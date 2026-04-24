@@ -22,8 +22,11 @@ sources = files(
     'src/agent.c',
     'src/http.c',
     'src/main.c',
+    'src/sse.c',
+    'src/turn.c',
     'src/util.c',
     'src/providers/codex.c',
+    'src/providers/codex_events.c',
     'src/tools/bash.c',
     'src/tools/read.c',
 )
@@ -34,3 +37,5 @@ executable('hax',
     dependencies: [libcurl, jansson, libedit],
     install: true,
 )
+
+subdir('tests')

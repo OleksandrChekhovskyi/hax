@@ -4,12 +4,7 @@
 
 #include <stddef.h>
 
-/*
- * SSE callback. event_name is empty if no `event:` line was sent for this event.
- * data is the accumulated `data:` payload (lines joined by '\n').
- * Return non-zero to stop further events (transfer still drains).
- */
-typedef int (*sse_cb)(const char *event_name, const char *data, void *user);
+#include "sse.h"
 
 struct http_response {
     long status;

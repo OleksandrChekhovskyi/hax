@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "tool.h"
+#include "turn.h"
 #include "util.h"
 
 #define PROMPT "> "
@@ -52,147 +53,62 @@ static void items_append(struct item **items, size_t *n, size_t *cap, struct ite
     (*items)[(*n)++] = it;
 }
 
-struct pending_tool {
-    char *call_id;
-    char *name;
-    struct buf args;
-};
-
-struct acc {
-    struct item *items;
-    size_t n_items;
-    size_t cap_items;
-
-    int in_text;
-    struct buf text_buf;
-
-    struct pending_tool *pending;
-    size_t n_pending;
-    size_t cap_pending;
-
-    int error;
-};
-
-static struct pending_tool *acc_find_pending(struct acc *a, const char *call_id)
+static void display_tool_end(struct pending_tool *p)
 {
-    if (!call_id)
-        return NULL;
-    for (size_t i = 0; i < a->n_pending; i++) {
-        if (a->pending[i].call_id && strcmp(a->pending[i].call_id, call_id) == 0)
-            return &a->pending[i];
+    const struct tool *t = find_tool(p->name);
+    const char *display = NULL;
+    json_t *root = NULL;
+    if (t && t->def.display_arg && p->args.data) {
+        json_error_t jerr;
+        root = json_loads(p->args.data, 0, &jerr);
+        if (root)
+            display = json_string_value(json_object_get(root, t->def.display_arg));
     }
-    return NULL;
-}
-
-static void acc_flush_text(struct acc *a)
-{
-    if (!a->in_text)
-        return;
-    struct item it = {
-        .kind = ITEM_ASSISTANT_MESSAGE,
-        .text = buf_steal(&a->text_buf),
-    };
-    items_append(&a->items, &a->n_items, &a->cap_items, it);
-    a->in_text = 0;
+    if (display)
+        fprintf(stdout, "\x1b[1m%s\x1b[0m\n", display);
+    else if (p->args.data && p->args.len)
+        fprintf(stdout, "\x1b[2m%s\x1b[0m\n", p->args.data);
+    else
+        fputc('\n', stdout);
+    fflush(stdout);
+    if (root)
+        json_decref(root);
 }
 
 static int on_event(const struct stream_event *ev, void *user)
 {
-    struct acc *a = user;
+    struct turn *t = user;
+
+    /* Display first so EV_TOOL_CALL_END can inspect pending args before
+     * turn_on_event consumes them. For other events the order is immaterial. */
     switch (ev->kind) {
-    case EV_TEXT_DELTA: {
-        const char *t = ev->u.text_delta.text;
-        fputs(t, stdout);
+    case EV_TEXT_DELTA:
+        fputs(ev->u.text_delta.text, stdout);
         fflush(stdout);
-        buf_append_str(&a->text_buf, t);
-        a->in_text = 1;
         break;
-    }
-    case EV_TOOL_CALL_START: {
-        acc_flush_text(a);
+    case EV_TOOL_CALL_START:
         fprintf(stdout, "\n\x1b[36m[%s]\x1b[0m ", ev->u.tool_call_start.name);
         fflush(stdout);
-        if (a->n_pending == a->cap_pending) {
-            size_t c = a->cap_pending ? a->cap_pending * 2 : 4;
-            a->pending = xrealloc(a->pending, c * sizeof(*a->pending));
-            a->cap_pending = c;
-        }
-        struct pending_tool *p = &a->pending[a->n_pending++];
-        p->call_id = xstrdup(ev->u.tool_call_start.id);
-        p->name = xstrdup(ev->u.tool_call_start.name);
-        buf_init(&p->args);
         break;
-    }
-    case EV_TOOL_CALL_DELTA: {
-        struct pending_tool *p = acc_find_pending(a, ev->u.tool_call_delta.id);
-        if (!p)
-            break;
-        buf_append_str(&p->args, ev->u.tool_call_delta.args_delta);
+    case EV_TOOL_CALL_DELTA:
         break;
-    }
     case EV_TOOL_CALL_END: {
-        struct pending_tool *p = acc_find_pending(a, ev->u.tool_call_end.id);
-        if (!p)
-            break;
-
-        const struct tool *t = find_tool(p->name);
-        const char *display = NULL;
-        json_t *root = NULL;
-        if (t && t->def.display_arg && p->args.data) {
-            json_error_t jerr;
-            root = json_loads(p->args.data, 0, &jerr);
-            if (root)
-                display = json_string_value(json_object_get(root, t->def.display_arg));
-        }
-        if (display)
-            fprintf(stdout, "\x1b[1m%s\x1b[0m\n", display);
-        else if (p->args.data && p->args.len)
-            fprintf(stdout, "\x1b[2m%s\x1b[0m\n", p->args.data);
-        else
-            fputc('\n', stdout);
-        fflush(stdout);
-        if (root)
-            json_decref(root);
-
-        struct item it = {
-            .kind = ITEM_TOOL_CALL,
-            .call_id = xstrdup(p->call_id),
-            .tool_name = xstrdup(p->name),
-            .tool_arguments_json = buf_steal(&p->args),
-        };
-        items_append(&a->items, &a->n_items, &a->cap_items, it);
+        struct pending_tool *p = turn_find_pending(t, ev->u.tool_call_end.id);
+        if (p)
+            display_tool_end(p);
         break;
     }
     case EV_DONE:
-        acc_flush_text(a);
         fputc('\n', stdout);
         fflush(stdout);
         break;
     case EV_ERROR:
-        acc_flush_text(a);
         fprintf(stderr, "\n\x1b[31m[error: %s]\x1b[0m\n", ev->u.error.message);
-        a->error = 1;
         break;
     }
-    return 0;
-}
 
-static void acc_reset(struct acc *a)
-{
-    for (size_t i = 0; i < a->n_pending; i++) {
-        free(a->pending[i].call_id);
-        free(a->pending[i].name);
-        buf_free(&a->pending[i].args);
-    }
-    free(a->pending);
-    buf_free(&a->text_buf);
-    /* On the error path, items may still own their strings — the success
-     * path nulls a->items after transferring ownership to the main vector,
-     * so this loop is a no-op there. */
-    for (size_t i = 0; i < a->n_items; i++)
-        item_free(&a->items[i]);
-    free(a->items);
-    memset(a, 0, sizeof(*a));
+    turn_on_event(ev, t);
+    return 0;
 }
 
 static void print_tool_output_preview(const char *out)
@@ -252,26 +168,27 @@ int agent_run(struct provider *p)
                 .n_tools = N_TOOLS,
             };
 
-            struct acc a;
-            memset(&a, 0, sizeof(a));
-            p->stream(p, &ctx, model, on_event, &a);
+            struct turn t;
+            turn_init(&t);
+            p->stream(p, &ctx, model, on_event, &t);
 
-            if (a.error) {
-                acc_reset(&a);
+            if (t.error) {
+                turn_reset(&t);
                 break;
             }
 
+            size_t n_new = 0;
+            struct item *new_items = turn_take_items(&t, &n_new);
+            turn_reset(&t);
+
             size_t n_before = n_items;
             int had_tool_call = 0;
-            for (size_t i = 0; i < a.n_items; i++) {
-                if (a.items[i].kind == ITEM_TOOL_CALL)
+            for (size_t i = 0; i < n_new; i++) {
+                if (new_items[i].kind == ITEM_TOOL_CALL)
                     had_tool_call = 1;
-                items_append(&items, &n_items, &cap_items, a.items[i]);
+                items_append(&items, &n_items, &cap_items, new_items[i]);
             }
-            free(a.items);
-            a.items = NULL;
-            a.n_items = a.cap_items = 0;
-            acc_reset(&a);
+            free(new_items);
 
             if (!had_tool_call)
                 break;
