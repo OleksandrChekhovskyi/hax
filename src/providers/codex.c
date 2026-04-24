@@ -204,6 +204,7 @@ struct provider *codex_provider_new(void)
 
     struct codex *c = xcalloc(1, sizeof(*c));
     c->base.name = "codex";
+    c->base.default_model = "gpt-5.3-codex";
     c->base.stream = codex_stream;
     c->base.destroy = codex_destroy;
     c->access_token = xstrdup(access);

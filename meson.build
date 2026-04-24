@@ -27,6 +27,8 @@ sources = files(
     'src/util.c',
     'src/providers/codex.c',
     'src/providers/codex_events.c',
+    'src/providers/openai.c',
+    'src/providers/openai_events.c',
     'src/tools/bash.c',
     'src/tools/read.c',
 )

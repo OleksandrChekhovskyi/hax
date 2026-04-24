@@ -2,9 +2,23 @@
 #include <curl/curl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "agent.h"
 #include "providers/codex.h"
+#include "providers/openai.h"
+
+static struct provider *pick_provider(void)
+{
+    const char *which = getenv("HAX_PROVIDER");
+    if (which && strcmp(which, "openai") == 0)
+        return openai_provider_new();
+    if (which && *which && strcmp(which, "codex") != 0) {
+        fprintf(stderr, "hax: unknown HAX_PROVIDER='%s' (supported: codex, openai)\n", which);
+        return NULL;
+    }
+    return codex_provider_new();
+}
 
 int main(int argc, char **argv)
 {
@@ -16,7 +30,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    struct provider *p = codex_provider_new();
+    struct provider *p = pick_provider();
     if (!p) {
         curl_global_cleanup();
         return 1;

@@ -13,7 +13,6 @@
 
 #define PROMPT "> "
 
-#define DEFAULT_MODEL "gpt-5.3-codex"
 #define DEFAULT_SYSTEM_PROMPT                                                                      \
     "You are hax, a minimalist coding assistant running in the user's terminal. "                  \
     "You have access to `read` and `bash` tools. Prefer action over explanation: "                 \
@@ -127,9 +126,17 @@ int agent_run(struct provider *p)
 {
     const char *model = getenv("HAX_MODEL");
     if (!model || !*model)
-        model = DEFAULT_MODEL;
+        model = p->default_model;
+    if (!model || !*model) {
+        fprintf(stderr, "hax: HAX_MODEL is required for provider '%s' (no default)\n",
+                p->name ? p->name : "?");
+        return 1;
+    }
+    /* Distinguish unset (use default) from explicit empty ("" — opt out).
+     * Some OpenAI-compatible chat templates reject a system message, so
+     * users need a way to disable it entirely. */
     const char *sys = getenv("HAX_SYSTEM_PROMPT");
-    if (!sys || !*sys)
+    if (!sys)
         sys = DEFAULT_SYSTEM_PROMPT;
 
     struct tool_def *tools = xmalloc(N_TOOLS * sizeof(*tools));
@@ -139,7 +146,7 @@ int agent_run(struct provider *p)
     struct item *items = NULL;
     size_t n_items = 0, cap_items = 0;
 
-    printf("hax (model: %s). Ctrl-D to quit.\n", model);
+    printf("hax (provider: %s, model: %s). Ctrl-D to quit.\n", p->name ? p->name : "?", model);
 
     for (;;) {
         putchar('\n');

@@ -88,6 +88,9 @@ typedef int (*stream_cb)(const struct stream_event *ev, void *user);
 
 struct provider {
     const char *name;
+    /* Model id used when HAX_MODEL is unset. NULL = no safe default; the
+     * agent will refuse to start and print an error. */
+    const char *default_model;
     int (*stream)(struct provider *p, const struct context *ctx, const char *model, stream_cb cb,
                   void *user);
     void (*destroy)(struct provider *p);

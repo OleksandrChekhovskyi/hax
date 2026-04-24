@@ -1,7 +1,8 @@
 # hax
 
-A minimalist coding agent in C. Multi-provider from day one, but v1 ships with a single
-adapter that reuses your existing Codex / ChatGPT subscription.
+A minimalist coding agent in C. Multi-provider from day one; currently ships
+with adapters for Codex / ChatGPT and any OpenAI-compatible Chat Completions
+endpoint.
 
 ## Build
 
@@ -21,7 +22,11 @@ meson compile -C build
 
 ## Run
 
-`hax` reuses the OAuth token that the official `codex` CLI stores in
+Pick a provider with `HAX_PROVIDER` (default `codex`).
+
+### Codex (ChatGPT subscription)
+
+Reuses the OAuth token that the official `codex` CLI stores in
 `~/.codex/auth.json`. If the token is expired, run `codex` once to refresh it,
 then re-run `hax`.
 
@@ -29,10 +34,44 @@ then re-run `hax`.
 ./build/hax
 ```
 
-Environment variables:
+### OpenAI-compatible (real OpenAI, local servers, proxies)
 
-- `HAX_MODEL` — model id (default: `gpt-5.3-codex`)
-- `HAX_SYSTEM_PROMPT` — override the built-in system prompt
+Works with anything that speaks `/v1/chat/completions` — the OpenAI API itself,
+or local backends like oMLX, vLLM, llama.cpp, Ollama, etc.
+
+Real OpenAI (base URL and key default to `https://api.openai.com/v1` and
+`$OPENAI_API_KEY`):
+
+```sh
+HAX_PROVIDER=openai HAX_MODEL=gpt-5.4 ./build/hax
+```
+
+Local server:
+
+```sh
+HAX_PROVIDER=openai \
+HAX_PROVIDER_NAME=oMLX \
+HAX_OPENAI_BASE_URL=http://127.0.0.1:8000/v1 \
+HAX_OPENAI_API_KEY=... \
+HAX_MODEL=Qwen3.6-35B-A3B-8bit \
+./build/hax
+```
+
+## Environment variables
+
+- `HAX_PROVIDER` — `codex` (default) or `openai`
+- `HAX_MODEL` — model id. Defaults to `gpt-5.3-codex` when using `codex`;
+  required when using `openai` (hax exits with an error if it's unset)
+- `HAX_SYSTEM_PROMPT` — override the built-in system prompt. Set to an empty
+  string to send no system message at all (some OpenAI-compatible chat
+  templates reject system messages)
+- `HAX_OPENAI_BASE_URL` — optional for `openai`; defaults to
+  `https://api.openai.com/v1`; set to point at a local or proxy endpoint
+- `HAX_OPENAI_API_KEY` — optional for `openai`; sent as `Authorization: Bearer`.
+  Falls back to `OPENAI_API_KEY` only when `HAX_OPENAI_BASE_URL` is unset, so a
+  globally configured OpenAI key is never forwarded to a custom endpoint. May
+  be omitted for local servers that don't require auth
+- `HAX_PROVIDER_NAME` — optional display name for the `openai` provider
 
 ## License
 

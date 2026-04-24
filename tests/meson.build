@@ -61,3 +61,14 @@ test_codex_events = executable('test_codex_events',
     dependencies: [jansson],
 )
 test('providers/codex_events', test_codex_events)
+
+test_openai_events = executable('test_openai_events',
+    sources: [
+        'providers/test_openai_events.c',
+        '../src/providers/openai_events.c',
+        '../src/util.c',
+    ],
+    include_directories: tests_inc,
+    dependencies: [jansson],
+)
+test('providers/openai_events', test_openai_events)
