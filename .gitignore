@@ -1,0 +1,6 @@
+build/
+.cache/
+*.o
+*.swp
+*.swo
+.DS_Store

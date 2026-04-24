@@ -1,0 +1,36 @@
+project('hax', 'c',
+    version: '0.1.0',
+    license: 'MIT',
+    default_options: [
+        'c_std=c11',
+        'warning_level=3',
+        'buildtype=debugoptimized',
+    ],
+)
+
+add_project_arguments(
+    '-D_POSIX_C_SOURCE=200809L',
+    '-D_DARWIN_C_SOURCE',
+    language: 'c',
+)
+
+libcurl = dependency('libcurl')
+jansson = dependency('jansson')
+libedit = dependency('libedit')
+
+sources = files(
+    'src/agent.c',
+    'src/http.c',
+    'src/main.c',
+    'src/util.c',
+    'src/providers/codex.c',
+    'src/tools/bash.c',
+    'src/tools/read.c',
+)
+
+executable('hax',
+    sources: sources,
+    include_directories: include_directories('src'),
+    dependencies: [libcurl, jansson, libedit],
+    install: true,
+)
