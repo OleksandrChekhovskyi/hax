@@ -17,11 +17,13 @@ add_project_arguments(
 libcurl = dependency('libcurl')
 jansson = dependency('jansson')
 libedit = dependency('libedit')
+threads = dependency('threads')
 
 sources = files(
     'src/agent.c',
     'src/http.c',
     'src/main.c',
+    'src/spinner.c',
     'src/sse.c',
     'src/trace.c',
     'src/turn.c',
@@ -37,7 +39,7 @@ sources = files(
 executable('hax',
     sources: sources,
     include_directories: include_directories('src'),
-    dependencies: [libcurl, jansson, libedit],
+    dependencies: [libcurl, jansson, libedit, threads],
     install: true,
 )
 

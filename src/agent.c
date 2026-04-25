@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "spinner.h"
 #include "tool.h"
 #include "turn.h"
 #include "util.h"
@@ -75,6 +76,7 @@ struct disp {
 struct event_ctx {
     struct disp *disp;
     struct turn *turn;
+    struct spinner *spinner;
 };
 
 /* Newline runs at the trail of any disp_* call are deferred into `held`
@@ -167,25 +169,20 @@ static void disp_block_separator(struct disp *d)
     d->held = 0;
 }
 
-/* Model text deltas. The first delta of a turn has its leading newlines
- * stripped — some compat backends (Qwen on oMLX, in particular) prefix the
- * stream with stray newlines that would push the response visually away
- * from the prompt. Spaces and tabs are preserved: leading indentation can
- * be legitimate response content (code blocks, diff context, etc.). */
-static void disp_text_delta(struct disp *d, const char *s)
+/* Strip leading newlines from the first delta of a turn — some compat
+ * backends (Qwen on oMLX, in particular) prefix the stream with stray
+ * newlines that would push the response visually away from the prompt.
+ * Spaces and tabs are preserved: leading indentation can be legitimate
+ * response content (code blocks, diff context, etc.). Pure — no stdout
+ * writes — so the caller can peek before deciding to hide the spinner. */
+static void disp_first_delta_strip(const struct disp *d, const char **s, size_t *n)
 {
-    size_t n = strlen(s);
-    if (!d->saw_text) {
-        while (n > 0 && (*s == '\n' || *s == '\r')) {
-            s++;
-            n--;
-        }
-        if (n == 0)
-            return;
-        disp_block_separator(d);
-        d->saw_text = 1;
+    if (d->saw_text)
+        return;
+    while (*n > 0 && (**s == '\n' || **s == '\r')) {
+        (*s)++;
+        (*n)--;
     }
-    disp_write(d, s, n);
 }
 
 static void display_tool_header(struct disp *d, const struct item *call)
@@ -217,6 +214,10 @@ static void display_tool_header(struct disp *d, const struct item *call)
         disp_raw("\x1b[0m");
     }
     disp_putc(d, '\n');
+    /* Commit the trailing newline so the cursor is at column 0 of the
+     * next line. The spinner shown during tool execution, or the tool
+     * output itself, draws there instead of overwriting the header. */
+    disp_emit_held(d);
 
     if (root)
         json_decref(root);
@@ -267,10 +268,24 @@ static int on_event(const struct stream_event *ev, void *user)
     struct disp *d = ec->disp;
 
     switch (ev->kind) {
-    case EV_TEXT_DELTA:
-        disp_text_delta(d, ev->u.text_delta.text);
+    case EV_TEXT_DELTA: {
+        /* Peek-strip first so we keep the spinner up across deltas that
+         * are entirely leading newlines — flickering it off without any
+         * output to take its place would reintroduce a silent wait. */
+        const char *s = ev->u.text_delta.text;
+        size_t n = strlen(s);
+        disp_first_delta_strip(d, &s, &n);
+        if (n == 0)
+            break;
+        spinner_hide(ec->spinner);
+        if (!d->saw_text) {
+            disp_block_separator(d);
+            d->saw_text = 1;
+        }
+        disp_write(d, s, n);
         fflush(stdout);
         break;
+    }
     case EV_TOOL_CALL_START:
     case EV_TOOL_CALL_DELTA:
     case EV_TOOL_CALL_END:
@@ -282,6 +297,7 @@ static int on_event(const struct stream_event *ev, void *user)
         fflush(stdout);
         break;
     case EV_ERROR:
+        spinner_hide(ec->spinner);
         disp_block_separator(d);
         disp_raw("\x1b[31m");
         disp_printf(d, "[error: %s]", ev->u.error.message);
@@ -321,6 +337,7 @@ int agent_run(struct provider *p)
 
     printf("hax (provider: %s, model: %s). Ctrl-D to quit.\n", p->name ? p->name : "?", model);
     struct disp disp = {.trail = 1};
+    struct spinner *spinner = spinner_new("Working...");
 
     for (;;) {
         disp_block_separator(&disp);
@@ -350,11 +367,22 @@ int agent_run(struct provider *p)
                 .n_tools = N_TOOLS,
             };
 
+            /* Spinner sits on its own line as a block: separator first so
+             * we have a known column-0 row, then show. The thread starts
+             * drawing immediately and hides on the first visible event. */
+            disp_block_separator(&disp);
+            spinner_show(spinner);
+
             struct turn t;
             turn_init(&t);
             disp.saw_text = 0;
-            struct event_ctx ec = {.disp = &disp, .turn = &t};
+            struct event_ctx ec = {.disp = &disp, .turn = &t, .spinner = spinner};
             p->stream(p, &ctx, model, on_event, &ec);
+
+            /* Either a tool-only response (no text emitted, spinner still
+             * visible) or stream returned without ever firing an event —
+             * make sure we're back to a clean line before continuing. */
+            spinner_hide(spinner);
 
             if (t.error) {
                 turn_reset(&t);
@@ -378,13 +406,19 @@ int agent_run(struct provider *p)
                 break;
 
             /* Execute tool calls just added — render header + output as
-             * one block per call so parallel calls don't interleave. */
+             * one block per call so parallel calls don't interleave. The
+             * spinner runs on the line between header and output so a
+             * slow tool still gives the user a "still working" signal;
+             * spinner_hide erases that line and tool output writes there
+             * in its place. */
             size_t current_end = n_items;
             for (size_t i = n_before; i < current_end; i++) {
                 if (items[i].kind != ITEM_TOOL_CALL)
                     continue;
                 display_tool_header(&disp, &items[i]);
+                spinner_show(spinner);
                 char *out = dispatch_tool(items[i].tool_name, items[i].tool_arguments_json);
+                spinner_hide(spinner);
                 display_tool_output(&disp, out);
                 items_append(&items, &n_items, &cap_items,
                              (struct item){
@@ -396,6 +430,7 @@ int agent_run(struct provider *p)
         }
     }
 
+    spinner_free(spinner);
     for (size_t i = 0; i < n_items; i++)
         item_free(&items[i]);
     free(items);
