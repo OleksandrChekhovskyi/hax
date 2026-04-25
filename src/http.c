@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "sse.h"
+#include "trace.h"
 #include "util.h"
 
 #define ERR_BODY_CAP 4096
@@ -15,6 +16,18 @@ struct curl_state {
     struct sse_parser parser;
     struct buf err_body; /* capped, for error reporting */
 };
+
+struct sse_trace_wrapper {
+    sse_cb inner;
+    void *inner_user;
+};
+
+static int sse_trace_cb(const char *event_name, const char *data, void *user)
+{
+    struct sse_trace_wrapper *w = user;
+    trace_sse_event(event_name, data);
+    return w->inner(event_name, data, w->inner_user);
+}
 
 static size_t on_write(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
@@ -55,7 +68,12 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
 
     struct curl_state s;
     memset(&s, 0, sizeof(s));
-    sse_parser_init(&s.parser, cb, user);
+
+    struct sse_trace_wrapper tw = {.inner = cb, .inner_user = user};
+    if (trace_enabled())
+        sse_parser_init(&s.parser, sse_trace_cb, &tw);
+    else
+        sse_parser_init(&s.parser, cb, user);
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -73,6 +91,8 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
 
+    trace_request(url, headers, body, body_len);
+
     CURLcode rc = curl_easy_perform(curl);
 
     long status = 0;
@@ -89,6 +109,8 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
     } else if (status < 200 || status >= 300) {
         resp->error_body = s.err_body.data ? buf_steal(&s.err_body) : xstrdup("(no response body)");
     }
+
+    trace_response_status(status, resp->error_body);
 
     sse_parser_free(&s.parser);
     buf_free(&s.err_body);

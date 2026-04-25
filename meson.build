@@ -23,6 +23,7 @@ sources = files(
     'src/http.c',
     'src/main.c',
     'src/sse.c',
+    'src/trace.c',
     'src/turn.c',
     'src/util.c',
     'src/providers/codex.c',

@@ -72,6 +72,10 @@ HAX_MODEL=Qwen3.6-35B-A3B-8bit \
   globally configured OpenAI key is never forwarded to a custom endpoint. May
   be omitted for local servers that don't require auth
 - `HAX_PROVIDER_NAME` — optional display name for the `openai` provider
+- `HAX_TRACE` — path to a Markdown file that will receive a pretty-printed
+  dump of every HTTP request, response status, and SSE event (Authorization
+  redacted). Opened in append mode; `tail -f` works, but the file is most
+  readable when opened in an editor that renders Markdown
 
 ## License
 
