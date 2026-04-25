@@ -73,6 +73,11 @@ HAX_MODEL=Qwen3.6-35B-A3B-8bit \
   configured OpenAI key is never forwarded to a custom endpoint. May be
   omitted for local servers that don't require auth
 - `HAX_PROVIDER_NAME` — optional display name for the `openai` provider
+- `HAX_REASONING_EFFORT` — optional. Passed verbatim to the provider:
+  `reasoning.effort` for the Codex Responses API, `reasoning_effort` for Chat
+  Completions. Typical values are `minimal`, `low`, `medium`, `high`, `xhigh` —
+  but hax doesn't validate, so anything the model accepts works. When unset,
+  the field is omitted and the server picks its own default
 - `HAX_OPENAI_SEND_CACHE_KEY` — set to any non-empty value to send a stable
   per-session `prompt_cache_key` even when `HAX_OPENAI_BASE_URL` is custom.
   Useful for hosted OpenAI-compatible providers (Together, Fireworks, Groq,

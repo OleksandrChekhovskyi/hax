@@ -336,5 +336,6 @@ void item_free(struct item *it)
     free(it->tool_name);
     free(it->tool_arguments_json);
     free(it->output);
+    free(it->reasoning_json);
     memset(it, 0, sizeof(*it));
 }

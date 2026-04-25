@@ -56,6 +56,14 @@ static json_t *build_input_items(const struct item *items, size_t n)
             obj = json_pack("{s:s, s:s, s:s}", "type", "function_call_output", "call_id",
                             it->call_id ? it->call_id : "", "output", it->output ? it->output : "");
             break;
+        case ITEM_REASONING:
+            /* The blob was already whitelisted to valid input fields when
+             * we received it (see codex_events.c) — just parse and emit. */
+            if (it->reasoning_json) {
+                json_error_t jerr;
+                obj = json_loads(it->reasoning_json, 0, &jerr);
+            }
+            break;
         }
         if (obj)
             json_array_append_new(arr, obj);
@@ -82,14 +90,23 @@ static json_t *build_tools(const struct tool_def *tools, size_t n)
 
 static char *build_body(const struct context *ctx, const char *model, const char *cache_key)
 {
-    json_t *body = json_pack(
-        "{s:s, s:b, s:b, s:s, s:o, s:{s:s}, s:s, s:b, s:o}", "model", model, "store", 0, "stream",
-        1, "instructions", ctx->system_prompt ? ctx->system_prompt : "", "input",
-        build_input_items(ctx->items, ctx->n_items), "text", "verbosity", "medium", "tool_choice",
-        "auto", "parallel_tool_calls", 1, "tools", build_tools(ctx->tools, ctx->n_tools));
+    json_t *include = json_array();
+    json_array_append_new(include, json_string("reasoning.encrypted_content"));
+
+    json_t *body =
+        json_pack("{s:s, s:b, s:b, s:s, s:o, s:o, s:{s:s}, s:s, s:b, s:o}", "model", model, "store",
+                  0, "stream", 1, "instructions", ctx->system_prompt ? ctx->system_prompt : "",
+                  "input", build_input_items(ctx->items, ctx->n_items), "include", include, "text",
+                  "verbosity", "medium", "tool_choice", "auto", "parallel_tool_calls", 1, "tools",
+                  build_tools(ctx->tools, ctx->n_tools));
 
     if (cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(cache_key));
+
+    if (ctx->reasoning_effort)
+        json_object_set_new(
+            body, "reasoning",
+            json_pack("{s:s, s:s}", "effort", ctx->reasoning_effort, "summary", "auto"));
 
     char *s = json_dumps(body, JSON_COMPACT);
     json_decref(body);
@@ -119,6 +136,11 @@ static int codex_stream(struct provider *p, const struct context *ctx, const cha
 
     char *auth_hdr = xasprintf("Authorization: Bearer %s", c->access_token);
     char *acct_hdr = xasprintf("chatgpt-account-id: %s", c->account_id);
+    /* Reuse the per-process UUID we already mint for prompt_cache_key.
+     * pi-mono sends both headers with the same value; codex-rs likewise.
+     * Used by the server for routing/dedup affinity. */
+    char *sess_hdr = xasprintf("session_id: %s", c->session_id);
+    char *reqid_hdr = xasprintf("x-client-request-id: %s", c->session_id);
 #if defined(__APPLE__)
     const char *ua = "User-Agent: hax/0.1 (macos)";
 #elif defined(__linux__)
@@ -130,6 +152,8 @@ static int codex_stream(struct provider *p, const struct context *ctx, const cha
     const char *headers[] = {
         auth_hdr,
         acct_hdr,
+        sess_hdr,
+        reqid_hdr,
         "originator: hax",
         ua,
         "OpenAI-Beta: responses=experimental",
@@ -165,6 +189,8 @@ static int codex_stream(struct provider *p, const struct context *ctx, const cha
     free(resp.error_body);
     free(auth_hdr);
     free(acct_hdr);
+    free(sess_hdr);
+    free(reqid_hdr);
     free(body);
     codex_events_free(&ev);
     return rc;

@@ -48,6 +48,9 @@ static int cap_cb(const struct stream_event *ev, void *user)
     case EV_TOOL_CALL_END:
         c->id = strdup(ev->u.tool_call_end.id);
         break;
+    case EV_REASONING_ITEM:
+        /* OpenAI Chat Completions doesn't emit reasoning items. */
+        break;
     case EV_DONE:
         c->message = strdup(ev->u.done.stop_reason ? ev->u.done.stop_reason : "");
         break;

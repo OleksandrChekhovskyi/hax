@@ -48,6 +48,9 @@ static int cap_cb(const struct stream_event *ev, void *user)
     case EV_TOOL_CALL_END:
         c->id = strdup(ev->u.tool_call_end.id);
         break;
+    case EV_REASONING_ITEM:
+        c->text = strdup(ev->u.reasoning_item.json);
+        break;
     case EV_DONE:
         c->message = strdup(ev->u.done.stop_reason ? ev->u.done.stop_reason : "");
         break;
@@ -265,6 +268,58 @@ static void test_tool_call_missing_required_fields_dropped(void)
     TEARDOWN(cap, st);
 }
 
+/* ---------- reasoning round-trip ---------- */
+
+static void test_reasoning_item_emitted(void)
+{
+    WITH_STATE(cap, st);
+    codex_events_feed(&st, "{\"type\":\"response.output_item.done\",\"item\":"
+                           "{\"type\":\"reasoning\",\"id\":\"rs_1\","
+                           "\"summary\":[],\"encrypted_content\":\"abc==\"}}");
+    EXPECT(cap.n == 1);
+    EXPECT(cap.events[0].kind == EV_REASONING_ITEM);
+    EXPECT(strstr(cap.events[0].text, "\"type\":\"reasoning\"") != NULL);
+    EXPECT(strstr(cap.events[0].text, "\"summary\":[]") != NULL);
+    EXPECT(strstr(cap.events[0].text, "\"encrypted_content\":\"abc==\"") != NULL);
+    /* id is an output-only field; matches codex-rs which skips it. */
+    EXPECT(strstr(cap.events[0].text, "rs_1") == NULL);
+    TEARDOWN(cap, st);
+}
+
+static void test_reasoning_item_strips_unknown_fields(void)
+{
+    WITH_STATE(cap, st);
+    codex_events_feed(&st, "{\"type\":\"response.output_item.done\",\"item\":"
+                           "{\"type\":\"reasoning\",\"id\":\"rs_1\","
+                           "\"status\":\"completed\",\"content\":[],"
+                           "\"summary\":[],\"encrypted_content\":\"abc==\","
+                           "\"future_field\":\"xyz\"}}");
+    EXPECT(cap.n == 1);
+    EXPECT(strstr(cap.events[0].text, "\"status\"") == NULL);
+    EXPECT(strstr(cap.events[0].text, "\"content\"") == NULL);
+    EXPECT(strstr(cap.events[0].text, "\"future_field\"") == NULL);
+    TEARDOWN(cap, st);
+}
+
+static void test_reasoning_item_without_encrypted_content_dropped(void)
+{
+    WITH_STATE(cap, st);
+    codex_events_feed(&st, "{\"type\":\"response.output_item.done\",\"item\":"
+                           "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[]}}");
+    EXPECT(cap.n == 0);
+    TEARDOWN(cap, st);
+}
+
+static void test_reasoning_item_with_null_encrypted_content_dropped(void)
+{
+    WITH_STATE(cap, st);
+    codex_events_feed(&st, "{\"type\":\"response.output_item.done\",\"item\":"
+                           "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[],"
+                           "\"encrypted_content\":null}}");
+    EXPECT(cap.n == 0);
+    TEARDOWN(cap, st);
+}
+
 /* ---------- finalize ---------- */
 
 static void test_finalize_without_terminal_emits_error(void)
@@ -307,6 +362,10 @@ int main(void)
     test_unparseable_json_ignored();
     test_missing_type_ignored();
     test_output_item_added_non_function_call_ignored();
+    test_reasoning_item_emitted();
+    test_reasoning_item_strips_unknown_fields();
+    test_reasoning_item_without_encrypted_content_dropped();
+    test_reasoning_item_with_null_encrypted_content_dropped();
     test_tool_call_missing_required_fields_dropped();
     test_finalize_without_terminal_emits_error();
     test_finalize_after_completed_no_extra_event();

@@ -91,19 +91,58 @@ static void handle_output_item_done(struct codex_events *s, json_t *root)
     const char *type = json_string_value(json_object_get(item, "type"));
     if (!type)
         return;
-    if (strcmp(type, "function_call") != 0)
-        return;
 
-    const char *item_id = json_string_value(json_object_get(item, "id"));
-    struct codex_tool_track *t = track_find(s, item_id);
-    if (!t)
+    if (strcmp(type, "function_call") == 0) {
+        const char *item_id = json_string_value(json_object_get(item, "id"));
+        struct codex_tool_track *t = track_find(s, item_id);
+        if (!t)
+            return;
+        struct stream_event ev = {
+            .kind = EV_TOOL_CALL_END,
+            .u.tool_call_end = {.id = t->call_id},
+        };
+        emit(s, &ev);
         return;
+    }
 
-    struct stream_event ev = {
-        .kind = EV_TOOL_CALL_END,
-        .u.tool_call_end = {.id = t->call_id},
-    };
-    emit(s, &ev);
+    if (strcmp(type, "reasoning") == 0) {
+        /* Skip if encrypted_content is missing or null — without it the
+         * item is useless for round-trip (we never see the plaintext),
+         * and sending bare summary back would be noise. Shouldn't happen
+         * when we ask for it via `include`, but the server may emit
+         * empty reasoning items in some edge cases. */
+        json_t *enc = json_object_get(item, "encrypted_content");
+        if (!enc || json_is_null(enc))
+            return;
+
+        /* Whitelist the fields valid as Responses API *input* items.
+         * Matches codex-rs's serde annotations on ResponseItem::Reasoning:
+         * `id` is skip_serializing (it identifies the *output* item, not
+         * an input one), `content` is skipped when it doesn't carry
+         * reasoning_text (always our case — we ask for encrypted_content
+         * instead). Whitelisting also future-proofs us against new output
+         * fields the server may add: anything we don't know about stays
+         * out of the next request. */
+        json_t *clean = json_object();
+        json_object_set_new(clean, "type", json_string("reasoning"));
+        json_t *summary = json_object_get(item, "summary");
+        if (summary)
+            json_object_set(clean, "summary", summary);
+        else
+            json_object_set_new(clean, "summary", json_array());
+        json_object_set(clean, "encrypted_content", enc);
+
+        char *json = json_dumps(clean, JSON_COMPACT);
+        json_decref(clean);
+        if (!json)
+            return;
+        struct stream_event ev = {
+            .kind = EV_REASONING_ITEM,
+            .u.reasoning_item = {.json = json},
+        };
+        emit(s, &ev);
+        free(json);
+    }
 }
 
 static void handle_text_delta(struct codex_events *s, json_t *root)

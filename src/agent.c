@@ -320,9 +320,11 @@ static int on_event(const struct stream_event *ev, void *user)
     case EV_TOOL_CALL_START:
     case EV_TOOL_CALL_DELTA:
     case EV_TOOL_CALL_END:
+    case EV_REASONING_ITEM:
         /* Suppress live tool-call display — a tool call's header and its
          * output are rendered together as one block during execution so
-         * parallel calls don't visually interleave. */
+         * parallel calls don't visually interleave. Reasoning items are
+         * also invisible: they're only round-tripped to the next turn. */
         break;
     case EV_DONE:
         fflush(stdout);
@@ -364,6 +366,9 @@ int agent_run(struct provider *p)
     const char *sys = getenv("HAX_SYSTEM_PROMPT");
     if (!sys)
         sys = DEFAULT_SYSTEM_PROMPT;
+    const char *reasoning_effort = getenv("HAX_REASONING_EFFORT");
+    if (reasoning_effort && !*reasoning_effort)
+        reasoning_effort = NULL;
 
     struct tool_def *tools = xmalloc(N_TOOLS * sizeof(*tools));
     for (size_t i = 0; i < N_TOOLS; i++)
@@ -372,7 +377,11 @@ int agent_run(struct provider *p)
     struct item *items = NULL;
     size_t n_items = 0, cap_items = 0;
 
-    printf("hax (provider: %s, model: %s). Ctrl-D to quit.\n", p->name ? p->name : "?", model);
+    if (reasoning_effort)
+        printf("hax (provider: %s, model: %s, reasoning: %s). Ctrl-D to quit.\n",
+               p->name ? p->name : "?", model, reasoning_effort);
+    else
+        printf("hax (provider: %s, model: %s). Ctrl-D to quit.\n", p->name ? p->name : "?", model);
     struct disp disp = {.trail = 1};
     struct spinner *spinner = spinner_new("Working...");
     struct md_renderer *md = markdown_enabled() ? md_new(md_emit_to_disp, &disp) : NULL;
@@ -403,6 +412,7 @@ int agent_run(struct provider *p)
                 .n_items = n_items,
                 .tools = tools,
                 .n_tools = N_TOOLS,
+                .reasoning_effort = reasoning_effort,
             };
 
             /* Spinner sits on its own line as a block: separator first so

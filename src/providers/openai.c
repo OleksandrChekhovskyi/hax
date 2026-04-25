@@ -101,6 +101,10 @@ static json_t *build_messages(const char *system_prompt, const struct item *item
                                             items[i].output ? items[i].output : ""));
             i++;
             break;
+        case ITEM_REASONING:
+            /* Codex-only blob; nothing to translate to Chat Completions. */
+            i++;
+            break;
         }
     }
 
@@ -140,6 +144,9 @@ static char *build_body(const struct context *ctx, const char *model, const char
 
     if (cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(cache_key));
+
+    if (ctx->reasoning_effort)
+        json_object_set_new(body, "reasoning_effort", json_string(ctx->reasoning_effort));
 
     char *s = json_dumps(body, JSON_COMPACT);
     json_decref(body);

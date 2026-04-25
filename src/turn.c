@@ -122,6 +122,18 @@ int turn_on_event(const struct stream_event *ev, struct turn *t)
         items_append(t, it);
         break;
     }
+    case EV_REASONING_ITEM: {
+        /* Server typically emits the reasoning item before the assistant
+         * text/tool-call output items, but flush any in-flight text just
+         * in case so wire order is preserved on the round-trip. */
+        flush_text(t);
+        struct item it = {
+            .kind = ITEM_REASONING,
+            .reasoning_json = xstrdup(ev->u.reasoning_item.json),
+        };
+        items_append(t, it);
+        break;
+    }
     case EV_DONE:
         flush_text(t);
         break;

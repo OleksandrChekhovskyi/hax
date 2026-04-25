@@ -15,6 +15,10 @@ enum item_kind {
     ITEM_ASSISTANT_MESSAGE,
     ITEM_TOOL_CALL,
     ITEM_TOOL_RESULT,
+    /* Provider-specific blob carried verbatim across turns. Currently only
+     * the Codex Responses adapter produces these (encrypted reasoning items
+     * for chain-of-thought continuity); other providers ignore them. */
+    ITEM_REASONING,
 };
 
 struct item {
@@ -28,6 +32,9 @@ struct item {
     char *tool_arguments_json;
     /* TOOL_RESULT: */
     char *output;
+    /* REASONING: full JSON object (e.g. {"type":"reasoning","id":...,
+     * "summary":[...],"encrypted_content":"..."}) ready to be re-sent. */
+    char *reasoning_json;
 };
 
 void item_free(struct item *it);
@@ -45,6 +52,12 @@ struct context {
     size_t n_items;
     const struct tool_def *tools;
     size_t n_tools;
+    /* Optional. When non-NULL, providers pass it verbatim to whichever
+     * field their API uses (Responses: reasoning.effort, Chat Completions:
+     * reasoning_effort). NULL means "don't send" so the server picks its
+     * own default. Values like "minimal"/"low"/"medium"/"high"/"xhigh" are
+     * passed through unchanged — hax doesn't validate or clamp. */
+    const char *reasoning_effort;
 };
 
 /* Events emitted by a provider's stream() into a stream_cb. */
@@ -53,6 +66,7 @@ enum stream_event_kind {
     EV_TOOL_CALL_START, /* id + name known */
     EV_TOOL_CALL_DELTA, /* partial JSON args */
     EV_TOOL_CALL_END,   /* args finalized */
+    EV_REASONING_ITEM,  /* opaque provider blob to round-trip on next turn */
     EV_DONE,
     EV_ERROR,
 };
@@ -74,6 +88,9 @@ struct stream_event {
         struct {
             const char *id;
         } tool_call_end;
+        struct {
+            const char *json;
+        } reasoning_item;
         struct {
             const char *stop_reason;
         } done;
