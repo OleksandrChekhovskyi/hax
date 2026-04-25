@@ -25,6 +25,10 @@ char *slurp_file_capped(const char *path, size_t cap, size_t *out_len, int *out_
 /* Expand a leading ~ to $HOME. Returns a newly-allocated path. */
 char *expand_home(const char *path);
 
+/* Write a random UUIDv4 (36 chars + NUL terminator) to out. Aborts on
+ * failure (e.g. /dev/urandom unavailable) — same convention as xmalloc. */
+void gen_uuid_v4(char out[37]);
+
 /* Convert an arbitrary byte range into a NUL-free, valid UTF-8 string.
  * Valid UTF-8 is preserved verbatim; NULs and invalid sequences are
  * replaced with U+FFFD. Caller frees. */

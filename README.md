@@ -68,10 +68,17 @@ HAX_MODEL=Qwen3.6-35B-A3B-8bit \
 - `HAX_OPENAI_BASE_URL` — optional for `openai`; defaults to
   `https://api.openai.com/v1`; set to point at a local or proxy endpoint
 - `HAX_OPENAI_API_KEY` — optional for `openai`; sent as `Authorization: Bearer`.
-  Falls back to `OPENAI_API_KEY` only when `HAX_OPENAI_BASE_URL` is unset, so a
-  globally configured OpenAI key is never forwarded to a custom endpoint. May
-  be omitted for local servers that don't require auth
+  Falls back to `OPENAI_API_KEY` only when the resolved base URL targets real
+  OpenAI (default or explicit `https://api.openai.com/...`), so a globally
+  configured OpenAI key is never forwarded to a custom endpoint. May be
+  omitted for local servers that don't require auth
 - `HAX_PROVIDER_NAME` — optional display name for the `openai` provider
+- `HAX_OPENAI_SEND_CACHE_KEY` — set to any non-empty value to send a stable
+  per-session `prompt_cache_key` even when `HAX_OPENAI_BASE_URL` is custom.
+  Useful for hosted OpenAI-compatible providers (Together, Fireworks, Groq,
+  OpenRouter, etc.) whose prefix caching benefits from an affinity hint. Off
+  by default for non-OpenAI URLs because some local servers (notably vLLM)
+  reject unknown JSON fields. Always sent to real `api.openai.com`
 - `HAX_TRACE` — path to a Markdown file that will receive a pretty-printed
   dump of every HTTP request, response status, and SSE event (Authorization
   redacted). Opened in append mode; `tail -f` works, but the file is most

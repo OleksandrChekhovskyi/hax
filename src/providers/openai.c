@@ -1,10 +1,12 @@
 /* SPDX-License-Identifier: MIT */
 #include "openai.h"
 
+#include <curl/curl.h>
 #include <jansson.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "http.h"
 #include "openai_events.h"
@@ -12,10 +14,12 @@
 
 struct openai {
     struct provider base;
-    char *base_url; /* e.g. "http://127.0.0.1:8000/v1" (no trailing slash) */
-    char *api_key;  /* may be NULL for unauthenticated local servers */
-    char *name_buf; /* backing storage for base.name (heap-owned) */
-    char *endpoint; /* base_url + "/chat/completions" */
+    char *base_url;   /* e.g. "http://127.0.0.1:8000/v1" (no trailing slash) */
+    char *api_key;    /* may be NULL for unauthenticated local servers */
+    char *name_buf;   /* backing storage for base.name (heap-owned) */
+    char *endpoint;   /* base_url + "/chat/completions" */
+    char *session_id; /* sent as prompt_cache_key when send_cache_key is set */
+    int send_cache_key;
 };
 
 /* ---------- request body construction ---------- */
@@ -120,7 +124,7 @@ static json_t *build_tools(const struct tool_def *tools, size_t n)
     return arr;
 }
 
-static char *build_body(const struct context *ctx, const char *model)
+static char *build_body(const struct context *ctx, const char *model, const char *cache_key)
 {
     /* Deliberately omit `tool_choice` ("auto" is the backend default when
      * tools are present) and `parallel_tool_calls` (defaults to true on
@@ -133,6 +137,9 @@ static char *build_body(const struct context *ctx, const char *model)
 
     if (ctx->n_tools > 0)
         json_object_set_new(body, "tools", build_tools(ctx->tools, ctx->n_tools));
+
+    if (cache_key)
+        json_object_set_new(body, "prompt_cache_key", json_string(cache_key));
 
     char *s = json_dumps(body, JSON_COMPACT);
     json_decref(body);
@@ -155,7 +162,7 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
 {
     struct openai *o = (struct openai *)p;
 
-    char *body = build_body(ctx, model);
+    char *body = build_body(ctx, model, o->send_cache_key ? o->session_id : NULL);
     if (!body)
         return -1;
     size_t body_len = strlen(body);
@@ -205,6 +212,7 @@ static void openai_destroy(struct provider *p)
     free(o->api_key);
     free(o->name_buf);
     free(o->endpoint);
+    free(o->session_id);
     free(o);
 }
 
@@ -221,29 +229,70 @@ static char *dup_trim_trailing_slash(const char *s)
     return out;
 }
 
+/* True when the URL targets the real OpenAI host. Used to gate behavior
+ * that's only safe/useful against api.openai.com (the OPENAI_API_KEY
+ * fallback and the default-on prompt_cache_key). Delegates to libcurl's
+ * URL parser so userinfo tricks like "https://api.openai.com:443@attacker/"
+ * are correctly rejected — CURLUPART_HOST returns the real host that
+ * libcurl will connect to, not whatever sat before the '@'. */
+static int is_real_openai_url(const char *url)
+{
+    CURLU *u = curl_url();
+    if (!u)
+        return 0;
+
+    int ok = 0;
+    char *scheme = NULL;
+    char *host = NULL;
+
+    if (curl_url_set(u, CURLUPART_URL, url, 0) == CURLUE_OK &&
+        curl_url_get(u, CURLUPART_SCHEME, &scheme, 0) == CURLUE_OK &&
+        curl_url_get(u, CURLUPART_HOST, &host, 0) == CURLUE_OK) {
+        ok = strcasecmp(scheme, "https") == 0 && strcasecmp(host, "api.openai.com") == 0;
+    }
+
+    curl_free(scheme);
+    curl_free(host);
+    curl_url_cleanup(u);
+    return ok;
+}
+
 struct provider *openai_provider_new(void)
 {
     const char *base_env = getenv("HAX_OPENAI_BASE_URL");
-    int base_is_default = !base_env || !*base_env;
-    const char *base = base_is_default ? "https://api.openai.com/v1" : base_env;
+    const char *base = (base_env && *base_env) ? base_env : "https://api.openai.com/v1";
+    char *base_url = dup_trim_trailing_slash(base);
+    int is_real_openai = is_real_openai_url(base_url);
 
-    /* Only fall back to OPENAI_API_KEY when we're hitting the default
-     * (real OpenAI) endpoint. For a user-supplied HAX_OPENAI_BASE_URL the
-     * fallback would leak a globally configured OpenAI key to whatever
-     * local or third-party server they've pointed us at. */
+    /* Only fall back to OPENAI_API_KEY when we're hitting real OpenAI —
+     * otherwise we'd leak a globally configured OpenAI key to whatever
+     * local or third-party server the user pointed us at. */
     const char *key = getenv("HAX_OPENAI_API_KEY");
-    if ((!key || !*key) && base_is_default)
+    if ((!key || !*key) && is_real_openai)
         key = getenv("OPENAI_API_KEY");
 
     const char *name = getenv("HAX_PROVIDER_NAME");
     if (!name || !*name)
         name = "openai";
 
+    /* Send prompt_cache_key by default to real OpenAI (its prefix-cache
+     * routing benefits from a stable affinity hint). For non-OpenAI base
+     * URLs the field is risky — vLLM hard-rejects unknown JSON fields —
+     * so default off, but allow opt-in for hosted OpenAI-compatible
+     * providers (Together, Fireworks, OpenRouter, Groq, ...) that do
+     * benefit from it. */
+    const char *force_env = getenv("HAX_OPENAI_SEND_CACHE_KEY");
+    int force_send = force_env && *force_env;
+
     struct openai *o = xcalloc(1, sizeof(*o));
-    o->base_url = dup_trim_trailing_slash(base);
+    o->base_url = base_url;
     o->api_key = (key && *key) ? xstrdup(key) : NULL;
     o->name_buf = xstrdup(name);
     o->endpoint = xasprintf("%s/chat/completions", o->base_url);
+    o->send_cache_key = is_real_openai || force_send;
+    char uuid[37];
+    gen_uuid_v4(uuid);
+    o->session_id = xstrdup(uuid);
     o->base.name = o->name_buf;
     o->base.stream = openai_stream;
     o->base.destroy = openai_destroy;

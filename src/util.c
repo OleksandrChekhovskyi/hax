@@ -70,6 +70,39 @@ char *xasprintf(const char *fmt, ...)
     return p;
 }
 
+void gen_uuid_v4(char out[37])
+{
+    uint8_t b[16];
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        fprintf(stderr, "hax: open /dev/urandom: %s\n", strerror(errno));
+        abort();
+    }
+    size_t got = 0;
+    while (got < sizeof(b)) {
+        ssize_t r = read(fd, b + got, sizeof(b) - got);
+        if (r < 0) {
+            if (errno == EINTR)
+                continue;
+            fprintf(stderr, "hax: read /dev/urandom: %s\n", strerror(errno));
+            abort();
+        }
+        if (r == 0) {
+            fprintf(stderr, "hax: unexpected EOF on /dev/urandom\n");
+            abort();
+        }
+        got += (size_t)r;
+    }
+    close(fd);
+
+    b[6] = (b[6] & 0x0f) | 0x40; /* RFC 4122 version 4 */
+    b[8] = (b[8] & 0x3f) | 0x80; /* RFC 4122 variant */
+
+    snprintf(out, 37, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", b[0],
+             b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13],
+             b[14], b[15]);
+}
+
 char *slurp_file(const char *path, size_t *out_len)
 {
     int fd = open(path, O_RDONLY);

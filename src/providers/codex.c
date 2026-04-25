@@ -16,6 +16,8 @@ struct codex {
     struct provider base;
     char *access_token;
     char *account_id;
+    char *session_id; /* sent as prompt_cache_key — stable for process lifetime
+                                             so the server can hit its prefix cache across turns */
 };
 
 /* ---------- request body construction ---------- */
@@ -78,13 +80,16 @@ static json_t *build_tools(const struct tool_def *tools, size_t n)
     return arr;
 }
 
-static char *build_body(const struct context *ctx, const char *model)
+static char *build_body(const struct context *ctx, const char *model, const char *cache_key)
 {
     json_t *body = json_pack(
         "{s:s, s:b, s:b, s:s, s:o, s:{s:s}, s:s, s:b, s:o}", "model", model, "store", 0, "stream",
         1, "instructions", ctx->system_prompt ? ctx->system_prompt : "", "input",
         build_input_items(ctx->items, ctx->n_items), "text", "verbosity", "medium", "tool_choice",
         "auto", "parallel_tool_calls", 1, "tools", build_tools(ctx->tools, ctx->n_tools));
+
+    if (cache_key)
+        json_object_set_new(body, "prompt_cache_key", json_string(cache_key));
 
     char *s = json_dumps(body, JSON_COMPACT);
     json_decref(body);
@@ -107,7 +112,7 @@ static int codex_stream(struct provider *p, const struct context *ctx, const cha
 {
     struct codex *c = (struct codex *)p;
 
-    char *body = build_body(ctx, model);
+    char *body = build_body(ctx, model, c->session_id);
     if (!body)
         return -1;
     size_t body_len = strlen(body);
@@ -170,6 +175,7 @@ static void codex_destroy(struct provider *p)
     struct codex *c = (struct codex *)p;
     free(c->access_token);
     free(c->account_id);
+    free(c->session_id);
     free(c);
 }
 
@@ -209,6 +215,9 @@ struct provider *codex_provider_new(void)
     c->base.destroy = codex_destroy;
     c->access_token = xstrdup(access);
     c->account_id = xstrdup(account);
+    char uuid[37];
+    gen_uuid_v4(uuid);
+    c->session_id = xstrdup(uuid);
 
     json_decref(root);
     return &c->base;
