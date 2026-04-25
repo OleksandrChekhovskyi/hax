@@ -84,6 +84,11 @@ HAX_MODEL=Qwen3.6-35B-A3B-8bit \
   OpenRouter, etc.) whose prefix caching benefits from an affinity hint. Off
   by default for non-OpenAI URLs because some local servers (notably vLLM)
   reject unknown JSON fields. Always sent to real `api.openai.com`
+- `HAX_CONTEXT_LIMIT` — optional. Model's context window, used to show a
+  percentage on the per-turn usage line. Accepts a plain number or a
+  `k`/`m` suffix (1024-base): `256k`, `128K`, `1m`, `262144`. There's no
+  reliable way to auto-detect this across local OpenAI-compatible servers,
+  so it's opt-in. When unset, hax shows the absolute counts only
 - `HAX_TRACE` — path to a Markdown file that will receive a pretty-printed
   dump of every HTTP request, response status, and SSE event (Authorization
   redacted). Opened in append mode; `tail -f` works, but the file is most

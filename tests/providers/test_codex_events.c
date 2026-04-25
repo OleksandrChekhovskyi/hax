@@ -16,6 +16,7 @@ struct captured_ev {
     char *args_delta;
     char *message;
     int http_status;
+    struct stream_usage usage;
 };
 
 struct cap_state {
@@ -53,6 +54,7 @@ static int cap_cb(const struct stream_event *ev, void *user)
         break;
     case EV_DONE:
         c->message = strdup(ev->u.done.stop_reason ? ev->u.done.stop_reason : "");
+        c->usage = ev->u.done.usage;
         break;
     case EV_ERROR:
         c->message = strdup(ev->u.error.message ? ev->u.error.message : "");
@@ -320,6 +322,44 @@ static void test_reasoning_item_with_null_encrypted_content_dropped(void)
     TEARDOWN(cap, st);
 }
 
+/* ---------- usage ---------- */
+
+static void test_usage_default_unknown(void)
+{
+    WITH_STATE(cap, st);
+    codex_events_feed(&st, "{\"type\":\"response.completed\"}");
+    EXPECT(cap.events[0].kind == EV_DONE);
+    EXPECT(cap.events[0].usage.input_tokens == -1);
+    EXPECT(cap.events[0].usage.output_tokens == -1);
+    EXPECT(cap.events[0].usage.cached_tokens == -1);
+    TEARDOWN(cap, st);
+}
+
+static void test_usage_captured_from_completed(void)
+{
+    /* Codex bundles usage inside the response.completed event under
+     * response.usage. cached_tokens lives in input_tokens_details. */
+    WITH_STATE(cap, st);
+    codex_events_feed(&st, "{\"type\":\"response.completed\",\"response\":{"
+                           "\"usage\":{\"input_tokens\":2048,\"output_tokens\":128,"
+                           "\"input_tokens_details\":{\"cached_tokens\":1024}}}}");
+    EXPECT(cap.events[0].kind == EV_DONE);
+    EXPECT(cap.events[0].usage.input_tokens == 2048);
+    EXPECT(cap.events[0].usage.output_tokens == 128);
+    EXPECT(cap.events[0].usage.cached_tokens == 1024);
+    TEARDOWN(cap, st);
+}
+
+static void test_usage_done_sentinel_unknown(void)
+{
+    /* The stream-end sentinel carries no JSON; usage stays unknown. */
+    WITH_STATE(cap, st);
+    codex_events_feed(&st, "[DONE]");
+    EXPECT(cap.events[0].kind == EV_DONE);
+    EXPECT(cap.events[0].usage.input_tokens == -1);
+    TEARDOWN(cap, st);
+}
+
 /* ---------- finalize ---------- */
 
 static void test_finalize_without_terminal_emits_error(void)
@@ -367,6 +407,9 @@ int main(void)
     test_reasoning_item_without_encrypted_content_dropped();
     test_reasoning_item_with_null_encrypted_content_dropped();
     test_tool_call_missing_required_fields_dropped();
+    test_usage_default_unknown();
+    test_usage_captured_from_completed();
+    test_usage_done_sentinel_unknown();
     test_finalize_without_terminal_emits_error();
     test_finalize_after_completed_no_extra_event();
     T_REPORT();

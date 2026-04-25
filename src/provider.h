@@ -60,6 +60,20 @@ struct context {
     const char *reasoning_effort;
 };
 
+/* Token accounting for one completed response. -1 means "not reported by
+ * this provider/backend" — many OpenAI-compatible servers don't surface
+ * cached_tokens, and some omit usage entirely. Callers must check for -1
+ * before formatting. input_tokens is everything we just sent (system +
+ * full history + new user turn); output_tokens is what was just generated.
+ * "context used" for display = input + output, since both will be in the
+ * next request's input. cached_tokens is a subset of input_tokens (prefix
+ * cache hit) — informational, not additive. */
+struct stream_usage {
+    long input_tokens;
+    long output_tokens;
+    long cached_tokens;
+};
+
 /* Events emitted by a provider's stream() into a stream_cb. */
 enum stream_event_kind {
     EV_TEXT_DELTA,
@@ -93,6 +107,7 @@ struct stream_event {
         } reasoning_item;
         struct {
             const char *stop_reason;
+            struct stream_usage usage;
         } done;
         struct {
             const char *message;

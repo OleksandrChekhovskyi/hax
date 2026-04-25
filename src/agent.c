@@ -80,6 +80,8 @@ struct event_ctx {
     struct turn *turn;
     struct spinner *spinner;
     struct md_renderer *md; /* NULL when markdown is disabled */
+    /* Filled in from EV_DONE; -1/-1/-1 if the provider didn't report. */
+    struct stream_usage usage;
 };
 
 /* Newline runs at the trail of any disp_* call are deferred into `held`
@@ -290,6 +292,116 @@ static int markdown_enabled(void)
     return 1;
 }
 
+/* Format a token count in 1024-base: "412", "5.4k", "128k", "1.2M".
+ * Powers-of-two are used because advertised context windows are typically
+ * 32k/128k/256k (= 32×1024 etc.), so 1024-base produces the cleaner round
+ * numbers users expect. < 0 → "?" (provider didn't report). */
+static void format_tokens(char *buf, size_t buflen, long n)
+{
+    if (n < 0)
+        snprintf(buf, buflen, "?");
+    else if (n < 1024)
+        snprintf(buf, buflen, "%ld", n);
+    else if (n < 10L * 1024)
+        snprintf(buf, buflen, "%.1fk", (double)n / 1024.0);
+    else if (n < 1024L * 1024)
+        snprintf(buf, buflen, "%ldk", (n + 512) / 1024);
+    else if (n < 10L * 1024 * 1024)
+        snprintf(buf, buflen, "%.1fM", (double)n / (1024.0 * 1024.0));
+    else
+        snprintf(buf, buflen, "%ldM", (n + 512L * 1024) / (1024L * 1024));
+}
+
+/* Parse a size with optional k/m suffix (case-insensitive, 1024-base):
+ * "256k" → 262144, "128K" → 131072, "1m" → 1048576, "4096" → 4096.
+ * Returns 0 on empty/invalid input. */
+static long parse_size(const char *s)
+{
+    if (!s || !*s)
+        return 0;
+    char *end;
+    long v = strtol(s, &end, 10);
+    if (end == s || v <= 0)
+        return 0;
+    while (*end == ' ' || *end == '\t')
+        end++;
+    switch (*end) {
+    case 'k':
+    case 'K':
+        v *= 1024L;
+        end++;
+        break;
+    case 'm':
+    case 'M':
+        v *= 1024L * 1024L;
+        end++;
+        break;
+    }
+    while (*end == ' ' || *end == '\t')
+        end++;
+    if (*end != '\0')
+        return 0;
+    return v;
+}
+
+/* Optional override: HAX_CONTEXT_LIMIT lets the user supply the model's
+ * context window (e.g. "256k") so we can show a percentage. There's no
+ * reliable way to auto-detect this across OpenAI-compatible local servers
+ * (Ollama, llama.cpp, vLLM, oMLX, LM Studio all expose it differently or
+ * not at all), so we ask. Returns 0 when unset/invalid → percentage is
+ * hidden. */
+static long context_limit(void)
+{
+    return parse_size(getenv("HAX_CONTEXT_LIMIT"));
+}
+
+/* Dim one-liner: "context 8.9k / 256k (3%) · out 595 · cached 2.7k", shown
+ * once per user turn so multi-step tool runs collapse into a single summary
+ * instead of bracketing every intermediate response.
+ *
+ * ctx and cached reflect the last response (= current window state — each
+ * call's input subsumes the prior call's prefix, so the latest values are
+ * the right snapshot). out is a running sum across the turn's model calls,
+ * answering "how many tokens did this prompt cost in generation". Each
+ * value is -1 when the underlying counts weren't reported by the backend;
+ * the section is then skipped rather than rendered with a misleading zero. */
+static void display_usage(struct disp *d, long ctx, long out, long cached)
+{
+    int show_ctx = ctx >= 0;
+    int show_out = out >= 0;
+    int show_cached = cached > 0;
+    if (!show_ctx && !show_out && !show_cached)
+        return;
+
+    disp_block_separator(d);
+    disp_raw("\x1b[2m");
+
+    const char *sep = "";
+    char buf[32], limit_buf[32];
+    if (show_ctx) {
+        format_tokens(buf, sizeof(buf), ctx);
+        disp_printf(d, "context %s", buf);
+        long limit = context_limit();
+        if (limit > 0) {
+            format_tokens(limit_buf, sizeof(limit_buf), limit);
+            disp_printf(d, " / %s (%ld%%)", limit_buf, ctx * 100 / limit);
+        }
+        sep = " · ";
+    }
+    if (show_out) {
+        format_tokens(buf, sizeof(buf), out);
+        disp_printf(d, "%sout %s", sep, buf);
+        sep = " · ";
+    }
+    if (show_cached) {
+        format_tokens(buf, sizeof(buf), cached);
+        disp_printf(d, "%scached %s", sep, buf);
+    }
+    disp_raw("\x1b[0m");
+    disp_putc(d, '\n');
+    fflush(stdout);
+}
+
 static int on_event(const struct stream_event *ev, void *user)
 {
     struct event_ctx *ec = user;
@@ -327,6 +439,7 @@ static int on_event(const struct stream_event *ev, void *user)
          * also invisible: they're only round-tripped to the next turn. */
         break;
     case EV_DONE:
+        ec->usage = ev->u.done.usage;
         fflush(stdout);
         break;
     case EV_ERROR:
@@ -405,6 +518,14 @@ int agent_run(struct provider *p)
         /* libedit echoed the prompt, the line, and a trailing \n. */
         disp.trail = 1;
 
+        /* Aggregated across every model call this user turn produces.
+         * ctx and cached track the latest reported value (= current window
+         * state, since each call's input subsumes the prior call's prefix);
+         * out is a running sum so the summary reflects total tokens
+         * generated in response to this prompt. -1 means "no call reported
+         * this number yet". */
+        long turn_ctx = -1, turn_out = -1, turn_cached = -1;
+        int turn_errored = 0;
         for (;;) {
             struct context ctx = {
                 .system_prompt = sys,
@@ -426,7 +547,8 @@ int agent_run(struct provider *p)
             struct turn t;
             turn_init(&t);
             disp.saw_text = 0;
-            struct event_ctx ec = {.disp = &disp, .turn = &t, .spinner = spinner, .md = md};
+            struct event_ctx ec = {
+                .disp = &disp, .turn = &t, .spinner = spinner, .md = md, .usage = {-1, -1, -1}};
             p->stream(p, &ctx, model, on_event, &ec);
 
             /* Either a tool-only response (no text emitted, spinner still
@@ -440,8 +562,16 @@ int agent_run(struct provider *p)
 
             if (t.error) {
                 turn_reset(&t);
+                turn_errored = 1;
                 break;
             }
+
+            if (ec.usage.input_tokens >= 0 && ec.usage.output_tokens >= 0)
+                turn_ctx = ec.usage.input_tokens + ec.usage.output_tokens;
+            if (ec.usage.output_tokens >= 0)
+                turn_out = (turn_out < 0 ? 0 : turn_out) + ec.usage.output_tokens;
+            if (ec.usage.cached_tokens >= 0)
+                turn_cached = ec.usage.cached_tokens;
 
             size_t n_new = 0;
             struct item *new_items = turn_take_items(&t, &n_new);
@@ -482,6 +612,9 @@ int agent_run(struct provider *p)
                              });
             }
         }
+
+        if (!turn_errored)
+            display_usage(&disp, turn_ctx, turn_out, turn_cached);
     }
 
     spinner_free(spinner);

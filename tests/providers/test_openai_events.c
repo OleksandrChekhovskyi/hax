@@ -16,6 +16,7 @@ struct captured_ev {
     char *args_delta;
     char *message;
     int http_status;
+    struct stream_usage usage;
 };
 
 struct cap_state {
@@ -53,6 +54,7 @@ static int cap_cb(const struct stream_event *ev, void *user)
         break;
     case EV_DONE:
         c->message = strdup(ev->u.done.stop_reason ? ev->u.done.stop_reason : "");
+        c->usage = ev->u.done.usage;
         break;
     case EV_ERROR:
         c->message = strdup(ev->u.error.message ? ev->u.error.message : "");
@@ -139,6 +141,10 @@ static void test_tool_call_lifecycle(void)
     openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
                             "\"index\":0,\"function\":{\"arguments\":\"\\\"ls\\\"}\"}}]}}]}");
     feed_finish(&st, "tool_calls");
+    /* EV_DONE is deferred until [DONE] (or the trailing usage chunk under
+     * stream_options.include_usage) so the agent gets a single terminal
+     * event with usage attached. */
+    openai_events_feed(&st, "[DONE]");
 
     EXPECT(cap.n == 5);
     EXPECT(cap.events[0].kind == EV_TOOL_CALL_START);
@@ -204,6 +210,7 @@ static void test_parallel_tool_calls(void)
                             "{\"index\":1,\"id\":\"b\",\"function\":{\"name\":\"y\"}}"
                             "]}}]}");
     feed_finish(&st, "tool_calls");
+    openai_events_feed(&st, "[DONE]");
 
     EXPECT(cap.n == 5);
     EXPECT(cap.events[0].kind == EV_TOOL_CALL_START);
@@ -229,6 +236,7 @@ static void test_tool_call_without_id_synthesizes(void)
                             "\"index\":0,\"function\":{\"name\":\"bash\","
                             "\"arguments\":\"{}\"}}]}}]}");
     feed_finish(&st, "tool_calls");
+    openai_events_feed(&st, "[DONE]");
 
     EXPECT(cap.n == 4);
     EXPECT(cap.events[0].kind == EV_TOOL_CALL_START);
@@ -259,10 +267,16 @@ static void test_tool_call_delta_without_index_defaults_to_zero(void)
 
 /* ---------- finish_reason & termination ---------- */
 
-static void test_finish_reason_stop_emits_done(void)
+static void test_finish_reason_stop_defers_done_until_sentinel(void)
 {
+    /* finish_reason alone doesn't terminate — usage may still arrive on a
+     * trailing chunk under stream_options.include_usage. EV_DONE fires when
+     * [DONE] (or stream close) confirms there's nothing more coming. */
     WITH_STATE(cap, st);
     feed_finish(&st, "stop");
+    EXPECT(cap.n == 0);
+    EXPECT(st.terminated == 0);
+    openai_events_feed(&st, "[DONE]");
     EXPECT(cap.n == 1);
     EXPECT(cap.events[0].kind == EV_DONE);
     EXPECT_STR_EQ(cap.events[0].message, "stop");
@@ -274,8 +288,10 @@ static void test_finish_reason_tool_calls_emits_done(void)
 {
     WITH_STATE(cap, st);
     feed_finish(&st, "tool_calls");
+    openai_events_feed(&st, "[DONE]");
     EXPECT(cap.n == 1);
     EXPECT(cap.events[0].kind == EV_DONE);
+    EXPECT_STR_EQ(cap.events[0].message, "tool_calls");
     TEARDOWN(cap, st);
 }
 
@@ -314,6 +330,7 @@ static void test_double_termination_gated(void)
     WITH_STATE(cap, st);
     feed_finish(&st, "stop");
     feed_finish(&st, "stop");
+    openai_events_feed(&st, "[DONE]");
     openai_events_feed(&st, "[DONE]");
     EXPECT(cap.n == 1);
     TEARDOWN(cap, st);
@@ -371,8 +388,73 @@ static void test_finalize_after_done_no_extra_event(void)
 {
     WITH_STATE(cap, st);
     feed_finish(&st, "stop");
+    openai_events_feed(&st, "[DONE]");
     openai_events_finalize(&st);
     EXPECT(cap.n == 1);
+    TEARDOWN(cap, st);
+}
+
+static void test_finalize_after_finish_without_sentinel_emits_done(void)
+{
+    /* Some backends close the SSE stream without ever sending [DONE]. If
+     * finish_reason was seen, finalize must still surface EV_DONE — not
+     * EV_ERROR — so the agent doesn't discard a complete response. */
+    WITH_STATE(cap, st);
+    feed_finish(&st, "stop");
+    openai_events_finalize(&st);
+    EXPECT(cap.n == 1);
+    EXPECT(cap.events[0].kind == EV_DONE);
+    EXPECT_STR_EQ(cap.events[0].message, "stop");
+    TEARDOWN(cap, st);
+}
+
+/* ---------- usage ---------- */
+
+static void test_usage_default_unknown(void)
+{
+    /* Backends that don't honor stream_options.include_usage just send
+     * finish_reason then [DONE]. EV_DONE.usage stays at -1/-1/-1 so the
+     * agent knows it's unreported. */
+    WITH_STATE(cap, st);
+    feed_finish(&st, "stop");
+    openai_events_feed(&st, "[DONE]");
+    EXPECT(cap.events[0].kind == EV_DONE);
+    EXPECT(cap.events[0].usage.input_tokens == -1);
+    EXPECT(cap.events[0].usage.output_tokens == -1);
+    EXPECT(cap.events[0].usage.cached_tokens == -1);
+    TEARDOWN(cap, st);
+}
+
+static void test_usage_captured_from_trailing_chunk(void)
+{
+    /* OpenAI shape under stream_options.include_usage: trailing chunk has
+     * empty choices and a usage object with prompt_tokens / completion_tokens
+     * / prompt_tokens_details.cached_tokens. */
+    WITH_STATE(cap, st);
+    feed_finish(&st, "stop");
+    openai_events_feed(&st, "{\"choices\":[],\"usage\":{"
+                            "\"prompt_tokens\":1234,\"completion_tokens\":56,"
+                            "\"prompt_tokens_details\":{\"cached_tokens\":1000}}}");
+    openai_events_feed(&st, "[DONE]");
+    EXPECT(cap.n == 1);
+    EXPECT(cap.events[0].kind == EV_DONE);
+    EXPECT(cap.events[0].usage.input_tokens == 1234);
+    EXPECT(cap.events[0].usage.output_tokens == 56);
+    EXPECT(cap.events[0].usage.cached_tokens == 1000);
+    TEARDOWN(cap, st);
+}
+
+static void test_usage_without_cached_details(void)
+{
+    /* Many compat backends omit prompt_tokens_details — cached stays unknown. */
+    WITH_STATE(cap, st);
+    feed_finish(&st, "stop");
+    openai_events_feed(&st, "{\"choices\":[],\"usage\":{"
+                            "\"prompt_tokens\":10,\"completion_tokens\":20}}");
+    openai_events_feed(&st, "[DONE]");
+    EXPECT(cap.events[0].usage.input_tokens == 10);
+    EXPECT(cap.events[0].usage.output_tokens == 20);
+    EXPECT(cap.events[0].usage.cached_tokens == -1);
     TEARDOWN(cap, st);
 }
 
@@ -386,7 +468,7 @@ int main(void)
     test_parallel_tool_calls();
     test_tool_call_without_id_synthesizes();
     test_tool_call_delta_without_index_defaults_to_zero();
-    test_finish_reason_stop_emits_done();
+    test_finish_reason_stop_defers_done_until_sentinel();
     test_finish_reason_tool_calls_emits_done();
     test_finish_reason_length_emits_error();
     test_finish_reason_content_filter_emits_error();
@@ -397,5 +479,9 @@ int main(void)
     test_missing_choices_ignored();
     test_finalize_without_terminal_emits_error();
     test_finalize_after_done_no_extra_event();
+    test_finalize_after_finish_without_sentinel_emits_done();
+    test_usage_default_unknown();
+    test_usage_captured_from_trailing_chunk();
+    test_usage_without_cached_details();
     T_REPORT();
 }

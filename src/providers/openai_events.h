@@ -39,6 +39,16 @@ struct openai_events {
     size_t n_tools;
     size_t cap_tools;
 
+    /* finish_reason arrives one chunk before the optional usage chunk and
+     * before [DONE], so EV_DONE has to be deferred to bundle usage with it.
+     * saw_finish: a non-error finish_reason was received; reason is saved.
+     * pending_usage: harvested from any chunk that carries `usage` (the
+     * trailing chunk under stream_options.include_usage; may be -1/-1/-1
+     * if the backend never sends one). */
+    int saw_finish;
+    char *finish_reason;
+    struct stream_usage pending_usage;
+
     int terminated; /* any terminal event (EV_DONE or EV_ERROR) emitted */
 };
 

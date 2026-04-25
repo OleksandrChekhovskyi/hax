@@ -12,6 +12,9 @@ void openai_events_init(struct openai_events *s, stream_cb cb, void *user)
     memset(s, 0, sizeof(*s));
     s->cb = cb;
     s->user = user;
+    s->pending_usage.input_tokens = -1;
+    s->pending_usage.output_tokens = -1;
+    s->pending_usage.cached_tokens = -1;
 }
 
 void openai_events_free(struct openai_events *s)
@@ -24,6 +27,8 @@ void openai_events_free(struct openai_events *s)
     free(s->tools);
     s->tools = NULL;
     s->n_tools = s->cap_tools = 0;
+    free(s->finish_reason);
+    s->finish_reason = NULL;
 }
 
 static struct openai_tool_track *track_find(struct openai_events *s, int index)
@@ -146,18 +151,60 @@ static void end_all_tool_calls(struct openai_events *s)
     }
 }
 
+/* Capture usage from any chunk that carries it. With
+ * stream_options.include_usage, OpenAI sends one trailing chunk with empty
+ * `choices` and a populated `usage` just before [DONE]; we keep the values
+ * around until the deferred EV_DONE fires. cached_tokens lives in
+ * prompt_tokens_details — absent on most compat backends, hence the -1
+ * "unknown" default. */
+static void capture_usage(struct openai_events *s, json_t *root)
+{
+    json_t *usage = json_object_get(root, "usage");
+    if (!json_is_object(usage))
+        return;
+
+    json_t *v = json_object_get(usage, "prompt_tokens");
+    if (json_is_integer(v))
+        s->pending_usage.input_tokens = (long)json_integer_value(v);
+    v = json_object_get(usage, "completion_tokens");
+    if (json_is_integer(v))
+        s->pending_usage.output_tokens = (long)json_integer_value(v);
+
+    json_t *details = json_object_get(usage, "prompt_tokens_details");
+    if (json_is_object(details)) {
+        v = json_object_get(details, "cached_tokens");
+        if (json_is_integer(v))
+            s->pending_usage.cached_tokens = (long)json_integer_value(v);
+    }
+}
+
+static void emit_deferred_done(struct openai_events *s)
+{
+    struct stream_event ev = {
+        .kind = EV_DONE,
+        .u.done = {.stop_reason = s->finish_reason ? s->finish_reason : "stop",
+                   .usage = s->pending_usage},
+    };
+    emit(s, &ev);
+}
+
 /* finish_reason semantics:
- *   "stop" / "tool_calls" → EV_DONE
+ *   "stop" / "tool_calls" → EV_DONE (deferred; see below)
  *   "length" / "content_filter" → EV_ERROR (truncated; discard partial turn)
- * Everything else is treated as unknown and maps to EV_DONE to avoid hanging. */
+ * Everything else is treated as unknown and maps to EV_DONE to avoid hanging.
+ *
+ * EV_DONE is deferred because under stream_options.include_usage the usage
+ * chunk arrives one event AFTER finish_reason. We end tool calls now (the
+ * response is logically complete) but hold off on EV_DONE until [DONE] or
+ * the SSE transport closes — whichever sees the usage chunk first. */
 static void handle_finish_reason(struct openai_events *s, const char *reason)
 {
-    if (s->terminated)
+    if (s->terminated || s->saw_finish)
         return;
-    end_all_tool_calls(s);
-    s->terminated = 1;
 
     if (reason && (strcmp(reason, "length") == 0 || strcmp(reason, "content_filter") == 0)) {
+        end_all_tool_calls(s);
+        s->terminated = 1;
         char *msg = xasprintf("response incomplete: %s", reason);
         struct stream_event ev = {
             .kind = EV_ERROR,
@@ -168,11 +215,9 @@ static void handle_finish_reason(struct openai_events *s, const char *reason)
         return;
     }
 
-    struct stream_event ev = {
-        .kind = EV_DONE,
-        .u.done = {.stop_reason = reason ? reason : "stop"},
-    };
-    emit(s, &ev);
+    end_all_tool_calls(s);
+    s->saw_finish = 1;
+    s->finish_reason = xstrdup(reason ? reason : "stop");
 }
 
 static void handle_done_sentinel(struct openai_events *s)
@@ -181,11 +226,7 @@ static void handle_done_sentinel(struct openai_events *s)
         return;
     end_all_tool_calls(s);
     s->terminated = 1;
-    struct stream_event ev = {
-        .kind = EV_DONE,
-        .u.done = {.stop_reason = "stop"},
-    };
-    emit(s, &ev);
+    emit_deferred_done(s);
 }
 
 /* Some backends surface errors as `{"error":{"message":"...","code":...}}`
@@ -224,6 +265,10 @@ void openai_events_feed(struct openai_events *s, const char *data)
         return;
     }
 
+    /* Trailing chunks with stream_options.include_usage carry an empty
+     * choices array plus the usage object — capture before the early-out. */
+    capture_usage(s, root);
+
     json_t *choices = json_object_get(root, "choices");
     if (!json_is_array(choices) || json_array_size(choices) == 0) {
         json_decref(root);
@@ -256,6 +301,13 @@ void openai_events_finalize(struct openai_events *s)
     if (s->terminated)
         return;
     s->terminated = 1;
+    /* Some backends close the SSE stream after finish_reason without ever
+     * sending [DONE] — emit the deferred done now so the agent doesn't
+     * mistake a clean close for a truncated stream. */
+    if (s->saw_finish) {
+        emit_deferred_done(s);
+        return;
+    }
     struct stream_event ev = {
         .kind = EV_ERROR,
         .u.error = {.message = "stream ended before completion", .http_status = 0},

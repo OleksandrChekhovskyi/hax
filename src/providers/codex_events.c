@@ -217,7 +217,37 @@ static void handle_incomplete(struct codex_events *s, json_t *root)
     free(msg);
 }
 
-static void handle_completed(struct codex_events *s)
+/* Codex carries usage on the final response.completed event under
+ * response.usage. cached_tokens lives in input_tokens_details — when absent
+ * we leave it at -1 ("unknown"), which is distinct from 0 ("known to be no
+ * cache hit"). */
+static void parse_usage(json_t *root, struct stream_usage *out)
+{
+    out->input_tokens = -1;
+    out->output_tokens = -1;
+    out->cached_tokens = -1;
+
+    json_t *resp = json_object_get(root, "response");
+    json_t *usage = resp ? json_object_get(resp, "usage") : NULL;
+    if (!json_is_object(usage))
+        return;
+
+    json_t *v = json_object_get(usage, "input_tokens");
+    if (json_is_integer(v))
+        out->input_tokens = (long)json_integer_value(v);
+    v = json_object_get(usage, "output_tokens");
+    if (json_is_integer(v))
+        out->output_tokens = (long)json_integer_value(v);
+
+    json_t *details = json_object_get(usage, "input_tokens_details");
+    if (json_is_object(details)) {
+        v = json_object_get(details, "cached_tokens");
+        if (json_is_integer(v))
+            out->cached_tokens = (long)json_integer_value(v);
+    }
+}
+
+static void handle_completed(struct codex_events *s, json_t *root)
 {
     if (s->terminated)
         return;
@@ -226,6 +256,10 @@ static void handle_completed(struct codex_events *s)
         .kind = EV_DONE,
         .u.done = {.stop_reason = "completed"},
     };
+    if (root)
+        parse_usage(root, &ev.u.done.usage);
+    else
+        ev.u.done.usage = (struct stream_usage){-1, -1, -1};
     emit(s, &ev);
 }
 
@@ -234,7 +268,7 @@ void codex_events_feed(struct codex_events *s, const char *data)
     if (!data || !*data)
         return;
     if (strcmp(data, "[DONE]") == 0) {
-        handle_completed(s);
+        handle_completed(s, NULL);
         return;
     }
 
@@ -258,7 +292,7 @@ void codex_events_feed(struct codex_events *s, const char *data)
     else if (strcmp(type, "response.function_call_arguments.delta") == 0)
         handle_args_delta(s, root);
     else if (strcmp(type, "response.completed") == 0 || strcmp(type, "response.done") == 0)
-        handle_completed(s);
+        handle_completed(s, root);
     else if (strcmp(type, "response.incomplete") == 0)
         handle_incomplete(s, root);
     else if (strcmp(type, "response.failed") == 0)

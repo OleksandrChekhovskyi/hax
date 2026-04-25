@@ -130,14 +130,21 @@ static json_t *build_tools(const struct tool_def *tools, size_t n)
 
 static char *build_body(const struct context *ctx, const char *model, const char *cache_key)
 {
-    /* Deliberately omit `tool_choice` ("auto" is the backend default when
-     * tools are present) and `parallel_tool_calls` (defaults to true on
-     * real OpenAI). Sending the field explicitly would risk 400s on
-     * strict compat backends that reject unknown JSON, with no upside on
-     * real OpenAI. The agent loop already handles multiple tool_calls
-     * per turn when the model emits them. */
-    json_t *body = json_pack("{s:s, s:b, s:o}", "model", model, "stream", 1, "messages",
-                             build_messages(ctx->system_prompt, ctx->items, ctx->n_items));
+    /* Omit `tool_choice` and `parallel_tool_calls`: their defaults ("auto"
+     * and true respectively) are exactly what we want, so explicitly setting
+     * them would be redundant. The agent loop already handles multiple
+     * tool_calls per turn when the model emits them.
+     *
+     * `stream_options.include_usage` is sent unconditionally — it asks the
+     * server to emit a trailing usage chunk so we can show per-turn token
+     * counts. Reference clients send it without per-call gating: opencode
+     * always-on for streaming, pi-mono default-true via per-model compat
+     * flag. Modern OpenAI-compatible backends (vLLM, llama.cpp server,
+     * Ollama, oMLX, hosted providers) all accept it. If we ever hit a
+     * backend that 400s on the unknown field, gating goes here. */
+    json_t *body = json_pack("{s:s, s:b, s:o, s:{s:b}}", "model", model, "stream", 1, "messages",
+                             build_messages(ctx->system_prompt, ctx->items, ctx->n_items),
+                             "stream_options", "include_usage", 1);
 
     if (ctx->n_tools > 0)
         json_object_set_new(body, "tools", build_tools(ctx->tools, ctx->n_tools));
@@ -282,12 +289,15 @@ struct provider *openai_provider_new(void)
     if (!name || !*name)
         name = "openai";
 
-    /* Send prompt_cache_key by default to real OpenAI (its prefix-cache
-     * routing benefits from a stable affinity hint). For non-OpenAI base
-     * URLs the field is risky — vLLM hard-rejects unknown JSON fields —
-     * so default off, but allow opt-in for hosted OpenAI-compatible
-     * providers (Together, Fireworks, OpenRouter, Groq, ...) that do
-     * benefit from it. */
+    /* prompt_cache_key is an OpenAI-specific affinity hint for their
+     * prefix-cache routing — it has no semantic meaning to other backends,
+     * which would just ignore it (and a stable per-process UUID isn't a
+     * meaningful key for them anyway). Default on for real OpenAI, off
+     * elsewhere — matches pi-mono, which hostname-gates to api.openai.com;
+     * opencode is even stricter and never sends it on the compat path.
+     * Hosted OpenAI-compatible providers that emulate prefix caching
+     * (Together, Fireworks, OpenRouter, Groq, ...) can opt in via
+     * HAX_OPENAI_SEND_CACHE_KEY. */
     const char *force_env = getenv("HAX_OPENAI_SEND_CACHE_KEY");
     int force_send = force_env && *force_env;
 
