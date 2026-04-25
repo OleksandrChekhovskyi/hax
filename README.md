@@ -89,6 +89,11 @@ HAX_MODEL=Qwen3.6-35B-A3B-8bit \
   `k`/`m` suffix (1024-base): `256k`, `128K`, `1m`, `262144`. There's no
   reliable way to auto-detect this across local OpenAI-compatible servers,
   so it's opt-in. When unset, hax shows the absolute counts only
+- `HAX_HTTP_IDLE_TIMEOUT` — optional. Seconds of app-layer silence on a
+  streaming response before libcurl gives up with `Timeout was reached`.
+  Default `600`; set to `0` to disable. Bump or disable when running against
+  a local server (e.g. `llama-server`) whose prompt evaluation can take
+  longer than the default and that doesn't send SSE heartbeats
 - `HAX_TRACE` — path to a Markdown file that will receive a pretty-printed
   dump of every HTTP request, response status, and SSE event (Authorization
   redacted). Opened in append mode; `tail -f` works, but the file is most

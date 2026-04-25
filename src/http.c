@@ -10,7 +10,8 @@
 #include "trace.h"
 #include "util.h"
 
-#define ERR_BODY_CAP 4096
+#define ERR_BODY_CAP         4096
+#define IDLE_TIMEOUT_DEFAULT 600L
 
 struct curl_state {
     struct sse_parser parser;
@@ -21,6 +22,20 @@ struct sse_trace_wrapper {
     sse_cb inner;
     void *inner_user;
 };
+
+/* Return the idle (low-speed) timeout in seconds. 0 disables the guard.
+ * Unset or unparseable → IDLE_TIMEOUT_DEFAULT. */
+static long resolve_idle_timeout(void)
+{
+    const char *s = getenv("HAX_HTTP_IDLE_TIMEOUT");
+    if (!s || !*s)
+        return IDLE_TIMEOUT_DEFAULT;
+    char *end;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end != '\0' || v < 0)
+        return IDLE_TIMEOUT_DEFAULT;
+    return v;
+}
 
 static int sse_trace_cb(const char *event_name, const char *data, void *user)
 {
@@ -84,12 +99,17 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &s);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-    /* Fail fast on dead connections. Streams can be legitimately long, so
-     * CURLOPT_TIMEOUT is unsuitable — but the backend should always push
-     * *something* (heartbeats, deltas) within a minute. */
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
+    /* Fail fast on dead connections. Streams can be legitimately long, so
+     * CURLOPT_TIMEOUT is unsuitable. We rely on app-layer silence instead:
+     * hosted endpoints push heartbeats or deltas regularly, but local
+     * servers (notably llama-server) stay silent during prompt eval, so the
+     * default is generous and HAX_HTTP_IDLE_TIMEOUT=0 disables it entirely. */
+    long idle = resolve_idle_timeout();
+    if (idle > 0) {
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, idle);
+    }
 
     trace_request(url, headers, body, body_len);
 
