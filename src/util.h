@@ -16,6 +16,10 @@ char *xasprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
  * Returns NULL on error and sets errno. Caller frees. */
 char *slurp_file(const char *path, size_t *out_len);
 
+/* Write exactly n bytes to fd, restarting on EINTR/short writes. Returns 0
+ * on success, -1 on error (errno set). */
+int write_all(int fd, const void *data, size_t n);
+
 /* Read up to cap bytes from path into a newly-allocated NUL-terminated
  * string. Allocates at most cap+1 bytes regardless of file size. If the
  * file has more bytes than the cap, sets *out_truncated to 1. Returns

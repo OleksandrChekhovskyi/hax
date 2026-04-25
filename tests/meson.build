@@ -31,6 +31,32 @@ test_bash = executable('test_bash',
 )
 test('tools/bash', test_bash)
 
+test_write = executable('test_write',
+    sources: [
+        'tools/test_write.c',
+        '../src/tools/write.c',
+        '../src/fs.c',
+        '../src/diff.c',
+        '../src/util.c',
+    ],
+    include_directories: tests_inc,
+    dependencies: [jansson],
+)
+test('tools/write', test_write)
+
+test_edit = executable('test_edit',
+    sources: [
+        'tools/test_edit.c',
+        '../src/tools/edit.c',
+        '../src/fs.c',
+        '../src/diff.c',
+        '../src/util.c',
+    ],
+    include_directories: tests_inc,
+    dependencies: [jansson],
+)
+test('tools/edit', test_edit)
+
 test_sse = executable('test_sse',
     sources: [
         'test_sse.c',
@@ -72,6 +98,16 @@ test_openai_events = executable('test_openai_events',
     dependencies: [jansson],
 )
 test('providers/openai_events', test_openai_events)
+
+test_diff = executable('test_diff',
+    sources: [
+        'test_diff.c',
+        '../src/diff.c',
+        '../src/util.c',
+    ],
+    include_directories: tests_inc,
+)
+test('diff', test_diff)
 
 test_markdown = executable('test_markdown',
     sources: [

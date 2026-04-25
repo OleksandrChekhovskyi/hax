@@ -10,6 +10,9 @@ project('hax', 'c',
 
 add_project_arguments(
     '-D_POSIX_C_SOURCE=200809L',
+    # _XOPEN_SOURCE=700 is SUSv4 (POSIX 2008 + XSI). Needed on glibc to
+    # expose realpath() — _POSIX_C_SOURCE alone doesn't gate it through.
+    '-D_XOPEN_SOURCE=700',
     '-D_DARWIN_C_SOURCE',
     language: 'c',
 )
@@ -21,6 +24,8 @@ threads = dependency('threads')
 
 sources = files(
     'src/agent.c',
+    'src/diff.c',
+    'src/fs.c',
     'src/http.c',
     'src/main.c',
     'src/markdown.c',
@@ -34,7 +39,9 @@ sources = files(
     'src/providers/openai.c',
     'src/providers/openai_events.c',
     'src/tools/bash.c',
+    'src/tools/edit.c',
     'src/tools/read.c',
+    'src/tools/write.c',
 )
 
 executable('hax',

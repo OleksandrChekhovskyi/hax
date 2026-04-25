@@ -103,6 +103,22 @@ void gen_uuid_v4(char out[37])
              b[14], b[15]);
 }
 
+int write_all(int fd, const void *data, size_t n)
+{
+    const char *p = data;
+    while (n > 0) {
+        ssize_t w = write(fd, p, n);
+        if (w < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        p += w;
+        n -= (size_t)w;
+    }
+    return 0;
+}
+
 char *slurp_file(const char *path, size_t *out_len)
 {
     int fd = open(path, O_RDONLY);

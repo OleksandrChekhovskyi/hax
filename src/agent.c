@@ -19,9 +19,9 @@
 
 #define DEFAULT_SYSTEM_PROMPT                                                                      \
     "You are hax, a minimalist coding assistant running in the user's terminal. "                  \
-    "You have access to `read` and `bash` tools. Prefer action over explanation: "                 \
-    "when a question can be answered by running a command or reading a file, do so. "              \
-    "Be concise in your replies."
+    "You have access to `read`, `bash`, `write`, and `edit` tools. Prefer action "                 \
+    "over explanation: when a question can be answered by running a command or "                   \
+    "reading a file, do so. Be concise in your replies."
 
 #define TOOL_OUTPUT_MAX_LINES 5
 #define TOOL_OUTPUT_MAX_BYTES 2000
@@ -29,6 +29,8 @@
 static const struct tool *const TOOLS[] = {
     &TOOL_READ,
     &TOOL_BASH,
+    &TOOL_WRITE,
+    &TOOL_EDIT,
 };
 #define N_TOOLS (sizeof(TOOLS) / sizeof(TOOLS[0]))
 
@@ -212,6 +214,15 @@ static void display_tool_header(struct disp *d, const struct item *call)
         disp_raw("\x1b[1m");
         disp_write(d, display_arg, strlen(display_arg));
         disp_raw("\x1b[0m");
+        if (tool && tool->format_display_extra) {
+            char *extra = tool->format_display_extra(call->tool_arguments_json);
+            if (extra && *extra) {
+                disp_raw("\x1b[2m");
+                disp_write(d, extra, strlen(extra));
+                disp_raw("\x1b[0m");
+            }
+            free(extra);
+        }
     } else if (call->tool_arguments_json && *call->tool_arguments_json) {
         disp_putc(d, ' ');
         disp_raw("\x1b[2m");
@@ -226,6 +237,50 @@ static void display_tool_header(struct disp *d, const struct item *call)
 
     if (root)
         json_decref(root);
+    fflush(stdout);
+}
+
+/* Render a unified diff with ANSI colors — green for added lines, red for
+ * removed, cyan for headers and hunk markers, dim for the rare "\ No newline"
+ * footer. Diffs are useful enough to the user that we never truncate them
+ * (matches Claude Code / pi-mono behavior); the model receives the same
+ * text uncolored as the tool result. */
+static void display_tool_diff(struct disp *d, const char *diff)
+{
+    if (!diff || !*diff) {
+        disp_raw("\x1b[2m");
+        disp_printf(d, "(no changes)");
+        disp_raw("\x1b[0m");
+        disp_putc(d, '\n');
+        fflush(stdout);
+        return;
+    }
+
+    const char *p = diff;
+    while (*p) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        const char *open = NULL;
+        if (len >= 4 && (memcmp(p, "--- ", 4) == 0 || memcmp(p, "+++ ", 4) == 0))
+            open = "\x1b[2m"; /* dim: file headers — scaffolding, not signal */
+        else if (len >= 2 && memcmp(p, "@@", 2) == 0)
+            open = "\x1b[2m"; /* dim: hunk header */
+        else if (len >= 1 && p[0] == '+')
+            open = "\x1b[32m"; /* green: addition */
+        else if (len >= 1 && p[0] == '-')
+            open = "\x1b[31m"; /* red: removal */
+        else if (len >= 1 && p[0] == '\\')
+            open = "\x1b[2m"; /* dim: \ No newline at end of file */
+        if (open)
+            disp_raw(open);
+        disp_write(d, p, len);
+        if (open)
+            disp_raw("\x1b[0m");
+        disp_putc(d, '\n');
+        if (!eol)
+            break;
+        p = eol + 1;
+    }
     fflush(stdout);
 }
 
@@ -603,7 +658,18 @@ int agent_run(struct provider *p)
                 spinner_show(spinner);
                 char *out = dispatch_tool(items[i].tool_name, items[i].tool_arguments_json);
                 spinner_hide(spinner);
-                display_tool_output(&disp, out);
+                /* Diff-producing tools render colored and uncapped — but
+                 * only when the output actually is a diff. On failure they
+                 * return a plain error message that flows through the
+                 * normal dim preview path. The `--- ` prefix is the
+                 * unambiguous marker; "" is a successful no-op write. */
+                const struct tool *t = find_tool(items[i].tool_name);
+                int as_diff =
+                    t && t->output_is_diff && (out[0] == '\0' || strncmp(out, "--- ", 4) == 0);
+                if (as_diff)
+                    display_tool_diff(&disp, out);
+                else
+                    display_tool_output(&disp, out);
                 items_append(&items, &n_items, &cap_items,
                              (struct item){
                                  .kind = ITEM_TOOL_RESULT,
