@@ -7,7 +7,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
+#include "markdown.h"
 #include "spinner.h"
 #include "tool.h"
 #include "turn.h"
@@ -77,6 +79,7 @@ struct event_ctx {
     struct disp *disp;
     struct turn *turn;
     struct spinner *spinner;
+    struct md_renderer *md; /* NULL when markdown is disabled */
 };
 
 /* Newline runs at the trail of any disp_* call are deferred into `held`
@@ -262,6 +265,31 @@ static void display_tool_output(struct disp *d, const char *out)
     fflush(stdout);
 }
 
+/* Adapter so md_renderer can emit through disp without knowing about it.
+ * Content bytes go through disp_write so trailing-newline buffering works
+ * uniformly. ANSI escapes (is_raw=1) bypass disp's trail/held bookkeeping
+ * — otherwise an escape after a buffered \n would commit the held NL and
+ * reset trail to 0, leaking an extra blank line out of the next
+ * disp_block_separator. The escape goes ahead of the held NL on stdout
+ * but is zero-width, so the visible result is identical. */
+static void md_emit_to_disp(const char *bytes, size_t n, int is_raw, void *user)
+{
+    if (is_raw)
+        fwrite(bytes, 1, n, stdout);
+    else
+        disp_write((struct disp *)user, bytes, n);
+}
+
+static int markdown_enabled(void)
+{
+    if (!isatty(fileno(stdout)))
+        return 0;
+    const char *e = getenv("HAX_MARKDOWN");
+    if (e && strcmp(e, "0") == 0)
+        return 0;
+    return 1;
+}
+
 static int on_event(const struct stream_event *ev, void *user)
 {
     struct event_ctx *ec = user;
@@ -282,7 +310,10 @@ static int on_event(const struct stream_event *ev, void *user)
             disp_block_separator(d);
             d->saw_text = 1;
         }
-        disp_write(d, s, n);
+        if (ec->md)
+            md_feed(ec->md, s, n);
+        else
+            disp_write(d, s, n);
         fflush(stdout);
         break;
     }
@@ -298,6 +329,12 @@ static int on_event(const struct stream_event *ev, void *user)
         break;
     case EV_ERROR:
         spinner_hide(ec->spinner);
+        /* Flush any pending markdown tail/styles so the model's last
+         * bytes appear with the model text, not after the error block.
+         * Idempotent — the post-stream md_flush in agent_run is a no-op
+         * after this. */
+        if (ec->md)
+            md_flush(ec->md);
         disp_block_separator(d);
         disp_raw("\x1b[31m");
         disp_printf(d, "[error: %s]", ev->u.error.message);
@@ -338,6 +375,7 @@ int agent_run(struct provider *p)
     printf("hax (provider: %s, model: %s). Ctrl-D to quit.\n", p->name ? p->name : "?", model);
     struct disp disp = {.trail = 1};
     struct spinner *spinner = spinner_new("Working...");
+    struct md_renderer *md = markdown_enabled() ? md_new(md_emit_to_disp, &disp) : NULL;
 
     for (;;) {
         disp_block_separator(&disp);
@@ -373,16 +411,22 @@ int agent_run(struct provider *p)
             disp_block_separator(&disp);
             spinner_show(spinner);
 
+            if (md)
+                md_reset(md);
             struct turn t;
             turn_init(&t);
             disp.saw_text = 0;
-            struct event_ctx ec = {.disp = &disp, .turn = &t, .spinner = spinner};
+            struct event_ctx ec = {.disp = &disp, .turn = &t, .spinner = spinner, .md = md};
             p->stream(p, &ctx, model, on_event, &ec);
 
             /* Either a tool-only response (no text emitted, spinner still
              * visible) or stream returned without ever firing an event —
              * make sure we're back to a clean line before continuing. */
             spinner_hide(spinner);
+            /* Commit any markdown tail/styles so we don't carry them
+             * forward and the terminal isn't left styled. */
+            if (md)
+                md_flush(md);
 
             if (t.error) {
                 turn_reset(&t);
@@ -431,6 +475,8 @@ int agent_run(struct provider *p)
     }
 
     spinner_free(spinner);
+    if (md)
+        md_free(md);
     for (size_t i = 0; i < n_items; i++)
         item_free(&items[i]);
     free(items);

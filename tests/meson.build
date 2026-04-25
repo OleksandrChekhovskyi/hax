@@ -72,3 +72,13 @@ test_openai_events = executable('test_openai_events',
     dependencies: [jansson],
 )
 test('providers/openai_events', test_openai_events)
+
+test_markdown = executable('test_markdown',
+    sources: [
+        'test_markdown.c',
+        '../src/markdown.c',
+        '../src/util.c',
+    ],
+    include_directories: tests_inc,
+)
+test('markdown', test_markdown)

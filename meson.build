@@ -23,6 +23,7 @@ sources = files(
     'src/agent.c',
     'src/http.c',
     'src/main.c',
+    'src/markdown.c',
     'src/spinner.c',
     'src/sse.c',
     'src/trace.c',
