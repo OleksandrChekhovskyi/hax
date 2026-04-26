@@ -570,9 +570,12 @@ int agent_run(struct provider *p)
             sys = sys_owned;
         }
     }
-    const char *reasoning_effort = getenv("HAX_REASONING_EFFORT");
-    if (reasoning_effort && !*reasoning_effort)
-        reasoning_effort = NULL;
+    const char *reasoning_env = getenv("HAX_REASONING_EFFORT");
+    const char *reasoning_effort = NULL;
+    if (reasoning_env)
+        reasoning_effort = *reasoning_env ? reasoning_env : NULL;
+    else
+        reasoning_effort = p->default_reasoning_effort;
 
     struct tool_def *tools = xmalloc(N_TOOLS * sizeof(*tools));
     for (size_t i = 0; i < N_TOOLS; i++)

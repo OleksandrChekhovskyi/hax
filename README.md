@@ -62,14 +62,17 @@ HAX_MODEL=Qwen3.6-35B-A3B-8bit \
 ### Provider & model
 
 - `HAX_PROVIDER` — `codex` (default) or `openai`
-- `HAX_MODEL` — model id. Defaults to `gpt-5.3-codex` when using `codex`; required when using
-  `openai` (hax exits with an error if it's unset)
+- `HAX_MODEL` — model id. With `codex`, defaults to `model` from `~/.codex/config.toml`,
+  falling back to `gpt-5.3-codex`; required when using `openai` (hax exits with an error if it's
+  unset)
 - `HAX_SYSTEM_PROMPT` — override the built-in system prompt. Set to an empty string to send no
   system message at all (some OpenAI-compatible chat templates reject system messages)
 - `HAX_REASONING_EFFORT` — optional. Passed verbatim to the provider: `reasoning.effort` for the
   Codex Responses API, `reasoning_effort` for Chat Completions. Typical values are `minimal`,
   `low`, `medium`, `high`, `xhigh` — but hax doesn't validate, so anything the model accepts
-  works. When unset, the field is omitted and the server picks its own default
+  works. With `codex`, defaults to `model_reasoning_effort` from `~/.codex/config.toml`; otherwise
+  the field is omitted and the server picks its own default. Set it to an empty string to force
+  omission
 
 ### OpenAI provider
 

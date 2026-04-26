@@ -17,9 +17,125 @@ struct codex {
     struct provider base;
     char *access_token;
     char *account_id;
+    char *default_model;
+    char *default_reasoning_effort;
     char *session_id; /* sent as prompt_cache_key — stable for process lifetime
                                              so the server can hit its prefix cache across turns */
 };
+
+/* ---------- Codex config (~/.codex/config.toml) ---------- */
+
+static const char *skip_inline_ws(const char *p, const char *end)
+{
+    while (p < end && (*p == ' ' || *p == '\t'))
+        p++;
+    return p;
+}
+
+static int key_matches(const char *p, const char *end, const char *key)
+{
+    size_t n = strlen(key);
+    if ((size_t)(end - p) < n || memcmp(p, key, n) != 0)
+        return 0;
+    p += n;
+    return p == end || *p == '=' || *p == ' ' || *p == '\t';
+}
+
+static char *parse_toml_string(const char *p, const char *end)
+{
+    if (p >= end || (*p != '"' && *p != '\''))
+        return NULL;
+
+    char quote = *p++;
+    struct buf b;
+    buf_init(&b);
+
+    while (p < end) {
+        char c = *p++;
+        if (c == quote)
+            return buf_steal(&b);
+
+        if (quote == '"' && c == '\\' && p < end) {
+            c = *p++;
+            switch (c) {
+            case 'b':
+                c = '\b';
+                break;
+            case 't':
+                c = '\t';
+                break;
+            case 'n':
+                c = '\n';
+                break;
+            case 'f':
+                c = '\f';
+                break;
+            case 'r':
+                c = '\r';
+                break;
+            case '"':
+            case '\\':
+                break;
+            default:
+                /* Model names / effort values are ordinary ASCII strings.
+                 * For unsupported escapes, keep the escaped byte rather
+                 * than rejecting the whole config. */
+                break;
+            }
+        }
+        buf_append(&b, &c, 1);
+    }
+
+    buf_free(&b);
+    return NULL;
+}
+
+static char *parse_top_level_toml_string_key(const char *contents, size_t len, const char *key)
+{
+    const char *p = contents;
+    const char *end = contents + len;
+
+    while (p < end) {
+        const char *line_end = memchr(p, '\n', (size_t)(end - p));
+        if (!line_end)
+            line_end = end;
+
+        const char *q = skip_inline_ws(p, line_end);
+        if (q < line_end && *q == '[')
+            return NULL; /* subsequent assignments are inside a table */
+        if (q < line_end && *q != '#' && key_matches(q, line_end, key)) {
+            q += strlen(key);
+            q = skip_inline_ws(q, line_end);
+            if (q < line_end && *q == '=') {
+                q++;
+                q = skip_inline_ws(q, line_end);
+                return parse_toml_string(q, line_end);
+            }
+        }
+
+        p = line_end < end ? line_end + 1 : end;
+    }
+
+    return NULL;
+}
+
+static void load_codex_settings(char **out_model, char **out_reasoning_effort)
+{
+    *out_model = NULL;
+    *out_reasoning_effort = NULL;
+
+    char *path = expand_home("~/.codex/config.toml");
+    size_t len = 0;
+    char *contents = slurp_file(path, &len);
+    free(path);
+    if (!contents)
+        return;
+
+    *out_model = parse_top_level_toml_string_key(contents, len, "model");
+    *out_reasoning_effort =
+        parse_top_level_toml_string_key(contents, len, "model_reasoning_effort");
+    free(contents);
+}
 
 /* ---------- request body construction ---------- */
 
@@ -206,6 +322,8 @@ static void codex_destroy(struct provider *p)
     struct codex *c = (struct codex *)p;
     free(c->access_token);
     free(c->account_id);
+    free(c->default_model);
+    free(c->default_reasoning_effort);
     free(c->session_id);
     free(c);
 }
@@ -239,9 +357,24 @@ struct provider *codex_provider_new(void)
         return NULL;
     }
 
+    char *cfg_model = NULL;
+    char *cfg_reasoning_effort = NULL;
+    load_codex_settings(&cfg_model, &cfg_reasoning_effort);
+    if (cfg_model && !*cfg_model) {
+        free(cfg_model);
+        cfg_model = NULL;
+    }
+    if (cfg_reasoning_effort && !*cfg_reasoning_effort) {
+        free(cfg_reasoning_effort);
+        cfg_reasoning_effort = NULL;
+    }
+
     struct codex *c = xcalloc(1, sizeof(*c));
+    c->default_model = cfg_model ? cfg_model : xstrdup("gpt-5.3-codex");
+    c->default_reasoning_effort = cfg_reasoning_effort;
     c->base.name = "codex";
-    c->base.default_model = "gpt-5.3-codex";
+    c->base.default_model = c->default_model;
+    c->base.default_reasoning_effort = c->default_reasoning_effort;
     c->base.stream = codex_stream;
     c->base.destroy = codex_destroy;
     c->access_token = xstrdup(access);

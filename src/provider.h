@@ -123,6 +123,9 @@ struct provider {
     /* Model id used when HAX_MODEL is unset. NULL = no safe default; the
      * agent will refuse to start and print an error. */
     const char *default_model;
+    /* Reasoning effort used when HAX_REASONING_EFFORT is unset. NULL means
+     * omit the field and let the backend choose. */
+    const char *default_reasoning_effort;
     int (*stream)(struct provider *p, const struct context *ctx, const char *model, stream_cb cb,
                   void *user);
     void (*destroy)(struct provider *p);
