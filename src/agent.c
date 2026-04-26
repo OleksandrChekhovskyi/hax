@@ -584,13 +584,15 @@ int agent_run(struct provider *p)
     struct item *items = NULL;
     size_t n_items = 0, cap_items = 0;
 
+    const char *bar = ANSI_CYAN "▌" ANSI_FG_DEFAULT;
     if (reasoning_effort)
-        printf("hax (provider: %s, model: %s, reasoning: %s). Ctrl-D to quit, Esc to "
-               "interrupt.\n",
-               p->name ? p->name : "?", model, reasoning_effort);
+        printf("\n%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s · %s" ANSI_BOLD_OFF
+               "\n",
+               bar, p->name ? p->name : "?", model, reasoning_effort);
     else
-        printf("hax (provider: %s, model: %s). Ctrl-D to quit, Esc to interrupt.\n",
-               p->name ? p->name : "?", model);
+        printf("\n%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s" ANSI_BOLD_OFF "\n",
+               bar, p->name ? p->name : "?", model);
+    printf("%s " ANSI_DIM "ctrl-d quit · esc interrupt" ANSI_BOLD_OFF "\n", bar);
     struct disp disp = {.trail = 1};
     struct spinner *spinner = spinner_new("Working...");
     struct md_renderer *md = markdown_enabled() ? md_new(md_emit_to_disp, &disp) : NULL;
