@@ -20,7 +20,20 @@
 
 #define INTERRUPT_MARKER "[interrupted]"
 
-#define PROMPT "> "
+/* `\1` / `\2` (RL_PROMPT_{START,END}_IGNORE) tell libedit which bytes are
+ * non-printing so its column accounting stays correct. The ASCII variant
+ * is used when locale_init_utf8() couldn't establish a UTF-8 LC_CTYPE —
+ * libedit would otherwise crash decoding the multibyte glyphs as wchars. */
+#define PROMPT_UTF8                                                                                \
+    "\1" ANSI_MAGENTA ANSI_BOLD "\2"                                                               \
+    "❯"                                                                                            \
+    "\1" ANSI_BOLD_OFF ANSI_FG_DEFAULT "\2"                                                        \
+    " "
+#define PROMPT_ASCII                                                                               \
+    "\1" ANSI_BOLD "\2"                                                                            \
+    ">"                                                                                            \
+    "\1" ANSI_BOLD_OFF "\2"                                                                        \
+    " "
 
 #define DEFAULT_SYSTEM_PROMPT                                                                      \
     "You are hax, a minimalist coding assistant running in the user's terminal. "                  \
@@ -601,9 +614,11 @@ int agent_run(struct provider *p)
      * ttys (becomes a no-op in that case). */
     interrupt_init();
 
+    const char *prompt = locale_have_utf8() ? PROMPT_UTF8 : PROMPT_ASCII;
+
     for (;;) {
         disp_block_separator(&disp);
-        char *line = readline(PROMPT);
+        char *line = readline(prompt);
         if (!line) {
             putchar('\n');
             break;

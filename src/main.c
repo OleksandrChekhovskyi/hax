@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "util.h"
 #include "agent.h"
 #include "providers/codex.h"
 #include "providers/openai.h"
@@ -24,6 +25,12 @@ int main(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
+
+    /* Must run before anything that emits or decodes multibyte text —
+     * libedit in particular crashes on non-UTF-8 LC_CTYPE if our prompt
+     * carries any UTF-8 byte. Touches LC_CTYPE only; LC_NUMERIC etc.
+     * stay at the C locale so printf output remains predictable. */
+    locale_init_utf8();
 
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
         fprintf(stderr, "hax: curl_global_init failed\n");

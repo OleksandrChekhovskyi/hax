@@ -3,7 +3,9 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <langinfo.h>
 #include <limits.h>
+#include <locale.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -13,6 +15,24 @@
 #include <unistd.h>
 
 #include "provider.h"
+
+static int locale_utf8 = 0;
+
+void locale_init_utf8(void)
+{
+    setlocale(LC_CTYPE, "");
+    if (strcmp(nl_langinfo(CODESET), "UTF-8") == 0) {
+        locale_utf8 = 1;
+        return;
+    }
+    if (setlocale(LC_CTYPE, "C.UTF-8") || setlocale(LC_CTYPE, "en_US.UTF-8"))
+        locale_utf8 = 1;
+}
+
+int locale_have_utf8(void)
+{
+    return locale_utf8;
+}
 
 static void oom(void)
 {
