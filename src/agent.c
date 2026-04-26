@@ -9,6 +9,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "ansi.h"
 #include "markdown.h"
 #include "spinner.h"
 #include "tool.h"
@@ -205,29 +206,29 @@ static void display_tool_header(struct disp *d, const struct item *call)
     }
 
     disp_block_separator(d);
-    disp_raw("\x1b[36m");
+    disp_raw(ANSI_CYAN);
     disp_printf(d, "[%s]", call->tool_name);
-    disp_raw("\x1b[0m");
+    disp_raw(ANSI_RESET);
 
     if (display_arg) {
         disp_putc(d, ' ');
-        disp_raw("\x1b[1m");
+        disp_raw(ANSI_BOLD);
         disp_write(d, display_arg, strlen(display_arg));
-        disp_raw("\x1b[0m");
+        disp_raw(ANSI_RESET);
         if (tool && tool->format_display_extra) {
             char *extra = tool->format_display_extra(call->tool_arguments_json);
             if (extra && *extra) {
-                disp_raw("\x1b[2m");
+                disp_raw(ANSI_DIM);
                 disp_write(d, extra, strlen(extra));
-                disp_raw("\x1b[0m");
+                disp_raw(ANSI_RESET);
             }
             free(extra);
         }
     } else if (call->tool_arguments_json && *call->tool_arguments_json) {
         disp_putc(d, ' ');
-        disp_raw("\x1b[2m");
+        disp_raw(ANSI_DIM);
         disp_write(d, call->tool_arguments_json, strlen(call->tool_arguments_json));
-        disp_raw("\x1b[0m");
+        disp_raw(ANSI_RESET);
     }
     disp_putc(d, '\n');
     /* Commit the trailing newline so the cursor is at column 0 of the
@@ -248,9 +249,9 @@ static void display_tool_header(struct disp *d, const struct item *call)
 static void display_tool_diff(struct disp *d, const char *diff)
 {
     if (!diff || !*diff) {
-        disp_raw("\x1b[2m");
+        disp_raw(ANSI_DIM);
         disp_printf(d, "(no changes)");
-        disp_raw("\x1b[0m");
+        disp_raw(ANSI_RESET);
         disp_putc(d, '\n');
         fflush(stdout);
         return;
@@ -262,20 +263,20 @@ static void display_tool_diff(struct disp *d, const char *diff)
         size_t len = eol ? (size_t)(eol - p) : strlen(p);
         const char *open = NULL;
         if (len >= 4 && (memcmp(p, "--- ", 4) == 0 || memcmp(p, "+++ ", 4) == 0))
-            open = "\x1b[2m"; /* dim: file headers — scaffolding, not signal */
+            open = ANSI_DIM; /* file headers — scaffolding, not signal */
         else if (len >= 2 && memcmp(p, "@@", 2) == 0)
-            open = "\x1b[2m"; /* dim: hunk header */
+            open = ANSI_DIM; /* hunk header */
         else if (len >= 1 && p[0] == '+')
-            open = "\x1b[32m"; /* green: addition */
+            open = ANSI_GREEN; /* addition */
         else if (len >= 1 && p[0] == '-')
-            open = "\x1b[31m"; /* red: removal */
+            open = ANSI_RED; /* removal */
         else if (len >= 1 && p[0] == '\\')
-            open = "\x1b[2m"; /* dim: \ No newline at end of file */
+            open = ANSI_DIM; /* \ No newline at end of file */
         if (open)
             disp_raw(open);
         disp_write(d, p, len);
         if (open)
-            disp_raw("\x1b[0m");
+            disp_raw(ANSI_RESET);
         disp_putc(d, '\n');
         if (!eol)
             break;
@@ -300,7 +301,7 @@ static void display_tool_output(struct disp *d, const char *out)
     }
     int truncated = cut < total;
 
-    disp_raw("\x1b[2m");
+    disp_raw(ANSI_DIM);
     disp_write(d, out, cut);
     if (truncated) {
         if (d->held == 0 && d->trail == 0)
@@ -318,7 +319,7 @@ static void display_tool_output(struct disp *d, const char *out)
     } else if (d->held == 0 && d->trail == 0) {
         disp_putc(d, '\n');
     }
-    disp_raw("\x1b[0m");
+    disp_raw(ANSI_RESET);
     fflush(stdout);
 }
 
@@ -429,7 +430,7 @@ static void display_usage(struct disp *d, long ctx, long out, long cached)
         return;
 
     disp_block_separator(d);
-    disp_raw("\x1b[2m");
+    disp_raw(ANSI_DIM);
 
     const char *sep = "";
     char buf[32], limit_buf[32];
@@ -452,7 +453,7 @@ static void display_usage(struct disp *d, long ctx, long out, long cached)
         format_tokens(buf, sizeof(buf), cached);
         disp_printf(d, "%scached %s", sep, buf);
     }
-    disp_raw("\x1b[0m");
+    disp_raw(ANSI_RESET);
     disp_putc(d, '\n');
     fflush(stdout);
 }
@@ -506,9 +507,9 @@ static int on_event(const struct stream_event *ev, void *user)
         if (ec->md)
             md_flush(ec->md);
         disp_block_separator(d);
-        disp_raw("\x1b[31m");
+        disp_raw(ANSI_RED);
         disp_printf(d, "[error: %s]", ev->u.error.message);
-        disp_raw("\x1b[0m");
+        disp_raw(ANSI_RESET);
         disp_putc(d, '\n');
         fflush(stdout);
         break;

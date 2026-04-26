@@ -9,6 +9,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "ansi.h"
 #include "util.h"
 
 /* Braille spinner — ten frames at 80ms each give ~12fps, enough to feel alive
@@ -35,17 +36,17 @@ struct spinner {
 
 static void erase_line_locked(void)
 {
-    fputs("\r\x1b[K", stdout);
+    fputs("\r" ANSI_ERASE_LINE, stdout);
     fflush(stdout);
 }
 
 static void draw_frame_locked(struct spinner *s)
 {
-    fputs("\r\x1b[2m", stdout);
+    fputs("\r" ANSI_DIM, stdout);
     fputs(FRAMES[s->frame], stdout);
     fputc(' ', stdout);
     fputs(s->label, stdout);
-    fputs("\x1b[0m", stdout);
+    fputs(ANSI_RESET, stdout);
     fflush(stdout);
 }
 

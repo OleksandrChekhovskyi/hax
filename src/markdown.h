@@ -13,7 +13,7 @@
  * non-alphanumeric byte on the left to open, so identifiers like
  * `compile_commands.json` and arithmetic like `5*3*7` stay literal.
  *
- * Output uses real italic via \x1b[3m, cyan for inline code, dim for code
+ * Output uses real italic for emphasis, cyan for inline code, dim for code
  * fences (with the language label on its own line in italic), and bold for
  * headings. Inline-code and code-fence spans are verbatim — no nested marker
  * processing inside them.

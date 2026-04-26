@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ansi.h"
 #include "util.h"
 
 /* Sanity bound on the deferred-tail size. Inline markers fit in a few bytes;
@@ -41,7 +42,7 @@ struct md_renderer {
     /* Style flags. All independent — each maps to a distinct SGR group, so
      * e.g. inline code (cyan) inside bold leaves bold intact when the code
      * span closes. The one exception is heading-vs-inline-bold which both
-     * use \x1b[1m / \x1b[22m; close_bold re-emits \x1b[1m if in_heading is
+     * use the same SGR; close_bold re-emits ANSI_BOLD if in_heading is
      * still set so the rest of the heading line stays bold. */
     int in_heading;
     int in_code_fence;
@@ -67,7 +68,7 @@ static void emit_text(struct md_renderer *m, const char *s, size_t n)
 
 /* Emit an ANSI escape (zero-width). The is_raw=1 flag tells consumers
  * routed through trail/held bookkeeping (like disp_write) to skip it,
- * so a `\x1b[22m` after a buffered `\n` doesn't trash the trail counter. */
+ * so a closer after a buffered `\n` doesn't trash the trail counter. */
 static void emit_raw(struct md_renderer *m, const char *s)
 {
     m->emit_cb(s, strlen(s), 1, m->user);
@@ -75,63 +76,63 @@ static void emit_raw(struct md_renderer *m, const char *s)
 
 static void open_bold(struct md_renderer *m)
 {
-    emit_raw(m, "\x1b[1m");
+    emit_raw(m, ANSI_BOLD);
     m->in_bold = 1;
 }
 
 static void close_bold(struct md_renderer *m)
 {
-    emit_raw(m, "\x1b[22m");
+    emit_raw(m, ANSI_BOLD_OFF);
     m->in_bold = 0;
     if (m->in_heading)
-        emit_raw(m, "\x1b[1m");
+        emit_raw(m, ANSI_BOLD);
 }
 
 static void open_italic(struct md_renderer *m)
 {
-    emit_raw(m, "\x1b[3m");
+    emit_raw(m, ANSI_ITALIC);
     m->in_italic = 1;
 }
 
 static void close_italic(struct md_renderer *m)
 {
-    emit_raw(m, "\x1b[23m");
+    emit_raw(m, ANSI_ITALIC_OFF);
     m->in_italic = 0;
 }
 
 static void open_inline_code(struct md_renderer *m)
 {
-    emit_raw(m, "\x1b[36m");
+    emit_raw(m, ANSI_CYAN);
     m->in_inline_code = 1;
 }
 
 static void close_inline_code(struct md_renderer *m)
 {
-    emit_raw(m, "\x1b[39m");
+    emit_raw(m, ANSI_FG_DEFAULT);
     m->in_inline_code = 0;
 }
 
 static void open_code_fence(struct md_renderer *m)
 {
-    emit_raw(m, "\x1b[2m");
+    emit_raw(m, ANSI_DIM);
     m->in_code_fence = 1;
 }
 
 static void close_code_fence(struct md_renderer *m)
 {
-    emit_raw(m, "\x1b[22m");
+    emit_raw(m, ANSI_BOLD_OFF);
     m->in_code_fence = 0;
 }
 
 static void open_heading(struct md_renderer *m)
 {
-    emit_raw(m, "\x1b[1m");
+    emit_raw(m, ANSI_BOLD);
     m->in_heading = 1;
 }
 
 static void close_heading(struct md_renderer *m)
 {
-    emit_raw(m, "\x1b[22m");
+    emit_raw(m, ANSI_BOLD_OFF);
     m->in_heading = 0;
 }
 
@@ -258,9 +259,9 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
                    w->data[lang_end] != '\r')
                 lang_end++;
             if (lang_end > info) {
-                emit_raw(m, "\x1b[3m");
+                emit_raw(m, ANSI_ITALIC);
                 emit_text(m, w->data + info, lang_end - info);
-                emit_raw(m, "\x1b[23m");
+                emit_raw(m, ANSI_ITALIC_OFF);
                 emit_text(m, "\n", 1);
             }
             *i = scan + 1; /* past the opener line's \n */
