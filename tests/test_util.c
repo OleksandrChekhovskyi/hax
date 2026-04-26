@@ -2,7 +2,10 @@
 #include "util.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include "harness.h"
@@ -277,6 +280,44 @@ static void test_slurp_normal(void)
     free(path);
 }
 
+static void test_slurp_directory_rejected(void)
+{
+    /* Some platforms let open(O_RDONLY) on a directory succeed and only
+     * fail on read(); the regular-file pre-check rejects up front so
+     * callers never get a bogus partial buffer back. */
+    char dir[] = "/tmp/hax-test-dir-XXXXXX";
+    EXPECT(mkdtemp(dir) != NULL);
+    errno = 0;
+    char *p = slurp_file(dir, NULL);
+    EXPECT(p == NULL);
+    EXPECT(errno == EISDIR);
+    rmdir(dir);
+}
+
+static void test_slurp_fifo_rejected_no_hang(void)
+{
+    /* If this test ever hangs, the regular-file guard regressed:
+     * open(O_RDONLY) on a writer-less FIFO blocks indefinitely. */
+    char path[] = "/tmp/hax-test-fifo-XXXXXX";
+    EXPECT(mkdtemp(path) != NULL);
+    /* mkdtemp gives us a unique dir; place the FIFO inside. */
+    char fifo[64];
+    snprintf(fifo, sizeof(fifo), "%s/f", path);
+    EXPECT(mkfifo(fifo, 0644) == 0);
+    errno = 0;
+    char *p = slurp_file(fifo, NULL);
+    EXPECT(p == NULL);
+    EXPECT(errno == EINVAL);
+    /* Same check via the capped variant. */
+    errno = 0;
+    int truncated = 1;
+    char *p2 = slurp_file_capped(fifo, 1024, NULL, &truncated);
+    EXPECT(p2 == NULL);
+    EXPECT(errno == EINVAL);
+    unlink(fifo);
+    rmdir(path);
+}
+
 /* ---------- slurp_file_capped ---------- */
 
 static void test_slurp_capped_missing(void)
@@ -423,6 +464,8 @@ int main(void)
     test_slurp_missing();
     test_slurp_empty();
     test_slurp_normal();
+    test_slurp_directory_rejected();
+    test_slurp_fifo_rejected_no_hang();
     test_slurp_capped_missing();
     test_slurp_capped_under();
     test_slurp_capped_over();

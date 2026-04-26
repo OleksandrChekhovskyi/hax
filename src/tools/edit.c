@@ -104,10 +104,11 @@ static char *run(const char *args_json)
         return xstrdup("'old_string' and 'new_string' are identical — nothing to do");
     }
 
-    /* Refuse FIFOs, sockets, devices, directories before slurping —
-     * opening a FIFO without a writer would block the agent indefinitely.
-     * Mirrors the same guard inside fs_write_with_diff but has to happen
-     * here too because we read the file ourselves first. stat() follows
+    /* Refuse FIFOs, sockets, devices, directories before slurping.
+     * slurp_file_capped's internal guard would also reject these, but
+     * we surface a tool-specific "not a regular file" error instead of
+     * the bare "Invalid argument" that would otherwise reach the model.
+     * Mirrors the same guard inside fs_write_with_diff. stat() follows
      * symlinks, so a link to a regular file still passes. */
     struct stat st;
     if (stat(path, &st) == 0 && !S_ISREG(st.st_mode)) {

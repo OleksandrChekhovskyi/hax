@@ -9,6 +9,16 @@ test_util = executable('test_util',
 )
 test('util', test_util)
 
+test_env = executable('test_env',
+    sources: [
+        'test_env.c',
+        '../src/env.c',
+        '../src/util.c',
+    ],
+    include_directories: tests_inc,
+)
+test('env', test_env)
+
 test_read = executable('test_read',
     sources: [
         'tools/test_read.c',

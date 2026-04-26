@@ -130,11 +130,12 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
     mode_t mode;
     struct stat st;
     if (stat(target, &st) == 0) {
-        /* Refuse FIFOs, sockets, devices, directories upfront. A FIFO
-         * with no writer would block slurp_file indefinitely, and the
+        /* Refuse FIFOs, sockets, devices, directories upfront. The
          * eventual rename would replace the special node with a plain
-         * file — both surprising. The model can recover from a clear
-         * error string. */
+         * file, which is surprising. slurp_file's own guard would also
+         * reject these now, but a tool-specific "not a regular file"
+         * error gives the model a much clearer hint than the
+         * "Invalid argument" it would otherwise see. */
         if (!S_ISREG(st.st_mode)) {
             *errmsg = xasprintf("%s exists but is not a regular file", target);
             free(target);

@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "ansi.h"
+#include "env.h"
 #include "markdown.h"
 #include "spinner.h"
 #include "tool.h"
@@ -535,6 +536,20 @@ int agent_run(struct provider *p)
     const char *sys = getenv("HAX_SYSTEM_PROMPT");
     if (!sys)
         sys = DEFAULT_SYSTEM_PROMPT;
+    /* Built once at session start and appended to `sys`; stable across
+     * turns so the assembled system prompt stays byte-identical and
+     * cache-friendly. The explicit-empty opt-out above suppresses the
+     * suffix too — HAX_SYSTEM_PROMPT="" means "send no system message
+     * at all", and that includes harness-injected metadata. */
+    char *sys_owned = NULL;
+    if (*sys) {
+        char *suffix = env_build_suffix(model);
+        if (suffix) {
+            sys_owned = xasprintf("%s\n\n%s", sys, suffix);
+            free(suffix);
+            sys = sys_owned;
+        }
+    }
     const char *reasoning_effort = getenv("HAX_REASONING_EFFORT");
     if (reasoning_effort && !*reasoning_effort)
         reasoning_effort = NULL;
@@ -691,5 +706,6 @@ int agent_run(struct provider *p)
         item_free(&items[i]);
     free(items);
     free(tools);
+    free(sys_owned);
     return 0;
 }

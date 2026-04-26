@@ -25,6 +25,7 @@ threads = dependency('threads')
 sources = files(
     'src/agent.c',
     'src/diff.c',
+    'src/env.c',
     'src/fs.c',
     'src/http.c',
     'src/main.c',

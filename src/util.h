@@ -13,7 +13,9 @@ char *xstrdup(const char *s);
 char *xasprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 /* Read an entire file into a newly-allocated NUL-terminated string.
- * Returns NULL on error and sets errno. Caller frees. */
+ * Returns NULL on error and sets errno. Caller frees. Rejects anything
+ * that isn't a regular file (errno EISDIR for directories, EINVAL for
+ * FIFOs / sockets / devices) so an unlucky path can't block startup. */
 char *slurp_file(const char *path, size_t *out_len);
 
 /* Write exactly n bytes to fd, restarting on EINTR/short writes. Returns 0
@@ -23,7 +25,8 @@ int write_all(int fd, const void *data, size_t n);
 /* Read up to cap bytes from path into a newly-allocated NUL-terminated
  * string. Allocates at most cap+1 bytes regardless of file size. If the
  * file has more bytes than the cap, sets *out_truncated to 1. Returns
- * NULL on error and sets errno. Caller frees. */
+ * NULL on error and sets errno. Caller frees. Same regular-file guard
+ * as slurp_file. */
 char *slurp_file_capped(const char *path, size_t cap, size_t *out_len, int *out_truncated);
 
 /* Expand a leading ~ to $HOME. Returns a newly-allocated path. */

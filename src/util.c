@@ -120,8 +120,29 @@ int write_all(int fd, const void *data, size_t n)
     return 0;
 }
 
+/* Reject anything that isn't a regular file before opening — open() on a
+ * FIFO without a writer blocks indefinitely, which would freeze startup
+ * if AGENTS.md or similar happened to be a special file. There's a tiny
+ * TOCTOU window between stat() and the subsequent open(), but the
+ * alternative (open with O_NONBLOCK then fstat) doesn't help: the FIFO
+ * open is what blocks, before fstat runs. */
+static int ensure_regular_file(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return -1;
+    if (!S_ISREG(st.st_mode)) {
+        errno = S_ISDIR(st.st_mode) ? EISDIR : EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
 char *slurp_file(const char *path, size_t *out_len)
 {
+    if (ensure_regular_file(path) < 0)
+        return NULL;
+
     int fd = open(path, O_RDONLY);
     if (fd < 0)
         return NULL;
@@ -162,6 +183,9 @@ err_close:
 
 char *slurp_file_capped(const char *path, size_t cap, size_t *out_len, int *out_truncated)
 {
+    if (ensure_regular_file(path) < 0)
+        return NULL;
+
     int fd = open(path, O_RDONLY);
     if (fd < 0)
         return NULL;
