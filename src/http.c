@@ -23,18 +23,23 @@ struct sse_trace_wrapper {
     void *inner_user;
 };
 
-/* Return the idle (low-speed) timeout in seconds. 0 disables the guard.
- * Unset or unparseable → IDLE_TIMEOUT_DEFAULT. */
+/* Return the idle (low-speed) timeout in seconds. Accepts plain seconds
+ * or a ms/s/m/h suffix. 0 disables the guard. Unset or unparseable →
+ * IDLE_TIMEOUT_DEFAULT. libcurl's CURLOPT_LOW_SPEED_TIME is whole
+ * seconds, so any non-zero ms value rounds up — never time out earlier
+ * than the configured duration, and sub-second values don't silently
+ * floor to 0 (which would mean "disabled"). */
 static long resolve_idle_timeout(void)
 {
     const char *s = getenv("HAX_HTTP_IDLE_TIMEOUT");
     if (!s || !*s)
         return IDLE_TIMEOUT_DEFAULT;
-    char *end;
-    long v = strtol(s, &end, 10);
-    if (end == s || *end != '\0' || v < 0)
+    long ms = parse_duration_ms(s);
+    if (ms < 0)
         return IDLE_TIMEOUT_DEFAULT;
-    return v;
+    if (ms == 0)
+        return 0;
+    return ms / 1000 + (ms % 1000 ? 1 : 0);
 }
 
 static int sse_trace_cb(const char *event_name, const char *data, void *user)

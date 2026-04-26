@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -289,6 +290,50 @@ char *expand_home(const char *path)
     if (!home)
         return xstrdup(path);
     return xasprintf("%s%s", home, path + 1);
+}
+
+long parse_duration_ms(const char *s)
+{
+    if (!s || !*s)
+        return -1;
+    char *end;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    /* ERANGE catches out-of-range numerals like "99...99ms" — strtol
+     * clamps to LONG_MAX, and the mul==1 ms path below would otherwise
+     * skip the overflow guard and silently accept a near-LONG_MAX value. */
+    if (end == s || v < 0 || errno == ERANGE)
+        return -1;
+    while (*end == ' ' || *end == '\t')
+        end++;
+    long mul;
+    /* `ms` must be matched before bare `m` so "5ms" doesn't parse as
+     * "5m" (300_000) followed by stray "s". */
+    if ((end[0] == 'm' || end[0] == 'M') && (end[1] == 's' || end[1] == 'S')) {
+        mul = 1;
+        end += 2;
+    } else if (*end == '\0' || *end == 's' || *end == 'S') {
+        mul = 1000;
+        if (*end)
+            end++;
+    } else if (*end == 'm' || *end == 'M') {
+        mul = 60000;
+        end++;
+    } else if (*end == 'h' || *end == 'H') {
+        mul = 3600000;
+        end++;
+    } else {
+        return -1;
+    }
+    while (*end == ' ' || *end == '\t')
+        end++;
+    if (*end != '\0')
+        return -1;
+    /* Reject values that would overflow when scaled. v is non-negative;
+     * only the multiply needs guarding. */
+    if (mul > 1 && v > LONG_MAX / mul)
+        return -1;
+    return v * mul;
 }
 
 void buf_init(struct buf *b)

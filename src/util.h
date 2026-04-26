@@ -29,6 +29,14 @@ char *slurp_file_capped(const char *path, size_t cap, size_t *out_len, int *out_
 /* Expand a leading ~ to $HOME. Returns a newly-allocated path. */
 char *expand_home(const char *path);
 
+/* Parse a duration with optional ms/s/m/h suffix (case-insensitive):
+ *   "30" → 30000 (no suffix = seconds, the common case)
+ *   "30s" → 30000, "30ms" → 30, "5m" → 300000, "2h" → 7200000.
+ * Whitespace between the number and suffix is allowed. Returns the
+ * duration in milliseconds, or -1 on empty/invalid input (so 0 remains
+ * a valid "disabled" value for callers that treat it as a sentinel). */
+long parse_duration_ms(const char *s);
+
 /* Write a random UUIDv4 (36 chars + NUL terminator) to out. Aborts on
  * failure (e.g. /dev/urandom unavailable) — same convention as xmalloc. */
 void gen_uuid_v4(char out[37]);

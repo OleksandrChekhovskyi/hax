@@ -347,6 +347,52 @@ static void test_slurp_capped_exact(void)
     free(path);
 }
 
+/* ---------- parse_duration_ms ---------- */
+
+static void test_parse_duration_plain_seconds(void)
+{
+    /* No suffix: number is interpreted as seconds, returned as ms. */
+    EXPECT(parse_duration_ms("0") == 0);
+    EXPECT(parse_duration_ms("30") == 30000);
+    EXPECT(parse_duration_ms("600") == 600000);
+}
+
+static void test_parse_duration_with_suffix(void)
+{
+    EXPECT(parse_duration_ms("30s") == 30000);
+    EXPECT(parse_duration_ms("30S") == 30000);
+    EXPECT(parse_duration_ms("5m") == 300000);
+    EXPECT(parse_duration_ms("5M") == 300000);
+    EXPECT(parse_duration_ms("2h") == 7200000);
+    EXPECT(parse_duration_ms("2H") == 7200000);
+    /* `ms` must beat bare `m` so "250ms" isn't parsed as 250min + 's'. */
+    EXPECT(parse_duration_ms("250ms") == 250);
+    EXPECT(parse_duration_ms("250MS") == 250);
+}
+
+static void test_parse_duration_whitespace(void)
+{
+    EXPECT(parse_duration_ms("5 m") == 300000);
+    EXPECT(parse_duration_ms("2h ") == 7200000);
+    EXPECT(parse_duration_ms("100 ms") == 100);
+}
+
+static void test_parse_duration_invalid(void)
+{
+    EXPECT(parse_duration_ms(NULL) == -1);
+    EXPECT(parse_duration_ms("") == -1);
+    EXPECT(parse_duration_ms("abc") == -1);
+    EXPECT(parse_duration_ms("5d") == -1);    /* days not supported */
+    EXPECT(parse_duration_ms("-5") == -1);    /* negative rejected */
+    EXPECT(parse_duration_ms("5 m x") == -1); /* trailing garbage */
+    EXPECT(parse_duration_ms("5mm") == -1);
+    EXPECT(parse_duration_ms("5msx") == -1); /* trailing after ms */
+    /* strtol clamps to LONG_MAX with ERANGE; the ms suffix has mul==1
+     * and would otherwise bypass the overflow guard. */
+    EXPECT(parse_duration_ms("99999999999999999999ms") == -1);
+    EXPECT(parse_duration_ms("99999999999999999999") == -1);
+}
+
 int main(void)
 {
     test_sanitize_ascii();
@@ -381,6 +427,11 @@ int main(void)
     test_slurp_capped_under();
     test_slurp_capped_over();
     test_slurp_capped_exact();
+
+    test_parse_duration_plain_seconds();
+    test_parse_duration_with_suffix();
+    test_parse_duration_whitespace();
+    test_parse_duration_invalid();
 
     T_REPORT();
 }
