@@ -14,6 +14,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "interrupt.h"
 #include "util.h"
 
 #define OUTPUT_CAP                  (100 * 1024)
@@ -77,8 +78,8 @@ static void format_timeout_for_model(char *buf, size_t buflen, long timeout_ms)
 
 /* Build the final tool result from the captured raw output and exit
  * metadata. Consumes `raw` (calls buf_free on it). */
-static char *format_run_output(struct buf *raw, int truncated, int timed_out, long timeout_ms,
-                               int status)
+static char *format_run_output(struct buf *raw, int truncated, int timed_out, int interrupted,
+                               long timeout_ms, int status)
 {
     /* Sanitize output to valid UTF-8 before annotating — binary output
      * and non-UTF-8 bytes would otherwise break JSON serialization. */
@@ -93,7 +94,12 @@ static char *format_run_output(struct buf *raw, int truncated, int timed_out, lo
     if (truncated)
         buf_append_str(&out, "\n[output truncated]");
 
-    if (timed_out) {
+    /* Interrupt takes precedence over timeout in the footer — if both
+     * fire (rare: deadline hits during the grace window of a user-Esc),
+     * the user-driven cause is the more useful explanation. */
+    if (interrupted) {
+        buf_append_str(&out, "\n[interrupted]");
+    } else if (timed_out) {
         char human[32];
         format_timeout_for_model(human, sizeof(human), timeout_ms);
         char tmp[64];
@@ -167,6 +173,7 @@ static char *run_shell(const char *cmd, long timeout_ms)
     long grace_ms = resolve_grace_ms();
     long grace_deadline = 0;
     int timed_out = 0;
+    int interrupted = 0;
     int term_sent = 0;
     int shell_exited = 0;
     int status = 0;
@@ -178,6 +185,24 @@ static char *run_shell(const char *cmd, long timeout_ms)
 
     for (;;) {
         long now = monotonic_ms();
+
+        /* User-Esc interrupt: same two-stage shutdown as the timeout path
+         * (SIGTERM → grace → SIGKILL). Checked before the deadline so the
+         * footer correctly attributes the cause when both fire. The flag
+         * latches, so once set we don't re-enter this branch. */
+        if (!term_sent && interrupt_requested()) {
+            interrupted = 1;
+            term_sent = 1;
+            if (shell_exited)
+                break;
+            if (grace_ms > 0) {
+                kill(-pid, SIGTERM);
+                grace_deadline = sat_add(now, grace_ms);
+            } else {
+                kill(-pid, SIGKILL);
+                break;
+            }
+        }
 
         /* First-stage timeout: a runaway command (slow build, hung network
          * call, infinite loop) would otherwise pin the agent forever. Send
@@ -303,7 +328,7 @@ static char *run_shell(const char *cmd, long timeout_ms)
         }
     }
 
-    return format_run_output(&raw, truncated, timed_out, timeout_ms, status);
+    return format_run_output(&raw, truncated, timed_out, interrupted, timeout_ms, status);
 }
 
 /* Resolve the timeout in ms from the JSON args, falling back to the env

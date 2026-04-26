@@ -8,6 +8,7 @@
 
 #include "codex_events.h"
 #include "http.h"
+#include "interrupt.h"
 #include "util.h"
 
 #define CODEX_ENDPOINT "https://chatgpt.com/backend-api/codex/responses"
@@ -165,9 +166,13 @@ static int codex_stream(struct provider *p, const struct context *ctx, const cha
     struct codex_events ev;
     codex_events_init(&ev, cb, user);
     struct http_response resp;
-    int rc = http_sse_post(CODEX_ENDPOINT, headers, body, body_len, on_sse, &ev, &resp);
+    int rc = http_sse_post(CODEX_ENDPOINT, headers, body, body_len, on_sse, &ev,
+                           interrupt_requested, &resp);
 
-    if (resp.status == 401) {
+    if (resp.cancelled) {
+        /* User-initiated abort — agent layer handles the partial state
+         * and the "[interrupted]" notice. Don't surface as EV_ERROR. */
+    } else if (resp.status == 401) {
         struct stream_event e = {
             .kind = EV_ERROR,
             .u.error = {.message = "codex token expired — run `codex` "

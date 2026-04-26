@@ -11,11 +11,14 @@
 
 #include "ansi.h"
 #include "env.h"
+#include "interrupt.h"
 #include "markdown.h"
 #include "spinner.h"
 #include "tool.h"
 #include "turn.h"
 #include "util.h"
+
+#define INTERRUPT_MARKER "[interrupted]"
 
 #define PROMPT "> "
 
@@ -61,6 +64,23 @@ static void items_append(struct item **items, size_t *n, size_t *cap, struct ite
         *cap = c;
     }
     (*items)[(*n)++] = it;
+}
+
+/* True when `it` is a tool_result whose output already ends with the
+ * interrupt marker — i.e. bash appended its "[interrupted]" footer when
+ * killed by user-Esc. Used to decide whether the post-dispatch break
+ * needs an additional synthetic marker, since non-bash tools (read,
+ * write, edit) finish normally without any footer and would otherwise
+ * leave the next turn with no signal that the user aborted. */
+static int tool_result_is_marked(const struct item *it)
+{
+    if (it->kind != ITEM_TOOL_RESULT || !it->output)
+        return 0;
+    size_t out_len = strlen(it->output);
+    size_t marker_len = strlen(INTERRUPT_MARKER);
+    if (out_len < marker_len)
+        return 0;
+    return strcmp(it->output + out_len - marker_len, INTERRUPT_MARKER) == 0;
 }
 
 /* ---------- display ----------
@@ -562,13 +582,19 @@ int agent_run(struct provider *p)
     size_t n_items = 0, cap_items = 0;
 
     if (reasoning_effort)
-        printf("hax (provider: %s, model: %s, reasoning: %s). Ctrl-D to quit.\n",
+        printf("hax (provider: %s, model: %s, reasoning: %s). Ctrl-D to quit, Esc to "
+               "interrupt.\n",
                p->name ? p->name : "?", model, reasoning_effort);
     else
-        printf("hax (provider: %s, model: %s). Ctrl-D to quit.\n", p->name ? p->name : "?", model);
+        printf("hax (provider: %s, model: %s). Ctrl-D to quit, Esc to interrupt.\n",
+               p->name ? p->name : "?", model);
     struct disp disp = {.trail = 1};
     struct spinner *spinner = spinner_new("Working...");
     struct md_renderer *md = markdown_enabled() ? md_new(md_emit_to_disp, &disp) : NULL;
+    /* Initialize once — captures the canonical termios baseline and starts
+     * the watcher thread. Idempotent; safe even when stdin/stdout aren't
+     * ttys (becomes a no-op in that case). */
+    interrupt_init();
 
     for (;;) {
         disp_block_separator(&disp);
@@ -597,6 +623,14 @@ int agent_run(struct provider *p)
          * this number yet". */
         long turn_ctx = -1, turn_out = -1, turn_cached = -1;
         int turn_errored = 0;
+        int turn_interrupted = 0;
+
+        /* Arm the watcher for the duration of the inner loop — Esc from
+         * here on aborts the stream or running tool. Cleared first so a
+         * stray Esc from a previous turn (e.g. user typed Esc during
+         * readline editing) doesn't auto-cancel this one. */
+        interrupt_clear();
+        interrupt_arm();
         for (;;) {
             struct context ctx = {
                 .system_prompt = sys,
@@ -637,12 +671,27 @@ int agent_run(struct provider *p)
                 break;
             }
 
+            /* Settle before deciding what to do with the response — Esc
+             * pressed in the last ~50ms of the stream may still be in
+             * the classifier's CSI/SS3-vs-bare window, and we must not
+             * dispatch tools (or send another request) on a flag that's
+             * about to flip. */
+            interrupt_settle();
+            int interrupted = interrupt_requested();
+
             if (ec.usage.input_tokens >= 0 && ec.usage.output_tokens >= 0)
                 turn_ctx = ec.usage.input_tokens + ec.usage.output_tokens;
             if (ec.usage.output_tokens >= 0)
                 turn_out = (turn_out < 0 ? 0 : turn_out) + ec.usage.output_tokens;
             if (ec.usage.cached_tokens >= 0)
                 turn_cached = ec.usage.cached_tokens;
+
+            /* On interrupt, finalize any in-flight assistant text with a
+             * tag so the next turn carries the marker. `t.in_text` is
+             * captured before flush since turn_flush_text clears it. */
+            int had_partial_text = interrupted && t.in_text;
+            if (interrupted)
+                turn_flush_text(&t, had_partial_text ? "\n" INTERRUPT_MARKER : NULL);
 
             size_t n_new = 0;
             struct item *new_items = turn_take_items(&t, &n_new);
@@ -657,6 +706,40 @@ int agent_run(struct provider *p)
             }
             free(new_items);
 
+            if (interrupted) {
+                /* Synthesize "[interrupted]" results for any completed
+                 * tool_calls in this batch (none have run yet). Pending/
+                 * incomplete tool_calls were already discarded by
+                 * turn_reset above. */
+                int marker_placed = had_partial_text;
+                size_t end = n_items;
+                for (size_t i = n_before; i < end; i++) {
+                    if (items[i].kind == ITEM_TOOL_CALL) {
+                        items_append(&items, &n_items, &cap_items,
+                                     (struct item){
+                                         .kind = ITEM_TOOL_RESULT,
+                                         .call_id = xstrdup(items[i].call_id),
+                                         .output = xstrdup(INTERRUPT_MARKER),
+                                     });
+                        marker_placed = 1;
+                    }
+                }
+                /* Nothing to tag in the partial output — synthesize a
+                 * standalone assistant message so the model sees a
+                 * marker on the next turn. Covers the "Esc before any
+                 * deltas arrived" case and the "only normally-flushed
+                 * text completed" case. */
+                if (!marker_placed) {
+                    items_append(&items, &n_items, &cap_items,
+                                 (struct item){
+                                     .kind = ITEM_ASSISTANT_MESSAGE,
+                                     .text = xstrdup(INTERRUPT_MARKER),
+                                 });
+                }
+                turn_interrupted = 1;
+                break;
+            }
+
             if (!had_tool_call)
                 break;
 
@@ -670,6 +753,28 @@ int agent_run(struct provider *p)
             for (size_t i = n_before; i < current_end; i++) {
                 if (items[i].kind != ITEM_TOOL_CALL)
                     continue;
+                /* Esc since the last iteration — skip the rest of the
+                 * batch with synthesized "[interrupted]" results so the
+                 * conversation stays well-formed. Show the header so the
+                 * user can see which calls were skipped. Settle first
+                 * so a fast-returning tool (read/write/edit) doesn't
+                 * race past a still-pending \x1b in the classifier. */
+                interrupt_settle();
+                if (interrupt_requested()) {
+                    display_tool_header(&disp, &items[i]);
+                    disp_raw(ANSI_DIM);
+                    disp_printf(&disp, "%s", INTERRUPT_MARKER);
+                    disp_raw(ANSI_RESET);
+                    disp_putc(&disp, '\n');
+                    fflush(stdout);
+                    items_append(&items, &n_items, &cap_items,
+                                 (struct item){
+                                     .kind = ITEM_TOOL_RESULT,
+                                     .call_id = xstrdup(items[i].call_id),
+                                     .output = xstrdup(INTERRUPT_MARKER),
+                                 });
+                    continue;
+                }
                 display_tool_header(&disp, &items[i]);
                 spinner_show(spinner);
                 char *out = dispatch_tool(items[i].tool_name, items[i].tool_arguments_json);
@@ -693,6 +798,35 @@ int agent_run(struct provider *p)
                                  .output = out,
                              });
             }
+
+            /* Esc fired during or just after this batch. Stop the inner
+             * loop without another model call, and ensure history carries
+             * a marker — bash appends its own "[interrupted]" footer when
+             * killed, but read/write/edit return clean results that
+             * would otherwise hide the abort from the next turn. Settle
+             * first so we don't race past a pending \x1b. */
+            interrupt_settle();
+            if (interrupt_requested()) {
+                if (n_items == 0 || !tool_result_is_marked(&items[n_items - 1])) {
+                    items_append(&items, &n_items, &cap_items,
+                                 (struct item){
+                                     .kind = ITEM_ASSISTANT_MESSAGE,
+                                     .text = xstrdup(INTERRUPT_MARKER),
+                                 });
+                }
+                turn_interrupted = 1;
+                break;
+            }
+        }
+        interrupt_disarm();
+
+        if (turn_interrupted) {
+            disp_block_separator(&disp);
+            disp_raw(ANSI_DIM);
+            disp_printf(&disp, "%s", INTERRUPT_MARKER);
+            disp_raw(ANSI_RESET);
+            disp_putc(&disp, '\n');
+            fflush(stdout);
         }
 
         if (!turn_errored)

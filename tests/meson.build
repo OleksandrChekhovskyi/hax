@@ -34,12 +34,24 @@ test_bash = executable('test_bash',
     sources: [
         'tools/test_bash.c',
         '../src/tools/bash.c',
+        '../src/interrupt.c',
         '../src/util.c',
     ],
     include_directories: tests_inc,
-    dependencies: [jansson],
+    dependencies: [jansson, threads],
 )
 test('tools/bash', test_bash)
+
+test_interrupt = executable('test_interrupt',
+    sources: [
+        'test_interrupt.c',
+        '../src/interrupt.c',
+        '../src/util.c',
+    ],
+    include_directories: tests_inc,
+    dependencies: [threads],
+)
+test('interrupt', test_interrupt)
 
 test_write = executable('test_write',
     sources: [

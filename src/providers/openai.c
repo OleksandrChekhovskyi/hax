@@ -9,6 +9,7 @@
 #include <strings.h>
 
 #include "http.h"
+#include "interrupt.h"
 #include "openai_events.h"
 #include "util.h"
 
@@ -199,9 +200,13 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
     struct openai_events ev;
     openai_events_init(&ev, cb, user);
     struct http_response resp;
-    int rc = http_sse_post(o->endpoint, headers, body, body_len, on_sse, &ev, &resp);
+    int rc = http_sse_post(o->endpoint, headers, body, body_len, on_sse, &ev, interrupt_requested,
+                           &resp);
 
-    if (rc != 0 || resp.status < 200 || resp.status >= 300) {
+    if (resp.cancelled) {
+        /* User-initiated abort — agent layer handles the partial state
+         * and the "[interrupted]" notice. Don't surface as EV_ERROR. */
+    } else if (rc != 0 || resp.status < 200 || resp.status >= 300) {
         struct stream_event e = {
             .kind = EV_ERROR,
             .u.error = {.message = resp.error_body ? resp.error_body : "request failed",

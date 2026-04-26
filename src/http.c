@@ -16,6 +16,7 @@
 struct curl_state {
     struct sse_parser parser;
     struct buf err_body; /* capped, for error reporting */
+    http_cancel_cb cancel;
 };
 
 struct sse_trace_wrapper {
@@ -54,6 +55,12 @@ static size_t on_write(char *ptr, size_t size, size_t nmemb, void *userdata)
     struct curl_state *s = userdata;
     size_t n = size * nmemb;
 
+    /* Returning a short count tells libcurl the transfer failed and aborts
+     * curl_easy_perform with CURLE_WRITE_ERROR. Check before parsing so we
+     * don't half-feed an event into the parser. */
+    if (s->cancel && s->cancel())
+        return 0;
+
     if (s->err_body.len < ERR_BODY_CAP) {
         size_t room = ERR_BODY_CAP - s->err_body.len;
         buf_append(&s->err_body, ptr, n < room ? n : room);
@@ -63,8 +70,23 @@ static size_t on_write(char *ptr, size_t size, size_t nmemb, void *userdata)
     return n;
 }
 
+/* Periodic callback (~1Hz by default) — non-zero return aborts the transfer
+ * with CURLE_ABORTED_BY_CALLBACK. Catches the case where the server is
+ * silent (no chunks → on_write isn't called), e.g. local llama-server
+ * during prompt eval. */
+static int on_progress(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal,
+                       curl_off_t ulnow)
+{
+    (void)dltotal;
+    (void)dlnow;
+    (void)ultotal;
+    (void)ulnow;
+    struct curl_state *s = clientp;
+    return (s->cancel && s->cancel()) ? 1 : 0;
+}
+
 int http_sse_post(const char *url, const char *const *headers, const char *body, size_t body_len,
-                  sse_cb cb, void *user, struct http_response *resp)
+                  sse_cb cb, void *user, http_cancel_cb cancel, struct http_response *resp)
 {
     memset(resp, 0, sizeof(*resp));
 
@@ -88,6 +110,7 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
 
     struct curl_state s;
     memset(&s, 0, sizeof(s));
+    s.cancel = cancel;
 
     struct sse_trace_wrapper tw = {.inner = cb, .inner_user = user};
     if (trace_enabled())
@@ -102,7 +125,15 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hl);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, on_write);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &s);
-    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
+    /* Progress callback only when a cancel hook is provided — keeps the
+     * default no-cancel path identical to before (NOPROGRESS=1). */
+    if (cancel) {
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, on_progress);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &s);
+    } else {
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
+    }
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
     /* Fail fast on dead connections. Streams can be legitimately long, so
@@ -129,7 +160,14 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
     curl_easy_cleanup(curl);
 
     resp->status = status;
-    if (rc != CURLE_OK) {
+    /* Distinguish "user cancelled" from a real transport error so the
+     * agent can react cleanly without surfacing it as [error: ...]. Both
+     * the write-callback short-return (CURLE_WRITE_ERROR) and the
+     * progress-callback abort (CURLE_ABORTED_BY_CALLBACK) only fire when
+     * cancel() returned true, so trusting the cancel hook here is safe. */
+    if (rc != CURLE_OK && cancel && cancel()) {
+        resp->cancelled = 1;
+    } else if (rc != CURLE_OK) {
         resp->error_body = xasprintf("libcurl: %s", curl_easy_strerror(rc));
     } else if (status < 200 || status >= 300) {
         resp->error_body = s.err_body.data ? buf_steal(&s.err_body) : xstrdup("(no response body)");

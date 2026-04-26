@@ -48,6 +48,14 @@ void turn_reset(struct turn *t);
 /* Update state for one event. Returns 0 (reserved for future cancellation). */
 int turn_on_event(const struct stream_event *ev, struct turn *t);
 
+/* Finalize any in-flight assistant text into an item, optionally appending
+ * `suffix` first. No-op if no text was buffered. Used by the agent on
+ * user-interrupt to capture the partial assistant message and tag it with
+ * "[interrupted]" so the next turn carries the marker. Pending
+ * (incomplete) tool calls are NOT promoted — they are discarded by
+ * turn_reset, since incomplete args wouldn't form valid tool_calls. */
+void turn_flush_text(struct turn *t, const char *suffix);
+
 /* Look up an in-flight tool call by id — useful for display code that wants
  * to inspect args before turn_on_event consumes them on EV_TOOL_CALL_END. */
 struct pending_tool *turn_find_pending(struct turn *t, const char *call_id);

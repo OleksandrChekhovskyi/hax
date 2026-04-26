@@ -28,6 +28,7 @@ sources = files(
     'src/env.c',
     'src/fs.c',
     'src/http.c',
+    'src/interrupt.c',
     'src/main.c',
     'src/markdown.c',
     'src/spinner.c',

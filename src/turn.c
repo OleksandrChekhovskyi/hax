@@ -75,6 +75,15 @@ static void flush_text(struct turn *t)
     t->in_text = 0;
 }
 
+void turn_flush_text(struct turn *t, const char *suffix)
+{
+    if (!t->in_text)
+        return;
+    if (suffix && *suffix)
+        buf_append_str(&t->text_buf, suffix);
+    flush_text(t);
+}
+
 static struct pending_tool *pending_push(struct turn *t, const char *call_id, const char *name)
 {
     if (t->n_pending == t->cap_pending) {
