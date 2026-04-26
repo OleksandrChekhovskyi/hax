@@ -259,9 +259,12 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
                    w->data[lang_end] != '\r')
                 lang_end++;
             if (lang_end > info) {
-                emit_raw(m, ANSI_ITALIC);
+                /* Dim is already on from open_code_fence; layer cyan
+                 * on top so the label reads as dim cyan, distinct
+                 * from the dim-default code body that follows. */
+                emit_raw(m, ANSI_CYAN);
                 emit_text(m, w->data + info, lang_end - info);
-                emit_raw(m, ANSI_ITALIC_OFF);
+                emit_raw(m, ANSI_FG_DEFAULT);
                 emit_text(m, "\n", 1);
             }
             *i = scan + 1; /* past the opener line's \n */

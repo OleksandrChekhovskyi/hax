@@ -147,10 +147,11 @@ static void test_code_fence(void)
 
 static void test_code_fence_with_lang(void)
 {
-    /* Language id renders as a dim+italic label on its own line above
-     * the content. */
+    /* Language id renders as a dim+cyan label on its own line above
+     * the content; dim is already on from the fence opener, so cyan
+     * layers on it and the body returns to dim+default fg. */
     char *got = render_one("```c\nint x;\n```\n");
-    EXPECT_STR_EQ(got, "\x1b[2m\x1b[3mc\x1b[23m\nint x;\n\x1b[22m");
+    EXPECT_STR_EQ(got, "\x1b[2m\x1b[36mc\x1b[39m\nint x;\n\x1b[22m");
     free(got);
 }
 
@@ -158,7 +159,7 @@ static void test_code_fence_lang_with_attrs(void)
 {
     /* Info string with attributes: only the first token is the label. */
     char *got = render_one("```python title=\"x.py\"\nprint(1)\n```\n");
-    EXPECT_STR_EQ(got, "\x1b[2m\x1b[3mpython\x1b[23m\nprint(1)\n\x1b[22m");
+    EXPECT_STR_EQ(got, "\x1b[2m\x1b[36mpython\x1b[39m\nprint(1)\n\x1b[22m");
     free(got);
 }
 
@@ -174,7 +175,7 @@ static void test_code_fence_lang_split_across_feeds(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "\x1b[2m\x1b[3mpython\x1b[23m\nint x;\n\x1b[22m");
+    EXPECT_STR_EQ(s, "\x1b[2m\x1b[36mpython\x1b[39m\nint x;\n\x1b[22m");
     free(s);
 }
 
@@ -194,7 +195,7 @@ static void test_code_fence_inner_with_info_is_content(void)
      * scenario from the markdown-rendering-demo trace. */
     const char *in = "```markdown\n# Title\n```python\ndef f(): pass\n```\n";
     char *got = render_one(in);
-    const char *want = "\x1b[2m\x1b[3mmarkdown\x1b[23m\n"
+    const char *want = "\x1b[2m\x1b[36mmarkdown\x1b[39m\n"
                        "# Title\n```python\ndef f(): pass\n\x1b[22m";
     EXPECT_STR_EQ(got, want);
     free(got);
@@ -243,7 +244,7 @@ static void test_code_fence_crlf_lang(void)
     /* CRLF on the opener line — \r must not leak into the language
      * label. */
     char *got = render_one("```python\r\nx = 1\r\n```\r\n");
-    EXPECT_STR_EQ(got, "\x1b[2m\x1b[3mpython\x1b[23m\nx = 1\r\n\x1b[22m");
+    EXPECT_STR_EQ(got, "\x1b[2m\x1b[36mpython\x1b[39m\nx = 1\r\n\x1b[22m");
     free(got);
 }
 
@@ -565,7 +566,7 @@ static void test_fence_long_info_split_across_feeds(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "\x1b[2m\x1b[3mpython\x1b[23m\nx = 1\n\x1b[22m");
+    EXPECT_STR_EQ(s, "\x1b[2m\x1b[36mpython\x1b[39m\nx = 1\n\x1b[22m");
     free(s);
 }
 
