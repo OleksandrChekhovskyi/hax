@@ -109,6 +109,17 @@ static char *resolve_link_target(const char *path)
 
 char *fs_write_with_diff(const char *path, const char *content, size_t content_len, char **errmsg)
 {
+    char *target = NULL, *old = NULL, *parent = NULL, *tmp = NULL, *diff = NULL;
+    char *a_label = NULL, *b_label = NULL;
+    int fd = -1;
+    int file_existed = 0;
+    int tmp_created = 0; /* mkstemp succeeded — there's a file at tmp to clean up */
+    int committed = 0;   /* rename succeeded — tmp is gone from disk */
+    int ok = 0;
+    size_t old_len = 0;
+    mode_t mode = 0;
+    struct stat st;
+
     *errmsg = NULL;
 
     /* If `path` is a symlink, resolve it so we update the target file's
@@ -118,17 +129,12 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
      * resolver tolerates dangling chains so a `link -> new` pattern can
      * still create `new`. Diff labels keep the model-supplied path so the
      * user sees what they asked for, not an internal canonicalization. */
-    char *target = resolve_link_target(path);
+    target = resolve_link_target(path);
     if (!target) {
         *errmsg = xasprintf("resolving %s: %s", path, strerror(errno));
-        return NULL;
+        goto out;
     }
 
-    int file_existed = 0;
-    size_t old_len = 0;
-    char *old = NULL;
-    mode_t mode;
-    struct stat st;
     if (stat(target, &st) == 0) {
         /* Refuse FIFOs, sockets, devices, directories upfront. The
          * eventual rename would replace the special node with a plain
@@ -138,8 +144,7 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
          * "Invalid argument" it would otherwise see. */
         if (!S_ISREG(st.st_mode)) {
             *errmsg = xasprintf("%s exists but is not a regular file", target);
-            free(target);
-            return NULL;
+            goto out;
         }
         file_existed = 1;
         /* 07777 (not 0777) preserves setuid/setgid/sticky bits on
@@ -150,8 +155,7 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
         old = slurp_file(target, &old_len);
         if (!old) {
             *errmsg = xasprintf("error reading %s: %s", target, strerror(errno));
-            free(target);
-            return NULL;
+            goto out;
         }
     } else if (errno == ENOENT) {
         /* Genuinely new file. Anything else (EACCES, EOVERFLOW, EIO,
@@ -164,37 +168,25 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
         mode = 0666 & ~um;
     } else {
         *errmsg = xasprintf("stat %s: %s", target, strerror(errno));
-        free(target);
-        return NULL;
+        goto out;
     }
 
-    char *parent = parent_dir_of(target);
+    parent = parent_dir_of(target);
     if (mkdir_p(parent) < 0) {
         *errmsg = xasprintf("creating %s: %s", parent, strerror(errno));
-        free(parent);
-        free(target);
-        free(old);
-        return NULL;
+        goto out;
     }
 
-    char *tmp = xasprintf("%s/.hax-write-XXXXXX", parent);
-    free(parent);
-    int fd = mkstemp(tmp);
+    tmp = xasprintf("%s/.hax-write-XXXXXX", parent);
+    fd = mkstemp(tmp);
     if (fd < 0) {
         *errmsg = xasprintf("mkstemp: %s", strerror(errno));
-        free(tmp);
-        free(target);
-        free(old);
-        return NULL;
+        goto out;
     }
+    tmp_created = 1;
     if (write_all(fd, content, content_len) < 0) {
         *errmsg = xasprintf("write %s: %s", tmp, strerror(errno));
-        close(fd);
-        unlink(tmp);
-        free(tmp);
-        free(target);
-        free(old);
-        return NULL;
+        goto out;
     }
     /* fchmod must happen *after* write: Linux's write(2) clears S_ISUID
      * and S_ISGID when an unprivileged process writes to a file, so a
@@ -208,36 +200,22 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
      * NFS in particular can report errors only at close. */
     if (fsync(fd) < 0) {
         *errmsg = xasprintf("fsync %s: %s", tmp, strerror(errno));
-        close(fd);
-        unlink(tmp);
-        free(tmp);
-        free(target);
-        free(old);
-        return NULL;
+        goto out;
     }
     if (close(fd) < 0) {
+        fd = -1; /* close failure leaves fd unspecified; don't double-close */
         *errmsg = xasprintf("close %s: %s", tmp, strerror(errno));
-        unlink(tmp);
-        free(tmp);
-        free(target);
-        free(old);
-        return NULL;
+        goto out;
     }
+    fd = -1;
 
-    char *a_label = file_existed ? xasprintf("a/%s", path) : xstrdup("/dev/null");
-    char *b_label = xasprintf("b/%s", path);
-    char *diff = make_unified_diff(file_existed ? old : "", file_existed ? old_len : 0, content,
-                                   content_len, a_label, b_label);
-    free(a_label);
-    free(b_label);
-    free(old);
-
+    a_label = file_existed ? xasprintf("a/%s", path) : xstrdup("/dev/null");
+    b_label = xasprintf("b/%s", path);
+    diff = make_unified_diff(file_existed ? old : "", file_existed ? old_len : 0, content,
+                             content_len, a_label, b_label);
     if (!diff) {
         *errmsg = xstrdup("diff(1) failed");
-        unlink(tmp);
-        free(tmp);
-        free(target);
-        return NULL;
+        goto out;
     }
 
     /* Creating an empty file would otherwise yield "" — visually
@@ -252,24 +230,35 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
 
     /* Byte-identical content on an existing file: skip the rename so the
      * file's inode, mtime, ownership, and any hard links are preserved.
-     * For a *missing* file with empty content, an empty diff still has to
-     * land on disk — otherwise "create empty file" silently no-ops. */
+     * The unwind below unlinks tmp. For a *missing* file with empty
+     * content, an empty diff still has to land on disk — otherwise
+     * "create empty file" silently no-ops. */
     if (file_existed && !*diff) {
-        unlink(tmp);
-        free(tmp);
-        free(target);
-        return diff;
+        ok = 1;
+        goto out;
     }
 
     if (rename(tmp, target) < 0) {
         *errmsg = xasprintf("rename to %s: %s", target, strerror(errno));
+        goto out;
+    }
+    committed = 1;
+    ok = 1;
+
+out:
+    if (fd >= 0)
+        close(fd);
+    if (tmp_created && !committed)
         unlink(tmp);
-        free(tmp);
+    free(a_label);
+    free(b_label);
+    free(tmp);
+    free(parent);
+    free(old);
+    free(target);
+    if (!ok) {
         free(diff);
-        free(target);
         return NULL;
     }
-    free(tmp);
-    free(target);
     return diff;
 }
