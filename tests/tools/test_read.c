@@ -75,32 +75,72 @@ static void test_read_normal(void)
 
 static void test_read_sanitizes_utf8(void)
 {
-    /* Embed a raw NUL and an invalid leading byte — both must become U+FFFD. */
-    const char content[] = {'a', 0x00, 'b', (char)0xFF, 'c'};
+    /* An invalid UTF-8 leading byte must become U+FFFD. (Embedded NULs
+     * are caught by the binary-file guard and tested separately.) */
+    const char content[] = {'a', (char)0xFF, 'b'};
     char *path = write_tmp(content, sizeof(content));
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = call_read(args);
     EXPECT_STR_EQ(out, "a\xEF\xBF\xBD"
-                       "b\xEF\xBF\xBD"
-                       "c");
+                       "b");
     free(out);
     free(args);
     unlink(path);
     free(path);
 }
 
-static void test_read_truncation_marker(void)
+static void test_read_refuses_binary(void)
 {
-    /* READ_CAP is 256 KiB; write one byte past it and expect the marker. */
+    /* A NUL byte in the first chunk marks the file as binary; the model
+     * gets a clear refusal instead of 256 KiB of replacement characters. */
+    const char content[] = {'a', 0x00, 'b'};
+    char *path = write_tmp(content, sizeof(content));
+    char *args = xasprintf("{\"path\":\"%s\"}", path);
+    char *out = call_read(args);
+    EXPECT(strstr(out, "appears to be binary") != NULL);
+    free(out);
+    free(args);
+    unlink(path);
+    free(path);
+}
+
+static void test_read_refuses_oversize_no_slice(void)
+{
+    /* READ_CAP is 256 KiB. Without offset/limit the tool refuses upfront
+     * and tells the model how big the file is, so it can ask for a slice
+     * or grep via bash instead of accepting a silently truncated prefix. */
     size_t over = 256 * 1024 + 32;
     char *big = xmalloc(over);
-    memset(big, 'q', over);
+    /* Multi-line so binary detection doesn't fire. */
+    for (size_t i = 0; i < over; i++)
+        big[i] = (i % 80 == 79) ? '\n' : 'q';
     char *path = write_tmp(big, over);
     free(big);
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = call_read(args);
-    EXPECT(strstr(out, "[truncated at") != NULL);
-    EXPECT(strstr(out, "file is larger]") != NULL);
+    EXPECT(strstr(out, "262176 bytes") != NULL);
+    EXPECT(strstr(out, "offset/limit") != NULL);
+    free(out);
+    free(args);
+    unlink(path);
+    free(path);
+}
+
+static void test_read_oversize_with_slice_ok(void)
+{
+    /* The pre-stat refusal only fires when neither offset nor limit is
+     * provided. With a slice request, streaming proceeds — the model has
+     * told us it knows what window it wants. */
+    size_t over = 256 * 1024 + 32;
+    char *big = xmalloc(over);
+    for (size_t i = 0; i < over; i++)
+        big[i] = (i % 80 == 79) ? '\n' : 'q';
+    char *path = write_tmp(big, over);
+    free(big);
+    char *args = xasprintf("{\"path\":\"%s\",\"offset\":1,\"limit\":1}", path);
+    char *out = call_read(args);
+    EXPECT(strstr(out, "262176 bytes") == NULL);
+    EXPECT(strstr(out, "offset/limit") == NULL);
     free(out);
     free(args);
     unlink(path);
@@ -225,12 +265,11 @@ static void test_read_range_past_cap_in_large_file(void)
 
 static void test_read_first_line_larger_than_cap(void)
 {
-    /* Strict cap: memory used by the result is hard-bounded by READ_CAP
-     * regardless of line length, so a single 300 KiB line returns the
-     * first ~256 KiB plus a truncation marker. The previous "include
-     * the first line whole" exception was the OOM door (a 10 GB
-     * single-line file would have allocated 10 GB before any cap
-     * fired). The model can fall back to bash if it needs the rest. */
+    /* A 300 KiB single-line file with explicit slice request: the
+     * pre-stat refusal is bypassed (offset/limit given), streaming
+     * proceeds, and the per-line cap kicks in — the result is the
+     * first MAX_LINE_LEN bytes of the line plus an inline elision
+     * marker. The model can fall back to bash if it needs the rest. */
     size_t huge_line_len = 300 * 1024;
     char *doc = xmalloc(huge_line_len + 1);
     memset(doc, 'q', huge_line_len);
@@ -240,10 +279,9 @@ static void test_read_first_line_larger_than_cap(void)
 
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":1,\"limit\":1}", path);
     char *out = call_read(args);
-    /* Result is roughly the cap, plus a small footer for the marker. */
-    EXPECT(strlen(out) > 256 * 1024 - 16);
-    EXPECT(strlen(out) < 256 * 1024 + 256);
-    EXPECT(strstr(out, "[truncated") != NULL);
+    /* Per-line cap is 2000 bytes; result is much smaller than the cap. */
+    EXPECT(strlen(out) < 4000);
+    EXPECT(strstr(out, "bytes elided") != NULL);
     free(out);
     free(args);
 
@@ -253,23 +291,53 @@ static void test_read_first_line_larger_than_cap(void)
 
 static void test_read_exact_cap_no_false_marker(void)
 {
-    /* When the file's content lands exactly at READ_CAP, the result is
-     * the whole file — no truncation occurred — so the marker must NOT
-     * appear. The cap-check-before-append design gets this right
-     * because the reader exits via read()==0, not via the cap branch. */
-    size_t exact = 256 * 1024;
-    char *doc = xmalloc(exact);
-    memset(doc, 'q', exact);
-    char *path = write_tmp(doc, exact);
+    /* When the file's size lands exactly at READ_CAP, the pre-stat check
+     * doesn't fire (>, not >=) and streaming returns the whole content
+     * — no truncation marker. Use multi-line content so the per-line
+     * cap doesn't intervene. */
+    size_t lines = 256 * 1024 / 8;
+    char *doc = xmalloc(lines * 8);
+    for (size_t i = 0; i < lines; i++)
+        memcpy(doc + i * 8, "abcdefg\n", 8);
+    char *path = write_tmp(doc, lines * 8);
     free(doc);
 
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = call_read(args);
-    EXPECT(strlen(out) == exact);
+    EXPECT(strlen(out) == lines * 8);
     EXPECT(strstr(out, "[truncated") == NULL);
+    EXPECT(strstr(out, "bytes elided") == NULL);
     free(out);
     free(args);
 
+    unlink(path);
+    free(path);
+}
+
+static void test_read_caps_long_line(void)
+{
+    /* A single line longer than MAX_LINE_LEN (2000) gets truncated with
+     * an inline marker; surrounding short lines are left alone. */
+    struct buf b;
+    buf_init(&b);
+    buf_append_str(&b, "short before\n");
+    char filler[3000];
+    memset(filler, 'x', sizeof(filler));
+    buf_append(&b, filler, sizeof(filler));
+    buf_append_str(&b, "\nshort after\n");
+    char *path = write_tmp(b.data, b.len);
+
+    char *args = xasprintf("{\"path\":\"%s\",\"offset\":1,\"limit\":3}", path);
+    char *out = call_read(args);
+    EXPECT(strstr(out, "short before\n") != NULL);
+    EXPECT(strstr(out, "short after\n") != NULL);
+    EXPECT(strstr(out, "bytes elided") != NULL);
+    /* The 3000-x line is reduced to ~2000 + a short marker. */
+    EXPECT(strlen(out) < 2200);
+    free(out);
+    free(args);
+
+    buf_free(&b);
     unlink(path);
     free(path);
 }
@@ -413,7 +481,10 @@ int main(void)
     test_read_nonexistent();
     test_read_normal();
     test_read_sanitizes_utf8();
-    test_read_truncation_marker();
+    test_read_refuses_binary();
+    test_read_refuses_oversize_no_slice();
+    test_read_oversize_with_slice_ok();
+    test_read_caps_long_line();
     test_read_offset_limit();
     test_read_offset_past_eof();
     test_read_no_trailing_newline();

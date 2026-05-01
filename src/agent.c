@@ -57,8 +57,16 @@
     "fix if they knew. Skip pre-existing issues and trivial style. Calibrate "                     \
     "severity honestly; no flattery. Empty findings is a valid result."
 
-#define TOOL_OUTPUT_MAX_LINES 5
-#define TOOL_OUTPUT_MAX_BYTES 2000
+/* Head-only preview (file-content tools — read top-down). */
+#define DISP_HEAD_ONLY_LINES 8
+#define DISP_HEAD_ONLY_BYTES 3000
+
+/* Head + tail preview (command-output tools — errors land at the
+ * bottom). Whichever side hits its line or byte cap first stops. */
+#define DISP_HT_HEAD_LINES 4
+#define DISP_HT_TAIL_LINES 4
+#define DISP_HT_HEAD_BYTES 1500
+#define DISP_HT_TAIL_BYTES 1500
 
 static const struct tool *const TOOLS[] = {
     &TOOL_READ,
@@ -335,16 +343,17 @@ static void display_tool_diff(struct disp *d, const char *diff)
     fflush(stdout);
 }
 
-/* Show a capped preview of tool output: at most TOOL_OUTPUT_MAX_LINES lines
- * or TOOL_OUTPUT_MAX_BYTES bytes, whichever is hit first. Truncated previews
- * end with a dim "... (N more lines, M more bytes)" footer on its own line. */
-static void display_tool_output(struct disp *d, const char *out)
+/* Head-only preview: at most HEAD_ONLY_LINES or HEAD_ONLY_BYTES,
+ * whichever is hit first. Truncated previews end with a dim "... (N
+ * more lines, M more bytes)" footer. Used by tools whose output is read
+ * top-down (file content). */
+static void display_tool_output_head(struct disp *d, const char *out)
 {
     size_t total = strlen(out);
 
     size_t cut = 0;
     int lines = 0;
-    while (cut < total && lines < TOOL_OUTPUT_MAX_LINES && cut < TOOL_OUTPUT_MAX_BYTES) {
+    while (cut < total && lines < DISP_HEAD_ONLY_LINES && cut < DISP_HEAD_ONLY_BYTES) {
         if (out[cut] == '\n')
             lines++;
         cut++;
@@ -369,6 +378,78 @@ static void display_tool_output(struct disp *d, const char *out)
     } else if (d->held == 0 && d->trail == 0) {
         disp_putc(d, '\n');
     }
+    disp_raw(ANSI_RESET);
+    fflush(stdout);
+}
+
+/* Head + tail preview, with an elision marker between when bytes are
+ * dropped. Each side is bounded in lines and bytes; if head and tail
+ * meet (short output), the whole thing is shown verbatim. Used by
+ * command-output tools (bash) where errors land at the bottom. */
+static void display_tool_output_head_tail(struct disp *d, const char *out)
+{
+    size_t total = strlen(out);
+
+    size_t head_end = 0;
+    int head_lines = 0;
+    while (head_end < total && head_lines < DISP_HT_HEAD_LINES && head_end < DISP_HT_HEAD_BYTES) {
+        if (out[head_end] == '\n')
+            head_lines++;
+        head_end++;
+    }
+    if (head_end >= total) {
+        disp_raw(ANSI_DIM);
+        disp_write(d, out, total);
+        if (d->held == 0 && d->trail == 0)
+            disp_putc(d, '\n');
+        disp_raw(ANSI_RESET);
+        fflush(stdout);
+        return;
+    }
+
+    /* Backward-walk: cross TAIL_LINES-1 newlines, then stop at the next
+     * (boundary) newline. tail_start ends up right after the boundary.
+     * The byte cap is a safety valve for very long single lines; we
+     * accept a partial leading line rather than emit an empty tail. */
+    size_t tail_start = total;
+    if (tail_start > head_end && out[tail_start - 1] == '\n')
+        tail_start--;
+    int crossed = 0;
+    while (tail_start > head_end && (total - tail_start) < (size_t)DISP_HT_TAIL_BYTES) {
+        if (out[tail_start - 1] == '\n') {
+            if (crossed == DISP_HT_TAIL_LINES - 1)
+                break;
+            crossed++;
+        }
+        tail_start--;
+    }
+
+    if (tail_start <= head_end) {
+        disp_raw(ANSI_DIM);
+        disp_write(d, out, total);
+        if (d->held == 0 && d->trail == 0)
+            disp_putc(d, '\n');
+        disp_raw(ANSI_RESET);
+        fflush(stdout);
+        return;
+    }
+
+    size_t mid_bytes = tail_start - head_end;
+    int mid_lines = 0;
+    for (size_t i = head_end; i < tail_start; i++)
+        if (out[i] == '\n')
+            mid_lines++;
+
+    disp_raw(ANSI_DIM);
+    disp_write(d, out, head_end);
+    if (head_end > 0 && out[head_end - 1] != '\n')
+        disp_putc(d, '\n');
+    disp_printf(d, "... (%d more line%s, %zu more byte%s) ...", mid_lines,
+                mid_lines == 1 ? "" : "s", mid_bytes, mid_bytes == 1 ? "" : "s");
+    disp_putc(d, '\n');
+    disp_write(d, out + tail_start, total - tail_start);
+    if (d->held == 0 && d->trail == 0)
+        disp_putc(d, '\n');
     disp_raw(ANSI_RESET);
     fflush(stdout);
 }
@@ -826,8 +907,10 @@ int agent_run(struct provider *p)
                     t && t->output_is_diff && (out[0] == '\0' || strncmp(out, "--- ", 4) == 0);
                 if (as_diff)
                     display_tool_diff(&disp, out);
+                else if (t && t->preview_tail)
+                    display_tool_output_head_tail(&disp, out);
                 else
-                    display_tool_output(&disp, out);
+                    display_tool_output_head(&disp, out);
                 items_append(&items, &n_items, &cap_items,
                              (struct item){
                                  .kind = ITEM_TOOL_RESULT,

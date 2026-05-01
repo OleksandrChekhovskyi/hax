@@ -324,6 +324,36 @@ char *sanitize_utf8(const char *data, size_t len)
     return buf_steal(&out);
 }
 
+char *cap_line_lengths(const char *data, size_t len, size_t max_line, size_t *out_len)
+{
+    struct buf out;
+    buf_init(&out);
+    size_t i = 0;
+    while (i < len) {
+        size_t line_start = i;
+        while (i < len && data[i] != '\n')
+            i++;
+        size_t line_len = i - line_start;
+        if (line_len > max_line) {
+            buf_append(&out, data + line_start, max_line);
+            char marker[64];
+            int m = snprintf(marker, sizeof(marker), "...[%zu bytes elided]", line_len - max_line);
+            buf_append(&out, marker, (size_t)m);
+        } else {
+            buf_append(&out, data + line_start, line_len);
+        }
+        if (i < len) {
+            buf_append(&out, "\n", 1);
+            i++;
+        }
+    }
+    if (!out.data)
+        out.data = xstrdup("");
+    if (out_len)
+        *out_len = out.len;
+    return buf_steal(&out);
+}
+
 char *expand_home(const char *path)
 {
     if (!path)

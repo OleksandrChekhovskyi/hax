@@ -12,13 +12,15 @@
 
 #include "util.h"
 
-#define READ_CAP (256 * 1024)
+#define READ_CAP     (256 * 1024)
+#define MAX_LINE_LEN 2000
 
 struct read_result {
     char *body;      /* malloc'd; "" on success-with-no-content */
     size_t body_len; /* byte length of body */
     int truncated;   /* result hit the byte cap before EOF/limit */
     int past_eof;    /* requested offset exceeded what's in the file */
+    int is_binary;   /* NUL byte found in first chunk; refuse */
     long lines_seen; /* total lines streamed (only meaningful when past_eof) */
 };
 
@@ -66,6 +68,7 @@ static int read_lines_capped(const char *path, long offset, long limit, size_t c
     r->body_len = 0;
     r->truncated = 0;
     r->past_eof = 0;
+    r->is_binary = 0;
     r->lines_seen = 0;
 
     int fd = open(path, O_RDONLY);
@@ -81,6 +84,7 @@ static int read_lines_capped(const char *path, long offset, long limit, size_t c
     int hit_eof = 0;
     int hit_cap = 0;
     int saw_data_in_current_line = 0;
+    int first_chunk = 1;
 
     for (;;) {
         ssize_t n = read(fd, chunk, sizeof(chunk));
@@ -96,6 +100,23 @@ static int read_lines_capped(const char *path, long offset, long limit, size_t c
         if (n == 0) {
             hit_eof = 1;
             break;
+        }
+
+        /* Binary detection on the first chunk only — typical binaries
+         * (executables, archives, images) have NUL bytes in their
+         * headers, so an early sniff is reliable and bails before the
+         * buffer grows. Source files with embedded NULs are rare; the
+         * model can fall back to bash for those. */
+        if (first_chunk) {
+            for (ssize_t i = 0; i < n; i++) {
+                if (chunk[i] == 0) {
+                    r->is_binary = 1;
+                    close(fd);
+                    buf_free(&out);
+                    return 0;
+                }
+            }
+            first_chunk = 0;
         }
 
         size_t run_start = 0;
@@ -230,9 +251,29 @@ static char *run(const char *args_json)
         return msg;
     }
 
+    /* When no slice is requested, refuse oversize files upfront so the
+     * model gets a useful error ("here's how big it is, narrow your
+     * request") instead of a silently truncated prefix. With offset or
+     * limit, streaming is the right thing — the model is asking for a
+     * specific window and the cap may not even fire. */
+    if (!jo && !jl && st.st_size > READ_CAP) {
+        char *msg = xasprintf("%s is %lld bytes; cap is %d. Pass offset/limit to read a slice, "
+                              "or use bash with grep/head/tail.",
+                              path, (long long)st.st_size, READ_CAP);
+        json_decref(root);
+        return msg;
+    }
+
     struct read_result rr;
     if (read_lines_capped(path, offset, limit, READ_CAP, &rr) < 0) {
         char *msg = xasprintf("error reading %s: %s", path, strerror(errno));
+        json_decref(root);
+        return msg;
+    }
+
+    if (rr.is_binary) {
+        char *msg = xasprintf("%s appears to be binary (NUL byte found in first 8 KiB)", path);
+        free(rr.body);
         json_decref(root);
         return msg;
     }
@@ -245,8 +286,17 @@ static char *run(const char *args_json)
         return msg;
     }
 
-    char *clean = sanitize_utf8(rr.body, rr.body_len);
+    /* Cap individual lines before UTF-8 sanitization so the marker text
+     * is itself valid UTF-8 and unaffected. Minified JS, CSV with no
+     * newlines, and similar can fill the byte cap with one line of
+     * useless content; this turns each pathological line into a small
+     * tagged stub instead. */
+    size_t capped_len = 0;
+    char *capped = cap_line_lengths(rr.body, rr.body_len, MAX_LINE_LEN, &capped_len);
     free(rr.body);
+
+    char *clean = sanitize_utf8(capped, capped_len);
+    free(capped);
 
     if (rr.truncated) {
         char *msg = xasprintf("%s\n\n[truncated at %d bytes; file is larger]", clean, READ_CAP);

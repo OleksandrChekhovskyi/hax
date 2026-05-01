@@ -17,7 +17,17 @@
 #include "interrupt.h"
 #include "util.h"
 
-#define OUTPUT_CAP                  (100 * 1024)
+/* Output budget split between a head buffer (preserved verbatim from the
+ * start) and a tail ring (overwriting; preserves the most recent bytes).
+ * For build/test failures the tail is where the actionable info lives; for
+ * `find`-style listings the head is. Keeping both gives the model context
+ * either way. MAX_BYTES_READ caps the total number of bytes the reader is
+ * willing to drain — a runaway producer like `yes` is killed at this
+ * point, so the tail stays bounded in time as well as size. */
+#define HEAD_CAP                    (32 * 1024)
+#define TAIL_CAP                    (64 * 1024)
+#define MAX_BYTES_READ              (1024 * 1024)
+#define MAX_LINE_LEN                2000
 #define BASH_TIMEOUT_DEFAULT_MS     (120L * 1000L)
 #define BASH_TIMEOUT_MAX_DEFAULT_MS (1800L * 1000L)
 #define BASH_GRACE_DEFAULT_MS       (2L * 1000L)
@@ -76,15 +86,62 @@ static void format_timeout_for_model(char *buf, size_t buflen, long timeout_ms)
         snprintf(buf, buflen, "%ldms", timeout_ms);
 }
 
-/* Build the final tool result from the captured raw output and exit
- * metadata. Consumes `raw` (calls buf_free on it). */
-static char *format_run_output(struct buf *raw, int truncated, int timed_out, int interrupted,
+/* Linearize head + tail-ring into `out`, splicing an elision marker
+ * between them when bytes were dropped in the middle. The marker bounds
+ * itself with newlines so it doesn't visually merge with whatever the
+ * head's last partial line and the tail's first partial line happen to
+ * be. Returns 1 if any bytes were elided (i.e. output is truncated). */
+static int assemble_head_tail(struct buf *out, struct buf *head, const char *tail, size_t tail_pos,
+                              int tail_wrapped, size_t total_bytes)
+{
+    if (head->data)
+        buf_append(out, head->data, head->len);
+
+    size_t tail_len = tail_wrapped ? TAIL_CAP : tail_pos;
+    size_t kept = head->len + tail_len;
+    size_t elided = total_bytes > kept ? total_bytes - kept : 0;
+
+    if (elided > 0) {
+        char marker[80];
+        int m = snprintf(marker, sizeof(marker), "\n... [%zu bytes elided] ...\n", elided);
+        buf_append(out, marker, (size_t)m);
+    }
+
+    if (tail_len > 0) {
+        if (tail_wrapped) {
+            buf_append(out, tail + tail_pos, TAIL_CAP - tail_pos);
+            buf_append(out, tail, tail_pos);
+        } else {
+            buf_append(out, tail, tail_pos);
+        }
+    }
+
+    return elided > 0;
+}
+
+/* Build the final tool result from the captured head/tail ring and exit
+ * metadata. Consumes `head` (calls buf_free on it). */
+static char *format_run_output(struct buf *head, const char *tail, size_t tail_pos,
+                               int tail_wrapped, size_t total_bytes, int timed_out, int interrupted,
                                long timeout_ms, int status)
 {
-    /* Sanitize output to valid UTF-8 before annotating — binary output
-     * and non-UTF-8 bytes would otherwise break JSON serialization. */
-    char *clean = sanitize_utf8(raw->data ? raw->data : "", raw->len);
-    buf_free(raw);
+    struct buf raw;
+    buf_init(&raw);
+    int truncated = assemble_head_tail(&raw, head, tail, tail_pos, tail_wrapped, total_bytes);
+    buf_free(head);
+
+    /* Cap pathologically long lines (single-line minified output, log
+     * lines with no newlines) before sanitizing — cap_line_lengths cuts
+     * at a byte boundary which can split a multi-byte UTF-8 codepoint;
+     * sanitize_utf8 then replaces the orphaned bytes with U+FFFD so the
+     * final string is always valid UTF-8 (jansson rejects invalid UTF-8
+     * in json_string). */
+    size_t capped_len = 0;
+    char *capped = cap_line_lengths(raw.data ? raw.data : "", raw.len, MAX_LINE_LEN, &capped_len);
+    buf_free(&raw);
+
+    char *clean = sanitize_utf8(capped, capped_len);
+    free(capped);
 
     struct buf out;
     buf_init(&out);
@@ -178,9 +235,12 @@ static char *run_shell(const char *cmd, long timeout_ms)
     int shell_exited = 0;
     int status = 0;
 
-    struct buf raw;
-    buf_init(&raw);
-    int truncated = 0;
+    struct buf head;
+    buf_init(&head);
+    char tail[TAIL_CAP];
+    size_t tail_pos = 0;
+    int tail_wrapped = 0;
+    size_t total_bytes = 0;
     char chunk[4096];
 
     for (;;) {
@@ -301,23 +361,37 @@ static char *run_shell(const char *cmd, long timeout_ms)
             kill(-pid, SIGKILL);
             break;
         }
-        if (raw.len < OUTPUT_CAP) {
-            size_t room = OUTPUT_CAP - raw.len;
+        total_bytes += (size_t)r;
+        size_t consumed = 0;
+        if (head.len < HEAD_CAP) {
+            size_t room = HEAD_CAP - head.len;
             size_t take = (size_t)r < room ? (size_t)r : room;
-            buf_append(&raw, chunk, take);
-            if ((size_t)r <= take)
-                continue;
+            buf_append(&head, chunk, take);
+            consumed = take;
         }
-        /* Cap hit and more data is still arriving. Draining a never-ending
-         * producer (yes, tail -f, …) would pin the agent forever, so kill
-         * the process group and stop. SIGKILL unconditionally: when we're
-         * in the grace window we deliberately deferred the pgroup-collapse
-         * so cleanup could finish, but a runaway descendant ignoring
-         * SIGTERM can still flood past OUTPUT_CAP. ESRCH on an empty
-         * pgroup is harmless. */
-        truncated = 1;
-        kill(-pid, SIGKILL);
-        break;
+        while (consumed < (size_t)r) {
+            size_t avail = (size_t)r - consumed;
+            size_t room = TAIL_CAP - tail_pos;
+            size_t take = avail < room ? avail : room;
+            memcpy(tail + tail_pos, chunk + consumed, take);
+            tail_pos += take;
+            if (tail_pos == TAIL_CAP) {
+                tail_pos = 0;
+                tail_wrapped = 1;
+            }
+            consumed += take;
+        }
+        /* Runaway producer (yes, tail -f, /dev/urandom, …) — once we've
+         * drained MAX_BYTES_READ, the tail ring already holds the most
+         * recent TAIL_CAP bytes and reading further is wasted work.
+         * SIGKILL unconditionally: when we're in the grace window we
+         * deliberately deferred the pgroup-collapse so cleanup could
+         * finish, but a runaway descendant ignoring SIGTERM can still
+         * flood past the budget. ESRCH on an empty pgroup is harmless. */
+        if (total_bytes >= MAX_BYTES_READ) {
+            kill(-pid, SIGKILL);
+            break;
+        }
     }
     close(fds[0]);
 
@@ -328,7 +402,8 @@ static char *run_shell(const char *cmd, long timeout_ms)
         }
     }
 
-    return format_run_output(&raw, truncated, timed_out, interrupted, timeout_ms, status);
+    return format_run_output(&head, tail, tail_pos, tail_wrapped, total_bytes, timed_out,
+                             interrupted, timeout_ms, status);
 }
 
 /* Resolve the timeout in ms from the JSON args, falling back to the env
@@ -408,4 +483,5 @@ const struct tool TOOL_BASH = {
             .display_arg = "command",
         },
     .run = run,
+    .preview_tail = 1,
 };

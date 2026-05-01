@@ -361,6 +361,49 @@ static void test_bash_per_call_timeout_invalid(void)
     free(out);
 }
 
+static void test_bash_head_tail_truncation(void)
+{
+    /* Produce ~168 KiB — more than HEAD_CAP+TAIL_CAP (96 KiB), but well
+     * under MAX_BYTES_READ (1 MiB) so the producer finishes naturally
+     * and the tail ring's final bytes are preserved. HEAD and TAIL
+     * markers bookend the stream so we can confirm both ends survive
+     * with the middle elided in the right order. */
+    char *out = call_bash("echo HEAD; seq 1 30000; echo TAIL");
+    const char *p_head = strstr(out, "HEAD");
+    const char *p_elided = strstr(out, "bytes elided");
+    const char *p_tail = strstr(out, "TAIL");
+    EXPECT(p_head != NULL);
+    EXPECT(p_elided != NULL);
+    EXPECT(p_tail != NULL);
+    /* Strict ordering: HEAD in head buffer, elision marker between,
+     * TAIL in tail ring — anything else is a bug in the assembly. */
+    EXPECT(p_head < p_elided);
+    EXPECT(p_elided < p_tail);
+    EXPECT(strstr(out, "[output truncated]") != NULL);
+    free(out);
+}
+
+static void test_bash_short_output_no_elision(void)
+{
+    /* Output that fits comfortably in head should not get an elision
+     * marker — we'd be lying about truncation that didn't happen. */
+    char *out = call_bash("for i in 1 2 3 4 5; do echo line $i; done");
+    EXPECT(strstr(out, "bytes elided") == NULL);
+    EXPECT(strstr(out, "[output truncated]") == NULL);
+    EXPECT_STR_EQ(out, "line 1\nline 2\nline 3\nline 4\nline 5\n");
+    free(out);
+}
+
+static void test_bash_caps_long_line(void)
+{
+    /* Single 5000-byte line (no newlines from `head -c`) gets per-line
+     * capped at MAX_LINE_LEN with an inline marker. */
+    char *out = call_bash("head -c 5000 /dev/zero | tr '\\\\0' x");
+    EXPECT(strstr(out, "bytes elided") != NULL);
+    EXPECT(strlen(out) < 2500);
+    free(out);
+}
+
 static void test_bash_sanitizes_non_utf8(void)
 {
     /* printf \xff produces an invalid UTF-8 byte which must be replaced.
@@ -394,5 +437,8 @@ int main(void)
     test_bash_timeout_huge_does_not_overflow();
     test_bash_per_call_timeout_invalid();
     test_bash_sanitizes_non_utf8();
+    test_bash_head_tail_truncation();
+    test_bash_short_output_no_elision();
+    test_bash_caps_long_line();
     T_REPORT();
 }

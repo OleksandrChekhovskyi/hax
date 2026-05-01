@@ -62,6 +62,16 @@ void gen_uuid_v4(char out[37]);
  * replaced with U+FFFD. Caller frees. */
 char *sanitize_utf8(const char *data, size_t len);
 
+/* Truncate any line in `data` longer than `max_line` bytes to its first
+ * `max_line` bytes followed by an inline `...[N bytes elided]` marker.
+ * Newline structure is preserved (one input line → one output line) so
+ * line-counting downstream still works. Returns a newly-allocated
+ * NUL-terminated string with the result; *out_len receives its byte
+ * length. Caller frees. When no line exceeds the cap, the returned
+ * buffer is a freshly-allocated copy of the input (so the caller can
+ * unconditionally free both old and new pointers). */
+char *cap_line_lengths(const char *data, size_t len, size_t max_line, size_t *out_len);
+
 /* Dynamic byte buffer — append-only, NUL-terminated at current length. */
 struct buf {
     char *data;

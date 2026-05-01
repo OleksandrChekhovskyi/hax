@@ -28,6 +28,11 @@ struct tool {
      * suffix. Caller frees the returned string. */
     char *(*format_display_extra)(const char *args_json);
     int output_is_diff;
+    /* When set, the dim preview shows both ends of long output with the
+     * middle elided — useful for command output where errors/summaries
+     * tend to land at the bottom. The default (head-only) is right for
+     * tools whose output is read top-down (file content). */
+    int preview_tail;
 };
 
 extern const struct tool TOOL_READ;
