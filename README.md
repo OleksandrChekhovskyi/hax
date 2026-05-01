@@ -6,15 +6,15 @@ endpoint.
 
 ## Build
 
-Requires `libcurl`, `jansson`, `libedit`, and `meson`.
+Requires `libcurl`, `jansson`, and `meson`.
 
 ```sh
 # Linux (Debian/Ubuntu)
-sudo apt install libcurl4-openssl-dev libjansson-dev libedit-dev meson ninja-build pkg-config
+sudo apt install libcurl4-openssl-dev libjansson-dev meson ninja-build pkg-config
 
 # macOS (Homebrew)
 brew install jansson meson ninja pkg-config
-# libcurl and libedit ship with macOS
+# libcurl ships with macOS
 
 meson setup build
 meson compile -C build

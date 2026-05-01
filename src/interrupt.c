@@ -258,13 +258,28 @@ static void *watcher_thread(void *arg)
 
 static void restore_tty_only(void)
 {
-    /* Best-effort restoration of the canonical baseline. Used by atexit
-     * and the signal handler — must be async-signal-safe in the latter
-     * case (tcsetattr is in the POSIX async-safe list). */
-    if (W.saved_termios_valid && W.raw_mode_active) {
-        tcsetattr(STDIN_FILENO, TCSANOW, &W.saved_termios);
-        W.raw_mode_active = 0;
-    }
+    /* Best-effort restoration of the canonical baseline. Used by
+     * atexit and the signal handler — both terminal paths (the signal
+     * handler re-raises with SIG_DFL right after this), so the bytes
+     * we write are the last bytes the tty sees from us; interleaving
+     * with a concurrent paint() in input.c is fine because the process
+     * is about to die and stdio buffers don't matter. Must be
+     * async-signal-safe in the signal case: tcsetattr and write(2) are
+     * in the POSIX async-safe list.
+     *
+     * Always restores when we have a saved baseline, regardless of the
+     * watcher's raw_mode_active flag: the prompt editor (input.c) also
+     * puts the tty in raw mode without going through interrupt_arm, so
+     * this path must unwind that case too. Restoring an already-
+     * canonical tty is a harmless no-op. Bracketed paste is also
+     * disabled unconditionally so it doesn't leak to the parent
+     * shell. */
+    if (!W.saved_termios_valid)
+        return;
+    tcsetattr(STDIN_FILENO, TCSANOW, &W.saved_termios);
+    W.raw_mode_active = 0;
+    static const char paste_off[] = "\x1b[?2004l";
+    (void)!write(STDOUT_FILENO, paste_off, sizeof(paste_off) - 1);
 }
 
 static void atexit_handler(void)

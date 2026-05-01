@@ -140,3 +140,13 @@ test_markdown = executable('test_markdown',
     include_directories: tests_inc,
 )
 test('markdown', test_markdown)
+
+test_input_core = executable('test_input_core',
+    sources: [
+        'test_input_core.c',
+        '../src/input_core.c',
+        '../src/util.c',
+    ],
+    include_directories: tests_inc,
+)
+test('input_core', test_input_core)

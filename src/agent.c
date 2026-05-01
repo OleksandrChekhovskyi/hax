@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "agent.h"
 
-#include <editline/readline.h>
 #include <jansson.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -11,6 +10,7 @@
 
 #include "ansi.h"
 #include "env.h"
+#include "input.h"
 #include "interrupt.h"
 #include "markdown.h"
 #include "spinner.h"
@@ -20,20 +20,11 @@
 
 #define INTERRUPT_MARKER "[interrupted]"
 
-/* `\1` / `\2` (RL_PROMPT_{START,END}_IGNORE) tell libedit which bytes are
- * non-printing so its column accounting stays correct. The ASCII variant
- * is used when locale_init_utf8() couldn't establish a UTF-8 LC_CTYPE —
- * libedit would otherwise crash decoding the multibyte glyphs as wchars. */
-#define PROMPT_UTF8                                                                                \
-    "\1" ANSI_MAGENTA ANSI_BOLD "\2"                                                               \
-    "❯"                                                                                            \
-    "\1" ANSI_BOLD_OFF ANSI_FG_DEFAULT "\2"                                                        \
-    " "
-#define PROMPT_ASCII                                                                               \
-    "\1" ANSI_BOLD "\2"                                                                            \
-    ">"                                                                                            \
-    "\1" ANSI_BOLD_OFF "\2"                                                                        \
-    " "
+/* The ASCII fallback is used when locale_init_utf8() couldn't establish a
+ * UTF-8 LC_CTYPE — wcwidth() under a non-UTF-8 locale would mis-account
+ * the multibyte glyph and break cursor positioning. */
+#define PROMPT_UTF8  ANSI_MAGENTA ANSI_BOLD "❯" ANSI_BOLD_OFF ANSI_FG_DEFAULT " "
+#define PROMPT_ASCII ANSI_BOLD ">" ANSI_BOLD_OFF " "
 
 #define DEFAULT_SYSTEM_PROMPT                                                                      \
     "You are hax, a minimalist coding assistant running in the user's terminal. "                  \
@@ -634,6 +625,7 @@ int agent_run(struct provider *p)
     struct disp disp = {.trail = 1};
     struct spinner *spinner = spinner_new("Working...");
     struct md_renderer *md = markdown_enabled() ? md_new(md_emit_to_disp, &disp) : NULL;
+    struct input *input = input_new();
     /* Initialize once — captures the canonical termios baseline and starts
      * the watcher thread. Idempotent; safe even when stdin/stdout aren't
      * ttys (becomes a no-op in that case). */
@@ -643,7 +635,7 @@ int agent_run(struct provider *p)
 
     for (;;) {
         disp_block_separator(&disp);
-        char *line = readline(prompt);
+        char *line = input_readline(input, prompt);
         if (!line) {
             putchar('\n');
             break;
@@ -652,12 +644,12 @@ int agent_run(struct provider *p)
             free(line);
             continue;
         }
-        add_history(line);
+        input_history_add(input, line);
 
         items_append(&items, &n_items, &cap_items,
                      (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup(line)});
         free(line);
-        /* libedit echoed the prompt, the line, and a trailing \n. */
+        /* input_readline left the cursor at column 0 of a fresh row. */
         disp.trail = 1;
 
         /* Aggregated across every model call this user turn produces.
@@ -879,6 +871,7 @@ int agent_run(struct provider *p)
     }
 
     spinner_free(spinner);
+    input_free(input);
     if (md)
         md_free(md);
     for (size_t i = 0; i < n_items; i++)

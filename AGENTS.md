@@ -29,7 +29,7 @@ listing the test source plus the production `.c` files it links against.
 ## Architecture
 
 hax is a single-binary REPL:
-`readline → build context → provider streams events → assemble turn → dispatch tools → loop`.
+`input → build context → provider streams events → assemble turn → dispatch tools → loop`.
 Everything funnels through small, stable interfaces in `src/provider.h` and `src/tool.h`.
 
 **`struct provider` (provider.h)** is the multi-provider seam. Each adapter exposes
@@ -82,7 +82,7 @@ helpers; their headers describe what they do.
 - Multi-resource cleanup: kernel-style goto-unwind labels in reverse-acquisition order
   (`goto err_free_buf:` / `goto err_close_fd:`).
 - `json_decref` jansson roots at end of every turn and at every early-exit.
-  `curl_easy_cleanup` on libcurl handles. `readline()` returns malloc'd memory — caller frees.
+  `curl_easy_cleanup` on libcurl handles. `input_readline()` returns malloc'd memory — caller frees.
 - Skip kernel idioms not portable to userspace: no `likely()`/`unlikely()`, `BUG_ON`,
   `ERR_PTR`, `kmalloc`. Use `<stdint.h>` types (`uint32_t`), plain negative-int returns +
   `errno`.
@@ -92,8 +92,7 @@ helpers; their headers describe what they do.
 ## Dependencies
 
 Current pinned set is in `meson.build` — at time of writing: **libcurl** (HTTPS+SSE),
-**jansson** (JSON), **libedit** (line editing — chosen over GNU readline because hax is MIT),
-**pthreads**.
+**jansson** (JSON), **pthreads**. Line editing is in-tree (`src/input.c`), not a dependency.
 
 Rule: every dependency must be in Debian main and either ship with macOS or be a single
 `brew install`. Don't add a dependency without confirming that property; don't suggest GPL
