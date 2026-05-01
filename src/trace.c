@@ -104,13 +104,14 @@ static int header_name_is(const char *header, const char *name)
     return strncasecmp(header, name, n) == 0 && header[n] == ':';
 }
 
-void trace_request(const char *url, const char *const *headers, const char *body, size_t body_len)
+void trace_request(const char *method, const char *url, const char *const *headers,
+                   const char *body, size_t body_len)
 {
     FILE *fp = get_fp();
     if (!fp)
         return;
 
-    fprintf(fp, "\n## POST %s\n\n", url);
+    fprintf(fp, "\n## %s %s\n\n", method, url);
 
     struct buf hb;
     buf_init(&hb);

@@ -147,7 +147,7 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, idle);
     }
 
-    trace_request(url, headers, body, body_len);
+    trace_request("POST", url, headers, body, body_len);
 
     CURLcode rc = curl_easy_perform(curl);
 
@@ -178,4 +178,74 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
     sse_parser_free(&s.parser);
     buf_free(&s.err_body);
     return (rc == CURLE_OK) ? 0 : -1;
+}
+
+static size_t http_get_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+    struct buf *b = userdata;
+    size_t n = size * nmemb;
+    buf_append(b, ptr, n);
+    return n;
+}
+
+int http_get(const char *url, const char *const *headers, long timeout_s, char **out)
+{
+    *out = NULL;
+
+    CURL *curl = curl_easy_init();
+    if (!curl)
+        return -1;
+
+    struct curl_slist *hl = NULL;
+    for (const char *const *h = headers; h && *h; h++) {
+        struct curl_slist *next = curl_slist_append(hl, *h);
+        if (!next) {
+            curl_slist_free_all(hl);
+            curl_easy_cleanup(curl);
+            return -1;
+        }
+        hl = next;
+    }
+
+    struct buf body;
+    buf_init(&body);
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    if (hl)
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hl);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, http_get_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 2L);
+    if (timeout_s > 0)
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_s);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
+
+    trace_request("GET", url, headers, NULL, 0);
+
+    CURLcode rc = curl_easy_perform(curl);
+    long status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+
+    curl_slist_free_all(hl);
+    curl_easy_cleanup(curl);
+
+    int failed = (rc != CURLE_OK || status < 200 || status >= 300 || !body.data);
+    /* On failure, hand whatever we received (curl error string or response
+     * body) to the trace as the error body so dead probes are visible. */
+    char *err = NULL;
+    if (failed) {
+        if (rc != CURLE_OK)
+            err = xasprintf("libcurl: %s", curl_easy_strerror(rc));
+        else if (body.data)
+            err = xstrdup(body.data);
+    }
+    trace_response_status(status, err);
+    free(err);
+
+    if (failed) {
+        buf_free(&body);
+        return -1;
+    }
+    *out = buf_steal(&body);
+    return 0;
 }

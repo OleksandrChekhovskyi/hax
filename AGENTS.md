@@ -42,6 +42,23 @@ Adapters live in `src/providers/`. Where a provider has a non-trivial SSE-event-
 `stream_event` translation, the pure translation logic is split into a sibling
 `<provider>_events.{c,h}` so it can be unit-tested without HTTP.
 
+**Provider registry (`struct provider_factory`)** — each adapter exports one
+`const struct provider_factory PROVIDER_<NAME>` symbol pairing the `HAX_PROVIDER` env value
+with its constructor. `src/main.c` collects them into `PROVIDERS[]`; the first entry is the
+default when `HAX_PROVIDER` is unset, and the "unknown provider" error builds its supported
+list from the array. Adding a new provider = drop a file under `src/providers/`, append the
+`&PROVIDER_*` symbol to that array, and add the source to `meson.build`.
+
+**Presets over the OpenAI Chat Completions translation** — `openai.c` owns the shared
+message/tool/SSE translation and exposes
+`openai_provider_new_preset(const struct openai_preset *)` plus a thin
+`openai_provider_new()` shim for real OpenAI. The other shims —
+`openai_compat.c` (bring-your-own URL), `llamacpp.c` (with `/v1/models` + `/props` probes),
+and `openrouter.c` (with `/api/v1/models` context-length probe + attribution headers) —
+each supply a `struct openai_preset` declaring defaults: display name, default base URL,
+API-key env fallback, prompt_cache_key policy, extra request headers. New OpenAI-compatible
+backends are typically a ~30-line preset file.
+
 **`struct context` and `struct item` (provider.h)** are the flat conversation view: a sequence
 of `USER_MESSAGE | ASSISTANT_MESSAGE | TOOL_CALL | TOOL_RESULT | REASONING`. `REASONING`
 carries opaque provider-specific JSON (Codex's encrypted chain-of-thought) round-tripped
@@ -63,7 +80,9 @@ recover from). Set `output_is_diff = 1` for tools whose successful output is a u
 missing `--- ` prefix and fall through to the standard dim preview.
 
 **`src/sse.{c,h}`** is a small boundary-safe SSE parser used by adapters.
-**`src/http.{c,h}`** wraps libcurl with an SSE write-callback and a configurable idle timeout.
+**`src/http.{c,h}`** wraps libcurl: `http_sse_post` for the streaming response path (with
+configurable idle timeout and a polled cancel hook), and `http_get` for synchronous JSON
+probes the preset shims use to auto-discover model/context limits at startup.
 
 **`src/ansi.h`** centralizes ANSI escape sequences — never inline `\033[...m` literals; add a
 constant there.

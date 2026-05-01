@@ -131,4 +131,13 @@ struct provider {
     void (*destroy)(struct provider *p);
 };
 
+/* Static provider descriptor. Each provider .c file defines exactly one
+ * `const struct provider_factory PROVIDER_<NAME>` symbol; main.c collects
+ * them into a registry and matches HAX_PROVIDER against `name`. The first
+ * entry in the registry array is the default when HAX_PROVIDER is unset. */
+struct provider_factory {
+    const char *name; /* HAX_PROVIDER value, e.g. "codex", "llama.cpp" */
+    struct provider *(*new)(void);
+};
+
 #endif /* HAX_PROVIDER_H */

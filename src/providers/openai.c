@@ -1,12 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 #include "openai.h"
 
-#include <curl/curl.h>
 #include <jansson.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 #include "http.h"
 #include "interrupt.h"
@@ -21,6 +19,7 @@ struct openai {
     char *endpoint;   /* base_url + "/chat/completions" */
     char *session_id; /* sent as prompt_cache_key when send_cache_key is set */
     int send_cache_key;
+    char **extra_headers; /* NULL-terminated, each element heap-owned; NULL = none */
 };
 
 /* ---------- request body construction ---------- */
@@ -184,24 +183,29 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
 
     char *auth_hdr = o->api_key ? xasprintf("Authorization: Bearer %s", o->api_key) : NULL;
 
-    const char *headers_auth[] = {
-        auth_hdr,
-        "Accept: text/event-stream",
-        "Content-Type: application/json",
-        NULL,
-    };
-    const char *headers_noauth[] = {
-        "Accept: text/event-stream",
-        "Content-Type: application/json",
-        NULL,
-    };
-    const char *const *headers = auth_hdr ? headers_auth : headers_noauth;
+    /* Assemble headers: optional Authorization, the two fixed Accept/
+     * Content-Type lines, and any preset-supplied extras (e.g. OpenRouter's
+     * X-Title). Built dynamically because the extras count is variable. */
+    size_t n_extra = 0;
+    for (char **h = o->extra_headers; h && *h; h++)
+        n_extra++;
+    const char **headers = xmalloc(sizeof(*headers) * (n_extra + 4));
+    size_t hi = 0;
+    if (auth_hdr)
+        headers[hi++] = auth_hdr;
+    headers[hi++] = "Accept: text/event-stream";
+    headers[hi++] = "Content-Type: application/json";
+    for (char **h = o->extra_headers; h && *h; h++)
+        headers[hi++] = *h;
+    headers[hi] = NULL;
 
     struct openai_events ev;
     openai_events_init(&ev, cb, user);
     struct http_response resp;
     int rc = http_sse_post(o->endpoint, headers, body, body_len, on_sse, &ev, interrupt_requested,
                            &resp);
+
+    free(headers);
 
     if (resp.cancelled) {
         /* User-initiated abort — agent layer handles the partial state
@@ -232,86 +236,77 @@ static void openai_destroy(struct provider *p)
     free(o->name_buf);
     free(o->endpoint);
     free(o->session_id);
+    if (o->extra_headers) {
+        for (char **h = o->extra_headers; *h; h++)
+            free(*h);
+        free(o->extra_headers);
+    }
     free(o);
 }
 
-/* Strip trailing '/' from a base URL so "http://x/v1/" and "http://x/v1"
- * produce the same endpoint. */
-static char *dup_trim_trailing_slash(const char *s)
+/* Duplicate a NULL-terminated array of header strings. Returns NULL when
+ * the input is NULL or empty (no headers); otherwise a heap-owned array
+ * with each element xstrdup'd, terminated by a NULL slot. */
+static char **dup_headers(const char *const *src)
 {
-    size_t n = strlen(s);
-    while (n > 0 && s[n - 1] == '/')
-        n--;
-    char *out = xmalloc(n + 1);
-    memcpy(out, s, n);
-    out[n] = '\0';
+    if (!src || !*src)
+        return NULL;
+    size_t n = 0;
+    for (const char *const *p = src; *p; p++)
+        n++;
+    char **out = xmalloc(sizeof(*out) * (n + 1));
+    for (size_t i = 0; i < n; i++)
+        out[i] = xstrdup(src[i]);
+    out[n] = NULL;
     return out;
 }
 
-/* True when the URL targets the real OpenAI host. Used to gate behavior
- * that's only safe/useful against api.openai.com (the OPENAI_API_KEY
- * fallback and the default-on prompt_cache_key). Delegates to libcurl's
- * URL parser so userinfo tricks like "https://api.openai.com:443@attacker/"
- * are correctly rejected — CURLUPART_HOST returns the real host that
- * libcurl will connect to, not whatever sat before the '@'. */
-static int is_real_openai_url(const char *url)
+struct provider *openai_provider_new_preset(const struct openai_preset *preset)
 {
-    CURLU *u = curl_url();
-    if (!u)
-        return 0;
+    struct openai_preset zero = {0};
+    if (!preset)
+        preset = &zero;
 
-    int ok = 0;
-    char *scheme = NULL;
-    char *host = NULL;
-
-    if (curl_url_set(u, CURLUPART_URL, url, 0) == CURLUE_OK &&
-        curl_url_get(u, CURLUPART_SCHEME, &scheme, 0) == CURLUE_OK &&
-        curl_url_get(u, CURLUPART_HOST, &host, 0) == CURLUE_OK) {
-        ok = strcasecmp(scheme, "https") == 0 && strcasecmp(host, "api.openai.com") == 0;
-    }
-
-    curl_free(scheme);
-    curl_free(host);
-    curl_url_cleanup(u);
-    return ok;
-}
-
-struct provider *openai_provider_new(void)
-{
+    /* HAX_OPENAI_BASE_URL beats the preset default; one of them must
+     * resolve to a non-empty value. If neither does, the calling preset
+     * is misconfigured (a programmer error inside hax) — fail loudly so
+     * we don't silently default to api.openai.com under a different
+     * preset's display name. */
     const char *base_env = getenv("HAX_OPENAI_BASE_URL");
-    const char *base = (base_env && *base_env) ? base_env : "https://api.openai.com/v1";
+    const char *base = (base_env && *base_env) ? base_env : preset->default_base_url;
+    if (!base || !*base) {
+        fprintf(stderr, "hax: internal: openai preset has no base URL\n");
+        return NULL;
+    }
     char *base_url = dup_trim_trailing_slash(base);
-    int is_real_openai = is_real_openai_url(base_url);
 
-    /* Only fall back to OPENAI_API_KEY when we're hitting real OpenAI —
-     * otherwise we'd leak a globally configured OpenAI key to whatever
-     * local or third-party server the user pointed us at. */
+    /* Key resolution: HAX_OPENAI_API_KEY → preset->api_key_env (e.g.
+     * OPENAI_API_KEY for the openai preset, OPENROUTER_API_KEY for
+     * openrouter). The openai-compatible preset deliberately leaves
+     * api_key_env unset so a globally configured OPENAI_API_KEY doesn't
+     * leak to a custom endpoint. */
     const char *key = getenv("HAX_OPENAI_API_KEY");
-    if ((!key || !*key) && is_real_openai)
-        key = getenv("OPENAI_API_KEY");
+    if ((!key || !*key) && preset->api_key_env)
+        key = getenv(preset->api_key_env);
 
     const char *name = getenv("HAX_PROVIDER_NAME");
     if (!name || !*name)
-        name = "openai";
+        name = (preset->display_name && *preset->display_name) ? preset->display_name : "openai";
 
-    /* prompt_cache_key is an OpenAI-specific affinity hint for their
-     * prefix-cache routing — it has no semantic meaning to other backends,
-     * which would just ignore it (and a stable per-process UUID isn't a
-     * meaningful key for them anyway). Default on for real OpenAI, off
-     * elsewhere — matches pi-mono, which hostname-gates to api.openai.com;
-     * opencode is even stricter and never sends it on the compat path.
-     * Hosted OpenAI-compatible providers that emulate prefix caching
-     * (Together, Fireworks, OpenRouter, Groq, ...) can opt in via
-     * HAX_OPENAI_SEND_CACHE_KEY. */
+    /* prompt_cache_key is an OpenAI-specific affinity hint for prefix-cache
+     * routing — backends that don't honor it just ignore the field.
+     * HAX_OPENAI_SEND_CACHE_KEY, if set to any non-empty value, forces it
+     * on regardless of the preset's default. */
     const char *force_env = getenv("HAX_OPENAI_SEND_CACHE_KEY");
-    int force_send = force_env && *force_env;
+    int send_cache_key = (force_env && *force_env) ? 1 : preset->send_cache_key_default;
 
     struct openai *o = xcalloc(1, sizeof(*o));
     o->base_url = base_url;
     o->api_key = (key && *key) ? xstrdup(key) : NULL;
     o->name_buf = xstrdup(name);
     o->endpoint = xasprintf("%s/chat/completions", o->base_url);
-    o->send_cache_key = is_real_openai || force_send;
+    o->send_cache_key = send_cache_key;
+    o->extra_headers = dup_headers(preset->extra_headers);
     char uuid[37];
     gen_uuid_v4(uuid);
     o->session_id = xstrdup(uuid);
@@ -320,3 +315,31 @@ struct provider *openai_provider_new(void)
     o->base.destroy = openai_destroy;
     return &o->base;
 }
+
+struct provider *openai_provider_new(void)
+{
+    /* Real OpenAI: api.openai.com is hard-coded and HAX_OPENAI_BASE_URL is
+     * rejected. Custom OpenAI-compat endpoints belong on the dedicated
+     * "openai-compatible" preset, which keeps the policies that matter
+     * for OpenAI itself (OPENAI_API_KEY pickup, prompt_cache_key on)
+     * from leaking to a third-party server. */
+    const char *base_env = getenv("HAX_OPENAI_BASE_URL");
+    if (base_env && *base_env) {
+        fprintf(stderr, "hax: HAX_OPENAI_BASE_URL is not honored by HAX_PROVIDER=openai "
+                        "(this preset is locked to api.openai.com)\n"
+                        "hax: use HAX_PROVIDER=openai-compatible to point at a custom endpoint\n");
+        return NULL;
+    }
+    struct openai_preset preset = {
+        .display_name = "openai",
+        .default_base_url = "https://api.openai.com/v1",
+        .api_key_env = "OPENAI_API_KEY",
+        .send_cache_key_default = 1,
+    };
+    return openai_provider_new_preset(&preset);
+}
+
+const struct provider_factory PROVIDER_OPENAI = {
+    .name = "openai",
+    .new = openai_provider_new,
+};

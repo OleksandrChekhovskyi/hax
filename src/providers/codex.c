@@ -386,3 +386,8 @@ struct provider *codex_provider_new(void)
     json_decref(root);
     return &c->base;
 }
+
+const struct provider_factory PROVIDER_CODEX = {
+    .name = "codex",
+    .new = codex_provider_new,
+};

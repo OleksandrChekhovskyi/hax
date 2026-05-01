@@ -8,4 +8,6 @@
  * Returns NULL on failure (prints cause to stderr). */
 struct provider *codex_provider_new(void);
 
+extern const struct provider_factory PROVIDER_CODEX;
+
 #endif /* HAX_CODEX_H */

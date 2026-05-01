@@ -1,8 +1,8 @@
 # hax
 
-A minimalist coding agent in C. Multi-provider from day one; currently ships
-with adapters for Codex / ChatGPT and any OpenAI-compatible Chat Completions
-endpoint.
+A minimalist coding agent in C. Multi-provider from day one; ships with adapters for Codex /
+ChatGPT and a family of presets over the OpenAI Chat Completions API (real OpenAI, generic
+"OpenAI-compatible" endpoints, llama.cpp llama-server, OpenRouter).
 
 ## Build
 
@@ -22,38 +22,79 @@ meson compile -C build
 
 ## Run
 
-Pick a provider with `HAX_PROVIDER` (default `codex`).
+Pick a provider with `HAX_PROVIDER` (default `codex`). Supported values:
+
+| `HAX_PROVIDER`      | Backend                                                |
+|---------------------|--------------------------------------------------------|
+| `codex` (default)   | Codex Responses API via ChatGPT subscription           |
+| `openai`            | OpenAI Chat Completions at api.openai.com              |
+| `openai-compatible` | Any OpenAI-compatible endpoint (bring your own URL)    |
+| `llama.cpp`         | Local `llama-server` with model + context auto-detect  |
+| `openrouter`        | OpenRouter with attribution + context auto-detect      |
 
 ### Codex (ChatGPT subscription)
 
-Reuses the OAuth token that the official `codex` CLI stores in
-`~/.codex/auth.json`. If the token is expired, run `codex` once to refresh it,
-then re-run `hax`.
+Reuses the OAuth token that the official `codex` CLI stores in `~/.codex/auth.json`. If the
+token is expired, run `codex` once to refresh it, then re-run `hax`.
 
 ```sh
 ./build/hax
 ```
 
-### OpenAI-compatible (real OpenAI, local servers, proxies)
+### OpenAI
 
-Works with anything that speaks `/v1/chat/completions` — the OpenAI API itself,
-or local backends like oMLX, vLLM, llama.cpp, Ollama, etc.
-
-Real OpenAI (base URL and key default to `https://api.openai.com/v1` and
-`$OPENAI_API_KEY`):
+Locked to `https://api.openai.com/v1`. Reads `HAX_OPENAI_API_KEY` (preferred) or
+`OPENAI_API_KEY`.
 
 ```sh
-HAX_PROVIDER=openai HAX_MODEL=gpt-5.4 ./build/hax
+HAX_PROVIDER=openai HAX_MODEL=gpt-5.5 ./build/hax
 ```
 
-Local server:
+`HAX_OPENAI_BASE_URL` is rejected here on purpose — for custom endpoints, use
+`openai-compatible` (which keeps `OPENAI_API_KEY` and `prompt_cache_key` scoped to real
+OpenAI so they don't leak to a third-party server).
+
+### OpenAI-compatible (vLLM, Ollama, LM Studio, oMLX, custom proxies)
+
+Generic preset for any backend that speaks `/v1/chat/completions`. `HAX_OPENAI_BASE_URL` is
+required; no implicit `OPENAI_API_KEY` fallback.
 
 ```sh
-HAX_PROVIDER=openai \
+HAX_PROVIDER=openai-compatible \
 HAX_PROVIDER_NAME=oMLX \
 HAX_OPENAI_BASE_URL=http://127.0.0.1:8000/v1 \
-HAX_OPENAI_API_KEY=... \
 HAX_MODEL=Qwen3.6-35B-A3B-8bit \
+./build/hax
+```
+
+### llama.cpp
+
+Convenience preset for a local `llama-server`. Defaults to `http://127.0.0.1:8080/v1`; set
+`HAX_LLAMACPP_PORT` for a different port, or `HAX_OPENAI_BASE_URL` to override the URL
+entirely. Auto-discovers the loaded model (`/v1/models`) and context window (`/props`), so
+`HAX_MODEL` and `HAX_CONTEXT_LIMIT` are filled for you when unset:
+
+```sh
+HAX_PROVIDER=llama.cpp HAX_LLAMACPP_PORT=9090 ./build/hax
+```
+
+If the server is unreachable and `HAX_MODEL` is unset, hax fails fast with the URL it tried
+and the override knobs. If `HAX_MODEL` is set, the probe is skipped entirely. The `/props`
+probe is best-effort: an older server without that endpoint just leaves the context-percent
+display hidden. If llama-server is started with `--api-key`, set `HAX_OPENAI_API_KEY` to the
+matching token — it's forwarded to the discovery probes too, not just the streaming request.
+
+### OpenRouter
+
+Reads `HAX_OPENAI_API_KEY` (preferred) or `OPENROUTER_API_KEY`. Auto-fills `HAX_CONTEXT_LIMIT`
+from OpenRouter's `/api/v1/models` catalog when unset. Always sends `X-Title: hax` for
+attribution on OpenRouter's leaderboards (override with `HAX_OPENROUTER_TITLE`); add an
+`HTTP-Referer` via `HAX_OPENROUTER_REFERER` if you want one.
+
+```sh
+HAX_PROVIDER=openrouter \
+HAX_MODEL=anthropic/claude-sonnet-4.6 \
+OPENROUTER_API_KEY=... \
 ./build/hax
 ```
 
@@ -61,64 +102,82 @@ HAX_MODEL=Qwen3.6-35B-A3B-8bit \
 
 ### Provider & model
 
-- `HAX_PROVIDER` — `codex` (default) or `openai`
+- `HAX_PROVIDER` — one of `codex` (default), `openai`, `openai-compatible`, `llama.cpp`,
+  `openrouter`
 - `HAX_MODEL` — model id. With `codex`, defaults to `model` from `~/.codex/config.toml`,
-  falling back to `gpt-5.3-codex`; required when using `openai` (hax exits with an error if it's
-  unset)
-- `HAX_SYSTEM_PROMPT` — override the built-in system prompt. Set to an empty string to send no
-  system message at all (some OpenAI-compatible chat templates reject system messages)
-- `HAX_REASONING_EFFORT` — optional. Passed verbatim to the provider: `reasoning.effort` for the
-  Codex Responses API, `reasoning_effort` for Chat Completions. Typical values are `minimal`,
-  `low`, `medium`, `high`, `xhigh` — but hax doesn't validate, so anything the model accepts
-  works. With `codex`, defaults to `model_reasoning_effort` from `~/.codex/config.toml`; otherwise
-  the field is omitted and the server picks its own default. Set it to an empty string to force
-  omission
+  falling back to `gpt-5.3-codex`. With `llama.cpp`, auto-filled from `/v1/models` when
+  unset. With every other provider, required (hax exits with an error if it's unset)
+- `HAX_PROVIDER_NAME` — optional display name; useful with `openai-compatible` to label the
+  banner ("oMLX", "vLLM", …)
+- `HAX_SYSTEM_PROMPT` — override the built-in system prompt. Set to an empty string to send
+  no system message at all (some OpenAI-compatible chat templates reject system messages)
+- `HAX_REASONING_EFFORT` — optional. Passed verbatim to the provider: `reasoning.effort` for
+  the Codex Responses API, `reasoning_effort` for Chat Completions. Typical values are
+  `minimal`, `low`, `medium`, `high`, `xhigh` — but hax doesn't validate, so anything the
+  model accepts works. With `codex`, defaults to `model_reasoning_effort` from
+  `~/.codex/config.toml`; otherwise the field is omitted and the server picks its own
+  default. Set it to an empty string to force omission
 
-### OpenAI provider
+### OpenAI-family auth and routing (openai, openai-compatible, llama.cpp, openrouter)
 
-- `HAX_OPENAI_BASE_URL` — optional for `openai`; defaults to `https://api.openai.com/v1`; set to
-  point at a local or proxy endpoint
-- `HAX_OPENAI_API_KEY` — optional for `openai`; sent as `Authorization: Bearer`. Falls back to
-  `OPENAI_API_KEY` only when the resolved base URL targets real OpenAI (default or explicit
-  `https://api.openai.com/...`), so a globally configured OpenAI key is never forwarded to a
-  custom endpoint. May be omitted for local servers that don't require auth
-- `HAX_PROVIDER_NAME` — optional display name for the `openai` provider
+- `HAX_OPENAI_BASE_URL` — required for `openai-compatible`; overrides the default for
+  `llama.cpp`; rejected by `openai` and `openrouter` (both locked to their real hosts so
+  their default API-key fallbacks can't leak to an unrelated endpoint)
+- `HAX_OPENAI_API_KEY` — preferred Bearer token across all OpenAI-family presets. Each
+  preset also picks up its conventional global as a fallback: `OPENAI_API_KEY` for `openai`,
+  `OPENROUTER_API_KEY` for `openrouter`. `openai-compatible` deliberately has no global
+  fallback so a configured OpenAI key isn't forwarded to an unrelated endpoint
 - `HAX_OPENAI_SEND_CACHE_KEY` — set to any non-empty value to send a stable per-session
-  `prompt_cache_key` even when `HAX_OPENAI_BASE_URL` is custom. Useful for hosted
-  OpenAI-compatible providers (Together, Fireworks, Groq, OpenRouter, etc.) whose prefix caching
-  benefits from an affinity hint. Off by default for non-OpenAI URLs because some local servers
-  (notably vLLM) reject unknown JSON fields. Always sent to real `api.openai.com`
+  `prompt_cache_key`. On by default for `openai` and `openrouter` (both honor prefix
+  caching); off by default for `openai-compatible` and `llama.cpp` because some local
+  servers (notably vLLM) reject unknown JSON fields. This switch lets hosted compat
+  backends like Together, Fireworks, or Groq opt in
+
+### llama.cpp preset
+
+- `HAX_LLAMACPP_PORT` — optional. Port for the local `llama-server` (defaults to `8080`).
+  Used only when `HAX_OPENAI_BASE_URL` is unset; the URL becomes
+  `http://127.0.0.1:<port>/v1`
+
+### OpenRouter preset
+
+- `OPENROUTER_API_KEY` — fallback API key when `HAX_OPENAI_API_KEY` is unset
+- `HAX_OPENROUTER_TITLE` — `X-Title` header value (defaults to `hax`); shown on OpenRouter's
+  attribution dashboards
+- `HAX_OPENROUTER_REFERER` — optional `HTTP-Referer` header; omitted when unset
 
 ### Runtime limits
 
-- `HAX_HTTP_IDLE_TIMEOUT` — optional. App-layer silence on a streaming response before libcurl
-  gives up with `Timeout was reached`. Accepts plain seconds or a `ms`/`s`/`m`/`h` suffix (e.g.
-  `10m`, `2h`). Default `600`; set to `0` to disable. Bump or disable when running against a
-  local server (e.g. `llama-server`) whose prompt evaluation can take longer than the default
-  and that doesn't send SSE heartbeats
+- `HAX_HTTP_IDLE_TIMEOUT` — optional. App-layer silence on a streaming response before
+  libcurl gives up with `Timeout was reached`. Accepts plain seconds or a `ms`/`s`/`m`/`h`
+  suffix (e.g. `10m`, `2h`). Default `600`; set to `0` to disable. Bump or disable when
+  running against a local server (e.g. `llama-server`) whose prompt evaluation can take
+  longer than the default and that doesn't send SSE heartbeats
 - `HAX_BASH_TIMEOUT` — optional. How long the `bash` tool will wait for a command to complete
-  before sending SIGTERM to the whole process group and reporting `[timed out after Ns]` to the
-  model. Accepts plain seconds or a `ms`/`s`/`m`/`h` suffix. Default `120` (2 min); set to `0`
-  to disable. The model can also pass `timeout_seconds` per call to override this for slow
-  commands (test suites, builds)
+  before sending SIGTERM to the whole process group and reporting `[timed out after Ns]` to
+  the model. Accepts plain seconds or a `ms`/`s`/`m`/`h` suffix. Default `120` (2 min); set
+  to `0` to disable. The model can also pass `timeout_seconds` per call to override this
+  for slow commands (test suites, builds)
 - `HAX_BASH_TIMEOUT_MAX` — optional. Hard ceiling on the per-call `timeout_seconds` override
   the model can request. Same suffix syntax as above. Default `1800` (30 min); set to `0` to
-  disable the ceiling. Without a cap, a confused model can request "1 day" and the safety net
-  erodes
+  disable the ceiling. Without a cap, a confused model can request "1 day" and the safety
+  net erodes
 - `HAX_BASH_TIMEOUT_GRACE` — optional. Window after the SIGTERM during which the command can
   wind down cleanly (flush output, drop locks, remove temp files) before SIGKILL escalates.
-  Same suffix syntax as above. Default `2` (seconds); set to `0` to skip the grace window and
-  SIGKILL immediately
+  Same suffix syntax as above. Default `2` (seconds); set to `0` to skip the grace window
+  and SIGKILL immediately
 
 ### Display & observability
 
 - `HAX_CONTEXT_LIMIT` — optional. Model's context window, used to show a percentage on the
-  per-turn usage line. Accepts a plain number or a `k`/`m` suffix (1024-base): `256k`, `128K`,
-  `1m`, `262144`. There's no reliable way to auto-detect this across local OpenAI-compatible
-  servers, so it's opt-in. When unset, hax shows the absolute counts only
-- `HAX_TRACE` — path to a Markdown file that will receive a pretty-printed dump of every HTTP
-  request, response status, and SSE event (Authorization redacted). Opened in append mode;
-  `tail -f` works, but the file is most readable when opened in an editor that renders Markdown
+  per-turn usage line. Accepts a plain number or a `k`/`m` suffix (1024-base): `256k`,
+  `128K`, `1m`, `262144`. Auto-detected for `llama.cpp` (from `/props`) and `openrouter`
+  (from the catalog's `context_length`); manual everywhere else. When unset and
+  undetectable, hax shows the absolute counts only
+- `HAX_TRACE` — path to a Markdown file that will receive a pretty-printed dump of every
+  HTTP request, response status, and SSE event (Authorization redacted). Opened in append
+  mode; `tail -f` works, but the file is most readable when opened in an editor that renders
+  Markdown
 
 ## License
 

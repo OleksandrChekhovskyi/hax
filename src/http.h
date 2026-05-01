@@ -24,4 +24,17 @@ typedef int (*http_cancel_cb)(void);
 int http_sse_post(const char *url, const char *const *headers, const char *body, size_t body_len,
                   sse_cb cb, void *user, http_cancel_cb cancel, struct http_response *resp);
 
+/* Synchronous GET into a freshly-allocated NUL-terminated buffer. Used for
+ * small JSON probes (e.g. /v1/models, /props) where streaming is overkill.
+ *
+ * Returns 0 on 2xx with *out set to a heap-owned response body (caller
+ * frees). Returns -1 on any failure — transport, non-2xx, empty body — with
+ * *out=NULL; the caller decides whether to surface or ignore the failure.
+ *
+ * `headers` is an optional NULL-terminated array of "Key: Value" strings,
+ * may be NULL. `timeout_s` is the total request timeout in seconds; pass 0
+ * to disable. Connect timeout is fixed at a short value so an unreachable
+ * host fails fast. */
+int http_get(const char *url, const char *const *headers, long timeout_s, char **out);
+
 #endif /* HAX_HTTP_H */

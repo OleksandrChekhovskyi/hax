@@ -366,6 +366,17 @@ char *expand_home(const char *path)
     return xasprintf("%s%s", home, path + 1);
 }
 
+char *dup_trim_trailing_slash(const char *s)
+{
+    size_t n = strlen(s);
+    while (n > 0 && s[n - 1] == '/')
+        n--;
+    char *out = xmalloc(n + 1);
+    memcpy(out, s, n);
+    out[n] = '\0';
+    return out;
+}
+
 long parse_duration_ms(const char *s)
 {
     if (!s || !*s)
