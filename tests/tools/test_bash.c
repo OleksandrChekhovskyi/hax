@@ -413,6 +413,30 @@ static void test_bash_sanitizes_non_utf8(void)
     free(out);
 }
 
+static void test_bash_binary_output_suppressed(void)
+{
+    /* A NUL byte in the stream marks the output binary. The body is
+     * replaced with the suppression marker; no U+FFFD glyphs leak
+     * through, and the exit footer (success here) is preserved. */
+    char *out = call_bash("printf 'BEFORE\\\\0AFTER'");
+    EXPECT(strstr(out, "[binary output suppressed:") != NULL);
+    EXPECT(strstr(out, "bytes]") != NULL);
+    EXPECT(strstr(out, "BEFORE") == NULL);
+    EXPECT(strstr(out, "AFTER") == NULL);
+    EXPECT(strstr(out, "\xEF\xBF\xBD") == NULL);
+    free(out);
+}
+
+static void test_bash_binary_output_keeps_exit_footer(void)
+{
+    /* Binary output that exits non-zero must still surface the exit
+     * code so the model can tell success from failure. */
+    char *out = call_bash("printf 'BEFORE\\\\0AFTER'; exit 7");
+    EXPECT(strstr(out, "[binary output suppressed:") != NULL);
+    EXPECT(strstr(out, "[exit 7]") != NULL);
+    free(out);
+}
+
 int main(void)
 {
     test_bash_invalid_json();
@@ -437,6 +461,8 @@ int main(void)
     test_bash_timeout_huge_does_not_overflow();
     test_bash_per_call_timeout_invalid();
     test_bash_sanitizes_non_utf8();
+    test_bash_binary_output_suppressed();
+    test_bash_binary_output_keeps_exit_footer();
     test_bash_head_tail_truncation();
     test_bash_short_output_no_elision();
     test_bash_caps_long_line();

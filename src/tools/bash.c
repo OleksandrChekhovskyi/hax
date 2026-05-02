@@ -119,12 +119,57 @@ static int assemble_head_tail(struct buf *out, struct buf *head, const char *tai
     return elided > 0;
 }
 
+/* Append the trailing exit/timeout/interrupt status to a result buffer.
+ * Interrupt takes precedence over timeout — if both fire (rare: deadline
+ * hits during the grace window of a user-Esc), the user-driven cause is
+ * the more useful explanation. */
+static void append_footers(struct buf *out, int timed_out, int interrupted, long timeout_ms,
+                           int status)
+{
+    if (interrupted) {
+        buf_append_str(out, "\n[interrupted]");
+    } else if (timed_out) {
+        char human[32];
+        format_timeout_for_model(human, sizeof(human), timeout_ms);
+        char tmp[64];
+        snprintf(tmp, sizeof(tmp), "\n[timed out after %s]", human);
+        buf_append_str(out, tmp);
+    } else if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
+        if (code != 0) {
+            char tmp[64];
+            snprintf(tmp, sizeof(tmp), "\n[exit %d]", code);
+            buf_append_str(out, tmp);
+        }
+    } else if (WIFSIGNALED(status)) {
+        char tmp[64];
+        snprintf(tmp, sizeof(tmp), "\n[signal %d]", WTERMSIG(status));
+        buf_append_str(out, tmp);
+    }
+}
+
 /* Build the final tool result from the captured head/tail ring and exit
  * metadata. Consumes `head` (calls buf_free on it). */
 static char *format_run_output(struct buf *head, const char *tail, size_t tail_pos,
-                               int tail_wrapped, size_t total_bytes, int timed_out, int interrupted,
-                               long timeout_ms, int status)
+                               int tail_wrapped, size_t total_bytes, int has_nul, int timed_out,
+                               int interrupted, long timeout_ms, int status)
 {
+    /* Binary output: a NUL byte essentially never appears in legitimate
+     * text output, but executables, archives, and images contain it
+     * pervasively. Showing the user a wall of U+FFFD glyphs and feeding
+     * the same to the model is pure waste — replace the body with a
+     * concise marker and keep only the exit/timeout footer. */
+    if (has_nul) {
+        buf_free(head);
+        struct buf out;
+        buf_init(&out);
+        char tmp[80];
+        snprintf(tmp, sizeof(tmp), "[binary output suppressed: %zu bytes]", total_bytes);
+        buf_append_str(&out, tmp);
+        append_footers(&out, timed_out, interrupted, timeout_ms, status);
+        return buf_steal(&out);
+    }
+
     struct buf raw;
     buf_init(&raw);
     int truncated = assemble_head_tail(&raw, head, tail, tail_pos, tail_wrapped, total_bytes);
@@ -151,29 +196,7 @@ static char *format_run_output(struct buf *head, const char *tail, size_t tail_p
     if (truncated)
         buf_append_str(&out, "\n[output truncated]");
 
-    /* Interrupt takes precedence over timeout in the footer — if both
-     * fire (rare: deadline hits during the grace window of a user-Esc),
-     * the user-driven cause is the more useful explanation. */
-    if (interrupted) {
-        buf_append_str(&out, "\n[interrupted]");
-    } else if (timed_out) {
-        char human[32];
-        format_timeout_for_model(human, sizeof(human), timeout_ms);
-        char tmp[64];
-        snprintf(tmp, sizeof(tmp), "\n[timed out after %s]", human);
-        buf_append_str(&out, tmp);
-    } else if (WIFEXITED(status)) {
-        int code = WEXITSTATUS(status);
-        if (code != 0) {
-            char tmp[64];
-            snprintf(tmp, sizeof(tmp), "\n[exit %d]", code);
-            buf_append_str(&out, tmp);
-        }
-    } else if (WIFSIGNALED(status)) {
-        char tmp[64];
-        snprintf(tmp, sizeof(tmp), "\n[signal %d]", WTERMSIG(status));
-        buf_append_str(&out, tmp);
-    }
+    append_footers(&out, timed_out, interrupted, timeout_ms, status);
 
     if (out.len == 0)
         buf_append_str(&out, "(no output)");
@@ -241,6 +264,7 @@ static char *run_shell(const char *cmd, long timeout_ms)
     size_t tail_pos = 0;
     int tail_wrapped = 0;
     size_t total_bytes = 0;
+    int has_nul = 0;
     char chunk[4096];
 
     for (;;) {
@@ -362,6 +386,8 @@ static char *run_shell(const char *cmd, long timeout_ms)
             break;
         }
         total_bytes += (size_t)r;
+        if (!has_nul && memchr(chunk, '\0', (size_t)r))
+            has_nul = 1;
         size_t consumed = 0;
         if (head.len < HEAD_CAP) {
             size_t room = HEAD_CAP - head.len;
@@ -402,7 +428,7 @@ static char *run_shell(const char *cmd, long timeout_ms)
         }
     }
 
-    return format_run_output(&head, tail, tail_pos, tail_wrapped, total_bytes, timed_out,
+    return format_run_output(&head, tail, tail_pos, tail_wrapped, total_bytes, has_nul, timed_out,
                              interrupted, timeout_ms, status);
 }
 

@@ -141,6 +141,16 @@ test_markdown = executable('test_markdown',
 )
 test('markdown', test_markdown)
 
+test_ctrl_strip = executable('test_ctrl_strip',
+    sources: [
+        'test_ctrl_strip.c',
+        '../src/ctrl_strip.c',
+        '../src/util.c',
+    ],
+    include_directories: tests_inc,
+)
+test('ctrl_strip', test_ctrl_strip)
+
 test_input_core = executable('test_input_core',
     sources: [
         'test_input_core.c',

@@ -23,6 +23,7 @@ threads = dependency('threads')
 
 sources = files(
     'src/agent.c',
+    'src/ctrl_strip.c',
     'src/diff.c',
     'src/env.c',
     'src/fs.c',

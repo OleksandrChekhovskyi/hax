@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "ansi.h"
+#include "ctrl_strip.h"
 #include "env.h"
 #include "input.h"
 #include "interrupt.h"
@@ -85,12 +86,20 @@ static const struct tool *find_tool(const char *name)
     return NULL;
 }
 
+/* Tool output flows through ctrl_strip_dup before reaching the display or
+ * the conversation history. Tools that wrap arbitrary commands (bash) can
+ * surface terminal control bytes — colors, cursor moves, OSC titles, FF
+ * clear-screen, charset-shift codes — that would otherwise corrupt the
+ * dim-styled preview block and waste tokens once mirrored back to the
+ * model. Stripping at this single boundary keeps display and history in
+ * sync. */
 static char *dispatch_tool(const char *name, const char *args_json)
 {
     const struct tool *t = find_tool(name);
-    if (t)
-        return t->run(args_json);
-    return xasprintf("unknown tool: %s", name);
+    char *raw = t ? t->run(args_json) : xasprintf("unknown tool: %s", name);
+    char *clean = ctrl_strip_dup(raw);
+    free(raw);
+    return clean;
 }
 
 static void items_append(struct item **items, size_t *n, size_t *cap, struct item it)
