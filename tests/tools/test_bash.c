@@ -103,10 +103,32 @@ static void test_bash_stdin_detached(void)
     free(out);
 }
 
+static void test_bash_dev_tty_does_not_hang(void)
+{
+    /* Programs that bypass stdin and read /dev/tty directly (sudo,
+     * ssh host-key prompts, gpg passphrase prompts, …) would block
+     * indefinitely on the slave PTY with no way for the agent to
+     * deliver input. run_shell skips TIOCSCTTY when wiring up the
+     * pty, so the child has no controlling terminal and /dev/tty
+     * opens fail with ENXIO instead. The first command's
+     * tcsetattr/stty variant covers the case where a child resets
+     * termios via /dev/tty (which would clobber a VMIN=0 defense)
+     * — the open fails before any termios manipulation happens.
+     * Worst case here is timeout, so a tight elapsed bound is the
+     * load-bearing assertion; the marker check is sanity. */
+    time_t t0 = time(NULL);
+    char *out = call_bash("stty sane </dev/tty 2>&1; cat /dev/tty 2>&1; echo done");
+    time_t elapsed = time(NULL) - t0;
+    EXPECT(elapsed < 3);
+    EXPECT(strstr(out, "done") != NULL);
+    free(out);
+}
+
 static void test_bash_background_job_does_not_hang(void)
 {
-    /* Shell exits immediately; backgrounded sleep would keep the pipe open
-     * unless pgroup cleanup releases it. */
+    /* Shell exits immediately; backgrounded sleep would keep the pty
+     * slave open (and so the master readable) unless pgroup cleanup
+     * releases it. */
     time_t t0 = time(NULL);
     char *out = call_bash("echo spawned; sleep 30 &");
     time_t elapsed = time(NULL) - t0;
@@ -204,21 +226,27 @@ static void test_bash_timeout_escalates_to_sigkill(void)
     unsetenv("HAX_BASH_TIMEOUT_GRACE");
 }
 
-static void test_bash_timeout_grace_allows_background_cleanup(void)
+static void test_bash_timeout_grace_allows_cleanup(void)
 {
-    /* Backgrounded subshell traps SIGTERM and takes a moment to finish
-     * cleanup before exiting; the outer shell has no trap and exits
-     * immediately on SIGTERM. The naive "shell exited → SIGKILL pgroup"
-     * path would cut off the subshell's cleanup the moment we reap the
-     * outer shell. The grace window must defer that pgroup-collapse so
-     * background workers can flush. Trap delay (100ms) is comfortably
-     * longer than the loop's 10ms poll cadence so the outer shell is
-     * reaped before the subshell finishes — exactly the buggy timing.
-     * The 80ms timeout gives the subshell margin to install its trap
-     * before SIGTERM arrives (matters under ASan, which slows fork). */
-    setenv("HAX_BASH_TIMEOUT", "80ms", 1);
+    /* Foreground shell traps SIGTERM and takes a moment to flush output
+     * before exiting (the common pytest / npm-test / cargo-test
+     * cleanup-handler pattern). The naive "deadline hit → SIGKILL"
+     * path would lose that final output. The grace window defers the
+     * SIGKILL so well-behaved cleanup handlers can finish. The shell
+     * parses the script before launching `sleep 30`, so the trap is
+     * installed before SIGTERM can arrive — no extra ASan margin
+     * needed in the timeout.
+     *
+     * Scope: this is the only grace-cleanup pattern the bash tool
+     * preserves under PTY. Backgrounded-subshell cleanup that flushes
+     * AFTER the outer shell exits — which the pre-PTY pipe path
+     * supported — can't be captured because session-leader exit both
+     * triggers a SIGHUP cascade to the foreground pgroup and (on
+     * macOS) revokes the slave. See the EOF branch in run_shell for
+     * the full reasoning. */
+    setenv("HAX_BASH_TIMEOUT", "50ms", 1);
     setenv("HAX_BASH_TIMEOUT_GRACE", "500ms", 1);
-    char *out = call_bash("(trap 'sleep 0.1; echo cleaned' TERM; sleep 30) & wait");
+    char *out = call_bash("trap 'sleep 0.05; echo cleaned; exit' TERM; sleep 30");
     EXPECT(strstr(out, "cleaned") != NULL);
     EXPECT(strstr(out, "[timed out") != NULL);
     free(out);
@@ -243,17 +271,43 @@ static void test_bash_timeout_grace_disabled(void)
     unsetenv("HAX_BASH_TIMEOUT_GRACE");
 }
 
+static void test_bash_timeout_no_grace_short_timeout(void)
+{
+    /* Smallest practical timeout (1ms) with grace disabled — the
+     * single-shot SIGKILL on deadline must still reach the child even
+     * though forkpty's setsid() in the child races with the parent's
+     * first kill. The race is a POSIX-permitted ordering: if the
+     * parent kills before the child setsid()'s, kill(-pid, …) fails
+     * with ESRCH and the post-loop waitpid would block until the
+     * command exits naturally (here, 30s of sleep). The race window
+     * is microseconds and doesn't reliably reproduce on macOS, but
+     * kill_descendants() in run_shell falls back to kill(pid, …) on
+     * ESRCH so the path is correct under both orderings on any
+     * platform. */
+    setenv("HAX_BASH_TIMEOUT", "1ms", 1);
+    setenv("HAX_BASH_TIMEOUT_GRACE", "0", 1);
+    time_t t0 = time(NULL);
+    char *out = call_bash("sleep 30");
+    time_t elapsed = time(NULL) - t0;
+    EXPECT(elapsed < 2);
+    EXPECT(strstr(out, "[timed out after 1ms]") != NULL);
+    free(out);
+    unsetenv("HAX_BASH_TIMEOUT");
+    unsetenv("HAX_BASH_TIMEOUT_GRACE");
+}
+
 static void test_bash_timeout_grace_no_escape_via_pipe_close(void)
 {
-    /* A descendant traps SIGTERM, redirects stdout/stderr away from the
-     * pipe (closing it), and runs CPU work. Without the EOF-during-
-     * grace handling, the parent reads EOF and returns immediately —
-     * the descendant survives. With the fix, the grace-window SIGKILL
-     * collapses the pgroup. We probe the pgroup directly: the subshell
-     * records its PGID via $$ (POSIX: subshell inherits parent shell's
-     * $$, and the parent IS the pgroup leader). The 80ms timeout gives
-     * the subshell margin to write $$ and install its trap before
-     * SIGTERM arrives (matters under ASan, which slows fork). */
+    /* A descendant traps SIGTERM, redirects stdout/stderr away from
+     * the slave (closing its references), and runs CPU work. Without
+     * the EOF-during-grace handling, the parent reads EOF and returns
+     * immediately — the descendant survives. With the fix, the grace-
+     * window SIGKILL collapses the pgroup. We probe the pgroup
+     * directly: the subshell records its PGID via $$ (POSIX: subshell
+     * inherits parent shell's $$, and the parent IS the pgroup
+     * leader). The 80ms timeout gives the subshell margin to write
+     * $$ and install its trap before SIGTERM arrives (matters under
+     * ASan, which slows fork). */
     setenv("HAX_BASH_TIMEOUT", "80ms", 1);
     setenv("HAX_BASH_TIMEOUT_GRACE", "20ms", 1);
 
@@ -307,18 +361,22 @@ static void test_bash_timeout_grace_no_escape_via_pipe_close(void)
 static void test_bash_redirected_background_job_does_not_leak(void)
 {
     /* `sleep N >/dev/null 2>&1 &` redirects its output away from the
-     * pipe and detaches; the shell exits immediately, the pipe closes,
-     * and EOF can arrive before the parent's iteration-top waitpid
-     * notices the shell is gone. Without explicit pgroup cleanup at
-     * EOF, the backgrounded sleep would survive past our return and
-     * leak indefinitely. We capture sleep's pid via $! so the test
-     * can verify the cleanup actually fired. */
+     * slave and detaches; the shell exits immediately, the last slave
+     * reference drops, and EOF can arrive before the parent's
+     * iteration-top waitpid notices the shell is gone. Without
+     * explicit pgroup cleanup at EOF, the backgrounded sleep would
+     * survive past our return and leak indefinitely. `nohup` makes
+     * sleep ignore SIGHUP — without that, the kernel's controlling-
+     * terminal SIGHUP cascade (sent when the session leader / shell
+     * exits under PTY) would kill sleep on its own and mask whether
+     * our explicit pgroup-cleanup is doing the work. We capture
+     * sleep's pid via $! so the test can verify the cleanup fired. */
     char path[] = "/tmp/hax-test-bg-pid-XXXXXX";
     int fd = mkstemp(path);
     EXPECT(fd >= 0);
     close(fd);
 
-    char *cmd = xasprintf("sleep 30 >/dev/null 2>&1 & echo $! > %s", path);
+    char *cmd = xasprintf("nohup sleep 30 >/dev/null 2>&1 & echo $! > %s", path);
     char *args = xasprintf("{\"command\":\"%s\"}", cmd);
     char *out = TOOL_BASH.run(args, NULL, NULL);
     free(args);
@@ -389,7 +447,7 @@ static void test_bash_head_tail_truncation(void)
      * and the tail ring's final bytes are preserved. HEAD and TAIL
      * markers bookend the stream so we can confirm both ends survive
      * with the middle elided in the right order. */
-    char *out = call_bash("echo HEAD; seq 1 30000; echo TAIL");
+    char *out = call_bash("echo HEAD; seq 1 20000; echo TAIL");
     const char *p_head = strstr(out, "HEAD");
     const char *p_elided = strstr(out, "bytes elided");
     const char *p_tail = strstr(out, "TAIL");
@@ -509,12 +567,12 @@ static void test_bash_streamed_binary_marker_isolated_from_escape(void)
     struct capture cap = {0};
     buf_init(&cap.buf);
     /* The first printf emits an unterminated CSI introducer; the
-     * second pads enough bytes to (likely) flush the kernel pipe in
+     * second pads enough bytes to (likely) flush the kernel buffer in
      * its own read so streamed_anything becomes true before the
      * trailing NUL triggers binary suppression. ESC is encoded as
      *  so the JSON parser accepts it. */
     char *out =
-        call_bash_streamed("printf '\\u001b['; sleep 0.05; printf 'pad pad pad pad\\\\0bin'", &cap);
+        call_bash_streamed("printf '\\u001b['; sleep 0.03; printf 'pad pad pad pad\\\\0bin'", &cap);
     EXPECT(out != NULL);
     EXPECT(cap.buf.data != NULL);
     /* Marker must reach emit_display. */
@@ -529,6 +587,104 @@ static void test_bash_streamed_binary_marker_isolated_from_escape(void)
     buf_free(&cap.buf);
 }
 
+static void test_bash_stdout_is_a_tty(void)
+{
+    /* The whole point of forkpty: child sees stdout as a TTY, so libc
+     * line-buffers and tools like grep/awk/python flush per-line in the
+     * pipeline downstream. `[ -t 1 ]` is the smallest portable probe. */
+    char *out = call_bash("[ -t 1 ] && echo TTY || echo NOTTY");
+    EXPECT_STR_EQ(out, "TTY\n");
+    free(out);
+}
+
+static void test_bash_stderr_is_a_tty(void)
+{
+    /* Stderr too, so colorized error output (cargo, rustc, clang) lands
+     * the same way as in a real terminal. */
+    char *out = call_bash("[ -t 2 ] && echo TTY 1>&2 || echo NOTTY 1>&2");
+    EXPECT_STR_EQ(out, "TTY\n");
+    free(out);
+}
+
+static void test_bash_interactive_helpers_neutralized(void)
+{
+    /* With a real TTY, common commands hand control off to interactive
+     * helpers — pagers (git log/diff, man, systemctl) or editors (git
+     * commit / rebase -i without -m, crontab -e). Both block forever
+     * waiting for input the agent can't deliver. The bash tool
+     * forces pagers to `cat` (passthrough) and editors to `false`
+     * (fail-closed — git treats a non-zero editor exit as "abort",
+     * which keeps `git commit --amend` from silently rewriting the
+     * commit with the old message and `git rebase -i` from silently
+     * no-op'ing through the default plan). Override each var the
+     * relevant tool consults: man prefers MANPAGER over PAGER; git
+     * commit prefers GIT_EDITOR over VISUAL over EDITOR. Verify they
+     * all land at the shell as expected, even when the parent has
+     * them set to something blocking. */
+    setenv("MANPAGER", "less", 1);
+    setenv("SYSTEMD_PAGER", "less", 1);
+    setenv("GIT_EDITOR", "vim", 1);
+    setenv("VISUAL", "vim", 1);
+    setenv("EDITOR", "vim", 1);
+    char *out = call_bash("echo $PAGER; echo $GIT_PAGER; echo $MANPAGER; echo $SYSTEMD_PAGER; "
+                          "echo $GIT_EDITOR; echo $VISUAL; echo $EDITOR");
+    EXPECT_STR_EQ(out, "cat\ncat\ncat\ncat\nfalse\nfalse\nfalse\n");
+    free(out);
+    unsetenv("MANPAGER");
+    unsetenv("SYSTEMD_PAGER");
+    unsetenv("GIT_EDITOR");
+    unsetenv("VISUAL");
+    unsetenv("EDITOR");
+}
+
+static void test_bash_term_default(void)
+{
+    /* TERM defaults to xterm-256color when unset (the common case in a
+     * headless agent) so programs that gate colors on TERM emit them.
+     * Save/restore the parent's TERM so the order of these env-touching
+     * tests doesn't leak into anything that might run between them. */
+    const char *saved = getenv("TERM");
+    char *saved_dup = saved ? xstrdup(saved) : NULL;
+    unsetenv("TERM");
+    char *out = call_bash("echo $TERM");
+    EXPECT_STR_EQ(out, "xterm-256color\n");
+    free(out);
+    if (saved_dup) {
+        setenv("TERM", saved_dup, 1);
+        free(saved_dup);
+    }
+}
+
+static void test_bash_term_user_override_preserved(void)
+{
+    /* User-set TERM passes through — setenv with overwrite=0 must not
+     * clobber it. Otherwise user choice (TERM=dumb, TERM=screen, …)
+     * would be silently lost. */
+    const char *saved = getenv("TERM");
+    char *saved_dup = saved ? xstrdup(saved) : NULL;
+    setenv("TERM", "dumb", 1);
+    char *out = call_bash("echo $TERM");
+    EXPECT_STR_EQ(out, "dumb\n");
+    free(out);
+    if (saved_dup) {
+        setenv("TERM", saved_dup, 1);
+        free(saved_dup);
+    } else {
+        unsetenv("TERM");
+    }
+}
+
+static void test_bash_lf_not_crlf(void)
+{
+    /* PTY default termios maps LF→CRLF on output (ONLCR). With OPOST
+     * cleared via make_raw_termios, child's `\n` reaches us as `\n`,
+     * not `\r\n` — preserves byte-for-byte fidelity in the captured
+     * history. The two-line probe forces a between-lines newline. */
+    char *out = call_bash("printf 'a\\nb\\n'");
+    EXPECT_STR_EQ(out, "a\nb\n");
+    free(out);
+}
+
 static void test_bash_streamed_history_truncated(void)
 {
     /* Streamed bash history must apply the same head/tail caps as the
@@ -538,7 +694,7 @@ static void test_bash_streamed_history_truncated(void)
      * many lines deterministically. */
     struct capture cap = {0};
     buf_init(&cap.buf);
-    char *out = call_bash_streamed("yes hi | head -c 500000", &cap);
+    char *out = call_bash_streamed("yes hi | head -c 150000", &cap);
     /* Truncation marker is the unambiguous signal that the legacy
      * head/tail pipeline ran. */
     EXPECT(strstr(out, "[output truncated]") != NULL);
@@ -564,6 +720,7 @@ int main(void)
     test_bash_signal();
     test_bash_no_output();
     test_bash_stdin_detached();
+    test_bash_dev_tty_does_not_hang();
     test_bash_background_job_does_not_hang();
     test_bash_foreground_infinite_writer_caps();
     test_bash_timeout_kills_process_tree();
@@ -571,9 +728,10 @@ int main(void)
     test_bash_per_call_timeout_clamped_to_max();
     test_bash_timeout_graceful_sigterm();
     test_bash_timeout_escalates_to_sigkill();
-    test_bash_timeout_grace_allows_background_cleanup();
+    test_bash_timeout_grace_allows_cleanup();
     test_bash_timeout_grace_no_escape_via_pipe_close();
     test_bash_timeout_grace_disabled();
+    test_bash_timeout_no_grace_short_timeout();
     test_bash_redirected_background_job_does_not_leak();
     test_bash_timeout_huge_does_not_overflow();
     test_bash_per_call_timeout_invalid();
@@ -584,6 +742,12 @@ int main(void)
     test_bash_streamed_binary_history_clean();
     test_bash_streamed_binary_marker_isolated_from_escape();
     test_bash_streamed_history_truncated();
+    test_bash_stdout_is_a_tty();
+    test_bash_stderr_is_a_tty();
+    test_bash_interactive_helpers_neutralized();
+    test_bash_term_default();
+    test_bash_term_user_override_preserved();
+    test_bash_lf_not_crlf();
     test_bash_head_tail_truncation();
     test_bash_short_output_no_elision();
     test_bash_caps_long_line();

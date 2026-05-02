@@ -10,9 +10,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
+
+/* forkpty(3) lives in <pty.h> on glibc/musl Linux and <util.h> on
+ * Darwin. The symbol is in libutil on Linux (linked via `-lutil`) and
+ * libSystem on macOS. */
+#if defined(__linux__)
+#include <pty.h>
+#else
+#include <util.h>
+#endif
 
 #include "interrupt.h"
 #include "utf8_sanitize.h"
@@ -74,6 +85,31 @@ static long monotonic_ms(void)
 static long sat_add(long now, long delta)
 {
     return delta > LONG_MAX - now ? LONG_MAX : now + delta;
+}
+
+/* Send `sig` to the child's process group, falling back to the bare
+ * pid if the group doesn't yet exist. forkpty's child runs setsid()
+ * to become a session leader (and thus its own pgroup leader with
+ * pgid == pid), but that happens *after* fork() returns to the parent
+ * — there's a small window where the parent can reach kill(-pid, …)
+ * before the child has finished session setup. In that window the
+ * pgroup pid doesn't exist and kill(-pid, …) fails with ESRCH, which
+ * with HAX_BASH_TIMEOUT_GRACE=0 would let the loop break and block
+ * in waitpid() until the command exits naturally. The fallback to
+ * kill(pid, …) is safe in that window: the child hasn't exec'd
+ * /bin/sh yet, so there are no descendants to leak.
+ *
+ * Caller invariant: pid must NOT have been reaped before we get here.
+ * After the kernel reaps the pid, it can recycle it on the next
+ * fork() and a kill(pid, …) fallback could target an unrelated
+ * process. run_shell upholds this by using waitid(WNOWAIT) in its
+ * in-loop status check (peek without reap), keeping the zombie around
+ * — and thus the pid allocated — until the post-loop blocking
+ * waitpid does the actual reap. */
+static void kill_descendants(pid_t pid, int sig)
+{
+    if (kill(-pid, sig) < 0 && errno == ESRCH)
+        kill(pid, sig);
 }
 
 /* Render the configured timeout for the model. Whole seconds use "Ns"
@@ -221,28 +257,141 @@ static char *format_run_output(struct buf *head, const char *tail, size_t tail_p
     return buf_steal(&out);
 }
 
-/* Runs in the forked child. Replaces this process with /bin/sh -c cmd,
- * with stdout/stderr going to write_fd and stdin pinned to /dev/null.
- * Never returns. */
-static void exec_shell_child(int read_fd, int write_fd, const char *cmd)
+/* Build the env vector handed to the child via execve. We do this in
+ * the parent — *not* in the post-fork child — because hax is multi-
+ * threaded (spinner, libcurl) and only async-signal-safe functions are
+ * legal between fork() and exec() in that case. setenv() isn't one:
+ * it can take glibc's env/malloc locks, which may have been held by
+ * another thread at fork time, deadlocking the child before /bin/sh
+ * starts. The strings here are either literals or borrowed straight
+ * from environ (we don't own them); only the array itself is heap-
+ * allocated, so the caller frees it with a single free(). */
+static char **build_child_env(void)
 {
-    /* Put the shell in its own process group so we can signal all of
-     * its descendants (including jobs backgrounded with `&`) at once. */
-    setpgid(0, 0);
-    close(read_fd);
-    dup2(write_fd, STDOUT_FILENO);
-    dup2(write_fd, STDERR_FILENO);
-    close(write_fd);
-    /* Detach stdin so commands that try to read from the terminal
-     * (cat, git commit, python REPL, …) get immediate EOF instead
-     * of blocking on the agent's controlling tty. */
-    int devnull = open("/dev/null", O_RDONLY);
-    if (devnull >= 0) {
-        dup2(devnull, STDIN_FILENO);
-        close(devnull);
+    extern char **environ;
+    int n = 0;
+    while (environ[n])
+        n++;
+
+    /* Vars that would hand control to an interactive helper (pager or
+     * editor) when stdout is a TTY — under the old pipe path those
+     * branches were dead because isatty was false, but on a PTY they
+     * fire and block waiting for input the agent has no way to
+     * deliver:
+     *   - Pagers (git log/diff, man, systemctl/journalctl) → `cat`
+     *     just streams the output through. Have to cover each tool's
+     *     preferred name: man prefers MANPAGER over PAGER, so
+     *     overriding only the latter still hangs `man printf` for
+     *     users who set MANPAGER=less.
+     *   - Editors (git commit / git rebase -i / git commit --amend
+     *     without -m, crontab -e, …) → `false` exits non-zero,
+     *     which all the relevant tools treat as "edit failed,
+     *     abort". `true` would be tempting but is fail-OPEN: an
+     *     amend without -m would silently rewrite the commit with
+     *     the old message, a `rebase -i` would silently no-op
+     *     through the default plan. `false` is fail-CLOSED — git
+     *     aborts with a clear error and the model can re-run with
+     *     -m / --no-edit / explicit plan. */
+    struct override {
+        const char *name;
+        const char *kv;
+    };
+    static const struct override interactive_overrides[] = {
+        {"PAGER", "PAGER=cat"},
+        {"GIT_PAGER", "GIT_PAGER=cat"},
+        {"MANPAGER", "MANPAGER=cat"},
+        {"SYSTEMD_PAGER", "SYSTEMD_PAGER=cat"},
+        {"GIT_EDITOR", "GIT_EDITOR=false"},
+        {"VISUAL", "VISUAL=false"},
+        {"EDITOR", "EDITOR=false"},
+    };
+    const size_t override_n = sizeof(interactive_overrides) / sizeof(*interactive_overrides);
+
+    /* Worst case: original env minus the vars we drop plus our
+     * overrides + TERM default + NULL terminator. */
+    char **envp = xmalloc((size_t)(n + (int)override_n + 2) * sizeof(*envp));
+    int has_term = 0;
+    int o = 0;
+    for (int i = 0; environ[i]; i++) {
+        const char *e = environ[i];
+        int dropped = 0;
+        for (size_t p = 0; p < override_n; p++) {
+            size_t plen = strlen(interactive_overrides[p].name);
+            if (strncmp(e, interactive_overrides[p].name, plen) == 0 && e[plen] == '=') {
+                dropped = 1;
+                break;
+            }
+        }
+        if (dropped)
+            continue;
+        if (strncmp(e, "TERM=", 5) == 0)
+            has_term = 1;
+        envp[o++] = (char *)e;
     }
-    execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+    for (size_t p = 0; p < override_n; p++)
+        envp[o++] = (char *)interactive_overrides[p].kv;
+    /* TERM default for programs that gate colors on it. The user's
+     * choice wins when set — xterm-256color only fills in when
+     * inherited TERM was empty. ctrl_strip handles whatever SGR /
+     * CSI / OSC the resulting colors produce. */
+    if (!has_term)
+        envp[o++] = (char *)"TERM=xterm-256color";
+    envp[o] = NULL;
+    return envp;
+}
+
+/* Runs in the forkpty()'d child. forkpty has already called setsid(),
+ * acquired the slave as our controlling terminal, and dup'd the slave
+ * to fds 0/1/2. Stdin is then re-pointed at /dev/null so commands that
+ * try to read (cat, git commit, python REPL, …) get immediate EOF
+ * instead of blocking on the master — the user has no input channel
+ * here. stdout/stderr stay on the slave so isatty(1)/isatty(2) report
+ * true and child libc stays line-buffered (the whole point of moving
+ * off pipes). Only async-signal-safe operations between forkpty() and
+ * execve(), per POSIX rules for forking a multithreaded process. Never
+ * returns. */
+static void exec_shell_child(const char *cmd, char *const envp[])
+{
+    /* Close stdin first so /dev/null (when open succeeds) lands on
+     * fd 0 directly — avoids a dup2 + close dance. If open somehow
+     * fails (effectively unreachable, but handle it cleanly), reads
+     * return EBADF, still preferable to blocking forever on the
+     * slave PTY waiting for input the agent never delivers. */
+    close(STDIN_FILENO);
+    (void)open("/dev/null", O_RDONLY);
+    char *const argv[] = {(char *)"sh", (char *)"-c", (char *)cmd, NULL};
+    execve("/bin/sh", argv, (char *const *)envp);
     _exit(127);
+}
+
+/* Build the slave-side termios passed to openpty. Roughly raw mode
+ * (in the spirit of cfmakeraw, which we avoid because it's a BSD
+ * extension that isn't reliably exposed under our _POSIX_C_SOURCE
+ * gates), tuned for our use case — a one-shot PTY whose master we
+ * only read from, never write to. We zero c_cflag and OR in
+ * CREAD|CS8; that encodes baud as B0 ("hang up") which the kernel
+ * ignores for PTY slaves but would matter on a real serial fd, so
+ * don't copy this verbatim for one. The bits that matter for hax:
+ *   - OPOST off: child's `\n` reaches us as `\n`, not `\r\n` (the
+ *     default ONLCR mapping would otherwise pollute every line of
+ *     captured output and break byte-equality tests).
+ *   - ECHO/ICANON off: belt-and-braces. We never write to the master
+ *     so echo can't fire in practice, but raw mode keeps the slave
+ *     well-defined if a future change ever does write input.
+ *   - VMIN=0, VTIME=0: belt-and-braces against blocking slave reads.
+ *     The primary defense against /dev/tty hangs is skipping
+ *     TIOCSCTTY in run_shell so the slave isn't a controlling
+ *     terminal at all, but if a child somehow acquires one and reads
+ *     it, VMIN=0 keeps the read non-blocking. */
+static void make_raw_termios(struct termios *t)
+{
+    memset(t, 0, sizeof *t);
+    t->c_iflag = 0;
+    t->c_oflag = 0;
+    t->c_cflag = CREAD | CS8;
+    t->c_lflag = 0;
+    t->c_cc[VMIN] = 0;
+    t->c_cc[VTIME] = 0;
 }
 
 /* Stream the trailing suffix (binary/truncated marker, footer, or
@@ -277,24 +426,57 @@ static void stream_suffix(tool_emit_display_fn emit_display, void *user, size_t 
 static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn emit_display,
                        void *user)
 {
-    int fds[2];
-    if (pipe(fds) < 0)
-        return xasprintf("pipe: %s", strerror(errno));
+    /* Fixed window size: wide enough that `git log --graph`, build
+     * progress lines, and pytest output don't column-wrap; tall enough
+     * that pager-style "more?" heuristics that key off rows don't
+     * trigger. hax does its own line-wrapping when rendering the dim
+     * tool block, so the host terminal's actual width is irrelevant. */
+    struct winsize ws = {.ws_row = 50, .ws_col = 200, .ws_xpixel = 0, .ws_ypixel = 0};
+    struct termios t;
+    make_raw_termios(&t);
 
+    /* Build the env vector before fork so the post-fork child doesn't
+     * have to call non-async-signal-safe setenv. */
+    char **envp = build_child_env();
+
+    /* openpty + manual fork instead of forkpty so we can deliberately
+     * skip TIOCSCTTY in the child. Without that ioctl, the slave is a
+     * tty device (so isatty(stdout/stderr) still reports true and the
+     * line-buffering benefit holds) but is *not* the child's
+     * controlling terminal — opening /dev/tty fails with ENXIO instead
+     * of blocking on input the agent has no way to deliver. That
+     * matters because VMIN=0 alone isn't enough: a command like
+     * `stty sane </dev/tty; cat /dev/tty` calls tcsetattr to put the
+     * line back into canonical mode (VMIN=1) and would then hang on
+     * the read until our timeout. With no controlling tty the open
+     * fails first and the whole class of /dev/tty-prompt commands
+     * (sudo, ssh host-key prompt, gpg passphrase, …) fails fast. */
+    int master = -1, slave = -1;
+    if (openpty(&master, &slave, NULL, &t, &ws) < 0) {
+        free(envp);
+        return xasprintf("openpty: %s", strerror(errno));
+    }
     pid_t pid = fork();
     if (pid < 0) {
-        close(fds[0]);
-        close(fds[1]);
+        close(master);
+        close(slave);
+        free(envp);
         return xasprintf("fork: %s", strerror(errno));
     }
-    if (pid == 0)
-        exec_shell_child(fds[0], fds[1], cmd); /* never returns */
-
-    /* Mirror setpgid in the parent to close the race where we reach
-     * waitpid / kill(-pid) before the child's setpgid runs. EACCES after
-     * exec is fine — child already has its own group. */
-    (void)setpgid(pid, pid);
-    close(fds[1]);
+    if (pid == 0) {
+        /* Child: own session (so kill(-pid, …) reaches descendants),
+         * stdout/stderr on the slave (so isatty is true and libc
+         * line-buffers), but no TIOCSCTTY → no controlling tty. */
+        close(master);
+        setsid();
+        dup2(slave, STDOUT_FILENO);
+        dup2(slave, STDERR_FILENO);
+        if (slave > STDERR_FILENO)
+            close(slave);
+        exec_shell_child(cmd, envp); /* never returns */
+    }
+    close(slave); /* parent only needs the master end */
+    free(envp);   /* parent's copy; child got its own at fork */
 
     long deadline = timeout_ms > 0 ? sat_add(monotonic_ms(), timeout_ms) : 0;
     long grace_ms = resolve_grace_ms();
@@ -328,10 +510,10 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
             if (shell_exited)
                 break;
             if (grace_ms > 0) {
-                kill(-pid, SIGTERM);
+                kill_descendants(pid, SIGTERM);
                 grace_deadline = sat_add(now, grace_ms);
             } else {
-                kill(-pid, SIGKILL);
+                kill_descendants(pid, SIGKILL);
                 break;
             }
         }
@@ -347,10 +529,10 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
             if (shell_exited)
                 break;
             if (grace_ms > 0) {
-                kill(-pid, SIGTERM);
+                kill_descendants(pid, SIGTERM);
                 grace_deadline = sat_add(now, grace_ms);
             } else {
-                kill(-pid, SIGKILL);
+                kill_descendants(pid, SIGKILL);
                 break;
             }
         }
@@ -360,26 +542,38 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
          * (see below), so stragglers may still be alive even when
          * shell_exited is set. */
         if (term_sent && grace_deadline > 0 && now >= grace_deadline) {
-            kill(-pid, SIGKILL);
+            kill_descendants(pid, SIGKILL);
             break;
         }
 
-        /* Check shell status on every iteration — a backgrounded writer
-         * like `yes &` keeps the pipe readable indefinitely, so we can't
-         * rely on poll() ever timing out. Once the shell is gone, kill
-         * the process group so read() can reach EOF — but skip that
-         * during the grace window, when backgrounded children may be
-         * mid-cleanup (e.g. `(trap '...' TERM; sleep) & wait` where the
-         * outer shell exits immediately on SIGTERM but the subshell's
-         * trap is still running). EOF arrives naturally when they
-         * finish; the second-stage check above SIGKILLs any stragglers. */
+        /* Check shell status on every iteration — a backgrounded
+         * writer like `yes &` keeps the slave readable indefinitely,
+         * so we can't rely on poll() ever timing out. Once the shell
+         * is gone, kill the process group so read() can reach EOF.
+         * The !term_sent guard preserves the grace window if it
+         * happens to matter (a niche where shell exit doesn't trigger
+         * master EOF — e.g. a descendant that detached stdout to a
+         * file). Under typical PTY semantics the EOF branch fires
+         * first and SIGKILLs anyway; see the note there.
+         *
+         * waitid(WNOWAIT) peeks at the exit state without reaping, so
+         * the pid stays allocated to the (now-zombie) shell for the
+         * rest of the loop. That keeps every subsequent kill(-pid, …)
+         * and the kill_descendants() bare-pid fallback well-defined:
+         * a reaped pid can be recycled by another fork() and a kill
+         * would then target an unrelated process. The post-loop
+         * waitpid() does the actual reap once we're done signaling.
+         * (WNOWAIT must be paired with waitid here — macOS rejects
+         * it on waitpid() with EINVAL.) */
         if (!shell_exited) {
-            pid_t w = waitpid(pid, &status, WNOHANG);
-            if (w == pid) {
+            siginfo_t info;
+            info.si_pid = 0;
+            int rc = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
+            if (rc == 0 && info.si_pid == pid) {
                 shell_exited = 1;
                 if (!term_sent)
-                    kill(-pid, SIGKILL);
-            } else if (w < 0 && errno != EINTR) {
+                    kill_descendants(pid, SIGKILL);
+            } else if (rc < 0 && errno != EINTR) {
                 break;
             }
         }
@@ -388,7 +582,7 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
          * meaningful CPU cost — poll() with no fd activity blocks in
          * the kernel. The clamp below shortens it further when a
          * deadline is approaching. */
-        struct pollfd pfd = {.fd = fds[0], .events = POLLIN};
+        struct pollfd pfd = {.fd = master, .events = POLLIN};
         int poll_ms = 10;
         long active_deadline = term_sent ? grace_deadline : deadline;
         if (active_deadline > 0) {
@@ -407,30 +601,46 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
         if (pr == 0)
             continue; /* re-check shell status / deadline */
 
-        ssize_t r = read(fds[0], chunk, sizeof(chunk));
+        ssize_t r = read(master, chunk, sizeof(chunk));
         if (r < 0) {
             if (errno == EINTR)
                 continue;
-            break;
+            /* On Linux, reading from a pty master after the slave has
+             * been hung up returns -1 with errno=EIO. macOS returns 0.
+             * Normalize to the EOF branch below so the rest of the
+             * logic doesn't have to care. */
+            if (errno == EIO)
+                r = 0;
+            else
+                break;
         }
         if (r == 0) {
-            /* EOF — all pipe writers closed. SIGKILL the pgroup
+            /* EOF — slave closed in the child. SIGKILL the pgroup
              * unconditionally so we don't leak redirected/detached
-             * descendants. The motivating case is `sleep 300
-             * >/dev/null 2>&1 &`: shell forks sleep with redirected
-             * fds, backgrounds, exits. Pipe closes (shell was the
-             * last writer), EOF arrives in parent, but kernel-level
-             * fd close can propagate to us before waitpid(WNOHANG)
-             * sees the zombie — without this kill, sleep would
-             * survive past our return. ESRCH/EPERM on an empty
-             * pgroup is harmless, and the prior waitpid status
-             * (when present) is preserved since SIGKILL on a zombie
-             * is a no-op. The edge case of a deliberately detached
-             * shell with self-redirected stdout (`exec >/dev/null;
-             * long_cmd`) also gets killed here — acceptable since
-             * the tool is meant for output capture and the global
-             * timeout would kill it anyway. */
-            kill(-pid, SIGKILL);
+             * descendants. Motivating case: `sleep 300 >/dev/null
+             * 2>&1 &` — shell forks sleep with redirected fds,
+             * backgrounds, exits. The slave drops, EOF arrives in
+             * the parent before waitpid(WNOHANG) sees the zombie,
+             * and without this kill sleep would outlive us. ESRCH
+             * /EPERM on an empty pgroup is harmless; SIGKILL on a
+             * zombie preserves the prior waitpid status.
+             *
+             * Note on the timeout grace window: this SIGKILL fires
+             * even mid-grace (term_sent == 1). That's intentional —
+             * once master EOFs, no further bytes can arrive on it,
+             * so deferring would only add latency without preserving
+             * output. This is a behavior difference from the pre-
+             * PTY pipe path, where backgrounded subshells doing
+             * `trap '...; echo cleaned' TERM` could keep the pipe
+             * open and flush during grace. Under PTY, session-leader
+             * exit triggers a SIGHUP cascade to the foreground pgroup
+             * and (on macOS) revokes the slave, so that pattern can't
+             * deliver output regardless of how the loop handles EOF.
+             * Foreground cleanup (the pytest / cargo-test pattern,
+             * where the shell itself catches SIGTERM and flushes
+             * before exit) is what the grace window protects, and
+             * `test_bash_timeout_grace_allows_cleanup` covers it. */
+            kill_descendants(pid, SIGKILL);
             break;
         }
         total_bytes += (size_t)r;
@@ -473,17 +683,20 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
          * finish, but a runaway descendant ignoring SIGTERM can still
          * flood past the budget. ESRCH on an empty pgroup is harmless. */
         if (total_bytes >= MAX_BYTES_READ) {
-            kill(-pid, SIGKILL);
+            kill_descendants(pid, SIGKILL);
             break;
         }
     }
-    close(fds[0]);
+    close(master);
 
-    if (!shell_exited) {
-        while (waitpid(pid, &status, 0) < 0) {
-            if (errno != EINTR)
-                break;
-        }
+    /* Final reap — always blocking. The in-loop waitid(WNOWAIT) above
+     * detected exit without reaping, so even when shell_exited is set
+     * the pid is still a zombie that needs collecting here. If the
+     * shell is somehow still running (uncommon error path that broke
+     * the loop without signaling), this blocks until it exits. */
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR)
+            break;
     }
 
     if (emit_display) {

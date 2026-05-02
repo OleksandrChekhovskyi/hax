@@ -111,7 +111,8 @@ helpers; their headers describe what they do.
 ## Dependencies
 
 Current pinned set is in `meson.build` — at time of writing: **libcurl** (HTTPS+SSE),
-**jansson** (JSON), **pthreads**. Line editing is in-tree (`src/input.c`), not a dependency.
+**jansson** (JSON), **pthreads**, **libutil** (`forkpty(3)`; libc-shipped on both targets,
+no extra install). Line editing is in-tree (`src/input.c`), not a dependency.
 
 Rule: every dependency must be in Debian main and either ship with macOS or be a single
 `brew install`. Don't add a dependency without confirming that property; don't suggest GPL

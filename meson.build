@@ -14,12 +14,27 @@ add_project_arguments(
     # expose realpath() — _POSIX_C_SOURCE alone doesn't gate it through.
     '-D_XOPEN_SOURCE=700',
     '-D_DARWIN_C_SOURCE',
+    # Project headers go through -iquote, not -I, so `#include <foo.h>`
+    # always reaches a system header rather than shadowing it with one
+    # of ours. (We carry a `src/util.h` whose name collides with macOS's
+    # `<util.h>`; without -iquote, an `#include <util.h>` to pick up
+    # forkpty(3) resolves to the project header instead.) The `tests/`
+    # entry serves the same purpose for `harness.h` and friends.
+    '-iquote', meson.project_source_root() / 'src',
+    '-iquote', meson.project_source_root() / 'tests',
     language: 'c',
 )
+
+cc = meson.get_compiler('c')
 
 libcurl = dependency('libcurl')
 jansson = dependency('jansson')
 threads = dependency('threads')
+# forkpty(3) lives in libutil on glibc/musl Linux. macOS ships a
+# libutil stub in libSystem, so find_library succeeds there too and
+# the resulting -lutil is harmless. required: false keeps the build
+# tolerant of platforms where the library isn't found at all.
+libutil = cc.find_library('util', required: false)
 
 sources = files(
     'src/agent.c',
@@ -56,8 +71,7 @@ sources = files(
 
 executable('hax',
     sources: sources,
-    include_directories: include_directories('src'),
-    dependencies: [libcurl, jansson, threads],
+    dependencies: [libcurl, jansson, threads, libutil],
     install: true,
 )
 

@@ -17,6 +17,14 @@
 #            the spinner re-shows after head fills.
 #   binary   Emits a NUL byte followed by garbage — verifies the binary
 #            guard suppresses the body and surfaces the marker.
+#   piped    Slow producer piped through `grep` — verifies that grep
+#            stays line-buffered against an isatty stdout. With a
+#            non-TTY stdout grep block-buffers and lines arrive only
+#            when its internal 4 KB buffer fills.
+#   python   Slow Python producer with default buffering — verifies
+#            Python's stdout stays line-buffered. Python only does so
+#            when isatty(STDOUT) reports true; otherwise it switches
+#            to fully-buffered and lines are dumped on exit.
 set -e
 
 mode="${1:-short}"
@@ -57,9 +65,27 @@ binary)
     printf '\000garbage\xff\xfe\x01\x02\n'
     printf 'trailing text\n'
     ;;
+piped)
+    for i in $(seq 1 40); do
+        echo "filter me $i"
+        sleep 0.1
+    done | grep filter
+    ;;
+python)
+    command -v python3 >/dev/null 2>&1 || {
+        echo "python3 not found" >&2
+        exit 2
+    }
+    python3 -c '
+import sys, time
+for i in range(15):
+    print(f"py line {i}")
+    time.sleep(0.2)
+'
+    ;;
 *)
     echo "unknown mode: $mode" >&2
-    echo "modes: short long ansi burst slow binary" >&2
+    echo "modes: short long ansi burst slow binary piped python" >&2
     exit 2
     ;;
 esac
