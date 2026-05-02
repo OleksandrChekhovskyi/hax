@@ -38,6 +38,7 @@ libutil = cc.find_library('util', required: false)
 
 sources = files(
     'src/agent.c',
+    'src/cmd_classify.c',
     'src/ctrl_strip.c',
     'src/diff.c',
     'src/disp.c',

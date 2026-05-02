@@ -31,6 +31,7 @@ test_bash = executable('test_bash',
     sources: [
         'tools/test_bash.c',
         '../src/tools/bash.c',
+        '../src/cmd_classify.c',
         '../src/interrupt.c',
         '../src/utf8_sanitize.c',
         '../src/util.c',
@@ -167,6 +168,15 @@ test_disp = executable('test_disp',
     ],
 )
 test('disp', test_disp)
+
+test_cmd_classify = executable('test_cmd_classify',
+    sources: [
+        'test_cmd_classify.c',
+        '../src/cmd_classify.c',
+        '../src/util.c',
+    ],
+)
+test('cmd_classify', test_cmd_classify)
 
 test_tool_render = executable('test_tool_render',
     sources: [

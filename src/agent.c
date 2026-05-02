@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 #include "ansi.h"
@@ -103,6 +104,26 @@ static int tool_result_is_marked(const struct item *it)
     return strcmp(it->output + out_len - marker_len, INTERRUPT_MARKER) == 0;
 }
 
+/* Tracks an in-progress run of "quiet" tool calls — read/list/grep-style
+ * exploration whose output is hidden from display. The cluster collapses
+ * the visual block separator between consecutive quiet calls, and
+ * coalesces consecutive `read` calls onto one line: `[read] foo.c, bar.c,
+ * baz.c`. The inline spinner sits at the end of the active line as
+ * "still alive" indicator, surviving across both tool-runs and the wait
+ * for the next provider event.
+ *
+ * `active` means a quiet line is currently on the terminal with no
+ * trailing newline (and the inline spinner may be drawn). `last_tool` is
+ * the name of the most recent quiet tool, used to decide whether the
+ * next call coalesces. `line_used` is a byte budget for the current
+ * line, checked against the terminal width before appending another
+ * filename. */
+struct cluster {
+    int active;
+    const char *last_tool; /* borrowed from struct tool's static name */
+    int line_used;
+};
+
 /* Bundles the per-turn state needed by the streaming callback into one
  * struct, so we can plumb display state alongside `struct turn` through
  * the provider's user-pointer parameter. */
@@ -111,10 +132,123 @@ struct event_ctx {
     struct turn *turn;
     struct spinner *spinner;
     struct md_renderer *md; /* NULL when markdown is disabled */
+    struct cluster *cl;
     /* Filled in from EV_DONE; -1/-1/-1 if the provider didn't report. */
     struct stream_usage usage;
 };
 
+/* Cells reserved at the right edge of a quiet line: the trailing space
+ * before the spinner glyph (1) + the glyph itself (1) + breathing room
+ * so the spinner doesn't crowd the right margin (~6). Pulled out here
+ * so the silent-header sizing and coalesce-overflow check stay in
+ * sync. */
+#define QUIET_LINE_MARGIN 8
+
+/* Query the host terminal width via TIOCGWINSZ, lazily on each call so
+ * SIGWINCH-style resizes are picked up without explicit handling. Falls
+ * back to 120 cols when stdout isn't a TTY or the ioctl fails. The
+ * returned value is clamped so silent headers stay readable on narrow
+ * terminals (40) and don't get pathologically long on wide ones (200). */
+static int term_width(void)
+{
+    struct winsize ws;
+    int w = 120;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
+        w = ws.ws_col;
+    if (w < 40)
+        w = 40;
+    if (w > 200)
+        w = 200;
+    return w;
+}
+
+/* Return a pointer into `path` at the basename — last component after
+ * the final '/'. Trailing slashes (`src/`) fall back to the full path
+ * since the basename would be empty. Returns "?" for NULL/empty. */
+static const char *basename_view(const char *path)
+{
+    if (!path || !*path)
+        return "?";
+    const char *slash = strrchr(path, '/');
+    if (!slash || slash[1] == '\0')
+        return path;
+    return slash + 1;
+}
+
+/* Truncate a UTF-8 string to fit in `cap` bytes, replacing the cut
+ * suffix with "..." so the user sees an explicit "more here" marker.
+ * Same convention as the elision markers in tool_render.c / bash.c so
+ * the truncation idiom reads consistently across the UI. Walks back
+ * from the cut point to a UTF-8 codepoint boundary so the replacement
+ * doesn't leave a half-encoded byte. Returns malloc'd. */
+static char *truncate_for_display(const char *s, size_t cap)
+{
+    size_t n = strlen(s);
+    if (n <= cap)
+        return xstrdup(s);
+    if (cap < 4) {
+        char *out = xmalloc(cap + 1);
+        memcpy(out, s, cap);
+        out[cap] = '\0';
+        return out;
+    }
+    size_t cut = cap - 3;
+    while (cut > 0 && (s[cut] & 0xC0) == 0x80)
+        cut--;
+    char *out = xmalloc(cut + 4);
+    memcpy(out, s, cut);
+    memcpy(out + cut, "...", 3);
+    out[cut + 3] = '\0';
+    return out;
+}
+
+/* Decide whether this call should render with the silent-preview flow.
+ * Static `silent_preview` flag wins when set; otherwise the optional
+ * `is_silent` callback gets to inspect args (used by bash to classify
+ * exploration commands at runtime). */
+static int call_is_silent(const struct tool *t, const struct item *call)
+{
+    if (!t)
+        return 0;
+    if (t->silent_preview)
+        return 1;
+    if (t->is_silent)
+        return t->is_silent(call->tool_arguments_json);
+    return 0;
+}
+
+/* Terminate the in-progress quiet line and reset cluster state.
+ * Idempotent on inactive cluster.
+ *
+ * Two cases depending on what the spinner was doing at hide time:
+ *   - Inline glyph: hide restored the cursor to the end of the cluster
+ *     line (after our trailing space). Emit `\n` to close the line —
+ *     it goes into disp's held buffer so a following block_separator
+ *     can collapse, or a following content write commits it.
+ *   - Line spinner (auto-transitioned): hide erased the spinner's row,
+ *     leaving the cursor at column 0 of an already-fresh line. The
+ *     transition's own `\n` is on the terminal already but bypassed
+ *     disp's tracking, so bump trail to 1 here to keep a following
+ *     block_separator emitting the right number of newlines. */
+static void cluster_terminate(struct cluster *cl, struct disp *d, struct spinner *sp)
+{
+    if (!cl->active)
+        return;
+    int was_inline = spinner_hide(sp);
+    if (was_inline) {
+        disp_putc(d, '\n');
+    } else {
+        d->trail = 1;
+    }
+    fflush(stdout);
+    cl->active = 0;
+    cl->last_tool = NULL;
+    cl->line_used = 0;
+}
+
+/* Verbose tool-call header: block separator, `[name]` tag, the tool's
+ * display_arg (full path / command), optional dim suffix. Terminated
+ * with `\n` and committed so the spinner or output draws below. */
 static void display_tool_header(struct disp *d, const struct item *call)
 {
     const struct tool *tool = find_tool(call->tool_name);
@@ -163,6 +297,137 @@ static void display_tool_header(struct disp *d, const struct item *call)
     fflush(stdout);
 }
 
+/* Silent-header writer for the start of a quiet line. For `read`,
+ * `arg_text` is the file's basename (possibly with a `:N-M` slice
+ * suffix); for quiet `bash`, it's the truncated command. The header is
+ * NOT terminated with a newline — the inline spinner sits at the
+ * cursor's resting position and is animated until either the next
+ * silent call extends the line or cluster_terminate ends it.
+ *
+ * The whole header is dim — quiet calls are exploration breadcrumbs
+ * that should recede visually, not compete with verbose tool blocks
+ * (whose preview body is the focus) or model text. The cyan brackets
+ * keep the tag scannable as a tool boundary even at lowered intensity.
+ *
+ * Returns the visual byte cost of the line so far so the caller can
+ * track when a coalesced line is about to overflow the terminal. */
+static int write_silent_header(struct disp *d, const struct item *call, const char *arg_text)
+{
+    /* Visual budget tracking: we count what's *visible* — ANSI escapes
+     * and the trailing space don't move the cursor visually, but the
+     * tag, space, and arg do. Approximation; off-by-a-few is fine. */
+    int used = 0;
+    disp_raw(ANSI_DIM ANSI_CYAN);
+    disp_printf(d, "[%s]", call->tool_name);
+    /* Switch back to default foreground but keep DIM in effect so the
+     * arg is dim too. ANSI_RESET would drop the dim attribute. */
+    disp_raw(ANSI_FG_DEFAULT);
+    used += 2 + (int)strlen(call->tool_name); /* "[name]" */
+    disp_putc(d, ' ');
+    used += 1;
+    if (arg_text && *arg_text) {
+        disp_write(d, arg_text, strlen(arg_text));
+        used += (int)strlen(arg_text);
+    }
+    disp_raw(ANSI_RESET);
+    /* Trailing space exists only as breathing room for the inline
+     * spinner glyph. When stdout isn't a TTY we don't draw the spinner
+     * (and don't backspace over the space during coalescing — see
+     * write_silent_append), so skip it to keep redirected logs free of
+     * dangling spaces. */
+    if (isatty(fileno(stdout))) {
+        disp_putc(d, ' ');
+        used += 1;
+    }
+    disp_emit_held(d); /* commit any held space so spinner lands inline */
+    fflush(stdout);
+    return used;
+}
+
+/* Silent-header append for read coalescing: writes ", basename" inline
+ * onto the current line. Caller has already hidden the inline spinner
+ * (which restored the cursor to the position right after the prior
+ * filename's trailing space — disp_putc' space stays committed). */
+static int write_silent_append(struct disp *d, const char *short_name)
+{
+    /* TTY: step back over the trailing space we left for the spinner
+     * glyph, write ", short_name", then re-add the trailing space.
+     * Cursor was at "...foo.c |" (| = cursor), after this we're at
+     * "...foo.c, bar.c |". Backspace is safe since the line is
+     * width-capped and we never wrap.
+     *
+     * Non-TTY: write_silent_header skipped the trailing space, so
+     * there's nothing to step over — emitting `\b` would land a literal
+     * control byte in the redirected log. Just append ", short_name". */
+    int tty = isatty(fileno(stdout));
+    if (tty)
+        fputs("\b", stdout);
+    disp_raw(ANSI_DIM);
+    disp_write(d, ", ", 2);
+    disp_write(d, short_name, strlen(short_name));
+    disp_raw(ANSI_RESET);
+    if (tty)
+        disp_putc(d, ' ');
+    disp_emit_held(d);
+    fflush(stdout);
+    /* Visible delta: ", " + name (+ restored space on TTY). The
+     * backspace only undoes the space we'd previously laid down, which
+     * we re-add at the end, so net is +2+strlen(name) regardless. */
+    return 2 + (int)strlen(short_name);
+}
+
+/* Compute the arg text shown after the bracketed tag for a silent
+ * call. Read uses basename of the file plus optional `:N-M`; bash uses
+ * the command, truncated to fit in the available column budget.
+ * `tag_cost` is the bytes consumed by `[name] ` so we know how many
+ * columns are left for the arg. Returns malloc'd; caller frees. */
+static char *make_silent_arg(const struct tool *tool, const struct item *call, int tag_cost,
+                             int term_w)
+{
+    const char *name = call->tool_name;
+    int budget = term_w - tag_cost - QUIET_LINE_MARGIN;
+    if (budget < 8)
+        budget = 8;
+
+    if (strcmp(name, "read") == 0) {
+        const char *path = NULL;
+        json_t *root = NULL;
+        if (call->tool_arguments_json) {
+            json_error_t jerr;
+            root = json_loads(call->tool_arguments_json, 0, &jerr);
+            if (root)
+                path = json_string_value(json_object_get(root, "path"));
+        }
+        const char *base = basename_view(path);
+        char *extra = NULL;
+        if (tool && tool->format_display_extra)
+            extra = tool->format_display_extra(call->tool_arguments_json);
+        char *full = (extra && *extra) ? xasprintf("%s%s", base, extra) : xstrdup(base);
+        free(extra);
+        if (root)
+            json_decref(root);
+        char *trimmed = truncate_for_display(full, (size_t)budget);
+        free(full);
+        return trimmed;
+    }
+    if (strcmp(name, "bash") == 0) {
+        const char *cmd = NULL;
+        json_t *root = NULL;
+        if (call->tool_arguments_json) {
+            json_error_t jerr;
+            root = json_loads(call->tool_arguments_json, 0, &jerr);
+            if (root)
+                cmd = json_string_value(json_object_get(root, "command"));
+        }
+        char *trimmed = truncate_for_display(cmd ? cmd : "", (size_t)budget);
+        if (root)
+            json_decref(root);
+        return trimmed;
+    }
+    /* Generic fallback (no other tool currently goes silent). */
+    return xstrdup("");
+}
+
 /* Render a synthesized "[interrupted]" block in place of running a tool,
  * and produce the matching tool_result item so the conversation stays
  * well-formed when Esc fires partway through a batch. */
@@ -181,13 +446,113 @@ static struct item dispatch_tool_skipped(struct disp *d, const struct item *call
     };
 }
 
+/* Silent dispatch: header-only, inline spinner, no preview. Coalesces
+ * with the previous quiet line when the prior tool was the same kind
+ * (currently only `read` chains visually). Output is captured for
+ * conversation history exactly like the verbose path; only the live
+ * display is suppressed. */
+static struct item dispatch_tool_call_silent(struct cluster *cl, struct disp *d, struct spinner *sp,
+                                             const struct item *call, const struct tool *t)
+{
+    int term_w = term_width();
+
+    /* Hide whichever mode the spinner is in and learn what mode was
+     * active at hide time. was_inline=1 means the cursor sits at the
+     * end of the prior cluster line (we can append/coalesce); =0 means
+     * the spinner had auto-transitioned to a labeled line below the
+     * cluster, and the cursor is now at column 0 of that just-erased
+     * row — coalescing isn't possible from there. */
+    int was_inline = spinner_hide(sp);
+    int can_coalesce = cl->active && was_inline && cl->last_tool &&
+                       strcmp(cl->last_tool, "read") == 0 && strcmp(call->tool_name, "read") == 0;
+
+    if (can_coalesce) {
+        const char *path = NULL;
+        json_t *root = NULL;
+        if (call->tool_arguments_json) {
+            json_error_t jerr;
+            root = json_loads(call->tool_arguments_json, 0, &jerr);
+            if (root)
+                path = json_string_value(json_object_get(root, "path"));
+        }
+        const char *base = basename_view(path);
+        char *extra = NULL;
+        if (t && t->format_display_extra)
+            extra = t->format_display_extra(call->tool_arguments_json);
+        char *append = (extra && *extra) ? xasprintf("%s%s", base, extra) : xstrdup(base);
+        free(extra);
+        size_t append_len = strlen(append);
+        /* Cap coalesced line at ~term width so we never wrap. The
+         * extra 2 covers ", " on top of the standard end-of-line
+         * margin (trailing space + spinner + breathing room). */
+        if (cl->line_used + (int)append_len + 2 + QUIET_LINE_MARGIN > term_w) {
+            /* Overflow → close current line, start a new `[read] …` header. */
+            disp_putc(d, '\n');
+            disp_emit_held(d);
+            char *arg = make_silent_arg(t, call, 7 /* "[read] " */, term_w);
+            int used = write_silent_header(d, call, arg);
+            free(arg);
+            cl->line_used = used;
+        } else {
+            cl->line_used += write_silent_append(d, append);
+        }
+        free(append);
+        if (root)
+            json_decref(root);
+    } else {
+        if (cl->active) {
+            if (was_inline) {
+                /* Different silent kind (read → bash exploration, or
+                 * vice versa). Close the prior inline line but stay
+                 * inside the cluster — no block separator. */
+                disp_putc(d, '\n');
+                disp_emit_held(d);
+            } else {
+                /* Spinner auto-transitioned. The transition's \n is
+                 * already on screen and spinner_hide cleared the
+                 * spinner row; we're at column 0 of that empty row.
+                 * Sync disp.trail so any later block_separator collapses
+                 * correctly. */
+                d->trail = 1;
+            }
+        } else {
+            /* First quiet call: separate from whatever came before. */
+            disp_block_separator(d);
+        }
+        int tag_cost = 2 + (int)strlen(call->tool_name) + 1; /* "[name] " */
+        char *arg = make_silent_arg(t, call, tag_cost, term_w);
+        int used = write_silent_header(d, call, arg);
+        free(arg);
+        cl->line_used = used;
+    }
+
+    spinner_show_inline(sp);
+
+    /* Run the tool with no display callback — silent path discards live
+     * stream and only keeps the canonical history. */
+    char *ret = t->run(call->tool_arguments_json, NULL, NULL);
+
+    cl->active = 1;
+    cl->last_tool = t->def.name;
+
+    char *history = ctrl_strip_dup(ret ? ret : "");
+    free(ret);
+
+    return (struct item){
+        .kind = ITEM_TOOL_RESULT,
+        .call_id = xstrdup(call->call_id),
+        .output = history,
+    };
+}
+
 /* Run one tool call: render the header, drive the renderer over either
  * streamed emit_display chunks or the canonical return value, and produce
  * the tool_result item that goes back to the model. The canonical history
  * is ctrl_stripped at this boundary so all tools' outputs land in the
  * conversation in the same normalized form; anything pushed through
  * emit_display is display-only and does not enter history. */
-static struct item dispatch_tool_call(struct disp *d, struct spinner *sp, const struct item *call)
+static struct item dispatch_tool_call_verbose(struct disp *d, struct spinner *sp,
+                                              const struct item *call)
 {
     display_tool_header(d, call);
     /* "⠋ running..." — the spinner re-emerges between streamed chunks
@@ -247,6 +612,20 @@ static struct item dispatch_tool_call(struct disp *d, struct spinner *sp, const 
         .call_id = xstrdup(call->call_id),
         .output = history,
     };
+}
+
+/* Top-level dispatch: pick silent or verbose path based on the tool's
+ * static silent_preview flag and (for bash) per-call classification of
+ * the command. Falling into the verbose path always terminates any
+ * active quiet cluster first so the visual block separator reappears. */
+static struct item dispatch_tool_call(struct cluster *cl, struct disp *d, struct spinner *sp,
+                                      const struct item *call)
+{
+    const struct tool *t = find_tool(call->tool_name);
+    if (t && call_is_silent(t, call))
+        return dispatch_tool_call_silent(cl, d, sp, call, t);
+    cluster_terminate(cl, d, sp);
+    return dispatch_tool_call_verbose(d, sp, call);
 }
 
 /* Adapter so md_renderer can emit through disp without knowing about it.
@@ -347,7 +726,8 @@ static long context_limit(void)
  * answering "how many tokens did this prompt cost in generation". Each
  * value is -1 when the underlying counts weren't reported by the backend;
  * the section is then skipped rather than rendered with a misleading zero. */
-static void display_usage(struct disp *d, long ctx, long out, long cached)
+static void display_usage(struct disp *d, struct cluster *cl, struct spinner *sp, long ctx,
+                          long out, long cached)
 {
     int show_ctx = ctx >= 0;
     int show_out = out >= 0;
@@ -355,6 +735,7 @@ static void display_usage(struct disp *d, long ctx, long out, long cached)
     if (!show_ctx && !show_out && !show_cached)
         return;
 
+    cluster_terminate(cl, d, sp);
     disp_block_separator(d);
     disp_raw(ANSI_DIM);
 
@@ -403,12 +784,18 @@ static int on_event(const struct stream_event *ev, void *user)
          * repainted on its way out, then restore the default — visible
          * text means reasoning is over, and any later show in this turn
          * (e.g. before tool dispatch) should read "working...". */
-        spinner_hide(ec->spinner);
-        spinner_set_label(ec->spinner, "working...");
         if (!d->saw_text) {
+            /* Cluster termination must precede the spinner_hide below
+             * so cluster_terminate observes the real prior spinner
+             * mode and picks the right disp.trail accounting
+             * (inline → close line with \n; line → trail=1 since the
+             * spinner already lived on its own row). */
+            cluster_terminate(ec->cl, d, ec->spinner);
             disp_block_separator(d);
             d->saw_text = 1;
         }
+        spinner_hide(ec->spinner);
+        spinner_set_label(ec->spinner, "working...");
         if (ec->md)
             md_feed(ec->md, s, n);
         else
@@ -444,6 +831,9 @@ static int on_event(const struct stream_event *ev, void *user)
         fflush(stdout);
         break;
     case EV_ERROR:
+        /* Same ordering rule as EV_TEXT_DELTA: cluster_terminate first
+         * so it observes the real prior spinner mode. */
+        cluster_terminate(ec->cl, d, ec->spinner);
         spinner_hide(ec->spinner);
         /* Flush any pending markdown tail/styles so the model's last
          * bytes appear with the model text, not after the error block.
@@ -528,7 +918,16 @@ int agent_run(struct provider *p)
 
     const char *prompt = locale_have_utf8() ? PROMPT_UTF8 : PROMPT_ASCII;
 
+    /* Cluster state lives across the inner loop so consecutive quiet
+     * tool calls (read/grep/find...) collapse into a tight block
+     * without intervening blank lines. Reset implicitly at the top of
+     * each user turn — cluster_terminate is a no-op when inactive, so
+     * leftover state from a prior turn (impossible in practice, but
+     * inexpensive to be defensive about) is harmless. */
+    struct cluster cl = {0};
+
     for (;;) {
+        cluster_terminate(&cl, &disp, spinner);
         disp_block_separator(&disp);
         char *line = input_readline(input, prompt);
         if (!line) {
@@ -579,23 +978,48 @@ int agent_run(struct provider *p)
              * Label is reset per-stream so a previous turn's "thinking..."
              * doesn't carry over into a model wait that produces no
              * reasoning deltas. */
-            disp_block_separator(&disp);
-            spinner_set_label(spinner, "working...");
-            spinner_show(spinner);
+            /* If the previous tool batch ended on an active quiet
+             * cluster, the inline spinner is still up at the end of
+             * `[read] foo, bar`. Don't flicker it off — the next event
+             * from the provider will terminate the cluster naturally
+             * (text → cluster_terminate in on_event; tool call →
+             * dispatch routes through silent path which hides+rewrites
+             * inline, or verbose path which terminates). The dedicated
+             * line-mode spinner only takes over when we're actually
+             * sitting at column 0 with no inline glyph. */
+            if (!cl.active) {
+                disp_block_separator(&disp);
+                spinner_set_label(spinner, "working...");
+                spinner_show(spinner);
+            }
 
             if (md)
                 md_reset(md);
             struct turn t;
             turn_init(&t);
             disp.saw_text = 0;
-            struct event_ctx ec = {
-                .disp = &disp, .turn = &t, .spinner = spinner, .md = md, .usage = {-1, -1, -1}};
+            struct event_ctx ec = {.disp = &disp,
+                                   .turn = &t,
+                                   .spinner = spinner,
+                                   .md = md,
+                                   .cl = &cl,
+                                   .usage = {-1, -1, -1}};
             p->stream(p, &ctx, model, on_event, &ec);
 
             /* Either a tool-only response (no text emitted, spinner still
              * visible) or stream returned without ever firing an event —
-             * make sure we're back to a clean line before continuing. */
-            spinner_hide(spinner);
+             * make sure we're back to a clean line before continuing.
+             *
+             * Skip when a quiet cluster is active: the inline spinner is
+             * the cluster's "still alive" indicator, sitting at the end
+             * of an unterminated line that the next silent dispatch will
+             * either coalesce into or close cleanly. Hiding here would
+             * lose the in-line cursor position and trick the next
+             * dispatch's was_inline=0 branch into thinking the spinner
+             * had auto-transitioned, suppressing the \n that should
+             * separate the next [read] header from the prior line. */
+            if (!cl.active)
+                spinner_hide(spinner);
             /* Commit any markdown tail/styles so we don't carry them
              * forward and the terminal isn't left styled. */
             if (md)
@@ -694,9 +1118,13 @@ int agent_run(struct provider *p)
                 if (items[i].kind != ITEM_TOOL_CALL)
                     continue;
                 interrupt_settle();
-                struct item result = interrupt_requested()
-                                         ? dispatch_tool_skipped(&disp, &items[i])
-                                         : dispatch_tool_call(&disp, spinner, &items[i]);
+                struct item result;
+                if (interrupt_requested()) {
+                    cluster_terminate(&cl, &disp, spinner);
+                    result = dispatch_tool_skipped(&disp, &items[i]);
+                } else {
+                    result = dispatch_tool_call(&cl, &disp, spinner, &items[i]);
+                }
                 items_append(&items, &n_items, &cap_items, result);
             }
 
@@ -722,6 +1150,7 @@ int agent_run(struct provider *p)
         interrupt_disarm();
 
         if (turn_interrupted) {
+            cluster_terminate(&cl, &disp, spinner);
             disp_block_separator(&disp);
             disp_raw(ANSI_DIM);
             disp_printf(&disp, "%s", INTERRUPT_MARKER);
@@ -731,7 +1160,7 @@ int agent_run(struct provider *p)
         }
 
         if (!turn_errored)
-            display_usage(&disp, turn_ctx, turn_out, turn_cached);
+            display_usage(&disp, &cl, spinner, turn_ctx, turn_out, turn_cached);
     }
 
     spinner_free(spinner);

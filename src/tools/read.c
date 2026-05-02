@@ -367,4 +367,5 @@ const struct tool TOOL_READ = {
         },
     .run = run,
     .format_display_extra = format_display_extra,
+    .silent_preview = 1,
 };
