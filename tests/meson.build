@@ -176,3 +176,28 @@ test_input_core = executable('test_input_core',
     include_directories: tests_inc,
 )
 test('input_core', test_input_core)
+
+test_disp = executable('test_disp',
+    sources: [
+        'test_disp.c',
+        '../src/disp.c',
+        '../src/util.c',
+    ],
+    include_directories: tests_inc,
+)
+test('disp', test_disp)
+
+test_tool_render = executable('test_tool_render',
+    sources: [
+        'test_tool_render.c',
+        '../src/tool_render.c',
+        '../src/disp.c',
+        '../src/ctrl_strip.c',
+        '../src/spinner.c',
+        '../src/utf8_sanitize.c',
+        '../src/util.c',
+    ],
+    include_directories: tests_inc,
+    dependencies: [threads],
+)
+test('tool_render', test_tool_render)

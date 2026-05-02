@@ -2,7 +2,6 @@
 #include "agent.h"
 
 #include <jansson.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,14 +9,15 @@
 
 #include "ansi.h"
 #include "ctrl_strip.h"
+#include "disp.h"
 #include "env.h"
 #include "input.h"
 #include "interrupt.h"
 #include "markdown.h"
 #include "spinner.h"
 #include "tool.h"
+#include "tool_render.h"
 #include "turn.h"
-#include "utf8_sanitize.h"
 #include "util.h"
 
 #define INTERRUPT_MARKER "[interrupted]"
@@ -58,17 +58,6 @@
     "*proposed change*, not a summary. A finding should be one the author would "                  \
     "fix if they knew. Skip pre-existing issues and trivial style. Calibrate "                     \
     "severity honestly; no flattery. Empty findings is a valid result."
-
-/* Head-only preview (file-content tools — read top-down). */
-#define DISP_HEAD_ONLY_LINES 8
-#define DISP_HEAD_ONLY_BYTES 3000
-
-/* Head + tail preview (command-output tools — errors land at the
- * bottom). Whichever side hits its line or byte cap first stops. */
-#define DISP_HT_HEAD_LINES 4
-#define DISP_HT_TAIL_LINES 4
-#define DISP_HT_HEAD_BYTES 1500
-#define DISP_HT_TAIL_BYTES 1500
 
 static const struct tool *const TOOLS[] = {
     &TOOL_READ,
@@ -114,19 +103,6 @@ static int tool_result_is_marked(const struct item *it)
     return strcmp(it->output + out_len - marker_len, INTERRUPT_MARKER) == 0;
 }
 
-/* ---------- display ----------
- *
- * All terminal output for the conversation flows through these helpers so we
- * can keep visual blocks (user prompt, model text, tool calls) cleanly
- * separated by exactly one blank line, regardless of how many trailing or
- * leading newlines the model and tools happen to emit. */
-
-struct disp {
-    int trail;    /* trailing newlines committed to terminal */
-    int held;     /* trailing newlines received but not yet committed */
-    int saw_text; /* have we emitted real model text yet this turn? */
-};
-
 /* Bundles the per-turn state needed by the streaming callback into one
  * struct, so we can plumb display state alongside `struct turn` through
  * the provider's user-pointer parameter. */
@@ -138,112 +114,6 @@ struct event_ctx {
     /* Filled in from EV_DONE; -1/-1/-1 if the provider didn't report. */
     struct stream_usage usage;
 };
-
-/* Newline runs at the trail of any disp_* call are deferred into `held`
- * rather than written immediately, so a later disp_block_separator can cap
- * them at 2 (one blank line) — without buffering they'd already be in the
- * terminal and we couldn't take them back. Within a block they get
- * committed verbatim by the next non-NL write. */
-static void disp_emit_held(struct disp *d)
-{
-    for (int i = 0; i < d->held; i++)
-        fputc('\n', stdout);
-    d->trail += d->held;
-    d->held = 0;
-}
-
-static void disp_putc(struct disp *d, char c)
-{
-    if (c == '\n') {
-        d->held++;
-    } else {
-        disp_emit_held(d);
-        fputc(c, stdout);
-        d->trail = 0;
-    }
-}
-
-static void disp_write(struct disp *d, const char *s, size_t n)
-{
-    if (n == 0)
-        return;
-    /* Walk back across trailing line-ending bytes — both \n and \r — so
-     * a CRLF tail (common in Windows files / tool output) is fully
-     * deferred and block_separator can collapse it. Only \n counts as a
-     * line break for held; \r alone is just a column-zero return. */
-    size_t tail_bytes = 0;
-    int tail_breaks = 0;
-    while (tail_bytes < n) {
-        char c = s[n - 1 - tail_bytes];
-        if (c == '\n')
-            tail_breaks++;
-        else if (c != '\r')
-            break;
-        tail_bytes++;
-    }
-    if (n > tail_bytes) {
-        disp_emit_held(d);
-        fwrite(s, 1, n - tail_bytes, stdout);
-        d->trail = 0;
-    }
-    d->held += tail_breaks;
-}
-
-/* For ANSI escape sequences (caller guarantees no NLs in s). Doesn't flush
- * held NLs — they remain queued so a later block separator can still cap
- * them. The escape lands ahead of any pending NLs in byte order, but since
- * escapes are zero-width that's visually identical. */
-static void disp_raw(const char *s)
-{
-    fputs(s, stdout);
-}
-
-__attribute__((format(printf, 2, 3))) static void disp_printf(struct disp *d, const char *fmt, ...)
-{
-    va_list ap, ap2;
-    va_start(ap, fmt);
-    va_copy(ap2, ap);
-    int n = vsnprintf(NULL, 0, fmt, ap);
-    va_end(ap);
-    if (n < 0) {
-        va_end(ap2);
-        return;
-    }
-    char *buf = xmalloc((size_t)n + 1);
-    vsnprintf(buf, (size_t)n + 1, fmt, ap2);
-    va_end(ap2);
-    disp_write(d, buf, (size_t)n);
-    free(buf);
-}
-
-/* Bring the terminal trail to exactly one blank line (two NLs). Held NLs
- * from the previous block are dropped, so trailing blank lines in tool
- * output or model text don't leak through. */
-static void disp_block_separator(struct disp *d)
-{
-    int need = 2 - d->trail;
-    for (int i = 0; i < need; i++)
-        fputc('\n', stdout);
-    if (need > 0)
-        d->trail += need;
-    d->held = 0;
-}
-
-/* Strip leading newlines from the first delta of a turn — some compat
- * backends (Qwen on oMLX, in particular) prefix the stream with stray
- * newlines that would push the response visually away from the prompt.
- * Spaces and tabs are preserved: leading indentation can be legitimate
- * response content (code blocks, diff context, etc.). Pure — no stdout
- * writes — so the caller can peek before deciding to hide the spinner. */
-static void disp_first_delta_strip(const struct disp *d, const char **s, size_t *n)
-{
-    if (d->saw_text)
-        return;
-    while (*n > 0 && (**s == '\n' || **s == '\r')) {
-        (*s)++;
-        (*n)--;
-    }
-}
 
 static void display_tool_header(struct disp *d, const struct item *call)
 {
@@ -293,442 +163,90 @@ static void display_tool_header(struct disp *d, const struct item *call)
     fflush(stdout);
 }
 
-/* ---------- streaming tool-output renderer ----------
- *
- * Tool output flows through this renderer chunk by chunk: bytes arrive
- * via stream_ctx_feed (driven by the emit_display callback the agent
- * hands to each tool's run()), and the renderer ctrl_strips them and emits a
- * live dim-styled preview to the terminal in one of three modes:
- *
- *   - R_HEAD_ONLY: dim block capped at HEAD_ONLY_LINES / HEAD_ONLY_BYTES.
- *     Past the cap, live emission stops and a spinner resumes; finalize
- *     emits a "... (N more lines, M more bytes)" footer.
- *
- *   - R_HEAD_TAIL: dim block capped at HT_HEAD_*; past the cap, live
- *     emission stops, a tail ring captures the most recent HT_TAIL_BYTES,
- *     and finalize emits an elision marker + the tail.
- *
- *   - R_DIFF: line-buffered, per-line colored, uncapped. Finalize
- *     flushes any trailing partial line.
- *
- * Mode is chosen by the agent at init time from the tool's capabilities.
- * Diff-capable tools (write/edit) are non-streaming, so the agent has
- * the full return string in hand and can switch to R_DIFF based on the
- * `--- ` prefix before feeding — no runtime peek needed. The renderer
- * therefore assumes mode is fixed for the lifetime of one tool call. */
-
-enum render_mode {
-    R_DIFF,      /* line-buffered, per-line color, uncapped          */
-    R_HEAD_ONLY, /* head cap with "(N more)" footer                  */
-    R_HEAD_TAIL, /* head cap with elision + tail ring                */
-};
-
-struct stream_ctx {
-    struct disp *disp;
-    struct spinner *spinner;
-    struct ctrl_strip strip;
-    /* Stateful UTF-8 sanitization: bytes pass through ctrl_strip first
-     * (drops C0/escape sequences), then this validator (replaces
-     * malformed UTF-8 with U+FFFD). Stateful so a multi-byte codepoint
-     * split across emit_display chunks isn't double-FFFD'd. */
-    struct utf8_sanitize utf8;
-    /* "Did the tool call emit_display?" — set on every emit_display_cb
-     * invocation regardless of byte count, so a call that strips to
-     * zero clean bytes still counts as having emitted. The dispatch
-     * wiring uses this to decide whether to feed the tool's return
-     * value through emit_display for one-shot rendering. */
-    int emit_display_called;
-
-    enum render_mode mode;
-
-    int dim_open;       /* ANSI_DIM has been emitted (must close on finalize)  */
-    int started;        /* any visible byte has been emitted in this block     */
-    int spinner_paused; /* hid spinner on first byte; resume after head fills  */
-
-    /* Head-budget tracking (R_HEAD_ONLY and R_HEAD_TAIL). */
-    int lines_emitted;
-    size_t bytes_emitted;
-    int head_full;
-
-    /* R_HEAD_TAIL: tail ring captures bytes after the head cap. */
-    char *tail;
-    size_t tail_pos;
-    int tail_wrapped;
-
-    /* Counts of bytes/lines suppressed past the head cap. */
-    size_t suppressed_bytes;
-    int suppressed_lines;
-    /* 1 when the last suppressed byte was not a newline, i.e. there's
-     * a partial trailing line beyond the cap. R_HEAD_ONLY adds this
-     * to the footer's line count so a long unterminated remainder
-     * doesn't read as "0 more lines". Mirrors the pre-streaming
-     * display_tool_output_head's `out[total-1] != '\n'` check. */
-    int suppressed_partial_trailing;
-
-    /* R_DIFF: per-line buffer so we can color whole lines. */
-    struct buf diff_line;
-};
-
-static int head_lines_cap(const struct stream_ctx *c)
+/* Render a synthesized "[interrupted]" block in place of running a tool,
+ * and produce the matching tool_result item so the conversation stays
+ * well-formed when Esc fires partway through a batch. */
+static struct item dispatch_tool_skipped(struct disp *d, const struct item *call)
 {
-    return c->mode == R_HEAD_TAIL ? DISP_HT_HEAD_LINES : DISP_HEAD_ONLY_LINES;
-}
-
-static size_t head_bytes_cap(const struct stream_ctx *c)
-{
-    return c->mode == R_HEAD_TAIL ? DISP_HT_HEAD_BYTES : DISP_HEAD_ONLY_BYTES;
-}
-
-static void stream_ctx_init(struct stream_ctx *c, struct disp *d, struct spinner *sp,
-                            enum render_mode mode)
-{
-    memset(c, 0, sizeof(*c));
-    c->disp = d;
-    c->spinner = sp;
-    ctrl_strip_init(&c->strip);
-    utf8_sanitize_init(&c->utf8);
-    c->mode = mode;
-    if (c->mode == R_HEAD_TAIL)
-        c->tail = xmalloc(DISP_HT_TAIL_BYTES);
-    buf_init(&c->diff_line);
-}
-
-static void stream_ctx_free(struct stream_ctx *c)
-{
-    free(c->tail);
-    buf_free(&c->diff_line);
-}
-
-static const char *diff_line_color(const char *line, size_t len)
-{
-    if (len >= 4 && (memcmp(line, "--- ", 4) == 0 || memcmp(line, "+++ ", 4) == 0))
-        return ANSI_DIM; /* file headers — scaffolding, not signal */
-    if (len >= 2 && memcmp(line, "@@", 2) == 0)
-        return ANSI_DIM;
-    if (len >= 1 && line[0] == '+')
-        return ANSI_GREEN;
-    if (len >= 1 && line[0] == '-')
-        return ANSI_RED;
-    if (len >= 1 && line[0] == '\\')
-        return ANSI_DIM; /* \ No newline at end of file */
-    return NULL;
-}
-
-static void emit_diff_line(struct stream_ctx *c, const char *line, size_t len, int with_newline)
-{
-    const char *color = diff_line_color(line, len);
-    if (color)
-        disp_raw(color);
-    disp_write(c->disp, line, len);
-    if (color)
-        disp_raw(ANSI_RESET);
-    if (with_newline)
-        disp_putc(c->disp, '\n');
-}
-
-/* First-byte hooks: open the ANSI_DIM wrapper (head-only / head-tail
- * modes) and pause the spinner so live text appears cleanly. Diff mode
- * has no dim wrapper — coloring is per-line. */
-static void stream_first_byte(struct stream_ctx *c)
-{
-    if (c->started)
-        return;
-    c->started = 1;
-    if (c->spinner && !c->spinner_paused) {
-        spinner_hide(c->spinner);
-        c->spinner_paused = 1;
-    }
-    if (c->mode == R_HEAD_ONLY || c->mode == R_HEAD_TAIL) {
-        disp_raw(ANSI_DIM);
-        c->dim_open = 1;
-    }
-}
-
-/* End the live cap line: emit a deferred newline (only if we're not
- * already at column 0), drain held NLs, close the dim block, and resume
- * the spinner. Used at the moment R_HEAD_ONLY hits its cap and at the
- * moment R_HEAD_TAIL's tail ring wraps (i.e., elision is now guaranteed
- * and the screen has stopped scrolling). */
-static void close_head_block(struct stream_ctx *c)
-{
-    if (c->disp->held == 0 && c->disp->trail == 0)
-        disp_putc(c->disp, '\n');
-    disp_emit_held(c->disp);
-    if (c->dim_open) {
-        disp_raw(ANSI_RESET);
-        c->dim_open = 0;
-    }
+    display_tool_header(d, call);
+    disp_raw(ANSI_DIM);
+    disp_printf(d, "%s", INTERRUPT_MARKER);
+    disp_raw(ANSI_RESET);
+    disp_putc(d, '\n');
     fflush(stdout);
-    if (c->spinner) {
-        spinner_show(c->spinner);
-        c->spinner_paused = 0;
-    }
+    return (struct item){
+        .kind = ITEM_TOOL_RESULT,
+        .call_id = xstrdup(call->call_id),
+        .output = xstrdup(INTERRUPT_MARKER),
+    };
 }
 
-/* True once we know finalize will need to emit an elision marker —
- * either the tail ring overflowed or the suppressed range has more
- * newlines than the tail line cap (mirrors the pre-streaming
- * tail_start > head_end check: back-walk would stop strictly inside
- * the suppressed range without reaching back into the head). */
-static int elision_guaranteed(const struct stream_ctx *c)
+/* Run one tool call: render the header, drive the renderer over either
+ * streamed emit_display chunks or the canonical return value, and produce
+ * the tool_result item that goes back to the model. The canonical history
+ * is ctrl_stripped at this boundary so all tools' outputs land in the
+ * conversation in the same normalized form; anything pushed through
+ * emit_display is display-only and does not enter history. */
+static struct item dispatch_tool_call(struct disp *d, struct spinner *sp, const struct item *call)
 {
-    return c->tail_wrapped || c->suppressed_lines > DISP_HT_TAIL_LINES;
-}
+    display_tool_header(d, call);
+    /* "⠋ running..." — the spinner re-emerges between streamed chunks
+     * (and for non-streaming tools, after the single returned payload),
+     * so the user always sees "running" while a tool is executing. */
+    spinner_set_label(sp, "running...");
+    spinner_show(sp);
 
-/* Live emit one already-clean byte under the active mode. */
-static void emit_byte_capped(struct stream_ctx *c, char ch)
-{
-    if (c->head_full) {
-        int was_eligible = elision_guaranteed(c);
-        if (c->mode == R_HEAD_TAIL) {
-            c->tail[c->tail_pos++] = ch;
-            if (c->tail_pos == DISP_HT_TAIL_BYTES) {
-                c->tail_pos = 0;
-                c->tail_wrapped = 1;
-            }
-        }
-        c->suppressed_bytes++;
-        if (ch == '\n') {
-            c->suppressed_lines++;
-            c->suppressed_partial_trailing = 0;
-        } else {
-            c->suppressed_partial_trailing = 1;
-        }
-        /* Close the live block at the first byte that makes elision
-         * certain. Until this point we keep the dim section open so
-         * that an output which ends up fitting under the tail caps can
-         * flow inline at finalize with no synthetic break. */
-        if (c->mode == R_HEAD_TAIL && !was_eligible && elision_guaranteed(c))
-            close_head_block(c);
-        return;
-    }
+    const struct tool *t = find_tool(call->tool_name);
+    /* Initial mode comes straight from tool capability. For diff-capable
+     * tools (write/edit) we leave R_DIFF for after run() — they never
+     * stream, so we'll have the full return string in hand to check the
+     * `--- ` prefix before deciding diff vs error preview. */
+    enum render_mode mode = (t && t->preview_tail) ? R_HEAD_TAIL : R_HEAD_ONLY;
+    struct tool_render rr;
+    tool_render_init(&rr, d, sp, mode);
+    char *ret = t ? t->run(call->tool_arguments_json, tool_render_emit, &rr)
+                  : xasprintf("unknown tool: %s", call->tool_name);
 
-    stream_first_byte(c);
-    disp_write(c->disp, &ch, 1);
-    c->bytes_emitted++;
-    if (ch == '\n')
-        c->lines_emitted++;
-
-    if (c->lines_emitted >= head_lines_cap(c) || c->bytes_emitted >= head_bytes_cap(c)) {
-        c->head_full = 1;
-        /* R_HEAD_ONLY always ends with a "(N more)" footer — close the
-         * live block now so the footer renders cleanly. R_HEAD_TAIL
-         * closes too if the cap landed on a newline boundary (line
-         * cap, or byte cap that happened to coincide with \n) so the
-         * spinner reappears immediately for slow line-based output;
-         * mid-line cap defers to avoid a phantom break (see the
-         * suppression branch above for the deferred-close path). */
-        if (c->mode != R_HEAD_TAIL || ch == '\n')
-            close_head_block(c);
-    }
-}
-
-/* Diff mode: line-buffer until \n, then emit colored. Partial trailing
- * line is held until finalize. */
-static void emit_byte_diff(struct stream_ctx *c, char ch)
-{
-    stream_first_byte(c);
-    if (ch == '\n') {
-        emit_diff_line(c, c->diff_line.data ? c->diff_line.data : "", c->diff_line.len, 1);
-        buf_reset(&c->diff_line);
-    } else {
-        buf_append(&c->diff_line, &ch, 1);
-    }
-}
-
-/* Dispatch one already-sanitized byte to the active mode. */
-static void emit_clean(struct stream_ctx *c, char ch)
-{
-    if (c->mode == R_DIFF)
-        emit_byte_diff(c, ch);
-    else
-        emit_byte_capped(c, ch);
-}
-
-static void stream_ctx_feed(struct stream_ctx *c, const char *bytes, size_t n)
-{
-    if (n == 0)
-        return;
-    /* Two-stage sanitize: ctrl_strip drops C0/escape sequences (never
-     * expands, so n bytes in → ≤ n bytes out). utf8_sanitize then
-     * replaces malformed bytes with U+FFFD (worst case 3x expansion),
-     * holding partial multi-byte sequences across chunks so a codepoint
-     * split at an emit_display-chunk boundary isn't double-replaced. */
-    char stack_strip[4096];
-    char *clean = n <= sizeof(stack_strip) ? stack_strip : xmalloc(n);
-    size_t cn = ctrl_strip_feed(&c->strip, bytes, n, clean);
-
-    char stack_utf8[UTF8_SANITIZE_OUT_MAX(4096)];
-    size_t need = UTF8_SANITIZE_OUT_MAX(cn);
-    char *out = need <= sizeof(stack_utf8) ? stack_utf8 : xmalloc(need);
-    size_t on = utf8_sanitize_feed(&c->utf8, clean, cn, out);
-
-    for (size_t i = 0; i < on; i++)
-        emit_clean(c, out[i]);
-
-    if (out != stack_utf8)
-        free(out);
-    if (clean != stack_strip)
-        free(clean);
-    fflush(stdout);
-}
-
-static void render_finalize_capped(struct stream_ctx *c)
-{
-    if (!c->head_full) {
-        /* Output fit entirely under the cap. Close the dim block with a
-         * trailing newline if we don't already have one. */
-        if (c->disp->held == 0 && c->disp->trail == 0)
-            disp_putc(c->disp, '\n');
-        return;
-    }
-
-    if (c->mode == R_HEAD_TAIL && !elision_guaranteed(c)) {
-        /* Cap was reached but the suppressed range was small enough
-         * that no elision marker is warranted (mirrors the pre-streaming
-         * "tail_start <= head_end" overlap case). Re-open dim if
-         * close_head_block already ran (line-aligned cap path); for
-         * mid-line cap dim is still open and the open is a no-op. */
-        if (c->tail_pos > 0) {
-            if (!c->dim_open) {
-                disp_raw(ANSI_DIM);
-                c->dim_open = 1;
-            }
-            disp_write(c->disp, c->tail, c->tail_pos);
-        }
-        if (c->disp->held == 0 && c->disp->trail == 0)
-            disp_putc(c->disp, '\n');
-        return;
-    }
-
-    /* Edge case: output landed exactly on the cap with nothing left
-     * over (R_HEAD_ONLY: lines_emitted == cap, no further bytes arrived).
-     * For R_HEAD_TAIL this branch can't run since we'd have taken the
-     * !tail_wrapped path above. Don't re-open ANSI_DIM only to close it
-     * again, and don't emit "... (0 more lines, 0 more bytes)". */
-    if (c->suppressed_bytes == 0)
-        return;
-
-    /* Elision: the cap line was already finalized by close_head_block
-     * (R_HEAD_ONLY at cap-hit, R_HEAD_TAIL at tail-wrap), so no extra
-     * "\n" needed here before the marker. Re-open dim. */
-    if (!c->dim_open) {
-        disp_raw(ANSI_DIM);
-        c->dim_open = 1;
-    }
-    if (c->mode == R_HEAD_TAIL) {
-        /* Linearize the ring into a contiguous buffer so the tail-trim
-         * back-walk is straightforward. Bounded by DISP_HT_TAIL_BYTES so
-         * the stack copy is cheap. Elision can fire either via byte
-         * overflow (tail_wrapped) or via line count overflow (more than
-         * TAIL_LINES newlines suppressed but < TAIL_BYTES) — in the
-         * latter case the ring isn't full, so use tail_pos directly. */
-        char linear[DISP_HT_TAIL_BYTES];
-        size_t linear_len = c->tail_wrapped ? DISP_HT_TAIL_BYTES : c->tail_pos;
-        size_t oldest = c->tail_wrapped ? c->tail_pos : 0;
-        for (size_t k = 0; k < linear_len; k++)
-            linear[k] = c->tail[(oldest + k) % DISP_HT_TAIL_BYTES];
-
-        /* Back-walk to keep at most DISP_HT_TAIL_LINES lines, mirroring
-         * the non-streaming display_tool_output_head_tail logic: ignore
-         * a trailing \n (so it doesn't count as a boundary), cross
-         * TAIL_LINES-1 newlines, then stop at the next newline so the
-         * tail begins on a clean line boundary. The byte cap is implicit
-         * since the ring is already bounded at TAIL_BYTES. */
-        size_t tail_start = linear_len;
-        if (tail_start > 0 && linear[tail_start - 1] == '\n')
-            tail_start--;
-        int crossed = 0;
-        while (tail_start > 0) {
-            if (linear[tail_start - 1] == '\n') {
-                if (crossed == DISP_HT_TAIL_LINES - 1)
-                    break;
-                crossed++;
-            }
-            tail_start--;
-        }
-        /* tail_start now points at the first byte of the kept tail; the
-         * kept range runs through the very end of the linearized ring,
-         * so the trailing newline (if any) is included naturally. */
-        size_t kept = linear_len - tail_start;
-        if (kept > c->suppressed_bytes)
-            kept = c->suppressed_bytes; /* shouldn't happen */
-        size_t mid_bytes = c->suppressed_bytes - kept;
-        int mid_lines = c->suppressed_lines;
-        /* Newlines inside the kept tail aren't middle bytes. */
-        for (size_t k = tail_start; k < linear_len; k++)
-            if (linear[k] == '\n')
-                mid_lines--;
-        if (mid_lines < 0)
-            mid_lines = 0;
-
-        /* Defensive: mid_bytes can still be 0 in the rare case where
-         * the tail ring wrapped exactly once on a no-newline output
-         * (so back-walk keeps the entire ring as tail and nothing was
-         * actually dropped). Skip the marker in that case rather than
-         * emit "... (0 more lines, 0 more bytes) ...". */
-        if (mid_bytes > 0) {
-            disp_printf(c->disp, "... (%d more line%s, %zu more byte%s) ...", mid_lines,
-                        mid_lines == 1 ? "" : "s", mid_bytes, mid_bytes == 1 ? "" : "s");
-            disp_putc(c->disp, '\n');
-        }
-        if (kept > 0)
-            disp_write(c->disp, linear + tail_start, kept);
-        if (c->disp->held == 0 && c->disp->trail == 0)
-            disp_putc(c->disp, '\n');
-    } else { /* R_HEAD_ONLY */
-        int more_lines = c->suppressed_lines + c->suppressed_partial_trailing;
-        disp_printf(c->disp, "... (%d more line%s, %zu more byte%s)", more_lines,
-                    more_lines == 1 ? "" : "s", c->suppressed_bytes,
-                    c->suppressed_bytes == 1 ? "" : "s");
-        disp_putc(c->disp, '\n');
-    }
-}
-
-static int emit_display_cb(const char *bytes, size_t n, void *user)
-{
-    struct stream_ctx *c = user;
-    c->emit_display_called = 1;
-    stream_ctx_feed(c, bytes, n);
-    return 0;
-}
-
-static void stream_ctx_finalize(struct stream_ctx *c)
-{
-    /* Flush any in-progress UTF-8 sequence as U+FFFD. Drives emit_clean
-     * directly so the byte goes through the same head/tail/diff path
-     * as live bytes — matters for the "started" flag in particular,
-     * which gates the no-output branch below. */
-    char tail[UTF8_SANITIZE_FLUSH_MAX];
-    size_t tn = utf8_sanitize_flush(&c->utf8, tail);
-    for (size_t i = 0; i < tn; i++)
-        emit_clean(c, tail[i]);
-
-    if (c->spinner && !c->spinner_paused) {
-        spinner_hide(c->spinner);
-        c->spinner_paused = 1;
-    }
-
-    if (!c->started) {
-        /* No output at all. Tools-level convention is "(no output)" for
-         * empty bash, but bash now emits that footer itself, so any
-         * truly empty stream just leaves no preview block. */
-        return;
-    }
-
-    if (c->mode == R_DIFF) {
-        if (c->diff_line.len > 0) {
-            emit_diff_line(c, c->diff_line.data, c->diff_line.len, 1);
-            buf_reset(&c->diff_line);
-        }
-    } else {
-        render_finalize_capped(c);
-        if (c->dim_open) {
+    /* If the tool called emit_display at any point, the live preview is
+     * already rendered. Otherwise feed the canonical return value through
+     * once so the renderer treats both kinds uniformly. */
+    if (ret && !rr.emit_called) {
+        /* Empty output from a diff-capable tool means the write/edit
+         * was a no-op (byte-identical content, see fs_write_with_diff).
+         * Render the marker inline — feeding "" through the preview
+         * renderer would leave the user staring at a bare tool header. */
+        if (t && t->output_is_diff && !*ret) {
+            spinner_hide(sp);
+            disp_raw(ANSI_DIM);
+            disp_printf(d, "(no changes)");
             disp_raw(ANSI_RESET);
-            c->dim_open = 0;
+            disp_putc(d, '\n');
+            fflush(stdout);
+        } else {
+            /* Diff-capable tools' success output starts with `--- `;
+             * their failure output (error messages) doesn't. Switching
+             * mode here keeps a botched write/edit flowing through the
+             * standard preview path instead of mis-coloring it as a diff. */
+            if (t && t->output_is_diff && strncmp(ret, "--- ", 4) == 0)
+                rr.mode = R_DIFF;
+            tool_render_feed(&rr, ret, strlen(ret));
         }
     }
-    fflush(stdout);
+    tool_render_finalize(&rr);
+    /* Spinner may still be up (no-output case, or head-full resume that
+     * we never hid in finalize). Belt-and-braces to make sure it's gone
+     * before the next thing draws. */
+    spinner_hide(sp);
+
+    char *history = ctrl_strip_dup(ret ? ret : "");
+    free(ret);
+    tool_render_free(&rr);
+
+    return (struct item){
+        .kind = ITEM_TOOL_RESULT,
+        .call_id = xstrdup(call->call_id),
+        .output = history,
+    };
 }
 
 /* Adapter so md_renderer can emit through disp without knowing about it.
@@ -1166,110 +684,20 @@ int agent_run(struct provider *p)
              * spinner runs on the line between header and output so a
              * slow tool still gives the user a "still working" signal;
              * spinner_hide erases that line and tool output writes there
-             * in its place. */
+             * in its place. Esc partway through the batch flips remaining
+             * calls to a synthesized "[interrupted]" result so the
+             * conversation stays well-formed; settle first so a
+             * fast-returning tool doesn't race past a pending \x1b in
+             * the classifier. */
             size_t current_end = n_items;
             for (size_t i = n_before; i < current_end; i++) {
                 if (items[i].kind != ITEM_TOOL_CALL)
                     continue;
-                /* Esc since the last iteration — skip the rest of the
-                 * batch with synthesized "[interrupted]" results so the
-                 * conversation stays well-formed. Show the header so the
-                 * user can see which calls were skipped. Settle first
-                 * so a fast-returning tool (read/write/edit) doesn't
-                 * race past a still-pending \x1b in the classifier. */
                 interrupt_settle();
-                if (interrupt_requested()) {
-                    display_tool_header(&disp, &items[i]);
-                    disp_raw(ANSI_DIM);
-                    disp_printf(&disp, "%s", INTERRUPT_MARKER);
-                    disp_raw(ANSI_RESET);
-                    disp_putc(&disp, '\n');
-                    fflush(stdout);
-                    items_append(&items, &n_items, &cap_items,
-                                 (struct item){
-                                     .kind = ITEM_TOOL_RESULT,
-                                     .call_id = xstrdup(items[i].call_id),
-                                     .output = xstrdup(INTERRUPT_MARKER),
-                                 });
-                    continue;
-                }
-                display_tool_header(&disp, &items[i]);
-                /* "⠋ running..." — the spinner re-emerges between
-                 * streamed chunks (and for non-streaming tools, after
-                 * the single returned payload), so the user always sees
-                 * "running" while a tool is executing. */
-                spinner_set_label(spinner, "running...");
-                spinner_show(spinner);
-
-                /* The tool always returns a canonical output string for
-                 * history. Live display is driven by emit_display chunks:
-                 * a streaming tool (bash) calls emit_display as bytes
-                 * arrive and the renderer emits them to the dim block. A
-                 * tool that has nothing display-only to say (read/edit,
-                 * and `write` on overwrite) doesn't call emit_display;
-                 * we feed the returned string through it once so the
-                 * renderer treats both kinds uniformly. The canonical
-                 * history is ctrl_stripped at this boundary so all
-                 * tools' outputs land in the conversation in the same
-                 * normalized form. */
-                const struct tool *t = find_tool(items[i].tool_name);
-                /* Initial mode comes straight from tool capability. For
-                 * diff-capable tools (write/edit) we leave R_DIFF for
-                 * after run() — they never stream, so we'll have the
-                 * full return string in hand to check the `--- ` prefix
-                 * before deciding diff vs error preview. */
-                enum render_mode mode = (t && t->preview_tail) ? R_HEAD_TAIL : R_HEAD_ONLY;
-                struct stream_ctx sc;
-                stream_ctx_init(&sc, &disp, spinner, mode);
-                char *ret = t ? t->run(items[i].tool_arguments_json, emit_display_cb, &sc)
-                              : xasprintf("unknown tool: %s", items[i].tool_name);
-                /* If the tool called emit_display at any point, the live
-                 * preview is already rendered. Otherwise feed the
-                 * canonical return value through once so the renderer
-                 * treats both kinds uniformly. */
-                if (ret && !sc.emit_display_called) {
-                    /* Empty output from a diff-capable tool means the
-                     * write/edit was a no-op (byte-identical content,
-                     * see fs_write_with_diff). Render the marker inline
-                     * — feeding "" through the preview renderer would
-                     * just leave the user staring at a bare tool header. */
-                    if (t && t->output_is_diff && !*ret) {
-                        spinner_hide(spinner);
-                        disp_raw(ANSI_DIM);
-                        disp_printf(&disp, "(no changes)");
-                        disp_raw(ANSI_RESET);
-                        disp_putc(&disp, '\n');
-                        fflush(stdout);
-                    } else {
-                        /* Diff-capable tools' success output starts with
-                         * `--- `; their failure output (error messages)
-                         * doesn't. Switching mode here keeps a botched
-                         * write/edit flowing through the standard preview
-                         * path instead of mis-coloring it as a diff. */
-                        if (t && t->output_is_diff && strncmp(ret, "--- ", 4) == 0)
-                            sc.mode = R_DIFF;
-                        stream_ctx_feed(&sc, ret, strlen(ret));
-                    }
-                }
-                stream_ctx_finalize(&sc);
-                /* Spinner may still be up (no-output case, or head-full
-                 * resume that we never hid in finalize). Belt-and-braces
-                 * to make sure it's gone before the next thing draws. */
-                spinner_hide(spinner);
-
-                /* History always comes from the returned string, ctrl-
-                 * stripped at this boundary. Anything pushed through
-                 * emit_display is display-only and is freed by
-                 * stream_ctx_free. */
-                char *history = ctrl_strip_dup(ret ? ret : "");
-                free(ret);
-                stream_ctx_free(&sc);
-                items_append(&items, &n_items, &cap_items,
-                             (struct item){
-                                 .kind = ITEM_TOOL_RESULT,
-                                 .call_id = xstrdup(items[i].call_id),
-                                 .output = history,
-                             });
+                struct item result = interrupt_requested()
+                                         ? dispatch_tool_skipped(&disp, &items[i])
+                                         : dispatch_tool_call(&disp, spinner, &items[i]);
+                items_append(&items, &n_items, &cap_items, result);
             }
 
             /* Esc fired during or just after this batch. Stop the inner
