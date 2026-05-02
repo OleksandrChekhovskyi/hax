@@ -29,7 +29,7 @@ static char *write_tmp(const void *data, size_t len)
 
 static char *call_read(const char *args_json)
 {
-    return TOOL_READ.run(args_json);
+    return TOOL_READ.run(args_json, NULL, NULL);
 }
 
 static void test_read_invalid_json(void)

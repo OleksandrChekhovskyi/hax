@@ -9,19 +9,34 @@
  * runs it. Each tool lives in its own translation unit under src/tools/ and
  * exports exactly one `const struct tool` symbol.
  *
- * run() takes a JSON-encoded argument string and returns a freshly allocated
- * output string that will be shown back to the model. On error, the returned
- * string explains the failure — the model treats it as tool output and can
- * recover. Returning NULL is not allowed.
+ * run() takes a JSON-encoded argument string and returns the canonical
+ * tool output that goes into conversation history (and back to the
+ * model). Returning NULL is not allowed; an error message is itself
+ * valid output the model can recover from. Returning "" is fine.
+ *
+ * Tools may additionally stream bytes via the `write` callback during
+ * execution for live on-screen feedback. The agent uses writer chunks
+ * only for the display pipeline — they have no effect on history. A
+ * tool that doesn't stream (read/write/edit) just ignores the writer
+ * params; the agent feeds the returned string through the writer once
+ * on completion so the live display works the same either way.
+ *
+ * Streaming tools (bash) typically call writer per pipe-read chunk and
+ * also return a possibly-different canonical string at the end —
+ * concretely, bash streams every byte for display but returns a
+ * head+tail-truncated, UTF-8-sanitized summary so the model isn't
+ * billed for an unbounded live stream.
  *
  * output_is_diff hints that successful output is a unified diff and the
  * agent should render it colored (and uncapped) instead of as a dim
  * preview. Failure messages from the same tool are not diffs; the agent
  * routes by checking whether the output starts with `--- `.
  */
+typedef int (*tool_writer)(const char *bytes, size_t n, void *user);
+
 struct tool {
     struct tool_def def;
-    char *(*run)(const char *args_json);
+    char *(*run)(const char *args_json, tool_writer write, void *user);
     /* Optional. Returns a small dim suffix appended to the tool-call header
      * after the bold `display_arg` value — e.g. `:5-20` for `read` to
      * surface the requested line range. NULL or empty string means no

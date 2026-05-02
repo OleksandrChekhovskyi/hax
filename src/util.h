@@ -62,11 +62,6 @@ long parse_duration_ms(const char *s);
  * failure (e.g. /dev/urandom unavailable) — same convention as xmalloc. */
 void gen_uuid_v4(char out[37]);
 
-/* Convert an arbitrary byte range into a NUL-free, valid UTF-8 string.
- * Valid UTF-8 is preserved verbatim; NULs and invalid sequences are
- * replaced with U+FFFD. Caller frees. */
-char *sanitize_utf8(const char *data, size_t len);
-
 /* Truncate any line in `data` longer than `max_line` bytes to its first
  * `max_line` bytes followed by an inline `...[N bytes elided]` marker.
  * Newline structure is preserved (one input line → one output line) so

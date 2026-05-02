@@ -6,8 +6,10 @@
 #include "fs.h"
 #include "util.h"
 
-static char *run(const char *args_json)
+static char *run(const char *args_json, tool_writer write, void *user)
 {
+    (void)write;
+    (void)user;
     json_error_t jerr;
     json_t *root = json_loads(args_json ? args_json : "{}", 0, &jerr);
     if (!root)

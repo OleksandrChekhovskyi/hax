@@ -289,7 +289,22 @@ void codex_events_feed(struct codex_events *s, const char *data)
         handle_output_item_done(s, root);
     else if (strcmp(type, "response.output_text.delta") == 0)
         handle_text_delta(s, root);
-    else if (strcmp(type, "response.function_call_arguments.delta") == 0)
+    else if (strcmp(type, "response.reasoning_summary_text.delta") == 0 ||
+             strcmp(type, "response.reasoning_text.delta") == 0) {
+        /* Visible CoT or summary deltas — we don't display or store the
+         * text (encrypted_content on the final reasoning item is what
+         * round-trips), but the activity drives the "thinking..." spinner.
+         * Symmetric with openai_events: skip empty/missing deltas so a
+         * malformed event doesn't fire a UX signal with no content. */
+        const char *delta = json_string_value(json_object_get(root, "delta"));
+        if (delta && *delta) {
+            struct stream_event ev = {
+                .kind = EV_REASONING_DELTA,
+                .u.reasoning_delta = {.text = delta},
+            };
+            emit(s, &ev);
+        }
+    } else if (strcmp(type, "response.function_call_arguments.delta") == 0)
         handle_args_delta(s, root);
     else if (strcmp(type, "response.completed") == 0 || strcmp(type, "response.done") == 0)
         handle_completed(s, root);

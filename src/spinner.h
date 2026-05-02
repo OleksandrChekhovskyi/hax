@@ -11,6 +11,11 @@ struct spinner;
 struct spinner *spinner_new(const char *label);
 void spinner_show(struct spinner *s);
 void spinner_hide(struct spinner *s);
+/* Swap the label shown beside the glyph. If the spinner is currently
+ * visible the new label is repainted on the same line; otherwise the
+ * change just takes effect on the next show. Idempotent — passing the
+ * current label is a no-op. NULL/"" reverts to the default ("working..."). */
+void spinner_set_label(struct spinner *s, const char *label);
 void spinner_free(struct spinner *s);
 
 #endif /* HAX_SPINNER_H */

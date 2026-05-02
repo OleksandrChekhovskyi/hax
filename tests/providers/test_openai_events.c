@@ -52,6 +52,9 @@ static int cap_cb(const struct stream_event *ev, void *user)
     case EV_REASONING_ITEM:
         /* OpenAI Chat Completions doesn't emit reasoning items. */
         break;
+    case EV_REASONING_DELTA:
+        c->text = strdup(ev->u.reasoning_delta.text ? ev->u.reasoning_delta.text : "");
+        break;
     case EV_DONE:
         c->message = strdup(ev->u.done.stop_reason ? ev->u.done.stop_reason : "");
         c->usage = ev->u.done.usage;
@@ -123,6 +126,58 @@ static void test_empty_content_ignored(void)
     openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"content\":\"\"}}]}");
     openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"content\":null}}]}");
     openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}");
+    EXPECT(cap.n == 0);
+    TEARDOWN(cap, st);
+}
+
+/* ---------- reasoning ---------- */
+
+static void test_reasoning_delta_openrouter(void)
+{
+    /* OpenRouter normalizes the field name to `reasoning`. */
+    WITH_STATE(cap, st);
+    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"reasoning\":\"Hmm\"}}]}");
+    EXPECT(cap.n == 1);
+    EXPECT(cap.events[0].kind == EV_REASONING_DELTA);
+    EXPECT_STR_EQ(cap.events[0].text, "Hmm");
+    TEARDOWN(cap, st);
+}
+
+static void test_reasoning_delta_llamacpp(void)
+{
+    /* llama.cpp / DeepSeek emit `reasoning_content` (also kept as a
+     * compat alias by OpenRouter). */
+    WITH_STATE(cap, st);
+    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"reasoning_content\":\"Let\"}}]}");
+    EXPECT(cap.n == 1);
+    EXPECT(cap.events[0].kind == EV_REASONING_DELTA);
+    EXPECT_STR_EQ(cap.events[0].text, "Let");
+    TEARDOWN(cap, st);
+}
+
+static void test_reasoning_then_content(void)
+{
+    /* Realistic order: a few reasoning chunks, then visible content. The
+     * reasoning chunks should not interfere with the text-delta path. */
+    WITH_STATE(cap, st);
+    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"reasoning\":\"Think\"}}]}");
+    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"reasoning\":\"ing\"}}]}");
+    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}");
+    EXPECT(cap.n == 3);
+    EXPECT(cap.events[0].kind == EV_REASONING_DELTA);
+    EXPECT(cap.events[1].kind == EV_REASONING_DELTA);
+    EXPECT(cap.events[2].kind == EV_TEXT_DELTA);
+    EXPECT_STR_EQ(cap.events[2].text, "Answer");
+    TEARDOWN(cap, st);
+}
+
+static void test_empty_reasoning_ignored(void)
+{
+    /* Mirrors test_empty_content_ignored — empty/null deltas don't fire. */
+    WITH_STATE(cap, st);
+    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"reasoning\":\"\"}}]}");
+    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"reasoning\":null}}]}");
+    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"reasoning_content\":\"\"}}]}");
     EXPECT(cap.n == 0);
     TEARDOWN(cap, st);
 }
@@ -462,6 +517,10 @@ int main(void)
 {
     test_text_delta();
     test_empty_content_ignored();
+    test_reasoning_delta_openrouter();
+    test_reasoning_delta_llamacpp();
+    test_reasoning_then_content();
+    test_empty_reasoning_ignored();
     test_tool_call_lifecycle();
     test_tool_call_id_and_name_across_deltas();
     test_tool_call_args_before_metadata_buffered();

@@ -37,6 +37,7 @@ sources = files(
     'src/sse.c',
     'src/trace.c',
     'src/turn.c',
+    'src/utf8_sanitize.c',
     'src/util.c',
     'src/providers/codex.c',
     'src/providers/codex_events.c',

@@ -52,6 +52,9 @@ static int cap_cb(const struct stream_event *ev, void *user)
     case EV_REASONING_ITEM:
         c->text = strdup(ev->u.reasoning_item.json);
         break;
+    case EV_REASONING_DELTA:
+        c->text = strdup(ev->u.reasoning_delta.text ? ev->u.reasoning_delta.text : "");
+        break;
     case EV_DONE:
         c->message = strdup(ev->u.done.stop_reason ? ev->u.done.stop_reason : "");
         c->usage = ev->u.done.usage;
@@ -322,6 +325,44 @@ static void test_reasoning_item_with_null_encrypted_content_dropped(void)
     TEARDOWN(cap, st);
 }
 
+static void test_reasoning_summary_text_delta_emits(void)
+{
+    /* Streaming summary deltas drive the "thinking..." spinner; the text
+     * itself is not stored in history (encrypted_content is). */
+    WITH_STATE(cap, st);
+    codex_events_feed(&st, "{\"type\":\"response.reasoning_summary_text.delta\","
+                           "\"delta\":\"Let's see\"}");
+    EXPECT(cap.n == 1);
+    EXPECT(cap.events[0].kind == EV_REASONING_DELTA);
+    EXPECT_STR_EQ(cap.events[0].text, "Let's see");
+    TEARDOWN(cap, st);
+}
+
+static void test_reasoning_text_delta_emits(void)
+{
+    /* Some Responses-API backends stream raw reasoning text instead of a
+     * summary — same UX signal. */
+    WITH_STATE(cap, st);
+    codex_events_feed(&st, "{\"type\":\"response.reasoning_text.delta\","
+                           "\"delta\":\"thinking\"}");
+    EXPECT(cap.n == 1);
+    EXPECT(cap.events[0].kind == EV_REASONING_DELTA);
+    EXPECT_STR_EQ(cap.events[0].text, "thinking");
+    TEARDOWN(cap, st);
+}
+
+static void test_empty_reasoning_delta_ignored(void)
+{
+    /* Symmetric with openai_events: empty/missing delta strings don't
+     * fire a UX signal. */
+    WITH_STATE(cap, st);
+    codex_events_feed(&st, "{\"type\":\"response.reasoning_summary_text.delta\","
+                           "\"delta\":\"\"}");
+    codex_events_feed(&st, "{\"type\":\"response.reasoning_text.delta\"}");
+    EXPECT(cap.n == 0);
+    TEARDOWN(cap, st);
+}
+
 /* ---------- usage ---------- */
 
 static void test_usage_default_unknown(void)
@@ -406,6 +447,9 @@ int main(void)
     test_reasoning_item_strips_unknown_fields();
     test_reasoning_item_without_encrypted_content_dropped();
     test_reasoning_item_with_null_encrypted_content_dropped();
+    test_reasoning_summary_text_delta_emits();
+    test_reasoning_text_delta_emits();
+    test_empty_reasoning_delta_ignored();
     test_tool_call_missing_required_fields_dropped();
     test_usage_default_unknown();
     test_usage_captured_from_completed();

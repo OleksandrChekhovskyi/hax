@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "interrupt.h"
+#include "utf8_sanitize.h"
 #include "util.h"
 
 /* Output budget split between a head buffer (preserved verbatim from the
@@ -148,59 +149,75 @@ static void append_footers(struct buf *out, int timed_out, int interrupted, long
     }
 }
 
+/* Append the trailing portion that follows whatever body has already
+ * been written to `out`:
+ *   - binary marker (when has_nul; takes precedence over truncated)
+ *   - "[output truncated]" (non-binary case, bytes were dropped)
+ *   - exit/timeout/interrupt footer
+ *   - "(no output)" fallback when nothing else was appended in this
+ *     call AND no body was produced (body_present=0)
+ *
+ * Used by both the canonical-history assembly (format_run_output) and
+ * the live-display path (stream_suffix), so the model and the user see
+ * consistent suffix content. */
+static void append_run_suffix(struct buf *out, size_t total_bytes, int has_nul, int truncated,
+                              int body_present, int timed_out, int interrupted, long timeout_ms,
+                              int status)
+{
+    size_t before = out->len;
+    if (has_nul) {
+        char tmp[80];
+        snprintf(tmp, sizeof(tmp), "[binary output suppressed: %zu bytes]", total_bytes);
+        buf_append_str(out, tmp);
+    } else if (truncated) {
+        buf_append_str(out, "\n[output truncated]");
+    }
+    append_footers(out, timed_out, interrupted, timeout_ms, status);
+    if (out->len == before && !body_present)
+        buf_append_str(out, "(no output)");
+}
+
 /* Build the final tool result from the captured head/tail ring and exit
  * metadata. Consumes `head` (calls buf_free on it). */
 static char *format_run_output(struct buf *head, const char *tail, size_t tail_pos,
                                int tail_wrapped, size_t total_bytes, int has_nul, int timed_out,
                                int interrupted, long timeout_ms, int status)
 {
+    struct buf out;
+    buf_init(&out);
+    int truncated = 0;
+
     /* Binary output: a NUL byte essentially never appears in legitimate
      * text output, but executables, archives, and images contain it
      * pervasively. Showing the user a wall of U+FFFD glyphs and feeding
-     * the same to the model is pure waste — replace the body with a
-     * concise marker and keep only the exit/timeout footer. */
-    if (has_nul) {
-        buf_free(head);
-        struct buf out;
-        buf_init(&out);
-        char tmp[80];
-        snprintf(tmp, sizeof(tmp), "[binary output suppressed: %zu bytes]", total_bytes);
-        buf_append_str(&out, tmp);
-        append_footers(&out, timed_out, interrupted, timeout_ms, status);
-        return buf_steal(&out);
-    }
+     * the same to the model is pure waste — replace the body with the
+     * marker (emitted by append_run_suffix below) and keep only the
+     * exit/timeout footer. */
+    if (!has_nul) {
+        struct buf raw;
+        buf_init(&raw);
+        truncated = assemble_head_tail(&raw, head, tail, tail_pos, tail_wrapped, total_bytes);
 
-    struct buf raw;
-    buf_init(&raw);
-    int truncated = assemble_head_tail(&raw, head, tail, tail_pos, tail_wrapped, total_bytes);
+        /* Cap pathologically long lines (single-line minified output, log
+         * lines with no newlines) before sanitizing — cap_line_lengths cuts
+         * at a byte boundary which can split a multi-byte UTF-8 codepoint;
+         * sanitize_utf8 then replaces the orphaned bytes with U+FFFD so the
+         * final string is always valid UTF-8 (jansson rejects invalid UTF-8
+         * in json_string). */
+        size_t capped_len = 0;
+        char *capped =
+            cap_line_lengths(raw.data ? raw.data : "", raw.len, MAX_LINE_LEN, &capped_len);
+        buf_free(&raw);
+
+        char *clean = sanitize_utf8(capped, capped_len);
+        free(capped);
+        buf_append_str(&out, clean);
+        free(clean);
+    }
     buf_free(head);
 
-    /* Cap pathologically long lines (single-line minified output, log
-     * lines with no newlines) before sanitizing — cap_line_lengths cuts
-     * at a byte boundary which can split a multi-byte UTF-8 codepoint;
-     * sanitize_utf8 then replaces the orphaned bytes with U+FFFD so the
-     * final string is always valid UTF-8 (jansson rejects invalid UTF-8
-     * in json_string). */
-    size_t capped_len = 0;
-    char *capped = cap_line_lengths(raw.data ? raw.data : "", raw.len, MAX_LINE_LEN, &capped_len);
-    buf_free(&raw);
-
-    char *clean = sanitize_utf8(capped, capped_len);
-    free(capped);
-
-    struct buf out;
-    buf_init(&out);
-    buf_append_str(&out, clean);
-    free(clean);
-
-    if (truncated)
-        buf_append_str(&out, "\n[output truncated]");
-
-    append_footers(&out, timed_out, interrupted, timeout_ms, status);
-
-    if (out.len == 0)
-        buf_append_str(&out, "(no output)");
-
+    append_run_suffix(&out, total_bytes, has_nul, truncated, out.len > 0, timed_out, interrupted,
+                      timeout_ms, status);
     return buf_steal(&out);
 }
 
@@ -228,7 +245,35 @@ static void exec_shell_child(int read_fd, int write_fd, const char *cmd)
     _exit(127);
 }
 
-static char *run_shell(const char *cmd, long timeout_ms)
+/* Stream the trailing suffix (binary/truncated marker, footer, or
+ * "(no output)") to the writer at the end of a streamed run. The body
+ * was already streamed live; this only writes what comes after, using
+ * the same append_run_suffix helper as the canonical-history path so
+ * the live display and history stay byte-identical past the body. */
+static void stream_suffix(tool_writer write, void *user, size_t total_bytes, int has_nul,
+                          int streamed_anything, int truncated, int timed_out, int interrupted,
+                          long timeout_ms, int status)
+{
+    struct buf suf;
+    buf_init(&suf);
+    /* If we streamed any bytes before detecting the NUL, the renderer's
+     * ctrl_strip may be parked in an unterminated escape sequence. The
+     * binary marker starts with `[`, which ctrl_strip would happily
+     * consume as the CSI introducer — silently swallowing the user-
+     * visible message. A leading \n forces an abort (ctrl_strip's
+     * is_abort accepts LF) and resets the state. Footers and the
+     * truncated marker already start with \n so they don't need the
+     * same treatment. */
+    if (has_nul && streamed_anything)
+        buf_append_str(&suf, "\n");
+    append_run_suffix(&suf, total_bytes, has_nul, truncated, streamed_anything, timed_out,
+                      interrupted, timeout_ms, status);
+    if (suf.len > 0)
+        write(suf.data, suf.len, user);
+    buf_free(&suf);
+}
+
+static char *run_shell(const char *cmd, long timeout_ms, tool_writer write, void *user)
 {
     int fds[2];
     if (pipe(fds) < 0)
@@ -265,6 +310,7 @@ static char *run_shell(const char *cmd, long timeout_ms)
     int tail_wrapped = 0;
     size_t total_bytes = 0;
     int has_nul = 0;
+    int streamed_anything = 0;
     char chunk[4096];
 
     for (;;) {
@@ -388,6 +434,16 @@ static char *run_shell(const char *cmd, long timeout_ms)
         total_bytes += (size_t)r;
         if (!has_nul && memchr(chunk, '\0', (size_t)r))
             has_nul = 1;
+        /* Stream this chunk live before writing into head/tail buffers.
+         * Skipping streaming once any chunk has had a NUL keeps the
+         * "binary output suppressed" guarantee intact: bytes we suppress
+         * in display also stay out of the writer-accumulated history.
+         * head/tail are still populated for the writer-less path used
+         * by the test suite. */
+        if (write && !has_nul) {
+            write(chunk, (size_t)r, user);
+            streamed_anything = 1;
+        }
         size_t consumed = 0;
         if (head.len < HEAD_CAP) {
             size_t room = HEAD_CAP - head.len;
@@ -428,6 +484,21 @@ static char *run_shell(const char *cmd, long timeout_ms)
         }
     }
 
+    if (write) {
+        /* Streaming path: live chunks already went through writer for
+         * display. Emit the trailing suffix to the writer too so the
+         * user sees it in the dim block. The canonical history is still
+         * produced by format_run_output below — it applies the same
+         * head/tail truncation, line-length cap, UTF-8 sanitization,
+         * and binary-suppression as the legacy path, which the live
+         * stream skips. The model's view of the output is therefore
+         * the bounded summary, not the unbounded live stream. */
+        size_t tail_len = tail_wrapped ? TAIL_CAP : tail_pos;
+        int truncated_streamed = total_bytes > head.len + tail_len;
+        stream_suffix(write, user, total_bytes, has_nul, streamed_anything, truncated_streamed,
+                      timed_out, interrupted, timeout_ms, status);
+    }
+
     return format_run_output(&head, tail, tail_pos, tail_wrapped, total_bytes, has_nul, timed_out,
                              interrupted, timeout_ms, status);
 }
@@ -462,7 +533,7 @@ static char *resolve_call_timeout_ms(json_t *root, long *out_ms)
     return NULL;
 }
 
-static char *run(const char *args_json)
+static char *run(const char *args_json, tool_writer write, void *user)
 {
     json_error_t jerr;
     json_t *root = json_loads(args_json ? args_json : "{}", 0, &jerr);
@@ -482,7 +553,7 @@ static char *run(const char *args_json)
         return err;
     }
 
-    char *out = run_shell(cmd, timeout_ms);
+    char *out = run_shell(cmd, timeout_ms, write, user);
     json_decref(root);
     return out;
 }

@@ -11,6 +11,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "utf8_sanitize.h"
 #include "util.h"
 
 /* Per-file cap for AGENTS.md content. A single file larger than this is

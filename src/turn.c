@@ -131,6 +131,9 @@ int turn_on_event(const struct stream_event *ev, struct turn *t)
         items_append(t, it);
         break;
     }
+    case EV_REASONING_DELTA:
+        /* UX-only signal — nothing to commit to history. */
+        break;
     case EV_REASONING_ITEM: {
         /* Server typically emits the reasoning item before the assistant
          * text/tool-call output items, but flush any in-flight text just

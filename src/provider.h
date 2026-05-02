@@ -81,6 +81,12 @@ enum stream_event_kind {
     EV_TOOL_CALL_DELTA, /* partial JSON args */
     EV_TOOL_CALL_END,   /* args finalized */
     EV_REASONING_ITEM,  /* opaque provider blob to round-trip on next turn */
+    /* The model is currently producing reasoning/thinking tokens. Carries
+     * the delta text (may be NULL if the provider only signals the state
+     * without exposing content, e.g. OpenAI o-series via Responses API).
+     * Drives UX only — the agent doesn't store this in history; reasoning
+     * round-trip goes through EV_REASONING_ITEM. */
+    EV_REASONING_DELTA,
     EV_DONE,
     EV_ERROR,
 };
@@ -105,6 +111,10 @@ struct stream_event {
         struct {
             const char *json;
         } reasoning_item;
+        struct {
+            const char *text; /* NULL or "" allowed — signals reasoning
+                                 activity even when no plaintext is exposed */
+        } reasoning_delta;
         struct {
             const char *stop_reason;
             struct stream_usage usage;

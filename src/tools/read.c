@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "utf8_sanitize.h"
 #include "util.h"
 
 #define READ_CAP     (256 * 1024)
@@ -194,8 +195,10 @@ end_loop:
     return 0;
 }
 
-static char *run(const char *args_json)
+static char *run(const char *args_json, tool_writer write, void *user)
 {
+    (void)write;
+    (void)user;
     json_error_t jerr;
     json_t *root = json_loads(args_json ? args_json : "{}", 0, &jerr);
     if (!root)

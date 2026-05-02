@@ -14,6 +14,7 @@
 
 #include "ansi.h"
 #include "input_core.h"
+#include "utf8_sanitize.h"
 #include "util.h"
 
 #define ESC_TIMEOUT_MS 50

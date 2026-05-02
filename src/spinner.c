@@ -42,7 +42,11 @@ static void erase_line_locked(void)
 
 static void draw_frame_locked(struct spinner *s)
 {
-    fputs("\r" ANSI_DIM, stdout);
+    /* Erase first so a label swap (set_label while visible) doesn't leave
+     * trailing chars from a longer previous label. The animation tick
+     * doesn't strictly need this — frame width is constant — but a
+     * single ANSI_ERASE_LINE per frame is cheap. */
+    fputs("\r" ANSI_ERASE_LINE ANSI_DIM, stdout);
     fputs(FRAMES[s->frame], stdout);
     fputc(' ', stdout);
     fputs(s->label, stdout);
@@ -88,7 +92,7 @@ static void *spinner_thread(void *arg)
 struct spinner *spinner_new(const char *label)
 {
     struct spinner *s = xcalloc(1, sizeof(*s));
-    s->label = xstrdup(label && *label ? label : "Working...");
+    s->label = xstrdup(label && *label ? label : "working...");
     s->enabled = isatty(fileno(stdout));
     pthread_mutex_init(&s->mu, NULL);
     pthread_cond_init(&s->cv, NULL);
@@ -118,6 +122,21 @@ void spinner_show(struct spinner *s)
     pthread_mutex_unlock(&s->mu);
     if (!was)
         pthread_cond_signal(&s->cv);
+}
+
+void spinner_set_label(struct spinner *s, const char *label)
+{
+    if (!s)
+        return;
+    const char *next = label && *label ? label : "working...";
+    pthread_mutex_lock(&s->mu);
+    if (strcmp(s->label, next) != 0) {
+        free(s->label);
+        s->label = xstrdup(next);
+        if (s->visible)
+            draw_frame_locked(s);
+    }
+    pthread_mutex_unlock(&s->mu);
 }
 
 void spinner_hide(struct spinner *s)

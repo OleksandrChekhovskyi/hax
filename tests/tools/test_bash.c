@@ -14,21 +14,42 @@
 static char *call_bash(const char *cmd_json_escaped)
 {
     char *args = xasprintf("{\"command\":\"%s\"}", cmd_json_escaped);
-    char *out = TOOL_BASH.run(args);
+    char *out = TOOL_BASH.run(args, NULL, NULL);
+    free(args);
+    return out;
+}
+
+/* Capturing writer: accumulates every chunk into a buf so tests can
+ * assert what bash sent live for display. */
+struct capture {
+    struct buf buf;
+};
+
+static int capture_write(const char *bytes, size_t n, void *user)
+{
+    struct capture *c = user;
+    buf_append(&c->buf, bytes, n);
+    return 0;
+}
+
+static char *call_bash_streamed(const char *cmd_json_escaped, struct capture *cap)
+{
+    char *args = xasprintf("{\"command\":\"%s\"}", cmd_json_escaped);
+    char *out = TOOL_BASH.run(args, capture_write, cap);
     free(args);
     return out;
 }
 
 static void test_bash_invalid_json(void)
 {
-    char *out = TOOL_BASH.run("not json");
+    char *out = TOOL_BASH.run("not json", NULL, NULL);
     EXPECT(strstr(out, "invalid arguments") != NULL);
     free(out);
 }
 
 static void test_bash_missing_command(void)
 {
-    char *out = TOOL_BASH.run("{}");
+    char *out = TOOL_BASH.run("{}", NULL, NULL);
     EXPECT(strstr(out, "missing 'command'") != NULL);
     free(out);
 }
@@ -133,7 +154,7 @@ static void test_bash_per_call_timeout_overrides_env(void)
      * of the env path. The integer-seconds floor is irrelevant here
      * because the command finishes long before the arg expires. */
     setenv("HAX_BASH_TIMEOUT", "10ms", 1);
-    char *out = TOOL_BASH.run("{\"command\":\"sleep 0.05\",\"timeout_seconds\":60}");
+    char *out = TOOL_BASH.run("{\"command\":\"sleep 0.05\",\"timeout_seconds\":60}", NULL, NULL);
     EXPECT(strstr(out, "[timed out") == NULL);
     free(out);
     unsetenv("HAX_BASH_TIMEOUT");
@@ -144,7 +165,7 @@ static void test_bash_per_call_timeout_clamped_to_max(void)
     /* Model asks for 9999s but max is 30ms — should clamp. */
     setenv("HAX_BASH_TIMEOUT_MAX", "30ms", 1);
     time_t t0 = time(NULL);
-    char *out = TOOL_BASH.run("{\"command\":\"sleep 30\",\"timeout_seconds\":9999}");
+    char *out = TOOL_BASH.run("{\"command\":\"sleep 30\",\"timeout_seconds\":9999}", NULL, NULL);
     time_t elapsed = time(NULL) - t0;
     EXPECT(elapsed < 2);
     EXPECT(strstr(out, "[timed out after 30ms]") != NULL);
@@ -246,7 +267,7 @@ static void test_bash_timeout_grace_no_escape_via_pipe_close(void)
                           "sleep 30) & wait",
                           path);
     char *args = xasprintf("{\"command\":\"%s\"}", cmd);
-    char *out = TOOL_BASH.run(args);
+    char *out = TOOL_BASH.run(args, NULL, NULL);
     free(args);
     free(cmd);
     EXPECT(strstr(out, "[timed out") != NULL);
@@ -299,7 +320,7 @@ static void test_bash_redirected_background_job_does_not_leak(void)
 
     char *cmd = xasprintf("sleep 30 >/dev/null 2>&1 & echo $! > %s", path);
     char *args = xasprintf("{\"command\":\"%s\"}", cmd);
-    char *out = TOOL_BASH.run(args);
+    char *out = TOOL_BASH.run(args, NULL, NULL);
     free(args);
     free(cmd);
     free(out);
@@ -348,15 +369,15 @@ static void test_bash_timeout_huge_does_not_overflow(void)
 
 static void test_bash_per_call_timeout_invalid(void)
 {
-    char *out = TOOL_BASH.run("{\"command\":\"true\",\"timeout_seconds\":0}");
+    char *out = TOOL_BASH.run("{\"command\":\"true\",\"timeout_seconds\":0}", NULL, NULL);
     EXPECT(strstr(out, "'timeout_seconds' must be >= 1") != NULL);
     free(out);
 
-    out = TOOL_BASH.run("{\"command\":\"true\",\"timeout_seconds\":-5}");
+    out = TOOL_BASH.run("{\"command\":\"true\",\"timeout_seconds\":-5}", NULL, NULL);
     EXPECT(strstr(out, "'timeout_seconds' must be >= 1") != NULL);
     free(out);
 
-    out = TOOL_BASH.run("{\"command\":\"true\",\"timeout_seconds\":\"30\"}");
+    out = TOOL_BASH.run("{\"command\":\"true\",\"timeout_seconds\":\"30\"}", NULL, NULL);
     EXPECT(strstr(out, "'timeout_seconds' must be an integer") != NULL);
     free(out);
 }
@@ -437,6 +458,102 @@ static void test_bash_binary_output_keeps_exit_footer(void)
     free(out);
 }
 
+static void test_bash_streamed_basic(void)
+{
+    /* With a writer attached, bash streams stdout chunks live AND
+     * returns the canonical history. The writer should see "hello\n"
+     * (live display); the returned string should also be "hello\n". */
+    struct capture cap = {0};
+    buf_init(&cap.buf);
+    char *out = call_bash_streamed("echo hello", &cap);
+    EXPECT_STR_EQ(out, "hello\n");
+    EXPECT(cap.buf.len > 0);
+    EXPECT(strstr(cap.buf.data, "hello") != NULL);
+    free(out);
+    buf_free(&cap.buf);
+}
+
+static void test_bash_streamed_binary_history_clean(void)
+{
+    /* Mid-stream NUL: pre-NUL bytes are streamed live for display, but
+     * the canonical history (returned string) must contain the binary
+     * marker and NOT any of the body bytes. This matches the legacy
+     * non-streamed behavior so the model sees the same suppression
+     * either way. */
+    struct capture cap = {0};
+    buf_init(&cap.buf);
+    char *out = call_bash_streamed("printf 'BEFORE\\\\0AFTER'; exit 0", &cap);
+    /* Returned string: marker, no body bytes. */
+    EXPECT(strstr(out, "[binary output suppressed:") != NULL);
+    EXPECT(strstr(out, "BEFORE") == NULL);
+    EXPECT(strstr(out, "AFTER") == NULL);
+    /* Live display: writer also got the suffix at the end. The
+     * pre-NUL bytes may or may not have been streamed depending on
+     * whether the NUL landed in chunk 1 (printf is small enough that
+     * it does — but we don't assert that, only that the marker
+     * reached the writer). */
+    EXPECT(strstr(cap.buf.data, "[binary output suppressed:") != NULL);
+    free(out);
+    buf_free(&cap.buf);
+}
+
+static void test_bash_streamed_binary_marker_isolated_from_escape(void)
+{
+    /* When pre-NUL bytes were streamed, the renderer's ctrl_strip may
+     * still be inside an unterminated escape sequence by the time the
+     * binary marker arrives. The marker starts with `[`, which would be
+     * consumed as the CSI introducer and silently swallowed. The fix
+     * is for the streaming suffix to lead with \n (an abort byte for
+     * ctrl_strip) so the marker always renders cleanly. Verify the
+     * leading \n is in the captured writer stream. */
+    struct capture cap = {0};
+    buf_init(&cap.buf);
+    /* The first printf emits an unterminated CSI introducer; the
+     * second pads enough bytes to (likely) flush the kernel pipe in
+     * its own read so streamed_anything becomes true before the
+     * trailing NUL triggers binary suppression. ESC is encoded as
+     *  so the JSON parser accepts it. */
+    char *out =
+        call_bash_streamed("printf '\\u001b['; sleep 0.05; printf 'pad pad pad pad\\\\0bin'", &cap);
+    EXPECT(out != NULL);
+    EXPECT(cap.buf.data != NULL);
+    /* Marker must reach the writer. */
+    const char *marker = strstr(cap.buf.data, "[binary output suppressed:");
+    EXPECT(marker != NULL);
+    /* …and be preceded by \n so ctrl_strip's escape state aborts.
+     * The leading \n protects the marker only when streamed_anything
+     * is true (i.e., bytes ran live before the NUL was detected).
+     * The sleep above is the cheapest way to force two reads. */
+    EXPECT(marker != NULL && marker > cap.buf.data && marker[-1] == '\n');
+    free(out);
+    buf_free(&cap.buf);
+}
+
+static void test_bash_streamed_history_truncated(void)
+{
+    /* Streamed bash history must apply the same head/tail caps as the
+     * non-streamed path — the live writer can see the full output, but
+     * the returned string (model history) is bounded so a busy command
+     * doesn't blow the context. Use yes piped through head to produce
+     * many lines deterministically. */
+    struct capture cap = {0};
+    buf_init(&cap.buf);
+    char *out = call_bash_streamed("yes hi | head -c 500000", &cap);
+    /* Truncation marker is the unambiguous signal that the legacy
+     * head/tail pipeline ran. */
+    EXPECT(strstr(out, "[output truncated]") != NULL);
+    /* The returned string is bounded by HEAD_CAP+TAIL_CAP plus footers
+     * — well under the 500 KB live stream. */
+    EXPECT(strlen(out) < 200 * 1024);
+    /* The streamed display must surface the same marker so the user
+     * sees that the live preview understated the gap (the renderer's
+     * elision marker reports captured-but-not-shown bytes; the bash
+     * cap goes further). */
+    EXPECT(strstr(cap.buf.data, "[output truncated]") != NULL);
+    free(out);
+    buf_free(&cap.buf);
+}
+
 int main(void)
 {
     test_bash_invalid_json();
@@ -463,6 +580,10 @@ int main(void)
     test_bash_sanitizes_non_utf8();
     test_bash_binary_output_suppressed();
     test_bash_binary_output_keeps_exit_footer();
+    test_bash_streamed_basic();
+    test_bash_streamed_binary_history_clean();
+    test_bash_streamed_binary_marker_isolated_from_escape();
+    test_bash_streamed_history_truncated();
     test_bash_head_tail_truncation();
     test_bash_short_output_no_elision();
     test_bash_caps_long_line();

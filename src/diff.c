@@ -9,6 +9,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "utf8_sanitize.h"
 #include "util.h"
 
 static char *tmpdir(void)

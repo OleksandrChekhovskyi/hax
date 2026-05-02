@@ -278,6 +278,21 @@ void openai_events_feed(struct openai_events *s, const char *data)
     json_t *delta = json_object_get(choice, "delta");
 
     if (json_is_object(delta)) {
+        /* Reasoning deltas: OpenRouter normalizes to `reasoning`,
+         * llama.cpp/DeepSeek emit `reasoning_content` (kept as a compat
+         * alias by OpenRouter too). We surface both so the agent can
+         * flip the spinner to "thinking..." while CoT is streaming. */
+        const char *r = json_string_value(json_object_get(delta, "reasoning"));
+        if (!r)
+            r = json_string_value(json_object_get(delta, "reasoning_content"));
+        if (r && *r) {
+            struct stream_event ev = {
+                .kind = EV_REASONING_DELTA,
+                .u.reasoning_delta = {.text = r},
+            };
+            emit(s, &ev);
+        }
+
         const char *text = json_string_value(json_object_get(delta, "content"));
         handle_text_delta(s, text);
 
