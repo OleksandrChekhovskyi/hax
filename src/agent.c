@@ -296,8 +296,8 @@ static void display_tool_header(struct disp *d, const struct item *call)
 /* ---------- streaming tool-output renderer ----------
  *
  * Tool output flows through this renderer chunk by chunk: bytes arrive
- * via stream_ctx_feed (driven by the writer callback the agent hands to
- * each tool's run()), and the renderer ctrl_strips them and emits a
+ * via stream_ctx_feed (driven by the emit_display callback the agent
+ * hands to each tool's run()), and the renderer ctrl_strips them and emits a
  * live dim-styled preview to the terminal in one of three modes:
  *
  *   - R_HEAD_ONLY: dim block capped at HEAD_ONLY_LINES / HEAD_ONLY_BYTES.
@@ -330,14 +330,14 @@ struct stream_ctx {
     /* Stateful UTF-8 sanitization: bytes pass through ctrl_strip first
      * (drops C0/escape sequences), then this validator (replaces
      * malformed UTF-8 with U+FFFD). Stateful so a multi-byte codepoint
-     * split across writer chunks isn't double-FFFD'd. */
+     * split across emit_display chunks isn't double-FFFD'd. */
     struct utf8_sanitize utf8;
-    /* "Did the tool call the writer?" — set on every stream_writer_cb
-     * invocation regardless of byte count, so a writer call that strips
-     * to zero clean bytes still counts as streaming. The dispatch wiring
-     * uses this to decide whether to feed the tool's return value
-     * through the writer for one-shot rendering. */
-    int writer_called;
+    /* "Did the tool call emit_display?" — set on every emit_display_cb
+     * invocation regardless of byte count, so a call that strips to
+     * zero clean bytes still counts as having emitted. The dispatch
+     * wiring uses this to decide whether to feed the tool's return
+     * value through emit_display for one-shot rendering. */
+    int emit_display_called;
 
     enum render_mode mode;
 
@@ -553,7 +553,7 @@ static void stream_ctx_feed(struct stream_ctx *c, const char *bytes, size_t n)
      * expands, so n bytes in → ≤ n bytes out). utf8_sanitize then
      * replaces malformed bytes with U+FFFD (worst case 3x expansion),
      * holding partial multi-byte sequences across chunks so a codepoint
-     * split at a writer-chunk boundary isn't double-replaced. */
+     * split at an emit_display-chunk boundary isn't double-replaced. */
     char stack_strip[4096];
     char *clean = n <= sizeof(stack_strip) ? stack_strip : xmalloc(n);
     size_t cn = ctrl_strip_feed(&c->strip, bytes, n, clean);
@@ -685,10 +685,10 @@ static void render_finalize_capped(struct stream_ctx *c)
     }
 }
 
-static int stream_writer_cb(const char *bytes, size_t n, void *user)
+static int emit_display_cb(const char *bytes, size_t n, void *user)
 {
     struct stream_ctx *c = user;
-    c->writer_called = 1;
+    c->emit_display_called = 1;
     stream_ctx_feed(c, bytes, n);
     return 0;
 }
@@ -1202,15 +1202,16 @@ int agent_run(struct provider *p)
                 spinner_show(spinner);
 
                 /* The tool always returns a canonical output string for
-                 * history. Live display is driven by writer chunks: a
-                 * streaming tool (bash) calls writer as bytes arrive and
-                 * the renderer emits them to the dim block. A
-                 * non-streaming tool (read/write/edit) doesn't call
-                 * writer; we feed the returned string through it once
-                 * so the renderer treats both kinds uniformly. The
-                 * canonical history is ctrl_stripped at this boundary
-                 * so all tools' outputs land in the conversation in the
-                 * same normalized form. */
+                 * history. Live display is driven by emit_display chunks:
+                 * a streaming tool (bash) calls emit_display as bytes
+                 * arrive and the renderer emits them to the dim block. A
+                 * tool that has nothing display-only to say (read/edit,
+                 * and `write` on overwrite) doesn't call emit_display;
+                 * we feed the returned string through it once so the
+                 * renderer treats both kinds uniformly. The canonical
+                 * history is ctrl_stripped at this boundary so all
+                 * tools' outputs land in the conversation in the same
+                 * normalized form. */
                 const struct tool *t = find_tool(items[i].tool_name);
                 /* Initial mode comes straight from tool capability. For
                  * diff-capable tools (write/edit) we leave R_DIFF for
@@ -1220,13 +1221,13 @@ int agent_run(struct provider *p)
                 enum render_mode mode = (t && t->preview_tail) ? R_HEAD_TAIL : R_HEAD_ONLY;
                 struct stream_ctx sc;
                 stream_ctx_init(&sc, &disp, spinner, mode);
-                char *ret = t ? t->run(items[i].tool_arguments_json, stream_writer_cb, &sc)
+                char *ret = t ? t->run(items[i].tool_arguments_json, emit_display_cb, &sc)
                               : xasprintf("unknown tool: %s", items[i].tool_name);
-                /* If the tool called the writer at any point, the live
+                /* If the tool called emit_display at any point, the live
                  * preview is already rendered. Otherwise feed the
-                 * canonical return value through once for uniform
-                 * rendering of non-streaming tools (read/write/edit). */
-                if (ret && !sc.writer_called) {
+                 * canonical return value through once so the renderer
+                 * treats both kinds uniformly. */
+                if (ret && !sc.emit_display_called) {
                     /* Empty output from a diff-capable tool means the
                      * write/edit was a no-op (byte-identical content,
                      * see fs_write_with_diff). Render the marker inline
@@ -1257,8 +1258,9 @@ int agent_run(struct provider *p)
                 spinner_hide(spinner);
 
                 /* History always comes from the returned string, ctrl-
-                 * stripped at this boundary. The writer-accumulated
-                 * buffer is display-only and is freed by stream_ctx_free. */
+                 * stripped at this boundary. Anything pushed through
+                 * emit_display is display-only and is freed by
+                 * stream_ctx_free. */
                 char *history = ctrl_strip_dup(ret ? ret : "");
                 free(ret);
                 stream_ctx_free(&sc);

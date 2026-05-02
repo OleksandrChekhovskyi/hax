@@ -65,9 +65,9 @@ static char *do_replace(const char *hay, size_t hay_len, const char *old_str, si
     return buf_steal(&out);
 }
 
-static char *run(const char *args_json, tool_writer write, void *user)
+static char *run(const char *args_json, tool_emit_display_fn emit_display, void *user)
 {
-    (void)write;
+    (void)emit_display;
     (void)user;
     json_error_t jerr;
     json_t *root = json_loads(args_json ? args_json : "{}", 0, &jerr);
@@ -156,7 +156,9 @@ static char *run(const char *args_json, tool_writer write, void *user)
     free(orig);
 
     char *errmsg = NULL;
-    char *diff = fs_write_with_diff(path, updated, new_total_len, &errmsg);
+    /* `edit` only runs on existing files (slurp_file_capped above would
+     * have failed otherwise), so we don't need the was-new signal. */
+    char *diff = fs_write_with_diff(path, updated, new_total_len, &errmsg, NULL);
     free(updated);
     json_decref(root);
 

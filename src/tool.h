@@ -14,29 +14,37 @@
  * model). Returning NULL is not allowed; an error message is itself
  * valid output the model can recover from. Returning "" is fine.
  *
- * Tools may additionally stream bytes via the `write` callback during
- * execution for live on-screen feedback. The agent uses writer chunks
- * only for the display pipeline — they have no effect on history. A
- * tool that doesn't stream (read/write/edit) just ignores the writer
- * params; the agent feeds the returned string through the writer once
- * on completion so the live display works the same either way.
+ * The `emit_display` callback is a display-only side channel: bytes fed
+ * through it flow into the agent's head/tail preview renderer but never
+ * enter conversation history. This decouples "what the user sees on
+ * screen" from "what the model remembers", and tools use it in two ways:
  *
- * Streaming tools (bash) typically call writer per pipe-read chunk and
- * also return a possibly-different canonical string at the end —
- * concretely, bash streams every byte for display but returns a
- * head+tail-truncated, UTF-8-sanitized summary so the model isn't
- * billed for an unbounded live stream.
+ *   - Streaming progress: `bash` calls emit_display per pipe-read chunk
+ *     so the user sees output live, and returns a head+tail-truncated,
+ *     UTF-8 sanitized summary as canonical output so the model isn't
+ *     billed for an unbounded live stream.
+ *
+ *   - Avoiding redundant context: `write` on a new file pushes the
+ *     content through emit_display for a `read`-style preview, and
+ *     returns a short "created <path>" confirmation as canonical output
+ *     — the content is already in the call arguments, no need to echo
+ *     it back.
+ *
+ * A tool that has nothing display-only to say just ignores the
+ * emit_display params; the agent feeds the returned string through the
+ * callback once on completion so the preview pipeline runs uniformly
+ * either way.
  *
  * output_is_diff hints that successful output is a unified diff and the
  * agent should render it colored (and uncapped) instead of as a dim
  * preview. Failure messages from the same tool are not diffs; the agent
  * routes by checking whether the output starts with `--- `.
  */
-typedef int (*tool_writer)(const char *bytes, size_t n, void *user);
+typedef int (*tool_emit_display_fn)(const char *bytes, size_t n, void *user);
 
 struct tool {
     struct tool_def def;
-    char *(*run)(const char *args_json, tool_writer write, void *user);
+    char *(*run)(const char *args_json, tool_emit_display_fn emit_display, void *user);
     /* Optional. Returns a small dim suffix appended to the tool-call header
      * after the bold `display_arg` value — e.g. `:5-20` for `read` to
      * surface the requested line range. NULL or empty string means no

@@ -195,9 +195,9 @@ end_loop:
     return 0;
 }
 
-static char *run(const char *args_json, tool_writer write, void *user)
+static char *run(const char *args_json, tool_emit_display_fn emit_display, void *user)
 {
-    (void)write;
+    (void)emit_display;
     (void)user;
     json_error_t jerr;
     json_t *root = json_loads(args_json ? args_json : "{}", 0, &jerr);

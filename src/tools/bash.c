@@ -246,13 +246,14 @@ static void exec_shell_child(int read_fd, int write_fd, const char *cmd)
 }
 
 /* Stream the trailing suffix (binary/truncated marker, footer, or
- * "(no output)") to the writer at the end of a streamed run. The body
- * was already streamed live; this only writes what comes after, using
- * the same append_run_suffix helper as the canonical-history path so
- * the live display and history stay byte-identical past the body. */
-static void stream_suffix(tool_writer write, void *user, size_t total_bytes, int has_nul,
-                          int streamed_anything, int truncated, int timed_out, int interrupted,
-                          long timeout_ms, int status)
+ * "(no output)") through emit_display at the end of a streamed run.
+ * The body was already streamed live; this only writes what comes
+ * after, using the same append_run_suffix helper as the canonical-
+ * history path so the live display and history stay byte-identical
+ * past the body. */
+static void stream_suffix(tool_emit_display_fn emit_display, void *user, size_t total_bytes,
+                          int has_nul, int streamed_anything, int truncated, int timed_out,
+                          int interrupted, long timeout_ms, int status)
 {
     struct buf suf;
     buf_init(&suf);
@@ -269,11 +270,12 @@ static void stream_suffix(tool_writer write, void *user, size_t total_bytes, int
     append_run_suffix(&suf, total_bytes, has_nul, truncated, streamed_anything, timed_out,
                       interrupted, timeout_ms, status);
     if (suf.len > 0)
-        write(suf.data, suf.len, user);
+        emit_display(suf.data, suf.len, user);
     buf_free(&suf);
 }
 
-static char *run_shell(const char *cmd, long timeout_ms, tool_writer write, void *user)
+static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn emit_display,
+                       void *user)
 {
     int fds[2];
     if (pipe(fds) < 0)
@@ -437,11 +439,11 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_writer write, void
         /* Stream this chunk live before writing into head/tail buffers.
          * Skipping streaming once any chunk has had a NUL keeps the
          * "binary output suppressed" guarantee intact: bytes we suppress
-         * in display also stay out of the writer-accumulated history.
-         * head/tail are still populated for the writer-less path used
-         * by the test suite. */
-        if (write && !has_nul) {
-            write(chunk, (size_t)r, user);
+         * in display also stay out of the streamed display. head/tail
+         * are still populated for the no-emit_display path used by the
+         * test suite. */
+        if (emit_display && !has_nul) {
+            emit_display(chunk, (size_t)r, user);
             streamed_anything = 1;
         }
         size_t consumed = 0;
@@ -484,19 +486,19 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_writer write, void
         }
     }
 
-    if (write) {
-        /* Streaming path: live chunks already went through writer for
-         * display. Emit the trailing suffix to the writer too so the
-         * user sees it in the dim block. The canonical history is still
-         * produced by format_run_output below — it applies the same
-         * head/tail truncation, line-length cap, UTF-8 sanitization,
-         * and binary-suppression as the legacy path, which the live
-         * stream skips. The model's view of the output is therefore
-         * the bounded summary, not the unbounded live stream. */
+    if (emit_display) {
+        /* Streaming path: live chunks already went through emit_display.
+         * Push the trailing suffix through it too so the user sees it
+         * in the dim block. The canonical history is still produced by
+         * format_run_output below — it applies the same head/tail
+         * truncation, line-length cap, UTF-8 sanitization, and binary-
+         * suppression as the legacy path, which the live stream skips.
+         * The model's view of the output is therefore the bounded
+         * summary, not the unbounded live stream. */
         size_t tail_len = tail_wrapped ? TAIL_CAP : tail_pos;
         int truncated_streamed = total_bytes > head.len + tail_len;
-        stream_suffix(write, user, total_bytes, has_nul, streamed_anything, truncated_streamed,
-                      timed_out, interrupted, timeout_ms, status);
+        stream_suffix(emit_display, user, total_bytes, has_nul, streamed_anything,
+                      truncated_streamed, timed_out, interrupted, timeout_ms, status);
     }
 
     return format_run_output(&head, tail, tail_pos, tail_wrapped, total_bytes, has_nul, timed_out,
@@ -533,7 +535,7 @@ static char *resolve_call_timeout_ms(json_t *root, long *out_ms)
     return NULL;
 }
 
-static char *run(const char *args_json, tool_writer write, void *user)
+static char *run(const char *args_json, tool_emit_display_fn emit_display, void *user)
 {
     json_error_t jerr;
     json_t *root = json_loads(args_json ? args_json : "{}", 0, &jerr);
@@ -553,7 +555,7 @@ static char *run(const char *args_json, tool_writer write, void *user)
         return err;
     }
 
-    char *out = run_shell(cmd, timeout_ms, write, user);
+    char *out = run_shell(cmd, timeout_ms, emit_display, user);
     json_decref(root);
     return out;
 }

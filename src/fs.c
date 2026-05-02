@@ -107,7 +107,8 @@ static char *resolve_link_target(const char *path)
     return NULL;
 }
 
-char *fs_write_with_diff(const char *path, const char *content, size_t content_len, char **errmsg)
+char *fs_write_with_diff(const char *path, const char *content, size_t content_len, char **errmsg,
+                         int *out_was_new)
 {
     char *target = NULL, *old = NULL, *parent = NULL, *tmp = NULL, *diff = NULL;
     char *a_label = NULL, *b_label = NULL;
@@ -121,6 +122,12 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
     struct stat st;
 
     *errmsg = NULL;
+    /* Default to "no", overwritten on the success exit. Any failure path
+     * goes through `goto out` with this still 0 — callers must check the
+     * NULL return / errmsg before consulting was_new, but at least they
+     * won't see a stale 1 from an aborted create attempt. */
+    if (out_was_new)
+        *out_was_new = 0;
 
     /* If `path` is a symlink, resolve it so we update the target file's
      * contents and leave the link intact — matches what vim/emacs/etc do.
@@ -260,5 +267,10 @@ out:
         free(diff);
         return NULL;
     }
+    /* Success — file_existed captures the pre-call state. The byte-
+     * identical short-circuit also lands here with file_existed=1, so
+     * the !file_existed branch covers exactly the create cases. */
+    if (out_was_new)
+        *out_was_new = !file_existed;
     return diff;
 }

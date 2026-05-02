@@ -19,8 +19,8 @@ static char *call_bash(const char *cmd_json_escaped)
     return out;
 }
 
-/* Capturing writer: accumulates every chunk into a buf so tests can
- * assert what bash sent live for display. */
+/* Capturing emit_display: accumulates every chunk into a buf so tests
+ * can assert what bash sent live for display. */
 struct capture {
     struct buf buf;
 };
@@ -460,8 +460,8 @@ static void test_bash_binary_output_keeps_exit_footer(void)
 
 static void test_bash_streamed_basic(void)
 {
-    /* With a writer attached, bash streams stdout chunks live AND
-     * returns the canonical history. The writer should see "hello\n"
+    /* With emit_display attached, bash streams stdout chunks live AND
+     * returns the canonical history. emit_display should see "hello\n"
      * (live display); the returned string should also be "hello\n". */
     struct capture cap = {0};
     buf_init(&cap.buf);
@@ -487,11 +487,11 @@ static void test_bash_streamed_binary_history_clean(void)
     EXPECT(strstr(out, "[binary output suppressed:") != NULL);
     EXPECT(strstr(out, "BEFORE") == NULL);
     EXPECT(strstr(out, "AFTER") == NULL);
-    /* Live display: writer also got the suffix at the end. The
+    /* Live display: emit_display also got the suffix at the end. The
      * pre-NUL bytes may or may not have been streamed depending on
      * whether the NUL landed in chunk 1 (printf is small enough that
      * it does — but we don't assert that, only that the marker
-     * reached the writer). */
+     * reached emit_display). */
     EXPECT(strstr(cap.buf.data, "[binary output suppressed:") != NULL);
     free(out);
     buf_free(&cap.buf);
@@ -505,7 +505,7 @@ static void test_bash_streamed_binary_marker_isolated_from_escape(void)
      * consumed as the CSI introducer and silently swallowed. The fix
      * is for the streaming suffix to lead with \n (an abort byte for
      * ctrl_strip) so the marker always renders cleanly. Verify the
-     * leading \n is in the captured writer stream. */
+     * leading \n is in the captured emit_display stream. */
     struct capture cap = {0};
     buf_init(&cap.buf);
     /* The first printf emits an unterminated CSI introducer; the
@@ -517,7 +517,7 @@ static void test_bash_streamed_binary_marker_isolated_from_escape(void)
         call_bash_streamed("printf '\\u001b['; sleep 0.05; printf 'pad pad pad pad\\\\0bin'", &cap);
     EXPECT(out != NULL);
     EXPECT(cap.buf.data != NULL);
-    /* Marker must reach the writer. */
+    /* Marker must reach emit_display. */
     const char *marker = strstr(cap.buf.data, "[binary output suppressed:");
     EXPECT(marker != NULL);
     /* …and be preceded by \n so ctrl_strip's escape state aborts.
@@ -532,7 +532,7 @@ static void test_bash_streamed_binary_marker_isolated_from_escape(void)
 static void test_bash_streamed_history_truncated(void)
 {
     /* Streamed bash history must apply the same head/tail caps as the
-     * non-streamed path — the live writer can see the full output, but
+     * non-streamed path — emit_display can see the full output, but
      * the returned string (model history) is bounded so a busy command
      * doesn't blow the context. Use yes piped through head to produce
      * many lines deterministically. */

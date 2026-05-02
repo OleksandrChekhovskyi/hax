@@ -71,14 +71,22 @@ static void test_write_missing_content(void)
 
 static void test_write_creates_new_file(void)
 {
+    /* New-file writes return a short "created <path> (...)" confirmation
+     * rather than a full diff: the content is already in the model's tool
+     * call arguments, so echoing it back as a `+`-prefixed diff would just
+     * double the context cost. The diff is reserved for overwrites, where
+     * it conveys real new-vs-old signal. */
     char *dir = mk_tmpdir();
     char *path = xasprintf("%s/new.txt", dir);
 
     char *out = call_write(path, "alpha\\nbeta\\n");
-    /* JSON-escaped \n decoded back to real newline. */
-    EXPECT(strstr(out, "--- /dev/null") != NULL);
-    EXPECT(strstr(out, "+alpha") != NULL);
-    EXPECT(strstr(out, "+beta") != NULL);
+    EXPECT(strstr(out, "created ") != NULL);
+    EXPECT(strstr(out, path) != NULL);
+    EXPECT(strstr(out, "2 lines") != NULL);
+    EXPECT(strstr(out, "11 bytes") != NULL);
+    /* No diff content for new files. */
+    EXPECT(strstr(out, "--- /dev/null") == NULL);
+    EXPECT(strstr(out, "+alpha") == NULL);
     free(out);
 
     char *got = slurp(path);
@@ -96,7 +104,7 @@ static void test_write_creates_parent_dirs(void)
     char *path = xasprintf("%s/sub/deeper/file.txt", dir);
 
     char *out = call_write(path, "content\\n");
-    EXPECT(strstr(out, "--- /dev/null") != NULL);
+    EXPECT(strstr(out, "created ") != NULL);
     free(out);
 
     char *got = slurp(path);
@@ -238,7 +246,9 @@ static void test_write_through_dangling_symlink(void)
     EXPECT(symlink(real, link) == 0); /* dangling on purpose */
 
     char *out = call_write(link, "hello\\n");
-    EXPECT(strstr(out, "+hello") != NULL);
+    /* Dangling-link target didn't exist, so this counts as a new-file
+     * create — short confirmation, no diff. */
+    EXPECT(strstr(out, "created ") != NULL);
     free(out);
 
     struct stat lst;
@@ -258,14 +268,14 @@ static void test_write_through_dangling_symlink(void)
 static void test_write_empty_new_file(void)
 {
     /* Creating an empty file is a valid request. The file must land on
-     * disk *and* the tool must return an unambiguous success diff so the
-     * model can tell the difference from a no-op. */
+     * disk *and* the tool must return an unambiguous success message so
+     * the model can tell the difference from a no-op. */
     char *dir = mk_tmpdir();
     char *path = xasprintf("%s/empty.txt", dir);
 
     char *out = call_write(path, "");
-    EXPECT(strstr(out, "--- /dev/null") != NULL);
-    EXPECT(strstr(out, "+++ b/") != NULL);
+    EXPECT(strstr(out, "created ") != NULL);
+    EXPECT(strstr(out, "(empty)") != NULL);
     free(out);
 
     struct stat st;
