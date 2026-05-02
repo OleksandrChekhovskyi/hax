@@ -62,6 +62,13 @@ long parse_duration_ms(const char *s);
  * failure (e.g. /dev/urandom unavailable) — same convention as xmalloc. */
 void gen_uuid_v4(char out[37]);
 
+/* Replace ASCII control bytes (newline, CR, tab, etc.) with single spaces
+ * and collapse runs of whitespace to one space, stripping leading and
+ * trailing whitespace. Used to render multi-line content (a bash command
+ * like `ls\npwd`, a JSON arg) on a single visual line for headers and
+ * logs. Returns a newly-allocated NUL-terminated string; caller frees. */
+char *flatten_for_display(const char *s);
+
 /* Truncate any line in `data` longer than `max_line` bytes to its first
  * `max_line` bytes followed by an inline `...[N bytes elided]` marker.
  * Newline structure is preserved (one input line → one output line) so

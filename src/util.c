@@ -278,6 +278,33 @@ char *cap_line_lengths(const char *data, size_t len, size_t max_line, size_t *ou
     return buf_steal(&out);
 }
 
+char *flatten_for_display(const char *s)
+{
+    if (!s)
+        return xstrdup("");
+    size_t n = strlen(s);
+    char *out = xmalloc(n + 1);
+    size_t j = 0;
+    int prev_space = 1; /* drop leading whitespace */
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        int is_space = c == ' ' || c == '\t' || c == '\n' || c == '\r' || c < 0x20 || c == 0x7f;
+        if (is_space) {
+            if (!prev_space) {
+                out[j++] = ' ';
+                prev_space = 1;
+            }
+        } else {
+            out[j++] = (char)c;
+            prev_space = 0;
+        }
+    }
+    while (j > 0 && out[j - 1] == ' ')
+        j--;
+    out[j] = '\0';
+    return out;
+}
+
 char *expand_home(const char *path)
 {
     if (!path)

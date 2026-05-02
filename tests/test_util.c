@@ -364,6 +364,78 @@ static void test_cap_lines_long_line_no_trailing_newline(void)
     free(out);
 }
 
+/* ---------- flatten_for_display ---------- */
+
+static void test_flatten_null(void)
+{
+    char *out = flatten_for_display(NULL);
+    EXPECT_STR_EQ(out, "");
+    free(out);
+}
+
+static void test_flatten_empty(void)
+{
+    char *out = flatten_for_display("");
+    EXPECT_STR_EQ(out, "");
+    free(out);
+}
+
+static void test_flatten_plain(void)
+{
+    char *out = flatten_for_display("ls -la");
+    EXPECT_STR_EQ(out, "ls -la");
+    free(out);
+}
+
+static void test_flatten_newline(void)
+{
+    char *out = flatten_for_display("ls\npwd");
+    EXPECT_STR_EQ(out, "ls pwd");
+    free(out);
+}
+
+static void test_flatten_collapses_runs(void)
+{
+    /* Multiple newlines/tabs/spaces collapse to a single space. */
+    char *out = flatten_for_display("a\n\n\tb  \r\n c");
+    EXPECT_STR_EQ(out, "a b c");
+    free(out);
+}
+
+static void test_flatten_strips_edges(void)
+{
+    char *out = flatten_for_display("\n  hello world\n\n");
+    EXPECT_STR_EQ(out, "hello world");
+    free(out);
+}
+
+static void test_flatten_all_whitespace(void)
+{
+    /* All-whitespace input collapses to empty — leading-trim drops the
+     * first run, trailing-trim drops everything that came after. */
+    char *out = flatten_for_display("  \n\t\r  ");
+    EXPECT_STR_EQ(out, "");
+    free(out);
+}
+
+static void test_flatten_control_bytes(void)
+{
+    /* All ASCII control bytes (incl. DEL 0x7f) collapse to spaces. */
+    char *out = flatten_for_display("a\x01\x02\x03"
+                                    "b\x7f"
+                                    "c");
+    EXPECT_STR_EQ(out, "a b c");
+    free(out);
+}
+
+static void test_flatten_preserves_high_bytes(void)
+{
+    /* UTF-8 bytes (>= 0x80) are not control chars and pass through. */
+    char *out = flatten_for_display("café\nlatte");
+    EXPECT_STR_EQ(out, "café latte");
+    free(out);
+}
+
 /* ---------- parse_duration_ms ---------- */
 
 static void test_parse_duration_plain_seconds(void)
@@ -441,6 +513,16 @@ int main(void)
     test_cap_lines_truncates_long_line();
     test_cap_lines_preserves_short_neighbors();
     test_cap_lines_long_line_no_trailing_newline();
+
+    test_flatten_null();
+    test_flatten_empty();
+    test_flatten_plain();
+    test_flatten_newline();
+    test_flatten_collapses_runs();
+    test_flatten_strips_edges();
+    test_flatten_all_whitespace();
+    test_flatten_control_bytes();
+    test_flatten_preserves_high_bytes();
 
     test_parse_duration_plain_seconds();
     test_parse_duration_with_suffix();

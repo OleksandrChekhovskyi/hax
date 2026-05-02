@@ -25,6 +25,7 @@
 #include <util.h>
 #endif
 
+#include "cmd_classify.h"
 #include "interrupt.h"
 #include "utf8_sanitize.h"
 #include "util.h"
@@ -773,6 +774,25 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
     return out;
 }
 
+/* Decide at dispatch time whether this call's output should be hidden
+ * from the live preview. The model still sees the canonical output —
+ * this is purely a display heuristic. cmd_classify is conservative:
+ * any redirection / subshell / unknown utility falls through to the
+ * normal head+tail preview. */
+static int bash_is_silent(const char *args_json)
+{
+    if (!args_json)
+        return 0;
+    json_error_t jerr;
+    json_t *root = json_loads(args_json, 0, &jerr);
+    if (!root)
+        return 0;
+    const char *cmd = json_string_value(json_object_get(root, "command"));
+    int verdict = cmd ? cmd_is_exploration(cmd) : 0;
+    json_decref(root);
+    return verdict;
+}
+
 const struct tool TOOL_BASH = {
     .def =
         {
@@ -796,4 +816,5 @@ const struct tool TOOL_BASH = {
         },
     .run = run,
     .preview_tail = 1,
+    .is_silent = bash_is_silent,
 };

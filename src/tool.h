@@ -56,6 +56,17 @@ struct tool {
      * tend to land at the bottom. The default (head-only) is right for
      * tools whose output is read top-down (file content). */
     int preview_tail;
+    /* When set, the call renders as a one-line header with no preview
+     * body and an inline spinner — used for read-only exploration tools
+     * whose output is for the model, not the user. Consecutive silent
+     * calls of the same tool can coalesce into one line (see agent.c
+     * read coalescing). */
+    int silent_preview;
+    /* Optional per-call override of silent_preview. If set, the agent
+     * calls this with the tool's args_json and treats the call as
+     * silent iff the function returns nonzero. Used by `bash` to
+     * classify exploration commands (ls/grep/find/...) at runtime. */
+    int (*is_silent)(const char *args_json);
 };
 
 extern const struct tool TOOL_READ;
