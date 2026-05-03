@@ -2,6 +2,8 @@
 #include "input_core.h"
 
 #include <locale.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "harness.h"
 #include "input.h"
@@ -421,9 +423,9 @@ static void test_history_empty(void)
 static void test_history_navigation(void)
 {
     struct input *in = input_new();
-    input_history_add(in, "one");
-    input_history_add(in, "two");
-    input_history_add(in, "three");
+    input_core_history_add(in, "one");
+    input_core_history_add(in, "two");
+    input_core_history_add(in, "three");
     EXPECT(in->hist_n == 3);
     EXPECT(in->hist_pos == 0); /* untouched at this point */
 
@@ -454,7 +456,7 @@ static void test_history_navigation(void)
 static void test_history_draft_preserved(void)
 {
     struct input *in = input_new();
-    input_history_add(in, "older");
+    input_core_history_add(in, "older");
     in->hist_pos = in->hist_n;
     input_core_buf_set(in, "my draft");
 
@@ -470,8 +472,8 @@ static void test_history_recall_edits_discarded(void)
     /* Editing a recalled entry is local; navigating away discards the edit
      * and the original entry stays unchanged. */
     struct input *in = input_new();
-    input_history_add(in, "a");
-    input_history_add(in, "b");
+    input_core_history_add(in, "a");
+    input_core_history_add(in, "b");
     in->hist_pos = in->hist_n;
     input_core_buf_set(in, "draft");
 
@@ -493,33 +495,77 @@ static void test_history_recall_edits_discarded(void)
 
 static void test_history_evicts_oldest(void)
 {
-    /* HISTORY_MAX (= 1000 in input_core.c) caps retained entries; the
-     * oldest one is dropped when capacity is exceeded. Push 1001
-     * unique entries and verify the first one is gone. */
+    /* INPUT_CORE_HISTORY_MAX caps retained entries; the oldest one is
+     * dropped when capacity is exceeded. Push cap+1 unique entries and
+     * verify the first one is gone. */
     struct input *in = input_new();
     char buf[16];
-    for (int i = 0; i < 1001; i++) {
+    const int cap = INPUT_CORE_HISTORY_MAX;
+    for (int i = 0; i <= cap; i++) {
         snprintf(buf, sizeof(buf), "e%d", i);
-        input_history_add(in, buf);
+        input_core_history_add(in, buf);
     }
-    EXPECT(in->hist_n == 1000);
-    EXPECT_STR_EQ(in->hist[0], "e1");      /* oldest, "e0" evicted */
-    EXPECT_STR_EQ(in->hist[999], "e1000"); /* newest */
+    EXPECT(in->hist_n == (size_t)cap);
+    EXPECT_STR_EQ(in->hist[0], "e1"); /* oldest, "e0" evicted */
+    snprintf(buf, sizeof(buf), "e%d", cap);
+    EXPECT_STR_EQ(in->hist[cap - 1], buf); /* newest */
     input_free(in);
 }
 
-static void test_history_skips_dup_of_last(void)
+static void test_history_erasedups(void)
 {
+    /* Erasedups semantics: any prior exact match (anywhere, not just
+     * the most recent) is removed before append, so a recalled entry
+     * bumps to the top instead of duplicating. The same-as-most-recent
+     * case is a fast-path skip (no work, return 0) so the persistence
+     * wrapper can avoid an on-disk record. */
     struct input *in = input_new();
-    input_history_add(in, "a");
-    input_history_add(in, "a"); /* skipped */
-    input_history_add(in, "b");
-    input_history_add(in, "a"); /* not a dup of last (last is "b") */
-    EXPECT(in->hist_n == 3);
+    EXPECT(input_core_history_add(in, "a") == 1);
+    EXPECT(input_core_history_add(in, "a") == 0); /* skip: already most recent */
+    EXPECT(in->hist_n == 1);
     EXPECT_STR_EQ(in->hist[0], "a");
-    EXPECT_STR_EQ(in->hist[1], "b");
-    EXPECT_STR_EQ(in->hist[2], "a");
+
+    EXPECT(input_core_history_add(in, "b") == 1);
+    EXPECT(input_core_history_add(in, "a") == 1); /* erases older "a" at idx 0 */
+    EXPECT(in->hist_n == 2);
+    EXPECT_STR_EQ(in->hist[0], "b");
+    EXPECT_STR_EQ(in->hist[1], "a");
+
+    /* Empty / NULL ignored, return 0. */
+    EXPECT(input_core_history_add(in, "") == 0);
+    EXPECT(input_core_history_add(in, NULL) == 0);
+    EXPECT(in->hist_n == 2);
     input_free(in);
+}
+
+static void test_history_encode_decode_roundtrip(void)
+{
+    /* Plain ASCII passes through unchanged. */
+    char *enc = input_core_history_encode("hello world");
+    EXPECT_STR_EQ(enc, "hello world");
+    char *dec = input_core_history_decode(enc, strlen(enc));
+    EXPECT_STR_EQ(dec, "hello world");
+    free(enc);
+    free(dec);
+
+    /* Embedded LF and backslashes are escaped on encode and restored. */
+    const char *raw = "line1\nline2\\tab\n";
+    enc = input_core_history_encode(raw);
+    EXPECT_STR_EQ(enc, "line1\\nline2\\\\tab\\n");
+    dec = input_core_history_decode(enc, strlen(enc));
+    EXPECT_STR_EQ(dec, raw);
+    free(enc);
+    free(dec);
+
+    /* Unknown escape preserves verbatim (forward compat). */
+    dec = input_core_history_decode("a\\xb", 4);
+    EXPECT_STR_EQ(dec, "a\\xb");
+    free(dec);
+
+    /* Trailing lone backslash preserved as-is. */
+    dec = input_core_history_decode("end\\", 4);
+    EXPECT_STR_EQ(dec, "end\\");
+    free(dec);
 }
 
 /* ---------- prompt_width ---------- */
@@ -578,7 +624,8 @@ int main(void)
     test_history_draft_preserved();
     test_history_recall_edits_discarded();
     test_history_evicts_oldest();
-    test_history_skips_dup_of_last();
+    test_history_erasedups();
+    test_history_encode_decode_roundtrip();
 
     test_prompt_width_strips_ansi();
     test_utf8_seq_len();

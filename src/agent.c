@@ -932,6 +932,7 @@ int agent_run(struct provider *p)
     struct spinner *spinner = spinner_new("working...");
     struct md_renderer *md = markdown_enabled() ? md_new(md_emit_to_disp, &disp) : NULL;
     struct input *input = input_new();
+    input_history_open_default(input);
     /* Initialize once — captures the canonical termios baseline and starts
      * the watcher thread. Idempotent; safe even when stdin/stdout aren't
      * ttys (becomes a no-op in that case). */

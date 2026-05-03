@@ -10,8 +10,6 @@
 #include "input.h"
 #include "util.h"
 
-#define HISTORY_MAX 1000
-
 /* ---------------- public API: alloc / free ---------------- */
 
 struct input *input_new(void)
@@ -32,6 +30,7 @@ void input_free(struct input *in)
     for (size_t i = 0; i < in->hist_n; i++)
         free(in->hist[i]);
     free(in->hist);
+    free(in->persist_path);
     free(in);
 }
 
@@ -344,22 +343,97 @@ void input_core_kill_word_back(struct input *in)
 
 /* ---------------- history ---------------- */
 
-void input_history_add(struct input *in, const char *line)
+/* Append `line` to history without touching any persistence layer.
+ * Erases any prior exact-match occurrences first (zsh
+ * HIST_IGNORE_ALL_DUPS / bash HISTCONTROL=erasedups semantics) so a
+ * recalled entry bumps to the top instead of duplicating — the same
+ * canned prompts get reused constantly in a coding-agent REPL.
+ *
+ * Fast path: if `line` is already the most-recent entry, the erasedups
+ * would self-cancel (erase idx hist_n-1, then re-append the same
+ * string). Skip outright — saves the on-disk wrapper an append too. */
+int input_core_history_add(struct input *in, const char *line)
 {
     if (!line || !*line)
-        return;
+        return 0;
     if (in->hist_n > 0 && strcmp(in->hist[in->hist_n - 1], line) == 0)
-        return;
+        return 0;
+    /* Erase prior exact matches. Walk back-to-front so indices stay
+     * valid as we remove. */
+    for (size_t i = in->hist_n; i > 0; i--) {
+        if (strcmp(in->hist[i - 1], line) == 0) {
+            free(in->hist[i - 1]);
+            memmove(&in->hist[i - 1], &in->hist[i], (in->hist_n - i) * sizeof(char *));
+            in->hist_n--;
+        }
+    }
     if (in->hist_n + 1 > in->hist_cap) {
         in->hist_cap = in->hist_cap ? in->hist_cap * 2 : 16;
         in->hist = xrealloc(in->hist, in->hist_cap * sizeof(char *));
     }
     in->hist[in->hist_n++] = xstrdup(line);
-    if (in->hist_n > HISTORY_MAX) {
+    if (in->hist_n > INPUT_CORE_HISTORY_MAX) {
         free(in->hist[0]);
         memmove(&in->hist[0], &in->hist[1], (in->hist_n - 1) * sizeof(char *));
         in->hist_n--;
     }
+    return 1;
+}
+
+/* ---------------- history persistence (encode/decode) ---------------- */
+
+/* Encode an entry for the on-disk one-line-per-record format: literal
+ * backslash -> "\\", literal LF -> "\n". Caller frees. The result has
+ * no trailing newline — the file writer adds one. */
+char *input_core_history_encode(const char *s)
+{
+    if (!s)
+        return xstrdup("");
+    size_t n = strlen(s);
+    char *out = xmalloc(n * 2 + 1);
+    size_t j = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '\\') {
+            out[j++] = '\\';
+            out[j++] = '\\';
+        } else if (c == '\n') {
+            out[j++] = '\\';
+            out[j++] = 'n';
+        } else {
+            out[j++] = (char)c;
+        }
+    }
+    out[j] = '\0';
+    return out;
+}
+
+/* Decode `n` bytes of an encoded entry. Recognizes "\\" -> '\\' and
+ * "\n" -> LF. An unrecognized escape (or trailing backslash) is
+ * preserved verbatim — forward-compatible with future escape additions
+ * and resilient to a hand-edited file. Caller frees. */
+char *input_core_history_decode(const char *s, size_t n)
+{
+    char *out = xmalloc(n + 1);
+    size_t j = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\\' && i + 1 < n) {
+            char nx = s[i + 1];
+            if (nx == '\\') {
+                out[j++] = '\\';
+                i++;
+                continue;
+            }
+            if (nx == 'n') {
+                out[j++] = '\n';
+                i++;
+                continue;
+            }
+        }
+        out[j++] = s[i];
+    }
+    out[j] = '\0';
+    return out;
 }
 
 /* History navigation convention:

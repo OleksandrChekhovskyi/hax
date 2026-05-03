@@ -28,4 +28,9 @@
 char *fs_write_with_diff(const char *path, const char *content, size_t content_len, char **errmsg,
                          int *out_was_new);
 
+/* mkdir -p: create `path` and any missing intermediate components with
+ * mode 0755. EEXIST is treated as success. Returns 0 on success, -1 on
+ * failure with errno set by the underlying mkdir(2). */
+int fs_mkdir_p(const char *path);
+
 #endif /* HAX_FS_H */

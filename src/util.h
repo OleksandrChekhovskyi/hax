@@ -25,6 +25,17 @@ void *xrealloc(void *p, size_t n);
 char *xstrdup(const char *s);
 char *xasprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
+/* Reject anything that isn't a regular file before opening it. open()
+ * on a FIFO without a writer blocks indefinitely, which would freeze a
+ * startup that touches a path the user doesn't fully control (config
+ * files, the history file, tool inputs). Returns 0 if `path` exists
+ * and is a regular file, -1 otherwise with errno set (EISDIR or EINVAL
+ * when stat succeeded but the type was wrong). There's a tiny TOCTOU
+ * window between stat and the subsequent open; the alternative (open
+ * with O_NONBLOCK then fstat) doesn't reliably help because the FIFO
+ * open is what blocks, before fstat runs. */
+int ensure_regular_file(const char *path);
+
 /* Read an entire file into a newly-allocated NUL-terminated string.
  * Returns NULL on error and sets errno. Caller frees. Rejects anything
  * that isn't a regular file (errno EISDIR for directories, EINVAL for
@@ -44,6 +55,18 @@ char *slurp_file_capped(const char *path, size_t cap, size_t *out_len, int *out_
 
 /* Expand a leading ~ to $HOME. Returns a newly-allocated path. */
 char *expand_home(const char *path);
+
+/* Resolve hax's XDG-style paths under the per-user config and state
+ * trees, both namespaced as `<base>/hax/<relpath>`:
+ *   xdg_hax_config_path("AGENTS.md") -> $XDG_CONFIG_HOME/hax/AGENTS.md,
+ *     or $HOME/.config/hax/AGENTS.md as fallback.
+ *   xdg_hax_state_path("history") -> $XDG_STATE_HOME/hax/history, or
+ *     $HOME/.local/state/hax/history as fallback.
+ * Config holds user-edited preferences (AGENTS.md, skills); state
+ * holds runtime/volatile data (history). Returns NULL when neither
+ * the env var nor $HOME is set. Caller frees. */
+char *xdg_hax_config_path(const char *relpath);
+char *xdg_hax_state_path(const char *relpath);
 
 /* Duplicate `s` with any trailing '/' characters stripped. Lets callers
  * normalize a base URL so "http://x/v1/" and "http://x/v1" produce the

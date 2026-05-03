@@ -175,17 +175,6 @@ static int append_agents_md(struct buf *b, const char *path, int *seen_header)
     return 1;
 }
 
-static char *global_agents_md_path(void)
-{
-    const char *xdg = getenv("XDG_CONFIG_HOME");
-    if (xdg && *xdg)
-        return xasprintf("%s/hax/AGENTS.md", xdg);
-    const char *home = getenv("HOME");
-    if (home && *home)
-        return xasprintf("%s/.config/hax/AGENTS.md", home);
-    return NULL;
-}
-
 static void append_project_agents_md(struct buf *b, int *seen_header)
 {
     char cwd[PATH_MAX];
@@ -372,17 +361,6 @@ static void collect_skills(struct skill_entry **out, size_t *n, size_t *cap, con
     closedir(d);
 }
 
-static char *global_skills_root(void)
-{
-    const char *xdg = getenv("XDG_CONFIG_HOME");
-    if (xdg && *xdg)
-        return xasprintf("%s/hax/skills", xdg);
-    const char *home = getenv("HOME");
-    if (home && *home)
-        return xasprintf("%s/.config/hax/skills", home);
-    return NULL;
-}
-
 static void append_skills(struct buf *b)
 {
     struct skill_entry *skills = NULL;
@@ -391,7 +369,7 @@ static void append_skills(struct buf *b)
     /* Project first so its entries shadow same-named global ones. */
     collect_skills(&skills, &n, &cap, ".agents/skills");
 
-    char *global = global_skills_root();
+    char *global = xdg_hax_config_path("skills");
     if (global) {
         collect_skills(&skills, &n, &cap, global);
         free(global);
@@ -438,7 +416,7 @@ char *env_build_suffix(const char *model)
 
     if (do_agents) {
         int seen_header = 0;
-        char *global = global_agents_md_path();
+        char *global = xdg_hax_config_path("AGENTS.md");
         if (global) {
             append_agents_md(&b, global, &seen_header);
             free(global);

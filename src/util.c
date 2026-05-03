@@ -140,13 +140,7 @@ int write_all(int fd, const void *data, size_t n)
     return 0;
 }
 
-/* Reject anything that isn't a regular file before opening — open() on a
- * FIFO without a writer blocks indefinitely, which would freeze startup
- * if AGENTS.md or similar happened to be a special file. There's a tiny
- * TOCTOU window between stat() and the subsequent open(), but the
- * alternative (open with O_NONBLOCK then fstat) doesn't help: the FIFO
- * open is what blocks, before fstat runs. */
-static int ensure_regular_file(const char *path)
+int ensure_regular_file(const char *path)
 {
     struct stat st;
     if (stat(path, &st) != 0)
@@ -315,6 +309,31 @@ char *expand_home(const char *path)
     if (!home)
         return xstrdup(path);
     return xasprintf("%s%s", home, path + 1);
+}
+
+/* Shared resolver behind xdg_hax_config_path / xdg_hax_state_path:
+ * "$<env_var>/hax/<relpath>" when the env var is set and non-empty,
+ * else "$HOME/<home_default>/hax/<relpath>". Returns NULL when neither
+ * is available. */
+static char *xdg_hax_path(const char *env_var, const char *home_default, const char *relpath)
+{
+    const char *xdg = getenv(env_var);
+    if (xdg && *xdg)
+        return xasprintf("%s/hax/%s", xdg, relpath);
+    const char *home = getenv("HOME");
+    if (home && *home)
+        return xasprintf("%s/%s/hax/%s", home, home_default, relpath);
+    return NULL;
+}
+
+char *xdg_hax_config_path(const char *relpath)
+{
+    return xdg_hax_path("XDG_CONFIG_HOME", ".config", relpath);
+}
+
+char *xdg_hax_state_path(const char *relpath)
+{
+    return xdg_hax_path("XDG_STATE_HOME", ".local/state", relpath);
 }
 
 char *dup_trim_trailing_slash(const char *s)

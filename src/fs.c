@@ -15,7 +15,7 @@
 
 /* mkdir -p: create path and any missing intermediate components. EEXIST is
  * treated as success — the caller doesn't care if a dir is new or old. */
-static int mkdir_p(const char *path)
+int fs_mkdir_p(const char *path)
 {
     if (!path || !*path)
         return 0;
@@ -179,7 +179,7 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
     }
 
     parent = parent_dir_of(target);
-    if (mkdir_p(parent) < 0) {
+    if (fs_mkdir_p(parent) < 0) {
         *errmsg = xasprintf("creating %s: %s", parent, strerror(errno));
         goto out;
     }

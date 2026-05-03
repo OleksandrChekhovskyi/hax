@@ -42,8 +42,32 @@ void input_free(struct input *in);
  * prompts. The returned string may contain embedded '\n'. */
 char *input_readline(struct input *in, const char *prompt);
 
-/* Append `line` to the in-memory history. No-op for NULL/empty input or
- * exact duplicates of the most recent entry. */
+/* Append `line` to history. Erasedups semantics: a prior exact match
+ * (anywhere in history, not just the most recent) is removed first, so
+ * a recalled entry bumps to the top instead of duplicating. No-op for
+ * NULL/empty input. When persistence is open (see input_history_open),
+ * the entry is also appended to the on-disk file. */
 void input_history_add(struct input *in, const char *line);
+
+/* Enable on-disk history persistence at `path`:
+ *   - Loads existing entries (decoded one-line-per-record) into memory,
+ *     so Up-arrow recalls them across invocations.
+ *   - Stores `path` on `in`; subsequent input_history_add calls append
+ *     each accepted entry to the file.
+ *   - Creates parent directories as needed; silently no-ops on any I/O
+ *     failure (missing $HOME, unwritable dir, etc) — losing history is
+ *     never worth crashing the REPL.
+ *   - If the on-disk file has grown well past the in-memory cap, the
+ *     in-memory state (already capped) is rewritten back atomically. */
+void input_history_open(struct input *in, const char *path);
+
+/* Convenience wrapper: open the conventional per-user history file at
+ * $XDG_STATE_HOME/hax/history (default $HOME/.local/state/hax/history),
+ * but only when stdin and stdout are both ttys — non-interactive use
+ * (`echo prompt | hax`) shouldn't leak scripted input into recall
+ * history. No-op if neither env var is set. The path-taking variant
+ * above remains the testable seam and the hook for a future
+ * --history-file override. */
+void input_history_open_default(struct input *in);
 
 #endif /* HAX_INPUT_H */

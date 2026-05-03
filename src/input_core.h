@@ -38,6 +38,11 @@ struct input {
     /* tty (input.c only) */
     struct termios saved_termios;
     int raw_active;
+
+    /* on-disk history persistence (input.c only). NULL = disabled. Set
+     * by input_history_open; once set, input_history_add additionally
+     * appends each accepted entry to this file. */
+    char *persist_path;
 };
 
 /* Result of input_core_compute_layout. All fields are 0-indexed offsets
@@ -67,6 +72,24 @@ void input_core_kill_word_back(struct input *in);
 /* ---- history ---- */
 void input_core_history_prev(struct input *in);
 void input_core_history_next(struct input *in);
+
+/* In-memory history append with erasedups semantics: any prior exact
+ * match is removed first, so a recalled entry bumps to the top instead
+ * of duplicating. No-op for NULL/empty input or for an exact repeat of
+ * the current most-recent entry (the erasedups would be a self-cancel
+ * anyway, and skipping spares an on-disk record).
+ *
+ * Returns 1 if the entry actually changed history, 0 if it was skipped.
+ * The IO-layer wrapper in input.c (`input_history_add`) uses the return
+ * value to decide whether to append to the on-disk file. */
+int input_core_history_add(struct input *in, const char *line);
+
+/* Pure encode/decode for the on-disk one-line-per-record format. Encode
+ * maps literal backslash -> "\\" and literal LF -> "\n"; decode reverses
+ * those, leaving unknown escapes verbatim for forward compatibility.
+ * Both return malloc'd strings the caller frees. */
+char *input_core_history_encode(const char *s);
+char *input_core_history_decode(const char *s, size_t n);
 
 /* ---- layout / utf-8 ---- */
 
@@ -104,5 +127,10 @@ int input_core_codepoint_width(const char *buf, size_t len, size_t i, size_t *co
  * (true tab-stop snapping makes the first tab after a prompt feel
  * short). We own both ends so the value is a free parameter. */
 #define INPUT_CORE_TAB_WIDTH 4
+
+/* In-memory history cap. Older entries are evicted past this. The IO
+ * layer in input.c uses it as the basis for its on-disk bloat threshold,
+ * so it lives in the header rather than as duplicated constants. */
+#define INPUT_CORE_HISTORY_MAX 1000
 
 #endif /* HAX_INPUT_CORE_H */

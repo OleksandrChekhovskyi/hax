@@ -2,17 +2,21 @@
 #include "input.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <libgen.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 
 #include "ansi.h"
+#include "fs.h"
 #include "input_core.h"
 #include "utf8_sanitize.h"
 #include "util.h"
@@ -563,6 +567,197 @@ static char *read_line_canonical(size_t *out_len)
     buf_free(&b);
     *out_len = 0;
     return NULL;
+}
+
+/* ---------------- history persistence ---------------- */
+
+/* Threshold (multiplier of in-memory cap) for rewriting the on-disk
+ * history file at open time. The file grows unboundedly via append; we
+ * compact it back to the in-memory snapshot once it gets this far past
+ * the cap, so it stays bounded over months of use without paying the
+ * rewrite cost on every submit. */
+#define HISTORY_FILE_BLOAT_FACTOR 3
+
+/* Hard cap on a single encoded record (bytes between newlines on disk).
+ * Drops both at append and at load, so the load path can use a fixed
+ * buffer instead of unbounded getline(). 64KB swallows any prompt a
+ * human would deliberately submit; the cap exists to defend against
+ * file corruption (concurrent-write truncation per the comment above
+ * splicing two records together) and against accidentally-edited
+ * history files turning into an unbounded allocation at startup. */
+#define HISTORY_RECORD_MAX 65536
+
+/* Append one already-encoded entry plus a trailing newline to `path`.
+ *
+ * Concurrency: the record is built in one buffer and emitted via a
+ * single write(2) under O_APPEND. Linux atomically pairs the implicit
+ * seek-to-end with the write, so concurrent hax processes don't
+ * overlap each other's records — at typical prompt sizes (well under
+ * one page) the kernel doesn't return short writes for regular files.
+ * A retry loop on a short write would defeat that atomicity (another
+ * process could append between our two write calls), so we emit once
+ * and accept that a >page record on a stressed system might end up
+ * truncated on disk. Errors are swallowed — a failed history write
+ * must never disrupt the REPL. */
+static void history_file_append(const char *path, const char *line)
+{
+    /* Refuse a non-regular file (FIFO, device) so a user-planted special
+     * node at the history path can't block the REPL on submit. ENOENT
+     * is fine — O_CREAT below will make a fresh regular file. */
+    if (ensure_regular_file(path) < 0 && errno != ENOENT)
+        return;
+    char *enc = input_core_history_encode(line);
+    size_t n = strlen(enc);
+    /* Drop oversized records — see HISTORY_RECORD_MAX. The encoded form
+     * can be up to 2x the raw input, so the gate sits here, after
+     * encoding. */
+    if (n + 1 > HISTORY_RECORD_MAX) {
+        free(enc);
+        return;
+    }
+    int fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0600);
+    if (fd < 0) {
+        free(enc);
+        return;
+    }
+    char *rec = xmalloc(n + 1);
+    memcpy(rec, enc, n);
+    rec[n] = '\n';
+    ssize_t w;
+    do {
+        w = write(fd, rec, n + 1);
+    } while (w < 0 && errno == EINTR);
+    free(rec);
+    free(enc);
+    close(fd);
+}
+
+/* Atomically rewrite `path` with the current in-memory history. Uses a
+ * sibling tmpfile + rename, so readers and concurrent appenders see
+ * either the old or the new file, never a half-written one. The race
+ * window with concurrent appenders is small (only invoked at startup
+ * after a bloat threshold is crossed) and the worst case is losing a
+ * few records that another instance appended during our rewrite. */
+static void history_file_rewrite(struct input *in, const char *path)
+{
+    char *dup = xstrdup(path);
+    char *tmp = xasprintf("%s/.hax-hist.XXXXXX", dirname(dup));
+    int fd = mkstemp(tmp);
+    if (fd < 0) {
+        free(tmp);
+        free(dup);
+        return;
+    }
+    (void)fchmod(fd, 0600);
+    FILE *f = fdopen(fd, "w");
+    if (!f) {
+        close(fd);
+        unlink(tmp);
+        free(tmp);
+        free(dup);
+        return;
+    }
+    for (size_t i = 0; i < in->hist_n; i++) {
+        char *enc = input_core_history_encode(in->hist[i]);
+        fputs(enc, f);
+        fputc('\n', f);
+        free(enc);
+    }
+    int ok = (fflush(f) == 0);
+    if (fclose(f) != 0)
+        ok = 0;
+    if (ok && rename(tmp, path) != 0)
+        ok = 0;
+    if (!ok)
+        unlink(tmp);
+    free(tmp);
+    free(dup);
+}
+
+void input_history_open(struct input *in, const char *path)
+{
+    if (!path || !*path)
+        return;
+    /* mkdir -p the parent — first run typically has no $XDG_STATE_HOME
+     * tree yet. Failure is non-fatal; the open below will fail and we
+     * silently disable persistence. */
+    char *dup = xstrdup(path);
+    fs_mkdir_p(dirname(dup));
+    free(dup);
+
+    /* Refuse a non-regular file at startup — a FIFO would block fopen()
+     * indefinitely, freezing the REPL before the first prompt. */
+    FILE *f = (ensure_regular_file(path) == 0) ? fopen(path, "r") : NULL;
+    size_t loaded = 0;
+    if (f) {
+        /* Fixed-size buffer instead of getline() — bounds the worst-case
+         * allocation if the file contains a corrupt or pathologically
+         * long line. Records >= HISTORY_RECORD_MAX bytes are dropped,
+         * with the rest of the offending line consumed up to the next
+         * newline so we resync on the following record. */
+        char *line = xmalloc(HISTORY_RECORD_MAX);
+        for (;;) {
+            size_t n = 0;
+            int c, overflow = 0;
+            while ((c = fgetc(f)) != EOF && c != '\n') {
+                if (n + 1 < HISTORY_RECORD_MAX)
+                    line[n++] = (char)c;
+                else
+                    overflow = 1;
+            }
+            if (c == EOF && n == 0 && !overflow)
+                break;
+            loaded++;
+            if (overflow)
+                continue;
+            while (n > 0 && line[n - 1] == '\r')
+                n--;
+            if (n == 0)
+                continue;
+            char *decoded = input_core_history_decode(line, n);
+            input_core_history_add(in, decoded);
+            free(decoded);
+            if (c == EOF)
+                break;
+        }
+        free(line);
+        fclose(f);
+    }
+
+    /* Store path before any rewrite so we can no-op on rewrite failure
+     * without losing append behavior. */
+    free(in->persist_path);
+    in->persist_path = xstrdup(path);
+
+    if (loaded > (size_t)INPUT_CORE_HISTORY_MAX * HISTORY_FILE_BLOAT_FACTOR)
+        history_file_rewrite(in, path);
+}
+
+void input_history_add(struct input *in, const char *line)
+{
+    if (!line || !*line)
+        return;
+    if (!input_core_history_add(in, line))
+        return;
+    if (in->persist_path)
+        history_file_append(in->persist_path, line);
+}
+
+void input_history_open_default(struct input *in)
+{
+    /* Skip persistence in non-interactive sessions. `echo prompt | hax`
+     * and other scripted invocations fall through to the canonical
+     * non-tty read path (see input_readline), and persisting those
+     * one-off lines into the user's recall history is surprising —
+     * worse, it can leak secrets piped from a script. Gate on the same
+     * condition input_readline uses to choose its read path. */
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
+        return;
+    char *path = xdg_hax_state_path("history");
+    if (!path)
+        return;
+    input_history_open(in, path);
+    free(path);
 }
 
 /* ---------------- public API ---------------- */
