@@ -22,6 +22,24 @@ meson compile -C build
 
 ## Run
 
+With no arguments, hax launches an interactive REPL.
+
+```sh
+./build/hax                   # interactive
+./build/hax -p "list TODOs"   # non-interactive: run, print final answer, exit
+echo "explain x" | ./build/hax -p   # prompt from stdin
+./build/hax --raw -p "hello"  # bare model, no system prompt, no tools
+./build/hax --help            # full usage
+```
+
+| Flag       | What it does                                                        |
+|------------|---------------------------------------------------------------------|
+| `-p`       | Non-interactive mode. Runs the prompt to completion (tools and all) |
+|            | and prints the final assistant message to stdout.                   |
+| `--raw`    | Send only the prompt — no system prompt, no env block, no AGENTS.md,|
+|            | no skills, no tools. Useful as a barebones chat interface.          |
+| `-h`       | Show usage.                                                         |
+
 Pick a provider with `HAX_PROVIDER` (default `codex`). Supported values:
 
 | `HAX_PROVIDER`      | Backend                                                |

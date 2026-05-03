@@ -196,6 +196,18 @@ test_transcript = executable('test_transcript',
 )
 test('transcript', test_transcript)
 
+test_agent_core = executable('test_agent_core',
+    sources: [
+        'test_agent_core.c',
+        '../src/agent_core.c',
+        '../src/env.c',
+        '../src/turn.c',
+        '../src/utf8_sanitize.c',
+        '../src/util.c',
+    ],
+)
+test('agent_core', test_agent_core)
+
 test_tool_render = executable('test_tool_render',
     sources: [
         'test_tool_render.c',

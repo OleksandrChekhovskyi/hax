@@ -8,10 +8,10 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include "agent_core.h"
 #include "ansi.h"
 #include "ctrl_strip.h"
 #include "disp.h"
-#include "env.h"
 #include "input.h"
 #include "interrupt.h"
 #include "markdown.h"
@@ -30,64 +30,6 @@
  * the multibyte glyph and break cursor positioning. */
 #define PROMPT_UTF8  ANSI_MAGENTA ANSI_BOLD "❯" ANSI_BOLD_OFF ANSI_FG_DEFAULT " "
 #define PROMPT_ASCII ANSI_BOLD ">" ANSI_BOLD_OFF " "
-
-#define DEFAULT_SYSTEM_PROMPT                                                                      \
-    "You are hax, a minimalist coding assistant running in the user's terminal. "                  \
-    "You have access to `read`, `bash`, `write`, and `edit` tools.\n"                              \
-    "\n"                                                                                           \
-    "Prefer action over explanation: when a question can be answered by running a "                \
-    "command or reading a file, do so. Be concise: no preambles, no trailing "                     \
-    "summaries, no filler. Reference code as path:line.\n"                                         \
-    "\n"                                                                                           \
-    "Before starting a substantial piece of work, say one sentence about what "                    \
-    "you're about to do. Don't narrate every read or routine step.\n"                              \
-    "\n"                                                                                           \
-    "Project guidance in any AGENTS.md block below overrides these defaults.\n"                    \
-    "\n"                                                                                           \
-    "When changing code:\n"                                                                        \
-    "- Make the smallest correct change that fits the existing style.\n"                           \
-    "- Fix root causes, not symptoms. Don't fix unrelated bugs unless asked.\n"                    \
-    "- Don't introduce new abstractions, helpers, or compatibility shims unless "                  \
-    "the task genuinely needs them.\n"                                                             \
-    "- Add a comment only when the *why* is non-obvious.\n"                                        \
-    "- If the project has a build, tests, or linter, run them before reporting done.\n"            \
-    "\n"                                                                                           \
-    "Git: never commit, push, amend, branch, or run destructive commands "                         \
-    "(`reset --hard`, `checkout --`, `branch -D`) unless the user explicitly asks. "               \
-    "Never revert changes you didn't make. If a hook or check fails, fix the cause; "              \
-    "don't bypass with `--no-verify`.\n"                                                           \
-    "\n"                                                                                           \
-    "If asked for a \"review\": lead with bugs, risks, and missing tests for the "                 \
-    "*proposed change*, not a summary. A finding should be one the author would "                  \
-    "fix if they knew. Skip pre-existing issues and trivial style. Calibrate "                     \
-    "severity honestly; no flattery. Empty findings is a valid result."
-
-static const struct tool *const TOOLS[] = {
-    &TOOL_READ,
-    &TOOL_BASH,
-    &TOOL_WRITE,
-    &TOOL_EDIT,
-};
-#define N_TOOLS (sizeof(TOOLS) / sizeof(TOOLS[0]))
-
-static const struct tool *find_tool(const char *name)
-{
-    for (size_t i = 0; i < N_TOOLS; i++) {
-        if (strcmp(TOOLS[i]->def.name, name) == 0)
-            return TOOLS[i];
-    }
-    return NULL;
-}
-
-static void items_append(struct item **items, size_t *n, size_t *cap, struct item it)
-{
-    if (*n == *cap) {
-        size_t c = *cap ? *cap * 2 : 16;
-        *items = xrealloc(*items, c * sizeof(struct item));
-        *cap = c;
-    }
-    (*items)[(*n)++] = it;
-}
 
 /* True when `it` is a tool_result whose output already ends with the
  * interrupt marker — i.e. bash appended its "[interrupted]" footer when
@@ -461,6 +403,27 @@ static struct item dispatch_tool_skipped(struct disp *d, const struct item *call
         .kind = ITEM_TOOL_RESULT,
         .call_id = xstrdup(call->call_id),
         .output = xstrdup(INTERRUPT_MARKER),
+    };
+}
+
+/* Refuse a tool call without running it. Used in --raw mode: we
+ * advertised no tools, so a tool_call from the provider is either a
+ * model bug or a misbehaving backend — either way we MUST NOT execute
+ * it. Display a refusal header for user visibility and feed an error
+ * tool_result back so the conversation stays well-formed and the model
+ * can recover (e.g. answer in plain text instead). */
+static struct item dispatch_tool_refused(struct disp *d, const struct item *call)
+{
+    display_tool_header(d, call);
+    disp_raw(ANSI_DIM);
+    disp_printf(d, "[refused: --raw, no tools advertised]");
+    disp_raw(ANSI_RESET);
+    disp_putc(d, '\n');
+    fflush(stdout);
+    return (struct item){
+        .kind = ITEM_TOOL_RESULT,
+        .call_id = xstrdup(call->call_id),
+        .output = xstrdup("error: tool calls are disabled in this session"),
     };
 }
 
@@ -877,10 +840,12 @@ static int on_event(const struct stream_event *ev, void *user)
     return 0;
 }
 
-/* Indirect references to agent_run's live conversation state so the
- * Ctrl-T callback always sees the latest values — `items` is reassigned
- * by xrealloc as the vector grows, and `sys` is rewritten once with the
- * env-suffixed prompt. Holding the addresses sidesteps both.
+/* Indirect references into the live agent_session so the Ctrl-T
+ * callback always sees the latest values — `items` is reassigned by
+ * xrealloc as the vector grows, and `n_items` advances with every
+ * append. Holding the addresses sidesteps the moving target. `sys` is
+ * fixed for the session's lifetime, but routing it through the same
+ * indirection keeps the three fields uniform.
  *
  * Lifetime: instances live on agent_run's stack frame and are
  * registered with the input editor for the duration of that call.
@@ -911,58 +876,20 @@ static void show_transcript_cb(void *user)
     spawn_pipe_close(&sp);
 }
 
-int agent_run(struct provider *p)
+int agent_run(struct provider *p, const struct hax_opts *opts)
 {
-    const char *model = getenv("HAX_MODEL");
-    if (!model || !*model)
-        model = p->default_model;
-    if (!model || !*model) {
-        fprintf(stderr, "hax: HAX_MODEL is required for provider '%s' (no default)\n",
-                p->name ? p->name : "?");
+    struct agent_session sess;
+    if (agent_session_init(&sess, p, opts) < 0)
         return 1;
-    }
-    /* Distinguish unset (use default) from explicit empty ("" — opt out).
-     * Some OpenAI-compatible chat templates reject a system message, so
-     * users need a way to disable it entirely. */
-    const char *sys = getenv("HAX_SYSTEM_PROMPT");
-    if (!sys)
-        sys = DEFAULT_SYSTEM_PROMPT;
-    /* Built once at session start and appended to `sys`; stable across
-     * turns so the assembled system prompt stays byte-identical and
-     * cache-friendly. The explicit-empty opt-out above suppresses the
-     * suffix too — HAX_SYSTEM_PROMPT="" means "send no system message
-     * at all", and that includes harness-injected metadata. */
-    char *sys_owned = NULL;
-    if (*sys) {
-        char *suffix = env_build_suffix(model);
-        if (suffix) {
-            sys_owned = xasprintf("%s\n\n%s", sys, suffix);
-            free(suffix);
-            sys = sys_owned;
-        }
-    }
-    const char *reasoning_env = getenv("HAX_REASONING_EFFORT");
-    const char *reasoning_effort = NULL;
-    if (reasoning_env)
-        reasoning_effort = *reasoning_env ? reasoning_env : NULL;
-    else
-        reasoning_effort = p->default_reasoning_effort;
-
-    struct tool_def *tools = xmalloc(N_TOOLS * sizeof(*tools));
-    for (size_t i = 0; i < N_TOOLS; i++)
-        tools[i] = TOOLS[i]->def;
-
-    struct item *items = NULL;
-    size_t n_items = 0, cap_items = 0;
 
     const char *bar = ANSI_CYAN "▌" ANSI_FG_DEFAULT;
-    if (reasoning_effort)
+    if (sess.reasoning_effort)
         printf("\n%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s · %s" ANSI_BOLD_OFF
                "\n",
-               bar, p->name ? p->name : "?", model, reasoning_effort);
+               bar, p->name ? p->name : "?", sess.model, sess.reasoning_effort);
     else
         printf("\n%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s" ANSI_BOLD_OFF "\n",
-               bar, p->name ? p->name : "?", model);
+               bar, p->name ? p->name : "?", sess.model);
     printf("%s " ANSI_DIM "ctrl-d quit · esc interrupt" ANSI_BOLD_OFF "\n", bar);
     struct disp disp = {.trail = 1};
     struct spinner *spinner = spinner_new("working...");
@@ -970,9 +897,13 @@ int agent_run(struct provider *p)
     struct input *input = input_new();
     input_history_open_default(input);
     struct transcript_view tv = {
-        .sys_ref = &sys,
-        .items_ref = &items,
-        .n_items_ref = &n_items,
+        /* Point at session fields so the Ctrl-T callback always sees
+         * the latest values — the items vector grows via xrealloc so
+         * its address changes, and these are read-only views. The cast
+         * appeases C's lack of implicit multi-level const conversion. */
+        .sys_ref = (const char *const *)&sess.sys,
+        .items_ref = &sess.items,
+        .n_items_ref = &sess.n_items,
     };
     input_set_transcript_cb(input, show_transcript_cb, &tv);
     /* Initialize once — captures the canonical termios baseline and starts
@@ -1011,9 +942,7 @@ int agent_run(struct provider *p)
          * header (turn 1 = user types + first model response). The
          * inner loop's subsequent iterations insert their own
          * boundaries for follow-up round-trips after tool dispatch. */
-        items_append(&items, &n_items, &cap_items, (struct item){.kind = ITEM_TURN_BOUNDARY});
-        items_append(&items, &n_items, &cap_items,
-                     (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup(line)});
+        agent_session_add_user(&sess, line);
         free(line);
         /* input_readline left the cursor at column 0 of a fresh row. */
         disp.trail = 1;
@@ -1046,18 +975,10 @@ int agent_run(struct provider *p)
                  * this call's n_items already reflects it (providers
                  * skip ITEM_TURN_BOUNDARY in their item-translation
                  * switch). */
-                items_append(&items, &n_items, &cap_items,
-                             (struct item){.kind = ITEM_TURN_BOUNDARY});
+                agent_session_add_boundary(&sess);
             }
             first_inner = 0;
-            struct context ctx = {
-                .system_prompt = sys,
-                .items = items,
-                .n_items = n_items,
-                .tools = tools,
-                .n_tools = N_TOOLS,
-                .reasoning_effort = reasoning_effort,
-            };
+            struct context ctx = agent_session_context(&sess);
 
             /* Spinner sits on its own line as a block: separator first so
              * we have a known column-0 row, then show. The thread starts
@@ -1091,7 +1012,7 @@ int agent_run(struct provider *p)
                                    .md = md,
                                    .cl = &cl,
                                    .usage = {-1, -1, -1}};
-            p->stream(p, &ctx, model, on_event, &ec);
+            p->stream(p, &ctx, sess.model, on_event, &ec);
 
             /* Either a tool-only response (no text emitted, spinner still
              * visible) or stream returned without ever firing an event —
@@ -1140,18 +1061,10 @@ int agent_run(struct provider *p)
             if (interrupted)
                 turn_flush_text(&t, had_partial_text ? "\n" INTERRUPT_MARKER : NULL);
 
-            size_t n_new = 0;
-            struct item *new_items = turn_take_items(&t, &n_new);
+            size_t n_before;
+            int had_tool_call;
+            agent_session_absorb(&sess, &t, &n_before, &had_tool_call);
             turn_reset(&t);
-
-            size_t n_before = n_items;
-            int had_tool_call = 0;
-            for (size_t i = 0; i < n_new; i++) {
-                if (new_items[i].kind == ITEM_TOOL_CALL)
-                    had_tool_call = 1;
-                items_append(&items, &n_items, &cap_items, new_items[i]);
-            }
-            free(new_items);
 
             if (interrupted) {
                 /* Synthesize "[interrupted]" results for any completed
@@ -1159,13 +1072,13 @@ int agent_run(struct provider *p)
                  * incomplete tool_calls were already discarded by
                  * turn_reset above. */
                 int marker_placed = had_partial_text;
-                size_t end = n_items;
+                size_t end = sess.n_items;
                 for (size_t i = n_before; i < end; i++) {
-                    if (items[i].kind == ITEM_TOOL_CALL) {
-                        items_append(&items, &n_items, &cap_items,
+                    if (sess.items[i].kind == ITEM_TOOL_CALL) {
+                        items_append(&sess.items, &sess.n_items, &sess.cap_items,
                                      (struct item){
                                          .kind = ITEM_TOOL_RESULT,
-                                         .call_id = xstrdup(items[i].call_id),
+                                         .call_id = xstrdup(sess.items[i].call_id),
                                          .output = xstrdup(INTERRUPT_MARKER),
                                      });
                         marker_placed = 1;
@@ -1177,7 +1090,7 @@ int agent_run(struct provider *p)
                  * deltas arrived" case and the "only normally-flushed
                  * text completed" case. */
                 if (!marker_placed) {
-                    items_append(&items, &n_items, &cap_items,
+                    items_append(&sess.items, &sess.n_items, &sess.cap_items,
                                  (struct item){
                                      .kind = ITEM_ASSISTANT_MESSAGE,
                                      .text = xstrdup(INTERRUPT_MARKER),
@@ -1200,19 +1113,26 @@ int agent_run(struct provider *p)
              * conversation stays well-formed; settle first so a
              * fast-returning tool doesn't race past a pending \x1b in
              * the classifier. */
-            size_t current_end = n_items;
+            size_t current_end = sess.n_items;
             for (size_t i = n_before; i < current_end; i++) {
-                if (items[i].kind != ITEM_TOOL_CALL)
+                if (sess.items[i].kind != ITEM_TOOL_CALL)
                     continue;
                 interrupt_settle();
                 struct item result;
-                if (interrupt_requested()) {
+                if (sess.n_tools == 0) {
+                    /* --raw advertised no tools; refuse to run anything
+                     * the provider returned anyway. Same gate exists in
+                     * oneshot.c — local execution must not be reachable
+                     * from a malformed or malicious backend response. */
                     cluster_terminate(&cl, &disp, spinner);
-                    result = dispatch_tool_skipped(&disp, &items[i]);
+                    result = dispatch_tool_refused(&disp, &sess.items[i]);
+                } else if (interrupt_requested()) {
+                    cluster_terminate(&cl, &disp, spinner);
+                    result = dispatch_tool_skipped(&disp, &sess.items[i]);
                 } else {
-                    result = dispatch_tool_call(&cl, &disp, spinner, &items[i]);
+                    result = dispatch_tool_call(&cl, &disp, spinner, &sess.items[i]);
                 }
-                items_append(&items, &n_items, &cap_items, result);
+                items_append(&sess.items, &sess.n_items, &sess.cap_items, result);
             }
 
             /* Esc fired during or just after this batch. Stop the inner
@@ -1223,8 +1143,8 @@ int agent_run(struct provider *p)
              * first so we don't race past a pending \x1b. */
             interrupt_settle();
             if (interrupt_requested()) {
-                if (n_items == 0 || !tool_result_is_marked(&items[n_items - 1])) {
-                    items_append(&items, &n_items, &cap_items,
+                if (sess.n_items == 0 || !tool_result_is_marked(&sess.items[sess.n_items - 1])) {
+                    items_append(&sess.items, &sess.n_items, &sess.cap_items,
                                  (struct item){
                                      .kind = ITEM_ASSISTANT_MESSAGE,
                                      .text = xstrdup(INTERRUPT_MARKER),
@@ -1254,10 +1174,6 @@ int agent_run(struct provider *p)
     input_free(input);
     if (md)
         md_free(md);
-    for (size_t i = 0; i < n_items; i++)
-        item_free(&items[i]);
-    free(items);
-    free(tools);
-    free(sys_owned);
+    agent_session_free(&sess);
     return 0;
 }

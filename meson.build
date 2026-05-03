@@ -38,6 +38,7 @@ libutil = cc.find_library('util', required: false)
 
 sources = files(
     'src/agent.c',
+    'src/agent_core.c',
     'src/cmd_classify.c',
     'src/ctrl_strip.c',
     'src/diff.c',
@@ -50,6 +51,7 @@ sources = files(
     'src/interrupt.c',
     'src/main.c',
     'src/markdown.c',
+    'src/oneshot.c',
     'src/spawn.c',
     'src/spinner.c',
     'src/sse.c',
