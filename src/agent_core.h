@@ -63,6 +63,13 @@ int agent_session_init(struct agent_session *s, struct provider *p, const struct
 
 void agent_session_free(struct agent_session *s);
 
+/* Drop every conversation item, leaving the session ready to start a
+ * fresh turn. Preserves model, system prompt, tools, and reasoning_effort
+ * — those are session-level config, not per-conversation state. The
+ * items vector's capacity is kept allocated so subsequent appends don't
+ * have to grow it from zero. Used by `/new` (and `/clear`). */
+void agent_session_reset(struct agent_session *s);
+
 /* Snapshot the session's current state into a `struct context` ready
  * to hand to a provider's stream(). The returned struct borrows the
  * session's pointers — its lifetime ends with the next mutating call

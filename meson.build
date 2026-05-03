@@ -52,6 +52,7 @@ sources = files(
     'src/main.c',
     'src/markdown.c',
     'src/oneshot.c',
+    'src/slash.c',
     'src/spawn.c',
     'src/spinner.c',
     'src/sse.c',

@@ -208,6 +208,19 @@ test_agent_core = executable('test_agent_core',
 )
 test('agent_core', test_agent_core)
 
+test_slash = executable('test_slash',
+    sources: [
+        'test_slash.c',
+        '../src/slash.c',
+        '../src/agent_core.c',
+        '../src/env.c',
+        '../src/turn.c',
+        '../src/utf8_sanitize.c',
+        '../src/util.c',
+    ],
+)
+test('slash', test_slash)
+
 test_tool_render = executable('test_tool_render',
     sources: [
         'test_tool_render.c',

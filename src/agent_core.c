@@ -138,6 +138,13 @@ void agent_session_free(struct agent_session *s)
     memset(s, 0, sizeof(*s));
 }
 
+void agent_session_reset(struct agent_session *s)
+{
+    for (size_t i = 0; i < s->n_items; i++)
+        item_free(&s->items[i]);
+    s->n_items = 0;
+}
+
 struct context agent_session_context(const struct agent_session *s)
 {
     return (struct context){

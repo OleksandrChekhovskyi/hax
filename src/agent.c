@@ -15,6 +15,7 @@
 #include "input.h"
 #include "interrupt.h"
 #include "markdown.h"
+#include "slash.h"
 #include "spawn.h"
 #include "spinner.h"
 #include "tool.h"
@@ -876,21 +877,26 @@ static void show_transcript_cb(void *user)
     spawn_pipe_close(&sp);
 }
 
+void agent_print_banner(const struct provider *p, const struct agent_session *s)
+{
+    const char *bar = ANSI_CYAN "▌" ANSI_FG_DEFAULT;
+    if (s->reasoning_effort)
+        printf("\n%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s · %s" ANSI_BOLD_OFF
+               "\n",
+               bar, p->name ? p->name : "?", s->model, s->reasoning_effort);
+    else
+        printf("\n%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s" ANSI_BOLD_OFF "\n",
+               bar, p->name ? p->name : "?", s->model);
+    printf("%s " ANSI_DIM "ctrl-d quit · try /help" ANSI_BOLD_OFF "\n", bar);
+}
+
 int agent_run(struct provider *p, const struct hax_opts *opts)
 {
     struct agent_session sess;
     if (agent_session_init(&sess, p, opts) < 0)
         return 1;
 
-    const char *bar = ANSI_CYAN "▌" ANSI_FG_DEFAULT;
-    if (sess.reasoning_effort)
-        printf("\n%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s · %s" ANSI_BOLD_OFF
-               "\n",
-               bar, p->name ? p->name : "?", sess.model, sess.reasoning_effort);
-    else
-        printf("\n%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s" ANSI_BOLD_OFF "\n",
-               bar, p->name ? p->name : "?", sess.model);
-    printf("%s " ANSI_DIM "ctrl-d quit · esc interrupt" ANSI_BOLD_OFF "\n", bar);
+    agent_print_banner(p, &sess);
     struct disp disp = {.trail = 1};
     struct spinner *spinner = spinner_new("working...");
     struct md_renderer *md = markdown_enabled() ? md_new(md_emit_to_disp, &disp) : NULL;
@@ -933,6 +939,20 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
             free(line);
             continue;
         }
+
+        /* Slash commands run locally (clear history, show help, ...) and
+         * never reach the model. Caught before history-add so recognized
+         * /-prefixed lines don't pollute up-arrow recall. Lines that
+         * look like commands but aren't (e.g. "/tmp/foo" — the
+         * dispatcher's bareword check) return SLASH_NOT_A_COMMAND and
+         * fall through to the regular model path below. */
+        struct slash_ctx sctx = {.sess = &sess, .provider = p};
+        if (slash_dispatch(line, &sctx) != SLASH_NOT_A_COMMAND) {
+            free(line);
+            disp.trail = 1;
+            continue;
+        }
+
         input_history_add(input, line);
 
         /* Mark the turn boundary just before the user message, not just
