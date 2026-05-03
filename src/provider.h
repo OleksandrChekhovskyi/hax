@@ -19,6 +19,13 @@ enum item_kind {
      * the Codex Responses adapter produces these (encrypted reasoning items
      * for chain-of-thought continuity); other providers ignore them. */
     ITEM_REASONING,
+    /* Inert marker the agent emits before each fresh model request, so
+     * downstream consumers (currently the transcript renderer) can mark
+     * turn boundaries the same way agent.c/turn.c sees them — one per
+     * HTTP round-trip — without re-deriving them by heuristics. Carries
+     * no fields. Provider adapters ignore it when serializing the
+     * conversation. */
+    ITEM_TURN_BOUNDARY,
 };
 
 struct item {

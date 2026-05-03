@@ -15,9 +15,11 @@
 #include "input.h"
 #include "interrupt.h"
 #include "markdown.h"
+#include "spawn.h"
 #include "spinner.h"
 #include "tool.h"
 #include "tool_render.h"
+#include "transcript.h"
 #include "turn.h"
 #include "util.h"
 
@@ -875,6 +877,40 @@ static int on_event(const struct stream_event *ev, void *user)
     return 0;
 }
 
+/* Indirect references to agent_run's live conversation state so the
+ * Ctrl-T callback always sees the latest values — `items` is reassigned
+ * by xrealloc as the vector grows, and `sys` is rewritten once with the
+ * env-suffixed prompt. Holding the addresses sidesteps both.
+ *
+ * Lifetime: instances live on agent_run's stack frame and are
+ * registered with the input editor for the duration of that call.
+ * input_free must run before agent_run returns (it does — see the
+ * cleanup at the end of agent_run), otherwise `input` would outlive
+ * the storage and a stray Ctrl-T would dereference a dead frame. */
+struct transcript_view {
+    const char *const *sys_ref;
+    struct item *const *items_ref;
+    const size_t *n_items_ref;
+};
+
+static void show_transcript_cb(void *user)
+{
+    struct transcript_view *v = user;
+    const char *pager = getenv("PAGER");
+    if (!pager || !*pager)
+        pager = "less -R";
+    /* spawn_pipe_open shields the parent from terminal-generated
+     * SIGINT/SIGQUIT (so Ctrl-C in the pager exits the pager, not
+     * hax) and from SIGPIPE on the fputs path (so quitting the pager
+     * early gives EPIPE rather than killing hax). The child sees all
+     * three at default disposition, so less behaves normally. */
+    struct spawn_pipe sp;
+    if (spawn_pipe_open(&sp, pager) < 0)
+        return;
+    transcript_render(sp.w, *v->sys_ref, *v->items_ref, *v->n_items_ref);
+    spawn_pipe_close(&sp);
+}
+
 int agent_run(struct provider *p)
 {
     const char *model = getenv("HAX_MODEL");
@@ -933,6 +969,12 @@ int agent_run(struct provider *p)
     struct md_renderer *md = markdown_enabled() ? md_new(md_emit_to_disp, &disp) : NULL;
     struct input *input = input_new();
     input_history_open_default(input);
+    struct transcript_view tv = {
+        .sys_ref = &sys,
+        .items_ref = &items,
+        .n_items_ref = &n_items,
+    };
+    input_set_transcript_cb(input, show_transcript_cb, &tv);
     /* Initialize once — captures the canonical termios baseline and starts
      * the watcher thread. Idempotent; safe even when stdin/stdout aren't
      * ttys (becomes a no-op in that case). */
@@ -962,6 +1004,14 @@ int agent_run(struct provider *p)
         }
         input_history_add(input, line);
 
+        /* Mark the turn boundary just before the user message, not just
+         * before the model request that consumes it. The transcript
+         * renderer treats a TURN_BOUNDARY as the start-of-turn rule;
+         * placing it here puts the user's input under its own turn
+         * header (turn 1 = user types + first model response). The
+         * inner loop's subsequent iterations insert their own
+         * boundaries for follow-up round-trips after tool dispatch. */
+        items_append(&items, &n_items, &cap_items, (struct item){.kind = ITEM_TURN_BOUNDARY});
         items_append(&items, &n_items, &cap_items,
                      (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup(line)});
         free(line);
@@ -984,7 +1034,22 @@ int agent_run(struct provider *p)
          * readline editing) doesn't auto-cancel this one. */
         interrupt_clear();
         interrupt_arm();
+        /* The first iteration consumes the boundary that was placed
+         * with the user message above; subsequent iterations (when the
+         * model called tools and we loop back for the next round-trip)
+         * insert their own. */
+        int first_inner = 1;
         for (;;) {
+            if (!first_inner) {
+                /* Inserted before ctx is built so the items_append's
+                 * potential xrealloc can't dangle ctx.items, and so
+                 * this call's n_items already reflects it (providers
+                 * skip ITEM_TURN_BOUNDARY in their item-translation
+                 * switch). */
+                items_append(&items, &n_items, &cap_items,
+                             (struct item){.kind = ITEM_TURN_BOUNDARY});
+            }
+            first_inner = 0;
             struct context ctx = {
                 .system_prompt = sys,
                 .items = items,

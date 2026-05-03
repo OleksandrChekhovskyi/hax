@@ -181,6 +181,10 @@ static json_t *build_input_items(const struct item *items, size_t n)
                 obj = json_loads(it->reasoning_json, 0, &jerr);
             }
             break;
+        case ITEM_TURN_BOUNDARY:
+            /* Agent-side marker for the transcript renderer; nothing to
+             * send over the wire. */
+            break;
         }
         if (obj)
             json_array_append_new(arr, obj);

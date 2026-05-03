@@ -19,6 +19,9 @@
  *   - Ctrl-G opens $EDITOR with the current buffer; on exit the edited
  *     content replaces the buffer. The user keeps editing in the REPL
  *     (no auto-submit).
+ *   - Ctrl-T invokes a caller-supplied transcript handler (see
+ *     input_set_transcript_cb) — typically pipes a full conversation
+ *     view through $PAGER. The buffer is preserved.
  *   - Standard motions: arrows, Home/End, Ctrl-A/E/B/F, backspace,
  *     Delete, Ctrl-H/K/U/W, Ctrl-L (clear screen + redraw).
  *   - Bracketed paste is enabled; pasted blocks (incl. newlines) insert
@@ -60,6 +63,13 @@ void input_history_add(struct input *in, const char *line);
  *   - If the on-disk file has grown well past the in-memory cap, the
  *     in-memory state (already capped) is rewritten back atomically. */
 void input_history_open(struct input *in, const char *path);
+
+/* Register a Ctrl-T handler. While the prompt is active, pressing Ctrl-T
+ * drops the editor out of raw mode, calls `fn(user)`, and repaints.
+ * `fn` owns stdout for the duration of the call — the typical
+ * implementation popens a pager and pipes content to it. NULL `fn`
+ * disables the binding. */
+void input_set_transcript_cb(struct input *in, void (*fn)(void *user), void *user);
 
 /* Convenience wrapper: open the conventional per-user history file at
  * $XDG_STATE_HOME/hax/history (default $HOME/.local/state/hax/history),

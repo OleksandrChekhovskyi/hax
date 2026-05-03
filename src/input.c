@@ -18,6 +18,7 @@
 #include "ansi.h"
 #include "fs.h"
 #include "input_core.h"
+#include "spawn.h"
 #include "utf8_sanitize.h"
 #include "util.h"
 
@@ -494,9 +495,14 @@ static void open_editor(struct input *in)
      * are safe (mkstemp templates only produce [/A-Za-z0-9_-] anyway).
      * `editor` itself is interpolated raw, on the assumption the user's
      * own env (VISUAL/EDITOR) is trusted — same posture as every other
-     * tool that honors $EDITOR. */
+     * tool that honors $EDITOR.
+     *
+     * spawn_run, like system(), shields the parent from terminal-
+     * generated SIGINT/SIGQUIT during the editor's run, and additionally
+     * resets SIGPIPE in the child so editor-internal pipelines (e.g.
+     * vim's `:!yes | head`) work the way the user expects. */
     char *cmd = xasprintf("%s '%s'", editor, path);
-    int rc = system(cmd);
+    int rc = spawn_run(cmd);
     free(cmd);
 
     /* If the editor exited non-zero (e.g. vim's :cq, or fork/exec
@@ -530,6 +536,33 @@ reenter:
      * SIGWINCH delivered during system() is consumed by the child, so
      * we won't see it here — refresh explicitly before the caller's
      * next paint, otherwise wrap math uses pre-editor width. */
+    in->term_cols = term_cols();
+}
+
+/* ---------------- Ctrl-T transcript ---------------- */
+
+/* Same shape as open_editor: erase the edit area, drop raw mode, hand
+ * stdout off to the user's callback (which typically popens a pager),
+ * then re-enter raw mode and let the caller's next paint redraw the
+ * prompt. */
+static void show_transcript(struct input *in)
+{
+    if (!in->transcript_cb)
+        return;
+
+    if (in->last_cursor_row > 0)
+        printf("\x1b[%dA", in->last_cursor_row);
+    fputs("\r\x1b[J", stdout);
+    fflush(stdout);
+    in->last_cursor_row = 0;
+    in->last_rows = 0;
+    raw_off(in);
+
+    in->transcript_cb(in->transcript_user);
+
+    raw_on(in);
+    /* Pager may have prompted a window resize; refresh before the next
+     * paint so wrap math uses the current width. */
     in->term_cols = term_cols();
 }
 
@@ -743,6 +776,12 @@ void input_history_add(struct input *in, const char *line)
         history_file_append(in->persist_path, line);
 }
 
+void input_set_transcript_cb(struct input *in, void (*fn)(void *user), void *user)
+{
+    in->transcript_cb = fn;
+    in->transcript_user = user;
+}
+
 void input_history_open_default(struct input *in)
 {
     /* Skip persistence in non-interactive sessions. `echo prompt | hax`
@@ -867,6 +906,9 @@ char *input_readline(struct input *in, const char *prompt)
             break;
         case 0x10: /* Ctrl-P */
             input_core_history_prev(in);
+            break;
+        case 0x14: /* Ctrl-T — open transcript pager (no-op if unset) */
+            show_transcript(in);
             break;
         case 0x15: /* Ctrl-U */
             input_core_kill_to_bol(in);

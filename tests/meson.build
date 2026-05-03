@@ -178,6 +178,24 @@ test_cmd_classify = executable('test_cmd_classify',
 )
 test('cmd_classify', test_cmd_classify)
 
+test_spawn = executable('test_spawn',
+    sources: [
+        'test_spawn.c',
+        '../src/spawn.c',
+    ],
+)
+test('spawn', test_spawn)
+
+test_transcript = executable('test_transcript',
+    sources: [
+        'test_transcript.c',
+        '../src/transcript.c',
+        '../src/util.c',
+    ],
+    dependencies: [jansson],
+)
+test('transcript', test_transcript)
+
 test_tool_render = executable('test_tool_render',
     sources: [
         'test_tool_render.c',

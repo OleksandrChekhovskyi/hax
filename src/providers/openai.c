@@ -105,6 +105,13 @@ static json_t *build_messages(const char *system_prompt, const struct item *item
             /* Codex-only blob; nothing to translate to Chat Completions. */
             i++;
             break;
+        case ITEM_TURN_BOUNDARY:
+            /* Agent-side marker for the transcript renderer; nothing to
+             * translate. emit_assistant_group's while clause already
+             * stops at this kind, so it cleanly ends an assistant
+             * group too. */
+            i++;
+            break;
         }
     }
 

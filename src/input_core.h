@@ -43,6 +43,14 @@ struct input {
      * by input_history_open; once set, input_history_add additionally
      * appends each accepted entry to this file. */
     char *persist_path;
+
+    /* Ctrl-T hook (input.c only). When set, Ctrl-T at the prompt drops
+     * out of raw mode, calls `transcript_cb(transcript_user)`, and
+     * repaints. The callback is expected to take over stdout for the
+     * duration (typically: popen a pager and pipe rendered content).
+     * NULL = Ctrl-T is a no-op. */
+    void (*transcript_cb)(void *user);
+    void *transcript_user;
 };
 
 /* Result of input_core_compute_layout. All fields are 0-indexed offsets
