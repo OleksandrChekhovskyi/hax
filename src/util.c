@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 #include "provider.h"
@@ -122,6 +123,19 @@ void gen_uuid_v4(char out[37])
     snprintf(out, 37, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", b[0],
              b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13],
              b[14], b[15]);
+}
+
+int term_width(void)
+{
+    struct winsize ws;
+    int w = 120;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
+        w = ws.ws_col;
+    if (w < 40)
+        w = 40;
+    if (w > 200)
+        w = 200;
+    return w;
 }
 
 int write_all(int fd, const void *data, size_t n)

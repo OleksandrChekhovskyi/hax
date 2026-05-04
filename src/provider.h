@@ -145,6 +145,13 @@ struct provider {
     const char *default_reasoning_effort;
     int (*stream)(struct provider *p, const struct context *ctx, const char *model, stream_cb cb,
                   void *user);
+    /* Optional. Print a provider-specific subscription/usage report to
+     * stdout (rate-limit windows for a Codex-style plan, paid-API spend
+     * totals, etc.). NULL means "/usage is not supported on this
+     * provider". Returns 0 on success, -1 on fetch/parse failure (the
+     * implementation is expected to have already printed a diagnostic
+     * to stderr in that case). */
+    int (*query_usage)(struct provider *p);
     void (*destroy)(struct provider *p);
 };
 

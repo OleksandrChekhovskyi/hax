@@ -85,6 +85,13 @@ long parse_duration_ms(const char *s);
  * failure (e.g. /dev/urandom unavailable) — same convention as xmalloc. */
 void gen_uuid_v4(char out[37]);
 
+/* Host terminal width via TIOCGWINSZ on stdout. Falls back to 120 cols
+ * when stdout isn't a TTY or the ioctl fails, and clamps the result to
+ * [40, 200] so callers don't need to defend against pathologically
+ * narrow or wide widths. Re-queried on each call so SIGWINCH-style
+ * resizes are picked up without explicit signal handling. */
+int term_width(void);
+
 /* Replace ASCII control bytes (newline, CR, tab, etc.) with single spaces
  * and collapse runs of whitespace to one space, stripping leading and
  * trailing whitespace. Used to render multi-line content (a bash command

@@ -5,7 +5,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <unistd.h>
 
 #include "agent_core.h"
@@ -88,24 +87,6 @@ struct event_ctx {
  * so the silent-header sizing and coalesce-overflow check stay in
  * sync. */
 #define QUIET_LINE_MARGIN 8
-
-/* Query the host terminal width via TIOCGWINSZ, lazily on each call so
- * SIGWINCH-style resizes are picked up without explicit handling. Falls
- * back to 120 cols when stdout isn't a TTY or the ioctl fails. The
- * returned value is clamped so silent headers stay readable on narrow
- * terminals (40) and don't get pathologically long on wide ones (200). */
-static int term_width(void)
-{
-    struct winsize ws;
-    int w = 120;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
-        w = ws.ws_col;
-    if (w < 40)
-        w = 40;
-    if (w > 200)
-        w = 200;
-    return w;
-}
 
 /* Return a pointer into `path` at the basename — last component after
  * the final '/'. Trailing slashes (`src/`) fall back to the full path
@@ -877,16 +858,19 @@ static void show_transcript_cb(void *user)
     spawn_pipe_close(&sp);
 }
 
+/* Caller is expected to have already emitted the leading blank-line
+ * gap (slash_dispatch does this for /new; agent_run does it at startup
+ * before the first call). The banner itself is just two output rows so
+ * it composes cleanly with whatever surrounded the call. */
 void agent_print_banner(const struct provider *p, const struct agent_session *s)
 {
     const char *bar = ANSI_CYAN "▌" ANSI_FG_DEFAULT;
     if (s->reasoning_effort)
-        printf("\n%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s · %s" ANSI_BOLD_OFF
-               "\n",
+        printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s · %s" ANSI_BOLD_OFF "\n",
                bar, p->name ? p->name : "?", s->model, s->reasoning_effort);
     else
-        printf("\n%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s" ANSI_BOLD_OFF "\n",
-               bar, p->name ? p->name : "?", s->model);
+        printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s" ANSI_BOLD_OFF "\n", bar,
+               p->name ? p->name : "?", s->model);
     printf("%s " ANSI_DIM "ctrl-d quit · try /help" ANSI_BOLD_OFF "\n", bar);
 }
 
@@ -896,6 +880,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
     if (agent_session_init(&sess, p, opts) < 0)
         return 1;
 
+    putchar('\n');
     agent_print_banner(p, &sess);
     struct disp disp = {.trail = 1};
     struct spinner *spinner = spinner_new("working...");

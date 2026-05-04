@@ -29,6 +29,7 @@ struct shortcut_def {
 };
 
 static void slash_run_new(struct slash_ctx *ctx);
+static void slash_run_usage(struct slash_ctx *ctx);
 static void slash_run_help(struct slash_ctx *ctx);
 
 /* Registry. Order is preserved in /help output, so list user-facing
@@ -39,6 +40,12 @@ static const struct slash_cmd COMMANDS[] = {
         .aliases = {"clear", NULL},
         .summary = "start a fresh conversation",
         .run = slash_run_new,
+    },
+    {
+        .name = "usage",
+        .aliases = {NULL},
+        .summary = "show provider usage info",
+        .run = slash_run_usage,
     },
     {
         .name = "help",
@@ -110,6 +117,15 @@ enum slash_result slash_dispatch(const char *line, struct slash_ctx *ctx)
         p++;
     int has_extra = (*p != '\0');
 
+    /* From here the line is committed as a slash command — every
+     * outcome (handler output, "unknown command", "no arguments",
+     * etc.) is slash output and gets the standard leading blank-line
+     * gap that disp_block_separator gives ordinary model turns. Emit
+     * once here so handlers don't each have to remember to do it,
+     * and the spinner-prep in long-running handlers like /usage gets
+     * its prepped row for free. */
+    putchar('\n');
+
     /* Stack copy so we can NUL-terminate without touching the caller's
      * buffer. 64 is generous for command names — the longest plausible
      * one is ~12 chars. */
@@ -144,6 +160,24 @@ static void slash_run_new(struct slash_ctx *ctx)
 {
     agent_session_reset(ctx->sess);
     agent_print_banner(ctx->provider, ctx->sess);
+}
+
+/* ---------- /usage ---------- */
+
+static void slash_run_usage(struct slash_ctx *ctx)
+{
+    /* Cast away const: provider methods (stream, query_usage, destroy)
+     * all take a writable `struct provider *` since they may mutate
+     * adapter state. slash_ctx holds a const pointer because most
+     * commands only need read-only fields (->name, ->default_model);
+     * this is the one place we hand the object to a method. */
+    struct provider *p = (struct provider *)ctx->provider;
+    if (!p->query_usage) {
+        printf(ANSI_DIM "/usage is not supported by the %s provider" ANSI_RESET "\n",
+               p->name ? p->name : "?");
+        return;
+    }
+    p->query_usage(p);
 }
 
 /* ---------- /help ---------- */
@@ -203,7 +237,6 @@ static void slash_run_help(struct slash_ctx *ctx)
     }
     int gutter = (int)col1 + 2;
 
-    fputc('\n', stdout);
     fputs(ANSI_BOLD "commands" ANSI_RESET "\n", stdout);
     for (size_t i = 0; i < N_COMMANDS; i++) {
         print_cmd_row(COMMANDS[i].name, COMMANDS[i].summary, 0, gutter);
