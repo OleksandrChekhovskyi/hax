@@ -39,6 +39,7 @@ libutil = cc.find_library('util', required: false)
 sources = files(
     'src/agent.c',
     'src/agent_core.c',
+    'src/bg.c',
     'src/cmd_classify.c',
     'src/ctrl_strip.c',
     'src/diff.c',
@@ -70,6 +71,7 @@ sources = files(
     'src/providers/openai_compat.c',
     'src/providers/openai_events.c',
     'src/providers/openrouter.c',
+    'src/providers/probe.c',
     'src/tools/bash.c',
     'src/tools/edit.c',
     'src/tools/read.c',

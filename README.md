@@ -42,18 +42,21 @@ echo "explain x" | ./build/hax -p   # prompt from stdin
 
 Pick a provider with `HAX_PROVIDER` (default `codex`). Supported values:
 
-| `HAX_PROVIDER`      | Backend                                                |
-|---------------------|--------------------------------------------------------|
-| `codex` (default)   | Codex Responses API via ChatGPT subscription           |
-| `openai`            | OpenAI Chat Completions at api.openai.com              |
-| `openai-compatible` | Any OpenAI-compatible endpoint (bring your own URL)    |
-| `llama.cpp`         | Local `llama-server` with model + context auto-detect  |
-| `openrouter`        | OpenRouter with attribution + context auto-detect      |
+| `HAX_PROVIDER`      | Backend                                               |
+|---------------------|-------------------------------------------------------|
+| `codex` (default)   | Codex Responses via ChatGPT + context auto-detect     |
+| `openai`            | OpenAI Chat Completions at api.openai.com             |
+| `openai-compatible` | Any OpenAI-compatible endpoint (bring your own URL)   |
+| `llama.cpp`         | Local `llama-server` with model + context auto-detect |
+| `openrouter`        | OpenRouter with attribution + context auto-detect     |
 
 ### Codex (ChatGPT subscription)
 
 Reuses the OAuth token that the official `codex` CLI stores in `~/.codex/auth.json`. If the
-token is expired, run `codex` once to refresh it, then re-run `hax`.
+token is expired, run `codex` once to refresh it, then re-run `hax`. At startup, hax also
+probes ChatGPT's `/backend-api/codex/models` catalog in the background to auto-detect the
+chosen model's context window for the per-turn `%`-of-context display; `HAX_CONTEXT_LIMIT`
+still wins when set.
 
 ```sh
 ./build/hax
@@ -90,22 +93,25 @@ HAX_MODEL=Qwen3.6-35B-A3B-8bit \
 Convenience preset for a local `llama-server`. Defaults to `http://127.0.0.1:8080/v1`; set
 `HAX_LLAMACPP_PORT` for a different port, or `HAX_OPENAI_BASE_URL` to override the URL
 entirely. Auto-discovers the loaded model (`/v1/models`) and context window (`/props`), so
-`HAX_MODEL` and `HAX_CONTEXT_LIMIT` are filled for you when unset:
+`HAX_MODEL` is filled for you when unset and the per-turn `%`-of-context display lights up
+without manual configuration:
 
 ```sh
 HAX_PROVIDER=llama.cpp HAX_LLAMACPP_PORT=9090 ./build/hax
 ```
 
 If the server is unreachable and `HAX_MODEL` is unset, hax fails fast with the URL it tried
-and the override knobs. If `HAX_MODEL` is set, the probe is skipped entirely. The `/props`
-probe is best-effort: an older server without that endpoint just leaves the context-percent
-display hidden. If llama-server is started with `--api-key`, set `HAX_OPENAI_API_KEY` to the
-matching token — it's forwarded to the discovery probes too, not just the streaming request.
+and the override knobs. If `HAX_MODEL` is set, the model probe is skipped entirely. The
+`/props` probe runs in the background, so a slow or missing endpoint never delays the first
+prompt — failure just leaves the context-percent display hidden. If llama-server is started
+with `--api-key`, set `HAX_OPENAI_API_KEY` to the matching token — it's forwarded to the
+discovery probes too, not just the streaming request.
 
 ### OpenRouter
 
-Reads `HAX_OPENAI_API_KEY` (preferred) or `OPENROUTER_API_KEY`. Auto-fills `HAX_CONTEXT_LIMIT`
-from OpenRouter's `/api/v1/models` catalog when unset. Always sends `X-Title: hax` for
+Reads `HAX_OPENAI_API_KEY` (preferred) or `OPENROUTER_API_KEY`. Probes
+`/api/v1/models/{model}/endpoints` in the background to auto-detect the chosen model's
+context window (used for the per-turn `%`-of-context display). Always sends `X-Title: hax` for
 attribution on OpenRouter's leaderboards (override with `HAX_OPENROUTER_TITLE`); add an
 `HTTP-Referer` via `HAX_OPENROUTER_REFERER` if you want one.
 
@@ -187,11 +193,14 @@ OPENROUTER_API_KEY=... \
 
 ### Display & observability
 
-- `HAX_CONTEXT_LIMIT` — optional. Model's context window, used to show a percentage on the
-  per-turn usage line. Accepts a plain number or a `k`/`m` suffix (1024-base): `256k`,
-  `128K`, `1m`, `262144`. Auto-detected for `llama.cpp` (from `/props`) and `openrouter`
-  (from the catalog's `context_length`); manual everywhere else. When unset and
-  undetectable, hax shows the absolute counts only
+- `HAX_CONTEXT_LIMIT` — optional manual override for the model's context window, used to
+  show a percentage on the per-turn usage line. Accepts a plain number or a `k`/`m` suffix
+  (1024-base): `256k`, `128K`, `1m`, `262144`. Auto-detected for `codex` (from the catalog's
+  `context_window`), `llama.cpp` (from `/props`), and `openrouter` (from the per-model
+  `endpoints[].context_length`); auto-detection runs in the background at startup and lights up the
+  display once the response lands. The env var, when set, wins over auto-detection. When
+  unset and the auto-probe didn't fire or returned nothing, hax shows the absolute counts
+  only
 - `HAX_TRACE` — path to a Markdown file that will receive a pretty-printed dump of every
   HTTP request, response status, and SSE event (Authorization redacted). Opened in append
   mode; `tail -f` works, but the file is most readable when opened in an editor that renders

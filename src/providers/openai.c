@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bg.h"
 #include "http.h"
 #include "interrupt.h"
 #include "openai_events.h"
@@ -20,6 +21,10 @@ struct openai {
     char *session_id; /* sent as prompt_cache_key when send_cache_key is set */
     int send_cache_key;
     char **extra_headers; /* NULL-terminated, each element heap-owned; NULL = none */
+    /* Optional background probe — currently the context-window
+     * discovery spawned by preset shims (openrouter, llama.cpp).
+     * Joined by openai_destroy below. */
+    struct bg_job *probe;
 };
 
 /* ---------- request body construction ---------- */
@@ -238,6 +243,13 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
 static void openai_destroy(struct provider *p)
 {
     struct openai *o = (struct openai *)p;
+    /* Settle any background probe before freeing its target. Cancel
+     * first so the worker exits its http_get promptly via the bg
+     * cancel thunk wired through the progress callback. */
+    if (o->probe) {
+        bg_cancel(o->probe);
+        bg_join(o->probe);
+    }
     free(o->base_url);
     free(o->api_key);
     free(o->name_buf);
@@ -249,6 +261,14 @@ static void openai_destroy(struct provider *p)
         free(o->extra_headers);
     }
     free(o);
+}
+
+void openai_attach_probe(struct provider *p, struct bg_job *probe)
+{
+    if (!p)
+        return;
+    struct openai *o = (struct openai *)p;
+    o->probe = probe;
 }
 
 /* Duplicate a NULL-terminated array of header strings. Returns NULL when

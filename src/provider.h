@@ -2,6 +2,7 @@
 #ifndef HAX_PROVIDER_H
 #define HAX_PROVIDER_H
 
+#include <stdatomic.h>
 #include <stddef.h>
 
 /*
@@ -153,6 +154,18 @@ struct provider {
      * to stderr in that case). */
     int (*query_usage)(struct provider *p);
     void (*destroy)(struct provider *p);
+    /* Auto-discovered model context window in tokens. 0 = unknown (no
+     * probe ran, hasn't completed yet, or failed); positive values are
+     * what the agent's status line uses to render the "%" of context
+     * used. Updated atomically — provider construction may set it
+     * synchronously from HAX_CONTEXT_LIMIT, or a background probe owned
+     * by the implementation may write it once the catalog response
+     * arrives. The agent reads it on every usage update, so a
+     * late-landing probe fills in the percentage starting with
+     * whichever turn it completes during. Implementations own the
+     * worker that writes here and are responsible for joining it in
+     * their destroy() before any teardown that could free this slot. */
+    _Atomic long context_limit;
 };
 
 /* Static provider descriptor. Each provider .c file defines exactly one

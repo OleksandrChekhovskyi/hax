@@ -36,7 +36,9 @@ Everything funnels through small, stable interfaces in `src/provider.h` and `src
 `stream(provider, context, model, cb, user)` that drives an SSE response and emits
 `struct stream_event` (text deltas, tool-call start/delta/end, reasoning items, done with
 usage, error). Adapters own their native SSE parsing and translate to the unified event
-vocabulary; the agent never sees provider-specific JSON.
+vocabulary; the agent never sees provider-specific JSON. The shared `context_limit` atomic is
+an optional, late-fill slot for provider-owned context-window probes; the agent reads it when
+rendering the per-turn `%`-of-context display, after honoring `HAX_CONTEXT_LIMIT`.
 
 Adapters live in `src/providers/`. Where a provider has a non-trivial SSE-event-to-
 `stream_event` translation, the pure translation logic is split into a sibling
@@ -53,11 +55,12 @@ list from the array. Adding a new provider = drop a file under `src/providers/`,
 message/tool/SSE translation and exposes
 `openai_provider_new_preset(const struct openai_preset *)` plus a thin
 `openai_provider_new()` shim for real OpenAI. The other shims —
-`openai_compat.c` (bring-your-own URL), `llamacpp.c` (with `/v1/models` + `/props` probes),
-and `openrouter.c` (with `/api/v1/models` context-length probe + attribution headers) —
-each supply a `struct openai_preset` declaring defaults: display name, default base URL,
-API-key env fallback, prompt_cache_key policy, extra request headers. New OpenAI-compatible
-backends are typically a ~30-line preset file.
+`openai_compat.c` (bring-your-own URL), `llamacpp.c` (synchronous `/v1/models` model probe +
+background `/props` context probe), and `openrouter.c` (background
+`/api/v1/models/{model}/endpoints` context probe + attribution headers) — each supply a
+`struct openai_preset` declaring defaults: display name, default base URL, API-key env
+fallback, prompt_cache_key policy, extra request headers. New OpenAI-compatible backends are
+typically a ~30-line preset file.
 
 **`struct context` and `struct item` (provider.h)** are the flat conversation view: a sequence
 of `USER_MESSAGE | ASSISTANT_MESSAGE | TOOL_CALL | TOOL_RESULT | REASONING`. `REASONING`
@@ -81,8 +84,14 @@ missing `--- ` prefix and fall through to the standard dim preview.
 
 **`src/sse.{c,h}`** is a small boundary-safe SSE parser used by adapters.
 **`src/http.{c,h}`** wraps libcurl: `http_sse_post` for the streaming response path (with
-configurable idle timeout and a polled cancel hook), and `http_get` for synchronous JSON
-probes the preset shims use to auto-discover model/context limits at startup.
+configurable idle timeout and a polled cancel hook), and `http_get` for bounded JSON GETs
+used by startup probes and Codex usage queries. All libcurl handles set `CURLOPT_NOSIGNAL` so
+foreground streams and background probes can run concurrently.
+
+**`src/bg.{c,h}`** is the tiny background-job primitive for provider-owned async work:
+spawn/cancel/join plus a thread-local cancel thunk that workers pass directly to `http_get`.
+`src/providers/probe.{c,h}` builds on it for context-window probes; each provider that spawns
+a probe owns the handle and joins it in `destroy()` before freeing the target state.
 
 **`src/ansi.h`** centralizes ANSI escape sequences — never inline `\033[...m` literals; add a
 constant there.

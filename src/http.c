@@ -119,6 +119,7 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
         sse_parser_init(&s.parser, cb, user);
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body_len);
@@ -180,15 +181,37 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
     return (rc == CURLE_OK) ? 0 : -1;
 }
 
+struct http_get_state {
+    struct buf body;
+    http_cancel_cb cancel;
+};
+
 static size_t http_get_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
-    struct buf *b = userdata;
+    struct http_get_state *s = userdata;
     size_t n = size * nmemb;
-    buf_append(b, ptr, n);
+    /* Same convention as the SSE write callback: a short return aborts
+     * the transfer so a cancelled probe doesn't keep buffering bytes
+     * we'll throw away. */
+    if (s->cancel && s->cancel())
+        return 0;
+    buf_append(&s->body, ptr, n);
     return n;
 }
 
-int http_get(const char *url, const char *const *headers, long timeout_s, char **out)
+static int http_get_progress_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
+                                curl_off_t ultotal, curl_off_t ulnow)
+{
+    (void)dltotal;
+    (void)dlnow;
+    (void)ultotal;
+    (void)ulnow;
+    struct http_get_state *s = clientp;
+    return (s->cancel && s->cancel()) ? 1 : 0;
+}
+
+int http_get(const char *url, const char *const *headers, long timeout_s, http_cancel_cb cancel,
+             char **out)
 {
     *out = NULL;
 
@@ -207,18 +230,26 @@ int http_get(const char *url, const char *const *headers, long timeout_s, char *
         hl = next;
     }
 
-    struct buf body;
-    buf_init(&body);
+    struct http_get_state state;
+    memset(&state, 0, sizeof(state));
+    state.cancel = cancel;
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     if (hl)
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hl);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, http_get_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 2L);
     if (timeout_s > 0)
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_s);
-    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
+    if (cancel) {
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, http_get_progress_cb);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &state);
+    } else {
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
+    }
 
     trace_request("GET", url, headers, NULL, 0);
 
@@ -229,23 +260,23 @@ int http_get(const char *url, const char *const *headers, long timeout_s, char *
     curl_slist_free_all(hl);
     curl_easy_cleanup(curl);
 
-    int failed = (rc != CURLE_OK || status < 200 || status >= 300 || !body.data);
+    int failed = (rc != CURLE_OK || status < 200 || status >= 300 || !state.body.data);
     /* On failure, hand whatever we received (curl error string or response
      * body) to the trace as the error body so dead probes are visible. */
     char *err = NULL;
     if (failed) {
         if (rc != CURLE_OK)
             err = xasprintf("libcurl: %s", curl_easy_strerror(rc));
-        else if (body.data)
-            err = xstrdup(body.data);
+        else if (state.body.data)
+            err = xstrdup(state.body.data);
     }
     trace_response_status(status, err);
     free(err);
 
     if (failed) {
-        buf_free(&body);
+        buf_free(&state.body);
         return -1;
     }
-    *out = buf_steal(&body);
+    *out = buf_steal(&state.body);
     return 0;
 }

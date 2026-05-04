@@ -34,7 +34,13 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
  * `headers` is an optional NULL-terminated array of "Key: Value" strings,
  * may be NULL. `timeout_s` is the total request timeout in seconds; pass 0
  * to disable. Connect timeout is fixed at a short value so an unreachable
- * host fails fast. */
-int http_get(const char *url, const char *const *headers, long timeout_s, char **out);
+ * host fails fast.
+ *
+ * `cancel` is an optional polled-cancellation hook (same shape as for
+ * http_sse_post). Background probes pass bg_cancel_thunk so shutdown can
+ * abort an in-flight transfer in well under a second instead of waiting
+ * out the timeout. NULL = no cancellation. */
+int http_get(const char *url, const char *const *headers, long timeout_s, http_cancel_cb cancel,
+             char **out);
 
 #endif /* HAX_HTTP_H */

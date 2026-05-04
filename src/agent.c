@@ -2,6 +2,7 @@
 #include "agent.h"
 
 #include <jansson.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -673,15 +674,22 @@ static long parse_size(const char *s)
     return v;
 }
 
-/* Optional override: HAX_CONTEXT_LIMIT lets the user supply the model's
- * context window (e.g. "256k") so we can show a percentage. There's no
- * reliable way to auto-detect this across OpenAI-compatible local servers
- * (Ollama, llama.cpp, vLLM, oMLX, LM Studio all expose it differently or
- * not at all), so we ask. Returns 0 when unset/invalid → percentage is
- * hidden. */
-static long context_limit(void)
+/* Resolve the context-window value used to render the "%" of context
+ * used. Two sources, in order of precedence:
+ *   1. HAX_CONTEXT_LIMIT — explicit user override (e.g. "256k"),
+ *      always wins so the user can correct a bogus auto-detect.
+ *   2. provider->context_limit — populated by a provider's startup
+ *      probe (codex /models, openrouter /models, llama.cpp /props).
+ *      Atomic since the probe runs on a background thread; 0 means
+ *      "unknown" (no probe ran, hasn't completed yet, or failed) and
+ *      the percentage display is hidden in that case. */
+static long context_limit(const struct provider *p)
 {
-    return parse_size(getenv("HAX_CONTEXT_LIMIT"));
+    long env = parse_size(getenv("HAX_CONTEXT_LIMIT"));
+    if (env > 0)
+        return env;
+    long auto_v = atomic_load(&p->context_limit);
+    return auto_v > 0 ? auto_v : 0;
 }
 
 /* Dim one-liner: "context 8.9k / 256k (3%) · out 595 · cached 2.7k", shown
@@ -694,8 +702,8 @@ static long context_limit(void)
  * answering "how many tokens did this prompt cost in generation". Each
  * value is -1 when the underlying counts weren't reported by the backend;
  * the section is then skipped rather than rendered with a misleading zero. */
-static void display_usage(struct disp *d, struct cluster *cl, struct spinner *sp, long ctx,
-                          long out, long cached)
+static void display_usage(struct disp *d, struct cluster *cl, struct spinner *sp,
+                          const struct provider *p, long ctx, long out, long cached)
 {
     int show_ctx = ctx >= 0;
     int show_out = out >= 0;
@@ -712,7 +720,7 @@ static void display_usage(struct disp *d, struct cluster *cl, struct spinner *sp
     if (show_ctx) {
         format_tokens(buf, sizeof(buf), ctx);
         disp_printf(d, "context %s", buf);
-        long limit = context_limit();
+        long limit = context_limit(p);
         if (limit > 0) {
             format_tokens(limit_buf, sizeof(limit_buf), limit);
             disp_printf(d, " / %s (%ld%%)", limit_buf, ctx * 100 / limit);
@@ -1172,7 +1180,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
         }
 
         if (!turn_errored)
-            display_usage(&disp, &cl, spinner, turn_ctx, turn_out, turn_cached);
+            display_usage(&disp, &cl, spinner, p, turn_ctx, turn_out, turn_cached);
     }
 
     spinner_free(spinner);

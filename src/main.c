@@ -228,6 +228,11 @@ int main(int argc, char **argv)
 
     rc = print_mode ? oneshot_run(p, prompt, &opts, ONESHOT_MAX_TURNS) : agent_run(p, &opts);
 
+    /* Each provider's destroy() is responsible for joining whatever
+     * background work it spawned (probes, prefetches, ...) before
+     * releasing the state those workers may still be writing to.
+     * curl_global_cleanup() runs after destroy(), so any libcurl
+     * handles in flight have necessarily been wound down by then. */
     p->destroy(p);
 err_curl:
     curl_global_cleanup();

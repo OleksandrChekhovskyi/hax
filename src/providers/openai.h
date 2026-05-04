@@ -49,6 +49,18 @@ struct openai_preset {
  * HAX_OPENAI_BASE_URL is set). Returns NULL on failure. */
 struct provider *openai_provider_new_preset(const struct openai_preset *preset);
 
+/* Hand off ownership of a background probe to an openai-derived provider.
+ * The handle is joined (with cancel first) by openai_destroy, which fits
+ * preset shims like openrouter/llamacpp that spawn a context-window
+ * probe but don't carry their own provider struct or destroy(). NULL
+ * `probe` is a no-op (e.g. when probe_context_limit_spawn returned NULL
+ * because pthread_create failed). Calling twice replaces the previous
+ * handle without joining it — there's only one slot today; any provider
+ * that needs to track several would carry its own struct instead of
+ * piggybacking on this. */
+struct bg_job;
+void openai_attach_probe(struct provider *p, struct bg_job *probe);
+
 extern const struct provider_factory PROVIDER_OPENAI;
 
 #endif /* HAX_OPENAI_H */

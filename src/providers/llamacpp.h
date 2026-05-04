@@ -17,17 +17,24 @@
  *
  * On startup, probes the resolved server:
  *   GET /v1/models  →  fills HAX_MODEL from data[0].id when unset
- *   GET /props      →  fills HAX_CONTEXT_LIMIT from
- *                      default_generation_settings.n_ctx when unset
+ *                      (synchronous — model is needed before the first
+ *                      chat request)
+ *   GET /props      →  fills provider->context_limit from
+ *                      default_generation_settings.n_ctx (asynchronous —
+ *                      runs in the background so a slow /props doesn't
+ *                      delay the first prompt; the percentage display
+ *                      just lights up once the response lands)
  *
  * Probe behavior:
  *   - When HAX_MODEL is unset and the /v1/models probe fails, construction
  *     fails loudly with the URL it tried — that's a strong signal the
  *     server is unreachable, and surfacing it here saves the user from a
  *     misleading downstream "HAX_MODEL is required" message.
- *   - When HAX_MODEL is set, the probe is skipped entirely.
+ *   - When HAX_MODEL is set, the model probe is skipped entirely.
  *   - The /props probe is always best-effort: failure just leaves the
- *     percentage display hidden, never blocks startup. */
+ *     percentage display hidden, never blocks startup.
+ *   - HAX_CONTEXT_LIMIT (when set) bypasses the /props probe entirely
+ *     and is used verbatim by the agent. */
 struct provider *llamacpp_provider_new(void);
 
 extern const struct provider_factory PROVIDER_LLAMACPP;

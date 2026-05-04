@@ -6,18 +6,56 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "http.h"
 #include "openai.h"
+#include "probe.h"
 #include "util.h"
 
-/* Best-effort, silent on failure: a 5s budget is generous for OpenRouter's
- * model catalog response (~hundreds of entries, ~hundreds of KB) on a
- * normal connection. Falling back to no probe just hides the percentage
- * display, which the user can also fill manually with HAX_CONTEXT_LIMIT. */
+/* Single-model lookup is small (one entry's worth of metadata, a few KB)
+ * vs the full catalog (~430 KB at the time of writing, hundreds of
+ * entries) — even on a slow link this rarely takes more than a second.
+ * Failure is silent: we just leave the percentage display hidden,
+ * which the user can also fill manually via HAX_CONTEXT_LIMIT. */
 #define PROBE_TIMEOUT_S 5
 
-static void probe_context_limit(const char *api_key)
+/* Walk the per-model response shape:
+ *     { "data": { "id": "...", "endpoints": [ { "context_length": N, ... }, ... ] } }
+ *
+ * One model can be served by several upstream providers (each is one
+ * `endpoints[]` entry) with potentially different context windows.
+ * Take the maximum — that matches the model-level `context_length`
+ * the catalog and the OpenRouter UI advertise, which is what users
+ * expect to see represented in the percentage display. An empty
+ * `endpoints[]` (deprecated or restricted model) returns 0, which the
+ * helper drops silently. `user` is unused — the URL already targets
+ * one model, so there's no slug to match against here. */
+static long extract_openrouter_context(const char *body, void *user)
 {
+    (void)user;
+    json_t *root = json_loads(body, 0, NULL);
+    if (!root)
+        return 0;
+    long out = 0;
+    json_t *data = json_object_get(root, "data");
+    json_t *endpoints = data ? json_object_get(data, "endpoints") : NULL;
+    if (json_is_array(endpoints)) {
+        size_t i;
+        json_t *entry;
+        json_array_foreach(endpoints, i, entry)
+        {
+            json_t *ctx = json_object_get(entry, "context_length");
+            if (json_is_integer(ctx) && json_integer_value(ctx) > out)
+                out = (long)json_integer_value(ctx);
+        }
+    }
+    json_decref(root);
+    return out;
+}
+
+static void spawn_context_probe(struct provider *p, const char *api_key)
+{
+    /* HAX_CONTEXT_LIMIT is the user override — when it's set, the agent
+     * already prefers it, so there's nothing for the probe to add and
+     * we save a network round-trip. */
     const char *cur = getenv("HAX_CONTEXT_LIMIT");
     if (cur && *cur)
         return;
@@ -25,37 +63,25 @@ static void probe_context_limit(const char *api_key)
     if (!model || !*model)
         return; /* nothing to look up — agent will surface the missing-model error */
 
-    char *url = xstrdup("https://openrouter.ai/api/v1/models");
-    char *auth = api_key ? xasprintf("Authorization: Bearer %s", api_key) : NULL;
-    const char *headers[] = {auth, NULL};
-    char *body = NULL;
-    if (http_get(url, auth ? headers : NULL, PROBE_TIMEOUT_S, &body) == 0) {
-        json_t *root = json_loads(body, 0, NULL);
-        if (root) {
-            json_t *data = json_object_get(root, "data");
-            if (json_is_array(data)) {
-                size_t i;
-                json_t *entry;
-                json_array_foreach(data, i, entry)
-                {
-                    json_t *id = json_object_get(entry, "id");
-                    if (!json_is_string(id) || strcmp(json_string_value(id), model) != 0)
-                        continue;
-                    json_t *ctx = json_object_get(entry, "context_length");
-                    if (json_is_integer(ctx) && json_integer_value(ctx) > 0) {
-                        char buf[32];
-                        snprintf(buf, sizeof(buf), "%lld", (long long)json_integer_value(ctx));
-                        setenv("HAX_CONTEXT_LIMIT", buf, 1);
-                    }
-                    break;
-                }
-            }
-            json_decref(root);
-        }
+    struct probe_args *a = xcalloc(1, sizeof(*a));
+    /* OpenRouter model ids contain `/` (and sometimes `:variant`)
+     * which are valid URL path-segment characters per RFC 3986
+     * sub-delims, so concatenation works without percent-encoding —
+     * confirmed against ids like `meta-llama/llama-3.2-3b-instruct:free`.
+     * If a more exotic id ever needs escaping, this is the place to
+     * add it. */
+    a->url = xasprintf("https://openrouter.ai/api/v1/models/%s/endpoints", model);
+    if (api_key && *api_key) {
+        a->headers = xcalloc(2, sizeof(*a->headers));
+        a->headers[0] = xasprintf("Authorization: Bearer %s", api_key);
+        a->headers[1] = NULL;
     }
-    free(body);
-    free(auth);
-    free(url);
+    a->timeout_s = PROBE_TIMEOUT_S;
+    a->extract = extract_openrouter_context;
+    a->target = &p->context_limit;
+    /* Hand off to the openai destroy() — it owns the join, so we don't
+     * need to track the handle locally. */
+    openai_attach_probe(p, probe_context_limit_spawn(a));
 }
 
 struct provider *openrouter_provider_new(void)
@@ -74,7 +100,6 @@ struct provider *openrouter_provider_new(void)
     const char *key = getenv("HAX_OPENAI_API_KEY");
     if (!key || !*key)
         key = getenv("OPENROUTER_API_KEY");
-    probe_context_limit((key && *key) ? key : NULL);
 
     const char *title = getenv("HAX_OPENROUTER_TITLE");
     if (!title || !*title)
@@ -107,6 +132,8 @@ struct provider *openrouter_provider_new(void)
     struct provider *p = openai_provider_new_preset(&preset);
     free(title_hdr);
     free(referer_hdr);
+    if (p)
+        spawn_context_probe(p, (key && *key) ? key : NULL);
     return p;
 }
 

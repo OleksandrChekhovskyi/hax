@@ -8,15 +8,29 @@
 #include <time.h>
 
 #include "ansi.h"
+#include "bg.h"
 #include "codex_events.h"
 #include "http.h"
 #include "interrupt.h"
+#include "probe.h"
 #include "progress.h"
 #include "spinner.h"
 #include "util.h"
 
-#define CODEX_ENDPOINT       "https://chatgpt.com/backend-api/codex/responses"
-#define CODEX_USAGE_ENDPOINT "https://chatgpt.com/backend-api/wham/usage"
+#define CODEX_ENDPOINT        "https://chatgpt.com/backend-api/codex/responses"
+#define CODEX_USAGE_ENDPOINT  "https://chatgpt.com/backend-api/wham/usage"
+#define CODEX_MODELS_ENDPOINT "https://chatgpt.com/backend-api/codex/models"
+
+/* Generous enough for the catalog over a wonky link, short enough that a
+ * dead probe doesn't block shutdown noticeably (the bg cancel hook
+ * usually aborts well before this fires anyway). */
+#define CODEX_PROBE_TIMEOUT_S 5
+
+/* Sent as the `client_version` query parameter on /models. The backend
+ * filters out models whose minimal_client_version is newer than this
+ * value; use a deliberately high synthetic version so metadata for
+ * already-sendable models (for example gpt-5.5) is visible. */
+#define CODEX_PROBE_CLIENT_VERSION "999.0.0"
 
 struct codex {
     struct provider base;
@@ -29,6 +43,11 @@ struct codex {
     char *default_reasoning_effort;
     char *session_id; /* sent as prompt_cache_key — stable for process lifetime
                                              so the server can hit its prefix cache across turns */
+    /* Optional context-window probe spawned at construction; joined by
+     * codex_destroy. Local rather than on struct provider so codex
+     * stays free to grow more probes (capabilities, account state, ...)
+     * without redesigning the generic interface. */
+    struct bg_job *probe;
 };
 
 /* ---------- Codex config (~/.codex/config.toml) ---------- */
@@ -434,6 +453,80 @@ static int codex_stream(struct provider *p, const struct context *ctx, const cha
     return rc;
 }
 
+/* ---------- /models context-window probe ---------- */
+
+/* Walk the chatgpt.com catalog response shape: `{ "models": [ { "slug":
+ * ..., "context_window": N }, ... ] }` and pull the context_window for
+ * the entry whose `slug` matches the model we're about to use. `user`
+ * is the heap-owned model slug captured at spawn time. */
+static long extract_codex_context(const char *body, void *user)
+{
+    const char *model = user;
+    if (!model || !*model)
+        return 0;
+    json_t *root = json_loads(body, 0, NULL);
+    if (!root)
+        return 0;
+    long out = 0;
+    json_t *models = json_object_get(root, "models");
+    if (json_is_array(models)) {
+        size_t i;
+        json_t *entry;
+        json_array_foreach(models, i, entry)
+        {
+            json_t *slug = json_object_get(entry, "slug");
+            if (!json_is_string(slug) || strcmp(json_string_value(slug), model) != 0)
+                continue;
+            json_t *ctx = json_object_get(entry, "context_window");
+            if (!json_is_integer(ctx) || json_integer_value(ctx) <= 0)
+                ctx = json_object_get(entry, "max_context_window");
+            if (json_is_integer(ctx) && json_integer_value(ctx) > 0)
+                out = (long)json_integer_value(ctx);
+            break;
+        }
+    }
+    json_decref(root);
+    return out;
+}
+
+static void spawn_context_probe(struct codex *c)
+{
+    /* User-supplied HAX_CONTEXT_LIMIT wins; nothing for the probe to
+     * add and we save a network round-trip + the matching shutdown
+     * join cost. */
+    const char *cur = getenv("HAX_CONTEXT_LIMIT");
+    if (cur && *cur)
+        return;
+    /* Resolve the model slug we'll actually send. HAX_MODEL wins per
+     * agent.c's resolver; otherwise the codex default applies. The
+     * probe needs a slug to match against the catalog — without one
+     * there's nothing useful to look up. */
+    const char *env_model = getenv("HAX_MODEL");
+    const char *model =
+        (env_model && *env_model) ? env_model : (c->default_model ? c->default_model : "");
+    if (!*model)
+        return;
+
+    struct probe_args *a = xcalloc(1, sizeof(*a));
+    a->url = xasprintf("%s?client_version=%s", CODEX_MODELS_ENDPOINT, CODEX_PROBE_CLIENT_VERSION);
+    /* Same auth headers we already build for /responses; the chatgpt
+     * backend accepts the bearer token + account-id pair on /models
+     * too. originator + UA mirror the streaming path so the probe
+     * looks like the same client to server-side telemetry. */
+    a->headers = xcalloc(5, sizeof(*a->headers));
+    a->headers[0] = xasprintf("Authorization: Bearer %s", c->access_token);
+    a->headers[1] = xasprintf("chatgpt-account-id: %s", c->account_id);
+    a->headers[2] = xstrdup("originator: hax");
+    a->headers[3] = xstrdup("Accept: application/json");
+    a->headers[4] = NULL;
+    a->timeout_s = CODEX_PROBE_TIMEOUT_S;
+    a->extract = extract_codex_context;
+    a->user = xstrdup(model);
+    a->free_user = free;
+    a->target = &c->base.context_limit;
+    c->probe = probe_context_limit_spawn(a);
+}
+
 /* ---------- /usage ---------- */
 
 /* Format the wall-clock time the window resets. If `reset_at` lands on
@@ -592,7 +685,7 @@ static int codex_query_usage(struct provider *p)
     struct spinner *sp = spinner_new("fetching usage...");
     spinner_show(sp);
     char *body = NULL;
-    int rc = http_get(CODEX_USAGE_ENDPOINT, headers, 30, &body);
+    int rc = http_get(CODEX_USAGE_ENDPOINT, headers, 30, NULL, &body);
     spinner_hide(sp);
     spinner_free(sp);
     free(auth_hdr);
@@ -645,6 +738,13 @@ static int codex_query_usage(struct provider *p)
 static void codex_destroy(struct provider *p)
 {
     struct codex *c = (struct codex *)p;
+    /* Settle the bg probe before freeing what it writes to. Cancel
+     * first so the worker exits its http_get promptly via the bg
+     * cancel thunk wired through the progress callback. */
+    if (c->probe) {
+        bg_cancel(c->probe);
+        bg_join(c->probe);
+    }
     free(c->access_token);
     free(c->account_id);
     free(c->email);
@@ -713,6 +813,11 @@ struct provider *codex_provider_new(void)
     c->session_id = xstrdup(uuid);
 
     json_decref(root);
+    /* Best-effort context-window probe runs in the background — gives
+     * the agent a "%" once the catalog response lands without delaying
+     * the first prompt. Failure (expired token, network blip, missing
+     * slug) silently leaves the percentage display hidden. */
+    spawn_context_probe(c);
     return &c->base;
 }
 

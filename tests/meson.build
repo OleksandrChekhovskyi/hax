@@ -50,6 +50,16 @@ test_interrupt = executable('test_interrupt',
 )
 test('interrupt', test_interrupt)
 
+test_bg = executable('test_bg',
+    sources: [
+        'test_bg.c',
+        '../src/bg.c',
+        '../src/util.c',
+    ],
+    dependencies: [threads],
+)
+test('bg', test_bg)
+
 test_write = executable('test_write',
     sources: [
         'tools/test_write.c',

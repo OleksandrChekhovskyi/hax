@@ -2,6 +2,7 @@
 #include "trace.h"
 
 #include <jansson.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,18 +10,21 @@
 
 #include "util.h"
 
+static pthread_mutex_t trace_mu = PTHREAD_MUTEX_INITIALIZER;
 static FILE *trace_fp;
 static int trace_init_done;
 
 static void trace_close_atexit(void)
 {
+    pthread_mutex_lock(&trace_mu);
     if (trace_fp) {
         fclose(trace_fp);
         trace_fp = NULL;
     }
+    pthread_mutex_unlock(&trace_mu);
 }
 
-static FILE *get_fp(void)
+static FILE *get_fp_locked(void)
 {
     if (trace_init_done)
         return trace_fp;
@@ -40,7 +44,10 @@ static FILE *get_fp(void)
 
 int trace_enabled(void)
 {
-    return get_fp() != NULL;
+    pthread_mutex_lock(&trace_mu);
+    int enabled = get_fp_locked() != NULL;
+    pthread_mutex_unlock(&trace_mu);
+    return enabled;
 }
 
 /* CommonMark: a fenced block must use a backtick run strictly longer than any
@@ -107,9 +114,10 @@ static int header_name_is(const char *header, const char *name)
 void trace_request(const char *method, const char *url, const char *const *headers,
                    const char *body, size_t body_len)
 {
-    FILE *fp = get_fp();
+    pthread_mutex_lock(&trace_mu);
+    FILE *fp = get_fp_locked();
     if (!fp)
-        return;
+        goto out_unlock;
 
     fprintf(fp, "\n## %s %s\n\n", method, url);
 
@@ -131,29 +139,40 @@ void trace_request(const char *method, const char *url, const char *const *heade
 
     if (body && body_len)
         emit_json_or_text(fp, body, body_len);
+
+out_unlock:
+    pthread_mutex_unlock(&trace_mu);
 }
 
 void trace_response_status(long status, const char *error_body)
 {
-    FILE *fp = get_fp();
+    pthread_mutex_lock(&trace_mu);
+    FILE *fp = get_fp_locked();
     if (!fp)
-        return;
+        goto out_unlock;
 
     fprintf(fp, "\n**HTTP %ld**\n", status);
     if (error_body && *error_body) {
         fputc('\n', fp);
         emit_json_or_text(fp, error_body, strlen(error_body));
     }
+
+out_unlock:
+    pthread_mutex_unlock(&trace_mu);
 }
 
 void trace_sse_event(const char *event_name, const char *data)
 {
-    FILE *fp = get_fp();
+    pthread_mutex_lock(&trace_mu);
+    FILE *fp = get_fp_locked();
     if (!fp)
-        return;
+        goto out_unlock;
 
     const char *name = (event_name && *event_name) ? event_name : "(unnamed)";
     fprintf(fp, "\n### event: %s\n\n", name);
     if (data && *data)
         emit_json_or_text(fp, data, strlen(data));
+
+out_unlock:
+    pthread_mutex_unlock(&trace_mu);
 }

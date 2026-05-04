@@ -9,11 +9,16 @@
 
 #include "http.h"
 #include "openai.h"
+#include "probe.h"
 #include "util.h"
 
-/* Probes are best-effort and run synchronously at startup, so the timeout
- * stays short — a missing or slow server should never stall the prompt. */
-#define PROBE_TIMEOUT_S 2
+/* Model probe runs synchronously at startup because HAX_MODEL must be
+ * resolved before the first chat request body is built. The context-limit
+ * probe is async (see spawn_context_probe) so a slow /props doesn't delay
+ * the first prompt. Both stay short so a missing or slow server fails
+ * cleanly. */
+#define MODEL_PROBE_TIMEOUT_S 2
+#define CTX_PROBE_TIMEOUT_S   5
 
 /* Build a sibling URL with the same scheme/host/port as `base` but a
  * different path. Used to reach llama-server's `/props` (rooted, not under
@@ -51,7 +56,7 @@ static int probe_model(const char *base_url, const char *api_key)
     const char *headers[] = {auth, NULL};
     char *body = NULL;
     int ok = 0;
-    if (http_get(url, auth ? headers : NULL, PROBE_TIMEOUT_S, &body) == 0) {
+    if (http_get(url, auth ? headers : NULL, MODEL_PROBE_TIMEOUT_S, NULL, &body) == 0) {
         json_t *root = json_loads(body, 0, NULL);
         if (root) {
             json_t *data = json_object_get(root, "data");
@@ -71,39 +76,45 @@ static int probe_model(const char *base_url, const char *api_key)
     return ok ? 0 : -1;
 }
 
-static void probe_context_limit(const char *base_url, const char *api_key)
+/* /props returns the live n_ctx the server was started with — the only
+ * cross-version-stable way to learn the context window from llama-server.
+ * `user` is unused (single global value, no key to match). */
+static long extract_llamacpp_n_ctx(const char *body, void *user)
 {
+    (void)user;
+    json_t *root = json_loads(body, 0, NULL);
+    if (!root)
+        return 0;
+    long out = 0;
+    json_t *settings = json_object_get(root, "default_generation_settings");
+    json_t *n_ctx = settings ? json_object_get(settings, "n_ctx") : NULL;
+    if (json_is_integer(n_ctx) && json_integer_value(n_ctx) > 0)
+        out = (long)json_integer_value(n_ctx);
+    json_decref(root);
+    return out;
+}
+
+static void spawn_context_probe(struct provider *p, const char *base_url, const char *api_key)
+{
+    /* User-supplied HAX_CONTEXT_LIMIT wins; nothing for the probe to add. */
     const char *cur = getenv("HAX_CONTEXT_LIMIT");
     if (cur && *cur)
         return;
-    /* /props sits at the server root, not under /v1 — derive it from the
-     * resolved base URL by swapping the path so a custom HAX_OPENAI_BASE_URL
-     * with a non-default host still works. */
     char *url = swap_path(base_url, "/props");
     if (!url)
         return;
-    char *auth = api_key ? xasprintf("Authorization: Bearer %s", api_key) : NULL;
-    const char *headers[] = {auth, NULL};
-    char *body = NULL;
-    if (http_get(url, auth ? headers : NULL, PROBE_TIMEOUT_S, &body) == 0) {
-        json_t *root = json_loads(body, 0, NULL);
-        if (root) {
-            json_t *settings = json_object_get(root, "default_generation_settings");
-            json_t *n_ctx = settings ? json_object_get(settings, "n_ctx") : NULL;
-            if (json_is_integer(n_ctx)) {
-                json_int_t v = json_integer_value(n_ctx);
-                if (v > 0) {
-                    char buf[32];
-                    snprintf(buf, sizeof(buf), "%lld", (long long)v);
-                    setenv("HAX_CONTEXT_LIMIT", buf, 1);
-                }
-            }
-            json_decref(root);
-        }
+
+    struct probe_args *a = xcalloc(1, sizeof(*a));
+    a->url = url;
+    if (api_key && *api_key) {
+        a->headers = xcalloc(2, sizeof(*a->headers));
+        a->headers[0] = xasprintf("Authorization: Bearer %s", api_key);
+        a->headers[1] = NULL;
     }
-    free(body);
-    free(auth);
-    free(url);
+    a->timeout_s = CTX_PROBE_TIMEOUT_S;
+    a->extract = extract_llamacpp_n_ctx;
+    a->target = &p->context_limit;
+    openai_attach_probe(p, probe_context_limit_spawn(a));
 }
 
 struct provider *llamacpp_provider_new(void)
@@ -136,11 +147,6 @@ struct provider *llamacpp_provider_new(void)
         free(default_url);
         return NULL;
     }
-    /* Context-limit probe stays best-effort: an older llama-server without
-     * /props, or a proxy that doesn't expose it, just means the percentage
-     * display is hidden — not a reason to refuse to start. */
-    probe_context_limit(resolved, key);
-    free(resolved);
 
     struct openai_preset preset = {
         .display_name = "llama.cpp",
@@ -148,6 +154,13 @@ struct provider *llamacpp_provider_new(void)
         .send_cache_key_default = 0,
     };
     struct provider *p = openai_provider_new_preset(&preset);
+    /* Context-limit probe runs in the background: an older llama-server
+     * without /props, or a proxy that doesn't expose it, just means the
+     * percentage display is hidden — not a reason to refuse to start
+     * (or to delay the first prompt). */
+    if (p)
+        spawn_context_probe(p, resolved, key);
+    free(resolved);
     free(default_url);
     return p;
 }
