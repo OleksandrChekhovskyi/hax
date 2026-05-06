@@ -71,11 +71,15 @@ size_t input_core_line_start(const struct input *in);
 size_t input_core_line_end(const struct input *in);
 void input_core_move_left(struct input *in);
 void input_core_move_right(struct input *in);
+void input_core_move_word_left(struct input *in);
+void input_core_move_word_right(struct input *in);
 void input_core_delete_back(struct input *in);
 void input_core_delete_fwd(struct input *in);
 void input_core_kill_to_eol(struct input *in);
 void input_core_kill_to_bol(struct input *in);
 void input_core_kill_word_back(struct input *in);
+void input_core_kill_word_back_alnum(struct input *in);
+void input_core_kill_word_fwd(struct input *in);
 
 /* ---- history ---- */
 void input_core_history_prev(struct input *in);
@@ -98,6 +102,11 @@ int input_core_history_add(struct input *in, const char *line);
  * Both return malloc'd strings the caller frees. */
 char *input_core_history_encode(const char *s);
 char *input_core_history_decode(const char *s, size_t n);
+
+/* In-memory history cap. Older entries are evicted past this. The IO
+ * layer in input.c uses it as the basis for its on-disk bloat threshold,
+ * so it lives in the header rather than as duplicated constants. */
+#define INPUT_CORE_HISTORY_MAX 1000
 
 /* ---- layout / utf-8 ---- */
 
@@ -136,9 +145,44 @@ int input_core_codepoint_width(const char *buf, size_t len, size_t i, size_t *co
  * short). We own both ends so the value is a free parameter. */
 #define INPUT_CORE_TAB_WIDTH 4
 
-/* In-memory history cap. Older entries are evicted past this. The IO
- * layer in input.c uses it as the basis for its on-disk bloat threshold,
- * so it lives in the header rather than as duplicated constants. */
-#define INPUT_CORE_HISTORY_MAX 1000
+/* ---- escape-sequence decoder ----
+ *
+ * The decoder is the pure (no-IO) heart of the line editor's terminal
+ * input handling: it recognizes the various CSI / SS3 / rxvt / iTerm2
+ * encodings emitted by real terminals and returns an action enum the
+ * IO layer maps onto buffer mutations. Splitting it out from input.c
+ * means we can exercise every encoding from unit tests by feeding a
+ * byte array, without spinning up a pty. */
+
+enum input_action {
+    INPUT_ACTION_NONE = 0, /* unknown / abandoned (timeout, overflow) */
+    INPUT_ACTION_MOVE_LEFT,
+    INPUT_ACTION_MOVE_RIGHT,
+    INPUT_ACTION_MOVE_WORD_LEFT,
+    INPUT_ACTION_MOVE_WORD_RIGHT,
+    INPUT_ACTION_LINE_START,
+    INPUT_ACTION_LINE_END,
+    INPUT_ACTION_DELETE_FWD,
+    INPUT_ACTION_HISTORY_PREV,
+    INPUT_ACTION_HISTORY_NEXT,
+    INPUT_ACTION_KILL_WORD_FWD,
+    INPUT_ACTION_KILL_WORD_BACK_ALNUM,
+    INPUT_ACTION_INSERT_NEWLINE,
+    INPUT_ACTION_PASTE_BEGIN, /* "ESC [ 2 0 0 ~" — caller reads body */
+};
+
+/* Byte-source callback: returns 0..255 on success or -1 on EOF /
+ * timeout / cancel. The decoder calls this once per byte it needs;
+ * tests pass a byte-array reader, the real path passes a poll-backed
+ * adapter. */
+typedef int (*input_byte_reader)(void *user);
+
+/* Decode the bytes following an ESC byte (the leading ESC has already
+ * been consumed by the caller). Reads as many bytes as the encoding
+ * requires via `read`, internally bounded against runaway streams
+ * (read cap, fixed seq buffer, ESC-strip cap). Returns
+ * INPUT_ACTION_NONE for unknown payloads, partial sequences, or
+ * abandoned reads. */
+enum input_action input_core_decode_escape(input_byte_reader read, void *user);
 
 #endif /* HAX_INPUT_CORE_H */

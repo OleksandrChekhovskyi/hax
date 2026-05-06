@@ -331,14 +331,80 @@ void input_core_kill_to_bol(struct input *in)
     buf_erase(in, b, in->cursor - b);
 }
 
+/* Two word-boundary flavors, matching readline:
+ *   - whitespace scan: only ASCII whitespace breaks words. Used by
+ *     Ctrl-W (`unix-word-rubout`) so "rm foo/bar" → one Ctrl-W deletes
+ *     the whole path, the long-standing shell idiom.
+ *   - alnum scan: any non-alnum ASCII byte breaks (so `/`, `.`, `-`,
+ *     `_`... no wait, `_` is alnum-adjacent — readline treats only
+ *     alnum as word chars, so `_` is a boundary too). Used by Meta-
+ *     bound ops (M-b/M-f/M-d/M-DEL) and the modified-arrow CSI keys,
+ *     matching `backward-word` / `forward-word` / `kill-word` /
+ *     `backward-kill-word`.
+ *
+ * Both scans are byte-wise. UTF-8 continuation/leader bytes are all
+ * >= 0x80; the alnum predicate explicitly treats those as word chars,
+ * so multi-byte letters (é, ö, …) stay inside words instead of
+ * splitting mid-codepoint. The whitespace predicate already handles
+ * UTF-8 correctly because isspace returns 0 for any byte >= 0x80. */
+static size_t scan_ws_left(const char *buf, size_t i)
+{
+    while (i > 0 && isspace((unsigned char)buf[i - 1]))
+        i--;
+    while (i > 0 && !isspace((unsigned char)buf[i - 1]))
+        i--;
+    return i;
+}
+
+static int is_word_byte(unsigned char c)
+{
+    return c >= 0x80 || isalnum(c);
+}
+
+static size_t scan_alnum_left(const char *buf, size_t i)
+{
+    while (i > 0 && !is_word_byte((unsigned char)buf[i - 1]))
+        i--;
+    while (i > 0 && is_word_byte((unsigned char)buf[i - 1]))
+        i--;
+    return i;
+}
+
+static size_t scan_alnum_right(const char *buf, size_t len, size_t i)
+{
+    while (i < len && !is_word_byte((unsigned char)buf[i]))
+        i++;
+    while (i < len && is_word_byte((unsigned char)buf[i]))
+        i++;
+    return i;
+}
+
+void input_core_move_word_left(struct input *in)
+{
+    in->cursor = scan_alnum_left(in->buf, in->cursor);
+}
+
+void input_core_move_word_right(struct input *in)
+{
+    in->cursor = scan_alnum_right(in->buf, in->len, in->cursor);
+}
+
 void input_core_kill_word_back(struct input *in)
 {
-    size_t i = in->cursor;
-    while (i > 0 && isspace((unsigned char)in->buf[i - 1]))
-        i--;
-    while (i > 0 && !isspace((unsigned char)in->buf[i - 1]))
-        i--;
+    size_t i = scan_ws_left(in->buf, in->cursor);
     buf_erase(in, i, in->cursor - i);
+}
+
+void input_core_kill_word_back_alnum(struct input *in)
+{
+    size_t i = scan_alnum_left(in->buf, in->cursor);
+    buf_erase(in, i, in->cursor - i);
+}
+
+void input_core_kill_word_fwd(struct input *in)
+{
+    size_t e = scan_alnum_right(in->buf, in->len, in->cursor);
+    buf_erase(in, in->cursor, e - in->cursor);
 }
 
 /* ---------------- history ---------------- */
@@ -545,4 +611,247 @@ void input_core_compute_layout(const char *buf, size_t len, size_t cursor, int p
     out->end_row = row;
     out->end_col = col;
     out->total_rows = row + 1;
+}
+
+/* ---------------- escape-sequence decoder ---------------- */
+
+/* Read the body of a CSI / SS3 sequence into `seq`: bytes after the
+ * leading "ESC [" or "ESC O" up to and including the final byte.
+ * Returns the number of bytes captured, or -1 on EOF, overflow, or a
+ * runaway non-terminating stream — caller aborts in all three cases.
+ *
+ * Final-byte detection accepts both the ECMA-48 standard range
+ * (0x40-0x7E) and '$' (0x24). The latter is technically an
+ * "intermediate byte" in ECMA-48, but rxvt uses it as a final for
+ * Shift-modified tilde keys (e.g. Shift+Home = "ESC[7$"); since this
+ * function only parses keyboard input, no legitimate keyboard
+ * sequence puts '$' mid-payload, so the relaxed termination is safe.
+ *
+ * On overflow (sequence longer than `seq`) we keep reading and
+ * discard the excess bytes, then return -1 once the final byte
+ * arrives. Stopping at the first overflow byte would leave the rest
+ * of the sequence — including the final — queued in stdin, and the
+ * main keystroke loop would then insert those bytes as text.
+ *
+ * Two hard caps bound the work in pathological cases: the per-byte
+ * timeout in the real reader (a stalled sequence can't wedge the
+ * prompt past Ctrl-C, since ISIG is off in raw mode), and a total
+ * read count limit (a peer that streams non-final bytes inside the
+ * timeout window otherwise spins this loop indefinitely). Real
+ * keyboard sequences are well under a dozen bytes, so the cap is
+ * generous. */
+static int read_csi_seq(input_byte_reader read, void *user, char *seq, int cap)
+{
+    const int MAX_READS = 64;
+    int n = 0;
+    int overflowed = 0;
+    for (int reads = 0; reads < MAX_READS; reads++) {
+        int b = read(user);
+        if (b < 0)
+            return -1;
+        if (n + 1 < cap)
+            seq[n++] = (char)b;
+        else
+            overflowed = 1;
+        if ((b >= 0x40 && b <= 0x7E) || b == '$') {
+            if (overflowed)
+                return -1;
+            seq[n] = '\0';
+            return n;
+        }
+    }
+    return -1;
+}
+
+/* Parse the xterm-style modifier parameter from a CSI/SS3 cursor-key
+ * payload of the form "1;<mod><final>" (e.g. "1;5D" for Ctrl+Left).
+ * Returns the raw modifier value (1 = no modifier, 2 = Shift, 3 = Alt,
+ * 5 = Ctrl, ...; encoding is 1 + bitmask with bits Shift=1, Alt=2,
+ * Ctrl=4, Meta=8). Returns 1 (no modifier) for any payload that
+ * doesn't structurally match, including the unmodified short forms.
+ *
+ * Tolerates trailing parameters separated by additional semicolons
+ * (kitty / xterm in modifyOtherKeys mode emit "1;5;2D" with a key-
+ * event-type after the modifier). Only the modifier — the parameter
+ * we care about — is parsed; the rest is ignored. */
+static int parse_xterm_mod(const char *seq, int n)
+{
+    if (n < 4 || seq[0] != '1' || seq[1] != ';')
+        return 1;
+    int v = 0;
+    for (int i = 2; i < n - 1; i++) {
+        if (seq[i] == ';')
+            break;
+        if (seq[i] < '0' || seq[i] > '9')
+            return 1;
+        v = v * 10 + (seq[i] - '0');
+        if (v > 99)
+            return 1;
+    }
+    return v ? v : 1;
+}
+
+/* True when an xterm modifier value implies word motion for arrow
+ * keys: Alt, Ctrl, or Meta is part of the chord (bits 2|4|8 in mod-1).
+ * Plain (mod=1) and Shift-only (mod=2) fall through to single-char
+ * motion — Shift+arrow has no selection meaning in this editor, so
+ * the least-surprising fallback is a normal arrow. */
+static int xterm_mod_implies_word(int mod)
+{
+    if (mod < 1)
+        return 0;
+    return ((mod - 1) & 0xE) != 0;
+}
+
+/* Map a CSI/SS3 cursor-key final byte to an action. Letters outside
+ * the cursor-key set (e.g. 'Z' for Shift-Tab, function-key finals)
+ * fall through to NONE. */
+static enum input_action arrow_to_action(char final, int word)
+{
+    switch (final) {
+    case 'A':
+        return INPUT_ACTION_HISTORY_PREV;
+    case 'B':
+        return INPUT_ACTION_HISTORY_NEXT;
+    case 'C':
+        return word ? INPUT_ACTION_MOVE_WORD_RIGHT : INPUT_ACTION_MOVE_RIGHT;
+    case 'D':
+        return word ? INPUT_ACTION_MOVE_WORD_LEFT : INPUT_ACTION_MOVE_LEFT;
+    case 'H':
+        return INPUT_ACTION_LINE_START;
+    case 'F':
+        return INPUT_ACTION_LINE_END;
+    }
+    return INPUT_ACTION_NONE;
+}
+
+enum input_action input_core_decode_escape(input_byte_reader read, void *user)
+{
+    int b = read(user);
+    if (b < 0)
+        return INPUT_ACTION_NONE; /* bare ESC */
+
+    /* iTerm2's "Esc+" mode for Option emits ESC ESC <CSI/SS3> for
+     * Alt-modified cursor keys (kLFT3 = "ESC ESC [ D" etc.). Strip
+     * leading ESCs and force word motion on the inner arrow. For
+     * bare-ESC + letter (b/f/d/...), `meta` is redundant since those
+     * bindings are already meta-defined; the flag is harmless there.
+     * The strip cap is paranoia against a peer flooding ESCs within
+     * the timeout window — real terminals send at most one extra. */
+    int meta = 0;
+    for (int strip = 0; b == 0x1b && strip < 4; strip++) {
+        b = read(user);
+        if (b < 0)
+            return INPUT_ACTION_NONE;
+        meta = 1;
+    }
+    if (b == 0x1b)
+        return INPUT_ACTION_NONE;
+
+    if (b == '[') {
+        char seq[32];
+        int n = read_csi_seq(read, user, seq, sizeof(seq));
+        if (n < 0)
+            return INPUT_ACTION_NONE;
+
+        if (n == 1) {
+            /* Unmodified arrow / Home / End. rxvt encodes Shift+arrow
+             * here as lowercase a/b/c/d; without selection support
+             * the least-surprising fallback is plain single-char
+             * motion, so normalize the case and dispatch unmodified. */
+            char final = seq[0];
+            if (final >= 'a' && final <= 'd')
+                final -= 'a' - 'A';
+            return arrow_to_action(final, meta);
+        }
+        if (strcmp(seq, "200~") == 0)
+            return INPUT_ACTION_PASTE_BEGIN;
+
+        /* Tilde-key family: Home/End/Delete and friends, encoded as
+         * "<digit><final>" with optional modifier. xterm uses '~' and
+         * "<digit>;<mod>~" for modified; rxvt encodes the modifier in
+         * the final byte itself ('~' = none, '$' = Shift, '^' = Ctrl,
+         * '@' = Ctrl+Shift). Modifier doesn't change the action for
+         * the keys we care about, so the final byte is treated
+         * uniformly.
+         *
+         * The code prefix must be a single digit — multi-digit codes
+         * (function keys F5+: "15~", "17~", ...) deliberately fall
+         * through, otherwise their leading digit would alias to
+         * Home/End/Delete. Accept the unmodified short form ("3~")
+         * and the xterm modified form ("3;5~"). */
+        char final = seq[n - 1];
+        if ((final == '~' || final == '^' || final == '$' || final == '@') &&
+            (n == 2 || (n >= 4 && seq[1] == ';'))) {
+            switch (seq[0]) {
+            case '1':
+            case '7':
+                return INPUT_ACTION_LINE_START;
+            case '4':
+            case '8':
+                return INPUT_ACTION_LINE_END;
+            case '3':
+                return INPUT_ACTION_DELETE_FWD;
+            }
+        }
+        /* Modified arrows / Home / End: "1;<mod><letter>". Modifier
+         * value is decoded; only Alt/Ctrl/Meta-flavored arrows take
+         * the word-motion path, while Shift-only and unmodified fall
+         * back to single-character motion. Home/End ignore the
+         * modifier. */
+        if (n >= 4 && seq[0] == '1' && seq[1] == ';') {
+            int mod = parse_xterm_mod(seq, n);
+            return arrow_to_action(seq[n - 1], xterm_mod_implies_word(mod) || meta);
+        }
+        return INPUT_ACTION_NONE;
+    }
+
+    if (b == 'O') {
+        /* SS3 cursor keys, used by some terminals in application-
+         * cursor mode. Three flavors:
+         *   - unmodified: "ESC O <A|B|C|D|H|F>"
+         *   - xterm modified: "ESC O 1;<mod><letter>"
+         *   - rxvt Ctrl+arrow: "ESC O <a|b|c|d>" (lowercase final)
+         * Reading to the final byte handles all three and drains any
+         * unrecognized SS3 payload (function keys F1-F4) cleanly so
+         * leftover bytes don't leak into the keystroke loop as text. */
+        char seq[32];
+        int n = read_csi_seq(read, user, seq, sizeof(seq));
+        if (n < 0)
+            return INPUT_ACTION_NONE;
+        char final = seq[n - 1];
+        int word;
+        if (final >= 'a' && final <= 'd') {
+            final -= 'a' - 'A';
+            word = 1;
+        } else {
+            word = xterm_mod_implies_word(parse_xterm_mod(seq, n));
+        }
+        return arrow_to_action(final, word || meta);
+    }
+
+    /* Alt+Enter (ESC + CR/LF) inserts a newline, for terminals that
+     * don't deliver Shift+Enter as a bare LF. */
+    if (b == '\r' || b == '\n')
+        return INPUT_ACTION_INSERT_NEWLINE;
+
+    /* Readline-style Meta bindings — also what macOS Terminal sends
+     * for Option+Left/Right when "Use Option as Meta key" is enabled,
+     * doubling as Alt+arrow handling on terminals that don't emit
+     * CSI modified arrows. */
+    switch (b) {
+    case 'b':
+    case 'B':
+        return INPUT_ACTION_MOVE_WORD_LEFT;
+    case 'f':
+    case 'F':
+        return INPUT_ACTION_MOVE_WORD_RIGHT;
+    case 'd':
+    case 'D':
+        return INPUT_ACTION_KILL_WORD_FWD;
+    case 0x7f: /* Alt+Backspace (most terminals) */
+    case 0x08: /* Alt+Backspace (terminals that map Backspace to ^H) */
+        return INPUT_ACTION_KILL_WORD_BACK_ALNUM;
+    }
+    return INPUT_ACTION_NONE;
 }

@@ -163,109 +163,73 @@ static void handle_paste(struct input *in)
 
 /* ---------------- escape sequence dispatch ---------------- */
 
-/* Called after we've consumed an ESC byte. Reads the rest of the
- * sequence (with a short timeout for bare ESC) and applies the
- * corresponding edit action. */
+/* Adapt read_byte_timeout to the input_byte_reader signature so
+ * input_core_decode_escape can drive it without knowing about poll. */
+static int byte_reader_tty(void *user)
+{
+    (void)user;
+    unsigned char b;
+    int r = read_byte_timeout(&b, ESC_TIMEOUT_MS);
+    if (r <= 0)
+        return -1;
+    return b;
+}
+
+/* Apply a decoded action to the edit buffer. Keeping this switch in
+ * the IO layer means the decoder stays pure; testing the action
+ * dispatch itself is unnecessary because each branch is one line. */
+static void apply_action(struct input *in, enum input_action a)
+{
+    switch (a) {
+    case INPUT_ACTION_NONE:
+        return;
+    case INPUT_ACTION_MOVE_LEFT:
+        input_core_move_left(in);
+        return;
+    case INPUT_ACTION_MOVE_RIGHT:
+        input_core_move_right(in);
+        return;
+    case INPUT_ACTION_MOVE_WORD_LEFT:
+        input_core_move_word_left(in);
+        return;
+    case INPUT_ACTION_MOVE_WORD_RIGHT:
+        input_core_move_word_right(in);
+        return;
+    case INPUT_ACTION_LINE_START:
+        in->cursor = input_core_line_start(in);
+        return;
+    case INPUT_ACTION_LINE_END:
+        in->cursor = input_core_line_end(in);
+        return;
+    case INPUT_ACTION_DELETE_FWD:
+        input_core_delete_fwd(in);
+        return;
+    case INPUT_ACTION_HISTORY_PREV:
+        input_core_history_prev(in);
+        return;
+    case INPUT_ACTION_HISTORY_NEXT:
+        input_core_history_next(in);
+        return;
+    case INPUT_ACTION_KILL_WORD_FWD:
+        input_core_kill_word_fwd(in);
+        return;
+    case INPUT_ACTION_KILL_WORD_BACK_ALNUM:
+        input_core_kill_word_back_alnum(in);
+        return;
+    case INPUT_ACTION_INSERT_NEWLINE:
+        input_core_buf_insert(in, "\n", 1);
+        return;
+    case INPUT_ACTION_PASTE_BEGIN:
+        handle_paste(in);
+        return;
+    }
+}
+
+/* Called after we've consumed an ESC byte. Decodes the rest of the
+ * sequence via the pure decoder and applies the resulting action. */
 static void handle_escape(struct input *in)
 {
-    unsigned char c;
-    int r = read_byte_timeout(&c, ESC_TIMEOUT_MS);
-    if (r <= 0)
-        return; /* bare ESC — ignored */
-
-    if (c == '[') {
-        char seq[32];
-        int n = 0;
-        for (;;) {
-            unsigned char b;
-            /* Same timeout as the leading ESC: a partial CSI (Alt-[,
-             * SSH-truncated sequence, etc.) aborts instead of blocking
-             * indefinitely and wedging the prompt past Ctrl-C/D. */
-            if (read_byte_timeout(&b, ESC_TIMEOUT_MS) <= 0)
-                return;
-            if (n + 1 < (int)sizeof(seq))
-                seq[n++] = (char)b;
-            if (b >= 0x40 && b <= 0x7E)
-                break;
-        }
-        seq[n] = '\0';
-
-        if (n == 1) {
-            switch (seq[0]) {
-            case 'A':
-                input_core_history_prev(in);
-                return;
-            case 'B':
-                input_core_history_next(in);
-                return;
-            case 'C':
-                input_core_move_right(in);
-                return;
-            case 'D':
-                input_core_move_left(in);
-                return;
-            case 'H':
-                in->cursor = input_core_line_start(in);
-                return;
-            case 'F':
-                in->cursor = input_core_line_end(in);
-                return;
-            }
-        }
-        if (n == 2 && seq[1] == '~') {
-            switch (seq[0]) {
-            case '1':
-            case '7':
-                in->cursor = input_core_line_start(in);
-                return;
-            case '4':
-            case '8':
-                in->cursor = input_core_line_end(in);
-                return;
-            case '3':
-                input_core_delete_fwd(in);
-                return;
-            }
-        }
-        if (strcmp(seq, "200~") == 0) {
-            handle_paste(in);
-            return;
-        }
-        /* anything else — silently ignore */
-        return;
-    }
-
-    if (c == 'O') {
-        unsigned char b;
-        if (read_byte_timeout(&b, ESC_TIMEOUT_MS) <= 0)
-            return;
-        switch (b) {
-        case 'A':
-            input_core_history_prev(in);
-            return;
-        case 'B':
-            input_core_history_next(in);
-            return;
-        case 'C':
-            input_core_move_right(in);
-            return;
-        case 'D':
-            input_core_move_left(in);
-            return;
-        case 'H':
-            in->cursor = input_core_line_start(in);
-            return;
-        case 'F':
-            in->cursor = input_core_line_end(in);
-            return;
-        }
-        return;
-    }
-
-    /* Alt+Enter (ESC + CR/LF) also inserts a newline, for terminals
-     * that don't deliver Shift+Enter as a bare LF. */
-    if (c == '\r' || c == '\n')
-        input_core_buf_insert(in, "\n", 1);
+    apply_action(in, input_core_decode_escape(byte_reader_tty, NULL));
 }
 
 /* ---------------- render / paint ---------------- */
