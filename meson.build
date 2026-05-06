@@ -52,6 +52,7 @@ sources = files(
     'src/interrupt.c',
     'src/main.c',
     'src/markdown.c',
+    'src/notify.c',
     'src/oneshot.c',
     'src/progress.c',
     'src/slash.c',

@@ -15,6 +15,7 @@
 #include "input.h"
 #include "interrupt.h"
 #include "markdown.h"
+#include "notify.h"
 #include "slash.h"
 #include "spawn.h"
 #include "spinner.h"
@@ -702,8 +703,7 @@ static long context_limit(const struct provider *p)
  * answering "how many tokens did this prompt cost in generation". Each
  * value is -1 when the underlying counts weren't reported by the backend;
  * the section is then skipped rather than rendered with a misleading zero. */
-static void display_usage(struct disp *d, struct cluster *cl, struct spinner *sp,
-                          const struct provider *p, long ctx, long out, long cached)
+static void display_usage(struct disp *d, const struct provider *p, long ctx, long out, long cached)
 {
     int show_ctx = ctx >= 0;
     int show_out = out >= 0;
@@ -711,7 +711,6 @@ static void display_usage(struct disp *d, struct cluster *cl, struct spinner *sp
     if (!show_ctx && !show_out && !show_cached)
         return;
 
-    cluster_terminate(cl, d, sp);
     disp_block_separator(d);
     disp_raw(ANSI_DIM);
 
@@ -921,7 +920,6 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
     struct cluster cl = {0};
 
     for (;;) {
-        cluster_terminate(&cl, &disp, spinner);
         disp_block_separator(&disp);
         char *line = input_readline(input, prompt);
         if (!line) {
@@ -1169,8 +1167,15 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
         }
         interrupt_disarm();
 
+        /* Tear down any in-progress quiet cluster before any post-turn
+         * output. Each branch below (interrupted marker, usage stats,
+         * terminal notification) writes to stdout, and the inline
+         * spinner thread is still drawing into the cluster line until
+         * we stop it — letting it run alongside our writes risks
+         * interleaved bytes (especially fatal mid-OSC-9 sequence). */
+        cluster_terminate(&cl, &disp, spinner);
+
         if (turn_interrupted) {
-            cluster_terminate(&cl, &disp, spinner);
             disp_block_separator(&disp);
             disp_raw(ANSI_DIM);
             disp_printf(&disp, "%s", INTERRUPT_MARKER);
@@ -1180,7 +1185,15 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
         }
 
         if (!turn_errored)
-            display_usage(&disp, &cl, spinner, p, turn_ctx, turn_out, turn_cached);
+            display_usage(&disp, p, turn_ctx, turn_out, turn_cached);
+
+        /* Ping the terminal so the user gets a notification / dock
+         * bounce when hax is back to idle. Skipped on Esc-interrupt
+         * since the user just pressed a key — they're already at the
+         * terminal. Errored turns still notify: the user needs to
+         * know the request bounced. */
+        if (!turn_interrupted)
+            notify_attention();
     }
 
     spinner_free(spinner);
