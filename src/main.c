@@ -10,6 +10,7 @@
 #include "oneshot.h"
 #include "providers/codex.h"
 #include "providers/llamacpp.h"
+#include "providers/mock.h"
 #include "providers/openai.h"
 #include "providers/openai_compat.h"
 #include "providers/openrouter.h"
@@ -21,20 +22,25 @@
  * cleanly. No CLI knob for this yet; add one if a real use case shows up. */
 #define ONESHOT_MAX_TURNS 100
 
-/* Registry of available providers. First entry is the default when
- * HAX_PROVIDER is unset. Adding a new preset = drop a file under
- * src/providers/ and append its PROVIDER_* symbol here. */
+/* Registry of available providers. Kept in alphabetical order so the
+ * "supported" list in error messages reads predictably and merges
+ * stay clean. Adding a new preset = drop a file under src/providers/
+ * and insert its PROVIDER_* symbol here in alphabetical order. */
 static const struct provider_factory *const PROVIDERS[] = {
-    &PROVIDER_CODEX,    &PROVIDER_OPENAI,     &PROVIDER_OPENAI_COMPAT,
-    &PROVIDER_LLAMACPP, &PROVIDER_OPENROUTER,
+    &PROVIDER_CODEX,  &PROVIDER_LLAMACPP,      &PROVIDER_MOCK,
+    &PROVIDER_OPENAI, &PROVIDER_OPENAI_COMPAT, &PROVIDER_OPENROUTER,
 };
 #define N_PROVIDERS (sizeof(PROVIDERS) / sizeof(PROVIDERS[0]))
+
+/* Provider used when HAX_PROVIDER is unset. Must match the `name`
+ * field of one entry in PROVIDERS[] above. */
+static const char DEFAULT_PROVIDER[] = "codex";
 
 static struct provider *pick_provider(void)
 {
     const char *which = getenv("HAX_PROVIDER");
     if (!which || !*which)
-        return PROVIDERS[0]->new();
+        which = DEFAULT_PROVIDER;
 
     for (size_t i = 0; i < N_PROVIDERS; i++) {
         if (strcmp(which, PROVIDERS[i]->name) == 0)

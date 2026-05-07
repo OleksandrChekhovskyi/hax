@@ -49,6 +49,7 @@ Pick a provider with `HAX_PROVIDER` (default `codex`). Supported values:
 | `openai-compatible` | Any OpenAI-compatible endpoint (bring your own URL)   |
 | `llama.cpp`         | Local `llama-server` with model + context auto-detect |
 | `openrouter`        | OpenRouter with attribution + context auto-detect     |
+| `mock`              | In-process scripted/heuristic stub for manual testing |
 
 ### Codex (ChatGPT subscription)
 
@@ -122,15 +123,48 @@ OPENROUTER_API_KEY=... \
 ./build/hax
 ```
 
+### Mock (manual testing without an LLM)
+
+In-process stub that emits canned events instead of calling out to a real backend. Useful
+for visually exercising the dispatch and rendering pipelines, smoke-testing changes, or
+producing deterministic repros for bug reports. No network, no API key, no `HAX_MODEL`
+required.
+
+Two modes:
+
+- **Scripted** — `HAX_MOCK_SCRIPT=path/to/script.txt` plays one turn of a small line-based
+  DSL per `stream()` call. Directives: `text <message>`, `tool <name> <json>`,
+  `delay <ms>`, `usage in=N out=M [cached=K]`, `end-turn`. See `scripts/mock_demo.txt` for
+  a worked example covering bash / read / write previews and a multi-message continuation.
+
+- **Interactive** — no script, parses the latest user message heuristically: a backtick-
+  quoted argument becomes a `bash` (or `read`, when prefixed with the verb) tool call,
+  anything else is echoed back. Designed so `HAX_PROVIDER=mock hax` is useful out of the
+  box — type ``run `ls -la` `` and watch a real bash dispatch render.
+
+```sh
+# scripted
+HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock_demo.txt ./build/hax
+
+# interactive
+HAX_PROVIDER=mock ./build/hax
+```
+
+Pair with `scripts/stream_demo.py` (`fake-ninja` / `fake-meson` / `fake-vitest`) for
+realistic streaming patterns through the bash tool.
+
 ## Environment variables
 
 ### Provider & model
 
 - `HAX_PROVIDER` — one of `codex` (default), `openai`, `openai-compatible`, `llama.cpp`,
-  `openrouter`
+  `openrouter`, `mock`
 - `HAX_MODEL` — model id. With `codex`, defaults to `model` from `~/.codex/config.toml`,
   falling back to `gpt-5.3-codex`. With `llama.cpp`, auto-filled from `/v1/models` when
-  unset. With every other provider, required (hax exits with an error if it's unset)
+  unset. With `mock`, defaults to a placeholder so the provider works without
+  configuration. With every other provider, required (hax exits with an error if it's unset)
+- `HAX_MOCK_SCRIPT` — path to a mock-script file (only honored when `HAX_PROVIDER=mock`).
+  Without it, the mock provider falls back to interactive heuristic responses
 - `HAX_PROVIDER_NAME` — optional display name; useful with `openai-compatible` to label the
   banner ("oMLX", "vLLM", …)
 - `HAX_SYSTEM_PROMPT` — override the built-in system prompt. Set to an empty string to send

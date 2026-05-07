@@ -26,6 +26,16 @@ Tests are plain C binaries using the macros in `tests/harness.h` (`EXPECT`, `EXP
 `T_REPORT`). To add one, append an `executable(...)` + `test(...)` pair to `tests/meson.build`
 listing the test source plus the production `.c` files it links against.
 
+For manual / visual checks of the dispatch + rendering pipeline without an LLM round-trip,
+`HAX_PROVIDER=mock` activates a scripted provider (`src/providers/mock.c`) that emits canned
+text and tool calls. With `HAX_MOCK_SCRIPT=path` it replays a small line-based DSL one turn
+per `stream()` call (see `scripts/mock_demo.txt` for an example); without a script it parses
+the latest user message heuristically (a backtick-quoted argument becomes a bash or read
+tool call). Pair it with `scripts/stream_demo.py` to drive the bash tool through realistic
+streaming patterns — `\r`-rewriting (`fake-ninja`), interleaved progress + result lines
+(`fake-meson`), or bottom-window redraws (`fake-vitest`) — at adjustable cadence via
+`--delay`.
+
 ## Architecture
 
 hax is a single-binary REPL:
@@ -46,10 +56,12 @@ Adapters live in `src/providers/`. Where a provider has a non-trivial SSE-event-
 
 **Provider registry (`struct provider_factory`)** — each adapter exports one
 `const struct provider_factory PROVIDER_<NAME>` symbol pairing the `HAX_PROVIDER` env value
-with its constructor. `src/main.c` collects them into `PROVIDERS[]`; the first entry is the
-default when `HAX_PROVIDER` is unset, and the "unknown provider" error builds its supported
-list from the array. Adding a new provider = drop a file under `src/providers/`, append the
-`&PROVIDER_*` symbol to that array, and add the source to `meson.build`.
+with its constructor. `src/main.c` collects them into `PROVIDERS[]` (kept in alphabetical
+order so the "supported" list in error messages and merges read predictably), and the
+default when `HAX_PROVIDER` is unset is named separately by the `DEFAULT_PROVIDER` constant
+in `main.c`. Adding a new provider = drop a file under `src/providers/`, insert the
+`&PROVIDER_*` symbol into that array in alphabetical order, and add the source to
+`meson.build`.
 
 **Presets over the OpenAI Chat Completions translation** — `openai.c` owns the shared
 message/tool/SSE translation and exposes

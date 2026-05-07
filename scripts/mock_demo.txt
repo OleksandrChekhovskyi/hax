@@ -1,0 +1,86 @@
+# Sample mock provider script. Drives hax through a sequence of canned
+# turns that exercise the rendering pipeline end-to-end without ever
+# talking to a real model.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock_demo.txt build/hax
+#
+# Each `end-turn` is one stream() call. Note that an agentic chain
+# (turn ends with a tool call → agent dispatches the tool → stream()
+# again) consumes script turns continuously without prompting the
+# user. So the user's *first* message plays everything from turn 1
+# down to the first turn that ends without a tool call (turn 6 here,
+# which closes the chain). The next user message picks up at turn 7
+# and runs through the second chain (turns 7–8).
+#
+# DSL recap (see src/providers/mock.c for the full spec):
+#   text <message>                    one assistant text delta
+#   tool <name> <json>                one tool call
+#   delay <ms>                        sleep before next emission and
+#                                     between auto-streamed text chunks
+#   usage in=N out=M [cached=K]       set usage on the upcoming end-turn
+#                                     (long-form input=/output= also work)
+#   end-turn                          finalize the current turn
+#   # comment / blank line            ignored
+
+# ---------- turn 1: simple bash, dim block under the head cap ----------
+delay 30
+text Let me poke around the repo to start.
+tool bash {"command":"ls scripts/"}
+usage in=420 out=18
+end-turn
+
+# ---------- turn 2: \r-rewriting progress (fake-ninja) ------------------
+text Now exercising the carriage-return rewrite path.
+tool bash {"command":"scripts/stream_demo.py fake-ninja --delay 0.1 --count 8"}
+usage in=520 out=22
+end-turn
+
+# ---------- turn 3: display head/tail elision (fake-meson) --------------
+# Many committed lines pass through the preview. The dim block keeps
+# the first DISP_HT_HEAD_LINES, the rest go through the tail ring,
+# and the elision marker appears between them. (This is the *display*
+# head/tail in tool_render — bash.c's separate ~96 KiB head/tail buffer
+# for the model's history isn't exercised here.)
+text This one overruns the display head and lands content in the tail.
+tool bash {"command":"scripts/stream_demo.py fake-meson --delay 0.05"}
+usage in=640 out=28
+end-turn
+
+# ---------- turn 4: file-read preview (R_HEAD_ONLY mode) ----------------
+text And here's the read tool's head-only preview.
+tool read {"path":"src/disp.h"}
+usage in=780 out=24
+end-turn
+
+# ---------- turn 5: diff preview (write tool) ---------------------------
+# Seed the file via bash first so the write below produces an actual
+# unified diff. fs_write_with_diff suppresses the diff for new-file
+# creates, and emits an empty payload when content is byte-identical
+# to what's there — without the seed, this turn's output depends on
+# whether a previous run left the file behind.
+text One write to /tmp so the diff renderer has something to color.
+tool bash {"command":"printf 'hello from a previous run\\n' > /tmp/hax_mock_demo.txt"}
+tool write {"path":"/tmp/hax_mock_demo.txt","content":"hello from the mock provider — second time around\n"}
+usage in=860 out=30
+end-turn
+
+# ---------- turn 6: final assistant turn, no tool call ------------------
+# Ends without a tool call, so the agent loop unwinds and control
+# returns to the prompt. Type a follow-up message to start the next
+# chain (turn 7).
+text All done — that covered live preview, display elision, file read, and diff coloring.
+usage in=920 out=44
+end-turn
+
+# ---------- turn 7: continuation after the user types again -------------
+# Picks up where turn 6 left off: a fresh chain on the second user
+# message that runs a quick command, then resolves at turn 8.
+text Sure, here's one more — a tiny ls just to show the continuation works.
+tool bash {"command":"ls -1 src/providers"}
+usage in=980 out=20
+end-turn
+
+# ---------- turn 8: wrap up after the second tool ----------------------
+text And that's the end of the demo script.
+usage in=1020 out=18
+end-turn
