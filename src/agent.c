@@ -845,6 +845,11 @@ struct transcript_view {
     const char *const *sys_ref;
     struct item *const *items_ref;
     const size_t *n_items_ref;
+    /* Tools and n_tools are stable for the session's lifetime (set in
+     * agent_session_init, freed in _destroy, not touched by /new), so
+     * they're held by value — no indirection needed. */
+    const struct tool_def *tools;
+    size_t n_tools;
 };
 
 static void show_transcript_cb(void *user)
@@ -861,7 +866,7 @@ static void show_transcript_cb(void *user)
     struct spawn_pipe sp;
     if (spawn_pipe_open(&sp, pager) < 0)
         return;
-    transcript_render(sp.w, *v->sys_ref, *v->items_ref, *v->n_items_ref);
+    transcript_render(sp.w, *v->sys_ref, v->tools, v->n_tools, *v->items_ref, *v->n_items_ref);
     spawn_pipe_close(&sp);
 }
 
@@ -902,6 +907,8 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
         .sys_ref = (const char *const *)&sess.sys,
         .items_ref = &sess.items,
         .n_items_ref = &sess.n_items,
+        .tools = sess.tools,
+        .n_tools = sess.n_tools,
     };
     input_set_transcript_cb(input, show_transcript_cb, &tv);
     /* Initialize once — captures the canonical termios baseline and starts

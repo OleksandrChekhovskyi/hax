@@ -20,7 +20,21 @@ static char *render_to_string(const char *sys, const struct item *items, size_t 
         perror("open_memstream");
         exit(1);
     }
-    transcript_render(f, sys, items, n);
+    transcript_render(f, sys, NULL, 0, items, n);
+    fclose(f);
+    return buf;
+}
+
+static char *render_with_tools(const struct tool_def *tools, size_t n_tools)
+{
+    char *buf = NULL;
+    size_t len = 0;
+    FILE *f = open_memstream(&buf, &len);
+    if (!f) {
+        perror("open_memstream");
+        exit(1);
+    }
+    transcript_render(f, NULL, tools, n_tools, NULL, 0);
     fclose(f);
     return buf;
 }
@@ -210,6 +224,45 @@ static void test_tool_result_unshortened(void)
     free(body);
 }
 
+static void test_tools_section_renders_each_tool(void)
+{
+    struct tool_def tools[] = {
+        {.name = "read",
+         .description = "Read a file from disk.",
+         .parameters_schema_json = "{\"type\":\"object\","
+                                   "\"properties\":{\"path\":{\"type\":\"string\"}},"
+                                   "\"required\":[\"path\"]}"},
+        {.name = "bash",
+         .description = "Run a shell command.",
+         .parameters_schema_json = "{\"type\":\"object\","
+                                   "\"properties\":{\"command\":{\"type\":\"string\"}}}"},
+    };
+    char *out = render_with_tools(tools, 2);
+    EXPECT(contains(out, "── tools ──"));
+    EXPECT(contains(out, "[read]"));
+    EXPECT(contains(out, "Read a file from disk."));
+    EXPECT(contains(out, "[bash]"));
+    EXPECT(contains(out, "Run a shell command."));
+    /* Schema is pretty-printed: JSON_INDENT(2) inserts newline + spaces. */
+    EXPECT(contains(out, "\n  \"type\": \"object\""));
+    EXPECT(contains(out, "\"path\""));
+    EXPECT(contains(out, "\"command\""));
+    /* read precedes bash in the output. */
+    const char *pr = strstr(out, "[read]");
+    const char *pb = strstr(out, "[bash]");
+    EXPECT(pr && pb && pr < pb);
+    free(out);
+}
+
+static void test_tools_section_omitted_when_empty(void)
+{
+    /* --raw mode advertises no tools — the section should disappear
+     * entirely, not appear with an empty body. */
+    char *out = render_with_tools(NULL, 0);
+    EXPECT(!contains(out, "── tools ──"));
+    free(out);
+}
+
 static void test_reasoning_shows_id(void)
 {
     struct item items[] = {{
@@ -237,6 +290,8 @@ int main(void)
     test_tool_call_pretty_prints_args();
     test_tool_call_invalid_json_dumps_verbatim();
     test_tool_result_unshortened();
+    test_tools_section_renders_each_tool();
+    test_tools_section_omitted_when_empty();
     test_reasoning_shows_id();
     T_REPORT();
 }

@@ -158,6 +158,57 @@ static void render_tool_call(FILE *out, const struct item *it)
     }
 }
 
+/* Pretty-print a JSON literal, falling back to a verbatim dump when
+ * parsing or encoding fails (deeply nested input, malformed payload).
+ * Writes a leading newline before the body so the schema sits on its own
+ * line below the description. */
+static void render_json_indented(FILE *out, const char *json_text)
+{
+    if (!json_text || !*json_text)
+        return;
+    fputc('\n', out);
+    json_t *root = json_loads(json_text, 0, NULL);
+    if (root) {
+        char *pretty = json_dumps(root, JSON_INDENT(2) | JSON_PRESERVE_ORDER);
+        if (pretty) {
+            fputs(pretty, out);
+            ensure_newline(out, pretty);
+            free(pretty);
+        } else {
+            fputs(json_text, out);
+            ensure_newline(out, json_text);
+        }
+        json_decref(root);
+    } else {
+        fputs(json_text, out);
+        ensure_newline(out, json_text);
+    }
+}
+
+/* Tools section: one block per advertised tool, mirroring exactly the
+ * fields the provider serializes for the model — name, description,
+ * parameters_schema_json. The agent's display_arg / preview_tail / etc.
+ * are UI-only and intentionally omitted. The cyan `[name]` header
+ * matches render_tool_call so a reader scanning the transcript can
+ * spot the matching tool definition above any specific call. */
+static void render_tools(FILE *out, const struct tool_def *tools, size_t n)
+{
+    if (!tools || n == 0)
+        return;
+    section(out, "tools");
+    for (size_t i = 0; i < n; i++) {
+        fprintf(out, ANSI_CYAN "[%s]" ANSI_RESET "\n", tools[i].name ? tools[i].name : "?");
+        if (tools[i].description) {
+            fputs(tools[i].description, out);
+            ensure_newline(out, tools[i].description);
+        }
+        render_json_indented(out, tools[i].parameters_schema_json);
+        if (i + 1 < n)
+            fputc('\n', out);
+    }
+    fputc('\n', out);
+}
+
 static void render_tool_result(FILE *out, const struct item *it)
 {
     section(out, "tool result");
@@ -185,8 +236,8 @@ static void render_reasoning(FILE *out, const struct item *it)
     fputc('\n', out);
 }
 
-void transcript_render(FILE *out, const char *system_prompt, const struct item *items,
-                       size_t n_items)
+void transcript_render(FILE *out, const char *system_prompt, const struct tool_def *tools,
+                       size_t n_tools, const struct item *items, size_t n_items)
 {
     banner(out);
 
@@ -196,6 +247,8 @@ void transcript_render(FILE *out, const char *system_prompt, const struct item *
         ensure_newline(out, system_prompt);
         fputc('\n', out);
     }
+
+    render_tools(out, tools, n_tools);
 
     if (n_items == 0)
         return;
