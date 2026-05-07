@@ -175,8 +175,14 @@ static void cluster_terminate(struct cluster *cl, struct disp *d, struct spinner
 }
 
 /* Verbose tool-call header: block separator, `[name]` tag, the tool's
- * display_arg (full path / command), optional dim suffix. Terminated
- * with `\n` and committed so the spinner or output draws below. */
+ * display_arg (full path / command), optional dim suffix. The
+ * display_arg is truncated to fit — one terminal row for most tools,
+ * two rows' worth for `bash` since user-interesting commands carry
+ * more signal than a path does. Terminated with `\n` and committed
+ * so the spinner or output draws below. The header line deliberately
+ * doesn't carry the disp_tool_strip gutter — the bracketed tool name
+ * is its own visual marker, and the strip is reserved for the output
+ * rows that follow. */
 static void display_tool_header(struct disp *d, const struct item *call)
 {
     const struct tool *tool = find_tool(call->tool_name);
@@ -198,7 +204,30 @@ static void display_tool_header(struct disp *d, const struct item *call)
         disp_putc(d, ' ');
         disp_raw(ANSI_BOLD);
         char *flat = flatten_for_display(display_arg);
-        disp_write(d, flat, strlen(flat));
+
+        /* Compute a per-tool budget for the display arg. Bash gets two
+         * rows since a long command carries real information; other
+         * tools get one row. The tag + space cost is deducted;
+         * format_display_extra (e.g. read's :30-50 slice) is reserved
+         * out so it stays attached without pushing the arg over
+         * budget. tool_name strlen approximates cell width — fine for
+         * ASCII tool names, the only case we have. */
+        int term_w = term_width();
+        int rows = strcmp(call->tool_name, "bash") == 0 ? 2 : 1;
+        int extra_reserve = 0;
+        if (tool && tool->format_display_extra) {
+            char *extra_peek = tool->format_display_extra(call->tool_arguments_json);
+            if (extra_peek)
+                extra_reserve = (int)strlen(extra_peek);
+            free(extra_peek);
+        }
+        int prefix_cost = (int)strlen(call->tool_name) + 3; /* "[%s] " */
+        int budget = rows * term_w - prefix_cost - extra_reserve;
+        if (budget < 8)
+            budget = 8;
+        char *trimmed = truncate_for_display(flat, (size_t)budget);
+        disp_write(d, trimmed, strlen(trimmed));
+        free(trimmed);
         free(flat);
         disp_raw(ANSI_RESET);
         if (tool && tool->format_display_extra) {
@@ -214,7 +243,14 @@ static void display_tool_header(struct disp *d, const struct item *call)
         disp_putc(d, ' ');
         disp_raw(ANSI_DIM);
         char *flat = flatten_for_display(call->tool_arguments_json);
-        disp_write(d, flat, strlen(flat));
+        int term_w = term_width();
+        int prefix_cost = (int)strlen(call->tool_name) + 3;
+        int budget = term_w - prefix_cost;
+        if (budget < 8)
+            budget = 8;
+        char *trimmed = truncate_for_display(flat, (size_t)budget);
+        disp_write(d, trimmed, strlen(trimmed));
+        free(trimmed);
         free(flat);
         disp_raw(ANSI_RESET);
     }
@@ -378,6 +414,7 @@ static char *make_silent_arg(const struct tool *tool, const struct item *call, i
 static struct item dispatch_tool_skipped(struct disp *d, const struct item *call)
 {
     display_tool_header(d, call);
+    disp_tool_strip_solo(d);
     disp_raw(ANSI_DIM);
     disp_printf(d, "%s", INTERRUPT_MARKER);
     disp_raw(ANSI_RESET);
@@ -399,6 +436,7 @@ static struct item dispatch_tool_skipped(struct disp *d, const struct item *call
 static struct item dispatch_tool_refused(struct disp *d, const struct item *call)
 {
     display_tool_header(d, call);
+    disp_tool_strip_solo(d);
     disp_raw(ANSI_DIM);
     disp_printf(d, "[refused: --raw, no tools advertised]");
     disp_raw(ANSI_RESET);
@@ -552,6 +590,7 @@ static struct item dispatch_tool_call_verbose(struct disp *d, struct spinner *sp
          * renderer would leave the user staring at a bare tool header. */
         if (t && t->output_is_diff && !*ret) {
             spinner_hide(sp);
+            disp_tool_strip_solo(d);
             disp_raw(ANSI_DIM);
             disp_printf(d, "(no changes)");
             disp_raw(ANSI_RESET);

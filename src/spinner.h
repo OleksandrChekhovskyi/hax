@@ -38,6 +38,18 @@ void spinner_set_label(struct spinner *s, const char *label);
  * the caller knows cursor is at column 0 of a fresh row, not at end
  * of the prior text. */
 void spinner_show_inline(struct spinner *s);
+
+/* Toggle the line-mode glyph between plain dim (default) and dim cyan.
+ * Cyan mode is used by tool_render's streaming-row spinner so its glyph
+ * matches the cyan gutter strip running down the side of the dim block
+ * — visually they read as one continuous element. The default plain dim
+ * is what the agent's "working..." / "thinking..." / "running..."
+ * statuses use; those have no gutter strip and shouldn't pick up the
+ * tint. The flag affects only line mode; inline mode (silent-tool
+ * cluster) is always plain dim. Idempotent; safe to call when the
+ * spinner is hidden — the new style applies on the next draw. */
+void spinner_set_cyan(struct spinner *s, int cyan);
+
 void spinner_free(struct spinner *s);
 
 #endif /* HAX_SPINNER_H */

@@ -442,11 +442,11 @@ static void test_bash_per_call_timeout_invalid(void)
 
 static void test_bash_head_tail_truncation(void)
 {
-    /* Produce ~168 KiB — more than HEAD_CAP+TAIL_CAP (96 KiB), but well
-     * under MAX_BYTES_READ (1 MiB) so the producer finishes naturally
-     * and the tail ring's final bytes are preserved. HEAD and TAIL
-     * markers bookend the stream so we can confirm both ends survive
-     * with the middle elided in the right order. */
+    /* Produce ~108 KiB — more than HEAD_CAP+TAIL_CAP (96 KiB), but
+     * well under MAX_BYTES_READ (1 MiB) so the producer finishes
+     * naturally and the tail ring's final bytes are preserved. HEAD
+     * and TAIL markers bookend the stream so we can confirm both ends
+     * survive with the middle elided in the right order. */
     char *out = call_bash("echo HEAD; seq 1 20000; echo TAIL");
     const char *p_head = strstr(out, "HEAD");
     const char *p_elided = strstr(out, "bytes elided");
@@ -699,8 +699,8 @@ static void test_bash_streamed_history_truncated(void)
      * head/tail pipeline ran. */
     EXPECT(strstr(out, "[output truncated]") != NULL);
     /* The returned string is bounded by HEAD_CAP+TAIL_CAP plus footers
-     * — well under the 500 KB live stream. */
-    EXPECT(strlen(out) < 200 * 1024);
+     * — well under the 150 KB live stream. */
+    EXPECT(strlen(out) < 120 * 1024);
     /* The streamed display must surface the same marker so the user
      * sees that the live preview understated the gap (the renderer's
      * elision marker reports captured-but-not-shown bytes; the bash
@@ -708,6 +708,44 @@ static void test_bash_streamed_history_truncated(void)
     EXPECT(strstr(cap.buf.data, "[output truncated]") != NULL);
     free(out);
     buf_free(&cap.buf);
+}
+
+static void test_bash_collapses_cr_rewrites_for_model(void)
+{
+    /* ninja/meson-style progress: \r-overprinted snapshots end with the
+     * final state, all preceding states discarded. Exact bytes-equal
+     * because term_lite runs before cap_line_lengths and UTF-8
+     * sanitization. Quadruple-backslash: C-literal → JSON → shell. */
+    char *out = call_bash("printf '[1/3] a\\\\r[2/3] bb\\\\r[3/3] ccc\\\\n'");
+    EXPECT_STR_EQ(out, "[3/3] ccc\n");
+    free(out);
+}
+
+static void test_bash_strips_ansi_color_for_model(void)
+{
+    /* Color escapes should be stripped from the model-side output —
+     * they're terminal scaffolding, not signal. */
+    char *out = call_bash("printf '\\\\033[31mred\\\\033[0m text\\\\n'");
+    EXPECT_STR_EQ(out, "red text\n");
+    free(out);
+}
+
+static void test_bash_applies_backspace_for_model(void)
+{
+    /* Curl/apt-style backspace erases. The model sees the post-erase
+     * frame, not the raw byte stream. */
+    char *out = call_bash("printf 'abcdef\\\\b\\\\b\\\\bXYZ\\\\n'");
+    EXPECT_STR_EQ(out, "abcXYZ\n");
+    free(out);
+}
+
+static void test_bash_crlf_collapses_for_model(void)
+{
+    /* CRLF is a line break, not an empty-line + content pair. Real
+     * terminals render \r\n as one row break; we should too. */
+    char *out = call_bash("printf 'one\\\\r\\\\ntwo\\\\r\\\\n'");
+    EXPECT_STR_EQ(out, "one\ntwo\n");
+    free(out);
 }
 
 int main(void)
@@ -742,6 +780,10 @@ int main(void)
     test_bash_streamed_binary_history_clean();
     test_bash_streamed_binary_marker_isolated_from_escape();
     test_bash_streamed_history_truncated();
+    test_bash_collapses_cr_rewrites_for_model();
+    test_bash_strips_ansi_color_for_model();
+    test_bash_applies_backspace_for_model();
+    test_bash_crlf_collapses_for_model();
     test_bash_stdout_is_a_tty();
     test_bash_stderr_is_a_tty();
     test_bash_interactive_helpers_neutralized();

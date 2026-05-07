@@ -48,10 +48,21 @@ struct spinner {
     int inline_drawn;     /* under inline_mode, a glyph is currently on screen */
     long inline_shown_at; /* CLOCK_MONOTONIC ms when inline mode last started */
     int stop;             /* thread should exit */
-    size_t frame;
-    int started; /* thread was successfully created */
-    int enabled; /* stdout is a tty */
+    int started;          /* thread was successfully created */
+    int enabled;          /* stdout is a tty */
+    int cyan;             /* line-mode glyph in dim cyan vs. plain dim */
 };
+
+/* Frame index derived from wall-clock time so the animation stays
+ * continuous across hide/show cycles — when tool output commits a new
+ * line we briefly hide the spinner, write the "│" row, and re-show on
+ * the next row. Storing a frame counter and resetting it on show would
+ * snap the glyph back to frame 0 on every commit; computing from time
+ * means the glyph keeps rotating wherever it physically appears. */
+static size_t current_frame_idx(void)
+{
+    return (size_t)(monotonic_ms() / FRAME_INTERVAL_MS) % N_FRAMES;
+}
 
 static void erase_line_locked(void)
 {
@@ -61,16 +72,21 @@ static void erase_line_locked(void)
 
 static void draw_frame_locked(struct spinner *s)
 {
+    const char *glyph = FRAMES[current_frame_idx()];
     if (s->inline_mode) {
         /* Inline mode: caller wrote a header (e.g. "[read] foo.c ")
          * and the cursor is positioned where the glyph should sit.
          * Backspace over the previous glyph if any so the new glyph
          * lands in the same cell — frame width is one terminal cell,
-         * \b moves cursor back by one cell. */
+         * \b moves cursor back by one cell. Plain dim (no cyan) — the
+         * cyan tint is reserved for the verbose tool block's gutter
+         * strip and its matching streaming-spinner row; silent-cluster
+         * inline glyphs sit inside their own header line and shouldn't
+         * pick up that styling. */
         if (s->inline_drawn)
             fputc('\b', stdout);
         fputs(ANSI_DIM, stdout);
-        fputs(FRAMES[s->frame], stdout);
+        fputs(glyph, stdout);
         fputs(ANSI_RESET, stdout);
         s->inline_drawn = 1;
         fflush(stdout);
@@ -79,9 +95,17 @@ static void draw_frame_locked(struct spinner *s)
     /* Erase first so a label swap (set_label while visible) doesn't leave
      * trailing chars from a longer previous label. The animation tick
      * doesn't strictly need this — frame width is constant — but a
-     * single ANSI_ERASE_LINE per frame is cheap. */
-    fputs("\r" ANSI_ERASE_LINE ANSI_DIM, stdout);
-    fputs(FRAMES[s->frame], stdout);
+     * single ANSI_ERASE_LINE per frame is cheap. The glyph renders in
+     * dim cyan when paired with a tool gutter strip (s->cyan), and in
+     * plain dim otherwise ("working..." / "thinking..." / "running..."
+     * statuses between turns). When cyan is on, ANSI_FG_DEFAULT after
+     * the glyph closes the cyan FG without disturbing SGR 2 (dim) so
+     * streamed tool content in the label doesn't pick up the tint. */
+    fputs("\r" ANSI_ERASE_LINE, stdout);
+    fputs(s->cyan ? ANSI_DIM_CYAN : ANSI_DIM, stdout);
+    fputs(glyph, stdout);
+    if (s->cyan)
+        fputs(ANSI_FG_DEFAULT, stdout);
     fputc(' ', stdout);
     fputs(s->label, stdout);
     fputs(ANSI_RESET, stdout);
@@ -127,7 +151,6 @@ static void *spinner_thread(void *arg)
                  * line-mode branch and renders the labeled spinner. */
             }
             draw_frame_locked(s);
-            s->frame = (s->frame + 1) % N_FRAMES;
 
             /* CLOCK_REALTIME: pthread_cond_timedwait portably uses it
              * (macOS lacks pthread_condattr_setclock). Wall-clock jumps
@@ -171,11 +194,13 @@ static void show_locked(struct spinner *s, int inline_mode)
     if (inline_mode)
         s->inline_shown_at = monotonic_ms();
     if (!was) {
-        /* Draw frame 0 synchronously so the spinner is on screen the
-         * moment this returns, instead of waiting for the thread to be
-         * scheduled. The thread will redraw frame 0 on its next wake
-         * (same glyph, no visible change), then animate at 80ms cadence. */
-        s->frame = 0;
+        /* Draw the current time-based frame synchronously so the spinner
+         * lands on screen the moment this returns, instead of waiting
+         * for the thread to be scheduled. The thread will redraw on its
+         * next wake — same frame if it fires within the current 80ms
+         * tick, the next frame otherwise. The animation phase is driven
+         * by wall-clock time, so a hide/show cycle (e.g. between
+         * committed tool-output lines) doesn't reset the rotation. */
         s->inline_drawn = 0; /* fresh inline draw — no prior glyph to backspace over */
         draw_frame_locked(s);
     }
@@ -215,6 +240,22 @@ void spinner_set_label(struct spinner *s, const char *label)
         free(s->label);
         s->label = xstrdup(next);
         if (s->visible)
+            draw_frame_locked(s);
+    }
+    pthread_mutex_unlock(&s->mu);
+}
+
+void spinner_set_cyan(struct spinner *s, int cyan)
+{
+    if (!s)
+        return;
+    pthread_mutex_lock(&s->mu);
+    if (s->cyan != cyan) {
+        s->cyan = cyan;
+        /* Repaint immediately if visible so the next animation tick
+         * doesn't show a torn frame in the wrong color. Inline mode
+         * doesn't use the cyan flag, so skip the repaint there. */
+        if (s->visible && !s->inline_mode)
             draw_frame_locked(s);
     }
     pthread_mutex_unlock(&s->mu);

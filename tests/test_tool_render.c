@@ -10,6 +10,30 @@
 #include "disp.h"
 #include "harness.h"
 
+/* All strip variants share the same envelope: ANSI_DIM_CYAN colors
+ * the gutter glyph dim cyan, then ANSI_RESET unwinds. Body content
+ * after the strip re-opens plain ANSI_DIM so the dim cyan stays
+ * confined to the gutter column; diff mode applies its per-line
+ * color instead. */
+
+/* Body rows of a multi-row block: "│" gutter. */
+#define STRIP_BODY ANSI_DIM_CYAN "\xE2\x94\x82 " ANSI_RESET ANSI_DIM
+
+/* Top corner of a multi-row block: "┌" gutter. Used for the very
+ * first row so the block reads as a closed tree opening at the top. */
+#define STRIP_FIRST ANSI_DIM_CYAN "\xE2\x94\x8C " ANSI_RESET ANSI_DIM
+
+/* Bottom corner of a multi-row block: "└" gutter. Replaces the prior
+ * "│ ... \r└" overprint dance — the renderer now defers the most-
+ * recent committed line by one and writes the close row's corner
+ * directly as a leading prefix. */
+#define STRIP_LAST ANSI_DIM_CYAN "\xE2\x94\x94 " ANSI_RESET ANSI_DIM
+
+/* Sole row of a single-row block: "›" gutter. There's no vertical
+ * line to anchor a corner glyph to, so we use a small right-facing
+ * chevron instead. */
+#define STRIP_SOLO ANSI_DIM_CYAN "\xE2\x80\xBA " ANSI_RESET ANSI_DIM
+
 /* Same stdout-capture pattern as test_disp.c — see comments there. */
 
 static char captured[65536];
@@ -73,9 +97,21 @@ static void test_head_only_under_cap(void)
 {
     const char *in = "hello\nworld\n";
     const char *out = render_one(R_HEAD_ONLY, in, strlen(in));
-    /* Trailing \n is held, not committed by finalize when held>0 — so
-     * dim opens, content "hello\nworld" lands, dim closes. */
-    EXPECT_STR_EQ(out, ANSI_DIM "hello\nworld" ANSI_RESET);
+    /* "hello" promotes when "world" arrives → STRIP_FIRST "hello\n"
+     * (top corner). "world" is the deferred pending; finalize emits it
+     * with STRIP_LAST (bottom corner). The trailing \n is held (not
+     * committed by finalize when held>0) so the closing ANSI_RESET
+     * lands inline. */
+    EXPECT_STR_EQ(out, STRIP_FIRST "hello\n" STRIP_LAST "world" ANSI_RESET);
+}
+
+static void test_head_only_three_lines_uses_body_strip(void)
+{
+    /* Three lines exercises the body strip — first row gets ┌, middle
+     * row gets │, last row (the deferred pending) gets └. */
+    const char *in = "one\ntwo\nthree\n";
+    const char *out = render_one(R_HEAD_ONLY, in, strlen(in));
+    EXPECT_STR_EQ(out, STRIP_FIRST "one\n" STRIP_BODY "two\n" STRIP_LAST "three" ANSI_RESET);
 }
 
 static void test_head_only_no_trailing_nl_queues_separator(void)
@@ -90,7 +126,7 @@ static void test_head_only_no_trailing_nl_queues_separator(void)
     tool_render_feed(&r, "no newline", 10);
     tool_render_finalize(&r);
     tool_render_free(&r);
-    EXPECT_STR_EQ(cap_read(), ANSI_DIM "no newline" ANSI_RESET);
+    EXPECT_STR_EQ(cap_read(), STRIP_SOLO "no newline" ANSI_RESET);
     EXPECT(d.held == 1);
 }
 
@@ -123,8 +159,10 @@ static void test_head_tail_under_cap(void)
 {
     const char *in = "a\nb\n";
     const char *out = render_one(R_HEAD_TAIL, in, strlen(in));
-    /* Same as head-only when output fits — content + dim wrapper. */
-    EXPECT_STR_EQ(out, ANSI_DIM "a\nb" ANSI_RESET);
+    /* Same as head-only when output fits — top-corner row for "a",
+     * bottom-corner row for the deferred-pending "b", single closing
+     * reset. */
+    EXPECT_STR_EQ(out, STRIP_FIRST "a\n" STRIP_LAST "b" ANSI_RESET);
 }
 
 static void test_head_tail_exceeds_cap_emits_marker_and_tail(void)
@@ -187,7 +225,57 @@ static void test_ctrl_bytes_dropped_before_render(void)
      * the dim wrapper is applied. */
     const char in[] = "ab\x07\x1b[31mc\x1b[mdef\n";
     const char *out = render_one(R_HEAD_ONLY, in, sizeof(in) - 1);
-    EXPECT_STR_EQ(out, ANSI_DIM "abcdef" ANSI_RESET);
+    EXPECT_STR_EQ(out, STRIP_SOLO "abcdef" ANSI_RESET);
+}
+
+/* ---------- term_lite-driven behavior ---------- */
+
+static void test_blank_lines_dropped_from_preview(void)
+{
+    /* Tools that pad output with blank lines (`echo; cmd; echo`) should
+     * not waste the head budget on those blanks — only the meaningful
+     * lines render. The model still sees the blanks (handled in bash's
+     * format_run_output), but the dim block is tighter. */
+    const char *in = "\n\n   \nreal-line-1\n\nreal-line-2\n\n";
+    const char *out = render_one(R_HEAD_TAIL, in, strlen(in));
+    EXPECT_STR_EQ(out, STRIP_FIRST "real-line-1\n" STRIP_LAST "real-line-2" ANSI_RESET);
+}
+
+static void test_cr_overwrite_collapsed_in_preview(void)
+{
+    /* \r-overprinted progress collapses to the final state. Without
+     * term_lite, the dim block would otherwise show the raw
+     * concatenation "[1/3] a[2/3] bb[3/3] ccc" — hard to read and
+     * eats the head budget. */
+    const char *in = "[1/3] a\r[2/3] bb\r[3/3] ccc\n";
+    const char *out = render_one(R_HEAD_TAIL, in, strlen(in));
+    EXPECT_STR_EQ(out, STRIP_SOLO "[3/3] ccc" ANSI_RESET);
+}
+
+static void test_crlf_one_line_per_pair(void)
+{
+    /* \r\n must yield one committed line per pair, not one blank
+     * (cleared by \r) followed by content. */
+    const char *in = "one\r\ntwo\r\n";
+    const char *out = render_one(R_HEAD_TAIL, in, strlen(in));
+    EXPECT_STR_EQ(out, STRIP_FIRST "one\n" STRIP_LAST "two" ANSI_RESET);
+}
+
+static void test_backspace_applied_in_preview(void)
+{
+    const char *in = "abcdef\b\b\bXYZ\n";
+    const char *out = render_one(R_HEAD_ONLY, in, strlen(in));
+    EXPECT_STR_EQ(out, STRIP_SOLO "abcXYZ" ANSI_RESET);
+}
+
+static void test_partial_trailing_line_committed_at_finalize(void)
+{
+    /* term_lite_flush at finalize commits the in-progress buffer as
+     * a final line. With \r-overprinting and no trailing \n, the
+     * committed content is the last frame. */
+    const char *in = "[1/3] a\r[2/3] bb\r[3/3] ccc";
+    const char *out = render_one(R_HEAD_ONLY, in, strlen(in));
+    EXPECT_STR_EQ(out, STRIP_SOLO "[3/3] ccc" ANSI_RESET);
 }
 
 /* ---------- emit callback wiring ---------- */
@@ -218,6 +306,7 @@ int main(void)
 
     test_empty_emits_nothing();
     test_head_only_under_cap();
+    test_head_only_three_lines_uses_body_strip();
     test_head_only_no_trailing_nl_queues_separator();
     test_head_only_exceeds_cap_emits_footer();
     test_head_tail_under_cap();
@@ -225,6 +314,11 @@ int main(void)
     test_diff_colors_added_and_removed();
     test_diff_flushes_partial_trailing_line();
     test_ctrl_bytes_dropped_before_render();
+    test_blank_lines_dropped_from_preview();
+    test_cr_overwrite_collapsed_in_preview();
+    test_crlf_one_line_per_pair();
+    test_backspace_applied_in_preview();
+    test_partial_trailing_line_committed_at_finalize();
     test_emit_callback_sets_flag();
 
     T_REPORT();

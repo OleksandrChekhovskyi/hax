@@ -32,7 +32,9 @@ test_bash = executable('test_bash',
         'tools/test_bash.c',
         '../src/tools/bash.c',
         '../src/cmd_classify.c',
+        '../src/ctrl_strip.c',
         '../src/interrupt.c',
+        '../src/term_lite.c',
         '../src/utf8_sanitize.c',
         '../src/util.c',
     ],
@@ -152,6 +154,15 @@ test_ctrl_strip = executable('test_ctrl_strip',
 )
 test('ctrl_strip', test_ctrl_strip)
 
+test_term_lite = executable('test_term_lite',
+    sources: [
+        'test_term_lite.c',
+        '../src/term_lite.c',
+        '../src/util.c',
+    ],
+)
+test('term_lite', test_term_lite)
+
 test_utf8_sanitize = executable('test_utf8_sanitize',
     sources: [
         'test_utf8_sanitize.c',
@@ -249,6 +260,7 @@ test_tool_render = executable('test_tool_render',
         '../src/tool_render.c',
         '../src/disp.c',
         '../src/ctrl_strip.c',
+        '../src/term_lite.c',
         '../src/spinner.c',
         '../src/utf8_sanitize.c',
         '../src/util.c',

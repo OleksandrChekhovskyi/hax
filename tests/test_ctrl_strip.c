@@ -60,12 +60,40 @@ static void test_csi_sgr(void)
     free(got);
 }
 
-static void test_csi_cursor(void)
+static void test_csi_layout_finals_passthrough(void)
 {
-    /* Cursor moves and erase-line: all CSI with various finals. */
-    char *got = strip_one_shot("\x1b[2J\x1b[H\x1b[10;20Hhi");
+    /* The full layout-allowlist forwards through ctrl_strip unchanged.
+     * Finals: A (CUU), B (CUD), C (CUF), D (CUB), E (CNL), F (CPL),
+     * G (CHA), H (CUP), J (ED), K (EL), d (VPA), f (HVP), s (SCOSC),
+     * u (SCORC). */
+    const char *in = "\x1b[1A\x1b[2B\x1b[3C\x1b[4D\x1b[E\x1b[F"
+                     "\x1b[1G\x1b[10;20H\x1b[J\x1b[2K\x1b[5d"
+                     "\x1b[10;20f\x1b[s\x1b[uhi";
+    char *got = strip_one_shot(in);
+    EXPECT_STR_EQ(got, in);
+    free(got);
+}
+
+static void test_csi_non_layout_finals_drop(void)
+{
+    /* SGR (m), set/reset modes including DECTCEM cursor-show/hide
+     * (?25h / ?25l), insert/delete line (L/M), scroll region (r),
+     * mouse modes — all drop. */
+    char *got = strip_one_shot("\x1b[31mhi\x1b[m\x1b[?25l\x1b[?25h\x1b[2L\x1b[3M\x1b[1;24r");
     EXPECT_STR_EQ(got, "hi");
     free(got);
+}
+
+static void test_csi_passthrough_chunk_split(void)
+{
+    /* Layout-final CSI split byte-by-byte still forwards exactly once,
+     * with no leading ESC[ leaking out before the final byte arrives. */
+    char *a = strip_one_shot("a\x1b[5A\x1b[2Kb");
+    char *b = strip_byte_by_byte("a\x1b[5A\x1b[2Kb");
+    EXPECT_STR_EQ(a, "a\x1b[5A\x1b[2Kb");
+    EXPECT_STR_EQ(b, "a\x1b[5A\x1b[2Kb");
+    free(a);
+    free(b);
 }
 
 static void test_osc_bel(void)
@@ -108,24 +136,30 @@ static void test_intermediate_esc(void)
     free(got);
 }
 
-static void test_bare_cr_dropped(void)
+static void test_bare_cr_preserved(void)
 {
+    /* CR is intentionally passed through so the downstream term_lite
+     * stage can treat rewriting-progress output (ninja/meson) as
+     * same-line overwrites. The actual collapse to "done\n" happens
+     * there, not here. */
     char *got = strip_one_shot("loading...\rdone\n");
-    EXPECT_STR_EQ(got, "loading...done\n");
+    EXPECT_STR_EQ(got, "loading...\rdone\n");
     free(got);
 }
 
-static void test_crlf_preserved_as_lf(void)
+static void test_crlf_preserved(void)
 {
     char *got = strip_one_shot("line1\r\nline2\r\n");
-    EXPECT_STR_EQ(got, "line1\nline2\n");
+    EXPECT_STR_EQ(got, "line1\r\nline2\r\n");
     free(got);
 }
 
-static void test_backspace_and_bell_dropped(void)
+static void test_backspace_preserved_bell_dropped(void)
 {
+    /* BS passes through (term_lite uses it for tty-style erase);
+     * BEL stays dropped — it has no semantic role downstream. */
     char *got = strip_one_shot("a\bb\ac");
-    EXPECT_STR_EQ(got, "abc");
+    EXPECT_STR_EQ(got, "a\bbc");
     free(got);
 }
 
@@ -303,15 +337,17 @@ int main(void)
 {
     test_passthrough();
     test_csi_sgr();
-    test_csi_cursor();
+    test_csi_layout_finals_passthrough();
+    test_csi_non_layout_finals_drop();
+    test_csi_passthrough_chunk_split();
     test_osc_bel();
     test_osc_st();
     test_dcs();
     test_single_byte_esc();
     test_intermediate_esc();
-    test_bare_cr_dropped();
-    test_crlf_preserved_as_lf();
-    test_backspace_and_bell_dropped();
+    test_bare_cr_preserved();
+    test_crlf_preserved();
+    test_backspace_preserved_bell_dropped();
     test_form_feed_and_vt_dropped();
     test_so_si_dropped();
     test_misc_c0_dropped();

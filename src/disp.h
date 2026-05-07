@@ -60,4 +60,54 @@ void disp_block_separator(struct disp *d);
  * writes — so the caller can peek before deciding to hide the spinner. */
 void disp_first_delta_strip(const struct disp *d, const char **s, size_t *n);
 
+/* Visual gutter prefix for the body rows of a tool block — the rows
+ * between the first and last in a multi-line block. A thin "│" plus
+ * space, in gray dim, so the tool block reads as a quiet vertical rule
+ * down the side. Self-contained: emits ANSI_DIM, glyph + space, then
+ * ANSI_RESET so callers can apply their own SGR to the content that
+ * follows. Uses disp_write internally so any held \n from the previous
+ * row is flushed first — `disp_raw` would leak the strip onto the tail
+ * of the previous row. Pair with disp_tool_strip_first for the top row
+ * of the block and disp_tool_strip_last for the bottom row. */
+void disp_tool_strip(struct disp *d);
+
+/* Cell width of the strip prefix above. Two cells: one box-drawing
+ * glyph plus one trailing space. All four strip variants are the same
+ * width — useful for budget calculations when truncating line content
+ * to fit one terminal row. */
+#define DISP_TOOL_STRIP_COLS 2
+
+/* Top row of a multi-line tool block: "┌ " — top-left corner. Same
+ * shape and invariants as disp_tool_strip, just a different glyph.
+ * Use only on the first row of a multi-row block; for a single-row
+ * block use disp_tool_strip_solo instead. */
+void disp_tool_strip_first(struct disp *d);
+
+/* Bottom row of a multi-line tool block: "└ " — bottom-left corner.
+ * Same shape and invariants as disp_tool_strip. Use only on the last
+ * row of a multi-row block; for a single-row block use
+ * disp_tool_strip_solo instead. */
+void disp_tool_strip_last(struct disp *d);
+
+/* Single-row tool block (skipped / refused tool, "(no changes)" marker,
+ * a one-line tool preview): "› " — a small right-facing chevron, since
+ * there's no vertical line to anchor a top/bottom corner glyph to.
+ * Same shape and invariants as disp_tool_strip. */
+void disp_tool_strip_solo(struct disp *d);
+
+/* Close the open diff block by overprinting the most recently emitted
+ * strip with the appropriate end-of-block glyph. Writes directly to
+ * stdout (bypassing disp's held / trail tracking). Caller invariant:
+ * the cursor is on the same row as the strip about to be overprinted,
+ * with the row's trailing \n still held in disp — i.e. emit_diff_line
+ * was the last thing to write content.
+ *
+ * The two variants exist because the diff path streams each line as it
+ * arrives (no lookahead) — at finalize we know the final line count
+ * and pick the matching glyph: "└" for multi-row, "›" for single-row.
+ * The non-diff path uses the disp_tool_strip_first / _last / _solo
+ * helpers above and avoids overprint entirely. */
+void disp_tool_strip_close(void);
+void disp_tool_strip_close_solo(void);
+
 #endif /* HAX_DISP_H */

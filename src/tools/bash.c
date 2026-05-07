@@ -26,7 +26,9 @@
 #endif
 
 #include "cmd_classify.h"
+#include "ctrl_strip.h"
 #include "interrupt.h"
+#include "term_lite.h"
 #include "utf8_sanitize.h"
 #include "util.h"
 
@@ -34,9 +36,25 @@
  * start) and a tail ring (overwriting; preserves the most recent bytes).
  * For build/test failures the tail is where the actionable info lives; for
  * `find`-style listings the head is. Keeping both gives the model context
- * either way. MAX_BYTES_READ caps the total number of bytes the reader is
- * willing to drain — a runaway producer like `yes` is killed at this
- * point, so the tail stays bounded in time as well as size. */
+ * either way.
+ *
+ * The caps measure *cleaned* bytes (post ctrl_strip + term_lite), not raw
+ * PTY bytes — TUIs like vitest emit lots of redraw-cycle bytes that
+ * collapse heavily once we interpret the cursor motion, and we want
+ * truncation to fire only when the model's view is genuinely lost.
+ *
+ * Sizes are deliberately on the small side. A coding agent makes many
+ * tool calls per turn; a 96 KiB cap (~24 K tokens) blown out to a 200 K
+ * context still leaves room to reason. Larger caps would feed more
+ * progress noise per call, costing tokens on every subsequent turn that
+ * re-includes the history — and on a local model with a tighter context
+ * window or slower tokenizer that lossless wins almost nothing. Tools
+ * that produce inherently large but useful output (long file reads,
+ * deep diffs) are better served by the user piping through head/grep/
+ * tail than by a globally larger cap.
+ *
+ * MAX_BYTES_READ still caps raw bytes so a runaway producer (`yes`,
+ * `tail -f`, /dev/urandom) gets SIGKILL'd before draining the system. */
 #define HEAD_CAP                    (32 * 1024)
 #define TAIL_CAP                    (64 * 1024)
 #define MAX_BYTES_READ              (1024 * 1024)
@@ -214,11 +232,59 @@ static void append_run_suffix(struct buf *out, size_t total_bytes, int has_nul, 
         buf_append_str(out, "(no output)");
 }
 
+/* Streaming-cleanup capture context. Bytes flow: raw PTY chunk →
+ * ctrl_strip → term_lite → on_clean_line (this callback) → head buf
+ * for the first HEAD_CAP cleaned bytes, then tail ring for everything
+ * after. total_clean tracks the running count of cleaned bytes
+ * regardless of where they landed, which drives the truncation check
+ * (cleaned > head + tail_len ⇒ middle bytes were dropped). */
+struct clean_capture {
+    struct buf *head;
+    char *tail;
+    size_t *tail_pos;
+    int *tail_wrapped;
+    size_t *total_clean;
+};
+
+static void clean_emit_byte(struct clean_capture *cap, char c)
+{
+    (*cap->total_clean)++;
+    if (cap->head->len < HEAD_CAP) {
+        buf_append(cap->head, &c, 1);
+        return;
+    }
+    cap->tail[*cap->tail_pos] = c;
+    (*cap->tail_pos)++;
+    if (*cap->tail_pos == TAIL_CAP) {
+        *cap->tail_pos = 0;
+        *cap->tail_wrapped = 1;
+    }
+}
+
+/* term_lite on_line callback: each row's bytes flow into the cleaned
+ * head/tail capture. has_newline=1 contributes a trailing '\n' so the
+ * captured stream reads as a normal multi-line text file. A trailing
+ * partial (has_newline=0) reads as "<body>[exit N]" without a phantom
+ * blank line before the footer — matches the pre-collapse layout when
+ * the producer exited mid-line. */
+static void on_clean_line(const char *line, size_t len, int has_newline, void *user)
+{
+    struct clean_capture *cap = user;
+    for (size_t i = 0; i < len; i++)
+        clean_emit_byte(cap, line[i]);
+    if (has_newline)
+        clean_emit_byte(cap, '\n');
+}
+
 /* Build the final tool result from the captured head/tail ring and exit
- * metadata. Consumes `head` (calls buf_free on it). */
+ * metadata. Consumes `head` (calls buf_free on it). raw_bytes counts
+ * bytes off the PTY (used for the binary-suppressed marker, which
+ * reports the real on-the-wire size); clean_bytes counts bytes after
+ * ctrl_strip + term_lite collapse (used for truncation accounting,
+ * since head/tail hold cleaned bytes). */
 static char *format_run_output(struct buf *head, const char *tail, size_t tail_pos,
-                               int tail_wrapped, size_t total_bytes, int has_nul, int timed_out,
-                               int interrupted, long timeout_ms, int status)
+                               int tail_wrapped, size_t raw_bytes, size_t clean_bytes, int has_nul,
+                               int timed_out, int interrupted, long timeout_ms, int status)
 {
     struct buf out;
     buf_init(&out);
@@ -231,20 +297,22 @@ static char *format_run_output(struct buf *head, const char *tail, size_t tail_p
      * marker (emitted by append_run_suffix below) and keep only the
      * exit/timeout footer. */
     if (!has_nul) {
-        struct buf raw;
-        buf_init(&raw);
-        truncated = assemble_head_tail(&raw, head, tail, tail_pos, tail_wrapped, total_bytes);
+        struct buf assembled;
+        buf_init(&assembled);
+        truncated = assemble_head_tail(&assembled, head, tail, tail_pos, tail_wrapped, clean_bytes);
 
-        /* Cap pathologically long lines (single-line minified output, log
-         * lines with no newlines) before sanitizing — cap_line_lengths cuts
-         * at a byte boundary which can split a multi-byte UTF-8 codepoint;
-         * sanitize_utf8 then replaces the orphaned bytes with U+FFFD so the
-         * final string is always valid UTF-8 (jansson rejects invalid UTF-8
-         * in json_string). */
+        /* head/tail already passed through ctrl_strip + term_lite during
+         * the read loop, so the assembled buffer is ANSI-free and
+         * \r/\b/CSI-folded. Just cap pathologically long lines before
+         * sanitizing — cap_line_lengths cuts at a byte boundary which
+         * can split a multi-byte UTF-8 codepoint; sanitize_utf8 then
+         * replaces orphaned bytes with U+FFFD so the final string is
+         * always valid UTF-8 (jansson rejects invalid UTF-8 in
+         * json_string). */
         size_t capped_len = 0;
-        char *capped =
-            cap_line_lengths(raw.data ? raw.data : "", raw.len, MAX_LINE_LEN, &capped_len);
-        buf_free(&raw);
+        char *capped = cap_line_lengths(assembled.data ? assembled.data : "", assembled.len,
+                                        MAX_LINE_LEN, &capped_len);
+        buf_free(&assembled);
 
         char *clean = sanitize_utf8(capped, capped_len);
         free(capped);
@@ -253,7 +321,7 @@ static char *format_run_output(struct buf *head, const char *tail, size_t tail_p
     }
     buf_free(head);
 
-    append_run_suffix(&out, total_bytes, has_nul, truncated, out.len > 0, timed_out, interrupted,
+    append_run_suffix(&out, raw_bytes, has_nul, truncated, out.len > 0, timed_out, interrupted,
                       timeout_ms, status);
     return buf_steal(&out);
 }
@@ -490,13 +558,41 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
 
     struct buf head;
     buf_init(&head);
-    char tail[TAIL_CAP];
+    /* TAIL_CAP is sized large enough that putting the ring on the heap
+     * is safer than the stack — main thread has plenty of room but
+     * pthread workers (libcurl, spinner) get smaller default stacks
+     * and sharing the layout convention keeps things predictable. */
+    char *tail = xmalloc(TAIL_CAP);
     size_t tail_pos = 0;
     int tail_wrapped = 0;
+    /* total_bytes counts RAW PTY bytes — drives the binary-suppressed
+     * marker (which should report on-wire size) and the runaway guard.
+     * total_clean counts bytes after ctrl_strip + term_lite collapse;
+     * head/tail hold these, so the truncation check is against this. */
     size_t total_bytes = 0;
+    size_t total_clean = 0;
     int has_nul = 0;
     int streamed_anything = 0;
     char chunk[4096];
+
+    /* Stream-cleanup pipeline: raw PTY bytes go through ctrl_strip
+     * (drop ANSI / forward layout-affecting CSIs) and term_lite (apply
+     * cursor motion / line erase / CRLF) on the fly, with the cleaned
+     * line emissions captured into head/tail via on_clean_line. The
+     * model sees what a real terminal would have rendered, not the
+     * wire-format bytes — important for TUIs like vitest that emit
+     * heavy redraw cycles whose intermediate frames don't matter. */
+    struct ctrl_strip cs_clean;
+    ctrl_strip_init(&cs_clean);
+    struct term_lite tl_clean;
+    term_lite_init(&tl_clean);
+    struct clean_capture cap_ctx = {
+        .head = &head,
+        .tail = tail,
+        .tail_pos = &tail_pos,
+        .tail_wrapped = &tail_wrapped,
+        .total_clean = &total_clean,
+    };
 
     for (;;) {
         long now = monotonic_ms();
@@ -657,24 +753,17 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
             emit_display(chunk, (size_t)r, user);
             streamed_anything = 1;
         }
-        size_t consumed = 0;
-        if (head.len < HEAD_CAP) {
-            size_t room = HEAD_CAP - head.len;
-            size_t take = (size_t)r < room ? (size_t)r : room;
-            buf_append(&head, chunk, take);
-            consumed = take;
-        }
-        while (consumed < (size_t)r) {
-            size_t avail = (size_t)r - consumed;
-            size_t room = TAIL_CAP - tail_pos;
-            size_t take = avail < room ? avail : room;
-            memcpy(tail + tail_pos, chunk + consumed, take);
-            tail_pos += take;
-            if (tail_pos == TAIL_CAP) {
-                tail_pos = 0;
-                tail_wrapped = 1;
-            }
-            consumed += take;
+        /* Run the chunk through ctrl_strip + term_lite to collapse
+         * cursor motion / line erase / CRLF into clean line emissions,
+         * captured into head/tail via on_clean_line. Skip when the
+         * stream has had a NUL — binary content shouldn't drive the
+         * line interpreter (it'd produce nonsense glyphs and waste
+         * cycles), and append_run_suffix replaces the body with the
+         * binary marker anyway. */
+        if (!has_nul) {
+            char clean_buf[sizeof(chunk)];
+            size_t cn = ctrl_strip_feed(&cs_clean, chunk, (size_t)r, clean_buf);
+            term_lite_feed(&tl_clean, clean_buf, cn, on_clean_line, &cap_ctx);
         }
         /* Runaway producer (yes, tail -f, /dev/urandom, …) — once we've
          * drained MAX_BYTES_READ, the tail ring already holds the most
@@ -700,23 +789,30 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
             break;
     }
 
+    /* Drain any rows still buffered in term_lite (cursor row + below)
+     * into head/tail. After this, the cleaned stream is fully captured
+     * and total_clean reflects the final cleaned-byte count. */
+    if (!has_nul)
+        term_lite_flush(&tl_clean, on_clean_line, &cap_ctx);
+    term_lite_free(&tl_clean);
+
     if (emit_display) {
         /* Streaming path: live chunks already went through emit_display.
          * Push the trailing suffix through it too so the user sees it
          * in the dim block. The canonical history is still produced by
-         * format_run_output below — it applies the same head/tail
-         * truncation, line-length cap, UTF-8 sanitization, and binary-
-         * suppression as the legacy path, which the live stream skips.
-         * The model's view of the output is therefore the bounded
-         * summary, not the unbounded live stream. */
+         * format_run_output below — it applies the same head/tail cap,
+         * line-length cap, UTF-8 sanitization, and binary-suppression
+         * as the legacy path, which the live stream skips. */
         size_t tail_len = tail_wrapped ? TAIL_CAP : tail_pos;
-        int truncated_streamed = total_bytes > head.len + tail_len;
+        int truncated_streamed = total_clean > head.len + tail_len;
         stream_suffix(emit_display, user, total_bytes, has_nul, streamed_anything,
                       truncated_streamed, timed_out, interrupted, timeout_ms, status);
     }
 
-    return format_run_output(&head, tail, tail_pos, tail_wrapped, total_bytes, has_nul, timed_out,
-                             interrupted, timeout_ms, status);
+    char *result = format_run_output(&head, tail, tail_pos, tail_wrapped, total_bytes, total_clean,
+                                     has_nul, timed_out, interrupted, timeout_ms, status);
+    free(tail);
+    return result;
 }
 
 /* Resolve the timeout in ms from the JSON args, falling back to the env

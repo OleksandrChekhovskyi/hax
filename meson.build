@@ -60,6 +60,7 @@ sources = files(
     'src/spawn.c',
     'src/spinner.c',
     'src/sse.c',
+    'src/term_lite.c',
     'src/tool_render.c',
     'src/trace.c',
     'src/transcript.c',

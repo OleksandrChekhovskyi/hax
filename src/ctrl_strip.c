@@ -20,12 +20,15 @@ enum {
 
 /* Bytes that pass through S_NORMAL untouched: printables (>= 0x20, also
  * includes the high half 0x80-0xFF which is UTF-8 territory), plus HT
- * (0x09) and LF (0x0A). Everything else in the C0 range and DEL (0x7F)
- * is dropped. ESC (0x1B) is handled by the state-transition arm
- * separately, so it never reaches this predicate. */
+ * (0x09), LF (0x0A), CR (0x0D), and BS (0x08). The CR/BS pair is kept
+ * so a downstream term_lite stage can interpret rewriting-progress
+ * output (ninja, meson, cargo, …) the way a real terminal would. The
+ * remaining C0 controls and DEL (0x7F) are dropped. ESC (0x1B) is
+ * handled by the state-transition arm separately, so it never reaches
+ * this predicate. */
 static int is_passthrough(unsigned char c)
 {
-    if (c == '\t' || c == '\n')
+    if (c == '\t' || c == '\n' || c == '\r' || c == '\b')
         return 1;
     if (c < 0x20)
         return 0;
@@ -47,9 +50,27 @@ static int is_abort(unsigned char c)
     return c == 0x0a || c == 0x18 || c == 0x1a;
 }
 
+/* CSI finals that affect cursor position / line erase. Forwarded to
+ * term_lite downstream; everything else (SGR, mouse modes, alt-screen,
+ * private modes, …) drops.
+ *
+ * The allowlist covers cursor motion (relative + absolute, in both
+ * axes), line-feed-with-CR variants, save/restore cursor, and the
+ * line/display erase ops. That's enough to interpret the cleanup
+ * sequences used by progress-spinner libraries (biome, ora, indicatif)
+ * and the multi-row redraw patterns used by test reporters. */
+static int csi_is_layout_final(unsigned char c)
+{
+    /* A=CUU  B=CUD  C=CUF  D=CUB  E=CNL  F=CPL  G=CHA
+     * H=CUP  J=ED   K=EL   d=VPA  f=HVP  s=SCOSC  u=SCORC */
+    return c == 'A' || c == 'B' || c == 'C' || c == 'D' || c == 'E' || c == 'F' || c == 'G' ||
+           c == 'H' || c == 'J' || c == 'K' || c == 'd' || c == 'f' || c == 's' || c == 'u';
+}
+
 void ctrl_strip_init(struct ctrl_strip *s)
 {
     s->state = S_NORMAL;
+    s->csi_len = 0;
 }
 
 size_t ctrl_strip_feed(struct ctrl_strip *s, const char *in, size_t n, char *out)
@@ -68,6 +89,7 @@ size_t ctrl_strip_feed(struct ctrl_strip *s, const char *in, size_t n, char *out
         case S_ESC:
             if (c == '[') {
                 s->state = S_CSI;
+                s->csi_len = 0;
             } else if (c == ']') {
                 s->state = S_OSC;
             } else if (c == 'P' || c == '^' || c == '_') {
@@ -88,13 +110,33 @@ size_t ctrl_strip_feed(struct ctrl_strip *s, const char *in, size_t n, char *out
             /* params (0x30-0x3F) and intermediates (0x20-0x2F) absorbed
              * until the final byte (0x40-0x7E). LF/CAN/SUB cancel the
              * sequence so a malformed or truncated CSI can't swallow
-             * arbitrary downstream text. */
+             * arbitrary downstream text. Final bytes on the layout
+             * allowlist (A/B/K/J) get the whole "ESC [ params final"
+             * forwarded so term_lite can interpret them; other finals
+             * (SGR 'm', cursor positioning 'H', save-cursor 's', …)
+             * drop wholesale. */
             if (is_abort(c)) {
                 s->state = S_NORMAL;
+                s->csi_len = 0;
                 i--;
             } else if (c >= 0x40 && c <= 0x7e) {
+                if (csi_is_layout_final(c) && s->csi_len + 3 <= sizeof(s->csi_buf)) {
+                    out[o++] = 0x1b;
+                    out[o++] = '[';
+                    for (size_t k = 0; k < s->csi_len; k++)
+                        out[o++] = s->csi_buf[k];
+                    out[o++] = (char)c;
+                }
                 s->state = S_NORMAL;
+                s->csi_len = 0;
+            } else if (s->csi_len < sizeof(s->csi_buf)) {
+                s->csi_buf[s->csi_len++] = (char)c;
             }
+            /* CSI longer than the buffer overflows: drop the byte and
+             * keep absorbing. The forward branch above won't fire
+             * because csi_len is now ≥ sizeof(buf), so the whole
+             * sequence ends up dropped — same behavior as a malformed
+             * one, which is the right outcome for a runaway CSI. */
             break;
         case S_OSC:
             if (is_abort(c)) {
