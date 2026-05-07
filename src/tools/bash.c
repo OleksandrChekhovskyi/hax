@@ -799,8 +799,21 @@ const struct tool TOOL_BASH = {
             .name = "bash",
             .description =
                 "Run a shell command via /bin/sh -c. Returns combined stdout+stderr plus "
-                "exit code. Default timeout is 120s; pass `timeout_seconds` for slow "
-                "commands (test suites, builds). The harness enforces a hard ceiling.",
+                "exit code.\n"
+                "\n"
+                "Rules:\n"
+                "- Each call starts in the directory shown in <env> cwd, and that "
+                "directory is fixed for the session. Run commands from there "
+                "directly. To target a subdirectory, use a relative path or "
+                "`(cd subdir && cmd)` in one call.\n"
+                "- Use relative paths from cwd; absolute paths to files inside cwd "
+                "are unnecessarily verbose. Re-`cd`-ing to the path that's already "
+                "cwd is a no-op, and `cd` to anywhere else doesn't persist across "
+                "calls anyway.\n"
+                "- Use the utilities listed in <env> preferred_commands instead of "
+                "their older equivalents — the <env> line spells out each replacement.\n"
+                "- Default timeout is 120s; pass `timeout_seconds` for slow commands "
+                "(test suites, builds). The harness enforces a hard ceiling.",
             .parameters_schema_json =
                 "{\"type\":\"object\","
                 "\"properties\":{"

@@ -12,10 +12,12 @@
  * no AGENTS.md files and no SKILL.md files were found.
  *
  * Built once at session start and reused across turns so the assembled
- * system prompt stays byte-identical and cache-friendly — every field is
- * stable for the lifetime of the process except `date`, which we accept
- * may drift on long sessions (the model has tools if it really cares
- * about the wall clock).
+ * system prompt stays byte-identical and cache-friendly — every field
+ * (cwd, os, shell, model, is_git_repo, preferred_commands) reflects
+ * process startup state and is fixed for the session's lifetime. The
+ * model has tools if it really needs the wall clock, so we deliberately
+ * don't emit a `date:` field that would drift across midnight and
+ * invalidate the cache.
  *
  * `model` is interpolated into the env block; pass NULL or "" to omit it.
  *

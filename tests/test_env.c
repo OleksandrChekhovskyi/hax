@@ -119,7 +119,6 @@ static void test_env_block_present_by_default(void)
         EXPECT(contains(p, "  os: "));
         EXPECT(contains(p, "  shell: "));
         EXPECT(contains(p, "  model: claude-test-1"));
-        EXPECT(contains(p, "  date: "));
         EXPECT(contains(p, "  is_git_repo: no"));
         free(p);
     }
@@ -224,6 +223,198 @@ static void test_both_knobs_disable_returns_null(void)
     free(p);
     unsetenv("HAX_NO_ENV");
     unsetenv("HAX_NO_AGENTS_MD");
+    sb_free(&s);
+}
+
+/* ---------- commands probe ---------- */
+
+/* Stage a fake executable named `name` under `dir` (creating `dir`).
+ * Content is irrelevant — env.c only checks access(X_OK). */
+static void stage_fake_command(const char *dir, const char *name)
+{
+    mkdirs(dir);
+    char *path = xasprintf("%s/%s", dir, name);
+    write_file(path, "#!/bin/sh\n");
+    if (chmod(path, 0755) != 0)
+        FAIL("chmod(%s): %s", path, strerror(errno));
+    free(path);
+}
+
+static void test_commands_line_lists_present(void)
+{
+    struct sandbox s;
+    sb_init(&s);
+    if (chdir(s.root) != 0) {
+        sb_free(&s);
+        return;
+    }
+    char *bin = xasprintf("%s/bin", s.root);
+    stage_fake_command(bin, "rg");
+    stage_fake_command(bin, "jq");
+    /* PATH = sandbox bin only. Real /usr/bin tools (gh, python3, etc.)
+     * are then deliberately invisible, pinning the expected line. */
+    char *prev_path = getenv("PATH");
+    char *saved = prev_path ? xstrdup(prev_path) : NULL;
+    setenv("PATH", bin, 1);
+
+    char *p = env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        /* rg has a replacement annotation (grep -r); jq doesn't. */
+        EXPECT(contains(p, "  preferred_commands: rg (instead of grep -r), jq\n"));
+        free(p);
+    }
+
+    if (saved) {
+        setenv("PATH", saved, 1);
+        free(saved);
+    } else {
+        unsetenv("PATH");
+    }
+    free(bin);
+    sb_free(&s);
+}
+
+static void test_commands_line_omitted_when_none(void)
+{
+    struct sandbox s;
+    sb_init(&s);
+    if (chdir(s.root) != 0) {
+        sb_free(&s);
+        return;
+    }
+    /* Empty (but valid) PATH dir → none of the probed commands present. */
+    char *empty_bin = xasprintf("%s/empty-bin", s.root);
+    mkdirs(empty_bin);
+    char *prev_path = getenv("PATH");
+    char *saved = prev_path ? xstrdup(prev_path) : NULL;
+    setenv("PATH", empty_bin, 1);
+
+    char *p = env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(!contains(p, "preferred_commands:"));
+        free(p);
+    }
+
+    if (saved) {
+        setenv("PATH", saved, 1);
+        free(saved);
+    } else {
+        unsetenv("PATH");
+    }
+    free(empty_bin);
+    sb_free(&s);
+}
+
+static void test_commands_line_skips_relative_path_entries(void)
+{
+    /* PATH entries that are relative (`.`, `bin`, …) refer to cwd, which
+     * may be a checkout of someone else's project. Advertising a binary
+     * picked up from a relative PATH entry could steer the model toward
+     * a repo-provided executable that shadows the host utility. Stage a
+     * fake `rg` directly in cwd, set PATH=., expect it NOT to appear. */
+    struct sandbox s;
+    sb_init(&s);
+    if (chdir(s.root) != 0) {
+        sb_free(&s);
+        return;
+    }
+    /* Drop the fake straight into cwd, no subdir — `.` resolves here. */
+    stage_fake_command(s.root, "rg");
+    char *prev_path = getenv("PATH");
+    char *saved = prev_path ? xstrdup(prev_path) : NULL;
+    setenv("PATH", ".", 1);
+
+    char *p = env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(!contains(p, "preferred_commands:"));
+        EXPECT(!contains(p, "rg"));
+        free(p);
+    }
+
+    if (saved) {
+        setenv("PATH", saved, 1);
+        free(saved);
+    } else {
+        unsetenv("PATH");
+    }
+    sb_free(&s);
+}
+
+static void test_commands_line_ignores_directories(void)
+{
+    /* access(X_OK) returns success for searchable directories, so a PATH
+     * entry containing a `rg/` subdirectory must not be advertised as the
+     * `rg` command. Stage a directory named like a probed command and a
+     * real fake executable for an unrelated probed command, expect only
+     * the real one to land in the line. */
+    struct sandbox s;
+    sb_init(&s);
+    if (chdir(s.root) != 0) {
+        sb_free(&s);
+        return;
+    }
+    char *bin = xasprintf("%s/bin", s.root);
+    char *rg_as_dir = xasprintf("%s/rg", bin);
+    mkdirs(rg_as_dir);
+    stage_fake_command(bin, "jq");
+    char *prev_path = getenv("PATH");
+    char *saved = prev_path ? xstrdup(prev_path) : NULL;
+    setenv("PATH", bin, 1);
+
+    char *p = env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(contains(p, "  preferred_commands: jq\n"));
+        EXPECT(!contains(p, "rg"));
+        free(p);
+    }
+
+    if (saved) {
+        setenv("PATH", saved, 1);
+        free(saved);
+    } else {
+        unsetenv("PATH");
+    }
+    free(rg_as_dir);
+    free(bin);
+    sb_free(&s);
+}
+
+static void test_commands_line_preserves_canonical_order(void)
+{
+    /* Probed list is rg, fd, jq, gh, python3, node — line should follow
+     * that order regardless of which subset is present. */
+    struct sandbox s;
+    sb_init(&s);
+    if (chdir(s.root) != 0) {
+        sb_free(&s);
+        return;
+    }
+    char *bin = xasprintf("%s/bin", s.root);
+    stage_fake_command(bin, "node");
+    stage_fake_command(bin, "rg");
+    stage_fake_command(bin, "gh");
+    char *prev_path = getenv("PATH");
+    char *saved = prev_path ? xstrdup(prev_path) : NULL;
+    setenv("PATH", bin, 1);
+
+    char *p = env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(contains(p, "  preferred_commands: rg (instead of grep -r), gh, node\n"));
+        free(p);
+    }
+
+    if (saved) {
+        setenv("PATH", saved, 1);
+        free(saved);
+    } else {
+        unsetenv("PATH");
+    }
+    free(bin);
     sb_free(&s);
 }
 
@@ -671,6 +862,12 @@ int main(void)
     test_env_block_omits_model_when_null();
     test_no_env_knob_disables_block();
     test_both_knobs_disable_returns_null();
+
+    test_commands_line_lists_present();
+    test_commands_line_omitted_when_none();
+    test_commands_line_skips_relative_path_entries();
+    test_commands_line_ignores_directories();
+    test_commands_line_preserves_canonical_order();
 
     test_agents_md_cwd_only_no_root_marker();
     test_agents_md_walks_to_git_root_farthest_first();

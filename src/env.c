@@ -8,7 +8,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "utf8_sanitize.h"
@@ -35,6 +34,67 @@ static int env_flag_set(const char *name)
 {
     const char *v = getenv(name);
     return v && *v;
+}
+
+/* Host-level utilities a coding agent reaches for regardless of project
+ * type. Project-driven tooling (npm/pnpm/yarn/bun, cargo, go, cmake, …)
+ * is selected by lockfiles in cwd, not by host availability, so we
+ * deliberately don't probe for those — knowing pnpm exists doesn't help
+ * when the project has package-lock.json.
+ *
+ * `replaces` is the older-equivalent the model should drop in favor of
+ * `name` when `name` is present. NULL means "no specific replacement"
+ * (the tool just adds capability — jq, gh, node). The pair is rendered
+ * inline in the preferred_commands line so the directive is filtered
+ * automatically: a missing `name` means its replacement guidance also
+ * disappears, which avoids telling the model to use a tool that isn't
+ * installed. */
+struct probed_cmd {
+    const char *name;
+    const char *replaces;
+};
+static const struct probed_cmd PROBED_COMMANDS[] = {
+    {"rg", "grep -r"}, {"fd", "find"},        {"jq", NULL},
+    {"gh", NULL},      {"python3", "python"}, {"node", NULL},
+};
+static const size_t N_PROBED_COMMANDS = sizeof(PROBED_COMMANDS) / sizeof(PROBED_COMMANDS[0]);
+
+/* Walk $PATH and check whether `name` is an executable regular file in
+ * any of its entries. Only absolute PATH entries are considered: empty
+ * entries (POSIX "the current directory"), `.`, and any other relative
+ * form are skipped, because anything cwd-relative could pick up a
+ * project-local binary and we'd then advertise it as a host utility —
+ * confusing at best, and a way to steer the model toward repo-provided
+ * commands at worst. The S_ISREG guard matters too: access(X_OK)
+ * returns success for searchable directories, so a PATH entry containing
+ * a directory named `rg` would otherwise make us claim rg is installed
+ * even though /bin/sh -c rg can't run it. No subprocess: just stat +
+ * access, microseconds total. */
+static int have_command(const char *name)
+{
+    const char *path = getenv("PATH");
+    if (!path || !*path)
+        return 0;
+
+    const char *p = path;
+    while (*p) {
+        const char *colon = strchr(p, ':');
+        size_t dirlen = colon ? (size_t)(colon - p) : strlen(p);
+        if (dirlen > 0 && p[0] == '/' && dirlen < PATH_MAX - 1 - strlen(name) - 1) {
+            char candidate[PATH_MAX];
+            int n = snprintf(candidate, sizeof(candidate), "%.*s/%s", (int)dirlen, p, name);
+            if (n > 0 && (size_t)n < sizeof(candidate)) {
+                struct stat st;
+                if (stat(candidate, &st) == 0 && S_ISREG(st.st_mode) &&
+                    access(candidate, X_OK) == 0)
+                    return 1;
+            }
+        }
+        if (!colon)
+            break;
+        p = colon + 1;
+    }
+    return 0;
 }
 
 /* Walk cwd → filesystem root, returning a malloc'd path to the first
@@ -84,14 +144,6 @@ static void append_env_block(struct buf *b, const char *model)
     if (!shell || !*shell)
         shell = "/bin/sh";
 
-    char date[16];
-    time_t t = time(NULL);
-    struct tm tm_;
-    if (localtime_r(&t, &tm_))
-        strftime(date, sizeof(date), "%Y-%m-%d", &tm_);
-    else
-        snprintf(date, sizeof(date), "unknown");
-
     char *project_root = find_project_root(cwd);
     int git = project_root != NULL;
     free(project_root);
@@ -99,14 +151,14 @@ static void append_env_block(struct buf *b, const char *model)
     /* Linux paths are arbitrary byte sequences and env vars are user-set,
      * so any of cwd / shell / model could carry non-UTF-8 bytes. Jansson
      * rejects non-UTF-8 and embedded NULs, so clean each before splicing.
-     * uname and strftime outputs are POSIX-defined to be ASCII and don't
-     * need this treatment. */
+     * uname output is POSIX-defined to be ASCII and doesn't need this
+     * treatment. */
     char *cwd_clean = sanitize_utf8(cwd, strlen(cwd));
     char *shell_clean = sanitize_utf8(shell, strlen(shell));
     char *model_clean = (model && *model) ? sanitize_utf8(model, strlen(model)) : NULL;
 
     buf_append_str(b, "<env>\n");
-    char *line = xasprintf("  cwd: %s\n", cwd_clean);
+    char *line = xasprintf("  cwd: %s (fixed for the session)\n", cwd_clean);
     buf_append_str(b, line);
     free(line);
     line = xasprintf("  os: %s %s\n", os_name, os_release);
@@ -120,12 +172,30 @@ static void append_env_block(struct buf *b, const char *model)
         buf_append_str(b, line);
         free(line);
     }
-    line = xasprintf("  date: %s\n", date);
-    buf_append_str(b, line);
-    free(line);
     line = xasprintf("  is_git_repo: %s\n", git ? "yes" : "no");
     buf_append_str(b, line);
     free(line);
+
+    int any_cmd = 0;
+    for (size_t i = 0; i < N_PROBED_COMMANDS; i++) {
+        if (!have_command(PROBED_COMMANDS[i].name))
+            continue;
+        if (!any_cmd) {
+            buf_append_str(b, "  preferred_commands: ");
+            any_cmd = 1;
+        } else {
+            buf_append_str(b, ", ");
+        }
+        buf_append_str(b, PROBED_COMMANDS[i].name);
+        if (PROBED_COMMANDS[i].replaces) {
+            buf_append_str(b, " (instead of ");
+            buf_append_str(b, PROBED_COMMANDS[i].replaces);
+            buf_append_str(b, ")");
+        }
+    }
+    if (any_cmd)
+        buf_append_str(b, "\n");
+
     buf_append_str(b, "</env>\n");
 
     free(cwd_clean);
