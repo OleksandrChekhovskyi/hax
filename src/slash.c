@@ -8,6 +8,7 @@
 
 #include "agent.h"
 #include "ansi.h"
+#include "clipboard.h"
 #include "util.h"
 
 /* Maximum number of aliases a single command can advertise. Three is
@@ -29,6 +30,7 @@ struct shortcut_def {
 };
 
 static void slash_run_new(struct slash_ctx *ctx);
+static void slash_run_copy(struct slash_ctx *ctx);
 static void slash_run_usage(struct slash_ctx *ctx);
 static void slash_run_help(struct slash_ctx *ctx);
 
@@ -40,6 +42,12 @@ static const struct slash_cmd COMMANDS[] = {
         .aliases = {"clear", NULL},
         .summary = "start a fresh conversation",
         .run = slash_run_new,
+    },
+    {
+        .name = "copy",
+        .aliases = {NULL},
+        .summary = "copy last response to clipboard",
+        .run = slash_run_copy,
     },
     {
         .name = "usage",
@@ -160,6 +168,38 @@ static void slash_run_new(struct slash_ctx *ctx)
 {
     agent_session_reset(ctx->sess);
     agent_print_banner(ctx->provider, ctx->sess);
+}
+
+/* ---------- /copy ---------- */
+
+static void slash_run_copy(struct slash_ctx *ctx)
+{
+    /* Walk the items vector backwards for the most recent assistant
+     * message with non-empty text. Tool calls, tool results, reasoning
+     * items, and turn boundaries are skipped — they're not what the
+     * user means by "the last response". The text field already holds
+     * the model's raw Markdown, so no conversion is needed. */
+    const struct item *msg = NULL;
+    if (ctx->sess) {
+        for (size_t i = ctx->sess->n_items; i > 0; i--) {
+            const struct item *it = &ctx->sess->items[i - 1];
+            if (it->kind == ITEM_ASSISTANT_MESSAGE && it->text && it->text[0]) {
+                msg = it;
+                break;
+            }
+        }
+    }
+    if (!msg) {
+        printf(ANSI_DIM "no assistant response to copy" ANSI_RESET "\n");
+        return;
+    }
+    size_t len = strlen(msg->text);
+    const char *err = NULL;
+    if (clipboard_copy(msg->text, len, &err) == 0) {
+        printf(ANSI_DIM "copied %zu byte%s to clipboard" ANSI_RESET "\n", len, len == 1 ? "" : "s");
+        return;
+    }
+    printf(ANSI_RED "clipboard copy failed: %s" ANSI_RESET "\n", err ? err : "unknown error");
 }
 
 /* ---------- /usage ---------- */

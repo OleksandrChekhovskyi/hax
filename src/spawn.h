@@ -31,6 +31,35 @@
 
 int spawn_run(const char *shell_cmd);
 
+/* Lower-level signal/wait helpers for callers that own their own
+ * fork+exec lifecycle (e.g. argv-based exec with custom child fd
+ * wiring, where neither spawn_run nor spawn_pipe_open's shell-and-
+ * FILE* shape fits). Exposed so we can have one canonical
+ * implementation of the POSIX system()-style parent/child signal
+ * etiquette plus the EINTR-tolerant waitpid loop, instead of
+ * duplicating ~10 lines per caller. */
+
+/* Save current SIGINT/SIGQUIT/SIGPIPE dispositions and replace them
+ * with SIG_IGN. Caller must pair with spawn_parent_restore. The
+ * three-signal set matches POSIX system()'s etiquette plus SIGPIPE,
+ * so a child writing to a closed pipe — or a terminal-generated
+ * Ctrl-C / Ctrl-\ during the child run — doesn't take down hax. */
+void spawn_parent_ignore(struct sigaction *saved_int, struct sigaction *saved_quit,
+                         struct sigaction *saved_pipe);
+
+/* Restore dispositions saved by spawn_parent_ignore. */
+void spawn_parent_restore(const struct sigaction *saved_int, const struct sigaction *saved_quit,
+                          const struct sigaction *saved_pipe);
+
+/* Reset SIGINT/SIGQUIT/SIGPIPE to SIG_DFL — call from the post-fork
+ * child before exec so the spawned program sees terminal signals
+ * normally (Ctrl-C in less quits less, not the parent). */
+void spawn_child_default_signals(void);
+
+/* waitpid(pid, &status, 0) with an EINTR retry loop. Returns the
+ * waitpid status word on success, -1 on non-EINTR error. */
+int spawn_wait_child(pid_t pid);
+
 struct spawn_pipe {
     FILE *w;
     pid_t pid;

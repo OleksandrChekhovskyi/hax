@@ -13,8 +13,8 @@
  * pipe variant) — quitting the child early would otherwise terminate
  * hax via the default disposition. Saving/restoring locally keeps
  * the rest of the process unaffected. */
-static void parent_ignore(struct sigaction *saved_int, struct sigaction *saved_quit,
-                          struct sigaction *saved_pipe)
+void spawn_parent_ignore(struct sigaction *saved_int, struct sigaction *saved_quit,
+                         struct sigaction *saved_pipe)
 {
     struct sigaction ign;
     memset(&ign, 0, sizeof(ign));
@@ -25,8 +25,8 @@ static void parent_ignore(struct sigaction *saved_int, struct sigaction *saved_q
     sigaction(SIGPIPE, &ign, saved_pipe);
 }
 
-static void parent_restore(const struct sigaction *saved_int, const struct sigaction *saved_quit,
-                           const struct sigaction *saved_pipe)
+void spawn_parent_restore(const struct sigaction *saved_int, const struct sigaction *saved_quit,
+                          const struct sigaction *saved_pipe)
 {
     sigaction(SIGINT, saved_int, NULL);
     sigaction(SIGQUIT, saved_quit, NULL);
@@ -38,7 +38,7 @@ static void parent_restore(const struct sigaction *saved_int, const struct sigac
  * signals normally. signal() is in POSIX's async-signal-safe list and
  * the post-fork child is single-threaded — the simpler API is fine
  * here. */
-static void child_default_signals(void)
+void spawn_child_default_signals(void)
 {
     signal(SIGINT, SIG_DFL);
     signal(SIGQUIT, SIG_DFL);
@@ -53,11 +53,12 @@ static void exec_into_shell(const char *cmd)
     execv("/bin/sh", argv);
 }
 
-/* Restart waitpid on EINTR. SIGINT/SIGQUIT/SIGPIPE are ignored above,
- * but SIGTERM/SIGHUP can still interrupt — those would have just
- * fired hax's own handler which calls _exit(), so we won't reach
- * here in that case. EINTR from anything else: retry. */
-static int wait_child(pid_t pid)
+/* Restart waitpid on EINTR. SIGINT/SIGQUIT/SIGPIPE are ignored by
+ * spawn_parent_ignore, but SIGTERM/SIGHUP can still interrupt —
+ * those would have just fired hax's own handler which calls _exit(),
+ * so we won't reach here in that case. EINTR from anything else:
+ * retry. */
+int spawn_wait_child(pid_t pid)
 {
     int status;
     while (waitpid(pid, &status, 0) < 0) {
@@ -72,22 +73,22 @@ int spawn_run(const char *shell_cmd)
     if (!shell_cmd)
         return -1;
     struct sigaction si, sq, sp;
-    parent_ignore(&si, &sq, &sp);
+    spawn_parent_ignore(&si, &sq, &sp);
 
     pid_t pid = fork();
     if (pid < 0) {
         int saved_errno = errno;
-        parent_restore(&si, &sq, &sp);
+        spawn_parent_restore(&si, &sq, &sp);
         errno = saved_errno;
         return -1;
     }
     if (pid == 0) {
-        child_default_signals();
+        spawn_child_default_signals();
         exec_into_shell(shell_cmd);
         _exit(127);
     }
-    int status = wait_child(pid);
-    parent_restore(&si, &sq, &sp);
+    int status = spawn_wait_child(pid);
+    spawn_parent_restore(&si, &sq, &sp);
     return status;
 }
 
@@ -105,12 +106,12 @@ int spawn_pipe_open(struct spawn_pipe *sp, const char *shell_cmd)
     if (pipe(pfd) < 0)
         return -1;
 
-    parent_ignore(&sp->saved_int, &sp->saved_quit, &sp->saved_pipe);
+    spawn_parent_ignore(&sp->saved_int, &sp->saved_quit, &sp->saved_pipe);
 
     pid_t pid = fork();
     if (pid < 0) {
         int saved_errno = errno;
-        parent_restore(&sp->saved_int, &sp->saved_quit, &sp->saved_pipe);
+        spawn_parent_restore(&sp->saved_int, &sp->saved_quit, &sp->saved_pipe);
         close(pfd[0]);
         close(pfd[1]);
         memset(sp, 0, sizeof(*sp));
@@ -118,7 +119,7 @@ int spawn_pipe_open(struct spawn_pipe *sp, const char *shell_cmd)
         return -1;
     }
     if (pid == 0) {
-        child_default_signals();
+        spawn_child_default_signals();
         /* Wire the pipe's read end as stdin and drop both pipe fds
          * (after dup2 the read end has a second descriptor on fd 0;
          * the original needs to go too so the child sees a clean fd
@@ -141,11 +142,11 @@ int spawn_pipe_open(struct spawn_pipe *sp, const char *shell_cmd)
          * zombie. SIGTERM is needed because we can't rely on stdin EOF
          * to make the child exit — pagers like less open /dev/tty for
          * input rather than reading stdin, so closing the pipe alone
-         * would leave wait_child blocking indefinitely. fdopen only
+         * would leave spawn_wait_child blocking indefinitely. fdopen only
          * fails on OOM in practice, so this is a cold path. */
         kill(pid, SIGTERM);
-        (void)wait_child(pid);
-        parent_restore(&sp->saved_int, &sp->saved_quit, &sp->saved_pipe);
+        (void)spawn_wait_child(pid);
+        spawn_parent_restore(&sp->saved_int, &sp->saved_quit, &sp->saved_pipe);
         memset(sp, 0, sizeof(*sp));
         errno = saved_errno;
         return -1;
@@ -162,8 +163,8 @@ int spawn_pipe_close(struct spawn_pipe *sp)
     /* Close write end first so the child sees EOF and exits. */
     fclose(sp->w);
     sp->w = NULL;
-    int status = wait_child(sp->pid);
-    parent_restore(&sp->saved_int, &sp->saved_quit, &sp->saved_pipe);
+    int status = spawn_wait_child(sp->pid);
+    spawn_parent_restore(&sp->saved_int, &sp->saved_quit, &sp->saved_pipe);
     sp->pid = 0;
     return status;
 }

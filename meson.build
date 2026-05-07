@@ -40,6 +40,7 @@ sources = files(
     'src/agent.c',
     'src/agent_core.c',
     'src/bg.c',
+    'src/clipboard.c',
     'src/cmd_classify.c',
     'src/ctrl_strip.c',
     'src/diff.c',

@@ -223,13 +223,25 @@ test_slash = executable('test_slash',
         'test_slash.c',
         '../src/slash.c',
         '../src/agent_core.c',
+        '../src/clipboard.c',
         '../src/env.c',
+        '../src/spawn.c',
         '../src/turn.c',
         '../src/utf8_sanitize.c',
         '../src/util.c',
     ],
 )
 test('slash', test_slash)
+
+test_clipboard = executable('test_clipboard',
+    sources: [
+        'test_clipboard.c',
+        '../src/clipboard.c',
+        '../src/spawn.c',
+        '../src/util.c',
+    ],
+)
+test('clipboard', test_clipboard)
 
 test_tool_render = executable('test_tool_render',
     sources: [
