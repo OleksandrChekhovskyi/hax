@@ -30,7 +30,7 @@
 /* The ASCII fallback is used when locale_init_utf8() couldn't establish a
  * UTF-8 LC_CTYPE — wcwidth() under a non-UTF-8 locale would mis-account
  * the multibyte glyph and break cursor positioning. */
-#define PROMPT_UTF8  ANSI_MAGENTA ANSI_BOLD "❯" ANSI_BOLD_OFF ANSI_FG_DEFAULT " "
+#define PROMPT_UTF8  ANSI_BRIGHT_MAGENTA ANSI_BOLD "❯" ANSI_BOLD_OFF ANSI_FG_DEFAULT " "
 #define PROMPT_ASCII ANSI_BOLD ">" ANSI_BOLD_OFF " "
 
 /* True when `it` is a tool_result whose output already ends with the

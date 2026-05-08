@@ -22,11 +22,12 @@
 #define ANSI_BOLD_OFF   "\x1b[22m" /* also closes dim — same SGR */
 #define ANSI_ITALIC_OFF "\x1b[23m"
 
-#define ANSI_RED        "\x1b[31m"
-#define ANSI_GREEN      "\x1b[32m"
-#define ANSI_MAGENTA    "\x1b[35m"
-#define ANSI_CYAN       "\x1b[36m"
-#define ANSI_FG_DEFAULT "\x1b[39m"
+#define ANSI_RED            "\x1b[31m"
+#define ANSI_GREEN          "\x1b[32m"
+#define ANSI_MAGENTA        "\x1b[35m"
+#define ANSI_CYAN           "\x1b[36m"
+#define ANSI_BRIGHT_MAGENTA "\x1b[95m"
+#define ANSI_FG_DEFAULT     "\x1b[39m"
 
 #define ANSI_ERASE_LINE "\x1b[K"
 

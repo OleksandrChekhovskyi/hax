@@ -146,7 +146,7 @@ static void test_user_message_has_magenta_bar(void)
 {
     struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = (char *)"hello"}};
     char *out = render_to_string(NULL, items, 1);
-    EXPECT(contains(out, ANSI_MAGENTA));
+    EXPECT(contains(out, ANSI_BRIGHT_MAGENTA));
     EXPECT(contains(out, "▌ "));
     EXPECT(contains(out, "hello"));
     free(out);

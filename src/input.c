@@ -397,7 +397,7 @@ static void render_submitted(struct input *in)
         printf("\x1b[%dA", in->last_cursor_row);
     fputs("\r\x1b[J", stdout);
 
-    const char *bar = ANSI_MAGENTA "▌ ";
+    const char *bar = ANSI_BRIGHT_MAGENTA "▌ ";
     const int bar_col = 2; /* visual width of "▌ " */
     int cols = in->term_cols;
     fputs(bar, stdout);

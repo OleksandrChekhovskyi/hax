@@ -115,14 +115,14 @@ static void ensure_newline(FILE *out, const char *s)
         fputc('\n', out);
 }
 
-/* User messages: magenta `▌ ` prefix on every line, body also magenta.
- * Mirrors input.c's render_submitted so user turns in the transcript
- * look identical to how they appeared at submit time. With color=0
- * the bar collapses to a plain `▌ ` prefix — still useful as a visual
- * anchor in `cat` output. */
+/* User messages: bright magenta `▌ ` prefix on every line, body also
+ * bright magenta. Mirrors input.c's render_submitted so user turns in
+ * the transcript look identical to how they appeared at submit time.
+ * With color=0 the bar collapses to a plain `▌ ` prefix — still useful
+ * as a visual anchor in `cat` output. */
 static void render_user(FILE *out, int color, const struct item *it)
 {
-    const char *open = ANSI_IF(ANSI_MAGENTA);
+    const char *open = ANSI_IF(ANSI_BRIGHT_MAGENTA);
     const char *close = ANSI_IF(ANSI_FG_DEFAULT);
     const char *p = it->text ? it->text : "";
     fputs(open, out);
