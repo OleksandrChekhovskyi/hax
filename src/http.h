@@ -9,20 +9,21 @@
 struct http_response {
     long status;
     char *error_body; /* non-null on non-2xx or transport error; caller frees */
-    int cancelled;    /* 1 when transfer was aborted by cancel_cb returning non-zero */
+    int cancelled;    /* 1 when transfer was aborted by tick returning non-zero */
 };
 
-/* Optional polled-cancellation callback. When provided and it returns
- * non-zero, the in-flight transfer is aborted promptly:
- *   - on every received chunk (write path), and
- *   - periodically (~1Hz) via libcurl's progress callback, so a silent
- *     server can still be aborted without waiting for the next byte.
- * NULL = no cancellation. */
-typedef int (*http_cancel_cb)(void);
+/* Periodic side-channel callback. Called from libcurl's progress hook
+ * (~1Hz, fires even when the server is silent) and on every received
+ * chunk. Returning non-zero aborts the in-flight transfer promptly.
+ * Side effects are allowed — the agent uses this slot to do wall-clock
+ * idle detection ("model went quiet mid-text, surface a spinner")
+ * alongside the cancel check. NULL = no tick (no cancel, no idle). */
+typedef int (*http_tick_cb)(void *user);
 
 /* headers: NULL-terminated array of "Key: Value" strings. */
 int http_sse_post(const char *url, const char *const *headers, const char *body, size_t body_len,
-                  sse_cb cb, void *user, http_cancel_cb cancel, struct http_response *resp);
+                  sse_cb cb, void *user, http_tick_cb tick, void *tick_user,
+                  struct http_response *resp);
 
 /* Synchronous GET into a freshly-allocated NUL-terminated buffer. Used for
  * small JSON probes (e.g. /v1/models, /props) where streaming is overkill.
@@ -36,11 +37,11 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
  * to disable. Connect timeout is fixed at a short value so an unreachable
  * host fails fast.
  *
- * `cancel` is an optional polled-cancellation hook (same shape as for
- * http_sse_post). Background probes pass bg_cancel_thunk so shutdown can
- * abort an in-flight transfer in well under a second instead of waiting
- * out the timeout. NULL = no cancellation. */
-int http_get(const char *url, const char *const *headers, long timeout_s, http_cancel_cb cancel,
-             char **out);
+ * `tick` is an optional side-channel hook (same shape as for
+ * http_sse_post). Background probes pass `bg_tick` with their job
+ * pointer so shutdown can abort an in-flight transfer in well under a
+ * second instead of waiting out the timeout. NULL = no tick. */
+int http_get(const char *url, const char *const *headers, long timeout_s, http_tick_cb tick,
+             void *tick_user, char **out);
 
 #endif /* HAX_HTTP_H */

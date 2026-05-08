@@ -9,10 +9,13 @@
 
 void disp_emit_held(struct disp *d)
 {
+    if (d->held == 0)
+        return;
     for (int i = 0; i < d->held; i++)
         fputc('\n', stdout);
     d->trail += d->held;
     d->held = 0;
+    d->at_space_or_bol = 1; /* cursor is now at column 0 of a fresh line */
 }
 
 void disp_putc(struct disp *d, char c)
@@ -23,6 +26,7 @@ void disp_putc(struct disp *d, char c)
         disp_emit_held(d);
         fputc(c, stdout);
         d->trail = 0;
+        d->at_space_or_bol = (c == ' ');
     }
 }
 
@@ -48,6 +52,14 @@ void disp_write(struct disp *d, const char *s, size_t n)
         disp_emit_held(d);
         fwrite(s, 1, n - tail_bytes, stdout);
         d->trail = 0;
+        /* Last visible byte committed determines the boundary state.
+         * UTF-8 continuation bytes (0x80-0xBF) never equal space, so
+         * a multibyte codepoint ending here correctly reads as not-
+         * space without any decoder. \r mid-string returns the cursor
+         * to col 0 (terminal behavior) — treat it as a fresh-line
+         * boundary too. */
+        char last = s[n - tail_bytes - 1];
+        d->at_space_or_bol = (last == ' ' || last == '\r');
     }
     d->held += tail_breaks;
 }
@@ -83,6 +95,7 @@ void disp_block_separator(struct disp *d)
     if (need > 0)
         d->trail += need;
     d->held = 0;
+    d->at_space_or_bol = 1; /* cursor at column 0 of separator-fresh row */
 }
 
 void disp_first_delta_strip(const struct disp *d, const char **s, size_t *n)

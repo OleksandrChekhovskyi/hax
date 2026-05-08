@@ -38,6 +38,19 @@ void spinner_set_label(struct spinner *s, const char *label);
  * the caller knows cursor is at column 0 of a fresh row, not at end
  * of the prior text. */
 void spinner_show_inline(struct spinner *s);
+/* Sticky inline: same as spinner_show_inline but never auto-transitions
+ * to line mode. Use when the caller doesn't want any \n added during
+ * the wait — e.g. an idle indicator surfaced mid-stream where any disp-
+ * bypassing line break would break the model's paragraph layout and
+ * desync disp's held/trail bookkeeping. The sticky bit clears on hide
+ * so a subsequent spinner_show_inline gets the default behavior.
+ *
+ * `pad`: when 1, draw a leading space cell before the glyph so it
+ * doesn't appear glued to a non-whitespace character; on hide both
+ * cells are erased and the cursor returns to the original position.
+ * Pass 0 when the cursor is already at column 0 or right after a
+ * space — the glyph reads cleanly without an extra cell. */
+void spinner_show_inline_sticky(struct spinner *s, int pad);
 void spinner_free(struct spinner *s);
 
 #endif /* HAX_SPINNER_H */

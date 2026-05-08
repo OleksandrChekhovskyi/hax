@@ -11,7 +11,6 @@
 #include "bg.h"
 #include "codex_events.h"
 #include "http.h"
-#include "interrupt.h"
 #include "probe.h"
 #include "progress.h"
 #include "spinner.h"
@@ -22,8 +21,8 @@
 #define CODEX_MODELS_ENDPOINT "https://chatgpt.com/backend-api/codex/models"
 
 /* Generous enough for the catalog over a wonky link, short enough that a
- * dead probe doesn't block shutdown noticeably (the bg cancel hook
- * usually aborts well before this fires anyway). */
+ * dead probe doesn't block shutdown noticeably (the bg tick usually
+ * aborts well before this fires anyway). */
 #define CODEX_PROBE_TIMEOUT_S 5
 
 /* Sent as the `client_version` query parameter on /models. The backend
@@ -378,7 +377,7 @@ static int on_sse(const char *event_name, const char *data, void *user)
 /* ---------- provider interface ---------- */
 
 static int codex_stream(struct provider *p, const struct context *ctx, const char *model,
-                        stream_cb cb, void *user)
+                        stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
 {
     struct codex *c = (struct codex *)p;
 
@@ -418,8 +417,8 @@ static int codex_stream(struct provider *p, const struct context *ctx, const cha
     struct codex_events ev;
     codex_events_init(&ev, cb, user);
     struct http_response resp;
-    int rc = http_sse_post(CODEX_ENDPOINT, headers, body, body_len, on_sse, &ev,
-                           interrupt_requested, &resp);
+    int rc =
+        http_sse_post(CODEX_ENDPOINT, headers, body, body_len, on_sse, &ev, tick, tick_user, &resp);
 
     if (resp.cancelled) {
         /* User-initiated abort — agent layer handles the partial state
@@ -685,7 +684,7 @@ static int codex_query_usage(struct provider *p)
     struct spinner *sp = spinner_new("fetching usage...");
     spinner_show(sp);
     char *body = NULL;
-    int rc = http_get(CODEX_USAGE_ENDPOINT, headers, 30, NULL, &body);
+    int rc = http_get(CODEX_USAGE_ENDPOINT, headers, 30, NULL, NULL, &body);
     spinner_hide(sp);
     spinner_free(sp);
     free(auth_hdr);

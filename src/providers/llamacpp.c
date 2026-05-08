@@ -56,7 +56,7 @@ static int probe_model(const char *base_url, const char *api_key)
     const char *headers[] = {auth, NULL};
     char *body = NULL;
     int ok = 0;
-    if (http_get(url, auth ? headers : NULL, MODEL_PROBE_TIMEOUT_S, NULL, &body) == 0) {
+    if (http_get(url, auth ? headers : NULL, MODEL_PROBE_TIMEOUT_S, NULL, NULL, &body) == 0) {
         json_t *root = json_loads(body, 0, NULL);
         if (root) {
             json_t *data = json_object_get(root, "data");

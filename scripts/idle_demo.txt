@@ -1,0 +1,49 @@
+# Mock script exercising the post-text idle spinner.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/idle_demo.txt build/hax
+#
+# Each `delay 2500` sits ~1s past the TEXT_IDLE_TIMEOUT_MS threshold
+# (1500ms), so the agent's idle hook fires from inside mock's msleep
+# loop and drops a single dim glyph at the cursor's current position
+# via sticky-inline mode. The next event hides the glyph (\b space \b)
+# and the model's output resumes exactly where it left off — no
+# paragraph break, no disp bookkeeping perturbed.
+#
+# A real provider triggers the same path through http.c's progress
+# callback (~1Hz) instead of mock's polled msleep, but the agent-side
+# bookkeeping (last_text_at, idle_shown, agent_stream_tick) is identical.
+#
+# Two patterns are exercised:
+#
+#  Turn 1: text → pause → text → pause → text. The idle glyph fires
+#  twice between sentences. Real-world equivalent: a model that pauses
+#  between paragraphs to think.
+#
+#  Turn 2: text → pause → tool call. The idle glyph fires during the
+#  pause between the trailing text and the tool dispatch. Real-world
+#  equivalent: a model that says "let me look at X" and then takes a
+#  few seconds to generate the tool-call args (Qwen via llama.cpp does
+#  this routinely). Without idle detection across non-text events the
+#  user would stare at unchanging output during args streaming.
+
+text Sentence one — the model emits this then pauses.
+space
+delay 2500
+text Sentence two arrives after the pause; an inline glyph should have been visible during the wait without breaking the paragraph.
+delay 0
+space
+delay 2500
+text Sentence three — same again.
+usage in=100 out=20
+end-turn
+
+# Turn 2 plays on the next user message.
+text Let me look at a few more key pieces.
+delay 2500
+tool read {"path":"src/agent.c"}
+usage in=120 out=15
+end-turn
+
+text Done — that wraps up the second pattern.
+usage in=140 out=12
+end-turn

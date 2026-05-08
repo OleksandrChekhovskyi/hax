@@ -25,6 +25,13 @@ struct disp {
     int trail;    /* trailing newlines committed to terminal */
     int held;     /* trailing newlines received but not yet committed */
     int saw_text; /* have we emitted real model text yet this turn? */
+    /* 1 when the cursor is at column 0 (post-NL) or right after an
+     * ASCII space — i.e. a place where overlay glyphs (notably the
+     * idle inline spinner) can attach without looking glued to the
+     * preceding character. Updated by every byte-committing write so
+     * the agent can decide whether to ask the spinner for a leading
+     * pad cell. Initially 1 (fresh-line state). */
+    int at_space_or_bol;
 };
 
 /* Drain held newlines to stdout. */

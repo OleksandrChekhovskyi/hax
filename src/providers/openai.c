@@ -8,7 +8,6 @@
 
 #include "bg.h"
 #include "http.h"
-#include "interrupt.h"
 #include "openai_events.h"
 #include "util.h"
 
@@ -184,7 +183,7 @@ static int on_sse(const char *event_name, const char *data, void *user)
 /* ---------- provider interface ---------- */
 
 static int openai_stream(struct provider *p, const struct context *ctx, const char *model,
-                         stream_cb cb, void *user)
+                         stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
 {
     struct openai *o = (struct openai *)p;
 
@@ -214,8 +213,8 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
     struct openai_events ev;
     openai_events_init(&ev, cb, user);
     struct http_response resp;
-    int rc = http_sse_post(o->endpoint, headers, body, body_len, on_sse, &ev, interrupt_requested,
-                           &resp);
+    int rc =
+        http_sse_post(o->endpoint, headers, body, body_len, on_sse, &ev, tick, tick_user, &resp);
 
     free(headers);
 

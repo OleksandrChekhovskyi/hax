@@ -81,6 +81,10 @@ char *dup_trim_trailing_slash(const char *s);
  * a valid "disabled" value for callers that treat it as a sentinel). */
 long parse_duration_ms(const char *s);
 
+/* CLOCK_MONOTONIC milliseconds since an unspecified epoch — used for
+ * elapsed-time math (timeouts, idle thresholds, animation cadence). */
+long monotonic_ms(void);
+
 /* Write a random UUIDv4 (36 chars + NUL terminator) to out. Aborts on
  * failure (e.g. /dev/urandom unavailable) — same convention as xmalloc. */
 void gen_uuid_v4(char out[37]);

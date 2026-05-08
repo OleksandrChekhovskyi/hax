@@ -27,20 +27,18 @@ static void probe_args_free(struct probe_args *a)
 
 static void probe_run(struct bg_job *job, void *arg)
 {
-    (void)job;
     struct probe_args *a = arg;
     /* Cancellation between spawn and the first network byte: the bg
-     * cancel hook short-circuits libcurl from the progress callback,
-     * but we may also have been asked to quit before we even started.
-     * Skip the round-trip in that case. */
-    if (bg_cancel_thunk()) {
+     * tick short-circuits libcurl from the progress callback, but we
+     * may also have been asked to quit before we even started. Skip
+     * the round-trip in that case. */
+    if (bg_cancelled(job)) {
         probe_args_free(a);
         return;
     }
 
     char *body = NULL;
-    int rc =
-        http_get(a->url, (const char *const *)a->headers, a->timeout_s, bg_cancel_thunk, &body);
+    int rc = http_get(a->url, (const char *const *)a->headers, a->timeout_s, bg_tick, job, &body);
     if (rc == 0 && body) {
         long v = a->extract(body, a->user);
         if (v > 0)

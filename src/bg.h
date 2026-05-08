@@ -44,13 +44,10 @@ void bg_cancel(struct bg_job *job);
  * sentinel writes don't crash. */
 int bg_cancelled(const struct bg_job *job);
 
-/* Parameterless cancel hook suitable for http_get / http_sse_post's
- * cancel callback. Returns 1 when called from inside a bg worker whose
- * job has been cancelled, 0 otherwise (including when called outside
- * any bg context). The thread-local current-job pointer is set up by
- * the bg trampoline before the worker runs and cleared after it
- * returns, so workers just pass `bg_cancel_thunk` by name. */
-int bg_cancel_thunk(void);
+/* http_tick_cb-shaped wrapper that workers pass straight to http_get /
+ * http_sse_post: `http_get(..., bg_tick, job, &out)`. Returns non-zero
+ * once `job` has been cancelled, aborting the in-flight transfer. */
+int bg_tick(void *job);
 
 /* Wait for the worker to finish, then free the handle. After this
  * returns, `job` is invalid. NULL is a no-op. */

@@ -36,14 +36,13 @@ static void cancel_loop_worker(struct bg_job *job, void *arg)
     atomic_store(&c->v, 99);
 }
 
-static void thunk_worker(struct bg_job *job, void *arg)
+static void tick_worker(struct bg_job *job, void *arg)
 {
-    (void)job;
     struct counter *c = arg;
-    /* bg_cancel_thunk reads thread-local state populated by the bg
-     * trampoline — mirrors how a probe inside http_get's progress
-     * callback would observe a cancel. */
-    while (!bg_cancel_thunk())
+    /* bg_tick is the http_tick_cb-shaped wrapper a probe inside
+     * http_get's progress callback would invoke — same job pointer
+     * as the worker holds. */
+    while (!bg_tick(job))
         sleep_ms(1);
     atomic_store(&c->v, 7);
 }
@@ -67,10 +66,10 @@ int main(void)
     bg_join(j2);
     EXPECT(atomic_load(&c2.v) == 99);
 
-    /* Same signal reachable through the parameterless thunk that
-     * workers pass to http_get. */
+    /* Same signal reachable through the http_tick_cb-shaped wrapper
+     * that workers pass to http_get / http_sse_post. */
     struct counter c3 = {0};
-    struct bg_job *j3 = bg_spawn(thunk_worker, &c3);
+    struct bg_job *j3 = bg_spawn(tick_worker, &c3);
     EXPECT(j3 != NULL);
     sleep_ms(5);
     bg_cancel(j3);
@@ -83,9 +82,8 @@ int main(void)
     bg_join(NULL);
     EXPECT(bg_cancelled(NULL) == 0);
 
-    /* Outside any bg context the thunk reads NULL TLS and reports not
-     * cancelled. */
-    EXPECT(bg_cancel_thunk() == 0);
+    /* NULL job is treated as not-cancelled by bg_tick too. */
+    EXPECT(bg_tick(NULL) == 0);
 
     T_REPORT();
 }

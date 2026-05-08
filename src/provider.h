@@ -5,6 +5,8 @@
 #include <stdatomic.h>
 #include <stddef.h>
 
+#include "http.h"
+
 /*
  * A flat, provider-agnostic view of a conversation. Each item is one thing:
  * a user turn, an assistant text turn, a tool call, or a tool result.
@@ -144,8 +146,16 @@ struct provider {
     /* Reasoning effort used when HAX_REASONING_EFFORT is unset. NULL means
      * omit the field and let the backend choose. */
     const char *default_reasoning_effort;
+    /* Stream a model response. The provider drives the HTTP round-trip
+     * and translates SSE events into stream_event callbacks (`cb`). The
+     * `tick` slot is the agent's side-channel hook into the wait loop —
+     * called periodically (~1Hz) and on each received chunk, with the
+     * agent's user pointer. Returning non-zero aborts the transfer.
+     * Providers thread it straight through to http_sse_post; the mock
+     * provider polls it from its sleep loop so scripted pauses exercise
+     * the same path. NULL tick disables the hook. */
     int (*stream)(struct provider *p, const struct context *ctx, const char *model, stream_cb cb,
-                  void *user);
+                  void *user, http_tick_cb tick, void *tick_user);
     /* Optional. Print a provider-specific subscription/usage report to
      * stdout (rate-limit windows for a Codex-style plan, paid-API spend
      * totals, etc.). NULL means "/usage is not supported on this

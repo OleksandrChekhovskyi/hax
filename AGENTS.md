@@ -55,10 +55,11 @@ hax is a single-binary REPL:
 Everything funnels through small, stable interfaces in `src/provider.h` and `src/tool.h`.
 
 **`struct provider` (provider.h)** is the multi-provider seam. Each adapter exposes
-`stream(provider, context, model, cb, user)` that drives an SSE response and emits
-`struct stream_event` (text deltas, tool-call start/delta/end, reasoning items, done with
-usage, error). Adapters own their native SSE parsing and translate to the unified event
-vocabulary; the agent never sees provider-specific JSON. The shared `context_limit` atomic is
+`stream(provider, context, model, cb, user, tick, tick_user)` that drives an SSE response and
+emits `struct stream_event` (text deltas, tool-call start/delta/end, reasoning items, done
+with usage, error). Adapters own their native SSE parsing and translate to the unified event
+vocabulary; the agent never sees provider-specific JSON. The `tick` slot threads through to
+`http_sse_post` so the agent's idle/cancel bookkeeping rides the same callback. The shared `context_limit` atomic is
 an optional, late-fill slot for provider-owned context-window probes; the agent reads it when
 rendering the per-turn `%`-of-context display, after honoring `HAX_CONTEXT_LIMIT`.
 
@@ -108,14 +109,19 @@ missing `--- ` prefix and fall through to the standard dim preview.
 
 **`src/sse.{c,h}`** is a small boundary-safe SSE parser used by adapters.
 **`src/http.{c,h}`** wraps libcurl: `http_sse_post` for the streaming response path (with
-configurable idle timeout and a polled cancel hook), and `http_get` for bounded JSON GETs
-used by startup probes and Codex usage queries. All libcurl handles set `CURLOPT_NOSIGNAL` so
-foreground streams and background probes can run concurrently.
+configurable idle timeout and a polled tick callback), and `http_get` for bounded JSON GETs
+used by startup probes and Codex usage queries. The tick is `int (*)(void *user)` — called
+from libcurl's progress hook (~1Hz, fires even when the server is silent) and on every
+received chunk; non-zero return aborts the transfer. The agent uses it both to honor Esc
+cancellation and to detect "model went quiet mid-text" idle and surface a spinner. All
+libcurl handles set `CURLOPT_NOSIGNAL` so foreground streams and background probes can run
+concurrently.
 
 **`src/bg.{c,h}`** is the tiny background-job primitive for provider-owned async work:
-spawn/cancel/join plus a thread-local cancel thunk that workers pass directly to `http_get`.
-`src/providers/probe.{c,h}` builds on it for context-window probes; each provider that spawns
-a probe owns the handle and joins it in `destroy()` before freeing the target state.
+spawn/cancel/join plus `bg_tick(void *job)` — an `http_tick_cb`-shaped wrapper that workers
+pass straight to `http_get` / `http_sse_post` with their job pointer.
+`src/providers/probe.{c,h}` builds on it for context-window probes; each provider that
+spawns a probe owns the handle and joins it in `destroy()` before freeing the target state.
 
 **`src/ansi.h`** centralizes ANSI escape sequences — never inline `\033[...m` literals; add a
 constant there.

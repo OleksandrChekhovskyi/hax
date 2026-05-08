@@ -8,7 +8,6 @@
 #include <strings.h>
 #include <time.h>
 
-#include "../interrupt.h"
 #include "../provider.h"
 #include "../util.h"
 
@@ -35,6 +34,12 @@
  *
  *     Directives:
  *       text <message>           One text delta with the rest of the line.
+ *       space                    One single-space text delta. Use between
+ *                                consecutive `text` directives that should
+ *                                read as joined prose; without it, two
+ *                                `text` lines emit back-to-back deltas with
+ *                                no separator (same shape real providers
+ *                                produce token-aligned).
  *       tool <name> <json>       One tool call. Args is a single-line JSON object.
  *       delay <ms>               Sleep before the next emission and between
  *                                auto-streamed text chunks.
@@ -71,46 +76,73 @@ struct mock_provider {
     int next_turn;
 };
 
-/* Sleep up to `ms` milliseconds, polling for the Esc interrupt every
- * 50ms so a long scripted delay doesn't pin the REPL. Returns 1 if
- * interrupted, 0 on full sleep or non-positive `ms`. Real providers
- * cancel via libcurl's progress callback against `interrupt_requested`;
- * the mock has no HTTP, so we poll directly. */
-static int msleep(long ms)
+/* Sleep up to `ms` milliseconds, calling `tick` every 50ms so a long
+ * scripted delay doesn't pin the REPL and the agent's idle detection
+ * fires through the mock the same way it would through libcurl's
+ * progress callback. Returns 1 if the tick signals cancel, 0 on full
+ * sleep or non-positive `ms`. Real providers reach this path through
+ * libcurl's progress callback; the mock has no HTTP so it polls. */
+static int mock_tick(http_tick_cb tick, void *tick_user)
+{
+    return tick ? tick(tick_user) : 0;
+}
+
+static int msleep(long ms, http_tick_cb tick, void *tick_user)
 {
     while (ms > 0) {
-        if (interrupt_requested())
+        if (mock_tick(tick, tick_user))
             return 1;
         long step = ms < 50 ? ms : 50;
         struct timespec ts = {step / 1000, (step % 1000) * 1000000L};
         nanosleep(&ts, NULL);
         ms -= step;
     }
-    return interrupt_requested();
+    return mock_tick(tick, tick_user);
 }
 
-/* Auto-stream `s` as multiple text deltas of TEXT_CHUNK_BYTES bytes,
- * sleeping `delay_ms` between chunks. The chunked emission is what
- * gives the live preview something to repaint when delay > 0; with
- * delay == 0 the deltas still arrive separately but back-to-back. */
-static int emit_text_chunked(stream_cb cb, void *user, const char *s, long delay_ms)
+/* Auto-stream `s` as multiple text deltas of up to TEXT_CHUNK_BYTES
+ * bytes, sleeping `delay_ms` between chunks. The chunked emission is
+ * what gives the live preview something to repaint when delay > 0;
+ * with delay == 0 the deltas still arrive separately but back-to-back.
+ *
+ * Chunks are walked back to a UTF-8 codepoint boundary so a multibyte
+ * character (em-dash, emoji, …) never straddles two deltas. Real
+ * providers send token-aligned deltas which are already UTF-8-complete;
+ * a naive byte-window split would diverge from that and corrupt any
+ * mid-stream rendering that interleaves with the partial bytes (the
+ * idle inline spinner being the most visible example). */
+static int emit_text_chunked(stream_cb cb, void *user, const char *s, long delay_ms,
+                             http_tick_cb tick, void *tick_user)
 {
     size_t n = strlen(s);
     if (n == 0)
         return 0;
     char buf[TEXT_CHUNK_BYTES + 1];
-    for (size_t i = 0; i < n; i += TEXT_CHUNK_BYTES) {
-        if (interrupt_requested())
+    size_t i = 0;
+    while (i < n) {
+        if (mock_tick(tick, tick_user))
             return 0;
         size_t take = (n - i) < TEXT_CHUNK_BYTES ? (n - i) : TEXT_CHUNK_BYTES;
+        /* Walk back into the chunk while the proposed cut byte is a
+         * UTF-8 continuation (10xxxxxx). Don't cross past the start
+         * of the chunk — a single oversized codepoint just emits as-
+         * is, no worse than the original byte-sized split would have
+         * been, and keeps progress monotone. */
+        if (i + take < n) {
+            while (take > 0 && (s[i + take] & 0xC0) == 0x80)
+                take--;
+            if (take == 0)
+                take = (n - i) < TEXT_CHUNK_BYTES ? (n - i) : TEXT_CHUNK_BYTES;
+        }
         memcpy(buf, s + i, take);
         buf[take] = '\0';
         struct stream_event ev = {.kind = EV_TEXT_DELTA, .u.text_delta = {.text = buf}};
         int rc = cb(&ev, user);
         if (rc)
             return rc;
-        if (i + take < n) {
-            if (msleep(delay_ms))
+        i += take;
+        if (i < n) {
+            if (msleep(delay_ms, tick, tick_user))
                 return 0;
         }
     }
@@ -227,7 +259,7 @@ static struct stream_usage parse_usage(const char *s)
  * EOF), emitting events as we go. Returns 0 on clean turn, the
  * callback's non-zero return on cancellation, or -2 if EOF was hit
  * with no directives in this turn (caller should treat as "exhausted"). */
-static int play_one_turn(FILE *f, stream_cb cb, void *user)
+static int play_one_turn(FILE *f, stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
 {
     char line[8192];
     long delay_ms = 0;
@@ -235,11 +267,11 @@ static int play_one_turn(FILE *f, stream_cb cb, void *user)
     int saw_directive = 0;
 
     while (fgets(line, sizeof line, f)) {
-        /* Poll Esc between directives so a long script can be cut
+        /* Poll the tick between directives so a long script can be cut
          * short cleanly. Emit EV_DONE so the agent can absorb a
          * partial turn the same way it would for a real cancelled
          * stream. */
-        if (interrupt_requested())
+        if (mock_tick(tick, tick_user))
             return emit_done(cb, user, usage);
 
         strip_eol(line);
@@ -259,9 +291,23 @@ static int play_one_turn(FILE *f, stream_cb cb, void *user)
             continue;
         }
         if (starts_with(body, "text", &rest)) {
-            if (msleep(delay_ms))
+            if (msleep(delay_ms, tick, tick_user))
                 return emit_done(cb, user, usage);
-            int rc = emit_text_chunked(cb, user, rest, delay_ms);
+            int rc = emit_text_chunked(cb, user, rest, delay_ms, tick, tick_user);
+            if (rc)
+                return rc;
+            continue;
+        }
+        if (starts_with(body, "space", NULL)) {
+            /* Honor delay_ms before emission, matching `text` / `tool`
+             * — `space` is a one-byte text delta, not exempt from the
+             * configured pacing. Lets a script use `delay X / space`
+             * to model "wait X then emit space" (e.g. a token-aligned
+             * space delta arriving after a long pause). */
+            if (msleep(delay_ms, tick, tick_user))
+                return emit_done(cb, user, usage);
+            struct stream_event sp = {.kind = EV_TEXT_DELTA, .u.text_delta = {.text = " "}};
+            int rc = cb(&sp, user);
             if (rc)
                 return rc;
             continue;
@@ -282,7 +328,7 @@ static int play_one_turn(FILE *f, stream_cb cb, void *user)
             memcpy(name, rest, name_len);
             name[name_len] = '\0';
             const char *args = skip_ws(space);
-            if (msleep(delay_ms)) {
+            if (msleep(delay_ms, tick, tick_user)) {
                 free(name);
                 return emit_done(cb, user, usage);
             }
@@ -433,7 +479,8 @@ static void json_escape(const char *s, char *out)
     *o = '\0';
 }
 
-static int interactive_response(const struct context *ctx, stream_cb cb, void *user)
+static int interactive_response(const struct context *ctx, stream_cb cb, void *user,
+                                http_tick_cb tick, void *tick_user)
 {
     const struct item *last = last_item(ctx);
     if (!last)
@@ -442,7 +489,8 @@ static int interactive_response(const struct context *ctx, stream_cb cb, void *u
     /* Just got a tool result back — keep things terse and end the turn
      * so the user can decide what to do next. */
     if (last->kind == ITEM_TOOL_RESULT) {
-        int rc = emit_text_chunked(cb, user, "Tool finished — awaiting next instruction.", 0);
+        int rc = emit_text_chunked(cb, user, "Tool finished — awaiting next instruction.", 0, tick,
+                                   tick_user);
         if (rc)
             return rc;
         return emit_done(cb, user, empty_usage());
@@ -450,7 +498,7 @@ static int interactive_response(const struct context *ctx, stream_cb cb, void *u
 
     const struct item *u = last_of_kind(ctx, ITEM_USER_MESSAGE);
     if (!u || !u->text || !*u->text) {
-        int rc = emit_text_chunked(cb, user, "Hello.", 0);
+        int rc = emit_text_chunked(cb, user, "Hello.", 0, tick, tick_user);
         if (rc)
             return rc;
         return emit_done(cb, user, empty_usage());
@@ -473,7 +521,7 @@ static int interactive_response(const struct context *ctx, stream_cb cb, void *u
         char *escaped = xmalloc(strlen(quoted) * 6 + 1);
         json_escape(quoted, escaped);
         char *args = xasprintf("{\"%s\":\"%s\"}", arg_key, escaped);
-        int rc = emit_text_chunked(cb, user, "Sure, on it.", 0);
+        int rc = emit_text_chunked(cb, user, "Sure, on it.", 0, tick, tick_user);
         if (!rc)
             rc = emit_tool_call(cb, user, tool_name, args);
         free(args);
@@ -488,7 +536,7 @@ static int interactive_response(const struct context *ctx, stream_cb cb, void *u
     /* Echo the message back so the user sees something was received.
      * Useful when smoke-testing assistant-text rendering. */
     char *echo = xasprintf("You said: %s", u->text);
-    int rc = emit_text_chunked(cb, user, echo, 0);
+    int rc = emit_text_chunked(cb, user, echo, 0, tick, tick_user);
     free(echo);
     if (rc)
         return rc;
@@ -498,13 +546,13 @@ static int interactive_response(const struct context *ctx, stream_cb cb, void *u
 /* ---- Provider entry points ---------------------------------------- */
 
 static int mock_stream(struct provider *p, const struct context *ctx, const char *model,
-                       stream_cb cb, void *user)
+                       stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
 {
     (void)model;
     struct mock_provider *m = (struct mock_provider *)p;
 
     if (!m->script_path)
-        return interactive_response(ctx, cb, user);
+        return interactive_response(ctx, cb, user, tick, tick_user);
 
     FILE *f = fopen(m->script_path, "r");
     if (!f) {
@@ -518,15 +566,15 @@ static int mock_stream(struct provider *p, const struct context *ctx, const char
     int skipped = skip_to_turn(f, m->next_turn);
     if (skipped < m->next_turn) {
         fclose(f);
-        emit_text_chunked(cb, user, "Script exhausted — no more turns.", 0);
+        emit_text_chunked(cb, user, "Script exhausted — no more turns.", 0, tick, tick_user);
         return emit_done(cb, user, empty_usage());
     }
 
-    int rc = play_one_turn(f, cb, user);
+    int rc = play_one_turn(f, cb, user, tick, tick_user);
     fclose(f);
 
     if (rc == -2) {
-        emit_text_chunked(cb, user, "Script exhausted — no more turns.", 0);
+        emit_text_chunked(cb, user, "Script exhausted — no more turns.", 0, tick, tick_user);
         return emit_done(cb, user, empty_usage());
     }
     if (rc == 0)

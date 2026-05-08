@@ -16,7 +16,8 @@
 struct curl_state {
     struct sse_parser parser;
     struct buf err_body; /* capped, for error reporting */
-    http_cancel_cb cancel;
+    http_tick_cb tick;
+    void *tick_user;
 };
 
 struct sse_trace_wrapper {
@@ -58,7 +59,7 @@ static size_t on_write(char *ptr, size_t size, size_t nmemb, void *userdata)
     /* Returning a short count tells libcurl the transfer failed and aborts
      * curl_easy_perform with CURLE_WRITE_ERROR. Check before parsing so we
      * don't half-feed an event into the parser. */
-    if (s->cancel && s->cancel())
+    if (s->tick && s->tick(s->tick_user))
         return 0;
 
     if (s->err_body.len < ERR_BODY_CAP) {
@@ -73,7 +74,8 @@ static size_t on_write(char *ptr, size_t size, size_t nmemb, void *userdata)
 /* Periodic callback (~1Hz by default) — non-zero return aborts the transfer
  * with CURLE_ABORTED_BY_CALLBACK. Catches the case where the server is
  * silent (no chunks → on_write isn't called), e.g. local llama-server
- * during prompt eval. */
+ * during prompt eval. The tick may also have side effects — the agent
+ * uses it to do wall-clock idle detection alongside the cancel check. */
 static int on_progress(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal,
                        curl_off_t ulnow)
 {
@@ -82,11 +84,12 @@ static int on_progress(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl
     (void)ultotal;
     (void)ulnow;
     struct curl_state *s = clientp;
-    return (s->cancel && s->cancel()) ? 1 : 0;
+    return (s->tick && s->tick(s->tick_user)) ? 1 : 0;
 }
 
 int http_sse_post(const char *url, const char *const *headers, const char *body, size_t body_len,
-                  sse_cb cb, void *user, http_cancel_cb cancel, struct http_response *resp)
+                  sse_cb cb, void *user, http_tick_cb tick, void *tick_user,
+                  struct http_response *resp)
 {
     memset(resp, 0, sizeof(*resp));
 
@@ -110,7 +113,8 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
 
     struct curl_state s;
     memset(&s, 0, sizeof(s));
-    s.cancel = cancel;
+    s.tick = tick;
+    s.tick_user = tick_user;
 
     struct sse_trace_wrapper tw = {.inner = cb, .inner_user = user};
     if (trace_enabled())
@@ -126,9 +130,9 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hl);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, on_write);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &s);
-    /* Progress callback only when a cancel hook is provided — keeps the
-     * default no-cancel path identical to before (NOPROGRESS=1). */
-    if (cancel) {
+    /* Progress callback only when a tick hook is provided — keeps the
+     * default no-tick path identical to before (NOPROGRESS=1). */
+    if (tick) {
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, on_progress);
         curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &s);
@@ -165,8 +169,8 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
      * agent can react cleanly without surfacing it as [error: ...]. Both
      * the write-callback short-return (CURLE_WRITE_ERROR) and the
      * progress-callback abort (CURLE_ABORTED_BY_CALLBACK) only fire when
-     * cancel() returned true, so trusting the cancel hook here is safe. */
-    if (rc != CURLE_OK && cancel && cancel()) {
+     * tick() returned non-zero, so trusting the tick hook here is safe. */
+    if (rc != CURLE_OK && tick && tick(tick_user)) {
         resp->cancelled = 1;
     } else if (rc != CURLE_OK) {
         resp->error_body = xasprintf("libcurl: %s", curl_easy_strerror(rc));
@@ -183,7 +187,8 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
 
 struct http_get_state {
     struct buf body;
-    http_cancel_cb cancel;
+    http_tick_cb tick;
+    void *tick_user;
 };
 
 static size_t http_get_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
@@ -193,7 +198,7 @@ static size_t http_get_write_cb(char *ptr, size_t size, size_t nmemb, void *user
     /* Same convention as the SSE write callback: a short return aborts
      * the transfer so a cancelled probe doesn't keep buffering bytes
      * we'll throw away. */
-    if (s->cancel && s->cancel())
+    if (s->tick && s->tick(s->tick_user))
         return 0;
     buf_append(&s->body, ptr, n);
     return n;
@@ -207,11 +212,11 @@ static int http_get_progress_cb(void *clientp, curl_off_t dltotal, curl_off_t dl
     (void)ultotal;
     (void)ulnow;
     struct http_get_state *s = clientp;
-    return (s->cancel && s->cancel()) ? 1 : 0;
+    return (s->tick && s->tick(s->tick_user)) ? 1 : 0;
 }
 
-int http_get(const char *url, const char *const *headers, long timeout_s, http_cancel_cb cancel,
-             char **out)
+int http_get(const char *url, const char *const *headers, long timeout_s, http_tick_cb tick,
+             void *tick_user, char **out)
 {
     *out = NULL;
 
@@ -232,7 +237,8 @@ int http_get(const char *url, const char *const *headers, long timeout_s, http_c
 
     struct http_get_state state;
     memset(&state, 0, sizeof(state));
-    state.cancel = cancel;
+    state.tick = tick;
+    state.tick_user = tick_user;
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
@@ -243,7 +249,7 @@ int http_get(const char *url, const char *const *headers, long timeout_s, http_c
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 2L);
     if (timeout_s > 0)
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_s);
-    if (cancel) {
+    if (tick) {
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, http_get_progress_cb);
         curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &state);

@@ -13,7 +13,6 @@
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <termios.h>
-#include <time.h>
 #include <unistd.h>
 
 /* forkpty(3) lives in <pty.h> on glibc/musl Linux and <util.h> on
@@ -69,13 +68,6 @@ static long resolve_max_timeout_ms(void)
 static long resolve_grace_ms(void)
 {
     return parse_timeout_env_ms("HAX_BASH_TIMEOUT_GRACE", BASH_GRACE_DEFAULT_MS);
-}
-
-static long monotonic_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
 }
 
 /* Saturating add for non-negative longs. A configured duration near

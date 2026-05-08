@@ -54,16 +54,19 @@ static int tool_result_is_marked(const struct item *it)
  * exploration whose output is hidden from display. The cluster collapses
  * the visual block separator between consecutive quiet calls, and
  * coalesces consecutive `read` calls onto one line: `[read] foo.c, bar.c,
- * baz.c`. The inline spinner sits at the end of the active line as
- * "still alive" indicator, surviving across both tool-runs and the wait
- * for the next provider event.
+ * baz.c`. For reads, the inline spinner sits at the end of the active
+ * line as a "still alive" indicator and as the attachment point for a
+ * coalesced follow-up. For non-coalescing silent kinds (bash) the
+ * header line is closed with `\n` and a labeled line-mode spinner is
+ * drawn below — there's no follow-up to attach, and the label gives
+ * slow commands a clearer signal than the bare inline glyph.
  *
- * `active` means a quiet line is currently on the terminal with no
- * trailing newline (and the inline spinner may be drawn). `last_tool` is
- * the name of the most recent quiet tool, used to decide whether the
- * next call coalesces. `line_used` is a byte budget for the current
- * line, checked against the terminal width before appending another
- * filename. */
+ * `active` means a quiet cluster is in progress: either a read line
+ * with the inline glyph parked at its end, or a closed header line
+ * with a line-mode spinner on the row below. `last_tool` is the name
+ * of the most recent quiet tool, used to decide whether the next call
+ * coalesces. `line_used` is a byte budget for the current line, checked
+ * against the terminal width before appending another filename. */
 struct cluster {
     int active;
     const char *last_tool; /* borrowed from struct tool's static name */
@@ -81,7 +84,23 @@ struct event_ctx {
     struct cluster *cl;
     /* Filled in from EV_DONE; -1/-1/-1 if the provider didn't report. */
     struct stream_usage usage;
+    /* Idle-spinner bookkeeping for the "model emitted text then went
+     * quiet" case. last_text_at is the CLOCK_MONOTONIC ms of the most
+     * recent EV_TEXT_DELTA; 0 means we're not in a text-idle window
+     * (no text yet, or a non-text event has since closed it). idle_shown
+     * latches once the idle handler has drawn the spinner so the
+     * progress-callback tick doesn't repeat the work every second. */
+    long last_text_at;
+    int idle_shown;
 };
+
+/* How long after the last text byte we wait before surfacing the
+ * "still alive" inline glyph. Shorter than the silent-cluster's
+ * INLINE_TIMEOUT_MS because the inline glyph is non-disruptive — one
+ * dim cell at the cursor's natural position, no paragraph break, no
+ * disp bookkeeping perturbed — so we can show it sooner without the
+ * risk of flicker between rapid deltas. */
+#define TEXT_IDLE_TIMEOUT_MS 1500
 
 /* Cells reserved at the right edge of a quiet line: the trailing space
  * before the spinner glyph (1) + the glyph itself (1) + breathing room
@@ -232,18 +251,24 @@ static void display_tool_header(struct disp *d, const struct item *call)
 /* Silent-header writer for the start of a quiet line. For `read`,
  * `arg_text` is the file's basename (possibly with a `:N-M` slice
  * suffix); for quiet `bash`, it's the truncated command. The header is
- * NOT terminated with a newline — the inline spinner sits at the
- * cursor's resting position and is animated until either the next
- * silent call extends the line or cluster_terminate ends it.
+ * NOT terminated with a newline — the caller decides whether to keep
+ * the cursor parked at end-of-line for an inline spinner (reads, where
+ * the next call may coalesce as `, baz.c`) or to emit `\n` and show a
+ * labeled line-mode spinner below (non-coalescing kinds like bash).
  *
  * The whole header is dim — quiet calls are exploration breadcrumbs
  * that should recede visually, not compete with verbose tool blocks
  * (whose preview body is the focus) or model text. The cyan brackets
  * keep the tag scannable as a tool boundary even at lowered intensity.
  *
+ * `reserve_spinner_space` adds a trailing space as breathing room for
+ * the inline glyph; pass 0 when the caller will follow with `\n` so
+ * redirected logs don't grow dangling spaces.
+ *
  * Returns the visual byte cost of the line so far so the caller can
  * track when a coalesced line is about to overflow the terminal. */
-static int write_silent_header(struct disp *d, const struct item *call, const char *arg_text)
+static int write_silent_header(struct disp *d, const struct item *call, const char *arg_text,
+                               int reserve_spinner_space)
 {
     /* Visual budget tracking: we count what's *visible* — ANSI escapes
      * and the trailing space don't move the cursor visually, but the
@@ -262,12 +287,10 @@ static int write_silent_header(struct disp *d, const struct item *call, const ch
         used += (int)strlen(arg_text);
     }
     disp_raw(ANSI_RESET);
-    /* Trailing space exists only as breathing room for the inline
-     * spinner glyph. When stdout isn't a TTY we don't draw the spinner
-     * (and don't backspace over the space during coalescing — see
-     * write_silent_append), so skip it to keep redirected logs free of
-     * dangling spaces. */
-    if (isatty(fileno(stdout))) {
+    /* Inline-spinner room: we need a space for the glyph, but only on
+     * a TTY (no spinner otherwise — see write_silent_append's matching
+     * tty check for why a non-TTY space would be a stray byte). */
+    if (reserve_spinner_space && isatty(fileno(stdout))) {
         disp_putc(d, ' ');
         used += 1;
     }
@@ -430,6 +453,13 @@ static struct item dispatch_tool_call_silent(struct cluster *cl, struct disp *d,
     int was_inline = spinner_hide(sp);
     int can_coalesce = cl->active && was_inline && cl->last_tool &&
                        strcmp(cl->last_tool, "read") == 0 && strcmp(call->tool_name, "read") == 0;
+    /* Reads coalesce, so the inline glyph is parked at end-of-line as
+     * an attachment point for a follow-up `, baz.c`. Bash never
+     * coalesces — every silent bash gets its own header line — so go
+     * straight to the labeled line-mode spinner below the header
+     * instead of waiting for INLINE_TIMEOUT_MS to auto-transition.
+     * Surfaces the "running..." label immediately for slow commands. */
+    int inline_spinner = strcmp(call->tool_name, "read") == 0;
 
     if (can_coalesce) {
         const char *path = NULL;
@@ -460,7 +490,7 @@ static struct item dispatch_tool_call_silent(struct cluster *cl, struct disp *d,
             disp_putc(d, '\n');
             disp_emit_held(d);
             char *arg = make_silent_arg(t, call, 7 /* "[read] " */, term_w);
-            int used = write_silent_header(d, call, arg);
+            int used = write_silent_header(d, call, arg, 1 /* coalesce path is always read */);
             free(arg);
             cl->line_used = used;
         } else {
@@ -491,16 +521,39 @@ static struct item dispatch_tool_call_silent(struct cluster *cl, struct disp *d,
         }
         int tag_cost = 2 + (int)strlen(call->tool_name) + 1; /* "[name] " */
         char *arg = make_silent_arg(t, call, tag_cost, term_w);
-        int used = write_silent_header(d, call, arg);
+        int used = write_silent_header(d, call, arg, inline_spinner);
         free(arg);
         cl->line_used = used;
+        if (!inline_spinner) {
+            /* Close the header line so the line-mode spinner draws on
+             * its own row below. Without this, the spinner thread's
+             * `\r` + erase would clobber the [bash] header. */
+            disp_putc(d, '\n');
+            disp_emit_held(d);
+        }
     }
 
-    spinner_show_inline(sp);
+    /* Bracket the run with "running..." / "working..." labels so the
+     * spinner accurately reflects whether the tool is actively
+     * executing. Silent path leaves the spinner visible after run()
+     * to span the gap to the next call or stream event — without the
+     * post-run reset, a stale "running..." would linger through that
+     * gap (line-mode bash) or leak through an auto-transition (inline
+     * read past INLINE_TIMEOUT_MS). The pre-run set ensures even
+     * inline reads, if they auto-transition, surface the right label.
+     * Set before show so the first frame draws with the new label
+     * rather than the prior turn's residue. */
+    spinner_set_label(sp, "running...");
+    if (inline_spinner) {
+        spinner_show_inline(sp);
+    } else {
+        spinner_show(sp);
+    }
 
     /* Run the tool with no display callback — silent path discards live
      * stream and only keeps the canonical history. */
     char *ret = t->run(call->tool_arguments_json, NULL, NULL);
+    spinner_set_label(sp, "working...");
 
     cl->active = 1;
     cl->last_tool = t->def.name;
@@ -740,10 +793,55 @@ static void display_usage(struct disp *d, const struct provider *p, long ctx, lo
     fflush(stdout);
 }
 
+/* Per-stream side-channel hook: runs idle bookkeeping and returns the
+ * cancel signal. Called from libcurl's progress callback (~1Hz) and
+ * on every received chunk while the agent thread is parked inside
+ * curl_easy_perform. Combines two responsibilities so the http layer
+ * sees one tick instead of separate cancel/idle entry points.
+ *
+ * Idle behavior: when the model has emitted text and then gone quiet
+ * for TEXT_IDLE_TIMEOUT_MS, drop a single dim glyph at the cursor's
+ * current position via sticky-inline mode. Nothing else moves —
+ * disp's held/trail counters stay as-is, the model's paragraph
+ * layout is untouched, the markdown renderer's lookahead tail keeps
+ * its buffered bytes. On text resume, spinner_hide's \b space \b
+ * restores the cursor; the next byte the model emits overwrites the
+ * cell that briefly held the glyph, so the resumed stream looks
+ * identical to one that never paused. Sticky inline suppresses the
+ * auto-transition to line mode that the silent cluster relies on —
+ * any disp-bypassing \n here would desync the held/trail bookkeeping. */
+static int agent_stream_tick(void *user)
+{
+    struct event_ctx *ec = user;
+    if (ec->last_text_at && !ec->idle_shown &&
+        monotonic_ms() - ec->last_text_at >= TEXT_IDLE_TIMEOUT_MS) {
+        /* Skip the leading-space cell when disp says the cursor is
+         * already at column 0 or right after a space — the model's
+         * last byte is its own breathing room, and an extra pad would
+         * read as a stray double-space once the glyph erases. */
+        spinner_show_inline_sticky(ec->spinner, !ec->disp->at_space_or_bol);
+        ec->idle_shown = 1;
+    }
+    return interrupt_requested();
+}
+
 static int on_event(const struct stream_event *ev, void *user)
 {
     struct event_ctx *ec = user;
     struct disp *d = ec->disp;
+
+    /* Idle detection tracks "time since the last byte the user could
+     * see". Stream-ending events close the window; tool-call and
+     * reasoning events do NOT, because neither produces live output
+     * (tool calls render as a block at dispatch time; reasoning is
+     * surfaced only as a spinner label change). Leaving the timer
+     * frozen across those events lets the idle spinner fire during
+     * a long tool-args generation pause too — the model emits a
+     * tool_call_start almost immediately after the trailing text, but
+     * may then take seconds to stream out a long path or command,
+     * during which the user sees nothing change on screen. */
+    if (ev->kind == EV_DONE || ev->kind == EV_ERROR)
+        ec->last_text_at = 0;
 
     switch (ev->kind) {
     case EV_TEXT_DELTA: {
@@ -776,6 +874,13 @@ static int on_event(const struct stream_event *ev, void *user)
         else
             disp_write(d, s, n);
         fflush(stdout);
+        /* Arm idle detection: from now until the next event, the
+         * progress-callback tick will check elapsed time and bring the
+         * spinner back if the model goes quiet. Reset idle_shown in
+         * case a previous idle had latched (text resumed, so we're
+         * back in the live-streaming state). */
+        ec->last_text_at = monotonic_ms();
+        ec->idle_shown = 0;
         break;
     }
     case EV_TOOL_CALL_START:
@@ -901,7 +1006,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
 
     putchar('\n');
     agent_print_banner(p, &sess);
-    struct disp disp = {.trail = 1};
+    struct disp disp = {.trail = 1, .at_space_or_bol = 1};
     struct spinner *spinner = spinner_new("working...");
     struct md_renderer *md = markdown_enabled() ? md_new(md_emit_to_disp, &disp) : NULL;
     struct input *input = input_new();
@@ -1053,8 +1158,14 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
                                    .spinner = spinner,
                                    .md = md,
                                    .cl = &cl,
-                                   .usage = {-1, -1, -1}};
-            p->stream(p, &ctx, sess.model, on_event, &ec);
+                                   .usage = {-1, -1, -1},
+                                   .last_text_at = 0,
+                                   .idle_shown = 0};
+            /* agent_stream_tick combines cancel (Esc) with idle
+             * detection: ~1Hz from libcurl's progress callback inside
+             * curl_easy_perform, plus on every received chunk. The
+             * provider threads it straight through to http_sse_post. */
+            p->stream(p, &ctx, sess.model, on_event, &ec, agent_stream_tick, &ec);
 
             /* Either a tool-only response (no text emitted, spinner still
              * visible) or stream returned without ever firing an event —

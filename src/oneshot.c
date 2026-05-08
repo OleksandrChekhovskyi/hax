@@ -85,7 +85,9 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         struct turn t;
         turn_init(&t);
         struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL};
-        p->stream(p, &ctx, sess.model, on_event, &oc);
+        /* Oneshot doesn't arm interrupt and has no idle UI to surface
+         * — pass a NULL tick so http skips the progress hook entirely. */
+        p->stream(p, &ctx, sess.model, on_event, &oc, NULL, NULL);
 
         if (t.error) {
             fprintf(stderr, "hax: provider error: %s\n",

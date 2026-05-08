@@ -11,8 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "provider.h"
@@ -403,6 +404,13 @@ long parse_duration_ms(const char *s)
     if (mul > 1 && v > LONG_MAX / mul)
         return -1;
     return v * mul;
+}
+
+long monotonic_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
 }
 
 void buf_init(struct buf *b)

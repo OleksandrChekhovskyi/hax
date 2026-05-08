@@ -14,18 +14,10 @@ struct bg_job {
     _Atomic int cancelled;
 };
 
-/* Per-thread pointer to the currently-running job, set by the trampoline
- * before the worker enters fn() and cleared after it returns. Lets the
- * cancel-hook adapter (bg_cancel_thunk) be a parameterless function so
- * workers can pass it directly to http_get / http_sse_post. */
-static _Thread_local struct bg_job *bg_current;
-
 static void *bg_trampoline(void *p)
 {
     struct bg_job *job = p;
-    bg_current = job;
     job->fn(job, job->arg);
-    bg_current = NULL;
     return NULL;
 }
 
@@ -52,9 +44,9 @@ int bg_cancelled(const struct bg_job *job)
     return job ? atomic_load(&job->cancelled) : 0;
 }
 
-int bg_cancel_thunk(void)
+int bg_tick(void *job)
 {
-    return bg_cancelled(bg_current);
+    return bg_cancelled(job);
 }
 
 void bg_join(struct bg_job *job)
