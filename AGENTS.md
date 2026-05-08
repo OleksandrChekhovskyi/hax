@@ -36,6 +36,18 @@ streaming patterns — `\r`-rewriting (`fake-ninja`), interleaved progress + res
 (`fake-meson`), or bottom-window redraws (`fake-vitest`) — at adjustable cadence via
 `--delay`.
 
+Two debug logs are useful when something goes wrong; both truncate on startup (and
+`HAX_TRANSCRIPT` also truncates on `/new`):
+
+- `HAX_TRACE=path` — wire-level Markdown dump of every HTTP request/response and SSE event
+  (Authorization redacted). Plain text, no ANSI. Use when you suspect a provider-
+  translation bug.
+- `HAX_TRANSCRIPT=path` — append-only mirror of the Ctrl-T transcript view: system prompt,
+  advertised tools, and every turn's items including tool calls + results. Plain text, no
+  ANSI — `cat`/`grep`/diff work directly. Use when you need a less-verbose, model-
+  perspective view of the conversation, or when debugging the mock provider (no HTTP, so
+  `HAX_TRACE` is empty there).
+
 ## Architecture
 
 hax is a single-binary REPL:

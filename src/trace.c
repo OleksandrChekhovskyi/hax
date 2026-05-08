@@ -32,14 +32,21 @@ static FILE *get_fp_locked(void)
     const char *path = getenv("HAX_TRACE");
     if (!path || !*path)
         return NULL;
-    trace_fp = fopen(path, "ae");
+    trace_fp = fopen(path, "we");
     if (!trace_fp) {
-        fprintf(stderr, "hax: HAX_TRACE: cannot open '%s' for append\n", path);
+        fprintf(stderr, "hax: HAX_TRACE: cannot open '%s' for writing\n", path);
         return NULL;
     }
     setvbuf(trace_fp, NULL, _IOLBF, 0);
     atexit(trace_close_atexit);
     return trace_fp;
+}
+
+void trace_init(void)
+{
+    pthread_mutex_lock(&trace_mu);
+    (void)get_fp_locked();
+    pthread_mutex_unlock(&trace_mu);
 }
 
 int trace_enabled(void)

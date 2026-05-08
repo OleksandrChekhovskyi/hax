@@ -166,8 +166,7 @@ enum slash_result slash_dispatch(const char *line, struct slash_ctx *ctx)
 
 static void slash_run_new(struct slash_ctx *ctx)
 {
-    agent_session_reset(ctx->sess);
-    agent_print_banner(ctx->provider, ctx->sess);
+    agent_new_conversation(ctx->state);
 }
 
 /* ---------- /copy ---------- */
@@ -180,9 +179,10 @@ static void slash_run_copy(struct slash_ctx *ctx)
      * user means by "the last response". The text field already holds
      * the model's raw Markdown, so no conversion is needed. */
     const struct item *msg = NULL;
-    if (ctx->sess) {
-        for (size_t i = ctx->sess->n_items; i > 0; i--) {
-            const struct item *it = &ctx->sess->items[i - 1];
+    if (ctx->state && ctx->state->sess) {
+        struct agent_session *s = ctx->state->sess;
+        for (size_t i = s->n_items; i > 0; i--) {
+            const struct item *it = &s->items[i - 1];
             if (it->kind == ITEM_ASSISTANT_MESSAGE && it->text && it->text[0]) {
                 msg = it;
                 break;
@@ -208,10 +208,10 @@ static void slash_run_usage(struct slash_ctx *ctx)
 {
     /* Cast away const: provider methods (stream, query_usage, destroy)
      * all take a writable `struct provider *` since they may mutate
-     * adapter state. slash_ctx holds a const pointer because most
+     * adapter state. agent_state holds a const pointer because most
      * commands only need read-only fields (->name, ->default_model);
      * this is the one place we hand the object to a method. */
-    struct provider *p = (struct provider *)ctx->provider;
+    struct provider *p = (struct provider *)ctx->state->provider;
     if (!p->query_usage) {
         printf(ANSI_DIM "/usage is not supported by the %s provider" ANSI_RESET "\n",
                p->name ? p->name : "?");

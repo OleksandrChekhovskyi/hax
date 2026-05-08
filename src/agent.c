@@ -886,6 +886,13 @@ void agent_print_banner(const struct provider *p, const struct agent_session *s)
     printf("%s " ANSI_DIM "ctrl-d quit · try /help" ANSI_BOLD_OFF "\n", bar);
 }
 
+void agent_new_conversation(struct agent_state *st)
+{
+    agent_session_reset(st->sess);
+    transcript_log_reset(st->tlog, st->sess->sys, st->sess->tools, st->sess->n_tools);
+    agent_print_banner(st->provider, st->sess);
+}
+
 int agent_run(struct provider *p, const struct hax_opts *opts)
 {
     struct agent_session sess;
@@ -911,6 +918,14 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
         .n_tools = sess.n_tools,
     };
     input_set_transcript_cb(input, show_transcript_cb, &tv);
+    /* HAX_TRANSCRIPT — append-only mirror of the Ctrl-T view. NULL when
+     * the env var is unset; all transcript_log_* entry points are
+     * NULL-safe so the call sites don't need a guard. */
+    struct transcript_log *tlog = transcript_log_open(sess.sys, sess.tools, sess.n_tools);
+    /* Aggregate handed to slash handlers so they can mutate live state
+     * without each one taking a separate argument. Pointers into stack
+     * frames here — agent_state never outlives agent_run. */
+    struct agent_state state = {.sess = &sess, .provider = p, .tlog = tlog};
     /* Initialize once — captures the canonical termios baseline and starts
      * the watcher thread. Idempotent; safe even when stdin/stdout aren't
      * ttys (becomes a no-op in that case). */
@@ -944,7 +959,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
          * look like commands but aren't (e.g. "/tmp/foo" — the
          * dispatcher's bareword check) return SLASH_NOT_A_COMMAND and
          * fall through to the regular model path below. */
-        struct slash_ctx sctx = {.sess = &sess, .provider = p};
+        struct slash_ctx sctx = {.state = &state};
         if (slash_dispatch(line, &sctx) != SLASH_NOT_A_COMMAND) {
             free(line);
             disp.trail = 1;
@@ -962,6 +977,11 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
          * boundaries for follow-up round-trips after tool dispatch. */
         agent_session_add_user(&sess, line);
         free(line);
+        /* Flush the prompt to the log immediately, before we hand
+         * control to the provider. If the stream hangs or the process
+         * is killed, the user prompt that triggered the in-flight call
+         * is preserved on disk for post-mortem reading. */
+        transcript_log_append(tlog, sess.items, sess.n_items);
         /* input_readline left the cursor at column 0 of a fresh row. */
         disp.trail = 1;
 
@@ -994,6 +1014,10 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
                  * skip ITEM_TURN_BOUNDARY in their item-translation
                  * switch). */
                 agent_session_add_boundary(&sess);
+                /* Same rationale as the post-add_user flush above:
+                 * land the new turn rule on disk before we wait on
+                 * the next stream call. */
+                transcript_log_append(tlog, sess.items, sess.n_items);
             }
             first_inner = 0;
             struct context ctx = agent_session_context(&sess);
@@ -1153,6 +1177,17 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
                 items_append(&sess.items, &sess.n_items, &sess.cap_items, result);
             }
 
+            /* Round-trip complete: assistant text, tool calls, and all
+             * their results are in sess.items, so flush the slice into
+             * the HAX_TRANSCRIPT log. Doing this *inside* the inner
+             * loop (rather than only at the bottom) means a hung
+             * follow-up stream, a crash mid-chain, or a SIGKILL leaves
+             * the prompt + completed tool output on disk for
+             * post-mortem reading — the main reason HAX_TRANSCRIPT
+             * exists. CALL/RESULT pairing is intact so the renderer's
+             * lookahead works. */
+            transcript_log_append(tlog, sess.items, sess.n_items);
+
             /* Esc fired during or just after this batch. Stop the inner
              * loop without another model call, and ensure history carries
              * a marker — bash appends its own "[interrupted]" footer when
@@ -1182,6 +1217,12 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
          * interleaved bytes (especially fatal mid-OSC-9 sequence). */
         cluster_terminate(&cl, &disp, spinner);
 
+        /* Catch-all flush. The per-round-trip append above covers tool
+         * paths; this one picks up the no-tool exit (assistant message
+         * only) and the synthesized-results interrupt path. Idempotent
+         * when there are no new items — _append no-ops on n_items <= n_written. */
+        transcript_log_append(tlog, sess.items, sess.n_items);
+
         if (turn_interrupted) {
             disp_block_separator(&disp);
             disp_raw(ANSI_DIM);
@@ -1207,6 +1248,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
     input_free(input);
     if (md)
         md_free(md);
+    transcript_log_close(tlog);
     agent_session_free(&sess);
     return 0;
 }

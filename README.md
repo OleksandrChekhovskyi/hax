@@ -236,9 +236,14 @@ realistic streaming patterns through the bash tool.
   unset and the auto-probe didn't fire or returned nothing, hax shows the absolute counts
   only
 - `HAX_TRACE` — path to a Markdown file that will receive a pretty-printed dump of every
-  HTTP request, response status, and SSE event (Authorization redacted). Opened in append
-  mode; `tail -f` works, but the file is most readable when opened in an editor that renders
-  Markdown
+  HTTP request, response status, and SSE event (Authorization redacted). Plain text,
+  truncated on startup so each run begins fresh; most readable when opened in an editor
+  that renders Markdown
+- `HAX_TRANSCRIPT` — path to a file that mirrors the Ctrl-T transcript view (system prompt,
+  advertised tools, and every turn's items including tool calls + results). Plain text,
+  truncated on startup and on `/new`, then appended to as the conversation grows. Useful
+  for debugging higher-level behavior than `HAX_TRACE` shows, and works with
+  `HAX_PROVIDER=mock` where there are no HTTP calls to trace
 
 ## License
 

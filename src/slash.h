@@ -2,8 +2,7 @@
 #ifndef HAX_SLASH_H
 #define HAX_SLASH_H
 
-#include "agent_core.h"
-#include "provider.h"
+struct agent_state;
 
 /*
  * Slash-command dispatch.
@@ -32,8 +31,11 @@ enum slash_result {
 };
 
 struct slash_ctx {
-    struct agent_session *sess;
-    const struct provider *provider;
+    /* Live REPL state. Defined in agent.h. Single field so handlers
+     * touch a coherent snapshot of session+provider+transcript without
+     * slash.h needing to grow each time the agent gains a new piece
+     * of mutable state. */
+    struct agent_state *state;
 };
 
 /* If `line` starts with '/', look up a registered command and run it.

@@ -8,6 +8,7 @@
 #include "agent_core.h"
 #include "ctrl_strip.h"
 #include "tool.h"
+#include "transcript.h"
 #include "turn.h"
 #include "util.h"
 
@@ -53,13 +54,30 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
     if (agent_session_init(&sess, p, opts) < 0)
         return 1;
 
+    /* HAX_TRANSCRIPT mirror, opened (and the file truncated) before
+     * any model call so even an early-error or zero-turn run leaves
+     * a fresh file behind. NULL when the env var is unset; all
+     * transcript_log_* entry points are NULL-safe. Appended at the end
+     * of each round-trip so `tail -f` works during long agentic runs;
+     * the final append at `done:` catches the no-tool exit path and
+     * is idempotent on the others (transcript_log_append no-ops when
+     * n_items hasn't grown). */
+    struct transcript_log *tlog = transcript_log_open(sess.sys, sess.tools, sess.n_tools);
+
     agent_session_add_user(&sess, prompt);
+    /* Land the prompt on disk before any provider call so a hang or
+     * crash mid-stream still leaves the triggering input visible in
+     * the log. */
+    transcript_log_append(tlog, sess.items, sess.n_items);
 
     int rc = 0;
     int first_inner = 1;
     for (int turn_n = 0; turn_n < max_turns; turn_n++) {
-        if (!first_inner)
+        if (!first_inner) {
             agent_session_add_boundary(&sess);
+            /* Same: flush the new turn rule before the next stream. */
+            transcript_log_append(tlog, sess.items, sess.n_items);
+        }
         first_inner = 0;
 
         struct context ctx = agent_session_context(&sess);
@@ -120,6 +138,10 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
                              .output = history,
                          });
         }
+        /* Round-trip complete (assistant + tool calls + their results
+         * all in sess.items): flush. CALL/RESULT pairing is intact for
+         * the renderer's lookahead. */
+        transcript_log_append(tlog, sess.items, sess.n_items);
     }
 
     /* Loop fell through without a final assistant-only response. */
@@ -127,6 +149,8 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
     rc = 1;
 
 done:
+    transcript_log_append(tlog, sess.items, sess.n_items);
+    transcript_log_close(tlog);
     agent_session_free(&sess);
     return rc;
 }

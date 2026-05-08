@@ -14,6 +14,8 @@
 #include "providers/openai.h"
 #include "providers/openai_compat.h"
 #include "providers/openrouter.h"
+#include "trace.h"
+#include "transcript.h"
 #include "util.h"
 
 /* Hard cap on agentic round-trips in -p mode. Generous — a real task
@@ -227,6 +229,16 @@ int main(int argc, char **argv)
         fprintf(stderr, "hax: curl_global_init failed\n");
         goto err_prompt;
     }
+
+    /* Truncate HAX_TRACE and HAX_TRANSCRIPT here, before any provider
+     * startup or session init. Without this, a fast-fail run (bad
+     * config, missing HAX_MODEL, no OAuth) would exit with stale files
+     * still on disk despite the documented truncate-on-startup
+     * behavior. trace_init forces the lazy fopen in trace.c; the
+     * transcript file is just truncated — its header gets written
+     * later when sys+tools are known. */
+    trace_init();
+    transcript_log_init();
 
     struct provider *p = pick_provider();
     if (!p)
