@@ -23,10 +23,10 @@
  * quits less, not hax; `:!yes | head` inside vim works the same as it
  * would from a regular shell.
  *
- * Out of scope: the bash tool's command runner. It owns a PTY, manages
- * a process group, enforces output caps and timeouts, and reads stdout
- * in a loop — too bespoke to share this code path. It does its own
- * signal reset post-fork.
+ * Out of scope: the bash tool's command runner. It owns the child's
+ * stdout/stderr pipe, manages a process group, enforces output caps
+ * and timeouts, and reads in a loop — too bespoke to share this code
+ * path. It does its own signal reset post-fork.
  */
 
 int spawn_run(const char *shell_cmd);

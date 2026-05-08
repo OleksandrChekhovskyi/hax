@@ -29,20 +29,23 @@ tool bash {"command":"ls scripts/"}
 usage in=420 out=18
 end-turn
 
-# ---------- turn 2: \r-rewriting progress (fake-ninja) ------------------
-text Now exercising the carriage-return rewrite path.
-tool bash {"command":"scripts/stream_demo.py fake-ninja --delay 0.1 --count 8"}
+# ---------- turn 2: slow streaming with visible spinner -----------------
+# Streams 6 lines at ~0.4s each — slow enough that the live preview
+# spinner repaints between commits, fast enough to keep the demo
+# moving. Exercises the streaming path + spinner-on-first-byte.
+text Now a slow streamer to show the spinner between chunks.
+tool bash {"command":"scripts/stream_demo.py slow --delay 0.4 --count 6"}
 usage in=520 out=22
 end-turn
 
-# ---------- turn 3: display head/tail elision (fake-meson) --------------
+# ---------- turn 3: display head/tail elision (long mode) ---------------
 # Many committed lines pass through the preview. The dim block keeps
 # the first DISP_HT_HEAD_LINES, the rest go through the tail ring,
 # and the elision marker appears between them. (This is the *display*
 # head/tail in tool_render — bash.c's separate ~96 KiB head/tail buffer
 # for the model's history isn't exercised here.)
 text This one overruns the display head and lands content in the tail.
-tool bash {"command":"scripts/stream_demo.py fake-meson --delay 0.05"}
+tool bash {"command":"scripts/stream_demo.py long --delay 0.05"}
 usage in=640 out=28
 end-turn
 

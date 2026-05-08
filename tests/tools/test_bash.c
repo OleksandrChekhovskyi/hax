@@ -106,14 +106,10 @@ static void test_bash_stdin_detached(void)
 static void test_bash_dev_tty_does_not_hang(void)
 {
     /* Programs that bypass stdin and read /dev/tty directly (sudo,
-     * ssh host-key prompts, gpg passphrase prompts, …) would block
-     * indefinitely on the slave PTY with no way for the agent to
-     * deliver input. run_shell skips TIOCSCTTY when wiring up the
-     * pty, so the child has no controlling terminal and /dev/tty
-     * opens fail with ENXIO instead. The first command's
-     * tcsetattr/stty variant covers the case where a child resets
-     * termios via /dev/tty (which would clobber a VMIN=0 defense)
-     * — the open fails before any termios manipulation happens.
+     * ssh host-key prompts, gpg passphrase prompts, …) would otherwise
+     * find the agent's terminal and block on input we can't deliver.
+     * The child runs setsid(), so it has no controlling terminal —
+     * `open("/dev/tty")` fails with ENXIO before anything blocks.
      * Worst case here is timeout, so a tight elapsed bound is the
      * load-bearing assertion; the marker check is sanity. */
     time_t t0 = time(NULL);
@@ -126,9 +122,9 @@ static void test_bash_dev_tty_does_not_hang(void)
 
 static void test_bash_background_job_does_not_hang(void)
 {
-    /* Shell exits immediately; backgrounded sleep would keep the pty
-     * slave open (and so the master readable) unless pgroup cleanup
-     * releases it. */
+    /* Shell exits immediately; backgrounded sleep would keep the
+     * pipe write end open (and so the parent's read blocked) unless
+     * pgroup cleanup collapses it. */
     time_t t0 = time(NULL);
     char *out = call_bash("echo spawned; sleep 30 &");
     time_t elapsed = time(NULL) - t0;
@@ -235,15 +231,7 @@ static void test_bash_timeout_grace_allows_cleanup(void)
      * SIGKILL so well-behaved cleanup handlers can finish. The shell
      * parses the script before launching `sleep 30`, so the trap is
      * installed before SIGTERM can arrive — no extra ASan margin
-     * needed in the timeout.
-     *
-     * Scope: this is the only grace-cleanup pattern the bash tool
-     * preserves under PTY. Backgrounded-subshell cleanup that flushes
-     * AFTER the outer shell exits — which the pre-PTY pipe path
-     * supported — can't be captured because session-leader exit both
-     * triggers a SIGHUP cascade to the foreground pgroup and (on
-     * macOS) revokes the slave. See the EOF branch in run_shell for
-     * the full reasoning. */
+     * needed in the timeout. */
     setenv("HAX_BASH_TIMEOUT", "50ms", 1);
     setenv("HAX_BASH_TIMEOUT_GRACE", "500ms", 1);
     char *out = call_bash("trap 'sleep 0.05; echo cleaned; exit' TERM; sleep 30");
@@ -275,12 +263,12 @@ static void test_bash_timeout_no_grace_short_timeout(void)
 {
     /* Smallest practical timeout (1ms) with grace disabled — the
      * single-shot SIGKILL on deadline must still reach the child even
-     * though forkpty's setsid() in the child races with the parent's
-     * first kill. The race is a POSIX-permitted ordering: if the
-     * parent kills before the child setsid()'s, kill(-pid, …) fails
-     * with ESRCH and the post-loop waitpid would block until the
-     * command exits naturally (here, 30s of sleep). The race window
-     * is microseconds and doesn't reliably reproduce on macOS, but
+     * though setsid() in the child races with the parent's first
+     * kill. The race is a POSIX-permitted ordering: if the parent
+     * kills before the child setsid()'s, kill(-pid, …) fails with
+     * ESRCH and the post-loop waitpid would block until the command
+     * exits naturally (here, 30s of sleep). The race window is
+     * microseconds and doesn't reliably reproduce on macOS, but
      * kill_descendants() in run_shell falls back to kill(pid, …) on
      * ESRCH so the path is correct under both orderings on any
      * platform. */
@@ -299,10 +287,10 @@ static void test_bash_timeout_no_grace_short_timeout(void)
 static void test_bash_timeout_grace_no_escape_via_pipe_close(void)
 {
     /* A descendant traps SIGTERM, redirects stdout/stderr away from
-     * the slave (closing its references), and runs CPU work. Without
-     * the EOF-during-grace handling, the parent reads EOF and returns
-     * immediately — the descendant survives. With the fix, the grace-
-     * window SIGKILL collapses the pgroup. We probe the pgroup
+     * the pipe (closing its inherited write end), and runs CPU work.
+     * Without the EOF-during-grace handling, the parent reads EOF and
+     * returns immediately — the descendant survives. With the fix,
+     * the grace-window SIGKILL collapses the pgroup. We probe the pgroup
      * directly: the subshell records its PGID via $$ (POSIX: subshell
      * inherits parent shell's $$, and the parent IS the pgroup
      * leader). The 80ms timeout gives the subshell margin to write
@@ -361,16 +349,17 @@ static void test_bash_timeout_grace_no_escape_via_pipe_close(void)
 static void test_bash_redirected_background_job_does_not_leak(void)
 {
     /* `sleep N >/dev/null 2>&1 &` redirects its output away from the
-     * slave and detaches; the shell exits immediately, the last slave
-     * reference drops, and EOF can arrive before the parent's
+     * pipe and detaches; the shell exits immediately, the last pipe
+     * write reference drops, and EOF can arrive before the parent's
      * iteration-top waitpid notices the shell is gone. Without
      * explicit pgroup cleanup at EOF, the backgrounded sleep would
-     * survive past our return and leak indefinitely. `nohup` makes
-     * sleep ignore SIGHUP — without that, the kernel's controlling-
-     * terminal SIGHUP cascade (sent when the session leader / shell
-     * exits under PTY) would kill sleep on its own and mask whether
-     * our explicit pgroup-cleanup is doing the work. We capture
-     * sleep's pid via $! so the test can verify the cleanup fired. */
+     * survive past our return and leak indefinitely. `nohup` is
+     * belt-and-braces here: although pipes don't trigger the SIGHUP
+     * cascade that PTY session-leader exit does, some shells/setups
+     * do propagate SIGHUP to backgrounded jobs at exit; nohup ensures
+     * sleep survives unless our explicit cleanup signals it. We
+     * capture sleep's pid via $! so the test can verify the cleanup
+     * fired. */
     char path[] = "/tmp/hax-test-bg-pid-XXXXXX";
     int fd = mkstemp(path);
     EXPECT(fd >= 0);
@@ -587,102 +576,137 @@ static void test_bash_streamed_binary_marker_isolated_from_escape(void)
     buf_free(&cap.buf);
 }
 
-static void test_bash_stdout_is_a_tty(void)
+static void test_bash_stdout_is_not_a_tty(void)
 {
-    /* The whole point of forkpty: child sees stdout as a TTY, so libc
-     * line-buffers and tools like grep/awk/python flush per-line in the
-     * pipeline downstream. `[ -t 1 ]` is the smallest portable probe. */
+    /* Stdout is a plain pipe, so isatty(1) is false. Tools that gate
+     * fancy output on this (progress bars, pagers, color) take the
+     * non-TTY branch — exactly what we want. We tried PTY-based exec
+     * to keep stdout line-buffered, but reproducing terminal behavior
+     * faithfully (\r-rewrites, cursor positioning, OSC) was too much
+     * complexity for too little benefit; env vars (TERM=dumb,
+     * NO_COLOR, AI_AGENT, PYTHONUNBUFFERED) cover the same ground
+     * with one-tenth the failure modes. */
     char *out = call_bash("[ -t 1 ] && echo TTY || echo NOTTY");
-    EXPECT_STR_EQ(out, "TTY\n");
+    EXPECT_STR_EQ(out, "NOTTY\n");
     free(out);
 }
 
-static void test_bash_stderr_is_a_tty(void)
+static void test_bash_stderr_is_not_a_tty(void)
 {
-    /* Stderr too, so colorized error output (cargo, rustc, clang) lands
-     * the same way as in a real terminal. */
+    /* Stderr also pipes through the same fd; isatty(2) is false. */
     char *out = call_bash("[ -t 2 ] && echo TTY 1>&2 || echo NOTTY 1>&2");
-    EXPECT_STR_EQ(out, "TTY\n");
+    EXPECT_STR_EQ(out, "NOTTY\n");
     free(out);
-}
-
-static void test_bash_interactive_helpers_neutralized(void)
-{
-    /* With a real TTY, common commands hand control off to interactive
-     * helpers — pagers (git log/diff, man, systemctl) or editors (git
-     * commit / rebase -i without -m, crontab -e). Both block forever
-     * waiting for input the agent can't deliver. The bash tool
-     * forces pagers to `cat` (passthrough) and editors to `false`
-     * (fail-closed — git treats a non-zero editor exit as "abort",
-     * which keeps `git commit --amend` from silently rewriting the
-     * commit with the old message and `git rebase -i` from silently
-     * no-op'ing through the default plan). Override each var the
-     * relevant tool consults: man prefers MANPAGER over PAGER; git
-     * commit prefers GIT_EDITOR over VISUAL over EDITOR. Verify they
-     * all land at the shell as expected, even when the parent has
-     * them set to something blocking. */
-    setenv("MANPAGER", "less", 1);
-    setenv("SYSTEMD_PAGER", "less", 1);
-    setenv("GIT_EDITOR", "vim", 1);
-    setenv("VISUAL", "vim", 1);
-    setenv("EDITOR", "vim", 1);
-    char *out = call_bash("echo $PAGER; echo $GIT_PAGER; echo $MANPAGER; echo $SYSTEMD_PAGER; "
-                          "echo $GIT_EDITOR; echo $VISUAL; echo $EDITOR");
-    EXPECT_STR_EQ(out, "cat\ncat\ncat\ncat\nfalse\nfalse\nfalse\n");
-    free(out);
-    unsetenv("MANPAGER");
-    unsetenv("SYSTEMD_PAGER");
-    unsetenv("GIT_EDITOR");
-    unsetenv("VISUAL");
-    unsetenv("EDITOR");
-}
-
-static void test_bash_term_default(void)
-{
-    /* TERM defaults to xterm-256color when unset (the common case in a
-     * headless agent) so programs that gate colors on TERM emit them.
-     * Save/restore the parent's TERM so the order of these env-touching
-     * tests doesn't leak into anything that might run between them. */
-    const char *saved = getenv("TERM");
-    char *saved_dup = saved ? xstrdup(saved) : NULL;
-    unsetenv("TERM");
-    char *out = call_bash("echo $TERM");
-    EXPECT_STR_EQ(out, "xterm-256color\n");
-    free(out);
-    if (saved_dup) {
-        setenv("TERM", saved_dup, 1);
-        free(saved_dup);
-    }
-}
-
-static void test_bash_term_user_override_preserved(void)
-{
-    /* User-set TERM passes through — setenv with overwrite=0 must not
-     * clobber it. Otherwise user choice (TERM=dumb, TERM=screen, …)
-     * would be silently lost. */
-    const char *saved = getenv("TERM");
-    char *saved_dup = saved ? xstrdup(saved) : NULL;
-    setenv("TERM", "dumb", 1);
-    char *out = call_bash("echo $TERM");
-    EXPECT_STR_EQ(out, "dumb\n");
-    free(out);
-    if (saved_dup) {
-        setenv("TERM", saved_dup, 1);
-        free(saved_dup);
-    } else {
-        unsetenv("TERM");
-    }
 }
 
 static void test_bash_lf_not_crlf(void)
 {
-    /* PTY default termios maps LF→CRLF on output (ONLCR). With OPOST
-     * cleared via make_raw_termios, child's `\n` reaches us as `\n`,
-     * not `\r\n` — preserves byte-for-byte fidelity in the captured
-     * history. The two-line probe forces a between-lines newline. */
+    /* Pipes don't apply ONLCR (that was a PTY artifact), so `\n`
+     * reaches us as `\n` byte-for-byte. The two-line probe forces a
+     * between-lines newline. */
     char *out = call_bash("printf 'a\\nb\\n'");
     EXPECT_STR_EQ(out, "a\nb\n");
     free(out);
+}
+
+static void test_bash_env_overrides(void)
+{
+    /* build_child_env() forces a fixed value for each var in its
+     * override table, regardless of what the parent had set. Keeping
+     * hax behavior independent of how the user launched it matters
+     * because users invoke hax from disparate environments — a
+     * developer with PAGER=less, MANPAGER=most, EDITOR=vim, FORCE_
+     * COLOR=1 set in their shell rc shouldn't see the agent's bash
+     * tool inherit any of that.
+     *
+     * The cluster of overrides has three purposes:
+     *   - Pagers (PAGER/GIT_PAGER/MANPAGER/SYSTEMD_PAGER/GH_PAGER) →
+     *     `cat` so commands like `git log` / `man printf` /
+     *     `systemctl status` stream rather than waiting on `q`.
+     *   - Editors (GIT_EDITOR/VISUAL/EDITOR) → `false` so commands
+     *     that pop $EDITOR (git commit without -m, rebase -i,
+     *     crontab -e) abort fail-closed instead of hanging on the
+     *     TTY the agent can't drive.
+     *   - Token-friendly output: TERM=dumb (kills ninja \r-rewrites
+     *     and chalk colors), NO_COLOR=1 (no-color.org honored by
+     *     cargo/rg/fd/git/etc.), COLORTERM= empty (presence-probing
+     *     tools), AI_AGENT=hax (vitest minimal reporter), GIT_
+     *     TERMINAL_PROMPT=0 (git fails fast on credential prompts),
+     *     PYTHONUNBUFFERED=1 (CPython line-flushes under pipes).
+     *
+     * For each var: set the parent to a contradicting value, run a
+     * single shell that echoes them all, and assert the full block.
+     *
+     * Two intentional non-overrides verified by the trailing lines:
+     *   - FORCE_COLOR passes through unchanged. Setting it (any
+     *     value) makes Node warn "'NO_COLOR' env is ignored due to
+     *     the 'FORCE_COLOR' env being set"; NO_COLOR + TERM=dumb
+     *     already cover the same ground.
+     *   - MAKEFLAGS passes through so parallel builds keep their
+     *     `-j` and jobserver fds.
+     */
+    setenv("PAGER", "less", 1);
+    setenv("GIT_PAGER", "less", 1);
+    setenv("MANPAGER", "less", 1);
+    setenv("SYSTEMD_PAGER", "less", 1);
+    setenv("GH_PAGER", "less", 1);
+    setenv("GIT_EDITOR", "vim", 1);
+    setenv("GIT_SEQUENCE_EDITOR", "vim", 1);
+    setenv("VISUAL", "vim", 1);
+    setenv("EDITOR", "vim", 1);
+    setenv("TERM", "xterm-256color", 1);
+    setenv("NO_COLOR", "0", 1);
+    setenv("COLORTERM", "truecolor", 1);
+    setenv("AI_AGENT", "other", 1);
+    setenv("GIT_TERMINAL_PROMPT", "1", 1);
+    setenv("PYTHONUNBUFFERED", "0", 1);
+    setenv("FORCE_COLOR", "1", 1);
+    setenv("MAKEFLAGS", "-j8", 1);
+    char *out = call_bash("echo PAGER=$PAGER; echo GIT_PAGER=$GIT_PAGER; "
+                          "echo MANPAGER=$MANPAGER; echo SYSTEMD_PAGER=$SYSTEMD_PAGER; "
+                          "echo GH_PAGER=$GH_PAGER; "
+                          "echo GIT_EDITOR=$GIT_EDITOR; "
+                          "echo GIT_SEQUENCE_EDITOR=$GIT_SEQUENCE_EDITOR; "
+                          "echo VISUAL=$VISUAL; echo EDITOR=$EDITOR; "
+                          "echo TERM=$TERM; echo NO_COLOR=$NO_COLOR; echo COLORTERM=$COLORTERM; "
+                          "echo AI_AGENT=$AI_AGENT; echo GIT_TERMINAL_PROMPT=$GIT_TERMINAL_PROMPT; "
+                          "echo PYTHONUNBUFFERED=$PYTHONUNBUFFERED; "
+                          "echo FORCE_COLOR=$FORCE_COLOR; echo MAKEFLAGS=$MAKEFLAGS");
+    EXPECT_STR_EQ(out, "PAGER=cat\n"
+                       "GIT_PAGER=cat\n"
+                       "MANPAGER=cat\n"
+                       "SYSTEMD_PAGER=cat\n"
+                       "GH_PAGER=cat\n"
+                       "GIT_EDITOR=false\n"
+                       "GIT_SEQUENCE_EDITOR=false\n"
+                       "VISUAL=false\n"
+                       "EDITOR=false\n"
+                       "TERM=dumb\n"
+                       "NO_COLOR=1\n"
+                       "COLORTERM=\n"
+                       "AI_AGENT=hax\n"
+                       "GIT_TERMINAL_PROMPT=0\n"
+                       "PYTHONUNBUFFERED=1\n"
+                       "FORCE_COLOR=1\n"
+                       "MAKEFLAGS=-j8\n");
+    free(out);
+    unsetenv("PAGER");
+    unsetenv("GIT_PAGER");
+    unsetenv("MANPAGER");
+    unsetenv("SYSTEMD_PAGER");
+    unsetenv("GH_PAGER");
+    unsetenv("GIT_EDITOR");
+    unsetenv("GIT_SEQUENCE_EDITOR");
+    unsetenv("VISUAL");
+    unsetenv("EDITOR");
+    unsetenv("TERM");
+    unsetenv("NO_COLOR");
+    unsetenv("COLORTERM");
+    unsetenv("AI_AGENT");
+    unsetenv("GIT_TERMINAL_PROMPT");
+    unsetenv("PYTHONUNBUFFERED");
+    unsetenv("FORCE_COLOR");
+    unsetenv("MAKEFLAGS");
 }
 
 static void test_bash_streamed_history_truncated(void)
@@ -742,11 +766,9 @@ int main(void)
     test_bash_streamed_binary_history_clean();
     test_bash_streamed_binary_marker_isolated_from_escape();
     test_bash_streamed_history_truncated();
-    test_bash_stdout_is_a_tty();
-    test_bash_stderr_is_a_tty();
-    test_bash_interactive_helpers_neutralized();
-    test_bash_term_default();
-    test_bash_term_user_override_preserved();
+    test_bash_stdout_is_not_a_tty();
+    test_bash_stderr_is_not_a_tty();
+    test_bash_env_overrides();
     test_bash_lf_not_crlf();
     test_bash_head_tail_truncation();
     test_bash_short_output_no_elision();

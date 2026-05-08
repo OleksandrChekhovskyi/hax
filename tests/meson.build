@@ -36,7 +36,7 @@ test_bash = executable('test_bash',
         '../src/utf8_sanitize.c',
         '../src/util.c',
     ],
-    dependencies: [jansson, threads, libutil],
+    dependencies: [jansson, threads],
 )
 test('tools/bash', test_bash)
 

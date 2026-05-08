@@ -32,9 +32,8 @@ text and tool calls. With `HAX_MOCK_SCRIPT=path` it replays a small line-based D
 per `stream()` call (see `scripts/mock_demo.txt` for an example); without a script it parses
 the latest user message heuristically (a backtick-quoted argument becomes a bash or read
 tool call). Pair it with `scripts/stream_demo.py` to drive the bash tool through realistic
-streaming patterns — `\r`-rewriting (`fake-ninja`), interleaved progress + result lines
-(`fake-meson`), or bottom-window redraws (`fake-vitest`) — at adjustable cadence via
-`--delay`.
+streaming patterns (`short`, `long`, `slow`, `burst`, `ansi`, `binary`, `piped`,
+`python_buffer`) at adjustable cadence via `--delay`.
 
 Two debug logs are useful when something goes wrong; both truncate on startup (and
 `HAX_TRANSCRIPT` also truncates on `/new`):
@@ -150,8 +149,8 @@ helpers; their headers describe what they do.
 ## Dependencies
 
 Current pinned set is in `meson.build` — at time of writing: **libcurl** (HTTPS+SSE),
-**jansson** (JSON), **pthreads**, **libutil** (`forkpty(3)`; libc-shipped on both targets,
-no extra install). Line editing is in-tree (`src/input.c`), not a dependency.
+**jansson** (JSON), **pthreads**. Line editing is in-tree (`src/input.c`), not a
+dependency.
 
 Rule: every dependency must be in Debian main and either ship with macOS or be a single
 `brew install`. Don't add a dependency without confirming that property; don't suggest GPL

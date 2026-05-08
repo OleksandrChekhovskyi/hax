@@ -150,8 +150,8 @@ HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock_demo.txt ./build/hax
 HAX_PROVIDER=mock ./build/hax
 ```
 
-Pair with `scripts/stream_demo.py` (`fake-ninja` / `fake-meson` / `fake-vitest`) for
-realistic streaming patterns through the bash tool.
+Pair with `scripts/stream_demo.py` (`short`, `long`, `slow`, `burst`, `ansi`, `binary`,
+`piped`, `python_buffer`) for realistic streaming patterns through the bash tool.
 
 ## Environment variables
 
