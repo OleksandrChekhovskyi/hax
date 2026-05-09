@@ -577,7 +577,7 @@ static struct item dispatch_tool_call_silent(struct cluster *cl, struct disp *d,
      * rather than the prior turn's residue. */
     spinner_set_label(sp, "running...");
     if (inline_spinner) {
-        spinner_show_inline(sp);
+        spinner_show_inline_header(sp);
     } else {
         spinner_show(sp);
     }
@@ -852,7 +852,7 @@ static int agent_stream_tick(void *user)
          * already at column 0 or right after a space — the model's
          * last byte is its own breathing room, and an extra pad would
          * read as a stray double-space once the glyph erases. */
-        spinner_show_inline_sticky(ec->spinner, !ec->disp->at_space_or_bol);
+        spinner_show_inline_text(ec->spinner, !ec->disp->at_space_or_bol);
         ec->idle_shown = 1;
     }
     return interrupt_requested();
