@@ -1,0 +1,67 @@
+# Mock provider script focused on display/layout features. Where
+# mock_demo.txt walks through the rendering pipeline end-to-end (head
+# preview, head+tail elision, diff coloring, etc.), this one is the
+# place to add fixtures for layout-specific behaviors that are easy to
+# eyeball but tedious to cover in unit tests — header reflow today,
+# streaming-markdown wrap and tool-output gutter rendering when they
+# land.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock_layout.txt build/hax
+#
+# Resize the terminal to a known width before running for predictable
+# break points (the comments below assume a 100-cell window — the
+# default display_width() cap). DSL reference lives in mock_demo.txt.
+
+# cmd_classify routes pure read-only invocations (ls, find, grep, …)
+# through the silent header — single dim line, no reflow target. To
+# exercise the verbose multi-row reflow we need commands that classify
+# as non-exploration (shell control flow, mutating ops, or unknown
+# binaries are reliable triggers).
+
+# ---------- turn 1: bash header, fits on one row ----------------------
+# Short verbose command — no wrap, no ellipsis. The "for d in …; do …;
+# done" wrapper trips cmd_classify into the verbose path.
+text Short bash command first, for a baseline.
+tool bash {"command":"for d in src; do echo $d; done"}
+usage in=80 out=10
+end-turn
+
+# ---------- turn 2: bash header, reflows across two rows --------------
+# Long enough that the first row's "[bash] " prefix forces a word-
+# boundary break, but short enough to fit in the 3-row budget so no
+# truncation kicks in.
+text Medium-length bash command — should wrap across two rows.
+tool bash {"command":"for f in src/providers/openai.c src/providers/codex.c src/providers/llamacpp.c; do echo $f; done"}
+usage in=160 out=18
+end-turn
+
+# ---------- turn 3: bash header, fills 3 rows exactly -----------------
+# Long enough to fill three rows but stops just under the budget — no
+# trailing "...". Demonstrates the upper edge of the reflow window.
+text Long bash command — should fill all 3 rows without truncation.
+tool bash {"command":"for f in src/providers/openai.c src/providers/codex.c src/providers/llamacpp.c src/providers/openrouter.c src/providers/openai_compat.c src/providers/mock.c; do echo \"== $f ==\"; wc -l \"$f\"; head -1 \"$f\"; tail -1 \"$f\"; done"}
+usage in=260 out=20
+end-turn
+
+# ---------- turn 4: bash header, overflows 3 rows + truncates ---------
+# Pushes well past the 3-row budget so the last row visibly ends in
+# "..." with a clean word-boundary cut.
+text Very long bash command — should overflow and truncate.
+tool bash {"command":"for f in src/providers/openai.c src/providers/codex.c src/providers/llamacpp.c src/providers/openrouter.c src/providers/openai_compat.c src/providers/mock.c src/providers/probe.c; do echo \"== $f ==\"; wc -l \"$f\"; head -3 \"$f\"; tail -3 \"$f\"; echo \"-- lines summary --\"; awk '{c++} END {print c}' \"$f\"; echo \"-- words summary --\"; awk '{w+=NF} END {print w}' \"$f\"; done"}
+usage in=320 out=24
+end-turn
+
+# ---------- turn 5: read silent header --------------------------------
+# Read goes through the silent path: the bracketed `[read]` plus the
+# basename + ":N-M" extra render as a single dim line. Included here
+# so the layout demo also covers the silent header for visual
+# comparison against the verbose bash blocks above; the verbose
+# multi-row reflow won't apply until a non-silent path tool lands.
+text Read with a deeply nested path.
+tool read {"path":"src/providers/this/is/an/intentionally/very/deeply/nested/imaginary/path/to/some/test_fixture.c","offset":30,"limit":31}
+usage in=320 out=12
+end-turn
+
+text Done — that covers verbose-header reflow and truncation.
+usage in=360 out=12
+end-turn

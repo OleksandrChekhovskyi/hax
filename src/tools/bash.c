@@ -789,6 +789,7 @@ const struct tool TOOL_BASH = {
             .display_arg = "command",
         },
     .run = run,
+    .header_rows = 3,
     .preview_tail = 1,
     .is_silent = bash_is_silent,
 };

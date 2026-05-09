@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: MIT */
 #include "input_core.h"
 
-#include <locale.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "harness.h"
 #include "input.h"
+#include "util.h"
 
 /* ---------- helpers ---------- */
 
@@ -732,18 +732,6 @@ static void test_prompt_width_strips_ansi(void)
     EXPECT(input_core_prompt_width("") == 0);
 }
 
-/* ---------- utf8_seq_len ---------- */
-
-static void test_utf8_seq_len(void)
-{
-    EXPECT(input_core_utf8_seq_len('a') == 1);
-    EXPECT(input_core_utf8_seq_len(0x7F) == 1);
-    EXPECT(input_core_utf8_seq_len(0xC3) == 2); /* 2-byte leader */
-    EXPECT(input_core_utf8_seq_len(0xE2) == 3); /* 3-byte leader */
-    EXPECT(input_core_utf8_seq_len(0xF0) == 4); /* 4-byte leader */
-    EXPECT(input_core_utf8_seq_len(0x80) == 1); /* malformed → 1 */
-}
-
 /* ---------- decode_escape ---------- */
 
 /* Byte-array reader for input_core_decode_escape. The decoder calls
@@ -986,11 +974,9 @@ static void test_decode_overflow_and_runaway(void)
 
 int main(void)
 {
-    /* mbrtowc inside compute_layout needs a UTF-8 LC_CTYPE for the multi-byte
-     * codepath to be exercised. C.UTF-8 is widely available; en_US.UTF-8 as
-     * a fallback for systems that lack C.UTF-8 (older macOS). */
-    if (!setlocale(LC_CTYPE, "C.UTF-8"))
-        setlocale(LC_CTYPE, "en_US.UTF-8");
+    /* mbrtowc inside compute_layout needs a UTF-8 LC_CTYPE for the
+     * multi-byte codepath to be exercised. */
+    locale_init_utf8();
 
     test_layout_empty();
     test_layout_single_line_cursor_positions();
@@ -1029,7 +1015,6 @@ int main(void)
     test_history_encode_decode_roundtrip();
 
     test_prompt_width_strips_ansi();
-    test_utf8_seq_len();
 
     test_decode_unmodified_csi();
     test_decode_unmodified_ss3();

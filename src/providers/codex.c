@@ -652,7 +652,7 @@ static void print_window(const char *slot, json_t *win)
      * itself is BAR_W cells; the rest is plain ASCII so byte length
      * equals visible width. */
     int total = USAGE_ROW_INDENT + USAGE_BAR_W + pct_len + tail_len;
-    int reflow = total > term_width();
+    int reflow = total > display_width();
 
     printf("  " ANSI_DIM "%-*s" ANSI_RESET " ", USAGE_LABEL_W, label);
     progress_bar_print(used / 100.0, USAGE_BAR_W);

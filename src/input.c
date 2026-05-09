@@ -19,6 +19,7 @@
 #include "fs.h"
 #include "input_core.h"
 #include "spawn.h"
+#include "utf8.h"
 #include "utf8_sanitize.h"
 #include "util.h"
 
@@ -269,7 +270,7 @@ static int emit_safe_span(const char *buf, size_t len, int start_col, int cols)
             continue;
         }
         size_t consumed;
-        int w = input_core_codepoint_width(buf, len, i, &consumed);
+        int w = utf8_codepoint_cells(buf, len, i, &consumed);
         if (w < 0) {
             /* Non-printable codepoint: C1 controls (raw 0x80-0x9f or
              * UTF-8 U+0080..U+009F), DEL, format chars, malformed
@@ -906,7 +907,7 @@ char *input_readline(struct input *in, const char *prompt)
                  * consumed as continuation bytes instead of working.
                  * On timeout we insert what we have; render-time
                  * substitution renders the partial sequence as `?`. */
-                int seq = input_core_utf8_seq_len(c);
+                int seq = utf8_seq_len(c);
                 char bytes[4];
                 bytes[0] = (char)c;
                 int got = 1;

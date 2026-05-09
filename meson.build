@@ -56,6 +56,7 @@ sources = files(
     'src/trace.c',
     'src/transcript.c',
     'src/turn.c',
+    'src/utf8.c',
     'src/utf8_sanitize.c',
     'src/util.c',
     'src/providers/codex.c',

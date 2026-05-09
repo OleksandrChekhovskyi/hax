@@ -123,21 +123,6 @@ int input_core_prompt_width(const char *s);
 void input_core_compute_layout(const char *buf, size_t len, size_t cursor, int prompt_w, int cols,
                                struct input_layout *out);
 
-/* Number of bytes in the UTF-8 sequence starting at leading byte `c`.
- * Returns 1 for a malformed leader. */
-int input_core_utf8_seq_len(unsigned char c);
-
-/* Display columns of the codepoint at buf[i..]. Writes the codepoint's
- * UTF-8 byte length to *consumed (always >= 1 when i < len). Returns:
- *   < 0 — non-printable: C0/C1 controls, DEL, malformed UTF-8, embedded
- *         NUL. Caller should substitute (a single safe glyph) rather
- *         than emit the raw bytes — even UTF-8-encoded C1 controls can
- *         be interpreted by some terminals.
- *   == 0 — combining mark or zero-width joiner; rides on prior glyph.
- *   > 0 — printable codepoint occupying that many columns.
- * Tab and newline are NOT special-cased — callers handle them. */
-int input_core_codepoint_width(const char *buf, size_t len, size_t i, size_t *consumed);
-
 /* Spaces per tab. Layout and rendering both expand a tab to exactly
  * this many columns regardless of the current column — soft-tab style,
  * so each tab in the buffer advances the cursor by a consistent amount

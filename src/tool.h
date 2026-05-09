@@ -51,6 +51,13 @@ struct tool {
      * suffix. Caller frees the returned string. */
     char *(*format_display_extra)(const char *args_json);
     int output_is_diff;
+    /* Maximum rows the verbose tool-call header may occupy. The
+     * display_arg word-wraps at row boundaries up to this cap, then
+     * truncates with "..."; 0 (the default) is treated as 1. Bash
+     * sets this to 3 because shell commands carry real signal that's
+     * worth seeing across multiple rows; tools with a path-shaped
+     * arg leave it at the default. */
+    int header_rows;
     /* When set, the dim preview shows both ends of long output with the
      * middle elided — useful for command output where errors/summaries
      * tend to land at the bottom. The default (head-only) is right for

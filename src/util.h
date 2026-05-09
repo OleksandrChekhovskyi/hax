@@ -93,14 +93,110 @@ void gen_uuid_v4(char out[37]);
  * when stdout isn't a TTY or the ioctl fails, and clamps the result to
  * [40, 200] so callers don't need to defend against pathologically
  * narrow or wide widths. Re-queried on each call so SIGWINCH-style
- * resizes are picked up without explicit signal handling. */
+ * resizes are picked up without explicit signal handling.
+ *
+ * Use term_width() only when you need the *real* edge of the row —
+ * cursor positioning, ANSI erase-line, spinner placement. For content
+ * layout (header reflow, tool previews, future markdown wrapping)
+ * prefer display_width() which caps the result for readability. */
 int term_width(void);
 
-/* Replace ASCII control bytes (newline, CR, tab, etc.) with single spaces
- * and collapse runs of whitespace to one space, stripping leading and
- * trailing whitespace. Used to render multi-line content (a bash command
- * like `ls\npwd`, a JSON arg) on a single visual line for headers and
- * logs. Returns a newly-allocated NUL-terminated string; caller frees. */
+/* Soft cap on content width applied by display_width(). Lines wrapped
+ * to the display width stay at a readable length even on ultrawide
+ * terminals (web-style "max-width" idiom). Tweak here if it ever
+ * needs to grow. */
+#define DISPLAY_WIDTH_CAP 100
+
+/* Capped variant of term_width() for content layout — clamps the
+ * result to DISPLAY_WIDTH_CAP cells. Use anywhere width drives word
+ * wrapping or text truncation; the unclamped term_width() stays for
+ * cursor-edge concerns where the real terminal column matters. */
+int display_width(void);
+
+/* Truncate a UTF-8 string to fit in `cap` visual cells, replacing the
+ * cut suffix with "..." so the user sees an explicit "more here"
+ * marker. Returns a fresh dup when content already fits. Width is
+ * via utf8_codepoint_cells — locale-dependent, requires
+ * locale_init_utf8() at startup. Returns malloc'd; caller frees. */
+char *truncate_for_display(const char *s, size_t cap);
+
+/* Find the byte offset where to break `s` (length `len`) so the
+ * current row fits in at most `max_cells` visual cells. Returns the
+ * end-of-row byte offset (s[0..return) is the row content). When
+ * *resume_at is non-NULL, also reports the byte offset where the
+ * next row's content starts — differs from the end offset when the
+ * break consumes a separating space.
+ *
+ * Algorithm: walks forward codepoint-by-codepoint, accumulating cell
+ * widths via utf8_codepoint_cells. The rightmost ASCII space within
+ * the budget is the break point (end excludes the space, resume
+ * skips it). A space sitting exactly at column max_cells is also a
+ * valid break — its width belongs to the inter-row fence. If the row
+ * holds no space at all, hard-breaks at the codepoint boundary that
+ * would push past max_cells. When the whole input fits, returns len.
+ *
+ * Width is measured in cells — see truncate_for_display for the
+ * locale caveat.
+ *
+ * Precondition: max_cells >= 1. A zero-width row has no meaningful
+ * break position (would stall the caller's loop) — callers must
+ * clamp first. reflow_for_display clamps internally; the streaming-
+ * markdown wrapper will need to do the same.
+ *
+ * Stateless primitive; both reflow_for_display and the (upcoming)
+ * streaming markdown wrapper layer their own state on top. */
+size_t wrap_break_pos(const char *s, size_t len, size_t max_cells, size_t *resume_at);
+
+/* Reflow `s` so it fits in at most `max_rows` terminal rows, breaking
+ * at word boundaries (ASCII spaces). Long unbroken words hard-break
+ * at the row boundary. If content exceeds the budget, the last
+ * visible row is truncated with a trailing "..." marker.
+ *
+ *   first_row         — cells available on the first row (caller may
+ *                       have a prefix already laid down, e.g.
+ *                       "[bash] ")
+ *   mid_row           — cells on subsequent rows (full row width)
+ *   max_rows          — maximum rows of output (>= 1)
+ *   last_row_reserve  — cells to reserve at the end of the last row
+ *                       for a suffix the caller will append after this
+ *                       (e.g. read's ":N-M" extra). 0 if none.
+ *
+ * Returns malloc'd; rows are joined by '\n' (no trailing newline).
+ * The returned string never contains ANSI escapes — caller wraps with
+ * styling. NULL input returns "". Caller frees.
+ *
+ * Width is measured in cells — see truncate_for_display for the
+ * locale caveat. */
+char *reflow_for_display(const char *s, int first_row, int mid_row, int max_rows,
+                         int last_row_reserve);
+
+/* Prepare an arbitrary UTF-8 string for one-line display. Three
+ * passes in one walk:
+ *
+ *   - Replace ASCII control bytes (newline, CR, tab, etc.) with
+ *     single spaces and collapse runs of whitespace to one space;
+ *     strip leading/trailing whitespace. Lets multi-line content
+ *     (a bash command, a JSON arg) render on a single visual line.
+ *
+ *   - Substitute one '?' per "dangerous" multi-byte codepoint —
+ *     Trojan Source bidi vectors, ZWJ and other invisibles, malformed
+ *     UTF-8. Without this, a model-supplied path or shell command
+ *     could embed bidi overrides and have the rendered header
+ *     reordered or hidden in the terminal. Mirrors the cell-width
+ *     substitution policy of utf8_codepoint_cells.
+ *
+ *   - Cap consecutive zero-width codepoints (combining marks, VS-N)
+ *     at a small bound per base glyph. Legitimate scripts use 0-6;
+ *     the cap stops adversarial floods of marks that nominally take
+ *     ~1 cell but consume arbitrary bytes.
+ *
+ *   - Pass through everything else (printable ASCII, well-formed
+ *     multi-byte codepoints with non-negative wcwidth) verbatim.
+ *
+ * Locale-dependent — the dangerous-codepoint detection routes through
+ * mbrtowc + wcwidth, so locale_init_utf8() must run at startup.
+ *
+ * Returns malloc'd; caller frees. NULL input returns "". */
 char *flatten_for_display(const char *s);
 
 /* Truncate any line in `data` longer than `max_line` bytes to its first

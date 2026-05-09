@@ -122,33 +122,6 @@ static const char *basename_view(const char *path)
     return slash + 1;
 }
 
-/* Truncate a UTF-8 string to fit in `cap` bytes, replacing the cut
- * suffix with "..." so the user sees an explicit "more here" marker.
- * Same convention as the elision markers in tool_render.c / bash.c so
- * the truncation idiom reads consistently across the UI. Walks back
- * from the cut point to a UTF-8 codepoint boundary so the replacement
- * doesn't leave a half-encoded byte. Returns malloc'd. */
-static char *truncate_for_display(const char *s, size_t cap)
-{
-    size_t n = strlen(s);
-    if (n <= cap)
-        return xstrdup(s);
-    if (cap < 4) {
-        char *out = xmalloc(cap + 1);
-        memcpy(out, s, cap);
-        out[cap] = '\0';
-        return out;
-    }
-    size_t cut = cap - 3;
-    while (cut > 0 && (s[cut] & 0xC0) == 0x80)
-        cut--;
-    char *out = xmalloc(cut + 4);
-    memcpy(out, s, cut);
-    memcpy(out + cut, "...", 3);
-    out[cut + 3] = '\0';
-    return out;
-}
-
 /* Decide whether this call should render with the silent-preview flow.
  * Static `silent_preview` flag wins when set; otherwise the optional
  * `is_silent` callback gets to inspect args (used by bash to classify
@@ -193,9 +166,19 @@ static void cluster_terminate(struct cluster *cl, struct disp *d, struct spinner
     cl->line_used = 0;
 }
 
+/* Hard cap on the dim suffix appended after the bold display_arg
+ * (read's ":N-M" line range, etc.). The model controls the suffix
+ * content via tool args; without a cap, an adversarial offset/limit
+ * pair could produce a suffix that dominates the row. Real suffixes
+ * are well under this. */
+#define HEADER_EXTRA_CAP 20
+
 /* Verbose tool-call header: block separator, `[name]` tag, the tool's
- * display_arg (full path / command), optional dim suffix. Terminated
- * with `\n` and committed so the spinner or output draws below. */
+ * display_arg (full path / command), optional dim suffix. The arg is
+ * word-wrapped across up to `tool->header_rows` rows (default 1) and
+ * truncated with "..." beyond that, so it can't overflow into
+ * terminal-driven mid-word wrapping. Terminated with `\n` and
+ * committed so the spinner or output draws below. */
 static void display_tool_header(struct disp *d, const struct item *call)
 {
     const struct tool *tool = find_tool(call->tool_name);
@@ -213,27 +196,74 @@ static void display_tool_header(struct disp *d, const struct item *call)
     disp_printf(d, "[%s]", call->tool_name);
     disp_raw(ANSI_RESET);
 
+    int width = display_width();
+    /* Tool names are ASCII so strlen == cells. */
+    int prefix_cost = (int)strlen(call->tool_name) + 3; /* "[name] " */
+
     if (display_arg) {
+        /* Reserve the dim extra suffix's cells out of the last row's
+         * budget so the suffix stays attached without pushing the arg
+         * over. format_display_extra is ASCII (e.g. read's ":30-50")
+         * so byte length approximates cells. The model controls the
+         * suffix content via tool args (a huge offset/limit pair on
+         * read produces a 20+ char `:N-M`), so cap it here — without
+         * a cap, a runaway suffix would dominate the row and shrink
+         * the arg to "..." even when the arg is the user-interesting
+         * part. */
+        int extra_cost = 0;
+        char *extra = NULL;
+        if (tool && tool->format_display_extra) {
+            extra = tool->format_display_extra(call->tool_arguments_json);
+            if (extra && *extra) {
+                int extra_cap = HEADER_EXTRA_CAP;
+                if (extra_cap > width - 8)
+                    extra_cap = width - 8;
+                if (extra_cap < 4)
+                    extra_cap = 4;
+                if ((int)strlen(extra) > extra_cap) {
+                    char *trimmed = truncate_for_display(extra, (size_t)extra_cap);
+                    free(extra);
+                    extra = trimmed;
+                }
+                extra_cost = (int)strlen(extra);
+            }
+        }
+
+        int rows = tool && tool->header_rows > 0 ? tool->header_rows : 1;
+        int first_row = width - prefix_cost;
+        int mid_row = width;
+        if (first_row < 8)
+            first_row = 8;
+        if (mid_row < 8)
+            mid_row = 8;
+
         disp_putc(d, ' ');
         disp_raw(ANSI_BOLD);
         char *flat = flatten_for_display(display_arg);
-        disp_write(d, flat, strlen(flat));
+        char *laid = reflow_for_display(flat, first_row, mid_row, rows, extra_cost);
         free(flat);
+        disp_write(d, laid, strlen(laid));
+        free(laid);
         disp_raw(ANSI_RESET);
-        if (tool && tool->format_display_extra) {
-            char *extra = tool->format_display_extra(call->tool_arguments_json);
-            if (extra && *extra) {
-                disp_raw(ANSI_DIM);
-                disp_write(d, extra, strlen(extra));
-                disp_raw(ANSI_RESET);
-            }
-            free(extra);
+        if (extra && *extra) {
+            disp_raw(ANSI_DIM);
+            disp_write(d, extra, strlen(extra));
+            disp_raw(ANSI_RESET);
         }
+        free(extra);
     } else if (call->tool_arguments_json && *call->tool_arguments_json) {
         disp_putc(d, ' ');
         disp_raw(ANSI_DIM);
         char *flat = flatten_for_display(call->tool_arguments_json);
-        disp_write(d, flat, strlen(flat));
+        /* Generic JSON arg (for tools without a display_arg field): one
+         * row, plain truncate. These are debug-grade — no point laying
+         * out raw JSON across multiple rows. */
+        int budget = width - prefix_cost;
+        if (budget < 8)
+            budget = 8;
+        char *trimmed = truncate_for_display(flat, (size_t)budget);
+        disp_write(d, trimmed, strlen(trimmed));
+        free(trimmed);
         free(flat);
         disp_raw(ANSI_RESET);
     }
@@ -442,7 +472,7 @@ static struct item dispatch_tool_refused(struct disp *d, const struct item *call
 static struct item dispatch_tool_call_silent(struct cluster *cl, struct disp *d, struct spinner *sp,
                                              const struct item *call, const struct tool *t)
 {
-    int term_w = term_width();
+    int term_w = display_width();
 
     /* Hide whichever mode the spinner is in and learn what mode was
      * active at hide time. was_inline=1 means the cursor sits at the

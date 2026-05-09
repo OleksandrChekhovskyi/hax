@@ -430,10 +430,525 @@ static void test_flatten_control_bytes(void)
 
 static void test_flatten_preserves_high_bytes(void)
 {
-    /* UTF-8 bytes (>= 0x80) are not control chars and pass through. */
+    /* UTF-8 bytes (>= 0x80) for non-dangerous codepoints pass through. */
     char *out = flatten_for_display("café\nlatte");
     EXPECT_STR_EQ(out, "café latte");
     free(out);
+}
+
+static void test_flatten_substitutes_bidi_override(void)
+{
+    /* Trojan Source: U+202E RIGHT-TO-LEFT OVERRIDE encoded as
+     * E2 80 AE. Flatten substitutes with '?' so a model-supplied
+     * tool arg can't bidi-reorder the rendered header. */
+    char *out = flatten_for_display("ab\xE2\x80\xAE"
+                                    "cd");
+    EXPECT_STR_EQ(out, "ab?cd");
+    free(out);
+}
+
+static void test_flatten_substitutes_zwj(void)
+{
+    /* U+200D ZERO WIDTH JOINER (E2 80 8D). Width-zero invisible —
+     * substituted so the displayed string matches the cell budget. */
+    char *out = flatten_for_display("ab\xE2\x80\x8D"
+                                    "cd");
+    EXPECT_STR_EQ(out, "ab?cd");
+    free(out);
+}
+
+static void test_flatten_substitutes_malformed_utf8(void)
+{
+    /* Lone continuation byte: malformed UTF-8 → '?'. */
+    char *out = flatten_for_display("ab\x80"
+                                    "cd");
+    EXPECT_STR_EQ(out, "ab?cd");
+    free(out);
+}
+
+static void test_flatten_caps_zero_width_run(void)
+{
+    /* Adversarial case: a single base glyph with a long flood of
+     * combining marks would render as ~1 cell but consume arbitrary
+     * bytes — defeating the "cap content width" goal of the new
+     * reflow path. flatten caps consecutive zero-width codepoints
+     * (each combining acute U+0301 = CC 81, 2 bytes, 0 cells) at
+     * MAX_ZW_PER_BASE = 8. Excess marks are silently dropped. */
+    char input[1 + 2 * 100 + 1];
+    input[0] = 'a';
+    for (int k = 0; k < 100; k++) {
+        input[1 + 2 * k] = (char)0xCC;
+        input[2 + 2 * k] = (char)0x81;
+    }
+    input[1 + 2 * 100] = '\0';
+    char *out = flatten_for_display(input);
+    /* "a" + 8 combining marks = 1 + 16 = 17 bytes. */
+    EXPECT(strlen(out) == 17);
+    EXPECT(out[0] == 'a');
+    free(out);
+}
+
+static void test_flatten_preserves_legit_combining_run(void)
+{
+    /* Below the cap, combining marks pass through unchanged so
+     * legitimate decomposed forms (e.g. macOS HFS+ NFD paths,
+     * Devanagari with multiple marks per base) render correctly.
+     * "a" + 3 combining marks = 1 + 6 = 7 bytes, unchanged. */
+    char *out = flatten_for_display("a\xCC\x81\xCC\x81\xCC\x81");
+    EXPECT_STR_EQ(out, "a\xCC\x81\xCC\x81\xCC\x81");
+    free(out);
+}
+
+/* ---------- truncate_for_display ---------- */
+
+static void test_truncate_under_cap(void)
+{
+    /* String shorter than cap: returned unchanged (still a fresh dup). */
+    char *out = truncate_for_display("hello", 10);
+    EXPECT_STR_EQ(out, "hello");
+    free(out);
+}
+
+static void test_truncate_exact_cap(void)
+{
+    /* strlen == cap: still a no-op. */
+    char *out = truncate_for_display("hello", 5);
+    EXPECT_STR_EQ(out, "hello");
+    free(out);
+}
+
+static void test_truncate_above_cap(void)
+{
+    /* strlen > cap: cut to cap-3 bytes and append "...". */
+    char *out = truncate_for_display("hello world", 8);
+    EXPECT_STR_EQ(out, "hello...");
+    free(out);
+}
+
+static void test_truncate_tiny_cap(void)
+{
+    /* cap < 4 has no room for "..." — hard cut, no marker. */
+    char *out = truncate_for_display("hello", 3);
+    EXPECT_STR_EQ(out, "hel");
+    free(out);
+}
+
+static void test_truncate_utf8_boundary(void)
+{
+    /* "café latte" — 10 cells (each codepoint is 1 cell here),
+     * 11 bytes (é is 2 bytes). Cap of 5 cells: cut at 2 cells
+     * (cap-3) and append "...". Result "ca...". The é is preserved
+     * as a unit (no half-codepoint). */
+    char *out = truncate_for_display("café latte", 5);
+    EXPECT_STR_EQ(out, "ca...");
+    free(out);
+}
+
+static void test_truncate_keeps_multibyte_intact(void)
+{
+    /* Cap of 6 cells over "café latte" (10 cells): keeps "caf"
+     * (3 cells) plus "..." since cap-3=3. The é codepoint is past
+     * the cut and excluded entirely — never split mid-byte. */
+    char *out = truncate_for_display("café latte", 6);
+    EXPECT_STR_EQ(out, "caf...");
+    free(out);
+}
+
+static void test_truncate_under_cap_multibyte(void)
+{
+    /* "café" = 4 cells (each codepoint is 1 cell, é via wcwidth=1)
+     * but 5 bytes. cap=4 fits even though byte length exceeds cap —
+     * cells, not bytes, drive the decision. */
+    char *out = truncate_for_display("café", 4);
+    EXPECT_STR_EQ(out, "café");
+    free(out);
+}
+
+static void test_truncate_keeps_trailing_combining_mark(void)
+{
+    /* "abcd" + COMBINING ACUTE on d (U+0301) = 4 cells, 6 bytes.
+     * cap=4 should fit it whole — combining marks contribute 0 cells
+     * and ride on the prior glyph. Without absorbing trailing zero-
+     * width codepoints, advance_cells stops after 'd' and the cut
+     * orphans the combining mark, mis-rendering as "a..." or similar. */
+    char *out = truncate_for_display("abcd\xCC\x81", 4);
+    EXPECT_STR_EQ(out, "abcd\xCC\x81");
+    free(out);
+}
+
+static void test_truncate_emoji_two_cells(void)
+{
+    /* Wide codepoints take 2 cells. "🦀abc" = 1 emoji (2 cells) +
+     * 3 ASCII = 5 cells, 7 bytes. cap=4 means the emoji + 1 char fits
+     * with room for nothing else; we cut at 1 cell (emoji is 2 → can't
+     * include) and append "...". cap-3=1 cell budget → cut after the
+     * first ASCII codepoint that fits, i.e. nothing fits, hard cut at
+     * byte 0 + "...". Result "...". */
+    char *out = truncate_for_display("\xF0\x9F\xA6\x80"
+                                     "abc",
+                                     4);
+    EXPECT_STR_EQ(out, "...");
+    free(out);
+
+    /* cap=5 fits the full string (2+1+1+1 = 5 cells). */
+    char *out2 = truncate_for_display("\xF0\x9F\xA6\x80"
+                                      "abc",
+                                      5);
+    EXPECT_STR_EQ(out2, "\xF0\x9F\xA6\x80"
+                        "abc");
+    free(out2);
+}
+
+static void test_truncate_null(void)
+{
+    char *out = truncate_for_display(NULL, 10);
+    EXPECT_STR_EQ(out, "");
+    free(out);
+}
+
+/* ---------- wrap_break_pos ---------- */
+
+static void test_wrap_break_fits(void)
+{
+    /* Whole string fits: end == resume == len, no break. */
+    size_t resume = 999;
+    size_t end = wrap_break_pos("hello", 5, 10, &resume);
+    EXPECT(end == 5);
+    EXPECT(resume == 5);
+}
+
+static void test_wrap_break_at_space(void)
+{
+    /* "hello world" with width 10: rightmost space in [0..10] is at
+     * byte 5. End = 5 (excludes the space), resume = 6 (skips it).
+     * Row content is "hello"; next row starts at "world". */
+    size_t resume = 0;
+    size_t end = wrap_break_pos("hello world", 11, 10, &resume);
+    EXPECT(end == 5);
+    EXPECT(resume == 6);
+}
+
+static void test_wrap_break_at_boundary(void)
+{
+    /* A space sitting exactly at position max_cells is a valid break:
+     * "hello world" with width 5 — s[5] is the space — yields row
+     * "hello" with the boundary space consumed. Without this rule the
+     * helper would hard-break "hello" mid-word and the leading space
+     * would leak onto the next row. */
+    size_t resume = 0;
+    size_t end = wrap_break_pos("hello world", 11, 5, &resume);
+    EXPECT(end == 5);
+    EXPECT(resume == 6);
+}
+
+static void test_wrap_break_hard_split(void)
+{
+    /* No space anywhere in [0..max_cells]: hard-break at the column
+     * boundary. Use a fixture where the only space sits well past the
+     * window. */
+    size_t resume = 0;
+    size_t end = wrap_break_pos("helloworldmore stuff", 20, 10, &resume);
+    EXPECT(end == 10);
+    EXPECT(resume == 10);
+}
+
+static void test_wrap_break_trims_trailing_spaces(void)
+{
+    /* Defensive trim: if the input wasn't pre-flattened, a run of
+     * spaces before the break point shouldn't leak into the row.
+     * Input "hi  more" with width 5: the rightmost space in [0..5] is
+     * at byte 3; the trim then walks end back over the space at byte
+     * 2, landing end=2 (row "hi") with resume=4 (start of "more"). */
+    size_t resume = 0;
+    size_t end = wrap_break_pos("hi  more", 8, 5, &resume);
+    EXPECT(end == 2);
+    EXPECT(resume == 4);
+}
+
+static void test_wrap_break_null_resume(void)
+{
+    /* resume_at NULL is allowed for callers that don't need it. */
+    size_t end = wrap_break_pos("hello world", 11, 10, NULL);
+    EXPECT(end == 5);
+}
+
+static void test_wrap_break_multibyte_aware(void)
+{
+    /* "café world" — 10 cells, 11 bytes (é is 2 bytes, 1 cell).
+     * With max_cells=4, the boundary space at column 4 is byte 5
+     * (since é occupies bytes 3-4). Row content "café" (4 cells,
+     * 5 bytes); resume at "world" (byte 6). A byte-counting
+     * implementation would have broken mid-é. */
+    size_t resume = 0;
+    size_t end = wrap_break_pos("caf\xC3\xA9 world", 11, 4, &resume);
+    EXPECT(end == 5);
+    EXPECT(resume == 6);
+}
+
+static void test_wrap_break_keeps_combining_with_base(void)
+{
+    /* "abcd̃ef" — a, b, c, d+COMBINING TILDE, e, f. 6 cells, 8 bytes
+     * (combining tilde U+0303 = CC 83). With max_cells=4 and no space,
+     * the hard split should land *after* the combining mark so it
+     * stays attached to its base 'd', not orphaned at the start of
+     * the next row. */
+    size_t resume = 0;
+    size_t end = wrap_break_pos("abcd\xCC\x83"
+                                "ef",
+                                8, 4, &resume);
+    EXPECT(end == 6);    /* "abcd̃" = 4 ASCII + 2-byte combining */
+    EXPECT(resume == 6); /* hard-break, no space consumed */
+}
+
+static void test_wrap_break_oversized_first_codepoint(void)
+{
+    /* Pathological budget: max_cells=1, first codepoint is 2 cells
+     * (emoji). No space anywhere in the window. Without forward-
+     * progress protection, advance_cells would return 0 and stall
+     * the caller's loop. Helper takes the emoji as a single-codepoint
+     * row instead — visible row overflows by 1 cell, but the caller
+     * still advances and the row count stays bounded. */
+    size_t resume = 0;
+    /* "🦀abc" — emoji (4 bytes) + abc. */
+    size_t end = wrap_break_pos("\xF0\x9F\xA6\x80"
+                                "abc",
+                                7, 1, &resume);
+    EXPECT(end == 4);    /* one emoji codepoint = 4 bytes */
+    EXPECT(resume == 4); /* hard-break, no space consumed */
+}
+
+/* ---------- reflow_for_display ---------- */
+
+static void test_reflow_no_wrap_needed(void)
+{
+    /* Fits on first row with reserve room: pass-through dup. */
+    char *out = reflow_for_display("short", 80, 80, 3, 0);
+    EXPECT_STR_EQ(out, "short");
+    free(out);
+}
+
+static void test_reflow_wraps_at_word(void)
+{
+    /* Two rows of width 10. Input "hello world more" (16 chars):
+     *   row 0 (cap 10): "hello"      ← break at space, "world more" remains
+     *   row 1 (cap 10): "world more" ← fits exactly
+     * No truncation. */
+    char *out = reflow_for_display("hello world more", 10, 10, 2, 0);
+    EXPECT_STR_EQ(out, "hello\nworld more");
+    free(out);
+}
+
+static void test_reflow_truncates_when_out_of_rows(void)
+{
+    /* Two rows of width 10, input "hello world more here". After row 0
+     * ("hello"), 15 chars remain ("world more here"); row 1 is the last
+     * row so we reserve 3 for "..." and word-break in width-3=7. Window
+     * "world m" — last space at byte 5, so row 1 = "world" + "...". */
+    char *out = reflow_for_display("hello world more here", 10, 10, 2, 0);
+    EXPECT_STR_EQ(out, "hello\nworld...");
+    free(out);
+}
+
+static void test_reflow_long_unbreakable_word(void)
+{
+    /* No spaces in the input but still longer than one row: hard-break
+     * mid-word, then truncate the last row. width=10, max_rows=2 →
+     * row 0 = first 10 chars, row 1 = next 7 + "...". */
+    char *out = reflow_for_display("abcdefghijklmnopqrstuvwxyz", 10, 10, 2, 0);
+    EXPECT_STR_EQ(out, "abcdefghij\nklmnopq...");
+    free(out);
+}
+
+static void test_reflow_unbreakable_across_3_rows_truncates(void)
+{
+    /* The pathological case: a long unbroken token that overflows even
+     * a 3-row budget. Every row hard-breaks at the column boundary
+     * (no space anywhere in the input), and the last row hard-cuts
+     * at width-3 to leave room for the trailing "...". width=10,
+     * max_rows=3, input 40 a's → rows 0 and 1 each take 10 chars,
+     * row 2 takes 7 chars + "..." (10 cells visible). */
+    char input[41];
+    memset(input, 'a', 40);
+    input[40] = '\0';
+    char *out = reflow_for_display(input, 10, 10, 3, 0);
+    EXPECT_STR_EQ(out, "aaaaaaaaaa\naaaaaaaaaa\naaaaaaa...");
+    free(out);
+}
+
+static void test_reflow_unbreakable_fits_in_3_rows(void)
+{
+    /* Same shape but shorter — fits exactly in 3 rows of 10, no
+     * truncation. Boundary case: 30 a's exactly fills the budget. */
+    char input[31];
+    memset(input, 'a', 30);
+    input[30] = '\0';
+    char *out = reflow_for_display(input, 10, 10, 3, 0);
+    EXPECT_STR_EQ(out, "aaaaaaaaaa\naaaaaaaaaa\naaaaaaaaaa");
+    free(out);
+}
+
+static void test_reflow_first_row_smaller(void)
+{
+    /* First row narrower than mid (caller has prefix). first_row=5,
+     * mid_row=10, max_rows=2. "hello brave new world" (21):
+     *   row 0 (cap 5):  "hello"        ← break at space at byte 5
+     *   row 1 (cap 10, last): 15 chars "brave new world" remain; word-
+     *     break in width-3=7 → window "brave n", last space at byte 5,
+     *     row = "brave..." */
+    char *out = reflow_for_display("hello brave new world", 5, 10, 2, 0);
+    EXPECT_STR_EQ(out, "hello\nbrave...");
+    free(out);
+}
+
+static void test_reflow_last_row_strict_for_wide_codepoint(void)
+{
+    /* Regression: when target = width-3 is tight and the first
+     * codepoint is wider than target (e.g. a 2-cell CJK glyph in a
+     * 1-cell window), the truncate path used to fall through to
+     * wrap_break_pos's forward-progress fallback and emit one full
+     * codepoint anyway. Appending "..." after pushed the row past
+     * its width budget — defeating the "no terminal hard-wrap"
+     * guarantee. The truncate row should now drop the over-wide
+     * codepoint and emit just "..." so the row stays within budget.
+     *
+     * "界xxx" is 5 cells, 6 bytes (界 = 3 bytes, 2 cells). With
+     * width=4, max_rows=1, target=1: 界 doesn't fit, output is "...". */
+    char *out = reflow_for_display("\xE7\x95\x8C"
+                                   "xxx",
+                                   4, 4, 1, 0);
+    EXPECT_STR_EQ(out, "...");
+    free(out);
+}
+
+static void test_reflow_reserve_applies_when_tail_fits_early(void)
+{
+    /* Regression: when the tail fits in `width` but not in
+     * `width - reserve`, last_row_reserve must still apply — every
+     * row could become the final one and the suffix needs room.
+     * "abcdef" (6 cells) with first_row=10, mid_row=10, max_rows=3,
+     * last_row_reserve=5: last_width=5. Row 0 wraps at 5 cells,
+     * emitting "abcde\n"; row 1 absorbs the trailing "f". Suffix
+     * appended by the caller lands on row 1 with 4 cells of room. */
+    char *out = reflow_for_display("abcdef", 10, 10, 3, 5);
+    EXPECT_STR_EQ(out, "abcde\nf");
+    free(out);
+}
+
+static void test_reflow_last_row_reserve(void)
+{
+    /* last_row_reserve shrinks the LAST row's effective width so a
+     * caller-appended suffix fits. Single-row mode (max_rows=1):
+     * input "hello world" (11), first_row=11, reserve=4 → effective
+     * width 7, doesn't fit → truncate. Width-3=4, window "hell", no
+     * space → hard cut → "hell...". */
+    char *out = reflow_for_display("hello world", 11, 11, 1, 4);
+    EXPECT_STR_EQ(out, "hell...");
+    free(out);
+}
+
+static void test_reflow_null_input(void)
+{
+    char *out = reflow_for_display(NULL, 80, 80, 3, 0);
+    EXPECT_STR_EQ(out, "");
+    free(out);
+}
+
+static void test_reflow_empty_input(void)
+{
+    char *out = reflow_for_display("", 80, 80, 3, 0);
+    EXPECT_STR_EQ(out, "");
+    free(out);
+}
+
+/* Illustrative: a long, realistic bash command laid out for a
+ * verbose tool header on a typical 100-cell display. The "[bash] "
+ * prefix consumes 7 cells, so first_row = 100 - 7 = 93; subsequent
+ * rows get the full 100. Three rows are allowed before truncation
+ * kicks in. The expected output shows rows breaking on spaces, with
+ * the last row ending in "..." when content overflows. */
+static void test_reflow_long_bash_command(void)
+{
+    const char *cmd =
+        "find . -type f -name '*.c' -not -path './build/*' -not -path './build-asan/*' "
+        "| xargs grep -l 'TODO' "
+        "| head -20 "
+        "| while read f; do echo \"== $f ==\"; grep -n TODO \"$f\"; done";
+
+    /* first_row = 93, mid_row = 100, max_rows = 3, no extra reserve. */
+    char *out = reflow_for_display(cmd, 93, 100, 3, 0);
+
+    /* Asserting structural properties (three or fewer rows; each row
+     * within its width budget; the head of the input is preserved
+     * verbatim) rather than the exact byte layout — the latter is
+     * brittle to whitespace tweaks in the fixture and the wrap
+     * algorithm proves itself with the simpler unit tests above. */
+    int rows = 1;
+    for (const char *p = out; *p; p++)
+        if (*p == '\n')
+            rows++;
+    EXPECT(rows <= 3);
+
+    /* Each row fits its budget. */
+    int row = 0;
+    int row_len = 0;
+    for (const char *p = out;; p++) {
+        if (*p == '\n' || *p == '\0') {
+            int budget = (row == 0) ? 93 : 100;
+            if (row_len > budget)
+                FAIL("row %d length %d exceeds budget %d", row, row_len, budget);
+            if (*p == '\0')
+                break;
+            row++;
+            row_len = 0;
+        } else {
+            row_len++;
+        }
+    }
+
+    /* Row 0 starts with "find ", confirms the head of the input is
+     * preserved verbatim (no stray truncation up front). */
+    EXPECT(strncmp(out, "find . -type f", 14) == 0);
+    free(out);
+}
+
+/* Same input, but constrained to 2 rows on a narrower budget so
+ * truncation visibly fires regardless of fixture length. */
+static void test_reflow_long_bash_command_truncated(void)
+{
+    /* A fixture that's deliberately too long for 2*40 cells. With
+     * first_row=33 (40 minus a "[bash] " prefix) and mid_row=40, the
+     * total budget is 73 cells; this command is well over 80. */
+    const char *cmd = "find . -type f -name '*.c' -not -path './build/*' "
+                      "| xargs grep -l TODO | head | while read f; do echo $f; done";
+
+    char *out = reflow_for_display(cmd, 33, 40, 2, 0);
+
+    /* Exactly 2 rows. */
+    int newlines = 0;
+    for (const char *p = out; *p; p++)
+        if (*p == '\n')
+            newlines++;
+    EXPECT(newlines == 1);
+
+    /* Last row ends with "..." since the input doesn't fit in 2 rows. */
+    size_t n = strlen(out);
+    EXPECT(n >= 3);
+    EXPECT(memcmp(out + n - 3, "...", 3) == 0);
+
+    /* Row 0 starts with the head of the command. */
+    EXPECT(strncmp(out, "find . -type f", 14) == 0);
+    free(out);
+}
+
+/* ---------- display_width ---------- */
+
+static void test_display_width_capped(void)
+{
+    /* display_width never exceeds the cap. term_width clamps to <=200,
+     * so on any host display_width returns <= DISPLAY_WIDTH_CAP. */
+    int dw = display_width();
+    EXPECT(dw <= DISPLAY_WIDTH_CAP);
+    EXPECT(dw >= 40);
 }
 
 /* ---------- parse_duration_ms ---------- */
@@ -484,6 +999,10 @@ static void test_parse_duration_invalid(void)
 
 int main(void)
 {
+    /* truncate_for_display / wrap_break_pos / reflow_for_display use
+     * utf8_codepoint_cells (mbrtowc + wcwidth) for cell-accurate width
+     * — those need a UTF-8 LC_CTYPE. */
+    locale_init_utf8();
 
     test_uuid_v4_format();
     test_uuid_v4_unique();
@@ -523,11 +1042,54 @@ int main(void)
     test_flatten_all_whitespace();
     test_flatten_control_bytes();
     test_flatten_preserves_high_bytes();
+    test_flatten_substitutes_bidi_override();
+    test_flatten_substitutes_zwj();
+    test_flatten_substitutes_malformed_utf8();
+    test_flatten_caps_zero_width_run();
+    test_flatten_preserves_legit_combining_run();
 
     test_parse_duration_plain_seconds();
     test_parse_duration_with_suffix();
     test_parse_duration_whitespace();
     test_parse_duration_invalid();
+
+    test_truncate_under_cap();
+    test_truncate_exact_cap();
+    test_truncate_above_cap();
+    test_truncate_tiny_cap();
+    test_truncate_utf8_boundary();
+    test_truncate_keeps_multibyte_intact();
+    test_truncate_under_cap_multibyte();
+    test_truncate_keeps_trailing_combining_mark();
+    test_truncate_emoji_two_cells();
+    test_truncate_null();
+
+    test_wrap_break_fits();
+    test_wrap_break_at_space();
+    test_wrap_break_at_boundary();
+    test_wrap_break_hard_split();
+    test_wrap_break_trims_trailing_spaces();
+    test_wrap_break_null_resume();
+    test_wrap_break_multibyte_aware();
+    test_wrap_break_keeps_combining_with_base();
+    test_wrap_break_oversized_first_codepoint();
+
+    test_reflow_no_wrap_needed();
+    test_reflow_wraps_at_word();
+    test_reflow_truncates_when_out_of_rows();
+    test_reflow_long_unbreakable_word();
+    test_reflow_unbreakable_across_3_rows_truncates();
+    test_reflow_unbreakable_fits_in_3_rows();
+    test_reflow_first_row_smaller();
+    test_reflow_last_row_strict_for_wide_codepoint();
+    test_reflow_reserve_applies_when_tail_fits_early();
+    test_reflow_last_row_reserve();
+    test_reflow_null_input();
+    test_reflow_empty_input();
+    test_reflow_long_bash_command();
+    test_reflow_long_bash_command_truncated();
+
+    test_display_width_capped();
 
     T_REPORT();
 }
