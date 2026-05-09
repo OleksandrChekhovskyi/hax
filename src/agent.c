@@ -729,38 +729,6 @@ static void format_tokens(char *buf, size_t buflen, long n)
         snprintf(buf, buflen, "%ldM", (n + 512L * 1024) / (1024L * 1024));
 }
 
-/* Parse a size with optional k/m suffix (case-insensitive, 1024-base):
- * "256k" → 262144, "128K" → 131072, "1m" → 1048576, "4096" → 4096.
- * Returns 0 on empty/invalid input. */
-static long parse_size(const char *s)
-{
-    if (!s || !*s)
-        return 0;
-    char *end;
-    long v = strtol(s, &end, 10);
-    if (end == s || v <= 0)
-        return 0;
-    while (*end == ' ' || *end == '\t')
-        end++;
-    switch (*end) {
-    case 'k':
-    case 'K':
-        v *= 1024L;
-        end++;
-        break;
-    case 'm':
-    case 'M':
-        v *= 1024L * 1024L;
-        end++;
-        break;
-    }
-    while (*end == ' ' || *end == '\t')
-        end++;
-    if (*end != '\0')
-        return 0;
-    return v;
-}
-
 /* Resolve the context-window value used to render the "%" of context
  * used. Two sources, in order of precedence:
  *   1. HAX_CONTEXT_LIMIT — explicit user override (e.g. "256k"),
@@ -1028,6 +996,11 @@ void agent_new_conversation(struct agent_state *st)
 {
     agent_session_reset(st->sess);
     transcript_log_reset(st->tlog, st->sess->sys, st->sess->tools, st->sess->n_tools);
+    /* The model loses access to anything not in the conversation history,
+     * so any preserved bash temp files referenced by old turns become
+     * unreachable garbage. Drop them now rather than letting them sit in
+     * /tmp until process exit (or longer if the user kills the process). */
+    bash_cleanup_tempfiles();
     agent_print_banner(st->provider, st->sess);
 }
 

@@ -73,6 +73,45 @@ char *xdg_hax_state_path(const char *relpath);
  * same downstream concatenation. Caller frees. */
 char *dup_trim_trailing_slash(const char *s);
 
+/* Join two filesystem path components with exactly one '/' between them.
+ * Strips trailing slashes from `base` (preserving "/" itself as root)
+ * and leading slashes from `rel`. Use for path concatenation where
+ * either side may have come from an env var (TMPDIR on macOS ends in
+ * "/") or a path-walk that lands on root. Both args must be non-NULL;
+ * callers passing user/env data should fall back to a literal default
+ * before calling. Caller frees. */
+char *path_join(const char *base, const char *rel);
+
+/* Shared limits applied to tool results (bash, read) before they go back
+ * to the model. Three knobs:
+ *
+ *   - byte cap: the only one that scales with the host model's context
+ *     size. Env-tunable via HAX_TOOL_OUTPUT_CAP using parse_size grammar
+ *     ("25k", "200k", "1m"). 50 KiB default — matches opencode/pi-mono
+ *     and is roughly 12K tokens, a sensible bite for both small local
+ *     models and frontier ones.
+ *
+ *   - line count cap: guardrail against "10000 short lines" output
+ *     shapes that don't trip the byte cap but still drown context. Not
+ *     env-tunable — the right value doesn't change with model size.
+ *
+ *   - per-line width cap: guardrail against single-line megabyte
+ *     pathologies (minified JS, log lines without newlines). Same
+ *     reasoning: not model-dependent, hardcoded.
+ *
+ * Whichever cap fires first wins. */
+size_t output_cap_bytes(void);
+
+#define OUTPUT_CAP_LINES      2000
+#define OUTPUT_CAP_LINE_WIDTH 500
+
+/* Parse a size with optional k/m suffix (case-insensitive, 1024-base):
+ *   "256k" → 262144, "128K" → 131072, "1m" → 1048576, "4096" → 4096.
+ * Returns 0 on empty/invalid input — callers using 0 as a "disabled"
+ * sentinel can't distinguish, but every current caller wants a positive
+ * size and falls back to a hardcoded default on 0. */
+long parse_size(const char *s);
+
 /* Parse a duration with optional ms/s/m/h suffix (case-insensitive):
  *   "30" → 30000 (no suffix = seconds, the common case)
  *   "30s" → 30000, "30ms" → 30, "5m" → 300000, "2h" → 7200000.

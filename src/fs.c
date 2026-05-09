@@ -96,7 +96,7 @@ static char *resolve_link_target(const char *path)
             next = xstrdup(buf);
         } else {
             char *parent = parent_dir_of(current);
-            next = xasprintf("%s/%s", parent, buf);
+            next = path_join(parent, buf);
             free(parent);
         }
         free(current);
@@ -184,7 +184,7 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
         goto out;
     }
 
-    tmp = xasprintf("%s/.hax-write-XXXXXX", parent);
+    tmp = path_join(parent, ".hax-write-XXXXXX");
     fd = mkstemp(tmp);
     if (fd < 0) {
         *errmsg = xasprintf("mkstemp: %s", strerror(errno));

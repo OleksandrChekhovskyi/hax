@@ -13,16 +13,19 @@
 #include "utf8_sanitize.h"
 #include "util.h"
 
-#define READ_CAP     (256 * 1024)
-#define MAX_LINE_LEN 2000
+enum read_trunc {
+    TRUNC_NONE,
+    TRUNC_BYTES, /* hit OUTPUT_CAP byte cap mid-content */
+    TRUNC_LINES, /* hit OUTPUT_CAP_LINES before EOF (only when no explicit limit) */
+};
 
 struct read_result {
-    char *body;      /* malloc'd; "" on success-with-no-content */
-    size_t body_len; /* byte length of body */
-    int truncated;   /* result hit the byte cap before EOF/limit */
-    int past_eof;    /* requested offset exceeded what's in the file */
-    int is_binary;   /* NUL byte found in first chunk; refuse */
-    long lines_seen; /* total lines streamed (only meaningful when past_eof) */
+    char *body;            /* malloc'd; "" on success-with-no-content */
+    size_t body_len;       /* byte length of body */
+    enum read_trunc trunc; /* TRUNC_NONE if EOF/limit reached cleanly */
+    int past_eof;          /* requested offset exceeded what's in the file */
+    int is_binary;         /* NUL byte found in first chunk; refuse */
+    long lines_seen;       /* total lines streamed (only meaningful when past_eof) */
 };
 
 /* Append [chunk+run_start, chunk+end) to `out`, respecting `cap`. Returns
@@ -67,7 +70,7 @@ static int read_lines_capped(const char *path, long offset, long limit, size_t c
 {
     r->body = NULL;
     r->body_len = 0;
-    r->truncated = 0;
+    r->trunc = TRUNC_NONE;
     r->past_eof = 0;
     r->is_binary = 0;
     r->lines_seen = 0;
@@ -76,6 +79,15 @@ static int read_lines_capped(const char *path, long offset, long limit, size_t c
     if (fd < 0)
         return -1;
 
+    /* The shared line cap is an absolute ceiling, not a default — an
+     * explicit `limit` can only tighten it, never raise it. A model
+     * passing `limit: 30000` on a file of short lines would otherwise
+     * defeat the "many tiny lines" context-flooding protection that the
+     * cap exists to enforce, even when the byte cap doesn't fire. */
+    long effective_line_limit = (long)OUTPUT_CAP_LINES;
+    if (limit > 0 && limit < effective_line_limit)
+        effective_line_limit = limit;
+
     struct buf out;
     buf_init(&out);
     char chunk[8192];
@@ -83,7 +95,7 @@ static int read_lines_capped(const char *path, long offset, long limit, size_t c
     int collecting = (offset == 1);
     long taken = 0;
     int hit_eof = 0;
-    int hit_cap = 0;
+    enum read_trunc trunc = TRUNC_NONE;
     int saw_data_in_current_line = 0;
     int first_chunk = 1;
 
@@ -144,21 +156,51 @@ static int read_lines_capped(const char *path, long offset, long limit, size_t c
 
             if (c == '\n') {
                 if (append_capped(&out, chunk, run_start, i + 1, cap)) {
-                    hit_cap = 1;
+                    trunc = TRUNC_BYTES;
                     goto end_loop;
                 }
                 run_start = i + 1;
                 lines_complete++;
                 taken++;
                 saw_data_in_current_line = 0;
-                if (limit > 0 && taken >= limit)
+                if (taken >= effective_line_limit) {
+                    /* Model's explicit `limit` was fulfilled (and was
+                     * tighter than the shared cap) — clean stop, no
+                     * truncation flag. */
+                    if (limit > 0 && limit <= (long)OUTPUT_CAP_LINES) {
+                        goto end_loop;
+                    }
+                    /* Otherwise the shared cap was the stopper (no explicit
+                     * limit, or limit > cap). Only flag truncation if more
+                     * content actually exists past this point — a file
+                     * whose line count happens to land exactly at the cap
+                     * shouldn't carry a misleading "truncated" marker.
+                     * Check the rest of this chunk first; if the cap
+                     * landed at the chunk boundary, do one more read to
+                     * detect EOF. */
+                    if (i + 1 < (size_t)n) {
+                        trunc = TRUNC_LINES;
+                    } else {
+                        char peek[1];
+                        ssize_t pr;
+                        do {
+                            pr = read(fd, peek, 1);
+                        } while (pr < 0 && errno == EINTR);
+                        /* pr > 0: more content. pr < 0: read error after
+                         * a successful collection — treat as truncated to
+                         * stay conservative. pr == 0: clean EOF, no
+                         * truncation. */
+                        if (pr != 0)
+                            trunc = TRUNC_LINES;
+                    }
                     goto end_loop;
+                }
             }
         }
         /* End of chunk: flush whatever's been collected since the last
          * newline. The cap check inside append_capped handles overflow. */
         if (collecting && append_capped(&out, chunk, run_start, (size_t)n, cap)) {
-            hit_cap = 1;
+            trunc = TRUNC_BYTES;
             goto end_loop;
         }
     }
@@ -176,7 +218,7 @@ end_loop:
     }
 
     r->lines_seen = lines_complete;
-    r->truncated = hit_cap;
+    r->trunc = trunc;
 
     /* Past-EOF: hit EOF without emitting any of the requested lines.
      * offset=1 on an empty file is a benign "no lines", not an error. */
@@ -254,21 +296,23 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
         return msg;
     }
 
+    size_t cap = output_cap_bytes();
+
     /* When no slice is requested, refuse oversize files upfront so the
      * model gets a useful error ("here's how big it is, narrow your
      * request") instead of a silently truncated prefix. With offset or
      * limit, streaming is the right thing — the model is asking for a
      * specific window and the cap may not even fire. */
-    if (!jo && !jl && st.st_size > READ_CAP) {
-        char *msg = xasprintf("%s is %lld bytes; cap is %d. Pass offset/limit to read a slice, "
+    if (!jo && !jl && (size_t)st.st_size > cap) {
+        char *msg = xasprintf("%s is %lld bytes; cap is %zu. Pass offset/limit to read a slice, "
                               "or use bash with grep/head/tail.",
-                              path, (long long)st.st_size, READ_CAP);
+                              path, (long long)st.st_size, cap);
         json_decref(root);
         return msg;
     }
 
     struct read_result rr;
-    if (read_lines_capped(path, offset, limit, READ_CAP, &rr) < 0) {
+    if (read_lines_capped(path, offset, limit, cap, &rr) < 0) {
         char *msg = xasprintf("error reading %s: %s", path, strerror(errno));
         json_decref(root);
         return msg;
@@ -295,14 +339,23 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
      * useless content; this turns each pathological line into a small
      * tagged stub instead. */
     size_t capped_len = 0;
-    char *capped = cap_line_lengths(rr.body, rr.body_len, MAX_LINE_LEN, &capped_len);
+    char *capped = cap_line_lengths(rr.body, rr.body_len, OUTPUT_CAP_LINE_WIDTH, &capped_len);
     free(rr.body);
 
     char *clean = sanitize_utf8(capped, capped_len);
     free(capped);
 
-    if (rr.truncated) {
-        char *msg = xasprintf("%s\n\n[truncated at %d bytes; file is larger]", clean, READ_CAP);
+    if (rr.trunc == TRUNC_BYTES) {
+        char *msg = xasprintf("%s\n\n[truncated at %zu bytes; file is larger — pass offset/limit "
+                              "to read more]",
+                              clean, cap);
+        free(clean);
+        return msg;
+    }
+    if (rr.trunc == TRUNC_LINES) {
+        char *msg = xasprintf("%s\n\n[truncated at %d lines; file has more — pass offset/limit "
+                              "to read more]",
+                              clean, OUTPUT_CAP_LINES);
         free(clean);
         return msg;
     }

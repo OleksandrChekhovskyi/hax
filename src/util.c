@@ -662,6 +662,65 @@ char *dup_trim_trailing_slash(const char *s)
     return out;
 }
 
+char *path_join(const char *base, const char *rel)
+{
+    size_t blen = strlen(base);
+    /* Preserve "/" as the root: blen==1 with base[0]=='/' must not be
+     * stripped to empty. Any other run of trailing slashes collapses. */
+    while (blen > 1 && base[blen - 1] == '/')
+        blen--;
+    while (*rel == '/')
+        rel++;
+    /* Special-case base=="/" so we get "/rel" instead of "//rel". */
+    if (blen == 1 && base[0] == '/')
+        return xasprintf("/%s", rel);
+    return xasprintf("%.*s/%s", (int)blen, base, rel);
+}
+
+size_t output_cap_bytes(void)
+{
+    long v = parse_size(getenv("HAX_TOOL_OUTPUT_CAP"));
+    return v > 0 ? (size_t)v : 50L * 1024;
+}
+
+long parse_size(const char *s)
+{
+    if (!s || !*s)
+        return 0;
+    char *end;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    /* ERANGE catches numerals like "99999999999999999999" — strtol clamps
+     * to LONG_MAX and the suffix multiply would either pass uselessly or
+     * overflow. Treat as invalid and let the caller's default kick in. */
+    if (end == s || v <= 0 || errno == ERANGE)
+        return 0;
+    while (*end == ' ' || *end == '\t')
+        end++;
+    long mul = 1;
+    switch (*end) {
+    case 'k':
+    case 'K':
+        mul = 1024L;
+        end++;
+        break;
+    case 'm':
+    case 'M':
+        mul = 1024L * 1024L;
+        end++;
+        break;
+    }
+    while (*end == ' ' || *end == '\t')
+        end++;
+    if (*end != '\0')
+        return 0;
+    /* Reject values that would overflow when scaled. v is positive; only
+     * the multiply needs guarding. */
+    if (mul > 1 && v > LONG_MAX / mul)
+        return 0;
+    return v * mul;
+}
+
 long parse_duration_ms(const char *s)
 {
     if (!s || !*s)

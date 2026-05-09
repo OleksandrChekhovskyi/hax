@@ -15,20 +15,25 @@
 
 #include "cmd_classify.h"
 #include "interrupt.h"
+#include "utf8.h"
 #include "utf8_sanitize.h"
 #include "util.h"
 
-/* Output budget split between a head buffer (preserved verbatim from the
- * start) and a tail ring (overwriting; preserves the most recent bytes).
- * For build/test failures the tail is where the actionable info lives; for
- * `find`-style listings the head is. Keeping both gives the model context
- * either way. MAX_BYTES_READ caps the total number of bytes the reader is
- * willing to drain — a runaway producer like `yes` is killed at this
- * point, so the tail stays bounded in time as well as size. */
-#define HEAD_CAP                    (32 * 1024)
-#define TAIL_CAP                    (64 * 1024)
-#define MAX_BYTES_READ              (1024 * 1024)
-#define MAX_LINE_LEN                2000
+/* Output is captured to a temp file (mkstemp under $TMPDIR) so the model
+ * sees a tail-truncated preview but can `read` the full output afterwards
+ * via the path embedded in the truncation hint. The temp file is unlinked
+ * when the output fits within the OUTPUT_CAP_* limits; otherwise it's
+ * kept for the model to revisit. We deliberately don't GC kept files at
+ * end of session — the model may reference one many turns later, and the
+ * OS evicts /tmp on reboot. MAX_DRAIN_BYTES caps how much the reader is
+ * willing to capture from a runaway producer (`yes`, `cat /dev/urandom`) —
+ * the file size never exceeds this, and the producer is SIGKILLed once
+ * we hit it. The effective byte cap (BASH_BYTE_CAP_MAX) is clamped
+ * strictly below MAX_DRAIN_BYTES so spill always fires before drain — a
+ * user-supplied HAX_TOOL_OUTPUT_CAP=20m must not let mem grow past the
+ * drain SIGKILL with no truncation marker. */
+#define MAX_DRAIN_BYTES             (16L * 1024 * 1024)
+#define BASH_BYTE_CAP_MAX           (MAX_DRAIN_BYTES - 64L * 1024)
 #define BASH_TIMEOUT_DEFAULT_MS     (120L * 1000L)
 #define BASH_TIMEOUT_MAX_DEFAULT_MS (1800L * 1000L)
 #define BASH_GRACE_DEFAULT_MS       (2L * 1000L)
@@ -105,37 +110,350 @@ static void format_timeout_for_model(char *buf, size_t buflen, long timeout_ms)
         snprintf(buf, buflen, "%ldms", timeout_ms);
 }
 
-/* Linearize head + tail-ring into `out`, splicing an elision marker
- * between them when bytes were dropped in the middle. The marker bounds
- * itself with newlines so it doesn't visually merge with whatever the
- * head's last partial line and the tail's first partial line happen to
- * be. Returns 1 if any bytes were elided (i.e. output is truncated). */
-static int assemble_head_tail(struct buf *out, struct buf *head, const char *tail, size_t tail_pos,
-                              int tail_wrapped, size_t total_bytes)
+/* Hybrid byte capture: in-memory buffer up to the OUTPUT_CAP_* limits,
+ * then spill to a temp file. Small commands never touch disk; long-
+ * running ones (build logs, find, large diffs) accumulate in /tmp/hax-
+ * bash-XXXXXX and are preserved past truncation so the model can `read`
+ * them.
+ *
+ * Spill triggers on either byte cap or line cap — counting newlines per
+ * chunk is cheap and lets shapes like "100k short lines" preserve early
+ * lines through the file rather than silently dropping them.
+ *
+ * Once spilled, mem is freed and the file holds the canonical content;
+ * we read its tail at finalization. Path stays NULL until spill, so
+ * build_body_and_trunc uses it to decide preserve-vs-unlink behavior. */
+struct capture {
+    struct buf mem;     /* pre-spill bytes (full output if !spilled) */
+    int spilled;        /* set once mem was flushed to file */
+    int fd;             /* temp file fd, -1 until spilled */
+    char *path;         /* malloc'd temp file path, NULL until spilled */
+    int write_failed;   /* sticky: a write_all on the temp file errored */
+    size_t total_bytes; /* running count, equals file size when spilled */
+    size_t total_lines; /* newline count across the full output */
+    int trails_no_nl;   /* the last byte written wasn't '\n' */
+};
+
+static void capture_init(struct capture *c)
 {
-    if (head->data)
-        buf_append(out, head->data, head->len);
+    buf_init(&c->mem);
+    c->spilled = 0;
+    c->fd = -1;
+    c->path = NULL;
+    c->write_failed = 0;
+    c->total_bytes = 0;
+    c->total_lines = 0;
+    c->trails_no_nl = 0;
+}
 
-    size_t tail_len = tail_wrapped ? TAIL_CAP : tail_pos;
-    size_t kept = head->len + tail_len;
-    size_t elided = total_bytes > kept ? total_bytes - kept : 0;
+static size_t count_newlines(const char *data, size_t n)
+{
+    size_t k = 0;
+    const char *p = data;
+    size_t left = n;
+    while (left > 0) {
+        const char *nl = memchr(p, '\n', left);
+        if (!nl)
+            break;
+        k++;
+        size_t consumed = (size_t)(nl - p) + 1;
+        p = nl + 1;
+        left -= consumed;
+    }
+    return k;
+}
 
-    if (elided > 0) {
-        char marker[80];
-        int m = snprintf(marker, sizeof(marker), "\n... [%zu bytes elided] ...\n", elided);
-        buf_append(out, marker, (size_t)m);
+/* Per-session registry of preserved temp files. capture_open_tempfile
+ * records each one; capture_unlink drops the entry. What's left is what
+ * we kept past truncation — bash_cleanup_tempfiles unlinks all of them
+ * on /new (via agent_new_conversation) and on process exit. Without
+ * this, the model-facing path embedded in the truncation marker leaks
+ * a file that nothing else cleans up: macOS doesn't evict /var/folders
+ * for days, and Linux /tmp may live until reboot. Single-threaded
+ * (tools run on the agent loop), so no locking. */
+static char **kept_paths;
+static size_t kept_paths_n;
+static size_t kept_paths_cap;
+static int cleanup_atexit_registered;
+
+void bash_cleanup_tempfiles(void)
+{
+    for (size_t i = 0; i < kept_paths_n; i++) {
+        if (kept_paths[i]) {
+            unlink(kept_paths[i]);
+            free(kept_paths[i]);
+        }
+    }
+    kept_paths_n = 0;
+}
+
+static void track_kept_path(const char *path)
+{
+    if (!cleanup_atexit_registered) {
+        atexit(bash_cleanup_tempfiles);
+        cleanup_atexit_registered = 1;
+    }
+    if (kept_paths_n == kept_paths_cap) {
+        kept_paths_cap = kept_paths_cap ? kept_paths_cap * 2 : 4;
+        kept_paths = xrealloc(kept_paths, kept_paths_cap * sizeof(*kept_paths));
+    }
+    kept_paths[kept_paths_n++] = xstrdup(path);
+}
+
+static void untrack_kept_path(const char *path)
+{
+    for (size_t i = 0; i < kept_paths_n; i++) {
+        if (kept_paths[i] && strcmp(kept_paths[i], path) == 0) {
+            free(kept_paths[i]);
+            /* Order doesn't matter for cleanup, so swap-with-last is the
+             * cheapest removal. */
+            kept_paths_n--;
+            kept_paths[i] = kept_paths[kept_paths_n];
+            kept_paths[kept_paths_n] = NULL;
+            return;
+        }
+    }
+}
+
+static int is_valid_utf8(const char *s, size_t len)
+{
+    size_t i = 0;
+    while (i < len) {
+        int sl = utf8_seq_len((unsigned char)s[i]);
+        if (sl <= 0 || i + (size_t)sl > len || !utf8_seq_valid(s + i, sl))
+            return 0;
+        i += (size_t)sl;
+    }
+    return 1;
+}
+
+/* Open /tmp/hax-bash-XXXXXX exclusively (mkstemp gives us O_RDWR, mode
+ * 0600). On failure we set write_failed so the rest of the run becomes
+ * a no-op for capture — the command still runs to completion and the
+ * model gets the body that fit in mem before the spill attempt.
+ *
+ * Falls back to "/tmp" when $TMPDIR contains bytes that aren't valid
+ * UTF-8: the path travels back to the model embedded in the truncation
+ * marker, so it must round-trip cleanly through the provider's JSON
+ * encoder (jansson). Without the fallback we'd advertise a sanitized
+ * path that doesn't exist on disk — the actual file lives at the raw-
+ * byte path, but the model can only read what the marker says. */
+static int capture_open_tempfile(struct capture *c)
+{
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp || !is_valid_utf8(tmp, strlen(tmp)))
+        tmp = "/tmp";
+    c->path = path_join(tmp, "hax-bash-XXXXXX");
+    c->fd = mkstemp(c->path);
+    if (c->fd < 0) {
+        free(c->path);
+        c->path = NULL;
+        c->write_failed = 1;
+        return -1;
+    }
+    track_kept_path(c->path);
+    return 0;
+}
+
+static void capture_spill(struct capture *c)
+{
+    /* Set spilled=1 unconditionally — even on open failure — so subsequent
+     * capture_write calls take the "already spilled" branch and don't
+     * retry mkstemp on every chunk for the rest of the run.
+     *
+     * On open failure we deliberately keep c->mem alive: it holds the
+     * pre-overflow prefix, which is the best body we can offer the model
+     * when the temp file isn't available. capture_write's spilled-and-
+     * write_failed branch then drops further bytes (no place to put
+     * them), and build_body_and_trunc surfaces the prefix as a truncated
+     * result with a "(temp file unavailable)" marker. Without this
+     * fallback we'd silently lose a usable prefix on transient errors
+     * like a misconfigured TMPDIR. */
+    c->spilled = 1;
+    if (capture_open_tempfile(c) < 0)
+        return;
+    if (c->mem.len > 0 && write_all(c->fd, c->mem.data, c->mem.len) < 0)
+        c->write_failed = 1;
+    buf_free(&c->mem);
+}
+
+/* Append a chunk to the capture, spilling to disk first if either cap
+ * would be exceeded. Spill is one-way; once on disk we stay on disk for
+ * the rest of the command. Errors are sticky on write_failed but never
+ * abort the run — the command keeps going so the model still sees an
+ * exit code. total_bytes / total_lines update unconditionally (even past
+ * write_failed or beyond MAX_DRAIN_BYTES) because the marker reports
+ * what the producer attempted, not what we managed to capture. */
+static void capture_write(struct capture *c, const char *data, size_t n, size_t cap_bytes)
+{
+    if (n == 0)
+        return;
+    size_t new_lines = count_newlines(data, n);
+    c->total_bytes += n;
+    c->total_lines += new_lines;
+    c->trails_no_nl = (data[n - 1] != '\n');
+    if (c->write_failed && c->spilled)
+        return;
+    if (!c->spilled) {
+        /* Compare against the human-visible line count (newlines plus the
+         * trailing partial line, if any). Using c->total_lines alone would
+         * miss a "2000 newlines + 1 unterminated line" output, where the
+         * partial 2001st line keeps total_lines pegged at 2000. */
+        size_t effective_lines = c->total_lines + (c->trails_no_nl ? 1 : 0);
+        if (c->mem.len + n <= cap_bytes && effective_lines <= OUTPUT_CAP_LINES) {
+            buf_append(&c->mem, data, n);
+            return;
+        }
+        capture_spill(c);
+        if (c->write_failed)
+            return;
+    }
+    if (write_all(c->fd, data, n) < 0)
+        c->write_failed = 1;
+}
+
+static void capture_free(struct capture *c)
+{
+    buf_free(&c->mem);
+    if (c->fd >= 0) {
+        close(c->fd);
+        c->fd = -1;
+    }
+    free(c->path);
+    c->path = NULL;
+}
+
+/* Drop the temp file (used when the captured output fits within caps and
+ * the path won't be referenced from the result). Safe to call even when
+ * !spilled — it's a no-op then. */
+static void capture_unlink(struct capture *c)
+{
+    if (c->path) {
+        unlink(c->path);
+        untrack_kept_path(c->path);
+        free(c->path);
+        c->path = NULL;
+    }
+    if (c->fd >= 0) {
+        close(c->fd);
+        c->fd = -1;
+    }
+}
+
+/* Format a byte count in 1024-base: "412B", "5.4K", "50K", "1.2M". Used
+ * inside the truncation hint where the model benefits from a compact
+ * size relative to the cap. */
+static void format_byte_size(char *buf, size_t bufsize, size_t bytes)
+{
+    if (bytes < 1024)
+        snprintf(buf, bufsize, "%zuB", bytes);
+    else if (bytes < 10L * 1024)
+        snprintf(buf, bufsize, "%.1fK", (double)bytes / 1024.0);
+    else if (bytes < 1024L * 1024)
+        snprintf(buf, bufsize, "%zuK", (bytes + 512) / 1024);
+    else if (bytes < 10L * 1024 * 1024)
+        snprintf(buf, bufsize, "%.1fM", (double)bytes / (1024.0 * 1024.0));
+    else
+        snprintf(buf, bufsize, "%zuM", (bytes + 512L * 1024) / (1024L * 1024));
+}
+
+/* Read the last `cap_bytes` of the spilled file into `out`, then align
+ * the front to a line boundary so we never start mid-line — except when
+ * the entire window contains no newline (a single-line output > cap),
+ * in which case we keep the bytes raw and let cap_line_lengths emit the
+ * inline elision marker downstream. Then trim the front so at most
+ * OUTPUT_CAP_LINES newline-terminated lines remain. Reports the kept-
+ * byte and kept-line counts via out params (not derivable from `out->len`
+ * alone because the caller wants pre-cap_line_lengths/pre-sanitize
+ * numbers in the hint). */
+static int read_tail_capped(int fd, size_t total_bytes, size_t cap_bytes, struct buf *out,
+                            size_t *kept_bytes_out, size_t *kept_lines_out)
+{
+    size_t want = total_bytes < cap_bytes ? total_bytes : cap_bytes;
+    off_t start = (off_t)(total_bytes - want);
+
+    /* Decide whether the tail window already starts on a line boundary
+     * by peeking the byte immediately before `start`. If that byte is
+     * '\n', the byte at `start` is the first byte of a fresh line and
+     * we keep it verbatim — without this check, the alignment trim
+     * below would drop a complete leading line whenever the cap
+     * happened to land exactly on a line boundary. pread() doesn't
+     * disturb the read offset, so we can issue it before the lseek. */
+    int needs_alignment = 0;
+    if (start > 0) {
+        char prev;
+        ssize_t pr;
+        do {
+            pr = pread(fd, &prev, 1, start - 1);
+        } while (pr < 0 && errno == EINTR);
+        /* On read failure, fall back to the conservative behavior of
+         * trimming through the first '\n'. We'd rather lose one line
+         * than start mid-line. */
+        needs_alignment = (pr != 1) || (prev != '\n');
     }
 
-    if (tail_len > 0) {
-        if (tail_wrapped) {
-            buf_append(out, tail + tail_pos, TAIL_CAP - tail_pos);
-            buf_append(out, tail, tail_pos);
-        } else {
-            buf_append(out, tail, tail_pos);
+    if (lseek(fd, start, SEEK_SET) < 0)
+        return -1;
+
+    char chunk[8192];
+    for (;;) {
+        ssize_t r = read(fd, chunk, sizeof(chunk));
+        if (r < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (r == 0)
+            break;
+        buf_append(out, chunk, (size_t)r);
+    }
+
+    /* Line-boundary alignment: when start>0 and the window starts
+     * mid-line, drop everything up to and including the first '\n'.
+     * If no '\n' exists or the only '\n' is at the very end (a single
+     * line longer than cap_bytes that does end with '\n'), trimming
+     * would leave an empty body — keep the raw tail bytes and let
+     * downstream line-width capping emit an inline elision marker. */
+    if (needs_alignment && out->len > 0) {
+        char *nl = memchr(out->data, '\n', out->len);
+        if (nl) {
+            size_t skip = (size_t)(nl - out->data) + 1;
+            if (skip < out->len) {
+                memmove(out->data, out->data + skip, out->len - skip);
+                out->len -= skip;
+                if (out->data)
+                    out->data[out->len] = '\0';
+            }
+            /* skip == out->len: the only '\n' is the last byte. Trimming
+             * would empty the buffer, taking the over-long line's tail
+             * with it. Leave the buffer alone. */
         }
     }
 
-    return elided > 0;
+    /* Trim the front so at most OUTPUT_CAP_LINES lines remain. Count
+     * newlines in the buffer; if the count is over budget, advance past
+     * the first (count - cap) newlines and keep the rest. */
+    size_t total_lines = count_newlines(out->data ? out->data : "", out->len);
+    /* A trailing line without a final newline counts too. */
+    size_t lines_in_buf = total_lines + (out->len > 0 && out->data[out->len - 1] != '\n' ? 1 : 0);
+    if (lines_in_buf > OUTPUT_CAP_LINES) {
+        size_t to_skip = lines_in_buf - OUTPUT_CAP_LINES;
+        size_t i = 0;
+        while (to_skip > 0 && i < out->len) {
+            if (out->data[i] == '\n')
+                to_skip--;
+            i++;
+        }
+        memmove(out->data, out->data + i, out->len - i);
+        out->len -= i;
+        if (out->data)
+            out->data[out->len] = '\0';
+        lines_in_buf = OUTPUT_CAP_LINES;
+    }
+
+    *kept_bytes_out = out->len;
+    *kept_lines_out = lines_in_buf;
+    return 0;
 }
 
 /* Append the trailing exit/timeout/interrupt status to a result buffer.
@@ -167,76 +485,155 @@ static void append_footers(struct buf *out, int timed_out, int interrupted, long
     }
 }
 
+/* Truncation summary — computed in build_body_and_trunc and passed
+ * forward so stream_suffix can render the same marker live.
+ * truncated=0 means no marker is emitted. path is borrowed (NULL when
+ * capture didn't preserve a file). */
+struct trunc_info {
+    int truncated;
+    size_t kept_bytes;
+    size_t kept_lines;
+    size_t total_bytes;
+    size_t total_lines;
+    const char *path;
+};
+
 /* Append the trailing portion that follows whatever body has already
  * been written to `out`:
  *   - binary marker (when has_nul; takes precedence over truncated)
- *   - "[output truncated]" (non-binary case, bytes were dropped)
+ *   - "[output truncated: ...; full output saved to PATH]" (non-binary
+ *     case, bytes were dropped)
  *   - exit/timeout/interrupt footer
  *   - "(no output)" fallback when nothing else was appended in this
  *     call AND no body was produced (body_present=0)
  *
- * Used by both the canonical-history assembly (format_run_output) and
- * the live-display path (stream_suffix), so the model and the user see
- * consistent suffix content. */
-static void append_run_suffix(struct buf *out, size_t total_bytes, int has_nul, int truncated,
+ * Used by both the canonical-history assembly (build_body_and_trunc +
+ * the run_shell tail) and the live-display path (stream_suffix), so
+ * the model and the user see consistent suffix content. */
+static void append_run_suffix(struct buf *out, const struct trunc_info *t, int has_nul,
                               int body_present, int timed_out, int interrupted, long timeout_ms,
                               int status)
 {
     size_t before = out->len;
     if (has_nul) {
         char tmp[80];
-        snprintf(tmp, sizeof(tmp), "[binary output suppressed: %zu bytes]", total_bytes);
+        snprintf(tmp, sizeof(tmp), "[binary output suppressed: %zu bytes]", t->total_bytes);
         buf_append_str(out, tmp);
-    } else if (truncated) {
-        buf_append_str(out, "\n[output truncated]");
+    } else if (t->truncated) {
+        char kept_b[16], total_b[16];
+        format_byte_size(kept_b, sizeof(kept_b), t->kept_bytes);
+        format_byte_size(total_b, sizeof(total_b), t->total_bytes);
+        /* Allocate dynamically — t->path can be arbitrarily long when
+         * the user has a deep $TMPDIR, and a fixed-size buffer would
+         * silently truncate the saved-to path the model needs to read. */
+        char *marker;
+        if (t->path) {
+            marker = xasprintf("\n[output truncated: last %zu of %zu lines, %s of %s; "
+                               "full output saved to %s]",
+                               t->kept_lines, t->total_lines, kept_b, total_b, t->path);
+        } else {
+            /* Spill failed — file isn't available; tell the model what we
+             * have and let it re-run with grep/head/tail if it needs more. */
+            marker = xasprintf("\n[output truncated: last %zu of %zu lines, %s of %s; "
+                               "full output unavailable (temp file write failed)]",
+                               t->kept_lines, t->total_lines, kept_b, total_b);
+        }
+        /* Path bytes come from $TMPDIR + mkstemp's hex suffix. POSIX paths
+         * are byte sequences with no UTF-8 guarantee — a Linux user with
+         * non-UTF-8 locale can have arbitrary bytes in TMPDIR. Without
+         * sanitization those bytes would land in the tool result, and
+         * jansson would reject them on the next request, dropping the
+         * result or breaking the conversation. */
+        char *clean = sanitize_utf8(marker, strlen(marker));
+        free(marker);
+        buf_append_str(out, clean);
+        free(clean);
     }
     append_footers(out, timed_out, interrupted, timeout_ms, status);
     if (out->len == before && !body_present)
         buf_append_str(out, "(no output)");
 }
 
-/* Build the final tool result from the captured head/tail ring and exit
- * metadata. Consumes `head` (calls buf_free on it). */
-static char *format_run_output(struct buf *head, const char *tail, size_t tail_pos,
-                               int tail_wrapped, size_t total_bytes, int has_nul, int timed_out,
-                               int interrupted, long timeout_ms, int status)
+/* Decide whether the captured output needs truncation, build the body
+ * (sanitized, line-width-capped), populate `t` for the suffix marker, and
+ * unlink the temp file when it isn't needed. The caller still owns
+ * `cap`; this only reads from it (and may unlink the spilled file). */
+static void build_body_and_trunc(struct capture *cap, int has_nul, struct buf *body,
+                                 struct trunc_info *t)
 {
-    struct buf out;
-    buf_init(&out);
-    int truncated = 0;
+    t->truncated = 0;
+    t->kept_bytes = 0;
+    t->kept_lines = 0;
+    t->total_bytes = cap->total_bytes;
+    /* count_newlines only counts '\n' terminators; if the producer's
+     * final line was unterminated, add it so the marker's "of N lines"
+     * reflects the human-visible line count. */
+    t->total_lines = cap->total_lines + (cap->trails_no_nl ? 1 : 0);
+    t->path = NULL;
 
-    /* Binary output: a NUL byte essentially never appears in legitimate
-     * text output, but executables, archives, and images contain it
-     * pervasively. Showing the user a wall of U+FFFD glyphs and feeding
-     * the same to the model is pure waste — replace the body with the
-     * marker (emitted by append_run_suffix below) and keep only the
-     * exit/timeout footer. */
-    if (!has_nul) {
-        struct buf raw;
-        buf_init(&raw);
-        truncated = assemble_head_tail(&raw, head, tail, tail_pos, tail_wrapped, total_bytes);
-
-        /* Cap pathologically long lines (single-line minified output, log
-         * lines with no newlines) before sanitizing — cap_line_lengths cuts
-         * at a byte boundary which can split a multi-byte UTF-8 codepoint;
-         * sanitize_utf8 then replaces the orphaned bytes with U+FFFD so the
-         * final string is always valid UTF-8 (jansson rejects invalid UTF-8
-         * in json_string). */
-        size_t capped_len = 0;
-        char *capped =
-            cap_line_lengths(raw.data ? raw.data : "", raw.len, MAX_LINE_LEN, &capped_len);
-        buf_free(&raw);
-
-        char *clean = sanitize_utf8(capped, capped_len);
-        free(capped);
-        buf_append_str(&out, clean);
-        free(clean);
+    if (has_nul) {
+        capture_unlink(cap);
+        return;
     }
-    buf_free(head);
 
-    append_run_suffix(&out, total_bytes, has_nul, truncated, out.len > 0, timed_out, interrupted,
-                      timeout_ms, status);
-    return buf_steal(&out);
+    struct buf raw;
+    buf_init(&raw);
+    if (!cap->spilled) {
+        /* Whole output fit in mem; no truncation. */
+        if (cap->mem.len > 0)
+            buf_append(&raw, cap->mem.data, cap->mem.len);
+    } else if (cap->fd >= 0 && !cap->write_failed) {
+        /* Spill succeeded; read the tail from disk, line-aligned,
+         * line-count-capped. */
+        size_t kept_b = 0, kept_l = 0;
+        if (read_tail_capped(cap->fd, cap->total_bytes, output_cap_bytes(), &raw, &kept_b,
+                             &kept_l) == 0) {
+            t->truncated = 1;
+            t->kept_bytes = kept_b;
+            t->kept_lines = kept_l;
+            t->path = cap->path; /* keep the file around for re-reads */
+        } else {
+            /* read_tail_capped failed — surface the truncation marker
+             * with no path (write_failed branch in append_run_suffix). */
+            t->truncated = 1;
+            capture_unlink(cap);
+        }
+    } else {
+        /* Spill attempted but the temp file isn't usable (mkstemp failed
+         * or write_all failed mid-flush). capture_spill kept c->mem alive
+         * in the mkstemp-failure case so we can still serve the pre-spill
+         * prefix as the body — the model gets *something* useful instead
+         * of an empty marker. write_all-failure leaves c->mem already
+         * freed, in which case mem.len==0 and we fall through to an empty
+         * body — partial file content is unsafe to recover. */
+        t->truncated = 1;
+        if (cap->mem.len > 0) {
+            buf_append(&raw, cap->mem.data, cap->mem.len);
+            t->kept_bytes = cap->mem.len;
+            t->kept_lines = count_newlines(cap->mem.data, cap->mem.len) +
+                            (cap->mem.data[cap->mem.len - 1] != '\n' ? 1 : 0);
+        }
+        capture_unlink(cap);
+    }
+
+    /* Cap pathologically long lines (single-line minified output, log
+     * lines with no newlines) before sanitizing — cap_line_lengths cuts
+     * at a byte boundary which can split a multi-byte UTF-8 codepoint;
+     * sanitize_utf8 then replaces the orphaned bytes with U+FFFD so the
+     * final string is always valid UTF-8 (jansson rejects invalid UTF-8
+     * in json_string). */
+    size_t capped_len = 0;
+    char *capped =
+        cap_line_lengths(raw.data ? raw.data : "", raw.len, OUTPUT_CAP_LINE_WIDTH, &capped_len);
+    buf_free(&raw);
+
+    char *clean = sanitize_utf8(capped, capped_len);
+    free(capped);
+    buf_append_str(body, clean);
+    free(clean);
+
+    if (!t->truncated)
+        capture_unlink(cap);
 }
 
 /* Build the env vector handed to the child via execve. We do this in
@@ -377,9 +774,9 @@ static void exec_shell_child(const char *cmd, char *const envp[])
  * after, using the same append_run_suffix helper as the canonical-
  * history path so the live display and history stay byte-identical
  * past the body. */
-static void stream_suffix(tool_emit_display_fn emit_display, void *user, size_t total_bytes,
-                          int has_nul, int streamed_anything, int truncated, int timed_out,
-                          int interrupted, long timeout_ms, int status)
+static void stream_suffix(tool_emit_display_fn emit_display, void *user, const struct trunc_info *t,
+                          int has_nul, int streamed_anything, int timed_out, int interrupted,
+                          long timeout_ms, int status)
 {
     struct buf suf;
     buf_init(&suf);
@@ -393,8 +790,8 @@ static void stream_suffix(tool_emit_display_fn emit_display, void *user, size_t 
      * same treatment. */
     if (has_nul && streamed_anything)
         buf_append_str(&suf, "\n");
-    append_run_suffix(&suf, total_bytes, has_nul, truncated, streamed_anything, timed_out,
-                      interrupted, timeout_ms, status);
+    append_run_suffix(&suf, t, has_nul, streamed_anything, timed_out, interrupted, timeout_ms,
+                      status);
     if (suf.len > 0)
         emit_display(suf.data, suf.len, user);
     buf_free(&suf);
@@ -459,12 +856,17 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
     int shell_exited = 0;
     int status = 0;
 
-    struct buf head;
-    buf_init(&head);
-    char tail[TAIL_CAP];
-    size_t tail_pos = 0;
-    int tail_wrapped = 0;
-    size_t total_bytes = 0;
+    struct capture cap;
+    capture_init(&cap);
+    /* Clamp to BASH_BYTE_CAP_MAX so the spill threshold is always
+     * reachable before the drain SIGKILL fires. Without this, a user-
+     * supplied HAX_TOOL_OUTPUT_CAP greater than MAX_DRAIN_BYTES would
+     * let mem grow past the drain (because the spill check never trips)
+     * and finalize would silently report "fit in mem, no truncation"
+     * even though the kernel killed the producer mid-stream. */
+    size_t cap_bytes = output_cap_bytes();
+    if (cap_bytes > (size_t)BASH_BYTE_CAP_MAX)
+        cap_bytes = (size_t)BASH_BYTE_CAP_MAX;
     int has_nul = 0;
     int streamed_anything = 0;
     char chunk[4096];
@@ -605,46 +1007,26 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
             kill_descendants(pid, SIGKILL);
             break;
         }
-        total_bytes += (size_t)r;
         if (!has_nul && memchr(chunk, '\0', (size_t)r))
             has_nul = 1;
-        /* Stream this chunk live before writing into head/tail buffers.
-         * Skipping streaming once any chunk has had a NUL keeps the
-         * "binary output suppressed" guarantee intact: bytes we suppress
-         * in display also stay out of the streamed display. head/tail
-         * are still populated for the no-emit_display path used by the
-         * test suite. */
+        /* Stream this chunk live before capturing it. Skipping streaming
+         * once any chunk has had a NUL keeps the "binary output
+         * suppressed" guarantee intact: bytes we suppress in display also
+         * stay out of the streamed display. The capture is still updated
+         * (we still want total_bytes for the binary marker) but the
+         * temp file gets the binary content too — finalize unlinks it. */
         if (emit_display && !has_nul) {
             emit_display(chunk, (size_t)r, user);
             streamed_anything = 1;
         }
-        size_t consumed = 0;
-        if (head.len < HEAD_CAP) {
-            size_t room = HEAD_CAP - head.len;
-            size_t take = (size_t)r < room ? (size_t)r : room;
-            buf_append(&head, chunk, take);
-            consumed = take;
-        }
-        while (consumed < (size_t)r) {
-            size_t avail = (size_t)r - consumed;
-            size_t room = TAIL_CAP - tail_pos;
-            size_t take = avail < room ? avail : room;
-            memcpy(tail + tail_pos, chunk + consumed, take);
-            tail_pos += take;
-            if (tail_pos == TAIL_CAP) {
-                tail_pos = 0;
-                tail_wrapped = 1;
-            }
-            consumed += take;
-        }
-        /* Runaway producer (yes, tail -f, /dev/urandom, …) — once we've
-         * drained MAX_BYTES_READ, the tail ring already holds the most
-         * recent TAIL_CAP bytes and reading further is wasted work.
+        capture_write(&cap, chunk, (size_t)r, cap_bytes);
+        /* Runaway producer (yes, tail -f, /dev/urandom, …) — bound the
+         * temp file size so a misbehaving command can't fill the disk.
          * SIGKILL unconditionally: when we're in the grace window we
          * deliberately deferred the pgroup-collapse so cleanup could
          * finish, but a runaway descendant ignoring SIGTERM can still
          * flood past the budget. ESRCH on an empty pgroup is harmless. */
-        if (total_bytes >= MAX_BYTES_READ) {
+        if (cap.total_bytes >= (size_t)MAX_DRAIN_BYTES) {
             kill_descendants(pid, SIGKILL);
             break;
         }
@@ -661,23 +1043,34 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
             break;
     }
 
+    /* Build the model-facing body and the truncation summary. This may
+     * unlink the temp file (when output fit within caps or the capture
+     * never spilled). When kept, t.path borrows from cap.path — we must
+     * not free cap until after stream_suffix runs. */
+    struct buf body;
+    buf_init(&body);
+    struct trunc_info t;
+    build_body_and_trunc(&cap, has_nul, &body, &t);
+
     if (emit_display) {
         /* Streaming path: live chunks already went through emit_display.
-         * Push the trailing suffix through it too so the user sees it
-         * in the dim block. The canonical history is still produced by
-         * format_run_output below — it applies the same head/tail
-         * truncation, line-length cap, UTF-8 sanitization, and binary-
-         * suppression as the legacy path, which the live stream skips.
-         * The model's view of the output is therefore the bounded
-         * summary, not the unbounded live stream. */
-        size_t tail_len = tail_wrapped ? TAIL_CAP : tail_pos;
-        int truncated_streamed = total_bytes > head.len + tail_len;
-        stream_suffix(emit_display, user, total_bytes, has_nul, streamed_anything,
-                      truncated_streamed, timed_out, interrupted, timeout_ms, status);
+         * Push the trailing suffix through it too so the user sees the
+         * truncation marker (with the saved-to path) and the footer in
+         * the dim block. The canonical history below adds the same
+         * suffix to the model's view, which is a bounded summary built
+         * by build_body_and_trunc, not the unbounded live stream. */
+        stream_suffix(emit_display, user, &t, has_nul, streamed_anything, timed_out, interrupted,
+                      timeout_ms, status);
     }
 
-    return format_run_output(&head, tail, tail_pos, tail_wrapped, total_bytes, has_nul, timed_out,
-                             interrupted, timeout_ms, status);
+    struct buf out;
+    buf_init(&out);
+    if (body.len > 0)
+        buf_append(&out, body.data, body.len);
+    append_run_suffix(&out, &t, has_nul, body.len > 0, timed_out, interrupted, timeout_ms, status);
+    buf_free(&body);
+    capture_free(&cap);
+    return buf_steal(&out);
 }
 
 /* Resolve the timeout in ms from the JSON args, falling back to the env

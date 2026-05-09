@@ -81,4 +81,13 @@ extern const struct tool TOOL_BASH;
 extern const struct tool TOOL_WRITE;
 extern const struct tool TOOL_EDIT;
 
+/* Unlink and forget every bash temp file we still hold — `bash` keeps
+ * the file when output truncates so the model can `read` it on the next
+ * turn, but those become unreachable once the conversation is reset.
+ * Called from agent_new_conversation (/new) and from an atexit handler
+ * registered on first spill. atexit doesn't fire on signal-driven exits
+ * (Ctrl-C, SIGHUP, kill), so a signalled session can still leak; the OS
+ * eventually evicts /tmp / /var/folders. */
+void bash_cleanup_tempfiles(void);
+
 #endif /* HAX_TOOL_H */

@@ -279,8 +279,9 @@ static void test_read_first_line_larger_than_cap(void)
 
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":1,\"limit\":1}", path);
     char *out = call_read(args);
-    /* Per-line cap is 2000 bytes; result is much smaller than the cap. */
-    EXPECT(strlen(out) < 4000);
+    /* Per-line cap is OUTPUT_CAP_LINE_WIDTH (500); result is well under
+     * the byte cap and shows the inline elision marker. */
+    EXPECT(strlen(out) < 1000);
     EXPECT(strstr(out, "bytes elided") != NULL);
     free(out);
     free(args);
@@ -291,20 +292,27 @@ static void test_read_first_line_larger_than_cap(void)
 
 static void test_read_exact_cap_no_false_marker(void)
 {
-    /* When the file's size lands exactly at READ_CAP, the pre-stat check
-     * doesn't fire (>, not >=) and streaming returns the whole content
-     * — no truncation marker. Use multi-line content so the per-line
-     * cap doesn't intervene. */
-    size_t lines = 256 * 1024 / 8;
-    char *doc = xmalloc(lines * 8);
-    for (size_t i = 0; i < lines; i++)
-        memcpy(doc + i * 8, "abcdefg\n", 8);
-    char *path = write_tmp(doc, lines * 8);
+    /* When the file's size lands exactly at the byte cap, the pre-stat
+     * check doesn't fire (>, not >=) and streaming returns the whole
+     * content — no truncation marker. Use long-ish lines so the line
+     * count cap (2000) doesn't intervene before the byte cap is reached:
+     * 1024 lines × 256 bytes = 262144 = 256 KiB exactly. */
+    size_t lines = 1024;
+    size_t line_len = 256;
+    size_t total = lines * line_len;
+    char *doc = xmalloc(total);
+    /* Line content fits the per-line width cap (500). Each line is 255
+     * 'q' bytes followed by a '\n'. */
+    for (size_t i = 0; i < lines; i++) {
+        memset(doc + i * line_len, 'q', line_len - 1);
+        doc[i * line_len + line_len - 1] = '\n';
+    }
+    char *path = write_tmp(doc, total);
     free(doc);
 
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = call_read(args);
-    EXPECT(strlen(out) == lines * 8);
+    EXPECT(strlen(out) == total);
     EXPECT(strstr(out, "[truncated") == NULL);
     EXPECT(strstr(out, "bytes elided") == NULL);
     free(out);
@@ -316,8 +324,8 @@ static void test_read_exact_cap_no_false_marker(void)
 
 static void test_read_caps_long_line(void)
 {
-    /* A single line longer than MAX_LINE_LEN (2000) gets truncated with
-     * an inline marker; surrounding short lines are left alone. */
+    /* A single line longer than OUTPUT_CAP_LINE_WIDTH (500) gets truncated
+     * with an inline marker; surrounding short lines are left alone. */
     struct buf b;
     buf_init(&b);
     buf_append_str(&b, "short before\n");
@@ -332,12 +340,112 @@ static void test_read_caps_long_line(void)
     EXPECT(strstr(out, "short before\n") != NULL);
     EXPECT(strstr(out, "short after\n") != NULL);
     EXPECT(strstr(out, "bytes elided") != NULL);
-    /* The 3000-x line is reduced to ~2000 + a short marker. */
-    EXPECT(strlen(out) < 2200);
+    /* The 3000-x line is reduced to ~500 + a short marker. */
+    EXPECT(strlen(out) < 700);
     free(out);
     free(args);
 
     buf_free(&b);
+    unlink(path);
+    free(path);
+}
+
+static void test_read_exact_line_cap_no_false_marker(void)
+{
+    /* A file with exactly OUTPUT_CAP_LINES lines (all newline-terminated)
+     * fits the cap exactly — nothing past line 2000. The truncation
+     * marker must NOT fire, otherwise the model sees a misleading "file
+     * has more" hint. */
+    size_t n_lines = 2000;
+    size_t doc_len = n_lines * 2;
+    char *doc = xmalloc(doc_len);
+    for (size_t i = 0; i < n_lines; i++) {
+        doc[i * 2] = 'x';
+        doc[i * 2 + 1] = '\n';
+    }
+    char *path = write_tmp(doc, doc_len);
+    free(doc);
+
+    char *args = xasprintf("{\"path\":\"%s\"}", path);
+    char *out = call_read(args);
+    EXPECT(strstr(out, "[truncated") == NULL);
+    free(out);
+    free(args);
+
+    unlink(path);
+    free(path);
+}
+
+static void test_read_unterminated_final_line_at_cap(void)
+{
+    /* OUTPUT_CAP_LINES + 1 logical lines where the last line has no
+     * trailing '\n' (2000 newlines + 1 partial). The cap fires at the
+     * 2000th newline; the peek must detect the partial 2001st line and
+     * mark TRUNC_LINES. */
+    size_t n_lines = 2000;
+    size_t doc_len = n_lines * 2 + 5; /* "x\n" × 2000 + "abcde" */
+    char *doc = xmalloc(doc_len);
+    for (size_t i = 0; i < n_lines; i++) {
+        doc[i * 2] = 'x';
+        doc[i * 2 + 1] = '\n';
+    }
+    memcpy(doc + n_lines * 2, "abcde", 5);
+    char *path = write_tmp(doc, doc_len);
+    free(doc);
+
+    char *args = xasprintf("{\"path\":\"%s\"}", path);
+    char *out = call_read(args);
+    EXPECT(strstr(out, "[truncated at 2000 lines") != NULL);
+    free(out);
+    free(args);
+
+    unlink(path);
+    free(path);
+}
+
+static void test_read_caps_implicit_line_count(void)
+{
+    /* A file with many short lines has small total bytes but should
+     * still trigger the shared OUTPUT_CAP_LINES guardrail when no
+     * explicit limit is given. main() pins HAX_TOOL_OUTPUT_CAP=256K,
+     * so 5000 two-byte lines (10 KiB) sit comfortably under the byte
+     * cap; without the line cap, all 5000 lines would flow back. */
+    size_t n_lines = 5000;
+    size_t doc_len = n_lines * 2;
+    char *doc = xmalloc(doc_len);
+    for (size_t i = 0; i < n_lines; i++) {
+        doc[i * 2] = 'x';
+        doc[i * 2 + 1] = '\n';
+    }
+    char *path = write_tmp(doc, doc_len);
+    free(doc);
+
+    char *args = xasprintf("{\"path\":\"%s\"}", path);
+    char *out = call_read(args);
+    EXPECT(strstr(out, "[truncated at 2000 lines") != NULL);
+    EXPECT(strstr(out, "offset/limit") != NULL);
+    free(out);
+    free(args);
+
+    /* A tighter explicit limit (below the shared cap) is the model's
+     * window — line-cap marker must NOT fire and only the requested
+     * lines come back. */
+    args = xasprintf("{\"path\":\"%s\",\"offset\":1,\"limit\":1500}", path);
+    out = call_read(args);
+    EXPECT(strstr(out, "[truncated at") == NULL);
+    free(out);
+    free(args);
+
+    /* An explicit limit *above* the shared cap can't lift the cap —
+     * line cap is an absolute ceiling, not a default. The model gets
+     * only OUTPUT_CAP_LINES lines and a TRUNC_LINES marker, even
+     * though byte cap doesn't fire (5000 × 2 = 10 KiB). */
+    args = xasprintf("{\"path\":\"%s\",\"offset\":1,\"limit\":3000}", path);
+    out = call_read(args);
+    EXPECT(strstr(out, "[truncated at 2000 lines") != NULL);
+    free(out);
+    free(args);
+
     unlink(path);
     free(path);
 }
@@ -475,6 +583,11 @@ static void test_read_display_extra(void)
 
 int main(void)
 {
+    /* The byte cap is the env-tunable knob; pin it to 256K so the tests
+     * below (most of which use multi-100K fixtures) exercise the code
+     * path the assertions describe regardless of the compiled-in default. */
+    setenv("HAX_TOOL_OUTPUT_CAP", "256k", 1);
+
     test_read_invalid_json();
     test_read_missing_path();
     test_read_empty_path();
@@ -485,6 +598,9 @@ int main(void)
     test_read_refuses_oversize_no_slice();
     test_read_oversize_with_slice_ok();
     test_read_caps_long_line();
+    test_read_caps_implicit_line_count();
+    test_read_exact_line_cap_no_false_marker();
+    test_read_unterminated_final_line_at_cap();
     test_read_offset_limit();
     test_read_offset_past_eof();
     test_read_no_trailing_newline();

@@ -271,7 +271,7 @@ static void append_project_agents_md(struct buf *b, int *seen_header)
     char dir[PATH_MAX];
     snprintf(dir, sizeof(dir), "%s", cwd);
     for (int i = 0; i < AGENTS_MD_MAX_LEVELS; i++) {
-        paths[n++] = xasprintf("%s/AGENTS.md", dir);
+        paths[n++] = path_join(dir, "AGENTS.md");
 
         if (strcmp(dir, root) == 0)
             break;
@@ -401,7 +401,9 @@ static void collect_skills(struct skill_entry **out, size_t *n, size_t *cap, con
             continue;
         }
 
-        char *skill_md = xasprintf("%s/%s/SKILL.md", root, ent->d_name);
+        char *skill_dir = path_join(root, ent->d_name);
+        char *skill_md = path_join(skill_dir, "SKILL.md");
+        free(skill_dir);
         size_t md_len = 0;
         int truncated = 0;
         char *md = slurp_file_capped(skill_md, SKILL_FRONTMATTER_HEAD, &md_len, &truncated);

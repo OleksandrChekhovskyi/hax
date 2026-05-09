@@ -17,7 +17,7 @@ static char *tmpdir(void)
     const char *t = getenv("TMPDIR");
     if (!t || !*t)
         t = "/tmp";
-    return xasprintf("%s/hax-diff-XXXXXX", t);
+    return path_join(t, "hax-diff-XXXXXX");
 }
 
 char *make_unified_diff(const char *a, size_t a_len, const char *b, size_t b_len,
