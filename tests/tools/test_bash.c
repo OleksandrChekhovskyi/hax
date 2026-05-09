@@ -584,8 +584,8 @@ static void test_bash_stdout_is_not_a_tty(void)
      * to keep stdout line-buffered, but reproducing terminal behavior
      * faithfully (\r-rewrites, cursor positioning, OSC) was too much
      * complexity for too little benefit; env vars (TERM=dumb,
-     * NO_COLOR, AI_AGENT, PYTHONUNBUFFERED) cover the same ground
-     * with one-tenth the failure modes. */
+     * AI_AGENT, PYTHONUNBUFFERED) cover the same ground with one-
+     * tenth the failure modes. */
     char *out = call_bash("[ -t 1 ] && echo TTY || echo NOTTY");
     EXPECT_STR_EQ(out, "NOTTY\n");
     free(out);
@@ -628,20 +628,24 @@ static void test_bash_env_overrides(void)
      *     crontab -e) abort fail-closed instead of hanging on the
      *     TTY the agent can't drive.
      *   - Token-friendly output: TERM=dumb (kills ninja \r-rewrites
-     *     and chalk colors), NO_COLOR=1 (no-color.org honored by
-     *     cargo/rg/fd/git/etc.), COLORTERM= empty (presence-probing
-     *     tools), AI_AGENT=hax (vitest minimal reporter), GIT_
-     *     TERMINAL_PROMPT=0 (git fails fast on credential prompts),
-     *     PYTHONUNBUFFERED=1 (CPython line-flushes under pipes).
+     *     and chalk colors; combined with non-TTY stdout this also
+     *     suppresses cargo/rg/fd/python-rich color), COLORTERM= empty
+     *     (presence-probing tools), AI_AGENT=hax (vitest minimal
+     *     reporter), GIT_TERMINAL_PROMPT=0 (git fails fast on
+     *     credential prompts), PYTHONUNBUFFERED=1 (CPython line-
+     *     flushes under pipes).
      *
      * For each var: set the parent to a contradicting value, run a
      * single shell that echoes them all, and assert the full block.
      *
-     * Two intentional non-overrides verified by the trailing lines:
-     *   - FORCE_COLOR passes through unchanged. Setting it (any
-     *     value) makes Node warn "'NO_COLOR' env is ignored due to
-     *     the 'FORCE_COLOR' env being set"; NO_COLOR + TERM=dumb
-     *     already cover the same ground.
+     * Three intentional non-overrides verified by the trailing lines:
+     *   - NO_COLOR and FORCE_COLOR pass through unchanged. Setting
+     *     NO_COLOR ourselves triggers Node's "'NO_COLOR' env is
+     *     ignored due to the 'FORCE_COLOR' env being set" warning
+     *     whenever a child (npm, playwright) injects FORCE_COLOR
+     *     into its own subprocess env — which we can't prevent.
+     *     TERM=dumb + non-TTY stdout already cover the no-color
+     *     ground for tools that honor either signal.
      *   - MAKEFLAGS passes through so parallel builds keep their
      *     `-j` and jobserver fds.
      */
@@ -682,7 +686,7 @@ static void test_bash_env_overrides(void)
                        "VISUAL=false\n"
                        "EDITOR=false\n"
                        "TERM=dumb\n"
-                       "NO_COLOR=1\n"
+                       "NO_COLOR=0\n"
                        "COLORTERM=\n"
                        "AI_AGENT=hax\n"
                        "GIT_TERMINAL_PROMPT=0\n"

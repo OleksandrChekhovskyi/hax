@@ -276,14 +276,15 @@ static char *format_run_output(struct buf *head, const char *tail, size_t tail_p
  *     \r-rewriting smart-terminal mode, makes the supports-color
  *     library short-circuit to 0 (suppressing chalk/Node colors
  *     across the ecosystem), and signals "no terminal features" to
- *     curses-style tools so they fall back to plain output.
- *   - NO_COLOR=1: no-color.org de-facto standard; honored by cargo,
- *     ripgrep, fd, bat, git (when set), python rich, etc. Belt to
- *     TERM=dumb's suspenders. We deliberately do NOT also set
- *     FORCE_COLOR=0: Node logs "'NO_COLOR' env is ignored due to the
- *     'FORCE_COLOR' env being set" whenever FORCE_COLOR is present
- *     at all, regardless of value. NO_COLOR + TERM=dumb already
- *     cover the same ground without the warning.
+ *     curses-style tools so they fall back to plain output. Combined
+ *     with our piped (non-TTY) stdout, this catches the cargo /
+ *     ripgrep / fd / bat / python-rich crowd too, since they all
+ *     isatty-gate before emitting color. We deliberately do NOT also
+ *     set NO_COLOR=1: when something inside the subprocess (npm,
+ *     playwright) sets FORCE_COLOR, Node logs "'NO_COLOR' env is
+ *     ignored due to the 'FORCE_COLOR' env being set" on every run.
+ *     A tool that *forces* color via its own env wouldn't have honored
+ *     NO_COLOR anyway, so we lose nothing real by dropping it.
  *   - COLORTERM= (empty): some tools probe presence rather than read
  *     value. Empty wins where unset isn't possible.
  *   - GIT_TERMINAL_PROMPT=0: git fails fast on credential prompts
@@ -317,7 +318,6 @@ static char **build_child_env(void)
         {"VISUAL", "VISUAL=false"},
         {"EDITOR", "EDITOR=false"},
         {"TERM", "TERM=dumb"},
-        {"NO_COLOR", "NO_COLOR=1"},
         {"COLORTERM", "COLORTERM="},
         {"GIT_TERMINAL_PROMPT", "GIT_TERMINAL_PROMPT=0"},
         {"AI_AGENT", "AI_AGENT=hax"},
@@ -414,7 +414,7 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
      * redraws, and OSC sequences from build tools like ninja, vitest,
      * and cargo — turned out to be too much. Pipes are predictable.
      * Block-buffering of stdout in the child is mitigated separately:
-     * `TERM=dumb`, `NO_COLOR=1`, `AI_AGENT=hax`, `CI`-shaped vars, and
+     * `TERM=dumb`, `AI_AGENT=hax`, `CI`-shaped vars, and
      * `PYTHONUNBUFFERED=1` already cover the long tail of tools. The
      * tools that block-buffer their stdout under pipes typically
      * don't matter for an agent loop (they finish fast enough that
