@@ -67,4 +67,43 @@ void disp_block_separator(struct disp *d);
  * writes — so the caller can peek before deciding to hide the spinner. */
 void disp_first_delta_strip(const struct disp *d, const char **s, size_t *n);
 
+/* Visual gutter prefix for the body rows of a tool-output block — a
+ * thin "│ " in dim cyan so the block reads as a quiet vertical rule
+ * down the side. Self-contained: emits ANSI_DIM_CYAN, glyph + space,
+ * then ANSI_RESET so callers can apply their own SGR to the content
+ * that follows. Goes through disp_write so any held \n from the
+ * previous row is flushed first. */
+void disp_tool_strip(struct disp *d);
+
+/* Cell width of any of the strip prefixes — one box-drawing glyph plus
+ * one trailing space. Useful for budget calculations when truncating
+ * line content to fit one terminal row. */
+#define DISP_TOOL_STRIP_COLS 2
+
+/* Top row of a multi-line tool block: "┌ " — top-left corner. Same
+ * shape and invariants as disp_tool_strip, just a different glyph.
+ * Use only on the first row of a streaming block; the closing glyph
+ * is chosen at finalize via disp_tool_strip_close{,_solo}. */
+void disp_tool_strip_first(struct disp *d);
+
+/* Single-row tool block (skipped / refused tool, "(no changes)" marker,
+ * a one-line tool preview): "› " — a small right-facing chevron.
+ * Same shape and invariants as disp_tool_strip; used eagerly by the
+ * non-streaming inline markers in agent.c. */
+void disp_tool_strip_solo(struct disp *d);
+
+/* Close the open tool block by overprinting the most recently emitted
+ * strip with the appropriate end-of-block glyph. Writes \r + the new
+ * glyph directly to stdout (bypassing disp's held / trail tracking).
+ * Caller invariant: the cursor is on the same row as the strip about
+ * to be overprinted, with the row's trailing \n still held in disp —
+ * i.e. the row's content was the last thing to write to that row.
+ *
+ * The two variants exist because the streaming path doesn't know its
+ * row count up front: at finalize, pick "└" if more than one row was
+ * emitted (multi-row close), or "›" if only one (effectively promotes
+ * the leading "┌" to a solo chevron). */
+void disp_tool_strip_close(void);
+void disp_tool_strip_close_solo(void);
+
 #endif /* HAX_DISP_H */

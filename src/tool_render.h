@@ -62,6 +62,25 @@ struct tool_render {
     int dim_open;       /* ANSI_DIM has been emitted (must close on finalize) */
     int started;        /* any visible byte has been emitted in this block    */
     int spinner_paused; /* hid spinner on first byte; resume after head fills */
+    /* close_head_block ran but its held-\n flush + spinner show have
+     * been deferred. Cleared on first suppress_byte (so the spinner
+     * shows during long output). If finalize runs with this still set,
+     * the cap row's \n is still held — the close-glyph overprint can
+     * land on the cap row's strip rather than a blank row past it. */
+    int head_close_pending;
+
+    /* Per-row state for the gutter strip and the per-row cell cap.
+     * Cleared at every \n so each new row gets its own "┌"/"│" prefix
+     * and a fresh budget. row_truncated is set when the row would
+     * overflow the cell budget — further bytes on that row are dropped
+     * silently until \n. */
+    int row_strip_emitted;
+    int row_cells;
+    int row_truncated;
+
+    /* Total rows fully emitted across head + finalize phases. Drives
+     * the close-glyph decision: 1 → overprint with "›", >=2 → "└". */
+    int rows_emitted;
 
     /* Head-budget tracking (R_HEAD_ONLY and R_HEAD_TAIL). */
     int lines_emitted;

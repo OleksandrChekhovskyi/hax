@@ -12,6 +12,13 @@
 
 /* Same stdout-capture pattern as test_disp.c — see comments there. */
 
+/* Gutter strip byte sequences — defined inline so tests can spell out
+ * the exact expected output. Must match the helpers in disp.c. */
+#define STRIP_FIRST      ANSI_DIM_CYAN "\xE2\x94\x8C " ANSI_RESET     /* ┌  */
+#define STRIP_BODY       ANSI_DIM_CYAN "\xE2\x94\x82 " ANSI_RESET     /* │  */
+#define STRIP_CLOSE      "\r" ANSI_DIM_CYAN "\xE2\x94\x94" ANSI_RESET /* └ */
+#define STRIP_CLOSE_SOLO "\r" ANSI_DIM_CYAN "\xE2\x80\xBA" ANSI_RESET /* › */
+
 static char captured[65536];
 
 static void cap_init(void)
@@ -73,16 +80,18 @@ static void test_head_only_under_cap(void)
 {
     const char *in = "hello\nworld\n";
     const char *out = render_one(R_HEAD_ONLY, in, strlen(in));
-    /* Trailing \n is held, not committed by finalize when held>0 — so
-     * dim opens, content "hello\nworld" lands, dim closes. */
-    EXPECT_STR_EQ(out, ANSI_DIM "hello\nworld" ANSI_RESET);
+    /* Each row gets a gutter strip; the trailing \n between rows
+     * commits before the second strip's disp_write flushes held NLs.
+     * The final row's \n stays held (finalize doesn't flush it), then
+     * the close-glyph overprint targets the last row's body strip. */
+    EXPECT_STR_EQ(out, STRIP_FIRST ANSI_DIM "hello\n" STRIP_BODY ANSI_DIM
+                                            "world" ANSI_RESET STRIP_CLOSE);
 }
 
 static void test_head_only_no_trailing_nl_queues_separator(void)
 {
-    /* When output ends mid-line under the cap, finalize queues a \n in
-     * disp so the next block starts cleanly — the byte is held, not
-     * committed, so block_separator can still collapse it. */
+    /* When output ends mid-line under the cap, finalize closes the row
+     * (queueing a \n in disp) and overprints with the solo close glyph. */
     cap_reset();
     struct disp d = {0};
     struct tool_render r;
@@ -90,7 +99,7 @@ static void test_head_only_no_trailing_nl_queues_separator(void)
     tool_render_feed(&r, "no newline", 10);
     tool_render_finalize(&r);
     tool_render_free(&r);
-    EXPECT_STR_EQ(cap_read(), ANSI_DIM "no newline" ANSI_RESET);
+    EXPECT_STR_EQ(cap_read(), STRIP_FIRST ANSI_DIM "no newline" ANSI_RESET STRIP_CLOSE_SOLO);
     EXPECT(d.held == 1);
 }
 
@@ -115,6 +124,8 @@ static void test_head_only_exceeds_cap_emits_footer(void)
     /* Footer reports the suppressed count. */
     EXPECT(strstr(out, "more line") != NULL);
     EXPECT(strstr(out, "more byte") != NULL);
+    /* Multi-row block → close glyph overprints with └. */
+    EXPECT(strstr(out, STRIP_CLOSE) != NULL);
 }
 
 /* ---------- head-tail elision ---------- */
@@ -123,8 +134,8 @@ static void test_head_tail_under_cap(void)
 {
     const char *in = "a\nb\n";
     const char *out = render_one(R_HEAD_TAIL, in, strlen(in));
-    /* Same as head-only when output fits — content + dim wrapper. */
-    EXPECT_STR_EQ(out, ANSI_DIM "a\nb" ANSI_RESET);
+    /* Same shape as head-only when output fits — strips plus close. */
+    EXPECT_STR_EQ(out, STRIP_FIRST ANSI_DIM "a\n" STRIP_BODY ANSI_DIM "b" ANSI_RESET STRIP_CLOSE);
 }
 
 static void test_head_tail_exceeds_cap_emits_marker_and_tail(void)
@@ -142,6 +153,8 @@ static void test_head_tail_exceeds_cap_emits_marker_and_tail(void)
     EXPECT(strstr(out, "row199") != NULL); /* tail kept */
     EXPECT(strstr(out, "more line") != NULL);
     EXPECT(strstr(out, " ...") != NULL); /* elision marker */
+    /* Multi-row block → close glyph overprints with └. */
+    EXPECT(strstr(out, STRIP_CLOSE) != NULL);
 }
 
 /* ---------- diff coloring ---------- */
@@ -184,10 +197,77 @@ static void test_diff_flushes_partial_trailing_line(void)
 static void test_ctrl_bytes_dropped_before_render(void)
 {
     /* Embedded ANSI sequence and bell byte should be filtered before
-     * the dim wrapper is applied. */
+     * the strip + content lands. Single row, so close uses the solo
+     * chevron. */
     const char in[] = "ab\x07\x1b[31mc\x1b[mdef\n";
     const char *out = render_one(R_HEAD_ONLY, in, sizeof(in) - 1);
-    EXPECT_STR_EQ(out, ANSI_DIM "abcdef" ANSI_RESET);
+    EXPECT_STR_EQ(out, STRIP_FIRST ANSI_DIM "abcdef" ANSI_RESET STRIP_CLOSE_SOLO);
+}
+
+/* ---------- exact-at-cap output ---------- */
+
+static void test_head_only_exact_line_cap(void)
+{
+    /* Output is exactly DISP_HEAD_ONLY_LINES (8) lines, each terminated
+     * by \n, and stops there. The line cap fires on the last \n; with
+     * no further bytes to suppress, finalize must still close the
+     * block on the cap row's strip — not on a blank row past it. */
+    char in[256];
+    size_t n = 0;
+    for (int i = 0; i < 8; i++)
+        n += (size_t)snprintf(in + n, sizeof(in) - n, "L%d\n", i);
+    const char *out = render_one(R_HEAD_ONLY, in, n);
+
+    /* All 8 lines made it through. */
+    EXPECT(strstr(out, "L0\n") != NULL);
+    EXPECT(strstr(out, "L7") != NULL);
+    /* No "(N more)" footer — no bytes were suppressed. */
+    EXPECT(strstr(out, "more line") == NULL);
+    /* The crucial assertion: the last line's content is immediately
+     * followed by ANSI_RESET + STRIP_CLOSE, with NO intervening \n.
+     * If close_head_block had flushed the held \n eagerly (the bug),
+     * the cap row's \n would be committed to the byte stream before
+     * the close glyph, and "L7" would be followed by "\n" first. */
+    EXPECT(strstr(out, "L7" ANSI_RESET STRIP_CLOSE) != NULL);
+}
+
+/* ---------- per-line truncation ---------- */
+
+static void test_long_line_truncated_with_ellipsis(void)
+{
+    /* Build a single line that overflows display_width()'s 100-cell
+     * cap (98 cells of content after subtracting the 2-cell strip).
+     * The renderer should emit "..." mid-row and suppress the rest
+     * until \n. We don't assert exact byte length — just that "..."
+     * appears in the output and the post-truncation content does not. */
+    char in[300];
+    memset(in, 'A', 200);
+    memcpy(in + 200, "TAIL_MARKER", 11);
+    in[211] = '\n';
+    const char *out = render_one(R_HEAD_ONLY, in, 212);
+    EXPECT(strstr(out, "...") != NULL);
+    /* The byte run after the ellipsis should be elided from the
+     * preview row. */
+    EXPECT(strstr(out, "TAIL_MARKER") == NULL);
+    /* Single visible row → solo close glyph. */
+    EXPECT(strstr(out, "\xE2\x80\xBA") != NULL); /* › */
+}
+
+static void test_long_line_after_short_line_uses_body_strip(void)
+{
+    /* Short line + long line: rows_emitted increments past the first
+     * row, so the long line gets a body strip "│" rather than the
+     * top-corner "┌". Per-line truncation still fires on the long row. */
+    char in[300];
+    memcpy(in, "short\n", 6);
+    memset(in + 6, 'B', 200);
+    in[206] = '\n';
+    const char *out = render_one(R_HEAD_ONLY, in, 207);
+    EXPECT(strstr(out, "\xE2\x94\x8C") != NULL); /* ┌ on first row */
+    EXPECT(strstr(out, "\xE2\x94\x82") != NULL); /* │ on second row */
+    EXPECT(strstr(out, "...") != NULL);          /* truncation marker */
+    /* Multi-row block → close glyph overprints with └. */
+    EXPECT(strstr(out, STRIP_CLOSE) != NULL);
 }
 
 /* ---------- emit callback wiring ---------- */
@@ -225,6 +305,9 @@ int main(void)
     test_diff_colors_added_and_removed();
     test_diff_flushes_partial_trailing_line();
     test_ctrl_bytes_dropped_before_render();
+    test_head_only_exact_line_cap();
+    test_long_line_truncated_with_ellipsis();
+    test_long_line_after_short_line_uses_body_strip();
     test_emit_callback_sets_flag();
 
     T_REPORT();

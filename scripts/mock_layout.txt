@@ -51,7 +51,18 @@ tool bash {"command":"for f in src/providers/openai.c src/providers/codex.c src/
 usage in=320 out=24
 end-turn
 
-# ---------- turn 5: read silent header --------------------------------
+# ---------- turn 5: bash output with long lines (per-row truncation) ---
+# Generates a mix of short and very-wide lines so the per-row cell cap
+# in tool_render kicks in: each long line should land as truncated
+# content with a trailing "..." inside the dim block. The for-loop
+# wrapper keeps this on the verbose path; the strip glyphs (┌ / │ / └)
+# anchor the gutter on every preview row.
+text Long-line bash output — should show per-row "..." truncation.
+tool bash {"command":"for i in 1 2 3; do printf 'X%.0s' $(seq 1 200); echo; printf 'short line\\n'; done"}
+usage in=380 out=14
+end-turn
+
+# ---------- turn 6: read silent header --------------------------------
 # Read goes through the silent path: the bracketed `[read]` plus the
 # basename + ":N-M" extra render as a single dim line. Included here
 # so the layout demo also covers the silent header for visual
@@ -59,9 +70,9 @@ end-turn
 # multi-row reflow won't apply until a non-silent path tool lands.
 text Read with a deeply nested path.
 tool read {"path":"src/providers/this/is/an/intentionally/very/deeply/nested/imaginary/path/to/some/test_fixture.c","offset":30,"limit":31}
-usage in=320 out=12
+usage in=400 out=12
 end-turn
 
-text Done — that covers verbose-header reflow and truncation.
-usage in=360 out=12
+text Done — that covers verbose-header reflow, per-row truncation, and the silent path.
+usage in=440 out=14
 end-turn

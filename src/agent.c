@@ -431,6 +431,7 @@ static char *make_silent_arg(const struct tool *tool, const struct item *call, i
 static struct item dispatch_tool_skipped(struct disp *d, const struct item *call)
 {
     display_tool_header(d, call);
+    disp_tool_strip_solo(d);
     disp_raw(ANSI_DIM);
     disp_printf(d, "%s", INTERRUPT_MARKER);
     disp_raw(ANSI_RESET);
@@ -452,6 +453,7 @@ static struct item dispatch_tool_skipped(struct disp *d, const struct item *call
 static struct item dispatch_tool_refused(struct disp *d, const struct item *call)
 {
     display_tool_header(d, call);
+    disp_tool_strip_solo(d);
     disp_raw(ANSI_DIM);
     disp_printf(d, "[refused: --raw, no tools advertised]");
     disp_raw(ANSI_RESET);
@@ -635,6 +637,7 @@ static struct item dispatch_tool_call_verbose(struct disp *d, struct spinner *sp
          * renderer would leave the user staring at a bare tool header. */
         if (t && t->output_is_diff && !*ret) {
             spinner_hide(sp);
+            disp_tool_strip_solo(d);
             disp_raw(ANSI_DIM);
             disp_printf(d, "(no changes)");
             disp_raw(ANSI_RESET);

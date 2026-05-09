@@ -29,6 +29,11 @@
 #define ANSI_BRIGHT_MAGENTA "\x1b[95m"
 #define ANSI_FG_DEFAULT     "\x1b[39m"
 
+/* Combined dim + cyan in one SGR set — used by the tool-block gutter
+ * strip so the box-drawing glyphs read as a quiet cyan rule down the
+ * side of the output. Closed by ANSI_RESET. */
+#define ANSI_DIM_CYAN "\x1b[2;36m"
+
 #define ANSI_ERASE_LINE "\x1b[K"
 
 #endif /* HAX_ANSI_H */
