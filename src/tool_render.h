@@ -78,6 +78,15 @@ struct tool_render {
     int row_cells;
     int row_truncated;
 
+    /* Leading-whitespace deferral. Spaces and tabs before the first
+     * non-whitespace codepoint of a row are buffered here instead of
+     * being emitted live; if the row turns out to be whitespace-only
+     * it's elided at row break (same skip path as truly-empty rows).
+     * On the first non-ws codepoint, row_ws is flushed verbatim so
+     * indentation is preserved for visible rows. */
+    struct buf row_ws;
+    int row_ws_cells;
+
     /* Total rows fully emitted across head + finalize phases. Drives
      * the close-glyph decision: 1 → overprint with "›", >=2 → "└". */
     int rows_emitted;

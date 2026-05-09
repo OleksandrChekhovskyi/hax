@@ -270,6 +270,137 @@ static void test_long_line_after_short_line_uses_body_strip(void)
     EXPECT(strstr(out, STRIP_CLOSE) != NULL);
 }
 
+/* ---------- over-indented content ---------- */
+
+static void test_over_indented_content_renders_truncation_marker(void)
+{
+    /* Leading whitespace longer than the row's safe budget combined
+     * with non-ws content used to drop both the ws and the content,
+     * making the row vanish from the preview entirely. The renderer
+     * must keep the row visible by emitting strip + bounded ws +
+     * "..." marker. */
+    char in[300];
+    memset(in, ' ', 200);
+    in[200] = 'x';
+    in[201] = '\n';
+    const char *out = render_one(R_HEAD_ONLY, in, 202);
+    /* Truncation marker present → row was rendered, not elided. */
+    EXPECT(strstr(out, "...") != NULL);
+    /* Single visible row → solo close glyph. */
+    EXPECT(strstr(out, STRIP_CLOSE_SOLO) != NULL);
+}
+
+static void test_whitespace_flood_buffer_bounded(void)
+{
+    /* A flood of leading whitespace without a newline must not grow
+     * the deferred-ws buffer unbounded. Bound is the row's "safe"
+     * budget (content_budget() - 3); on any reasonable terminal
+     * width that's well under 1KB, regardless of input size. */
+    cap_reset();
+    struct disp d = {0};
+    struct tool_render r;
+    tool_render_init(&r, &d, NULL, R_HEAD_ONLY);
+    char *buf = malloc(65536);
+    memset(buf, ' ', 65536);
+    tool_render_feed(&r, buf, 65536);
+    EXPECT(r.row_ws.len < 1024);
+    free(buf);
+    tool_render_finalize(&r);
+    tool_render_free(&r);
+}
+
+/* ---------- empty-line skipping ---------- */
+
+static void test_empty_lines_skipped_between_content(void)
+{
+    /* Empty rows between content should disappear from the preview;
+     * the visible output is "a" and "b" with one strip each, no blank
+     * row in between. The model still gets the raw bytes — that's a
+     * separate path, not exercised here. */
+    const char *in = "a\n\n\nb\n";
+    const char *out = render_one(R_HEAD_ONLY, in, strlen(in));
+    EXPECT_STR_EQ(out, STRIP_FIRST ANSI_DIM "a\n" STRIP_BODY ANSI_DIM "b" ANSI_RESET STRIP_CLOSE);
+}
+
+static void test_whitespace_only_lines_skipped(void)
+{
+    /* Rows that contain only spaces or tabs must be elided too —
+     * common in diff context, git log indented bodies, etc. The
+     * surrounding visible content renders as if the ws-only rows
+     * weren't there. */
+    const char *in = "hello\n  \n\t\nworld\n";
+    const char *out = render_one(R_HEAD_ONLY, in, strlen(in));
+    EXPECT_STR_EQ(out, STRIP_FIRST ANSI_DIM "hello\n" STRIP_BODY ANSI_DIM
+                                            "world" ANSI_RESET STRIP_CLOSE);
+}
+
+static void test_indented_content_preserved(void)
+{
+    /* Leading whitespace before non-ws content is signal — flush the
+     * deferred ws on first non-ws codepoint so indentation survives. */
+    const char *in = "    indented\n";
+    const char *out = render_one(R_HEAD_ONLY, in, strlen(in));
+    EXPECT_STR_EQ(out, STRIP_FIRST ANSI_DIM "    indented" ANSI_RESET STRIP_CLOSE_SOLO);
+}
+
+static void test_only_empty_lines_no_preview(void)
+{
+    /* Pure-blank input produces no preview block at all — started
+     * stays 0, so finalize emits nothing (no dim wrapper, no close
+     * glyph). */
+    const char *in = "\n  \n\t\n";
+    const char *out = render_one(R_HEAD_ONLY, in, strlen(in));
+    EXPECT_STR_EQ(out, "");
+}
+
+static void test_head_tail_blank_only_tail_keeps_close_glyph_aligned(void)
+{
+    /* "a\nb\nc\nd\n\n" in R_HEAD_TAIL: 4 visible lines hit the head
+     * cap on a \n boundary, then a single blank \n is suppressed.
+     * close_head_block runs (cap landed on a newline) and a later
+     * suppress_byte flushes the cap row's held \n via
+     * head_close_emit_pending, putting the cursor on a new blank row
+     * past d. With ws-only rows now elided in tail replay,
+     * emit_tail_bytes would emit nothing — leaving no strip on that
+     * row for the close-glyph overprint to land on. The placeholder
+     * strip in render_finalize_capped restores the invariant. */
+    const char *in = "a\nb\nc\nd\n\n";
+    const char *out = render_one(R_HEAD_TAIL, in, strlen(in));
+    /* All 4 visible lines made it through the head. */
+    EXPECT(strstr(out, "a") != NULL);
+    EXPECT(strstr(out, "d") != NULL);
+    /* No "(N more lines)" footer — tail fits inline. */
+    EXPECT(strstr(out, "more line") == NULL);
+    /* The close glyph overprints a strip — specifically, the
+     * placeholder strip emitted by render_finalize_capped. The byte
+     * sequence STRIP_BODY + ANSI_DIM (row_strip_open's dim re-open)
+     * + ANSI_RESET (finalize's dim close) + STRIP_CLOSE only appears
+     * when the placeholder was emitted; without it the close glyph
+     * would be preceded by ANSI_DIM ANSI_RESET (no STRIP_BODY),
+     * landing on bare terrain. */
+    EXPECT(strstr(out, STRIP_BODY ANSI_DIM ANSI_RESET STRIP_CLOSE) != NULL);
+}
+
+static void test_diff_preserves_empty_lines(void)
+{
+    /* Diff context can legitimately include blank or whitespace-only
+     * lines (a hunk where the surrounding code is blank). R_DIFF
+     * routes through emit_diff_line, which always emits a row, so
+     * the ws-skip logic in row_emit_codepoint doesn't apply here. */
+    const char *in = "+a\n"
+                     "  \n"
+                     "+b\n";
+    const char *out = render_one(R_DIFF, in, strlen(in));
+    /* Expect three strips: ┌ on the first row, │ on the two body rows.
+     * STRIP_BODY appearing at least twice proves the middle ws-only
+     * row was emitted. */
+    EXPECT(strstr(out, "+a") != NULL);
+    EXPECT(strstr(out, "+b") != NULL);
+    const char *p = strstr(out, STRIP_BODY);
+    EXPECT(p != NULL);
+    EXPECT(strstr(p + 1, STRIP_BODY) != NULL);
+}
+
 /* ---------- emit callback wiring ---------- */
 
 static void test_emit_callback_sets_flag(void)
@@ -308,6 +439,14 @@ int main(void)
     test_head_only_exact_line_cap();
     test_long_line_truncated_with_ellipsis();
     test_long_line_after_short_line_uses_body_strip();
+    test_over_indented_content_renders_truncation_marker();
+    test_whitespace_flood_buffer_bounded();
+    test_empty_lines_skipped_between_content();
+    test_whitespace_only_lines_skipped();
+    test_indented_content_preserved();
+    test_only_empty_lines_no_preview();
+    test_head_tail_blank_only_tail_keeps_close_glyph_aligned();
+    test_diff_preserves_empty_lines();
     test_emit_callback_sets_flag();
 
     T_REPORT();

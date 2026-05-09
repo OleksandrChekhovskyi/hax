@@ -61,12 +61,14 @@ void tool_render_init(struct tool_render *r, struct disp *d, struct spinner *sp,
     if (r->mode == R_HEAD_TAIL)
         r->tail = xmalloc(DISP_HT_TAIL_BYTES);
     buf_init(&r->diff_line);
+    buf_init(&r->row_ws);
 }
 
 void tool_render_free(struct tool_render *r)
 {
     free(r->tail);
     buf_free(&r->diff_line);
+    buf_free(&r->row_ws);
 }
 
 /* Emit the gutter strip for the row we're about to write content on:
@@ -100,14 +102,23 @@ static void row_strip_open(struct tool_render *r)
  * per-row state, and increment rows_emitted so finalize knows whether
  * to overprint with "└" (multi-row) or "›" (single-row). Used by the
  * non-diff path; diff mode does its own row-break inline since the
- * strip+content+\n is one synchronous block. */
+ * strip+content+\n is one synchronous block.
+ *
+ * Empty *and* whitespace-only rows (no non-ws codepoint emitted, i.e.
+ * !row_strip_emitted) are silently skipped from the preview — no
+ * strip, no \n, no counter bumps. Any leading whitespace deferred via
+ * row_ws is discarded here. The model still sees the raw bytes via
+ * the tool's return string, so the elision is purely a display
+ * concern. R_DIFF preserves blank lines (handled in emit_diff_line,
+ * which always emits a row). */
 static void row_break_capped(struct tool_render *r)
 {
-    /* Make sure even a pure-blank row carries a strip so the gutter
-     * stays continuous. Without this, a stream like "\n\n" produces
-     * two empty lines with no glyph and the column-rule visual breaks. */
-    if (!r->row_strip_emitted)
-        row_strip_open(r);
+    if (!r->row_strip_emitted) {
+        buf_reset(&r->row_ws);
+        r->row_ws_cells = 0;
+        r->row_truncated = 0;
+        return;
+    }
     disp_putc(r->disp, '\n');
     r->bytes_emitted++;
     r->lines_emitted++;
@@ -115,6 +126,21 @@ static void row_break_capped(struct tool_render *r)
     r->row_cells = 0;
     r->row_truncated = 0;
     r->rows_emitted++;
+}
+
+/* Flush any deferred leading whitespace into the current row, crediting
+ * its bytes against bytes_emitted and its cells against row_cells.
+ * Caller guarantees the row strip has been opened (so the bytes land
+ * in the right place visually). */
+static void row_flush_pending_ws(struct tool_render *r)
+{
+    if (r->row_ws.len == 0)
+        return;
+    disp_write(r->disp, r->row_ws.data, r->row_ws.len);
+    r->bytes_emitted += r->row_ws.len;
+    r->row_cells += r->row_ws_cells;
+    buf_reset(&r->row_ws);
+    r->row_ws_cells = 0;
 }
 
 /* Write one already-clean codepoint into the current row, applying
@@ -125,7 +151,13 @@ static void row_break_capped(struct tool_render *r)
  * reserved cells. Slightly conservative for content that exactly
  * fills the row (loses ≤3 cells when no marker actually was needed),
  * but the alternative — back-stepping with \b — is finicky and the
- * preview is approximate anyway. */
+ * preview is approximate anyway.
+ *
+ * Leading whitespace (space, tab) that lands before the first non-ws
+ * codepoint is buffered into row_ws instead of being emitted live, so
+ * a row that turns out to be whitespace-only can be elided at row
+ * break. On the first non-ws codepoint the buffer is flushed and the
+ * row's strip opens — indentation is preserved for visible rows. */
 static void row_emit_codepoint(struct tool_render *r, const char *bytes, size_t len, int cells)
 {
     if (r->row_truncated)
@@ -134,9 +166,30 @@ static void row_emit_codepoint(struct tool_render *r, const char *bytes, size_t 
         cells = 1;
     size_t budget = content_budget();
     size_t safe = budget >= 3 ? budget - 3 : 0;
-    if ((size_t)r->row_cells + (size_t)cells > safe) {
-        if (budget >= 3 && (size_t)r->row_cells + 3 <= budget) {
+    int is_ws = (len == 1 && (bytes[0] == ' ' || bytes[0] == '\t'));
+    if (is_ws && !r->row_strip_emitted) {
+        /* Cap the deferred-whitespace buffer at the row's "safe"
+         * budget (cells available before the truncation marker kicks
+         * in). Whitespace past that point couldn't render on the row
+         * anyway, and the bound keeps a tool that floods spaces
+         * without a newline from growing row_ws without limit. With
+         * the bound in place the "ws + marker fits" check below
+         * always succeeds when the strip is still closed, so
+         * over-indented rows render as "<ws> ..." rather than
+         * vanishing. */
+        if ((size_t)r->row_ws_cells + (size_t)cells <= safe) {
+            buf_append(&r->row_ws, bytes, len);
+            r->row_ws_cells += cells;
+        }
+        return;
+    }
+    /* When strip is closed, row_cells is 0 and ws_cells holds the
+     * deferred leading whitespace; when strip is open ws_cells is 0
+     * (already flushed). Summing both is safe in either state. */
+    if ((size_t)r->row_cells + (size_t)r->row_ws_cells + (size_t)cells > safe) {
+        if (budget >= 3 && (size_t)r->row_cells + (size_t)r->row_ws_cells + 3 <= budget) {
             row_strip_open(r);
+            row_flush_pending_ws(r);
             disp_write(r->disp, "...", 3);
             r->row_cells += 3;
             /* Don't credit the synthetic "..." against bytes_emitted —
@@ -145,9 +198,12 @@ static void row_emit_codepoint(struct tool_render *r, const char *bytes, size_t 
              * earlier than the documented constant suggests. */
         }
         r->row_truncated = 1;
+        buf_reset(&r->row_ws);
+        r->row_ws_cells = 0;
         return;
     }
     row_strip_open(r);
+    row_flush_pending_ws(r);
     disp_write(r->disp, bytes, len);
     r->row_cells += cells;
     r->bytes_emitted += len;
@@ -412,20 +468,16 @@ void tool_render_feed(struct tool_render *r, const char *bytes, size_t n)
  * the row machinery, so each line gets its own gutter strip and the
  * per-row truncation cap. Unlike the live path, head_full is true
  * here — we route content through row_emit_codepoint / row_break_capped
- * directly, bypassing the suppress / cap-trigger logic. */
+ * directly, bypassing the suppress / cap-trigger logic. The empty /
+ * whitespace-only row skip lives in row_break_capped, so the tail
+ * inherits the same elision policy as the head. */
 static void emit_tail_bytes(struct tool_render *r, const char *bytes, size_t n)
 {
     size_t i = 0;
     while (i < n) {
         char c = bytes[i];
         if (c == '\n') {
-            if (!r->row_strip_emitted)
-                row_strip_open(r);
-            disp_putc(r->disp, '\n');
-            r->row_strip_emitted = 0;
-            r->row_cells = 0;
-            r->row_truncated = 0;
-            r->rows_emitted++;
+            row_break_capped(r);
             i++;
             continue;
         }
@@ -478,11 +530,28 @@ static void render_finalize_capped(struct tool_render *r)
          * additional rows. Re-open dim if close_head_block already
          * ran; usually it hasn't (mid-line cap defers the close). */
         if (r->tail_pos > 0) {
-            if (!r->dim_open) {
+            int reopened_dim = !r->dim_open;
+            if (reopened_dim) {
                 disp_raw(ANSI_DIM);
                 r->dim_open = 1;
             }
+            int rows_before = r->rows_emitted;
             emit_tail_bytes(r, r->tail, r->tail_pos);
+            /* If close_head_block ran (cap landed on a newline) and the
+             * suppressed bytes were all blank/ws — emit_tail_bytes
+             * skipped every row — head_close_emit_pending has already
+             * committed the cap row's held \n, so the cursor sits on a
+             * new blank row past the cap. Without a strip on that row
+             * the close-glyph overprint at finalize would land on bare
+             * terrain. Emit a placeholder strip so └ has a gutter to
+             * overprint. reopened_dim is the signal: dim is only
+             * closed by close_head_block, and tail_pos > 0 in this
+             * branch implies suppress_byte ran ≥ once (which fires
+             * head_close_emit_pending if pending). */
+            if (reopened_dim && r->rows_emitted == rows_before) {
+                row_strip_open(r);
+                row_break_capped(r);
+            }
         }
         return;
     }
