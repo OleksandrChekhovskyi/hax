@@ -4,6 +4,7 @@
 #include <jansson.h>
 
 #include "fs.h"
+#include "path.h"
 #include "util.h"
 
 /* Count '\n' bytes plus a trailing partial line (content not ending in
@@ -34,9 +35,9 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
     if (!root)
         return xasprintf("invalid arguments: %s", jerr.text);
 
-    const char *path = json_string_value(json_object_get(root, "path"));
+    const char *raw_path = json_string_value(json_object_get(root, "path"));
     json_t *jc = json_object_get(root, "content");
-    if (!path || !*path) {
+    if (!raw_path || !*raw_path) {
         json_decref(root);
         return xstrdup("missing 'path' argument");
     }
@@ -44,6 +45,7 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
         json_decref(root);
         return xstrdup("missing 'content' argument");
     }
+    char *path = expand_home(raw_path);
     const char *content = json_string_value(jc);
     size_t content_len = json_string_length(jc);
 
@@ -53,6 +55,7 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
 
     if (errmsg) {
         free(diff);
+        free(path);
         json_decref(root);
         return errmsg;
     }
@@ -74,10 +77,12 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
         else
             result = xasprintf("created %s (%zu line%s, %zu byte%s)", path, lines,
                                lines == 1 ? "" : "s", content_len, content_len == 1 ? "" : "s");
+        free(path);
         json_decref(root);
         return result;
     }
 
+    free(path);
     json_decref(root);
     return diff;
 }

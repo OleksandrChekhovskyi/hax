@@ -10,6 +10,7 @@
 #include <sys/utsname.h>
 #include <unistd.h>
 
+#include "path.h"
 #include "utf8_sanitize.h"
 #include "util.h"
 
@@ -153,12 +154,17 @@ static void append_env_block(struct buf *b, const char *model)
      * rejects non-UTF-8 and embedded NULs, so clean each before splicing.
      * uname output is POSIX-defined to be ASCII and doesn't need this
      * treatment. */
-    char *cwd_clean = sanitize_utf8(cwd, strlen(cwd));
+    /* `~` is friendlier than the full $HOME prefix and what the user types
+     * themselves; collapse before sanitizing so the substitution operates on
+     * raw bytes (sanitize_utf8 is a one-way pass). */
+    char *cwd_display = collapse_home(cwd);
+    char *cwd_clean = sanitize_utf8(cwd_display, strlen(cwd_display));
+    free(cwd_display);
     char *shell_clean = sanitize_utf8(shell, strlen(shell));
     char *model_clean = (model && *model) ? sanitize_utf8(model, strlen(model)) : NULL;
 
     buf_append_str(b, "<env>\n");
-    char *line = xasprintf("  cwd: %s (fixed for the session)\n", cwd_clean);
+    char *line = xasprintf("  cwd: %s\n", cwd_clean);
     buf_append_str(b, line);
     free(line);
     line = xasprintf("  os: %s %s\n", os_name, os_release);
@@ -203,11 +209,17 @@ static void append_env_block(struct buf *b, const char *model)
     free(model_clean);
 }
 
-/* Append a single AGENTS.md file under a `## <path>` header. Returns 1 if
- * the file existed and was appended, 0 otherwise. The first successful
- * call also writes the `# Project Context` section header (and a leading
- * separator if the buffer already has env-block content). */
-static int append_agents_md(struct buf *b, const char *path, int *seen_header)
+/* Append a single AGENTS.md file under a `## <display_path>` header.
+ * `path` is the absolute filesystem path used to read the file;
+ * `display_path` is what the model sees in the section header — a
+ * `~`-collapsed absolute path so the model can re-read the file with
+ * the same string it sees here. NULL display_path falls back to `path`.
+ * Returns 1 if the file existed and was appended, 0 otherwise. The
+ * first successful call also writes the `# Project Context` section
+ * header (and a leading separator if the buffer already has env-block
+ * content). */
+static int append_agents_md(struct buf *b, const char *path, const char *display_path,
+                            int *seen_header)
 {
     size_t n = 0;
     int truncated = 0;
@@ -223,7 +235,8 @@ static int append_agents_md(struct buf *b, const char *path, int *seen_header)
     char *clean = sanitize_utf8(content, n);
     free(content);
     size_t clean_len = strlen(clean);
-    char *path_clean = sanitize_utf8(path, strlen(path));
+    const char *header_src = display_path ? display_path : path;
+    char *path_clean = sanitize_utf8(header_src, strlen(header_src));
 
     if (!*seen_header) {
         if (b->len > 0)
@@ -257,7 +270,9 @@ static void append_project_agents_md(struct buf *b, int *seen_header)
          * considered, to avoid pulling in unrelated AGENTS.md files when
          * hax is run outside any repo. */
         char *candidate = xasprintf("%s/AGENTS.md", cwd);
-        append_agents_md(b, candidate, seen_header);
+        char *display = collapse_home(candidate);
+        append_agents_md(b, candidate, display, seen_header);
+        free(display);
         free(candidate);
         return;
     }
@@ -265,13 +280,19 @@ static void append_project_agents_md(struct buf *b, int *seen_header)
     /* Collect every AGENTS.md from cwd up to and including the project
      * root, then emit farthest-first so closer files take precedence.
      * append_agents_md handles missing/non-regular paths via slurp_*'s
-     * own guard, so we don't pre-filter here. */
+     * own guard, so we don't pre-filter here. Display paths use the
+     * absolute form with $HOME collapsed to `~` — relative paths like
+     * `../AGENTS.md` invite the model to rebase them on whatever it
+     * thinks the base is (we've seen Qwen rebase onto $HOME). */
     char *paths[AGENTS_MD_MAX_LEVELS];
+    char *display_paths[AGENTS_MD_MAX_LEVELS];
     int n = 0;
     char dir[PATH_MAX];
     snprintf(dir, sizeof(dir), "%s", cwd);
     for (int i = 0; i < AGENTS_MD_MAX_LEVELS; i++) {
-        paths[n++] = path_join(dir, "AGENTS.md");
+        paths[n] = path_join(dir, "AGENTS.md");
+        display_paths[n] = collapse_home(paths[n]);
+        n++;
 
         if (strcmp(dir, root) == 0)
             break;
@@ -290,8 +311,9 @@ static void append_project_agents_md(struct buf *b, int *seen_header)
     free(root);
 
     for (int i = n - 1; i >= 0; i--) {
-        append_agents_md(b, paths[i], seen_header);
+        append_agents_md(b, paths[i], display_paths[i], seen_header);
         free(paths[i]);
+        free(display_paths[i]);
     }
 }
 
@@ -370,9 +392,10 @@ static int cmp_skill_entry(const void *a, const void *b)
  * file, append a fresh entry to *out (xrealloc'd as needed). Skips
  * dotfiles and entries already present in *out (so an earlier root takes
  * precedence over a later one — used to let project skills shadow
- * same-named global ones). `root` is also what's shown to the model in
- * the entry's path, so callers pass a relative path for project skills
- * and an absolute path for global ones. */
+ * same-named global ones). The displayed path is what the model sees:
+ * callers should pass an absolute root so the resulting `<root>/<name>/
+ * SKILL.md` reads unambiguously (the project scan prepends cwd, and
+ * $XDG/$HOME-based globals are absolute in any sane setup). */
 static void collect_skills(struct skill_entry **out, size_t *n, size_t *cap, const char *root)
 {
     DIR *d = opendir(root);
@@ -417,7 +440,11 @@ static void collect_skills(struct skill_entry **out, size_t *n, size_t *cap, con
         char *desc = parse_skill_description(md, md_len);
         free(md);
 
-        char *path_clean = sanitize_utf8(skill_md, strlen(skill_md));
+        /* skill_md is absolute (callers pass absolute roots — see header).
+         * Collapse $HOME → `~` for compactness; otherwise leave as-is. */
+        char *display = collapse_home(skill_md);
+        char *path_clean = sanitize_utf8(display, strlen(display));
+        free(display);
         free(skill_md);
 
         if (*n == *cap) {
@@ -438,8 +465,15 @@ static void append_skills(struct buf *b)
     struct skill_entry *skills = NULL;
     size_t n = 0, cap = 0;
 
-    /* Project first so its entries shadow same-named global ones. */
-    collect_skills(&skills, &n, &cap, ".agents/skills");
+    /* Project first so its entries shadow same-named global ones. The root
+     * is built absolute so the displayed SKILL.md path is unambiguous; a
+     * relative `.agents/...` would be model-rebased onto $HOME or similar. */
+    char cwd[PATH_MAX];
+    if (getcwd(cwd, sizeof(cwd))) {
+        char *project_root = path_join(cwd, ".agents/skills");
+        collect_skills(&skills, &n, &cap, project_root);
+        free(project_root);
+    }
 
     char *global = xdg_hax_config_path("skills");
     if (global) {
@@ -490,7 +524,9 @@ char *env_build_suffix(const char *model)
         int seen_header = 0;
         char *global = xdg_hax_config_path("AGENTS.md");
         if (global) {
-            append_agents_md(&b, global, &seen_header);
+            char *display = collapse_home(global);
+            append_agents_md(&b, global, display, &seen_header);
+            free(display);
             free(global);
         }
         append_project_agents_md(&b, &seen_header);

@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "diff.h"
+#include "path.h"
 #include "util.h"
 
 /* mkdir -p: create path and any missing intermediate components. EEXIST is

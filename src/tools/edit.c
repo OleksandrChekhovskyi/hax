@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 
 #include "fs.h"
+#include "path.h"
 #include "util.h"
 
 #define EDIT_READ_CAP (4 * 1024 * 1024)
@@ -74,12 +75,12 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
     if (!root)
         return xasprintf("invalid arguments: %s", jerr.text);
 
-    const char *path = json_string_value(json_object_get(root, "path"));
+    const char *raw_path = json_string_value(json_object_get(root, "path"));
     json_t *jold = json_object_get(root, "old_string");
     json_t *jnew = json_object_get(root, "new_string");
     json_t *jra = json_object_get(root, "replace_all");
 
-    if (!path || !*path) {
+    if (!raw_path || !*raw_path) {
         json_decref(root);
         return xstrdup("missing 'path' argument");
     }
@@ -106,6 +107,10 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
         return xstrdup("'old_string' and 'new_string' are identical — nothing to do");
     }
 
+    /* Allocate the expanded path only after cheap validation passes — keeps
+     * the early-error paths free of cleanup. */
+    char *path = expand_home(raw_path);
+
     /* Refuse FIFOs, sockets, devices, directories before slurping.
      * slurp_file_capped's internal guard would also reject these, but
      * we surface a tool-specific "not a regular file" error instead of
@@ -115,6 +120,7 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
     struct stat st;
     if (stat(path, &st) == 0 && !S_ISREG(st.st_mode)) {
         char *msg = xasprintf("%s exists but is not a regular file", path);
+        free(path);
         json_decref(root);
         return msg;
     }
@@ -124,6 +130,7 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
     char *orig = slurp_file_capped(path, EDIT_READ_CAP, &orig_len, &truncated);
     if (!orig) {
         char *msg = xasprintf("error reading %s: %s", path, strerror(errno));
+        free(path);
         json_decref(root);
         return msg;
     }
@@ -131,6 +138,7 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
         char *msg =
             xasprintf("file %s is larger than %d bytes — refusing to edit", path, EDIT_READ_CAP);
         free(orig);
+        free(path);
         json_decref(root);
         return msg;
     }
@@ -138,6 +146,7 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
     size_t n_matches = count_occurrences(orig, orig_len, old_s, old_len);
     if (n_matches == 0) {
         free(orig);
+        free(path);
         json_decref(root);
         return xstrdup("'old_string' not found in file");
     }
@@ -146,6 +155,7 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
                               "to disambiguate, or set replace_all=true",
                               n_matches, path);
         free(orig);
+        free(path);
         json_decref(root);
         return msg;
     }
@@ -160,6 +170,7 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
      * have failed otherwise), so we don't need the was-new signal. */
     char *diff = fs_write_with_diff(path, updated, new_total_len, &errmsg, NULL);
     free(updated);
+    free(path);
     json_decref(root);
 
     if (errmsg) {

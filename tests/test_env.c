@@ -30,6 +30,16 @@ static void sb_init(struct sandbox *s)
         FAIL("mkdtemp: %s", strerror(errno));
         free(s->root);
         s->root = NULL;
+        return;
+    }
+    /* Resolve symlinks: macOS `/tmp` is a symlink to `/private/tmp`, so
+     * mkdtemp returns `/tmp/...` while getcwd after chdir returns
+     * `/private/tmp/...`. Anything that compares the two byte-for-byte
+     * (collapse_home, HOME-prefix matching) needs them to agree. */
+    char *real = realpath(s->root, NULL);
+    if (real) {
+        free(s->root);
+        s->root = real;
     }
     /* Point HOME and XDG_CONFIG_HOME at the sandbox so global AGENTS.md
      * lookups don't escape it. Tests that want a global file create it
@@ -693,8 +703,10 @@ static void test_skills_with_description_sorted(void)
     EXPECT(p != NULL);
     if (p) {
         EXPECT(contains(p, "# Skills"));
-        EXPECT(contains(p, "- alpha: alpha does A (.agents/skills/alpha/SKILL.md)"));
-        EXPECT(contains(p, "- zeta: zeta does Z (.agents/skills/zeta/SKILL.md)"));
+        /* sb_init pins HOME=sandbox root, so absolute project paths collapse
+         * to `~/.agents/skills/...`. */
+        EXPECT(contains(p, "- alpha: alpha does A (~/.agents/skills/alpha/SKILL.md)"));
+        EXPECT(contains(p, "- zeta: zeta does Z (~/.agents/skills/zeta/SKILL.md)"));
         const char *a = strstr(p, "- alpha");
         const char *z = strstr(p, "- zeta");
         EXPECT(a && z && a < z);
@@ -724,7 +736,7 @@ static void test_skills_crlf_frontmatter(void)
     char *p = env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {
-        EXPECT(contains(p, "- crlf: from crlf (.agents/skills/crlf/SKILL.md)"));
+        EXPECT(contains(p, "- crlf: from crlf (~/.agents/skills/crlf/SKILL.md)"));
         free(p);
     }
     unsetenv("HAX_NO_ENV");
@@ -746,7 +758,7 @@ static void test_skills_no_frontmatter_falls_back_to_dir(void)
     char *p = env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {
-        EXPECT(contains(p, "- raw (.agents/skills/raw/SKILL.md)"));
+        EXPECT(contains(p, "- raw (~/.agents/skills/raw/SKILL.md)"));
         EXPECT(!contains(p, "raw:")); /* no description → no colon-and-text */
         free(p);
     }

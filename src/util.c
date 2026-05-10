@@ -641,18 +641,6 @@ char *flatten_for_display(const char *s)
     return out;
 }
 
-char *expand_home(const char *path)
-{
-    if (!path)
-        return NULL;
-    if (path[0] != '~')
-        return xstrdup(path);
-    const char *home = getenv("HOME");
-    if (!home)
-        return xstrdup(path);
-    return xasprintf("%s%s", home, path + 1);
-}
-
 /* Shared resolver behind xdg_hax_config_path / xdg_hax_state_path:
  * "$<env_var>/hax/<relpath>" when the env var is set and non-empty,
  * else "$HOME/<home_default>/hax/<relpath>". Returns NULL when neither
@@ -687,21 +675,6 @@ char *dup_trim_trailing_slash(const char *s)
     memcpy(out, s, n);
     out[n] = '\0';
     return out;
-}
-
-char *path_join(const char *base, const char *rel)
-{
-    size_t blen = strlen(base);
-    /* Preserve "/" as the root: blen==1 with base[0]=='/' must not be
-     * stripped to empty. Any other run of trailing slashes collapses. */
-    while (blen > 1 && base[blen - 1] == '/')
-        blen--;
-    while (*rel == '/')
-        rel++;
-    /* Special-case base=="/" so we get "/rel" instead of "//rel". */
-    if (blen == 1 && base[0] == '/')
-        return xasprintf("/%s", rel);
-    return xasprintf("%.*s/%s", (int)blen, base, rel);
 }
 
 size_t output_cap_bytes(void)

@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "path.h"
 #include "utf8_sanitize.h"
 #include "util.h"
 
@@ -246,8 +247,8 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
     if (!root)
         return xasprintf("invalid arguments: %s", jerr.text);
 
-    const char *path = json_string_value(json_object_get(root, "path"));
-    if (!path || !*path) {
+    const char *raw_path = json_string_value(json_object_get(root, "path"));
+    if (!raw_path || !*raw_path) {
         json_decref(root);
         return xstrdup("missing 'path' argument");
     }
@@ -279,6 +280,10 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
         }
     }
 
+    /* Allocate the expanded path only after cheap validation passes — keeps
+     * the early-error paths free of cleanup. */
+    char *path = expand_home(raw_path);
+
     /* Refuse non-regular files before opening: a FIFO with no writer
      * blocks on open(O_RDONLY) forever, /dev/zero would stream until
      * we hit the cap (correct memory-wise but useless to the model),
@@ -287,11 +292,13 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
     struct stat st;
     if (stat(path, &st) < 0) {
         char *msg = xasprintf("error reading %s: %s", path, strerror(errno));
+        free(path);
         json_decref(root);
         return msg;
     }
     if (!S_ISREG(st.st_mode)) {
         char *msg = xasprintf("%s exists but is not a regular file", path);
+        free(path);
         json_decref(root);
         return msg;
     }
@@ -307,6 +314,7 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
         char *msg = xasprintf("%s is %lld bytes; cap is %zu. Pass offset/limit to read a slice, "
                               "or use bash with grep/head/tail.",
                               path, (long long)st.st_size, cap);
+        free(path);
         json_decref(root);
         return msg;
     }
@@ -314,6 +322,7 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
     struct read_result rr;
     if (read_lines_capped(path, offset, limit, cap, &rr) < 0) {
         char *msg = xasprintf("error reading %s: %s", path, strerror(errno));
+        free(path);
         json_decref(root);
         return msg;
     }
@@ -321,9 +330,11 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
     if (rr.is_binary) {
         char *msg = xasprintf("%s appears to be binary (NUL byte found in first 8 KiB)", path);
         free(rr.body);
+        free(path);
         json_decref(root);
         return msg;
     }
+    free(path);
     json_decref(root);
 
     if (rr.past_eof) {

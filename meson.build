@@ -47,6 +47,7 @@ sources = files(
     'src/markdown.c',
     'src/notify.c',
     'src/oneshot.c',
+    'src/path.c',
     'src/progress.c',
     'src/slash.c',
     'src/spawn.c',

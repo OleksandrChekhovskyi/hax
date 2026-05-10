@@ -53,9 +53,6 @@ int write_all(int fd, const void *data, size_t n);
  * as slurp_file. */
 char *slurp_file_capped(const char *path, size_t cap, size_t *out_len, int *out_truncated);
 
-/* Expand a leading ~ to $HOME. Returns a newly-allocated path. */
-char *expand_home(const char *path);
-
 /* Resolve hax's XDG-style paths under the per-user config and state
  * trees, both namespaced as `<base>/hax/<relpath>`:
  *   xdg_hax_config_path("AGENTS.md") -> $XDG_CONFIG_HOME/hax/AGENTS.md,
@@ -72,15 +69,6 @@ char *xdg_hax_state_path(const char *relpath);
  * normalize a base URL so "http://x/v1/" and "http://x/v1" produce the
  * same downstream concatenation. Caller frees. */
 char *dup_trim_trailing_slash(const char *s);
-
-/* Join two filesystem path components with exactly one '/' between them.
- * Strips trailing slashes from `base` (preserving "/" itself as root)
- * and leading slashes from `rel`. Use for path concatenation where
- * either side may have come from an env var (TMPDIR on macOS ends in
- * "/") or a path-walk that lands on root. Both args must be non-NULL;
- * callers passing user/env data should fall back to a literal default
- * before calling. Caller frees. */
-char *path_join(const char *base, const char *rel);
 
 /* Shared limits applied to tool results (bash, read) before they go back
  * to the model. Three knobs:

@@ -9,6 +9,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "path.h"
 #include "utf8_sanitize.h"
 #include "util.h"
 

@@ -11,6 +11,7 @@
 #include "bg.h"
 #include "codex_events.h"
 #include "http.h"
+#include "path.h"
 #include "probe.h"
 #include "progress.h"
 #include "spinner.h"

@@ -111,45 +111,6 @@ static void test_buf_growth_crosses_default_cap(void)
     buf_free(&b);
 }
 
-/* ---------- expand_home ---------- */
-
-static void test_expand_home_null(void)
-{
-    EXPECT(expand_home(NULL) == NULL);
-}
-
-static void test_expand_home_no_tilde(void)
-{
-    setenv("HOME", "/tmp/fake", 1);
-    char *p = expand_home("/absolute/path");
-    EXPECT_STR_EQ(p, "/absolute/path");
-    free(p);
-}
-
-static void test_expand_home_tilde_only(void)
-{
-    setenv("HOME", "/tmp/fake", 1);
-    char *p = expand_home("~");
-    EXPECT_STR_EQ(p, "/tmp/fake");
-    free(p);
-}
-
-static void test_expand_home_tilde_slash(void)
-{
-    setenv("HOME", "/tmp/fake", 1);
-    char *p = expand_home("~/sub/file");
-    EXPECT_STR_EQ(p, "/tmp/fake/sub/file");
-    free(p);
-}
-
-static void test_expand_home_no_home_env(void)
-{
-    unsetenv("HOME");
-    char *p = expand_home("~/foo");
-    EXPECT_STR_EQ(p, "~/foo");
-    free(p);
-}
-
 /* ---------- slurp_file ---------- */
 
 static void test_slurp_missing(void)
@@ -362,90 +323,6 @@ static void test_cap_lines_long_line_no_trailing_newline(void)
     EXPECT(strstr(out, "zzz") == out);
     EXPECT(strstr(out, "[5 bytes elided]") != NULL);
     EXPECT(out[n - 1] != '\n');
-    free(out);
-}
-
-/* ---------- path_join ---------- */
-
-static void test_path_join_simple(void)
-{
-    char *out = path_join("/tmp", "foo");
-    EXPECT_STR_EQ(out, "/tmp/foo");
-    free(out);
-}
-
-static void test_path_join_strips_trailing_slash(void)
-{
-    /* Original motivating bug: macOS $TMPDIR ends in '/' and naive
-     * concat produces "//hax-bash-XXXXXX". */
-    char *out = path_join("/var/folders/abc/T/", "hax-bash-XXXXXX");
-    EXPECT_STR_EQ(out, "/var/folders/abc/T/hax-bash-XXXXXX");
-    free(out);
-}
-
-static void test_path_join_strips_multiple_trailing_slashes(void)
-{
-    char *out = path_join("/tmp///", "foo");
-    EXPECT_STR_EQ(out, "/tmp/foo");
-    free(out);
-}
-
-static void test_path_join_strips_leading_slash_on_rel(void)
-{
-    /* `rel` arriving with a leading '/' (rare, but defensive) shouldn't
-     * produce "//" in the join either. */
-    char *out = path_join("/tmp", "/foo");
-    EXPECT_STR_EQ(out, "/tmp/foo");
-    free(out);
-}
-
-static void test_path_join_root_base(void)
-{
-    /* base=="/" must not be stripped to empty — joining with "etc"
-     * needs to give "/etc", not "etc" or "//etc". */
-    char *out = path_join("/", "etc");
-    EXPECT_STR_EQ(out, "/etc");
-    free(out);
-}
-
-static void test_path_join_root_base_with_leading_slash_rel(void)
-{
-    char *out = path_join("/", "/etc");
-    EXPECT_STR_EQ(out, "/etc");
-    free(out);
-}
-
-static void test_path_join_relative_base(void)
-{
-    char *out = path_join("subdir", "file.txt");
-    EXPECT_STR_EQ(out, "subdir/file.txt");
-    free(out);
-}
-
-static void test_path_join_dot_base(void)
-{
-    char *out = path_join(".", "file.txt");
-    EXPECT_STR_EQ(out, "./file.txt");
-    free(out);
-}
-
-static void test_path_join_empty_base(void)
-{
-    /* No current call site passes an empty base, but pin the behavior
-     * so a future regression is loud rather than silent. blen==0 hits
-     * neither the trailing-slash strip (guarded by blen>1) nor the
-     * root special-case, so it falls through to "%.*s/%s" with .*==0,
-     * yielding "/rel". */
-    char *out = path_join("", "foo");
-    EXPECT_STR_EQ(out, "/foo");
-    free(out);
-}
-
-static void test_path_join_empty_rel(void)
-{
-    /* Symmetric: pin the empty-rel behavior. */
-    char *out = path_join("/tmp", "");
-    EXPECT_STR_EQ(out, "/tmp/");
     free(out);
 }
 
@@ -1167,12 +1044,6 @@ int main(void)
     test_buf_reset_keeps_capacity();
     test_buf_growth_crosses_default_cap();
 
-    test_expand_home_null();
-    test_expand_home_no_tilde();
-    test_expand_home_tilde_only();
-    test_expand_home_tilde_slash();
-    test_expand_home_no_home_env();
-
     test_slurp_missing();
     test_slurp_empty();
     test_slurp_normal();
@@ -1188,17 +1059,6 @@ int main(void)
     test_cap_lines_truncates_long_line();
     test_cap_lines_preserves_short_neighbors();
     test_cap_lines_long_line_no_trailing_newline();
-
-    test_path_join_simple();
-    test_path_join_strips_trailing_slash();
-    test_path_join_strips_multiple_trailing_slashes();
-    test_path_join_strips_leading_slash_on_rel();
-    test_path_join_root_base();
-    test_path_join_root_base_with_leading_slash_rel();
-    test_path_join_relative_base();
-    test_path_join_dot_base();
-    test_path_join_empty_base();
-    test_path_join_empty_rel();
 
     test_parse_size_basic();
     test_parse_size_invalid_returns_zero();
