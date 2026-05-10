@@ -33,6 +33,84 @@
 #define PROMPT_UTF8  ANSI_BRIGHT_MAGENTA ANSI_BOLD "❯" ANSI_BOLD_OFF ANSI_FG_DEFAULT " "
 #define PROMPT_ASCII ANSI_BOLD ">" ANSI_BOLD_OFF " "
 
+/* Outcome of absorb_aborted_turn — drives whether a caller adds a
+ * fallback standalone [interrupted] marker.
+ *
+ *   had_state    Anything was streamed before the abort: in-flight
+ *                text, an in-progress tool_call (start+args without
+ *                a matching end), or completed items already pushed
+ *                this turn (text flushed by EV_TOOL_CALL_START, a
+ *                completed reasoning blob, etc.). 0 means the error
+ *                fired before any wire content arrived (pre-stream
+ *                500/401/429 after retries) — there's nothing for
+ *                the model to "continue from".
+ *   marker_placed [interrupted] landed inside the absorbed batch
+ *                (in flushed text or as a synthesized tool_result). */
+struct absorb_outcome {
+    int had_state;
+    int marker_placed;
+};
+
+/* Shape conversation history for an aborted assistant turn — used by
+ * both the mid-stream EV_ERROR path (network drop, length truncation)
+ * and the Esc-cancel path. Both leave partial state behind that needs
+ * the same three-step cleanup so the next user turn lands in a
+ * well-formed conversation:
+ *
+ *   1. Tag any in-flight assistant text with [interrupted] before
+ *      flushing — without the marker, the model on the next turn
+ *      would see a complete-looking response and not know to
+ *      continue or recover.
+ *   2. Absorb the turn's items (the tagged text, any completed
+ *      tool_calls) into the session vector.
+ *   3. For each completed tool_call in the absorbed batch, synthesize
+ *      a matching [interrupted] tool_result — none of them ran (we
+ *      break before dispatch), and a tool_call without a matching
+ *      result is malformed history that future turns reject.
+ *
+ * Returns the outcome flags so callers can decide whether to add a
+ * standalone [interrupted] assistant message:
+ *
+ *   - Esc path: always add the fallback when marker_placed=0 (user
+ *     cancellation needs explicit ack regardless of whether anything
+ *     streamed).
+ *   - EV_ERROR path: only add when had_state=1 && marker_placed=0
+ *     (tag the "text-flushed-by-tool_call_start, then error" gap;
+ *     skip when nothing streamed — a pre-stream 500 with no output
+ *     would otherwise leave a fake assistant turn in history that
+ *     misleads the model on the user's next prompt). */
+static struct absorb_outcome absorb_aborted_turn(struct agent_session *sess, struct turn *t)
+{
+    /* Capture state-before-mutation. n_items already covers any
+     * earlier flush (e.g. EV_TOOL_CALL_START flushed text on its
+     * way through); n_pending covers an in-flight tool_call that
+     * never reached EV_TOOL_CALL_END. */
+    int had_state = t->in_text || t->n_pending > 0 || t->n_items > 0;
+    int had_partial_text = t->in_text;
+    turn_flush_text(t, had_partial_text ? "\n" INTERRUPT_MARKER : NULL);
+
+    size_t n_before;
+    int had_tc;
+    agent_session_absorb(sess, t, &n_before, &had_tc);
+    (void)had_tc;
+    turn_reset(t);
+
+    int marker_placed = had_partial_text;
+    size_t end = sess->n_items;
+    for (size_t i = n_before; i < end; i++) {
+        if (sess->items[i].kind == ITEM_TOOL_CALL) {
+            items_append(&sess->items, &sess->n_items, &sess->cap_items,
+                         (struct item){
+                             .kind = ITEM_TOOL_RESULT,
+                             .call_id = xstrdup(sess->items[i].call_id),
+                             .output = xstrdup(INTERRUPT_MARKER),
+                         });
+            marker_placed = 1;
+        }
+    }
+    return (struct absorb_outcome){.had_state = had_state, .marker_placed = marker_placed};
+}
+
 /* True when `it` is a tool_result whose output already ends with the
  * interrupt marker — i.e. bash appended its "[interrupted]" footer when
  * killed by user-Esc. Used to decide whether the post-dispatch break
@@ -92,7 +170,39 @@ struct event_ctx {
      * progress-callback tick doesn't repeat the work every second. */
     long last_text_at;
     int idle_shown;
+    /* Retry-countdown bookkeeping. retry_deadline_at is the
+     * CLOCK_MONOTONIC ms at which the in-progress backoff sleep ends; 0
+     * means no retry is pending. retry_attempt/retry_max are captured
+     * from the last EV_RETRY so the tick can repaint the spinner label
+     * with a live countdown ("retrying in 12s..." → "11s..." → ...).
+     * Cleared on the next non-retry event so a successful retry's
+     * EV_TEXT_DELTA / EV_TOOL_CALL_START handler can restore the
+     * "working..." label without competing with the countdown. */
+    long retry_deadline_at;
+    int retry_attempt;
+    int retry_max;
 };
+
+/* Paint the spinner with the retry countdown label. Called on EV_RETRY
+ * (so the user sees the new state immediately) and from the stream tick
+ * (so the seconds count visibly decreases during the backoff sleep).
+ * spinner_set_label gates on strcmp internally, so calling this every
+ * tick is cheap until the second changes. */
+static void update_retry_label(struct event_ctx *ec)
+{
+    long remaining = ec->retry_deadline_at - monotonic_ms();
+    /* Round up so the countdown shows "1s" through the final second
+     * instead of dropping to "0s" with time still on the clock. Floor
+     * at 1s when we're inside the last 100ms — saying "in 0s" reads as
+     * "stuck", and the actual flip to a fresh attempt is imminent. */
+    long secs = (remaining + 999) / 1000;
+    if (secs < 1)
+        secs = 1;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "retrying in %lds (attempt %d/%d)...", secs, ec->retry_attempt,
+             ec->retry_max);
+    spinner_set_label(ec->spinner, buf);
+}
 
 /* How long after the last text byte we wait before surfacing the
  * "still alive" inline glyph. Shorter than the silent-cluster's
@@ -814,8 +924,13 @@ static void display_usage(struct disp *d, const struct provider *p, long ctx, lo
 static int agent_stream_tick(void *user)
 {
     struct event_ctx *ec = user;
-    if (ec->last_text_at && !ec->idle_shown &&
-        monotonic_ms() - ec->last_text_at >= TEXT_IDLE_TIMEOUT_MS) {
+    /* Retry countdown wins over idle detection: during a retry sleep the
+     * model isn't streaming at all, so there's no idle-text window to
+     * surface. Repaint each tick so the seconds count visibly shrinks. */
+    if (ec->retry_deadline_at) {
+        update_retry_label(ec);
+    } else if (ec->last_text_at && !ec->idle_shown &&
+               monotonic_ms() - ec->last_text_at >= TEXT_IDLE_TIMEOUT_MS) {
         /* Skip the leading-space cell when disp says the cursor is
          * already at column 0 or right after a space — the model's
          * last byte is its own breathing room, and an extra pad would
@@ -843,6 +958,13 @@ static int on_event(const struct stream_event *ev, void *user)
      * during which the user sees nothing change on screen. */
     if (ev->kind == EV_DONE || ev->kind == EV_ERROR)
         ec->last_text_at = 0;
+    /* Any event other than EV_RETRY itself means the new attempt has
+     * progressed past the backoff sleep — text/tool/reasoning deltas
+     * mean the retry connected, EV_DONE/EV_ERROR mean the stream
+     * terminated. Clear the countdown so the per-event label setters
+     * below ("working...", "thinking...") aren't fighting the tick. */
+    if (ev->kind != EV_RETRY)
+        ec->retry_deadline_at = 0;
 
     switch (ev->kind) {
     case EV_TEXT_DELTA: {
@@ -907,6 +1029,21 @@ static int on_event(const struct stream_event *ev, void *user)
          * EV_TOOL_CALL_START, or EV_REASONING_ITEM — whichever ends CoT. */
         spinner_set_label(ec->spinner, "thinking...");
         break;
+    case EV_RETRY: {
+        /* Provider hit a transient HTTP failure and is about to back off
+         * before another attempt. Stash the deadline so agent_stream_tick
+         * can repaint the spinner with a live countdown — without this
+         * the label freezes at "retrying in 30s" for the full 30s, which
+         * reads as "stuck". attempt+1 is the *next* attempt about to
+         * start (the field carries the 1-based attempt that just
+         * failed). Paint immediately so there's no flicker between the
+         * prior label and the first tick of the countdown. */
+        ec->retry_deadline_at = monotonic_ms() + ev->u.retry.delay_ms;
+        ec->retry_attempt = ev->u.retry.attempt + 1;
+        ec->retry_max = ev->u.retry.max_attempts;
+        update_retry_label(ec);
+        break;
+    }
     case EV_DONE:
         ec->usage = ev->u.done.usage;
         fflush(stdout);
@@ -1194,7 +1331,39 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
                 md_flush(md);
 
             if (t.error) {
-                turn_reset(&t);
+                /* Mid-stream error (network drop, "length"/"content_filter"
+                 * truncation, provider parse failure, ...). Preserve the
+                 * partial assistant text in conversation history so the
+                 * user can ask the model to "continue" on the next turn
+                 * without losing what was already streamed. The on-screen
+                 * "[error: ...]" line was already drawn by on_event;
+                 * absorb_aborted_turn shapes what lands in history. */
+                struct absorb_outcome o = absorb_aborted_turn(&sess, &t);
+                if (o.had_state && !o.marker_placed) {
+                    /* Tag the gap when state was streamed but nothing
+                     * in the absorbed batch could carry the marker —
+                     * e.g. text flushed by EV_TOOL_CALL_START (so
+                     * in_text=0 by error time) with the pending
+                     * tool_call never finalized. Without this, the
+                     * model would see a complete-looking assistant
+                     * response with no signal it was cut short.
+                     *
+                     * Skip when had_state=0 (pre-stream 500/401/429
+                     * after retries): there's no partial work to
+                     * preserve, and synthesizing a fake assistant
+                     * "[interrupted]" would mislead the model on the
+                     * user's next prompt. The on-screen "[error: ...]"
+                     * line is the user-facing signal. */
+                    items_append(&sess.items, &sess.n_items, &sess.cap_items,
+                                 (struct item){
+                                     .kind = ITEM_ASSISTANT_MESSAGE,
+                                     .text = xstrdup(INTERRUPT_MARKER),
+                                 });
+                }
+                /* Land the partial state on disk now — the success
+                 * path's later append doesn't run on this branch and
+                 * post-mortem readers want to see how far we got. */
+                transcript_log_append(tlog, sess.items, sess.n_items);
                 turn_errored = 1;
                 break;
             }
@@ -1214,42 +1383,18 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
             if (ec.usage.cached_tokens >= 0)
                 turn_cached = ec.usage.cached_tokens;
 
-            /* On interrupt, finalize any in-flight assistant text with a
-             * tag so the next turn carries the marker. `t.in_text` is
-             * captured before flush since turn_flush_text clears it. */
-            int had_partial_text = interrupted && t.in_text;
-            if (interrupted)
-                turn_flush_text(&t, had_partial_text ? "\n" INTERRUPT_MARKER : NULL);
-
-            size_t n_before;
-            int had_tool_call;
-            agent_session_absorb(&sess, &t, &n_before, &had_tool_call);
-            turn_reset(&t);
-
             if (interrupted) {
-                /* Synthesize "[interrupted]" results for any completed
-                 * tool_calls in this batch (none have run yet). Pending/
-                 * incomplete tool_calls were already discarded by
-                 * turn_reset above. */
-                int marker_placed = had_partial_text;
-                size_t end = sess.n_items;
-                for (size_t i = n_before; i < end; i++) {
-                    if (sess.items[i].kind == ITEM_TOOL_CALL) {
-                        items_append(&sess.items, &sess.n_items, &sess.cap_items,
-                                     (struct item){
-                                         .kind = ITEM_TOOL_RESULT,
-                                         .call_id = xstrdup(sess.items[i].call_id),
-                                         .output = xstrdup(INTERRUPT_MARKER),
-                                     });
-                        marker_placed = 1;
-                    }
-                }
-                /* Nothing to tag in the partial output — synthesize a
-                 * standalone assistant message so the model sees a
-                 * marker on the next turn. Covers the "Esc before any
-                 * deltas arrived" case and the "only normally-flushed
-                 * text completed" case. */
-                if (!marker_placed) {
+                /* User pressed Esc. Same shape-history-as-aborted dance
+                 * as the EV_ERROR path; additionally, when nothing
+                 * could carry the marker, drop a standalone one so
+                 * the model sees the cancel signal on the next turn.
+                 * Esc adds it unconditionally on no-marker (unlike
+                 * EV_ERROR's had_state gate) — user cancellation
+                 * deserves explicit acknowledgement even if no
+                 * deltas had arrived yet ("Esc before any output"
+                 * and "only normally-flushed text completed" cases). */
+                struct absorb_outcome o = absorb_aborted_turn(&sess, &t);
+                if (!o.marker_placed) {
                     items_append(&sess.items, &sess.n_items, &sess.cap_items,
                                  (struct item){
                                      .kind = ITEM_ASSISTANT_MESSAGE,
@@ -1259,6 +1404,13 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
                 turn_interrupted = 1;
                 break;
             }
+
+            /* Normal completion: absorb without any marker, decide
+             * whether to loop for tool dispatch. */
+            size_t n_before;
+            int had_tool_call;
+            agent_session_absorb(&sess, &t, &n_before, &had_tool_call);
+            turn_reset(&t);
 
             if (!had_tool_call)
                 break;

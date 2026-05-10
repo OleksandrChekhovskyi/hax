@@ -7,6 +7,28 @@ test_util = executable('test_util',
 )
 test('util', test_util)
 
+test_retry = executable('test_retry',
+    sources: [
+        'test_retry.c',
+        '../src/retry.c',
+        '../src/utf8.c',
+        '../src/util.c',
+    ],
+)
+test('retry', test_retry)
+
+test_api_error = executable('test_api_error',
+    sources: [
+        'test_api_error.c',
+        '../src/api_error.c',
+        '../src/sse.c',
+        '../src/utf8.c',
+        '../src/util.c',
+    ],
+    dependencies: [jansson],
+)
+test('api_error', test_api_error)
+
 test_env = executable('test_env',
     sources: [
         'test_env.c',

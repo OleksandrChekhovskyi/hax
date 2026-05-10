@@ -190,7 +190,9 @@ static void emit_deferred_done(struct openai_events *s)
 
 /* finish_reason semantics:
  *   "stop" / "tool_calls" → EV_DONE (deferred; see below)
- *   "length" / "content_filter" → EV_ERROR (truncated; discard partial turn)
+ *   "length" / "content_filter" → EV_ERROR (truncated). The agent
+ *      preserves any text streamed before the truncation, tagged with
+ *      [interrupted], so a "continue" follow-up turn carries it.
  * Everything else is treated as unknown and maps to EV_DONE to avoid hanging.
  *
  * EV_DONE is deferred because under stream_options.include_usage the usage

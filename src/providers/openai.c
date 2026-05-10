@@ -6,9 +6,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "api_error.h"
 #include "bg.h"
 #include "http.h"
 #include "openai_events.h"
+#include "retry.h"
 #include "util.h"
 
 struct openai {
@@ -210,11 +212,52 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
         headers[hi++] = *h;
     headers[hi] = NULL;
 
-    struct openai_events ev;
-    openai_events_init(&ev, cb, user);
+    struct retry_policy pol = retry_policy_default();
     struct http_response resp;
-    int rc =
-        http_sse_post(o->endpoint, headers, body, body_len, on_sse, &ev, tick, tick_user, &resp);
+    struct openai_events ev;
+    int rc = -1;
+
+    /* Auto-retry on transient transport / 5xx / 429 errors. We re-init the
+     * events parser each attempt so a partial parser state from a 5xx body
+     * (which isn't SSE-shaped anyway) doesn't leak into the next try. The
+     * request body and headers are immutable — same call_id, same prompt
+     * cache key — so resending them is safe. */
+    int attempt;
+    for (attempt = 0; attempt < pol.max_attempts; attempt++) {
+        memset(&resp, 0, sizeof(resp));
+        openai_events_init(&ev, cb, user);
+        rc = http_sse_post(o->endpoint, headers, body, body_len, on_sse, &ev, tick, tick_user,
+                           &resp);
+
+        if (resp.cancelled)
+            break;
+        if (!retry_should_attempt(rc, resp.status))
+            break;
+        if (attempt + 1 >= pol.max_attempts)
+            break;
+
+        long delay = resp.retry_after_ms > 0 ? resp.retry_after_ms : retry_delay_ms(&pol, attempt);
+        struct stream_event re = {
+            .kind = EV_RETRY,
+            .u.retry = {.attempt = attempt + 1,
+                        .max_attempts = pol.max_attempts,
+                        .delay_ms = delay,
+                        .http_status = (int)resp.status},
+        };
+        cb(&re, user);
+
+        free(resp.error_body);
+        resp.error_body = NULL;
+        openai_events_free(&ev);
+
+        if (retry_sleep_with_tick(delay, tick, tick_user)) {
+            /* Cancelled mid-backoff — synthesize the cancelled flag so
+             * the post-loop branch below treats this like a user abort. */
+            resp.cancelled = 1;
+            memset(&ev, 0, sizeof(ev));
+            break;
+        }
+    }
 
     free(headers);
 
@@ -222,12 +265,13 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
         /* User-initiated abort — agent layer handles the partial state
          * and the "[interrupted]" notice. Don't surface as EV_ERROR. */
     } else if (rc != 0 || resp.status < 200 || resp.status >= 300) {
+        char *msg = format_api_error(resp.status, resp.error_body);
         struct stream_event e = {
             .kind = EV_ERROR,
-            .u.error = {.message = resp.error_body ? resp.error_body : "request failed",
-                        .http_status = (int)resp.status},
+            .u.error = {.message = msg, .http_status = (int)resp.status},
         };
         cb(&e, user);
+        free(msg);
     } else {
         openai_events_finalize(&ev);
     }

@@ -31,6 +31,7 @@ threads = dependency('threads')
 sources = files(
     'src/agent.c',
     'src/agent_core.c',
+    'src/api_error.c',
     'src/bg.c',
     'src/clipboard.c',
     'src/cmd_classify.c',
@@ -49,6 +50,7 @@ sources = files(
     'src/oneshot.c',
     'src/path.c',
     'src/progress.c',
+    'src/retry.c',
     'src/slash.c',
     'src/spawn.c',
     'src/spinner.c',

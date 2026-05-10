@@ -132,7 +132,10 @@ int turn_on_event(const struct stream_event *ev, struct turn *t)
         break;
     }
     case EV_REASONING_DELTA:
-        /* UX-only signal — nothing to commit to history. */
+    case EV_RETRY:
+        /* UX-only signals — nothing to commit to history. EV_RETRY just
+         * tells the agent to update its spinner; the eventual outcome
+         * (success or EV_ERROR) drives state. */
         break;
     case EV_REASONING_ITEM: {
         /* Server typically emits the reasoning item before the assistant
@@ -150,7 +153,13 @@ int turn_on_event(const struct stream_event *ev, struct turn *t)
         flush_text(t);
         break;
     case EV_ERROR:
-        flush_text(t);
+        /* Don't flush here. The agent's error handler mirrors the
+         * Esc-interrupt path: it tags any in-flight text with an
+         * [interrupted] marker before flushing, so a "continue"
+         * follow-up turn carries history of what was already streamed.
+         * Calling flush_text now would commit the text without the
+         * marker and clear t->in_text, leaving the agent unable to
+         * tell partial-text from no-text. */
         t->error = 1;
         break;
     }

@@ -189,7 +189,7 @@ static void test_turn_find_pending(void)
 
 /* ---------- error path ---------- */
 
-static void test_error_flushes_text_and_sets_flag(void)
+static void test_error_preserves_text_and_sets_flag(void)
 {
     struct turn t;
     turn_init(&t);
@@ -197,10 +197,97 @@ static void test_error_flushes_text_and_sets_flag(void)
     feed_text(&t, "answer");
     feed_error(&t, "oops");
     EXPECT(t.error == 1);
-    /* Partial text is flushed into items — but on the error path the agent
-     * discards items via turn_reset, so this is only visible if we peek. */
+    /* EV_ERROR no longer flushes — the agent does it itself with an
+     * [interrupted] marker so the partial response can be preserved in
+     * conversation history (so the user can ask the model to "continue"
+     * on the next turn). The buffered text stays in text_buf with
+     * in_text=1 until the agent calls turn_flush_text. */
+    EXPECT(t.n_items == 0);
+    EXPECT(t.in_text == 1);
+    EXPECT(t.text_buf.data != NULL);
+    EXPECT_STR_EQ(t.text_buf.data, "partial answer");
+    turn_reset(&t);
+}
+
+static void test_error_then_flush_with_marker(void)
+{
+    /* Simulate the agent's mid-stream-error handler: stream the partial
+     * text, EV_ERROR fires, agent calls turn_flush_text with the
+     * [interrupted] suffix, then takes the absorbed item. Verifies the
+     * model sees both the partial response and the marker. */
+    struct turn t;
+    turn_init(&t);
+    feed_text(&t, "the answer is ");
+    feed_text(&t, "42 because");
+    feed_error(&t, "stream dropped");
+    EXPECT(t.in_text == 1);
+
+    turn_flush_text(&t, "\n[interrupted]");
+    EXPECT(t.in_text == 0);
     EXPECT(t.n_items == 1);
-    EXPECT_STR_EQ(t.items[0].text, "partial answer");
+    EXPECT_STR_EQ(t.items[0].text, "the answer is 42 because\n[interrupted]");
+    turn_reset(&t);
+}
+
+static void test_error_after_text_flushed_by_tool_call_start(void)
+{
+    /* The "missed marker" case from review: text streams, then a
+     * tool_call starts (which flushes the text into items and clears
+     * in_text), then the stream errors before EV_TOOL_CALL_END. The
+     * pending tool_call is incomplete (no args finalized) so it gets
+     * discarded — the agent ends up with a complete-looking assistant
+     * message and no tool_call.
+     *
+     * If absorb_aborted_turn ran on this state, it would return 0
+     * (in_text=0 → no marker added; no completed tool_calls in items
+     * → no synthesized result). The agent.c EV_ERROR branch must
+     * notice the 0 return and append a standalone [interrupted]
+     * marker — otherwise the next user turn sees a complete-looking
+     * response with no signal it was cut short. This test pins the
+     * turn-state preconditions; the marker insertion lives in agent.c. */
+    struct turn t;
+    turn_init(&t);
+    feed_text(&t, "Let me check ");
+    feed_tool_start(&t, "c1", "read");
+    feed_tool_delta(&t, "c1", "{\"pa");
+    feed_error(&t, "stream dropped");
+
+    /* in_text was cleared when the tool_call started, so there's no
+     * partial text for the agent's flush+marker step to act on. */
+    EXPECT(t.in_text == 0);
+    /* The text item was flushed into items by EV_TOOL_CALL_START. */
+    EXPECT(t.n_items == 1);
+    EXPECT(t.items[0].kind == ITEM_ASSISTANT_MESSAGE);
+    EXPECT_STR_EQ(t.items[0].text, "Let me check ");
+    /* The tool_call never finished — it's in pending, not items —
+     * which is why a fallback marker is needed at the agent layer. */
+    EXPECT(t.n_pending == 1);
+    turn_reset(&t);
+}
+
+static void test_error_with_completed_tool_call_preserved(void)
+{
+    /* A tool_call that finished BEFORE the mid-stream error is in the
+     * items vector. The agent will absorb it and synthesize a matching
+     * [interrupted] tool_result so the conversation stays well-formed. */
+    struct turn t;
+    turn_init(&t);
+    feed_text(&t, "let me check ");
+    feed_tool_start(&t, "c1", "read");
+    feed_tool_delta(&t, "c1", "{\"path\":\"x.c\"}");
+    feed_tool_end(&t, "c1");
+    feed_error(&t, "stream dropped");
+
+    /* Pre-flush: items vector has [assistant_msg flushed by tool_call,
+     * tool_call]. The text-before-tool was flushed when the tool call
+     * started (the EV_TOOL_CALL_START flush_text path), and there's no
+     * text after it, so in_text is 0 and there's nothing left for the
+     * agent's flush+marker to do for text. */
+    EXPECT(t.in_text == 0);
+    EXPECT(t.n_items == 2);
+    EXPECT(t.items[0].kind == ITEM_ASSISTANT_MESSAGE);
+    EXPECT(t.items[1].kind == ITEM_TOOL_CALL);
+    EXPECT_STR_EQ(t.items[1].call_id, "c1");
     turn_reset(&t);
 }
 
@@ -271,7 +358,10 @@ int main(void)
     test_tool_call_end_without_start();
     test_tool_call_delta_unknown_id_ignored();
     test_turn_find_pending();
-    test_error_flushes_text_and_sets_flag();
+    test_error_preserves_text_and_sets_flag();
+    test_error_then_flush_with_marker();
+    test_error_after_text_flushed_by_tool_call_start();
+    test_error_with_completed_tool_call_preserved();
     test_take_items_zeros_vector();
     test_reset_after_take_is_noop_for_items();
     test_reset_before_done_frees_partial_state();

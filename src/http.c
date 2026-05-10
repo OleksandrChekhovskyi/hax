@@ -2,9 +2,13 @@
 #include "http.h"
 
 #include <curl/curl.h>
+#include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <time.h>
 
 #include "sse.h"
 #include "trace.h"
@@ -12,12 +16,18 @@
 
 #define ERR_BODY_CAP         4096
 #define IDLE_TIMEOUT_DEFAULT 600L
+#define RETRY_AFTER_MAX_MS   (2L * 60L * 1000L) /* interactive cap; user can retry later */
 
 struct curl_state {
     struct sse_parser parser;
     struct buf err_body; /* capped, for error reporting */
     http_tick_cb tick;
     void *tick_user;
+    /* Borrowed handle so on_write can query CURLINFO_RESPONSE_CODE
+     * before deciding whether to feed body bytes into the SSE
+     * parser. See on_write for why this gate exists. */
+    CURL *curl;
+    long retry_after_ms;
 };
 
 struct sse_trace_wrapper {
@@ -51,6 +61,66 @@ static int sse_trace_cb(const char *event_name, const char *data, void *user)
     return w->inner(event_name, data, w->inner_user);
 }
 
+static long parse_retry_after_ms(const char *value, size_t n)
+{
+    while (n > 0 && isspace((unsigned char)*value)) {
+        value++;
+        n--;
+    }
+    while (n > 0 && isspace((unsigned char)value[n - 1]))
+        n--;
+    if (n == 0)
+        return 0;
+
+    int all_digits = 1;
+    for (size_t i = 0; i < n; i++) {
+        if (!isdigit((unsigned char)value[i])) {
+            all_digits = 0;
+            break;
+        }
+    }
+    if (all_digits) {
+        long secs = 0;
+        for (size_t i = 0; i < n; i++) {
+            int d = value[i] - '0';
+            if (secs > (LONG_MAX - d) / 10)
+                return RETRY_AFTER_MAX_MS;
+            secs = secs * 10 + d;
+        }
+        if (secs > RETRY_AFTER_MAX_MS / 1000)
+            return RETRY_AFTER_MAX_MS;
+        return secs * 1000;
+    }
+
+    char *date = xmalloc(n + 1);
+    memcpy(date, value, n);
+    date[n] = '\0';
+    time_t when = curl_getdate(date, NULL);
+    free(date);
+    if (when == (time_t)-1)
+        return 0;
+    time_t now = time(NULL);
+    if (when <= now)
+        return 0;
+    if ((long)(when - now) > RETRY_AFTER_MAX_MS / 1000)
+        return RETRY_AFTER_MAX_MS;
+    return (long)(when - now) * 1000;
+}
+
+static size_t on_header(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+    struct curl_state *s = userdata;
+    size_t n = size * nmemb;
+    static const char prefix[] = "Retry-After:";
+
+    if (n >= sizeof(prefix) - 1 && strncasecmp(ptr, prefix, sizeof(prefix) - 1) == 0) {
+        long ms = parse_retry_after_ms(ptr + sizeof(prefix) - 1, n - (sizeof(prefix) - 1));
+        if (ms > 0)
+            s->retry_after_ms = ms;
+    }
+    return n;
+}
+
 static size_t on_write(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
     struct curl_state *s = userdata;
@@ -67,7 +137,24 @@ static size_t on_write(char *ptr, size_t size, size_t nmemb, void *userdata)
         buf_append(&s->err_body, ptr, n < room ? n : room);
     }
 
-    sse_parser_feed(&s->parser, ptr, n);
+    /* Gate the SSE parser on the HTTP response status. Some backends
+     * pack errors as SSE-shaped data even on 4xx/5xx, e.g.
+     *   HTTP/1.1 503 ...
+     *   data: {"error":{"message":"rate limit"}}
+     * Letting that through would emit EV_ERROR via the events
+     * translator before the provider's retry loop has decided
+     * whether to retry, polluting the agent's turn state with errors
+     * from attempts we'd otherwise discard. The body bytes are still
+     * captured in err_body for the eventual error surface (after
+     * retries are exhausted). CURLINFO_RESPONSE_CODE is set after
+     * headers and before the first body byte, so it's reliable here;
+     * status==0 means we couldn't query it for some reason — fall
+     * through and feed the parser, since assuming success is the
+     * less-bad default than dropping a real success response. */
+    long status = 0;
+    curl_easy_getinfo(s->curl, CURLINFO_RESPONSE_CODE, &status);
+    if (status == 0 || (status >= 200 && status < 300))
+        sse_parser_feed(&s->parser, ptr, n);
     return n;
 }
 
@@ -115,6 +202,7 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
     memset(&s, 0, sizeof(s));
     s.tick = tick;
     s.tick_user = tick_user;
+    s.curl = curl;
 
     struct sse_trace_wrapper tw = {.inner = cb, .inner_user = user};
     if (trace_enabled())
@@ -128,6 +216,8 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body_len);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hl);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, on_header);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &s);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, on_write);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &s);
     /* Progress callback only when a tick hook is provided — keeps the
@@ -165,6 +255,7 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
     curl_easy_cleanup(curl);
 
     resp->status = status;
+    resp->retry_after_ms = s.retry_after_ms;
     /* Distinguish "user cancelled" from a real transport error so the
      * agent can react cleanly without surfacing it as [error: ...]. Both
      * the write-callback short-return (CURLE_WRITE_ERROR) and the

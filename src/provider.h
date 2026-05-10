@@ -97,6 +97,12 @@ enum stream_event_kind {
      * Drives UX only — the agent doesn't store this in history; reasoning
      * round-trip goes through EV_REASONING_ITEM. */
     EV_REASONING_DELTA,
+    /* A streaming HTTP attempt failed with a transient error and the
+     * provider is about to retry. Pure UX signal — the agent uses it
+     * to update the spinner label so the user sees that we're not
+     * stuck on a dead connection. The eventual outcome (success or
+     * EV_ERROR after exhausting retries) arrives later. */
+    EV_RETRY,
     EV_DONE,
     EV_ERROR,
 };
@@ -125,6 +131,12 @@ struct stream_event {
             const char *text; /* NULL or "" allowed — signals reasoning
                                  activity even when no plaintext is exposed */
         } reasoning_delta;
+        struct {
+            int attempt;      /* 1-based attempt that just failed */
+            int max_attempts; /* total attempts the provider will make */
+            long delay_ms;    /* about to sleep this long before retrying */
+            int http_status;  /* 0 = transport error, otherwise HTTP code */
+        } retry;
         struct {
             const char *stop_reason;
             struct stream_usage usage;

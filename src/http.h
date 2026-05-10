@@ -8,8 +8,9 @@
 
 struct http_response {
     long status;
-    char *error_body; /* non-null on non-2xx or transport error; caller frees */
-    int cancelled;    /* 1 when transfer was aborted by tick returning non-zero */
+    char *error_body;    /* non-null on non-2xx or transport error; caller frees */
+    long retry_after_ms; /* parsed Retry-After header, 0 when absent/unparseable */
+    int cancelled;       /* 1 when transfer was aborted by tick returning non-zero */
 };
 
 /* Periodic side-channel callback. Called from libcurl's progress hook
