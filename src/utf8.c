@@ -155,3 +155,76 @@ int utf8_codepoint_cells(const char *s, size_t len, size_t i, size_t *consumed)
         return -1;
     return wcwidth(wc); /* -1 covers C0/C1 controls, DEL, format chars */
 }
+
+void utf8_stream_reset(struct utf8_stream *s)
+{
+    s->have = 0;
+}
+
+/* Helper: cell width of a complete sequence in s->buf, with the
+ * "1 cell per malformed/control" substitution that the streaming
+ * contract advertises. */
+static int stream_cells(const struct utf8_stream *s)
+{
+    size_t consumed;
+    int w = utf8_codepoint_cells((const char *)s->buf, s->have, 0, &consumed);
+    return w < 0 ? 1 : w;
+}
+
+int utf8_stream_byte(struct utf8_stream *s, unsigned char c, const char **out, size_t *out_n,
+                     int *out_cells)
+{
+    if (s->have == 0) {
+        s->buf[0] = c;
+        s->have = 1;
+        int n = utf8_seq_len(c);
+        if (n == 1) {
+            /* ASCII or lone leader/continuation — emit immediately.
+             * stream_cells handles the "control byte → 1 cell"
+             * substitution via utf8_codepoint_cells. */
+            *out = (const char *)s->buf;
+            *out_n = 1;
+            *out_cells = stream_cells(s);
+            s->have = 0;
+            return 1;
+        }
+        return 0;
+    }
+    /* Mid-sequence. Continuation bytes have prefix 10xxxxxx. */
+    if ((c & 0xC0) != 0x80) {
+        /* Malformed: dump buffered bytes plus the offender as one
+         * opaque run. No recovery — see header note. */
+        s->buf[s->have++] = c;
+        *out = (const char *)s->buf;
+        *out_n = s->have;
+        *out_cells = (int)s->have;
+        s->have = 0;
+        return 1;
+    }
+    s->buf[s->have++] = c;
+    int need = utf8_seq_len(s->buf[0]);
+    if ((int)s->have < need)
+        return 0;
+    /* Sequence complete — validate the strict form (overlongs,
+     * surrogates, codepoints > U+10FFFF). On invalid, surface as a
+     * malformed run with one cell per byte; on valid, measure cells. */
+    *out = (const char *)s->buf;
+    *out_n = s->have;
+    if (!utf8_seq_valid((const char *)s->buf, need))
+        *out_cells = (int)s->have;
+    else
+        *out_cells = stream_cells(s);
+    s->have = 0;
+    return 1;
+}
+
+int utf8_stream_flush(struct utf8_stream *s, const char **out, size_t *out_n, int *out_cells)
+{
+    if (s->have == 0)
+        return 0;
+    *out = (const char *)s->buf;
+    *out_n = s->have;
+    *out_cells = (int)s->have;
+    s->have = 0;
+    return 1;
+}

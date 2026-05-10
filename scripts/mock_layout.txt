@@ -76,3 +76,96 @@ end-turn
 text Done — that covers verbose-header reflow, per-row truncation, and the silent path.
 usage in=440 out=14
 end-turn
+
+# Markdown wrap fixtures. Pin the width with HAX_DISPLAY_WIDTH=80 for
+# reproducible breaks; the comments below assume that width.
+
+# ---------- turn 7: long unwrapped paragraph --------------------------
+text Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
+usage in=480 out=40
+end-turn
+
+# ---------- turn 8: model-narrow lines, soft-joined and re-wrapped ----
+text Lorem ipsum dolor sit amet, consectetur
+text \nadipiscing elit, sed do eiusmod tempor
+text \nincididunt ut labore et dolore magna
+text \naliqua. Ut enim ad minim veniam, quis
+text \nnostrud exercitation ullamco laboris.
+usage in=520 out=42
+end-turn
+
+# ---------- turn 9: paragraph break preserved (blank line is hard) ----
+text First paragraph with enough content to almost fill a single 80-cell row of output.
+text \n\nSecond paragraph after a blank line — this should render as a separate block, not joined.
+usage in=560 out=20
+end-turn
+
+# ---------- turn 10: bullet list, hanging indent on wrapped items -----
+text Here is a list:
+text \n* alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi
+text \n* one two three four five six seven eight nine ten eleven twelve thirteen
+text \n* short item that fits
+usage in=620 out=36
+end-turn
+
+# ---------- turn 11: numbered list (3- and 4-cell markers) ------------
+text Numbered list:
+text \n1. First item with enough words to require wrapping at the configured display width
+text \n2. Second item also long enough that it spills onto a continuation row indented under 2
+text \n10. Larger marker — 4-cell prefix, continuation should still align cleanly
+usage in=680 out=40
+end-turn
+
+# ---------- turn 12: list items soft-wrapped by the model -------------
+text Same list, this time soft-wrapped by the model:
+text \n* alpha beta gamma delta epsilon
+text \nzeta eta theta iota kappa lambda mu nu xi
+text \n* one two three four five six
+text \nseven eight nine ten eleven twelve thirteen
+text \n* short item that fits
+usage in=700 out=40
+end-turn
+
+# ---------- turn 13: code fence is verbatim (terminal hard-wraps) -----
+text Code block follows:
+text \n```python
+text \ndef long_function_name_that_makes_the_line_quite_wide(parameter_one, parameter_two, parameter_three):
+text \n    return parameter_one + parameter_two + parameter_three
+text \n```
+text \nText after the fence resumes normal wrap behaviour.
+usage in=740 out=44
+end-turn
+
+# ---------- turn 14: bold spans a wrap break --------------------------
+text Some preamble, then **alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi** and a tail.
+usage in=780 out=22
+end-turn
+
+# ---------- turn 15: inline code at a wrap boundary -------------------
+text See `function_with_a_long_name(arg one, arg two, arg three)` for details and check the docs.
+usage in=820 out=20
+end-turn
+
+# ---------- turn 16: heading (single-line) then prose -----------------
+text ## A medium-length heading that probably fits one row but not always
+text \nFollow-up paragraph: enough content to demonstrate that wrap behaviour resumes immediately under the heading without spillover.
+usage in=860 out=28
+end-turn
+
+# ---------- turn 17: GFM table, model emits one row per delta --------
+text Here's a small table:
+text \n| Tool | What it does |
+text \n|---|---|
+text \n| read | Read files from disk |
+text \n| bash | Run shell commands via /bin/sh -c |
+usage in=900 out=30
+end-turn
+
+# ---------- turn 18: multibyte (1-cell accents, 2-cell CJK) -----------
+text Café résumé naïveté is the prose; 中文字符 占两个单元格 each, so a row mixing them computes width per codepoint correctly.
+usage in=900 out=22
+end-turn
+
+text Done — markdown wrap demo complete.
+usage in=940 out=18
+end-turn

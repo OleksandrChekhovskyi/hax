@@ -34,6 +34,9 @@
  *
  *     Directives:
  *       text <message>           One text delta with the rest of the line.
+ *                                Decodes \n, \t, \\ so a single delta can
+ *                                span multiple lines (used by the markdown
+ *                                wrap fixtures in mock_layout.txt).
  *       space                    One single-space text delta. Use between
  *                                consecutive `text` directives that should
  *                                read as joined prose; without it, two
@@ -293,7 +296,39 @@ static int play_one_turn(FILE *f, stream_cb cb, void *user, http_tick_cb tick, v
         if (starts_with(body, "text", &rest)) {
             if (msleep(delay_ms, tick, tick_user))
                 return emit_done(cb, user, usage);
-            int rc = emit_text_chunked(cb, user, rest, delay_ms, tick, tick_user);
+            /* Decode minimal C-style escapes (\n, \t, \\) so script
+             * lines can embed real newlines without breaking the
+             * line-per-directive parser. Anything else passes
+             * through; an unrecognized \X is emitted as the literal
+             * two bytes so existing scripts that happen to contain a
+             * backslash aren't silently mangled. */
+            size_t rlen = strlen(rest);
+            char *decoded = xmalloc(rlen + 1);
+            size_t di = 0;
+            for (size_t si = 0; si < rlen; si++) {
+                if (rest[si] == '\\' && si + 1 < rlen) {
+                    char e = rest[si + 1];
+                    if (e == 'n') {
+                        decoded[di++] = '\n';
+                        si++;
+                        continue;
+                    }
+                    if (e == 't') {
+                        decoded[di++] = '\t';
+                        si++;
+                        continue;
+                    }
+                    if (e == '\\') {
+                        decoded[di++] = '\\';
+                        si++;
+                        continue;
+                    }
+                }
+                decoded[di++] = rest[si];
+            }
+            decoded[di] = '\0';
+            int rc = emit_text_chunked(cb, user, decoded, delay_ms, tick, tick_user);
+            free(decoded);
             if (rc)
                 return rc;
             continue;

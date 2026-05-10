@@ -38,10 +38,21 @@ typedef void (*md_emit_fn)(const char *bytes, size_t n, int is_raw, void *user);
 
 struct md_renderer;
 
-struct md_renderer *md_new(md_emit_fn emit, void *user);
+/* wrap_width: cells per row before the renderer inserts a soft break at
+ * the last word boundary. 0 disables wrapping (content passes through
+ * verbatim, exactly as the model emitted it — used by tests for byte-
+ * exact comparison and as a safety hatch). Code fences and headings are
+ * always passed through verbatim regardless of wrap_width. The renderer
+ * also collapses single \n inside paragraphs to a space (CommonMark soft
+ * break) so a model emitting narrow lines is rewrapped to the available
+ * width; \n followed by a block marker (list bullet, heading, fence
+ * opener, blank line) stays a hard break. */
+struct md_renderer *md_new(md_emit_fn emit, void *user, int wrap_width);
 void md_feed(struct md_renderer *m, const char *s, size_t n);
 void md_flush(struct md_renderer *m); /* commit pending tail at end of turn */
-void md_reset(struct md_renderer *m); /* between turns: drop tail/style state */
+/* Re-sample wrap_width here; lets the agent pass display_width() between
+ * turns so a SIGWINCH-style resize is picked up without a callback. */
+void md_reset(struct md_renderer *m, int wrap_width);
 void md_free(struct md_renderer *m);
 
 #endif /* HAX_MARKDOWN_H */

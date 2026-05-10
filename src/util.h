@@ -146,10 +146,21 @@ int term_width(void);
  * needs to grow. */
 #define DISPLAY_WIDTH_CAP 100
 
+/* Parse a base-10 integer that fits in int, with overflow protection.
+ * Used by env-var parsers that take a plain count (no k/M suffix —
+ * see parse_size for that) and need to refuse "abc", "", a value past
+ * INT range, and trailing garbage like "80x". Returns 1 on success
+ * with the parsed value in *out; 0 otherwise (caller falls back). */
+int parse_int(const char *s, int *out);
+
 /* Capped variant of term_width() for content layout — clamps the
  * result to DISPLAY_WIDTH_CAP cells. Use anywhere width drives word
  * wrapping or text truncation; the unclamped term_width() stays for
- * cursor-edge concerns where the real terminal column matters. */
+ * cursor-edge concerns where the real terminal column matters.
+ *
+ * HAX_DISPLAY_WIDTH=N overrides both the ioctl and the soft cap, with
+ * a 20-cell floor and no upper bound — used by mock_layout.txt and
+ * tests to pin a reproducible width regardless of the host terminal. */
 int display_width(void);
 
 /* Truncate a UTF-8 string to fit in `cap` visual cells, replacing the

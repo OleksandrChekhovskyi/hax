@@ -87,4 +87,41 @@ size_t utf8_prev(const char *s, size_t i);
  * (or equivalent) before exercising multi-byte input. */
 int utf8_codepoint_cells(const char *s, size_t len, size_t i, size_t *consumed);
 
+/* Streaming UTF-8 decoder. Consumes bytes one at a time and yields
+ * complete codepoints with their visual cell width — for callers that
+ * receive bytes incrementally (markdown wrap, etc.) and can't measure
+ * cells until a multi-byte sequence is complete.
+ *
+ * Initialize by zeroing the struct (or call utf8_stream_reset). */
+struct utf8_stream {
+    unsigned char buf[4];
+    unsigned char have;
+};
+
+/* Feed one byte. Returns 1 when a complete unit is ready: *out points
+ * into the stream's internal buffer for *out_n bytes, with *out_cells
+ * visual columns. The caller must consume *out before the next call —
+ * subsequent feeds may clobber the buffer.
+ *
+ * For valid sequences *out_cells is the wcwidth-style measurement
+ * (0 for combining marks, >=1 for printables; -1 results from
+ * utf8_codepoint_cells are clamped to 1 cell so non-printables render
+ * as a single-cell substitute glyph).
+ *
+ * Returns 0 when more bytes are needed (mid-sequence). On a malformed
+ * byte (bad leader, invalid continuation, overlong, surrogate) the
+ * decoder emits the buffered bytes as one opaque "malformed run" with
+ * one cell per byte — no recovery, no byte loss; the terminal renders
+ * each as a replacement glyph. */
+int utf8_stream_byte(struct utf8_stream *s, unsigned char c, const char **out, size_t *out_n,
+                     int *out_cells);
+
+/* Drain any incomplete trailing sequence. Returns 1 with the buffered
+ * bytes (1..3) if the stream ended mid-codepoint, 0 if the buffer is
+ * already empty. After a successful call the stream is reset. Use at
+ * end-of-stream so a truncated multi-byte sequence isn't lost. */
+int utf8_stream_flush(struct utf8_stream *s, const char **out, size_t *out_n, int *out_cells);
+
+void utf8_stream_reset(struct utf8_stream *s);
+
 #endif /* HAX_UTF8_H */

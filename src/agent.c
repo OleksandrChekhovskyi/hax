@@ -1014,7 +1014,8 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
     agent_print_banner(p, &sess);
     struct disp disp = {.trail = 1, .at_space_or_bol = 1};
     struct spinner *spinner = spinner_new("working...");
-    struct md_renderer *md = markdown_enabled() ? md_new(md_emit_to_disp, &disp) : NULL;
+    struct md_renderer *md =
+        markdown_enabled() ? md_new(md_emit_to_disp, &disp, display_width()) : NULL;
     struct input *input = input_new();
     input_history_open_default(input);
     struct transcript_view tv = {
@@ -1155,7 +1156,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
             }
 
             if (md)
-                md_reset(md);
+                md_reset(md, display_width());
             struct turn t;
             turn_init(&t);
             disp.saw_text = 0;

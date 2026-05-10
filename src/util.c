@@ -141,8 +141,35 @@ int term_width(void)
     return w;
 }
 
+int parse_int(const char *s, int *out)
+{
+    if (!s || !*s)
+        return 0;
+    char *end;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end != '\0')
+        return 0;
+    if (errno == ERANGE || v > INT_MAX || v < INT_MIN)
+        return 0;
+    *out = (int)v;
+    return 1;
+}
+
 int display_width(void)
 {
+    /* HAX_DISPLAY_WIDTH overrides both term_width() and the soft cap so
+     * fixtures (mock_layout.txt) and tests can pin a known width without
+     * resizing the host terminal. Floored at 20 to keep downstream wrap
+     * and truncate paths viable; no upper bound — term_width()'s 200
+     * ceiling is a defensive guard against pathological ioctl values,
+     * not a policy users should hit when they're explicit. */
+    int v;
+    if (parse_int(getenv("HAX_DISPLAY_WIDTH"), &v) && v > 0) {
+        if (v < 20)
+            v = 20;
+        return v;
+    }
     int w = term_width();
     return w < DISPLAY_WIDTH_CAP ? w : DISPLAY_WIDTH_CAP;
 }

@@ -1066,11 +1066,45 @@ static void test_reflow_long_bash_command_truncated(void)
 
 static void test_display_width_capped(void)
 {
-    /* display_width never exceeds the cap. term_width clamps to <=200,
-     * so on any host display_width returns <= DISPLAY_WIDTH_CAP. */
+    /* Default path: display_width never exceeds the cap. term_width
+     * clamps to <=200, so without the env override display_width
+     * returns <= DISPLAY_WIDTH_CAP. The override path is exercised in
+     * test_display_width_env_override below. */
+    unsetenv("HAX_DISPLAY_WIDTH");
     int dw = display_width();
     EXPECT(dw <= DISPLAY_WIDTH_CAP);
     EXPECT(dw >= 40);
+}
+
+static void test_display_width_env_override(void)
+{
+    /* HAX_DISPLAY_WIDTH bypasses the soft cap and the term_width
+     * defensive ceiling — explicit user choice, no upper bound. */
+    setenv("HAX_DISPLAY_WIDTH", "120", 1);
+    EXPECT(display_width() == 120);
+    setenv("HAX_DISPLAY_WIDTH", "60", 1);
+    EXPECT(display_width() == 60);
+    setenv("HAX_DISPLAY_WIDTH", "500", 1);
+    EXPECT(display_width() == 500);
+    /* Below the 20-cell floor. */
+    setenv("HAX_DISPLAY_WIDTH", "5", 1);
+    EXPECT(display_width() == 20);
+    /* Garbage falls back to the default path. */
+    setenv("HAX_DISPLAY_WIDTH", "abc", 1);
+    int dw = display_width();
+    EXPECT(dw <= DISPLAY_WIDTH_CAP);
+    EXPECT(dw >= 40);
+    /* Trailing garbage rejected too. */
+    setenv("HAX_DISPLAY_WIDTH", "80x", 1);
+    dw = display_width();
+    EXPECT(dw <= DISPLAY_WIDTH_CAP);
+    /* Numeric overflow must NOT wrap into a bogus negative width
+     * (which markdown would treat as wrap-disabled). */
+    setenv("HAX_DISPLAY_WIDTH", "999999999999999999999999999", 1);
+    dw = display_width();
+    EXPECT(dw > 0);
+    EXPECT(dw <= DISPLAY_WIDTH_CAP);
+    unsetenv("HAX_DISPLAY_WIDTH");
 }
 
 /* ---------- parse_duration_ms ---------- */
@@ -1227,6 +1261,7 @@ int main(void)
     test_reflow_long_bash_command_truncated();
 
     test_display_width_capped();
+    test_display_width_env_override();
 
     T_REPORT();
 }
