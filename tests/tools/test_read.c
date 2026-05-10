@@ -1,15 +1,14 @@
 /* SPDX-License-Identifier: MIT */
-#include "tool.h"
-
 #include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>
 
 #include "harness.h"
+#include "tool.h"
 #include "util.h"
 
 static char *write_tmp(const void *data, size_t len)

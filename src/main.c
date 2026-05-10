@@ -1,22 +1,22 @@
 /* SPDX-License-Identifier: MIT */
-#include <curl/curl.h>
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <curl/curl.h>
 
 #include "agent.h"
 #include "oneshot.h"
+#include "trace.h"
+#include "transcript.h"
+#include "util.h"
 #include "providers/codex.h"
 #include "providers/llamacpp.h"
 #include "providers/mock.h"
 #include "providers/openai.h"
 #include "providers/openai_compat.h"
 #include "providers/openrouter.h"
-#include "trace.h"
-#include "transcript.h"
-#include "util.h"
 
 /* Hard cap on agentic round-trips in -p mode. Generous — a real task
  * rarely needs more than a couple of dozen — but bounded so a confused

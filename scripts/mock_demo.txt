@@ -51,7 +51,7 @@ end-turn
 
 # ---------- turn 4: file-read preview (R_HEAD_ONLY mode) ----------------
 text And here's the read tool's head-only preview.
-tool read {"path":"src/disp.h"}
+tool read {"path":"src/render/disp.h"}
 usage in=780 out=24
 end-turn
 

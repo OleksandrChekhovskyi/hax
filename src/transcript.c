@@ -5,9 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "ansi.h"
 #include "provider.h"
 #include "util.h"
+#include "terminal/ansi.h"
 
 /* Fixed renderer width. Pager passes through; narrow terminals reflow.
  * Picked so the banner box and turn rules stay legible without taking

@@ -1,15 +1,14 @@
 /* SPDX-License-Identifier: MIT */
-#include "util.h"
-
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>
 
 #include "harness.h"
+#include "util.h"
 
 /* Helper: create a temp file with the given contents and return its path.
  * The caller owns the returned string and is responsible for unlink + free. */

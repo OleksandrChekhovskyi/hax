@@ -2,7 +2,7 @@
 #ifndef HAX_PROVIDERS_MOCK_H
 #define HAX_PROVIDERS_MOCK_H
 
-#include "../provider.h"
+#include "provider.h"
 
 /*
  * Mock provider for exercising the rendering / dispatch pipeline without

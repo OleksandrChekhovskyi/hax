@@ -1,6 +1,4 @@
 /* SPDX-License-Identifier: MIT */
-#include "tool.h"
-
 #include <errno.h>
 #include <fcntl.h>
 #include <jansson.h>
@@ -10,15 +8,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
-#include "cmd_classify.h"
-#include "interrupt.h"
-#include "path.h"
-#include "utf8.h"
-#include "utf8_sanitize.h"
+#include "tool.h"
 #include "util.h"
+#include "system/path.h"
+#include "terminal/interrupt.h"
+#include "text/utf8.h"
+#include "text/utf8_sanitize.h"
+#include "tools/bash_classify.h"
 
 /* Output is captured to a temp file (mkstemp under $TMPDIR) so the model
  * sees a tail-truncated preview but can `read` the full output afterwards
@@ -1131,7 +1130,7 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
 
 /* Decide at dispatch time whether this call's output should be hidden
  * from the live preview. The model still sees the canonical output —
- * this is purely a display heuristic. cmd_classify is conservative:
+ * this is purely a display heuristic. bash_classify is conservative:
  * any redirection / subshell / unknown utility falls through to the
  * normal head+tail preview. */
 static int bash_is_silent(const char *args_json)
@@ -1143,7 +1142,7 @@ static int bash_is_silent(const char *args_json)
     if (!root)
         return 0;
     const char *cmd = json_string_value(json_object_get(root, "command"));
-    int verdict = cmd ? cmd_is_exploration(cmd) : 0;
+    int verdict = cmd ? bash_cmd_is_exploration(cmd) : 0;
     json_decref(root);
     return verdict;
 }

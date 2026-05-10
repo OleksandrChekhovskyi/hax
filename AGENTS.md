@@ -106,27 +106,28 @@ recover from). Set `output_is_diff = 1` for tools whose successful output is a u
 (rendered colored, uncapped); failure messages from the same tool are auto-detected by the
 missing `--- ` prefix and fall through to the standard dim preview.
 
-**`src/sse.{c,h}`** is a small boundary-safe SSE parser used by adapters.
-**`src/http.{c,h}`** wraps libcurl: `http_sse_post` for the streaming response path (with
-configurable idle timeout and a polled tick callback), and `http_get` for bounded JSON GETs
-used by startup probes and Codex usage queries. The tick is `int (*)(void *user)` — called
-from libcurl's progress hook (~1Hz, fires even when the server is silent) and on every
+**`src/transport/sse.{c,h}`** is a small boundary-safe SSE parser used by adapters.
+**`src/transport/http.{c,h}`** wraps libcurl: `http_sse_post` for the streaming response path
+(with configurable idle timeout and a polled tick callback), and `http_get` for bounded JSON
+GETs used by startup probes and Codex usage queries. The tick is `int (*)(void *user)` —
+called from libcurl's progress hook (~1Hz, fires even when the server is silent) and on every
 received chunk; non-zero return aborts the transfer. The agent uses it both to honor Esc
 cancellation and to detect "model went quiet mid-text" idle and surface a spinner. All
 libcurl handles set `CURLOPT_NOSIGNAL` so foreground streams and background probes can run
 concurrently.
 
-**`src/bg.{c,h}`** is the tiny background-job primitive for provider-owned async work:
-spawn/cancel/join plus `bg_tick(void *job)` — an `http_tick_cb`-shaped wrapper that workers
-pass straight to `http_get` / `http_sse_post` with their job pointer.
+**`src/system/bg_job.{c,h}`** is the tiny background job primitive for provider-owned async
+work: spawn/cancel/join plus `bg_job_tick(void *job)` — an `http_tick_cb`-shaped wrapper
+that workers pass straight to `http_get` / `http_sse_post` with their job pointer.
 `src/providers/probe.{c,h}` builds on it for context-window probes; each provider that
 spawns a probe owns the handle and joins it in `destroy()` before freeing the target state.
 
-**`src/ansi.h`** centralizes ANSI escape sequences — never inline `\033[...m` literals; add a
-constant there.
+**`src/terminal/ansi.h`** centralizes ANSI escape sequences — never inline `\033[...m`
+literals; add a constant there.
 
-Other modules under `src/` (diff, markdown, trace, util, spinner, fs, …) are small, focused
-helpers; their headers describe what they do.
+Other modules under `src/` (`system/diff`, `render/markdown`, `trace`, `util`,
+`render/spinner`, `system/fs`, …) are small, focused helpers; their headers describe what
+they do.
 
 ## Code style and conventions
 
@@ -149,7 +150,7 @@ helpers; their headers describe what they do.
 ## Dependencies
 
 Current pinned set is in `meson.build` — at time of writing: **libcurl** (HTTPS+SSE),
-**jansson** (JSON), **pthreads**. Line editing is in-tree (`src/input.c`), not a
+**jansson** (JSON), **pthreads**. Line editing is in-tree (`src/terminal/input.c`), not a
 dependency.
 
 Rule: every dependency must be in Debian main and either ship with macOS or be a single

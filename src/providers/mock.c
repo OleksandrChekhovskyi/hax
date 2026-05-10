@@ -8,8 +8,8 @@
 #include <strings.h>
 #include <time.h>
 
-#include "../provider.h"
-#include "../util.h"
+#include "provider.h"
+#include "util.h"
 
 /*
  * Mock provider for testing the rendering pipeline without a real LLM.

@@ -4,8 +4,8 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 
-#include "bg.h"
-#include "http.h"
+#include "system/bg_job.h"
+#include "transport/http.h"
 
 /* Free everything we own and the args struct itself. Tolerant of
  * partially-populated args so the spawn-failure path can reuse it
@@ -32,13 +32,14 @@ static void probe_run(struct bg_job *job, void *arg)
      * tick short-circuits libcurl from the progress callback, but we
      * may also have been asked to quit before we even started. Skip
      * the round-trip in that case. */
-    if (bg_cancelled(job)) {
+    if (bg_job_cancelled(job)) {
         probe_args_free(a);
         return;
     }
 
     char *body = NULL;
-    int rc = http_get(a->url, (const char *const *)a->headers, a->timeout_s, bg_tick, job, &body);
+    int rc =
+        http_get(a->url, (const char *const *)a->headers, a->timeout_s, bg_job_tick, job, &body);
     if (rc == 0 && body) {
         long v = a->extract(body, a->user);
         if (v > 0)
@@ -52,7 +53,7 @@ struct bg_job *probe_context_limit_spawn(struct probe_args *args)
 {
     if (!args)
         return NULL;
-    struct bg_job *job = bg_spawn(probe_run, args);
+    struct bg_job *job = bg_job_spawn(probe_run, args);
     /* Worker frees args on its own exit path; on spawn failure that
      * path never runs, so we own the cleanup here. Keeps the caller
      * from having to know about the partially-built state. */

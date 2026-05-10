@@ -1,14 +1,13 @@
 /* SPDX-License-Identifier: MIT */
-#include "tool.h"
-
 #include <errno.h>
 #include <jansson.h>
 #include <string.h>
 #include <sys/stat.h>
 
-#include "fs.h"
-#include "path.h"
+#include "tool.h"
 #include "util.h"
+#include "system/fs.h"
+#include "system/path.h"
 
 #define EDIT_READ_CAP (4 * 1024 * 1024)
 

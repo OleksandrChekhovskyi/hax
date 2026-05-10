@@ -19,7 +19,7 @@ struct agent_state;
  * Aliases (e.g. /clear → /new) are listed alongside the canonical
  * name on the same registry entry.
  *
- * Distinct from src/cmd_classify.c, which classifies shell command
+ * Distinct from src/tools/bash_classify.c, which classifies shell command
  * lines for the bash tool — different domain, similar word.
  */
 

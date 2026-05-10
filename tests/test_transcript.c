@@ -1,13 +1,12 @@
 /* SPDX-License-Identifier: MIT */
-#include "transcript.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "ansi.h"
 #include "harness.h"
 #include "provider.h"
+#include "transcript.h"
+#include "terminal/ansi.h"
 
 /* Render into a memstream so the test can inspect the bytes without
  * touching the filesystem or stdout. */

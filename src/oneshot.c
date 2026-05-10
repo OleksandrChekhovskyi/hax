@@ -6,11 +6,11 @@
 #include <string.h>
 
 #include "agent_core.h"
-#include "ctrl_strip.h"
 #include "tool.h"
 #include "transcript.h"
 #include "turn.h"
 #include "util.h"
+#include "render/ctrl_strip.h"
 
 /* Per-stream callback state for the oneshot path. We hand turn.c every
  * event for item assembly and capture the human-readable error text on

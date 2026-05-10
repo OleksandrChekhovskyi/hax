@@ -1,9 +1,8 @@
 /* SPDX-License-Identifier: MIT */
-#include "agent_core.h"
-
 #include <stdlib.h>
 #include <string.h>
 
+#include "agent_core.h"
 #include "harness.h"
 #include "tool.h"
 #include "util.h"
@@ -113,7 +112,7 @@ static void test_build_system_prompt_explicit_empty(void)
 
 static void test_build_system_prompt_custom_no_suffix(void)
 {
-    /* With env block + AGENTS.md suppressed, env_build_suffix returns
+    /* With env block + AGENTS.md suppressed, agent_env_build_suffix returns
      * NULL and the result is just the custom system prompt verbatim.
      * Lets us assert byte-equality without depending on cwd state. */
     setenv("HAX_SYSTEM_PROMPT", "you are a teapot", 1);

@@ -7,9 +7,9 @@
 #include <string.h>
 
 #include "agent.h"
-#include "ansi.h"
-#include "clipboard.h"
 #include "util.h"
+#include "terminal/ansi.h"
+#include "terminal/clipboard.h"
 
 /* Maximum number of aliases a single command can advertise. Three is
  * already plenty (e.g. /new + /clear + /reset is the absolute ceiling

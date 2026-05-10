@@ -36,8 +36,8 @@ const char *resolve_reasoning_effort(const struct provider *p);
  *
  *   raw=1               → NULL (--raw means "just the prompt, nothing else")
  *   HAX_SYSTEM_PROMPT=""→ NULL (explicit opt-out, same as before)
- *   HAX_SYSTEM_PROMPT   → that value + env_build_suffix(model)
- *   unset               → built-in default + env_build_suffix(model)
+ *   HAX_SYSTEM_PROMPT   → that value + agent_env_build_suffix(model)
+ *   unset               → built-in default + agent_env_build_suffix(model)
  */
 char *build_system_prompt(const char *model, int raw);
 

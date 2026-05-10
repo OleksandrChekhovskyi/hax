@@ -1,10 +1,9 @@
 /* SPDX-License-Identifier: MIT */
-#include "providers/openai_events.h"
-
 #include <stdlib.h>
 #include <string.h>
 
 #include "harness.h"
+#include "providers/openai_events.h"
 
 #define MAX_EVENTS 16
 

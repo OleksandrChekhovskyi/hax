@@ -1,18 +1,17 @@
 /* SPDX-License-Identifier: MIT */
-#include "tool.h"
-
 #include <errno.h>
 #include <fcntl.h>
 #include <jansson.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
-#include "path.h"
-#include "utf8_sanitize.h"
+#include "tool.h"
 #include "util.h"
+#include "system/path.h"
+#include "text/utf8_sanitize.h"
 
 enum read_trunc {
     TRUNC_NONE,

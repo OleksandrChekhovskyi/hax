@@ -1,11 +1,10 @@
 /* SPDX-License-Identifier: MIT */
-#include "tool.h"
-
 #include <jansson.h>
 
-#include "fs.h"
-#include "path.h"
+#include "tool.h"
 #include "util.h"
+#include "system/fs.h"
+#include "system/path.h"
 
 /* Count '\n' bytes plus a trailing partial line (content not ending in
  * '\n' still counts as one line — matches what `wc -l` would feel intuitive

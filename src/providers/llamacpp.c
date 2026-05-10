@@ -1,16 +1,16 @@
 /* SPDX-License-Identifier: MIT */
 #include "llamacpp.h"
 
-#include <curl/curl.h>
 #include <jansson.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <curl/curl.h>
 
-#include "http.h"
 #include "openai.h"
 #include "probe.h"
 #include "util.h"
+#include "transport/http.h"
 
 /* Model probe runs synchronously at startup because HAX_MODEL must be
  * resolved before the first chat request body is built. The context-limit

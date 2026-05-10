@@ -7,17 +7,17 @@
 #include <string.h>
 #include <time.h>
 
-#include "ansi.h"
-#include "api_error.h"
-#include "bg.h"
 #include "codex_events.h"
-#include "http.h"
-#include "path.h"
 #include "probe.h"
-#include "progress.h"
-#include "retry.h"
-#include "spinner.h"
 #include "util.h"
+#include "render/progress.h"
+#include "render/spinner.h"
+#include "system/bg_job.h"
+#include "system/path.h"
+#include "terminal/ansi.h"
+#include "transport/api_error.h"
+#include "transport/http.h"
+#include "transport/retry.h"
 
 #define CODEX_ENDPOINT        "https://chatgpt.com/backend-api/codex/responses"
 #define CODEX_USAGE_ENDPOINT  "https://chatgpt.com/backend-api/wham/usage"
@@ -785,8 +785,8 @@ static void codex_destroy(struct provider *p)
      * first so the worker exits its http_get promptly via the bg
      * cancel thunk wired through the progress callback. */
     if (c->probe) {
-        bg_cancel(c->probe);
-        bg_join(c->probe);
+        bg_job_cancel(c->probe);
+        bg_job_join(c->probe);
     }
     free(c->access_token);
     free(c->account_id);

@@ -5,7 +5,7 @@
 #include <stdatomic.h>
 #include <stddef.h>
 
-#include "http.h"
+#include "transport/http.h"
 
 /*
  * A flat, provider-agnostic view of a conversation. Each item is one thing:

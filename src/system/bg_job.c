@@ -1,0 +1,58 @@
+/* SPDX-License-Identifier: MIT */
+#include "system/bg_job.h"
+
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdlib.h>
+
+#include "util.h"
+
+struct bg_job {
+    pthread_t tid;
+    bg_job_fn fn;
+    void *arg;
+    _Atomic int cancelled;
+};
+
+static void *bg_job_trampoline(void *p)
+{
+    struct bg_job *job = p;
+    job->fn(job, job->arg);
+    return NULL;
+}
+
+struct bg_job *bg_job_spawn(bg_job_fn fn, void *arg)
+{
+    struct bg_job *job = xcalloc(1, sizeof(*job));
+    job->fn = fn;
+    job->arg = arg;
+    if (pthread_create(&job->tid, NULL, bg_job_trampoline, job) != 0) {
+        free(job);
+        return NULL;
+    }
+    return job;
+}
+
+void bg_job_cancel(struct bg_job *job)
+{
+    if (job)
+        atomic_store(&job->cancelled, 1);
+}
+
+int bg_job_cancelled(const struct bg_job *job)
+{
+    return job ? atomic_load(&job->cancelled) : 0;
+}
+
+int bg_job_tick(void *job)
+{
+    return bg_job_cancelled(job);
+}
+
+void bg_job_join(struct bg_job *job)
+{
+    if (!job)
+        return;
+    pthread_join(job->tid, NULL);
+    free(job);
+}

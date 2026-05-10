@@ -1,10 +1,9 @@
 /* SPDX-License-Identifier: MIT */
-#include "turn.h"
-
 #include <stdlib.h>
 #include <string.h>
 
 #include "harness.h"
+#include "turn.h"
 
 /* ---------- helpers ---------- */
 

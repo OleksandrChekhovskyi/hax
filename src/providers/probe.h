@@ -4,7 +4,7 @@
 
 #include <stdatomic.h>
 
-#include "bg.h"
+#include "system/bg_job.h"
 
 /* Shared scaffolding for the "GET a small JSON catalog, find one
  * integer, store it in provider->context_limit" pattern. The catalog
@@ -15,7 +15,7 @@
  * this helper owns the bg-cancel wiring, http_get call, atomic store,
  * and ownership of the heap-allocated args / headers / user data.
  *
- * Workers run on a bg thread spawned via bg_spawn(probe_context_limit_run,
+ * Workers run on a bg thread spawned via bg_job_spawn(probe_context_limit_run,
  * args). The caller hands ownership of `args` to the worker; the worker
  * always frees it (and everything it points to) before returning, even
  * when the request fails or is cancelled. */

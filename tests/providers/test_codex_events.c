@@ -1,10 +1,9 @@
 /* SPDX-License-Identifier: MIT */
-#include "providers/codex_events.h"
-
 #include <stdlib.h>
 #include <string.h>
 
 #include "harness.h"
+#include "providers/codex_events.h"
 
 #define MAX_EVENTS 16
 

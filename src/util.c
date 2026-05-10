@@ -12,13 +12,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
-#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
 
 #include "provider.h"
-#include "utf8.h"
+#include "text/utf8.h"
 
 static int locale_utf8 = 0;
 

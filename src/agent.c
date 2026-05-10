@@ -9,21 +9,21 @@
 #include <unistd.h>
 
 #include "agent_core.h"
-#include "ansi.h"
-#include "ctrl_strip.h"
-#include "disp.h"
-#include "input.h"
-#include "interrupt.h"
-#include "markdown.h"
-#include "notify.h"
 #include "slash.h"
-#include "spawn.h"
-#include "spinner.h"
 #include "tool.h"
-#include "tool_render.h"
 #include "transcript.h"
 #include "turn.h"
 #include "util.h"
+#include "render/ctrl_strip.h"
+#include "render/disp.h"
+#include "render/markdown.h"
+#include "render/spinner.h"
+#include "render/tool_render.h"
+#include "system/spawn.h"
+#include "terminal/ansi.h"
+#include "terminal/input.h"
+#include "terminal/interrupt.h"
+#include "terminal/notify.h"
 
 #define INTERRUPT_MARKER "[interrupted]"
 
@@ -520,7 +520,7 @@ static char *make_silent_arg(const struct tool *tool, const struct item *call, i
             if (root)
                 cmd = json_string_value(json_object_get(root, "command"));
         }
-        /* Flatten before truncating: a multi-line command (cmd_classify
+        /* Flatten before truncating: a multi-line command (bash_classify
          * accepts e.g. `ls\npwd` as exploration) would otherwise wrap
          * the header across rows and put the inline spinner on the
          * wrong line. */

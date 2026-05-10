@@ -1,6 +1,4 @@
 /* SPDX-License-Identifier: MIT */
-#include "slash.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +7,7 @@
 #include "agent.h"
 #include "agent_core.h"
 #include "harness.h"
+#include "slash.h"
 #include "tool.h"
 #include "util.h"
 

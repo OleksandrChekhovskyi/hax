@@ -5,11 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "env.h"
+#include "agent_env.h"
 #include "util.h"
 
 /* Default text used when HAX_SYSTEM_PROMPT is unset and --raw was not
- * passed. AGENTS.md / env block / skills are appended via env_build_suffix
+ * passed. AGENTS.md / env block / skills are appended via agent_env_build_suffix
  * and the assembled string is what's sent to the provider. */
 static const char DEFAULT_SYSTEM_PROMPT[] =
     "You are hax, a minimalist coding assistant running in the user's terminal. "
@@ -96,7 +96,7 @@ char *build_system_prompt(const char *model, int raw)
     if (!*sys)
         return NULL;
 
-    char *suffix = env_build_suffix(model);
+    char *suffix = agent_env_build_suffix(model);
     if (!suffix)
         return xstrdup(sys);
 

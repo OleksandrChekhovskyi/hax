@@ -6,12 +6,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "api_error.h"
-#include "bg.h"
-#include "http.h"
 #include "openai_events.h"
-#include "retry.h"
 #include "util.h"
+#include "system/bg_job.h"
+#include "transport/api_error.h"
+#include "transport/http.h"
+#include "transport/retry.h"
 
 struct openai {
     struct provider base;
@@ -290,8 +290,8 @@ static void openai_destroy(struct provider *p)
      * first so the worker exits its http_get promptly via the bg
      * cancel thunk wired through the progress callback. */
     if (o->probe) {
-        bg_cancel(o->probe);
-        bg_join(o->probe);
+        bg_job_cancel(o->probe);
+        bg_job_join(o->probe);
     }
     free(o->base_url);
     free(o->api_key);
