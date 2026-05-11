@@ -128,69 +128,230 @@ static int tool_result_is_marked(const struct item *it)
     return strcmp(it->output + out_len - marker_len, INTERRUPT_MARKER) == 0;
 }
 
-/* Tracks an in-progress run of "quiet" tool calls — read/list/grep-style
- * exploration whose output is hidden from display. The cluster collapses
- * the visual block separator between consecutive quiet calls, and
- * coalesces consecutive `read` calls onto one line: `[read] foo.c, bar.c,
- * baz.c`. For reads, the inline spinner sits at the end of the active
- * line as a "still alive" indicator and as the attachment point for a
- * coalesced follow-up. For non-coalescing silent kinds (bash) the
- * header line is closed with `\n` and a labeled line-mode spinner is
- * drawn below — there's no follow-up to attach, and the label gives
- * slow commands a clearer signal than the bare inline glyph.
+/* What visual mode is currently "open" on the terminal — each state
+ * owns specific bytes (SGR runs, cursor position, in-flight spinner
+ * variant) that must be unwound before drawing anything else.
  *
- * `active` means a quiet cluster is in progress: either a read line
- * with the inline glyph parked at its end, or a closed header line
- * with a line-mode spinner on the row below. `last_tool` is the name
- * of the most recent quiet tool, used to decide whether the next call
- * coalesces. `line_used` is a byte budget for the current line, checked
- * against the terminal width before appending another filename. */
-struct cluster {
-    int active;
-    const char *last_tool; /* borrowed from struct tool's static name */
-    int line_used;
+ *   RS_IDLE      Nothing open: cursor at column 0, no SGR active.
+ *   RS_REASONING Dim+italic CoT span open. Only reached when
+ *                HAX_SHOW_REASONING is on; otherwise reasoning drives
+ *                the spinner label only.
+ *   RS_TEXT      Markdown answer stream open; md owns inline SGR.
+ *   RS_CLUSTER   In-progress run of "quiet" tool calls (read/grep
+ *                exploration). Coalesces consecutive `read`s onto one
+ *                line and keeps its own end-of-line spinner across
+ *                gaps. Survives stream() boundaries; the other states
+ *                are reset per-stream. */
+enum render_state {
+    RS_IDLE,
+    RS_REASONING,
+    RS_TEXT,
+    RS_CLUSTER,
 };
 
-/* Bundles the per-turn state needed by the streaming callback into one
- * struct, so we can plumb display state alongside `struct turn` through
- * the provider's user-pointer parameter. */
-struct event_ctx {
-    struct disp *disp;
-    struct turn *turn;
+/* All rendering state. Threaded through call sites as a single
+ * pointer; stack-allocated in agent_run with spinner/md as opaque
+ * handles owned (and freed) there. */
+struct render_ctx {
+    enum render_state state;
+
+    struct disp disp;
     struct spinner *spinner;
     struct md_renderer *md; /* NULL when markdown is disabled */
-    struct cluster *cl;
-    /* Filled in from EV_DONE; -1/-1/-1 if the provider didn't report. */
-    struct stream_usage usage;
-    /* Idle-spinner bookkeeping for the "model emitted text then went
-     * quiet" case. last_text_at is the CLOCK_MONOTONIC ms of the most
-     * recent EV_TEXT_DELTA; 0 means we're not in a text-idle window
-     * (no text yet, or a non-text event has since closed it). idle_shown
-     * latches once the idle handler has drawn the spinner so the
-     * progress-callback tick doesn't repeat the work every second. */
+
+    /* RS_CLUSTER sub-state. cluster_last_tool == NULL means "cluster
+     * just entered, no header painted yet". cluster_line_used is a
+     * cell budget against terminal width for read-coalescing wrap. */
+    const char *cluster_last_tool;
+    int cluster_line_used;
+
+    /* Idle inline overlay (SPINNER_INLINE_TEXT) — drawn on top of an
+     * active text/reasoning stream when the model goes quiet.
+     * last_text_at is the ms of the most recent live delta; 0 means
+     * no idle window armed. idle_shown latches once drawn so the
+     * tick doesn't re-emit it every second. */
     long last_text_at;
     int idle_shown;
-    /* Retry-countdown bookkeeping. retry_deadline_at is the
-     * CLOCK_MONOTONIC ms at which the in-progress backoff sleep ends; 0
-     * means no retry is pending. retry_attempt/retry_max are captured
-     * from the last EV_RETRY so the tick can repaint the spinner label
-     * with a live countdown ("retrying in 12s..." → "11s..." → ...).
-     * Cleared on the next non-retry event so a successful retry's
-     * EV_TEXT_DELTA / EV_TOOL_CALL_START handler can restore the
-     * "working..." label without competing with the countdown. */
+
+    /* Retry countdown — the tick repaints the spinner label from
+     * these so the seconds visibly shrink during the backoff sleep.
+     * retry_deadline_at == 0 means no retry pending. */
     long retry_deadline_at;
     int retry_attempt;
     int retry_max;
+
+    /* HAX_SHOW_REASONING — when 0, reasoning deltas drive only the
+     * spinner label; no RS_REASONING transition is taken. */
+    int show_reasoning;
 };
+
+/* Per-stream slice the event callback needs alongside render_ctx. */
+struct event_ctx {
+    struct render_ctx *r;
+    struct turn *turn;
+    /* Filled in from EV_DONE; -1/-1/-1 if the provider didn't report. */
+    struct stream_usage usage;
+};
+
+/* Clear the idle inline overlay (SPINNER_INLINE_TEXT) if it's up. The
+ * overlay is a "still alive" indicator drawn on top of an in-flight
+ * content stream; any new render activity supersedes it. Called from
+ * render_transition (covering both cross-state and same-state cases)
+ * so handlers don't need to repeat it after every transition call. */
+static void render_clear_idle(struct render_ctx *r)
+{
+    if (r->idle_shown) {
+        spinner_hide(r->spinner);
+        r->idle_shown = 0;
+    }
+}
+
+/* Move the live render state to `to`: close whatever is currently
+ * open (SGR reset, md tail flush, state-owned spinner hidden), then
+ * open the target (block separator, fresh SGR, canonical label).
+ *
+ * Spinner ordering invariant: non-cluster spinners are hidden before
+ * the open-half's block separator advances the cursor past the glyph
+ * (which would make \b-space-\b erase impossible). The cluster's own
+ * spinner is hidden inside the close-half of RS_CLUSTER where
+ * was_inline drives correct NL/trail accounting. */
+static void render_transition(struct render_ctx *r, enum render_state to)
+{
+    render_clear_idle(r);
+    if (r->state == to)
+        return;
+
+    switch (r->state) {
+    case RS_IDLE:
+        break;
+    case RS_REASONING:
+        if (r->md)
+            md_flush(r->md);
+        disp_raw(ANSI_RESET);
+        disp_putc(&r->disp, '\n');
+        break;
+    case RS_TEXT:
+        if (r->md)
+            md_flush(r->md);
+        break;
+    case RS_CLUSTER: {
+        int was_inline = spinner_hide(r->spinner);
+        if (was_inline)
+            disp_putc(&r->disp, '\n');
+        else
+            r->disp.trail = 1;
+        fflush(stdout);
+        r->cluster_last_tool = NULL;
+        r->cluster_line_used = 0;
+        break;
+    }
+    }
+
+    switch (to) {
+    case RS_IDLE:
+        /* No separator emitted — out-of-band block writers
+         * (render_open_block, display_tool_header) own that decision. */
+        break;
+    case RS_REASONING:
+        spinner_hide(r->spinner);
+        disp_block_separator(&r->disp);
+        disp_raw(ANSI_DIM ANSI_ITALIC);
+        spinner_set_label(r->spinner, "thinking...");
+        /* Suppress md's inline SGR so the dim+italic span above is
+         * the only active style; wrap and block structure still run. */
+        if (r->md)
+            md_set_styled(r->md, 0);
+        break;
+    case RS_TEXT:
+        spinner_hide(r->spinner);
+        disp_block_separator(&r->disp);
+        spinner_set_label(r->spinner, "working...");
+        r->disp.saw_text = 1;
+        if (r->md)
+            md_set_styled(r->md, 1);
+        break;
+    case RS_CLUSTER:
+        spinner_hide(r->spinner);
+        disp_block_separator(&r->disp);
+        break;
+    }
+
+    r->state = to;
+}
+
+/* Commit any pending output to the terminal without changing state:
+ * clear the idle overlay, flush md's lookahead tail if we're in a
+ * content stream, and reset the spinner label to the neutral default.
+ * Called at mid-stream content-block seams (text/reasoning → tool
+ * call, or one reasoning item → the next) so the trailing fragment of
+ * the prior block lands before the next block's bytes arrive. State
+ * is left untouched so any open SGR (RS_REASONING's dim+italic)
+ * persists across the seam. */
+static void render_flush(struct render_ctx *r)
+{
+    render_clear_idle(r);
+    if (r->md && (r->state == RS_TEXT || r->state == RS_REASONING))
+        md_flush(r->md);
+    spinner_set_label(r->spinner, "working...");
+}
+
+/* Pre-stream housekeeping: arm fresh idle/retry bookkeeping for the
+ * new stream, then show the "working..." spinner — unless we're
+ * continuing a cluster, whose own end-of-line spinner is the alive
+ * indicator across the gap. */
+static void render_stream_begin(struct render_ctx *r)
+{
+    r->last_text_at = 0;
+    r->idle_shown = 0;
+    r->retry_deadline_at = 0;
+    if (r->state == RS_CLUSTER)
+        return;
+    disp_block_separator(&r->disp);
+    spinner_set_label(r->spinner, "working...");
+    spinner_show(r->spinner);
+}
+
+/* Post-stream housekeeping: hide the pre-stream spinner unless a
+ * cluster is open. Cluster's spinner spans the gap to the next call
+ * (verbose tool dispatch or a continuation stream). */
+static void render_stream_end(struct render_ctx *r)
+{
+    if (r->state == RS_CLUSTER)
+        return;
+    spinner_hide(r->spinner);
+}
+
+/* Return to a clean idle line and open a fresh visual block — for
+ * out-of-band rendering (error line, usage stats, interrupt marker)
+ * that should land separated from prior content. */
+static void render_open_block(struct render_ctx *r)
+{
+    render_transition(r, RS_IDLE);
+    disp_block_separator(&r->disp);
+}
+
+/* Write a chunk of model-produced text into the currently-open content
+ * stream (RS_TEXT or RS_REASONING). Routes through md when enabled,
+ * falls through to disp otherwise; arms idle detection so the tick
+ * can surface the inline spinner if the model goes quiet. */
+static void render_text_chunk(struct render_ctx *r, const char *s, size_t n)
+{
+    if (r->md)
+        md_feed(r->md, s, n);
+    else
+        disp_write(&r->disp, s, n);
+    fflush(stdout);
+    r->last_text_at = monotonic_ms();
+}
 
 /* Paint the spinner with the retry countdown label. Called on EV_RETRY
  * (so the user sees the new state immediately) and from the stream tick
  * (so the seconds count visibly decreases during the backoff sleep).
  * spinner_set_label gates on strcmp internally, so calling this every
  * tick is cheap until the second changes. */
-static void update_retry_label(struct event_ctx *ec)
+static void update_retry_label(struct render_ctx *r)
 {
-    long remaining = ec->retry_deadline_at - monotonic_ms();
+    long remaining = r->retry_deadline_at - monotonic_ms();
     /* Round up so the countdown shows "1s" through the final second
      * instead of dropping to "0s" with time still on the clock. Floor
      * at 1s when we're inside the last 100ms — saying "in 0s" reads as
@@ -199,9 +360,9 @@ static void update_retry_label(struct event_ctx *ec)
     if (secs < 1)
         secs = 1;
     char buf[64];
-    snprintf(buf, sizeof(buf), "retrying in %lds (attempt %d/%d)...", secs, ec->retry_attempt,
-             ec->retry_max);
-    spinner_set_label(ec->spinner, buf);
+    snprintf(buf, sizeof(buf), "retrying in %lds (attempt %d/%d)...", secs, r->retry_attempt,
+             r->retry_max);
+    spinner_set_label(r->spinner, buf);
 }
 
 /* How long after the last text byte we wait before surfacing the
@@ -245,35 +406,6 @@ static int call_is_silent(const struct tool *t, const struct item *call)
     if (t->is_silent)
         return t->is_silent(call->tool_arguments_json);
     return 0;
-}
-
-/* Terminate the in-progress quiet line and reset cluster state.
- * Idempotent on inactive cluster.
- *
- * Two cases depending on what the spinner was doing at hide time:
- *   - Inline glyph: hide restored the cursor to the end of the cluster
- *     line (after our trailing space). Emit `\n` to close the line —
- *     it goes into disp's held buffer so a following block_separator
- *     can collapse, or a following content write commits it.
- *   - Line spinner (auto-transitioned): hide erased the spinner's row,
- *     leaving the cursor at column 0 of an already-fresh line. The
- *     transition's own `\n` is on the terminal already but bypassed
- *     disp's tracking, so bump trail to 1 here to keep a following
- *     block_separator emitting the right number of newlines. */
-static void cluster_terminate(struct cluster *cl, struct disp *d, struct spinner *sp)
-{
-    if (!cl->active)
-        return;
-    int was_inline = spinner_hide(sp);
-    if (was_inline) {
-        disp_putc(d, '\n');
-    } else {
-        d->trail = 1;
-    }
-    fflush(stdout);
-    cl->active = 0;
-    cl->last_tool = NULL;
-    cl->line_used = 0;
 }
 
 /* Hard cap on the dim suffix appended after the bold display_arg
@@ -538,8 +670,9 @@ static char *make_silent_arg(const struct tool *tool, const struct item *call, i
 /* Render a synthesized "[interrupted]" block in place of running a tool,
  * and produce the matching tool_result item so the conversation stays
  * well-formed when Esc fires partway through a batch. */
-static struct item dispatch_tool_skipped(struct disp *d, const struct item *call)
+static struct item dispatch_tool_skipped(struct render_ctx *r, const struct item *call)
 {
+    struct disp *d = &r->disp;
     display_tool_header(d, call);
     disp_tool_strip_solo(d);
     disp_raw(ANSI_DIM);
@@ -560,8 +693,9 @@ static struct item dispatch_tool_skipped(struct disp *d, const struct item *call
  * it. Display a refusal header for user visibility and feed an error
  * tool_result back so the conversation stays well-formed and the model
  * can recover (e.g. answer in plain text instead). */
-static struct item dispatch_tool_refused(struct disp *d, const struct item *call)
+static struct item dispatch_tool_refused(struct render_ctx *r, const struct item *call)
 {
+    struct disp *d = &r->disp;
     display_tool_header(d, call);
     disp_tool_strip_solo(d);
     disp_raw(ANSI_DIM);
@@ -580,21 +714,31 @@ static struct item dispatch_tool_refused(struct disp *d, const struct item *call
  * with the previous quiet line when the prior tool was the same kind
  * (currently only `read` chains visually). Output is captured for
  * conversation history exactly like the verbose path; only the live
- * display is suppressed. */
-static struct item dispatch_tool_call_silent(struct cluster *cl, struct disp *d, struct spinner *sp,
-                                             const struct item *call, const struct tool *t)
+ * display is suppressed.
+ *
+ * Caller (dispatch_tool_call) has already called render_transition
+ * to RS_CLUSTER, so r->state is RS_CLUSTER and — on first entry —
+ * a clean column-0 row is below whatever came before.
+ * cluster_last_tool == NULL distinguishes "just entered the cluster"
+ * from "continuing a cluster started by a previous call". */
+static struct item dispatch_tool_call_silent(struct render_ctx *r, const struct item *call,
+                                             const struct tool *t)
 {
+    struct disp *d = &r->disp;
+    struct spinner *sp = r->spinner;
     int term_w = display_width();
 
-    /* Hide whichever mode the spinner is in and learn what mode was
-     * active at hide time. was_inline=1 means the cursor sits at the
-     * end of the prior cluster line (we can append/coalesce); =0 means
-     * the spinner had auto-transitioned to a labeled line below the
-     * cluster, and the cursor is now at column 0 of that just-erased
-     * row — coalescing isn't possible from there. */
+    /* Hide the cluster's own spinner and learn what mode it was in.
+     * was_inline=1: cursor sits at the end of the prior cluster line
+     * (we can append/coalesce). was_inline=0: prior spinner was line
+     * mode (auto-transitioned, or labeled bash) OR there's no prior
+     * spinner because this is the first call of a freshly-entered
+     * cluster — cursor is at column 0 of a fresh row, and coalescing
+     * isn't possible from there. */
     int was_inline = spinner_hide(sp);
-    int can_coalesce = cl->active && was_inline && cl->last_tool &&
-                       strcmp(cl->last_tool, "read") == 0 && strcmp(call->tool_name, "read") == 0;
+    int can_coalesce = was_inline && r->cluster_last_tool &&
+                       strcmp(r->cluster_last_tool, "read") == 0 &&
+                       strcmp(call->tool_name, "read") == 0;
     /* Reads coalesce, so the inline glyph is parked at end-of-line as
      * an attachment point for a follow-up `, baz.c`. Bash never
      * coalesces — every silent bash gets its own header line — so go
@@ -627,45 +771,44 @@ static struct item dispatch_tool_call_silent(struct cluster *cl, struct disp *d,
         /* Cap coalesced line at ~term width so we never wrap. The
          * extra 2 covers ", " on top of the standard end-of-line
          * margin (trailing space + spinner + breathing room). */
-        if (cl->line_used + (int)append_len + 2 + QUIET_LINE_MARGIN > term_w) {
+        if (r->cluster_line_used + (int)append_len + 2 + QUIET_LINE_MARGIN > term_w) {
             /* Overflow → close current line, start a new `[read] …` header. */
             disp_putc(d, '\n');
             disp_emit_held(d);
             char *arg = make_silent_arg(t, call, 7 /* "[read] " */, term_w);
             int used = write_silent_header(d, call, arg, 1 /* coalesce path is always read */);
             free(arg);
-            cl->line_used = used;
+            r->cluster_line_used = used;
         } else {
-            cl->line_used += write_silent_append(d, append);
+            r->cluster_line_used += write_silent_append(d, append);
         }
         free(append);
         if (root)
             json_decref(root);
     } else {
-        if (cl->active) {
+        if (r->cluster_last_tool) {
+            /* Already inside the cluster but can't coalesce (different
+             * silent kind, or coalesce-overflow): close the prior line
+             * and write a fresh header below — but stay in RS_CLUSTER,
+             * so no block separator between the lines. */
             if (was_inline) {
-                /* Different silent kind (read → bash exploration, or
-                 * vice versa). Close the prior inline line but stay
-                 * inside the cluster — no block separator. */
                 disp_putc(d, '\n');
                 disp_emit_held(d);
             } else {
-                /* Spinner auto-transitioned. The transition's \n is
-                 * already on screen and spinner_hide cleared the
-                 * spinner row; we're at column 0 of that empty row.
-                 * Sync disp.trail so any later block_separator collapses
-                 * correctly. */
+                /* Prior spinner had auto-transitioned to line mode.
+                 * spinner_hide cleared the row; cursor is at column 0
+                 * of that fresh row. Sync trail so later separators
+                 * compute correctly. */
                 d->trail = 1;
             }
-        } else {
-            /* First quiet call: separate from whatever came before. */
-            disp_block_separator(d);
         }
+        /* Else: first call after entering RS_CLUSTER — the transition
+         * already left a clean column-0 row below prior content. */
         int tag_cost = 2 + (int)strlen(call->tool_name) + 1; /* "[name] " */
         char *arg = make_silent_arg(t, call, tag_cost, term_w);
         int used = write_silent_header(d, call, arg, inline_spinner);
         free(arg);
-        cl->line_used = used;
+        r->cluster_line_used = used;
         if (!inline_spinner) {
             /* Close the header line so the line-mode spinner draws on
              * its own row below. Without this, the spinner thread's
@@ -697,8 +840,7 @@ static struct item dispatch_tool_call_silent(struct cluster *cl, struct disp *d,
     char *ret = t->run(call->tool_arguments_json, NULL, NULL);
     spinner_set_label(sp, "working...");
 
-    cl->active = 1;
-    cl->last_tool = t->def.name;
+    r->cluster_last_tool = t->def.name;
 
     char *history = ctrl_strip_dup(ret ? ret : "");
     free(ret);
@@ -716,9 +858,10 @@ static struct item dispatch_tool_call_silent(struct cluster *cl, struct disp *d,
  * is ctrl_stripped at this boundary so all tools' outputs land in the
  * conversation in the same normalized form; anything pushed through
  * emit_display is display-only and does not enter history. */
-static struct item dispatch_tool_call_verbose(struct disp *d, struct spinner *sp,
-                                              const struct item *call)
+static struct item dispatch_tool_call_verbose(struct render_ctx *r, const struct item *call)
 {
+    struct disp *d = &r->disp;
+    struct spinner *sp = r->spinner;
     display_tool_header(d, call);
     /* "⠋ running..." — the spinner re-emerges between streamed chunks
      * (and for non-streaming tools, after the single returned payload),
@@ -782,16 +925,17 @@ static struct item dispatch_tool_call_verbose(struct disp *d, struct spinner *sp
 
 /* Top-level dispatch: pick silent or verbose path based on the tool's
  * static silent_preview flag and (for bash) per-call classification of
- * the command. Falling into the verbose path always terminates any
- * active quiet cluster first so the visual block separator reappears. */
-static struct item dispatch_tool_call(struct cluster *cl, struct disp *d, struct spinner *sp,
-                                      const struct item *call)
+ * the command. The render_transition handles both directions cleanly —
+ * silent → silent is a no-op (cluster continues), any other prior
+ * state closes properly before the target opens. */
+static struct item dispatch_tool_call(struct render_ctx *r, const struct item *call)
 {
     const struct tool *t = find_tool(call->tool_name);
-    if (t && call_is_silent(t, call))
-        return dispatch_tool_call_silent(cl, d, sp, call, t);
-    cluster_terminate(cl, d, sp);
-    return dispatch_tool_call_verbose(d, sp, call);
+    int is_silent = t && call_is_silent(t, call);
+    render_transition(r, is_silent ? RS_CLUSTER : RS_IDLE);
+    if (is_silent)
+        return dispatch_tool_call_silent(r, call, t);
+    return dispatch_tool_call_verbose(r, call);
 }
 
 /* Adapter so md_renderer can emit through disp without knowing about it.
@@ -817,6 +961,17 @@ static int markdown_enabled(void)
     if (e && strcmp(e, "0") == 0)
         return 0;
     return 1;
+}
+
+/* Whether to render reasoning/CoT deltas live in a dim block. Default
+ * off because the volume can be large and most users want only the
+ * model's final answer. Backend opt-in is separate (some servers only
+ * stream reasoning when explicitly requested — see openrouter); this
+ * just decides whether the deltas we receive get drawn. */
+static int reasoning_visible(void)
+{
+    const char *e = getenv("HAX_SHOW_REASONING");
+    return e && *e && strcmp(e, "0") != 0;
 }
 
 /* Format a token count in 1024-base: "412", "5.4k", "128k", "1.2M".
@@ -867,7 +1022,8 @@ static long context_limit(const struct provider *p)
  * answering "how many tokens did this prompt cost in generation". Each
  * value is -1 when the underlying counts weren't reported by the backend;
  * the section is then skipped rather than rendered with a misleading zero. */
-static void display_usage(struct disp *d, const struct provider *p, long ctx, long out, long cached)
+static void display_usage(struct render_ctx *r, const struct provider *p, long ctx, long out,
+                          long cached)
 {
     int show_ctx = ctx >= 0;
     int show_out = out >= 0;
@@ -875,7 +1031,8 @@ static void display_usage(struct disp *d, const struct provider *p, long ctx, lo
     if (!show_ctx && !show_out && !show_cached)
         return;
 
-    disp_block_separator(d);
+    struct disp *d = &r->disp;
+    render_open_block(r);
     disp_raw(ANSI_DIM);
 
     const char *sep = "";
@@ -923,20 +1080,20 @@ static void display_usage(struct disp *d, const struct provider *p, long ctx, lo
  * any disp-bypassing \n here would desync the held/trail bookkeeping. */
 static int agent_stream_tick(void *user)
 {
-    struct event_ctx *ec = user;
+    struct render_ctx *r = user;
     /* Retry countdown wins over idle detection: during a retry sleep the
      * model isn't streaming at all, so there's no idle-text window to
      * surface. Repaint each tick so the seconds count visibly shrinks. */
-    if (ec->retry_deadline_at) {
-        update_retry_label(ec);
-    } else if (ec->last_text_at && !ec->idle_shown &&
-               monotonic_ms() - ec->last_text_at >= TEXT_IDLE_TIMEOUT_MS) {
+    if (r->retry_deadline_at) {
+        update_retry_label(r);
+    } else if (r->last_text_at && !r->idle_shown &&
+               monotonic_ms() - r->last_text_at >= TEXT_IDLE_TIMEOUT_MS) {
         /* Skip the leading-space cell when disp says the cursor is
          * already at column 0 or right after a space — the model's
          * last byte is its own breathing room, and an extra pad would
          * read as a stray double-space once the glyph erases. */
-        spinner_show_inline_text(ec->spinner, !ec->disp->at_space_or_bol);
-        ec->idle_shown = 1;
+        spinner_show_inline_text(r->spinner, !r->disp.at_space_or_bol);
+        r->idle_shown = 1;
     }
     return interrupt_requested();
 }
@@ -944,122 +1101,83 @@ static int agent_stream_tick(void *user)
 static int on_event(const struct stream_event *ev, void *user)
 {
     struct event_ctx *ec = user;
-    struct disp *d = ec->disp;
+    struct render_ctx *r = ec->r;
+    struct disp *d = &r->disp;
 
     /* Idle detection tracks "time since the last byte the user could
-     * see". Stream-ending events close the window; tool-call and
-     * reasoning events do NOT, because neither produces live output
-     * (tool calls render as a block at dispatch time; reasoning is
-     * surfaced only as a spinner label change). Leaving the timer
-     * frozen across those events lets the idle spinner fire during
-     * a long tool-args generation pause too — the model emits a
-     * tool_call_start almost immediately after the trailing text, but
-     * may then take seconds to stream out a long path or command,
-     * during which the user sees nothing change on screen. */
+     * see". Stream-ending events close the window; tool-call events
+     * leave it armed so the idle spinner can fire during a long
+     * tool-args generation pause too. Reasoning deltas re-arm it from
+     * their own handler when reasoning is visible. */
     if (ev->kind == EV_DONE || ev->kind == EV_ERROR)
-        ec->last_text_at = 0;
-    /* Any event other than EV_RETRY itself means the new attempt has
-     * progressed past the backoff sleep — text/tool/reasoning deltas
-     * mean the retry connected, EV_DONE/EV_ERROR mean the stream
-     * terminated. Clear the countdown so the per-event label setters
-     * below ("working...", "thinking...") aren't fighting the tick. */
-    if (ev->kind != EV_RETRY)
-        ec->retry_deadline_at = 0;
+        r->last_text_at = 0;
+    /* Any event other than EV_RETRY itself means we're past the
+     * backoff sleep — clear the countdown so per-event label updates
+     * aren't fighting the tick. */
+    if (ev->kind != EV_RETRY && r->retry_deadline_at) {
+        r->retry_deadline_at = 0;
+        spinner_set_label(r->spinner, "working...");
+    }
 
     switch (ev->kind) {
     case EV_TEXT_DELTA: {
-        /* Peek-strip first so we keep the spinner up across deltas that
-         * are entirely leading newlines — flickering it off without any
-         * output to take its place would reintroduce a silent wait. */
+        /* Peek-strip leading newlines on the first delta of the stream
+         * so a provider's trailing-NL convention doesn't open a stray
+         * blank line above the answer. n==0 after strip → keep the
+         * spinner up (no state change) until a non-NL byte arrives. */
         const char *s = ev->u.text_delta.text;
         size_t n = strlen(s);
         disp_first_delta_strip(d, &s, &n);
         if (n == 0)
             break;
-        /* Hide first so a stale "thinking..." label isn't briefly
-         * repainted on its way out, then restore the default — visible
-         * text means reasoning is over, and any later show in this turn
-         * (e.g. before tool dispatch) should read "working...". */
-        if (!d->saw_text) {
-            /* Cluster termination must precede the spinner_hide below
-             * so cluster_terminate observes the real prior spinner
-             * mode and picks the right disp.trail accounting
-             * (inline → close line with \n; line → trail=1 since the
-             * spinner already lived on its own row). */
-            cluster_terminate(ec->cl, d, ec->spinner);
-            disp_block_separator(d);
-            d->saw_text = 1;
-        }
-        spinner_hide(ec->spinner);
-        spinner_set_label(ec->spinner, "working...");
-        if (ec->md)
-            md_feed(ec->md, s, n);
-        else
-            disp_write(d, s, n);
-        fflush(stdout);
-        /* Arm idle detection: from now until the next event, the
-         * progress-callback tick will check elapsed time and bring the
-         * spinner back if the model goes quiet. Reset idle_shown in
-         * case a previous idle had latched (text resumed, so we're
-         * back in the live-streaming state). */
-        ec->last_text_at = monotonic_ms();
-        ec->idle_shown = 0;
+        render_transition(r, RS_TEXT);
+        render_text_chunk(r, s, n);
         break;
     }
     case EV_TOOL_CALL_START:
     case EV_REASONING_ITEM:
-        /* Reasoning has ended — restore the default label so a stale
-         * "thinking..." doesn't linger while the model emits tool-call
-         * arguments (especially visible with reasoning models that emit
-         * large write/edit args after CoT) or while we wait for the
-         * next event after a Codex reasoning round-trip blob. The
-         * tool-call's own header + output render as one block at
-         * dispatch time, so we don't draw anything live here. */
-        spinner_set_label(ec->spinner, "working...");
+        render_flush(r);
         break;
     case EV_TOOL_CALL_DELTA:
     case EV_TOOL_CALL_END:
         /* No live display: tool calls render as a single block during
          * dispatch so parallel calls don't visually interleave. */
         break;
-    case EV_REASONING_DELTA:
-        /* Activity-only signal: flip the spinner to "thinking..." so the
-         * user can tell a long quiet pause is the model reasoning, not
-         * the network. Restored to "working..." on the first EV_TEXT_DELTA,
-         * EV_TOOL_CALL_START, or EV_REASONING_ITEM — whichever ends CoT. */
-        spinner_set_label(ec->spinner, "thinking...");
+    case EV_REASONING_DELTA: {
+        /* Flip the label even when reasoning is invisible — the
+         * spinner still shows so the user knows the quiet pause is
+         * the model reasoning, not the network. */
+        spinner_set_label(r->spinner, "thinking...");
+        const char *rt = ev->u.reasoning_delta.text;
+        if (!r->show_reasoning || !rt || !*rt)
+            break;
+        render_transition(r, RS_REASONING);
+        render_text_chunk(r, rt, strlen(rt));
         break;
+    }
     case EV_RETRY: {
-        /* Provider hit a transient HTTP failure and is about to back off
-         * before another attempt. Stash the deadline so agent_stream_tick
-         * can repaint the spinner with a live countdown — without this
-         * the label freezes at "retrying in 30s" for the full 30s, which
-         * reads as "stuck". attempt+1 is the *next* attempt about to
-         * start (the field carries the 1-based attempt that just
-         * failed). Paint immediately so there's no flicker between the
-         * prior label and the first tick of the countdown. */
-        ec->retry_deadline_at = monotonic_ms() + ev->u.retry.delay_ms;
-        ec->retry_attempt = ev->u.retry.attempt + 1;
-        ec->retry_max = ev->u.retry.max_attempts;
-        update_retry_label(ec);
+        /* Provider is about to back off before another attempt. Stash
+         * the deadline so the tick can repaint with a live countdown;
+         * paint immediately so there's no flicker between the prior
+         * label and the first tick. attempt+1 is the *next* attempt
+         * about to start. */
+        r->retry_deadline_at = monotonic_ms() + ev->u.retry.delay_ms;
+        r->retry_attempt = ev->u.retry.attempt + 1;
+        r->retry_max = ev->u.retry.max_attempts;
+        update_retry_label(r);
         break;
     }
     case EV_DONE:
+        /* Stream ended cleanly. No state transition — agent_run's
+         * post-stream path closes whatever was open. */
         ec->usage = ev->u.done.usage;
         fflush(stdout);
         break;
     case EV_ERROR:
-        /* Same ordering rule as EV_TEXT_DELTA: cluster_terminate first
-         * so it observes the real prior spinner mode. */
-        cluster_terminate(ec->cl, d, ec->spinner);
-        spinner_hide(ec->spinner);
-        /* Flush any pending markdown tail/styles so the model's last
-         * bytes appear with the model text, not after the error block.
-         * Idempotent — the post-stream md_flush in agent_run is a no-op
-         * after this. */
-        if (ec->md)
-            md_flush(ec->md);
-        disp_block_separator(d);
+        /* Full close before drawing the error block. render_open_block's
+         * RS_IDLE transition flushes md's tail if RS_TEXT was open, so
+         * partial pre-error text appears just above the error line. */
+        render_open_block(r);
         disp_raw(ANSI_RED);
         disp_printf(d, "[error: %s]", ev->u.error.message);
         disp_raw(ANSI_RESET);
@@ -1149,10 +1267,14 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
 
     putchar('\n');
     agent_print_banner(p, &sess);
-    struct disp disp = {.trail = 1, .at_space_or_bol = 1};
-    struct spinner *spinner = spinner_new("working...");
-    struct md_renderer *md =
-        markdown_enabled() ? md_new(md_emit_to_disp, &disp, display_width()) : NULL;
+    /* The single bag of rendering state threaded through every render
+     * call. disp is embedded (same lifetime as agent_run's frame), so
+     * md_emit_to_disp's user pointer is &r.disp; spinner / md are
+     * opaque handles owned here and freed below. */
+    struct render_ctx r = {.disp = {.trail = 1, .at_space_or_bol = 1},
+                           .show_reasoning = reasoning_visible()};
+    r.spinner = spinner_new("working...");
+    r.md = markdown_enabled() ? md_new(md_emit_to_disp, &r.disp, display_width()) : NULL;
     struct input *input = input_new();
     input_history_open_default(input);
     struct transcript_view tv = {
@@ -1182,16 +1304,15 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
 
     const char *prompt = locale_have_utf8() ? PROMPT_UTF8 : PROMPT_ASCII;
 
-    /* Cluster state lives across the inner loop so consecutive quiet
-     * tool calls (read/grep/find...) collapse into a tight block
-     * without intervening blank lines. Reset implicitly at the top of
-     * each user turn — cluster_terminate is a no-op when inactive, so
-     * leftover state from a prior turn (impossible in practice, but
-     * inexpensive to be defensive about) is harmless. */
-    struct cluster cl = {0};
+    /* The render state in r (state + cluster sub-state) lives across
+     * the inner loop so RS_CLUSTER can span consecutive silent tool
+     * calls (read/grep/find...) without intervening blank lines.
+     * End-of-turn cleanup unconditionally transitions back to RS_IDLE,
+     * so leftover state from a prior turn is impossible by
+     * construction. */
 
     for (;;) {
-        disp_block_separator(&disp);
+        disp_block_separator(&r.disp);
         char *line = input_readline(input, prompt);
         if (!line) {
             putchar('\n');
@@ -1211,7 +1332,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
         struct slash_ctx sctx = {.state = &state};
         if (slash_dispatch(line, &sctx) != SLASH_NOT_A_COMMAND) {
             free(line);
-            disp.trail = 1;
+            r.disp.trail = 1;
             continue;
         }
 
@@ -1232,7 +1353,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
          * is preserved on disk for post-mortem reading. */
         transcript_log_append(tlog, sess.items, sess.n_items);
         /* input_readline left the cursor at column 0 of a fresh row. */
-        disp.trail = 1;
+        r.disp.trail = 1;
 
         /* Aggregated across every model call this user turn produces.
          * ctx and cached track the latest reported value (= current window
@@ -1271,64 +1392,20 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
             first_inner = 0;
             struct context ctx = agent_session_context(&sess);
 
-            /* Spinner sits on its own line as a block: separator first so
-             * we have a known column-0 row, then show. The thread starts
-             * drawing immediately and hides on the first visible event.
-             * Label is reset per-stream so a previous turn's "thinking..."
-             * doesn't carry over into a model wait that produces no
-             * reasoning deltas. */
-            /* If the previous tool batch ended on an active quiet
-             * cluster, the inline spinner is still up at the end of
-             * `[read] foo, bar`. Don't flicker it off — the next event
-             * from the provider will terminate the cluster naturally
-             * (text → cluster_terminate in on_event; tool call →
-             * dispatch routes through silent path which hides+rewrites
-             * inline, or verbose path which terminates). The dedicated
-             * line-mode spinner only takes over when we're actually
-             * sitting at column 0 with no inline glyph. */
-            if (!cl.active) {
-                disp_block_separator(&disp);
-                spinner_set_label(spinner, "working...");
-                spinner_show(spinner);
-            }
+            render_stream_begin(&r);
 
-            if (md)
-                md_reset(md, display_width());
+            if (r.md)
+                md_reset(r.md, display_width());
             struct turn t;
             turn_init(&t);
-            disp.saw_text = 0;
-            struct event_ctx ec = {.disp = &disp,
-                                   .turn = &t,
-                                   .spinner = spinner,
-                                   .md = md,
-                                   .cl = &cl,
-                                   .usage = {-1, -1, -1},
-                                   .last_text_at = 0,
-                                   .idle_shown = 0};
+            r.disp.saw_text = 0;
+            struct event_ctx ec = {.r = &r, .turn = &t, .usage = {-1, -1, -1}};
             /* agent_stream_tick combines cancel (Esc) with idle
              * detection: ~1Hz from libcurl's progress callback inside
-             * curl_easy_perform, plus on every received chunk. The
-             * provider threads it straight through to http_sse_post. */
-            p->stream(p, &ctx, sess.model, on_event, &ec, agent_stream_tick, &ec);
+             * curl_easy_perform, plus on every received chunk. */
+            p->stream(p, &ctx, sess.model, on_event, &ec, agent_stream_tick, &r);
 
-            /* Either a tool-only response (no text emitted, spinner still
-             * visible) or stream returned without ever firing an event —
-             * make sure we're back to a clean line before continuing.
-             *
-             * Skip when a quiet cluster is active: the inline spinner is
-             * the cluster's "still alive" indicator, sitting at the end
-             * of an unterminated line that the next silent dispatch will
-             * either coalesce into or close cleanly. Hiding here would
-             * lose the in-line cursor position and trick the next
-             * dispatch's was_inline=0 branch into thinking the spinner
-             * had auto-transitioned, suppressing the \n that should
-             * separate the next [read] header from the prior line. */
-            if (!cl.active)
-                spinner_hide(spinner);
-            /* Commit any markdown tail/styles so we don't carry them
-             * forward and the terminal isn't left styled. */
-            if (md)
-                md_flush(md);
+            render_stream_end(&r);
 
             if (t.error) {
                 /* Mid-stream error (network drop, "length"/"content_filter"
@@ -1436,13 +1513,13 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
                      * the provider returned anyway. Same gate exists in
                      * oneshot.c — local execution must not be reachable
                      * from a malformed or malicious backend response. */
-                    cluster_terminate(&cl, &disp, spinner);
-                    result = dispatch_tool_refused(&disp, &sess.items[i]);
+                    render_transition(&r, RS_IDLE);
+                    result = dispatch_tool_refused(&r, &sess.items[i]);
                 } else if (interrupt_requested()) {
-                    cluster_terminate(&cl, &disp, spinner);
-                    result = dispatch_tool_skipped(&disp, &sess.items[i]);
+                    render_transition(&r, RS_IDLE);
+                    result = dispatch_tool_skipped(&r, &sess.items[i]);
                 } else {
-                    result = dispatch_tool_call(&cl, &disp, spinner, &sess.items[i]);
+                    result = dispatch_tool_call(&r, &sess.items[i]);
                 }
                 items_append(&sess.items, &sess.n_items, &sess.cap_items, result);
             }
@@ -1479,13 +1556,10 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
         }
         interrupt_disarm();
 
-        /* Tear down any in-progress quiet cluster before any post-turn
-         * output. Each branch below (interrupted marker, usage stats,
-         * terminal notification) writes to stdout, and the inline
-         * spinner thread is still drawing into the cluster line until
-         * we stop it — letting it run alongside our writes risks
-         * interleaved bytes (especially fatal mid-OSC-9 sequence). */
-        cluster_terminate(&cl, &disp, spinner);
+        /* Close any open render state before post-turn output — a
+         * still-running cluster spinner racing with notify_attention's
+         * OSC-9 would corrupt the escape sequence. */
+        render_transition(&r, RS_IDLE);
 
         /* Catch-all flush. The per-round-trip append above covers tool
          * paths; this one picks up the no-tool exit (assistant message
@@ -1494,16 +1568,16 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
         transcript_log_append(tlog, sess.items, sess.n_items);
 
         if (turn_interrupted) {
-            disp_block_separator(&disp);
+            render_open_block(&r);
             disp_raw(ANSI_DIM);
-            disp_printf(&disp, "%s", INTERRUPT_MARKER);
+            disp_printf(&r.disp, "%s", INTERRUPT_MARKER);
             disp_raw(ANSI_RESET);
-            disp_putc(&disp, '\n');
+            disp_putc(&r.disp, '\n');
             fflush(stdout);
         }
 
         if (!turn_errored)
-            display_usage(&disp, p, turn_ctx, turn_out, turn_cached);
+            display_usage(&r, p, turn_ctx, turn_out, turn_cached);
 
         /* Ping the terminal so the user gets a notification / dock
          * bounce when hax is back to idle. Skipped on Esc-interrupt
@@ -1514,10 +1588,10 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
             notify_attention();
     }
 
-    spinner_free(spinner);
+    spinner_free(r.spinner);
     input_free(input);
-    if (md)
-        md_free(md);
+    if (r.md)
+        md_free(r.md);
     transcript_log_close(tlog);
     agent_session_free(&sess);
     return 0;

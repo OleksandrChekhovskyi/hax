@@ -13,18 +13,32 @@
 # callback (~1Hz) instead of mock's polled msleep, but the agent-side
 # bookkeeping (last_text_at, idle_shown, agent_stream_tick) is identical.
 #
-# Two patterns are exercised:
+# Three patterns are exercised:
 #
-#  Turn 1: text → pause → text → pause → text. The idle glyph fires
+#  Turn 1: reasoning → pause → reasoning → answer. With
+#  HAX_SHOW_REASONING=1 the idle glyph fires mid-CoT inside the
+#  dim+italic span, then the renderer transitions to the answer.
+#  Without the env var the reasoning chunks drive only the spinner
+#  label ("thinking..."), and the idle glyph never paints.
+#
+#  Turn 2: text → pause → text → pause → text. The idle glyph fires
 #  twice between sentences. Real-world equivalent: a model that pauses
 #  between paragraphs to think.
 #
-#  Turn 2: text → pause → tool call. The idle glyph fires during the
+#  Turn 3: text → pause → tool call. The idle glyph fires during the
 #  pause between the trailing text and the tool dispatch. Real-world
 #  equivalent: a model that says "let me look at X" and then takes a
 #  few seconds to generate the tool-call args (Qwen via llama.cpp does
 #  this routinely). Without idle detection across non-text events the
 #  user would stare at unchanging output during args streaming.
+
+reasoning Thinking through the user's question — what's the simplest answer that still covers the asked-for bits?\n\n
+delay 2500
+reasoning Right, I have it. The idle glyph should have parked on the dim+italic span between these two thoughts.
+delay 0
+text Here's the answer after that pause.
+usage in=80 out=22
+end-turn
 
 text Sentence one — the model emits this then pauses.
 space

@@ -120,12 +120,23 @@ struct provider *openrouter_provider_new(void)
         headers[i++] = referer_hdr;
     headers[i] = NULL;
 
+    /* HAX_SHOW_REASONING also acts as a request-side opt-in here:
+     * many OpenRouter models gate CoT behind `reasoning.enabled=true`,
+     * so without this flag the deltas the user asked to see never
+     * arrive. When off, we fall back to the flat dialect so a plain
+     * `reasoning_effort` still reaches models that honor it. The same
+     * env var still gates the *display* side in the agent — provider
+     * opt-in alone doesn't render anything. */
+    const char *show = getenv("HAX_SHOW_REASONING");
+    int request_reasoning = show && *show && strcmp(show, "0") != 0;
+
     struct openai_preset preset = {
         .display_name = "openrouter",
         .default_base_url = "https://openrouter.ai/api/v1",
         .api_key_env = "OPENROUTER_API_KEY",
         .send_cache_key_default = 1,
         .extra_headers = headers,
+        .reasoning_format = request_reasoning ? REASONING_NESTED : REASONING_FLAT,
     };
     /* Constructor copies headers internally, so the local strings can be
      * freed once it returns. */

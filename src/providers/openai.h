@@ -15,6 +15,36 @@
  * Returns NULL on failure (prints cause to stderr). */
 struct provider *openai_provider_new(void);
 
+/* Wire-format dialect for reasoning parameters. OpenAI-compatible
+ * backends agree on the rest of the Chat Completions payload but
+ * diverge here — the divergence is structural (different field name
+ * and shape, not just a value), so each backend declares which dialect
+ * to emit. New shapes (DeepSeek's `thinking: {type}`, Qwen's
+ * `enable_thinking`, …) get a new value here and a matching arm in
+ * build_body().
+ *
+ *   REASONING_FLAT    `reasoning_effort: <effort>` as a top-level
+ *                     string, sent only when effort is set. The
+ *                     default — real OpenAI's Chat Completions
+ *                     accepts exactly this shape and rejects others.
+ *   REASONING_NESTED  `reasoning: {enabled: true, effort?: <effort>}`
+ *                     as a top-level object, always sent when
+ *                     selected. The `enabled: true` is the opt-in
+ *                     some routers (OpenRouter, …) need to wake CoT
+ *                     emission on models that otherwise stay silent. */
+enum reasoning_format {
+    REASONING_FLAT = 0,
+    REASONING_NESTED,
+};
+
+/* Parse "flat" / "nested" into the matching enum value. `fallback` is
+ * returned when `s` is NULL/empty so callers can write
+ *   .reasoning_format = reasoning_format_parse(getenv("HAX_..."), REASONING_FLAT)
+ * without an extra NULL check. An unrecognized non-empty value also
+ * falls back, with a one-line stderr warning so a typo doesn't pass
+ * silently. */
+enum reasoning_format reasoning_format_parse(const char *s, enum reasoning_format fallback);
+
 /* Preset configuration consumed by openai_provider_new_preset(). All fields
  * are optional except `default_base_url` (or HAX_OPENAI_BASE_URL must be
  * set). Used by the thin shim providers (openai-compatible, llama.cpp,
@@ -42,6 +72,10 @@ struct openai_preset {
      * "Name: value" strings. Copied at construction; the preset does not
      * need to keep them alive afterwards. NULL → none. */
     const char *const *extra_headers;
+    /* Wire format for reasoning parameters — see enum reasoning_format
+     * above. Zero-initialized presets get REASONING_FLAT, the common
+     * case for OpenAI Chat Completions and OpenAI-compatible backends. */
+    enum reasoning_format reasoning_format;
 };
 
 /* Build an OpenAI-compatible provider configured by `preset`. NULL preset

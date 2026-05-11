@@ -21,6 +21,7 @@ struct openai {
     char *endpoint;   /* base_url + "/chat/completions" */
     char *session_id; /* sent as prompt_cache_key when send_cache_key is set */
     int send_cache_key;
+    enum reasoning_format reasoning_format;
     char **extra_headers; /* NULL-terminated, each element heap-owned; NULL = none */
     /* Optional background probe — currently the context-window
      * discovery spawned by preset shims (openrouter, llama.cpp).
@@ -141,7 +142,21 @@ static json_t *build_tools(const struct tool_def *tools, size_t n)
     return arr;
 }
 
-static char *build_body(const struct context *ctx, const char *model, const char *cache_key)
+enum reasoning_format reasoning_format_parse(const char *s, enum reasoning_format fallback)
+{
+    if (!s || !*s)
+        return fallback;
+    if (strcmp(s, "flat") == 0)
+        return REASONING_FLAT;
+    if (strcmp(s, "nested") == 0)
+        return REASONING_NESTED;
+    fprintf(stderr,
+            "hax: unknown reasoning format %s (expected 'flat' or 'nested') — using default\n", s);
+    return fallback;
+}
+
+static char *build_body(const struct context *ctx, const char *model, const char *cache_key,
+                        enum reasoning_format reasoning)
 {
     /* Omit `tool_choice` and `parallel_tool_calls`: their defaults ("auto"
      * and true respectively) are exactly what we want, so explicitly setting
@@ -165,8 +180,22 @@ static char *build_body(const struct context *ctx, const char *model, const char
     if (cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(cache_key));
 
-    if (ctx->reasoning_effort)
-        json_object_set_new(body, "reasoning_effort", json_string(ctx->reasoning_effort));
+    switch (reasoning) {
+    case REASONING_FLAT:
+        if (ctx->reasoning_effort)
+            json_object_set_new(body, "reasoning_effort", json_string(ctx->reasoning_effort));
+        break;
+    case REASONING_NESTED: {
+        /* `enabled: true` is the opt-in some routers need to wake CoT
+         * emission on models that otherwise stay silent. Effort
+         * piggybacks in the same object when set. */
+        json_t *r = json_pack("{s:b}", "enabled", 1);
+        if (ctx->reasoning_effort)
+            json_object_set_new(r, "effort", json_string(ctx->reasoning_effort));
+        json_object_set_new(body, "reasoning", r);
+        break;
+    }
+    }
 
     char *s = json_dumps(body, JSON_COMPACT);
     json_decref(body);
@@ -189,7 +218,8 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
 {
     struct openai *o = (struct openai *)p;
 
-    char *body = build_body(ctx, model, o->send_cache_key ? o->session_id : NULL);
+    char *body =
+        build_body(ctx, model, o->send_cache_key ? o->session_id : NULL, o->reasoning_format);
     if (!body)
         return -1;
     size_t body_len = strlen(body);
@@ -376,6 +406,7 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
     o->name_buf = xstrdup(name);
     o->endpoint = xasprintf("%s/chat/completions", o->base_url);
     o->send_cache_key = send_cache_key;
+    o->reasoning_format = preset->reasoning_format;
     o->extra_headers = dup_headers(preset->extra_headers);
     char uuid[37];
     gen_uuid_v4(uuid);

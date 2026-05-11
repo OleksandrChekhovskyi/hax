@@ -14,6 +14,8 @@
 #
 # DSL recap (see src/providers/mock.c for the full spec):
 #   text <message>                    one assistant text delta
+#   reasoning <message>               one chain-of-thought delta (visible
+#                                     only with HAX_SHOW_REASONING=1)
 #   tool <name> <json>                one tool call
 #   delay <ms>                        sleep before next emission and
 #                                     between auto-streamed text chunks
@@ -22,8 +24,16 @@
 #   end-turn                          finalize the current turn
 #   # comment / blank line            ignored
 
-# ---------- turn 1: simple bash, dim block under the head cap ----------
+# ---------- turn 1: reasoning prelude, then a simple bash call ---------
+# The reasoning block exercises the CoT render path: with HAX_SHOW_
+# REASONING=1 it streams as a dim+italic span reflowed to terminal
+# width; Markdown markers (the `backticks` around identifiers, the
+# blank-line paragraph break) parse for structure but suppress inline
+# SGR so the whole block stays one color. Without the env var the
+# agent only flips the spinner label to "thinking..." and discards
+# the text — matching how real providers behave.
 delay 30
+reasoning The user just said hello, so I should poke around to see what kind of repo this is before answering. A single `ls scripts/` is enough — the directory is flat, no need for `find` or `-R`.\n\nLet me run it and then summarize.
 text Let me poke around the repo to start.
 tool bash {"command":"ls scripts/"}
 usage in=420 out=18

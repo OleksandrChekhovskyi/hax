@@ -37,6 +37,12 @@
  *                                Decodes \n, \t, \\ so a single delta can
  *                                span multiple lines (used by the markdown
  *                                wrap fixtures in mock_layout.txt).
+ *       reasoning <message>      One reasoning/chain-of-thought delta.
+ *                                Same auto-chunking and \-escape decoding
+ *                                as `text`. Renders only when HAX_SHOW_
+ *                                REASONING is set; otherwise the agent
+ *                                consumes it as a spinner-label-only
+ *                                signal, matching real providers.
  *       space                    One single-space text delta. Use between
  *                                consecutive `text` directives that should
  *                                read as joined prose; without it, two
@@ -103,10 +109,12 @@ static int msleep(long ms, http_tick_cb tick, void *tick_user)
     return mock_tick(tick, tick_user);
 }
 
-/* Auto-stream `s` as multiple text deltas of up to TEXT_CHUNK_BYTES
- * bytes, sleeping `delay_ms` between chunks. The chunked emission is
- * what gives the live preview something to repaint when delay > 0;
- * with delay == 0 the deltas still arrive separately but back-to-back.
+/* Auto-stream `s` as multiple deltas of up to TEXT_CHUNK_BYTES bytes,
+ * sleeping `delay_ms` between chunks. The chunked emission is what
+ * gives the live preview something to repaint when delay > 0; with
+ * delay == 0 the deltas still arrive separately but back-to-back.
+ * `reasoning` selects EV_REASONING_DELTA over EV_TEXT_DELTA; the body
+ * is otherwise identical.
  *
  * Chunks are walked back to a UTF-8 codepoint boundary so a multibyte
  * character (em-dash, emoji, …) never straddles two deltas. Real
@@ -114,8 +122,8 @@ static int msleep(long ms, http_tick_cb tick, void *tick_user)
  * a naive byte-window split would diverge from that and corrupt any
  * mid-stream rendering that interleaves with the partial bytes (the
  * idle inline spinner being the most visible example). */
-static int emit_text_chunked(stream_cb cb, void *user, const char *s, long delay_ms,
-                             http_tick_cb tick, void *tick_user)
+static int emit_chunked(stream_cb cb, void *user, const char *s, long delay_ms, http_tick_cb tick,
+                        void *tick_user, int reasoning)
 {
     size_t n = strlen(s);
     if (n == 0)
@@ -139,7 +147,10 @@ static int emit_text_chunked(stream_cb cb, void *user, const char *s, long delay
         }
         memcpy(buf, s + i, take);
         buf[take] = '\0';
-        struct stream_event ev = {.kind = EV_TEXT_DELTA, .u.text_delta = {.text = buf}};
+        struct stream_event ev =
+            reasoning ? (struct stream_event){.kind = EV_REASONING_DELTA,
+                                              .u.reasoning_delta = {.text = buf}}
+                      : (struct stream_event){.kind = EV_TEXT_DELTA, .u.text_delta = {.text = buf}};
         int rc = cb(&ev, user);
         if (rc)
             return rc;
@@ -150,6 +161,12 @@ static int emit_text_chunked(stream_cb cb, void *user, const char *s, long delay
         }
     }
     return 0;
+}
+
+static int emit_text_chunked(stream_cb cb, void *user, const char *s, long delay_ms,
+                             http_tick_cb tick, void *tick_user)
+{
+    return emit_chunked(cb, user, s, delay_ms, tick, tick_user, 0);
 }
 
 static int emit_tool_call(stream_cb cb, void *user, const char *name, const char *args_json)
@@ -293,7 +310,8 @@ static int play_one_turn(FILE *f, stream_cb cb, void *user, http_tick_cb tick, v
             delay_ms = parse_long(rest, 0);
             continue;
         }
-        if (starts_with(body, "text", &rest)) {
+        if (starts_with(body, "text", &rest) || starts_with(body, "reasoning", &rest)) {
+            int reasoning = body[0] == 'r';
             if (msleep(delay_ms, tick, tick_user))
                 return emit_done(cb, user, usage);
             /* Decode minimal C-style escapes (\n, \t, \\) so script
@@ -327,7 +345,7 @@ static int play_one_turn(FILE *f, stream_cb cb, void *user, http_tick_cb tick, v
                 decoded[di++] = rest[si];
             }
             decoded[di] = '\0';
-            int rc = emit_text_chunked(cb, user, decoded, delay_ms, tick, tick_user);
+            int rc = emit_chunked(cb, user, decoded, delay_ms, tick, tick_user, reasoning);
             free(decoded);
             if (rc)
                 return rc;

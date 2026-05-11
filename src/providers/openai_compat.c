@@ -19,6 +19,12 @@ struct provider *openai_compat_provider_new(void)
         /* No default_base_url: HAX_OPENAI_BASE_URL is mandatory and the
          * openai constructor reads it from env. */
         .send_cache_key_default = 0,
+        /* OpenAI-compatible backends diverge on the reasoning wire
+         * format (real OpenAI: flat; OpenRouter-like routers and some
+         * proxies: nested). Let the user pick at runtime since we
+         * don't know which one they're pointing at. */
+        .reasoning_format =
+            reasoning_format_parse(getenv("HAX_OPENAI_REASONING_FORMAT"), REASONING_FLAT),
     };
     return openai_provider_new_preset(&preset);
 }

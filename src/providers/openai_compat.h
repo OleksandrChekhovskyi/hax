@@ -18,7 +18,14 @@
  * to the dedicated openai preset, so a globally configured key never
  * leaks to a third-party endpoint. prompt_cache_key is off by default
  * (some backends like vLLM reject unknown JSON fields); set
- * HAX_OPENAI_SEND_CACHE_KEY to opt in for backends that honor it. */
+ * HAX_OPENAI_SEND_CACHE_KEY to opt in for backends that honor it.
+ *
+ * Reasoning wire format defaults to flat `reasoning_effort` (the OpenAI
+ * Chat Completions shape). Override with HAX_OPENAI_REASONING_FORMAT:
+ *   flat    — `reasoning_effort: <effort>` (default)
+ *   nested  — `reasoning: {enabled: true, effort?: <effort>}` (for
+ *             OpenRouter-style routers and proxies that gate CoT
+ *             emission on an explicit opt-in) */
 struct provider *openai_compat_provider_new(void);
 
 extern const struct provider_factory PROVIDER_OPENAI_COMPAT;

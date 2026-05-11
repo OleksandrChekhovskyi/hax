@@ -55,4 +55,13 @@ void md_flush(struct md_renderer *m); /* commit pending tail at end of turn */
 void md_reset(struct md_renderer *m, int wrap_width);
 void md_free(struct md_renderer *m);
 
+/* Toggle inline SGR emission (bold / italic / code / heading / fence
+ * color). Wrap and block structure still run — only color escapes are
+ * suppressed when off. Use when the caller owns SGR around the
+ * renderer's output (e.g. CoT inside a dim+italic span). Acts as a
+ * soft reset at the mode boundary: flushes the tail under the old
+ * setting, then clears parser + wrap state. Caller emits ANSI_RESET
+ * at the seam; this function does not. Default is on. */
+void md_set_styled(struct md_renderer *m, int on);
+
 #endif /* HAX_MARKDOWN_H */

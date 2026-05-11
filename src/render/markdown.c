@@ -51,6 +51,13 @@ struct md_renderer {
     int in_bold;
     int in_italic;
 
+    /* When 0, the open_* / close_* helpers below suppress their SGR
+     * escapes but keep the in_* flag bookkeeping. The parser still
+     * tracks bold/italic/etc. correctly (so markers nest and close as
+     * usual) — only the visible color changes are dropped. Wrap and
+     * block structure are unaffected. Defaults to 1. See md_set_styled. */
+    int styled;
+
     /* Set when the current line starts with a marker that isolates it
      * from surrounding prose (blockquote `>`, GFM table row `|`). The
      * trailing \n of such a line is forced hard regardless of what's
@@ -427,6 +434,12 @@ static void emit_text(struct md_renderer *m, const char *s, size_t n)
  * so a closer after a buffered `\n` doesn't trash the trail counter. */
 static void emit_raw(struct md_renderer *m, const char *s)
 {
+    /* Unstyled mode: every emit_raw call site is an SGR escape, so a
+     * single gate here suppresses them all. The in_* flag bookkeeping
+     * in the open_/close_ helpers still runs, keeping marker nesting
+     * correct. */
+    if (!m->styled)
+        return;
     size_t n = strlen(s);
     if (m->wrap_width <= 0 || m->in_code_fence || m->in_heading) {
         /* Drain any pending malformed UTF-8 from the wrap stream
@@ -1098,6 +1111,7 @@ struct md_renderer *md_new(md_emit_fn emit_cb, void *user, int wrap_width)
     m->emit_cb = emit_cb;
     m->user = user;
     m->at_line_start = 1;
+    m->styled = 1;
     m->wrap_width = wrap_width;
     m->last_break_byte = -1;
     return m;
@@ -1114,6 +1128,7 @@ void md_reset(struct md_renderer *m, int wrap_width)
     m->in_inline_code = 0;
     m->in_bold = 0;
     m->in_italic = 0;
+    m->styled = 1;
     m->cur_line_is_block = 0;
     /* Re-sample wrap width on turn boundary so SIGWINCH-style resizes
      * between turns are picked up cheaply without callback plumbing. */
@@ -1372,4 +1387,17 @@ void md_flush(struct md_renderer *m)
             wrap_consume_codepoint(m, out, out_n, cells);
         wrap_flush_all(m);
     }
+}
+
+void md_set_styled(struct md_renderer *m, int on)
+{
+    if (m->styled == on)
+        return;
+    /* Flush the tail under the OLD setting so deferred markers resolve
+     * with the SGR rules they were buffered under, then soft-reset
+     * (same fields as md_reset, wrap_width preserved) so the next feed
+     * starts at column 0 to match the seam the caller is emitting. */
+    md_flush(m);
+    md_reset(m, m->wrap_width);
+    m->styled = on;
 }
