@@ -144,6 +144,17 @@ static void test_code_fence(void)
     free(got);
 }
 
+static void test_code_fence_tab_expanded_to_four_spaces(void)
+{
+    /* Fence body bypasses the wrap engine; emit_text substitutes \t
+     * with 4 spaces before either branch so terminals don't expand
+     * tabs to inconsistent column-multiple-of-8 stops. */
+    char *got = render_one("```\n\thello\n```\n");
+    EXPECT(strchr(got, '\t') == NULL);
+    EXPECT(strstr(got, "    hello") != NULL);
+    free(got);
+}
+
 static void test_code_fence_with_lang(void)
 {
     /* Language id renders as a dim+cyan label on its own line above
@@ -1098,6 +1109,31 @@ static void test_wrap_under_budget_unchanged(void)
     free(got);
 }
 
+static void test_wrap_tab_collapsed_to_single_space(void)
+{
+    /* Wrap branch substitutes \t with a single space (not 4 — see
+     * emit_text comment: 4 spaces would let stream-commits push the
+     * row past wrap_width). Mid-prose tabs are vanishingly rare from
+     * models; collapsing to one space is semantically equivalent for
+     * prose. */
+    char *got = render_wrap("a\tb", 80);
+    EXPECT_STR_EQ(got, "a b");
+    free(got);
+}
+
+static void test_wrap_tab_near_right_edge_no_overflow(void)
+{
+    /* Regression for the stream-commit bug: with the 4-space tab
+     * substitution, "ab\tcd" at a 4-cell budget would emit "ab   \ncd"
+     * — first row 5 cells, over budget by 1, because three of the
+     * four expanded spaces got stream-committed before any non-space
+     * could trigger wrap_break. Single-space substitution lets the
+     * break fire cleanly at the tab. */
+    char *got = render_wrap("ab\tcd", 4);
+    EXPECT_STR_EQ(got, "ab\ncd");
+    free(got);
+}
+
 static void test_wrap_long_word_overflow(void)
 {
     /* A single word longer than the budget — long-word fallback emits
@@ -1397,6 +1433,7 @@ int main(void)
     test_hash_no_space_is_text();
 
     test_code_fence();
+    test_code_fence_tab_expanded_to_four_spaces();
     test_code_fence_with_lang();
     test_code_fence_lang_with_attrs();
     test_code_fence_lang_split_across_feeds();
@@ -1502,6 +1539,8 @@ int main(void)
     test_wrap_long_paragraph();
     test_wrap_multiple_breaks();
     test_wrap_under_budget_unchanged();
+    test_wrap_tab_collapsed_to_single_space();
+    test_wrap_tab_near_right_edge_no_overflow();
     test_wrap_long_word_overflow();
     test_wrap_list_indent();
     test_wrap_numbered_list_indent();

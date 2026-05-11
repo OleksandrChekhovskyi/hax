@@ -358,7 +358,7 @@ static void wrap_drain_cp_stream(struct md_renderer *m)
         wrap_consume_codepoint(m, out, out_n, cells);
 }
 
-static void emit_text(struct md_renderer *m, const char *s, size_t n)
+static void emit_text_chunk(struct md_renderer *m, const char *s, size_t n)
 {
     /* Wrap disabled, or modes that pass content through verbatim:
      * code fences are CommonMark-verbatim and headings are by-policy
@@ -384,6 +384,42 @@ static void emit_text(struct md_renderer *m, const char *s, size_t n)
         if (utf8_stream_byte(&m->cp_stream, b, &out, &out_n, &cells))
             wrap_consume_codepoint(m, out, out_n, cells);
     }
+}
+
+/* Substitute \t before content reaches the terminal so it can't expand
+ * to inconsistent column-multiple-of-8 tab stops past our cell budget
+ * (wcwidth('\t') == -1, so without substitution cell math counts a tab
+ * as one cell while the terminal renders many). Two policies because
+ * the wrap engine and the verbatim path tolerate multi-cell whitespace
+ * differently:
+ *
+ *   - Verbatim (code fences, headings, no-wrap mode): 4 spaces.
+ *     Preserves indent fidelity for source code in fenced blocks, the
+ *     main practical case.
+ *
+ *   - Wrap engine: 1 space. The engine records a wrap-break candidate
+ *     at every space and stream-commits earlier ones as later spaces
+ *     arrive, so a 4-space expansion can let already-emitted spaces
+ *     push the row past wrap_width by up to 3 cells before the next
+ *     non-space triggers a break. A single space round-trips through
+ *     the break math cleanly and is semantically fine for prose (a
+ *     mid-prose tab serves the same role as a space). */
+static void emit_text(struct md_renderer *m, const char *s, size_t n)
+{
+    int bypass = (m->wrap_width <= 0 || m->in_code_fence || m->in_heading);
+    const char *tab_sub = bypass ? "    " : " ";
+    size_t tab_sub_len = bypass ? 4 : 1;
+    size_t start = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\t') {
+            if (i > start)
+                emit_text_chunk(m, s + start, i - start);
+            emit_text_chunk(m, tab_sub, tab_sub_len);
+            start = i + 1;
+        }
+    }
+    if (start < n)
+        emit_text_chunk(m, s + start, n - start);
 }
 
 /* Emit an ANSI escape (zero-width). The is_raw=1 flag tells consumers

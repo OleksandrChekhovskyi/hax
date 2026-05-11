@@ -412,6 +412,11 @@ static void emit_byte_diff(struct tool_render *r, char ch)
     if (ch == '\n') {
         emit_diff_line(r, r->diff_line.data ? r->diff_line.data : "", r->diff_line.len);
         buf_reset(&r->diff_line);
+    } else if (ch == '\t') {
+        /* Match the head/tail path: expand \t to 4 spaces so the row
+         * width passed to truncate_for_display matches what the
+         * terminal renders. */
+        buf_append(&r->diff_line, "    ", 4);
     } else {
         buf_append(&r->diff_line, &ch, 1);
     }
@@ -462,16 +467,22 @@ void tool_render_feed(struct tool_render *r, const char *bytes, size_t n)
                 i++;
                 continue;
             }
-            /* Tab is the one C0 control ctrl_strip preserves; pass it
-             * through as one cell of whitespace. utf8_codepoint_cells
-             * treats it as dangerous (returns -1), so it must skip the
-             * codepoint walk below to avoid being substituted with
-             * "?". Tabs don't set line_saw_non_ws — they're whitespace
-             * for elision purposes. */
+            /* Tab is the one C0 control ctrl_strip preserves. Expand
+             * to a fixed 4 spaces before it hits the line buffer or
+             * tail ring: a raw \t reaching the terminal expands to the
+             * next column-multiple-of-8 tab stop, which doesn't match
+             * the 1-cell width truncate_for_display assumes (wcwidth
+             * returns -1 for tab), so the rendered row blows past
+             * content_budget and wraps out of the gutter. Spaces are
+             * whitespace for elision purposes, same as the tab they
+             * replace, so line_saw_non_ws is correctly left alone. */
             if (c == '\t') {
-                if (r->line.len < LINE_BUF_CAP)
-                    buf_append(&r->line, "\t", 1);
-                tail_push_byte(r, '\t');
+                static const char TAB_AS[] = "    ";
+                size_t tw = sizeof(TAB_AS) - 1;
+                if (r->line.len + tw <= LINE_BUF_CAP)
+                    buf_append(&r->line, TAB_AS, tw);
+                for (size_t k = 0; k < tw; k++)
+                    tail_push_byte(r, TAB_AS[k]);
                 r->line_total_bytes++;
                 i++;
                 continue;

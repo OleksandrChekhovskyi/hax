@@ -234,6 +234,19 @@ static void test_indented_content_preserved(void)
     EXPECT(strstr(out, STRIP_FIRST ANSI_DIM "    indented" ANSI_RESET STRIP_CLOSE_SOLO) != NULL);
 }
 
+static void test_tab_expanded_to_four_spaces(void)
+{
+    /* Raw \t reaching the terminal expands to the next column-multiple-
+     * of-8 tab stop, but wcwidth('\t') == -1 made cell math count it as
+     * one cell — the mismatch wrapped content out of the gutter. Tabs
+     * are substituted with 4 spaces before any cell math runs; assert
+     * no raw tab survives and the expanded indent is visible. */
+    const char *in = "\t\thello\n";
+    const char *out = render_one(R_HEAD_ONLY, in, strlen(in));
+    EXPECT(strchr(out, '\t') == NULL);
+    EXPECT(strstr(out, "        hello") != NULL);
+}
+
 /* ---------- head-cap suppression ---------- */
 
 static void test_head_only_exceeds_cap_emits_footer(void)
@@ -379,6 +392,17 @@ static void test_diff_colors_added_and_removed(void)
     EXPECT(strstr(out, ANSI_GREEN) != NULL);
     EXPECT(strstr(out, ANSI_RED) != NULL);
     EXPECT(strstr(out, ANSI_DIM) != NULL);
+}
+
+static void test_diff_tab_expanded_to_four_spaces(void)
+{
+    /* Same substitution rule applies to the diff path — a model
+     * emitting tab-indented source in a unified diff must not blow
+     * past content_budget. */
+    const char *in = "+\thello\n";
+    const char *out = render_one(R_DIFF, in, strlen(in));
+    EXPECT(strchr(out, '\t') == NULL);
+    EXPECT(strstr(out, "+    hello") != NULL);
 }
 
 static void test_diff_flushes_partial_trailing_line(void)
@@ -774,6 +798,7 @@ int main(void)
     test_blank_lines_elided_between_content();
     test_whitespace_only_lines_elided();
     test_indented_content_preserved();
+    test_tab_expanded_to_four_spaces();
     test_head_only_exceeds_cap_emits_footer();
     test_head_tail_under_cap_shows_all_lines();
     test_head_tail_exceeds_cap_emits_marker_and_tail();
@@ -782,6 +807,7 @@ int main(void)
     test_over_indented_content_renders_truncation_marker();
     test_long_unbroken_input_buffer_bounded();
     test_diff_colors_added_and_removed();
+    test_diff_tab_expanded_to_four_spaces();
     test_diff_flushes_partial_trailing_line();
     test_diff_preserves_blank_lines();
     test_ctrl_bytes_dropped_before_render();

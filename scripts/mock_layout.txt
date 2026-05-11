@@ -2,9 +2,9 @@
 # mock_demo.txt walks through the rendering pipeline end-to-end (head
 # preview, head+tail elision, diff coloring, etc.), this one is the
 # place to add fixtures for layout-specific behaviors that are easy to
-# eyeball but tedious to cover in unit tests — header reflow today,
-# streaming-markdown wrap and tool-output gutter rendering when they
-# land.
+# eyeball but tedious to cover in unit tests — header reflow, tool-
+# output gutter rendering (incl. tab expansion), and streaming-markdown
+# wrap.
 #
 #   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock_layout.txt build/hax
 #
@@ -62,7 +62,20 @@ tool bash {"command":"for i in 1 2 3; do printf 'X%.0s' $(seq 1 200); echo; prin
 usage in=380 out=14
 end-turn
 
-# ---------- turn 6: read silent header --------------------------------
+# ---------- turn 6: leading tabs in tool output (gutter integrity) ----
+# Lines with leading tabs used to wrap out of the gutter strip:
+# wcwidth('\t') == -1 left cell math believing a tab took 1 cell while
+# the terminal expanded it to the next column-multiple-of-8 tab stop,
+# pushing content past content_budget. tool_render now substitutes \t
+# with 4 spaces before content reaches truncate_for_display, so this
+# block should render with a clean ┌ / │ / └ gutter, tabs visualized as
+# 4-space indents, and per-row "..." on the long line.
+text Tab-laden output — gutter should stay intact and tabs render as 4 spaces.
+tool bash {"command":"printf '\\t\\t// a long comment with enough text after the leading tabs that the row needs per-cell truncation at the right margin\\n\\t\\tlong_function_call(first_argument, second_argument, third_argument);\\n\\thello from a less-indented line\\nno-tab line at column zero\\n'"}
+usage in=400 out=18
+end-turn
+
+# ---------- turn 7: read silent header --------------------------------
 # Read goes through the silent path: the bracketed `[read]` plus the
 # basename + ":N-M" extra render as a single dim line. Included here
 # so the layout demo also covers the silent header for visual
@@ -73,19 +86,19 @@ tool read {"path":"src/providers/this/is/an/intentionally/very/deeply/nested/ima
 usage in=400 out=12
 end-turn
 
-text Done — that covers verbose-header reflow, per-row truncation, and the silent path.
+text Done — that covers verbose-header reflow, per-row truncation, tab expansion, and the silent path.
 usage in=440 out=14
 end-turn
 
 # Markdown wrap fixtures. Pin the width with HAX_DISPLAY_WIDTH=80 for
 # reproducible breaks; the comments below assume that width.
 
-# ---------- turn 7: long unwrapped paragraph --------------------------
+# ---------- turn 8: long unwrapped paragraph --------------------------
 text Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
 usage in=480 out=40
 end-turn
 
-# ---------- turn 8: model-narrow lines, soft-joined and re-wrapped ----
+# ---------- turn 9: model-narrow lines, soft-joined and re-wrapped ----
 text Lorem ipsum dolor sit amet, consectetur
 text \nadipiscing elit, sed do eiusmod tempor
 text \nincididunt ut labore et dolore magna
@@ -94,13 +107,13 @@ text \nnostrud exercitation ullamco laboris.
 usage in=520 out=42
 end-turn
 
-# ---------- turn 9: paragraph break preserved (blank line is hard) ----
+# ---------- turn 10: paragraph break preserved (blank line is hard) ---
 text First paragraph with enough content to almost fill a single 80-cell row of output.
 text \n\nSecond paragraph after a blank line — this should render as a separate block, not joined.
 usage in=560 out=20
 end-turn
 
-# ---------- turn 10: bullet list, hanging indent on wrapped items -----
+# ---------- turn 11: bullet list, hanging indent on wrapped items -----
 text Here is a list:
 text \n* alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi
 text \n* one two three four five six seven eight nine ten eleven twelve thirteen
@@ -108,7 +121,7 @@ text \n* short item that fits
 usage in=620 out=36
 end-turn
 
-# ---------- turn 11: numbered list (3- and 4-cell markers) ------------
+# ---------- turn 12: numbered list (3- and 4-cell markers) ------------
 text Numbered list:
 text \n1. First item with enough words to require wrapping at the configured display width
 text \n2. Second item also long enough that it spills onto a continuation row indented under 2
@@ -116,7 +129,7 @@ text \n10. Larger marker — 4-cell prefix, continuation should still align clea
 usage in=680 out=40
 end-turn
 
-# ---------- turn 12: list items soft-wrapped by the model -------------
+# ---------- turn 13: list items soft-wrapped by the model -------------
 text Same list, this time soft-wrapped by the model:
 text \n* alpha beta gamma delta epsilon
 text \nzeta eta theta iota kappa lambda mu nu xi
@@ -126,7 +139,7 @@ text \n* short item that fits
 usage in=700 out=40
 end-turn
 
-# ---------- turn 13: code fence is verbatim (terminal hard-wraps) -----
+# ---------- turn 14: code fence is verbatim (terminal hard-wraps) -----
 text Code block follows:
 text \n```python
 text \ndef long_function_name_that_makes_the_line_quite_wide(parameter_one, parameter_two, parameter_three):
@@ -136,36 +149,56 @@ text \nText after the fence resumes normal wrap behaviour.
 usage in=740 out=44
 end-turn
 
-# ---------- turn 14: bold spans a wrap break --------------------------
+# ---------- turn 15: code fence with tab-indented source --------------
+# Models emitting source inside a fenced block sometimes use real tabs.
+# Without substitution those reach the terminal raw and jump to its
+# native tab stops, producing inconsistent indent depth depending on
+# what precedes the tab on the line. emit_text now substitutes \t → 4
+# spaces before either branch (verbatim-bypass or wrap engine), so
+# every indent level below should look like exactly 4 spaces.
+text Tab-indented code fence — indent depth should be consistent (4 spaces per level):
+text \n```c
+text \nint main(int argc, char **argv)
+text \n{
+text \n\tif (argc > 1) {
+text \n\t\tprintf("hello %s\\n", argv[1]);
+text \n\t}
+text \n\treturn 0;
+text \n}
+text \n```
+usage in=780 out=48
+end-turn
+
+# ---------- turn 16: bold spans a wrap break --------------------------
 text Some preamble, then **alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi** and a tail.
-usage in=780 out=22
+usage in=820 out=22
 end-turn
 
-# ---------- turn 15: inline code at a wrap boundary -------------------
+# ---------- turn 17: inline code at a wrap boundary -------------------
 text See `function_with_a_long_name(arg one, arg two, arg three)` for details and check the docs.
-usage in=820 out=20
+usage in=860 out=20
 end-turn
 
-# ---------- turn 16: heading (single-line) then prose -----------------
+# ---------- turn 18: heading (single-line) then prose -----------------
 text ## A medium-length heading that probably fits one row but not always
 text \nFollow-up paragraph: enough content to demonstrate that wrap behaviour resumes immediately under the heading without spillover.
-usage in=860 out=28
+usage in=900 out=28
 end-turn
 
-# ---------- turn 17: GFM table, model emits one row per delta --------
+# ---------- turn 19: GFM table, model emits one row per delta --------
 text Here's a small table:
 text \n| Tool | What it does |
 text \n|---|---|
 text \n| read | Read files from disk |
 text \n| bash | Run shell commands via /bin/sh -c |
-usage in=900 out=30
+usage in=940 out=30
 end-turn
 
-# ---------- turn 18: multibyte (1-cell accents, 2-cell CJK) -----------
+# ---------- turn 20: multibyte (1-cell accents, 2-cell CJK) -----------
 text Café résumé naïveté is the prose; 中文字符 占两个单元格 each, so a row mixing them computes width per codepoint correctly.
-usage in=900 out=22
+usage in=940 out=22
 end-turn
 
 text Done — markdown wrap demo complete.
-usage in=940 out=18
+usage in=980 out=18
 end-turn
