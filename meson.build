@@ -71,6 +71,7 @@ sources = files(
     'src/providers/openai_events.c',
     'src/providers/openrouter.c',
     'src/providers/probe.c',
+    'src/providers/registry.c',
     'src/tools/bash.c',
     'src/tools/edit.c',
     'src/tools/read.c',

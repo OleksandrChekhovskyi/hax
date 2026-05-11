@@ -68,12 +68,16 @@ Adapters live in `src/providers/`. Where a provider has a non-trivial SSE-event-
 
 **Provider registry (`struct provider_factory`)** — each adapter exports one
 `const struct provider_factory PROVIDER_<NAME>` symbol pairing the `HAX_PROVIDER` env value
-with its constructor. `src/main.c` collects them into `PROVIDERS[]` (kept in alphabetical
-order so the "supported" list in error messages and merges read predictably), and the
-default when `HAX_PROVIDER` is unset is named separately by the `DEFAULT_PROVIDER` constant
-in `main.c`. Adding a new provider = drop a file under `src/providers/`, insert the
-`&PROVIDER_*` symbol into that array in alphabetical order, and add the source to
-`meson.build`.
+with its constructor. `src/providers/registry.{c,h}` collects them into `PROVIDERS[]` (kept
+in alphabetical order so the "supported" list in error messages and merges read
+predictably) and exposes `provider_find(name)` / `provider_list_names(out)` plus
+`PROVIDER_DEFAULT_NAME` for the unset-`HAX_PROVIDER` case. The registry lives next to the
+adapters, not in `provider.h`, so the seam header stays a pure interface and future
+callers (e.g. a `/provider` slash command) can `#include "providers/registry.h"` without
+dragging in the closed set of providers. Adding a new provider = drop a file under
+`src/providers/`, add its source to `meson.build`, then add the `extern PROVIDER_*`
+declaration to `registry.h` and append the symbol to `PROVIDERS[]` in `registry.c`, both
+in alphabetical order.
 
 **Presets over the OpenAI Chat Completions translation** — `openai.c` owns the shared
 message/tool/SSE translation and exposes
