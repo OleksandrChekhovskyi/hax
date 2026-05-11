@@ -437,7 +437,7 @@ static int codex_stream(struct provider *p, const struct context *ctx, const cha
 
         if (resp.cancelled)
             break;
-        if (!retry_should_attempt(rc, resp.status))
+        if (!retry_should_attempt(rc, resp.status, resp.error_body))
             break;
         if (attempt + 1 >= pol.max_attempts)
             break;

@@ -14,6 +14,7 @@ test_retry = executable('test_retry',
         '../src/text/utf8.c',
         '../src/util.c',
     ],
+    dependencies: [jansson],
 )
 test('retry', test_retry)
 

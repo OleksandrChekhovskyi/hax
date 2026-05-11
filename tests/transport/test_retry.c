@@ -8,30 +8,66 @@
 static void test_classify(void)
 {
     /* Success — never retry. */
-    EXPECT(retry_should_attempt(0, 200) == 0);
-    EXPECT(retry_should_attempt(0, 204) == 0);
+    EXPECT(retry_should_attempt(0, 200, NULL) == 0);
+    EXPECT(retry_should_attempt(0, 204, NULL) == 0);
 
     /* Transport errors (no status from libcurl) — retry. */
-    EXPECT(retry_should_attempt(-1, 0) == 1);
+    EXPECT(retry_should_attempt(-1, 0, NULL) == 1);
 
     /* Transient HTTP — retry. */
-    EXPECT(retry_should_attempt(-1, 408) == 1);
-    EXPECT(retry_should_attempt(-1, 429) == 1);
-    EXPECT(retry_should_attempt(-1, 500) == 1);
-    EXPECT(retry_should_attempt(-1, 502) == 1);
-    EXPECT(retry_should_attempt(-1, 503) == 1);
-    EXPECT(retry_should_attempt(-1, 504) == 1);
-    EXPECT(retry_should_attempt(-1, 599) == 1);
+    EXPECT(retry_should_attempt(-1, 408, NULL) == 1);
+    EXPECT(retry_should_attempt(-1, 429, NULL) == 1);
+    EXPECT(retry_should_attempt(-1, 500, NULL) == 1);
+    EXPECT(retry_should_attempt(-1, 502, NULL) == 1);
+    EXPECT(retry_should_attempt(-1, 503, NULL) == 1);
+    EXPECT(retry_should_attempt(-1, 504, NULL) == 1);
+    EXPECT(retry_should_attempt(-1, 599, NULL) == 1);
 
     /* Permanent client errors — don't retry. */
-    EXPECT(retry_should_attempt(-1, 400) == 0);
-    EXPECT(retry_should_attempt(-1, 401) == 0);
-    EXPECT(retry_should_attempt(-1, 403) == 0);
-    EXPECT(retry_should_attempt(-1, 404) == 0);
+    EXPECT(retry_should_attempt(-1, 400, NULL) == 0);
+    EXPECT(retry_should_attempt(-1, 401, NULL) == 0);
+    EXPECT(retry_should_attempt(-1, 403, NULL) == 0);
+    EXPECT(retry_should_attempt(-1, 404, NULL) == 0);
 
     /* Mid-stream drop (2xx + non-zero rc) — don't retry, would dup output. */
-    EXPECT(retry_should_attempt(-1, 200) == 0);
-    EXPECT(retry_should_attempt(-1, 201) == 0);
+    EXPECT(retry_should_attempt(-1, 200, NULL) == 0);
+    EXPECT(retry_should_attempt(-1, 201, NULL) == 0);
+}
+
+static void test_429_body_terminal(void)
+{
+    /* Codex subscription cap — error.type marks it terminal. */
+    const char *codex_usage =
+        "{\"error\":{\"type\":\"usage_limit_reached\",\"plan_type\":\"Pro\",\"resets_at\":1}}";
+    EXPECT(retry_should_attempt(-1, 429, codex_usage) == 0);
+
+    /* Codex plan doesn't include Codex — also terminal. */
+    const char *not_included = "{\"error\":{\"type\":\"usage_not_included\"}}";
+    EXPECT(retry_should_attempt(-1, 429, not_included) == 0);
+
+    /* OpenAI hard quota — error.code (not type). */
+    const char *quota = "{\"error\":{\"message\":\"You exceeded your current quota\","
+                        "\"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}}";
+    EXPECT(retry_should_attempt(-1, 429, quota) == 0);
+
+    /* Case-insensitive match. */
+    const char *upper = "{\"error\":{\"code\":\"INSUFFICIENT_QUOTA\"}}";
+    EXPECT(retry_should_attempt(-1, 429, upper) == 0);
+
+    /* Per-minute rate limit — transient, still retryable. */
+    const char *rl = "{\"error\":{\"message\":\"Rate limit\",\"type\":\"rate_limit_exceeded\","
+                     "\"code\":\"rate_limit_exceeded\"}}";
+    EXPECT(retry_should_attempt(-1, 429, rl) == 1);
+
+    /* Unknown / generic 429 body — fall back to retry. */
+    EXPECT(retry_should_attempt(-1, 429, "{\"error\":{\"message\":\"slow down\"}}") == 1);
+    EXPECT(retry_should_attempt(-1, 429, "") == 1);
+    EXPECT(retry_should_attempt(-1, 429, "<html>429 Too Many Requests</html>") == 1);
+
+    /* Body only suppresses retry on 429; a 503 with the same marker is
+     * still classified by status (transient). Worth pinning explicitly
+     * so the override doesn't accidentally bleed into 5xx. */
+    EXPECT(retry_should_attempt(-1, 503, codex_usage) == 1);
 }
 
 static void test_backoff_growth(void)
@@ -139,6 +175,7 @@ static void test_sleep_completes(void)
 int main(void)
 {
     test_classify();
+    test_429_body_terminal();
     test_backoff_growth();
     test_backoff_cap();
     test_default_env();

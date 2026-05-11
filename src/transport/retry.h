@@ -29,14 +29,21 @@ struct retry_policy {
  * HAX_HTTP_RETRY_BASE) with sensible fallbacks. */
 struct retry_policy retry_policy_default(void);
 
-/* Classify (rc, status) from an http_sse_post call.
+/* Classify (rc, status, body) from an http_sse_post call.
  * Returns 1 if retrying is safe and likely to help, 0 otherwise.
  *
  *   status == 0           — transport error (DNS, connect, reset): retry
  *   status 2xx, rc != 0   — mid-stream drop after some events: don't retry
  *   status 408/429/5xx    — transient server-side: retry
- *   anything else (4xx)   — permanent (auth, bad request): don't retry */
-int retry_should_attempt(int rc, long status);
+ *   anything else (4xx)   — permanent (auth, bad request): don't retry
+ *
+ * 429 has a body-aware override: when `body` parses as JSON and the
+ * `error.type` or `error.code` field marks the limit as terminal
+ * (Codex `usage_limit_reached` / `usage_not_included`, OpenAI
+ * `insufficient_quota`, `quota_exceeded`), this returns 0 even though
+ * the status alone would say retry. Per-minute rate caps
+ * (`rate_limit_exceeded`) still retry. `body` may be NULL. */
+int retry_should_attempt(int rc, long status, const char *body);
 
 /* Exponential backoff with bounded jitter. `attempt` is 0-based — the
  * delay returned is the wait *between* attempt N and attempt N+1.

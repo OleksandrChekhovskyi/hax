@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #include "transport/retry.h"
 
+#include <jansson.h>
 #include <stdlib.h>
+#include <strings.h>
 #include <time.h>
 
 #include "util.h"
@@ -44,7 +46,63 @@ struct retry_policy retry_policy_default(void)
     return p;
 }
 
-int retry_should_attempt(int rc, long status)
+/* Markers that turn a 429 from "transient rate cap" into "terminal usage
+ * cap" — we hit our subscription/quota ceiling and retrying won't help
+ * until the user's window resets. Matched case-insensitively against
+ * the JSON `error.type` or `error.code` field.
+ *
+ *   usage_limit_reached / usage_not_included
+ *     — Codex subscription window (`api_bridge.rs:80-100` in codex-rs).
+ *   insufficient_quota / quota_exceeded
+ *     — OpenAI hard quota and account-level caps; also what opencode's
+ *       executor matches on (`packages/llm/src/route/executor.ts:242`).
+ *
+ * Deliberately NOT listed: `rate_limit_exceeded` (per-minute TPM/RPM
+ * limit, transient — retrying after the server's Retry-After is the
+ * intended behavior). */
+static const char *const TERMINAL_429_CODES[] = {
+    "usage_limit_reached", "usage_not_included", "insufficient_quota", "quota_exceeded", NULL,
+};
+
+static int is_terminal_429_marker(const char *s)
+{
+    if (!s)
+        return 0;
+    for (const char *const *p = TERMINAL_429_CODES; *p; p++) {
+        if (strcasecmp(s, *p) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* Inspect a 429 response body for the terminal-usage markers above. The
+ * body is the raw payload from the server — usually JSON, but may be
+ * HTML or empty when a proxy intervenes; jansson rejects those and we
+ * return 0 (= keep the default "retry 429" behaviour). */
+static int body_marks_terminal_429(const char *body)
+{
+    if (!body || !*body)
+        return 0;
+    json_t *root = json_loads(body, 0, NULL);
+    if (!root)
+        return 0;
+    int terminal = 0;
+    json_t *err = json_object_get(root, "error");
+    if (json_is_object(err)) {
+        json_t *t = json_object_get(err, "type");
+        if (json_is_string(t) && is_terminal_429_marker(json_string_value(t)))
+            terminal = 1;
+        if (!terminal) {
+            json_t *c = json_object_get(err, "code");
+            if (json_is_string(c) && is_terminal_429_marker(json_string_value(c)))
+                terminal = 1;
+        }
+    }
+    json_decref(root);
+    return terminal;
+}
+
+int retry_should_attempt(int rc, long status, const char *body)
 {
     /* Success — caller doesn't retry, but be defensive. */
     if (rc == 0 && status >= 200 && status < 300)
@@ -62,9 +120,15 @@ int retry_should_attempt(int rc, long status)
     if (status >= 200 && status < 300)
         return 0;
     /* Transient server-side errors. 408 (request timeout), 429 (rate
-     * limit), 5xx (server overload, gateway issues). */
-    if (status == 408 || status == 429)
+     * limit), 5xx (server overload, gateway issues). For 429 we peek
+     * at the JSON body: a `usage_limit_reached` / `insufficient_quota`
+     * marker means our subscription window is exhausted and the only
+     * remedy is waiting hours for the reset — burning the retry budget
+     * would just delay the user-visible error. */
+    if (status == 408)
         return 1;
+    if (status == 429)
+        return body_marks_terminal_429(body) ? 0 : 1;
     if (status >= 500 && status <= 599)
         return 1;
     /* 4xx other than the above are permanent for our purposes — auth,
