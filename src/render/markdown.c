@@ -319,23 +319,27 @@ static void wrap_consume_codepoint(struct md_renderer *m, const char *out, size_
          * coherent without forcing the wrap to overflow. */
         if (m->row_has_content) {
             size_t new_break = m->row_buf.len - 1;
-            if (m->last_break_byte < 0) {
+            if (m->last_break_byte < 0 && !m->indent_locked) {
                 /* First break of the row. Detect list-marker indent
-                 * now, before any streaming commit removes the
+                 * now, before the streaming commit below drops the
                  * marker bytes from row_buf. */
-                if (!m->indent_locked) {
-                    m->indent_cells = compute_indent_cells(m);
-                    m->indent_locked = 1;
-                }
-            } else {
-                /* Stream-commit through the previous break so the
-                 * user sees content as it arrives instead of waiting
-                 * for the row to fill or a hard \n. The previous
-                 * break is now obsolete — if a wrap fires it'll
-                 * prefer the latest break recorded below. col stays
-                 * the same because committed bytes still occupy
-                 * cells on the current terminal row. */
-                size_t shift = (size_t)m->last_break_byte + 1;
+                m->indent_cells = compute_indent_cells(m);
+                m->indent_locked = 1;
+            }
+            /* Stream-commit through the new break, keeping ONLY the
+             * break-space byte itself in row_buf. Each word reaches
+             * the terminal the moment its trailing whitespace
+             * arrives, instead of one word behind (the natural
+             * alternative — commit through the *previous* break —
+             * holds last_word + space + partial_next_word and shows
+             * up as a visible two-word lag before a hard \n). The
+             * retained space is the wrap-break candidate: if the
+             * next word overflows, wrap_break replaces it with \n
+             * cleanly (no trailing-space artifact on the row). col
+             * stays the same — committed bytes still occupy cells
+             * on the current terminal row. */
+            size_t shift = new_break;
+            if (shift > 0) {
                 wrap_flush_range(m, 0, shift);
                 size_t new_len = m->row_buf.len - shift;
                 memmove(m->row_buf.data, m->row_buf.data + shift, new_len);

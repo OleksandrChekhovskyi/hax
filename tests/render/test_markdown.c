@@ -1378,19 +1378,23 @@ static void stream_capture_cb(const char *bytes, size_t n, int is_raw, void *use
 
 static void test_wrap_streams_completed_words(void)
 {
-    /* With wrap enabled, content should reach emit_cb as words arrive
-     * (committed through the previous break) — not all at once when
-     * the row wraps or the stream flushes. After feeding "alpha "
-     * "beta " "gamma" with budget 100 (no wrap), the renderer should
-     * have committed at least "alpha" before md_flush runs. */
+    /* With wrap enabled, each word reaches emit_cb the moment its
+     * trailing whitespace arrives — not after the next-next space
+     * or when the row wraps / stream flushes. Only the in-progress
+     * word and its leading break-space remain buffered, so on a
+     * paused stream the user is at most one word behind. */
     struct stream_capture c = {0};
     struct md_renderer *m = md_new(stream_capture_cb, &c, 100);
     md_feed(m, "alpha ", 6);
+    /* "alpha" committed (space stays in buf as the break candidate). */
+    EXPECT(c.len == 5);
+    EXPECT(memcmp(c.buf, "alpha", 5) == 0);
     md_feed(m, "beta ", 5);
-    /* At this point the second space has arrived — "alpha " should
-     * already be committed even though md_flush hasn't run. */
-    EXPECT(c.len >= 6);
-    EXPECT(memcmp(c.buf, "alpha ", 6) == 0);
+    /* Second space arrived — " beta" flushes (the buffered leading
+     * space + the now-complete word). "alpha beta" is on the
+     * terminal even though "gamma" hasn't been fed yet. */
+    EXPECT(c.len == 10);
+    EXPECT(memcmp(c.buf, "alpha beta", 10) == 0);
     md_feed(m, "gamma", 5);
     md_flush(m);
     md_free(m);
