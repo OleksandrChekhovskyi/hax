@@ -508,17 +508,28 @@ struct trunc_info {
  *     call AND no body was produced (body_present=0)
  *
  * Used by both the canonical-history assembly (build_body_and_trunc +
- * the run_shell tail) and the live-display path (stream_suffix), so
- * the model and the user see consistent suffix content. */
+ * the run_shell tail) and the live-display path (stream_suffix). When
+ * for_display=1 the truncated marker is shortened to a single sub-100-
+ * col line: bytes and the saved-to path are dropped because the human
+ * scrolling the preview can't act on them (only the model can re-read
+ * the spilled file). Footers and "(no output)" are identical in both
+ * forms — they're already short and equally useful either way. */
 static void append_run_suffix(struct buf *out, const struct trunc_info *t, int has_nul,
                               int body_present, int timed_out, int interrupted, long timeout_ms,
-                              int status)
+                              int status, int for_display)
 {
     size_t before = out->len;
     if (has_nul) {
-        char tmp[80];
-        snprintf(tmp, sizeof(tmp), "[binary output suppressed: %zu bytes]", t->total_bytes);
+        char total_b[16];
+        format_byte_size(total_b, sizeof(total_b), t->total_bytes);
+        char tmp[64];
+        snprintf(tmp, sizeof(tmp), "[binary output suppressed: %s]", total_b);
         buf_append_str(out, tmp);
+    } else if (t->truncated && for_display) {
+        char *marker =
+            xasprintf("\n[output truncated: last %zu of %zu lines]", t->kept_lines, t->total_lines);
+        buf_append_str(out, marker);
+        free(marker);
     } else if (t->truncated) {
         char kept_b[16], total_b[16];
         format_byte_size(kept_b, sizeof(kept_b), t->kept_bytes);
@@ -791,7 +802,7 @@ static void stream_suffix(tool_emit_display_fn emit_display, void *user, const s
     if (has_nul && streamed_anything)
         buf_append_str(&suf, "\n");
     append_run_suffix(&suf, t, has_nul, streamed_anything, timed_out, interrupted, timeout_ms,
-                      status);
+                      status, 1);
     if (suf.len > 0)
         emit_display(suf.data, suf.len, user);
     buf_free(&suf);
@@ -1067,7 +1078,8 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
     buf_init(&out);
     if (body.len > 0)
         buf_append(&out, body.data, body.len);
-    append_run_suffix(&out, &t, has_nul, body.len > 0, timed_out, interrupted, timeout_ms, status);
+    append_run_suffix(&out, &t, has_nul, body.len > 0, timed_out, interrupted, timeout_ms, status,
+                      0);
     buf_free(&body);
     capture_free(&cap);
     return buf_steal(&out);

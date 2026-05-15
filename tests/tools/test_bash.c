@@ -717,8 +717,9 @@ static void test_bash_binary_output_suppressed(void)
      * replaced with the suppression marker; no U+FFFD glyphs leak
      * through, and the exit footer (success here) is preserved. */
     char *out = call_bash("printf 'BEFORE\\\\0AFTER'");
-    EXPECT(strstr(out, "[binary output suppressed:") != NULL);
-    EXPECT(strstr(out, "bytes]") != NULL);
+    EXPECT(strstr(out, "[binary output suppressed: ") != NULL);
+    /* 12 bytes ("BEFORE\0AFTER") formats via format_byte_size as "12B". */
+    EXPECT(strstr(out, "12B]") != NULL);
     EXPECT(strstr(out, "BEFORE") == NULL);
     EXPECT(strstr(out, "AFTER") == NULL);
     EXPECT(strstr(out, "\xEF\xBF\xBD") == NULL);
