@@ -115,31 +115,31 @@ static void ensure_newline(FILE *out, const char *s)
         fputc('\n', out);
 }
 
-/* User messages: bright magenta `▌ ` prefix on every line, body also
- * bright magenta. Mirrors input.c's render_submitted so user turns in
- * the transcript look identical to how they appeared at submit time.
- * With color=0 the bar collapses to a plain `▌ ` prefix — still useful
- * as a visual anchor in `cat` output. */
+/* User messages: section() rule with the "user" label, then the body
+ * in bright magenta. The transcript is intentionally raw — no wrap,
+ * no markdown, no per-line prefix — so the section rule plays the
+ * same role for user turns that the `── assistant ──` / `── tool
+ * result ──` rules play for the model side. A per-line `▌ ` strip
+ * would break visually whenever a long line gets soft-wrapped by the
+ * pager, so the rule is the only anchor; color carries the rest. */
 static void render_user(FILE *out, int color, const struct item *it)
 {
-    const char *open = ANSI_IF(ANSI_BRIGHT_MAGENTA);
-    const char *close = ANSI_IF(ANSI_FG_DEFAULT);
-    const char *p = it->text ? it->text : "";
-    fputs(open, out);
-    fputs("▌ ", out);
+    section(out, color, "user");
+    const char *text = it->text ? it->text : "";
+    const char *p = text;
+
     while (*p) {
-        if (*p == '\n') {
-            fputs(close, out);
-            fputc('\n', out);
-            fputs(open, out);
-            fputs("▌ ", out);
-            p++;
-        } else {
-            fputc(*p++, out);
-        }
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        fputs(ANSI_IF(ANSI_BRIGHT_MAGENTA), out);
+        fwrite(p, 1, n, out);
+        fputs(ANSI_IF(ANSI_FG_DEFAULT), out);
+        if (!nl)
+            break;
+        fputc('\n', out);
+        p = nl + 1;
     }
-    fputs(close, out);
-    fputc('\n', out);
+    ensure_newline(out, text);
 }
 
 static void render_assistant(FILE *out, int color, const struct item *it)

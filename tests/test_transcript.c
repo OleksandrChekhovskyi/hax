@@ -43,6 +43,14 @@ static int contains(const char *hay, const char *needle)
     return strstr(hay, needle) != NULL;
 }
 
+static int count_occurrences(const char *hay, const char *needle)
+{
+    int n = 0;
+    for (const char *p = hay; (p = strstr(p, needle)) != NULL; p += strlen(needle))
+        n++;
+    return n;
+}
+
 static void test_banner_box(void)
 {
     char *out = render_to_string(NULL, NULL, 0);
@@ -129,7 +137,7 @@ static void test_no_boundary_no_turn_rule(void)
     struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = (char *)"hello"}};
     char *out = render_to_string(NULL, items, 1);
     EXPECT(!contains(out, "turn"));
-    EXPECT(contains(out, "▌ "));
+    EXPECT(contains(out, "── user ──"));
     free(out);
 }
 
@@ -141,25 +149,33 @@ static void test_system_prompt(void)
     free(out);
 }
 
-static void test_user_message_has_magenta_bar(void)
+static void test_user_message_has_section_rule(void)
 {
     struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = (char *)"hello"}};
     char *out = render_to_string(NULL, items, 1);
+    /* The `── user ──` rule plays the same role here that the
+     * `── assistant ──` / `── tool result ──` rules play elsewhere
+     * in the transcript — a single anchor per turn instead of a
+     * per-line strip that would visually fall apart when the pager
+     * soft-wraps long lines. */
+    EXPECT(contains(out, "── user ──"));
     EXPECT(contains(out, ANSI_BRIGHT_MAGENTA));
-    EXPECT(contains(out, "▌ "));
     EXPECT(contains(out, "hello"));
+    /* The legacy per-line `▌ ` strip has been retired in favor of
+     * the section rule. */
+    EXPECT(!contains(out, "▌ "));
     free(out);
 }
 
-static void test_user_multiline_bars_each_row(void)
+static void test_user_multiline_raw(void)
 {
+    /* The transcript renders user text raw — embedded newlines pass
+     * through verbatim, no per-line prefix. */
     struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = (char *)"one\ntwo"}};
     char *out = render_to_string(NULL, items, 1);
-    /* Two lines, two bars. */
-    int bars = 0;
-    for (const char *p = out; (p = strstr(p, "▌ ")) != NULL; p++)
-        bars++;
-    EXPECT(bars == 2);
+    EXPECT(contains(out, "one" ANSI_FG_DEFAULT "\n" ANSI_BRIGHT_MAGENTA "two"));
+    EXPECT(count_occurrences(out, ANSI_BRIGHT_MAGENTA) == 2);
+    EXPECT(!contains(out, "▌ "));
     free(out);
 }
 
@@ -283,8 +299,8 @@ int main(void)
     test_parallel_calls_render_paired_with_results();
     test_no_boundary_no_turn_rule();
     test_system_prompt();
-    test_user_message_has_magenta_bar();
-    test_user_multiline_bars_each_row();
+    test_user_message_has_section_rule();
+    test_user_multiline_raw();
     test_assistant_message();
     test_tool_call_pretty_prints_args();
     test_tool_call_invalid_json_dumps_verbatim();

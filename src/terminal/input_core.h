@@ -33,6 +33,11 @@ struct input {
 
     /* per-call render cache */
     const char *prompt;
+    /* Wrap budget for one row of the edit area, sampled from
+     * display_width() — capped to DISPLAY_WIDTH_CAP and honoring
+     * HAX_DISPLAY_WIDTH, not the raw terminal width. Refreshed at
+     * input_readline entry, on resize, and after $EDITOR / pager
+     * handoffs that might land us in a different geometry. */
     int term_cols;
 
     /* tty (input.c only) */
@@ -116,12 +121,56 @@ char *input_core_history_decode(const char *s, size_t n);
 int input_core_prompt_width(const char *s);
 
 /* Walk the buffer once, computing where the cursor lands on screen and
- * where the painted content ends. Mirrors the wrap behavior of
- * input.c's emit step: explicit '\n' resets to column `prompt_w` (so
- * continuation lines align with the first line's content); terminal
- * soft-wrap from auto-wrap lands at column 0. */
+ * where the painted content ends. Continuation rows (after '\n' or a
+ * soft wrap) land at column `prompt_w` so they align with the first
+ * line's content. Soft wrap is word-aware: a row break is placed at
+ * the latest preceding ASCII space when the next glyph would overflow
+ * `cols`; if no space is on the current row, the break falls mid-token
+ * (char-wrap fallback). Tabs expand to INPUT_CORE_TAB_WIDTH spaces and
+ * unsafe bytes substitute to one cell, identical to render output. */
 void input_core_compute_layout(const char *buf, size_t len, size_t cursor, int prompt_w, int cols,
                                struct input_layout *out);
+
+/* --- shared render walker ---
+ *
+ * Pure walk over a buffer that emits per-glyph + per-row-break events
+ * in visual order. Both the live editor's paint() and the commit-time
+ * submitted-message renderer drive this, so cursor-layout math and
+ * byte emission can't drift. input_core_compute_layout is a thin
+ * wrapper that runs the walker with a NULL callback.
+ *
+ * Word-wrap is built in: glyphs since the last ASCII space are
+ * buffered, so on overflow the trailing word can be replayed onto the
+ * next row instead of breaking mid-token. A token longer than the row
+ * budget falls back to a mid-token break (the terminal's own wrap as a
+ * last resort isn't relied on — the walker emits its own ROW_BREAK).
+ *
+ * `prompt_w` is the column on row 0 where the first glyph lands.
+ * `cont_indent_col` is the column where continuation rows (after '\n'
+ * or a soft break) start; typically equals prompt_w. `cols` is the
+ * per-row cell budget — pass display_width() in interactive contexts
+ * (terminal width capped to a readable cell count) or 0 to disable
+ * wrap entirely (content flows through verbatim, useful for non-tty
+ * contexts and tests). */
+enum {
+    INPUT_RENDER_GLYPH,     /* one visible glyph to emit */
+    INPUT_RENDER_ROW_BREAK, /* go to a new row, indent to `col` */
+};
+
+struct input_render_event {
+    int kind;          /* INPUT_RENDER_GLYPH or INPUT_RENDER_ROW_BREAK */
+    const char *bytes; /* GLYPH: bytes to write (may point at a static substitute) */
+    size_t n;          /* GLYPH: byte length */
+    int width;         /* GLYPH: cell width */
+    int row;           /* destination row (0 = first row) */
+    int col;           /* GLYPH: column of this glyph; ROW_BREAK: indent of new row */
+};
+
+typedef void (*input_render_cb)(const struct input_render_event *ev, void *user);
+
+void input_core_render(const char *buf, size_t len, size_t cursor, int prompt_w,
+                       int cont_indent_col, int cols, input_render_cb cb, void *user,
+                       struct input_layout *out);
 
 /* Spaces per tab. Layout and rendering both expand a tab to exactly
  * this many columns regardless of the current column — soft-tab style,

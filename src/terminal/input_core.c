@@ -393,66 +393,350 @@ void input_core_history_next(struct input *in)
     hist_load(in, in->hist_pos + 1);
 }
 
-/* ---------------- layout ---------------- */
+/* ---------------- render walker ---------------- */
+
+/* One decoded glyph from the source buffer. For ASCII tabs and unsafe
+ * bytes, `bytes` points at a static substitute (so the caller can write
+ * it verbatim); for valid codepoints, `bytes` slices `buf` in place.
+ * `consumed` is the number of source bytes this glyph covers. */
+struct walk_glyph {
+    const char *bytes;
+    size_t n;
+    int width;
+    size_t byte_index;
+    size_t consumed;
+    int is_space; /* ASCII ' ' — a candidate word-wrap boundary */
+};
+
+/* Substitute glyph for non-printables (C0/C1 controls, malformed UTF-8,
+ * dangerous bidi/format codepoints). Same '?' the legacy emit_safe_span
+ * used; substituting at the walker level means every rendering site —
+ * editor paint, submitted-message paint, layout math — sees the same
+ * cell count. */
+static const char SUBST_BYTES[1] = {'?'};
+
+/* Tab substitute: rendered as INPUT_CORE_TAB_WIDTH spaces. Stored as a
+ * static buffer so callers can point at it without owning storage; the
+ * walker only emits up to INPUT_CORE_TAB_WIDTH bytes from it. */
+static const char TAB_SPACES[INPUT_CORE_TAB_WIDTH] = {' ', ' ', ' ', ' '};
+
+static int decode_glyph(const char *buf, size_t len, size_t i, struct walk_glyph *g)
+{
+    if (i >= len)
+        return 0;
+    unsigned char c = (unsigned char)buf[i];
+    g->byte_index = i;
+    if (c == '\t') {
+        g->bytes = TAB_SPACES;
+        g->n = INPUT_CORE_TAB_WIDTH;
+        g->width = INPUT_CORE_TAB_WIDTH;
+        g->consumed = 1;
+        g->is_space = 0;
+        return 1;
+    }
+    if (c < 0x20 || c == 0x7f) {
+        /* C0 control or DEL: substitute one '?'. Matches the old
+         * emit_safe_span policy of refusing to write raw control bytes
+         * that some terminals interpret as escape sequences. */
+        g->bytes = SUBST_BYTES;
+        g->n = 1;
+        g->width = 1;
+        g->consumed = 1;
+        g->is_space = 0;
+        return 1;
+    }
+    size_t consumed;
+    int w = utf8_codepoint_cells(buf, len, i, &consumed);
+    if (w < 0) {
+        /* Non-printable codepoint (C1 in UTF-8, format chars, malformed
+         * sequence). Substitute one '?' for the leader byte; the
+         * caller advances by 1 so each problem byte gets its own
+         * substitute. */
+        g->bytes = SUBST_BYTES;
+        g->n = 1;
+        g->width = 1;
+        g->consumed = consumed ? consumed : 1;
+        g->is_space = 0;
+        return 1;
+    }
+    g->bytes = buf + i;
+    g->n = consumed;
+    g->width = w; /* may be 0 for combining marks */
+    g->consumed = consumed ? consumed : 1;
+    g->is_space = (consumed == 1 && c == ' ');
+    return 1;
+}
+
+/* Walker state. Glyphs since the last committed wrap candidate (row
+ * start or last emitted space) live in `wbuf` so a word that runs past
+ * `cols` can be replayed onto the next row instead of breaking mid-
+ * token. The buffer is fixed-size; an unbroken token longer than the
+ * buffer (a pathological URL / hash) is committed as it grows, with
+ * char-wrap behavior taking over.
+ *
+ * `cursor_resolved` is set when the walker sees a byte index that
+ * lies inside the cursor's byte range; the cursor's row/col is taken
+ * from the glyph's *final* emit position (after any wrap replay), not
+ * its pre-buffer position.
+ *
+ * Wrap policy: post-emit column must stay strictly less than `cols`.
+ * The terminal's last cell (col == cols-1) is the "phantom" position
+ * — most terminals enter delayed-wrap state when the cursor advances
+ * past it, and CUF (`\x1b[NC`) clamps to col cols-1, which would put
+ * a cursor positioned at col=cols visually on top of the last glyph.
+ * Triggering wrap one column earlier (post-emit >= cols ⇒ wrap)
+ * keeps the cursor unambiguously in [0, cols-1] for every row. */
+#define WBUF_CAP 256
+
+struct walker {
+    int prompt_w;
+    int cont_indent;
+    int cols;
+    size_t cursor;
+    input_render_cb cb;
+    void *user;
+
+    /* Position at which the next committed glyph would emit. */
+    int row;
+    int col;
+
+    int cursor_row;
+    int cursor_col;
+    int cursor_resolved;
+
+    /* Pending tail (current word). */
+    struct walk_glyph wbuf[WBUF_CAP];
+    size_t wbuf_n;
+    int wbuf_width;       /* sum of widths in wbuf */
+    int wbuf_after_space; /* wbuf may replay to next row at a word boundary */
+};
+
+static int cursor_in_range(size_t cursor, size_t start, size_t consumed)
+{
+    return cursor >= start && cursor < start + consumed;
+}
+
+static void emit_glyph(struct walker *w, const struct walk_glyph *g)
+{
+    if (!w->cursor_resolved && cursor_in_range(w->cursor, g->byte_index, g->consumed)) {
+        w->cursor_row = w->row;
+        w->cursor_col = w->col;
+        w->cursor_resolved = 1;
+    }
+    if (w->cb) {
+        struct input_render_event ev = {.kind = INPUT_RENDER_GLYPH,
+                                        .bytes = g->bytes,
+                                        .n = g->n,
+                                        .width = g->width,
+                                        .row = w->row,
+                                        .col = w->col};
+        w->cb(&ev, w->user);
+    }
+    w->col += g->width;
+}
+
+static void emit_row_break(struct walker *w)
+{
+    w->row++;
+    w->col = w->cont_indent;
+    if (w->cb) {
+        struct input_render_event ev = {.kind = INPUT_RENDER_ROW_BREAK,
+                                        .bytes = NULL,
+                                        .n = 0,
+                                        .width = 0,
+                                        .row = w->row,
+                                        .col = w->col};
+        w->cb(&ev, w->user);
+    }
+}
+
+static void wbuf_flush(struct walker *w)
+{
+    for (size_t i = 0; i < w->wbuf_n; i++)
+        emit_glyph(w, &w->wbuf[i]);
+    w->wbuf_n = 0;
+    w->wbuf_width = 0;
+    w->wbuf_after_space = 0;
+}
+
+/* Move the contents of wbuf to a fresh row. Used when a glyph would
+ * overflow and wbuf began immediately after an emitted space. After
+ * replay, later overflow in the same over-long token must char-wrap
+ * instead of replaying again, so wbuf_after_space is cleared. */
+static void wbuf_replay_on_new_row(struct walker *w)
+{
+    emit_row_break(w);
+    /* Replay buffered glyphs at the new row's starting column. */
+    for (size_t i = 0; i < w->wbuf_n; i++)
+        emit_glyph(w, &w->wbuf[i]);
+    w->wbuf_n = 0;
+    w->wbuf_width = 0;
+    w->wbuf_after_space = 0;
+}
+
+/* The byte index that follows the walker's most recently consumed
+ * glyph (whether committed or buffered). Used so an end-of-buffer
+ * cursor lands on the correct row/col when no glyph was emitted at
+ * cursor's index (cursor == len). */
+static void resolve_cursor_at_end(struct walker *w, size_t len)
+{
+    if (w->cursor_resolved)
+        return;
+    if (w->cursor >= len) {
+        /* Cursor at end-of-buffer: it sits where the next glyph would
+         * land — i.e. after any pending wbuf flush. The wbuf flush is
+         * the caller's responsibility (input_core_render flushes
+         * before resolving). */
+        w->cursor_row = w->row;
+        w->cursor_col = w->col;
+        w->cursor_resolved = 1;
+        return;
+    }
+    /* Cursor mid-buffer but no glyph matched its range (e.g. cursor
+     * past the leader of a malformed sequence we substituted as one
+     * byte). Fall back to current emit position; matches the old
+     * compute_layout behavior. */
+    w->cursor_row = w->row;
+    w->cursor_col = w->col;
+    w->cursor_resolved = 1;
+}
+
+void input_core_render(const char *buf, size_t len, size_t cursor, int prompt_w,
+                       int cont_indent_col, int cols, input_render_cb cb, void *user,
+                       struct input_layout *out)
+{
+    struct walker w = {.prompt_w = prompt_w,
+                       .cont_indent = cont_indent_col,
+                       .cols = cols,
+                       .cursor = cursor,
+                       .cb = cb,
+                       .user = user,
+                       .row = 0,
+                       .col = prompt_w};
+
+    size_t i = 0;
+    while (i < len) {
+        unsigned char c = (unsigned char)buf[i];
+        if (c == '\n') {
+            wbuf_flush(&w);
+            /* Cursor exactly on the '\n': it visually sits at the
+             * end of the current row (just after the trailing
+             * content), matching the legacy compute_layout's
+             * "cursor on \n stays at row, col after content"
+             * behavior. */
+            if (!w.cursor_resolved && w.cursor == i) {
+                w.cursor_row = w.row;
+                w.cursor_col = w.col;
+                w.cursor_resolved = 1;
+            }
+            emit_row_break(&w);
+            i++;
+            continue;
+        }
+
+        struct walk_glyph g;
+        if (!decode_glyph(buf, len, i, &g))
+            break;
+
+        /* Combining marks (width 0) ride along on the previous glyph.
+         * Append to wbuf without any overflow check — they don't push
+         * the column. If wbuf is at capacity, flush it first so the
+         * mark emits at the correct visual position (immediately
+         * after its host glyph) and its cursor resolution uses the
+         * post-flush row/col; emitting the mark before the flush
+         * would attach it to whatever glyph last committed before
+         * the wbuf fill and put cursor reporting at the wrong column. */
+        if (g.width == 0) {
+            if (w.wbuf_n < WBUF_CAP) {
+                w.wbuf[w.wbuf_n++] = g;
+            } else {
+                wbuf_flush(&w);
+                emit_glyph(&w, &g);
+            }
+            i += g.consumed;
+            continue;
+        }
+
+        if (g.is_space) {
+            /* Space: commit the trailing word to this row. Then,
+             * if the space itself overflows the row, drop it as
+             * the wrap point and break — leaves the new row clean
+             * of a leading space. Otherwise emit it normally so it
+             * separates this word from the next. */
+            int over = (w.cols > 0 && w.col + w.wbuf_width + g.width >= w.cols);
+            wbuf_flush(&w);
+            if (over && w.col > w.cont_indent) {
+                if (!w.cursor_resolved && cursor_in_range(w.cursor, g.byte_index, g.consumed)) {
+                    w.cursor_row = w.row;
+                    w.cursor_col = w.col;
+                    w.cursor_resolved = 1;
+                }
+                emit_row_break(&w);
+            } else {
+                emit_glyph(&w, &g);
+                w.wbuf_after_space = 1;
+            }
+            i += g.consumed;
+            continue;
+        }
+
+        /* Non-space glyph. */
+        int prospective = w.col + w.wbuf_width + g.width;
+        if (w.cols > 0 && prospective >= w.cols) {
+            if (w.wbuf_n > 0 && w.wbuf_after_space && w.col > w.cont_indent) {
+                /* Buffer holds the trailing word after a real word
+                 * boundary; move it to a fresh row. `w.col >
+                 * w.cont_indent` guards an empty-row replay. */
+                wbuf_replay_on_new_row(&w);
+            } else {
+                /* No earlier word boundary on this row, or we're
+                 * already at row start with an over-long token in
+                 * the buffer. Flush the buffer to commit what fit,
+                 * then break before the current glyph. */
+                wbuf_flush(&w);
+                if (w.col > w.cont_indent)
+                    emit_row_break(&w);
+            }
+        }
+
+        if (w.wbuf_n < WBUF_CAP) {
+            w.wbuf[w.wbuf_n++] = g;
+            w.wbuf_width += g.width;
+        } else {
+            /* Token longer than wbuf budget — degrade to char-wrap.
+             * Flush, break if needed, then emit directly. */
+            wbuf_flush(&w);
+            if (w.cols > 0 && w.col + g.width >= w.cols && w.col > w.cont_indent)
+                emit_row_break(&w);
+            emit_glyph(&w, &g);
+        }
+        i += g.consumed;
+    }
+
+    /* Flush any pending tail. If it overflows, replay onto a new
+     * row first — same rule as mid-walk. */
+    if (w.wbuf_n > 0 && w.cols > 0 && w.col + w.wbuf_width >= w.cols && w.wbuf_after_space &&
+        w.col > w.cont_indent) {
+        wbuf_replay_on_new_row(&w);
+    } else {
+        wbuf_flush(&w);
+    }
+
+    resolve_cursor_at_end(&w, len);
+
+    if (out) {
+        out->cursor_row = w.cursor_row;
+        out->cursor_col = w.cursor_col;
+        out->end_row = w.row;
+        out->end_col = w.col;
+        out->total_rows = w.row + 1;
+    }
+}
 
 void input_core_compute_layout(const char *buf, size_t len, size_t cursor, int prompt_w, int cols,
                                struct input_layout *out)
 {
-    int row = 0, col = prompt_w;
-    int crow = -1, ccol = -1;
-    size_t i = 0;
-    for (;;) {
-        if (i == cursor && crow < 0) {
-            crow = row;
-            ccol = col;
-        }
-        if (i >= len)
-            break;
-        unsigned char c = (unsigned char)buf[i];
-        if (c == '\n') {
-            row++;
-            col = prompt_w;
-            i++;
-            continue;
-        }
-        if (c == '\t') {
-            /* Soft-tab: every tab is exactly TAB_WIDTH columns wide,
-             * regardless of current position. emit_safe_span in
-             * input.c expands tabs to the same number of spaces, so
-             * layout and rendering can't drift apart. */
-            int w = INPUT_CORE_TAB_WIDTH;
-            if (cols > 0 && col + w > cols) {
-                row++;
-                col = 0;
-            }
-            col += w;
-            i++;
-            continue;
-        }
-        size_t consumed;
-        int w = utf8_codepoint_cells(buf, len, i, &consumed);
-        /* Non-printable (controls, malformed UTF-8) renders as a 1-col
-         * substitute in emit_safe_span; mirror that here so layout and
-         * rendering stay in sync. Combining marks legitimately have
-         * w == 0 and must not advance the cursor. */
-        if (w < 0)
-            w = 1;
-        if (cols > 0 && w > 0 && col + w > cols) {
-            row++;
-            col = 0;
-        }
-        col += w;
-        i += consumed ? consumed : 1;
-    }
-    if (crow < 0) {
-        crow = row;
-        ccol = col;
-    }
-    out->cursor_row = crow;
-    out->cursor_col = ccol;
-    out->end_row = row;
-    out->end_col = col;
-    out->total_rows = row + 1;
+    input_core_render(buf, len, cursor, prompt_w, prompt_w, cols, NULL, NULL, out);
 }
 
 /* ---------------- escape-sequence decoder ---------------- */

@@ -24,7 +24,27 @@
 #include "text/utf8_sanitize.h"
 
 #define ESC_TIMEOUT_MS 50
-#define DEFAULT_COLS   80
+
+static int tty_cols(void)
+{
+    struct winsize ws;
+
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
+        return ws.ws_col;
+    return 0;
+}
+
+static int editor_cols(void)
+{
+    int cols = display_width();
+    int real = tty_cols();
+
+    if (real > 0 && cols > real)
+        cols = real;
+    if (cols < 1)
+        cols = 1;
+    return cols;
+}
 
 /* ---------------- raw mode ---------------- */
 
@@ -61,14 +81,6 @@ static void raw_off(struct input *in)
     fflush(stdout);
     tcsetattr(STDIN_FILENO, TCSADRAIN, &in->saved_termios);
     in->raw_active = 0;
-}
-
-static int term_cols(void)
-{
-    struct winsize ws;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
-        return ws.ws_col;
-    return DEFAULT_COLS;
 }
 
 /* ---------------- input primitives ---------------- */
@@ -235,84 +247,21 @@ static void handle_escape(struct input *in)
 
 /* ---------------- render / paint ---------------- */
 
-/* Emit a span of buffer bytes (no embedded '\n' — caller splits) safely:
- *  - Tabs expand to spaces using the same math as input_core_compute_layout
- *    so layout and rendering can't disagree about where the cursor lands.
- *  - ASCII control bytes (and 0x7f) become '?' so paste/editor content
- *    can't inject terminal escape sequences.
- *  - Printable codepoints (incl. UTF-8 multi-byte) pass through verbatim.
- *
- * `start_col` is the column of the cursor on entry. `cols` is the
- * terminal width (0 = no wrap). Returns the column the cursor lands at
- * after the span. */
-static int emit_safe_span(const char *buf, size_t len, int start_col, int cols)
+/* Walker callback for the live edit area: writes glyph bytes verbatim
+ * and emits `\r\n` + indent-spaces at every row break. With OPOST off
+ * (raw mode) the terminal won't add the CR for us. The indent target
+ * is delivered via ev->col — the walker has resolved it from the
+ * cont_indent_col passed in. */
+static void paint_emit(const struct input_render_event *ev, void *user)
 {
-    int col = start_col;
-    size_t i = 0;
-    while (i < len) {
-        unsigned char c = (unsigned char)buf[i];
-        if (c == '\t') {
-            int w = INPUT_CORE_TAB_WIDTH;
-            if (cols > 0 && col + w > cols) {
-                fputs("\r\n", stdout);
-                col = 0;
-            }
-            for (int k = 0; k < w; k++)
-                fputc(' ', stdout);
-            col += w;
-            i++;
-            continue;
-        }
-        if (c < 0x20 || c == 0x7f) {
-            fputc('?', stdout);
-            col += 1;
-            i++;
-            continue;
-        }
-        size_t consumed;
-        int w = utf8_codepoint_cells(buf, len, i, &consumed);
-        if (w < 0) {
-            /* Non-printable codepoint: C1 controls (raw 0x80-0x9f or
-             * UTF-8 U+0080..U+009F), DEL, format chars, malformed
-             * UTF-8. Some terminals interpret these as escape
-             * sequences even in UTF-8 mode; substitute. */
-            fputc('?', stdout);
-            col += 1;
-            i += consumed ? consumed : 1;
-            continue;
-        }
-        /* Mirror terminal soft-wrap in our col tracking: when col + w
-         * would overflow, the terminal wraps the codepoint to col 0 of
-         * the next row before printing it. */
-        if (cols > 0 && w > 0 && col + w > cols)
-            col = 0;
-        fwrite(buf + i, 1, consumed, stdout);
-        col += w;
-        i += consumed ? consumed : 1;
+    (void)user;
+    if (ev->kind == INPUT_RENDER_GLYPH) {
+        fwrite(ev->bytes, 1, ev->n, stdout);
+    } else {
+        fputs("\r\n", stdout);
+        for (int k = 0; k < ev->col; k++)
+            fputc(' ', stdout);
     }
-    return col;
-}
-
-/* Emit buffer bytes, translating each '\n' to "\r\n" + `indent` spaces
- * so continuation lines align with the first line's content. We run
- * with OPOST off, so the terminal won't add the CR for us. */
-static void emit_buffer(const char *buf, size_t len, int start_col, int indent, int cols)
-{
-    int col = start_col;
-    size_t start = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (buf[i] == '\n') {
-            if (i > start)
-                col = emit_safe_span(buf + start, i - start, col, cols);
-            fputs("\r\n", stdout);
-            for (int k = 0; k < indent; k++)
-                fputc(' ', stdout);
-            col = indent;
-            start = i + 1;
-        }
-    }
-    if (start < len)
-        emit_safe_span(buf + start, len - start, col, cols);
 }
 
 static void paint(struct input *in)
@@ -326,10 +275,9 @@ static void paint(struct input *in)
     fputs("\r\x1b[J", stdout);
 
     fputs(in->prompt, stdout);
-    emit_buffer(in->buf, in->len, prompt_w, prompt_w, cols);
 
     struct input_layout L;
-    input_core_compute_layout(in->buf, in->len, in->cursor, prompt_w, cols, &L);
+    input_core_render(in->buf, in->len, in->cursor, prompt_w, prompt_w, cols, paint_emit, NULL, &L);
 
     /* From end-of-content position, climb up to cursor row, then right. */
     int up = L.end_row - L.cursor_row;
@@ -344,28 +292,85 @@ static void paint(struct input *in)
     in->last_rows = L.total_rows;
 }
 
-/* Detect a terminal resize. The terminal reflowed our prior paint to
- * the new width and the cursor stayed at the same logical position in
- * the buffer (the common reflow behavior across modern terminals).
- * Recompute layout in the new width to find how far up the prompt row
- * is, climb there, and erase the reflowed area; the next paint then
- * draws cleanly. Anything above the prompt row is untouched, so
- * conversation history is preserved.
+/* Per-logical-row content width collector. The walker emits a glyph
+ * event per cell and a row-break event between rows; tracking the max
+ * post-emit col per row gives each row's end column under the OLD
+ * width, which is what we need to compute physical-row counts under
+ * the new width. */
+struct row_widths_state {
+    int *widths;
+    int cap;
+    int n;
+    int current; /* highest post-emit col seen so far on current row */
+};
+
+static void row_widths_cb(const struct input_render_event *ev, void *user)
+{
+    struct row_widths_state *s = user;
+    if (ev->kind == INPUT_RENDER_GLYPH) {
+        int post = ev->col + ev->width;
+        if (post > s->current)
+            s->current = post;
+    } else { /* ROW_BREAK */
+        if (s->n < s->cap)
+            s->widths[s->n] = s->current;
+        s->n++;
+        s->current = ev->col; /* new row starts at cont_indent */
+    }
+}
+
+/* Detect a terminal resize. The painted edit area's manual `\r\n`
+ * breaks survive on screen, but each painted row can still char-wrap
+ * to multiple physical rows under a narrower width on terminals that
+ * reflow on SIGWINCH (xterm, iTerm2, kitty, Alacritty, …). To clear
+ * the right region we re-walk the buffer at the *previous* width to
+ * recover each logical row's content width, then translate into a
+ * physical-row climb under the new width.
+ *
+ * This assumes the terminal reflows soft-wrapped screen rows on resize,
+ * which is the common behavior for modern terminal emulators. Terminals
+ * that clamp/truncate instead may leave a stale row behind or briefly
+ * over-clear during the next repaint; optimizing the common path keeps
+ * resize UX smooth instead of restarting the prompt for every shrink.
  *
  * Called at the top of each loop iteration — *before* applying the
- * next keypress — so the buffer state still matches what's on screen.
- * Returns 1 if a resize was handled (caller should repaint). */
+ * next keypress — so last_rows / last_cursor_row still describe
+ * what's on screen. Returns 1 if a resize was handled (caller
+ * should repaint). */
 static int handle_resize(struct input *in)
 {
-    int cols = term_cols();
-    if (cols == in->term_cols)
+    int new_cols = editor_cols();
+    if (new_cols == in->term_cols)
         return 0;
-    in->term_cols = cols;
-    int prompt_w = input_core_prompt_width(in->prompt);
-    struct input_layout L;
-    input_core_compute_layout(in->buf, in->len, in->cursor, prompt_w, cols, &L);
-    if (L.cursor_row > 0)
-        printf("\x1b[%dA", L.cursor_row);
+    int old_cols = in->term_cols;
+    in->term_cols = new_cols;
+
+    int climb = 0;
+    if (in->last_rows > 0 && new_cols > 0) {
+        int prompt_w = input_core_prompt_width(in->prompt);
+        int cap = in->last_rows + 1; /* +1 for the post-walk final row */
+        int *widths = xcalloc((size_t)cap, sizeof(int));
+        struct row_widths_state s = {.widths = widths, .cap = cap, .n = 0, .current = prompt_w};
+        struct input_layout L;
+        input_core_render(in->buf, in->len, in->cursor, prompt_w, prompt_w, old_cols, row_widths_cb,
+                          &s, &L);
+        if (s.n < s.cap)
+            s.widths[s.n] = s.current;
+        s.n++;
+
+        /* Physical rows above the cursor's logical row + cursor's
+         * offset within its own row under the new width. An empty
+         * logical row still occupies one physical row, so floor at 1. */
+        for (int i = 0; i < L.cursor_row && i < s.n; i++) {
+            int pr = s.widths[i] > 0 ? (s.widths[i] + new_cols - 1) / new_cols : 1;
+            climb += pr;
+        }
+        climb += L.cursor_col / new_cols;
+        free(widths);
+    }
+
+    if (climb > 0)
+        printf("\x1b[%dA", climb);
     fputs("\r\x1b[J", stdout);
     fflush(stdout);
     in->last_cursor_row = 0;
@@ -386,36 +391,38 @@ static void leave_edit_area(struct input *in)
     in->last_rows = 0;
 }
 
+/* Walker callback for the committed-user-message render. Emits a
+ * bright-magenta `▌ ` stripe at every row break so wrapped continuation
+ * rows stay marked, and resets foreground around the strip glyph so
+ * the body inherits magenta without escapes nesting. */
+static void submitted_emit(const struct input_render_event *ev, void *user)
+{
+    (void)user;
+    if (ev->kind == INPUT_RENDER_GLYPH) {
+        fwrite(ev->bytes, 1, ev->n, stdout);
+    } else {
+        fputs(ANSI_FG_DEFAULT "\r\n" ANSI_BRIGHT_MAGENTA "▌ ", stdout);
+    }
+}
+
 /* Erase the edit area and re-emit the buffer with a magenta stripe and
- * magenta text body, so submitted user messages stay clearly marked in
- * the scrollback against agent output. The body color is intentional —
- * just a stripe wasn't visually distinct enough during scrollback
- * review. Stripe width matches the prompt (2 cols) so content stays
- * aligned. */
+ * magenta body so submitted user messages stay clearly marked in the
+ * scrollback against agent output. Word-wrap runs at the strip-width
+ * indent so wrapped rows keep the same alignment as the first row and
+ * never lose the strip glyph. */
 static void render_submitted(struct input *in)
 {
     if (in->last_cursor_row > 0)
         printf("\x1b[%dA", in->last_cursor_row);
     fputs("\r\x1b[J", stdout);
 
-    const char *bar = ANSI_BRIGHT_MAGENTA "▌ ";
-    const int bar_col = 2; /* visual width of "▌ " */
-    int cols = in->term_cols;
-    fputs(bar, stdout);
-    int col = bar_col;
-    size_t start = 0;
-    for (size_t i = 0; i < in->len; i++) {
-        if (in->buf[i] == '\n') {
-            if (i > start)
-                col = emit_safe_span(in->buf + start, i - start, col, cols);
-            fputs(ANSI_FG_DEFAULT "\r\n", stdout);
-            fputs(bar, stdout);
-            col = bar_col;
-            start = i + 1;
-        }
-    }
-    if (start < in->len)
-        emit_safe_span(in->buf + start, in->len - start, col, cols);
+    /* Cell width of "▌ ": one box-drawing glyph plus a space. The
+     * walker indents continuation rows to this column so wrapped
+     * content aligns under the first row's text. */
+    const int bar_col = 2;
+    fputs(ANSI_BRIGHT_MAGENTA "▌ ", stdout);
+    input_core_render(in->buf, in->len, /*cursor=*/0, bar_col, bar_col, in->term_cols,
+                      submitted_emit, NULL, NULL);
     fputs(ANSI_FG_DEFAULT "\r\n", stdout);
     fflush(stdout);
     in->last_cursor_row = 0;
@@ -501,7 +508,7 @@ reenter:
      * SIGWINCH delivered during system() is consumed by the child, so
      * we won't see it here — refresh explicitly before the caller's
      * next paint, otherwise wrap math uses pre-editor width. */
-    in->term_cols = term_cols();
+    in->term_cols = editor_cols();
 }
 
 /* ---------------- Ctrl-T transcript ---------------- */
@@ -528,7 +535,7 @@ static void show_transcript(struct input *in)
     raw_on(in);
     /* Pager may have prompted a window resize; refresh before the next
      * paint so wrap math uses the current width. */
-    in->term_cols = term_cols();
+    in->term_cols = editor_cols();
 }
 
 /* ---------------- non-tty fallback ---------------- */
@@ -780,7 +787,7 @@ char *input_readline(struct input *in, const char *prompt)
 
     /* Reset per-call edit state. History is preserved across calls. */
     in->prompt = prompt;
-    in->term_cols = term_cols();
+    in->term_cols = editor_cols();
     in->len = 0;
     in->cursor = 0;
     in->buf[0] = '\0';
@@ -892,7 +899,7 @@ char *input_readline(struct input *in, const char *prompt)
              * were stopped; paint state was cleared by leave_edit_area
              * so the next paint draws fresh. */
             raw_on(in);
-            in->term_cols = term_cols();
+            in->term_cols = editor_cols();
             break;
         case 0x1b: /* ESC — start of escape sequence */
             handle_escape(in);

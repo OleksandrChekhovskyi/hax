@@ -154,24 +154,226 @@ static void test_layout_tabs(void)
     input_core_compute_layout("\t\t", 2, 2, 2, 80, &L);
     EXPECT(L.end_col == 10);
 
-    /* Tab that would exceed cols: wrap to row 1 col 0, then advance
-     * by TAB_WIDTH. */
+    /* A tab wider than the entire row can't fit anywhere — the walker
+     * emits it at the row's starting column (cont_indent_col) and lets
+     * it overflow visually. Breaking to a fresh row first would just
+     * re-overflow with no progress, so the walker holds it in place. */
     input_core_compute_layout("\t", 1, 1, 0, 2, &L);
-    EXPECT(L.end_row == 1);
+    EXPECT(L.end_row == 0);
     EXPECT(L.end_col == 4);
 }
 
-static void test_layout_soft_wrap(void)
+static void test_layout_soft_wrap_char(void)
 {
-    /* prompt_w=2, cols=10, "0123456789" (10 chars). After 8 chars on row 0
-     * (col 2..9), 9th char wraps to col 0 of row 1. */
+    /* prompt_w=2, cols=10, "0123456789" (10 chars, no spaces). With
+     * no word boundary, the walker falls back to char-wrap. The wrap
+     * threshold reserves the terminal's last cell (post-emit col must
+     * stay < cols) to avoid the phantom-cursor state, so row 0 fits
+     * cols 2..8 (7 chars). The remaining 3 chars land on row 1
+     * indented to cont_indent (= prompt_w), so end_col = 2 + 3 = 5. */
     struct input_layout L;
     input_core_compute_layout("0123456789", 10, 10, 2, 10, &L);
     EXPECT(L.total_rows == 2);
     EXPECT(L.end_row == 1);
-    /* On row 0 we fit 8 cols (10 - 2). Char at idx 8 wraps to row 1 col 0,
-     * col advances by 1 per char, so end_col after 2 chars on row 1 = 2. */
-    EXPECT(L.end_col == 2);
+    EXPECT(L.end_col == 5);
+}
+
+static void test_layout_soft_wrap_word(void)
+{
+    /* prompt_w=2, cols=10, "hello world" (11 chars with a space at
+     * index 5). The trailing word "world" doesn't fit at col 8 (would
+     * end at col 13 > cols=10), so it moves to row 1 indented to
+     * cont_indent (2). end_col after "world" on row 1 = 2 + 5 = 7. */
+    struct input_layout L;
+    input_core_compute_layout("hello world", 11, 11, 2, 10, &L);
+    EXPECT(L.total_rows == 2);
+    EXPECT(L.end_row == 1);
+    EXPECT(L.end_col == 7);
+}
+
+static void test_layout_soft_wrap_drops_boundary_space(void)
+{
+    /* "abcdefg ij" in cols=10 prompt_w=2: "abcdefg" (7 chars) fills
+     * row 0 cols 2..8, leaving the reserved last cell empty. The
+     * following space would land at col 9 (== cols-1; the reserved
+     * cell) — it's the wrap point, so the walker drops it and breaks.
+     * Row 1 starts cleanly with "ij" at cont_indent (no leading
+     * space). */
+    struct input_layout L;
+    input_core_compute_layout("abcdefg ij", 10, 10, 2, 10, &L);
+    EXPECT(L.total_rows == 2);
+    EXPECT(L.end_row == 1);
+    EXPECT(L.end_col == 4); /* 2 + len("ij") */
+}
+
+static void test_layout_soft_wrap_cursor_after_wrap(void)
+{
+    /* Cursor in the wrapped word lands at its new row/col, not the
+     * pre-wrap position it would have occupied if it stayed on row 0.
+     * cursor=6 is on the 'w' of "world"; after wrap "world" lives at
+     * row 1 cont_indent (= 2). */
+    struct input_layout L;
+    input_core_compute_layout("hello world", 11, 6, 2, 10, &L);
+    EXPECT(L.cursor_row == 1);
+    EXPECT(L.cursor_col == 2);
+
+    /* cursor=8 is the 'r' (third char of "world") — two cells in,
+     * so col = cont_indent + 2 = 4. */
+    input_core_compute_layout("hello world", 11, 8, 2, 10, &L);
+    EXPECT(L.cursor_row == 1);
+    EXPECT(L.cursor_col == 4);
+}
+
+/* ---------- render walker callback ---------- */
+
+/* Recorder: appends a transcript of walker events so tests can assert
+ * the exact glyph + row-break stream. '/' is the row-break sigil; raw
+ * glyph bytes (incl. the TAB → 4-space and unsafe-byte → '?'
+ * substitutions the walker performs) pass through verbatim. */
+struct rec {
+    char buf[256];
+    size_t n;
+};
+
+static void rec_emit(const struct input_render_event *ev, void *user)
+{
+    struct rec *r = user;
+    if (ev->kind == INPUT_RENDER_ROW_BREAK) {
+        if (r->n < sizeof(r->buf) - 1)
+            r->buf[r->n++] = '/';
+        return;
+    }
+    for (size_t i = 0; i < ev->n && r->n < sizeof(r->buf) - 1; i++)
+        r->buf[r->n++] = ev->bytes[i];
+}
+
+static void test_render_word_wrap_emits_break(void)
+{
+    /* "hello world" in cols=10 prompt=2: row 0 holds "hello " (the
+     * trailing space lands at col 7), row 1 holds "world" replayed at
+     * cont_indent. The walker emits one ROW_BREAK between them. */
+    struct rec r = {0};
+    input_core_render("hello world", 11, 0, 2, 2, 10, rec_emit, &r, NULL);
+    r.buf[r.n] = '\0';
+    EXPECT_STR_EQ(r.buf, "hello /world");
+}
+
+static void test_render_drops_boundary_space(void)
+{
+    /* Space exactly at the row boundary: dropped, no leading space
+     * on the next row. The reserved last cell (cols-1) means
+     * "abcdefg" fills row 0 cols 2..8 and the space at col 9 is the
+     * wrap point. */
+    struct rec r = {0};
+    input_core_render("abcdefg ij", 10, 0, 2, 2, 10, rec_emit, &r, NULL);
+    r.buf[r.n] = '\0';
+    EXPECT_STR_EQ(r.buf, "abcdefg/ij");
+}
+
+static void test_render_char_wrap_fallback(void)
+{
+    /* No space — word longer than the row. With the reserved last
+     * cell, row 0 fits 7 cells (cols 2-8); break; "hijk" on row 1. */
+    struct rec r = {0};
+    input_core_render("abcdefghijk", 11, 0, 2, 2, 10, rec_emit, &r, NULL);
+    r.buf[r.n] = '\0';
+    EXPECT_STR_EQ(r.buf, "abcdefg/hijk");
+}
+
+static void test_render_overlong_word_after_wrap_char_wraps(void)
+{
+    /* Once a word has moved to a fresh row, further overflow in that
+     * same overlong token must char-wrap. It must not replay the
+     * token tail again and leave a one-character orphan row. */
+    struct rec r = {0};
+    input_core_render("hello abcdefghijk", 17, 0, 2, 2, 10, rec_emit, &r, NULL);
+    r.buf[r.n] = '\0';
+    EXPECT_STR_EQ(r.buf, "hello /abcdefg/hijk");
+}
+
+static void test_render_hard_newline_indents(void)
+{
+    /* A literal '\n' breaks to cont_indent and is not itself emitted
+     * as a glyph (the row break carries the semantics). */
+    struct rec r = {0};
+    input_core_render("a\nb", 3, 0, 2, 2, 80, rec_emit, &r, NULL);
+    r.buf[r.n] = '\0';
+    EXPECT_STR_EQ(r.buf, "a/b");
+}
+
+static void test_render_tab_expands(void)
+{
+    /* Tab decodes as INPUT_CORE_TAB_WIDTH (=4) spaces. */
+    struct rec r = {0};
+    input_core_render("a\tb", 3, 0, 0, 0, 80, rec_emit, &r, NULL);
+    r.buf[r.n] = '\0';
+    EXPECT_STR_EQ(r.buf, "a    b");
+}
+
+static void test_render_unsafe_substituted(void)
+{
+    /* C0 control bytes (here 0x07 / BEL) substitute to '?'. */
+    struct rec r = {0};
+    input_core_render("a\x07"
+                      "b",
+                      3, 0, 0, 0, 80, rec_emit, &r, NULL);
+    r.buf[r.n] = '\0';
+    EXPECT_STR_EQ(r.buf, "a?b");
+}
+
+/* Counter recorder: tracks how many 'a' glyphs were emitted before
+ * the first combining-mark glyph fired. Used to verify that a
+ * combining mark arriving while the word-buffer is at capacity is
+ * flushed AFTER the buffered word, not before. */
+struct order_rec {
+    int a_count;
+    int combining_after_a_count;
+    int combining_seen;
+};
+
+static void order_cb(const struct input_render_event *ev, void *user)
+{
+    struct order_rec *o = user;
+    if (ev->kind != INPUT_RENDER_GLYPH)
+        return;
+    if (ev->n == 1 && ev->bytes[0] == 'a') {
+        o->a_count++;
+    } else if (!o->combining_seen && ev->width == 0) {
+        o->combining_after_a_count = o->a_count;
+        o->combining_seen = 1;
+    }
+}
+
+static void test_render_combining_after_full_wbuf(void)
+{
+    /* Bug repro: when the word-buffer is exactly at capacity and a
+     * combining mark arrives, the mark must still emit *after* the
+     * buffered glyphs flush — otherwise it attaches to whatever
+     * glyph last committed before wbuf filled and its cursor report
+     * uses the pre-flush column.
+     *
+     * Constructed input: WBUF_CAP 'a's so wbuf is full right when
+     * the next byte is read, immediately followed by U+0301
+     * (combining acute, 0xCC 0x81). cols=0 keeps the wrap path
+     * dormant; the cap-overflow path is the only way wbuf flushes.
+     *
+     * WBUF_CAP is private to input_core.c; the constant below is a
+     * copy. If the implementation cap changes this test must be
+     * updated to match (the bug is at the cap boundary, not on
+     * either side of it). */
+    enum { LEAD = 256 };
+    char buf[LEAD + 2 + 1];
+    for (int i = 0; i < LEAD; i++)
+        buf[i] = 'a';
+    buf[LEAD] = (char)0xcc;
+    buf[LEAD + 1] = (char)0x81;
+    buf[LEAD + 2] = '\0';
+
+    struct order_rec o = {0};
+    input_core_render(buf, LEAD + 2, 0, 0, 0, 0, order_cb, &o, NULL);
+    EXPECT(o.combining_seen);
+    EXPECT(o.a_count == LEAD);
+    EXPECT(o.combining_after_a_count == LEAD);
 }
 
 /* ---------- buffer ops ---------- */
@@ -986,7 +1188,19 @@ int main(void)
     test_layout_c1_in_utf8();
     test_layout_bidi_substituted();
     test_layout_tabs();
-    test_layout_soft_wrap();
+    test_layout_soft_wrap_char();
+    test_layout_soft_wrap_word();
+    test_layout_soft_wrap_drops_boundary_space();
+    test_layout_soft_wrap_cursor_after_wrap();
+
+    test_render_word_wrap_emits_break();
+    test_render_drops_boundary_space();
+    test_render_char_wrap_fallback();
+    test_render_overlong_word_after_wrap_char_wraps();
+    test_render_hard_newline_indents();
+    test_render_tab_expands();
+    test_render_unsafe_substituted();
+    test_render_combining_after_full_wbuf();
 
     test_buf_set_and_insert();
     test_motions_ascii();
