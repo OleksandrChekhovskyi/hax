@@ -47,6 +47,36 @@ static int append_capped(struct buf *out, const char *chunk, size_t run_start, s
     return 0;
 }
 
+/* Emit the `cat -n` line-number prefix ("%6ld\t") for `line_no` into `out`,
+ * then the content run. Prefix is emitted lazily — only when there is at
+ * least one byte of content to attach it to — so we never produce orphan
+ * prefixes for lines we won't reach (cap, EOF, or limit-stop). If the
+ * prefix wouldn't fit whole, signal cap-hit before writing anything; a
+ * half-written "     12" would look like file content. */
+static int emit_run(struct buf *out, const char *chunk, size_t run_start, size_t end, size_t cap,
+                    long line_no, int *need_prefix)
+{
+    if (end <= run_start)
+        return 0;
+    if (*need_prefix) {
+        char prefix[24];
+        int plen = snprintf(prefix, sizeof(prefix), "%6ld\t", line_no);
+        if (plen < 0)
+            plen = 0;
+        if ((size_t)plen >= sizeof(prefix))
+            plen = (int)sizeof(prefix) - 1;
+        /* `>=`, not `>`: if the prefix would land exactly at the cap, we'd
+         * write it and then have no room for any content — an orphan
+         * "     42\t" right before the truncation marker. Treat zero
+         * content headroom as cap-hit and bail without writing anything. */
+        if (out->len + (size_t)plen >= cap)
+            return 1;
+        buf_append(out, prefix, (size_t)plen);
+        *need_prefix = 0;
+    }
+    return append_capped(out, chunk, run_start, end, cap);
+}
+
 /* Stream the file in 8K chunks, scanning for newlines manually so we can
  * skip past the requested offset and accumulate up to `cap` bytes of body.
  * Memory is hard-bounded by `cap`: we never call into a primitive (like
@@ -98,6 +128,8 @@ static int read_lines_capped(const char *path, long offset, long limit, size_t c
     enum read_trunc trunc = TRUNC_NONE;
     int saw_data_in_current_line = 0;
     int first_chunk = 1;
+    long current_line_no = offset;
+    int need_prefix = collecting;
 
     for (;;) {
         ssize_t n = read(fd, chunk, sizeof(chunk));
@@ -148,6 +180,7 @@ static int read_lines_capped(const char *path, long offset, long limit, size_t c
                     saw_data_in_current_line = 0;
                     if (lines_complete + 1 >= offset) {
                         collecting = 1;
+                        need_prefix = 1;
                         run_start = i + 1;
                     }
                 }
@@ -155,13 +188,15 @@ static int read_lines_capped(const char *path, long offset, long limit, size_t c
             }
 
             if (c == '\n') {
-                if (append_capped(&out, chunk, run_start, i + 1, cap)) {
+                if (emit_run(&out, chunk, run_start, i + 1, cap, current_line_no, &need_prefix)) {
                     trunc = TRUNC_BYTES;
                     goto end_loop;
                 }
                 run_start = i + 1;
                 lines_complete++;
                 taken++;
+                current_line_no++;
+                need_prefix = 1;
                 saw_data_in_current_line = 0;
                 if (taken >= effective_line_limit) {
                     /* Model's explicit `limit` was fulfilled (and was
@@ -198,8 +233,11 @@ static int read_lines_capped(const char *path, long offset, long limit, size_t c
             }
         }
         /* End of chunk: flush whatever's been collected since the last
-         * newline. The cap check inside append_capped handles overflow. */
-        if (collecting && append_capped(&out, chunk, run_start, (size_t)n, cap)) {
+         * newline. emit_run handles the lazy prefix for an unfinished line
+         * that started mid-chunk; the cap check inside append_capped
+         * handles overflow. */
+        if (collecting &&
+            emit_run(&out, chunk, run_start, (size_t)n, cap, current_line_no, &need_prefix)) {
             trunc = TRUNC_BYTES;
             goto end_loop;
         }
@@ -414,8 +452,12 @@ const struct tool TOOL_READ = {
         {
             .name = "read",
             .description =
-                "Read a file from disk and return its contents. Optional 1-indexed line "
-                "`offset` and `limit` slice a range; without them, the whole file is returned.",
+                "Read a file from disk and return its contents in `cat -n` format: each "
+                "line is prefixed with its 1-indexed line number, a tab, then the line's "
+                "content. The prefix is presentation only — it is NOT part of the file on "
+                "disk; do not include it in `edit` tool `old_string`/`new_string` arguments. "
+                "Optional 1-indexed line `offset` and `limit` slice a range; without them, "
+                "the whole file is returned.",
             .parameters_schema_json =
                 "{\"type\":\"object\","
                 "\"properties\":{"

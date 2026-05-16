@@ -185,7 +185,10 @@ const struct tool TOOL_EDIT = {
             .name = "edit",
             .description = "Replace an exact string in a file. The `old_string` must match a "
                            "byte sequence in the file exactly once unless `replace_all` is "
-                           "true. Returns a unified diff of the change.",
+                           "true. The `read` tool prepends a `cat -n` line-number column to "
+                           "its output for display; that prefix is NOT part of the file on "
+                           "disk, so do not include it in `old_string` or `new_string`. "
+                           "Returns a unified diff of the change.",
             .parameters_schema_json =
                 "{\"type\":\"object\","
                 "\"properties\":{"
