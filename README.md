@@ -268,9 +268,11 @@ Pair with `scripts/stream_demo.py` (`short`, `long`, `slow`, `burst`, `ansi`, `b
   unset and the auto-probe didn't fire or returned nothing, hax shows the absolute counts
   only
 - `HAX_TRACE` — path to a Markdown file that will receive a pretty-printed dump of every
-  HTTP request, response status, and SSE event (Authorization redacted). Plain text,
-  truncated on startup so each run begins fresh; most readable when opened in an editor
-  that renders Markdown
+  HTTP request, response status, and SSE event (Authorization redacted). Each entry's
+  header carries a `t+S.MMMs dt+S.MMMs` tag (wall-clock since the first trace entry, plus
+  delta from the prior one) so pauses between SSE chunks are visible without inferring
+  from per-provider `created` fields. Plain text, truncated on startup so each run begins
+  fresh; most readable when opened in an editor that renders Markdown
 - `HAX_TRANSCRIPT` — path to a file that mirrors the Ctrl-T transcript view (system prompt,
   advertised tools, and every turn's items including tool calls + results). Plain text,
   truncated on startup and on `/new`, then appended to as the conversation grows. Useful
