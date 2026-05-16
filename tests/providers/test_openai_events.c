@@ -16,6 +16,7 @@ struct captured_ev {
     char *message;
     int http_status;
     struct stream_usage usage;
+    long processed, total, cache;
 };
 
 struct cap_state {
@@ -56,6 +57,11 @@ static int cap_cb(const struct stream_event *ev, void *user)
         break;
     case EV_RETRY:
         /* Provider-emitted UX signal — not produced by openai_events. */
+        break;
+    case EV_PROGRESS:
+        c->processed = ev->u.progress.processed;
+        c->total = ev->u.progress.total;
+        c->cache = ev->u.progress.cache;
         break;
     case EV_DONE:
         c->message = strdup(ev->u.done.stop_reason ? ev->u.done.stop_reason : "");
@@ -515,6 +521,56 @@ static void test_usage_without_cached_details(void)
     TEARDOWN(cap, st);
 }
 
+/* ---------- prompt progress (llama.cpp return_progress) ---------- */
+
+static void test_progress_ignored_when_flag_off(void)
+{
+    /* Default state: emit_progress is 0, so prompt_progress chunks are
+     * silently dropped even if they reach the parser. Guards against
+     * stray fields from unrelated backends triggering spurious events. */
+    WITH_STATE(cap, st);
+    openai_events_feed(&st, "{\"choices\":[{\"delta\":{}}],"
+                            "\"prompt_progress\":{\"total\":100,\"cache\":0,"
+                            "\"processed\":50,\"time_ms\":42}}");
+    EXPECT(cap.n == 0);
+    TEARDOWN(cap, st);
+}
+
+static void test_progress_emitted_when_flag_on(void)
+{
+    /* Wire shape llama-server attaches to each prefill chunk under
+     * return_progress=true. The delta is role-only / content-null so
+     * no text event fires alongside. */
+    WITH_STATE(cap, st);
+    st.emit_progress = 1;
+    openai_events_feed(&st, "{\"choices\":[{\"delta\":"
+                            "{\"role\":\"assistant\",\"content\":null}}],"
+                            "\"prompt_progress\":{\"total\":1000,\"cache\":200,"
+                            "\"processed\":600,\"time_ms\":123}}");
+    EXPECT(cap.n == 1);
+    EXPECT(cap.events[0].kind == EV_PROGRESS);
+    EXPECT(cap.events[0].total == 1000);
+    EXPECT(cap.events[0].cache == 200);
+    EXPECT(cap.events[0].processed == 600);
+    TEARDOWN(cap, st);
+}
+
+static void test_progress_missing_fields_default_zero(void)
+{
+    /* Partially-populated objects should parse without aborting — missing
+     * integers default to zero so the agent's div-by-zero guard kicks in. */
+    WITH_STATE(cap, st);
+    st.emit_progress = 1;
+    openai_events_feed(&st, "{\"choices\":[],"
+                            "\"prompt_progress\":{\"processed\":50}}");
+    EXPECT(cap.n == 1);
+    EXPECT(cap.events[0].kind == EV_PROGRESS);
+    EXPECT(cap.events[0].processed == 50);
+    EXPECT(cap.events[0].total == 0);
+    EXPECT(cap.events[0].cache == 0);
+    TEARDOWN(cap, st);
+}
+
 int main(void)
 {
     test_text_delta();
@@ -544,5 +600,8 @@ int main(void)
     test_usage_default_unknown();
     test_usage_captured_from_trailing_chunk();
     test_usage_without_cached_details();
+    test_progress_ignored_when_flag_off();
+    test_progress_emitted_when_flag_on();
+    test_progress_missing_fields_default_zero();
     T_REPORT();
 }

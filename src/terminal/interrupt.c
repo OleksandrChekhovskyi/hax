@@ -37,6 +37,15 @@ struct watcher {
     struct termios saved_termios;
     int saved_termios_valid;
     int raw_mode_active; /* tracks whether termios currently differs from saved */
+    /* Set in interrupt_init() when both stdin and stdout are TTYs.
+     * Independent of saved_termios_valid: cursor/paste-off restoration
+     * needs only a TTY stdout, not a captured termios baseline, so a
+     * tcgetattr() failure mustn't suppress those bytes on exit. Same
+     * gate (`isatty(stdin) && isatty(stdout)`) that agent.c's
+     * cursor_supported() uses to decide whether to hide the cursor —
+     * the two must stay aligned or the parent shell can inherit a
+     * hidden-cursor state. */
+    int stdout_is_tty;
 };
 
 /* Single global instance — there's one tty and one process. Static handlers
@@ -267,19 +276,22 @@ static void restore_tty_only(void)
      * async-signal-safe in the signal case: tcsetattr and write(2) are
      * in the POSIX async-safe list.
      *
-     * Always restores when we have a saved baseline, regardless of the
-     * watcher's raw_mode_active flag: the prompt editor (input.c) also
-     * puts the tty in raw mode without going through interrupt_arm, so
-     * this path must unwind that case too. Restoring an already-
-     * canonical tty is a harmless no-op. Bracketed paste is also
-     * disabled unconditionally so it doesn't leak to the parent
-     * shell. */
-    if (!W.saved_termios_valid)
-        return;
-    tcsetattr(STDIN_FILENO, TCSANOW, &W.saved_termios);
-    W.raw_mode_active = 0;
-    static const char paste_off[] = "\x1b[?2004l";
-    (void)!write(STDOUT_FILENO, paste_off, sizeof(paste_off) - 1);
+     * Termios and DEC mode restoration are independent failure domains:
+     * tcgetattr() at init may have failed (saved_termios_valid==0)
+     * while stdout is still a TTY, so we must emit paste-off + cursor-
+     * show even when the termios path is skipped. Restoring an
+     * already-canonical tty is a harmless no-op; same for DECTCEM. */
+    if (W.saved_termios_valid) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &W.saved_termios);
+        W.raw_mode_active = 0;
+    }
+    if (W.stdout_is_tty) {
+        /* Bracketed-paste off so it doesn't leak to the parent shell,
+         * cursor-show to reverse agent.c's cursor_hide() in case the
+         * process dies mid-stream (SIGINT, abort, crash). */
+        static const char restore_seq[] = "\x1b[?2004l\x1b[?25h";
+        (void)!write(STDOUT_FILENO, restore_seq, sizeof(restore_seq) - 1);
+    }
 }
 
 static void atexit_handler(void)
@@ -322,6 +334,15 @@ void interrupt_init(void)
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
         return;
 
+    /* Install cleanup handlers immediately once we know we're on a TTY
+     * — before any can-fail step below. If tcgetattr/pipe/pthread_create
+     * fail and we bail, restore_tty_only() must still run on exit to
+     * undo any cursor-hide / paste-on emitted by agent.c during the
+     * doomed-but-still-interactive prompt loop. */
+    W.stdout_is_tty = 1;
+    atexit(atexit_handler);
+    install_signal_handlers();
+
     if (tcgetattr(STDIN_FILENO, &W.saved_termios) == 0)
         W.saved_termios_valid = 1;
 
@@ -350,9 +371,6 @@ void interrupt_init(void)
         return;
     }
     W.started = 1;
-
-    atexit(atexit_handler);
-    install_signal_handlers();
 }
 
 static void wake_watcher(void)

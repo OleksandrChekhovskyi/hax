@@ -76,6 +76,13 @@ struct openai_preset {
      * above. Zero-initialized presets get REASONING_FLAT, the common
      * case for OpenAI Chat Completions and OpenAI-compatible backends. */
     enum reasoning_format reasoning_format;
+    /* Ask the backend for mid-stream prefill progress. Sends
+     * `return_progress: true` in the request body (a llama.cpp
+     * extension) and tells the events parser to surface the resulting
+     * top-level `prompt_progress` chunks as EV_PROGRESS. Other backends
+     * ignore the unknown request field; leave this 0 unless the
+     * preset's target server is known to emit prompt_progress. */
+    int emit_progress;
 };
 
 /* Build an OpenAI-compatible provider configured by `preset`. NULL preset

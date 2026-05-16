@@ -103,6 +103,17 @@ enum stream_event_kind {
      * stuck on a dead connection. The eventual outcome (success or
      * EV_ERROR after exhausting retries) arrives later. */
     EV_RETRY,
+    /* Prompt-processing (prefill) progress for this turn. Carries
+     * llama.cpp-style counts: `processed`/`total` are tokens, `cache`
+     * is the prefix-cache hit subset of `total` (so cache <=
+     * processed <= total). The UX-meaningful fraction is
+     * (processed - cache) / (total - cache), which starts at 0% each
+     * turn regardless of cache reuse. Pure UX signal — never committed
+     * to history. Only llama.cpp currently sources these; the openai
+     * translation gates emission behind a per-preset flag (set
+     * return_progress:true in the request body) so backends that don't
+     * speak it never see synthesized events. */
+    EV_PROGRESS,
     EV_DONE,
     EV_ERROR,
 };
@@ -137,6 +148,11 @@ struct stream_event {
             long delay_ms;    /* about to sleep this long before retrying */
             int http_status;  /* 0 = transport error, otherwise HTTP code */
         } retry;
+        struct {
+            long processed; /* tokens prefilled so far this turn */
+            long total;     /* total prompt tokens to prefill */
+            long cache;     /* subset of `total` served from prefix cache */
+        } progress;
         struct {
             const char *stop_reason;
             struct stream_usage usage;

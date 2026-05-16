@@ -55,7 +55,8 @@ static int cap_cb(const struct stream_event *ev, void *user)
         c->text = strdup(ev->u.reasoning_delta.text ? ev->u.reasoning_delta.text : "");
         break;
     case EV_RETRY:
-        /* Provider-emitted UX signal — not produced by codex_events. */
+    case EV_PROGRESS:
+        /* Provider-emitted UX signals — not produced by codex_events. */
         break;
     case EV_DONE:
         c->message = strdup(ev->u.done.stop_reason ? ev->u.done.stop_reason : "");

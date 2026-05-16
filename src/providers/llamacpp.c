@@ -152,6 +152,10 @@ struct provider *llamacpp_provider_new(void)
         .display_name = "llama.cpp",
         .default_base_url = default_url,
         .send_cache_key_default = 0,
+        /* llama-server attaches `prompt_progress` to each prefill chunk
+         * when this is set — the only provider we target today that
+         * exposes server-side progress. */
+        .emit_progress = 1,
     };
     struct provider *p = openai_provider_new_preset(&preset);
     /* Context-limit probe runs in the background: an older llama-server

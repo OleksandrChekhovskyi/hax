@@ -133,9 +133,11 @@ int turn_on_event(const struct stream_event *ev, struct turn *t)
     }
     case EV_REASONING_DELTA:
     case EV_RETRY:
+    case EV_PROGRESS:
         /* UX-only signals — nothing to commit to history. EV_RETRY just
-         * tells the agent to update its spinner; the eventual outcome
-         * (success or EV_ERROR) drives state. */
+         * tells the agent to update its spinner; EV_PROGRESS drives
+         * the prefill % indicator. The eventual outcome (success or
+         * EV_ERROR) drives state. */
         break;
     case EV_REASONING_ITEM: {
         /* Server typically emits the reasoning item before the assistant

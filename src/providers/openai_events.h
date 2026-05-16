@@ -50,6 +50,12 @@ struct openai_events {
     struct stream_usage pending_usage;
 
     int terminated; /* any terminal event (EV_DONE or EV_ERROR) emitted */
+
+    /* When set, surface top-level `prompt_progress` chunks (llama.cpp's
+     * return_progress=true) as EV_PROGRESS. Off by default — real OpenAI
+     * and most compat backends never send the field, but a stray match
+     * would still parse, so keep emission opt-in. */
+    int emit_progress;
 };
 
 void openai_events_init(struct openai_events *s, stream_cb cb, void *user);

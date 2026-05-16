@@ -1167,6 +1167,33 @@ static int on_event(const struct stream_event *ev, void *user)
         update_retry_label(r);
         break;
     }
+    case EV_PROGRESS: {
+        /* Prefill progress for this turn. Compute as
+         * (processed - cache) / (total - cache) — the "work this turn
+         * requires" view — so the percentage starts at 0% each turn
+         * regardless of cache reuse. If the entire prompt was cached
+         * (total == cache) there's no work to report; skip. The first
+         * content/reasoning delta naturally overwrites the label via
+         * the existing render_transition() paths. */
+        long total = ev->u.progress.total;
+        long cache = ev->u.progress.cache;
+        long processed = ev->u.progress.processed;
+        long denom = total - cache;
+        if (denom <= 0)
+            break;
+        long num = processed - cache;
+        if (num < 0)
+            num = 0;
+        int pct = (int)((num * 100) / denom);
+        if (pct < 0)
+            pct = 0;
+        if (pct > 100)
+            pct = 100;
+        char buf[32];
+        snprintf(buf, sizeof(buf), "processing... %d%%", pct);
+        spinner_set_label(r->spinner, buf);
+        break;
+    }
     case EV_DONE:
         /* Stream ended cleanly. No state transition — agent_run's
          * post-stream path closes whatever was open. */
@@ -1188,6 +1215,36 @@ static int on_event(const struct stream_event *ev, void *user)
 
     turn_on_event(ev, ec->turn);
     return 0;
+}
+
+/* Cursor visibility tracks "user is being asked to type": shown only
+ * around input_readline, hidden everywhere else (slash commands,
+ * streaming, tool dispatch). The spinner glyph is the "we're alive"
+ * indicator while hidden. Restoration on abnormal exit lives in
+ * interrupt.c's restore_tty_only(); these helpers handle the normal
+ * loop. Gate on BOTH stdin and stdout being TTYs to match
+ * interrupt_init()'s condition — otherwise atexit/signal restore
+ * isn't installed, and a piped-stdin run on a TTY stdout would leak
+ * a hidden-cursor state to the parent shell after EOF or signal. */
+static int cursor_supported(void)
+{
+    return isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
+}
+
+static void cursor_show(void)
+{
+    if (!cursor_supported())
+        return;
+    fputs(ANSI_CURSOR_SHOW, stdout);
+    fflush(stdout);
+}
+
+static void cursor_hide(void)
+{
+    if (!cursor_supported())
+        return;
+    fputs(ANSI_CURSOR_HIDE, stdout);
+    fflush(stdout);
 }
 
 /* Indirect references into the live agent_session so the Ctrl-T
@@ -1313,7 +1370,9 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
 
     for (;;) {
         disp_block_separator(&r.disp);
+        cursor_show();
         char *line = input_readline(input, prompt);
+        cursor_hide();
         if (!line) {
             putchar('\n');
             break;

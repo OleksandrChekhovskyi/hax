@@ -21,6 +21,7 @@ struct openai {
     char *endpoint;   /* base_url + "/chat/completions" */
     char *session_id; /* sent as prompt_cache_key when send_cache_key is set */
     int send_cache_key;
+    int emit_progress;
     enum reasoning_format reasoning_format;
     char **extra_headers; /* NULL-terminated, each element heap-owned; NULL = none */
     /* Optional background probe — currently the context-window
@@ -156,7 +157,7 @@ enum reasoning_format reasoning_format_parse(const char *s, enum reasoning_forma
 }
 
 static char *build_body(const struct context *ctx, const char *model, const char *cache_key,
-                        enum reasoning_format reasoning)
+                        enum reasoning_format reasoning, int return_progress)
 {
     /* Omit `tool_choice` and `parallel_tool_calls`: their defaults ("auto"
      * and true respectively) are exactly what we want, so explicitly setting
@@ -179,6 +180,13 @@ static char *build_body(const struct context *ctx, const char *model, const char
 
     if (cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(cache_key));
+
+    /* llama.cpp extension: asks the server to inject prompt_progress
+     * objects into the stream during prefill. Other OpenAI-compatible
+     * backends ignore the unknown field, so we can send it whenever the
+     * preset opts in without per-backend gating beyond that. */
+    if (return_progress)
+        json_object_set_new(body, "return_progress", json_true());
 
     switch (reasoning) {
     case REASONING_FLAT:
@@ -218,8 +226,8 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
 {
     struct openai *o = (struct openai *)p;
 
-    char *body =
-        build_body(ctx, model, o->send_cache_key ? o->session_id : NULL, o->reasoning_format);
+    char *body = build_body(ctx, model, o->send_cache_key ? o->session_id : NULL,
+                            o->reasoning_format, o->emit_progress);
     if (!body)
         return -1;
     size_t body_len = strlen(body);
@@ -256,6 +264,7 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
     for (attempt = 0; attempt < pol.max_attempts; attempt++) {
         memset(&resp, 0, sizeof(resp));
         openai_events_init(&ev, cb, user);
+        ev.emit_progress = o->emit_progress;
         rc = http_sse_post(o->endpoint, headers, body, body_len, on_sse, &ev, tick, tick_user,
                            &resp);
 
@@ -406,6 +415,7 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
     o->name_buf = xstrdup(name);
     o->endpoint = xasprintf("%s/chat/completions", o->base_url);
     o->send_cache_key = send_cache_key;
+    o->emit_progress = preset->emit_progress;
     o->reasoning_format = preset->reasoning_format;
     o->extra_headers = dup_headers(preset->extra_headers);
     char uuid[37];

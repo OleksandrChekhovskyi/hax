@@ -36,4 +36,11 @@
 
 #define ANSI_ERASE_LINE "\x1b[K"
 
+/* DECTCEM cursor visibility. Hidden during model streaming and tool
+ * dispatch so the only "we're alive" indicator is the spinner glyph;
+ * shown only for the duration of the input prompt. Restoration on
+ * exit / signal lives in interrupt.c's restore_tty_only(). */
+#define ANSI_CURSOR_HIDE "\x1b[?25l"
+#define ANSI_CURSOR_SHOW "\x1b[?25h"
+
 #endif /* HAX_ANSI_H */

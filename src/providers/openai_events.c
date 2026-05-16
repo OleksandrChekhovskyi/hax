@@ -178,6 +178,36 @@ static void capture_usage(struct openai_events *s, json_t *root)
     }
 }
 
+/* llama.cpp's return_progress:true attaches a top-level `prompt_progress`
+ * to each streamed chunk during prefill, alongside `choices`:
+ *   "prompt_progress": {"total":N, "cache":N, "processed":N, "time_ms":N}
+ * Emit EV_PROGRESS so the agent can surface "processing N%" on the
+ * spinner. Gated by emit_progress so backends that don't speak this
+ * extension never see synthesized events. `time_ms` is parsed by
+ * llama-server but ignored here — the spinner shows percentage only. */
+static void capture_progress(struct openai_events *s, json_t *root)
+{
+    if (!s->emit_progress)
+        return;
+    json_t *pp = json_object_get(root, "prompt_progress");
+    if (!json_is_object(pp))
+        return;
+    struct stream_event ev = {
+        .kind = EV_PROGRESS,
+        .u.progress = {0},
+    };
+    json_t *v = json_object_get(pp, "processed");
+    if (json_is_integer(v))
+        ev.u.progress.processed = (long)json_integer_value(v);
+    v = json_object_get(pp, "total");
+    if (json_is_integer(v))
+        ev.u.progress.total = (long)json_integer_value(v);
+    v = json_object_get(pp, "cache");
+    if (json_is_integer(v))
+        ev.u.progress.cache = (long)json_integer_value(v);
+    emit(s, &ev);
+}
+
 static void emit_deferred_done(struct openai_events *s)
 {
     struct stream_event ev = {
@@ -270,6 +300,8 @@ void openai_events_feed(struct openai_events *s, const char *data)
     /* Trailing chunks with stream_options.include_usage carry an empty
      * choices array plus the usage object — capture before the early-out. */
     capture_usage(s, root);
+    /* Same goes for llama.cpp's mid-stream prefill progress chunks. */
+    capture_progress(s, root);
 
     json_t *choices = json_object_get(root, "choices");
     if (!json_is_array(choices) || json_array_size(choices) == 0) {
