@@ -1062,7 +1062,112 @@ static void test_real_world_paragraph(void)
 
 /* ---------- wrap mode ---------- */
 
-/* Render with wrap enabled at the given cell budget. */
+/* Walk a byte stream as a terminal would, returning the final visible
+ * content. Handles the two cursor-control sequences the eager-wrap
+ * engine emits — CSI nD (cursor back) and CSI K (erase to EOL) — by
+ * tracking a per-row cell map (cell index → byte offset). \n commits
+ * the current row; SGR and other CSI escapes pass through verbatim at
+ * the row's tail (zero-width, no cell advance). The output is what
+ * the user would see on screen, so wrap tests can keep their
+ * pre-eager byte-exact expected strings as the invariant.
+ *
+ * Cells assume one codepoint = one cell — adequate for everything the
+ * suite exercises (no wide CJK, no combining marks). Continuation
+ * bytes (0b10xxxxxx) tag along with the prior cell's byte range. */
+static char *interpret_terminal(const char *in)
+{
+    struct buf out;
+    buf_init(&out);
+    size_t in_len = strlen(in);
+
+    /* Generous fixed-size scratch — tests stay well within these. */
+    char row[8192];
+    size_t row_len = 0;
+    size_t cell_off[4096];
+    size_t n_cells = 0;
+    size_t cursor = 0;
+
+    size_t i = 0;
+    while (i < in_len) {
+        unsigned char c = (unsigned char)in[i];
+
+        if (c == '\n') {
+            buf_append(&out, row, row_len);
+            buf_append(&out, "\n", 1);
+            row_len = 0;
+            n_cells = 0;
+            cursor = 0;
+            i++;
+            continue;
+        }
+
+        if (c == 0x1b && i + 1 < in_len && in[i + 1] == '[') {
+            /* Parse CSI: digits up to a final byte in 0x40-0x7E. */
+            size_t p = i + 2;
+            int n = 0;
+            int has_num = 0;
+            while (p < in_len && in[p] >= '0' && in[p] <= '9') {
+                n = n * 10 + (in[p] - '0');
+                has_num = 1;
+                p++;
+            }
+            if (p >= in_len || (unsigned char)in[p] < 0x40 || (unsigned char)in[p] > 0x7E) {
+                /* Malformed — treat as literal byte and move on. */
+                row[row_len++] = (char)c;
+                i++;
+                continue;
+            }
+            char final = in[p];
+            if (final == 'D') {
+                int back = has_num ? n : 1;
+                if (back > (int)cursor)
+                    back = (int)cursor;
+                cursor -= (size_t)back;
+                i = p + 1;
+                continue;
+            }
+            if (final == 'K') {
+                if (cursor < n_cells) {
+                    row_len = cell_off[cursor];
+                    n_cells = cursor;
+                }
+                i = p + 1;
+                continue;
+            }
+            /* SGR or any other CSI — pass through. Eager wrap only
+             * emits cursor-control sequences when cursor == n_cells,
+             * so appending at row_len keeps style escapes adjacent to
+             * the cells they were emitted next to. */
+            size_t seq_len = p - i + 1;
+            memcpy(row + row_len, in + i, seq_len);
+            row_len += seq_len;
+            i = p + 1;
+            continue;
+        }
+
+        /* Visible byte. UTF-8 continuation bytes don't bump the cell
+         * count — they extend the byte range of the prior cell. */
+        int is_continuation = (c & 0xC0) == 0x80;
+        if (!is_continuation) {
+            cell_off[n_cells] = row_len;
+            n_cells++;
+            cursor = n_cells;
+        }
+        row[row_len++] = (char)c;
+        i++;
+    }
+
+    buf_append(&out, row, row_len);
+    char *s = buf_steal(&out);
+    return s ? s : xstrdup("");
+}
+
+/* Render with wrap enabled at the given cell budget, then interpret the
+ * raw byte stream as a terminal would. The eager-emit engine streams
+ * each codepoint to emit_cb immediately and retroactively erases when
+ * a word overshoots wrap_width; interpret_terminal collapses that
+ * cursor-jiggle back to the visible result so tests assert what users
+ * see, not the wire-level chatter. */
 static char *render_wrap(const char *input, int wrap_width)
 {
     struct buf out;
@@ -1071,8 +1176,10 @@ static char *render_wrap(const char *input, int wrap_width)
     md_feed(m, input, strlen(input));
     md_flush(m);
     md_free(m);
-    char *s = buf_steal(&out);
-    return s ? s : xstrdup("");
+    char *raw = buf_steal(&out);
+    char *visible = interpret_terminal(raw ? raw : "");
+    free(raw);
+    return visible;
 }
 
 static void test_wrap_disabled_byte_exact(void)
@@ -1306,9 +1413,11 @@ static void test_wrap_partial_utf8_across_feeds(void)
     md_feed(m, "\xA9llo wonderful world", 21);
     md_flush(m);
     md_free(m);
-    char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "h\xC3\xA9llo\nwonderful\nworld");
-    free(s);
+    char *raw = buf_steal(&out);
+    char *visible = interpret_terminal(raw ? raw : "");
+    free(raw);
+    EXPECT_STR_EQ(visible, "h\xC3\xA9llo\nwonderful\nworld");
+    free(visible);
 }
 
 static void test_wrap_soft_wrapped_list_item(void)
@@ -1376,30 +1485,311 @@ static void stream_capture_cb(const char *bytes, size_t n, int is_raw, void *use
     c->call_count++;
 }
 
-static void test_wrap_streams_completed_words(void)
+static void test_wrap_raw_cursor_escapes_on_break(void)
 {
-    /* With wrap enabled, each word reaches emit_cb the moment its
-     * trailing whitespace arrives — not after the next-next space
-     * or when the row wraps / stream flushes. Only the in-progress
-     * word and its leading break-space remain buffered, so on a
-     * paused stream the user is at most one word behind. */
+    /* Lock down the exact wire format the eager engine produces when
+     * a word would overshoot wrap_width: cursor-back over the partial
+     * word + break-space (CSI nD), erase to end of line (CSI K),
+     * newline, then replay the partial word on the next row. Other
+     * wrap tests strip these via interpret_terminal so they assert
+     * what the user sees; this one inspects the raw byte stream so a
+     * regression in the cursor-back math (off-by-one on erase_cells,
+     * forgotten CSI K, etc.) is caught directly.
+     *
+     * "abc def ghi" at width 10: " gh" lands eagerly at col 10 (which
+     * is == budget, no overflow yet); 'i' would push to 11, fires
+     * wrap_break. last_break_col=8 (right after the second space);
+     * erase_cells = (10 - 8) + 1 = 3 — "gh" plus the break-space.
+     * Replay emits "gh" on the new row, then 'i' streams in. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 10);
+    md_feed(m, "abc def ghi", 11);
+    md_flush(m);
+    md_free(m);
+    char *s = buf_steal(&out);
+    EXPECT_STR_EQ(s, "abc def gh\x1b[3D\x1b[K\nghi");
+    free(s);
+}
+
+static void test_wrap_no_autowrap_when_sgr_after_held_space(void)
+{
+    /* Regression for the autowrap variant flagged in code review: a
+     * Markdown style marker (** / ` / _) arriving right at the edge
+     * mustn't trigger autowrap. With pending_wrap the edge-space is
+     * dropped (no byte at col > wrap_width), and a zero-width raw
+     * that follows is emitted to the wire without committing the
+     * pending wrap — that lets a subsequent visible byte commit on
+     * the new row, and the SGR's position relative to \n is moot
+     * (SGR state persists across \n on standard terminals).
+     *
+     * "foo bar **baz**" at width 7: edge-space sets pending; bold
+     * opener emits inline (no commit); 'b' commits → \n + indent;
+     * "baz" lands on row 2; bold closer emits inline. Wire stream
+     * has no byte at col > 7. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 7);
+    md_feed(m, "foo bar **baz**", 15);
+    md_flush(m);
+    md_free(m);
+    char *s = buf_steal(&out);
+    EXPECT_STR_EQ(s, "foo bar\x1b[1m\nbaz\x1b[22m");
+    free(s);
+}
+
+static void test_wrap_sgr_during_pending_wrap_no_extra_blank_line(void)
+{
+    /* Regression: wrap_append used to commit pending_wrap on any
+     * byte, including zero-width SGR escapes. When a styled span
+     * had its trailing edge-space at col > wrap_width followed by
+     * the style closer + hard \n, the closer would commit pending
+     * (emitting an early \n + the closer on its own row), and the
+     * hard \n + blank-line \n then produced TWO blank rows instead
+     * of one paragraph break.
+     *
+     * Source `` `foo bar `\n\nnext `` at width 7: cyan opens, "foo
+     * bar" fills col 7, the trailing space pends, cyan closes (now
+     * inline, no commit), hard \n absorbs pending, second \n is
+     * the paragraph break, "next" on a fresh row. interpret_terminal
+     * preserves SGR escapes inline, so the visible-row stream still
+     * carries the cyan markers — what matters here is the row count:
+     * one blank line between the styled "foo bar" and "next", not
+     * two as in the buggy case. */
+    char *got = render_wrap("`foo bar `\n\nnext", 7);
+    EXPECT_STR_EQ(got, "\x1b[36mfoo bar\x1b[39m\n\nnext");
+    free(got);
+}
+
+static void test_wrap_sgr_during_pending_wrap_at_eof(void)
+{
+    /* EOF variant of the same bug: a styled span ending at the wrap
+     * edge with the closer immediately after the dropped space must
+     * not commit pending. md_flush leaves pending unresolved (no
+     * trailing \n is owed), so the wire stays a single styled run.
+     *
+     * Source `` `foo bar ` `` at width 7: cyan + "foo bar" fills
+     * col 7, trailing space pends, cyan closes inline. No commit.
+     * Wire: cyan-on + "foo bar" + cyan-off. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 7);
+    md_feed(m, "`foo bar `", 10);
+    md_flush(m);
+    md_free(m);
+    char *s = buf_steal(&out);
+    EXPECT_STR_EQ(s, "\x1b[36mfoo bar\x1b[39m");
+    free(s);
+}
+
+static void test_wrap_replay_restores_sgr_state_at_break(void)
+{
+    /* Regression: with eager SGR emit, a style transition inside the
+     * erased slice has already mutated terminal state before wrap_break
+     * fires. The replayed partial word would inherit that *post-break*
+     * state instead of the state at the break point, rendering
+     * unstyled text where the source had it styled (or vice versa).
+     *
+     * Fix: snapshot in_bold / in_italic / in_inline_code at every
+     * break-space record. At wrap_break, emit a diff so terminal state
+     * reverts to the snapshot before the replay re-applies its own
+     * SGRs.
+     *
+     * Input "**foo bar**baz" at width 8: wrap fires at 'a' of "baz"
+     * (the only break candidate is the space between "foo" and
+     * "bar"). The bold-close \e[22m was eagerly emitted on row 1
+     * before CSI nD; without the rewind, replayed "bar" would render
+     * plain even though it's inside the bold span at the break. The
+     * rewind emits \e[1m on row 2 before the replay, so "bar" comes
+     * out bold; the replay's own \e[22m then turns it off in time
+     * for "baz". */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 8);
+    md_feed(m, "**foo bar**baz", 14);
+    md_flush(m);
+    md_free(m);
+    char *s = buf_steal(&out);
+    EXPECT_STR_EQ(s, "\x1b[1mfoo bar\x1b[22mb\x1b[5D\x1b[K\n\x1b[1mbar\x1b[22mbaz");
+    free(s);
+}
+
+static void test_wrap_eof_preserves_trailing_space_when_within_budget(void)
+{
+    /* The autowrap drop in wrap_flush_all only kicks in when the held
+     * space sits past the wrap edge. When the row hasn't reached the
+     * edge, the trailing space is emitted as usual — inline-code
+     * spans are documented as verbatim, so `` `x ` `` (with a
+     * trailing space inside the cyan span) must keep its space at
+     * end-of-stream. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 80);
+    md_feed(m, "`x `", 4);
+    md_flush(m);
+    md_free(m);
+    char *s = buf_steal(&out);
+    EXPECT_STR_EQ(s, "\x1b[36mx \x1b[39m");
+    free(s);
+}
+
+static void test_wrap_hard_newline_drops_trailing_held_space(void)
+{
+    /* Regression: a held break-space at col > wrap_width would autowrap
+     * if flushed at hard \n. wrap_flush_all drops it instead — trailing
+     * spaces before a hard break are invisible, and emitting one at
+     * the right edge commits xterm's delayed-wrap before the \n fires,
+     * leaving a stranded blank row.
+     *
+     * "foo bar \n\nnext" at width 7: row 1 fills to col 7 with
+     * "foo bar". The trailing space sits at col 8 (held). Hard \n
+     * fires. With the drop, the wire stream is "foo bar\n\nnext" —
+     * no trailing space, no autowrap, one blank line as intended.
+     * Without the drop, the wire would be "foo bar \n\nnext" and
+     * xterm would autowrap the space, producing two blank lines. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 7);
+    md_feed(m, "foo bar \n\nnext", 14);
+    md_flush(m);
+    md_free(m);
+    char *s = buf_steal(&out);
+    EXPECT_STR_EQ(s, "foo bar\n\nnext");
+    free(s);
+}
+
+static void test_wrap_sgr_after_break_space_preserves_source_order(void)
+{
+    /* When content does follow the held space + deferred SGR (no
+     * wrap), flush_held_space emits them in source order: space first,
+     * then the SGR, then the content. The cyan-on lands between the
+     * space and the marker's content — matching what a non-eager
+     * renderer would produce. */
+    char *got = render_wrap("foo `bar` baz", 80);
+    EXPECT_STR_EQ(got, "foo \x1b[36mbar\x1b[39m baz");
+    free(got);
+}
+
+static void test_wrap_no_escapes_when_break_at_budget_edge(void)
+{
+    /* Regression for the terminal-autowrap bug: when wrap_width matches
+     * the terminal width and a break-space would land at col == budget +
+     * 1, eagerly emitting it commits the terminal's delayed autowrap to
+     * the next physical row before wrap_break can erase. CSI nD can't
+     * cross row boundaries, so the erase + \n leaves a stranded blank
+     * row.
+     *
+     * Fix: hold every break-space until the next byte arrives. If the
+     * next byte is content that fits, flush the held space first. If
+     * it's content that overflows, wrap_break drops the held space
+     * without emitting it — no cursor-back needed (nothing on the
+     * terminal past the prior committed content).
+     *
+     * "foo bar baz" at width 7: the space after "bar" would land at
+     * col 8. Held. 'b' triggers wrap_break, which sees space_held=1
+     * and skips the cursor-back+erase entirely. Wire stream contains
+     * no cursor escapes — just "foo bar\nbaz". */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 7);
+    md_feed(m, "foo bar baz", 11);
+    md_flush(m);
+    md_free(m);
+    char *s = buf_steal(&out);
+    EXPECT_STR_EQ(s, "foo bar\nbaz");
+    free(s);
+}
+
+static void test_wrap_consecutive_spaces_at_edge(void)
+{
+    /* Regression for the autowrap-on-second-space bug: a break-space
+     * at col > wrap_width was previously held and flushed when the
+     * next byte arrived; if that next byte was another space, the
+     * first held space hit the wire at col == wrap_width + 1 and
+     * autowrapped before wrap_break could fire.
+     *
+     * Fix: drop the over-edge space entirely (it IS the wrap point),
+     * defer the \n + indent via pending_wrap. A second consecutive
+     * space then lands on the fresh row as ordinary leading
+     * whitespace. The wire stays under wrap_width — no autowrap. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 7);
+    md_feed(m, "foo bar  baz", 12);
+    md_flush(m);
+    md_free(m);
+    char *s = buf_steal(&out);
+    EXPECT_STR_EQ(s, "foo bar\n baz");
+    free(s);
+}
+
+static void test_md_cursor_col_tracks_emit_position(void)
+{
+    /* The agent's idle-spinner gating reads md_cursor_col to decide
+     * whether the inline glyph would fit before the terminal edge.
+     * Every appended byte is emitted (no holds), so col tracks the
+     * real terminal cursor — visible bytes advance it cell-by-cell. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 80);
+
+    /* Fresh renderer: nothing emitted, cursor at col 0. */
+    EXPECT(md_cursor_col(m) == 0);
+
+    /* After "abc" the cursor is at col 3. */
+    md_feed(m, "abc", 3);
+    EXPECT(md_cursor_col(m) == 3);
+
+    /* Break-spaces are emitted eagerly — no holds — so the cursor
+     * advances through the space cell immediately. */
+    md_feed(m, " ", 1);
+    EXPECT(md_cursor_col(m) == 4);
+
+    /* Next content continues from where the space landed. */
+    md_feed(m, "d", 1);
+    EXPECT(md_cursor_col(m) == 5);
+
+    md_flush(m);
+    md_free(m);
+    char *s = buf_steal(&out);
+    free(s);
+}
+
+static void test_md_cursor_col_wrap_disabled(void)
+{
+    /* Wrap disabled (wrap_width=0): no wrap engine, no col tracking
+     * — the helper returns 0 so callers can ignore the result. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 0);
+    md_feed(m, "abcdef", 6);
+    EXPECT(md_cursor_col(m) == 0);
+    md_flush(m);
+    md_free(m);
+    char *s = buf_steal(&out);
+    free(s);
+}
+
+static void test_wrap_streams_each_codepoint_eagerly(void)
+{
+    /* Eager emit: every codepoint reaches emit_cb the moment its
+     * bytes arrive — including the trailing break-space, since the
+     * row is well within budget and there's no autowrap risk. A
+     * paused stream is zero codepoints behind. */
     struct stream_capture c = {0};
     struct md_renderer *m = md_new(stream_capture_cb, &c, 100);
     md_feed(m, "alpha ", 6);
-    /* "alpha" committed (space stays in buf as the break candidate). */
-    EXPECT(c.len == 5);
-    EXPECT(memcmp(c.buf, "alpha", 5) == 0);
+    EXPECT(c.len == 6);
+    EXPECT(memcmp(c.buf, "alpha ", 6) == 0);
     md_feed(m, "beta ", 5);
-    /* Second space arrived — " beta" flushes (the buffered leading
-     * space + the now-complete word). "alpha beta" is on the
-     * terminal even though "gamma" hasn't been fed yet. */
-    EXPECT(c.len == 10);
-    EXPECT(memcmp(c.buf, "alpha beta", 10) == 0);
+    EXPECT(c.len == 11);
+    EXPECT(memcmp(c.buf, "alpha beta ", 11) == 0);
     md_feed(m, "gamma", 5);
+    EXPECT(c.len == 16);
+    EXPECT(memcmp(c.buf, "alpha beta gamma", 16) == 0);
     md_flush(m);
     md_free(m);
     EXPECT(c.len == 16);
-    EXPECT(memcmp(c.buf, "alpha beta gamma", 16) == 0);
 }
 
 static void test_wrap_heading_not_wrapped(void)
@@ -1563,7 +1953,19 @@ int main(void)
     test_wrap_soft_wrapped_list_item();
     test_soft_join_indented_continuation();
     test_wrap_indented_continuation_reflows();
-    test_wrap_streams_completed_words();
+    test_wrap_streams_each_codepoint_eagerly();
+    test_wrap_raw_cursor_escapes_on_break();
+    test_wrap_no_escapes_when_break_at_budget_edge();
+    test_wrap_no_autowrap_when_sgr_after_held_space();
+    test_wrap_sgr_during_pending_wrap_no_extra_blank_line();
+    test_wrap_sgr_during_pending_wrap_at_eof();
+    test_wrap_sgr_after_break_space_preserves_source_order();
+    test_wrap_replay_restores_sgr_state_at_break();
+    test_wrap_hard_newline_drops_trailing_held_space();
+    test_wrap_eof_preserves_trailing_space_when_within_budget();
+    test_md_cursor_col_tracks_emit_position();
+    test_wrap_consecutive_spaces_at_edge();
+    test_md_cursor_col_wrap_disabled();
     test_wrap_heading_not_wrapped();
 
     T_REPORT();

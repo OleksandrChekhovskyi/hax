@@ -1116,11 +1116,38 @@ static int agent_stream_tick(void *user)
         update_retry_label(r);
     } else if (r->last_text_at && !r->idle_shown &&
                monotonic_ms() - r->last_text_at >= TEXT_IDLE_TIMEOUT_MS) {
-        /* Skip the leading-space cell when disp says the cursor is
-         * already at column 0 or right after a space — the model's
-         * last byte is its own breathing room, and an extra pad would
-         * read as a stray double-space once the glyph erases. */
-        spinner_show_inline_text(r->spinner, !r->disp.at_space_or_bol);
+        /* Inline glyph is only safe when:
+         *
+         *   - md is driving output (HAX_MARKDOWN=0 has no column
+         *     source for the plain disp_write path, so the gate
+         *     can't decide);
+         *   - disp has no held newlines (md_cursor_col reads md's
+         *     post-\n column == 0 after a hard \n, but disp defers
+         *     trailing \n into r->disp.held instead of writing to
+         *     stdout — so the real terminal cursor is still at the
+         *     prior row's right edge, and the gate would pass even
+         *     though pad + glyph would autowrap);
+         *   - cursor + cells fits before term_width() (the real tty
+         *     edge, not the soft-capped layout width).
+         *
+         * Autowrap here would commit xterm's delayed-autowrap on
+         * top of the glyph, leaving spinner_hide's \b-based erase
+         * to operate on the wrong row. We trade the idle-alive
+         * indicator for correctness in the unsafe cases; latch
+         * idle_shown either way so the tick doesn't churn — the
+         * next text byte moves last_text_at forward and re-arms
+         * the idle window. */
+        if (r->md && r->disp.held == 0) {
+            /* Skip the leading-space cell when disp says the cursor
+             * is already at column 0 or right after a space — the
+             * model's last byte is its own breathing room, and an
+             * extra pad would read as a stray double-space once the
+             * glyph erases. */
+            int pad = !r->disp.at_space_or_bol;
+            int spinner_cells = 1 + pad;
+            if (md_cursor_col(r->md) + spinner_cells <= term_width())
+                spinner_show_inline_text(r->spinner, pad);
+        }
         r->idle_shown = 1;
     }
     return interrupt_requested();

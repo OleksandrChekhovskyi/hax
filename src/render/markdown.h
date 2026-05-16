@@ -64,4 +64,14 @@ void md_free(struct md_renderer *m);
  * at the seam; this function does not. Default is on. */
 void md_set_styled(struct md_renderer *m, int on);
 
+/* Current terminal-cursor column. The wrap engine's logical column
+ * can be one cell ahead of where the cursor actually sits — a held
+ * break-space at the budget edge has been *appended* to row_buf but
+ * not yet emitted (see md_renderer's space_held field). Returns 0
+ * when wrap is disabled (wrap_width <= 0) or when no codepoint has
+ * been consumed yet. Used by the agent's idle-spinner gating so the
+ * inline glyph doesn't draw past the terminal's right edge and
+ * trigger autowrap. */
+int md_cursor_col(const struct md_renderer *m);
+
 #endif /* HAX_MARKDOWN_H */
