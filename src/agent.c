@@ -327,6 +327,18 @@ static void render_stream_end(struct render_ctx *r)
 static void render_open_block(struct render_ctx *r)
 {
     render_transition(r, RS_IDLE);
+    /* RS_IDLE → RS_IDLE is a no-op transition, so the "working..." line
+     * spinner from render_stream_begin can still be occupying the
+     * current row when we get here (e.g. EV_ERROR fired before any
+     * SSE bytes, or EV_DONE on an empty assistant turn). The spinner's
+     * \r-prefixed redraw doesn't update disp's column tracking, so the
+     * out-of-band block we're about to write would land on the same
+     * row as the spinner's glyph+label — and then the post-stream
+     * spinner_hide's \r + erase-line would wipe the row, taking the
+     * error/usage text with it. Hide explicitly here so the line is
+     * cleared before we write to it; no-op when the spinner is already
+     * off (the common path after any RS_TEXT/RS_REASONING run). */
+    spinner_hide(r->spinner);
     disp_block_separator(&r->disp);
 }
 
