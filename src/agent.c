@@ -133,6 +133,8 @@ static int tool_result_is_marked(const struct item *it)
  * variant) that must be unwound before drawing anything else.
  *
  *   RS_IDLE      Nothing open: cursor at column 0, no SGR active.
+ *   RS_WAITING   The agent is busy but no content block is open; owns the
+ *                full-size line spinner in its own block.
  *   RS_REASONING Dim+italic CoT span open. Only reached when
  *                HAX_SHOW_REASONING is on; otherwise reasoning drives
  *                the spinner label only.
@@ -144,6 +146,7 @@ static int tool_result_is_marked(const struct item *it)
  *                are reset per-stream. */
 enum render_state {
     RS_IDLE,
+    RS_WAITING,
     RS_REASONING,
     RS_TEXT,
     RS_CLUSTER,
@@ -224,6 +227,9 @@ static void render_transition(struct render_ctx *r, enum render_state to)
     switch (r->state) {
     case RS_IDLE:
         break;
+    case RS_WAITING:
+        spinner_hide(r->spinner);
+        break;
     case RS_REASONING:
         if (r->md)
             md_flush(r->md);
@@ -252,6 +258,11 @@ static void render_transition(struct render_ctx *r, enum render_state to)
         /* No separator emitted — out-of-band block writers
          * (render_open_block, display_tool_header) own that decision. */
         break;
+    case RS_WAITING:
+        disp_block_separator(&r->disp);
+        spinner_set_label(r->spinner, "working...");
+        spinner_show(r->spinner);
+        break;
     case RS_REASONING:
         spinner_hide(r->spinner);
         disp_block_separator(&r->disp);
@@ -279,25 +290,35 @@ static void render_transition(struct render_ctx *r, enum render_state to)
     r->state = to;
 }
 
-/* Commit any pending output to the terminal without changing state:
- * clear the idle overlay, flush md's lookahead tail if we're in a
- * content stream, and reset the spinner label to the neutral default.
- * Called at mid-stream content-block seams (text/reasoning → tool
- * call, or one reasoning item → the next) so the trailing fragment of
- * the prior block lands before the next block's bytes arrive. State
- * is left untouched so any open SGR (RS_REASONING's dim+italic)
- * persists across the seam. */
-static void render_flush(struct render_ctx *r)
+/* Return to the busy full-size spinner between visible content blocks.
+ * This closes text/reasoning state (flushing md tails and SGR) and clears
+ * the text-idle window so a long tool-args / post-reasoning pause doesn't
+ * render as an inline glyph attached to the prior block. */
+static void render_stream_wait(struct render_ctx *r)
 {
-    render_clear_idle(r);
-    if (r->md && (r->state == RS_TEXT || r->state == RS_REASONING))
-        md_flush(r->md);
+    r->last_text_at = 0;
+    render_transition(r, RS_WAITING);
+    /* Same-state RS_WAITING transitions are no-ops; still restore the
+     * neutral label after invisible reasoning and ensure the spinner is up. */
     spinner_set_label(r->spinner, "working...");
+    spinner_show(r->spinner);
+}
+
+/* A streamed item boundary means the prior visible content block is done,
+ * but the provider is still active. Keep silent clusters intact so they can
+ * coalesce with the tool call that will be classified during dispatch. */
+static void render_stream_seam(struct render_ctx *r)
+{
+    if (r->state == RS_CLUSTER) {
+        spinner_set_label(r->spinner, "working...");
+        return;
+    }
+    render_stream_wait(r);
 }
 
 /* Pre-stream housekeeping: arm fresh idle/retry bookkeeping for the
- * new stream, then show the "working..." spinner — unless we're
- * continuing a cluster, whose own end-of-line spinner is the alive
+ * new provider call, then show the busy "working..." spinner — unless
+ * we're continuing a cluster, whose own end-of-line spinner is the alive
  * indicator across the gap. */
 static void render_stream_begin(struct render_ctx *r)
 {
@@ -306,19 +327,7 @@ static void render_stream_begin(struct render_ctx *r)
     r->retry_deadline_at = 0;
     if (r->state == RS_CLUSTER)
         return;
-    disp_block_separator(&r->disp);
-    spinner_set_label(r->spinner, "working...");
-    spinner_show(r->spinner);
-}
-
-/* Post-stream housekeeping: hide the pre-stream spinner unless a
- * cluster is open. Cluster's spinner spans the gap to the next call
- * (verbose tool dispatch or a continuation stream). */
-static void render_stream_end(struct render_ctx *r)
-{
-    if (r->state == RS_CLUSTER)
-        return;
-    spinner_hide(r->spinner);
+    render_stream_wait(r);
 }
 
 /* Return to a clean idle line and open a fresh visual block — for
@@ -327,17 +336,10 @@ static void render_stream_end(struct render_ctx *r)
 static void render_open_block(struct render_ctx *r)
 {
     render_transition(r, RS_IDLE);
-    /* RS_IDLE → RS_IDLE is a no-op transition, so the "working..." line
-     * spinner from render_stream_begin can still be occupying the
-     * current row when we get here (e.g. EV_ERROR fired before any
-     * SSE bytes, or EV_DONE on an empty assistant turn). The spinner's
-     * \r-prefixed redraw doesn't update disp's column tracking, so the
-     * out-of-band block we're about to write would land on the same
-     * row as the spinner's glyph+label — and then the post-stream
-     * spinner_hide's \r + erase-line would wipe the row, taking the
-     * error/usage text with it. Hide explicitly here so the line is
-     * cleared before we write to it; no-op when the spinner is already
-     * off (the common path after any RS_TEXT/RS_REASONING run). */
+    /* Belt-and-braces: RS_WAITING owns the busy spinner and is closed
+     * by the transition above, but hide explicitly so callers that enter
+     * with an out-of-band spinner row never draw into a line that a later
+     * erase would wipe. */
     spinner_hide(r->spinner);
     disp_block_separator(&r->disp);
 }
@@ -1160,10 +1162,11 @@ static int on_event(const struct stream_event *ev, void *user)
     struct disp *d = &r->disp;
 
     /* Idle detection tracks "time since the last byte the user could
-     * see". Stream-ending events close the window; tool-call events
-     * leave it armed so the idle spinner can fire during a long
-     * tool-args generation pause too. Reasoning deltas re-arm it from
-     * their own handler when reasoning is visible. */
+     * see". Stream-ending events close the window; streamed item seams
+     * close it via render_stream_seam so long tool-args / post-reasoning
+     * pauses use the full-size busy spinner instead of an inline glyph.
+     * Reasoning deltas re-arm it from their own handler when reasoning is
+     * visible. */
     if (ev->kind == EV_DONE || ev->kind == EV_ERROR)
         r->last_text_at = 0;
     /* Any event other than EV_RETRY itself means we're past the
@@ -1191,7 +1194,7 @@ static int on_event(const struct stream_event *ev, void *user)
     }
     case EV_TOOL_CALL_START:
     case EV_REASONING_ITEM:
-        render_flush(r);
+        render_stream_seam(r);
         break;
     case EV_TOOL_CALL_DELTA:
     case EV_TOOL_CALL_END:
@@ -1518,8 +1521,6 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
              * detection: ~1Hz from libcurl's progress callback inside
              * curl_easy_perform, plus on every received chunk. */
             p->stream(p, &ctx, sess.model, on_event, &ec, agent_stream_tick, &r);
-
-            render_stream_end(&r);
 
             if (t.error) {
                 /* Mid-stream error (network drop, "length"/"content_filter"
