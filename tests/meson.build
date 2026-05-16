@@ -69,6 +69,7 @@ test_bash = executable('test_bash',
     sources: [
         'tools/test_bash.c',
         '../src/tools/bash.c',
+        '../src/tools/bash_cd_strip.c',
         '../src/tools/bash_classify.c',
         '../src/terminal/interrupt.c',
         '../src/system/path.c',
@@ -79,6 +80,16 @@ test_bash = executable('test_bash',
     dependencies: [jansson, threads],
 )
 test('tools/bash', test_bash)
+
+test_bash_cd_strip = executable('test_bash_cd_strip',
+    sources: [
+        'tools/test_bash_cd_strip.c',
+        '../src/tools/bash_cd_strip.c',
+        '../src/text/utf8.c',
+        '../src/util.c',
+    ],
+)
+test('tools/bash_cd_strip', test_bash_cd_strip)
 
 test_interrupt = executable('test_interrupt',
     sources: [

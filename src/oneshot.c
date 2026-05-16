@@ -125,12 +125,21 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
                 continue;
             const struct tool *tool = sess.n_tools ? find_tool(sess.items[i].tool_name) : NULL;
             char *result;
-            if (tool)
-                result = tool->run(sess.items[i].tool_arguments_json, NULL, NULL);
-            else if (sess.n_tools == 0)
+            if (tool) {
+                /* Apply the same per-tool arg normalization as
+                 * interactive dispatch (agent.c::dispatch_tool_call) so
+                 * tool behavior doesn't silently differ between modes. */
+                char *rewritten = NULL;
+                if (tool->preprocess_args && sess.items[i].tool_arguments_json)
+                    rewritten = tool->preprocess_args(sess.items[i].tool_arguments_json);
+                const char *args = rewritten ? rewritten : sess.items[i].tool_arguments_json;
+                result = tool->run(args, NULL, NULL);
+                free(rewritten);
+            } else if (sess.n_tools == 0) {
                 result = xstrdup("error: tool calls are disabled in this session");
-            else
+            } else {
                 result = xasprintf("unknown tool: %s", sess.items[i].tool_name);
+            }
             char *history = ctrl_strip_dup(result);
             free(result);
             items_append(&sess.items, &sess.n_items, &sess.cap_items,

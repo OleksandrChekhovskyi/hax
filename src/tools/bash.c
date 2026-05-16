@@ -17,6 +17,7 @@
 #include "terminal/interrupt.h"
 #include "text/utf8.h"
 #include "text/utf8_sanitize.h"
+#include "tools/bash_cd_strip.h"
 #include "tools/bash_classify.h"
 
 /* Output is captured to a temp file (mkstemp under $TMPDIR) so the model
@@ -1140,6 +1141,43 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
     return out;
 }
 
+/* Rewrite args_json to drop a redundant `cd <cwd> && ` prefix from
+ * the command. Some models (notably the Qwen family) prepend this on
+ * every call even when cwd already equals the target — it's harmless
+ * but doubles the noise in the per-call preview line. We strip when
+ * the cd target resolves *exactly* to getcwd() under the limited
+ * expansion forms in bash_strip_cd_prefix, so the filesystem state
+ * the suffix sees is unchanged. Returns NULL when nothing was
+ * stripped, leaving the agent to use the model's original args. */
+static char *bash_preprocess_args(const char *args_json)
+{
+    if (!args_json)
+        return NULL;
+    json_error_t jerr;
+    json_t *root = json_loads(args_json, 0, &jerr);
+    if (!root)
+        return NULL;
+    const char *cmd = json_string_value(json_object_get(root, "command"));
+    if (!cmd) {
+        json_decref(root);
+        return NULL;
+    }
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        json_decref(root);
+        return NULL;
+    }
+    size_t off = bash_strip_cd_prefix(cmd, cwd, getenv("HOME"));
+    if (off == 0) {
+        json_decref(root);
+        return NULL;
+    }
+    json_object_set_new(root, "command", json_string(cmd + off));
+    char *out = json_dumps(root, JSON_COMPACT);
+    json_decref(root);
+    return out;
+}
+
 /* Decide at dispatch time whether this call's output should be hidden
  * from the live preview. The model still sees the canonical output —
  * this is purely a display heuristic. bash_classify is conservative:
@@ -1190,4 +1228,5 @@ const struct tool TOOL_BASH = {
     .header_rows = 3,
     .preview_tail = 1,
     .is_silent = bash_is_silent,
+    .preprocess_args = bash_preprocess_args,
 };

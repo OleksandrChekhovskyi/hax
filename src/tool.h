@@ -74,6 +74,15 @@ struct tool {
      * silent iff the function returns nonzero. Used by `bash` to
      * classify exploration commands (ls/grep/find/...) at runtime. */
     int (*is_silent)(const char *args_json);
+    /* Optional. Called once per tool call before display + run() to
+     * normalize the args. Returns a malloc'd, rewritten args_json
+     * (caller frees) or NULL to leave args unchanged — NULL is also
+     * the right return on any parse/alloc failure inside the hook,
+     * since "use the model's original payload" is always safe. The
+     * rewritten value drives both the preview and the run() argument;
+     * the model's original emission stays in conversation history
+     * (transcript/trace reflect what was actually sent over the wire). */
+    char *(*preprocess_args)(const char *args_json);
 };
 
 extern const struct tool TOOL_READ;

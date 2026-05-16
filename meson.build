@@ -34,6 +34,7 @@ sources = files(
     'src/transport/api_error.c',
     'src/system/bg_job.c',
     'src/terminal/clipboard.c',
+    'src/tools/bash_cd_strip.c',
     'src/tools/bash_classify.c',
     'src/render/ctrl_strip.c',
     'src/system/diff.c',

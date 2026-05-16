@@ -943,11 +943,27 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *r, const struct
 static struct item dispatch_tool_call(struct render_ctx *r, const struct item *call)
 {
     const struct tool *t = find_tool(call->tool_name);
-    int is_silent = t && call_is_silent(t, call);
+
+    /* Optional per-tool arg normalization, applied once so the preview
+     * and run() see the same rewritten payload. The model's original
+     * args stay in `call` (and thus in conversation history); only the
+     * local `effective` shadow item carries the rewrite. Field-by-field
+     * copy is fine because we never free `effective` — its non-
+     * rewritten fields still belong to `call`. */
+    char *rewritten = NULL;
+    if (t && t->preprocess_args && call->tool_arguments_json)
+        rewritten = t->preprocess_args(call->tool_arguments_json);
+    struct item effective = *call;
+    if (rewritten)
+        effective.tool_arguments_json = rewritten;
+    const struct item *eff = rewritten ? &effective : call;
+
+    int is_silent = t && call_is_silent(t, eff);
     render_transition(r, is_silent ? RS_CLUSTER : RS_IDLE);
-    if (is_silent)
-        return dispatch_tool_call_silent(r, call, t);
-    return dispatch_tool_call_verbose(r, call);
+    struct item out =
+        is_silent ? dispatch_tool_call_silent(r, eff, t) : dispatch_tool_call_verbose(r, eff);
+    free(rewritten);
+    return out;
 }
 
 /* Adapter so md_renderer can emit through disp without knowing about it.
