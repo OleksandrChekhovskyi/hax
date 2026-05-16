@@ -66,6 +66,7 @@ sources = files(
     'src/providers/codex_events.c',
     'src/providers/llamacpp.c',
     'src/providers/mock.c',
+    'src/providers/ollama.c',
     'src/providers/openai.c',
     'src/providers/openai_compat.c',
     'src/providers/openai_events.c',

@@ -2,7 +2,7 @@
 
 A minimalist coding agent in C. Multi-provider from day one; ships with adapters for Codex /
 ChatGPT and a family of presets over the OpenAI Chat Completions API (real OpenAI, generic
-"OpenAI-compatible" endpoints, llama.cpp llama-server, OpenRouter).
+"OpenAI-compatible" endpoints, llama.cpp llama-server, ollama, OpenRouter).
 
 ## Build
 
@@ -48,6 +48,7 @@ Pick a provider with `HAX_PROVIDER` (default `codex`). Supported values:
 | `openai`            | OpenAI Chat Completions at api.openai.com             |
 | `openai-compatible` | Any OpenAI-compatible endpoint (bring your own URL)   |
 | `llama.cpp`         | Local `llama-server` with model + context auto-detect |
+| `ollama`            | Local `ollama` with context auto-detect               |
 | `openrouter`        | OpenRouter with attribution + context auto-detect     |
 | `mock`              | In-process scripted/heuristic stub for manual testing |
 
@@ -76,7 +77,7 @@ HAX_PROVIDER=openai HAX_MODEL=gpt-5.5 ./build/hax
 `openai-compatible` (which keeps `OPENAI_API_KEY` and `prompt_cache_key` scoped to real
 OpenAI so they don't leak to a third-party server).
 
-### OpenAI-compatible (vLLM, Ollama, LM Studio, oMLX, custom proxies)
+### OpenAI-compatible (vLLM, LM Studio, oMLX, custom proxies)
 
 Generic preset for any backend that speaks `/v1/chat/completions`. `HAX_OPENAI_BASE_URL` is
 required; no implicit `OPENAI_API_KEY` fallback.
@@ -107,6 +108,29 @@ and the override knobs. If `HAX_MODEL` is set, the model probe is skipped entire
 prompt — failure just leaves the context-percent display hidden. If llama-server is started
 with `--api-key`, set `HAX_OPENAI_API_KEY` to the matching token — it's forwarded to the
 discovery probes too, not just the streaming request.
+
+### ollama
+
+Convenience preset for a local `ollama` daemon. Defaults to `http://127.0.0.1:11434/v1`;
+set `HAX_OLLAMA_PORT` for a different port, or `HAX_OPENAI_BASE_URL` to override the URL
+entirely. `HAX_MODEL` is required — ollama's chat endpoint rejects requests without one,
+and no signal it exposes reliably picks the right model (`/api/ps` decays after
+`OLLAMA_KEEP_ALIVE`, `/v1/models` is just the pulled-model catalog), so hax asks once
+rather than guess. In the background, hax probes `/api/show` for the model's training
+context window (`model_info["<arch>.context_length"]`) so the per-turn
+`%`-of-context display lights up without manual configuration:
+
+```sh
+HAX_PROVIDER=ollama HAX_MODEL=qwen3:8b ./build/hax
+HAX_PROVIDER=ollama HAX_OLLAMA_PORT=11500 HAX_MODEL=qwen3:8b ./build/hax
+```
+
+Run `ollama list` to see what's installed locally. The `/api/show` probe runs in the
+background, so a slow response never delays the first prompt — failure just leaves the
+context-percent display hidden. The reported context is the model's training maximum
+from gguf metadata; if your ollama daemon is configured with a smaller
+`OLLAMA_CONTEXT_LENGTH` (or you pass `num_ctx` per call), set `HAX_CONTEXT_LIMIT` to
+match so the percentage stays accurate.
 
 ### OpenRouter
 
@@ -158,11 +182,12 @@ Pair with `scripts/stream_demo.py` (`short`, `long`, `slow`, `burst`, `ansi`, `b
 ### Provider & model
 
 - `HAX_PROVIDER` — one of `codex` (default), `openai`, `openai-compatible`, `llama.cpp`,
-  `openrouter`, `mock`
+  `ollama`, `openrouter`, `mock`
 - `HAX_MODEL` — model id. With `codex`, defaults to `model` from `~/.codex/config.toml`,
   falling back to `gpt-5.3-codex`. With `llama.cpp`, auto-filled from `/v1/models` when
   unset. With `mock`, defaults to a placeholder so the provider works without
-  configuration. With every other provider, required (hax exits with an error if it's unset)
+  configuration. With every other provider (including `ollama`), required (hax exits with
+  an error if it's unset)
 - `HAX_MOCK_SCRIPT` — path to a mock-script file (only honored when `HAX_PROVIDER=mock`).
   Without it, the mock provider falls back to interactive heuristic responses
 - `HAX_PROVIDER_NAME` — optional display name; useful with `openai-compatible` to label the
@@ -176,24 +201,30 @@ Pair with `scripts/stream_demo.py` (`short`, `long`, `slow`, `burst`, `ansi`, `b
   `~/.codex/config.toml`; otherwise the field is omitted and the server picks its own
   default. Set it to an empty string to force omission
 
-### OpenAI-family auth and routing (openai, openai-compatible, llama.cpp, openrouter)
+### OpenAI-family auth and routing (openai, openai-compatible, llama.cpp, ollama, openrouter)
 
 - `HAX_OPENAI_BASE_URL` — required for `openai-compatible`; overrides the default for
-  `llama.cpp`; rejected by `openai` and `openrouter` (both locked to their real hosts so
-  their default API-key fallbacks can't leak to an unrelated endpoint)
+  `llama.cpp` and `ollama`; rejected by `openai` and `openrouter` (both locked to their
+  real hosts so their default API-key fallbacks can't leak to an unrelated endpoint)
 - `HAX_OPENAI_API_KEY` — preferred Bearer token across all OpenAI-family presets. Each
   preset also picks up its conventional global as a fallback: `OPENAI_API_KEY` for `openai`,
   `OPENROUTER_API_KEY` for `openrouter`. `openai-compatible` deliberately has no global
   fallback so a configured OpenAI key isn't forwarded to an unrelated endpoint
 - `HAX_OPENAI_SEND_CACHE_KEY` — set to any non-empty value to send a stable per-session
   `prompt_cache_key`. On by default for `openai` and `openrouter` (both honor prefix
-  caching); off by default for `openai-compatible` and `llama.cpp` because some local
-  servers (notably vLLM) reject unknown JSON fields. This switch lets hosted compat
+  caching); off by default for `openai-compatible`, `llama.cpp`, and `ollama` because some
+  local servers (notably vLLM) reject unknown JSON fields. This switch lets hosted compat
   backends like Together, Fireworks, or Groq opt in
 
 ### llama.cpp preset
 
 - `HAX_LLAMACPP_PORT` — optional. Port for the local `llama-server` (defaults to `8080`).
+  Used only when `HAX_OPENAI_BASE_URL` is unset; the URL becomes
+  `http://127.0.0.1:<port>/v1`
+
+### ollama preset
+
+- `HAX_OLLAMA_PORT` — optional. Port for the local `ollama` daemon (defaults to `11434`).
   Used only when `HAX_OPENAI_BASE_URL` is unset; the URL becomes
   `http://127.0.0.1:<port>/v1`
 
@@ -230,7 +261,8 @@ Pair with `scripts/stream_demo.py` (`short`, `long`, `slow`, `burst`, `ansi`, `b
 - `HAX_CONTEXT_LIMIT` — optional manual override for the model's context window, used to
   show a percentage on the per-turn usage line. Accepts a plain number or a `k`/`m` suffix
   (1024-base): `256k`, `128K`, `1m`, `262144`. Auto-detected for `codex` (from the catalog's
-  `context_window`), `llama.cpp` (from `/props`), and `openrouter` (from the per-model
+  `context_window`), `llama.cpp` (from `/props`), `ollama` (from `/api/show`'s
+  `model_info["<arch>.context_length"]`), and `openrouter` (from the per-model
   `endpoints[].context_length`); auto-detection runs in the background at startup and lights up the
   display once the response lands. The env var, when set, wins over auto-detection. When
   unset and the auto-probe didn't fire or returned nothing, hax shows the absolute counts

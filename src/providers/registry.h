@@ -25,6 +25,7 @@
 extern const struct provider_factory PROVIDER_CODEX;
 extern const struct provider_factory PROVIDER_LLAMACPP;
 extern const struct provider_factory PROVIDER_MOCK;
+extern const struct provider_factory PROVIDER_OLLAMA;
 extern const struct provider_factory PROVIDER_OPENAI;
 extern const struct provider_factory PROVIDER_OPENAI_COMPAT;
 extern const struct provider_factory PROVIDER_OPENROUTER;

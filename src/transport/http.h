@@ -45,4 +45,15 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
 int http_get(const char *url, const char *const *headers, long timeout_s, http_tick_cb tick,
              void *tick_user, char **out);
 
+/* Synchronous POST of a JSON body into a freshly-allocated NUL-terminated
+ * buffer. Identical contract to http_get otherwise (timeouts, tick, return
+ * codes, *out ownership). `body` is treated as opaque bytes — the caller
+ * is responsible for the JSON encoding — and a `Content-Type: application/json`
+ * header is appended automatically (callers should not duplicate it in
+ * `headers`). NULL/empty body sends a zero-length POST. Used for small
+ * probe endpoints that take a JSON request (ollama's POST /api/show, …)
+ * rather than encoding the query in the URL. */
+int http_post_json(const char *url, const char *const *headers, const char *body, size_t body_len,
+                   long timeout_s, http_tick_cb tick, void *tick_user, char **out);
+
 #endif /* HAX_HTTP_H */

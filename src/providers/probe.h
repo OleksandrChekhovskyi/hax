@@ -26,6 +26,11 @@ struct probe_args {
     /* NULL-terminated array of "Key: value" strings. Each entry and the
      * array itself are heap-owned. NULL = no extra headers. */
     char **headers;
+    /* Optional heap-owned JSON request body. When non-NULL the worker
+     * issues a POST (Content-Type: application/json appended for free)
+     * instead of a GET — used by probes whose catalog endpoint takes a
+     * body (ollama's /api/show) rather than a query in the URL. */
+    char *body;
     /* Total request timeout in seconds, passed through to http_get.
      * Probes are best-effort, so callers should pick a small value
      * (typically 5s) — a slow catalog endpoint shouldn't keep the

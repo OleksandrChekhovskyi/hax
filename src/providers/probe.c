@@ -3,6 +3,7 @@
 
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "system/bg_job.h"
 #include "transport/http.h"
@@ -15,6 +16,7 @@ static void probe_args_free(struct probe_args *a)
     if (!a)
         return;
     free(a->url);
+    free(a->body);
     if (a->headers) {
         for (char **h = a->headers; *h; h++)
             free(*h);
@@ -38,8 +40,13 @@ static void probe_run(struct bg_job *job, void *arg)
     }
 
     char *body = NULL;
-    int rc =
-        http_get(a->url, (const char *const *)a->headers, a->timeout_s, bg_job_tick, job, &body);
+    int rc;
+    if (a->body)
+        rc = http_post_json(a->url, (const char *const *)a->headers, a->body, strlen(a->body),
+                            a->timeout_s, bg_job_tick, job, &body);
+    else
+        rc = http_get(a->url, (const char *const *)a->headers, a->timeout_s, bg_job_tick, job,
+                      &body);
     if (rc == 0 && body) {
         long v = a->extract(body, a->user);
         if (v > 0)

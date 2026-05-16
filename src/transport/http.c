@@ -306,8 +306,15 @@ static int http_get_progress_cb(void *clientp, curl_off_t dltotal, curl_off_t dl
     return (s->tick && s->tick(s->tick_user)) ? 1 : 0;
 }
 
-int http_get(const char *url, const char *const *headers, long timeout_s, http_tick_cb tick,
-             void *tick_user, char **out)
+/* Shared core for the small synchronous GET/POST probes. `method` is just
+ * the label for the trace; the libcurl request shape is selected by
+ * `body` (NULL = GET, non-NULL = POST with body bytes + appended
+ * Content-Type: application/json). Splitting this out keeps the GET and
+ * POST entry points to ~5 lines each so the only difference between
+ * them is the one bit that actually differs. */
+static int http_body_request(const char *method, const char *url, const char *const *headers,
+                             const char *body, size_t body_len, long timeout_s, http_tick_cb tick,
+                             void *tick_user, char **out)
 {
     *out = NULL;
 
@@ -325,6 +332,15 @@ int http_get(const char *url, const char *const *headers, long timeout_s, http_t
         }
         hl = next;
     }
+    if (body) {
+        struct curl_slist *next = curl_slist_append(hl, "Content-Type: application/json");
+        if (!next) {
+            curl_slist_free_all(hl);
+            curl_easy_cleanup(curl);
+            return -1;
+        }
+        hl = next;
+    }
 
     struct http_get_state state;
     memset(&state, 0, sizeof(state));
@@ -335,6 +351,11 @@ int http_get(const char *url, const char *const *headers, long timeout_s, http_t
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     if (hl)
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hl);
+    if (body) {
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body_len);
+    }
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, http_get_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 2L);
@@ -348,7 +369,24 @@ int http_get(const char *url, const char *const *headers, long timeout_s, http_t
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
     }
 
-    trace_request("GET", url, headers, NULL, 0);
+    /* Mirror the auto-appended Content-Type into the trace so HAX_TRACE
+     * reflects the bytes actually on the wire — otherwise a JSON POST
+     * shows up in the trace with no Content-Type, which is misleading
+     * when debugging server/proxy behavior that depends on it. The
+     * pointer copies are cheap; allocation only on the POST path. */
+    const char **trace_headers = NULL;
+    if (body) {
+        size_t n = 0;
+        for (const char *const *h = headers; h && *h; h++)
+            n++;
+        trace_headers = xmalloc((n + 2) * sizeof(*trace_headers));
+        for (size_t i = 0; i < n; i++)
+            trace_headers[i] = headers[i];
+        trace_headers[n] = "Content-Type: application/json";
+        trace_headers[n + 1] = NULL;
+    }
+    trace_request(method, url, body ? trace_headers : headers, body, body_len);
+    free(trace_headers);
 
     CURLcode rc = curl_easy_perform(curl);
     long status = 0;
@@ -376,4 +414,19 @@ int http_get(const char *url, const char *const *headers, long timeout_s, http_t
     }
     *out = buf_steal(&state.body);
     return 0;
+}
+
+int http_get(const char *url, const char *const *headers, long timeout_s, http_tick_cb tick,
+             void *tick_user, char **out)
+{
+    return http_body_request("GET", url, headers, NULL, 0, timeout_s, tick, tick_user, out);
+}
+
+int http_post_json(const char *url, const char *const *headers, const char *body, size_t body_len,
+                   long timeout_s, http_tick_cb tick, void *tick_user, char **out)
+{
+    /* Treat NULL body as a zero-length POST so the Content-Type header
+     * is still attached and the request shape matches the contract. */
+    return http_body_request("POST", url, headers, body ? body : "", body ? body_len : 0, timeout_s,
+                             tick, tick_user, out);
 }

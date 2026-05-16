@@ -4,10 +4,19 @@
 
 #include "providers/registry.h"
 
+/* One factory per line so additions remain a single-line diff and the
+ * alphabetical order is obvious at a glance. */
+// clang-format off
 static const struct provider_factory *const PROVIDERS[] = {
-    &PROVIDER_CODEX,  &PROVIDER_LLAMACPP,      &PROVIDER_MOCK,
-    &PROVIDER_OPENAI, &PROVIDER_OPENAI_COMPAT, &PROVIDER_OPENROUTER,
+    &PROVIDER_CODEX,
+    &PROVIDER_LLAMACPP,
+    &PROVIDER_MOCK,
+    &PROVIDER_OLLAMA,
+    &PROVIDER_OPENAI,
+    &PROVIDER_OPENAI_COMPAT,
+    &PROVIDER_OPENROUTER,
 };
+// clang-format on
 #define N_PROVIDERS (sizeof(PROVIDERS) / sizeof(PROVIDERS[0]))
 
 const char PROVIDER_DEFAULT_NAME[] = "codex";
