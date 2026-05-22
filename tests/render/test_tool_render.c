@@ -431,6 +431,45 @@ static void test_diff_preserves_blank_lines(void)
     EXPECT(strstr(p + 1, STRIP_BODY) != NULL);
 }
 
+static void test_diff_dash_content_not_mistaken_for_header(void)
+{
+    /* A removed line whose original content begins with "-- " renders
+     * as "--- " in the diff — historically that collided with the
+     * "--- " file-header pattern and got dimmed. Inside a hunk body it
+     * must stay red. Same for an added "++ " → "+++ " line staying
+     * green. */
+    const char *in = "--- a/x\n"
+                     "+++ b/x\n"
+                     "@@ -1,2 +1,2 @@\n"
+                     "--- removed dashes\n"
+                     "+++ added pluses\n";
+    const char *out = render_one(R_DIFF, in, strlen(in));
+
+    /* Real file headers stay dim. */
+    EXPECT(strstr(out, ANSI_DIM "--- a/x") != NULL);
+    EXPECT(strstr(out, ANSI_DIM "+++ b/x") != NULL);
+    /* Body lines colored by their real prefix, not mistaken for headers. */
+    EXPECT(strstr(out, ANSI_RED "--- removed dashes") != NULL);
+    EXPECT(strstr(out, ANSI_GREEN "+++ added pluses") != NULL);
+}
+
+static void test_diff_inter_hunk_separator_stays_dim(void)
+{
+    /* A multi-hunk single-file diff: the second "@@" separator must
+     * still dim even though we're past the first one (it's matched up
+     * front, not treated as a hunk-body line). */
+    const char *in = "--- a/x\n"
+                     "+++ b/x\n"
+                     "@@ -1 +1 @@\n"
+                     "-old\n"
+                     "+new\n"
+                     "@@ -9 +9 @@\n"
+                     "-foo\n"
+                     "+bar\n";
+    const char *out = render_one(R_DIFF, in, strlen(in));
+    EXPECT(strstr(out, ANSI_DIM "@@ -9 +9 @@") != NULL);
+}
+
 /* ---------- ctrl-byte stripping (live path) ---------- */
 
 static void test_ctrl_bytes_dropped_before_render(void)
@@ -810,6 +849,8 @@ int main(void)
     test_diff_tab_expanded_to_four_spaces();
     test_diff_flushes_partial_trailing_line();
     test_diff_preserves_blank_lines();
+    test_diff_dash_content_not_mistaken_for_header();
+    test_diff_inter_hunk_separator_stays_dim();
     test_ctrl_bytes_dropped_before_render();
     test_emit_callback_sets_flag();
     test_finalize_is_idempotent();

@@ -126,6 +126,14 @@ struct tool_render {
 
     /* R_DIFF: per-line buffer so we can color whole lines. */
     struct buf diff_line;
+    /* R_DIFF: set once the first "@@" header is seen. Inside the hunk
+     * body every line carries a +/-/space prefix, so we classify by
+     * that prefix alone and never re-match the "--- "/"+++ " file-header
+     * patterns — which a removed "-- x" (rendered "--- x") or added
+     * "++ x" (rendered "+++ x") content line would otherwise collide
+     * with. Diffs here are always single-file (one header block up
+     * top), so the latch never needs resetting. */
+    int diff_in_hunk;
 };
 
 void tool_render_init(struct tool_render *r, struct disp *d, struct spinner *sp,

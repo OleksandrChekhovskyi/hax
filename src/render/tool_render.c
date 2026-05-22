@@ -366,20 +366,42 @@ static void process_line(struct tool_render *r, const char *bytes, size_t len, i
         suppress_account(r, /* blank */ 0);
 }
 
-/* ---- Diff mode (unchanged from before — line-buffered, colored) ---- */
+/* ---- Diff mode (line-buffered, per-line colored, hunk-aware) ---- */
 
-static const char *diff_line_color(const char *line, size_t len)
+/* Color one diff line. `in_hunk` says whether a hunk body has begun
+ * (we've already seen an "@@" header).
+ *
+ * The split matters for robustness: inside a hunk every line carries a
+ * one-char prefix, so the prefix alone is the classifier and we never
+ * re-test the "--- "/"+++ " header patterns. That keeps a removed
+ * "-- x" (rendered "--- x") red and an added "++ x" (rendered "+++ x")
+ * green, instead of mistaking either for a file header and dimming it.
+ * The "@@" and "\ No newline" markers are dimmed in either position —
+ * a hunk-body content line never starts with a bare "@@"/"\" (it always
+ * carries a +/-/space prefix), so matching them up front is unambiguous
+ * and keeps inter-hunk separators dim in a multi-hunk diff. */
+static const char *diff_line_color(const char *line, size_t len, int in_hunk)
 {
-    if (len >= 4 && (memcmp(line, "--- ", 4) == 0 || memcmp(line, "+++ ", 4) == 0))
+    if (len >= 1 && line[0] == '\\')
         return ANSI_DIM;
     if (len >= 2 && memcmp(line, "@@", 2) == 0)
+        return ANSI_DIM;
+    if (in_hunk) {
+        if (len >= 1 && line[0] == '+')
+            return ANSI_GREEN;
+        if (len >= 1 && line[0] == '-')
+            return ANSI_RED;
+        return NULL; /* context (space-prefixed) line */
+    }
+    /* Before the first hunk: file headers, then fall back to prefix
+     * coloring so stray +/- lines in degenerate input with no "@@"
+     * header still read as additions/removals. */
+    if (len >= 4 && (memcmp(line, "--- ", 4) == 0 || memcmp(line, "+++ ", 4) == 0))
         return ANSI_DIM;
     if (len >= 1 && line[0] == '+')
         return ANSI_GREEN;
     if (len >= 1 && line[0] == '-')
         return ANSI_RED;
-    if (len >= 1 && line[0] == '\\')
-        return ANSI_DIM;
     return NULL;
 }
 
@@ -394,7 +416,7 @@ static void emit_diff_line(struct tool_render *r, const char *line, size_t len)
     if (!r->started)
         spinner_hide(r->spinner);
     emit_strip_for_next_row(r);
-    const char *color = diff_line_color(line, len);
+    const char *color = diff_line_color(line, len, r->diff_in_hunk);
     if (color)
         disp_raw(color);
     char *trimmed = truncate_line(line, content_budget());
@@ -405,6 +427,11 @@ static void emit_diff_line(struct tool_render *r, const char *line, size_t len)
     disp_putc(r->disp, '\n');
     r->rows_emitted++;
     r->started = 1;
+    /* The first "@@" header opens the hunk body; everything after is
+     * classified by its +/-/space prefix (single-file diffs only ever
+     * have one header block up top, so the latch never needs resetting). */
+    if (len >= 2 && memcmp(line, "@@", 2) == 0)
+        r->diff_in_hunk = 1;
 }
 
 static void emit_byte_diff(struct tool_render *r, char ch)
