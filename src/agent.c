@@ -993,6 +993,27 @@ static int markdown_enabled(void)
     return 1;
 }
 
+/* Cell budget for the markdown wrap engine. display_width() is the
+ * content width we'd like, but the eager-wrap engine streams each
+ * codepoint to the terminal and retro-wraps with CSI nD + CSI K
+ * (markdown.c:wrap_break) — math that assumes the cursor sits one cell
+ * past the last glyph. A glyph in the *physical* last column violates
+ * that: terminals that defer the autowrap (xterm's pending-wrap,
+ * libvterm's at_phantom) leave the cursor on the last column, not past
+ * it, so the cursor-back lands one cell too far left and the erase eats
+ * the previous word's last character. Reserve the last column so the
+ * engine never fills it and the cursor model holds on every terminal.
+ * Only bites when display_width() == term_width() (narrow terminals,
+ * e.g. nvim's sidebar); the wide case is already capped well short.
+ * term_width() is the raw physical edge, so this holds even on the
+ * sub-20-column terminals display_width() floors away from. */
+static int md_wrap_width(void)
+{
+    int w = display_width();
+    int edge = term_width() - 1;
+    return w < edge ? w : edge;
+}
+
 /* Whether to render reasoning/CoT deltas live in a dim block. Default
  * off because the volume can be large and most users want only the
  * model's final answer. Backend opt-in is separate (some servers only
@@ -1129,12 +1150,16 @@ static int agent_stream_tick(void *user)
          *     stdout — so the real terminal cursor is still at the
          *     prior row's right edge, and the gate would pass even
          *     though pad + glyph would autowrap);
-         *   - cursor + cells fits before term_width() (the real tty
-         *     edge, not the soft-capped layout width).
+         *   - cursor + cells stays strictly left of term_width() (the
+         *     real tty edge, not the soft-capped layout width) so the
+         *     glyph never lands in the physical last column.
          *
-         * Autowrap here would commit xterm's delayed-autowrap on
-         * top of the glyph, leaving spinner_hide's \b-based erase
-         * to operate on the wrong row. We trade the idle-alive
+         * Filling the last column arms the terminal's deferred autowrap
+         * (xterm pending-wrap, libvterm at_phantom); spinner_hide's
+         * \b-based erase then runs against that pending state, and
+         * libvterm's BS leaves at_phantom set — the same off-by-one
+         * that ate wrap characters. Reserving the column (strict <)
+         * keeps the erase on solid ground. We trade the idle-alive
          * indicator for correctness in the unsafe cases; latch
          * idle_shown either way so the tick doesn't churn — the
          * next text byte moves last_text_at forward and re-arms
@@ -1147,7 +1172,7 @@ static int agent_stream_tick(void *user)
              * glyph erases. */
             int pad = !r->disp.at_space_or_bol;
             int spinner_cells = 1 + pad;
-            if (md_cursor_col(r->md) + spinner_cells <= term_width())
+            if (md_cursor_col(r->md) + spinner_cells < term_width())
                 spinner_show_inline_text(r->spinner, pad);
         }
         r->idle_shown = 1;
@@ -1389,7 +1414,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
     struct render_ctx r = {.disp = {.trail = 1, .at_space_or_bol = 1},
                            .show_reasoning = reasoning_visible()};
     r.spinner = spinner_new("working...");
-    r.md = markdown_enabled() ? md_new(md_emit_to_disp, &r.disp, display_width()) : NULL;
+    r.md = markdown_enabled() ? md_new(md_emit_to_disp, &r.disp, md_wrap_width()) : NULL;
     struct input *input = input_new();
     input_history_open_default(input);
     struct transcript_view tv = {
@@ -1512,7 +1537,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
             render_stream_begin(&r);
 
             if (r.md)
-                md_reset(r.md, display_width());
+                md_reset(r.md, md_wrap_width());
             struct turn t;
             turn_init(&t);
             r.disp.saw_text = 0;

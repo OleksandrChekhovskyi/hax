@@ -117,15 +117,16 @@ long monotonic_ms(void);
 void gen_uuid_v4(char out[37]);
 
 /* Host terminal width via TIOCGWINSZ on stdout. Falls back to 120 cols
- * when stdout isn't a TTY or the ioctl fails, and clamps the result to
- * [40, 200] so callers don't need to defend against pathologically
- * narrow or wide widths. Re-queried on each call so SIGWINCH-style
- * resizes are picked up without explicit signal handling.
+ * when stdout isn't a TTY or the ioctl fails. Returns the raw reported
+ * width otherwise — no clamping, so it is the literal physical edge of
+ * the row. Re-queried on each call so SIGWINCH-style resizes are picked
+ * up without explicit signal handling.
  *
- * Use term_width() only when you need the *real* edge of the row —
- * cursor positioning, ANSI erase-line, spinner placement. For content
- * layout (header reflow, tool previews, future markdown wrapping)
- * prefer display_width() which caps the result for readability. */
+ * Use term_width() only when you need that *real* edge — cursor
+ * positioning, ANSI erase-line, spinner placement, reserving the last
+ * column for the wrap engine. For content layout (header reflow, tool
+ * previews, markdown wrapping) prefer display_width(), which clamps the
+ * result to a sane, readable range. */
 int term_width(void);
 
 /* Soft cap on content width applied by display_width(). Lines wrapped
@@ -141,10 +142,10 @@ int term_width(void);
  * with the parsed value in *out; 0 otherwise (caller falls back). */
 int parse_int(const char *s, int *out);
 
-/* Capped variant of term_width() for content layout — clamps the
- * result to DISPLAY_WIDTH_CAP cells. Use anywhere width drives word
- * wrapping or text truncation; the unclamped term_width() stays for
- * cursor-edge concerns where the real terminal column matters.
+/* Clamped variant of term_width() for content layout — clamps the
+ * result to [20, DISPLAY_WIDTH_CAP] cells. Use anywhere width drives
+ * word wrapping or text truncation; the unclamped term_width() stays
+ * for cursor-edge concerns where the real terminal column matters.
  *
  * HAX_DISPLAY_WIDTH=N overrides both the ioctl and the soft cap, with
  * a 20-cell floor and no upper bound — used by mock_layout.txt and

@@ -942,20 +942,19 @@ static void test_reflow_long_bash_command_truncated(void)
 
 static void test_display_width_capped(void)
 {
-    /* Default path: display_width never exceeds the cap. term_width
-     * clamps to <=200, so without the env override display_width
-     * returns <= DISPLAY_WIDTH_CAP. The override path is exercised in
+    /* Default path: display_width clamps the raw term_width to
+     * [20, DISPLAY_WIDTH_CAP]. The override path is exercised in
      * test_display_width_env_override below. */
     unsetenv("HAX_DISPLAY_WIDTH");
     int dw = display_width();
     EXPECT(dw <= DISPLAY_WIDTH_CAP);
-    EXPECT(dw >= 40);
+    EXPECT(dw >= 20);
 }
 
 static void test_display_width_env_override(void)
 {
-    /* HAX_DISPLAY_WIDTH bypasses the soft cap and the term_width
-     * defensive ceiling — explicit user choice, no upper bound. */
+    /* HAX_DISPLAY_WIDTH bypasses the soft cap — explicit user choice,
+     * no upper bound. */
     setenv("HAX_DISPLAY_WIDTH", "120", 1);
     EXPECT(display_width() == 120);
     setenv("HAX_DISPLAY_WIDTH", "60", 1);
@@ -969,7 +968,7 @@ static void test_display_width_env_override(void)
     setenv("HAX_DISPLAY_WIDTH", "abc", 1);
     int dw = display_width();
     EXPECT(dw <= DISPLAY_WIDTH_CAP);
-    EXPECT(dw >= 40);
+    EXPECT(dw >= 20);
     /* Trailing garbage rejected too. */
     setenv("HAX_DISPLAY_WIDTH", "80x", 1);
     dw = display_width();

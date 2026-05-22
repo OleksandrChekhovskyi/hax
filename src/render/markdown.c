@@ -16,6 +16,11 @@
  * exceeded, the excess is flushed as plain text. */
 #define TAIL_MAX 8192
 
+/* Content cells granted past the indent only on a doomed continuation row
+ * (indent_cells >= wrap_width) — see current_row_budget. Small: just enough
+ * to print a short word per row instead of crawling one column at a time. */
+#define WRAP_MIN_CONTENT 8
+
 struct md_renderer {
     md_emit_fn emit_cb;
     void *user;
@@ -304,24 +309,25 @@ static int compute_indent_cells(const struct md_renderer *m)
     return 0;
 }
 
-/* Continuation budget — wrap_width on the first row, but at least
- * indent_cells + 20 on continuation rows so a deeply-indented bullet
- * still has room to make forward progress (wrap into 3 cells of
- * content would just spin). The min-content floor lets the row
- * overshoot wrap_width when indent is huge — the alternative is
- * worse: visible spinning at the per-codepoint break. */
+/* Continuation budget for a wrapped row. Almost always wrap_width —
+ * which md_wrap_width() keeps one cell inside the physical edge, so
+ * the eager retro-wrap (CSI nD / CSI K) never touches the last column
+ * and survives terminals that defer the autowrap (libvterm's phantom
+ * column). A list-item continuation row reserves indent_cells of that
+ * width for the hanging indent, but the budget stays at wrap_width so
+ * the reserved column is honored regardless of indent depth.
+ *
+ * The sole exception is a pathologically deep bullet on a tiny
+ * terminal where the indent alone meets or exceeds wrap_width: the row
+ * is already doomed to the terminal's own hard-wrap, so capping at
+ * wrap_width would only crawl one column at a time. There we overshoot
+ * to keep the content legible — the phantom hazard is unreachable on a
+ * row whose indent already fills the usable width. */
 static int current_row_budget(struct md_renderer *m)
 {
-    /* No indent (plain paragraph): always wrap_width. With indent
-     * (continuation row of a list item), guarantee at least 20 cells
-     * of content past the indent so a deeply-indented bullet still
-     * makes forward progress — overshoots wrap_width in that edge
-     * case, which is the better failure mode (visible overrun beats
-     * silent stall). */
-    if (m->indent_cells <= 0)
+    if (m->indent_cells <= 0 || m->indent_cells < m->wrap_width)
         return m->wrap_width;
-    int min_budget = m->indent_cells + 20;
-    return min_budget > m->wrap_width ? min_budget : m->wrap_width;
+    return m->indent_cells + WRAP_MIN_CONTENT;
 }
 
 static void wrap_emit_indent(struct md_renderer *m, int n)

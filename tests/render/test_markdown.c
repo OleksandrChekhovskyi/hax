@@ -1071,10 +1071,21 @@ static void test_real_world_paragraph(void)
  * the user would see on screen, so wrap tests can keep their
  * pre-eager byte-exact expected strings as the invariant.
  *
+ * cols selects the right-edge model:
+ *   - cols <= 0: unbounded row (rows break only on the engine's own \n).
+ *     This is what the logical-wrap tests assert against.
+ *   - cols  > 0: physical width with deferred autowrap. A glyph in the
+ *     last column sets a "phantom" and leaves the cursor *on* that
+ *     column (not past it), exactly as xterm's pending-wrap and
+ *     libvterm's at_phantom do; the wrap fires on the next glyph. A
+ *     CSI nD while phantom is set therefore lands one cell further left
+ *     than a renderer that assumes the cursor sits past the last glyph
+ *     — the divergence that ate trailing characters in narrow terminals.
+ *
  * Cells assume one codepoint = one cell — adequate for everything the
  * suite exercises (no wide CJK, no combining marks). Continuation
  * bytes (0b10xxxxxx) tag along with the prior cell's byte range. */
-static char *interpret_terminal(const char *in)
+static char *interpret_terminal(const char *in, int cols)
 {
     struct buf out;
     buf_init(&out);
@@ -1086,6 +1097,7 @@ static char *interpret_terminal(const char *in)
     size_t cell_off[4096];
     size_t n_cells = 0;
     size_t cursor = 0;
+    int phantom = 0;
 
     size_t i = 0;
     while (i < in_len) {
@@ -1097,6 +1109,7 @@ static char *interpret_terminal(const char *in)
             row_len = 0;
             n_cells = 0;
             cursor = 0;
+            phantom = 0;
             i++;
             continue;
         }
@@ -1123,6 +1136,7 @@ static char *interpret_terminal(const char *in)
                 if (back > (int)cursor)
                     back = (int)cursor;
                 cursor -= (size_t)back;
+                phantom = 0; /* cursor move resolves the pending wrap */
                 i = p + 1;
                 continue;
             }
@@ -1149,9 +1163,31 @@ static char *interpret_terminal(const char *in)
          * count — they extend the byte range of the prior cell. */
         int is_continuation = (c & 0xC0) == 0x80;
         if (!is_continuation) {
+            /* Deferred autowrap: a glyph held at the phantom column (or
+             * past a hard edge) commits the wrap now — flush + \n + new
+             * row, then land here. */
+            if (cols > 0 && (phantom || (int)cursor >= cols)) {
+                buf_append(&out, row, row_len);
+                buf_append(&out, "\n", 1);
+                row_len = 0;
+                n_cells = 0;
+                cursor = 0;
+                phantom = 0;
+            }
             cell_off[n_cells] = row_len;
             n_cells++;
-            cursor = n_cells;
+            row[row_len++] = (char)c;
+            /* Filling the last column sets the phantom and pins the
+             * cursor on it (libvterm leaves pos.col un-advanced); a
+             * later CSI nD then counts back from there. */
+            if (cols > 0 && (int)n_cells >= cols) {
+                phantom = 1;
+                cursor = n_cells - 1;
+            } else {
+                cursor = n_cells;
+            }
+            i++;
+            continue;
         }
         row[row_len++] = (char)c;
         i++;
@@ -1177,9 +1213,98 @@ static char *render_wrap(const char *input, int wrap_width)
     md_flush(m);
     md_free(m);
     char *raw = buf_steal(&out);
-    char *visible = interpret_terminal(raw ? raw : "");
+    char *visible = interpret_terminal(raw ? raw : "", 0);
     free(raw);
     return visible;
+}
+
+/* Strip every space and newline so two renderings can be compared for
+ * dropped/added glyphs regardless of where the wrap engine placed line
+ * breaks (break-spaces are legitimately dropped). */
+static char *strip_ws(const char *s)
+{
+    char *out = xmalloc(strlen(s) + 1);
+    size_t j = 0;
+    for (const char *p = s; *p; p++)
+        if (*p != ' ' && *p != '\n')
+            out[j++] = *p;
+    out[j] = 0;
+    return out;
+}
+
+/* Render at wrap_width and replay through a physical terminal of the
+ * given width (phantom-aware — see interpret_terminal's cols > 0 path). */
+static char *render_wrap_phantom(const char *input, int wrap_width, int term_cols)
+{
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, wrap_width);
+    md_feed(m, input, strlen(input));
+    md_flush(m);
+    md_free(m);
+    char *raw = buf_steal(&out);
+    char *visible = interpret_terminal(raw ? raw : "", term_cols);
+    free(raw);
+    return visible;
+}
+
+/* Reserving the last column (wrap_width = term_cols - 1, as md_wrap_width
+ * does in production) keeps the eager retro-wrap off the phantom column,
+ * so no glyph is dropped on a terminal that defers the autowrap. The
+ * range dips below 40 because term_width() no longer floors there — a
+ * 20-column sidebar must wrap at 19 and stay intact. */
+static void test_wrap_phantom_reserves_last_column(void)
+{
+    const char *in = "I'm hax, a minimalist coding assistant designed to help you "
+                     "with your code and environment management.";
+    for (int cols = 20; cols <= 64; cols++) {
+        char *vis = render_wrap_phantom(in, cols - 1, cols);
+        char *a = strip_ws(vis), *b = strip_ws(in);
+        EXPECT_STR_EQ(a, b);
+        free(a);
+        free(b);
+        free(vis);
+    }
+}
+
+/* Same guarantee for list-item continuation rows. current_row_budget()
+ * once floored the budget at indent_cells + 20, which overshot wrap_width
+ * on a narrow terminal — a plain "- " bullet (indent 2) wrapped at 22 on a
+ * 20-column sidebar, refilling the physical last column the reserved-column
+ * scheme is meant to keep clear. Each marker's continuation indent must
+ * still wrap one cell inside the edge and lose no glyph. */
+static void test_wrap_phantom_list_reserves_last_column(void)
+{
+    const char *items[] = {
+        "- alpha bravo charlie delta echo foxtrot golf hotel india juliet",
+        "1. alpha bravo charlie delta echo foxtrot golf hotel india juliet",
+        "  * alpha bravo charlie delta echo foxtrot golf hotel india juliet",
+    };
+    for (size_t k = 0; k < sizeof(items) / sizeof(items[0]); k++) {
+        for (int cols = 20; cols <= 64; cols++) {
+            char *vis = render_wrap_phantom(items[k], cols - 1, cols);
+            char *a = strip_ws(vis), *b = strip_ws(items[k]);
+            EXPECT_STR_EQ(a, b);
+            free(a);
+            free(b);
+            free(vis);
+        }
+    }
+}
+
+/* Guard the diagnosis: filling the physical last column (wrap_width ==
+ * term_cols) under phantom semantics DOES drop the char before a wrap's
+ * break-space — the bug md_wrap_width's reserved column fixes. If a
+ * future change makes the eager retro-wrap phantom-safe on its own, this
+ * will start passing and can be retired. */
+static void test_wrap_phantom_last_column_drops_char(void)
+{
+    char *vis = render_wrap_phantom("alpha bravo charlie delta echo foxtrot golf", 20, 20);
+    char *a = strip_ws(vis), *b = strip_ws("alphabravocharliedeltaechofoxtrotgolf");
+    EXPECT(strcmp(a, b) != 0);
+    free(a);
+    free(b);
+    free(vis);
 }
 
 static void test_wrap_disabled_byte_exact(void)
@@ -1255,8 +1380,8 @@ static void test_wrap_long_word_overflow(void)
 static void test_wrap_list_indent(void)
 {
     /* Bullet list: continuation row indents under the marker. The
-     * marker itself ("* ") is 2 cells; budget 30 leaves 28 for first
-     * row, 28 (plus 2 indent = 30) for continuation. */
+     * marker ("* ") is 2 cells, so continuation rows carry a 2-cell
+     * hanging indent and wrap at wrap_width (20) like the first row. */
     char *got = render_wrap("* alpha beta gamma delta epsilon zeta", 20);
     EXPECT_STR_EQ(got, "* alpha beta gamma\n  delta epsilon zeta");
     free(got);
@@ -1274,16 +1399,16 @@ static void test_wrap_nested_bullet_hanging_indent(void)
 {
     /* Nested list: parent at col 0, child indented 2. The child's
      * wrap continuation must indent under its own content column
-     * (col 4 = 2 leading spaces + "- ") rather than col 0. The
-     * continuation budget can overshoot wrap_width by up to 20-cell
-     * floor (current_row_budget) so deeply-indented rows still get
-     * a viable amount of content per row. */
+     * (col 4 = 2 leading spaces + "- ") rather than col 0. The indent
+     * fits within wrap_width, so the continuation rows wrap at
+     * wrap_width like everything else (current_row_budget) — no
+     * overshoot, keeping the reserved last column clear. */
     const char *in = "* parent\n  - child alpha beta gamma delta epsilon zeta";
     char *got = render_wrap(in, 22);
     EXPECT_STR_EQ(got, "* parent\n"
                        "  - child alpha beta\n"
-                       "    gamma delta epsilon\n"
-                       "    zeta");
+                       "    gamma delta\n"
+                       "    epsilon zeta");
     free(got);
 }
 
@@ -1414,7 +1539,7 @@ static void test_wrap_partial_utf8_across_feeds(void)
     md_flush(m);
     md_free(m);
     char *raw = buf_steal(&out);
-    char *visible = interpret_terminal(raw ? raw : "");
+    char *visible = interpret_terminal(raw ? raw : "", 0);
     free(raw);
     EXPECT_STR_EQ(visible, "h\xC3\xA9llo\nwonderful\nworld");
     free(visible);
@@ -1936,6 +2061,9 @@ int main(void)
     test_wrap_tab_collapsed_to_single_space();
     test_wrap_tab_near_right_edge_no_overflow();
     test_wrap_long_word_overflow();
+    test_wrap_phantom_reserves_last_column();
+    test_wrap_phantom_list_reserves_last_column();
+    test_wrap_phantom_last_column_drops_char();
     test_wrap_list_indent();
     test_wrap_numbered_list_indent();
     test_wrap_long_numbered_marker_indent();

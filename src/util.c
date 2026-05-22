@@ -131,14 +131,9 @@ void gen_uuid_v4(char out[37])
 int term_width(void)
 {
     struct winsize ws;
-    int w = 120;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
-        w = ws.ws_col;
-    if (w < 40)
-        w = 40;
-    if (w > 200)
-        w = 200;
-    return w;
+        return ws.ws_col;
+    return 120; /* not a tty / ioctl failed — pick a roomy default */
 }
 
 int parse_int(const char *s, int *out)
@@ -160,18 +155,20 @@ int display_width(void)
 {
     /* HAX_DISPLAY_WIDTH overrides both term_width() and the soft cap so
      * fixtures (mock_layout.txt) and tests can pin a known width without
-     * resizing the host terminal. Floored at 20 to keep downstream wrap
-     * and truncate paths viable; no upper bound — term_width()'s 200
-     * ceiling is a defensive guard against pathological ioctl values,
-     * not a policy users should hit when they're explicit. */
+     * resizing the host terminal. No upper bound on the override —
+     * explicit user choice. */
     int v;
-    if (parse_int(getenv("HAX_DISPLAY_WIDTH"), &v) && v > 0) {
-        if (v < 20)
-            v = 20;
-        return v;
-    }
+    if (parse_int(getenv("HAX_DISPLAY_WIDTH"), &v) && v > 0)
+        return v < 20 ? 20 : v;
+    /* term_width() is the raw physical width; for content layout clamp
+     * it to [20, DISPLAY_WIDTH_CAP] — the floor keeps wrap/truncate
+     * paths viable on a tiny terminal, the cap keeps lines readable on
+     * an ultrawide one. The unclamped edge stays in term_width() for
+     * cursor-positioning callers that need the literal last column. */
     int w = term_width();
-    return w < DISPLAY_WIDTH_CAP ? w : DISPLAY_WIDTH_CAP;
+    if (w > DISPLAY_WIDTH_CAP)
+        w = DISPLAY_WIDTH_CAP;
+    return w < 20 ? 20 : w;
 }
 
 /* Width of the codepoint at s[i..] in cells. Sets *consumed to the
