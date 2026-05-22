@@ -1466,13 +1466,16 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
         }
 
         /* Slash commands run locally (clear history, show help, ...) and
-         * never reach the model. Caught before history-add so recognized
-         * /-prefixed lines don't pollute up-arrow recall. Lines that
-         * look like commands but aren't (e.g. "/tmp/foo" — the
-         * dispatcher's bareword check) return SLASH_NOT_A_COMMAND and
-         * fall through to the regular model path below. */
+         * never reach the model. They join up-arrow recall for the current
+         * session but aren't persisted: replaying yesterday's /new or
+         * /usage in a fresh session is pointless and only dilutes the
+         * stored prompt history. Lines that look like commands but aren't
+         * (e.g. "/tmp/foo" — the dispatcher's bareword check) return
+         * SLASH_NOT_A_COMMAND and fall through to the regular model path
+         * below. */
         struct slash_ctx sctx = {.state = &state};
         if (slash_dispatch(line, &sctx) != SLASH_NOT_A_COMMAND) {
+            input_history_add_session(input, line);
             free(line);
             r.disp.trail = 1;
             continue;

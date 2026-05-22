@@ -52,6 +52,12 @@ char *input_readline(struct input *in, const char *prompt);
  * the entry is also appended to the on-disk file. */
 void input_history_add(struct input *in, const char *line);
 
+/* Like input_history_add, but in-memory only — never touches the on-disk
+ * file. For ephemeral, session-scoped lines (e.g. slash commands) that are
+ * worth recalling with Up-arrow now but pointless to replay in a future,
+ * unrelated session. */
+void input_history_add_session(struct input *in, const char *line);
+
 /* Enable on-disk history persistence at `path`:
  *   - Loads existing entries (decoded one-line-per-record) into memory,
  *     so Up-arrow recalls them across invocations.

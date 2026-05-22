@@ -748,6 +748,13 @@ void input_history_add(struct input *in, const char *line)
         history_file_append(in->persist_path, line);
 }
 
+void input_history_add_session(struct input *in, const char *line)
+{
+    if (!line || !*line)
+        return;
+    input_core_history_add(in, line);
+}
+
 void input_set_transcript_cb(struct input *in, void (*fn)(void *user), void *user)
 {
     in->transcript_cb = fn;
