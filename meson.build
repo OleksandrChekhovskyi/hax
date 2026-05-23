@@ -31,6 +31,7 @@ threads = dependency('threads')
 sources = files(
     'src/agent.c',
     'src/agent_core.c',
+    'src/agent_dispatch.c',
     'src/transport/api_error.c',
     'src/system/bg_job.c',
     'src/terminal/clipboard.c',

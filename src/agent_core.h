@@ -8,6 +8,14 @@
 #include "tool.h"
 #include "turn.h"
 
+/* Sentinel inserted into conversation history (assistant text or a
+ * synthesized tool_result) to mark a turn that was cut short — by Esc
+ * cancellation, a mid-stream error, or a tool skipped partway through a
+ * batch. Keeps history well-formed and signals the model on the next
+ * turn that the prior response was incomplete. Shared so both the REPL
+ * loop (history shaping) and dispatch (the rendered skip block) agree. */
+#define INTERRUPT_MARKER "[interrupted]"
+
 /* Run-wide options parsed from CLI flags. Lives here (not in agent.h)
  * so the one-shot path can consume it without dragging in the
  * interactive REPL header. */
