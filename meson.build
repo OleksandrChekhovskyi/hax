@@ -51,6 +51,7 @@ sources = files(
     'src/oneshot.c',
     'src/system/path.c',
     'src/render/progress.c',
+    'src/render/render_ctx.c',
     'src/transport/retry.c',
     'src/slash.c',
     'src/system/spawn.c',
