@@ -40,6 +40,17 @@ struct md_renderer {
 
     int at_line_start;
 
+    /* Run of space bytes at the current end-of-line, reset by any
+     * non-space content (in emit_text) and by every consumed inline
+     * delimiter (in the open_/close_ helpers). Lets the \n handler spot
+     * a CommonMark hard line break (2+ trailing spaces) without looking
+     * back into the work buffer — so the rule still fires when the
+     * spaces and the newline land in separate feeds (e.g. a provider
+     * that streams "  " and "\n" as two deltas), yet stays accurate when
+     * the spaces precede a delimiter (`foo  **\n`) rather than the line
+     * ending. */
+    int trailing_spaces;
+
     /* Number of backticks in the active fence's opener — closer must have
      * at least this many, with no info string after, per CommonMark. Lets
      * a ```markdown demo containing inner ```python lines stay open until
@@ -268,10 +279,15 @@ static void wrap_flush_all(struct md_renderer *m)
  * decision). Recognizes:
  *   `* `, `- `, `+ `   → leading_spaces + 2 cells
  *   `N. ` / `N) `      → leading_spaces + digits + 2 cells
- * Returns 0 when no marker matches. ASCII-only patterns, so byte
- * offsets equal cell counts. The leading-space scan is capped at 8
- * to keep the continuation indent within sane budget territory; deeper
- * nesting levels just lose a bit of visual hierarchy on wrap. */
+ *   no marker          → leading_spaces (align wrapped rows under the
+ *                        line's own indent — a list-item continuation
+ *                        paragraph or code/blockquote body keeps its
+ *                        hanging indent instead of wrapping back to
+ *                        column 0)
+ * ASCII-only patterns, so byte offsets equal cell counts. The
+ * leading-space scan is capped at 8 to keep the continuation indent
+ * within sane budget territory; deeper nesting levels just lose a bit
+ * of visual hierarchy on wrap. */
 static int compute_indent_cells(const struct md_renderer *m)
 {
     size_t i = 0;
@@ -306,7 +322,9 @@ static int compute_indent_cells(const struct md_renderer *m)
             m->row_meta.data[j + 1] == 0 && m->row_buf.data[j + 1] == ' ')
             return (int)lead_spaces + (int)(j - i) + 2; /* spaces + digits + delim + space */
     }
-    return 0;
+    /* No marker — align continuation rows under the line's own leading
+     * indent (0 for a plain top-level paragraph). */
+    return (int)lead_spaces;
 }
 
 /* Continuation budget for a wrapped row. Almost always wrap_width —
@@ -448,6 +466,25 @@ static void wrap_hard_newline(struct md_renderer *m)
  * the terminal hard-wraps it, same fallback as before. */
 static void wrap_consume_codepoint(struct md_renderer *m, const char *out, size_t n, int cells)
 {
+    /* CR is the lead of a CRLF line ending, not a glyph. Drop it in the
+     * wrap layer: the \n that follows drives the break, so a bare CR
+     * here would only commit a pending wrap (turning a CRLF hard break
+     * landing on the wrap boundary into an extra blank line) or strand
+     * the cursor at column 0 mid-row. The trailing-space counter in
+     * emit_text already treats \r as transparent, so the hard-break
+     * rule still sees the spaces before it. */
+    if (n == 1 && out[0] == '\r')
+        return;
+    /* A space arriving while a wrap is already pending belongs to a run
+     * of spaces straddling the wrap point. Drop it instead of letting it
+     * commit the deferred \n: committing would strand the space at
+     * column 0 of the next row, which turned trailing hard-break spaces
+     * landing on the wrap boundary into a spurious blank/space line
+     * (`aaaaa  \nbar` at width 5 → `aaaaa\n \nbar`) and left ragged
+     * leading spaces on ordinary wrapped rows. Only non-space content
+     * (or a hard \n, which subsumes pending) commits the wrap. */
+    if (n == 1 && out[0] == ' ' && m->pending_wrap)
+        return;
     commit_pending_wrap(m);
     if (cells == 0) {
         /* Combining mark: rides on the prior glyph; append silently
@@ -581,6 +618,18 @@ static void emit_text_chunk(struct md_renderer *m, const char *s, size_t n)
  *     space). */
 static void emit_text(struct md_renderer *m, const char *s, size_t n)
 {
+    /* Track the trailing-space run for the hard-line-break rule (see the
+     * \n handler in step_inline). Counted on the raw bytes before tab
+     * substitution: a tab is not a space for CommonMark's rule, and any
+     * non-space resets the run — except \r, which is transparent so a
+     * CRLF line ending ("foo  \r\n") still sees the two spaces. */
+    for (size_t j = 0; j < n; j++) {
+        if (s[j] == ' ')
+            m->trailing_spaces++;
+        else if (s[j] != '\r')
+            m->trailing_spaces = 0;
+    }
+
     int bypass = (m->wrap_width <= 0 || m->in_code_fence || m->in_heading);
     const char *tab_sub = bypass ? "    " : " ";
     size_t tab_sub_len = bypass ? 4 : 1;
@@ -628,16 +677,23 @@ static void emit_raw(struct md_renderer *m, const char *s)
     wrap_append(m, s, n, 1);
 }
 
+/* An inline delimiter (`*`, `**`, `_`, `` ` ``) is a non-space source
+ * byte that's consumed without passing through emit_text, so it must
+ * clear the trailing-space run itself — otherwise spaces sitting before
+ * the delimiter (e.g. `foo  **`) would leave a stale count and a later
+ * \n would wrongly read as a hard break. */
 static void open_bold(struct md_renderer *m)
 {
     emit_raw(m, ANSI_BOLD);
     m->in_bold = 1;
+    m->trailing_spaces = 0;
 }
 
 static void close_bold(struct md_renderer *m)
 {
     emit_raw(m, ANSI_BOLD_OFF);
     m->in_bold = 0;
+    m->trailing_spaces = 0;
     if (m->in_heading)
         emit_raw(m, ANSI_BOLD);
 }
@@ -646,24 +702,28 @@ static void open_italic(struct md_renderer *m)
 {
     emit_raw(m, ANSI_ITALIC);
     m->in_italic = 1;
+    m->trailing_spaces = 0;
 }
 
 static void close_italic(struct md_renderer *m)
 {
     emit_raw(m, ANSI_ITALIC_OFF);
     m->in_italic = 0;
+    m->trailing_spaces = 0;
 }
 
 static void open_inline_code(struct md_renderer *m)
 {
     emit_raw(m, ANSI_CYAN);
     m->in_inline_code = 1;
+    m->trailing_spaces = 0;
 }
 
 static void close_inline_code(struct md_renderer *m)
 {
     emit_raw(m, ANSI_FG_DEFAULT);
     m->in_inline_code = 0;
+    m->trailing_spaces = 0;
 }
 
 static void open_code_fence(struct md_renderer *m)
@@ -716,40 +776,55 @@ enum step_result {
 /* Inside a code fence: pass through verbatim. The only thing we look for
  * is a closing fence at line start — backticks >= opener count, followed
  * by only optional whitespace and \n (no info string per CommonMark).
- * The marker line is consumed entirely so the dim region surrounds only
- * the content lines. */
+ * Up to 3 leading spaces before the backticks are allowed, so a fence
+ * nested in a list item (whose lines carry the item's indent) still
+ * closes; without this the closer reads as content and the dim region
+ * runs away to end-of-stream. The marker line is consumed entirely so
+ * the dim region surrounds only the content lines. */
 static enum step_result step_in_code_fence(struct md_renderer *m, struct buf *w, size_t *i)
 {
     char c = w->data[*i];
 
-    if (m->at_line_start && c == '`') {
-        size_t cnt = 0;
-        while (*i + cnt < w->len && w->data[*i + cnt] == '`')
-            cnt++;
-        if (*i + cnt >= w->len)
-            return STEP_DEFER;
-        if (cnt >= m->fence_open_count) {
-            /* Skip optional trailing whitespace; \r is included
-             * so a CRLF-terminated closer (`` ```\r\n ``) is
-             * recognized — without it the scan would stop at \r
-             * and treat the line as content. */
-            size_t scan = *i + cnt;
-            while (scan < w->len && w->data[scan] != '\n' &&
-                   (w->data[scan] == ' ' || w->data[scan] == '\t' || w->data[scan] == '\r'))
-                scan++;
-            if (scan >= w->len)
-                return STEP_DEFER;
-            if (w->data[scan] == '\n') {
-                close_code_fence(m);
-                m->fence_open_count = 0;
-                *i = scan + 1;
-                m->at_line_start = 1;
-                return STEP_ADVANCED;
-            }
-            /* Non-whitespace before \n — info-string-like content
-             * (e.g. ```python inside a markdown demo). Fall through. */
+    if (m->at_line_start) {
+        size_t scan = *i;
+        size_t sp = 0;
+        while (scan < w->len && sp < 3 && w->data[scan] == ' ') {
+            scan++;
+            sp++;
         }
-        /* Too few backticks or invalid trailing — fall through. */
+        if (scan >= w->len)
+            return STEP_DEFER; /* leading spaces with nothing after yet */
+        if (w->data[scan] == '`') {
+            size_t cnt = 0;
+            while (scan + cnt < w->len && w->data[scan + cnt] == '`')
+                cnt++;
+            if (scan + cnt >= w->len)
+                return STEP_DEFER;
+            if (cnt >= m->fence_open_count) {
+                /* Skip optional trailing whitespace; \r is included
+                 * so a CRLF-terminated closer (`` ```\r\n ``) is
+                 * recognized — without it the scan would stop at \r
+                 * and treat the line as content. */
+                size_t s2 = scan + cnt;
+                while (s2 < w->len && w->data[s2] != '\n' &&
+                       (w->data[s2] == ' ' || w->data[s2] == '\t' || w->data[s2] == '\r'))
+                    s2++;
+                if (s2 >= w->len)
+                    return STEP_DEFER;
+                if (w->data[s2] == '\n') {
+                    close_code_fence(m);
+                    m->fence_open_count = 0;
+                    *i = s2 + 1;
+                    m->at_line_start = 1;
+                    return STEP_ADVANCED;
+                }
+                /* Non-whitespace before \n — info-string-like content
+                 * (e.g. ```python inside a markdown demo). Fall through. */
+            }
+            /* Too few backticks or invalid trailing — fall through. */
+        }
+        /* Leading spaces that don't front a closer: fall through and
+         * emit them verbatim as code indentation. */
     }
     emit_text(m, &c, 1);
     m->at_line_start = (c == '\n');
@@ -1173,6 +1248,27 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
             *i = normalize_indent ? scan : *i + 1;
             return STEP_ADVANCED;
         }
+        /* CommonMark hard line break: two or more spaces before the
+         * newline. Checked only after the block-marker lookahead above
+         * has ruled out a block opener — a hard *line* break is inline,
+         * so when the next line actually starts a new block the block
+         * path wins (and closes emphasis); only mid-paragraph does the
+         * trailing pair force a break. The spaces were emitted eagerly
+         * but, now at end-of-line before the \n, are invisible — the
+         * prior bug was a soft join leaving them inline as a stray
+         * double space. Open emphasis carries across (the break is
+         * inline), and the next line's leading whitespace is preserved
+         * so a list item's hanging continuation stays aligned. The count
+         * lives in m->trailing_spaces (maintained by emit_text, reset by
+         * any consumed inline delimiter) rather than a buffer scan, so it
+         * holds across feeds yet ignores spaces before a delimiter. */
+        if (m->trailing_spaces >= 2) {
+            emit_text(m, "\n", 1);
+            m->at_line_start = 1;
+            m->cur_line_is_block = 0;
+            (*i)++;
+            return STEP_ADVANCED;
+        }
         /* Soft join: replace \n with a single space and skip leading
          * whitespace on the joined line so trailing/leading spaces
          * don't double up. Styles continue across the join — the model
@@ -1290,6 +1386,7 @@ void md_reset(struct md_renderer *m, int wrap_width)
     buf_reset(&m->tail);
     m->prev_byte = 0;
     m->at_line_start = 1;
+    m->trailing_spaces = 0;
     m->fence_open_count = 0;
     m->in_heading = 0;
     m->in_code_fence = 0;
@@ -1407,12 +1504,19 @@ void md_flush(struct md_renderer *m)
      * being emitted as literal text. */
 
     if (m->in_code_fence && m->tail.len > 0) {
+        /* Skip up to 3 leading spaces, matching step_in_code_fence —
+         * an indented closer (`  ``` ` nested in a list item) left in
+         * the tail at EOF must still be recognized, not emitted as
+         * literal/dim content. */
+        size_t lead = 0;
+        while (lead < m->tail.len && lead < 3 && m->tail.data[lead] == ' ')
+            lead++;
         size_t cnt = 0;
-        while (cnt < m->tail.len && m->tail.data[cnt] == '`')
+        while (lead + cnt < m->tail.len && m->tail.data[lead + cnt] == '`')
             cnt++;
         if (cnt >= m->fence_open_count) {
             int valid = 1;
-            for (size_t i = cnt; i < m->tail.len; i++) {
+            for (size_t i = lead + cnt; i < m->tail.len; i++) {
                 char tc = m->tail.data[i];
                 if (tc != ' ' && tc != '\t' && tc != '\r') {
                     valid = 0;
@@ -1507,6 +1611,20 @@ void md_flush(struct md_renderer *m)
                 size_t rest_len = m->tail.len - k;
                 char *rest = xmalloc(rest_len);
                 memcpy(rest, m->tail.data + k, rest_len);
+                buf_reset(&m->tail);
+                emit_text(m, rest, rest_len);
+                free(rest);
+            } else if (m->trailing_spaces >= 2) {
+                /* The streaming \n handler deferred here for an ambiguous
+                 * block prefix (`#`, `-`, `2024`, ...) that EOF resolves
+                 * to prose. The two trailing spaces still make it a hard
+                 * line break — emit \n and the rest verbatim (leading
+                 * whitespace preserved, matching the streaming inline
+                 * hard break) instead of soft-joining. */
+                emit_text(m, "\n", 1);
+                size_t rest_len = m->tail.len - 1;
+                char *rest = xmalloc(rest_len);
+                memcpy(rest, m->tail.data + 1, rest_len);
                 buf_reset(&m->tail);
                 emit_text(m, rest, rest_len);
                 free(rest);

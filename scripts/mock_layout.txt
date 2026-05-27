@@ -199,6 +199,27 @@ text Café résumé naïveté is the prose; 中文字符 占两个单元格 each
 usage in=940 out=22
 end-turn
 
+# ---------- turn 21: trailing-space hard line breaks in a list item ---
+# The two "  \n" sequences are CommonMark hard breaks (line ends in two
+# spaces). Each must render as a real break — title, then `code` label,
+# then the prose on its own row — not a soft join that drops the trailing
+# pair inline as a stray double space. The final sentence has no trailing
+# spaces, so it stays a soft join and wraps normally.
+text - **First finding with a hard-broken title**  \n  `identifier_or_location`  \n  A longer explanation that follows on its own line and flows across the configured display width, wrapping under the list item while the two short lines above each keep their own row.
+usage in=980 out=64
+end-turn
+
+# ---------- turn 22: nested list-item pathologies ---------------------
+# One list item carrying a blank-line-separated continuation paragraph
+# and a fenced code block, both at the item's two-space indent. Watch
+# (at HAX_DISPLAY_WIDTH=80): the continuation keeps its 2-cell hanging
+# indent when it wraps (not collapsing to column 0), and the indented
+# fence both opens and closes (its closer carries the same indent) so the
+# dim region hugs only the body instead of running to end of stream.
+text - **First item** with a header line  \n  a label line  \n  and a longer explanation that flows across the configured display width and must keep its two-space hanging indent on every continuation row, not just the first.\n\n- **Second item** with a fenced block\n\n  ```\n  function example(value) {\n      return value + 1;\n  }\n  ```\n  Closing prose after the block, also indented under the item and long enough to wrap so the hanging indent shows here too.
+usage in=1040 out=120
+end-turn
+
 text Done — markdown wrap demo complete.
 usage in=980 out=18
 end-turn

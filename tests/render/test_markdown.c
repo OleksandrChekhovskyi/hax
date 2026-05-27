@@ -667,6 +667,33 @@ static void test_eof_soft_join_hash_alone(void)
     free(got);
 }
 
+static void test_eof_hard_break_trailing_spaces_ambiguous_prefix(void)
+{
+    /* Mirror of the soft-join-at-EOF cases above, but with two trailing
+     * spaces: the streaming \n handler defers on the ambiguous prefix
+     * (`#` / `-` / `2024`), and at EOF the trailing pair resolves it as
+     * a hard line break rather than a soft join. */
+    char *got = render_one("foo  \n#");
+    EXPECT_STR_EQ(got, "foo  \n#");
+    free(got);
+    got = render_one("foo  \n-");
+    EXPECT_STR_EQ(got, "foo  \n-");
+    free(got);
+    got = render_one("foo  \n2024");
+    EXPECT_STR_EQ(got, "foo  \n2024");
+    free(got);
+}
+
+static void test_hard_break_crlf(void)
+{
+    /* CRLF line ending: the \r is part of the terminator, so it must
+     * not reset the trailing-space run before the \n is classified —
+     * "foo  \r\nbar" is a hard break, like its \n-only counterpart. */
+    char *got = render_one("foo  \r\nbar");
+    EXPECT_STR_EQ(got, "foo  \r\nbar");
+    free(got);
+}
+
 static void test_eof_hard_break_blank(void)
 {
     /* "foo\n   " at EOF (just whitespace after \n) — emit \n
@@ -699,6 +726,97 @@ static void test_soft_break_no_double_space(void)
      * spaces in the joined output. */
     char *got = render_one("foo \nbar");
     EXPECT_STR_EQ(got, "foo bar");
+    free(got);
+}
+
+static void test_hard_break_trailing_two_spaces(void)
+{
+    /* CommonMark hard line break: 2+ spaces before \n force a real
+     * break instead of a soft join. The trailing spaces stay on the
+     * wire but, sitting at end-of-line before the \n, are invisible —
+     * the bug this guards against was a soft join leaving them inline
+     * as "foo  bar" (a stray double space). */
+    char *got = render_one("foo  \nbar");
+    EXPECT_STR_EQ(got, "foo  \nbar");
+    free(got);
+}
+
+static void test_hard_break_trailing_two_spaces_after_code_span(void)
+{
+    /* The exact shape models emit: an inline code span closed right at
+     * a 2-space hard break, then an indented continuation line. The
+     * span must break onto its own line, not soft-join with a double
+     * space before the next word. */
+    char *got = render_one("`x`  \n  bar");
+    EXPECT_STR_EQ(got, "\x1b[36mx\x1b[39m  \n  bar");
+    free(got);
+}
+
+static void test_hard_break_trailing_spaces_split_across_feeds(void)
+{
+    /* The trailing spaces and the \n arrive in separate feeds. The
+     * hard-break count is renderer state (m->trailing_spaces), so it
+     * still fires — a buffer-only scan would miss it. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 0);
+    md_feed(m, "foo  ", 5); /* content + 2 trailing spaces */
+    md_feed(m, "\nbar", 4); /* newline + next line, separate feed */
+    md_flush(m);
+    md_free(m);
+    char *s = buf_steal(&out);
+    EXPECT_STR_EQ(s, "foo  \nbar");
+    free(s);
+}
+
+static void test_soft_break_single_trailing_space(void)
+{
+    /* A single trailing space is below the hard-break threshold, so the
+     * line still soft-joins — and to exactly one space, not two. */
+    char *got = render_one("foo \nbar");
+    EXPECT_STR_EQ(got, "foo bar");
+    free(got);
+}
+
+static void test_hard_break_carries_emphasis(void)
+{
+    /* A hard line break is inline content, so open emphasis continues
+     * across it (CommonMark) — bold must not close at the break, and
+     * the trailing `**` is consumed as the closer rather than left
+     * literal. */
+    char *got = render_one("**foo  \nbar**");
+    EXPECT_STR_EQ(got, "\x1b[1mfoo  \nbar\x1b[22m");
+    free(got);
+}
+
+static void test_trailing_spaces_before_delimiter_soft_join(void)
+{
+    /* The two spaces sit before the closing `**`, not before the \n, so
+     * the line ends with a delimiter — a soft join, not a hard break.
+     * The consumed delimiter clears the trailing-space run. */
+    char *got = render_one("**foo  **\nbar");
+    EXPECT_STR_EQ(got, "\x1b[1mfoo  \x1b[22m bar");
+    free(got);
+}
+
+static void test_hard_break_before_block_closes_emphasis(void)
+{
+    /* When the next line opens a block (here a blank-line paragraph
+     * break), the block path wins over the inline hard line break and
+     * closes emphasis — identical to the same input without the
+     * trailing spaces. The hard *line* break only carries emphasis
+     * mid-paragraph. */
+    char *got = render_one("**foo  \n\nbar**");
+    EXPECT_STR_EQ(got, "\x1b[1mfoo  \x1b[22m\n\nbar**");
+    free(got);
+}
+
+static void test_hard_break_before_fence_closes_emphasis(void)
+{
+    /* Same rule with a fence opener as the next line: emphasis closes
+     * before the fence rather than being carried into the code block. */
+    char *got = render_one("**foo  \n```\ncode\n```");
+    EXPECT_STR_EQ(got, "\x1b[1mfoo  \x1b[22m\n\x1b[2mcode\n\x1b[22m");
     free(got);
 }
 
@@ -864,6 +982,29 @@ static void test_hard_break_indented_fence(void)
     /* Indented fence opener — same equivalence. */
     char *got = render_one("intro\n  ```\ncode\n```\n");
     EXPECT_STR_EQ(got, "intro\n\x1b[2mcode\n\x1b[22m");
+    free(got);
+}
+
+static void test_code_fence_indented_closer_closes(void)
+{
+    /* Fence nested in a list item: every line, the closer included,
+     * carries the item's 2-space indent. The closer must still be
+     * recognized (CommonMark allows up to 3 spaces) — otherwise the
+     * dim region runs past the block to end-of-stream. The opener's
+     * indent is normalized away, the body stays verbatim (dim, indent
+     * preserved), and the trailing line renders normally. */
+    char *got = render_one("  ```\n  code line\n  ```\n  after");
+    EXPECT_STR_EQ(got, "\x1b[2m  code line\n\x1b[22m  after");
+    free(got);
+}
+
+static void test_code_fence_indented_closer_at_eof(void)
+{
+    /* Indented closer with no trailing newline: md_flush must recognize
+     * it (skipping up to 3 leading spaces like the streaming path) and
+     * consume it, not emit it as dim content. */
+    char *got = render_one("  ```\n  code\n  ```");
+    EXPECT_STR_EQ(got, "\x1b[2m  code\n\x1b[22m");
     free(got);
 }
 
@@ -1584,6 +1725,40 @@ static void test_wrap_indented_continuation_reflows(void)
     free(got);
 }
 
+static void test_wrap_blank_line_continuation_indents(void)
+{
+    /* A list-item continuation paragraph separated by a blank line has
+     * no marker of its own. Its leading 2-space indent should still set
+     * the hanging indent so wrapped rows align under the item instead
+     * of collapsing to column 0 (the bug: the wrapped tail landed at
+     * col 0). The blank line stays a paragraph break. */
+    const char *in =
+        "- header\n\n  continuation body long enough to wrap onto a second row here ok";
+    char *got = render_wrap(in, 24);
+    EXPECT_STR_EQ(got, "- header\n"
+                       "\n"
+                       "  continuation body long\n"
+                       "  enough to wrap onto a\n"
+                       "  second row here ok");
+    free(got);
+}
+
+static void test_wrap_code_fence_in_list_item(void)
+{
+    /* End-to-end of the list-item pathologies: a bulleted item, a blank
+     * line, an indented fenced code block (opener/body/closer all carry
+     * the item's indent), then a trailing line. The fence must open and
+     * close cleanly (dim only around the body) and the trailing line
+     * must render normally — not swallowed by a runaway code span. */
+    const char *in = "- item\n\n  ```\n  code\n  ```\n  after text";
+    char *got = render_wrap(in, 40);
+    EXPECT_STR_EQ(got, "- item\n"
+                       "\n"
+                       "\x1b[2m  code\n"
+                       "\x1b[22m  after text");
+    free(got);
+}
+
 /* Capture every emit_cb call as a separate (kind, bytes) record so
  * tests can assert that content streams progressively instead of
  * landing in one final flush. The byte stream is identical to what
@@ -1827,16 +2002,14 @@ static void test_wrap_no_escapes_when_break_at_budget_edge(void)
 
 static void test_wrap_consecutive_spaces_at_edge(void)
 {
-    /* Regression for the autowrap-on-second-space bug: a break-space
-     * at col > wrap_width was previously held and flushed when the
-     * next byte arrived; if that next byte was another space, the
-     * first held space hit the wire at col == wrap_width + 1 and
-     * autowrapped before wrap_break could fire.
-     *
-     * Fix: drop the over-edge space entirely (it IS the wrap point),
-     * defer the \n + indent via pending_wrap. A second consecutive
-     * space then lands on the fresh row as ordinary leading
-     * whitespace. The wire stays under wrap_width — no autowrap. */
+    /* A run of spaces straddling the wrap point collapses entirely: the
+     * first over-edge space sets pending_wrap (it IS the wrap point),
+     * and every following space while pending is dropped rather than
+     * committing the deferred \n. So the wrapped row starts at the next
+     * word with no ragged leading space, and — crucially — trailing
+     * hard-break spaces landing on the boundary can't commit a spurious
+     * blank/space line before the hard \n. The wire stays under
+     * wrap_width, so no autowrap (the original regression here). */
     struct buf out;
     buf_init(&out);
     struct md_renderer *m = md_new(capture, &out, 7);
@@ -1844,8 +2017,30 @@ static void test_wrap_consecutive_spaces_at_edge(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "foo bar\n baz");
+    EXPECT_STR_EQ(s, "foo bar\nbaz");
     free(s);
+}
+
+static void test_wrap_hard_break_at_budget_no_extra_line(void)
+{
+    /* Trailing hard-break spaces landing exactly on the wrap budget:
+     * the first space sets pending_wrap, the second is dropped (not
+     * committed), and the hard-break \n then subsumes pending — a
+     * single break, not "aaaaa\n \nbar" with a stray space line. */
+    char *got = render_wrap("aaaaa  \nbar", 5);
+    EXPECT_STR_EQ(got, "aaaaa\nbar");
+    free(got);
+}
+
+static void test_wrap_crlf_hard_break_at_budget_no_extra_line(void)
+{
+    /* Same boundary case with a CRLF line ending: the \r between the
+     * trailing spaces and the \n must not commit the pending wrap (it's
+     * dropped in the wrap layer), so the result is one break — not
+     * "aaaaa\n\r\nbar" with a stray blank line. */
+    char *got = render_wrap("aaaaa  \r\nbar", 5);
+    EXPECT_STR_EQ(got, "aaaaa\nbar");
+    free(got);
 }
 
 static void test_md_cursor_col_tracks_emit_position(void)
@@ -2010,10 +2205,20 @@ int main(void)
     test_eof_soft_join_digits();
     test_eof_soft_join_dash_alone();
     test_eof_soft_join_hash_alone();
+    test_eof_hard_break_trailing_spaces_ambiguous_prefix();
+    test_hard_break_crlf();
     test_eof_hard_break_blank();
     test_soft_break_simple_join();
     test_soft_break_skip_leading_whitespace();
     test_soft_break_no_double_space();
+    test_hard_break_trailing_two_spaces();
+    test_hard_break_trailing_two_spaces_after_code_span();
+    test_hard_break_trailing_spaces_split_across_feeds();
+    test_soft_break_single_trailing_space();
+    test_hard_break_carries_emphasis();
+    test_trailing_spaces_before_delimiter_soft_join();
+    test_hard_break_before_block_closes_emphasis();
+    test_hard_break_before_fence_closes_emphasis();
     test_hard_break_blank_line();
     test_hard_break_blank_line_4_spaces();
     test_hard_break_blank_line_with_tab();
@@ -2033,6 +2238,8 @@ int main(void)
     test_hard_break_indented_bullet_no_parent();
     test_hard_break_indented_heading();
     test_hard_break_indented_fence();
+    test_code_fence_indented_closer_closes();
+    test_code_fence_indented_closer_at_eof();
     test_soft_join_4_leading_spaces_not_marker();
     test_line_start_indented_heading();
     test_line_start_indented_fence();
@@ -2081,6 +2288,8 @@ int main(void)
     test_wrap_soft_wrapped_list_item();
     test_soft_join_indented_continuation();
     test_wrap_indented_continuation_reflows();
+    test_wrap_blank_line_continuation_indents();
+    test_wrap_code_fence_in_list_item();
     test_wrap_streams_each_codepoint_eagerly();
     test_wrap_raw_cursor_escapes_on_break();
     test_wrap_no_escapes_when_break_at_budget_edge();
@@ -2093,6 +2302,8 @@ int main(void)
     test_wrap_eof_preserves_trailing_space_when_within_budget();
     test_md_cursor_col_tracks_emit_position();
     test_wrap_consecutive_spaces_at_edge();
+    test_wrap_hard_break_at_budget_no_extra_line();
+    test_wrap_crlf_hard_break_at_budget_no_extra_line();
     test_md_cursor_col_wrap_disabled();
     test_wrap_heading_not_wrapped();
 
