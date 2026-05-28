@@ -47,9 +47,9 @@ static int append_capped(struct buf *out, const char *chunk, size_t run_start, s
     return 0;
 }
 
-/* Emit the `cat -n` line-number prefix ("%6ld\t") for `line_no` into `out`,
- * then the content run. Prefix is emitted lazily — only when there is at
- * least one byte of content to attach it to — so we never produce orphan
+/* Emit the line-number prefix ("%6ld" + READ_LINE_DELIM) for `line_no` into
+ * `out`, then the content run. Prefix is emitted lazily — only when there is
+ * at least one byte of content to attach it to — so we never produce orphan
  * prefixes for lines we won't reach (cap, EOF, or limit-stop). If the
  * prefix wouldn't fit whole, signal cap-hit before writing anything; a
  * half-written "     12" would look like file content. */
@@ -60,14 +60,14 @@ static int emit_run(struct buf *out, const char *chunk, size_t run_start, size_t
         return 0;
     if (*need_prefix) {
         char prefix[24];
-        int plen = snprintf(prefix, sizeof(prefix), "%6ld\t", line_no);
+        int plen = snprintf(prefix, sizeof(prefix), "%6ld" READ_LINE_DELIM, line_no);
         if (plen < 0)
             plen = 0;
         if ((size_t)plen >= sizeof(prefix))
             plen = (int)sizeof(prefix) - 1;
         /* `>=`, not `>`: if the prefix would land exactly at the cap, we'd
          * write it and then have no room for any content — an orphan
-         * "     42\t" right before the truncation marker. Treat zero
+         * "     42→" right before the truncation marker. Treat zero
          * content headroom as cap-hit and bail without writing anything. */
         if (out->len + (size_t)plen >= cap)
             return 1;
@@ -452,12 +452,13 @@ const struct tool TOOL_READ = {
         {
             .name = "read",
             .description =
-                "Read a file from disk and return its contents in `cat -n` format: each "
-                "line is prefixed with its 1-indexed line number, a tab, then the line's "
-                "content. The prefix is presentation only — it is NOT part of the file on "
-                "disk; do not include it in `edit` tool `old_string`/`new_string` arguments. "
-                "Optional 1-indexed line `offset` and `limit` slice a range; without them, "
-                "the whole file is returned.",
+                "Read a file from disk and return its contents in `cat -n` style: each "
+                "line is prefixed with its 1-indexed line number, a " READ_LINE_DELIM
+                " arrow, then the line's content. The prefix is presentation only — it is "
+                "NOT part of the file on disk; do not include it in `edit` tool "
+                "`old_string`/`new_string` "
+                "arguments. Optional 1-indexed line `offset` and `limit` slice a range; "
+                "without them, the whole file is returned.",
             .parameters_schema_json =
                 "{\"type\":\"object\","
                 "\"properties\":{"

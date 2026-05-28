@@ -93,6 +93,15 @@ size_t output_cap_bytes(void);
 #define OUTPUT_CAP_LINES      2000
 #define OUTPUT_CAP_LINE_WIDTH 500
 
+/* Delimiter between the read tool's line-number column and the line content.
+ * A visible arrow (U+2192 "→"), not a tab: models conflate a leading tab
+ * with the file's own tab indentation and then echo the wrong whitespace
+ * back in edit old_string/new_string. A non-whitespace glyph can't be
+ * mistaken for indentation. Written as a string literal so callers can
+ * concatenate it (`"%6ld" READ_LINE_DELIM`) — keeping it separate from
+ * adjacent content literals also avoids \x hex-escape greediness. */
+#define READ_LINE_DELIM "\xE2\x86\x92"
+
 /* Parse a size with optional k/m suffix (case-insensitive, 1024-base):
  *   "256k" → 262144, "128K" → 131072, "1m" → 1048576, "4096" → 4096.
  * Returns 0 on empty/invalid input — callers using 0 as a "disabled"

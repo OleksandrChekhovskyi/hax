@@ -61,13 +61,14 @@ static void test_read_nonexistent(void)
 
 static void test_read_normal(void)
 {
-    /* `cat -n` format: each line gets a right-aligned 6-char line-number
-     * column followed by a tab, then the original content. */
+    /* `cat -n` style: each line gets a right-aligned 6-char line-number
+     * column followed by a → arrow (READ_LINE_DELIM), then the original
+     * content. */
     const char content[] = "hello\nworld\n";
     char *path = write_tmp(content, sizeof(content) - 1);
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = call_read(args);
-    EXPECT_STR_EQ(out, "     1\thello\n     2\tworld\n");
+    EXPECT_STR_EQ(out, "     1" READ_LINE_DELIM "hello\n     2" READ_LINE_DELIM "world\n");
     free(out);
     free(args);
     unlink(path);
@@ -82,7 +83,7 @@ static void test_read_sanitizes_utf8(void)
     char *path = write_tmp(content, sizeof(content));
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = call_read(args);
-    EXPECT_STR_EQ(out, "     1\ta\xEF\xBF\xBD"
+    EXPECT_STR_EQ(out, "     1" READ_LINE_DELIM "a\xEF\xBF\xBD"
                        "b");
     free(out);
     free(args);
@@ -155,19 +156,19 @@ static void test_read_offset_limit(void)
 
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":2,\"limit\":2}", path);
     char *out = call_read(args);
-    EXPECT_STR_EQ(out, "     2\ttwo\n     3\tthree\n");
+    EXPECT_STR_EQ(out, "     2" READ_LINE_DELIM "two\n     3" READ_LINE_DELIM "three\n");
     free(out);
     free(args);
 
     args = xasprintf("{\"path\":\"%s\",\"offset\":4}", path);
     out = call_read(args);
-    EXPECT_STR_EQ(out, "     4\tfour\n     5\tfive\n");
+    EXPECT_STR_EQ(out, "     4" READ_LINE_DELIM "four\n     5" READ_LINE_DELIM "five\n");
     free(out);
     free(args);
 
     args = xasprintf("{\"path\":\"%s\",\"limit\":1}", path);
     out = call_read(args);
-    EXPECT_STR_EQ(out, "     1\tone\n");
+    EXPECT_STR_EQ(out, "     1" READ_LINE_DELIM "one\n");
     free(out);
     free(args);
 
@@ -195,7 +196,7 @@ static void test_read_no_trailing_newline(void)
     char *path = write_tmp(content, sizeof(content) - 1);
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":2}", path);
     char *out = call_read(args);
-    EXPECT_STR_EQ(out, "     2\tbeta");
+    EXPECT_STR_EQ(out, "     2" READ_LINE_DELIM "beta");
     free(out);
     free(args);
     unlink(path);
@@ -253,7 +254,8 @@ static void test_read_range_past_cap_in_large_file(void)
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":%ld,\"limit\":1}", path, which);
     char *out = call_read(args);
     char expected[32];
-    snprintf(expected, sizeof(expected), "%6ld\t%cbc\n", which, 'a' + (char)((which - 1) % 26));
+    snprintf(expected, sizeof(expected), "%6ld" READ_LINE_DELIM "%cbc\n", which,
+             'a' + (char)((which - 1) % 26));
     EXPECT_STR_EQ(out, expected);
     EXPECT(strstr(out, "[truncated") == NULL);
     EXPECT(strstr(out, "past readable") == NULL);
@@ -297,8 +299,9 @@ static void test_read_no_false_marker_when_under_cap(void)
      * without a truncation marker, and the output starts with the
      * line-1 prefix (i.e., the pre-stat refusal didn't fire either —
      * that path would have produced a "cap is" error instead). The
-     * `cat -n` prefix adds 7 bytes per line, so leave headroom for the
-     * overhead: 800 × 256 = 200 KiB file → ~205 KiB output. */
+     * line-number prefix adds 9 bytes per line (6-wide number + 3-byte →),
+     * so leave headroom for the overhead: 800 × 256 = 200 KiB file →
+     * ~207 KiB output. */
     size_t lines = 800;
     size_t line_len = 256;
     size_t total = lines * line_len;
@@ -316,12 +319,12 @@ static void test_read_no_false_marker_when_under_cap(void)
     char *out = call_read(args);
     EXPECT(strstr(out, "[truncated") == NULL);
     EXPECT(strstr(out, "bytes elided") == NULL);
-    EXPECT(strstr(out, "     1\t") == out);
+    EXPECT(strstr(out, "     1" READ_LINE_DELIM) == out);
     /* Pin the exact size so the format is locked in: each line of pure
-     * ASCII under the per-line width cap adds exactly the 7-byte
-     * "%6ld\t" prefix and nothing else (no UTF-8 substitution, no
+     * ASCII under the per-line width cap adds exactly the 9-byte
+     * "%6ld" + → prefix and nothing else (no UTF-8 substitution, no
      * line-cap elision). */
-    EXPECT(strlen(out) == total + lines * 7);
+    EXPECT(strlen(out) == total + lines * 9);
     free(out);
     free(args);
 
@@ -354,7 +357,7 @@ static void test_read_pre_stat_boundary_st_size_at_cap(void)
      * the streaming truncation marker doesn't. Its absence proves the
      * `>` boundary held. */
     EXPECT(strstr(out, "cap is") == NULL);
-    EXPECT(strstr(out, "     1\t") == out);
+    EXPECT(strstr(out, "     1" READ_LINE_DELIM) == out);
     /* Prefixes inflate the output past the cap, so the stream-side
      * truncation marker is expected. */
     EXPECT(strstr(out, "[truncated at") != NULL);
@@ -556,7 +559,7 @@ static void test_read_bounded_slice_suppresses_truncation_marker(void)
 
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":1,\"limit\":1}", path);
     char *out = call_read(args);
-    EXPECT_STR_EQ(out, "     1\tln_\n");
+    EXPECT_STR_EQ(out, "     1" READ_LINE_DELIM "ln_\n");
     EXPECT(strstr(out, "[truncated") == NULL);
     free(out);
     free(args);
