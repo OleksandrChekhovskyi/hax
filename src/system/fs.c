@@ -217,8 +217,16 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
     }
     fd = -1;
 
-    a_label = file_existed ? xasprintf("a/%s", path) : xstrdup("/dev/null");
-    b_label = xasprintf("b/%s", path);
+    /* The `a/`/`b/` prefixes are the git convention for *relative* paths;
+     * a path the model passed as absolute (one outside cwd — under-cwd
+     * paths are relativized before they reach here) would otherwise read
+     * as "a//abs/path". For those, emit the bare path like plain
+     * `diff -u`. The new-file source stays "/dev/null" either way. */
+    int absolute = path[0] == '/';
+    a_label = !file_existed ? xstrdup("/dev/null")
+              : absolute    ? xstrdup(path)
+                            : xasprintf("a/%s", path);
+    b_label = absolute ? xstrdup(path) : xasprintf("b/%s", path);
     diff = make_unified_diff(file_existed ? old : "", file_existed ? old_len : 0, content,
                              content_len, a_label, b_label);
     if (!diff) {
@@ -233,7 +241,7 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
      * no content". */
     if (!file_existed && !*diff) {
         free(diff);
-        diff = xasprintf("--- /dev/null\n+++ b/%s\n", path);
+        diff = xasprintf("--- /dev/null\n+++ %s\n", b_label);
     }
 
     /* Byte-identical content on an existing file: skip the rename so the

@@ -31,4 +31,17 @@ char *expand_home(const char *path);
  * "/Users/oleksandr") is returned verbatim. NULL input returns NULL. */
 char *collapse_home(const char *path);
 
+/* If `path` is absolute and lies strictly *under* `cwd` (sharing it as a
+ * leading path-component prefix), return the cwd-relative remainder
+ * (malloc'd, e.g. "/home/u/proj" + "/home/u/proj/src/x.c" -> "src/x.c").
+ * Returns NULL when `path` is relative, equals `cwd`, or sits outside it
+ * — leaving the caller to use the original. Like collapse_home, the
+ * boundary is component-aware so "/home/u/proj2/x" doesn't match cwd
+ * "/home/u/proj". Pure textual transform: no realpath, no symlink
+ * resolution, so correctness relies on the caller resolving the result
+ * against the same cwd. A path containing a ".." component returns NULL
+ * (resolving it could escape cwd, and we don't normalize dot segments).
+ * NULL/non-absolute inputs return NULL. */
+char *path_relativize(const char *path, const char *cwd);
+
 #endif /* HAX_PATH_H */

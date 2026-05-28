@@ -495,6 +495,30 @@ static struct item dispatch_tool_call_silent(struct render_ctx *r, const struct 
     };
 }
 
+/* Render a single dim "solo" row (the "›" chevron block) carrying a terse
+ * one-line tool outcome that bypasses the streaming preview — the
+ * "(no changes)" marker and the created-summary fallback. `text` may be
+ * model-controlled (the created summary embeds the file path), so flatten
+ * it to one row and neutralize control bytes the same way the tool header
+ * does, then truncate to the terminal width. */
+static void emit_tool_solo_marker(struct disp *d, struct spinner *sp, const char *text)
+{
+    spinner_hide(sp);
+    disp_tool_strip_solo(d);
+    disp_raw(ANSI_DIM);
+    int budget = display_width() - 2; /* "› " strip glyph + space */
+    if (budget < 8)
+        budget = 8;
+    char *flat = flatten_for_display(text);
+    char *line = truncate_for_display(flat, (size_t)budget);
+    free(flat);
+    disp_write(d, line, strlen(line));
+    free(line);
+    disp_raw(ANSI_RESET);
+    disp_putc(d, '\n');
+    fflush(stdout);
+}
+
 /* Run one tool call: render the header, drive the renderer over either
  * streamed emit_display chunks or the canonical return value, and produce
  * the tool_result item that goes back to the model. The canonical history
@@ -532,13 +556,7 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *r, const struct
          * Render the marker inline — feeding "" through the preview
          * renderer would leave the user staring at a bare tool header. */
         if (t && t->output_is_diff && !*ret) {
-            spinner_hide(sp);
-            disp_tool_strip_solo(d);
-            disp_raw(ANSI_DIM);
-            disp_printf(d, "(no changes)");
-            disp_raw(ANSI_RESET);
-            disp_putc(d, '\n');
-            fflush(stdout);
+            emit_tool_solo_marker(d, sp, "(no changes)");
         } else {
             /* Diff-capable tools' success output starts with `--- `;
              * their failure output (error messages) doesn't. Switching
@@ -554,6 +572,18 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *r, const struct
      * we never hid in finalize). Belt-and-braces to make sure it's gone
      * before the next thing draws. */
     spinner_hide(sp);
+
+    /* A diff-capable tool that streamed display content the renderer
+     * elided to nothing — write creating a file whose content is only
+     * whitespace, or control/escape bytes ctrl_strip drops — produces no
+     * rows, leaving a bare header. Surface the canonical "created ..."
+     * summary as a solo row so the block always has a body. Predicting
+     * "would this render?" in the tool can't account for ctrl_strip
+     * (an ANSI escape swallows its trailing bytes), so we decide here on
+     * the actual row count. Only write reaches this: edit never streams,
+     * and the no-emit branches above already render a row. */
+    if (t && t->output_is_diff && rr.emit_called && rr.rows_emitted == 0 && ret && *ret)
+        emit_tool_solo_marker(d, sp, ret);
 
     char *history = ctrl_strip_dup(ret ? ret : "");
     free(ret);

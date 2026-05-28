@@ -8,6 +8,7 @@
 #include "util.h"
 #include "system/fs.h"
 #include "system/path.h"
+#include "tools/path_preprocess.h"
 
 #define EDIT_READ_CAP (4 * 1024 * 1024)
 
@@ -207,5 +208,6 @@ const struct tool TOOL_EDIT = {
             .display_arg = "path",
         },
     .run = run,
+    .preprocess_args = tool_normalize_path_args,
     .output_is_diff = 1,
 };

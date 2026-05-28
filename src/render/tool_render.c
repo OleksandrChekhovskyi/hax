@@ -405,8 +405,24 @@ static const char *diff_line_color(const char *line, size_t len, int in_hunk)
     return NULL;
 }
 
+/* The unified-diff file-header lines ("--- a/x" / "+++ b/x"). Only the
+ * pair *before* the first hunk are headers; an identical-looking line
+ * inside a hunk body is real removed/added content (handled by the
+ * diff_in_hunk latch at the call site). */
+static int is_diff_file_header(const char *line, size_t len)
+{
+    return len >= 4 && (memcmp(line, "--- ", 4) == 0 || memcmp(line, "+++ ", 4) == 0);
+}
+
 static void emit_diff_line(struct tool_render *r, const char *line, size_t len)
 {
+    /* Drop the file-header lines from display: the tool-call header row
+     * above already names the file, so "--- a/x" / "+++ b/x" are pure
+     * duplication (and read as "a//abs/path" for absolute paths). The
+     * full header stays in the tool result the model receives — this is
+     * display-only elision, like the head/tail capping elsewhere. */
+    if (!r->diff_in_hunk && is_diff_file_header(line, len))
+        return;
     /* On the first row of the diff block, hide whatever the spinner
      * is currently showing (the agent may have left it in inline /
      * line mode from before dispatch) so it doesn't fight the row

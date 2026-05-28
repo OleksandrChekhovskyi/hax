@@ -78,6 +78,7 @@ sources = files(
     'src/providers/registry.c',
     'src/tools/bash.c',
     'src/tools/edit.c',
+    'src/tools/path_preprocess.c',
     'src/tools/read.c',
     'src/tools/write.c',
 )

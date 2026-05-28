@@ -2,11 +2,13 @@
 #include "mock.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "provider.h"
 #include "util.h"
@@ -55,6 +57,12 @@
  *       usage in=N out=M [cached=K]   Set usage on the upcoming done event.
  *       end-turn                 Finalize the current turn (emits EV_DONE).
  *       (blank or # line)        Ignored.
+ *
+ *     In both `text` and `tool` directives, "{{CWD}}" expands to the
+ *     process working directory at emit time (see expand_cwd). Lets a
+ *     checked-in script reference paths under cwd — whose absolute root
+ *     is machine-specific — to exercise path relativization and
+ *     cd-stripping (see scripts/diff_demo.txt).
  *
  *     Long text is auto-streamed in TEXT_CHUNK_BYTES-sized deltas with
  *     `delay` between chunks, so the live preview shows incremental
@@ -199,6 +207,38 @@ static struct stream_usage empty_usage(void)
 }
 
 /* ---- Script parsing ----------------------------------------------- */
+
+/* Replace every "{{CWD}}" in `s` with the process working directory.
+ * A checked-in script can't hardcode an absolute path under cwd — the
+ * root is machine-specific — yet both path relativization (in the file
+ * tools) and cd-stripping (in the bash tool) only fire against the real
+ * cwd. This lets a script emit e.g. {"path":"{{CWD}}/x"} and exercise
+ * those paths from any directory. Returns a malloc'd string (caller
+ * frees); on no match or getcwd failure, a plain copy. */
+static char *expand_cwd(const char *s)
+{
+    static const char tok[] = "{{CWD}}";
+    const size_t toklen = sizeof(tok) - 1;
+    if (!strstr(s, tok))
+        return xstrdup(s);
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd)))
+        return xstrdup(s);
+    struct buf out;
+    buf_init(&out);
+    for (const char *p = s; *p;) {
+        if (strncmp(p, tok, toklen) == 0) {
+            buf_append_str(&out, cwd);
+            p += toklen;
+        } else {
+            buf_append(&out, p, 1);
+            p++;
+        }
+    }
+    char *res = xstrdup(out.data ? out.data : "");
+    buf_free(&out);
+    return res;
+}
 
 static const char *skip_ws(const char *s)
 {
@@ -345,8 +385,10 @@ static int play_one_turn(FILE *f, stream_cb cb, void *user, http_tick_cb tick, v
                 decoded[di++] = rest[si];
             }
             decoded[di] = '\0';
-            int rc = emit_chunked(cb, user, decoded, delay_ms, tick, tick_user, reasoning);
+            char *expanded = expand_cwd(decoded);
             free(decoded);
+            int rc = emit_chunked(cb, user, expanded, delay_ms, tick, tick_user, reasoning);
+            free(expanded);
             if (rc)
                 return rc;
             continue;
@@ -380,12 +422,14 @@ static int play_one_turn(FILE *f, stream_cb cb, void *user, http_tick_cb tick, v
             char *name = xmalloc(name_len + 1);
             memcpy(name, rest, name_len);
             name[name_len] = '\0';
-            const char *args = skip_ws(space);
+            char *args = expand_cwd(skip_ws(space));
             if (msleep(delay_ms, tick, tick_user)) {
+                free(args);
                 free(name);
                 return emit_done(cb, user, usage);
             }
             int rc = emit_tool_call(cb, user, name, args);
+            free(args);
             free(name);
             if (rc)
                 return rc;

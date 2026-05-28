@@ -286,6 +286,26 @@ static void test_write_empty_new_file(void)
     free(dir);
 }
 
+static void test_write_blank_content_summary(void)
+{
+    /* A new file with no visible content still gets an unambiguous
+     * "created ..." summary — the dispatch layer surfaces it as the block
+     * body when the streamed preview renders no rows. Pin the summary text
+     * (line/byte counts) the model and that fallback both rely on. */
+    char *dir = mk_tmpdir();
+    char *path = xasprintf("%s/blank.txt", dir);
+
+    char *out = call_write(path, "\\n   \\n"); /* only blank lines */
+    EXPECT(strstr(out, "created ") != NULL);
+    EXPECT(strstr(out, "2 lines") != NULL);
+    EXPECT(strstr(out, "5 bytes") != NULL);
+    free(out);
+
+    rm_rf(dir);
+    free(path);
+    free(dir);
+}
+
 static void test_write_through_symlink(void)
 {
     char *dir = mk_tmpdir();
@@ -328,6 +348,7 @@ int main(void)
     test_write_preserves_setuid();
     test_write_unchanged_yields_empty_diff();
     test_write_empty_new_file();
+    test_write_blank_content_summary();
     test_write_through_symlink();
     test_write_through_dangling_symlink();
     test_write_refuses_fifo();

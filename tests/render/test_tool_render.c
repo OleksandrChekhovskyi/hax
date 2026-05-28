@@ -384,14 +384,33 @@ static void test_diff_colors_added_and_removed(void)
                      "+new\n";
     const char *out = render_one(R_DIFF, in, strlen(in));
 
-    EXPECT(strstr(out, "--- a/x") != NULL);
-    EXPECT(strstr(out, "+++ b/x") != NULL);
+    /* File-header lines are elided from display (the tool-call header
+     * row already names the file); the hunk header and body remain. */
+    EXPECT(strstr(out, "--- a/x") == NULL);
+    EXPECT(strstr(out, "+++ b/x") == NULL);
     EXPECT(strstr(out, "@@ -1,1 +1,1 @@") != NULL);
     EXPECT(strstr(out, "-old") != NULL);
     EXPECT(strstr(out, "+new") != NULL);
     EXPECT(strstr(out, ANSI_GREEN) != NULL);
     EXPECT(strstr(out, ANSI_RED) != NULL);
     EXPECT(strstr(out, ANSI_DIM) != NULL);
+}
+
+static void test_diff_file_headers_elided(void)
+{
+    /* Both header lines are dropped regardless of label shape — including
+     * the bare absolute-path form used for files outside cwd, which would
+     * otherwise show "--- /abs/path". */
+    const char *in = "--- /abs/path\n"
+                     "+++ /abs/path\n"
+                     "@@ -1,1 +1,1 @@\n"
+                     "-old\n"
+                     "+new\n";
+    const char *out = render_one(R_DIFF, in, strlen(in));
+    EXPECT(strstr(out, "/abs/path") == NULL);
+    EXPECT(strstr(out, "@@ -1,1 +1,1 @@") != NULL);
+    EXPECT(strstr(out, "-old") != NULL);
+    EXPECT(strstr(out, "+new") != NULL);
 }
 
 static void test_diff_tab_expanded_to_four_spaces(void)
@@ -445,10 +464,11 @@ static void test_diff_dash_content_not_mistaken_for_header(void)
                      "+++ added pluses\n";
     const char *out = render_one(R_DIFF, in, strlen(in));
 
-    /* Real file headers stay dim. */
-    EXPECT(strstr(out, ANSI_DIM "--- a/x") != NULL);
-    EXPECT(strstr(out, ANSI_DIM "+++ b/x") != NULL);
-    /* Body lines colored by their real prefix, not mistaken for headers. */
+    /* The leading file headers are elided from display entirely. */
+    EXPECT(strstr(out, "--- a/x") == NULL);
+    EXPECT(strstr(out, "+++ b/x") == NULL);
+    /* Body lines colored by their real prefix, not mistaken for headers
+     * and not elided — an in-hunk "--- "/"+++ " is real content. */
     EXPECT(strstr(out, ANSI_RED "--- removed dashes") != NULL);
     EXPECT(strstr(out, ANSI_GREEN "+++ added pluses") != NULL);
 }
@@ -846,6 +866,7 @@ int main(void)
     test_over_indented_content_renders_truncation_marker();
     test_long_unbroken_input_buffer_bounded();
     test_diff_colors_added_and_removed();
+    test_diff_file_headers_elided();
     test_diff_tab_expanded_to_four_spaces();
     test_diff_flushes_partial_trailing_line();
     test_diff_preserves_blank_lines();

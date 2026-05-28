@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: MIT */
 #include <stdlib.h>
-#include <string.h>
 
 #include "harness.h"
 #include "util.h"
@@ -223,6 +222,92 @@ static void test_collapse_home_root_home(void)
     free(p);
 }
 
+/* ---------- path_relativize ---------- */
+
+static void test_relativize_under_cwd(void)
+{
+    char *p = path_relativize("/home/u/proj/src/x.c", "/home/u/proj");
+    EXPECT_STR_EQ(p, "src/x.c");
+    free(p);
+}
+
+static void test_relativize_direct_child(void)
+{
+    char *p = path_relativize("/home/u/proj/calc.py", "/home/u/proj");
+    EXPECT_STR_EQ(p, "calc.py");
+    free(p);
+}
+
+static void test_relativize_equal_to_cwd_is_null(void)
+{
+    EXPECT(path_relativize("/home/u/proj", "/home/u/proj") == NULL);
+}
+
+static void test_relativize_outside_cwd_is_null(void)
+{
+    EXPECT(path_relativize("/etc/hosts", "/home/u/proj") == NULL);
+}
+
+static void test_relativize_partial_component_is_null(void)
+{
+    /* "/home/u/proj2" must not match cwd "/home/u/proj" — byte prefix
+     * but not a path-component boundary. */
+    EXPECT(path_relativize("/home/u/proj2/x", "/home/u/proj") == NULL);
+}
+
+static void test_relativize_relative_input_is_null(void)
+{
+    EXPECT(path_relativize("src/x.c", "/home/u/proj") == NULL);
+}
+
+static void test_relativize_trailing_slash_cwd(void)
+{
+    char *p = path_relativize("/home/u/proj/x.c", "/home/u/proj/");
+    EXPECT_STR_EQ(p, "x.c");
+    free(p);
+}
+
+static void test_relativize_root_cwd(void)
+{
+    char *p = path_relativize("/etc/hosts", "/");
+    EXPECT_STR_EQ(p, "etc/hosts");
+    free(p);
+}
+
+static void test_relativize_root_cwd_root_path_is_null(void)
+{
+    EXPECT(path_relativize("/", "/") == NULL);
+}
+
+static void test_relativize_null_inputs(void)
+{
+    EXPECT(path_relativize(NULL, "/home") == NULL);
+    EXPECT(path_relativize("/home/x", NULL) == NULL);
+}
+
+static void test_relativize_dotdot_escaping_is_null(void)
+{
+    /* "/repo/../outside/file" resolves outside cwd; relativizing it to
+     * "../outside/file" would leak an outside-cwd target in as a relative
+     * path. Bail instead. */
+    EXPECT(path_relativize("/repo/../outside/file", "/repo") == NULL);
+}
+
+static void test_relativize_dotdot_under_cwd_is_null(void)
+{
+    /* Even a ".." that stays under cwd is left alone — we don't normalize
+     * dot segments, and "a/../b" would make an ugly "a/a/../b" label. */
+    EXPECT(path_relativize("/repo/a/../b/file", "/repo") == NULL);
+}
+
+static void test_relativize_dotdot_in_name_still_relativizes(void)
+{
+    /* ".." inside a filename (not a standalone component) is fine. */
+    char *p = path_relativize("/repo/a..b/file", "/repo");
+    EXPECT_STR_EQ(p, "a..b/file");
+    free(p);
+}
+
 int main(void)
 {
     test_path_join_simple();
@@ -252,6 +337,20 @@ int main(void)
     test_collapse_home_trailing_slash_in_home();
     test_collapse_home_no_home_env();
     test_collapse_home_root_home();
+
+    test_relativize_under_cwd();
+    test_relativize_direct_child();
+    test_relativize_equal_to_cwd_is_null();
+    test_relativize_outside_cwd_is_null();
+    test_relativize_partial_component_is_null();
+    test_relativize_relative_input_is_null();
+    test_relativize_trailing_slash_cwd();
+    test_relativize_root_cwd();
+    test_relativize_root_cwd_root_path_is_null();
+    test_relativize_null_inputs();
+    test_relativize_dotdot_escaping_is_null();
+    test_relativize_dotdot_under_cwd_is_null();
+    test_relativize_dotdot_in_name_still_relativizes();
 
     T_REPORT();
 }

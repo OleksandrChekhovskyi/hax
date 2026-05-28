@@ -72,3 +72,50 @@ char *collapse_home(const char *path)
         return xasprintf("~%s", path + hlen);
     return xstrdup(path);
 }
+
+/* True if `path` contains a ".." path component (e.g. "/a/../b", "/a/.."),
+ * not merely ".." inside a name like "a..b". */
+static int path_has_dotdot(const char *path)
+{
+    for (const char *s = path; (s = strstr(s, "..")); s += 2) {
+        char before = s == path ? '/' : s[-1];
+        char after = s[2];
+        if (before == '/' && (after == '/' || after == '\0'))
+            return 1;
+    }
+    return 0;
+}
+
+char *path_relativize(const char *path, const char *cwd)
+{
+    if (!path || !cwd || path[0] != '/' || cwd[0] != '/')
+        return NULL;
+    /* A ".." component can lexically escape cwd ("/repo/../x") or just
+     * produce a misleading "a/../x" label. We don't resolve dot segments
+     * (see the header note), so bail and leave the original path. */
+    if (path_has_dotdot(path))
+        return NULL;
+    size_t clen = strlen(cwd);
+    /* Strip trailing '/' on cwd so "/proj/" matches "/proj" + "/x". */
+    while (clen > 1 && cwd[clen - 1] == '/')
+        clen--;
+    /* cwd is root "/": every absolute path other than "/" itself is
+     * under it, and the separating slash sits at position 0. */
+    if (clen == 1) {
+        const char *rest = path + 1;
+        while (*rest == '/')
+            rest++;
+        return *rest ? xstrdup(rest) : NULL;
+    }
+    if (strncmp(path, cwd, clen) != 0)
+        return NULL;
+    /* Require a component boundary so "/proj2/x" doesn't match "/proj"
+     * — path[clen] must be the separating '/'. path == cwd (path[clen]
+     * == '\0') yields nothing to relativize. */
+    if (path[clen] != '/')
+        return NULL;
+    const char *rest = path + clen + 1;
+    while (*rest == '/')
+        rest++;
+    return *rest ? xstrdup(rest) : NULL;
+}

@@ -5,6 +5,7 @@
 #include "util.h"
 #include "system/fs.h"
 #include "system/path.h"
+#include "tools/path_preprocess.h"
 
 /* Count '\n' bytes plus a trailing partial line (content not ending in
  * '\n' still counts as one line — matches what `wc -l` would feel intuitive
@@ -67,6 +68,12 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
      * canonical output. */
     if (was_new) {
         free(diff);
+        /* Stream the content for a display-only preview. When it renders
+         * no rows (empty / whitespace / control-only content), the
+         * dispatch layer falls back to showing the "created ..." summary
+         * so the block isn't a bare header — it decides on the actual row
+         * count, which the tool can't predict through the renderer's
+         * ctrl_strip. */
         if (emit_display && content_len > 0)
             emit_display(content, content_len, user);
         char *result;
@@ -103,5 +110,6 @@ const struct tool TOOL_WRITE = {
             .display_arg = "path",
         },
     .run = run,
+    .preprocess_args = tool_normalize_path_args,
     .output_is_diff = 1,
 };

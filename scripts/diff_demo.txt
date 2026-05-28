@@ -1,0 +1,100 @@
+# Mock provider script for the path-normalization + diff-display pipeline.
+# Exercises every pathology those features handle, end to end, with no
+# real model:
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/diff_demo.txt build/hax
+#
+# Then type any message (e.g. "go") at the prompt. Every turn below ends
+# with a tool call except the last, so the whole sequence plays as one
+# agentic chain off that first message; control returns to the prompt
+# after the final turn.
+#
+# {{CWD}} expands to the process working directory at emit time (see
+# expand_cwd in src/providers/mock.c). A checked-in script can't hardcode
+# an absolute path under cwd — the root is machine-specific — yet both
+# path relativization (file tools) and cd-stripping (bash) only fire
+# against the real cwd, so the placeholder is how we reach them. The demo
+# works from any directory and cleans up after itself.
+#
+# DSL recap (full spec in src/providers/mock.c):
+#   text <msg> / tool <name> <json> / delay <ms> / usage ... / end-turn
+
+# ---------- turn 1: seed a scratch area under cwd + one file outside it ----
+# printf needs "\\n" here: JSON unescapes "\\" to "\", so the shell sees
+# `printf '...\n...'` and printf turns \n into real newlines.
+text Setting up a scratch area to demo path normalization and diff display.
+tool bash {"command":"mkdir -p {{CWD}}/.hax-diffdemo && printf 'line one\\nline two\\nline three\\n' > {{CWD}}/.hax-diffdemo/calc.py && printf 'first\\n' > {{CWD}}/.hax-diffdemo/over.txt && printf 'outside\\n' > /tmp/hax-diffdemo-outside.txt"}
+end-turn
+
+# ---------- turn 2: cd-strip ----------------------------------------------
+# The redundant "cd <cwd> &&" prefix resolves to the current directory, so
+# the shown command drops it and previews just `ls .hax-diffdemo`.
+text Note the redundant `cd <cwd> &&` prefix is stripped from the shown command.
+tool bash {"command":"cd {{CWD}} && ls .hax-diffdemo"}
+end-turn
+
+# ---------- turn 3: edit via an absolute path *under* cwd ------------------
+# The model passes an absolute path; the [edit] header and the diff's
+# (model-facing) a//b labels are relativized to ".hax-diffdemo/calc.py",
+# and the "--- / +++" header lines are elided from the display.
+text Editing via an absolute path under cwd — shown relative, diff headers elided.
+tool edit {"path":"{{CWD}}/.hax-diffdemo/calc.py","old_string":"line two","new_string":"line TWO"}
+end-turn
+
+# ---------- turn 4: edit a file *outside* cwd -----------------------------
+# Outside cwd there's nothing to relativize, so the path stays absolute
+# (and in the model's tool result the diff carries a bare "--- /tmp/..."
+# label rather than an "a//tmp/..." double slash).
+text Editing a file outside cwd — the path stays absolute.
+tool edit {"path":"/tmp/hax-diffdemo-outside.txt","old_string":"outside","new_string":"OUTSIDE"}
+end-turn
+
+# ---------- turn 5: read with an absolute under-cwd path ------------------
+# Relativization is shared by all file tools, so read's header collapses
+# to the same short form.
+text Reading shows the same relativized header.
+tool read {"path":"{{CWD}}/.hax-diffdemo/calc.py"}
+end-turn
+
+# ---------- turn 6: new file with visible content -------------------------
+# New-file writes show a content preview and return a terse "created ..."
+# summary (the bytes are already in the call args, so no diff echo).
+text New file with content — a content preview, terse returned summary.
+tool write {"path":"{{CWD}}/.hax-diffdemo/new.py","content":"print('hi')\nprint('bye')\n"}
+end-turn
+
+# ---------- turn 7: empty new file ----------------------------------------
+# Empty content renders no preview rows, so the "created ... (empty)"
+# summary is shown instead of a bare header.
+text Empty new file — a "(empty)" summary, not a blank block.
+tool write {"path":"{{CWD}}/.hax-diffdemo/empty.py","content":""}
+end-turn
+
+# ---------- turn 8: whitespace-only new file ------------------------------
+# All-blank content elides to nothing in the preview too, so it takes the
+# same summary path as the empty file rather than leaving a bare header.
+text Whitespace-only new file — also a visible summary, not a blank block.
+tool write {"path":"{{CWD}}/.hax-diffdemo/blank.py","content":"\n   \n"}
+end-turn
+
+# ---------- turn 9: overwrite producing a real diff -----------------------
+# over.txt already holds "first"; overwriting yields a colored unified
+# diff (labels relativized, header lines elided from display).
+text Overwriting an existing file shows a colored diff.
+tool write {"path":"{{CWD}}/.hax-diffdemo/over.txt","content":"second\n"}
+end-turn
+
+# ---------- turn 10: overwrite with identical content ---------------------
+# Byte-identical content is a no-op; the renderer shows "(no changes)".
+text Overwriting with identical content shows "(no changes)".
+tool write {"path":"{{CWD}}/.hax-diffdemo/over.txt","content":"second\n"}
+end-turn
+
+# ---------- turn 11: clean up ---------------------------------------------
+text Cleaning up the scratch area.
+tool bash {"command":"rm -rf {{CWD}}/.hax-diffdemo /tmp/hax-diffdemo-outside.txt"}
+end-turn
+
+# ---------- turn 12: close the chain --------------------------------------
+text Done — that covered cd-strip, path relativization, bare absolute labels, diff-header elision, content previews, empty/blank/no-change markers, and a colored diff.
+end-turn

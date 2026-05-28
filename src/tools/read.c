@@ -11,6 +11,7 @@
 #include "tool.h"
 #include "util.h"
 #include "system/path.h"
+#include "tools/path_preprocess.h"
 #include "text/utf8_sanitize.h"
 
 enum read_trunc {
@@ -472,6 +473,7 @@ const struct tool TOOL_READ = {
             .display_arg = "path",
         },
     .run = run,
+    .preprocess_args = tool_normalize_path_args,
     .format_display_extra = format_display_extra,
     .silent_preview = 1,
 };
