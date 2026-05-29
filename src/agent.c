@@ -9,6 +9,7 @@
 
 #include "agent_core.h"
 #include "agent_dispatch.h"
+#include "session.h"
 #include "slash.h"
 #include "tool.h"
 #include "transcript.h"
@@ -129,6 +130,18 @@ static int tool_result_is_marked(const struct item *it)
     if (out_len < marker_len)
         return 0;
     return strcmp(it->output + out_len - marker_len, INTERRUPT_MARKER) == 0;
+}
+
+/* Flush the same item slice to both append-only logs. The two share the
+ * incremental [n_written..n_items) cursor design, so they're always
+ * advanced together at each of the agent's commit points (after the user
+ * message, after each round-trip, on the error/interrupt paths). Both
+ * entry points no-op on a NULL log or when nothing new accumulated. */
+static void flush_logs(struct transcript_log *tlog, struct session_log *slog,
+                       const struct item *items, size_t n)
+{
+    transcript_log_append(tlog, items, n);
+    session_log_append(slog, items, n);
 }
 
 /* Per-stream slice the event callback needs alongside render_ctx. */
@@ -570,6 +583,9 @@ void agent_new_conversation(struct agent_state *st)
 {
     agent_session_reset(st->sess);
     transcript_log_reset(st->tlog, st->sess->sys, st->sess->tools, st->sess->n_tools);
+    /* Rotate to a fresh session file so the cleared conversation doesn't
+     * keep appending to the prior session's record. */
+    session_log_reset(st->slog);
     /* The model loses access to anything not in the conversation history,
      * so any preserved bash temp files referenced by old turns become
      * unreachable garbage. Drop them now rather than letting them sit in
@@ -578,14 +594,99 @@ void agent_new_conversation(struct agent_state *st)
     agent_print_banner(st->provider, st->sess);
 }
 
+/* Resume orientation banner: a dim rule noting how much was restored,
+ * plus the last user prompt. The model has the full history; this is only
+ * the human-facing "here's where we left off". The complete conversation
+ * is one Ctrl-T away rather than replayed inline — the live display style
+ * (markdown wrap, collapsed tool output) isn't reproducible from stored
+ * items without rendering them through the streaming/dispatch path. */
+static void render_resumed_banner(const struct agent_session *s)
+{
+    size_t n_msg = 0;
+    const char *last_user = NULL;
+    for (size_t i = 0; i < s->n_items; i++) {
+        if (s->items[i].kind == ITEM_USER_MESSAGE) {
+            n_msg++;
+            last_user = s->items[i].text;
+        }
+    }
+    printf("\n" ANSI_DIM "── resumed · %zu message%s · ctrl-t for full history ──" ANSI_RESET "\n",
+           n_msg, n_msg == 1 ? "" : "s");
+    if (last_user && *last_user) {
+        char *flat = flatten_for_display(last_user);
+        char *trunc = truncate_for_display(flat, (size_t)display_width());
+        printf(ANSI_DIM "last message: " ANSI_RESET "%s\n", trunc);
+        free(trunc);
+        free(flat);
+    }
+}
+
+void agent_resume_session(struct agent_state *st, const char *path)
+{
+    struct agent_session *s = st->sess;
+    struct item *loaded = NULL;
+    size_t nl = 0;
+    if (session_load(path, st->provider->name, s->model, &loaded, &nl, NULL) != 0 || nl == 0) {
+        free(loaded);
+        printf(ANSI_RED "could not read session" ANSI_RESET "\n");
+        return;
+    }
+
+    /* Swap the loaded conversation in for the current one. */
+    for (size_t i = 0; i < s->n_items; i++)
+        item_free(&s->items[i]);
+    free(s->items);
+    s->items = loaded;
+    s->n_items = nl;
+    s->cap_items = nl;
+
+    /* Continue the resumed file rather than the prior one, and re-key the
+     * transcript mirror to the restored history (reset writes the header,
+     * the append replays the items). */
+    session_log_close(st->slog);
+    st->slog = session_log_resume(path, st->provider->name, s->model, s->reasoning_effort, nl);
+    transcript_log_reset(st->tlog, s->sys, s->tools, s->n_tools);
+    transcript_log_append(st->tlog, s->items, s->n_items);
+
+    /* Old bash temp files referenced by the prior conversation are now
+     * unreachable, same as on /new. */
+    bash_cleanup_tempfiles();
+    render_resumed_banner(s);
+}
+
 int agent_run(struct provider *p, const struct hax_opts *opts)
 {
     struct agent_session sess;
     if (agent_session_init(&sess, p, opts) < 0)
         return 1;
 
+    /* Resume: load a prior conversation into history before anything else
+     * touches it, so the Ctrl-T view, the HAX_TRANSCRIPT mirror, and the
+     * session log all see the restored items from the start. An unreadable
+     * file is fatal — silently starting fresh would run against the wrong
+     * history. An empty-but-readable session (e.g. truncated by a crash)
+     * loads as zero items and just resumes empty, continuing that file. */
+    size_t n_resumed = 0;
+    if (opts->resume_path) {
+        struct item *loaded = NULL;
+        size_t nl = 0;
+        if (session_load(opts->resume_path, p->name, sess.model, &loaded, &nl, NULL) != 0) {
+            fprintf(stderr, "hax: could not resume session '%s'\n", opts->resume_path);
+            agent_session_free(&sess);
+            return 1;
+        }
+        sess.items = loaded;
+        sess.n_items = nl;
+        sess.cap_items = nl;
+        n_resumed = nl;
+    }
+
     putchar('\n');
     agent_print_banner(p, &sess);
+    /* On a --continue/--resume startup, show the same orientation banner
+     * /resume prints mid-session. */
+    if (n_resumed > 0)
+        render_resumed_banner(&sess);
     /* The single bag of rendering state threaded through every render
      * call. disp is embedded (same lifetime as agent_run's frame), so
      * md_emit_to_disp's user pointer is &r.disp; spinner / md are
@@ -614,8 +715,23 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
     struct transcript_log *tlog = transcript_log_open(sess.sys, sess.tools, sess.n_tools);
     /* Aggregate handed to slash handlers so they can mutate live state
      * without each one taking a separate argument. Pointers into stack
-     * frames here — agent_state never outlives agent_run. */
+     * frames here — agent_state never outlives agent_run. The session log
+     * lives on `state` (not a separate local) because /resume swaps it
+     * mid-run via agent_resume_session — every later use reads state.slog
+     * so it tracks that swap instead of dangling on the closed handle. */
     struct agent_state state = {.sess = &sess, .provider = p, .tlog = tlog};
+    /* Append-only session record. Resuming continues the same file (so
+     * the restored items aren't re-written); otherwise a fresh file is
+     * begun. NULL when persistence is disabled — all entry points are
+     * NULL-safe. */
+    state.slog = opts->resume_path ? session_log_resume(opts->resume_path, p->name, sess.model,
+                                                        sess.reasoning_effort, n_resumed)
+                                   : session_log_open(p->name, sess.model, sess.reasoning_effort);
+    /* Mirror restored history into the HAX_TRANSCRIPT log — its header
+     * was just written by _open; the items follow so the mirror matches
+     * the live conversation. */
+    if (n_resumed > 0)
+        transcript_log_append(tlog, sess.items, sess.n_items);
     /* Initialize once — captures the canonical termios baseline and starts
      * the watcher thread. Idempotent; safe even when stdin/stdout aren't
      * ttys (becomes a no-op in that case). */
@@ -675,7 +791,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
          * control to the provider. If the stream hangs or the process
          * is killed, the user prompt that triggered the in-flight call
          * is preserved on disk for post-mortem reading. */
-        transcript_log_append(tlog, sess.items, sess.n_items);
+        flush_logs(tlog, state.slog, sess.items, sess.n_items);
         /* input_readline left the cursor at column 0 of a fresh row. */
         r.disp.trail = 1;
 
@@ -711,7 +827,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
                 /* Same rationale as the post-add_user flush above:
                  * land the new turn rule on disk before we wait on
                  * the next stream call. */
-                transcript_log_append(tlog, sess.items, sess.n_items);
+                flush_logs(tlog, state.slog, sess.items, sess.n_items);
             }
             first_inner = 0;
             struct context ctx = agent_session_context(&sess);
@@ -762,7 +878,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
                 /* Land the partial state on disk now — the success
                  * path's later append doesn't run on this branch and
                  * post-mortem readers want to see how far we got. */
-                transcript_log_append(tlog, sess.items, sess.n_items);
+                flush_logs(tlog, state.slog, sess.items, sess.n_items);
                 turn_errored = 1;
                 break;
             }
@@ -855,7 +971,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
              * post-mortem reading — the main reason HAX_TRANSCRIPT
              * exists. CALL/RESULT pairing is intact so the renderer's
              * lookahead works. */
-            transcript_log_append(tlog, sess.items, sess.n_items);
+            flush_logs(tlog, state.slog, sess.items, sess.n_items);
 
             /* Esc fired during or just after this batch. Stop the inner
              * loop without another model call, and ensure history carries
@@ -887,7 +1003,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
          * paths; this one picks up the no-tool exit (assistant message
          * only) and the synthesized-results interrupt path. Idempotent
          * when there are no new items — _append no-ops on n_items <= n_written. */
-        transcript_log_append(tlog, sess.items, sess.n_items);
+        flush_logs(tlog, state.slog, sess.items, sess.n_items);
 
         if (turn_interrupted) {
             render_open_block(&r);
@@ -910,11 +1026,19 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
             notify_attention();
     }
 
+    /* On the way out, tell the user how to get back: the session id (NULL
+     * for an empty or persistence-disabled run). The Ctrl-D path already
+     * emitted a newline, so this lands on its own line under the prompt. */
+    const char *hint = session_log_resume_hint(state.slog);
+    if (hint)
+        printf(ANSI_DIM "resume with: hax --resume=%s" ANSI_RESET "\n", hint);
+
     spinner_free(r.spinner);
     input_free(input);
     if (r.md)
         md_free(r.md);
     transcript_log_close(tlog);
+    session_log_close(state.slog);
     agent_session_free(&sess);
     return 0;
 }

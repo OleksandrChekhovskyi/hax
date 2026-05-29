@@ -171,7 +171,17 @@ static size_t count_newlines(const char *data, size_t n)
  * this, the model-facing path embedded in the truncation marker leaks
  * a file that nothing else cleans up: macOS doesn't evict /var/folders
  * for days, and Linux /tmp may live until reboot. Single-threaded
- * (tools run on the agent loop), so no locking. */
+ * (tools run on the agent loop), so no locking.
+ *
+ * These files don't outlive the process, so after a session is resumed
+ * the persisted "full output saved to <path>" marker points at a path
+ * that's gone. We deliberately leave the marker verbatim rather than
+ * rewrite it on load: editing history would break prompt-cache reuse on a
+ * soon-after resume (the common case), the truncated head/tail is still
+ * inline, and a read of the missing path just yields a recoverable error
+ * the model re-runs past. (Surviving resume would mean session-scoped
+ * spills — see Claude Code — at the cost of unbounded growth in a tool
+ * with no "session done" hook; not worth it here.) */
 static char **kept_paths;
 static size_t kept_paths_n;
 static size_t kept_paths_cap;

@@ -5,8 +5,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "agent.h"
+#include "session.h"
+#include "session_picker.h"
 #include "util.h"
 #include "terminal/ansi.h"
 #include "terminal/clipboard.h"
@@ -30,6 +33,7 @@ struct shortcut_def {
 };
 
 static void slash_run_new(struct slash_ctx *ctx);
+static void slash_run_resume(struct slash_ctx *ctx);
 static void slash_run_copy(struct slash_ctx *ctx);
 static void slash_run_usage(struct slash_ctx *ctx);
 static void slash_run_help(struct slash_ctx *ctx);
@@ -42,6 +46,12 @@ static const struct slash_cmd COMMANDS[] = {
         .aliases = {"clear", NULL},
         .summary = "start a fresh conversation",
         .run = slash_run_new,
+    },
+    {
+        .name = "resume",
+        .aliases = {NULL},
+        .summary = "resume a past conversation",
+        .run = slash_run_resume,
     },
     {
         .name = "copy",
@@ -167,6 +177,27 @@ enum slash_result slash_dispatch(const char *line, struct slash_ctx *ctx)
 static void slash_run_new(struct slash_ctx *ctx)
 {
     agent_new_conversation(ctx->state);
+}
+
+/* ---------- /resume ---------- */
+
+static void slash_run_resume(struct slash_ctx *ctx)
+{
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        printf(ANSI_RED "cannot determine working directory" ANSI_RESET "\n");
+        return;
+    }
+    /* Hide the live session from the list — resuming the conversation
+     * you're already in is a no-op. The picker prints its own "nothing
+     * to resume" note and returns NULL when the list is empty or the
+     * user cancels. */
+    const char *current = session_log_path(ctx->state->slog);
+    char *path = session_picker_run(cwd, current);
+    if (!path)
+        return;
+    agent_resume_session(ctx->state, path);
+    free(path);
 }
 
 /* ---------- /copy ---------- */

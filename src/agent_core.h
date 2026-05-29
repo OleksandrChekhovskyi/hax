@@ -24,6 +24,11 @@ struct hax_opts {
      * Sends only the user's message — useful for testing models on
      * raw tasks or as a barebones chat interface. */
     int raw;
+    /* Resume a prior conversation: path to a session .jsonl whose items
+     * are loaded into history before the loop starts, with new turns
+     * appended to the same file. NULL = start a fresh session. Resolved
+     * by main.c from --continue / --resume. */
+    const char *resume_path;
 };
 
 const struct tool *find_tool(const char *name);

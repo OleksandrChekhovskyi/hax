@@ -28,17 +28,33 @@ With no arguments, hax launches an interactive REPL.
 ./build/hax                   # interactive
 ./build/hax -p "list TODOs"   # non-interactive: run, print final answer, exit
 echo "explain x" | ./build/hax -p   # prompt from stdin
+./build/hax -c                # resume the most recent conversation here
+./build/hax --resume          # pick a past conversation from a list
+./build/hax --resume=ID -p "and now?"   # resume a specific session, non-interactively
 ./build/hax --raw -p "hello"  # bare model, no system prompt, no tools
 ./build/hax --help            # full usage
 ```
 
-| Flag       | What it does                                                        |
-|------------|---------------------------------------------------------------------|
-| `-p`       | Non-interactive mode. Runs the prompt to completion (tools and all) |
-|            | and prints the final assistant message to stdout.                   |
-| `--raw`    | Send only the prompt — no system prompt, no env block, no AGENTS.md,|
-|            | no skills, no tools. Useful as a barebones chat interface.          |
-| `-h`       | Show usage.                                                         |
+| Flag         | What it does                                                      |
+|--------------|-------------------------------------------------------------------|
+| `-p`         | Non-interactive mode. Runs the prompt to completion (tools and    |
+|              | all) and prints the final assistant message to stdout.            |
+| `-c`         | Resume the most recent conversation in the current directory.     |
+| `--resume`   | Resume a past conversation in this directory. Bare opens an       |
+| `[=ID]`      | interactive picker; `--resume=ID` (a session id) resumes directly |
+|              | — the ID form also works with `-p`. `/resume` does the same in    |
+|              | the REPL.                                                         |
+| `--raw`      | Send only the prompt — no system prompt, no env block, no         |
+|              | AGENTS.md, no skills, no tools. A barebones chat interface.       |
+| `-h`         | Show usage.                                                       |
+
+Every conversation (interactive or `-p`) is recorded to an append-only JSONL
+file under `$XDG_STATE_HOME/hax/sessions/<encoded-cwd>/`, keyed by the working
+directory, so `-c` / `--resume` only ever offer conversations from the project
+you're in. Resuming (including `/resume`) appends to the chosen session's own
+file; only `/new` starts a fresh one. On exit hax prints the session id (on
+stderr in `-p` mode, so piped stdout stays clean) so you can `--resume=<id>` it
+later. Set `HAX_NO_SESSION=1` to disable recording.
 
 Pick a provider with `HAX_PROVIDER` (default `codex`). Supported values:
 
@@ -278,6 +294,9 @@ Pair with `scripts/stream_demo.py` (`short`, `long`, `slow`, `burst`, `ansi`, `b
   truncated on startup and on `/new`, then appended to as the conversation grows. Useful
   for debugging higher-level behavior than `HAX_TRACE` shows, and works with
   `HAX_PROVIDER=mock` where there are no HTTP calls to trace
+- `HAX_NO_SESSION` — set to any non-empty value (other than `0`) to disable session
+  recording, so `-c` / `--resume` / `/resume` have nothing to persist or restore. Unset
+  by default: every conversation is written to `$XDG_STATE_HOME/hax/sessions/`
 
 ## License
 

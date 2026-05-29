@@ -4,13 +4,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "agent_core.h"
+#include "session.h"
 #include "tool.h"
 #include "transcript.h"
 #include "turn.h"
 #include "util.h"
 #include "render/ctrl_strip.h"
+#include "terminal/ansi.h"
+
+/* Advance both append-only logs over the same item slice — see the twin
+ * helper in agent.c. Both no-op on a NULL log or no new items. */
+static void oneshot_flush(struct transcript_log *tlog, struct session_log *slog,
+                          const struct item *items, size_t n)
+{
+    transcript_log_append(tlog, items, n);
+    session_log_append(slog, items, n);
+}
 
 /* Per-stream callback state for the oneshot path. We hand turn.c every
  * event for item assembly and capture the human-readable error text on
@@ -54,6 +66,25 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
     if (agent_session_init(&sess, p, opts) < 0)
         return 1;
 
+    /* Resume: seed history from a prior session before the new prompt is
+     * added, so -p can continue a conversation. An unreadable file is fatal
+     * rather than silently running the prompt against empty history; an
+     * empty-but-readable session loads as zero items and resumes empty. */
+    size_t n_resumed = 0;
+    if (opts->resume_path) {
+        struct item *loaded = NULL;
+        size_t nl = 0;
+        if (session_load(opts->resume_path, p->name, sess.model, &loaded, &nl, NULL) != 0) {
+            fprintf(stderr, "hax: could not resume session '%s'\n", opts->resume_path);
+            agent_session_free(&sess);
+            return 1;
+        }
+        sess.items = loaded;
+        sess.n_items = nl;
+        sess.cap_items = nl;
+        n_resumed = nl;
+    }
+
     /* HAX_TRANSCRIPT mirror, opened (and the file truncated) before
      * any model call so even an early-error or zero-turn run leaves
      * a fresh file behind. NULL when the env var is unset; all
@@ -63,12 +94,20 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
      * is idempotent on the others (transcript_log_append no-ops when
      * n_items hasn't grown). */
     struct transcript_log *tlog = transcript_log_open(sess.sys, sess.tools, sess.n_tools);
+    /* Append-only session record — continue the resumed file, else begin
+     * a fresh one. NULL when persistence is disabled. */
+    struct session_log *slog = opts->resume_path
+                                   ? session_log_resume(opts->resume_path, p->name, sess.model,
+                                                        sess.reasoning_effort, n_resumed)
+                                   : session_log_open(p->name, sess.model, sess.reasoning_effort);
+    if (n_resumed > 0)
+        transcript_log_append(tlog, sess.items, sess.n_items);
 
     agent_session_add_user(&sess, prompt);
     /* Land the prompt on disk before any provider call so a hang or
      * crash mid-stream still leaves the triggering input visible in
      * the log. */
-    transcript_log_append(tlog, sess.items, sess.n_items);
+    oneshot_flush(tlog, slog, sess.items, sess.n_items);
 
     int rc = 0;
     int first_inner = 1;
@@ -76,7 +115,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         if (!first_inner) {
             agent_session_add_boundary(&sess);
             /* Same: flush the new turn rule before the next stream. */
-            transcript_log_append(tlog, sess.items, sess.n_items);
+            oneshot_flush(tlog, slog, sess.items, sess.n_items);
         }
         first_inner = 0;
 
@@ -152,7 +191,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         /* Round-trip complete (assistant + tool calls + their results
          * all in sess.items): flush. CALL/RESULT pairing is intact for
          * the renderer's lookahead. */
-        transcript_log_append(tlog, sess.items, sess.n_items);
+        oneshot_flush(tlog, slog, sess.items, sess.n_items);
     }
 
     /* Loop fell through without a final assistant-only response. */
@@ -160,8 +199,27 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
     rc = 1;
 
 done:
-    transcript_log_append(tlog, sess.items, sess.n_items);
+    oneshot_flush(tlog, slog, sess.items, sess.n_items);
+    /* Surface the session id on stderr (stdout is the model's answer, kept
+     * clean for piping) so a one-shot run can be picked up with --resume.
+     * NULL when nothing was recorded or persistence is disabled. */
+    const char *hint = session_log_resume_hint(slog);
+    if (hint) {
+        /* Flush the answer (block-buffered when stdout is piped) before the
+         * unbuffered stderr write, so a combined 2>&1 stream shows the hint
+         * after the answer rather than racing ahead of it. */
+        fflush(stdout);
+        /* Always lead with a blank line so the hint reads as a footnote
+         * rather than part of the answer — agents commonly fold stderr
+         * into stdout (2>&1), where the model's output would otherwise run
+         * straight into it. Dim only on a terminal; a captured log stays
+         * plain (no stray ANSI). */
+        int tty = isatty(fileno(stderr));
+        fprintf(stderr, "\n%sresume with: hax --resume=%s%s\n", tty ? ANSI_DIM : "", hint,
+                tty ? ANSI_RESET : "");
+    }
     transcript_log_close(tlog);
+    session_log_close(slog);
     agent_session_free(&sess);
     return rc;
 }

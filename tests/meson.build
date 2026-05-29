@@ -334,6 +334,7 @@ test_slash = executable('test_slash',
         '../src/text/utf8.c',
         '../src/util.c',
     ],
+    dependencies: [jansson],
 )
 test('slash', test_slash)
 
@@ -385,3 +386,18 @@ test_agent_dispatch = executable('test_agent_dispatch',
     dependencies: [jansson, threads],
 )
 test('agent_dispatch', test_agent_dispatch)
+
+test_session = executable('test_session',
+    sources: [
+        'test_session.c',
+        '../src/session.c',
+        '../src/system/fs.c',
+        '../src/system/diff.c',
+        '../src/system/path.c',
+        '../src/text/utf8_sanitize.c',
+        '../src/text/utf8.c',
+        '../src/util.c',
+    ],
+    dependencies: [jansson],
+)
+test('session', test_session)

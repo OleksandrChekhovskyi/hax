@@ -57,6 +57,8 @@ sources = files(
     'src/slash.c',
     'src/system/spawn.c',
     'src/render/spinner.c',
+    'src/session.c',
+    'src/session_picker.c',
     'src/transport/sse.c',
     'src/render/tool_render.c',
     'src/trace.c',

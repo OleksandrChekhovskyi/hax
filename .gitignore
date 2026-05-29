@@ -5,3 +5,6 @@ build/
 *.swo
 .DS_Store
 __pycache__/
+
+# clang static-analyzer output
+*.plist

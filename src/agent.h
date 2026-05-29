@@ -6,6 +6,7 @@
 #include "provider.h"
 
 struct transcript_log;
+struct session_log;
 
 /* Live REPL state owned by agent_run, exposed to slash handlers (and
  * any future callers that need to mutate the conversation) so a single
@@ -16,6 +17,9 @@ struct agent_state {
     struct agent_session *sess;
     const struct provider *provider;
     struct transcript_log *tlog;
+    /* Append-only session record for resume; NULL when persistence is
+     * disabled (HAX_NO_SESSION) or unavailable. */
+    struct session_log *slog;
 };
 
 int agent_run(struct provider *p, const struct hax_opts *opts);
@@ -33,5 +37,13 @@ void agent_print_banner(const struct provider *p, const struct agent_session *s)
  * future additions (e.g. clearing a future cache, resetting usage
  * counters) don't leak into slash.c. */
 void agent_new_conversation(struct agent_state *st);
+
+/* Replace the live conversation with the one stored at `path`: load its
+ * items into history, continue appending to that same session file, mirror
+ * it into the HAX_TRANSCRIPT log, and print a short "resumed" banner with
+ * the last prompt for orientation. The full restored history is reachable
+ * via Ctrl-T rather than replayed inline. Used by the /resume command. A
+ * load failure is reported and leaves the current conversation untouched. */
+void agent_resume_session(struct agent_state *st, const char *path);
 
 #endif /* HAX_AGENT_H */

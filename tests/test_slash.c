@@ -44,6 +44,29 @@ void agent_new_conversation(struct agent_state *st)
     agent_session_reset(st->sess);
 }
 
+/* /resume reaches into session.c / session_picker.c / agent.c too. None
+ * are linked here (and pulling session.h would drag in jansson), so
+ * forward-declare the opaque handle and stub the three symbols slash.c
+ * references. The picker returns NULL (cancel), so /resume is a no-op in
+ * these tests — they assert on dispatch/parse behavior, not resume. */
+struct session_log;
+const char *session_log_path(const struct session_log *log)
+{
+    (void)log;
+    return NULL;
+}
+char *session_picker_run(const char *cwd, const char *exclude_path)
+{
+    (void)cwd;
+    (void)exclude_path;
+    return NULL;
+}
+void agent_resume_session(struct agent_state *st, const char *path)
+{
+    (void)st;
+    (void)path;
+}
+
 /* Redirect stdout to a temp file so we can inspect what slash_dispatch
  * printed. Returns the captured bytes (caller frees) and restores
  * stdout. */

@@ -9,6 +9,8 @@
 #include "agent.h"
 #include "oneshot.h"
 #include "providers/registry.h"
+#include "session.h"
+#include "session_picker.h"
 #include "trace.h"
 #include "transcript.h"
 #include "util.h"
@@ -48,6 +50,13 @@ static const char HELP_TEXT[] =
     "                   The prompt comes from PROMPT positional arguments\n"
     "                   (joined with spaces) when given, otherwise from\n"
     "                   stdin if stdin is not a terminal.\n"
+    "  -c, --continue   Resume the most recent conversation in this\n"
+    "                   directory.\n"
+    "      --resume[=ID]\n"
+    "                   Resume a past conversation in this directory. With\n"
+    "                   no ID, pick one from an interactive list; with a\n"
+    "                   session ID, resume it directly — the ID form also\n"
+    "                   works with -p.\n"
     "      --raw        Send only the prompt text — no system prompt, no\n"
     "                   environment block, no AGENTS.md, no skills, and no\n"
     "                   tools. Useful as a barebones chat interface.\n"
@@ -121,6 +130,44 @@ static void strip_trailing_newline(char *s)
         s[--n] = '\0';
 }
 
+/* Resolve a --resume=ARG to a session file path. ARG is a session id —
+ * exact match, or a unique prefix — among the sessions recorded for `cwd`.
+ * Sessions are per-directory by design; there's no path/cross-directory
+ * form (cd to the project to resume its work). Returns a malloc'd path, or
+ * NULL when nothing matches or the prefix is ambiguous. Caller frees. */
+static char *resolve_resume_arg(const char *cwd, const char *arg)
+{
+    struct session_entry *list;
+    size_t n;
+    session_list(cwd, &list, &n);
+
+    char *match = NULL;
+    /* Exact id first. */
+    for (size_t i = 0; i < n; i++) {
+        if (list[i].id && strcmp(list[i].id, arg) == 0) {
+            match = xstrdup(list[i].path);
+            break;
+        }
+    }
+    /* Else a unique id prefix. */
+    if (!match) {
+        size_t hits = 0, len = strlen(arg);
+        for (size_t i = 0; i < n; i++) {
+            if (list[i].id && strncmp(list[i].id, arg, len) == 0) {
+                hits++;
+                free(match);
+                match = xstrdup(list[i].path);
+            }
+        }
+        if (hits != 1) {
+            free(match);
+            match = NULL;
+        }
+    }
+    session_list_free(list, n);
+    return match;
+}
+
 int main(int argc, char **argv)
 {
     /* Must run before anything that emits or decodes multibyte text —
@@ -131,29 +178,39 @@ int main(int argc, char **argv)
 
     struct hax_opts opts = {0};
     int print_mode = 0;
+    int continue_mode = 0;
+    int resume_mode = 0;
+    const char *resume_arg = NULL;
 
-    /* `-h` and `-p` keep their conventional short forms; --raw is
-     * long-only since `-r` is already overloaded by other agents
-     * (Claude/pi-mono use it for --resume) and we may want to mirror
-     * that later without a collision. */
+    /* `-h`, `-p`, `-c` keep conventional short forms; --raw and --resume
+     * are long-only (`-r` is avoided to leave room for a future short
+     * alias without collision). --resume takes an optional ID, so
+     * `--resume` alone opens the picker and `--resume=ID` is direct. */
     enum {
         OPT_RAW = 0x100,
+        OPT_RESUME,
     };
     static const struct option long_opts[] = {
-        {"help", no_argument, NULL, 'h'},
-        {"print", no_argument, NULL, 'p'},
-        {"raw", no_argument, NULL, OPT_RAW},
-        {NULL, 0, NULL, 0},
+        {"help", no_argument, NULL, 'h'},     {"print", no_argument, NULL, 'p'},
+        {"continue", no_argument, NULL, 'c'}, {"resume", optional_argument, NULL, OPT_RESUME},
+        {"raw", no_argument, NULL, OPT_RAW},  {NULL, 0, NULL, 0},
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "hp", long_opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "hpc", long_opts, NULL)) != -1) {
         switch (c) {
         case 'h':
             fputs(HELP_TEXT, stdout);
             return 0;
         case 'p':
             print_mode = 1;
+            break;
+        case 'c':
+            continue_mode = 1;
+            break;
+        case OPT_RESUME:
+            resume_mode = 1;
+            resume_arg = optarg; /* NULL when given as bare --resume */
             break;
         case OPT_RAW:
             opts.raw = 1;
@@ -165,6 +222,18 @@ int main(int argc, char **argv)
         default:
             return 1;
         }
+    }
+
+    if (continue_mode && resume_mode) {
+        fprintf(stderr, "hax: use only one of --continue / --resume\n");
+        return 1;
+    }
+    /* A bare --resume opens an interactive picker, which makes no sense in
+     * -p mode (and would fight prompt-from-stdin). Require an explicit id
+     * there; -c stays valid since it auto-selects the most recent. */
+    if (print_mode && resume_mode && !resume_arg) {
+        fprintf(stderr, "hax: -p with --resume requires a session id (e.g. --resume=ID)\n");
+        return 1;
     }
 
     /* Reject positional args in interactive mode: they would otherwise
@@ -203,6 +272,68 @@ int main(int argc, char **argv)
         }
     }
 
+    /* Resolve --continue / --resume to a session file before any provider
+     * work: --continue picks the newest session in this cwd, --resume[=ID]
+     * either matches an id/path or opens the interactive picker. Done here
+     * so a cancelled picker or a bad id exits cleanly without constructing
+     * a provider. */
+    char *resume_path = NULL;
+    if (continue_mode || resume_mode) {
+        char cwd[4096];
+        if (!getcwd(cwd, sizeof(cwd))) {
+            fprintf(stderr, "hax: getcwd failed\n");
+            free(prompt);
+            return 1;
+        }
+        if (continue_mode) {
+            struct session_entry *list;
+            size_t n;
+            session_list(cwd, &list, &n);
+            if (n > 0)
+                resume_path = xstrdup(list[0].path); /* newest by mtime */
+            session_list_free(list, n);
+            if (!resume_path) {
+                /* Nothing to continue. In -p that's an error: the prompt
+                 * would otherwise run against empty history with only an
+                 * easy-to-miss stderr note, contradicting the explicit
+                 * request. Interactively, just start a fresh REPL. */
+                if (print_mode) {
+                    fprintf(stderr, "hax: no past conversation in this directory to continue\n");
+                    free(prompt);
+                    return 1;
+                }
+                fprintf(stderr, "hax: no past conversation in this directory; starting fresh\n");
+            }
+        } else if (resume_arg) {
+            if (!*resume_arg) {
+                /* `--resume=` (empty, e.g. an unset shell var) would prefix-
+                 * match every session — refuse it rather than resume an
+                 * arbitrary one. (Bare `--resume` with no '=' is the picker.) */
+                fprintf(stderr, "hax: --resume= requires a session id\n");
+                free(prompt);
+                return 1;
+            }
+            resume_path = resolve_resume_arg(cwd, resume_arg);
+            if (!resume_path) {
+                if (strchr(resume_arg, '/'))
+                    fprintf(stderr, "hax: --resume takes a session id, not a path "
+                                    "(sessions are per-directory)\n");
+                else
+                    fprintf(stderr, "hax: no session matching '%s'\n", resume_arg);
+                free(prompt);
+                return 1;
+            }
+        } else {
+            resume_path = session_picker_run(cwd, NULL);
+            if (!resume_path) {
+                /* Cancelled, or nothing to resume / no TTY. */
+                free(prompt);
+                return 0;
+            }
+        }
+    }
+    opts.resume_path = resume_path;
+
     int rc = 1;
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
         fprintf(stderr, "hax: curl_global_init failed\n");
@@ -235,5 +366,6 @@ err_curl:
     curl_global_cleanup();
 err_prompt:
     free(prompt);
+    free(resume_path);
     return rc;
 }
