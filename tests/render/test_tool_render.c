@@ -396,6 +396,20 @@ static void test_diff_colors_added_and_removed(void)
     EXPECT(strstr(out, ANSI_DIM) != NULL);
 }
 
+static void test_diff_context_lines_dimmed(void)
+{
+    /* Context (space-prefixed, unchanged) lines render dim — matching
+     * the rest of the tool preview — while +/- keep their signal color. */
+    const char *in = "@@ -1,3 +1,3 @@\n"
+                     "-old\n"
+                     " context\n"
+                     "+new\n";
+    const char *out = render_one(R_DIFF, in, strlen(in));
+    EXPECT(strstr(out, ANSI_DIM " context" ANSI_RESET) != NULL);
+    EXPECT(strstr(out, ANSI_RED "-old" ANSI_RESET) != NULL);
+    EXPECT(strstr(out, ANSI_GREEN "+new" ANSI_RESET) != NULL);
+}
+
 static void test_diff_file_headers_elided(void)
 {
     /* Both header lines are dropped regardless of label shape — including
@@ -866,6 +880,7 @@ int main(void)
     test_over_indented_content_renders_truncation_marker();
     test_long_unbroken_input_buffer_bounded();
     test_diff_colors_added_and_removed();
+    test_diff_context_lines_dimmed();
     test_diff_file_headers_elided();
     test_diff_tab_expanded_to_four_spaces();
     test_diff_flushes_partial_trailing_line();

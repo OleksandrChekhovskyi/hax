@@ -371,15 +371,21 @@ static void process_line(struct tool_render *r, const char *bytes, size_t len, i
 /* Color one diff line. `in_hunk` says whether a hunk body has begun
  * (we've already seen an "@@" header).
  *
+ * Everything but the actual changed lines is dimmed, matching the rest
+ * of the tool preview (head/tail rows are all ANSI_DIM): context
+ * (space-prefixed) lines, "@@" hunk headers, "\ No newline" markers,
+ * and the "--- "/"+++ " file headers. Only "+" additions (green) and
+ * "-" removals (red) keep a full-brightness signal color.
+ *
  * The split matters for robustness: inside a hunk every line carries a
  * one-char prefix, so the prefix alone is the classifier and we never
  * re-test the "--- "/"+++ " header patterns. That keeps a removed
  * "-- x" (rendered "--- x") red and an added "++ x" (rendered "+++ x")
  * green, instead of mistaking either for a file header and dimming it.
- * The "@@" and "\ No newline" markers are dimmed in either position —
- * a hunk-body content line never starts with a bare "@@"/"\" (it always
- * carries a +/-/space prefix), so matching them up front is unambiguous
- * and keeps inter-hunk separators dim in a multi-hunk diff. */
+ * The "@@" and "\ No newline" markers match up front in either
+ * position — a hunk-body content line never starts with a bare
+ * "@@"/"\" (it always carries a +/-/space prefix), so that's
+ * unambiguous and keeps inter-hunk separators dim in a multi-hunk diff. */
 static const char *diff_line_color(const char *line, size_t len, int in_hunk)
 {
     if (len >= 1 && line[0] == '\\')
@@ -391,7 +397,7 @@ static const char *diff_line_color(const char *line, size_t len, int in_hunk)
             return ANSI_GREEN;
         if (len >= 1 && line[0] == '-')
             return ANSI_RED;
-        return NULL; /* context (space-prefixed) line */
+        return ANSI_DIM; /* context (space-prefixed) line */
     }
     /* Before the first hunk: file headers, then fall back to prefix
      * coloring so stray +/- lines in degenerate input with no "@@"
@@ -402,7 +408,7 @@ static const char *diff_line_color(const char *line, size_t len, int in_hunk)
         return ANSI_GREEN;
     if (len >= 1 && line[0] == '-')
         return ANSI_RED;
-    return NULL;
+    return ANSI_DIM;
 }
 
 /* The unified-diff file-header lines ("--- a/x" / "+++ b/x"). Only the
@@ -432,14 +438,13 @@ static void emit_diff_line(struct tool_render *r, const char *line, size_t len)
     if (!r->started)
         spinner_hide(r->spinner);
     emit_strip_for_next_row(r);
-    const char *color = diff_line_color(line, len, r->diff_in_hunk);
-    if (color)
-        disp_raw(color);
+    /* Every diff line gets a color: green/red for the changed lines,
+     * dim for everything else (context, headers, markers). */
+    disp_raw(diff_line_color(line, len, r->diff_in_hunk));
     char *trimmed = truncate_line(line, content_budget());
     disp_write(r->disp, trimmed, strlen(trimmed));
     free(trimmed);
-    if (color)
-        disp_raw(ANSI_RESET);
+    disp_raw(ANSI_RESET);
     disp_putc(r->disp, '\n');
     r->rows_emitted++;
     r->started = 1;
