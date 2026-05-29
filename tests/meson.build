@@ -188,6 +188,24 @@ test_openai_events = executable('test_openai_events',
 )
 test('providers/openai_events', test_openai_events)
 
+test_openai_messages = executable('test_openai_messages',
+    sources: [
+        'providers/test_openai_messages.c',
+        '../src/providers/openai.c',
+        '../src/providers/openai_events.c',
+        '../src/transport/http.c',
+        '../src/transport/sse.c',
+        '../src/transport/retry.c',
+        '../src/transport/api_error.c',
+        '../src/system/bg_job.c',
+        '../src/trace.c',
+        '../src/text/utf8.c',
+        '../src/util.c',
+    ],
+    dependencies: [libcurl, jansson, threads],
+)
+test('providers/openai_messages', test_openai_messages)
+
 test_diff = executable('test_diff',
     sources: [
         'system/test_diff.c',

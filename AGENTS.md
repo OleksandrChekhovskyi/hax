@@ -91,9 +91,11 @@ fallback, prompt_cache_key policy, extra request headers. New OpenAI-compatible 
 typically a ~30-line preset file.
 
 **`struct context` and `struct item` (provider.h)** are the flat conversation view: a sequence
-of `USER_MESSAGE | ASSISTANT_MESSAGE | TOOL_CALL | TOOL_RESULT | REASONING`. `REASONING`
-carries opaque provider-specific JSON (Codex's encrypted chain-of-thought) round-tripped
-verbatim — non-Codex adapters ignore it.
+of `USER_MESSAGE | ASSISTANT_MESSAGE | TOOL_CALL | TOOL_RESULT | REASONING`. `REASONING` carries
+either Codex's opaque encrypted chain-of-thought (`reasoning_json`, round-tripped verbatim) or
+plain CoT text (`reasoning_text`) captured from an openai-family `reasoning_content` stream and
+replayed as `reasoning_content` when the provider opts in (see
+`openai_preset.roundtrip_reasoning_field`).
 
 **`src/turn.{c,h}`** is a pure state machine that assembles one streamed response into
 `struct item`s. Driven by `turn_on_event`, drained by `turn_take_items`. No I/O — keeps

@@ -250,6 +250,30 @@ static void render_tool_result(FILE *out, int color, const struct item *it)
  * one without bloating the view. */
 static void render_reasoning(FILE *out, int color, const struct item *it)
 {
+    /* Text CoT (openai-family reasoning_content): a section rule + dim body,
+     * matching the user/assistant/tool blocks. Dim is re-applied per line
+     * (like render_user's color) so it survives soft-wrapping in a pager
+     * instead of dropping after the first newline. */
+    if (it->reasoning_text) {
+        section(out, color, "reasoning");
+        const char *text = it->reasoning_text;
+        const char *p = text;
+        while (*p) {
+            const char *nl = strchr(p, '\n');
+            size_t n = nl ? (size_t)(nl - p) : strlen(p);
+            fputs(ANSI_IF(ANSI_DIM), out);
+            fwrite(p, 1, n, out);
+            fputs(ANSI_IF(ANSI_RESET), out);
+            if (!nl)
+                break;
+            fputc('\n', out);
+            p = nl + 1;
+        }
+        ensure_newline(out, text);
+        return;
+    }
+    /* Codex's opaque structured blob: just the inline tag + id, since there
+     * is no human-readable text to show (it's encrypted). */
     fprintf(out, "%s[reasoning]%s", ANSI_IF(ANSI_DIM), ANSI_IF(ANSI_RESET));
     if (it->reasoning_json) {
         json_t *root = json_loads(it->reasoning_json, 0, NULL);

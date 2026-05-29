@@ -33,6 +33,9 @@ struct turn {
     int in_text;
     struct buf text_buf;
 
+    int in_reasoning;
+    struct buf reasoning_buf;
+
     struct pending_tool *pending;
     size_t n_pending;
     size_t cap_pending;
@@ -55,6 +58,14 @@ int turn_on_event(const struct stream_event *ev, struct turn *t);
  * (incomplete) tool calls are NOT promoted — they are discarded by
  * turn_reset, since incomplete args wouldn't form valid tool_calls. */
 void turn_flush_text(struct turn *t, const char *suffix);
+
+/* Commit any buffered reasoning as an ITEM_REASONING. No-op if none is
+ * buffered. Used on the abort/cancel path to preserve a reasoning-only
+ * partial stream (CoT streamed, then error/cancel before any text/tool
+ * event or EV_DONE) — otherwise the buffered reasoning would be discarded
+ * by turn_reset. In the normal flow reasoning is flushed automatically when
+ * the first text/tool-call event arrives or on EV_DONE. */
+void turn_flush_reasoning(struct turn *t);
 
 /* Look up an in-flight tool call by id — useful for display code that wants
  * to inspect args before turn_on_event consumes them on EV_TOOL_CALL_END. */

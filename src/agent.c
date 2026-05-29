@@ -81,9 +81,15 @@ static struct absorb_outcome absorb_aborted_turn(struct agent_session *sess, str
     /* Capture state-before-mutation. n_items already covers any
      * earlier flush (e.g. EV_TOOL_CALL_START flushed text on its
      * way through); n_pending covers an in-flight tool_call that
-     * never reached EV_TOOL_CALL_END. */
-    int had_state = t->in_text || t->n_pending > 0 || t->n_items > 0;
+     * never reached EV_TOOL_CALL_END. in_reasoning covers a
+     * reasoning-only stream that errored/cancelled before any
+     * text/tool event flushed the buffered CoT — preserve it (the
+     * whole point of the reasoning round-trip) rather than dropping
+     * it in turn_reset. Flush it before the text so the reasoning
+     * item precedes the assistant message, matching the normal flow. */
+    int had_state = t->in_text || t->in_reasoning || t->n_pending > 0 || t->n_items > 0;
     int had_partial_text = t->in_text;
+    turn_flush_reasoning(t);
     turn_flush_text(t, had_partial_text ? "\n" INTERRUPT_MARKER : NULL);
 
     size_t n_before;

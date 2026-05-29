@@ -2,6 +2,8 @@
 #ifndef HAX_OPENAI_H
 #define HAX_OPENAI_H
 
+#include <jansson.h>
+
 #include "provider.h"
 
 /* Real OpenAI Chat Completions: locked to https://api.openai.com/v1. Reads:
@@ -83,6 +85,14 @@ struct openai_preset {
      * ignore the unknown request field; leave this 0 unless the
      * preset's target server is known to emit prompt_progress. */
     int emit_progress;
+    /* When non-NULL, captured reasoning text (ITEM_REASONING.reasoning_text)
+     * is round-tripped back to the server under this field name on each
+     * assistant message — "reasoning_content" for llama.cpp. Required for
+     * interleaved-thinking models (Qwen3): without their prior reasoning in
+     * the prompt they degrade and leak tool calls into the reasoning
+     * channel. NULL = don't send (real OpenAI exposes no such field).
+     * HAX_REASONING_ROUNDTRIP overrides this per-run (off / on / <field>). */
+    const char *roundtrip_reasoning_field;
 };
 
 /* Build an OpenAI-compatible provider configured by `preset`. NULL preset
@@ -101,6 +111,14 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset);
  * piggybacking on this. */
 struct bg_job;
 void openai_attach_probe(struct provider *p, struct bg_job *probe);
+
+/* Translate flat conversation items into the Chat Completions `messages`
+ * array. Exposed (rather than static) so the round-trip serialization —
+ * notably reasoning_content attachment — can be unit-tested without an HTTP
+ * round-trip. `reasoning_field` NULL means don't emit reasoning. Returns a
+ * new jansson array the caller must json_decref. */
+json_t *openai_build_messages(const char *system_prompt, const struct item *items, size_t n,
+                              const char *reasoning_field);
 
 extern const struct provider_factory PROVIDER_OPENAI;
 

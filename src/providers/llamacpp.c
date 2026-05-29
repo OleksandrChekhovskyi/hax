@@ -156,6 +156,12 @@ struct provider *llamacpp_provider_new(void)
          * when this is set — the only provider we target today that
          * exposes server-side progress. */
         .emit_progress = 1,
+        /* Qwen3 and other interleaved-thinking models served by
+         * llama-server degrade and leak tool calls into the reasoning
+         * channel unless their prior reasoning is fed back. Round-trip it
+         * as reasoning_content (the field llama-server ingests). Disable
+         * with HAX_REASONING_ROUNDTRIP=off. */
+        .roundtrip_reasoning_field = "reasoning_content",
     };
     struct provider *p = openai_provider_new_preset(&preset);
     /* Context-limit probe runs in the background: an older llama-server

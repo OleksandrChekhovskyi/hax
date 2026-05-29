@@ -22,6 +22,7 @@ struct openai {
     char *session_id; /* sent as prompt_cache_key when send_cache_key is set */
     int send_cache_key;
     int emit_progress;
+    char *roundtrip_reasoning_field; /* NULL = don't round-trip reasoning */
     enum reasoning_format reasoning_format;
     char **extra_headers; /* NULL-terminated, each element heap-owned; NULL = none */
     /* Optional background probe — currently the context-window
@@ -40,31 +41,62 @@ static json_t *build_tool_call(const struct item *it)
 }
 
 /* Emit one consolidated assistant message for a run of consecutive
- * ITEM_ASSISTANT_MESSAGE + ITEM_TOOL_CALL items. OpenAI accepts a single
- * assistant message with both `content` and `tool_calls`; some compat
- * servers reject bare tool_call-only messages without that wrapper.
+ * ITEM_REASONING + ITEM_ASSISTANT_MESSAGE + ITEM_TOOL_CALL items. OpenAI
+ * accepts a single assistant message with both `content` and `tool_calls`;
+ * some compat servers reject bare tool_call-only messages without that
+ * wrapper.
+ *
+ * When `reasoning_field` is set, any captured reasoning text in the run is
+ * attached under that key (e.g. "reasoning_content" for llama.cpp) so
+ * interleaved-thinking models see their own prior CoT — see openai.h. Only
+ * ITEM_REASONING.reasoning_text is round-tripped here; Codex's structured
+ * reasoning_json travels its own provider and never reaches this path.
  *
  * Lossy corner: if a turn produced text → tool_call → text, both text
  * fragments are concatenated into one `content` — Chat Completions has
  * no way to interleave text with tool_calls within a message. Splitting
  * the trailing text into a post-tool-result message would imply it was
  * said after observing the result, which is more misleading. */
-static size_t emit_assistant_group(json_t *arr, const struct item *items, size_t i, size_t n)
+static size_t emit_assistant_group(json_t *arr, const struct item *items, size_t i, size_t n,
+                                   const char *reasoning_field)
 {
     struct buf text;
+    struct buf reasoning;
     buf_init(&text);
+    buf_init(&reasoning);
     json_t *tool_calls = NULL;
 
-    while (i < n && (items[i].kind == ITEM_ASSISTANT_MESSAGE || items[i].kind == ITEM_TOOL_CALL)) {
+    while (i < n && (items[i].kind == ITEM_ASSISTANT_MESSAGE || items[i].kind == ITEM_TOOL_CALL ||
+                     items[i].kind == ITEM_REASONING)) {
         if (items[i].kind == ITEM_ASSISTANT_MESSAGE) {
             if (items[i].text)
                 buf_append_str(&text, items[i].text);
+        } else if (items[i].kind == ITEM_REASONING) {
+            if (items[i].reasoning_text && *items[i].reasoning_text) {
+                if (reasoning.len > 0)
+                    buf_append_str(&reasoning, "\n");
+                buf_append_str(&reasoning, items[i].reasoning_text);
+            }
         } else {
             if (!tool_calls)
                 tool_calls = json_array();
             json_array_append_new(tool_calls, build_tool_call(&items[i]));
         }
         i++;
+    }
+
+    int emit_reasoning = reasoning_field && reasoning.len > 0;
+
+    /* Skip an assistant message with nothing to say — no text, no tool
+     * calls, and no reasoning being replayed. Happens for a reasoning-only
+     * turn when replay is disabled (reasoning_field NULL: HAX_REASONING_
+     * ROUNDTRIP=off, or a compat backend that streams CoT but doesn't opt
+     * into replay). Emitting {"role":"assistant","content":null} there
+     * poisons the next request and some backends reject it. */
+    if (text.len == 0 && !tool_calls && !emit_reasoning) {
+        buf_free(&text);
+        buf_free(&reasoning);
+        return i;
     }
 
     json_t *msg = json_object();
@@ -75,13 +107,17 @@ static size_t emit_assistant_group(json_t *arr, const struct item *items, size_t
         json_object_set_new(msg, "content", json_null());
     if (tool_calls)
         json_object_set_new(msg, "tool_calls", tool_calls);
+    if (emit_reasoning)
+        json_object_set_new(msg, reasoning_field, json_string(reasoning.data));
     json_array_append_new(arr, msg);
 
     buf_free(&text);
+    buf_free(&reasoning);
     return i;
 }
 
-static json_t *build_messages(const char *system_prompt, const struct item *items, size_t n)
+json_t *openai_build_messages(const char *system_prompt, const struct item *items, size_t n,
+                              const char *reasoning_field)
 {
     json_t *arr = json_array();
 
@@ -100,7 +136,7 @@ static json_t *build_messages(const char *system_prompt, const struct item *item
             break;
         case ITEM_ASSISTANT_MESSAGE:
         case ITEM_TOOL_CALL:
-            i = emit_assistant_group(arr, items, i, n);
+            i = emit_assistant_group(arr, items, i, n, reasoning_field);
             break;
         case ITEM_TOOL_RESULT:
             json_array_append_new(arr,
@@ -110,8 +146,13 @@ static json_t *build_messages(const char *system_prompt, const struct item *item
             i++;
             break;
         case ITEM_REASONING:
-            /* Codex-only blob; nothing to translate to Chat Completions. */
-            i++;
+            /* Text reasoning begins an assistant group so it can ride along
+             * as reasoning_content (gated by reasoning_field). Codex's
+             * structured blob has no Chat Completions representation — skip. */
+            if (items[i].reasoning_text)
+                i = emit_assistant_group(arr, items, i, n, reasoning_field);
+            else
+                i++;
             break;
         case ITEM_TURN_BOUNDARY:
             /* Agent-side marker for the transcript renderer; nothing to
@@ -157,7 +198,8 @@ enum reasoning_format reasoning_format_parse(const char *s, enum reasoning_forma
 }
 
 static char *build_body(const struct context *ctx, const char *model, const char *cache_key,
-                        enum reasoning_format reasoning, int return_progress)
+                        enum reasoning_format reasoning, int return_progress,
+                        const char *reasoning_field)
 {
     /* Omit `tool_choice` and `parallel_tool_calls`: their defaults ("auto"
      * and true respectively) are exactly what we want, so explicitly setting
@@ -171,9 +213,10 @@ static char *build_body(const struct context *ctx, const char *model, const char
      * flag. Modern OpenAI-compatible backends (vLLM, llama.cpp server,
      * Ollama, oMLX, hosted providers) all accept it. If we ever hit a
      * backend that 400s on the unknown field, gating goes here. */
-    json_t *body = json_pack("{s:s, s:b, s:o, s:{s:b}}", "model", model, "stream", 1, "messages",
-                             build_messages(ctx->system_prompt, ctx->items, ctx->n_items),
-                             "stream_options", "include_usage", 1);
+    json_t *body = json_pack(
+        "{s:s, s:b, s:o, s:{s:b}}", "model", model, "stream", 1, "messages",
+        openai_build_messages(ctx->system_prompt, ctx->items, ctx->n_items, reasoning_field),
+        "stream_options", "include_usage", 1);
 
     if (ctx->n_tools > 0)
         json_object_set_new(body, "tools", build_tools(ctx->tools, ctx->n_tools));
@@ -227,7 +270,7 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
     struct openai *o = (struct openai *)p;
 
     char *body = build_body(ctx, model, o->send_cache_key ? o->session_id : NULL,
-                            o->reasoning_format, o->emit_progress);
+                            o->reasoning_format, o->emit_progress, o->roundtrip_reasoning_field);
     if (!body)
         return -1;
     size_t body_len = strlen(body);
@@ -337,6 +380,7 @@ static void openai_destroy(struct provider *p)
     free(o->name_buf);
     free(o->endpoint);
     free(o->session_id);
+    free(o->roundtrip_reasoning_field);
     if (o->extra_headers) {
         for (char **h = o->extra_headers; *h; h++)
             free(*h);
@@ -368,6 +412,26 @@ static char **dup_headers(const char *const *src)
         out[i] = xstrdup(src[i]);
     out[n] = NULL;
     return out;
+}
+
+/* Resolve the reasoning round-trip field. HAX_REASONING_ROUNDTRIP, when set,
+ * overrides the preset default: "off"/"0"/empty disables; "on"/"1" selects the
+ * canonical "reasoning_content"; any other value is used verbatim as the field
+ * name (e.g. "reasoning" for routers that key on that). Returns heap-owned or
+ * NULL (disabled). */
+static char *resolve_roundtrip_field(const char *preset_default)
+{
+    const char *env = getenv("HAX_REASONING_ROUNDTRIP");
+    const char *chosen = preset_default;
+    if (env) {
+        if (!*env || strcmp(env, "off") == 0 || strcmp(env, "0") == 0)
+            chosen = NULL;
+        else if (strcmp(env, "on") == 0 || strcmp(env, "1") == 0)
+            chosen = "reasoning_content";
+        else
+            chosen = env;
+    }
+    return chosen ? xstrdup(chosen) : NULL;
 }
 
 struct provider *openai_provider_new_preset(const struct openai_preset *preset)
@@ -416,6 +480,7 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
     o->endpoint = xasprintf("%s/chat/completions", o->base_url);
     o->send_cache_key = send_cache_key;
     o->emit_progress = preset->emit_progress;
+    o->roundtrip_reasoning_field = resolve_roundtrip_field(preset->roundtrip_reasoning_field);
     o->reasoning_format = preset->reasoning_format;
     o->extra_headers = dup_headers(preset->extra_headers);
     char uuid[37];

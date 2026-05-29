@@ -18,9 +18,12 @@ enum item_kind {
     ITEM_ASSISTANT_MESSAGE,
     ITEM_TOOL_CALL,
     ITEM_TOOL_RESULT,
-    /* Provider-specific blob carried verbatim across turns. Currently only
-     * the Codex Responses adapter produces these (encrypted reasoning items
-     * for chain-of-thought continuity); other providers ignore them. */
+    /* Reasoning carried across turns. Two flavors share this kind and the
+     * reasoning_* fields on struct item: the Codex Responses adapter emits
+     * an opaque encrypted blob (reasoning_json) for chain-of-thought
+     * continuity, while the openai-family adapters capture plain CoT text
+     * (reasoning_text) to replay as reasoning_content for interleaved-
+     * thinking models. Adapters that need neither simply skip this kind. */
     ITEM_REASONING,
     /* Inert marker the agent emits before each fresh model request, so
      * downstream consumers (currently the transcript renderer) can mark
@@ -42,9 +45,18 @@ struct item {
     char *tool_arguments_json;
     /* TOOL_RESULT: */
     char *output;
-    /* REASONING: full JSON object (e.g. {"type":"reasoning","id":...,
-     * "summary":[...],"encrypted_content":"..."}) ready to be re-sent. */
+    /* REASONING round-trip form (Codex): full JSON object (e.g.
+     * {"type":"reasoning","id":...,"summary":[...],"encrypted_content":...})
+     * ready to be re-sent. This is what the model needs back. */
     char *reasoning_json;
+    /* REASONING human-readable form: plain chain-of-thought text. For the
+     * openai-family it arrives via `reasoning_content`/`reasoning` and is
+     * round-tripped as reasoning_content when the provider opts in (see
+     * openai_preset.roundtrip_reasoning_field). For Codex it is the streamed
+     * summary, carried alongside reasoning_json purely for display (the JSON
+     * is what gets re-sent). An item may have either or both; the transcript
+     * prefers this text and falls back to the opaque reasoning_json tag. */
+    char *reasoning_text;
 };
 
 void item_free(struct item *it);
@@ -92,10 +104,15 @@ enum stream_event_kind {
     EV_TOOL_CALL_END,   /* args finalized */
     EV_REASONING_ITEM,  /* opaque provider blob to round-trip on next turn */
     /* The model is currently producing reasoning/thinking tokens. Carries
-     * the delta text (may be NULL if the provider only signals the state
-     * without exposing content, e.g. OpenAI o-series via Responses API).
-     * Drives UX only — the agent doesn't store this in history; reasoning
-     * round-trip goes through EV_REASONING_ITEM. */
+     * the delta text (may be NULL/empty if the provider only signals the
+     * state without exposing content, e.g. OpenAI o-series via Responses
+     * API — such state-only deltas are ignored). Drives the "thinking..."
+     * spinner, and the text is accumulated into an ITEM_REASONING
+     * (reasoning_text). For opted-in openai-family providers that text is
+     * replayed to the model as reasoning_content (see
+     * openai_preset.roundtrip_reasoning_field); Codex instead round-trips
+     * an opaque blob via EV_REASONING_ITEM and keeps the delta text only
+     * for the transcript. */
     EV_REASONING_DELTA,
     /* A streaming HTTP attempt failed with a transient error and the
      * provider is about to retry. Pure UX signal — the agent uses it

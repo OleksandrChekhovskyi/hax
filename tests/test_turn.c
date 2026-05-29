@@ -33,6 +33,12 @@ static void feed_tool_end(struct turn *t, const char *id)
     turn_on_event(&ev, t);
 }
 
+static void feed_reasoning(struct turn *t, const char *text)
+{
+    struct stream_event ev = {.kind = EV_REASONING_DELTA, .u.reasoning_delta = {.text = text}};
+    turn_on_event(&ev, t);
+}
+
 static void feed_done(struct turn *t)
 {
     struct stream_event ev = {.kind = EV_DONE, .u.done = {.stop_reason = "completed"}};
@@ -183,6 +189,154 @@ static void test_turn_find_pending(void)
     EXPECT(turn_find_pending(&t, "missing") == NULL);
     EXPECT(turn_find_pending(&t, NULL) == NULL);
 
+    turn_reset(&t);
+}
+
+/* ---------- reasoning capture ---------- */
+
+static void test_reasoning_before_tool_call(void)
+{
+    /* Reasoning deltas precede the tool call in the stream; the captured
+     * ITEM_REASONING must land before the ITEM_TOOL_CALL so build_messages
+     * can attach it as reasoning_content on the same assistant message. */
+    struct turn t;
+    turn_init(&t);
+    feed_reasoning(&t, "I should ");
+    feed_reasoning(&t, "read the file.");
+    EXPECT(t.n_items == 0); /* nothing flushed while reasoning streams */
+    feed_tool_start(&t, "c1", "read");
+    feed_tool_delta(&t, "c1", "{\"path\":\"x\"}");
+    feed_tool_end(&t, "c1");
+    feed_done(&t);
+
+    EXPECT(t.n_items == 2);
+    EXPECT(t.items[0].kind == ITEM_REASONING);
+    EXPECT_STR_EQ(t.items[0].reasoning_text, "I should read the file.");
+    EXPECT(t.items[0].reasoning_json == NULL);
+    EXPECT(t.items[1].kind == ITEM_TOOL_CALL);
+    turn_reset(&t);
+}
+
+static void test_reasoning_before_text(void)
+{
+    /* Reasoning then plain text: ITEM_REASONING precedes the assistant
+     * message. */
+    struct turn t;
+    turn_init(&t);
+    feed_reasoning(&t, "thinking...");
+    feed_text(&t, "Here is the answer.");
+    feed_done(&t);
+
+    EXPECT(t.n_items == 2);
+    EXPECT(t.items[0].kind == ITEM_REASONING);
+    EXPECT_STR_EQ(t.items[0].reasoning_text, "thinking...");
+    EXPECT(t.items[1].kind == ITEM_ASSISTANT_MESSAGE);
+    EXPECT_STR_EQ(t.items[1].text, "Here is the answer.");
+    turn_reset(&t);
+}
+
+static void test_reasoning_only_turn(void)
+{
+    /* The leak case: a turn that emits only reasoning (no content/tool
+     * calls) before DONE must still commit the reasoning to history so it
+     * can be round-tripped. */
+    struct turn t;
+    turn_init(&t);
+    feed_reasoning(&t, "all my thinking went here");
+    feed_done(&t);
+
+    EXPECT(t.n_items == 1);
+    EXPECT(t.items[0].kind == ITEM_REASONING);
+    EXPECT_STR_EQ(t.items[0].reasoning_text, "all my thinking went here");
+    turn_reset(&t);
+}
+
+static void test_reasoning_state_only_deltas_ignored(void)
+{
+    /* provider.h allows state-only reasoning events (NULL or empty text)
+     * that only nudge the spinner — they must not crash on append nor
+     * commit an empty reasoning item. */
+    struct turn t;
+    turn_init(&t);
+    feed_reasoning(&t, NULL);
+    feed_reasoning(&t, "");
+    feed_text(&t, "answer");
+    feed_done(&t);
+
+    EXPECT(t.n_items == 1);
+    EXPECT(t.items[0].kind == ITEM_ASSISTANT_MESSAGE);
+    EXPECT_STR_EQ(t.items[0].text, "answer");
+    turn_reset(&t);
+}
+
+static void test_reasoning_item_carries_delta_text(void)
+{
+    /* Codex streams the plaintext as reasoning deltas (spinner) and then a
+     * structured reasoning item (round-trip JSON). They collapse into ONE
+     * item carrying both: the JSON for re-sending, the text for display. */
+    struct turn t;
+    turn_init(&t);
+    feed_reasoning(&t, "let me think about this");
+    struct stream_event item = {.kind = EV_REASONING_ITEM,
+                                .u.reasoning_item = {.json = "{\"type\":\"reasoning\"}"}};
+    turn_on_event(&item, &t);
+    feed_text(&t, "the answer");
+    feed_done(&t);
+
+    EXPECT(t.n_items == 2);
+    EXPECT(t.items[0].kind == ITEM_REASONING);
+    EXPECT_STR_EQ(t.items[0].reasoning_json, "{\"type\":\"reasoning\"}");
+    EXPECT_STR_EQ(t.items[0].reasoning_text, "let me think about this");
+    EXPECT(t.items[1].kind == ITEM_ASSISTANT_MESSAGE);
+    EXPECT_STR_EQ(t.items[1].text, "the answer");
+    turn_reset(&t);
+}
+
+static void test_reasoning_item_without_deltas(void)
+{
+    /* A structured reasoning item with no preceding text deltas (encrypted
+     * only, no summary) carries JSON but no display text — transcript falls
+     * back to the opaque tag. */
+    struct turn t;
+    turn_init(&t);
+    struct stream_event item = {.kind = EV_REASONING_ITEM,
+                                .u.reasoning_item = {.json = "{\"type\":\"reasoning\"}"}};
+    turn_on_event(&item, &t);
+    feed_done(&t);
+
+    EXPECT(t.n_items == 1);
+    EXPECT(t.items[0].kind == ITEM_REASONING);
+    EXPECT_STR_EQ(t.items[0].reasoning_json, "{\"type\":\"reasoning\"}");
+    EXPECT(t.items[0].reasoning_text == NULL);
+    turn_reset(&t);
+}
+
+static void test_flush_reasoning_preserves_partial_on_abort(void)
+{
+    /* Abort path: reasoning streamed but the stream errored/cancelled before
+     * any text/tool event or DONE. turn_flush_reasoning commits the buffered
+     * CoT so it isn't lost (the agent then adds a standalone [interrupted]
+     * marker since no text carried it). */
+    struct turn t;
+    turn_init(&t);
+    feed_reasoning(&t, "partial reasoning before the drop");
+    EXPECT(t.in_reasoning == 1);
+    EXPECT(t.n_items == 0);
+
+    turn_flush_reasoning(&t);
+    EXPECT(t.in_reasoning == 0);
+    EXPECT(t.n_items == 1);
+    EXPECT(t.items[0].kind == ITEM_REASONING);
+    EXPECT_STR_EQ(t.items[0].reasoning_text, "partial reasoning before the drop");
+    turn_reset(&t);
+}
+
+static void test_flush_reasoning_noop_when_empty(void)
+{
+    struct turn t;
+    turn_init(&t);
+    turn_flush_reasoning(&t); /* nothing buffered */
+    EXPECT(t.n_items == 0);
     turn_reset(&t);
 }
 
@@ -354,6 +508,14 @@ int main(void)
     test_tool_call_lifecycle();
     test_text_then_tool_then_text();
     test_parallel_tool_calls();
+    test_reasoning_before_tool_call();
+    test_reasoning_before_text();
+    test_reasoning_only_turn();
+    test_reasoning_state_only_deltas_ignored();
+    test_reasoning_item_carries_delta_text();
+    test_reasoning_item_without_deltas();
+    test_flush_reasoning_preserves_partial_on_abort();
+    test_flush_reasoning_noop_when_empty();
     test_tool_call_end_without_start();
     test_tool_call_delta_unknown_id_ignored();
     test_turn_find_pending();
