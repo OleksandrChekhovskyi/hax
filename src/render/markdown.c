@@ -958,27 +958,6 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
                 return STEP_DEFER;
             open_code_fence(m);
             m->fence_open_count = cnt;
-            /* First whitespace-separated token of the info string
-             * is the language label. \r is treated as whitespace
-             * so a CRLF-terminated opener doesn't leak \r into
-             * the rendered label. */
-            size_t info = *i + cnt;
-            while (info < scan &&
-                   (w->data[info] == ' ' || w->data[info] == '\t' || w->data[info] == '\r'))
-                info++;
-            size_t lang_end = info;
-            while (lang_end < scan && w->data[lang_end] != ' ' && w->data[lang_end] != '\t' &&
-                   w->data[lang_end] != '\r')
-                lang_end++;
-            if (lang_end > info) {
-                /* Dim is already on from open_code_fence; layer cyan
-                 * on top so the label reads as dim cyan, distinct
-                 * from the dim-default code body that follows. */
-                emit_raw(m, ANSI_CYAN);
-                emit_text(m, w->data + info, lang_end - info);
-                emit_raw(m, ANSI_FG_DEFAULT);
-                emit_text(m, "\n", 1);
-            }
             *i = scan + 1; /* past the opener line's \n */
             m->at_line_start = 1;
             return STEP_ADVANCED;

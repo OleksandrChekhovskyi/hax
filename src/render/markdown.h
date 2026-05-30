@@ -6,7 +6,7 @@
 
 /* Pragmatic Markdown renderer for streaming text — NOT a CommonMark
  * implementation. Supports `**bold**`, `*italic*`/`_italic_`, `` `code` ``,
- * line-start headers (#, ##, ###), code fences (``` with language label),
+ * line-start headers (#, ##, ###), code fences (```, optional info string),
  * and `* ` list markers (preserved literally so they don't trigger italic).
  * Bold and inline-code are tracked as independent attributes, so `**`code`**`
  * (bold around inline code) renders correctly. Emphasis markers require a
@@ -14,9 +14,8 @@
  * `compile_commands.json` and arithmetic like `5*3*7` stay literal.
  *
  * Output uses real italic for emphasis, cyan for inline code, dim for code
- * fences (with the language label on its own line in italic), and bold for
- * headings. Inline-code and code-fence spans are verbatim — no nested marker
- * processing inside them.
+ * fences, and bold for headings. Inline-code and code-fence spans are
+ * verbatim — no nested marker processing inside them.
  *
  * Code-fence opener and closer follow CommonMark's count rule: a 4-backtick
  * fence isn't closed by a 3-backtick line, and a closer cannot have an info

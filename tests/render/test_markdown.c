@@ -157,26 +157,26 @@ static void test_code_fence_tab_expanded_to_four_spaces(void)
 
 static void test_code_fence_with_lang(void)
 {
-    /* Language id renders as a dim+cyan label on its own line above
-     * the content; dim is already on from the fence opener, so cyan
-     * layers on it and the body returns to dim+default fg. */
+    /* Code fence with a language identifier — only the fenced
+     * content is rendered. */
     char *got = render_one("```c\nint x;\n```\n");
-    EXPECT_STR_EQ(got, "\x1b[2m\x1b[36mc\x1b[39m\nint x;\n\x1b[22m");
+    EXPECT_STR_EQ(got, "\x1b[2mint x;\n\x1b[22m");
     free(got);
 }
 
 static void test_code_fence_lang_with_attrs(void)
 {
-    /* Info string with attributes: only the first token is the label. */
+    /* Fence opener with extra info-string tokens — the entire opener
+     * line is consumed and only fenced content is rendered. */
     char *got = render_one("```python title=\"x.py\"\nprint(1)\n```\n");
-    EXPECT_STR_EQ(got, "\x1b[2m\x1b[36mpython\x1b[39m\nprint(1)\n\x1b[22m");
+    EXPECT_STR_EQ(got, "\x1b[2mprint(1)\n\x1b[22m");
     free(got);
 }
 
 static void test_code_fence_lang_split_across_feeds(void)
 {
-    /* Opener line spans feeds — the opener defers until we have \n,
-     * so the language is captured cleanly on the second feed. */
+    /* Fence opener spans feeds — the opener defers until we have \n,
+     * so the fence opens correctly on the second feed. */
     struct buf out;
     buf_init(&out);
     struct md_renderer *m = md_new(capture, &out, 0);
@@ -185,7 +185,7 @@ static void test_code_fence_lang_split_across_feeds(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "\x1b[2m\x1b[36mpython\x1b[39m\nint x;\n\x1b[22m");
+    EXPECT_STR_EQ(s, "\x1b[2mint x;\n\x1b[22m");
     free(s);
 }
 
@@ -205,8 +205,7 @@ static void test_code_fence_inner_with_info_is_content(void)
      * scenario from the markdown-rendering-demo trace. */
     const char *in = "```markdown\n# Title\n```python\ndef f(): pass\n```\n";
     char *got = render_one(in);
-    const char *want = "\x1b[2m\x1b[36mmarkdown\x1b[39m\n"
-                       "# Title\n```python\ndef f(): pass\n\x1b[22m";
+    const char *want = "\x1b[2m# Title\n```python\ndef f(): pass\n\x1b[22m";
     EXPECT_STR_EQ(got, want);
     free(got);
 }
@@ -251,10 +250,10 @@ static void test_code_fence_crlf_closer(void)
 
 static void test_code_fence_crlf_lang(void)
 {
-    /* CRLF on the opener line — \r must not leak into the language
-     * label. */
+    /* CRLF on the opener line — \r before \n is treated as whitespace
+     * and does not leak into rendered output. */
     char *got = render_one("```python\r\nx = 1\r\n```\r\n");
-    EXPECT_STR_EQ(got, "\x1b[2m\x1b[36mpython\x1b[39m\nx = 1\r\n\x1b[22m");
+    EXPECT_STR_EQ(got, "\x1b[2mx = 1\r\n\x1b[22m");
     free(got);
 }
 
@@ -564,10 +563,10 @@ static void test_underscore_with_space_right(void)
 
 static void test_fence_long_info_split_across_feeds(void)
 {
-    /* Opener line longer than the old TAIL_CAP=32, split mid-info. The
-     * deferred opener must be buffered intact so the fence opens cleanly
-     * once the \n arrives — not flushed as plain text, which would let
-     * the closing ``` start a new empty fence. */
+    /* Fence opener split mid-info across feeds — the deferred opener
+     * must be buffered intact so the fence opens cleanly once the \n
+     * arrives, not flushed as plain text (which would let the closing
+     * ``` start a new empty fence). */
     struct buf out;
     buf_init(&out);
     struct md_renderer *m = md_new(capture, &out, 0);
@@ -576,7 +575,7 @@ static void test_fence_long_info_split_across_feeds(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "\x1b[2m\x1b[36mpython\x1b[39m\nx = 1\n\x1b[22m");
+    EXPECT_STR_EQ(s, "\x1b[2mx = 1\n\x1b[22m");
     free(s);
 }
 
