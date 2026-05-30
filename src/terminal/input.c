@@ -46,6 +46,11 @@ static int editor_cols(void)
     return cols;
 }
 
+int input_display_cols(void)
+{
+    return editor_cols();
+}
+
 /* ---------------- raw mode ---------------- */
 
 static void raw_on(struct input *in)
@@ -405,26 +410,29 @@ static void submitted_emit(const struct input_render_event *ev, void *user)
     }
 }
 
+void input_render_user_message(const char *text, size_t len, int term_cols)
+{
+    /* Cell width of "▌ ": one box-drawing glyph plus a space. The walker
+     * indents continuation rows to this column so wrapped content aligns
+     * under the first row's text. */
+    const int bar_col = 2;
+    fputs(ANSI_BRIGHT_MAGENTA "▌ ", stdout);
+    input_core_render(text, len, /*cursor=*/0, bar_col, bar_col, term_cols, submitted_emit, NULL,
+                      NULL);
+    fputs(ANSI_FG_DEFAULT "\r\n", stdout);
+    fflush(stdout);
+}
+
 /* Erase the edit area and re-emit the buffer with a magenta stripe and
  * magenta body so submitted user messages stay clearly marked in the
- * scrollback against agent output. Word-wrap runs at the strip-width
- * indent so wrapped rows keep the same alignment as the first row and
- * never lose the strip glyph. */
+ * scrollback against agent output. */
 static void render_submitted(struct input *in)
 {
     if (in->last_cursor_row > 0)
         printf("\x1b[%dA", in->last_cursor_row);
     fputs("\r\x1b[J", stdout);
 
-    /* Cell width of "▌ ": one box-drawing glyph plus a space. The
-     * walker indents continuation rows to this column so wrapped
-     * content aligns under the first row's text. */
-    const int bar_col = 2;
-    fputs(ANSI_BRIGHT_MAGENTA "▌ ", stdout);
-    input_core_render(in->buf, in->len, /*cursor=*/0, bar_col, bar_col, in->term_cols,
-                      submitted_emit, NULL, NULL);
-    fputs(ANSI_FG_DEFAULT "\r\n", stdout);
-    fflush(stdout);
+    input_render_user_message(in->buf, in->len, in->term_cols);
     in->last_cursor_row = 0;
     in->last_rows = 0;
 }

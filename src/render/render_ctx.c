@@ -156,6 +156,15 @@ void render_text_chunk(struct render_ctx *r, const char *s, size_t n)
     r->last_text_at = monotonic_ms();
 }
 
+void render_text_delta(struct render_ctx *r, const char *s, size_t n)
+{
+    disp_first_delta_strip(&r->disp, &s, &n);
+    if (n == 0)
+        return;
+    render_transition(r, RS_TEXT);
+    render_text_chunk(r, s, n);
+}
+
 void update_retry_label(struct render_ctx *r)
 {
     long remaining = r->retry_deadline_at - monotonic_ms();

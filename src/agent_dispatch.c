@@ -353,6 +353,62 @@ struct item dispatch_tool_refused(struct render_ctx *r, const struct item *call)
     };
 }
 
+/* Build the dim arg shown after the tag in a collapsed (replayed) tool
+ * line: the tool's declared display_arg value (read/edit/write → path,
+ * bash → command), plus read's ":N-M" range suffix when present,
+ * flattened to one row and truncated to `budget` cells. Returns malloc'd
+ * (caller frees) or NULL when there's nothing useful to show. */
+static char *collapsed_arg(const struct tool *t, const struct item *call, int budget)
+{
+    if (!t || !t->def.display_arg || !call->tool_arguments_json)
+        return NULL;
+    json_t *root = json_loads(call->tool_arguments_json, 0, NULL);
+    const char *val = root ? json_string_value(json_object_get(root, t->def.display_arg)) : NULL;
+    char *out = NULL;
+    if (val) {
+        char *extra =
+            t->format_display_extra ? t->format_display_extra(call->tool_arguments_json) : NULL;
+        char *full = (extra && *extra) ? xasprintf("%s%s", val, extra) : xstrdup(val);
+        free(extra);
+        char *flat = flatten_for_display(full);
+        free(full);
+        out = truncate_for_display(flat, (size_t)(budget < 8 ? 8 : budget));
+        free(flat);
+    }
+    if (root)
+        json_decref(root);
+    return out;
+}
+
+void render_collapsed_tool_call(struct render_ctx *r, const struct item *call)
+{
+    struct disp *d = &r->disp;
+    const char *name = call->tool_name ? call->tool_name : "?";
+    /* Dim throughout so replayed calls recede as past context. Cyan tag
+     * keeps it scannable; ANSI_FG_DEFAULT drops the cyan but leaves DIM
+     * in effect for the arg (ANSI_RESET would clear dim too). */
+    disp_raw(ANSI_DIM ANSI_CYAN);
+    disp_printf(d, "[%s]", name);
+    disp_raw(ANSI_FG_DEFAULT);
+
+    int tag_cost = 2 + (int)strlen(name) + 1; /* "[name] " */
+    const struct tool *t = call->tool_name ? find_tool(call->tool_name) : NULL;
+    char *arg = collapsed_arg(t, call, display_width() - tag_cost - 2);
+    if (arg && *arg) {
+        disp_putc(d, ' ');
+        disp_write(d, arg, strlen(arg));
+    }
+    free(arg);
+    disp_raw(ANSI_RESET);
+    disp_putc(d, '\n');
+    /* Commit the line's newline (like display_tool_header) so the cursor
+     * sits at column 0 of a fresh row and disp's trail accounting matches
+     * the terminal — otherwise RS_CLUSTER's close-half assumes a fresh row
+     * that isn't there and the next block's separator collapses to no gap. */
+    disp_emit_held(d);
+    fflush(stdout);
+}
+
 /* Silent dispatch: header-only, inline spinner, no preview. Coalesces
  * with the previous quiet line when the prior tool was the same kind
  * (currently only `read` chains visually). Output is captured for

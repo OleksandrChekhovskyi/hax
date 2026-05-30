@@ -96,6 +96,16 @@ void render_open_block(struct render_ctx *r);
  * can surface the inline spinner if the model goes quiet. */
 void render_text_chunk(struct render_ctx *r, const char *s, size_t n);
 
+/* Render a chunk of assistant answer text into RS_TEXT: peek-strip leading
+ * newlines on the first chunk of the block (disp tracks "first" via
+ * saw_text, which the caller clears per stream/item) so a provider's
+ * trailing-NL convention doesn't open a stray blank line above the answer,
+ * then transition to RS_TEXT and feed the rest. A chunk that is all leading
+ * newlines collapses to nothing (no transition — the spinner stays up).
+ * Shared by the live text-delta handler and resume replay so both strip
+ * identically. */
+void render_text_delta(struct render_ctx *r, const char *s, size_t n);
+
 /* Paint the spinner with the retry countdown label. Called on EV_RETRY
  * (so the user sees the new state immediately) and from the stream tick
  * (so the seconds count visibly decreases during the backoff sleep). */

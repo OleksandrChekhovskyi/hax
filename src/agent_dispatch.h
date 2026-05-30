@@ -27,4 +27,13 @@ struct item dispatch_tool_skipped(struct render_ctx *r, const struct item *call)
  * header and feeds back an error result the model can recover from. */
 struct item dispatch_tool_refused(struct render_ctx *r, const struct item *call);
 
+/* Render a collapsed, dim one-line view of a tool call — "[name] arg",
+ * no output preview, no spinner, no execution. Used by history replay
+ * (resume), where the tool can't be re-run and its live preview isn't
+ * reconstructable from stored items; the header alone is enough
+ * orientation. Writes a single newline-terminated line into the current
+ * cursor position — the caller owns block separation (replay groups
+ * consecutive calls under RS_CLUSTER so they stack tight). */
+void render_collapsed_tool_call(struct render_ctx *r, const struct item *call);
+
 #endif /* HAX_AGENT_DISPATCH_H */

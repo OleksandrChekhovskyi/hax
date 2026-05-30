@@ -2,6 +2,8 @@
 #ifndef HAX_INPUT_H
 #define HAX_INPUT_H
 
+#include <stddef.h> /* size_t */
+
 /*
  * Multi-line line editor with in-memory history.
  *
@@ -85,5 +87,20 @@ void input_set_transcript_cb(struct input *in, void (*fn)(void *user), void *use
  * above remains the testable seam and the hook for a future
  * --history-file override. */
 void input_history_open_default(struct input *in);
+
+/* Render `text` (length `len`) as a committed user message — a bright-
+ * magenta "▌ " stripe (repeated at every wrapped row) and magenta body,
+ * word-wrapped at the stripe indent to `term_cols`. Writes directly to
+ * stdout and leaves the cursor at column 0 of a fresh row. The editor
+ * uses it to repaint a submitted line; history replay (resume) uses it so
+ * a restored user message looks byte-for-byte like one just typed. Does
+ * not erase any prior content — the caller positions the cursor. */
+void input_render_user_message(const char *text, size_t len, int term_cols);
+
+/* The column budget the editor lays user input out within: display_width()
+ * (honoring HAX_DISPLAY_WIDTH) clamped to the real tty width. Exposed so a
+ * caller passing a width to input_render_user_message (e.g. history replay)
+ * can match the editor's wrapping exactly. */
+int input_display_cols(void);
 
 #endif /* HAX_INPUT_H */

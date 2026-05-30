@@ -7,6 +7,7 @@
 
 struct transcript_log;
 struct session_log;
+struct render_ctx;
 
 /* Live REPL state owned by agent_run, exposed to slash handlers (and
  * any future callers that need to mutate the conversation) so a single
@@ -20,6 +21,11 @@ struct agent_state {
     /* Append-only session record for resume; NULL when persistence is
      * disabled (HAX_NO_SESSION) or unavailable. */
     struct session_log *slog;
+    /* The live render state, so mid-session handlers (e.g. /resume) can
+     * drive the same display pipeline agent_run uses — replaying the
+     * restored conversation through it. Points at agent_run's stack
+     * frame; never heap-owned. */
+    struct render_ctx *r;
 };
 
 int agent_run(struct provider *p, const struct hax_opts *opts);
@@ -40,10 +46,11 @@ void agent_new_conversation(struct agent_state *st);
 
 /* Replace the live conversation with the one stored at `path`: load its
  * items into history, continue appending to that same session file, mirror
- * it into the HAX_TRANSCRIPT log, and print a short "resumed" banner with
- * the last prompt for orientation. The full restored history is reachable
- * via Ctrl-T rather than replayed inline. Used by the /resume command. A
- * load failure is reported and leaves the current conversation untouched. */
+ * it into the HAX_TRANSCRIPT log, and replay the last user turn (a dim
+ * "resumed" rule, then the final exchange rendered live) for orientation.
+ * Earlier history is reachable via Ctrl-T rather than replayed inline.
+ * Used by the /resume command. A load failure is reported and leaves the
+ * current conversation untouched. */
 void agent_resume_session(struct agent_state *st, const char *path);
 
 #endif /* HAX_AGENT_H */
