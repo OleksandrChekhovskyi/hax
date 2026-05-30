@@ -8,6 +8,18 @@
 #include "util.h"
 
 /*
+ * Terminology: a bare "turn" is ONE model round-trip — a single provider
+ * stream() call producing one assistant response (text and/or a batch of tool
+ * calls). A "user turn" is the larger unit: one user prompt plus every turn it
+ * spawns (the model calls tools, we run them and stream again, until a turn
+ * comes back with no tool calls), so one user turn contains one or more turns.
+ * ITEM_TURN_BOUNDARY marks the seam between consecutive turns; the per-user-
+ * turn usage summary in agent.c aggregates token counts across them. The bare
+ * "turn" = round-trip sense matches the Anthropic / OpenAI agent SDKs
+ * (maxTurns / max_turns). "turn" is overloaded in the wider field — alone it
+ * often means a whole user→assistant exchange — so hax keeps that broader
+ * sense behind the qualified "user turn" and never bare "turn".
+ *
  * Assembles one streamed model response into a list of items ready to be
  * appended to conversation history. Pure state — no I/O. Agent drives this
  * alongside display logic so the two stay decoupled.

@@ -53,6 +53,16 @@ hax is a single-binary REPL:
 `input → build context → provider streams events → assemble turn → dispatch tools → loop`.
 Everything funnels through small, stable interfaces in `src/provider.h` and `src/tool.h`.
 
+**Terminology:** a bare **turn** is ONE model round-trip — a single `stream()` call
+producing one assistant response (text and/or a batch of tool calls). A **user turn** is the
+larger unit: one user prompt plus every turn it spawns (call tools → run them → stream again
+→ …) until a turn comes back with no tool calls — so a user turn contains one or more turns.
+The bare-turn sense follows the Anthropic / OpenAI agent SDKs (`maxTurns` / `max_turns`).
+"turn" is overloaded in the wider field — alone it often means a whole user→assistant
+exchange — so hax keeps that broader meaning behind the qualified **"user turn"** and never
+bare "turn." `ITEM_TURN_BOUNDARY` marks the seam between consecutive turns; the per-user-turn
+usage summary aggregates across them (see `src/turn.{c,h}`).
+
 **`struct provider` (provider.h)** is the multi-provider seam. Each adapter exposes
 `stream(provider, context, model, cb, user, tick, tick_user)` that drives an SSE response and
 emits `struct stream_event` (text deltas, tool-call start/delta/end, reasoning items, done
@@ -60,7 +70,7 @@ with usage, error). Adapters own their native SSE parsing and translate to the u
 vocabulary; the agent never sees provider-specific JSON. The `tick` slot threads through to
 `http_sse_post` so the agent's idle/cancel bookkeeping rides the same callback. The shared `context_limit` atomic is
 an optional, late-fill slot for provider-owned context-window probes; the agent reads it when
-rendering the per-turn `%`-of-context display, after honoring `HAX_CONTEXT_LIMIT`.
+rendering the per-user-turn `%`-of-context display, after honoring `HAX_CONTEXT_LIMIT`.
 
 Adapters live in `src/providers/`. Where a provider has a non-trivial SSE-event-to-
 `stream_event` translation, the pure translation logic is split into a sibling

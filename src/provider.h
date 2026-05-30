@@ -9,7 +9,7 @@
 
 /*
  * A flat, provider-agnostic view of a conversation. Each item is one thing:
- * a user turn, an assistant text turn, a tool call, or a tool result.
+ * a user message, an assistant message, a tool call, or a tool result.
  * This maps cleanly to the OpenAI Responses API "input" array, and with a
  * small amount of grouping in the adapter, to Anthropic Messages too.
  */
@@ -86,7 +86,7 @@ struct context {
  * this provider/backend" — many OpenAI-compatible servers don't surface
  * cached_tokens, and some omit usage entirely. Callers must check for -1
  * before formatting. input_tokens is everything we just sent (system +
- * full history + new user turn); output_tokens is what was just generated.
+ * full history + the new user message); output_tokens is what was just generated.
  * "context used" for display = input + output, since both will be in the
  * next request's input. cached_tokens is a subset of input_tokens (prefix
  * cache hit) — informational, not additive. */

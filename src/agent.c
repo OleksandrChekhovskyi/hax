@@ -261,7 +261,7 @@ static long context_limit(const struct provider *p)
  *
  * ctx and cached reflect the last response (= current window state — each
  * call's input subsumes the prior call's prefix, so the latest values are
- * the right snapshot). out is a running sum across the turn's model calls,
+ * the right snapshot). out is a running sum across the user turn's model calls,
  * answering "how many tokens did this prompt cost in generation". Each
  * value is -1 when the underlying counts weren't reported by the backend;
  * the section is then skipped rather than rendered with a misleading zero. */
@@ -742,9 +742,9 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
     /* The render state in r (state + cluster sub-state) lives across
      * the inner loop so RS_CLUSTER can span consecutive silent tool
      * calls (read/grep/find...) without intervening blank lines.
-     * End-of-turn cleanup unconditionally transitions back to RS_IDLE,
-     * so leftover state from a prior turn is impossible by
-     * construction. */
+     * End-of-user-turn cleanup unconditionally transitions back to
+     * RS_IDLE, so leftover state from a prior user turn is impossible
+     * by construction. */
 
     for (;;) {
         disp_block_separator(&r.disp);
@@ -780,11 +780,12 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
 
         /* Mark the turn boundary just before the user message, not just
          * before the model request that consumes it. The transcript
-         * renderer treats a TURN_BOUNDARY as the start-of-turn rule;
-         * placing it here puts the user's input under its own turn
-         * header (turn 1 = user types + first model response). The
-         * inner loop's subsequent iterations insert their own
-         * boundaries for follow-up round-trips after tool dispatch. */
+         * renderer treats a TURN_BOUNDARY as a start-of-turn rule;
+         * placing it ahead of the user message puts the first round-trip's
+         * header above the triggering user input, so the prompt and the
+         * response it produced read as one group. The inner loop's
+         * subsequent iterations insert their own boundaries for follow-up
+         * round-trips after tool dispatch. */
         agent_session_add_user(&sess, line);
         free(line);
         /* Flush the prompt to the log immediately, before we hand
@@ -801,13 +802,13 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
          * out is a running sum so the summary reflects total tokens
          * generated in response to this prompt. -1 means "no call reported
          * this number yet". */
-        long turn_ctx = -1, turn_out = -1, turn_cached = -1;
-        int turn_errored = 0;
-        int turn_interrupted = 0;
+        long user_turn_ctx = -1, user_turn_out = -1, user_turn_cached = -1;
+        int user_turn_errored = 0;
+        int user_turn_interrupted = 0;
 
         /* Arm the watcher for the duration of the inner loop — Esc from
          * here on aborts the stream or running tool. Cleared first so a
-         * stray Esc from a previous turn (e.g. user typed Esc during
+         * stray Esc from a previous user turn (e.g. user typed Esc during
          * readline editing) doesn't auto-cancel this one. */
         interrupt_clear();
         interrupt_arm();
@@ -879,7 +880,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
                  * path's later append doesn't run on this branch and
                  * post-mortem readers want to see how far we got. */
                 flush_logs(tlog, state.slog, sess.items, sess.n_items);
-                turn_errored = 1;
+                user_turn_errored = 1;
                 break;
             }
 
@@ -892,11 +893,11 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
             int interrupted = interrupt_requested();
 
             if (ec.usage.input_tokens >= 0 && ec.usage.output_tokens >= 0)
-                turn_ctx = ec.usage.input_tokens + ec.usage.output_tokens;
+                user_turn_ctx = ec.usage.input_tokens + ec.usage.output_tokens;
             if (ec.usage.output_tokens >= 0)
-                turn_out = (turn_out < 0 ? 0 : turn_out) + ec.usage.output_tokens;
+                user_turn_out = (user_turn_out < 0 ? 0 : user_turn_out) + ec.usage.output_tokens;
             if (ec.usage.cached_tokens >= 0)
-                turn_cached = ec.usage.cached_tokens;
+                user_turn_cached = ec.usage.cached_tokens;
 
             if (interrupted) {
                 /* User pressed Esc. Same shape-history-as-aborted dance
@@ -916,7 +917,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
                                      .text = xstrdup(INTERRUPT_MARKER),
                                  });
                 }
-                turn_interrupted = 1;
+                user_turn_interrupted = 1;
                 break;
             }
 
@@ -988,13 +989,13 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
                                      .text = xstrdup(INTERRUPT_MARKER),
                                  });
                 }
-                turn_interrupted = 1;
+                user_turn_interrupted = 1;
                 break;
             }
         }
         interrupt_disarm();
 
-        /* Close any open render state before post-turn output — a
+        /* Close any open render state before post-user-turn output — a
          * still-running cluster spinner racing with notify_attention's
          * OSC-9 would corrupt the escape sequence. */
         render_transition(&r, RS_IDLE);
@@ -1005,7 +1006,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
          * when there are no new items — _append no-ops on n_items <= n_written. */
         flush_logs(tlog, state.slog, sess.items, sess.n_items);
 
-        if (turn_interrupted) {
+        if (user_turn_interrupted) {
             render_open_block(&r);
             disp_raw(ANSI_DIM);
             disp_printf(&r.disp, "%s", INTERRUPT_MARKER);
@@ -1014,15 +1015,15 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
             fflush(stdout);
         }
 
-        if (!turn_errored)
-            display_usage(&r, p, turn_ctx, turn_out, turn_cached);
+        if (!user_turn_errored)
+            display_usage(&r, p, user_turn_ctx, user_turn_out, user_turn_cached);
 
         /* Ping the terminal so the user gets a notification / dock
          * bounce when hax is back to idle. Skipped on Esc-interrupt
          * since the user just pressed a key — they're already at the
-         * terminal. Errored turns still notify: the user needs to
+         * terminal. Errored user turns still notify: the user needs to
          * know the request bounced. */
-        if (!turn_interrupted)
+        if (!user_turn_interrupted)
             notify_attention();
     }
 

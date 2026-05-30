@@ -73,7 +73,7 @@ Pick a provider with `HAX_PROVIDER` (default `codex`). Supported values:
 Reuses the OAuth token that the official `codex` CLI stores in `~/.codex/auth.json`. If the
 token is expired, run `codex` once to refresh it, then re-run `hax`. At startup, hax also
 probes ChatGPT's `/backend-api/codex/models` catalog in the background to auto-detect the
-chosen model's context window for the per-turn `%`-of-context display; `HAX_CONTEXT_LIMIT`
+chosen model's context window for the per-user-turn `%`-of-context display; `HAX_CONTEXT_LIMIT`
 still wins when set.
 
 ```sh
@@ -111,7 +111,7 @@ HAX_MODEL=Qwen3.6-35B-A3B-8bit \
 Convenience preset for a local `llama-server`. Defaults to `http://127.0.0.1:8080/v1`; set
 `HAX_LLAMACPP_PORT` for a different port, or `HAX_OPENAI_BASE_URL` to override the URL
 entirely. Auto-discovers the loaded model (`/v1/models`) and context window (`/props`), so
-`HAX_MODEL` is filled for you when unset and the per-turn `%`-of-context display lights up
+`HAX_MODEL` is filled for you when unset and the per-user-turn `%`-of-context display lights up
 without manual configuration:
 
 ```sh
@@ -133,7 +133,7 @@ entirely. `HAX_MODEL` is required — ollama's chat endpoint rejects requests wi
 and no signal it exposes reliably picks the right model (`/api/ps` decays after
 `OLLAMA_KEEP_ALIVE`, `/v1/models` is just the pulled-model catalog), so hax asks once
 rather than guess. In the background, hax probes `/api/show` for the model's training
-context window (`model_info["<arch>.context_length"]`) so the per-turn
+context window (`model_info["<arch>.context_length"]`) so the per-user-turn
 `%`-of-context display lights up without manual configuration:
 
 ```sh
@@ -152,7 +152,7 @@ match so the percentage stays accurate.
 
 Reads `HAX_OPENAI_API_KEY` (preferred) or `OPENROUTER_API_KEY`. Probes
 `/api/v1/models/{model}/endpoints` in the background to auto-detect the chosen model's
-context window (used for the per-turn `%`-of-context display). Always sends `X-Title: hax` for
+context window (used for the per-user-turn `%`-of-context display). Always sends `X-Title: hax` for
 attribution on OpenRouter's leaderboards (override with `HAX_OPENROUTER_TITLE`); add an
 `HTTP-Referer` via `HAX_OPENROUTER_REFERER` if you want one.
 
@@ -275,7 +275,7 @@ Pair with `scripts/stream_demo.py` (`short`, `long`, `slow`, `burst`, `ansi`, `b
 ### Display & observability
 
 - `HAX_CONTEXT_LIMIT` — optional manual override for the model's context window, used to
-  show a percentage on the per-turn usage line. Accepts a plain number or a `k`/`m` suffix
+  show a percentage on the per-user-turn usage line. Accepts a plain number or a `k`/`m` suffix
   (1024-base): `256k`, `128K`, `1m`, `262144`. Auto-detected for `codex` (from the catalog's
   `context_window`), `llama.cpp` (from `/props`), `ollama` (from `/api/show`'s
   `model_info["<arch>.context_length"]`), and `openrouter` (from the per-model

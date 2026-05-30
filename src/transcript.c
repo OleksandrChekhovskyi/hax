@@ -118,7 +118,7 @@ static void ensure_newline(FILE *out, const char *s)
 /* User messages: section() rule with the "user" label, then the body
  * in bright magenta. The transcript is intentionally raw — no wrap,
  * no markdown, no per-line prefix — so the section rule plays the
- * same role for user turns that the `── assistant ──` / `── tool
+ * same role for user messages that the `── assistant ──` / `── tool
  * result ──` rules play for the model side. A per-line `▌ ` strip
  * would break visually whenever a long line gets soft-wrapped by the
  * pager, so the rule is the only anchor; color carries the rest. */
