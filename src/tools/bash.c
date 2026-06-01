@@ -368,17 +368,110 @@ static void format_byte_size(char *buf, size_t bufsize, size_t bytes)
         snprintf(buf, bufsize, "%zuM", (bytes + 512L * 1024) / (1024L * 1024));
 }
 
+/* The truncation budget (output_cap_bytes() / OUTPUT_CAP_LINES) is split
+ * between a head slice and a tail slice so that output whose summary sits
+ * at the top — `git show --stat`, `ls`, `git log`, build banners — keeps
+ * that summary instead of losing it to tail-only truncation, while the
+ * trailing payload (errors, results) still survives. The split is
+ * asymmetric: heads are short summaries, tails carry the meat, so the head
+ * gets 1/HEAD_DIVISOR of each budget and the tail the rest. The head+tail
+ * total stays within the original caps, so context cost is unchanged. */
+#define OUTPUT_HEAD_DIVISOR 8
+
+/* cap_line_lengths + sanitize_utf8 a raw segment and append it to `body`.
+ * cap_line_lengths cuts over-long lines at a byte boundary that can split a
+ * UTF-8 codepoint; sanitize_utf8 then repairs the orphaned bytes so the
+ * result is always valid UTF-8 (jansson rejects invalid UTF-8 in
+ * json_string). Shared by the head, tail, and whole-output paths. */
+static void append_clean(struct buf *body, const char *data, size_t len)
+{
+    size_t capped_len = 0;
+    char *capped = cap_line_lengths(data ? data : "", len, OUTPUT_CAP_LINE_WIDTH, &capped_len);
+    char *clean = sanitize_utf8(capped, capped_len);
+    free(capped);
+    buf_append_str(body, clean);
+    free(clean);
+}
+
+/* Read the first `cap_bytes` of the spilled file (but never past
+ * `limit_off`, where the tail window begins, so the head and tail windows
+ * can never overlap), drop any trailing partial line so the head ends on a
+ * line boundary, then keep at most `cap_lines` leading lines. If the window
+ * holds no newline at all (one line longer than the head budget) we keep
+ * nothing and let the caller fall back to tail-only — splitting a single
+ * logical line across the gap would only confuse the model. Reports kept
+ * bytes/lines via out params. */
+static int read_head_capped(int fd, size_t cap_bytes, size_t cap_lines, off_t limit_off,
+                            struct buf *out, size_t *kept_bytes_out, size_t *kept_lines_out)
+{
+    *kept_bytes_out = 0;
+    *kept_lines_out = 0;
+    size_t want = cap_bytes;
+    if (limit_off >= 0 && (off_t)want > limit_off)
+        want = (size_t)limit_off;
+    if (want == 0)
+        return 0;
+    if (lseek(fd, 0, SEEK_SET) < 0)
+        return -1;
+
+    char chunk[8192];
+    while (out->len < want) {
+        size_t need = want - out->len;
+        ssize_t r = read(fd, chunk, need < sizeof(chunk) ? need : sizeof(chunk));
+        if (r < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (r == 0)
+            break;
+        buf_append(out, chunk, (size_t)r);
+    }
+
+    /* Trim the trailing partial line: keep through the last '\n'. With no
+     * newline the whole window is one unterminated line — keep nothing. */
+    size_t last_nl = out->len;
+    while (last_nl > 0 && out->data[last_nl - 1] != '\n')
+        last_nl--;
+    if (last_nl == 0) {
+        out->len = 0;
+        if (out->data)
+            out->data[0] = '\0';
+        return 0;
+    }
+    out->len = last_nl;
+
+    /* Keep at most cap_lines leading lines (each ends in '\n' now). */
+    size_t lines = count_newlines(out->data, out->len);
+    if (lines > cap_lines) {
+        size_t seen = 0, i = 0;
+        while (i < out->len && seen < cap_lines) {
+            if (out->data[i] == '\n')
+                seen++;
+            i++;
+        }
+        out->len = i;
+        lines = cap_lines;
+    }
+    if (out->data)
+        out->data[out->len] = '\0';
+
+    *kept_bytes_out = out->len;
+    *kept_lines_out = lines;
+    return 0;
+}
+
 /* Read the last `cap_bytes` of the spilled file into `out`, then align
  * the front to a line boundary so we never start mid-line — except when
  * the entire window contains no newline (a single-line output > cap),
  * in which case we keep the bytes raw and let cap_line_lengths emit the
  * inline elision marker downstream. Then trim the front so at most
- * OUTPUT_CAP_LINES newline-terminated lines remain. Reports the kept-
+ * `cap_lines` newline-terminated lines remain. Reports the kept-
  * byte and kept-line counts via out params (not derivable from `out->len`
  * alone because the caller wants pre-cap_line_lengths/pre-sanitize
  * numbers in the hint). */
-static int read_tail_capped(int fd, size_t total_bytes, size_t cap_bytes, struct buf *out,
-                            size_t *kept_bytes_out, size_t *kept_lines_out)
+static int read_tail_capped(int fd, size_t total_bytes, size_t cap_bytes, size_t cap_lines,
+                            struct buf *out, size_t *kept_bytes_out, size_t *kept_lines_out)
 {
     size_t want = total_bytes < cap_bytes ? total_bytes : cap_bytes;
     off_t start = (off_t)(total_bytes - want);
@@ -441,14 +534,14 @@ static int read_tail_capped(int fd, size_t total_bytes, size_t cap_bytes, struct
         }
     }
 
-    /* Trim the front so at most OUTPUT_CAP_LINES lines remain. Count
+    /* Trim the front so at most `cap_lines` lines remain. Count
      * newlines in the buffer; if the count is over budget, advance past
      * the first (count - cap) newlines and keep the rest. */
     size_t total_lines = count_newlines(out->data ? out->data : "", out->len);
     /* A trailing line without a final newline counts too. */
     size_t lines_in_buf = total_lines + (out->len > 0 && out->data[out->len - 1] != '\n' ? 1 : 0);
-    if (lines_in_buf > OUTPUT_CAP_LINES) {
-        size_t to_skip = lines_in_buf - OUTPUT_CAP_LINES;
+    if (lines_in_buf > cap_lines) {
+        size_t to_skip = lines_in_buf - cap_lines;
         size_t i = 0;
         while (to_skip > 0 && i < out->len) {
             if (out->data[i] == '\n')
@@ -459,7 +552,7 @@ static int read_tail_capped(int fd, size_t total_bytes, size_t cap_bytes, struct
         out->len -= i;
         if (out->data)
             out->data[out->len] = '\0';
-        lines_in_buf = OUTPUT_CAP_LINES;
+        lines_in_buf = cap_lines;
     }
 
     *kept_bytes_out = out->len;
@@ -496,166 +589,191 @@ static void append_footers(struct buf *out, int timed_out, int interrupted, long
     }
 }
 
-/* Truncation summary — computed in build_body_and_trunc and passed
- * forward so stream_suffix can render the same marker live.
- * truncated=0 means no marker is emitted. path is borrowed (NULL when
- * capture didn't preserve a file). */
-struct trunc_info {
-    int truncated;
-    size_t kept_bytes;
-    size_t kept_lines;
-    size_t total_bytes;
-    size_t total_lines;
-    const char *path;
-};
-
 /* Append the trailing portion that follows whatever body has already
  * been written to `out`:
- *   - binary marker (when has_nul; takes precedence over truncated)
- *   - "[output truncated: ...; full output saved to PATH]" (non-binary
- *     case, bytes were dropped)
+ *   - binary marker (when has_nul)
  *   - exit/timeout/interrupt footer
  *   - "(no output)" fallback when nothing else was appended in this
  *     call AND no body was produced (body_present=0)
  *
- * Used by both the canonical-history assembly (build_body_and_trunc +
- * the run_shell tail) and the live-display path (stream_suffix). When
- * for_display=1 the truncated marker is shortened to a single sub-100-
- * col line: bytes and the saved-to path are dropped because the human
- * scrolling the preview can't act on them (only the model can re-read
- * the spilled file). Footers and "(no output)" are identical in both
- * forms — they're already short and equally useful either way. */
-static void append_run_suffix(struct buf *out, const struct trunc_info *t, int has_nul,
-                              int body_present, int timed_out, int interrupted, long timeout_ms,
-                              int status, int for_display)
+ * The truncation marker is not emitted here. The model gets it embedded in
+ * its body by build_body_and_trunc (a gap marker between the head and tail
+ * slices, or an end marker in the tail-only fallback). The live display
+ * conveys truncation through the renderer's own head/tail elision marker
+ * ("... (N more lines) ..."), so a second marker here would be redundant
+ * and would report a different (display-row vs model-line) count. That
+ * leaves this suffix byte-identical for the canonical-history and
+ * live-display paths. `total_bytes` is only consulted for the binary
+ * marker. */
+static void append_run_suffix(struct buf *out, size_t total_bytes, int has_nul, int body_present,
+                              int timed_out, int interrupted, long timeout_ms, int status)
 {
     size_t before = out->len;
     if (has_nul) {
         char total_b[16];
-        format_byte_size(total_b, sizeof(total_b), t->total_bytes);
+        format_byte_size(total_b, sizeof(total_b), total_bytes);
         char tmp[64];
         snprintf(tmp, sizeof(tmp), "[binary output suppressed: %s]", total_b);
         buf_append_str(out, tmp);
-    } else if (t->truncated && for_display) {
-        char *marker =
-            xasprintf("\n[output truncated: last %zu of %zu lines]", t->kept_lines, t->total_lines);
-        buf_append_str(out, marker);
-        free(marker);
-    } else if (t->truncated) {
-        char kept_b[16], total_b[16];
-        format_byte_size(kept_b, sizeof(kept_b), t->kept_bytes);
-        format_byte_size(total_b, sizeof(total_b), t->total_bytes);
-        /* Allocate dynamically — t->path can be arbitrarily long when
-         * the user has a deep $TMPDIR, and a fixed-size buffer would
-         * silently truncate the saved-to path the model needs to read. */
-        char *marker;
-        if (t->path) {
-            marker = xasprintf("\n[output truncated: last %zu of %zu lines, %s of %s; "
-                               "full output saved to %s]",
-                               t->kept_lines, t->total_lines, kept_b, total_b, t->path);
-        } else {
-            /* Spill failed — file isn't available; tell the model what we
-             * have and let it re-run with grep/head/tail if it needs more. */
-            marker = xasprintf("\n[output truncated: last %zu of %zu lines, %s of %s; "
-                               "full output unavailable (temp file write failed)]",
-                               t->kept_lines, t->total_lines, kept_b, total_b);
-        }
-        /* Path bytes come from $TMPDIR + mkstemp's hex suffix. POSIX paths
-         * are byte sequences with no UTF-8 guarantee — a Linux user with
-         * non-UTF-8 locale can have arbitrary bytes in TMPDIR. Without
-         * sanitization those bytes would land in the tool result, and
-         * jansson would reject them on the next request, dropping the
-         * result or breaking the conversation. */
-        char *clean = sanitize_utf8(marker, strlen(marker));
-        free(marker);
-        buf_append_str(out, clean);
-        free(clean);
     }
     append_footers(out, timed_out, interrupted, timeout_ms, status);
     if (out->len == before && !body_present)
         buf_append_str(out, "(no output)");
 }
 
-/* Decide whether the captured output needs truncation, build the body
- * (sanitized, line-width-capped), populate `t` for the suffix marker, and
- * unlink the temp file when it isn't needed. The caller still owns
- * `cap`; this only reads from it (and may unlink the spilled file). */
-static void build_body_and_trunc(struct capture *cap, int has_nul, struct buf *body,
-                                 struct trunc_info *t)
+/* Append a model-facing truncation marker (owned `marker`) to the body,
+ * sanitized: the saved-to path comes from $TMPDIR + mkstemp and POSIX paths
+ * carry no UTF-8 guarantee, so the raw bytes would make jansson reject the
+ * next request (dropping the result or breaking the conversation). */
+static void append_clean_marker(struct buf *body, char *marker)
 {
-    t->truncated = 0;
-    t->kept_bytes = 0;
-    t->kept_lines = 0;
-    t->total_bytes = cap->total_bytes;
-    /* count_newlines only counts '\n' terminators; if the producer's
-     * final line was unterminated, add it so the marker's "of N lines"
-     * reflects the human-visible line count. */
-    t->total_lines = cap->total_lines + (cap->trails_no_nl ? 1 : 0);
-    t->path = NULL;
+    char *clean = sanitize_utf8(marker, strlen(marker));
+    free(marker);
+    buf_append_str(body, clean);
+    free(clean);
+}
 
+/* Build the model-facing body: sanitized, line-width-capped, with the
+ * truncation marker embedded when truncation happened — a gap marker
+ * between a head and a tail slice, or an end marker in the tail-only
+ * fallback. The live display does NOT use this marker; it relies on the
+ * renderer's own head/tail elision. Unlinks the temp file when it isn't
+ * needed. The caller still owns `cap`; this only reads from it (and may
+ * unlink the spilled file). */
+static void build_body_and_trunc(struct capture *cap, int has_nul, struct buf *body)
+{
     if (has_nul) {
         capture_unlink(cap);
         return;
     }
 
-    struct buf raw;
-    buf_init(&raw);
     if (!cap->spilled) {
         /* Whole output fit in mem; no truncation. */
-        if (cap->mem.len > 0)
-            buf_append(&raw, cap->mem.data, cap->mem.len);
-    } else if (cap->fd >= 0 && !cap->write_failed) {
-        /* Spill succeeded; read the tail from disk, line-aligned,
-         * line-count-capped. */
-        size_t kept_b = 0, kept_l = 0;
-        if (read_tail_capped(cap->fd, cap->total_bytes, output_cap_bytes(), &raw, &kept_b,
-                             &kept_l) == 0) {
-            t->truncated = 1;
-            t->kept_bytes = kept_b;
-            t->kept_lines = kept_l;
-            t->path = cap->path; /* keep the file around for re-reads */
-        } else {
-            /* read_tail_capped failed — surface the truncation marker
-             * with no path (write_failed branch in append_run_suffix). */
-            t->truncated = 1;
-            capture_unlink(cap);
-        }
-    } else {
-        /* Spill attempted but the temp file isn't usable (mkstemp failed
-         * or write_all failed mid-flush). capture_spill kept c->mem alive
-         * in the mkstemp-failure case so we can still serve the pre-spill
-         * prefix as the body — the model gets *something* useful instead
-         * of an empty marker. write_all-failure leaves c->mem already
-         * freed, in which case mem.len==0 and we fall through to an empty
-         * body — partial file content is unsafe to recover. */
-        t->truncated = 1;
-        if (cap->mem.len > 0) {
-            buf_append(&raw, cap->mem.data, cap->mem.len);
-            t->kept_bytes = cap->mem.len;
-            t->kept_lines = count_newlines(cap->mem.data, cap->mem.len) +
-                            (cap->mem.data[cap->mem.len - 1] != '\n' ? 1 : 0);
-        }
+        append_clean(body, cap->mem.data, cap->mem.len);
         capture_unlink(cap);
+        return;
     }
 
-    /* Cap pathologically long lines (single-line minified output, log
-     * lines with no newlines) before sanitizing — cap_line_lengths cuts
-     * at a byte boundary which can split a multi-byte UTF-8 codepoint;
-     * sanitize_utf8 then replaces the orphaned bytes with U+FFFD so the
-     * final string is always valid UTF-8 (jansson rejects invalid UTF-8
-     * in json_string). */
-    size_t capped_len = 0;
-    char *capped =
-        cap_line_lengths(raw.data ? raw.data : "", raw.len, OUTPUT_CAP_LINE_WIDTH, &capped_len);
-    buf_free(&raw);
+    /* count_newlines only counts '\n' terminators; if the producer's final
+     * line was unterminated, add it so the marker's "of N lines" reflects
+     * the human-visible line count. */
+    size_t total_lines = cap->total_lines + (cap->trails_no_nl ? 1 : 0);
 
-    char *clean = sanitize_utf8(capped, capped_len);
-    free(capped);
-    buf_append_str(body, clean);
-    free(clean);
-
-    if (!t->truncated)
+    if (cap->fd < 0 || cap->write_failed) {
+        /* Spill attempted but the temp file isn't usable (mkstemp failed or
+         * write_all failed mid-flush). capture_spill kept c->mem alive in
+         * the mkstemp-failure case so we can still serve the pre-spill
+         * prefix; write_all-failure leaves mem.len==0 (partial file content
+         * is unsafe to recover). Tail-only end marker, no path — the model
+         * can re-run with grep/head/tail if it needs more. */
+        size_t kept_bytes = 0, kept_lines = 0;
+        if (cap->mem.len > 0) {
+            append_clean(body, cap->mem.data, cap->mem.len);
+            kept_bytes = cap->mem.len;
+            kept_lines = count_newlines(cap->mem.data, cap->mem.len) +
+                         (cap->mem.data[cap->mem.len - 1] != '\n' ? 1 : 0);
+        }
+        char kept_b[16], total_b[16];
+        format_byte_size(kept_b, sizeof(kept_b), kept_bytes);
+        format_byte_size(total_b, sizeof(total_b), cap->total_bytes);
+        append_clean_marker(body, xasprintf("\n[output truncated: last %zu of %zu lines, %s of %s; "
+                                            "full output unavailable (temp file write failed)]",
+                                            kept_lines, total_lines, kept_b, total_b));
         capture_unlink(cap);
+        return;
+    }
+
+    /* Spill succeeded. Split the budget into a tail (the bulk) and a small
+     * head, read each line-aligned and line-count-capped, then assemble
+     * head + gap marker + tail so output that front-loads its summary keeps
+     * it. The head window is bounded below the tail's start offset so the
+     * two can never overlap. */
+    size_t total_cap = output_cap_bytes();
+    size_t head_cap_bytes = total_cap / OUTPUT_HEAD_DIVISOR;
+    size_t head_cap_lines = OUTPUT_CAP_LINES / OUTPUT_HEAD_DIVISOR;
+    size_t tail_cap_bytes = total_cap - head_cap_bytes;
+    size_t tail_cap_lines = OUTPUT_CAP_LINES - head_cap_lines;
+
+    struct buf tail_raw;
+    buf_init(&tail_raw);
+    size_t tail_b = 0, tail_l = 0;
+    if (read_tail_capped(cap->fd, cap->total_bytes, tail_cap_bytes, tail_cap_lines, &tail_raw,
+                         &tail_b, &tail_l) != 0) {
+        /* Spill read failed — no usable body. Surface a marker with no path
+         * so the model knows output existed but can't be recovered. */
+        buf_free(&tail_raw);
+        append_clean_marker(body, xasprintf("\n[output truncated: %zu lines, full output "
+                                            "unavailable (spill read failed)]",
+                                            total_lines));
+        capture_unlink(cap);
+        return;
+    }
+
+    off_t tail_start_off = (off_t)(cap->total_bytes - tail_b);
+    struct buf head_raw;
+    buf_init(&head_raw);
+    size_t head_b = 0, head_l = 0;
+    /* A read_head_capped failure (lseek/read error) leaves head_b==0, which
+     * falls through to the tail-only branch below — no special-casing. */
+    read_head_capped(cap->fd, head_cap_bytes, head_cap_lines, tail_start_off, &head_raw, &head_b,
+                     &head_l);
+
+    /* Split into head + tail when the head holds at least one whole line
+     * AND real content was dropped between the windows. Eligibility keys on
+     * the byte gap, not the omitted-line count: a single long line can be
+     * split across the windows (the tail window holds no newline, so it
+     * starts mid-line) with a large byte gap but zero whole lines omitted —
+     * gating on lines would drop the front-loaded summary this is meant to
+     * keep. head_b <= tail_start_off (the head is bounded below the tail's
+     * start), so the subtraction can't underflow. */
+    size_t omitted_lines = total_lines > head_l + tail_l ? total_lines - head_l - tail_l : 0;
+    size_t gap_bytes = (size_t)tail_start_off - head_b;
+    if (head_l > 0 && gap_bytes > 0) {
+        append_clean(body, head_raw.data, head_raw.len);
+        char *marker;
+        if (omitted_lines > 0) {
+            marker = xasprintf("... [output truncated: omitted %zu of %zu lines (kept first %zu, "
+                               "last %zu); full output saved to %s] ...\n",
+                               omitted_lines, total_lines, head_l, tail_l, cap->path);
+        } else {
+            /* The gap falls within a single long line, so a line count would
+             * read as a misleading "0 lines"; report the omitted byte span. */
+            char gap_s[16];
+            format_byte_size(gap_s, sizeof(gap_s), gap_bytes);
+            marker = xasprintf("... [output truncated: omitted %s mid-line; full output saved to "
+                               "%s] ...\n",
+                               gap_s, cap->path);
+        }
+        append_clean_marker(body, marker);
+        append_clean(body, tail_raw.data, tail_raw.len);
+    } else {
+        /* No usable head (a single unterminated line longer than the head
+         * slice) or no gap between the windows: fall back to a tail-only
+         * end marker. Re-read the tail at the FULL budget rather than emit
+         * the reduced 7/8 slice we read above — otherwise these fallback
+         * cases would keep less than plain tail-only truncation did. The
+         * re-read only runs on this uncommon path. */
+        buf_reset(&tail_raw);
+        tail_b = 0;
+        tail_l = 0;
+        if (read_tail_capped(cap->fd, cap->total_bytes, output_cap_bytes(), OUTPUT_CAP_LINES,
+                             &tail_raw, &tail_b, &tail_l) != 0) {
+            append_clean_marker(body, xasprintf("\n[output truncated: %zu lines, full output "
+                                                "unavailable (spill read failed)]",
+                                                total_lines));
+        } else {
+            char kept_b[16], total_b[16];
+            format_byte_size(kept_b, sizeof(kept_b), tail_b);
+            format_byte_size(total_b, sizeof(total_b), cap->total_bytes);
+            append_clean(body, tail_raw.data, tail_raw.len);
+            append_clean_marker(body,
+                                xasprintf("\n[output truncated: last %zu of %zu lines, %s of %s; "
+                                          "full output saved to %s]",
+                                          tail_l, total_lines, kept_b, total_b, cap->path));
+        }
+    }
+    buf_free(&head_raw);
+    buf_free(&tail_raw);
 }
 
 /* Build the env vector handed to the child via execve. We do this in
@@ -790,13 +908,14 @@ static void exec_shell_child(const char *cmd, char *const envp[])
     _exit(127);
 }
 
-/* Stream the trailing suffix (binary/truncated marker, footer, or
- * "(no output)") through emit_display at the end of a streamed run.
- * The body was already streamed live; this only writes what comes
- * after, using the same append_run_suffix helper as the canonical-
- * history path so the live display and history stay byte-identical
- * past the body. */
-static void stream_suffix(tool_emit_display_fn emit_display, void *user, const struct trunc_info *t,
+/* Stream the trailing suffix (binary marker, footer, or "(no output)")
+ * through emit_display at the end of a streamed run. The body was already
+ * streamed live; this only writes what comes after, using the same
+ * append_run_suffix helper as the canonical-history path so the live display
+ * and history stay byte-identical past the body. The truncation marker is
+ * not part of the suffix — the live display conveys truncation through the
+ * renderer's own head/tail elision (see append_run_suffix). */
+static void stream_suffix(tool_emit_display_fn emit_display, void *user, size_t total_bytes,
                           int has_nul, int streamed_anything, int timed_out, int interrupted,
                           long timeout_ms, int status)
 {
@@ -807,13 +926,12 @@ static void stream_suffix(tool_emit_display_fn emit_display, void *user, const s
      * binary marker starts with `[`, which ctrl_strip would happily
      * consume as the CSI introducer — silently swallowing the user-
      * visible message. A leading \n forces an abort (ctrl_strip's
-     * is_abort accepts LF) and resets the state. Footers and the
-     * truncated marker already start with \n so they don't need the
-     * same treatment. */
+     * is_abort accepts LF) and resets the state. Footers already start
+     * with \n so they don't need the same treatment. */
     if (has_nul && streamed_anything)
         buf_append_str(&suf, "\n");
-    append_run_suffix(&suf, t, has_nul, streamed_anything, timed_out, interrupted, timeout_ms,
-                      status, 1);
+    append_run_suffix(&suf, total_bytes, has_nul, streamed_anything, timed_out, interrupted,
+                      timeout_ms, status);
     if (suf.len > 0)
         emit_display(suf.data, suf.len, user);
     buf_free(&suf);
@@ -1065,32 +1183,29 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
             break;
     }
 
-    /* Build the model-facing body and the truncation summary. This may
+    /* Build the model-facing body (truncation marker embedded). This may
      * unlink the temp file (when output fit within caps or the capture
-     * never spilled). When kept, t.path borrows from cap.path — we must
-     * not free cap until after stream_suffix runs. */
+     * never spilled); when kept, the path is copied into the body, so the
+     * order of capture_free below no longer matters for it. */
     struct buf body;
     buf_init(&body);
-    struct trunc_info t;
-    build_body_and_trunc(&cap, has_nul, &body, &t);
+    build_body_and_trunc(&cap, has_nul, &body);
 
     if (emit_display) {
         /* Streaming path: live chunks already went through emit_display.
-         * Push the trailing suffix through it too so the user sees the
-         * truncation marker (with the saved-to path) and the footer in
-         * the dim block. The canonical history below adds the same
-         * suffix to the model's view, which is a bounded summary built
-         * by build_body_and_trunc, not the unbounded live stream. */
-        stream_suffix(emit_display, user, &t, has_nul, streamed_anything, timed_out, interrupted,
-                      timeout_ms, status);
+         * Push the trailing suffix (footers / binary marker) through it too
+         * so the user sees the exit status in the dim block. Truncation is
+         * conveyed by the renderer's own head/tail elision, not a marker. */
+        stream_suffix(emit_display, user, cap.total_bytes, has_nul, streamed_anything, timed_out,
+                      interrupted, timeout_ms, status);
     }
 
     struct buf out;
     buf_init(&out);
     if (body.len > 0)
         buf_append(&out, body.data, body.len);
-    append_run_suffix(&out, &t, has_nul, body.len > 0, timed_out, interrupted, timeout_ms, status,
-                      0);
+    append_run_suffix(&out, cap.total_bytes, has_nul, body.len > 0, timed_out, interrupted,
+                      timeout_ms, status);
     buf_free(&body);
     capture_free(&cap);
     return buf_steal(&out);

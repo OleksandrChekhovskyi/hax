@@ -8,9 +8,9 @@
 # (turn ends with a tool call → agent dispatches the tool → stream()
 # again) consumes script turns continuously without prompting the
 # user. So the user's *first* message plays everything from turn 1
-# down to the first turn that ends without a tool call (turn 6 here,
-# which closes the chain). The next user message picks up at turn 7
-# and runs through the second chain (turns 7–8).
+# down to the first turn that ends without a tool call (turn 7 here,
+# which closes the chain). The next user message picks up at turn 8
+# and runs through the second chain (turns 8–9).
 #
 # DSL recap (see src/providers/mock.c for the full spec):
 #   text <message>                    one assistant text delta
@@ -52,20 +52,39 @@ end-turn
 # Many committed lines pass through the preview. The dim block keeps
 # the first DISP_HT_HEAD_LINES, the rest go through the tail ring,
 # and the elision marker appears between them. (This is the *display*
-# head/tail in tool_render — bash.c's separate ~96 KiB head/tail buffer
-# for the model's history isn't exercised here.)
+# head/tail in tool_render — the model's history truncation, exercised
+# in the next turn, is a separate mechanism that stays under the cap
+# here.)
 text This one overruns the display head and lands content in the tail.
 tool bash {"command":"scripts/stream_demo.py long --delay 0.05"}
 usage in=640 out=28
 end-turn
 
-# ---------- turn 4: file-read preview (R_HEAD_ONLY mode) ----------------
+# ---------- turn 4: model-facing head+tail truncation -------------------
+# ~108 KiB / 20002 lines trips bash.c's OUTPUT_CAP (50 KiB / 2000 lines),
+# so the capture spills to a temp file. Two distinct things to eyeball:
+#   - Display: the renderer shows head rows, its own "... (N more lines)
+#     ..." elision, then the tail rows ending in the trailer — no trailing
+#     truncation marker (the renderer's elision is the only signal). An
+#     exit footer, if any, sits on the last row.
+#   - Model history (run with HAX_TRANSCRIPT=/tmp/t.txt and grep it): the
+#     body is a head slice + a mid-body marker "... [output truncated:
+#     omitted N of M lines (kept first H, last T); full output saved to
+#     PATH] ..." + a tail slice. The front-loaded SUMMARY line survives in
+#     the head — the whole point, since tail-only truncation used to drop
+#     it — and the saved path lets the model re-read the full output.
+text This one is big enough that the model gets a head+tail summary with a gap marker.
+tool bash {"command":"echo '=== SUMMARY (front-loaded line; must survive in the head) ==='; seq 1 20000; echo '=== TRAILER (must survive in the tail) ==='"}
+usage in=700 out=30
+end-turn
+
+# ---------- turn 5: file-read preview (R_HEAD_ONLY mode) ----------------
 text And here's the read tool's head-only preview.
 tool read {"path":"src/render/disp.h"}
 usage in=780 out=24
 end-turn
 
-# ---------- turn 5: diff preview (write tool) ---------------------------
+# ---------- turn 6: diff preview (write tool) ---------------------------
 # Seed the file via bash first so the write below produces an actual
 # unified diff. fs_write_with_diff suppresses the diff for new-file
 # creates, and emits an empty payload when content is byte-identical
@@ -77,23 +96,23 @@ tool write {"path":"/tmp/hax_mock_demo.txt","content":"hello from the mock provi
 usage in=860 out=30
 end-turn
 
-# ---------- turn 6: final assistant turn, no tool call ------------------
+# ---------- turn 7: final assistant turn, no tool call ------------------
 # Ends without a tool call, so the agent loop unwinds and control
 # returns to the prompt. Type a follow-up message to start the next
-# chain (turn 7).
-text All done — that covered live preview, display elision, file read, and diff coloring.
+# chain (turn 8).
+text All done — that covered live preview, display elision, model truncation, file read, and diff coloring.
 usage in=920 out=44
 end-turn
 
-# ---------- turn 7: continuation after the user types again -------------
-# Picks up where turn 6 left off: a fresh chain on the second user
-# message that runs a quick command, then resolves at turn 8.
+# ---------- turn 8: continuation after the user types again -------------
+# Picks up where turn 7 left off: a fresh chain on the second user
+# message that runs a quick command, then resolves at turn 9.
 text Sure, here's one more — a tiny ls just to show the continuation works.
 tool bash {"command":"ls -1 src/providers"}
 usage in=980 out=20
 end-turn
 
-# ---------- turn 8: wrap up after the second tool ----------------------
+# ---------- turn 9: wrap up after the second tool ----------------------
 text And that's the end of the demo script.
 usage in=1020 out=18
 end-turn

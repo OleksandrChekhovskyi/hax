@@ -431,20 +431,72 @@ static void test_bash_per_call_timeout_invalid(void)
     free(out);
 }
 
-static void test_bash_tail_truncation(void)
+static void test_bash_head_tail_truncation(void)
 {
     /* Produce ~108 KiB — more than the default OUTPUT_CAP (50 KiB), so
-     * the capture spills to a temp file and the model gets a tail
-     * preview. HEAD marker is at the start (must be dropped); TAIL
-     * marker is at the end (must survive). The truncation hint must
-     * include the saved file path so the model can read the rest. */
+     * the capture spills to a temp file and the model gets a head+tail
+     * preview with a gap marker. Both the leading HEAD line (in the head
+     * slice — output that front-loads a summary keeps it) and the trailing
+     * TAIL line (in the tail slice) must survive. The gap marker names the
+     * omitted middle and the saved file path so the model can read the
+     * rest. The marker sits between the two slices, not after the body. */
     char *out = call_bash("echo HEAD; seq 1 20000; echo TAIL");
-    EXPECT(strstr(out, "TAIL") != NULL);
-    EXPECT(strstr(out, "HEAD") == NULL);
-    EXPECT(strstr(out, "[output truncated") != NULL);
+    char *head = strstr(out, "HEAD");
+    char *marker = strstr(out, "[output truncated");
+    char *tail = strstr(out, "TAIL");
+    EXPECT(head != NULL);
+    EXPECT(marker != NULL);
+    EXPECT(tail != NULL);
+    /* Order: HEAD slice, then the gap marker, then the TAIL slice. */
+    EXPECT(head < marker && marker < tail);
+    EXPECT(strstr(out, "omitted ") != NULL);
+    EXPECT(strstr(out, "kept first ") != NULL);
     EXPECT(strstr(out, "saved to ") != NULL);
     /* Hint mentions the file under $TMPDIR / /tmp. */
     EXPECT(strstr(out, "hax-bash-") != NULL);
+    free(out);
+}
+
+static void test_bash_head_kept_when_long_line_spans_gap(void)
+{
+    /* A front-loaded summary followed by one line longer than the byte cap:
+     * the tail window holds no newline (it starts mid-line), so no *whole*
+     * line is omitted (omitted_lines == 0) even though a large byte range
+     * is. Eligibility must key on the byte gap, not the line count —
+     * otherwise this falls back to tail-only and drops the SUMMARY line the
+     * head+tail split exists to preserve. The gap marker reports the
+     * omission in bytes ("mid-line") since a line count would read as 0. */
+    char *out = call_bash("echo SUMMARY; printf 'x%.0s' $(seq 1 60000)");
+    char *head = strstr(out, "SUMMARY");
+    char *marker = strstr(out, "[output truncated");
+    EXPECT(head != NULL);
+    EXPECT(marker != NULL);
+    /* SUMMARY survives in the head, ahead of the gap marker. */
+    EXPECT(head < marker);
+    /* Within-line gap is reported in bytes, not "0 lines". */
+    EXPECT(strstr(out, "mid-line") != NULL);
+    EXPECT(strstr(out, "0 lines") == NULL);
+    EXPECT(strstr(out, "saved to ") != NULL);
+    free(out);
+}
+
+static void test_bash_tail_only_fallback_uses_full_budget(void)
+{
+    /* When the first line is longer than the head slice (~6 KiB at the
+     * 50 KiB cap) read_head_capped keeps nothing, so the body falls back to
+     * tail-only. That fallback must re-read the tail at the FULL budget
+     * (2000 lines), not the reduced 7/8 head+tail budget (1750) — the
+     * fallback should keep as much as plain tail-only truncation always
+     * did. Fixture: an 8 KiB first line (no newline within the head slice)
+     * then 5000 short lines (5001 total, so the line cap trips the spill).
+     * Total stays well under the byte cap, so the kept count is line-bound. */
+    char *out = call_bash("printf 'X%.0s' $(seq 1 8000); echo; seq 1 5000");
+    EXPECT(strstr(out, "[output truncated") != NULL);
+    /* Full budget keeps the last 2000 lines; the reduced budget would have
+     * kept only 1750 — assert the full count and the absence of the bug's. */
+    EXPECT(strstr(out, "last 2000 of 5001 lines") != NULL);
+    EXPECT(strstr(out, "last 1750 of") == NULL);
+    EXPECT(strstr(out, "saved to ") != NULL);
     free(out);
 }
 
@@ -481,8 +533,8 @@ static void test_bash_saved_path_holds_full_output(void)
         EXPECT(stat(path, &st) == 0);
         /* `echo HEAD` + seq 1..20000 + `echo TAIL` = ~108 KiB. */
         EXPECT(st.st_size > 100 * 1024);
-        /* Contents start with "HEAD\n" — the original head we dropped
-         * from the tail-truncated preview. */
+        /* Contents start with "HEAD\n" — the saved file holds the full,
+         * untruncated output, head+tail preview notwithstanding. */
         FILE *f = fopen(path, "r");
         EXPECT(f != NULL);
         if (f) {
@@ -562,28 +614,37 @@ static void test_bash_mkstemp_failure_falls_back_to_mem(void)
 
 static void test_bash_tail_keeps_line_at_window_boundary(void)
 {
-    /* When (total_bytes - cap_bytes) lands exactly on a line start, the
-     * byte before `start` is '\n' — the tail window already begins on a
-     * boundary, no alignment trim needed. The earlier implementation
-     * always dropped through the first '\n', losing the leading line in
-     * this edge case.
+    /* When the tail window's start (total_bytes - tail_cap_bytes) lands
+     * exactly on a line start, the byte before it is '\n' — the window
+     * already begins on a boundary, no alignment trim needed. The earlier
+     * implementation always dropped through the first '\n', losing the
+     * leading line in this edge case.
      *
      * Fixture uses 32-byte lines (`printf '%-31s\n' "lineN"` → "lineN"
-     * + spaces + '\n'). With cap pinned to 50 KiB = 51200 bytes and
-     * total = 2000 × 32 = 64000 bytes, start = 12800 falls exactly on
-     * line 400 (zero-indexed). The 1600-line tail stays under the
-     * 2000-line cap so the line-count trim doesn't fire and the
-     * alignment behavior is what's actually under test. */
+     * + spaces + '\n'). With cap pinned to 50 KiB = 51200 bytes the head
+     * gets 51200/8 = 6400 bytes (= 200 lines) and the tail the remaining
+     * 44800 bytes. total = 2000 × 32 = 64000, so the tail window starts at
+     * 64000 - 44800 = 19200 = line 600 (zero-indexed) — exactly on a
+     * boundary, the case under test. The head therefore keeps line0..199,
+     * the tail line600..1999. */
     char *out = call_bash("for i in $(seq 0 1999); do printf '%-31s\\n' line$i; done");
     EXPECT(strstr(out, "[output truncated") != NULL);
-    /* The body comes before the marker; the first 'line' substring is
-     * the first preserved line. With the fix, that's "line400". Padded
-     * format means the prefix "line400 " (trailing space from padding)
-     * is unique vs. "line400N..." for any later N. */
+    /* The head slice comes first: its first line is line0. */
     const char *first = strstr(out, "line");
     EXPECT(first != NULL);
-    if (first) {
-        EXPECT(strncmp(first, "line400 ", 8) == 0);
+    if (first)
+        EXPECT(strncmp(first, "line0 ", 6) == 0);
+    /* The tail slice follows the gap marker; its first line is line600,
+     * kept whole (no mid-line truncation at the boundary). */
+    const char *marker = strstr(out, "[output truncated");
+    EXPECT(marker != NULL);
+    if (marker) {
+        const char *tail = strstr(marker, "] ...\n");
+        EXPECT(tail != NULL);
+        if (tail) {
+            tail += strlen("] ...\n");
+            EXPECT(strncmp(tail, "line600 ", 8) == 0);
+        }
     }
     free(out);
 }
@@ -954,16 +1015,20 @@ static void test_bash_streamed_history_truncated(void)
     struct capture cap = {0};
     buf_init(&cap.buf);
     char *out = call_bash_streamed("yes hi | head -c 150000", &cap);
-    /* Truncation marker is the unambiguous signal that capture spilled
-     * to a temp file and the tail-truncation pipeline ran. */
+    /* Truncation marker in the model history is the unambiguous signal
+     * that capture spilled to a temp file and the truncation pipeline ran. */
     EXPECT(strstr(out, "[output truncated") != NULL);
     EXPECT(strstr(out, "saved to ") != NULL);
     /* Result is bounded by OUTPUT_CAP plus marker plus footer — well
      * under the 150 KB live stream. */
     EXPECT(strlen(out) < 100 * 1024);
-    /* The streamed display surfaces the same marker so the user sees
-     * the saved-to path live in the dim block too. */
-    EXPECT(strstr(cap.buf.data, "[output truncated") != NULL);
+    /* The live display gets the raw stream but NOT the truncation marker:
+     * the renderer conveys truncation through its own head/tail elision
+     * ("... (N more lines) ..."), so emitting a marker here would be a
+     * redundant, differently-counted second signal. The raw "hi" output
+     * still flows through emit_display. */
+    EXPECT(strstr(cap.buf.data, "hi") != NULL);
+    EXPECT(strstr(cap.buf.data, "[output truncated") == NULL);
     free(out);
     buf_free(&cap.buf);
 }
@@ -1012,7 +1077,9 @@ int main(void)
     test_bash_stderr_is_not_a_tty();
     test_bash_env_overrides();
     test_bash_lf_not_crlf();
-    test_bash_tail_truncation();
+    test_bash_head_tail_truncation();
+    test_bash_head_kept_when_long_line_spans_gap();
+    test_bash_tail_only_fallback_uses_full_budget();
     test_bash_saved_path_holds_full_output();
     test_bash_single_line_over_cap_keeps_body();
     test_bash_line_cap_triggers_spill();
