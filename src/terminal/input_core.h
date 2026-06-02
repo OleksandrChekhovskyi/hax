@@ -31,6 +31,13 @@ struct input {
     int last_cursor_row;
     int last_rows;
 
+    /* When set, the live paint wraps continuation rows to column 0 rather
+     * than aligning them under the prompt (the usual cont_indent =
+     * prompt_w). Used by the Ctrl-R search prompt, whose wide
+     * "reverse-search · query → " prefix would otherwise shove every
+     * wrapped row of a long match far to the right. input.c-only. */
+    int wrap_cont_col0;
+
     /* per-call render cache */
     const char *prompt;
     /* Wrap budget for one row of the edit area, sampled from
@@ -89,6 +96,17 @@ void input_core_kill_word_fwd(struct input *in);
 /* ---- history ---- */
 void input_core_history_prev(struct input *in);
 void input_core_history_next(struct input *in);
+
+/* Incremental history search (Ctrl-R / Ctrl-S). Scan history for the
+ * first entry containing `query` as a substring, beginning at index
+ * `start` and stepping by `dir` — -1 toward older entries (reverse
+ * search), +1 toward newer (forward search). Returns the matching index,
+ * or -1 if none is found (also -1 for an empty/NULL query, an out-of-range
+ * `start`, or an empty history). Match is a plain case-sensitive substring
+ * test, mirroring readline's default. The IO layer in input.c drives this
+ * from its Ctrl-R sub-loop; exposing it here keeps the scan testable
+ * without a tty. */
+long input_core_history_search(const struct input *in, const char *query, long start, int dir);
 
 /* In-memory history append with erasedups semantics: any prior exact
  * match is removed first, so a recalled entry bumps to the top instead

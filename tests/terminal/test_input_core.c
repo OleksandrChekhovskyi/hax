@@ -894,6 +894,46 @@ static void test_history_erasedups(void)
     input_free(in);
 }
 
+static void test_history_search(void)
+{
+    /* History oldest-first: idx 0 oldest, idx hist_n-1 newest. */
+    struct input *in = input_new();
+    input_core_history_add(in, "git status");
+    input_core_history_add(in, "make build");
+    input_core_history_add(in, "git commit -m wip");
+    input_core_history_add(in, "make test");
+    /* hist: [0]=git status [1]=make build [2]=git commit [3]=make test */
+
+    /* Reverse from newest finds the most recent "git" match (idx 2). */
+    EXPECT(input_core_history_search(in, "git", (long)in->hist_n - 1, -1) == 2);
+    /* Stepping older from there reaches idx 0. */
+    EXPECT(input_core_history_search(in, "git", 1, -1) == 0);
+    /* No older match past idx 0. */
+    EXPECT(input_core_history_search(in, "git", -1, -1) == -1);
+
+    /* Forward (newer-ward) from oldest finds idx 0 then idx 2. */
+    EXPECT(input_core_history_search(in, "git", 0, 1) == 0);
+    EXPECT(input_core_history_search(in, "git", 1, 1) == 2);
+    /* Forward past the newest matching index. */
+    EXPECT(input_core_history_search(in, "git", 3, 1) == -1);
+
+    /* Substring anywhere in the entry matches; case-sensitive. */
+    EXPECT(input_core_history_search(in, "test", (long)in->hist_n - 1, -1) == 3);
+    EXPECT(input_core_history_search(in, "TEST", (long)in->hist_n - 1, -1) == -1);
+
+    /* Empty / NULL query, bad direction, and out-of-range start: no match. */
+    EXPECT(input_core_history_search(in, "", (long)in->hist_n - 1, -1) == -1);
+    EXPECT(input_core_history_search(in, NULL, (long)in->hist_n - 1, -1) == -1);
+    EXPECT(input_core_history_search(in, "git", (long)in->hist_n - 1, 0) == -1);
+    EXPECT(input_core_history_search(in, "git", 99, -1) == -1);
+    input_free(in);
+
+    /* Empty history: never matches. */
+    struct input *empty = input_new();
+    EXPECT(input_core_history_search(empty, "x", 0, -1) == -1);
+    input_free(empty);
+}
+
 static void test_history_encode_decode_roundtrip(void)
 {
     /* Plain ASCII passes through unchanged. */
@@ -1225,6 +1265,7 @@ int main(void)
     test_history_recall_edits_discarded();
     test_history_evicts_oldest();
     test_history_erasedups();
+    test_history_search();
     test_history_encode_decode_roundtrip();
 
     test_prompt_width_strips_ansi();

@@ -288,6 +288,21 @@ int input_core_history_add(struct input *in, const char *line)
     return 1;
 }
 
+/* Scan history for `query` as a substring, from `start` stepping by
+ * `dir` (-1 older, +1 newer). The `i >= 0 && i < hist_n` guard makes an
+ * out-of-range `start` (e.g. match-1 when already at the oldest entry, or
+ * match+1 at the newest) fall straight through to -1. */
+long input_core_history_search(const struct input *in, const char *query, long start, int dir)
+{
+    if (!query || !*query || in->hist_n == 0 || (dir != 1 && dir != -1))
+        return -1;
+    for (long i = start; i >= 0 && (size_t)i < in->hist_n; i += dir) {
+        if (strstr(in->hist[i], query))
+            return i;
+    }
+    return -1;
+}
+
 /* ---------------- history persistence (encode/decode) ---------------- */
 
 /* Encode an entry for the on-disk one-line-per-record format: literal

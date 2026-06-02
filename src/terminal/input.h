@@ -18,6 +18,12 @@
  *     correctly. Edits to a recalled entry are kept locally; the
  *     in-progress draft is preserved while navigating and restored on
  *     Down past the last entry.
+ *   - Ctrl-R starts an incremental reverse history search (readline-style
+ *     behavior, freshened presentation): the prompt becomes
+ *     "reverse-search · query → match" and the buffer tracks the most recent
+ *     matching entry as you type. Ctrl-R/Ctrl-S step to older/newer matches,
+ *     Backspace shortens the query, Enter accepts and submits, ESC accepts
+ *     and keeps editing, Ctrl-G/Ctrl-C abort.
  *   - Ctrl-G opens $EDITOR with the current buffer; on exit the edited
  *     content replaces the buffer. The user keeps editing in the REPL
  *     (no auto-submit).

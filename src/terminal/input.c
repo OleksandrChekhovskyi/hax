@@ -118,7 +118,13 @@ static int read_byte_timeout(unsigned char *out, int ms)
 
 /* ---------------- bracketed paste ---------------- */
 
-/* Read a paste body until we see "\x1b[201~", inserting bytes verbatim.
+/* Sink for paste-body bytes — receives the content between the bracketed-
+ * paste markers, after CR→LF/NUL normalization, one byte at a time. The
+ * main editor feeds it into the edit buffer; the Ctrl-R loop feeds it into
+ * the search query. */
+typedef void (*paste_sink)(void *user, const char *bytes, size_t n);
+
+/* Read a paste body until we see "\x1b[201~", handing bytes to `sink`.
  * CR is normalized to LF; an LF immediately following a normalized CR
  * is swallowed so Windows-style CRLF pastes become a single newline.
  * NULs are substituted with spaces so they can't truncate downstream
@@ -128,10 +134,10 @@ static int read_byte_timeout(unsigned char *out, int ms)
  * Bounded against runaway / malicious input: a 5 s idle timeout
  * abandons the paste if bytes stop arriving (a buggy or hostile
  * counterpart can otherwise hold the prompt open indefinitely), and
- * inserted bytes are capped at PASTE_MAX. We keep consuming bytes
+ * sunk bytes are capped at PASTE_MAX. We keep consuming bytes
  * past the cap so leftover paste body doesn't leak into the next
  * keystroke loop as garbage input. */
-static void handle_paste(struct input *in)
+static void read_paste(paste_sink sink, void *user)
 {
     static const char END[] = "\x1b[201~";
     const size_t ELEN = sizeof(END) - 1;
@@ -168,7 +174,7 @@ static void handle_paste(struct input *in)
                 break;      /* still a possible prefix; keep reading */
             }
             if (inserted < PASTE_MAX) {
-                input_core_buf_insert(in, &held[0], 1);
+                sink(user, &held[0], 1);
                 inserted++;
             }
             memmove(held, held + 1, hlen - 1);
@@ -177,6 +183,18 @@ static void handle_paste(struct input *in)
                 break;
         }
     }
+}
+
+static void paste_into_buf(void *user, const char *bytes, size_t n)
+{
+    input_core_buf_insert((struct input *)user, bytes, n);
+}
+
+/* Insert pasted content at the cursor. The start marker "\x1b[200~" has
+ * already been consumed by the escape decoder. */
+static void handle_paste(struct input *in)
+{
+    read_paste(paste_into_buf, in);
 }
 
 /* ---------------- escape sequence dispatch ---------------- */
@@ -281,8 +299,9 @@ static void paint(struct input *in)
 
     fputs(in->prompt, stdout);
 
+    int cont = in->wrap_cont_col0 ? 0 : prompt_w;
     struct input_layout L;
-    input_core_render(in->buf, in->len, in->cursor, prompt_w, prompt_w, cols, paint_emit, NULL, &L);
+    input_core_render(in->buf, in->len, in->cursor, prompt_w, cont, cols, paint_emit, NULL, &L);
 
     /* From end-of-content position, climb up to cursor row, then right. */
     int up = L.end_row - L.cursor_row;
@@ -357,8 +376,9 @@ static int handle_resize(struct input *in)
         int *widths = xcalloc((size_t)cap, sizeof(int));
         struct row_widths_state s = {.widths = widths, .cap = cap, .n = 0, .current = prompt_w};
         struct input_layout L;
-        input_core_render(in->buf, in->len, in->cursor, prompt_w, prompt_w, old_cols, row_widths_cb,
-                          &s, &L);
+        int cont = in->wrap_cont_col0 ? 0 : prompt_w;
+        input_core_render(in->buf, in->len, in->cursor, prompt_w, cont, old_cols, row_widths_cb, &s,
+                          &L);
         if (s.n < s.cap)
             s.widths[s.n] = s.current;
         s.n++;
@@ -544,6 +564,361 @@ static void show_transcript(struct input *in)
     /* Pager may have prompted a window resize; refresh before the next
      * paint so wrap math uses the current width. */
     in->term_cols = editor_cols();
+}
+
+/* ---------------- reverse / forward incremental search ---------------- */
+
+/* Outcome of the Ctrl-R sub-loop, reported back to the main keystroke
+ * loop. ACCEPT leaves the matched (or, on abort, the original) line in the
+ * edit buffer and returns to editing; SUBMIT additionally asks the caller
+ * to submit it, matching readline's Enter-during-isearch behavior. */
+enum rsearch_outcome {
+    RSEARCH_ACCEPT,
+    RSEARCH_SUBMIT,
+};
+
+/* Paste sink for the search query: append printable bytes, dropping ASCII
+ * controls and DEL (a pasted newline/tab must not enter the single-line
+ * query). UTF-8 lead/continuation bytes (>= 0x80) are kept so multi-byte
+ * glyphs survive; any dangerous ones (C1, bidi) are neutralized when the
+ * query is sanitized for display — see the prompt build in reverse_search. */
+static void paste_into_query(void *user, const char *bytes, size_t n)
+{
+    struct buf *q = user;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char b = (unsigned char)bytes[i];
+        if (b >= 0x20 && b != 0x7f)
+            buf_append(q, &bytes[i], 1);
+    }
+}
+
+/* Recompute the current match after the query changed. An empty query has
+ * no match (the pre-search line is shown); otherwise scan from the current
+ * match — so refining keeps you on the same entry when it still matches —
+ * toward `dir`, marking `failed` when nothing matches. */
+static void rsearch_recompute(struct input *in, const struct buf *q, int dir, long *match,
+                              int *failed)
+{
+    if (q->len == 0) {
+        *match = -1;
+        *failed = 0;
+        return;
+    }
+    long start = (*match >= 0) ? *match : (dir < 0 ? (long)in->hist_n - 1 : 0);
+    long m = input_core_history_search(in, q->data, start, dir);
+    if (m >= 0) {
+        *match = m;
+        *failed = 0;
+    } else {
+        *failed = 1;
+    }
+}
+
+/* Sanitize the search query for display in the prompt. The prompt is
+ * written raw via fputs (unlike the edit buffer, which renders through the
+ * substituting walker), so dangerous codepoints must be neutralized here.
+ * Substitutes one '?' per ASCII control / DEL / C1 / malformed / dangerous
+ * (bidi, invisible) codepoint — the same policy as the buffer walker, keyed
+ * on utf8_codepoint_cells returning negative — but passes every other glyph,
+ * crucially ordinary spaces, through byte-for-byte: spaces are meaningful in
+ * the raw query that drives input_core_history_search, so the prompt must
+ * show them verbatim. Returns malloc'd; caller frees. */
+static char *sanitize_query_for_display(const char *s)
+{
+    size_t len = strlen(s);
+    struct buf out;
+    buf_init(&out);
+    for (size_t i = 0; i < len;) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x20 || c == 0x7f) {
+            /* ASCII control / DEL — input filters these out, so this is just
+             * defensive; one '?' each. */
+            buf_append(&out, "?", 1);
+            i++;
+            continue;
+        }
+        size_t cons;
+        int w = utf8_codepoint_cells(s, len, i, &cons);
+        if (w < 0) {
+            buf_append(&out, "?", 1); /* one '?' per dangerous codepoint */
+            i += cons ? cons : 1;
+            continue;
+        }
+        size_t n = cons ? cons : 1;
+        buf_append(&out, s + i, n);
+        i += n;
+    }
+    return buf_steal(&out);
+}
+
+/* Clip `s` to at most `avail` display cells, keeping its tail and prefixing
+ * a one-cell marker ("…", or "<" without UTF-8) when truncated. Used to keep
+ * the search prompt within one row so it can't soft-wrap the terminal —
+ * paint()/handle_resize() track only the rows input_core_render() produces
+ * and assume the prompt fits on one row. Applied to the query alone (keeping
+ * the tail the user is typing) when the chrome fits, or to the whole plain
+ * prompt as a last resort on a terminal too narrow for the chrome. The full
+ * query still drives the search; only the display is windowed. Returns
+ * malloc'd; caller frees. */
+static char *clip_query_left(const char *s, int avail, int utf8)
+{
+    size_t len = strlen(s);
+    int total = 0;
+    for (size_t i = 0; i < len;) {
+        size_t cons;
+        int w = utf8_codepoint_cells(s, len, i, &cons);
+        total += w < 0 ? 1 : w;
+        i += cons ? cons : 1;
+    }
+    if (avail < 1)
+        return xstrdup("");
+    if (total <= avail)
+        return xstrdup(s);
+
+    const char *mark = utf8 ? "\xe2\x80\xa6" : "<"; /* … */
+    int budget = avail - 1;                         /* one cell for the marker */
+    size_t keep = len;
+    int used = 0;
+    for (size_t i = len; i > 0;) {
+        size_t prev = utf8_prev(s, i);
+        size_t cons;
+        int w = utf8_codepoint_cells(s, len, prev, &cons);
+        if (w < 0)
+            w = 1;
+        if (used + w > budget)
+            break;
+        used += w;
+        keep = prev;
+        i = prev;
+    }
+    return xasprintf("%s%s", mark, s + keep);
+}
+
+/* Readline-style incremental history search. Entered on Ctrl-R; the prompt
+ * is replaced with "reverse-search · query → " and the edit buffer mirrors
+ * the most recent history entry containing `query`, with the cursor parked
+ * at the match. Keys:
+ *   - printable bytes extend the query (UTF-8 reassembled like the main loop)
+ *   - Backspace shortens it
+ *   - Ctrl-R steps to the next older match, Ctrl-S to the next newer one
+ *     (Ctrl-S reaches us because raw mode clears IXON; the prompt flips to
+ *     "forward-search")
+ *   - Enter accepts the match and submits; LF / ESC (or any escape sequence)
+ *     accept it and drop back into editing
+ *   - Ctrl-G / Ctrl-C abort, restoring the line as it was on entry
+ * During the loop the buffer holds only the painted view (the match, the
+ * pre-search line, or empty under "(no match)"); the committed line is
+ * rebuilt from `match` at `done` on accept, and abort restores the saved
+ * copy. Accepting while nothing matches restores the entry line and does not
+ * submit — you only ever accept/submit a match that is actually showing.
+ * in->prompt is borrowed for our search prompt and restored on exit. */
+static enum rsearch_outcome reverse_search(struct input *in)
+{
+    char *orig = xstrdup(in->buf);
+    size_t orig_cursor = in->cursor;
+    size_t orig_hist_pos = in->hist_pos;
+    const char *orig_prompt = in->prompt;
+
+    struct buf q;
+    buf_init(&q);
+    long match = -1;  /* index of current match, or -1 = none */
+    int failed = 0;   /* current query matches nothing — painted as "(no match)" */
+    int dir = -1;     /* -1 reverse (older), +1 forward (newer) */
+    int accepted = 0; /* exiting to editing with the matched entry (not abort) */
+    char *prompt_buf = NULL;
+    enum rsearch_outcome outcome = RSEARCH_ACCEPT;
+
+    /* The search prefix is wide; wrap a long match's continuation rows to
+     * column 0 instead of aligning them under it. */
+    in->wrap_cont_col0 = 1;
+
+    for (;;) {
+        /* Mirror the current state into the edit buffer for display: the
+         * matched entry (cursor parked on the matched span), or the saved
+         * line when there's no query yet, or an empty line when the current
+         * query matches nothing (the prompt then shows "(no match)"). The
+         * line actually committed on accept is rebuilt at `done` from
+         * `match`/`orig`, so this is purely what's painted. */
+        if (failed) {
+            input_core_buf_set(in, "");
+        } else if (match >= 0) {
+            input_core_buf_set(in, in->hist[match]);
+            char *p = q.len > 0 ? strstr(in->buf, q.data) : NULL;
+            in->cursor = p ? (size_t)(p - in->buf) : in->len;
+        } else {
+            input_core_buf_set(in, orig);
+            in->cursor = orig_cursor <= in->len ? orig_cursor : in->len;
+        }
+
+        /* Modernized chrome: "<reverse|forward>-search · <query> → <result>".
+         * Bright magenta for the search chrome — matching the normal "❯"
+         * prompt — with the result reset to default; a failed query shows a
+         * dim "(no match)" in place of the result. Glyphs fall back to ASCII
+         * (" : " / " > ") when the locale isn't UTF-8, like PROMPT_ASCII.
+         *
+         * The displayed query is sanitized (see sanitize_query_for_display):
+         * the prompt is written raw via fputs (unlike the edit buffer, which
+         * renders through the substituting walker), so pasted/typed control,
+         * DEL, C1 and dangerous bidi/format codepoints must be neutralized
+         * here or they could corrupt the terminal. Ordinary spaces are kept
+         * verbatim (they matter to the search); the raw query still drives
+         * the byte-safe search.
+         *
+         * The assembled prompt is kept within one row so it can't soft-wrap
+         * (paint()/handle_resize() model it as a single row): with room for
+         * the chrome, the query is windowed to its tail to fill the leftover
+         * width; on a terminal too narrow even for the chrome, the whole
+         * plain prompt is left-clipped to fit. input_core_prompt_width strips
+         * the CSI sequences, so the wrap and cursor math stay correct. */
+        int utf8 = locale_have_utf8();
+        const char *label = dir < 0 ? "reverse-search" : "forward-search";
+        const char *dot = q.len > 0 ? (utf8 ? " \xc2\xb7 " : " : ") : "";
+        const char *arrow = utf8 ? " \xe2\x86\x92 " : " > ";
+        char *qsafe = q.len > 0 ? sanitize_query_for_display(q.data) : NULL;
+
+        int budget = in->term_cols - 1;
+        if (budget < 1)
+            budget = 1;
+        /* Fixed chrome: label + " · "/" → " (3 each, dot only with a query) +
+         * "(no match)" (10, failed only). */
+        int fixed = (int)strlen(label) + (q.len > 0 ? 3 : 0) + 3 + (failed ? 10 : 0);
+
+        free(prompt_buf);
+        if (fixed <= budget) {
+            char *qdisp = qsafe ? clip_query_left(qsafe, budget - fixed, utf8) : NULL;
+            const char *tail = failed ? ANSI_DIM "(no match)" ANSI_BOLD_OFF : "";
+            prompt_buf = xasprintf(ANSI_BRIGHT_MAGENTA "%s%s%s%s" ANSI_FG_DEFAULT "%s", label, dot,
+                                   qdisp ? qdisp : "", arrow, tail);
+            free(qdisp);
+        } else {
+            char *plain = xasprintf("%s%s%s%s%s", label, dot, qsafe ? qsafe : "", arrow,
+                                    failed ? "(no match)" : "");
+            char *fit = clip_query_left(plain, budget, utf8);
+            prompt_buf = xasprintf(ANSI_BRIGHT_MAGENTA "%s" ANSI_FG_DEFAULT, fit);
+            free(plain);
+            free(fit);
+        }
+        free(qsafe);
+        in->prompt = prompt_buf;
+        paint(in);
+
+        unsigned char c;
+        if (read_byte_blocking(&c) <= 0) /* EOF: abort, restore */
+            break;
+
+        /* Resize bookkeeping before the next top-of-loop paint, same as
+         * the main keystroke loop. */
+        handle_resize(in);
+
+        if (c == 0x12 || c == 0x13) { /* Ctrl-R / Ctrl-S — step the search */
+            dir = (c == 0x12) ? -1 : 1;
+            /* Nothing to step when there's no query yet, or the query
+             * matches nothing at all (stays "(no match)"). Otherwise a
+             * match is showing (match >= 0); try the next one in `dir`.
+             * If exhausted, keep the current match shown — a silent no-op,
+             * like Up/Down at the history boundaries — rather than blanking
+             * to "(no match)", which would wrongly imply the query stopped
+             * matching. So stepping never sets `failed`. */
+            if (q.len == 0 || failed)
+                continue;
+            long m = input_core_history_search(in, q.data, match + dir, dir);
+            if (m >= 0)
+                match = m;
+            continue;
+        }
+        if (c == 0x7f || c == 0x08) { /* Backspace — shorten the query */
+            if (q.len > 0) {
+                q.len = utf8_prev(q.data, q.len);
+                q.data[q.len] = '\0';
+            }
+            rsearch_recompute(in, &q, dir, &match, &failed);
+            continue;
+        }
+        if (c == 0x07 || c == 0x03) /* Ctrl-G / Ctrl-C — abort, restore */
+            break;
+        if (c == 0x0d) { /* Enter — accept the match and submit */
+            accepted = 1;
+            outcome = RSEARCH_SUBMIT;
+            goto done;
+        }
+        if (c == 0x0a) { /* LF — accept the match, keep editing */
+            accepted = 1;
+            goto done;
+        }
+        if (c == 0x1b) {
+            /* An escape sequence. A bracketed paste feeds its body into the
+             * query (so a paste during search extends it, and — crucially —
+             * the paste body and its end marker can't leak into the main
+             * keystroke loop where a pasted newline could submit the prompt).
+             * Any other sequence (arrow, bare ESC, ...) accepts the match and
+             * returns to editing; input_core_decode_escape has already drained
+             * its bytes, so nothing leaks. */
+            if (input_core_decode_escape(byte_reader_tty, NULL) == INPUT_ACTION_PASTE_BEGIN) {
+                read_paste(paste_into_query, &q);
+                rsearch_recompute(in, &q, dir, &match, &failed);
+                continue;
+            }
+            accepted = 1;
+            goto done;
+        }
+        if (c >= 0x20) { /* printable — extend the query */
+            int seq = utf8_seq_len(c);
+            char bytes[4];
+            bytes[0] = (char)c;
+            int got = 1;
+            for (int i = 1; i < seq; i++) {
+                unsigned char b;
+                if (read_byte_timeout(&b, ESC_TIMEOUT_MS) <= 0)
+                    break;
+                bytes[got++] = (char)b;
+            }
+            buf_append(&q, bytes, got);
+            rsearch_recompute(in, &q, dir, &match, &failed);
+            continue;
+        }
+        /* Other control bytes: ignore, stay in search. */
+    }
+
+    /* Abort / EOF path: restore the line exactly as it was on entry. */
+    input_core_buf_set(in, orig);
+    in->cursor = orig_cursor <= in->len ? orig_cursor : in->len;
+
+done:
+    if (accepted) {
+        /* Rebuild the committed line from `match` (the display buffer may be
+         * the transient empty "(no match)" view). A match is committable only
+         * when one is actually showing (!failed) — accepting out of a
+         * "(no match)" state must not resurrect a stale, typed-past match, nor
+         * submit the original line. So if the current query has no match, we
+         * fall back to the line as it was on entry and never submit. */
+        if (!failed && match >= 0) {
+            input_core_buf_set(in, in->hist[match]);
+            char *p = q.len > 0 ? strstr(in->buf, q.data) : NULL;
+            in->cursor = p ? (size_t)(p - in->buf) : in->len;
+            /* Land history navigation on the matched entry so a subsequent
+             * Up/Down steps from there — as if reached by arrowing, matching
+             * bash's Ctrl-R. */
+            in->hist_pos = (size_t)match;
+            /* If the search began on the live draft, preserve it so Down past
+             * the newest entry restores what the user was typing. (If they
+             * had already arrowed into history, the existing draft is their
+             * real in-progress line — leave it untouched.) */
+            if (orig_hist_pos == in->hist_n) {
+                free(in->draft);
+                in->draft = xstrdup(orig);
+            }
+        } else {
+            input_core_buf_set(in, orig);
+            in->cursor = orig_cursor <= in->len ? orig_cursor : in->len;
+            outcome = RSEARCH_ACCEPT; /* nothing matched — don't submit */
+        }
+    }
+    in->wrap_cont_col0 = 0;
+    in->prompt = orig_prompt;
+    free(prompt_buf);
+    buf_free(&q);
+    free(orig);
+    return outcome;
 }
 
 /* ---------------- non-tty fallback ---------------- */
@@ -893,6 +1268,10 @@ char *input_readline(struct input *in, const char *prompt)
             break;
         case 0x10: /* Ctrl-P */
             input_core_history_prev(in);
+            break;
+        case 0x12: /* Ctrl-R — incremental reverse history search */
+            if (reverse_search(in) == RSEARCH_SUBMIT && in->len > 0)
+                submit = 1;
             break;
         case 0x14: /* Ctrl-T — open transcript pager (no-op if unset) */
             show_transcript(in);
