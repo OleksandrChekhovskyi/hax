@@ -1,0 +1,107 @@
+# Mock provider script for eyeballing the web_fetch tool end-to-end. It first
+# exercises the tool's mechanics on toy URLs, then validates the HTML->Markdown
+# transform on realistic documentation pages — the messy HTML agents actually
+# fetch (code blocks, tables, definition lists, nav chrome).
+#
+# Unlike the other demo scripts this one MAKES REAL NETWORK REQUESTS: the mock
+# only emits the tool calls; the agent runs the real web_fetch, so what renders
+# is genuine fetched content, not canned. The targets are stable, bot-friendly
+# hosts — but the live web changes and can go down, so treat a mismatch as "the
+# web moved", not a regression.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/web_fetch_demo.txt build/hax
+#
+# Every turn ends with a tool call, so the whole sequence plays from your first
+# message in one agentic chain down to the final text-only turn. Run with
+# HAX_TRANSCRIPT=/tmp/wf.txt to also inspect the model-facing output.
+#
+# What web_fetch does to HTML (worth keeping in mind while eyeballing):
+#   - scopes conversion to the main-content container (<main>, role="main",
+#     <article>) when present, and drops <nav>/<aside>, so pages lead with real
+#     content instead of sidebar/ToC link soup;
+#   - pages with no semantic container convert whole (minor breadcrumb chrome
+#     comes along); scoping is cheap, not a full Readability scorer, so a
+#     link-dense block *inside* <main> (e.g. Wikipedia's "N languages" list)
+#     can still leak — the known limit.
+
+# ===================== tool mechanics (toy URLs) =====================
+
+# ---------- turn 1: HTML -> Markdown ------------------------------------
+# example.com is tiny and IANA-stable. Eyeball the tool-call header (bold URL
+# after the `web_fetch` label) and the dim preview: an `#` heading, a paragraph,
+# and a `[text](href)` link — HTML stripped to readable Markdown.
+text A plain HTML page rendered as Markdown.
+tool web_fetch {"url":"https://example.com/"}
+usage in=400 out=16
+end-turn
+
+# ---------- turn 2: raw mode --------------------------------------------
+# Same URL, raw:true. The header gains a dim " (raw)" suffix and the body is the
+# original HTML (tags, <style>, doctype) with no conversion.
+text The same page with raw:true — note the "(raw)" header suffix and unconverted bytes.
+tool web_fetch {"url":"https://example.com/","raw":true}
+usage in=440 out=20
+end-turn
+
+# ---------- turn 3: non-HTML passthrough --------------------------------
+# The GitHub API root returns application/json; web_fetch detects the non-HTML
+# content type and returns the body verbatim — no Markdown mangling.
+text A JSON endpoint — non-HTML content is returned unchanged.
+tool web_fetch {"url":"https://api.github.com"}
+usage in=480 out=18
+end-turn
+
+# ---------- turn 4: error response --------------------------------------
+# A 404. web_fetch returns "HTTP 404 fetching <url>" followed by the error
+# body, converted the same way as a success — so an HTML error page shows its
+# readable message, not raw markup.
+text An error: a URL that 404s — the status line plus the converted error page.
+tool web_fetch {"url":"https://example.com/no-such-page"}
+usage in=520 out=18
+end-turn
+
+# ===================== realistic documentation =====================
+
+# ---------- turn 5: Sphinx docs (Python stdlib) -------------------------
+# docs.python.org is Sphinx-generated: the payoff is the >>> REPL examples as
+# clean fenced ``` code, inline `code` spans, the #/## heading hierarchy, and
+# main-content scoping (it should lead with the module heading, not the ToC).
+text A Sphinx docs page — fenced code blocks, heading hierarchy, content-first.
+tool web_fetch {"url":"https://docs.python.org/3/library/json.html"}
+usage in=600 out=22
+end-turn
+
+# ---------- turn 6: a Linux man page ------------------------------------
+# man7.org renders each section (NAME, SYNOPSIS, ...) as an <h2> with <pre>
+# bodies — many small fenced blocks. It has no semantic main container, so it
+# converts whole (minor breadcrumb at the top), and at ~51 KB it also exercises
+# the output-cap truncation marker.
+text A man page — section headings, many small code blocks, whole-page fallback, truncation.
+tool web_fetch {"url":"https://man7.org/linux/man-pages/man2/open.2.html"}
+usage in=660 out=24
+end-turn
+
+# ---------- turn 7: tables / definition lists ---------------------------
+# A big <dl>/table of status codes — the case that used to mash every
+# "code + description" pair into one unreadable run. Each code should land on
+# its own line with its description following, and real <table> cells separated
+# by " | ". (Also a Wikipedia page, so note the in-<main> language-list leak.)
+text A status-code reference — definition-list and table structure should stay legible, not mashed.
+tool web_fetch {"url":"https://en.wikipedia.org/wiki/List_of_HTTP_status_codes"}
+usage in=720 out=26
+end-turn
+
+# ---------- turn 8: a JavaScript-rendered app (a known limit) -----------
+# A GitHub repo page renders its README client-side, so a no-JS fetch gets only
+# the server shell — UI chrome and "loading" placeholders, not the README. This
+# is expected (the tool description warns about it); the workaround is the raw
+# URL, e.g. https://raw.githubusercontent.com/<owner>/<repo>/<branch>/README.md.
+text And a JS-rendered page (GitHub repo) — expect chrome/placeholders, not the README; the documented no-JS limit.
+tool web_fetch {"url":"https://github.com/pallets/flask"}
+usage in=780 out=28
+end-turn
+
+# ---------- turn 9: close the chain -------------------------------------
+text That covered the mechanics (Markdown, raw, JSON, errors) and realistic conversion (Sphinx, a man page, a status-code table, and a JS-rendered page).
+usage in=840 out=40
+end-turn

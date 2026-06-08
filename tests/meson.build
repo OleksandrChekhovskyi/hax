@@ -37,6 +37,7 @@ test_sources = [
     'terminal/test_input_core.c',
     'terminal/test_interrupt.c',
 
+    'text/test_html_markdown.c',
     'text/test_utf8.c',
     'text/test_utf8_sanitize.c',
 
@@ -45,6 +46,7 @@ test_sources = [
     'tools/test_bash_classify.c',
     'tools/test_edit.c',
     'tools/test_read.c',
+    'tools/test_web_fetch.c',
     'tools/test_write.c',
 
     'transport/test_api_error.c',

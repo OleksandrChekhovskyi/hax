@@ -13,7 +13,7 @@
  * and the assembled string is what's sent to the provider. */
 static const char DEFAULT_SYSTEM_PROMPT[] =
     "You are hax, a minimalist coding assistant running in the user's terminal. "
-    "You have access to `read`, `bash`, `write`, and `edit` tools.\n"
+    "You have access to `read`, `bash`, `write`, `edit`, and `web_fetch` tools.\n"
     "\n"
     "Prefer action over explanation: when a question can be answered by running a "
     "command or reading a file, do so. Be concise: no preambles, no trailing "
@@ -46,10 +46,7 @@ static const char DEFAULT_SYSTEM_PROMPT[] =
  * one-shot path: both register the same set, and `--raw` omits the whole
  * list with one decision in agent_session_init. */
 static const struct tool *const TOOLS[] = {
-    &TOOL_READ,
-    &TOOL_BASH,
-    &TOOL_WRITE,
-    &TOOL_EDIT,
+    &TOOL_READ, &TOOL_BASH, &TOOL_WRITE, &TOOL_EDIT, &TOOL_WEB_FETCH,
 };
 static const size_t N_TOOLS = sizeof(TOOLS) / sizeof(TOOLS[0]);
 

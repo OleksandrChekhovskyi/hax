@@ -435,3 +435,146 @@ int http_post_json(const char *url, const char *const *headers, const char *body
     return http_body_request("POST", url, headers, body ? body : "", body ? body_len : 0, timeout_s,
                              tick, tick_user, out, NULL);
 }
+
+struct http_fetch_state {
+    struct buf body;
+    size_t max_bytes; /* 0 = unbounded */
+    int hit_cap;      /* set when a write was clamped at max_bytes */
+    http_tick_cb tick;
+    void *tick_user;
+};
+
+static size_t http_fetch_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+    struct http_fetch_state *s = userdata;
+    size_t n = size * nmemb;
+    if (s->tick && s->tick(s->tick_user))
+        return 0; /* cancel: short return aborts the transfer */
+    if (s->max_bytes && s->body.len + n > s->max_bytes) {
+        size_t room = s->body.len < s->max_bytes ? s->max_bytes - s->body.len : 0;
+        if (room)
+            buf_append(&s->body, ptr, room);
+        s->hit_cap = 1;
+        return 0; /* stop the download; treated as success below */
+    }
+    buf_append(&s->body, ptr, n);
+    return n;
+}
+
+static int http_fetch_progress_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
+                                  curl_off_t ultotal, curl_off_t ulnow)
+{
+    (void)dltotal;
+    (void)dlnow;
+    (void)ultotal;
+    (void)ulnow;
+    struct http_fetch_state *s = clientp;
+    return (s->tick && s->tick(s->tick_user)) ? 1 : 0;
+}
+
+/* Lowercase a Content-Type and strip any ";charset=..." parameters so the
+ * caller can match on the bare mime ("text/html"). Returns malloc'd or NULL. */
+static char *normalize_content_type(const char *raw)
+{
+    if (!raw)
+        return NULL;
+    size_t n = 0;
+    while (raw[n] && raw[n] != ';' && !isspace((unsigned char)raw[n]))
+        n++;
+    if (!n)
+        return NULL;
+    char *out = xmalloc(n + 1);
+    for (size_t i = 0; i < n; i++)
+        out[i] = (char)tolower((unsigned char)raw[i]);
+    out[n] = '\0';
+    return out;
+}
+
+void http_fetch_free(struct http_fetch_result *r)
+{
+    if (!r)
+        return;
+    free(r->body);
+    free(r->content_type);
+    free(r->final_url);
+    free(r->error);
+    memset(r, 0, sizeof(*r));
+}
+
+int http_fetch(const char *url, size_t max_bytes, long timeout_s, http_tick_cb tick,
+               void *tick_user, struct http_fetch_result *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        out->error = xstrdup("curl init failed");
+        return -1;
+    }
+
+    struct http_fetch_state state;
+    memset(&state, 0, sizeof(state));
+    state.max_bytes = max_bytes;
+    state.tick = tick;
+    state.tick_user = tick_user;
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "hax");
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, ""); /* let curl handle gzip/deflate */
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
+    /* Confine both the initial request and any redirect target to http/https
+     * so a redirect to file:// or scp:// can't exfiltrate local data. */
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS, (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+    if (max_bytes)
+        curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)max_bytes);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, http_fetch_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    if (timeout_s > 0)
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_s);
+    if (tick) {
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, http_fetch_progress_cb);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &state);
+    } else {
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
+    }
+
+    trace_request("GET", url, NULL, NULL, 0);
+    CURLcode rc = curl_easy_perform(curl);
+
+    long status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    out->status = status;
+
+    /* A write-callback short-return clamped at max_bytes surfaces as
+     * CURLE_WRITE_ERROR; that's a successful, deliberately-truncated fetch,
+     * not a failure. A tick-driven cancel uses the same channel, so check the
+     * cap flag (and tick) to disambiguate. */
+    int cancelled = (rc == CURLE_WRITE_ERROR && tick && tick(tick_user));
+    int capped_ok = (rc == CURLE_WRITE_ERROR && state.hit_cap && !cancelled);
+
+    if (rc == CURLE_OK || capped_ok) {
+        char *ct = NULL, *eff = NULL;
+        curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &ct);
+        curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &eff);
+        out->content_type = normalize_content_type(ct);
+        out->final_url = eff ? xstrdup(eff) : NULL;
+        out->truncated = state.hit_cap;
+        out->body_len = state.body.len;
+        out->body = state.body.data ? buf_steal(&state.body) : xstrdup("");
+        trace_response_status(status, NULL);
+        curl_easy_cleanup(curl);
+        return 0;
+    }
+
+    out->error =
+        cancelled ? xstrdup("cancelled") : xasprintf("libcurl: %s", curl_easy_strerror(rc));
+    trace_response_status(status, out->error);
+    buf_free(&state.body);
+    curl_easy_cleanup(curl);
+    return -1;
+}

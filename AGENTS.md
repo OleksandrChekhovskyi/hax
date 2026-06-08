@@ -147,9 +147,9 @@ spawns a probe owns the handle and joins it in `destroy()` before freeing the ta
 **`src/terminal/ansi.h`** centralizes ANSI escape sequences — never inline `\033[...m`
 literals; add a constant there.
 
-Other modules under `src/` (`system/diff`, `render/markdown`, `trace`, `util`,
-`render/spinner`, `system/fs`, …) are small, focused helpers; their headers describe what
-they do.
+Other modules under `src/` (`system/diff`, `render/markdown`, `text/html_markdown`, `trace`,
+`util`, `render/spinner`, `system/fs`, …) are small, focused helpers; their headers describe
+what they do.
 
 ## Code style and conventions
 

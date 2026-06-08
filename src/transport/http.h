@@ -62,4 +62,34 @@ int http_get(const char *url, const char *const *headers, long timeout_s, http_t
 int http_post_json(const char *url, const char *const *headers, const char *body, size_t body_len,
                    long timeout_s, http_tick_cb tick, void *tick_user, char **out);
 
+struct http_fetch_result {
+    long status;        /* HTTP status, or 0 on transport failure */
+    char *body;         /* heap, NUL-terminated; caller frees. NULL on transport failure */
+    size_t body_len;    /* byte length of body (excludes terminator) */
+    char *content_type; /* heap, lowercased mime sans params, or NULL; caller frees */
+    char *final_url;    /* heap, effective URL after redirects, or NULL; caller frees */
+    char *error;        /* heap, transport error string, or NULL; caller frees */
+    int truncated;      /* 1 if the download was stopped at max_bytes */
+};
+
+/* Fetch a URL's content for the web_fetch tool. Unlike http_get (a JSON-probe
+ * helper) this follows redirects (capped, http/https only), sends a plain
+ * User-Agent, hard-caps the downloaded body at `max_bytes`, and reports the
+ * response Content-Type and post-redirect URL.
+ *
+ * Returns 0 whenever an HTTP exchange completed — including non-2xx, which the
+ * caller inspects via `out->status` — with `out->body` holding whatever the
+ * server sent (possibly truncated). Returns -1 on a transport failure (DNS,
+ * connect, timeout, cancel) with `out->error` set and `out->body` NULL.
+ *
+ * `max_bytes` 0 means no download cap. `timeout_s` 0 disables the total
+ * timeout. `tick` is the usual optional cancel/idle side channel. The caller
+ * frees every non-NULL heap field in `out` (a single http_fetch_free helper
+ * does this). */
+int http_fetch(const char *url, size_t max_bytes, long timeout_s, http_tick_cb tick,
+               void *tick_user, struct http_fetch_result *out);
+
+/* Free every heap field of an http_fetch_result (safe on a zeroed struct). */
+void http_fetch_free(struct http_fetch_result *r);
+
 #endif /* HAX_HTTP_H */

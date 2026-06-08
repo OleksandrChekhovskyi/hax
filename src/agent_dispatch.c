@@ -306,7 +306,31 @@ static char *make_silent_arg(const struct tool *tool, const struct item *call, i
             json_decref(root);
         return trimmed;
     }
-    /* Generic fallback (no other tool currently goes silent). */
+    /* Generic fallback: show the tool's declared display_arg value verbatim
+     * (plus any format_display_extra suffix). `read`/`bash` are special-cased
+     * above because a path/command reads better shortened; an arg like
+     * web_fetch's URL must be shown whole — basenaming it would, for a URL
+     * ending in '/', collapse to nothing. */
+    if (tool && tool->def.display_arg && call->tool_arguments_json) {
+        json_t *root = json_loads(call->tool_arguments_json, 0, NULL);
+        const char *val =
+            root ? json_string_value(json_object_get(root, tool->def.display_arg)) : NULL;
+        char *out = NULL;
+        if (val) {
+            char *extra = tool->format_display_extra
+                              ? tool->format_display_extra(call->tool_arguments_json)
+                              : NULL;
+            char *full = (extra && *extra) ? xasprintf("%s%s", val, extra) : xstrdup(val);
+            free(extra);
+            char *flat = flatten_for_display(full);
+            free(full);
+            out = truncate_for_display(flat, (size_t)budget);
+            free(flat);
+        }
+        if (root)
+            json_decref(root);
+        return out ? out : xstrdup("");
+    }
     return xstrdup("");
 }
 
