@@ -6,8 +6,14 @@
 
 /* Pragmatic Markdown renderer for streaming text — NOT a CommonMark
  * implementation. Supports `**bold**`, `*italic*`/`_italic_`, `` `code` ``,
- * line-start headers (#, ##, ###), code fences (```, optional info string),
- * and `* ` list markers (preserved literally so they don't trigger italic).
+ * line-start headers (#, ##, ###), and code fences (```, optional info
+ * string). Unordered list markers (`*`/`-`/`+`) render as a dim `• ` bullet
+ * and ordered markers (`N.`/`N)`) keep their number but dim it, so the marker
+ * recedes and the item text leads. Thematic breaks (`---`/`***`/`___`) render
+ * as a short dim row of spaced dots (kept distinct from the harness's
+ * full-width solid rules), and GFM pipe tables are buffered whole and laid out
+ * as an aligned grid with dim `│` column separators — or reflowed to a bulleted
+ * `label: value` record list when too wide for the wrap width.
  * Bold and inline-code are tracked as independent attributes, so `**`code`**`
  * (bold around inline code) renders correctly. Emphasis markers require a
  * non-alphanumeric byte on the left to open, so identifiers like
@@ -38,14 +44,16 @@ typedef void (*md_emit_fn)(const char *bytes, size_t n, int is_raw, void *user);
 struct md_renderer;
 
 /* wrap_width: cells per row before the renderer inserts a soft break at
- * the last word boundary. 0 disables wrapping (content passes through
- * verbatim, exactly as the model emitted it — used by tests for byte-
- * exact comparison and as a safety hatch). Code fences and headings are
- * always passed through verbatim regardless of wrap_width. The renderer
- * also collapses single \n inside paragraphs to a space (CommonMark soft
- * break) so a model emitting narrow lines is rewrapped to the available
- * width; \n followed by a block marker (list bullet, heading, fence
- * opener, blank line) stays a hard break. */
+ * the last word boundary. <= 0 means unlimited width — no reflow, and
+ * tables lay out at their natural column widths rather than choosing the
+ * record-list fallback (used by tests for byte-exact comparison and as a
+ * safety hatch). Prettification (emphasis, headings, list markers, rules,
+ * tables) applies regardless of wrap_width; only line wrapping is gated on
+ * it. Code fences and headings are passed through without wrapping. The
+ * renderer also collapses single \n inside paragraphs to a space
+ * (CommonMark soft break) so a model emitting narrow lines is rewrapped to
+ * the available width; \n followed by a block marker (list bullet, heading,
+ * fence opener, blank line) stays a hard break. */
 struct md_renderer *md_new(md_emit_fn emit, void *user, int wrap_width);
 void md_feed(struct md_renderer *m, const char *s, size_t n);
 void md_flush(struct md_renderer *m); /* commit pending tail at end of turn */

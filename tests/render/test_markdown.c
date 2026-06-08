@@ -5,6 +5,28 @@
 #include "harness.h"
 #include "util.h"
 #include "render/markdown.h"
+#include "terminal/ansi.h"
+
+/* Building blocks for expected-output strings. The SGR macros alias the
+ * canonical ANSI_* sequences (single source of truth in terminal/ansi.h);
+ * the rest are content glyphs the renderer emits, which aren't ANSI
+ * escapes so they have no ANSI_* equivalent. */
+#define DIM      ANSI_DIM                        /* \x1b[2m */
+#define OFF      ANSI_BOLD_OFF                   /* \x1b[22m — SGR 22 closes bold AND dim */
+#define BLD      ANSI_BOLD                       /* \x1b[1m */
+#define ITAL     ANSI_ITALIC                     /* \x1b[3m */
+#define ITAL_OFF ANSI_ITALIC_OFF                 /* \x1b[23m */
+#define CODE     ANSI_CYAN                       /* \x1b[36m — inline code span */
+#define CODE_OFF ANSI_FG_DEFAULT                 /* \x1b[39m */
+#define ERASE    ANSI_ERASE_LINE                 /* \x1b[K */
+#define CUB(n)   "\x1b[" #n "D"                  /* cursor back n columns (retro-wrap) */
+#define BUL      DIM "\xe2\x80\xa2 " OFF         /* dim "• " bullet */
+#define DOT      "\xc2\xb7"                      /* · middle dot (divider) */
+#define DINKUS   DIM DOT "   " DOT "   " DOT OFF /* 3-dot divider (wide/unlimited width) */
+#define HL       "\xe2\x94\x80"                  /* ─ table rule */
+#define VB       "\xe2\x94\x82"                  /* │ table column separator */
+#define CR       "\xe2\x94\xbc"                  /* ┼ table underline crossing */
+#define TSEP     " " DIM VB OFF " "              /* dim " │ " column separator */
 
 /* Capture md_renderer output into a buf so tests can compare bytes. The
  * is_raw flag distinguishes ANSI escapes from content for downstream
@@ -61,14 +83,14 @@ static void test_empty(void)
 static void test_bold_simple(void)
 {
     char *got = render_one("**hi**");
-    EXPECT_STR_EQ(got, "\x1b[1mhi\x1b[22m");
+    EXPECT_STR_EQ(got, BLD "hi" OFF);
     free(got);
 }
 
 static void test_bold_in_sentence(void)
 {
     char *got = render_one("a **b** c");
-    EXPECT_STR_EQ(got, "a \x1b[1mb\x1b[22m c");
+    EXPECT_STR_EQ(got, "a " BLD "b" OFF " c");
     free(got);
 }
 
@@ -77,14 +99,14 @@ static void test_bold_in_sentence(void)
 static void test_italic_star(void)
 {
     char *got = render_one("a *b* c");
-    EXPECT_STR_EQ(got, "a \x1b[3mb\x1b[23m c");
+    EXPECT_STR_EQ(got, "a " ITAL "b" ITAL_OFF " c");
     free(got);
 }
 
 static void test_italic_underscore(void)
 {
     char *got = render_one("_b_");
-    EXPECT_STR_EQ(got, "\x1b[3mb\x1b[23m");
+    EXPECT_STR_EQ(got, ITAL "b" ITAL_OFF);
     free(got);
 }
 
@@ -93,7 +115,7 @@ static void test_italic_underscore(void)
 static void test_inline_code(void)
 {
     char *got = render_one("a `read` b");
-    EXPECT_STR_EQ(got, "a \x1b[36mread\x1b[39m b");
+    EXPECT_STR_EQ(got, "a " CODE "read" CODE_OFF " b");
     free(got);
 }
 
@@ -105,7 +127,7 @@ static void test_bold_around_code(void)
      * The verbatim-cyan "read" comes through because inline-code spans
      * don't process inner markers. */
     char *got = render_one("**`read`**");
-    EXPECT_STR_EQ(got, "\x1b[1m\x1b[36mread\x1b[39m\x1b[22m");
+    EXPECT_STR_EQ(got, BLD CODE "read" CODE_OFF OFF);
     free(got);
 }
 
@@ -114,14 +136,14 @@ static void test_bold_around_code(void)
 static void test_heading_h3(void)
 {
     char *got = render_one("### What it does\n");
-    EXPECT_STR_EQ(got, "\x1b[1mWhat it does\x1b[22m\n");
+    EXPECT_STR_EQ(got, BLD "What it does" OFF "\n");
     free(got);
 }
 
 static void test_heading_then_paragraph(void)
 {
     char *got = render_one("## Tech\nDetails");
-    EXPECT_STR_EQ(got, "\x1b[1mTech\x1b[22m\nDetails");
+    EXPECT_STR_EQ(got, BLD "Tech" OFF "\nDetails");
     free(got);
 }
 
@@ -140,7 +162,7 @@ static void test_code_fence(void)
     /* Marker lines are consumed entirely (including their \n) so the dim
      * region wraps only the content lines. */
     char *got = render_one("```\nfoo\nbar\n```\n");
-    EXPECT_STR_EQ(got, "\x1b[2mfoo\nbar\n\x1b[22m");
+    EXPECT_STR_EQ(got, DIM "foo\nbar\n" OFF);
     free(got);
 }
 
@@ -160,7 +182,7 @@ static void test_code_fence_with_lang(void)
     /* Code fence with a language identifier — only the fenced
      * content is rendered. */
     char *got = render_one("```c\nint x;\n```\n");
-    EXPECT_STR_EQ(got, "\x1b[2mint x;\n\x1b[22m");
+    EXPECT_STR_EQ(got, DIM "int x;\n" OFF);
     free(got);
 }
 
@@ -169,7 +191,7 @@ static void test_code_fence_lang_with_attrs(void)
     /* Fence opener with extra info-string tokens — the entire opener
      * line is consumed and only fenced content is rendered. */
     char *got = render_one("```python title=\"x.py\"\nprint(1)\n```\n");
-    EXPECT_STR_EQ(got, "\x1b[2mprint(1)\n\x1b[22m");
+    EXPECT_STR_EQ(got, DIM "print(1)\n" OFF);
     free(got);
 }
 
@@ -185,7 +207,7 @@ static void test_code_fence_lang_split_across_feeds(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "\x1b[2mint x;\n\x1b[22m");
+    EXPECT_STR_EQ(s, DIM "int x;\n" OFF);
     free(s);
 }
 
@@ -193,7 +215,7 @@ static void test_code_fence_inner_markers_verbatim(void)
 {
     /* `*` inside a fence must NOT toggle italic; the fence is verbatim. */
     char *got = render_one("```\n*not italic*\n```\n");
-    EXPECT_STR_EQ(got, "\x1b[2m*not italic*\n\x1b[22m");
+    EXPECT_STR_EQ(got, DIM "*not italic*\n" OFF);
     free(got);
 }
 
@@ -205,7 +227,7 @@ static void test_code_fence_inner_with_info_is_content(void)
      * scenario from the markdown-rendering-demo trace. */
     const char *in = "```markdown\n# Title\n```python\ndef f(): pass\n```\n";
     char *got = render_one(in);
-    const char *want = "\x1b[2m# Title\n```python\ndef f(): pass\n\x1b[22m";
+    const char *want = DIM "# Title\n```python\ndef f(): pass\n" OFF;
     EXPECT_STR_EQ(got, want);
     free(got);
 }
@@ -216,7 +238,7 @@ static void test_code_fence_four_backticks_wraps_three(void)
      * pattern for documenting code that itself contains backticks. */
     const char *in = "````\nthis has ```inner``` text\n````\n";
     char *got = render_one(in);
-    const char *want = "\x1b[2mthis has ```inner``` text\n\x1b[22m";
+    const char *want = DIM "this has ```inner``` text\n" OFF;
     EXPECT_STR_EQ(got, want);
     free(got);
 }
@@ -226,7 +248,7 @@ static void test_code_fence_three_backticks_dont_close_four(void)
     /* A 3-backtick line inside a 4-backtick fence stays as content. */
     const char *in = "````\nbody\n```\nstill body\n````\n";
     char *got = render_one(in);
-    const char *want = "\x1b[2mbody\n```\nstill body\n\x1b[22m";
+    const char *want = DIM "body\n```\nstill body\n" OFF;
     EXPECT_STR_EQ(got, want);
     free(got);
 }
@@ -235,7 +257,7 @@ static void test_code_fence_closer_with_trailing_spaces(void)
 {
     /* CommonMark allows trailing whitespace on the closer line. */
     char *got = render_one("```\nfoo\n```   \n");
-    EXPECT_STR_EQ(got, "\x1b[2mfoo\n\x1b[22m");
+    EXPECT_STR_EQ(got, DIM "foo\n" OFF);
     free(got);
 }
 
@@ -244,7 +266,7 @@ static void test_code_fence_crlf_closer(void)
     /* CRLF line endings — the trailing \r before \n must be treated as
      * whitespace, otherwise the closer is misread as content. */
     char *got = render_one("```\r\nfoo\r\n```\r\n");
-    EXPECT_STR_EQ(got, "\x1b[2mfoo\r\n\x1b[22m");
+    EXPECT_STR_EQ(got, DIM "foo\r\n" OFF);
     free(got);
 }
 
@@ -253,7 +275,7 @@ static void test_code_fence_crlf_lang(void)
     /* CRLF on the opener line — \r before \n is treated as whitespace
      * and does not leak into rendered output. */
     char *got = render_one("```python\r\nx = 1\r\n```\r\n");
-    EXPECT_STR_EQ(got, "\x1b[2mx = 1\r\n\x1b[22m");
+    EXPECT_STR_EQ(got, DIM "x = 1\r\n" OFF);
     free(got);
 }
 
@@ -261,24 +283,24 @@ static void test_code_fence_crlf_lang(void)
 
 static void test_star_space_is_list_marker(void)
 {
-    /* `* foo` at line start renders the `*` literally — must not enter italic. */
+    /* `* foo` at line start renders as a dim bullet — must not enter italic. */
     char *got = render_one("* foo");
-    EXPECT_STR_EQ(got, "* foo");
+    EXPECT_STR_EQ(got, BUL "foo");
     free(got);
 }
 
 static void test_dash_list_passthrough(void)
 {
-    /* `- foo` has no special meaning to our parser; it just renders. */
+    /* `- foo` renders as a dim bullet. */
     char *got = render_one("- foo");
-    EXPECT_STR_EQ(got, "- foo");
+    EXPECT_STR_EQ(got, BUL "foo");
     free(got);
 }
 
 static void test_numbered_list_passthrough(void)
 {
     char *got = render_one("1. foo\n2. bar");
-    EXPECT_STR_EQ(got, "1. foo\n2. bar");
+    EXPECT_STR_EQ(got, DIM "1. " OFF "foo\n" DIM "2. " OFF "bar");
     free(got);
 }
 
@@ -286,7 +308,7 @@ static void test_list_with_bold(void)
 {
     /* Snippet pattern: `- **bold**: rest` */
     char *got = render_one("- **bold**: rest");
-    EXPECT_STR_EQ(got, "- \x1b[1mbold\x1b[22m: rest");
+    EXPECT_STR_EQ(got, BUL BLD "bold" OFF ": rest");
     free(got);
 }
 
@@ -304,7 +326,7 @@ static void test_split_double_star(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "\x1b[1mhi\x1b[22m");
+    EXPECT_STR_EQ(s, BLD "hi" OFF);
     free(s);
 }
 
@@ -320,7 +342,7 @@ static void test_split_inline_code(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "x \x1b[36my\x1b[39m");
+    EXPECT_STR_EQ(s, "x " CODE "y" CODE_OFF);
     free(s);
 }
 
@@ -336,7 +358,7 @@ static void test_split_fence_at_line_start(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "\x1b[2mbody\n\x1b[22m");
+    EXPECT_STR_EQ(s, DIM "body\n" OFF);
     free(s);
 }
 
@@ -351,7 +373,7 @@ static void test_split_heading(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "\x1b[1mtitle\x1b[22m\n");
+    EXPECT_STR_EQ(s, BLD "title" OFF "\n");
     free(s);
 }
 
@@ -362,7 +384,7 @@ static void test_flush_emits_unterminated_marker(void)
     /* A `**bold` with no closing — flush should emit the bold-on but
      * close it cleanly so the terminal isn't left in a styled state. */
     char *got = render_one("**bold");
-    EXPECT_STR_EQ(got, "\x1b[1mbold\x1b[22m");
+    EXPECT_STR_EQ(got, BLD "bold" OFF);
     free(got);
 }
 
@@ -380,14 +402,14 @@ static void test_flush_closes_italic_at_eof(void)
      * the streaming loop can't tell if a `**` would follow. md_flush must
      * recognize that we're in_italic and treat the tail `*` as the closer. */
     char *got = render_one("*hi*");
-    EXPECT_STR_EQ(got, "\x1b[3mhi\x1b[23m");
+    EXPECT_STR_EQ(got, ITAL "hi" ITAL_OFF);
     free(got);
 }
 
 static void test_flush_closes_underscore_italic_at_eof(void)
 {
     char *got = render_one("_hi_");
-    EXPECT_STR_EQ(got, "\x1b[3mhi\x1b[23m");
+    EXPECT_STR_EQ(got, ITAL "hi" ITAL_OFF);
     free(got);
 }
 
@@ -396,7 +418,7 @@ static void test_flush_closes_bold_at_eof(void)
     /* `**hi**` with no trailing byte after the second `**` — the closer
      * defers and md_flush must recognize the bold close. */
     char *got = render_one("**hi**");
-    EXPECT_STR_EQ(got, "\x1b[1mhi\x1b[22m");
+    EXPECT_STR_EQ(got, BLD "hi" OFF);
     free(got);
 }
 
@@ -406,7 +428,7 @@ static void test_flush_closes_fence_at_eof(void)
      * backticks defer (couldn't see whether more would follow) and
      * md_flush must recognize them as a valid closer. */
     char *got = render_one("```\nfoo\n```");
-    EXPECT_STR_EQ(got, "\x1b[2mfoo\n\x1b[22m");
+    EXPECT_STR_EQ(got, DIM "foo\n" OFF);
     free(got);
 }
 
@@ -435,7 +457,7 @@ static void test_inline_code_bold_marker_verbatim(void)
 {
     /* `**foo**` — bold-marker bytes inside backticks must not toggle bold. */
     char *got = render_one("see `**foo**` here");
-    EXPECT_STR_EQ(got, "see \x1b[36m**foo**\x1b[39m here");
+    EXPECT_STR_EQ(got, "see " CODE "**foo**" CODE_OFF " here");
     free(got);
 }
 
@@ -443,14 +465,14 @@ static void test_inline_code_underscore_verbatim(void)
 {
     /* The user's reported case wrapped in inline code. */
     char *got = render_one("`compile_commands.json`");
-    EXPECT_STR_EQ(got, "\x1b[36mcompile_commands.json\x1b[39m");
+    EXPECT_STR_EQ(got, CODE "compile_commands.json" CODE_OFF);
     free(got);
 }
 
 static void test_code_fence_all_markers_verbatim(void)
 {
     char *got = render_one("```\n**bold** and _italic_ and `code`\n```\n");
-    EXPECT_STR_EQ(got, "\x1b[2m**bold** and _italic_ and `code`\n\x1b[22m");
+    EXPECT_STR_EQ(got, DIM "**bold** and _italic_ and `code`\n" OFF);
     free(got);
 }
 
@@ -487,7 +509,7 @@ static void test_underscore_at_word_boundary_opens(void)
      * opening rule (left non-alpha) is satisfied. Closing happens
      * unconditionally because we're already in italic. */
     char *got = render_one("_word_");
-    EXPECT_STR_EQ(got, "\x1b[3mword\x1b[23m");
+    EXPECT_STR_EQ(got, ITAL "word" ITAL_OFF);
     free(got);
 }
 
@@ -519,7 +541,7 @@ static void test_underscore_after_space_split_across_feeds(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "say \x1b[3myes\x1b[23m");
+    EXPECT_STR_EQ(s, "say " ITAL "yes" ITAL_OFF);
     free(s);
 }
 
@@ -543,11 +565,11 @@ static void test_spaced_double_star(void)
 
 static void test_indented_list_marker_literal(void)
 {
-    /* Indented `  * item` — line-start path doesn't catch this because
-     * leading whitespace clears at_line_start, so the `*` falls through
-     * to inline. The right-side-whitespace check must keep it literal. */
+    /* Indented `  * item` — line-start path catches this (up to 3 leading
+     * spaces are allowed before a list marker), and renders it as a dim
+     * bullet with the indent preserved. */
     char *got = render_one("  * item");
-    EXPECT_STR_EQ(got, "  * item");
+    EXPECT_STR_EQ(got, "  " BUL "item");
     free(got);
 }
 
@@ -575,7 +597,7 @@ static void test_fence_long_info_split_across_feeds(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "\x1b[2mx = 1\n\x1b[22m");
+    EXPECT_STR_EQ(s, DIM "x = 1\n" OFF);
     free(s);
 }
 
@@ -590,19 +612,20 @@ static void test_soft_join_user_review_pattern(void)
      * continuation text, not two. */
     char *got =
         render_one("- **P3 `src/path:line` - lorem ipsum.**\n  The detailed explanation follows.");
-    EXPECT_STR_EQ(got, "- \x1b[1mP3 \x1b[36msrc/path:line\x1b[39m - lorem ipsum.\x1b[22m"
-                       " The detailed explanation follows.");
+    EXPECT_STR_EQ(got, BUL BLD "P3 " CODE "src/path:line" CODE_OFF " - lorem ipsum." OFF
+                               " The detailed explanation follows.");
     free(got);
 }
 
 static void test_eof_thematic_no_trailing_newline(void)
 {
     /* Thematic break at end of stream without a trailing \n. The
-     * streaming \n handler defers waiting for the line terminator,
-     * but at md_flush we know the bytes-we-have ARE the whole line,
-     * and a 3+ marker run is a valid thematic break. */
+     * streaming \n handler defers waiting for the line terminator, but at
+     * md_flush the bytes-we-have ARE the whole line, so a 3+ marker run is
+     * a valid thematic break and renders as the dim divider — same as when
+     * it has a trailing newline (no EOF-only literal inconsistency). */
     char *got = render_one("section\n---");
-    EXPECT_STR_EQ(got, "section\n---");
+    EXPECT_STR_EQ(got, "section\n" DINKUS "\n");
     free(got);
 }
 
@@ -616,16 +639,27 @@ static void test_eof_setext_h1_no_trailing_newline(void)
 
 static void test_eof_setext_h2_no_trailing_newline(void)
 {
-    /* Setext h2 underline `-----`. */
+    /* `-----` is both a setext h2 underline and a thematic break; we don't
+     * render setext, so it becomes the dim divider — matching the streaming
+     * path for `Heading\n-----\n`. */
     char *got = render_one("Heading\n-----");
-    EXPECT_STR_EQ(got, "Heading\n-----");
+    EXPECT_STR_EQ(got, "Heading\n" DINKUS "\n");
     free(got);
 }
 
 static void test_eof_thematic_spaced_no_trailing_newline(void)
 {
     char *got = render_one("section\n_ _ _");
-    EXPECT_STR_EQ(got, "section\n_ _ _");
+    EXPECT_STR_EQ(got, "section\n" DINKUS "\n");
+    free(got);
+}
+
+static void test_eof_bare_thematic_no_trailing_newline(void)
+{
+    /* Input that is *only* a thematic break (no preceding line) and ends
+     * without a newline still renders as the divider, not literal dashes. */
+    char *got = render_one("---");
+    EXPECT_STR_EQ(got, DINKUS "\n");
     free(got);
 }
 
@@ -633,9 +667,9 @@ static void test_crlf_thematic_break(void)
 {
     /* CRLF line endings — \r before \n in the marker line must be
      * treated as whitespace by the soft-break thematic scan, so
-     * the marker is recognized. */
+     * the marker is recognized and rendered as a dinkus. */
     char *got = render_one("section\n---\r\nnext");
-    EXPECT_STR_EQ(got, "section\n---\r\nnext");
+    EXPECT_STR_EQ(got, "section\n" DIM "\xc2\xb7   \xc2\xb7   \xc2\xb7" OFF "\nnext");
     free(got);
 }
 
@@ -747,7 +781,7 @@ static void test_hard_break_trailing_two_spaces_after_code_span(void)
      * span must break onto its own line, not soft-join with a double
      * space before the next word. */
     char *got = render_one("`x`  \n  bar");
-    EXPECT_STR_EQ(got, "\x1b[36mx\x1b[39m  \n  bar");
+    EXPECT_STR_EQ(got, CODE "x" CODE_OFF "  \n  bar");
     free(got);
 }
 
@@ -784,7 +818,7 @@ static void test_hard_break_carries_emphasis(void)
      * the trailing `**` is consumed as the closer rather than left
      * literal. */
     char *got = render_one("**foo  \nbar**");
-    EXPECT_STR_EQ(got, "\x1b[1mfoo  \nbar\x1b[22m");
+    EXPECT_STR_EQ(got, BLD "foo  \nbar" OFF);
     free(got);
 }
 
@@ -794,7 +828,7 @@ static void test_trailing_spaces_before_delimiter_soft_join(void)
      * the line ends with a delimiter — a soft join, not a hard break.
      * The consumed delimiter clears the trailing-space run. */
     char *got = render_one("**foo  **\nbar");
-    EXPECT_STR_EQ(got, "\x1b[1mfoo  \x1b[22m bar");
+    EXPECT_STR_EQ(got, BLD "foo  " OFF " bar");
     free(got);
 }
 
@@ -806,7 +840,7 @@ static void test_hard_break_before_block_closes_emphasis(void)
      * trailing spaces. The hard *line* break only carries emphasis
      * mid-paragraph. */
     char *got = render_one("**foo  \n\nbar**");
-    EXPECT_STR_EQ(got, "\x1b[1mfoo  \x1b[22m\n\nbar**");
+    EXPECT_STR_EQ(got, BLD "foo  " OFF "\n\nbar**");
     free(got);
 }
 
@@ -815,7 +849,7 @@ static void test_hard_break_before_fence_closes_emphasis(void)
     /* Same rule with a fence opener as the next line: emphasis closes
      * before the fence rather than being carried into the code block. */
     char *got = render_one("**foo  \n```\ncode\n```");
-    EXPECT_STR_EQ(got, "\x1b[1mfoo  \x1b[22m\n\x1b[2mcode\n\x1b[22m");
+    EXPECT_STR_EQ(got, BLD "foo  " OFF "\n" DIM "code\n" OFF);
     free(got);
 }
 
@@ -869,21 +903,21 @@ static void test_hard_break_list_marker(void)
 {
     /* Next line starting with a list marker is a hard break. */
     char *got = render_one("foo\n* item");
-    EXPECT_STR_EQ(got, "foo\n* item");
+    EXPECT_STR_EQ(got, "foo\n" BUL "item");
     free(got);
 }
 
 static void test_hard_break_dash_list(void)
 {
     char *got = render_one("foo\n- item");
-    EXPECT_STR_EQ(got, "foo\n- item");
+    EXPECT_STR_EQ(got, "foo\n" BUL "item");
     free(got);
 }
 
 static void test_hard_break_numbered_list(void)
 {
     char *got = render_one("foo\n1. item");
-    EXPECT_STR_EQ(got, "foo\n1. item");
+    EXPECT_STR_EQ(got, "foo\n" DIM "1. " OFF "item");
     free(got);
 }
 
@@ -891,7 +925,7 @@ static void test_hard_break_heading(void)
 {
     /* Next line starting with a heading marker is hard. */
     char *got = render_one("foo\n## h\n");
-    EXPECT_STR_EQ(got, "foo\n\x1b[1mh\x1b[22m\n");
+    EXPECT_STR_EQ(got, "foo\n" BLD "h" OFF "\n");
     free(got);
 }
 
@@ -899,7 +933,7 @@ static void test_hard_break_fence(void)
 {
     /* Next line starting with ``` opens a fence — must be hard. */
     char *got = render_one("foo\n```\ncode\n```\n");
-    EXPECT_STR_EQ(got, "foo\n\x1b[2mcode\n\x1b[22m");
+    EXPECT_STR_EQ(got, "foo\n" DIM "code\n" OFF);
     free(got);
 }
 
@@ -908,7 +942,7 @@ static void test_soft_break_carries_bold(void)
     /* Bold style continues across a soft break — we don't close on
      * soft \n the way we do on hard. */
     char *got = render_one("**foo\nbar**");
-    EXPECT_STR_EQ(got, "\x1b[1mfoo bar\x1b[22m");
+    EXPECT_STR_EQ(got, BLD "foo bar" OFF);
     free(got);
 }
 
@@ -947,23 +981,20 @@ static void test_soft_break_paragraph_break_across_feeds(void)
 static void test_hard_break_indented_bullet_preserves_indent(void)
 {
     /* Up to 3 leading spaces before a list marker is still a list
-     * (CommonMark). The leading spaces are PRESERVED so a nested
-     * list keeps its visual hierarchy — `* parent\n  - child`
-     * stays nested rather than being flattened to top level. */
+     * (CommonMark). The leading spaces are PRESERVED and markers are
+     * rendered as dim bullets — `* parent\n  - child` keeps its
+     * nesting indent. */
     char *got = render_one("* parent\n  - child\n  - sibling");
-    EXPECT_STR_EQ(got, "* parent\n  - child\n  - sibling");
+    EXPECT_STR_EQ(got, BUL "parent\n  " BUL "child\n  " BUL "sibling");
     free(got);
 }
 
 static void test_hard_break_indented_bullet_no_parent(void)
 {
-    /* Same shape without a containing list — the indent is
-     * preserved (we can't tell from the byte stream whether it's
-     * top-level allowance or nesting). Renders the leading spaces
-     * literally; CommonMark would normalize but our pragmatic
-     * approach errs on the side of preserving model intent. */
+    /* Same shape without a containing list — the indent is preserved
+     * and markers are prettified. */
     char *got = render_one("intro\n  - one\n  - two");
-    EXPECT_STR_EQ(got, "intro\n  - one\n  - two");
+    EXPECT_STR_EQ(got, "intro\n  " BUL "one\n  " BUL "two");
     free(got);
 }
 
@@ -972,7 +1003,7 @@ static void test_hard_break_indented_heading(void)
     /* `  ## sub` is still a heading. The leading spaces are dropped
      * (CommonMark equivalence) so the heading renders as bold. */
     char *got = render_one("preamble\n  ## sub\nbody");
-    EXPECT_STR_EQ(got, "preamble\n\x1b[1msub\x1b[22m\nbody");
+    EXPECT_STR_EQ(got, "preamble\n" BLD "sub" OFF "\nbody");
     free(got);
 }
 
@@ -980,7 +1011,7 @@ static void test_hard_break_indented_fence(void)
 {
     /* Indented fence opener — same equivalence. */
     char *got = render_one("intro\n  ```\ncode\n```\n");
-    EXPECT_STR_EQ(got, "intro\n\x1b[2mcode\n\x1b[22m");
+    EXPECT_STR_EQ(got, "intro\n" DIM "code\n" OFF);
     free(got);
 }
 
@@ -993,7 +1024,7 @@ static void test_code_fence_indented_closer_closes(void)
      * indent is normalized away, the body stays verbatim (dim, indent
      * preserved), and the trailing line renders normally. */
     char *got = render_one("  ```\n  code line\n  ```\n  after");
-    EXPECT_STR_EQ(got, "\x1b[2m  code line\n\x1b[22m  after");
+    EXPECT_STR_EQ(got, DIM "  code line\n" OFF "  after");
     free(got);
 }
 
@@ -1003,7 +1034,7 @@ static void test_code_fence_indented_closer_at_eof(void)
      * it (skipping up to 3 leading spaces like the streaming path) and
      * consume it, not emit it as dim content. */
     char *got = render_one("  ```\n  code\n  ```");
-    EXPECT_STR_EQ(got, "\x1b[2m  code\n\x1b[22m");
+    EXPECT_STR_EQ(got, DIM "  code\n" OFF);
     free(got);
 }
 
@@ -1024,24 +1055,23 @@ static void test_line_start_indented_heading(void)
      * per CommonMark. step_line_start must normalize, not just the
      * soft-break path. */
     char *got = render_one("  ## h\nbody");
-    EXPECT_STR_EQ(got, "\x1b[1mh\x1b[22m\nbody");
+    EXPECT_STR_EQ(got, BLD "h" OFF "\nbody");
     free(got);
 }
 
 static void test_line_start_indented_fence(void)
 {
     char *got = render_one("  ```\ncode\n```\n");
-    EXPECT_STR_EQ(got, "\x1b[2mcode\n\x1b[22m");
+    EXPECT_STR_EQ(got, DIM "code\n" OFF);
     free(got);
 }
 
 static void test_line_start_indented_thematic(void)
 {
-    /* Thematic breaks are CommonMark-equivalent under leading
-     * spaces — the marker line is consumed verbatim from the
-     * normalized position, so the leading spaces don't survive. */
+    /* Thematic breaks are CommonMark-equivalent under leading spaces —
+     * the marker line is normalized and rendered as a dim dinkus. */
     char *got = render_one("  ---\nbody");
-    EXPECT_STR_EQ(got, "---\nbody");
+    EXPECT_STR_EQ(got, DIM "\xc2\xb7   \xc2\xb7   \xc2\xb7" OFF "\nbody");
     free(got);
 }
 
@@ -1050,7 +1080,7 @@ static void test_line_start_indented_after_blank(void)
     /* `intro\n\n  ```\n…` — fence after blank line at line start
      * with leading spaces. Same path. */
     char *got = render_one("intro\n\n  ```\ncode\n```\n");
-    EXPECT_STR_EQ(got, "intro\n\n\x1b[2mcode\n\x1b[22m");
+    EXPECT_STR_EQ(got, "intro\n\n" DIM "code\n" OFF);
     free(got);
 }
 
@@ -1058,9 +1088,9 @@ static void test_line_start_indented_bullet_preserves(void)
 {
     /* Bullets are NOT normalized — leading spaces stay so nested
      * lists keep their visual indent even when arriving at line
-     * start. */
+     * start. The marker is prettified to a dim bullet. */
     char *got = render_one("  - item");
-    EXPECT_STR_EQ(got, "  - item");
+    EXPECT_STR_EQ(got, "  " BUL "item");
     free(got);
 }
 
@@ -1094,17 +1124,17 @@ static void test_hard_break_table_preserves_continuation_indent(void)
 
 static void test_hard_break_thematic_dashes(void)
 {
-    /* `---` / `***` / `___` is a thematic break (or setext underline)
-     * — must stay on its own line. */
+    /* `---` / `***` / `___` is a thematic break — rendered as a dim
+     * dinkus on its own line. */
     char *got = render_one("section\n---\nnext bit");
-    EXPECT_STR_EQ(got, "section\n---\nnext bit");
+    EXPECT_STR_EQ(got, "section\n" DIM "\xc2\xb7   \xc2\xb7   \xc2\xb7" OFF "\nnext bit");
     free(got);
 }
 
 static void test_hard_break_thematic_stars(void)
 {
     char *got = render_one("section\n***\nnext bit");
-    EXPECT_STR_EQ(got, "section\n***\nnext bit");
+    EXPECT_STR_EQ(got, "section\n" DIM "\xc2\xb7   \xc2\xb7   \xc2\xb7" OFF "\nnext bit");
     free(got);
 }
 
@@ -1120,27 +1150,25 @@ static void test_hard_break_setext_h1_underline(void)
 static void test_hard_break_spaced_thematic_underscores(void)
 {
     /* CommonMark allows whitespace between thematic markers:
-     * `_ _ _` is a thematic break. Soft-join must not collapse it. */
+     * `_ _ _` is a thematic break — rendered as a dim dinkus. */
     char *got = render_one("section\n_ _ _\nnext");
-    EXPECT_STR_EQ(got, "section\n_ _ _\nnext");
+    EXPECT_STR_EQ(got, "section\n" DIM "\xc2\xb7   \xc2\xb7   \xc2\xb7" OFF "\nnext");
     free(got);
 }
 
 static void test_hard_break_spaced_thematic_stars(void)
 {
+    /* `* * *` is recognized as a thematic break (spaced markers with
+     * 3+ instances) and rendered as a dim dinkus. */
     char *got = render_one("section\n* * *\nnext");
-    /* Bullet check fires first on `* * *` since data[scan+1]=' '
-     * matches the `* ` bullet pattern. The hard break still
-     * happens, which is what matters; step_line_start's thematic
-     * consumer then captures the full marker line. */
-    EXPECT_STR_EQ(got, "section\n* * *\nnext");
+    EXPECT_STR_EQ(got, "section\n" DIM "\xc2\xb7   \xc2\xb7   \xc2\xb7" OFF "\nnext");
     free(got);
 }
 
 static void test_hard_break_thematic_underscores(void)
 {
     char *got = render_one("section\n___\nnext bit");
-    EXPECT_STR_EQ(got, "section\n___\nnext bit");
+    EXPECT_STR_EQ(got, "section\n" DIM "\xc2\xb7   \xc2\xb7   \xc2\xb7" OFF "\nnext bit");
     free(got);
 }
 
@@ -1156,7 +1184,7 @@ static void test_soft_join_double_dash_is_not_thematic(void)
 static void test_hard_break_plus_bullet(void)
 {
     char *got = render_one("intro\n+ alpha\n+ beta");
-    EXPECT_STR_EQ(got, "intro\n+ alpha\n+ beta");
+    EXPECT_STR_EQ(got, "intro\n" BUL "alpha\n" BUL "beta");
     free(got);
 }
 
@@ -1164,18 +1192,27 @@ static void test_hard_break_numbered_paren(void)
 {
     /* `N)` numbered list marker, alongside `N.`. */
     char *got = render_one("intro\n1) alpha\n2) beta");
-    EXPECT_STR_EQ(got, "intro\n1) alpha\n2) beta");
+    EXPECT_STR_EQ(got, "intro\n" DIM "1) " OFF "alpha\n" DIM "2) " OFF "beta");
     free(got);
 }
 
 static void test_hard_break_table_row(void)
 {
-    /* GFM table — each row starts with `|`. We don't pretty-print
-     * the table, but the soft-join must NOT collapse rows into one
-     * line, otherwise the cell delimiters end up jumbled together. */
+    /* GFM table — even in no-wrap mode the renderer lays out the aligned
+     * grid at natural column widths (wrap_width<=0 means unlimited).
+     * Header cells are bold, column separators are dim │, the underline
+     * uses ─┼─ crossings, body cells are plain. */
     const char *in = "| Tool | Does |\n|---|---|\n| read | Read files |\n| bash | Run shell |";
     char *got = render_one(in);
-    EXPECT_STR_EQ(got, in);
+    const char *want = BLD "Tool" OFF " " DIM "\xe2\x94\x82" OFF " " BLD "Does" OFF "\n" DIM
+                           "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                           "\xe2\x94\xbc"
+                           "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                           "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                           "\xe2\x94\x80" OFF "\n"
+                           "read " DIM "\xe2\x94\x82" OFF " Read files\n"
+                           "bash " DIM "\xe2\x94\x82" OFF " Run shell\n";
+    EXPECT_STR_EQ(got, want);
     free(got);
 }
 
@@ -1183,7 +1220,7 @@ static void test_code_fence_no_soft_join(void)
 {
     /* Inside a code fence, \n stays \n — fences are verbatim. */
     char *got = render_one("```\nline1\nline2\n```\n");
-    EXPECT_STR_EQ(got, "\x1b[2mline1\nline2\n\x1b[22m");
+    EXPECT_STR_EQ(got, DIM "line1\nline2\n" OFF);
     free(got);
 }
 
@@ -1194,8 +1231,8 @@ static void test_real_world_paragraph(void)
     /* Compact slice that exercises bold, inline code, em dash, plain text. */
     const char *in = "I'm **hax**, with `read` and `bash` tools.";
     char *got = render_one(in);
-    const char *want = "I'm \x1b[1mhax\x1b[22m, with \x1b[36mread\x1b[39m and "
-                       "\x1b[36mbash\x1b[39m tools.";
+    const char *want =
+        "I'm " BLD "hax" OFF ", with " CODE "read" CODE_OFF " and " CODE "bash" CODE_OFF " tools.";
     EXPECT_STR_EQ(got, want);
     free(got);
 }
@@ -1372,6 +1409,75 @@ static char *strip_ws(const char *s)
     return out;
 }
 
+/* Strip ANSI CSI escape sequences (\x1b[ ... final-byte) AND spaces/newlines
+ * from a rendered string. Used by test_wrap_phantom_list_reserves_last_column
+ * to compare prettified rendered output (which contains dim escapes and the
+ * • glyph) against a normalized expected content string. */
+static char *strip_ansi_ws(const char *s)
+{
+    size_t len = strlen(s);
+    /* Output is at most len bytes (stripping only removes). */
+    char *out = xmalloc(len + 1);
+    size_t j = 0;
+    for (size_t i = 0; i < len;) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == ' ' || c == '\n') {
+            i++;
+            continue;
+        }
+        /* ANSI CSI: \x1b[ ... <final byte in 0x40-0x7E> */
+        if (c == 0x1b && i + 1 < len && s[i + 1] == '[') {
+            size_t p = i + 2;
+            while (p < len && (unsigned char)s[p] >= 0x20 && (unsigned char)s[p] < 0x40)
+                p++;
+            if (p < len && (unsigned char)s[p] >= 0x40 && (unsigned char)s[p] <= 0x7e)
+                p++;
+            i = p;
+            continue;
+        }
+        out[j++] = (char)c;
+        i++;
+    }
+    out[j] = 0;
+    return out;
+}
+
+/* Return a whitespace-stripped expected content string for a list item input
+ * with its marker normalized to the rendered form:
+ *   `- ` / `* ` / `+ ` (possibly with leading spaces) → `•` (U+2022, 3 bytes)
+ *   `N. ` / `N) ` (possibly with leading spaces) → digits + `.`/`)` verbatim
+ * Everything else passes through; whitespace is then stripped by strip_ws. */
+static char *expected_list_content(const char *input)
+{
+    const char *p = input;
+    /* Skip leading spaces. */
+    while (*p == ' ')
+        p++;
+    char buf[256];
+    size_t n = 0;
+    /* Unordered bullet: replace marker with bullet glyph (no leading spaces). */
+    if ((*p == '-' || *p == '*' || *p == '+') && p[1] == ' ') {
+        /* bullet glyph U+2022 = \xe2\x80\xa2 */
+        buf[n++] = '\xe2';
+        buf[n++] = '\x80';
+        buf[n++] = '\xa2';
+        p += 2; /* skip marker + space */
+    } else if (*p >= '0' && *p <= '9') {
+        /* Ordered: keep digits + delimiter verbatim. */
+        while (*p >= '0' && *p <= '9')
+            buf[n++] = *p++;
+        if (*p == '.' || *p == ')')
+            buf[n++] = *p++;
+        if (*p == ' ')
+            p++; /* skip the space */
+    }
+    /* Append the item content. */
+    while (*p)
+        buf[n++] = *p++;
+    buf[n] = 0;
+    return strip_ws(buf);
+}
+
 /* Render at wrap_width and replay through a physical terminal of the
  * given width (phantom-aware — see interpret_terminal's cols > 0 path). */
 static char *render_wrap_phantom(const char *input, int wrap_width, int term_cols)
@@ -1412,7 +1518,13 @@ static void test_wrap_phantom_reserves_last_column(void)
  * on a narrow terminal — a plain "- " bullet (indent 2) wrapped at 22 on a
  * 20-column sidebar, refilling the physical last column the reserved-column
  * scheme is meant to keep clear. Each marker's continuation indent must
- * still wrap one cell inside the edge and lose no glyph. */
+ * still wrap one cell inside the edge and lose no glyph.
+ *
+ * With prettification, vis now contains ANSI escapes and the "•" glyph
+ * instead of the literal `-`/`*`/`+` marker, so we compare
+ * strip_ansi_ws(vis) against expected_list_content(input): the input's
+ * marker is normalized to the rendered form and then whitespace-stripped,
+ * giving the same content-glyph set the renderer produced. */
 static void test_wrap_phantom_list_reserves_last_column(void)
 {
     const char *items[] = {
@@ -1421,14 +1533,15 @@ static void test_wrap_phantom_list_reserves_last_column(void)
         "  * alpha bravo charlie delta echo foxtrot golf hotel india juliet",
     };
     for (size_t k = 0; k < sizeof(items) / sizeof(items[0]); k++) {
+        char *expected = expected_list_content(items[k]);
         for (int cols = 20; cols <= 64; cols++) {
             char *vis = render_wrap_phantom(items[k], cols - 1, cols);
-            char *a = strip_ws(vis), *b = strip_ws(items[k]);
-            EXPECT_STR_EQ(a, b);
+            char *a = strip_ansi_ws(vis);
+            EXPECT_STR_EQ(a, expected);
             free(a);
-            free(b);
             free(vis);
         }
+        free(expected);
     }
 }
 
@@ -1520,10 +1633,10 @@ static void test_wrap_long_word_overflow(void)
 static void test_wrap_list_indent(void)
 {
     /* Bullet list: continuation row indents under the marker. The
-     * marker ("* ") is 2 cells, so continuation rows carry a 2-cell
+     * marker ("• ") is 2 cells, so continuation rows carry a 2-cell
      * hanging indent and wrap at wrap_width (20) like the first row. */
     char *got = render_wrap("* alpha beta gamma delta epsilon zeta", 20);
-    EXPECT_STR_EQ(got, "* alpha beta gamma\n  delta epsilon zeta");
+    EXPECT_STR_EQ(got, BUL "alpha beta gamma\n  delta epsilon zeta");
     free(got);
 }
 
@@ -1531,7 +1644,7 @@ static void test_wrap_numbered_list_indent(void)
 {
     /* "1. " marker is 3 cells, so continuation indent is 3. */
     char *got = render_wrap("1. alpha beta gamma delta epsilon", 20);
-    EXPECT_STR_EQ(got, "1. alpha beta gamma\n   delta epsilon");
+    EXPECT_STR_EQ(got, DIM "1. " OFF "alpha beta gamma\n   delta epsilon");
     free(got);
 }
 
@@ -1539,16 +1652,16 @@ static void test_wrap_nested_bullet_hanging_indent(void)
 {
     /* Nested list: parent at col 0, child indented 2. The child's
      * wrap continuation must indent under its own content column
-     * (col 4 = 2 leading spaces + "- ") rather than col 0. The indent
+     * (col 4 = 2 leading spaces + "• ") rather than col 0. The indent
      * fits within wrap_width, so the continuation rows wrap at
      * wrap_width like everything else (current_row_budget) — no
      * overshoot, keeping the reserved last column clear. */
     const char *in = "* parent\n  - child alpha beta gamma delta epsilon zeta";
     char *got = render_wrap(in, 22);
-    EXPECT_STR_EQ(got, "* parent\n"
-                       "  - child alpha beta\n"
-                       "    gamma delta\n"
-                       "    epsilon zeta");
+    EXPECT_STR_EQ(got, BUL "parent\n"
+                           "  " BUL "child alpha beta\n"
+                           "    gamma delta\n"
+                           "    epsilon zeta");
     free(got);
 }
 
@@ -1557,14 +1670,14 @@ static void test_wrap_long_numbered_marker_indent(void)
     /* 4-digit marker "1000. " is 6 cells. Continuation rows must
      * indent under the content column, not collapse to 0. */
     char *got = render_wrap("1000. alpha beta gamma delta epsilon zeta", 24);
-    EXPECT_STR_EQ(got, "1000. alpha beta gamma\n      delta epsilon zeta");
+    EXPECT_STR_EQ(got, DIM "1000. " OFF "alpha beta gamma\n      delta epsilon zeta");
     free(got);
 }
 
 static void test_wrap_dash_list_indent(void)
 {
     char *got = render_wrap("- alpha beta gamma delta epsilon", 20);
-    EXPECT_STR_EQ(got, "- alpha beta gamma\n  delta epsilon");
+    EXPECT_STR_EQ(got, BUL "alpha beta gamma\n  delta epsilon");
     free(got);
 }
 
@@ -1591,8 +1704,7 @@ static void test_wrap_skips_code_fence(void)
      * column tracking. The dim escape and \n are produced as today. */
     const char *in = "```\nthis is a deliberately long code line that exceeds the budget\n```\n";
     char *got = render_wrap(in, 20);
-    const char *want =
-        "\x1b[2mthis is a deliberately long code line that exceeds the budget\n\x1b[22m";
+    const char *want = DIM "this is a deliberately long code line that exceeds the budget\n" OFF;
     EXPECT_STR_EQ(got, want);
     free(got);
 }
@@ -1606,7 +1718,7 @@ static void test_wrap_carries_bold_across_break(void)
     char *got = render_wrap("**alpha beta gamma delta**", 15);
     /* Break lands after "alpha beta" (10 cells in bold). Continuation
      * has "gamma delta" with bold still on; closer follows. */
-    EXPECT_STR_EQ(got, "\x1b[1malpha beta\ngamma delta\x1b[22m");
+    EXPECT_STR_EQ(got, BLD "alpha beta\ngamma delta" OFF);
     free(got);
 }
 
@@ -1618,7 +1730,7 @@ static void test_wrap_inline_code_breaks_at_space(void)
      * opens on row 1, the closer (FG_DEFAULT) lands on row 2 after
      * the carried-over content. */
     char *got = render_wrap("foo `code with spaces` bar baz", 15);
-    EXPECT_STR_EQ(got, "foo \x1b[36mcode with\nspaces\x1b[39m bar baz");
+    EXPECT_STR_EQ(got, "foo " CODE "code with\nspaces" CODE_OFF " bar baz");
     free(got);
 }
 
@@ -1662,7 +1774,7 @@ static void test_wrap_partial_utf8_drains_before_raw(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "A\xC3\x1b[1mB\x1b[22m");
+    EXPECT_STR_EQ(s, "A\xC3" BLD "B" OFF);
     free(s);
 }
 
@@ -1692,7 +1804,7 @@ static void test_wrap_soft_wrapped_list_item(void)
      * \n into a space and re-flow the joined item at our width with
      * the correct hanging indent under the bullet. */
     char *got = render_wrap("* alpha beta gamma delta\nepsilon zeta eta theta iota", 20);
-    EXPECT_STR_EQ(got, "* alpha beta gamma\n  delta epsilon zeta\n  eta theta iota");
+    EXPECT_STR_EQ(got, BUL "alpha beta gamma\n  delta epsilon zeta\n  eta theta iota");
     free(got);
 }
 
@@ -1707,7 +1819,7 @@ static void test_soft_join_indented_continuation(void)
      * shape without the wrap layer's re-flow obscuring things. */
     const char *in = "* list item\n  indented continuation\n* another item\n  another indent";
     char *got = render_one(in);
-    EXPECT_STR_EQ(got, "* list item indented continuation\n* another item another indent");
+    EXPECT_STR_EQ(got, BUL "list item indented continuation\n" BUL "another item another indent");
     free(got);
 }
 
@@ -1717,10 +1829,9 @@ static void test_wrap_indented_continuation_reflows(void)
      * single logical line, then re-flows with hanging indent 2. */
     const char *in = "* list item\n  indented continuation\n* another item\n  another indent";
     char *got = render_wrap(in, 22);
-    EXPECT_STR_EQ(got, "* list item indented\n"
-                       "  continuation\n"
-                       "* another item another\n"
-                       "  indent");
+    EXPECT_STR_EQ(got, BUL "list item indented\n"
+                           "  continuation\n" BUL "another item another\n"
+                           "  indent");
     free(got);
 }
 
@@ -1734,11 +1845,11 @@ static void test_wrap_blank_line_continuation_indents(void)
     const char *in =
         "- header\n\n  continuation body long enough to wrap onto a second row here ok";
     char *got = render_wrap(in, 24);
-    EXPECT_STR_EQ(got, "- header\n"
-                       "\n"
-                       "  continuation body long\n"
-                       "  enough to wrap onto a\n"
-                       "  second row here ok");
+    EXPECT_STR_EQ(got, BUL "header\n"
+                           "\n"
+                           "  continuation body long\n"
+                           "  enough to wrap onto a\n"
+                           "  second row here ok");
     free(got);
 }
 
@@ -1751,10 +1862,417 @@ static void test_wrap_code_fence_in_list_item(void)
      * must render normally — not swallowed by a runaway code span. */
     const char *in = "- item\n\n  ```\n  code\n  ```\n  after text";
     char *got = render_wrap(in, 40);
-    EXPECT_STR_EQ(got, "- item\n"
-                       "\n"
-                       "\x1b[2m  code\n"
-                       "\x1b[22m  after text");
+    EXPECT_STR_EQ(got, BUL "item\n"
+                           "\n" DIM "  code\n" OFF "  after text");
+    free(got);
+}
+
+/* ---------- tables ---------- */
+
+static void test_table_aligned(void)
+{
+    /* Natural width (Name=5, Age=3; total 5+3+3=11) fits the budget, so
+     * the table lays out as an aligned grid: bold header, dim `│`
+     * separators, a `─┼─` crossing underline, left-aligned (no delimiter
+     * colons) body cells padded to the column width. The last column is
+     * ragged (no right pad), but the underline spans its full width. */
+    const char *in = "| Name | Age |\n|---|---|\n| Bob | 30 |\n| Alice | 7 |";
+    char *got = render_wrap(in, 40);
+    EXPECT_STR_EQ(got, BLD "Name" OFF " " TSEP BLD "Age" OFF
+                           "\n" DIM HL HL HL HL HL HL CR HL HL HL HL OFF "\n"
+                           "Bob  " TSEP "30\n"
+                           "Alice" TSEP "7\n");
+    free(got);
+}
+
+static void test_table_column_alignment(void)
+{
+    /* Delimiter row drives per-column alignment: `:--` left, `--:` right,
+     * `:-:` center. All columns are 4 cells wide (aaaa/bbbb/cccc), so the
+     * 1-char body row shows the padding: "x" left ("x   "), "y" right
+     * ("   y"), "z" center (pad 1 → padl 0, padr 1, last col ragged). */
+    const char *in = "| L | R | C |\n|:--|--:|:-:|\n| aaaa | bbbb | cccc |\n| x | y | z |";
+    char *got = render_wrap(in, 40);
+    EXPECT_STR_EQ(got, BLD "L" OFF "   " TSEP "   " BLD "R" OFF TSEP " " BLD "C" OFF
+                           "\n" DIM HL HL HL HL HL CR HL HL HL HL HL HL CR HL HL HL HL HL OFF "\n"
+                           "aaaa" TSEP "bbbb" TSEP "cccc\n"
+                           "x   " TSEP "   y" TSEP " z\n");
+    free(got);
+}
+
+static void test_table_reflow_to_records_when_too_wide(void)
+{
+    /* Natural width (9+12+5 + 2*3 = 32) exceeds the 20-cell budget, so the
+     * table reflows to one bulleted record per row: the first column
+     * carries the dim `•`, every column becomes a bold `label: value`
+     * line, and the fields indent two cells under the bullet. */
+    const char *in = "| Component | Role | Owner |\n|---|---|---|\n"
+                     "| parser | reads tokens | ann |\n| writer | emits bytes | bob |";
+    char *got = render_wrap(in, 20);
+    EXPECT_STR_EQ(got, BUL BLD "Component" OFF ": parser\n"
+                               "  " BLD "Role" OFF ": reads tokens\n"
+                               "  " BLD "Owner" OFF ": ann\n" BUL BLD "Component" OFF ": writer\n"
+                               "  " BLD "Role" OFF ": emits bytes\n"
+                               "  " BLD "Owner" OFF ": bob\n");
+    free(got);
+}
+
+static void test_table_buffering_is_feed_split_invariant(void)
+{
+    /* A table can't be laid out until every row is seen, so it's buffered
+     * across feeds. The result must be identical however the bytes are
+     * chunked — feed byte-by-byte and compare to the single-feed render. */
+    const char *in = "| Name | Age |\n|---|---|\n| Bob | 30 |\n| Alice | 7 |";
+    char *whole = render_wrap(in, 40);
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 40);
+    for (size_t i = 0; i < strlen(in); i++)
+        md_feed(m, in + i, 1);
+    md_flush(m);
+    md_free(m);
+    char *chunked = buf_steal(&out);
+    EXPECT_STR_EQ(chunked ? chunked : "", whole);
+    free(chunked);
+    free(whole);
+}
+
+static void test_table_not_a_table_passthrough(void)
+{
+    /* A `|`-led line whose next line is NOT a delimiter row is not a
+     * table — it passes through verbatim (block-isolated so it doesn't
+     * soft-join with the following prose). */
+    const char *in = "| a | b |\nplain prose line\n";
+    char *got = render_wrap(in, 40);
+    EXPECT_STR_EQ(got, "| a | b |\nplain prose line\n");
+    free(got);
+}
+
+static void test_table_finalized_at_eof(void)
+{
+    /* Table whose last row has no trailing newline: the buffer is
+     * finalized at md_flush rather than lost. */
+    const char *in = "| A | B |\n|---|---|\n| 1 | 2 |";
+    char *got = render_wrap(in, 40);
+    EXPECT_STR_EQ(got, BLD "A" OFF TSEP BLD "B" OFF "\n" DIM HL HL CR HL HL OFF "\n"
+                           "1" TSEP "2\n");
+    free(got);
+}
+
+static void test_table_cell_inline_styles(void)
+{
+    /* Cells run through the inline engine, so `**bold**` and `` `code` ``
+     * render styled. Crucially the column width is measured on the visible
+     * glyphs (the Note column is 6 = "bold x", not 10 = "**bold** x"), so
+     * the `a`/`bb` cells stay correctly padded — the width tally excludes
+     * the markers and SGR escapes. */
+    const char *in = "| Col | Note |\n|---|---|\n| a | **bold** x |\n| bb | `code` |";
+    char *got = render_wrap(in, 40);
+    EXPECT_STR_EQ(got, BLD "Col" OFF TSEP BLD "Note" OFF
+                           "\n" DIM HL HL HL HL CR HL HL HL HL HL HL HL OFF "\n"
+                           "a  " TSEP BLD "bold" OFF " x\n"
+                           "bb " TSEP CODE "code" CODE_OFF "\n");
+    free(got);
+}
+
+static void test_table_cell_block_markers_stay_literal(void)
+{
+    /* GFM table cells are inline contexts, so leading block markers in a
+     * cell (`#`, `-`, `---`) are NOT interpreted as a heading / bullet /
+     * rule — they render as literal inline text. Header cells are bold;
+     * the body `---` cell stays "---", not a dim divider. Cols: "# H"=3,
+     * "- x"=3 (the "1"/"a" bodies are narrower). */
+    const char *in = "| # H | - x |\n|---|---|\n| --- | a |";
+    char *got = render_wrap(in, 40);
+    EXPECT_STR_EQ(got, BLD "# H" OFF TSEP BLD "- x" OFF "\n" DIM HL HL HL HL CR HL HL HL HL OFF "\n"
+                           "---" TSEP "a\n");
+    free(got);
+}
+
+static void test_table_header_only_renders_grid(void)
+{
+    /* A header-only table (no body rows) whose natural width exceeds the
+     * budget must still render the grid, not collapse to empty output —
+     * there are no rows to reflow into records, so the reflow path would
+     * emit nothing (data loss). */
+    const char *in = "| AB | CD |\n|---|---|\n";
+    char *got = render_wrap(in, 5);
+    EXPECT_STR_EQ(got, BLD "AB" OFF TSEP BLD "CD" OFF "\n" DIM HL HL HL CR HL HL HL OFF "\n");
+    free(got);
+}
+
+static void test_table_cell_multibyte_code_width(void)
+{
+    /* Inline-code content is emitted byte-by-byte, so a multibyte codepoint
+     * (é) inside a code cell would measure as 0 if counted per-callback.
+     * Measuring the assembled content run gives the right width, so the X
+     * column is 2 cells ("éé") and the underline/separator stay aligned. */
+    const char *in = "| X | Y |\n|---|---|\n| `\xc3\xa9\xc3\xa9` | z |";
+    char *got = render_wrap(in, 40);
+    EXPECT_STR_EQ(got, BLD "X" OFF " " TSEP BLD "Y" OFF "\n" DIM HL HL HL CR HL HL OFF "\n" CODE
+                           "\xc3\xa9\xc3\xa9" CODE_OFF TSEP "z\n");
+    free(got);
+}
+
+static void test_table_header_cell_inline_bold_stays_bold(void)
+{
+    /* A header cell with an inner **bold** span stays fully bold: the
+     * inner span's bold-off must not cancel the header bold for the rest
+     * of the cell. "A **B** C" renders as bold "A B C" (suppress_bold
+     * drops the cell's own toggles; the outer header bold covers it). */
+    const char *in = "| A **B** C | V |\n|---|---|\n| 1 | 2 |";
+    char *got = render_wrap(in, 40);
+    EXPECT_STR_EQ(got, BLD "A B C" OFF TSEP BLD "V" OFF "\n" DIM HL HL HL HL HL HL CR HL HL OFF "\n"
+                           "1    " TSEP "2\n");
+    free(got);
+}
+
+static void test_table_column_count_mismatch_passthrough(void)
+{
+    /* GFM requires the delimiter row to have the same cell count as the
+     * header; a mismatch is not a table, so the lines pass through
+     * verbatim rather than being partially formatted with a dropped
+     * column (here the third column "3" must survive). */
+    const char *in = "| A | B |\n|---|---|---|\n| 1 | 2 | 3 |\n";
+    char *got = render_wrap(in, 40);
+    EXPECT_STR_EQ(got, "| A | B |\n|---|---|---|\n| 1 | 2 | 3 |\n");
+    free(got);
+}
+
+static void test_table_body_cell_pipe_overflow_passthrough(void)
+{
+    /* split_row isn't aware of inline code spans, so a body cell holding a
+     * literal pipe (here `` `ls | wc` ``) over-splits into 3 cells against
+     * a 2-column header. Dropping the excess would corrupt the model's
+     * text ("count lines" lost), so the whole table falls back to verbatim
+     * — every byte, including the trailing cell, survives intact. */
+    const char *in = "| Cmd | Meaning |\n|---|---|\n| `ls | wc` | count lines |\n";
+    char *got = render_wrap(in, 40);
+    EXPECT_STR_EQ(got, "| Cmd | Meaning |\n|---|---|\n| `ls | wc` | count lines |\n");
+    free(got);
+}
+
+static void test_table_body_cell_escaped_pipe_passthrough(void)
+{
+    /* An escaped `\|` is a literal pipe in GFM, but split_row splits there
+     * too, over-splitting a 2-column row to 3 cells. Rather than mangle it,
+     * the table passes through verbatim so the escaped pipe is preserved. */
+    const char *in = "| Expr | Meaning |\n|---|---|\n| a \\| b | union |\n";
+    char *got = render_wrap(in, 40);
+    EXPECT_STR_EQ(got, "| Expr | Meaning |\n|---|---|\n| a \\| b | union |\n");
+    free(got);
+}
+
+static void test_table_header_only_eof_no_newline(void)
+{
+    /* A header + delimiter with no trailing newline renders the same grid
+     * as if it had one: try_table_start defers at EOF (it needs the second
+     * newline), and md_flush recognizes the deferred table. */
+    const char *in = "| A | B |\n|---|---|";
+    char *got = render_wrap(in, 40);
+    EXPECT_STR_EQ(got, BLD "A" OFF TSEP BLD "B" OFF "\n" DIM HL HL CR HL HL OFF "\n");
+    free(got);
+}
+
+static void test_table_row_overflow_emits_all_rows(void)
+{
+    /* A table with more rows than the layout's span array holds must not
+     * silently drop the tail — it falls back to verbatim, so every row
+     * (including the last) still appears in the output. */
+    size_t cap = 64 * 1024;
+    char *in = xmalloc(cap);
+    int p = snprintf(in, cap, "| H |\n|---|\n");
+    for (int i = 0; i < 2100 && (size_t)p < cap - 32; i++)
+        p += snprintf(in + p, cap - (size_t)p, "| r%d |\n", i);
+    char *got = render_wrap(in, 40);
+    EXPECT(strstr(got, "r0 ") != NULL);    /* first row present */
+    EXPECT(strstr(got, "r2099 ") != NULL); /* last row not dropped */
+    free(got);
+    free(in);
+}
+
+static void test_table_long_streamed_row_no_leak(void)
+{
+    /* A body row longer than TAIL_MAX, streamed without its trailing
+     * newline, must stay buffered with the table — the generic tail
+     * excess-flush is skipped while in_table, so no leading bytes leak as
+     * prose ahead of the rendered table and the row isn't split. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 40);
+    md_feed(m, "| H |\n|---|\n", 12);
+    char *row = xmalloc(9000);
+    row[0] = '|';
+    row[1] = ' ';
+    memset(row + 2, 'a', 8990);
+    row[8992] = ' ';
+    row[8993] = '|';
+    md_feed(m, row, 8994); /* 9 KB row, no newline yet */
+    md_feed(m, "\n", 1);
+    md_flush(m);
+    md_free(m);
+    char *got = buf_steal(&out);
+    /* Output begins with the rendered table (reflow bullet's dim), not
+     * leaked 'aaaa' prose, and the cell content survives. */
+    EXPECT(got && strncmp(got, DIM, strlen(DIM)) == 0);
+    EXPECT(got && strstr(got, "aaaaaaaaaaaaaaaaaaaa") != NULL);
+    free(got);
+    free(row);
+}
+
+static void test_table_oversized_inprogress_row_bails(void)
+{
+    /* A row streamed without its newline past TABLE_MAX_BYTES must not grow
+     * the buffer unbounded — it bails to verbatim, dumping the buffered
+     * rows + the oversized partial as plain text and leaving table mode.
+     * The header therefore appears verbatim ("| H |"), not formatted. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 40);
+    md_feed(m, "| H |\n|---|\n", 12);
+    size_t big = 70000; /* > TABLE_MAX_BYTES (64 KiB) */
+    char *row = xmalloc(big);
+    row[0] = '|';
+    row[1] = ' ';
+    memset(row + 2, 'a', big - 4);
+    row[big - 2] = ' ';
+    row[big - 1] = '|';
+    md_feed(m, row, big); /* no newline — would otherwise buffer unbounded */
+    md_feed(m, "\n", 1);
+    md_flush(m);
+    md_free(m);
+    char *got = buf_steal(&out);
+    EXPECT(got && strstr(got, "| H |") != NULL); /* verbatim header, not a formatted grid */
+    free(got);
+    free(row);
+}
+
+static void test_table_oversized_complete_row_bails(void)
+{
+    /* A complete row (with its trailing \n) arriving whole in one feed,
+     * past the byte cap, must not be appended and laid out: step_in_table
+     * checks the incoming row size before appending, so the buffered
+     * header renders as a (header-only) grid and the huge row falls
+     * through to verbatim — never growing the buffer or running layout on
+     * it. The output starts with the bold grid header, not a reflow
+     * bullet (which is what laying the huge row out would produce). */
+    size_t big = 70000; /* > TABLE_MAX_BYTES (64 KiB) */
+    char *in = xmalloc(big + 64);
+    int p = snprintf(in, big + 64, "| H |\n|---|\n| ");
+    memset(in + p, 'a', big);
+    p += (int)big;
+    p += snprintf(in + p, 64, " |\n");
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 40);
+    md_feed(m, in, (size_t)p); /* whole input, incl. the row's \n, in one feed */
+    md_flush(m);
+    md_free(m);
+    char *got = buf_steal(&out);
+    EXPECT(got && strncmp(got, BLD, strlen(BLD)) == 0); /* grid header, not a reflow bullet */
+    EXPECT(got && strstr(got, "aaaaaaaaaaaaaaaaaaaa") != NULL); /* row content survives */
+    free(got);
+    free(in);
+}
+
+static void test_table_huge_header_bails(void)
+{
+    /* The header + delimiter block is checked against the byte cap before
+     * entering table mode, so a giant header cell is left verbatim (output
+     * begins with the literal "| "), not buffered and laid out. Captured
+     * raw rather than via render_wrap: the unbreakable 70 KB word would
+     * overflow interpret_terminal's fixed row buffer (a test-helper limit,
+     * not renderer behavior). */
+    size_t big = 70000; /* > TABLE_MAX_BYTES (64 KiB) */
+    char *in = xmalloc(big + 64);
+    int p = snprintf(in, big + 64, "| ");
+    memset(in + p, 'H', big);
+    p += (int)big;
+    p += snprintf(in + p, 64, " |\n|---|\n| x |\n");
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 40);
+    md_feed(m, in, (size_t)p);
+    md_flush(m);
+    md_free(m);
+    char *got = buf_steal(&out);
+    EXPECT(got && strncmp(got, "| ", 2) == 0); /* verbatim header, not formatted */
+    free(got);
+    free(in);
+}
+
+static void test_table_eof_final_row_over_cap_bails(void)
+{
+    /* A newline-less final row at EOF is absorbed by md_flush, but only if
+     * the combined size stays within the cap. Here the buffered rows are
+     * already near the cap, so appending the final row would push
+     * table_buf over TABLE_MAX_BYTES — md_flush must leave the tail
+     * untouched, lay out what's within the cap, and let the final row fall
+     * through to verbatim emission (its `| ` pipe prefix survives, which a
+     * reflow/grid layout would have stripped when splitting cells). */
+    size_t row = 60000, last = 10000; /* row+last+header > TABLE_MAX_BYTES (64 KiB) */
+    char *in = xmalloc(row + last + 64);
+    int p = snprintf(in, 64, "| H |\n|---|\n| ");
+    memset(in + p, 'a', row);
+    p += (int)row;
+    p += snprintf(in + p, 16, " |\n| "); /* close buffered row, open final row */
+    memset(in + p, 'b', last);
+    p += (int)last;
+    p += snprintf(in + p, 16, " |"); /* final row: NO trailing newline */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 40);
+    md_feed(m, in, (size_t)p);
+    md_flush(m);
+    md_free(m);
+    char *got = buf_steal(&out);
+    /* The over-cap final row survives verbatim, pipes intact — it was not
+     * absorbed into the table and split into cells. */
+    EXPECT(got && strstr(got, "| bbbbbbbbbb") != NULL);
+    free(got);
+    free(in);
+}
+
+static void test_table_delimiter_interior_colon_rejected(void)
+{
+    /* GFM allows a colon only at a delimiter cell's edges; an interior
+     * colon (`:-:-`) makes it not a delimiter row, so the block is not a
+     * table and passes through verbatim. */
+    const char *in = "| A | B |\n|:-:-|---|\n| 1 | 2 |\n";
+    char *got = render_wrap(in, 40);
+    EXPECT_STR_EQ(got, "| A | B |\n|:-:-|---|\n| 1 | 2 |\n");
+    free(got);
+}
+
+static void test_table_reflow_value_keeps_bold_across_wrap(void)
+{
+    /* A bold span inside a reflowed value that wraps must re-assert bold
+     * on the continuation row — emit_cell_wrapped tracks the cell's SGR
+     * into the wrap engine's style snapshot. "beta" stays bold after the
+     * wrap even though the source bold span closes immediately after it. */
+    const char *in = "| K | V |\n|---|---|\n| k | **alpha beta**gammazz delta |";
+    char *got = render_wrap(in, 18);
+    char *vis = interpret_terminal(got, 0);
+    EXPECT(strstr(vis, BLD "beta" OFF) != NULL);
+    free(vis);
+    free(got);
+}
+
+/* ---------- thematic break (dinkus) ---------- */
+
+static void test_dinkus_renders_three_dots(void)
+{
+    char *got = render_wrap("a\n\n---\n\nb", 40);
+    EXPECT_STR_EQ(got, "a\n\n" DINKUS "\n\nb");
+    free(got);
+}
+
+static void test_dinkus_shrinks_on_narrow_width(void)
+{
+    /* Three dots + two 3-space gaps need 9 cells; at width 5 it drops to
+     * two dots (1 + 3 + 1 = 5) so the divider never wraps. */
+    char *got = render_wrap("a\n\n***\n\nb", 5);
+    EXPECT_STR_EQ(got, "a\n\n" DIM DOT "   " DOT OFF "\n\nb");
     free(got);
 }
 
@@ -1807,7 +2325,7 @@ static void test_wrap_raw_cursor_escapes_on_break(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "abc def gh\x1b[3D\x1b[K\nghi");
+    EXPECT_STR_EQ(s, "abc def gh" CUB(3) ERASE "\nghi");
     free(s);
 }
 
@@ -1833,7 +2351,7 @@ static void test_wrap_no_autowrap_when_sgr_after_held_space(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "foo bar\x1b[1m\nbaz\x1b[22m");
+    EXPECT_STR_EQ(s, "foo bar" BLD "\nbaz" OFF);
     free(s);
 }
 
@@ -1856,7 +2374,7 @@ static void test_wrap_sgr_during_pending_wrap_no_extra_blank_line(void)
      * one blank line between the styled "foo bar" and "next", not
      * two as in the buggy case. */
     char *got = render_wrap("`foo bar `\n\nnext", 7);
-    EXPECT_STR_EQ(got, "\x1b[36mfoo bar\x1b[39m\n\nnext");
+    EXPECT_STR_EQ(got, CODE "foo bar" CODE_OFF "\n\nnext");
     free(got);
 }
 
@@ -1877,7 +2395,7 @@ static void test_wrap_sgr_during_pending_wrap_at_eof(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "\x1b[36mfoo bar\x1b[39m");
+    EXPECT_STR_EQ(s, CODE "foo bar" CODE_OFF);
     free(s);
 }
 
@@ -1909,7 +2427,7 @@ static void test_wrap_replay_restores_sgr_state_at_break(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "\x1b[1mfoo bar\x1b[22mb\x1b[5D\x1b[K\n\x1b[1mbar\x1b[22mbaz");
+    EXPECT_STR_EQ(s, BLD "foo bar" OFF "b" CUB(5) ERASE "\n" BLD "bar" OFF "baz");
     free(s);
 }
 
@@ -1928,7 +2446,7 @@ static void test_wrap_eof_preserves_trailing_space_when_within_budget(void)
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "\x1b[36mx \x1b[39m");
+    EXPECT_STR_EQ(s, CODE "x " CODE_OFF);
     free(s);
 }
 
@@ -1965,7 +2483,7 @@ static void test_wrap_sgr_after_break_space_preserves_source_order(void)
      * space and the marker's content — matching what a non-eager
      * renderer would produce. */
     char *got = render_wrap("foo `bar` baz", 80);
-    EXPECT_STR_EQ(got, "foo \x1b[36mbar\x1b[39m baz");
+    EXPECT_STR_EQ(got, "foo " CODE "bar" CODE_OFF " baz");
     free(got);
 }
 
@@ -2116,7 +2634,7 @@ static void test_wrap_heading_not_wrapped(void)
     /* Headings are single-line by policy — long heading content
      * passes through verbatim even when wrap is active. */
     char *got = render_wrap("## A very long heading that exceeds the budget\n", 20);
-    EXPECT_STR_EQ(got, "\x1b[1mA very long heading that exceeds the budget\x1b[22m\n");
+    EXPECT_STR_EQ(got, BLD "A very long heading that exceeds the budget" OFF "\n");
     free(got);
 }
 
@@ -2200,6 +2718,7 @@ int main(void)
     test_eof_setext_h1_no_trailing_newline();
     test_eof_setext_h2_no_trailing_newline();
     test_eof_thematic_spaced_no_trailing_newline();
+    test_eof_bare_thematic_no_trailing_newline();
     test_crlf_thematic_break();
     test_eof_soft_join_digits();
     test_eof_soft_join_dash_alone();
@@ -2289,6 +2808,33 @@ int main(void)
     test_wrap_indented_continuation_reflows();
     test_wrap_blank_line_continuation_indents();
     test_wrap_code_fence_in_list_item();
+
+    test_table_aligned();
+    test_table_column_alignment();
+    test_table_reflow_to_records_when_too_wide();
+    test_table_buffering_is_feed_split_invariant();
+    test_table_not_a_table_passthrough();
+    test_table_finalized_at_eof();
+    test_table_cell_inline_styles();
+    test_table_cell_block_markers_stay_literal();
+    test_table_header_only_renders_grid();
+    test_table_cell_multibyte_code_width();
+    test_table_header_cell_inline_bold_stays_bold();
+    test_table_column_count_mismatch_passthrough();
+    test_table_body_cell_pipe_overflow_passthrough();
+    test_table_body_cell_escaped_pipe_passthrough();
+    test_table_header_only_eof_no_newline();
+    test_table_row_overflow_emits_all_rows();
+    test_table_long_streamed_row_no_leak();
+    test_table_oversized_inprogress_row_bails();
+    test_table_oversized_complete_row_bails();
+    test_table_huge_header_bails();
+    test_table_eof_final_row_over_cap_bails();
+    test_table_delimiter_interior_colon_rejected();
+    test_table_reflow_value_keeps_bold_across_wrap();
+    test_dinkus_renders_three_dots();
+    test_dinkus_shrinks_on_narrow_width();
+
     test_wrap_streams_each_codepoint_eagerly();
     test_wrap_raw_cursor_escapes_on_break();
     test_wrap_no_escapes_when_break_at_budget_edge();

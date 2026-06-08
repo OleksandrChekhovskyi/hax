@@ -186,6 +186,13 @@ usage in=900 out=28
 end-turn
 
 # ---------- turn 19: GFM table, model emits one row per delta --------
+# Each row arrives in a separate delta, so this exercises the cross-feed
+# table buffering: the renderer can't lay out columns until it has seen
+# every row, so it diverts lines into table_buf from the `|`-led header
+# (confirmed a table by the `|---|` delimiter on the next line) until the
+# blank line / non-pipe line that ends the block, then renders an aligned
+# grid — bold header, dim `│` column separators, a `─┼─` underline, and
+# padded columns.
 text Here's a small table:
 text \n| Tool | What it does |
 text \n|---|---|
@@ -218,6 +225,45 @@ end-turn
 # dim region hugs only the body instead of running to end of stream.
 text - **First item** with a header line  \n  a label line  \n  and a longer explanation that flows across the configured display width and must keep its two-space hanging indent on every continuation row, not just the first.\n\n- **Second item** with a fenced block\n\n  ```\n  function example(value) {\n      return value + 1;\n  }\n  ```\n  Closing prose after the block, also indented under the item and long enough to wrap so the hanging indent shows here too.
 usage in=1040 out=120
+end-turn
+
+# ---------- turn 23: thematic break renders as a spaced-dot divider ---
+# `---` (and `***` / `___`) between two paragraphs renders as a short dim
+# row of spaced dots (a "dinkus") — not the literal dashes, and
+# deliberately not a full-width line — kept quiet and visually distinct
+# from the harness's own full-width SOLID `─` rules (the `── resumed ──`
+# marker, transcript section rules).
+text Above the divider — a short intro paragraph before the section break.
+text \n\n---\n\nBelow the divider — the rule should be a short dim row of spaced dots, with one blank line of separation on each side.
+usage in=980 out=40
+end-turn
+
+# ---------- turn 24: column alignment + inline markup in cells --------
+# The delimiter row drives per-column alignment: `:--` left, `--:` right,
+# `:-:` center. Cells run through the full inline engine, so `code`,
+# **bold**, and _italic_ inside a cell render styled, and the column
+# widths are measured on the visible glyphs (markers excluded).
+text A table with mixed alignment and inline styling in the cells:
+text \n| File | Lines | Note |
+text \n|:-----|------:|:----:|
+text \n| `markdown.c` | 1900 | the **streaming** renderer |
+text \n| `ansi.h` | 47 | _SGR_ constants |
+text \n| `util.h` | 300 | `buf` + helpers |
+usage in=1000 out=60
+end-turn
+
+# ---------- turn 25: wide table reflows to a record list --------------
+# At HAX_DISPLAY_WIDTH=80 the natural column widths overflow, so instead
+# of cramming or truncating, the renderer reflows each row to a bulleted
+# record — one `label: value` line per column, the first carrying the `•`
+# and the rest indented two cells beneath it. Try a wide window too — past
+# the total width it flips back to the aligned grid.
+text This one is too wide to align at 80 cells, so it reflows to a list:
+text \n| Component | Responsibility | Notes |
+text \n|---|---|---|
+text \n| provider adapter | Translate native SSE events into the unified stream_event vocabulary | one per backend, lives in src/providers |
+text \n| turn state machine | Assemble one streamed response into the flat item sequence | pure, no I/O, driven by turn_on_event |
+usage in=1080 out=90
 end-turn
 
 text Done — markdown wrap demo complete.
