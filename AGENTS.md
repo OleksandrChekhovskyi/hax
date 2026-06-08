@@ -23,8 +23,14 @@ ASan build for sharper error messages:
 `meson setup build-asan -Db_sanitize=address,undefined && meson compile -C build-asan`.
 
 Tests are plain C binaries using the macros in `tests/harness.h` (`EXPECT`, `EXPECT_STR_EQ`,
-`T_REPORT`). To add one, append an `executable(...)` + `test(...)` pair to `tests/meson.build`
-listing the test source plus the production `.c` files it links against.
+`T_REPORT`). All production code (everything but `src/main.c`) compiles into a single
+`hax_lib` archive that both the `hax` executable and the tests link against; lazy
+static-archive linking pulls in only the objects each test transitively references. To add a
+test, append its source path to the `test_sources` list in `tests/meson.build` (grouped by
+subdirectory, mirroring the `sources` list) — no need to list production sources or
+dependencies (they propagate through `hax_dep`). The registered test name is derived from the
+path: `test_` prefix and `.c` suffix stripped, subdirectory kept (`tools/test_read.c` →
+`tools/read`, `test_util.c` → `util`). That name is what `meson test -C build <name>` matches.
 
 For manual / visual checks of the dispatch + rendering pipeline without an LLM round-trip,
 `HAX_PROVIDER=mock` activates a scripted provider (`src/providers/mock.c`) that emits canned
@@ -85,9 +91,9 @@ predictably) and exposes `provider_find(name)` / `provider_list_names(out)` plus
 adapters, not in `provider.h`, so the seam header stays a pure interface and future
 callers (e.g. a `/provider` slash command) can `#include "providers/registry.h"` without
 dragging in the closed set of providers. Adding a new provider = drop a file under
-`src/providers/`, add its source to `meson.build`, then add the `extern PROVIDER_*`
-declaration to `registry.h` and append the symbol to `PROVIDERS[]` in `registry.c`, both
-in alphabetical order.
+`src/providers/`, add its source to the `src/providers/` group of `sources` in `meson.build`
+(kept sorted), then add the `extern PROVIDER_*` declaration to `registry.h` and append the
+symbol to `PROVIDERS[]` in `registry.c`, both in alphabetical order.
 
 **Presets over the OpenAI Chat Completions translation** — `openai.c` owns the shared
 message/tool/SSE translation and exposes

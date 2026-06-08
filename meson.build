@@ -28,46 +28,25 @@ libcurl = dependency('libcurl')
 jansson = dependency('jansson')
 threads = dependency('threads')
 
+# Production sources, grouped by subdirectory and sorted within each group.
+# `main.c` is deliberately excluded: it lives only in the `hax` executable so
+# that test binaries (which bring their own `main`) can link the same objects
+# via `hax_lib` without colliding. Keep these lists sorted — additions should
+# slot into the right group alphabetically.
 sources = files(
     'src/agent.c',
     'src/agent_core.c',
     'src/agent_dispatch.c',
-    'src/transport/api_error.c',
-    'src/system/bg_job.c',
-    'src/terminal/clipboard.c',
-    'src/tools/bash_cd_strip.c',
-    'src/tools/bash_classify.c',
-    'src/render/ctrl_strip.c',
-    'src/system/diff.c',
-    'src/render/disp.c',
     'src/agent_env.c',
-    'src/system/fs.c',
-    'src/transport/http.c',
-    'src/terminal/input.c',
-    'src/terminal/input_core.c',
-    'src/terminal/interrupt.c',
-    'src/main.c',
-    'src/render/markdown.c',
-    'src/terminal/notify.c',
     'src/oneshot.c',
-    'src/system/path.c',
-    'src/render/progress.c',
-    'src/render/render_ctx.c',
-    'src/transport/retry.c',
-    'src/slash.c',
-    'src/system/spawn.c',
-    'src/render/spinner.c',
     'src/session.c',
     'src/session_picker.c',
-    'src/transport/sse.c',
-    'src/render/tool_render.c',
+    'src/slash.c',
     'src/trace.c',
     'src/transcript.c',
     'src/turn.c',
-    'src/terminal/ui.c',
-    'src/text/utf8.c',
-    'src/text/utf8_sanitize.c',
     'src/util.c',
+
     'src/providers/codex.c',
     'src/providers/codex_events.c',
     'src/providers/llamacpp.c',
@@ -79,16 +58,75 @@ sources = files(
     'src/providers/openrouter.c',
     'src/providers/probe.c',
     'src/providers/registry.c',
+
+    'src/render/ctrl_strip.c',
+    'src/render/disp.c',
+    'src/render/markdown.c',
+    'src/render/progress.c',
+    'src/render/render_ctx.c',
+    'src/render/spinner.c',
+    'src/render/tool_render.c',
+
+    'src/system/bg_job.c',
+    'src/system/diff.c',
+    'src/system/fs.c',
+    'src/system/path.c',
+    'src/system/spawn.c',
+
+    'src/terminal/clipboard.c',
+    'src/terminal/input.c',
+    'src/terminal/input_core.c',
+    'src/terminal/interrupt.c',
+    'src/terminal/notify.c',
+    'src/terminal/ui.c',
+
+    'src/text/utf8.c',
+    'src/text/utf8_sanitize.c',
+
     'src/tools/bash.c',
+    'src/tools/bash_cd_strip.c',
+    'src/tools/bash_classify.c',
     'src/tools/edit.c',
     'src/tools/path_preprocess.c',
     'src/tools/read.c',
     'src/tools/write.c',
+
+    'src/transport/api_error.c',
+    'src/transport/http.c',
+    'src/transport/retry.c',
+    'src/transport/sse.c',
+)
+
+# One archive shared by the executable and every test. Static-archive linking
+# is lazy: each consumer pulls only the objects it transitively references, so
+# tests get exactly the closure they need without hand-listing sources. The
+# target is named distinctly from the `hax` executable so `meson compile -C
+# build hax` stays unambiguous.
+hax_lib = static_library('hax_lib',
+    sources,
+    dependencies: [libcurl, jansson, threads],
+)
+
+# Wrap the library as a dependency so consumers inherit both the link against
+# `hax_lib` and the include dirs / compile flags of libcurl / jansson / threads
+# — their own translation units (`main.c`, each test) include <jansson.h> etc.
+# and need those paths at compile time, which `link_with` alone wouldn't carry.
+# Only the compile-side of each dependency is propagated here via
+# partial_dependency(): the link args already ride along through `link_with`
+# (static libraries propagate their link deps), so re-adding them would make
+# every link emit `ld: warning: ignoring duplicate libraries`.
+hax_dep = declare_dependency(
+    link_with: hax_lib,
+    dependencies: [
+        libcurl.partial_dependency(compile_args: true, includes: true),
+        jansson.partial_dependency(compile_args: true, includes: true),
+        threads.partial_dependency(compile_args: true, includes: true),
+    ],
 )
 
 executable('hax',
-    sources: sources,
-    dependencies: [libcurl, jansson, threads],
+    'src/main.c',
+    dependencies: [hax_dep],
     install: true,
 )
 
