@@ -174,7 +174,7 @@ static json_t *build_tools(const struct tool_def *tools, size_t n)
         json_error_t err;
         json_t *params = json_loads(tools[i].parameters_schema_json, 0, &err);
         if (!params) {
-            fprintf(stderr, "hax: bad tool schema for %s: %s\n", tools[i].name, err.text);
+            hax_warn("bad tool schema for %s: %s", tools[i].name, err.text);
             params = json_object();
         }
         json_array_append_new(arr, json_pack("{s:s, s:{s:s, s:s, s:o}}", "type", "function",
@@ -192,8 +192,7 @@ enum reasoning_format reasoning_format_parse(const char *s, enum reasoning_forma
         return REASONING_FLAT;
     if (strcmp(s, "nested") == 0)
         return REASONING_NESTED;
-    fprintf(stderr,
-            "hax: unknown reasoning format %s (expected 'flat' or 'nested') — using default\n", s);
+    hax_warn("unknown reasoning format %s (expected 'flat' or 'nested') — using default", s);
     return fallback;
 }
 
@@ -448,7 +447,7 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
     const char *base_env = getenv("HAX_OPENAI_BASE_URL");
     const char *base = (base_env && *base_env) ? base_env : preset->default_base_url;
     if (!base || !*base) {
-        fprintf(stderr, "hax: internal: openai preset has no base URL\n");
+        hax_err("internal: openai preset has no base URL");
         return NULL;
     }
     char *base_url = dup_trim_trailing_slash(base);
@@ -501,9 +500,9 @@ struct provider *openai_provider_new(void)
      * from leaking to a third-party server. */
     const char *base_env = getenv("HAX_OPENAI_BASE_URL");
     if (base_env && *base_env) {
-        fprintf(stderr, "hax: HAX_OPENAI_BASE_URL is not honored by HAX_PROVIDER=openai "
-                        "(this preset is locked to api.openai.com)\n"
-                        "hax: use HAX_PROVIDER=openai-compatible to point at a custom endpoint\n");
+        hax_err("HAX_OPENAI_BASE_URL is not honored by HAX_PROVIDER=openai "
+                "(this preset is locked to api.openai.com)\n"
+                "hax: use HAX_PROVIDER=openai-compatible to point at a custom endpoint");
         return NULL;
     }
     struct openai_preset preset = {

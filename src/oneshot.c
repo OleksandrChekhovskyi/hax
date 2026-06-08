@@ -75,7 +75,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         struct item *loaded = NULL;
         size_t nl = 0;
         if (session_load(opts->resume_path, p->name, sess.model, &loaded, &nl, NULL) != 0) {
-            fprintf(stderr, "hax: could not resume session '%s'\n", opts->resume_path);
+            hax_err("could not resume session '%s'", opts->resume_path);
             agent_session_free(&sess);
             return 1;
         }
@@ -129,8 +129,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         p->stream(p, &ctx, sess.model, on_event, &oc, NULL, NULL);
 
         if (t.error) {
-            fprintf(stderr, "hax: provider error: %s\n",
-                    oc.error_msg ? oc.error_msg : "(no message)");
+            hax_err("provider error: %s", oc.error_msg ? oc.error_msg : "(no message)");
             free(oc.error_msg);
             turn_reset(&t);
             rc = 1;
@@ -195,7 +194,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
     }
 
     /* Loop fell through without a final assistant-only response. */
-    fprintf(stderr, "hax: max turns (%d) exceeded; aborting\n", max_turns);
+    hax_err("max turns (%d) exceeded; aborting", max_turns);
     rc = 1;
 
 done:

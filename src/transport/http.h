@@ -41,9 +41,15 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
  * `tick` is an optional side-channel hook (same shape as for
  * http_sse_post). Background probes pass `bg_job_tick` with their job
  * pointer so shutdown can abort an in-flight transfer in well under a
- * second instead of waiting out the timeout. NULL = no tick. */
+ * second instead of waiting out the timeout. NULL = no tick.
+ *
+ * `status_out` is an optional slot for the HTTP response code (0 when the
+ * request never got a response, e.g. a transport error). It is filled on
+ * both success and failure, letting callers distinguish a 401 from a
+ * network blip even though the return code collapses all failures to -1.
+ * NULL = caller doesn't need the status. */
 int http_get(const char *url, const char *const *headers, long timeout_s, http_tick_cb tick,
-             void *tick_user, char **out);
+             void *tick_user, char **out, long *status_out);
 
 /* Synchronous POST of a JSON body into a freshly-allocated NUL-terminated
  * buffer. Identical contract to http_get otherwise (timeouts, tick, return

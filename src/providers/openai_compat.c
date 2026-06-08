@@ -5,13 +5,14 @@
 #include <stdlib.h>
 
 #include "openai.h"
+#include "util.h"
 
 struct provider *openai_compat_provider_new(void)
 {
     const char *base_env = getenv("HAX_OPENAI_BASE_URL");
     if (!base_env || !*base_env) {
-        fprintf(stderr, "hax: HAX_PROVIDER=openai-compatible requires HAX_OPENAI_BASE_URL\n"
-                        "hax: e.g. HAX_OPENAI_BASE_URL=http://127.0.0.1:8000/v1\n");
+        hax_err("HAX_PROVIDER=openai-compatible requires HAX_OPENAI_BASE_URL\n"
+                "hax: e.g. HAX_OPENAI_BASE_URL=http://127.0.0.1:8000/v1");
         return NULL;
     }
     struct openai_preset preset = {

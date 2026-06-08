@@ -314,9 +314,11 @@ static int http_get_progress_cb(void *clientp, curl_off_t dltotal, curl_off_t dl
  * them is the one bit that actually differs. */
 static int http_body_request(const char *method, const char *url, const char *const *headers,
                              const char *body, size_t body_len, long timeout_s, http_tick_cb tick,
-                             void *tick_user, char **out)
+                             void *tick_user, char **out, long *status_out)
 {
     *out = NULL;
+    if (status_out)
+        *status_out = 0;
 
     CURL *curl = curl_easy_init();
     if (!curl)
@@ -391,6 +393,8 @@ static int http_body_request(const char *method, const char *url, const char *co
     CURLcode rc = curl_easy_perform(curl);
     long status = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    if (status_out)
+        *status_out = status;
 
     curl_slist_free_all(hl);
     curl_easy_cleanup(curl);
@@ -417,9 +421,10 @@ static int http_body_request(const char *method, const char *url, const char *co
 }
 
 int http_get(const char *url, const char *const *headers, long timeout_s, http_tick_cb tick,
-             void *tick_user, char **out)
+             void *tick_user, char **out, long *status_out)
 {
-    return http_body_request("GET", url, headers, NULL, 0, timeout_s, tick, tick_user, out);
+    return http_body_request("GET", url, headers, NULL, 0, timeout_s, tick, tick_user, out,
+                             status_out);
 }
 
 int http_post_json(const char *url, const char *const *headers, const char *body, size_t body_len,
@@ -428,5 +433,5 @@ int http_post_json(const char *url, const char *const *headers, const char *body
     /* Treat NULL body as a zero-length POST so the Content-Type header
      * is still attached and the request shape matches the contract. */
     return http_body_request("POST", url, headers, body ? body : "", body ? body_len : 0, timeout_s,
-                             tick, tick_user, out);
+                             tick, tick_user, out, NULL);
 }

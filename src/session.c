@@ -309,7 +309,7 @@ struct session_log *session_log_resume(const char *path, const char *provider, c
          * read-only mount): the conversation resumes in memory but new
          * turns won't be recorded. Rare, but say so rather than silently
          * dropping persistence for the rest of the run. */
-        fprintf(stderr, "hax: cannot append to session '%s'; this run won't be recorded\n", path);
+        hax_warn("cannot append to session '%s'; this run won't be recorded", path);
         return NULL;
     }
     struct session_log *log = xcalloc(1, sizeof(*log));

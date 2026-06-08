@@ -92,9 +92,9 @@ struct provider *openrouter_provider_new(void)
      * endpoints belong on HAX_PROVIDER=openai-compatible. */
     const char *base_env = getenv("HAX_OPENAI_BASE_URL");
     if (base_env && *base_env) {
-        fprintf(stderr, "hax: HAX_OPENAI_BASE_URL is not honored by HAX_PROVIDER=openrouter "
-                        "(this preset is locked to openrouter.ai)\n"
-                        "hax: use HAX_PROVIDER=openai-compatible to point at a custom endpoint\n");
+        hax_err("HAX_OPENAI_BASE_URL is not honored by HAX_PROVIDER=openrouter "
+                "(this preset is locked to openrouter.ai)\n"
+                "hax: use HAX_PROVIDER=openai-compatible to point at a custom endpoint");
         return NULL;
     }
     const char *key = getenv("HAX_OPENAI_API_KEY");

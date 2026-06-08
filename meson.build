@@ -64,6 +64,7 @@ sources = files(
     'src/trace.c',
     'src/transcript.c',
     'src/turn.c',
+    'src/terminal/ui.c',
     'src/text/utf8.c',
     'src/text/utf8_sanitize.c',
     'src/util.c',

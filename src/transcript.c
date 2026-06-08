@@ -407,7 +407,7 @@ struct transcript_log *transcript_log_open(const char *system_prompt, const stru
         return NULL;
     FILE *fp = fopen(path, "we");
     if (!fp) {
-        fprintf(stderr, "hax: HAX_TRANSCRIPT: cannot open '%s' for writing\n", path);
+        hax_warn("HAX_TRANSCRIPT: cannot open '%s' for writing", path);
         return NULL;
     }
     /* Line buffering so a reader watching the file (editor reload,
@@ -450,7 +450,7 @@ void transcript_log_reset(struct transcript_log *log, const char *system_prompt,
      * survives freopen on glibc but not portably — re-set either way. */
     FILE *fp = log->fp ? freopen(log->path, "we", log->fp) : fopen(log->path, "we");
     if (!fp) {
-        fprintf(stderr, "hax: HAX_TRANSCRIPT: cannot truncate '%s' on /new\n", log->path);
+        hax_warn("HAX_TRANSCRIPT: cannot truncate '%s' on /new", log->path);
         log->fp = NULL;
         return;
     }

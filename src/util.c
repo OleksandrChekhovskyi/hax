@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 
 #include "provider.h"
+#include "terminal/ansi.h"
 #include "text/utf8.h"
 
 static int locale_utf8 = 0;
@@ -42,6 +43,37 @@ static void oom(void)
 {
     fprintf(stderr, "hax: out of memory\n");
     abort();
+}
+
+/* Shared core for hax_err/hax_warn: a "hax: <msg>\n" line on stderr,
+ * wrapped in `color` only when stderr is a TTY so redirected output and
+ * 2>&1 captures stay plain. */
+static void hax_diag(const char *color, const char *fmt, va_list ap)
+{
+    int tty = isatty(fileno(stderr));
+    if (tty)
+        fputs(color, stderr);
+    fputs("hax: ", stderr);
+    vfprintf(stderr, fmt, ap);
+    if (tty)
+        fputs(ANSI_RESET, stderr);
+    fputc('\n', stderr);
+}
+
+void hax_err(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    hax_diag(ANSI_RED, fmt, ap);
+    va_end(ap);
+}
+
+void hax_warn(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    hax_diag(ANSI_YELLOW, fmt, ap);
+    va_end(ap);
 }
 
 void *xmalloc(size_t n)
@@ -100,7 +132,7 @@ void gen_uuid_v4(char out[37])
     uint8_t b[16];
     int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
-        fprintf(stderr, "hax: open /dev/urandom: %s\n", strerror(errno));
+        hax_err("open /dev/urandom: %s", strerror(errno));
         abort();
     }
     size_t got = 0;
@@ -109,11 +141,11 @@ void gen_uuid_v4(char out[37])
         if (r < 0) {
             if (errno == EINTR)
                 continue;
-            fprintf(stderr, "hax: read /dev/urandom: %s\n", strerror(errno));
+            hax_err("read /dev/urandom: %s", strerror(errno));
             abort();
         }
         if (r == 0) {
-            fprintf(stderr, "hax: unexpected EOF on /dev/urandom\n");
+            hax_err("unexpected EOF on /dev/urandom");
             abort();
         }
         got += (size_t)r;

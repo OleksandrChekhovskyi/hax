@@ -108,8 +108,7 @@ int agent_session_init(struct agent_session *s, struct provider *p, const struct
     if (!s->model || !*s->model)
         s->model = p->default_model;
     if (!s->model || !*s->model) {
-        fprintf(stderr, "hax: HAX_MODEL is required for provider '%s' (no default)\n",
-                p->name ? p->name : "?");
+        hax_err("HAX_MODEL is required for provider '%s' (no default)", p->name ? p->name : "?");
         return -1;
     }
 

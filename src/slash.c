@@ -13,6 +13,7 @@
 #include "util.h"
 #include "terminal/ansi.h"
 #include "terminal/clipboard.h"
+#include "terminal/ui.h"
 
 /* Maximum number of aliases a single command can advertise. Three is
  * already plenty (e.g. /new + /clear + /reset is the absolute ceiling
@@ -149,7 +150,7 @@ enum slash_result slash_dispatch(const char *line, struct slash_ctx *ctx)
      * one is ~12 chars. */
     char name_buf[64];
     if (name_len >= sizeof(name_buf)) {
-        printf(ANSI_RED "unknown command. type /help for the list." ANSI_RESET "\n");
+        ui_error("unknown command. type /help for the list.");
         return SLASH_UNKNOWN;
     }
     memcpy(name_buf, start, name_len);
@@ -157,14 +158,14 @@ enum slash_result slash_dispatch(const char *line, struct slash_ctx *ctx)
 
     const struct slash_cmd *cmd = find_command(name_buf);
     if (!cmd) {
-        printf(ANSI_RED "unknown command: /%s. type /help for the list." ANSI_RESET "\n", name_buf);
+        ui_error("unknown command: /%s. type /help for the list.", name_buf);
         return SLASH_UNKNOWN;
     }
     if (has_extra) {
         /* Echo the token the user actually typed, not the canonical
          * name — `/clear now` should report on `/clear`, not on the
          * `/new` it resolves to. */
-        printf(ANSI_RED "/%s takes no arguments." ANSI_RESET "\n", name_buf);
+        ui_error("/%s takes no arguments.", name_buf);
         return SLASH_BAD_USAGE;
     }
 
@@ -185,7 +186,7 @@ static void slash_run_resume(struct slash_ctx *ctx)
 {
     char cwd[4096];
     if (!getcwd(cwd, sizeof(cwd))) {
-        printf(ANSI_RED "cannot determine working directory" ANSI_RESET "\n");
+        ui_error("cannot determine working directory");
         return;
     }
     /* Hide the live session from the list — resuming the conversation
@@ -221,16 +222,16 @@ static void slash_run_copy(struct slash_ctx *ctx)
         }
     }
     if (!msg) {
-        printf(ANSI_DIM "no assistant response to copy" ANSI_RESET "\n");
+        ui_note("no assistant response to copy");
         return;
     }
     size_t len = strlen(msg->text);
     const char *err = NULL;
     if (clipboard_copy(msg->text, len, &err) == 0) {
-        printf(ANSI_DIM "copied %zu byte%s to clipboard" ANSI_RESET "\n", len, len == 1 ? "" : "s");
+        ui_note("copied %zu byte%s to clipboard", len, len == 1 ? "" : "s");
         return;
     }
-    printf(ANSI_RED "clipboard copy failed: %s" ANSI_RESET "\n", err ? err : "unknown error");
+    ui_error("clipboard copy failed: %s", err ? err : "unknown error");
 }
 
 /* ---------- /usage ---------- */
@@ -244,8 +245,7 @@ static void slash_run_usage(struct slash_ctx *ctx)
      * this is the one place we hand the object to a method. */
     struct provider *p = (struct provider *)ctx->state->provider;
     if (!p->query_usage) {
-        printf(ANSI_DIM "/usage is not supported by the %s provider" ANSI_RESET "\n",
-               p->name ? p->name : "?");
+        ui_note("/usage is not supported by the %s provider", p->name ? p->name : "?");
         return;
     }
     p->query_usage(p);

@@ -126,8 +126,7 @@ struct provider *ollama_provider_new(void)
      * picked would surprise some workflow — better to ask once. */
     const char *model = getenv("HAX_MODEL");
     if (!model || !*model) {
-        fprintf(stderr, "hax: ollama: HAX_MODEL is required "
-                        "(run `ollama list` to see installed models)\n");
+        hax_err("ollama: HAX_MODEL is required (run `ollama list` to see installed models)");
         return NULL;
     }
 

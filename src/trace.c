@@ -59,7 +59,7 @@ static FILE *get_fp_locked(void)
         return NULL;
     trace_fp = fopen(path, "we");
     if (!trace_fp) {
-        fprintf(stderr, "hax: HAX_TRACE: cannot open '%s' for writing\n", path);
+        hax_warn("HAX_TRACE: cannot open '%s' for writing", path);
         return NULL;
     }
     setvbuf(trace_fp, NULL, _IOLBF, 0);

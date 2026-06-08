@@ -46,7 +46,7 @@ static void probe_run(struct bg_job *job, void *arg)
                             a->timeout_s, bg_job_tick, job, &body);
     else
         rc = http_get(a->url, (const char *const *)a->headers, a->timeout_s, bg_job_tick, job,
-                      &body);
+                      &body, NULL);
     if (rc == 0 && body) {
         long v = a->extract(body, a->user);
         if (v > 0)

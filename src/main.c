@@ -182,6 +182,14 @@ int main(int argc, char **argv)
     int resume_mode = 0;
     const char *resume_arg = NULL;
 
+    /* Declared up front and initialized to safe values so every error
+     * path can funnel through the err_prompt/err_curl unwind below with a
+     * plain `goto` — no per-site free() boilerplate, and no goto crossing
+     * an initializer it would later read. */
+    int rc = 1;
+    char *prompt = NULL;
+    char *resume_path = NULL;
+
     /* `-h`, `-p`, `-c` keep conventional short forms; --raw and --resume
      * are long-only (`-r` is avoided to leave room for a future short
      * alias without collision). --resume takes an optional ID, so
@@ -225,24 +233,24 @@ int main(int argc, char **argv)
     }
 
     if (continue_mode && resume_mode) {
-        fprintf(stderr, "hax: use only one of --continue / --resume\n");
-        return 1;
+        hax_err("use only one of --continue / --resume");
+        goto err_prompt;
     }
     /* A bare --resume opens an interactive picker, which makes no sense in
      * -p mode (and would fight prompt-from-stdin). Require an explicit id
      * there; -c stays valid since it auto-selects the most recent. */
     if (print_mode && resume_mode && !resume_arg) {
-        fprintf(stderr, "hax: -p with --resume requires a session id (e.g. --resume=ID)\n");
-        return 1;
+        hax_err("-p with --resume requires a session id (e.g. --resume=ID)");
+        goto err_prompt;
     }
 
     /* Reject positional args in interactive mode: they would otherwise
      * be silently ignored and the user would be left wondering why
      * `hax fix this bug` did nothing. */
     if (!print_mode && optind < argc) {
-        fprintf(stderr, "hax: positional arguments require -p / --print\n"
-                        "Try 'hax --help' for usage.\n");
-        return 1;
+        hax_err("positional arguments require -p / --print\n"
+                "Try 'hax --help' for usage.");
+        goto err_prompt;
     }
 
     /* Acquire and validate the -p prompt before initializing curl or
@@ -250,25 +258,23 @@ int main(int argc, char **argv)
      * probes the local server, codex reads OAuth state) and a typo'd
      * `hax -p` with no piped input shouldn't surface as a probe or auth
      * error before the real "needs a prompt" diagnostic. */
-    char *prompt = NULL;
     if (print_mode) {
         if (optind < argc) {
             prompt = join_args(argc - optind, argv + optind);
         } else if (!isatty(fileno(stdin))) {
             prompt = read_all_stdin();
             if (!prompt) {
-                fprintf(stderr, "hax: failed to read stdin\n");
-                return 1;
+                hax_err("failed to read stdin");
+                goto err_prompt;
             }
             strip_trailing_newline(prompt);
         } else {
-            fprintf(stderr, "hax: -p requires a prompt (positional args or piped stdin)\n");
-            return 1;
+            hax_err("-p requires a prompt (positional args or piped stdin)");
+            goto err_prompt;
         }
         if (!*prompt) {
-            fprintf(stderr, "hax: -p prompt is empty\n");
-            free(prompt);
-            return 1;
+            hax_err("-p prompt is empty");
+            goto err_prompt;
         }
     }
 
@@ -277,13 +283,11 @@ int main(int argc, char **argv)
      * either matches an id/path or opens the interactive picker. Done here
      * so a cancelled picker or a bad id exits cleanly without constructing
      * a provider. */
-    char *resume_path = NULL;
     if (continue_mode || resume_mode) {
         char cwd[4096];
         if (!getcwd(cwd, sizeof(cwd))) {
-            fprintf(stderr, "hax: getcwd failed\n");
-            free(prompt);
-            return 1;
+            hax_err("getcwd failed");
+            goto err_prompt;
         }
         if (continue_mode) {
             struct session_entry *list;
@@ -298,45 +302,41 @@ int main(int argc, char **argv)
                  * easy-to-miss stderr note, contradicting the explicit
                  * request. Interactively, just start a fresh REPL. */
                 if (print_mode) {
-                    fprintf(stderr, "hax: no past conversation in this directory to continue\n");
-                    free(prompt);
-                    return 1;
+                    hax_err("no past conversation in this directory to continue");
+                    goto err_prompt;
                 }
-                fprintf(stderr, "hax: no past conversation in this directory; starting fresh\n");
+                hax_warn("no past conversation in this directory; starting fresh");
             }
         } else if (resume_arg) {
             if (!*resume_arg) {
                 /* `--resume=` (empty, e.g. an unset shell var) would prefix-
                  * match every session — refuse it rather than resume an
                  * arbitrary one. (Bare `--resume` with no '=' is the picker.) */
-                fprintf(stderr, "hax: --resume= requires a session id\n");
-                free(prompt);
-                return 1;
+                hax_err("--resume= requires a session id");
+                goto err_prompt;
             }
             resume_path = resolve_resume_arg(cwd, resume_arg);
             if (!resume_path) {
                 if (strchr(resume_arg, '/'))
-                    fprintf(stderr, "hax: --resume takes a session id, not a path "
-                                    "(sessions are per-directory)\n");
+                    hax_err("--resume takes a session id, not a path "
+                            "(sessions are per-directory)");
                 else
-                    fprintf(stderr, "hax: no session matching '%s'\n", resume_arg);
-                free(prompt);
-                return 1;
+                    hax_err("no session matching '%s'", resume_arg);
+                goto err_prompt;
             }
         } else {
             resume_path = session_picker_run(cwd, NULL);
             if (!resume_path) {
-                /* Cancelled, or nothing to resume / no TTY. */
-                free(prompt);
-                return 0;
+                /* Cancelled, or nothing to resume / no TTY — not an error. */
+                rc = 0;
+                goto err_prompt;
             }
         }
     }
     opts.resume_path = resume_path;
 
-    int rc = 1;
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
-        fprintf(stderr, "hax: curl_global_init failed\n");
+        hax_err("curl_global_init failed");
         goto err_prompt;
     }
 

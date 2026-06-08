@@ -25,6 +25,23 @@ void *xrealloc(void *p, size_t n);
 char *xstrdup(const char *s);
 char *xasprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
+/* Startup / CLI diagnostics. Both print a single "hax: <msg>\n" line to
+ * stderr — the machine-greppable prefix scripts expect — and color it only
+ * when stderr is a TTY (piped/redirected output stays plain so logs and
+ * `2>&1` captures don't collect escape bytes). The caller keeps its own
+ * control flow afterward (return an error code, fall through, goto an
+ * unwind label); pass a printf-style message with no prefix and no newline.
+ *
+ *   hax_err  — red; a failure (bad args, missing auth, unreachable backend).
+ *   hax_warn — yellow; a non-fatal notice where the run still proceeds
+ *              (optional logging disabled, recovered from a bad schema,
+ *              starting a fresh conversation).
+ *
+ * For diagnostics surfaced inside the running REPL, use ui_error/ui_note
+ * (terminal/ui.h) instead — those are the stdout-side equivalents. */
+__attribute__((format(printf, 1, 2))) void hax_err(const char *fmt, ...);
+__attribute__((format(printf, 1, 2))) void hax_warn(const char *fmt, ...);
+
 /* Reject anything that isn't a regular file before opening it. open()
  * on a FIFO without a writer blocks indefinitely, which would freeze a
  * startup that touches a path the user doesn't fully control (config

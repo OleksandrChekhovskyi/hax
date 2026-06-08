@@ -56,7 +56,7 @@ static int probe_model(const char *base_url, const char *api_key)
     const char *headers[] = {auth, NULL};
     char *body = NULL;
     int ok = 0;
-    if (http_get(url, auth ? headers : NULL, MODEL_PROBE_TIMEOUT_S, NULL, NULL, &body) == 0) {
+    if (http_get(url, auth ? headers : NULL, MODEL_PROBE_TIMEOUT_S, NULL, NULL, &body, NULL) == 0) {
         json_t *root = json_loads(body, 0, NULL);
         if (root) {
             json_t *data = json_object_get(root, "data");
@@ -137,11 +137,10 @@ struct provider *llamacpp_provider_new(void)
     if (key && !*key)
         key = NULL;
     if (probe_model(resolved, key) != 0) {
-        fprintf(stderr,
-                "hax: llama.cpp: failed to auto-discover model from %s/models\n"
+        hax_err("llama.cpp: failed to auto-discover model from %s/models\n"
                 "hax: is llama-server running? "
                 "(set HAX_MODEL to skip probing, or adjust HAX_LLAMACPP_PORT / "
-                "HAX_OPENAI_BASE_URL)\n",
+                "HAX_OPENAI_BASE_URL)",
                 resolved);
         free(resolved);
         free(default_url);

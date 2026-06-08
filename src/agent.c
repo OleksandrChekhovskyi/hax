@@ -24,6 +24,7 @@
 #include "terminal/input.h"
 #include "terminal/interrupt.h"
 #include "terminal/notify.h"
+#include "terminal/ui.h"
 
 /* The ASCII fallback is used when locale_init_utf8() couldn't establish a
  * UTF-8 LC_CTYPE — wcwidth() under a non-UTF-8 locale would mis-account
@@ -779,7 +780,7 @@ void agent_resume_session(struct agent_state *st, const char *path)
     size_t nl = 0;
     if (session_load(path, st->provider->name, s->model, &loaded, &nl, NULL) != 0 || nl == 0) {
         free(loaded);
-        printf(ANSI_RED "could not read session" ANSI_RESET "\n");
+        ui_error("could not read session");
         return;
     }
 
@@ -822,7 +823,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
         struct item *loaded = NULL;
         size_t nl = 0;
         if (session_load(opts->resume_path, p->name, sess.model, &loaded, &nl, NULL) != 0) {
-            fprintf(stderr, "hax: could not resume session '%s'\n", opts->resume_path);
+            hax_err("could not resume session '%s'", opts->resume_path);
             agent_session_free(&sess);
             return 1;
         }
@@ -1179,7 +1180,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
      * emitted a newline, so this lands on its own line under the prompt. */
     const char *hint = session_log_resume_hint(state.slog);
     if (hint)
-        printf(ANSI_DIM "resume with: hax --resume=%s" ANSI_RESET "\n", hint);
+        ui_note("resume with: hax --resume=%s", hint);
 
     spinner_free(r.spinner);
     input_free(input);

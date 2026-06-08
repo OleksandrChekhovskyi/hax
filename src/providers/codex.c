@@ -15,6 +15,7 @@
 #include "system/bg_job.h"
 #include "system/path.h"
 #include "terminal/ansi.h"
+#include "terminal/ui.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 #include "transport/retry.h"
@@ -333,7 +334,7 @@ static json_t *build_tools(const struct tool_def *tools, size_t n)
         json_error_t err;
         json_t *params = json_loads(tools[i].parameters_schema_json, 0, &err);
         if (!params) {
-            fprintf(stderr, "hax: bad tool schema for %s: %s\n", tools[i].name, err.text);
+            hax_warn("bad tool schema for %s: %s", tools[i].name, err.text);
             params = json_object();
         }
         json_array_append_new(arr, json_pack("{s:s, s:s, s:s, s:o}", "type", "function", "name",
@@ -728,13 +729,21 @@ static int codex_query_usage(struct provider *p)
     struct spinner *sp = spinner_new("fetching usage...");
     spinner_show(sp);
     char *body = NULL;
-    int rc = http_get(CODEX_USAGE_ENDPOINT, headers, 30, NULL, NULL, &body);
+    long status = 0;
+    int rc = http_get(CODEX_USAGE_ENDPOINT, headers, 30, NULL, NULL, &body, &status);
     spinner_hide(sp);
     spinner_free(sp);
     free(auth_hdr);
     free(acct_hdr);
     if (rc != 0 || !body) {
-        fprintf(stderr, "hax: failed to fetch usage from %s\n", CODEX_USAGE_ENDPOINT);
+        /* A 401 here is the same stale-OAuth-token condition the streaming
+         * path reports — match that friendly, actionable phrasing rather
+         * than the bare "failed to fetch" line, which gives the user
+         * nothing to act on. */
+        if (status == 401)
+            ui_error("codex token expired — run `codex` once to refresh, then retry");
+        else
+            ui_error("failed to fetch usage from %s", CODEX_USAGE_ENDPOINT);
         free(body);
         return -1;
     }
@@ -743,7 +752,7 @@ static int codex_query_usage(struct provider *p)
     json_t *root = json_loads(body, 0, &jerr);
     free(body);
     if (!root) {
-        fprintf(stderr, "hax: usage response is not valid JSON: %s\n", jerr.text);
+        ui_error("usage response is not valid JSON: %s", jerr.text);
         return -1;
     }
 
@@ -803,7 +812,7 @@ struct provider *codex_provider_new(void)
     size_t len = 0;
     char *contents = slurp_file(path, &len);
     if (!contents) {
-        fprintf(stderr, "hax: cannot read %s — is the codex CLI installed and logged in?\n", path);
+        hax_err("cannot read %s — is the codex CLI installed and logged in?", path);
         free(path);
         return NULL;
     }
@@ -813,7 +822,7 @@ struct provider *codex_provider_new(void)
     json_t *root = json_loads(contents, 0, &err);
     free(contents);
     if (!root) {
-        fprintf(stderr, "hax: ~/.codex/auth.json is not valid JSON: %s\n", err.text);
+        hax_err("~/.codex/auth.json is not valid JSON: %s", err.text);
         return NULL;
     }
 
@@ -822,7 +831,7 @@ struct provider *codex_provider_new(void)
     const char *account = tokens ? json_string_value(json_object_get(tokens, "account_id")) : NULL;
     const char *id_token = tokens ? json_string_value(json_object_get(tokens, "id_token")) : NULL;
     if (!access || !account) {
-        fprintf(stderr, "hax: auth.json missing tokens.access_token or tokens.account_id\n");
+        hax_err("auth.json missing tokens.access_token or tokens.account_id");
         json_decref(root);
         return NULL;
     }

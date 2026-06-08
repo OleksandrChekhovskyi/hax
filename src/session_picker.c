@@ -10,6 +10,7 @@
 #include "session.h"
 #include "util.h"
 #include "terminal/ansi.h"
+#include "terminal/ui.h"
 
 /* Sessions revealed per page, newest first. A printed list (not a
  * scrolling TUI), so 'm' prints the next page in place — each step is
@@ -92,7 +93,7 @@ char *session_picker_run(const char *cwd, const char *exclude_path)
     }
 
     if (shown == 0) {
-        printf(ANSI_DIM "no past conversations in this directory" ANSI_RESET "\n");
+        ui_note("no past conversations in this directory");
         free(idx);
         session_list_free(list, n);
         return NULL;
