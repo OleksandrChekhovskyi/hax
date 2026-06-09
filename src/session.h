@@ -142,10 +142,12 @@ int session_list(const char *cwd, struct session_entry **out, size_t *n_out);
 
 void session_list_free(struct session_entry *list, size_t n);
 
-/* First user prompt of a session, flattened and truncated for one-line
- * display, or NULL if none / unreadable. Reads only a bounded prefix of
- * the file (the first user message is near the top), so it's cheap to call
- * per displayed picker row. Caller frees. */
-char *session_first_prompt(const char *path);
+/* First user prompt of a session, flattened to one line and truncated to
+ * `max_cells` display cells, or NULL if none / unreadable. Reads only a
+ * bounded prefix of the file (the first user message is near the top), so
+ * it's cheap to call per picker row. `max_cells` bounds both the cost and
+ * how far into the prompt a filter can match: pass enough to search past
+ * what a row visibly shows, not just the on-screen preview. Caller frees. */
+char *session_first_prompt(const char *path, int max_cells);
 
 #endif /* HAX_SESSION_H */

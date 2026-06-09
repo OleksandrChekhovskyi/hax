@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "session_picker.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -9,17 +8,19 @@
 
 #include "session.h"
 #include "util.h"
-#include "terminal/ansi.h"
+#include "terminal/picker.h"
 #include "terminal/ui.h"
 
-/* Sessions revealed per page, newest first. A printed list (not a
- * scrolling TUI), so 'm' prints the next page in place — each step is
- * bounded regardless of how many sessions a long-lived project has. Any
- * session is also reachable directly by id via --resume=ID. */
-#define SESSION_PICKER_PAGE 10
+/* Search/display budget for the first-prompt label. The picker clips it to
+ * the row width for display; the extra reach lets a filter match terms well
+ * past the on-screen preview, not just its first few words. */
+#define SESSION_LABEL_CELLS 512
 
-/* read_choice sentinel: user asked for the next page ('m'). */
-#define PICK_MORE (-2)
+/* Cap on how many sessions the picker reads before first paint (newest
+ * first). Each row reads a bounded transcript prefix, so without a cap a
+ * repo with thousands of sessions would stall the picker on open. Older
+ * sessions stay reachable by id via `--resume=<id>`. */
+#define SESSION_PICKER_MAX 200
 
 /* Coarse "3m ago" / "2d ago" stamp from a delta in seconds. Good enough
  * to disambiguate sessions in a picker; not a precise clock. */
@@ -37,45 +38,15 @@ static void rel_time(long secs_ago, char *buf, size_t n)
         snprintf(buf, n, "%ldd ago", secs_ago / 86400);
 }
 
-/* Read one line from stdin and parse a 1-based selection. Returns the
- * 0-based index in [0,count), PICK_MORE when the user types 'm', or -1
- * for cancel (empty line, EOF, 'q', out-of-range, or junk). */
-static long read_choice(size_t count)
+char *session_picker_run(const char *cwd, const char *exclude_path, int *shown)
 {
-    char *line = NULL;
-    size_t cap = 0;
-    ssize_t len = getline(&line, &cap, stdin);
-    if (len < 0) {
-        free(line);
-        return -1;
-    }
-    /* Trim trailing newline and surrounding spaces. */
-    char *s = line;
-    while (*s == ' ' || *s == '\t')
-        s++;
-    char *end = s + strlen(s);
-    while (end > s && (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ' || end[-1] == '\t'))
-        *--end = '\0';
+    if (shown)
+        *shown = 0;
 
-    long choice = -1;
-    if (*s == 'm' || *s == 'M') {
-        choice = PICK_MORE;
-    } else if (*s && *s != 'q' && *s != 'Q') {
-        char *parse_end;
-        long v = strtol(s, &parse_end, 10);
-        if (*parse_end == '\0' && v >= 1 && (size_t)v <= count)
-            choice = v - 1;
-    }
-    free(line);
-    return choice;
-}
-
-char *session_picker_run(const char *cwd, const char *exclude_path)
-{
-    /* The picker is interactive: it prints a list/prompt to stdout and
-     * reads a selection from stdin. Require both to be terminals (matching
-     * the cursor/history gating elsewhere) so `hax --resume >out` doesn't
-     * write the menu into a file and block waiting on stdin. */
+    /* The picker is interactive (raw-mode list + stdin selection); require
+     * both ends to be terminals so `hax --resume >out` doesn't paint a menu
+     * into a file and block waiting on stdin. picker_run re-checks this, but
+     * gating here lets us skip the whole list build on the non-tty path. */
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
         return NULL;
 
@@ -84,60 +55,69 @@ char *session_picker_run(const char *cwd, const char *exclude_path)
     session_list(cwd, &list, &n);
 
     /* Build the display order, dropping the excluded (live) session. */
-    size_t *idx = n ? xmalloc(n * sizeof(*idx)) : NULL;
-    size_t shown = 0;
+    size_t *map = n ? xmalloc(n * sizeof(*map)) : NULL;
+    size_t n_shown = 0;
     for (size_t i = 0; i < n; i++) {
         if (exclude_path && list[i].path && strcmp(list[i].path, exclude_path) == 0)
             continue;
-        idx[shown++] = i;
+        map[n_shown++] = i;
     }
 
-    if (shown == 0) {
+    if (n_shown == 0) {
         ui_note("no past conversations in this directory");
-        free(idx);
+        free(map);
         session_list_free(list, n);
         return NULL;
     }
 
+    /* Materialize a row per session, newest first: the first prompt is the
+     * searchable label (the picker clips it to the row width for display),
+     * the relative time a dim detail column. Reads are capped at
+     * SESSION_PICKER_MAX so opening the picker never stalls on a huge
+     * history; the title notes when the list is capped. */
+    size_t n_load = n_shown < SESSION_PICKER_MAX ? n_shown : SESSION_PICKER_MAX;
     time_t now = time(NULL);
-    /* Reveal a page at a time, printing only each new batch (the numbering
-     * keeps climbing), so a project with hundreds of sessions doesn't dump
-     * a wall of text — the user types 'm' until they spot the one they
-     * want, or cancels. */
-    printf(ANSI_BOLD "resume a conversation" ANSI_RESET "\n");
-    size_t printed = 0;
-    long pick;
-    for (;;) {
-        size_t next = printed + SESSION_PICKER_PAGE;
-        if (next > shown)
-            next = shown;
-        for (size_t k = printed; k < next; k++) {
-            struct session_entry *e = &list[idx[k]];
-            char when[24];
-            rel_time((long)(now - e->mtime), when, sizeof(when));
-            /* Read the first prompt only for rows we actually print. */
-            if (!e->first_prompt)
-                e->first_prompt = session_first_prompt(e->path);
-            printf("  " ANSI_CYAN "%2zu" ANSI_RESET "  " ANSI_DIM "%-9s" ANSI_RESET "  %s\n", k + 1,
-                   when, e->first_prompt ? e->first_prompt : "");
-        }
-        printed = next;
-        int more = printed < shown;
-        printf("\n" ANSI_DIM "select 1-%zu%s, or enter to cancel: " ANSI_RESET, printed,
-               more ? ", m for more" : "");
-        fflush(stdout);
-
-        pick = read_choice(printed);
-        if (pick == PICK_MORE) {
-            if (more)
-                continue; /* print the next batch */
-            pick = -1;    /* nothing more to show — treat as cancel */
-        }
-        break;
+    struct picker_item *items = xmalloc(n_load * sizeof(*items));
+    char **details = xmalloc(n_load * sizeof(*details));
+    for (size_t k = 0; k < n_load; k++) {
+        struct session_entry *e = &list[map[k]];
+        if (!e->first_prompt)
+            e->first_prompt = session_first_prompt(e->path, SESSION_LABEL_CELLS);
+        char when[24];
+        rel_time((long)(now - e->mtime), when, sizeof(when));
+        details[k] = xstrdup(when);
+        items[k].label = (e->first_prompt && e->first_prompt[0]) ? e->first_prompt : "(no preview)";
+        items[k].detail = details[k];
     }
-    char *path = (pick >= 0) ? xstrdup(list[idx[pick]].path) : NULL;
 
-    free(idx);
+    char title_buf[96];
+    const char *title = "resume a conversation";
+    if (n_load < n_shown) {
+        snprintf(title_buf, sizeof title_buf, "resume a conversation · newest %zu of %zu", n_load,
+                 n_shown);
+        title = title_buf;
+    }
+
+    struct picker_opts opts = {
+        .title = title,
+        .items = items,
+        .n = n_load,
+        .empty_note = NULL,
+    };
+    /* Set before handing off (see session_picker.h): /resume's trail
+     * bookkeeping only needs that the cursor ends at the picker's start row,
+     * which holds even if picker_run's raw-mode setup fails without ever
+     * painting — so this need not wait on a successful paint. */
+    if (shown)
+        *shown = 1;
+    long sel = picker_run(&opts);
+    char *path = (sel >= 0) ? xstrdup(list[map[sel]].path) : NULL;
+
+    for (size_t k = 0; k < n_load; k++)
+        free(details[k]);
+    free(details);
+    free(items);
+    free(map);
     session_list_free(list, n);
     return path;
 }

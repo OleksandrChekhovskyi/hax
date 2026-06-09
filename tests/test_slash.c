@@ -7,6 +7,7 @@
 #include "agent.h"
 #include "agent_core.h"
 #include "harness.h"
+#include "render/render_ctx.h"
 #include "slash.h"
 #include "tool.h"
 #include "util.h"
@@ -47,19 +48,25 @@ void agent_new_conversation(struct agent_state *st)
 /* /resume reaches into session.c / session_picker.c / agent.c too. None
  * are linked here (and pulling session.h would drag in jansson), so
  * forward-declare the opaque handle and stub the three symbols slash.c
- * references. The picker returns NULL (cancel), so /resume is a no-op in
- * these tests — they assert on dispatch/parse behavior, not resume. */
+ * references. The picker stub is scriptable via the two globals below so
+ * the resume tests can exercise the cancelled-vs-nothing-shown paths. */
 struct session_log;
 const char *session_log_path(const struct session_log *log)
 {
     (void)log;
     return NULL;
 }
-char *session_picker_run(const char *cwd, const char *exclude_path)
+/* Scripts the session_picker_run stub: whether it reports an interactive
+ * picker was presented, and the path it "selects" (NULL = cancel). */
+static int stub_picker_shown = 0;
+static const char *stub_picker_path = NULL;
+char *session_picker_run(const char *cwd, const char *exclude_path, int *shown)
 {
     (void)cwd;
     (void)exclude_path;
-    return NULL;
+    if (shown)
+        *shown = stub_picker_shown;
+    return stub_picker_path ? xstrdup(stub_picker_path) : NULL;
 }
 void agent_resume_session(struct agent_state *st, const char *path)
 {
@@ -359,6 +366,63 @@ static void test_dispatch_trims_trailing_whitespace(void)
     free(out);
 }
 
+static void test_resume_cancelled_picker_sets_trail(void)
+{
+    /* A cancelled picker (shown, no selection) erased itself back onto the
+     * blank gap slash_dispatch emits, so two trailing newlines already sit
+     * below the echoed command. slash_run_resume must report that to disp
+     * (trail = 2), or the pre-prompt separator stacks a second blank line. */
+    stub_picker_shown = 1;
+    stub_picker_path = NULL;
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.r = &r};
+    struct slash_ctx ctx = {.state = &st};
+    struct dispatch_call c = {.line = "/resume", .ctx = &ctx};
+    char *out = capture_stdout(do_dispatch, &c);
+    EXPECT(c.result == SLASH_HANDLED);
+    EXPECT(r.disp.trail == 2);
+    free(out);
+}
+
+static void test_resume_selected_session_reports_trail(void)
+{
+    /* Selecting a session is the same gap situation as cancelling — the
+     * picker was shown — so slash_run_resume must report trail = 2 before
+     * handing off to agent_resume_session, whose replay would otherwise
+     * stack a second blank line above the resumed view. (agent_resume_session
+     * is stubbed here, so this asserts the report, not the replay itself.) */
+    stub_picker_shown = 1;
+    stub_picker_path = "/tmp/some-session.jsonl";
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.r = &r};
+    struct slash_ctx ctx = {.state = &st};
+    struct dispatch_call c = {.line = "/resume", .ctx = &ctx};
+    char *out = capture_stdout(do_dispatch, &c);
+    EXPECT(c.result == SLASH_HANDLED);
+    EXPECT(r.disp.trail == 2);
+    free(out);
+}
+
+static void test_resume_nothing_shown_keeps_trail(void)
+{
+    /* No interactive picker (non-tty, or nothing to resume): any note is
+     * real output, so the trail is left at the dispatcher default for the
+     * usual one-blank separation — slash_run_resume must not touch it. */
+    stub_picker_shown = 0;
+    stub_picker_path = NULL;
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.r = &r};
+    struct slash_ctx ctx = {.state = &st};
+    struct dispatch_call c = {.line = "/resume", .ctx = &ctx};
+    char *out = capture_stdout(do_dispatch, &c);
+    EXPECT(c.result == SLASH_HANDLED);
+    EXPECT(r.disp.trail == 1);
+    free(out);
+}
+
 int main(void)
 {
     test_dispatch_not_a_command();
@@ -373,5 +437,8 @@ int main(void)
     test_clear_alias_runs_new();
     test_new_rejects_extra_args();
     test_dispatch_trims_trailing_whitespace();
+    test_resume_cancelled_picker_sets_trail();
+    test_resume_selected_session_reports_trail();
+    test_resume_nothing_shown_keeps_trail();
     T_REPORT();
 }

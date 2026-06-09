@@ -623,15 +623,13 @@ int session_load(const char *path, const char *cur_provider, const char *cur_mod
 
 /* ---------------- listing ---------------- */
 
-#define FIRST_PROMPT_CELLS 64
-
 /* How much of a session file to read when extracting the first prompt.
  * The first user message sits within the first few lines (header,
  * boundary, user), so a bounded prefix avoids slurping a huge file (one
  * line can be a multi-megabyte tool result) just to label a picker row. */
 #define FIRST_PROMPT_SCAN_CAP (64 * 1024)
 
-char *session_first_prompt(const char *path)
+char *session_first_prompt(const char *path, int max_cells)
 {
     size_t len;
     int truncated;
@@ -651,7 +649,7 @@ char *session_first_prompt(const char *path)
             const char *txt = json_string_value(json_object_get(o, "text"));
             if (txt) {
                 char *flat = flatten_for_display(txt);
-                result = truncate_for_display(flat, FIRST_PROMPT_CELLS);
+                result = truncate_for_display(flat, (size_t)max_cells);
                 free(flat);
             }
             json_decref(o);

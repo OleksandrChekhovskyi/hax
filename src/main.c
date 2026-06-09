@@ -11,6 +11,7 @@
 #include "providers/registry.h"
 #include "session.h"
 #include "session_picker.h"
+#include "terminal/interrupt.h"
 #include "trace.h"
 #include "transcript.h"
 #include "util.h"
@@ -325,7 +326,15 @@ int main(int argc, char **argv)
                 goto err_prompt;
             }
         } else {
-            resume_path = session_picker_run(cwd, NULL);
+            /* The bare-`--resume` picker switches the terminal to raw mode
+             * here, during option resolution — before agent_run() installs
+             * the terminal-restore atexit/signal handlers. Install them now
+             * so a SIGTERM/SIGHUP/SIGQUIT (or normal exit) while the picker
+             * is up still restores cooked mode and re-shows the cursor,
+             * rather than leaving the parent shell raw. Idempotent and
+             * TTY-gated: agent_run()'s later call is then a no-op. */
+            interrupt_init();
+            resume_path = session_picker_run(cwd, NULL, NULL);
             if (!resume_path) {
                 /* Cancelled, or nothing to resume / no TTY — not an error. */
                 rc = 0;

@@ -159,9 +159,9 @@ int main(void)
             found = &list[i];
     EXPECT(found != NULL);
     if (found) {
-        EXPECT_STR_EQ(found->id, saved_id);           /* id comes from the filename, no file read */
-        EXPECT(found->first_prompt == NULL);          /* listing is enumeration-only */
-        char *fp = session_first_prompt(found->path); /* lazily, on demand */
+        EXPECT_STR_EQ(found->id, saved_id);  /* id comes from the filename, no file read */
+        EXPECT(found->first_prompt == NULL); /* listing is enumeration-only */
+        char *fp = session_first_prompt(found->path, 64); /* lazily, on demand */
         EXPECT(fp != NULL && strstr(fp, "hello world") != NULL);
         free(fp);
     }
@@ -240,7 +240,7 @@ int main(void)
     char *pathb = xstrdup(session_log_path(lb));
     session_log_append(lb, conv_b, 1);
     session_log_close(lb);
-    char *empty_fp = session_first_prompt(pathb);
+    char *empty_fp = session_first_prompt(pathb, 64);
     EXPECT(empty_fp == NULL);
     free(empty_fp);
     free(pathb);

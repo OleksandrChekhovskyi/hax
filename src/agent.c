@@ -717,9 +717,11 @@ static void replay_user_turn(struct render_ctx *r, const struct agent_session *s
 
     /* The startup banner and the /resume picker both write directly to
      * stdout, leaving the cursor at column 0 of a fresh row but disp's
-     * trail bookkeeping stale. Resync so the rule's separator computes the
-     * one blank line we want above it. */
-    r->disp.trail = 1;
+     * held/column bookkeeping stale — resync those. The trailing-newline
+     * count differs by caller (the /resume slash command leaves an extra
+     * leading blank line below the echoed command), so the caller sets
+     * r->disp.trail before invoking us and we trust it for the rule's
+     * separator. */
     r->disp.held = 0;
     r->disp.at_space_or_bol = 1;
 
@@ -781,6 +783,11 @@ void agent_resume_session(struct agent_state *st, const char *path)
     if (session_load(path, st->provider->name, s->model, &loaded, &nl, NULL) != 0 || nl == 0) {
         free(loaded);
         ui_error("could not read session");
+        /* The error line is now the last thing printed, on its own fresh
+         * row. /resume set trail = 2 for the picker that's now moot; correct
+         * it to the post-error state (one trailing newline) so the next
+         * prompt still gets its blank-line separation. */
+        st->r->disp.trail = 1;
         return;
     }
 
@@ -922,11 +929,16 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
          * (e.g. "/tmp/foo" — the dispatcher's bareword check) return
          * SLASH_NOT_A_COMMAND and fall through to the regular model path
          * below. */
+        /* Slash output bypasses disp, so reset the trail to the state the
+         * common case leaves: cursor at column 0 one newline below the
+         * echoed command. Set it before dispatch so a handler that ends in
+         * a different cursor state (e.g. /resume's full-screen picker) can
+         * override it. */
+        r.disp.trail = 1;
         struct slash_ctx sctx = {.state = &state};
         if (slash_dispatch(line, &sctx) != SLASH_NOT_A_COMMAND) {
             input_history_add_session(input, line);
             free(line);
-            r.disp.trail = 1;
             continue;
         }
 

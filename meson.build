@@ -78,6 +78,7 @@ sources = files(
     'src/terminal/input_core.c',
     'src/terminal/interrupt.c',
     'src/terminal/notify.c',
+    'src/terminal/picker.c',
     'src/terminal/ui.c',
 
     'src/text/utf8.c',

@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "agent.h"
+#include "render/render_ctx.h"
 #include "session.h"
 #include "session_picker.h"
 #include "util.h"
@@ -194,7 +195,17 @@ static void slash_run_resume(struct slash_ctx *ctx)
      * to resume" note and returns NULL when the list is empty or the
      * user cancels. */
     const char *current = session_log_path(ctx->state->slog);
-    char *path = session_picker_run(cwd, current);
+    int shown = 0;
+    char *path = session_picker_run(cwd, current, &shown);
+    /* A shown picker erases itself back onto the blank line slash_dispatch
+     * emits as the leading gap, so two trailing newlines already sit below
+     * the echoed command. Report that to disp — otherwise the pre-prompt
+     * separator (on cancel) or replay_user_turn's opening block (on select)
+     * stacks a second blank line on top. When no picker was shown (non-tty,
+     * or nothing to resume), the note is real output and the dispatcher's
+     * default trail gives it the usual one-blank separation. */
+    if (shown)
+        ctx->state->r->disp.trail = 2;
     if (!path)
         return;
     agent_resume_session(ctx->state, path);
