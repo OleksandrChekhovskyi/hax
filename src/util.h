@@ -91,10 +91,10 @@ char *dup_trim_trailing_slash(const char *s);
  * to the model. Three knobs:
  *
  *   - byte cap: the only one that scales with the host model's context
- *     size. Env-tunable via HAX_TOOL_OUTPUT_CAP using parse_size grammar
- *     ("25k", "200k", "1m"). 50 KiB default — matches opencode/pi-mono
- *     and is roughly 12K tokens, a sensible bite for both small local
- *     models and frontier ones.
+ *     size. Tunable via the tool_output_cap setting using parse_size
+ *     grammar ("25k", "200k", "1m"). 50 KiB default — matches opencode/
+ *     pi-mono and is roughly 12K tokens, a sensible bite for both small
+ *     local models and frontier ones.
  *
  *   - line count cap: guardrail against "10000 short lines" output
  *     shapes that don't trip the byte cap but still drown context. Not

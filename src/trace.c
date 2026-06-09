@@ -8,6 +8,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "config.h"
 #include "util.h"
 
 static pthread_mutex_t trace_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -54,7 +55,7 @@ static FILE *get_fp_locked(void)
     if (trace_init_done)
         return trace_fp;
     trace_init_done = 1;
-    const char *path = getenv("HAX_TRACE");
+    const char *path = config_str("trace");
     if (!path || !*path)
         return NULL;
     trace_fp = fopen(path, "we");

@@ -129,6 +129,16 @@ static void test_default_env(void)
     struct retry_policy s = retry_policy_default();
     EXPECT(s.base_delay_ms == 2000);
 
+    /* Semantically invalid values fall back to the defaults: a negative
+     * retry count and a zero base delay are typos, not meanings. */
+    setenv("HAX_HTTP_MAX_RETRIES", "-1", 1);
+    struct retry_policy neg = retry_policy_default();
+    EXPECT(neg.max_attempts == 5);
+
+    setenv("HAX_HTTP_RETRY_BASE", "0", 1);
+    struct retry_policy zb = retry_policy_default();
+    EXPECT(zb.base_delay_ms == 1000);
+
     unsetenv("HAX_HTTP_MAX_RETRIES");
     unsetenv("HAX_HTTP_RETRY_BASE");
 }

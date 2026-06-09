@@ -7,6 +7,7 @@
 #include <string.h>
 #include <curl/curl.h>
 
+#include "config.h"
 #include "openai.h"
 #include "probe.h"
 #include "util.h"
@@ -86,11 +87,13 @@ static long extract_ollama_context(const char *body, void *user)
 
 static void spawn_context_probe(struct provider *p, const char *base_url, const char *api_key)
 {
-    /* User-supplied HAX_CONTEXT_LIMIT wins; nothing for the probe to add. */
-    const char *cur = getenv("HAX_CONTEXT_LIMIT");
-    if (cur && *cur)
+    /* A usable user-supplied context_limit wins; nothing for the probe
+     * to add. Ask config_size — the same question the display path asks —
+     * so an unparseable value falls back to auto-detection instead of
+     * silently hiding the % display. */
+    if (config_size("context_limit") > 0)
         return;
-    const char *model = getenv("HAX_MODEL");
+    const char *model = config_str("model");
     if (!model || !*model)
         return; /* nothing to look up — caller will surface the missing-model error */
     char *url = swap_path(base_url, "/api/show");
@@ -124,26 +127,26 @@ struct provider *ollama_provider_new(void)
      * nor /v1/models (pulled-model catalog, no preference order) gives
      * a reliable signal of which one the user wants. Any heuristic we
      * picked would surprise some workflow — better to ask once. */
-    const char *model = getenv("HAX_MODEL");
+    const char *model = config_str("model");
     if (!model || !*model) {
         hax_err("ollama: HAX_MODEL is required (run `ollama list` to see installed models)");
         return NULL;
     }
 
-    const char *port_env = getenv("HAX_OLLAMA_PORT");
-    const char *port = (port_env && *port_env) ? port_env : "11434";
-    char *default_url = xasprintf("http://127.0.0.1:%s/v1", port);
+    /* The "11434" default lives in the config registry, so it's defined in
+     * one place. */
+    char *default_url = xasprintf("http://127.0.0.1:%s/v1", config_str_nonempty("ollama.port"));
 
     /* Resolve the URL the openai constructor will actually use so the
      * context probe targets the same host. Normalize the trailing slash
      * up-front so the probe and the eventual stream() target produce
      * identical paths. */
-    const char *base_env = getenv("HAX_OPENAI_BASE_URL");
+    const char *base_env = config_str("openai.base_url");
     char *resolved = dup_trim_trailing_slash((base_env && *base_env) ? base_env : default_url);
     /* Ollama doesn't authenticate by default, but a reverse proxy in
      * front of it might — forward HAX_OPENAI_API_KEY to the probe so an
      * authenticated front-end doesn't 401 us at /api/show. */
-    const char *key = getenv("HAX_OPENAI_API_KEY");
+    const char *key = config_str("openai.api_key");
     if (key && !*key)
         key = NULL;
 

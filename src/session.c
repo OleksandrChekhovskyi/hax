@@ -12,6 +12,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "config.h"
 #include "util.h"
 #include "system/fs.h"
 
@@ -135,8 +136,7 @@ void session_meta_free(struct session_meta *m)
 
 static int sessions_disabled(void)
 {
-    const char *e = getenv("HAX_NO_SESSION");
-    return e && *e && strcmp(e, "0") != 0;
+    return config_bool("no_session");
 }
 
 /* Per-cwd directory name: a readable slug plus a hash of the full path,

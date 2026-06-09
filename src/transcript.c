@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "config.h"
 #include "provider.h"
 #include "util.h"
 #include "terminal/ansi.h"
@@ -381,7 +382,7 @@ void transcript_render(FILE *out, const char *system_prompt, const struct tool_d
 
 void transcript_log_init(void)
 {
-    const char *path = getenv("HAX_TRANSCRIPT");
+    const char *path = config_str("transcript");
     if (!path || !*path)
         return;
     /* fopen("we") is itself the truncate. Discard the handle — the real
@@ -402,7 +403,7 @@ struct transcript_log {
 struct transcript_log *transcript_log_open(const char *system_prompt, const struct tool_def *tools,
                                            size_t n_tools)
 {
-    const char *path = getenv("HAX_TRANSCRIPT");
+    const char *path = config_str("transcript");
     if (!path || !*path)
         return NULL;
     FILE *fp = fopen(path, "we");

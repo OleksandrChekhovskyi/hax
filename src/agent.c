@@ -9,6 +9,7 @@
 
 #include "agent_core.h"
 #include "agent_dispatch.h"
+#include "config.h"
 #include "session.h"
 #include "slash.h"
 #include "tool.h"
@@ -178,12 +179,14 @@ static void md_emit_to_disp(const char *bytes, size_t n, int is_raw, void *user)
 
 static int markdown_enabled(void)
 {
+    /* Hard gate, not a default: the markdown renderer drives the cursor
+     * (retro-wrap via CSI sequences — see the cell-budget comment below),
+     * which would pollute piped output, so non-TTY is always raw even
+     * against an explicit markdown=1. On a TTY the setting is an
+     * off-switch; its fixed default (on) lives in the registry. */
     if (!isatty(fileno(stdout)))
         return 0;
-    const char *e = getenv("HAX_MARKDOWN");
-    if (e && strcmp(e, "0") == 0)
-        return 0;
-    return 1;
+    return config_bool("markdown");
 }
 
 /* Cell budget for the markdown wrap engine. display_width() is the
@@ -214,8 +217,7 @@ static int md_wrap_width(void)
  * just decides whether the deltas we receive get drawn. */
 static int reasoning_visible(void)
 {
-    const char *e = getenv("HAX_SHOW_REASONING");
-    return e && *e && strcmp(e, "0") != 0;
+    return config_bool("show_reasoning");
 }
 
 /* Format a token count in 1024-base: "412", "5.4k", "128k", "1.2M".
@@ -249,7 +251,7 @@ static void format_tokens(char *buf, size_t buflen, long n)
  *      the percentage display is hidden in that case. */
 static long context_limit(const struct provider *p)
 {
-    long env = parse_size(getenv("HAX_CONTEXT_LIMIT"));
+    long env = config_size("context_limit");
     if (env > 0)
         return env;
     long auto_v = atomic_load(&p->context_limit);

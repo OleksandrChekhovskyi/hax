@@ -7,6 +7,7 @@
 #include <string.h>
 #include <curl/curl.h>
 
+#include "config.h"
 #include "openai.h"
 #include "probe.h"
 #include "util.h"
@@ -48,7 +49,7 @@ static char *swap_path(const char *base, const char *new_path)
  * downstream "HAX_MODEL is required" message. */
 static int probe_model(const char *base_url, const char *api_key)
 {
-    const char *cur = getenv("HAX_MODEL");
+    const char *cur = config_str("model");
     if (cur && *cur)
         return 0;
     char *url = xasprintf("%s/models", base_url);
@@ -96,9 +97,11 @@ static long extract_llamacpp_n_ctx(const char *body, void *user)
 
 static void spawn_context_probe(struct provider *p, const char *base_url, const char *api_key)
 {
-    /* User-supplied HAX_CONTEXT_LIMIT wins; nothing for the probe to add. */
-    const char *cur = getenv("HAX_CONTEXT_LIMIT");
-    if (cur && *cur)
+    /* A usable user-supplied context_limit wins; nothing for the probe
+     * to add. Ask config_size — the same question the display path asks —
+     * so an unparseable value falls back to auto-detection instead of
+     * silently hiding the % display. */
+    if (config_size("context_limit") > 0)
         return;
     char *url = swap_path(base_url, "/props");
     if (!url)
@@ -119,21 +122,21 @@ static void spawn_context_probe(struct provider *p, const char *base_url, const 
 
 struct provider *llamacpp_provider_new(void)
 {
-    const char *port_env = getenv("HAX_LLAMACPP_PORT");
-    const char *port = (port_env && *port_env) ? port_env : "8080";
-    char *default_url = xasprintf("http://127.0.0.1:%s/v1", port);
+    /* The "8080" default lives in the config registry, so it's defined in
+     * one place. */
+    char *default_url = xasprintf("http://127.0.0.1:%s/v1", config_str_nonempty("llamacpp.port"));
 
     /* Probe whichever URL the openai constructor will actually use, so a
      * user-supplied HAX_OPENAI_BASE_URL still benefits from auto-discovery.
      * Normalize the trailing slash up-front so the probe and the eventual
      * stream() target produce identical paths. */
-    const char *base_env = getenv("HAX_OPENAI_BASE_URL");
+    const char *base_env = config_str("openai.base_url");
     char *resolved = dup_trim_trailing_slash((base_env && *base_env) ? base_env : default_url);
     /* llama-server can be started with --api-key, in which case HAX_OPENAI_API_KEY
      * carries the matching token. Forward it to the probes too — otherwise an
      * authenticated server returns 401 on /v1/models and provider construction
      * fails even though the eventual chat request would have been authorized. */
-    const char *key = getenv("HAX_OPENAI_API_KEY");
+    const char *key = config_str("openai.api_key");
     if (key && !*key)
         key = NULL;
     if (probe_model(resolved, key) != 0) {

@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include "codex_events.h"
+#include "config.h"
 #include "probe.h"
 #include "util.h"
 #include "render/progress.h"
@@ -535,17 +536,18 @@ static long extract_codex_context(const char *body, void *user)
 
 static void spawn_context_probe(struct codex *c)
 {
-    /* User-supplied HAX_CONTEXT_LIMIT wins; nothing for the probe to
-     * add and we save a network round-trip + the matching shutdown
-     * join cost. */
-    const char *cur = getenv("HAX_CONTEXT_LIMIT");
-    if (cur && *cur)
+    /* A usable user-supplied context_limit wins; nothing for the probe
+     * to add and we save a network round-trip + the matching shutdown
+     * join cost. Ask config_size — the same question the display path
+     * asks — so an unparseable value falls back to auto-detection
+     * instead of silently hiding the % display. */
+    if (config_size("context_limit") > 0)
         return;
     /* Resolve the model slug we'll actually send. HAX_MODEL wins per
      * agent.c's resolver; otherwise the codex default applies. The
      * probe needs a slug to match against the catalog — without one
      * there's nothing useful to look up. */
-    const char *env_model = getenv("HAX_MODEL");
+    const char *env_model = config_str("model");
     const char *model =
         (env_model && *env_model) ? env_model : (c->default_model ? c->default_model : "");
     if (!*model)

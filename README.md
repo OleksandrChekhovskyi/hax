@@ -193,7 +193,34 @@ HAX_PROVIDER=mock ./build/hax
 Pair with `scripts/stream_demo.py` (`short`, `long`, `slow`, `burst`, `ansi`, `binary`,
 `piped`, `python_buffer`) for realistic streaming patterns through the bash tool.
 
-## Environment variables
+## Configuration
+
+Every setting can be supplied two ways: an `HAX_*` environment variable, or
+`~/.config/hax/config.json` (the same directory as `AGENTS.md`). Precedence is **environment >
+config file > built-in default**, so a quick `HAX_MODEL=… hax …` still wins over whatever the
+file says, and the file is entirely optional — with no file, hax behaves exactly as it always
+has.
+
+Each `HAX_FOO_BAR` variable maps to a canonical config key, lowercased and grouped by
+provider/area: `HAX_MODEL` → `model`, `HAX_OPENAI_BASE_URL` → `openai.base_url`,
+`HAX_LLAMACPP_PORT` → `llamacpp.port`, `HAX_BASH_TIMEOUT` → `bash.timeout`. In the file those
+are nested objects (a flat `"openai.base_url"` key is accepted too), and scalar values may be
+written bare or quoted (`5000` ≡ `"5000"`). On/off settings accept `1`/`true`/`yes`/`on` as
+truthy and `0`/`false`/`no`/`off` as falsy (case-insensitive); anything else is invalid and
+reads as the setting's default — a typo never silently flips a switch:
+
+```json
+{
+  "provider": "openai-compatible",
+  "provider_name": "vLLM",
+  "model": "Qwen3-30B",
+  "reasoning_effort": "medium",
+  "openai": { "base_url": "http://127.0.0.1:8000/v1" }
+}
+```
+
+The variables below are the full list of settings; each maps to a config key by the rule
+above.
 
 ### Provider & model
 
@@ -216,6 +243,10 @@ Pair with `scripts/stream_demo.py` (`short`, `long`, `slow`, `burst`, `ansi`, `b
   model accepts works. With `codex`, defaults to `model_reasoning_effort` from
   `~/.codex/config.toml`; otherwise the field is omitted and the server picks its own
   default. Set it to an empty string to force omission
+- `HAX_NO_ENV` — set truthy to skip the `<env>` block (platform, cwd, available tools,
+  preferred commands) normally appended to the system prompt
+- `HAX_NO_AGENTS_MD` — set truthy to skip injecting AGENTS.md project instructions
+  (global, project, and parent-directory files) into the system prompt
 
 ### OpenAI-family auth and routing (openai, openai-compatible, llama.cpp, ollama, openrouter)
 
@@ -226,11 +257,18 @@ Pair with `scripts/stream_demo.py` (`short`, `long`, `slow`, `burst`, `ansi`, `b
   preset also picks up its conventional global as a fallback: `OPENAI_API_KEY` for `openai`,
   `OPENROUTER_API_KEY` for `openrouter`. `openai-compatible` deliberately has no global
   fallback so a configured OpenAI key isn't forwarded to an unrelated endpoint
-- `HAX_OPENAI_SEND_CACHE_KEY` — set to any non-empty value to send a stable per-session
-  `prompt_cache_key`. On by default for `openai` and `openrouter` (both honor prefix
-  caching); off by default for `openai-compatible`, `llama.cpp`, and `ollama` because some
-  local servers (notably vLLM) reject unknown JSON fields. This switch lets hosted compat
-  backends like Together, Fireworks, or Groq opt in
+- `HAX_OPENAI_SEND_CACHE_KEY` — set truthy to send a stable per-session `prompt_cache_key`,
+  falsy (`0`, `false`, `no`, `off`) to suppress it. On by default for `openai` and
+  `openrouter` (both honor prefix caching); off by default for `openai-compatible`,
+  `llama.cpp`, and `ollama` because some local servers (notably vLLM) reject unknown JSON
+  fields. The switch lets hosted compat backends like Together, Fireworks, or Groq opt in
+  (or the hosted presets opt out)
+- `HAX_OPENAI_REASONING_FORMAT` — only honored by `openai-compatible`: how reasoning effort
+  is encoded in the request, `flat` (`reasoning_effort`, the default) or `nested`
+  (`reasoning: {"effort": ...}`, used by some routers)
+- `HAX_REASONING_ROUNDTRIP` — replay plain reasoning text back to the model on later turns:
+  `off`/`0` disables, `on`/`1` sends it as `reasoning_content`, any other value names the
+  field to use. Defaults per preset (off for most; on where the backend expects it)
 
 ### llama.cpp preset
 
@@ -258,6 +296,13 @@ Pair with `scripts/stream_demo.py` (`short`, `long`, `slow`, `burst`, `ansi`, `b
   suffix (e.g. `10m`, `2h`). Default `600`; set to `0` to disable. Bump or disable when
   running against a local server (e.g. `llama-server`) whose prompt evaluation can take
   longer than the default and that doesn't send SSE heartbeats
+- `HAX_HTTP_MAX_RETRIES` — optional. Additional retries after a transient HTTP failure
+  (timeouts, 429s, 5xx). Default `4`; set to `0` to fail on the first error
+- `HAX_HTTP_RETRY_BASE` — optional. Base delay before the first retry; doubles per attempt
+  with jitter, capped at 30s. Same suffix syntax as above. Default `1s`
+- `HAX_TOOL_OUTPUT_CAP` — optional. Max bytes of a tool's output sent back to the model;
+  longer output is truncated with a hint pointing at the full capture on disk. Accepts a
+  `k`/`m` suffix (1024-base). Default `50k`
 - `HAX_BASH_TIMEOUT` — optional. How long the `bash` tool will wait for a command to complete
   before sending SIGTERM to the whole process group and reporting `[timed out after Ns]` to
   the model. Accepts plain seconds or a `ms`/`s`/`m`/`h` suffix. Default `120` (2 min); set
@@ -274,6 +319,15 @@ Pair with `scripts/stream_demo.py` (`short`, `long`, `slow`, `burst`, `ansi`, `b
 
 ### Display & observability
 
+- `HAX_MARKDOWN` — set falsy (`0`, `false`, `no`, `off`) to disable Markdown rendering and
+  print the model's text raw. Default on when stdout is a TTY (and always off when it isn't)
+- `HAX_SHOW_REASONING` — set truthy to print reasoning/CoT deltas live as they stream
+  (default off). With `openrouter` it also opts the request into returning reasoning
+- `HAX_DISPLAY_WIDTH` — optional. Force the content width in columns instead of the detected
+  terminal width; mainly for tests and fixtures that need a stable layout
+- `HAX_NOTIFY` — optional. Desktop-notification method for "model is done" while the
+  terminal is unfocused: `osc9`, `bel`, or a falsy value to disable. Auto-detected by
+  default (OSC 9 on terminals known to support it, BEL inside tmux and elsewhere)
 - `HAX_CONTEXT_LIMIT` — optional manual override for the model's context window, used to
   show a percentage on the per-user-turn usage line. Accepts a plain number or a `k`/`m` suffix
   (1024-base): `256k`, `128K`, `1m`, `262144`. Auto-detected for `codex` (from the catalog's
@@ -294,9 +348,9 @@ Pair with `scripts/stream_demo.py` (`short`, `long`, `slow`, `burst`, `ansi`, `b
   truncated on startup and on `/new`, then appended to as the conversation grows. Useful
   for debugging higher-level behavior than `HAX_TRACE` shows, and works with
   `HAX_PROVIDER=mock` where there are no HTTP calls to trace
-- `HAX_NO_SESSION` — set to any non-empty value (other than `0`) to disable session
-  recording, so `-c` / `--resume` / `/resume` have nothing to persist or restore. Unset
-  by default: every conversation is written to `$XDG_STATE_HOME/hax/sessions/`
+- `HAX_NO_SESSION` — set truthy to disable session recording, so `-c` / `--resume` /
+  `/resume` have nothing to persist or restore. Unset by default: every conversation is
+  written to `$XDG_STATE_HOME/hax/sessions/`
 
 ## License
 

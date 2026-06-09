@@ -7,6 +7,7 @@
 #include <curl/curl.h>
 
 #include "agent.h"
+#include "config.h"
 #include "oneshot.h"
 #include "providers/registry.h"
 #include "session.h"
@@ -24,7 +25,7 @@
 
 static struct provider *pick_provider(void)
 {
-    const char *which = getenv("HAX_PROVIDER");
+    const char *which = config_str("provider");
     if (!which || !*which)
         which = PROVIDER_DEFAULT_NAME;
 
@@ -32,7 +33,9 @@ static struct provider *pick_provider(void)
     if (f)
         return f->new();
 
-    fprintf(stderr, "hax: unknown HAX_PROVIDER='%s' (supported: ", which);
+    /* `which` may have come from HAX_PROVIDER or the config file's
+     * "provider" key, so name the value, not the source. */
+    fprintf(stderr, "hax: unknown provider '%s' (supported: ", which);
     provider_list_names(stderr);
     fprintf(stderr, ")\n");
     return NULL;
@@ -63,8 +66,8 @@ static const char HELP_TEXT[] =
     "                   tools. Useful as a barebones chat interface.\n"
     "  -h, --help       Show this help and exit.\n"
     "\n"
-    "Configuration is via environment variables; see README.md for\n"
-    "HAX_PROVIDER, HAX_MODEL, and the rest.\n";
+    "Configuration is via environment variables (HAX_PROVIDER, HAX_MODEL,\n"
+    "and the rest) or ~/.config/hax/config.json; env wins. See README.md.\n";
 
 /* Concatenate `argv[0..n-1]` with single spaces between elements. Returns
  * malloc'd. Used to assemble a positional-args prompt: `hax -p hello world`
@@ -349,6 +352,11 @@ int main(int argc, char **argv)
         goto err_prompt;
     }
 
+    /* Load the user config first: everything below resolves settings
+     * through config_str/etc. (env still wins over the file), including
+     * the trace/transcript paths. */
+    config_init();
+
     /* Truncate HAX_TRACE and HAX_TRANSCRIPT here, before any provider
      * startup or session init. Without this, a fast-fail run (bad
      * config, missing HAX_MODEL, no OAuth) would exit with stale files
@@ -374,6 +382,7 @@ int main(int argc, char **argv)
 err_curl:
     curl_global_cleanup();
 err_prompt:
+    config_free();
     free(prompt);
     free(resume_path);
     return rc;

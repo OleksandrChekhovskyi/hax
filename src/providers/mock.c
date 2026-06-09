@@ -10,6 +10,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "config.h"
 #include "provider.h"
 #include "util.h"
 
@@ -694,7 +695,7 @@ struct provider *mock_provider_new(void)
     m->base.stream = mock_stream;
     m->base.destroy = mock_destroy;
 
-    const char *script = getenv("HAX_MOCK_SCRIPT");
+    const char *script = config_str("mock.script");
     if (script && *script)
         m->script_path = xstrdup(script);
 

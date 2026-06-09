@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <sys/utsname.h>
 
+#include "config.h"
 #include "util.h"
 #include "system/path.h"
 #include "text/utf8_sanitize.h"
@@ -30,12 +31,6 @@
 
 /* Spec limit for the description field; longer values are truncated. */
 #define SKILL_DESCRIPTION_MAX 1024
-
-static int agent_env_flag_set(const char *name)
-{
-    const char *v = getenv(name);
-    return v && *v;
-}
 
 /* Host-level utilities a coding agent reaches for regardless of project
  * type. Project-driven tooling (npm/pnpm/yarn/bun, cargo, go, cmake, …)
@@ -508,8 +503,8 @@ static void append_skills(struct buf *b)
 
 char *agent_env_build_suffix(const char *model)
 {
-    int do_env = !agent_env_flag_set("HAX_NO_ENV");
-    int do_agents = !agent_env_flag_set("HAX_NO_AGENTS_MD");
+    int do_env = !config_bool("no_env");
+    int do_agents = !config_bool("no_agents_md");
 
     if (!do_env && !do_agents)
         return NULL;

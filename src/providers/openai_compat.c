@@ -4,12 +4,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "config.h"
 #include "openai.h"
 #include "util.h"
 
 struct provider *openai_compat_provider_new(void)
 {
-    const char *base_env = getenv("HAX_OPENAI_BASE_URL");
+    const char *base_env = config_str("openai.base_url");
     if (!base_env || !*base_env) {
         hax_err("HAX_PROVIDER=openai-compatible requires HAX_OPENAI_BASE_URL\n"
                 "hax: e.g. HAX_OPENAI_BASE_URL=http://127.0.0.1:8000/v1");
@@ -25,7 +26,7 @@ struct provider *openai_compat_provider_new(void)
          * proxies: nested). Let the user pick at runtime since we
          * don't know which one they're pointing at. */
         .reasoning_format =
-            reasoning_format_parse(getenv("HAX_OPENAI_REASONING_FORMAT"), REASONING_FLAT),
+            reasoning_format_parse(config_str("openai.reasoning_format"), REASONING_FLAT),
     };
     return openai_provider_new_preset(&preset);
 }

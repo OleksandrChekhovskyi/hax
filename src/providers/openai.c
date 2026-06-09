@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "config.h"
 #include "openai_events.h"
 #include "util.h"
 #include "system/bg_job.h"
@@ -420,7 +421,7 @@ static char **dup_headers(const char *const *src)
  * NULL (disabled). */
 static char *resolve_roundtrip_field(const char *preset_default)
 {
-    const char *env = getenv("HAX_REASONING_ROUNDTRIP");
+    const char *env = config_str("openai.reasoning_roundtrip");
     const char *chosen = preset_default;
     if (env) {
         if (!*env || strcmp(env, "off") == 0 || strcmp(env, "0") == 0)
@@ -444,7 +445,7 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
      * is misconfigured (a programmer error inside hax) — fail loudly so
      * we don't silently default to api.openai.com under a different
      * preset's display name. */
-    const char *base_env = getenv("HAX_OPENAI_BASE_URL");
+    const char *base_env = config_str("openai.base_url");
     const char *base = (base_env && *base_env) ? base_env : preset->default_base_url;
     if (!base || !*base) {
         hax_err("internal: openai preset has no base URL");
@@ -457,20 +458,20 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
      * openrouter). The openai-compatible preset deliberately leaves
      * api_key_env unset so a globally configured OPENAI_API_KEY doesn't
      * leak to a custom endpoint. */
-    const char *key = getenv("HAX_OPENAI_API_KEY");
+    const char *key = config_str("openai.api_key");
     if ((!key || !*key) && preset->api_key_env)
         key = getenv(preset->api_key_env);
 
-    const char *name = getenv("HAX_PROVIDER_NAME");
+    const char *name = config_str("provider_name");
     if (!name || !*name)
         name = (preset->display_name && *preset->display_name) ? preset->display_name : "openai";
 
     /* prompt_cache_key is an OpenAI-specific affinity hint for prefix-cache
-     * routing — backends that don't honor it just ignore the field.
-     * HAX_OPENAI_SEND_CACHE_KEY, if set to any non-empty value, forces it
-     * on regardless of the preset's default. */
-    const char *force_env = getenv("HAX_OPENAI_SEND_CACHE_KEY");
-    int send_cache_key = (force_env && *force_env) ? 1 : preset->send_cache_key_default;
+     * routing — but some local servers (notably vLLM) reject unknown JSON
+     * fields, hence the per-preset default. openai.send_cache_key
+     * overrides it in either direction via the shared bool grammar (an
+     * explicit false/0/off must not read as "set → on"). */
+    int send_cache_key = config_bool_or("openai.send_cache_key", preset->send_cache_key_default);
 
     struct openai *o = xcalloc(1, sizeof(*o));
     o->base_url = base_url;
@@ -498,7 +499,7 @@ struct provider *openai_provider_new(void)
      * "openai-compatible" preset, which keeps the policies that matter
      * for OpenAI itself (OPENAI_API_KEY pickup, prompt_cache_key on)
      * from leaking to a third-party server. */
-    const char *base_env = getenv("HAX_OPENAI_BASE_URL");
+    const char *base_env = config_str("openai.base_url");
     if (base_env && *base_env) {
         hax_err("HAX_OPENAI_BASE_URL is not honored by HAX_PROVIDER=openai "
                 "(this preset is locked to api.openai.com)\n"

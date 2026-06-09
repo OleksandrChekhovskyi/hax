@@ -147,9 +147,19 @@ spawns a probe owns the handle and joins it in `destroy()` before freeing the ta
 **`src/terminal/ansi.h`** centralizes ANSI escape sequences — never inline `\033[...m`
 literals; add a constant there.
 
-Other modules under `src/` (`system/diff`, `render/markdown`, `trace`, `util`,
+Other modules under `src/` (`config`, `system/diff`, `render/markdown`, `trace`, `util`,
 `render/spinner`, `system/fs`, …) are small, focused helpers; their headers describe what
-they do.
+they do. `config.{c,h}` holds the process-wide user config
+(`~/.config/hax/config.json`, loaded once at startup). Every tunable has a canonical key
+and an env-var binding declared once in a registry inside `config.c`; callers read by
+canonical key via `config_str` / `config_int` / `config_bool` / `config_size` /
+`config_duration_ms` (never `getenv`), so a setting can't be accidentally env-only and the
+parse grammar lives in one place. Resolution is `runtime override → env → file → registry
+default`: `config_set_override` is the session-scoped runtime tier (what `/model` etc. will
+write), `config_persist` writes the file tier ("remember this"), and env still wins over the
+file so the quick `HAX_FOO=bar hax …` invocation is unchanged. The file uses the canonical
+keys as nested objects (`{"openai": {"base_url": …}}`; flat-dotted also accepted). This is
+the seam runtime model/provider/preset selection builds on.
 
 ## Code style and conventions
 
@@ -179,5 +189,7 @@ Rule: every dependency must be in Debian main and either ship with macOS or be a
 `brew install`. Don't add a dependency without confirming that property; don't suggest GPL
 libraries (would break MIT distribution).
 
-Out of scope intentionally: ncurses (raw ANSI instead), TOML/YAML config (env vars only),
-OpenSSL direct linking, glib, libxdiff.
+Out of scope intentionally: ncurses (raw ANSI instead), TOML/YAML config (configuration is
+env vars plus an optional JSON file parsed with the already-present jansson — see
+`src/config.{c,h}` — so no new config-parser dependency), OpenSSL direct linking, glib,
+libxdiff.

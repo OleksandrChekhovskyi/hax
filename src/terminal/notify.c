@@ -7,6 +7,8 @@
 #include <strings.h> /* strcasecmp — POSIX puts it here, not in <string.h> */
 #include <unistd.h>
 
+#include "config.h"
+
 /* Method selected for the current process — resolved once on first call,
  * since the answer is a function of the environment and the env doesn't
  * change underneath us. */
@@ -57,7 +59,7 @@ static enum method resolve_method(void)
     /* Explicit user choice wins over the auto-detect heuristics so
      * `HAX_NOTIFY=bel|osc9` actually forces the method (as the header
      * advertises). The dumb-terminal opt-out below is auto-only. */
-    const char *cfg = getenv("HAX_NOTIFY");
+    const char *cfg = config_str("notify");
     if (env_truthy_off(cfg))
         return M_DISABLED;
     if (cfg && strcasecmp(cfg, "bel") == 0)

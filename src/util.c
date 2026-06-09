@@ -17,6 +17,7 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 
+#include "config.h"
 #include "provider.h"
 #include "terminal/ansi.h"
 #include "text/utf8.h"
@@ -189,8 +190,8 @@ int display_width(void)
      * fixtures (mock_layout.txt) and tests can pin a known width without
      * resizing the host terminal. No upper bound on the override —
      * explicit user choice. */
-    int v;
-    if (parse_int(getenv("HAX_DISPLAY_WIDTH"), &v) && v > 0)
+    int v = config_int("display_width");
+    if (v > 0)
         return v < 20 ? 20 : v;
     /* term_width() is the raw physical width; for content layout clamp
      * it to [20, DISPLAY_WIDTH_CAP] — the floor keeps wrap/truncate
@@ -708,8 +709,10 @@ char *dup_trim_trailing_slash(const char *s)
 
 size_t output_cap_bytes(void)
 {
-    long v = parse_size(getenv("HAX_TOOL_OUTPUT_CAP"));
-    return v > 0 ? (size_t)v : 50L * 1024;
+    /* The registry default ("50k") also covers an explicit 0 or invalid
+     * value — config_size treats both as unset, so the cap is never 0
+     * ("truncate everything"). */
+    return (size_t)config_size("tool_output_cap");
 }
 
 long parse_size(const char *s)

@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
+#include "config.h"
 #include "tool.h"
 #include "util.h"
 #include "system/path.h"
@@ -33,37 +34,8 @@
  * strictly below MAX_DRAIN_BYTES so spill always fires before drain — a
  * user-supplied HAX_TOOL_OUTPUT_CAP=20m must not let mem grow past the
  * drain SIGKILL with no truncation marker. */
-#define MAX_DRAIN_BYTES             (16L * 1024 * 1024)
-#define BASH_BYTE_CAP_MAX           (MAX_DRAIN_BYTES - 64L * 1024)
-#define BASH_TIMEOUT_DEFAULT_MS     (120L * 1000L)
-#define BASH_TIMEOUT_MAX_DEFAULT_MS (1800L * 1000L)
-#define BASH_GRACE_DEFAULT_MS       (2L * 1000L)
-
-/* Read a duration env var (ms/s/m/h suffix or bare seconds). 0 disables
- * the guard; unset or unparseable falls back to `fallback_ms`. */
-static long parse_timeout_env_ms(const char *name, long fallback_ms)
-{
-    const char *s = getenv(name);
-    if (!s || !*s)
-        return fallback_ms;
-    long v = parse_duration_ms(s);
-    return v < 0 ? fallback_ms : v;
-}
-
-static long resolve_default_timeout_ms(void)
-{
-    return parse_timeout_env_ms("HAX_BASH_TIMEOUT", BASH_TIMEOUT_DEFAULT_MS);
-}
-
-static long resolve_max_timeout_ms(void)
-{
-    return parse_timeout_env_ms("HAX_BASH_TIMEOUT_MAX", BASH_TIMEOUT_MAX_DEFAULT_MS);
-}
-
-static long resolve_grace_ms(void)
-{
-    return parse_timeout_env_ms("HAX_BASH_TIMEOUT_GRACE", BASH_GRACE_DEFAULT_MS);
-}
+#define MAX_DRAIN_BYTES   (16L * 1024 * 1024)
+#define BASH_BYTE_CAP_MAX (MAX_DRAIN_BYTES - 64L * 1024)
 
 /* Saturating add for non-negative longs. A configured duration near
  * LONG_MAX (e.g. HAX_BASH_TIMEOUT="9223372036854775000ms" or a per-call
@@ -988,7 +960,7 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
     free(envp);    /* parent's copy; child got its own at fork */
 
     long deadline = timeout_ms > 0 ? sat_add(monotonic_ms(), timeout_ms) : 0;
-    long grace_ms = resolve_grace_ms();
+    long grace_ms = config_duration_ms("bash.timeout_grace");
     long grace_deadline = 0;
     int timed_out = 0;
     int interrupted = 0;
@@ -1211,9 +1183,10 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
     return buf_steal(&out);
 }
 
-/* Resolve the timeout in ms from the JSON args, falling back to the env
- * default. The arg is integer seconds (clean model UX); env-var max is
- * parsed in ms so tests and ops can use any duration unit. The schema
+/* Resolve the timeout in ms from the JSON args, falling back to the
+ * configured default. The arg is integer seconds (clean model UX); the
+ * configured ceiling is in ms so tests and ops can use any duration unit.
+ * The schema
  * advertises the harness ceiling, but the model can't read env vars,
  * so we silently clamp rather than reject and force a retry. Returns
  * NULL on success (with *out_ms set), or an allocated error message
@@ -1222,7 +1195,7 @@ static char *resolve_call_timeout_ms(json_t *root, long *out_ms)
 {
     json_t *jt = json_object_get(root, "timeout_seconds");
     if (!jt) {
-        *out_ms = resolve_default_timeout_ms();
+        *out_ms = config_duration_ms("bash.timeout");
         return NULL;
     }
     if (!json_is_integer(jt))
@@ -1234,7 +1207,7 @@ static char *resolve_call_timeout_ms(json_t *root, long *out_ms)
      * to a negative timeout_ms that silently disables the timeout. The
      * clamp below brings this back down if a max is configured. */
     long timeout_ms = secs > LONG_MAX / 1000L ? LONG_MAX : secs * 1000L;
-    long max_ms = resolve_max_timeout_ms();
+    long max_ms = config_duration_ms("bash.timeout_max");
     if (max_ms > 0 && timeout_ms > max_ms)
         timeout_ms = max_ms;
     *out_ms = timeout_ms;

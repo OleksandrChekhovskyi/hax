@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "config.h"
 #include "openai.h"
 #include "probe.h"
 #include "util.h"
@@ -53,13 +54,14 @@ static long extract_openrouter_context(const char *body, void *user)
 
 static void spawn_context_probe(struct provider *p, const char *api_key)
 {
-    /* HAX_CONTEXT_LIMIT is the user override — when it's set, the agent
-     * already prefers it, so there's nothing for the probe to add and
-     * we save a network round-trip. */
-    const char *cur = getenv("HAX_CONTEXT_LIMIT");
-    if (cur && *cur)
+    /* context_limit is the user override — when it's usable, the agent
+     * already prefers it, so there's nothing for the probe to add and we
+     * save a network round-trip. Ask config_size — the same question the
+     * display path asks — so an unparseable value falls back to
+     * auto-detection instead of silently hiding the % display. */
+    if (config_size("context_limit") > 0)
         return;
-    const char *model = getenv("HAX_MODEL");
+    const char *model = config_str("model");
     if (!model || !*model)
         return; /* nothing to look up — agent will surface the missing-model error */
 
@@ -90,21 +92,21 @@ struct provider *openrouter_provider_new(void)
      * OPENROUTER_API_KEY fallback (and the public X-Title attribution
      * header) can never leak to an unrelated host. Custom OpenAI-compat
      * endpoints belong on HAX_PROVIDER=openai-compatible. */
-    const char *base_env = getenv("HAX_OPENAI_BASE_URL");
+    const char *base_env = config_str("openai.base_url");
     if (base_env && *base_env) {
         hax_err("HAX_OPENAI_BASE_URL is not honored by HAX_PROVIDER=openrouter "
                 "(this preset is locked to openrouter.ai)\n"
                 "hax: use HAX_PROVIDER=openai-compatible to point at a custom endpoint");
         return NULL;
     }
-    const char *key = getenv("HAX_OPENAI_API_KEY");
+    const char *key = config_str("openai.api_key");
     if (!key || !*key)
         key = getenv("OPENROUTER_API_KEY");
 
-    const char *title = getenv("HAX_OPENROUTER_TITLE");
+    const char *title = config_str("openrouter.title");
     if (!title || !*title)
         title = "hax";
-    const char *referer = getenv("HAX_OPENROUTER_REFERER");
+    const char *referer = config_str("openrouter.referer");
 
     /* OpenRouter uses these for attribution on its public leaderboards and
      * usage dashboards. Both are optional from OpenRouter's side; we always
@@ -127,8 +129,7 @@ struct provider *openrouter_provider_new(void)
      * `reasoning_effort` still reaches models that honor it. The same
      * env var still gates the *display* side in the agent — provider
      * opt-in alone doesn't render anything. */
-    const char *show = getenv("HAX_SHOW_REASONING");
-    int request_reasoning = show && *show && strcmp(show, "0") != 0;
+    int request_reasoning = config_bool("show_reasoning");
 
     struct openai_preset preset = {
         .display_name = "openrouter",

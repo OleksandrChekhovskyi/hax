@@ -6,43 +6,41 @@
 #include <strings.h>
 #include <time.h>
 
+#include "config.h"
 #include "util.h"
 
-/* Defaults tuned for an interactive CLI: prefer a slightly slower
- * successful reply over a fast clean failure. With 4 retries and
- * 1s base, the cumulative wait across a flaky window is ~15s
- * (1+2+4+8s, before jitter), which rides out a typical provider
+/* Defaults (in the config registry) tuned for an interactive CLI:
+ * prefer a slightly slower successful reply over a fast clean failure.
+ * With 4 retries and 1s base, the cumulative wait across a flaky window
+ * is ~15s (1+2+4+8s, before jitter), which rides out a typical provider
  * deploy / rate-limit cooldown / brief 5xx spike. The final per-
  * attempt delay (8s) is the "go get coffee" range without crossing
  * into "is hax frozen?" territory. The max-delay cap at 30s applies
- * when users override HAX_HTTP_RETRY_BASE upward. */
-#define DEFAULT_MAX_ATTEMPTS  5 /* one initial + 4 retries */
-#define DEFAULT_BASE_DELAY_MS 1000
-#define DEFAULT_MAX_DELAY_MS  30000
+ * when users override http.retry_base upward. */
+#define MAX_DELAY_MS 30000
 
 struct retry_policy retry_policy_default(void)
 {
+    /* The knob counts additional retries; the policy's max_attempts is
+     * total tries including the first, so add one. Clamp at a value
+     * users would never actually want to wait through. (Negative values
+     * already read as the registry default via config_int.) */
+    int n = config_int("http.max_retries");
+    if (n > 100)
+        n = 100;
+
+    /* "0 disables" is not part of this knob's grammar: a zero base would
+     * make every delay zero and hammer an already-struggling server, so
+     * it reads as invalid → the registry default. */
+    long base = config_duration_ms("http.retry_base");
+    if (base <= 0)
+        base = parse_duration_ms(config_default("http.retry_base"));
+
     struct retry_policy p = {
-        .max_attempts = DEFAULT_MAX_ATTEMPTS,
-        .base_delay_ms = DEFAULT_BASE_DELAY_MS,
-        .max_delay_ms = DEFAULT_MAX_DELAY_MS,
+        .max_attempts = n + 1,
+        .base_delay_ms = base,
+        .max_delay_ms = MAX_DELAY_MS,
     };
-
-    const char *e = getenv("HAX_HTTP_MAX_RETRIES");
-    int n;
-    if (e && *e && parse_int(e, &n) && n >= 0) {
-        /* The env knob is "additional retries"; the policy's max_attempts
-         * is total tries including the first, so add one. Cap at a value
-         * users would never actually want to wait through. */
-        if (n > 100)
-            n = 100;
-        p.max_attempts = n + 1;
-    }
-
-    long base = parse_duration_ms(getenv("HAX_HTTP_RETRY_BASE"));
-    if (base > 0)
-        p.base_delay_ms = base;
-
     return p;
 }
 

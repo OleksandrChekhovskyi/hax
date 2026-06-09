@@ -41,7 +41,7 @@ enum reasoning_format {
 
 /* Parse "flat" / "nested" into the matching enum value. `fallback` is
  * returned when `s` is NULL/empty so callers can write
- *   .reasoning_format = reasoning_format_parse(getenv("HAX_..."), REASONING_FLAT)
+ *   .reasoning_format = reasoning_format_parse(config_str("openai...."), REASONING_FLAT)
  * without an extra NULL check. An unrecognized non-empty value also
  * falls back, with a one-line stderr warning so a typo doesn't pass
  * silently. */

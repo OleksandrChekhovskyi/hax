@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "agent_env.h"
+#include "config.h"
 #include "util.h"
 
 /* Default text used when HAX_SYSTEM_PROMPT is unset and --raw was not
@@ -74,7 +75,7 @@ void items_append(struct item **items, size_t *n, size_t *cap, struct item it)
 
 const char *resolve_reasoning_effort(const struct provider *p)
 {
-    const char *e = getenv("HAX_REASONING_EFFORT");
+    const char *e = config_str("reasoning_effort");
     if (e)
         return *e ? e : NULL;
     return p->default_reasoning_effort;
@@ -85,7 +86,7 @@ char *build_system_prompt(const char *model, int raw)
     if (raw)
         return NULL;
 
-    const char *sys = getenv("HAX_SYSTEM_PROMPT");
+    const char *sys = config_str("system_prompt");
     if (!sys)
         sys = DEFAULT_SYSTEM_PROMPT;
     if (!*sys)
@@ -104,7 +105,7 @@ int agent_session_init(struct agent_session *s, struct provider *p, const struct
 {
     memset(s, 0, sizeof(*s));
 
-    s->model = getenv("HAX_MODEL");
+    s->model = config_str("model");
     if (!s->model || !*s->model)
         s->model = p->default_model;
     if (!s->model || !*s->model) {

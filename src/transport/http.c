@@ -10,13 +10,13 @@
 #include <time.h>
 #include <curl/curl.h>
 
+#include "config.h"
 #include "trace.h"
 #include "util.h"
 #include "transport/sse.h"
 
-#define ERR_BODY_CAP         4096
-#define IDLE_TIMEOUT_DEFAULT 600L
-#define RETRY_AFTER_MAX_MS   (2L * 60L * 1000L) /* interactive cap; user can retry later */
+#define ERR_BODY_CAP       4096
+#define RETRY_AFTER_MAX_MS (2L * 60L * 1000L) /* interactive cap; user can retry later */
 
 struct curl_state {
     struct sse_parser parser;
@@ -35,22 +35,14 @@ struct sse_trace_wrapper {
     void *inner_user;
 };
 
-/* Return the idle (low-speed) timeout in seconds. Accepts plain seconds
- * or a ms/s/m/h suffix. 0 disables the guard. Unset or unparseable →
- * IDLE_TIMEOUT_DEFAULT. libcurl's CURLOPT_LOW_SPEED_TIME is whole
- * seconds, so any non-zero ms value rounds up — never time out earlier
- * than the configured duration, and sub-second values don't silently
- * floor to 0 (which would mean "disabled"). */
+/* Return the idle (low-speed) timeout in seconds; 0 disables the guard.
+ * libcurl's CURLOPT_LOW_SPEED_TIME is whole seconds, so any non-zero ms
+ * value rounds up — never time out earlier than the configured duration,
+ * and sub-second values don't silently floor to 0 (which would mean
+ * "disabled"). */
 static long resolve_idle_timeout(void)
 {
-    const char *s = getenv("HAX_HTTP_IDLE_TIMEOUT");
-    if (!s || !*s)
-        return IDLE_TIMEOUT_DEFAULT;
-    long ms = parse_duration_ms(s);
-    if (ms < 0)
-        return IDLE_TIMEOUT_DEFAULT;
-    if (ms == 0)
-        return 0;
+    long ms = config_duration_ms("http.idle_timeout");
     return ms / 1000 + (ms % 1000 ? 1 : 0);
 }
 
