@@ -382,6 +382,11 @@ static void paint(struct picker_state *s)
     buf_init(&out);
     buf_init(&row);
 
+    /* The whole frame is one fwrite already; wrap it in synchronized output
+     * (DEC 2026) too so the climb/erase-then-redraw can't flash an
+     * intermediate blank on terminals that present mid-stream. */
+    buf_append_str(&out, ANSI_SYNC_BEGIN);
+
     /* Climb to the top of the prior paint and clear everything below, so
      * a shrinking list (filter narrowed) leaves no stale rows behind. */
     if (s->painted && s->prev_rows > 1) {
@@ -432,6 +437,8 @@ static void paint(struct picker_state *s)
         }
     }
 #undef EMIT_ROW
+
+    buf_append_str(&out, ANSI_SYNC_END);
 
     buf_free(&row);
     fwrite(out.data ? out.data : "", 1, out.len, stdout);

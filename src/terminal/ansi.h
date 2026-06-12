@@ -37,6 +37,20 @@
 
 #define ANSI_ERASE_LINE "\x1b[K"
 
+/* Erase from the cursor to the end of the screen (ED 0). */
+#define ANSI_ERASE_BELOW "\x1b[J"
+
+/* DEC private mode 2026 — synchronized output. Between BEGIN and END the
+ * terminal buffers everything we write and presents it as one atomic
+ * frame, so a multi-row prompt repaint can't show an intermediate blank
+ * (erased-but-not-yet-redrawn) state. Terminals that don't implement the
+ * mode ignore the unknown private mode harmlessly. The prompt editor
+ * wraps each full-area repaint in this pair; interrupt.c's tty restore
+ * also emits END so a paint interrupted mid-frame can't leave the
+ * terminal stuck with updates suspended. */
+#define ANSI_SYNC_BEGIN "\x1b[?2026h"
+#define ANSI_SYNC_END   "\x1b[?2026l"
+
 /* DECTCEM cursor visibility. Hidden during model streaming and tool
  * dispatch so the only "we're alive" indicator is the spinner glyph;
  * shown only for the duration of the input prompt. Restoration on

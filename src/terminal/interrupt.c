@@ -288,8 +288,11 @@ static void restore_tty_only(void)
     if (W.stdout_is_tty) {
         /* Bracketed-paste off so it doesn't leak to the parent shell,
          * cursor-show to reverse agent.c's cursor_hide() in case the
-         * process dies mid-stream (SIGINT, abort, crash). */
-        static const char restore_seq[] = "\x1b[?2004l\x1b[?25h";
+         * process dies mid-stream (SIGINT, abort, crash). End synchronized
+         * output (DEC 2026) too: a paint() interrupted between SYNC_BEGIN
+         * and SYNC_END would otherwise leave the terminal suspending
+         * updates indefinitely. */
+        static const char restore_seq[] = "\x1b[?2004l\x1b[?25h\x1b[?2026l";
         (void)!write(STDOUT_FILENO, restore_seq, sizeof(restore_seq) - 1);
     }
 }

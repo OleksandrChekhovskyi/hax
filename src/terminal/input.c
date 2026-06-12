@@ -270,47 +270,76 @@ static void handle_escape(struct input *in)
 
 /* ---------------- render / paint ---------------- */
 
-/* Walker callback for the live edit area: writes glyph bytes verbatim
- * and emits `\r\n` + indent-spaces at every row break. With OPOST off
- * (raw mode) the terminal won't add the CR for us. The indent target
- * is delivered via ev->col — the walker has resolved it from the
- * cont_indent_col passed in. */
+/* Append a CSI sequence like "\x1b[<n><final>" to `f`. */
+static void buf_append_csi(struct buf *f, int n, char final)
+{
+    char tmp[24];
+    int len = snprintf(tmp, sizeof(tmp), "\x1b[%d%c", n, final);
+    buf_append(f, tmp, (size_t)len);
+}
+
+/* Walker callback for the live edit area: appends glyph bytes verbatim
+ * and a `\r\n` + indent-spaces at every row break. With OPOST off (raw
+ * mode) the terminal won't add the CR for us. The indent target is
+ * delivered via ev->col — the walker has resolved it from the
+ * cont_indent_col passed in. Output goes into the caller's `struct buf`
+ * (passed as `user`) so the whole repaint reaches the tty as one write —
+ * see paint(). */
 static void paint_emit(const struct input_render_event *ev, void *user)
 {
-    (void)user;
+    struct buf *f = user;
     if (ev->kind == INPUT_RENDER_GLYPH) {
-        fwrite(ev->bytes, 1, ev->n, stdout);
+        buf_append(f, ev->bytes, ev->n);
     } else {
-        fputs("\r\n", stdout);
+        buf_append(f, "\r\n", 2);
         for (int k = 0; k < ev->col; k++)
-            fputc(' ', stdout);
+            buf_append(f, " ", 1);
     }
 }
 
+/* Repaint the whole edit area. The entire frame — sync-begin, the
+ * climb/erase, the prompt, the rendered buffer, the cursor repositioning,
+ * sync-end — is assembled in one `struct buf` and emitted with a single
+ * fwrite. Two things matter for flicker on a tall prompt: (1) stdout is
+ * line-buffered on a tty, so emitting row-by-row would flush once per
+ * `\n` and hand the terminal a separate write (and a chance to present a
+ * half-drawn frame) for every visual row — batching collapses that to one
+ * write; (2) DEC 2026 (ANSI_SYNC_BEGIN/END) tells terminals that support
+ * it to present the frame atomically, so the erase-then-redraw can't show
+ * an intermediate blank even if the bytes are chunked downstream. */
 static void paint(struct input *in)
 {
     int prompt_w = input_core_prompt_width(in->prompt);
     int cols = in->term_cols;
 
+    struct buf f;
+    buf_init(&f);
+    buf_append_str(&f, ANSI_SYNC_BEGIN);
+
     /* Move to top of last edit area, erase to end of screen. */
     if (in->last_cursor_row > 0)
-        printf("\x1b[%dA", in->last_cursor_row);
-    fputs("\r\x1b[J", stdout);
+        buf_append_csi(&f, in->last_cursor_row, 'A');
+    buf_append_str(&f, "\r" ANSI_ERASE_BELOW);
 
-    fputs(in->prompt, stdout);
+    buf_append_str(&f, in->prompt);
 
     int cont = in->wrap_cont_col0 ? 0 : prompt_w;
     struct input_layout L;
-    input_core_render(in->buf, in->len, in->cursor, prompt_w, cont, cols, paint_emit, NULL, &L);
+    input_core_render(in->buf, in->len, in->cursor, prompt_w, cont, cols, paint_emit, &f, &L);
 
     /* From end-of-content position, climb up to cursor row, then right. */
     int up = L.end_row - L.cursor_row;
     if (up > 0)
-        printf("\x1b[%dA", up);
-    putchar('\r');
+        buf_append_csi(&f, up, 'A');
+    buf_append(&f, "\r", 1);
     if (L.cursor_col > 0)
-        printf("\x1b[%dC", L.cursor_col);
+        buf_append_csi(&f, L.cursor_col, 'C');
+
+    buf_append_str(&f, ANSI_SYNC_END);
+
+    fwrite(f.data, 1, f.len, stdout);
     fflush(stdout);
+    buf_free(&f);
 
     in->last_cursor_row = L.cursor_row;
     in->last_rows = L.total_rows;
@@ -416,43 +445,63 @@ static void leave_edit_area(struct input *in)
     in->last_rows = 0;
 }
 
-/* Walker callback for the committed-user-message render. Emits a
+/* Walker callback for the committed-user-message render. Appends a
  * bright-magenta `▌ ` stripe at every row break so wrapped continuation
  * rows stay marked, and resets foreground around the strip glyph so
- * the body inherits magenta without escapes nesting. */
+ * the body inherits magenta without escapes nesting. Output is collected
+ * into the caller's `struct buf` (passed as `user`). */
 static void submitted_emit(const struct input_render_event *ev, void *user)
 {
-    (void)user;
+    struct buf *f = user;
     if (ev->kind == INPUT_RENDER_GLYPH) {
-        fwrite(ev->bytes, 1, ev->n, stdout);
+        buf_append(f, ev->bytes, ev->n);
     } else {
-        fputs(ANSI_FG_DEFAULT "\r\n" ANSI_BRIGHT_MAGENTA "▌ ", stdout);
+        buf_append_str(f, ANSI_FG_DEFAULT "\r\n" ANSI_BRIGHT_MAGENTA "▌ ");
     }
 }
 
-void input_render_user_message(const char *text, size_t len, int term_cols)
+/* Append the magenta-striped user message to `f`. Shared by the public
+ * one-shot renderer and render_submitted so the stripe layout can't drift. */
+static void append_user_message(struct buf *f, const char *text, size_t len, int term_cols)
 {
     /* Cell width of "▌ ": one box-drawing glyph plus a space. The walker
      * indents continuation rows to this column so wrapped content aligns
      * under the first row's text. */
     const int bar_col = 2;
-    fputs(ANSI_BRIGHT_MAGENTA "▌ ", stdout);
-    input_core_render(text, len, /*cursor=*/0, bar_col, bar_col, term_cols, submitted_emit, NULL,
+    buf_append_str(f, ANSI_BRIGHT_MAGENTA "▌ ");
+    input_core_render(text, len, /*cursor=*/0, bar_col, bar_col, term_cols, submitted_emit, f,
                       NULL);
-    fputs(ANSI_FG_DEFAULT "\r\n", stdout);
+    buf_append_str(f, ANSI_FG_DEFAULT "\r\n");
+}
+
+void input_render_user_message(const char *text, size_t len, int term_cols)
+{
+    struct buf f;
+    buf_init(&f);
+    append_user_message(&f, text, len, term_cols);
+    fwrite(f.data, 1, f.len, stdout);
     fflush(stdout);
+    buf_free(&f);
 }
 
 /* Erase the edit area and re-emit the buffer with a magenta stripe and
  * magenta body so submitted user messages stay clearly marked in the
- * scrollback against agent output. */
+ * scrollback against agent output. The erase and the re-emit ride one
+ * synchronized frame so the prompt is replaced in place without a flash. */
 static void render_submitted(struct input *in)
 {
+    struct buf f;
+    buf_init(&f);
+    buf_append_str(&f, ANSI_SYNC_BEGIN);
     if (in->last_cursor_row > 0)
-        printf("\x1b[%dA", in->last_cursor_row);
-    fputs("\r\x1b[J", stdout);
+        buf_append_csi(&f, in->last_cursor_row, 'A');
+    buf_append_str(&f, "\r" ANSI_ERASE_BELOW);
+    append_user_message(&f, in->buf, in->len, in->term_cols);
+    buf_append_str(&f, ANSI_SYNC_END);
+    fwrite(f.data, 1, f.len, stdout);
+    fflush(stdout);
+    buf_free(&f);
 
-    input_render_user_message(in->buf, in->len, in->term_cols);
     in->last_cursor_row = 0;
     in->last_rows = 0;
 }
