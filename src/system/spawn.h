@@ -56,9 +56,36 @@ void spawn_parent_restore(const struct sigaction *saved_int, const struct sigact
  * normally (Ctrl-C in less quits less, not the parent). */
 void spawn_child_default_signals(void);
 
+/* Redirect the post-fork child's stdin/stdout/stderr to /dev/null
+ * before exec — for background helpers that should neither read the
+ * terminal nor scribble on the REPL (cf. spawn_run / spawn_pipe_open,
+ * which deliberately inherit parent stdio for interactive children).
+ * Best-effort: if /dev/null can't be opened the child just keeps the
+ * inherited descriptors. */
+void spawn_child_redirect_null(void);
+
+/* Arrange for the post-fork child to die with its parent: on Linux,
+ * request SIGTERM via PR_SET_PDEATHSIG so a parent that exits without
+ * reaping (a SIGKILL, say) doesn't strand the child. `parent` is the
+ * pid captured *before* fork; this re-checks getppid() against it and
+ * self-exits if the parent already died in the fork/exec window (the
+ * death signal only fires for deaths after the arm). A no-op where
+ * PR_SET_PDEATHSIG is unavailable; callers that also need a
+ * non-Linux backstop (e.g. a self-terminating exec) supply that
+ * separately. */
+void spawn_child_die_with_parent(pid_t parent);
+
 /* waitpid(pid, &status, 0) with an EINTR retry loop. Returns the
  * waitpid status word on success, -1 on non-EINTR error. */
 int spawn_wait_child(pid_t pid);
+
+/* Non-blocking reap: if `pid` has already exited, reap it and return 1;
+ * return 0 while it is still running. ECHILD (not our child, or already
+ * reaped elsewhere) counts as exited; any other waitpid error returns 0
+ * so a transient failure doesn't falsely report a live child as gone.
+ * The WNOHANG sibling of spawn_wait_child, for callers polling a
+ * long-lived background helper they may later respawn. */
+int spawn_reap_if_exited(pid_t pid);
 
 struct spawn_pipe {
     FILE *w;

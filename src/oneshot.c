@@ -13,6 +13,7 @@
 #include "turn.h"
 #include "util.h"
 #include "render/ctrl_strip.h"
+#include "system/keepawake.h"
 #include "terminal/ansi.h"
 
 /* Advance both append-only logs over the same item slice — see the twin
@@ -109,6 +110,14 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
      * the log. */
     oneshot_flush(tlog, slog, sess.items, sess.n_items);
 
+    /* Keep the machine from idling to sleep across the whole agentic
+     * run — a long unattended -p invocation (or one driven from
+     * automation) shouldn't be cut short by the idle timer. Released at
+     * `done:`, the single cleanup funnel for every exit path below.
+     * Gated by the keep_awake config key; no-op when off or where no
+     * inhibitor helper exists. */
+    keepawake_acquire();
+
     int rc = 0;
     int first_inner = 1;
     for (int turn_n = 0; turn_n < max_turns; turn_n++) {
@@ -198,6 +207,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
     rc = 1;
 
 done:
+    keepawake_release();
     oneshot_flush(tlog, slog, sess.items, sess.n_items);
     /* Surface the session id on stderr (stdout is the model's answer, kept
      * clean for piping) so a one-shot run can be picked up with --resume.

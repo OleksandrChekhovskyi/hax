@@ -316,6 +316,11 @@ above.
   wind down cleanly (flush output, drop locks, remove temp files) before SIGKILL escalates.
   Same suffix syntax as above. Default `2` (seconds); set to `0` to skip the grace window
   and SIGKILL immediately
+- `HAX_KEEP_AWAKE` — optional. Keep the machine from going to sleep while a turn is running,
+  so a long unattended run isn't cut short by the idle timer. Inhibits idle *system* sleep
+  only — the display is still free to blank. On by default; set falsy (`0`, `false`, `no`,
+  `off`) to disable. Best-effort: a no-op where the platform helper is missing (`caffeinate`
+  on macOS, `systemd-inhibit` on Linux) or on other platforms
 
 ### Display & observability
 

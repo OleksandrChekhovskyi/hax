@@ -157,6 +157,108 @@ static void test_pipe_early_child_exit_does_not_kill_parent(void)
     EXPECT(WIFEXITED(rc));
 }
 
+/* ---------------- spawn_reap_if_exited ---------------- */
+
+/* A pid that isn't our child reaps as "exited": waitpid returns
+ * -1/ECHILD, which the helper treats as gone. Our own pid is a safe,
+ * deterministic stand-in (never our child). */
+static void test_reap_non_child_is_exited(void)
+{
+    EXPECT(spawn_reap_if_exited(getpid()) == 1);
+}
+
+/* A live child reads as not-yet-exited; we reap it ourselves after. */
+static void test_reap_live_child(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        pause(); /* block until the parent kills us */
+        _exit(0);
+    }
+    if (pid < 0) {
+        EXPECT(0); /* fork failed: record and bail — never use pid (a
+                    * -1 would make kill() signal the whole process group) */
+        return;
+    }
+    EXPECT(spawn_reap_if_exited(pid) == 0);
+    kill(pid, SIGKILL);
+    (void)spawn_wait_child(pid);
+}
+
+/* An exited child gets reaped. Poll (bounded) because the child may
+ * not have been scheduled to exit the instant we return from fork. */
+static void test_reap_exited_child(void)
+{
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(0);
+    if (pid < 0) {
+        EXPECT(0); /* fork failed: bail before any waitpid(-1) */
+        return;
+    }
+    int reaped = 0;
+    for (int i = 0; i < 1000 && !reaped; i++) {
+        if (spawn_reap_if_exited(pid)) {
+            reaped = 1;
+            break;
+        }
+        struct timespec ts = {0, 1000000}; /* 1ms */
+        nanosleep(&ts, NULL);
+    }
+    EXPECT(reaped);
+    /* Re-poll after the reap: waitpid now returns ECHILD, still
+     * reported as exited — the idempotent shape keepawake's acquire
+     * path relies on. */
+    EXPECT(spawn_reap_if_exited(pid) == 1);
+}
+
+/* ---------------- spawn_child_redirect_null ---------------- */
+
+/* After the redirect the child's stdin is /dev/null, which reads as
+ * immediate EOF. The child reports the outcome through its exit status
+ * so the parent can assert without shared memory. */
+static void test_redirect_null_stdin_is_eof(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        spawn_child_redirect_null();
+        char c;
+        ssize_t n = read(STDIN_FILENO, &c, 1);
+        _exit(n == 0 ? 0 : 1);
+    }
+    if (pid < 0) {
+        EXPECT(0); /* fork failed: bail before spawn_wait_child(-1) */
+        return;
+    }
+    int rc = spawn_wait_child(pid);
+    EXPECT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0);
+}
+
+/* ---------------- spawn_child_die_with_parent ---------------- */
+
+/* With the parent still alive, the race-check must NOT self-exit — a
+ * child passing its real parent pid should run through to its normal
+ * exit. Guards against an inverted getppid() comparison. Run inside a
+ * forked child so the (Linux) PR_SET_PDEATHSIG arm doesn't perturb the
+ * test process; on non-Linux the call is a no-op and this still holds.
+ * The death-propagation behavior itself (parent dies => SIGTERM) is
+ * integration-level and racy (grandchild + reparenting), so it's left
+ * out of this unit test. */
+static void test_die_with_parent_alive_does_not_exit(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        spawn_child_die_with_parent(getppid());
+        _exit(7);
+    }
+    if (pid < 0) {
+        EXPECT(0); /* fork failed: bail before spawn_wait_child(-1) */
+        return;
+    }
+    int rc = spawn_wait_child(pid);
+    EXPECT(WIFEXITED(rc) && WEXITSTATUS(rc) == 7);
+}
+
 int main(void)
 {
     tmp_setup();
@@ -170,6 +272,14 @@ int main(void)
     test_pipe_close_after_failed_open_is_noop();
     test_pipe_open_rejects_bad_args();
     test_pipe_early_child_exit_does_not_kill_parent();
+
+    test_reap_non_child_is_exited();
+    test_reap_live_child();
+    test_reap_exited_child();
+
+    test_redirect_null_stdin_is_eof();
+
+    test_die_with_parent_alive_does_not_exit();
 
     rmdir(tmpdir);
     T_REPORT();

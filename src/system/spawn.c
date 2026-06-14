@@ -2,9 +2,14 @@
 #include "system/spawn.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
+
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 /* Parent-side signal mask. SIGINT and SIGQUIT match POSIX system()
  * semantics: while a foreground interactive child runs, terminal-
@@ -45,6 +50,31 @@ void spawn_child_default_signals(void)
     signal(SIGPIPE, SIG_DFL);
 }
 
+void spawn_child_redirect_null(void)
+{
+    int devnull = open("/dev/null", O_RDWR);
+    if (devnull < 0)
+        return;
+    dup2(devnull, STDIN_FILENO);
+    dup2(devnull, STDOUT_FILENO);
+    dup2(devnull, STDERR_FILENO);
+    if (devnull > STDERR_FILENO)
+        close(devnull);
+}
+
+void spawn_child_die_with_parent(pid_t parent)
+{
+#ifdef __linux__
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
+    /* Close the fork/exec race: if the parent exited before the arm
+     * above, the death signal will never come, so bail out now. */
+    if (getppid() != parent)
+        _exit(0);
+#else
+    (void)parent;
+#endif
+}
+
 /* exec_into_shell: replace the calling process with `/bin/sh -c cmd`.
  * Returns only on failure (caller _exit's). */
 static void exec_into_shell(const char *cmd)
@@ -66,6 +96,13 @@ int spawn_wait_child(pid_t pid)
             return -1;
     }
     return status;
+}
+
+int spawn_reap_if_exited(pid_t pid)
+{
+    int status;
+    pid_t r = waitpid(pid, &status, WNOHANG);
+    return r == pid || (r < 0 && errno == ECHILD);
 }
 
 int spawn_run(const char *shell_cmd)

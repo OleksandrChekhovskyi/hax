@@ -53,6 +53,10 @@ static const struct config_setting REGISTRY[] = {
     {"notify",                     "HAX_NOTIFY",                  NULL,
      "Desktop-notification style (auto-detected)"},
 
+    /* behavior */
+    {"keep_awake",                 "HAX_KEEP_AWAKE",              "1",
+     "Inhibit idle system sleep while a turn is running (display may still blank)"},
+
     /* recording */
     {"no_session",                 "HAX_NO_SESSION",              NULL,
      "Disable session recording when set truthy"},

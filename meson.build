@@ -71,6 +71,7 @@ sources = files(
     'src/system/bg_job.c',
     'src/system/diff.c',
     'src/system/fs.c',
+    'src/system/keepawake.c',
     'src/system/path.c',
     'src/system/spawn.c',
 

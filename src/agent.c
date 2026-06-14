@@ -20,6 +20,7 @@
 #include "render/markdown.h"
 #include "render/render_ctx.h"
 #include "render/spinner.h"
+#include "system/keepawake.h"
 #include "system/spawn.h"
 #include "terminal/ansi.h"
 #include "terminal/input.h"
@@ -980,6 +981,12 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
          * readline editing) doesn't auto-cancel this one. */
         interrupt_clear();
         interrupt_arm();
+        /* Keep the machine from idling to sleep for the duration of the
+         * inner loop (streaming + tool dispatch), so an unattended long
+         * run survives the idle timer. Released alongside interrupt_disarm
+         * below — there's no human-approval wait in this loop to hold it
+         * across. Gated by the keep_awake config key; no-op when off. */
+        keepawake_acquire();
         /* The first iteration consumes the boundary that was placed
          * with the user message above; subsequent iterations (when the
          * model called tools and we loop back for the next round-trip)
@@ -1162,6 +1169,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
             }
         }
         interrupt_disarm();
+        keepawake_release();
 
         /* Close any open render state before post-user-turn output — a
          * still-running cluster spinner racing with notify_attention's
