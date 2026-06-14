@@ -16,12 +16,15 @@
 #include "render/tool_render.h"
 #include "terminal/ansi.h"
 
-/* Cells reserved at the right edge of a quiet line: the trailing space
- * before the spinner glyph (1) + the glyph itself (1) + breathing room
- * so the spinner doesn't crowd the right margin (~6). Pulled out here
- * so the silent-header sizing and coalesce-overflow check stay in
- * sync. */
-#define QUIET_LINE_MARGIN 8
+/* Cells reserved at the right edge of a quiet line where an inline
+ * spinner parks at end-of-line (read coalescing): the trailing space
+ * before the glyph (1) + the glyph itself (1) + one cell of phantom-wrap
+ * guard so the cursor stays strictly under the terminal edge (1).
+ * Non-inline quiet lines (bash and friends) draw the spinner on its own
+ * row below, so they reserve only the phantom-wrap cell instead and let
+ * the arg use the reclaimed width — see make_silent_arg. Pulled out here
+ * so the silent-header sizing and coalesce-overflow check stay in sync. */
+#define INLINE_SPINNER_MARGIN 3
 
 /* Return a pointer into `path` at the basename — last component after
  * the final '/'. Trailing slashes (`src/`) fall back to the full path
@@ -250,12 +253,17 @@ static int write_silent_append(struct disp *d, const char *short_name)
  * call. Read uses basename of the file plus optional `:N-M`; bash uses
  * the command, truncated to fit in the available column budget.
  * `tag_cost` is the bytes consumed by `[name] ` so we know how many
- * columns are left for the arg. Returns malloc'd; caller frees. */
+ * columns are left for the arg. `reserve_spinner_space` says whether an
+ * inline spinner will park at end-of-line (read) — only then is the
+ * full INLINE_SPINNER_MARGIN held back; line-mode quiet lines (bash) draw
+ * the spinner on the next row, so they reserve just a phantom-wrap cell
+ * and reclaim the rest for the arg. Returns malloc'd; caller frees. */
 static char *make_silent_arg(const struct tool *tool, const struct item *call, int tag_cost,
-                             int term_w)
+                             int term_w, int reserve_spinner_space)
 {
     const char *name = call->tool_name;
-    int budget = term_w - tag_cost - QUIET_LINE_MARGIN;
+    int margin = reserve_spinner_space ? INLINE_SPINNER_MARGIN : 1;
+    int budget = term_w - tag_cost - margin;
     if (budget < 8)
         budget = 8;
 
@@ -468,13 +476,14 @@ static struct item dispatch_tool_call_silent(struct render_ctx *r, const struct 
         free(full);
         size_t append_len = strlen(append);
         /* Cap coalesced line at ~term width so we never wrap. The
-         * extra 2 covers ", " on top of the standard end-of-line
-         * margin (trailing space + spinner + breathing room). */
-        if (r->cluster_line_used + (int)append_len + 2 + QUIET_LINE_MARGIN > term_w) {
+         * extra 2 covers ", " on top of the inline-spinner end-of-line
+         * reservation (trailing space + glyph + phantom-wrap guard). */
+        if (r->cluster_line_used + (int)append_len + 2 + INLINE_SPINNER_MARGIN > term_w) {
             /* Overflow → close current line, start a new `[read] …` header. */
             disp_putc(d, '\n');
             disp_emit_held(d);
-            char *arg = make_silent_arg(t, call, 7 /* "[read] " */, term_w);
+            char *arg = make_silent_arg(t, call, 7 /* "[read] " */, term_w,
+                                        1 /* coalesce path is always read → inline spinner */);
             int used = write_silent_header(d, call, arg, 1 /* coalesce path is always read */);
             free(arg);
             r->cluster_line_used = used;
@@ -504,7 +513,7 @@ static struct item dispatch_tool_call_silent(struct render_ctx *r, const struct 
         /* Else: first call after entering RS_CLUSTER — the transition
          * already left a clean column-0 row below prior content. */
         int tag_cost = 2 + (int)strlen(call->tool_name) + 1; /* "[name] " */
-        char *arg = make_silent_arg(t, call, tag_cost, term_w);
+        char *arg = make_silent_arg(t, call, tag_cost, term_w, inline_spinner);
         int used = write_silent_header(d, call, arg, inline_spinner);
         free(arg);
         r->cluster_line_used = used;
