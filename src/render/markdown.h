@@ -81,4 +81,11 @@ void md_set_styled(struct md_renderer *m, int on);
  * trigger autowrap. */
 int md_cursor_col(const struct md_renderer *m);
 
+/* True while the renderer is buffering a GFM table — rows are being
+ * collected into an internal buffer and nothing is emitted until the
+ * whole grid lays out at end-of-table. The agent reads this to show a
+ * "composing..." spinner during the otherwise-silent accumulation, the
+ * way it does for the tool-call args window. */
+int md_in_table(const struct md_renderer *m);
+
 #endif /* HAX_MARKDOWN_H */

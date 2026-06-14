@@ -40,6 +40,11 @@ void md_set_styled(struct md_renderer *m, int on)
     (void)m;
     (void)on;
 }
+int md_in_table(const struct md_renderer *m)
+{
+    (void)m;
+    return 0;
+}
 
 /* ---- stdout capture (freopen → regular file, so isatty()→0 and the
  * spinner stays synchronous; same approach as test_tool_render). ---- */

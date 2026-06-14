@@ -57,6 +57,38 @@ struct render_ctx {
     long last_text_at;
     int idle_shown;
 
+    /* Table-composing overlay (SPINNER_LINE "composing...") — drawn on
+     * its own row while md is buffering a GFM table, a window that emits
+     * nothing until the whole grid lays out. Distinct from idle_shown:
+     * the bytes are arriving (not a stall), so it's keyed on md_in_table
+     * rather than the idle clock alone, and it persists across the silent
+     * row-buffering deltas. render_text_chunk hides it before each md_feed
+     * (so a finalizing grid never races the spinner row) and re-shows if
+     * still buffering; render_transition clears it on any real state
+     * change (so the end-of-stream md_flush renders the grid cleanly). */
+    int table_composing;
+
+    /* Deferred tool-call "composing..." label. EV_TOOL_CALL_START knows
+     * the tool name but holds the busy spinner on "working..." and arms
+     * these instead of swapping the label immediately; the stream tick
+     * performs the swap only once the compose window outlives
+     * TOOL_COMPOSE_LABEL_MS, so a fast call dispatches first and never
+     * flickers working->composing->header. compose_at == 0 means no
+     * pending swap (latched off after the swap, and cleared by any event
+     * that sets its own label). compose_label holds the formatted text.
+     * composing_active latches once the swap has happened this stream, so
+     * a following call in a back-to-back batch swaps straight to its name
+     * instead of reverting to "working..." and re-deferring (which would
+     * flicker between calls). compose_end_at is the symmetric revert timer:
+     * armed at EV_TOOL_CALL_END while composing, it lets the tick fall back
+     * to "working..." only if the model stalls past TOOL_COMPOSE_LABEL_MS
+     * after finalizing the args (a following call or the done event cancels
+     * it first). All three reset per stream in render_stream_begin. */
+    long compose_at;
+    char compose_label[64];
+    int composing_active;
+    long compose_end_at;
+
     /* Retry countdown — the tick repaints the spinner label from
      * these so the seconds visibly shrink during the backoff sleep.
      * retry_deadline_at == 0 means no retry pending. */
@@ -105,6 +137,13 @@ void render_text_chunk(struct render_ctx *r, const char *s, size_t n);
  * Shared by the live text-delta handler and resume replay so both strip
  * identically. */
 void render_text_delta(struct render_ctx *r, const char *s, size_t n);
+
+/* Show the labeled "composing..." line spinner for an in-progress table
+ * buffer: flush any held newline so it lands on a fresh row below the
+ * preceding block, then raise SPINNER_LINE. Idempotent via
+ * r->table_composing. Called from the stream tick (slow table) and
+ * re-issued by render_text_chunk across the silent row-buffering deltas. */
+void render_table_spinner_show(struct render_ctx *r);
 
 /* Paint the spinner with the retry countdown label. Called on EV_RETRY
  * (so the user sees the new state immediately) and from the stream tick

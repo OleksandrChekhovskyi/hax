@@ -2557,3 +2557,12 @@ int md_cursor_col(const struct md_renderer *m)
      * landing column never reached the wire). */
     return m->col;
 }
+
+int md_in_table(const struct md_renderer *m)
+{
+    /* True while rows are being diverted into table_buf with nothing
+     * emitted yet — the grid only renders at finalize_table once every
+     * row is in. The agent reads this to surface a "composing..."
+     * spinner during the otherwise-silent accumulation. */
+    return m && m->in_table;
+}

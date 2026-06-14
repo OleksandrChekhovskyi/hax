@@ -178,7 +178,8 @@ static int emit_text_chunked(stream_cb cb, void *user, const char *s, long delay
     return emit_chunked(cb, user, s, delay_ms, tick, tick_user, 0);
 }
 
-static int emit_tool_call(stream_cb cb, void *user, const char *name, const char *args_json)
+static int emit_tool_call(stream_cb cb, void *user, const char *name, const char *args_json,
+                          long delay_ms, http_tick_cb tick, void *tick_user)
 {
     char id[37];
     gen_uuid_v4(id);
@@ -186,6 +187,11 @@ static int emit_tool_call(stream_cb cb, void *user, const char *name, const char
     struct stream_event start = {.kind = EV_TOOL_CALL_START,
                                  .u.tool_call_start = {.id = id, .name = name}};
     if (cb(&start, user))
+        return -1;
+    /* Pause between the start (name known) and the args delta so the
+     * agent's named "[tool] composing..." spinner is observable, the
+     * way a real provider streaming a large args JSON would expose it. */
+    if (msleep(delay_ms, tick, tick_user))
         return -1;
     struct stream_event delta = {.kind = EV_TOOL_CALL_DELTA,
                                  .u.tool_call_delta = {.id = id, .args_delta = args_json}};
@@ -429,7 +435,7 @@ static int play_one_turn(FILE *f, stream_cb cb, void *user, http_tick_cb tick, v
                 free(name);
                 return emit_done(cb, user, usage);
             }
-            int rc = emit_tool_call(cb, user, name, args);
+            int rc = emit_tool_call(cb, user, name, args, delay_ms, tick, tick_user);
             free(args);
             free(name);
             if (rc)
@@ -621,7 +627,7 @@ static int interactive_response(const struct context *ctx, stream_cb cb, void *u
         char *args = xasprintf("{\"%s\":\"%s\"}", arg_key, escaped);
         int rc = emit_text_chunked(cb, user, "Sure, on it.", 0, tick, tick_user);
         if (!rc)
-            rc = emit_tool_call(cb, user, tool_name, args);
+            rc = emit_tool_call(cb, user, tool_name, args, 0, tick, tick_user);
         free(args);
         free(escaped);
         free(quoted);

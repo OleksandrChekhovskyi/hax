@@ -36,6 +36,16 @@ void render_transition(struct render_ctx *r, enum render_state to)
     if (r->state == to)
         return;
 
+    /* A real state change while a table was still buffering (e.g. the
+     * stream ended mid-table and the close-half md_flush is about to
+     * finalize the grid): hide the composing spinner first so the grid
+     * doesn't render into its row. Same-state RS_TEXT transitions during
+     * buffering returned above — render_text_chunk owns the spinner there. */
+    if (r->table_composing) {
+        spinner_hide(r->spinner);
+        r->table_composing = 0;
+    }
+
     switch (r->state) {
     case RS_IDLE:
         break;
@@ -130,6 +140,12 @@ void render_stream_begin(struct render_ctx *r)
     r->last_text_at = 0;
     r->idle_shown = 0;
     r->retry_deadline_at = 0;
+    /* Fresh batch of tool calls per stream — drop any pending/active
+     * compose label so a call in this stream doesn't inherit the prior
+     * stream's "stay on composing" continuation. */
+    r->compose_at = 0;
+    r->composing_active = 0;
+    r->compose_end_at = 0;
     if (r->state == RS_CLUSTER)
         return;
     render_stream_wait(r);
@@ -146,14 +162,64 @@ void render_open_block(struct render_ctx *r)
     disp_block_separator(&r->disp);
 }
 
+void render_table_spinner_show(struct render_ctx *r)
+{
+    if (r->table_composing)
+        return;
+    /* Only over the answer stream. A table can also buffer inside visible
+     * reasoning (block structure runs even with styling suppressed), but
+     * RS_REASONING's dim+italic span is emitted once on entry — the line
+     * spinner's trailing ANSI_RESET would close it and leave the rest of
+     * the reasoning / the grid unstyled. Suppressing the spinner there
+     * (silent, as before) is safer than re-emitting the span. */
+    if (r->state != RS_TEXT)
+        return;
+    /* Drain the preceding block's held newlines so the spinner's
+     * \r + erase-line lands on a fresh row instead of wiping prior text;
+     * once drained this is a no-op on the re-show path. */
+    disp_emit_held(&r->disp);
+    spinner_set_label(r->spinner, "composing...");
+    spinner_show(r->spinner);
+    r->table_composing = 1;
+}
+
 void render_text_chunk(struct render_ctx *r, const char *s, size_t n)
 {
+    /* The table-composing spinner sits on its own row. Hide it before
+     * feeding: this delta may finalize the table (md_feed emits the grid,
+     * which must not race the spinner row) or buffer another row. */
+    int had_spinner = r->table_composing;
+    if (had_spinner) {
+        spinner_hide(r->spinner);
+        r->table_composing = 0;
+    }
+    int was_in_table = r->md && md_in_table(r->md);
     if (r->md)
         md_feed(r->md, s, n);
     else
         disp_write(&r->disp, s, n);
     fflush(stdout);
-    r->last_text_at = monotonic_ms();
+    if (r->md && md_in_table(r->md)) {
+        /* Still buffering: bytes arrive but nothing more is shown until the
+         * grid lays out, so leave the idle clock pinned to the last visible
+         * byte and let agent_stream_tick surface the spinner once buffering
+         * crosses the threshold (a table that finalizes within the window
+         * never trips it). But the delta that *enters* the table (was_in_table
+         * false) usually rendered visible prose first — e.g.
+         * "Here:\n\n| a |\n| - |\n" — and a leading table has no prior visible
+         * byte at all; in both cases the freshly rendered / just-started
+         * content is the right zero point, so (re)start the clock from now.
+         * Without this, a stale last_text_at from before a pause would make
+         * the tick show the spinner immediately after the fresh prose. A
+         * continuing-buffer delta leaves it pinned. Re-show synchronously if
+         * we just hid one — a repaint, not a flicker. */
+        if (!was_in_table)
+            r->last_text_at = monotonic_ms();
+        if (had_spinner)
+            render_table_spinner_show(r);
+    } else {
+        r->last_text_at = monotonic_ms();
+    }
 }
 
 void render_text_delta(struct render_ctx *r, const char *s, size_t n)

@@ -84,14 +84,27 @@ tool read {"path":"src/render/disp.h"}
 usage in=780 out=24
 end-turn
 
-# ---------- turn 6: diff preview (write tool) ---------------------------
+# ---------- turn 6: diff preview (write tool) + compose label -----------
 # Seed the file via bash first so the write below produces an actual
 # unified diff. fs_write_with_diff suppresses the diff for new-file
 # creates, and emits an empty payload when content is byte-identical
 # to what's there — without the seed, this turn's output depends on
 # whether a previous run left the file behind.
+#
+# The `delay 800` (set after the text so the prose still streams fast)
+# also exercises the named compose spinner: the mock pauses between a
+# tool call's start (name known) and its args delta, so the agent
+# surfaces "[bash] composing..." for the otherwise-anonymous window
+# where the model is still streaming a call's arguments. The `delay 80`
+# before the second call models the small real gap between back-to-back
+# tool calls: under the compose-revert threshold, so the spinner swaps
+# straight to "[write] composing..." instead of flashing "working..."
+# between the two (a write's `content` is the large-args case this
+# stands in for).
 text One write to /tmp so the diff renderer has something to color.
+delay 800
 tool bash {"command":"printf 'hello from a previous run\\n' > /tmp/hax_mock_demo.txt"}
+delay 80
 tool write {"path":"/tmp/hax_mock_demo.txt","content":"hello from the mock provider — second time around\n"}
 usage in=860 out=30
 end-turn
@@ -112,7 +125,17 @@ tool bash {"command":"ls -1 src/providers"}
 usage in=980 out=20
 end-turn
 
-# ---------- turn 9: wrap up after the second tool ----------------------
-text And that's the end of the demo script.
-usage in=1020 out=18
+# ---------- turn 9: slow table → "composing..." spinner ----------------
+# A GFM table is the one block the renderer can't stream: column widths
+# need every row, so md buffers the whole grid and emits nothing until
+# the last row is in (see md_in_table / finalize_table). The intro line
+# streams fast (delay 0), then `delay 250` paces the table rows in
+# 16-byte chunks so the silent buffering runs well past the 1.5s idle
+# threshold — long enough for the agent to raise the labeled
+# "composing..." line spinner on its own row, which is erased in place
+# when the finished grid lays out below the intro text.
+text Here's a quick comparison of the OpenAI-family presets:
+delay 250
+text \n\n| Preset | Default base URL | Context probe |\n| --- | --- | --- |\n| openai | api.openai.com | none |\n| openai_compat | (your URL) | none |\n| llamacpp | 127.0.0.1:8080 | /props background |\n| openrouter | openrouter.ai/api | /endpoints background |\n
+usage in=1020 out=72
 end-turn

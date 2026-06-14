@@ -163,6 +163,14 @@ struct event_ctx {
  * risk of flicker between rapid deltas. */
 #define TEXT_IDLE_TIMEOUT_MS 1500
 
+/* How long a tool call must keep composing (name known, args still
+ * streaming) before the busy spinner swaps "working..." for the named
+ * "[tool] composing..." label. The spinner is already up either way —
+ * only the text changes — so a short defer is enough to keep a fast call
+ * from flashing working->composing->header; a genuinely long compose
+ * (a big write/edit's args) still gets named. */
+#define TOOL_COMPOSE_LABEL_MS 500
+
 /* Adapter so md_renderer can emit through disp without knowing about it.
  * Content bytes go through disp_write so trailing-newline buffering works
  * uniformly. ANSI escapes (is_raw=1) bypass disp's trail/held bookkeeping
@@ -333,6 +341,33 @@ static int agent_stream_tick(void *user)
      * surface. Repaint each tick so the seconds count visibly shrinks. */
     if (r->retry_deadline_at) {
         update_retry_label(r);
+    } else if (r->compose_at && monotonic_ms() - r->compose_at >= TOOL_COMPOSE_LABEL_MS) {
+        /* A tool call has been composing past the defer threshold — swap
+         * the busy spinner's "working..." for its name. Latch (compose_at
+         * = 0) so we set the label once; on_event clears it when the
+         * compose window ends. composing_active keeps a back-to-back batch
+         * on a composing label instead of reverting per call. */
+        spinner_set_label(r->spinner, r->compose_label);
+        r->compose_at = 0;
+        r->composing_active = 1;
+    } else if (r->compose_end_at && monotonic_ms() - r->compose_end_at >= TOOL_COMPOSE_LABEL_MS) {
+        /* A composing call's args ended and nothing followed within the
+         * window — no next call in the batch, no done/dispatch — so the
+         * model has stalled after finalizing args. Stop claiming it's
+         * composing; revert to the generic busy label. */
+        spinner_set_label(r->spinner, "working...");
+        r->composing_active = 0;
+        r->compose_end_at = 0;
+    } else if (r->md && md_in_table(r->md)) {
+        /* Buffering a table: bytes are arriving but nothing renders until
+         * the whole grid lays out. Surface a labeled "composing..." line
+         * spinner once the silent window crosses the idle threshold (a
+         * fast table finalizes first and never shows it). render_text_chunk
+         * keeps it up across the row deltas; this covers a mid-table stall
+         * where no further delta arrives to re-issue it. */
+        if (!r->table_composing && r->last_text_at &&
+            monotonic_ms() - r->last_text_at >= TEXT_IDLE_TIMEOUT_MS)
+            render_table_spinner_show(r);
     } else if (r->last_text_at && !r->idle_shown &&
                monotonic_ms() - r->last_text_at >= TEXT_IDLE_TIMEOUT_MS) {
         /* Inline glyph is only safe when:
@@ -397,6 +432,19 @@ static int on_event(const struct stream_event *ev, void *user)
         r->retry_deadline_at = 0;
         spinner_set_label(r->spinner, "working...");
     }
+    /* Drop any pending deferred "composing..." swap: only EV_TOOL_CALL_DELTA
+     * (args still arriving) keeps it alive. EV_TOOL_CALL_END means the call
+     * is fully composed, so a post-END stall must not let the tick flip the
+     * busy spinner to "composing..." after the fact; every other event sets
+     * its own label or ends the stream. EV_TOOL_CALL_START re-arms below. */
+    if (ev->kind != EV_TOOL_CALL_DELTA)
+        r->compose_at = 0;
+    /* Cancel a pending revert-to-"working..." (armed at EV_TOOL_CALL_END):
+     * the next call's START or the done event arriving means the model
+     * didn't stall, so the batch stays on its composing label. END itself
+     * arms it just below; only deltas otherwise leave it untouched. */
+    if (ev->kind != EV_TOOL_CALL_DELTA && ev->kind != EV_TOOL_CALL_END)
+        r->compose_end_at = 0;
 
     switch (ev->kind) {
     case EV_TEXT_DELTA:
@@ -404,12 +452,65 @@ static int on_event(const struct stream_event *ev, void *user)
          * shared with resume replay so both render identically. */
         render_text_delta(r, ev->u.text_delta.text, strlen(ev->u.text_delta.text));
         break;
-    case EV_TOOL_CALL_START:
+    case EV_TOOL_CALL_START: {
+        /* The model is composing a tool call: its name is known but the
+         * args JSON still streams (long for a big write/edit). Name the
+         * spinner so the otherwise-anonymous compose window says what's
+         * coming — but defer the swap on the first call: leave the busy
+         * spinner on "working..." and only arm compose_at/compose_label, so
+         * the tick swaps in "[tool] composing..." once the window outlives
+         * TOOL_COMPOSE_LABEL_MS. A fast call dispatches first with no
+         * working->composing->header flicker.
+         *
+         * We track only the latest-started call (single compose_label, no
+         * per-id state). For every provider in the supported set this names
+         * the right call: an autoregressive model emits one call's tokens —
+         * name then full args — before the next's, and OpenAI streams its
+         * indexed tool_calls array one entry to completion before the next,
+         * so the args streaming right now belong to the most recent START.
+         * ("Parallel" tool calls run in parallel only at dispatch.) The
+         * indexed-array shape does technically permit announcing several
+         * names up front and backfilling one call's args later (START a,
+         * START b, then a long DELTA a) — no backend we target emits that
+         * order, but if one did the label could name a sibling call from the
+         * same response for under a second. We accept that: it's cosmetic and
+         * self-corrects when dispatch paints the real per-call headers, not
+         * worth an id->name map to chase. */
+        const char *name = ev->u.tool_call_start.name;
+        if (name && *name)
+            snprintf(r->compose_label, sizeof(r->compose_label), "[%s] composing...", name);
+        if (r->composing_active && name && *name && r->state == RS_WAITING) {
+            /* Mid-batch: a previous call in this stream already swapped the
+             * spinner to a composing label and the busy line spinner is
+             * still up (RS_WAITING, the normal state across a back-to-back
+             * tool-call batch), so skip render_stream_seam's "working..."
+             * reset — it would repaint "working..." for an instant before we
+             * swap it back — and swap straight to this call's name. The
+             * RS_WAITING guard means intervening text/reasoning (spinner
+             * hidden) still falls through to render_stream_seam below, which
+             * re-raises the spinner. */
+            spinner_set_label(r->spinner, r->compose_label);
+        } else {
+            render_stream_seam(r);
+            if (name && *name)
+                r->compose_at = monotonic_ms();
+        }
+        break;
+    }
     case EV_REASONING_ITEM:
         render_stream_seam(r);
         break;
-    case EV_TOOL_CALL_DELTA:
     case EV_TOOL_CALL_END:
+        /* Args for this call are finalized. If a composing label is on the
+         * spinner, arm a deferred revert to "working...": the next call's
+         * START or the done event normally lands within TOOL_COMPOSE_LABEL_MS
+         * and cancels it (top of on_event), keeping a batch smooth; if the
+         * model instead stalls after the args, the tick reverts so the label
+         * stops claiming the tool is still composing. */
+        if (r->composing_active)
+            r->compose_end_at = monotonic_ms();
+        break;
+    case EV_TOOL_CALL_DELTA:
         /* No live display: tool calls render as a single block during
          * dispatch so parallel calls don't visually interleave. */
         break;
