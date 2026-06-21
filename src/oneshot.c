@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "agent_core.h"
+#include "compact.h"
 #include "session.h"
 #include "tool.h"
 #include "transcript.h"
@@ -31,6 +32,9 @@ static void oneshot_flush(struct transcript_log *tlog, struct session_log *slog,
 struct oneshot_ctx {
     struct turn *turn;
     char *error_msg; /* malloc'd; set on EV_ERROR */
+    /* Filled from EV_DONE; -1/-1/-1 if the provider didn't report. Drives
+     * the auto-compaction threshold check between round-trips. */
+    struct stream_usage usage;
 };
 
 static int on_event(const struct stream_event *ev, void *user)
@@ -38,6 +42,8 @@ static int on_event(const struct stream_event *ev, void *user)
     struct oneshot_ctx *oc = user;
     if (ev->kind == EV_ERROR && !oc->error_msg && ev->u.error.message)
         oc->error_msg = xstrdup(ev->u.error.message);
+    else if (ev->kind == EV_DONE)
+        oc->usage = ev->u.done.usage;
     turn_on_event(ev, oc->turn);
     return 0;
 }
@@ -59,6 +65,37 @@ static void print_assistant_text(const struct item *items, size_t from, size_t t
         if (items[i].text[n - 1] != '\n')
             fputc('\n', stdout);
     }
+}
+
+/* Summarize history into a single seed message in place — the non-interactive
+ * twin of agent.c's agent_compact. No display, no tick, no Esc handling: a
+ * summarization request, then history is replaced and both logs
+ * rotate to fresh files (seeded /new). Returns 1 if compacted, 0 on
+ * empty/failure (history left intact). Used between round-trips so a long
+ * agentic `-p` run survives its own context growth. */
+static int oneshot_compact(struct agent_session *s, struct provider *p, struct session_log *slog,
+                           struct transcript_log *tlog)
+{
+    if (s->n_items == 0)
+        return 0;
+
+    struct turn t;
+    turn_init(&t);
+    /* Reuse the normal sink (feeds the turn, captures any error); no tick,
+     * no display. */
+    struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL, .usage = {-1, -1, -1}};
+    char *summary = compact_summarize(s, p, NULL, &t, on_event, &oc, NULL, NULL);
+    free(oc.error_msg);
+    turn_reset(&t);
+
+    if (!summary || !summary[0]) {
+        free(summary);
+        return 0;
+    }
+
+    compact_apply(s, slog, tlog, summary);
+    free(summary);
+    return 1;
 }
 
 int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *opts, int max_turns)
@@ -132,7 +169,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
 
         struct turn t;
         turn_init(&t);
-        struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL};
+        struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL, .usage = {-1, -1, -1}};
         /* Oneshot doesn't arm interrupt and has no idle UI to surface
          * — pass a NULL tick so http skips the progress hook entirely. */
         p->stream(p, &ctx, sess.model, on_event, &oc, NULL, NULL);
@@ -145,6 +182,13 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
             goto done;
         }
         free(oc.error_msg);
+
+        /* Exact context size this round-trip reported (input subsumes the
+         * prior prefix, output is what was just generated) — the signal the
+         * between-round-trip auto-compaction check reads below. */
+        long round_ctx = (oc.usage.input_tokens >= 0 && oc.usage.output_tokens >= 0)
+                             ? oc.usage.input_tokens + oc.usage.output_tokens
+                             : -1;
 
         size_t n_before;
         int had_tool_call;
@@ -200,6 +244,18 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
          * all in sess.items): flush. CALL/RESULT pairing is intact for
          * the renderer's lookahead. */
         oneshot_flush(tlog, slog, sess.items, sess.n_items);
+
+        /* Between-round-trip auto-compaction: the model called tools and we
+         * loop for another request. If this round-trip's reported usage nears
+         * the window, summarize the completed work now so a long agentic chain
+         * doesn't run itself into an overflow. The next iteration streams from
+         * the seed. Quiet on stderr so a `tail`'d -p log shows it happened. */
+        if (compact_should_auto(round_ctx, compact_context_limit(p)) &&
+            oneshot_compact(&sess, p, slog, tlog)) {
+            int tty = isatty(fileno(stderr));
+            fprintf(stderr, "%s[compacted context]%s\n", tty ? ANSI_DIM : "",
+                    tty ? ANSI_RESET : "");
+        }
     }
 
     /* Loop fell through without a final assistant-only response. */

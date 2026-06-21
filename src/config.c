@@ -56,6 +56,10 @@ static const struct config_setting REGISTRY[] = {
     /* behavior */
     {"keep_awake",                 "HAX_KEEP_AWAKE",              "1",
      "Inhibit idle system sleep while a turn is running (display may still blank)"},
+    {"compact.auto",               "HAX_COMPACT_AUTO",            "1",
+     "Auto-summarize history when it nears the context window (manual /compact still works)"},
+    {"compact.threshold",          "HAX_COMPACT_THRESHOLD",       "85",
+     "Auto-compact when context usage reaches this percent of the window"},
 
     /* recording */
     {"no_session",                 "HAX_NO_SESSION",              NULL,

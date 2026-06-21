@@ -38,6 +38,7 @@ sources = files(
     'src/agent_core.c',
     'src/agent_dispatch.c',
     'src/agent_env.c',
+    'src/compact.c',
     'src/config.c',
     'src/oneshot.c',
     'src/session.c',

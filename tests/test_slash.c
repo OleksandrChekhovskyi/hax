@@ -56,8 +56,8 @@ const char *session_log_path(const struct session_log *log)
     (void)log;
     return NULL;
 }
-/* Scripts the session_picker_run stub: whether it reports an interactive
- * picker was presented, and the path it "selects" (NULL = cancel). */
+/* Scripts the session_picker_run stub: whether an interactive picker was
+ * shown, and the path it "selects" (NULL = cancel or nothing to resume). */
 static int stub_picker_shown = 0;
 static const char *stub_picker_path = NULL;
 char *session_picker_run(const char *cwd, const char *exclude_path, int *shown)
@@ -72,6 +72,13 @@ void agent_resume_session(struct agent_state *st, const char *path)
 {
     (void)st;
     (void)path;
+}
+int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
+{
+    (void)st;
+    (void)instructions;
+    (void)is_auto;
+    return 0;
 }
 
 /* Redirect stdout to a temp file so we can inspect what slash_dispatch
@@ -147,7 +154,9 @@ static void test_dispatch_unknown(void)
     /* A bareword token that doesn't match any registered command
      * still gets the red "unknown" error so typos are caught loudly,
      * not silently shipped to the model. */
-    struct agent_state st = {0};
+    struct render_ctx r = {0};
+    r.disp.trail = 1; /* models the cursor one line below the echoed command */
+    struct agent_state st = {.r = &r};
     struct slash_ctx ctx = {.state = &st};
     struct dispatch_call c = {.line = "/nonesuch", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
@@ -224,7 +233,9 @@ static void test_dispatch_bad_usage(void)
     /* /help takes no arguments — passing one must produce BAD_USAGE
      * with a diagnostic mentioning the command name, not silently
      * run the handler. */
-    struct agent_state st = {0};
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.r = &r};
     struct slash_ctx ctx = {.state = &st};
     struct dispatch_call c = {.line = "/help foo", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
@@ -240,7 +251,9 @@ static void test_dispatch_bad_usage_uses_alias_name(void)
      * name it resolves to (`/new`). Otherwise the message reads as
      * "I rejected /clear but I'm telling you about /new", which is
      * confusing. */
-    struct agent_state st = {0};
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.r = &r};
     struct slash_ctx ctx = {.state = &st};
     struct dispatch_call c = {.line = "/clear now", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
@@ -254,7 +267,9 @@ static void test_dispatch_bad_usage_uses_alias_name(void)
 
 static void test_help_lists_commands_and_shortcuts(void)
 {
-    struct agent_state st = {0};
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.r = &r};
     struct slash_ctx ctx = {.state = &st};
     struct dispatch_call c = {.line = "/help", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
@@ -295,7 +310,9 @@ static void test_new_clears_session(void)
     size_t cap_before = s.cap_items;
 
     struct provider p = {.name = "test", .default_model = NULL};
-    struct agent_state st = {.sess = &s, .provider = &p};
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.sess = &s, .provider = &p, .r = &r};
     struct slash_ctx ctx = {.state = &st};
     struct dispatch_call c = {.line = "/new", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
@@ -321,7 +338,9 @@ static void test_clear_alias_runs_new(void)
     EXPECT(s.n_items > 0);
 
     struct provider p = {.name = "test", .default_model = NULL};
-    struct agent_state st = {.sess = &s, .provider = &p};
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.sess = &s, .provider = &p, .r = &r};
     struct slash_ctx ctx = {.state = &st};
     struct dispatch_call c = {.line = "/clear", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
@@ -342,7 +361,9 @@ static void test_new_rejects_extra_args(void)
     size_t n_before = s.n_items;
 
     struct provider p = {.name = "test", .default_model = NULL};
-    struct agent_state st = {.sess = &s, .provider = &p};
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.sess = &s, .provider = &p, .r = &r};
     struct slash_ctx ctx = {.state = &st};
     struct dispatch_call c = {.line = "/new now", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
@@ -358,7 +379,9 @@ static void test_dispatch_trims_trailing_whitespace(void)
     /* "/help   " (no other args, just trailing whitespace) must be
      * accepted, not rejected as BAD_USAGE — readline edits and
      * accidental space-Enter shouldn't break a known command. */
-    struct agent_state st = {0};
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.r = &r};
     struct slash_ctx ctx = {.state = &st};
     struct dispatch_call c = {.line = "/help   ", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
@@ -366,12 +389,12 @@ static void test_dispatch_trims_trailing_whitespace(void)
     free(out);
 }
 
-static void test_resume_cancelled_picker_sets_trail(void)
+static void test_resume_cancelled_picker_keeps_trail(void)
 {
-    /* A cancelled picker (shown, no selection) erased itself back onto the
-     * blank gap slash_dispatch emits, so two trailing newlines already sit
-     * below the echoed command. slash_run_resume must report that to disp
-     * (trail = 2), or the pre-prompt separator stacks a second blank line. */
+    /* A shown picker that the user cancels erases itself back onto the
+     * dispatcher's leading-gap line, so trail = 2 still matches the cursor —
+     * slash_run_resume must leave it so the pre-prompt separator adds no
+     * second blank line. */
     stub_picker_shown = 1;
     stub_picker_path = NULL;
     struct render_ctx r = {0};
@@ -385,13 +408,13 @@ static void test_resume_cancelled_picker_sets_trail(void)
     free(out);
 }
 
-static void test_resume_selected_session_reports_trail(void)
+static void test_resume_selected_session_keeps_trail(void)
 {
-    /* Selecting a session is the same gap situation as cancelling — the
-     * picker was shown — so slash_run_resume must report trail = 2 before
-     * handing off to agent_resume_session, whose replay would otherwise
-     * stack a second blank line above the resumed view. (agent_resume_session
-     * is stubbed here, so this asserts the report, not the replay itself.) */
+    /* Selecting a session is the same gap situation — the picker was shown and
+     * erased back, so trail = 2 — and agent_resume_session's replay sees that
+     * and doesn't stack a second blank line above the resumed view.
+     * (agent_resume_session is stubbed, so this asserts the trail, not the
+     * replay itself.) */
     stub_picker_shown = 1;
     stub_picker_path = "/tmp/some-session.jsonl";
     struct render_ctx r = {0};
@@ -405,11 +428,13 @@ static void test_resume_selected_session_reports_trail(void)
     free(out);
 }
 
-static void test_resume_nothing_shown_keeps_trail(void)
+static void test_resume_no_picker_repairs_trail(void)
 {
-    /* No interactive picker (non-tty, or nothing to resume): any note is
-     * real output, so the trail is left at the dispatcher default for the
-     * usual one-blank separation — slash_run_resume must not touch it. */
+    /* No interactive picker (non-tty, or nothing to resume): session_picker_run
+     * prints a raw note straight to stdout and returns with shown = 0, so the
+     * cursor is one newline past the note, not at the gap line. slash_run_resume
+     * must repair trail = 1 so the pre-prompt separator still emits the blank;
+     * leaving the dispatcher's trail = 2 would drop it. */
     stub_picker_shown = 0;
     stub_picker_path = NULL;
     struct render_ctx r = {0};
@@ -437,8 +462,8 @@ int main(void)
     test_clear_alias_runs_new();
     test_new_rejects_extra_args();
     test_dispatch_trims_trailing_whitespace();
-    test_resume_cancelled_picker_sets_trail();
-    test_resume_selected_session_reports_trail();
-    test_resume_nothing_shown_keeps_trail();
+    test_resume_cancelled_picker_keeps_trail();
+    test_resume_selected_session_keeps_trail();
+    test_resume_no_picker_repairs_trail();
     T_REPORT();
 }

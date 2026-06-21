@@ -53,4 +53,15 @@ void agent_new_conversation(struct agent_state *st);
  * current conversation untouched. */
 void agent_resume_session(struct agent_state *st, const char *path);
 
+/* Summarize the live conversation and replace history with the summary,
+ * so the session can continue without overflowing the context window.
+ * Streams a tool-free summarization request (showing a "compacting..."
+ * spinner), then swaps history for a single seed user message and rotates
+ * the session/transcript logs. `instructions` is optional extra focus for
+ * the summary (NULL/empty for none). `is_auto` distinguishes the threshold-
+ * triggered path (quiet on a no-op) from manual /compact. Returns 1 when
+ * history was compacted, 0 on failure/cancel/empty/no-op (history intact).
+ * Used by the /compact command and the post-user-turn auto-trigger. */
+int agent_compact(struct agent_state *st, const char *instructions, int is_auto);
+
 #endif /* HAX_AGENT_H */

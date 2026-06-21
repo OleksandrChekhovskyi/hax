@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "agent.h"
 
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +10,7 @@
 
 #include "agent_core.h"
 #include "agent_dispatch.h"
+#include "compact.h"
 #include "config.h"
 #include "session.h"
 #include "slash.h"
@@ -135,6 +137,18 @@ static int tool_result_is_marked(const struct item *it)
     return strcmp(it->output + out_len - marker_len, INTERRUPT_MARKER) == 0;
 }
 
+/* Record a mid-turn user abort: append the [interrupted] marker as a synthetic
+ * assistant message unless the last item already carries it (a tool result
+ * marked at the abort boundary), so the next turn and the transcript both see
+ * the model was cut short. */
+static void append_interrupt_marker(struct agent_session *s)
+{
+    if (s->n_items == 0 || !tool_result_is_marked(&s->items[s->n_items - 1]))
+        items_append(
+            &s->items, &s->n_items, &s->cap_items,
+            (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup(INTERRUPT_MARKER)});
+}
+
 /* Flush the same item slice to both append-only logs. The two share the
  * incremental [n_written..n_items) cursor design, so they're always
  * advanced together at each of the agent's commit points (after the user
@@ -249,24 +263,6 @@ static void format_tokens(char *buf, size_t buflen, long n)
         snprintf(buf, buflen, "%ldM", (n + 512L * 1024) / (1024L * 1024));
 }
 
-/* Resolve the context-window value used to render the "%" of context
- * used. Two sources, in order of precedence:
- *   1. HAX_CONTEXT_LIMIT — explicit user override (e.g. "256k"),
- *      always wins so the user can correct a bogus auto-detect.
- *   2. provider->context_limit — populated by a provider's startup
- *      probe (codex /models, openrouter /models, llama.cpp /props).
- *      Atomic since the probe runs on a background thread; 0 means
- *      "unknown" (no probe ran, hasn't completed yet, or failed) and
- *      the percentage display is hidden in that case. */
-static long context_limit(const struct provider *p)
-{
-    long env = config_size("context_limit");
-    if (env > 0)
-        return env;
-    long auto_v = atomic_load(&p->context_limit);
-    return auto_v > 0 ? auto_v : 0;
-}
-
 /* Dim one-liner: "context 8.9k / 256k (3%) · out 595 · cached 2.7k", shown
  * once per user turn so multi-step tool runs collapse into a single summary
  * instead of bracketing every intermediate response.
@@ -295,7 +291,7 @@ static void display_usage(struct render_ctx *r, const struct provider *p, long c
     if (show_ctx) {
         format_tokens(buf, sizeof(buf), ctx);
         disp_printf(d, "context %s", buf);
-        long limit = context_limit(p);
+        long limit = compact_context_limit(p);
         if (limit > 0) {
             format_tokens(limit_buf, sizeof(limit_buf), limit);
             disp_printf(d, " / %s (%ld%%)", limit_buf, ctx * 100 / limit);
@@ -917,6 +913,106 @@ void agent_resume_session(struct agent_state *st, const char *path)
     replay_user_turn(st->r, s);
 }
 
+/* Event sink for the summary stream: feed the turn assembler and capture any
+ * error. Deliberately renders nothing — the summary is drawn as a spinner-only
+ * operation and surfaced as a one-line notice, not streamed as a normal
+ * assistant answer. */
+struct compact_ev {
+    struct turn *turn;
+    char *err; /* owned; set from EV_ERROR */
+};
+
+static int compact_on_event(const struct stream_event *ev, void *user)
+{
+    struct compact_ev *ce = user;
+    if (ev->kind == EV_ERROR && !ce->err)
+        ce->err = xstrdup(ev->u.error.message ? ev->u.error.message : "stream failed");
+    turn_on_event(ev, ce->turn);
+    return 0;
+}
+
+/* Draw a dim, out-of-band "── … ──" status line for compaction. */
+static void compact_notice(struct render_ctx *r, const char *fmt, ...)
+{
+    va_list ap;
+    char buf[256];
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    render_open_block(r);
+    disp_raw(ANSI_DIM);
+    disp_printf(&r->disp, "── %s ──", buf);
+    disp_raw(ANSI_RESET);
+    disp_putc(&r->disp, '\n');
+    fflush(stdout);
+}
+
+int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
+{
+    struct agent_session *s = st->sess;
+    struct provider *p = (struct provider *)st->provider;
+    struct render_ctx *r = st->r;
+
+    if (s->n_items == 0) {
+        if (!is_auto)
+            compact_notice(r, "nothing to compact");
+        return 0;
+    }
+
+    /* Close any block left open by the caller (a tool cluster on the mid-task
+     * auto path, slash output on the manual path) before raising the spinner,
+     * so it lands on a clean line regardless of entry point. */
+    render_transition(r, RS_IDLE);
+
+    /* Spinner-only stream — mirror the main loop's begin/stream/close, but
+     * with no per-event rendering and a "compacting..." label. compact_on_event
+     * feeds the turn and captures usage / the error message for the notice. */
+    render_stream_begin(r);
+    spinner_set_label(r->spinner, "compacting...");
+
+    struct turn t;
+    turn_init(&t);
+    struct compact_ev ce = {.turn = &t};
+
+    interrupt_clear();
+    interrupt_arm();
+    char *summary =
+        compact_summarize(s, p, instructions, &t, compact_on_event, &ce, agent_stream_tick, r);
+    interrupt_settle();
+    int cancelled = interrupt_requested();
+    interrupt_disarm();
+
+    render_transition(r, RS_IDLE);
+
+    /* A cancel surfaces as resp.cancelled (not EV_ERROR), so compact_summarize
+     * may have returned a partial summary — discard it. */
+    if (cancelled) {
+        free(summary);
+        summary = NULL;
+    }
+
+    if (!summary || !summary[0]) {
+        if (cancelled)
+            compact_notice(r, "compaction cancelled");
+        else if (ce.err)
+            compact_notice(r, "compaction failed: %s", ce.err);
+        else
+            compact_notice(r, "compaction produced no summary");
+        free(summary);
+        free(ce.err);
+        turn_reset(&t);
+        return 0;
+    }
+    free(ce.err);
+    turn_reset(&t);
+
+    compact_apply(s, st->slog, st->tlog, summary);
+    free(summary);
+
+    compact_notice(r, "conversation compacted");
+    return 1;
+}
+
 int agent_run(struct provider *p, const struct hax_opts *opts)
 {
     struct agent_session sess;
@@ -1258,15 +1354,37 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
              * first so we don't race past a pending \x1b. */
             interrupt_settle();
             if (interrupt_requested()) {
-                if (sess.n_items == 0 || !tool_result_is_marked(&sess.items[sess.n_items - 1])) {
-                    items_append(&sess.items, &sess.n_items, &sess.cap_items,
-                                 (struct item){
-                                     .kind = ITEM_ASSISTANT_MESSAGE,
-                                     .text = xstrdup(INTERRUPT_MARKER),
-                                 });
-                }
+                append_interrupt_marker(&sess);
                 user_turn_interrupted = 1;
                 break;
+            }
+
+            /* Mid-task auto-compaction: the model called tools and we're about
+             * to loop back for another round-trip. If this round-trip's
+             * reported context usage already nears the window, summarize now —
+             * before the next request — so a long autonomous tool chain can't
+             * run itself into an overflow. The just-completed work (assistant
+             * text, tool calls, results) is summarized and the model continues
+             * from the seed on the next iteration. Distinct from the
+             * end-of-user-turn check below, which fires before the *next user
+             * message* is added so that message is preserved verbatim. */
+            if (compact_should_auto(user_turn_ctx, compact_context_limit(p))) {
+                agent_compact(&state, NULL, 1);
+                /* Esc during auto-compaction is the user's stop signal:
+                 * agent_compact aborts the summary but leaves the flag latched.
+                 * Honor it like any mid-turn Esc — stop the tool loop rather
+                 * than clearing it and firing another round-trip against the
+                 * (still uncompacted) history. */
+                if (interrupt_requested()) {
+                    append_interrupt_marker(&sess);
+                    user_turn_interrupted = 1;
+                    break;
+                }
+                /* agent_compact runs its own arm/disarm and leaves the watcher
+                 * disarmed; the inner loop relies on it staying armed, so
+                 * re-arm (idempotent) for the remaining round-trips. */
+                interrupt_clear();
+                interrupt_arm();
             }
         }
         interrupt_disarm();
@@ -1288,6 +1406,16 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
 
         if (!user_turn_errored)
             display_usage(&r, p, user_turn_ctx, user_turn_out, user_turn_cached);
+
+        /* Auto-compaction: once the reported context usage nears the window,
+         * summarize and replace history before the next prompt. Skipped on an
+         * errored/interrupted user turn (no reliable token count, and the
+         * user may want to retry against intact history). Runs at this natural
+         * pause — the model has finished responding and we're about to wait
+         * for input — so no mid-task continuation is needed. */
+        if (!user_turn_errored && !user_turn_interrupted &&
+            compact_should_auto(user_turn_ctx, compact_context_limit(p)))
+            agent_compact(&state, NULL, 1);
 
         /* Ping the terminal so the user gets a notification / dock
          * bounce when hax is back to idle. Skipped on Esc-interrupt

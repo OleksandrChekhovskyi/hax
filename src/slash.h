@@ -36,6 +36,10 @@ struct slash_ctx {
      * slash.h needing to grow each time the agent gains a new piece
      * of mutable state. */
     struct agent_state *state;
+    /* Trailing argument text for commands that accept one (takes_arg in
+     * the registry); NULL when the command takes no argument or none was
+     * given. Whitespace-trimmed at both ends. */
+    const char *arg;
 };
 
 /* If `line` starts with '/', look up a registered command and run it.

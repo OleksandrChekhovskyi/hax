@@ -26,6 +26,17 @@ struct slash_cmd {
     const char *name;
     const char *aliases[SLASH_MAX_ALIASES + 1]; /* NULL-terminated */
     const char *summary;
+    /* When set, the command accepts an optional trailing argument (passed
+     * via slash_ctx.arg) instead of being rejected with "takes no
+     * arguments." The argument is still optional — the command runs with
+     * arg == NULL when none is given. */
+    int takes_arg;
+    /* When set, the handler drives the render pipeline (disp) itself and
+     * leaves the trailing-newline state correct — e.g. /compact's notice,
+     * /resume's replay. Raw-output handlers (the default) print straight to
+     * stdout and bypass disp, so the dispatcher resets the trail after them
+     * (see slash_dispatch) to model the fresh line their output ended on. */
+    int drives_disp;
     void (*run)(struct slash_ctx *ctx);
 };
 
@@ -36,6 +47,7 @@ struct shortcut_def {
 
 static void slash_run_new(struct slash_ctx *ctx);
 static void slash_run_resume(struct slash_ctx *ctx);
+static void slash_run_compact(struct slash_ctx *ctx);
 static void slash_run_copy(struct slash_ctx *ctx);
 static void slash_run_usage(struct slash_ctx *ctx);
 static void slash_run_help(struct slash_ctx *ctx);
@@ -53,7 +65,16 @@ static const struct slash_cmd COMMANDS[] = {
         .name = "resume",
         .aliases = {NULL},
         .summary = "resume a past conversation",
+        .drives_disp = 1,
         .run = slash_run_resume,
+    },
+    {
+        .name = "compact",
+        .aliases = {NULL},
+        .summary = "summarize history to free up context (optional: focus instructions)",
+        .takes_arg = 1,
+        .drives_disp = 1,
+        .run = slash_run_compact,
     },
     {
         .name = "copy",
@@ -137,14 +158,25 @@ enum slash_result slash_dispatch(const char *line, struct slash_ctx *ctx)
         p++;
     int has_extra = (*p != '\0');
 
-    /* From here the line is committed as a slash command — every
-     * outcome (handler output, "unknown command", "no arguments",
-     * etc.) is slash output and gets the standard leading blank-line
-     * gap that disp_block_separator gives ordinary model turns. Emit
-     * once here so handlers don't each have to remember to do it,
-     * and the spinner-prep in long-running handlers like /usage gets
-     * its prepped row for free. */
-    putchar('\n');
+    /* From here the line is committed as a slash command — every outcome
+     * (handler output, "unknown command", "no arguments", etc.) is slash
+     * output and gets the standard leading blank-line gap that ordinary model
+     * turns get. Emit it through disp (not a raw putchar) so the trail counter
+     * stays truthful: handlers that drive the render pipeline (/compact's
+     * agent_compact, /resume's replay) then see the real cursor position
+     * instead of stacking a second separator. Doing it once here also means
+     * handlers don't each have to remember, and /usage's spinner-prep gets its
+     * prepped row for free.
+     *
+     * Raw-output handlers (the default — /help, /usage, ... and the error
+     * paths below) print straight to stdout, bypassing disp, so afterwards the
+     * trail still reflects this gap rather than their output. Reset it to 1
+     * once they return (and on the error paths) to model the fresh line their
+     * trailing newline left, so the pre-prompt separator still emits the
+     * trailing blank. drives_disp handlers maintain disp themselves and are
+     * left untouched. */
+    struct disp *d = &ctx->state->r->disp;
+    disp_block_separator(d);
 
     /* Stack copy so we can NUL-terminate without touching the caller's
      * buffer. 64 is generous for command names — the longest plausible
@@ -152,6 +184,7 @@ enum slash_result slash_dispatch(const char *line, struct slash_ctx *ctx)
     char name_buf[64];
     if (name_len >= sizeof(name_buf)) {
         ui_error("unknown command. type /help for the list.");
+        d->trail = 1;
         return SLASH_UNKNOWN;
     }
     memcpy(name_buf, start, name_len);
@@ -160,17 +193,26 @@ enum slash_result slash_dispatch(const char *line, struct slash_ctx *ctx)
     const struct slash_cmd *cmd = find_command(name_buf);
     if (!cmd) {
         ui_error("unknown command: /%s. type /help for the list.", name_buf);
+        d->trail = 1;
         return SLASH_UNKNOWN;
     }
-    if (has_extra) {
+    if (has_extra && !cmd->takes_arg) {
         /* Echo the token the user actually typed, not the canonical
          * name — `/clear now` should report on `/clear`, not on the
          * `/new` it resolves to. */
         ui_error("/%s takes no arguments.", name_buf);
+        d->trail = 1;
         return SLASH_BAD_USAGE;
     }
 
+    /* For arg-taking commands, hand over the trailing text (NULL when none).
+     * `p` already sits past the command token and its following whitespace;
+     * the line is NUL-terminated so it needs no further trimming on the left,
+     * and the input editor strips trailing whitespace before dispatch. */
+    ctx->arg = (cmd->takes_arg && has_extra) ? p : NULL;
     cmd->run(ctx);
+    if (!cmd->drives_disp)
+        d->trail = 1;
     return SLASH_HANDLED;
 }
 
@@ -197,19 +239,28 @@ static void slash_run_resume(struct slash_ctx *ctx)
     const char *current = session_log_path(ctx->state->slog);
     int shown = 0;
     char *path = session_picker_run(cwd, current, &shown);
-    /* A shown picker erases itself back onto the blank line slash_dispatch
-     * emits as the leading gap, so two trailing newlines already sit below
-     * the echoed command. Report that to disp — otherwise the pre-prompt
-     * separator (on cancel) or replay_user_turn's opening block (on select)
-     * stacks a second blank line on top. When no picker was shown (non-tty,
-     * or nothing to resume), the note is real output and the dispatcher's
-     * default trail gives it the usual one-blank separation. */
-    if (shown)
-        ctx->state->r->disp.trail = 2;
+    /* The dispatcher's leading-gap separator left disp at trail = 2. A shown
+     * picker draws full-screen then erases itself back onto that same blank
+     * line (its raw drawing bypasses disp but lands where it started), so
+     * trail = 2 still matches the cursor — leave it. When no picker was shown
+     * (non-tty, or nothing to resume), a raw note was printed instead, so model
+     * its fresh-line end (trail = 1) for the pre-prompt separator. */
+    if (!shown)
+        ctx->state->r->disp.trail = 1;
     if (!path)
         return;
     agent_resume_session(ctx->state, path);
     free(path);
+}
+
+/* ---------- /compact ---------- */
+
+static void slash_run_compact(struct slash_ctx *ctx)
+{
+    /* agent_compact drives the same render pipeline /resume does, so the
+     * spinner + dim notice land below the echoed command like any other
+     * slash output. ctx->arg carries optional focus instructions. */
+    agent_compact(ctx->state, ctx->arg, 0);
 }
 
 /* ---------- /copy ---------- */

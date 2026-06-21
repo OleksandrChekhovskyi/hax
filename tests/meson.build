@@ -13,6 +13,7 @@ test_sources = [
     'test_agent_core.c',
     'test_agent_dispatch.c',
     'test_agent_env.c',
+    'test_compact.c',
     'test_config.c',
     'test_session.c',
     'test_slash.c',
