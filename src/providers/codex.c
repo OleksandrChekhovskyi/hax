@@ -275,7 +275,8 @@ static char *jwt_extract_email(const char *jwt)
 
 /* ---------- request body construction ---------- */
 
-static json_t *build_input_items(const struct item *items, size_t n)
+static json_t *build_input_items(const struct item *items, size_t n, const char *provider,
+                                 const char *model)
 {
     json_t *arr = json_array();
     for (size_t i = 0; i < n; i++) {
@@ -310,9 +311,15 @@ static json_t *build_input_items(const struct item *items, size_t n)
                             it->call_id ? it->call_id : "", "output", it->output ? it->output : "");
             break;
         case ITEM_REASONING:
-            /* The blob was already whitelisted to valid input fields when
-             * we received it (see codex_events.c) — just parse and emit. */
-            if (it->reasoning_json) {
+            /* The blob was already whitelisted to valid input fields when we
+             * received it (see codex_events.c). Replay it only when it was
+             * produced by the provider+model of this very request — the
+             * encrypted CoT is signed/bound to that model, so after a /model
+             * or /provider switch the older items (carrying the old stamp) are
+             * skipped rather than rejected by the backend. An unstamped item
+             * (very old record) is treated as not-ours and skipped. */
+            if (it->reasoning_json && it->provider && it->model && provider && model &&
+                strcmp(it->provider, provider) == 0 && strcmp(it->model, model) == 0) {
                 json_error_t jerr;
                 obj = json_loads(it->reasoning_json, 0, &jerr);
             }
@@ -345,7 +352,8 @@ static json_t *build_tools(const struct tool_def *tools, size_t n)
     return arr;
 }
 
-static char *build_body(const struct context *ctx, const char *model, const char *cache_key)
+static char *build_body(const struct context *ctx, const char *provider, const char *model,
+                        const char *cache_key)
 {
     json_t *include = json_array();
     json_array_append_new(include, json_string("reasoning.encrypted_content"));
@@ -353,9 +361,9 @@ static char *build_body(const struct context *ctx, const char *model, const char
     json_t *body =
         json_pack("{s:s, s:b, s:b, s:s, s:o, s:o, s:{s:s}, s:s, s:b, s:o}", "model", model, "store",
                   0, "stream", 1, "instructions", ctx->system_prompt ? ctx->system_prompt : "",
-                  "input", build_input_items(ctx->items, ctx->n_items), "include", include, "text",
-                  "verbosity", "medium", "tool_choice", "auto", "parallel_tool_calls", 1, "tools",
-                  build_tools(ctx->tools, ctx->n_tools));
+                  "input", build_input_items(ctx->items, ctx->n_items, provider, model), "include",
+                  include, "text", "verbosity", "medium", "tool_choice", "auto",
+                  "parallel_tool_calls", 1, "tools", build_tools(ctx->tools, ctx->n_tools));
 
     if (cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(cache_key));
@@ -386,7 +394,7 @@ static int codex_stream(struct provider *p, const struct context *ctx, const cha
 {
     struct codex *c = (struct codex *)p;
 
-    char *body = build_body(ctx, model, c->session_id);
+    char *body = build_body(ctx, c->base.name, model, c->session_id);
     if (!body)
         return -1;
     size_t body_len = strlen(body);
@@ -534,7 +542,16 @@ static long extract_codex_context(const char *body, void *user)
     return out;
 }
 
-static void spawn_context_probe(struct codex *c)
+/* Resolve the model slug the probe should look up: HAX_MODEL wins (per
+ * agent.c's resolver), else the codex default. NULL/"" means there's
+ * nothing to look up. Borrowed. */
+static const char *probe_model(const struct codex *c)
+{
+    const char *env_model = config_str("model");
+    return (env_model && *env_model) ? env_model : c->default_model;
+}
+
+static void spawn_context_probe(struct codex *c, const char *model)
 {
     /* A usable user-supplied context_limit wins; nothing for the probe
      * to add and we save a network round-trip + the matching shutdown
@@ -543,14 +560,9 @@ static void spawn_context_probe(struct codex *c)
      * instead of silently hiding the % display. */
     if (config_size("context_limit") > 0)
         return;
-    /* Resolve the model slug we'll actually send. HAX_MODEL wins per
-     * agent.c's resolver; otherwise the codex default applies. The
-     * probe needs a slug to match against the catalog — without one
+    /* The probe needs a slug to match against the catalog — without one
      * there's nothing useful to look up. */
-    const char *env_model = config_str("model");
-    const char *model =
-        (env_model && *env_model) ? env_model : (c->default_model ? c->default_model : "");
-    if (!*model)
+    if (!model || !*model)
         return;
 
     struct probe_args *a = xcalloc(1, sizeof(*a));
@@ -571,6 +583,22 @@ static void spawn_context_probe(struct codex *c)
     a->free_user = free;
     a->target = &c->base.context_limit;
     c->probe = probe_context_limit_spawn(a);
+}
+
+/* /model switched the model under us: the catalog keys the context window by
+ * slug, so the old probe's value is stale. Settle the in-flight probe (so it
+ * can't land late and overwrite the new one), drop the limit back to unknown,
+ * and re-probe for `model`. */
+static void codex_refresh_context(struct provider *p, const char *model)
+{
+    struct codex *c = (struct codex *)p;
+    if (c->probe) {
+        bg_job_cancel(c->probe);
+        bg_job_join(c->probe);
+        c->probe = NULL;
+    }
+    atomic_store(&c->base.context_limit, 0);
+    spawn_context_probe(c, model);
 }
 
 /* ---------- /usage ---------- */
@@ -789,6 +817,67 @@ static int codex_query_usage(struct provider *p)
     return 0;
 }
 
+/* ---------- runtime pickers (model / effort) ---------- */
+
+/* Codex's reasoning-effort ladder. Mirrors the backend enum
+ * (none/minimal/low/medium/high/xhigh); per-model support is advertised in
+ * the catalog's supported_reasoning_levels, but offering the full ladder
+ * and letting the server narrow it keeps this simple — a refinement can
+ * filter by the selected model's catalog entry later. */
+static const char *const CODEX_EFFORTS[] = {"none", "minimal", "low", "medium", "high", "xhigh"};
+
+static size_t codex_list_efforts(struct provider *p, const char *const **out)
+{
+    (void)p;
+    *out = CODEX_EFFORTS;
+    return sizeof(CODEX_EFFORTS) / sizeof(CODEX_EFFORTS[0]);
+}
+
+/* Fetch the catalog and collect `models[].slug` — the same endpoint and
+ * shape the context-window probe walks (extract_codex_context). The high
+ * synthetic client_version keeps already-sendable models visible. */
+static int codex_list_models(struct provider *p, char ***ids, size_t *n)
+{
+    struct codex *c = (struct codex *)p;
+    *ids = NULL;
+    *n = 0;
+    char *url =
+        xasprintf("%s?client_version=%s", CODEX_MODELS_ENDPOINT, CODEX_PROBE_CLIENT_VERSION);
+    char *auth = xasprintf("Authorization: Bearer %s", c->access_token);
+    char *acct = xasprintf("chatgpt-account-id: %s", c->account_id);
+    const char *headers[] = {auth, acct, "originator: hax", "Accept: application/json", NULL};
+    char *body = NULL;
+    int rc = http_get(url, headers, CODEX_PROBE_TIMEOUT_S, NULL, NULL, &body, NULL);
+    free(auth);
+    free(acct);
+    free(url);
+    if (rc != 0) {
+        free(body);
+        return -1;
+    }
+    json_t *root = json_loads(body, 0, NULL);
+    free(body);
+    if (!root)
+        return -1;
+    json_t *models = json_object_get(root, "models");
+    if (!json_is_array(models)) {
+        json_decref(root);
+        return -1;
+    }
+    size_t cnt = json_array_size(models);
+    char **out = cnt ? xmalloc(cnt * sizeof(*out)) : NULL;
+    size_t k = 0;
+    for (size_t i = 0; i < cnt; i++) {
+        json_t *slug = json_object_get(json_array_get(models, i), "slug");
+        if (json_is_string(slug) && *json_string_value(slug))
+            out[k++] = xstrdup(json_string_value(slug));
+    }
+    json_decref(root);
+    *ids = out;
+    *n = k;
+    return 0;
+}
+
 static void codex_destroy(struct provider *p)
 {
     struct codex *c = (struct codex *)p;
@@ -858,6 +947,9 @@ struct provider *codex_provider_new(void)
     c->base.default_reasoning_effort = c->default_reasoning_effort;
     c->base.stream = codex_stream;
     c->base.query_usage = codex_query_usage;
+    c->base.list_models = codex_list_models;
+    c->base.list_efforts = codex_list_efforts;
+    c->base.refresh_context = codex_refresh_context;
     c->base.destroy = codex_destroy;
     c->access_token = xstrdup(access);
     c->account_id = xstrdup(account);
@@ -871,11 +963,48 @@ struct provider *codex_provider_new(void)
      * the agent a "%" once the catalog response lands without delaying
      * the first prompt. Failure (expired token, network blip, missing
      * slug) silently leaves the percentage display hidden. */
-    spawn_context_probe(c);
+    spawn_context_probe(c, probe_model(c));
     return &c->base;
+}
+
+/* Usable iff ~/.codex/auth.json parses and carries both tokens we need —
+ * the cheap, file-only precondition the constructor checks, without the
+ * network probe it then spawns. */
+static int codex_available(const char **reason)
+{
+    char *path = expand_home("~/.codex/auth.json");
+    if (!path) {
+        if (reason)
+            *reason = "no home directory";
+        return 0;
+    }
+    size_t len = 0;
+    char *contents = slurp_file(path, &len);
+    free(path);
+    if (!contents) {
+        if (reason)
+            *reason = "codex CLI not logged in";
+        return 0;
+    }
+    json_t *root = json_loads(contents, 0, NULL);
+    free(contents);
+    if (!root) {
+        if (reason)
+            *reason = "auth.json not valid JSON";
+        return 0;
+    }
+    json_t *tokens = json_object_get(root, "tokens");
+    const char *access = tokens ? json_string_value(json_object_get(tokens, "access_token")) : NULL;
+    const char *account = tokens ? json_string_value(json_object_get(tokens, "account_id")) : NULL;
+    int ok = access && *access && account && *account;
+    json_decref(root);
+    if (!ok && reason)
+        *reason = "codex CLI not logged in";
+    return ok;
 }
 
 const struct provider_factory PROVIDER_CODEX = {
     .name = "codex",
     .new = codex_provider_new,
+    .available = codex_available,
 };

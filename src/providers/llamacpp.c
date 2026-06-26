@@ -42,39 +42,69 @@ static char *swap_path(const char *base, const char *new_path)
     return out;
 }
 
-/* Returns 0 on success (HAX_MODEL was already set, or auto-fill worked).
- * Returns -1 when HAX_MODEL was unset AND we failed to derive one from
- * /v1/models — a strong signal the server is unreachable, which the caller
- * surfaces as a hard error so the user sees the real cause instead of a
- * downstream "HAX_MODEL is required" message. */
+/* Resolve the model to send, treating llama-server's catalog as live server
+ * state rather than a user preference. The served model depends on how the
+ * server was started — a single model, or (router mode) several loaded on
+ * demand — and a value stored in config/state.json can be stale: the server
+ * may have been restarted with a different model since. So reconcile against
+ * the live /v1/models: keep the configured model only if the server is
+ * actually serving it; otherwise adopt what it serves (the first entry — the
+ * sole model in single-model mode, or the first router model). The effective
+ * value is set as a session override (config tier), so it wins for this run
+ * without rewriting a persisted choice that may become valid again.
+ *
+ * Returns 0 when a model could be resolved (reconciled, or an explicit one
+ * trusted while the server is briefly unreachable). Returns -1 only when the
+ * server is unreachable AND nothing is configured — a strong "is it running?"
+ * signal the caller surfaces instead of a downstream "HAX_MODEL is required". */
 static int probe_model(const char *base_url, const char *api_key)
 {
-    const char *cur = config_str("model");
-    if (cur && *cur)
-        return 0;
     char *url = xasprintf("%s/models", base_url);
     char *auth = api_key ? xasprintf("Authorization: Bearer %s", api_key) : NULL;
     const char *headers[] = {auth, NULL};
     char *body = NULL;
-    int ok = 0;
-    if (http_get(url, auth ? headers : NULL, MODEL_PROBE_TIMEOUT_S, NULL, NULL, &body, NULL) == 0) {
+    int reached =
+        http_get(url, auth ? headers : NULL, MODEL_PROBE_TIMEOUT_S, NULL, NULL, &body, NULL) == 0;
+
+    const char *cur = config_str("model");
+    int rc = -1;
+    if (reached) {
         json_t *root = json_loads(body, 0, NULL);
-        if (root) {
-            json_t *data = json_object_get(root, "data");
-            if (json_is_array(data) && json_array_size(data) > 0) {
-                json_t *id = json_object_get(json_array_get(data, 0), "id");
-                if (json_is_string(id)) {
-                    setenv("HAX_MODEL", json_string_value(id), 1);
-                    ok = 1;
-                }
+        json_t *data = root ? json_object_get(root, "data") : NULL;
+        if (json_is_array(data) && json_array_size(data) > 0) {
+            const char *first = NULL;
+            int present = 0;
+            size_t n = json_array_size(data);
+            for (size_t i = 0; i < n; i++) {
+                json_t *id = json_object_get(json_array_get(data, i), "id");
+                if (!json_is_string(id))
+                    continue;
+                const char *s = json_string_value(id);
+                if (!first)
+                    first = s;
+                if (cur && *cur && strcmp(s, cur) == 0)
+                    present = 1;
             }
-            json_decref(root);
+            if (first) {
+                /* Unset or stale (not in the live list) → adopt what's served;
+                 * a still-valid configured model is left untouched. */
+                if (!cur || !*cur || !present)
+                    config_set_override("model", first);
+                rc = 0;
+            }
         }
+        json_decref(root);
+    } else if (cur && *cur) {
+        /* Unreachable but a model is explicitly configured: trust it and let
+         * the first stream surface the real connection error, rather than
+         * failing construction (which would drop the user out of the REPL). */
+        rc = 0;
     }
+
     free(body);
     free(auth);
     free(url);
-    return ok ? 0 : -1;
+    return rc;
 }
 
 /* /props returns the live n_ctx the server was started with — the only
@@ -164,6 +194,11 @@ struct provider *llamacpp_provider_new(void)
          * as reasoning_content (the field llama-server ingests). Disable
          * with HAX_REASONING_ROUNDTRIP=off. */
         .roundtrip_reasoning_field = "reasoning_content",
+        /* If the server's context (-c / --ctx-size) is full, the reply
+         * truncates to "length"; unlike ollama there's no per-request knob,
+         * so the fix is a larger -c at launch. */
+        .length_hint = "llama-server's context is full — restart it with a larger "
+                       "-c / --ctx-size",
     };
     struct provider *p = openai_provider_new_preset(&preset);
     /* Context-limit probe runs in the background: an older llama-server
@@ -177,7 +212,23 @@ struct provider *llamacpp_provider_new(void)
     return p;
 }
 
+/* Availability is "is llama-server up": a bounded GET on the same /models
+ * the model probe uses. Resolves the base URL exactly as the constructor
+ * does so the probe targets the server the user would actually reach. */
+static int llamacpp_available(const char **reason)
+{
+    char *default_url = xasprintf("http://127.0.0.1:%s/v1", config_str_nonempty("llamacpp.port"));
+    const char *base_env = config_str("openai.base_url");
+    char *resolved = dup_trim_trailing_slash((base_env && *base_env) ? base_env : default_url);
+    const char *key = config_str("openai.api_key");
+    int ok = openai_base_url_reachable(resolved, (key && *key) ? key : NULL, reason);
+    free(resolved);
+    free(default_url);
+    return ok;
+}
+
 const struct provider_factory PROVIDER_LLAMACPP = {
     .name = "llama.cpp",
     .new = llamacpp_provider_new,
+    .available = llamacpp_available,
 };

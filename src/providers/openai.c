@@ -14,6 +14,17 @@
 #include "transport/http.h"
 #include "transport/retry.h"
 
+/* Short timeouts for the runtime pickers: the availability probe must keep
+ * /provider fast even when a server hangs (the 2s connect timeout in
+ * http_get bounds the unreachable case); the model-list fetch tolerates a
+ * larger catalog (OpenRouter's is hundreds of entries). */
+#define AVAIL_PROBE_TIMEOUT_S 2
+#define MODEL_LIST_TIMEOUT_S  10
+
+const char *const OPENAI_EFFORT_LADDER[] = {"none", "minimal", "low", "medium", "high", "xhigh"};
+const size_t OPENAI_EFFORT_LADDER_N =
+    sizeof(OPENAI_EFFORT_LADDER) / sizeof(OPENAI_EFFORT_LADDER[0]);
+
 struct openai {
     struct provider base;
     char *base_url;   /* e.g. "http://127.0.0.1:8000/v1" (no trailing slash) */
@@ -23,8 +34,11 @@ struct openai {
     char *session_id; /* sent as prompt_cache_key when send_cache_key is set */
     int send_cache_key;
     int emit_progress;
+    const char *length_hint;         /* borrowed; appended to "length" truncation errors */
     char *roundtrip_reasoning_field; /* NULL = don't round-trip reasoning */
     enum reasoning_format reasoning_format;
+    const char *const *efforts; /* borrowed effort ladder for /effort; NULL = none */
+    size_t n_efforts;
     char **extra_headers; /* NULL-terminated, each element heap-owned; NULL = none */
     /* Optional background probe — currently the context-window
      * discovery spawned by preset shims (openrouter, llama.cpp).
@@ -53,13 +67,21 @@ static json_t *build_tool_call(const struct item *it)
  * ITEM_REASONING.reasoning_text is round-tripped here; Codex's structured
  * reasoning_json travels its own provider and never reaches this path.
  *
+ * A reasoning item is replayed only when its provenance stamp matches the
+ * live `cur_provider`/`cur_model` — otherwise CoT produced by Codex, or by a
+ * different llama.cpp model earlier in the same conversation, would be fed to
+ * a backend/model that never wrote it. Unstamped items (NULL provider/model)
+ * are conservatively skipped; for resumed pre-stamp files session_load has
+ * already backfilled the stamp from the header.
+ *
  * Lossy corner: if a turn produced text → tool_call → text, both text
  * fragments are concatenated into one `content` — Chat Completions has
  * no way to interleave text with tool_calls within a message. Splitting
  * the trailing text into a post-tool-result message would imply it was
  * said after observing the result, which is more misleading. */
 static size_t emit_assistant_group(json_t *arr, const struct item *items, size_t i, size_t n,
-                                   const char *reasoning_field)
+                                   const char *reasoning_field, const char *cur_provider,
+                                   const char *cur_model)
 {
     struct buf text;
     struct buf reasoning;
@@ -73,7 +95,10 @@ static size_t emit_assistant_group(json_t *arr, const struct item *items, size_t
             if (items[i].text)
                 buf_append_str(&text, items[i].text);
         } else if (items[i].kind == ITEM_REASONING) {
-            if (items[i].reasoning_text && *items[i].reasoning_text) {
+            int stamp_ok = items[i].provider && items[i].model && cur_provider && cur_model &&
+                           strcmp(items[i].provider, cur_provider) == 0 &&
+                           strcmp(items[i].model, cur_model) == 0;
+            if (stamp_ok && items[i].reasoning_text && *items[i].reasoning_text) {
                 if (reasoning.len > 0)
                     buf_append_str(&reasoning, "\n");
                 buf_append_str(&reasoning, items[i].reasoning_text);
@@ -118,7 +143,8 @@ static size_t emit_assistant_group(json_t *arr, const struct item *items, size_t
 }
 
 json_t *openai_build_messages(const char *system_prompt, const struct item *items, size_t n,
-                              const char *reasoning_field)
+                              const char *reasoning_field, const char *cur_provider,
+                              const char *cur_model)
 {
     json_t *arr = json_array();
 
@@ -137,7 +163,7 @@ json_t *openai_build_messages(const char *system_prompt, const struct item *item
             break;
         case ITEM_ASSISTANT_MESSAGE:
         case ITEM_TOOL_CALL:
-            i = emit_assistant_group(arr, items, i, n, reasoning_field);
+            i = emit_assistant_group(arr, items, i, n, reasoning_field, cur_provider, cur_model);
             break;
         case ITEM_TOOL_RESULT:
             json_array_append_new(arr,
@@ -151,7 +177,8 @@ json_t *openai_build_messages(const char *system_prompt, const struct item *item
              * as reasoning_content (gated by reasoning_field). Codex's
              * structured blob has no Chat Completions representation — skip. */
             if (items[i].reasoning_text)
-                i = emit_assistant_group(arr, items, i, n, reasoning_field);
+                i = emit_assistant_group(arr, items, i, n, reasoning_field, cur_provider,
+                                         cur_model);
             else
                 i++;
             break;
@@ -197,8 +224,8 @@ enum reasoning_format reasoning_format_parse(const char *s, enum reasoning_forma
     return fallback;
 }
 
-static char *build_body(const struct context *ctx, const char *model, const char *cache_key,
-                        enum reasoning_format reasoning, int return_progress,
+static char *build_body(const struct context *ctx, const char *provider, const char *model,
+                        const char *cache_key, enum reasoning_format reasoning, int return_progress,
                         const char *reasoning_field)
 {
     /* Omit `tool_choice` and `parallel_tool_calls`: their defaults ("auto"
@@ -213,10 +240,10 @@ static char *build_body(const struct context *ctx, const char *model, const char
      * flag. Modern OpenAI-compatible backends (vLLM, llama.cpp server,
      * Ollama, oMLX, hosted providers) all accept it. If we ever hit a
      * backend that 400s on the unknown field, gating goes here. */
-    json_t *body = json_pack(
-        "{s:s, s:b, s:o, s:{s:b}}", "model", model, "stream", 1, "messages",
-        openai_build_messages(ctx->system_prompt, ctx->items, ctx->n_items, reasoning_field),
-        "stream_options", "include_usage", 1);
+    json_t *body = json_pack("{s:s, s:b, s:o, s:{s:b}}", "model", model, "stream", 1, "messages",
+                             openai_build_messages(ctx->system_prompt, ctx->items, ctx->n_items,
+                                                   reasoning_field, provider, model),
+                             "stream_options", "include_usage", 1);
 
     if (ctx->n_tools > 0)
         json_object_set_new(body, "tools", build_tools(ctx->tools, ctx->n_tools));
@@ -269,7 +296,7 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
 {
     struct openai *o = (struct openai *)p;
 
-    char *body = build_body(ctx, model, o->send_cache_key ? o->session_id : NULL,
+    char *body = build_body(ctx, p->name, model, o->send_cache_key ? o->session_id : NULL,
                             o->reasoning_format, o->emit_progress, o->roundtrip_reasoning_field);
     if (!body)
         return -1;
@@ -308,6 +335,7 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
         memset(&resp, 0, sizeof(resp));
         openai_events_init(&ev, cb, user);
         ev.emit_progress = o->emit_progress;
+        ev.length_hint = o->length_hint;
         rc = http_sse_post(o->endpoint, headers, body, body_len, on_sse, &ev, tick, tick_user,
                            &resp);
 
@@ -397,6 +425,23 @@ void openai_attach_probe(struct provider *p, struct bg_job *probe)
     o->probe = probe;
 }
 
+void openai_context_probe_reset(struct provider *p)
+{
+    if (!p)
+        return;
+    struct openai *o = (struct openai *)p;
+    /* Settle the in-flight probe before a re-probe so the superseded worker
+     * can't land late and overwrite the new model's limit, then drop the
+     * limit to unknown. The slot is cleared so the follow-up
+     * openai_attach_probe just stores the fresh handle. */
+    if (o->probe) {
+        bg_job_cancel(o->probe);
+        bg_job_join(o->probe);
+        o->probe = NULL;
+    }
+    atomic_store(&o->base.context_limit, 0);
+}
+
 /* Duplicate a NULL-terminated array of header strings. Returns NULL when
  * the input is NULL or empty (no headers); otherwise a heap-owned array
  * with each element xstrdup'd, terminated by a NULL slot. */
@@ -434,19 +479,121 @@ static char *resolve_roundtrip_field(const char *preset_default)
     return chosen ? xstrdup(chosen) : NULL;
 }
 
+/* ---------- runtime pickers (model / effort) ---------- */
+
+/* GET <base_url>/models and collect the `data[].id` slugs. The OpenAI
+ * /v1/models shape is shared across the whole compat family — real OpenAI,
+ * llama.cpp, ollama, OpenRouter — so this one parser serves every shim. */
+static int openai_list_models(struct provider *p, char ***ids, size_t *n)
+{
+    struct openai *o = (struct openai *)p;
+    *ids = NULL;
+    *n = 0;
+    char *url = xasprintf("%s/models", o->base_url);
+    char *auth = o->api_key ? xasprintf("Authorization: Bearer %s", o->api_key) : NULL;
+    const char *headers[] = {auth, NULL};
+    char *body = NULL;
+    int rc = http_get(url, auth ? headers : NULL, MODEL_LIST_TIMEOUT_S, NULL, NULL, &body, NULL);
+    free(auth);
+    free(url);
+    if (rc != 0) {
+        free(body);
+        return -1;
+    }
+    json_t *root = json_loads(body, 0, NULL);
+    free(body);
+    if (!root)
+        return -1;
+    /* A 2xx body that parsed but carries no model array is a reachable
+     * server with an empty catalog, not a fetch failure — ollama returns
+     * "data": null (rather than []) when nothing is pulled. Report it as
+     * zero models (return 0, *n stays 0) so the caller can say "no models
+     * available" instead of "could not reach". */
+    json_t *data = json_object_get(root, "data");
+    if (!json_is_array(data)) {
+        json_decref(root);
+        return 0;
+    }
+    size_t cnt = json_array_size(data);
+    char **out = cnt ? xmalloc(cnt * sizeof(*out)) : NULL;
+    size_t k = 0;
+    for (size_t i = 0; i < cnt; i++) {
+        json_t *id = json_object_get(json_array_get(data, i), "id");
+        if (json_is_string(id) && *json_string_value(id))
+            out[k++] = xstrdup(json_string_value(id));
+    }
+    json_decref(root);
+    *ids = out;
+    *n = k;
+    return 0;
+}
+
+static size_t openai_list_efforts(struct provider *p, const char *const **out)
+{
+    struct openai *o = (struct openai *)p;
+    if (!o->efforts || o->n_efforts == 0)
+        return 0;
+    *out = o->efforts;
+    return o->n_efforts;
+}
+
+int openai_key_available(const char *api_key_env, const char **reason)
+{
+    const char *key = config_str("openai.api_key");
+    if (key && *key)
+        return 1;
+    if (api_key_env) {
+        const char *e = getenv(api_key_env);
+        if (e && *e)
+            return 1;
+    }
+    if (reason)
+        *reason = "no API key";
+    return 0;
+}
+
+int openai_base_url_reachable(const char *base_url, const char *api_key, const char **reason)
+{
+    char *url = xasprintf("%s/models", base_url);
+    char *auth = (api_key && *api_key) ? xasprintf("Authorization: Bearer %s", api_key) : NULL;
+    const char *headers[] = {auth, NULL};
+    char *body = NULL;
+    int rc = http_get(url, auth ? headers : NULL, AVAIL_PROBE_TIMEOUT_S, NULL, NULL, &body, NULL);
+    free(body);
+    free(auth);
+    free(url);
+    if (rc != 0) {
+        if (reason)
+            *reason = "server not reachable";
+        return 0;
+    }
+    return 1;
+}
+
+static int openai_available(const char **reason)
+{
+    /* Fixed endpoint (api.openai.com), so selectability is just "is a key
+     * configured" — HAX_OPENAI_BASE_URL no longer affects it (the preset
+     * locks the base URL and ignores the override). */
+    return openai_key_available("OPENAI_API_KEY", reason);
+}
+
 struct provider *openai_provider_new_preset(const struct openai_preset *preset)
 {
     struct openai_preset zero = {0};
     if (!preset)
         preset = &zero;
 
-    /* HAX_OPENAI_BASE_URL beats the preset default; one of them must
-     * resolve to a non-empty value. If neither does, the calling preset
-     * is misconfigured (a programmer error inside hax) — fail loudly so
-     * we don't silently default to api.openai.com under a different
-     * preset's display name. */
+    /* HAX_OPENAI_BASE_URL beats the preset default — unless the preset locks
+     * its base URL (openai, openrouter: fixed endpoints), in which case the
+     * shared override is ignored so a value left set for another backend can't
+     * redirect them. One of them must resolve to a non-empty value; if neither
+     * does, the calling preset is misconfigured (a programmer error inside
+     * hax) — fail loudly so we don't silently default to api.openai.com under
+     * a different preset's display name. */
     const char *base_env = config_str("openai.base_url");
-    const char *base = (base_env && *base_env) ? base_env : preset->default_base_url;
+    const char *base =
+        (!preset->lock_base_url && base_env && *base_env) ? base_env : preset->default_base_url;
     if (!base || !*base) {
         hax_err("internal: openai preset has no base URL");
         return NULL;
@@ -480,37 +627,39 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
     o->endpoint = xasprintf("%s/chat/completions", o->base_url);
     o->send_cache_key = send_cache_key;
     o->emit_progress = preset->emit_progress;
+    o->length_hint = preset->length_hint;
     o->roundtrip_reasoning_field = resolve_roundtrip_field(preset->roundtrip_reasoning_field);
     o->reasoning_format = preset->reasoning_format;
+    o->efforts = preset->efforts;
+    o->n_efforts = preset->n_efforts;
     o->extra_headers = dup_headers(preset->extra_headers);
     char uuid[37];
     gen_uuid_v4(uuid);
     o->session_id = xstrdup(uuid);
     o->base.name = o->name_buf;
     o->base.stream = openai_stream;
+    o->base.list_models = openai_list_models;
+    o->base.list_efforts = openai_list_efforts;
     o->base.destroy = openai_destroy;
     return &o->base;
 }
 
 struct provider *openai_provider_new(void)
 {
-    /* Real OpenAI: api.openai.com is hard-coded and HAX_OPENAI_BASE_URL is
-     * rejected. Custom OpenAI-compat endpoints belong on the dedicated
-     * "openai-compatible" preset, which keeps the policies that matter
-     * for OpenAI itself (OPENAI_API_KEY pickup, prompt_cache_key on)
-     * from leaking to a third-party server. */
-    const char *base_env = config_str("openai.base_url");
-    if (base_env && *base_env) {
-        hax_err("HAX_OPENAI_BASE_URL is not honored by HAX_PROVIDER=openai "
-                "(this preset is locked to api.openai.com)\n"
-                "hax: use HAX_PROVIDER=openai-compatible to point at a custom endpoint");
-        return NULL;
-    }
+    /* Real OpenAI: api.openai.com is fixed. HAX_OPENAI_BASE_URL is ignored
+     * (lock_base_url) rather than honored — a custom endpoint belongs on the
+     * dedicated "openai-compatible" preset, which keeps OpenAI's policies
+     * (OPENAI_API_KEY pickup, prompt_cache_key on) from reaching a third-party
+     * host. Ignoring rather than rejecting means a base URL left set for
+     * another backend doesn't block selecting openai. */
     struct openai_preset preset = {
         .display_name = "openai",
         .default_base_url = "https://api.openai.com/v1",
         .api_key_env = "OPENAI_API_KEY",
         .send_cache_key_default = 1,
+        .lock_base_url = 1,
+        .efforts = OPENAI_EFFORT_LADDER,
+        .n_efforts = OPENAI_EFFORT_LADDER_N,
     };
     return openai_provider_new_preset(&preset);
 }
@@ -518,4 +667,5 @@ struct provider *openai_provider_new(void)
 const struct provider_factory PROVIDER_OPENAI = {
     .name = "openai",
     .new = openai_provider_new,
+    .available = openai_available,
 };

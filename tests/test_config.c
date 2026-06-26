@@ -198,6 +198,126 @@ static void test_override_beats_env(void)
     unsetenv("HAX_MODEL");
 }
 
+static void test_state_tier_ordering(void)
+{
+    clear_env();
+    config_set_override("model", NULL);
+    /* The state tier (state.json) sits between env and the committed
+     * config file: it overrides the declared default, but yields to an
+     * explicit env var for a one-off invocation, and to a runtime override. */
+    EXPECT(config_load("{\"model\": \"from-file\"}") == 0);
+    EXPECT(config_load_state("{\"model\": \"from-state\"}") == 0);
+    EXPECT_STR_EQ(config_str("model"), "from-state"); /* beats the file */
+    setenv("HAX_MODEL", "from-env", 1);
+    EXPECT_STR_EQ(config_str("model"), "from-env"); /* env still wins */
+    config_set_override("model", "from-override");
+    EXPECT_STR_EQ(config_str("model"), "from-override"); /* override is top */
+    config_set_override("model", NULL);
+    unsetenv("HAX_MODEL");
+    EXPECT_STR_EQ(config_str("model"), "from-state");
+    /* Same nested/flat grammar as the file tier. */
+    EXPECT(config_load_state("{\"reasoning_effort\": \"high\"}") == 0);
+    EXPECT_STR_EQ(config_str("reasoning_effort"), "high");
+    /* Clearing the state tier falls back to the file. */
+    EXPECT(config_load_state(NULL) == 0);
+    EXPECT_STR_EQ(config_str("model"), "from-file");
+    config_load(NULL);
+}
+
+static void test_default_sentinel(void)
+{
+    clear_env();
+    config_set_override("model", NULL);
+    config_load(NULL);
+    config_load_state(NULL);
+
+    /* CONFIG_VALUE_DEFAULT resolves to NULL (consumer uses its own default)
+     * and shadows lower tiers instead of falling through to them. */
+    EXPECT(config_load("{\"model\": \"from-file\"}") == 0);
+    EXPECT_STR_EQ(config_str("model"), "from-file");
+    config_set_override("model", CONFIG_VALUE_DEFAULT);
+    EXPECT(config_str("model") == NULL); /* sentinel, not "from-file" */
+    /* The literal token round-trips through a tier the same way. */
+    config_set_override("model", NULL);
+    EXPECT(config_load_state("{\"model\": \"(default)\"}") == 0);
+    EXPECT(config_str("model") == NULL);
+
+    /* An override sentinel sits above env, so it shadows even an env var —
+     * this is what stops a stale HAX_MODEL leaking into a switched provider
+     * for the session. With the override cleared, env wins again. */
+    setenv("HAX_MODEL", "from-env", 1);
+    config_set_override("model", CONFIG_VALUE_DEFAULT);
+    EXPECT(config_str("model") == NULL);
+    config_set_override("model", NULL);
+    EXPECT_STR_EQ(config_str("model"), "from-env");
+    unsetenv("HAX_MODEL");
+
+    config_load(NULL);
+    config_load_state(NULL);
+}
+
+static void rm_rf_config(const char *dir); /* defined below; shared cleanup */
+
+static void rm_rf_state(const char *dir)
+{
+    char path[4096];
+    snprintf(path, sizeof path, "%s/hax/state.json", dir);
+    unlink(path);
+    snprintf(path, sizeof path, "%s/hax", dir);
+    rmdir(path);
+    rmdir(dir);
+}
+
+static void test_persist_state_roundtrip(void)
+{
+    clear_env();
+    config_free();
+
+    /* Separate temp trees for config and state so we can prove the
+     * state-tier write lands in the state dir, not the config dir. */
+    char cfg_tmpl[] = "/tmp/haxcfgtest.XXXXXX";
+    char st_tmpl[] = "/tmp/haxsttest.XXXXXX";
+    char *cfg_dir = mkdtemp(cfg_tmpl);
+    char *st_dir = mkdtemp(st_tmpl);
+    EXPECT(cfg_dir != NULL && st_dir != NULL);
+    if (!cfg_dir || !st_dir)
+        return;
+    setenv("XDG_CONFIG_HOME", cfg_dir, 1);
+    setenv("XDG_STATE_HOME", st_dir, 1);
+
+    EXPECT(config_persist_state("provider", "openrouter") == 0);
+    EXPECT(config_persist_state("model", "some/model") == 0);
+
+    /* It writes state.json (state dir), and leaves config.json absent. */
+    char stpath[4096], cfgpath[4096];
+    snprintf(stpath, sizeof stpath, "%s/hax/state.json", st_dir);
+    snprintf(cfgpath, sizeof cfgpath, "%s/hax/config.json", cfg_dir);
+    struct stat st;
+    EXPECT(stat(stpath, &st) == 0 && (st.st_mode & 0777) == 0600);
+    EXPECT(stat(cfgpath, &st) != 0);
+
+    /* Reload from disk: the state tier reads back. */
+    config_load(NULL);
+    config_load_state(NULL);
+    config_init();
+    EXPECT_STR_EQ(config_str("provider"), "openrouter");
+    EXPECT_STR_EQ(config_str("model"), "some/model");
+
+    /* An env var still wins over a persisted selection (one-off override). */
+    setenv("HAX_MODEL", "env-model", 1);
+    EXPECT_STR_EQ(config_str("model"), "env-model");
+    unsetenv("HAX_MODEL");
+
+    /* Deleting a selection key removes it; resolution falls through. */
+    EXPECT(config_persist_state("provider", NULL) == 0);
+    EXPECT(config_str("provider") == NULL);
+
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_STATE_HOME");
+    rm_rf_config(cfg_dir);
+    rm_rf_state(st_dir);
+}
+
 static void rm_rf_config(const char *dir)
 {
     char path[4096];
@@ -219,6 +339,12 @@ static void test_persist_roundtrip(void)
     if (!dir)
         return;
     setenv("XDG_CONFIG_HOME", dir, 1);
+    /* Isolate the state dir too: config_init() reads state.json (the
+     * state tier) from XDG_STATE_HOME, and a developer's real
+     * ~/.local/state/hax/state.json would otherwise shadow the config-file
+     * values this test persists. The temp dir holds no state.json, so the
+     * state tier stays empty. */
+    setenv("XDG_STATE_HOME", dir, 1);
 
     /* Persist a flat and a nested key, then reload from disk. */
     EXPECT(config_persist("model", "saved-model") == 0);
@@ -255,6 +381,7 @@ static void test_persist_roundtrip(void)
     EXPECT_STR_EQ(config_str("model"), "saved-under-umask");
 
     unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_STATE_HOME");
     rm_rf_config(dir);
 }
 
@@ -283,6 +410,7 @@ static void test_persist_flat_key(void)
     if (!dir)
         return;
     setenv("XDG_CONFIG_HOME", dir, 1);
+    setenv("XDG_STATE_HOME", dir, 1); /* isolate the state tier — see roundtrip test */
 
     /* A hand-written flat dotted key takes lookup precedence, so persist
      * must remove it or it would shadow the nested value it writes. */
@@ -302,6 +430,7 @@ static void test_persist_flat_key(void)
     EXPECT(config_str("openai.base_url") == NULL);
 
     unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_STATE_HOME");
     rm_rf_config(dir);
 }
 
@@ -332,6 +461,9 @@ int main(void)
     test_env_wins_over_file();
     test_empty_means_unset();
     test_override_beats_env();
+    test_state_tier_ordering();
+    test_default_sentinel();
+    test_persist_state_roundtrip();
     test_persist_roundtrip();
     test_persist_failure_rolls_back();
     test_persist_flat_key();

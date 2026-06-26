@@ -867,5 +867,7 @@ void item_free(struct item *it)
     free(it->output);
     free(it->reasoning_json);
     free(it->reasoning_text);
+    free(it->provider);
+    free(it->model);
     memset(it, 0, sizeof(*it));
 }

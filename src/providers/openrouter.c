@@ -86,22 +86,36 @@ static void spawn_context_probe(struct provider *p, const char *api_key)
     openai_attach_probe(p, probe_context_limit_spawn(a));
 }
 
-struct provider *openrouter_provider_new(void)
+/* Re-resolve the API key exactly as the constructor does (HAX_OPENAI_API_KEY,
+ * then the OPENROUTER_API_KEY fallback). Borrowed. */
+static const char *openrouter_api_key(void)
 {
-    /* Locked to openrouter.ai — HAX_OPENAI_BASE_URL is rejected so the
-     * OPENROUTER_API_KEY fallback (and the public X-Title attribution
-     * header) can never leak to an unrelated host. Custom OpenAI-compat
-     * endpoints belong on HAX_PROVIDER=openai-compatible. */
-    const char *base_env = config_str("openai.base_url");
-    if (base_env && *base_env) {
-        hax_err("HAX_OPENAI_BASE_URL is not honored by HAX_PROVIDER=openrouter "
-                "(this preset is locked to openrouter.ai)\n"
-                "hax: use HAX_PROVIDER=openai-compatible to point at a custom endpoint");
-        return NULL;
-    }
     const char *key = config_str("openai.api_key");
     if (!key || !*key)
         key = getenv("OPENROUTER_API_KEY");
+    return (key && *key) ? key : NULL;
+}
+
+/* /model switched the model: the per-model /endpoints catalog gives a
+ * different window, so re-probe. openai_context_probe_reset settles the prior
+ * probe and clears the limit; spawn_context_probe re-reads config_str("model")
+ * (the agent committed the new value before apply), so the explicit `model`
+ * isn't needed here. */
+static void openrouter_refresh_context(struct provider *p, const char *model)
+{
+    (void)model;
+    openai_context_probe_reset(p);
+    spawn_context_probe(p, openrouter_api_key());
+}
+
+struct provider *openrouter_provider_new(void)
+{
+    /* Fixed to openrouter.ai. HAX_OPENAI_BASE_URL is ignored (lock_base_url),
+     * not rejected, so the OPENROUTER_API_KEY fallback and the public X-Title
+     * attribution header can never reach an unrelated host, and a base URL
+     * left set for another backend doesn't block selecting openrouter. Custom
+     * endpoints belong on HAX_PROVIDER=openai-compatible. */
+    const char *key = openrouter_api_key();
 
     const char *title = config_str("openrouter.title");
     if (!title || !*title)
@@ -136,20 +150,36 @@ struct provider *openrouter_provider_new(void)
         .default_base_url = "https://openrouter.ai/api/v1",
         .api_key_env = "OPENROUTER_API_KEY",
         .send_cache_key_default = 1,
+        .lock_base_url = 1,
         .extra_headers = headers,
         .reasoning_format = request_reasoning ? REASONING_NESTED : REASONING_FLAT,
+        /* OpenRouter normalizes the full OpenAI-style ladder across upstreams
+         * and maps an unsupported level to the nearest one, so the whole
+         * ladder is safe to offer. */
+        .efforts = OPENAI_EFFORT_LADDER,
+        .n_efforts = OPENAI_EFFORT_LADDER_N,
     };
     /* Constructor copies headers internally, so the local strings can be
      * freed once it returns. */
     struct provider *p = openai_provider_new_preset(&preset);
     free(title_hdr);
     free(referer_hdr);
-    if (p)
-        spawn_context_probe(p, (key && *key) ? key : NULL);
+    if (p) {
+        p->refresh_context = openrouter_refresh_context;
+        spawn_context_probe(p, key);
+    }
     return p;
+}
+
+/* Usable iff a key is configured — HAX_OPENAI_API_KEY or the OPENROUTER_API_KEY
+ * fallback the preset already consults. */
+static int openrouter_available(const char **reason)
+{
+    return openai_key_available("OPENROUTER_API_KEY", reason);
 }
 
 const struct provider_factory PROVIDER_OPENROUTER = {
     .name = "openrouter",
     .new = openrouter_provider_new,
+    .available = openrouter_available,
 };

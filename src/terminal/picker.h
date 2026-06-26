@@ -41,6 +41,13 @@
 struct picker_item {
     const char *label;  /* primary text; what the filter matches against */
     const char *detail; /* optional dim text shown after the label; may be NULL */
+    /* When set, the row is shown dim and is not selectable: the cursor
+     * skips over it, Enter won't accept it, and it never gets the
+     * highlight marker. Used to list an option that exists but can't be
+     * chosen right now (e.g. an unconfigured provider), with `detail`
+     * carrying the reason. The row still matches the filter so it stays
+     * discoverable. */
+    int disabled;
 };
 
 struct picker_opts {

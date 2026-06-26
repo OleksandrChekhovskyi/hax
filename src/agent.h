@@ -28,7 +28,12 @@ struct agent_state {
     struct render_ctx *r;
 };
 
-int agent_run(struct provider *p, const struct hax_opts *opts);
+/* Run the interactive REPL. *provider is the initial provider (owned by the
+ * caller); a runtime /provider switch may replace it, destroying the old
+ * one and storing the new current provider back into *provider. On return the
+ * caller destroys *provider — which is whatever provider is live at exit, not
+ * necessarily the one passed in. */
+int agent_run(struct provider **provider, const struct hax_opts *opts);
 
 /* Print the two-line startup banner: provider/model identification
  * and the key-tip line. Reused by agent_new_conversation so a fresh-
@@ -52,6 +57,22 @@ void agent_new_conversation(struct agent_state *st);
  * Used by the /resume command. A load failure is reported and leaves the
  * current conversation untouched. */
 void agent_resume_session(struct agent_state *st, const char *path);
+
+/* Replace the live provider with `newp` (freshly constructed; ownership
+ * transfers in). Destroys the previously-live provider — joining its
+ * background work — and points the session at `newp`. Does NOT re-resolve
+ * model/effort or rebuild the prompt; the caller follows with
+ * agent_apply_settings once the new model/effort are chosen. Used by the
+ * /provider switch. */
+void agent_set_provider(struct agent_state *st, struct provider *newp);
+
+/* Re-resolve model + reasoning effort against the current config and the
+ * live provider, rebuild the system prompt, append a dim marker to history
+ * (so the switch shows in the transcript and survives a resume), and print
+ * a one-line confirmation. The single "apply a /provider, /model or /effort
+ * change" step. Returns 0 on success, -1 when no model resolves for the
+ * provider (a note is printed; history is left intact). */
+int agent_apply_settings(struct agent_state *st);
 
 /* Summarize the live conversation and replace history with the summary,
  * so the session can continue without overflowing the context window.

@@ -24,6 +24,7 @@ test_sources = [
     'providers/test_codex_events.c',
     'providers/test_openai_events.c',
     'providers/test_openai_messages.c',
+    'providers/test_registry.c',
 
     'render/test_ctrl_strip.c',
     'render/test_disp.c',

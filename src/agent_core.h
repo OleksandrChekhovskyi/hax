@@ -55,24 +55,46 @@ const char *resolve_reasoning_effort(const struct provider *p);
 char *build_system_prompt(const char *model, int raw);
 
 /* Live per-run state shared by the interactive and one-shot paths.
- * Owns the items vector, the assembled system prompt, and the tools
- * table; borrows model and reasoning_effort. */
+ * Owns the items vector, the assembled system prompt, the tools table,
+ * and the resolved model + reasoning_effort. */
 struct agent_session {
-    const char *model;            /* borrowed */
-    const char *reasoning_effort; /* borrowed; NULL = "omit" */
-    char *sys;                    /* owned; NULL = no system message */
-    struct tool_def *tools;       /* owned; NULL when n_tools == 0 */
+    /* Owned copies, not borrowed config_str pointers: a runtime /provider,
+     * /model, or /effort commit replaces a whole config tier object (and frees
+     * its strings), which would dangle a borrowed pointer the still-live
+     * session keeps using. */
+    char *model;               /* owned; NULL/"" = no model resolved yet */
+    char *reasoning_effort;    /* owned; NULL = "omit" */
+    const char *provider_name; /* borrowed from the live provider (valid for
+                                * its lifetime), for stamping reasoning
+                                * items. NULL = none. */
+    char *sys;                 /* owned; NULL = no system message */
+    struct tool_def *tools;    /* owned; NULL when n_tools == 0 */
     size_t n_tools;
+    /* The --raw decision, captured at init so a mid-session provider/model
+     * switch (agent_session_reconfigure) rebuilds the system prompt the
+     * same way: raw stays "no system message", non-raw refreshes the env
+     * block with the new model name. */
+    int raw;
 
     struct item *items;
     size_t n_items;
     size_t cap_items;
 };
 
-/* Resolve model + build sys + tools table. Returns 0 on success, -1
- * when no model is available (an error is logged to stderr in that
- * case, so the caller can just propagate the failure). */
+/* Resolve model + build sys + tools table. Always returns 0: a missing
+ * model (provider with no default, nothing configured) is left as an empty
+ * s->model rather than failing, so the interactive REPL can start and let
+ * the user pick one at runtime. Callers that can't prompt (the one-shot
+ * path) must check s->model themselves and fail fast when it's empty. */
 int agent_session_init(struct agent_session *s, struct provider *p, const struct hax_opts *opts);
+
+/* Re-resolve the session's model and reasoning effort against the current
+ * config and provider `p`, and rebuild the system prompt (its env block
+ * embeds the model name). Used after a runtime /provider or /model switch:
+ * conversation history, the tools table, and the session log are left
+ * intact — only the per-request settings change. Returns 0 on success, -1
+ * when no model is available for `p` (logged to stderr). */
+int agent_session_reconfigure(struct agent_session *s, struct provider *p);
 
 void agent_session_free(struct agent_session *s);
 

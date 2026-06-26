@@ -9,6 +9,7 @@
 
 #include "agent.h"
 #include "render/render_ctx.h"
+#include "select.h"
 #include "session.h"
 #include "session_picker.h"
 #include "util.h"
@@ -47,6 +48,9 @@ struct shortcut_def {
 
 static void slash_run_new(struct slash_ctx *ctx);
 static void slash_run_resume(struct slash_ctx *ctx);
+static void slash_run_provider(struct slash_ctx *ctx);
+static void slash_run_model(struct slash_ctx *ctx);
+static void slash_run_effort(struct slash_ctx *ctx);
 static void slash_run_compact(struct slash_ctx *ctx);
 static void slash_run_copy(struct slash_ctx *ctx);
 static void slash_run_usage(struct slash_ctx *ctx);
@@ -67,6 +71,27 @@ static const struct slash_cmd COMMANDS[] = {
         .summary = "resume a past conversation",
         .drives_disp = 1,
         .run = slash_run_resume,
+    },
+    {
+        .name = "provider",
+        .aliases = {NULL},
+        .summary = "switch provider, then model and effort",
+        .drives_disp = 1,
+        .run = slash_run_provider,
+    },
+    {
+        .name = "model",
+        .aliases = {NULL},
+        .summary = "switch model, then effort",
+        .drives_disp = 1,
+        .run = slash_run_model,
+    },
+    {
+        .name = "effort",
+        .aliases = {NULL},
+        .summary = "set reasoning effort",
+        .drives_disp = 1,
+        .run = slash_run_effort,
     },
     {
         .name = "compact",
@@ -253,6 +278,26 @@ static void slash_run_resume(struct slash_ctx *ctx)
     free(path);
 }
 
+/* ---------- /provider, /model, /effort ---------- */
+
+/* All three drive the picker + render pipeline themselves (drives_disp),
+ * so the dispatcher leaves disp bookkeeping to the select flow. The chain
+ * is provider → model → effort; /model and /effort enter partway in. */
+static void slash_run_provider(struct slash_ctx *ctx)
+{
+    select_provider(ctx->state);
+}
+
+static void slash_run_model(struct slash_ctx *ctx)
+{
+    select_model(ctx->state);
+}
+
+static void slash_run_effort(struct slash_ctx *ctx)
+{
+    select_effort(ctx->state);
+}
+
 /* ---------- /compact ---------- */
 
 static void slash_run_compact(struct slash_ctx *ctx)
@@ -306,6 +351,10 @@ static void slash_run_usage(struct slash_ctx *ctx)
      * commands only need read-only fields (->name, ->default_model);
      * this is the one place we hand the object to a method. */
     struct provider *p = (struct provider *)ctx->state->provider;
+    if (!p) {
+        ui_note("no provider selected — use /provider to choose one first");
+        return;
+    }
     if (!p->query_usage) {
         ui_note("/usage is not supported by the %s provider", p->name ? p->name : "?");
         return;

@@ -17,9 +17,9 @@
  * Adding a new provider:
  *   1. Drop the implementation under src/providers/.
  *   2. Add its source to meson.build.
- *   3. Add the `extern PROVIDER_*` declaration below and append the
- *      symbol to PROVIDERS[] in registry.c, both in alphabetical order
- *      so error messages and merges stay predictable.
+ *   3. Add the `extern PROVIDER_*` declaration below (alphabetical, for an
+ *      easy diff) and insert the symbol into PROVIDERS[] in registry.c at the
+ *      right autoselect-priority position (see the array comment there).
  */
 
 extern const struct provider_factory PROVIDER_CODEX;
@@ -30,17 +30,24 @@ extern const struct provider_factory PROVIDER_OPENAI;
 extern const struct provider_factory PROVIDER_OPENAI_COMPAT;
 extern const struct provider_factory PROVIDER_OPENROUTER;
 
-/* Name used when no explicit selection is made (e.g. HAX_PROVIDER unset
- * at startup). Matches one entry's `name` field in the registry. */
-extern const char PROVIDER_DEFAULT_NAME[];
-
 /* Look up a factory by its `name` field. Returns NULL if no provider
  * with that name is registered. */
 const struct provider_factory *provider_find(const char *name);
 
-/* Write the space-separated list of registered provider names to `out`,
- * in registration (alphabetical) order. Used for error messages and as
- * the listing primitive for a future /provider command. */
+/* The highest-priority user-facing provider — the default used when nothing
+ * is configured (HAX_PROVIDER unset, no state.json pick): provider_all()'s
+ * first entry. Cold-start autoselect tries it first; the one-shot path builds
+ * it directly. */
+const struct provider_factory *provider_default(void);
+
+/* The full registry as a read-only array; *n receives the count. In
+ * autoselect-priority order (most-preferred first), internal providers
+ * excluded. The listing primitive the /provider picker iterates to show —
+ * and probe the availability of — every selectable provider. */
+const struct provider_factory *const *provider_all(size_t *n);
+
+/* Write the space-separated list of selectable provider names to `out`, in
+ * priority order. Used for error messages and the supported-list. */
 void provider_list_names(FILE *out);
 
 #endif /* HAX_PROVIDERS_REGISTRY_H */

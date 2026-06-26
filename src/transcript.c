@@ -395,7 +395,9 @@ void transcript_log_init(void)
 
 struct transcript_log {
     FILE *fp;
-    const char *path; /* getenv pointer — stable for the process lifetime */
+    char *path; /* owned: a borrowed config_str("transcript") would dangle when
+                 * a /provider, /model, or /effort commit replaces a config
+                 * tier object (and reset reuses path in freopen). */
     size_t n_written;
     int turn_no;
 };
@@ -419,7 +421,7 @@ struct transcript_log *transcript_log_open(const char *system_prompt, const stru
     setvbuf(fp, NULL, _IOLBF, 0);
     struct transcript_log *log = xmalloc(sizeof(*log));
     log->fp = fp;
-    log->path = path;
+    log->path = xstrdup(path);
     log->n_written = 0;
     log->turn_no = 0;
     transcript_render_header(fp, 0, system_prompt, tools, n_tools);
@@ -468,5 +470,6 @@ void transcript_log_close(struct transcript_log *log)
         return;
     if (log->fp)
         fclose(log->fp);
+    free(log->path);
     free(log);
 }

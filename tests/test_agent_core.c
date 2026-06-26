@@ -229,18 +229,18 @@ static void test_session_init_raw(void)
 
 static void test_session_init_missing_model(void)
 {
-    /* No HAX_MODEL and no provider default → init must fail with -1
-     * and leave the session zeroed (so callers don't have to remember
-     * to free a half-initialized session — main.c relies on this). */
+    /* No HAX_MODEL and no provider default: init now succeeds with an
+     * empty model rather than failing, so the interactive REPL can start
+     * and prompt the user to pick one at runtime (/model, /provider). The
+     * one-shot path checks the empty model itself and fails fast there. */
     unsetenv("HAX_MODEL");
     struct provider p = {.name = "test", .default_model = NULL};
     struct hax_opts opts = {0};
 
     struct agent_session s;
-    EXPECT(agent_session_init(&s, &p, &opts) == -1);
-    EXPECT(s.items == NULL);
-    EXPECT(s.tools == NULL);
-    EXPECT(s.sys == NULL);
+    EXPECT(agent_session_init(&s, &p, &opts) == 0);
+    EXPECT(s.model == NULL || s.model[0] == '\0');
+    agent_session_free(&s);
 }
 
 /* ---------- agent_session_add_user / add_boundary ---------- */
@@ -328,9 +328,11 @@ static void test_session_absorb_with_tool_call(void)
 
 static void test_session_context_snapshot(void)
 {
+    /* model/reasoning_effort are owned (freed by agent_session_free), so seed
+     * them with heap copies rather than string literals. */
     struct agent_session s = {
-        .model = "m1",
-        .reasoning_effort = "high",
+        .model = xstrdup("m1"),
+        .reasoning_effort = xstrdup("high"),
         .sys = NULL,
         .tools = NULL,
         .n_tools = 0,

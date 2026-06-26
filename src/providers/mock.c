@@ -711,4 +711,7 @@ struct provider *mock_provider_new(void)
 const struct provider_factory PROVIDER_MOCK = {
     .name = "mock",
     .new = mock_provider_new,
+    /* Dev/testing backend: opt in explicitly with HAX_PROVIDER=mock. Kept
+     * out of the /provider picker, auto-selection, and the supported list. */
+    .internal = 1,
 };

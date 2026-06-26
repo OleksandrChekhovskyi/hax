@@ -10,6 +10,7 @@
 #include "config.h"
 #include "oneshot.h"
 #include "providers/registry.h"
+#include "select.h"
 #include "session.h"
 #include "session_picker.h"
 #include "terminal/interrupt.h"
@@ -23,22 +24,44 @@
  * cleanly. No CLI knob for this yet; add one if a real use case shows up. */
 #define ONESHOT_MAX_TURNS 100
 
-static struct provider *pick_provider(void)
+static struct provider *pick_provider(int print_mode)
 {
     const char *which = config_str("provider");
-    if (!which || !*which)
-        which = PROVIDER_DEFAULT_NAME;
+    /* "Explicit" = the user named a provider somewhere (HAX_PROVIDER, the
+     * config file's "provider" key, or a prior /provider pick in state.json).
+     * Absent that, fall to the built-in default (the highest-priority
+     * provider) — which we treat more gently below, since the user never
+     * asked for it. */
+    int chosen = which && *which;
+    const struct provider_factory *f = chosen ? provider_find(which) : provider_default();
+    if (!f) {
+        /* Unknown name — a typo in HAX_PROVIDER / the config / a stale
+         * state.json pick (only the explicit path can miss; provider_default
+         * is never NULL). Name the value, not the source, with the supported
+         * set as the help. */
+        fprintf(stderr, "hax: unknown provider '%s' (supported: ", which);
+        provider_list_names(stderr);
+        fprintf(stderr, ")\n");
+        return NULL;
+    }
 
-    const struct provider_factory *f = provider_find(which);
-    if (f)
+    /* Strict construction (failure surfaces verbatim, becomes fatal) when
+     * the provider was explicitly chosen — the user asked for this backend,
+     * so "codex not logged in" / "server down" is the answer they need — or
+     * in one-shot mode, which can't prompt for an alternative and must not
+     * emit a chatty auto-select note onto piped stdout. The built-in default
+     * is built strictly here too in one-shot. */
+    if (chosen || print_mode)
         return f->new();
 
-    /* `which` may have come from HAX_PROVIDER or the config file's
-     * "provider" key, so name the value, not the source. */
-    fprintf(stderr, "hax: unknown provider '%s' (supported: ", which);
-    provider_list_names(stderr);
-    fprintf(stderr, ")\n");
-    return NULL;
+    /* Interactive cold start with nothing configured: one path picks
+     * something. The auto-selector tries the built-in default first (cheap
+     * to check, so the common logged-in start stays instant and silent),
+     * and on its failure probes the rest and starts on the first available
+     * one — or returns NULL for a provider-less REPL whose banner points at
+     * /provider. (`f` is the resolved default here; autoselect re-finds it
+     * as its top candidate.) */
+    return provider_autoselect();
 }
 
 static const char HELP_TEXT[] =
@@ -367,18 +390,28 @@ int main(int argc, char **argv)
     trace_init();
     transcript_log_init();
 
-    struct provider *p = pick_provider();
-    if (!p)
+    struct provider *p = pick_provider(print_mode);
+    /* A provider that can't be constructed (codex not logged in, no API key,
+     * local server down) is fatal only in one-shot mode, which can't prompt
+     * for an alternative. Interactively we start the REPL with no provider:
+     * pick_provider already printed why, the banner points at /provider, and
+     * agent_run streams nothing until a working one is chosen. */
+    if (!p && print_mode)
         goto err_curl;
 
-    rc = print_mode ? oneshot_run(p, prompt, &opts, ONESHOT_MAX_TURNS) : agent_run(p, &opts);
+    /* agent_run may swap the provider at runtime (/provider), updating `p`
+     * to whatever is live at exit (possibly from NULL to a real one); the
+     * one-shot path never does. Either way `p` below is the provider to tear
+     * down — NULL if the user exited without ever choosing one. */
+    rc = print_mode ? oneshot_run(p, prompt, &opts, ONESHOT_MAX_TURNS) : agent_run(&p, &opts);
 
     /* Each provider's destroy() is responsible for joining whatever
      * background work it spawned (probes, prefetches, ...) before
      * releasing the state those workers may still be writing to.
      * curl_global_cleanup() runs after destroy(), so any libcurl
      * handles in flight have necessarily been wound down by then. */
-    p->destroy(p);
+    if (p)
+        p->destroy(p);
 err_curl:
     curl_global_cleanup();
 err_prompt:

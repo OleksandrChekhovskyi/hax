@@ -57,6 +57,15 @@ struct item {
      * is what gets re-sent). An item may have either or both; the transcript
      * prefers this text and falls back to the opaque reasoning_json tag. */
     char *reasoning_text;
+    /* REASONING provenance: the provider name and model id that produced this
+     * item, stamped when it enters history (and round-tripped through the
+     * session log). reasoning_json is signed/bound to that exact model, so the
+     * build path replays it only when this stamp matches the provider+model of
+     * the current request — after a /model or /provider switch (mid-session or
+     * across a resume) the older items carry the old stamp and are skipped.
+     * NULL on non-reasoning items and on records that predate stamping. */
+    char *provider;
+    char *model;
 };
 
 void item_free(struct item *it);
@@ -208,6 +217,42 @@ struct provider {
      * implementation is expected to have already printed a diagnostic
      * to stderr in that case). */
     int (*query_usage)(struct provider *p);
+    /* Optional. Discover the model ids this provider can serve, for the
+     * runtime model picker (/model). On success returns 0 with *ids a
+     * freshly-allocated array of *n heap-owned strings (caller frees each
+     * element then the array; *n may be 0). Returns -1 on any failure — no
+     * such endpoint, network error, unparseable catalog — with *ids=NULL.
+     * When no menu can be built (this returns -1, *n==0, or the hook is
+     * NULL) the selector prints an actionable note and skips the model
+     * step: there is no free-text entry today, so /model leaves the model
+     * unchanged and /provider keeps the current provider unless the new one
+     * supplies a default_model. In practice the OpenAI-compatible engines
+     * hax targets (vLLM, llama.cpp, ollama, TGI, …) all serve /v1/models,
+     * so this is mostly a transient state (server momentarily unreachable).
+     * May block on a network round-trip, so callers run it off the
+     * foreground path. NULL hook means the provider can't enumerate models. */
+    int (*list_models)(struct provider *p, char ***ids, size_t *n);
+    /* Optional. Reasoning-effort wire values this provider accepts (e.g.
+     * "low", "high"), for the runtime effort picker (/effort). Points *out
+     * at a borrowed array (typically static, owned by the provider; valid
+     * for the provider's lifetime) and returns its length. Returns 0 (or a
+     * NULL hook) when the provider has no categorical reasoning effort — its
+     * thinking is a token budget/toggle, or it has none — in which case the
+     * picker reports "not supported" and the chained flow skips the step.
+     * The selector prepends its own "default (omit)" choice, so providers
+     * list only real effort values here. */
+    size_t (*list_efforts)(struct provider *p, const char *const **out);
+    /* Optional. Re-run the model-specific context-window probe after a
+     * runtime /model switch, so context_limit tracks the newly selected
+     * model rather than the one resolved at construction. Implementations
+     * cancel/join any in-flight probe, reset context_limit to 0 (unknown),
+     * and spawn a fresh probe for `model`. NULL when the limit isn't
+     * model-specific — fixed, absent, or sourced only from
+     * HAX_CONTEXT_LIMIT (which the agent honors ahead of this slot anyway).
+     * Only codex and openrouter, whose catalogs key the window by model,
+     * implement it; the local backends report server/loaded-model state a
+     * probe can't meaningfully re-derive on a switch. */
+    void (*refresh_context)(struct provider *p, const char *model);
     void (*destroy)(struct provider *p);
     /* Auto-discovered model context window in tokens. 0 = unknown (no
      * probe ran, hasn't completed yet, or failed); positive values are
@@ -231,6 +276,23 @@ struct provider {
 struct provider_factory {
     const char *name; /* HAX_PROVIDER value, e.g. "codex", "llama.cpp" */
     struct provider *(*new)(void);
+    /* Optional availability check for the runtime provider picker
+     * (/provider): can this provider be selected right now? Returns 1 when
+     * usable, 0 when not — and on 0 may set *reason to a short static
+     * string ("no API key", "server not reachable") shown dim beside the
+     * disabled row. May perform a bounded network probe (a local server's
+     * reachability GET); the picker runs these off the foreground path and
+     * in parallel so opening the list stays fast even when a host hangs.
+     * The reason string, if set, must outlive the call (use static
+     * literals — these run on worker threads). NULL hook ⇒ always
+     * selectable. */
+    int (*available)(const char **reason);
+    /* Dev-only backend, hidden from the enumerated provider set: excluded
+     * from the /provider picker, cold-start auto-selection, and the
+     * "supported" list in error messages. Still resolvable by name, so it
+     * stays reachable via an explicit HAX_PROVIDER=<name> (e.g. the mock
+     * provider for manual pipeline testing). */
+    int internal;
 };
 
 #endif /* HAX_PROVIDER_H */

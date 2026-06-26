@@ -101,7 +101,7 @@ int main(void)
     struct item *items;
     size_t n;
     struct session_meta meta;
-    EXPECT(session_load(path, NULL, NULL, &items, &n, &meta) == 0);
+    EXPECT(session_load(path, &items, &n, &meta) == 0);
     EXPECT(n == CONVO_N);
     for (size_t i = 0; i < n && i < CONVO_N; i++)
         EXPECT(item_eq(&items[i], &CONVO[i]));
@@ -114,36 +114,20 @@ int main(void)
     free_items(items, n);
     session_meta_free(&meta);
 
-    /* ---- model switch clears the opaque CoT blob but keeps the text ---- */
-    /* Same provider+model: reasoning kept intact (encrypted blob present). */
-    EXPECT(session_load(path, "alpha", "m1", &items, &n, NULL) == 0);
+    /* ---- load is non-destructive: the opaque blob and its provenance stamp
+       survive verbatim. Whether a blob can be replayed is decided later by the
+       provider's build path (which compares the stamp to the request's model),
+       not by load — so a model switch never destroys history here. ---- */
+    EXPECT(session_load(path, &items, &n, NULL) == 0);
     EXPECT(n == CONVO_N);
     const struct item *rs = NULL;
     for (size_t i = 0; i < n; i++)
         if (items[i].kind == ITEM_REASONING)
             rs = &items[i];
     EXPECT(rs && rs->reasoning_json != NULL && rs->reasoning_text != NULL);
-    free_items(items, n);
-
-    /* Different provider: the blob is cleared, the plain text survives, so
-     * the item stays but without its opaque half. */
-    EXPECT(session_load(path, "beta", "m1", &items, &n, NULL) == 0);
-    EXPECT(n == CONVO_N);
-    rs = NULL;
-    for (size_t i = 0; i < n; i++)
-        if (items[i].kind == ITEM_REASONING)
-            rs = &items[i];
-    EXPECT(rs && rs->reasoning_json == NULL);
-    EXPECT(rs && rs->reasoning_text && strcmp(rs->reasoning_text, "thinking...") == 0);
-    free_items(items, n);
-
-    /* Same provider but a different model also clears the blob. */
-    EXPECT(session_load(path, "alpha", "m2", &items, &n, NULL) == 0);
-    rs = NULL;
-    for (size_t i = 0; i < n; i++)
-        if (items[i].kind == ITEM_REASONING)
-            rs = &items[i];
-    EXPECT(rs && rs->reasoning_json == NULL);
+    /* The fixture carries no per-item stamp, so it inherits the header's. */
+    EXPECT(rs && rs->provider && strcmp(rs->provider, "alpha") == 0);
+    EXPECT(rs && rs->model && strcmp(rs->model, "m1") == 0);
     free_items(items, n);
 
     /* ---- listing finds the session with a usable summary ---- */
@@ -183,7 +167,7 @@ int main(void)
     session_log_append(r, convo_ext, CONVO_N + 2);
     session_log_close(r);
 
-    EXPECT(session_load(path, NULL, NULL, &items, &n, NULL) == 0);
+    EXPECT(session_load(path, &items, &n, NULL) == 0);
     EXPECT(n == CONVO_N + 2);
     if (n == CONVO_N + 2) {
         EXPECT(items[n - 1].kind == ITEM_USER_MESSAGE);
@@ -191,11 +175,17 @@ int main(void)
     }
     free_items(items, n);
 
-    /* ---- opaque reasoning is model-bound; plain text is portable ---- */
+    /* ---- the reasoning provenance stamp round-trips: a per-item stamp wins,
+       and an item lacking one inherits the header's ---- */
     struct item conv_r[] = {
         {.kind = ITEM_USER_MESSAGE, .text = (char *)"q"},
-        {.kind = ITEM_REASONING, .reasoning_json = (char *)"{\"id\":\"enc\"}"}, /* opaque only */
-        {.kind = ITEM_REASONING, .reasoning_text = (char *)"plain cot"},        /* text only */
+        /* explicit per-item stamp (a different model than the header's) */
+        {.kind = ITEM_REASONING,
+         .reasoning_json = (char *)"{\"id\":\"enc\"}",
+         .provider = (char *)"pa",
+         .model = (char *)"mX"},
+        /* no stamp → inherits the header (pa/ma) */
+        {.kind = ITEM_REASONING, .reasoning_text = (char *)"plain cot"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"a"},
     };
     struct session_log *lr = session_log_open("pa", "ma", NULL);
@@ -204,31 +194,21 @@ int main(void)
     session_log_append(lr, conv_r, 4);
     session_log_close(lr);
 
-    /* Same model: both reasoning items survive, blob intact. */
-    EXPECT(session_load(pathr, "pa", "ma", &items, &n, NULL) == 0);
-    int n_reason = 0, has_blob = 0, has_text = 0;
+    EXPECT(session_load(pathr, &items, &n, NULL) == 0);
+    const struct item *enc = NULL, *txt = NULL;
     for (size_t i = 0; i < n; i++)
         if (items[i].kind == ITEM_REASONING) {
-            n_reason++;
-            has_blob |= items[i].reasoning_json != NULL;
-            has_text |= items[i].reasoning_text != NULL;
+            if (items[i].reasoning_json)
+                enc = &items[i];
+            else
+                txt = &items[i];
         }
-    EXPECT(n_reason == 2 && has_blob && has_text);
-    free_items(items, n);
-
-    /* Different model: the opaque-only item is dropped entirely; the
-     * text-only item is kept. */
-    EXPECT(session_load(pathr, "pb", "ma", &items, &n, NULL) == 0);
-    n_reason = has_blob = 0;
-    const char *kept = NULL;
-    for (size_t i = 0; i < n; i++)
-        if (items[i].kind == ITEM_REASONING) {
-            n_reason++;
-            has_blob |= items[i].reasoning_json != NULL;
-            kept = items[i].reasoning_text;
-        }
-    EXPECT(n_reason == 1 && !has_blob);
-    EXPECT(kept && strcmp(kept, "plain cot") == 0);
+    /* Both items survive (non-destructive); the blob keeps its own stamp... */
+    EXPECT(enc && enc->reasoning_json && enc->provider && strcmp(enc->provider, "pa") == 0);
+    EXPECT(enc && enc->model && strcmp(enc->model, "mX") == 0);
+    /* ...and the unstamped one inherits the header. */
+    EXPECT(txt && txt->reasoning_text && strcmp(txt->reasoning_text, "plain cot") == 0);
+    EXPECT(txt && txt->model && strcmp(txt->model, "ma") == 0);
     free_items(items, n);
 
     free(pathr);
@@ -264,7 +244,7 @@ int main(void)
 
         struct item *base;
         size_t nb;
-        EXPECT(session_load(tornpath, NULL, NULL, &base, &nb, NULL) == 0);
+        EXPECT(session_load(tornpath, &base, &nb, NULL) == 0);
         EXPECT(nb == 3); /* boundary, user, assistant — torn line skipped */
 
         struct item ext[5];
@@ -279,7 +259,7 @@ int main(void)
         /* The appended record must be intact, not fused onto the fragment. */
         struct item *after;
         size_t na;
-        EXPECT(session_load(tornpath, NULL, NULL, &after, &na, NULL) == 0);
+        EXPECT(session_load(tornpath, &after, &na, NULL) == 0);
         EXPECT(na == 4); /* the 3 valid + the new one; torn fragment still skipped */
         if (na == 4)
             EXPECT_STR_EQ(after[3].text, "after crash");
@@ -302,7 +282,7 @@ int main(void)
     char *pathtc = xstrdup(session_log_path(ltc));
     session_log_append(ltc, conv_tc, 4);
     session_log_close(ltc);
-    EXPECT(session_load(pathtc, NULL, NULL, &items, &n, NULL) == 0);
+    EXPECT(session_load(pathtc, &items, &n, NULL) == 0);
     EXPECT(n == 3); /* boundary, user, assistant — the unpaired call dropped */
     for (size_t i = 0; i < n; i++)
         EXPECT(items[i].kind != ITEM_TOOL_CALL);

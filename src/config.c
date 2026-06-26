@@ -130,9 +130,11 @@ const struct config_setting *config_settings(size_t *n)
     return REGISTRY;
 }
 
-/* File tier (parsed config.json, always NULL or a JSON object) and the
- * session-only override tier (a flat object keyed by canonical key). */
+/* File tier (parsed config.json), state tier (parsed state.json — the
+ * machine-local persisted overrides), and the session-only override tier
+ * (a flat object keyed by canonical key). Each is NULL or a JSON object. */
 static json_t *g_config;
+static json_t *g_state;
 static json_t *g_overrides;
 
 #define CONFIG_MAX_BYTES (1024 * 1024)
@@ -164,10 +166,13 @@ static void normalize(json_t *obj)
     }
 }
 
-int config_load(const char *text)
+/* Replace `*tier` with the JSON object parsed from `text`. Shared by the
+ * config-file and state loaders — same grammar (object root, scalar leaves
+ * normalized to strings) and return contract. */
+static int load_tier(json_t **tier, const char *text)
 {
-    json_decref(g_config);
-    g_config = NULL;
+    json_decref(*tier);
+    *tier = NULL;
     if (!text || !*text)
         return 0;
     json_t *root = json_loads(text, 0, NULL);
@@ -178,13 +183,26 @@ int config_load(const char *text)
         return -1;
     }
     normalize(root);
-    g_config = root;
+    *tier = root;
     return 0;
 }
 
-void config_init(void)
+int config_load(const char *text)
 {
-    char *path = xdg_hax_config_path("config.json");
+    return load_tier(&g_config, text);
+}
+
+int config_load_state(const char *text)
+{
+    return load_tier(&g_state, text);
+}
+
+/* Read `path` into `*tier` via load_tier. Absent is silent (the tier is
+ * optional); present-but-unusable (malformed, oversized, unreadable) is
+ * ignored with a warning naming `what` — the user wrote the file and it
+ * isn't being honored. Consumes `path` (frees it). */
+static void init_tier_file(json_t **tier, char *path, const char *what)
+{
     if (!path)
         return;
     size_t len;
@@ -193,37 +211,42 @@ void config_init(void)
     char *data = slurp_file_capped(path, CONFIG_MAX_BYTES, &len, &truncated);
     if (data) {
         if (truncated)
-            hax_warn("ignoring config at %s: larger than the 1 MiB limit", path);
-        else if (config_load(data) != 0)
-            hax_warn("ignoring malformed config at %s (expected a JSON object)", path);
+            hax_warn("ignoring %s at %s: larger than the 1 MiB limit", what, path);
+        else if (load_tier(tier, data) != 0)
+            hax_warn("ignoring malformed %s at %s (expected a JSON object)", what, path);
         free(data);
     } else if (errno != ENOENT) {
-        /* Absent is fine (config is optional); present-but-unreadable
-         * (permissions, a directory, ...) must not be silent — the user
-         * wrote a config and it isn't being honored. */
-        hax_warn("ignoring unreadable config at %s: %s", path, strerror(errno));
+        hax_warn("ignoring unreadable %s at %s: %s", what, path, strerror(errno));
     }
     free(path);
+}
+
+void config_init(void)
+{
+    init_tier_file(&g_config, xdg_hax_config_path("config.json"), "config");
+    init_tier_file(&g_state, xdg_hax_state_path("state.json"), "state");
 }
 
 void config_free(void)
 {
     json_decref(g_config);
     g_config = NULL;
+    json_decref(g_state);
+    g_state = NULL;
     json_decref(g_overrides);
     g_overrides = NULL;
 }
 
-/* Look up `key` in the file tier: the flat literal key first (the
+/* Look up `key` in a JSON-object tier: the flat literal key first (the
  * dotted-key form), then a walk down nested objects on '.'. Returns the
- * leaf string, or NULL. */
-static const char *file_get(const char *key)
+ * leaf string, or NULL. Shared by the file and state tiers. */
+static const char *obj_get(json_t *root, const char *key)
 {
-    if (!g_config)
+    if (!root)
         return NULL;
-    json_t *v = json_object_get(g_config, key);
+    json_t *v = json_object_get(root, key);
     if (!v) {
-        json_t *cur = g_config;
+        json_t *cur = root;
         const char *p = key;
         for (;;) {
             const char *dot = strchr(p, '.');
@@ -246,26 +269,48 @@ static const char *file_get(const char *key)
     return json_string_value(v);
 }
 
-/* Walk the tiers: override (session) → environment → file → registry
- * default. With skip_empty, an empty value counts as "unset at this
- * tier" and resolution falls through to the next one — for settings
- * whose grammar gives "" no meaning (ports, durations, bools), where a
- * stray HAX_FOO= must not shadow a configured value or produce
+static const char *file_get(const char *key)
+{
+    return obj_get(g_config, key);
+}
+
+static const char *state_get(const char *key)
+{
+    return obj_get(g_state, key);
+}
+
+/* Walk the tiers: override (session) → environment → state →
+ * file → registry default. With skip_empty, an empty value counts as
+ * "unset at this tier" and resolution falls through to the next one — for
+ * settings whose grammar gives "" no meaning (ports, durations, bools),
+ * where a stray HAX_FOO= must not shadow a configured value or produce
  * nonsense. Without it, values are returned verbatim including "". */
+/* CONFIG_VALUE_DEFAULT at a tier means "explicitly defaulted": resolution
+ * stops here and yields NULL (the consumer uses its own default), shadowing
+ * any value at a lower tier. Checked at every tier — including env, where a
+ * literal HAX_FOO="(default)" reads the same way — so the meaning is uniform. */
+static const char *deflt(const char *v)
+{
+    return (v && strcmp(v, CONFIG_VALUE_DEFAULT) == 0) ? NULL : v;
+}
+
 static const char *resolve(const char *key, int skip_empty)
 {
     const char *o = json_string_value(json_object_get(g_overrides, key));
     if (o && (!skip_empty || *o))
-        return o;
+        return deflt(o);
     const struct config_setting *s = find_setting(key);
     if (s) {
         const char *e = getenv(s->env);
         if (e && (!skip_empty || *e))
-            return e;
+            return deflt(e);
     }
+    const char *sel = state_get(key);
+    if (sel && (!skip_empty || *sel))
+        return deflt(sel);
     const char *f = file_get(key);
     if (f && (!skip_empty || *f))
-        return f;
+        return deflt(f);
     return s ? s->def : NULL;
 }
 
@@ -367,6 +412,34 @@ void config_set_override(const char *key, const char *val)
         json_object_del(g_overrides, key);
 }
 
+struct config_override_state {
+    json_t *overrides; /* deep copy of g_overrides at snapshot time, or NULL */
+};
+
+struct config_override_state *config_override_snapshot(void)
+{
+    struct config_override_state *s = xmalloc(sizeof(*s));
+    s->overrides = g_overrides ? json_deep_copy(g_overrides) : NULL;
+    return s;
+}
+
+void config_override_restore(struct config_override_state *snap)
+{
+    if (!snap)
+        return;
+    json_decref(g_overrides);
+    g_overrides = snap->overrides; /* transfer ownership back to the live tier */
+    free(snap);
+}
+
+void config_override_state_free(struct config_override_state *snap)
+{
+    if (!snap)
+        return;
+    json_decref(snap->overrides);
+    free(snap);
+}
+
 /* Set (or, for val==NULL, delete) the nested leaf at canonical `key`,
  * creating intermediate objects as needed. */
 static void set_nested(json_t *root, const char *key, const char *val)
@@ -442,33 +515,44 @@ static int write_json_atomic(const char *path, json_t *obj)
     return rc;
 }
 
-int config_persist(const char *key, const char *val)
+/* Persist `key` = `val` into the JSON object at `path`, swapping the result
+ * into `*tier`. Consumes `path` (frees it). Mutate a copy and swap it in only
+ * after the write succeeds, so a failed write can't leave the in-memory tier
+ * claiming a value the disk never saw. Shared by the config-file and state
+ * writers. */
+static int persist_tier(json_t **tier, char *path, const char *key, const char *val)
 {
-    /* Mutate a copy and swap it in only after the write succeeds, so a
-     * failed write can't leave the in-memory tier claiming a value the
-     * disk never saw. */
-    json_t *next = g_config ? json_deep_copy(g_config) : json_object();
-    if (!next)
+    if (!path)
         return -1;
+    json_t *next = *tier ? json_deep_copy(*tier) : json_object();
+    if (!next) {
+        free(path);
+        return -1;
+    }
     /* A hand-written flat dotted key ({"openai.base_url": ...}) shadows
-     * the nested path in file_get, so drop it — otherwise it would mask
+     * the nested path in obj_get, so drop it — otherwise it would mask
      * the value persisted below (or survive a deletion). Rewriting the
      * file also normalizes it to nested form as a side effect. */
     json_object_del(next, key);
     set_nested(next, key, val);
 
-    char *path = xdg_hax_config_path("config.json");
-    if (!path) {
-        json_decref(next);
-        return -1;
-    }
     int rc = write_json_atomic(path, next);
     free(path);
     if (rc != 0) {
         json_decref(next);
         return -1;
     }
-    json_decref(g_config);
-    g_config = next;
+    json_decref(*tier);
+    *tier = next;
     return 0;
+}
+
+int config_persist(const char *key, const char *val)
+{
+    return persist_tier(&g_config, xdg_hax_config_path("config.json"), key, val);
+}
+
+int config_persist_state(const char *key, const char *val)
+{
+    return persist_tier(&g_state, xdg_hax_state_path("state.json"), key, val);
 }

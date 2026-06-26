@@ -237,7 +237,12 @@ static void handle_finish_reason(struct openai_events *s, const char *reason)
     if (reason && (strcmp(reason, "length") == 0 || strcmp(reason, "content_filter") == 0)) {
         end_all_tool_calls(s);
         s->terminated = 1;
-        char *msg = xasprintf("response incomplete: %s", reason);
+        /* Append the preset's hint only for "length": it explains a context/
+         * output-cap truncation (the actionable ollama num_ctx case), which
+         * doesn't apply to a content_filter stop. */
+        char *msg = (strcmp(reason, "length") == 0 && s->length_hint)
+                        ? xasprintf("response incomplete: length — %s", s->length_hint)
+                        : xasprintf("response incomplete: %s", reason);
         struct stream_event ev = {
             .kind = EV_ERROR,
             .u.error = {.message = msg, .http_status = 0},

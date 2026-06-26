@@ -41,6 +41,7 @@ sources = files(
     'src/compact.c',
     'src/config.c',
     'src/oneshot.c',
+    'src/select.c',
     'src/session.c',
     'src/session_picker.c',
     'src/slash.c',

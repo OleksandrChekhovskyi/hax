@@ -17,17 +17,28 @@
  *
  * Resolution, highest priority first:
  *
- *   runtime override  →  environment  →  config file  →  registry default
+ *   runtime override  →  environment  →  state  →  config file
+ *                                                →  registry default
  *
  *   - override: set this session via config_set_override (e.g. a /model
- *     slash command); never persisted unless also written via config_persist.
+ *     slash command); never persisted unless also written via config_persist
+ *     or config_persist_state.
  *   - environment: the HAX_* var, verbatim including an empty string, so the
  *     quick `HAX_FOO=bar hax ...` invocation always wins.
+ *   - state: ~/.local/state/hax/state.json — the machine-local,
+ *     *persisted* layer of the override tier (what /provider, /model, /effort
+ *     write). It holds only canonical config keys, sits in the XDG state dir
+ *     (not the config dir) so it stays out of a dotfiles repo, and overrides
+ *     the committed config file while still yielding to an explicit env var
+ *     for a one-off invocation. Same nested/flat key grammar as the config
+ *     file. Genuinely different-shaped state (prompt history, sessions,
+ *     future auth tokens) lives in its own files, not here.
  *   - config file: ~/.config/hax/config.json (the same dir as AGENTS.md /
- *     skills). Nested objects are the friendly form — {"openai": {"base_url":
- *     "..."}} — and a flat dotted key ({"openai.base_url": "..."}) is also
- *     accepted. Plain JSON (jansson parses no comments or trailing commas);
- *     scalar values are read as strings, so 5000 and "5000" are equivalent.
+ *     skills) — the declared, committable defaults. Nested objects are the
+ *     friendly form — {"openai": {"base_url": "..."}} — and a flat dotted key
+ *     ({"openai.base_url": "..."}) is also accepted. Plain JSON (jansson
+ *     parses no comments or trailing commas); scalar values are read as
+ *     strings, so 5000 and "5000" are equivalent.
  *   - registry default: a fixed fallback declared with the setting, so a
  *     shared default lives in exactly one place. Settings whose default is
  *     dynamic (model → the provider's), computed (notify → terminal
@@ -42,6 +53,18 @@
  * the whole run in normal use.
  */
 
+/* Sentinel value meaning "explicitly use the default". When a tier resolves
+ * to this, config_str returns NULL — so the consumer falls to its own (or the
+ * provider's) default — AND resolution stops there: it does NOT fall through
+ * to lower tiers. It's the third state beyond "absent" (fall through to the
+ * next tier) and "a value" (use it verbatim). The runtime selectors write it
+ * for a "use the provider's default" pick (the effort picker's "default" row,
+ * or a provider switch that keeps no model), so the choice shadows a stale
+ * lower-tier value (env/config) instead of letting it resurface under the new
+ * provider. (An env var still wins on a fresh launch, per the order above —
+ * the sentinel sits in the override/state tiers, not above env.) */
+#define CONFIG_VALUE_DEFAULT "(default)"
+
 /* ---- lifecycle ---- */
 
 /* Load the config-file tier from JSON text, replacing any prior file tier.
@@ -49,6 +72,11 @@
  * non-object input (tier left empty). Scalar leaves are normalized to
  * strings. The pure seam config_init() builds on, and what tests drive. */
 int config_load(const char *text);
+
+/* Like config_load, but for the state tier (state.json). Same grammar and
+ * return contract; the pure seam config_init() builds on for the state file,
+ * and what tests drive. */
+int config_load_state(const char *text);
 
 /* Read ~/.config/hax/config.json into the file tier. Absent file is silent
  * (config is optional); a present-but-unusable file (malformed, non-object,
@@ -109,12 +137,31 @@ int config_bool_or(const char *key, int def);
  * /effort, /preset) writes to. */
 void config_set_override(const char *key, const char *val);
 
+/* Snapshot / restore the whole override tier, for trying an operation that may
+ * mutate overrides as a side effect and rolling it back on abort — e.g.
+ * constructing a prospective provider (some set an override during probing)
+ * before the user has committed to the switch. `snapshot` returns an opaque
+ * owned handle; `restore` consumes it, replacing the live override tier (so on
+ * the success path, discard the handle with config_override_state_free instead
+ * of restoring). */
+struct config_override_state;
+struct config_override_state *config_override_snapshot(void);
+void config_override_restore(struct config_override_state *snap);
+void config_override_state_free(struct config_override_state *snap);
+
 /* Persist `key` = `val` into ~/.config/hax/config.json (nested form),
  * preserving the file's other keys; val == NULL removes the key. Atomic
  * (temp + rename, 0600). Updates the in-memory file tier too, so the new
  * value is visible immediately. Returns 0 on success, -1 on I/O failure.
- * The "remember this setting" seam. */
+ * The "remember this setting" seam for the committed config file. */
 int config_persist(const char *key, const char *val);
+
+/* Like config_persist, but writes the machine-local state tier
+ * (~/.local/state/hax/state.json) instead of the committed config file.
+ * The "remember my runtime pick" seam — what /provider, /model, /effort
+ * call so a selection sticks across runs without touching dotfiles-managed
+ * config. Pair with config_set_override for immediate same-session effect. */
+int config_persist_state(const char *key, const char *val);
 
 /* ---- introspection ---- */
 

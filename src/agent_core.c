@@ -78,7 +78,7 @@ const char *resolve_reasoning_effort(const struct provider *p)
     const char *e = config_str("reasoning_effort");
     if (e)
         return *e ? e : NULL;
-    return p->default_reasoning_effort;
+    return p ? p->default_reasoning_effort : NULL;
 }
 
 char *build_system_prompt(const char *model, int raw)
@@ -105,19 +105,27 @@ int agent_session_init(struct agent_session *s, struct provider *p, const struct
 {
     memset(s, 0, sizeof(*s));
 
-    s->model = config_str("model");
-    if (!s->model || !*s->model)
-        s->model = p->default_model;
-    if (!s->model || !*s->model) {
-        hax_err("HAX_MODEL is required for provider '%s' (no default)", p->name ? p->name : "?");
-        return -1;
-    }
+    /* model may resolve empty: a provider with no default (openai, ollama,
+     * …) and nothing configured yet — or no provider at all (`p == NULL`),
+     * when the configured/default one couldn't construct (codex not logged
+     * in, …) and the user will pick another with /provider. That's no longer
+     * fatal — the interactive REPL starts anyway and prompts the user to pick
+     * one with /model or /provider, guarding the stream path until they do.
+     * The one-shot path, which can't prompt, checks for an empty model /
+     * missing provider itself and fails fast there. */
+    const char *model = config_str("model");
+    if ((!model || !*model) && p)
+        model = p->default_model;
+    s->model = model ? xstrdup(model) : NULL;
+    s->provider_name = p ? p->name : NULL;
 
     /* --raw collapses to "no system message + no tools advertised" so the
      * model sees only the user text. HAX_SYSTEM_PROMPT="" remains the
      * narrower opt-out (no system message but tools stay). */
+    s->raw = opts->raw;
     s->sys = build_system_prompt(s->model, opts->raw);
-    s->reasoning_effort = resolve_reasoning_effort(p);
+    const char *effort = resolve_reasoning_effort(p);
+    s->reasoning_effort = effort ? xstrdup(effort) : NULL;
 
     s->n_tools = opts->raw ? 0 : N_TOOLS;
     if (s->n_tools) {
@@ -128,6 +136,30 @@ int agent_session_init(struct agent_session *s, struct provider *p, const struct
     return 0;
 }
 
+int agent_session_reconfigure(struct agent_session *s, struct provider *p)
+{
+    const char *model = config_str("model");
+    if (!model || !*model)
+        model = p->default_model;
+    if (!model || !*model) {
+        hax_err("no model available for provider '%s' (set one with /model)",
+                p->name ? p->name : "?");
+        return -1;
+    }
+    free(s->model);
+    s->model = xstrdup(model);
+    s->provider_name = p->name;
+    /* Rebuild the system prompt so its env block names the new model.
+     * Tools and history are deliberately untouched — a switch keeps the
+     * conversation going under the new settings. */
+    free(s->sys);
+    s->sys = build_system_prompt(s->model, s->raw);
+    const char *effort = resolve_reasoning_effort(p);
+    free(s->reasoning_effort);
+    s->reasoning_effort = effort ? xstrdup(effort) : NULL;
+    return 0;
+}
+
 void agent_session_free(struct agent_session *s)
 {
     for (size_t i = 0; i < s->n_items; i++)
@@ -135,6 +167,8 @@ void agent_session_free(struct agent_session *s)
     free(s->items);
     free(s->tools);
     free(s->sys);
+    free(s->model);
+    free(s->reasoning_effort);
     memset(s, 0, sizeof(*s));
 }
 
@@ -181,6 +215,24 @@ void agent_session_absorb(struct agent_session *s, struct turn *t, size_t *out_b
     for (size_t i = 0; i < n_new; i++) {
         if (new_items[i].kind == ITEM_TOOL_CALL)
             had_tc = 1;
+        /* Stamp reasoning with the provider+model that produced it, so a later
+         * /model or /provider switch (or a resumed mixed-model file) can't
+         * replay its model-bound blob against the wrong backend. Owned by the
+         * item (freed in item_free); the session's borrowed names are valid
+         * here — the producing provider is still live.
+         *
+         * The provider stamp is the display name (s->provider_name = p->name),
+         * which is intentionally the provider's identity: HAX_PROVIDER_NAME (and
+         * config-defined custom providers) name a backend, so it distinguishes
+         * two openai-compatible endpoints that share the "openai-compatible"
+         * factory id. Renaming a backend therefore re-identifies it and older
+         * CoT stops replaying — acceptable, since this is soft reasoning_text
+         * (assistant text + tool history always replay); Codex's model-bound
+         * encrypted blob rides provider "codex", which has no display override. */
+        if (new_items[i].kind == ITEM_REASONING) {
+            new_items[i].provider = s->provider_name ? xstrdup(s->provider_name) : NULL;
+            new_items[i].model = s->model ? xstrdup(s->model) : NULL;
+        }
         items_append(&s->items, &s->n_items, &s->cap_items, new_items[i]);
     }
     free(new_items);

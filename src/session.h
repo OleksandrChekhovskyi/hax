@@ -77,6 +77,17 @@ struct session_log *session_log_resume(const char *path, const char *provider, c
  * its parent directory + header line) on first use. */
 void session_log_append(struct session_log *log, const struct item *items, size_t n_items);
 
+/* Refresh the header provider/model/effort fields (for a runtime /provider,
+ * /model, or /effort switch). Only the header line is updated — per-item
+ * reasoning provenance is stamped on the items themselves — so this matters
+ * only before the header is written (the lazy first append): a session that
+ * starts provider-less, then selects a provider before its first prompt, ends
+ * up with an accurate header instead of "none". After the header is on disk it
+ * is a harmless in-memory update that the next session_log_reset carries into
+ * the rotated file. No-op when `log` is NULL. */
+void session_log_set_meta(struct session_log *log, const char *provider, const char *model,
+                          const char *reasoning_effort);
+
 /* Rotate to a brand-new session id/file (for /new). Closes the current
  * file; the next append lazily materializes the fresh one. */
 void session_log_reset(struct session_log *log);
@@ -97,29 +108,22 @@ const char *session_log_resume_hint(const struct session_log *log);
 
 /* ---------------- loading & listing ---------------- */
 
-/* Load a session file, replaying its items into a fresh malloc'd vector
- * (*out_items / *out_n) and, when out_meta is non-NULL, filling it from
+/* Load a session file, replaying its items verbatim into a fresh malloc'd
+ * vector (*out_items / *out_n) and, when out_meta is non-NULL, filling it from
  * the header.
  *
- * Reasoning is filtered by the model that produced it (each reasoning item
- * is stamped with its origin provider+model; older files fall back to the
- * header). A reasoning item carries two parts: an opaque, model-bound
- * payload (reasoning_json — Codex's encrypted CoT, and the equivalent for
- * any signed/encrypted scheme) and portable plain text (reasoning_text).
- * On load:
- *   - reasoning_text is always kept — it's just text;
- *   - reasoning_json is kept only when (cur_provider, cur_model) matches
- *     the producer, and cleared otherwise (a foreign encrypted/signed blob
- *     would be rejected by the backend);
- *   - the item is dropped only if nothing replayable remains (an
- *     encrypted-only item resumed under a different model).
- * Pass NULL for `cur_provider` to load everything verbatim (no filtering);
- * `cur_model` is consulted only when `cur_provider` is non-NULL.
+ * The load is non-destructive: model-bound reasoning (Codex's encrypted
+ * reasoning_json) is kept along with its origin provider+model stamp (each
+ * reasoning item carries one; older files fall back to the header). Whether a
+ * blob can be replayed for a given request is decided later, by the provider's
+ * build path, which compares the stamp to the current model — so a resumed
+ * file may legitimately mix models, and switching back to a model still finds
+ * its blobs intact.
  *
  * Returns 0 on success, -1 when the file can't be read. Caller frees the
  * items (item_free each, then free the vector) and session_meta_free. */
-int session_load(const char *path, const char *cur_provider, const char *cur_model,
-                 struct item **out_items, size_t *out_n, struct session_meta *out_meta);
+int session_load(const char *path, struct item **out_items, size_t *out_n,
+                 struct session_meta *out_meta);
 
 /* One row for the resume picker. */
 struct session_entry {

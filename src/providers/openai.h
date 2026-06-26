@@ -93,32 +93,85 @@ struct openai_preset {
      * channel. NULL = don't send (real OpenAI exposes no such field).
      * HAX_REASONING_ROUNDTRIP overrides this per-run (off / on / <field>). */
     const char *roundtrip_reasoning_field;
+    /* Reasoning-effort wire values this backend accepts, surfaced by the
+     * provider's list_efforts for the /effort picker. Borrowed (typically
+     * OPENAI_EFFORT_LADDER, a static array) — not copied, so it must outlive
+     * the provider. NULL / 0 means "no categorical effort" (local servers
+     * whose thinking is a token budget): the picker then skips the step. */
+    const char *const *efforts;
+    size_t n_efforts;
+    /* Appended to the "response incomplete: length" error when a stream is
+     * truncated with finish_reason "length", to make a backend-specific
+     * cause actionable. The canonical case is a local server whose context
+     * window is too small for the prompt (ollama's num_ctx default, a small
+     * llama.cpp -c): the generic "length" tells the user nothing they can
+     * act on. Borrowed static string; NULL = no hint (hosted backends, where
+     * "length" means the model's own max-output cap). */
+    const char *length_hint;
+    /* The base URL is fixed to default_base_url: ignore the shared
+     * HAX_OPENAI_BASE_URL override (which belongs to the bring-your-own-URL
+     * presets — openai-compatible, llama.cpp, ollama). Set by openai and
+     * openrouter, whose endpoints aren't configurable, so a base URL left set
+     * for another backend can't redirect them (or block their selection). */
+    int lock_base_url;
 };
+
+/* The shared "OpenAI-style" reasoning-effort ladder, low→high:
+ * none, minimal, low, medium, high, xhigh. OpenAI, OpenRouter, and the
+ * generic compat preset all accept this vocabulary (OpenRouter maps an
+ * unsupported level to the nearest one; real OpenAI may reject a level a
+ * given model doesn't support). Presets point .efforts at this. */
+extern const char *const OPENAI_EFFORT_LADDER[];
+extern const size_t OPENAI_EFFORT_LADDER_N;
 
 /* Build an OpenAI-compatible provider configured by `preset`. NULL preset
  * is equivalent to a zero-initialized one (which will fail unless
  * HAX_OPENAI_BASE_URL is set). Returns NULL on failure. */
 struct provider *openai_provider_new_preset(const struct openai_preset *preset);
 
+/* Shared provider-picker availability helpers (provider_factory.available),
+ * so each openai-family shim's check is a one-liner. Both set *reason (a
+ * static string) and return 0 when unavailable, 1 when usable.
+ *
+ *   openai_key_available    — usable iff HAX_OPENAI_API_KEY or `api_key_env`
+ *     (when non-NULL) holds a non-empty key. For hosted backends.
+ *   openai_base_url_reachable — bounded GET <base_url>/models with a short
+ *     timeout; usable iff it 2xx's. For local-server shims (llama.cpp,
+ *     ollama) whose availability is "is the server up". May block briefly,
+ *     so the picker runs it on a worker thread. */
+int openai_key_available(const char *api_key_env, const char **reason);
+int openai_base_url_reachable(const char *base_url, const char *api_key, const char **reason);
+
 /* Hand off ownership of a background probe to an openai-derived provider.
  * The handle is joined (with cancel first) by openai_destroy, which fits
  * preset shims like openrouter/llamacpp that spawn a context-window
  * probe but don't carry their own provider struct or destroy(). NULL
  * `probe` is a no-op (e.g. when probe_context_limit_spawn returned NULL
- * because pthread_create failed). Calling twice replaces the previous
- * handle without joining it — there's only one slot today; any provider
- * that needs to track several would carry its own struct instead of
+ * because pthread_create failed). There's one slot; before re-attaching
+ * (a /model re-probe) the caller settles the old handle via
+ * openai_context_probe_reset, so attach itself stays a plain setter. A
+ * provider needing several probes would carry its own struct instead of
  * piggybacking on this. */
 struct bg_job;
 void openai_attach_probe(struct provider *p, struct bg_job *probe);
 
+/* Cancel and join any in-flight context probe and reset context_limit to
+ * unknown (0), readying an openai-derived provider for a fresh probe after
+ * a runtime /model switch. Pairs with a follow-up openai_attach_probe.
+ * Used by the model-keyed shims (openrouter) in their refresh_context. */
+void openai_context_probe_reset(struct provider *p);
+
 /* Translate flat conversation items into the Chat Completions `messages`
  * array. Exposed (rather than static) so the round-trip serialization —
  * notably reasoning_content attachment — can be unit-tested without an HTTP
- * round-trip. `reasoning_field` NULL means don't emit reasoning. Returns a
- * new jansson array the caller must json_decref. */
+ * round-trip. `reasoning_field` NULL means don't emit reasoning. When it is
+ * set, a reasoning item's text is replayed only if its provenance stamp
+ * matches `cur_provider`/`cur_model` (both must be non-NULL and equal), so a
+ * mid-conversation provider or model switch never feeds stale CoT to the new
+ * backend. Returns a new jansson array the caller must json_decref. */
 json_t *openai_build_messages(const char *system_prompt, const struct item *items, size_t n,
-                              const char *reasoning_field);
+                              const char *reasoning_field, const char *cur_provider,
+                              const char *cur_model);
 
 extern const struct provider_factory PROVIDER_OPENAI;
 

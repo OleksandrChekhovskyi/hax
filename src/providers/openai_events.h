@@ -56,6 +56,11 @@ struct openai_events {
      * and most compat backends never send the field, but a stray match
      * would still parse, so keep emission opt-in. */
     int emit_progress;
+
+    /* Borrowed (preset-owned, static) hint appended to the "length"
+     * truncation error to make a backend-specific cause actionable — e.g.
+     * ollama's num_ctx default being too small for the prompt. NULL = none. */
+    const char *length_hint;
 };
 
 void openai_events_init(struct openai_events *s, stream_cb cb, void *user);

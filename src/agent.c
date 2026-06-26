@@ -662,13 +662,116 @@ static void show_transcript_cb(void *user)
 void agent_print_banner(const struct provider *p, const struct agent_session *s)
 {
     const char *bar = ANSI_CYAN "▌" ANSI_FG_DEFAULT;
-    if (s->reasoning_effort)
+    if (!p) {
+        /* No provider could be constructed (the configured/default one isn't
+         * usable — e.g. codex not logged in). The REPL still starts; point
+         * the user at /provider to choose a working one. */
+        printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM
+               "› no provider — use /provider" ANSI_BOLD_OFF "\n",
+               bar);
+        printf("%s " ANSI_DIM "ctrl-d quit · try /help" ANSI_BOLD_OFF "\n", bar);
+        return;
+    }
+    const char *name = p->name ? p->name : "?";
+    if (!s->model || !*s->model)
+        /* No model resolved (a provider with no default, nothing configured
+         * yet). The REPL still starts; point the user at /model. */
+        printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM
+               "› %s · no model — use /model" ANSI_BOLD_OFF "\n",
+               bar, name);
+    else if (s->reasoning_effort)
         printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s · %s" ANSI_BOLD_OFF "\n",
-               bar, p->name ? p->name : "?", s->model, s->reasoning_effort);
+               bar, name, s->model, s->reasoning_effort);
     else
         printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s" ANSI_BOLD_OFF "\n", bar,
-               p->name ? p->name : "?", s->model);
+               name, s->model);
     printf("%s " ANSI_DIM "ctrl-d quit · try /help" ANSI_BOLD_OFF "\n", bar);
+}
+
+/* Provider name for session-log / -load metadata, tolerating a not-yet-
+ * selected provider (interactive startup when the configured one couldn't
+ * construct — the user picks one with /provider). */
+static const char *provider_log_name(const struct provider *p)
+{
+    return p && p->name ? p->name : "none";
+}
+
+void agent_set_provider(struct agent_state *st, struct provider *newp)
+{
+    struct provider *old = (struct provider *)st->provider;
+    st->provider = newp;
+    /* Destroy after the swap so the picker/selection code never observes a
+     * half-replaced state; destroy() joins the old provider's bg probes. */
+    if (old)
+        old->destroy(old);
+}
+
+int agent_apply_settings(struct agent_state *st)
+{
+    struct agent_session *s = st->sess;
+    struct provider *p = (struct provider *)st->provider;
+    /* Snapshot the model before reconfigure overwrites it, to tell a real
+     * /model change from a /provider or /effort apply that left it the same. */
+    char *prev_model = s->model ? xstrdup(s->model) : NULL;
+    if (agent_session_reconfigure(s, p) != 0) {
+        free(prev_model);
+        return -1;
+    }
+
+    /* A model switch can change the context window (codex/openrouter key it by
+     * model), so ask the provider to re-probe for the new model — but only when
+     * the model actually changed, so a bare /effort tweak doesn't trigger a
+     * needless network probe (and the cancel/join of the in-flight one).
+     * reconfigure already resolved s->model from the committed "model" override;
+     * providers without a model-specific probe leave the hook NULL. On a
+     * /provider switch the new provider's construction probe ran before the
+     * model was committed, so the slug it used could be stale: when the model
+     * differs we re-probe and correct it here; when it's identical that probe
+     * already used the right slug, so skipping is correct too. */
+    int model_changed = (prev_model == NULL) != (s->model == NULL) ||
+                        (prev_model && s->model && strcmp(prev_model, s->model) != 0);
+    free(prev_model);
+    if (model_changed && p && p->refresh_context)
+        p->refresh_context(p, s->model);
+
+    /* reconfigure rebuilt sess->sys (its env block names the new model), so
+     * re-key the HAX_TRANSCRIPT mirror to it: rewrite the header and replay
+     * history (like /new, but keeping the conversation) so the file keeps
+     * matching the Ctrl-T view instead of claiming later turns used the old
+     * system prompt. No-op when HAX_TRANSCRIPT is unset. (The session log's
+     * per-item reasoning stamp tracks the switch on its own — items carry
+     * their own provider+model now.) */
+    transcript_log_reset(st->tlog, s->sys, s->tools, s->n_tools);
+    transcript_log_append(st->tlog, s->items, s->n_items);
+
+    /* Keep the session-log header in step with the live settings. The header
+     * is written lazily on the first append, so a session that starts
+     * provider-less (or with a stale startup model) and is reconfigured before
+     * its first prompt records the provider/model the user actually used,
+     * rather than the startup placeholder. After the header is on disk this is
+     * a no-op for the current file; the next /new carries the values forward.
+     * (Per-item reasoning blobs carry their own provider+model stamp, so a
+     * mid-session switch stays correct independent of this header.) */
+    session_log_set_meta(st->slog, provider_log_name(p), s->model, s->reasoning_effort);
+
+    /* A dim "[switched to …]" line confirms the change on screen. It is a
+     * UI hint only — deliberately NOT appended to s->items or the logs: the
+     * model can't act on a settings change, so injecting it into the
+     * conversation would just be context noise (and skew the transcript /
+     * --resume view away from what the model actually saw). */
+    char *label = s->reasoning_effort
+                      ? xasprintf("switched to %s · %s · %s", p->name ? p->name : "?", s->model,
+                                  s->reasoning_effort)
+                      : xasprintf("switched to %s · %s", p->name ? p->name : "?", s->model);
+
+    render_open_block(st->r);
+    disp_raw(ANSI_DIM);
+    disp_printf(&st->r->disp, "%s", label);
+    disp_raw(ANSI_RESET);
+    disp_putc(&st->r->disp, '\n');
+    fflush(stdout);
+    free(label);
+    return 0;
 }
 
 void agent_new_conversation(struct agent_state *st)
@@ -880,7 +983,7 @@ void agent_resume_session(struct agent_state *st, const char *path)
     struct agent_session *s = st->sess;
     struct item *loaded = NULL;
     size_t nl = 0;
-    if (session_load(path, st->provider->name, s->model, &loaded, &nl, NULL) != 0 || nl == 0) {
+    if (session_load(path, &loaded, &nl, NULL) != 0 || nl == 0) {
         free(loaded);
         ui_error("could not read session");
         /* The error line is now the last thing printed, on its own fresh
@@ -903,7 +1006,8 @@ void agent_resume_session(struct agent_state *st, const char *path)
      * transcript mirror to the restored history (reset writes the header,
      * the append replays the items). */
     session_log_close(st->slog);
-    st->slog = session_log_resume(path, st->provider->name, s->model, s->reasoning_effort, nl);
+    st->slog = session_log_resume(path, provider_log_name(st->provider), s->model,
+                                  s->reasoning_effort, nl);
     transcript_log_reset(st->tlog, s->sys, s->tools, s->n_tools);
     transcript_log_append(st->tlog, s->items, s->n_items);
 
@@ -953,6 +1057,25 @@ int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
     struct provider *p = (struct provider *)st->provider;
     struct render_ctx *r = st->r;
 
+    if (!p) {
+        /* No provider to summarize with. Only reachable via a manual
+         * /compact before one is picked (auto-compaction needs a streamed
+         * turn, which the stream guard already blocks without a provider). */
+        if (!is_auto)
+            compact_notice(r, "no provider selected — use /provider");
+        return 0;
+    }
+    if (!s->model || !*s->model) {
+        /* Provider live but no model resolved (started against one with no
+         * default and nothing configured). Compaction streams with s->model,
+         * so guard it just like the main stream path — reachable via manual
+         * /compact on a resumed session whose history is non-empty. Auto
+         * never gets here: it follows a streamed turn the no-model stream
+         * guard already blocks. */
+        if (!is_auto)
+            compact_notice(r, "no model selected — use /model (or /provider)");
+        return 0;
+    }
     if (s->n_items == 0) {
         if (!is_auto)
             compact_notice(r, "nothing to compact");
@@ -1013,8 +1136,14 @@ int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
     return 1;
 }
 
-int agent_run(struct provider *p, const struct hax_opts *opts)
+int agent_run(struct provider **provider, const struct hax_opts *opts)
 {
+    /* `p` is the live provider: it starts as the caller's and is replaced
+     * in place by a runtime /provider switch (slash handler swaps
+     * state.provider; we resync `p` from it after each dispatch). The final
+     * value is written back to *provider so the caller destroys whatever is
+     * live at exit. */
+    struct provider *p = *provider;
     struct agent_session sess;
     if (agent_session_init(&sess, p, opts) < 0)
         return 1;
@@ -1029,7 +1158,7 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
     if (opts->resume_path) {
         struct item *loaded = NULL;
         size_t nl = 0;
-        if (session_load(opts->resume_path, p->name, sess.model, &loaded, &nl, NULL) != 0) {
+        if (session_load(opts->resume_path, &loaded, &nl, NULL) != 0) {
             hax_err("could not resume session '%s'", opts->resume_path);
             agent_session_free(&sess);
             return 1;
@@ -1085,9 +1214,10 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
      * the restored items aren't re-written); otherwise a fresh file is
      * begun. NULL when persistence is disabled — all entry points are
      * NULL-safe. */
-    state.slog = opts->resume_path ? session_log_resume(opts->resume_path, p->name, sess.model,
-                                                        sess.reasoning_effort, n_resumed)
-                                   : session_log_open(p->name, sess.model, sess.reasoning_effort);
+    state.slog = opts->resume_path
+                     ? session_log_resume(opts->resume_path, provider_log_name(p), sess.model,
+                                          sess.reasoning_effort, n_resumed)
+                     : session_log_open(provider_log_name(p), sess.model, sess.reasoning_effort);
     /* Mirror restored history into the HAX_TRANSCRIPT log — its header
      * was just written by _open; the items follow so the mirror matches
      * the live conversation. */
@@ -1137,12 +1267,44 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
         r.disp.trail = 1;
         struct slash_ctx sctx = {.state = &state};
         if (slash_dispatch(line, &sctx) != SLASH_NOT_A_COMMAND) {
+            /* A /provider switch swaps state.provider (destroying the old
+             * one); resync the local so the next turn streams against the
+             * new provider and its context-limit / usage reads track it. */
+            p = (struct provider *)state.provider;
             input_history_add_session(input, line);
             free(line);
             continue;
         }
 
         input_history_add(input, line);
+
+        /* No provider yet (the configured/default one couldn't construct, so
+         * the REPL started without one): we can't stream. Checked before the
+         * model guard because HAX_MODEL may be set even when the provider is
+         * absent. Keep the prompt recallable and point at /provider. */
+        if (!p) {
+            /* Same leading blank-line gap a model turn or slash note gets:
+             * emit it through disp (trail is 1 here — one newline below the
+             * echoed prompt) so the note doesn't butt against the input, then
+             * reset trail to model the fresh line ui_note's own newline left. */
+            disp_block_separator(&r.disp);
+            ui_note("no provider selected — use /provider to choose one, then resend");
+            r.disp.trail = 1;
+            free(line);
+            continue;
+        }
+
+        /* No model yet (started against a provider with no default and
+         * nothing configured): we can't stream. Keep the prompt in the
+         * editor history so the user can recall it after picking, and point
+         * them at the runtime selectors rather than failing the launch. */
+        if (!sess.model || !*sess.model) {
+            disp_block_separator(&r.disp); /* leading gap, as above */
+            ui_note("no model selected — use /model (or /provider) to choose one, then resend");
+            r.disp.trail = 1;
+            free(line);
+            continue;
+        }
 
         /* Mark the turn boundary just before the user message, not just
          * before the model request that consumes it. The transcript
@@ -1432,6 +1594,11 @@ int agent_run(struct provider *p, const struct hax_opts *opts)
     const char *hint = session_log_resume_hint(state.slog);
     if (hint)
         ui_note("resume with: hax --resume=%s", hint);
+
+    /* Hand the live provider back so the caller destroys the one that's
+     * current at exit, not the one it passed in (a /provider switch may
+     * have replaced it). */
+    *provider = p;
 
     spinner_free(r.spinner);
     input_free(input);

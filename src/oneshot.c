@@ -103,6 +103,13 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
     struct agent_session sess;
     if (agent_session_init(&sess, p, opts) < 0)
         return 1;
+    /* No interactive picker in -p mode, so a missing model is fatal here
+     * (agent_session_init now tolerates it for the REPL's sake). */
+    if (!sess.model || !*sess.model) {
+        hax_err("HAX_MODEL is required for provider '%s' (no default)", p->name ? p->name : "?");
+        agent_session_free(&sess);
+        return 1;
+    }
 
     /* Resume: seed history from a prior session before the new prompt is
      * added, so -p can continue a conversation. An unreadable file is fatal
@@ -112,7 +119,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
     if (opts->resume_path) {
         struct item *loaded = NULL;
         size_t nl = 0;
-        if (session_load(opts->resume_path, p->name, sess.model, &loaded, &nl, NULL) != 0) {
+        if (session_load(opts->resume_path, &loaded, &nl, NULL) != 0) {
             hax_err("could not resume session '%s'", opts->resume_path);
             agent_session_free(&sess);
             return 1;

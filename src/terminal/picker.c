@@ -332,6 +332,36 @@ static void render_row(struct buf *out, const struct picker_state *s, size_t fi,
     if (budget < 1)
         budget = 1;
 
+    if (it->disabled) {
+        /* Dim, unselectable: no marker arrow and no highlight even if the
+         * cursor is parked here (only possible when every row is disabled).
+         * The detail column carries the reason. One DIM .. BOLD_OFF spans
+         * the whole row so nothing inside re-brightens it. */
+        buf_append_str(out, ANSI_DIM "  ");
+        struct buf det;
+        buf_init(&det);
+        int det_w = 0;
+        const char *reason = (it->detail && it->detail[0]) ? it->detail : NULL;
+        if (reason) {
+            int maxd = budget / 2;
+            if (maxd < 1)
+                maxd = 1;
+            append_clip(&det, reason, maxd, &det_w, utf8);
+        }
+        int lab_budget = budget - (det_w ? det_w + 2 : 0);
+        if (lab_budget < 1)
+            lab_budget = 1;
+        int lab_used = 0;
+        append_clip(out, it->label ? it->label : "", lab_budget, &lab_used, utf8);
+        if (det_w) {
+            buf_append_str(out, "  ");
+            buf_append(out, det.data ? det.data : "", det.len);
+        }
+        buf_free(&det);
+        buf_append_str(out, ANSI_BOLD_OFF);
+        return;
+    }
+
     if (selected)
         buf_append_str(out, ANSI_BRIGHT_MAGENTA);
     buf_append_str(out, selected ? (utf8 ? "\xe2\x86\x92 " : "> ") : "  "); /* → */
@@ -451,6 +481,12 @@ static void paint(struct picker_state *s)
 
 /* ---------------- selection / filter state ---------------- */
 
+/* Is the filtered row at offset `fi` selectable (not a disabled item)? */
+static int row_enabled(const struct picker_state *s, size_t fi)
+{
+    return !s->opts->items[s->filtered[fi]].disabled;
+}
+
 static void clamp_scroll(struct picker_state *s)
 {
     if (s->n_filtered == 0) {
@@ -471,6 +507,31 @@ static void clamp_scroll(struct picker_state *s)
         s->top = s->n_filtered - (size_t)s->viewport;
 }
 
+/* Snap the selection onto an enabled row if it currently sits on a disabled
+ * one: search forward from the current offset, then backward. Leaves the
+ * selection put only when every filtered row is disabled (then Enter is a
+ * no-op). Keeps the cursor off unselectable rows after a filter change or a
+ * jump. */
+static void ensure_enabled_sel(struct picker_state *s)
+{
+    if (s->n_filtered == 0 || row_enabled(s, s->sel))
+        return;
+    for (size_t i = s->sel; i < s->n_filtered; i++) {
+        if (row_enabled(s, i)) {
+            s->sel = i;
+            clamp_scroll(s);
+            return;
+        }
+    }
+    for (size_t i = s->sel; i-- > 0;) {
+        if (row_enabled(s, i)) {
+            s->sel = i;
+            clamp_scroll(s);
+            return;
+        }
+    }
+}
+
 static void recompute(struct picker_state *s)
 {
     const char *q = s->query.len ? s->query.data : "";
@@ -480,20 +541,32 @@ static void recompute(struct picker_state *s)
             s->filtered[s->n_filtered++] = i;
     }
     clamp_scroll(s);
+    ensure_enabled_sel(s);
 }
 
 static void move_sel(struct picker_state *s, int delta)
 {
     if (s->n_filtered == 0)
         return;
-    if (delta < 0) {
-        if (s->sel > 0)
-            s->sel--;
-    } else {
-        if (s->sel + 1 < s->n_filtered)
-            s->sel++;
+    /* Step in `delta`'s direction to the next enabled row, skipping any
+     * disabled ones. Stay put if there's no enabled row that way. */
+    size_t cur = s->sel;
+    for (;;) {
+        if (delta < 0) {
+            if (cur == 0)
+                return;
+            cur--;
+        } else {
+            if (cur + 1 >= s->n_filtered)
+                return;
+            cur++;
+        }
+        if (row_enabled(s, cur)) {
+            s->sel = cur;
+            clamp_scroll(s);
+            return;
+        }
     }
-    clamp_scroll(s);
 }
 
 /* ---------------- public entry ---------------- */
@@ -551,7 +624,9 @@ long picker_run(const struct picker_opts *opts)
         if (c == 0x03 || c == 0x07) /* Ctrl-C / Ctrl-G — cancel */
             break;
         if (c == 0x0d || c == 0x0a) { /* Enter / LF — accept */
-            if (s.n_filtered) {
+            /* Only an enabled row is acceptable; a disabled highlight
+             * (all rows disabled) does nothing. */
+            if (s.n_filtered && row_enabled(&s, s.sel)) {
                 result = (long)s.filtered[s.sel];
                 done = 1;
             }
@@ -582,9 +657,11 @@ long picker_run(const struct picker_opts *opts)
             else if (a == INPUT_ACTION_LINE_START) {
                 s.sel = 0;
                 clamp_scroll(&s);
+                ensure_enabled_sel(&s); /* first enabled at/after the top */
             } else if (a == INPUT_ACTION_LINE_END) {
                 s.sel = s.n_filtered ? s.n_filtered - 1 : 0;
                 clamp_scroll(&s);
+                ensure_enabled_sel(&s); /* last enabled at/before the bottom */
             }
             /* Any other sequence (unknown key, page motions we don't map)
              * is ignored — never an accidental cancel. */

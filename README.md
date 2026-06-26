@@ -89,9 +89,10 @@ Locked to `https://api.openai.com/v1`. Reads `HAX_OPENAI_API_KEY` (preferred) or
 HAX_PROVIDER=openai HAX_MODEL=gpt-5.5 ./build/hax
 ```
 
-`HAX_OPENAI_BASE_URL` is rejected here on purpose — for custom endpoints, use
-`openai-compatible` (which keeps `OPENAI_API_KEY` and `prompt_cache_key` scoped to real
-OpenAI so they don't leak to a third-party server).
+`HAX_OPENAI_BASE_URL` is ignored here — the endpoint is fixed, so a base URL left set for
+another backend can't redirect it (or block selecting `openai` in `/provider`). For a custom
+endpoint, use `openai-compatible`, which keeps `OPENAI_API_KEY` and `prompt_cache_key` scoped
+to real OpenAI so they don't leak to a third-party server.
 
 ### OpenAI-compatible (vLLM, LM Studio, oMLX, custom proxies)
 
@@ -110,20 +111,29 @@ HAX_MODEL=Qwen3.6-35B-A3B-8bit \
 
 Convenience preset for a local `llama-server`. Defaults to `http://127.0.0.1:8080/v1`; set
 `HAX_LLAMACPP_PORT` for a different port, or `HAX_OPENAI_BASE_URL` to override the URL
-entirely. Auto-discovers the loaded model (`/v1/models`) and context window (`/props`), so
-`HAX_MODEL` is filled for you when unset and the per-user-turn `%`-of-context display lights up
-without manual configuration:
+entirely. Auto-discovers the served model (`/v1/models`) and context window (`/props`), so the
+model is filled for you and the per-user-turn `%`-of-context display lights up without manual
+configuration:
 
 ```sh
 HAX_PROVIDER=llama.cpp HAX_LLAMACPP_PORT=9090 ./build/hax
 ```
 
-If the server is unreachable and `HAX_MODEL` is unset, hax fails fast with the URL it tried
-and the override knobs. If `HAX_MODEL` is set, the model probe is skipped entirely. The
-`/props` probe runs in the background, so a slow or missing endpoint never delays the first
-prompt — failure just leaves the context-percent display hidden. If llama-server is started
-with `--api-key`, set `HAX_OPENAI_API_KEY` to the matching token — it's forwarded to the
-discovery probes too, not just the streaming request.
+The served model is treated as live server state, not a stored preference: at startup hax
+reconciles against `/v1/models`, keeping a configured/remembered model only if the server is
+actually serving it and otherwise adopting what it serves. This keeps the banner accurate
+across server restarts with a different model, and works whether `llama-server` runs in
+single-model mode or its experimental router mode (launched with no model, serving several on
+demand). When only one model is served, `/model` skips the picker and just uses it; in router
+mode it lists the several to choose from.
+
+If the server is unreachable and no model is configured, hax fails fast with the URL it tried
+and the override knobs; an explicitly set `HAX_MODEL` is trusted in that case so the real
+connection error surfaces at the first prompt instead. The `/props` probe runs in the
+background, so a slow or missing endpoint never delays the first prompt — failure just leaves
+the context-percent display hidden. If llama-server is started with `--api-key`, set
+`HAX_OPENAI_API_KEY` to the matching token — it's forwarded to the discovery probes too, not
+just the streaming request.
 
 ### ollama
 
@@ -132,21 +142,26 @@ set `HAX_OLLAMA_PORT` for a different port, or `HAX_OPENAI_BASE_URL` to override
 entirely. `HAX_MODEL` is required — ollama's chat endpoint rejects requests without one,
 and no signal it exposes reliably picks the right model (`/api/ps` decays after
 `OLLAMA_KEEP_ALIVE`, `/v1/models` is just the pulled-model catalog), so hax asks once
-rather than guess. In the background, hax probes `/api/show` for the model's training
-context window (`model_info["<arch>.context_length"]`) so the per-user-turn
-`%`-of-context display lights up without manual configuration:
+rather than guess.
 
 ```sh
 HAX_PROVIDER=ollama HAX_MODEL=qwen3:8b ./build/hax
 HAX_PROVIDER=ollama HAX_OLLAMA_PORT=11500 HAX_MODEL=qwen3:8b ./build/hax
 ```
 
-Run `ollama list` to see what's installed locally. The `/api/show` probe runs in the
-background, so a slow response never delays the first prompt — failure just leaves the
-context-percent display hidden. The reported context is the model's training maximum
-from gguf metadata; if your ollama daemon is configured with a smaller
-`OLLAMA_CONTEXT_LENGTH` (or you pass `num_ctx` per call), set `HAX_CONTEXT_LIMIT` to
-match so the percentage stays accurate.
+Run `ollama list` to see what's installed locally. Unlike llama.cpp, the `%`-of-context
+display is **not** auto-detected for ollama: the only context value it exposes before a model
+is loaded (`/api/show`) is the model's *training* maximum, not the runtime window — that's
+`OLLAMA_CONTEXT_LENGTH` (default 4096), readable only from `/api/ps` once the first request
+has loaded the model. Probing the training maximum would badly over-state headroom and mask
+truncation, so hax doesn't; set `HAX_CONTEXT_LIMIT` to your `OLLAMA_CONTEXT_LENGTH` if you
+want the display.
+
+That default of **4096** is small — hax's system prompt plus tool schemas nearly fill it on
+their own, so against a default daemon the first reply often truncates to `length` after a
+word or two. ollama's OpenAI endpoint ignores a per-request `num_ctx`, so the only fix is a
+larger server-side context: restart `ollama serve` with `OLLAMA_CONTEXT_LENGTH=16384` (or
+raise `num_ctx` on the model). hax says as much in the error when it hits this.
 
 ### OpenRouter
 
@@ -196,10 +211,13 @@ Pair with `scripts/stream_demo.py` (`short`, `long`, `slow`, `burst`, `ansi`, `b
 ## Configuration
 
 Every setting can be supplied two ways: an `HAX_*` environment variable, or
-`~/.config/hax/config.json` (the same directory as `AGENTS.md`). Precedence is **environment >
-config file > built-in default**, so a quick `HAX_MODEL=… hax …` still wins over whatever the
-file says, and the file is entirely optional — with no file, hax behaves exactly as it always
-has.
+`~/.config/hax/config.json` (the same directory as `AGENTS.md`). Runtime picks made from the
+REPL (`/provider`, `/model`, `/effort` — see below) persist to a third, machine-local file,
+`~/.local/state/hax/state.json`, so the committable `config.json` can live in a dotfiles repo
+while your last-used selection stays separate. Precedence is **environment > selection state
+(`state.json`) > config file > built-in default**, so a quick `HAX_MODEL=… hax …` still wins
+over both, and everything but the env var is optional — with no files, hax behaves exactly as
+it always has.
 
 Each `HAX_FOO_BAR` variable maps to a canonical config key, lowercased and grouped by
 provider/area: `HAX_MODEL` → `model`, `HAX_OPENAI_BASE_URL` → `openai.base_url`,
@@ -218,6 +236,27 @@ reads as the setting's default — a typo never silently flips a switch:
   "openai": { "base_url": "http://127.0.0.1:8000/v1" }
 }
 ```
+
+Provider, model, and reasoning effort can also be changed mid-session from the REPL, without
+restarting: `/provider` lists every selectable backend (unconfigured or unreachable ones
+shown dimmed, with the reason) and, once you pick one, walks you through `/model` then
+`/effort`; `/model` and `/effort` enter that chain partway. Models are auto-discovered from
+the provider where it exposes a catalog, and the effort levels are the ones that provider
+actually accepts. Each pick takes effect on the next turn and is written to `state.json`, so
+it sticks across runs (while an explicit `HAX_*` env var still wins for a one-off
+invocation). Picking a model or effort also pins the current provider, so a setup built on an
+auto-selected provider (see below) sticks as a whole rather than reverting next launch.
+
+Because of this, a provider that can't start no longer aborts the interactive REPL. If you
+explicitly chose it (codex not logged in, a missing API key, a local server that's down), the
+REPL opens on a `no provider — use /provider` banner with the reason above it. If nothing is
+configured, hax instead auto-selects the first available backend on startup, in priority order
+— the built-in default (codex), then a configured generic `openai-compatible` endpoint, then
+local servers (`llama.cpp`, `ollama`), then cloud-key backends — and only falls back to the
+`no provider` banner when none is available (the startup banner shows which was picked). That
+ordering is also why a configured `HAX_OPENAI_BASE_URL` auto-starts `openai-compatible` rather
+than `llama.cpp`/`ollama`, which honor the same override but rank lower. The one-shot `-p` path
+still fails fast on a provider that can't start, since it can't prompt for an alternative.
 
 The variables below are the full list of settings; each maps to a config key by the rule
 above.
@@ -251,8 +290,9 @@ above.
 ### OpenAI-family auth and routing (openai, openai-compatible, llama.cpp, ollama, openrouter)
 
 - `HAX_OPENAI_BASE_URL` — required for `openai-compatible`; overrides the default for
-  `llama.cpp` and `ollama`; rejected by `openai` and `openrouter` (both locked to their
-  real hosts so their default API-key fallbacks can't leak to an unrelated endpoint)
+  `llama.cpp` and `ollama`; ignored by `openai` and `openrouter` (both fixed to their
+  real hosts so their default API-key fallbacks can't leak to an unrelated endpoint, and
+  a value left set for another backend can't redirect or disable them)
 - `HAX_OPENAI_API_KEY` — preferred Bearer token across all OpenAI-family presets. Each
   preset also picks up its conventional global as a fallback: `OPENAI_API_KEY` for `openai`,
   `OPENROUTER_API_KEY` for `openrouter`. `openai-compatible` deliberately has no global

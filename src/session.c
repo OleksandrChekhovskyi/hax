@@ -92,6 +92,9 @@ json_t *item_to_json(const struct item *it)
     set_str(o, "output", it->output);
     set_str(o, "reasoning_json", it->reasoning_json);
     set_str(o, "reasoning_text", it->reasoning_text);
+    /* Provenance stamp for reasoning items (NULL elsewhere → omitted). */
+    set_str(o, "provider", it->provider);
+    set_str(o, "model", it->model);
     return o;
 }
 
@@ -117,6 +120,8 @@ int item_from_json(const json_t *obj, struct item *out)
     out->output = dup_field(obj, "output");
     out->reasoning_json = dup_field(obj, "reasoning_json");
     out->reasoning_text = dup_field(obj, "reasoning_text");
+    out->provider = dup_field(obj, "provider");
+    out->model = dup_field(obj, "model");
     return 0;
 }
 
@@ -431,17 +436,10 @@ void session_log_append(struct session_log *log, const struct item *items, size_
         log->header_written = 1;
     }
     for (size_t i = log->n_written; i < n_items; i++) {
+        /* item_to_json carries each reasoning item's own provider+model stamp
+         * (set when it entered history), so a file that mixes models under one
+         * header still records which produced each blob. */
         json_t *o = item_to_json(&items[i]);
-        /* Stamp reasoning with the model that produced it (this run's
-         * provider+model). The opaque half (reasoning_json) is bound to
-         * that exact model — an encrypted/signed CoT blob is rejected by
-         * any other backend — so a later resume under a different model
-         * can clear just the opaque half while keeping the portable text,
-         * even though a resumed file mixes models under one header. */
-        if (items[i].kind == ITEM_REASONING) {
-            set_str(o, "provider", log->provider);
-            set_str(o, "model", log->model);
-        }
         char *s = json_dumps(o, JSON_COMPACT);
         if (s) {
             fputs(s, log->fp);
@@ -451,6 +449,24 @@ void session_log_append(struct session_log *log, const struct item *items, size_
         json_decref(o);
     }
     log->n_written = n_items;
+}
+
+void session_log_set_meta(struct session_log *log, const char *provider, const char *model,
+                          const char *reasoning_effort)
+{
+    if (!log)
+        return;
+    /* Only meaningful before the header is flushed; once written we can't
+     * rewrite that line, and a mid-session switch is already captured by the
+     * per-item reasoning stamps. Still refresh the in-memory fields so a later
+     * session_log_reset (a /new after the switch) carries the current values
+     * into the fresh file's header. */
+    free(log->provider);
+    log->provider = provider ? xstrdup(provider) : NULL;
+    free(log->model);
+    log->model = model ? xstrdup(model) : NULL;
+    free(log->reasoning_effort);
+    log->reasoning_effort = reasoning_effort ? xstrdup(reasoning_effort) : NULL;
 }
 
 void session_log_reset(struct session_log *log)
@@ -514,8 +530,8 @@ static void push_item(struct item **items, size_t *n, size_t *cap, struct item i
     (*items)[(*n)++] = it;
 }
 
-int session_load(const char *path, const char *cur_provider, const char *cur_model,
-                 struct item **out_items, size_t *out_n, struct session_meta *out_meta)
+int session_load(const char *path, struct item **out_items, size_t *out_n,
+                 struct session_meta *out_meta)
 {
     size_t len;
     char *data = slurp_file(path, &len);
@@ -561,29 +577,18 @@ int session_load(const char *path, const char *cur_provider, const char *cur_mod
 
         struct item it;
         if (item_from_json(o, &it) == 0) {
-            /* The opaque half of reasoning (reasoning_json) round-trips
-             * only to the exact model that produced it; clear it on a
-             * model switch but keep the portable text. Drop the item only
-             * if nothing replayable is left (an encrypted-only blob under
-             * a different model). cur_provider == NULL means "load
-             * verbatim" (diagnostics / full restore). */
-            if (it.kind == ITEM_REASONING && cur_provider && it.reasoning_json) {
-                const char *ip = json_string_value(json_object_get(o, "provider"));
-                const char *im = json_string_value(json_object_get(o, "model"));
-                const char *prov = ip ? ip : hdr_provider;
-                const char *mdl = im ? im : hdr_model;
-                int same_model = cur_model && prov && mdl && strcmp(prov, cur_provider) == 0 &&
-                                 strcmp(mdl, cur_model) == 0;
-                if (!same_model) {
-                    free(it.reasoning_json);
-                    it.reasoning_json = NULL;
-                }
+            /* Ensure every reasoning item carries a provenance stamp so the
+             * build path can decide replay: per-item fields win; older records
+             * that predate stamping inherit the header's provider+model. The
+             * blob itself is kept verbatim — filtering happens at build time,
+             * not here. */
+            if (it.kind == ITEM_REASONING) {
+                if (!it.provider && hdr_provider)
+                    it.provider = xstrdup(hdr_provider);
+                if (!it.model && hdr_model)
+                    it.model = xstrdup(hdr_model);
             }
-            if (it.kind == ITEM_REASONING && !it.reasoning_json &&
-                (!it.reasoning_text || !it.reasoning_text[0]))
-                item_free(&it); /* nothing left to replay */
-            else
-                push_item(&items, &n, &cap, it);
+            push_item(&items, &n, &cap, it);
         }
         json_decref(o);
     }
