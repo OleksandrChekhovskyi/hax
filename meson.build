@@ -50,6 +50,9 @@ sources = files(
     'src/turn.c',
     'src/util.c',
 
+    'src/providers/anthropic.c',
+    'src/providers/anthropic_compat.c',
+    'src/providers/anthropic_events.c',
     'src/providers/codex.c',
     'src/providers/codex_events.c',
     'src/providers/config_provider.c',

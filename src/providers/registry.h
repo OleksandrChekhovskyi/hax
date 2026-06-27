@@ -22,6 +22,8 @@
  *      right autoselect-priority position (see the array comment there).
  */
 
+extern const struct provider_factory PROVIDER_ANTHROPIC;
+extern const struct provider_factory PROVIDER_ANTHROPIC_COMPAT;
 extern const struct provider_factory PROVIDER_CODEX;
 extern const struct provider_factory PROVIDER_LLAMACPP;
 extern const struct provider_factory PROVIDER_MOCK;

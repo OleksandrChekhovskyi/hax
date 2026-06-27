@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "anthropic.h"
 #include "config.h"
 #include "openai.h"
 #include "util.h"
@@ -18,7 +19,7 @@
 struct provider_recipe {
     const char *name;             /* selectable id (HAX_PROVIDER value) */
     const char *display_name;     /* banner label; NULL → name */
-    const char *api;              /* dialect; NULL → "openai-completions" */
+    const char *api;              /* dialect: openai-completions | anthropic-messages */
     const char *base_url;         /* default endpoint */
     const char *api_key_env;      /* env var holding the key; NULL → local/no key */
     const char *reasoning_format; /* "flat"/"nested"; NULL → flat */
@@ -85,8 +86,8 @@ static const char *resolve(const char *name, const char *leaf, const char *recip
 /* Build the provider for config id `name` (the factory's own name). The
  * dialect (providers.<name>.api, else the recipe's, else openai-completions)
  * picks the construction path; every other field is resolved as config
- * overlaid on the recipe and threaded into the openai preset, which reads its
- * own subtree via config_prefix. */
+ * overlaid on the recipe and threaded into the dialect's preset, which reads
+ * its own subtree via config_prefix. */
 static struct provider *config_provider_new(const char *name)
 {
     const struct provider_recipe *r = recipe_find(name);
@@ -94,8 +95,12 @@ static struct provider *config_provider_new(const char *name)
     const char *api = resolve(name, "api", r ? r->api : NULL);
     if (!api)
         api = "openai-completions";
-    if (strcmp(api, "openai-completions") != 0) {
-        hax_err("provider '%s': unsupported api '%s' (supported: openai-completions)", name, api);
+    int is_openai = strcmp(api, "openai-completions") == 0;
+    int is_anthropic = strcmp(api, "anthropic-messages") == 0;
+    if (!is_openai && !is_anthropic) {
+        hax_err("provider '%s': unsupported api '%s' "
+                "(supported: openai-completions, anthropic-messages)",
+                name, api);
         return NULL;
     }
 
@@ -109,14 +114,33 @@ static struct provider *config_provider_new(const char *name)
     const char *display = resolve(name, "display_name", r ? r->display_name : NULL);
     if (!display || !*display)
         display = name;
+
+    /* The dialect's preset resolves the per-provider settings itself from this
+     * prefix; the rest we pass as already-resolved fields. The prefix is read
+     * synchronously during construction (the preset copies what it keeps), so
+     * the stack-built string is safe to free on return. */
+    char *cfg_prefix = xasprintf("providers.%s", name);
+
+    if (is_anthropic) {
+        /* Generic Anthropic Messages endpoint: budget-mode thinking, tolerant
+         * of empty signatures, caching off — the compat-shim baseline, all
+         * overridable per provider via providers.<name>.{thinking_mode,cache,…}. */
+        struct anthropic_preset preset = {
+            .display_name = display,
+            .default_base_url = base,
+            .api_key_env = resolve(name, "api_key_env", r ? r->api_key_env : NULL),
+            .default_thinking_mode = ANTHROPIC_THINKING_BUDGET,
+            .allow_empty_signature = 1,
+            .send_cache_control_default = 0,
+            .config_prefix = cfg_prefix,
+        };
+        struct provider *p = anthropic_provider_new_preset(&preset);
+        free(cfg_prefix);
+        return p;
+    }
+
     const char *rf = resolve(name, "reasoning_format", r ? r->reasoning_format : NULL);
 
-    /* The preset resolves base_url / api_key / send_cache_key /
-     * reasoning_roundtrip itself from this prefix; the rest we pass as
-     * already-resolved fields. The prefix is read synchronously during the
-     * construction call (the preset copies what it keeps), so the stack-built
-     * string is safe to free on return. */
-    char *prefix = xasprintf("providers.%s", name);
     /* The OpenAI effort ladder is advisory for a generic compat endpoint (the
      * user picked the URL), so it's the default — but a recipe can opt out for
      * a local server with no categorical effort (ollama). */
@@ -130,10 +154,10 @@ static struct provider *config_provider_new(const char *name)
         .efforts = with_efforts ? OPENAI_EFFORT_LADDER : NULL,
         .n_efforts = with_efforts ? OPENAI_EFFORT_LADDER_N : 0,
         .length_hint = r ? r->length_hint : NULL,
-        .config_prefix = prefix,
+        .config_prefix = cfg_prefix,
     };
     struct provider *p = openai_provider_new_preset(&preset);
-    free(prefix);
+    free(cfg_prefix);
     return p;
 }
 

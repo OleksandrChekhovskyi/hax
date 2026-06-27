@@ -29,7 +29,8 @@
 static const struct config_setting REGISTRY[] = {
     /* selection */
     {"provider",                   "HAX_PROVIDER",                NULL,
-     "Backend: codex, openai, openai-compatible, llama.cpp, ollama, openrouter, mock"},
+     "Backend: codex, openai, openai-compatible, anthropic, anthropic-compatible, "
+     "llama.cpp, ollama, openrouter, mock"},
     {"model",                      "HAX_MODEL",                   NULL,
      "Model id (provider-specific; some auto-fill or require it)"},
     {"reasoning_effort",           "HAX_REASONING_EFFORT",        NULL,
@@ -100,6 +101,24 @@ static const struct config_setting REGISTRY[] = {
      "Send a stable prompt_cache_key (prefix-cache hint)"},
     {"provider_name",              "HAX_PROVIDER_NAME",           NULL,
      "Display name for the provider in the banner"},
+
+    /* anthropic family (shared by the anthropic + anthropic-compatible providers) */
+    {"anthropic.base_url",         "HAX_ANTHROPIC_BASE_URL",      NULL,
+     "Base URL for an Anthropic-compatible /v1 endpoint (anthropic-compatible)"},
+    {"anthropic.api_key",          "HAX_ANTHROPIC_API_KEY",       NULL,
+     "x-api-key token for Anthropic-family providers"},
+    {"anthropic.max_tokens",       "HAX_ANTHROPIC_MAX_TOKENS",    "32000",
+     "Max output tokens (thinking + text) per response"},
+    {"anthropic.thinking_mode",    "HAX_ANTHROPIC_THINKING_MODE", NULL,
+     "Thinking mode: adaptive, budget, or off (default depends on the provider)"},
+    {"anthropic.thinking_budget",  "HAX_ANTHROPIC_THINKING_BUDGET", NULL,
+     "Budget-mode thinking tokens (default: max_tokens - 1)"},
+    {"anthropic.cache",            "HAX_ANTHROPIC_CACHE",         NULL,
+     "Send prompt cache_control breakpoints (default depends on the provider)"},
+    {"anthropic.cache_ttl",        "HAX_ANTHROPIC_CACHE_TTL",     "1h",
+     "Cache breakpoint TTL: 5m or 1h (1h suits an interactive agent's pauses)"},
+    {"anthropic.version",          "HAX_ANTHROPIC_VERSION",       "2023-06-01",
+     "anthropic-version request header value"},
 
     /* per-provider */
     {"llamacpp.port",              "HAX_LLAMACPP_PORT",           "8080",

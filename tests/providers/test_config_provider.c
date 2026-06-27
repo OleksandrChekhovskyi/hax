@@ -30,8 +30,10 @@ int main(void)
                        "  \"providers\": {"
                        "    \"myllm\": {\"base_url\": \"http://127.0.0.1:9000/v1\","
                        "               \"display_name\": \"My LLM\"},"
-                       "    \"bad\":   {\"api\": \"anthropic-messages\","
+                       "    \"bad\":   {\"api\": \"soap-1.2\","
                        "               \"base_url\": \"http://x/v1\"},"
+                       "    \"claudish\": {\"api\": \"anthropic-messages\","
+                       "               \"base_url\": \"http://127.0.0.1:18080/v1\"},"
                        "    \"ollama\": {\"base_url\": \"http://gpu:1234/v1\"},"
                        "    \"my.llm\": {\"base_url\": \"http://127.0.0.1:9002/v1\"}"
                        "  },"
@@ -43,7 +45,7 @@ int main(void)
      * provider layer's job, below). */
     char **names = NULL;
     size_t nk = config_object_keys("providers", &names);
-    EXPECT(nk == 5);
+    EXPECT(nk == 6);
     for (size_t i = 0; i < nk; i++)
         free(names[i]);
     free(names);
@@ -101,6 +103,24 @@ int main(void)
         const char *const *eff = NULL;
         EXPECT(op->list_efforts(op, &eff) == 0);
         op->destroy(op);
+    }
+
+    /* An anthropic-messages provider constructs offline (no probe). Its
+     * default budget thinking mode ignores effort, so /effort is hidden;
+     * switching to adaptive mode advertises the ladder (low..max). */
+    const struct provider_factory *af = provider_find("claudish");
+    EXPECT(af != NULL);
+    EXPECT(selectable("claudish"));
+    struct provider *ap = af->new(af->name);
+    EXPECT(ap != NULL);
+    if (ap) {
+        const char *const *eff = NULL;
+        EXPECT_STR_EQ(ap->name, "claudish");
+        EXPECT(ap->list_efforts && ap->list_efforts(ap, &eff) == 0); /* budget → hidden */
+        config_set_override("providers.claudish.thinking_mode", "adaptive");
+        EXPECT(ap->list_efforts(ap, &eff) == 5); /* adaptive → ladder shown */
+        config_set_override("providers.claudish.thinking_mode", NULL);
+        ap->destroy(ap);
     }
 
     /* An unsupported dialect is a construction failure, not a crash. */

@@ -13,10 +13,11 @@
  * config.json (the file/runtime-override lane — there is no per-provider env
  * binding; the env/ad-hoc lane is the global "openai-compatible" preset),
  * optionally seeded by a built-in *recipe* (see RECIPES in
- * config_provider.c — e.g. "ollama"). Each speaks one dialect — today only
- * "openai-completions", which builds on openai_provider_new_preset — and
- * resolves its settings from its own subtree overlaid on its recipe
- * defaults. The API key is the one value read from the environment, via a
+ * config_provider.c — e.g. "ollama"). Each speaks one dialect — either
+ * "openai-completions" (openai_provider_new_preset) or "anthropic-messages"
+ * (anthropic_provider_new_preset) — and resolves its settings from its own
+ * subtree overlaid on its recipe defaults. The API key is the one value read
+ * from the environment, via a
  * recipe- or config-declared key var (api_key_env), since a secret belongs
  * in the environment, not the config file.
  *

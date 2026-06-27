@@ -17,10 +17,13 @@ test_sources = [
     'test_config.c',
     'test_session.c',
     'test_slash.c',
+    'test_trace.c',
     'test_transcript.c',
     'test_turn.c',
     'test_util.c',
 
+    'providers/test_anthropic_events.c',
+    'providers/test_anthropic_messages.c',
     'providers/test_codex_events.c',
     'providers/test_config_provider.c',
     'providers/test_openai_events.c',

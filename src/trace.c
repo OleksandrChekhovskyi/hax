@@ -144,6 +144,20 @@ static int header_name_is(const char *header, const char *name)
     return strncasecmp(header, name, n) == 0 && header[n] == ':';
 }
 
+/* Request-header names whose values are credentials and must never hit the
+ * trace file. Matched case-insensitively (header_name_is). Authorization
+ * covers Bearer tokens (OpenAI, Codex, OpenRouter); x-api-key is Anthropic's
+ * scheme; api-key is Azure OpenAI's. Add new auth header names here. */
+static const char *const SENSITIVE_HEADERS[] = {"Authorization", "x-api-key", "api-key"};
+
+static int header_is_sensitive(const char *header)
+{
+    for (size_t i = 0; i < sizeof(SENSITIVE_HEADERS) / sizeof(SENSITIVE_HEADERS[0]); i++)
+        if (header_name_is(header, SENSITIVE_HEADERS[i]))
+            return 1;
+    return 0;
+}
+
 void trace_request(const char *method, const char *url, const char *const *headers,
                    const char *body, size_t body_len)
 {
@@ -159,7 +173,7 @@ void trace_request(const char *method, const char *url, const char *const *heade
     struct buf hb;
     buf_init(&hb);
     for (const char *const *h = headers; h && *h; h++) {
-        if (header_name_is(*h, "Authorization")) {
+        if (header_is_sensitive(*h)) {
             const char *colon = strchr(*h, ':');
             buf_append(&hb, *h, colon - *h);
             buf_append_str(&hb, ": <redacted>\n");

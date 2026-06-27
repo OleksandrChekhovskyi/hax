@@ -18,7 +18,8 @@ void trace_init(void);
 
 int trace_enabled(void);
 
-/* Emit a banner + headers (with Authorization redacted) + pretty-printed
+/* Emit a banner + headers (credential headers — Authorization, x-api-key,
+ * api-key — redacted) + pretty-printed
  * request body. method is "POST", "GET", … and goes into the banner.
  * headers is a NULL-terminated array of "Key: Value" strings. body need
  * not be NUL-terminated; body_len is authoritative. body may be NULL/0
