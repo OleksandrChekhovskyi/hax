@@ -174,9 +174,19 @@ static void test_build_system_prompt_with_suffix(void)
 
 /* ---------- resolve_reasoning_effort ---------- */
 
+static const char *const test_effort_levels[] = {"low", "high"};
+
+static size_t test_list_efforts(struct provider *p, const char *const **out)
+{
+    (void)p;
+    *out = test_effort_levels;
+    return 2;
+}
+
 static void test_resolve_reasoning_effort(void)
 {
-    struct provider p = {.default_reasoning_effort = "default-e"};
+    struct provider p = {.default_reasoning_effort = "default-e",
+                         .list_efforts = test_list_efforts};
 
     /* unset → provider default */
     unsetenv("HAX_REASONING_EFFORT");
@@ -192,8 +202,24 @@ static void test_resolve_reasoning_effort(void)
 
     /* with no provider default and unset env, returns NULL */
     unsetenv("HAX_REASONING_EFFORT");
-    struct provider p2 = {.default_reasoning_effort = NULL};
+    struct provider p2 = {.default_reasoning_effort = NULL, .list_efforts = test_list_efforts};
     EXPECT(resolve_reasoning_effort(&p2) == NULL);
+
+    /* a provider with no effort ladder (NULL hook, or one that reports zero
+     * levels) never resolves an effort — even one persisted in config — so a
+     * stale value can't leak onto e.g. llama.cpp / ollama. */
+    setenv("HAX_REASONING_EFFORT", "high", 1);
+    struct provider p3 = {.default_reasoning_effort = "default-e", .list_efforts = NULL};
+    EXPECT(resolve_reasoning_effort(&p3) == NULL);
+
+    /* a value the provider's ladder doesn't accept (a stale pick carried over
+     * from a different backend) falls back to the provider default rather than
+     * being sent verbatim. test_list_efforts offers {low, high}. */
+    setenv("HAX_REASONING_EFFORT", "medium", 1);
+    EXPECT_STR_EQ(resolve_reasoning_effort(&p), "default-e");
+    /* same, but no provider default to fall back to → omit. */
+    EXPECT(resolve_reasoning_effort(&p2) == NULL);
+    unsetenv("HAX_REASONING_EFFORT");
 }
 
 /* ---------- agent_session_init ---------- */

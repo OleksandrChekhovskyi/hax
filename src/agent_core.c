@@ -75,10 +75,33 @@ void items_append(struct item **items, size_t *n, size_t *cap, struct item it)
 
 const char *resolve_reasoning_effort(const struct provider *p)
 {
+    /* A persisted/configured effort only makes sense for a provider that
+     * exposes a categorical effort ladder. Without one (NULL hook or an empty
+     * list — llama.cpp, ollama, a non-reasoning model …) the value can't be
+     * sent meaningfully, so don't resolve it: this keeps a stale effort left in
+     * state.json from leaking into the banner, the wire request, and the logs
+     * after switching to such a provider. */
+    const char *const *eff = NULL;
+    struct provider *mp = (struct provider *)p;
+    size_t n = (p && p->list_efforts) ? p->list_efforts(mp, &eff) : 0;
+    if (n == 0)
+        return NULL;
+
     const char *e = config_str("reasoning_effort");
-    if (e)
-        return *e ? e : NULL;
-    return p ? p->default_reasoning_effort : NULL;
+    if (!e)
+        return p->default_reasoning_effort; /* unset / "(default)" → provider default */
+    if (!*e)
+        return NULL; /* explicit empty → force omit */
+
+    /* The value must be one the current provider's ladder actually accepts. A
+     * stale pick carried in state.json from a different backend (e.g. "medium"
+     * persisted under codex, then a switch to a low/high-only provider) would
+     * otherwise be sent verbatim and 400 every turn. On a non-member fall back
+     * to the provider's default rather than honoring a value it can't take. */
+    for (size_t i = 0; i < n; i++)
+        if (strcmp(e, eff[i]) == 0)
+            return e;
+    return p->default_reasoning_effort;
 }
 
 char *build_system_prompt(const char *model, int raw)
