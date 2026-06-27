@@ -21,7 +21,7 @@
  *      free-text instructions like "run `ls -la`".
  */
 
-struct provider *mock_provider_new(void);
+struct provider *mock_provider_new(const char *name);
 
 extern const struct provider_factory PROVIDER_MOCK;
 

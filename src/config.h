@@ -109,6 +109,14 @@ const char *config_str_nonempty(const char *key);
  * re-stating the constant at the site. */
 const char *config_default(const char *key);
 
+/* Enumerate the immediate member names of the JSON object at nested key
+ * `key` (e.g. "providers"), merged and deduplicated across the file and
+ * state tiers. Returns the count; *out receives a freshly-allocated array of
+ * `count` heap-owned strings (caller frees each element, then the array;
+ * NULL with count 0 when the object is absent). The basis for config-defined
+ * providers: each providers.<name> block is one selectable provider. */
+size_t config_object_keys(const char *key, char ***out);
+
 /* Typed views over the same resolution, centralizing the parse so every
  * setting shares one grammar. They resolve like config_str_nonempty (the
  * grammars give "" no meaning), and a value that fails to parse falls back

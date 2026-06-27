@@ -108,8 +108,9 @@ static void openrouter_refresh_context(struct provider *p, const char *model)
     spawn_context_probe(p, openrouter_api_key());
 }
 
-struct provider *openrouter_provider_new(void)
+struct provider *openrouter_provider_new(const char *name)
 {
+    (void)name;
     /* Fixed to openrouter.ai. HAX_OPENAI_BASE_URL is ignored (lock_base_url),
      * not rejected, so the OPENROUTER_API_KEY fallback and the public X-Title
      * attribution header can never reach an unrelated host, and a base URL
@@ -173,8 +174,9 @@ struct provider *openrouter_provider_new(void)
 
 /* Usable iff a key is configured — HAX_OPENAI_API_KEY or the OPENROUTER_API_KEY
  * fallback the preset already consults. */
-static int openrouter_available(const char **reason)
+static int openrouter_available(const char *name, const char **reason)
 {
+    (void)name;
     return openai_key_available("OPENROUTER_API_KEY", reason);
 }
 

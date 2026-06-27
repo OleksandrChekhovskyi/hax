@@ -31,7 +31,7 @@ static void avail_worker(struct bg_job *job, void *arg)
     (void)job;
     struct avail_arg *a = arg;
     const char *reason = NULL;
-    int ok = a->f->available ? a->f->available(&reason) : 1; /* no hook ⇒ available */
+    int ok = a->f->available ? a->f->available(a->f->name, &reason) : 1; /* no hook ⇒ available */
     *a->avail = ok;
     *a->reason = ok ? NULL : (reason ? reason : "unavailable");
     free(a);
@@ -78,8 +78,8 @@ struct provider *provider_autoselect(void)
      * parallel probe: the common logged-in start then stays instant. No note:
      * the default is what the user expects, not a surprising swap. */
     const struct provider_factory *def = provider_default();
-    if (def && (!def->available || def->available(NULL))) {
-        struct provider *p = def->new();
+    if (def && (!def->available || def->available(def->name, NULL))) {
+        struct provider *p = def->new(def->name);
         if (p) {
             /* Record the pick as a session-scoped override (NOT persisted),
              * so config_str("provider") names the live provider for the rest
@@ -112,7 +112,7 @@ struct provider *provider_autoselect(void)
         /* available() is a pre-check, not a guarantee — construction can
          * still fail (a server that dropped between probe and connect); on
          * that race just try the next available one. */
-        p = facs[i]->new();
+        p = facs[i]->new(facs[i]->name);
         if (p)
             config_set_override("provider", facs[i]->name); /* see codex branch above */
     }
@@ -390,7 +390,7 @@ void select_provider(struct agent_state *st)
      * already explained why (no key, server down …); the current provider
      * stays live. */
     struct config_override_state *ov = config_override_snapshot();
-    struct provider *newp = f->new();
+    struct provider *newp = f->new(f->name);
     if (!newp) {
         config_override_restore(ov);
         st->r->disp.trail = 1; /* the factory printed a raw error line */

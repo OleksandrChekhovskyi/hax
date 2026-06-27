@@ -31,17 +31,17 @@ int main(void)
     EXPECT(idx_of("mock") == -1);
     EXPECT(provider_find("mock") != NULL);
 
-    /* The autoselect-priority invariant behind the base-URL fix: a configured
-     * HAX_OPENAI_BASE_URL makes openai-compatible, llama.cpp, and ollama all
-     * available (they honor the same override), so cold-start autoselect lands
-     * on the generic compatible preset only because it ranks ahead of the
-     * local ones. Guard that ordering. */
+    /* Autoselect-priority ordering: the compiled-in factories come first, in
+     * BUILTINS order, so the generic openai-compatible preset ranks ahead of
+     * the local llama.cpp server. Config-defined providers (ollama is a
+     * shipped recipe) are appended after every built-in, so they never
+     * outrank one at cold-start autoselect. Guard both halves. */
     int compat = idx_of("openai-compatible");
     int llama = idx_of("llama.cpp");
     int ollama = idx_of("ollama");
     EXPECT(compat >= 0 && llama >= 0 && ollama >= 0);
     EXPECT(compat < llama);
-    EXPECT(compat < ollama);
+    EXPECT(llama < ollama); /* built-in before config-defined */
 
     T_REPORT();
 }

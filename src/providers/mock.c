@@ -693,8 +693,9 @@ static void mock_destroy(struct provider *p)
     free(m);
 }
 
-struct provider *mock_provider_new(void)
+struct provider *mock_provider_new(const char *name)
 {
+    (void)name;
     struct mock_provider *m = xcalloc(1, sizeof(*m));
     m->base.name = "mock";
     m->base.default_model = "mock-model";

@@ -459,14 +459,26 @@ static char **dup_headers(const char *const *src)
     return out;
 }
 
-/* Resolve the reasoning round-trip field. HAX_REASONING_ROUNDTRIP, when set,
+/* Build the config key for one preset-resolved leaf. A config-defined
+ * provider (preset->config_prefix = "providers.<name>") reads its own
+ * subtree; the compiled-in shims (prefix NULL) read the shared global
+ * "openai.*" namespace. Caller frees. */
+static char *preset_key(const char *prefix, const char *leaf)
+{
+    return xasprintf("%s.%s", prefix ? prefix : "openai", leaf);
+}
+
+/* Resolve the reasoning round-trip field. The <prefix>.reasoning_roundtrip
+ * setting (HAX_REASONING_ROUNDTRIP for the global namespace), when set,
  * overrides the preset default: "off"/"0"/empty disables; "on"/"1" selects the
  * canonical "reasoning_content"; any other value is used verbatim as the field
  * name (e.g. "reasoning" for routers that key on that). Returns heap-owned or
  * NULL (disabled). */
-static char *resolve_roundtrip_field(const char *preset_default)
+static char *resolve_roundtrip_field(const char *prefix, const char *preset_default)
 {
-    const char *env = config_str("openai.reasoning_roundtrip");
+    char *k = preset_key(prefix, "reasoning_roundtrip");
+    const char *env = config_str(k);
+    free(k);
     const char *chosen = preset_default;
     if (env) {
         if (!*env || strcmp(env, "off") == 0 || strcmp(env, "0") == 0)
@@ -570,8 +582,9 @@ int openai_base_url_reachable(const char *base_url, const char *api_key, const c
     return 1;
 }
 
-static int openai_available(const char **reason)
+static int openai_available(const char *name, const char **reason)
 {
+    (void)name;
     /* Fixed endpoint (api.openai.com), so selectability is just "is a key
      * configured" — HAX_OPENAI_BASE_URL no longer affects it (the preset
      * locks the base URL and ignores the override). */
@@ -591,34 +604,47 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
      * does, the calling preset is misconfigured (a programmer error inside
      * hax) — fail loudly so we don't silently default to api.openai.com under
      * a different preset's display name. */
-    const char *base_env = config_str("openai.base_url");
+    char *base_key = preset_key(preset->config_prefix, "base_url");
+    const char *base_cfg = config_str(base_key);
+    free(base_key);
     const char *base =
-        (!preset->lock_base_url && base_env && *base_env) ? base_env : preset->default_base_url;
+        (!preset->lock_base_url && base_cfg && *base_cfg) ? base_cfg : preset->default_base_url;
     if (!base || !*base) {
         hax_err("internal: openai preset has no base URL");
         return NULL;
     }
     char *base_url = dup_trim_trailing_slash(base);
 
-    /* Key resolution: HAX_OPENAI_API_KEY → preset->api_key_env (e.g.
-     * OPENAI_API_KEY for the openai preset, OPENROUTER_API_KEY for
-     * openrouter). The openai-compatible preset deliberately leaves
-     * api_key_env unset so a globally configured OPENAI_API_KEY doesn't
+    /* Key resolution: <prefix>.api_key (HAX_OPENAI_API_KEY for the global
+     * namespace) → preset->api_key_env (e.g. OPENAI_API_KEY for the openai
+     * preset, OPENROUTER_API_KEY for openrouter, or a config-defined
+     * provider's declared key var). The openai-compatible preset deliberately
+     * leaves api_key_env unset so a globally configured OPENAI_API_KEY doesn't
      * leak to a custom endpoint. */
-    const char *key = config_str("openai.api_key");
+    char *key_key = preset_key(preset->config_prefix, "api_key");
+    const char *key = config_str(key_key);
+    free(key_key);
     if ((!key || !*key) && preset->api_key_env)
         key = getenv(preset->api_key_env);
 
-    const char *name = config_str("provider_name");
+    /* Display name: a config-defined provider (config_prefix set) takes its
+     * banner from preset->display_name only — the already-resolved
+     * providers.<name>.display_name overlaid on its recipe — so a stray
+     * global HAX_PROVIDER_NAME can't rename it. The shared shims read the
+     * global provider_name override. */
+    const char *name = preset->config_prefix ? NULL : config_str("provider_name");
     if (!name || !*name)
         name = (preset->display_name && *preset->display_name) ? preset->display_name : "openai";
 
     /* prompt_cache_key is an OpenAI-specific affinity hint for prefix-cache
      * routing — but some local servers (notably vLLM) reject unknown JSON
-     * fields, hence the per-preset default. openai.send_cache_key
-     * overrides it in either direction via the shared bool grammar (an
-     * explicit false/0/off must not read as "set → on"). */
-    int send_cache_key = config_bool_or("openai.send_cache_key", preset->send_cache_key_default);
+     * fields, hence the per-preset default. <prefix>.send_cache_key
+     * (HAX_OPENAI_SEND_CACHE_KEY globally) overrides it in either direction
+     * via the shared bool grammar (an explicit false/0/off must not read as
+     * "set → on"). */
+    char *cache_key_key = preset_key(preset->config_prefix, "send_cache_key");
+    int send_cache_key = config_bool_or(cache_key_key, preset->send_cache_key_default);
+    free(cache_key_key);
 
     struct openai *o = xcalloc(1, sizeof(*o));
     o->base_url = base_url;
@@ -628,7 +654,8 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
     o->send_cache_key = send_cache_key;
     o->emit_progress = preset->emit_progress;
     o->length_hint = preset->length_hint;
-    o->roundtrip_reasoning_field = resolve_roundtrip_field(preset->roundtrip_reasoning_field);
+    o->roundtrip_reasoning_field =
+        resolve_roundtrip_field(preset->config_prefix, preset->roundtrip_reasoning_field);
     o->reasoning_format = preset->reasoning_format;
     o->efforts = preset->efforts;
     o->n_efforts = preset->n_efforts;
@@ -644,8 +671,9 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
     return &o->base;
 }
 
-struct provider *openai_provider_new(void)
+struct provider *openai_provider_new(const char *name)
 {
+    (void)name;
     /* Real OpenAI: api.openai.com is fixed. HAX_OPENAI_BASE_URL is ignored
      * (lock_base_url) rather than honored — a custom endpoint belongs on the
      * dedicated "openai-compatible" preset, which keeps OpenAI's policies

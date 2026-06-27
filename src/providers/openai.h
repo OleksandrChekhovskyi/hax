@@ -14,8 +14,10 @@
  * the openai-compatible preset (openai_compat.h) instead, which keeps
  * OPENAI_API_KEY and prompt_cache_key scoped to the real-OpenAI host.
  *
- * Returns NULL on failure (prints cause to stderr). */
-struct provider *openai_provider_new(void);
+ * `name` is the provider_factory name, unused here (the real-OpenAI factory
+ * serves exactly one provider). Returns NULL on failure (prints cause to
+ * stderr). */
+struct provider *openai_provider_new(const char *name);
 
 /* Wire-format dialect for reasoning parameters. OpenAI-compatible
  * backends agree on the rest of the Chat Completions payload but
@@ -114,6 +116,14 @@ struct openai_preset {
      * openrouter, whose endpoints aren't configurable, so a base URL left set
      * for another backend can't redirect them (or block their selection). */
     int lock_base_url;
+    /* Config namespace for the settings this constructor resolves itself
+     * (base_url, api_key, send_cache_key, reasoning_roundtrip). NULL — the
+     * compiled-in shims — reads the shared global "openai.*" keys (and the
+     * global provider_name for the banner): the env/ad-hoc single-provider
+     * lane. A config-defined provider sets this to "providers.<name>", so each
+     * named provider reads its own self-contained subtree and a stray
+     * HAX_OPENAI_* in the environment can't bleed into it. */
+    const char *config_prefix;
 };
 
 /* The shared "OpenAI-style" reasoning-effort ladder, low→high:

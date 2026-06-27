@@ -150,8 +150,9 @@ static void spawn_context_probe(struct provider *p, const char *base_url, const 
     openai_attach_probe(p, probe_context_limit_spawn(a));
 }
 
-struct provider *llamacpp_provider_new(void)
+struct provider *llamacpp_provider_new(const char *name)
 {
+    (void)name;
     /* The "8080" default lives in the config registry, so it's defined in
      * one place. */
     char *default_url = xasprintf("http://127.0.0.1:%s/v1", config_str_nonempty("llamacpp.port"));
@@ -215,8 +216,9 @@ struct provider *llamacpp_provider_new(void)
 /* Availability is "is llama-server up": a bounded GET on the same /models
  * the model probe uses. Resolves the base URL exactly as the constructor
  * does so the probe targets the server the user would actually reach. */
-static int llamacpp_available(const char **reason)
+static int llamacpp_available(const char *name, const char **reason)
 {
+    (void)name;
     char *default_url = xasprintf("http://127.0.0.1:%s/v1", config_str_nonempty("llamacpp.port"));
     const char *base_env = config_str("openai.base_url");
     char *resolved = dup_trim_trailing_slash((base_env && *base_env) ? base_env : default_url);

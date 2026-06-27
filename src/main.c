@@ -52,7 +52,7 @@ static struct provider *pick_provider(int print_mode)
      * emit a chatty auto-select note onto piped stdout. The built-in default
      * is built strictly here too in one-shot. */
     if (chosen || print_mode)
-        return f->new();
+        return f->new(f->name);
 
     /* Interactive cold start with nothing configured: one path picks
      * something. The auto-selector tries the built-in default first (cheap

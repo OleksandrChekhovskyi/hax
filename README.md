@@ -137,16 +137,21 @@ just the streaming request.
 
 ### ollama
 
-Convenience preset for a local `ollama` daemon. Defaults to `http://127.0.0.1:11434/v1`;
-set `HAX_OLLAMA_PORT` for a different port, or `HAX_OPENAI_BASE_URL` to override the URL
-entirely. `HAX_MODEL` is required — ollama's chat endpoint rejects requests without one,
-and no signal it exposes reliably picks the right model (`/api/ps` decays after
-`OLLAMA_KEEP_ALIVE`, `/v1/models` is just the pulled-model catalog), so hax asks once
-rather than guess.
+Built-in config for a local `ollama` daemon — the shipped example of a
+[custom provider](#custom-providers). Defaults to `http://127.0.0.1:11434/v1`; for a
+different port or a remote host, set its `base_url` in `config.json` (see below). `HAX_MODEL`
+is required — ollama's chat endpoint rejects requests without one, and no signal it exposes
+reliably picks the right model (`/api/ps` decays after `OLLAMA_KEEP_ALIVE`, `/v1/models` is
+just the pulled-model catalog), so hax asks once rather than guess.
 
 ```sh
 HAX_PROVIDER=ollama HAX_MODEL=qwen3:8b ./build/hax
-HAX_PROVIDER=ollama HAX_OLLAMA_PORT=11500 HAX_MODEL=qwen3:8b ./build/hax
+```
+
+For a non-default port, add to `config.json`:
+
+```json
+{ "providers": { "ollama": { "base_url": "http://127.0.0.1:11500/v1" } } }
 ```
 
 Run `ollama list` to see what's installed locally. Unlike llama.cpp, the `%`-of-context
@@ -177,6 +182,39 @@ HAX_MODEL=anthropic/claude-sonnet-4.6 \
 OPENROUTER_API_KEY=... \
 ./build/hax
 ```
+
+### Custom providers
+
+Any backend that speaks the OpenAI Chat Completions API can be added as a named provider in
+`config.json`, then selected with `/provider`, `HAX_PROVIDER=<name>`, or a stored default —
+no rebuild. Each entry is self-contained: it reads only its own block, never the global
+`HAX_OPENAI_*` variables, so a key or URL left in your environment can't bleed into it.
+
+```json
+{
+  "providers": {
+    "groq": { "base_url": "https://api.groq.com/openai/v1", "api_key_env": "GROQ_API_KEY" },
+    "my-vllm": {
+      "base_url": "http://gpu-box:8000/v1",
+      "display_name": "vLLM (qwen)",
+      "reasoning_format": "nested"
+    }
+  }
+}
+```
+
+Recognized keys: `base_url` (required); `display_name`; `api` (the wire dialect — defaults to
+`openai-completions`, the only one today); `api_key` (a literal token) or `api_key_env` (the
+name of the env var holding it — the API key is the one value read from the environment,
+since a secret belongs there rather than in a committed file); `reasoning_format`
+(`flat`/`nested`); and `send_cache_key`. Models are discovered live from `/v1/models`, so
+there's no model list to maintain — `/model` lists whatever the endpoint serves. The shipped
+`ollama` provider is one of these with built-in defaults; override any field by adding a
+`providers.ollama` block.
+
+A provider name doubles as its config-key path, so it can't contain a `.` (the key separator)
+— use `-`. A name that collides with a built-in (`openai`, `llama.cpp`, …) is ignored in
+favor of the built-in.
 
 ### Mock (manual testing without an LLM)
 
@@ -251,9 +289,11 @@ Because of this, a provider that can't start no longer aborts the interactive RE
 explicitly chose it (codex not logged in, a missing API key, a local server that's down), the
 REPL opens on a `no provider — use /provider` banner with the reason above it. If nothing is
 configured, hax instead auto-selects the first available backend on startup, in priority order
-— the built-in default (codex), then a configured generic `openai-compatible` endpoint, then
-local servers (`llama.cpp`, `ollama`), then cloud-key backends — and only falls back to the
-`no provider` banner when none is available (the startup banner shows which was picked). That
+— the compiled-in factories first: the built-in default (codex), then a configured generic
+`openai-compatible` endpoint, then the local `llama.cpp` server, then the cloud-key backends
+(`openai`, `openrouter`); then any config-defined providers (including the `ollama` recipe),
+which are appended after the built-ins — and only falls back to the `no provider` banner when
+none is available (the startup banner shows which was picked). That
 ordering is also why a configured `HAX_OPENAI_BASE_URL` auto-starts `openai-compatible` rather
 than `llama.cpp`/`ollama`, which honor the same override but rank lower. The one-shot `-p` path
 still fails fast on a provider that can't start, since it can't prompt for an alternative.
@@ -287,22 +327,26 @@ above.
 - `HAX_NO_AGENTS_MD` — set truthy to skip injecting AGENTS.md project instructions
   (global, project, and parent-directory files) into the system prompt
 
-### OpenAI-family auth and routing (openai, openai-compatible, llama.cpp, ollama, openrouter)
+### OpenAI-family auth and routing (openai, openai-compatible, llama.cpp, openrouter)
+
+These globals configure the compiled-in OpenAI-family presets. They do **not** apply to
+custom providers (including `ollama`), which read only their own `config.json` block — see
+[Custom providers](#custom-providers).
 
 - `HAX_OPENAI_BASE_URL` — required for `openai-compatible`; overrides the default for
-  `llama.cpp` and `ollama`; ignored by `openai` and `openrouter` (both fixed to their
-  real hosts so their default API-key fallbacks can't leak to an unrelated endpoint, and
-  a value left set for another backend can't redirect or disable them)
+  `llama.cpp`; ignored by `openai` and `openrouter` (both fixed to their real hosts so their
+  default API-key fallbacks can't leak to an unrelated endpoint, and a value left set for
+  another backend can't redirect or disable them)
 - `HAX_OPENAI_API_KEY` — preferred Bearer token across all OpenAI-family presets. Each
   preset also picks up its conventional global as a fallback: `OPENAI_API_KEY` for `openai`,
   `OPENROUTER_API_KEY` for `openrouter`. `openai-compatible` deliberately has no global
   fallback so a configured OpenAI key isn't forwarded to an unrelated endpoint
 - `HAX_OPENAI_SEND_CACHE_KEY` — set truthy to send a stable per-session `prompt_cache_key`,
   falsy (`0`, `false`, `no`, `off`) to suppress it. On by default for `openai` and
-  `openrouter` (both honor prefix caching); off by default for `openai-compatible`,
-  `llama.cpp`, and `ollama` because some local servers (notably vLLM) reject unknown JSON
-  fields. The switch lets hosted compat backends like Together, Fireworks, or Groq opt in
-  (or the hosted presets opt out)
+  `openrouter` (both honor prefix caching); off by default for `openai-compatible` and
+  `llama.cpp` because some local servers (notably vLLM) reject unknown JSON fields. The
+  switch lets hosted compat backends like Together, Fireworks, or Groq opt in (or the hosted
+  presets opt out)
 - `HAX_OPENAI_REASONING_FORMAT` — only honored by `openai-compatible`: how reasoning effort
   is encoded in the request, `flat` (`reasoning_effort`, the default) or `nested`
   (`reasoning: {"effort": ...}`, used by some routers)
@@ -316,11 +360,12 @@ above.
   Used only when `HAX_OPENAI_BASE_URL` is unset; the URL becomes
   `http://127.0.0.1:<port>/v1`
 
-### ollama preset
+### ollama
 
-- `HAX_OLLAMA_PORT` — optional. Port for the local `ollama` daemon (defaults to `11434`).
-  Used only when `HAX_OPENAI_BASE_URL` is unset; the URL becomes
-  `http://127.0.0.1:<port>/v1`
+A custom provider with built-in defaults, configured in `config.json` rather than by env
+vars — there is no `HAX_OLLAMA_*`. Defaults to `http://127.0.0.1:11434/v1`; set a
+`providers.ollama.base_url` entry for a different port or host. See
+[Custom providers](#custom-providers).
 
 ### OpenRouter preset
 

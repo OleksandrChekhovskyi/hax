@@ -25,10 +25,19 @@
 extern const struct provider_factory PROVIDER_CODEX;
 extern const struct provider_factory PROVIDER_LLAMACPP;
 extern const struct provider_factory PROVIDER_MOCK;
-extern const struct provider_factory PROVIDER_OLLAMA;
 extern const struct provider_factory PROVIDER_OPENAI;
 extern const struct provider_factory PROVIDER_OPENAI_COMPAT;
 extern const struct provider_factory PROVIDER_OPENROUTER;
+
+/*
+ * Beyond these compiled-in factories, the registry also surfaces
+ * config-defined providers — named providers.<name> blocks in config.json,
+ * plus the shipped recipes (see providers/config_provider.c). They are
+ * merged in below the compiled-in set: a built-in name always wins, and a
+ * config/recipe provider adds a new selectable name. So provider_find /
+ * provider_all / the /provider picker see ollama (a recipe) and any custom
+ * provider the user configured, without a code change.
+ */
 
 /* Look up a factory by its `name` field. Returns NULL if no provider
  * with that name is registered. */

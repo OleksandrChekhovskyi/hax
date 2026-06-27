@@ -275,7 +275,12 @@ struct provider {
  * constant, decoupled from registry order. */
 struct provider_factory {
     const char *name; /* HAX_PROVIDER value, e.g. "codex", "llama.cpp" */
-    struct provider *(*new)(void);
+    /* Construct the provider. `name` is this factory's own `name` field,
+     * threaded in so a single generic constructor can serve many config-
+     * defined providers (each a distinct name ⇒ a distinct providers.<name>.*
+     * config subtree). The compiled-in factories each serve one fixed
+     * provider and ignore the argument. */
+    struct provider *(*new)(const char *name);
     /* Optional availability check for the runtime provider picker
      * (/provider): can this provider be selected right now? Returns 1 when
      * usable, 0 when not — and on 0 may set *reason to a short static
@@ -284,9 +289,9 @@ struct provider_factory {
      * reachability GET); the picker runs these off the foreground path and
      * in parallel so opening the list stays fast even when a host hangs.
      * The reason string, if set, must outlive the call (use static
-     * literals — these run on worker threads). NULL hook ⇒ always
-     * selectable. */
-    int (*available)(const char **reason);
+     * literals — these run on worker threads). `name` is the factory's own
+     * name (see `new`). NULL hook ⇒ always selectable. */
+    int (*available)(const char *name, const char **reason);
     /* Dev-only backend, hidden from the enumerated provider set: excluded
      * from the /provider picker, cold-start auto-selection, and the
      * "supported" list in error messages. Still resolvable by name, so it

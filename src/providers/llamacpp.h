@@ -35,7 +35,7 @@
  *     percentage display hidden, never blocks startup.
  *   - HAX_CONTEXT_LIMIT (when set) bypasses the /props probe entirely
  *     and is used verbatim by the agent. */
-struct provider *llamacpp_provider_new(void);
+struct provider *llamacpp_provider_new(const char *name);
 
 extern const struct provider_factory PROVIDER_LLAMACPP;
 

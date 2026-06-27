@@ -84,16 +84,19 @@ Adapters live in `src/providers/`. Where a provider has a non-trivial SSE-event-
 
 **Provider registry (`struct provider_factory`)** — each adapter exports one
 `const struct provider_factory PROVIDER_<NAME>` symbol pairing the `HAX_PROVIDER` env value
-with its constructor. `src/providers/registry.{c,h}` collects them into `PROVIDERS[]` (kept
-in alphabetical order so the "supported" list in error messages and merges read
-predictably) and exposes `provider_find(name)` / `provider_list_names(out)` plus
-`PROVIDER_DEFAULT_NAME` for the unset-`HAX_PROVIDER` case. The registry lives next to the
-adapters, not in `provider.h`, so the seam header stays a pure interface and future
-callers (e.g. a `/provider` slash command) can `#include "providers/registry.h"` without
-dragging in the closed set of providers. Adding a new provider = drop a file under
-`src/providers/`, add its source to the `src/providers/` group of `sources` in `meson.build`
-(kept sorted), then add the `extern PROVIDER_*` declaration to `registry.h` and append the
-symbol to `PROVIDERS[]` in `registry.c`, both in alphabetical order.
+with its constructor. The factory's `new(name)` / `available(name, reason)` hooks take the
+factory's own name, so one generic constructor can serve many config-defined providers (see
+below); the compiled-in factories serve one provider each and ignore the argument.
+`src/providers/registry.{c,h}` collects the compiled-in factories into `BUILTINS[]` (in
+autoselect-priority order — `provider_all()[0]` is the default for the unset-`HAX_PROVIDER`
+case) and exposes `provider_find(name)` / `provider_all(n)` / `provider_list_names(out)` /
+`provider_default()`. The registry lives next to the adapters, not in `provider.h`, so the
+seam header stays a pure interface and callers (the `/provider` picker in `select.c`) can
+`#include "providers/registry.h"` without dragging in the closed set. Adding a compiled-in
+provider = drop a file under `src/providers/`, add its source to the `src/providers/` group
+of `sources` in `meson.build` (kept sorted), then add the `extern PROVIDER_*` declaration to
+`registry.h` and insert the symbol into `BUILTINS[]` in `registry.c` at the right priority
+position.
 
 **Presets over the OpenAI Chat Completions translation** — `openai.c` owns the shared
 message/tool/SSE translation and exposes
@@ -103,8 +106,24 @@ message/tool/SSE translation and exposes
 background `/props` context probe), and `openrouter.c` (background
 `/api/v1/models/{model}/endpoints` context probe + attribution headers) — each supply a
 `struct openai_preset` declaring defaults: display name, default base URL, API-key env
-fallback, prompt_cache_key policy, extra request headers. New OpenAI-compatible backends are
-typically a ~30-line preset file.
+fallback, prompt_cache_key policy, extra request headers. New OpenAI-compatible backends with
+real auth/probe logic are typically a ~30-line preset file.
+
+**Config-defined providers (`providers/config_provider.{c,h}`)** — backends with no custom
+code are *data*, not a preset file: a named `providers.<name>` block in `config.json` (the
+file/runtime-override lane — no per-provider env binding; the env/ad-hoc lane stays the
+global `openai-compatible` preset reading `openai.*`), optionally seeded by a built-in
+*recipe* in the `RECIPES[]` table (ollama ships as one). A recipe is the default field set
+for a well-known endpoint; a config block overlays it key-by-key. The `api` field picks the
+dialect (today only `openai-completions`, which builds via `openai_provider_new_preset` with
+`openai_preset.config_prefix = "providers.<name>"` so the named provider reads its *own*
+subtree — base_url / api_key / send_cache_key / reasoning_roundtrip — and a stray
+`HAX_OPENAI_*` can't bleed in). The API key is the one value taken from the environment, via
+a recipe- or config-declared `api_key_env`. `config_providers()` builds a heap factory per
+recipe/config name (deduped); `registry.c` merges them below `BUILTINS[]` (a built-in name
+wins) so they appear in `provider_find` / `provider_all` / `/provider` with no code change.
+Ship a recipe only for an endpoint fully describable by static metadata (no auth/transport
+code) — model discovery is live via `/v1/models`, so there is no catalog to maintain.
 
 **`struct context` and `struct item` (provider.h)** are the flat conversation view: a sequence
 of `USER_MESSAGE | ASSISTANT_MESSAGE | TOOL_CALL | TOOL_RESULT | REASONING`. `REASONING` carries

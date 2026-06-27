@@ -18,7 +18,7 @@
  *
  * prompt_cache_key is sent by default since OpenRouter routes some upstream
  * providers (Anthropic, OpenAI) that honor prefix-cache hints. */
-struct provider *openrouter_provider_new(void);
+struct provider *openrouter_provider_new(const char *name);
 
 extern const struct provider_factory PROVIDER_OPENROUTER;
 

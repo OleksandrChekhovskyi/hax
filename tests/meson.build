@@ -22,6 +22,7 @@ test_sources = [
     'test_util.c',
 
     'providers/test_codex_events.c',
+    'providers/test_config_provider.c',
     'providers/test_openai_events.c',
     'providers/test_openai_messages.c',
     'providers/test_registry.c',

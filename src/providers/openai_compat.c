@@ -8,8 +8,9 @@
 #include "openai.h"
 #include "util.h"
 
-struct provider *openai_compat_provider_new(void)
+struct provider *openai_compat_provider_new(const char *name)
 {
+    (void)name;
     const char *base_env = config_str("openai.base_url");
     if (!base_env || !*base_env) {
         hax_err("HAX_PROVIDER=openai-compatible requires HAX_OPENAI_BASE_URL\n"
@@ -39,8 +40,9 @@ struct provider *openai_compat_provider_new(void)
 /* Availability is simply "a base URL is configured" — we can't probe an
  * arbitrary third-party endpoint cheaply or know its auth scheme, so a set
  * HAX_OPENAI_BASE_URL is the signal. */
-static int openai_compat_available(const char **reason)
+static int openai_compat_available(const char *name, const char **reason)
 {
+    (void)name;
     const char *base = config_str("openai.base_url");
     if (base && *base)
         return 1;

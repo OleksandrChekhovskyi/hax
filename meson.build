@@ -52,9 +52,9 @@ sources = files(
 
     'src/providers/codex.c',
     'src/providers/codex_events.c',
+    'src/providers/config_provider.c',
     'src/providers/llamacpp.c',
     'src/providers/mock.c',
-    'src/providers/ollama.c',
     'src/providers/openai.c',
     'src/providers/openai_compat.c',
     'src/providers/openai_events.c',

@@ -897,8 +897,9 @@ static void codex_destroy(struct provider *p)
     free(c);
 }
 
-struct provider *codex_provider_new(void)
+struct provider *codex_provider_new(const char *name)
 {
+    (void)name;
     char *path = expand_home("~/.codex/auth.json");
     size_t len = 0;
     char *contents = slurp_file(path, &len);
@@ -970,8 +971,9 @@ struct provider *codex_provider_new(void)
 /* Usable iff ~/.codex/auth.json parses and carries both tokens we need —
  * the cheap, file-only precondition the constructor checks, without the
  * network probe it then spawns. */
-static int codex_available(const char **reason)
+static int codex_available(const char *name, const char **reason)
 {
+    (void)name;
     char *path = expand_home("~/.codex/auth.json");
     if (!path) {
         if (reason)

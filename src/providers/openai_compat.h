@@ -26,7 +26,7 @@
  *   nested  — `reasoning: {enabled: true, effort?: <effort>}` (for
  *             OpenRouter-style routers and proxies that gate CoT
  *             emission on an explicit opt-in) */
-struct provider *openai_compat_provider_new(void);
+struct provider *openai_compat_provider_new(const char *name);
 
 extern const struct provider_factory PROVIDER_OPENAI_COMPAT;
 

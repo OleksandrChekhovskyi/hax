@@ -104,8 +104,6 @@ static const struct config_setting REGISTRY[] = {
     /* per-provider */
     {"llamacpp.port",              "HAX_LLAMACPP_PORT",           "8080",
      "Port for the local llama-server (when openai.base_url is unset)"},
-    {"ollama.port",                "HAX_OLLAMA_PORT",             "11434",
-     "Port for the local ollama daemon (when openai.base_url is unset)"},
     {"openrouter.title",           "HAX_OPENROUTER_TITLE",        NULL,
      "X-Title header for OpenRouter attribution"},
     {"openrouter.referer",         "HAX_OPENROUTER_REFERER",      NULL,
@@ -269,6 +267,82 @@ static const char *obj_get(json_t *root, const char *key)
     return json_string_value(v);
 }
 
+/* Like obj_get, but returns the JSON *node* at `key` (object, array, or
+ * scalar) rather than its string value — for callers that need to walk an
+ * object's members. NULL when absent or a path segment isn't an object. */
+static json_t *obj_get_node(json_t *root, const char *key)
+{
+    if (!root)
+        return NULL;
+    json_t *v = json_object_get(root, key); /* flat dotted key */
+    if (v)
+        return v;
+    json_t *cur = root;
+    const char *p = key;
+    for (;;) {
+        const char *dot = strchr(p, '.');
+        if (!dot)
+            return json_object_get(cur, p);
+        char seg[64];
+        size_t n = (size_t)(dot - p);
+        if (n >= sizeof seg)
+            return NULL;
+        memcpy(seg, p, n);
+        seg[n] = '\0';
+        cur = json_object_get(cur, seg);
+        if (!json_is_object(cur))
+            return NULL;
+        p = dot + 1;
+    }
+}
+
+/* Add the name `k`[0..len) to *arr if absent (growing it), so the merged
+ * result is deduplicated. */
+static void add_object_key(char ***arr, size_t *n, size_t *cap, const char *k, size_t len)
+{
+    for (size_t i = 0; i < *n; i++)
+        if (strlen((*arr)[i]) == len && strncmp((*arr)[i], k, len) == 0)
+            return;
+    if (*n == *cap) {
+        *cap = *cap ? *cap * 2 : 8;
+        *arr = xrealloc(*arr, *cap * sizeof(**arr));
+    }
+    char *s = xmalloc(len + 1);
+    memcpy(s, k, len);
+    s[len] = '\0';
+    (*arr)[(*n)++] = s;
+}
+
+/* Append the immediate member names of the object at `key` in `tier` to *arr.
+ * Both authoring forms config.c accepts are honored, mirroring obj_get's read
+ * path: the nested object ({"providers": {"<name>": {...}}}) and top-level
+ * flat-dotted leaves ({"providers.<name>.<leaf>": "..."}, whose immediate
+ * child is the segment after "<key>." up to the next '.'). Without the flat
+ * scan a flat-defined provider would be readable but undiscoverable. Names
+ * already present are skipped, so the merged result is deduplicated. */
+static void collect_object_keys(json_t *tier, const char *key, char ***arr, size_t *n, size_t *cap)
+{
+    if (!json_is_object(tier))
+        return;
+    const char *k;
+    json_t *v;
+    json_t *obj = obj_get_node(tier, key);
+    if (json_is_object(obj)) {
+        json_object_foreach(obj, k, v) add_object_key(arr, n, cap, k, strlen(k));
+    }
+    size_t prefix = strlen(key);
+    json_object_foreach(tier, k, v)
+    {
+        if (strncmp(k, key, prefix) != 0 || k[prefix] != '.')
+            continue;
+        const char *seg = k + prefix + 1;
+        const char *dot = strchr(seg, '.');
+        size_t len = dot ? (size_t)(dot - seg) : strlen(seg);
+        if (len)
+            add_object_key(arr, n, cap, seg, len);
+    }
+}
+
 static const char *file_get(const char *key)
 {
     return obj_get(g_config, key);
@@ -328,6 +402,19 @@ const char *config_default(const char *key)
 {
     const struct config_setting *s = find_setting(key);
     return s ? s->def : NULL;
+}
+
+size_t config_object_keys(const char *key, char ***out)
+{
+    char **arr = NULL;
+    size_t n = 0, cap = 0;
+    /* File and state tiers only: this enumerates user-authored structure
+     * (config.json's providers.*, primarily), and the override tier is
+     * flat-keyed so it holds no nested objects to walk. */
+    collect_object_keys(g_config, key, &arr, &n, &cap);
+    collect_object_keys(g_state, key, &arr, &n, &cap);
+    *out = arr;
+    return n;
 }
 
 /* The typed getters resolve skip-empty (resolve() already lands on the
