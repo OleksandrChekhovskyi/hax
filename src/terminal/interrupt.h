@@ -14,7 +14,7 @@
  *
  * Lifecycle:
  *   interrupt_init() once at startup.
- *   <user enters prompt — disarmed; libedit owns the tty>
+ *   <user enters prompt — disarmed; the line editor owns the tty>
  *   interrupt_arm() — raw mode on, watcher reading.
  *   <stream and tools run, periodically check interrupt_requested()>
  *   interrupt_disarm() — canonical mode restored, watcher paused, stdin drained.
@@ -23,9 +23,9 @@
  * Tty safety: at init we capture the current termios as the canonical
  * baseline and register atexit + signal handlers (SIGINT/SIGTERM/SIGHUP/
  * SIGQUIT) that always restore that baseline — even on a panic mid-arm. The
- * baseline is what was in effect when interrupt_init ran, before libedit's
- * first prompt; libedit save/restore around its own readline calls is
- * unaffected.
+ * baseline is what was in effect when interrupt_init ran, before the line
+ * editor's first prompt; the editor's own termios save/restore around each
+ * input_readline() call is unaffected.
  *
  * No-tty mode: when stdin or stdout isn't a tty, all entry points become
  * no-ops — there's no Esc to detect on a piped stdin, and putting a

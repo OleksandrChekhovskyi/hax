@@ -160,7 +160,8 @@ static void *spinner_thread(void *arg)
     struct spinner *s = arg;
 
     /* Block all signals so SIGINT/SIGPIPE/SIGWINCH are delivered to the
-     * main thread, which owns libedit, libcurl, and stdout's line state. */
+     * main thread, which owns the line editor, libcurl, and stdout's
+     * line state. */
     sigset_t mask;
     sigfillset(&mask);
     pthread_sigmask(SIG_SETMASK, &mask, NULL);

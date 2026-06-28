@@ -4,8 +4,9 @@
 
 #include <stddef.h>
 
-/* Set LC_CTYPE — and only LC_CTYPE — to a UTF-8 locale so libedit's
- * wide-char machinery can handle multibyte input and prompt bytes. We
+/* Set LC_CTYPE — and only LC_CTYPE — to a UTF-8 locale so the line
+ * editor and renderers can decode multibyte text and measure it with
+ * wcwidth() (see utf8_codepoint_cells). We
  * deliberately avoid LC_ALL/"" so the user's LC_NUMERIC etc. don't slip
  * in and break printf/JSON output (e.g. German "1,5" instead of "1.5").
  * Cascade: env-defined LC_CTYPE → C.UTF-8 → en_US.UTF-8. Idempotent and
@@ -13,8 +14,8 @@
 void locale_init_utf8(void);
 
 /* True iff locale_init_utf8() established a UTF-8 LC_CTYPE. Callers that
- * emit multibyte content through wide-aware libraries (libedit) should
- * fall back to ASCII when this returns 0. */
+ * emit multibyte glyphs (prompt, spinner, picker markers) should fall
+ * back to ASCII when this returns 0. */
 int locale_have_utf8(void);
 
 /* Allocate-or-die helpers. On OOM they print to stderr and abort — we are a

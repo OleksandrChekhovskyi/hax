@@ -199,9 +199,10 @@ static char *resolve_resume_arg(const char *cwd, const char *arg)
 int main(int argc, char **argv)
 {
     /* Must run before anything that emits or decodes multibyte text —
-     * libedit in particular crashes on non-UTF-8 LC_CTYPE if our prompt
-     * carries any UTF-8 byte. Touches LC_CTYPE only; LC_NUMERIC etc.
-     * stay at the C locale so printf output remains predictable. */
+     * the line editor and renderers size glyphs with wcwidth(), which
+     * mis-measures under a non-UTF-8 LC_CTYPE and breaks cursor
+     * positioning. Touches LC_CTYPE only; LC_NUMERIC etc. stay at the C
+     * locale so printf output remains predictable. */
     locale_init_utf8();
 
     struct hax_opts opts = {0};

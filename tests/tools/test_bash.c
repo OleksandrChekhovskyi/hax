@@ -765,9 +765,11 @@ static void test_bash_caps_long_line(void)
 
 static void test_bash_sanitizes_non_utf8(void)
 {
-    /* printf \xff produces an invalid UTF-8 byte which must be replaced.
-     * Quadruple-backslash: C-literal → JSON → shell each eat one layer. */
-    char *out = call_bash("printf '\\\\xff'");
+    /* printf \377 produces an invalid UTF-8 byte which must be replaced.
+     * Octal, not \xff: POSIX printf only mandates octal escapes and dash
+     * (Debian's /bin/sh) emits hex escapes literally. Quadruple-backslash:
+     * C-literal → JSON → shell each eat one layer. */
+    char *out = call_bash("printf '\\\\377'");
     EXPECT(strstr(out, "\xEF\xBF\xBD") != NULL);
     free(out);
 }
@@ -850,8 +852,10 @@ static void test_bash_streamed_binary_marker_isolated_from_escape(void)
     /* The first printf emits an unterminated CSI introducer; the
      * second pads enough bytes to (likely) flush the kernel buffer in
      * its own read so streamed_anything becomes true before the
-     * trailing NUL triggers binary suppression. ESC is encoded as
-     *  so the JSON parser accepts it. */
+     * trailing NUL triggers binary suppression. ESC reaches the shell
+     * as a raw byte via the JSON \u001b escape — the JSON parser
+     * decodes it, so the shell's printf interprets no escapes here and
+     * the fixture is portable across /bin/sh implementations. */
     char *out =
         call_bash_streamed("printf '\\u001b['; sleep 0.03; printf 'pad pad pad pad\\\\0bin'", &cap);
     EXPECT(out != NULL);

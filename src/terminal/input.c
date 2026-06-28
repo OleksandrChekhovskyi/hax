@@ -978,8 +978,7 @@ static char *read_line_canonical(size_t *out_len)
 {
     /* No prompt in the non-tty path: stdout may be a pipe or file, in
      * which case ANSI prompt bytes pollute scriptable output, and stdin
-     * may be piped with no human to read a prompt anyway. Match
-     * libedit's old behavior of staying silent when not interactive. */
+     * may be piped with no human to read a prompt anyway. */
     /* Read byte-by-byte rather than fgets+strlen so embedded NULs in
      * piped input survive (fgets terminates at \n but strlen-based
      * append truncates at the first NUL). fgetc returns int and

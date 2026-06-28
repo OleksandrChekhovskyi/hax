@@ -6,8 +6,10 @@
 
 /*
  * Generate a unified diff between two in-memory buffers by shelling out to
- * /usr/bin/diff -u. POSIX-mandated tool, present on every Linux/macOS box —
- * no extra deps and no in-house diff algorithm to maintain.
+ * diff -u (resolved via PATH). POSIX-mandated and preinstalled almost
+ * everywhere, but not guaranteed: minimal Arch installs lack diffutils, so
+ * the README lists it as a dependency. No in-house diff algorithm to
+ * maintain.
  *
  * a_label / b_label are the strings emitted on the `--- ` / `+++ ` header
  * lines (e.g. "a/path", "b/path", or "/dev/null" for absent files).
