@@ -9,9 +9,7 @@
 #include "config.h"
 #include "util.h"
 
-/* Default text used when HAX_SYSTEM_PROMPT is unset and --raw was not
- * passed. AGENTS.md / env block / skills are appended via agent_env_build_suffix
- * and the assembled string is what's sent to the provider. */
+/* Base prompt used when HAX_SYSTEM_PROMPT is unset. */
 static const char DEFAULT_SYSTEM_PROMPT[] =
     "You are hax, a minimalist coding assistant running in the user's terminal. "
     "You have access to `read`, `bash`, `write`, and `edit` tools.\n"
@@ -43,9 +41,7 @@ static const char DEFAULT_SYSTEM_PROMPT[] =
     "fix if they knew. Skip pre-existing issues and trivial style. Calibrate "
     "severity honestly; no flattery. Empty findings is a valid result.";
 
-/* Tool table shared between the interactive REPL and the non-interactive
- * one-shot path: both register the same set, and `--raw` omits the whole
- * list with one decision in agent_session_init. */
+/* Shared tool table; --raw omits it in agent_session_init. */
 static const struct tool *const TOOLS[] = {
     &TOOL_READ,
     &TOOL_BASH,
@@ -75,12 +71,8 @@ void items_append(struct item **items, size_t *n, size_t *cap, struct item it)
 
 const char *resolve_reasoning_effort(const struct provider *p)
 {
-    /* A persisted/configured effort only makes sense for a provider that
-     * exposes a categorical effort ladder. Without one (NULL hook or an empty
-     * list — llama.cpp, ollama, a non-reasoning model …) the value can't be
-     * sent meaningfully, so don't resolve it: this keeps a stale effort left in
-     * state.json from leaking into the banner, the wire request, and the logs
-     * after switching to such a provider. */
+    /* Ignore persisted effort for providers without an effort ladder, otherwise
+     * a stale value from another backend would leak into requests and logs. */
     const char *const *eff = NULL;
     struct provider *mp = (struct provider *)p;
     size_t n = (p && p->list_efforts) ? p->list_efforts(mp, &eff) : 0;
@@ -93,11 +85,8 @@ const char *resolve_reasoning_effort(const struct provider *p)
     if (!*e)
         return NULL; /* explicit empty → force omit */
 
-    /* The value must be one the current provider's ladder actually accepts. A
-     * stale pick carried in state.json from a different backend (e.g. "medium"
-     * persisted under codex, then a switch to a low/high-only provider) would
-     * otherwise be sent verbatim and 400 every turn. On a non-member fall back
-     * to the provider's default rather than honoring a value it can't take. */
+    /* A non-member value is probably stale state from another backend; prefer
+     * the provider default over sending an effort it rejects. */
     for (size_t i = 0; i < n; i++)
         if (strcmp(e, eff[i]) == 0)
             return e;
@@ -128,23 +117,16 @@ int agent_session_init(struct agent_session *s, struct provider *p, const struct
 {
     memset(s, 0, sizeof(*s));
 
-    /* model may resolve empty: a provider with no default (openai, ollama,
-     * …) and nothing configured yet — or no provider at all (`p == NULL`),
-     * when the configured/default one couldn't construct (codex not logged
-     * in, …) and the user will pick another with /provider. That's no longer
-     * fatal — the interactive REPL starts anyway and prompts the user to pick
-     * one with /model or /provider, guarding the stream path until they do.
-     * The one-shot path, which can't prompt, checks for an empty model /
-     * missing provider itself and fails fast there. */
+    /* Empty model/provider is allowed here so the REPL can start and let the
+     * user choose one; one-shot rejects that state before streaming. */
     const char *model = config_str("model");
     if ((!model || !*model) && p)
         model = p->default_model;
     s->model = model ? xstrdup(model) : NULL;
     s->provider_name = p ? p->name : NULL;
 
-    /* --raw collapses to "no system message + no tools advertised" so the
-     * model sees only the user text. HAX_SYSTEM_PROMPT="" remains the
-     * narrower opt-out (no system message but tools stay). */
+    /* --raw omits both system text and tools; HAX_SYSTEM_PROMPT="" omits only
+     * system text. */
     s->raw = opts->raw;
     s->sys = build_system_prompt(s->model, opts->raw);
     const char *effort = resolve_reasoning_effort(p);
@@ -172,9 +154,7 @@ int agent_session_reconfigure(struct agent_session *s, struct provider *p)
     free(s->model);
     s->model = xstrdup(model);
     s->provider_name = p->name;
-    /* Rebuild the system prompt so its env block names the new model.
-     * Tools and history are deliberately untouched — a switch keeps the
-     * conversation going under the new settings. */
+    /* Rebuild the prompt for the new model; tools and history stay intact. */
     free(s->sys);
     s->sys = build_system_prompt(s->model, s->raw);
     const char *effort = resolve_reasoning_effort(p);
@@ -238,20 +218,8 @@ void agent_session_absorb(struct agent_session *s, struct turn *t, size_t *out_b
     for (size_t i = 0; i < n_new; i++) {
         if (new_items[i].kind == ITEM_TOOL_CALL)
             had_tc = 1;
-        /* Stamp reasoning with the provider+model that produced it, so a later
-         * /model or /provider switch (or a resumed mixed-model file) can't
-         * replay its model-bound blob against the wrong backend. Owned by the
-         * item (freed in item_free); the session's borrowed names are valid
-         * here — the producing provider is still live.
-         *
-         * The provider stamp is the display name (s->provider_name = p->name),
-         * which is intentionally the provider's identity: HAX_PROVIDER_NAME (and
-         * config-defined custom providers) name a backend, so it distinguishes
-         * two openai-compatible endpoints that share the "openai-compatible"
-         * factory id. Renaming a backend therefore re-identifies it and older
-         * CoT stops replaying — acceptable, since this is soft reasoning_text
-         * (assistant text + tool history always replay); Codex's model-bound
-         * encrypted blob rides provider "codex", which has no display override. */
+        /* Stamp model-bound CoT with provider+model; custom provider names
+         * intentionally invalidate old reasoning after a rename. */
         if (new_items[i].kind == ITEM_REASONING) {
             new_items[i].provider = s->provider_name ? xstrdup(s->provider_name) : NULL;
             new_items[i].model = s->model ? xstrdup(s->model) : NULL;

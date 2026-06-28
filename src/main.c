@@ -18,49 +18,30 @@
 #include "transcript.h"
 #include "util.h"
 
-/* Hard cap on agentic round-trips in -p mode. Generous — a real task
- * rarely needs more than a couple of dozen — but bounded so a confused
- * model can't spin forever in a pipeline where Ctrl-C may not reach us
- * cleanly. No CLI knob for this yet; add one if a real use case shows up. */
+/* Cap agentic -p loops so a confused model can't spin forever in a pipeline. */
 #define ONESHOT_MAX_TURNS 100
 
 static struct provider *pick_provider(int print_mode)
 {
     const char *which = config_str("provider");
-    /* "Explicit" = the user named a provider somewhere (HAX_PROVIDER, the
-     * config file's "provider" key, or a prior /provider pick in state.json).
-     * Absent that, fall to the built-in default (the highest-priority
-     * provider) — which we treat more gently below, since the user never
-     * asked for it. */
+    /* Explicit provider picks fail strictly; an implicit default may autoselect. */
     int chosen = which && *which;
     const struct provider_factory *f = chosen ? provider_find(which) : provider_default();
     if (!f) {
-        /* Unknown name — a typo in HAX_PROVIDER / the config / a stale
-         * state.json pick (only the explicit path can miss; provider_default
-         * is never NULL). Name the value, not the source, with the supported
-         * set as the help. */
+        /* Unknown explicit provider; show the supported set. */
         fprintf(stderr, "hax: unknown provider '%s' (supported: ", which);
         provider_list_names(stderr);
         fprintf(stderr, ")\n");
         return NULL;
     }
 
-    /* Strict construction (failure surfaces verbatim, becomes fatal) when
-     * the provider was explicitly chosen — the user asked for this backend,
-     * so "codex not logged in" / "server down" is the answer they need — or
-     * in one-shot mode, which can't prompt for an alternative and must not
-     * emit a chatty auto-select note onto piped stdout. The built-in default
-     * is built strictly here too in one-shot. */
+    /* Explicit choices and one-shot mode fail strictly; one-shot cannot prompt
+     * or emit autoselect chatter onto piped stdout. */
     if (chosen || print_mode)
         return f->new(f->name);
 
-    /* Interactive cold start with nothing configured: one path picks
-     * something. The auto-selector tries the built-in default first (cheap
-     * to check, so the common logged-in start stays instant and silent),
-     * and on its failure probes the rest and starts on the first available
-     * one — or returns NULL for a provider-less REPL whose banner points at
-     * /provider. (`f` is the resolved default here; autoselect re-finds it
-     * as its top candidate.) */
+    /* Interactive cold start: try the default, then probe alternatives, else
+     * start provider-less so the banner can point at /provider. */
     return provider_autoselect();
 }
 
@@ -92,9 +73,7 @@ static const char HELP_TEXT[] =
     "Configuration is via environment variables (HAX_PROVIDER, HAX_MODEL,\n"
     "and the rest) or ~/.config/hax/config.json; env wins. See README.md.\n";
 
-/* Concatenate `argv[0..n-1]` with single spaces between elements. Returns
- * malloc'd. Used to assemble a positional-args prompt: `hax -p hello world`
- * → "hello world". */
+/* Join positional prompt args with spaces. Returns malloc'd. */
 static char *join_args(int n, char **argv)
 {
     if (n <= 0)
@@ -115,8 +94,7 @@ static char *join_args(int n, char **argv)
     return out;
 }
 
-/* Slurp every byte from stdin into a malloc'd buffer. Used when -p is
- * given without positional args and stdin is a pipe/file. */
+/* Read the piped/file stdin prompt for -p. Returns malloc'd. */
 static char *read_all_stdin(void)
 {
     struct buf b;
@@ -134,20 +112,14 @@ static char *read_all_stdin(void)
             break;
         }
     }
-    /* buf_steal returns NULL when nothing was appended; guarantee a
-     * non-NULL string (possibly empty) so the caller can use it
-     * uniformly. */
+    /* buf_steal returns NULL when empty; callers expect a string. */
     if (!b.data)
         return xstrdup("");
     return buf_steal(&b);
 }
 
-/* Strip exactly one trailing newline (LF or CRLF) in place. Stdin from
- * `echo` / heredocs / editors arrives with a trailing newline that the
- * user almost certainly didn't mean as part of the prompt; a `printf`
- * pipe without a newline keeps every byte intact. Spaces and tabs are
- * left alone — they may carry intent (markdown hard break, indented
- * code, exact-match-this-string prompts). */
+/* Strip one trailing LF/CRLF from stdin prompts, but leave other whitespace:
+ * spaces/tabs may be intentional (markdown breaks, indented code, exact text). */
 static void strip_trailing_newline(char *s)
 {
     size_t n = strlen(s);
@@ -157,11 +129,8 @@ static void strip_trailing_newline(char *s)
         s[--n] = '\0';
 }
 
-/* Resolve a --resume=ARG to a session file path. ARG is a session id —
- * exact match, or a unique prefix — among the sessions recorded for `cwd`.
- * Sessions are per-directory by design; there's no path/cross-directory
- * form (cd to the project to resume its work). Returns a malloc'd path, or
- * NULL when nothing matches or the prefix is ambiguous. Caller frees. */
+/* Resolve --resume=ARG (exact id or unique prefix) within `cwd`'s sessions.
+ * Returns a malloc'd path, or NULL on no/ambiguous match. */
 static char *resolve_resume_arg(const char *cwd, const char *arg)
 {
     struct session_entry *list;
@@ -197,10 +166,8 @@ static char *resolve_resume_arg(const char *cwd, const char *arg)
 
 int main(int argc, char **argv)
 {
-    /* Must run before anything that emits or decodes multibyte text —
-     * libedit in particular crashes on non-UTF-8 LC_CTYPE if our prompt
-     * carries any UTF-8 byte. Touches LC_CTYPE only; LC_NUMERIC etc.
-     * stay at the C locale so printf output remains predictable. */
+    /* Establish UTF-8 LC_CTYPE before any multibyte prompt/UI; leave other
+     * locale categories at C so numeric output stays predictable. */
     locale_init_utf8();
 
     struct hax_opts opts = {0};
@@ -209,18 +176,13 @@ int main(int argc, char **argv)
     int resume_mode = 0;
     const char *resume_arg = NULL;
 
-    /* Declared up front and initialized to safe values so every error
-     * path can funnel through the err_prompt/err_curl unwind below with a
-     * plain `goto` — no per-site free() boilerplate, and no goto crossing
-     * an initializer it would later read. */
+    /* Initialized up front so error paths can share the goto unwind without
+     * crossing declarations they later read. */
     int rc = 1;
     char *prompt = NULL;
     char *resume_path = NULL;
 
-    /* `-h`, `-p`, `-c` keep conventional short forms; --raw and --resume
-     * are long-only (`-r` is avoided to leave room for a future short
-     * alias without collision). --resume takes an optional ID, so
-     * `--resume` alone opens the picker and `--resume=ID` is direct. */
+    /* --resume takes an optional ID: bare opens the picker, =ID resumes directly. */
     enum {
         OPT_RAW = 0x100,
         OPT_RESUME,
@@ -280,11 +242,8 @@ int main(int argc, char **argv)
         goto err_prompt;
     }
 
-    /* Acquire and validate the -p prompt before initializing curl or
-     * constructing a provider — the latter can be expensive (llama.cpp
-     * probes the local server, codex reads OAuth state) and a typo'd
-     * `hax -p` with no piped input shouldn't surface as a probe or auth
-     * error before the real "needs a prompt" diagnostic. */
+    /* Validate the -p prompt before provider startup so prompt errors aren't
+     * hidden behind probe/auth failures. */
     if (print_mode) {
         if (optind < argc) {
             prompt = join_args(argc - optind, argv + optind);
@@ -305,11 +264,8 @@ int main(int argc, char **argv)
         }
     }
 
-    /* Resolve --continue / --resume to a session file before any provider
-     * work: --continue picks the newest session in this cwd, --resume[=ID]
-     * either matches an id/path or opens the interactive picker. Done here
-     * so a cancelled picker or a bad id exits cleanly without constructing
-     * a provider. */
+    /* Resolve resume state before provider startup so bad ids or cancelled
+     * pickers exit cleanly. */
     if (continue_mode || resume_mode) {
         char cwd[4096];
         if (!getcwd(cwd, sizeof(cwd))) {
@@ -324,10 +280,8 @@ int main(int argc, char **argv)
                 resume_path = xstrdup(list[0].path); /* newest by mtime */
             session_list_free(list, n);
             if (!resume_path) {
-                /* Nothing to continue. In -p that's an error: the prompt
-                 * would otherwise run against empty history with only an
-                 * easy-to-miss stderr note, contradicting the explicit
-                 * request. Interactively, just start a fresh REPL. */
+                /* In -p, --continue without history would silently run the prompt
+                 * against empty context; interactive mode can just start fresh. */
                 if (print_mode) {
                     hax_err("no past conversation in this directory to continue");
                     goto err_prompt;
@@ -336,9 +290,7 @@ int main(int argc, char **argv)
             }
         } else if (resume_arg) {
             if (!*resume_arg) {
-                /* `--resume=` (empty, e.g. an unset shell var) would prefix-
-                 * match every session — refuse it rather than resume an
-                 * arbitrary one. (Bare `--resume` with no '=' is the picker.) */
+                /* Empty --resume= would prefix-match every session; refuse it. */
                 hax_err("--resume= requires a session id");
                 goto err_prompt;
             }
@@ -352,13 +304,8 @@ int main(int argc, char **argv)
                 goto err_prompt;
             }
         } else {
-            /* The bare-`--resume` picker switches the terminal to raw mode
-             * here, during option resolution — before agent_run() installs
-             * the terminal-restore atexit/signal handlers. Install them now
-             * so a SIGTERM/SIGHUP/SIGQUIT (or normal exit) while the picker
-             * is up still restores cooked mode and re-shows the cursor,
-             * rather than leaving the parent shell raw. Idempotent and
-             * TTY-gated: agent_run()'s later call is then a no-op. */
+            /* The picker enters raw mode before agent_run() would install restore
+             * handlers; install them here so signals/exit leave the shell cooked. */
             interrupt_init();
             resume_path = session_picker_run(cwd, NULL, NULL);
             if (!resume_path) {
@@ -380,36 +327,22 @@ int main(int argc, char **argv)
      * the trace/transcript paths. */
     config_init();
 
-    /* Truncate HAX_TRACE and HAX_TRANSCRIPT here, before any provider
-     * startup or session init. Without this, a fast-fail run (bad
-     * config, missing HAX_MODEL, no OAuth) would exit with stale files
-     * still on disk despite the documented truncate-on-startup
-     * behavior. trace_init forces the lazy fopen in trace.c; the
-     * transcript file is just truncated — its header gets written
-     * later when sys+tools are known. */
+    /* Truncate HAX_TRACE/HAX_TRANSCRIPT before provider startup so fast-fail
+     * runs don't leave stale files. The transcript header is written later
+     * when sys+tools are known. */
     trace_init();
     transcript_log_init();
 
     struct provider *p = pick_provider(print_mode);
-    /* A provider that can't be constructed (codex not logged in, no API key,
-     * local server down) is fatal only in one-shot mode, which can't prompt
-     * for an alternative. Interactively we start the REPL with no provider:
-     * pick_provider already printed why, the banner points at /provider, and
-     * agent_run streams nothing until a working one is chosen. */
+    /* Provider construction failure is fatal only for -p; the REPL can start
+     * provider-less and point the user at /provider. */
     if (!p && print_mode)
         goto err_curl;
 
-    /* agent_run may swap the provider at runtime (/provider), updating `p`
-     * to whatever is live at exit (possibly from NULL to a real one); the
-     * one-shot path never does. Either way `p` below is the provider to tear
-     * down — NULL if the user exited without ever choosing one. */
+    /* agent_run writes back the live provider after /provider swaps; one-shot doesn't. */
     rc = print_mode ? oneshot_run(p, prompt, &opts, ONESHOT_MAX_TURNS) : agent_run(&p, &opts);
 
-    /* Each provider's destroy() is responsible for joining whatever
-     * background work it spawned (probes, prefetches, ...) before
-     * releasing the state those workers may still be writing to.
-     * curl_global_cleanup() runs after destroy(), so any libcurl
-     * handles in flight have necessarily been wound down by then. */
+    /* destroy() joins provider background work before curl_global_cleanup(). */
     if (p)
         p->destroy(p);
 err_curl:

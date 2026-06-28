@@ -46,8 +46,8 @@ int md_in_table(const struct md_renderer *m)
     return 0;
 }
 
-/* ---- stdout capture (freopen → regular file, so isatty()→0 and the
- * spinner stays synchronous; same approach as test_tool_render). ---- */
+/* Redirect stdout to a regular file so isatty() is false and the spinner stays
+ * synchronous, matching test_tool_render. */
 
 static char captured[131072];
 

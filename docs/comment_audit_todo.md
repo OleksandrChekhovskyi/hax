@@ -14,7 +14,7 @@ For each chunk:
 
 ## Chunks
 
-- [ ] Agent REPL and turn orchestration
+- [x] Agent REPL and turn orchestration
   - Source:
     - `src/agent.c`
     - `src/agent.h`

@@ -26,14 +26,11 @@ static void oneshot_flush(struct transcript_log *tlog, struct session_log *slog,
     session_log_append(slog, items, n);
 }
 
-/* Per-stream callback state for the oneshot path. We hand turn.c every
- * event for item assembly and capture the human-readable error text on
- * EV_ERROR (turn sets t->error but doesn't carry the message). */
+/* Oneshot stream state: assemble the turn and retain EV_ERROR's message. */
 struct oneshot_ctx {
     struct turn *turn;
     char *error_msg; /* malloc'd; set on EV_ERROR */
-    /* Filled from EV_DONE; -1/-1/-1 if the provider didn't report. Drives
-     * the auto-compaction threshold check between round-trips. */
+    /* From EV_DONE; -1 fields mean unreported. Used for auto-compaction. */
     struct stream_usage usage;
 };
 
@@ -48,11 +45,8 @@ static int on_event(const struct stream_event *ev, void *user)
     return 0;
 }
 
-/* Walk `items` and write the text of every assistant message produced
- * after `from` to stdout, one terminating newline per message. The model
- * may emit multiple assistant messages in a single response (rare with
- * the providers we ship, but legal); printing all of them avoids
- * silently swallowing content. */
+/* Print every assistant message produced after `from`; multiple messages are
+ * legal, so don't silently drop extras. */
 static void print_assistant_text(const struct item *items, size_t from, size_t to)
 {
     for (size_t i = from; i < to; i++) {
@@ -67,12 +61,8 @@ static void print_assistant_text(const struct item *items, size_t from, size_t t
     }
 }
 
-/* Summarize history into a single seed message in place — the non-interactive
- * twin of agent.c's agent_compact. No display, no tick, no Esc handling: a
- * summarization request, then history is replaced and both logs
- * rotate to fresh files (seeded /new). Returns 1 if compacted, 0 on
- * empty/failure (history left intact). Used between round-trips so a long
- * agentic `-p` run survives its own context growth. */
+/* Non-interactive compaction: summarize, replace history, and rotate logs.
+ * Returns 1 if compacted, 0 on empty/failure with history intact. */
 static int oneshot_compact(struct agent_session *s, struct provider *p, struct session_log *slog,
                            struct transcript_log *tlog)
 {
@@ -103,18 +93,15 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
     struct agent_session sess;
     if (agent_session_init(&sess, p, opts) < 0)
         return 1;
-    /* No interactive picker in -p mode, so a missing model is fatal here
-     * (agent_session_init now tolerates it for the REPL's sake). */
+    /* No interactive picker in -p mode, so a missing model is fatal. */
     if (!sess.model || !*sess.model) {
         hax_err("HAX_MODEL is required for provider '%s' (no default)", p->name ? p->name : "?");
         agent_session_free(&sess);
         return 1;
     }
 
-    /* Resume: seed history from a prior session before the new prompt is
-     * added, so -p can continue a conversation. An unreadable file is fatal
-     * rather than silently running the prompt against empty history; an
-     * empty-but-readable session loads as zero items and resumes empty. */
+    /* Seed resumed history before the new prompt; unreadable sessions are fatal
+     * rather than silently running against empty context. */
     size_t n_resumed = 0;
     if (opts->resume_path) {
         struct item *loaded = NULL;
@@ -130,14 +117,8 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         n_resumed = nl;
     }
 
-    /* HAX_TRANSCRIPT mirror, opened (and the file truncated) before
-     * any model call so even an early-error or zero-turn run leaves
-     * a fresh file behind. NULL when the env var is unset; all
-     * transcript_log_* entry points are NULL-safe. Appended at the end
-     * of each round-trip so `tail -f` works during long agentic runs;
-     * the final append at `done:` catches the no-tool exit path and
-     * is idempotent on the others (transcript_log_append no-ops when
-     * n_items hasn't grown). */
+    /* Open/truncate HAX_TRANSCRIPT before streaming. Per-round flushes support
+     * `tail -f`; the final flush is idempotent and catches the no-tool path. */
     struct transcript_log *tlog = transcript_log_open(sess.sys, sess.tools, sess.n_tools);
     /* Append-only session record — continue the resumed file, else begin
      * a fresh one. NULL when persistence is disabled. */
@@ -149,17 +130,11 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         transcript_log_append(tlog, sess.items, sess.n_items);
 
     agent_session_add_user(&sess, prompt);
-    /* Land the prompt on disk before any provider call so a hang or
-     * crash mid-stream still leaves the triggering input visible in
-     * the log. */
+    /* Log the prompt before streaming so hangs/crashes keep the trigger visible. */
     oneshot_flush(tlog, slog, sess.items, sess.n_items);
 
-    /* Keep the machine from idling to sleep across the whole agentic
-     * run — a long unattended -p invocation (or one driven from
-     * automation) shouldn't be cut short by the idle timer. Released at
-     * `done:`, the single cleanup funnel for every exit path below.
-     * Gated by the keep_awake config key; no-op when off or where no
-     * inhibitor helper exists. */
+    /* Prevent idle sleep across unattended -p runs; released at `done:` and
+     * no-op when keep_awake is off or unsupported. */
     keepawake_acquire();
 
     int rc = 0;
@@ -177,8 +152,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         struct turn t;
         turn_init(&t);
         struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL, .usage = {-1, -1, -1}};
-        /* Oneshot doesn't arm interrupt and has no idle UI to surface
-         * — pass a NULL tick so http skips the progress hook entirely. */
+        /* No interrupt or idle UI in -p; skip the progress hook. */
         p->stream(p, &ctx, sess.model, on_event, &oc, NULL, NULL);
 
         if (t.error) {
@@ -190,9 +164,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         }
         free(oc.error_msg);
 
-        /* Exact context size this round-trip reported (input subsumes the
-         * prior prefix, output is what was just generated) — the signal the
-         * between-round-trip auto-compaction check reads below. */
+        /* Latest reported window size for the between-round-trip compaction check. */
         long round_ctx = (oc.usage.input_tokens >= 0 && oc.usage.output_tokens >= 0)
                              ? oc.usage.input_tokens + oc.usage.output_tokens
                              : -1;
@@ -207,16 +179,8 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
             goto done;
         }
 
-        /* Run tools silently — no display, no spinner. The result is
-         * ctrl_strip'd at the boundary just like the verbose path so
-         * the conversation lands in history in the same normalized
-         * form. emit_display callback is NULL: streamed output would
-         * have nowhere to go.
-         *
-         * --raw gate (sess.n_tools == 0): advertised no tools to the
-         * provider, so a tool_call coming back is either a model bug
-         * or a malicious backend. Refuse to execute and feed an error
-         * result to the model — the same gate exists in agent.c. */
+        /* Run tools silently but normalize history like the REPL. If --raw
+         * advertised no tools, refuse any returned tool_call instead of running it. */
         size_t current_end = sess.n_items;
         for (size_t i = n_before; i < current_end; i++) {
             if (sess.items[i].kind != ITEM_TOOL_CALL)
@@ -224,9 +188,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
             const struct tool *tool = sess.n_tools ? find_tool(sess.items[i].tool_name) : NULL;
             char *result;
             if (tool) {
-                /* Apply the same per-tool arg normalization as
-                 * interactive dispatch (agent.c::dispatch_tool_call) so
-                 * tool behavior doesn't silently differ between modes. */
+                /* Match interactive per-tool arg normalization. */
                 char *rewritten = NULL;
                 if (tool->preprocess_args && sess.items[i].tool_arguments_json)
                     rewritten = tool->preprocess_args(sess.items[i].tool_arguments_json);
@@ -247,16 +209,11 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
                              .output = history,
                          });
         }
-        /* Round-trip complete (assistant + tool calls + their results
-         * all in sess.items): flush. CALL/RESULT pairing is intact for
-         * the renderer's lookahead. */
+        /* Flush only after CALL/RESULT pairs are complete for this round-trip. */
         oneshot_flush(tlog, slog, sess.items, sess.n_items);
 
-        /* Between-round-trip auto-compaction: the model called tools and we
-         * loop for another request. If this round-trip's reported usage nears
-         * the window, summarize the completed work now so a long agentic chain
-         * doesn't run itself into an overflow. The next iteration streams from
-         * the seed. Quiet on stderr so a `tail`'d -p log shows it happened. */
+        /* If this tool round-trip nears the window, compact before the next
+         * request and note it quietly on stderr for `tail -f` logs. */
         if (compact_should_auto(round_ctx, compact_context_limit(p)) &&
             oneshot_compact(&sess, p, slog, tlog)) {
             int tty = isatty(fileno(stderr));
@@ -272,20 +229,12 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
 done:
     keepawake_release();
     oneshot_flush(tlog, slog, sess.items, sess.n_items);
-    /* Surface the session id on stderr (stdout is the model's answer, kept
-     * clean for piping) so a one-shot run can be picked up with --resume.
-     * NULL when nothing was recorded or persistence is disabled. */
+    /* Put the resume hint on stderr so stdout stays pipeable. */
     const char *hint = session_log_resume_hint(slog);
     if (hint) {
-        /* Flush the answer (block-buffered when stdout is piped) before the
-         * unbuffered stderr write, so a combined 2>&1 stream shows the hint
-         * after the answer rather than racing ahead of it. */
+        /* Flush stdout first so combined 2>&1 logs show the hint after the answer. */
         fflush(stdout);
-        /* Always lead with a blank line so the hint reads as a footnote
-         * rather than part of the answer — agents commonly fold stderr
-         * into stdout (2>&1), where the model's output would otherwise run
-         * straight into it. Dim only on a terminal; a captured log stays
-         * plain (no stray ANSI). */
+        /* Blank line makes the hint a footnote under 2>&1; dim only on a TTY. */
         int tty = isatty(fileno(stderr));
         fprintf(stderr, "\n%sresume with: hax --resume=%s%s\n", tty ? ANSI_DIM : "", hint,
                 tty ? ANSI_RESET : "");

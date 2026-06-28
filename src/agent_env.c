@@ -32,19 +32,9 @@
 /* Spec limit for the description field; longer values are truncated. */
 #define SKILL_DESCRIPTION_MAX 1024
 
-/* Host-level utilities a coding agent reaches for regardless of project
- * type. Project-driven tooling (npm/pnpm/yarn/bun, cargo, go, cmake, …)
- * is selected by lockfiles in cwd, not by host availability, so we
- * deliberately don't probe for those — knowing pnpm exists doesn't help
- * when the project has package-lock.json.
- *
- * `replaces` is the older-equivalent the model should drop in favor of
- * `name` when `name` is present. NULL means "no specific replacement"
- * (the tool just adds capability — jq, gh, node). The pair is rendered
- * inline in the preferred_commands line so the directive is filtered
- * automatically: a missing `name` means its replacement guidance also
- * disappears, which avoids telling the model to use a tool that isn't
- * installed. */
+/* Host-level utilities worth advertising independent of project type. Project
+ * tools are inferred from files in cwd, not from global availability. `replaces`
+ * is shown only when the preferred command is actually installed. */
 struct probed_cmd {
     const char *name;
     const char *replaces;
@@ -55,17 +45,9 @@ static const struct probed_cmd PROBED_COMMANDS[] = {
 };
 static const size_t N_PROBED_COMMANDS = sizeof(PROBED_COMMANDS) / sizeof(PROBED_COMMANDS[0]);
 
-/* Walk $PATH and check whether `name` is an executable regular file in
- * any of its entries. Only absolute PATH entries are considered: empty
- * entries (POSIX "the current directory"), `.`, and any other relative
- * form are skipped, because anything cwd-relative could pick up a
- * project-local binary and we'd then advertise it as a host utility —
- * confusing at best, and a way to steer the model toward repo-provided
- * commands at worst. The S_ISREG guard matters too: access(X_OK)
- * returns success for searchable directories, so a PATH entry containing
- * a directory named `rg` would otherwise make us claim rg is installed
- * even though /bin/sh -c rg can't run it. No subprocess: just stat +
- * access, microseconds total. */
+/* Probe only absolute PATH entries for executable regular files. Relative
+ * entries could advertise project-local binaries as host tools; S_ISREG avoids
+ * directories that access(X_OK) would otherwise accept. */
 static int have_command(const char *name)
 {
     const char *path = getenv("PATH");
@@ -144,14 +126,8 @@ static void append_env_block(struct buf *b, const char *model)
     int git = project_root != NULL;
     free(project_root);
 
-    /* Linux paths are arbitrary byte sequences and env vars are user-set,
-     * so any of cwd / shell / model could carry non-UTF-8 bytes. Jansson
-     * rejects non-UTF-8 and embedded NULs, so clean each before splicing.
-     * uname output is POSIX-defined to be ASCII and doesn't need this
-     * treatment. */
-    /* `~` is friendlier than the full $HOME prefix and what the user types
-     * themselves; collapse before sanitizing so the substitution operates on
-     * raw bytes (sanitize_utf8 is a one-way pass). */
+    /* Sanitize user-controlled path/env bytes before they enter provider JSON.
+     * Collapse $HOME first, while the path is still raw bytes. */
     char *cwd_display = collapse_home(cwd);
     char *cwd_clean = sanitize_utf8(cwd_display, strlen(cwd_display));
     free(cwd_display);
@@ -204,15 +180,8 @@ static void append_env_block(struct buf *b, const char *model)
     free(model_clean);
 }
 
-/* Append a single AGENTS.md file under a `## <display_path>` header.
- * `path` is the absolute filesystem path used to read the file;
- * `display_path` is what the model sees in the section header — a
- * `~`-collapsed absolute path so the model can re-read the file with
- * the same string it sees here. NULL display_path falls back to `path`.
- * Returns 1 if the file existed and was appended, 0 otherwise. The
- * first successful call also writes the `# Project Context` section
- * header (and a leading separator if the buffer already has env-block
- * content). */
+/* Append one AGENTS.md under a model-visible absolute-ish header. The first
+ * successful append also creates the `# Project Context` section. */
 static int append_agents_md(struct buf *b, const char *path, const char *display_path,
                             int *seen_header)
 {
@@ -222,11 +191,8 @@ static int append_agents_md(struct buf *b, const char *path, const char *display
     if (!content)
         return 0;
 
-    /* AGENTS.md is user-authored and may contain embedded NULs or invalid
-     * UTF-8; the path itself comes from getcwd / $HOME / $XDG_CONFIG_HOME
-     * which on Linux can also carry arbitrary bytes. Both would break
-     * provider JSON (NUL truncates strlen, Jansson rejects non-UTF-8) —
-     * sanitize both before splicing into the prompt. */
+    /* User-authored content and filesystem paths can contain NULs or invalid
+     * UTF-8; sanitize both before splicing into provider JSON. */
     char *clean = sanitize_utf8(content, n);
     free(content);
     size_t clean_len = strlen(clean);
@@ -272,13 +238,8 @@ static void append_project_agents_md(struct buf *b, int *seen_header)
         return;
     }
 
-    /* Collect every AGENTS.md from cwd up to and including the project
-     * root, then emit farthest-first so closer files take precedence.
-     * append_agents_md handles missing/non-regular paths via slurp_*'s
-     * own guard, so we don't pre-filter here. Display paths use the
-     * absolute form with $HOME collapsed to `~` — relative paths like
-     * `../AGENTS.md` invite the model to rebase them on whatever it
-     * thinks the base is (we've seen Qwen rebase onto $HOME). */
+    /* Emit cwd→root AGENTS.md files farthest-first so closer files win. Display
+     * absolute-ish paths; models have been observed rebasing relative ones. */
     char *paths[AGENTS_MD_MAX_LEVELS];
     char *display_paths[AGENTS_MD_MAX_LEVELS];
     int n = 0;
@@ -383,14 +344,8 @@ static int cmp_skill_entry(const void *a, const void *b)
     return strcmp(sa->dir, sb->dir);
 }
 
-/* Scan one root for skills. For each `<root>/<name>/SKILL.md` regular
- * file, append a fresh entry to *out (xrealloc'd as needed). Skips
- * dotfiles and entries already present in *out (so an earlier root takes
- * precedence over a later one — used to let project skills shadow
- * same-named global ones). The displayed path is what the model sees:
- * callers should pass an absolute root so the resulting `<root>/<name>/
- * SKILL.md` reads unambiguously (the project scan prepends cwd, and
- * $XDG/$HOME-based globals are absolute in any sane setup). */
+/* Scan `<root>/<name>/SKILL.md` entries. Earlier roots win, so project skills
+ * shadow globals; callers pass absolute roots for unambiguous prompt paths. */
 static void collect_skills(struct skill_entry **out, size_t *n, size_t *cap, const char *root)
 {
     DIR *d = opendir(root);
@@ -401,10 +356,8 @@ static void collect_skills(struct skill_entry **out, size_t *n, size_t *cap, con
         if (ent->d_name[0] == '.')
             continue;
 
-        /* readdir bytes (and `root` from $HOME/$XDG) can be non-UTF-8 on
-         * Linux. Sanitize the dir name up front so dedup, sort, and prompt
-         * emission all see the same clean identifier; sanitize the path
-         * after we've read the file so opendir/stat still see raw bytes. */
+        /* Sanitize the identifier before dedup/sort, but keep raw path bytes
+         * until after filesystem access. */
         char *dir_clean = sanitize_utf8(ent->d_name, strlen(ent->d_name));
 
         int already = 0;
@@ -426,8 +379,7 @@ static void collect_skills(struct skill_entry **out, size_t *n, size_t *cap, con
         int truncated = 0;
         char *md = slurp_file_capped(skill_md, SKILL_FRONTMATTER_HEAD, &md_len, &truncated);
         if (!md) {
-            /* Missing, non-regular, or unreadable — slurp_* sets errno;
-             * we just skip the entry. */
+            /* Missing, non-regular, or unreadable: not a valid skill. */
             free(dir_clean);
             free(skill_md);
             continue;
@@ -460,9 +412,8 @@ static void append_skills(struct buf *b)
     struct skill_entry *skills = NULL;
     size_t n = 0, cap = 0;
 
-    /* Project first so its entries shadow same-named global ones. The root
-     * is built absolute so the displayed SKILL.md path is unambiguous; a
-     * relative `.agents/...` would be model-rebased onto $HOME or similar. */
+    /* Project first so same-named global skills are shadowed; use an absolute
+     * root because models have been observed rebasing relative paths. */
     char cwd[PATH_MAX];
     if (getcwd(cwd, sizeof(cwd))) {
         char *project_root = path_join(cwd, ".agents/skills");

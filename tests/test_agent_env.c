@@ -108,8 +108,6 @@ static int contains(const char *hay, const char *needle)
     return hay && strstr(hay, needle) != NULL;
 }
 
-/* ---------- env block ---------- */
-
 static void test_agent_env_block_present_by_default(void)
 {
     struct sandbox s;
@@ -234,8 +232,6 @@ static void test_both_knobs_disable_returns_null(void)
     unsetenv("HAX_NO_AGENTS_MD");
     sb_free(&s);
 }
-
-/* ---------- commands probe ---------- */
 
 /* Stage a fake executable named `name` under `dir` (creating `dir`).
  * Content is irrelevant — env.c only checks access(X_OK). */
@@ -426,8 +422,6 @@ static void test_commands_line_preserves_canonical_order(void)
     free(bin);
     sb_free(&s);
 }
-
-/* ---------- AGENTS.md walk ---------- */
 
 static void test_agents_md_cwd_only_no_root_marker(void)
 {
@@ -660,8 +654,6 @@ static void test_agents_md_invalid_bytes_sanitized(void)
     unsetenv("HAX_NO_ENV");
     sb_free(&s);
 }
-
-/* ---------- skills ---------- */
 
 static void test_skills_none(void)
 {

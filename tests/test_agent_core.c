@@ -24,17 +24,12 @@ const struct tool TOOL_BASH = {.def = {.name = "bash"}, .run = stub_run};
 const struct tool TOOL_WRITE = {.def = {.name = "write"}, .run = stub_run};
 const struct tool TOOL_EDIT = {.def = {.name = "edit"}, .run = stub_run};
 
-/* ---------- items_append ---------- */
-
 static void test_items_append_growth(void)
 {
     struct item *items = NULL;
     size_t n = 0, cap = 0;
 
-    /* Verify capacity doubling: empty → 16 → 32. We don't strictly need
-     * to depend on the doubling factor (that's an internal detail), but
-     * cap must always be >= n and growth must be amortized — i.e. cap
-     * grows in steps, not on every append. */
+    /* Capacity must cover all items and grow amortized, not on every append. */
     size_t prev_cap = 0;
     int cap_changes = 0;
     for (int i = 0; i < 40; i++) {
@@ -76,8 +71,6 @@ static void test_items_append_preserves_payload(void)
     free(items);
 }
 
-/* ---------- find_tool ---------- */
-
 static void test_find_tool(void)
 {
     EXPECT(find_tool("read") == &TOOL_READ);
@@ -87,8 +80,6 @@ static void test_find_tool(void)
     EXPECT(find_tool("nonexistent") == NULL);
     EXPECT(find_tool("") == NULL);
 }
-
-/* ---------- build_system_prompt ---------- */
 
 static void test_build_system_prompt_raw(void)
 {
@@ -172,8 +163,6 @@ static void test_build_system_prompt_with_suffix(void)
     unsetenv("HAX_NO_AGENTS_MD");
 }
 
-/* ---------- resolve_reasoning_effort ---------- */
-
 static const char *const test_effort_levels[] = {"low", "high"};
 
 static size_t test_list_efforts(struct provider *p, const char *const **out)
@@ -222,8 +211,6 @@ static void test_resolve_reasoning_effort(void)
     unsetenv("HAX_REASONING_EFFORT");
 }
 
-/* ---------- agent_session_init ---------- */
-
 static void test_session_init_raw(void)
 {
     /* --raw must produce sys=NULL, n_tools=0, tools=NULL even when
@@ -269,8 +256,6 @@ static void test_session_init_missing_model(void)
     agent_session_free(&s);
 }
 
-/* ---------- agent_session_add_user / add_boundary ---------- */
-
 static void test_session_add_user(void)
 {
     struct agent_session s = {0};
@@ -289,8 +274,6 @@ static void test_session_add_user(void)
     EXPECT(s.items == NULL);
     EXPECT(s.n_items == 0);
 }
-
-/* ---------- agent_session_absorb ---------- */
 
 /* Drive a `struct turn` through an event sequence without going through
  * a provider, so we have a deterministic source of new items to absorb. */
@@ -349,8 +332,6 @@ static void test_session_absorb_with_tool_call(void)
 
     agent_session_free(&s);
 }
-
-/* ---------- agent_session_context ---------- */
 
 static void test_session_context_snapshot(void)
 {
