@@ -246,6 +246,11 @@ static void apply_action(struct input *in, enum input_action a)
     case INPUT_ACTION_HISTORY_NEXT:
         input_core_history_next(in);
         return;
+    case INPUT_ACTION_PAGE_UP:
+    case INPUT_ACTION_PAGE_DOWN:
+        /* No paged motion at the line prompt; consumed so the sequence
+         * doesn't leak into the buffer as text. */
+        return;
     case INPUT_ACTION_KILL_WORD_FWD:
         input_core_kill_word_fwd(in);
         return;

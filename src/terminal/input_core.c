@@ -908,7 +908,7 @@ enum input_action input_core_decode_escape(input_byte_reader read, void *user)
         if (strcmp(seq, "200~") == 0)
             return INPUT_ACTION_PASTE_BEGIN;
 
-        /* Tilde-key family: Home/End/Delete and friends, encoded as
+        /* Tilde-key family: Home/End/Delete/PageUp/PageDown, encoded as
          * "<digit><final>" with optional modifier. xterm uses '~' and
          * "<digit>;<mod>~" for modified; rxvt encodes the modifier in
          * the final byte itself ('~' = none, '$' = Shift, '^' = Ctrl,
@@ -933,6 +933,10 @@ enum input_action input_core_decode_escape(input_byte_reader read, void *user)
                 return INPUT_ACTION_LINE_END;
             case '3':
                 return INPUT_ACTION_DELETE_FWD;
+            case '5':
+                return INPUT_ACTION_PAGE_UP;
+            case '6':
+                return INPUT_ACTION_PAGE_DOWN;
             }
         }
         /* Modified arrows / Home / End: "1;<mod><letter>". Modifier

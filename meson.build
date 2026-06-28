@@ -86,6 +86,7 @@ sources = files(
     'src/terminal/interrupt.c',
     'src/terminal/notify.c',
     'src/terminal/picker.c',
+    'src/terminal/picker_core.c',
     'src/terminal/ui.c',
 
     'src/text/utf8.c',

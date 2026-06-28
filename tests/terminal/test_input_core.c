@@ -1067,6 +1067,8 @@ static void test_decode_tilde_unmodified(void)
     EXPECT(decode("[4~") == INPUT_ACTION_LINE_END);
     EXPECT(decode("[8~") == INPUT_ACTION_LINE_END);
     EXPECT(decode("[3~") == INPUT_ACTION_DELETE_FWD);
+    EXPECT(decode("[5~") == INPUT_ACTION_PAGE_UP);
+    EXPECT(decode("[6~") == INPUT_ACTION_PAGE_DOWN);
 }
 
 static void test_decode_tilde_xterm_modified(void)
@@ -1075,6 +1077,8 @@ static void test_decode_tilde_xterm_modified(void)
      * for the keys we care about. */
     EXPECT(decode("[3;5~") == INPUT_ACTION_DELETE_FWD); /* Ctrl+Delete */
     EXPECT(decode("[7;5~") == INPUT_ACTION_LINE_START); /* Ctrl+Home */
+    EXPECT(decode("[5;5~") == INPUT_ACTION_PAGE_UP);    /* Ctrl+PageUp */
+    EXPECT(decode("[6;5~") == INPUT_ACTION_PAGE_DOWN);  /* Ctrl+PageDown */
 }
 
 static void test_decode_tilde_no_fkey_alias(void)

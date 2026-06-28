@@ -28,7 +28,7 @@
  *   - Esc / Ctrl-C / Ctrl-G cancel
  *
  * The filter is a case-insensitive, space-separated AND of substrings
- * matched against each item's `label` (see picker_match). On exit the
+ * matched against each item's `label` (see picker_core_match). On exit the
  * picker erases its own painted area, leaving the cursor at column 0 of
  * the line it started on so the caller can print a confirmation (or
  * nothing) with no leftover rows.
@@ -60,11 +60,5 @@ struct picker_opts {
 /* Run the picker. Returns the selected 0-based index into `items`, or -1
  * on cancel, an empty list, or a non-tty stdin/stdout. */
 long picker_run(const struct picker_opts *opts);
-
-/* Pure filter predicate: case-insensitive, `query` split on spaces into
- * terms, every term must occur as a substring of `text`. An empty or
- * NULL query matches everything. NULL `text` matches only an empty query.
- * Exposed for testing. */
-int picker_match(const char *text, const char *query);
 
 #endif /* HAX_PICKER_H */

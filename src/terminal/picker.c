@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "terminal/picker.h"
 
-#include <ctype.h>
 #include <errno.h>
 #include <poll.h>
 #include <stdio.h>
@@ -14,6 +13,7 @@
 #include "util.h"
 #include "terminal/ansi.h"
 #include "terminal/input_core.h"
+#include "terminal/picker_core.h"
 #include "terminal/ui.h"
 #include "text/utf8.h"
 
@@ -25,48 +25,6 @@
 /* Hard ceiling on visible rows so a tall terminal doesn't paint a wall of
  * list; the window scrolls to keep the selection in view past this. */
 #define PICKER_MAX_ROWS 12
-
-/* ---------------- pure filter ---------------- */
-
-/* Case-insensitive "does `hay` contain `needle`" over ASCII case. Bytes
- * >= 0x80 (UTF-8) compare verbatim, which is correct for the common
- * all-ASCII labels and degrades to case-sensitive for accented text —
- * acceptable for a filter, and avoids dragging locale casefolding in. */
-static int contains_ci(const char *hay, const char *needle, size_t nlen)
-{
-    if (nlen == 0)
-        return 1;
-    for (const char *p = hay; *p; p++) {
-        size_t i = 0;
-        while (i < nlen && p[i] &&
-               tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i]))
-            i++;
-        if (i == nlen)
-            return 1;
-    }
-    return 0;
-}
-
-int picker_match(const char *text, const char *query)
-{
-    if (!query || !*query)
-        return 1;
-    if (!text)
-        text = "";
-    /* Split the query on runs of spaces; every term must be found. */
-    const char *p = query;
-    while (*p) {
-        while (*p == ' ')
-            p++;
-        const char *start = p;
-        while (*p && *p != ' ')
-            p++;
-        size_t len = (size_t)(p - start);
-        if (len > 0 && !contains_ci(text, start, len))
-            return 0;
-    }
-    return 1;
-}
 
 /* ---------------- terminal geometry ---------------- */
 
@@ -83,22 +41,6 @@ static void term_size(int *cols, int *rows)
 }
 
 /* ---------------- raw mode + byte input ---------------- */
-
-struct picker_state {
-    const struct picker_opts *opts;
-    size_t *filtered; /* item indices currently matching the filter */
-    size_t n_filtered;
-    size_t sel; /* offset into filtered[] of the highlighted row */
-    size_t top; /* offset into filtered[] of the first visible row */
-    int viewport;
-    struct buf query;
-
-    int painted;   /* a paint has happened (so we can reposition over it) */
-    int prev_rows; /* rows the last paint emitted (cursor sits on the last) */
-
-    struct termios saved;
-    int raw_active;
-};
 
 static int raw_on(struct picker_state *s)
 {
@@ -479,96 +421,6 @@ static void paint(struct picker_state *s)
     s->painted = 1;
 }
 
-/* ---------------- selection / filter state ---------------- */
-
-/* Is the filtered row at offset `fi` selectable (not a disabled item)? */
-static int row_enabled(const struct picker_state *s, size_t fi)
-{
-    return !s->opts->items[s->filtered[fi]].disabled;
-}
-
-static void clamp_scroll(struct picker_state *s)
-{
-    if (s->n_filtered == 0) {
-        s->sel = 0;
-        s->top = 0;
-        return;
-    }
-    if (s->sel >= s->n_filtered)
-        s->sel = s->n_filtered - 1;
-    if (s->sel < s->top)
-        s->top = s->sel;
-    else if (s->sel >= s->top + (size_t)s->viewport)
-        s->top = s->sel - (size_t)s->viewport + 1;
-    /* Pull the window back when the list shrank under it. */
-    if (s->n_filtered <= (size_t)s->viewport)
-        s->top = 0;
-    else if (s->top + (size_t)s->viewport > s->n_filtered)
-        s->top = s->n_filtered - (size_t)s->viewport;
-}
-
-/* Snap the selection onto an enabled row if it currently sits on a disabled
- * one: search forward from the current offset, then backward. Leaves the
- * selection put only when every filtered row is disabled (then Enter is a
- * no-op). Keeps the cursor off unselectable rows after a filter change or a
- * jump. */
-static void ensure_enabled_sel(struct picker_state *s)
-{
-    if (s->n_filtered == 0 || row_enabled(s, s->sel))
-        return;
-    for (size_t i = s->sel; i < s->n_filtered; i++) {
-        if (row_enabled(s, i)) {
-            s->sel = i;
-            clamp_scroll(s);
-            return;
-        }
-    }
-    for (size_t i = s->sel; i-- > 0;) {
-        if (row_enabled(s, i)) {
-            s->sel = i;
-            clamp_scroll(s);
-            return;
-        }
-    }
-}
-
-static void recompute(struct picker_state *s)
-{
-    const char *q = s->query.len ? s->query.data : "";
-    s->n_filtered = 0;
-    for (size_t i = 0; i < s->opts->n; i++) {
-        if (picker_match(s->opts->items[i].label, q))
-            s->filtered[s->n_filtered++] = i;
-    }
-    clamp_scroll(s);
-    ensure_enabled_sel(s);
-}
-
-static void move_sel(struct picker_state *s, int delta)
-{
-    if (s->n_filtered == 0)
-        return;
-    /* Step in `delta`'s direction to the next enabled row, skipping any
-     * disabled ones. Stay put if there's no enabled row that way. */
-    size_t cur = s->sel;
-    for (;;) {
-        if (delta < 0) {
-            if (cur == 0)
-                return;
-            cur--;
-        } else {
-            if (cur + 1 >= s->n_filtered)
-                return;
-            cur++;
-        }
-        if (row_enabled(s, cur)) {
-            s->sel = cur;
-            clamp_scroll(s);
-            return;
-        }
-    }
-}
-
 /* ---------------- public entry ---------------- */
 
 long picker_run(const struct picker_opts *opts)
@@ -601,7 +453,7 @@ long picker_run(const struct picker_opts *opts)
         vp = PICKER_MAX_ROWS;
     s.viewport = vp;
 
-    recompute(&s);
+    picker_core_recompute(&s);
 
     if (raw_on(&s) < 0) {
         free(s.filtered);
@@ -626,7 +478,7 @@ long picker_run(const struct picker_opts *opts)
         if (c == 0x0d || c == 0x0a) { /* Enter / LF — accept */
             /* Only an enabled row is acceptable; a disabled highlight
              * (all rows disabled) does nothing. */
-            if (s.n_filtered && row_enabled(&s, s.sel)) {
+            if (s.n_filtered && picker_core_row_enabled(&s, s.sel)) {
                 result = (long)s.filtered[s.sel];
                 done = 1;
             }
@@ -634,16 +486,16 @@ long picker_run(const struct picker_opts *opts)
             if (s.query.len) {
                 s.query.len = utf8_prev(s.query.data, s.query.len);
                 s.query.data[s.query.len] = '\0';
-                recompute(&s);
+                picker_core_recompute(&s);
             }
         } else if (c == 0x15) { /* Ctrl-U — clear filter */
             if (s.query.len) {
                 s.query.len = 0;
                 s.query.data[0] = '\0';
-                recompute(&s);
+                picker_core_recompute(&s);
             }
         } else if (c == 0x0e || c == 0x10) { /* Ctrl-N / Ctrl-P */
-            move_sel(&s, c == 0x0e ? +1 : -1);
+            picker_core_move_sel(&s, c == 0x0e ? +1 : -1);
         } else if (c == 0x1b) { /* ESC: bare = cancel, otherwise a key sequence */
             unsigned char nb;
             if (read_byte_timeout(&nb, ESC_TIMEOUT_MS) <= 0)
@@ -651,20 +503,19 @@ long picker_run(const struct picker_opts *opts)
             struct seq_reader r = {.pending = nb};
             enum input_action a = input_core_decode_escape(seq_byte, &r);
             if (a == INPUT_ACTION_HISTORY_PREV)
-                move_sel(&s, -1);
+                picker_core_move_sel(&s, -1);
             else if (a == INPUT_ACTION_HISTORY_NEXT)
-                move_sel(&s, +1);
-            else if (a == INPUT_ACTION_LINE_START) {
-                s.sel = 0;
-                clamp_scroll(&s);
-                ensure_enabled_sel(&s); /* first enabled at/after the top */
-            } else if (a == INPUT_ACTION_LINE_END) {
-                s.sel = s.n_filtered ? s.n_filtered - 1 : 0;
-                clamp_scroll(&s);
-                ensure_enabled_sel(&s); /* last enabled at/before the bottom */
-            }
-            /* Any other sequence (unknown key, page motions we don't map)
-             * is ignored — never an accidental cancel. */
+                picker_core_move_sel(&s, +1);
+            else if (a == INPUT_ACTION_LINE_START)
+                picker_core_select_first(&s);
+            else if (a == INPUT_ACTION_LINE_END)
+                picker_core_select_last(&s);
+            else if (a == INPUT_ACTION_PAGE_UP)
+                picker_core_page_sel(&s, -1);
+            else if (a == INPUT_ACTION_PAGE_DOWN)
+                picker_core_page_sel(&s, +1);
+            /* Any other sequence (unknown key) is ignored — never an
+             * accidental cancel. */
         } else if (c >= 0x20) { /* printable — extend the filter */
             int seq = utf8_seq_len(c);
             char bytes[4];
@@ -677,7 +528,7 @@ long picker_run(const struct picker_opts *opts)
                 bytes[got++] = (char)b;
             }
             buf_append(&s.query, bytes, got);
-            recompute(&s);
+            picker_core_recompute(&s);
         }
         /* Other control bytes: ignore. */
 
