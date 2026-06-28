@@ -1,4 +1,6 @@
-build/
+# Meson build directories (any build* dir at repo root)
+/build*/
+
 .cache/
 *.o
 *.swp
