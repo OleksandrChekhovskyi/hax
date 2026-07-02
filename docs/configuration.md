@@ -150,6 +150,8 @@ See [debugging.md](./debugging.md) for trace and transcript details.
   bash call; `0` disables the cap. Default `30m`.
 - `bash.timeout_grace` / `HAX_BASH_TIMEOUT_GRACE` — grace period between SIGTERM and SIGKILL;
   `0` skips the grace period. Default `2s`.
+- `bash.shell` / `HAX_BASH_SHELL` — shell the bash tool execs, as a `$PATH` name or a path.
+  Default: `bash` when available, otherwise `sh`.
 
 The model can request `timeout_seconds` on a bash call, bounded by `bash.timeout_max`.
 

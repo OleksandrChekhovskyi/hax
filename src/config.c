@@ -79,6 +79,8 @@ static const struct config_setting REGISTRY[] = {
      "Ceiling on the model's per-call bash timeout; 0 disables"},
     {"bash.timeout_grace",         "HAX_BASH_TIMEOUT_GRACE",      "2s",
      "Grace window between SIGTERM and SIGKILL for bash commands; 0 skips"},
+    {"bash.shell",                 "HAX_BASH_SHELL",              NULL,
+     "Shell for the bash tool, a $PATH name or path (default: bash, else sh)"},
 
     /* http transport */
     {"http.max_retries",           "HAX_HTTP_MAX_RETRIES",        "4",

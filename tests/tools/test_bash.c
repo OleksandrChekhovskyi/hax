@@ -8,9 +8,11 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "config.h"
 #include "harness.h"
 #include "tool.h"
 #include "util.h"
+#include "system/fs.h"
 
 static char *call_bash(const char *cmd_json_escaped)
 {
@@ -1009,6 +1011,42 @@ static void test_bash_env_overrides(void)
     unsetenv("MAKEFLAGS");
 }
 
+static void test_bash_shell_prefers_bash(void)
+{
+    /* `$0` echoes the argv[0] the tool exec'd with. Default resolution
+     * must pick bash whenever PATH has one and fall back to sh
+     * (Alpine/busybox, minimal containers). The CONFIG_VALUE_DEFAULT
+     * sentinel pins the built-in chain so a developer's own
+     * config.json bash.shell can't skew the assertion. */
+    setenv("HAX_BASH_SHELL", CONFIG_VALUE_DEFAULT, 1);
+    char *bash = fs_which("bash");
+    char *out = call_bash("echo $0");
+    EXPECT_STR_EQ(out, bash ? "bash\n" : "sh\n");
+    free(out);
+    free(bash);
+    unsetenv("HAX_BASH_SHELL");
+}
+
+static void test_bash_shell_override(void)
+{
+    setenv("HAX_BASH_SHELL", "/bin/sh", 1);
+    char *out = call_bash("echo $0");
+    EXPECT_STR_EQ(out, "sh\n");
+    free(out);
+    unsetenv("HAX_BASH_SHELL");
+}
+
+static void test_bash_shell_override_bad_value_falls_back(void)
+{
+    /* A shell that doesn't resolve must degrade to the default chain
+     * (with a one-time stderr warning), not break every bash call. */
+    setenv("HAX_BASH_SHELL", "hax-definitely-not-a-shell", 1);
+    char *out = call_bash("echo still-works");
+    EXPECT_STR_EQ(out, "still-works\n");
+    free(out);
+    unsetenv("HAX_BASH_SHELL");
+}
+
 static void test_bash_streamed_history_truncated(void)
 {
     /* Streamed bash history must apply the same OUTPUT_CAP as the
@@ -1080,6 +1118,9 @@ int main(void)
     test_bash_stdout_is_not_a_tty();
     test_bash_stderr_is_not_a_tty();
     test_bash_env_overrides();
+    test_bash_shell_prefers_bash();
+    test_bash_shell_override();
+    test_bash_shell_override_bad_value_falls_back();
     test_bash_lf_not_crlf();
     test_bash_head_tail_truncation();
     test_bash_head_kept_when_long_line_spans_gap();

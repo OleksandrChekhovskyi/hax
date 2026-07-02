@@ -29,8 +29,19 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
                          int *out_was_new);
 
 /* mkdir -p: create `path` and any missing intermediate components with
- * mode 0755. EEXIST is treated as success. Returns 0 on success, -1 on
- * failure with errno set by the underlying mkdir(2). */
+ * mode 0755. Existing directories (or symlinks to them) along the way are
+ * success; an existing non-directory anywhere fails with ENOTDIR, like
+ * `mkdir -p`. NULL/empty input is a no-op success. Returns 0 on success,
+ * -1 with errno set otherwise. */
 int fs_mkdir_p(const char *path);
+
+/* which(1): resolve `name` against $PATH, returning the first candidate
+ * that is an executable regular file (symlinks followed) as a malloc'd
+ * string, or NULL when nothing matches. A `name` containing '/' skips
+ * the search and is returned verbatim if it passes the same check.
+ * Deliberately stricter than POSIX PATH semantics: empty and relative
+ * PATH entries are skipped — resolving an executable out of whatever
+ * directory the agent happens to be in is a code-execution footgun. */
+char *fs_which(const char *name);
 
 #endif /* HAX_FS_H */

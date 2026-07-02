@@ -14,6 +14,7 @@
 #include "config.h"
 #include "tool.h"
 #include "util.h"
+#include "system/fs.h"
 #include "system/path.h"
 #include "terminal/interrupt.h"
 #include "text/utf8.h"
@@ -57,7 +58,7 @@ static long sat_add(long now, long delta)
  * ESRCH, which with HAX_BASH_TIMEOUT_GRACE=0 would let the loop break
  * and block in waitpid() until the command exits naturally. The
  * fallback to kill(pid, …) is safe in that window: the child hasn't
- * exec'd /bin/sh yet, so there are no descendants to leak.
+ * exec'd the shell yet, so there are no descendants to leak.
  *
  * Caller invariant: pid must NOT have been reaped before we get here.
  * After the kernel reaps the pid, it can recycle it on the next
@@ -753,7 +754,7 @@ static void build_body_and_trunc(struct capture *cap, int has_nul, struct buf *b
  * threaded (spinner, libcurl) and only async-signal-safe functions are
  * legal between fork() and exec() in that case. setenv() isn't one:
  * it can take glibc's env/malloc locks, which may have been held by
- * another thread at fork time, deadlocking the child before /bin/sh
+ * another thread at fork time, deadlocking the child before the shell
  * starts. The strings here are either literals or borrowed straight
  * from environ (we don't own them); only the array itself is heap-
  * allocated, so the caller frees it with a single free().
@@ -860,6 +861,39 @@ static char **build_child_env(void)
     return envp;
 }
 
+/* Pick the shell for `-c`. Models overwhelmingly write bash-isms
+ * ([[ ]], pipefail, `&>`) no matter what the tool description says,
+ * and on Debian-family systems /bin/sh is dash — where `cmd &> f`
+ * even parses as "background cmd, truncate f" and silently misruns.
+ * So prefer bash wherever it lives (PATH lookup covers NixOS and
+ * friends) and fall back to POSIX sh (Alpine/busybox, minimal
+ * containers). `bash.shell` overrides the chain; a value that doesn't
+ * resolve warns once and falls through rather than breaking every
+ * call. Resolved before fork() because PATH search is not async-
+ * signal-safe in the forked child of a multithreaded process. */
+static char *resolve_shell(void)
+{
+    const char *cfg = config_str("bash.shell");
+    if (cfg && *cfg) {
+        char *p = fs_which(cfg);
+        if (p)
+            return p;
+        static int warned;
+        if (!warned) {
+            warned = 1;
+            hax_warn("bash.shell: '%s' not found or not executable; using default", cfg);
+        }
+    }
+    char *p = fs_which("bash");
+    if (p)
+        return p;
+    /* PATH may be stripped in odd embedded environments; the ABI-
+     * stable location still covers macOS and virtually every distro. */
+    if (access("/bin/bash", X_OK) == 0)
+        return xstrdup("/bin/bash");
+    return xstrdup("/bin/sh");
+}
+
 /* Runs in the forked child after stdout/stderr have been pointed at
  * the pipe write end. Stdin is re-pointed at /dev/null so commands
  * that try to read (cat with no args, git commit waiting on a
@@ -867,7 +901,8 @@ static char **build_child_env(void)
  * a fd the agent has no way to feed. Only async-signal-safe
  * operations between fork() and execve(), per POSIX rules for
  * forking a multithreaded process. Never returns. */
-static void exec_shell_child(const char *cmd, char *const envp[])
+static void exec_shell_child(const char *shell, const char *argv0, const char *cmd,
+                             char *const envp[])
 {
     /* Close stdin first so /dev/null (when open succeeds) lands on
      * fd 0 directly — avoids a dup2 + close dance. If open somehow
@@ -875,8 +910,8 @@ static void exec_shell_child(const char *cmd, char *const envp[])
      * return EBADF, still preferable to blocking. */
     close(STDIN_FILENO);
     (void)open("/dev/null", O_RDONLY);
-    char *const argv[] = {(char *)"sh", (char *)"-c", (char *)cmd, NULL};
-    execve("/bin/sh", argv, (char *const *)envp);
+    char *const argv[] = {(char *)argv0, (char *)"-c", (char *)cmd, NULL};
+    execve(shell, argv, (char *const *)envp);
     _exit(127);
 }
 
@@ -912,9 +947,16 @@ static void stream_suffix(tool_emit_display_fn emit_display, void *user, size_t 
 static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn emit_display,
                        void *user)
 {
-    /* Build the env vector before fork so the post-fork child doesn't
-     * have to call non-async-signal-safe setenv. */
+    /* Build the env vector and resolve the shell before fork so the
+     * post-fork child only performs async-signal-safe calls (strrchr
+     * for the basename isn't on the POSIX async-signal-safe list
+     * either, hence argv[0] is computed here too). argv[0] is the
+     * shell's basename so `$0` and ps output read as "bash"/"sh"
+     * rather than an absolute path. */
     char **envp = build_child_env();
+    char *shell = resolve_shell();
+    const char *argv0 = strrchr(shell, '/');
+    argv0 = argv0 ? argv0 + 1 : shell;
 
     /* A single pipe carries the child's combined stdout+stderr. We
      * tried PTY-based execution to keep stdout/stderr line-buffered
@@ -930,6 +972,7 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
      * the buffer flushes on exit). */
     int pipefds[2];
     if (pipe(pipefds) < 0) {
+        free(shell);
         free(envp);
         return xasprintf("pipe: %s", strerror(errno));
     }
@@ -939,6 +982,7 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
     if (pid < 0) {
         close(reader);
         close(writer);
+        free(shell);
         free(envp);
         return xasprintf("fork: %s", strerror(errno));
     }
@@ -954,10 +998,11 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
         dup2(writer, STDERR_FILENO);
         if (writer > STDERR_FILENO)
             close(writer);
-        exec_shell_child(cmd, envp); /* never returns */
+        exec_shell_child(shell, argv0, cmd, envp); /* never returns */
     }
     close(writer); /* parent only reads */
-    free(envp);    /* parent's copy; child got its own at fork */
+    free(shell);   /* parent's copies; child got its own at fork */
+    free(envp);
 
     long deadline = timeout_ms > 0 ? sat_add(monotonic_ms(), timeout_ms) : 0;
     long grace_ms = config_duration_ms("bash.timeout_grace");
@@ -1300,8 +1345,8 @@ const struct tool TOOL_BASH = {
         {
             .name = "bash",
             .description =
-                "Run a shell command via /bin/sh -c. Returns combined stdout+stderr plus "
-                "exit code.\n"
+                "Run a shell command via bash -c (POSIX sh -c where bash is unavailable). "
+                "Returns combined stdout+stderr plus exit code.\n"
                 "\n"
                 "Rules:\n"
                 "- Each call starts in <env> cwd; `cd` does not persist across calls.\n"

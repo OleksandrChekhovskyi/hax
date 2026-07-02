@@ -14,8 +14,11 @@
 #include "system/diff.h"
 #include "system/path.h"
 
-/* mkdir -p: create path and any missing intermediate components. EEXIST is
- * treated as success — the caller doesn't care if a dir is new or old. */
+/* mkdir -p: create path and any missing intermediate components. EEXIST on
+ * an intermediate is fine as-is — if the existing entry is not a directory,
+ * the next component's mkdir fails with ENOTDIR. The final component needs
+ * the explicit directory check: a plain file there also yields EEXIST, and
+ * real `mkdir -p` fails on that rather than "succeeding" with no dir. */
 int fs_mkdir_p(const char *path)
 {
     if (!path || !*path)
@@ -28,23 +31,30 @@ int fs_mkdir_p(const char *path)
     for (size_t i = 1; i < len; i++) {
         if (p[i] == '/') {
             p[i] = '\0';
-            if (mkdir(p, 0755) < 0 && errno != EEXIST) {
-                int saved = errno;
-                free(p);
-                errno = saved;
-                return -1;
-            }
+            if (mkdir(p, 0755) < 0 && errno != EEXIST)
+                goto err;
             p[i] = '/';
         }
     }
-    if (mkdir(p, 0755) < 0 && errno != EEXIST) {
-        int saved = errno;
-        free(p);
-        errno = saved;
-        return -1;
+    if (mkdir(p, 0755) < 0) {
+        if (errno != EEXIST)
+            goto err;
+        /* stat follows symlinks, so a link pointing at a directory
+         * passes — consistent with `mkdir -p` through such a link. */
+        struct stat st;
+        if (stat(p, &st) < 0 || !S_ISDIR(st.st_mode)) {
+            errno = ENOTDIR;
+            goto err;
+        }
     }
     free(p);
     return 0;
+
+err:;
+    int saved = errno;
+    free(p);
+    errno = saved;
+    return -1;
 }
 
 static char *parent_dir_of(const char *path)
@@ -282,4 +292,42 @@ out:
     if (out_was_new)
         *out_was_new = !file_existed;
     return diff;
+}
+
+/* X_OK alone is not enough: a *directory* with the search bit passes
+ * access() too, and a directory shadowing a real binary in a later
+ * $PATH entry would then be "resolved" and fail at exec time on every
+ * call. Require a regular file, like which(1) and shell PATH search;
+ * stat follows symlinks so `bash -> bash-5.2` links still pass. */
+static int is_executable_file(const char *path)
+{
+    struct stat st;
+    return access(path, X_OK) == 0 && stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+char *fs_which(const char *name)
+{
+    if (!name || !*name)
+        return NULL;
+    if (strchr(name, '/'))
+        return is_executable_file(name) ? xstrdup(name) : NULL;
+    const char *path = getenv("PATH");
+    if (!path)
+        return NULL;
+    const char *p = path;
+    for (;;) {
+        const char *sep = strchr(p, ':');
+        size_t len = sep ? (size_t)(sep - p) : strlen(p);
+        if (len > 0 && p[0] == '/') {
+            char *dir = xasprintf("%.*s", (int)len, p);
+            char *cand = path_join(dir, name);
+            free(dir);
+            if (is_executable_file(cand))
+                return cand;
+            free(cand);
+        }
+        if (!sep)
+            return NULL;
+        p = sep + 1;
+    }
 }
