@@ -355,24 +355,25 @@ static void paint(struct picker_state *s)
     buf_init(&row);
 
     /* The whole frame is one fwrite already; wrap it in synchronized output
-     * (DEC 2026) too so the climb/erase-then-redraw can't flash an
-     * intermediate blank on terminals that present mid-stream. */
+     * (DEC 2026) too. Redraw before erasing stale tails so terminals or tmux
+     * setups that ignore synchronized output don't show a blank picker between
+     * frames. */
     buf_append_str(&out, ANSI_SYNC_BEGIN);
 
-    /* Climb to the top of the prior paint and clear everything below, so
-     * a shrinking list (filter narrowed) leaves no stale rows behind. */
+    /* Climb to the top of the prior paint. Stale content is cleared after
+     * each redrawn row and below the final row. */
     if (s->painted && s->prev_rows > 1) {
         char up[16];
         snprintf(up, sizeof up, "\x1b[%dA", s->prev_rows - 1);
         buf_append_str(&out, up);
     }
     if (s->painted)
-        buf_append_str(&out, "\r\x1b[J");
+        buf_append(&out, "\r", 1);
 
     /* Each logical row is built into `row`, then flushed via the clipping
-     * backstop and joined with a leading CR/LF before all but the first — so
-     * the cursor parks on the final row, which the reposition math above and
-     * the exit erase both key off. */
+     * backstop, tail-cleared, and joined with a leading CR/LF before all but
+     * the first — so the cursor parks on the final row, which the reposition
+     * math above and the exit erase both key off. */
     int painted_rows = 0;
 #define EMIT_ROW()                                                                                 \
     do {                                                                                           \
@@ -380,6 +381,7 @@ static void paint(struct picker_state *s)
             buf_append_str(&out, "\r\n");                                                          \
         painted_rows++;                                                                            \
         emit_line_clipped(&out, row.data ? row.data : "", row.len, cols, utf8);                    \
+        buf_append_str(&out, ANSI_ERASE_LINE);                                                     \
         buf_reset(&row);                                                                           \
     } while (0)
 
@@ -410,6 +412,7 @@ static void paint(struct picker_state *s)
     }
 #undef EMIT_ROW
 
+    buf_append_str(&out, ANSI_ERASE_BELOW);
     buf_append_str(&out, ANSI_SYNC_END);
 
     buf_free(&row);

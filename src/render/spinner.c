@@ -129,26 +129,26 @@ static void draw_frame_locked(struct spinner *s)
     case SPINNER_LINE: {
         if (!s->started)
             return;
-        /* Erase first so a label swap (set_label while visible) doesn't
-         * leave trailing chars from a longer previous label. */
-        fputs("\r" ANSI_ERASE_LINE ANSI_DIM, stdout);
+        /* Draw before erasing the row tail so sync-less terminals don't show
+         * a blank spinner row between frames. */
+        fputs("\r" ANSI_DIM, stdout);
         fputs(glyph, stdout);
         fputc(' ', stdout);
         fputs(s->label, stdout);
-        fputs(ANSI_RESET, stdout);
+        fputs(ANSI_RESET ANSI_ERASE_LINE, stdout);
         fflush(stdout);
         return;
     }
     case SPINNER_TOOL_STATUS: {
         /* Two-tone gutter row: cyan glyph (matches the tool block's
-         * box-drawing strip color) followed by dim content. \r +
-         * erase-line clears stale content from the previous paint
-         * so a shorter line doesn't inherit trailing chars. */
-        fputs("\r" ANSI_ERASE_LINE ANSI_DIM_CYAN, stdout);
+         * box-drawing strip color) followed by dim content. Erase after
+         * drawing so shorter updates don't leave trailing chars without
+         * blanking the row first. */
+        fputs("\r" ANSI_DIM_CYAN, stdout);
         fputs(glyph, stdout);
         fputs(" " ANSI_RESET ANSI_DIM, stdout);
         fputs(s->tool_status_content ? s->tool_status_content : "", stdout);
-        fputs(ANSI_RESET, stdout);
+        fputs(ANSI_RESET ANSI_ERASE_LINE, stdout);
         fflush(stdout);
         return;
     }

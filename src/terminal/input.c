@@ -284,34 +284,34 @@ static void buf_append_csi(struct buf *f, int n, char final)
 }
 
 /* Walker callback for the live edit area: appends glyph bytes verbatim
- * and a `\r\n` + indent-spaces at every row break. With OPOST off (raw
- * mode) the terminal won't add the CR for us. The indent target is
- * delivered via ev->col — the walker has resolved it from the
- * cont_indent_col passed in. Output goes into the caller's `struct buf`
- * (passed as `user`) so the whole repaint reaches the tty as one write —
- * see paint(). */
+ * and clears the tail of each completed row before a `\r\n` + indent-spaces
+ * row break. With OPOST off (raw mode) the terminal won't add the CR for us.
+ * The indent target is delivered via ev->col — the walker has resolved it
+ * from the cont_indent_col passed in. Output goes into the caller's
+ * `struct buf` (passed as `user`) so the whole repaint reaches the tty as one
+ * write — see paint(). */
 static void paint_emit(const struct input_render_event *ev, void *user)
 {
     struct buf *f = user;
     if (ev->kind == INPUT_RENDER_GLYPH) {
         buf_append(f, ev->bytes, ev->n);
     } else {
-        buf_append(f, "\r\n", 2);
+        buf_append_str(f, ANSI_ERASE_LINE "\r\n");
         for (int k = 0; k < ev->col; k++)
             buf_append(f, " ", 1);
     }
 }
 
-/* Repaint the whole edit area. The entire frame — sync-begin, the
- * climb/erase, the prompt, the rendered buffer, the cursor repositioning,
- * sync-end — is assembled in one `struct buf` and emitted with a single
- * fwrite. Two things matter for flicker on a tall prompt: (1) stdout is
- * line-buffered on a tty, so emitting row-by-row would flush once per
- * `\n` and hand the terminal a separate write (and a chance to present a
- * half-drawn frame) for every visual row — batching collapses that to one
- * write; (2) DEC 2026 (ANSI_SYNC_BEGIN/END) tells terminals that support
- * it to present the frame atomically, so the erase-then-redraw can't show
- * an intermediate blank even if the bytes are chunked downstream. */
+/* Repaint the whole edit area. The entire frame — sync-begin, the climb,
+ * prompt, rendered buffer, tail clear, cursor repositioning, sync-end — is
+ * assembled in one `struct buf` and emitted with a single fwrite. Two things
+ * matter for flicker on a tall prompt: (1) stdout is line-buffered on a tty,
+ * so emitting row-by-row would flush once per `\n` and hand the terminal a
+ * separate write (and a chance to present a half-drawn frame) for every
+ * visual row — batching collapses that to one write; (2) DEC 2026
+ * (ANSI_SYNC_BEGIN/END) tells terminals that support it to present the frame
+ * atomically. We still redraw before erasing stale tails so terminals or tmux
+ * setups that ignore DEC 2026 don't show a blank prompt between frames. */
 static void paint(struct input *in)
 {
     int prompt_w = input_core_prompt_width(in->prompt);
@@ -321,16 +321,17 @@ static void paint(struct input *in)
     buf_init(&f);
     buf_append_str(&f, ANSI_SYNC_BEGIN);
 
-    /* Move to top of last edit area, erase to end of screen. */
+    /* Move to top of last edit area. Stale content is cleared after redraw. */
     if (in->last_cursor_row > 0)
         buf_append_csi(&f, in->last_cursor_row, 'A');
-    buf_append_str(&f, "\r" ANSI_ERASE_BELOW);
+    buf_append(&f, "\r", 1);
 
     buf_append_str(&f, in->prompt);
 
     int cont = in->wrap_cont_col0 ? 0 : prompt_w;
     struct input_layout L;
     input_core_render(in->buf, in->len, in->cursor, prompt_w, cont, cols, paint_emit, &f, &L);
+    buf_append_str(&f, ANSI_ERASE_BELOW);
 
     /* From end-of-content position, climb up to cursor row, then right. */
     int up = L.end_row - L.cursor_row;
@@ -383,7 +384,8 @@ static void row_widths_cb(const struct input_render_event *ev, void *user)
  * reflow on SIGWINCH (xterm, iTerm2, kitty, Alacritty, …). To clear
  * the right region we re-walk the buffer at the *previous* width to
  * recover each logical row's content width, then translate into a
- * physical-row climb under the new width.
+ * physical-row climb under the new width. The next paint performs that climb
+ * inside its synchronized frame and clears stale content after redraw.
  *
  * This assumes the terminal reflows soft-wrapped screen rows on resize,
  * which is the common behavior for modern terminal emulators. Terminals
@@ -392,9 +394,8 @@ static void row_widths_cb(const struct input_render_event *ev, void *user)
  * resize UX smooth instead of restarting the prompt for every shrink.
  *
  * Called at the top of each loop iteration — *before* applying the
- * next keypress — so last_rows / last_cursor_row still describe
- * what's on screen. Returns 1 if a resize was handled (caller
- * should repaint). */
+ * next keypress — so last_rows / last_cursor_row still describe what's on
+ * screen. Returns 1 if a resize was handled (caller should repaint). */
 static int handle_resize(struct input *in)
 {
     int new_cols = editor_cols();
@@ -428,11 +429,7 @@ static int handle_resize(struct input *in)
         free(widths);
     }
 
-    if (climb > 0)
-        printf("\x1b[%dA", climb);
-    fputs("\r\x1b[J", stdout);
-    fflush(stdout);
-    in->last_cursor_row = 0;
+    in->last_cursor_row = climb;
     in->last_rows = 0;
     return 1;
 }
@@ -461,7 +458,7 @@ static void submitted_emit(const struct input_render_event *ev, void *user)
     if (ev->kind == INPUT_RENDER_GLYPH) {
         buf_append(f, ev->bytes, ev->n);
     } else {
-        buf_append_str(f, ANSI_FG_DEFAULT "\r\n" ANSI_BRIGHT_MAGENTA "▌ ");
+        buf_append_str(f, ANSI_FG_DEFAULT ANSI_ERASE_LINE "\r\n" ANSI_BRIGHT_MAGENTA "▌ ");
     }
 }
 
@@ -476,7 +473,7 @@ static void append_user_message(struct buf *f, const char *text, size_t len, int
     buf_append_str(f, ANSI_BRIGHT_MAGENTA "▌ ");
     input_core_render(text, len, /*cursor=*/0, bar_col, bar_col, term_cols, submitted_emit, f,
                       NULL);
-    buf_append_str(f, ANSI_FG_DEFAULT "\r\n");
+    buf_append_str(f, ANSI_FG_DEFAULT ANSI_ERASE_LINE "\r\n");
 }
 
 void input_render_user_message(const char *text, size_t len, int term_cols)
@@ -489,10 +486,9 @@ void input_render_user_message(const char *text, size_t len, int term_cols)
     buf_free(&f);
 }
 
-/* Erase the edit area and re-emit the buffer with a magenta stripe and
- * magenta body so submitted user messages stay clearly marked in the
- * scrollback against agent output. The erase and the re-emit ride one
- * synchronized frame so the prompt is replaced in place without a flash. */
+/* Replace the edit area with a magenta-striped committed user message. Draw
+ * before erasing stale tails so sync-less terminals don't flash a blank prompt
+ * on submit. */
 static void render_submitted(struct input *in)
 {
     struct buf f;
@@ -500,8 +496,9 @@ static void render_submitted(struct input *in)
     buf_append_str(&f, ANSI_SYNC_BEGIN);
     if (in->last_cursor_row > 0)
         buf_append_csi(&f, in->last_cursor_row, 'A');
-    buf_append_str(&f, "\r" ANSI_ERASE_BELOW);
+    buf_append(&f, "\r", 1);
     append_user_message(&f, in->buf, in->len, in->term_cols);
+    buf_append_str(&f, ANSI_ERASE_BELOW);
     buf_append_str(&f, ANSI_SYNC_END);
     fwrite(f.data, 1, f.len, stdout);
     fflush(stdout);
