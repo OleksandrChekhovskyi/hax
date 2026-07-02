@@ -24,44 +24,45 @@
  * cleanly. No CLI knob for this yet; add one if a real use case shows up. */
 #define ONESHOT_MAX_TURNS 100
 
-static struct provider *pick_provider(int print_mode)
+static struct provider *pick_provider(int print_mode, int *provider_autoselected)
 {
     const char *which = config_str("provider");
     /* "Explicit" = the user named a provider somewhere (HAX_PROVIDER, the
-     * config file's "provider" key, or a prior /provider pick in state.json).
-     * Absent that, fall to the built-in default (the highest-priority
-     * provider) — which we treat more gently below, since the user never
-     * asked for it. */
-    int chosen = which && *which;
-    const struct provider_factory *f = chosen ? provider_find(which) : provider_default();
-    if (!f) {
-        /* Unknown name — a typo in HAX_PROVIDER / the config / a stale
-         * state.json pick (only the explicit path can miss; provider_default
-         * is never NULL). Name the value, not the source, with the supported
-         * set as the help. */
-        fprintf(stderr, "hax: unknown provider '%s' (supported: ", which);
-        provider_list_names(stderr);
-        fprintf(stderr, ")\n");
-        return NULL;
+     * config file's "provider" key, or a prior /provider pick in state.json). */
+    if (which && *which) {
+        const struct provider_factory *f = provider_find(which);
+        if (!f) {
+            /* Unknown name — a typo in HAX_PROVIDER / the config / a stale
+             * state.json pick. Name the value, not the source, with the
+             * supported set as the help. */
+            fprintf(stderr, "hax: unknown provider '%s' (supported: ", which);
+            provider_list_names(stderr);
+            fprintf(stderr, ")\n");
+            return NULL;
+        }
+        /* Strict construction: the user asked for this backend, so "codex
+         * not logged in" / "server down" is the answer they need. Fatal in
+         * one-shot mode; interactively the REPL opens provider-less. */
+        return f->new(f->name);
     }
 
-    /* Strict construction (failure surfaces verbatim, becomes fatal) when
-     * the provider was explicitly chosen — the user asked for this backend,
-     * so "codex not logged in" / "server down" is the answer they need — or
-     * in one-shot mode, which can't prompt for an alternative and must not
-     * emit a chatty auto-select note onto piped stdout. The built-in default
-     * is built strictly here too in one-shot. */
-    if (chosen || print_mode)
-        return f->new(f->name);
-
-    /* Interactive cold start with nothing configured: one path picks
-     * something. The auto-selector tries the built-in default first (cheap
-     * to check, so the common logged-in start stays instant and silent),
-     * and on its failure probes the rest and starts on the first available
-     * one — or returns NULL for a provider-less REPL whose banner points at
-     * /provider. (`f` is the resolved default here; autoselect re-finds it
-     * as its top candidate.) */
-    return provider_autoselect();
+    /* Cold start with nothing configured: one path picks something in both
+     * modes. The auto-selector tries the built-in default first (cheap to
+     * check, so the common logged-in start stays instant and silent), and on
+     * its failure probes the rest and starts on the first available one. */
+    struct provider *p = provider_autoselect();
+    if (p) {
+        /* Inferred, not configured — the one-shot banner marks it, default
+         * included: nothing pins the pick, so it can change with the
+         * environment (interactively /provider shows the why instead). */
+        *provider_autoselected = 1;
+    } else if (print_mode) {
+        /* The availability probes are silent, so without this a one-shot
+         * run would exit with no diagnostic at all. Interactively the REPL
+         * opens provider-less with the banner pointing at /provider. */
+        hax_err("no provider available (set HAX_PROVIDER or configure one)");
+    }
+    return p;
 }
 
 static const char HELP_TEXT[] =
@@ -390,10 +391,10 @@ int main(int argc, char **argv)
     trace_init();
     transcript_log_init();
 
-    struct provider *p = pick_provider(print_mode);
-    /* A provider that can't be constructed (codex not logged in, no API key,
-     * local server down) is fatal only in one-shot mode, which can't prompt
-     * for an alternative. Interactively we start the REPL with no provider:
+    struct provider *p = pick_provider(print_mode, &opts.provider_autoselected);
+    /* No usable provider (explicit one can't construct, or nothing available
+     * to auto-select) is fatal only in one-shot mode, which can't prompt for
+     * an alternative. Interactively we start the REPL with no provider:
      * pick_provider already printed why, the banner points at /provider, and
      * agent_run streams nothing until a working one is chosen. */
     if (!p && print_mode)

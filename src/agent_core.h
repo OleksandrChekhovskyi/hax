@@ -29,6 +29,11 @@ struct hax_opts {
      * appended to the same file. NULL = start a fresh session. Resolved
      * by main.c from --continue / --resume. */
     const char *resume_path;
+    /* The provider was auto-selected at cold start (nothing configured),
+     * default included, rather than explicitly named. The one-shot stderr
+     * banner marks the pick — -p has no /provider picker where the "why"
+     * would otherwise show. */
+    int provider_autoselected;
 };
 
 const struct tool *find_tool(const char *name);

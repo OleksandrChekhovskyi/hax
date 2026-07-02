@@ -111,6 +111,25 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         return 1;
     }
 
+    /* Provenance banner — the light -p twin of the REPL's agent_print_banner.
+     * What actually answers resolves through several tiers (env, state.json,
+     * config, auto-selection), so name it up front, before any model call.
+     * stderr keeps piped stdout clean; deliberately not TTY-gated so CI and
+     * pipeline logs capture which backend produced the answer. Dim only on a
+     * terminal, like the resume hint below. */
+    {
+        int tty = isatty(fileno(stderr));
+        fprintf(stderr, "%shax: %s · %s", tty ? ANSI_DIM : "", p->name ? p->name : "?", sess.model);
+        if (sess.reasoning_effort)
+            fprintf(stderr, " · %s", sess.reasoning_effort);
+        if (opts->provider_autoselected)
+            fprintf(stderr, " (auto-selected)");
+        /* Trailing blank line for the same reason the resume hint leads with
+         * one: in a combined 2>&1 stream the banner would otherwise run
+         * straight into the answer. */
+        fprintf(stderr, "%s\n\n", tty ? ANSI_RESET : "");
+    }
+
     /* Resume: seed history from a prior session before the new prompt is
      * added, so -p can continue a conversation. An unreadable file is fatal
      * rather than silently running the prompt against empty history; an
