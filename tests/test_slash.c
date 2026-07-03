@@ -321,6 +321,12 @@ static void test_session_prints_totals(void)
     r.disp.trail = 1;
     struct agent_state st = {.r = &r};
     st.stats.turns = 3;
+    st.stats.requests = 7;
+    st.stats.tool_calls = 6;
+    st.stats.tools[0].name = "bash";
+    st.stats.tools[0].count = 4;
+    st.stats.tools[1].name = "read";
+    st.stats.tools[1].count = 2;
     st.stats.worked_ms = 68000;   /* 1m 08s */
     st.stats.input_tokens = 5530; /* 5.4k */
     st.stats.output_tokens = 412;
@@ -333,7 +339,10 @@ static void test_session_prints_totals(void)
     EXPECT(c.result == SLASH_HANDLED);
     /* Stubbed session_log_resume_hint returns NULL ⇒ "not recorded". */
     EXPECT(strstr(out, "not recorded") != NULL);
-    EXPECT(strstr(out, "turns") != NULL);
+    EXPECT(strstr(out, "user turns") != NULL);
+    EXPECT(strstr(out, "requests") != NULL);
+    EXPECT(strstr(out, "tool calls") != NULL);
+    EXPECT(strstr(out, "6 · bash 4 · read 2") != NULL);
     EXPECT(strstr(out, "time worked") != NULL);
     EXPECT(strstr(out, "1m 08s") != NULL);
     EXPECT(strstr(out, "context") != NULL);
@@ -358,8 +367,10 @@ static void test_session_hides_unreported_rows(void)
     struct dispatch_call c = {.line = "/session", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
-    EXPECT(strstr(out, "turns") != NULL);
+    EXPECT(strstr(out, "user turns") != NULL);
+    EXPECT(strstr(out, "requests") != NULL);
     EXPECT(strstr(out, "time worked") != NULL);
+    EXPECT(strstr(out, "tool calls") == NULL);
     EXPECT(strstr(out, "tokens") == NULL);
     EXPECT(strstr(out, "$") == NULL);
     free(out);

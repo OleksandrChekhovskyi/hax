@@ -383,8 +383,25 @@ static void slash_run_session(struct slash_ctx *ctx)
         snprintf(row, sizeof(row), "%s · %s", prov, model);
     session_row("provider", row);
 
+    /* Two counts per the project glossary: user turns (prompts) and
+     * requests (model round-trips — each resends the full context, which
+     * is what makes the tokens-total sums below grow). */
     snprintf(row, sizeof(row), "%ld", t->turns);
-    session_row("turns", row);
+    session_row("user turns", row);
+
+    snprintf(row, sizeof(row), "%ld", t->requests);
+    session_row("requests", row);
+
+    if (t->tool_calls > 0) {
+        int len = snprintf(row, sizeof(row), "%ld", t->tool_calls);
+        for (size_t i = 0; i < SESSION_STATS_MAX_TOOLS && t->tools[i].name; i++) {
+            if (len < 0 || (size_t)len >= sizeof(row))
+                break;
+            len += snprintf(row + len, sizeof(row) - (size_t)len, " · %s %ld", t->tools[i].name,
+                            t->tools[i].count);
+        }
+        session_row("tool calls", row);
+    }
 
     format_duration(a, sizeof(a), t->worked_ms);
     session_row("time worked", a);

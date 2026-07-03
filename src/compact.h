@@ -88,10 +88,15 @@ char *compact_extract_summary(const struct item *items, size_t n);
  * attempts. On a returned non-NULL summary the turn's items have been drained;
  * on a stream-error NULL they have not — the caller calls turn_reset(t) either
  * way. Does not touch history: the caller decides (after checking its own
- * cancel state) whether to compact_apply the result. */
+ * cancel state) whether to compact_apply the result.
+ *
+ * `attempts`, when non-NULL, is incremented once per model stream attempt
+ * (the rejected-tool-call retries included), regardless of outcome. This is
+ * the request count a stats-keeping caller needs: a user-cancelled attempt
+ * emits no terminal event, so the caller's sink alone can't see it. */
 char *compact_summarize(const struct agent_session *s, struct provider *p, const char *instructions,
                         struct turn *t, stream_cb cb, void *cb_user, http_tick_cb tick,
-                        void *tick_user);
+                        void *tick_user, int *attempts);
 
 /* Replace the session's history with a single seed user message holding the
  * summary, then rotate both logs to fresh files (a seeded `/new`: the old

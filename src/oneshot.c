@@ -36,6 +36,11 @@ struct oneshot_ctx {
      * Drives the auto-compaction threshold check between round-trips and
      * the exit stats summary. */
     struct stream_usage usage;
+    /* Provider-reported cost summed across every EV_DONE this sink saw —
+     * unlike `usage` (last-one-wins), so a multi-attempt compaction
+     * stream (reject-and-retry on a stray tool call) bills every
+     * attempt into the exit summary. */
+    double cost_sum;
 };
 
 static int on_event(const struct stream_event *ev, void *user)
@@ -43,8 +48,11 @@ static int on_event(const struct stream_event *ev, void *user)
     struct oneshot_ctx *oc = user;
     if (ev->kind == EV_ERROR && !oc->error_msg && ev->u.error.message)
         oc->error_msg = xstrdup(ev->u.error.message);
-    else if (ev->kind == EV_DONE)
+    else if (ev->kind == EV_DONE) {
         oc->usage = ev->u.done.usage;
+        if (ev->u.done.usage.cost > 0)
+            oc->cost_sum += ev->u.done.usage.cost;
+    }
     turn_on_event(ev, oc->turn);
     return 0;
 }
@@ -72,10 +80,12 @@ static void print_assistant_text(const struct item *items, size_t from, size_t t
  * twin of agent.c's agent_compact. No display, no tick, no Esc handling: a
  * summarization request, then history is replaced and both logs
  * rotate to fresh files (seeded /new). Returns 1 if compacted, 0 on
- * empty/failure (history left intact). Used between round-trips so a long
- * agentic `-p` run survives its own context growth. */
+ * empty/failure (history left intact); either way *cost accumulates the
+ * provider-reported spend of the summarization round-trips, so the exit
+ * stats bill compaction like any other request. Used between round-trips
+ * so a long agentic `-p` run survives its own context growth. */
 static int oneshot_compact(struct agent_session *s, struct provider *p, struct session_log *slog,
-                           struct transcript_log *tlog)
+                           struct transcript_log *tlog, double *cost)
 {
     if (s->n_items == 0)
         return 0;
@@ -85,7 +95,8 @@ static int oneshot_compact(struct agent_session *s, struct provider *p, struct s
     /* Reuse the normal sink (feeds the turn, captures any error); no tick,
      * no display. */
     struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL, .usage = {-1, -1, -1, -1}};
-    char *summary = compact_summarize(s, p, NULL, &t, on_event, &oc, NULL, NULL);
+    char *summary = compact_summarize(s, p, NULL, &t, on_event, &oc, NULL, NULL, NULL);
+    *cost += oc.cost_sum;
     free(oc.error_msg);
     turn_reset(&t);
 
@@ -185,9 +196,9 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
     int rc = 0;
     int first_inner = 1;
     /* Run stats for the exit summary on stderr: latest reported context
-     * size, summed provider-reported cost, wall time for the whole run.
-     * (Compaction round-trips inside oneshot_compact aren't counted —
-     * same simplification as the interactive path.) */
+     * size, summed provider-reported cost (compaction round-trips
+     * included, via oneshot_compact's cost accumulator), wall time for
+     * the whole run. */
     long start_ms = monotonic_ms();
     long last_ctx = -1;
     double total_cost = 0;
@@ -225,8 +236,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
                              : -1;
         if (round_ctx >= 0)
             last_ctx = round_ctx;
-        if (oc.usage.cost > 0)
-            total_cost += oc.usage.cost;
+        total_cost += oc.cost_sum;
 
         size_t n_before;
         int had_tool_call;
@@ -289,7 +299,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
          * doesn't run itself into an overflow. The next iteration streams from
          * the seed. Quiet on stderr so a `tail`'d -p log shows it happened. */
         if (compact_should_auto(round_ctx, compact_context_limit(p)) &&
-            oneshot_compact(&sess, p, slog, tlog)) {
+            oneshot_compact(&sess, p, slog, tlog, &total_cost)) {
             int tty = isatty(fileno(stderr));
             fprintf(stderr, "%s[compacted context]%s\n", tty ? ANSI_DIM : "",
                     tty ? ANSI_RESET : "");

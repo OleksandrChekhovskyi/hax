@@ -22,6 +22,18 @@ struct session_stats {
     double cost;        /* provider-reported spend, USD */
     long worked_ms;     /* wall time spent inside user turns */
     long turns;         /* user turns run */
+    long requests;      /* model round-trips streamed (glossary: turns) */
+    /* Tool invocations the model made, total and per type. Per-type slots
+     * key on the registry's static tool names (find_tool), which outlive
+     * items — an item-owned name would dangle once compaction frees the
+     * history that carried it. Slots fill in first-use order; calls to
+     * unregistered names count only toward the total. */
+    long tool_calls;
+#define SESSION_STATS_MAX_TOOLS 8
+    struct {
+        const char *name; /* borrowed static registry name; NULL = free slot */
+        long count;
+    } tools[SESSION_STATS_MAX_TOOLS];
     /* Current window state: input+output of the latest reported response —
      * the same number the per-turn stats line shows, NOT a sum. Kept so
      * /session can present the window frame next to the billing-frame

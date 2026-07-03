@@ -142,7 +142,16 @@ int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long
 
     if (ctx >= 0) {
         format_context(buf, sizeof(buf), ctx, limit);
-        snprintf(segs[n++], STATS_SEG_LEN, "context %s", buf);
+        /* The "context" word is disambiguation, not decoration, so it
+         * appears only when needed: in verbose mode there are three token
+         * counts to tell apart, and with an unknown window the figure is
+         * a bare number ("8.9k") that nothing identifies. The default
+         * gauge form ("8.9k / 256k (3%)") self-identifies — next to
+         * fields whose units (s, $) label themselves — and drops it. */
+        if (verbose || limit <= 0)
+            snprintf(segs[n++], STATS_SEG_LEN, "context %s", buf);
+        else
+            snprintf(segs[n++], STATS_SEG_LEN, "%s", buf);
     }
     if (verbose && out >= 0) {
         format_tokens(buf, sizeof(buf), out);
@@ -152,10 +161,20 @@ int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long
         format_tokens(buf, sizeof(buf), cached);
         snprintf(segs[n++], STATS_SEG_LEN, "cached %s", buf);
     }
-    if (elapsed_ms >= 0)
-        format_duration(segs[n++], STATS_SEG_LEN, elapsed_ms);
-    if (spend > 0)
-        format_cost(segs[n++], STATS_SEG_LEN, spend);
+    if (elapsed_ms >= 0) {
+        format_duration(buf, sizeof(buf), elapsed_ms);
+        if (verbose)
+            snprintf(segs[n++], STATS_SEG_LEN, "worked %s", buf);
+        else
+            snprintf(segs[n++], STATS_SEG_LEN, "%s", buf);
+    }
+    if (spend > 0) {
+        format_cost(buf, sizeof(buf), spend);
+        if (verbose)
+            snprintf(segs[n++], STATS_SEG_LEN, "spent %s", buf);
+        else
+            snprintf(segs[n++], STATS_SEG_LEN, "%s", buf);
+    }
     return n;
 }
 

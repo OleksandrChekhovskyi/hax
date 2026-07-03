@@ -148,7 +148,7 @@ static void req_push(struct item **req, size_t *n, size_t *cap, struct item it)
 
 char *compact_summarize(const struct agent_session *s, struct provider *p, const char *instructions,
                         struct turn *t, stream_cb cb, void *cb_user, http_tick_cb tick,
-                        void *tick_user)
+                        void *tick_user, int *attempts)
 {
     /* The request is the live history plus a synthetic trailing user message
      * carrying the summarization prompt. Tools ARE advertised so the cached
@@ -181,6 +181,8 @@ char *compact_summarize(const struct agent_session *s, struct provider *p, const
             .n_tools = s->n_tools,
             .reasoning_effort = s->reasoning_effort,
         };
+        if (attempts)
+            (*attempts)++;
         p->stream(p, &ctx, s->model, cb, cb_user, tick, tick_user);
 
         /* A stream error leaves the turn holding partial items for the

@@ -54,6 +54,29 @@ struct absorb_outcome {
     int marker_placed;
 };
 
+/* Tally one tool invocation for /session. The per-type slot keys on the
+ * registry's static name (via find_tool) rather than the item-owned
+ * string, which compaction can free while stats live on; unregistered
+ * names (refused/unknown calls) still count toward the total. */
+static void stats_count_tool_call(struct session_stats *st, const char *name)
+{
+    st->tool_calls++;
+    const struct tool *tl = name ? find_tool(name) : NULL;
+    if (!tl)
+        return;
+    for (size_t i = 0; i < SESSION_STATS_MAX_TOOLS; i++) {
+        if (st->tools[i].name == tl->def.name) {
+            st->tools[i].count++;
+            return;
+        }
+        if (!st->tools[i].name) {
+            st->tools[i].name = tl->def.name;
+            st->tools[i].count = 1;
+            return;
+        }
+    }
+}
+
 /* Shape conversation history for an aborted assistant turn — used by
  * both the mid-stream EV_ERROR path (network drop, length truncation)
  * and the Esc-cancel path. Both leave partial state behind that needs
@@ -82,7 +105,8 @@ struct absorb_outcome {
  *     skip when nothing streamed — a pre-stream 500 with no output
  *     would otherwise leave a fake assistant turn in history that
  *     misleads the model on the user's next prompt). */
-static struct absorb_outcome absorb_aborted_turn(struct agent_session *sess, struct turn *t)
+static struct absorb_outcome absorb_aborted_turn(struct agent_session *sess, struct turn *t,
+                                                 struct session_stats *stats)
 {
     /* Capture state-before-mutation. n_items already covers any
      * earlier flush (e.g. EV_TOOL_CALL_START flushed text on its
@@ -108,6 +132,11 @@ static struct absorb_outcome absorb_aborted_turn(struct agent_session *sess, str
     size_t end = sess->n_items;
     for (size_t i = n_before; i < end; i++) {
         if (sess->items[i].kind == ITEM_TOOL_CALL) {
+            /* The model issued this call even though the abort keeps it
+             * from dispatching — /session's tool-call count includes it,
+             * same as the dispatch loop counts refused/skipped calls. */
+            if (stats)
+                stats_count_tool_call(stats, sess->items[i].tool_name);
             items_append(&sess->items, &sess->n_items, &sess->cap_items,
                          (struct item){
                              .kind = ITEM_TOOL_RESULT,
@@ -1005,13 +1034,14 @@ void agent_resume_session(struct agent_state *st, const char *path)
     replay_user_turn(st->r, s);
 }
 
-/* Event sink for the summary stream: feed the turn assembler and capture any
- * error. Deliberately renders nothing — the summary is drawn as a spinner-only
- * operation and surfaced as a one-line notice, not streamed as a normal
- * assistant answer. */
+/* Event sink for the summary stream: feed the turn assembler, capture any
+ * error, and account the round-trips into the session totals. Deliberately
+ * renders nothing — the summary is drawn as a spinner-only operation and
+ * surfaced as a one-line notice, not streamed as a normal assistant answer. */
 struct compact_ev {
     struct turn *turn;
-    char *err; /* owned; set from EV_ERROR */
+    char *err;                   /* owned; set from EV_ERROR */
+    struct session_stats *stats; /* accounted into on terminal events */
 };
 
 static int compact_on_event(const struct stream_event *ev, void *user)
@@ -1019,6 +1049,26 @@ static int compact_on_event(const struct stream_event *ev, void *user)
     struct compact_ev *ce = user;
     if (ev->kind == EV_ERROR && !ce->err)
         ce->err = xstrdup(ev->u.error.message ? ev->u.error.message : "stream failed");
+    /* Compaction round-trips are real model requests, so their usage
+     * counts into /session's totals (token sums, spend) exactly like the
+     * main loop's. The *request count* is NOT tallied here: a
+     * user-cancelled attempt emits no terminal event at all, so
+     * agent_compact takes it from compact_summarize's attempts counter
+     * instead. The window snapshot (last_ctx) is deliberately not
+     * touched: the summarize request's input spans the full
+     * pre-compaction history plus prompt, which would misstate the
+     * post-compaction window until the next turn reports the real one. */
+    if (ce->stats && ev->kind == EV_DONE) {
+        const struct stream_usage *u = &ev->u.done.usage;
+        if (u->input_tokens >= 0)
+            ce->stats->input_tokens += u->input_tokens;
+        if (u->output_tokens >= 0)
+            ce->stats->output_tokens += u->output_tokens;
+        if (u->cached_tokens > 0)
+            ce->stats->cached_tokens += u->cached_tokens;
+        if (u->cost > 0)
+            ce->stats->cost += u->cost;
+    }
     turn_on_event(ev, ce->turn);
     return 0;
 }
@@ -1083,12 +1133,18 @@ int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
 
     struct turn t;
     turn_init(&t);
-    struct compact_ev ce = {.turn = &t};
+    struct compact_ev ce = {.turn = &t, .stats = &st->stats};
 
     interrupt_clear();
     interrupt_arm();
-    char *summary =
-        compact_summarize(s, p, instructions, &t, compact_on_event, &ce, agent_stream_tick, r);
+    int attempts = 0;
+    char *summary = compact_summarize(s, p, instructions, &t, compact_on_event, &ce,
+                                      agent_stream_tick, r, &attempts);
+    /* Counted by compact_summarize, not the event sink: a cancelled
+     * attempt aborts the transfer without any terminal event, but it
+     * still hit the backend and /session's "requests" counts it, same
+     * as the main loop's post-stream unconditional increment. */
+    st->stats.requests += attempts;
     interrupt_settle();
     int cancelled = interrupt_requested();
     interrupt_disarm();
@@ -1374,6 +1430,10 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
              * detection: ~1Hz from libcurl's progress callback inside
              * curl_easy_perform, plus on every received chunk. */
             p->stream(p, &ctx, sess.model, on_event, &ec, agent_stream_tick, &r);
+            /* Every stream call is one model round-trip, /session's
+             * "requests" — counted regardless of outcome (an errored or
+             * interrupted attempt still hit the backend). */
+            state.stats.requests++;
 
             if (t.error) {
                 /* Mid-stream error (network drop, "length"/"content_filter"
@@ -1383,7 +1443,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
                  * without losing what was already streamed. The on-screen
                  * "[error: ...]" line was already drawn by on_event;
                  * absorb_aborted_turn shapes what lands in history. */
-                struct absorb_outcome o = absorb_aborted_turn(&sess, &t);
+                struct absorb_outcome o = absorb_aborted_turn(&sess, &t, &state.stats);
                 if (o.had_state && !o.marker_placed) {
                     /* Tag the gap when state was streamed but nothing
                      * in the absorbed batch could carry the marker —
@@ -1454,7 +1514,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
                  * deserves explicit acknowledgement even if no
                  * deltas had arrived yet ("Esc before any output"
                  * and "only normally-flushed text completed" cases). */
-                struct absorb_outcome o = absorb_aborted_turn(&sess, &t);
+                struct absorb_outcome o = absorb_aborted_turn(&sess, &t, &state.stats);
                 if (!o.marker_placed) {
                     items_append(&sess.items, &sess.n_items, &sess.cap_items,
                                  (struct item){
@@ -1490,6 +1550,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
             for (size_t i = n_before; i < current_end; i++) {
                 if (sess.items[i].kind != ITEM_TOOL_CALL)
                     continue;
+                stats_count_tool_call(&state.stats, sess.items[i].tool_name);
                 interrupt_settle();
                 struct item result;
                 if (sess.n_tools == 0) {
