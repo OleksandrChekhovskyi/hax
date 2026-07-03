@@ -374,6 +374,29 @@ static const char *state_get(const char *key)
     return obj_get(g_state, key);
 }
 
+static const char *resolve(const char *key, int skip_empty);
+
+/* "model" and "reasoning_effort" are provider-bound: the runtime selectors
+ * persist them together with the "provider" they were picked for, and a
+ * config file pairing them with a provider means the same. A bound value
+ * applies only while that provider is the active one — otherwise the tier is
+ * skipped for these keys, so a one-off HAX_PROVIDER=mock doesn't inherit a
+ * model saved for codex. A tier that records no provider is unbound (a bare
+ * "model" in config.json applies everywhere), and the env/override tiers are
+ * always honored — they are set explicitly for this run/session. */
+static int binding_allows(json_t *tier, const char *key)
+{
+    if (strcmp(key, "model") != 0 && strcmp(key, "reasoning_effort") != 0)
+        return 1;
+    const char *bound = obj_get(tier, "provider");
+    if (!bound || !*bound)
+        return 1;
+    /* The verbatim read mirrors pick_provider: NULL/empty means no provider
+     * resolved (auto-select will infer one), which no bound value can claim. */
+    const char *active = resolve("provider", 0);
+    return active && *active && strcmp(active, bound) == 0;
+}
+
 /* Walk the tiers: override (session) → environment → state →
  * file → registry default. With skip_empty, an empty value counts as
  * "unset at this tier" and resolution falls through to the next one — for
@@ -401,10 +424,10 @@ static const char *resolve(const char *key, int skip_empty)
             return deflt(e);
     }
     const char *sel = state_get(key);
-    if (sel && (!skip_empty || *sel))
+    if (sel && (!skip_empty || *sel) && binding_allows(g_state, key))
         return deflt(sel);
     const char *f = file_get(key);
-    if (f && (!skip_empty || *f))
+    if (f && (!skip_empty || *f) && binding_allows(g_config, key))
         return deflt(f);
     return s ? s->def : NULL;
 }
@@ -663,4 +686,43 @@ int config_persist(const char *key, const char *val)
 int config_persist_state(const char *key, const char *val)
 {
     return persist_tier(&g_state, xdg_hax_state_path("state.json"), key, val);
+}
+
+int config_persist_selection(const char *provider, const char *model, const char *effort)
+{
+    if (!provider || !*provider)
+        return -1;
+    char *path = xdg_hax_state_path("state.json");
+    if (!path)
+        return -1;
+    /* Mutate a copy and swap after the write succeeds, like persist_tier. */
+    json_t *next = g_state ? json_deep_copy(g_state) : json_object();
+    if (!next) {
+        free(path);
+        return -1;
+    }
+
+    /* Re-pinning a different provider orphans the members not picked this
+     * time — they belong to the old provider — so they reset to the sentinel
+     * (the new provider's own default beats a stale lower-tier value). On an
+     * unchanged provider an unpicked member keeps its stored value: an
+     * /effort pick must not wipe a saved model. */
+    const char *old = obj_get(g_state, "provider");
+    int repin = !old || strcmp(old, provider) != 0;
+    json_object_set_new(next, "provider", json_string(provider));
+    if (model || repin)
+        json_object_set_new(next, "model", json_string(model ? model : CONFIG_VALUE_DEFAULT));
+    if (effort || repin)
+        json_object_set_new(next, "reasoning_effort",
+                            json_string(effort ? effort : CONFIG_VALUE_DEFAULT));
+
+    int rc = write_json_atomic(path, next);
+    free(path);
+    if (rc != 0) {
+        json_decref(next);
+        return -1;
+    }
+    json_decref(g_state);
+    g_state = next;
+    return 0;
 }

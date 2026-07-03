@@ -232,17 +232,24 @@ static int choose_effort(struct agent_state *st, struct provider *p, const char 
     return 1;
 }
 
-/* Record a selection into the live override + persisted state tiers. NULL
- * clears (resolution falls through to env / config / provider default). */
-static void commit_selection(const char *key, const char *val)
+/* Record a selection: session overrides for the members actually picked, and
+ * one atomic state-tier write for the whole set. NULL model/effort means "not
+ * picked here" — config_persist_selection keeps the stored value when the
+ * provider is unchanged and resets it to the sentinel when the commit re-pins
+ * a different one (e.g. an /effort pick promoting a one-off HAX_PROVIDER run
+ * must not carry the old provider's saved model along). */
+static void commit_selection(const char *provider, const char *model, const char *effort)
 {
-    config_set_override(key, val);
-    if (config_persist_state(key, val) != 0) {
-        /* The override above keeps the pick active this session, but it didn't
+    config_set_override("provider", provider);
+    if (model)
+        config_set_override("model", model);
+    if (effort)
+        config_set_override("reasoning_effort", effort);
+    if (config_persist_selection(provider, model, effort) != 0) {
+        /* The overrides above keep the pick active this session, but it didn't
          * reach state.json (an unwritable state dir), so it won't survive a
          * restart. Say so once — otherwise the user is left puzzled when
-         * settings silently revert next launch. Guarded because one pick
-         * commits up to three keys (provider/model/effort). */
+         * settings silently revert next launch. */
         static int warned;
         if (!warned) {
             warned = 1;
@@ -280,16 +287,16 @@ void select_effort(struct agent_state *st)
     /* Explicit /effort: announce when the provider has no effort levels. */
     if (!choose_effort(st, p, st->sess->reasoning_effort, &e, 1))
         return;
-    /* Pin the provider alongside the effort, for the same reason select_model
-     * does: an explicit setting against an auto-selected provider should
-     * promote the whole set to a stored choice. Idempotent when already
-     * pinned. */
+    /* The provider is pinned alongside the effort, for the same reason
+     * select_model does: an explicit setting against an auto-selected provider
+     * should promote the whole set to a stored choice. Idempotent when already
+     * pinned. The "default" row → the sentinel (use the provider's default,
+     * shadowing a lower-tier env/config effort), not a delete (which would let
+     * it leak); the model isn't picked here, so NULL — kept unless the pin
+     * changes the stored provider. */
     char *pid = current_provider_id(p);
-    commit_selection("provider", pid);
+    commit_selection(pid, NULL, e ? e : CONFIG_VALUE_DEFAULT);
     free(pid);
-    /* "default" row → the sentinel (use the provider's default, shadowing a
-     * lower-tier env/config effort), not a delete (which would let it leak). */
-    commit_selection("reasoning_effort", e ? e : CONFIG_VALUE_DEFAULT);
     free(e);
     agent_apply_settings(st);
 }
@@ -308,30 +315,27 @@ void select_model(struct agent_state *st)
     if (!m)
         return;
 
-    /* Run the chained effort pick BEFORE committing anything. commit_selection
-     * persists into the state tier, which deep-copies and frees the old tier
-     * object — and st->sess->reasoning_effort may point into it (after a prior
+    /* Run the chained effort pick BEFORE committing. commit_selection persists
+     * into the state tier, which deep-copies and frees the old tier object —
+     * and st->sess->reasoning_effort may point into it (after a prior
      * session's /effort). Reading it as the picker's "current" marker after a
      * commit would be a use-after-free, so gather both picks first, then commit
-     * together. Skips silently if this provider has no ladder. */
+     * once. Skips silently if this provider has no ladder. */
     char *e = NULL;
     int chose_effort = choose_effort(st, p, st->sess->reasoning_effort, &e, 0);
 
-    /* Pin the provider alongside the model. Without this, a model picked
+    /* The provider is pinned alongside the model. Without this, a model picked
      * against an auto-selected (and thus unpinned) provider would leave
      * `provider` unset, so the next launch would re-auto-select and warn
      * despite the user having explicitly configured a model. Idempotent when
-     * the provider is already pinned to the same value. */
+     * the provider is already pinned to the same value. A made effort pick's
+     * "default" row → sentinel, not delete (see select_effort); a skipped
+     * pick → NULL, kept unless the pin changes the stored provider. */
     char *pid = current_provider_id(p);
-    commit_selection("provider", pid);
+    commit_selection(pid, m, chose_effort ? (e ? e : CONFIG_VALUE_DEFAULT) : NULL);
     free(pid);
-    commit_selection("model", m);
     free(m);
-    if (chose_effort) {
-        /* "default" row → sentinel, not delete (see select_effort). */
-        commit_selection("reasoning_effort", e ? e : CONFIG_VALUE_DEFAULT);
-        free(e);
-    }
+    free(e);
     agent_apply_settings(st);
 }
 
@@ -425,11 +429,10 @@ void select_provider(struct agent_state *st)
     /* Commit: a provider switch invalidates the old model/effort (they belong
      * to the old backend), so set the new model and effort to the picked value
      * or the sentinel — "use newp's default", which shadows a stale lower-tier
-     * env/config value instead of leaking it into the new provider — then
-     * record the provider, swap, and apply. */
-    commit_selection("provider", f->name);
-    commit_selection("model", m ? m : CONFIG_VALUE_DEFAULT);
-    commit_selection("reasoning_effort", e ? e : CONFIG_VALUE_DEFAULT);
+     * env/config value instead of leaking it into the new provider (passed
+     * explicitly rather than as NULL: a same-provider re-pick must reset too,
+     * not keep). Then swap and apply. */
+    commit_selection(f->name, m ? m : CONFIG_VALUE_DEFAULT, e ? e : CONFIG_VALUE_DEFAULT);
 
     agent_set_provider(st, newp);
     agent_apply_settings(st);

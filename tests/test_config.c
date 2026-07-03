@@ -224,6 +224,124 @@ static void test_state_tier_ordering(void)
     config_load(NULL);
 }
 
+static void test_provider_binding(void)
+{
+    clear_env();
+
+    /* model/effort saved by the selectors are bound to the provider recorded
+     * with them: they apply while it is the active provider ... */
+    EXPECT(config_load("{\"model\": \"from-file\"}") == 0);
+    EXPECT(config_load_state("{\"provider\": \"openai\", \"model\": \"gpt-x\","
+                             " \"reasoning_effort\": \"high\"}") == 0);
+    EXPECT_STR_EQ(config_str("provider"), "openai");
+    EXPECT_STR_EQ(config_str("model"), "gpt-x");
+    EXPECT_STR_EQ(config_str("reasoning_effort"), "high");
+
+    /* ... and a one-off HAX_PROVIDER skips them: resolution falls through to
+     * the (unbound) file tier / registry default instead. */
+    setenv("HAX_PROVIDER", "mock", 1);
+    EXPECT_STR_EQ(config_str("model"), "from-file");
+    EXPECT(config_str("reasoning_effort") == NULL);
+    /* An explicit env model is a deliberate pairing and always applies. */
+    setenv("HAX_MODEL", "env-model", 1);
+    EXPECT_STR_EQ(config_str("model"), "env-model");
+    unsetenv("HAX_MODEL");
+    unsetenv("HAX_PROVIDER");
+    /* Dropping the one-off brings the saved pair back untouched. */
+    EXPECT_STR_EQ(config_str("model"), "gpt-x");
+
+    /* The file tier is bound the same way when it pairs model with provider:
+     * a hand-written codex default doesn't leak into HAX_PROVIDER=mock. */
+    EXPECT(config_load("{\"provider\": \"codex\", \"model\": \"gpt-x\","
+                       " \"reasoning_effort\": \"high\"}") == 0);
+    EXPECT(config_load_state(NULL) == 0);
+    EXPECT_STR_EQ(config_str("model"), "gpt-x");
+    setenv("HAX_PROVIDER", "mock", 1);
+    EXPECT(config_str("model") == NULL);
+    EXPECT(config_str("reasoning_effort") == NULL);
+    unsetenv("HAX_PROVIDER");
+
+    /* A tier that records no provider is unbound: a bare "model" in
+     * config.json is a global claim and applies under any provider. */
+    EXPECT(config_load("{\"model\": \"global\"}") == 0);
+    setenv("HAX_PROVIDER", "mock", 1);
+    EXPECT_STR_EQ(config_str("model"), "global");
+    unsetenv("HAX_PROVIDER");
+
+    /* Cross-tier: the active provider resolving from the state tier skips a
+     * file-tier model bound to a different file-tier provider. */
+    EXPECT(config_load("{\"provider\": \"codex\", \"model\": \"codex-model\"}") == 0);
+    EXPECT(config_load_state("{\"provider\": \"openai\"}") == 0);
+    EXPECT(config_str("model") == NULL);
+
+    /* No resolvable provider at all (empty HAX_PROVIDER → auto-select runs):
+     * a bound value can't claim whatever gets inferred. */
+    EXPECT(config_load(NULL) == 0);
+    EXPECT(config_load_state("{\"provider\": \"openai\", \"model\": \"gpt-x\"}") == 0);
+    setenv("HAX_PROVIDER", "", 1);
+    EXPECT(config_str("model") == NULL);
+    unsetenv("HAX_PROVIDER");
+
+    config_load(NULL);
+    config_load_state(NULL);
+}
+
+static void rm_rf_state(const char *dir); /* defined below; shared cleanup */
+
+static void test_persist_selection(void)
+{
+    clear_env();
+    config_free();
+
+    char tmpl[] = "/tmp/haxseltest.XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    EXPECT(dir != NULL);
+    if (!dir)
+        return;
+    setenv("XDG_STATE_HOME", dir, 1);
+    setenv("XDG_CONFIG_HOME", dir, 1); /* keep config_init off the real file */
+
+    /* A full pick lands as one write and reads back. */
+    EXPECT(config_persist_selection("codex", "gpt-x", "high") == 0);
+    EXPECT_STR_EQ(config_str("provider"), "codex");
+    EXPECT_STR_EQ(config_str("model"), "gpt-x");
+    EXPECT_STR_EQ(config_str("reasoning_effort"), "high");
+
+    /* Unpicked members (NULL) keep their stored value while the provider is
+     * unchanged: an effort-only pick must not wipe the saved model. */
+    EXPECT(config_persist_selection("codex", NULL, "low") == 0);
+    EXPECT_STR_EQ(config_str("model"), "gpt-x");
+    EXPECT_STR_EQ(config_str("reasoning_effort"), "low");
+
+    /* Re-pinning a different provider resets unpicked members to the
+     * sentinel: the old provider's picks must not follow the new one. */
+    EXPECT(config_persist_selection("mock", NULL, NULL) == 0);
+    EXPECT_STR_EQ(config_str("provider"), "mock");
+    EXPECT(config_str("model") == NULL);
+    EXPECT(config_str("reasoning_effort") == NULL);
+
+    /* The reset is on disk, not just in memory. */
+    config_load_state(NULL);
+    config_init();
+    EXPECT_STR_EQ(config_str("provider"), "mock");
+    EXPECT(config_str("model") == NULL);
+
+    /* A failed write leaves the in-memory tier unchanged (see
+     * test_persist_failure_rolls_back for the same contract per-key). */
+    setenv("XDG_STATE_HOME", "/dev/null/nope", 1);
+    EXPECT(config_persist_selection("other", NULL, NULL) == -1);
+    EXPECT_STR_EQ(config_str("provider"), "mock");
+
+    /* A selection needs its provider anchor. */
+    EXPECT(config_persist_selection(NULL, "gpt-x", NULL) == -1);
+    EXPECT(config_persist_selection("", "gpt-x", NULL) == -1);
+
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_STATE_HOME");
+    config_free();
+    rm_rf_state(dir);
+}
+
 static void test_default_sentinel(void)
 {
     clear_env();
@@ -462,8 +580,10 @@ int main(void)
     test_empty_means_unset();
     test_override_beats_env();
     test_state_tier_ordering();
+    test_provider_binding();
     test_default_sentinel();
     test_persist_state_roundtrip();
+    test_persist_selection();
     test_persist_roundtrip();
     test_persist_failure_rolls_back();
     test_persist_flat_key();

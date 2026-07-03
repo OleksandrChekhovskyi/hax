@@ -45,6 +45,17 @@
  *     detection), or per-provider (openai.base_url) carry no registry
  *     default and their consumer supplies it when config_str returns NULL.
  *
+ * Two keys resolve with one extra rule: "model" and "reasoning_effort" are
+ * provider-bound. They only mean something relative to a provider, so the
+ * selectors persist them as one set with the "provider" they were picked for
+ * (config_persist_selection), and a config file pairing them with a provider
+ * reads the same way. At the state and file tiers a bound value applies only
+ * while that tier's recorded provider is the active one; otherwise the tier
+ * is skipped for these keys and resolution falls through — a one-off
+ * HAX_PROVIDER=mock doesn't inherit a model saved for codex. A tier that
+ * records no provider is unbound and applies as-is, and the env/override
+ * tiers always apply: they are explicit for this run/session.
+ *
  * The whole system is optional: with no file and no overrides, every lookup
  * is just getenv-or-default, so an env-vars-only setup is unchanged.
  *
@@ -170,6 +181,18 @@ int config_persist(const char *key, const char *val);
  * call so a selection sticks across runs without touching dotfiles-managed
  * config. Pair with config_set_override for immediate same-session effect. */
 int config_persist_state(const char *key, const char *val);
+
+/* Persist a provider/model/effort selection into the state tier as one
+ * atomic write — the seam the runtime selectors commit through, keeping the
+ * set coherent for the provider-binding resolution rule above. `provider`
+ * anchors the selection and is required. A NULL model/effort means "not
+ * picked this time": the stored value is kept when `provider` matches the
+ * recorded one (an /effort pick must not wipe a saved model) and reset to
+ * CONFIG_VALUE_DEFAULT when the selection re-pins a different provider (the
+ * old value was picked for the old provider). To write "explicitly use the
+ * provider's default", pass CONFIG_VALUE_DEFAULT itself. Returns 0 on
+ * success, -1 on I/O failure (the in-memory tier is then left unchanged). */
+int config_persist_selection(const char *provider, const char *model, const char *effort);
 
 /* ---- introspection ---- */
 
