@@ -100,6 +100,19 @@ int spinner_hide(struct spinner *s);
  * default ("working..."). */
 void spinner_set_label(struct spinner *s, const char *label);
 
+/* Arm (start_ms > 0) or disarm (0) the elapsed-time counter on
+ * SPINNER_LINE rows. While armed and once the wait is long enough to
+ * matter (see TIMER_MIN_MS), each line-mode frame draws
+ * "<elapsed> · " between the glyph and the label (e.g.
+ * "⠋ 1m 08s · working...") computed from monotonic_ms() - start_ms at
+ * draw time, so the counter ticks with the animation. It leads the
+ * label — which swaps frequently within a user turn — so its column
+ * stays put. The agent arms it with the user turn's start time so the
+ * counter matches the end-of-user-turn stats line. Inline and
+ * tool-status modes never draw it: the inline glyph has no room, and the
+ * tool status row is owned by tool output. */
+void spinner_set_timer(struct spinner *s, long start_ms);
+
 /* Current spinner glyph derived from CLOCK_MONOTONIC, independent of
  * the spinner thread's animation state. Returns a const, NUL-
  * terminated UTF-8 string occupying one terminal cell. Useful when

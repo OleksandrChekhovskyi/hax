@@ -32,11 +32,20 @@ static const char *const FRAMES[] = {
  * fast back-to-back tool dispatches stays inline indefinitely. */
 #define INLINE_TIMEOUT_MS 3000
 
+/* The armed elapsed-time prefix stays hidden until the user turn is
+ * this old. Its job is "this is taking long", so it should not decorate
+ * ordinary user turns — 30s is where a wait stops feeling routine and
+ * the user starts wondering how long it's been (same threshold Claude
+ * Code uses for its spinner counter). Once shown it stays for the rest
+ * of the user turn, since elapsed only grows. */
+#define TIMER_MIN_MS 30000
+
 struct spinner {
     pthread_t thread;
     pthread_mutex_t mu;
     pthread_cond_t cv;
     char *label;
+    long timer_base;           /* monotonic_ms user-turn start; 0 = no elapsed counter */
     enum spinner_mode mode;    /* SPINNER_OFF when not visible */
     int inline_pad;            /* SPINNER_INLINE_TEXT: draw a leading space cell */
     int inline_drawn;          /* SPINNER_INLINE_*: glyph currently on screen */
@@ -130,10 +139,30 @@ static void draw_frame_locked(struct spinner *s)
         if (!s->started)
             return;
         /* Draw before erasing the row tail so sync-less terminals don't show
-         * a blank spinner row between frames. */
+         * a blank spinner row between frames. The elapsed counter draws
+         * *before* the label: labels swap frequently within a user turn
+         * (working → thinking → composing → retrying) and a trailing
+         * counter would hop columns with every swap, while a leading one
+         * only widens at the 1m/1h marks. */
         fputs("\r" ANSI_DIM, stdout);
         fputs(glyph, stdout);
         fputc(' ', stdout);
+        if (s->timer_base > 0) {
+            long elapsed = monotonic_ms() - s->timer_base;
+            if (elapsed >= TIMER_MIN_MS) {
+                char t[32];
+                format_duration(t, sizeof(t), elapsed);
+                /* Keep the row on one physical line: the \r repaint and
+                 * ANSI_ERASE_LINE own exactly one row, so a wrapped row
+                 * would leave stale cells behind. Labels are ASCII
+                 * (bytes == columns); glyph + space are 2 cells, the
+                 * " · " separator 3. */
+                if (2 + strlen(t) + 3 + strlen(s->label) < (size_t)term_width()) {
+                    fputs(t, stdout);
+                    fputs(" \xC2\xB7 ", stdout);
+                }
+            }
+        }
         fputs(s->label, stdout);
         fputs(ANSI_RESET ANSI_ERASE_LINE, stdout);
         fflush(stdout);
@@ -339,6 +368,18 @@ void spinner_set_label(struct spinner *s, const char *label)
         if (s->mode == SPINNER_LINE)
             draw_frame_locked(s);
     }
+    pthread_mutex_unlock(&s->mu);
+}
+
+void spinner_set_timer(struct spinner *s, long start_ms)
+{
+    if (!s)
+        return;
+    pthread_mutex_lock(&s->mu);
+    /* No synchronous repaint: the suffix only ever appears on the
+     * thread-driven SPINNER_LINE row, and the next ~80ms tick picks the
+     * new base up — same latency as one animation frame. */
+    s->timer_base = start_ms > 0 ? start_ms : 0;
     pthread_mutex_unlock(&s->mu);
 }
 

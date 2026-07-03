@@ -88,9 +88,13 @@ context 8.9k / 256k (3%) · 42s · $0.042
   reports per-response cost (currently OpenRouter); subscription and local backends never
   show a dollar figure.
 
-Set `HAX_STATS_VERBOSE=1` to add `out` (tokens generated this turn) and `cached` (prefix-cache
-hits) — useful for diagnosing cache behavior. On narrow terminals the line wraps between
-fields rather than mid-number.
+Set `HAX_STATS_VERBOSE=1` to add `out` (tokens generated this user turn) and `cached`
+(prefix-cache hits) — useful for diagnosing cache behavior. On narrow terminals the line wraps
+between fields rather than mid-number.
+
+Once a user turn has been running for 30 seconds, the busy spinner shows the same elapsed
+counter live (`⠋ 42s · working...`), so a long-running user turn's age is visible before the
+stats line lands.
 
 `/session` shows the cumulative counterpart: turns, time worked, current context usage, token
 totals, and spend for the current sitting. The `tokens total` row sums across every request —

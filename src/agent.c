@@ -1323,6 +1323,12 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
         int user_turn_errored = 0;
         int user_turn_interrupted = 0;
 
+        /* Arm the spinner's elapsed counter with the same clock the
+         * end-of-user-turn stats line reports, so the live counter and
+         * the final duration agree. Disarmed when the inner loop
+         * settles. */
+        spinner_set_timer(r.spinner, user_turn_start_ms);
+
         /* Arm the watcher for the duration of the inner loop — Esc from
          * here on aborts the stream or running tool. Cleared first so a
          * stray Esc from a previous user turn (e.g. user typed Esc during
@@ -1556,6 +1562,10 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
         }
         interrupt_disarm();
         keepawake_release();
+        /* The user turn is over: the end-of-user-turn auto-compaction
+         * below and the next user turn's pre-stream spinner must not
+         * carry this one's counter. */
+        spinner_set_timer(r.spinner, 0);
 
         /* Close any open render state before post-user-turn output — a
          * still-running cluster spinner racing with notify_attention's
