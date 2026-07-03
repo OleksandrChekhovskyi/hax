@@ -15,6 +15,7 @@ void openai_events_init(struct openai_events *s, stream_cb cb, void *user)
     s->pending_usage.input_tokens = -1;
     s->pending_usage.output_tokens = -1;
     s->pending_usage.cached_tokens = -1;
+    s->pending_usage.cost = -1;
 }
 
 void openai_events_free(struct openai_events *s)
@@ -176,6 +177,13 @@ static void capture_usage(struct openai_events *s, json_t *root)
         if (json_is_integer(v))
             s->pending_usage.cached_tokens = (long)json_integer_value(v);
     }
+
+    /* OpenRouter convention: with `usage: {include: true}` in the request,
+     * the trailing usage chunk carries `cost` (USD). Harvested wherever it
+     * appears so compat backends following the same convention work too. */
+    v = json_object_get(usage, "cost");
+    if (json_is_number(v) && json_number_value(v) >= 0)
+        s->pending_usage.cost = json_number_value(v);
 }
 
 /* llama.cpp's return_progress:true attaches a top-level `prompt_progress`

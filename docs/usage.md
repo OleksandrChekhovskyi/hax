@@ -66,11 +66,41 @@ Type `/help` in the REPL for the live command list and keyboard shortcuts.
 | `/effort` | Set reasoning effort when the provider exposes effort levels. |
 | `/compact [focus]` | Summarize history to free context; optional focus text guides the summary. |
 | `/copy` | Copy the latest assistant text response to the clipboard. |
-| `/usage` | Show provider usage info when the provider supports it. |
+| `/session` | Show this session's info and local usage totals (tokens, time worked, spend). |
+| `/usage` | Show provider account usage (subscription windows, key credits) when supported. |
 | `/help` | Show commands and shortcuts. |
 
 A line beginning with `/` is only treated as a command when the first token is a bare command
 name. Paths like `/tmp/repro.c crashes` pass through to the model.
+
+## Stats line
+
+After each user turn the REPL prints a dim one-line summary:
+
+```text
+context 8.9k / 256k (3%) · 42s · $0.042
+```
+
+- `context` is the token usage the last response reported, with the window size and percentage
+  when the context limit is known.
+- The duration is wall-clock time for that user turn, including tool runs.
+- The dollar amount is the session's cumulative spend. It appears only when the provider
+  reports per-response cost (currently OpenRouter); subscription and local backends never
+  show a dollar figure.
+
+Set `HAX_STATS_VERBOSE=1` to add `out` (tokens generated this turn) and `cached` (prefix-cache
+hits) — useful for diagnosing cache behavior. On narrow terminals the line wraps between
+fields rather than mid-number.
+
+`/session` shows the cumulative counterpart: turns, time worked, current context usage, token
+totals, and spend for the current sitting. The `tokens total` row sums across every request —
+each request resends the full conversation, so total `in` grows faster than `context`; the
+cache percentage is the hit rate of summed cached tokens against summed input. Totals reset on
+`/new` and are not carried across `--resume`. `/usage` is different — it asks the provider
+what it knows about your account (Codex plan windows, OpenRouter key credits).
+
+In `-p` mode, an equivalent stats line is printed to stderr at the end of the run, above the
+resume hint, whenever the backend reported usage.
 
 ## Keyboard shortcuts
 

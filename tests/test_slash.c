@@ -56,6 +56,13 @@ const char *session_log_path(const struct session_log *log)
     (void)log;
     return NULL;
 }
+/* /session prints the resume id; NULL = "not recorded", which is what a
+ * stubbed-out log should read as. */
+const char *session_log_resume_hint(const struct session_log *log)
+{
+    (void)log;
+    return NULL;
+}
 /* Scripts the session_picker_run stub: whether an interactive picker was
  * shown, and the path it "selects" (NULL = cancel or nothing to resume). */
 static int stub_picker_shown = 0;
@@ -306,6 +313,58 @@ static void test_help_lists_commands_and_shortcuts(void)
     free(out);
 }
 
+/* ---------- /session ---------- */
+
+static void test_session_prints_totals(void)
+{
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.r = &r};
+    st.stats.turns = 3;
+    st.stats.worked_ms = 68000;   /* 1m 08s */
+    st.stats.input_tokens = 5530; /* 5.4k */
+    st.stats.output_tokens = 412;
+    st.stats.cached_tokens = 2048; /* 2.0k; 2048*100/5530 = 37% hit rate */
+    st.stats.cost = 0.042;
+    st.stats.last_ctx = 4000; /* 3.9k; no provider ⇒ no limit/percent */
+    struct slash_ctx ctx = {.state = &st};
+    struct dispatch_call c = {.line = "/session", .ctx = &ctx};
+    char *out = capture_stdout(do_dispatch, &c);
+    EXPECT(c.result == SLASH_HANDLED);
+    /* Stubbed session_log_resume_hint returns NULL ⇒ "not recorded". */
+    EXPECT(strstr(out, "not recorded") != NULL);
+    EXPECT(strstr(out, "turns") != NULL);
+    EXPECT(strstr(out, "time worked") != NULL);
+    EXPECT(strstr(out, "1m 08s") != NULL);
+    EXPECT(strstr(out, "context") != NULL);
+    EXPECT(strstr(out, "3.9k") != NULL);
+    EXPECT(strstr(out, "tokens total") != NULL);
+    EXPECT(strstr(out, "in 5.4k") != NULL);
+    EXPECT(strstr(out, "out 412") != NULL);
+    EXPECT(strstr(out, "cached 2.0k (37%)") != NULL);
+    EXPECT(strstr(out, "$0.042") != NULL);
+    free(out);
+}
+
+static void test_session_hides_unreported_rows(void)
+{
+    /* Zero totals (a backend that reports no usage, no provider-reported
+     * cost): the tokens and spend rows are dropped rather than shown as
+     * zeros; turns and time worked always render. */
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.r = &r};
+    struct slash_ctx ctx = {.state = &st};
+    struct dispatch_call c = {.line = "/session", .ctx = &ctx};
+    char *out = capture_stdout(do_dispatch, &c);
+    EXPECT(c.result == SLASH_HANDLED);
+    EXPECT(strstr(out, "turns") != NULL);
+    EXPECT(strstr(out, "time worked") != NULL);
+    EXPECT(strstr(out, "tokens") == NULL);
+    EXPECT(strstr(out, "$") == NULL);
+    free(out);
+}
+
 /* ---------- /new and its alias /clear ---------- */
 
 static void seed_session(struct agent_session *s)
@@ -474,6 +533,8 @@ int main(void)
     test_dispatch_bad_usage();
     test_dispatch_bad_usage_uses_alias_name();
     test_help_lists_commands_and_shortcuts();
+    test_session_prints_totals();
+    test_session_hides_unreported_rows();
     test_new_clears_session();
     test_clear_alias_runs_new();
     test_new_rejects_extra_args();

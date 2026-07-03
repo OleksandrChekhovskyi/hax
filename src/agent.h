@@ -9,6 +9,31 @@ struct transcript_log;
 struct session_log;
 struct render_ctx;
 
+/* Cumulative usage totals for the running REPL, accumulated across user
+ * turns and reset by /new alongside the conversation. Only provider-
+ * reported numbers are summed (-1 "not reported" fields are skipped), so
+ * a zero can also mean "the backend never said". Deliberately process-
+ * lifetime: /resume restores the conversation, not the resumed session's
+ * historical totals — "time worked" and "spend" describe this sitting. */
+struct session_stats {
+    long input_tokens;  /* summed across round-trips (each sends the full context) */
+    long output_tokens; /* total tokens generated */
+    long cached_tokens; /* total input tokens served from the prefix cache */
+    double cost;        /* provider-reported spend, USD */
+    long worked_ms;     /* wall time spent inside user turns */
+    long turns;         /* user turns run */
+    /* Current window state: input+output of the latest reported response —
+     * the same number the per-turn stats line shows, NOT a sum. Kept so
+     * /session can present the window frame next to the billing-frame
+     * totals above (summed `in` exceeds it as soon as there's a second
+     * round-trip, which reads as a bug without this anchor). 0 = none
+     * reported yet. last_limit is the context window resolved alongside it
+     * (0 = unknown), snapshotted here so /session doesn't have to reach
+     * into the provider/compact layers. */
+    long last_ctx;
+    long last_limit;
+};
+
 /* Live REPL state owned by agent_run, exposed to slash handlers (and
  * any future callers that need to mutate the conversation) so a single
  * pointer is enough to act on history, the optional HAX_TRANSCRIPT log,
@@ -26,6 +51,8 @@ struct agent_state {
      * restored conversation through it. Points at agent_run's stack
      * frame; never heap-owned. */
     struct render_ctx *r;
+    /* Session usage totals — read by /session, reset by /new. */
+    struct session_stats stats;
 };
 
 /* Run the interactive REPL. *provider is the initial provider (owned by the

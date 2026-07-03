@@ -376,6 +376,33 @@ static void test_session_context_snapshot(void)
     agent_session_free(&s);
 }
 
+static void test_format_stats_segments_selection(void)
+{
+    char segs[STATS_SEGS_MAX][STATS_SEG_LEN];
+
+    /* Default (non-verbose): context, duration, spend; out/cached dropped. */
+    int n = format_stats_segments(segs, 9113, 262144, 595, 2765, 0, 42000, 0.042);
+    EXPECT(n == 3);
+    EXPECT_STR_EQ(segs[0], "context 8.9k / 256k (3%)");
+    EXPECT_STR_EQ(segs[1], "42s");
+    EXPECT_STR_EQ(segs[2], "$0.042");
+
+    /* Verbose: out and cached slot in between. */
+    n = format_stats_segments(segs, 9113, 262144, 595, 2765, 1, 42000, 0.042);
+    EXPECT(n == 5);
+    EXPECT_STR_EQ(segs[1], "out 595");
+    EXPECT_STR_EQ(segs[2], "cached 2.7k");
+
+    /* Unreported fields are skipped: no usage, no cost ⇒ duration only. */
+    n = format_stats_segments(segs, -1, 0, -1, -1, 1, 42000, 0);
+    EXPECT(n == 1);
+    EXPECT_STR_EQ(segs[0], "42s");
+
+    /* Nothing reported at all. */
+    n = format_stats_segments(segs, -1, 0, -1, -1, 0, -1, 0);
+    EXPECT(n == 0);
+}
+
 int main(void)
 {
     test_items_append_growth();
@@ -393,5 +420,6 @@ int main(void)
     test_session_absorb_no_tool_call();
     test_session_absorb_with_tool_call();
     test_session_context_snapshot();
+    test_format_stats_segments_selection();
     T_REPORT();
 }

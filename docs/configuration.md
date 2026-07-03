@@ -118,6 +118,8 @@ canonical key and its environment variable.
 - `context_limit` / `HAX_CONTEXT_LIMIT` — manual context-window size for percentage display
   and auto-compaction.
 - `display_width` / `HAX_DISPLAY_WIDTH` — force render width in columns.
+- `stats.verbose` / `HAX_STATS_VERBOSE` — add `out` and `cached` token details to the
+  per-turn stats line. Default off.
 - `notify` / `HAX_NOTIFY` — desktop notification style: `osc9`, `bel`, or falsy to disable.
 
 `HAX_CONTEXT_LIMIT` overrides provider auto-detection. Current auto-detection exists for
@@ -179,6 +181,9 @@ These settings apply to built-in OpenAI-family presets: `openai`, `openai-compat
   turns: `off`, `on`, or a field name. Default is provider-specific.
 - `openai.send_cache_key` / `HAX_OPENAI_SEND_CACHE_KEY` — send a stable `prompt_cache_key`
   when enabled. Default is provider-specific.
+- `openai.request_cost` / `HAX_OPENAI_REQUEST_COST` — send `usage: {include: true}` so the
+  backend reports per-response cost (an OpenRouter extension). Default on for `openrouter`,
+  off elsewhere.
 
 API-key fallbacks:
 

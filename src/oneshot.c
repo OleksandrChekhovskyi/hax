@@ -32,8 +32,9 @@ static void oneshot_flush(struct transcript_log *tlog, struct session_log *slog,
 struct oneshot_ctx {
     struct turn *turn;
     char *error_msg; /* malloc'd; set on EV_ERROR */
-    /* Filled from EV_DONE; -1/-1/-1 if the provider didn't report. Drives
-     * the auto-compaction threshold check between round-trips. */
+    /* Filled from EV_DONE; all fields -1 if the provider didn't report.
+     * Drives the auto-compaction threshold check between round-trips and
+     * the exit stats summary. */
     struct stream_usage usage;
 };
 
@@ -83,7 +84,7 @@ static int oneshot_compact(struct agent_session *s, struct provider *p, struct s
     turn_init(&t);
     /* Reuse the normal sink (feeds the turn, captures any error); no tick,
      * no display. */
-    struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL, .usage = {-1, -1, -1}};
+    struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL, .usage = {-1, -1, -1, -1}};
     char *summary = compact_summarize(s, p, NULL, &t, on_event, &oc, NULL, NULL);
     free(oc.error_msg);
     turn_reset(&t);
@@ -183,6 +184,13 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
 
     int rc = 0;
     int first_inner = 1;
+    /* Run stats for the exit summary on stderr: latest reported context
+     * size, summed provider-reported cost, wall time for the whole run.
+     * (Compaction round-trips inside oneshot_compact aren't counted —
+     * same simplification as the interactive path.) */
+    long start_ms = monotonic_ms();
+    long last_ctx = -1;
+    double total_cost = 0;
     for (int turn_n = 0; turn_n < max_turns; turn_n++) {
         if (!first_inner) {
             agent_session_add_boundary(&sess);
@@ -195,7 +203,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
 
         struct turn t;
         turn_init(&t);
-        struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL, .usage = {-1, -1, -1}};
+        struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL, .usage = {-1, -1, -1, -1}};
         /* Oneshot doesn't arm interrupt and has no idle UI to surface
          * — pass a NULL tick so http skips the progress hook entirely. */
         p->stream(p, &ctx, sess.model, on_event, &oc, NULL, NULL);
@@ -215,6 +223,10 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         long round_ctx = (oc.usage.input_tokens >= 0 && oc.usage.output_tokens >= 0)
                              ? oc.usage.input_tokens + oc.usage.output_tokens
                              : -1;
+        if (round_ctx >= 0)
+            last_ctx = round_ctx;
+        if (oc.usage.cost > 0)
+            total_cost += oc.usage.cost;
 
         size_t n_before;
         int had_tool_call;
@@ -295,19 +307,38 @@ done:
      * clean for piping) so a one-shot run can be picked up with --resume.
      * NULL when nothing was recorded or persistence is disabled. */
     const char *hint = session_log_resume_hint(slog);
-    if (hint) {
+    /* Run stats mirror the REPL's per-turn line (context · time · spend),
+     * printed only when a backend actually reported something — a provider
+     * that sends no usage keeps -p output free of a "context ?" stub. Time
+     * alone isn't worth a line. */
+    int have_stats = last_ctx >= 0 || total_cost > 0;
+    if (hint || have_stats) {
         /* Flush the answer (block-buffered when stdout is piped) before the
          * unbuffered stderr write, so a combined 2>&1 stream shows the hint
          * after the answer rather than racing ahead of it. */
         fflush(stdout);
-        /* Always lead with a blank line so the hint reads as a footnote
+        /* Always lead with a blank line so the footnotes read as such
          * rather than part of the answer — agents commonly fold stderr
          * into stdout (2>&1), where the model's output would otherwise run
-         * straight into it. Dim only on a terminal; a captured log stays
+         * straight into them. Dim only on a terminal; a captured log stays
          * plain (no stray ANSI). */
         int tty = isatty(fileno(stderr));
-        fprintf(stderr, "\n%sresume with: hax --resume=%s%s\n", tty ? ANSI_DIM : "", hint,
-                tty ? ANSI_RESET : "");
+        fputc('\n', stderr);
+        if (have_stats) {
+            /* Same field selection/formatting as the REPL stats line
+             * (display_stats_line), minus the verbose detail and reflow —
+             * stderr footnotes are plain single lines. */
+            char segs[STATS_SEGS_MAX][STATS_SEG_LEN];
+            int n = format_stats_segments(segs, last_ctx, compact_context_limit(p), -1, -1, 0,
+                                          monotonic_ms() - start_ms, total_cost);
+            fputs(tty ? ANSI_DIM : "", stderr);
+            for (int i = 0; i < n; i++)
+                fprintf(stderr, "%s%s", i ? " · " : "", segs[i]);
+            fprintf(stderr, "%s\n", tty ? ANSI_RESET : "");
+        }
+        if (hint)
+            fprintf(stderr, "%sresume with: hax --resume=%s%s\n", tty ? ANSI_DIM : "", hint,
+                    tty ? ANSI_RESET : "");
     }
     transcript_log_close(tlog);
     session_log_close(slog);

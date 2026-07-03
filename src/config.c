@@ -51,6 +51,8 @@ static const struct config_setting REGISTRY[] = {
      "Manual context-window size for the % display (e.g. 256k); overrides auto-detect"},
     {"display_width",              "HAX_DISPLAY_WIDTH",           NULL,
      "Force content width in columns (default: terminal width, clamped)"},
+    {"stats.verbose",              "HAX_STATS_VERBOSE",           NULL,
+     "Show output/cached token details on the per-turn stats line"},
     {"notify",                     "HAX_NOTIFY",                  NULL,
      "Desktop-notification style (auto-detected)"},
 
@@ -101,6 +103,8 @@ static const struct config_setting REGISTRY[] = {
      "Replay reasoning text to the model (off/on, or a field name)"},
     {"openai.send_cache_key",      "HAX_OPENAI_SEND_CACHE_KEY",   NULL,
      "Send a stable prompt_cache_key (prefix-cache hint)"},
+    {"openai.request_cost",        "HAX_OPENAI_REQUEST_COST",     NULL,
+     "Request usage accounting (`usage: {include: true}`) for per-response cost"},
     {"provider_name",              "HAX_PROVIDER_NAME",           NULL,
      "Display name for the provider in the banner"},
 

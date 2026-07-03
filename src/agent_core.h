@@ -59,6 +59,20 @@ const char *resolve_reasoning_effort(const struct provider *p);
  */
 char *build_system_prompt(const char *model, int raw);
 
+/* Shared assembly for the stats line shown after each REPL user turn and
+ * at the end of a -p run: "context 8.9k / 256k (3%)", "out 595",
+ * "cached 2.7k", "42s", "$0.042". Fills `segs` in display order and
+ * returns the count (0 when nothing was reported). Unreported fields are
+ * skipped rather than rendered as fake zeros: ctx < 0, elapsed_ms < 0,
+ * spend <= 0. out/cached are diagnostic detail, included only when
+ * `verbose` (and cached only when > 0). Callers own the layout — the REPL
+ * reflows segments at the " · " seams, oneshot joins them into one stderr
+ * line — so what is shown can never drift between the two. */
+#define STATS_SEGS_MAX 5
+#define STATS_SEG_LEN  64
+int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long out, long cached,
+                          int verbose, long elapsed_ms, double spend);
+
 /* Live per-run state shared by the interactive and one-shot paths.
  * Owns the items vector, the assembled system prompt, the tools table,
  * and the resolved model + reasoning_effort. */

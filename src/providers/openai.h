@@ -87,6 +87,12 @@ struct openai_preset {
      * ignore the unknown request field; leave this 0 unless the
      * preset's target server is known to emit prompt_progress. */
     int emit_progress;
+    /* Ask the backend for usage accounting. Sends `usage: {include: true}`
+     * in the request body (an OpenRouter extension) so the trailing usage
+     * chunk carries the response's `cost` in USD. Gated per preset: the
+     * field name is generic enough that an unknown-field-rejecting backend
+     * (vLLM) could 400 on it. */
+    int request_cost;
     /* When non-NULL, captured reasoning text (ITEM_REASONING.reasoning_text)
      * is round-tripped back to the server under this field name on each
      * assistant message — "reasoning_content" for llama.cpp. Required for

@@ -804,6 +804,61 @@ long monotonic_ms(void)
     return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
 }
 
+void format_tokens(char *buf, size_t buflen, long n)
+{
+    if (n < 0)
+        snprintf(buf, buflen, "?");
+    else if (n < 1024)
+        snprintf(buf, buflen, "%ld", n);
+    else if (n < 10L * 1024)
+        snprintf(buf, buflen, "%.1fk", (double)n / 1024.0);
+    else if (n < 1024L * 1024)
+        snprintf(buf, buflen, "%ldk", (n + 512) / 1024);
+    else if (n < 10L * 1024 * 1024)
+        snprintf(buf, buflen, "%.1fM", (double)n / (1024.0 * 1024.0));
+    else
+        snprintf(buf, buflen, "%ldM", (n + 512L * 1024) / (1024L * 1024));
+}
+
+void format_duration(char *buf, size_t buflen, long ms)
+{
+    long s = (ms + 500) / 1000;
+    if (s < 0)
+        s = 0;
+    if (s < 60)
+        snprintf(buf, buflen, "%lds", s);
+    else if (s < 3600)
+        snprintf(buf, buflen, "%ldm %02lds", s / 60, s % 60);
+    else
+        snprintf(buf, buflen, "%ldh %02ldm", s / 3600, s % 3600 / 60);
+}
+
+void format_cost(char *buf, size_t buflen, double usd)
+{
+    /* Zero is a real value here (a fresh key's account spend), not an
+     * unreported one — but "$0.0000" reads like a formatting bug. */
+    if (usd <= 0)
+        snprintf(buf, buflen, "$0.00");
+    else if (usd < 0.01)
+        snprintf(buf, buflen, "$%.4f", usd);
+    else if (usd < 1.0)
+        snprintf(buf, buflen, "$%.3f", usd);
+    else
+        snprintf(buf, buflen, "$%.2f", usd);
+}
+
+void format_context(char *buf, size_t buflen, long ctx, long limit)
+{
+    char a[32], b[32];
+    format_tokens(a, sizeof(a), ctx);
+    if (limit > 0) {
+        format_tokens(b, sizeof(b), limit);
+        snprintf(buf, buflen, "%s / %s (%ld%%)", a, b, ctx * 100 / limit);
+    } else {
+        snprintf(buf, buflen, "%s", a);
+    }
+}
+
 void buf_init(struct buf *b)
 {
     b->data = NULL;

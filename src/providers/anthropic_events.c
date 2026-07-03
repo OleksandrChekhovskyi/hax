@@ -15,6 +15,7 @@ void anthropic_events_init(struct anthropic_events *s, stream_cb cb, void *user)
     s->pending_usage.input_tokens = -1;
     s->pending_usage.output_tokens = -1;
     s->pending_usage.cached_tokens = -1;
+    s->pending_usage.cost = -1;
 }
 
 void anthropic_events_free(struct anthropic_events *s)

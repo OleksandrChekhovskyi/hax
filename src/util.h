@@ -139,6 +139,25 @@ long parse_duration_ms(const char *s);
  * elapsed-time math (timeouts, idle thresholds, animation cadence). */
 long monotonic_ms(void);
 
+/* Format a token count in 1024-base: "412", "5.4k", "128k", "1.2M".
+ * Powers-of-two because advertised context windows are typically
+ * 32k/128k/256k (= 32×1024 etc.), so 1024-base produces the round
+ * numbers users expect. < 0 → "?" (provider didn't report). */
+void format_tokens(char *buf, size_t buflen, long n);
+
+/* Format a duration for stats display: "0s", "42s", "1m 08s", "1h 02m".
+ * Rounds to the nearest second; negative values clamp to "0s". */
+void format_duration(char *buf, size_t buflen, long ms);
+
+/* Format a dollar amount with magnitude-dependent precision, so small
+ * per-turn costs stay meaningful without adding noise to large ones:
+ * "$0.0042", "$0.042", "$1.23". Zero (and below) renders "$0.00". */
+void format_cost(char *buf, size_t buflen, double usd);
+
+/* Format context usage against its window: "8.9k / 256k (3%)", or just
+ * "8.9k" when the window is unknown (limit <= 0). */
+void format_context(char *buf, size_t buflen, long ctx, long limit);
+
 /* Write a random UUIDv4 (36 chars + NUL terminator) to out. Aborts on
  * failure (e.g. /dev/urandom unavailable) — same convention as xmalloc. */
 void gen_uuid_v4(char out[37]);

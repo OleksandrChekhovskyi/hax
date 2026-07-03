@@ -34,6 +34,7 @@ struct openai {
     char *session_id; /* sent as prompt_cache_key when send_cache_key is set */
     int send_cache_key;
     int emit_progress;
+    int request_cost;
     const char *length_hint;         /* borrowed; appended to "length" truncation errors */
     char *roundtrip_reasoning_field; /* NULL = don't round-trip reasoning */
     enum reasoning_format reasoning_format;
@@ -226,7 +227,7 @@ enum reasoning_format reasoning_format_parse(const char *s, enum reasoning_forma
 
 static char *build_body(const struct context *ctx, const char *provider, const char *model,
                         const char *cache_key, enum reasoning_format reasoning, int return_progress,
-                        const char *reasoning_field)
+                        int request_cost, const char *reasoning_field)
 {
     /* Omit `tool_choice` and `parallel_tool_calls`: their defaults ("auto"
      * and true respectively) are exactly what we want, so explicitly setting
@@ -257,6 +258,11 @@ static char *build_body(const struct context *ctx, const char *provider, const c
      * preset opts in without per-backend gating beyond that. */
     if (return_progress)
         json_object_set_new(body, "return_progress", json_true());
+
+    /* OpenRouter extension: opt into usage accounting so the trailing
+     * usage chunk includes this response's `cost` (USD). */
+    if (request_cost)
+        json_object_set_new(body, "usage", json_pack("{s:b}", "include", 1));
 
     switch (reasoning) {
     case REASONING_FLAT:
@@ -297,7 +303,8 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
     struct openai *o = (struct openai *)p;
 
     char *body = build_body(ctx, p->name, model, o->send_cache_key ? o->session_id : NULL,
-                            o->reasoning_format, o->emit_progress, o->roundtrip_reasoning_field);
+                            o->reasoning_format, o->emit_progress, o->request_cost,
+                            o->roundtrip_reasoning_field);
     if (!body)
         return -1;
     size_t body_len = strlen(body);
@@ -653,6 +660,9 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
     o->endpoint = xasprintf("%s/chat/completions", o->base_url);
     o->send_cache_key = send_cache_key;
     o->emit_progress = preset->emit_progress;
+    char *cost_key = preset_key(preset->config_prefix, "request_cost");
+    o->request_cost = config_bool_or(cost_key, preset->request_cost);
+    free(cost_key);
     o->length_hint = preset->length_hint;
     o->roundtrip_reasoning_field =
         resolve_roundtrip_field(preset->config_prefix, preset->roundtrip_reasoning_field);

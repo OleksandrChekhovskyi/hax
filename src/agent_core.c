@@ -130,6 +130,35 @@ char *build_system_prompt(const char *model, int raw)
     return out;
 }
 
+int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long out, long cached,
+                          int verbose, long elapsed_ms, double spend)
+{
+    int n = 0;
+    /* Sized so the longest prefix ("context ", 8 cols) plus the scratch
+     * value provably fits in a segment — GCC's -Wformat-truncation flags
+     * the snprintfs below otherwise. Humanized values are ~20 chars at
+     * worst ("9.9M / 9.9M (100%)"), so the headroom costs nothing. */
+    char buf[STATS_SEG_LEN - 16];
+
+    if (ctx >= 0) {
+        format_context(buf, sizeof(buf), ctx, limit);
+        snprintf(segs[n++], STATS_SEG_LEN, "context %s", buf);
+    }
+    if (verbose && out >= 0) {
+        format_tokens(buf, sizeof(buf), out);
+        snprintf(segs[n++], STATS_SEG_LEN, "out %s", buf);
+    }
+    if (verbose && cached > 0) {
+        format_tokens(buf, sizeof(buf), cached);
+        snprintf(segs[n++], STATS_SEG_LEN, "cached %s", buf);
+    }
+    if (elapsed_ms >= 0)
+        format_duration(segs[n++], STATS_SEG_LEN, elapsed_ms);
+    if (spend > 0)
+        format_cost(segs[n++], STATS_SEG_LEN, spend);
+    return n;
+}
+
 int agent_session_init(struct agent_session *s, struct provider *p, const struct hax_opts *opts)
 {
     memset(s, 0, sizeof(*s));

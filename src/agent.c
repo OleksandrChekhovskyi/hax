@@ -165,7 +165,7 @@ static void flush_logs(struct transcript_log *tlog, struct session_log *slog,
 struct event_ctx {
     struct render_ctx *r;
     struct turn *turn;
-    /* Filled in from EV_DONE; -1/-1/-1 if the provider didn't report. */
+    /* Filled in from EV_DONE; all fields -1 if the provider didn't report. */
     struct stream_usage usage;
 };
 
@@ -243,69 +243,55 @@ static int reasoning_visible(void)
     return config_bool("show_reasoning");
 }
 
-/* Format a token count in 1024-base: "412", "5.4k", "128k", "1.2M".
- * Powers-of-two are used because advertised context windows are typically
- * 32k/128k/256k (= 32×1024 etc.), so 1024-base produces the cleaner round
- * numbers users expect. < 0 → "?" (provider didn't report). */
-static void format_tokens(char *buf, size_t buflen, long n)
-{
-    if (n < 0)
-        snprintf(buf, buflen, "?");
-    else if (n < 1024)
-        snprintf(buf, buflen, "%ld", n);
-    else if (n < 10L * 1024)
-        snprintf(buf, buflen, "%.1fk", (double)n / 1024.0);
-    else if (n < 1024L * 1024)
-        snprintf(buf, buflen, "%ldk", (n + 512) / 1024);
-    else if (n < 10L * 1024 * 1024)
-        snprintf(buf, buflen, "%.1fM", (double)n / (1024.0 * 1024.0));
-    else
-        snprintf(buf, buflen, "%ldM", (n + 512L * 1024) / (1024L * 1024));
-}
-
-/* Dim one-liner: "context 8.9k / 256k (3%) · out 595 · cached 2.7k", shown
- * once per user turn so multi-step tool runs collapse into a single summary
- * instead of bracketing every intermediate response.
+/* Dim per-user-turn stats line: "context 8.9k / 256k (3%) · 42s · $0.042",
+ * shown once per user turn so multi-step tool runs collapse into a single
+ * summary instead of bracketing every intermediate response. Distinct from
+ * /usage (the provider's account report) and /session (this session's
+ * totals) — this is the ambient per-turn view.
  *
  * ctx and cached reflect the last response (= current window state — each
  * call's input subsumes the prior call's prefix, so the latest values are
- * the right snapshot). out is a running sum across the user turn's model calls,
- * answering "how many tokens did this prompt cost in generation". Each
- * value is -1 when the underlying counts weren't reported by the backend;
- * the section is then skipped rather than rendered with a misleading zero. */
-static void display_usage(struct render_ctx *r, const struct provider *p, long ctx, long out,
-                          long cached)
+ * the right snapshot). out is a running sum across the user turn's model
+ * calls. elapsed_ms is this user turn's wall time; spend is the *session's*
+ * cumulative provider-reported cost. Field selection and formatting live in
+ * format_stats_segments, shared with oneshot's exit summary.
+ *
+ * Segments wrap at the " · " seams against the content width, so a narrow
+ * terminal reflows between fields instead of the terminal hard-wrapping
+ * mid-number. Width is sampled at print time; the line is scrollback, so
+ * there's no post-print reflow obligation. */
+static void display_stats_line(struct render_ctx *r, const struct provider *p, long ctx, long out,
+                               long cached, long elapsed_ms, double spend)
 {
-    int show_ctx = ctx >= 0;
-    int show_out = out >= 0;
-    int show_cached = cached > 0;
-    if (!show_ctx && !show_out && !show_cached)
+    char segs[STATS_SEGS_MAX][STATS_SEG_LEN];
+    int n = format_stats_segments(segs, ctx, compact_context_limit(p), out, cached,
+                                  config_bool("stats.verbose"), elapsed_ms, spend);
+    if (n == 0)
         return;
 
     struct disp *d = &r->disp;
     render_open_block(r);
     disp_raw(ANSI_DIM);
 
-    const char *sep = "";
-    char buf[32], limit_buf[32];
-    if (show_ctx) {
-        format_tokens(buf, sizeof(buf), ctx);
-        disp_printf(d, "context %s", buf);
-        long limit = compact_context_limit(p);
-        if (limit > 0) {
-            format_tokens(limit_buf, sizeof(limit_buf), limit);
-            disp_printf(d, " / %s (%ld%%)", limit_buf, ctx * 100 / limit);
+    /* Greedy fill: emit segments joined by " · ", breaking to a fresh line
+     * when the next one wouldn't fit. Segment text is ASCII (byte length ==
+     * columns); only the separator's '·' is multibyte, hence the explicit
+     * 3-column charge for it. */
+    int width = display_width();
+    int col = 0;
+    for (int i = 0; i < n; i++) {
+        int len = (int)strlen(segs[i]);
+        if (col > 0) {
+            if (col + 3 + len > width) {
+                disp_putc(d, '\n');
+                col = 0;
+            } else {
+                disp_printf(d, " · ");
+                col += 3;
+            }
         }
-        sep = " · ";
-    }
-    if (show_out) {
-        format_tokens(buf, sizeof(buf), out);
-        disp_printf(d, "%sout %s", sep, buf);
-        sep = " · ";
-    }
-    if (show_cached) {
-        format_tokens(buf, sizeof(buf), cached);
-        disp_printf(d, "%scached %s", sep, buf);
+        disp_printf(d, "%s", segs[i]);
+        col += len;
     }
     disp_raw(ANSI_RESET);
     disp_putc(d, '\n');
@@ -786,6 +772,8 @@ void agent_new_conversation(struct agent_state *st)
      * unreachable garbage. Drop them now rather than letting them sit in
      * /tmp until process exit (or longer if the user kills the process). */
     bash_cleanup_tempfiles();
+    /* A fresh conversation starts its /session ledger at zero too. */
+    memset(&st->stats, 0, sizeof(st->stats));
     agent_print_banner(st->provider, st->sess);
 }
 
@@ -1331,6 +1319,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
          * generated in response to this prompt. -1 means "no call reported
          * this number yet". */
         long user_turn_ctx = -1, user_turn_out = -1, user_turn_cached = -1;
+        long user_turn_start_ms = monotonic_ms();
         int user_turn_errored = 0;
         int user_turn_interrupted = 0;
 
@@ -1374,7 +1363,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
             struct turn t;
             turn_init(&t);
             r.disp.saw_text = 0;
-            struct event_ctx ec = {.r = &r, .turn = &t, .usage = {-1, -1, -1}};
+            struct event_ctx ec = {.r = &r, .turn = &t, .usage = {-1, -1, -1, -1}};
             /* agent_stream_tick combines cancel (Esc) with idle
              * detection: ~1Hz from libcurl's progress callback inside
              * curl_easy_perform, plus on every received chunk. */
@@ -1432,6 +1421,22 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
                 user_turn_out = (user_turn_out < 0 ? 0 : user_turn_out) + ec.usage.output_tokens;
             if (ec.usage.cached_tokens >= 0)
                 user_turn_cached = ec.usage.cached_tokens;
+
+            /* Session totals (/session): sums of what this round-trip
+             * reported. Unlike the display trio above these are plain
+             * accumulators — unreported fields just don't contribute. */
+            if (user_turn_ctx >= 0) {
+                state.stats.last_ctx = user_turn_ctx;
+                state.stats.last_limit = compact_context_limit(p);
+            }
+            if (ec.usage.input_tokens >= 0)
+                state.stats.input_tokens += ec.usage.input_tokens;
+            if (ec.usage.output_tokens >= 0)
+                state.stats.output_tokens += ec.usage.output_tokens;
+            if (ec.usage.cached_tokens > 0)
+                state.stats.cached_tokens += ec.usage.cached_tokens;
+            if (ec.usage.cost > 0)
+                state.stats.cost += ec.usage.cost;
 
             if (interrupted) {
                 /* User pressed Esc. Same shape-history-as-aborted dance
@@ -1566,8 +1571,15 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
         if (user_turn_interrupted)
             render_interrupt_marker(&r);
 
+        /* Time worked counts errored/interrupted turns too — the wall time
+         * was spent either way, and /session's total should reflect it. */
+        long user_turn_ms = monotonic_ms() - user_turn_start_ms;
+        state.stats.worked_ms += user_turn_ms;
+        state.stats.turns++;
+
         if (!user_turn_errored)
-            display_usage(&r, p, user_turn_ctx, user_turn_out, user_turn_cached);
+            display_stats_line(&r, p, user_turn_ctx, user_turn_out, user_turn_cached, user_turn_ms,
+                               state.stats.cost);
 
         /* Auto-compaction: once the reported context usage nears the window,
          * summarize and replace history before the next prompt. Skipped on an

@@ -98,11 +98,23 @@ struct context {
  * full history + the new user message); output_tokens is what was just generated.
  * "context used" for display = input + output, since both will be in the
  * next request's input. cached_tokens is a subset of input_tokens (prefix
- * cache hit) — informational, not additive. */
+ * cache hit) — informational, not additive. Note that cached_tokens means
+ * cache *reads* only: dialects that bill cache writes separately
+ * (Anthropic's cache_creation_input_tokens) fold the written tokens into
+ * input_tokens, where they are volume-accurate but priced like ordinary
+ * input. hax doesn't price tokens, so the distinction is deliberately not
+ * modeled; if it's ever needed, add a cache_write_tokens field with the
+ * same -1 convention rather than overloading this one.
+ *
+ * cost is the provider-reported charge for this response in USD (e.g.
+ * OpenRouter's usage.cost when usage accounting is requested); negative
+ * means not reported. hax never computes cost from token prices itself —
+ * subscription and local backends simply never report one. */
 struct stream_usage {
     long input_tokens;
     long output_tokens;
     long cached_tokens;
+    double cost;
 };
 
 /* Events emitted by a provider's stream() into a stream_cb. */

@@ -208,6 +208,11 @@ For the context percentage, hax probes
 `/api/v1/models/<model>/endpoints` and uses the largest returned `context_length`.
 `HAX_SHOW_REASONING=1` both requests OpenRouter reasoning output and shows reasoning deltas.
 
+OpenRouter reports per-response cost, which feeds the spend figure on the stats line and in
+`/session`. OpenRouter also supports `/usage`, showing the API key's total spend, the account's
+remaining prepaid credits, and — when the key carries a per-key spending cap — the cap and its
+remaining allowance.
+
 ## Custom providers
 
 Any static OpenAI Chat Completions or Anthropic Messages endpoint can be added under the

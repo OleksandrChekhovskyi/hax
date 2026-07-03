@@ -53,6 +53,7 @@ static void slash_run_model(struct slash_ctx *ctx);
 static void slash_run_effort(struct slash_ctx *ctx);
 static void slash_run_compact(struct slash_ctx *ctx);
 static void slash_run_copy(struct slash_ctx *ctx);
+static void slash_run_session(struct slash_ctx *ctx);
 static void slash_run_usage(struct slash_ctx *ctx);
 static void slash_run_help(struct slash_ctx *ctx);
 
@@ -108,9 +109,15 @@ static const struct slash_cmd COMMANDS[] = {
         .run = slash_run_copy,
     },
     {
+        .name = "session",
+        .aliases = {NULL},
+        .summary = "show this session's info and usage totals",
+        .run = slash_run_session,
+    },
+    {
         .name = "usage",
         .aliases = {NULL},
-        .summary = "show provider usage info",
+        .summary = "show provider account usage",
         .run = slash_run_usage,
     },
     {
@@ -339,6 +346,76 @@ static void slash_run_copy(struct slash_ctx *ctx)
         return;
     }
     ui_error("clipboard copy failed: %s", err ? err : "unknown error");
+}
+
+/* ---------- /session ---------- */
+
+/* Label column width: longest label ("tokens total") plus a two-space
+ * gutter, matching the /help table's alignment approach. */
+#define SESSION_LABEL_W 14
+
+static void session_row(const char *label, const char *value)
+{
+    printf("  " ANSI_DIM "%-*s%s" ANSI_RESET "\n", SESSION_LABEL_W, label, value);
+}
+
+/* Local counterpart to /usage: everything here is computed from this
+ * process's own accumulators (struct session_stats) — no network. Totals
+ * are per-sitting by design: /new zeroes them, /resume does not restore
+ * the resumed session's history. Rows whose numbers were never reported
+ * (a backend that sends no usage, no provider-reported cost) are dropped
+ * rather than shown as zeros. */
+static void slash_run_session(struct slash_ctx *ctx)
+{
+    struct agent_state *st = ctx->state;
+    const struct session_stats *t = &st->stats;
+    char row[160], a[32], b[32];
+
+    const char *hint = session_log_resume_hint(st->slog);
+    session_row("session", hint ? hint : "not recorded");
+
+    const char *prov = (st->provider && st->provider->name) ? st->provider->name : "?";
+    const char *model = (st->sess && st->sess->model && *st->sess->model) ? st->sess->model : "?";
+    const char *effort = st->sess ? st->sess->reasoning_effort : NULL;
+    if (effort && *effort)
+        snprintf(row, sizeof(row), "%s · %s · %s", prov, model, effort);
+    else
+        snprintf(row, sizeof(row), "%s · %s", prov, model);
+    session_row("provider", row);
+
+    snprintf(row, sizeof(row), "%ld", t->turns);
+    session_row("turns", row);
+
+    format_duration(a, sizeof(a), t->worked_ms);
+    session_row("time worked", a);
+
+    /* Two distinct frames, one row each. `context` is window state — the
+     * latest response's usage, matching the per-turn stats line. `tokens
+     * total` is the billing frame — sums across every round-trip (each of
+     * which resends the full context), so `in` outgrows `context` as soon
+     * as a second request happens; cached gets its hit rate against summed
+     * input, the number that actually says whether the prefix cache works. */
+    if (t->last_ctx > 0) {
+        format_context(row, sizeof(row), t->last_ctx, t->last_limit);
+        session_row("context", row);
+    }
+
+    if (t->input_tokens > 0 || t->output_tokens > 0) {
+        format_tokens(a, sizeof(a), t->input_tokens);
+        format_tokens(b, sizeof(b), t->output_tokens);
+        int len = snprintf(row, sizeof(row), "in %s · out %s", a, b);
+        if (t->cached_tokens > 0 && t->input_tokens > 0 && len > 0 && (size_t)len < sizeof(row)) {
+            format_tokens(a, sizeof(a), t->cached_tokens);
+            snprintf(row + len, sizeof(row) - (size_t)len, " · cached %s (%ld%%)", a,
+                     t->cached_tokens * 100 / t->input_tokens);
+        }
+        session_row("tokens total", row);
+    }
+
+    if (t->cost > 0) {
+        format_cost(a, sizeof(a), t->cost);
+        session_row("spend", a);
+    }
 }
 
 /* ---------- /usage ---------- */

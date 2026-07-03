@@ -485,6 +485,7 @@ static void test_usage_default_unknown(void)
     EXPECT(cap.events[0].usage.input_tokens == -1);
     EXPECT(cap.events[0].usage.output_tokens == -1);
     EXPECT(cap.events[0].usage.cached_tokens == -1);
+    EXPECT(cap.events[0].usage.cost < 0);
     TEARDOWN(cap, st);
 }
 
@@ -518,6 +519,22 @@ static void test_usage_without_cached_details(void)
     EXPECT(cap.events[0].usage.input_tokens == 10);
     EXPECT(cap.events[0].usage.output_tokens == 20);
     EXPECT(cap.events[0].usage.cached_tokens == -1);
+    EXPECT(cap.events[0].usage.cost < 0); /* no cost field ⇒ unreported */
+    TEARDOWN(cap, st);
+}
+
+static void test_usage_cost_captured(void)
+{
+    /* OpenRouter shape under `usage: {include: true}`: the trailing usage
+     * chunk additionally carries `cost` in USD as a plain number. */
+    WITH_STATE(cap, st);
+    feed_finish(&st, "stop");
+    openai_events_feed(&st, "{\"choices\":[],\"usage\":{"
+                            "\"prompt_tokens\":10,\"completion_tokens\":20,"
+                            "\"cost\":0.0123}}");
+    openai_events_feed(&st, "[DONE]");
+    EXPECT(cap.events[0].kind == EV_DONE);
+    EXPECT(cap.events[0].usage.cost > 0.0122 && cap.events[0].usage.cost < 0.0124);
     TEARDOWN(cap, st);
 }
 
@@ -600,6 +617,7 @@ int main(void)
     test_usage_default_unknown();
     test_usage_captured_from_trailing_chunk();
     test_usage_without_cached_details();
+    test_usage_cost_captured();
     test_progress_ignored_when_flag_off();
     test_progress_emitted_when_flag_on();
     test_progress_missing_fields_default_zero();
