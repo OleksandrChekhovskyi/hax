@@ -312,7 +312,7 @@ struct provider *openrouter_provider_new(const char *name)
 static int openrouter_available(const char *name, const char **reason)
 {
     (void)name;
-    return openai_key_available("OPENROUTER_API_KEY", reason);
+    return openai_key_available("OPENROUTER_API_KEY", "OPENROUTER_API_KEY not set", reason);
 }
 
 const struct provider_factory PROVIDER_OPENROUTER = {

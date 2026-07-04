@@ -585,7 +585,7 @@ static int anthropic_key_available(const char *api_key_env, const char **reason)
             return 1;
     }
     if (reason)
-        *reason = "no API key";
+        *reason = "ANTHROPIC_API_KEY not set";
     return 0;
 }
 

@@ -556,7 +556,7 @@ static size_t openai_list_efforts(struct provider *p, const char *const **out)
     return o->n_efforts;
 }
 
-int openai_key_available(const char *api_key_env, const char **reason)
+int openai_key_available(const char *api_key_env, const char *miss_reason, const char **reason)
 {
     const char *key = config_str("openai.api_key");
     if (key && *key)
@@ -567,7 +567,7 @@ int openai_key_available(const char *api_key_env, const char **reason)
             return 1;
     }
     if (reason)
-        *reason = "no API key";
+        *reason = miss_reason ? miss_reason : "no API key";
     return 0;
 }
 
@@ -595,7 +595,7 @@ static int openai_available(const char *name, const char **reason)
     /* Fixed endpoint (api.openai.com), so selectability is just "is a key
      * configured" — HAX_OPENAI_BASE_URL no longer affects it (the preset
      * locks the base URL and ignores the override). */
-    return openai_key_available("OPENAI_API_KEY", reason);
+    return openai_key_available("OPENAI_API_KEY", "OPENAI_API_KEY not set", reason);
 }
 
 struct provider *openai_provider_new_preset(const struct openai_preset *preset)

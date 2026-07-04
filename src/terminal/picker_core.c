@@ -47,11 +47,6 @@ int picker_core_match(const char *text, const char *query)
 
 /* ---------------- selection / scroll state ---------------- */
 
-int picker_core_row_enabled(const struct picker_state *s, size_t fi)
-{
-    return !s->opts->items[s->filtered[fi]].disabled;
-}
-
 static void clamp_scroll(struct picker_state *s)
 {
     if (s->n_filtered == 0) {
@@ -72,31 +67,6 @@ static void clamp_scroll(struct picker_state *s)
         s->top = s->n_filtered - (size_t)s->viewport;
 }
 
-/* Snap the selection onto an enabled row if it currently sits on a disabled
- * one: search forward from the current offset, then backward. Leaves the
- * selection put only when every filtered row is disabled (then Enter is a
- * no-op). Keeps the cursor off unselectable rows after a filter change or a
- * jump. */
-static void ensure_enabled_sel(struct picker_state *s)
-{
-    if (s->n_filtered == 0 || picker_core_row_enabled(s, s->sel))
-        return;
-    for (size_t i = s->sel; i < s->n_filtered; i++) {
-        if (picker_core_row_enabled(s, i)) {
-            s->sel = i;
-            clamp_scroll(s);
-            return;
-        }
-    }
-    for (size_t i = s->sel; i-- > 0;) {
-        if (picker_core_row_enabled(s, i)) {
-            s->sel = i;
-            clamp_scroll(s);
-            return;
-        }
-    }
-}
-
 void picker_core_recompute(struct picker_state *s)
 {
     const char *q = s->query.len ? s->query.data : "";
@@ -105,33 +75,26 @@ void picker_core_recompute(struct picker_state *s)
         if (picker_core_match(s->opts->items[i].label, q))
             s->filtered[s->n_filtered++] = i;
     }
-    clamp_scroll(s);
-    ensure_enabled_sel(s);
+    /* Land on the first match, not the old offset clamped into the new
+     * list — after a query edit the previous position is meaningless (a
+     * stale offset would make Enter grab an arbitrary match). The picker
+     * applies its opts->initial positioning after this. */
+    s->sel = 0;
+    s->top = 0;
 }
 
 void picker_core_move_sel(struct picker_state *s, int delta)
 {
     if (s->n_filtered == 0)
         return;
-    /* Step in `delta`'s direction to the next enabled row, skipping any
-     * disabled ones. Stay put if there's no enabled row that way. */
-    size_t cur = s->sel;
-    for (;;) {
-        if (delta < 0) {
-            if (cur == 0)
-                return;
-            cur--;
-        } else {
-            if (cur + 1 >= s->n_filtered)
-                return;
-            cur++;
-        }
-        if (picker_core_row_enabled(s, cur)) {
-            s->sel = cur;
-            clamp_scroll(s);
-            return;
-        }
+    if (delta < 0) {
+        if (s->sel > 0)
+            s->sel--;
+    } else {
+        if (s->sel + 1 < s->n_filtered)
+            s->sel++;
     }
+    clamp_scroll(s);
 }
 
 /* Park the window so the selection sits in the middle, clamped to the list
@@ -150,40 +113,6 @@ static void center_on_sel(struct picker_state *s)
         s->top = s->n_filtered - (size_t)s->viewport;
 }
 
-/* Snap a disabled landing row onto an enabled one, preferring `dir`'s
- * direction so a page jump across a disabled block doesn't bounce back to
- * where it started: search the way the jump was heading first, then the
- * other way as a fallback. Leaves the selection put only when every
- * filtered row is disabled. */
-static void snap_enabled_dir(struct picker_state *s, int dir)
-{
-    if (s->n_filtered == 0 || picker_core_row_enabled(s, s->sel))
-        return;
-    if (dir < 0) {
-        for (size_t i = s->sel; i-- > 0;)
-            if (picker_core_row_enabled(s, i)) {
-                s->sel = i;
-                return;
-            }
-        for (size_t i = s->sel + 1; i < s->n_filtered; i++)
-            if (picker_core_row_enabled(s, i)) {
-                s->sel = i;
-                return;
-            }
-    } else {
-        for (size_t i = s->sel + 1; i < s->n_filtered; i++)
-            if (picker_core_row_enabled(s, i)) {
-                s->sel = i;
-                return;
-            }
-        for (size_t i = s->sel; i-- > 0;)
-            if (picker_core_row_enabled(s, i)) {
-                s->sel = i;
-                return;
-            }
-    }
-}
-
 void picker_core_page_sel(struct picker_state *s, int dir)
 {
     if (s->n_filtered == 0)
@@ -195,7 +124,6 @@ void picker_core_page_sel(struct picker_state *s, int dir)
         s->sel = s->sel > step ? s->sel - step : 0;
     else
         s->sel = s->sel + step < s->n_filtered ? s->sel + step : s->n_filtered - 1;
-    snap_enabled_dir(s, dir);
     center_on_sel(s);
 }
 
@@ -203,12 +131,21 @@ void picker_core_select_first(struct picker_state *s)
 {
     s->sel = 0;
     clamp_scroll(s);
-    ensure_enabled_sel(s); /* first enabled at/after the top */
 }
 
 void picker_core_select_last(struct picker_state *s)
 {
     s->sel = s->n_filtered ? s->n_filtered - 1 : 0;
     clamp_scroll(s);
-    ensure_enabled_sel(s); /* last enabled at/before the bottom */
+}
+
+void picker_core_select_item(struct picker_state *s, size_t item_idx)
+{
+    for (size_t fi = 0; fi < s->n_filtered; fi++) {
+        if (s->filtered[fi] == item_idx) {
+            s->sel = fi;
+            center_on_sel(s);
+            return;
+        }
+    }
 }

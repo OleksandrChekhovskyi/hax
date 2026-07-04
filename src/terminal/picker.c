@@ -114,6 +114,11 @@ static int seq_byte(void *user)
 
 /* ---------------- render ---------------- */
 
+/* Width of the leading marker column: "→ " on the highlighted row, spaces
+ * elsewhere. The search field's icon is the same width so the query and
+ * the row labels align vertically. */
+#define MARKER_CELLS 2
+
 /* Append a one-line, display-safe clip of `s` (at most `max_cells` cells)
  * to `out`, stopping at the first newline and substituting non-printable
  * codepoints with '?'. When the source overflows the budget (or has more
@@ -219,8 +224,7 @@ static void emit_line_clipped(struct buf *out, const char *line, size_t len, int
 static void render_search(struct buf *out, const struct picker_state *s, int cols, int utf8)
 {
     const char *icon = utf8 ? "\xe2\x8c\x95 " : "/ "; /* ⌕ */
-    const int icon_w = 2;
-    int budget = cols - icon_w; /* cells left for text after the icon */
+    int budget = cols - MARKER_CELLS;                 /* cells left for text after the icon */
     if (budget < 0)
         budget = 0;
 
@@ -266,43 +270,22 @@ static void render_search(struct buf *out, const struct picker_state *s, int col
     }
 }
 
+/* A row is `label [ ✓ current ] [ <sep> detail ]` after the marker column:
+ * the green "current" tag marks persistent state (deliberately distinct
+ * from the moving magenta highlight), then the dim detail text, close to
+ * the label rather than flush-right. On a dim row the detail is a failure
+ * reason and its separator becomes a spaced dash so the reason reads as an
+ * annotation instead of blurring into the equally-dim label. The tag and
+ * separator have fixed widths (measured on the ASCII variants — same cell
+ * counts as their UTF-8 twins); the detail may take at most half the row;
+ * the label is clipped to what remains. */
 static void render_row(struct buf *out, const struct picker_state *s, size_t fi, int selected,
                        int cols, int utf8)
 {
     const struct picker_item *it = &s->opts->items[s->filtered[fi]];
-    int budget = cols - 2; /* leave the 2-cell marker column */
-    if (budget < 1)
-        budget = 1;
-
-    if (it->disabled) {
-        /* Dim, unselectable: no marker arrow and no highlight even if the
-         * cursor is parked here (only possible when every row is disabled).
-         * The detail column carries the reason. One DIM .. BOLD_OFF spans
-         * the whole row so nothing inside re-brightens it. */
-        buf_append_str(out, ANSI_DIM "  ");
-        struct buf det;
-        buf_init(&det);
-        int det_w = 0;
-        const char *reason = (it->detail && it->detail[0]) ? it->detail : NULL;
-        if (reason) {
-            int maxd = budget / 2;
-            if (maxd < 1)
-                maxd = 1;
-            append_clip(&det, reason, maxd, &det_w, utf8);
-        }
-        int lab_budget = budget - (det_w ? det_w + 2 : 0);
-        if (lab_budget < 1)
-            lab_budget = 1;
-        int lab_used = 0;
-        append_clip(out, it->label ? it->label : "", lab_budget, &lab_used, utf8);
-        if (det_w) {
-            buf_append_str(out, "  ");
-            buf_append(out, det.data ? det.data : "", det.len);
-        }
-        buf_free(&det);
-        buf_append_str(out, ANSI_BOLD_OFF);
-        return;
-    }
+    int row_cells = cols - MARKER_CELLS;
+    if (row_cells < 1)
+        row_cells = 1;
 
     if (selected)
         buf_append_str(out, ANSI_BRIGHT_MAGENTA);
@@ -310,37 +293,49 @@ static void render_row(struct buf *out, const struct picker_state *s, size_t fi,
     if (selected)
         buf_append_str(out, ANSI_FG_DEFAULT);
 
-    /* The detail (e.g. a relative time) follows the label after a small gap,
-     * staying close to the text rather than flush-right — clip the label so
-     * the detail still fits on the row. */
-    struct buf det;
-    buf_init(&det);
-    int det_w = 0;
-    const char *detail = (it->detail && it->detail[0]) ? it->detail : NULL;
-    if (detail) {
-        int maxd = budget / 2;
-        if (maxd < 1)
-            maxd = 1;
-        append_clip(&det, detail, maxd, &det_w, utf8);
+    const char *tag = it->current ? (utf8 ? "\xe2\x9c\x93 current" : "* current") : NULL; /* ✓ */
+    int tag_cells = tag ? (int)strlen("  * current") : 0; /* gap included */
+
+    const char *sep = it->dim ? (utf8 ? " \xe2\x80\x93 " : " - ") : "  "; /* – */
+    int sep_cells = (int)strlen(it->dim ? " - " : "  ");
+
+    struct buf detail;
+    buf_init(&detail);
+    int detail_cells = 0;
+    if (it->detail && it->detail[0]) {
+        int detail_max = row_cells / 2;
+        if (detail_max < 1)
+            detail_max = 1;
+        append_clip(&detail, it->detail, detail_max, &detail_cells, utf8);
     }
 
-    int lab_budget = budget - (det_w ? det_w + 2 : 0);
-    if (lab_budget < 1)
-        lab_budget = 1;
-    int lab_used = 0;
-    if (selected)
-        buf_append_str(out, ANSI_BOLD);
-    append_clip(out, it->label ? it->label : "", lab_budget, &lab_used, utf8);
-    if (selected)
-        buf_append_str(out, ANSI_BOLD_OFF);
-
-    if (det_w) {
-        buf_append_str(out, "  ");
+    int label_cells = row_cells - tag_cells - (detail_cells ? sep_cells + detail_cells : 0);
+    if (label_cells < 1)
+        label_cells = 1;
+    int label_used = 0;
+    /* A dim row's label stays dim even under the highlight — the arrow
+     * alone marks focus there; bold would contradict the "probably won't
+     * work" signal. */
+    if (it->dim)
         buf_append_str(out, ANSI_DIM);
-        buf_append(out, det.data ? det.data : "", det.len);
+    else if (selected)
+        buf_append_str(out, ANSI_BOLD);
+    append_clip(out, it->label ? it->label : "", label_cells, &label_used, utf8);
+    if (it->dim || selected)
+        buf_append_str(out, ANSI_BOLD_OFF);
+
+    if (tag) {
+        buf_append_str(out, "  " ANSI_GREEN);
+        buf_append_str(out, tag);
+        buf_append_str(out, ANSI_FG_DEFAULT);
+    }
+    if (detail_cells) {
+        buf_append_str(out, ANSI_DIM);
+        buf_append_str(out, sep);
+        buf_append(out, detail.data ? detail.data : "", detail.len);
         buf_append_str(out, ANSI_BOLD_OFF);
     }
-    buf_free(&det);
+    buf_free(&detail);
 }
 
 static void paint(struct picker_state *s)
@@ -457,6 +452,8 @@ long picker_run(const struct picker_opts *opts)
     s.viewport = vp;
 
     picker_core_recompute(&s);
+    if (opts->initial)
+        picker_core_select_item(&s, opts->initial);
 
     if (raw_on(&s) < 0) {
         free(s.filtered);
@@ -479,9 +476,7 @@ long picker_run(const struct picker_opts *opts)
         if (c == 0x03 || c == 0x07) /* Ctrl-C / Ctrl-G — cancel */
             break;
         if (c == 0x0d || c == 0x0a) { /* Enter / LF — accept */
-            /* Only an enabled row is acceptable; a disabled highlight
-             * (all rows disabled) does nothing. */
-            if (s.n_filtered && picker_core_row_enabled(&s, s.sel)) {
+            if (s.n_filtered) {
                 result = (long)s.filtered[s.sel];
                 done = 1;
             }

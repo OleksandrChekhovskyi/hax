@@ -40,23 +40,25 @@ struct picker_state {
  * NULL query matches everything. NULL `text` matches only an empty query. */
 int picker_core_match(const char *text, const char *query);
 
-/* Is the filtered row at offset `fi` selectable (not a disabled item)? */
-int picker_core_row_enabled(const struct picker_state *s, size_t fi);
-
-/* Rebuild filtered[] from opts against the current query, then re-clamp the
- * window and snap the selection onto an enabled row. */
+/* Rebuild filtered[] from opts against the current query, resetting the
+ * selection and window to the first match. */
 void picker_core_recompute(struct picker_state *s);
 
-/* Step the selection one enabled row in `delta`'s direction (skipping
- * disabled rows), stopping at the list ends. */
+/* Step the selection one row in `delta`'s direction, stopping at the list
+ * ends. */
 void picker_core_move_sel(struct picker_state *s, int delta);
 
-/* Jump the selection by half a viewport in `dir`'s direction, snapping onto
- * the nearest enabled row in that direction and re-centering the window. */
+/* Jump the selection by half a viewport in `dir`'s direction, re-centering
+ * the window. */
 void picker_core_page_sel(struct picker_state *s, int dir);
 
-/* Jump to the first / last match, landing on the nearest enabled row. */
+/* Jump to the first / last match. */
 void picker_core_select_first(struct picker_state *s);
 void picker_core_select_last(struct picker_state *s);
+
+/* Park the selection on the filtered row showing item `item_idx`, centering
+ * the window on it. No-op when the item isn't in the current filter. Used
+ * to open the picker with the cursor on the caller's `initial` row. */
+void picker_core_select_item(struct picker_state *s, size_t item_idx);
 
 #endif /* HAX_PICKER_CORE_H */

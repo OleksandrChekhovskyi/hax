@@ -56,8 +56,8 @@ struct nav_fixture {
     struct picker_state s;
 };
 
-/* Build a state over `n` all-enabled items, filtered 1:1, with the cursor
- * at the top. Callers flip individual items' `disabled` and set `sel`. */
+/* Build a state over `n` items, filtered 1:1, with the cursor at the top.
+ * Callers set `sel` to start elsewhere. */
 static void nav_init(struct nav_fixture *f, size_t n, int viewport)
 {
     memset(f, 0, sizeof *f);
@@ -102,48 +102,56 @@ static void test_page_clamps_at_ends(void)
     EXPECT(f.s.top == 79); /* re-centered: 89 - viewport/2 */
 }
 
-/* The regression the snap fix targets: a PageUp landing inside a disabled
- * run must snap UP to the next enabled row, not bounce forward to where it
- * started. Enabled rows at 0..50 and 101; 51..100 disabled. */
-static void test_page_up_across_disabled_block(void)
+static void test_move_sel_steps_and_clamps(void)
 {
     struct nav_fixture f;
-    nav_init(&f, 102, 20);
-    for (size_t i = 51; i <= 100; i++)
-        f.items[i].disabled = 1;
-    f.s.sel = 101;
+    nav_init(&f, 3, 10);
 
-    picker_core_page_sel(&f.s, -1); /* target 91 (disabled) -> snap up to 50 */
-    EXPECT(f.s.sel == 50);
-
-    picker_core_page_sel(&f.s, -1); /* keeps moving, never stuck */
-    EXPECT(f.s.sel == 40);
-}
-
-/* Symmetric case: a PageDown into a disabled run snaps DOWN. */
-static void test_page_down_across_disabled_block(void)
-{
-    struct nav_fixture f;
-    nav_init(&f, 102, 20);
-    for (size_t i = 51; i <= 100; i++)
-        f.items[i].disabled = 1;
-    f.s.sel = 50;
-
-    picker_core_page_sel(&f.s, +1); /* target 60 (disabled) -> snap down to 101 */
-    EXPECT(f.s.sel == 101);
-}
-
-static void test_move_sel_skips_disabled(void)
-{
-    struct nav_fixture f;
-    nav_init(&f, 5, 10);
-    f.items[1].disabled = 1;
-    f.items[2].disabled = 1;
-
-    picker_core_move_sel(&f.s, +1);
-    EXPECT(f.s.sel == 3); /* steps past 1 and 2 */
     picker_core_move_sel(&f.s, -1);
-    EXPECT(f.s.sel == 0);
+    EXPECT(f.s.sel == 0); /* clamped at the top */
+    picker_core_move_sel(&f.s, +1);
+    EXPECT(f.s.sel == 1);
+    picker_core_move_sel(&f.s, +1);
+    picker_core_move_sel(&f.s, +1);
+    EXPECT(f.s.sel == 2); /* clamped at the bottom */
+}
+
+/* Opening on a caller-provided initial row: the selection lands on the
+ * item and the window centers around it instead of anchoring at the top. */
+static void test_select_item_centers(void)
+{
+    struct nav_fixture f;
+    nav_init(&f, 100, 20);
+
+    picker_core_select_item(&f.s, 50);
+    EXPECT(f.s.sel == 50);
+    EXPECT(f.s.top == 40); /* centered: 50 - viewport/2 */
+
+    /* An item index outside the filter leaves the selection untouched. */
+    picker_core_select_item(&f.s, 500);
+    EXPECT(f.s.sel == 50);
+}
+
+/* A query edit must reset the selection to the first match — clamping the
+ * old offset into the shrunken list would make Enter grab an arbitrary
+ * match (e.g. cursor opened deep on a "current" row, then a typed query
+ * matching two items would land on the second). */
+static void test_recompute_resets_selection(void)
+{
+    struct nav_fixture f;
+    nav_init(&f, 8, 10);
+    f.items[5].label = "openai";
+    f.items[6].label = "openai-compatible";
+    f.items[7].label = "openrouter";
+    f.s.sel = 7; /* opened with the cursor on a deep row */
+
+    buf_init(&f.s.query);
+    buf_append_str(&f.s.query, "openai");
+    picker_core_recompute(&f.s);
+    EXPECT(f.s.n_filtered == 2);
+    EXPECT(f.s.sel == 0); /* first match, not the clamped old offset */
+    EXPECT(f.s.top == 0);
+    buf_free(&f.s.query);
 }
 
 int main(void)
@@ -154,8 +162,8 @@ int main(void)
     test_whitespace_handling();
     test_page_jumps_half_and_centers();
     test_page_clamps_at_ends();
-    test_page_up_across_disabled_block();
-    test_page_down_across_disabled_block();
-    test_move_sel_skips_disabled();
+    test_move_sel_steps_and_clamps();
+    test_select_item_centers();
+    test_recompute_resets_selection();
     T_REPORT();
 }

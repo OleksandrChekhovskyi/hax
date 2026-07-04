@@ -41,13 +41,19 @@
 struct picker_item {
     const char *label;  /* primary text; what the filter matches against */
     const char *detail; /* optional dim text shown after the label; may be NULL */
-    /* When set, the row is shown dim and is not selectable: the cursor
-     * skips over it, Enter won't accept it, and it never gets the
-     * highlight marker. Used to list an option that exists but can't be
-     * chosen right now (e.g. an unconfigured provider), with `detail`
-     * carrying the reason. The row still matches the filter so it stays
-     * discoverable. */
-    int disabled;
+    /* When set, the whole row is rendered dim and `detail` gains a dash
+     * separator — an advisory "exists but probably won't work right now"
+     * (e.g. an unconfigured provider, with `detail` carrying the reason).
+     * Purely visual: the row still matches the filter and is selectable,
+     * so the caller decides what accepting it means (typically: try
+     * anyway and report the exact failure). */
+    int dim;
+    /* When set, the row is tagged "✓ current" in green after the label —
+     * persistent state, distinct from the (magenta, moving) selection
+     * highlight. Callers mark the already-active choice with this rather
+     * than smuggling "current" through `detail`, where it would render
+     * dim and read like a failure reason. */
+    int current;
 };
 
 struct picker_opts {
@@ -55,6 +61,9 @@ struct picker_opts {
     const struct picker_item *items;
     size_t n;
     const char *empty_note; /* dim note shown (and -1 returned) when n == 0; may be NULL */
+    /* Item index the cursor starts on (0 = first row). Callers pass the
+     * "current" row so Enter-without-navigation re-picks what's active. */
+    size_t initial;
 };
 
 /* Run the picker. Returns the selected 0-based index into `items`, or -1

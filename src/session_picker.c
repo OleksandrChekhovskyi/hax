@@ -88,7 +88,8 @@ char *session_picker_run(const char *cwd, const char *exclude_path, int *shown)
         details[k] = xstrdup(when);
         items[k].label = (e->first_prompt && e->first_prompt[0]) ? e->first_prompt : "(no preview)";
         items[k].detail = details[k];
-        items[k].disabled = 0;
+        items[k].dim = 0;
+        items[k].current = 0;
     }
 
     char title_buf[96];

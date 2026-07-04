@@ -300,15 +300,17 @@ struct provider_factory {
      * provider and ignore the argument. */
     struct provider *(*new)(const char *name);
     /* Optional availability check for the runtime provider picker
-     * (/provider): can this provider be selected right now? Returns 1 when
-     * usable, 0 when not — and on 0 may set *reason to a short static
-     * string ("no API key", "server not reachable") shown dim beside the
-     * disabled row. May perform a bounded network probe (a local server's
-     * reachability GET); the picker runs these off the foreground path and
-     * in parallel so opening the list stays fast even when a host hangs.
-     * The reason string, if set, must outlive the call (use static
+     * (/provider): is this provider expected to work right now? Advisory,
+     * not gating — the picker shows a failing provider dim with *reason
+     * ("OPENAI_API_KEY not set", "server not reachable") but still lets it
+     * be picked, re-running this check at commit time to report the fresh
+     * verdict. Returns 1 when usable, 0 when not (then may set *reason to
+     * a short static string). May perform a bounded network probe (a local
+     * server's reachability GET); the picker runs these off the foreground
+     * path and in parallel so opening the list stays fast even when a host
+     * hangs. The reason string, if set, must outlive the call (use static
      * literals — these run on worker threads). `name` is the factory's own
-     * name (see `new`). NULL hook ⇒ always selectable. */
+     * name (see `new`). NULL hook ⇒ always available. */
     int (*available)(const char *name, const char **reason);
     /* Dev-only backend, hidden from the enumerated provider set: excluded
      * from the /provider picker, cold-start auto-selection, and the

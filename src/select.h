@@ -14,10 +14,12 @@ struct agent_state;
  *
  * The flows chain in the order the conversation cares about:
  *
- *   select_provider — list every known provider (unconfigured / unreachable
- *     ones shown disabled with a reason), switch to the chosen one, then
- *     chain into model and effort selection. The provider switch clears the
- *     prior model/effort (they belong to the old backend).
+ *   select_provider — list every known provider alphabetically
+ *     (unconfigured / unreachable ones dim with a reason, but still
+ *     selectable: picking one re-checks availability and reports the exact
+ *     reason if it's still unusable), switch to the chosen one, then chain
+ *     into model and effort selection. The provider switch clears the prior
+ *     model/effort (they belong to the old backend).
  *   select_model    — list the current provider's models, then chain into
  *     effort selection.
  *   select_effort   — list the current provider's reasoning-effort levels

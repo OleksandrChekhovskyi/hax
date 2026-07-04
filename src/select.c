@@ -180,12 +180,17 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
         qsort(ids, n, sizeof(*ids), cmp_model_id);
 
     struct picker_item *items = xmalloc(n * sizeof(*items));
+    size_t initial = 0;
     for (size_t i = 0; i < n; i++) {
         items[i].label = ids[i];
-        items[i].disabled = 0;
-        items[i].detail = (cur && strcmp(ids[i], cur) == 0) ? "current" : NULL;
+        items[i].detail = NULL;
+        items[i].dim = 0;
+        items[i].current = cur && strcmp(ids[i], cur) == 0;
+        if (items[i].current)
+            initial = i;
     }
-    struct picker_opts opts = {.title = "select a model", .items = items, .n = n};
+    struct picker_opts opts = {
+        .title = "select a model", .items = items, .n = n, .initial = initial};
     long sel = picker_run(&opts);
     char *chosen = (sel >= 0) ? xstrdup(ids[sel]) : NULL;
 
@@ -223,13 +228,19 @@ static int choose_effort(struct agent_state *st, struct provider *p, const char 
     struct picker_item *items = xmalloc((n + 1) * sizeof(*items));
     items[0].label = "default";
     items[0].detail = "let the provider choose";
-    items[0].disabled = 0;
+    items[0].dim = 0;
+    items[0].current = 0;
+    size_t initial = 0;
     for (size_t i = 0; i < n; i++) {
         items[i + 1].label = eff[i];
-        items[i + 1].disabled = 0;
-        items[i + 1].detail = (cur && strcmp(eff[i], cur) == 0) ? "current" : NULL;
+        items[i + 1].detail = NULL;
+        items[i + 1].dim = 0;
+        items[i + 1].current = cur && strcmp(eff[i], cur) == 0;
+        if (items[i + 1].current)
+            initial = i + 1;
     }
-    struct picker_opts opts = {.title = "select reasoning effort", .items = items, .n = n + 1};
+    struct picker_opts opts = {
+        .title = "select reasoning effort", .items = items, .n = n + 1, .initial = initial};
     long sel = picker_run(&opts);
     free(items);
 
@@ -350,10 +361,24 @@ void select_model(struct agent_state *st)
     agent_apply_settings(st);
 }
 
+static int cmp_factory_name(const void *a, const void *b)
+{
+    const struct provider_factory *const *fa = a;
+    const struct provider_factory *const *fb = b;
+    return strcmp((*fa)->name, (*fb)->name);
+}
+
 void select_provider(struct agent_state *st)
 {
     size_t n = 0;
-    const struct provider_factory *const *facs = provider_all(&n);
+    const struct provider_factory *const *all = provider_all(&n);
+
+    /* Display order is alphabetical, not registry priority: priority drives
+     * cold-start autoselect, but in a picker predictable lookup wins as the
+     * list grows. */
+    const struct provider_factory **facs = xmalloc(n * sizeof(*facs));
+    memcpy(facs, all, n * sizeof(*facs));
+    qsort(facs, n, sizeof(*facs), cmp_factory_name);
 
     int *avail = xmalloc(n * sizeof(*avail));
     const char **reason = xmalloc(n * sizeof(*reason));
@@ -364,27 +389,50 @@ void select_provider(struct agent_state *st)
      * HAX_PROVIDER_NAME / a custom provider can rename the display name so it
      * no longer equals any factory id, which would leave the row unmarked and
      * make re-selecting it rebuild instead of continuing into /model. NULL
-     * when no provider constructed at startup; then nothing is current. */
+     * when no provider constructed at startup; then nothing is current.
+     *
+     * Unavailable rows are dim-with-a-reason but still selectable: the probe
+     * is advisory (and possibly stale by the time the user commits), and a
+     * navigable row is the only way a long tail of unavailable providers
+     * stays readable at all — the viewport follows the selection. */
     char *cur = st->provider ? current_provider_id(st->provider) : NULL;
     struct picker_item *items = xmalloc(n * sizeof(*items));
+    size_t initial = 0;
     for (size_t i = 0; i < n; i++) {
         items[i].label = facs[i]->name;
-        items[i].disabled = !avail[i];
-        if (!avail[i])
-            items[i].detail = reason[i] ? reason[i] : "unavailable";
-        else
-            items[i].detail = (cur && strcmp(facs[i]->name, cur) == 0) ? "current" : NULL;
+        items[i].dim = !avail[i];
+        items[i].detail = avail[i] ? NULL : (reason[i] ? reason[i] : "unavailable");
+        items[i].current = cur && strcmp(facs[i]->name, cur) == 0;
+        if (items[i].current)
+            initial = i;
     }
-    struct picker_opts opts = {.title = "select a provider", .items = items, .n = n};
+    struct picker_opts opts = {
+        .title = "select a provider", .items = items, .n = n, .initial = initial};
     long sel = picker_run(&opts);
 
     const struct provider_factory *f = (sel >= 0) ? facs[sel] : NULL;
+    int sel_avail = (sel >= 0) ? avail[sel] : 1;
     free(items);
     free(avail);
     free(reason);
+    free(facs);
     if (!f) {
         free(cur);
         return; /* cancelled / non-tty — leave disp as the dispatcher's separator */
+    }
+
+    /* A dim row was picked: the open-time probe said unavailable, but that
+     * verdict may be stale, so re-check now. Still unavailable → report the
+     * exact reason and stay on the current provider; a fresh pass (a server
+     * that came up since) proceeds with the normal switch. */
+    if (!sel_avail && f->available) {
+        const char *why = NULL;
+        if (!f->available(f->name, &why)) {
+            ui_note("%s is unavailable — %s", f->name, why ? why : "unavailable");
+            st->r->disp.trail = 1;
+            free(cur);
+            return;
+        }
     }
 
     /* Re-picking the current provider just continues into model/effort,

@@ -151,11 +151,14 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset);
  *
  *   openai_key_available    — usable iff HAX_OPENAI_API_KEY or `api_key_env`
  *     (when non-NULL) holds a non-empty key. For hosted backends.
+ *     `miss_reason` is the caller's exact no-key message (a static string
+ *     naming its env var, e.g. "OPENAI_API_KEY not set"), so the picker's
+ *     reason is actionable rather than a generic "no API key".
  *   openai_base_url_reachable — bounded GET <base_url>/models with a short
  *     timeout; usable iff it 2xx's. For local-server shims (llama.cpp,
  *     ollama) whose availability is "is the server up". May block briefly,
  *     so the picker runs it on a worker thread. */
-int openai_key_available(const char *api_key_env, const char **reason);
+int openai_key_available(const char *api_key_env, const char *miss_reason, const char **reason);
 int openai_base_url_reachable(const char *base_url, const char *api_key, const char **reason);
 
 /* Hand off ownership of a background probe to an openai-derived provider.
