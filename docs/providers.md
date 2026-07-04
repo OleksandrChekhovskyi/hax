@@ -242,6 +242,8 @@ Recognized common keys:
 - `api` — `openai-completions` (default) or `anthropic-messages`.
 - `api_key` — literal token. Prefer `api_key_env` for real secrets.
 - `api_key_env` — environment variable holding the token.
+- `sort_models` — sort the `/model` picker alphabetically instead of the server's catalog
+  order. Default off.
 
 OpenAI-style custom providers also recognize `reasoning_format` (`flat` or `nested`) and
 `send_cache_key`. Anthropic-style custom providers recognize the Anthropic settings from

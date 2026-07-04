@@ -212,6 +212,12 @@ struct provider {
     /* Reasoning effort used when HAX_REASONING_EFFORT is unset. NULL means
      * omit the field and let the backend choose. */
     const char *default_reasoning_effort;
+    /* Sort list_models output alphabetically in the /model picker. Set by
+     * providers whose catalog order carries no meaning; leave 0 where the
+     * server's order is deliberate (curated, newest-first) or trivially
+     * short. A default only — the global sort_models config key lets the
+     * user force either order at the picker. */
+    int sort_models;
     /* Stream a model response. The provider drives the HTTP round-trip
      * and translates SSE events into stream_event callbacks (`cb`). The
      * `tick` slot is the agent's side-channel hook into the wait loop —

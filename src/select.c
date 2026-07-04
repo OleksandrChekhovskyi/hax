@@ -123,6 +123,11 @@ struct provider *provider_autoselect(void)
 
 /* ---------- model / effort pick steps ---------- */
 
+static int cmp_model_id(const void *a, const void *b)
+{
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
 /* Run the model picker for `p` (which need not be the live provider — the
  * /provider flow picks against the prospective new one before committing).
  * Returns a malloc'd model id, or NULL on cancel or when the provider can't
@@ -167,6 +172,12 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
         free(ids);
         return only;
     }
+
+    /* The provider declares whether its catalog order is worth preserving
+     * (sort_models); the global sort_models key is a user override on top
+     * of that per-provider default. */
+    if (config_bool_or("sort_models", p->sort_models))
+        qsort(ids, n, sizeof(*ids), cmp_model_id);
 
     struct picker_item *items = xmalloc(n * sizeof(*items));
     for (size_t i = 0; i < n; i++) {

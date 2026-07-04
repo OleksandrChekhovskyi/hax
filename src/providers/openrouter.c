@@ -299,6 +299,9 @@ struct provider *openrouter_provider_new(const char *name)
     if (p) {
         p->refresh_context = openrouter_refresh_context;
         p->query_usage = openrouter_query_usage;
+        /* Hundreds of catalog entries in no meaningful order — alphabetize
+         * so vendor prefixes group together in the picker. */
+        p->sort_models = 1;
         spawn_context_probe(p, key);
     }
     return p;

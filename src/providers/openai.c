@@ -699,7 +699,13 @@ struct provider *openai_provider_new(const char *name)
         .efforts = OPENAI_EFFORT_LADDER,
         .n_efforts = OPENAI_EFFORT_LADDER_N,
     };
-    return openai_provider_new_preset(&preset);
+    struct provider *p = openai_provider_new_preset(&preset);
+    if (p) {
+        /* /v1/models interleaves snapshots, fine-tunes, and aliases in no
+         * useful order — alphabetize the picker. */
+        p->sort_models = 1;
+    }
+    return p;
 }
 
 const struct provider_factory PROVIDER_OPENAI = {

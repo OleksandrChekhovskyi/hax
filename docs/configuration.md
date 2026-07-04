@@ -115,6 +115,9 @@ canonical key and its environment variable.
   `1`.
 - `show_reasoning` / `HAX_SHOW_REASONING` — show reasoning deltas live. For OpenRouter, also
   requests reasoning output.
+- `sort_models` / `HAX_SORT_MODELS` — force the `/model` picker alphabetical (or, when falsy,
+  keep the server's catalog order) for every provider. Unset, each provider picks its own
+  default: alphabetical for `openai` and `openrouter`, catalog order elsewhere.
 - `context_limit` / `HAX_CONTEXT_LIMIT` — manual context-window size for percentage display
   and auto-compaction.
 - `display_width` / `HAX_DISPLAY_WIDTH` — force render width in columns.

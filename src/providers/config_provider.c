@@ -83,6 +83,19 @@ static const char *resolve(const char *name, const char *leaf, const char *recip
     return v ? v : recipe_val;
 }
 
+/* Dialect-agnostic base-provider fields belong here, resolved once from the
+ * providers.<name> subtree — dialect constructors resolve only keys specific
+ * to their wire format. */
+static struct provider *apply_base_config(const char *name, struct provider *p)
+{
+    if (!p)
+        return NULL;
+    char *k = xasprintf("providers.%s.sort_models", name);
+    p->sort_models = config_bool_or(k, 0);
+    free(k);
+    return p;
+}
+
 /* Build the provider for config id `name` (the factory's own name). The
  * dialect (providers.<name>.api, else the recipe's, else openai-completions)
  * picks the construction path; every other field is resolved as config
@@ -136,7 +149,7 @@ static struct provider *config_provider_new(const char *name)
         };
         struct provider *p = anthropic_provider_new_preset(&preset);
         free(cfg_prefix);
-        return p;
+        return apply_base_config(name, p);
     }
 
     const char *rf = resolve(name, "reasoning_format", r ? r->reasoning_format : NULL);
@@ -158,7 +171,7 @@ static struct provider *config_provider_new(const char *name)
     };
     struct provider *p = openai_provider_new_preset(&preset);
     free(cfg_prefix);
-    return p;
+    return apply_base_config(name, p);
 }
 
 /* Availability for the /provider picker. A keyed (cloud) provider — one with

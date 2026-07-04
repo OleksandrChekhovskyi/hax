@@ -33,7 +33,8 @@ int main(void)
                        "    \"bad\":   {\"api\": \"soap-1.2\","
                        "               \"base_url\": \"http://x/v1\"},"
                        "    \"claudish\": {\"api\": \"anthropic-messages\","
-                       "               \"base_url\": \"http://127.0.0.1:18080/v1\"},"
+                       "               \"base_url\": \"http://127.0.0.1:18080/v1\","
+                       "               \"sort_models\": \"on\"},"
                        "    \"ollama\": {\"base_url\": \"http://gpu:1234/v1\"},"
                        "    \"my.llm\": {\"base_url\": \"http://127.0.0.1:9002/v1\"}"
                        "  },"
@@ -90,6 +91,7 @@ int main(void)
         const char *const *eff = NULL;
         EXPECT_STR_EQ(p->name, "My LLM");
         EXPECT(p->list_efforts && p->list_efforts(p, &eff) > 0);
+        EXPECT(p->sort_models == 0); /* sort_models unset → catalog order */
         p->destroy(p);
     }
 
@@ -116,6 +118,10 @@ int main(void)
     if (ap) {
         const char *const *eff = NULL;
         EXPECT_STR_EQ(ap->name, "claudish");
+        /* providers.<name>.sort_models is dialect-agnostic: resolved by the
+         * config-provider layer, so it reaches an anthropic-dialect provider
+         * the same as an openai one. */
+        EXPECT(ap->sort_models == 1);
         EXPECT(ap->list_efforts && ap->list_efforts(ap, &eff) == 0); /* budget → hidden */
         config_set_override("providers.claudish.thinking_mode", "adaptive");
         EXPECT(ap->list_efforts(ap, &eff) == 5); /* adaptive → ladder shown */

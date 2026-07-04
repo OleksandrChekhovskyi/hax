@@ -47,6 +47,8 @@ static const struct config_setting REGISTRY[] = {
      "Render Markdown in the terminal (TTY only; piped output is always raw)"},
     {"show_reasoning",             "HAX_SHOW_REASONING",          NULL,
      "Show reasoning/CoT deltas live (default off)"},
+    {"sort_models",                "HAX_SORT_MODELS",             NULL,
+     "Sort the /model picker alphabetically (default depends on the provider)"},
     {"context_limit",              "HAX_CONTEXT_LIMIT",           NULL,
      "Manual context-window size for the % display (e.g. 256k); overrides auto-detect"},
     {"display_width",              "HAX_DISPLAY_WIDTH",           NULL,
