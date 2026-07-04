@@ -1,0 +1,64 @@
+# Mock script exercising pauses in streaming text and reasoning.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/pause_demo.txt build/hax
+#
+# Each `delay 2500` is a mid-stream pause with no events. The expected
+# behavior is that NOTHING appears during these pauses: partial text on
+# screen is its own progress indicator, and a spinner popping in and
+# out between chunks reads as flicker (the busy spinner shows only for
+# waits with no visible output — pre-stream, tool-args composing, tool
+# execution, retries, table buffering). When the stream resumes, the
+# text must continue exactly where it left off: same line, same style,
+# no paragraph break, no disp bookkeeping perturbed.
+#
+# A real provider produces the same pauses through http.c's streaming
+# reads; the mock's polled msleep stands in for that. What to watch
+# for is any spinner row or cursor movement during the pauses — that
+# would be a regression.
+#
+# Three patterns are exercised:
+#
+#  Turn 1: reasoning → pause → reasoning → answer. With
+#  HAX_SHOW_REASONING=1 the dim+italic CoT text pauses and resumes
+#  in place. Without the env var the reasoning chunks drive only the
+#  busy spinner's "thinking..." label, which stays up (and animating)
+#  across the pause — that wait has no visible output, so the spinner
+#  is correct there.
+#
+#  Turn 2: text → pause → text → pause → text. Both pauses stay quiet;
+#  the sentences join into one paragraph as if never interrupted.
+#
+#  Turn 3: text → pause → tool call. The pause after the trailing text
+#  stays quiet; the busy spinner returns only once the tool call
+#  starts streaming (and names itself "[read] composing..." if the
+#  args window runs long), then the dispatch header takes over.
+
+reasoning Thinking through the user's question — what's the simplest answer that still covers the asked-for bits?\n\n
+delay 2500
+reasoning Right, I have it. The pause between these two thoughts should have shown nothing new on screen.
+delay 0
+text Here's the answer after that pause.
+usage in=80 out=22
+end-turn
+
+text Sentence one — the model emits this then pauses.
+space
+delay 2500
+text Sentence two arrives after the pause; nothing should have appeared during the wait, and the paragraph continues unbroken.
+delay 0
+space
+delay 2500
+text Sentence three — same again.
+usage in=100 out=20
+end-turn
+
+# Turn 2 plays on the next user message.
+text Let me look at a few more key pieces.
+delay 2500
+tool read {"path":"src/agent.c"}
+usage in=120 out=15
+end-turn
+
+text Done — that wraps up the second pattern.
+usage in=140 out=12
+end-turn

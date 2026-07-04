@@ -2560,53 +2560,6 @@ static void test_wrap_crlf_hard_break_at_budget_no_extra_line(void)
     free(got);
 }
 
-static void test_md_cursor_col_tracks_emit_position(void)
-{
-    /* The agent's idle-spinner gating reads md_cursor_col to decide
-     * whether the inline glyph would fit before the terminal edge.
-     * Every appended byte is emitted (no holds), so col tracks the
-     * real terminal cursor — visible bytes advance it cell-by-cell. */
-    struct buf out;
-    buf_init(&out);
-    struct md_renderer *m = md_new(capture, &out, 80);
-
-    /* Fresh renderer: nothing emitted, cursor at col 0. */
-    EXPECT(md_cursor_col(m) == 0);
-
-    /* After "abc" the cursor is at col 3. */
-    md_feed(m, "abc", 3);
-    EXPECT(md_cursor_col(m) == 3);
-
-    /* Break-spaces are emitted eagerly — no holds — so the cursor
-     * advances through the space cell immediately. */
-    md_feed(m, " ", 1);
-    EXPECT(md_cursor_col(m) == 4);
-
-    /* Next content continues from where the space landed. */
-    md_feed(m, "d", 1);
-    EXPECT(md_cursor_col(m) == 5);
-
-    md_flush(m);
-    md_free(m);
-    char *s = buf_steal(&out);
-    free(s);
-}
-
-static void test_md_cursor_col_wrap_disabled(void)
-{
-    /* Wrap disabled (wrap_width=0): no wrap engine, no col tracking
-     * — the helper returns 0 so callers can ignore the result. */
-    struct buf out;
-    buf_init(&out);
-    struct md_renderer *m = md_new(capture, &out, 0);
-    md_feed(m, "abcdef", 6);
-    EXPECT(md_cursor_col(m) == 0);
-    md_flush(m);
-    md_free(m);
-    char *s = buf_steal(&out);
-    free(s);
-}
-
 static void test_wrap_streams_each_codepoint_eagerly(void)
 {
     /* Eager emit: every codepoint reaches emit_cb the moment its
@@ -2845,11 +2798,9 @@ int main(void)
     test_wrap_replay_restores_sgr_state_at_break();
     test_wrap_hard_newline_drops_trailing_held_space();
     test_wrap_eof_preserves_trailing_space_when_within_budget();
-    test_md_cursor_col_tracks_emit_position();
     test_wrap_consecutive_spaces_at_edge();
     test_wrap_hard_break_at_budget_no_extra_line();
     test_wrap_crlf_hard_break_at_budget_no_extra_line();
-    test_md_cursor_col_wrap_disabled();
     test_wrap_heading_not_wrapped();
 
     T_REPORT();

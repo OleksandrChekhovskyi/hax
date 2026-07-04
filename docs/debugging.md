@@ -72,7 +72,7 @@ Useful scripts in `scripts/`:
 | `stream_demo.py` | Streaming patterns through the bash tool. |
 | `mock_openai_server.py` | Lightweight OpenAI-compatible test server. |
 | `diff_demo.txt` | Manual diff/rendering fixture. |
-| `idle_demo.txt` | Idle/streaming behavior fixture. |
+| `pause_demo.txt` | Streaming-pause behavior fixture (no spinner over live text). |
 
 `stream_demo.py` modes include `short`, `long`, `slow`, `burst`, `ansi`, `binary`, `piped`,
 and `python_buffer`.

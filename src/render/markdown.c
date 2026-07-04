@@ -2547,17 +2547,6 @@ void md_set_styled(struct md_renderer *m, int on)
     m->styled = on;
 }
 
-int md_cursor_col(const struct md_renderer *m)
-{
-    if (!m || m->wrap_width <= 0)
-        return 0;
-    /* Every appended byte was emitted (no held-state), so col is
-     * the terminal cursor column. A pending edge-wrap leaves the
-     * cursor at col = wrap_width (the dropped space's would-be
-     * landing column never reached the wire). */
-    return m->col;
-}
-
 int md_in_table(const struct md_renderer *m)
 {
     /* True while rows are being diverted into table_buf with nothing

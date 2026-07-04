@@ -255,6 +255,21 @@ static size_t advance_cells(const char *s, size_t len, size_t target_cells)
     return skip_zero_width(s, len, i);
 }
 
+size_t display_cells(const char *s)
+{
+    if (!s)
+        return 0;
+    size_t len = strlen(s);
+    size_t i = 0;
+    size_t cells = 0;
+    while (i < len) {
+        size_t consumed;
+        cells += cells_at(s, len, i, &consumed);
+        i += consumed;
+    }
+    return cells;
+}
+
 char *truncate_for_display(const char *s, size_t cap)
 {
     if (!s)

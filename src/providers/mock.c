@@ -96,11 +96,12 @@ struct mock_provider {
 };
 
 /* Sleep up to `ms` milliseconds, calling `tick` every 50ms so a long
- * scripted delay doesn't pin the REPL and the agent's idle detection
- * fires through the mock the same way it would through libcurl's
- * progress callback. Returns 1 if the tick signals cancel, 0 on full
- * sleep or non-positive `ms`. Real providers reach this path through
- * libcurl's progress callback; the mock has no HTTP so it polls. */
+ * scripted delay doesn't pin the REPL and the agent's tick-driven
+ * windows (retry countdown, table stall) fire through the mock the
+ * same way they would through libcurl's progress callback. Returns 1
+ * if the tick signals cancel, 0 on full sleep or non-positive `ms`.
+ * Real providers reach this path through libcurl's progress callback;
+ * the mock has no HTTP so it polls. */
 static int mock_tick(http_tick_cb tick, void *tick_user)
 {
     return tick ? tick(tick_user) : 0;
@@ -129,9 +130,8 @@ static int msleep(long ms, http_tick_cb tick, void *tick_user)
  * Chunks are walked back to a UTF-8 codepoint boundary so a multibyte
  * character (em-dash, emoji, …) never straddles two deltas. Real
  * providers send token-aligned deltas which are already UTF-8-complete;
- * a naive byte-window split would diverge from that and corrupt any
- * mid-stream rendering that interleaves with the partial bytes (the
- * idle inline spinner being the most visible example). */
+ * a naive byte-window split would diverge from that shape and could
+ * corrupt any per-delta rendering that assumes complete codepoints. */
 static int emit_chunked(stream_cb cb, void *user, const char *s, long delay_ms, http_tick_cb tick,
                         void *tick_user, int reasoning)
 {

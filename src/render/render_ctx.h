@@ -22,9 +22,9 @@ struct md_renderer;
  *   RS_TEXT      Markdown answer stream open; md owns inline SGR.
  *   RS_CLUSTER   In-progress run of "quiet" tool calls (read/grep
  *                exploration). Coalesces consecutive `read`s onto one
- *                line and keeps its own end-of-line spinner across
- *                gaps. Survives stream() boundaries; the other states
- *                are reset per-stream. */
+ *                line and keeps a parked spinner below the cluster
+ *                across gaps. Survives stream() boundaries; the other
+ *                states are reset per-stream. */
 enum render_state {
     RS_IDLE,
     RS_WAITING,
@@ -44,50 +44,29 @@ struct render_ctx {
     struct md_renderer *md; /* NULL when markdown is disabled */
 
     /* RS_CLUSTER sub-state. cluster_last_tool == NULL means "cluster
-     * just entered, no header painted yet". cluster_line_used is a
-     * cell budget against terminal width for read-coalescing wrap. */
+     * just entered, no header painted yet". cluster_line_open: the
+     * current quiet line still awaits its terminating \n (emitted by
+     * the transition close-half). cluster_line_used is the line's
+     * exact cell count — cells, not bytes, because it doubles as the
+     * parked spinner's cursor-restore column. */
     const char *cluster_last_tool;
+    int cluster_line_open;
     int cluster_line_used;
 
-    /* Idle inline overlay (SPINNER_INLINE_TEXT) — drawn on top of an
-     * active text/reasoning stream when the model goes quiet.
-     * last_text_at is the ms of the most recent live delta; 0 means
-     * no idle window armed. idle_shown latches once drawn so the
-     * tick doesn't re-emit it every second. */
+    /* Stall clock for the table-composing spinner: ms of the most
+     * recent live delta, 0 when unarmed. Only consulted while md is
+     * buffering a table — pauses in ordinary streaming text
+     * deliberately surface nothing (the text is its own progress
+     * indicator). */
     long last_text_at;
-    int idle_shown;
 
-    /* Table-composing overlay (SPINNER_LINE "composing...") — drawn on
-     * its own row while md is buffering a GFM table, a window that emits
-     * nothing until the whole grid lays out. Distinct from idle_shown:
-     * the bytes are arriving (not a stall), so it's keyed on md_in_table
-     * rather than the idle clock alone, and it persists across the silent
-     * row-buffering deltas. render_text_chunk hides it before each md_feed
-     * (so a finalizing grid never races the spinner row) and re-shows if
-     * still buffering; render_transition clears it on any real state
-     * change (so the end-of-stream md_flush renders the grid cleanly). */
+    /* Table-composing spinner is up ("composing..." on its own row
+     * while md buffers a GFM table and emits nothing).
+     * render_text_chunk hides it before each md_feed so a finalizing
+     * grid never races the spinner row, and re-shows if still
+     * buffering; render_transition clears it on any real state
+     * change. */
     int table_composing;
-
-    /* Deferred tool-call "composing..." label. EV_TOOL_CALL_START knows
-     * the tool name but holds the busy spinner on "working..." and arms
-     * these instead of swapping the label immediately; the stream tick
-     * performs the swap only once the compose window outlives
-     * TOOL_COMPOSE_LABEL_MS, so a fast call dispatches first and never
-     * flickers working->composing->header. compose_at == 0 means no
-     * pending swap (latched off after the swap, and cleared by any event
-     * that sets its own label). compose_label holds the formatted text.
-     * composing_active latches once the swap has happened this stream, so
-     * a following call in a back-to-back batch swaps straight to its name
-     * instead of reverting to "working..." and re-deferring (which would
-     * flicker between calls). compose_end_at is the symmetric revert timer:
-     * armed at EV_TOOL_CALL_END while composing, it lets the tick fall back
-     * to "working..." only if the model stalls past TOOL_COMPOSE_LABEL_MS
-     * after finalizing the args (a following call or the done event cancels
-     * it first). All three reset per stream in render_stream_begin. */
-    long compose_at;
-    char compose_label[64];
-    int composing_active;
-    long compose_end_at;
 
     /* Retry countdown — the tick repaints the spinner label from
      * these so the seconds visibly shrink during the backoff sleep.
@@ -111,9 +90,9 @@ void render_transition(struct render_ctx *r, enum render_state to);
  * coalesce with the tool call that will be classified during dispatch. */
 void render_stream_seam(struct render_ctx *r);
 
-/* Pre-stream housekeeping: arm fresh idle/retry bookkeeping for the
+/* Pre-stream housekeeping: arm fresh stall/retry bookkeeping for the
  * new provider call, then show the busy "working..." spinner — unless
- * we're continuing a cluster, whose own end-of-line spinner is the alive
+ * we're continuing a cluster, whose parked spinner is the alive
  * indicator across the gap. */
 void render_stream_begin(struct render_ctx *r);
 
@@ -124,8 +103,9 @@ void render_open_block(struct render_ctx *r);
 
 /* Write a chunk of model-produced text into the currently-open content
  * stream (RS_TEXT or RS_REASONING). Routes through md when enabled,
- * falls through to disp otherwise; arms idle detection so the tick
- * can surface the inline spinner if the model goes quiet. */
+ * falls through to disp otherwise; keeps the table-stall clock fresh
+ * so the tick can surface the composing spinner if a table buffer
+ * goes quiet. */
 void render_text_chunk(struct render_ctx *r, const char *s, size_t n);
 
 /* Render a chunk of assistant answer text into RS_TEXT: peek-strip leading

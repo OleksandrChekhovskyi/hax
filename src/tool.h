@@ -64,7 +64,7 @@ struct tool {
      * tools whose output is read top-down (file content). */
     int preview_tail;
     /* When set, the call renders as a one-line header with no preview
-     * body and an inline spinner — used for read-only exploration tools
+     * body and a parked spinner — used for read-only exploration tools
      * whose output is for the model, not the user. Consecutive silent
      * calls of the same tool can coalesce into one line (see agent.c
      * read coalescing). */

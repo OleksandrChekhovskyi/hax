@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mock OpenAI-compatible server for end-to-end testing of hax's HTTP/SSE
-plumbing — auto-retry, mid-stream error recovery, idle spinner, length
-truncation, tool dispatch.
+plumbing — auto-retry, mid-stream error recovery, slow-stream pauses,
+length truncation, tool dispatch.
 
 The unit tests cover each piece in isolation (retry classifier, turn state
 machine, etc.); this server is the manual integration check for the bits
@@ -47,8 +47,9 @@ Modes
               inline error events would land in the live turn before
               the retry loop classifies the status, and t->error
               (sticky) would taint a successful retry attempt.
-  slow        Long pauses between deltas. Exercises the idle-text
-              spinner that appears when the model goes quiet mid-text.
+  slow        Long pauses between deltas. Verifies that pauses in
+              streaming text stay quiet — no spinner pops in and out
+              between chunks; the partial text is the progress signal.
   tool-call   Emit a single bash tool_call. Exercises the verbose
               tool-dispatch UI without touching error paths.
 
@@ -255,9 +256,10 @@ class MockHandler(BaseHTTPRequestHandler):
         self._write_done()
 
     def _serve_slow(self):
-        # 2s between tokens — enough to trigger the idle inline glyph
-        # (TEXT_IDLE_TIMEOUT_MS = 1500ms) but not so long that a casual
-        # tester gives up. Adjust by editing the sleep.
+        # 2s between tokens. Long pauses in streaming text should show
+        # no indicator at all (the text is the progress signal) — watch
+        # for spinner rows flickering in and out between words, which
+        # would be a regression. Adjust by editing the sleep.
         for word in ["This ", "is ", "a ", "slow ", "response."]:
             self._write(_delta_chunk(word))
             time.sleep(2.0)

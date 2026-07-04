@@ -198,21 +198,13 @@ struct event_ctx {
     struct stream_usage usage;
 };
 
-/* How long after the last text byte we wait before surfacing the
- * "still alive" inline glyph. Shorter than the silent-cluster's
- * INLINE_TIMEOUT_MS because the inline glyph is non-disruptive — one
- * dim cell at the cursor's natural position, no paragraph break, no
- * disp bookkeeping perturbed — so we can show it sooner without the
- * risk of flicker between rapid deltas. */
-#define TEXT_IDLE_TIMEOUT_MS 1500
-
-/* How long a tool call must keep composing (name known, args still
- * streaming) before the busy spinner swaps "working..." for the named
- * "[tool] composing..." label. The spinner is already up either way —
- * only the text changes — so a short defer is enough to keep a fast call
- * from flashing working->composing->header; a genuinely long compose
- * (a big write/edit's args) still gets named. */
-#define TOOL_COMPOSE_LABEL_MS 500
+/* How long a table must keep buffering with no visible output before
+ * the "composing..." spinner surfaces. A fast table finalizes within
+ * the window and never shows it; ordinary inter-token gaps stay well
+ * under it. Pauses in ordinary streaming text deliberately show no
+ * indicator at all — the arriving text is its own progress signal,
+ * and a spinner popping in and out between chunks reads as flicker. */
+#define TABLE_IDLE_TIMEOUT_MS 1500
 
 /* Adapter so md_renderer can emit through disp without knowing about it.
  * Content bytes go through disp_write so trailing-newline buffering works
@@ -327,97 +319,34 @@ static void display_stats_line(struct render_ctx *r, const struct provider *p, l
     fflush(stdout);
 }
 
-/* Per-stream side-channel hook: runs idle bookkeeping and returns the
- * cancel signal. Called from libcurl's progress callback (~1Hz) and
- * on every received chunk while the agent thread is parked inside
- * curl_easy_perform. Combines two responsibilities so the http layer
- * sees one tick instead of separate cancel/idle entry points.
+/* Per-stream side-channel hook: label/timer bookkeeping plus the
+ * cancel signal, called from libcurl's progress callback (~1Hz) and on
+ * every received chunk while the agent thread is parked inside
+ * curl_easy_perform.
  *
- * Idle behavior: when the model has emitted text and then gone quiet
- * for TEXT_IDLE_TIMEOUT_MS, drop a single dim glyph at the cursor's
- * current position via sticky-inline mode. Nothing else moves —
- * disp's held/trail counters stay as-is, the model's paragraph
- * layout is untouched, the markdown renderer's lookahead tail keeps
- * its buffered bytes. On text resume, spinner_hide's \b space \b
- * restores the cursor; the next byte the model emits overwrites the
- * cell that briefly held the glyph, so the resumed stream looks
- * identical to one that never paused. Sticky inline suppresses the
- * auto-transition to line mode that the silent cluster relies on —
- * any disp-bypassing \n here would desync the held/trail bookkeeping. */
+ * A pause in ordinary streaming text deliberately shows nothing here:
+ * the text itself is the progress indicator, and a spinner popping in
+ * and out between chunks reads as flicker. Every no-visible-output
+ * wait has its own spinner path elsewhere; the tick only drives the
+ * two clocks that need wall time, the retry countdown and the stalled
+ * table buffer. */
 static int agent_stream_tick(void *user)
 {
     struct render_ctx *r = user;
-    /* Retry countdown wins over idle detection: during a retry sleep the
-     * model isn't streaming at all, so there's no idle-text window to
-     * surface. Repaint each tick so the seconds count visibly shrinks. */
+    /* Retry countdown wins over the other tick windows: during a retry
+     * sleep the model isn't streaming at all. Repaint each tick so the
+     * seconds count visibly shrinks. */
     if (r->retry_deadline_at) {
         update_retry_label(r);
-    } else if (r->compose_at && monotonic_ms() - r->compose_at >= TOOL_COMPOSE_LABEL_MS) {
-        /* A tool call has been composing past the defer threshold — swap
-         * the busy spinner's "working..." for its name. Latch (compose_at
-         * = 0) so we set the label once; on_event clears it when the
-         * compose window ends. composing_active keeps a back-to-back batch
-         * on a composing label instead of reverting per call. */
-        spinner_set_label(r->spinner, r->compose_label);
-        r->compose_at = 0;
-        r->composing_active = 1;
-    } else if (r->compose_end_at && monotonic_ms() - r->compose_end_at >= TOOL_COMPOSE_LABEL_MS) {
-        /* A composing call's args ended and nothing followed within the
-         * window — no next call in the batch, no done/dispatch — so the
-         * model has stalled after finalizing args. Stop claiming it's
-         * composing; revert to the generic busy label. */
-        spinner_set_label(r->spinner, "working...");
-        r->composing_active = 0;
-        r->compose_end_at = 0;
     } else if (r->md && md_in_table(r->md)) {
-        /* Buffering a table: bytes are arriving but nothing renders until
-         * the whole grid lays out. Surface a labeled "composing..." line
-         * spinner once the silent window crosses the idle threshold (a
-         * fast table finalizes first and never shows it). render_text_chunk
-         * keeps it up across the row deltas; this covers a mid-table stall
-         * where no further delta arrives to re-issue it. */
+        /* Table buffering renders nothing until the grid lays out;
+         * surface "composing..." once the silence outlives the
+         * threshold (a fast table finalizes first and never shows it).
+         * render_text_chunk keeps it up across row deltas; this covers
+         * a mid-table stall where no delta arrives to re-issue it. */
         if (!r->table_composing && r->last_text_at &&
-            monotonic_ms() - r->last_text_at >= TEXT_IDLE_TIMEOUT_MS)
+            monotonic_ms() - r->last_text_at >= TABLE_IDLE_TIMEOUT_MS)
             render_table_spinner_show(r);
-    } else if (r->last_text_at && !r->idle_shown &&
-               monotonic_ms() - r->last_text_at >= TEXT_IDLE_TIMEOUT_MS) {
-        /* Inline glyph is only safe when:
-         *
-         *   - md is driving output (HAX_MARKDOWN=0 has no column
-         *     source for the plain disp_write path, so the gate
-         *     can't decide);
-         *   - disp has no held newlines (md_cursor_col reads md's
-         *     post-\n column == 0 after a hard \n, but disp defers
-         *     trailing \n into r->disp.held instead of writing to
-         *     stdout — so the real terminal cursor is still at the
-         *     prior row's right edge, and the gate would pass even
-         *     though pad + glyph would autowrap);
-         *   - cursor + cells stays strictly left of term_width() (the
-         *     real tty edge, not the soft-capped layout width) so the
-         *     glyph never lands in the physical last column.
-         *
-         * Filling the last column arms the terminal's deferred autowrap
-         * (xterm pending-wrap, libvterm at_phantom); spinner_hide's
-         * \b-based erase then runs against that pending state, and
-         * libvterm's BS leaves at_phantom set — the same off-by-one
-         * that ate wrap characters. Reserving the column (strict <)
-         * keeps the erase on solid ground. We trade the idle-alive
-         * indicator for correctness in the unsafe cases; latch
-         * idle_shown either way so the tick doesn't churn — the
-         * next text byte moves last_text_at forward and re-arms
-         * the idle window. */
-        if (r->md && r->disp.held == 0) {
-            /* Skip the leading-space cell when disp says the cursor
-             * is already at column 0 or right after a space — the
-             * model's last byte is its own breathing room, and an
-             * extra pad would read as a stray double-space once the
-             * glyph erases. */
-            int pad = !r->disp.at_space_or_bol;
-            int spinner_cells = 1 + pad;
-            if (md_cursor_col(r->md) + spinner_cells < term_width())
-                spinner_show_inline_text(r->spinner, pad);
-        }
-        r->idle_shown = 1;
     }
     return interrupt_requested();
 }
@@ -428,12 +357,10 @@ static int on_event(const struct stream_event *ev, void *user)
     struct render_ctx *r = ec->r;
     struct disp *d = &r->disp;
 
-    /* Idle detection tracks "time since the last byte the user could
-     * see". Stream-ending events close the window; streamed item seams
-     * close it via render_stream_seam so long tool-args / post-reasoning
-     * pauses use the full-size busy spinner instead of an inline glyph.
-     * Reasoning deltas re-arm it from their own handler when reasoning is
-     * visible. */
+    /* last_text_at tracks "time since the last byte the user could
+     * see" — the tick's stall clock for the table-composing spinner.
+     * Stream-ending events close the window; streamed item seams close
+     * it via render_stream_seam. */
     if (ev->kind == EV_DONE || ev->kind == EV_ERROR)
         r->last_text_at = 0;
     /* Any event other than EV_RETRY itself means we're past the
@@ -441,21 +368,8 @@ static int on_event(const struct stream_event *ev, void *user)
      * aren't fighting the tick. */
     if (ev->kind != EV_RETRY && r->retry_deadline_at) {
         r->retry_deadline_at = 0;
-        spinner_set_label(r->spinner, "working...");
+        spinner_set_label(r->spinner, "working", "working...");
     }
-    /* Drop any pending deferred "composing..." swap: only EV_TOOL_CALL_DELTA
-     * (args still arriving) keeps it alive. EV_TOOL_CALL_END means the call
-     * is fully composed, so a post-END stall must not let the tick flip the
-     * busy spinner to "composing..." after the fact; every other event sets
-     * its own label or ends the stream. EV_TOOL_CALL_START re-arms below. */
-    if (ev->kind != EV_TOOL_CALL_DELTA)
-        r->compose_at = 0;
-    /* Cancel a pending revert-to-"working..." (armed at EV_TOOL_CALL_END):
-     * the next call's START or the done event arriving means the model
-     * didn't stall, so the batch stays on its composing label. END itself
-     * arms it just below; only deltas otherwise leave it untouched. */
-    if (ev->kind != EV_TOOL_CALL_DELTA && ev->kind != EV_TOOL_CALL_END)
-        r->compose_end_at = 0;
 
     switch (ev->kind) {
     case EV_TEXT_DELTA:
@@ -464,47 +378,22 @@ static int on_event(const struct stream_event *ev, void *user)
         render_text_delta(r, ev->u.text_delta.text, strlen(ev->u.text_delta.text));
         break;
     case EV_TOOL_CALL_START: {
-        /* The model is composing a tool call: its name is known but the
-         * args JSON still streams (long for a big write/edit). Name the
-         * spinner so the otherwise-anonymous compose window says what's
-         * coming — but defer the swap on the first call: leave the busy
-         * spinner on "working..." and only arm compose_at/compose_label, so
-         * the tick swaps in "[tool] composing..." once the window outlives
-         * TOOL_COMPOSE_LABEL_MS. A fast call dispatches first with no
-         * working->composing->header flicker.
+        /* Name the otherwise-anonymous args-streaming window. The
+         * settle window does the smoothing: a fast call dispatches
+         * before the label surfaces, and a batch shares one "compose"
+         * key so per-call name swaps don't bounce through "working...".
          *
-         * We track only the latest-started call (single compose_label, no
-         * per-id state). For every provider in the supported set this names
-         * the right call: an autoregressive model emits one call's tokens —
-         * name then full args — before the next's, and OpenAI streams its
-         * indexed tool_calls array one entry to completion before the next,
-         * so the args streaming right now belong to the most recent START.
-         * ("Parallel" tool calls run in parallel only at dispatch.) The
-         * indexed-array shape does technically permit announcing several
-         * names up front and backfilling one call's args later (START a,
-         * START b, then a long DELTA a) — no backend we target emits that
-         * order, but if one did the label could name a sibling call from the
-         * same response for under a second. We accept that: it's cosmetic and
-         * self-corrects when dispatch paints the real per-call headers, not
-         * worth an id->name map to chase. */
+         * Naming only the latest-started call is correct for every
+         * backend we target (each streams one call to completion
+         * before the next); a hypothetical announce-all-then-backfill
+         * order would mislabel cosmetically and self-correct at
+         * dispatch — not worth an id->name map. */
         const char *name = ev->u.tool_call_start.name;
-        if (name && *name)
-            snprintf(r->compose_label, sizeof(r->compose_label), "[%s] composing...", name);
-        if (r->composing_active && name && *name && r->state == RS_WAITING) {
-            /* Mid-batch: a previous call in this stream already swapped the
-             * spinner to a composing label and the busy line spinner is
-             * still up (RS_WAITING, the normal state across a back-to-back
-             * tool-call batch), so skip render_stream_seam's "working..."
-             * reset — it would repaint "working..." for an instant before we
-             * swap it back — and swap straight to this call's name. The
-             * RS_WAITING guard means intervening text/reasoning (spinner
-             * hidden) still falls through to render_stream_seam below, which
-             * re-raises the spinner. */
-            spinner_set_label(r->spinner, r->compose_label);
-        } else {
-            render_stream_seam(r);
-            if (name && *name)
-                r->compose_at = monotonic_ms();
+        render_stream_seam(r);
+        if (name && *name) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "[%s] composing...", name);
+            spinner_request_label(r->spinner, "compose", buf);
         }
         break;
     }
@@ -512,24 +401,20 @@ static int on_event(const struct stream_event *ev, void *user)
         render_stream_seam(r);
         break;
     case EV_TOOL_CALL_END:
-        /* Args for this call are finalized. If a composing label is on the
-         * spinner, arm a deferred revert to "working...": the next call's
-         * START or the done event normally lands within TOOL_COMPOSE_LABEL_MS
-         * and cancels it (top of on_event), keeping a batch smooth; if the
-         * model instead stalls after the args, the tick reverts so the label
-         * stops claiming the tool is still composing. */
-        if (r->composing_active)
-            r->compose_end_at = monotonic_ms();
+        /* Args finalized — request neutral so only a genuine post-args
+         * stall stops the label claiming the tool is still composing;
+         * the normal batch cadence outruns the settle window. */
+        spinner_request_label(r->spinner, "working", "working...");
         break;
     case EV_TOOL_CALL_DELTA:
         /* No live display: tool calls render as a single block during
          * dispatch so parallel calls don't visually interleave. */
         break;
     case EV_REASONING_DELTA: {
-        /* Flip the label even when reasoning is invisible — the
-         * spinner still shows so the user knows the quiet pause is
-         * the model reasoning, not the network. */
-        spinner_set_label(r->spinner, "thinking...");
+        /* Requested even when reasoning is invisible — the spinner
+         * still shows, and a settled "thinking..." tells the user the
+         * quiet pause is the model, not the network. */
+        spinner_request_label(r->spinner, "thinking", "thinking...");
         const char *rt = ev->u.reasoning_delta.text;
         if (!r->show_reasoning || !rt || !*rt)
             break;
@@ -573,7 +458,11 @@ static int on_event(const struct stream_event *ev, void *user)
             pct = 100;
         char buf[32];
         snprintf(buf, sizeof(buf), "processing... %d%%", pct);
-        spinner_set_label(r->spinner, buf);
+        /* Shared "processing" key: the settle clock runs once for the
+         * whole prefill phase while each event refreshes the pending
+         * percentage, so a short prefill never surfaces the label and
+         * a long one ticks live after it settles. */
+        spinner_request_label(r->spinner, "processing", buf);
         break;
     }
     case EV_DONE:
@@ -835,7 +724,6 @@ static void replay_user_echo(struct render_ctx *r, const char *text)
     input_render_user_message(text ? text : "", text ? strlen(text) : 0, input_display_cols());
     r->disp.trail = 1;
     r->disp.held = 0;
-    r->disp.at_space_or_bol = 1;
 }
 
 /* Feed a stored assistant message or reasoning blob into the markdown
@@ -943,7 +831,6 @@ static void replay_user_turn(struct render_ctx *r, const struct agent_session *s
      * r->disp.trail before invoking us and we trust it for the rule's
      * separator. */
     r->disp.held = 0;
-    r->disp.at_space_or_bol = 1;
 
     render_open_block(r);
     disp_raw(ANSI_DIM);
@@ -1129,7 +1016,7 @@ int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
      * with no per-event rendering and a "compacting..." label. compact_on_event
      * feeds the turn and captures usage / the error message for the notice. */
     render_stream_begin(r);
-    spinner_set_label(r->spinner, "compacting...");
+    spinner_set_label(r->spinner, "compacting", "compacting...");
 
     struct turn t;
     turn_init(&t);
@@ -1219,8 +1106,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
      * call. disp is embedded (same lifetime as agent_run's frame), so
      * md_emit_to_disp's user pointer is &r.disp; spinner / md are
      * opaque handles owned here and freed below. */
-    struct render_ctx r = {.disp = {.trail = 1, .at_space_or_bol = 1},
-                           .show_reasoning = reasoning_visible()};
+    struct render_ctx r = {.disp = {.trail = 1}, .show_reasoning = reasoning_visible()};
     r.spinner = spinner_new("working...");
     r.md = markdown_enabled() ? md_new(md_emit_to_disp, &r.disp, md_wrap_width()) : NULL;
     /* On a --continue/--resume startup, replay the last user turn through
@@ -1379,10 +1265,12 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
         int user_turn_errored = 0;
         int user_turn_interrupted = 0;
 
-        /* Arm the spinner's elapsed counter with the same clock the
-         * end-of-user-turn stats line reports, so the live counter and
-         * the final duration agree. Disarmed when the inner loop
-         * settles. */
+        /* Immediate label reset: a fresh user turn is a clean slate,
+         * and the previous turn's promoted label must not describe it
+         * for a settle window (no flicker risk — the spinner was
+         * hidden while the user typed). The timer uses the same clock
+         * as the end-of-turn stats line so the two agree. */
+        spinner_set_label(r.spinner, "working", "working...");
         spinner_set_timer(r.spinner, user_turn_start_ms);
 
         /* Arm the watcher for the duration of the inner loop — Esc from
@@ -1537,15 +1425,11 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
                 break;
 
             /* Execute tool calls just added — render header + output as
-             * one block per call so parallel calls don't interleave. The
-             * spinner runs on the line between header and output so a
-             * slow tool still gives the user a "still working" signal;
-             * spinner_hide erases that line and tool output writes there
-             * in its place. Esc partway through the batch flips remaining
-             * calls to a synthesized "[interrupted]" result so the
-             * conversation stays well-formed; settle first so a
-             * fast-returning tool doesn't race past a pending \x1b in
-             * the classifier. */
+             * one block per call so parallel calls don't interleave.
+             * Esc partway through the batch flips remaining calls to a
+             * synthesized "[interrupted]" result so the conversation
+             * stays well-formed; settle first so a fast-returning tool
+             * doesn't race past a pending \x1b in the classifier. */
             size_t current_end = sess.n_items;
             for (size_t i = n_before; i < current_end; i++) {
                 if (sess.items[i].kind != ITEM_TOOL_CALL)

@@ -130,7 +130,7 @@ end-turn
 # need every row, so md buffers the whole grid and emits nothing until
 # the last row is in (see md_in_table / finalize_table). The intro line
 # streams fast (delay 0), then `delay 250` paces the table rows in
-# 16-byte chunks so the silent buffering runs well past the 1.5s idle
+# 16-byte chunks so the silent buffering runs well past the 1.5s stall
 # threshold — long enough for the agent to raise the labeled
 # "composing..." line spinner on its own row, which is erased in place
 # when the finished grid lays out below the intro text.

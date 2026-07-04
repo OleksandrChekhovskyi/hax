@@ -128,18 +128,13 @@ static char *truncate_line(const char *s, size_t cap)
     return truncate_for_display(s ? s : "", cap);
 }
 
-/* Hand the current status_content off to the spinner — it'll paint
- * the dim-cyan glyph + dim content row at its tick rate so the
- * animation stays alive between content updates (or, in non-tty
- * contexts where the thread doesn't run, just paints synchronously
- * once per content update). On first call this swaps the spinner
- * into SPINNER_TOOL_STATUS mode; on subsequent calls only the
- * content updates.
- *
- * Flushes any held \n (from a prior status_commit) first — the
- * spinner's draw bypasses disp's tracking, so without the flush the
- * new status would overprint the row we just committed instead of
- * landing on a fresh row below it. */
+/* Hand the current status_content to the spinner, which owns the live
+ * row's painting (tick-rate animation on TTY, synchronous per-update
+ * draws otherwise). Flushes any held \n first — the spinner's draw
+ * bypasses disp's tracking, so without the flush the new status would
+ * overprint the row just committed. The first paint's show also
+ * unwinds dispatch's parked spinner, landing the status row directly
+ * under the header. */
 static void status_paint(struct tool_render *r)
 {
     disp_emit_held(r->disp);
@@ -429,12 +424,10 @@ static void emit_diff_line(struct tool_render *r, const char *line, size_t len)
      * display-only elision, like the head/tail capping elsewhere. */
     if (!r->diff_in_hunk && is_diff_file_header(line, len))
         return;
-    /* On the first row of the diff block, hide whatever the spinner
-     * is currently showing (the agent may have left it in inline /
-     * line mode from before dispatch) so it doesn't fight the row
-     * paint. Subsequent diff rows skip the hide — the renderer
-     * doesn't bring the spinner back during R_DIFF, so once it's
-     * off it stays off. */
+    /* First diff row: hide dispatch's parked spinner (the hide
+     * returns the cursor to the fresh row under the header) so it
+     * doesn't fight the row paint. The renderer never brings it back
+     * during R_DIFF, so once off it stays off. */
     if (!r->started)
         spinner_hide(r->spinner);
     emit_strip_for_next_row(r);

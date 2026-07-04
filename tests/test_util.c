@@ -426,6 +426,20 @@ static void test_flatten_control_bytes(void)
     free(out);
 }
 
+static void test_display_cells(void)
+{
+    /* ASCII: cells == bytes. */
+    EXPECT(display_cells("abc") == 3);
+    EXPECT(display_cells("") == 0);
+    EXPECT(display_cells(NULL) == 0);
+    /* Multi-byte codepoint occupying one cell: bytes over-count. */
+    EXPECT(display_cells("café") == 4);
+    /* Wide CJK codepoint: two cells. */
+    EXPECT(display_cells("a\xE4\xB8\xAD") == 3);
+    /* Combining mark rides on the base glyph (zero cells). */
+    EXPECT(display_cells("e\xCC\x81") == 1);
+}
+
 static void test_flatten_preserves_high_bytes(void)
 {
     /* UTF-8 bytes (>= 0x80) for non-dangerous codepoints pass through. */
@@ -1130,6 +1144,7 @@ int main(void)
     test_flatten_strips_edges();
     test_flatten_all_whitespace();
     test_flatten_control_bytes();
+    test_display_cells();
     test_flatten_preserves_high_bytes();
     test_flatten_substitutes_bidi_override();
     test_flatten_substitutes_zwj();

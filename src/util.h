@@ -205,6 +205,14 @@ int display_width(void);
  * locale_init_utf8() at startup. Returns malloc'd; caller frees. */
 char *truncate_for_display(const char *s, size_t cap);
 
+/* Visual cell width of an entire UTF-8 string on one terminal row.
+ * Non-printables count 1 cell (the substitute-glyph policy of
+ * utf8_codepoint_cells), zero-width codepoints 0. Callers that need
+ * an exact cursor column (not just a truncation budget) use this —
+ * byte length over-counts multi-byte codepoints. Locale-dependent,
+ * see truncate_for_display. */
+size_t display_cells(const char *s);
+
 /* Find the byte offset where to break `s` (length `len`) so the
  * current row fits in at most `max_cells` visual cells. Returns the
  * end-of-row byte offset (s[0..return) is the row content). When
