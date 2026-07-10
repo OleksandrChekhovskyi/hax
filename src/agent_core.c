@@ -110,7 +110,7 @@ const char *resolve_reasoning_effort(const struct provider *p)
     return p->default_reasoning_effort;
 }
 
-char *build_system_prompt(const char *model, int raw)
+char *build_system_prompt(const char *model_label, int raw)
 {
     if (raw)
         return NULL;
@@ -121,7 +121,7 @@ char *build_system_prompt(const char *model, int raw)
     if (!*sys)
         return NULL;
 
-    char *suffix = agent_env_build_suffix(model);
+    char *suffix = agent_env_build_suffix(model_label);
     if (!suffix)
         return xstrdup(sys);
 
@@ -178,6 +178,13 @@ int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long
     return n;
 }
 
+static char *resolve_model_label(struct provider *p, const char *model)
+{
+    if (!model)
+        return NULL;
+    return (p && p->model_label) ? p->model_label(p, model) : xstrdup(model);
+}
+
 int agent_session_init(struct agent_session *s, struct provider *p, const struct hax_opts *opts)
 {
     memset(s, 0, sizeof(*s));
@@ -194,13 +201,14 @@ int agent_session_init(struct agent_session *s, struct provider *p, const struct
     if ((!model || !*model) && p)
         model = p->default_model;
     s->model = model ? xstrdup(model) : NULL;
+    s->model_label = resolve_model_label(p, s->model);
     s->provider_name = p ? p->name : NULL;
 
     /* --raw collapses to "no system message + no tools advertised" so the
      * model sees only the user text. HAX_SYSTEM_PROMPT="" remains the
      * narrower opt-out (no system message but tools stay). */
     s->raw = opts->raw;
-    s->sys = build_system_prompt(s->model, opts->raw);
+    s->sys = build_system_prompt(s->model_label, opts->raw);
     const char *effort = resolve_reasoning_effort(p);
     s->reasoning_effort = effort ? xstrdup(effort) : NULL;
 
@@ -223,14 +231,18 @@ int agent_session_reconfigure(struct agent_session *s, struct provider *p)
                 p->name ? p->name : "?");
         return -1;
     }
+    char *new_model = xstrdup(model);
+    char *new_model_label = resolve_model_label(p, new_model);
     free(s->model);
-    s->model = xstrdup(model);
+    free(s->model_label);
+    s->model = new_model;
+    s->model_label = new_model_label;
     s->provider_name = p->name;
     /* Rebuild the system prompt so its env block names the new model.
      * Tools and history are deliberately untouched — a switch keeps the
      * conversation going under the new settings. */
     free(s->sys);
-    s->sys = build_system_prompt(s->model, s->raw);
+    s->sys = build_system_prompt(s->model_label, s->raw);
     const char *effort = resolve_reasoning_effort(p);
     free(s->reasoning_effort);
     s->reasoning_effort = effort ? xstrdup(effort) : NULL;
@@ -245,6 +257,7 @@ void agent_session_free(struct agent_session *s)
     free(s->tools);
     free(s->sys);
     free(s->model);
+    free(s->model_label);
     free(s->reasoning_effort);
     memset(s, 0, sizeof(*s));
 }

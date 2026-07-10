@@ -131,7 +131,9 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
      * terminal, like the resume hint below. */
     {
         int tty = isatty(fileno(stderr));
-        fprintf(stderr, "%shax: %s · %s", tty ? ANSI_DIM : "", p->name ? p->name : "?", sess.model);
+        const char *model_label = sess.model_label ? sess.model_label : sess.model;
+        fprintf(stderr, "%shax: %s · %s", tty ? ANSI_DIM : "", p->name ? p->name : "?",
+                model_label);
         if (sess.reasoning_effort)
             fprintf(stderr, " · %s", sess.reasoning_effort);
         if (opts->provider_autoselected)

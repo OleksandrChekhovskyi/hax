@@ -577,6 +577,7 @@ void agent_print_banner(const struct provider *p, const struct agent_session *s)
         return;
     }
     const char *name = p->name ? p->name : "?";
+    const char *model_label = s->model_label ? s->model_label : s->model;
     if (!s->model || !*s->model)
         /* No model resolved (a provider with no default, nothing configured
          * yet). The REPL still starts; point the user at /model. */
@@ -585,10 +586,10 @@ void agent_print_banner(const struct provider *p, const struct agent_session *s)
                bar, name);
     else if (s->reasoning_effort)
         printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s · %s" ANSI_BOLD_OFF "\n",
-               bar, name, s->model, s->reasoning_effort);
+               bar, name, model_label, s->reasoning_effort);
     else
         printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s" ANSI_BOLD_OFF "\n", bar,
-               name, s->model);
+               name, model_label);
     printf("%s " ANSI_DIM "ctrl-d quit · try /help" ANSI_BOLD_OFF "\n", bar);
 }
 
@@ -663,10 +664,11 @@ int agent_apply_settings(struct agent_state *st)
      * model can't act on a settings change, so injecting it into the
      * conversation would just be context noise (and skew the transcript /
      * --resume view away from what the model actually saw). */
+    const char *model_label = s->model_label ? s->model_label : s->model;
     char *label = s->reasoning_effort
-                      ? xasprintf("switched to %s · %s · %s", p->name ? p->name : "?", s->model,
+                      ? xasprintf("switched to %s · %s · %s", p->name ? p->name : "?", model_label,
                                   s->reasoning_effort)
-                      : xasprintf("switched to %s · %s", p->name ? p->name : "?", s->model);
+                      : xasprintf("switched to %s · %s", p->name ? p->name : "?", model_label);
 
     render_open_block(st->r);
     disp_raw(ANSI_DIM);

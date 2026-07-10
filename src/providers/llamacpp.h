@@ -37,6 +37,10 @@
  *     and is used verbatim by the agent. */
 struct provider *llamacpp_provider_new(const char *name);
 
+/* Collapse a GGUF path to its extensionless filename for display and the env
+ * block. Other model ids are duplicated unchanged. Caller frees. */
+char *llamacpp_model_label(struct provider *p, const char *model);
+
 extern const struct provider_factory PROVIDER_LLAMACPP;
 
 #endif /* HAX_LLAMACPP_H */

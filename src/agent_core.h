@@ -49,15 +49,15 @@ void items_append(struct item **items, size_t *n, size_t *cap, struct item it);
 const char *resolve_reasoning_effort(const struct provider *p);
 
 /* Build the assembled system prompt (base text + env block + AGENTS.md +
- * skills) for `model`. Returns malloc'd, or NULL when the system message
- * should be omitted entirely.
+ * skills) using `model_label` in the env block. Returns malloc'd, or NULL
+ * when the system message should be omitted entirely.
  *
  *   raw=1               → NULL (--raw means "just the prompt, nothing else")
  *   HAX_SYSTEM_PROMPT=""→ NULL (explicit opt-out, same as before)
- *   HAX_SYSTEM_PROMPT   → that value + agent_env_build_suffix(model)
- *   unset               → built-in default + agent_env_build_suffix(model)
+ *   HAX_SYSTEM_PROMPT   → that value + agent_env_build_suffix(model_label)
+ *   unset               → built-in default + agent_env_build_suffix(model_label)
  */
-char *build_system_prompt(const char *model, int raw);
+char *build_system_prompt(const char *model_label, int raw);
 
 /* Shared assembly for the stats line shown after each REPL user turn and
  * at the end of a -p run. The default form is terse and unlabeled —
@@ -84,7 +84,8 @@ struct agent_session {
      * /model, or /effort commit replaces a whole config tier object (and frees
      * its strings), which would dangle a borrowed pointer the still-live
      * session keeps using. */
-    char *model;               /* owned; NULL/"" = no model resolved yet */
+    char *model;               /* owned exact id; NULL/"" = no model resolved yet */
+    char *model_label;         /* owned display/env label; NULL when model is NULL */
     char *reasoning_effort;    /* owned; NULL = "omit" */
     const char *provider_name; /* borrowed from the live provider (valid for
                                 * its lifetime), for stamping reasoning

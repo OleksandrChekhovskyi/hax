@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <curl/curl.h>
 
 #include "config.h"
@@ -125,6 +126,28 @@ static long extract_llamacpp_n_ctx(const char *body, void *user)
     return out;
 }
 
+char *llamacpp_model_label(struct provider *p, const char *model)
+{
+    (void)p;
+    size_t len = strlen(model);
+    if (len <= 5 || strcasecmp(model + len - 5, ".gguf") != 0)
+        return xstrdup(model);
+
+    const char *base = strrchr(model, '/');
+    const char *backslash = strrchr(model, '\\');
+    if (!base || (backslash && backslash > base))
+        base = backslash;
+    base = base ? base + 1 : model;
+
+    size_t stem_len = (size_t)(model + len - 5 - base);
+    if (stem_len == 0)
+        return xstrdup(model);
+    char *label = xmalloc(stem_len + 1);
+    memcpy(label, base, stem_len);
+    label[stem_len] = '\0';
+    return label;
+}
+
 static void spawn_context_probe(struct provider *p, const char *base_url, const char *api_key)
 {
     /* A usable user-supplied context_limit wins; nothing for the probe
@@ -202,12 +225,14 @@ struct provider *llamacpp_provider_new(const char *name)
                        "-c / --ctx-size",
     };
     struct provider *p = openai_provider_new_preset(&preset);
-    /* Context-limit probe runs in the background: an older llama-server
-     * without /props, or a proxy that doesn't expose it, just means the
-     * percentage display is hidden — not a reason to refuse to start
-     * (or to delay the first prompt). */
-    if (p)
+    if (p) {
+        p->model_label = llamacpp_model_label;
+        /* Context-limit probe runs in the background: an older llama-server
+         * without /props, or a proxy that doesn't expose it, just means the
+         * percentage display is hidden — not a reason to refuse to start
+         * (or to delay the first prompt). */
         spawn_context_probe(p, resolved, key);
+    }
     free(resolved);
     free(default_url);
     return p;

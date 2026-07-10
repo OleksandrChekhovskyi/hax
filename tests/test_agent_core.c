@@ -224,6 +224,35 @@ static void test_resolve_reasoning_effort(void)
 
 /* ---------- agent_session_init ---------- */
 
+static char *test_model_label(struct provider *p, const char *model)
+{
+    (void)p;
+    (void)model;
+    return xstrdup("short-model");
+}
+
+static void test_session_init_model_label(void)
+{
+    setenv("HAX_MODEL", "/models/long-model.gguf", 1);
+    setenv("HAX_SYSTEM_PROMPT", "PREFIX", 1);
+    setenv("HAX_NO_AGENTS_MD", "1", 1);
+    unsetenv("HAX_NO_ENV");
+
+    struct provider p = {.name = "test", .model_label = test_model_label};
+    struct hax_opts opts = {0};
+    struct agent_session s;
+    EXPECT(agent_session_init(&s, &p, &opts) == 0);
+    EXPECT_STR_EQ(s.model, "/models/long-model.gguf");
+    EXPECT_STR_EQ(s.model_label, "short-model");
+    EXPECT(s.sys != NULL && strstr(s.sys, "model: short-model") != NULL);
+    EXPECT(s.sys != NULL && strstr(s.sys, "/models/long-model.gguf") == NULL);
+
+    agent_session_free(&s);
+    unsetenv("HAX_MODEL");
+    unsetenv("HAX_SYSTEM_PROMPT");
+    unsetenv("HAX_NO_AGENTS_MD");
+}
+
 static void test_session_init_raw(void)
 {
     /* --raw must produce sys=NULL, n_tools=0, tools=NULL even when
@@ -428,6 +457,7 @@ int main(void)
     test_build_system_prompt_default_no_suffix();
     test_build_system_prompt_with_suffix();
     test_resolve_reasoning_effort();
+    test_session_init_model_label();
     test_session_init_raw();
     test_session_init_missing_model();
     test_session_add_user();
