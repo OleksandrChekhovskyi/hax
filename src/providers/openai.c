@@ -514,8 +514,8 @@ static int openai_list_models(struct provider *p, char ***ids, size_t *n, char *
     const char *headers[] = {auth, NULL};
     char *body = NULL;
     long status = 0;
-    int rc =
-        http_get(url, auth ? headers : NULL, MODEL_LIST_TIMEOUT_S, tick, tick_user, &body, &status);
+    int rc = http_get(url, auth ? headers : NULL, MODEL_LIST_TIMEOUT_S, 0, tick, tick_user, &body,
+                      &status);
     free(auth);
     free(url);
     if (rc != 0) {
@@ -595,7 +595,8 @@ int openai_base_url_reachable(const char *base_url, const char *api_key, const c
     char *auth = (api_key && *api_key) ? xasprintf("Authorization: Bearer %s", api_key) : NULL;
     const char *headers[] = {auth, NULL};
     char *body = NULL;
-    int rc = http_get(url, auth ? headers : NULL, AVAIL_PROBE_TIMEOUT_S, NULL, NULL, &body, NULL);
+    int rc =
+        http_get(url, auth ? headers : NULL, AVAIL_PROBE_TIMEOUT_S, 0, NULL, NULL, &body, NULL);
     free(body);
     free(auth);
     free(url);
@@ -692,6 +693,7 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
     gen_uuid_v4(uuid);
     o->session_id = xstrdup(uuid);
     o->base.name = o->name_buf;
+    o->base.catalog_id = preset->catalog_id;
     o->base.stream = openai_stream;
     o->base.list_models = openai_list_models;
     o->base.list_efforts = openai_list_efforts;
@@ -714,6 +716,7 @@ struct provider *openai_provider_new(const char *name)
         .api_key_env = "OPENAI_API_KEY",
         .send_cache_key_default = 1,
         .lock_base_url = 1,
+        .catalog_id = "openai",
         .efforts = OPENAI_EFFORT_LADDER,
         .n_efforts = OPENAI_EFFORT_LADDER_N,
     };

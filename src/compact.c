@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "agent_core.h"
+#include "catalog.h"
 #include "config.h"
 #include "provider.h"
 #include "session.h"
@@ -93,13 +94,21 @@ int compact_should_auto(long ctx_tokens, long limit)
     return compact_over_threshold(ctx_tokens, limit, threshold_pct());
 }
 
-long compact_context_limit(const struct provider *p)
+long compact_context_limit(const struct provider *p, const char *model)
 {
     long env = config_size("context_limit");
     if (env > 0)
         return env;
     long auto_v = atomic_load(&p->context_limit);
-    return auto_v > 0 ? auto_v : 0;
+    if (auto_v > 0)
+        return auto_v;
+    if (p->catalog_id && model && *model) {
+        struct catalog_entry e;
+        catalog_lookup(p->catalog_id, model, &e);
+        if (e.context > 0)
+            return e.context;
+    }
+    return 0;
 }
 
 char *compact_build_prompt(const char *instructions)

@@ -34,7 +34,10 @@ int main(void)
                        "               \"base_url\": \"http://x/v1\"},"
                        "    \"claudish\": {\"api\": \"anthropic-messages\","
                        "               \"base_url\": \"http://127.0.0.1:18080/v1\","
-                       "               \"sort_models\": \"on\"},"
+                       "               \"sort_models\": \"on\","
+                       "               \"catalog_id\": \"anthropic\"},"
+                       "    \"nocat\": {\"base_url\": \"http://127.0.0.1:9003/v1\","
+                       "               \"catalog_id\": \"\"},"
                        "    \"ollama\": {\"base_url\": \"http://gpu:1234/v1\"},"
                        "    \"my.llm\": {\"base_url\": \"http://127.0.0.1:9002/v1\"}"
                        "  },"
@@ -46,7 +49,7 @@ int main(void)
      * provider layer's job, below). */
     char **names = NULL;
     size_t nk = config_object_keys("providers", &names);
-    EXPECT(nk == 6);
+    EXPECT(nk == 7);
     for (size_t i = 0; i < nk; i++)
         free(names[i]);
     free(names);
@@ -92,7 +95,18 @@ int main(void)
         EXPECT_STR_EQ(p->name, "My LLM");
         EXPECT(p->list_efforts && p->list_efforts(p, &eff) > 0);
         EXPECT(p->sort_models == 0); /* sort_models unset → catalog order */
+        /* catalog_id defaults to the provider's own name. */
+        EXPECT_STR_EQ(p->catalog_id, "myllm");
         p->destroy(p);
+    }
+
+    /* An explicit empty catalog_id opts out of catalog lookups. */
+    const struct provider_factory *nf = provider_find("nocat");
+    struct provider *np = nf->new(nf->name);
+    EXPECT(np != NULL);
+    if (np) {
+        EXPECT(np->catalog_id == NULL);
+        np->destroy(np);
     }
 
     /* The ollama recipe opts out of the effort ladder (a local server has no
@@ -104,6 +118,9 @@ int main(void)
     if (op) {
         const char *const *eff = NULL;
         EXPECT(op->list_efforts(op, &eff) == 0);
+        /* A recipe's curated catalog_id absence is final — no name fallback:
+         * local ollama models aren't the hosted ones the catalog describes. */
+        EXPECT(op->catalog_id == NULL);
         op->destroy(op);
     }
 
@@ -118,6 +135,8 @@ int main(void)
     if (ap) {
         const char *const *eff = NULL;
         EXPECT_STR_EQ(ap->name, "claudish");
+        /* An explicit catalog_id wins over the own-name default. */
+        EXPECT_STR_EQ(ap->catalog_id, "anthropic");
         /* providers.<name>.sort_models is dialect-agnostic: resolved by the
          * config-provider layer, so it reaches an anthropic-dialect provider
          * the same as an openai one. */

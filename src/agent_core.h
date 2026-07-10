@@ -70,11 +70,47 @@ char *build_system_prompt(const char *model_label, int raw);
  * ctx < 0, elapsed_ms < 0, spend <= 0 (cached only when > 0). Callers
  * own the layout — the REPL reflows segments at the " · " seams, oneshot
  * joins them into one stderr line — so what is shown can never drift
- * between the two. */
+ * between the two. spend_approx marks the spend as a catalog estimate
+ * rather than a provider-reported charge: "~$0.042". */
 #define STATS_SEGS_MAX 5
 #define STATS_SEG_LEN  64
 int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long out, long cached,
-                          int verbose, long elapsed_ms, double spend);
+                          int verbose, long elapsed_ms, double spend, int spend_approx);
+
+/* Spend accounting shared by the REPL and the -p path, so the exact-vs-
+ * estimated policy lives in exactly one place (like format_stats_segments
+ * does for the display side): a response that reports cost is exact and
+ * sums into `reported`; one that doesn't contributes its token counts to
+ * the open pricing segment, priced against catalog rates when read. */
+struct spend_totals {
+    double reported; /* provider-reported cost sum, USD */
+    /* The open pricing segment: token sums of responses that reported no
+     * cost. Non-overlapping subsets cached/cache_write follow the
+     * stream_usage conventions. */
+    long seg_input;
+    long seg_output;
+    long seg_cached;
+    long seg_cache_write;
+};
+
+/* Account one completed response into `t` — the single definition of the
+ * reported-vs-estimated split. */
+void spend_account(struct spend_totals *t, const struct stream_usage *u);
+
+/* Fold `src` into `dst`. For callers that accumulate per-stream sinks
+ * (oneshot recreates its event context every round-trip). */
+void spend_fold(struct spend_totals *dst, const struct spend_totals *src);
+
+/* True when the open pricing segment holds any tokens — i.e. unreported
+ * usage exists that spend_estimate may or may not be able to price. The
+ * shared guard that keeps "is there anything to price" and "did pricing
+ * fail on real usage" from drifting apart at the call sites. */
+int spend_has_tokens(const struct spend_totals *t);
+
+/* Price the open pricing segment against the current provider/model's
+ * catalog rates, USD. -1 when it can't be priced: no segment tokens, no
+ * catalog identity, or the model is unknown to the catalog. */
+double spend_estimate(const struct spend_totals *t, const struct provider *p, const char *model);
 
 /* Live per-run state shared by the interactive and one-shot paths.
  * Owns the items vector, the assembled system prompt, the tools table,

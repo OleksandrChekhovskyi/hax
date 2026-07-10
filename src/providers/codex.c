@@ -758,7 +758,7 @@ static int codex_query_usage(struct provider *p)
     struct busy *b = busy_begin("fetching usage...");
     char *body = NULL;
     long status = 0;
-    int rc = http_get(CODEX_USAGE_ENDPOINT, headers, 30, busy_tick, NULL, &body, &status);
+    int rc = http_get(CODEX_USAGE_ENDPOINT, headers, 30, 0, busy_tick, NULL, &body, &status);
     int cancelled = busy_end(b);
     free(auth_hdr);
     free(acct_hdr);
@@ -866,7 +866,7 @@ static int codex_list_models(struct provider *p, char ***ids, size_t *n, char **
     const char *headers[] = {auth, acct, "originator: hax", "Accept: application/json", NULL};
     char *body = NULL;
     long status = 0;
-    int rc = http_get(url, headers, CODEX_PROBE_TIMEOUT_S, tick, tick_user, &body, &status);
+    int rc = http_get(url, headers, CODEX_PROBE_TIMEOUT_S, 0, tick, tick_user, &body, &status);
     free(auth);
     free(acct);
     free(url);
@@ -973,6 +973,9 @@ struct provider *codex_provider_new(const char *name)
     c->default_model = cfg_model ? cfg_model : xstrdup("gpt-5.3-codex");
     c->default_reasoning_effort = cfg_reasoning_effort;
     c->base.name = "codex";
+    /* Codex serves OpenAI models under a subscription — no reported cost,
+     * so the catalog supplies API-equivalent rates for the "~$" estimate. */
+    c->base.catalog_id = "openai";
     c->base.default_model = c->default_model;
     c->base.default_reasoning_effort = c->default_reasoning_effort;
     c->base.stream = codex_stream;

@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "agent_core.h"
+#include "catalog.h"
 #include "compact.h"
 #include "session.h"
 #include "tool.h"
@@ -36,11 +37,13 @@ struct oneshot_ctx {
      * Drives the auto-compaction threshold check between round-trips and
      * the exit stats summary. */
     struct stream_usage usage;
-    /* Provider-reported cost summed across every EV_DONE this sink saw —
-     * unlike `usage` (last-one-wins), so a multi-attempt compaction
-     * stream (reject-and-retry on a stray tool call) bills every
-     * attempt into the exit summary. */
-    double cost_sum;
+    /* Spend of every EV_DONE this sink saw — unlike `usage`
+     * (last-one-wins), accumulated, so a multi-attempt compaction stream
+     * (reject-and-retry on a stray tool call) bills every attempt into
+     * the exit summary. Folded into the run-level totals per stream; the
+     * unreported-token segment is priced against the catalog at exit
+     * (the model never changes mid-run here, so no settling). */
+    struct spend_totals spend;
 };
 
 static int on_event(const struct stream_event *ev, void *user)
@@ -50,8 +53,7 @@ static int on_event(const struct stream_event *ev, void *user)
         oc->error_msg = xstrdup(ev->u.error.message);
     else if (ev->kind == EV_DONE) {
         oc->usage = ev->u.done.usage;
-        if (ev->u.done.usage.cost > 0)
-            oc->cost_sum += ev->u.done.usage.cost;
+        spend_account(&oc->spend, &ev->u.done.usage);
     }
     turn_on_event(ev, oc->turn);
     return 0;
@@ -80,12 +82,12 @@ static void print_assistant_text(const struct item *items, size_t from, size_t t
  * twin of agent.c's agent_compact. No display, no tick, no Esc handling: a
  * summarization request, then history is replaced and both logs
  * rotate to fresh files (seeded /new). Returns 1 if compacted, 0 on
- * empty/failure (history left intact); either way *cost accumulates the
- * provider-reported spend of the summarization round-trips, so the exit
- * stats bill compaction like any other request. Used between round-trips
- * so a long agentic `-p` run survives its own context growth. */
+ * empty/failure (history left intact); either way *costs accumulates the
+ * spend of the summarization round-trips (reported and unreported alike),
+ * so the exit stats bill compaction like any other request. Used between
+ * round-trips so a long agentic `-p` run survives its own context growth. */
 static int oneshot_compact(struct agent_session *s, struct provider *p, struct session_log *slog,
-                           struct transcript_log *tlog, double *cost)
+                           struct transcript_log *tlog, struct spend_totals *costs)
 {
     if (s->n_items == 0)
         return 0;
@@ -94,9 +96,9 @@ static int oneshot_compact(struct agent_session *s, struct provider *p, struct s
     turn_init(&t);
     /* Reuse the normal sink (feeds the turn, captures any error); no tick,
      * no display. */
-    struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL, .usage = {-1, -1, -1, -1}};
+    struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL, .usage = {-1, -1, -1, -1, -1}};
     char *summary = compact_summarize(s, p, NULL, &t, on_event, &oc, NULL, NULL, NULL);
-    *cost += oc.cost_sum;
+    spend_fold(costs, &oc.spend);
     free(oc.error_msg);
     turn_reset(&t);
 
@@ -203,7 +205,17 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
      * the whole run. */
     long start_ms = monotonic_ms();
     long last_ctx = -1;
-    double total_cost = 0;
+    struct spend_totals costs = {0};
+    /* A run on a catalog-mapped provider will want metadata for the exit
+     * estimate / window fallback — start the background refresh now so it
+     * lands while the model works. A snapshot that has been failing to
+     * refresh for weeks earns a warning: estimates may have drifted. */
+    if (p->catalog_id) {
+        long stale_days = catalog_prefetch();
+        if (stale_days > 0)
+            hax_warn("model catalog last refreshed %ld days ago — cost estimates may be stale",
+                     stale_days);
+    }
     for (int turn_n = 0; turn_n < max_turns; turn_n++) {
         if (!first_inner) {
             agent_session_add_boundary(&sess);
@@ -216,7 +228,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
 
         struct turn t;
         turn_init(&t);
-        struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL, .usage = {-1, -1, -1, -1}};
+        struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL, .usage = {-1, -1, -1, -1, -1}};
         /* Oneshot doesn't arm interrupt and has no idle UI to surface
          * — pass a NULL tick so http skips the progress hook entirely. */
         p->stream(p, &ctx, sess.model, on_event, &oc, NULL, NULL);
@@ -238,7 +250,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
                              : -1;
         if (round_ctx >= 0)
             last_ctx = round_ctx;
-        total_cost += oc.cost_sum;
+        spend_fold(&costs, &oc.spend);
 
         size_t n_before;
         int had_tool_call;
@@ -300,8 +312,8 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
          * the window, summarize the completed work now so a long agentic chain
          * doesn't run itself into an overflow. The next iteration streams from
          * the seed. Quiet on stderr so a `tail`'d -p log shows it happened. */
-        if (compact_should_auto(round_ctx, compact_context_limit(p)) &&
-            oneshot_compact(&sess, p, slog, tlog, &total_cost)) {
+        if (compact_should_auto(round_ctx, compact_context_limit(p, sess.model)) &&
+            oneshot_compact(&sess, p, slog, tlog, &costs)) {
             int tty = isatty(fileno(stderr));
             fprintf(stderr, "%s[compacted context]%s\n", tty ? ANSI_DIM : "",
                     tty ? ANSI_RESET : "");
@@ -323,7 +335,29 @@ done:
      * printed only when a backend actually reported something — a provider
      * that sends no usage keeps -p output free of a "context ?" stub. Time
      * alone isn't worth a line. */
-    int have_stats = last_ctx >= 0 || total_cost > 0;
+    /* Total spend: reported cost, plus the unreported responses' tokens
+     * priced against the catalog. Approximate ("~$") whenever unreported
+     * usage exists at all — priced or not, a reported subtotal must never
+     * display as an exact grand total. */
+    double spend = costs.reported;
+    double est = spend_estimate(&costs, p, sess.model);
+    if (est <= 0 && spend_has_tokens(&costs)) {
+        /* Unpriced usage the cache couldn't answer for — likely a cold
+         * cache racing the download this run started. Give the fetch a
+         * bounded moment to land instead of letting shutdown cancel it,
+         * then retry once: this run's estimate can resolve, and repeated
+         * short -p runs can't keep a cold cache cold forever. Deliberately
+         * conditional — when a stale-but-usable snapshot already priced
+         * the run, exit latency wins over refresh eagerness (a hanging
+         * endpoint would otherwise tax every run 3s while the mtime stays
+         * old), and the 30-day staleness alarm still backstops real rot. */
+        catalog_drain(3000);
+        est = spend_estimate(&costs, p, sess.model);
+    }
+    if (est > 0)
+        spend += est;
+    int spend_approx = est > 0 || spend_has_tokens(&costs);
+    int have_stats = last_ctx >= 0 || spend > 0;
     if (hint || have_stats) {
         /* Flush the answer (block-buffered when stdout is piped) before the
          * unbuffered stderr write, so a combined 2>&1 stream shows the hint
@@ -341,8 +375,8 @@ done:
              * (display_stats_line), minus the verbose detail and reflow —
              * stderr footnotes are plain single lines. */
             char segs[STATS_SEGS_MAX][STATS_SEG_LEN];
-            int n = format_stats_segments(segs, last_ctx, compact_context_limit(p), -1, -1, 0,
-                                          monotonic_ms() - start_ms, total_cost);
+            int n = format_stats_segments(segs, last_ctx, compact_context_limit(p, sess.model), -1,
+                                          -1, 0, monotonic_ms() - start_ms, spend, spend_approx);
             fputs(tty ? ANSI_DIM : "", stderr);
             for (int i = 0; i < n; i++)
                 fprintf(stderr, "%s%s", i ? " · " : "", segs[i]);

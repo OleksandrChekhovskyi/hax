@@ -85,9 +85,16 @@ After each user turn the REPL prints a dim one-line summary:
   and percentage when the context limit is known (when it isn't, the bare count is labeled:
   `context 8.9k`).
 - The duration is wall-clock time for that user turn, including tool runs.
-- The dollar amount is the session's cumulative spend. It appears only when the provider
-  reports per-response cost (currently OpenRouter); subscription and local backends never
-  show a dollar figure.
+- The dollar amount is the session's cumulative spend. When the provider reports per-response
+  cost (currently OpenRouter), the figure is exact. Otherwise, for providers with a model
+  catalog identity (`codex`, `openai`, `anthropic`, and custom providers — see `catalog_id`
+  in [providers.md](./providers.md)),
+  hax estimates it from the reported token counts and per-model rates fetched from
+  [models.dev](https://models.dev), shown with a tilde: `~$0.042`. For subscription backends
+  like Codex this is the API-equivalent cost — what the same tokens would have billed on the
+  paid API — which makes cost/benefit comparisons across models possible. Local backends
+  (llama.cpp, ollama) show no dollar figure. See the model catalog section in
+  [configuration.md](./configuration.md) for tuning or disabling the catalog fetch.
 
 Set `HAX_STATS_VERBOSE=1` for the fully labeled diagnostic form, adding `out` (tokens
 generated this user turn) and `cached` (prefix-cache hits) — useful for diagnosing cache

@@ -66,6 +66,12 @@ static const struct config_setting REGISTRY[] = {
     {"compact.threshold",          "HAX_COMPACT_THRESHOLD",       "85",
      "Auto-compact when context usage reaches this percent of the window"},
 
+    /* model catalog */
+    {"catalog.url",                "HAX_CATALOG_URL",             "https://models.dev/api.json",
+     "Model-metadata catalog endpoint (models.dev api.json shape); empty disables fetching"},
+    {"catalog.refresh",            "HAX_CATALOG_REFRESH",         "24h",
+     "Re-fetch the cached model catalog when older than this; 0 disables fetching"},
+
     /* recording */
     {"no_session",                 "HAX_NO_SESSION",              NULL,
      "Disable session recording when set truthy"},
@@ -454,6 +460,14 @@ const char *config_default(const char *key)
 {
     const struct config_setting *s = find_setting(key);
     return s ? s->def : NULL;
+}
+
+const json_t *config_json_node(const char *key)
+{
+    /* State over file mirrors resolve()'s tier order; no cross-tier merge —
+     * a block is taken whole from the highest tier that defines it. */
+    json_t *v = obj_get_node(g_state, key);
+    return v ? v : obj_get_node(g_config, key);
 }
 
 size_t config_object_keys(const char *key, char ***out)

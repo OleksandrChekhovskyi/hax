@@ -55,7 +55,7 @@
  *       tool <name> <json>       One tool call. Args is a single-line JSON object.
  *       delay <ms>               Sleep before the next emission and between
  *                                auto-streamed text chunks.
- *       usage in=N out=M [cached=K] [cost=D]   Set usage on the upcoming
+ *       usage in=N out=M [cached=K] [cache_write=W] [cost=D]   Set usage on the upcoming
  *                                done event (cost is a decimal USD amount).
  *       end-turn                 Finalize the current turn (emits EV_DONE).
  *       (blank or # line)        Ignored.
@@ -211,8 +211,11 @@ static int emit_done(stream_cb cb, void *user, struct stream_usage usage)
 
 static struct stream_usage empty_usage(void)
 {
-    return (struct stream_usage){
-        .input_tokens = -1, .output_tokens = -1, .cached_tokens = -1, .cost = -1};
+    return (struct stream_usage){.input_tokens = -1,
+                                 .output_tokens = -1,
+                                 .cached_tokens = -1,
+                                 .cache_write_tokens = -1,
+                                 .cost = -1};
 }
 
 /* ---- Script parsing ----------------------------------------------- */
@@ -315,6 +318,8 @@ static struct stream_usage parse_usage(const char *s)
             u.output_tokens = v;
         else if (strncmp(s, "cached=", 7) == 0)
             u.cached_tokens = v;
+        else if (strncmp(s, "cache_write=", 12) == 0)
+            u.cache_write_tokens = v;
         else if (strncmp(s, "cost=", 5) == 0)
             u.cost = strtod(eq + 1, NULL);
         /* Skip past this token. */

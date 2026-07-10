@@ -101,19 +101,20 @@ struct context {
  * cache hit) — informational, not additive. Note that cached_tokens means
  * cache *reads* only: dialects that bill cache writes separately
  * (Anthropic's cache_creation_input_tokens) fold the written tokens into
- * input_tokens, where they are volume-accurate but priced like ordinary
- * input. hax doesn't price tokens, so the distinction is deliberately not
- * modeled; if it's ever needed, add a cache_write_tokens field with the
- * same -1 convention rather than overloading this one.
+ * input_tokens, keeping that count volume-accurate, and report them again
+ * in cache_write_tokens — a second, non-overlapping subset of
+ * input_tokens — so cost estimation can price the write surcharge.
+ * Dialects with no such billing notion leave it at -1.
  *
  * cost is the provider-reported charge for this response in USD (e.g.
  * OpenRouter's usage.cost when usage accounting is requested); negative
- * means not reported. hax never computes cost from token prices itself —
- * subscription and local backends simply never report one. */
+ * means not reported. Providers never compute cost from token prices
+ * themselves — estimation from catalog rates is the agent's job. */
 struct stream_usage {
     long input_tokens;
     long output_tokens;
     long cached_tokens;
+    long cache_write_tokens;
     double cost;
 };
 
@@ -222,6 +223,16 @@ struct provider {
      * short. A default only — the global sort_models config key lets the
      * user force either order at the picker. */
     int sort_models;
+    /* Identity in the model-metadata catalog (catalog.h): the models.dev
+     * provider key this provider's model ids resolve under — "openai" for
+     * both codex and openai, "anthropic" for anthropic. Drives catalog-based
+     * cost estimation and the context/output-limit fallback. NULL opts out:
+     * local backends whose models have no catalog presence, providers that
+     * report exact cost and probe their own limits (openrouter), and
+     * config-defined providers that opted out (their default is their own
+     * name — see config_provider.c). Borrowed static/config string that
+     * outlives the provider. */
+    const char *catalog_id;
     /* Stream a model response. The provider drives the HTTP round-trip
      * and translates SSE events into stream_event callbacks (`cb`). The
      * `tick` slot is the agent's side-channel hook into the wait loop —

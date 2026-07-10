@@ -136,9 +136,9 @@ static int openrouter_query_usage(struct provider *p)
     struct busy *b = busy_begin("fetching usage...");
     char *body = NULL, *credits_body = NULL;
     long status = 0;
-    int rc = http_get(OPENROUTER_KEY_ENDPOINT, headers, 30, busy_tick, NULL, &body, &status);
+    int rc = http_get(OPENROUTER_KEY_ENDPOINT, headers, 30, 0, busy_tick, NULL, &body, &status);
     if (rc == 0)
-        http_get(OPENROUTER_CREDITS_ENDPOINT, headers, 30, busy_tick, NULL, &credits_body, NULL);
+        http_get(OPENROUTER_CREDITS_ENDPOINT, headers, 30, 0, busy_tick, NULL, &credits_body, NULL);
     int cancelled = busy_end(b);
     free(auth_hdr);
     if (cancelled) {

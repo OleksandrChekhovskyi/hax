@@ -51,7 +51,7 @@ reasoning <message>
 space
 tool <name> <json>
 delay <ms>
-usage in=N out=M [cached=K]
+usage in=N out=M [cached=K] [cache_write=W] [cost=D]
 end-turn
 ```
 

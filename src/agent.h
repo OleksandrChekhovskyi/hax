@@ -19,10 +19,25 @@ struct session_stats {
     long input_tokens;  /* summed across round-trips (each sends the full context) */
     long output_tokens; /* total tokens generated */
     long cached_tokens; /* total input tokens served from the prefix cache */
-    double cost;        /* provider-reported spend, USD */
-    long worked_ms;     /* wall time spent inside user turns */
-    long turns;         /* user turns run */
-    long requests;      /* model round-trips streamed (glossary: turns) */
+    /* Spend accounting (agent_core.h): exact provider-reported cost plus
+     * the open pricing segment — responses that reported none, accumulated
+     * since the last provider/model switch. The segment is priced at
+     * *render* time against the current model's catalog rates — so a
+     * late-landing catalog fetch retroactively covers earlier turns — and
+     * folded into est_cost at the then-current rates by the settle step
+     * when a switch changes the rates mid-session. */
+    struct spend_totals spend;
+    /* Catalog-estimated spend of *settled* pricing segments, USD.
+     * Displayed added to spend and marked approximate ("~$"). */
+    double est_cost;
+    /* Set when a settle had to *drop* segment tokens it couldn't price
+     * (catalog fetch never landed, model unknown to it): the spend total
+     * is missing real usage from then on, so it must stay marked
+     * approximate even when every remaining component is exact. */
+    int est_dropped;
+    long worked_ms; /* wall time spent inside user turns */
+    long turns;     /* user turns run */
+    long requests;  /* model round-trips streamed (glossary: turns) */
     /* Tool invocations the model made, total and per type. Per-type slots
      * key on the registry's static tool names (find_tool), which outlive
      * items — an item-owned name would dangle once compaction frees the
@@ -115,6 +130,17 @@ void agent_set_provider(struct agent_state *st, struct provider *newp);
  * /model or /effort change" step. Returns 0 on success, -1 when no model
  * resolves for the provider (a note is printed; history is left intact). */
 int agent_apply_settings(struct agent_state *st);
+
+/* Total session spend for display, USD: provider-reported cost plus the
+ * catalog-estimated cost of unreported responses (settled segments +
+ * the open segment priced at the current provider/model's rates). Sets
+ * *approx (when non-NULL) to 1 iff any inexact component exists — an
+ * estimate contributed, unpriced usage sits in the open segment, or a
+ * settle dropped unpriceable tokens — so callers can mark the figure
+ * ("~$0.42"). `p`/`model` may be NULL — the open segment then simply
+ * can't be priced (and keeps the figure approximate). */
+double agent_session_spend(const struct session_stats *t, const struct provider *p,
+                           const char *model, int *approx);
 
 /* Summarize the live conversation and replace history with the summary,
  * so the session can continue without overflowing the context window.

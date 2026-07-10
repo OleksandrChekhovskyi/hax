@@ -23,6 +23,12 @@ struct provider_recipe {
     const char *base_url;         /* default endpoint */
     const char *api_key_env;      /* env var holding the key; NULL → local/no key */
     const char *reasoning_format; /* "flat"/"nested"; NULL → flat */
+    const char *catalog_id;       /* models.dev provider key for cost/limit
+                                     metadata (catalog.h). For a recipe, NULL
+                                     is curated absence — final, no fallback:
+                                     ollama's local models aren't the hosted
+                                     ones the catalog describes, so catalog
+                                     windows/costs would mislead */
     int send_cache_key;           /* prompt_cache_key default (0/1) */
     const char *length_hint;      /* appended to a "length"-truncation error */
     int no_efforts;               /* suppress the OpenAI effort ladder for a
@@ -81,6 +87,24 @@ static const char *resolve(const char *name, const char *leaf, const char *recip
 {
     const char *v = cfg(name, leaf);
     return v ? v : recipe_val;
+}
+
+/* Catalog identity for provider->catalog_id. An explicit
+ * providers.<name>.catalog_id wins, read verbatim so "" is an explicit
+ * opt-out; a recipe's curated value (or curated absence) is final; a pure
+ * config-defined provider defaults to its own name, so a block named after
+ * a models.dev id (deepseek, groq, …) gets cost/limit metadata with zero
+ * extra keys — also the shape a config generator would emit. Returned
+ * pointers outlive the provider: config-tier strings are process-lifetime,
+ * `name` is the factory's own (cached) name, recipes are static. */
+static const char *resolve_catalog_id(const char *name, const struct provider_recipe *r)
+{
+    char *k = xasprintf("providers.%s.catalog_id", name);
+    const char *v = config_str(k);
+    free(k);
+    if (v)
+        return *v ? v : NULL;
+    return r ? r->catalog_id : name;
 }
 
 /* Dialect-agnostic base-provider fields belong here, resolved once from the
@@ -146,6 +170,7 @@ static struct provider *config_provider_new(const char *name)
             .allow_empty_signature = 1,
             .send_cache_control_default = 0,
             .config_prefix = cfg_prefix,
+            .catalog_id = resolve_catalog_id(name, r),
         };
         struct provider *p = anthropic_provider_new_preset(&preset);
         free(cfg_prefix);
@@ -168,6 +193,7 @@ static struct provider *config_provider_new(const char *name)
         .n_efforts = with_efforts ? OPENAI_EFFORT_LADDER_N : 0,
         .length_hint = r ? r->length_hint : NULL,
         .config_prefix = cfg_prefix,
+        .catalog_id = resolve_catalog_id(name, r),
     };
     struct provider *p = openai_provider_new_preset(&preset);
     free(cfg_prefix);

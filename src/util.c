@@ -711,6 +711,11 @@ char *xdg_hax_state_path(const char *relpath)
     return xdg_hax_path("XDG_STATE_HOME", ".local/state", relpath);
 }
 
+char *xdg_hax_cache_path(const char *relpath)
+{
+    return xdg_hax_path("XDG_CACHE_HOME", ".cache", relpath);
+}
+
 char *dup_trim_trailing_slash(const char *s)
 {
     size_t n = strlen(s);

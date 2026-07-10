@@ -38,6 +38,12 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
  * to disable. Connect timeout is fixed at a short value so an unreachable
  * host fails fast.
  *
+ * `max_bytes` bounds the response body: the transfer is aborted (and the
+ * call fails) as soon as the body would exceed it, so an oversized
+ * response can't balloon memory for the whole timeout window. 0 = no
+ * bound — fine for provider endpoints whose payloads are known-small;
+ * set it when the URL is user-configurable (the catalog fetch).
+ *
  * `tick` is an optional side-channel hook (same shape as for
  * http_sse_post). Background probes pass `bg_job_tick` with their job
  * pointer so shutdown can abort an in-flight transfer in well under a
@@ -48,8 +54,8 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
  * both success and failure, letting callers distinguish a 401 from a
  * network blip even though the return code collapses all failures to -1.
  * NULL = caller doesn't need the status. */
-int http_get(const char *url, const char *const *headers, long timeout_s, http_tick_cb tick,
-             void *tick_user, char **out, long *status_out);
+int http_get(const char *url, const char *const *headers, long timeout_s, long max_bytes,
+             http_tick_cb tick, void *tick_user, char **out, long *status_out);
 
 /* Synchronous POST of a JSON body into a freshly-allocated NUL-terminated
  * buffer. Identical contract to http_get otherwise (timeouts, tick, return
@@ -60,6 +66,6 @@ int http_get(const char *url, const char *const *headers, long timeout_s, http_t
  * probe endpoints that take a JSON request (ollama's POST /api/show, …)
  * rather than encoding the query in the URL. */
 int http_post_json(const char *url, const char *const *headers, const char *body, size_t body_len,
-                   long timeout_s, http_tick_cb tick, void *tick_user, char **out);
+                   long timeout_s, long max_bytes, http_tick_cb tick, void *tick_user, char **out);
 
 #endif /* HAX_HTTP_H */

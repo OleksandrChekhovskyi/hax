@@ -2,6 +2,7 @@
 #ifndef HAX_CONFIG_H
 #define HAX_CONFIG_H
 
+#include <jansson.h>
 #include <stddef.h>
 
 /*
@@ -120,6 +121,16 @@ const char *config_str_nonempty(const char *key);
  * must be > 0): a semantically invalid value falls back to this without
  * re-stating the constant at the site. */
 const char *config_default(const char *key);
+
+/* The JSON node at nested `key` — state tier first, then the config file
+ * (highest tier that defines the block wins; no cross-tier merge). For
+ * structured blocks whose member keys can themselves contain dots
+ * (catalog.models.<provider>.<model-id> — model ids like "llama-3.2" would
+ * split wrong under the flat dotted-key grammar), so the caller walks the
+ * object with jansson directly. Borrowed; valid until config_free / the next
+ * config_load*. Scalar leaves follow the load-time normalization: numbers
+ * and booleans read as strings. NULL when absent. */
+const json_t *config_json_node(const char *key);
 
 /* Enumerate the immediate member names of the JSON object at nested key
  * `key` (e.g. "providers"), merged and deduplicated across the file and

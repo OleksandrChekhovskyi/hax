@@ -15,6 +15,7 @@ void anthropic_events_init(struct anthropic_events *s, stream_cb cb, void *user)
     s->pending_usage.input_tokens = -1;
     s->pending_usage.output_tokens = -1;
     s->pending_usage.cached_tokens = -1;
+    s->pending_usage.cache_write_tokens = -1;
     s->pending_usage.cost = -1;
 }
 
@@ -224,7 +225,7 @@ static void handle_content_block_stop(struct anthropic_events *s, json_t *root)
  * count on message_delta. input_tokens is the non-cached prompt portion; the
  * cache_* counts are additional input we sent, so total input = input +
  * cache_read + cache_creation. cached_tokens (the prefix-cache hit) is the
- * cache_read subset. */
+ * cache_read subset; cache_write_tokens is the cache_creation subset. */
 static void capture_usage(struct anthropic_events *s, json_t *usage)
 {
     if (!json_is_object(usage))
@@ -250,6 +251,8 @@ static void capture_usage(struct anthropic_events *s, json_t *usage)
     }
     if (cache_read >= 0)
         s->pending_usage.cached_tokens = cache_read;
+    if (cache_create >= 0)
+        s->pending_usage.cache_write_tokens = cache_create;
     if (output >= 0)
         s->pending_usage.output_tokens = output;
 }

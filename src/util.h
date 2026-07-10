@@ -83,6 +83,11 @@ char *slurp_file_capped(const char *path, size_t cap, size_t *out_len, int *out_
 char *xdg_hax_config_path(const char *relpath);
 char *xdg_hax_state_path(const char *relpath);
 
+/* Same resolution for the per-user cache tree: $XDG_CACHE_HOME/hax/<relpath>,
+ * or $HOME/.cache/hax/<relpath>. For re-fetchable data (the model-metadata
+ * catalog) that must survive restarts but may be deleted freely. */
+char *xdg_hax_cache_path(const char *relpath);
+
 /* Duplicate `s` with any trailing '/' characters stripped. Lets callers
  * normalize a base URL so "http://x/v1/" and "http://x/v1" produce the
  * same downstream concatenation. Caller frees. */

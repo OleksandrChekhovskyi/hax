@@ -43,9 +43,9 @@ static void probe_run(struct bg_job *job, void *arg)
     int rc;
     if (a->body)
         rc = http_post_json(a->url, (const char *const *)a->headers, a->body, strlen(a->body),
-                            a->timeout_s, bg_job_tick, job, &body);
+                            a->timeout_s, 0, bg_job_tick, job, &body);
     else
-        rc = http_get(a->url, (const char *const *)a->headers, a->timeout_s, bg_job_tick, job,
+        rc = http_get(a->url, (const char *const *)a->headers, a->timeout_s, 0, bg_job_tick, job,
                       &body, NULL);
     if (rc == 0 && body) {
         long v = a->extract(body, a->user);

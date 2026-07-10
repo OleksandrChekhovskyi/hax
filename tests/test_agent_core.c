@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: MIT */
+#include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 #include "agent_core.h"
 #include "harness.h"
@@ -411,7 +415,7 @@ static void test_format_stats_segments_selection(void)
 
     /* Default (non-verbose): context gauge, duration, spend; out/cached
      * dropped, and the single token figure carries no word label. */
-    int n = format_stats_segments(segs, 9113, 262144, 595, 2765, 0, 42000, 0.042);
+    int n = format_stats_segments(segs, 9113, 262144, 595, 2765, 0, 42000, 0.042, 0);
     EXPECT(n == 3);
     EXPECT_STR_EQ(segs[0], "8.9k / 256k (3%)");
     EXPECT_STR_EQ(segs[1], "42s");
@@ -419,7 +423,7 @@ static void test_format_stats_segments_selection(void)
 
     /* Verbose: out and cached slot in between, and every field gets its
      * word label (the fully labeled diagnostic form). */
-    n = format_stats_segments(segs, 9113, 262144, 595, 2765, 1, 42000, 0.042);
+    n = format_stats_segments(segs, 9113, 262144, 595, 2765, 1, 42000, 0.042, 0);
     EXPECT(n == 5);
     EXPECT_STR_EQ(segs[0], "context 8.9k / 256k (3%)");
     EXPECT_STR_EQ(segs[1], "out 595");
@@ -429,21 +433,104 @@ static void test_format_stats_segments_selection(void)
 
     /* Unknown window: no gauge shape to identify the bare number, so the
      * default form keeps the "context" label for this figure only. */
-    n = format_stats_segments(segs, 9113, 0, -1, -1, 0, 42000, 0.042);
+    n = format_stats_segments(segs, 9113, 0, -1, -1, 0, 42000, 0.042, 0);
     EXPECT(n == 3);
     EXPECT_STR_EQ(segs[0], "context 8.9k");
     EXPECT_STR_EQ(segs[1], "42s");
     EXPECT_STR_EQ(segs[2], "$0.042");
 
+    /* Estimated spend is marked approximate, both forms. */
+    n = format_stats_segments(segs, -1, 0, -1, -1, 0, -1, 0.042, 1);
+    EXPECT(n == 1);
+    EXPECT_STR_EQ(segs[0], "~$0.042");
+    n = format_stats_segments(segs, -1, 0, -1, -1, 1, -1, 0.042, 1);
+    EXPECT(n == 1);
+    EXPECT_STR_EQ(segs[0], "spent ~$0.042");
+
     /* Unreported fields are skipped: no usage, no cost ⇒ duration only
      * (labeled, since this asks for the verbose form). */
-    n = format_stats_segments(segs, -1, 0, -1, -1, 1, 42000, 0);
+    n = format_stats_segments(segs, -1, 0, -1, -1, 1, 42000, 0, 0);
     EXPECT(n == 1);
     EXPECT_STR_EQ(segs[0], "worked 42s");
 
     /* Nothing reported at all. */
-    n = format_stats_segments(segs, -1, 0, -1, -1, 0, -1, 0);
+    n = format_stats_segments(segs, -1, 0, -1, -1, 0, -1, 0, 0);
     EXPECT(n == 0);
+}
+
+static void test_spend_accounting(void)
+{
+    struct spend_totals t = {0};
+
+    /* Reported cost is exact: sums into reported, no segment tokens. */
+    struct stream_usage u = {.input_tokens = 1000,
+                             .output_tokens = 50,
+                             .cached_tokens = 200,
+                             .cache_write_tokens = -1,
+                             .cost = 0.01};
+    spend_account(&t, &u);
+    EXPECT(t.reported == 0.01);
+    EXPECT(t.seg_input == 0 && t.seg_output == 0);
+
+    /* Unreported cost: token counts land in the open segment; -1 ("not
+     * reported") fields don't contribute. */
+    u.cost = -1;
+    spend_account(&t, &u);
+    spend_account(&t, &u);
+    EXPECT(t.reported == 0.01);
+    EXPECT(t.seg_input == 2000);
+    EXPECT(t.seg_output == 100);
+    EXPECT(t.seg_cached == 400);
+    EXPECT(t.seg_cache_write == 0);
+
+    /* An explicit zero cost is a *reported* free response, not "cost
+     * unknown": nothing may land in the segment, where catalog rates
+     * would later re-price the free tokens as paid. */
+    struct spend_totals z = {0};
+    u.cost = 0;
+    spend_account(&z, &u);
+    EXPECT(z.reported == 0);
+    EXPECT(z.seg_input == 0 && z.seg_output == 0 && z.seg_cached == 0);
+    u.cost = -1;
+
+    /* Folding sums every field. */
+    struct spend_totals sum = {.reported = 1.0, .seg_input = 5};
+    spend_fold(&sum, &t);
+    EXPECT(sum.reported == 1.01);
+    EXPECT(sum.seg_input == 2005);
+    EXPECT(sum.seg_output == 100);
+
+    /* spend_has_tokens: any segment tokens count; reported cost doesn't. */
+    EXPECT(spend_has_tokens(&t));
+    EXPECT(!spend_has_tokens(&z));
+
+    /* Unpriceable segments: no tokens, no provider, or no catalog_id. */
+    struct spend_totals empty = {.reported = 9.0};
+    struct provider p = {.name = "x"};
+    EXPECT(spend_estimate(&empty, &p, "m") == -1);
+    EXPECT(spend_estimate(&t, NULL, "m") == -1);
+    EXPECT(spend_estimate(&t, &p, "m") == -1); /* catalog_id unset */
+
+    /* The positive path: a mapped provider whose model resolves in the
+     * catalog prices the segment (fixture snapshot, real catalog module). */
+    char dir[] = "/tmp/hax_test_agent_core_XXXXXX";
+    if (!mkdtemp(dir))
+        FAIL("mkdtemp: %s", strerror(errno));
+    setenv("XDG_CACHE_HOME", dir, 1);
+    char path[600];
+    snprintf(path, sizeof(path), "%s/hax", dir);
+    mkdir(path, 0755);
+    snprintf(path, sizeof(path), "%s/hax/catalog.json", dir);
+    FILE *f = fopen(path, "w");
+    EXPECT(f != NULL);
+    if (f) {
+        fputs("{\"prov\": {\"models\": {\"m\": {\"cost\": {\"input\": 2, \"output\": 8}}}}}", f);
+        fclose(f);
+    }
+    p.catalog_id = "prov";
+    struct spend_totals seg = {.seg_input = 1000000, .seg_output = 1000000};
+    EXPECT(spend_estimate(&seg, &p, "m") == 10.0);
+    EXPECT(spend_estimate(&seg, &p, "unknown-model") == -1);
 }
 
 int main(void)
@@ -465,5 +552,6 @@ int main(void)
     test_session_absorb_with_tool_call();
     test_session_context_snapshot();
     test_format_stats_segments_selection();
+    test_spend_accounting();
     T_REPORT();
 }

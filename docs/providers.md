@@ -57,6 +57,10 @@ Codex supports `/usage`. It also probes ChatGPT's model catalog in the backgroun
 the selected model's context window for the percentage display; `HAX_CONTEXT_LIMIT` overrides
 that.
 
+Codex is subscription-based and reports no per-response cost, so the stats line shows an
+estimated API-equivalent spend (`~$0.042`) priced from OpenAI's published rates via the model
+catalog — see the model catalog section in [configuration.md](./configuration.md).
+
 ## OpenAI
 
 `HAX_PROVIDER=openai` uses `https://api.openai.com/v1` and ignores `HAX_OPENAI_BASE_URL`.
@@ -247,6 +251,14 @@ Recognized common keys:
 - `api_key_env` — environment variable holding the token.
 - `sort_models` — sort the `/model` picker alphabetically instead of the server's catalog
   order. Default off.
+- `catalog_id` — the provider's key in the model catalog (its models.dev id), enabling the
+  estimated spend figure and the context-window fallback for its models. Defaults to the
+  provider's own name, so a provider named after its models.dev id (`deepseek`, `groq`, …)
+  gets metadata with no extra keys; set it when the names differ (a proxy for a known
+  provider), or to an empty string to disable catalog lookups. Recipe-seeded providers
+  (`ollama`) follow their recipe instead — a local server's models aren't the hosted ones
+  the catalog describes. See the model catalog section in
+  [configuration.md](./configuration.md).
 
 OpenAI-style custom providers also recognize `reasoning_format` (`flat` or `nested`) and
 `send_cache_key`. Anthropic-style custom providers recognize the Anthropic settings from

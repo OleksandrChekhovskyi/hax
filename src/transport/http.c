@@ -270,6 +270,7 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
 
 struct http_get_state {
     struct buf body;
+    long max_bytes; /* abort once the body would exceed this; 0 = unlimited */
     http_tick_cb tick;
     void *tick_user;
 };
@@ -282,6 +283,11 @@ static size_t http_get_write_cb(char *ptr, size_t size, size_t nmemb, void *user
      * the transfer so a cancelled probe doesn't keep buffering bytes
      * we'll throw away. */
     if (s->tick && s->tick(s->tick_user))
+        return 0;
+    /* Enforce the caller's body cap *during* the transfer, not after —
+     * an oversized (broken, hostile) endpoint must not balloon memory
+     * for the full timeout window before being rejected. */
+    if (s->max_bytes > 0 && s->body.len + n > (size_t)s->max_bytes)
         return 0;
     buf_append(&s->body, ptr, n);
     return n;
@@ -305,8 +311,8 @@ static int http_get_progress_cb(void *clientp, curl_off_t dltotal, curl_off_t dl
  * POST entry points to ~5 lines each so the only difference between
  * them is the one bit that actually differs. */
 static int http_body_request(const char *method, const char *url, const char *const *headers,
-                             const char *body, size_t body_len, long timeout_s, http_tick_cb tick,
-                             void *tick_user, char **out, long *status_out)
+                             const char *body, size_t body_len, long timeout_s, long max_bytes,
+                             http_tick_cb tick, void *tick_user, char **out, long *status_out)
 {
     *out = NULL;
     if (status_out)
@@ -338,6 +344,7 @@ static int http_body_request(const char *method, const char *url, const char *co
 
     struct http_get_state state;
     memset(&state, 0, sizeof(state));
+    state.max_bytes = max_bytes;
     state.tick = tick;
     state.tick_user = tick_user;
 
@@ -412,18 +419,18 @@ static int http_body_request(const char *method, const char *url, const char *co
     return 0;
 }
 
-int http_get(const char *url, const char *const *headers, long timeout_s, http_tick_cb tick,
-             void *tick_user, char **out, long *status_out)
+int http_get(const char *url, const char *const *headers, long timeout_s, long max_bytes,
+             http_tick_cb tick, void *tick_user, char **out, long *status_out)
 {
-    return http_body_request("GET", url, headers, NULL, 0, timeout_s, tick, tick_user, out,
-                             status_out);
+    return http_body_request("GET", url, headers, NULL, 0, timeout_s, max_bytes, tick, tick_user,
+                             out, status_out);
 }
 
 int http_post_json(const char *url, const char *const *headers, const char *body, size_t body_len,
-                   long timeout_s, http_tick_cb tick, void *tick_user, char **out)
+                   long timeout_s, long max_bytes, http_tick_cb tick, void *tick_user, char **out)
 {
     /* Treat NULL body as a zero-length POST so the Content-Type header
      * is still attached and the request shape matches the contract. */
     return http_body_request("POST", url, headers, body ? body : "", body ? body_len : 0, timeout_s,
-                             tick, tick_user, out, NULL);
+                             max_bytes, tick, tick_user, out, NULL);
 }

@@ -440,7 +440,7 @@ static int anthropic_list_models(struct provider *p, char ***ids, size_t *n, cha
     headers[hi] = NULL;
     char *body = NULL;
     long status = 0;
-    int rc = http_get(url, headers, MODEL_LIST_TIMEOUT_S, tick, tick_user, &body, &status);
+    int rc = http_get(url, headers, MODEL_LIST_TIMEOUT_S, 0, tick, tick_user, &body, &status);
     free(key_hdr);
     free(ver_hdr);
     free(url);
@@ -568,6 +568,7 @@ struct provider *anthropic_provider_new_preset(const struct anthropic_preset *pr
     a->send_cache_control_default = preset->send_cache_control_default;
 
     a->base.name = a->name_buf;
+    a->base.catalog_id = preset->catalog_id;
     /* Real Anthropic has a fixed default model; the compat shim and
      * config-defined providers leave this NULL (rely on HAX_MODEL or /model). */
     a->base.default_model = preset->lock_base_url ? ANTHROPIC_DEFAULT_MODEL : NULL;
@@ -589,6 +590,7 @@ struct provider *anthropic_provider_new(const char *name)
         .default_thinking_mode = ANTHROPIC_THINKING_ADAPTIVE,
         .allow_empty_signature = 0,
         .send_cache_control_default = 1,
+        .catalog_id = "anthropic",
     };
     return anthropic_provider_new_preset(&preset);
 }

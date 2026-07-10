@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "agent_env.h"
+#include "catalog.h"
 #include "config.h"
 #include "util.h"
 
@@ -131,7 +132,7 @@ char *build_system_prompt(const char *model_label, int raw)
 }
 
 int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long out, long cached,
-                          int verbose, long elapsed_ms, double spend)
+                          int verbose, long elapsed_ms, double spend, int spend_approx)
 {
     int n = 0;
     /* Sized so the longest prefix ("context ", 8 cols) plus the scratch
@@ -170,12 +171,62 @@ int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long
     }
     if (spend > 0) {
         format_cost(buf, sizeof(buf), spend);
+        const char *approx = spend_approx ? "~" : "";
         if (verbose)
-            snprintf(segs[n++], STATS_SEG_LEN, "spent %s", buf);
+            snprintf(segs[n++], STATS_SEG_LEN, "spent %s%s", approx, buf);
         else
-            snprintf(segs[n++], STATS_SEG_LEN, "%s", buf);
+            snprintf(segs[n++], STATS_SEG_LEN, "%s%s", approx, buf);
     }
     return n;
+}
+
+void spend_account(struct spend_totals *t, const struct stream_usage *u)
+{
+    if (u->cost >= 0) {
+        /* Any non-negative cost is a *reported* charge (stream_usage's
+         * convention: negative = not reported) — including an explicit
+         * zero, e.g. a free-tier model. Zero must not fall through to the
+         * segment below, where catalog rates would re-price the free
+         * response as paid. */
+        t->reported += u->cost;
+        return;
+    }
+    /* No reported charge: bill the response into the open pricing
+     * segment, estimated from catalog rates when read (spend_estimate). */
+    if (u->input_tokens > 0)
+        t->seg_input += u->input_tokens;
+    if (u->output_tokens > 0)
+        t->seg_output += u->output_tokens;
+    if (u->cached_tokens > 0)
+        t->seg_cached += u->cached_tokens;
+    if (u->cache_write_tokens > 0)
+        t->seg_cache_write += u->cache_write_tokens;
+}
+
+void spend_fold(struct spend_totals *dst, const struct spend_totals *src)
+{
+    dst->reported += src->reported;
+    dst->seg_input += src->seg_input;
+    dst->seg_output += src->seg_output;
+    dst->seg_cached += src->seg_cached;
+    dst->seg_cache_write += src->seg_cache_write;
+}
+
+int spend_has_tokens(const struct spend_totals *t)
+{
+    return t->seg_input > 0 || t->seg_output > 0;
+}
+
+double spend_estimate(const struct spend_totals *t, const struct provider *p, const char *model)
+{
+    if (!spend_has_tokens(t))
+        return -1;
+    if (!p || !p->catalog_id || !model || !*model)
+        return -1;
+    struct catalog_entry e;
+    if (catalog_lookup(p->catalog_id, model, &e) != 0)
+        return -1;
+    return catalog_price(&e, t->seg_input, t->seg_output, t->seg_cached, t->seg_cache_write);
 }
 
 static char *resolve_model_label(struct provider *p, const char *model)

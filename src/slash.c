@@ -429,9 +429,14 @@ static void slash_run_session(struct slash_ctx *ctx)
         session_row("tokens total", row);
     }
 
-    if (t->cost > 0) {
-        format_cost(a, sizeof(a), t->cost);
-        session_row("spend", a);
+    /* Reported cost plus the catalog estimate for unreported responses,
+     * same figure the per-turn stats line shows; "~" marks an estimate. */
+    int approx = 0;
+    double spend = agent_session_spend(t, st->provider, st->sess ? st->sess->model : NULL, &approx);
+    if (spend > 0) {
+        format_cost(a, sizeof(a), spend);
+        snprintf(row, sizeof(row), "%s%s", approx ? "~" : "", a);
+        session_row("spend", row);
     }
 }
 

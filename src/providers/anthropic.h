@@ -62,6 +62,10 @@ struct anthropic_preset {
      * "providers.<name>" so each named provider reads its own self-contained
      * subtree and a stray HAX_ANTHROPIC_* can't bleed in. */
     const char *config_prefix;
+    /* Model-catalog identity, copied to provider->catalog_id (see
+     * provider.h). Borrowed — a static literal or a config-tier string
+     * outliving the provider. NULL = no catalog presence. */
+    const char *catalog_id;
 };
 
 /* Build an Anthropic Messages provider configured by `preset`. Returns NULL on

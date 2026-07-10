@@ -1,7 +1,10 @@
 /* SPDX-License-Identifier: MIT */
+#include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "agent.h"
 #include "agent_core.h"
@@ -211,6 +214,102 @@ static void test_apply_settings_refresh_only_on_model_change(void)
     fixture_free(&f);
 }
 
+/* ---------- agent_apply_settings: pricing-segment settle gate ---------- */
+
+static void test_apply_settings_settles_at_outgoing_model_rates(void)
+{
+    struct fixture f;
+    fixture_init(&f);
+
+    /* Catalog fixture that knows only the OUTGOING model: settling must
+     * price the segment at the rates it accumulated under (prev model),
+     * not the incoming model's. */
+    static char dir[] = "/tmp/hax_test_agent_XXXXXX";
+    if (!mkdtemp(dir))
+        FAIL("mkdtemp: %s", strerror(errno));
+    setenv("XDG_CACHE_HOME", dir, 1);
+    char path[600];
+    snprintf(path, sizeof(path), "%s/hax", dir);
+    mkdir(path, 0755);
+    snprintf(path, sizeof(path), "%s/hax/catalog.json", dir);
+    FILE *cf = fopen(path, "w");
+    EXPECT(cf != NULL);
+    if (cf) {
+        fputs("{\"prov\": {\"models\": {"
+              "\"model-a\": {\"cost\": {\"input\": 2, \"output\": 8}}}}}",
+              cf);
+        fclose(cf);
+    }
+    f.p.catalog_id = "prov";
+    f.st.stats.spend.seg_input = 1000000;
+    f.st.stats.spend.seg_output = 1000000;
+
+    setenv("HAX_MODEL", "model-b", 1); /* model-a -> model-b */
+    char *out = capture_stdout(do_apply, &f);
+    EXPECT(f.rc == 0);
+    EXPECT(f.st.stats.est_cost == 10.0); /* 1M*$2 + 1M*$8 per Mtok */
+    EXPECT(f.st.stats.spend.seg_input == 0);
+    EXPECT(f.st.stats.spend.seg_output == 0);
+    EXPECT(f.st.stats.est_dropped == 0); /* priced, not dropped */
+    free(out);
+
+    fixture_free(&f);
+}
+
+static void test_apply_settings_settle_only_on_model_change(void)
+{
+    struct fixture f;
+    fixture_init(&f);
+    /* Catalog-mapped, but the id resolves nowhere — modeling "the catalog
+     * fetch hasn't landed yet", when the segment can't be priced. */
+    f.p.catalog_id = "no-such-catalog-provider";
+    f.st.stats.spend.seg_input = 1000;
+    f.st.stats.spend.seg_output = 50;
+
+    /* Effort-only apply (model unchanged): the segment must stay open —
+     * settling here would drop the tokens for good, and a late-landing
+     * catalog could no longer recover the estimate at render time. */
+    char *out = capture_stdout(do_apply, &f);
+    EXPECT(f.rc == 0);
+    EXPECT(f.st.stats.spend.seg_input == 1000);
+    EXPECT(f.st.stats.spend.seg_output == 50);
+    EXPECT(f.st.stats.est_cost == 0);
+    free(out);
+
+    /* Failed apply: also intact. */
+    unsetenv("HAX_MODEL");
+    f.p.default_model = NULL;
+    out = capture_stdout(do_apply, &f);
+    EXPECT(f.rc == -1);
+    EXPECT(f.st.stats.spend.seg_input == 1000);
+    free(out);
+
+    /* While the unpriced segment is open, a reported subtotal must show
+     * as approximate — the total is missing real usage. */
+    f.st.stats.spend.reported = 0.03;
+    int approx = 0;
+    EXPECT(agent_session_spend(&f.st.stats, &f.p, f.sess.model, &approx) == 0.03);
+    EXPECT(approx == 1);
+
+    /* A real model change settles: still-unpriceable tokens are dropped
+     * (the documented undercount), the segment restarts under the new
+     * model's rates — and est_dropped keeps the total marked approximate
+     * for the rest of the session. */
+    setenv("HAX_MODEL", "model-b", 1);
+    out = capture_stdout(do_apply, &f);
+    EXPECT(f.rc == 0);
+    EXPECT(f.st.stats.spend.seg_input == 0);
+    EXPECT(f.st.stats.spend.seg_output == 0);
+    EXPECT(f.st.stats.est_cost == 0);
+    EXPECT(f.st.stats.est_dropped == 1);
+    approx = 0;
+    EXPECT(agent_session_spend(&f.st.stats, &f.p, f.sess.model, &approx) == 0.03);
+    EXPECT(approx == 1);
+    free(out);
+
+    fixture_free(&f);
+}
+
 /* ---------- agent_new_conversation ---------- */
 
 static void do_new_conversation(void *user)
@@ -301,6 +400,8 @@ int main(void)
     test_apply_settings_nonempty_prints_marker();
     test_apply_settings_no_model_fails_intact();
     test_apply_settings_refresh_only_on_model_change();
+    test_apply_settings_settles_at_outgoing_model_rates();
+    test_apply_settings_settle_only_on_model_change();
     test_new_conversation_resets_everything();
     test_banner_no_provider_points_at_picker();
     test_banner_no_model_points_at_picker();

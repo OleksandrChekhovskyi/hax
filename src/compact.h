@@ -56,9 +56,12 @@ int compact_should_auto(long ctx_tokens, long limit);
 
 /* Resolve the context-window size used for the auto-compaction threshold and
  * the per-user-turn "%" display: HAX_CONTEXT_LIMIT (manual override) wins,
- * else the provider's auto-detected probe value, else 0 ("unknown" — both
- * the percentage and auto-compaction are then disabled). */
-long compact_context_limit(const struct provider *p);
+ * else the provider's auto-detected probe value, else the model-catalog
+ * entry for `model` (providers with a catalog_id but no probe of their own —
+ * openai, anthropic), else 0 ("unknown" — both the percentage and
+ * auto-compaction are then disabled). `model` may be NULL (skips the
+ * catalog tier). */
+long compact_context_limit(const struct provider *p, const char *model);
 
 /* Build the summarization instruction sent as the synthetic trailing user
  * message. `instructions` (optional) is appended as extra focus. Caller

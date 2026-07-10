@@ -64,8 +64,8 @@ static int probe_model(const char *base_url, const char *api_key)
     char *auth = api_key ? xasprintf("Authorization: Bearer %s", api_key) : NULL;
     const char *headers[] = {auth, NULL};
     char *body = NULL;
-    int reached =
-        http_get(url, auth ? headers : NULL, MODEL_PROBE_TIMEOUT_S, NULL, NULL, &body, NULL) == 0;
+    int reached = http_get(url, auth ? headers : NULL, MODEL_PROBE_TIMEOUT_S, 0, NULL, NULL, &body,
+                           NULL) == 0;
 
     const char *cur = config_str("model");
     int rc = -1;

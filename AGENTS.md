@@ -79,6 +79,10 @@ Core modules and responsibilities:
 - `src/config.{c,h}` is the configuration access layer. Declare user-facing tunables in the
   config registry and read them by canonical key; reserve direct `getenv` calls for process
   environment facts or deliberately env-only secrets.
+- `src/catalog.{c,h}` is the model-metadata access layer (per-model cost rates, window
+  limits): a config `catalog.models` tier over a background-cached models.dev snapshot.
+  Providers opt in by setting `provider->catalog_id`; cost *estimation* lives in the agent
+  layer (`agent_session_spend`), never in provider adapters.
 - `src/terminal/ansi.h` centralizes ANSI escape sequences; do not inline raw escape literals.
 
 When adding a compiled-in provider: add the source under `src/providers/`, list it in

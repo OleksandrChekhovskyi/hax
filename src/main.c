@@ -7,6 +7,7 @@
 #include <curl/curl.h>
 
 #include "agent.h"
+#include "catalog.h"
 #include "config.h"
 #include "oneshot.h"
 #include "providers/registry.h"
@@ -415,6 +416,9 @@ int main(int argc, char **argv)
     if (p)
         p->destroy(p);
 err_curl:
+    /* Like provider destroy: join the catalog's background fetch (it may
+     * hold a libcurl handle) before curl_global_cleanup below. */
+    catalog_shutdown();
     curl_global_cleanup();
 err_prompt:
     config_free();

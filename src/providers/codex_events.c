@@ -226,6 +226,7 @@ static void parse_usage(json_t *root, struct stream_usage *out)
     out->input_tokens = -1;
     out->output_tokens = -1;
     out->cached_tokens = -1;
+    out->cache_write_tokens = -1;
     out->cost = -1;
 
     json_t *resp = json_object_get(root, "response");
@@ -260,7 +261,7 @@ static void handle_completed(struct codex_events *s, json_t *root)
     if (root)
         parse_usage(root, &ev.u.done.usage);
     else
-        ev.u.done.usage = (struct stream_usage){-1, -1, -1, -1};
+        ev.u.done.usage = (struct stream_usage){-1, -1, -1, -1, -1};
     emit(s, &ev);
 }
 

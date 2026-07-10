@@ -126,8 +126,53 @@ canonical key and its environment variable.
 - `notify` / `HAX_NOTIFY` — desktop notification style: `osc9`, `bel`, or falsy to disable.
 
 `HAX_CONTEXT_LIMIT` overrides provider auto-detection. Current auto-detection exists for
-Codex, llama.cpp, and OpenRouter. Other providers show absolute token counts unless a manual
-limit is set.
+Codex, llama.cpp, and OpenRouter; `openai`, `anthropic`, and custom providers with a
+catalog identity (`catalog_id`, defaulting to the provider's name — see
+[providers.md](./providers.md)) fall back to the model catalog's per-model window (see
+below). Other providers show absolute token counts unless a manual limit is set.
+
+### Model catalog
+
+hax uses a per-model metadata catalog — cost rates and window limits — to estimate spend for
+providers that don't report per-response cost (the `~$` figure on the stats line) and to fill
+in unknown context windows. Metadata resolves from two tiers: a `models` block in the config
+file, then a cached snapshot of [models.dev](https://models.dev/api.json).
+
+- `catalog.url` / `HAX_CATALOG_URL` — catalog endpoint, in the models.dev `api.json` shape.
+  Empty disables fetching entirely. Default `https://models.dev/api.json`.
+- `catalog.refresh` / `HAX_CATALOG_REFRESH` — re-fetch the cached snapshot when older than
+  this; `0` disables fetching. Default `24h`.
+
+The snapshot is cached at `$XDG_CACHE_HOME/hax/catalog.json` (`~/.cache/hax/catalog.json`) and
+fetched in the background, at most once per run, only when a session actually streams on a
+catalog-mapped provider. A stale cache keeps serving; fetch failures are silent — but when the
+snapshot hasn't refreshed for over 30 days (endpoint unreachable, response rejected), hax
+prints a one-line warning that estimates may be stale. With fetching disabled, an existing
+cache file — or a hand-placed one — is still read, and no staleness warning is issued.
+
+The `catalog.models` block declares or overrides per-model metadata, keyed by catalog
+provider id then model id, with the models.dev field names (costs are USD per million
+tokens):
+
+```json
+{
+  "catalog": {
+    "models": {
+      "openai": {
+        "gpt-5.3-codex": {
+          "cost": {"input": 1.25, "output": 10, "cache_read": 0.125},
+          "limit": {"context": 400000, "output": 128000}
+        }
+      }
+    }
+  }
+}
+```
+
+Config fields win field-by-field; the cached catalog fills whatever the block leaves unset.
+Estimates use reported token counts only and skip what they can't price, so treat the `~$`
+figure as an approximation — cross-check against the provider's own accounting (`/usage`)
+where it matters.
 
 ### Behavior
 

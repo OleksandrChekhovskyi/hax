@@ -234,6 +234,7 @@ static void test_usage_and_done(void)
     EXPECT(cap.events[0].usage.input_tokens == 150);
     EXPECT(cap.events[0].usage.output_tokens == 25);
     EXPECT(cap.events[0].usage.cached_tokens == 40);
+    EXPECT(cap.events[0].usage.cache_write_tokens == 10);
     EXPECT(st.terminated == 1);
     TEARDOWN(cap, st);
 }

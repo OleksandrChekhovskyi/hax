@@ -15,6 +15,7 @@ void openai_events_init(struct openai_events *s, stream_cb cb, void *user)
     s->pending_usage.input_tokens = -1;
     s->pending_usage.output_tokens = -1;
     s->pending_usage.cached_tokens = -1;
+    s->pending_usage.cache_write_tokens = -1;
     s->pending_usage.cost = -1;
 }
 

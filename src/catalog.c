@@ -1,0 +1,584 @@
+/* SPDX-License-Identifier: MIT */
+#include "catalog.h"
+
+#include <libgen.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+#include <jansson.h>
+
+#include "config.h"
+#include "util.h"
+#include "system/bg_job.h"
+#include "system/fs.h"
+#include "transport/http.h"
+
+#define CATALOG_CACHE_FILE "catalog.json"
+/* The full catalog is ~3 MB; give a slow link room, but a hung endpoint
+ * must not pin the worker until process exit (shutdown cancels via the
+ * bg tick anyway — this is the no-shutdown bound). */
+#define CATALOG_FETCH_TIMEOUT_S 30
+/* Bounds the downloaded body (enforced mid-transfer by http_get) and the
+ * cache-file slurp. Memory scales linearly with it — the artifact is
+ * never tree-parsed whole (see catalog_extract_member), so this is pure
+ * buffer headroom: ~10x the current artifact. */
+#define CATALOG_MAX_BYTES (32 * 1024 * 1024)
+/* catalog_prefetch flags a snapshot older than this: refreshes have been
+ * failing (endpoint moved, artifact outgrew CATALOG_MAX_BYTES, broken
+ * proxy) for long enough that estimates may have drifted. Far past the
+ * refresh TTL so transient outages never trip it. */
+#define CATALOG_STALE_WARN_S (30L * 24 * 60 * 60)
+
+/* ---------------- entry parsing (shared by both tiers) ---------------- */
+
+static void entry_init(struct catalog_entry *e)
+{
+    e->cost_input = -1;
+    e->cost_output = -1;
+    e->cost_cache_read = -1;
+    e->cost_cache_write = -1;
+    e->context = 0;
+    e->output = 0;
+}
+
+/* Member `k` of `obj` as a non-negative rate. Accepts a JSON number (the
+ * raw models.dev artifact) or a numeric string (config values pass through
+ * normalize(), which stringifies scalars). -1 = absent/invalid. */
+static double member_rate(json_t *obj, const char *k)
+{
+    json_t *v = json_object_get(obj, k);
+    if (json_is_number(v)) {
+        double d = json_number_value(v);
+        return d >= 0 ? d : -1;
+    }
+    const char *s = json_string_value(v);
+    if (!s || !*s)
+        return -1;
+    char *end;
+    double d = strtod(s, &end);
+    return (end != s && !*end && d >= 0) ? d : -1;
+}
+
+/* Member `k` of `obj` as a token count. Accepts a JSON integer or a
+ * parse_size string ("400000", "256k"). 0 = absent/invalid. */
+static long member_tokens(json_t *obj, const char *k)
+{
+    json_t *v = json_object_get(obj, k);
+    if (json_is_integer(v)) {
+        long n = (long)json_integer_value(v);
+        return n > 0 ? n : 0;
+    }
+    return parse_size(json_string_value(v));
+}
+
+/* Fill the still-unknown fields of *e from a per-model object of the
+ * models.dev shape ({"cost": {...}, "limit": {...}}). Known fields are
+ * left alone, so a higher tier's values survive a lower tier's pass. */
+static void entry_fill(json_t *model_obj, struct catalog_entry *e)
+{
+    if (!json_is_object(model_obj))
+        return;
+    json_t *cost = json_object_get(model_obj, "cost");
+    if (json_is_object(cost)) {
+        if (e->cost_input < 0)
+            e->cost_input = member_rate(cost, "input");
+        if (e->cost_output < 0)
+            e->cost_output = member_rate(cost, "output");
+        if (e->cost_cache_read < 0)
+            e->cost_cache_read = member_rate(cost, "cache_read");
+        if (e->cost_cache_write < 0)
+            e->cost_cache_write = member_rate(cost, "cache_write");
+    }
+    json_t *limit = json_object_get(model_obj, "limit");
+    if (json_is_object(limit)) {
+        if (e->context <= 0)
+            e->context = member_tokens(limit, "context");
+        if (e->output <= 0)
+            e->output = member_tokens(limit, "output");
+    }
+}
+
+static int entry_complete(const struct catalog_entry *e)
+{
+    return e->cost_input >= 0 && e->cost_output >= 0 && e->cost_cache_read >= 0 &&
+           e->cost_cache_write >= 0 && e->context > 0 && e->output > 0;
+}
+
+static int entry_any(const struct catalog_entry *e)
+{
+    return e->cost_input >= 0 || e->cost_output >= 0 || e->cost_cache_read >= 0 ||
+           e->cost_cache_write >= 0 || e->context > 0 || e->output > 0;
+}
+
+/* Fill the still-unknown fields of *dst from *src — the struct-to-struct
+ * twin of entry_fill, used to overlay the config tier on a memoized
+ * cache-tier entry. */
+static void entry_merge(struct catalog_entry *dst, const struct catalog_entry *src)
+{
+    if (dst->cost_input < 0)
+        dst->cost_input = src->cost_input;
+    if (dst->cost_output < 0)
+        dst->cost_output = src->cost_output;
+    if (dst->cost_cache_read < 0)
+        dst->cost_cache_read = src->cost_cache_read;
+    if (dst->cost_cache_write < 0)
+        dst->cost_cache_write = src->cost_cache_write;
+    if (dst->context <= 0)
+        dst->context = src->context;
+    if (dst->output <= 0)
+        dst->output = src->output;
+}
+
+/* ---------------- top-level member extraction ---------------- */
+
+/* The artifact is multi-MB and jansson inflates JSON ~10x when building a
+ * tree, so nothing here ever tree-parses the whole file. A byte-level scan
+ * locates one top-level member's value span, and only that slice (~100 KB
+ * for a large provider) is handed to jansson — which also supplies the
+ * real validation the scan doesn't do. Bytewise scanning is UTF-8-safe:
+ * '"' and '\\' never occur inside multi-byte sequences. */
+
+static const char *scan_ws(const char *p)
+{
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+        p++;
+    return p;
+}
+
+/* Advance past the string whose opening '"' is at `p`. Returns the
+ * position just past the closing quote, NULL on truncated input. */
+static const char *scan_string(const char *p)
+{
+    for (p++; *p; p++) {
+        if (*p == '\\') {
+            if (!p[1])
+                return NULL;
+            p++;
+        } else if (*p == '"') {
+            return p + 1;
+        }
+    }
+    return NULL;
+}
+
+/* Advance past one JSON value starting at `p`: strings and {} / []
+ * nesting are honored, everything else is structural-only. NULL on
+ * truncated input. */
+static const char *scan_value(const char *p)
+{
+    if (*p == '"')
+        return scan_string(p);
+    if (*p == '{' || *p == '[') {
+        int depth = 0;
+        while (*p) {
+            if (*p == '"') {
+                p = scan_string(p);
+                if (!p)
+                    return NULL;
+                continue;
+            }
+            if (*p == '{' || *p == '[') {
+                depth++;
+            } else if (*p == '}' || *p == ']') {
+                if (--depth == 0)
+                    return p + 1;
+            }
+            p++;
+        }
+        return NULL;
+    }
+    /* Scalar token (number / true / false / null): up to a delimiter. */
+    while (*p && *p != ',' && *p != '}' && *p != ']' && *p != ' ' && *p != '\t' && *p != '\n' &&
+           *p != '\r')
+        p++;
+    return p;
+}
+
+/* One step of top-level member iteration. On entry *pp points at a member
+ * key's opening quote; on success fills the key and value spans and
+ * advances *pp — to the next member's key (returns 0), or just past the
+ * root's closing brace when this was the last member (returns 1, leaving
+ * *pp at the trailing bytes for an EOF check). Returns -1 on malformed or
+ * truncated input. */
+static int scan_member(const char **pp, const char **kstart, size_t *klen, const char **vstart,
+                       const char **vend)
+{
+    const char *p = *pp;
+    if (*p != '"')
+        return -1;
+    *kstart = p + 1;
+    const char *kend = scan_string(p);
+    if (!kend)
+        return -1;
+    *klen = (size_t)(kend - 1 - *kstart);
+    p = scan_ws(kend);
+    if (*p != ':')
+        return -1;
+    p = scan_ws(p + 1);
+    *vstart = p;
+    p = scan_value(p);
+    if (!p)
+        return -1;
+    *vend = p;
+    p = scan_ws(p);
+    if (*p == ',') {
+        *pp = scan_ws(p + 1);
+        return 0;
+    }
+    if (*p == '}') {
+        *pp = p + 1; /* that was the last member */
+        return 1;
+    }
+    return -1;
+}
+
+/* Position of the first member key in object `text`; NULL for an empty
+ * object or a non-object. */
+static const char *scan_first_member(const char *text)
+{
+    const char *p = scan_ws(text);
+    if (*p != '{')
+        return NULL;
+    p = scan_ws(p + 1);
+    return *p == '"' ? p : NULL;
+}
+
+json_t *catalog_extract_member(const char *text, const char *key)
+{
+    if (!text || !key || !*key)
+        return NULL;
+    size_t key_len = strlen(key);
+    const char *p = scan_first_member(text);
+    if (!p)
+        return NULL;
+    for (;;) {
+        const char *kstart, *vstart, *vend;
+        size_t klen;
+        int last = scan_member(&p, &kstart, &klen, &vstart, &vend);
+        if (last < 0)
+            return NULL;
+        if (klen == key_len && memcmp(kstart, key, key_len) == 0)
+            return json_loadb(vstart, (size_t)(vend - vstart), JSON_DECODE_ANY, NULL);
+        if (last)
+            return NULL; /* members exhausted */
+    }
+}
+
+/* Accept a body as a catalog: some top-level member must be an object
+ * carrying a `models` object, every member's value must be valid JSON,
+ * and nothing but whitespace may follow the root's closing brace. The
+ * first condition rejects JSON-shaped error payloads ({"error": "rate
+ * limited"} behind a broken proxy); the others reject truncated or
+ * corrupted tails — replacing the previous (complete) snapshot with a
+ * file with holes would silently lose providers, and the fresh mtime
+ * would suppress a recovering re-fetch for a whole refresh interval.
+ * Validation is piecewise — one member slice parsed at a time, never the
+ * whole artifact — so peak memory stays one slice; the full-parse CPU
+ * cost lands on the background fetch worker where it doesn't matter. */
+static int catalog_text_valid(const char *text)
+{
+    int ok = 0;
+    const char *p = scan_first_member(text);
+    if (!p)
+        return 0;
+    for (;;) {
+        const char *kstart, *vstart, *vend;
+        size_t klen;
+        int last = scan_member(&p, &kstart, &klen, &vstart, &vend);
+        if (last < 0)
+            return 0;
+        json_t *v = json_loadb(vstart, (size_t)(vend - vstart), JSON_DECODE_ANY, NULL);
+        if (!v)
+            return 0; /* brace-balanced garbage the structural scan waved through */
+        if (!ok)
+            ok = json_is_object(v) && json_is_object(json_object_get(v, "models"));
+        json_decref(v);
+        if (last)
+            break;
+    }
+    return ok && *scan_ws(p) == '\0';
+}
+
+/* ---------------- config tier: the catalog.models block ---------------- */
+
+static void fill_from_config(const char *provider_id, const char *model, struct catalog_entry *e)
+{
+    const json_t *models = config_json_node("catalog.models");
+    if (!json_is_object(models))
+        return;
+    json_t *prov = json_object_get((json_t *)models, provider_id);
+    if (!json_is_object(prov))
+        return;
+    entry_fill(json_object_get(prov, model), e);
+}
+
+/* ---------------- cache tier: the fetched snapshot ---------------- */
+
+/* Extract only the wanted provider's slice from the cached artifact and
+ * tree-parse just that — a few ms, cheap enough for the foreground path;
+ * the memo in cache_tier_lookup bounds repeats anyway. */
+static void fill_from_cache(const char *provider_id, const char *model, struct catalog_entry *e)
+{
+    char *path = xdg_hax_cache_path(CATALOG_CACHE_FILE);
+    if (!path)
+        return;
+    size_t len;
+    int truncated;
+    char *text = slurp_file_capped(path, CATALOG_MAX_BYTES, &len, &truncated);
+    free(path);
+    if (!text)
+        return;
+    json_t *prov = truncated ? NULL : catalog_extract_member(text, provider_id);
+    free(text);
+    if (!prov)
+        return;
+    json_t *models = json_object_get(prov, "models");
+    if (json_is_object(models))
+        entry_fill(json_object_get(models, model), e);
+    json_decref(prov);
+}
+
+/* ---------------- cache-tier memo (foreground thread) ---------------- */
+
+/* The memo holds *cache-tier* entries — the slurp + scan + slice-parse is
+ * a few ms, worth remembering per (provider, model); the config tier is a
+ * tiny-JSON walk redone on every catalog_lookup. Foreground-only: the one
+ * background actor is the fetch worker, which touches nothing but the
+ * cache file and the atomic generation counter below. */
+
+struct memo {
+    char *provider_id;
+    char *model;
+    struct catalog_entry entry;
+    int found;
+};
+
+static struct memo *g_memo;
+static size_t g_n_memo, g_cap_memo;
+
+/* Bumped by the fetch worker when a fresh snapshot lands; synced on lookup
+ * so memoized misses don't outlive the refresh that could turn them into
+ * hits. */
+static _Atomic int g_cache_gen;
+static int g_memo_gen;
+
+static void memo_clear(void)
+{
+    for (size_t i = 0; i < g_n_memo; i++) {
+        free(g_memo[i].provider_id);
+        free(g_memo[i].model);
+    }
+    free(g_memo);
+    g_memo = NULL;
+    g_n_memo = g_cap_memo = 0;
+}
+
+static struct memo *memo_find(const char *provider_id, const char *model)
+{
+    for (size_t i = 0; i < g_n_memo; i++)
+        if (strcmp(g_memo[i].provider_id, provider_id) == 0 && strcmp(g_memo[i].model, model) == 0)
+            return &g_memo[i];
+    return NULL;
+}
+
+static void memo_add(const char *provider_id, const char *model, const struct catalog_entry *e,
+                     int found)
+{
+    if (g_n_memo == g_cap_memo) {
+        g_cap_memo = g_cap_memo ? g_cap_memo * 2 : 4;
+        g_memo = xrealloc(g_memo, g_cap_memo * sizeof(*g_memo));
+    }
+    struct memo *m = &g_memo[g_n_memo++];
+    m->provider_id = xstrdup(provider_id);
+    m->model = xstrdup(model);
+    m->entry = *e;
+    m->found = found;
+}
+
+static int cache_tier_lookup(const char *provider_id, const char *model, struct catalog_entry *out)
+{
+    int gen = atomic_load(&g_cache_gen);
+    if (gen != g_memo_gen) {
+        memo_clear();
+        g_memo_gen = gen;
+    }
+    struct memo *m = memo_find(provider_id, model);
+    if (m) {
+        *out = m->entry;
+        return m->found ? 0 : -1;
+    }
+    entry_init(out);
+    fill_from_cache(provider_id, model, out);
+    int found = entry_any(out);
+    memo_add(provider_id, model, out, found);
+    return found ? 0 : -1;
+}
+
+int catalog_lookup(const char *provider_id, const char *model, struct catalog_entry *out)
+{
+    entry_init(out);
+    if (!provider_id || !*provider_id || !model || !*model)
+        return -1;
+
+    fill_from_config(provider_id, model, out);
+    if (!entry_complete(out)) {
+        struct catalog_entry cached;
+        if (cache_tier_lookup(provider_id, model, &cached) == 0)
+            entry_merge(out, &cached);
+    }
+    return entry_any(out) ? 0 : -1;
+}
+
+double catalog_price(const struct catalog_entry *e, long input, long output, long cached,
+                     long cache_write)
+{
+    if (e->cost_input < 0 || e->cost_output < 0)
+        return -1;
+    long cr = cached > 0 ? cached : 0;
+    long cw = cache_write > 0 ? cache_write : 0;
+    long in = input > 0 ? input : 0;
+    long uncached = in - cr - cw;
+    if (uncached < 0)
+        uncached = 0;
+    double r_read = e->cost_cache_read >= 0 ? e->cost_cache_read : e->cost_input;
+    double r_write = e->cost_cache_write >= 0 ? e->cost_cache_write : e->cost_input;
+    double out = output > 0 ? (double)output : 0;
+    return ((double)uncached * e->cost_input + (double)cr * r_read + (double)cw * r_write +
+            out * e->cost_output) /
+           1e6;
+}
+
+/* ---------------- background fetch ---------------- */
+
+static struct bg_job *g_fetch;
+static int g_prefetch_ran;
+/* Set by the worker on every exit path; lets catalog_drain poll for
+ * completion without a timed-join primitive. */
+static _Atomic int g_fetch_done;
+
+struct fetch_args {
+    char *url;
+    char *path;
+};
+
+static void fetch_args_free(struct fetch_args *a)
+{
+    if (!a)
+        return;
+    free(a->url);
+    free(a->path);
+    free(a);
+}
+
+/* Stage the body in a sibling temp file and rename() it into place, so a
+ * concurrent lookup (this process or another) never sees a torn file. */
+static int write_cache_atomic(const char *path, const char *body, size_t len)
+{
+    char *dup = xstrdup(path);
+    fs_mkdir_p(dirname(dup));
+    free(dup);
+
+    char *tmp = xasprintf("%s.tmp.XXXXXX", path);
+    int fd = mkstemp(tmp);
+    if (fd < 0) {
+        free(tmp);
+        return -1;
+    }
+    int rc = write_all(fd, body, len);
+    if (close(fd) != 0)
+        rc = -1;
+    if (rc == 0 && rename(tmp, path) != 0)
+        rc = -1;
+    if (rc != 0)
+        unlink(tmp);
+    free(tmp);
+    return rc;
+}
+
+static void fetch_run(struct bg_job *job, void *arg)
+{
+    struct fetch_args *a = arg;
+    if (!bg_job_cancelled(job)) {
+        char *body = NULL;
+        if (http_get(a->url, NULL, CATALOG_FETCH_TIMEOUT_S, CATALOG_MAX_BYTES, bg_job_tick, job,
+                     &body, NULL) == 0 &&
+            body) {
+            if (catalog_text_valid(body) && write_cache_atomic(a->path, body, strlen(body)) == 0)
+                atomic_fetch_add(&g_cache_gen, 1);
+        }
+        free(body);
+    }
+    fetch_args_free(a);
+    atomic_store(&g_fetch_done, 1);
+}
+
+long catalog_prefetch(void)
+{
+    if (g_prefetch_ran)
+        return 0;
+    g_prefetch_ran = 1; /* one attempt per run, even on early-outs below */
+
+    const char *url = config_str("catalog.url");
+    if (!url || !*url)
+        return 0; /* explicit empty = no fetching — and no staleness alarm:
+                     the user opted out of refreshes */
+    long ttl_ms = config_duration_ms("catalog.refresh");
+    if (ttl_ms <= 0)
+        return 0; /* 0 disables refresh */
+    char *path = xdg_hax_cache_path(CATALOG_CACHE_FILE);
+    if (!path)
+        return 0;
+
+    long stale_days = 0;
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        long age_s = (long)(time(NULL) - st.st_mtime);
+        if (age_s < ttl_ms / 1000) {
+            free(path);
+            return 0; /* fresh enough */
+        }
+        if (age_s > CATALOG_STALE_WARN_S)
+            stale_days = age_s / (24L * 60 * 60);
+    }
+
+    struct fetch_args *a = xcalloc(1, sizeof(*a));
+    a->url = xstrdup(url);
+    a->path = path;
+    g_fetch = bg_job_spawn(fetch_run, a);
+    if (!g_fetch)
+        fetch_args_free(a); /* worker's free path never runs on spawn failure */
+    return stale_days;
+}
+
+void catalog_drain(long max_wait_ms)
+{
+    if (!g_fetch)
+        return;
+    for (long waited = 0; waited < max_wait_ms && !atomic_load(&g_fetch_done); waited += 20) {
+        struct timespec ts = {0, 20 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+    }
+    /* Finished or out of patience — settle the handle either way. A join
+     * after the done flag is momentary; a timed-out fetch gets the same
+     * cancel+join shutdown would give it. */
+    if (!atomic_load(&g_fetch_done))
+        bg_job_cancel(g_fetch);
+    bg_job_join(g_fetch);
+    g_fetch = NULL;
+}
+
+void catalog_shutdown(void)
+{
+    if (g_fetch) {
+        bg_job_cancel(g_fetch);
+        bg_job_join(g_fetch);
+        g_fetch = NULL;
+    }
+    memo_clear();
+    g_memo_gen = atomic_load(&g_cache_gen);
+}

@@ -28,7 +28,7 @@ const struct tool TOOL_WRITE = {.def = {.name = "write"}, .run = stub_run};
 const struct tool TOOL_EDIT = {.def = {.name = "edit"}, .run = stub_run};
 
 /* agent.c isn't linked here (it pulls the entire REPL graph: input,
- * spinner, disp, ...). Stub the two symbols slash.c reaches into:
+ * spinner, disp, ...). Stub the symbols slash.c reaches into:
  *
  * - agent_print_banner: called by agent_new_conversation; tests don't
  *   assert on its output.
@@ -43,6 +43,19 @@ void agent_print_banner(const struct provider *p, const struct agent_session *s)
 void agent_new_conversation(struct agent_state *st)
 {
     agent_session_reset(st->sess);
+}
+/* agent_session_spend folds a catalog estimate for the open pricing
+ * segment into the spend figure; these tests run with no provider and no
+ * catalog, so mirror just the no-catalog arithmetic (reported cost +
+ * settled estimate; approximate when any inexact component exists). */
+double agent_session_spend(const struct session_stats *t, const struct provider *p,
+                           const char *model, int *approx)
+{
+    (void)p;
+    (void)model;
+    if (approx)
+        *approx = t->est_cost > 0 || spend_has_tokens(&t->spend) || t->est_dropped;
+    return t->spend.reported + t->est_cost;
 }
 
 /* /resume reaches into session.c / session_picker.c / agent.c too. None
@@ -331,7 +344,7 @@ static void test_session_prints_totals(void)
     st.stats.input_tokens = 5530; /* 5.4k */
     st.stats.output_tokens = 412;
     st.stats.cached_tokens = 2048; /* 2.0k; 2048*100/5530 = 37% hit rate */
-    st.stats.cost = 0.042;
+    st.stats.spend.reported = 0.042;
     st.stats.last_ctx = 4000; /* 3.9k; no provider ⇒ no limit/percent */
     struct slash_ctx ctx = {.state = &st};
     struct dispatch_call c = {.line = "/session", .ctx = &ctx};
@@ -373,6 +386,24 @@ static void test_session_hides_unreported_rows(void)
     EXPECT(strstr(out, "tool calls") == NULL);
     EXPECT(strstr(out, "tokens") == NULL);
     EXPECT(strstr(out, "$") == NULL);
+    free(out);
+}
+
+static void test_session_marks_estimated_spend(void)
+{
+    /* When an estimated component contributes, the spend row carries the
+     * "~" approximation marker (the stubbed agent_session_spend mirrors
+     * the real reported+estimate arithmetic). */
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.r = &r};
+    st.stats.spend.reported = 0.030;
+    st.stats.est_cost = 0.012;
+    struct slash_ctx ctx = {.state = &st};
+    struct dispatch_call c = {.line = "/session", .ctx = &ctx};
+    char *out = capture_stdout(do_dispatch, &c);
+    EXPECT(c.result == SLASH_HANDLED);
+    EXPECT(strstr(out, "~$0.042") != NULL);
     free(out);
 }
 
@@ -546,6 +577,7 @@ int main(void)
     test_help_lists_commands_and_shortcuts();
     test_session_prints_totals();
     test_session_hides_unreported_rows();
+    test_session_marks_estimated_spend();
     test_new_clears_session();
     test_clear_alias_runs_new();
     test_new_rejects_extra_args();
