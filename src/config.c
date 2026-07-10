@@ -131,10 +131,11 @@ static const struct config_setting REGISTRY[] = {
     /* per-provider */
     {"llamacpp.port",              "HAX_LLAMACPP_PORT",           "8080",
      "Port for the local llama-server (when openai.base_url is unset)"},
-    {"openrouter.title",           "HAX_OPENROUTER_TITLE",        NULL,
-     "X-Title header for OpenRouter attribution"},
-    {"openrouter.referer",         "HAX_OPENROUTER_REFERER",      NULL,
-     "HTTP-Referer header for OpenRouter"},
+    {"openrouter.title",           "HAX_OPENROUTER_TITLE",        "hax",
+     "X-Title header for OpenRouter attribution (empty disables)"},
+    {"openrouter.referer",         "HAX_OPENROUTER_REFERER",
+     "https://github.com/OleksandrChekhovskyi/hax",
+     "HTTP-Referer header for OpenRouter attribution (empty disables)"},
     {"mock.script",                "HAX_MOCK_SCRIPT",             NULL,
      "Path to a mock-provider script (mock provider only)"},
 };

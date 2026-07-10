@@ -201,8 +201,11 @@ API-key lookup order:
 1. `HAX_OPENAI_API_KEY`
 2. `OPENROUTER_API_KEY`
 
-OpenRouter has no built-in model default in hax. It sends `X-Title: hax` by default; override
-with `HAX_OPENROUTER_TITLE`. Set `HAX_OPENROUTER_REFERER` to send an `HTTP-Referer` header.
+OpenRouter has no built-in model default in hax. For app attribution on OpenRouter's
+dashboards, hax sends `HTTP-Referer` (the app identifier, defaulting to the hax project URL),
+`X-Title: hax`, and `X-OpenRouter-Categories: cli-agent` by default. Override the referer and
+title with `HAX_OPENROUTER_REFERER` and `HAX_OPENROUTER_TITLE`; set the referer to an empty
+string to disable attribution entirely.
 
 For the context percentage, hax probes
 `/api/v1/models/<model>/endpoints` and uses the largest returned `context_length`.

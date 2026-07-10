@@ -247,29 +247,32 @@ struct provider *openrouter_provider_new(const char *name)
 {
     (void)name;
     /* Fixed to openrouter.ai. HAX_OPENAI_BASE_URL is ignored (lock_base_url),
-     * not rejected, so the OPENROUTER_API_KEY fallback and the public X-Title
-     * attribution header can never reach an unrelated host, and a base URL
+     * not rejected, so the OPENROUTER_API_KEY fallback and the attribution
+     * headers can never reach an unrelated host, and a base URL
      * left set for another backend doesn't block selecting openrouter. Custom
      * endpoints belong on HAX_PROVIDER=openai-compatible. */
     const char *key = openrouter_api_key();
 
     const char *title = config_str("openrouter.title");
-    if (!title || !*title)
-        title = "hax";
     const char *referer = config_str("openrouter.referer");
 
-    /* OpenRouter uses these for attribution on its public leaderboards and
-     * usage dashboards. Both are optional from OpenRouter's side; we always
-     * send X-Title (so traffic is recognizable) but only send HTTP-Referer
-     * when the user explicitly opts in. */
-    char *title_hdr = xasprintf("X-Title: %s", title);
+    /* OpenRouter attributes usage to an app by HTTP-Referer — without it no
+     * app page exists and traffic shows as "Unknown"; X-Title merely labels
+     * that page and does nothing on its own. Both default via the config
+     * registry, and an explicit empty value opts out of attribution. The
+     * categories header only refines an app page, so it rides with the
+     * referer. */
+    char *title_hdr = (title && *title) ? xasprintf("X-Title: %s", title) : NULL;
     char *referer_hdr = (referer && *referer) ? xasprintf("HTTP-Referer: %s", referer) : NULL;
 
-    const char *headers[3];
+    const char *headers[4];
     size_t i = 0;
-    headers[i++] = title_hdr;
-    if (referer_hdr)
+    if (title_hdr)
+        headers[i++] = title_hdr;
+    if (referer_hdr) {
         headers[i++] = referer_hdr;
+        headers[i++] = "X-OpenRouter-Categories: cli-agent";
+    }
     headers[i] = NULL;
 
     /* HAX_SHOW_REASONING also acts as a request-side opt-in here:

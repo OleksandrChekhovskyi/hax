@@ -227,9 +227,9 @@ API-key fallbacks:
 - `llamacpp.port` / `HAX_LLAMACPP_PORT` — port for local `llama-server` when
   `openai.base_url` is unset. Default `8080`.
 - `openrouter.title` / `HAX_OPENROUTER_TITLE` — `X-Title` attribution header for OpenRouter.
-  Default `hax`.
-- `openrouter.referer` / `HAX_OPENROUTER_REFERER` — optional `HTTP-Referer` header for
-  OpenRouter.
+  Default `hax`; empty omits it.
+- `openrouter.referer` / `HAX_OPENROUTER_REFERER` — `HTTP-Referer` header, OpenRouter's app
+  identifier for attribution. Defaults to the hax project URL; empty disables attribution.
 - `mock.script` / `HAX_MOCK_SCRIPT` — mock-provider script path.
 
 ## Custom provider blocks
