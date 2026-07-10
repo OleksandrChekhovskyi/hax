@@ -7,12 +7,12 @@
 #include <string.h>
 #include <time.h>
 
+#include "busy.h"
 #include "codex_events.h"
 #include "config.h"
 #include "probe.h"
 #include "util.h"
 #include "render/progress.h"
-#include "render/spinner.h"
 #include "system/bg_job.h"
 #include "system/path.h"
 #include "terminal/ansi.h"
@@ -750,21 +750,24 @@ static int codex_query_usage(struct provider *p)
     };
 
     /* Single round-trip to chatgpt.com; usually <1s but can stretch on
-     * a flaky link. The slash dispatcher already emitted the leading
-     * blank-line gap, so the spinner draws in the row that the codex
-     * header will eventually occupy and the layout stays stable from
-     * the moment /usage is issued. Spinner is a no-op on non-TTY stdout
-     * so this stays safe under `hax -p '/usage'`-style scripted
-     * invocations. */
-    struct spinner *sp = spinner_new("fetching usage...");
-    spinner_show(sp);
+     * a flaky link, so run it under a busy window: spinner + Esc cancel
+     * (both no-ops on non-TTY stdout, so `hax -p '/usage'`-style scripted
+     * invocations stay clean). The slash dispatcher already emitted the
+     * leading blank-line gap, so the spinner draws in the row that the
+     * codex header will eventually occupy and the layout stays stable. */
+    struct busy *b = busy_begin("fetching usage...");
     char *body = NULL;
     long status = 0;
-    int rc = http_get(CODEX_USAGE_ENDPOINT, headers, 30, NULL, NULL, &body, &status);
-    spinner_hide(sp);
-    spinner_free(sp);
+    int rc = http_get(CODEX_USAGE_ENDPOINT, headers, 30, busy_tick, NULL, &body, &status);
+    int cancelled = busy_end(b);
     free(auth_hdr);
     free(acct_hdr);
+    if (cancelled) {
+        /* User abandoned the wait — busy_end left the [interrupted]
+         * marker; not a failure, no diagnostic. */
+        free(body);
+        return -1;
+    }
     if (rc != 0 || !body) {
         /* A 401 here is the same stale-OAuth-token condition the streaming
          * path reports — match that friendly, actionable phrasing rather
@@ -833,10 +836,25 @@ static size_t codex_list_efforts(struct provider *p, const char *const **out)
     return sizeof(CODEX_EFFORTS) / sizeof(CODEX_EFFORTS[0]);
 }
 
+/* A 401 is the stale-OAuth-token condition — same friendly phrasing as
+ * the streaming and /usage paths; a 2xx that still failed means the body
+ * was empty or the transfer died mid-body, not an HTTP error. */
+char *codex_models_error(long status)
+{
+    if (status == 401)
+        return xstrdup("codex token expired — run `codex` once to refresh, then retry");
+    if (status >= 200 && status < 300)
+        return xstrdup("codex sent an empty or truncated model catalog response");
+    if (status != 0)
+        return xasprintf("codex model catalog fetch failed (HTTP %ld)", status);
+    return xstrdup("could not reach chatgpt.com to list models — check your network");
+}
+
 /* Fetch the catalog and collect `models[].slug` — the same endpoint and
  * shape the context-window probe walks (extract_codex_context). The high
  * synthetic client_version keeps already-sendable models visible. */
-static int codex_list_models(struct provider *p, char ***ids, size_t *n)
+static int codex_list_models(struct provider *p, char ***ids, size_t *n, char **err,
+                             http_tick_cb tick, void *tick_user)
 {
     struct codex *c = (struct codex *)p;
     *ids = NULL;
@@ -847,21 +865,26 @@ static int codex_list_models(struct provider *p, char ***ids, size_t *n)
     char *acct = xasprintf("chatgpt-account-id: %s", c->account_id);
     const char *headers[] = {auth, acct, "originator: hax", "Accept: application/json", NULL};
     char *body = NULL;
-    int rc = http_get(url, headers, CODEX_PROBE_TIMEOUT_S, NULL, NULL, &body, NULL);
+    long status = 0;
+    int rc = http_get(url, headers, CODEX_PROBE_TIMEOUT_S, tick, tick_user, &body, &status);
     free(auth);
     free(acct);
     free(url);
     if (rc != 0) {
+        *err = codex_models_error(status);
         free(body);
         return -1;
     }
     json_t *root = json_loads(body, 0, NULL);
     free(body);
-    if (!root)
+    if (!root) {
+        *err = xstrdup("codex model catalog response is not valid JSON");
         return -1;
+    }
     json_t *models = json_object_get(root, "models");
     if (!json_is_array(models)) {
         json_decref(root);
+        *err = xstrdup("codex model catalog response has no model list");
         return -1;
     }
     size_t cnt = json_array_size(models);
@@ -873,6 +896,12 @@ static int codex_list_models(struct provider *p, char ***ids, size_t *n)
             out[k++] = xstrdup(json_string_value(slug));
     }
     json_decref(root);
+    /* Entries existed but none carried a slug — malformed, not empty. */
+    if (cnt > 0 && k == 0) {
+        free(out);
+        *err = xstrdup("codex model catalog response contains no usable model slugs");
+        return -1;
+    }
     *ids = out;
     *n = k;
     return 0;

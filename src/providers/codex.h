@@ -8,6 +8,10 @@
  * Returns NULL on failure (prints cause to stderr). */
 struct provider *codex_provider_new(const char *name);
 
+/* Diagnostic for a failed codex model-catalog fetch, keyed by HTTP status
+ * (0 = never reached). Exposed for unit tests. Heap-owned; caller frees. */
+char *codex_models_error(long status);
+
 extern const struct provider_factory PROVIDER_CODEX;
 
 #endif /* HAX_CODEX_H */

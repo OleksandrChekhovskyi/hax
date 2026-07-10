@@ -290,3 +290,20 @@ char *format_api_error(long status, const char *body)
     free(unwrapped);
     return out;
 }
+
+char *format_models_error(const char *name, const char *base_url, int has_key, long status)
+{
+    if (!name)
+        name = "provider";
+    if (status == 401 || status == 403) {
+        if (has_key)
+            return xasprintf("%s rejected the API key (HTTP %ld) — check it and retry", name,
+                             status);
+        return xasprintf("%s requires an API key (HTTP %ld) — none is configured", name, status);
+    }
+    if (status >= 200 && status < 300)
+        return xasprintf("%s sent an empty or truncated /models response", name);
+    if (status != 0)
+        return xasprintf("listing %s models failed (HTTP %ld)", name, status);
+    return xasprintf("could not reach %s at %s", name, base_url);
+}

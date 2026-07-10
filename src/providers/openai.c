@@ -503,7 +503,8 @@ static char *resolve_roundtrip_field(const char *prefix, const char *preset_defa
 /* GET <base_url>/models and collect the `data[].id` slugs. The OpenAI
  * /v1/models shape is shared across the whole compat family — real OpenAI,
  * llama.cpp, ollama, OpenRouter — so this one parser serves every shim. */
-static int openai_list_models(struct provider *p, char ***ids, size_t *n)
+static int openai_list_models(struct provider *p, char ***ids, size_t *n, char **err,
+                              http_tick_cb tick, void *tick_user)
 {
     struct openai *o = (struct openai *)p;
     *ids = NULL;
@@ -512,29 +513,40 @@ static int openai_list_models(struct provider *p, char ***ids, size_t *n)
     char *auth = o->api_key ? xasprintf("Authorization: Bearer %s", o->api_key) : NULL;
     const char *headers[] = {auth, NULL};
     char *body = NULL;
-    int rc = http_get(url, auth ? headers : NULL, MODEL_LIST_TIMEOUT_S, NULL, NULL, &body, NULL);
+    long status = 0;
+    int rc =
+        http_get(url, auth ? headers : NULL, MODEL_LIST_TIMEOUT_S, tick, tick_user, &body, &status);
     free(auth);
     free(url);
     if (rc != 0) {
+        *err = format_models_error(p->name, o->base_url, o->api_key != NULL, status);
         free(body);
         return -1;
     }
     json_t *root = json_loads(body, 0, NULL);
     free(body);
-    if (!root)
+    if (!root) {
+        *err = xasprintf("%s /models response is not valid JSON", p->name ? p->name : "provider");
         return -1;
-    /* A 2xx body that parsed but carries no model array is a reachable
-     * server with an empty catalog, not a fetch failure — ollama returns
-     * "data": null (rather than []) when nothing is pulled. Report it as
-     * zero models (return 0, *n stays 0) so the caller can say "no models
-     * available" instead of "could not reach". */
+    }
+    /* An empty "data" array — or ollama's "data": null when nothing is
+     * pulled — is a reachable server with a legitimately empty catalog:
+     * report zero models so the caller says "no models available". Any
+     * other non-array shape (missing field, object, a 200 error payload
+     * like {"message":...}) is a malformed catalog, not an empty one. */
     json_t *data = json_object_get(root, "data");
-    if (!json_is_array(data)) {
+    if (json_is_null(data) || (json_is_array(data) && json_array_size(data) == 0)) {
         json_decref(root);
         return 0;
     }
+    const char *name = p->name ? p->name : "provider";
+    if (!json_is_array(data)) {
+        json_decref(root);
+        *err = xasprintf("%s /models response has no model list", name);
+        return -1;
+    }
     size_t cnt = json_array_size(data);
-    char **out = cnt ? xmalloc(cnt * sizeof(*out)) : NULL;
+    char **out = xmalloc(cnt * sizeof(*out));
     size_t k = 0;
     for (size_t i = 0; i < cnt; i++) {
         json_t *id = json_object_get(json_array_get(data, i), "id");
@@ -542,6 +554,12 @@ static int openai_list_models(struct provider *p, char ***ids, size_t *n)
             out[k++] = xstrdup(json_string_value(id));
     }
     json_decref(root);
+    /* Entries existed but none carried a usable id — malformed, not empty. */
+    if (k == 0) {
+        free(out);
+        *err = xasprintf("%s /models response contains no usable model ids", name);
+        return -1;
+    }
     *ids = out;
     *n = k;
     return 0;

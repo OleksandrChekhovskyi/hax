@@ -423,7 +423,8 @@ static int anthropic_stream(struct provider *p, const struct context *ctx, const
 /* GET <base_url>/models and collect data[].id. Anthropic's catalog shares the
  * OpenAI-style {"data":[{"id":...}]} shape, as does llama-server's compat
  * endpoint, so one parser serves both shims. */
-static int anthropic_list_models(struct provider *p, char ***ids, size_t *n)
+static int anthropic_list_models(struct provider *p, char ***ids, size_t *n, char **err,
+                                 http_tick_cb tick, void *tick_user)
 {
     struct anthropic *a = (struct anthropic *)p;
     *ids = NULL;
@@ -438,25 +439,38 @@ static int anthropic_list_models(struct provider *p, char ***ids, size_t *n)
     headers[hi++] = ver_hdr;
     headers[hi] = NULL;
     char *body = NULL;
-    int rc = http_get(url, headers, MODEL_LIST_TIMEOUT_S, NULL, NULL, &body, NULL);
+    long status = 0;
+    int rc = http_get(url, headers, MODEL_LIST_TIMEOUT_S, tick, tick_user, &body, &status);
     free(key_hdr);
     free(ver_hdr);
     free(url);
     if (rc != 0) {
+        *err = format_models_error(p->name, a->base_url, a->api_key != NULL, status);
         free(body);
         return -1;
     }
     json_t *root = json_loads(body, 0, NULL);
     free(body);
-    if (!root)
+    if (!root) {
+        *err = xasprintf("%s /models response is not valid JSON", p->name ? p->name : "provider");
         return -1;
+    }
+    /* Same shape policy as openai_list_models: null / empty array = a
+     * legitimately empty catalog; any other non-array shape, or entries
+     * with no usable ids, = a malformed one. */
     json_t *data = json_object_get(root, "data");
-    if (!json_is_array(data)) {
+    if (json_is_null(data) || (json_is_array(data) && json_array_size(data) == 0)) {
         json_decref(root);
         return 0;
     }
+    const char *name = p->name ? p->name : "provider";
+    if (!json_is_array(data)) {
+        json_decref(root);
+        *err = xasprintf("%s /models response has no model list", name);
+        return -1;
+    }
     size_t cnt = json_array_size(data);
-    char **out = cnt ? xmalloc(cnt * sizeof(*out)) : NULL;
+    char **out = xmalloc(cnt * sizeof(*out));
     size_t k = 0;
     for (size_t i = 0; i < cnt; i++) {
         json_t *id = json_object_get(json_array_get(data, i), "id");
@@ -464,6 +478,11 @@ static int anthropic_list_models(struct provider *p, char ***ids, size_t *n)
             out[k++] = xstrdup(json_string_value(id));
     }
     json_decref(root);
+    if (k == 0) {
+        free(out);
+        *err = xasprintf("%s /models response contains no usable model ids", name);
+        return -1;
+    }
     *ids = out;
     *n = k;
     return 0;

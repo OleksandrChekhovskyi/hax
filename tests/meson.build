@@ -24,6 +24,7 @@ test_sources = [
 
     'providers/test_anthropic_events.c',
     'providers/test_anthropic_messages.c',
+    'providers/test_codex.c',
     'providers/test_codex_events.c',
     'providers/test_config_provider.c',
     'providers/test_openai_events.c',

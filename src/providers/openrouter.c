@@ -6,11 +6,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "busy.h"
 #include "config.h"
 #include "openai.h"
 #include "probe.h"
 #include "util.h"
-#include "render/spinner.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
 #include "transport/http.h"
@@ -131,18 +131,23 @@ static int openrouter_query_usage(struct provider *p)
     char *auth_hdr = xasprintf("Authorization: Bearer %s", key);
     const char *headers[] = {auth_hdr, "Accept: application/json", NULL};
 
-    /* Same UX as the codex /usage fetch: bounded round-trips behind a
-     * spinner (a no-op on non-TTY stdout, so scripted use stays clean). */
-    struct spinner *sp = spinner_new("fetching usage...");
-    spinner_show(sp);
+    /* Same UX as the codex /usage fetch: bounded round-trips under a busy
+     * window — spinner + Esc cancel, both no-ops on non-TTY stdout. */
+    struct busy *b = busy_begin("fetching usage...");
     char *body = NULL, *credits_body = NULL;
     long status = 0;
-    int rc = http_get(OPENROUTER_KEY_ENDPOINT, headers, 30, NULL, NULL, &body, &status);
+    int rc = http_get(OPENROUTER_KEY_ENDPOINT, headers, 30, busy_tick, NULL, &body, &status);
     if (rc == 0)
-        http_get(OPENROUTER_CREDITS_ENDPOINT, headers, 30, NULL, NULL, &credits_body, NULL);
-    spinner_hide(sp);
-    spinner_free(sp);
+        http_get(OPENROUTER_CREDITS_ENDPOINT, headers, 30, busy_tick, NULL, &credits_body, NULL);
+    int cancelled = busy_end(b);
     free(auth_hdr);
+    if (cancelled) {
+        /* User abandoned the wait — busy_end left the [interrupted]
+         * marker; not a failure, no diagnostic. */
+        free(body);
+        free(credits_body);
+        return -1;
+    }
     if (rc != 0 || !body) {
         if (status == 401)
             ui_error("OpenRouter rejected the API key (401) — check OPENROUTER_API_KEY");

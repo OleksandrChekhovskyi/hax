@@ -4,12 +4,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "util.h"
 #include "agent.h"
+#include "busy.h"
 #include "config.h"
 #include "provider.h"
 #include "providers/registry.h"
 #include "render/render_ctx.h"
-#include "util.h"
 #include "system/bg_job.h"
 #include "terminal/picker.h"
 #include "terminal/ui.h"
@@ -128,12 +129,24 @@ static int cmp_model_id(const void *a, const void *b)
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
+/* Outcome of one picker step. The chained flows treat these differently:
+ * cancel aborts the whole command with nothing changed, "no picker to
+ * show" continues on the provider's defaults, and a failure also rolls a
+ * provider switch back. */
+enum pick_status {
+    PICK_MADE,      /* a choice was made; the value out-param is set */
+    PICK_CANCELLED, /* user cancelled the picker (Escape / non-tty) */
+    PICK_NONE,      /* no picker to show: can't enumerate / no ladder */
+    PICK_FAILED,    /* enumeration failed — provider looks unusable now */
+};
+
 /* Run the model picker for `p` (which need not be the live provider — the
  * /provider flow picks against the prospective new one before committing).
- * Returns a malloc'd model id, or NULL on cancel or when the provider can't
- * enumerate models (a note is printed in the latter case). `cur` marks the
- * row currently in use, if it appears in the list. */
-static char *choose_model(struct agent_state *st, struct provider *p, const char *cur)
+ * Returns a malloc'd model id iff *status is PICK_MADE, else NULL with
+ * *status saying why (a note/error was already printed for NONE/FAILED).
+ * `cur` marks the row currently in use, if it appears in the list. */
+static char *choose_model(struct agent_state *st, struct provider *p, const char *cur,
+                          enum pick_status *status)
 {
     const char *name = p->name ? p->name : "?";
     char **ids = NULL;
@@ -146,11 +159,40 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
     if (!p->list_models) {
         ui_note("%s can't list models — set one with HAX_MODEL or in config", name);
         st->r->disp.trail = 1;
+        *status = PICK_NONE;
         return NULL;
     }
-    if (p->list_models(p, &ids, &n) != 0) {
-        ui_note("could not reach %s to list models — is it running?", name);
+    /* The catalog fetch blocks the foreground for up to the adapter's
+     * timeout (OpenRouter's list runs to hundreds of entries): run it
+     * under a busy window so a spinner shows and Esc cancels during the
+     * fetch, not just in the picker. */
+    struct busy *b = busy_begin("fetching models...");
+    char *err = NULL;
+    int rc = p->list_models(p, &ids, &n, &err, busy_tick, NULL);
+    if (busy_end(b)) {
+        /* Esc during the fetch aborts like Esc in the picker; a result
+         * that landed in the same instant is discarded, not committed.
+         * busy_end printed the [interrupted] marker — mark the trail
+         * like the other printed-note exits here. */
+        for (size_t i = 0; i < n; i++)
+            free(ids[i]);
+        free(ids);
+        free(err);
         st->r->disp.trail = 1;
+        *status = PICK_CANCELLED;
+        return NULL;
+    }
+    if (rc != 0) {
+        /* The adapter's diagnostic names the endpoint and remedy ("codex
+         * token expired — …"); the bare fallback only covers an adapter
+         * that left *err unset. Red — same class as a failed /usage fetch. */
+        if (err)
+            ui_error("%s", err);
+        else
+            ui_error("failed to list models for %s", name);
+        st->r->disp.trail = 1;
+        *status = PICK_FAILED;
+        free(err);
         free(ids);
         return NULL;
     }
@@ -160,6 +202,7 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
          * fact without prescribing a fix the provider may not support. */
         ui_note("%s has no models available", name);
         st->r->disp.trail = 1;
+        *status = PICK_FAILED;
         free(ids);
         return NULL;
     }
@@ -170,6 +213,7 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
         char *only = xstrdup(ids[0]);
         free(ids[0]);
         free(ids);
+        *status = PICK_MADE;
         return only;
     }
 
@@ -193,6 +237,7 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
         .title = "select a model", .items = items, .n = n, .initial = initial};
     long sel = picker_run(&opts);
     char *chosen = (sel >= 0) ? xstrdup(ids[sel]) : NULL;
+    *status = chosen ? PICK_MADE : PICK_CANCELLED;
 
     free(items);
     for (size_t i = 0; i < n; i++)
@@ -201,17 +246,15 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
     return chosen;
 }
 
-/* Run the effort picker for `p`. Returns 1 when a choice was made (including
- * "default"), 0 on cancel or when the provider has no effort ladder. On a
- * made choice *out is set: NULL for "default" (clear the pick → provider /
- * config default), or a malloc'd effort value.
+/* Run the effort picker for `p`. On PICK_MADE *out is set: NULL for the
+ * "default" row (clear the pick → provider / config default), or a malloc'd
+ * effort value. PICK_NONE = no effort ladder, PICK_CANCELLED = Escape.
  *
- * `announce` controls the no-ladder note: print it only when the user asked
- * for effort directly (/effort), not when this runs as the automatic tail
- * of /model or /provider — there, a provider without effort levels should
- * just be skipped silently. */
-static int choose_effort(struct agent_state *st, struct provider *p, const char *cur, char **out,
-                         int announce)
+ * `announce` prints the no-ladder note only when the user asked for effort
+ * directly (/effort); the chained tails of /model and /provider skip a
+ * no-ladder provider silently. */
+static enum pick_status choose_effort(struct agent_state *st, struct provider *p, const char *cur,
+                                      char **out, int announce)
 {
     *out = NULL;
     const char *const *eff = NULL;
@@ -222,7 +265,7 @@ static int choose_effort(struct agent_state *st, struct provider *p, const char 
                     p->name ? p->name : "?");
             st->r->disp.trail = 1;
         }
-        return 0;
+        return PICK_NONE;
     }
 
     struct picker_item *items = xmalloc((n + 1) * sizeof(*items));
@@ -245,13 +288,13 @@ static int choose_effort(struct agent_state *st, struct provider *p, const char 
     free(items);
 
     if (sel < 0)
-        return 0; /* cancel — no change */
+        return PICK_CANCELLED;
     /* sel == 0 is "default" (leave *out NULL → clear); sel > 0 is a value.
      * "default" differs from the ladder's "none": none sends none, default
      * sends nothing and lets the provider choose. */
     if (sel > 0)
         *out = xstrdup(eff[sel - 1]);
-    return 1;
+    return PICK_MADE;
 }
 
 /* Record a selection: session overrides for the members actually picked, and
@@ -306,8 +349,9 @@ void select_effort(struct agent_state *st)
         return;
     }
     char *e;
-    /* Explicit /effort: announce when the provider has no effort levels. */
-    if (!choose_effort(st, p, st->sess->reasoning_effort, &e, 1))
+    /* Explicit /effort: announce when the provider has no effort levels.
+     * Only a made pick commits; cancel and no-ladder both change nothing. */
+    if (choose_effort(st, p, st->sess->reasoning_effort, &e, 1) != PICK_MADE)
         return;
     /* The provider is pinned alongside the effort, for the same reason
      * select_model does: an explicit setting against an auto-selected provider
@@ -325,17 +369,19 @@ void select_effort(struct agent_state *st)
 
 void select_model(struct agent_state *st)
 {
-    /* Standalone: a cancelled model pick aborts with no change. A made pick
-     * chains into effort (also cancellable) and then applies once. */
+    /* Escape anywhere in the chain (model picker or the chained effort
+     * picker) aborts the whole /model with no change; a completed chain
+     * applies once. */
     struct provider *p = (struct provider *)st->provider;
     if (!p) {
         ui_note("no provider selected — use /provider to choose one first");
         st->r->disp.trail = 1;
         return;
     }
-    char *m = choose_model(st, p, st->sess->model);
+    enum pick_status ms;
+    char *m = choose_model(st, p, st->sess->model, &ms);
     if (!m)
-        return;
+        return; /* cancelled or no menu — notes already printed */
 
     /* Run the chained effort pick BEFORE committing. commit_selection persists
      * into the state tier, which deep-copies and frees the old tier object —
@@ -344,17 +390,23 @@ void select_model(struct agent_state *st)
      * commit would be a use-after-free, so gather both picks first, then commit
      * once. Skips silently if this provider has no ladder. */
     char *e = NULL;
-    int chose_effort = choose_effort(st, p, st->sess->reasoning_effort, &e, 0);
+    enum pick_status es = choose_effort(st, p, st->sess->reasoning_effort, &e, 0);
+    if (es == PICK_CANCELLED) {
+        /* Escape mid-chain: discard the model pick too — nothing commits. */
+        free(m);
+        return;
+    }
 
-    /* The provider is pinned alongside the model. Without this, a model picked
-     * against an auto-selected (and thus unpinned) provider would leave
-     * `provider` unset, so the next launch would re-auto-select and warn
-     * despite the user having explicitly configured a model. Idempotent when
-     * the provider is already pinned to the same value. A made effort pick's
-     * "default" row → sentinel, not delete (see select_effort); a skipped
-     * pick → NULL, kept unless the pin changes the stored provider. */
+    /* The provider is pinned alongside the model — otherwise a model picked
+     * against an auto-selected (unpinned) provider would make the next
+     * launch re-auto-select and warn. Effort commits as the picked value,
+     * or the sentinel for both the "default" row and a no-ladder skip: a
+     * provider without an effort ladder shouldn't be sent one, so the pin
+     * resets to "provider default" instead of keeping (or letting a
+     * lower-tier env/config value leak into) an effort it never advertised.
+     * Same resolution /provider applies on a switch. */
     char *pid = current_provider_id(p);
-    commit_selection(pid, m, chose_effort ? (e ? e : CONFIG_VALUE_DEFAULT) : NULL);
+    commit_selection(pid, m, e ? e : CONFIG_VALUE_DEFAULT);
     free(pid);
     free(m);
     free(e);
@@ -380,6 +432,11 @@ void select_provider(struct agent_state *st)
     memcpy(facs, all, n * sizeof(*facs));
     qsort(facs, n, sizeof(*facs), cmp_factory_name);
 
+    /* Esc is not observed during the pre-pick phases — this probe, the
+     * dim-row recheck at commit, provider construction. All are bounded by
+     * the short probe/connect timeouts (a couple of seconds worst case),
+     * so cancellation plumbing isn't worth it there; Esc coverage starts
+     * with the pickers and the busy-window catalog fetch. */
     int *avail = xmalloc(n * sizeof(*avail));
     const char **reason = xmalloc(n * sizeof(*reason));
     probe_availability(facs, n, avail, reason);
@@ -462,28 +519,39 @@ void select_provider(struct agent_state *st)
     }
 
     /* Choose model and effort *against the new provider* but DON'T commit
-     * the switch yet — so an unusable result (no model, and no default to
-     * fall back on) leaves the current provider untouched instead of
-     * stranding the session on a half-configured backend. The new provider
-     * isn't live during these picks (choose_* take it explicitly), so its
-     * list_models/list_efforts drive the menus correctly. */
-    char *m = choose_model(st, newp, NULL);
+     * yet: Escape at either picker or an unusable backend must leave the
+     * current provider untouched. Only PICK_NONE (no enumerate hook — no
+     * picker shown, nothing cancelled) falls back to newp's default model;
+     * cancel and failure roll the whole switch back. A cancel bails
+     * silently — Esc is deliberate, and a killed fetch already left its
+     * [interrupted] marker; the "staying on" note is for failures, where
+     * it follows the red diagnostic. newp isn't live during these picks,
+     * so choose_* take it explicitly. */
+    enum pick_status ms;
+    char *m = choose_model(st, newp, NULL, &ms);
     int has_default = newp->default_model && *newp->default_model;
-    if (!m && !has_default) {
-        ui_note("staying on %s — no model chosen for %s", cur ? cur : "?", f->name);
-        st->r->disp.trail = 1;
+    if (!m && (ms != PICK_NONE || !has_default)) {
+        if (ms != PICK_CANCELLED) {
+            ui_note("staying on %s — no model chosen for %s", cur ? cur : "?", f->name);
+            st->r->disp.trail = 1;
+        }
         newp->destroy(newp);
         config_override_restore(ov);
         free(cur);
         return;
     }
-    config_override_state_free(ov); /* committing below — keep the side effects */
-    /* Pick effort against newp (cur=NULL). A switch always resets effort: to
-     * the chosen value, or — for the "default" row, a no-ladder provider, or a
-     * cancel — to newp's own default via the sentinel. So only whether an
-     * explicit value came back matters, not the made/skipped return. */
+    /* Escape at the effort step aborts the switch too, silently (see
+     * above). A completed switch resets effort to the pick, or — "default"
+     * row / no ladder — to newp's own default via the sentinel. */
     char *e = NULL;
-    choose_effort(st, newp, NULL, &e, 0);
+    if (choose_effort(st, newp, NULL, &e, 0) == PICK_CANCELLED) {
+        newp->destroy(newp);
+        config_override_restore(ov);
+        free(cur);
+        free(m);
+        return;
+    }
+    config_override_state_free(ov); /* committing below — keep the side effects */
 
     /* Commit: a provider switch invalidates the old model/effort (they belong
      * to the old backend), so set the new model and effort to the picked value

@@ -233,23 +233,29 @@ struct provider {
      * totals, etc.). NULL means "/usage is not supported on this
      * provider". Returns 0 on success, -1 on fetch/parse failure (the
      * implementation is expected to have already printed a diagnostic
-     * to stderr in that case). */
+     * to stderr in that case). Implementations run their blocking
+     * fetches under a busy window (busy.h) so a spinner shows and Esc
+     * cancels; a cancelled fetch returns -1 with no diagnostic. */
     int (*query_usage)(struct provider *p);
     /* Optional. Discover the model ids this provider can serve, for the
-     * runtime model picker (/model). On success returns 0 with *ids a
-     * freshly-allocated array of *n heap-owned strings (caller frees each
-     * element then the array; *n may be 0). Returns -1 on any failure — no
-     * such endpoint, network error, unparseable catalog — with *ids=NULL.
-     * When no menu can be built (this returns -1, *n==0, or the hook is
-     * NULL) the selector prints an actionable note and skips the model
-     * step: there is no free-text entry today, so /model leaves the model
-     * unchanged and /provider keeps the current provider unless the new one
-     * supplies a default_model. In practice the OpenAI-compatible engines
-     * hax targets (vLLM, llama.cpp, ollama, TGI, …) all serve /v1/models,
-     * so this is mostly a transient state (server momentarily unreachable).
-     * May block on a network round-trip, so callers run it off the
-     * foreground path. NULL hook means the provider can't enumerate models. */
-    int (*list_models)(struct provider *p, char ***ids, size_t *n);
+     * runtime model picker (/model). Returns 0 with *ids a freshly-allocated
+     * array of *n heap-owned strings (caller frees; *n may be 0), or -1 on
+     * any failure with *ids=NULL and *err set to a malloc'd user-actionable
+     * diagnostic ("codex token expired — …", "could not reach <name> at
+     * <url>") that the caller prints and frees. Set *err on every failure
+     * path: only the adapter can name the endpoint and remedy; the caller's
+     * fallback for an unset *err is a bare generic line. When no menu can
+     * be built the selector prints a note and skips the model step; a
+     * failure (-1) or an empty catalog (*n==0) also rolls a /provider
+     * switch back entirely, while a NULL hook — the provider can't
+     * enumerate models — lets the switch proceed on the new provider's
+     * default_model. The picker calls this synchronously on the foreground
+     * path, so implementations must bound the network round-trip with a
+     * short timeout AND thread `tick` (same shape as stream()'s, may be
+     * NULL) into it — the picker cancels the fetch through it when the
+     * user presses Esc. */
+    int (*list_models)(struct provider *p, char ***ids, size_t *n, char **err, http_tick_cb tick,
+                       void *tick_user);
     /* Optional. Reasoning-effort wire values this provider accepts (e.g.
      * "low", "high"), for the runtime effort picker (/effort). Points *out
      * at a borrowed array (typically static, owned by the provider; valid

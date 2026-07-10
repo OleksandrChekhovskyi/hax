@@ -26,4 +26,18 @@
  * Always returns a heap-owned, non-NULL string. Caller frees. */
 char *format_api_error(long status, const char *body);
 
+/* Diagnostic for a failed model-catalog fetch (GET <base_url>/models) in
+ * the /model picker, keyed by the outcome http_get reported. Shared by
+ * the openai and anthropic families, whose auth/endpoint shapes agree:
+ *
+ *   401/403      — API key rejected (has_key) or required but missing
+ *   other 2xx    — server answered but http_get still failed: the body
+ *                  was empty or the transfer died mid-body
+ *   other status — plain HTTP failure, status shown
+ *   status 0     — never reached; names base_url so "server down" vs
+ *                  "wrong base_url" is self-diagnosing
+ *
+ * NULL `name` falls back to "provider". Heap-owned; caller frees. */
+char *format_models_error(const char *name, const char *base_url, int has_key, long status);
+
 #endif /* HAX_API_ERROR_H */

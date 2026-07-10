@@ -371,6 +371,53 @@ static void test_multiline_collapsed(void)
     free(m);
 }
 
+/* ---------- format_models_error ---------- */
+
+static void test_models_error_key_rejected(void)
+{
+    char *m = format_models_error("openai", "https://api.openai.com/v1", 1, 401);
+    EXPECT_STR_EQ(m, "openai rejected the API key (HTTP 401) — check it and retry");
+    free(m);
+}
+
+static void test_models_error_key_missing(void)
+{
+    char *m = format_models_error("anthropic", "https://api.anthropic.com/v1", 0, 403);
+    EXPECT_STR_EQ(m, "anthropic requires an API key (HTTP 403) — none is configured");
+    free(m);
+}
+
+static void test_models_error_empty_2xx(void)
+{
+    /* http_get fails a 2xx whose body is empty/truncated — not an HTTP
+     * error, must not render as "failed (HTTP 200)". */
+    char *m = format_models_error("llama.cpp", "http://127.0.0.1:8080/v1", 0, 200);
+    EXPECT_STR_EQ(m, "llama.cpp sent an empty or truncated /models response");
+    free(m);
+}
+
+static void test_models_error_http_status(void)
+{
+    char *m = format_models_error("openrouter", "https://openrouter.ai/api/v1", 1, 500);
+    EXPECT_STR_EQ(m, "listing openrouter models failed (HTTP 500)");
+    free(m);
+}
+
+static void test_models_error_unreachable(void)
+{
+    /* No status: never reached — the URL is the diagnosis. */
+    char *m = format_models_error("llama.cpp", "http://127.0.0.1:8080/v1", 0, 0);
+    EXPECT_STR_EQ(m, "could not reach llama.cpp at http://127.0.0.1:8080/v1");
+    free(m);
+}
+
+static void test_models_error_null_name(void)
+{
+    char *m = format_models_error(NULL, "http://x", 0, 500);
+    EXPECT_STR_EQ(m, "listing provider models failed (HTTP 500)");
+    free(m);
+}
+
 int main(void)
 {
     test_empty_body();
@@ -399,5 +446,11 @@ int main(void)
     test_transport_error_no_status();
     test_html_only_no_text();
     test_multiline_collapsed();
+    test_models_error_key_rejected();
+    test_models_error_key_missing();
+    test_models_error_empty_2xx();
+    test_models_error_http_status();
+    test_models_error_unreachable();
+    test_models_error_null_name();
     T_REPORT();
 }
