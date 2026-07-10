@@ -659,7 +659,25 @@ int agent_apply_settings(struct agent_state *st)
      * mid-session switch stays correct independent of this header.) */
     session_log_set_meta(st->slog, provider_log_name(p), s->model, s->reasoning_effort);
 
-    /* A dim "[switched to …]" line confirms the change on screen. It is a
+    /* On an empty conversation the startup banner is usually still on
+     * screen just above, boldly asserting the old settings; a dim line
+     * under it would read as subordinate to that stale header. Reprint the
+     * banner instead — the same clean-break signal /new gives — so the
+     * loudest statement on screen is the true one (this also corrects a
+     * "no provider / no model" startup banner after the pick that fixed
+     * it). render_open_block supplies the leading gap the banner expects;
+     * its raw printf output ends on a fresh line, so resync the trail the
+     * same way the dispatcher does for raw-output handlers. */
+    if (s->n_items == 0) {
+        render_open_block(st->r);
+        agent_print_banner(p, s);
+        st->r->disp.trail = 1;
+        fflush(stdout);
+        return 0;
+    }
+
+    /* Mid-conversation, a dim "[switched to …]" line confirms the change
+     * on screen — a banner here would falsely imply a reset. It is a
      * UI hint only — deliberately NOT appended to s->items or the logs: the
      * model can't act on a settings change, so injecting it into the
      * conversation would just be context noise (and skew the transcript /

@@ -75,10 +75,12 @@ struct agent_state {
 int agent_run(struct provider **provider, const struct hax_opts *opts);
 
 /* Print the two-line startup banner: provider/model identification
- * and the key-tip line. Reused by agent_new_conversation so a fresh-
- * conversation reset shows the same banner the user saw at startup.
- * Emits a leading blank line so the banner stands clear of whatever
- * was on the terminal before. */
+ * and the key-tip line. Reused by agent_new_conversation (a fresh-
+ * conversation reset shows the same banner the user saw at startup)
+ * and by agent_apply_settings on an empty conversation (a switch
+ * before the first prompt replaces the stale startup banner rather
+ * than whispering under it). The caller emits the leading blank-line
+ * gap; the banner itself is just the two rows. */
 void agent_print_banner(const struct provider *p, const struct agent_session *s);
 
 /* Reset the live conversation to a fresh state: clear the items vector,
@@ -106,11 +108,12 @@ void agent_resume_session(struct agent_state *st, const char *path);
 void agent_set_provider(struct agent_state *st, struct provider *newp);
 
 /* Re-resolve model + reasoning effort against the current config and the
- * live provider, rebuild the system prompt, append a dim marker to history
- * (so the switch shows in the transcript and survives a resume), and print
- * a one-line confirmation. The single "apply a /provider, /model or /effort
- * change" step. Returns 0 on success, -1 when no model resolves for the
- * provider (a note is printed; history is left intact). */
+ * live provider, rebuild the system prompt, and confirm the change on
+ * screen: a dim one-line "switched to …" marker mid-conversation, or a
+ * fresh banner when the conversation is still empty (so the stale startup
+ * banner doesn't outshout the correction). The single "apply a /provider,
+ * /model or /effort change" step. Returns 0 on success, -1 when no model
+ * resolves for the provider (a note is printed; history is left intact). */
 int agent_apply_settings(struct agent_state *st);
 
 /* Summarize the live conversation and replace history with the summary,

@@ -10,6 +10,7 @@
 # the dependency carries the libcurl/jansson/threads include dirs and link
 # flags — so a test needs nothing here but its source path.
 test_sources = [
+    'test_agent.c',
     'test_agent_core.c',
     'test_agent_dispatch.c',
     'test_agent_env.c',
