@@ -349,8 +349,9 @@ static void test_default_sentinel(void)
     config_load(NULL);
     config_load_state(NULL);
 
-    /* CONFIG_VALUE_DEFAULT resolves to NULL (consumer uses its own default)
-     * and shadows lower tiers instead of falling through to them. */
+    /* CONFIG_VALUE_DEFAULT on a key without a registry default resolves to
+     * NULL (consumer uses its own default) and shadows lower tiers instead
+     * of falling through to them. */
     EXPECT(config_load("{\"model\": \"from-file\"}") == 0);
     EXPECT_STR_EQ(config_str("model"), "from-file");
     config_set_override("model", CONFIG_VALUE_DEFAULT);
@@ -369,6 +370,19 @@ static void test_default_sentinel(void)
     config_set_override("model", NULL);
     EXPECT_STR_EQ(config_str("model"), "from-env");
     unsetenv("HAX_MODEL");
+
+    /* On a key with a registry default the sentinel lands on that default
+     * instead of NULL — same shadowing of lower tiers, one definition of
+     * the default. An explicit empty value still reads verbatim (the
+     * opt-out state for settings where "" is meaningful). */
+    setenv("HAX_LLAMACPP_PORT", "9999", 1);
+    EXPECT_STR_EQ(config_str("llamacpp.port"), "9999");
+    config_set_override("llamacpp.port", CONFIG_VALUE_DEFAULT);
+    EXPECT_STR_EQ(config_str("llamacpp.port"), "8080");
+    config_set_override("llamacpp.port", "");
+    EXPECT_STR_EQ(config_str("llamacpp.port"), "");
+    config_set_override("llamacpp.port", NULL);
+    unsetenv("HAX_LLAMACPP_PORT");
 
     config_load(NULL);
     config_load_state(NULL);

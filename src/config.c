@@ -403,38 +403,39 @@ static int binding_allows(json_t *tier, const char *key)
     return active && *active && strcmp(active, bound) == 0;
 }
 
-/* Walk the tiers: override (session) → environment → state →
- * file → registry default. With skip_empty, an empty value counts as
- * "unset at this tier" and resolution falls through to the next one — for
- * settings whose grammar gives "" no meaning (ports, durations, bools),
- * where a stray HAX_FOO= must not shadow a configured value or produce
- * nonsense. Without it, values are returned verbatim including "". */
-/* CONFIG_VALUE_DEFAULT at a tier means "explicitly defaulted": resolution
- * stops here and yields NULL (the consumer uses its own default), shadowing
- * any value at a lower tier. Checked at every tier — including env, where a
- * literal HAX_FOO="(default)" reads the same way — so the meaning is uniform. */
-static const char *deflt(const char *v)
+/* Walk the tiers: override (session) → environment → state → file →
+ * registry default. With skip_empty, "" counts as unset at a tier and
+ * resolution falls through — for settings whose grammar gives "" no meaning
+ * (ports, durations), so a stray HAX_FOO= can't shadow a configured value.
+ * Without it, values are returned verbatim, "" included. */
+/* The CONFIG_VALUE_DEFAULT sentinel is honored at every tier (a literal
+ * HAX_FOO="(default)" too): resolution stops there, shadowing lower tiers,
+ * and yields the registry default — or NULL when the key declares none,
+ * leaving the consumer's own default in charge. */
+static const char *apply_sentinel(const char *v, const struct config_setting *s)
 {
-    return (v && strcmp(v, CONFIG_VALUE_DEFAULT) == 0) ? NULL : v;
+    if (v && strcmp(v, CONFIG_VALUE_DEFAULT) == 0)
+        return s ? s->def : NULL;
+    return v;
 }
 
 static const char *resolve(const char *key, int skip_empty)
 {
+    const struct config_setting *s = find_setting(key);
     const char *o = json_string_value(json_object_get(g_overrides, key));
     if (o && (!skip_empty || *o))
-        return deflt(o);
-    const struct config_setting *s = find_setting(key);
+        return apply_sentinel(o, s);
     if (s) {
         const char *e = getenv(s->env);
         if (e && (!skip_empty || *e))
-            return deflt(e);
+            return apply_sentinel(e, s);
     }
     const char *sel = state_get(key);
     if (sel && (!skip_empty || *sel) && binding_allows(g_state, key))
-        return deflt(sel);
+        return apply_sentinel(sel, s);
     const char *f = file_get(key);
     if (f && (!skip_empty || *f) && binding_allows(g_config, key))
-        return deflt(f);
+        return apply_sentinel(f, s);
     return s ? s->def : NULL;
 }
 

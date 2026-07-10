@@ -65,10 +65,11 @@
  */
 
 /* Sentinel value meaning "explicitly use the default". When a tier resolves
- * to this, config_str returns NULL — so the consumer falls to its own (or the
- * provider's) default — AND resolution stops there: it does NOT fall through
- * to lower tiers. It's the third state beyond "absent" (fall through to the
- * next tier) and "a value" (use it verbatim). The runtime selectors write it
+ * to this, config_str returns the registry default when the key declares one,
+ * else NULL — so the consumer falls to its own (or the provider's) default —
+ * AND resolution stops there: it does NOT fall through to lower tiers. It's
+ * the third state beyond "absent" (fall through to the next tier) and "a
+ * value" (use it verbatim). The runtime selectors write it
  * for a "use the provider's default" pick (the effort picker's "default" row,
  * or a provider switch that keeps no model), so the choice shadows a stale
  * lower-tier value (env/config) instead of letting it resurface under the new
