@@ -15,6 +15,26 @@
  * stay zero / unused in headless test contexts.
  */
 
+/* A modal Tab completer — see input_set_modal_completer in input.h.
+ * Split in two phases because the editor must know whether Tab
+ * triggers *before* it mutates the screen (erase + raw-mode drop):
+ *
+ *   match — pure, no I/O. Given the buffer state, decide whether Tab
+ *     completes here and which span [start, end) the result replaces.
+ *     Trigger policy (what a completable token looks like) lives
+ *     entirely in the implementation, not in the editor.
+ *   pick — modal. Runs with the edit area erased and the terminal in
+ *     cooked mode; owns the tty for the duration (fzf, a picker, ...).
+ *     Receives the matched span's text and returns the malloc'd
+ *     replacement, or NULL to leave the buffer untouched.
+ */
+struct input_modal_completer {
+    int (*match)(const char *buf, size_t len, size_t cursor, size_t *start, size_t *end,
+                 void *user);
+    char *(*pick)(const char *token, void *user);
+    void *user;
+};
+
 struct input {
     /* current edit buffer (NUL-terminated, may contain '\n') */
     char *buf;
@@ -63,6 +83,11 @@ struct input {
      * NULL = Ctrl-T is a no-op. */
     void (*transcript_cb)(void *user);
     void *transcript_user;
+
+    /* Modal Tab completer (input.c only) — caller-owned, must outlive
+     * the editor (typically a const static). NULL = Tab always inserts
+     * a literal tab. */
+    const struct input_modal_completer *completer;
 };
 
 /* Result of input_core_compute_layout. All fields are 0-indexed offsets
@@ -77,6 +102,11 @@ struct input_layout {
 /* ---- buffer ---- */
 void input_core_buf_set(struct input *in, const char *s);
 void input_core_buf_insert(struct input *in, const char *bytes, size_t n);
+
+/* Replace buf[start..end) with `text` (NULL = delete the span), leaving
+ * the cursor right after the inserted text. No-op when the span is out
+ * of range. */
+void input_core_replace_span(struct input *in, size_t start, size_t end, const char *text);
 
 /* ---- motions / edits (operate on the buffer at in->cursor) ---- */
 size_t input_core_line_start(const struct input *in);

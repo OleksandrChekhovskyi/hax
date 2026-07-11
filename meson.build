@@ -42,6 +42,7 @@ sources = files(
     'src/catalog.c',
     'src/compact.c',
     'src/config.c',
+    'src/file_mention.c',
     'src/oneshot.c',
     'src/select.c',
     'src/session.c',

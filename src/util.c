@@ -128,6 +128,21 @@ char *xasprintf(const char *fmt, ...)
     return p;
 }
 
+char *shell_single_quote(const char *s)
+{
+    struct buf b;
+    buf_init(&b);
+    buf_append(&b, "'", 1);
+    for (; s && *s; s++) {
+        if (*s == '\'')
+            buf_append_str(&b, "'\\''");
+        else
+            buf_append(&b, s, 1);
+    }
+    buf_append(&b, "'", 1);
+    return buf_steal(&b);
+}
+
 void gen_uuid_v4(char out[37])
 {
     uint8_t b[16];

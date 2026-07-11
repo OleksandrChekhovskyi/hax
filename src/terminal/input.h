@@ -30,6 +30,11 @@
  *   - Ctrl-T invokes a caller-supplied transcript handler (see
  *     input_set_transcript_cb) — typically pipes a full conversation
  *     view through $PAGER. The buffer is preserved.
+ *   - Tab consults a caller-registered modal completer (see
+ *     input_set_modal_completer): when its match phase reports a
+ *     completable span, its pick phase — typically an interactive file
+ *     picker — takes over the terminal and the result replaces the
+ *     span. Otherwise Tab inserts a literal tab.
  *   - Standard motions: arrows, Home/End, Ctrl-A/E/B/F, backspace,
  *     Delete, Ctrl-H/K/U/W, Ctrl-L (clear screen + redraw).
  *   - Bracketed paste is enabled; pasted blocks (incl. newlines) insert
@@ -84,6 +89,16 @@ void input_history_open(struct input *in, const char *path);
  * implementation popens a pager and pipes content to it. NULL `fn`
  * disables the binding. */
 void input_set_transcript_cb(struct input *in, void (*fn)(void *user), void *user);
+
+/* Register a modal Tab completer (full contract on the struct in
+ * input_core.h: pure `match` decides whether Tab completes and which
+ * span the result replaces; modal `pick` owns the terminal and returns
+ * the replacement). The editor stores the pointer, so `mc` must outlive
+ * the editor — typically a const static exported by the implementation
+ * (see file_mention_completer). NULL unregisters; Tab then always
+ * inserts a literal tab. */
+struct input_modal_completer;
+void input_set_modal_completer(struct input *in, const struct input_modal_completer *mc);
 
 /* Convenience wrapper: open the conventional per-user history file at
  * $XDG_STATE_HOME/hax/history (default $HOME/.local/state/hax/history),

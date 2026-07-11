@@ -13,6 +13,7 @@
 #include "catalog.h"
 #include "compact.h"
 #include "config.h"
+#include "file_mention.h"
 #include "session.h"
 #include "slash.h"
 #include "tool.h"
@@ -1202,6 +1203,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
         .n_tools = sess.n_tools,
     };
     input_set_transcript_cb(input, show_transcript_cb, &tv);
+    input_set_modal_completer(input, &file_mention_completer);
     /* HAX_TRANSCRIPT — append-only mirror of the Ctrl-T view. NULL when
      * the env var is unset; all transcript_log_* entry points are
      * NULL-safe so the call sites don't need a guard. */

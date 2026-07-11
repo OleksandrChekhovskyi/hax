@@ -12,6 +12,7 @@
 
 #include "config.h"
 #include "util.h"
+#include "system/fs.h"
 #include "system/path.h"
 #include "text/utf8_sanitize.h"
 
@@ -55,42 +56,17 @@ static const struct probed_cmd PROBED_COMMANDS[] = {
 };
 static const size_t N_PROBED_COMMANDS = sizeof(PROBED_COMMANDS) / sizeof(PROBED_COMMANDS[0]);
 
-/* Walk $PATH and check whether `name` is an executable regular file in
- * any of its entries. Only absolute PATH entries are considered: empty
- * entries (POSIX "the current directory"), `.`, and any other relative
- * form are skipped, because anything cwd-relative could pick up a
- * project-local binary and we'd then advertise it as a host utility —
- * confusing at best, and a way to steer the model toward repo-provided
- * commands at worst. The S_ISREG guard matters too: access(X_OK)
- * returns success for searchable directories, so a PATH entry containing
- * a directory named `rg` would otherwise make us claim rg is installed
- * even though /bin/sh -c rg can't run it. No subprocess: just stat +
- * access, microseconds total. */
+/* $PATH probe via fs_which — absolute PATH entries only, executable
+ * regular files only (see fs.h for the rationale; both guards matter
+ * here so we never advertise a host utility that /bin/sh -c couldn't
+ * actually run). No subprocess: just stat + access, microseconds. */
 static int have_command(const char *name)
 {
-    const char *path = getenv("PATH");
-    if (!path || !*path)
+    char *p = fs_which(name);
+    if (!p)
         return 0;
-
-    const char *p = path;
-    while (*p) {
-        const char *colon = strchr(p, ':');
-        size_t dirlen = colon ? (size_t)(colon - p) : strlen(p);
-        if (dirlen > 0 && p[0] == '/' && dirlen < PATH_MAX - 1 - strlen(name) - 1) {
-            char candidate[PATH_MAX];
-            int n = snprintf(candidate, sizeof(candidate), "%.*s/%s", (int)dirlen, p, name);
-            if (n > 0 && (size_t)n < sizeof(candidate)) {
-                struct stat st;
-                if (stat(candidate, &st) == 0 && S_ISREG(st.st_mode) &&
-                    access(candidate, X_OK) == 0)
-                    return 1;
-            }
-        }
-        if (!colon)
-            break;
-        p = colon + 1;
-    }
-    return 0;
+    free(p);
+    return 1;
 }
 
 /* Walk cwd → filesystem root, returning a malloc'd path to the first

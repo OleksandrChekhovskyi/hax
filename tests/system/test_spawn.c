@@ -157,6 +157,93 @@ static void test_pipe_early_child_exit_does_not_kill_parent(void)
     EXPECT(WIFEXITED(rc));
 }
 
+/* ---------------- spawn_pipe_open_read ---------------- */
+
+static void test_pipe_read_child_stdout(void)
+{
+    struct spawn_pipe sp;
+    EXPECT(spawn_pipe_open_read(&sp, "printf 'picked/path.c\\n'") == 0);
+    char line[64];
+    EXPECT(fgets(line, sizeof(line), sp.r) != NULL);
+    EXPECT(strcmp(line, "picked/path.c\n") == 0);
+    int rc = spawn_pipe_close(&sp);
+    EXPECT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0);
+}
+
+static void test_pipe_read_nonzero_exit(void)
+{
+    struct spawn_pipe sp;
+    EXPECT(spawn_pipe_open_read(&sp, "exit 42") == 0);
+    char line[8];
+    EXPECT(fgets(line, sizeof(line), sp.r) == NULL); /* EOF, no output */
+    int rc = spawn_pipe_close(&sp);
+    EXPECT(WIFEXITED(rc) && WEXITSTATUS(rc) == 42);
+}
+
+static void test_pipe_read_rejects_bad_args(void)
+{
+    EXPECT(spawn_pipe_open_read(NULL, "true") == -1);
+    struct spawn_pipe sp;
+    EXPECT(spawn_pipe_open_read(&sp, NULL) == -1);
+    EXPECT(spawn_pipe_close(&sp) == 0); /* zeroed by the failed open: no-op */
+}
+
+/* The reason this helper exists over popen(): the child must get
+ * default SIGINT even while the parent (spawn_parent_ignore) ignores
+ * it — popen's child inherits SIG_IGN across exec and shrugs off
+ * terminal Ctrl-C. `kill -INT $$` self-signals the shell: at default
+ * disposition it dies by SIGINT; with inherited ignore it would fall
+ * through and exit 0, failing the test. */
+static void test_pipe_read_child_sigint_default(void)
+{
+    struct spawn_pipe sp;
+    EXPECT(spawn_pipe_open_read(&sp, "kill -INT $$; exit 0") == 0);
+    int rc = spawn_pipe_close(&sp);
+    EXPECT(WIFSIGNALED(rc));
+    EXPECT(WTERMSIG(rc) == SIGINT);
+}
+
+/* Early close tears down a still-streaming producer via SIGPIPE — the
+ * fzf-exits-before-the-file-walk-finishes case. */
+static void test_pipe_read_early_close_kills_writer(void)
+{
+    struct spawn_pipe sp;
+    EXPECT(spawn_pipe_open_read(&sp, "while :; do echo x; done") == 0);
+    char line[8];
+    EXPECT(fgets(line, sizeof(line), sp.r) != NULL);
+    int rc = spawn_pipe_close(&sp);
+    EXPECT(WIFSIGNALED(rc));
+    EXPECT(WTERMSIG(rc) == SIGPIPE);
+}
+
+/* With stdout closed, pipe() hands out fd 1, so the parent's read end
+ * collides with the child's target stdout. The child must drop the
+ * parent's end *before* dup2'ing its own onto fd 1 — closing it after
+ * would re-close the freshly installed stdout and lose all output.
+ * Runs in a fork so the closed fd 1 can't disturb the test process;
+ * results come back via the exit code (2 = open failed, 1 = bad read
+ * or child status, 0 = ok), like test_redirect_null_stdin_is_eof. */
+static void test_pipe_read_survives_closed_stdout(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(STDOUT_FILENO);
+        struct spawn_pipe sp;
+        if (spawn_pipe_open_read(&sp, "echo hi") != 0)
+            _exit(2);
+        char line[8];
+        int ok = fgets(line, sizeof(line), sp.r) && strcmp(line, "hi\n") == 0;
+        int rc = spawn_pipe_close(&sp);
+        _exit((ok && WIFEXITED(rc) && WEXITSTATUS(rc) == 0) ? 0 : 1);
+    }
+    if (pid < 0) {
+        EXPECT(0); /* fork failed: bail before spawn_wait_child(-1) */
+        return;
+    }
+    int rc = spawn_wait_child(pid);
+    EXPECT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0);
+}
+
 /* ---------------- spawn_reap_if_exited ---------------- */
 
 /* A pid that isn't our child reaps as "exited": waitpid returns
@@ -272,6 +359,13 @@ int main(void)
     test_pipe_close_after_failed_open_is_noop();
     test_pipe_open_rejects_bad_args();
     test_pipe_early_child_exit_does_not_kill_parent();
+
+    test_pipe_read_child_stdout();
+    test_pipe_read_nonzero_exit();
+    test_pipe_read_rejects_bad_args();
+    test_pipe_read_child_sigint_default();
+    test_pipe_read_early_close_kills_writer();
+    test_pipe_read_survives_closed_stdout();
 
     test_reap_non_child_is_exited();
     test_reap_live_child();

@@ -98,6 +98,21 @@ void input_core_buf_insert(struct input *in, const char *bytes, size_t n)
     in->buf[in->len] = '\0';
 }
 
+void input_core_replace_span(struct input *in, size_t start, size_t end, const char *text)
+{
+    if (start > end || end > in->len)
+        return;
+    size_t tn = text ? strlen(text) : 0;
+    size_t tail = in->len - end;
+    buf_grow(in, in->len - (end - start) + tn + 1);
+    memmove(in->buf + start + tn, in->buf + end, tail);
+    if (tn)
+        memcpy(in->buf + start, text, tn);
+    in->len = start + tn + tail;
+    in->cursor = start + tn;
+    in->buf[in->len] = '\0';
+}
+
 static void buf_erase(struct input *in, size_t pos, size_t n)
 {
     if (pos >= in->len || n == 0)

@@ -416,6 +416,35 @@ static void test_buf_set_and_insert(void)
     input_free(in);
 }
 
+static void test_replace_span(void)
+{
+    struct input *in = new_with("see @src/m tail");
+
+    /* replace mid-buffer; cursor lands after the inserted text */
+    input_core_replace_span(in, 4, 10, "src/main.c");
+    EXPECT_STR_EQ(in->buf, "see src/main.c tail");
+    EXPECT(in->cursor == 14);
+
+    /* NULL text deletes the span */
+    input_core_replace_span(in, 3, 14, NULL);
+    EXPECT_STR_EQ(in->buf, "see tail");
+    EXPECT(in->cursor == 3);
+
+    /* growth path: replacement much longer than the span */
+    input_core_buf_set(in, "@x");
+    input_core_replace_span(in, 0, 2, "a/very/long/replacement/path/that/needs/room.c");
+    EXPECT_STR_EQ(in->buf, "a/very/long/replacement/path/that/needs/room.c");
+    EXPECT(in->cursor == in->len);
+
+    /* out-of-range spans are no-ops */
+    input_core_buf_set(in, "abc");
+    input_core_replace_span(in, 2, 1, "X");
+    input_core_replace_span(in, 0, 4, "X");
+    EXPECT_STR_EQ(in->buf, "abc");
+
+    input_free(in);
+}
+
 /* ---------- motions / edits ---------- */
 
 static void test_motions_ascii(void)
@@ -1247,6 +1276,7 @@ int main(void)
     test_render_combining_after_full_wbuf();
 
     test_buf_set_and_insert();
+    test_replace_span();
     test_motions_ascii();
     test_motions_utf8();
     test_motions_malformed_utf8();

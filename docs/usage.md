@@ -134,9 +134,17 @@ The REPL supports readline-style editing. Hax-specific or notable bindings:
 | Esc | Interrupt the model or a running tool. |
 | Ctrl-C | Cancel the current prompt line. |
 | Ctrl-D | Quit on an empty prompt. |
+| Ctrl-L | Clear screen and redraw the prompt. |
 | Ctrl-G | Edit the prompt in `$EDITOR`. |
 | Ctrl-T | View the current transcript in `$PAGER`. |
-| Ctrl-L | Clear screen and redraw the prompt. |
+| Tab | On an `@`-prefixed word: pick a project file to mention. Elsewhere: insert a tab. |
+
+Typing `@src` and pressing Tab opens [`fzf`](https://github.com/junegunn/fzf) over the
+project's files (tracked and untracked-but-not-ignored inside a git repository; a pruned
+`find` elsewhere), with the token pre-seeding the fuzzy filter. The selected path replaces the
+`@src` token; cancelling leaves the prompt untouched. The path is inserted as plain text — the
+model reads the file with its `read` tool as usual. fzf on `$PATH` is required: without it,
+Tab on an `@` word prints a short notice instead, and `/help` shows the binding dimmed.
 
 ## Prompt context
 

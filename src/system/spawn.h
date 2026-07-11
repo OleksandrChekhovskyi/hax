@@ -88,7 +88,8 @@ int spawn_wait_child(pid_t pid);
 int spawn_reap_if_exited(pid_t pid);
 
 struct spawn_pipe {
-    FILE *w;
+    FILE *w; /* write-mode variant (spawn_pipe_open); NULL otherwise */
+    FILE *r; /* read-mode variant (spawn_pipe_open_read); NULL otherwise */
     pid_t pid;
     /* Saved parent-side dispositions, restored by spawn_pipe_close. */
     struct sigaction saved_int;
@@ -103,10 +104,21 @@ struct spawn_pipe {
  * caller must NOT call spawn_pipe_close (no resources to release). */
 int spawn_pipe_open(struct spawn_pipe *sp, const char *shell_cmd);
 
-/* Closes the write side, waits for the child, restores parent
+/* Read-mode sibling of spawn_pipe_open: the child's stdout is the pipe
+ * and the caller reads its output via sp->r. stdin/stderr stay
+ * inherited, so an interactive child (fzf) can still reach the tty.
+ * Same contract otherwise. Unlike popen(), the child gets the full
+ * spawn signal etiquette — SIGINT/SIGQUIT/SIGPIPE reset to SIG_DFL
+ * (popen's child would inherit the parent's SIG_IGN across exec,
+ * leaving terminal Ctrl-C unable to drive it). */
+int spawn_pipe_open_read(struct spawn_pipe *sp, const char *shell_cmd);
+
+/* Closes the parent's pipe end, waits for the child, restores parent
  * signals. Returns waitpid-style status, or -1 on internal error.
  * Idempotent on a zeroed struct (no-op + return 0) so callers can
- * pair it with a failed open without branching. */
+ * pair it with a failed open without branching. For a read pipe,
+ * closing before the child finishes writing tears it down via
+ * SIGPIPE — at default disposition in the child, per the above. */
 int spawn_pipe_close(struct spawn_pipe *sp);
 
 #endif /* HAX_SPAWN_H */

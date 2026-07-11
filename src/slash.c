@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "agent.h"
+#include "file_mention.h"
 #include "render/render_ctx.h"
 #include "select.h"
 #include "session.h"
@@ -44,6 +45,12 @@ struct slash_cmd {
 struct shortcut_def {
     const char *key;
     const char *desc;
+    /* Optional availability probe. When set and returning 0, /help
+     * renders the row dim with `missing` appended after the
+     * description — the binding exists but needs something the
+     * environment doesn't provide (e.g. fzf on $PATH). */
+    int (*available)(void);
+    const char *missing;
 };
 
 static void slash_run_new(struct slash_ctx *ctx);
@@ -134,14 +141,18 @@ static const struct slash_cmd COMMANDS[] = {
  * omitted: users who know readline already know them, and listing
  * everything would push the more useful bindings off the screen. */
 static const struct shortcut_def SHORTCUTS[] = {
-    {"enter", "submit prompt"},
-    {"shift-enter", "insert newline (terminal must be configured to send LF)"},
-    {"esc", "interrupt model or running tool"},
-    {"ctrl-c", "cancel current prompt line"},
-    {"ctrl-d", "quit (on empty prompt)"},
-    {"ctrl-g", "edit prompt in $EDITOR"},
-    {"ctrl-t", "view transcript in $PAGER"},
-    {"ctrl-l", "clear screen and redraw prompt"},
+    {.key = "enter", .desc = "submit prompt"},
+    {.key = "shift-enter", .desc = "insert newline (terminal must be configured to send LF)"},
+    {.key = "esc", .desc = "interrupt model or running tool"},
+    {.key = "ctrl-c", .desc = "cancel current prompt line"},
+    {.key = "ctrl-d", .desc = "quit (on empty prompt)"},
+    {.key = "ctrl-l", .desc = "clear screen and redraw prompt"},
+    {.key = "ctrl-g", .desc = "edit prompt in $EDITOR"},
+    {.key = "ctrl-t", .desc = "view transcript in $PAGER"},
+    {.key = "@ + tab",
+     .desc = "pick a project file to mention",
+     .available = file_mention_available,
+     .missing = "(fzf not installed)"},
 };
 #define N_SHORTCUTS (sizeof(SHORTCUTS) / sizeof(SHORTCUTS[0]))
 
@@ -531,12 +542,21 @@ static void slash_run_help(struct slash_ctx *ctx)
     fputc('\n', stdout);
     fputs(ANSI_BOLD "shortcuts" ANSI_RESET "\n", stdout);
     for (size_t i = 0; i < N_SHORTCUTS; i++) {
+        int avail = !SHORTCUTS[i].available || SHORTCUTS[i].available();
         fputs("  ", stdout);
-        fputs(ANSI_CYAN, stdout);
+        fputs(avail ? ANSI_CYAN : ANSI_DIM ANSI_CYAN, stdout);
         fputs(SHORTCUTS[i].key, stdout);
         fputs(ANSI_RESET, stdout);
         pad_spaces(gutter - (int)strlen(SHORTCUTS[i].key));
-        fputs(SHORTCUTS[i].desc, stdout);
+        if (avail) {
+            fputs(SHORTCUTS[i].desc, stdout);
+        } else {
+            fputs(ANSI_DIM, stdout);
+            fputs(SHORTCUTS[i].desc, stdout);
+            fputc(' ', stdout);
+            fputs(SHORTCUTS[i].missing, stdout);
+            fputs(ANSI_RESET, stdout);
+        }
         fputc('\n', stdout);
     }
 }

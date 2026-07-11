@@ -617,6 +617,43 @@ static void show_transcript(struct input *in)
     in->term_cols = editor_cols();
 }
 
+/* ---------------- Tab modal completion ---------------- */
+
+/* Run the registered completer's modal phase over the span its match
+ * phase reported. Same handoff shape as show_transcript: erase the
+ * edit area, drop raw mode, let pick own the terminal (fzf or a picker
+ * draws and cleans up after itself), then re-enter raw mode; the
+ * caller's next paint redraws the prompt. On a non-empty result the
+ * matched span is replaced with it; on NULL/empty (cancel) the buffer
+ * is left untouched. */
+static void complete_modal(struct input *in, size_t start, size_t end)
+{
+    size_t tn = end - start;
+    char *token = xmalloc(tn + 1);
+    if (tn)
+        memcpy(token, in->buf + start, tn);
+    token[tn] = '\0';
+
+    if (in->last_cursor_row > 0)
+        printf("\x1b[%dA", in->last_cursor_row);
+    fputs("\r\x1b[J", stdout);
+    fflush(stdout);
+    in->last_cursor_row = 0;
+    in->last_rows = 0;
+    raw_off(in);
+
+    char *pick = in->completer->pick(token, in->completer->user);
+    free(token);
+
+    raw_on(in);
+    /* The picker may have prompted a window resize; refresh before the
+     * next paint so wrap math uses the current width. */
+    in->term_cols = editor_cols();
+    if (pick && *pick)
+        input_core_replace_span(in, start, end, pick);
+    free(pick);
+}
+
 /* ---------------- reverse / forward incremental search ---------------- */
 
 /* Outcome of the Ctrl-R sub-loop, reported back to the main keystroke
@@ -1194,6 +1231,11 @@ void input_set_transcript_cb(struct input *in, void (*fn)(void *user), void *use
     in->transcript_user = user;
 }
 
+void input_set_modal_completer(struct input *in, const struct input_modal_completer *mc)
+{
+    in->completer = mc;
+}
+
 void input_history_open_default(struct input *in)
 {
     /* Skip persistence in non-interactive sessions. `echo prompt | hax`
@@ -1295,9 +1337,18 @@ char *input_readline(struct input *in, const char *prompt)
         case 0x7f: /* DEL / backspace */
             input_core_delete_back(in);
             break;
-        case 0x09: /* Tab — insert literal; rendering expands to spaces */
-            input_core_buf_insert(in, "\t", 1);
+        case 0x09: { /* Tab — modal completion when a completer matches;
+                      * else insert a literal tab. The span is validated
+                      * here so a buggy match can't splice out of range. */
+            size_t cs, ce;
+            if (in->completer &&
+                in->completer->match(in->buf, in->len, in->cursor, &cs, &ce, in->completer->user) &&
+                cs <= ce && ce <= in->len)
+                complete_modal(in, cs, ce);
+            else
+                input_core_buf_insert(in, "\t", 1);
             break;
+        }
         case 0x0a: /* LF — Shift+Enter inserts a newline */
             input_core_buf_insert(in, "\n", 1);
             break;

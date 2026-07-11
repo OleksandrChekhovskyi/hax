@@ -1102,6 +1102,30 @@ static void test_format_cost_precision(void)
     EXPECT_STR_EQ(buf, "$42.13");
 }
 
+static void test_shell_single_quote(void)
+{
+    char *q = shell_single_quote("plain");
+    EXPECT_STR_EQ(q, "'plain'");
+    free(q);
+
+    q = shell_single_quote("it's");
+    EXPECT_STR_EQ(q, "'it'\\''s'");
+    free(q);
+
+    /* metacharacters are inert inside single quotes — no escaping */
+    q = shell_single_quote("a b;$(x)|&\"*");
+    EXPECT_STR_EQ(q, "'a b;$(x)|&\"*'");
+    free(q);
+
+    q = shell_single_quote("");
+    EXPECT_STR_EQ(q, "''");
+    free(q);
+
+    q = shell_single_quote(NULL);
+    EXPECT_STR_EQ(q, "''");
+    free(q);
+}
+
 int main(void)
 {
     /* truncate_for_display / wrap_break_pos / reflow_for_display use
@@ -1160,6 +1184,7 @@ int main(void)
     test_format_tokens_ranges();
     test_format_duration_ranges();
     test_format_cost_precision();
+    test_shell_single_quote();
     test_format_context_with_and_without_limit();
 
     test_truncate_under_cap();

@@ -26,6 +26,12 @@ void *xrealloc(void *p, size_t n);
 char *xstrdup(const char *s);
 char *xasprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
+/* Wrap `s` in single quotes for safe interpolation into a `sh -c`
+ * command line, escaping embedded single quotes the conventional way
+ * ("it's" -> "'it'\''s'"). NULL is treated as "". Returns malloc'd;
+ * caller frees. */
+char *shell_single_quote(const char *s);
+
 /* Startup / CLI diagnostics. Both print a single "hax: <msg>\n" line to
  * stderr — the machine-greppable prefix scripts expect — and color it only
  * when stderr is a TTY (piped/redirected output stays plain so logs and
