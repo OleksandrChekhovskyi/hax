@@ -922,7 +922,18 @@ static void replay_user_turn(struct render_ctx *r, const struct agent_session *s
             const struct item *it = &s->items[i];
             switch (it->kind) {
             case ITEM_USER_MESSAGE:
-                replay_user_echo(r, it->text);
+                /* A compaction seed is synthetic — mark the boundary the way
+                 * the live path's notice did instead of echoing the whole
+                 * summary as a typed prompt. */
+                if (it->compact_seed) {
+                    render_open_block(r);
+                    disp_raw(ANSI_DIM);
+                    disp_printf(&r->disp, "── conversation compacted ──");
+                    disp_raw(ANSI_RESET);
+                    disp_putc(&r->disp, '\n');
+                } else {
+                    replay_user_echo(r, it->text);
+                }
                 break;
             case ITEM_ASSISTANT_MESSAGE:
                 replay_assistant(r, it->text);

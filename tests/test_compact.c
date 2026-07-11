@@ -7,9 +7,11 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "agent_core.h"
 #include "compact.h"
 #include "config.h"
 #include "harness.h"
+#include "util.h"
 
 /* compact_over_threshold is the pure trigger predicate; everything else
  * (compact_should_auto, agent_compact) layers config + I/O on top of it. */
@@ -95,10 +97,35 @@ static void test_context_limit_resolution(void)
     config_set_override("context_limit", NULL);
 }
 
+static void test_apply_seeds_history(void)
+{
+    /* compact_apply replaces history with exactly one user message that
+     * wraps the summary in the seed preamble and carries the compact_seed
+     * flag — the bit resume replay and the picker label key off. NULL logs:
+     * persistence disabled, as in a HAX_NO_SESSION run. */
+    struct agent_session s = {0};
+    items_append(&s.items, &s.n_items, &s.cap_items,
+                 (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup("old prompt")});
+    items_append(&s.items, &s.n_items, &s.cap_items,
+                 (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("old answer")});
+
+    compact_apply(&s, NULL, NULL, "## Goal\n- finish the thing");
+
+    EXPECT(s.n_items == 1);
+    if (s.n_items == 1) {
+        EXPECT(s.items[0].kind == ITEM_USER_MESSAGE);
+        EXPECT(s.items[0].compact_seed);
+        EXPECT(s.items[0].text && strstr(s.items[0].text, COMPACT_SEED_PREAMBLE) != NULL);
+        EXPECT(s.items[0].text && strstr(s.items[0].text, "finish the thing") != NULL);
+    }
+    agent_session_free(&s);
+}
+
 int main(void)
 {
     test_over_threshold();
     test_should_auto();
     test_context_limit_resolution();
+    test_apply_seeds_history();
     T_REPORT();
 }

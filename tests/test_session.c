@@ -23,7 +23,7 @@ static int item_eq(const struct item *a, const struct item *b)
            streq0(a->tool_name, b->tool_name) &&
            streq0(a->tool_arguments_json, b->tool_arguments_json) && streq0(a->output, b->output) &&
            streq0(a->reasoning_json, b->reasoning_json) &&
-           streq0(a->reasoning_text, b->reasoning_text);
+           streq0(a->reasoning_text, b->reasoning_text) && a->compact_seed == b->compact_seed;
 }
 
 /* Round-trip one item through item_to_json -> json text -> json -> item,
@@ -61,6 +61,7 @@ static struct item CONVO[] = {
      .tool_name = (char *)"bash",
      .tool_arguments_json = (char *)"{\"cmd\":\"ls\"}"},
     {.kind = ITEM_TOOL_RESULT, .call_id = (char *)"c1", .output = (char *)"file1\nfile2"},
+    {.kind = ITEM_USER_MESSAGE, .text = (char *)"summary of earlier work", .compact_seed = 1},
 };
 #define CONVO_N (sizeof(CONVO) / sizeof(CONVO[0]))
 
@@ -224,6 +225,38 @@ int main(void)
     EXPECT(empty_fp == NULL);
     free(empty_fp);
     free(pathb);
+
+    /* ---- the first-prompt label skips a compaction seed ---- */
+    /* A compacted-then-continued session labels by the first real prompt;
+     * one holding only the seed labels "(compacted)". */
+    struct item conv_seed[] = {
+        {.kind = ITEM_USER_MESSAGE, .text = (char *)"condensed summary", .compact_seed = 1},
+        {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"continuing"},
+        {.kind = ITEM_TURN_BOUNDARY},
+        {.kind = ITEM_USER_MESSAGE, .text = (char *)"real question"},
+    };
+    struct session_log *ls = session_log_open("pa", "ma", NULL);
+    EXPECT(ls != NULL);
+    char *paths = xstrdup(session_log_path(ls));
+    session_log_append(ls, conv_seed, 4);
+    session_log_close(ls);
+    char *seed_fp = session_first_prompt(paths, 64);
+    EXPECT(seed_fp != NULL && strstr(seed_fp, "real question") != NULL);
+    EXPECT(seed_fp == NULL || strstr(seed_fp, "condensed summary") == NULL);
+    free(seed_fp);
+    free(paths);
+
+    struct session_log *lso = session_log_open("pa", "ma", NULL);
+    EXPECT(lso != NULL);
+    char *pathso = xstrdup(session_log_path(lso));
+    session_log_append(lso, conv_seed, 2); /* seed + assistant, no real prompt */
+    session_log_close(lso);
+    char *only_fp = session_first_prompt(pathso, 64);
+    EXPECT(only_fp != NULL);
+    if (only_fp)
+        EXPECT_STR_EQ(only_fp, "(compacted)");
+    free(only_fp);
+    free(pathso);
 
     /* ---- resuming repairs a torn final line instead of fusing onto it ---- */
     /* Simulate a crash that left the last record half-written (no trailing

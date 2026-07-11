@@ -102,10 +102,12 @@ char *compact_summarize(const struct agent_session *s, struct provider *p, const
                         void *tick_user, int *attempts);
 
 /* Replace the session's history with a single seed user message holding the
- * summary, then rotate both logs to fresh files (a seeded `/new`: the old
- * records stay on disk) and drop now-unreachable bash temp files. Centralizes
- * the history-rebuild policy so the interactive and one-shot paths can't
- * drift. `slog`/`tlog` may be NULL (persistence disabled). */
+ * summary (flagged compact_seed so display and session tooling can tell it
+ * from a typed prompt), then rotate both logs to fresh files (a seeded
+ * `/new`: the old records stay on disk) and drop now-unreachable bash temp
+ * files. Centralizes the history-rebuild policy so the interactive and
+ * one-shot paths can't drift. `slog`/`tlog` may be NULL (persistence
+ * disabled). */
 void compact_apply(struct agent_session *s, struct session_log *slog, struct transcript_log *tlog,
                    const char *summary);
 

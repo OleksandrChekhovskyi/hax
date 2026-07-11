@@ -167,6 +167,22 @@ static void test_user_message_has_section_rule(void)
     free(out);
 }
 
+static void test_user_compact_seed_label(void)
+{
+    /* A compaction seed keeps the user body verbatim and untruncated (it
+     * IS what went on the wire) but renders under its own rule with a dim
+     * body: magenta stays exclusive to human-typed input. */
+    struct item items[] = {
+        {.kind = ITEM_USER_MESSAGE, .text = (char *)"line one\nline two", .compact_seed = 1}};
+    char *out = render_to_string(NULL, items, 1);
+    EXPECT(contains(out, "── compaction seed ──"));
+    EXPECT(!contains(out, "── user ──"));
+    EXPECT(!contains(out, ANSI_BRIGHT_MAGENTA));
+    /* Dim, re-applied per line so it survives the pager. */
+    EXPECT(contains(out, ANSI_DIM "line one" ANSI_RESET "\n" ANSI_DIM "line two" ANSI_RESET));
+    free(out);
+}
+
 static void test_user_multiline_raw(void)
 {
     /* The transcript renders user text raw — embedded newlines pass
@@ -300,6 +316,7 @@ int main(void)
     test_no_boundary_no_turn_rule();
     test_system_prompt();
     test_user_message_has_section_rule();
+    test_user_compact_seed_label();
     test_user_multiline_raw();
     test_assistant_message();
     test_tool_call_pretty_prints_args();

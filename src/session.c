@@ -95,6 +95,8 @@ json_t *item_to_json(const struct item *it)
     /* Provenance stamp for reasoning items (NULL elsewhere → omitted). */
     set_str(o, "provider", it->provider);
     set_str(o, "model", it->model);
+    if (it->compact_seed)
+        json_object_set_new(o, "compact_seed", json_true());
     return o;
 }
 
@@ -122,6 +124,7 @@ int item_from_json(const json_t *obj, struct item *out)
     out->reasoning_text = dup_field(obj, "reasoning_text");
     out->provider = dup_field(obj, "provider");
     out->model = dup_field(obj, "model");
+    out->compact_seed = json_is_true(json_object_get(obj, "compact_seed"));
     return 0;
 }
 
@@ -643,6 +646,7 @@ char *session_first_prompt(const char *path, int max_cells)
         return NULL;
     char *result = NULL;
     char *save = NULL;
+    int saw_seed = 0;
     for (char *line = strtok_r(data, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
         if (!*line)
             continue;
@@ -651,6 +655,14 @@ char *session_first_prompt(const char *path, int max_cells)
             continue; /* a partial last line from the cap, or the header */
         const char *kind = json_string_value(json_object_get(o, "kind"));
         if (kind && strcmp(kind, "user") == 0) {
+            /* A compaction seed is synthetic — its text is the same generic
+             * preamble in every compacted session, useless as a label. Skip
+             * it and keep scanning for a real prompt. */
+            if (json_is_true(json_object_get(o, "compact_seed"))) {
+                saw_seed = 1;
+                json_decref(o);
+                continue;
+            }
             const char *txt = json_string_value(json_object_get(o, "text"));
             if (txt) {
                 char *flat = flatten_for_display(txt);
@@ -658,11 +670,15 @@ char *session_first_prompt(const char *path, int max_cells)
                 free(flat);
             }
             json_decref(o);
-            break; /* first user message is all we want */
+            break; /* first real user message is all we want */
         }
         json_decref(o);
     }
     free(data);
+    /* Nothing but the seed (compacted, then no follow-up prompt yet): a
+     * fixed label beats echoing the preamble or "(no preview)". */
+    if (!result && saw_seed)
+        result = xstrdup("(compacted)");
     return result;
 }
 

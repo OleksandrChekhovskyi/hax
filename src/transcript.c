@@ -116,31 +116,54 @@ static void ensure_newline(FILE *out, const char *s)
         fputc('\n', out);
 }
 
-/* User messages: section() rule with the "user" label, then the body
- * in bright magenta. The transcript is intentionally raw — no wrap,
- * no markdown, no per-line prefix — so the section rule plays the
- * same role for user messages that the `── assistant ──` / `── tool
- * result ──` rules play for the model side. A per-line `▌ ` strip
- * would break visually whenever a long line gets soft-wrapped by the
- * pager, so the rule is the only anchor; color carries the rest. */
-static void render_user(FILE *out, int color, const struct item *it)
+/* Body text with `open`/`close` ANSI sequences re-applied per line:
+ * `less -R` resets SGR state at every line break, so a single leading
+ * escape would drop after the first newline (and a soft-wrapped long
+ * line keeps its color either way). Shared by every colored-body block
+ * — user (magenta), reasoning and the compaction seed (dim). */
+static void render_body_lines(FILE *out, int color, const char *text, const char *open,
+                              const char *close)
 {
-    section(out, color, "user");
-    const char *text = it->text ? it->text : "";
     const char *p = text;
-
     while (*p) {
         const char *nl = strchr(p, '\n');
         size_t n = nl ? (size_t)(nl - p) : strlen(p);
-        fputs(ANSI_IF(ANSI_BRIGHT_MAGENTA), out);
+        if (color)
+            fputs(open, out);
         fwrite(p, 1, n, out);
-        fputs(ANSI_IF(ANSI_FG_DEFAULT), out);
+        if (color)
+            fputs(close, out);
         if (!nl)
             break;
         fputc('\n', out);
         p = nl + 1;
     }
     ensure_newline(out, text);
+}
+
+/* User messages: section() rule with the "user" label, then the body
+ * in bright magenta. The transcript is intentionally raw — no wrap,
+ * no markdown, no per-line prefix — so the section rule plays the
+ * same role for user messages that the `── assistant ──` / `── tool
+ * result ──` rules play for the model side. A per-line `▌ ` strip
+ * would break visually whenever a long line gets soft-wrapped by the
+ * pager, so the rule is the only anchor; color carries the rest.
+ *
+ * A compaction seed goes on the wire as a user message, but rendering
+ * it magenta would read as "the user typed this whole summary". The
+ * transcript's visual grammar keeps magenta exclusively for typed
+ * input, so the seed gets its own label and the dim body machinery
+ * shares with reasoning — full text, just visibly not human. */
+static void render_user(FILE *out, int color, const struct item *it)
+{
+    const char *text = it->text ? it->text : "";
+    if (it->compact_seed) {
+        section(out, color, "compaction seed");
+        render_body_lines(out, color, text, ANSI_DIM, ANSI_RESET);
+        return;
+    }
+    section(out, color, "user");
+    render_body_lines(out, color, text, ANSI_BRIGHT_MAGENTA, ANSI_FG_DEFAULT);
 }
 
 static void render_assistant(FILE *out, int color, const struct item *it)
@@ -252,25 +275,10 @@ static void render_tool_result(FILE *out, int color, const struct item *it)
 static void render_reasoning(FILE *out, int color, const struct item *it)
 {
     /* Text CoT (openai-family reasoning_content): a section rule + dim body,
-     * matching the user/assistant/tool blocks. Dim is re-applied per line
-     * (like render_user's color) so it survives soft-wrapping in a pager
-     * instead of dropping after the first newline. */
+     * matching the user/assistant/tool blocks. */
     if (it->reasoning_text) {
         section(out, color, "reasoning");
-        const char *text = it->reasoning_text;
-        const char *p = text;
-        while (*p) {
-            const char *nl = strchr(p, '\n');
-            size_t n = nl ? (size_t)(nl - p) : strlen(p);
-            fputs(ANSI_IF(ANSI_DIM), out);
-            fwrite(p, 1, n, out);
-            fputs(ANSI_IF(ANSI_RESET), out);
-            if (!nl)
-                break;
-            fputc('\n', out);
-            p = nl + 1;
-        }
-        ensure_newline(out, text);
+        render_body_lines(out, color, it->reasoning_text, ANSI_DIM, ANSI_RESET);
         return;
     }
     /* Codex's opaque structured blob: just the inline tag + id, since there

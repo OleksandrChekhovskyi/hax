@@ -66,6 +66,13 @@ struct item {
      * NULL on non-reasoning items and on records that predate stamping. */
     char *provider;
     char *model;
+    /* USER_MESSAGE: this is a compaction seed — the synthetic summary that
+     * replaced compacted history — not something the user typed. Provider
+     * adapters ignore it (the seed goes on the wire as a plain user
+     * message); the flag exists so display and session tooling (resume
+     * replay, the /resume picker label) never present it as a typed
+     * prompt. Round-tripped through the session log. */
+    int compact_seed;
 };
 
 void item_free(struct item *it);
