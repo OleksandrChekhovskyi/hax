@@ -47,9 +47,15 @@ struct input {
     size_t hist_pos;
     char *draft; /* saved buffer at first Up; restored on Down past end */
 
-    /* paint state — offsets within the edit area painted on screen */
+    /* paint state — screen-relative offsets within the painted edit
+     * area. When the paint is clipped to a row window (buffer taller
+     * than the viewport), these describe the on-screen window, not the
+     * full buffer, so relative cursor motion stays within reach. */
     int last_cursor_row;
     int last_rows;
+    int last_clipped;  /* previous paint was clipped to a row window */
+    int win_top;       /* first content row painted by the previous clipped paint */
+    int top_ind_cells; /* cell width of that paint's top indicator (0 = blank) */
 
     /* When set, the live paint wraps continuation rows to column 0 rather
      * than aligning them under the prompt (the usual cont_indent =
@@ -66,6 +72,9 @@ struct input {
      * input_readline entry, on resize, and after $EDITOR / pager
      * handoffs that might land us in a different geometry. */
     int term_cols;
+    /* Viewport height in rows (ws_row), refreshed alongside term_cols.
+     * 0 = unknown; row-window clipping is then disabled. */
+    int term_rows;
 
     /* tty (input.c only) */
     struct termios saved_termios;
@@ -219,6 +228,23 @@ typedef void (*input_render_cb)(const struct input_render_event *ev, void *user)
 void input_core_render(const char *buf, size_t len, size_t cursor, int prompt_w,
                        int cont_indent_col, int cols, input_render_cb cb, void *user,
                        struct input_layout *out);
+
+/* Row-windowed variant of input_core_render: forwards only the events
+ * belonging to rows [row_lo, row_hi] — glyphs on those rows, and
+ * ROW_BREAKs whose destination row is in range. The break *into*
+ * row_lo is included so a caller whose window starts on a continuation
+ * row still learns its indent column. Layout out-params describe the
+ * full, unclipped walk. */
+void input_core_render_window(const char *buf, size_t len, size_t cursor, int prompt_w,
+                              int cont_indent_col, int cols, int row_lo, int row_hi,
+                              input_render_cb cb, void *user, struct input_layout *out);
+
+/* Sliding-window scroll for a viewport of `rows` screen rows over
+ * `total_rows` content rows. Returns the window's new top row: keeps
+ * `prev_top` when the cursor row is already visible (sticky, minimal
+ * scrolling), otherwise slides just enough to bring it back in view,
+ * clamped to the content. Returns 0 when everything fits. */
+int input_core_window_top(int prev_top, int cursor_row, int total_rows, int rows);
 
 /* Spaces per tab. Layout and rendering both expand a tab to exactly
  * this many columns regardless of the current column — soft-tab style,

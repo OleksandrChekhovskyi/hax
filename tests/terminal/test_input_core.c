@@ -376,6 +376,61 @@ static void test_render_combining_after_full_wbuf(void)
     EXPECT(o.combining_after_a_count == LEAD);
 }
 
+/* ---------- row-windowed render (viewport clipping) ---------- */
+
+static void test_window_top_fits(void)
+{
+    /* Content shorter than the viewport never scrolls, and a stale
+     * prev_top from a previously taller buffer clamps back to 0. */
+    EXPECT(input_core_window_top(0, 3, 5, 10) == 0);
+    EXPECT(input_core_window_top(7, 3, 5, 10) == 0);
+}
+
+static void test_window_top_slides(void)
+{
+    /* 30 content rows, 10-row window. */
+    EXPECT(input_core_window_top(0, 0, 30, 10) == 0);
+    EXPECT(input_core_window_top(0, 9, 30, 10) == 0); /* bottom edge, no slide */
+    EXPECT(input_core_window_top(0, 10, 30, 10) == 1);
+    EXPECT(input_core_window_top(0, 29, 30, 10) == 20);  /* jump to end */
+    EXPECT(input_core_window_top(5, 8, 30, 10) == 5);    /* cursor inside: sticky */
+    EXPECT(input_core_window_top(20, 19, 30, 10) == 19); /* cursor above: follow up */
+    EXPECT(input_core_window_top(25, 29, 30, 10) == 20); /* prev past max: clamp */
+}
+
+static void test_render_window_hard_lines(void)
+{
+    /* Rows 0..4; window [1,3] forwards the break *into* row 1, rows
+     * 1-3, and drops the break out of row 3. Layout still reports the
+     * full walk. */
+    struct rec r = {0};
+    struct input_layout L;
+    input_core_render_window("a\nb\nc\nd\ne", 9, 9, 0, 0, 80, 1, 3, rec_emit, &r, &L);
+    r.buf[r.n] = '\0';
+    EXPECT_STR_EQ(r.buf, "/b/c/d");
+    EXPECT(L.total_rows == 5);
+    EXPECT(L.cursor_row == 4);
+}
+
+static void test_render_window_from_top(void)
+{
+    /* Window starting at row 0: no leading break (row 0 has none). */
+    struct rec r = {0};
+    input_core_render_window("a\nb\nc", 5, 0, 0, 0, 80, 0, 1, rec_emit, &r, NULL);
+    r.buf[r.n] = '\0';
+    EXPECT_STR_EQ(r.buf, "a/b");
+}
+
+static void test_render_window_soft_wrap_rows(void)
+{
+    /* Soft-wrapped rows count as window rows: "hello world" in cols=10
+     * spans rows 0-1; window [1,1] yields only the wrapped word. */
+    struct rec r = {0};
+    input_core_render_window("hello world", 11, 0, 2, 2, 10, 1, 1, rec_emit, &r, NULL);
+    r.buf[r.n] = '\0';
+    EXPECT_STR_EQ(r.buf, "/world");
+}
+
 /* ---------- buffer ops ---------- */
 
 static void test_buf_set_and_insert(void)
@@ -1274,6 +1329,12 @@ int main(void)
     test_render_tab_expands();
     test_render_unsafe_substituted();
     test_render_combining_after_full_wbuf();
+
+    test_window_top_fits();
+    test_window_top_slides();
+    test_render_window_hard_lines();
+    test_render_window_from_top();
+    test_render_window_soft_wrap_rows();
 
     test_buf_set_and_insert();
     test_replace_span();

@@ -34,6 +34,15 @@ static int tty_cols(void)
     return 0;
 }
 
+static int tty_rows(void)
+{
+    struct winsize ws;
+
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0)
+        return ws.ws_row;
+    return 0;
+}
+
 static int editor_cols(void)
 {
     int cols = display_width();
@@ -287,19 +296,67 @@ static void buf_append_csi(struct buf *f, int n, char final)
  * and clears the tail of each completed row before a `\r\n` + indent-spaces
  * row break. With OPOST off (raw mode) the terminal won't add the CR for us.
  * The indent target is delivered via ev->col — the walker has resolved it
- * from the cont_indent_col passed in. Output goes into the caller's
- * `struct buf` (passed as `user`) so the whole repaint reaches the tty as one
- * write — see paint(). */
+ * from the cont_indent_col passed in. When the paint is clipped to a row
+ * window that starts on a continuation row, the break *into* the first
+ * visible row emits only the indent: the frame is already positioned at
+ * the start of that screen row. Output goes into the caller's frame
+ * `struct buf` so the whole repaint reaches the tty as one write — see
+ * paint(). */
+struct paint_ctx {
+    struct buf *f;
+    int win_top; /* first painted content row; 0 when unclipped */
+};
+
 static void paint_emit(const struct input_render_event *ev, void *user)
 {
-    struct buf *f = user;
+    struct paint_ctx *p = user;
     if (ev->kind == INPUT_RENDER_GLYPH) {
-        buf_append(f, ev->bytes, ev->n);
-    } else {
-        buf_append_str(f, ANSI_ERASE_LINE "\r\n");
-        for (int k = 0; k < ev->col; k++)
-            buf_append(f, " ", 1);
+        buf_append(p->f, ev->bytes, ev->n);
+        return;
     }
+    if (ev->row > p->win_top)
+        buf_append_str(p->f, ANSI_ERASE_LINE "\r\n");
+    for (int k = 0; k < ev->col; k++)
+        buf_append(p->f, " ", 1);
+}
+
+/* One indicator row for a clipped paint: dim "… +N lines" when rows are
+ * hidden past this edge, blank otherwise. Dropped entirely when it
+ * wouldn't fit the row budget, so it can never soft-wrap — the paint's
+ * row accounting models it as exactly one screen row. Returns the cell
+ * width actually painted (0 for a blank row) so resize recovery can
+ * compute how many physical rows the indicator reflows to under a
+ * narrower width. */
+static int append_clip_indicator(struct buf *f, int hidden, int cols)
+{
+    int painted = 0;
+    if (hidden > 0) {
+        int utf8 = locale_have_utf8();
+        char *s = xasprintf("%s +%d line%s", utf8 ? "\xe2\x80\xa6" : "...", hidden,
+                            hidden == 1 ? "" : "s");
+        int cells = (int)strlen(s) - (utf8 ? 2 : 0); /* "…" is 3 bytes, 1 cell */
+        if (cells < cols) {
+            buf_append_str(f, ANSI_DIM);
+            buf_append_str(f, s);
+            buf_append_str(f, ANSI_BOLD_OFF);
+            painted = cells;
+        }
+        free(s);
+    }
+    buf_append_str(f, ANSI_ERASE_LINE);
+    return painted;
+}
+
+/* Edit-area height cap: ~40% of the viewport, the same proportion as
+ * the fzf @file picker (see file_mention.c). */
+static int edit_area_rows(int term_rows)
+{
+    int cap = term_rows * 2 / 5;
+    if (cap < 3)
+        cap = 3;
+    if (cap > term_rows)
+        cap = term_rows;
+    return cap;
 }
 
 /* Repaint the whole edit area. The entire frame — sync-begin, the climb,
@@ -311,11 +368,38 @@ static void paint_emit(const struct input_render_event *ev, void *user)
  * visual row — batching collapses that to one write; (2) DEC 2026
  * (ANSI_SYNC_BEGIN/END) tells terminals that support it to present the frame
  * atomically. We still redraw before erasing stale tails so terminals or tmux
- * setups that ignore DEC 2026 don't show a blank prompt between frames. */
+ * setups that ignore DEC 2026 don't show a blank prompt between frames.
+ *
+ * The painted area is capped at a fraction of the viewport. Relative
+ * cursor motion can't climb above the visible screen, so painting more
+ * rows than the terminal has would scroll the top of the edit area into
+ * scrollback where later repaints can't reach it — each repaint would then
+ * push another stale copy of the prompt into scrollback. And even within
+ * the screen, the prompt is meant to stay a compact area: a huge paste or
+ * a recalled history entry shouldn't shove the conversation out of view.
+ * A buffer taller than the cap paints a sliding window of content rows
+ * that keeps the cursor visible, with one indicator row on each edge.
+ * Clipping needs at least 3 rows (two indicators + a content row);
+ * tinier or unknown viewports keep the unclipped behavior. */
 static void paint(struct input *in)
 {
     int prompt_w = input_core_prompt_width(in->prompt);
     int cols = in->term_cols;
+    int rows = in->term_rows;
+    int cont = in->wrap_cont_col0 ? 0 : prompt_w;
+
+    /* Layout pass first: the row window must be chosen before emission. */
+    struct input_layout L;
+    input_core_render(in->buf, in->len, in->cursor, prompt_w, cont, cols, NULL, NULL, &L);
+
+    int limit = edit_area_rows(rows);
+    int clipped = rows >= 3 && L.total_rows > limit;
+    int top = 0;
+    int wh = L.total_rows; /* content rows painted */
+    if (clipped) {
+        wh = limit - 2;
+        top = input_core_window_top(in->win_top, L.cursor_row, L.total_rows, wh);
+    }
 
     struct buf f;
     buf_init(&f);
@@ -326,15 +410,36 @@ static void paint(struct input *in)
         buf_append_csi(&f, in->last_cursor_row, 'A');
     buf_append(&f, "\r", 1);
 
-    buf_append_str(&f, in->prompt);
+    int top_ind_cells = 0;
+    if (clipped) {
+        top_ind_cells = append_clip_indicator(&f, top, cols);
+        buf_append_str(&f, "\r\n");
+    }
+    if (top == 0)
+        buf_append_str(&f, in->prompt);
 
-    int cont = in->wrap_cont_col0 ? 0 : prompt_w;
-    struct input_layout L;
-    input_core_render(in->buf, in->len, in->cursor, prompt_w, cont, cols, paint_emit, &f, &L);
+    struct paint_ctx pc = {.f = &f, .win_top = top};
+    if (clipped)
+        input_core_render_window(in->buf, in->len, in->cursor, prompt_w, cont, cols, top,
+                                 top + wh - 1, paint_emit, &pc, NULL);
+    else
+        input_core_render(in->buf, in->len, in->cursor, prompt_w, cont, cols, paint_emit, &pc,
+                          NULL);
+
+    if (clipped) {
+        buf_append_str(&f, ANSI_ERASE_LINE "\r\n");
+        append_clip_indicator(&f, L.total_rows - (top + wh), cols);
+    }
     buf_append_str(&f, ANSI_ERASE_BELOW);
 
-    /* From end-of-content position, climb up to cursor row, then right. */
-    int up = L.end_row - L.cursor_row;
+    /* From end-of-frame position, climb up to the cursor row, then right.
+     * Screen rows: unclipped they equal content rows; clipped, screen row
+     * 0 is the top indicator, content row r sits at 1 + (r - top), and the
+     * bottom indicator is last. The window keeps the cursor row inside
+     * [top, top + wh), so the climb never leaves the viewport. */
+    int cursor_srow = clipped ? 1 + (L.cursor_row - top) : L.cursor_row;
+    int end_srow = clipped ? wh + 1 : L.end_row;
+    int up = end_srow - cursor_srow;
     if (up > 0)
         buf_append_csi(&f, up, 'A');
     buf_append(&f, "\r", 1);
@@ -347,8 +452,11 @@ static void paint(struct input *in)
     fflush(stdout);
     buf_free(&f);
 
-    in->last_cursor_row = L.cursor_row;
-    in->last_rows = L.total_rows;
+    in->last_cursor_row = cursor_srow;
+    in->last_rows = clipped ? wh + 2 : L.total_rows;
+    in->last_clipped = clipped;
+    in->win_top = top;
+    in->top_ind_cells = top_ind_cells;
 }
 
 /* Per-logical-row content width collector. The walker emits a glyph
@@ -399,15 +507,30 @@ static void row_widths_cb(const struct input_render_event *ev, void *user)
 static int handle_resize(struct input *in)
 {
     int new_cols = editor_cols();
-    if (new_cols == in->term_cols)
+    int new_rows = tty_rows();
+    if (new_cols == in->term_cols && new_rows == in->term_rows)
         return 0;
     int old_cols = in->term_cols;
     in->term_cols = new_cols;
+    in->term_rows = new_rows;
+
+    if (new_cols == old_cols) {
+        /* Row-count-only change: no column reflow, so the painted rows
+         * keep their shape and last_cursor_row stays valid — unless a
+         * shrink scrolled the top of the edit area out of reach, so
+         * clamp to the viewport. Repaint to re-derive the row window. */
+        if (new_rows > 0 && in->last_cursor_row > new_rows - 1)
+            in->last_cursor_row = new_rows - 1;
+        return 1;
+    }
 
     int climb = 0;
     if (in->last_rows > 0 && new_cols > 0) {
         int prompt_w = input_core_prompt_width(in->prompt);
-        int cap = in->last_rows + 1; /* +1 for the post-walk final row */
+        /* +1 for the post-walk final row. win_top offsets the cap for a
+         * clipped previous paint, whose replayed rows start there (it's
+         * 0 otherwise). */
+        int cap = in->win_top + in->last_rows + 1;
         int *widths = xcalloc((size_t)cap, sizeof(int));
         struct row_widths_state s = {.widths = widths, .cap = cap, .n = 0, .current = prompt_w};
         struct input_layout L;
@@ -420,13 +543,25 @@ static int handle_resize(struct input *in)
 
         /* Physical rows above the cursor's logical row + cursor's
          * offset within its own row under the new width. An empty
-         * logical row still occupies one physical row, so floor at 1. */
-        for (int i = 0; i < L.cursor_row && i < s.n; i++) {
+         * logical row still occupies one physical row, so floor at 1.
+         * For a clipped previous paint, only the painted window rows
+         * are on screen: count from win_top and add the top indicator
+         * row — which was sized for the old width and reflows under
+         * the new one just like a content row. */
+        int start = in->last_clipped ? in->win_top : 0;
+        if (in->last_clipped) {
+            climb = in->top_ind_cells > 0 ? (in->top_ind_cells + new_cols - 1) / new_cols : 1;
+        }
+        for (int i = start; i < L.cursor_row && i < s.n; i++) {
             int pr = s.widths[i] > 0 ? (s.widths[i] + new_cols - 1) / new_cols : 1;
             climb += pr;
         }
         climb += L.cursor_col / new_cols;
         free(widths);
+        /* Reflow estimates can overshoot what the viewport can actually
+         * hold; an over-climb would repaint from the wrong row. */
+        if (new_rows > 0 && climb > new_rows - 1)
+            climb = new_rows - 1;
     }
 
     in->last_cursor_row = climb;
@@ -508,6 +643,38 @@ static void render_submitted(struct input *in)
     in->last_rows = 0;
 }
 
+/* Erase the painted edit area in place, leaving the cursor at its
+ * top-left, ready for a modal handoff (editor / pager / picker) or the
+ * next paint. Deliberately erases line-by-line (erase-line + cursor-
+ * down, which clamps at the bottom row and never scrolls) rather than
+ * with one erase-below: when the edit area starts at the top of the
+ * screen (a capped tall buffer on a small terminal, or a prompt
+ * repainted right after Ctrl-L), an erase-below from home is a
+ * full-screen clear, and tmux (like some terminals) preserves cleared
+ * screens by pushing them into scrollback — leaving a stale copy of
+ * the prompt above the handoff. */
+static void erase_edit_area(struct input *in)
+{
+    struct buf f;
+    buf_init(&f);
+    if (in->last_cursor_row > 0)
+        buf_append_csi(&f, in->last_cursor_row, 'A');
+    buf_append(&f, "\r", 1);
+    int rows = in->last_rows > 0 ? in->last_rows : 1;
+    for (int i = 0; i < rows; i++) {
+        buf_append_str(&f, ANSI_ERASE_LINE);
+        if (i + 1 < rows)
+            buf_append_csi(&f, 1, 'B');
+    }
+    if (rows > 1)
+        buf_append_csi(&f, rows - 1, 'A');
+    fwrite(f.data, 1, f.len, stdout);
+    fflush(stdout);
+    buf_free(&f);
+    in->last_cursor_row = 0;
+    in->last_rows = 0;
+}
+
 /* ---------------- $EDITOR escape ---------------- */
 
 static void open_editor(struct input *in)
@@ -517,12 +684,7 @@ static void open_editor(struct input *in)
      * editors (vim, nvim, helix, ...) altscreen restore returns the
      * cursor to this cleared position; non-altscreen editors will
      * leave their output visible above. */
-    if (in->last_cursor_row > 0)
-        printf("\x1b[%dA", in->last_cursor_row);
-    fputs("\r\x1b[J", stdout);
-    fflush(stdout);
-    in->last_cursor_row = 0;
-    in->last_rows = 0;
+    erase_edit_area(in);
     raw_off(in);
 
     char path[] = "/tmp/hax-edit-XXXXXX";
@@ -588,6 +750,7 @@ reenter:
      * we won't see it here — refresh explicitly before the caller's
      * next paint, otherwise wrap math uses pre-editor width. */
     in->term_cols = editor_cols();
+    in->term_rows = tty_rows();
 }
 
 /* ---------------- Ctrl-T transcript ---------------- */
@@ -601,12 +764,7 @@ static void show_transcript(struct input *in)
     if (!in->transcript_cb)
         return;
 
-    if (in->last_cursor_row > 0)
-        printf("\x1b[%dA", in->last_cursor_row);
-    fputs("\r\x1b[J", stdout);
-    fflush(stdout);
-    in->last_cursor_row = 0;
-    in->last_rows = 0;
+    erase_edit_area(in);
     raw_off(in);
 
     in->transcript_cb(in->transcript_user);
@@ -615,6 +773,7 @@ static void show_transcript(struct input *in)
     /* Pager may have prompted a window resize; refresh before the next
      * paint so wrap math uses the current width. */
     in->term_cols = editor_cols();
+    in->term_rows = tty_rows();
 }
 
 /* ---------------- Tab modal completion ---------------- */
@@ -634,12 +793,7 @@ static void complete_modal(struct input *in, size_t start, size_t end)
         memcpy(token, in->buf + start, tn);
     token[tn] = '\0';
 
-    if (in->last_cursor_row > 0)
-        printf("\x1b[%dA", in->last_cursor_row);
-    fputs("\r\x1b[J", stdout);
-    fflush(stdout);
-    in->last_cursor_row = 0;
-    in->last_rows = 0;
+    erase_edit_area(in);
     raw_off(in);
 
     char *pick = in->completer->pick(token, in->completer->user);
@@ -649,6 +803,7 @@ static void complete_modal(struct input *in, size_t start, size_t end)
     /* The picker may have prompted a window resize; refresh before the
      * next paint so wrap math uses the current width. */
     in->term_cols = editor_cols();
+    in->term_rows = tty_rows();
     if (pick && *pick)
         input_core_replace_span(in, start, end, pick);
     free(pick);
@@ -1270,6 +1425,7 @@ char *input_readline(struct input *in, const char *prompt)
     /* Reset per-call edit state. History is preserved across calls. */
     in->prompt = prompt;
     in->term_cols = editor_cols();
+    in->term_rows = tty_rows();
     in->len = 0;
     in->cursor = 0;
     in->buf[0] = '\0';
@@ -1278,6 +1434,9 @@ char *input_readline(struct input *in, const char *prompt)
     in->draft = NULL;
     in->last_cursor_row = 0;
     in->last_rows = 0;
+    in->last_clipped = 0;
+    in->win_top = 0;
+    in->top_ind_cells = 0;
 
     fflush(stdout);
     raw_on(in);
@@ -1395,6 +1554,7 @@ char *input_readline(struct input *in, const char *prompt)
              * so the next paint draws fresh. */
             raw_on(in);
             in->term_cols = editor_cols();
+            in->term_rows = tty_rows();
             break;
         case 0x1b: /* ESC — start of escape sequence */
             handle_escape(in);
@@ -1425,7 +1585,9 @@ char *input_readline(struct input *in, const char *prompt)
             break;
         }
 
-        if (!eof)
+        /* No paint on submit: render_submitted replaces the edit area
+         * wholesale, so a paint here would be pure churn. */
+        if (!eof && !submit)
             paint(in);
     }
 

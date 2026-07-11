@@ -769,6 +769,52 @@ void input_core_compute_layout(const char *buf, size_t len, size_t cursor, int p
     input_core_render(buf, len, cursor, prompt_w, prompt_w, cols, NULL, NULL, out);
 }
 
+/* Trampoline for input_core_render_window: passes through events whose
+ * row lies in [lo, hi]. GLYPH events carry their own row; ROW_BREAK
+ * events carry the destination row, so the break into `lo` passes and
+ * the break out of `hi` (destination hi+1) is dropped. */
+struct row_window {
+    int lo, hi;
+    input_render_cb cb;
+    void *user;
+};
+
+static void window_cb(const struct input_render_event *ev, void *user)
+{
+    struct row_window *w = user;
+    if (ev->row < w->lo || ev->row > w->hi)
+        return;
+    w->cb(ev, w->user);
+}
+
+void input_core_render_window(const char *buf, size_t len, size_t cursor, int prompt_w,
+                              int cont_indent_col, int cols, int row_lo, int row_hi,
+                              input_render_cb cb, void *user, struct input_layout *out)
+{
+    struct row_window w = {.lo = row_lo, .hi = row_hi, .cb = cb, .user = user};
+    input_core_render(buf, len, cursor, prompt_w, cont_indent_col, cols, cb ? window_cb : NULL,
+                      cb ? &w : NULL, out);
+}
+
+int input_core_window_top(int prev_top, int cursor_row, int total_rows, int rows)
+{
+    if (rows <= 0)
+        return 0;
+    int max_top = total_rows - rows;
+    if (max_top < 0)
+        max_top = 0;
+    int top = prev_top;
+    if (top < 0)
+        top = 0;
+    if (top > max_top)
+        top = max_top;
+    if (cursor_row < top)
+        top = cursor_row;
+    else if (cursor_row > top + rows - 1)
+        top = cursor_row - (rows - 1);
+    return top;
+}
+
 /* ---------------- escape-sequence decoder ---------------- */
 
 /* Read the body of a CSI / SS3 sequence into `seq`: bytes after the
