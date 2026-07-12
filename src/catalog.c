@@ -435,12 +435,15 @@ int catalog_lookup(const char *provider_id, const char *model, struct catalog_en
 }
 
 double catalog_price(const struct catalog_entry *e, long input, long output, long cached,
-                     long cache_write)
+                     long cache_write, long cache_write_1h)
 {
     if (e->cost_input < 0 || e->cost_output < 0)
         return -1;
     long cr = cached > 0 ? cached : 0;
     long cw = cache_write > 0 ? cache_write : 0;
+    long cw1h = cache_write_1h > 0 ? cache_write_1h : 0;
+    if (cw1h > cw)
+        cw1h = cw; /* defensive: contract says 1h writes are a subset */
     long in = input > 0 ? input : 0;
     long uncached = in - cr - cw;
     if (uncached < 0)
@@ -448,8 +451,10 @@ double catalog_price(const struct catalog_entry *e, long input, long output, lon
     double r_read = e->cost_cache_read >= 0 ? e->cost_cache_read : e->cost_input;
     double r_write = e->cost_cache_write >= 0 ? e->cost_cache_write : e->cost_input;
     double out = output > 0 ? (double)output : 0;
-    return ((double)uncached * e->cost_input + (double)cr * r_read + (double)cw * r_write +
-            out * e->cost_output) /
+    /* 1h cache writes bill at 2x input (see the header contract); only
+     * the remaining (5m) writes take the catalog's cache_write rate. */
+    return ((double)uncached * e->cost_input + (double)cr * r_read + (double)(cw - cw1h) * r_write +
+            (double)cw1h * 2 * e->cost_input + out * e->cost_output) /
            1e6;
 }
 

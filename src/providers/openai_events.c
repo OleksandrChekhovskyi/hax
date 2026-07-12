@@ -16,6 +16,7 @@ void openai_events_init(struct openai_events *s, stream_cb cb, void *user)
     s->pending_usage.output_tokens = -1;
     s->pending_usage.cached_tokens = -1;
     s->pending_usage.cache_write_tokens = -1;
+    s->pending_usage.cache_write_1h_tokens = -1;
     s->pending_usage.cost = -1;
 }
 
@@ -31,6 +32,8 @@ void openai_events_free(struct openai_events *s)
     s->n_tools = s->cap_tools = 0;
     free(s->finish_reason);
     s->finish_reason = NULL;
+    free(s->deferred_error);
+    s->deferred_error = NULL;
 }
 
 static struct openai_tool_track *track_find(struct openai_events *s, int index)
@@ -217,8 +220,20 @@ static void capture_progress(struct openai_events *s, json_t *root)
     emit(s, &ev);
 }
 
-static void emit_deferred_done(struct openai_events *s)
+/* Emit the terminal event the earlier finish_reason deferred: the
+ * truncation error when one was recorded, the clean EV_DONE otherwise.
+ * Either way pending_usage rides along — truncated responses bill like
+ * complete ones. */
+static void emit_deferred_terminal(struct openai_events *s)
 {
+    if (s->deferred_error) {
+        struct stream_event ev = {
+            .kind = EV_ERROR,
+            .u.error = {.message = s->deferred_error, .http_status = 0, .usage = &s->pending_usage},
+        };
+        emit(s, &ev);
+        return;
+    }
     struct stream_event ev = {
         .kind = EV_DONE,
         .u.done = {.stop_reason = s->finish_reason ? s->finish_reason : "stop",
@@ -234,35 +249,29 @@ static void emit_deferred_done(struct openai_events *s)
  *      [interrupted], so a "continue" follow-up turn carries it.
  * Everything else is treated as unknown and maps to EV_DONE to avoid hanging.
  *
- * EV_DONE is deferred because under stream_options.include_usage the usage
- * chunk arrives one event AFTER finish_reason. We end tool calls now (the
- * response is logically complete) but hold off on EV_DONE until [DONE] or
- * the SSE transport closes — whichever sees the usage chunk first. */
+ * The terminal event is deferred because under stream_options.include_usage
+ * the usage chunk arrives one event AFTER finish_reason. We end tool calls
+ * now (the response is logically complete) but hold off on EV_DONE — or the
+ * truncation EV_ERROR, which must carry that usage too — until [DONE] or
+ * the SSE transport closes, whichever sees the usage chunk first. */
 static void handle_finish_reason(struct openai_events *s, const char *reason)
 {
     if (s->terminated || s->saw_finish)
         return;
 
+    end_all_tool_calls(s);
+    s->saw_finish = 1;
+
     if (reason && (strcmp(reason, "length") == 0 || strcmp(reason, "content_filter") == 0)) {
-        end_all_tool_calls(s);
-        s->terminated = 1;
         /* Append the preset's hint only for "length": it explains a context/
          * output-cap truncation (the actionable ollama num_ctx case), which
          * doesn't apply to a content_filter stop. */
-        char *msg = (strcmp(reason, "length") == 0 && s->length_hint)
-                        ? xasprintf("response incomplete: length — %s", s->length_hint)
-                        : xasprintf("response incomplete: %s", reason);
-        struct stream_event ev = {
-            .kind = EV_ERROR,
-            .u.error = {.message = msg, .http_status = 0},
-        };
-        emit(s, &ev);
-        free(msg);
+        s->deferred_error = (strcmp(reason, "length") == 0 && s->length_hint)
+                                ? xasprintf("response incomplete: length — %s", s->length_hint)
+                                : xasprintf("response incomplete: %s", reason);
         return;
     }
 
-    end_all_tool_calls(s);
-    s->saw_finish = 1;
     s->finish_reason = xstrdup(reason ? reason : "stop");
 }
 
@@ -272,7 +281,7 @@ static void handle_done_sentinel(struct openai_events *s)
         return;
     end_all_tool_calls(s);
     s->terminated = 1;
-    emit_deferred_done(s);
+    emit_deferred_terminal(s);
 }
 
 /* Some backends surface errors as `{"error":{"message":"...","code":...}}`
@@ -285,7 +294,9 @@ static void handle_error_object(struct openai_events *s, json_t *err)
     const char *m = json_string_value(json_object_get(err, "message"));
     struct stream_event ev = {
         .kind = EV_ERROR,
-        .u.error = {.message = m ? m : "provider error", .http_status = 0},
+        .u.error = {.message = m ? m : "provider error",
+                    .http_status = 0,
+                    .usage = &s->pending_usage},
     };
     emit(s, &ev);
 }
@@ -365,15 +376,17 @@ void openai_events_finalize(struct openai_events *s)
         return;
     s->terminated = 1;
     /* Some backends close the SSE stream after finish_reason without ever
-     * sending [DONE] — emit the deferred done now so the agent doesn't
-     * mistake a clean close for a truncated stream. */
+     * sending [DONE] — emit the deferred terminal event now so the agent
+     * doesn't mistake a clean close for a truncated stream. */
     if (s->saw_finish) {
-        emit_deferred_done(s);
+        emit_deferred_terminal(s);
         return;
     }
     struct stream_event ev = {
         .kind = EV_ERROR,
-        .u.error = {.message = "stream ended before completion", .http_status = 0},
+        .u.error = {.message = "stream ended before completion",
+                    .http_status = 0,
+                    .usage = &s->pending_usage},
     };
     emit(s, &ev);
 }

@@ -173,6 +173,8 @@ static void handle_args_delta(struct codex_events *s, json_t *root)
     emit(s, &ev);
 }
 
+static void parse_usage(json_t *root, struct stream_usage *out);
+
 static void handle_failed(struct codex_events *s, json_t *root)
 {
     if (s->terminated)
@@ -188,16 +190,19 @@ static void handle_failed(struct codex_events *s, json_t *root)
                 msg = m;
         }
     }
+    struct stream_usage u;
+    parse_usage(root, &u);
     struct stream_event ev = {
         .kind = EV_ERROR,
-        .u.error = {.message = msg, .http_status = 0},
+        .u.error = {.message = msg, .http_status = 0, .usage = &u},
     };
     emit(s, &ev);
 }
 
 /* response.incomplete fires when the backend truncates (hit max_output_tokens,
  * content filter, etc.). Surface as an error so the agent discards the partial
- * turn instead of committing it to history. */
+ * turn instead of committing it to history — but keep the usage the event
+ * carries: a truncated response bills like a complete one. */
 static void handle_incomplete(struct codex_events *s, json_t *root)
 {
     if (s->terminated)
@@ -209,24 +214,27 @@ static void handle_incomplete(struct codex_events *s, json_t *root)
     if (details)
         reason = json_string_value(json_object_get(details, "reason"));
     char *msg = xasprintf("response incomplete: %s", reason ? reason : "unknown");
+    struct stream_usage u;
+    parse_usage(root, &u);
     struct stream_event ev = {
         .kind = EV_ERROR,
-        .u.error = {.message = msg, .http_status = 0},
+        .u.error = {.message = msg, .http_status = 0, .usage = &u},
     };
     emit(s, &ev);
     free(msg);
 }
 
-/* Codex carries usage on the final response.completed event under
- * response.usage. cached_tokens lives in input_tokens_details — when absent
- * we leave it at -1 ("unknown"), which is distinct from 0 ("known to be no
- * cache hit"). */
+/* Codex carries usage on the final response.completed event (and on
+ * response.incomplete / response.failed) under response.usage. cached_tokens
+ * lives in input_tokens_details — when absent we leave it at -1 ("unknown"),
+ * which is distinct from 0 ("known to be no cache hit"). */
 static void parse_usage(json_t *root, struct stream_usage *out)
 {
     out->input_tokens = -1;
     out->output_tokens = -1;
     out->cached_tokens = -1;
     out->cache_write_tokens = -1;
+    out->cache_write_1h_tokens = -1;
     out->cost = -1;
 
     json_t *resp = json_object_get(root, "response");
@@ -261,7 +269,7 @@ static void handle_completed(struct codex_events *s, json_t *root)
     if (root)
         parse_usage(root, &ev.u.done.usage);
     else
-        ev.u.done.usage = (struct stream_usage){-1, -1, -1, -1, -1};
+        ev.u.done.usage = (struct stream_usage){-1, -1, -1, -1, -1, -1};
     emit(s, &ev);
 }
 

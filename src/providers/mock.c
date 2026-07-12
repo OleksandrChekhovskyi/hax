@@ -215,6 +215,7 @@ static struct stream_usage empty_usage(void)
                                  .output_tokens = -1,
                                  .cached_tokens = -1,
                                  .cache_write_tokens = -1,
+                                 .cache_write_1h_tokens = -1,
                                  .cost = -1};
 }
 
@@ -320,6 +321,8 @@ static struct stream_usage parse_usage(const char *s)
             u.cached_tokens = v;
         else if (strncmp(s, "cache_write=", 12) == 0)
             u.cache_write_tokens = v;
+        else if (strncmp(s, "cache_write_1h=", 15) == 0)
+            u.cache_write_1h_tokens = v;
         else if (strncmp(s, "cost=", 5) == 0)
             u.cost = strtod(eq + 1, NULL);
         /* Skip past this token. */

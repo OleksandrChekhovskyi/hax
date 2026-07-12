@@ -202,6 +202,8 @@ void spend_account(struct spend_totals *t, const struct stream_usage *u)
         t->seg_cached += u->cached_tokens;
     if (u->cache_write_tokens > 0)
         t->seg_cache_write += u->cache_write_tokens;
+    if (u->cache_write_1h_tokens > 0)
+        t->seg_cache_write_1h += u->cache_write_1h_tokens;
 }
 
 void spend_fold(struct spend_totals *dst, const struct spend_totals *src)
@@ -211,6 +213,7 @@ void spend_fold(struct spend_totals *dst, const struct spend_totals *src)
     dst->seg_output += src->seg_output;
     dst->seg_cached += src->seg_cached;
     dst->seg_cache_write += src->seg_cache_write;
+    dst->seg_cache_write_1h += src->seg_cache_write_1h;
 }
 
 int spend_has_tokens(const struct spend_totals *t)
@@ -227,7 +230,8 @@ double spend_estimate(const struct spend_totals *t, const struct provider *p, co
     struct catalog_entry e;
     if (catalog_lookup(p->catalog_id, model, &e) != 0)
         return -1;
-    return catalog_price(&e, t->seg_input, t->seg_output, t->seg_cached, t->seg_cache_write);
+    return catalog_price(&e, t->seg_input, t->seg_output, t->seg_cached, t->seg_cache_write,
+                         t->seg_cache_write_1h);
 }
 
 static char *resolve_model_label(struct provider *p, const char *model)

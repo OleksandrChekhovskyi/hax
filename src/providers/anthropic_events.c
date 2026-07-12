@@ -16,6 +16,7 @@ void anthropic_events_init(struct anthropic_events *s, stream_cb cb, void *user)
     s->pending_usage.output_tokens = -1;
     s->pending_usage.cached_tokens = -1;
     s->pending_usage.cache_write_tokens = -1;
+    s->pending_usage.cache_write_1h_tokens = -1;
     s->pending_usage.cost = -1;
 }
 
@@ -225,7 +226,9 @@ static void handle_content_block_stop(struct anthropic_events *s, json_t *root)
  * count on message_delta. input_tokens is the non-cached prompt portion; the
  * cache_* counts are additional input we sent, so total input = input +
  * cache_read + cache_creation. cached_tokens (the prefix-cache hit) is the
- * cache_read subset; cache_write_tokens is the cache_creation subset. */
+ * cache_read subset; cache_write_tokens is the cache_creation subset. The
+ * nested cache_creation object breaks writes down by TTL — the 1h portion
+ * bills at 2x input (vs 1.25x for 5m writes), so it travels separately. */
 static void capture_usage(struct anthropic_events *s, json_t *usage)
 {
     if (!json_is_object(usage))
@@ -253,6 +256,10 @@ static void capture_usage(struct anthropic_events *s, json_t *usage)
         s->pending_usage.cached_tokens = cache_read;
     if (cache_create >= 0)
         s->pending_usage.cache_write_tokens = cache_create;
+    json_t *breakdown = json_object_get(usage, "cache_creation");
+    if (json_is_object(breakdown) &&
+        json_is_integer(v = json_object_get(breakdown, "ephemeral_1h_input_tokens")))
+        s->pending_usage.cache_write_1h_tokens = (long)json_integer_value(v);
     if (output >= 0)
         s->pending_usage.output_tokens = output;
 }
@@ -298,7 +305,8 @@ static void handle_message_stop(struct anthropic_events *s)
             .kind = EV_ERROR,
             .u.error = {.message = "response incomplete: max_tokens — raise "
                                    "anthropic.max_tokens or lower the effort level",
-                        .http_status = 0},
+                        .http_status = 0,
+                        .usage = &s->pending_usage},
         };
         emit(s, &ev);
         return;
@@ -307,7 +315,8 @@ static void handle_message_stop(struct anthropic_events *s)
         struct stream_event ev = {
             .kind = EV_ERROR,
             .u.error = {.message = "response paused before completion (pause_turn)",
-                        .http_status = 0},
+                        .http_status = 0,
+                        .usage = &s->pending_usage},
         };
         emit(s, &ev);
         return;
@@ -329,7 +338,9 @@ static void handle_error(struct anthropic_events *s, json_t *root)
     const char *m = err ? json_string_value(json_object_get(err, "message")) : NULL;
     struct stream_event ev = {
         .kind = EV_ERROR,
-        .u.error = {.message = m ? m : "provider error", .http_status = 0},
+        .u.error = {.message = m ? m : "provider error",
+                    .http_status = 0,
+                    .usage = &s->pending_usage},
     };
     emit(s, &ev);
 }
@@ -377,7 +388,9 @@ void anthropic_events_finalize(struct anthropic_events *s)
     s->terminated = 1;
     struct stream_event ev = {
         .kind = EV_ERROR,
-        .u.error = {.message = "stream ended before completion", .http_status = 0},
+        .u.error = {.message = "stream ended before completion",
+                    .http_status = 0,
+                    .usage = &s->pending_usage},
     };
     emit(s, &ev);
 }

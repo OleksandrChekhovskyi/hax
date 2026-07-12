@@ -125,20 +125,27 @@ static void test_price_formula(void)
         .output = 0,
     };
     /* 1M uncached input + 1M output at base rates. */
-    EXPECT(catalog_price(&e, 1000000, 1000000, 0, 0) == 10.0);
+    EXPECT(catalog_price(&e, 1000000, 1000000, 0, 0, 0) == 10.0);
     /* Cached reads and writes are subsets of input, priced at their own
      * rates: 1M input of which 500k reads + 250k writes leaves 250k at
      * the input rate. 0.5M*0.5 + 0.25M*2.5 + 0.25M*2 = 1.375. */
-    EXPECT(catalog_price(&e, 1000000, 0, 500000, 250000) == 1.375);
+    EXPECT(catalog_price(&e, 1000000, 0, 500000, 250000, 0) == 1.375);
+    /* The 1h subset of the writes bills at 2x input instead of the
+     * (5-minute) cache_write rate: of the 250k writes, 100k are 1h.
+     * 0.25M*2 + 0.5M*0.5 + 0.15M*2.5 + 0.1M*(2*2) = 1.525. */
+    EXPECT(catalog_price(&e, 1000000, 0, 500000, 250000, 100000) == 1.525);
+    /* A 1h count exceeding the writes clamps to them (subset contract):
+     * 0.9M*2 + 0.1M*(2*2) = 2.2. */
+    EXPECT(catalog_price(&e, 1000000, 0, 0, 100000, 200000) == 2.2);
     /* Negative ("not reported") counts read as zero. */
-    EXPECT(catalog_price(&e, 1000000, -1, -1, -1) == 2.0);
+    EXPECT(catalog_price(&e, 1000000, -1, -1, -1, -1) == 2.0);
     /* Unknown cache rates fall back to the input rate. */
     e.cost_cache_read = -1;
     e.cost_cache_write = -1;
-    EXPECT(catalog_price(&e, 1000000, 0, 400000, 0) == 2.0);
+    EXPECT(catalog_price(&e, 1000000, 0, 400000, 0, 0) == 2.0);
     /* Unknown input or output rate: no estimate at all. */
     e.cost_input = -1;
-    EXPECT(catalog_price(&e, 1000000, 1000000, 0, 0) == -1);
+    EXPECT(catalog_price(&e, 1000000, 1000000, 0, 0, 0) == -1);
 }
 
 static void test_extract_member(void)

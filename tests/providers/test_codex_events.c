@@ -65,6 +65,10 @@ static int cap_cb(const struct stream_event *ev, void *user)
     case EV_ERROR:
         c->message = strdup(ev->u.error.message ? ev->u.error.message : "");
         c->http_status = ev->u.error.http_status;
+        if (ev->u.error.usage)
+            c->usage = *ev->u.error.usage;
+        else
+            c->usage = (struct stream_usage){-1, -1, -1, -1, -1, -1};
         break;
     }
     return 0;
@@ -166,10 +170,17 @@ static void test_incomplete_with_reason(void)
 {
     WITH_STATE(cap, st);
     codex_events_feed(&st, "{\"type\":\"response.incomplete\",\"response\":"
-                           "{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}");
+                           "{\"incomplete_details\":{\"reason\":\"max_output_tokens\"},"
+                           "\"usage\":{\"input_tokens\":500,\"output_tokens\":80,"
+                           "\"input_tokens_details\":{\"cached_tokens\":300}}}}");
     EXPECT(cap.n == 1);
     EXPECT(cap.events[0].kind == EV_ERROR);
     EXPECT(strstr(cap.events[0].message, "max_output_tokens") != NULL);
+    /* The truncated response is billed like a complete one — its usage
+     * rides on the error instead of being dropped. */
+    EXPECT(cap.events[0].usage.input_tokens == 500);
+    EXPECT(cap.events[0].usage.output_tokens == 80);
+    EXPECT(cap.events[0].usage.cached_tokens == 300);
     EXPECT(st.terminated == 1);
     TEARDOWN(cap, st);
 }

@@ -85,12 +85,13 @@ int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long
 struct spend_totals {
     double reported; /* provider-reported cost sum, USD */
     /* The open pricing segment: token sums of responses that reported no
-     * cost. Non-overlapping subsets cached/cache_write follow the
-     * stream_usage conventions. */
+     * cost. Non-overlapping subsets cached/cache_write (and its 1h-TTL
+     * subset cache_write_1h) follow the stream_usage conventions. */
     long seg_input;
     long seg_output;
     long seg_cached;
     long seg_cache_write;
+    long seg_cache_write_1h;
 };
 
 /* Account one completed response into `t` — the single definition of the

@@ -512,6 +512,11 @@ static int on_event(const struct stream_event *ev, void *user)
         fflush(stdout);
         break;
     case EV_ERROR:
+        /* Usage the provider reported before failing (a max_tokens/length
+         * truncation is billed like a complete response) — account it the
+         * same as EV_DONE's. */
+        if (ev->u.error.usage)
+            ec->usage = *ev->u.error.usage;
         /* Full close before drawing the error block. render_open_block's
          * RS_IDLE transition flushes md's tail if RS_TEXT was open, so
          * partial pre-error text appears just above the error line. */
@@ -1040,8 +1045,12 @@ static int compact_on_event(const struct stream_event *ev, void *user)
      * touched: the summarize request's input spans the full
      * pre-compaction history plus prompt, which would misstate the
      * post-compaction window until the next turn reports the real one. */
-    if (ce->stats && ev->kind == EV_DONE) {
-        const struct stream_usage *u = &ev->u.done.usage;
+    const struct stream_usage *u = NULL;
+    if (ev->kind == EV_DONE)
+        u = &ev->u.done.usage;
+    else if (ev->kind == EV_ERROR)
+        u = ev->u.error.usage; /* billed pre-failure usage, when reported */
+    if (ce->stats && u) {
         if (u->input_tokens >= 0)
             ce->stats->input_tokens += u->input_tokens;
         if (u->output_tokens >= 0)
@@ -1424,7 +1433,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
             struct turn t;
             turn_init(&t);
             r.disp.saw_text = 0;
-            struct event_ctx ec = {.r = &r, .turn = &t, .usage = {-1, -1, -1, -1, -1}};
+            struct event_ctx ec = {.r = &r, .turn = &t, .usage = {-1, -1, -1, -1, -1, -1}};
             /* agent_stream_tick combines cancel (Esc) with idle
              * detection: ~1Hz from libcurl's progress callback inside
              * curl_easy_perform, plus on every received chunk. */
@@ -1433,6 +1442,32 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
              * "requests" — counted regardless of outcome (an errored or
              * interrupted attempt still hit the backend). */
             state.stats.requests++;
+
+            /* Usage accounting runs before the error branch below: a
+             * truncated (max_tokens/length) response reports usage on its
+             * EV_ERROR and is billed like a complete one, so the display
+             * trio and /session totals must not skip it. */
+            if (ec.usage.input_tokens >= 0 && ec.usage.output_tokens >= 0)
+                user_turn_ctx = ec.usage.input_tokens + ec.usage.output_tokens;
+            if (ec.usage.output_tokens >= 0)
+                user_turn_out = (user_turn_out < 0 ? 0 : user_turn_out) + ec.usage.output_tokens;
+            if (ec.usage.cached_tokens >= 0)
+                user_turn_cached = ec.usage.cached_tokens;
+
+            /* Session totals (/session): sums of what this round-trip
+             * reported. Unlike the display trio above these are plain
+             * accumulators — unreported fields just don't contribute. */
+            if (user_turn_ctx >= 0) {
+                state.stats.last_ctx = user_turn_ctx;
+                state.stats.last_limit = compact_context_limit(p, sess.model);
+            }
+            if (ec.usage.input_tokens >= 0)
+                state.stats.input_tokens += ec.usage.input_tokens;
+            if (ec.usage.output_tokens >= 0)
+                state.stats.output_tokens += ec.usage.output_tokens;
+            if (ec.usage.cached_tokens > 0)
+                state.stats.cached_tokens += ec.usage.cached_tokens;
+            spend_account(&state.stats.spend, &ec.usage);
 
             if (t.error) {
                 /* Mid-stream error (network drop, "length"/"content_filter"
@@ -1479,28 +1514,6 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
              * about to flip. */
             interrupt_settle();
             int interrupted = interrupt_requested();
-
-            if (ec.usage.input_tokens >= 0 && ec.usage.output_tokens >= 0)
-                user_turn_ctx = ec.usage.input_tokens + ec.usage.output_tokens;
-            if (ec.usage.output_tokens >= 0)
-                user_turn_out = (user_turn_out < 0 ? 0 : user_turn_out) + ec.usage.output_tokens;
-            if (ec.usage.cached_tokens >= 0)
-                user_turn_cached = ec.usage.cached_tokens;
-
-            /* Session totals (/session): sums of what this round-trip
-             * reported. Unlike the display trio above these are plain
-             * accumulators — unreported fields just don't contribute. */
-            if (user_turn_ctx >= 0) {
-                state.stats.last_ctx = user_turn_ctx;
-                state.stats.last_limit = compact_context_limit(p, sess.model);
-            }
-            if (ec.usage.input_tokens >= 0)
-                state.stats.input_tokens += ec.usage.input_tokens;
-            if (ec.usage.output_tokens >= 0)
-                state.stats.output_tokens += ec.usage.output_tokens;
-            if (ec.usage.cached_tokens > 0)
-                state.stats.cached_tokens += ec.usage.cached_tokens;
-            spend_account(&state.stats.spend, &ec.usage);
 
             if (interrupted) {
                 /* User pressed Esc. Same shape-history-as-aborted dance

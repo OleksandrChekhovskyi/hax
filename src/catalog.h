@@ -80,11 +80,15 @@ json_t *catalog_extract_member(const char *text, const char *key);
  * partial one). `cached` (prefix-cache reads) and `cache_write` are the
  * non-overlapping subsets of `input` that stream_usage reports; they are
  * priced at their own rates, falling back to the input rate when the
- * entry doesn't declare one. Negative token counts (the "not reported"
- * convention) read as 0. Pure math — no I/O, no tiers (models.dev's
- * long-context tier pricing is deliberately not modeled yet). */
+ * entry doesn't declare one. `cache_write_1h` is the 1h-TTL subset of
+ * `cache_write`, priced at 2x the input rate — Anthropic's documented
+ * multiplier; the catalog's cache_write rate covers only the default
+ * 5-minute writes and models.dev carries no 1h rate to read instead.
+ * Negative token counts (the "not reported" convention) read as 0. Pure
+ * math — no I/O, no tiers (models.dev's long-context tier pricing is
+ * deliberately not modeled yet). */
 double catalog_price(const struct catalog_entry *e, long input, long output, long cached,
-                     long cache_write);
+                     long cache_write, long cache_write_1h);
 
 /* Spawn the once-per-run background snapshot fetch if the cache file is
  * missing or older than catalog.refresh (empty catalog.url or zero

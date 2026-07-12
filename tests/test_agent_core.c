@@ -471,6 +471,7 @@ static void test_spend_accounting(void)
                              .output_tokens = 50,
                              .cached_tokens = 200,
                              .cache_write_tokens = -1,
+                             .cache_write_1h_tokens = -1,
                              .cost = 0.01};
     spend_account(&t, &u);
     EXPECT(t.reported == 0.01);
@@ -486,6 +487,16 @@ static void test_spend_accounting(void)
     EXPECT(t.seg_output == 100);
     EXPECT(t.seg_cached == 400);
     EXPECT(t.seg_cache_write == 0);
+    EXPECT(t.seg_cache_write_1h == 0);
+
+    /* Cache writes and their 1h subset accumulate like the others. */
+    u.cache_write_tokens = 300;
+    u.cache_write_1h_tokens = 120;
+    spend_account(&t, &u);
+    EXPECT(t.seg_cache_write == 300);
+    EXPECT(t.seg_cache_write_1h == 120);
+    u.cache_write_tokens = -1;
+    u.cache_write_1h_tokens = -1;
 
     /* An explicit zero cost is a *reported* free response, not "cost
      * unknown": nothing may land in the segment, where catalog rates
@@ -501,8 +512,10 @@ static void test_spend_accounting(void)
     struct spend_totals sum = {.reported = 1.0, .seg_input = 5};
     spend_fold(&sum, &t);
     EXPECT(sum.reported == 1.01);
-    EXPECT(sum.seg_input == 2005);
-    EXPECT(sum.seg_output == 100);
+    EXPECT(sum.seg_input == 3005);
+    EXPECT(sum.seg_output == 150);
+    EXPECT(sum.seg_cache_write == 300);
+    EXPECT(sum.seg_cache_write_1h == 120);
 
     /* spend_has_tokens: any segment tokens count; reported cost doesn't. */
     EXPECT(spend_has_tokens(&t));

@@ -112,6 +112,10 @@ struct context {
  * in cache_write_tokens — a second, non-overlapping subset of
  * input_tokens — so cost estimation can price the write surcharge.
  * Dialects with no such billing notion leave it at -1.
+ * cache_write_1h_tokens narrows further: the subset of cache_write_tokens
+ * written with a 1-hour TTL, which Anthropic bills at 2x the input rate
+ * (the catalog's cache_write rate covers only the default 5-minute
+ * writes). -1 where the dialect doesn't break writes down by TTL.
  *
  * cost is the provider-reported charge for this response in USD (e.g.
  * OpenRouter's usage.cost when usage accounting is requested); negative
@@ -122,6 +126,7 @@ struct stream_usage {
     long output_tokens;
     long cached_tokens;
     long cache_write_tokens;
+    long cache_write_1h_tokens;
     double cost;
 };
 
@@ -206,6 +211,11 @@ struct stream_event {
         struct {
             const char *message;
             int http_status;
+            /* Usage the provider reported before the failure, or NULL.
+             * Truncated responses (max_tokens/length) are billed like
+             * complete ones, so translators that captured usage attach
+             * it here and the agent accounts it exactly as EV_DONE's. */
+            const struct stream_usage *usage;
         } error;
     } u;
 };

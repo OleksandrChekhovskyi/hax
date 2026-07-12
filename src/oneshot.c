@@ -50,9 +50,16 @@ struct oneshot_ctx {
 static int on_event(const struct stream_event *ev, void *user)
 {
     struct oneshot_ctx *oc = user;
-    if (ev->kind == EV_ERROR && !oc->error_msg && ev->u.error.message)
-        oc->error_msg = xstrdup(ev->u.error.message);
-    else if (ev->kind == EV_DONE) {
+    if (ev->kind == EV_ERROR) {
+        if (!oc->error_msg && ev->u.error.message)
+            oc->error_msg = xstrdup(ev->u.error.message);
+        /* A truncated response reports its usage on the error — billed
+         * like a complete one. */
+        if (ev->u.error.usage) {
+            oc->usage = *ev->u.error.usage;
+            spend_account(&oc->spend, ev->u.error.usage);
+        }
+    } else if (ev->kind == EV_DONE) {
         oc->usage = ev->u.done.usage;
         spend_account(&oc->spend, &ev->u.done.usage);
     }
@@ -97,7 +104,7 @@ static int oneshot_compact(struct agent_session *s, struct provider *p, struct s
     turn_init(&t);
     /* Reuse the normal sink (feeds the turn, captures any error); no tick,
      * no display. */
-    struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL, .usage = {-1, -1, -1, -1, -1}};
+    struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL, .usage = {-1, -1, -1, -1, -1, -1}};
     char *summary = compact_summarize(s, p, NULL, &t, on_event, &oc, NULL, NULL, NULL);
     spend_fold(costs, &oc.spend);
     free(oc.error_msg);
@@ -244,10 +251,23 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
 
         struct turn t;
         turn_init(&t);
-        struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL, .usage = {-1, -1, -1, -1, -1}};
+        struct oneshot_ctx oc = {.turn = &t, .error_msg = NULL, .usage = {-1, -1, -1, -1, -1, -1}};
         /* Oneshot doesn't arm interrupt and has no idle UI to surface
          * — pass a NULL tick so http skips the progress hook entirely. */
         p->stream(p, &ctx, sess.model, on_event, &oc, NULL, NULL);
+
+        /* Accounting runs before the error exit: a truncated response
+         * reported its usage on the error and is billed like a complete
+         * one. round_ctx is the exact context size this round-trip
+         * reported (input subsumes the prior prefix, output is what was
+         * just generated) — the signal the between-round-trip
+         * auto-compaction check reads below. */
+        spend_fold(&costs, &oc.spend);
+        long round_ctx = (oc.usage.input_tokens >= 0 && oc.usage.output_tokens >= 0)
+                             ? oc.usage.input_tokens + oc.usage.output_tokens
+                             : -1;
+        if (round_ctx >= 0)
+            last_ctx = round_ctx;
 
         if (t.error) {
             hax_err("provider error: %s", oc.error_msg ? oc.error_msg : "(no message)");
@@ -257,16 +277,6 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
             goto done;
         }
         free(oc.error_msg);
-
-        /* Exact context size this round-trip reported (input subsumes the
-         * prior prefix, output is what was just generated) — the signal the
-         * between-round-trip auto-compaction check reads below. */
-        long round_ctx = (oc.usage.input_tokens >= 0 && oc.usage.output_tokens >= 0)
-                             ? oc.usage.input_tokens + oc.usage.output_tokens
-                             : -1;
-        if (round_ctx >= 0)
-            last_ctx = round_ctx;
-        spend_fold(&costs, &oc.spend);
 
         size_t n_before;
         int had_tool_call;

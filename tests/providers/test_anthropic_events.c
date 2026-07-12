@@ -64,6 +64,10 @@ static int cap_cb(const struct stream_event *ev, void *user)
         break;
     case EV_ERROR:
         c->message = strdup(ev->u.error.message ? ev->u.error.message : "");
+        if (ev->u.error.usage)
+            c->usage = *ev->u.error.usage;
+        else
+            c->usage = (struct stream_usage){-1, -1, -1, -1, -1, -1};
         break;
     }
     return 0;
@@ -235,19 +239,51 @@ static void test_usage_and_done(void)
     EXPECT(cap.events[0].usage.output_tokens == 25);
     EXPECT(cap.events[0].usage.cached_tokens == 40);
     EXPECT(cap.events[0].usage.cache_write_tokens == 10);
+    /* No cache_creation breakdown: the 1h count stays unknown. */
+    EXPECT(cap.events[0].usage.cache_write_1h_tokens == -1);
     EXPECT(st.terminated == 1);
+    TEARDOWN(cap, st);
+}
+
+static void test_usage_cache_creation_ttl_breakdown(void)
+{
+    /* The nested cache_creation object splits writes by TTL; the 1h
+     * portion bills at 2x input, so it must survive translation. */
+    WITH_STATE(cap, st);
+    FEED(st, "{\"type\":\"message_start\",\"message\":{\"usage\":{"
+             "\"input_tokens\":100,\"cache_read_input_tokens\":40,"
+             "\"cache_creation_input_tokens\":10,"
+             "\"cache_creation\":{\"ephemeral_5m_input_tokens\":3,"
+             "\"ephemeral_1h_input_tokens\":7},\"output_tokens\":0}}}");
+    FEED(st, "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},"
+             "\"usage\":{\"output_tokens\":25}}");
+    FEED(st, "{\"type\":\"message_stop\"}");
+
+    EXPECT(cap.n == 1);
+    EXPECT(cap.events[0].kind == EV_DONE);
+    EXPECT(cap.events[0].usage.cache_write_tokens == 10);
+    EXPECT(cap.events[0].usage.cache_write_1h_tokens == 7);
     TEARDOWN(cap, st);
 }
 
 static void test_stop_reason_max_tokens_is_error(void)
 {
     WITH_STATE(cap, st);
+    FEED(st, "{\"type\":\"message_start\",\"message\":{\"usage\":{"
+             "\"input_tokens\":100,\"cache_read_input_tokens\":40,"
+             "\"cache_creation_input_tokens\":10,\"output_tokens\":0}}}");
     FEED(st, "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},"
              "\"usage\":{\"output_tokens\":99}}");
     FEED(st, "{\"type\":\"message_stop\"}");
     EXPECT(cap.n == 1);
     EXPECT(cap.events[0].kind == EV_ERROR);
     EXPECT(strstr(cap.events[0].message, "max_tokens") != NULL);
+    /* The truncated response is billed like a complete one — its usage
+     * rides on the error instead of being dropped. */
+    EXPECT(cap.events[0].usage.input_tokens == 150);
+    EXPECT(cap.events[0].usage.output_tokens == 99);
+    EXPECT(cap.events[0].usage.cached_tokens == 40);
+    EXPECT(cap.events[0].usage.cache_write_tokens == 10);
     TEARDOWN(cap, st);
 }
 
@@ -322,6 +358,7 @@ int main(void)
     test_redacted_thinking_round_trips_data();
     test_tool_use_lifecycle();
     test_usage_and_done();
+    test_usage_cache_creation_ttl_breakdown();
     test_stop_reason_max_tokens_is_error();
     test_stop_reason_pause_turn_is_error();
     test_error_event();

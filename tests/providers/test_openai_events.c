@@ -70,6 +70,10 @@ static int cap_cb(const struct stream_event *ev, void *user)
     case EV_ERROR:
         c->message = strdup(ev->u.error.message ? ev->u.error.message : "");
         c->http_status = ev->u.error.http_status;
+        if (ev->u.error.usage)
+            c->usage = *ev->u.error.usage;
+        else
+            c->usage = (struct stream_usage){-1, -1, -1, -1, -1, -1};
         break;
     }
     return 0;
@@ -360,8 +364,33 @@ static void test_finish_reason_tool_calls_emits_done(void)
 
 static void test_finish_reason_length_emits_error(void)
 {
+    /* The truncation error defers like EV_DONE: the trailing usage chunk
+     * arrives after finish_reason, and a truncated response bills like a
+     * complete one, so the error must wait for and carry that usage. */
     WITH_STATE(cap, st);
     feed_finish(&st, "length");
+    EXPECT(cap.n == 0);
+    EXPECT(st.terminated == 0);
+    openai_events_feed(&st, "{\"choices\":[],\"usage\":{"
+                            "\"prompt_tokens\":1234,\"completion_tokens\":56}}");
+    openai_events_feed(&st, "[DONE]");
+    EXPECT(cap.n == 1);
+    EXPECT(cap.events[0].kind == EV_ERROR);
+    EXPECT(strstr(cap.events[0].message, "length") != NULL);
+    EXPECT(cap.events[0].usage.input_tokens == 1234);
+    EXPECT(cap.events[0].usage.output_tokens == 56);
+    EXPECT(st.terminated == 1);
+    TEARDOWN(cap, st);
+}
+
+static void test_finish_reason_length_error_on_close_without_sentinel(void)
+{
+    /* Backends that close the stream after finish_reason without [DONE]
+     * still surface the deferred truncation error at finalize. */
+    WITH_STATE(cap, st);
+    feed_finish(&st, "length");
+    EXPECT(cap.n == 0);
+    openai_events_finalize(&st);
     EXPECT(cap.n == 1);
     EXPECT(cap.events[0].kind == EV_ERROR);
     EXPECT(strstr(cap.events[0].message, "length") != NULL);
@@ -372,6 +401,8 @@ static void test_finish_reason_content_filter_emits_error(void)
 {
     WITH_STATE(cap, st);
     feed_finish(&st, "content_filter");
+    EXPECT(cap.n == 0);
+    openai_events_feed(&st, "[DONE]");
     EXPECT(cap.n == 1);
     EXPECT(cap.events[0].kind == EV_ERROR);
     EXPECT(strstr(cap.events[0].message, "content_filter") != NULL);
@@ -605,6 +636,7 @@ int main(void)
     test_finish_reason_stop_defers_done_until_sentinel();
     test_finish_reason_tool_calls_emits_done();
     test_finish_reason_length_emits_error();
+    test_finish_reason_length_error_on_close_without_sentinel();
     test_finish_reason_content_filter_emits_error();
     test_done_sentinel();
     test_double_termination_gated();
