@@ -28,6 +28,8 @@
 // clang-format off
 static const struct config_setting REGISTRY[] = {
     /* selection */
+    {"preset",                     "HAX_PRESET",                  NULL,
+     "Preset from presets.<name> to apply at startup; empty disables"},
     {"provider",                   "HAX_PROVIDER",                NULL,
      "Backend: codex, openai, openai-compatible, anthropic, anthropic-compatible, "
      "llama.cpp, ollama, openrouter, mock"},
@@ -41,6 +43,10 @@ static const struct config_setting REGISTRY[] = {
      "Skip the environment block in the system prompt"},
     {"no_agents_md",               "HAX_NO_AGENTS_MD",            NULL,
      "Skip AGENTS.md project instructions in the system prompt"},
+    {"no_skills",                  "HAX_NO_SKILLS",               NULL,
+     "Skip the skills listing in the system prompt"},
+    {"no_subagents",               "HAX_NO_SUBAGENTS",            NULL,
+     "Skip the subagents section in the system prompt"},
 
     /* display */
     {"markdown",                   "HAX_MARKDOWN",                "1",
@@ -731,6 +737,12 @@ int config_persist_selection(const char *provider, const char *model, const char
      * /effort pick must not wipe a saved model. */
     const char *old = obj_get(g_state, "provider");
     int repin = !old || strcmp(old, provider) != 0;
+    /* An explicit selection commit replaces a persisted preset stance:
+     * without this, the preset would re-apply next launch as an override
+     * and shadow the very selection being committed here. The session-side
+     * counterpart (clearing the "preset" and "system_prompt" overrides)
+     * lives in the selectors' commit path. */
+    json_object_del(next, "preset");
     json_object_set_new(next, "provider", json_string(provider));
     if (model || repin)
         json_object_set_new(next, "model", json_string(model ? model : CONFIG_VALUE_DEFAULT));
@@ -747,4 +759,173 @@ int config_persist_selection(const char *provider, const char *model, const char
     json_decref(g_state);
     g_state = next;
     return 0;
+}
+
+/* The presets.<name> object for `name`, or NULL. Looked up as a *literal*
+ * member of each tier's "presets" object — never through the dotted-path
+ * grammar, which would misread a user-chosen name like "review.v2" as
+ * nesting and make an enumerated preset unappliable. State over file per
+ * name, matching config_object_keys' merged enumeration. The flat-authored
+ * top-level form ({"presets.<name>": {...}}) is kept working via the dotted
+ * fallback, which by construction only resolves dot-free names. */
+static const json_t *preset_node(const char *name)
+{
+    json_t *const tiers[] = {g_state, g_config};
+    for (size_t i = 0; i < sizeof(tiers) / sizeof(*tiers); i++) {
+        json_t *presets = obj_get_node(tiers[i], "presets");
+        json_t *obj = json_is_object(presets) ? json_object_get(presets, name) : NULL;
+        if (json_is_object(obj))
+            return obj;
+    }
+    char *key = xasprintf("presets.%s", name);
+    const json_t *obj = config_json_node(key);
+    free(key);
+    return json_is_object(obj) ? obj : NULL;
+}
+
+/* The presettable keys. Deliberately narrow: a preset must be fully honored
+ * whenever it is applied — startup or mid-session — so only per-request
+ * settings qualify. Construction-bound settings (openai.base_url, api keys,
+ * provider_name) belong in a providers.<name> block the preset points at;
+ * startup-latched behavior (context stripping, session recording) belongs
+ * to the --bare / --no-session flags. */
+static const char *const PRESET_KEYS[] = {"provider", "model", "reasoning_effort", "system_prompt"};
+
+/* Structural validation shared by apply and enumeration: the whole block
+ * checks out or the preset is unusable — a typo'd member must not leave the
+ * session running half a preset, and the enumerators must not advertise a
+ * definition that would then fail. "description" is reserved metadata
+ * (picker/prompt listings), not a setting. Load-time normalization already
+ * turned scalar members into strings, so a non-string here is a nested
+ * object or an array — not expressible as an override. Non-mutating;
+ * *err (when non-NULL) receives a malloc'd reason on failure. */
+static int preset_validate(const json_t *obj, const char *name, char **err)
+{
+    const char *k;
+    json_t *v;
+    json_object_foreach((json_t *)obj, k, v)
+    {
+        /* "description" is exempt from the allowed-keys check (reserved
+         * metadata, not a setting) but not from the scalar check below: a
+         * structured value would silently read back as "no description" —
+         * exactly where descriptions matter, guiding preset choice. */
+        if (strcmp(k, "description") != 0) {
+            int allowed = 0;
+            for (size_t i = 0; i < sizeof(PRESET_KEYS) / sizeof(*PRESET_KEYS) && !allowed; i++)
+                allowed = strcmp(k, PRESET_KEYS[i]) == 0;
+            if (!allowed) {
+                if (err)
+                    *err = xasprintf(
+                        "preset '%s': '%s' is not presettable (allowed: provider, model, "
+                        "reasoning_effort, system_prompt); endpoint settings belong in a "
+                        "providers.<name> block, context/recording in the --bare/--no-session "
+                        "flags",
+                        name, k);
+                return -1;
+            }
+        }
+        if (!json_is_string(v)) {
+            if (err)
+                *err = xasprintf("preset '%s': '%s' must be a scalar", name, k);
+            return -1;
+        }
+    }
+    const char *prov = json_string_value(json_object_get((json_t *)obj, "provider"));
+    if (!prov || !*prov) {
+        if (err)
+            *err = xasprintf("preset '%s' must name a provider", name);
+        return -1;
+    }
+    return 0;
+}
+
+int config_preset_apply(const char *name, char **err)
+{
+    if (err)
+        *err = NULL;
+    const json_t *obj = preset_node(name);
+    if (!obj) {
+        if (err)
+            *err = xasprintf("unknown preset '%s' (define a presets.%s block in config.json)", name,
+                             name);
+        return -1;
+    }
+    if (preset_validate(obj, name, err) != 0)
+        return -1;
+
+    /* A preset is a whole selection, so applying one replaces the previous
+     * preset instead of composing with it: unnamed model/effort reset to the
+     * sentinel — the named provider's own default applies, shadowing stale
+     * lower-tier values exactly like a /provider re-pin (see
+     * config_persist_selection) — and an unnamed system_prompt clears the
+     * override outright. system_prompt is the one preset-owned override
+     * (nothing else writes it), and it isn't provider-bound, so falling back
+     * to normal resolution (a user's configured prompt) is right where the
+     * sentinel would wrongly force the built-in. */
+    const char *m = json_string_value(json_object_get((json_t *)obj, "model"));
+    const char *e = json_string_value(json_object_get((json_t *)obj, "reasoning_effort"));
+    config_set_override("provider", json_string_value(json_object_get((json_t *)obj, "provider")));
+    config_set_override("model", m ? m : CONFIG_VALUE_DEFAULT);
+    config_set_override("reasoning_effort", e ? e : CONFIG_VALUE_DEFAULT);
+    config_set_override("system_prompt",
+                        json_string_value(json_object_get((json_t *)obj, "system_prompt")));
+    /* Record the active stance under the "preset" key — what the banner and
+     * /session read, so a preset that swapped the system prompt is never
+     * invisibly in effect. Cleared when an explicit selection commit exits
+     * the stance (commit_selection). */
+    config_set_override("preset", name);
+    return 0;
+}
+
+const char *config_preset_description(const char *name)
+{
+    const json_t *obj = preset_node(name);
+    if (!obj)
+        return NULL;
+    return json_string_value(json_object_get(obj, "description"));
+}
+
+const char *config_preset_provider(const char *name)
+{
+    const json_t *obj = preset_node(name);
+    if (!obj)
+        return NULL;
+    return json_string_value(json_object_get(obj, "provider"));
+}
+
+size_t config_preset_names(char ***out)
+{
+    /* Filter through the same resolution + validation that apply uses, so
+     * "enumerated ⊆ appliable" holds by construction — the /preset picker
+     * and the system prompt's listing must never advertise a preset that
+     * then fails, whether unresolvable (a name spelled only as fully-flat
+     * leaves, which preset_node cannot assemble) or structurally invalid
+     * (missing provider, unknown member). Skipped definitions are still
+     * user-authored config that isn't being honored, so they warn — once
+     * per process, since enumeration runs on every prompt rebuild. */
+    static int warned;
+    char **names = NULL;
+    size_t n = config_object_keys("presets", &names);
+    size_t kept = 0;
+    for (size_t i = 0; i < n; i++) {
+        const json_t *obj = preset_node(names[i]);
+        char *err = NULL;
+        if (obj && preset_validate(obj, names[i], warned ? NULL : &err) == 0) {
+            names[kept++] = names[i];
+            continue;
+        }
+        if (!warned) {
+            if (err)
+                hax_warn("%s — ignoring it", err);
+            else if (!obj)
+                hax_warn("preset '%s' is not an object (define a presets.%s block) — "
+                         "ignoring it",
+                         names[i], names[i]);
+        }
+        free(err);
+        free(names[i]);
+    }
+    warned = 1;
+    *out = names;
+    return kept;
 }

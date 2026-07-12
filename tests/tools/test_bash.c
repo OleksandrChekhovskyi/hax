@@ -13,6 +13,7 @@
 #include "tool.h"
 #include "util.h"
 #include "system/fs.h"
+#include "tools/bash_export.h"
 
 static char *call_bash(const char *cmd_json_escaped)
 {
@@ -1011,6 +1012,57 @@ static void test_bash_env_overrides(void)
     unsetenv("MAKEFLAGS");
 }
 
+static void test_bash_subagent_env(void)
+{
+    /* The published selection (bash_export_selection) is exported into
+     * children — the seam a nested `hax -p` subagent inherits its
+     * provider/model/effort through. Contradicting parent values prove the
+     * entries replace rather than pass through; a NULL effort exports as
+     * empty (force "send none"); HAX_PRESET is cleared so a parent preset
+     * can't re-shadow the exported values in the child. The depth marker is
+     * always stamped at parent + 1 (computed from this process's own env,
+     * so the expectation holds even when the tests themselves run inside a
+     * hax subagent). */
+    const char *d = getenv("HAX_SUBAGENT_DEPTH");
+    char depth_expect[32];
+    snprintf(depth_expect, sizeof(depth_expect), "d=%d\n", (d ? atoi(d) : 0) + 1);
+
+    setenv("HAX_PROVIDER", "parent-provider", 1);
+    setenv("HAX_MODEL", "parent-model", 1);
+    setenv("HAX_REASONING_EFFORT", "parent-effort", 1);
+    setenv("HAX_PRESET", "parent-preset", 1);
+    setenv("HAX_TRACE", "/tmp/parent.trace", 1);
+    setenv("HAX_TRANSCRIPT", "/tmp/parent.transcript", 1);
+    bash_export_selection("mock", "m-1", NULL);
+    char *out = call_bash("echo p=$HAX_PROVIDER; echo m=$HAX_MODEL; "
+                          "echo e=$HAX_REASONING_EFFORT; echo ps=$HAX_PRESET; "
+                          "echo d=$HAX_SUBAGENT_DEPTH; echo tr=$HAX_TRACE; "
+                          "echo tl=$HAX_TRANSCRIPT");
+    char *want = xasprintf("p=mock\nm=m-1\ne=\nps=\n%str=\ntl=\n", depth_expect);
+    EXPECT_STR_EQ(out, want);
+    free(want);
+    free(out);
+
+    /* Clearing the export reverts the selection vars to raw passthrough;
+     * the depth marker and the trace/transcript clearing are unconditional
+     * (a nested hax truncates those paths at startup — inheriting them
+     * would destroy this process's live logs). */
+    bash_export_selection(NULL, NULL, NULL);
+    out = call_bash("echo p=$HAX_PROVIDER; echo ps=$HAX_PRESET; echo d=$HAX_SUBAGENT_DEPTH; "
+                    "echo tr=$HAX_TRACE; echo tl=$HAX_TRANSCRIPT");
+    want = xasprintf("p=parent-provider\nps=parent-preset\n%str=\ntl=\n", depth_expect);
+    EXPECT_STR_EQ(out, want);
+    free(want);
+    free(out);
+
+    unsetenv("HAX_PROVIDER");
+    unsetenv("HAX_MODEL");
+    unsetenv("HAX_REASONING_EFFORT");
+    unsetenv("HAX_PRESET");
+    unsetenv("HAX_TRACE");
+    unsetenv("HAX_TRANSCRIPT");
+}
+
 static void test_bash_shell_prefers_bash(void)
 {
     /* `$0` echoes the argv[0] the tool exec'd with. Default resolution
@@ -1118,6 +1170,7 @@ int main(void)
     test_bash_stdout_is_not_a_tty();
     test_bash_stderr_is_not_a_tty();
     test_bash_env_overrides();
+    test_bash_subagent_env();
     test_bash_shell_prefers_bash();
     test_bash_shell_override();
     test_bash_shell_override_bad_value_falls_back();

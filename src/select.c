@@ -305,6 +305,19 @@ static enum pick_status choose_effort(struct agent_state *st, struct provider *p
  * must not carry the old provider's saved model along). */
 static void commit_selection(const char *provider, const char *model, const char *effort)
 {
+    /* An explicit pick exits any active preset stance — atomically, not as
+     * a blend: the stance name is cleared (the banner must not keep
+     * claiming a preset whose selection was just overridden) along with
+     * the preset's system_prompt override, so the regular prompt returns.
+     * Presets are the only writer of that override, so clearing is
+     * unambiguous; every commit path follows with agent_apply_settings,
+     * which rebuilds the prompt. config_persist_selection below removes
+     * the persisted name in the same write. The name is shadowed with the
+     * empty sentinel, not deleted: a delete would let a lower-tier name
+     * (HAX_PRESET, a config-file default, or state if its write fails)
+     * resurface in the banner as a stance that is no longer applied. */
+    config_set_override("preset", "");
+    config_set_override("system_prompt", NULL);
     config_set_override("provider", provider);
     if (model)
         config_set_override("model", model);
@@ -359,9 +372,20 @@ void select_effort(struct agent_state *st)
      * pinned. The "default" row → the sentinel (use the provider's default,
      * shadowing a lower-tier env/config effort), not a delete (which would let
      * it leak); the model isn't picked here, so NULL — kept unless the pin
-     * changes the stored provider. */
+     * changes the stored provider.
+     *
+     * Exiting a preset stance is the exception to the NULL model: the
+     * session keeps running the preset's model (an effort pick shouldn't
+     * change the model), but NULL would persist "keep the previously
+     * *stored* model" — the pre-preset one — and the next launch would
+     * diverge from what this pick left running. Materialize the stance's
+     * effective model into the replacement selection instead. Read before
+     * commit_selection clears the stance. */
+    const char *stance = config_str("preset");
+    const char *eff_model =
+        (stance && *stance && st->sess->model && *st->sess->model) ? st->sess->model : NULL;
     char *pid = current_provider_id(p);
-    commit_selection(pid, NULL, e ? e : CONFIG_VALUE_DEFAULT);
+    commit_selection(pid, eff_model, e ? e : CONFIG_VALUE_DEFAULT);
     free(pid);
     free(e);
     agent_apply_settings(st);
@@ -567,4 +591,131 @@ void select_provider(struct agent_state *st)
     free(cur);
     free(m);
     free(e);
+}
+
+void select_preset(struct agent_state *st, const char *name)
+{
+    char **names = NULL;
+    size_t n = config_preset_names(&names);
+    char *picked = NULL;
+
+    if (!name) {
+        if (n == 0) {
+            ui_note("no presets defined — add a presets.<name> block to config.json");
+            st->r->disp.trail = 1;
+            goto out;
+        }
+        qsort(names, n, sizeof(*names), cmp_model_id); /* plain char* compare */
+        struct picker_item *items = xmalloc(n * sizeof(*items));
+        char **details = xcalloc(n, sizeof(*details)); /* owned detail strings */
+        for (size_t i = 0; i < n; i++) {
+            items[i].label = names[i];
+            items[i].detail = config_preset_description(names[i]);
+            items[i].dim = 0;
+            items[i].current = 0;
+            /* A provider name the registry can't resolve is a typo, not a
+             * transient outage (availability is deliberately not probed
+             * here) — show the row dim with the defect as its detail, like
+             * the /provider picker's unavailable rows. Still selectable;
+             * committing it reports the same error and changes nothing. */
+            const char *prov = config_preset_provider(names[i]);
+            if (!prov || !provider_find(prov)) {
+                details[i] = xasprintf("unknown provider '%s'", prov ? prov : "?");
+                items[i].detail = details[i];
+                items[i].dim = 1;
+            }
+        }
+        struct picker_opts opts = {
+            .title = "select a preset", .items = items, .n = n, .initial = 0};
+        long sel = picker_run(&opts);
+        free(items);
+        for (size_t i = 0; i < n; i++)
+            free(details[i]);
+        free(details);
+        if (sel < 0)
+            goto out; /* cancelled / non-tty */
+        picked = xstrdup(names[sel]);
+        name = picked;
+    }
+
+    /* Snapshot the override tier before applying: a preset that fails
+     * validation or lands on an unusable setup must leave the session
+     * exactly as it was. */
+    struct config_override_state *ov = config_override_snapshot();
+    char *err = NULL;
+    if (config_preset_apply(name, &err) != 0) {
+        ui_error("%s", err ? err : "preset failed to apply");
+        free(err);
+        config_override_restore(ov);
+        st->r->disp.trail = 1;
+        goto out;
+    }
+
+    /* The preset named a provider (config_preset_apply requires one).
+     * Always construct it fresh under the applied overrides — even when the
+     * id matches the live provider: construction is where value-dependent
+     * behavior runs (llama.cpp reconciles the preset's model against the
+     * live /v1/models, warning on a stale pick), so reusing the live
+     * connection would let a same-provider preset bypass it. Strictly by
+     * name, no picker chain: the preset carries the rest. */
+    const char *after = config_str("provider");
+    const struct provider_factory *f = provider_find(after);
+    if (!f) {
+        ui_error("preset '%s': unknown provider '%s'", name, after);
+        config_override_restore(ov);
+        st->r->disp.trail = 1;
+        goto out;
+    }
+    struct provider *newp = f->new(f->name);
+    if (!newp) {
+        /* The factory printed the reason (no key, server down, …). */
+        config_override_restore(ov);
+        st->r->disp.trail = 1;
+        goto out;
+    }
+
+    /* Gather-then-commit, like select_provider: a model must resolve for
+     * the provider the preset lands on — checked BEFORE the old provider is
+     * destroyed and the snapshot freed, so a preset that leaves no model
+     * (omitted, provider has no default) rolls back to the previous
+     * provider+model instead of committing a mismatched pair. Checked after
+     * construction, which may have reconciled a discovered model into the
+     * override tier (llama.cpp). Mirrors agent_session_reconfigure's own
+     * test, so the agent_apply_settings below cannot fail it. */
+    const char *m = config_str("model");
+    if ((!m || !*m) && !(newp->default_model && *newp->default_model)) {
+        ui_error("preset '%s': no model resolves for provider '%s' — name one in the preset", name,
+                 after);
+        newp->destroy(newp);
+        config_override_restore(ov);
+        st->r->disp.trail = 1;
+        goto out;
+    }
+
+    agent_set_provider(st, newp);
+    config_override_state_free(ov); /* committing — keep the applied overrides */
+
+    /* Persist the stance like the other selectors, so the next launch
+     * starts back in it (an explicit env var still wins). By name, not
+     * values: the preset definition stays authoritative — editing it
+     * changes what the next launch applies. Deliberately not
+     * config_persist_selection, which is the exit-the-stance commit. */
+    if (config_persist_state("preset", name) != 0) {
+        static int warned;
+        if (!warned) {
+            warned = 1;
+            ui_note("couldn't save to state.json — this preset applies to this session only");
+        }
+    }
+
+    /* agent_apply_settings prints the confirmation (banner or
+     * [switched to …]); the banner shows the stance via the "preset"
+     * override config_preset_apply recorded. */
+    agent_apply_settings(st);
+
+out:
+    free(picked);
+    for (size_t i = 0; i < n; i++)
+        free(names[i]);
+    free(names);
 }

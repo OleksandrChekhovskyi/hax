@@ -12,6 +12,7 @@
 
 #include "config.h"
 #include "util.h"
+#include "providers/registry.h"
 #include "system/fs.h"
 #include "system/path.h"
 #include "text/utf8_sanitize.h"
@@ -134,6 +135,10 @@ static void append_env_block(struct buf *b, const char *model)
     char *shell_clean = sanitize_utf8(shell, strlen(shell));
     char *model_clean = (model && *model) ? sanitize_utf8(model, strlen(model)) : NULL;
 
+    /* Blank-line separator when a section (subagents) precedes this one,
+     * same as the other appenders; a no-op when the block leads the suffix. */
+    if (b->len > 0)
+        buf_append_str(b, "\n");
     buf_append_str(b, "<env>\n");
     char *line = xasprintf("  cwd: %s\n", cwd_clean);
     buf_append_str(b, line);
@@ -352,6 +357,11 @@ struct skill_entry {
     char *description;  /* may be NULL */
 };
 
+static int cmp_str(const void *a, const void *b)
+{
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
 static int cmp_skill_entry(const void *a, const void *b)
 {
     const struct skill_entry *sa = a;
@@ -477,16 +487,107 @@ static void append_skills(struct buf *b)
     free(skills);
 }
 
+/* Subagent invocation guidance. hax is its own subagent runner — the model
+ * shells out to `hax -p` via the bash tool — so the mechanics live in the
+ * prompt, not in a dedicated tool. Deliberately conservative: spawning
+ * costs real money and latency, so it happens on request, not initiative.
+ * Only --preset is advertised (via the lead-in below, so a setup with no
+ * presets never sees the flag): a preset's name and description are in the
+ * prompt and its values are user-vetted, whereas --provider/--model/--effort
+ * would ask the model to guess identifiers it can't enumerate — users who
+ * want a specific setup name those flags in AGENTS.md or a skill. */
+static const char SUBAGENTS_PROMPT[] =
+    "# Subagents\n"
+    "\n"
+    "`hax -p \"<task>\"` (via the bash tool) runs a fresh hax instance with clean context in "
+    "this directory and prints its final answer to stdout. Delegate to subagents only when "
+    "the user asks for it. The child inherits this session's provider, model, and effort. "
+    "Subagents are slow: pass a generous timeout_seconds (e.g. 1800). The child prints its "
+    "session id to stderr at startup; follow up on a finished (or timed-out) run with "
+    "`hax --resume=<id> -p \"<follow-up>\"`.\n";
+
+/* Defined presets are listed with their descriptions so the model knows
+ * what roles exist without guessing at names. */
+static void append_subagents(struct buf *b)
+{
+    if (b->len > 0)
+        buf_append_str(b, "\n");
+    buf_append_str(b, SUBAGENTS_PROMPT);
+
+    char **names = NULL;
+    size_t n = config_preset_names(&names);
+    /* Render the entries into a scratch buffer first: the heading — which
+     * is what advertises --preset — is emitted only when at least one
+     * usable preset survived the provider check below. An all-invalid set
+     * must not leave a bare heading inviting a guessed name. */
+    struct buf list;
+    buf_init(&list);
+    if (n > 1)
+        qsort(names, n, sizeof(*names), cmp_str);
+    for (size_t i = 0; i < n; i++) {
+        /* A preset naming a provider the registry can't resolve (a typo;
+         * availability is deliberately not checked — a stopped server or
+         * missing key may recover) would fail on every invocation: never
+         * recommend it to the model. Checked here, not in
+         * config_preset_names — provider resolution lives above the config
+         * layer. Warn once like the enumerator's own skips; the /preset
+         * picker shows the same defect dim instead. */
+        const char *prov = config_preset_provider(names[i]);
+        if (!prov || !provider_find(prov)) {
+            static int warned;
+            if (!warned) {
+                warned = 1;
+                hax_warn("preset '%s' names unknown provider '%s' — not advertised "
+                         "to the model",
+                         names[i], prov ? prov : "?");
+            }
+            continue;
+        }
+        /* Names and descriptions are user-authored config — sanitize
+         * like every other prompt splice. */
+        char *name_clean = sanitize_utf8(names[i], strlen(names[i]));
+        const char *desc = config_preset_description(names[i]);
+        char *line;
+        if (desc && *desc) {
+            char *desc_clean = sanitize_utf8(desc, strlen(desc));
+            line = xasprintf("- %s: %s\n", name_clean, desc_clean);
+            free(desc_clean);
+        } else {
+            line = xasprintf("- %s\n", name_clean);
+        }
+        buf_append_str(&list, line);
+        free(line);
+        free(name_clean);
+    }
+    if (list.len > 0) {
+        /* The resume caveat lives here, next to the flag it explains, not
+         * in the static preamble — which deliberately defines no selection
+         * flags, so the note would dangle without a referent there. */
+        buf_append_str(b, "\nPresets (select with `--preset <name>`, and repeat it when "
+                          "resuming — resume restores the conversation, not the selection):\n");
+        buf_append(b, list.data, list.len);
+    }
+    buf_free(&list);
+    for (size_t i = 0; i < n; i++)
+        free(names[i]);
+    free(names);
+}
+
 char *agent_env_build_suffix(const char *model)
 {
     int do_env = !config_bool("no_env");
     int do_agents = !config_bool("no_agents_md");
-
-    if (!do_env && !do_agents)
-        return NULL;
+    int do_skills = !config_bool("no_skills");
+    int do_subagents = !config_bool("no_subagents");
 
     struct buf b;
     buf_init(&b);
+
+    /* Subagents first: it's hax-level instruction like the base prompt it
+     * follows, not project context — after the AGENTS.md sections it would
+     * read as part of them in the assembled prompt. */
+    if (do_subagents)
+        append_subagents(&b);
 
     if (do_env)
         append_env_block(&b, model);
@@ -501,8 +602,10 @@ char *agent_env_build_suffix(const char *model)
             free(global);
         }
         append_project_agents_md(&b, &seen_header);
-        append_skills(&b);
     }
+
+    if (do_skills)
+        append_skills(&b);
 
     if (b.len == 0) {
         buf_free(&b);

@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 
 #include "agent_env.h"
+#include "config.h"
 #include "harness.h"
 #include "util.h"
 
@@ -47,6 +48,11 @@ static void sb_init(struct sandbox *s)
     unsetenv("XDG_CONFIG_HOME");
     unsetenv("HAX_NO_ENV");
     unsetenv("HAX_NO_AGENTS_MD");
+    unsetenv("HAX_NO_SKILLS");
+    /* The subagents section is static text present in every suffix, which
+     * would smear across every assertion below; suppress it by default and
+     * let the dedicated subagents tests unset this deliberately. */
+    setenv("HAX_NO_SUBAGENTS", "1", 1);
 }
 
 static void sb_free(struct sandbox *s)
@@ -842,7 +848,7 @@ static void test_skills_project_shadows_global(void)
     sb_free(&s);
 }
 
-static void test_skills_disabled_by_no_agents_md(void)
+static void test_skills_disabled_by_no_skills(void)
 {
     struct sandbox s;
     sb_init(&s);
@@ -853,7 +859,7 @@ static void test_skills_disabled_by_no_agents_md(void)
         sb_free(&s);
         return;
     }
-    setenv("HAX_NO_AGENTS_MD", "1", 1);
+    setenv("HAX_NO_SKILLS", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL); /* env block still present */
     if (p) {
@@ -861,7 +867,104 @@ static void test_skills_disabled_by_no_agents_md(void)
         EXPECT(!contains(p, "hidden"));
         free(p);
     }
+    unsetenv("HAX_NO_SKILLS");
+    sb_free(&s);
+}
+
+static void test_skills_survive_no_agents_md(void)
+{
+    /* The gates are orthogonal: suppressing AGENTS.md must not take the
+     * skills listing with it. */
+    struct sandbox s;
+    sb_init(&s);
+    char *path = xasprintf("%s/.agents/skills/foo/SKILL.md", s.root);
+    write_file(path, "---\ndescription: still here\n---\n");
+    free(path);
+    char *md = xasprintf("%s/AGENTS.md", s.root);
+    write_file(md, "project rules\n");
+    free(md);
+    if (chdir(s.root) != 0) {
+        sb_free(&s);
+        return;
+    }
+    setenv("HAX_NO_AGENTS_MD", "1", 1);
+    char *p = agent_env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(!contains(p, "project rules"));
+        EXPECT(contains(p, "# Skills"));
+        EXPECT(contains(p, "still here"));
+        free(p);
+    }
     unsetenv("HAX_NO_AGENTS_MD");
+    sb_free(&s);
+}
+
+/* ---------- subagents section ---------- */
+
+static void test_subagents_section_and_presets(void)
+{
+    struct sandbox s;
+    sb_init(&s);
+    if (chdir(s.root) != 0) {
+        sb_free(&s);
+        return;
+    }
+    unsetenv("HAX_NO_SUBAGENTS");
+
+    /* Present by default, with the conservative framing, and placed before
+     * the env block — it's hax-level instruction, not project context. With
+     * no presets defined, --preset isn't advertised at all. */
+    char *p = agent_env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(contains(p, "# Subagents"));
+        EXPECT(contains(p, "only when the user asks"));
+        /* The resume-selection caveat rides with the presets lead-in, so a
+         * preset-less setup sees neither it nor the flag it explains. */
+        EXPECT(!contains(p, "not the selection"));
+        EXPECT(!contains(p, "--preset"));
+        const char *sub = strstr(p, "# Subagents");
+        const char *env = strstr(p, "<env>");
+        EXPECT(sub && env && sub < env);
+        free(p);
+    }
+
+    /* Defined presets are listed sorted, with descriptions when present,
+     * under a lead-in that names the flag. A preset naming a provider the
+     * registry can't resolve is never advertised to the model — it would
+     * fail on every invocation. */
+    EXPECT(config_load("{\"presets\": {"
+                       "\"zeta\": {\"provider\": \"mock\", \"model\": \"m2\"},"
+                       "\"typo\": {\"provider\": \"does-not-exist\"},"
+                       "\"review\": {\"provider\": \"mock\", "
+                       "\"description\": \"code review stance\"}}}") == 0);
+    p = agent_env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(contains(p, "Presets (select with `--preset <name>`, and repeat it when "
+                           "resuming — resume restores the conversation, not the selection):\n"
+                           "- review: code review stance\n- zeta\n"));
+        EXPECT(!contains(p, "typo"));
+        free(p);
+    }
+
+    /* All presets invalid (unknown providers): the heading — the thing
+     * that advertises --preset — must not appear either, or the model
+     * would be invited to guess a name with no valid value to pass. */
+    EXPECT(config_load("{\"presets\": {"
+                       "\"a\": {\"provider\": \"does-not-exist\"},"
+                       "\"b\": {\"provider\": \"also-missing\"}}}") == 0);
+    p = agent_env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(!contains(p, "Presets ("));
+        EXPECT(!contains(p, "--preset"));
+        free(p);
+    }
+    config_load(NULL);
+
+    setenv("HAX_NO_SUBAGENTS", "1", 1);
     sb_free(&s);
 }
 
@@ -894,7 +997,9 @@ int main(void)
     test_skills_dir_without_skill_md_skipped();
     test_skills_global_root();
     test_skills_project_shadows_global();
-    test_skills_disabled_by_no_agents_md();
+    test_skills_disabled_by_no_skills();
+    test_skills_survive_no_agents_md();
+    test_subagents_section_and_presets();
 
     T_REPORT();
 }

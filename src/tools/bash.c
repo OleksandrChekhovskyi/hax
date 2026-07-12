@@ -21,6 +21,7 @@
 #include "text/utf8_sanitize.h"
 #include "tools/bash_cd_strip.h"
 #include "tools/bash_classify.h"
+#include "tools/bash_export.h"
 
 /* Output is captured to a temp file (mkstemp under $TMPDIR) so the model
  * sees a tail-truncated preview but can `read` the full output afterwards
@@ -832,24 +833,63 @@ static char **build_child_env(void)
         {"GIT_TERMINAL_PROMPT", "GIT_TERMINAL_PROMPT=0"},
         {"AI_AGENT", "AI_AGENT=hax"},
         {"PYTHONUNBUFFERED", "PYTHONUNBUFFERED=1"},
+        /* Per-process observability, not inheritable config: a nested hax
+         * truncates these paths at startup, so passing them through would
+         * destroy this process's live logs and leave both writing to the
+         * same file. Empty = disabled; a child can still be traced by
+         * passing an explicit (different) path in the command. */
+        {"HAX_TRACE", "HAX_TRACE="},
+        {"HAX_TRANSCRIPT", "HAX_TRANSCRIPT="},
     };
     const size_t override_n = sizeof(overrides) / sizeof(*overrides);
+
+    /* Depth marker for nested hax: children run one level deeper than this
+     * process, and main() refuses to start past the cap — the backstop
+     * against a confused model recursively spawning subagents. The parent's
+     * own depth is fixed for the process lifetime, so format once. Checked
+     * parse mirroring main()'s guard: malformed or negative reads as at-cap
+     * so a corrupted chain still terminates (unreachable in practice —
+     * main() refuses such values at startup). */
+    static char depth_kv[64];
+    if (!depth_kv[0]) {
+        const char *d = getenv("HAX_SUBAGENT_DEPTH");
+        int depth = 0;
+        if (d && *d && (!parse_int(d, &depth) || depth < 0))
+            depth = HAX_SUBAGENT_MAX_DEPTH;
+        int child = depth >= HAX_SUBAGENT_MAX_DEPTH ? depth : depth + 1;
+        snprintf(depth_kv, sizeof(depth_kv), "HAX_SUBAGENT_DEPTH=%d", child);
+    }
+
+    /* Dynamic overrides: the published selection (may be empty — see
+     * tools/bash_export.h) plus the depth marker. Same replace-regardless
+     * semantics as the fixed table. */
+    const char *const *sel = NULL;
+    size_t sel_n = bash_export_env(&sel);
+    const char *extra[8];
+    size_t extra_n = 0;
+    for (size_t i = 0; i < sel_n && extra_n + 1 < sizeof(extra) / sizeof(*extra); i++)
+        extra[extra_n++] = sel[i];
+    extra[extra_n++] = depth_kv;
 
     /* Worst case: original env (every entry kept) + every override
      * appended fresh + NULL terminator. We may double-allocate when
      * an override replaces an inherited entry, but the slack is
      * trivial. */
-    char **envp = xmalloc((size_t)(n + (int)override_n + 1) * sizeof(*envp));
+    char **envp = xmalloc((size_t)(n + (int)override_n + (int)extra_n + 1) * sizeof(*envp));
     int o = 0;
     for (int i = 0; environ[i]; i++) {
         const char *e = environ[i];
         int skip = 0;
-        for (size_t p = 0; p < override_n; p++) {
+        for (size_t p = 0; p < override_n && !skip; p++) {
             size_t plen = strlen(overrides[p].name);
-            if (strncmp(e, overrides[p].name, plen) == 0 && e[plen] == '=') {
+            if (strncmp(e, overrides[p].name, plen) == 0 && e[plen] == '=')
                 skip = 1;
-                break;
-            }
+        }
+        for (size_t p = 0; p < extra_n && !skip; p++) {
+            const char *eq = strchr(extra[p], '=');
+            size_t plen = (size_t)(eq - extra[p]);
+            if (strncmp(e, extra[p], plen) == 0 && e[plen] == '=')
+                skip = 1;
         }
         if (skip)
             continue;
@@ -857,6 +897,8 @@ static char **build_child_env(void)
     }
     for (size_t p = 0; p < override_n; p++)
         envp[o++] = (char *)overrides[p].kv;
+    for (size_t p = 0; p < extra_n; p++)
+        envp[o++] = (char *)extra[p];
     envp[o] = NULL;
     return envp;
 }

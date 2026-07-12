@@ -18,16 +18,24 @@ Options:
 | `-c`, `--continue` | Resume the newest session recorded for the current directory. |
 | `--resume` | Pick a past session for the current directory. |
 | `--resume=ID` | Resume a specific session id or unique prefix. Also works with `-p`. |
-| `--raw` | Send only the prompt: no system prompt, env block, AGENTS.md, skills, or tools. |
+| `--no-session` | Don't record this conversation; there will be nothing to resume. |
+| `--raw` | Send only the prompt: no system prompt, env block, AGENTS.md, skills, or tools. Still recorded — a raw chat can be continued with `-c`. |
+| `--bare` | Drop the environment-derived context (env block, AGENTS.md, skills, subagents section); tools and the base prompt remain, unlike `--raw`. |
+| `--provider=NAME` | Select the backend for this run. Beats env vars, saved picks, and config. |
+| `--model=ID` | Select the model for this run. Same precedence as `--provider`. |
+| `--effort=LEVEL` | Select reasoning effort for this run. Same precedence as `--provider`. |
+| `--preset=NAME` | Apply the `presets.NAME` selection from config (see [configuration.md](./configuration.md)). Explicit flags above still win. |
 | `-h`, `--help` | Show CLI help. |
 
 In `-p` mode, positional arguments are joined with spaces. If no positional arguments are
 present and stdin is not a terminal, stdin becomes the prompt. A bare `-p` on a terminal is an
 error.
 
-`-p` prints a one-line `provider · model · effort` banner to stderr before the run starts, so
-the backend that produced the answer is always visible; stdout carries only the answer.
-Silence it with `2>/dev/null` if needed.
+`-p` prints a one-line `provider · model · effort · session <id>` banner to stderr before the
+run starts, so the backend that produced the answer is always visible; stdout carries only the
+answer. Silence it with `2>/dev/null` if needed. The session id appears up front (not only in
+the exit hint) so a run that is killed mid-flight — say, by a caller's timeout — can still be
+picked up with `--resume=<id>`.
 
 `--resume` without an id opens a picker, so `-p --resume` requires `--resume=ID` instead.
 
@@ -64,6 +72,7 @@ Type `/help` in the REPL for the live command list and keyboard shortcuts.
 | `/provider` | Switch provider, then choose model and effort where applicable. |
 | `/model` | Switch model for the current provider, then choose effort where applicable. |
 | `/effort` | Set reasoning effort when the provider exposes effort levels. |
+| `/preset [name]` | Switch to a config-defined preset (shown dim in the banner); without a name, pick from a list. Persists by name; an explicit `/provider`, `/model`, or `/effort` pick exits it. |
 | `/compact [focus]` | Summarize history to free context; optional focus text guides the summary. |
 | `/copy` | Copy the latest assistant text response to the clipboard. |
 | `/session` | Show this session's info and local usage totals (tokens, time worked, spend). |
@@ -168,8 +177,36 @@ ${XDG_CONFIG_HOME:-$HOME/.config}/hax/AGENTS.md
 For projects inside a git worktree, hax then loads AGENTS.md files from the repo root down to
 the current directory. Outside a git worktree, it only considers `./AGENTS.md`. Skills are
 discovered from `./.agents/skills/<name>/SKILL.md` and
-`${XDG_CONFIG_HOME:-$HOME/.config}/hax/skills/<name>/SKILL.md`; set `HAX_NO_AGENTS_MD=1` to
-skip both AGENTS.md and skills.
+`${XDG_CONFIG_HOME:-$HOME/.config}/hax/skills/<name>/SKILL.md`. Each context section has its
+own opt-out: `HAX_NO_AGENTS_MD=1` skips AGENTS.md, `HAX_NO_SKILLS=1` skips the skills listing,
+and `HAX_NO_SUBAGENTS=1` skips the subagents section described below. `--bare` sets all of
+these plus the env block in one flag.
+
+## Subagents
+
+The system prompt includes a short section telling the model it can delegate a self-contained
+task to a fresh hax instance — `hax -p "<task>"` through its own bash tool — and to do so only
+when the user asks for it. There is no dedicated subagent machinery: a subagent is just hax
+run by hax, so everything above about `-p`, sessions, and resume applies to it.
+
+- The child inherits the parent's exact provider, model, and effort: the bash tool exports the
+  parent session's effective selection as `HAX_PROVIDER` / `HAX_MODEL` / `HAX_REASONING_EFFORT`
+  for its children, so even session-only picks (an auto-selected provider, a mid-session
+  `/model`) carry over.
+- A different role or backend per subagent is one flag away: `--preset review`, or explicit
+  `--provider` / `--model` / `--effort`; `--bare` makes a cheap context-free scout. Only
+  `--preset` (with the defined presets and their descriptions) is advertised to the model —
+  preset values are user-vetted, whereas the explicit flags would have it guess identifiers
+  it can't enumerate. To make the model use a specific setup, name the flags in AGENTS.md or
+  a skill.
+- The child's session id is printed to stderr at startup, so a subagent that outlives the bash
+  tool's timeout still leaves a resumable session; the parent can continue it with
+  `hax --resume=<id> -p "..."` instead of redoing the work. Resume restores the conversation,
+  not the selection (hax-wide behavior — `/resume` works the same), so a follow-up to a
+  preset-backed child must repeat the original `--preset`/flags; the prompt section says so.
+  `--no-session` opts a throwaway query out of this.
+- Nesting is capped: children run with `HAX_SUBAGENT_DEPTH` incremented, and hax refuses to
+  start at depth 3 — a backstop against runaway recursive spawning.
 
 ## Compaction
 

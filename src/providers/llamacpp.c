@@ -43,6 +43,41 @@ static char *swap_path(const char *base, const char *new_path)
     return out;
 }
 
+/* The pure reconcile decision behind probe_model, split out for tests (no
+ * HTTP): parse a /v1/models body and decide against `cur`. Returns 0 when
+ * the list names at least one model — a resolvable state — with *adopt set
+ * to a malloc'd replacement (the first served entry) when `cur` is unset or
+ * absent from the list, or NULL when the configured model is served and
+ * kept. Returns -1 (adopt untouched) for an unusable body or empty list. */
+int llamacpp_reconcile_model(const char *body, const char *cur, char **adopt)
+{
+    *adopt = NULL;
+    json_t *root = json_loads(body, 0, NULL);
+    json_t *data = root ? json_object_get(root, "data") : NULL;
+    const char *first = NULL;
+    int present = 0;
+    if (json_is_array(data)) {
+        size_t n = json_array_size(data);
+        for (size_t i = 0; i < n; i++) {
+            json_t *id = json_object_get(json_array_get(data, i), "id");
+            if (!json_is_string(id))
+                continue;
+            const char *s = json_string_value(id);
+            if (!first)
+                first = s;
+            if (cur && *cur && strcmp(s, cur) == 0)
+                present = 1;
+        }
+    }
+    int rc = first ? 0 : -1;
+    /* Unset or stale (not in the live list) → adopt what's served; a
+     * still-valid configured model is left untouched. */
+    if (first && (!cur || !*cur || !present))
+        *adopt = xstrdup(first);
+    json_decref(root);
+    return rc;
+}
+
 /* Resolve the model to send, treating llama-server's catalog as live server
  * state rather than a user preference. The served model depends on how the
  * server was started — a single model, or (router mode) several loaded on
@@ -70,31 +105,21 @@ static int probe_model(const char *base_url, const char *api_key)
     const char *cur = config_str("model");
     int rc = -1;
     if (reached) {
-        json_t *root = json_loads(body, 0, NULL);
-        json_t *data = root ? json_object_get(root, "data") : NULL;
-        if (json_is_array(data) && json_array_size(data) > 0) {
-            const char *first = NULL;
-            int present = 0;
-            size_t n = json_array_size(data);
-            for (size_t i = 0; i < n; i++) {
-                json_t *id = json_object_get(json_array_get(data, i), "id");
-                if (!json_is_string(id))
-                    continue;
-                const char *s = json_string_value(id);
-                if (!first)
-                    first = s;
-                if (cur && *cur && strcmp(s, cur) == 0)
-                    present = 1;
+        char *adopt = NULL;
+        if (llamacpp_reconcile_model(body, cur, &adopt) == 0) {
+            if (adopt) {
+                /* Replacing an explicit value is announced: the adoption is
+                 * the truthful outcome either way (the server answers with
+                 * what it serves, whatever name we send), but a
+                 * --model/preset/state pick being reconciled away shouldn't
+                 * be discoverable only by reading the banner closely. */
+                if (cur && *cur)
+                    hax_warn("llama.cpp: model '%s' is not served — using '%s'", cur, adopt);
+                config_set_override("model", adopt);
+                free(adopt);
             }
-            if (first) {
-                /* Unset or stale (not in the live list) → adopt what's served;
-                 * a still-valid configured model is left untouched. */
-                if (!cur || !*cur || !present)
-                    config_set_override("model", first);
-                rc = 0;
-            }
+            rc = 0;
         }
-        json_decref(root);
     } else if (cur && *cur) {
         /* Unreachable but a model is explicitly configured: trust it and let
          * the first stream surface the real connection error, rather than

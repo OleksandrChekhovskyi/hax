@@ -122,6 +122,8 @@ static void test_build_system_prompt_custom_no_suffix(void)
     setenv("HAX_SYSTEM_PROMPT", "you are a teapot", 1);
     setenv("HAX_NO_ENV", "1", 1);
     setenv("HAX_NO_AGENTS_MD", "1", 1);
+    setenv("HAX_NO_SKILLS", "1", 1);
+    setenv("HAX_NO_SUBAGENTS", "1", 1);
 
     char *out = build_system_prompt("model-x", 0);
     EXPECT(out != NULL);
@@ -132,6 +134,8 @@ static void test_build_system_prompt_custom_no_suffix(void)
     unsetenv("HAX_SYSTEM_PROMPT");
     unsetenv("HAX_NO_ENV");
     unsetenv("HAX_NO_AGENTS_MD");
+    unsetenv("HAX_NO_SKILLS");
+    unsetenv("HAX_NO_SUBAGENTS");
 }
 
 static void test_build_system_prompt_default_no_suffix(void)

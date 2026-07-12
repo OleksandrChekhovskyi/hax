@@ -202,9 +202,57 @@ int config_persist_state(const char *key, const char *val);
  * recorded one (an /effort pick must not wipe a saved model) and reset to
  * CONFIG_VALUE_DEFAULT when the selection re-pins a different provider (the
  * old value was picked for the old provider). To write "explicitly use the
- * provider's default", pass CONFIG_VALUE_DEFAULT itself. Returns 0 on
+ * provider's default", pass CONFIG_VALUE_DEFAULT itself. Also removes any
+ * persisted preset name in the same write: an explicit selection commit
+ * replaces the preset stance (see config_preset_apply). Returns 0 on
  * success, -1 on I/O failure (the in-memory tier is then left unchanged). */
 int config_persist_selection(const char *provider, const char *model, const char *effort);
+
+/* ---- presets ---- */
+
+/* Apply the preset named `name` — a full, session-only selection commit
+ * from the config's presets.<name> object, written as overrides (above env
+ * in precedence, below explicit CLI flags, which the caller applies
+ * afterwards). The members: "provider" (required) anchors the selection;
+ * "model" and "reasoning_effort" are optional and reset to
+ * CONFIG_VALUE_DEFAULT when unnamed, so the provider's own default applies;
+ * "system_prompt" is optional and cleared when unnamed, so normal
+ * resolution returns. Because every apply writes the whole set, presets
+ * replace each other rather than compose. No other keys are presettable
+ * (see PRESET_KEYS in config.c for why); "description" is reserved
+ * metadata for the /preset picker and the system prompt's preset listing.
+ * Validation is all-or-nothing: any invalid member applies nothing.
+ * A successful apply also records `name` in the "preset" override — the
+ * active-stance signal the banners and /session read; an explicit
+ * /provider, /model, or /effort commit clears it (the pick exits the
+ * stance). Returns 0 on success; -1 on failure with *err (when non-NULL)
+ * set to a malloc'd human-readable reason the caller prints and frees. */
+int config_preset_apply(const char *name, char **err);
+
+/* The "description" member of presets.<name>, or NULL when the preset or
+ * the member is absent. Borrowed; valid until config_free / config_load*. */
+const char *config_preset_description(const char *name);
+
+/* The "provider" member of presets.<name>, or NULL when the preset is
+ * absent (validation guarantees it's present and non-empty for every
+ * enumerated name). For consumers that check the name resolves against the
+ * provider registry — a check that lives above this layer, since config
+ * must not depend on provider discovery. Borrowed, same lifetime as
+ * config_preset_description. */
+const char *config_preset_provider(const char *name);
+
+/* Enumerate the defined presets: the member names of the presets object,
+ * merged and deduplicated across the state and file tiers, restricted to
+ * names that resolve to a *structurally valid* preset — the same
+ * validation apply runs — so everything listed is guaranteed to apply.
+ * Unusable definitions (fully-flat leaf spellings, a missing provider, an
+ * unknown member) are skipped with a once-per-process warning: they are
+ * user-authored config that isn't being honored. (A definition must be an
+ * object: nested under "presets", or a single flat "presets.<name>" key —
+ * the same exception to the flat-key grammar that structured blocks like
+ * catalog.models carry.) Same ownership contract as config_object_keys:
+ * caller frees each element, then the array. */
+size_t config_preset_names(char ***out);
 
 /* ---- introspection ---- */
 

@@ -9,6 +9,7 @@
 #include "catalog.h"
 #include "config.h"
 #include "util.h"
+#include "tools/bash_export.h"
 
 /* Default text used when HAX_SYSTEM_PROMPT is unset and --raw was not
  * passed. AGENTS.md / env block / skills are appended via agent_env_build_suffix
@@ -236,6 +237,22 @@ static char *resolve_model_label(struct provider *p, const char *model)
     return (p && p->model_label) ? p->model_label(p, model) : xstrdup(model);
 }
 
+/* Publish the effective selection for subagent inheritance (see
+ * bash_export_selection). The provider is exported by its resolvable id —
+ * the "provider" config key the autoselector/selectors record — not the
+ * display name, which HAX_PROVIDER_NAME can change to something
+ * provider_find wouldn't accept; the factory name is only the last-ditch
+ * fallback. Sited here (init + reconfigure) because these are the only two
+ * places the session's model/effort are resolved, so every path — startup,
+ * oneshot, /provider, /model, /effort, /preset — republishes for free. */
+static void export_selection(const struct provider *p, const struct agent_session *s)
+{
+    const char *id = config_str("provider");
+    if ((!id || !*id) && p)
+        id = p->name;
+    bash_export_selection(id, s->model, s->reasoning_effort);
+}
+
 int agent_session_init(struct agent_session *s, struct provider *p, const struct hax_opts *opts)
 {
     memset(s, 0, sizeof(*s));
@@ -269,6 +286,7 @@ int agent_session_init(struct agent_session *s, struct provider *p, const struct
         for (size_t i = 0; i < s->n_tools; i++)
             s->tools[i] = TOOLS[i]->def;
     }
+    export_selection(p, s);
     return 0;
 }
 
@@ -297,6 +315,7 @@ int agent_session_reconfigure(struct agent_session *s, struct provider *p)
     const char *effort = resolve_reasoning_effort(p);
     free(s->reasoning_effort);
     s->reasoning_effort = effort ? xstrdup(effort) : NULL;
+    export_selection(p, s);
     return 0;
 }
 

@@ -14,7 +14,9 @@
 #include "select.h"
 #include "session.h"
 #include "session_picker.h"
+#include "terminal/ansi.h"
 #include "terminal/interrupt.h"
+#include "tools/bash_export.h"
 #include "trace.h"
 #include "transcript.h"
 #include "util.h"
@@ -24,6 +26,11 @@
  * model can't spin forever in a pipeline where Ctrl-C may not reach us
  * cleanly. No CLI knob for this yet; add one if a real use case shows up. */
 #define ONESHOT_MAX_TURNS 100
+
+/* The subagent depth cap lives in tools/bash_export.h (the guard here and
+ * the stamp in the bash tool must agree). Deliberately a plain getenv, not
+ * a config key: it's a process fact set by the parent, not a user
+ * tunable. */
 
 static struct provider *pick_provider(int print_mode, int *provider_autoselected)
 {
@@ -66,33 +73,74 @@ static struct provider *pick_provider(int print_mode, int *provider_autoselected
     return p;
 }
 
-static const char HELP_TEXT[] =
-    "usage: hax [OPTIONS] [PROMPT...]\n"
-    "\n"
-    "A minimalist coding assistant in your terminal.\n"
-    "\n"
-    "With no arguments, runs an interactive REPL.\n"
-    "\n"
-    "Options:\n"
-    "  -p, --print      Non-interactive mode. Runs the prompt to completion\n"
-    "                   and prints the final assistant message to stdout.\n"
-    "                   The prompt comes from PROMPT positional arguments\n"
-    "                   (joined with spaces) when given, otherwise from\n"
-    "                   stdin if stdin is not a terminal.\n"
-    "  -c, --continue   Resume the most recent conversation in this\n"
-    "                   directory.\n"
-    "      --resume[=ID]\n"
-    "                   Resume a past conversation in this directory. With\n"
-    "                   no ID, pick one from an interactive list; with a\n"
-    "                   session ID, resume it directly — the ID form also\n"
-    "                   works with -p.\n"
-    "      --raw        Send only the prompt text — no system prompt, no\n"
-    "                   environment block, no AGENTS.md, no skills, and no\n"
-    "                   tools. Useful as a barebones chat interface.\n"
-    "  -h, --help       Show this help and exit.\n"
-    "\n"
-    "Configuration is via environment variables (HAX_PROVIDER, HAX_MODEL,\n"
-    "and the rest) or ~/.config/hax/config.json; env wins. See README.md.\n";
+/* Flag column + description lines per option; descriptions embed '\n' for
+ * continuation lines, indented by the printer to the shared column. Kept as
+ * data so the TTY and piped renderings come from one source. */
+static const struct help_opt {
+    const char *flags;
+    const char *desc;
+} HELP_OPTS[] = {
+    {"-p, --print", "Non-interactive mode. Runs the prompt to completion and prints the final\n"
+                    "assistant message to stdout. The prompt comes from PROMPT positional\n"
+                    "arguments (joined with spaces) when given, otherwise from stdin if stdin\n"
+                    "is not a terminal."},
+    {"-c, --continue", "Resume the most recent conversation in this directory."},
+    {"--resume[=ID]", "Resume a past conversation in this directory. With no ID, pick one from\n"
+                      "an interactive list; with a session ID, resume it directly — the ID form\n"
+                      "also works with -p."},
+    {"--no-session", "Don't record this conversation (nothing to resume)."},
+    {"--raw", "Send only the prompt text — no system prompt, no environment block,\n"
+              "no AGENTS.md, no skills, and no tools. Useful as a barebones chat\n"
+              "interface."},
+    {"--bare", "Run without the environment-derived context — env block, AGENTS.md,\n"
+               "skills, subagents section. Tools and the base system prompt remain\n"
+               "(unlike --raw)."},
+    {"--provider=NAME", "Select the backend for this run."},
+    {"--model=ID", "Select the model for this run."},
+    {"--effort=LEVEL", "Select the reasoning effort for this run."},
+    {"--preset=NAME", "Apply the named preset — a presets.NAME selection from the config\n"
+                      "file. Explicit selection flags win over the preset's values."},
+    {"-h, --help", "Show this help and exit."},
+};
+
+static void print_help(void)
+{
+    /* Cyan flags + bold headers on a terminal, matching the REPL's /help;
+     * piped output (hax -h | less, docs generation) stays plain. */
+    int tty = isatty(fileno(stdout));
+    const char *cyan = tty ? ANSI_CYAN : "";
+    const char *bold = tty ? ANSI_BOLD : "";
+    const char *reset = tty ? ANSI_RESET : "";
+
+    printf("%susage:%s hax [OPTIONS] [PROMPT...]\n\n", bold, reset);
+    printf("A minimalist coding assistant in your terminal.\n\n"
+           "With no arguments, runs an interactive REPL.\n\n");
+    printf("%soptions%s\n", bold, reset);
+
+    size_t col = 0;
+    for (size_t i = 0; i < sizeof(HELP_OPTS) / sizeof(*HELP_OPTS); i++) {
+        size_t w = strlen(HELP_OPTS[i].flags);
+        if (w > col)
+            col = w;
+    }
+    for (size_t i = 0; i < sizeof(HELP_OPTS) / sizeof(*HELP_OPTS); i++) {
+        printf("  %s%s%s%*s", cyan, HELP_OPTS[i].flags, reset,
+               (int)(col - strlen(HELP_OPTS[i].flags) + 2), "");
+        for (const char *p = HELP_OPTS[i].desc; *p;) {
+            const char *nl = strchr(p, '\n');
+            size_t len = nl ? (size_t)(nl - p) : strlen(p);
+            if (p != HELP_OPTS[i].desc)
+                printf("%*s", (int)(col + 4), "");
+            printf("%.*s\n", (int)len, p);
+            p += len + (nl != NULL);
+        }
+    }
+
+    printf("\nThe selection flags (--provider, --model, --effort, --preset) apply to this run\n"
+           "only and take priority over every other source. Persistent configuration is via\n"
+           "environment variables (HAX_PROVIDER, HAX_MODEL, and the rest), saved runtime picks,\n"
+           "then ~/.config/hax/config.json — in that order. See README.md.\n");
+}
 
 /* Concatenate `argv[0..n-1]` with single spaces between elements. Returns
  * malloc'd. Used to assemble a positional-args prompt: `hax -p hello world`
@@ -220,25 +268,50 @@ int main(int argc, char **argv)
     char *prompt = NULL;
     char *resume_path = NULL;
 
-    /* `-h`, `-p`, `-c` keep conventional short forms; --raw and --resume
-     * are long-only (`-r` is avoided to leave room for a future short
+    /* Selection overrides gathered during parsing and applied after
+     * config_init() below (the preset needs the config file loaded).
+     * Values are borrowed argv pointers — valid for the whole run. */
+    const char *opt_provider = NULL;
+    const char *opt_model = NULL;
+    const char *opt_effort = NULL;
+    const char *opt_preset = NULL;
+    int opt_no_session = 0;
+    int opt_bare = 0;
+
+    /* `-h`, `-p`, `-c` keep conventional short forms; everything else is
+     * long-only (`-r` is avoided to leave room for a future short
      * alias without collision). --resume takes an optional ID, so
      * `--resume` alone opens the picker and `--resume=ID` is direct. */
     enum {
         OPT_RAW = 0x100,
         OPT_RESUME,
+        OPT_PROVIDER,
+        OPT_MODEL,
+        OPT_EFFORT,
+        OPT_PRESET,
+        OPT_BARE,
+        OPT_NO_SESSION,
     };
     static const struct option long_opts[] = {
-        {"help", no_argument, NULL, 'h'},     {"print", no_argument, NULL, 'p'},
-        {"continue", no_argument, NULL, 'c'}, {"resume", optional_argument, NULL, OPT_RESUME},
-        {"raw", no_argument, NULL, OPT_RAW},  {NULL, 0, NULL, 0},
+        {"help", no_argument, NULL, 'h'},
+        {"print", no_argument, NULL, 'p'},
+        {"continue", no_argument, NULL, 'c'},
+        {"resume", optional_argument, NULL, OPT_RESUME},
+        {"no-session", no_argument, NULL, OPT_NO_SESSION},
+        {"raw", no_argument, NULL, OPT_RAW},
+        {"bare", no_argument, NULL, OPT_BARE},
+        {"provider", required_argument, NULL, OPT_PROVIDER},
+        {"model", required_argument, NULL, OPT_MODEL},
+        {"effort", required_argument, NULL, OPT_EFFORT},
+        {"preset", required_argument, NULL, OPT_PRESET},
+        {NULL, 0, NULL, 0},
     };
 
     int c;
     while ((c = getopt_long(argc, argv, "hpc", long_opts, NULL)) != -1) {
         switch (c) {
         case 'h':
-            fputs(HELP_TEXT, stdout);
+            print_help();
             return 0;
         case 'p':
             print_mode = 1;
@@ -253,6 +326,24 @@ int main(int argc, char **argv)
         case OPT_RAW:
             opts.raw = 1;
             break;
+        case OPT_PROVIDER:
+            opt_provider = optarg;
+            break;
+        case OPT_MODEL:
+            opt_model = optarg;
+            break;
+        case OPT_EFFORT:
+            opt_effort = optarg;
+            break;
+        case OPT_PRESET:
+            opt_preset = optarg;
+            break;
+        case OPT_BARE:
+            opt_bare = 1;
+            break;
+        case OPT_NO_SESSION:
+            opt_no_session = 1;
+            break;
         case '?':
             /* getopt_long already printed the diagnostic. */
             fprintf(stderr, "Try 'hax --help' for usage.\n");
@@ -260,6 +351,46 @@ int main(int argc, char **argv)
         default:
             return 1;
         }
+    }
+
+    /* Refuse to nest past the subagent depth cap. After parsing so --help
+     * still works anywhere, before any real work so a runaway chain dies
+     * fast with a diagnostic the spawning model can read and act on.
+     * Checked parse: this is the recursion backstop, so a malformed,
+     * negative, or overflowing value reads as at-cap (refuse) rather than
+     * resetting the chain — atoi would wrap or yield 0. */
+    const char *depth_env = getenv("HAX_SUBAGENT_DEPTH");
+    if (depth_env && *depth_env) {
+        int depth = 0;
+        if (!parse_int(depth_env, &depth) || depth < 0)
+            depth = HAX_SUBAGENT_MAX_DEPTH;
+        if (depth >= HAX_SUBAGENT_MAX_DEPTH) {
+            hax_err("subagent depth limit (%d) reached — run the task directly instead of "
+                    "spawning another hax",
+                    HAX_SUBAGENT_MAX_DEPTH);
+            return 1;
+        }
+    }
+
+    /* Empty selection-flag values (e.g. an unset shell var in
+     * --provider="$P") — reject like `--resume=`: the flags exist to name
+     * an explicit value, and falling through would silently do something
+     * else entirely (--provider= auto-selects another backend, --model=
+     * takes the provider default, --effort= disables effort, --preset=
+     * leaves a lower-tier stance visible-but-unapplied). The empty-means-
+     * disable spelling belongs to the env vars, where it's documented. */
+    const char *empty_flag = NULL;
+    if (opt_provider && !*opt_provider)
+        empty_flag = "--provider=";
+    else if (opt_model && !*opt_model)
+        empty_flag = "--model=";
+    else if (opt_effort && !*opt_effort)
+        empty_flag = "--effort=";
+    else if (opt_preset && !*opt_preset)
+        empty_flag = "--preset=";
+    if (empty_flag) {
+        hax_err("%s requires a value", empty_flag);
+        goto err_prompt;
     }
 
     if (continue_mode && resume_mode) {
@@ -382,6 +513,81 @@ int main(int argc, char **argv)
      * through config_str/etc. (env still wins over the file), including
      * the trace/transcript paths. */
     config_init();
+
+    /* Apply the preset (if any), then the explicit selection flags on top.
+     * Both land in the session-override tier, so the order alone gives the
+     * precedence: flag > preset > env > saved state > config file. The
+     * preset resolves through config too (--preset flag, else HAX_PRESET /
+     * a "preset" key), read verbatim so an explicit empty disables a
+     * configured default. Applied before trace_init so a preset can carry
+     * trace/transcript paths like any other setting. */
+    /* A preset named explicitly for this run (--preset, HAX_PRESET) always
+     * applies — that's the documented flag > preset > env order. A preset
+     * arriving by resolution instead (a /preset stance persisted in
+     * state.json, or a config-file default) yields to ANY explicit per-run
+     * selection: its values would land in the override tier and beat the
+     * env vars, silently breaking the "a one-off HAX_FOO=bar hax always
+     * wins" promise for persisted state. Explicit input suppresses the
+     * whole stance, not per-key — presets apply whole or not at all — and
+     * does so silently, like every other case of explicit input shadowing
+     * persisted state; the banner shows what actually runs. */
+    int explicit_sel = opt_provider || opt_model || opt_effort || getenv("HAX_PROVIDER") ||
+                       getenv("HAX_MODEL") || getenv("HAX_REASONING_EFFORT") ||
+                       getenv("HAX_SYSTEM_PROMPT");
+
+    const char *preset = opt_preset ? opt_preset : getenv("HAX_PRESET");
+    int preset_explicit = preset != NULL;
+    if (!preset) {
+        preset = config_str("preset"); /* state.json stance / config default */
+        if (preset && *preset && explicit_sel) {
+            config_set_override("preset", ""); /* keep the banner stance-free */
+            preset = NULL;
+        }
+    }
+    if (preset && *preset) {
+        char *err = NULL;
+        if (config_preset_apply(preset, &err) != 0) {
+            /* An explicitly named preset (--preset or HAX_PRESET) is a hard
+             * error — a subagent or scripted invocation must not silently
+             * run on the wrong setup. A name that came from resolution
+             * instead (a /preset persisted to state.json before its
+             * definition was renamed, a stale config default) must not
+             * brick every launch: warn and continue without it, shadowing
+             * the name for this run so the banner doesn't claim a stance
+             * that isn't applied. */
+            if (preset_explicit) {
+                hax_err("%s", err ? err : "preset failed to apply");
+                free(err);
+                goto err_curl;
+            }
+            hax_warn("%s", err ? err : "preset failed to apply");
+            free(err);
+            config_set_override("preset", "");
+        }
+    }
+    if (opt_provider)
+        config_set_override("provider", opt_provider);
+    if (opt_model)
+        config_set_override("model", opt_model);
+    if (opt_effort)
+        config_set_override("reasoning_effort", opt_effort);
+    /* --bare = every environment-derived context section stripped in one
+     * flag — the common shape for scripted / subagent scout runs, and one
+     * place to grow when new context sections appear. Deliberately a flag,
+     * not a preset: none of these keys are presettable (they're
+     * startup-latched), and the definition can widen without touching the
+     * preset contract. Recording is a separate axis (--no-session), NOT
+     * bundled: a bare run stays resumable — the recovery path for a
+     * subagent killed by a tool timeout — unless disposability is asked
+     * for explicitly. */
+    if (opt_bare) {
+        config_set_override("no_env", "1");
+        config_set_override("no_agents_md", "1");
+        config_set_override("no_skills", "1");
+        config_set_override("no_subagents", "1");
+    }
+    if (opt_no_session)
+        config_set_override("no_session", "1");
 
     /* Truncate HAX_TRACE and HAX_TRANSCRIPT here, before any provider
      * startup or session init. Without this, a fast-fail run (bad

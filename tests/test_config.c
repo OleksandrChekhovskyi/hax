@@ -326,6 +326,14 @@ static void test_persist_selection(void)
     EXPECT_STR_EQ(config_str("provider"), "mock");
     EXPECT(config_str("model") == NULL);
 
+    /* An explicit selection commit removes a persisted preset stance in the
+     * same write — otherwise it would re-apply next launch and shadow the
+     * very selection committed here. */
+    EXPECT(config_persist_state("preset", "review") == 0);
+    EXPECT_STR_EQ(config_str("preset"), "review");
+    EXPECT(config_persist_selection("mock", "m2", NULL) == 0);
+    EXPECT(config_str("preset") == NULL);
+
     /* A failed write leaves the in-memory tier unchanged (see
      * test_persist_failure_rolls_back for the same contract per-key). */
     setenv("XDG_STATE_HOME", "/dev/null/nope", 1);
@@ -581,6 +589,182 @@ static void test_registry_introspection(void)
     }
 }
 
+/* ---------- presets ---------- */
+
+static void test_preset_apply(void)
+{
+    clear_env();
+    EXPECT(config_load("{\"model\": \"base\", \"presets\": {"
+                       "\"review\": {"
+                       "\"description\": \"code review stance\","
+                       "\"provider\": \"mock\","
+                       "\"model\": \"rev-model\","
+                       "\"reasoning_effort\": \"high\","
+                       "\"system_prompt\": \"you review code\"},"
+                       "\"min\": {\"provider\": \"mock\"}}}") == 0);
+
+    char *err = NULL;
+    EXPECT(config_preset_apply("review", &err) == 0);
+    EXPECT(err == NULL);
+    /* Members land in the override tier — above env and the file tier. */
+    setenv("HAX_MODEL", "env-model", 1);
+    EXPECT_STR_EQ(config_str("provider"), "mock");
+    EXPECT_STR_EQ(config_str("model"), "rev-model");
+    EXPECT_STR_EQ(config_str("reasoning_effort"), "high");
+    EXPECT_STR_EQ(config_str("system_prompt"), "you review code");
+    /* The applied name is recorded as the active stance (banner, /session). */
+    EXPECT_STR_EQ(config_str("preset"), "review");
+    /* "description" is reserved metadata, not an override. */
+    EXPECT(config_str("description") == NULL);
+    EXPECT_STR_EQ(config_preset_description("review"), "code review stance");
+
+    /* A preset is a whole selection, so presets replace rather than
+     * compose: one that names only the provider resets model/effort to the
+     * sentinel — the provider's default applies and the env var must NOT
+     * resurface — and clears the system_prompt override, so normal
+     * resolution returns and the env var DOES resurface. */
+    setenv("HAX_SYSTEM_PROMPT", "custom prompt", 1);
+    EXPECT(config_preset_apply("min", &err) == 0);
+    EXPECT(err == NULL);
+    EXPECT_STR_EQ(config_str("provider"), "mock");
+    EXPECT(config_str("model") == NULL);
+    EXPECT(config_str("reasoning_effort") == NULL);
+    EXPECT_STR_EQ(config_str("system_prompt"), "custom prompt");
+    EXPECT_STR_EQ(config_str("preset"), "min");
+    unsetenv("HAX_MODEL");
+    unsetenv("HAX_SYSTEM_PROMPT");
+
+    /* Clear the applied overrides so later tests see a clean tier. */
+    config_set_override("preset", NULL);
+    config_set_override("provider", NULL);
+    config_set_override("model", NULL);
+    config_set_override("reasoning_effort", NULL);
+    config_set_override("system_prompt", NULL);
+}
+
+static void test_preset_apply_errors(void)
+{
+    clear_env();
+    EXPECT(config_load("{\"presets\": {"
+                       "\"endpoint\": {\"provider\": \"mock\", \"openai.base_url\": \"u\"},"
+                       "\"nonscalar\": {\"provider\": \"mock\", \"model\": {\"id\": \"x\"}},"
+                       "\"badd\": {\"provider\": \"mock\", \"description\": {\"text\": \"x\"}},"
+                       "\"anon\": {\"model\": \"x\"}}}") == 0);
+
+    /* Unknown preset name. */
+    char *err = NULL;
+    EXPECT(config_preset_apply("nope", &err) == -1);
+    EXPECT(err != NULL);
+    free(err);
+    EXPECT(config_preset_description("nope") == NULL);
+
+    /* Only selection keys are presettable; all-or-nothing, so the valid
+     * "provider" member must not have been applied either. */
+    err = NULL;
+    EXPECT(config_preset_apply("endpoint", &err) == -1);
+    EXPECT(err != NULL && strstr(err, "not presettable") != NULL);
+    free(err);
+    EXPECT(config_str("provider") == NULL);
+    EXPECT(config_str("openai.base_url") == NULL);
+
+    /* Non-scalar member. */
+    err = NULL;
+    EXPECT(config_preset_apply("nonscalar", &err) == -1);
+    EXPECT(err != NULL);
+    free(err);
+
+    /* "description" skips the allowed-keys check but not the scalar one —
+     * a structured description would silently read back as none. */
+    err = NULL;
+    EXPECT(config_preset_apply("badd", &err) == -1);
+    EXPECT(err != NULL && strstr(err, "description") != NULL);
+    free(err);
+
+    /* A preset must anchor a provider. */
+    err = NULL;
+    EXPECT(config_preset_apply("anon", &err) == -1);
+    EXPECT(err != NULL && strstr(err, "provider") != NULL);
+    free(err);
+    EXPECT(config_str("model") == NULL);
+}
+
+static void test_preset_enumeration(void)
+{
+    clear_env();
+    EXPECT(config_load("{\"presets\": {\"a\": {\"provider\": \"mock\"},"
+                       " \"b\": {\"provider\": \"mock\"}}}") == 0);
+    char **names = NULL;
+    size_t n = config_preset_names(&names);
+    EXPECT(n == 2);
+    for (size_t i = 0; i < n; i++)
+        free(names[i]);
+    free(names);
+
+    /* Enumerated ⊆ appliable: everything listed must survive the same
+     * validation apply runs. A name spelled only as fully-flat leaves
+     * cannot be assembled into a preset object, and a structurally invalid
+     * definition (missing provider, unknown member) would fail on
+     * selection — neither may be advertised in the picker or the prompt
+     * listing. The one-level-flat block form remains both listed and
+     * appliable. */
+    EXPECT(config_load("{\"presets.flatleaf.provider\": \"mock\","
+                       "\"presets.block\": {\"provider\": \"mock\"},"
+                       "\"presets\": {"
+                       "\"anon\": {\"model\": \"x\", \"description\": \"no provider\"},"
+                       "\"typo\": {\"provider\": \"mock\", \"modle\": \"x\"}}}") == 0);
+    n = config_preset_names(&names);
+    EXPECT(n == 1);
+    if (n == 1)
+        EXPECT_STR_EQ(names[0], "block");
+    for (size_t i = 0; i < n; i++)
+        free(names[i]);
+    free(names);
+    char *err = NULL;
+    EXPECT(config_preset_apply("flatleaf", &err) == -1);
+    EXPECT(err != NULL);
+    free(err);
+}
+
+static void test_preset_dotted_name(void)
+{
+    clear_env();
+    /* A user-chosen name containing dots is a literal member, not a nested
+     * path — anything enumeration lists must also apply. */
+    EXPECT(config_load("{\"presets\": {\"review.v2\": "
+                       "{\"provider\": \"mock\", \"model\": \"m\"}}}") == 0);
+    char **names = NULL;
+    size_t n = config_object_keys("presets", &names);
+    EXPECT(n == 1);
+    if (n == 1)
+        EXPECT_STR_EQ(names[0], "review.v2");
+    for (size_t i = 0; i < n; i++)
+        free(names[i]);
+    free(names);
+
+    char *err = NULL;
+    EXPECT(config_preset_apply("review.v2", &err) == 0);
+    EXPECT(err == NULL);
+    EXPECT_STR_EQ(config_str("provider"), "mock");
+    EXPECT_STR_EQ(config_str("model"), "m");
+    EXPECT_STR_EQ(config_str("preset"), "review.v2");
+    config_set_override("preset", NULL);
+    config_set_override("provider", NULL);
+    config_set_override("model", NULL);
+    config_set_override("reasoning_effort", NULL);
+    config_set_override("system_prompt", NULL);
+
+    /* The flat-authored top-level form still resolves via the fallback. */
+    EXPECT(config_load("{\"presets.flat\": {\"provider\": \"mock\"}}") == 0);
+    EXPECT(config_preset_apply("flat", &err) == 0);
+    EXPECT(err == NULL);
+    EXPECT_STR_EQ(config_str("provider"), "mock");
+    config_set_override("preset", NULL);
+    config_set_override("provider", NULL);
+    config_set_override("model", NULL);
+    config_set_override("reasoning_effort", NULL);
+    config_set_override("system_prompt", NULL);
+}
+
 int main(void)
 {
     test_load_validation();
@@ -601,6 +785,10 @@ int main(void)
     test_persist_roundtrip();
     test_persist_failure_rolls_back();
     test_persist_flat_key();
+    test_preset_apply();
+    test_preset_apply_errors();
+    test_preset_enumeration();
+    test_preset_dotted_name();
     config_free();
     T_REPORT();
 }

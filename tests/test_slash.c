@@ -101,9 +101,9 @@ int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
     return 0;
 }
 
-/* /provider, /model, /effort dispatch into select.c, which pulls in the
- * whole provider + picker + agent graph. The slash tests only assert on
- * dispatch routing, so stub the three entry points the registry calls. */
+/* /provider, /model, /effort, /preset dispatch into select.c, which pulls
+ * in the whole provider + picker + agent graph. The slash tests only assert
+ * on dispatch routing, so stub the entry points the registry calls. */
 void select_provider(struct agent_state *st)
 {
     (void)st;
@@ -115,6 +115,11 @@ void select_model(struct agent_state *st)
 void select_effort(struct agent_state *st)
 {
     (void)st;
+}
+void select_preset(struct agent_state *st, const char *name)
+{
+    (void)st;
+    (void)name;
 }
 
 /* Redirect stdout to a temp file so we can inspect what slash_dispatch

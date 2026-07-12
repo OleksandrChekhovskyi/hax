@@ -34,6 +34,18 @@ void select_provider(struct agent_state *st);
 void select_model(struct agent_state *st);
 void select_effort(struct agent_state *st);
 
+/* Switch to a preset (a presets.<name> selection from the config — see
+ * config_preset_apply): by `name` when given, else via a picker over the
+ * defined presets. Persists like the flows above, but by *name* (the
+ * "preset" state key): the next launch re-applies the then-current
+ * definition. An explicit /provider, /model, or /effort pick exits the
+ * stance — commit_selection clears the name and the preset's system
+ * prompt. The provider is always constructed fresh under the applied
+ * overrides (construction runs value-dependent behavior like llama.cpp's
+ * model reconciliation) and swapped in; a validation or construction
+ * failure rolls the whole application back. */
+void select_preset(struct agent_state *st, const char *name);
+
 struct provider;
 
 /* Cold-start auto-pick used when the built-in default provider can't be

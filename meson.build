@@ -98,6 +98,7 @@ sources = files(
     'src/tools/bash.c',
     'src/tools/bash_cd_strip.c',
     'src/tools/bash_classify.c',
+    'src/tools/bash_export.c',
     'src/tools/edit.c',
     'src/tools/path_preprocess.c',
     'src/tools/read.c',

@@ -606,14 +606,21 @@ static void show_transcript_cb(void *user)
 void agent_print_banner(const struct provider *p, const struct agent_session *s)
 {
     const char *bar = ANSI_CYAN "▌" ANSI_FG_DEFAULT;
+    /* Active preset stance, shown dim as a qualifier of hax itself
+     * ("this is hax in review trim"). Load-bearing, not decoration: a
+     * preset may have swapped the system prompt, and the name is the only
+     * at-a-glance signal that a stance — persona included — is in effect. */
+    const char *preset = config_str("preset");
+    char *stance = (preset && *preset) ? xasprintf("[%s] ", preset) : xstrdup("");
     if (!p) {
         /* No provider could be constructed (the configured/default one isn't
          * usable — e.g. codex not logged in). The REPL still starts; point
          * the user at /provider to choose a working one. */
         printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM
-               "› no provider — use /provider" ANSI_BOLD_OFF "\n",
-               bar);
+               "%s› no provider — use /provider" ANSI_BOLD_OFF "\n",
+               bar, stance);
         printf("%s " ANSI_DIM "ctrl-d quit · try /help" ANSI_BOLD_OFF "\n", bar);
+        free(stance);
         return;
     }
     const char *name = p->name ? p->name : "?";
@@ -622,15 +629,17 @@ void agent_print_banner(const struct provider *p, const struct agent_session *s)
         /* No model resolved (a provider with no default, nothing configured
          * yet). The REPL still starts; point the user at /model. */
         printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM
-               "› %s · no model — use /model" ANSI_BOLD_OFF "\n",
-               bar, name);
+               "%s› %s · no model — use /model" ANSI_BOLD_OFF "\n",
+               bar, stance, name);
     else if (s->reasoning_effort)
-        printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s · %s" ANSI_BOLD_OFF "\n",
-               bar, name, model_label, s->reasoning_effort);
+        printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "%s› %s · %s · %s" ANSI_BOLD_OFF
+               "\n",
+               bar, stance, name, model_label, s->reasoning_effort);
     else
-        printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "› %s · %s" ANSI_BOLD_OFF "\n", bar,
-               name, model_label);
+        printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "%s› %s · %s" ANSI_BOLD_OFF "\n",
+               bar, stance, name, model_label);
     printf("%s " ANSI_DIM "ctrl-d quit · try /help" ANSI_BOLD_OFF "\n", bar);
+    free(stance);
 }
 
 /* Provider name for session-log / -load metadata, tolerating a not-yet-

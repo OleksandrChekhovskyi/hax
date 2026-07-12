@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "agent.h"
+#include "config.h"
 #include "file_mention.h"
 #include "render/render_ctx.h"
 #include "select.h"
@@ -58,6 +59,7 @@ static void slash_run_resume(struct slash_ctx *ctx);
 static void slash_run_provider(struct slash_ctx *ctx);
 static void slash_run_model(struct slash_ctx *ctx);
 static void slash_run_effort(struct slash_ctx *ctx);
+static void slash_run_preset(struct slash_ctx *ctx);
 static void slash_run_compact(struct slash_ctx *ctx);
 static void slash_run_copy(struct slash_ctx *ctx);
 static void slash_run_session(struct slash_ctx *ctx);
@@ -100,6 +102,14 @@ static const struct slash_cmd COMMANDS[] = {
         .summary = "set reasoning effort",
         .drives_disp = 1,
         .run = slash_run_effort,
+    },
+    {
+        .name = "preset",
+        .aliases = {NULL},
+        .summary = "switch to a config-defined preset (optional: name)",
+        .takes_arg = 1,
+        .drives_disp = 1,
+        .run = slash_run_preset,
     },
     {
         .name = "compact",
@@ -316,6 +326,14 @@ static void slash_run_effort(struct slash_ctx *ctx)
     select_effort(ctx->state);
 }
 
+/* ---------- /preset ---------- */
+
+static void slash_run_preset(struct slash_ctx *ctx)
+{
+    /* ctx->arg is a preset name for direct application, NULL for the picker. */
+    select_preset(ctx->state, ctx->arg);
+}
+
 /* ---------- /compact ---------- */
 
 static void slash_run_compact(struct slash_ctx *ctx)
@@ -384,6 +402,12 @@ static void slash_run_session(struct slash_ctx *ctx)
 
     const char *hint = session_log_resume_hint(st->slog);
     session_row("session", hint ? hint : "not recorded");
+
+    /* Active stance, when one is applied — above the provider row it
+     * qualifies, mirroring the banner's `hax [preset]`. */
+    const char *preset = config_str("preset");
+    if (preset && *preset)
+        session_row("preset", preset);
 
     const char *prov = (st->provider && st->provider->name) ? st->provider->name : "?";
     const char *model = (st->sess && st->sess->model && *st->sess->model) ? st->sess->model : "?";

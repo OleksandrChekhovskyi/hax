@@ -9,6 +9,7 @@
 #include "agent_core.h"
 #include "catalog.h"
 #include "compact.h"
+#include "config.h"
 #include "session.h"
 #include "tool.h"
 #include "transcript.h"
@@ -125,27 +126,6 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         return 1;
     }
 
-    /* Provenance banner — the light -p twin of the REPL's agent_print_banner.
-     * What actually answers resolves through several tiers (env, state.json,
-     * config, auto-selection), so name it up front, before any model call.
-     * stderr keeps piped stdout clean; deliberately not TTY-gated so CI and
-     * pipeline logs capture which backend produced the answer. Dim only on a
-     * terminal, like the resume hint below. */
-    {
-        int tty = isatty(fileno(stderr));
-        const char *model_label = sess.model_label ? sess.model_label : sess.model;
-        fprintf(stderr, "%shax: %s · %s", tty ? ANSI_DIM : "", p->name ? p->name : "?",
-                model_label);
-        if (sess.reasoning_effort)
-            fprintf(stderr, " · %s", sess.reasoning_effort);
-        if (opts->provider_autoselected)
-            fprintf(stderr, " (auto-selected)");
-        /* Trailing blank line for the same reason the resume hint leads with
-         * one: in a combined 2>&1 stream the banner would otherwise run
-         * straight into the answer. */
-        fprintf(stderr, "%s\n\n", tty ? ANSI_RESET : "");
-    }
-
     /* Resume: seed history from a prior session before the new prompt is
      * added, so -p can continue a conversation. An unreadable file is fatal
      * rather than silently running the prompt against empty history; an
@@ -188,6 +168,42 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
      * crash mid-stream still leaves the triggering input visible in
      * the log. */
     oneshot_flush(tlog, slog, sess.items, sess.n_items);
+
+    /* Provenance banner — the light -p twin of the REPL's agent_print_banner.
+     * What actually answers resolves through several tiers (env, state.json,
+     * config, auto-selection), so name it up front, before any model call.
+     * stderr keeps piped stdout clean; deliberately not TTY-gated so CI and
+     * pipeline logs capture which backend produced the answer. Dim only on a
+     * terminal, like the resume hint below. Emitted after the first flush
+     * (not at entry) so the session id can ride along: the flush above
+     * materialized the file, and an id visible *at startup* is what lets a
+     * subagent killed mid-run (bash-tool timeout) still be picked up with
+     * --resume — the exit-time hint never prints for it. */
+    {
+        int tty = isatty(fileno(stderr));
+        const char *model_label = sess.model_label ? sess.model_label : sess.model;
+        /* Active preset stance, like the REPL banner: the answer's
+         * provenance includes the stance that shaped it (possibly a swapped
+         * system prompt), not just the backend. */
+        const char *preset = config_str("preset");
+        if (preset && *preset)
+            fprintf(stderr, "%shax [%s]: %s · %s", tty ? ANSI_DIM : "", preset,
+                    p->name ? p->name : "?", model_label);
+        else
+            fprintf(stderr, "%shax: %s · %s", tty ? ANSI_DIM : "", p->name ? p->name : "?",
+                    model_label);
+        if (sess.reasoning_effort)
+            fprintf(stderr, " · %s", sess.reasoning_effort);
+        if (opts->provider_autoselected)
+            fprintf(stderr, " (auto-selected)");
+        const char *sid = session_log_resume_hint(slog);
+        if (sid)
+            fprintf(stderr, " · session %s", sid);
+        /* Trailing blank line for the same reason the resume hint leads with
+         * one: in a combined 2>&1 stream the banner would otherwise run
+         * straight into the answer. */
+        fprintf(stderr, "%s\n\n", tty ? ANSI_RESET : "");
+    }
 
     /* Keep the machine from idling to sleep across the whole agentic
      * run — a long unattended -p invocation (or one driven from

@@ -23,6 +23,13 @@ runtime override → environment → state.json → config.json → registry/pro
 persist them to `state.json`. On the next launch, an explicit environment variable still wins
 over that state.
 
+The CLI selection flags and presets also land in the runtime-override tier, applied in this
+order: a preset first, then explicit `--provider` / `--model` / `--effort` flags on top. So
+for a single run the effective order is: flags → preset → environment → `state.json` →
+`config.json`. The flags and startup presets (`--preset`, `HAX_PRESET`) persist nothing;
+the interactive `/preset` persists the preset's *name* to `state.json` like the other
+selectors (see [Presets](#presets)).
+
 ## Config file format
 
 `config.json` is plain JSON: no comments or trailing commas. Dotted keys are written as nested
@@ -87,6 +94,84 @@ Custom provider with a key in the environment:
 }
 ```
 
+## Presets
+
+A preset is a named, complete selection: which provider to talk to, and optionally which
+model, reasoning effort, and system prompt. Define them under `presets.<name>` in
+`config.json`:
+
+```json
+{
+  "presets": {
+    "review": {
+      "description": "thorough code review on a strong model",
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "high",
+      "system_prompt": "You are a meticulous code reviewer. ..."
+    },
+    "scout": {
+      "description": "fast, cheap exploration",
+      "provider": "openrouter",
+      "model": "qwen/qwen3-coder:free"
+    }
+  }
+}
+```
+
+Semantics:
+
+- `provider` is required; it anchors the selection.
+- `model` and `reasoning_effort` are optional. Omitted, the provider's own default applies
+  (llama.cpp discovers the served model), shadowing any env/state/config value — the same
+  rule a `/provider` switch uses, so a stale `HAX_MODEL` can't leak into a different backend.
+  Explicit `--model`/`--effort` flags still win over the preset.
+- `system_prompt` is optional. Omitted, normal resolution applies — your configured prompt,
+  or the built-in one.
+- Applying a preset writes the whole selection, so presets replace each other rather than
+  compose: switching from a preset that set a system prompt to one that doesn't restores the
+  regular prompt.
+- `description` is reserved metadata, shown by the `/preset` picker and listed in the system
+  prompt's subagents section so the model knows which preset fits which delegated task.
+- A definition must be an object: nested under `presets` as above, or a single flat
+  `"presets.<name>": {...}` key. Fully-flat leaf spellings (`"presets.<name>.provider": ...`)
+  are not assembled into a preset — the same exception to the flat-key grammar that other
+  structured blocks (like `catalog.models`) carry.
+- Nothing else is presettable, deliberately: a preset must be fully honored whenever it is
+  applied, including mid-session via `/preset`, and only these per-request keys qualify.
+  Endpoint and credential settings are bound at provider construction — define a custom
+  `providers.<name>` block and point the preset's `provider` at it. Context stripping and
+  session recording are startup-bound — use the `--bare` / `--no-session` flags.
+- Application is all-or-nothing: an invalid member is an error and nothing is applied.
+
+Select a preset with `--preset <name>`, the `HAX_PRESET` env var (or a `preset` config key),
+or `/preset` in the REPL. The active preset shows dim in the banner — `hax [review] › …` —
+which matters because a preset may have swapped the system prompt; `/session` lists it too,
+and Ctrl-T shows the exact prompt in effect.
+
+`/preset` persists like the other selectors, but by *name* (a `preset` key in `state.json`,
+machine-local like the rest): the next launch re-applies the then-current definition, so
+editing the preset in `config.json` changes what you get. An explicit `/provider`, `/model`,
+or `/effort` pick exits the preset — the committed selection replaces the whole stance,
+clearing its name and system prompt. `--preset` and `HAX_PRESET` apply per-run and persist
+nothing.
+
+Explicit per-run input beats the persisted stance as a whole: when any selection flag or
+selection env var (`HAX_PROVIDER`, `HAX_MODEL`, `HAX_REASONING_EFFORT`, `HAX_SYSTEM_PROMPT`)
+is set, a preset coming from `state.json` or a config-file `preset` default is skipped
+entirely — presets apply whole or not at all, never blended with other input. A preset named
+explicitly for the run (`--preset`, `HAX_PRESET`) still
+applies, and still shadows selection env vars per the flags → preset → env order;
+`HAX_PRESET=` (empty) disables any preset for the run. A persisted name whose definition has
+since been renamed or deleted warns at startup and is skipped; a failing explicit `--preset`
+is an error.
+
+Earlier `/provider`/`/model`/`/effort` picks stay in `state.json` underneath a persisted
+preset. They are fully shadowed while the preset is active (it writes the whole selection),
+and come back into effect whenever the stance is skipped — a one-off `HAX_PRESET=` run, an
+explicit selection env var, or a stale name — so disabling a preset falls back to your last
+explicit selection, not to auto-selection.
+
 ## Setting reference
 
 The list below mirrors the setting registry in `src/config.c`. Each bullet starts with the
@@ -94,6 +179,8 @@ canonical key and its environment variable.
 
 ### Selection and prompt
 
+- `preset` / `HAX_PRESET` — preset to apply at startup, as if passed via `--preset`. An
+  explicit empty value disables a config-file default.
 - `provider` / `HAX_PROVIDER` — backend id. Built-ins are `codex`, `openai`,
   `openai-compatible`, `anthropic`, `anthropic-compatible`, `llama.cpp`, `ollama`,
   `openrouter`, and `mock`. When unset, startup auto-selects: the built-in default (`codex`)
@@ -107,7 +194,10 @@ canonical key and its environment variable.
 - `provider_name` / `HAX_PROVIDER_NAME` — override the banner display name for compiled-in
   providers.
 - `no_env` / `HAX_NO_ENV` — skip the `<env>` block.
-- `no_agents_md` / `HAX_NO_AGENTS_MD` — skip AGENTS.md and skill discovery.
+- `no_agents_md` / `HAX_NO_AGENTS_MD` — skip AGENTS.md discovery.
+- `no_skills` / `HAX_NO_SKILLS` — skip the skills listing.
+- `no_subagents` / `HAX_NO_SUBAGENTS` — skip the subagents section (see
+  [usage.md](./usage.md)).
 
 ### Display
 
