@@ -142,6 +142,20 @@ int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long
      * worst ("9.9M / 9.9M (100%)"), so the headroom costs nothing. */
     char buf[STATS_SEG_LEN - 16];
 
+    /* Segment order is scope order, narrow to wide: this user turn's
+     * activity (worked, out), then current window state (context, cached),
+     * then the session total (spent). */
+    if (elapsed_ms >= 0) {
+        format_duration(buf, sizeof(buf), elapsed_ms);
+        if (verbose)
+            snprintf(segs[n++], STATS_SEG_LEN, "worked %s", buf);
+        else
+            snprintf(segs[n++], STATS_SEG_LEN, "%s", buf);
+    }
+    if (verbose && out >= 0) {
+        format_tokens(buf, sizeof(buf), out);
+        snprintf(segs[n++], STATS_SEG_LEN, "out %s", buf);
+    }
     if (ctx >= 0) {
         format_context(buf, sizeof(buf), ctx, limit);
         /* The "context" word is disambiguation, not decoration, so it
@@ -155,20 +169,9 @@ int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long
         else
             snprintf(segs[n++], STATS_SEG_LEN, "%s", buf);
     }
-    if (verbose && out >= 0) {
-        format_tokens(buf, sizeof(buf), out);
-        snprintf(segs[n++], STATS_SEG_LEN, "out %s", buf);
-    }
     if (verbose && cached > 0) {
         format_tokens(buf, sizeof(buf), cached);
         snprintf(segs[n++], STATS_SEG_LEN, "cached %s", buf);
-    }
-    if (elapsed_ms >= 0) {
-        format_duration(buf, sizeof(buf), elapsed_ms);
-        if (verbose)
-            snprintf(segs[n++], STATS_SEG_LEN, "worked %s", buf);
-        else
-            snprintf(segs[n++], STATS_SEG_LEN, "%s", buf);
     }
     if (spend > 0) {
         format_cost(buf, sizeof(buf), spend);

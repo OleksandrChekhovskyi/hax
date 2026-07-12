@@ -61,11 +61,12 @@ char *build_system_prompt(const char *model_label, int raw);
 
 /* Shared assembly for the stats line shown after each REPL user turn and
  * at the end of a -p run. The default form is terse and unlabeled —
- * "8.9k / 256k (3%)", "42s", "$0.042" — one gauge plus fields whose
+ * "42s", "8.9k / 256k (3%)", "$0.042" — one gauge plus fields whose
  * units label themselves. `verbose` switches to the fully labeled
- * diagnostic form and adds the token detail: "context 8.9k / 256k (3%)",
- * "out 595", "cached 2.7k", "worked 42s", "spent $0.042". Fills `segs`
- * in display order and returns the count (0 when nothing was reported).
+ * diagnostic form and adds the token detail: "worked 42s", "out 595",
+ * "context 8.9k / 256k (3%)", "cached 2.7k", "spent $0.042". Fills `segs`
+ * in display order (scope order: turn activity, window state, session
+ * total) and returns the count (0 when nothing was reported).
  * Unreported fields are skipped rather than rendered as fake zeros:
  * ctx < 0, elapsed_ms < 0, spend <= 0 (cached only when > 0). Callers
  * own the layout — the REPL reflows segments at the " · " seams, oneshot

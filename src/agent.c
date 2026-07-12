@@ -299,7 +299,7 @@ static void agent_stats_settle(struct agent_state *st, const char *model)
     t->spend = (struct spend_totals){.reported = t->spend.reported};
 }
 
-/* Dim per-user-turn stats line: "context 8.9k / 256k (3%) · 42s · $0.042",
+/* Dim per-user-turn stats line: "42s · 8.9k / 256k (3%) · $0.042",
  * shown once per user turn so multi-step tool runs collapse into a single
  * summary instead of bracketing every intermediate response. Distinct from
  * /usage (the provider's account report) and /session (this session's

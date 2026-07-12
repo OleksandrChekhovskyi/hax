@@ -417,30 +417,31 @@ static void test_format_stats_segments_selection(void)
 {
     char segs[STATS_SEGS_MAX][STATS_SEG_LEN];
 
-    /* Default (non-verbose): context gauge, duration, spend; out/cached
-     * dropped, and the single token figure carries no word label. */
+    /* Default (non-verbose): duration, context gauge, spend — scope order,
+     * this turn before session state; out/cached dropped, and the single
+     * token figure carries no word label. */
     int n = format_stats_segments(segs, 9113, 262144, 595, 2765, 0, 42000, 0.042, 0);
     EXPECT(n == 3);
-    EXPECT_STR_EQ(segs[0], "8.9k / 256k (3%)");
-    EXPECT_STR_EQ(segs[1], "42s");
+    EXPECT_STR_EQ(segs[0], "42s");
+    EXPECT_STR_EQ(segs[1], "8.9k / 256k (3%)");
     EXPECT_STR_EQ(segs[2], "$0.042");
 
-    /* Verbose: out and cached slot in between, and every field gets its
-     * word label (the fully labeled diagnostic form). */
+    /* Verbose: out and cached slot in, and every field gets its word
+     * label (the fully labeled diagnostic form). */
     n = format_stats_segments(segs, 9113, 262144, 595, 2765, 1, 42000, 0.042, 0);
     EXPECT(n == 5);
-    EXPECT_STR_EQ(segs[0], "context 8.9k / 256k (3%)");
+    EXPECT_STR_EQ(segs[0], "worked 42s");
     EXPECT_STR_EQ(segs[1], "out 595");
-    EXPECT_STR_EQ(segs[2], "cached 2.7k");
-    EXPECT_STR_EQ(segs[3], "worked 42s");
+    EXPECT_STR_EQ(segs[2], "context 8.9k / 256k (3%)");
+    EXPECT_STR_EQ(segs[3], "cached 2.7k");
     EXPECT_STR_EQ(segs[4], "spent $0.042");
 
     /* Unknown window: no gauge shape to identify the bare number, so the
      * default form keeps the "context" label for this figure only. */
     n = format_stats_segments(segs, 9113, 0, -1, -1, 0, 42000, 0.042, 0);
     EXPECT(n == 3);
-    EXPECT_STR_EQ(segs[0], "context 8.9k");
-    EXPECT_STR_EQ(segs[1], "42s");
+    EXPECT_STR_EQ(segs[0], "42s");
+    EXPECT_STR_EQ(segs[1], "context 8.9k");
     EXPECT_STR_EQ(segs[2], "$0.042");
 
     /* Estimated spend is marked approximate, both forms. */
