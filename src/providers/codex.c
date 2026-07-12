@@ -36,6 +36,19 @@
  * already-sendable models (for example gpt-5.5) is visible. */
 #define CODEX_PROBE_CLIENT_VERSION "999.0.0"
 
+/* The backend routes some models by client identity: unless both the
+ * originator header and the User-Agent product token identify the official
+ * CLI, gpt-5.6-luna resolves to a nonexistent internal engine and
+ * /responses returns 404 "Model not found" (openai/codex#31967; verified
+ * empirically 2026-07 — each header alone is insufficient). Impersonate
+ * codex_cli_rs: this provider rides its OAuth tokens anyway, so codex-rs
+ * behavior is the only contract there is. hax identity rides in the UA's
+ * trailing token, the slot codex-rs fills with terminal info. The UA
+ * version is not currently checked (any string passes); a plausible pinned
+ * one keeps the fingerprint ordinary. */
+#define CODEX_ORIGINATOR "originator: codex_cli_rs"
+#define CODEX_USER_AGENT "User-Agent: codex_cli_rs/0.144.1 hax/0.1"
+
 struct codex {
     struct provider base;
     char *access_token;
@@ -404,23 +417,15 @@ static int codex_stream(struct provider *p, const struct context *ctx, const cha
     /* Reuse the per-process UUID we already mint for prompt_cache_key.
      * pi-mono sends both headers with the same value; codex-rs likewise.
      * Used by the server for routing/dedup affinity. */
-    char *sess_hdr = xasprintf("session_id: %s", c->session_id);
+    char *sess_hdr = xasprintf("session-id: %s", c->session_id);
     char *reqid_hdr = xasprintf("x-client-request-id: %s", c->session_id);
-#if defined(__APPLE__)
-    const char *ua = "User-Agent: hax/0.1 (macos)";
-#elif defined(__linux__)
-    const char *ua = "User-Agent: hax/0.1 (linux)";
-#else
-    const char *ua = "User-Agent: hax/0.1";
-#endif
-
     const char *headers[] = {
         auth_hdr,
         acct_hdr,
         sess_hdr,
         reqid_hdr,
-        "originator: hax",
-        ua,
+        CODEX_ORIGINATOR,
+        CODEX_USER_AGENT,
         "OpenAI-Beta: responses=experimental",
         "Accept: text/event-stream",
         "Content-Type: application/json",
@@ -571,12 +576,13 @@ static void spawn_context_probe(struct codex *c, const char *model)
      * backend accepts the bearer token + account-id pair on /models
      * too. originator + UA mirror the streaming path so the probe
      * looks like the same client to server-side telemetry. */
-    a->headers = xcalloc(5, sizeof(*a->headers));
+    a->headers = xcalloc(6, sizeof(*a->headers));
     a->headers[0] = xasprintf("Authorization: Bearer %s", c->access_token);
     a->headers[1] = xasprintf("chatgpt-account-id: %s", c->account_id);
-    a->headers[2] = xstrdup("originator: hax");
-    a->headers[3] = xstrdup("Accept: application/json");
-    a->headers[4] = NULL;
+    a->headers[2] = xstrdup(CODEX_ORIGINATOR);
+    a->headers[3] = xstrdup(CODEX_USER_AGENT);
+    a->headers[4] = xstrdup("Accept: application/json");
+    a->headers[5] = NULL;
     a->timeout_s = CODEX_PROBE_TIMEOUT_S;
     a->extract = extract_codex_context;
     a->user = xstrdup(model);
@@ -746,7 +752,7 @@ static int codex_query_usage(struct provider *p)
     char *auth_hdr = xasprintf("Authorization: Bearer %s", c->access_token);
     char *acct_hdr = xasprintf("chatgpt-account-id: %s", c->account_id);
     const char *headers[] = {
-        auth_hdr, acct_hdr, "originator: hax", "Accept: application/json", NULL,
+        auth_hdr, acct_hdr, CODEX_ORIGINATOR, CODEX_USER_AGENT, "Accept: application/json", NULL,
     };
 
     /* Single round-trip to chatgpt.com; usually <1s but can stretch on
@@ -863,7 +869,8 @@ static int codex_list_models(struct provider *p, char ***ids, size_t *n, char **
         xasprintf("%s?client_version=%s", CODEX_MODELS_ENDPOINT, CODEX_PROBE_CLIENT_VERSION);
     char *auth = xasprintf("Authorization: Bearer %s", c->access_token);
     char *acct = xasprintf("chatgpt-account-id: %s", c->account_id);
-    const char *headers[] = {auth, acct, "originator: hax", "Accept: application/json", NULL};
+    const char *headers[] = {
+        auth, acct, CODEX_ORIGINATOR, CODEX_USER_AGENT, "Accept: application/json", NULL};
     char *body = NULL;
     long status = 0;
     int rc = http_get(url, headers, CODEX_PROBE_TIMEOUT_S, 0, tick, tick_user, &body, &status);
