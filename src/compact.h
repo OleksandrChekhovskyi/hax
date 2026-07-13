@@ -27,6 +27,32 @@ struct transcript_log;
  * interactive and one-shot paths can't drift.
  */
 
+/* Per-attempt usage capture for the compaction event sinks. A retried
+ * summarize (reject-and-retry on a stray tool call) is several complete,
+ * billed requests, and each one owes the transcript its own
+ * ITEM_TURN_USAGE footer — one footer per usage-bearing terminal event,
+ * same as the main loop's requests. Sinks record every EV_DONE (even with
+ * unreported usage: the stream succeeded, and a duration-only footer
+ * still documents it) and every EV_ERROR that carried billed usage;
+ * pre-stream failures and cancelled attempts record nothing. Sized past
+ * compact_summarize's attempt cap; overflow drops silently. */
+#define COMPACT_ATTEMPTS_MAX 8
+struct compact_usage {
+    struct {
+        struct stream_usage u;
+        long ms; /* this attempt's wall time */
+    } att[COMPACT_ATTEMPTS_MAX];
+    int n;
+    long t0; /* start of the in-flight attempt (monotonic_ms) */
+};
+
+/* Start the capture clock. Call right before compact_summarize. */
+void compact_usage_init(struct compact_usage *cu);
+
+/* Record one terminal event's usage; the attempt's wall time is the span
+ * since the previous terminal event (or init). */
+void compact_usage_record(struct compact_usage *cu, const struct stream_usage *u);
+
 /* The summarization instruction. Appended as a synthetic trailing user
  * message to the live conversation when generating a summary. Tools stay
  * advertised on the request (to keep the prefix cache warm), so the prompt

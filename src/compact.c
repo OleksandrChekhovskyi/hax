@@ -134,6 +134,23 @@ char *compact_extract_summary(const struct item *items, size_t n)
     return found ? xstrdup(found) : NULL;
 }
 
+void compact_usage_init(struct compact_usage *cu)
+{
+    cu->n = 0;
+    cu->t0 = monotonic_ms();
+}
+
+void compact_usage_record(struct compact_usage *cu, const struct stream_usage *u)
+{
+    long now = monotonic_ms();
+    if (cu->n < COMPACT_ATTEMPTS_MAX) {
+        cu->att[cu->n].u = *u;
+        cu->att[cu->n].ms = now - cu->t0;
+        cu->n++;
+    }
+    cu->t0 = now;
+}
+
 /* initial summarization stream + up to 3 retries that reject a tool call. */
 #define COMPACT_MAX_ATTEMPTS 4
 

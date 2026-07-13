@@ -17,13 +17,31 @@ static int streq0(const char *a, const char *b)
     return strcmp(a, b) == 0;
 }
 
+static int usage_eq(const struct turn_usage *a, const struct turn_usage *b)
+{
+    if (!a && !b)
+        return 1;
+    if (!a || !b)
+        return 0;
+    return a->usage.input_tokens == b->usage.input_tokens &&
+           a->usage.output_tokens == b->usage.output_tokens &&
+           a->usage.cached_tokens == b->usage.cached_tokens &&
+           a->usage.cache_write_tokens == b->usage.cache_write_tokens &&
+           a->usage.cache_write_1h_tokens == b->usage.cache_write_1h_tokens &&
+           a->usage.cost == b->usage.cost && a->elapsed_ms == b->elapsed_ms &&
+           a->cost_in == b->cost_in && a->cost_cache_read == b->cost_cache_read &&
+           a->cost_cache_write == b->cost_cache_write && a->cost_out == b->cost_out &&
+           a->cost_total == b->cost_total && a->cost_estimated == b->cost_estimated;
+}
+
 static int item_eq(const struct item *a, const struct item *b)
 {
     return a->kind == b->kind && streq0(a->text, b->text) && streq0(a->call_id, b->call_id) &&
            streq0(a->tool_name, b->tool_name) &&
            streq0(a->tool_arguments_json, b->tool_arguments_json) && streq0(a->output, b->output) &&
            streq0(a->reasoning_json, b->reasoning_json) &&
-           streq0(a->reasoning_text, b->reasoning_text) && a->compact_seed == b->compact_seed;
+           streq0(a->reasoning_text, b->reasoning_text) && a->compact_seed == b->compact_seed &&
+           usage_eq(a->usage, b->usage);
 }
 
 /* Round-trip one item through item_to_json -> json text -> json -> item,
@@ -46,6 +64,40 @@ static void check_codec(const struct item *src)
     free(s);
 }
 
+/* An estimated-cost usage footer (unreported fields as -1 sentinels) and
+ * an exact one (reported charge, no decomposition) — static like the
+ * strings below, so the fixture items own nothing. */
+static struct turn_usage TU_EST = {
+    .usage = {.input_tokens = 30000,
+              .output_tokens = 2100,
+              .cached_tokens = 16000,
+              .cache_write_tokens = 8200,
+              .cache_write_1h_tokens = -1,
+              .cost = -1},
+    .elapsed_ms = 42000,
+    .cost_in = 0.025,
+    .cost_cache_read = 0.048,
+    .cost_cache_write = 0.031,
+    .cost_out = 0.084,
+    .cost_total = 0.188,
+    .cost_estimated = 1,
+};
+static struct turn_usage TU_EXACT = {
+    .usage = {.input_tokens = 1000,
+              .output_tokens = 50,
+              .cached_tokens = -1,
+              .cache_write_tokens = -1,
+              .cache_write_1h_tokens = -1,
+              .cost = 0.0012},
+    .elapsed_ms = -1,
+    .cost_in = -1,
+    .cost_cache_read = -1,
+    .cost_cache_write = -1,
+    .cost_out = -1,
+    .cost_total = 0.0012,
+    .cost_estimated = 0,
+};
+
 /* A representative conversation covering every item kind. Strings are
  * literals — never freed, never written — so the array lives on the
  * stack with no ownership bookkeeping. */
@@ -61,6 +113,8 @@ static struct item CONVO[] = {
      .tool_name = (char *)"bash",
      .tool_arguments_json = (char *)"{\"cmd\":\"ls\"}"},
     {.kind = ITEM_TOOL_RESULT, .call_id = (char *)"c1", .output = (char *)"file1\nfile2"},
+    {.kind = ITEM_TURN_USAGE, .usage = &TU_EST, .provider = (char *)"alpha", .model = (char *)"m1"},
+    {.kind = ITEM_TURN_USAGE, .usage = &TU_EXACT},
     {.kind = ITEM_USER_MESSAGE, .text = (char *)"summary of earlier work", .compact_seed = 1},
 };
 #define CONVO_N (sizeof(CONVO) / sizeof(CONVO[0]))

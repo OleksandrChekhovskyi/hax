@@ -294,6 +294,63 @@ static void test_tools_section_omitted_when_empty(void)
     free(out);
 }
 
+static void test_turn_usage_footer(void)
+{
+    /* Estimated request: "~" total, non-overlapping token categories
+     * ("in" is the uncached remainder) each with its component cost. */
+    struct turn_usage est = {
+        .usage = {.input_tokens = 3072,
+                  .output_tokens = 512,
+                  .cached_tokens = 1024,
+                  .cache_write_tokens = -1,
+                  .cache_write_1h_tokens = -1,
+                  .cost = -1},
+        .elapsed_ms = 42000,
+        .cost_in = 0.025,
+        .cost_cache_read = 0.048,
+        .cost_cache_write = -1,
+        .cost_out = 0.084,
+        .cost_total = 0.157,
+        .cost_estimated = 1,
+    };
+    struct item items[] = {
+        {.kind = ITEM_TURN_BOUNDARY},
+        {.kind = ITEM_USER_MESSAGE, .text = (char *)"question"},
+        {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"answer"},
+        {.kind = ITEM_TURN_USAGE, .usage = &est},
+    };
+    char *out = render_to_string(NULL, items, sizeof(items) / sizeof(items[0]));
+    EXPECT(contains(out, "42s · ~$0.157 · in 2.0k $0.025 · cache 1.0k $0.048 · out 512 $0.084"));
+    /* The footer trails the response it accounts. */
+    const char *ans = strstr(out, "answer");
+    const char *foot = strstr(out, "42s ·");
+    EXPECT(ans && foot && ans < foot);
+    free(out);
+
+    /* Reported request: exact total, bare token counts — a reported
+     * charge can't be decomposed, so no per-category dollars appear. */
+    struct turn_usage exact = {
+        .usage = {.input_tokens = 1000,
+                  .output_tokens = 50,
+                  .cached_tokens = -1,
+                  .cache_write_tokens = -1,
+                  .cache_write_1h_tokens = -1,
+                  .cost = 0.0012},
+        .elapsed_ms = 3000,
+        .cost_in = -1,
+        .cost_cache_read = -1,
+        .cost_cache_write = -1,
+        .cost_out = -1,
+        .cost_total = 0.0012,
+        .cost_estimated = 0,
+    };
+    items[3].usage = &exact;
+    out = render_to_string(NULL, items, sizeof(items) / sizeof(items[0]));
+    EXPECT(contains(out, "3s · $0.0012 · in 1000 · out 50"));
+    EXPECT(!contains(out, "~$"));
+    free(out);
+}
+
 static void test_reasoning_shows_id(void)
 {
     struct item items[] = {{
@@ -325,5 +382,6 @@ int main(void)
     test_tools_section_renders_each_tool();
     test_tools_section_omitted_when_empty();
     test_reasoning_shows_id();
+    test_turn_usage_footer();
     T_REPORT();
 }

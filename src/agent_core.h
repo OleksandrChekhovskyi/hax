@@ -8,6 +8,8 @@
 #include "tool.h"
 #include "turn.h"
 
+struct catalog_split; /* catalog.h — consumers of spend_split include it */
+
 /* Sentinel inserted into conversation history (assistant text or a
  * synthesized tool_result) to mark a turn that was cut short — by Esc
  * cancellation, a mid-stream error, or a tool skipped partway through a
@@ -60,59 +62,92 @@ const char *resolve_effort(const struct provider *p);
 char *build_system_prompt(const char *model_label, int raw);
 
 /* Shared assembly for the stats line shown after each REPL user turn and
- * at the end of a -p run. The default form is terse and unlabeled —
- * "42s", "8.9k / 256k (3%)", "$0.042" — one gauge plus fields whose
- * units label themselves. `verbose` switches to the fully labeled
- * diagnostic form and adds the token detail: "worked 42s", "out 595",
- * "context 8.9k / 256k (3%)", "cached 2.7k", "spent $0.042". Fills `segs`
- * in display order (scope order: turn activity, window state, session
- * total) and returns the count (0 when nothing was reported).
- * Unreported fields are skipped rather than rendered as fake zeros:
- * ctx < 0, elapsed_ms < 0, spend <= 0 (cached only when > 0). Callers
- * own the layout — the REPL reflows segments at the " · " seams, oneshot
- * joins them into one stderr line — so what is shown can never drift
- * between the two. spend_approx marks the spend as a catalog estimate
- * rather than a provider-reported charge: "~$0.042". */
-#define STATS_SEGS_MAX 5
+ * at the end of a -p run: "42s", "8.9k / 256k (3%)", "$0.042" — one gauge
+ * plus fields whose units label themselves (the per-request token detail
+ * lives in the transcript's ITEM_TURN_USAGE footers). Fills `segs` in
+ * display order (scope order: turn activity, window state, session total)
+ * and returns the count (0 when nothing was reported). Unreported fields
+ * are skipped rather than rendered as fake zeros: ctx < 0, elapsed_ms < 0,
+ * spend <= 0. Callers own the layout — the REPL reflows segments at the
+ * " · " seams, oneshot joins them into one stderr line — so what is shown
+ * can never drift between the two. spend_approx marks the spend as a
+ * catalog estimate rather than a provider-reported charge: "~$0.042". */
+#define STATS_SEGS_MAX 3
 #define STATS_SEG_LEN  64
-int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long out, long cached,
-                          int verbose, long elapsed_ms, double spend, int spend_approx);
+int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long elapsed_ms,
+                          double spend, int spend_approx);
 
 /* Spend accounting shared by the REPL and the -p path, so the exact-vs-
  * estimated policy lives in exactly one place (like format_stats_segments
  * does for the display side): a response that reports cost is exact and
- * sums into `reported`; one that doesn't contributes its token counts to
- * the open pricing segment, priced against catalog rates when read. */
+ * sums into `reported`; one that doesn't is kept as a per-request record,
+ * priced against catalog rates when read. */
+struct spend_rec {
+    struct stream_usage u; /* cost < 0 by construction (else it summed) */
+    /* Catalog identity to price against, owned. Stamped at account time
+     * so a later /provider or /model switch can't re-rate old requests;
+     * NULL = no identity, the record stays unpriceable. */
+    char *catalog_id;
+    char *model;
+};
+
 struct spend_totals {
     double reported; /* provider-reported cost sum, USD */
-    /* The open pricing segment: token sums of responses that reported no
-     * cost. Non-overlapping subsets cached/cache_write (and its 1h-TTL
-     * subset cache_write_1h) follow the stream_usage conventions. */
-    long seg_input;
-    long seg_output;
-    long seg_cached;
-    long seg_cache_write;
-    long seg_cache_write_1h;
+    /* Records of responses that reported no cost. Priced lazily at read
+     * (spend_total) so a late-landing catalog fetch retroactively covers
+     * earlier requests, and priced one request at a time so context-tier
+     * selection sees each request's own input size. */
+    struct spend_rec *recs;
+    size_t n_recs;
+    size_t cap_recs;
 };
 
 /* Account one completed response into `t` — the single definition of the
- * reported-vs-estimated split. */
-void spend_account(struct spend_totals *t, const struct stream_usage *u);
+ * reported-vs-estimated split. catalog_id/model (both may be NULL) stamp
+ * the record when the response goes the estimated route. */
+void spend_account(struct spend_totals *t, const struct stream_usage *u, const char *catalog_id,
+                   const char *model);
 
-/* Fold `src` into `dst`. For callers that accumulate per-stream sinks
- * (oneshot recreates its event context every round-trip). */
-void spend_fold(struct spend_totals *dst, const struct spend_totals *src);
+/* Total spend for display, USD: reported cost plus the per-record catalog
+ * estimates. Sets *approx (when non-NULL) to 1 iff any inexact component
+ * exists — an estimate contributed, or a record couldn't be priced at all
+ * — so callers can mark the figure ("~$0.42"). */
+double spend_total(const struct spend_totals *t, int *approx);
 
-/* True when the open pricing segment holds any tokens — i.e. unreported
- * usage exists that spend_estimate may or may not be able to price. The
- * shared guard that keeps "is there anything to price" and "did pricing
- * fail on real usage" from drifting apart at the call sites. */
-int spend_has_tokens(const struct spend_totals *t);
+/* True when some record's real usage can't be priced right now (catalog
+ * fetch not landed, unknown model, no identity). The oneshot exit path
+ * uses it to decide whether draining the in-flight fetch could improve
+ * the estimate. */
+int spend_unpriced(const struct spend_totals *t);
 
-/* Price the open pricing segment against the current provider/model's
- * catalog rates, USD. -1 when it can't be priced: no segment tokens, no
- * catalog identity, or the model is unknown to the catalog. */
-double spend_estimate(const struct spend_totals *t, const struct provider *p, const char *model);
+/* Sum the per-record catalog splits into *out (USD per category; zeroed
+ * first) — the estimated portion of the session's spend broken down the
+ * same way the transcript footers are. Tier-correct: each record prices
+ * at its own request's rates. Returns 1 when at least one record priced
+ * (i.e. the split is worth showing), 0 otherwise. Reported-cost
+ * responses keep no records, so their charge is deliberately absent
+ * here — a reported charge can't be decomposed. */
+int spend_split(const struct spend_totals *t, struct catalog_split *out);
+
+void spend_free(struct spend_totals *t);
+
+/* True when the response reported any billing signal (tokens or cost).
+ * The gate the error/interrupt paths use before emitting a footer, so a
+ * pre-stream failure or a plain Esc cancel doesn't earn a duration-only
+ * one — successful round-trips emit unconditionally, usage or not. */
+int usage_reported(const struct stream_usage *u);
+
+/* Build the priced payload for an ITEM_TURN_USAGE footer: raw usage plus
+ * per-category catalog estimates (see struct turn_usage). Malloc'd, or
+ * NULL when there is nothing to show at all (no tokens, no cost, no
+ * elapsed time) — a backend that reports no usage still gets a
+ * duration-only footer for a successful round-trip. The reported-vs-
+ * estimated policy matches spend_account: a reported cost is exact and is
+ * never decomposed (the category estimates stay -1); an unreported one
+ * gets the catalog estimate, total and split alike, marked
+ * cost_estimated. */
+struct turn_usage *turn_usage_make(const struct stream_usage *u, long elapsed_ms,
+                                   const char *catalog_id, const char *model);
 
 /* Live per-run state shared by the interactive and one-shot paths.
  * Owns the items vector, the assembled system prompt, the tools table,
@@ -180,6 +215,26 @@ void agent_session_add_user(struct agent_session *s, const char *text);
  * round-trips inside one user turn (after the first one) so the
  * transcript renderer can mark each round as its own boundary. */
 void agent_session_add_boundary(struct agent_session *s);
+
+/* Append the round-trip's ITEM_TURN_USAGE footer — the transcript's
+ * per-request stats line, priced via turn_usage_make against `p`'s
+ * catalog identity and the session model. No-op when `u` reported no
+ * usage and no cost. Call once per round-trip, after everything the
+ * round-trip put into history (response, tool results, an interrupt
+ * marker), so the footer trails the turn it accounts and precedes the
+ * next boundary. */
+void agent_session_add_turn_usage(struct agent_session *s, const struct provider *p,
+                                  const struct stream_usage *u, long elapsed_ms);
+
+/* Record a mid-turn user abort: append INTERRUPT_MARKER as a synthetic
+ * assistant message so the next turn and the transcript both see the
+ * model was cut short — unless the last content item already carries the
+ * marker (a tool result marked at the abort boundary: bash appends its
+ * own "[interrupted]" footer when killed by Esc, while read/write/edit
+ * return clean results). Inert trailing items (ITEM_TURN_USAGE,
+ * ITEM_TURN_BOUNDARY) are looked past when finding that last content
+ * item. */
+void agent_session_mark_interrupt(struct agent_session *s);
 
 /* Drain finished items from `t` into the session. Reports:
  *   *out_before        = session's n_items just before the drain

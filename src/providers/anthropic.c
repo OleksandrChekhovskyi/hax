@@ -173,6 +173,7 @@ json_t *anthropic_build_messages(const struct item *items, size_t n, const char 
             i = emit_tool_results(arr, items, i, n);
             break;
         case ITEM_TURN_BOUNDARY:
+        case ITEM_TURN_USAGE:
             i++;
             break;
         }

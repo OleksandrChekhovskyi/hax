@@ -42,6 +42,8 @@ static const char *kind_to_str(enum item_kind k)
         return "reasoning";
     case ITEM_TURN_BOUNDARY:
         return "turn_boundary";
+    case ITEM_TURN_USAGE:
+        return "turn_usage";
     }
     return NULL;
 }
@@ -62,6 +64,8 @@ static int kind_from_str(const char *s, enum item_kind *out)
         *out = ITEM_REASONING;
     else if (strcmp(s, "turn_boundary") == 0)
         *out = ITEM_TURN_BOUNDARY;
+    else if (strcmp(s, "turn_usage") == 0)
+        *out = ITEM_TURN_USAGE;
     else
         return -1;
     return 0;
@@ -81,6 +85,75 @@ static void set_str(json_t *o, const char *key, const char *val)
         json_object_set_new(o, key, s);
 }
 
+/* ---------------- turn_usage payload (ITEM_TURN_USAGE) ---------------- */
+
+/* Unreported/-1 fields are omitted from the record rather than stored as
+ * sentinels, mirroring set_str's "absent means absent" convention. */
+static void set_count(json_t *o, const char *key, long v)
+{
+    if (v >= 0)
+        json_object_set_new(o, key, json_integer(v));
+}
+
+static void set_usd(json_t *o, const char *key, double v)
+{
+    if (v >= 0)
+        json_object_set_new(o, key, json_real(v));
+}
+
+static json_t *turn_usage_to_json(const struct turn_usage *tu)
+{
+    json_t *o = json_object();
+    set_count(o, "input", tu->usage.input_tokens);
+    set_count(o, "output", tu->usage.output_tokens);
+    set_count(o, "cached", tu->usage.cached_tokens);
+    set_count(o, "cache_write", tu->usage.cache_write_tokens);
+    set_count(o, "cache_write_1h", tu->usage.cache_write_1h_tokens);
+    set_usd(o, "cost", tu->usage.cost);
+    set_count(o, "elapsed_ms", tu->elapsed_ms);
+    set_usd(o, "cost_in", tu->cost_in);
+    set_usd(o, "cost_cache_read", tu->cost_cache_read);
+    set_usd(o, "cost_cache_write", tu->cost_cache_write);
+    set_usd(o, "cost_out", tu->cost_out);
+    set_usd(o, "cost_total", tu->cost_total);
+    if (tu->cost_estimated)
+        json_object_set_new(o, "cost_estimated", json_true());
+    return o;
+}
+
+static long get_count(const json_t *o, const char *key)
+{
+    json_t *v = json_object_get(o, key);
+    return json_is_integer(v) ? (long)json_integer_value(v) : -1;
+}
+
+static double get_usd(const json_t *o, const char *key)
+{
+    json_t *v = json_object_get(o, key);
+    return json_is_number(v) ? json_number_value(v) : -1;
+}
+
+static struct turn_usage *turn_usage_from_json(const json_t *o)
+{
+    if (!json_is_object(o))
+        return NULL;
+    struct turn_usage *tu = xmalloc(sizeof(*tu));
+    tu->usage.input_tokens = get_count(o, "input");
+    tu->usage.output_tokens = get_count(o, "output");
+    tu->usage.cached_tokens = get_count(o, "cached");
+    tu->usage.cache_write_tokens = get_count(o, "cache_write");
+    tu->usage.cache_write_1h_tokens = get_count(o, "cache_write_1h");
+    tu->usage.cost = get_usd(o, "cost");
+    tu->elapsed_ms = get_count(o, "elapsed_ms");
+    tu->cost_in = get_usd(o, "cost_in");
+    tu->cost_cache_read = get_usd(o, "cost_cache_read");
+    tu->cost_cache_write = get_usd(o, "cost_cache_write");
+    tu->cost_out = get_usd(o, "cost_out");
+    tu->cost_total = get_usd(o, "cost_total");
+    tu->cost_estimated = json_is_true(json_object_get(o, "cost_estimated"));
+    return tu;
+}
+
 json_t *item_to_json(const struct item *it)
 {
     json_t *o = json_object();
@@ -92,11 +165,14 @@ json_t *item_to_json(const struct item *it)
     set_str(o, "output", it->output);
     set_str(o, "reasoning_json", it->reasoning_json);
     set_str(o, "reasoning_text", it->reasoning_text);
-    /* Provenance stamp for reasoning items (NULL elsewhere → omitted). */
+    /* Provenance stamp for reasoning and turn_usage items (NULL elsewhere
+     * → omitted). */
     set_str(o, "provider", it->provider);
     set_str(o, "model", it->model);
     if (it->compact_seed)
         json_object_set_new(o, "compact_seed", json_true());
+    if (it->usage)
+        json_object_set_new(o, "usage", turn_usage_to_json(it->usage));
     return o;
 }
 
@@ -125,6 +201,8 @@ int item_from_json(const json_t *obj, struct item *out)
     out->provider = dup_field(obj, "provider");
     out->model = dup_field(obj, "model");
     out->compact_seed = json_is_true(json_object_get(obj, "compact_seed"));
+    if (k == ITEM_TURN_USAGE)
+        out->usage = turn_usage_from_json(json_object_get(obj, "usage"));
     return 0;
 }
 

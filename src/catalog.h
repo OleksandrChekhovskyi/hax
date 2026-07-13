@@ -48,6 +48,20 @@
  * generation counter invalidating the foreground memo.
  */
 
+/* One long-context pricing tier: replacement rates that apply to the
+ * whole request once its total input exceeds `above` tokens. Mirrors the
+ * models.dev `cost.tiers` shape ({rates..., tier: {type: "context",
+ * size: N}}). Negative rates fall back to the base entry's. */
+struct catalog_tier {
+    long above;
+    double cost_input;
+    double cost_output;
+    double cost_cache_read;
+    double cost_cache_write;
+};
+
+#define CATALOG_TIERS_MAX 4
+
 struct catalog_entry {
     /* USD per 1M tokens; negative = unknown. */
     double cost_input;
@@ -57,6 +71,16 @@ struct catalog_entry {
     /* Window limits in tokens; 0 = unknown. */
     long context;
     long output;
+    /* Context tiers, in artifact order; none for flat-priced models. The
+     * list is taken whole from whichever tier *declares* one first
+     * (config over cache) — tiers don't merge field-by-field the way
+     * base rates do, since a mixed list would price against rates that
+     * never coexisted. Declaring is distinct from having entries:
+     * "tiers": [] in config declares an empty list, pinning flat pricing
+     * over whatever tiers the cached snapshot carries. */
+    struct catalog_tier tiers[CATALOG_TIERS_MAX];
+    int n_tiers;
+    int tiers_declared;
 };
 
 /* Resolve metadata for (provider_id, model). Fills *out (unknown fields
@@ -75,7 +99,16 @@ int catalog_lookup(const char *provider_id, const char *model, struct catalog_en
  * or NULL when absent/malformed. Exposed for unit tests. */
 json_t *catalog_extract_member(const char *text, const char *key);
 
-/* Price a token batch against an entry's rates, in USD; -1 when the
+/* Per-category component split of one priced request, USD. `in` is the
+ * uncached input remainder; `cache_write` includes the 2x-rate 1h subset. */
+struct catalog_split {
+    double in;
+    double cache_read;
+    double cache_write;
+    double out;
+};
+
+/* Price ONE request against an entry's rates, in USD; -1 when the
  * input or output rate is unknown (no estimate is better than a wildly
  * partial one). `cached` (prefix-cache reads) and `cache_write` are the
  * non-overlapping subsets of `input` that stream_usage reports; they are
@@ -84,11 +117,16 @@ json_t *catalog_extract_member(const char *text, const char *key);
  * `cache_write`, priced at 2x the input rate — Anthropic's documented
  * multiplier; the catalog's cache_write rate covers only the default
  * 5-minute writes and models.dev carries no 1h rate to read instead.
- * Negative token counts (the "not reported" convention) read as 0. Pure
- * math — no I/O, no tiers (models.dev's long-context tier pricing is
- * deliberately not modeled yet). */
+ * Negative token counts (the "not reported" convention) read as 0.
+ *
+ * Tier selection is why this prices one request, never an aggregate:
+ * `input` (cache subsets included) picks the highest tier it exceeds and
+ * the whole request bills at that tier's rates — summed batches would
+ * cross thresholds their individual requests never did. When non-NULL,
+ * *split receives the per-category component costs (zeros when the total
+ * is -1). Pure math — no I/O. */
 double catalog_price(const struct catalog_entry *e, long input, long output, long cached,
-                     long cache_write, long cache_write_1h);
+                     long cache_write, long cache_write_1h, struct catalog_split *split);
 
 /* Spawn the once-per-run background snapshot fetch if the cache file is
  * missing or older than catalog.refresh (empty catalog.url or zero

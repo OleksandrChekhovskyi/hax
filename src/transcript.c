@@ -296,6 +296,70 @@ static void render_reasoning(FILE *out, int color, const struct item *it)
     fputc('\n', out);
 }
 
+static void usage_sep(FILE *out, int *first)
+{
+    if (!*first)
+        fputs(" · ", out);
+    *first = 0;
+}
+
+/* One "<label> <count> [$cost]" segment; the dollar figure is shown only
+ * when it's a positive estimate — a reported exact total is never
+ * decomposed (its category costs stay negative), and "$0.00" would be
+ * clutter, not information. */
+static void usage_tokens(FILE *out, int *first, const char *label, long tokens, double usd)
+{
+    char t[32];
+    usage_sep(out, first);
+    format_tokens(t, sizeof(t), tokens);
+    fprintf(out, "%s %s", label, t);
+    if (usd > 0) {
+        char c[32];
+        format_cost(c, sizeof(c), usd);
+        fprintf(out, " %s", c);
+    }
+}
+
+/* ITEM_TURN_USAGE: the per-request stats footer — time worked, the
+ * request's cost (exact when provider-reported, "~" when estimated from
+ * catalog rates), then the token categories with their per-category
+ * estimates. One raw line by design: the transcript never wraps content;
+ * pagers and editors do. All figures come precomputed in the payload
+ * (turn_usage_make), keeping this pure formatting. */
+static void render_turn_usage(FILE *out, int color, const struct turn_usage *tu)
+{
+    const struct stream_usage *u = &tu->usage;
+    int first = 1;
+    char buf[32];
+    fputs(ANSI_IF(ANSI_DIM), out);
+    if (tu->elapsed_ms >= 0) {
+        format_duration(buf, sizeof(buf), tu->elapsed_ms);
+        usage_sep(out, &first);
+        fputs(buf, out);
+    }
+    if (tu->cost_total > 0) {
+        format_cost(buf, sizeof(buf), tu->cost_total);
+        usage_sep(out, &first);
+        fprintf(out, "%s%s", tu->cost_estimated ? "~" : "", buf);
+    }
+    long cr = u->cached_tokens > 0 ? u->cached_tokens : 0;
+    long cw = u->cache_write_tokens > 0 ? u->cache_write_tokens : 0;
+    if (u->input_tokens >= 0) {
+        /* The categories are non-overlapping: "in" is the uncached
+         * remainder, so the counts sum to what was actually sent. */
+        long in = u->input_tokens - cr - cw;
+        usage_tokens(out, &first, "in", in > 0 ? in : 0, tu->cost_in);
+    }
+    if (cr > 0)
+        usage_tokens(out, &first, "cache", cr, tu->cost_cache_read);
+    if (cw > 0)
+        usage_tokens(out, &first, "write", cw, tu->cost_cache_write);
+    if (u->output_tokens >= 0)
+        usage_tokens(out, &first, "out", u->output_tokens, tu->cost_out);
+    fputs(ANSI_IF(ANSI_RESET), out);
+    fputc('\n', out);
+}
+
 void transcript_render_header(FILE *out, int color, const char *system_prompt,
                               const struct tool_def *tools, size_t n_tools)
 {
@@ -370,6 +434,11 @@ void transcript_render_items(FILE *out, int color, const struct item *items, siz
             break;
         case ITEM_REASONING:
             render_reasoning(out, color, it);
+            break;
+        case ITEM_TURN_USAGE:
+            if (!it->usage)
+                continue; /* degenerate record — nothing to show */
+            render_turn_usage(out, color, it->usage);
             break;
         }
         fputc('\n', out);

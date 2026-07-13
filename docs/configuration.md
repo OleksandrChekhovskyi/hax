@@ -211,8 +211,6 @@ canonical key and its environment variable.
 - `context_limit` / `HAX_CONTEXT_LIMIT` — manual context-window size for percentage display
   and auto-compaction.
 - `display_width` / `HAX_DISPLAY_WIDTH` — force render width in columns.
-- `stats.verbose` / `HAX_STATS_VERBOSE` — add `out` and `cached` token details to the
-  per-turn stats line. Default off.
 - `notify` / `HAX_NOTIFY` — desktop notification style: `osc9`, `bel`, or falsy to disable.
 
 `HAX_CONTEXT_LIMIT` overrides provider auto-detection. Current auto-detection exists for

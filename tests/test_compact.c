@@ -121,11 +121,36 @@ static void test_apply_seeds_history(void)
     agent_session_free(&s);
 }
 
+static void test_usage_capture(void)
+{
+    struct compact_usage cu;
+    compact_usage_init(&cu);
+    struct stream_usage u = {.input_tokens = 100,
+                             .output_tokens = 10,
+                             .cached_tokens = -1,
+                             .cache_write_tokens = -1,
+                             .cache_write_1h_tokens = -1,
+                             .cost = -1};
+    compact_usage_record(&cu, &u);
+    u.input_tokens = 200;
+    compact_usage_record(&cu, &u);
+    EXPECT(cu.n == 2);
+    EXPECT(cu.att[0].u.input_tokens == 100);
+    EXPECT(cu.att[1].u.input_tokens == 200);
+    EXPECT(cu.att[0].ms >= 0 && cu.att[1].ms >= 0);
+
+    /* Overflow past the cap drops silently rather than overrunning. */
+    for (int i = 0; i < COMPACT_ATTEMPTS_MAX + 2; i++)
+        compact_usage_record(&cu, &u);
+    EXPECT(cu.n == COMPACT_ATTEMPTS_MAX);
+}
+
 int main(void)
 {
     test_over_threshold();
     test_should_auto();
     test_context_limit_resolution();
     test_apply_seeds_history();
+    test_usage_capture();
     T_REPORT();
 }

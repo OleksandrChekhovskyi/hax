@@ -959,5 +959,6 @@ void item_free(struct item *it)
     free(it->reasoning_text);
     free(it->provider);
     free(it->model);
+    free(it->usage);
     memset(it, 0, sizeof(*it));
 }

@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "agent.h"
+#include "catalog.h"
 #include "config.h"
 #include "file_mention.h"
 #include "render/render_ctx.h"
@@ -388,6 +389,26 @@ static void session_row(const char *label, const char *value)
     printf("  " ANSI_DIM "%-*s%s" ANSI_RESET "\n", SESSION_LABEL_W, label, value);
 }
 
+/* Append one "<label> <count> [$cost]" segment of the tokens-total row,
+ * " · "-separated — the row-buffer twin of the transcript footer's
+ * usage_tokens. `usd` < 0 or 0 shows no dollar figure (unknown, or
+ * nothing worth printing). Returns the new row length; safe to keep
+ * calling once the buffer is full (snprintf truncates, len clamps). */
+static int session_tok_seg(char *row, size_t sz, int len, const char *label, long tokens,
+                           double usd)
+{
+    char buf[32];
+    if (len < 0 || (size_t)len >= sz)
+        return len;
+    format_tokens(buf, sizeof(buf), tokens);
+    len += snprintf(row + len, sz - (size_t)len, "%s%s %s", len ? " · " : "", label, buf);
+    if (usd > 0 && len > 0 && (size_t)len < sz) {
+        format_cost(buf, sizeof(buf), usd);
+        len += snprintf(row + len, sz - (size_t)len, " %s", buf);
+    }
+    return len;
+}
+
 /* Local counterpart to /usage: everything here is computed from this
  * process's own accumulators (struct session_stats) — no network. Totals
  * are per-sitting by design: /new zeroes them, /resume does not restore
@@ -398,7 +419,7 @@ static void slash_run_session(struct slash_ctx *ctx)
 {
     struct agent_state *st = ctx->state;
     const struct session_stats *t = &st->stats;
-    char row[160], a[32], b[32];
+    char row[160], a[32];
 
     const char *hint = session_log_resume_hint(st->slog);
     session_row("session", hint ? hint : "not recorded");
@@ -444,30 +465,44 @@ static void slash_run_session(struct slash_ctx *ctx)
     /* Two distinct frames, one row each. `context` is window state — the
      * latest response's usage, matching the per-turn stats line. `tokens
      * total` is the billing frame — sums across every round-trip (each of
-     * which resends the full context), so `in` outgrows `context` as soon
-     * as a second request happens; cached gets its hit rate against summed
-     * input, the number that actually says whether the prefix cache works. */
+     * which resends the full context), so summed input outgrows `context`
+     * as soon as a second request happens. */
     if (t->last_ctx > 0) {
         format_context(row, sizeof(row), t->last_ctx, t->last_limit);
         session_row("context", row);
     }
 
+    /* Same non-overlapping categories and vocabulary as the transcript's
+     * per-request footers — `in` is the uncached remainder — so the two
+     * surfaces read as one breakdown (cache effectiveness reads off the
+     * cache-vs-in count ratio, same as there). Dollars are the summed
+     * per-record catalog estimates (spend_split); a reported charge
+     * (OpenRouter) can't be decomposed, so its categories show bare
+     * counts and its exact total stays on the spend row. */
     if (t->input_tokens > 0 || t->output_tokens > 0) {
-        format_tokens(a, sizeof(a), t->input_tokens);
-        format_tokens(b, sizeof(b), t->output_tokens);
-        int len = snprintf(row, sizeof(row), "in %s · out %s", a, b);
-        if (t->cached_tokens > 0 && t->input_tokens > 0 && len > 0 && (size_t)len < sizeof(row)) {
-            format_tokens(a, sizeof(a), t->cached_tokens);
-            snprintf(row + len, sizeof(row) - (size_t)len, " · cached %s (%ld%%)", a,
-                     t->cached_tokens * 100 / t->input_tokens);
-        }
+        struct catalog_split split;
+        int have_split = spend_split(&t->spend, &split);
+        long cr = t->cached_tokens > 0 ? t->cached_tokens : 0;
+        long cw = t->cache_write_tokens > 0 ? t->cache_write_tokens : 0;
+        long in = t->input_tokens - cr - cw;
+        int len = 0;
+        len = session_tok_seg(row, sizeof(row), len, "in", in > 0 ? in : 0,
+                              have_split ? split.in : -1);
+        if (cr > 0)
+            len = session_tok_seg(row, sizeof(row), len, "cache", cr,
+                                  have_split ? split.cache_read : -1);
+        if (cw > 0)
+            len = session_tok_seg(row, sizeof(row), len, "write", cw,
+                                  have_split ? split.cache_write : -1);
+        session_tok_seg(row, sizeof(row), len, "out", t->output_tokens,
+                        have_split ? split.out : -1);
         session_row("tokens total", row);
     }
 
     /* Reported cost plus the catalog estimate for unreported responses,
      * same figure the per-turn stats line shows; "~" marks an estimate. */
     int approx = 0;
-    double spend = agent_session_spend(t, st->provider, st->sess ? st->sess->model : NULL, &approx);
+    double spend = agent_session_spend(t, &approx);
     if (spend > 0) {
         format_cost(a, sizeof(a), spend);
         snprintf(row, sizeof(row), "%s%s", approx ? "~" : "", a);

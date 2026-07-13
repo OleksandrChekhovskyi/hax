@@ -44,18 +44,11 @@ void agent_new_conversation(struct agent_state *st)
 {
     agent_session_reset(st->sess);
 }
-/* agent_session_spend folds a catalog estimate for the open pricing
- * segment into the spend figure; these tests run with no provider and no
- * catalog, so mirror just the no-catalog arithmetic (reported cost +
- * settled estimate; approximate when any inexact component exists). */
-double agent_session_spend(const struct session_stats *t, const struct provider *p,
-                           const char *model, int *approx)
+/* The real agent_session_spend lives in agent.c (not linked here) but is
+ * a plain wrapper over agent_core's spend_total — mirror that. */
+double agent_session_spend(const struct session_stats *t, int *approx)
 {
-    (void)p;
-    (void)model;
-    if (approx)
-        *approx = t->est_cost > 0 || spend_has_tokens(&t->spend) || t->est_dropped;
-    return t->spend.reported + t->est_cost;
+    return spend_total(&t->spend, approx);
 }
 
 /* /resume reaches into session.c / session_picker.c / agent.c too. None
@@ -346,9 +339,10 @@ static void test_session_prints_totals(void)
     st.stats.tools[1].name = "read";
     st.stats.tools[1].count = 2;
     st.stats.worked_ms = 68000;   /* 1m 08s */
-    st.stats.input_tokens = 5530; /* 5.4k */
+    st.stats.input_tokens = 5530; /* categories below subtract to 2.4k uncached */
     st.stats.output_tokens = 412;
-    st.stats.cached_tokens = 2048; /* 2.0k; 2048*100/5530 = 37% hit rate */
+    st.stats.cached_tokens = 2048;      /* 2.0k */
+    st.stats.cache_write_tokens = 1024; /* 1.0k */
     st.stats.spend.reported = 0.042;
     st.stats.last_ctx = 4000; /* 3.9k; no provider ⇒ no limit/percent */
     struct slash_ctx ctx = {.state = &st};
@@ -366,9 +360,11 @@ static void test_session_prints_totals(void)
     EXPECT(strstr(out, "context") != NULL);
     EXPECT(strstr(out, "3.9k") != NULL);
     EXPECT(strstr(out, "tokens total") != NULL);
-    EXPECT(strstr(out, "in 5.4k") != NULL);
-    EXPECT(strstr(out, "out 412") != NULL);
-    EXPECT(strstr(out, "cached 2.0k (37%)") != NULL);
+    /* Footer vocabulary: non-overlapping categories, `in` is the uncached
+     * remainder (5530 - 2048 - 1024). No spend records here (the cost was
+     * provider-reported), so the counts stay bare — a reported charge
+     * can't be decomposed. */
+    EXPECT(strstr(out, "in 2.4k · cache 2.0k · write 1.0k · out 412") != NULL);
     EXPECT(strstr(out, "$0.042") != NULL);
     free(out);
 }
@@ -396,20 +392,27 @@ static void test_session_hides_unreported_rows(void)
 
 static void test_session_marks_estimated_spend(void)
 {
-    /* When an estimated component contributes, the spend row carries the
-     * "~" approximation marker (the stubbed agent_session_spend mirrors
-     * the real reported+estimate arithmetic). */
+    /* When unpriced real usage exists (a recorded response no catalog can
+     * answer for here), the spend row carries the "~" approximation
+     * marker — the reported subtotal is not the whole story. */
     struct render_ctx r = {0};
     r.disp.trail = 1;
     struct agent_state st = {.r = &r};
     st.stats.spend.reported = 0.030;
-    st.stats.est_cost = 0.012;
+    struct stream_usage u = {.input_tokens = 1000,
+                             .output_tokens = 50,
+                             .cached_tokens = -1,
+                             .cache_write_tokens = -1,
+                             .cache_write_1h_tokens = -1,
+                             .cost = -1};
+    spend_account(&st.stats.spend, &u, NULL, NULL);
     struct slash_ctx ctx = {.state = &st};
     struct dispatch_call c = {.line = "/session", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
-    EXPECT(strstr(out, "~$0.042") != NULL);
+    EXPECT(strstr(out, "~$0.030") != NULL);
     free(out);
+    spend_free(&st.stats.spend);
 }
 
 /* ---------- /new and its alias /clear ---------- */

@@ -492,14 +492,15 @@ static const struct item *last_of_kind(const struct context *ctx, enum item_kind
     return NULL;
 }
 
-/* Return the last item that's actually content — skipping any
- * ITEM_TURN_BOUNDARY marker the agent inserts before each new turn,
- * so the heuristic sees the real most-recent thing the user or a
- * tool produced. */
+/* Return the last item that's actually content — skipping the inert
+ * ITEM_TURN_BOUNDARY/ITEM_TURN_USAGE markers the agent inserts around
+ * round-trips, so the heuristic sees the real most-recent thing the user
+ * or a tool produced. */
 static const struct item *last_item(const struct context *ctx)
 {
     for (size_t i = ctx->n_items; i > 0; i--) {
-        if (ctx->items[i - 1].kind != ITEM_TURN_BOUNDARY)
+        enum item_kind k = ctx->items[i - 1].kind;
+        if (k != ITEM_TURN_BOUNDARY && k != ITEM_TURN_USAGE)
             return &ctx->items[i - 1];
     }
     return NULL;

@@ -44,6 +44,8 @@ static void entry_init(struct catalog_entry *e)
     e->cost_cache_write = -1;
     e->context = 0;
     e->output = 0;
+    e->n_tiers = 0;
+    e->tiers_declared = 0;
 }
 
 /* Member `k` of `obj` as a non-negative rate. Accepts a JSON number (the
@@ -76,6 +78,43 @@ static long member_tokens(json_t *obj, const char *k)
     return parse_size(json_string_value(v));
 }
 
+/* Take a `cost.tiers` array into *e whole (see the whole-list rule in
+ * catalog.h). Elements that aren't context tiers with a positive
+ * threshold are skipped; anything past CATALOG_TIERS_MAX is dropped. */
+static void tiers_fill(json_t *tiers, struct catalog_entry *e)
+{
+    if (e->tiers_declared || !json_is_array(tiers))
+        return;
+    e->tiers_declared = 1; /* an empty array declares "flat-priced" */
+    size_t i;
+    json_t *tv;
+    json_array_foreach(tiers, i, tv)
+    {
+        if (e->n_tiers >= CATALOG_TIERS_MAX)
+            break;
+        if (!json_is_object(tv))
+            continue;
+        json_t *sel = json_object_get(tv, "tier");
+        if (!json_is_object(sel))
+            continue;
+        /* Strictly require type == "context": a missing or mistyped
+         * selector must fail toward the declared flat rates, not toward
+         * a surprise long-context surcharge. */
+        const char *type = json_string_value(json_object_get(sel, "type"));
+        if (!type || strcmp(type, "context") != 0)
+            continue;
+        long above = member_tokens(sel, "size");
+        if (above <= 0)
+            continue;
+        struct catalog_tier *t = &e->tiers[e->n_tiers++];
+        t->above = above;
+        t->cost_input = member_rate(tv, "input");
+        t->cost_output = member_rate(tv, "output");
+        t->cost_cache_read = member_rate(tv, "cache_read");
+        t->cost_cache_write = member_rate(tv, "cache_write");
+    }
+}
+
 /* Fill the still-unknown fields of *e from a per-model object of the
  * models.dev shape ({"cost": {...}, "limit": {...}}). Known fields are
  * left alone, so a higher tier's values survive a lower tier's pass. */
@@ -93,6 +132,7 @@ static void entry_fill(json_t *model_obj, struct catalog_entry *e)
             e->cost_cache_read = member_rate(cost, "cache_read");
         if (e->cost_cache_write < 0)
             e->cost_cache_write = member_rate(cost, "cache_write");
+        tiers_fill(json_object_get(cost, "tiers"), e);
     }
     json_t *limit = json_object_get(model_obj, "limit");
     if (json_is_object(limit)) {
@@ -105,14 +145,21 @@ static void entry_fill(json_t *model_obj, struct catalog_entry *e)
 
 static int entry_complete(const struct catalog_entry *e)
 {
+    /* Tiers count toward completeness via the *declared* flag: a config
+     * block that pins every scalar but says nothing about tiers must
+     * still fall through to the cache, or a tiered model would silently
+     * price flat (the memoized lookup keeps that consult cheap). */
     return e->cost_input >= 0 && e->cost_output >= 0 && e->cost_cache_read >= 0 &&
-           e->cost_cache_write >= 0 && e->context > 0 && e->output > 0;
+           e->cost_cache_write >= 0 && e->context > 0 && e->output > 0 && e->tiers_declared;
 }
 
 static int entry_any(const struct catalog_entry *e)
 {
+    /* Tiers count as resolved metadata: a tier-only entry (custom model
+     * declaring just its long-context rates) is priceable above its
+     * threshold, so it must not read as "unknown model". */
     return e->cost_input >= 0 || e->cost_output >= 0 || e->cost_cache_read >= 0 ||
-           e->cost_cache_write >= 0 || e->context > 0 || e->output > 0;
+           e->cost_cache_write >= 0 || e->context > 0 || e->output > 0 || e->n_tiers > 0;
 }
 
 /* Fill the still-unknown fields of *dst from *src — the struct-to-struct
@@ -132,6 +179,11 @@ static void entry_merge(struct catalog_entry *dst, const struct catalog_entry *s
         dst->context = src->context;
     if (dst->output <= 0)
         dst->output = src->output;
+    if (!dst->tiers_declared && src->tiers_declared) {
+        memcpy(dst->tiers, src->tiers, sizeof(dst->tiers));
+        dst->n_tiers = src->n_tiers;
+        dst->tiers_declared = 1;
+    }
 }
 
 /* ---------------- top-level member extraction ---------------- */
@@ -435,10 +487,31 @@ int catalog_lookup(const char *provider_id, const char *model, struct catalog_en
 }
 
 double catalog_price(const struct catalog_entry *e, long input, long output, long cached,
-                     long cache_write, long cache_write_1h)
+                     long cache_write, long cache_write_1h, struct catalog_split *split)
 {
-    if (e->cost_input < 0 || e->cost_output < 0)
+    if (split)
+        *split = (struct catalog_split){0};
+
+    /* Tier selection: the request's total input (cache subsets included)
+     * picks the highest threshold it exceeds; the whole request bills at
+     * that tier's rates, with the tier's undeclared fields falling back
+     * to the base rates. */
+    double r_in = e->cost_input, r_out = e->cost_output;
+    double r_read = e->cost_cache_read, r_write = e->cost_cache_write;
+    long matched = -1;
+    for (int i = 0; i < e->n_tiers; i++) {
+        const struct catalog_tier *t = &e->tiers[i];
+        if (input <= t->above || t->above <= matched)
+            continue;
+        matched = t->above;
+        r_in = t->cost_input >= 0 ? t->cost_input : e->cost_input;
+        r_out = t->cost_output >= 0 ? t->cost_output : e->cost_output;
+        r_read = t->cost_cache_read >= 0 ? t->cost_cache_read : e->cost_cache_read;
+        r_write = t->cost_cache_write >= 0 ? t->cost_cache_write : e->cost_cache_write;
+    }
+    if (r_in < 0 || r_out < 0)
         return -1;
+
     long cr = cached > 0 ? cached : 0;
     long cw = cache_write > 0 ? cache_write : 0;
     long cw1h = cache_write_1h > 0 ? cache_write_1h : 0;
@@ -448,14 +521,23 @@ double catalog_price(const struct catalog_entry *e, long input, long output, lon
     long uncached = in - cr - cw;
     if (uncached < 0)
         uncached = 0;
-    double r_read = e->cost_cache_read >= 0 ? e->cost_cache_read : e->cost_input;
-    double r_write = e->cost_cache_write >= 0 ? e->cost_cache_write : e->cost_input;
-    double out = output > 0 ? (double)output : 0;
+    if (r_read < 0)
+        r_read = r_in;
+    if (r_write < 0)
+        r_write = r_in;
+    double c_in = (double)uncached * r_in / 1e6;
+    double c_read = (double)cr * r_read / 1e6;
     /* 1h cache writes bill at 2x input (see the header contract); only
      * the remaining (5m) writes take the catalog's cache_write rate. */
-    return ((double)uncached * e->cost_input + (double)cr * r_read + (double)(cw - cw1h) * r_write +
-            (double)cw1h * 2 * e->cost_input + out * e->cost_output) /
-           1e6;
+    double c_write = ((double)(cw - cw1h) * r_write + (double)cw1h * 2 * r_in) / 1e6;
+    double c_out = (output > 0 ? (double)output : 0) * r_out / 1e6;
+    if (split) {
+        split->in = c_in;
+        split->cache_read = c_read;
+        split->cache_write = c_write;
+        split->out = c_out;
+    }
+    return c_in + c_read + c_write + c_out;
 }
 
 /* ---------------- background fetch ---------------- */

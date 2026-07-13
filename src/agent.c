@@ -151,35 +151,6 @@ static struct absorb_outcome absorb_aborted_turn(struct agent_session *sess, str
     return (struct absorb_outcome){.had_state = had_state, .marker_placed = marker_placed};
 }
 
-/* True when `it` is a tool_result whose output already ends with the
- * interrupt marker — i.e. bash appended its "[interrupted]" footer when
- * killed by user-Esc. Used to decide whether the post-dispatch break
- * needs an additional synthetic marker, since non-bash tools (read,
- * write, edit) finish normally without any footer and would otherwise
- * leave the next turn with no signal that the user aborted. */
-static int tool_result_is_marked(const struct item *it)
-{
-    if (it->kind != ITEM_TOOL_RESULT || !it->output)
-        return 0;
-    size_t out_len = strlen(it->output);
-    size_t marker_len = strlen(INTERRUPT_MARKER);
-    if (out_len < marker_len)
-        return 0;
-    return strcmp(it->output + out_len - marker_len, INTERRUPT_MARKER) == 0;
-}
-
-/* Record a mid-turn user abort: append the [interrupted] marker as a synthetic
- * assistant message unless the last item already carries it (a tool result
- * marked at the abort boundary), so the next turn and the transcript both see
- * the model was cut short. */
-static void append_interrupt_marker(struct agent_session *s)
-{
-    if (s->n_items == 0 || !tool_result_is_marked(&s->items[s->n_items - 1]))
-        items_append(
-            &s->items, &s->n_items, &s->cap_items,
-            (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup(INTERRUPT_MARKER)});
-}
-
 /* Flush the same item slice to both append-only logs. The two share the
  * incremental [n_written..n_items) cursor design, so they're always
  * advanced together at each of the agent's commit points (after the user
@@ -266,52 +237,24 @@ static int reasoning_visible(void)
     return config_bool("show_reasoning");
 }
 
-double agent_session_spend(const struct session_stats *t, const struct provider *p,
-                           const char *model, int *approx)
+double agent_session_spend(const struct session_stats *t, int *approx)
 {
-    double seg = spend_estimate(&t->spend, p, model);
-    double est = t->est_cost + (seg > 0 ? seg : 0);
-    /* Approximate = any inexact component: an estimate contributed, real
-     * usage sits unpriced in the open segment (whether or not it could be
-     * estimated), or a settle had to drop unpriceable tokens. A reported
-     * subtotal must never display as an exact grand total. */
-    if (approx)
-        *approx = est > 0 || spend_has_tokens(&t->spend) || t->est_dropped;
-    return t->spend.reported + est;
-}
-
-/* Close the open pricing segment: price its tokens at `model`'s catalog
- * rates (the model the segment accumulated under — the *outgoing* one on a
- * switch), fold the result into est_cost, and reset the segment counters.
- * Runs only when a switch actually changes the rates: an effort-only or
- * failed settings change must leave the segment open, because tokens that
- * can't be priced at settle time (catalog fetch not landed yet) are
- * dropped rather than guessed at foreign rates — est_dropped then keeps
- * the undercounting total marked approximate for the rest of the session. */
-static void agent_stats_settle(struct agent_state *st, const char *model)
-{
-    struct session_stats *t = &st->stats;
-    double seg = spend_estimate(&t->spend, st->provider, model);
-    if (seg > 0)
-        t->est_cost += seg;
-    else if (spend_has_tokens(&t->spend))
-        t->est_dropped = 1;
-    t->spend = (struct spend_totals){.reported = t->spend.reported};
+    return spend_total(&t->spend, approx);
 }
 
 /* Dim per-user-turn stats line: "42s · 8.9k / 256k (3%) · $0.042",
  * shown once per user turn so multi-step tool runs collapse into a single
  * summary instead of bracketing every intermediate response. Distinct from
- * /usage (the provider's account report) and /session (this session's
- * totals) — this is the ambient per-turn view.
+ * /usage (the provider's account report), /session (this session's
+ * totals), and the transcript's per-request ITEM_TURN_USAGE footers —
+ * this is the ambient per-turn view.
  *
- * ctx and cached reflect the last response (= current window state — each
- * call's input subsumes the prior call's prefix, so the latest values are
- * the right snapshot). out is a running sum across the user turn's model
- * calls. elapsed_ms is this user turn's wall time; spend is the *session's*
- * cumulative cost — provider-reported, plus the catalog estimate for
- * responses that reported none (agent_session_spend), the latter marking
- * the figure "~$". Field selection and formatting live in
+ * ctx reflects the last response (= current window state — each call's
+ * input subsumes the prior call's prefix, so the latest value is the
+ * right snapshot). elapsed_ms is this user turn's wall time; spend is the
+ * *session's* cumulative cost — provider-reported, plus the catalog
+ * estimate for responses that reported none (agent_session_spend), the
+ * latter marking the figure "~$". Field selection and formatting live in
  * format_stats_segments, shared with oneshot's exit summary.
  *
  * Segments wrap at the " · " seams against the content width, so a narrow
@@ -319,14 +262,13 @@ static void agent_stats_settle(struct agent_state *st, const char *model)
  * mid-number. Width is sampled at print time; the line is scrollback, so
  * there's no post-print reflow obligation. */
 static void display_stats_line(struct render_ctx *r, const struct provider *p, const char *model,
-                               long ctx, long out, long cached, long elapsed_ms,
-                               const struct session_stats *stats)
+                               long ctx, long elapsed_ms, const struct session_stats *stats)
 {
     int approx = 0;
-    double spend = agent_session_spend(stats, p, model, &approx);
+    double spend = agent_session_spend(stats, &approx);
     char segs[STATS_SEGS_MAX][STATS_SEG_LEN];
-    int n = format_stats_segments(segs, ctx, compact_context_limit(p, model), out, cached,
-                                  config_bool("stats.verbose"), elapsed_ms, spend, approx);
+    int n = format_stats_segments(segs, ctx, compact_context_limit(p, model), elapsed_ms, spend,
+                                  approx);
     if (n == 0)
         return;
 
@@ -658,12 +600,9 @@ static const char *provider_log_name(const struct provider *p)
 void agent_set_provider(struct agent_state *st, struct provider *newp)
 {
     struct provider *old = (struct provider *)st->provider;
-    /* The open pricing segment accumulated under the old provider's rates;
-     * price it while they're still resolvable (old catalog_id + old model).
-     * Inherent loss window: if the catalog hasn't landed yet, the segment's
-     * tokens are dropped — unavoidable here, since after destroy() there is
-     * no old provider left to price against later. */
-    agent_stats_settle(st, st->sess ? st->sess->model : NULL);
+    /* No spend bookkeeping here: each spend record carries its own
+     * catalog_id/model stamp, so requests made under the old provider
+     * keep pricing correctly after the switch. */
     st->provider = newp;
     /* Destroy after the swap so the picker/selection code never observes a
      * half-replaced state; destroy() joins the old provider's bg probes. */
@@ -695,15 +634,6 @@ int agent_apply_settings(struct agent_state *st)
      * already used the right slug, so skipping is correct too. */
     int model_changed = (prev_model == NULL) != (s->model == NULL) ||
                         (prev_model && s->model && strcmp(prev_model, s->model) != 0);
-    /* A real model change can change the catalog rates the open pricing
-     * segment accumulated under — settle it against the outgoing model.
-     * Only now, once reconfigure succeeded and the change is confirmed: an
-     * effort-only or failed apply must keep the segment open, so a
-     * late-landing catalog fetch can still price it (see
-     * agent_stats_settle). On a /provider switch agent_set_provider already
-     * settled, leaving the segment empty and this a no-op. */
-    if (model_changed)
-        agent_stats_settle(st, prev_model);
     free(prev_model);
     if (model_changed && p && p->refresh_context)
         p->refresh_context(p, s->model);
@@ -780,6 +710,7 @@ void agent_new_conversation(struct agent_state *st)
      * /tmp until process exit (or longer if the user kills the process). */
     bash_cleanup_tempfiles();
     /* A fresh conversation starts its /session ledger at zero too. */
+    spend_free(&st->stats.spend);
     memset(&st->stats, 0, sizeof(st->stats));
     agent_print_banner(st->provider, st->sess);
 }
@@ -965,6 +896,7 @@ static void replay_user_turn(struct render_ctx *r, const struct agent_session *s
                 break;
             case ITEM_TOOL_RESULT:
             case ITEM_TURN_BOUNDARY:
+            case ITEM_TURN_USAGE:
                 break;
             }
         }
@@ -1028,6 +960,12 @@ struct compact_ev {
     struct turn *turn;
     char *err;                   /* owned; set from EV_ERROR */
     struct session_stats *stats; /* accounted into on terminal events */
+    /* Catalog stamp for the spend records (borrowed from the live
+     * provider/session for the duration of the stream). */
+    const char *catalog_id;
+    const char *model;
+    /* Per-attempt usage for the compaction footers (compact.h). */
+    struct compact_usage cap;
 };
 
 static int compact_on_event(const struct stream_event *ev, void *user)
@@ -1056,8 +994,14 @@ static int compact_on_event(const struct stream_event *ev, void *user)
             ce->stats->output_tokens += u->output_tokens;
         if (u->cached_tokens > 0)
             ce->stats->cached_tokens += u->cached_tokens;
-        spend_account(&ce->stats->spend, u);
+        if (u->cache_write_tokens > 0)
+            ce->stats->cache_write_tokens += u->cache_write_tokens;
+        spend_account(&ce->stats->spend, u, ce->catalog_id, ce->model);
     }
+    /* u is non-NULL for every EV_DONE and for billed EV_ERRORs — exactly
+     * the terminal events that owe a transcript footer. */
+    if (u)
+        compact_usage_record(&ce->cap, u);
     turn_on_event(ev, ce->turn);
     return 0;
 }
@@ -1122,7 +1066,9 @@ int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
 
     struct turn t;
     turn_init(&t);
-    struct compact_ev ce = {.turn = &t, .stats = &st->stats};
+    struct compact_ev ce = {
+        .turn = &t, .stats = &st->stats, .catalog_id = p->catalog_id, .model = s->model};
+    compact_usage_init(&ce.cap);
 
     interrupt_clear();
     interrupt_arm();
@@ -1154,6 +1100,15 @@ int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
             compact_notice(r, "compaction failed: %s", ce.err);
         else
             compact_notice(r, "compaction produced no summary");
+        /* Attempts that completed (or billed a truncation) before the
+         * failure still owe their footers — one per usage-bearing
+         * terminal event, matching the session totals the sink already
+         * fed. History is untouched, so they trail the last turn's
+         * content; a cancelled attempt recorded nothing and emits
+         * nothing. */
+        for (int i = 0; i < ce.cap.n; i++)
+            agent_session_add_turn_usage(s, p, &ce.cap.att[i].u, ce.cap.att[i].ms);
+        flush_logs(st->tlog, st->slog, s->items, s->n_items);
         free(summary);
         free(ce.err);
         turn_reset(&t);
@@ -1162,8 +1117,26 @@ int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
     free(ce.err);
     turn_reset(&t);
 
+    /* Rejected attempts (the model answered with a tool call and was
+     * re-asked) were complete, billed requests: their footers land in the
+     * OLD history before the rotation, durably archived in the outgoing
+     * session file (the transcript mirror is truncated by the rotation
+     * moments later). */
+    for (int i = 0; i + 1 < ce.cap.n; i++)
+        agent_session_add_turn_usage(s, p, &ce.cap.att[i].u, ce.cap.att[i].ms);
+    flush_logs(st->tlog, st->slog, s->items, s->n_items);
+
     compact_apply(s, st->slog, st->tlog, summary);
     free(summary);
+
+    /* The successful attempt was likely the most expensive request of the
+     * session (it resent the full context), so it earns its footer like
+     * any round-trip — appended after the seed it produced, into the
+     * rotated logs. */
+    if (ce.cap.n > 0)
+        agent_session_add_turn_usage(s, p, &ce.cap.att[ce.cap.n - 1].u,
+                                     ce.cap.att[ce.cap.n - 1].ms);
+    flush_logs(st->tlog, st->slog, s->items, s->n_items);
 
     compact_notice(r, "conversation compacted");
     return 1;
@@ -1373,13 +1346,11 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
             }
         }
 
-        /* Aggregated across every model call this user turn produces.
-         * ctx and cached track the latest reported value (= current window
-         * state, since each call's input subsumes the prior call's prefix);
-         * out is a running sum so the summary reflects total tokens
-         * generated in response to this prompt. -1 means "no call reported
-         * this number yet". */
-        long user_turn_ctx = -1, user_turn_out = -1, user_turn_cached = -1;
+        /* ctx tracks the latest reported context size across this user
+         * turn's model calls (= current window state, since each call's
+         * input subsumes the prior call's prefix). -1 means "no call
+         * reported it yet". */
+        long user_turn_ctx = -1;
         long user_turn_start_ms = monotonic_ms();
         int user_turn_errored = 0;
         int user_turn_interrupted = 0;
@@ -1433,10 +1404,12 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
             turn_init(&t);
             r.disp.saw_text = 0;
             struct event_ctx ec = {.r = &r, .turn = &t, .usage = {-1, -1, -1, -1, -1, -1}};
+            long round_start_ms = monotonic_ms();
             /* agent_stream_tick combines cancel (Esc) with idle
              * detection: ~1Hz from libcurl's progress callback inside
              * curl_easy_perform, plus on every received chunk. */
             p->stream(p, &ctx, sess.model, on_event, &ec, agent_stream_tick, &r);
+            long round_ms = monotonic_ms() - round_start_ms;
             /* Every stream call is one model round-trip, /session's
              * "requests" — counted regardless of outcome (an errored or
              * interrupted attempt still hit the backend). */
@@ -1445,17 +1418,13 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
             /* Usage accounting runs before the error branch below: a
              * truncated (max_tokens/length) response reports usage on its
              * EV_ERROR and is billed like a complete one, so the display
-             * trio and /session totals must not skip it. */
+             * and /session totals must not skip it. */
             if (ec.usage.input_tokens >= 0 && ec.usage.output_tokens >= 0)
                 user_turn_ctx = ec.usage.input_tokens + ec.usage.output_tokens;
-            if (ec.usage.output_tokens >= 0)
-                user_turn_out = (user_turn_out < 0 ? 0 : user_turn_out) + ec.usage.output_tokens;
-            if (ec.usage.cached_tokens >= 0)
-                user_turn_cached = ec.usage.cached_tokens;
 
             /* Session totals (/session): sums of what this round-trip
-             * reported. Unlike the display trio above these are plain
-             * accumulators — unreported fields just don't contribute. */
+             * reported. Plain accumulators — unreported fields just
+             * don't contribute. */
             if (user_turn_ctx >= 0) {
                 state.stats.last_ctx = user_turn_ctx;
                 state.stats.last_limit = compact_context_limit(p, sess.model);
@@ -1466,7 +1435,9 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
                 state.stats.output_tokens += ec.usage.output_tokens;
             if (ec.usage.cached_tokens > 0)
                 state.stats.cached_tokens += ec.usage.cached_tokens;
-            spend_account(&state.stats.spend, &ec.usage);
+            if (ec.usage.cache_write_tokens > 0)
+                state.stats.cache_write_tokens += ec.usage.cache_write_tokens;
+            spend_account(&state.stats.spend, &ec.usage, p->catalog_id, sess.model);
 
             if (t.error) {
                 /* Mid-stream error (network drop, "length"/"content_filter"
@@ -1498,6 +1469,12 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
                                      .text = xstrdup(INTERRUPT_MARKER),
                                  });
                 }
+                /* A truncated response is billed like a complete one, so
+                 * it earns a footer too; a pre-stream failure (the common
+                 * case here) reported nothing and gets none — not even
+                 * the duration-only form successful requests get. */
+                if (usage_reported(&ec.usage))
+                    agent_session_add_turn_usage(&sess, p, &ec.usage, round_ms);
                 /* Land the partial state on disk now — the success
                  * path's later append doesn't run on this branch and
                  * post-mortem readers want to see how far we got. */
@@ -1532,6 +1509,10 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
                                      .text = xstrdup(INTERRUPT_MARKER),
                                  });
                 }
+                /* Footer only when the abort was billed (usage arrived
+                 * before the Esc) — a plain cancel earns no line. */
+                if (usage_reported(&ec.usage))
+                    agent_session_add_turn_usage(&sess, p, &ec.usage, round_ms);
                 user_turn_interrupted = 1;
                 break;
             }
@@ -1543,8 +1524,10 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
             agent_session_absorb(&sess, &t, &n_before, &had_tool_call);
             turn_reset(&t);
 
-            if (!had_tool_call)
+            if (!had_tool_call) {
+                agent_session_add_turn_usage(&sess, p, &ec.usage, round_ms);
                 break;
+            }
 
             /* Execute tool calls just added — render header + output as
              * one block per call so parallel calls don't interleave.
@@ -1575,6 +1558,18 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
                 items_append(&sess.items, &sess.n_items, &sess.cap_items, result);
             }
 
+            /* Esc fired during or just after this batch: decide the
+             * marker BEFORE appending the usage footer, so the marked-
+             * result check sees the batch's final tool result and the
+             * footer stays the round-trip's last word, matching the
+             * other abort paths. Settle first so we don't race past a
+             * pending \x1b. */
+            interrupt_settle();
+            int batch_aborted = interrupt_requested();
+            if (batch_aborted)
+                agent_session_mark_interrupt(&sess);
+            agent_session_add_turn_usage(&sess, p, &ec.usage, round_ms);
+
             /* Round-trip complete: assistant text, tool calls, and all
              * their results are in sess.items, so flush the slice into
              * the HAX_TRANSCRIPT log. Doing this *inside* the inner
@@ -1586,15 +1581,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
              * lookahead works. */
             flush_logs(tlog, state.slog, sess.items, sess.n_items);
 
-            /* Esc fired during or just after this batch. Stop the inner
-             * loop without another model call, and ensure history carries
-             * a marker — bash appends its own "[interrupted]" footer when
-             * killed, but read/write/edit return clean results that
-             * would otherwise hide the abort from the next turn. Settle
-             * first so we don't race past a pending \x1b. */
-            interrupt_settle();
-            if (interrupt_requested()) {
-                append_interrupt_marker(&sess);
+            if (batch_aborted) {
                 user_turn_interrupted = 1;
                 break;
             }
@@ -1616,7 +1603,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
                  * than clearing it and firing another round-trip against the
                  * (still uncompacted) history. */
                 if (interrupt_requested()) {
-                    append_interrupt_marker(&sess);
+                    agent_session_mark_interrupt(&sess);
                     user_turn_interrupted = 1;
                     break;
                 }
@@ -1655,8 +1642,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
         state.stats.turns++;
 
         if (!user_turn_errored)
-            display_stats_line(&r, p, sess.model, user_turn_ctx, user_turn_out, user_turn_cached,
-                               user_turn_ms, &state.stats);
+            display_stats_line(&r, p, sess.model, user_turn_ctx, user_turn_ms, &state.stats);
 
         /* Auto-compaction: once the reported context usage nears the window,
          * summarize and replace history before the next prompt. Skipped on an
@@ -1695,6 +1681,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
         md_free(r.md);
     transcript_log_close(tlog);
     session_log_close(state.slog);
+    spend_free(&state.stats.spend);
     agent_session_free(&sess);
     return 0;
 }

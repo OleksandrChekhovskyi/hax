@@ -132,8 +132,8 @@ char *build_system_prompt(const char *model_label, int raw)
     return out;
 }
 
-int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long out, long cached,
-                          int verbose, long elapsed_ms, double spend, int spend_approx)
+int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long elapsed_ms,
+                          double spend, int spend_approx)
 {
     int n = 0;
     /* Sized so the longest prefix ("context ", 8 cols) plus the scratch
@@ -143,98 +143,165 @@ int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long
     char buf[STATS_SEG_LEN - 16];
 
     /* Segment order is scope order, narrow to wide: this user turn's
-     * activity (worked, out), then current window state (context, cached),
-     * then the session total (spent). */
+     * activity (worked), then current window state (context), then the
+     * session total (spent). */
     if (elapsed_ms >= 0) {
         format_duration(buf, sizeof(buf), elapsed_ms);
-        if (verbose)
-            snprintf(segs[n++], STATS_SEG_LEN, "worked %s", buf);
-        else
-            snprintf(segs[n++], STATS_SEG_LEN, "%s", buf);
-    }
-    if (verbose && out >= 0) {
-        format_tokens(buf, sizeof(buf), out);
-        snprintf(segs[n++], STATS_SEG_LEN, "out %s", buf);
+        snprintf(segs[n++], STATS_SEG_LEN, "%s", buf);
     }
     if (ctx >= 0) {
         format_context(buf, sizeof(buf), ctx, limit);
-        /* The "context" word is disambiguation, not decoration, so it
-         * appears only when needed: in verbose mode there are three token
-         * counts to tell apart, and with an unknown window the figure is
-         * a bare number ("8.9k") that nothing identifies. The default
-         * gauge form ("8.9k / 256k (3%)") self-identifies — next to
-         * fields whose units (s, $) label themselves — and drops it. */
-        if (verbose || limit <= 0)
+        /* The "context" word is disambiguation, not decoration: with an
+         * unknown window the figure is a bare number ("8.9k") that
+         * nothing identifies. The gauge form ("8.9k / 256k (3%)")
+         * self-identifies — next to fields whose units (s, $) label
+         * themselves — and drops it. */
+        if (limit <= 0)
             snprintf(segs[n++], STATS_SEG_LEN, "context %s", buf);
         else
             snprintf(segs[n++], STATS_SEG_LEN, "%s", buf);
     }
-    if (verbose && cached > 0) {
-        format_tokens(buf, sizeof(buf), cached);
-        snprintf(segs[n++], STATS_SEG_LEN, "cached %s", buf);
-    }
     if (spend > 0) {
         format_cost(buf, sizeof(buf), spend);
-        const char *approx = spend_approx ? "~" : "";
-        if (verbose)
-            snprintf(segs[n++], STATS_SEG_LEN, "spent %s%s", approx, buf);
-        else
-            snprintf(segs[n++], STATS_SEG_LEN, "%s%s", approx, buf);
+        snprintf(segs[n++], STATS_SEG_LEN, "%s%s", spend_approx ? "~" : "", buf);
     }
     return n;
 }
 
-void spend_account(struct spend_totals *t, const struct stream_usage *u)
+void spend_account(struct spend_totals *t, const struct stream_usage *u, const char *catalog_id,
+                   const char *model)
 {
     if (u->cost >= 0) {
         /* Any non-negative cost is a *reported* charge (stream_usage's
          * convention: negative = not reported) — including an explicit
          * zero, e.g. a free-tier model. Zero must not fall through to the
-         * segment below, where catalog rates would re-price the free
+         * record below, where catalog rates would re-price the free
          * response as paid. */
         t->reported += u->cost;
         return;
     }
-    /* No reported charge: bill the response into the open pricing
-     * segment, estimated from catalog rates when read (spend_estimate). */
-    if (u->input_tokens > 0)
-        t->seg_input += u->input_tokens;
-    if (u->output_tokens > 0)
-        t->seg_output += u->output_tokens;
-    if (u->cached_tokens > 0)
-        t->seg_cached += u->cached_tokens;
-    if (u->cache_write_tokens > 0)
-        t->seg_cache_write += u->cache_write_tokens;
-    if (u->cache_write_1h_tokens > 0)
-        t->seg_cache_write_1h += u->cache_write_1h_tokens;
+    if (u->input_tokens <= 0 && u->output_tokens <= 0)
+        return; /* nothing billable was reported */
+    /* No reported charge: record the response for catalog estimation at
+     * read time (spend_total). */
+    if (t->n_recs == t->cap_recs) {
+        t->cap_recs = t->cap_recs ? t->cap_recs * 2 : 8;
+        t->recs = xrealloc(t->recs, t->cap_recs * sizeof(*t->recs));
+    }
+    struct spend_rec *r = &t->recs[t->n_recs++];
+    r->u = *u;
+    r->catalog_id = catalog_id && *catalog_id ? xstrdup(catalog_id) : NULL;
+    r->model = model && *model ? xstrdup(model) : NULL;
 }
 
-void spend_fold(struct spend_totals *dst, const struct spend_totals *src)
+/* Price one record, USD; -1 when it can't be priced (no catalog identity,
+ * model unknown to the catalog). `split` (optional) receives the
+ * per-category components. */
+static double spend_rec_price(const struct spend_rec *r, struct catalog_split *split)
 {
-    dst->reported += src->reported;
-    dst->seg_input += src->seg_input;
-    dst->seg_output += src->seg_output;
-    dst->seg_cached += src->seg_cached;
-    dst->seg_cache_write += src->seg_cache_write;
-    dst->seg_cache_write_1h += src->seg_cache_write_1h;
-}
-
-int spend_has_tokens(const struct spend_totals *t)
-{
-    return t->seg_input > 0 || t->seg_output > 0;
-}
-
-double spend_estimate(const struct spend_totals *t, const struct provider *p, const char *model)
-{
-    if (!spend_has_tokens(t))
-        return -1;
-    if (!p || !p->catalog_id || !model || !*model)
+    if (!r->catalog_id || !r->model)
         return -1;
     struct catalog_entry e;
-    if (catalog_lookup(p->catalog_id, model, &e) != 0)
+    if (catalog_lookup(r->catalog_id, r->model, &e) != 0)
         return -1;
-    return catalog_price(&e, t->seg_input, t->seg_output, t->seg_cached, t->seg_cache_write,
-                         t->seg_cache_write_1h);
+    return catalog_price(&e, r->u.input_tokens, r->u.output_tokens, r->u.cached_tokens,
+                         r->u.cache_write_tokens, r->u.cache_write_1h_tokens, split);
+}
+
+double spend_total(const struct spend_totals *t, int *approx)
+{
+    double est = 0;
+    for (size_t i = 0; i < t->n_recs; i++) {
+        double c = spend_rec_price(&t->recs[i], NULL);
+        if (c >= 0)
+            est += c;
+    }
+    /* Every record exists because its response reported no cost, so any
+     * record at all makes the figure inexact — whether it priced to a
+     * positive estimate, to zero (zero catalog rates are still an
+     * estimate), or not at all. A reported subtotal must never display
+     * as an exact grand total. */
+    if (approx)
+        *approx = t->n_recs > 0;
+    return t->reported + est;
+}
+
+int spend_unpriced(const struct spend_totals *t)
+{
+    for (size_t i = 0; i < t->n_recs; i++)
+        if (spend_rec_price(&t->recs[i], NULL) < 0)
+            return 1;
+    return 0;
+}
+
+int spend_split(const struct spend_totals *t, struct catalog_split *out)
+{
+    *out = (struct catalog_split){0};
+    int priced = 0;
+    for (size_t i = 0; i < t->n_recs; i++) {
+        struct catalog_split s;
+        if (spend_rec_price(&t->recs[i], &s) < 0)
+            continue;
+        out->in += s.in;
+        out->cache_read += s.cache_read;
+        out->cache_write += s.cache_write;
+        out->out += s.out;
+        priced = 1;
+    }
+    return priced;
+}
+
+void spend_free(struct spend_totals *t)
+{
+    for (size_t i = 0; i < t->n_recs; i++) {
+        free(t->recs[i].catalog_id);
+        free(t->recs[i].model);
+    }
+    free(t->recs);
+    memset(t, 0, sizeof(*t));
+}
+
+int usage_reported(const struct stream_usage *u)
+{
+    return u->input_tokens >= 0 || u->output_tokens >= 0 || u->cost >= 0;
+}
+
+struct turn_usage *turn_usage_make(const struct stream_usage *u, long elapsed_ms,
+                                   const char *catalog_id, const char *model)
+{
+    if (!usage_reported(u) && elapsed_ms < 0)
+        return NULL;
+    struct turn_usage *tu = xmalloc(sizeof(*tu));
+    tu->usage = *u;
+    tu->elapsed_ms = elapsed_ms;
+    tu->cost_in = tu->cost_cache_read = tu->cost_cache_write = tu->cost_out = -1;
+    tu->cost_total = -1;
+    tu->cost_estimated = 0;
+    if (u->cost >= 0) {
+        tu->cost_total = u->cost;
+        return tu;
+    }
+    if (!usage_reported(u))
+        return tu; /* duration-only — no tokens to price, and a $0
+                    * "estimate" would fabricate certainty about a
+                    * request whose usage is simply unknown */
+    if (!catalog_id || !*catalog_id || !model || !*model)
+        return tu;
+    struct catalog_entry e;
+    if (catalog_lookup(catalog_id, model, &e) != 0)
+        return tu;
+    struct catalog_split split;
+    double total = catalog_price(&e, u->input_tokens, u->output_tokens, u->cached_tokens,
+                                 u->cache_write_tokens, u->cache_write_1h_tokens, &split);
+    if (total < 0)
+        return tu;
+    tu->cost_total = total;
+    tu->cost_in = split.in;
+    tu->cost_cache_read = split.cache_read;
+    tu->cost_cache_write = split.cache_write;
+    tu->cost_out = split.out;
+    tu->cost_estimated = 1;
+    return tu;
 }
 
 static char *resolve_model_label(struct provider *p, const char *model)
@@ -368,6 +435,52 @@ void agent_session_add_user(struct agent_session *s, const char *text)
 void agent_session_add_boundary(struct agent_session *s)
 {
     items_append(&s->items, &s->n_items, &s->cap_items, (struct item){.kind = ITEM_TURN_BOUNDARY});
+}
+
+/* True when `it` is a tool_result whose output already ends with the
+ * interrupt marker — i.e. bash appended its "[interrupted]" footer when
+ * killed by user-Esc. Non-bash tools (read, write, edit) finish normally
+ * without any footer, so their results never read as marked. */
+static int tool_result_is_marked(const struct item *it)
+{
+    if (it->kind != ITEM_TOOL_RESULT || !it->output)
+        return 0;
+    size_t out_len = strlen(it->output);
+    size_t marker_len = strlen(INTERRUPT_MARKER);
+    if (out_len < marker_len)
+        return 0;
+    return strcmp(it->output + out_len - marker_len, INTERRUPT_MARKER) == 0;
+}
+
+void agent_session_mark_interrupt(struct agent_session *s)
+{
+    /* Look past inert trailing items (usage footers, boundaries) to the
+     * last *content* item — footer emission between the tool batch and
+     * this check must not hide an already-marked result and provoke a
+     * duplicate marker. */
+    size_t i = s->n_items;
+    while (i > 0 &&
+           (s->items[i - 1].kind == ITEM_TURN_USAGE || s->items[i - 1].kind == ITEM_TURN_BOUNDARY))
+        i--;
+    if (i > 0 && tool_result_is_marked(&s->items[i - 1]))
+        return;
+    items_append(&s->items, &s->n_items, &s->cap_items,
+                 (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup(INTERRUPT_MARKER)});
+}
+
+void agent_session_add_turn_usage(struct agent_session *s, const struct provider *p,
+                                  const struct stream_usage *u, long elapsed_ms)
+{
+    struct turn_usage *tu = turn_usage_make(u, elapsed_ms, p ? p->catalog_id : NULL, s->model);
+    if (!tu)
+        return;
+    items_append(&s->items, &s->n_items, &s->cap_items,
+                 (struct item){
+                     .kind = ITEM_TURN_USAGE,
+                     .usage = tu,
+                     .provider = s->provider_name ? xstrdup(s->provider_name) : NULL,
+                     .model = s->model && *s->model ? xstrdup(s->model) : NULL,
+                 });
 }
 
 void agent_session_absorb(struct agent_session *s, struct turn *t, size_t *out_before,

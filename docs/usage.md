@@ -105,15 +105,24 @@ After each user turn the REPL prints a dim one-line summary:
   (llama.cpp, ollama) show no dollar figure. See the model catalog section in
   [configuration.md](./configuration.md) for tuning or disabling the catalog fetch.
 
-Set `HAX_STATS_VERBOSE=1` for the fully labeled diagnostic form, adding `out` (tokens
-generated this user turn) and `cached` (prefix-cache hits) — useful for diagnosing cache
+On narrow terminals the line wraps between fields rather than mid-number.
+
+The per-request detail lives in the transcript (Ctrl-T, and the `HAX_TRANSCRIPT` mirror):
+each model round-trip ends with a dim stats footer — time, the request's cost, then the
+token categories with their estimated component costs — useful for seeing where a session's
+spend actually goes (context replay vs. cache reads vs. output) and for diagnosing cache
 behavior:
 
 ```text
-context 8.9k / 256k (3%) · out 595 · cached 2.7k · worked 42s · spent $0.042
+42s · ~$0.19 · in 20.3k $0.025 · cache 160k $0.048 · write 8.2k $0.031 · out 2.1k $0.084
 ```
 
-On narrow terminals the line wraps between fields rather than mid-number.
+`in` is the uncached input remainder, `cache`/`write` are prefix-cache reads and writes, so
+the counts sum to what the request actually sent. The `~` on the total marks a catalog
+estimate and governs the whole line; when the provider reports an exact charge (OpenRouter),
+the total is exact and the categories show bare token counts — a reported charge can't be
+decomposed. Estimates are tier-aware: models with long-context pricing (e.g. different rates
+above 200k input tokens) bill each request at the tier its own input size selects.
 
 Once a user turn has been running for 30 seconds, the busy spinner shows the same elapsed
 counter live (`⠋ 42s · working...`), so a long-running user turn's age is visible before the
@@ -121,13 +130,17 @@ stats line lands.
 
 `/session` shows the cumulative counterpart: user turns, model requests, tool calls (with a
 per-tool breakdown), time worked, current context usage, token totals, and spend for the
-current sitting. The `tokens total` row sums across every request — each request resends the
-full conversation, so total `in` grows faster than `context` — and the cache percentage is the
-hit rate of summed cached tokens against summed input. Compaction requests (manual `/compact`
-or automatic) count like any other request, in both the request count and the token/spend
-totals. Totals reset on `/new` and are not carried across `--resume`. `/usage` is different —
-it asks the provider what it knows about your account (Codex plan windows, OpenRouter key
-credits).
+current sitting. The `tokens total` row sums across every request in the same categories the
+transcript footers use — `in` (uncached input), `cache`/`write` (prefix-cache reads and
+writes), `out` — each with its summed estimated cost where catalog rates resolve, so the
+session's overall cost breakdown reads at a glance (a large `cache` count next to a small
+`in` is the prefix cache working). Each request resends the full conversation, so summed
+input grows faster than `context`. Provider-reported charges can't be decomposed, so their
+categories show bare counts and the exact total stays on the `spend` row. Compaction
+requests (manual `/compact` or automatic) count like any other request, in
+both the request count and the token/spend totals. Totals reset on `/new` and are not carried
+across `--resume`. `/usage` is different — it asks the provider what it knows about your
+account (Codex plan windows, OpenRouter key credits).
 
 In `-p` mode, an equivalent stats line is printed to stderr at the end of the run, above the
 resume hint, whenever the backend reported usage.

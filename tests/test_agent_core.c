@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 
 #include "agent_core.h"
+#include "catalog.h"
 #include "harness.h"
 #include "tool.h"
 #include "util.h"
@@ -412,124 +413,97 @@ static void test_session_context_snapshot(void)
     agent_session_free(&s);
 }
 
+static void test_mark_interrupt(void)
+{
+    struct stream_usage u = {.input_tokens = 100,
+                             .output_tokens = 10,
+                             .cached_tokens = -1,
+                             .cache_write_tokens = -1,
+                             .cache_write_1h_tokens = -1,
+                             .cost = -1};
+
+    /* The regression case: a tool result already marked at the abort
+     * boundary (bash's own "[interrupted]" footer), with the round-trip's
+     * usage footer appended after it. The marker check must look past the
+     * inert footer, see the marked result, and add no duplicate. */
+    struct agent_session s = {0};
+    items_append(&s.items, &s.n_items, &s.cap_items,
+                 (struct item){.kind = ITEM_TOOL_RESULT,
+                               .call_id = xstrdup("c1"),
+                               .output = xstrdup("partial output\n" INTERRUPT_MARKER)});
+    agent_session_add_turn_usage(&s, NULL, &u, 1000);
+    EXPECT(s.n_items == 2);
+    size_t before = s.n_items;
+    agent_session_mark_interrupt(&s);
+    EXPECT(s.n_items == before);
+    agent_session_free(&s);
+
+    /* A clean (unmarked) result behind the footer still gets the
+     * synthetic assistant marker. */
+    struct agent_session s2 = {0};
+    items_append(&s2.items, &s2.n_items, &s2.cap_items,
+                 (struct item){.kind = ITEM_TOOL_RESULT,
+                               .call_id = xstrdup("c2"),
+                               .output = xstrdup("clean result")});
+    agent_session_add_turn_usage(&s2, NULL, &u, 1000);
+    agent_session_mark_interrupt(&s2);
+    EXPECT(s2.n_items == 3);
+    if (s2.n_items == 3) {
+        EXPECT(s2.items[2].kind == ITEM_ASSISTANT_MESSAGE);
+        EXPECT_STR_EQ(s2.items[2].text, INTERRUPT_MARKER);
+    }
+    agent_session_free(&s2);
+
+    /* Empty history: the marker is the whole record of the abort. */
+    struct agent_session s3 = {0};
+    agent_session_mark_interrupt(&s3);
+    EXPECT(s3.n_items == 1);
+    EXPECT(s3.n_items == 1 && s3.items[0].kind == ITEM_ASSISTANT_MESSAGE);
+    agent_session_free(&s3);
+}
+
 static void test_format_stats_segments_selection(void)
 {
     char segs[STATS_SEGS_MAX][STATS_SEG_LEN];
 
-    /* Default (non-verbose): duration, context gauge, spend — scope order,
-     * this turn before session state; out/cached dropped, and the single
-     * token figure carries no word label. */
-    int n = format_stats_segments(segs, 9113, 262144, 595, 2765, 0, 42000, 0.042, 0);
+    /* Duration, context gauge, spend — scope order, this turn before
+     * session state; the single token figure carries no word label. */
+    int n = format_stats_segments(segs, 9113, 262144, 42000, 0.042, 0);
     EXPECT(n == 3);
     EXPECT_STR_EQ(segs[0], "42s");
     EXPECT_STR_EQ(segs[1], "8.9k / 256k (3%)");
     EXPECT_STR_EQ(segs[2], "$0.042");
 
-    /* Verbose: out and cached slot in, and every field gets its word
-     * label (the fully labeled diagnostic form). */
-    n = format_stats_segments(segs, 9113, 262144, 595, 2765, 1, 42000, 0.042, 0);
-    EXPECT(n == 5);
-    EXPECT_STR_EQ(segs[0], "worked 42s");
-    EXPECT_STR_EQ(segs[1], "out 595");
-    EXPECT_STR_EQ(segs[2], "context 8.9k / 256k (3%)");
-    EXPECT_STR_EQ(segs[3], "cached 2.7k");
-    EXPECT_STR_EQ(segs[4], "spent $0.042");
-
     /* Unknown window: no gauge shape to identify the bare number, so the
-     * default form keeps the "context" label for this figure only. */
-    n = format_stats_segments(segs, 9113, 0, -1, -1, 0, 42000, 0.042, 0);
+     * "context" label sticks to this figure only. */
+    n = format_stats_segments(segs, 9113, 0, 42000, 0.042, 0);
     EXPECT(n == 3);
     EXPECT_STR_EQ(segs[0], "42s");
     EXPECT_STR_EQ(segs[1], "context 8.9k");
     EXPECT_STR_EQ(segs[2], "$0.042");
 
-    /* Estimated spend is marked approximate, both forms. */
-    n = format_stats_segments(segs, -1, 0, -1, -1, 0, -1, 0.042, 1);
+    /* Estimated spend is marked approximate. */
+    n = format_stats_segments(segs, -1, 0, -1, 0.042, 1);
     EXPECT(n == 1);
     EXPECT_STR_EQ(segs[0], "~$0.042");
-    n = format_stats_segments(segs, -1, 0, -1, -1, 1, -1, 0.042, 1);
-    EXPECT(n == 1);
-    EXPECT_STR_EQ(segs[0], "spent ~$0.042");
 
-    /* Unreported fields are skipped: no usage, no cost ⇒ duration only
-     * (labeled, since this asks for the verbose form). */
-    n = format_stats_segments(segs, -1, 0, -1, -1, 1, 42000, 0, 0);
+    /* Unreported fields are skipped: no usage, no cost ⇒ duration only. */
+    n = format_stats_segments(segs, -1, 0, 42000, 0, 0);
     EXPECT(n == 1);
-    EXPECT_STR_EQ(segs[0], "worked 42s");
+    EXPECT_STR_EQ(segs[0], "42s");
 
     /* Nothing reported at all. */
-    n = format_stats_segments(segs, -1, 0, -1, -1, 0, -1, 0, 0);
+    n = format_stats_segments(segs, -1, 0, -1, 0, 0);
     EXPECT(n == 0);
 }
 
 static void test_spend_accounting(void)
 {
     struct spend_totals t = {0};
+    int approx = 0;
 
-    /* Reported cost is exact: sums into reported, no segment tokens. */
-    struct stream_usage u = {.input_tokens = 1000,
-                             .output_tokens = 50,
-                             .cached_tokens = 200,
-                             .cache_write_tokens = -1,
-                             .cache_write_1h_tokens = -1,
-                             .cost = 0.01};
-    spend_account(&t, &u);
-    EXPECT(t.reported == 0.01);
-    EXPECT(t.seg_input == 0 && t.seg_output == 0);
-
-    /* Unreported cost: token counts land in the open segment; -1 ("not
-     * reported") fields don't contribute. */
-    u.cost = -1;
-    spend_account(&t, &u);
-    spend_account(&t, &u);
-    EXPECT(t.reported == 0.01);
-    EXPECT(t.seg_input == 2000);
-    EXPECT(t.seg_output == 100);
-    EXPECT(t.seg_cached == 400);
-    EXPECT(t.seg_cache_write == 0);
-    EXPECT(t.seg_cache_write_1h == 0);
-
-    /* Cache writes and their 1h subset accumulate like the others. */
-    u.cache_write_tokens = 300;
-    u.cache_write_1h_tokens = 120;
-    spend_account(&t, &u);
-    EXPECT(t.seg_cache_write == 300);
-    EXPECT(t.seg_cache_write_1h == 120);
-    u.cache_write_tokens = -1;
-    u.cache_write_1h_tokens = -1;
-
-    /* An explicit zero cost is a *reported* free response, not "cost
-     * unknown": nothing may land in the segment, where catalog rates
-     * would later re-price the free tokens as paid. */
-    struct spend_totals z = {0};
-    u.cost = 0;
-    spend_account(&z, &u);
-    EXPECT(z.reported == 0);
-    EXPECT(z.seg_input == 0 && z.seg_output == 0 && z.seg_cached == 0);
-    u.cost = -1;
-
-    /* Folding sums every field. */
-    struct spend_totals sum = {.reported = 1.0, .seg_input = 5};
-    spend_fold(&sum, &t);
-    EXPECT(sum.reported == 1.01);
-    EXPECT(sum.seg_input == 3005);
-    EXPECT(sum.seg_output == 150);
-    EXPECT(sum.seg_cache_write == 300);
-    EXPECT(sum.seg_cache_write_1h == 120);
-
-    /* spend_has_tokens: any segment tokens count; reported cost doesn't. */
-    EXPECT(spend_has_tokens(&t));
-    EXPECT(!spend_has_tokens(&z));
-
-    /* Unpriceable segments: no tokens, no provider, or no catalog_id. */
-    struct spend_totals empty = {.reported = 9.0};
-    struct provider p = {.name = "x"};
-    EXPECT(spend_estimate(&empty, &p, "m") == -1);
-    EXPECT(spend_estimate(&t, NULL, "m") == -1);
-    EXPECT(spend_estimate(&t, &p, "m") == -1); /* catalog_id unset */
-
-    /* The positive path: a mapped provider whose model resolves in the
-     * catalog prices the segment (fixture snapshot, real catalog module). */
+    /* Fixture snapshot first (the catalog memoizes misses per
+     * provider/model, so no lookup may precede the write). */
     char dir[] = "/tmp/hax_test_agent_core_XXXXXX";
     if (!mkdtemp(dir))
         FAIL("mkdtemp: %s", strerror(errno));
@@ -541,13 +515,170 @@ static void test_spend_accounting(void)
     FILE *f = fopen(path, "w");
     EXPECT(f != NULL);
     if (f) {
-        fputs("{\"prov\": {\"models\": {\"m\": {\"cost\": {\"input\": 2, \"output\": 8}}}}}", f);
+        fputs("{\"prov\": {\"models\": {"
+              "\"m\": {\"cost\": {\"input\": 2, \"output\": 8}},"
+              "\"free-m\": {\"cost\": {\"input\": 0, \"output\": 0}}"
+              "}}}",
+              f);
         fclose(f);
     }
-    p.catalog_id = "prov";
-    struct spend_totals seg = {.seg_input = 1000000, .seg_output = 1000000};
-    EXPECT(spend_estimate(&seg, &p, "m") == 10.0);
-    EXPECT(spend_estimate(&seg, &p, "unknown-model") == -1);
+
+    /* Reported cost is exact: sums into reported, no record kept. */
+    struct stream_usage u = {.input_tokens = 1000,
+                             .output_tokens = 50,
+                             .cached_tokens = 200,
+                             .cache_write_tokens = -1,
+                             .cache_write_1h_tokens = -1,
+                             .cost = 0.01};
+    spend_account(&t, &u, "prov", "m");
+    EXPECT(t.reported == 0.01);
+    EXPECT(t.n_recs == 0);
+    EXPECT(spend_total(&t, &approx) == 0.01);
+    EXPECT(!approx);
+
+    /* Unreported cost: each response becomes its own stamped record.
+     * Neither stamp resolves in the catalog, so the total stays at the
+     * reported subtotal, marked approximate — real usage exists that the
+     * figure doesn't cover. */
+    u.cost = -1;
+    spend_account(&t, &u, "noprov", "m");
+    spend_account(&t, &u, NULL, NULL);
+    EXPECT(t.reported == 0.01);
+    EXPECT(t.n_recs == 2);
+    EXPECT_STR_EQ(t.recs[0].catalog_id, "noprov");
+    EXPECT_STR_EQ(t.recs[0].model, "m");
+    EXPECT(t.recs[1].catalog_id == NULL && t.recs[1].model == NULL);
+    EXPECT(spend_unpriced(&t));
+    EXPECT(spend_total(&t, &approx) == 0.01);
+    EXPECT(approx);
+
+    /* A response that reported neither cost nor tokens records nothing. */
+    struct stream_usage nothing = {-1, -1, -1, -1, -1, -1};
+    spend_account(&t, &nothing, "prov", "m");
+    EXPECT(t.n_recs == 2);
+
+    /* An explicit zero cost is a *reported* free response, not "cost
+     * unknown": no record may be kept, where catalog rates would later
+     * re-price the free tokens as paid. */
+    struct spend_totals z = {0};
+    u.cost = 0;
+    spend_account(&z, &u, "prov", "m");
+    EXPECT(z.reported == 0);
+    EXPECT(z.n_recs == 0);
+    EXPECT(spend_total(&z, &approx) == 0);
+    EXPECT(!approx);
+    u.cost = -1;
+
+    /* The positive path: a stamp the catalog resolves prices its record
+     * into the total (fixture snapshot, real catalog module) — still
+     * approximate, being an estimate. */
+    struct spend_totals big = {0};
+    struct stream_usage mega = {.input_tokens = 1000000,
+                                .output_tokens = 1000000,
+                                .cached_tokens = -1,
+                                .cache_write_tokens = -1,
+                                .cache_write_1h_tokens = -1,
+                                .cost = -1};
+    spend_account(&big, &mega, "prov", "m");
+    EXPECT(spend_total(&big, &approx) == 10.0);
+    EXPECT(approx);
+    EXPECT(!spend_unpriced(&big));
+    struct spend_totals miss = {0};
+    spend_account(&miss, &mega, "prov", "unknown-model");
+    EXPECT(spend_total(&miss, &approx) == 0);
+    EXPECT(approx);
+    EXPECT(spend_unpriced(&miss));
+
+    /* spend_split: the estimated spend broken down per category (the
+     * /session row), summed across priceable records only. */
+    struct catalog_split sp;
+    EXPECT(spend_split(&big, &sp) == 1);
+    EXPECT(sp.in == 2.0 && sp.out == 8.0);
+    EXPECT(sp.cache_read == 0 && sp.cache_write == 0);
+    EXPECT(spend_split(&miss, &sp) == 0);
+
+    /* Zero catalog rates price a record to $0 — still an estimate, so
+     * the figure stays approximate rather than passing off the reported
+     * subtotal as an exact grand total. */
+    struct spend_totals freebie = {.reported = 0.5};
+    spend_account(&freebie, &mega, "prov", "free-m");
+    EXPECT(spend_total(&freebie, &approx) == 0.5);
+    EXPECT(approx);
+    EXPECT(!spend_unpriced(&freebie));
+    spend_free(&freebie);
+
+    spend_free(&t);
+    spend_free(&z);
+    spend_free(&big);
+    spend_free(&miss);
+    EXPECT(t.n_recs == 0 && t.recs == NULL);
+}
+
+static void test_turn_usage_make(void)
+{
+    /* Reported cost: exact total, never decomposed. */
+    struct stream_usage u = {.input_tokens = 1000,
+                             .output_tokens = 50,
+                             .cached_tokens = 200,
+                             .cache_write_tokens = -1,
+                             .cache_write_1h_tokens = -1,
+                             .cost = 0.01};
+    struct turn_usage *tu = turn_usage_make(&u, 1500, "prov", "m");
+    EXPECT(tu != NULL);
+    if (tu) {
+        EXPECT(tu->cost_total == 0.01);
+        EXPECT(!tu->cost_estimated);
+        EXPECT(tu->cost_in < 0 && tu->cost_out < 0);
+        EXPECT(tu->elapsed_ms == 1500);
+        free(tu);
+    }
+
+    /* No usage but a known duration: a duration-only footer, so
+     * usage-less backends still document each successful round-trip.
+     * With no duration either there is nothing to show — NULL. */
+    struct stream_usage nothing = {-1, -1, -1, -1, -1, -1};
+    EXPECT(!usage_reported(&nothing));
+    tu = turn_usage_make(&nothing, 1500, "prov", "m");
+    EXPECT(tu != NULL);
+    if (tu) {
+        EXPECT(tu->elapsed_ms == 1500);
+        EXPECT(tu->cost_total < 0);
+        EXPECT(!tu->cost_estimated);
+        free(tu);
+    }
+    EXPECT(turn_usage_make(&nothing, -1, "prov", "m") == NULL);
+
+    /* Unreported cost against the fixture catalog (written by
+     * test_spend_accounting, still in XDG_CACHE_HOME): estimated total
+     * with the per-category split. 500k uncached in ($1) + 500k cached
+     * reads at the input-rate fallback ($1) + 1M out ($8). */
+    struct stream_usage est = {.input_tokens = 1000000,
+                               .output_tokens = 1000000,
+                               .cached_tokens = 500000,
+                               .cache_write_tokens = -1,
+                               .cache_write_1h_tokens = -1,
+                               .cost = -1};
+    tu = turn_usage_make(&est, -1, "prov", "m");
+    EXPECT(tu != NULL);
+    if (tu) {
+        EXPECT(tu->cost_estimated);
+        EXPECT(tu->cost_total == 10.0);
+        EXPECT(tu->cost_in == 1.0);
+        EXPECT(tu->cost_cache_read == 1.0);
+        EXPECT(tu->cost_cache_write == 0);
+        EXPECT(tu->cost_out == 8.0);
+        free(tu);
+    }
+
+    /* No catalog identity: raw usage carries through, costs unknown. */
+    tu = turn_usage_make(&est, 2000, NULL, NULL);
+    EXPECT(tu != NULL);
+    if (tu) {
+        EXPECT(tu->cost_total < 0);
+        EXPECT(!tu->cost_estimated);
+        EXPECT(tu->usage.input_tokens == 1000000);
+        free(tu);
+    }
 }
 
 int main(void)
@@ -568,7 +699,9 @@ int main(void)
     test_session_absorb_no_tool_call();
     test_session_absorb_with_tool_call();
     test_session_context_snapshot();
+    test_mark_interrupt();
     test_format_stats_segments_selection();
     test_spend_accounting();
+    test_turn_usage_make();
     T_REPORT();
 }

@@ -337,7 +337,8 @@ static json_t *build_input_items(const struct item *items, size_t n, const char 
             }
             break;
         case ITEM_TURN_BOUNDARY:
-            /* Agent-side marker for the transcript renderer; nothing to
+        case ITEM_TURN_USAGE:
+            /* Agent-side markers for the transcript renderer; nothing to
              * send over the wire. */
             break;
         }

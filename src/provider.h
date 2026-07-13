@@ -32,6 +32,13 @@ enum item_kind {
      * no fields. Provider adapters ignore it when serializing the
      * conversation. */
     ITEM_TURN_BOUNDARY,
+    /* Inert accounting footer for the model round-trip whose items
+     * precede it, appended by the agent when the round-trip completes
+     * (its usage is only known then, which is why it trails the turn
+     * rather than riding the boundary that opened it). Carries a
+     * `usage` payload; the transcript renders it as a per-request stats
+     * line. Provider adapters ignore it like ITEM_TURN_BOUNDARY. */
+    ITEM_TURN_USAGE,
 };
 
 struct item {
@@ -73,6 +80,9 @@ struct item {
      * replay, the /resume picker label) never present it as a typed
      * prompt. Round-tripped through the session log. */
     int compact_seed;
+    /* TURN_USAGE: malloc'd accounting payload (owned; freed by
+     * item_free). NULL on every other kind. */
+    struct turn_usage *usage;
 };
 
 void item_free(struct item *it);
@@ -128,6 +138,25 @@ struct stream_usage {
     long cache_write_tokens;
     long cache_write_1h_tokens;
     double cost;
+};
+
+/* ITEM_TURN_USAGE payload: raw reported usage plus the costs resolved at
+ * emission time (cost estimation is the agent layer's job — see
+ * turn_usage_make — so display consumers stay pure formatting). */
+struct turn_usage {
+    struct stream_usage usage; /* -1 fields = not reported */
+    long elapsed_ms;           /* stream wall time, retries included; -1 = unknown */
+    /* USD. cost_total is the provider-reported charge when one was
+     * reported (exact), else the catalog estimate, marked by
+     * cost_estimated ("~$"); -1 = unknown. The per-category fields are
+     * catalog estimates and stay -1 when the total is exact — a reported
+     * charge arrives as one number and can't be decomposed. */
+    double cost_in;          /* uncached input */
+    double cost_cache_read;  /* prefix-cache reads */
+    double cost_cache_write; /* cache writes, 1h surcharge included */
+    double cost_out;
+    double cost_total;
+    int cost_estimated;
 };
 
 /* Events emitted by a provider's stream() into a stream_cb. */
