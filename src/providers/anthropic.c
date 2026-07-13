@@ -266,9 +266,8 @@ static void apply_thinking(json_t *body, struct anthropic *a, const struct conte
         const char *display = config_bool("show_reasoning") ? "summarized" : "omitted";
         json_object_set_new(body, "thinking",
                             json_pack("{s:s, s:s}", "type", "adaptive", "display", display));
-        if (ctx->reasoning_effort && *ctx->reasoning_effort)
-            json_object_set_new(body, "output_config",
-                                json_pack("{s:s}", "effort", ctx->reasoning_effort));
+        if (ctx->effort && *ctx->effort)
+            json_object_set_new(body, "output_config", json_pack("{s:s}", "effort", ctx->effort));
         return;
     }
 

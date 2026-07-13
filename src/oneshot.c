@@ -163,10 +163,10 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
     struct transcript_log *tlog = transcript_log_open(sess.sys, sess.tools, sess.n_tools);
     /* Append-only session record — continue the resumed file, else begin
      * a fresh one. NULL when persistence is disabled. */
-    struct session_log *slog = opts->resume_path
-                                   ? session_log_resume(opts->resume_path, p->name, sess.model,
-                                                        sess.reasoning_effort, n_resumed)
-                                   : session_log_open(p->name, sess.model, sess.reasoning_effort);
+    struct session_log *slog =
+        opts->resume_path
+            ? session_log_resume(opts->resume_path, p->name, sess.model, sess.effort, n_resumed)
+            : session_log_open(p->name, sess.model, sess.effort);
     if (n_resumed > 0)
         transcript_log_append(tlog, sess.items, sess.n_items);
 
@@ -199,8 +199,8 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         else
             fprintf(stderr, "%shax: %s · %s", tty ? ANSI_DIM : "", p->name ? p->name : "?",
                     model_label);
-        if (sess.reasoning_effort)
-            fprintf(stderr, " · %s", sess.reasoning_effort);
+        if (sess.effort)
+            fprintf(stderr, " · %s", sess.effort);
         if (opts->provider_autoselected)
             fprintf(stderr, " (auto-selected)");
         const char *sid = session_log_resume_hint(slog);

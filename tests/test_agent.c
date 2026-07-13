@@ -59,7 +59,7 @@ static char *capture_stdout(void (*body)(void *), void *user)
 /* The fixture pins every input agent_apply_settings resolves from:
  * HAX_MODEL (env tier — shadows any real config/state.json on the
  * machine running the tests) and a provider without an effort ladder,
- * so resolve_reasoning_effort is deterministically NULL. tlog/slog stay
+ * so resolve_effort is deterministically NULL. tlog/slog stay
  * NULL — both log layers are NULL-safe by contract. */
 struct fixture {
     struct provider p;
@@ -75,7 +75,7 @@ static void fixture_init(struct fixture *f)
     setenv("HAX_SYSTEM_PROMPT", "sys", 1);
     setenv("HAX_NO_ENV", "1", 1);
     setenv("HAX_NO_AGENTS_MD", "1", 1);
-    unsetenv("HAX_REASONING_EFFORT");
+    unsetenv("HAX_EFFORT");
 
     memset(f, 0, sizeof(*f));
     f->p.name = "prov-x";
@@ -344,7 +344,7 @@ static void test_new_conversation_resets_everything(void)
 
 /* ---------- agent_print_banner: fallback forms ---------- */
 
-/* agent_print_banner only reads name/model/model_label/reasoning_effort,
+/* agent_print_banner only reads name/model/model_label/effort,
  * so hand-built structs suffice — no session init, no env. The asserts
  * pin the fallback logic (which hint, which label), not exact wording. */
 
@@ -385,7 +385,7 @@ static void test_banner_prefers_label_and_appends_effort(void)
     struct agent_session s = {
         .model = "/models/long-file-name.gguf",
         .model_label = "short-name",
-        .reasoning_effort = "high",
+        .effort = "high",
     };
     struct banner_call c = {.p = &p, .s = &s};
     char *out = capture_stdout(do_banner, &c);

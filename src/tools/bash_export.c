@@ -17,7 +17,7 @@ void bash_export_selection(const char *provider, const char *model, const char *
         return; /* no live selection — leave the parent env untouched */
     g_env[g_n++] = xasprintf("HAX_PROVIDER=%s", provider);
     g_env[g_n++] = xasprintf("HAX_MODEL=%s", model ? model : "");
-    g_env[g_n++] = xasprintf("HAX_REASONING_EFFORT=%s", effort ? effort : "");
+    g_env[g_n++] = xasprintf("HAX_EFFORT=%s", effort ? effort : "");
     g_env[g_n++] = xstrdup("HAX_PRESET=");
 }
 

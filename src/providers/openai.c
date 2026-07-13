@@ -266,16 +266,16 @@ static char *build_body(const struct context *ctx, const char *provider, const c
 
     switch (reasoning) {
     case REASONING_FLAT:
-        if (ctx->reasoning_effort)
-            json_object_set_new(body, "reasoning_effort", json_string(ctx->reasoning_effort));
+        if (ctx->effort)
+            json_object_set_new(body, "reasoning_effort", json_string(ctx->effort));
         break;
     case REASONING_NESTED: {
         /* `enabled: true` is the opt-in some routers need to wake CoT
          * emission on models that otherwise stay silent. Effort
          * piggybacks in the same object when set. */
         json_t *r = json_pack("{s:b}", "enabled", 1);
-        if (ctx->reasoning_effort)
-            json_object_set_new(r, "effort", json_string(ctx->reasoning_effort));
+        if (ctx->effort)
+            json_object_set_new(r, "effort", json_string(ctx->effort));
         json_object_set_new(body, "reasoning", r);
         break;
     }

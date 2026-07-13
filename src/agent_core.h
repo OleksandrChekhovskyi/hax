@@ -43,10 +43,10 @@ const struct tool *find_tool(const char *name);
  * oneshot.c — extracted here so both paths grow it the same way. */
 void items_append(struct item **items, size_t *n, size_t *cap, struct item it);
 
-/* Resolve the `reasoning_effort` value to send for this session.
- * Empty HAX_REASONING_EFFORT means "force omit"; unset falls back to
+/* Resolve the `effort` value to send for this session.
+ * Empty HAX_EFFORT means "force omit"; unset falls back to
  * the provider default; any non-empty value passes through verbatim. */
-const char *resolve_reasoning_effort(const struct provider *p);
+const char *resolve_effort(const struct provider *p);
 
 /* Build the assembled system prompt (base text + env block + AGENTS.md +
  * skills) using `model_label` in the env block. Returns malloc'd, or NULL
@@ -116,7 +116,7 @@ double spend_estimate(const struct spend_totals *t, const struct provider *p, co
 
 /* Live per-run state shared by the interactive and one-shot paths.
  * Owns the items vector, the assembled system prompt, the tools table,
- * and the resolved model + reasoning_effort. */
+ * and the resolved model + effort. */
 struct agent_session {
     /* Owned copies, not borrowed config_str pointers: a runtime /provider,
      * /model, or /effort commit replaces a whole config tier object (and frees
@@ -124,7 +124,7 @@ struct agent_session {
      * session keeps using. */
     char *model;               /* owned exact id; NULL/"" = no model resolved yet */
     char *model_label;         /* owned display/env label; NULL when model is NULL */
-    char *reasoning_effort;    /* owned; NULL = "omit" */
+    char *effort;              /* owned; NULL = "omit" */
     const char *provider_name; /* borrowed from the live provider (valid for
                                 * its lifetime), for stamping reasoning
                                 * items. NULL = none. */
@@ -160,7 +160,7 @@ int agent_session_reconfigure(struct agent_session *s, struct provider *p);
 void agent_session_free(struct agent_session *s);
 
 /* Drop every conversation item, leaving the session ready to start a
- * fresh turn. Preserves model, system prompt, tools, and reasoning_effort
+ * fresh turn. Preserves model, system prompt, tools, and effort
  * — those are session-level config, not per-conversation state. The
  * items vector's capacity is kept allocated so subsequent appends don't
  * have to grow it from zero. Used by `/new` (and `/clear`). */

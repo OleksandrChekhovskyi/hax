@@ -138,7 +138,7 @@ void session_meta_free(struct session_meta *m)
     free(m->cwd);
     free(m->provider);
     free(m->model);
-    free(m->reasoning_effort);
+    free(m->effort);
     memset(m, 0, sizeof(*m));
 }
 
@@ -246,7 +246,7 @@ struct session_log {
     char *timestamp; /* ISO-8601 for the header */
     char *provider;
     char *model;
-    char *reasoning_effort;
+    char *effort;
 };
 
 /* (Re)compute path/id/cwd/timestamp for a fresh session and clear the
@@ -290,15 +290,14 @@ static int session_begin(struct session_log *log)
 
 static FILE *open_session_file(const char *path, int append);
 
-struct session_log *session_log_open(const char *provider, const char *model,
-                                     const char *reasoning_effort)
+struct session_log *session_log_open(const char *provider, const char *model, const char *effort)
 {
     if (sessions_disabled())
         return NULL;
     struct session_log *log = xcalloc(1, sizeof(*log));
     log->provider = provider ? xstrdup(provider) : NULL;
     log->model = model ? xstrdup(model) : NULL;
-    log->reasoning_effort = reasoning_effort ? xstrdup(reasoning_effort) : NULL;
+    log->effort = effort ? xstrdup(effort) : NULL;
     if (session_begin(log) < 0) {
         session_log_close(log);
         return NULL;
@@ -307,7 +306,7 @@ struct session_log *session_log_open(const char *provider, const char *model,
 }
 
 struct session_log *session_log_resume(const char *path, const char *provider, const char *model,
-                                       const char *reasoning_effort, size_t n_loaded)
+                                       const char *effort, size_t n_loaded)
 {
     if (sessions_disabled())
         return NULL;
@@ -328,7 +327,7 @@ struct session_log *session_log_resume(const char *path, const char *provider, c
     log->n_written = n_loaded;
     log->provider = provider ? xstrdup(provider) : NULL;
     log->model = model ? xstrdup(model) : NULL;
-    log->reasoning_effort = reasoning_effort ? xstrdup(reasoning_effort) : NULL;
+    log->effort = effort ? xstrdup(effort) : NULL;
     return log;
 }
 
@@ -418,7 +417,7 @@ static void write_header(struct session_log *log)
     set_str(h, "cwd", log->cwd);
     set_str(h, "provider", log->provider);
     set_str(h, "model", log->model);
-    set_str(h, "reasoning_effort", log->reasoning_effort);
+    set_str(h, "effort", log->effort);
     char *s = json_dumps(h, JSON_COMPACT);
     if (s) {
         fputs(s, log->fp);
@@ -455,7 +454,7 @@ void session_log_append(struct session_log *log, const struct item *items, size_
 }
 
 void session_log_set_meta(struct session_log *log, const char *provider, const char *model,
-                          const char *reasoning_effort)
+                          const char *effort)
 {
     if (!log)
         return;
@@ -468,8 +467,8 @@ void session_log_set_meta(struct session_log *log, const char *provider, const c
     log->provider = provider ? xstrdup(provider) : NULL;
     free(log->model);
     log->model = model ? xstrdup(model) : NULL;
-    free(log->reasoning_effort);
-    log->reasoning_effort = reasoning_effort ? xstrdup(reasoning_effort) : NULL;
+    free(log->effort);
+    log->effort = effort ? xstrdup(effort) : NULL;
 }
 
 void session_log_reset(struct session_log *log)
@@ -500,7 +499,7 @@ void session_log_close(struct session_log *log)
     free(log->timestamp);
     free(log->provider);
     free(log->model);
-    free(log->reasoning_effort);
+    free(log->effort);
     free(log);
 }
 
@@ -572,7 +571,7 @@ int session_load(const char *path, struct item **out_items, size_t *out_n,
                 out_meta->cwd = dup_field(o, "cwd");
                 out_meta->provider = dup_field(o, "provider");
                 out_meta->model = dup_field(o, "model");
-                out_meta->reasoning_effort = dup_field(o, "reasoning_effort");
+                out_meta->effort = dup_field(o, "effort");
             }
             json_decref(o);
             continue;

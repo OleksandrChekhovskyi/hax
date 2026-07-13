@@ -7,7 +7,7 @@
 /*
  * The session's effective provider/model/effort, published by the agent
  * layer and exported into bash-tool children as HAX_PROVIDER / HAX_MODEL /
- * HAX_REASONING_EFFORT — so a nested `hax -p` (subagent) inherits exactly
+ * HAX_EFFORT — so a nested `hax -p` (subagent) inherits exactly
  * what the parent sends on the wire, including session-only state (an
  * auto-selected provider, a /model pick) that lives in the override tier,
  * not the environment. HAX_PRESET is cleared alongside: a preset the parent

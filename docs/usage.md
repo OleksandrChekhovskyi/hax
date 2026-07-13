@@ -190,7 +190,7 @@ when the user asks for it. There is no dedicated subagent machinery: a subagent 
 run by hax, so everything above about `-p`, sessions, and resume applies to it.
 
 - The child inherits the parent's exact provider, model, and effort: the bash tool exports the
-  parent session's effective selection as `HAX_PROVIDER` / `HAX_MODEL` / `HAX_REASONING_EFFORT`
+  parent session's effective selection as `HAX_PROVIDER` / `HAX_MODEL` / `HAX_EFFORT`
   for its children, so even session-only picks (an auto-selected provider, a mid-session
   `/model`) carry over.
 - A different role or backend per subagent is one flag away: `--preset review`, or explicit

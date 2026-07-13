@@ -35,7 +35,7 @@ walks through model and reasoning-effort selection when those are available.
 `HAX_MODEL` or the `model` config key sets the model. Providers with no default model require
 one in `-p` mode; interactively, `/model` can pick one if the provider exposes a model list.
 
-`HAX_REASONING_EFFORT` or `/effort` sets a provider-specific effort value. The picker only
+`HAX_EFFORT` or `/effort` sets a provider-specific effort value. The picker only
 offers effort levels when the current provider exposes a ladder. If the value is not accepted
 by the current provider's ladder, hax falls back to that provider's default.
 

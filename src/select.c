@@ -322,7 +322,7 @@ static void commit_selection(const char *provider, const char *model, const char
     if (model)
         config_set_override("model", model);
     if (effort)
-        config_set_override("reasoning_effort", effort);
+        config_set_override("effort", effort);
     if (config_persist_selection(provider, model, effort) != 0) {
         /* The overrides above keep the pick active this session, but it didn't
          * reach state.json (an unwritable state dir), so it won't survive a
@@ -364,7 +364,7 @@ void select_effort(struct agent_state *st)
     char *e;
     /* Explicit /effort: announce when the provider has no effort levels.
      * Only a made pick commits; cancel and no-ladder both change nothing. */
-    if (choose_effort(st, p, st->sess->reasoning_effort, &e, 1) != PICK_MADE)
+    if (choose_effort(st, p, st->sess->effort, &e, 1) != PICK_MADE)
         return;
     /* The provider is pinned alongside the effort, for the same reason
      * select_model does: an explicit setting against an auto-selected provider
@@ -409,12 +409,12 @@ void select_model(struct agent_state *st)
 
     /* Run the chained effort pick BEFORE committing. commit_selection persists
      * into the state tier, which deep-copies and frees the old tier object —
-     * and st->sess->reasoning_effort may point into it (after a prior
+     * and st->sess->effort may point into it (after a prior
      * session's /effort). Reading it as the picker's "current" marker after a
      * commit would be a use-after-free, so gather both picks first, then commit
      * once. Skips silently if this provider has no ladder. */
     char *e = NULL;
-    enum pick_status es = choose_effort(st, p, st->sess->reasoning_effort, &e, 0);
+    enum pick_status es = choose_effort(st, p, st->sess->effort, &e, 0);
     if (es == PICK_CANCELLED) {
         /* Escape mid-chain: discard the model pick too — nothing commits. */
         free(m);

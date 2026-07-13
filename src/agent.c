@@ -636,10 +636,10 @@ void agent_print_banner(const struct provider *p, const struct agent_session *s)
         printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM
                "%s› %s · no model — use /model" ANSI_BOLD_OFF "\n",
                bar, stance, name);
-    else if (s->reasoning_effort)
+    else if (s->effort)
         printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "%s› %s · %s · %s" ANSI_BOLD_OFF
                "\n",
-               bar, stance, name, model_label, s->reasoning_effort);
+               bar, stance, name, model_label, s->effort);
     else
         printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "%s› %s · %s" ANSI_BOLD_OFF "\n",
                bar, stance, name, model_label);
@@ -726,7 +726,7 @@ int agent_apply_settings(struct agent_state *st)
      * a no-op for the current file; the next /new carries the values forward.
      * (Per-item reasoning blobs carry their own provider+model stamp, so a
      * mid-session switch stays correct independent of this header.) */
-    session_log_set_meta(st->slog, provider_log_name(p), s->model, s->reasoning_effort);
+    session_log_set_meta(st->slog, provider_log_name(p), s->model, s->effort);
 
     /* On an empty conversation the startup banner is usually still on
      * screen just above, boldly asserting the old settings; a dim line
@@ -752,10 +752,10 @@ int agent_apply_settings(struct agent_state *st)
      * conversation would just be context noise (and skew the transcript /
      * --resume view away from what the model actually saw). */
     const char *model_label = s->model_label ? s->model_label : s->model;
-    char *label = s->reasoning_effort
-                      ? xasprintf("switched to %s · %s · %s", p->name ? p->name : "?", model_label,
-                                  s->reasoning_effort)
-                      : xasprintf("switched to %s · %s", p->name ? p->name : "?", model_label);
+    char *label =
+        s->effort
+            ? xasprintf("switched to %s · %s · %s", p->name ? p->name : "?", model_label, s->effort)
+            : xasprintf("switched to %s · %s", p->name ? p->name : "?", model_label);
 
     render_open_block(st->r);
     disp_raw(ANSI_DIM);
@@ -1010,8 +1010,7 @@ void agent_resume_session(struct agent_state *st, const char *path)
      * transcript mirror to the restored history (reset writes the header,
      * the append replays the items). */
     session_log_close(st->slog);
-    st->slog = session_log_resume(path, provider_log_name(st->provider), s->model,
-                                  s->reasoning_effort, nl);
+    st->slog = session_log_resume(path, provider_log_name(st->provider), s->model, s->effort, nl);
     transcript_log_reset(st->tlog, s->sys, s->tools, s->n_tools);
     transcript_log_append(st->tlog, s->items, s->n_items);
 
@@ -1250,8 +1249,8 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
      * NULL-safe. */
     state.slog = opts->resume_path
                      ? session_log_resume(opts->resume_path, provider_log_name(p), sess.model,
-                                          sess.reasoning_effort, n_resumed)
-                     : session_log_open(provider_log_name(p), sess.model, sess.reasoning_effort);
+                                          sess.effort, n_resumed)
+                     : session_log_open(provider_log_name(p), sess.model, sess.effort);
     /* Mirror restored history into the HAX_TRANSCRIPT log — its header
      * was just written by _open; the items follow so the mirror matches
      * the live conversation. */

@@ -57,7 +57,7 @@ struct codex {
                   * /usage). NULL when the auth.json had no id_token, or the JWT was
                   * unparseable, or it didn't carry an "email" claim. */
     char *default_model;
-    char *default_reasoning_effort;
+    char *default_effort;
     char *session_id; /* sent as prompt_cache_key — stable for process lifetime
                                              so the server can hit its prefix cache across turns */
     /* Optional context-window probe spawned at construction; joined by
@@ -163,10 +163,10 @@ static char *parse_top_level_toml_string_key(const char *contents, size_t len, c
     return NULL;
 }
 
-static void load_codex_settings(char **out_model, char **out_reasoning_effort)
+static void load_codex_settings(char **out_model, char **out_effort)
 {
     *out_model = NULL;
-    *out_reasoning_effort = NULL;
+    *out_effort = NULL;
 
     char *path = expand_home("~/.codex/config.toml");
     size_t len = 0;
@@ -176,8 +176,7 @@ static void load_codex_settings(char **out_model, char **out_reasoning_effort)
         return;
 
     *out_model = parse_top_level_toml_string_key(contents, len, "model");
-    *out_reasoning_effort =
-        parse_top_level_toml_string_key(contents, len, "model_reasoning_effort");
+    *out_effort = parse_top_level_toml_string_key(contents, len, "model_reasoning_effort");
     free(contents);
 }
 
@@ -381,10 +380,9 @@ static char *build_body(const struct context *ctx, const char *provider, const c
     if (cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(cache_key));
 
-    if (ctx->reasoning_effort)
-        json_object_set_new(
-            body, "reasoning",
-            json_pack("{s:s, s:s}", "effort", ctx->reasoning_effort, "summary", "auto"));
+    if (ctx->effort)
+        json_object_set_new(body, "reasoning",
+                            json_pack("{s:s, s:s}", "effort", ctx->effort, "summary", "auto"));
 
     char *s = json_dumps(body, JSON_COMPACT);
     json_decref(body);
@@ -928,7 +926,7 @@ static void codex_destroy(struct provider *p)
     free(c->account_id);
     free(c->email);
     free(c->default_model);
-    free(c->default_reasoning_effort);
+    free(c->default_effort);
     free(c->session_id);
     free(c);
 }
@@ -965,26 +963,26 @@ struct provider *codex_provider_new(const char *name)
     }
 
     char *cfg_model = NULL;
-    char *cfg_reasoning_effort = NULL;
-    load_codex_settings(&cfg_model, &cfg_reasoning_effort);
+    char *cfg_effort = NULL;
+    load_codex_settings(&cfg_model, &cfg_effort);
     if (cfg_model && !*cfg_model) {
         free(cfg_model);
         cfg_model = NULL;
     }
-    if (cfg_reasoning_effort && !*cfg_reasoning_effort) {
-        free(cfg_reasoning_effort);
-        cfg_reasoning_effort = NULL;
+    if (cfg_effort && !*cfg_effort) {
+        free(cfg_effort);
+        cfg_effort = NULL;
     }
 
     struct codex *c = xcalloc(1, sizeof(*c));
     c->default_model = cfg_model ? cfg_model : xstrdup("gpt-5.3-codex");
-    c->default_reasoning_effort = cfg_reasoning_effort;
+    c->default_effort = cfg_effort;
     c->base.name = "codex";
     /* Codex serves OpenAI models under a subscription — no reported cost,
      * so the catalog supplies API-equivalent rates for the "~$" estimate. */
     c->base.catalog_id = "openai";
     c->base.default_model = c->default_model;
-    c->base.default_reasoning_effort = c->default_reasoning_effort;
+    c->base.default_effort = c->default_effort;
     c->base.stream = codex_stream;
     c->base.query_usage = codex_query_usage;
     c->base.list_models = codex_list_models;

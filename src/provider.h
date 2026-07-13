@@ -95,7 +95,7 @@ struct context {
      * reasoning_effort). NULL means "don't send" so the server picks its
      * own default. Values like "minimal"/"low"/"medium"/"high"/"xhigh" are
      * passed through unchanged — hax doesn't validate or clamp. */
-    const char *reasoning_effort;
+    const char *effort;
 };
 
 /* Token accounting for one completed response. -1 means "not reported by
@@ -231,9 +231,9 @@ struct provider {
      * UI/env-block label that the caller owns; the exact id is still used on the
      * wire and in persisted metadata. NULL means use the id unchanged. */
     char *(*model_label)(struct provider *p, const char *model);
-    /* Reasoning effort used when HAX_REASONING_EFFORT is unset. NULL means
+    /* Reasoning effort used when HAX_EFFORT is unset. NULL means
      * omit the field and let the backend choose. */
-    const char *default_reasoning_effort;
+    const char *default_effort;
     /* Sort list_models output alphabetically in the /model picker. Set by
      * providers whose catalog order carries no meaning; leave 0 where the
      * server's order is deliberate (curated, newest-first) or trivially

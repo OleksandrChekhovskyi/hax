@@ -41,11 +41,11 @@ int item_from_json(const json_t *obj, struct item *out);
 /* ---------------- session metadata (the header line) ---------------- */
 
 struct session_meta {
-    char *id;               /* uuid */
-    char *cwd;              /* cwd recorded when the session began */
-    char *provider;         /* HAX_PROVIDER name; may be NULL on old files */
-    char *model;            /* may be NULL */
-    char *reasoning_effort; /* may be NULL */
+    char *id;       /* uuid */
+    char *cwd;      /* cwd recorded when the session began */
+    char *provider; /* HAX_PROVIDER name; may be NULL on old files */
+    char *model;    /* may be NULL */
+    char *effort;   /* may be NULL */
 };
 
 void session_meta_free(struct session_meta *m);
@@ -60,8 +60,7 @@ struct session_log; /* opaque */
  * disabled (HAX_NO_SESSION) or no state directory is resolvable. The file
  * is created lazily on the first append, so a run that sends nothing
  * leaves no file behind. */
-struct session_log *session_log_open(const char *provider, const char *model,
-                                     const char *reasoning_effort);
+struct session_log *session_log_open(const char *provider, const char *model, const char *effort);
 
 /* Continue an existing session file: opens `path` for append and treats
  * the first `n_loaded` items as already written, so session_log_append
@@ -70,7 +69,7 @@ struct session_log *session_log_open(const char *provider, const char *model,
  * than forking a new one. Returns NULL when sessions are disabled or the
  * file can't be opened for append. */
 struct session_log *session_log_resume(const char *path, const char *provider, const char *model,
-                                       const char *reasoning_effort, size_t n_loaded);
+                                       const char *effort, size_t n_loaded);
 
 /* Append items [n_written..n_items) as one JSONL line each. No-op when
  * `log` is NULL or nothing new accumulated. Materializes the file (and
@@ -86,7 +85,7 @@ void session_log_append(struct session_log *log, const struct item *items, size_
  * is a harmless in-memory update that the next session_log_reset carries into
  * the rotated file. No-op when `log` is NULL. */
 void session_log_set_meta(struct session_log *log, const char *provider, const char *model,
-                          const char *reasoning_effort);
+                          const char *effort);
 
 /* Rotate to a brand-new session id/file (for /new). Closes the current
  * file; the next append lazily materializes the fresh one. */

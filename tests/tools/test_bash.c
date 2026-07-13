@@ -1029,13 +1029,13 @@ static void test_bash_subagent_env(void)
 
     setenv("HAX_PROVIDER", "parent-provider", 1);
     setenv("HAX_MODEL", "parent-model", 1);
-    setenv("HAX_REASONING_EFFORT", "parent-effort", 1);
+    setenv("HAX_EFFORT", "parent-effort", 1);
     setenv("HAX_PRESET", "parent-preset", 1);
     setenv("HAX_TRACE", "/tmp/parent.trace", 1);
     setenv("HAX_TRANSCRIPT", "/tmp/parent.transcript", 1);
     bash_export_selection("mock", "m-1", NULL);
     char *out = call_bash("echo p=$HAX_PROVIDER; echo m=$HAX_MODEL; "
-                          "echo e=$HAX_REASONING_EFFORT; echo ps=$HAX_PRESET; "
+                          "echo e=$HAX_EFFORT; echo ps=$HAX_PRESET; "
                           "echo d=$HAX_SUBAGENT_DEPTH; echo tr=$HAX_TRACE; "
                           "echo tl=$HAX_TRANSCRIPT");
     char *want = xasprintf("p=mock\nm=m-1\ne=\nps=\n%str=\ntl=\n", depth_expect);
@@ -1057,7 +1057,7 @@ static void test_bash_subagent_env(void)
 
     unsetenv("HAX_PROVIDER");
     unsetenv("HAX_MODEL");
-    unsetenv("HAX_REASONING_EFFORT");
+    unsetenv("HAX_EFFORT");
     unsetenv("HAX_PRESET");
     unsetenv("HAX_TRACE");
     unsetenv("HAX_TRANSCRIPT");

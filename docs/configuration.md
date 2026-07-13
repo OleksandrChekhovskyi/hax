@@ -40,7 +40,7 @@ objects, though flat dotted keys are also accepted.
   "provider": "openai-compatible",
   "provider_name": "vLLM",
   "model": "Qwen3-30B",
-  "reasoning_effort": "medium",
+  "effort": "medium",
   "openai": {
     "base_url": "http://127.0.0.1:8000/v1"
   }
@@ -107,7 +107,7 @@ model, reasoning effort, and system prompt. Define them under `presets.<name>` i
       "description": "thorough code review on a strong model",
       "provider": "codex",
       "model": "gpt-5.6-sol",
-      "reasoning_effort": "high",
+      "effort": "high",
       "system_prompt": "You are a meticulous code reviewer. ..."
     },
     "scout": {
@@ -122,7 +122,7 @@ model, reasoning effort, and system prompt. Define them under `presets.<name>` i
 Semantics:
 
 - `provider` is required; it anchors the selection.
-- `model` and `reasoning_effort` are optional. Omitted, the provider's own default applies
+- `model` and `effort` are optional. Omitted, the provider's own default applies
   (llama.cpp discovers the served model), shadowing any env/state/config value — the same
   rule a `/provider` switch uses, so a stale `HAX_MODEL` can't leak into a different backend.
   Explicit `--model`/`--effort` flags still win over the preset.
@@ -157,7 +157,7 @@ clearing its name and system prompt. `--preset` and `HAX_PRESET` apply per-run a
 nothing.
 
 Explicit per-run input beats the persisted stance as a whole: when any selection flag or
-selection env var (`HAX_PROVIDER`, `HAX_MODEL`, `HAX_REASONING_EFFORT`, `HAX_SYSTEM_PROMPT`)
+selection env var (`HAX_PROVIDER`, `HAX_MODEL`, `HAX_EFFORT`, `HAX_SYSTEM_PROMPT`)
 is set, a preset coming from `state.json` or a config-file `preset` default is skipped
 entirely — presets apply whole or not at all, never blended with other input. A preset named
 explicitly for the run (`--preset`, `HAX_PRESET`) still
@@ -187,7 +187,7 @@ canonical key and its environment variable.
   first, then the first available provider in priority order.
 - `model` / `HAX_MODEL` — model id. Required when the provider has no default and cannot
   auto-fill it.
-- `reasoning_effort` / `HAX_REASONING_EFFORT` — provider-specific reasoning effort. Empty
+- `effort` / `HAX_EFFORT` — provider-specific reasoning effort. Empty
   string forces omission.
 - `system_prompt` / `HAX_SYSTEM_PROMPT` — override the base system prompt. Empty string sends
   no system message.

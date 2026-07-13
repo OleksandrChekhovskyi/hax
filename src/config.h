@@ -46,7 +46,7 @@
  *     detection), or per-provider (openai.base_url) carry no registry
  *     default and their consumer supplies it when config_str returns NULL.
  *
- * Two keys resolve with one extra rule: "model" and "reasoning_effort" are
+ * Two keys resolve with one extra rule: "model" and "effort" are
  * provider-bound. They only mean something relative to a provider, so the
  * selectors persist them as one set with the "provider" they were picked for
  * (config_persist_selection), and a config file pairing them with a provider
@@ -106,7 +106,7 @@ void config_free(void);
 /* Resolved string for `key` (override → env → file → registry default), or
  * NULL when unset everywhere. Borrowed. Values are returned verbatim
  * including "" — empty is meaningful for some settings (HAX_SYSTEM_PROMPT=""
- * sends no system prompt, HAX_REASONING_EFFORT="" omits it). */
+ * sends no system prompt, HAX_EFFORT="" omits it). */
 const char *config_str(const char *key);
 
 /* Like config_str, but an empty value at any tier counts as unset there and
@@ -214,7 +214,7 @@ int config_persist_selection(const char *provider, const char *model, const char
  * from the config's presets.<name> object, written as overrides (above env
  * in precedence, below explicit CLI flags, which the caller applies
  * afterwards). The members: "provider" (required) anchors the selection;
- * "model" and "reasoning_effort" are optional and reset to
+ * "model" and "effort" are optional and reset to
  * CONFIG_VALUE_DEFAULT when unnamed, so the provider's own default applies;
  * "system_prompt" is optional and cleared when unnamed, so normal
  * resolution returns. Because every apply writes the whole set, presets

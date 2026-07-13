@@ -216,8 +216,8 @@ static void test_state_tier_ordering(void)
     unsetenv("HAX_MODEL");
     EXPECT_STR_EQ(config_str("model"), "from-state");
     /* Same nested/flat grammar as the file tier. */
-    EXPECT(config_load_state("{\"reasoning_effort\": \"high\"}") == 0);
-    EXPECT_STR_EQ(config_str("reasoning_effort"), "high");
+    EXPECT(config_load_state("{\"effort\": \"high\"}") == 0);
+    EXPECT_STR_EQ(config_str("effort"), "high");
     /* Clearing the state tier falls back to the file. */
     EXPECT(config_load_state(NULL) == 0);
     EXPECT_STR_EQ(config_str("model"), "from-file");
@@ -232,16 +232,16 @@ static void test_provider_binding(void)
      * with them: they apply while it is the active provider ... */
     EXPECT(config_load("{\"model\": \"from-file\"}") == 0);
     EXPECT(config_load_state("{\"provider\": \"openai\", \"model\": \"gpt-x\","
-                             " \"reasoning_effort\": \"high\"}") == 0);
+                             " \"effort\": \"high\"}") == 0);
     EXPECT_STR_EQ(config_str("provider"), "openai");
     EXPECT_STR_EQ(config_str("model"), "gpt-x");
-    EXPECT_STR_EQ(config_str("reasoning_effort"), "high");
+    EXPECT_STR_EQ(config_str("effort"), "high");
 
     /* ... and a one-off HAX_PROVIDER skips them: resolution falls through to
      * the (unbound) file tier / registry default instead. */
     setenv("HAX_PROVIDER", "mock", 1);
     EXPECT_STR_EQ(config_str("model"), "from-file");
-    EXPECT(config_str("reasoning_effort") == NULL);
+    EXPECT(config_str("effort") == NULL);
     /* An explicit env model is a deliberate pairing and always applies. */
     setenv("HAX_MODEL", "env-model", 1);
     EXPECT_STR_EQ(config_str("model"), "env-model");
@@ -253,12 +253,12 @@ static void test_provider_binding(void)
     /* The file tier is bound the same way when it pairs model with provider:
      * a hand-written codex default doesn't leak into HAX_PROVIDER=mock. */
     EXPECT(config_load("{\"provider\": \"codex\", \"model\": \"gpt-x\","
-                       " \"reasoning_effort\": \"high\"}") == 0);
+                       " \"effort\": \"high\"}") == 0);
     EXPECT(config_load_state(NULL) == 0);
     EXPECT_STR_EQ(config_str("model"), "gpt-x");
     setenv("HAX_PROVIDER", "mock", 1);
     EXPECT(config_str("model") == NULL);
-    EXPECT(config_str("reasoning_effort") == NULL);
+    EXPECT(config_str("effort") == NULL);
     unsetenv("HAX_PROVIDER");
 
     /* A tier that records no provider is unbound: a bare "model" in
@@ -305,20 +305,20 @@ static void test_persist_selection(void)
     EXPECT(config_persist_selection("codex", "gpt-x", "high") == 0);
     EXPECT_STR_EQ(config_str("provider"), "codex");
     EXPECT_STR_EQ(config_str("model"), "gpt-x");
-    EXPECT_STR_EQ(config_str("reasoning_effort"), "high");
+    EXPECT_STR_EQ(config_str("effort"), "high");
 
     /* Unpicked members (NULL) keep their stored value while the provider is
      * unchanged: an effort-only pick must not wipe the saved model. */
     EXPECT(config_persist_selection("codex", NULL, "low") == 0);
     EXPECT_STR_EQ(config_str("model"), "gpt-x");
-    EXPECT_STR_EQ(config_str("reasoning_effort"), "low");
+    EXPECT_STR_EQ(config_str("effort"), "low");
 
     /* Re-pinning a different provider resets unpicked members to the
      * sentinel: the old provider's picks must not follow the new one. */
     EXPECT(config_persist_selection("mock", NULL, NULL) == 0);
     EXPECT_STR_EQ(config_str("provider"), "mock");
     EXPECT(config_str("model") == NULL);
-    EXPECT(config_str("reasoning_effort") == NULL);
+    EXPECT(config_str("effort") == NULL);
 
     /* The reset is on disk, not just in memory. */
     config_load_state(NULL);
@@ -502,11 +502,11 @@ static void test_persist_roundtrip(void)
     EXPECT(stat(cfgpath, &st) == 0 && (st.st_mode & 0777) == 0600);
 
     /* A subsequent persist preserves the earlier keys. */
-    EXPECT(config_persist("reasoning_effort", "high") == 0);
+    EXPECT(config_persist("effort", "high") == 0);
     config_load(NULL);
     config_init();
     EXPECT_STR_EQ(config_str("model"), "saved-model");
-    EXPECT_STR_EQ(config_str("reasoning_effort"), "high");
+    EXPECT_STR_EQ(config_str("effort"), "high");
 
     /* A hostile umask must not strip the 0600 contract: mkstemp's mode
      * is masked by the umask, the fchmod after it is not. (The config
@@ -599,7 +599,7 @@ static void test_preset_apply(void)
                        "\"description\": \"code review stance\","
                        "\"provider\": \"mock\","
                        "\"model\": \"rev-model\","
-                       "\"reasoning_effort\": \"high\","
+                       "\"effort\": \"high\","
                        "\"system_prompt\": \"you review code\"},"
                        "\"min\": {\"provider\": \"mock\"}}}") == 0);
 
@@ -610,7 +610,7 @@ static void test_preset_apply(void)
     setenv("HAX_MODEL", "env-model", 1);
     EXPECT_STR_EQ(config_str("provider"), "mock");
     EXPECT_STR_EQ(config_str("model"), "rev-model");
-    EXPECT_STR_EQ(config_str("reasoning_effort"), "high");
+    EXPECT_STR_EQ(config_str("effort"), "high");
     EXPECT_STR_EQ(config_str("system_prompt"), "you review code");
     /* The applied name is recorded as the active stance (banner, /session). */
     EXPECT_STR_EQ(config_str("preset"), "review");
@@ -628,7 +628,7 @@ static void test_preset_apply(void)
     EXPECT(err == NULL);
     EXPECT_STR_EQ(config_str("provider"), "mock");
     EXPECT(config_str("model") == NULL);
-    EXPECT(config_str("reasoning_effort") == NULL);
+    EXPECT(config_str("effort") == NULL);
     EXPECT_STR_EQ(config_str("system_prompt"), "custom prompt");
     EXPECT_STR_EQ(config_str("preset"), "min");
     unsetenv("HAX_MODEL");
@@ -638,7 +638,7 @@ static void test_preset_apply(void)
     config_set_override("preset", NULL);
     config_set_override("provider", NULL);
     config_set_override("model", NULL);
-    config_set_override("reasoning_effort", NULL);
+    config_set_override("effort", NULL);
     config_set_override("system_prompt", NULL);
 }
 
@@ -750,7 +750,7 @@ static void test_preset_dotted_name(void)
     config_set_override("preset", NULL);
     config_set_override("provider", NULL);
     config_set_override("model", NULL);
-    config_set_override("reasoning_effort", NULL);
+    config_set_override("effort", NULL);
     config_set_override("system_prompt", NULL);
 
     /* The flat-authored top-level form still resolves via the fallback. */
@@ -761,7 +761,7 @@ static void test_preset_dotted_name(void)
     config_set_override("preset", NULL);
     config_set_override("provider", NULL);
     config_set_override("model", NULL);
-    config_set_override("reasoning_effort", NULL);
+    config_set_override("effort", NULL);
     config_set_override("system_prompt", NULL);
 }
 

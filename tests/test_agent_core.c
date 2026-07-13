@@ -180,7 +180,7 @@ static void test_build_system_prompt_with_suffix(void)
     unsetenv("HAX_NO_AGENTS_MD");
 }
 
-/* ---------- resolve_reasoning_effort ---------- */
+/* ---------- resolve_effort ---------- */
 
 static const char *const test_effort_levels[] = {"low", "high"};
 
@@ -191,43 +191,42 @@ static size_t test_list_efforts(struct provider *p, const char *const **out)
     return 2;
 }
 
-static void test_resolve_reasoning_effort(void)
+static void test_resolve_effort(void)
 {
-    struct provider p = {.default_reasoning_effort = "default-e",
-                         .list_efforts = test_list_efforts};
+    struct provider p = {.default_effort = "default-e", .list_efforts = test_list_efforts};
 
     /* unset → provider default */
-    unsetenv("HAX_REASONING_EFFORT");
-    EXPECT_STR_EQ(resolve_reasoning_effort(&p), "default-e");
+    unsetenv("HAX_EFFORT");
+    EXPECT_STR_EQ(resolve_effort(&p), "default-e");
 
     /* explicit empty → "force omit" (NULL), even though provider has a default */
-    setenv("HAX_REASONING_EFFORT", "", 1);
-    EXPECT(resolve_reasoning_effort(&p) == NULL);
+    setenv("HAX_EFFORT", "", 1);
+    EXPECT(resolve_effort(&p) == NULL);
 
     /* non-empty → passes through verbatim */
-    setenv("HAX_REASONING_EFFORT", "low", 1);
-    EXPECT_STR_EQ(resolve_reasoning_effort(&p), "low");
+    setenv("HAX_EFFORT", "low", 1);
+    EXPECT_STR_EQ(resolve_effort(&p), "low");
 
     /* with no provider default and unset env, returns NULL */
-    unsetenv("HAX_REASONING_EFFORT");
-    struct provider p2 = {.default_reasoning_effort = NULL, .list_efforts = test_list_efforts};
-    EXPECT(resolve_reasoning_effort(&p2) == NULL);
+    unsetenv("HAX_EFFORT");
+    struct provider p2 = {.default_effort = NULL, .list_efforts = test_list_efforts};
+    EXPECT(resolve_effort(&p2) == NULL);
 
     /* a provider with no effort ladder (NULL hook, or one that reports zero
      * levels) never resolves an effort — even one persisted in config — so a
      * stale value can't leak onto e.g. llama.cpp / ollama. */
-    setenv("HAX_REASONING_EFFORT", "high", 1);
-    struct provider p3 = {.default_reasoning_effort = "default-e", .list_efforts = NULL};
-    EXPECT(resolve_reasoning_effort(&p3) == NULL);
+    setenv("HAX_EFFORT", "high", 1);
+    struct provider p3 = {.default_effort = "default-e", .list_efforts = NULL};
+    EXPECT(resolve_effort(&p3) == NULL);
 
     /* a value the provider's ladder doesn't accept (a stale pick carried over
      * from a different backend) falls back to the provider default rather than
      * being sent verbatim. test_list_efforts offers {low, high}. */
-    setenv("HAX_REASONING_EFFORT", "medium", 1);
-    EXPECT_STR_EQ(resolve_reasoning_effort(&p), "default-e");
+    setenv("HAX_EFFORT", "medium", 1);
+    EXPECT_STR_EQ(resolve_effort(&p), "default-e");
     /* same, but no provider default to fall back to → omit. */
-    EXPECT(resolve_reasoning_effort(&p2) == NULL);
-    unsetenv("HAX_REASONING_EFFORT");
+    EXPECT(resolve_effort(&p2) == NULL);
+    unsetenv("HAX_EFFORT");
 }
 
 /* ---------- agent_session_init ---------- */
@@ -391,11 +390,11 @@ static void test_session_absorb_with_tool_call(void)
 
 static void test_session_context_snapshot(void)
 {
-    /* model/reasoning_effort are owned (freed by agent_session_free), so seed
+    /* model/effort are owned (freed by agent_session_free), so seed
      * them with heap copies rather than string literals. */
     struct agent_session s = {
         .model = xstrdup("m1"),
-        .reasoning_effort = xstrdup("high"),
+        .effort = xstrdup("high"),
         .sys = NULL,
         .tools = NULL,
         .n_tools = 0,
@@ -408,7 +407,7 @@ static void test_session_context_snapshot(void)
     EXPECT(ctx.n_items == 2);
     EXPECT(ctx.tools == NULL);
     EXPECT(ctx.n_tools == 0);
-    EXPECT_STR_EQ(ctx.reasoning_effort, "high");
+    EXPECT_STR_EQ(ctx.effort, "high");
 
     agent_session_free(&s);
 }
@@ -561,7 +560,7 @@ int main(void)
     test_build_system_prompt_custom_no_suffix();
     test_build_system_prompt_default_no_suffix();
     test_build_system_prompt_with_suffix();
-    test_resolve_reasoning_effort();
+    test_resolve_effort();
     test_session_init_model_label();
     test_session_init_raw();
     test_session_init_missing_model();

@@ -532,8 +532,7 @@ int main(int argc, char **argv)
      * does so silently, like every other case of explicit input shadowing
      * persisted state; the banner shows what actually runs. */
     int explicit_sel = opt_provider || opt_model || opt_effort || getenv("HAX_PROVIDER") ||
-                       getenv("HAX_MODEL") || getenv("HAX_REASONING_EFFORT") ||
-                       getenv("HAX_SYSTEM_PROMPT");
+                       getenv("HAX_MODEL") || getenv("HAX_EFFORT") || getenv("HAX_SYSTEM_PROMPT");
 
     const char *preset = opt_preset ? opt_preset : getenv("HAX_PRESET");
     int preset_explicit = preset != NULL;
@@ -570,7 +569,7 @@ int main(int argc, char **argv)
     if (opt_model)
         config_set_override("model", opt_model);
     if (opt_effort)
-        config_set_override("reasoning_effort", opt_effort);
+        config_set_override("effort", opt_effort);
     /* --bare = every environment-derived context section stripped in one
      * flag — the common shape for scripted / subagent scout runs, and one
      * place to grow when new context sections appear. Deliberately a flag,

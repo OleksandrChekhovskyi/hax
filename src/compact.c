@@ -188,7 +188,7 @@ char *compact_summarize(const struct agent_session *s, struct provider *p, const
             .n_items = n,
             .tools = s->tools,
             .n_tools = s->n_tools,
-            .reasoning_effort = s->reasoning_effort,
+            .effort = s->effort,
         };
         if (attempts)
             (*attempts)++;

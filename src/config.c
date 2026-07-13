@@ -35,7 +35,7 @@ static const struct config_setting REGISTRY[] = {
      "llama.cpp, ollama, openrouter, mock"},
     {"model",                      "HAX_MODEL",                   NULL,
      "Model id (provider-specific; some auto-fill or require it)"},
-    {"reasoning_effort",           "HAX_REASONING_EFFORT",        NULL,
+    {"effort",                     "HAX_EFFORT",                  NULL,
      "Reasoning effort (minimal/low/medium/high/xhigh); empty omits it"},
     {"system_prompt",              "HAX_SYSTEM_PROMPT",           NULL,
      "Override the built-in system prompt; empty sends no system message"},
@@ -395,7 +395,7 @@ static const char *state_get(const char *key)
 
 static const char *resolve(const char *key, int skip_empty);
 
-/* "model" and "reasoning_effort" are provider-bound: the runtime selectors
+/* "model" and "effort" are provider-bound: the runtime selectors
  * persist them together with the "provider" they were picked for, and a
  * config file pairing them with a provider means the same. A bound value
  * applies only while that provider is the active one — otherwise the tier is
@@ -405,7 +405,7 @@ static const char *resolve(const char *key, int skip_empty);
  * always honored — they are set explicitly for this run/session. */
 static int binding_allows(json_t *tier, const char *key)
 {
-    if (strcmp(key, "model") != 0 && strcmp(key, "reasoning_effort") != 0)
+    if (strcmp(key, "model") != 0 && strcmp(key, "effort") != 0)
         return 1;
     const char *bound = obj_get(tier, "provider");
     if (!bound || !*bound)
@@ -747,8 +747,7 @@ int config_persist_selection(const char *provider, const char *model, const char
     if (model || repin)
         json_object_set_new(next, "model", json_string(model ? model : CONFIG_VALUE_DEFAULT));
     if (effort || repin)
-        json_object_set_new(next, "reasoning_effort",
-                            json_string(effort ? effort : CONFIG_VALUE_DEFAULT));
+        json_object_set_new(next, "effort", json_string(effort ? effort : CONFIG_VALUE_DEFAULT));
 
     int rc = write_json_atomic(path, next);
     free(path);
@@ -789,7 +788,7 @@ static const json_t *preset_node(const char *name)
  * provider_name) belong in a providers.<name> block the preset points at;
  * startup-latched behavior (context stripping, session recording) belongs
  * to the --bare / --no-session flags. */
-static const char *const PRESET_KEYS[] = {"provider", "model", "reasoning_effort", "system_prompt"};
+static const char *const PRESET_KEYS[] = {"provider", "model", "effort", "system_prompt"};
 
 /* Structural validation shared by apply and enumeration: the whole block
  * checks out or the preset is unusable — a typo'd member must not leave the
@@ -817,7 +816,7 @@ static int preset_validate(const json_t *obj, const char *name, char **err)
                 if (err)
                     *err = xasprintf(
                         "preset '%s': '%s' is not presettable (allowed: provider, model, "
-                        "reasoning_effort, system_prompt); endpoint settings belong in a "
+                        "effort, system_prompt); endpoint settings belong in a "
                         "providers.<name> block, context/recording in the --bare/--no-session "
                         "flags",
                         name, k);
@@ -863,10 +862,10 @@ int config_preset_apply(const char *name, char **err)
      * to normal resolution (a user's configured prompt) is right where the
      * sentinel would wrongly force the built-in. */
     const char *m = json_string_value(json_object_get((json_t *)obj, "model"));
-    const char *e = json_string_value(json_object_get((json_t *)obj, "reasoning_effort"));
+    const char *e = json_string_value(json_object_get((json_t *)obj, "effort"));
     config_set_override("provider", json_string_value(json_object_get((json_t *)obj, "provider")));
     config_set_override("model", m ? m : CONFIG_VALUE_DEFAULT);
-    config_set_override("reasoning_effort", e ? e : CONFIG_VALUE_DEFAULT);
+    config_set_override("effort", e ? e : CONFIG_VALUE_DEFAULT);
     config_set_override("system_prompt",
                         json_string_value(json_object_get((json_t *)obj, "system_prompt")));
     /* Record the active stance under the "preset" key — what the banner and

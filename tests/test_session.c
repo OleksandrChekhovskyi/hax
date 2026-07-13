@@ -110,7 +110,7 @@ int main(void)
     EXPECT(meta.cwd != NULL && meta.cwd[0] != '\0');
     EXPECT_STR_EQ(meta.provider, "alpha");
     EXPECT_STR_EQ(meta.model, "m1");
-    EXPECT_STR_EQ(meta.reasoning_effort, "high");
+    EXPECT_STR_EQ(meta.effort, "high");
     char *saved_id = xstrdup(meta.id);
     free_items(items, n);
     session_meta_free(&meta);

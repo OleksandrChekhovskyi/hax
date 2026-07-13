@@ -411,7 +411,7 @@ static void slash_run_session(struct slash_ctx *ctx)
 
     const char *prov = (st->provider && st->provider->name) ? st->provider->name : "?";
     const char *model = (st->sess && st->sess->model && *st->sess->model) ? st->sess->model : "?";
-    const char *effort = st->sess ? st->sess->reasoning_effort : NULL;
+    const char *effort = st->sess ? st->sess->effort : NULL;
     if (effort && *effort)
         snprintf(row, sizeof(row), "%s · %s · %s", prov, model, effort);
     else

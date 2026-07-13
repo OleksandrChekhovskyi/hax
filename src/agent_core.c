@@ -81,7 +81,7 @@ void items_append(struct item **items, size_t *n, size_t *cap, struct item it)
     (*items)[(*n)++] = it;
 }
 
-const char *resolve_reasoning_effort(const struct provider *p)
+const char *resolve_effort(const struct provider *p)
 {
     /* A persisted/configured effort only makes sense for a provider that
      * exposes a categorical effort ladder. Without one (NULL hook or an empty
@@ -95,9 +95,9 @@ const char *resolve_reasoning_effort(const struct provider *p)
     if (n == 0)
         return NULL;
 
-    const char *e = config_str("reasoning_effort");
+    const char *e = config_str("effort");
     if (!e)
-        return p->default_reasoning_effort; /* unset / "(default)" → provider default */
+        return p->default_effort; /* unset / "(default)" → provider default */
     if (!*e)
         return NULL; /* explicit empty → force omit */
 
@@ -109,7 +109,7 @@ const char *resolve_reasoning_effort(const struct provider *p)
     for (size_t i = 0; i < n; i++)
         if (strcmp(e, eff[i]) == 0)
             return e;
-    return p->default_reasoning_effort;
+    return p->default_effort;
 }
 
 char *build_system_prompt(const char *model_label, int raw)
@@ -257,7 +257,7 @@ static void export_selection(const struct provider *p, const struct agent_sessio
     const char *id = config_str("provider");
     if ((!id || !*id) && p)
         id = p->name;
-    bash_export_selection(id, s->model, s->reasoning_effort);
+    bash_export_selection(id, s->model, s->effort);
 }
 
 int agent_session_init(struct agent_session *s, struct provider *p, const struct hax_opts *opts)
@@ -284,8 +284,8 @@ int agent_session_init(struct agent_session *s, struct provider *p, const struct
      * narrower opt-out (no system message but tools stay). */
     s->raw = opts->raw;
     s->sys = build_system_prompt(s->model_label, opts->raw);
-    const char *effort = resolve_reasoning_effort(p);
-    s->reasoning_effort = effort ? xstrdup(effort) : NULL;
+    const char *effort = resolve_effort(p);
+    s->effort = effort ? xstrdup(effort) : NULL;
 
     s->n_tools = opts->raw ? 0 : N_TOOLS;
     if (s->n_tools) {
@@ -319,9 +319,9 @@ int agent_session_reconfigure(struct agent_session *s, struct provider *p)
      * conversation going under the new settings. */
     free(s->sys);
     s->sys = build_system_prompt(s->model_label, s->raw);
-    const char *effort = resolve_reasoning_effort(p);
-    free(s->reasoning_effort);
-    s->reasoning_effort = effort ? xstrdup(effort) : NULL;
+    const char *effort = resolve_effort(p);
+    free(s->effort);
+    s->effort = effort ? xstrdup(effort) : NULL;
     export_selection(p, s);
     return 0;
 }
@@ -335,7 +335,7 @@ void agent_session_free(struct agent_session *s)
     free(s->sys);
     free(s->model);
     free(s->model_label);
-    free(s->reasoning_effort);
+    free(s->effort);
     memset(s, 0, sizeof(*s));
 }
 
@@ -354,7 +354,7 @@ struct context agent_session_context(const struct agent_session *s)
         .n_items = s->n_items,
         .tools = s->tools,
         .n_tools = s->n_tools,
-        .reasoning_effort = s->reasoning_effort,
+        .effort = s->effort,
     };
 }
 
