@@ -233,13 +233,28 @@ static void test_bash_timeout_grace_allows_cleanup(void)
      * before exiting (the common pytest / npm-test / cargo-test
      * cleanup-handler pattern). The naive "deadline hit → SIGKILL"
      * path would lose that final output. The grace window defers the
-     * SIGKILL so well-behaved cleanup handlers can finish. The shell
-     * parses the script before launching `sleep 30`, so the trap is
-     * installed before SIGTERM can arrive — no extra ASan margin
-     * needed in the timeout. */
-    setenv("HAX_BASH_TIMEOUT", "50ms", 1);
+     * SIGKILL so well-behaved cleanup handlers can finish.
+     *
+     * The deadline clock starts at fork(), so the child must exec the
+     * shell and install the trap before SIGTERM fires. On a loaded
+     * machine (parallel ASan suite) shell startup alone can exceed the
+     * timeout. The "armed" marker printed right after trap installation
+     * distinguishes that benign startup race (no armed, no cleaned →
+     * escalate the timeout and retry) from the regression this test
+     * guards against (armed but no cleaned: the trap existed and its
+     * output was still lost → fail immediately). Success stays keyed on
+     * "cleaned" alone: SIGTERM can land between the trap and the echo,
+     * running the pending trap first — cleaned without armed. */
+    static const char *const timeouts[] = {"100ms", "400ms", "1600ms"};
     setenv("HAX_BASH_TIMEOUT_GRACE", "500ms", 1);
-    char *out = call_bash("trap 'sleep 0.05; echo cleaned; exit' TERM; sleep 30");
+    char *out = NULL;
+    for (size_t i = 0; i < sizeof(timeouts) / sizeof(*timeouts); i++) {
+        setenv("HAX_BASH_TIMEOUT", timeouts[i], 1);
+        free(out);
+        out = call_bash("trap 'sleep 0.05; echo cleaned; exit' TERM; echo armed; sleep 30");
+        if (strstr(out, "cleaned") != NULL || strstr(out, "armed") != NULL)
+            break;
+    }
     EXPECT(strstr(out, "cleaned") != NULL);
     EXPECT(strstr(out, "[timed out") != NULL);
     free(out);
