@@ -638,8 +638,8 @@ int agent_apply_settings(struct agent_state *st)
     if (model_changed && p && p->refresh_context)
         p->refresh_context(p, s->model);
 
-    /* reconfigure rebuilt sess->sys (its env block names the new model), so
-     * re-key the HAX_TRANSCRIPT mirror to it: rewrite the header and replay
+    /* reconfigure rebuilt sess->sys (its Environment section names the new
+     * model), so re-key the HAX_TRANSCRIPT mirror to it: rewrite the header and replay
      * history (like /new, but keeping the conversation) so the file keeps
      * matching the Ctrl-T view instead of claiming later turns used the old
      * system prompt. No-op when HAX_TRANSCRIPT is unset. (The session log's

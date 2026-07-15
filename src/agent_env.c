@@ -8,14 +8,15 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <sys/utsname.h>
 
 #include "config.h"
 #include "util.h"
 #include "providers/registry.h"
 #include "system/fs.h"
+#include "system/os.h"
 #include "system/path.h"
 #include "text/utf8_sanitize.h"
+#include "tools/bash_shell.h"
 
 /* Per-file cap for AGENTS.md content. A single file larger than this is
  * almost certainly a mistake; truncating with a marker is more useful than
@@ -34,19 +35,8 @@
 /* Spec limit for the description field; longer values are truncated. */
 #define SKILL_DESCRIPTION_MAX 1024
 
-/* Host-level utilities a coding agent reaches for regardless of project
- * type. Project-driven tooling (npm/pnpm/yarn/bun, cargo, go, cmake, …)
- * is selected by lockfiles in cwd, not by host availability, so we
- * deliberately don't probe for those — knowing pnpm exists doesn't help
- * when the project has package-lock.json.
- *
- * `replaces` is the older-equivalent the model should drop in favor of
- * `name` when `name` is present. NULL means "no specific replacement"
- * (the tool just adds capability — jq, gh, node). The pair is rendered
- * inline in the preferred_commands line so the directive is filtered
- * automatically: a missing `name` means its replacement guidance also
- * disappears, which avoids telling the model to use a tool that isn't
- * installed. */
+/* Probe project-agnostic tools only; project tooling is inferred from its files.
+ * Replacement guidance is emitted only when `name` is available. */
 struct probed_cmd {
     const char *name;
     const char *replaces;
@@ -57,10 +47,6 @@ static const struct probed_cmd PROBED_COMMANDS[] = {
 };
 static const size_t N_PROBED_COMMANDS = sizeof(PROBED_COMMANDS) / sizeof(PROBED_COMMANDS[0]);
 
-/* $PATH probe via fs_which — absolute PATH entries only, executable
- * regular files only (see fs.h for the rationale; both guards matter
- * here so we never advertise a host utility that /bin/sh -c couldn't
- * actually run). No subprocess: just stat + access, microseconds. */
 static int have_command(const char *name)
 {
     char *p = fs_which(name);
@@ -70,10 +56,7 @@ static int have_command(const char *name)
     return 1;
 }
 
-/* Walk cwd → filesystem root, returning a malloc'd path to the first
- * directory containing `.git`. Returns NULL if no marker is found within
- * AGENTS_MD_MAX_LEVELS. Shared by the env block (is_git_repo) and the
- * AGENTS.md walk so both agree on what counts as "in a repo". */
+/* Find the nearest Git root for Environment and AGENTS.md discovery. */
 static char *find_project_root(const char *cwd)
 {
     char dir[PATH_MAX];
@@ -100,89 +83,108 @@ static char *find_project_root(const char *cwd)
     return NULL;
 }
 
-static void append_env_block(struct buf *b, const char *model)
+static void append_environment_section(struct buf *b, const char *model)
 {
     char cwd[PATH_MAX];
     if (!getcwd(cwd, sizeof(cwd)))
         snprintf(cwd, sizeof(cwd), "(unknown)");
 
-    struct utsname u;
-    const char *os_name = "unknown", *os_release = "";
-    if (uname(&u) == 0) {
-        os_name = u.sysname;
-        os_release = u.release;
-    }
-
-    const char *shell = getenv("SHELL");
-    if (!shell || !*shell)
-        shell = "/bin/sh";
-
+    const char *home = getenv("HOME");
+    char *shell = bash_resolve_shell();
+    char *os = os_description();
     char *project_root = find_project_root(cwd);
-    int git = project_root != NULL;
-    free(project_root);
 
-    /* Linux paths are arbitrary byte sequences and env vars are user-set,
-     * so any of cwd / shell / model could carry non-UTF-8 bytes. Jansson
-     * rejects non-UTF-8 and embedded NULs, so clean each before splicing.
-     * uname output is POSIX-defined to be ASCII and doesn't need this
-     * treatment. */
-    /* `~` is friendlier than the full $HOME prefix and what the user types
-     * themselves; collapse before sanitizing so the substitution operates on
-     * raw bytes (sanitize_utf8 is a one-way pass). */
+    /* Collapse paths before sanitizing so `~` still maps to the displayed home. */
     char *cwd_display = collapse_home(cwd);
     char *cwd_clean = sanitize_utf8(cwd_display, strlen(cwd_display));
     free(cwd_display);
+    char *home_clean = (home && *home) ? sanitize_utf8(home, strlen(home)) : NULL;
+    char *os_clean = sanitize_utf8(os, strlen(os));
     char *shell_clean = sanitize_utf8(shell, strlen(shell));
     char *model_clean = (model && *model) ? sanitize_utf8(model, strlen(model)) : NULL;
+    char *root_clean = NULL;
+    if (project_root) {
+        char *root_display = collapse_home(project_root);
+        root_clean = sanitize_utf8(root_display, strlen(root_display));
+        free(root_display);
+    }
 
-    /* Blank-line separator when a section (subagents) precedes this one,
-     * same as the other appenders; a no-op when the block leads the suffix. */
     if (b->len > 0)
         buf_append_str(b, "\n");
-    buf_append_str(b, "<env>\n");
-    char *line = xasprintf("  cwd: %s\n", cwd_clean);
+    buf_append_str(b, "# Environment\n\n");
+    char *line = xasprintf("- Working directory: %s\n", cwd_clean);
     buf_append_str(b, line);
     free(line);
-    line = xasprintf("  os: %s %s\n", os_name, os_release);
-    buf_append_str(b, line);
-    free(line);
-    line = xasprintf("  shell: %s\n", shell_clean);
-    buf_append_str(b, line);
-    free(line);
-    if (model_clean) {
-        line = xasprintf("  model: %s\n", model_clean);
+    if (home_clean) {
+        line = xasprintf("- Home directory: %s\n", home_clean);
         buf_append_str(b, line);
         free(line);
     }
-    line = xasprintf("  is_git_repo: %s\n", git ? "yes" : "no");
+    line = xasprintf("- Operating system: %s\n", os_clean);
+    buf_append_str(b, line);
+    free(line);
+    line = xasprintf("- Command shell: %s\n", shell_clean);
+    buf_append_str(b, line);
+    free(line);
+    if (model_clean) {
+        line = xasprintf("- Model: %s\n", model_clean);
+        buf_append_str(b, line);
+        free(line);
+    }
+    if (root_clean)
+        line = xasprintf("- Git repository root: %s\n", root_clean);
+    else
+        line = xstrdup("- Git repository: no\n");
     buf_append_str(b, line);
     free(line);
 
+    int available[sizeof(PROBED_COMMANDS) / sizeof(PROBED_COMMANDS[0])];
+    for (size_t i = 0; i < N_PROBED_COMMANDS; i++)
+        available[i] = have_command(PROBED_COMMANDS[i].name);
+
     int any_cmd = 0;
     for (size_t i = 0; i < N_PROBED_COMMANDS; i++) {
-        if (!have_command(PROBED_COMMANDS[i].name))
+        if (!available[i])
             continue;
         if (!any_cmd) {
-            buf_append_str(b, "  preferred_commands: ");
+            buf_append_str(b, "\nAvailable command-line tools: ");
             any_cmd = 1;
         } else {
             buf_append_str(b, ", ");
         }
+        buf_append_str(b, "`");
         buf_append_str(b, PROBED_COMMANDS[i].name);
-        if (PROBED_COMMANDS[i].replaces) {
-            buf_append_str(b, " (instead of ");
-            buf_append_str(b, PROBED_COMMANDS[i].replaces);
-            buf_append_str(b, ")");
-        }
+        buf_append_str(b, "`");
     }
     if (any_cmd)
-        buf_append_str(b, "\n");
+        buf_append_str(b, ".\n");
 
-    buf_append_str(b, "</env>\n");
+    int any_replacement = 0;
+    for (size_t i = 0; i < N_PROBED_COMMANDS; i++) {
+        if (!PROBED_COMMANDS[i].replaces || !available[i])
+            continue;
+        if (!any_replacement) {
+            buf_append_str(b, "Prefer ");
+            any_replacement = 1;
+        } else {
+            buf_append_str(b, ", ");
+        }
+        line = xasprintf("`%s` to `%s`", PROBED_COMMANDS[i].name, PROBED_COMMANDS[i].replaces);
+        buf_append_str(b, line);
+        free(line);
+    }
+    if (any_replacement)
+        buf_append_str(b, ".\n");
 
     free(cwd_clean);
+    free(home_clean);
+    free(os_clean);
     free(shell_clean);
     free(model_clean);
+    free(root_clean);
+    free(shell);
+    free(os);
+    free(project_root);
 }
 
 /* Append a single AGENTS.md file under a `## <display_path>` header.
@@ -192,7 +194,7 @@ static void append_env_block(struct buf *b, const char *model)
  * the same string it sees here. NULL display_path falls back to `path`.
  * Returns 1 if the file existed and was appended, 0 otherwise. The
  * first successful call also writes the `# Project Context` section
- * header (and a leading separator if the buffer already has env-block
+ * header (and a leading separator if the buffer already has Environment
  * content). */
 static int append_agents_md(struct buf *b, const char *path, const char *display_path,
                             int *seen_header)
@@ -590,7 +592,7 @@ char *agent_env_build_suffix(const char *model)
         append_subagents(&b);
 
     if (do_env)
-        append_env_block(&b, model);
+        append_environment_section(&b, model);
 
     if (do_agents) {
         int seen_header = 0;

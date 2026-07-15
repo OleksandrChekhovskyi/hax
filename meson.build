@@ -80,6 +80,7 @@ sources = files(
     'src/system/diff.c',
     'src/system/fs.c',
     'src/system/keepawake.c',
+    'src/system/os.c',
     'src/system/path.c',
     'src/system/spawn.c',
 
@@ -99,6 +100,7 @@ sources = files(
     'src/tools/bash_cd_strip.c',
     'src/tools/bash_classify.c',
     'src/tools/bash_export.c',
+    'src/tools/bash_shell.c',
     'src/tools/edit.c',
     'src/tools/path_preprocess.c',
     'src/tools/read.c',

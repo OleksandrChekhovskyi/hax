@@ -12,8 +12,8 @@
 #include "tools/bash_export.h"
 
 /* Default text used when HAX_SYSTEM_PROMPT is unset and --raw was not
- * passed. AGENTS.md / env block / skills are appended via agent_env_build_suffix
- * and the assembled string is what's sent to the provider. */
+ * passed. The Environment, AGENTS.md, and skills sections are appended via
+ * agent_env_build_suffix; the assembled string is sent to the provider. */
 static const char DEFAULT_SYSTEM_PROMPT[] =
     "You are hax, a minimalist coding assistant running in the user's terminal. "
     "You have access to `read`, `bash`, `write`, and `edit` tools.\n"
@@ -381,7 +381,7 @@ int agent_session_reconfigure(struct agent_session *s, struct provider *p)
     s->model = new_model;
     s->model_label = new_model_label;
     s->provider_name = p->name;
-    /* Rebuild the system prompt so its env block names the new model.
+    /* Rebuild the system prompt so its Environment section names the new model.
      * Tools and history are deliberately untouched — a switch keeps the
      * conversation going under the new settings. */
     free(s->sys);

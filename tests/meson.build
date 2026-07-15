@@ -45,6 +45,7 @@ test_sources = [
     'system/test_diff.c',
     'system/test_fs.c',
     'system/test_keepawake.c',
+    'system/test_os.c',
     'system/test_path.c',
     'system/test_spawn.c',
 

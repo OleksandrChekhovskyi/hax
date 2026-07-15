@@ -257,8 +257,8 @@ struct provider {
      * agent will refuse to start and print an error. */
     const char *default_model;
     /* Optional presentation formatter for model ids. Returns a newly allocated
-     * UI/env-block label that the caller owns; the exact id is still used on the
-     * wire and in persisted metadata. NULL means use the id unchanged. */
+     * display label that the caller owns; the exact id is still used on the wire
+     * and in persisted metadata. NULL means use the id unchanged. */
     char *(*model_label)(struct provider *p, const char *model);
     /* Reasoning effort used when HAX_EFFORT is unset. NULL means
      * omit the field and let the backend choose. */

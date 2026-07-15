@@ -19,8 +19,8 @@ Options:
 | `--resume` | Pick a past session for the current directory. |
 | `--resume=ID` | Resume a specific session id or unique prefix. Also works with `-p`. |
 | `--no-session` | Don't record this conversation; there will be nothing to resume. |
-| `--raw` | Send only the prompt: no system prompt, env block, AGENTS.md, skills, or tools. Still recorded — a raw chat can be continued with `-c`. |
-| `--bare` | Drop the environment-derived context (env block, AGENTS.md, skills, subagents section); tools and the base prompt remain, unlike `--raw`. |
+| `--raw` | Send only the prompt: no system prompt, Environment section, AGENTS.md, skills, or tools. Still recorded — a raw chat can be continued with `-c`. |
+| `--bare` | Drop project and delegation context (AGENTS.md, skills, and the subagents section); the Environment section, tools, and base prompt remain, unlike `--raw`. |
 | `--provider=NAME` | Select the backend for this run. Beats env vars, saved picks, and config. |
 | `--model=ID` | Select the model for this run. Same precedence as `--provider`. |
 | `--effort=LEVEL` | Select reasoning effort for this run. Same precedence as `--provider`. |
@@ -173,13 +173,13 @@ Tab on an `@` word prints a short notice instead, and `/help` shows the binding 
 Unless `--raw` is used, hax sends:
 
 1. the built-in system prompt, or `HAX_SYSTEM_PROMPT` if set;
-2. an `<env>` block with platform, cwd, shell, model, preferred commands, and related
-   process facts;
+2. an Environment section with working/home directories, operating system, command shell,
+   model, Git root, and command preferences;
 3. discovered `AGENTS.md` files and skill descriptions; and
 4. tool schemas for `read`, `bash`, `write`, and `edit`.
 
 `HAX_SYSTEM_PROMPT=""` omits only the system message; tools still remain available. `--raw`
-omits the system prompt, env block, AGENTS.md/skills, and tools.
+omits the system prompt, Environment section, AGENTS.md/skills, and tools.
 
 AGENTS.md discovery loads the global file first:
 
@@ -191,9 +191,9 @@ For projects inside a git worktree, hax then loads AGENTS.md files from the repo
 the current directory. Outside a git worktree, it only considers `./AGENTS.md`. Skills are
 discovered from `./.agents/skills/<name>/SKILL.md` and
 `${XDG_CONFIG_HOME:-$HOME/.config}/hax/skills/<name>/SKILL.md`. Each context section has its
-own opt-out: `HAX_NO_AGENTS_MD=1` skips AGENTS.md, `HAX_NO_SKILLS=1` skips the skills listing,
-and `HAX_NO_SUBAGENTS=1` skips the subagents section described below. `--bare` sets all of
-these plus the env block in one flag.
+own opt-out: `HAX_NO_ENV=1` skips Environment, `HAX_NO_AGENTS_MD=1` skips AGENTS.md,
+`HAX_NO_SKILLS=1` skips the skills listing, and `HAX_NO_SUBAGENTS=1` skips the subagents
+section described below. `--bare` sets the latter three while retaining Environment.
 
 ## Subagents
 
@@ -207,8 +207,8 @@ run by hax, so everything above about `-p`, sessions, and resume applies to it.
   for its children, so even session-only picks (an auto-selected provider, a mid-session
   `/model`) carry over.
 - A different role or backend per subagent is one flag away: `--preset review`, or explicit
-  `--provider` / `--model` / `--effort`; `--bare` makes a cheap context-free scout. Only
-  `--preset` (with the defined presets and their descriptions) is advertised to the model —
+  `--provider` / `--model` / `--effort`; `--bare` makes a cheap scout without project context.
+  Only `--preset` (with the defined presets and their descriptions) is advertised to the model —
   preset values are user-vetted, whereas the explicit flags would have it guess identifiers
   it can't enumerate. To make the model use a specific setup, name the flags in AGENTS.md or
   a skill.

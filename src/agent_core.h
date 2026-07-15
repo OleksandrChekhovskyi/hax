@@ -22,7 +22,7 @@ struct catalog_split; /* catalog.h — consumers of spend_split include it */
  * so the one-shot path can consume it without dragging in the
  * interactive REPL header. */
 struct hax_opts {
-    /* Bypass system prompt, env block, AGENTS.md, skills, and tools.
+    /* Bypass system prompt, Environment section, AGENTS.md, skills, and tools.
      * Sends only the user's message — useful for testing models on
      * raw tasks or as a barebones chat interface. */
     int raw;
@@ -50,15 +50,9 @@ void items_append(struct item **items, size_t *n, size_t *cap, struct item it);
  * the provider default; any non-empty value passes through verbatim. */
 const char *resolve_effort(const struct provider *p);
 
-/* Build the assembled system prompt (base text + env block + AGENTS.md +
- * skills) using `model_label` in the env block. Returns malloc'd, or NULL
- * when the system message should be omitted entirely.
- *
- *   raw=1               → NULL (--raw means "just the prompt, nothing else")
- *   HAX_SYSTEM_PROMPT=""→ NULL (explicit opt-out, same as before)
- *   HAX_SYSTEM_PROMPT   → that value + agent_env_build_suffix(model_label)
- *   unset               → built-in default + agent_env_build_suffix(model_label)
- */
+/* Build the malloc'd system prompt from the configured or default base plus
+ * agent_env_build_suffix(). Return NULL for raw mode or an explicitly empty
+ * HAX_SYSTEM_PROMPT. */
 char *build_system_prompt(const char *model_label, int raw);
 
 /* Shared assembly for the stats line shown after each REPL user turn and
@@ -185,9 +179,9 @@ struct agent_session {
 int agent_session_init(struct agent_session *s, struct provider *p, const struct hax_opts *opts);
 
 /* Re-resolve the session's model and reasoning effort against the current
- * config and provider `p`, and rebuild the system prompt (its env block
- * embeds the model name). Used after a runtime /provider or /model switch:
- * conversation history, the tools table, and the session log are left
+ * config and provider `p`, and rebuild the system prompt (its Environment
+ * section embeds the model name). Used after a runtime /provider or /model
+ * switch: conversation history, the tools table, and the session log are left
  * intact — only the per-request settings change. Returns 0 on success, -1
  * when no model is available for `p` (logged to stderr). */
 int agent_session_reconfigure(struct agent_session *s, struct provider *p);

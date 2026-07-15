@@ -140,8 +140,8 @@ Semantics:
 - Nothing else is presettable, deliberately: a preset must be fully honored whenever it is
   applied, including mid-session via `/preset`, and only these per-request keys qualify.
   Endpoint and credential settings are bound at provider construction — define a custom
-  `providers.<name>` block and point the preset's `provider` at it. Context stripping and
-  session recording are startup-bound — use the `--bare` / `--no-session` flags.
+  `providers.<name>` block and point the preset's `provider` at it. Project-context stripping
+  and session recording are startup-bound — use the `--bare` / `--no-session` flags.
 - Application is all-or-nothing: an invalid member is an error and nothing is applied.
 
 Select a preset with `--preset <name>`, the `HAX_PRESET` env var (or a `preset` config key),
@@ -193,7 +193,7 @@ canonical key and its environment variable.
   no system message.
 - `provider_name` / `HAX_PROVIDER_NAME` — override the banner display name for compiled-in
   providers.
-- `no_env` / `HAX_NO_ENV` — skip the `<env>` block.
+- `no_env` / `HAX_NO_ENV` — skip the Environment section.
 - `no_agents_md` / `HAX_NO_AGENTS_MD` — skip AGENTS.md discovery.
 - `no_skills` / `HAX_NO_SKILLS` — skip the skills listing.
 - `no_subagents` / `HAX_NO_SUBAGENTS` — skip the subagents section (see

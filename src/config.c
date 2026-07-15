@@ -40,7 +40,7 @@ static const struct config_setting REGISTRY[] = {
     {"system_prompt",              "HAX_SYSTEM_PROMPT",           NULL,
      "Override the built-in system prompt; empty sends no system message"},
     {"no_env",                     "HAX_NO_ENV",                  NULL,
-     "Skip the environment block in the system prompt"},
+     "Skip the Environment section in the system prompt"},
     {"no_agents_md",               "HAX_NO_AGENTS_MD",            NULL,
      "Skip AGENTS.md project instructions in the system prompt"},
     {"no_skills",                  "HAX_NO_SKILLS",               NULL,

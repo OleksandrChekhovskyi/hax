@@ -117,7 +117,7 @@ static void test_build_system_prompt_explicit_empty(void)
 
 static void test_build_system_prompt_custom_no_suffix(void)
 {
-    /* With env block + AGENTS.md suppressed, agent_env_build_suffix returns
+    /* With the Environment section + AGENTS.md suppressed, agent_env_build_suffix returns
      * NULL and the result is just the custom system prompt verbatim.
      * Lets us assert byte-equality without depending on cwd state. */
     setenv("HAX_SYSTEM_PROMPT", "you are a teapot", 1);
@@ -160,20 +160,19 @@ static void test_build_system_prompt_default_no_suffix(void)
 
 static void test_build_system_prompt_with_suffix(void)
 {
-    /* When the env block is enabled, the result should start with the
-     * custom prompt, then a blank-line separator, then the <env> block.
-     * We don't pin the env contents (cwd/date/etc. drift) but the
-     * structural shape is stable. */
+    /* When the Environment section is enabled, the result should start with
+     * the custom prompt, then a blank-line separator, then its Markdown
+     * heading. We don't pin the dynamic contents, but the shape is stable. */
     setenv("HAX_SYSTEM_PROMPT", "PREFIX", 1);
     setenv("HAX_NO_AGENTS_MD", "1", 1); /* suppress AGENTS.md content */
-    unsetenv("HAX_NO_ENV");             /* keep <env> on */
+    unsetenv("HAX_NO_ENV");             /* keep Environment on */
 
     char *out = build_system_prompt("model-x", 0);
     EXPECT(out != NULL);
     if (out) {
         EXPECT(strncmp(out, "PREFIX\n\n", 8) == 0);
-        EXPECT(strstr(out, "<env>") != NULL);
-        EXPECT(strstr(out, "model: model-x") != NULL);
+        EXPECT(strstr(out, "# Environment") != NULL);
+        EXPECT(strstr(out, "- Model: model-x") != NULL);
     }
     free(out);
 
@@ -252,7 +251,7 @@ static void test_session_init_model_label(void)
     EXPECT(agent_session_init(&s, &p, &opts) == 0);
     EXPECT_STR_EQ(s.model, "/models/long-model.gguf");
     EXPECT_STR_EQ(s.model_label, "short-model");
-    EXPECT(s.sys != NULL && strstr(s.sys, "model: short-model") != NULL);
+    EXPECT(s.sys != NULL && strstr(s.sys, "- Model: short-model") != NULL);
     EXPECT(s.sys != NULL && strstr(s.sys, "/models/long-model.gguf") == NULL);
 
     agent_session_free(&s);

@@ -89,12 +89,12 @@ static const struct help_opt {
                       "an interactive list; with a session ID, resume it directly — the ID form\n"
                       "also works with -p."},
     {"--no-session", "Don't record this conversation (nothing to resume)."},
-    {"--raw", "Send only the prompt text — no system prompt, no environment block,\n"
+    {"--raw", "Send only the prompt text — no system prompt, no Environment section,\n"
               "no AGENTS.md, no skills, and no tools. Useful as a barebones chat\n"
               "interface."},
-    {"--bare", "Run without the environment-derived context — env block, AGENTS.md,\n"
-               "skills, subagents section. Tools and the base system prompt remain\n"
-               "(unlike --raw)."},
+    {"--bare", "Run without project and delegation context — no AGENTS.md, skills, or\n"
+               "subagents section. The Environment section, tools, and base system prompt\n"
+               "remain (unlike --raw)."},
     {"--provider=NAME", "Select the backend for this run."},
     {"--model=ID", "Select the model for this run."},
     {"--effort=LEVEL", "Select the reasoning effort for this run."},
@@ -570,17 +570,11 @@ int main(int argc, char **argv)
         config_set_override("model", opt_model);
     if (opt_effort)
         config_set_override("effort", opt_effort);
-    /* --bare = every environment-derived context section stripped in one
-     * flag — the common shape for scripted / subagent scout runs, and one
-     * place to grow when new context sections appear. Deliberately a flag,
-     * not a preset: none of these keys are presettable (they're
-     * startup-latched), and the definition can widen without touching the
-     * preset contract. Recording is a separate axis (--no-session), NOT
-     * bundled: a bare run stays resumable — the recovery path for a
-     * subagent killed by a tool timeout — unless disposability is asked
-     * for explicitly. */
+    /* --bare strips optional project and delegation context for scripted or
+     * subagent scout runs. Keep Environment: cwd, shell, and command guidance
+     * remain useful even without project instructions. Recording is a separate
+     * axis so a bare run remains resumable unless --no-session is also given. */
     if (opt_bare) {
-        config_set_override("no_env", "1");
         config_set_override("no_agents_md", "1");
         config_set_override("no_skills", "1");
         config_set_override("no_subagents", "1");

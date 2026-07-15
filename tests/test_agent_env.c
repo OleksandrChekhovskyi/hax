@@ -49,6 +49,7 @@ static void sb_init(struct sandbox *s)
     unsetenv("HAX_NO_ENV");
     unsetenv("HAX_NO_AGENTS_MD");
     unsetenv("HAX_NO_SKILLS");
+    setenv("HAX_BASH_SHELL", CONFIG_VALUE_DEFAULT, 1);
     /* The subagents section is static text present in every suffix, which
      * would smear across every assertion below; suppress it by default and
      * let the dedicated subagents tests unset this deliberately. */
@@ -114,9 +115,9 @@ static int contains(const char *hay, const char *needle)
     return hay && strstr(hay, needle) != NULL;
 }
 
-/* ---------- env block ---------- */
+/* ---------- Environment section ---------- */
 
-static void test_agent_env_block_present_by_default(void)
+static void test_agent_env_section_present_by_default(void)
 {
     struct sandbox s;
     sb_init(&s);
@@ -128,19 +129,22 @@ static void test_agent_env_block_present_by_default(void)
     char *p = agent_env_build_suffix("claude-test-1");
     EXPECT(p != NULL);
     if (p) {
-        EXPECT(contains(p, "<env>"));
-        EXPECT(contains(p, "</env>"));
-        EXPECT(contains(p, "  cwd: "));
-        EXPECT(contains(p, "  os: "));
-        EXPECT(contains(p, "  shell: "));
-        EXPECT(contains(p, "  model: claude-test-1"));
-        EXPECT(contains(p, "  is_git_repo: no"));
+        EXPECT(contains(p, "# Environment\n\n"));
+        EXPECT(contains(p, "- Working directory: ~\n"));
+        char *home = xasprintf("- Home directory: %s\n", s.root);
+        EXPECT(contains(p, home));
+        free(home);
+        EXPECT(contains(p, "- Operating system: "));
+        EXPECT(contains(p, "- Command shell: "));
+        EXPECT(contains(p, "- Model: claude-test-1\n"));
+        EXPECT(contains(p, "- Git repository: no\n"));
+        EXPECT(!contains(p, "<env>"));
         free(p);
     }
     sb_free(&s);
 }
 
-static void test_agent_env_block_git_repo_yes(void)
+static void test_agent_env_section_git_root(void)
 {
     struct sandbox s;
     sb_init(&s);
@@ -155,19 +159,19 @@ static void test_agent_env_block_git_repo_yes(void)
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {
-        EXPECT(contains(p, "  is_git_repo: yes"));
+        EXPECT(contains(p, "- Git repository root: ~\n"));
         free(p);
     }
     sb_free(&s);
 }
 
-static void test_agent_env_block_git_repo_yes_from_subdir(void)
+static void test_agent_env_section_git_root_from_subdir(void)
 {
     struct sandbox s;
     sb_init(&s);
-    /* .git lives at the sandbox root; cwd is two levels deeper. The env
-     * block should still report is_git_repo: yes — same upward walk that
-     * AGENTS.md uses, so the two stay consistent. */
+    /* .git lives at the sandbox root; cwd is two levels deeper. The
+     * Environment section should report that root using the same upward walk
+     * as AGENTS.md. */
     char *git = xasprintf("%s/.git", s.root);
     mkdir(git, 0755);
     free(git);
@@ -183,13 +187,13 @@ static void test_agent_env_block_git_repo_yes_from_subdir(void)
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {
-        EXPECT(contains(p, "  is_git_repo: yes"));
+        EXPECT(contains(p, "- Git repository root: ~\n"));
         free(p);
     }
     sb_free(&s);
 }
 
-static void test_agent_env_block_omits_model_when_null(void)
+static void test_agent_env_section_omits_model_when_null(void)
 {
     struct sandbox s;
     sb_init(&s);
@@ -200,13 +204,52 @@ static void test_agent_env_block_omits_model_when_null(void)
     char *p = agent_env_build_suffix(NULL);
     EXPECT(p != NULL);
     if (p) {
-        EXPECT(!contains(p, "  model:"));
+        EXPECT(!contains(p, "- Model:"));
         free(p);
     }
     sb_free(&s);
 }
 
-static void test_no_env_knob_disables_block(void)
+static void test_agent_env_section_omits_home_when_unset(void)
+{
+    struct sandbox s;
+    sb_init(&s);
+    if (chdir(s.root) != 0) {
+        sb_free(&s);
+        return;
+    }
+    unsetenv("HOME");
+    char *p = agent_env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(!contains(p, "- Home directory:"));
+        char *cwd = xasprintf("- Working directory: %s\n", s.root);
+        EXPECT(contains(p, cwd));
+        free(cwd);
+        free(p);
+    }
+    sb_free(&s);
+}
+
+static void test_agent_env_section_reports_command_shell(void)
+{
+    struct sandbox s;
+    sb_init(&s);
+    if (chdir(s.root) != 0) {
+        sb_free(&s);
+        return;
+    }
+    setenv("HAX_BASH_SHELL", "/bin/sh", 1);
+    char *p = agent_env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(contains(p, "- Command shell: /bin/sh\n"));
+        free(p);
+    }
+    sb_free(&s);
+}
+
+static void test_no_env_knob_disables_section(void)
 {
     struct sandbox s;
     sb_init(&s);
@@ -244,7 +287,7 @@ static void test_both_knobs_disable_returns_null(void)
 /* ---------- commands probe ---------- */
 
 /* Stage a fake executable named `name` under `dir` (creating `dir`).
- * Content is irrelevant — env.c only checks access(X_OK). */
+ * Content is irrelevant — agent_env.c only checks access(X_OK). */
 static void stage_fake_command(const char *dir, const char *name)
 {
     mkdirs(dir);
@@ -275,8 +318,8 @@ static void test_commands_line_lists_present(void)
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {
-        /* rg has a replacement annotation (grep -r); jq doesn't. */
-        EXPECT(contains(p, "  preferred_commands: rg (instead of grep -r), jq\n"));
+        EXPECT(contains(p, "Available command-line tools: `rg`, `jq`.\n"));
+        EXPECT(contains(p, "Prefer `rg` to `grep -r`.\n"));
         free(p);
     }
 
@@ -308,7 +351,8 @@ static void test_commands_line_omitted_when_none(void)
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {
-        EXPECT(!contains(p, "preferred_commands:"));
+        EXPECT(!contains(p, "Available command-line tools:"));
+        EXPECT(!contains(p, "Prefer `"));
         free(p);
     }
 
@@ -344,7 +388,8 @@ static void test_commands_line_skips_relative_path_entries(void)
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {
-        EXPECT(!contains(p, "preferred_commands:"));
+        EXPECT(!contains(p, "Available command-line tools:"));
+        EXPECT(!contains(p, "Prefer `"));
         EXPECT(!contains(p, "rg"));
         free(p);
     }
@@ -382,8 +427,9 @@ static void test_commands_line_ignores_directories(void)
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {
-        EXPECT(contains(p, "  preferred_commands: jq\n"));
-        EXPECT(!contains(p, "rg"));
+        EXPECT(contains(p, "Available command-line tools: `jq`.\n"));
+        EXPECT(!contains(p, "Prefer `"));
+        EXPECT(!contains(p, "`rg`"));
         free(p);
     }
 
@@ -410,6 +456,8 @@ static void test_commands_line_preserves_canonical_order(void)
     }
     char *bin = xasprintf("%s/bin", s.root);
     stage_fake_command(bin, "node");
+    stage_fake_command(bin, "python3");
+    stage_fake_command(bin, "fd");
     stage_fake_command(bin, "rg");
     stage_fake_command(bin, "gh");
     char *prev_path = getenv("PATH");
@@ -419,7 +467,9 @@ static void test_commands_line_preserves_canonical_order(void)
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {
-        EXPECT(contains(p, "  preferred_commands: rg (instead of grep -r), gh, node\n"));
+        EXPECT(contains(p, "Available command-line tools: `rg`, `fd`, `gh`, `python3`, `node`.\n"));
+        EXPECT(contains(p, "Prefer `rg` to `grep -r`, `fd` to `find`, `python3` to "
+                           "`python`.\n"));
         free(p);
     }
 
@@ -584,7 +634,7 @@ static void test_no_agents_md_knob_disables_walk(void)
     if (p) {
         EXPECT(!contains(p, "SHOULD_NOT_APPEAR"));
         EXPECT(!contains(p, "# Project Context"));
-        EXPECT(contains(p, "<env>"));
+        EXPECT(contains(p, "# Environment"));
         free(p);
     }
     unsetenv("HAX_NO_AGENTS_MD");
@@ -861,7 +911,7 @@ static void test_skills_disabled_by_no_skills(void)
     }
     setenv("HAX_NO_SKILLS", "1", 1);
     char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL); /* env block still present */
+    EXPECT(p != NULL); /* Environment section still present */
     if (p) {
         EXPECT(!contains(p, "# Skills"));
         EXPECT(!contains(p, "hidden"));
@@ -913,8 +963,8 @@ static void test_subagents_section_and_presets(void)
     unsetenv("HAX_NO_SUBAGENTS");
 
     /* Present by default, with the conservative framing, and placed before
-     * the env block — it's hax-level instruction, not project context. With
-     * no presets defined, --preset isn't advertised at all. */
+     * the Environment section — it's hax-level instruction, not project
+     * context. With no presets defined, --preset isn't advertised at all. */
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {
@@ -925,7 +975,7 @@ static void test_subagents_section_and_presets(void)
         EXPECT(!contains(p, "not the selection"));
         EXPECT(!contains(p, "--preset"));
         const char *sub = strstr(p, "# Subagents");
-        const char *env = strstr(p, "<env>");
+        const char *env = strstr(p, "# Environment");
         EXPECT(sub && env && sub < env);
         free(p);
     }
@@ -970,11 +1020,13 @@ static void test_subagents_section_and_presets(void)
 
 int main(void)
 {
-    test_agent_env_block_present_by_default();
-    test_agent_env_block_git_repo_yes();
-    test_agent_env_block_git_repo_yes_from_subdir();
-    test_agent_env_block_omits_model_when_null();
-    test_no_env_knob_disables_block();
+    test_agent_env_section_present_by_default();
+    test_agent_env_section_git_root();
+    test_agent_env_section_git_root_from_subdir();
+    test_agent_env_section_omits_model_when_null();
+    test_agent_env_section_omits_home_when_unset();
+    test_agent_env_section_reports_command_shell();
+    test_no_env_knob_disables_section();
     test_both_knobs_disable_returns_null();
 
     test_commands_line_lists_present();

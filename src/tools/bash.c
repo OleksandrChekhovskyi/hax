@@ -14,7 +14,6 @@
 #include "config.h"
 #include "tool.h"
 #include "util.h"
-#include "system/fs.h"
 #include "system/path.h"
 #include "terminal/interrupt.h"
 #include "text/utf8.h"
@@ -22,6 +21,7 @@
 #include "tools/bash_cd_strip.h"
 #include "tools/bash_classify.h"
 #include "tools/bash_export.h"
+#include "tools/bash_shell.h"
 
 /* Output is captured to a temp file (mkstemp under $TMPDIR) so the model
  * sees a tail-truncated preview but can `read` the full output afterwards
@@ -903,39 +903,6 @@ static char **build_child_env(void)
     return envp;
 }
 
-/* Pick the shell for `-c`. Models overwhelmingly write bash-isms
- * ([[ ]], pipefail, `&>`) no matter what the tool description says,
- * and on Debian-family systems /bin/sh is dash — where `cmd &> f`
- * even parses as "background cmd, truncate f" and silently misruns.
- * So prefer bash wherever it lives (PATH lookup covers NixOS and
- * friends) and fall back to POSIX sh (Alpine/busybox, minimal
- * containers). `bash.shell` overrides the chain; a value that doesn't
- * resolve warns once and falls through rather than breaking every
- * call. Resolved before fork() because PATH search is not async-
- * signal-safe in the forked child of a multithreaded process. */
-static char *resolve_shell(void)
-{
-    const char *cfg = config_str("bash.shell");
-    if (cfg && *cfg) {
-        char *p = fs_which(cfg);
-        if (p)
-            return p;
-        static int warned;
-        if (!warned) {
-            warned = 1;
-            hax_warn("bash.shell: '%s' not found or not executable; using default", cfg);
-        }
-    }
-    char *p = fs_which("bash");
-    if (p)
-        return p;
-    /* PATH may be stripped in odd embedded environments; the ABI-
-     * stable location still covers macOS and virtually every distro. */
-    if (access("/bin/bash", X_OK) == 0)
-        return xstrdup("/bin/bash");
-    return xstrdup("/bin/sh");
-}
-
 /* Runs in the forked child after stdout/stderr have been pointed at
  * the pipe write end. Stdin is re-pointed at /dev/null so commands
  * that try to read (cat with no args, git commit waiting on a
@@ -996,7 +963,7 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
      * shell's basename so `$0` and ps output read as "bash"/"sh"
      * rather than an absolute path. */
     char **envp = build_child_env();
-    char *shell = resolve_shell();
+    char *shell = bash_resolve_shell();
     const char *argv0 = strrchr(shell, '/');
     argv0 = argv0 ? argv0 + 1 : shell;
 
@@ -1391,9 +1358,9 @@ const struct tool TOOL_BASH = {
                 "Returns combined stdout+stderr plus exit code.\n"
                 "\n"
                 "Rules:\n"
-                "- Each call starts in <env> cwd; `cd` does not persist across calls.\n"
-                "- Use the utilities listed in <env> preferred_commands instead of "
-                "their older equivalents — the <env> line spells out each replacement.\n"
+                "- Each call starts in the working directory listed under `# Environment`; "
+                "`cd` does not persist across calls.\n"
+                "- Follow the command preferences under `# Environment` when present.\n"
                 "- Default timeout is 120s; pass `timeout_seconds` for slow commands "
                 "(test suites, builds). The harness enforces a hard ceiling.",
             .parameters_schema_json =
