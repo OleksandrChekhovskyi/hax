@@ -94,6 +94,37 @@ int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
     return 0;
 }
 
+/* /undo and /fork reach into agent.c (the turn helpers and the mutators) and
+ * terminal/picker.c. None are linked here; the dispatch tests exercise the
+ * empty-conversation guard, which returns before any of these run. */
+size_t agent_user_turn_count(const struct agent_session *s)
+{
+    (void)s;
+    return 0;
+}
+const char *agent_user_turn_text(const struct agent_session *s, size_t turn)
+{
+    (void)s;
+    (void)turn;
+    return NULL;
+}
+void agent_undo(struct agent_state *st, size_t turn)
+{
+    (void)st;
+    (void)turn;
+}
+void agent_fork(struct agent_state *st, size_t turn)
+{
+    (void)st;
+    (void)turn;
+}
+struct picker_opts;
+long picker_run(const struct picker_opts *opts)
+{
+    (void)opts;
+    return -1;
+}
+
 /* /provider, /model, /effort, /preset dispatch into select.c, which pulls
  * in the whole provider + picker + agent graph. The slash tests only assert
  * on dispatch routing, so stub the entry points the registry calls. */
@@ -573,6 +604,76 @@ static void test_resume_no_picker_repairs_trail(void)
     free(out);
 }
 
+/* ---------- /undo and /fork routing ---------- */
+
+static void test_undo_fork_empty_conversation(void)
+{
+    /* With no user turns (stubbed agent_user_turn_count returns 0), both
+     * commands must route to their handler, hit the guard, and report
+     * "nothing to …" rather than falling through or crashing. */
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_session s = {0};
+    struct agent_state st = {.sess = &s, .r = &r};
+    struct slash_ctx ctx = {.state = &st};
+
+    struct dispatch_call cu = {.line = "/undo", .ctx = &ctx};
+    char *out = capture_stdout(do_dispatch, &cu);
+    EXPECT(cu.result == SLASH_HANDLED);
+    EXPECT(strstr(out, "nothing to undo") != NULL);
+    free(out);
+
+    struct dispatch_call cf = {.line = "/fork", .ctx = &ctx};
+    out = capture_stdout(do_dispatch, &cf);
+    EXPECT(cf.result == SLASH_HANDLED);
+    EXPECT(strstr(out, "nothing to fork") != NULL);
+    free(out);
+}
+
+static void test_fork_zero_clones_seed_only(void)
+{
+    /* After compaction the only user item is a seed, so agent_user_turn_count
+     * (stubbed to 0 here) reports no turns — but /fork 0 clones the tip and
+     * must still be allowed when there's history to copy. agent_fork is a
+     * no-op stub, so we assert the zero-count guard did NOT fire. */
+    struct agent_session s = {0};
+    items_append(
+        &s.items, &s.n_items, &s.cap_items,
+        (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup("seed"), .compact_seed = 1});
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.sess = &s, .r = &r};
+    struct slash_ctx ctx = {.state = &st};
+
+    struct dispatch_call cf = {.line = "/fork 0", .ctx = &ctx};
+    char *out = capture_stdout(do_dispatch, &cf);
+    EXPECT(cf.result == SLASH_HANDLED);
+    EXPECT(strstr(out, "nothing to fork") == NULL); /* clone allowed */
+    free(out);
+
+    /* Trailing whitespace beyond a plain space (here a tab) is still accepted. */
+    struct dispatch_call ct = {.line = "/fork 0\t", .ctx = &ctx};
+    out = capture_stdout(do_dispatch, &ct);
+    EXPECT(ct.result == SLASH_HANDLED);
+    EXPECT(strstr(out, "takes a number") == NULL);
+    free(out);
+
+    /* /undo and picker-based /fork are still rejected — no real turn to act on. */
+    struct dispatch_call cu = {.line = "/undo 1", .ctx = &ctx};
+    out = capture_stdout(do_dispatch, &cu);
+    EXPECT(cu.result == SLASH_HANDLED);
+    EXPECT(strstr(out, "nothing to undo") != NULL);
+    free(out);
+
+    struct dispatch_call cp = {.line = "/fork", .ctx = &ctx};
+    out = capture_stdout(do_dispatch, &cp);
+    EXPECT(cp.result == SLASH_HANDLED);
+    EXPECT(strstr(out, "nothing to fork") != NULL);
+    free(out);
+
+    agent_session_free(&s);
+}
+
 int main(void)
 {
     test_dispatch_not_a_command();
@@ -593,5 +694,7 @@ int main(void)
     test_resume_cancelled_picker_keeps_trail();
     test_resume_selected_session_keeps_trail();
     test_resume_no_picker_repairs_trail();
+    test_undo_fork_empty_conversation();
+    test_fork_zero_clones_seed_only();
     T_REPORT();
 }

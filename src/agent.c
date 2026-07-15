@@ -817,14 +817,16 @@ static void replay_assistant(struct render_ctx *r, const char *text)
  * reasoning render at full fidelity; tool calls collapse to dim one-line
  * headers, since their output previews can't be rebuilt from stored items
  * and the tools can't be safely re-run. Earlier history stays one Ctrl-T
- * away, summarized by the dim rule's count.
+ * away, summarized by the dim rule's count. `lead` is the verb clause inside
+ * the dim rule ("resumed", "undid 2 turns", "forked"), so /resume, /undo and
+ * /fork share one replay with different framing.
  *
  * Anchored on the last ITEM_USER_MESSAGE, not the last TURN_BOUNDARY: one
  * user prompt can span several round-trips (turns), and we want them all.
  * Interactive-only — gated on both stdin and stdout being TTYs (same as
  * cursor_supported()), so a non-interactive run (`printf … | hax --resume`,
  * or any piped stdin/stdout) renders nothing extra before processing input. */
-static void replay_user_turn(struct render_ctx *r, const struct agent_session *s)
+static void replay_user_turn(struct render_ctx *r, const struct agent_session *s, const char *lead)
 {
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
         return;
@@ -855,10 +857,10 @@ static void replay_user_turn(struct render_ctx *r, const struct agent_session *s
     render_open_block(r);
     disp_raw(ANSI_DIM);
     if (earlier > 0)
-        disp_printf(&r->disp, "── resumed · %zu earlier message%s · ctrl-t for full history ──",
+        disp_printf(&r->disp, "── %s · %zu earlier message%s · ctrl-t for full history ──", lead,
                     earlier, earlier == 1 ? "" : "s");
     else
-        disp_printf(&r->disp, "── resumed · ctrl-t for full history ──");
+        disp_printf(&r->disp, "── %s · ctrl-t for full history ──", lead);
     disp_raw(ANSI_RESET);
     disp_putc(&r->disp, '\n');
 
@@ -949,7 +951,163 @@ void agent_resume_session(struct agent_state *st, const char *path)
     /* Old bash temp files referenced by the prior conversation are now
      * unreachable, same as on /new. */
     bash_cleanup_tempfiles();
-    replay_user_turn(st->r, s);
+    replay_user_turn(st->r, s, "resumed");
+}
+
+/* Item index of the 0-based non-seed user message `turn`, or -1 when out of
+ * range. The truncation point for /undo and /fork is this index, backed up
+ * over the turn_boundary that opens the turn (so the boundary goes too). */
+static int turn_item_index(const struct agent_session *s, size_t turn, size_t *out)
+{
+    size_t seen = 0;
+    for (size_t i = 0; i < s->n_items; i++) {
+        if (s->items[i].kind == ITEM_USER_MESSAGE && !s->items[i].compact_seed) {
+            if (seen == turn) {
+                *out = i;
+                return 0;
+            }
+            seen++;
+        }
+    }
+    return -1;
+}
+
+size_t agent_user_turn_count(const struct agent_session *s)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < s->n_items; i++)
+        if (s->items[i].kind == ITEM_USER_MESSAGE && !s->items[i].compact_seed)
+            n++;
+    return n;
+}
+
+const char *agent_user_turn_text(const struct agent_session *s, size_t turn)
+{
+    size_t idx;
+    if (turn_item_index(s, turn, &idx) != 0)
+        return NULL;
+    return s->items[idx].text;
+}
+
+/* Shared tail of /undo and /fork: stash the discarded prompt for recall, free
+ * history items from `cut` onward, clear the current-window snapshot when turns
+ * were discarded, re-key the transcript mirror, and replay the new tail behind
+ * `lead`. `cut` is the item index to truncate at; `turn` names the first
+ * discarded user turn (its prompt is the one to re-edit). */
+static void reshape_after_cut(struct agent_state *st, size_t cut, size_t turn, const char *lead)
+{
+    struct agent_session *s = st->sess;
+
+    /* Capture the discarded prompt before its item is freed. The REPL seeds it
+     * into recall after the /undo or /fork command line, so Up-arrow reaches
+     * the prompt, not the command (see agent_state.pending_recall). */
+    const char *recall = agent_user_turn_text(s, turn);
+    free(st->pending_recall);
+    st->pending_recall = recall ? xstrdup(recall) : NULL;
+
+    size_t old_n = s->n_items;
+    for (size_t i = cut; i < s->n_items; i++)
+        item_free(&s->items[i]);
+    s->n_items = cut;
+
+    /* The "current window" snapshot (/session's context row) is only ever set
+     * from a server-reported response. Once we discard turns it describes a
+     * response that's gone, and retained ITEM_TURN_USAGE footers (a compaction
+     * summary request's, say) don't reliably represent the new tail — so clear
+     * it rather than re-derive, letting /session show a context figure again
+     * only after the next real turn. A no-op cut (/fork 0 discards nothing)
+     * leaves the deliberate snapshot. Cumulative per-sitting totals always stay. */
+    if (cut < old_n) {
+        st->stats.last_ctx = 0;
+        st->stats.last_limit = 0;
+    }
+
+    transcript_log_reset(st->tlog, s->sys, s->tools, s->n_tools);
+    transcript_log_append(st->tlog, s->items, s->n_items);
+    /* No bash_cleanup_tempfiles() here: it unlinks the whole spill-file
+     * registry, but the retained prefix (all of it for /fork 0) can still hold
+     * "output saved to <path>" markers for those files, and the registry has
+     * no per-file removal. Leave the discarded turns' spills to /new and exit. */
+    replay_user_turn(st->r, s, lead);
+}
+
+void agent_undo(struct agent_state *st, size_t turn)
+{
+    struct agent_session *s = st->sess;
+    size_t cut;
+    if (turn_item_index(s, turn, &cut) != 0)
+        return;
+    if (cut > 0 && s->items[cut - 1].kind == ITEM_TURN_BOUNDARY)
+        cut--;
+
+    size_t removed = agent_user_turn_count(s) - turn;
+
+    /* Truncate the on-disk record first; on I/O failure bail with history
+     * intact. The file keeps the old branch and its high-water mark, so
+     * truncating memory too would later append onto that stale branch. */
+    if (session_log_truncate(st->slog, turn, cut) != 0) {
+        ui_error("could not truncate the session file; conversation left unchanged");
+        st->r->disp.trail = 1;
+        return;
+    }
+
+    char lead[64];
+    snprintf(lead, sizeof(lead), "undid %zu turn%s", removed, removed == 1 ? "" : "s");
+    reshape_after_cut(st, cut, turn, lead);
+}
+
+void agent_fork(struct agent_state *st, size_t turn)
+{
+    struct agent_session *s = st->sess;
+    size_t cut;
+    if (turn >= agent_user_turn_count(s)) {
+        /* Fork at the current tip (/fork 0): keep every turn — a clone onto a
+         * new branch, nothing discarded. */
+        cut = s->n_items;
+    } else {
+        if (turn_item_index(s, turn, &cut) != 0)
+            return;
+        if (cut > 0 && s->items[cut - 1].kind == ITEM_TURN_BOUNDARY)
+            cut--;
+    }
+
+    /* Fork must preserve the original as a resumable branch, which needs a
+     * session file to copy. With recording off (HAX_NO_SESSION) or a
+     * materialization failure there is none, so refuse rather than silently
+     * degrade into a destructive /undo mislabeled "forked". */
+    if (!session_log_materialized(st->slog)) {
+        ui_error("/fork needs session recording (it is disabled or unavailable)");
+        st->r->disp.trail = 1;
+        return;
+    }
+
+    /* Copy the prefix into a new file and switch the live logs onto it,
+     * leaving the original whole (resumable as the pre-fork branch). */
+    const char *src = session_log_path(st->slog);
+    char *newpath = NULL;
+    if (session_fork_file(src, turn, &newpath) != 0) {
+        ui_error("could not create fork");
+        st->r->disp.trail = 1;
+        return;
+    }
+    /* Open the new logger before retiring the old one: if it can't be opened,
+     * the original stays live and the conversation is untouched (rather than
+     * forking into an unrecordable branch). src borrows from st->slog, so it
+     * must outlive this call too. */
+    struct session_log *newlog =
+        session_log_resume(newpath, provider_log_name(st->provider), s->model, s->effort, cut);
+    if (!newlog) {
+        unlink(newpath);
+        free(newpath);
+        ui_error("could not open the fork session file; conversation left unchanged");
+        st->r->disp.trail = 1;
+        return;
+    }
+    free(newpath);
+    session_log_close(st->slog);
+    st->slog = newlog;
+
+    reshape_after_cut(st, cut, turn, "forked");
 }
 
 /* Event sink for the summary stream: feed the turn assembler, capture any
@@ -1189,7 +1347,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
      * so it lands here rather than right after the banner — nothing prints
      * in between, so it still reads as part of the startup sequence. */
     if (n_resumed > 0)
-        replay_user_turn(&r, &sess);
+        replay_user_turn(&r, &sess, "resumed");
     struct input *input = input_new();
     input_history_open_default(input);
     struct transcript_view tv = {
@@ -1278,6 +1436,13 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
              * new provider and its context-limit / usage reads track it. */
             p = (struct provider *)state.provider;
             input_history_add_session(input, line);
+            /* /undo and /fork stash the prompt they discarded; seed it after
+             * the command line so Up-arrow reaches it first. */
+            if (state.pending_recall) {
+                input_history_add_session(input, state.pending_recall);
+                free(state.pending_recall);
+                state.pending_recall = NULL;
+            }
             free(line);
             continue;
         }

@@ -598,6 +598,243 @@ const char *session_log_resume_hint(const struct session_log *log)
     return log->id;
 }
 
+/* ---------------- undo / fork ---------------- */
+
+/* Byte offset at which to end `path` to keep exactly the first `keep_turns`
+ * user turns (non-seed user items). The cut lands on the turn_boundary that
+ * opens the (keep_turns)-th turn — or that user line itself if no boundary
+ * precedes it — dropping that turn and everything after. Keeps the whole file
+ * when `keep_turns` covers every turn. Returns the offset, or -1 if `path`
+ * can't be opened. */
+static long scan_turn_offset(const char *path, size_t keep_turns)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return -1;
+
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t nread;
+    long cur = 0;   /* offset at the start of the line about to be read */
+    long prev = -1; /* start offset of the previous line */
+    int prev_boundary = 0;
+    long cut = -1;
+    size_t turns = 0;
+
+    while ((nread = getline(&line, &cap, f)) != -1) {
+        long start = cur;
+        cur += nread;
+
+        int is_boundary = 0, is_user = 0;
+        json_t *o = json_loads(line, 0, NULL);
+        if (o) {
+            const char *kind = json_string_value(json_object_get(o, "kind"));
+            if (kind) {
+                if (strcmp(kind, "turn_boundary") == 0)
+                    is_boundary = 1;
+                else if (strcmp(kind, "user") == 0 &&
+                         !json_is_true(json_object_get(o, "compact_seed")))
+                    is_user = 1;
+            }
+            json_decref(o);
+        }
+
+        if (is_user) {
+            if (turns == keep_turns && cut < 0)
+                cut = prev_boundary ? prev : start;
+            turns++;
+        }
+        prev = start;
+        prev_boundary = is_boundary;
+    }
+    /* getline returns -1 for both EOF and read/alloc errors; only a clean EOF
+     * makes cur a trustworthy end offset. On error, cut may be short of the
+     * real tail, so refuse rather than let the caller truncate what it never
+     * read. */
+    int err = ferror(f);
+    free(line);
+    fclose(f);
+    if (err)
+        return -1;
+
+    if (cut < 0)
+        cut = cur; /* keep_turns >= turns: retain the whole file */
+    return cut;
+}
+
+int session_log_truncate(struct session_log *log, size_t keep_turns, size_t new_item_count)
+{
+    if (!log || !log->path)
+        return 0;
+    /* Never materialized: nothing on disk to cut. n_written is still 0 (it
+     * only advances on a successful append), so leave it — a later append
+     * persists the whole truncated history from the start. */
+    if (!log->fp)
+        return 0;
+    if (fflush(log->fp) != 0)
+        return -1;
+    long off = scan_turn_offset(log->path, keep_turns);
+    if (off < 0)
+        return -1;
+
+    /* Only ever shrink, never extend. `off` came from a separate reader, so if
+     * something shortened the file since (session files aren't locked — same
+     * caveat as the fork path), truncating to a now-out-of-range `off` would
+     * re-extend the file with zero bytes. Refuse instead of corrupting; we
+     * don't otherwise try to coordinate concurrent writers. */
+    struct stat st;
+    if (fstat(fileno(log->fp), &st) != 0 || (off_t)off > st.st_size)
+        return -1;
+
+    /* Park the stream at the cut before truncating, so ftruncate is the only
+     * step that changes the file and the last one that can fail. On a fresh
+     * session's plain "w" stream this also moves the write cursor to the new
+     * EOF (it otherwise points past the cut bytes, corrupting the next append);
+     * a resumed O_APPEND stream ignores it. Restore the original position on
+     * any failure so a caller that keeps its history (undo aborts on -1) resumes
+     * appending at the real tail instead of overwriting it. */
+    long pos = ftell(log->fp);
+    if (pos < 0)
+        return -1;
+    if (fseek(log->fp, off, SEEK_SET) != 0) {
+        fseek(log->fp, pos, SEEK_SET);
+        return -1;
+    }
+    if (ftruncate(fileno(log->fp), off) != 0) {
+        fseek(log->fp, pos, SEEK_SET);
+        return -1;
+    }
+    log->n_written = new_item_count;
+    return 0;
+}
+
+int session_log_materialized(const struct session_log *log)
+{
+    return log && log->header_written;
+}
+
+int session_fork_file(const char *src_path, size_t keep_turns, char **out_path)
+{
+    *out_path = NULL;
+
+    long off = scan_turn_offset(src_path, keep_turns);
+    if (off < 0)
+        return -1;
+
+    FILE *src = fopen(src_path, "r");
+    if (!src)
+        return -1;
+
+    /* Read the header line so it can be restamped; its length is where the
+     * copyable body begins. */
+    char *header = NULL;
+    size_t hcap = 0;
+    ssize_t hlen = getline(&header, &hcap, src);
+    if (hlen < 0) {
+        free(header);
+        fclose(src);
+        return -1;
+    }
+    json_t *h = json_loads(header, 0, NULL);
+    free(header);
+    if (!h) {
+        fclose(src);
+        return -1;
+    }
+
+    /* Fresh identity for the fork; keep every other header field (cwd,
+     * provider, model, effort, version) as-is. */
+    char uuid[37];
+    gen_uuid_v4(uuid);
+    time_t now = time(NULL);
+    struct tm tm;
+    gmtime_r(&now, &tm);
+    char ts_file[32], ts_iso[32];
+    strftime(ts_file, sizeof(ts_file), "%Y-%m-%dT%H-%M-%SZ", &tm);
+    strftime(ts_iso, sizeof(ts_iso), "%Y-%m-%dT%H:%M:%SZ", &tm);
+
+    const char *old_id = json_string_value(json_object_get(h, "id"));
+    if (old_id)
+        json_object_set_new(h, "forked_from", json_string(old_id));
+    json_object_set_new(h, "id", json_string(uuid));
+    json_object_set_new(h, "timestamp", json_string(ts_iso));
+
+    /* Place the new file in the same per-cwd directory as the source. */
+    const char *slash = strrchr(src_path, '/');
+    char *newpath;
+    if (slash) {
+        int dirlen = (int)(slash - src_path);
+        newpath = xasprintf("%.*s/%s_%s.jsonl", dirlen, src_path, ts_file, uuid);
+    } else {
+        newpath = xasprintf("%s_%s.jsonl", ts_file, uuid);
+    }
+
+    int fd = open(newpath, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        json_decref(h);
+        free(newpath);
+        fclose(src);
+        return -1;
+    }
+    FILE *dst = fdopen(fd, "w");
+    if (!dst) {
+        close(fd);
+        unlink(newpath); /* drop the O_EXCL file we just created */
+        json_decref(h);
+        free(newpath);
+        fclose(src);
+        return -1;
+    }
+
+    int rc = 0;
+    char *hs = json_dumps(h, JSON_COMPACT);
+    if (hs) {
+        fputs(hs, dst);
+        fputc('\n', dst);
+        free(hs);
+    } else {
+        rc = -1;
+    }
+    json_decref(h);
+
+    /* Copy the body: source bytes from just after the header up to the cut. */
+    if (rc == 0 && off > hlen) {
+        if (fseek(src, hlen, SEEK_SET) != 0) {
+            rc = -1;
+        } else {
+            long remaining = off - hlen;
+            char buf[65536];
+            while (rc == 0 && remaining > 0) {
+                size_t want = remaining < (long)sizeof(buf) ? (size_t)remaining : sizeof(buf);
+                size_t got = fread(buf, 1, want, src);
+                if (got == 0) {
+                    /* Bytes still owed but none read: a read error, or the
+                     * source shrank since scan_turn_offset (session files have
+                     * no inter-process locking). Either way the copy is
+                     * incomplete — fail rather than switch onto a short fork. */
+                    rc = -1;
+                    break;
+                }
+                if (fwrite(buf, 1, got, dst) != got)
+                    rc = -1;
+                remaining -= (long)got;
+            }
+        }
+    }
+
+    if (fclose(dst) != 0)
+        rc = -1;
+    fclose(src);
+
+    if (rc != 0) {
+        unlink(newpath);
+        free(newpath);
+        return -1;
+    }
+    *out_path = newpath;
+    return 0;
+}
+
 /* ---------------- loading ---------------- */
 
 static void push_item(struct item **items, size_t *n, size_t *cap, struct item it)

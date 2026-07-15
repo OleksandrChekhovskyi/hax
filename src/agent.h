@@ -72,6 +72,10 @@ struct agent_state {
      * restored conversation through it. Points at agent_run's stack
      * frame; never heap-owned. */
     struct render_ctx *r;
+    /* A prompt the last /undo or /fork discarded, for the REPL to push onto
+     * recall *after* the command line so the first Up-arrow reaches the prompt,
+     * not the /undo/fork line. Owned; consumed and freed per slash command. */
+    char *pending_recall;
     /* Session usage totals — read by /session, reset by /new. */
     struct session_stats stats;
 };
@@ -107,6 +111,33 @@ void agent_new_conversation(struct agent_state *st);
  * Used by the /resume command. A load failure is reported and leaves the
  * current conversation untouched. */
 void agent_resume_session(struct agent_state *st, const char *path);
+
+/* Number of user turns in the live conversation — non-seed user messages,
+ * the unit /undo and /fork act on. */
+size_t agent_user_turn_count(const struct agent_session *s);
+
+/* The prompt text of user turn `turn` (0-based, oldest first), borrowed and
+ * valid until the next mutation of history. NULL when `turn` is out of range.
+ * Used by the /undo and /fork pickers to label rows. */
+const char *agent_user_turn_text(const struct agent_session *s, size_t turn);
+
+/* Revert the live conversation to just before user turn `turn` (0-based):
+ * drop turns [turn, end) from history, the session file, and the transcript
+ * mirror; seed the discarded prompt into editor recall; and replay the new
+ * tail behind a dim "── undid … ──" rule. `turn` must be <
+ * agent_user_turn_count (the caller validates). Used by /undo. */
+void agent_undo(struct agent_state *st, size_t turn);
+
+/* Fork a new branch before user turn `turn` (0-based): copy the session's
+ * first `turn` turns into a fresh file (the original is left whole, resumable
+ * as the pre-fork branch), switch the live session and logs onto the copy,
+ * truncate history to the branch point, seed the discarded prompt into recall,
+ * and replay the new tail behind a dim "── forked ──" rule. `turn` >=
+ * agent_user_turn_count forks at the tip (a whole-conversation clone, nothing
+ * discarded). Requires session recording: with it off or unavailable there is
+ * no original to preserve, so it reports an error and leaves history intact.
+ * Used by /fork. */
+void agent_fork(struct agent_state *st, size_t turn);
 
 /* Replace the live provider with `newp` (freshly constructed; ownership
  * transfers in). Destroys the previously-live provider — joining its

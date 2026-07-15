@@ -18,6 +18,7 @@
 #include "util.h"
 #include "terminal/ansi.h"
 #include "terminal/clipboard.h"
+#include "terminal/picker.h"
 #include "terminal/ui.h"
 
 /* Maximum number of aliases a single command can advertise. Three is
@@ -57,6 +58,8 @@ struct shortcut_def {
 
 static void slash_run_new(struct slash_ctx *ctx);
 static void slash_run_resume(struct slash_ctx *ctx);
+static void slash_run_undo(struct slash_ctx *ctx);
+static void slash_run_fork(struct slash_ctx *ctx);
 static void slash_run_provider(struct slash_ctx *ctx);
 static void slash_run_model(struct slash_ctx *ctx);
 static void slash_run_effort(struct slash_ctx *ctx);
@@ -82,6 +85,22 @@ static const struct slash_cmd COMMANDS[] = {
         .summary = "resume a past conversation",
         .drives_disp = 1,
         .run = slash_run_resume,
+    },
+    {
+        .name = "undo",
+        .aliases = {NULL},
+        .summary = "revert conversation to before an earlier message (optional: turns back)",
+        .takes_arg = 1,
+        .drives_disp = 1,
+        .run = slash_run_undo,
+    },
+    {
+        .name = "fork",
+        .aliases = {NULL},
+        .summary = "branch a new session before an earlier message (optional: turns back)",
+        .takes_arg = 1,
+        .drives_disp = 1,
+        .run = slash_run_fork,
     },
     {
         .name = "provider",
@@ -305,6 +324,125 @@ static void slash_run_resume(struct slash_ctx *ctx)
         return;
     agent_resume_session(ctx->state, path);
     free(path);
+}
+
+/* ---------- /undo, /fork ---------- */
+
+/* Search-and-display budget for a turn's prompt preview in the picker; the
+ * picker clips it to the row width, the slack lets a filter reach past it. */
+#define TURN_LABEL_CELLS 512
+
+/* Show a picker over the conversation's user turns (oldest first, most recent
+ * pre-selected) and return the chosen 0-based turn ordinal, or -1 on cancel
+ * or a non-tty. */
+static long undo_fork_picker(struct agent_session *s, size_t count, int is_undo)
+{
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
+        return -1;
+
+    struct picker_item *items = xmalloc(count * sizeof(*items));
+    char **labels = xmalloc(count * sizeof(*labels));
+    for (size_t t = 0; t < count; t++) {
+        const char *text = agent_user_turn_text(s, t);
+        char *flat = flatten_for_display(text ? text : "");
+        labels[t] = truncate_for_display(flat, TURN_LABEL_CELLS);
+        free(flat);
+        items[t].label = (labels[t] && labels[t][0]) ? labels[t] : "(empty)";
+        items[t].detail = NULL;
+        items[t].dim = 0;
+        items[t].current = 0;
+    }
+
+    struct picker_opts opts = {
+        .title = is_undo ? "revert to before which message" : "fork before which message",
+        .items = items,
+        .n = count,
+        .empty_note = NULL,
+        .initial = count - 1,
+    };
+    long sel = picker_run(&opts);
+
+    for (size_t t = 0; t < count; t++)
+        free(labels[t]);
+    free(labels);
+    free(items);
+    return sel;
+}
+
+/* Shared /undo and /fork body: resolve the target user turn (from the "turns
+ * back" argument, or a picker when none is given) and hand off to the agent.
+ * Both are drives_disp — the agent's replay drives the pipeline on success,
+ * and the raw-note/error paths reset the trail themselves. */
+static void slash_run_undo_fork(struct slash_ctx *ctx, int is_undo)
+{
+    struct agent_state *st = ctx->state;
+    struct agent_session *s = st->sess;
+    const char *verb = is_undo ? "undo" : "fork";
+    size_t count = agent_user_turn_count(s);
+
+    long turn;
+    if (ctx->arg) {
+        /* N counts turns back from the end: 1 is the most recent turn, `count`
+         * the first. /fork also accepts 0 — the current tip — which clones the
+         * whole conversation; that stays valid even when the only user item is
+         * a compaction seed (count 0), as long as there's history to copy.
+         * "undo nothing" is meaningless, so /undo starts at 1. */
+        long min = is_undo ? 1 : 0;
+        char *end;
+        long n = strtol(ctx->arg, &end, 10);
+        while (isspace((unsigned char)*end))
+            end++;
+        if (!is_undo && *end == '\0' && n == 0) {
+            if (s->n_items == 0) {
+                ui_note("nothing to fork yet");
+                st->r->disp.trail = 1;
+                return;
+            }
+            agent_fork(st, count); /* turn == count → clone the tip */
+            return;
+        }
+        if (*end != '\0' || n < min || (size_t)n > count) {
+            if (count == 0)
+                ui_note("nothing to %s yet", verb);
+            else
+                ui_error("/%s takes a number of turns between %ld and %zu", verb, min, count);
+            st->r->disp.trail = 1;
+            return;
+        }
+        turn = (long)count - n;
+    } else {
+        if (count == 0) {
+            ui_note("nothing to %s yet", verb);
+            st->r->disp.trail = 1;
+            return;
+        }
+        turn = undo_fork_picker(s, count, is_undo);
+        if (turn < 0) {
+            /* A shown picker erased back to its start row, so leave disp as
+             * the dispatcher's separator set it. With no tty there was no
+             * picker and no way to choose — point at the argument form. */
+            if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+                ui_note("/%s needs a number of turns when not interactive", verb);
+                st->r->disp.trail = 1;
+            }
+            return;
+        }
+    }
+
+    if (is_undo)
+        agent_undo(st, (size_t)turn);
+    else
+        agent_fork(st, (size_t)turn);
+}
+
+static void slash_run_undo(struct slash_ctx *ctx)
+{
+    slash_run_undo_fork(ctx, 1);
+}
+
+static void slash_run_fork(struct slash_ctx *ctx)
+{
+    slash_run_undo_fork(ctx, 0);
 }
 
 /* ---------- /provider, /model, /effort ---------- */

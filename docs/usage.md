@@ -69,6 +69,8 @@ Type `/help` in the REPL for the live command list and keyboard shortcuts.
 | `/new` | Start a fresh conversation. |
 | `/clear` | Alias for `/new`. |
 | `/resume` | Pick and resume a past session for this directory. |
+| `/undo [n]` | Revert the conversation to before an earlier prompt: without an argument, pick one from a list; `n` counts turns back from the end (`/undo 1` drops the most recent). Destructive and not undoable — history and the session file are truncated in place, with no redo; the dropped prompt is left in editor recall (Up-arrow) to re-edit. |
+| `/fork [n]` | Branch a new session before an earlier prompt, leaving the original whole and resumable. Without an argument, pick one from a list; `n` counts turns back from the end, and `/fork 0` clones the whole conversation at the current tip. |
 | `/provider` | Switch provider, then choose model and effort where applicable. |
 | `/model` | Switch model for the current provider, then choose effort where applicable. |
 | `/effort` | Set reasoning effort when the provider exposes effort levels. |

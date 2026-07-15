@@ -376,6 +376,127 @@ int main(void)
     free_items(items, n);
     free(pathtc);
 
+    /* ---- session_log_materialized flips on the first append ---- */
+    struct session_log *lm = session_log_open("pa", "ma", NULL);
+    EXPECT(lm != NULL);
+    EXPECT(session_log_materialized(lm) == 0); /* path assigned, file not written yet */
+    struct item one_turn[] = {{.kind = ITEM_TURN_BOUNDARY},
+                              {.kind = ITEM_USER_MESSAGE, .text = (char *)"hi"}};
+    session_log_append(lm, one_turn, 2);
+    EXPECT(session_log_materialized(lm) != 0); /* header + items now on disk */
+    session_log_close(lm);
+    EXPECT(session_log_materialized(NULL) == 0);
+
+    /* ---- undo: session_log_truncate keeps the first N user turns ---- */
+    /* Three turns; each is boundary + user + assistant. */
+    struct item conv_u[] = {
+        {.kind = ITEM_TURN_BOUNDARY},
+        {.kind = ITEM_USER_MESSAGE, .text = (char *)"t0"},
+        {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"a0"},
+        {.kind = ITEM_TURN_BOUNDARY},
+        {.kind = ITEM_USER_MESSAGE, .text = (char *)"t1"},
+        {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"a1"},
+        {.kind = ITEM_TURN_BOUNDARY},
+        {.kind = ITEM_USER_MESSAGE, .text = (char *)"t2"},
+        {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"a2"},
+    };
+    struct session_log *lu = session_log_open("pa", "ma", NULL);
+    EXPECT(lu != NULL);
+    char *pathu = xstrdup(session_log_path(lu));
+    session_log_append(lu, conv_u, 9);
+    /* Keep 2 turns: the cut lands on the boundary opening turn index 2, so
+     * items [0,6) survive (through assistant "a1"). */
+    EXPECT(session_log_truncate(lu, 2, 6) == 0);
+    /* Appending resumes cleanly from the new high-water mark. */
+    struct item conv_u2[7];
+    memcpy(conv_u2, conv_u, 6 * sizeof(struct item));
+    conv_u2[6] = (struct item){.kind = ITEM_USER_MESSAGE, .text = (char *)"redo"};
+    session_log_append(lu, conv_u2, 7);
+    session_log_close(lu);
+
+    EXPECT(session_load(pathu, &items, &n, NULL) == 0);
+    EXPECT(n == 7);
+    if (n == 7) {
+        EXPECT_STR_EQ(items[5].text, "a1");
+        EXPECT_STR_EQ(items[6].text, "redo");
+    }
+    for (size_t i = 0; i < n; i++)
+        EXPECT(!(items[i].text && strcmp(items[i].text, "t2") == 0)); /* discarded turn gone */
+    free_items(items, n);
+    free(pathu);
+
+    /* ---- undo everything: keep 0 turns leaves just the header ---- */
+    struct session_log *lz = session_log_open("pa", "ma", NULL);
+    EXPECT(lz != NULL);
+    char *pathz = xstrdup(session_log_path(lz));
+    session_log_append(lz, conv_u, 9);
+    EXPECT(session_log_truncate(lz, 0, 0) == 0);
+    session_log_close(lz);
+    EXPECT(session_load(pathz, &items, &n, NULL) == 0);
+    EXPECT(n == 0);
+    free_items(items, n);
+    free(pathz);
+
+    /* ---- fork: prefix copy branches without touching the source ---- */
+    struct session_log *lf = session_log_open("pa", "ma", "hi");
+    EXPECT(lf != NULL);
+    char *pathf = xstrdup(session_log_path(lf));
+    session_log_append(lf, conv_u, 9);
+    session_log_close(lf);
+
+    /* Capture the source id to prove the fork gets a fresh one. */
+    EXPECT(session_load(pathf, &items, &n, &meta) == 0);
+    char *src_id = xstrdup(meta.id);
+    free_items(items, n);
+    session_meta_free(&meta);
+
+    char *forkpath = NULL;
+    EXPECT(session_fork_file(pathf, 1, &forkpath) == 0);
+    EXPECT(forkpath != NULL);
+    if (forkpath) {
+        EXPECT(session_load(forkpath, &items, &n, &meta) == 0);
+        EXPECT(n == 3); /* one turn: boundary, user, assistant */
+        if (n == 3)
+            EXPECT_STR_EQ(items[1].text, "t0");
+        for (size_t i = 0; i < n; i++)
+            EXPECT(!(items[i].text && strcmp(items[i].text, "t1") == 0));
+        /* Fresh identity, inherited settings. */
+        EXPECT(meta.id != NULL && strcmp(meta.id, src_id) != 0);
+        EXPECT_STR_EQ(meta.provider, "pa");
+        EXPECT_STR_EQ(meta.model, "ma");
+        EXPECT_STR_EQ(meta.effort, "hi");
+        free_items(items, n);
+        session_meta_free(&meta);
+
+        /* The header records where it forked from. */
+        size_t flen;
+        char *fdata = slurp_file(forkpath, &flen);
+        EXPECT(fdata != NULL);
+        if (fdata) {
+            EXPECT(strstr(fdata, "forked_from") != NULL);
+            EXPECT(strstr(fdata, src_id) != NULL);
+            free(fdata);
+        }
+        free(forkpath);
+    }
+
+    /* The source file is untouched — still three full turns. */
+    EXPECT(session_load(pathf, &items, &n, NULL) == 0);
+    EXPECT(n == 9);
+    free_items(items, n);
+
+    /* Forking past the last turn clones the whole file. */
+    char *clonepath = NULL;
+    EXPECT(session_fork_file(pathf, 3, &clonepath) == 0);
+    if (clonepath) {
+        EXPECT(session_load(clonepath, &items, &n, NULL) == 0);
+        EXPECT(n == 9);
+        free_items(items, n);
+        free(clonepath);
+    }
+    free(src_id);
+    free(pathf);
+
     free(saved_id);
     free(path);
     T_REPORT();

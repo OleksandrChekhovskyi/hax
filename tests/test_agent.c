@@ -10,6 +10,7 @@
 #include "agent_core.h"
 #include "harness.h"
 #include "provider.h"
+#include "session.h"
 #include "render/render_ctx.h"
 #include "util.h"
 
@@ -354,6 +355,261 @@ static void test_banner_prefers_label_and_appends_effort(void)
     free(out);
 }
 
+/* ---------- agent_undo / agent_fork: the real mutators ---------- */
+
+/* These exercise the composition test_session.c can't reach: the in-memory
+ * cut, the session-log swap, pending_recall capture, and failure atomicity,
+ * all driven through the live agent.o. replay_user_turn no-ops off a tty (as
+ * here), so the assertions pin state, not the replayed rule; ui_error prints
+ * to stdout regardless, so the failure paths check the message too. */
+
+static void add_turn(struct agent_session *s, const char *prompt, const char *reply)
+{
+    agent_session_add_user(s, prompt); /* boundary + user */
+    items_append(&s->items, &s->n_items, &s->cap_items,
+                 (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup(reply)});
+}
+
+/* Fresh, isolated per-cwd session tree, with recording enabled. */
+static void set_state_dir(char *buf, size_t bufsz)
+{
+    snprintf(buf, bufsz, "/tmp/hax_test_undofork_XXXXXX");
+    EXPECT(mkdtemp(buf) != NULL);
+    setenv("XDG_STATE_HOME", buf, 1);
+    unsetenv("HAX_NO_SESSION");
+}
+
+static size_t count_users(const struct item *items, size_t n)
+{
+    size_t c = 0;
+    for (size_t i = 0; i < n; i++)
+        if (items[i].kind == ITEM_USER_MESSAGE && !items[i].compact_seed)
+            c++;
+    return c;
+}
+
+static void free_items(struct item *items, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        item_free(&items[i]);
+    free(items);
+}
+
+struct mut_call {
+    struct agent_state *st;
+    size_t turn;
+};
+
+static void do_undo(void *user)
+{
+    struct mut_call *c = user;
+    agent_undo(c->st, c->turn);
+}
+
+static void do_fork(void *user)
+{
+    struct mut_call *c = user;
+    agent_fork(c->st, c->turn);
+}
+
+static void test_undo_reverts_history_and_file(void)
+{
+    char dir[64];
+    set_state_dir(dir, sizeof(dir));
+    struct fixture f;
+    fixture_init(&f);
+    add_turn(&f.sess, "first", "r1");
+    add_turn(&f.sess, "second", "r2");
+    add_turn(&f.sess, "third", "r3");
+
+    f.st.slog = session_log_open("prov-x", "model-a", NULL);
+    EXPECT(f.st.slog != NULL);
+    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
+    char *path = xstrdup(session_log_path(f.st.slog));
+    EXPECT(agent_user_turn_count(&f.sess) == 3);
+
+    /* Revert to before turn 1: turn 0 survives, turns 1 and 2 drop. */
+    struct mut_call c = {.st = &f.st, .turn = 1};
+    char *out = capture_stdout(do_undo, &c);
+
+    EXPECT(agent_user_turn_count(&f.sess) == 1);
+    EXPECT_STR_EQ(agent_user_turn_text(&f.sess, 0), "first");
+    /* The discarded prompt is staged for editor recall. */
+    EXPECT_STR_EQ(f.st.pending_recall, "second");
+
+    /* The truncation reached disk: reloading shows only turn 0. */
+    struct item *items;
+    size_t n;
+    EXPECT(session_load(path, &items, &n, NULL) == 0);
+    EXPECT(count_users(items, n) == 1);
+    free_items(items, n);
+
+    free(out);
+    free(path);
+    free(f.st.pending_recall);
+    session_log_close(f.st.slog);
+    agent_session_free(&f.sess);
+    unsetenv("HAX_MODEL");
+    unsetenv("HAX_SYSTEM_PROMPT");
+    unsetenv("HAX_NO_ENV");
+    unsetenv("HAX_NO_AGENTS_MD");
+}
+
+static void test_fork_branches_and_switches_log(void)
+{
+    char dir[64];
+    set_state_dir(dir, sizeof(dir));
+    struct fixture f;
+    fixture_init(&f);
+    add_turn(&f.sess, "first", "r1");
+    add_turn(&f.sess, "second", "r2");
+    add_turn(&f.sess, "third", "r3");
+
+    f.st.slog = session_log_open("prov-x", "model-a", NULL);
+    EXPECT(f.st.slog != NULL);
+    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
+    char *orig = xstrdup(session_log_path(f.st.slog));
+
+    struct mut_call c = {.st = &f.st, .turn = 1};
+    char *out = capture_stdout(do_fork, &c);
+
+    /* History cut to the branch point, discarded prompt staged. */
+    EXPECT(agent_user_turn_count(&f.sess) == 1);
+    EXPECT_STR_EQ(f.st.pending_recall, "second");
+
+    /* The live log moved to a new file... */
+    const char *newpath = session_log_path(f.st.slog);
+    EXPECT(newpath != NULL);
+    EXPECT(strcmp(newpath, orig) != 0);
+
+    /* ...which holds just the branch prefix, stamped forked_from the source... */
+    struct item *items;
+    size_t n;
+    struct session_meta meta = {0};
+    EXPECT(session_load(newpath, &items, &n, &meta) == 0);
+    EXPECT(count_users(items, n) == 1);
+    free_items(items, n);
+    session_meta_free(&meta);
+
+    /* ...while the original is left whole and resumable. */
+    EXPECT(session_load(orig, &items, &n, NULL) == 0);
+    EXPECT(count_users(items, n) == 3);
+    free_items(items, n);
+
+    free(out);
+    free(orig);
+    free(f.st.pending_recall);
+    session_log_close(f.st.slog);
+    agent_session_free(&f.sess);
+    unsetenv("HAX_MODEL");
+    unsetenv("HAX_SYSTEM_PROMPT");
+    unsetenv("HAX_NO_ENV");
+    unsetenv("HAX_NO_AGENTS_MD");
+}
+
+static void test_fork_at_tip_clones_whole(void)
+{
+    char dir[64];
+    set_state_dir(dir, sizeof(dir));
+    struct fixture f;
+    fixture_init(&f);
+    add_turn(&f.sess, "first", "r1");
+    add_turn(&f.sess, "second", "r2");
+
+    f.st.slog = session_log_open("prov-x", "model-a", NULL);
+    EXPECT(f.st.slog != NULL);
+    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
+    char *orig = xstrdup(session_log_path(f.st.slog));
+    size_t items_before = f.sess.n_items;
+
+    /* turn == count: clone at the tip, nothing discarded. */
+    struct mut_call c = {.st = &f.st, .turn = 2};
+    char *out = capture_stdout(do_fork, &c);
+
+    EXPECT(f.sess.n_items == items_before);
+    EXPECT(f.st.pending_recall == NULL); /* no prompt discarded */
+
+    const char *newpath = session_log_path(f.st.slog);
+    EXPECT(strcmp(newpath, orig) != 0);
+    struct item *items;
+    size_t n;
+    EXPECT(session_load(newpath, &items, &n, NULL) == 0);
+    EXPECT(count_users(items, n) == 2); /* full clone */
+    free_items(items, n);
+
+    free(out);
+    free(orig);
+    session_log_close(f.st.slog);
+    agent_session_free(&f.sess);
+    unsetenv("HAX_MODEL");
+    unsetenv("HAX_SYSTEM_PROMPT");
+    unsetenv("HAX_NO_ENV");
+    unsetenv("HAX_NO_AGENTS_MD");
+}
+
+static void test_fork_without_recording_leaves_state(void)
+{
+    char dir[64];
+    set_state_dir(dir, sizeof(dir));
+    struct fixture f;
+    fixture_init(&f);
+    add_turn(&f.sess, "first", "r1");
+    add_turn(&f.sess, "second", "r2");
+    f.st.slog = NULL; /* recording off/unavailable: nothing to preserve */
+    size_t items_before = f.sess.n_items;
+
+    struct mut_call c = {.st = &f.st, .turn = 1};
+    char *out = capture_stdout(do_fork, &c);
+
+    /* Refused, conversation fully intact. */
+    EXPECT(strstr(out, "session recording") != NULL);
+    EXPECT(f.sess.n_items == items_before);
+    EXPECT(f.st.pending_recall == NULL);
+    EXPECT(f.st.slog == NULL);
+
+    free(out);
+    agent_session_free(&f.sess);
+    unsetenv("HAX_MODEL");
+    unsetenv("HAX_SYSTEM_PROMPT");
+    unsetenv("HAX_NO_ENV");
+    unsetenv("HAX_NO_AGENTS_MD");
+}
+
+static void test_undo_intact_when_truncate_fails(void)
+{
+    char dir[64];
+    set_state_dir(dir, sizeof(dir));
+    struct fixture f;
+    fixture_init(&f);
+    add_turn(&f.sess, "first", "r1");
+    add_turn(&f.sess, "second", "r2");
+    add_turn(&f.sess, "third", "r3");
+
+    f.st.slog = session_log_open("prov-x", "model-a", NULL);
+    EXPECT(f.st.slog != NULL);
+    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
+    size_t items_before = f.sess.n_items;
+
+    /* Make the on-disk truncation fail: unlink the file so scan_turn_offset's
+     * reopen can't find it. agent_undo must bail before touching memory. */
+    EXPECT(unlink(session_log_path(f.st.slog)) == 0);
+
+    struct mut_call c = {.st = &f.st, .turn = 1};
+    char *out = capture_stdout(do_undo, &c);
+
+    EXPECT(strstr(out, "could not truncate") != NULL);
+    EXPECT(f.sess.n_items == items_before); /* history untouched */
+    EXPECT(f.st.pending_recall == NULL);
+
+    free(out);
+    session_log_close(f.st.slog);
+    agent_session_free(&f.sess);
+    unsetenv("HAX_MODEL");
+    unsetenv("HAX_SYSTEM_PROMPT");
+    unsetenv("HAX_NO_ENV");
+    unsetenv("HAX_NO_AGENTS_MD");
+}
+
 int main(void)
 {
     test_apply_settings_empty_reprints_banner();
@@ -365,5 +621,10 @@ int main(void)
     test_banner_no_provider_points_at_picker();
     test_banner_no_model_points_at_picker();
     test_banner_prefers_label_and_appends_effort();
+    test_undo_reverts_history_and_file();
+    test_fork_branches_and_switches_log();
+    test_fork_at_tip_clones_whole();
+    test_fork_without_recording_leaves_state();
+    test_undo_intact_when_truncate_fails();
     T_REPORT();
 }

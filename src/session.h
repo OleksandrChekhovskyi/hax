@@ -93,6 +93,32 @@ void session_log_reset(struct session_log *log);
 
 void session_log_close(struct session_log *log);
 
+/* ---------------- undo / fork ---------------- */
+
+/* Truncate the file backing `log` to keep only its first `keep_turns` user
+ * turns (non-seed user messages, each with its boundary and responses); the
+ * cut drops the boundary opening the (keep_turns)-th turn and everything after
+ * it. `new_item_count` is the caller's post-truncation in-memory item count,
+ * recorded as the writer's high-water mark so later appends resume correctly.
+ * No-op returning 0 when `log` is NULL or unmaterialized. Returns 0 on
+ * success, -1 on I/O failure — in which case the file is left unchanged, so
+ * the caller keeps its in-memory history to stay consistent. Used by /undo. */
+int session_log_truncate(struct session_log *log, size_t keep_turns, size_t new_item_count);
+
+/* True once the session's file exists on disk (its header was written).
+ * session_log_path is non-NULL even before that first write, so callers that
+ * must touch the actual file — /fork copying it — gate on this instead. */
+int session_log_materialized(const struct session_log *log);
+
+/* Create a new session file next to `src_path` holding a copy of its header
+ * (restamped with a fresh id/timestamp and a `forked_from` field naming the
+ * source) followed by the source's first `keep_turns` user turns. The source
+ * file is left untouched, so it stays resumable as the pre-fork branch. On
+ * success returns 0 and stores the new file's path in *out_path (caller
+ * frees); returns -1 on I/O failure (with *out_path left NULL). Used by
+ * /fork. */
+int session_fork_file(const char *src_path, size_t keep_turns, char **out_path);
+
 /* The on-disk path of the current session file (borrowed; valid until
  * reset/close). Non-NULL even before the file is materialized — it's
  * where the session will be written. NULL only when `log` is NULL or
