@@ -84,6 +84,24 @@ struct md_renderer {
      * matches. */
     int cur_line_is_block;
 
+    /* Set while output sits at a blank-line boundary — a blank line has
+     * just been emitted, or nothing has been emitted yet. Extra
+     * consecutive blank lines are then suppressed so a run collapses to a
+     * single one; models sometimes emit several, which reads as ragged
+     * vertical gaps in the terminal. Set when the one allowed blank line
+     * is emitted in step_line_start, cleared there as soon as a non-blank
+     * line is processed. Only prose blank lines route through that path —
+     * code-fence and table interiors bypass it, so their verbatim blank
+     * lines are preserved. */
+    int at_blank;
+
+    /* Set when a list marker consumed a space run that reached the buffer
+     * end: leading spaces at the head of the next feed are the tail of that
+     * marker's padding and must be dropped, not rendered as content, so the
+     * marker still collapses to one space across the boundary. Cleared by
+     * the first non-space byte in step_inline. */
+    int skip_pad;
+
     /* ---------- wrap layer ----------
      *
      * Active when wrap_width > 0. Sits between the markdown step machine
@@ -1648,17 +1666,27 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
 
     char c = w->data[*i];
 
-    /* Blank line: paragraph break. Emit the \n and stay at_line_start
-     * so a run of blank lines all hard-break (vs. the soft-join logic
-     * in step_inline that would otherwise see the second \n in a "\n\n"
-     * run as mid-paragraph). */
+    /* Blank line: paragraph break. Emit a single \n and stay at_line_start
+     * so a run of blank lines all hard-break (vs. the soft-join logic in
+     * step_inline that would otherwise see the second \n in a "\n\n" run as
+     * mid-paragraph). Consecutive blank lines collapse to one: at_blank
+     * gates the emit, so a model padding with several blank lines still
+     * renders a single-line gap. The paragraph-terminating \n was already
+     * emitted elsewhere (step_inline hard break / marker line end), so the
+     * first blank here is the second newline that opens the one gap. */
     if (c == '\n') {
-        emit_text(m, "\n", 1);
+        if (!m->at_blank) {
+            emit_text(m, "\n", 1);
+            m->at_blank = 1;
+        }
         m->at_line_start = 1;
         m->cur_line_is_block = 0;
         (*i)++;
         return STEP_ADVANCED;
     }
+    /* A non-blank line begins: clear the boundary so its own trailing
+     * blank line (if any) is the next one allowed through. */
+    m->at_blank = 0;
 
     if (c == '`') {
         /* Count run length so we can support 4+ backtick fences (used
@@ -1749,11 +1777,21 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
             if (k + 1 >= w->len)
                 return STEP_DEFER;
             if (w->data[k + 1] == ' ') {
+                /* Collapse the whole space run after the marker to the
+                 * bullet's own single space (some models pad it for
+                 * alignment). If the run reaches the buffer end the padding
+                 * may continue in the next feed — skip_pad carries the
+                 * collapse across the boundary (see step_inline) rather than
+                 * deferring the whole marker. */
+                size_t sp = k + 1;
+                while (sp < w->len && w->data[sp] == ' ')
+                    sp++;
                 if (k > *i)
                     emit_text(m, w->data + *i, k - *i); /* preserve indent */
                 emit_bullet(m);                         /* dim "• " */
                 m->at_line_start = 0;
-                *i = k + 2; /* consume marker + space */
+                m->skip_pad = (sp >= w->len);
+                *i = sp; /* consume marker + space run */
                 return STEP_ADVANCED;
             }
         }
@@ -1773,6 +1811,15 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
             if (d >= w->len || d + 1 >= w->len)
                 return STEP_DEFER;
             if ((w->data[d] == '.' || w->data[d] == ')') && w->data[d + 1] == ' ') {
+                /* Collapse the whole space run after the delimiter to the
+                 * single separating space below (some models pad it for
+                 * alignment). If the run reaches the buffer end the padding
+                 * may continue in the next feed — skip_pad carries the
+                 * collapse across the boundary (see step_inline) rather than
+                 * deferring the whole marker. */
+                size_t sp = d + 1;
+                while (sp < w->len && w->data[sp] == ' ')
+                    sp++;
                 if (k > *i)
                     emit_text(m, w->data + *i, k - *i); /* preserve indent */
                 emit_raw(m, ANSI_DIM);
@@ -1780,7 +1827,8 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
                 emit_text(m, " ", 1);                   /* separating space */
                 emit_raw(m, ANSI_BOLD_OFF);             /* SGR 22 closes dim */
                 m->at_line_start = 0;
-                *i = d + 2; /* consume delimiter + space */
+                m->skip_pad = (sp >= w->len);
+                *i = sp; /* consume delimiter + space run */
                 return STEP_ADVANCED;
             }
         }
@@ -1833,6 +1881,19 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
 {
     char c = w->data[*i];
     size_t remaining = w->len - *i;
+
+    /* Residual list-marker padding: a preceding marker consumed a space run
+     * that reached the buffer end, so leading spaces at the head of this
+     * feed are the continuation of that padding — drop them so the marker
+     * still collapses to its single canonical space. Cleared by the first
+     * non-space byte, which is the item's real content. */
+    if (m->skip_pad) {
+        if (c == ' ') {
+            (*i)++;
+            return STEP_ADVANCED;
+        }
+        m->skip_pad = 0;
+    }
 
     if (c == '\n') {
         /* Headings are single-line: the trailing \n always terminates. */
@@ -2132,6 +2193,8 @@ struct md_renderer *md_new(md_emit_fn emit_cb, void *user, int wrap_width)
     m->emit_cb = emit_cb;
     m->user = user;
     m->at_line_start = 1;
+    m->at_blank = 1; /* start of stream: swallow leading blank lines */
+    m->skip_pad = 0;
     m->styled = 1;
     m->wrap_width = wrap_width;
     m->last_break_byte = -1;
@@ -2152,6 +2215,9 @@ void md_reset(struct md_renderer *m, int wrap_width)
     m->in_italic = 0;
     m->styled = 1;
     m->cur_line_is_block = 0;
+    /* Start of stream is a blank boundary — swallow leading blank lines. */
+    m->at_blank = 1;
+    m->skip_pad = 0;
     /* Re-sample wrap width on turn boundary so SIGWINCH-style resizes
      * between turns are picked up cheaply without callback plumbing. */
     m->wrap_width = wrap_width;

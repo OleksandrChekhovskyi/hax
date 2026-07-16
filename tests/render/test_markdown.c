@@ -78,6 +78,56 @@ static void test_empty(void)
     free(got);
 }
 
+/* ---------- blank-line collapsing ---------- */
+
+static void test_single_blank_line_preserved(void)
+{
+    /* One blank line between paragraphs is the canonical gap — kept. */
+    char *got = render_one("a\n\nb");
+    EXPECT_STR_EQ(got, "a\n\nb");
+    free(got);
+}
+
+static void test_multiple_blank_lines_collapse(void)
+{
+    /* Several blank lines collapse to a single-line gap. */
+    char *got = render_one("a\n\n\n\nb");
+    EXPECT_STR_EQ(got, "a\n\nb");
+    free(got);
+}
+
+static void test_leading_blank_lines_stripped(void)
+{
+    /* Blank lines before the first content have no gap to open. */
+    char *got = render_one("\n\n\ntext");
+    EXPECT_STR_EQ(got, "text");
+    free(got);
+}
+
+static void test_blank_lines_preserved_in_code_fence(void)
+{
+    /* Fenced code is verbatim — its interior blank lines survive. */
+    char *got = render_one("```\nfoo\n\n\nbar\n```\n");
+    EXPECT_STR_EQ(got, DIM "foo\n\n\nbar\n" OFF);
+    free(got);
+}
+
+static void test_collapse_blank_lines_split_across_feeds(void)
+{
+    /* The blank run straddles a feed boundary — the boundary flag carries
+     * across feeds so the gap still collapses to one line. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 0);
+    md_feed(m, "a\n\n", 3);
+    md_feed(m, "\n\nb", 3);
+    md_flush(m);
+    md_free(m);
+    char *got = buf_steal(&out);
+    EXPECT_STR_EQ(got, "a\n\nb");
+    free(got);
+}
+
 /* ---------- bold ---------- */
 
 static void test_bold_simple(void)
@@ -309,6 +359,93 @@ static void test_list_with_bold(void)
     /* Snippet pattern: `- **bold**: rest` */
     char *got = render_one("- **bold**: rest");
     EXPECT_STR_EQ(got, BUL BLD "bold" OFF ": rest");
+    free(got);
+}
+
+static void test_bullet_collapses_padded_marker(void)
+{
+    /* Some models pad the marker for alignment (`-   foo`); the extra
+     * spaces collapse to the bullet's own single space. */
+    char *got = render_one("-   foo");
+    EXPECT_STR_EQ(got, BUL "foo");
+    free(got);
+}
+
+static void test_numbered_collapses_padded_marker(void)
+{
+    /* Ordered marker padded for alignment (`1.  foo`) collapses to a
+     * single separating space, so the first line aligns with the
+     * hanging indent used for wrapped continuation rows. */
+    char *got = render_one("1.  foo\n10. bar");
+    EXPECT_STR_EQ(got, DIM "1. " OFF "foo\n" DIM "10. " OFF "bar");
+    free(got);
+}
+
+static void test_padded_marker_indent_preserved(void)
+{
+    /* Leading indent survives the collapse of the trailing padding. */
+    char *got = render_one("  -   foo");
+    EXPECT_STR_EQ(got, "  " BUL "foo");
+    free(got);
+}
+
+static void test_padded_marker_split_across_feeds(void)
+{
+    /* The padding run straddles a feed boundary: the parser must defer
+     * until it sees the run end, then collapse it — not treat the
+     * second feed's leading spaces as content. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 0);
+    md_feed(m, "1.  ", 4); /* delimiter + spaces, run reaches buffer end */
+    md_feed(m, "  foo", 5);
+    md_flush(m);
+    md_free(m);
+    char *got = buf_steal(&out);
+    EXPECT_STR_EQ(got, DIM "1. " OFF "foo");
+    free(got);
+}
+
+/* An ordered marker with no item text renders eagerly at EOF: there's no
+ * thematic-break ambiguity for digits, so the marker isn't deferred and the
+ * padding (if any) still collapses to one space. */
+static void test_numbered_marker_only_at_eof(void)
+{
+    char *got = render_one("1. ");
+    EXPECT_STR_EQ(got, DIM "1. " OFF);
+    free(got);
+    got = render_one("1.   ");
+    EXPECT_STR_EQ(got, DIM "1. " OFF);
+    free(got);
+    got = render_one("2) ");
+    EXPECT_STR_EQ(got, DIM "2) " OFF);
+    free(got);
+}
+
+static void test_bullet_marker_only_at_eof_stays_literal(void)
+{
+    /* A lone `-`/`*`/`_` + space at EOF can't be confirmed as a bullet: it
+     * could still open a `---`/`***`/`___` thematic break once a newline
+     * arrives, so the streaming parser defers it and, with no more input,
+     * flush emits it literally. (Pre-existing behavior — the digit markers
+     * above have no such ambiguity.) */
+    char *got = render_one("- ");
+    EXPECT_STR_EQ(got, "- ");
+    free(got);
+    got = render_one("*   ");
+    EXPECT_STR_EQ(got, "*   ");
+    free(got);
+}
+
+static void test_bare_marker_no_space_stays_literal(void)
+{
+    /* A marker char with no following space is not a list marker — it
+     * stays literal at EOF, matching the streaming path. */
+    char *got = render_one("-");
+    EXPECT_STR_EQ(got, "-");
+    free(got);
+    got = render_one("1.");
+    EXPECT_STR_EQ(got, "1.");
     free(got);
 }
 
@@ -2602,6 +2739,11 @@ int main(void)
     test_plain_ascii();
     test_utf8_passthrough();
     test_empty();
+    test_single_blank_line_preserved();
+    test_multiple_blank_lines_collapse();
+    test_leading_blank_lines_stripped();
+    test_blank_lines_preserved_in_code_fence();
+    test_collapse_blank_lines_split_across_feeds();
 
     test_bold_simple();
     test_bold_in_sentence();
@@ -2633,6 +2775,13 @@ int main(void)
     test_dash_list_passthrough();
     test_numbered_list_passthrough();
     test_list_with_bold();
+    test_bullet_collapses_padded_marker();
+    test_numbered_collapses_padded_marker();
+    test_padded_marker_indent_preserved();
+    test_padded_marker_split_across_feeds();
+    test_numbered_marker_only_at_eof();
+    test_bullet_marker_only_at_eof_stays_literal();
+    test_bare_marker_no_space_stays_literal();
 
     test_split_double_star();
     test_split_inline_code();

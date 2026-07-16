@@ -266,6 +266,31 @@ text \n| turn state machine | Assemble one streamed response into the flat item 
 usage in=1080 out=90
 end-turn
 
+# ---------- turn 26: padded list markers collapse to one space -------
+# Some models (local gemma, notably) pad the marker with extra spaces
+# for alignment: "1.   text" / "-   text". The renderer collapses that
+# run to the canonical single space, so the first line sits at the same
+# column as the hanging indent used for wrapped continuation rows instead
+# of a couple cells to its right. Compare against turns 11–12 (single-
+# space markers) — the rendered result should be indistinguishable.
+text Padded markers — the extra spaces after the marker should collapse:
+text \n-   alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi
+text \n-   short padded bullet
+text \n1.   First padded ordered item, long enough to wrap so the continuation aligns under the digit
+text \n2.   Second padded ordered item
+usage in=1020 out=44
+end-turn
+
+# ---------- turn 27: runs of blank lines collapse to one gap ----------
+# Models sometimes emit several blank lines between blocks; the renderer
+# keeps a single-line gap so the vertical rhythm stays even. The five
+# newlines below should render the same as the single blank line in
+# turn 10 — one gap, not four.
+text First block, then several blank lines before the next.
+text \n\n\n\n\nSecond block after the collapsed run — the gap above should be a single blank line, same as a normal paragraph break.
+usage in=1060 out=28
+end-turn
+
 text Done — markdown wrap demo complete.
 usage in=980 out=18
 end-turn
