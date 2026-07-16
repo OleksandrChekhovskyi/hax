@@ -375,8 +375,8 @@ static char *build_body(const struct context *ctx, const char *provider, const c
         json_pack("{s:s, s:b, s:b, s:s, s:o, s:o, s:{s:s}, s:s, s:b, s:o}", "model", model, "store",
                   0, "stream", 1, "instructions", ctx->system_prompt ? ctx->system_prompt : "",
                   "input", build_input_items(ctx->items, ctx->n_items, provider, model), "include",
-                  include, "text", "verbosity", "medium", "tool_choice", "auto",
-                  "parallel_tool_calls", 1, "tools", build_tools(ctx->tools, ctx->n_tools));
+                  include, "text", "verbosity", "low", "tool_choice", "auto", "parallel_tool_calls",
+                  1, "tools", build_tools(ctx->tools, ctx->n_tools));
 
     if (cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(cache_key));
