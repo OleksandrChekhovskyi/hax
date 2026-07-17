@@ -71,6 +71,7 @@ sources = files(
     'src/render/ctrl_strip.c',
     'src/render/disp.c',
     'src/render/markdown.c',
+    'src/render/markdown_scan.c',
     'src/render/markdown_table.c',
     'src/render/markdown_wrap.c',
     'src/render/progress.c',

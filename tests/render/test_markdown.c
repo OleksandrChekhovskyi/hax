@@ -649,6 +649,36 @@ static void test_feed_emits_prose_eagerly(void)
     buf_free(&out);
 }
 
+static void test_feed_emits_definite_block_break_eagerly(void)
+{
+    /* A provisional bullet proves the prose boundary while its own line remains held. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 100);
+
+    md_feed(m, "alpha\n* ", 8);
+    EXPECT_MEM_EQ(out.data, out.len, "alpha\n", 6);
+
+    md_free(m);
+    buf_free(&out);
+}
+
+static void test_short_fence_candidate_reaches_inline_dispatch(void)
+{
+    /* Conservative block lookahead must not hide a short run from line-start dispatch. */
+    char *got = render_one("`\n");
+    EXPECT_STR_EQ(got, CODE CODE_OFF "\n");
+    free(got);
+}
+
+static void test_indented_fence_prefix_normalizes_before_defer(void)
+{
+    /* Eligible fence indentation is discarded before an incomplete opener waits for more. */
+    char *got = render_one("   ````");
+    EXPECT_STR_EQ(got, "````");
+    free(got);
+}
+
 /* ---------- flush behavior ---------- */
 
 static void test_flush_emits_unterminated_marker(void)
@@ -2693,6 +2723,9 @@ int main(void)
 
     test_feed_partition_invariance();
     test_feed_emits_prose_eagerly();
+    test_feed_emits_definite_block_break_eagerly();
+    test_short_fence_candidate_reaches_inline_dispatch();
+    test_indented_fence_prefix_normalizes_before_defer();
 
     test_flush_emits_unterminated_marker();
     test_flush_emits_pending_tail();

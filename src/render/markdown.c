@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "util.h"
+#include "render/markdown_scan.h"
 #include "render/markdown_table.h"
 #include "render/markdown_wrap.h"
 #include "terminal/ansi.h"
@@ -551,72 +552,12 @@ static enum step_result step_in_inline_code(struct md_renderer *m, struct buf *w
  * clears at_line_start and falls through to inline processing. */
 static enum step_result step_line_start(struct md_renderer *m, struct buf *w, size_t *i)
 {
-    /* CommonMark equivalence: up to 3 leading spaces before a block
-     * marker that doesn't carry visual nesting (#, fence, thematic
-     * break, blockquote, table) are equivalent to no indent. Skip
-     * them before dispatch so a line like `  ## h` at the actual
-     * start of a response (or after a blank line) gets the same
-     * treatment as the soft-break path. List bullets (* / - / +)
-     * and numbered lists are intentionally excluded — leading spaces
-     * there mean nesting and must be preserved.
-     *
-     * Whitespace-only lines (any number of spaces or tabs followed by
-     * \n) are treated as blank for paragraph-break purposes — that
-     * scan is unbounded, separate from the 3-space marker cap. */
-    if (w->data[*i] == ' ' || w->data[*i] == '\t') {
-        size_t scan = *i;
-        int has_tab = 0;
-        while (scan < w->len && (w->data[scan] == ' ' || w->data[scan] == '\t')) {
-            if (w->data[scan] == '\t')
-                has_tab = 1;
-            scan++;
-        }
-        if (scan >= w->len)
-            return STEP_DEFER;
-        char peek = w->data[scan];
-        size_t avail = w->len - scan;
-        size_t white = scan - *i;
-        int marker_eligible = !has_tab && white <= 3;
-        int normalize = 0;
-        if (peek == '\n') {
-            normalize = 1; /* whitespace-only line — drop, fall through to blank */
-        } else if (marker_eligible && peek == '#') {
-            /* CommonMark heading: 1-6 # followed by space or \n.
-             * `##not` is not a heading (no space after the run). */
-            size_t k = scan;
-            while (k < w->len && k - scan < 6 && w->data[k] == '#')
-                k++;
-            if (k >= w->len)
-                return STEP_DEFER;
-            if (w->data[k] == ' ' || w->data[k] == '\n')
-                normalize = 1;
-        } else if (marker_eligible && peek == '`') {
-            if (avail < 3)
-                return STEP_DEFER;
-            if (w->data[scan + 1] == '`' && w->data[scan + 2] == '`')
-                normalize = 1;
-        } else if (marker_eligible && (peek == '-' || peek == '*' || peek == '_' || peek == '=')) {
-            /* Thematic break / setext underline. Allow whitespace
-             * between markers and require a \n terminator — same
-             * shape as the soft-break check in step_inline. */
-            size_t k = scan;
-            size_t count = 0;
-            while (k < w->len && (w->data[k] == peek || w->data[k] == ' ' || w->data[k] == '\t' ||
-                                  w->data[k] == '\r')) {
-                if (w->data[k] == peek)
-                    count++;
-                k++;
-            }
-            if (k >= w->len)
-                return STEP_DEFER;
-            if (w->data[k] == '\n' && count >= 3)
-                normalize = 1;
-        } else if (marker_eligible && (peek == '>' || peek == '|')) {
-            normalize = 1;
-        }
-        if (normalize)
-            *i = scan;
-    }
+    struct md_line_info line = md_scan_line(w->data + *i, w->len - *i, 0);
+    if (line.normalize_indent)
+        *i += line.indent_length;
+    /* Unindented dispatchers can resolve conservative lookahead results themselves. */
+    if (!line.classification_complete && line.indent_length > 0)
+        return STEP_DEFER;
 
     char c = w->data[*i];
 
@@ -861,156 +802,30 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
             (*i)++;
             return STEP_ADVANCED;
         }
-        /* Soft-break decision needs lookahead at the next line's
-         * start. Hard cases: blank line, or the next non-blank line
-         * begins with a block-level marker. Anything else is treated
-         * as soft per CommonMark — single \n inside a paragraph is a
-         * space. Recognized starts:
-         *   "\n"              blank line / paragraph break
-         *   "* " / "- " / "+ "  bullet list
-         *   "1. " / "1) "     numbered list (any digit run)
-         *   "# " / "## " ...  ATX heading
-         *   "```"             fence opener
-         *   "|"               GFM table row
-         *   "> "              blockquote
-         *   "---" / "***" / "___"  thematic break (also catches
-         *                      setext underlines, which we don't
-         *                      render but mustn't smash together)
-         * CommonMark allows up to 3 leading spaces before any of
-         * these — models often emit `  - sub`. Scan past them so the
-         * marker check still fires; on hard break we advance past
-         * the spaces too so the next line starts cleanly at the
-         * marker. A leading marker char with not-yet-known followers
-         * defers so the next feed can disambiguate. */
-        if (remaining < 2)
-            return STEP_DEFER;
-        /* Two scans, one pass: walk all whitespace (spaces + tabs) so
-         * blank-line detection isn't capped by leading-space count;
-         * track tab presence and white-cell count separately so the
-         * block-marker check can still apply CommonMark's 3-space
-         * (no tabs) limit. */
-        size_t scan = *i + 1;
-        int has_tab = 0;
-        while (scan < w->len && (w->data[scan] == ' ' || w->data[scan] == '\t')) {
-            if (w->data[scan] == '\t')
-                has_tab = 1;
-            scan++;
+        /* A physical newline is hard before a blank or block line and soft inside prose. The
+         * scanner may identify a definite block before its exact kind is complete, preserving
+         * eager boundary output while line dispatch waits for more. */
+        struct md_line_info line = md_scan_line(w->data + *i + 1, remaining - 1, 0);
+        if (line.kind == MD_LINE_INCOMPLETE) {
+            /* Indented list candidates are not block starts in lookahead, but an all-whitespace
+             * prefix remains ambiguous regardless of indentation depth. */
+            if (line.indent_length == remaining - 1 || line.indent_length <= 3)
+                return STEP_DEFER;
         }
-        if (scan >= w->len)
-            return STEP_DEFER;
-        char next = w->data[scan];
-        size_t avail = w->len - scan;
-        size_t white = scan - (*i + 1);
-        int marker_eligible = !has_tab && white <= 3;
 
-        /* Two flags drive the hard-break decision and what to do
-         * about leading spaces:
-         *
-         *   hard            — emit \n and end the paragraph here
-         *   normalize_indent — also drop the 1-3 leading spaces
-         *                      (CommonMark equivalence for top-level
-         *                      block markers that have no nesting
-         *                      concept via indent: heading, fence,
-         *                      thematic break, blockquote, table,
-         *                      blank line)
-         *
-         * For list markers we DON'T normalize: `* parent\n  - child`
-         * is a nested list and the visual indent is meaningful.
-         * Same for the cur_line_is_block continuation case (a line
-         * after a blockquote/table whose own next line might be
-         * indented prose continuing the structure). */
         int hard = 0;
-        int normalize_indent = 0;
-        if (next == '\n') {
-            /* Blank line (possibly with tabs / 4+ spaces) — drop the
-             * whitespace and let the next iteration's blank-line
-             * handler emit the second \n. */
+        if (line.kind == MD_LINE_BLANK || line.kind == MD_LINE_HEADING ||
+            line.kind == MD_LINE_FENCE || line.kind == MD_LINE_THEMATIC ||
+            line.kind == MD_LINE_BLOCKQUOTE || line.kind == MD_LINE_PIPE)
             hard = 1;
-            normalize_indent = 1;
-        }
-        if (!hard && marker_eligible && (next == '*' || next == '-' || next == '+')) {
-            if (avail < 2)
-                return STEP_DEFER;
-            if (w->data[scan + 1] == ' ')
-                hard = 1; /* bullet — preserve nesting indent */
-        }
-        /* Thematic break / setext heading underline: 3+ of the same
-         * `-`, `*`, `_`, or `=` on a line, possibly with whitespace
-         * between markers (CommonMark allows `* * *`, `_ _ _`, etc.).
-         * `=` and `-` also serve as setext h1 / h2 underlines — we
-         * don't render setext specially, but the line must stay
-         * separate from prose above and below. We require the line
-         * to terminate with \n so a 3-marker run mid-paragraph
-         * (e.g. `intro\n--verbose ...`) doesn't false-positive. */
-        if (!hard && marker_eligible &&
-            (next == '-' || next == '*' || next == '_' || next == '=')) {
-            size_t k = scan;
-            size_t count = 0;
-            while (k < w->len && (w->data[k] == next || w->data[k] == ' ' || w->data[k] == '\t' ||
-                                  w->data[k] == '\r')) {
-                if (w->data[k] == next)
-                    count++;
-                k++;
-            }
-            if (k >= w->len)
-                return STEP_DEFER;
-            if (w->data[k] == '\n' && count >= 3) {
-                hard = 1;
-                normalize_indent = 1;
-            }
-        }
-        if (!hard && marker_eligible && next == '#') {
-            /* CommonMark heading: 1-6 # followed by space or \n.
-             * `##not` is not a heading (no space terminating the
-             * hash run). */
-            size_t k = scan;
-            while (k < w->len && k - scan < 6 && w->data[k] == '#')
-                k++;
-            if (k >= w->len)
-                return STEP_DEFER;
-            if (w->data[k] == ' ' || w->data[k] == '\n') {
-                hard = 1;
-                normalize_indent = 1;
-            }
-        }
-        if (!hard && marker_eligible && next >= '0' && next <= '9') {
-            size_t k = scan + 1;
-            while (k < w->len && w->data[k] >= '0' && w->data[k] <= '9')
-                k++;
-            if (k >= w->len || k + 1 >= w->len)
-                return STEP_DEFER;
-            /* `N.` and `N)` are both valid CommonMark numbered list
-             * delimiters. compute_indent_cells accepts both too.
-             * Numbered lists nest the same way bullets do — preserve
-             * leading spaces. */
-            if ((w->data[k] == '.' || w->data[k] == ')') && w->data[k + 1] == ' ')
-                hard = 1;
-        }
-        if (!hard && marker_eligible && next == '`') {
-            if (avail < 3)
-                return STEP_DEFER;
-            if (w->data[scan + 1] == '`' && w->data[scan + 2] == '`') {
-                hard = 1;
-                normalize_indent = 1;
-            }
-        }
-        if (!hard && marker_eligible && next == '>') {
-            /* Blockquotes don't nest via space-indent; nesting is
-             * `> > > ...`. Leading spaces are CommonMark equivalent. */
+        if ((line.kind == MD_LINE_BULLET || line.kind == MD_LINE_ORDERED) &&
+            line.indent_length <= 3)
             hard = 1;
-            normalize_indent = 1;
-        }
-        if (!hard && marker_eligible && next == '|') {
-            /* Tables don't nest. */
+        if (m->cur_line_is_block)
             hard = 1;
-            normalize_indent = 1;
-        }
-        if (!hard && m->cur_line_is_block) {
-            /* The line we're ending was a blockquote/table row. The
-             * NEXT line may be lazy-continuation prose with its own
-             * indent — preserve it. */
-            hard = 1;
-        }
+
+        size_t scan = *i + 1 + line.indent_length;
+        int normalize_indent = line.normalize_indent;
         if (hard) {
             if (m->in_bold)
                 close_bold(m);
