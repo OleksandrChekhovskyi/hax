@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: MIT */
 #include "render/markdown.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "util.h"
+#include "render/markdown_wrap.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
 #include "text/utf8.h"
@@ -16,44 +16,6 @@
  * with attributes; this cap prevents runaway growth on malformed input. If
  * exceeded, the excess is flushed as plain text. */
 #define TAIL_MAX 8192
-
-/* Content cells granted past the indent only on a doomed continuation row
- * (indent_cells >= wrap_width) — see current_row_budget. Small: just enough
- * to print a short word per row instead of crawling one column at a time. */
-#define WRAP_MIN_CONTENT 8
-
-struct md_wrap {
-    /* Output stays eager; these buffers shadow the current row for
-     * retroactive erase/replay. row_meta tags content (0) and raw bytes (1),
-     * while cp_stream reassembles codepoints for accurate cell counts. */
-    int width;
-    struct utf8_stream cp_stream;
-    struct buf row_buf;
-    struct buf row_meta;
-    int col; /* visible cells; raw escapes are zero-width */
-
-    /* Most recent break-space: its row_buf offset and post-space cell column. */
-    int last_break_byte;
-    int last_break_col;
-
-    /* Continuation indent is detected once, before replay drops the original
-     * line prefix, then locked until a hard newline. */
-    int indent_cells;
-    int indent_locked;
-    /* Leading spaces are not break candidates until content has arrived. */
-    int row_has_content;
-
-    /* An edge-space cannot be emitted safely with delayed terminal autowrap.
-     * Defer its newline until visible content commits it; a hard newline
-     * absorbs it. */
-    int pending_wrap;
-
-    /* Style at the break-space. Later eager SGRs may have changed terminal
-     * state before wrap_break erases and replays the partial word. */
-    int snap_in_bold;
-    int snap_in_italic;
-    int snap_in_inline_code;
-};
 
 struct md_renderer {
     md_emit_fn emit_cb;
@@ -176,508 +138,21 @@ static int is_space(char c)
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
-/* ---------- wrap layer ----------
- *
- * Forwarding helpers used by emit_text / emit_raw below and by the
- * step machine to flush at hard-break boundaries. When wrap_width is
- * 0 (disabled) all of these collapse to a direct emit_cb call.
- */
-
-static void wrap_row_reset(struct md_wrap *w)
+static struct md_wrap_context wrap_context(const struct md_renderer *m)
 {
-    buf_reset(&w->row_buf);
-    buf_reset(&w->row_meta);
-    w->col = 0;
-    w->last_break_byte = -1;
-    w->last_break_col = 0;
-    w->indent_cells = 0;
-    w->indent_locked = 0;
-    w->row_has_content = 0;
+    return (struct md_wrap_context){
+        .emit = m->emit_cb,
+        .user = m->user,
+        .styled = m->styled,
+        .in_bold = m->in_bold,
+        .in_italic = m->in_italic,
+        .in_inline_code = m->in_inline_code,
+    };
 }
 
-static void wrap_state_reset(struct md_wrap *w, int width)
-{
-    w->width = width;
-    utf8_stream_reset(&w->cp_stream);
-    wrap_row_reset(w);
-    w->pending_wrap = 0;
-    w->snap_in_bold = 0;
-    w->snap_in_italic = 0;
-    w->snap_in_inline_code = 0;
-}
-
-static void wrap_state_free(struct md_wrap *w)
-{
-    buf_free(&w->row_buf);
-    buf_free(&w->row_meta);
-}
-
-static void wrap_emit_indent(struct md_renderer *m, int n);
-
-/* Commit a deferred edge-wrap to the wire: emit \n + indent and
- * reset row state so the next byte lands at column 0 of a fresh
- * row. Called from the top of wrap_consume_codepoint and wrap_append
- * — every entry point that would put a new byte on the terminal
- * — so the pending \n always lands before the byte that triggered
- * the commit. wrap_hard_newline absorbs pending instead (its own
- * \n is what the edge wrap was waiting for). */
-static void commit_pending_wrap(struct md_renderer *m)
-{
-    if (!m->wrap.pending_wrap)
-        return;
-    m->wrap.pending_wrap = 0;
-    m->emit_cb("\n", 1, 0, m->user);
-    wrap_emit_indent(m, m->wrap.indent_cells);
-    buf_reset(&m->wrap.row_buf);
-    buf_reset(&m->wrap.row_meta);
-    m->wrap.col = m->wrap.indent_cells;
-    m->wrap.last_break_byte = -1;
-    m->wrap.last_break_col = 0;
-    m->wrap.row_has_content = 0;
-    m->wrap.snap_in_bold = 0;
-    m->wrap.snap_in_italic = 0;
-    m->wrap.snap_in_inline_code = 0;
-}
-
-/* Append bytes to row_buf with their is_raw kind tagged in row_meta,
- * and emit them straight through to the terminal so the user sees
- * each codepoint the moment it arrives — no waiting on a downstream
- * commit point. The row_buf shadow is kept anyway: indent detection
- * still inspects the row's prefix at the first break, and wrap_break
- * uses it to replay the partial word on the next row after erasing
- * the eagerly-emitted bytes that overshot the budget. The two arrays
- * stay in lockstep so wrap_flush_range can re-emit runs of like-kind
- * bytes through emit_cb with the correct flag during a retro-wrap.
- *
- * The autowrap-edge case (a break-space that would land at col >
- * wrap_width) is handled upstream in wrap_consume_codepoint, which
- * drops the space and sets pending_wrap instead of calling here. So
- * by the time we get to wrap_append, the byte is safe to put on the
- * wire — we just commit any pending edge-wrap first so the \n + new
- * row lands before the new byte.
- *
- * Exception: zero-width raw bytes (SGR escapes) during a pending
- * edge-wrap go straight to the wire without committing. Committing
- * on a zero-width byte would emit \n + indent ahead of any visible
- * content, stranding the \n on its own line and producing an
- * extra blank row when the next byte is a hard \n that would
- * otherwise absorb pending. Only a visible byte (commit) or a
- * hard \n (absorb) should resolve pending_wrap. The SGR is not
- * stored in row_buf during this window — row_buf still holds the
- * prior (full) row, which commit_pending_wrap will reset anyway,
- * and no wrap_break can fire before commit since pending_wrap
- * means we're already past the edge with no more bytes appended
- * to the current row's shadow. */
-static void wrap_append(struct md_renderer *m, const char *s, size_t n, int is_raw)
-{
-    if (is_raw && m->wrap.pending_wrap) {
-        m->emit_cb(s, n, 1, m->user);
-        return;
-    }
-    commit_pending_wrap(m);
-    buf_append(&m->wrap.row_buf, s, n);
-    char meta = is_raw ? 1 : 0;
-    for (size_t i = 0; i < n; i++)
-        buf_append(&m->wrap.row_meta, &meta, 1);
-    m->emit_cb(s, n, is_raw, m->user);
-}
-
-/* Emit row_buf[start..end), splitting into runs of identical row_meta
- * bytes so escape spans go out with is_raw=1 and content with is_raw=0.
- * The split lets disp's trail/held bookkeeping ignore zero-width bytes
- * exactly the way it does on the non-wrap path. */
-static void wrap_flush_range(struct md_renderer *m, size_t start, size_t end)
-{
-    size_t i = start;
-    while (i < end) {
-        char kind = m->wrap.row_meta.data[i];
-        size_t j = i + 1;
-        while (j < end && m->wrap.row_meta.data[j] == kind)
-            j++;
-        m->emit_cb(m->wrap.row_buf.data + i, j - i, kind ? 1 : 0, m->user);
-        i = j;
-    }
-}
-
-/* End-of-row / end-of-stream cleanup. Every byte that ever reached
- * row_buf has already been emitted to the terminal (wrap_append is
- * the only entry, and it emits unconditionally), so this is just a
- * state reset of the shadow buffers. Pending_wrap stays set across
- * this — it's per-renderer state that the next byte (next feed, or
- * a hard \n) commits or absorbs; md_reset clears it at turn
- * boundaries. */
-static void wrap_flush_all(struct md_renderer *m)
-{
-    buf_reset(&m->wrap.row_buf);
-    buf_reset(&m->wrap.row_meta);
-}
-
-/* Detect a leading list-marker pattern in row_buf so wrapped rows can
- * indent under the marker's content column. Skips raw escape bytes
- * (they may be a leading style opener) and leading content spaces
- * (preserved before nested or indented list markers per the soft-break
- * decision). Recognizes:
- *   `* `, `- `, `+ `   → leading_spaces + 2 cells
- *   `N. ` / `N) `      → leading_spaces + digits + 2 cells
- *   no marker          → leading_spaces (align wrapped rows under the
- *                        line's own indent — a list-item continuation
- *                        paragraph or code/blockquote body keeps its
- *                        hanging indent instead of wrapping back to
- *                        column 0)
- * ASCII-only patterns, so byte offsets equal cell counts. The
- * leading-space scan is capped at 8 to keep the continuation indent
- * within sane budget territory; deeper nesting levels just lose a bit
- * of visual hierarchy on wrap. */
-static int compute_indent_cells(const struct md_renderer *m)
-{
-    size_t i = 0;
-    /* Skip leading raw-escape bytes — bullets are emitted as plain
-     * content, so the first non-raw byte is the candidate marker. */
-    while (i < m->wrap.row_buf.len && m->wrap.row_meta.data[i] == 1)
-        i++;
-    /* Then skip leading ASCII spaces in content. */
-    size_t lead_spaces = 0;
-    while (i < m->wrap.row_buf.len && lead_spaces < 8 && m->wrap.row_meta.data[i] == 0 &&
-           m->wrap.row_buf.data[i] == ' ') {
-        i++;
-        lead_spaces++;
-    }
-    /* Skip raw escapes again: a dim list marker emits its SGR opener
-     * between the indent and the marker glyph (indent spaces, then DIM,
-     * then `• ` / `N. `), so the marker check below must see past it. */
-    while (i < m->wrap.row_buf.len && m->wrap.row_meta.data[i] == 1)
-        i++;
-    if (i >= m->wrap.row_buf.len)
-        return 0;
-    /* Unicode bullet "• " (U+2022 = e2 80 a2) — the table-reflow record
-     * marker. Like a one-cell bullet: 2-cell hanging indent (glyph +
-     * space) so wrapped value lines align under the record's content. */
-    if (i + 3 < m->wrap.row_buf.len && m->wrap.row_meta.data[i] == 0 &&
-        (unsigned char)m->wrap.row_buf.data[i] == 0xe2 &&
-        (unsigned char)m->wrap.row_buf.data[i + 1] == 0x80 &&
-        (unsigned char)m->wrap.row_buf.data[i + 2] == 0xa2 && m->wrap.row_meta.data[i + 3] == 0 &&
-        m->wrap.row_buf.data[i + 3] == ' ')
-        return (int)lead_spaces + 2;
-    char c = m->wrap.row_buf.data[i];
-    if ((c == '*' || c == '-' || c == '+') && i + 1 < m->wrap.row_buf.len &&
-        m->wrap.row_meta.data[i + 1] == 0 && m->wrap.row_buf.data[i + 1] == ' ')
-        return (int)lead_spaces + 2;
-    if (c >= '0' && c <= '9') {
-        /* Scan the full digit run — match the soft-break detector
-         * which is also unbounded, so a 4+ digit ordered list like
-         * "1000. " or CommonMark's 9-digit max gets a correct
-         * hanging indent under the marker on continuation rows. */
-        size_t j = i + 1;
-        while (j < m->wrap.row_buf.len && m->wrap.row_meta.data[j] == 0 &&
-               m->wrap.row_buf.data[j] >= '0' && m->wrap.row_buf.data[j] <= '9')
-            j++;
-        if (j > i && j + 1 < m->wrap.row_buf.len && m->wrap.row_meta.data[j] == 0 &&
-            (m->wrap.row_buf.data[j] == '.' || m->wrap.row_buf.data[j] == ')') &&
-            m->wrap.row_meta.data[j + 1] == 0 && m->wrap.row_buf.data[j + 1] == ' ')
-            return (int)lead_spaces + (int)(j - i) + 2; /* spaces + digits + delim + space */
-    }
-    /* No marker — align continuation rows under the line's own leading
-     * indent (0 for a plain top-level paragraph). */
-    return (int)lead_spaces;
-}
-
-/* Continuation budget for a wrapped row. Almost always wrap_width —
- * which md_wrap_width() keeps one cell inside the physical edge, so
- * the eager retro-wrap (CSI nD / CSI K) never touches the last column
- * and survives terminals that defer the autowrap (libvterm's phantom
- * column). A list-item continuation row reserves indent_cells of that
- * width for the hanging indent, but the budget stays at wrap_width so
- * the reserved column is honored regardless of indent depth.
- *
- * The sole exception is a pathologically deep bullet on a tiny
- * terminal where the indent alone meets or exceeds wrap_width: the row
- * is already doomed to the terminal's own hard-wrap, so capping at
- * wrap_width would only crawl one column at a time. There we overshoot
- * to keep the content legible — the phantom hazard is unreachable on a
- * row whose indent already fills the usable width. */
-static int current_row_budget(struct md_renderer *m)
-{
-    if (m->wrap.indent_cells <= 0 || m->wrap.indent_cells < m->wrap.width)
-        return m->wrap.width;
-    return m->wrap.indent_cells + WRAP_MIN_CONTENT;
-}
-
-static void wrap_emit_indent(struct md_renderer *m, int n)
-{
-    if (n <= 0)
-        return;
-    /* Indent is content (is_raw=0) and goes directly to emit_cb — it
-     * lives only on the terminal, not in row_buf, so a subsequent
-     * wrap doesn't carry it as content to be re-emitted. */
-    static const char SPACES[] = "                                ";
-    while (n > 0) {
-        int k = n > 32 ? 32 : n;
-        m->emit_cb(SPACES, (size_t)k, 0, m->user);
-        n -= k;
-    }
-}
-
-/* Retroactive wrap: the partial word past the recorded break-space
- * was eagerly emitted onto the current row and now would overshoot
- * the budget. Move the terminal cursor back over the break-space and
- * the partial word, erase to end of line, drop down to a new row with
- * the continuation indent, and replay the partial word from row_buf.
- * The break-space itself is dropped (not replayed) so the next row
- * starts at the first byte of the partial word — same final visible
- * state as the legacy buffered-flush wrap, just delivered without
- * waiting for the next codepoint to commit the prior word. */
-static void wrap_break(struct md_renderer *m)
-{
-    if (!m->wrap.indent_locked) {
-        m->wrap.indent_cells = compute_indent_cells(m);
-        m->wrap.indent_locked = 1;
-    }
-    /* erase_cells = partial word's cells + 1 for the break-space.
-     * Every byte in row_buf has been emitted (no holds in this
-     * design), so the break-space always contributes 1 cell to the
-     * erase. col is pre-new-codepoint, last_break_col is post-space. */
-    int erase_cells = (m->wrap.col - m->wrap.last_break_col) + 1;
-    if (erase_cells > 0) {
-        char esc[16];
-        int len = snprintf(esc, sizeof(esc), "\x1b[%dD", erase_cells);
-        m->emit_cb(esc, (size_t)len, 1, m->user);
-        m->emit_cb(ANSI_ERASE_LINE, sizeof(ANSI_ERASE_LINE) - 1, 1, m->user);
-    }
-    m->emit_cb("\n", 1, 0, m->user);
-    wrap_emit_indent(m, m->wrap.indent_cells);
-    /* Restore terminal SGR state to the snapshot taken at the break:
-     * post-break style transitions have already eagerly mutated
-     * terminal state, so the replay would otherwise inherit the
-     * wrong state for any byte that's inside the snapshot's span
-     * but past a closer that fired before wrap_break. Skipped in
-     * unstyled mode where the renderer emits no SGRs at all (any
-     * close here would clobber the caller's outer span). */
-    if (m->styled) {
-        if (m->in_bold != m->wrap.snap_in_bold) {
-            const char *e = m->wrap.snap_in_bold ? ANSI_BOLD : ANSI_BOLD_OFF;
-            m->emit_cb(e, strlen(e), 1, m->user);
-        }
-        if (m->in_italic != m->wrap.snap_in_italic) {
-            const char *e = m->wrap.snap_in_italic ? ANSI_ITALIC : ANSI_ITALIC_OFF;
-            m->emit_cb(e, strlen(e), 1, m->user);
-        }
-        if (m->in_inline_code != m->wrap.snap_in_inline_code) {
-            const char *e = m->wrap.snap_in_inline_code ? theme_open(THEME_CODE_INLINE)
-                                                        : theme_close(THEME_CODE_INLINE);
-            m->emit_cb(e, strlen(e), 1, m->user);
-        }
-    }
-    /* Replay the partial word + any escapes interleaved with it. The
-     * break-space at offset last_break_byte is skipped. */
-    size_t shift = (size_t)m->wrap.last_break_byte + 1;
-    if (shift > m->wrap.row_buf.len)
-        shift = m->wrap.row_buf.len;
-    if (shift < m->wrap.row_buf.len)
-        wrap_flush_range(m, shift, m->wrap.row_buf.len);
-    size_t new_len = m->wrap.row_buf.len - shift;
-    memmove(m->wrap.row_buf.data, m->wrap.row_buf.data + shift, new_len);
-    memmove(m->wrap.row_meta.data, m->wrap.row_meta.data + shift, new_len);
-    m->wrap.row_buf.len = new_len;
-    m->wrap.row_meta.len = new_len;
-    m->wrap.col = m->wrap.indent_cells + (m->wrap.col - m->wrap.last_break_col);
-    m->wrap.last_break_byte = -1;
-    m->wrap.last_break_col = 0;
-}
-
-/* End-of-row hard break: model emitted a \n that's a real break (not
- * a soft join). Reset row state, emit \n. A pending edge-wrap is
- * absorbed here — its deferred \n is exactly what we're about to
- * emit, so committing it separately would double-up the line break. */
-static void wrap_hard_newline(struct md_renderer *m)
-{
-    m->wrap.pending_wrap = 0;
-    wrap_flush_all(m);
-    m->emit_cb("\n", 1, 0, m->user);
-    m->wrap.col = 0;
-    m->wrap.last_break_byte = -1;
-    m->wrap.last_break_col = 0;
-    m->wrap.indent_cells = 0;
-    m->wrap.indent_locked = 0;
-    m->wrap.row_has_content = 0;
-}
-
-/* Per-codepoint append into row_buf with break-point bookkeeping.
- *
- * Two wrap paths:
- *   - Edge-space wrap: a break-space that would land at col >
- *     wrap_width gets dropped on the floor; pending_wrap is set so
- *     the next byte (commit_pending_wrap) or hard \n (subsume)
- *     supplies the actual line break. Realistically there's no
- *     other outcome — the space IS the wrap point, anything after
- *     belongs on the next row.
- *   - Mid-word wrap: a non-space that would overshoot fires
- *     wrap_break at the last break-space — erase the partial word,
- *     drop down, replay (with SGR rewind from snap_in_X).
- *
- * Pending_wrap is committed at entry so a second consecutive byte
- * (be it another space, content, or an SGR via wrap_append) lands
- * on the fresh row with row_has_content cleared. A long unbroken
- * word with no break candidate just keeps streaming past budget —
- * the terminal hard-wraps it, same fallback as before. */
-static void wrap_consume_codepoint(struct md_renderer *m, const char *out, size_t n, int cells)
-{
-    /* CR is the lead of a CRLF line ending, not a glyph. Drop it in the
-     * wrap layer: the \n that follows drives the break, so a bare CR
-     * here would only commit a pending wrap (turning a CRLF hard break
-     * landing on the wrap boundary into an extra blank line) or strand
-     * the cursor at column 0 mid-row. The trailing-space counter in
-     * emit_text already treats \r as transparent, so the hard-break
-     * rule still sees the spaces before it. */
-    if (n == 1 && out[0] == '\r')
-        return;
-    /* A space arriving while a wrap is already pending belongs to a run
-     * of spaces straddling the wrap point. Drop it instead of letting it
-     * commit the deferred \n: committing would strand the space at
-     * column 0 of the next row, which turned trailing hard-break spaces
-     * landing on the wrap boundary into a spurious blank/space line
-     * (`aaaaa  \nbar` at width 5 → `aaaaa\n \nbar`) and left ragged
-     * leading spaces on ordinary wrapped rows. Only non-space content
-     * (or a hard \n, which subsumes pending) commits the wrap. */
-    if (n == 1 && out[0] == ' ' && m->wrap.pending_wrap)
-        return;
-    commit_pending_wrap(m);
-    if (cells == 0) {
-        /* Combining mark: rides on the prior glyph; append silently
-         * so a wrap break can't orphan it. */
-        wrap_append(m, out, n, 0);
-        return;
-    }
-    int budget = current_row_budget(m);
-    int is_space = (n == 1 && out[0] == ' ');
-    /* Edge-space: don't emit, defer the wrap. row_has_content is
-     * the same guard we use for break-recording — leading spaces
-     * never set pending. */
-    if (is_space && m->wrap.row_has_content && m->wrap.col + cells > budget) {
-        m->wrap.pending_wrap = 1;
-        return;
-    }
-    /* Mid-word overflow: wrap at the last break-space. */
-    if (!is_space && m->wrap.col + cells > budget && m->wrap.last_break_byte >= 0)
-        wrap_break(m);
-    wrap_append(m, out, n, 0);
-    m->wrap.col += cells;
-    if (is_space) {
-        /* Record break candidate AT this space — but only if some
-         * non-space content has already landed, otherwise wrapping
-         * here would emit an empty row + indent + same content and
-         * make no forward progress. Inline code spans are NOT
-         * exempted: a soft break inside one stays code-colored thanks
-         * to SGR persistence across \n, which keeps the visual span
-         * coherent without forcing the wrap to overflow. */
-        if (m->wrap.row_has_content) {
-            size_t new_break = m->wrap.row_buf.len - 1;
-            if (m->wrap.last_break_byte < 0 && !m->wrap.indent_locked) {
-                /* First break of the row. Detect list-marker indent
-                 * now, before the streaming commit below drops the
-                 * marker bytes from row_buf. */
-                m->wrap.indent_cells = compute_indent_cells(m);
-                m->wrap.indent_locked = 1;
-            }
-            /* Trim row_buf so it retains only the break-space and any
-             * future partial word past it — eager-emit already pushed
-             * everything before this space onto the terminal, so the
-             * shadow only needs to hold what wrap_break would replay
-             * after an erase. Keeping the break-space as the new
-             * row_buf head lets wrap_break compute the erase span
-             * (cursor back through the space + partial word) and
-             * skip the space on replay so no trailing-space artifact
-             * survives the wrap. */
-            size_t shift = new_break;
-            if (shift > 0) {
-                size_t new_len = m->wrap.row_buf.len - shift;
-                memmove(m->wrap.row_buf.data, m->wrap.row_buf.data + shift, new_len);
-                memmove(m->wrap.row_meta.data, m->wrap.row_meta.data + shift, new_len);
-                m->wrap.row_buf.len = new_len;
-                m->wrap.row_meta.len = new_len;
-                new_break -= shift;
-            }
-            m->wrap.last_break_byte = (int)new_break;
-            m->wrap.last_break_col = m->wrap.col;
-            /* Capture the active SGR state at this break point so
-             * wrap_break can rewind terminal state before replaying
-             * — eager-emitted SGRs after the space might leave the
-             * terminal in a different state than the replay expects. */
-            m->wrap.snap_in_bold = m->in_bold;
-            m->wrap.snap_in_italic = m->in_italic;
-            m->wrap.snap_in_inline_code = m->in_inline_code;
-        }
-    } else {
-        m->wrap.row_has_content = 1;
-    }
-}
-
-/* Drain any partial codepoint that cp_stream is holding. Used at
- * boundaries where ordering matters (hard \n, raw escape append) so
- * a malformed lead byte queued before the boundary doesn't end up
- * AFTER the \n or the escape in the output. */
-static void wrap_drain_cp_stream(struct md_renderer *m)
-{
-    const char *out;
-    size_t out_n;
-    int cells;
-    if (utf8_stream_flush(&m->wrap.cp_stream, &out, &out_n, &cells))
-        wrap_consume_codepoint(m, out, out_n, cells);
-}
-
-static void emit_text_chunk(struct md_renderer *m, const char *s, size_t n)
-{
-    /* Wrap disabled, or modes that pass content through verbatim:
-     * code fences are CommonMark-verbatim and headings are by-policy
-     * single-line. */
-    if (m->wrap.width <= 0 || m->in_code_fence || m->in_heading) {
-        m->emit_cb(s, n, 0, m->user);
-        return;
-    }
-    for (size_t i = 0; i < n; i++) {
-        unsigned char b = (unsigned char)s[i];
-        if (b == '\n') {
-            /* The step machine only emits \n via emit_text on a real
-             * (hard) line break — soft joins are converted to spaces
-             * before this point. Drain any pending malformed UTF-8
-             * lead byte FIRST so it lands before the \n, not after. */
-            wrap_drain_cp_stream(m);
-            wrap_hard_newline(m);
-            continue;
-        }
-        const char *out;
-        size_t out_n;
-        int cells;
-        if (utf8_stream_byte(&m->wrap.cp_stream, b, &out, &out_n, &cells))
-            wrap_consume_codepoint(m, out, out_n, cells);
-    }
-}
-
-/* Substitute \t before content reaches the terminal so it can't expand
- * to inconsistent column-multiple-of-8 tab stops past our cell budget
- * (wcwidth('\t') == -1, so without substitution cell math counts a tab
- * as one cell while the terminal renders many). Two policies because
- * the wrap engine and the verbatim path tolerate multi-cell whitespace
- * differently:
- *
- *   - Verbatim (code fences, headings, no-wrap mode): 4 spaces.
- *     Preserves indent fidelity for source code in fenced blocks, the
- *     main practical case.
- *
- *   - Wrap engine: 1 space. The engine records a wrap-break candidate
- *     at every space and trims earlier ones from row_buf as later
- *     spaces arrive, so a 4-space expansion would let the eagerly-
- *     emitted spaces push the row past wrap_width by up to 3 cells
- *     before the next non-space triggers a break. A single space
- *     round-trips through the break math cleanly and is semantically
- *     fine for prose (a mid-prose tab serves the same role as a
- *     space). */
 static void emit_text(struct md_renderer *m, const char *s, size_t n)
 {
-    /* Track the trailing-space run for the hard-line-break rule (see the
-     * \n handler in step_inline). Counted on the raw bytes before tab
-     * substitution: a tab is not a space for CommonMark's rule, and any
-     * non-space resets the run — except \r, which is transparent so a
-     * CRLF line ending ("foo  \r\n") still sees the two spaces. */
+    /* Track the source bytes before the wrap layer substitutes tabs. */
     for (size_t j = 0; j < n; j++) {
         if (s[j] == ' ')
             m->trailing_spaces++;
@@ -685,51 +160,19 @@ static void emit_text(struct md_renderer *m, const char *s, size_t n)
             m->trailing_spaces = 0;
     }
 
-    int bypass = (m->wrap.width <= 0 || m->in_code_fence || m->in_heading);
-    const char *tab_sub = bypass ? "    " : " ";
-    size_t tab_sub_len = bypass ? 4 : 1;
-    size_t start = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (s[i] == '\t') {
-            if (i > start)
-                emit_text_chunk(m, s + start, i - start);
-            emit_text_chunk(m, tab_sub, tab_sub_len);
-            start = i + 1;
-        }
-    }
-    if (start < n)
-        emit_text_chunk(m, s + start, n - start);
+    struct md_wrap_context ctx = wrap_context(m);
+    int verbatim = m->in_code_fence || m->in_heading;
+    md_wrap_emit_text(&m->wrap, &ctx, s, n, verbatim);
 }
 
-/* Emit an ANSI escape (zero-width). The is_raw=1 flag tells consumers
- * routed through trail/held bookkeeping (like disp_write) to skip it,
- * so a closer after a buffered `\n` doesn't trash the trail counter. */
+/* Emit an ANSI escape (zero-width). */
 static void emit_raw(struct md_renderer *m, const char *s)
 {
-    /* Unstyled mode: every emit_raw call site is an SGR escape, so a
-     * single gate here suppresses them all. The in_* flag bookkeeping
-     * in the open_/close_ helpers still runs, keeping marker nesting
-     * correct. */
     if (!m->styled)
         return;
-    size_t n = strlen(s);
-    if (m->wrap.width <= 0 || m->in_code_fence || m->in_heading) {
-        /* Drain any pending malformed UTF-8 from the wrap stream
-         * even when bypassing — otherwise a transition into a
-         * fence/heading would leave that byte to combine with the
-         * next text in wrap mode and emit out of order. */
-        if (m->wrap.width > 0)
-            wrap_drain_cp_stream(m);
-        m->emit_cb(s, n, 1, m->user);
-        return;
-    }
-    /* Wrap mode: drain any pending UTF-8 lead byte first so it lands
-     * before the escape, then wrap_append emits the escape eagerly
-     * (is_raw=1) and also stores it in row_buf so a subsequent
-     * wrap_break replay re-emits it inline with the partial word's
-     * content bytes. */
-    wrap_drain_cp_stream(m);
-    wrap_append(m, s, n, 1);
+    struct md_wrap_context ctx = wrap_context(m);
+    int verbatim = m->in_code_fence || m->in_heading;
+    md_wrap_emit_raw(&m->wrap, &ctx, s, strlen(s), verbatim);
 }
 
 /* An inline delimiter (`*`, `**`, `_`, `` ` ``) is a non-space source
@@ -903,7 +346,8 @@ static void temit_glyphs(struct md_renderer *m, int n, const char *g3)
 static void render_hrule(struct md_renderer *m)
 {
     int dots = 3;
-    while (m->wrap.width > 0 && dots > 1 && dots + (dots - 1) * HRULE_DOT_GAP > m->wrap.width)
+    while (md_wrap_width(&m->wrap) > 0 && dots > 1 &&
+           dots + (dots - 1) * HRULE_DOT_GAP > md_wrap_width(&m->wrap))
         dots--;
     temit_raw(m, ANSI_DIM);
     for (int k = 0; k < dots; k++) {
@@ -1059,8 +503,8 @@ static void emit_raw_run(struct md_renderer *m, const char *s, size_t n)
 {
     if (!m->styled || n == 0)
         return;
-    wrap_drain_cp_stream(m);
-    wrap_append(m, s, n, 1);
+    struct md_wrap_context ctx = wrap_context(m);
+    md_wrap_emit_raw(&m->wrap, &ctx, s, n, 0);
 }
 
 /* Mirror a replayed cell SGR run into the renderer's in_* style flags so
@@ -1251,7 +695,8 @@ static int table_header_matches_delim(const char *h, size_t hlen, const char *d,
 static void finalize_table(struct md_renderer *m)
 {
     struct buf *tb = &m->table_buf;
-    commit_pending_wrap(m);
+    struct md_wrap_context ctx = wrap_context(m);
+    md_wrap_commit_pending(&m->wrap, &ctx);
 
     /* Gather line spans (newline-terminated; table_buf always ends \n). */
     const char *ls[TABLE_MAX_ROWS];
@@ -1362,7 +807,7 @@ static void finalize_table(struct md_renderer *m)
      * table has nothing to turn into `label: value` lines, so render the
      * grid (overflow handled like any wide content) rather than emit
      * nothing. */
-    if (m->wrap.width <= 0 || total <= m->wrap.width || nbody == 0) {
+    if (md_wrap_width(&m->wrap) <= 0 || total <= md_wrap_width(&m->wrap) || nbody == 0) {
         /* Aligned grid with dim `│` column separators: header row, a
          * `─┼─` crossing underline, then body rows. */
         for (int j = 0; j < ncols; j++) {
@@ -1427,7 +872,7 @@ done:
     m->in_table = 0;
     /* The table wrote complete lines directly, so the next byte starts a
      * fresh wrapped row. */
-    wrap_row_reset(&m->wrap);
+    md_wrap_row_reset(&m->wrap);
 }
 
 /* In table-collect mode: consume one full line into table_buf, or
@@ -2194,7 +1639,7 @@ struct md_renderer *md_new(md_emit_fn emit_cb, void *user, int wrap_width)
     m->at_blank = 1; /* start of stream: swallow leading blank lines */
     m->skip_pad = 0;
     m->styled = 1;
-    wrap_state_reset(&m->wrap, wrap_width);
+    md_wrap_reset(&m->wrap, wrap_width);
     return m;
 }
 
@@ -2217,7 +1662,7 @@ void md_reset(struct md_renderer *m, int wrap_width)
     m->skip_pad = 0;
     /* Re-sample wrap width on turn boundary so SIGWINCH-style resizes
      * between turns are picked up cheaply without callback plumbing. */
-    wrap_state_reset(&m->wrap, wrap_width);
+    md_wrap_reset(&m->wrap, wrap_width);
     m->in_table = 0;
     buf_reset(&m->table_buf);
     m->inline_only = 0;
@@ -2229,7 +1674,7 @@ void md_free(struct md_renderer *m)
     if (!m)
         return;
     buf_free(&m->tail);
-    wrap_state_free(&m->wrap);
+    md_wrap_free(&m->wrap);
     buf_free(&m->table_buf);
     free(m);
 }
@@ -2567,20 +2012,8 @@ void md_flush(struct md_renderer *m)
     if (m->in_italic)
         close_italic(m);
 
-    /* Drain any partial UTF-8 codepoint the wrap layer was holding
-     * (truncated multi-byte sequence at end-of-stream), then clear
-     * the shadow row_buf. With eager emit the row's bytes are already
-     * on the terminal, so wrap_flush_all is just a state reset; we
-     * don't append a \n — this is a partial row and the caller's
-     * block separator handles spacing. */
-    if (m->wrap.width > 0) {
-        const char *out;
-        size_t out_n;
-        int cells;
-        if (utf8_stream_flush(&m->wrap.cp_stream, &out, &out_n, &cells))
-            wrap_consume_codepoint(m, out, out_n, cells);
-        wrap_flush_all(m);
-    }
+    struct md_wrap_context ctx = wrap_context(m);
+    md_wrap_flush(&m->wrap, &ctx);
 }
 
 void md_set_styled(struct md_renderer *m, int on)
@@ -2592,7 +2025,7 @@ void md_set_styled(struct md_renderer *m, int on)
      * (same fields as md_reset, wrap_width preserved) so the next feed
      * starts at column 0 to match the seam the caller is emitting. */
     md_flush(m);
-    md_reset(m, m->wrap.width);
+    md_reset(m, md_wrap_width(&m->wrap));
     m->styled = on;
 }
 
