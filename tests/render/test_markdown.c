@@ -631,6 +631,24 @@ static void test_feed_partition_invariance(void)
     }
 }
 
+static void test_feed_emits_prose_eagerly(void)
+{
+    /* Public feeds must emit prose without waiting for another delta or flush. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 100);
+
+    md_feed(m, "alpha ", 6);
+    EXPECT_MEM_EQ(out.data, out.len, "alpha ", 6);
+    md_feed(m, "beta", 4);
+    EXPECT_MEM_EQ(out.data, out.len, "alpha beta", 10);
+    md_flush(m);
+    EXPECT_MEM_EQ(out.data, out.len, "alpha beta", 10);
+
+    md_free(m);
+    buf_free(&out);
+}
+
 /* ---------- flush behavior ---------- */
 
 static void test_flush_emits_unterminated_marker(void)
@@ -1979,31 +1997,6 @@ static void test_wrap_under_budget_unchanged(void)
     free(got);
 }
 
-static void test_wrap_tab_collapsed_to_single_space(void)
-{
-    /* Wrap branch substitutes \t with a single space (not 4 — see
-     * emit_text comment: 4 spaces would let stream-commits push the
-     * row past wrap_width). Mid-prose tabs are vanishingly rare from
-     * models; collapsing to one space is semantically equivalent for
-     * prose. */
-    char *got = render_wrap("a\tb", 80);
-    EXPECT_STR_EQ(got, "a b");
-    free(got);
-}
-
-static void test_wrap_tab_near_right_edge_no_overflow(void)
-{
-    /* Regression for the stream-commit bug: with the 4-space tab
-     * substitution, "ab\tcd" at a 4-cell budget would emit "ab   \ncd"
-     * — first row 5 cells, over budget by 1, because three of the
-     * four expanded spaces got stream-committed before any non-space
-     * could trigger wrap_break. Single-space substitution lets the
-     * break fire cleanly at the tab. */
-    char *got = render_wrap("ab\tcd", 4);
-    EXPECT_STR_EQ(got, "ab\ncd");
-    free(got);
-}
-
 static void test_wrap_long_word_overflow(void)
 {
     /* A single word longer than the budget — long-word fallback emits
@@ -2126,60 +2119,6 @@ static void test_wrap_multibyte_codepoints(void)
     char *got = render_wrap("h\xC3\xA9llo w\xC3\xB6rld", 8);
     EXPECT_STR_EQ(got, "h\xC3\xA9llo\nw\xC3\xB6rld");
     free(got);
-}
-
-static void test_wrap_partial_utf8_drains_before_hard_newline(void)
-{
-    /* If a malformed UTF-8 lead byte is pending when a hard \n
-     * arrives, it must be flushed BEFORE the \n in output — not
-     * carried forward to combine with the next line's first byte. */
-    struct buf out;
-    buf_init(&out);
-    struct md_renderer *m = md_new(capture, &out, 80);
-    md_feed(m, "A\xC3", 2); /* lead byte with no continuation */
-    md_feed(m, "\n\nX", 3); /* hard breaks should not reorder past the \xC3 */
-    md_flush(m);
-    md_free(m);
-    char *s = buf_steal(&out);
-    /* The orphan \xC3 stays adjacent to the 'A' on the first line. */
-    EXPECT_STR_EQ(s, "A\xC3\n\nX");
-    free(s);
-}
-
-static void test_wrap_partial_utf8_drains_before_raw(void)
-{
-    /* Same ordering invariant when the next emit is an ANSI raw
-     * escape from a marker transition. Pending malformed bytes
-     * must precede the escape so the output stays in source order. */
-    struct buf out;
-    buf_init(&out);
-    struct md_renderer *m = md_new(capture, &out, 80);
-    md_feed(m, "A\xC3", 2);
-    md_feed(m, "**B**", 5);
-    md_flush(m);
-    md_free(m);
-    char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "A\xC3" BLD "B" OFF);
-    free(s);
-}
-
-static void test_wrap_partial_utf8_across_feeds(void)
-{
-    /* Multi-byte sequence split across feeds: the wrap layer's
-     * cp_stream must hold partial bytes until the codepoint is
-     * complete, so col counting stays correct. */
-    struct buf out;
-    buf_init(&out);
-    struct md_renderer *m = md_new(capture, &out, 12);
-    md_feed(m, "h\xC3", 2);
-    md_feed(m, "\xA9llo wonderful world", 21);
-    md_flush(m);
-    md_free(m);
-    char *raw = buf_steal(&out);
-    char *visible = interpret_terminal(raw ? raw : "", 0);
-    free(raw);
-    EXPECT_STR_EQ(visible, "h\xC3\xA9llo\nwonderful\nworld");
-    free(visible);
 }
 
 static void test_wrap_soft_wrapped_list_item(void)
@@ -2661,59 +2600,6 @@ static void test_dinkus_shrinks_on_narrow_width(void)
     free(got);
 }
 
-/* Capture every emit_cb call as a separate (kind, bytes) record so
- * tests can assert that content streams progressively instead of
- * landing in one final flush. The byte stream is identical to what
- * `capture` would produce — this just preserves call boundaries. */
-struct stream_capture {
-    char buf[1024];
-    size_t len;
-    int call_count;
-    /* Length of buf after each call, for reconstructing what the
-     * terminal saw at each emit boundary. */
-    size_t lens[32];
-};
-
-static void stream_capture_cb(const char *bytes, size_t n, int is_raw, void *user)
-{
-    (void)is_raw;
-    struct stream_capture *c = user;
-    if (c->len + n < sizeof(c->buf)) {
-        memcpy(c->buf + c->len, bytes, n);
-        c->len += n;
-    }
-    if (c->call_count < (int)(sizeof(c->lens) / sizeof(c->lens[0])))
-        c->lens[c->call_count] = c->len;
-    c->call_count++;
-}
-
-static void test_wrap_raw_cursor_escapes_on_break(void)
-{
-    /* Lock down the exact wire format the eager engine produces when
-     * a word would overshoot wrap_width: cursor-back over the partial
-     * word + break-space (CSI nD), erase to end of line (CSI K),
-     * newline, then replay the partial word on the next row. Other
-     * wrap tests strip these via interpret_terminal so they assert
-     * what the user sees; this one inspects the raw byte stream so a
-     * regression in the cursor-back math (off-by-one on erase_cells,
-     * forgotten CSI K, etc.) is caught directly.
-     *
-     * "abc def ghi" at width 10: " gh" lands eagerly at col 10 (which
-     * is == budget, no overflow yet); 'i' would push to 11, fires
-     * wrap_break. last_break_col=8 (right after the second space);
-     * erase_cells = (10 - 8) + 1 = 3 — "gh" plus the break-space.
-     * Replay emits "gh" on the new row, then 'i' streams in. */
-    struct buf out;
-    buf_init(&out);
-    struct md_renderer *m = md_new(capture, &out, 10);
-    md_feed(m, "abc def ghi", 11);
-    md_flush(m);
-    md_free(m);
-    char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "abc def gh" CUB(3) ERASE "\nghi");
-    free(s);
-}
-
 static void test_wrap_no_autowrap_when_sgr_after_held_space(void)
 {
     /* Regression for the autowrap variant flagged in code review: a
@@ -2902,27 +2788,6 @@ static void test_wrap_no_escapes_when_break_at_budget_edge(void)
     free(s);
 }
 
-static void test_wrap_consecutive_spaces_at_edge(void)
-{
-    /* A run of spaces straddling the wrap point collapses entirely: the
-     * first over-edge space sets pending_wrap (it IS the wrap point),
-     * and every following space while pending is dropped rather than
-     * committing the deferred \n. So the wrapped row starts at the next
-     * word with no ragged leading space, and — crucially — trailing
-     * hard-break spaces landing on the boundary can't commit a spurious
-     * blank/space line before the hard \n. The wire stays under
-     * wrap_width, so no autowrap (the original regression here). */
-    struct buf out;
-    buf_init(&out);
-    struct md_renderer *m = md_new(capture, &out, 7);
-    md_feed(m, "foo bar  baz", 12);
-    md_flush(m);
-    md_free(m);
-    char *s = buf_steal(&out);
-    EXPECT_STR_EQ(s, "foo bar\nbaz");
-    free(s);
-}
-
 static void test_wrap_hard_break_at_budget_no_extra_line(void)
 {
     /* Trailing hard-break spaces landing exactly on the wrap budget:
@@ -2932,39 +2797,6 @@ static void test_wrap_hard_break_at_budget_no_extra_line(void)
     char *got = render_wrap("aaaaa  \nbar", 5);
     EXPECT_STR_EQ(got, "aaaaa\nbar");
     free(got);
-}
-
-static void test_wrap_crlf_hard_break_at_budget_no_extra_line(void)
-{
-    /* Same boundary case with a CRLF line ending: the \r between the
-     * trailing spaces and the \n must not commit the pending wrap (it's
-     * dropped in the wrap layer), so the result is one break — not
-     * "aaaaa\n\r\nbar" with a stray blank line. */
-    char *got = render_wrap("aaaaa  \r\nbar", 5);
-    EXPECT_STR_EQ(got, "aaaaa\nbar");
-    free(got);
-}
-
-static void test_wrap_streams_each_codepoint_eagerly(void)
-{
-    /* Eager emit: every codepoint reaches emit_cb the moment its
-     * bytes arrive — including the trailing break-space, since the
-     * row is well within budget and there's no autowrap risk. A
-     * paused stream is zero codepoints behind. */
-    struct stream_capture c = {0};
-    struct md_renderer *m = md_new(stream_capture_cb, &c, 100);
-    md_feed(m, "alpha ", 6);
-    EXPECT(c.len == 6);
-    EXPECT(memcmp(c.buf, "alpha ", 6) == 0);
-    md_feed(m, "beta ", 5);
-    EXPECT(c.len == 11);
-    EXPECT(memcmp(c.buf, "alpha beta ", 11) == 0);
-    md_feed(m, "gamma", 5);
-    EXPECT(c.len == 16);
-    EXPECT(memcmp(c.buf, "alpha beta gamma", 16) == 0);
-    md_flush(m);
-    md_free(m);
-    EXPECT(c.len == 16);
 }
 
 static void test_wrap_heading_not_wrapped(void)
@@ -3037,6 +2869,7 @@ int main(void)
     test_split_heading();
 
     test_feed_partition_invariance();
+    test_feed_emits_prose_eagerly();
 
     test_flush_emits_unterminated_marker();
     test_flush_emits_pending_tail();
@@ -3142,8 +2975,6 @@ int main(void)
     test_wrap_long_paragraph();
     test_wrap_multiple_breaks();
     test_wrap_under_budget_unchanged();
-    test_wrap_tab_collapsed_to_single_space();
-    test_wrap_tab_near_right_edge_no_overflow();
     test_wrap_long_word_overflow();
     test_wrap_phantom_reserves_last_column();
     test_wrap_phantom_list_reserves_last_column();
@@ -3159,9 +2990,6 @@ int main(void)
     test_wrap_carries_bold_across_break();
     test_wrap_inline_code_breaks_at_space();
     test_wrap_multibyte_codepoints();
-    test_wrap_partial_utf8_drains_before_hard_newline();
-    test_wrap_partial_utf8_drains_before_raw();
-    test_wrap_partial_utf8_across_feeds();
     test_wrap_soft_wrapped_list_item();
     test_soft_join_indented_continuation();
     test_wrap_indented_continuation_reflows();
@@ -3194,8 +3022,6 @@ int main(void)
     test_dinkus_renders_three_dots();
     test_dinkus_shrinks_on_narrow_width();
 
-    test_wrap_streams_each_codepoint_eagerly();
-    test_wrap_raw_cursor_escapes_on_break();
     test_wrap_no_escapes_when_break_at_budget_edge();
     test_wrap_no_autowrap_when_sgr_after_held_space();
     test_wrap_sgr_during_pending_wrap_no_extra_blank_line();
@@ -3204,9 +3030,7 @@ int main(void)
     test_wrap_replay_restores_sgr_state_at_break();
     test_wrap_hard_newline_drops_trailing_held_space();
     test_wrap_eof_preserves_trailing_space_when_within_budget();
-    test_wrap_consecutive_spaces_at_edge();
     test_wrap_hard_break_at_budget_no_extra_line();
-    test_wrap_crlf_hard_break_at_budget_no_extra_line();
     test_wrap_heading_not_wrapped();
 
     T_REPORT();

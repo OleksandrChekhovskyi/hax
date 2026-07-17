@@ -39,6 +39,7 @@ test_sources = [
     'render/test_ctrl_strip.c',
     'render/test_disp.c',
     'render/test_markdown.c',
+    'render/test_markdown_wrap.c',
     'render/test_tool_render.c',
 
     'system/test_bg_job.c',
