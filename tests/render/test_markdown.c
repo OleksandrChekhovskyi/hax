@@ -38,15 +38,100 @@ static void capture(const char *bytes, size_t n, int is_raw, void *user)
     buf_append((struct buf *)user, bytes, n);
 }
 
+/* `text` / `raw` support direct assertions; `wire` preserves callback order
+ * and `kinds` tags each corresponding byte (0 = content, 1 = raw). Keeping
+ * both views lets validation ignore callback boundaries, which may split CSI. */
+struct kind_capture {
+    struct buf text;
+    struct buf raw;
+    struct buf wire;
+    struct buf kinds;
+};
+
+/* Validate the reassembled stream: complete CSI sequences must be entirely
+ * raw, while every byte outside them must be content. */
+static int capture_kinds_valid(const struct kind_capture *c)
+{
+    if (c->wire.len != c->kinds.len)
+        return 0;
+    size_t i = 0;
+    while (i < c->wire.len) {
+        if (c->wire.data[i] != '\x1b') {
+            if (c->kinds.data[i] != 0)
+                return 0;
+            i++;
+            continue;
+        }
+        size_t start = i;
+        if (i + 2 > c->wire.len || c->wire.data[i + 1] != '[')
+            return 0;
+        i += 2;
+        /* CSI parameter/intermediate bytes precede one final byte. */
+        while (i < c->wire.len && (unsigned char)c->wire.data[i] >= 0x20 &&
+               (unsigned char)c->wire.data[i] <= 0x3f)
+            i++;
+        if (i >= c->wire.len || (unsigned char)c->wire.data[i] < 0x40 ||
+            (unsigned char)c->wire.data[i] > 0x7e)
+            return 0;
+        i++;
+        for (size_t j = start; j < i; j++)
+            if (c->kinds.data[j] != 1)
+                return 0;
+    }
+    return 1;
+}
+
+static void capture_kind(const char *bytes, size_t n, int is_raw, void *user)
+{
+    struct kind_capture *c = user;
+    buf_append(is_raw ? &c->raw : &c->text, bytes, n);
+    buf_append(&c->wire, bytes, n);
+    char kind = is_raw ? 1 : 0;
+    for (size_t i = 0; i < n; i++)
+        buf_append(&c->kinds, &kind, 1);
+}
+
 /* Common helper: feed the whole input as one block, flush, return string.
  * buf_steal returns NULL if nothing was appended; coerce to "" so callers
  * can EXPECT_STR_EQ unconditionally. */
-static char *render_one(const char *input)
+static char *render_width(const char *input, int wrap_width)
 {
     struct buf out;
     buf_init(&out);
-    struct md_renderer *m = md_new(capture, &out, 0);
+    struct md_renderer *m = md_new(capture, &out, wrap_width);
     md_feed(m, input, strlen(input));
+    md_flush(m);
+    md_free(m);
+    char *s = buf_steal(&out);
+    return s ? s : xstrdup("");
+}
+
+static char *render_one(const char *input)
+{
+    return render_width(input, 0);
+}
+
+static char *render_split(const char *input, int wrap_width, size_t split)
+{
+    struct buf out;
+    buf_init(&out);
+    size_t len = strlen(input);
+    struct md_renderer *m = md_new(capture, &out, wrap_width);
+    md_feed(m, input, split);
+    md_feed(m, input + split, len - split);
+    md_flush(m);
+    md_free(m);
+    char *s = buf_steal(&out);
+    return s ? s : xstrdup("");
+}
+
+static char *render_bytewise(const char *input, int wrap_width)
+{
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, wrap_width);
+    for (size_t i = 0; input[i]; i++)
+        md_feed(m, input + i, 1);
     md_flush(m);
     md_free(m);
     char *s = buf_steal(&out);
@@ -514,6 +599,38 @@ static void test_split_heading(void)
     free(s);
 }
 
+/* ---------- feed partition invariance ---------- */
+
+static void test_feed_partition_invariance(void)
+{
+    /* Provider deltas can split at any byte, so parsing and wrap wire output
+     * must not depend on where feed boundaries happen to land. */
+    static const struct {
+        const char *input;
+        int wrap_width;
+    } cases[] = {
+        {"plain **bold** and _italic_ with `code`", 0},
+        {"first line\nsecond line\n\n  - **item**\n\n## Heading\n", 0},
+        {"````markdown\n```c\nx = 1;\n```\n````\n", 0},
+        {"| Name | Note |\n|---|---|\n| one | **two** |\n", 40},
+        {"- alpha **bravo charlie** delta echo foxtrot", 16},
+    };
+
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        size_t len = strlen(cases[c].input);
+        char *whole = render_width(cases[c].input, cases[c].wrap_width);
+        for (size_t split = 0; split <= len; split++) {
+            char *partitioned = render_split(cases[c].input, cases[c].wrap_width, split);
+            EXPECT_STR_EQ(partitioned, whole);
+            free(partitioned);
+        }
+        char *bytewise = render_bytewise(cases[c].input, cases[c].wrap_width);
+        EXPECT_STR_EQ(bytewise, whole);
+        free(bytewise);
+        free(whole);
+    }
+}
+
 /* ---------- flush behavior ---------- */
 
 static void test_flush_emits_unterminated_marker(void)
@@ -586,6 +703,137 @@ static void test_reset_clears_state(void)
     /* No bold leakage from the previous turn. */
     EXPECT_STR_EQ(s, "plain");
     free(s);
+}
+
+/* ---------- emit callback contract ---------- */
+
+static void test_emit_kind_separates_content_and_sgr(void)
+{
+    /* Downstream display bookkeeping counts visible bytes and held newlines;
+     * labeling SGR as content would corrupt those counts. */
+    struct kind_capture c = {0};
+    buf_init(&c.text);
+    buf_init(&c.raw);
+    struct md_renderer *m = md_new(capture_kind, &c, 0);
+    md_feed(m, "**b** `c`", 9);
+    md_flush(m);
+    md_free(m);
+    EXPECT(capture_kinds_valid(&c));
+    EXPECT_STR_EQ(c.text.data, "b c");
+    EXPECT_STR_EQ(c.raw.data, BLD OFF CODE CODE_OFF);
+    buf_free(&c.text);
+    buf_free(&c.raw);
+    buf_free(&c.wire);
+    buf_free(&c.kinds);
+}
+
+static void test_emit_kind_marks_wrap_cursor_control_raw(void)
+{
+    /* Retro-wrap CSI moves are zero-width terminal control, not rendered text,
+     * and must bypass the same downstream bookkeeping as SGR. */
+    struct kind_capture c = {0};
+    buf_init(&c.text);
+    buf_init(&c.raw);
+    struct md_renderer *m = md_new(capture_kind, &c, 10);
+    md_feed(m, "abc def ghi", 11);
+    md_flush(m);
+    md_free(m);
+    EXPECT(capture_kinds_valid(&c));
+    EXPECT_STR_EQ(c.text.data, "abc def gh\nghi");
+    EXPECT_STR_EQ(c.raw.data, CUB(3) ERASE);
+    buf_free(&c.text);
+    buf_free(&c.raw);
+    buf_free(&c.wire);
+    buf_free(&c.kinds);
+}
+
+static void test_emit_kind_covers_table_paths(void)
+{
+    /* Aligned tables emit SGR directly and replay styled-cell metadata;
+     * narrow tables replay the same cells through the wrap layer. */
+    static const struct {
+        const char *input;
+        int wrap_width;
+    } cases[] = {
+        {"| H | V |\n|---|---|\n| x | **b** |\n", 40},
+        {"| Key | Value |\n|---|---|\n| x | **alpha beta** |\n", 10},
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct kind_capture c = {0};
+        buf_init(&c.text);
+        buf_init(&c.raw);
+        struct md_renderer *m = md_new(capture_kind, &c, cases[i].wrap_width);
+        md_feed(m, cases[i].input, strlen(cases[i].input));
+        md_flush(m);
+        md_free(m);
+        EXPECT(capture_kinds_valid(&c));
+        EXPECT(c.text.len > 0);
+        EXPECT(c.raw.len > 0);
+        EXPECT(strstr(c.raw.data, BLD) != NULL);
+        buf_free(&c.text);
+        buf_free(&c.raw);
+        buf_free(&c.wire);
+        buf_free(&c.kinds);
+    }
+}
+
+/* ---------- public modes and state ---------- */
+
+static void test_styled_mode_transition_soft_resets(void)
+{
+    /* The caller emits its own newline at a style seam, so md must reset to
+     * matching line-start and wrap state. The heading checks parser state;
+     * the edge-space before the second seam leaves a pending wrap to clear. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 5);
+    md_set_styled(m, 0);
+    md_feed(m, "**quiet**", 9);
+    md_set_styled(m, 1);
+    buf_append(&out, "\n", 1); /* caller-owned seam */
+    md_feed(m, "## H\n", 5);
+
+    md_set_styled(m, 0);
+    md_feed(m, "abcde ", 6);
+    md_set_styled(m, 1);
+    buf_append(&out, "\n", 1); /* caller-owned seam */
+    md_feed(m, "x", 1);
+    md_flush(m);
+    md_free(m);
+    char *s = buf_steal(&out);
+    EXPECT_STR_EQ(s, "quiet\n" BLD "H" OFF "\nabcde\nx");
+    free(s);
+}
+
+static void test_in_table_tracks_buffering(void)
+{
+    /* The caller shows a composing spinner while tables silently buffer, so
+     * md_in_table must cover exactly the interval in which no rows are emitted. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 40);
+    EXPECT(md_in_table(m) == 0);
+    md_feed(m, "| A |\n|---|\n", 12);
+    EXPECT(md_in_table(m) == 1);
+    EXPECT(out.len == 0);
+    md_feed(m, "| x |\n", 6);
+    EXPECT(md_in_table(m) == 1);
+    EXPECT(out.len == 0);
+    md_feed(m, "after\n", 6);
+    EXPECT(md_in_table(m) == 0);
+    EXPECT(out.len > 0);
+    md_flush(m);
+
+    buf_reset(&out);
+    md_reset(m, 40);
+    md_feed(m, "| A |\n|---|\n", 12);
+    EXPECT(md_in_table(m) == 1);
+    md_flush(m);
+    EXPECT(md_in_table(m) == 0);
+    EXPECT(out.len > 0);
+    md_free(m);
+    buf_free(&out);
 }
 
 /* ---------- markers inside code spans/fences must stay verbatim ---------- */
@@ -2788,6 +3036,8 @@ int main(void)
     test_split_fence_at_line_start();
     test_split_heading();
 
+    test_feed_partition_invariance();
+
     test_flush_emits_unterminated_marker();
     test_flush_emits_pending_tail();
     test_flush_closes_italic_at_eof();
@@ -2796,6 +3046,13 @@ int main(void)
     test_flush_closes_fence_at_eof();
 
     test_reset_clears_state();
+
+    test_emit_kind_separates_content_and_sgr();
+    test_emit_kind_marks_wrap_cursor_control_raw();
+    test_emit_kind_covers_table_paths();
+
+    test_styled_mode_transition_soft_resets();
+    test_in_table_tracks_buffering();
 
     test_inline_code_bold_marker_verbatim();
     test_inline_code_underscore_verbatim();
