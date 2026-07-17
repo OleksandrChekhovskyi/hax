@@ -78,6 +78,21 @@ int llamacpp_reconcile_model(const char *body, const char *cur, char **adopt)
     return rc;
 }
 
+char *llamacpp_model_warning(const char *configured, const char *served)
+{
+    char *configured_label = llamacpp_model_label(NULL, configured);
+    char *served_label = llamacpp_model_label(NULL, served);
+    char *warning;
+    if (strcmp(configured_label, served_label) == 0)
+        warning = xasprintf("llama.cpp: configured model is not served — using '%s'", served_label);
+    else
+        warning = xasprintf("llama.cpp: model '%s' is not served — using '%s'", configured_label,
+                            served_label);
+    free(served_label);
+    free(configured_label);
+    return warning;
+}
+
 /* Resolve the model to send, treating llama-server's catalog as live server
  * state rather than a user preference. The served model depends on how the
  * server was started — a single model, or (router mode) several loaded on
@@ -108,13 +123,13 @@ static int probe_model(const char *base_url, const char *api_key)
         char *adopt = NULL;
         if (llamacpp_reconcile_model(body, cur, &adopt) == 0) {
             if (adopt) {
-                /* Replacing an explicit value is announced: the adoption is
-                 * the truthful outcome either way (the server answers with
-                 * what it serves, whatever name we send), but a
-                 * --model/preset/state pick being reconciled away shouldn't
-                 * be discoverable only by reading the banner closely. */
-                if (cur && *cur)
-                    hax_warn("llama.cpp: model '%s' is not served — using '%s'", cur, adopt);
+                /* Replacing an explicit value is announced; unset means
+                 * ordinary auto-discovery and stays silent. */
+                if (cur && *cur) {
+                    char *warning = llamacpp_model_warning(cur, adopt);
+                    hax_warn("%s", warning);
+                    free(warning);
+                }
                 config_set_override("model", adopt);
                 free(adopt);
             }

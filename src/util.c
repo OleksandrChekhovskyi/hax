@@ -8,6 +8,7 @@
 #include <limits.h>
 #include <locale.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,6 +48,16 @@ static void oom(void)
     abort();
 }
 
+/* Monotonic diagnostic generation lets mixed stdout/stderr presentation
+ * resynchronize after lower layers print directly here, without carrying
+ * individual warning payloads through their APIs. */
+static _Atomic unsigned long diag_sequence;
+
+unsigned long hax_diag_sequence(void)
+{
+    return atomic_load_explicit(&diag_sequence, memory_order_relaxed);
+}
+
 /* Shared core for hax_err/hax_warn: a "hax: <msg>\n" line on stderr,
  * wrapped in `color` only when stderr is a TTY so redirected output and
  * 2>&1 captures stay plain. */
@@ -62,6 +73,8 @@ static void hax_diag(const char *color, const char *fmt, va_list ap)
     if (styled)
         fputs(ANSI_RESET, stderr);
     fputc('\n', stderr);
+    fflush(stderr);
+    atomic_fetch_add_explicit(&diag_sequence, 1, memory_order_relaxed);
 }
 
 void hax_err(const char *fmt, ...)

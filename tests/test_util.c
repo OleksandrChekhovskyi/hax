@@ -27,6 +27,26 @@ static char *write_tmp(const void *data, size_t len)
     return path;
 }
 
+/* ---------- diagnostics ---------- */
+
+static void test_diag_sequence(void)
+{
+    fflush(stderr);
+    int saved = dup(STDERR_FILENO);
+    EXPECT(saved >= 0);
+    FILE *tmp = tmpfile();
+    EXPECT(tmp != NULL);
+    EXPECT(dup2(fileno(tmp), STDERR_FILENO) >= 0);
+
+    unsigned long before = hax_diag_sequence();
+    hax_warn("sequence test");
+    EXPECT(hax_diag_sequence() == before + 1);
+
+    EXPECT(dup2(saved, STDERR_FILENO) >= 0);
+    close(saved);
+    fclose(tmp);
+}
+
 /* ---------- gen_uuid_v4 ---------- */
 
 static int is_lower_hex(char c)
@@ -1132,6 +1152,8 @@ int main(void)
      * utf8_codepoint_cells (mbrtowc + wcwidth) for cell-accurate width
      * — those need a UTF-8 LC_CTYPE. */
     locale_init_utf8();
+
+    test_diag_sequence();
 
     test_uuid_v4_format();
     test_uuid_v4_unique();

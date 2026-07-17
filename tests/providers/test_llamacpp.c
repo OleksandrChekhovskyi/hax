@@ -21,6 +21,19 @@ static void test_model_label(void)
     expect_label(".gguf", ".gguf");
 }
 
+static void test_model_warning(void)
+{
+    char *warning = llamacpp_model_warning("codex/gpt-5.6-sol/high",
+                                           "/home/user/models/Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf");
+    EXPECT_STR_EQ(warning, "llama.cpp: model 'codex/gpt-5.6-sol/high' is not served — using "
+                           "'Qwen3.6-35B-A3B-UD-Q5_K_XL'");
+    free(warning);
+
+    warning = llamacpp_model_warning("/old/Qwen.gguf", "/new/Qwen.gguf");
+    EXPECT_STR_EQ(warning, "llama.cpp: configured model is not served — using 'Qwen'");
+    free(warning);
+}
+
 static void test_reconcile_model(void)
 {
     static const char BODY[] = "{\"data\": [{\"id\": \"served-a\"}, {\"id\": \"served-b\"}]}";
@@ -56,6 +69,7 @@ static void test_reconcile_model(void)
 int main(void)
 {
     test_model_label();
+    test_model_warning();
     test_reconcile_model();
     T_REPORT();
 }

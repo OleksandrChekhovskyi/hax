@@ -139,22 +139,16 @@ void agent_undo(struct agent_state *st, size_t turn);
  * Used by /fork. */
 void agent_fork(struct agent_state *st, size_t turn);
 
-/* Replace the live provider with `newp` (freshly constructed; ownership
- * transfers in). Destroys the previously-live provider — joining its
- * background work — and points the session at `newp`. Does NOT re-resolve
- * model/effort or rebuild the prompt; the caller follows with
- * agent_apply_settings once the new model/effort are chosen. Used by the
- * /provider switch. */
-void agent_set_provider(struct agent_state *st, struct provider *newp);
-
-/* Re-resolve model + reasoning effort against the current config and the
- * live provider, rebuild the system prompt, and confirm the change on
- * screen: a dim one-line "switched to …" marker mid-conversation, or a
- * fresh banner when the conversation is still empty (so the stale startup
- * banner doesn't outshout the correction). The single "apply a /provider,
- * /model or /effort change" step. Returns 0 on success, -1 when no model
- * resolves for the provider (a note is printed; history is left intact). */
-int agent_apply_settings(struct agent_state *st);
+/* Re-resolve model + reasoning effort against `p`, rebuild the system prompt,
+ * and confirm the change on screen: a dim one-line "switched to …" marker
+ * mid-conversation, or a fresh banner while the conversation is empty. When
+ * p differs from the live provider, this is an atomic provider replacement:
+ * validate/reconfigure first, then transfer ownership into st and destroy the
+ * old provider. A provider or model change refreshes model-specific context;
+ * a same-provider effort change does not. Returns 0 on success. On failure,
+ * the session and live provider stay intact; when p is a prospective
+ * replacement, the caller retains ownership of it. */
+int agent_apply_settings(struct agent_state *st, struct provider *p);
 
 /* Total session spend for display, USD: provider-reported cost plus the
  * catalog-estimated cost of unreported responses, each priced at its own

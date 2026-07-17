@@ -602,7 +602,14 @@ int main(int argc, char **argv)
     trace_init();
     transcript_log_init();
 
+    unsigned long diag_before_provider = hax_diag_sequence();
     struct provider *p = pick_provider(print_mode, &opts.provider_autoselected);
+    if (print_mode && p && hax_diag_sequence() != diag_before_provider) {
+        /* The one-shot provenance banner shares stderr with construction
+         * diagnostics, so finish their visual block before it follows. */
+        fputc('\n', stderr);
+        fflush(stderr);
+    }
     /* No usable provider (explicit one can't construct, or nothing available
      * to auto-select) is fatal only in one-shot mode, which can't prompt for
      * an alternative. Interactively we start the REPL with no provider:

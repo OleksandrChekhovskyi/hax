@@ -67,6 +67,7 @@ struct fixture {
     struct agent_session sess;
     struct render_ctx r;
     struct agent_state st;
+    struct provider *candidate;
     int rc;
 };
 
@@ -89,6 +90,7 @@ static void fixture_init(struct fixture *f)
     f->st.sess = &f->sess;
     f->st.provider = &f->p;
     f->st.r = &f->r;
+    f->candidate = &f->p;
 }
 
 static void fixture_free(struct fixture *f)
@@ -103,7 +105,7 @@ static void fixture_free(struct fixture *f)
 static void do_apply(void *user)
 {
     struct fixture *f = user;
-    f->rc = agent_apply_settings(&f->st);
+    f->rc = agent_apply_settings(&f->st, f->candidate);
 }
 
 static void test_apply_settings_empty_reprints_banner(void)
@@ -180,7 +182,14 @@ static void test_apply_settings_no_model_fails_intact(void)
 /* ---------- agent_apply_settings: refresh_context gate ---------- */
 
 static int refresh_calls;
+static int provider_destroy_calls;
 static char refresh_last_model[64];
+
+static void counting_provider_destroy(struct provider *p)
+{
+    (void)p;
+    provider_destroy_calls++;
+}
 
 static void counting_refresh_context(struct provider *p, const char *model)
 {
@@ -189,7 +198,28 @@ static void counting_refresh_context(struct provider *p, const char *model)
     snprintf(refresh_last_model, sizeof(refresh_last_model), "%s", model ? model : "");
 }
 
-static void test_apply_settings_refresh_only_on_model_change(void)
+static void test_apply_settings_failed_provider_change_keeps_old(void)
+{
+    struct fixture f;
+    fixture_init(&f);
+    unsetenv("HAX_MODEL");
+    f.p.destroy = counting_provider_destroy;
+    struct provider next = {.name = "prov-y"};
+    f.candidate = &next;
+    provider_destroy_calls = 0;
+
+    char *out = capture_stdout(do_apply, &f);
+    EXPECT(f.rc == -1);
+    EXPECT(f.st.provider == &f.p);
+    EXPECT(provider_destroy_calls == 0);
+    EXPECT_STR_EQ(f.sess.provider_name, "prov-x");
+    EXPECT(out[0] == '\0');
+
+    free(out);
+    fixture_free(&f);
+}
+
+static void test_apply_settings_refreshes_on_model_or_provider_change(void)
 {
     struct fixture f;
     fixture_init(&f);
@@ -208,6 +238,26 @@ static void test_apply_settings_refresh_only_on_model_change(void)
     setenv("HAX_MODEL", "model-b", 1);
     out = capture_stdout(do_apply, &f);
     EXPECT(f.rc == 0);
+    EXPECT(refresh_calls == 1);
+    EXPECT_STR_EQ(refresh_last_model, "model-b");
+    free(out);
+
+    /* Provider identity is independently load-bearing: a fresh provider may
+     * have skipped its constructor probe or probed a default model. Even when
+     * the selected model string stays identical, refresh it once after the
+     * ownership swap. */
+    struct provider next = {
+        .name = "prov-y",
+        .refresh_context = counting_refresh_context,
+    };
+    f.p.destroy = counting_provider_destroy;
+    f.candidate = &next;
+    refresh_calls = 0;
+    provider_destroy_calls = 0;
+    out = capture_stdout(do_apply, &f);
+    EXPECT(f.rc == 0);
+    EXPECT(f.st.provider == &next);
+    EXPECT(provider_destroy_calls == 1);
     EXPECT(refresh_calls == 1);
     EXPECT_STR_EQ(refresh_last_model, "model-b");
     free(out);
@@ -615,7 +665,8 @@ int main(void)
     test_apply_settings_empty_reprints_banner();
     test_apply_settings_nonempty_prints_marker();
     test_apply_settings_no_model_fails_intact();
-    test_apply_settings_refresh_only_on_model_change();
+    test_apply_settings_failed_provider_change_keeps_old();
+    test_apply_settings_refreshes_on_model_or_provider_change();
     test_apply_settings_keeps_stamped_spend();
     test_new_conversation_resets_everything();
     test_banner_no_provider_points_at_picker();

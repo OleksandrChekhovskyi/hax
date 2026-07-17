@@ -607,23 +607,11 @@ static const char *provider_log_name(const struct provider *p)
     return p && p->name ? p->name : "none";
 }
 
-void agent_set_provider(struct agent_state *st, struct provider *newp)
-{
-    struct provider *old = (struct provider *)st->provider;
-    /* No spend bookkeeping here: each spend record carries its own
-     * catalog_id/model stamp, so requests made under the old provider
-     * keep pricing correctly after the switch. */
-    st->provider = newp;
-    /* Destroy after the swap so the picker/selection code never observes a
-     * half-replaced state; destroy() joins the old provider's bg probes. */
-    if (old)
-        old->destroy(old);
-}
-
-int agent_apply_settings(struct agent_state *st)
+int agent_apply_settings(struct agent_state *st, struct provider *p)
 {
     struct agent_session *s = st->sess;
-    struct provider *p = (struct provider *)st->provider;
+    struct provider *old = (struct provider *)st->provider;
+    int provider_changed = p != old;
     /* Snapshot the model before reconfigure overwrites it, to tell a real
      * /model change from a /provider or /effort apply that left it the same. */
     char *prev_model = s->model ? xstrdup(s->model) : NULL;
@@ -632,20 +620,26 @@ int agent_apply_settings(struct agent_state *st)
         return -1;
     }
 
-    /* A model switch can change the context window (codex/openrouter key it by
-     * model), so ask the provider to re-probe for the new model — but only when
-     * the model actually changed, so a bare /effort tweak doesn't trigger a
-     * needless network probe (and the cancel/join of the in-flight one).
-     * reconfigure already resolved s->model from the committed "model" override;
-     * providers without a model-specific probe leave the hook NULL. On a
-     * /provider switch the new provider's construction probe ran before the
-     * model was committed, so the slug it used could be stale: when the model
-     * differs we re-probe and correct it here; when it's identical that probe
-     * already used the right slug, so skipping is correct too. */
+    /* Install a prospective provider only after its settings resolve. On
+     * failure above, the live provider remains untouched and ownership of a
+     * prospective p stays with the caller. Each spend record carries its own
+     * provider/model stamp, so no bookkeeping needs settling before the old
+     * provider is destroyed. */
+    if (provider_changed) {
+        st->provider = p;
+        if (old)
+            old->destroy(old);
+    }
+
+    /* A model or provider switch can change the context window. Provider
+     * identity matters even when the model id is unchanged: the fresh
+     * provider's constructor may have probed its default model, or skipped the
+     * probe while /provider transactionally hid the outgoing model. A bare
+     * /effort tweak still avoids needless cancel/join and network churn. */
     int model_changed = (prev_model == NULL) != (s->model == NULL) ||
                         (prev_model && s->model && strcmp(prev_model, s->model) != 0);
     free(prev_model);
-    if (model_changed && p && p->refresh_context)
+    if ((provider_changed || model_changed) && p->refresh_context)
         p->refresh_context(p, s->model);
 
     /* reconfigure rebuilt sess->sys (its Environment section names the new

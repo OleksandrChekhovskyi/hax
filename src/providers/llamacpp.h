@@ -20,9 +20,8 @@
  *                      actually serves (synchronous — the model is needed
  *                      before the first chat request): a configured model
  *                      present in the list is kept; unset or absent, the
- *                      first served entry is adopted as a session override
- *                      (absent = with a warning — see
- *                      llamacpp_reconcile_model)
+ *                      first served entry is adopted as a session override;
+ *                      replacing an explicit value emits a warning
  *   GET /props      →  fills provider->context_limit from
  *                      default_generation_settings.n_ctx (asynchronous —
  *                      runs in the background so a slow /props doesn't
@@ -49,6 +48,10 @@ struct provider *llamacpp_provider_new(const char *name);
  * list (NULL when `cur` is served and kept); -1 for an unusable body or an
  * empty list. */
 int llamacpp_reconcile_model(const char *body, const char *cur, char **adopt);
+
+/* Format an explicit-model reconciliation warning using the same display
+ * labels as the banner. Caller frees. */
+char *llamacpp_model_warning(const char *configured, const char *served);
 
 /* Collapse a GGUF path to its extensionless filename for display and the env
  * block. Other model ids are duplicated unchanged. Caller frees. */

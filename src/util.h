@@ -44,10 +44,17 @@ char *shell_single_quote(const char *s);
  *              (optional logging disabled, recovered from a bad schema,
  *              starting a fresh conversation).
  *
- * For diagnostics surfaced inside the running REPL, use ui_error/ui_note
- * (terminal/ui.h) instead — those are the stdout-side equivalents. */
+ * REPL-owned status uses ui_error/ui_note (terminal/ui.h) instead. Lower
+ * layers that can run both at startup and during the REPL keep using these;
+ * presentation code detects their completed writes through
+ * hax_diag_sequence(). */
 __attribute__((format(printf, 1, 2))) void hax_err(const char *fmt, ...);
 __attribute__((format(printf, 1, 2))) void hax_warn(const char *fmt, ...);
+
+/* Monotonic count of completed hax_err/hax_warn writes. Presentation code
+ * snapshots this around lower-layer operations that may diagnose directly,
+ * then resynchronizes its stdout newline state when the value changed. */
+unsigned long hax_diag_sequence(void);
 
 /* Reject anything that isn't a regular file before opening it. open()
  * on a FIFO without a writer blocks indefinitely, which would freeze a

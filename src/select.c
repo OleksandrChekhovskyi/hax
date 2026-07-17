@@ -351,6 +351,17 @@ static char *current_provider_id(const struct provider *p)
     return xstrdup(p && p->name ? p->name : "");
 }
 
+/* A constructor may diagnose directly through hax_err/hax_warn on stderr.
+ * Resynchronize disp with the fresh terminal row that output left behind so
+ * the next stdout block still gets its separator. */
+static void sync_constructor_diagnostics(struct agent_state *st, unsigned long before)
+{
+    if (hax_diag_sequence() != before) {
+        st->r->disp.held = 0;
+        st->r->disp.trail = 1;
+    }
+}
+
 /* ---------- public flows ---------- */
 
 void select_effort(struct agent_state *st)
@@ -388,7 +399,7 @@ void select_effort(struct agent_state *st)
     commit_selection(pid, eff_model, e ? e : CONFIG_VALUE_DEFAULT);
     free(pid);
     free(e);
-    agent_apply_settings(st);
+    agent_apply_settings(st, p);
 }
 
 void select_model(struct agent_state *st)
@@ -434,7 +445,7 @@ void select_model(struct agent_state *st)
     free(pid);
     free(m);
     free(e);
-    agent_apply_settings(st);
+    agent_apply_settings(st, p);
 }
 
 static int cmp_factory_name(const void *a, const void *b)
@@ -525,16 +536,20 @@ void select_provider(struct agent_state *st)
         return;
     }
 
-    /* Construct the new provider before touching any state. Some constructors
-     * mutate the override tier as a side effect (llama.cpp's probe reconciles
-     * the served model into a "model" override), so snapshot it first: every
-     * abort path below restores it, leaving the still-current provider's
-     * overrides untouched. On the commit path the snapshot is just discarded —
-     * commit_selection sets the real values. On failure the factory has
-     * already explained why (no key, server down …); the current provider
-     * stays live. */
+    /* Construct transactionally under the prospective selection. A provider
+     * switch invalidates the old backend's model/effort, so shadow them with
+     * the default sentinel before construction; otherwise value-dependent
+     * constructors (notably llama.cpp's live-model reconciliation) mistake the
+     * outgoing provider's exact model for intent against the new backend.
+     * Every abort restores the snapshot; commit_selection replaces these
+     * provisional values with the actual picks. */
     struct config_override_state *ov = config_override_snapshot();
+    config_set_override("provider", f->name);
+    config_set_override("model", CONFIG_VALUE_DEFAULT);
+    config_set_override("effort", CONFIG_VALUE_DEFAULT);
+    unsigned long diag_before = hax_diag_sequence();
     struct provider *newp = f->new(f->name);
+    sync_constructor_diagnostics(st, diag_before);
     if (!newp) {
         config_override_restore(ov);
         st->r->disp.trail = 1; /* the factory printed a raw error line */
@@ -575,7 +590,6 @@ void select_provider(struct agent_state *st)
         free(m);
         return;
     }
-    config_override_state_free(ov); /* committing below — keep the side effects */
 
     /* Commit: a provider switch invalidates the old model/effort (they belong
      * to the old backend), so set the new model and effort to the picked value
@@ -585,8 +599,15 @@ void select_provider(struct agent_state *st)
      * not keep). Then swap and apply. */
     commit_selection(f->name, m ? m : CONFIG_VALUE_DEFAULT, e ? e : CONFIG_VALUE_DEFAULT);
 
-    agent_set_provider(st, newp);
-    agent_apply_settings(st);
+    if (agent_apply_settings(st, newp) != 0) {
+        newp->destroy(newp); /* ownership transfers only on success */
+        config_override_restore(ov);
+        free(cur);
+        free(m);
+        free(e);
+        return;
+    }
+    config_override_state_free(ov); /* committed constructor side effects remain */
 
     free(cur);
     free(m);
@@ -666,7 +687,9 @@ void select_preset(struct agent_state *st, const char *name)
         st->r->disp.trail = 1;
         goto out;
     }
+    unsigned long diag_before = hax_diag_sequence();
     struct provider *newp = f->new(f->name);
+    sync_constructor_diagnostics(st, diag_before);
     if (!newp) {
         /* The factory printed the reason (no key, server down, …). */
         config_override_restore(ov);
@@ -692,9 +715,6 @@ void select_preset(struct agent_state *st, const char *name)
         goto out;
     }
 
-    agent_set_provider(st, newp);
-    config_override_state_free(ov); /* committing — keep the applied overrides */
-
     /* Persist the stance like the other selectors, so the next launch
      * starts back in it (an explicit env var still wins). By name, not
      * values: the preset definition stays authoritative — editing it
@@ -708,10 +728,16 @@ void select_preset(struct agent_state *st, const char *name)
         }
     }
 
-    /* agent_apply_settings prints the confirmation (banner or
-     * [switched to …]); the banner shows the stance via the "preset"
-     * override config_preset_apply recorded. */
-    agent_apply_settings(st);
+    /* This is the ownership-transfer point: validation above keeps failure
+     * theoretical, but preserve the old provider and override tier if it
+     * still occurs. */
+    if (agent_apply_settings(st, newp) != 0) {
+        newp->destroy(newp);
+        config_override_restore(ov);
+        st->r->disp.trail = 1;
+        goto out;
+    }
+    config_override_state_free(ov); /* committing — keep the applied overrides */
 
 out:
     free(picked);
