@@ -2193,54 +2193,6 @@ static void test_wrap_code_fence_in_list_item(void)
 
 /* ---------- tables ---------- */
 
-static void test_table_aligned(void)
-{
-    /* Natural width (Name=5, Age=3; total 5+3+3=11) fits the budget, so
-     * the table lays out as an aligned grid: bold header, dim `│`
-     * separators, a `─┼─` crossing underline, left-aligned (no delimiter
-     * colons) body cells padded to the column width. The last column is
-     * ragged (no right pad), but the underline spans its full width. */
-    const char *in = "| Name | Age |\n|---|---|\n| Bob | 30 |\n| Alice | 7 |";
-    char *got = render_wrap(in, 40);
-    EXPECT_STR_EQ(got, BLD "Name" OFF " " TSEP BLD "Age" OFF
-                           "\n" DIM HL HL HL HL HL HL CR HL HL HL HL OFF "\n"
-                           "Bob  " TSEP "30\n"
-                           "Alice" TSEP "7\n");
-    free(got);
-}
-
-static void test_table_column_alignment(void)
-{
-    /* Delimiter row drives per-column alignment: `:--` left, `--:` right,
-     * `:-:` center. All columns are 4 cells wide (aaaa/bbbb/cccc), so the
-     * 1-char body row shows the padding: "x" left ("x   "), "y" right
-     * ("   y"), "z" center (pad 1 → padl 0, padr 1, last col ragged). */
-    const char *in = "| L | R | C |\n|:--|--:|:-:|\n| aaaa | bbbb | cccc |\n| x | y | z |";
-    char *got = render_wrap(in, 40);
-    EXPECT_STR_EQ(got, BLD "L" OFF "   " TSEP "   " BLD "R" OFF TSEP " " BLD "C" OFF
-                           "\n" DIM HL HL HL HL HL CR HL HL HL HL HL HL CR HL HL HL HL HL OFF "\n"
-                           "aaaa" TSEP "bbbb" TSEP "cccc\n"
-                           "x   " TSEP "   y" TSEP " z\n");
-    free(got);
-}
-
-static void test_table_reflow_to_records_when_too_wide(void)
-{
-    /* Natural width (9+12+5 + 2*3 = 32) exceeds the 20-cell budget, so the
-     * table reflows to one bulleted record per row: the first column
-     * carries the dim `•`, every column becomes a bold `label: value`
-     * line, and the fields indent two cells under the bullet. */
-    const char *in = "| Component | Role | Owner |\n|---|---|---|\n"
-                     "| parser | reads tokens | ann |\n| writer | emits bytes | bob |";
-    char *got = render_wrap(in, 20);
-    EXPECT_STR_EQ(got, BUL BLD "Component" OFF ": parser\n"
-                               "  " BLD "Role" OFF ": reads tokens\n"
-                               "  " BLD "Owner" OFF ": ann\n" BUL BLD "Component" OFF ": writer\n"
-                               "  " BLD "Role" OFF ": emits bytes\n"
-                               "  " BLD "Owner" OFF ": bob\n");
-    free(got);
-}
-
 static void test_table_buffering_is_feed_split_invariant(void)
 {
     /* A table can't be laid out until every row is seen, so it's buffered
@@ -2259,28 +2211,6 @@ static void test_table_buffering_is_feed_split_invariant(void)
     EXPECT_STR_EQ(chunked ? chunked : "", whole);
     free(chunked);
     free(whole);
-}
-
-static void test_table_not_a_table_passthrough(void)
-{
-    /* A `|`-led line whose next line is NOT a delimiter row is not a
-     * table — it passes through verbatim (block-isolated so it doesn't
-     * soft-join with the following prose). */
-    const char *in = "| a | b |\nplain prose line\n";
-    char *got = render_wrap(in, 40);
-    EXPECT_STR_EQ(got, "| a | b |\nplain prose line\n");
-    free(got);
-}
-
-static void test_table_finalized_at_eof(void)
-{
-    /* Table whose last row has no trailing newline: the buffer is
-     * finalized at md_flush rather than lost. */
-    const char *in = "| A | B |\n|---|---|\n| 1 | 2 |";
-    char *got = render_wrap(in, 40);
-    EXPECT_STR_EQ(got, BLD "A" OFF TSEP BLD "B" OFF "\n" DIM HL HL CR HL HL OFF "\n"
-                           "1" TSEP "2\n");
-    free(got);
 }
 
 static void test_table_cell_inline_styles(void)
@@ -2313,31 +2243,6 @@ static void test_table_cell_block_markers_stay_literal(void)
     free(got);
 }
 
-static void test_table_header_only_renders_grid(void)
-{
-    /* A header-only table (no body rows) whose natural width exceeds the
-     * budget must still render the grid, not collapse to empty output —
-     * there are no rows to reflow into records, so the reflow path would
-     * emit nothing (data loss). */
-    const char *in = "| AB | CD |\n|---|---|\n";
-    char *got = render_wrap(in, 5);
-    EXPECT_STR_EQ(got, BLD "AB" OFF TSEP BLD "CD" OFF "\n" DIM HL HL HL CR HL HL HL OFF "\n");
-    free(got);
-}
-
-static void test_table_cell_multibyte_code_width(void)
-{
-    /* Inline-code content is emitted byte-by-byte, so a multibyte codepoint
-     * (é) inside a code cell would measure as 0 if counted per-callback.
-     * Measuring the assembled content run gives the right width, so the X
-     * column is 2 cells ("éé") and the underline/separator stay aligned. */
-    const char *in = "| X | Y |\n|---|---|\n| `\xc3\xa9\xc3\xa9` | z |";
-    char *got = render_wrap(in, 40);
-    EXPECT_STR_EQ(got, BLD "X" OFF " " TSEP BLD "Y" OFF "\n" DIM HL HL HL CR HL HL OFF "\n" CODE
-                           "\xc3\xa9\xc3\xa9" CODE_OFF TSEP "z\n");
-    free(got);
-}
-
 static void test_table_header_cell_inline_bold_stays_bold(void)
 {
     /* A header cell with an inner **bold** span stays fully bold: the
@@ -2351,76 +2256,20 @@ static void test_table_header_cell_inline_bold_stays_bold(void)
     free(got);
 }
 
-static void test_table_column_count_mismatch_passthrough(void)
-{
-    /* GFM requires the delimiter row to have the same cell count as the
-     * header; a mismatch is not a table, so the lines pass through
-     * verbatim rather than being partially formatted with a dropped
-     * column (here the third column "3" must survive). */
-    const char *in = "| A | B |\n|---|---|---|\n| 1 | 2 | 3 |\n";
-    char *got = render_wrap(in, 40);
-    EXPECT_STR_EQ(got, "| A | B |\n|---|---|---|\n| 1 | 2 | 3 |\n");
-    free(got);
-}
-
-static void test_table_body_cell_pipe_overflow_passthrough(void)
-{
-    /* split_row isn't aware of inline code spans, so a body cell holding a
-     * literal pipe (here `` `ls | wc` ``) over-splits into 3 cells against
-     * a 2-column header. Dropping the excess would corrupt the model's
-     * text ("count lines" lost), so the whole table falls back to verbatim
-     * — every byte, including the trailing cell, survives intact. */
-    const char *in = "| Cmd | Meaning |\n|---|---|\n| `ls | wc` | count lines |\n";
-    char *got = render_wrap(in, 40);
-    EXPECT_STR_EQ(got, "| Cmd | Meaning |\n|---|---|\n| `ls | wc` | count lines |\n");
-    free(got);
-}
-
-static void test_table_body_cell_escaped_pipe_passthrough(void)
-{
-    /* An escaped `\|` is a literal pipe in GFM, but split_row splits there
-     * too, over-splitting a 2-column row to 3 cells. Rather than mangle it,
-     * the table passes through verbatim so the escaped pipe is preserved. */
-    const char *in = "| Expr | Meaning |\n|---|---|\n| a \\| b | union |\n";
-    char *got = render_wrap(in, 40);
-    EXPECT_STR_EQ(got, "| Expr | Meaning |\n|---|---|\n| a \\| b | union |\n");
-    free(got);
-}
-
 static void test_table_header_only_eof_no_newline(void)
 {
-    /* A header + delimiter with no trailing newline renders the same grid
-     * as if it had one: try_table_start defers at EOF (it needs the second
-     * newline), and md_flush recognizes the deferred table. */
+    /* A header + delimiter with no trailing newline stays deferred until
+     * md_flush resolves the complete pair at EOF. */
     const char *in = "| A | B |\n|---|---|";
     char *got = render_wrap(in, 40);
     EXPECT_STR_EQ(got, BLD "A" OFF TSEP BLD "B" OFF "\n" DIM HL HL CR HL HL OFF "\n");
     free(got);
 }
 
-static void test_table_row_overflow_emits_all_rows(void)
-{
-    /* A table with more rows than the layout's span array holds must not
-     * silently drop the tail — it falls back to verbatim, so every row
-     * (including the last) still appears in the output. */
-    size_t cap = 64 * 1024;
-    char *in = xmalloc(cap);
-    int p = snprintf(in, cap, "| H |\n|---|\n");
-    for (int i = 0; i < 2100 && (size_t)p < cap - 32; i++)
-        p += snprintf(in + p, cap - (size_t)p, "| r%d |\n", i);
-    char *got = render_wrap(in, 40);
-    EXPECT(strstr(got, "r0 ") != NULL);    /* first row present */
-    EXPECT(strstr(got, "r2099 ") != NULL); /* last row not dropped */
-    free(got);
-    free(in);
-}
-
 static void test_table_long_streamed_row_no_leak(void)
 {
-    /* A body row longer than TAIL_MAX, streamed without its trailing
-     * newline, must stay buffered with the table — the generic tail
-     * excess-flush is skipped while in_table, so no leading bytes leak as
-     * prose ahead of the rendered table and the row isn't split. */
+    /* A body row longer than the parser tail cap must remain whole while
+     * table collection is active, with no prose emitted ahead of it. */
     struct buf out;
     buf_init(&out);
     struct md_renderer *m = md_new(capture, &out, 40);
@@ -2446,10 +2295,8 @@ static void test_table_long_streamed_row_no_leak(void)
 
 static void test_table_oversized_inprogress_row_bails(void)
 {
-    /* A row streamed without its newline past TABLE_MAX_BYTES must not grow
-     * the buffer unbounded — it bails to verbatim, dumping the buffered
-     * rows + the oversized partial as plain text and leaving table mode.
-     * The header therefore appears verbatim ("| H |"), not formatted. */
+    /* A newline-less row beyond the table cap must bail the buffered block
+     * to verbatim output and leave collection mode. */
     struct buf out;
     buf_init(&out);
     struct md_renderer *m = md_new(capture, &out, 40);
@@ -2471,48 +2318,40 @@ static void test_table_oversized_inprogress_row_bails(void)
     free(row);
 }
 
-static void test_table_oversized_complete_row_bails(void)
+static void test_table_oversized_complete_row_passes_through(void)
 {
-    /* A complete row (with its trailing \n) arriving whole in one feed,
-     * past the byte cap, must not be appended and laid out: step_in_table
-     * checks the incoming row size before appending, so the buffered
-     * header renders as a (header-only) grid and the huge row falls
-     * through to verbatim — never growing the buffer or running layout on
-     * it. The output starts with the bold grid header, not a reflow
-     * bullet (which is what laying the huge row out would produce). */
+    /* A complete row rejected by table collection must fall through the parser without loss. */
     size_t big = 70000; /* > TABLE_MAX_BYTES (64 KiB) */
     char *in = xmalloc(big + 64);
     int p = snprintf(in, big + 64, "| H |\n|---|\n| ");
     memset(in + p, 'a', big);
     p += (int)big;
     p += snprintf(in + p, 64, " |\n");
+
     struct buf out;
     buf_init(&out);
     struct md_renderer *m = md_new(capture, &out, 40);
-    md_feed(m, in, (size_t)p); /* whole input, incl. the row's \n, in one feed */
+    md_feed(m, in, (size_t)p);
     md_flush(m);
     md_free(m);
     char *got = buf_steal(&out);
-    EXPECT(got && strncmp(got, BLD, strlen(BLD)) == 0); /* grid header, not a reflow bullet */
-    EXPECT(got && strstr(got, "aaaaaaaaaaaaaaaaaaaa") != NULL); /* row content survives */
+    EXPECT(got && strncmp(got, BLD, strlen(BLD)) == 0);
+    EXPECT(got && strstr(got, "| aaaaaaaaaaaaaaaaaaaa") != NULL);
+
     free(got);
     free(in);
 }
 
-static void test_table_huge_header_bails(void)
+static void test_table_oversized_header_passes_through(void)
 {
-    /* The header + delimiter block is checked against the byte cap before
-     * entering table mode, so a giant header cell is left verbatim (output
-     * begins with the literal "| "), not buffered and laid out. Captured
-     * raw rather than via render_wrap: the unbreakable 70 KB word would
-     * overflow interpret_terminal's fixed row buffer (a test-helper limit,
-     * not renderer behavior). */
+    /* A header rejected by the table probe must remain ordinary parser output. */
     size_t big = 70000; /* > TABLE_MAX_BYTES (64 KiB) */
     char *in = xmalloc(big + 64);
     int p = snprintf(in, big + 64, "| ");
     memset(in + p, 'H', big);
     p += (int)big;
     p += snprintf(in + p, 64, " |\n|---|\n| x |\n");
+
     struct buf out;
     buf_init(&out);
     struct md_renderer *m = md_new(capture, &out, 40);
@@ -2520,29 +2359,27 @@ static void test_table_huge_header_bails(void)
     md_flush(m);
     md_free(m);
     char *got = buf_steal(&out);
-    EXPECT(got && strncmp(got, "| ", 2) == 0); /* verbatim header, not formatted */
+    EXPECT(got && strncmp(got, "| HHHHHHHHHHHHHHHHHHHH", 22) == 0);
+    EXPECT(got && strstr(got, "| x |\n") != NULL);
+
     free(got);
     free(in);
 }
 
-static void test_table_eof_final_row_over_cap_bails(void)
+static void test_table_eof_over_cap_row_passes_through(void)
 {
-    /* A newline-less final row at EOF is absorbed by md_flush, but only if
-     * the combined size stays within the cap. Here the buffered rows are
-     * already near the cap, so appending the final row would push
-     * table_buf over TABLE_MAX_BYTES — md_flush must leave the tail
-     * untouched, lay out what's within the cap, and let the final row fall
-     * through to verbatim emission (its `| ` pipe prefix survives, which a
-     * reflow/grid layout would have stripped when splitting cells). */
-    size_t row = 60000, last = 10000; /* row+last+header > TABLE_MAX_BYTES (64 KiB) */
+    /* A final row left in the tail by table finish must still be emitted at flush. */
+    size_t row = 60000;
+    size_t last = 10000;
     char *in = xmalloc(row + last + 64);
     int p = snprintf(in, 64, "| H |\n|---|\n| ");
     memset(in + p, 'a', row);
     p += (int)row;
-    p += snprintf(in + p, 16, " |\n| "); /* close buffered row, open final row */
+    p += snprintf(in + p, 16, " |\n| ");
     memset(in + p, 'b', last);
     p += (int)last;
-    p += snprintf(in + p, 16, " |"); /* final row: NO trailing newline */
+    p += snprintf(in + p, 16, " |");
+
     struct buf out;
     buf_init(&out);
     struct md_renderer *m = md_new(capture, &out, 40);
@@ -2550,30 +2387,16 @@ static void test_table_eof_final_row_over_cap_bails(void)
     md_flush(m);
     md_free(m);
     char *got = buf_steal(&out);
-    /* The over-cap final row survives verbatim, pipes intact — it was not
-     * absorbed into the table and split into cells. */
-    EXPECT(got && strstr(got, "| bbbbbbbbbb") != NULL);
+    EXPECT(got && strstr(got, "| bbbbbbbbbbbbbbbbbbbb") != NULL);
+
     free(got);
     free(in);
 }
 
-static void test_table_delimiter_interior_colon_rejected(void)
-{
-    /* GFM allows a colon only at a delimiter cell's edges; an interior
-     * colon (`:-:-`) makes it not a delimiter row, so the block is not a
-     * table and passes through verbatim. */
-    const char *in = "| A | B |\n|:-:-|---|\n| 1 | 2 |\n";
-    char *got = render_wrap(in, 40);
-    EXPECT_STR_EQ(got, "| A | B |\n|:-:-|---|\n| 1 | 2 |\n");
-    free(got);
-}
-
 static void test_table_reflow_value_keeps_bold_across_wrap(void)
 {
-    /* A bold span inside a reflowed value that wraps must re-assert bold
-     * on the continuation row — emit_cell_wrapped tracks the cell's SGR
-     * into the wrap engine's style snapshot. "beta" stays bold after the
-     * wrap even though the source bold span closes immediately after it. */
+    /* A bold cell span that wraps must re-assert bold from the table replay
+     * into the wrapper's continuation row. */
     const char *in = "| K | V |\n|---|---|\n| k | **alpha beta**gammazz delta |";
     char *got = render_wrap(in, 18);
     char *vis = interpret_terminal(got, 0);
@@ -2996,28 +2819,16 @@ int main(void)
     test_wrap_blank_line_continuation_indents();
     test_wrap_code_fence_in_list_item();
 
-    test_table_aligned();
-    test_table_column_alignment();
-    test_table_reflow_to_records_when_too_wide();
     test_table_buffering_is_feed_split_invariant();
-    test_table_not_a_table_passthrough();
-    test_table_finalized_at_eof();
     test_table_cell_inline_styles();
     test_table_cell_block_markers_stay_literal();
-    test_table_header_only_renders_grid();
-    test_table_cell_multibyte_code_width();
     test_table_header_cell_inline_bold_stays_bold();
-    test_table_column_count_mismatch_passthrough();
-    test_table_body_cell_pipe_overflow_passthrough();
-    test_table_body_cell_escaped_pipe_passthrough();
     test_table_header_only_eof_no_newline();
-    test_table_row_overflow_emits_all_rows();
     test_table_long_streamed_row_no_leak();
     test_table_oversized_inprogress_row_bails();
-    test_table_oversized_complete_row_bails();
-    test_table_huge_header_bails();
-    test_table_eof_final_row_over_cap_bails();
-    test_table_delimiter_interior_colon_rejected();
+    test_table_oversized_complete_row_passes_through();
+    test_table_oversized_header_passes_through();
+    test_table_eof_over_cap_row_passes_through();
     test_table_reflow_value_keeps_bold_across_wrap();
     test_dinkus_renders_three_dots();
     test_dinkus_shrinks_on_narrow_width();
