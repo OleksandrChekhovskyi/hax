@@ -17,6 +17,23 @@
  * exceeded, the excess is flushed as plain text. */
 #define TAIL_MAX 8192
 
+/* Tables cannot stream because column sizing and reflow require every row. */
+struct md_table {
+    int collecting;
+    struct buf buf;
+};
+
+static void md_table_reset(struct md_table *t)
+{
+    t->collecting = 0;
+    buf_reset(&t->buf);
+}
+
+static void md_table_free(struct md_table *t)
+{
+    buf_free(&t->buf);
+}
+
 struct md_renderer {
     md_emit_fn emit_cb;
     void *user;
@@ -100,18 +117,7 @@ struct md_renderer {
 
     struct md_wrap wrap;
 
-    /* ---------- table buffer ----------
-     *
-     * Tables are the one block type that can't be rendered as it streams:
-     * column widths and the fit-or-reflow decision need every row first.
-     * So when a `|`-led line is confirmed to head a GFM table (its next
-     * line is a delimiter row), the renderer diverts subsequent lines into
-     * table_buf until a blank / non-pipe line / end-of-stream, then lays
-     * the whole block out at once (finalize_table). in_table gates the
-     * divert in md_feed. wrap_width <= 0 lays the grid out at natural
-     * width (unlimited) rather than reflowing. */
-    int in_table;
-    struct buf table_buf;
+    struct md_table table;
 
     /* Inline-only mode: skip all line-start block parsing (headings,
      * lists, fences, rules, tables) so the input is treated as a single
@@ -694,11 +700,11 @@ static int table_header_matches_delim(const char *h, size_t hlen, const char *d,
  * lines (one per column) — a narrow fallback that degrades to any width. */
 static void finalize_table(struct md_renderer *m)
 {
-    struct buf *tb = &m->table_buf;
+    struct buf *tb = &m->table.buf;
     struct md_wrap_context ctx = wrap_context(m);
     md_wrap_commit_pending(&m->wrap, &ctx);
 
-    /* Gather line spans (newline-terminated; table_buf always ends \n). */
+    /* Gather line spans (newline-terminated; the table buffer always ends \n). */
     const char *ls[TABLE_MAX_ROWS];
     size_t ll[TABLE_MAX_ROWS];
     int lc = 0;
@@ -868,14 +874,13 @@ static void finalize_table(struct md_renderer *m)
     free(grid);
 
 done:
-    buf_reset(tb);
-    m->in_table = 0;
+    md_table_reset(&m->table);
     /* The table wrote complete lines directly, so the next byte starts a
      * fresh wrapped row. */
     md_wrap_row_reset(&m->wrap);
 }
 
-/* In table-collect mode: consume one full line into table_buf, or
+/* In table-collect mode: consume one full line into the table buffer, or
  * finalize the table when a blank / non-pipe line (or the byte cap) ends
  * it. Returns DEFER until a complete line is available, ADVANCED when a
  * row is buffered, PASS when the table ended (the terminating line is
@@ -902,12 +907,12 @@ static enum step_result step_in_table(struct md_renderer *m, struct buf *w, size
      * incoming row's size, not just the current length, so a single huge
      * row arriving whole (with its \n) still bails to verbatim rather than
      * growing the buffer and running layout on it. */
-    if (blank || !pipe || m->table_buf.len + line_len > TABLE_MAX_BYTES) {
+    if (blank || !pipe || m->table.buf.len + line_len > TABLE_MAX_BYTES) {
         finalize_table(m);
         m->at_line_start = 1;
         return STEP_PASS; /* re-dispatch this line normally */
     }
-    buf_append(&m->table_buf, w->data + *i, line_len);
+    buf_append(&m->table.buf, w->data + *i, line_len);
     *i = nl + 1;
     return STEP_ADVANCED;
 }
@@ -933,8 +938,8 @@ static enum step_result try_table_start(struct md_renderer *m, struct buf *w, si
         return STEP_PASS;
     if (!table_header_matches_delim(w->data + *i, nl1 - *i, w->data + nl1 + 1, nl2 - (nl1 + 1)))
         return STEP_PASS;
-    buf_append(&m->table_buf, w->data + *i, nl2 - *i + 1); /* header + delimiter, incl. \n */
-    m->in_table = 1;
+    buf_append(&m->table.buf, w->data + *i, nl2 - *i + 1); /* header + delimiter, incl. \n */
+    m->table.collecting = 1;
     *i = nl2 + 1;
     m->at_line_start = 1;
     return STEP_ADVANCED;
@@ -1640,6 +1645,7 @@ struct md_renderer *md_new(md_emit_fn emit_cb, void *user, int wrap_width)
     m->skip_pad = 0;
     m->styled = 1;
     md_wrap_reset(&m->wrap, wrap_width);
+    md_table_reset(&m->table);
     return m;
 }
 
@@ -1663,8 +1669,7 @@ void md_reset(struct md_renderer *m, int wrap_width)
     /* Re-sample wrap width on turn boundary so SIGWINCH-style resizes
      * between turns are picked up cheaply without callback plumbing. */
     md_wrap_reset(&m->wrap, wrap_width);
-    m->in_table = 0;
-    buf_reset(&m->table_buf);
+    md_table_reset(&m->table);
     m->inline_only = 0;
     m->suppress_bold = 0;
 }
@@ -1675,7 +1680,7 @@ void md_free(struct md_renderer *m)
         return;
     buf_free(&m->tail);
     md_wrap_free(&m->wrap);
-    buf_free(&m->table_buf);
+    md_table_free(&m->table);
     free(m);
 }
 
@@ -1695,7 +1700,7 @@ void md_feed(struct md_renderer *m, const char *s, size_t n)
     while (i < w.len) {
         enum step_result step;
 
-        if (m->in_table) {
+        if (m->table.collecting) {
             step = step_in_table(m, &w, &i);
             if (step == STEP_DEFER)
                 break;
@@ -1747,22 +1752,21 @@ void md_feed(struct md_renderer *m, const char *s, size_t n)
      * are an incomplete table row awaiting its newline, not an ambiguous
      * marker tail. Flushing the leading part as prose would leak text
      * ahead of the rendered table and split the row (step_in_table appends
-     * whole lines to table_buf, and TABLE_MAX_BYTES already bounds it). */
+     * whole lines to the table buffer, and TABLE_MAX_BYTES already bounds it). */
     size_t rem = w.len - i;
-    if (m->in_table && rem > TABLE_MAX_BYTES) {
+    if (m->table.collecting && rem > TABLE_MAX_BYTES) {
         /* In-progress table row (no newline yet) past the byte cap —
          * malformed/pathological. The excess-flush above is suppressed
-         * while in_table, so without this the tail would grow unbounded.
+         * while collecting, so without this the tail would grow unbounded.
          * Bail to verbatim: dump the buffered rows and the oversized
          * partial as plain text, and leave table mode. */
-        emit_text(m, m->table_buf.data, m->table_buf.len);
-        buf_reset(&m->table_buf);
-        m->in_table = 0;
+        emit_text(m, m->table.buf.data, m->table.buf.len);
+        md_table_reset(&m->table);
         emit_text(m, w.data + i, rem);
         i = w.len;
         rem = 0;
     }
-    if (rem > TAIL_MAX && !m->in_table) {
+    if (rem > TAIL_MAX && !m->table.collecting) {
         emit_text(m, w.data + i, rem - TAIL_MAX);
         i += rem - TAIL_MAX;
         rem = TAIL_MAX;
@@ -1788,12 +1792,12 @@ void md_flush(struct md_renderer *m)
      * being emitted as literal text. */
 
     /* A header + delimiter whose delimiter line never got a trailing \n:
-     * try_table_start deferred (it needs the second newline) so in_table
-     * is still false and the tail holds the whole "header\ndelimiter". At
+     * try_table_start deferred (it needs the second newline) so collection
+     * has not started and the tail holds the whole "header\ndelimiter". At
      * EOF the bytes-we-have ARE both lines, so recognize the table now and
      * render it the same as if it had a final newline. Pipe-led only, to
      * match the streaming detection scope. */
-    if (!m->in_table && m->tail.len > 0 && m->tail.data[0] == '|') {
+    if (!m->table.collecting && m->tail.len > 0 && m->tail.data[0] == '|') {
         size_t nl1 = 0;
         while (nl1 < m->tail.len && m->tail.data[nl1] != '\n')
             nl1++;
@@ -1801,10 +1805,10 @@ void md_flush(struct md_renderer *m)
             m->tail.len + 1 <= TABLE_MAX_BYTES && /* header + delimiter within cap */
             table_header_matches_delim(m->tail.data, nl1, m->tail.data + nl1 + 1,
                                        m->tail.len - (nl1 + 1))) {
-            buf_append(&m->table_buf, m->tail.data, m->tail.len);
-            buf_append(&m->table_buf, "\n", 1);
+            buf_append(&m->table.buf, m->tail.data, m->tail.len);
+            buf_append(&m->table.buf, "\n", 1);
             buf_reset(&m->tail);
-            m->in_table = 1;
+            m->table.collecting = 1;
         }
     }
 
@@ -1812,11 +1816,11 @@ void md_flush(struct md_renderer *m)
      * newline-less last row from the tail (deferred for its missing \n),
      * then lay out what we have. The combined-size check mirrors the other
      * three entry points (step_in_table, try_table_start, the header probe
-     * above): if appending this final row would push table_buf past the
+     * above): if appending this final row would push the table buffer past the
      * byte cap, leave the tail untouched — finalize what's within the cap,
      * and the leftover row falls through to the literal-emit fallback
      * below, exactly as step_in_table bails an over-cap completed row. */
-    if (m->in_table) {
+    if (m->table.collecting) {
         int blank = 1, pipe = 0;
         for (size_t k = 0; k < m->tail.len; k++) {
             char ch = m->tail.data[k];
@@ -1826,9 +1830,9 @@ void md_flush(struct md_renderer *m)
                 pipe = 1;
         }
         if (m->tail.len > 0 && !blank && pipe &&
-            m->table_buf.len + m->tail.len + 1 <= TABLE_MAX_BYTES) {
-            buf_append(&m->table_buf, m->tail.data, m->tail.len);
-            buf_append(&m->table_buf, "\n", 1);
+            m->table.buf.len + m->tail.len + 1 <= TABLE_MAX_BYTES) {
+            buf_append(&m->table.buf, m->tail.data, m->tail.len);
+            buf_append(&m->table.buf, "\n", 1);
             buf_reset(&m->tail);
         }
         finalize_table(m);
@@ -2031,9 +2035,9 @@ void md_set_styled(struct md_renderer *m, int on)
 
 int md_in_table(const struct md_renderer *m)
 {
-    /* True while rows are being diverted into table_buf with nothing
+    /* True while rows are being diverted into the table buffer with nothing
      * emitted yet — the grid only renders at finalize_table once every
      * row is in. The agent reads this to surface a "composing..."
      * spinner during the otherwise-silent accumulation. */
-    return m && m->in_table;
+    return m && m->table.collecting;
 }
