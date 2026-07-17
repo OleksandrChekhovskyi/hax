@@ -422,30 +422,6 @@ static void render_hrule(struct md_renderer *m)
     temit(m, "\n", 1);
 }
 
-/* If s[start..end) is a thematic-break line — 3+ of a single `-`, `*`, or
- * `_`, with only whitespace between — return that marker char, else 0.
- * `=` is deliberately excluded: it's only ever a setext underline, which
- * stays literal. Used by md_flush to render a thematic break that ends the
- * stream without a trailing newline as the dim divider, matching the
- * streaming path (which needs the \n to disambiguate but the EOF bytes
- * are the whole line). */
-static char eof_thematic_marker(const char *s, size_t start, size_t end)
-{
-    if (start >= end)
-        return 0;
-    char first = s[start];
-    if (first != '-' && first != '*' && first != '_')
-        return 0;
-    size_t count = 0;
-    for (size_t j = start; j < end; j++) {
-        if (s[j] == first)
-            count++;
-        else if (s[j] != ' ' && s[j] != '\t' && s[j] != '\r')
-            return 0;
-    }
-    return count >= 3 ? first : 0;
-}
-
 /* Emit a dim list bullet through the wrapper so hanging indentation sees it. */
 static void emit_bullet(struct md_renderer *m)
 {
@@ -475,7 +451,8 @@ static void emit_bullet(struct md_renderer *m)
  * closes; without this the closer reads as content and the dim region
  * runs away to end-of-stream. The marker line is consumed entirely so
  * the dim region surrounds only the content lines. */
-static enum step_result step_in_code_fence(struct md_renderer *m, struct buf *w, size_t *i)
+static enum step_result step_in_code_fence(struct md_renderer *m, struct buf *w, size_t *i,
+                                           int final)
 {
     char c = w->data[*i];
 
@@ -486,13 +463,14 @@ static enum step_result step_in_code_fence(struct md_renderer *m, struct buf *w,
             scan++;
             sp++;
         }
-        if (scan >= w->len)
-            return STEP_DEFER; /* leading spaces with nothing after yet */
-        if (w->data[scan] == '`') {
+        if (scan >= w->len) {
+            if (!final)
+                return STEP_DEFER; /* leading spaces with nothing after yet */
+        } else if (w->data[scan] == '`') {
             size_t cnt = 0;
             while (scan + cnt < w->len && w->data[scan + cnt] == '`')
                 cnt++;
-            if (scan + cnt >= w->len)
+            if (scan + cnt >= w->len && !final)
                 return STEP_DEFER;
             if (cnt >= m->fence_open_count) {
                 /* Skip optional trailing whitespace; \r is included
@@ -503,8 +481,16 @@ static enum step_result step_in_code_fence(struct md_renderer *m, struct buf *w,
                 while (s2 < w->len && w->data[s2] != '\n' &&
                        (w->data[s2] == ' ' || w->data[s2] == '\t' || w->data[s2] == '\r'))
                     s2++;
-                if (s2 >= w->len)
-                    return STEP_DEFER;
+                if (s2 >= w->len) {
+                    if (!final)
+                        return STEP_DEFER;
+                    /* EOF terminates a valid closer followed only by optional whitespace. */
+                    close_code_fence(m);
+                    m->fence_open_count = 0;
+                    *i = s2;
+                    m->at_line_start = 1;
+                    return STEP_ADVANCED;
+                }
                 if (w->data[s2] == '\n') {
                     close_code_fence(m);
                     m->fence_open_count = 0;
@@ -550,14 +536,38 @@ static enum step_result step_in_inline_code(struct md_renderer *m, struct buf *w
 /* At line start: try the line-level patterns (fence open, heading, list
  * marker). Returns PASS for anything that doesn't match — the caller
  * clears at_line_start and falls through to inline processing. */
-static enum step_result step_line_start(struct md_renderer *m, struct buf *w, size_t *i)
+static enum step_result step_line_start(struct md_renderer *m, struct buf *w, size_t *i, int final)
 {
-    struct md_line_info line = md_scan_line(w->data + *i, w->len - *i, 0);
-    if (line.normalize_indent)
+    struct md_line_info line = md_scan_line(w->data + *i, w->len - *i, final);
+    int normalize_indent = line.normalize_indent;
+    /* A bare setext underline stays literal at EOF, including its source indent. */
+    if (final && line.kind == MD_LINE_THEMATIC && line.marker == '=')
+        normalize_indent = 0;
+    if (normalize_indent)
         *i += line.indent_length;
     /* Unindented dispatchers can resolve conservative lookahead results themselves. */
     if (!line.classification_complete && line.indent_length > 0)
         return STEP_DEFER;
+
+    if (final && line.kind == MD_LINE_TEXT) {
+        /* A block prefix that remained ambiguous through EOF falls back to literal text. */
+        struct md_line_info streaming = md_scan_line(w->data + *i, w->len - *i, 0);
+        if (!streaming.classification_complete) {
+            emit_text(m, w->data + *i, w->len - *i);
+            *i = w->len;
+            return STEP_ADVANCED;
+        }
+    }
+
+    if (final && line.kind == MD_LINE_THEMATIC) {
+        if (line.marker == '=')
+            emit_text(m, w->data + *i, w->len - *i);
+        else
+            render_hrule(m);
+        *i = w->len;
+        m->at_line_start = 1;
+        return STEP_ADVANCED;
+    }
 
     char c = w->data[*i];
 
@@ -741,8 +751,14 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
      * leading-pipe tables, so we keep the cheap, stall-free heuristic. */
     if (c == '|') {
         enum md_table_result r = md_table_try_start(&m->table, w, i);
-        if (r == MD_TABLE_DEFER)
-            return STEP_DEFER;
+        if (r == MD_TABLE_DEFER) {
+            if (!final)
+                return STEP_DEFER;
+            /* md_table_finish already had the final chance; unresolved bytes stay literal. */
+            emit_text(m, w->data + *i, w->len - *i);
+            *i = w->len;
+            return STEP_ADVANCED;
+        }
         if (r == MD_TABLE_ADVANCED)
             return STEP_ADVANCED;
     }
@@ -774,7 +790,7 @@ static int can_open_emphasis(char left, char right)
 /* Inline byte dispatch: \n closes any open per-line styles and resets
  * at_line_start; ` opens inline code; *, **, _ open or close emphasis
  * with the left/right-flanking heuristic. Any other byte emits as text. */
-static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t *i)
+static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t *i, int final)
 {
     char c = w->data[*i];
     size_t remaining = w->len - *i;
@@ -805,12 +821,42 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
         /* A physical newline is hard before a blank or block line and soft inside prose. The
          * scanner may identify a definite block before its exact kind is complete, preserving
          * eager boundary output while line dispatch waits for more. */
-        struct md_line_info line = md_scan_line(w->data + *i + 1, remaining - 1, 0);
+        struct md_line_info line = md_scan_line(w->data + *i + 1, remaining - 1, final);
         if (line.kind == MD_LINE_INCOMPLETE) {
             /* Indented list candidates are not block starts in lookahead, but an all-whitespace
              * prefix remains ambiguous regardless of indentation depth. */
             if (line.indent_length == remaining - 1 || line.indent_length <= 3)
                 return STEP_DEFER;
+        }
+        /* At EOF, whitespace keeps a hard break, thematic markers become complete lines, and
+         * unresolved prefixes remain literal rather than entering inline parsing. */
+        if (final && line.kind == MD_LINE_TEXT && line.indent_length == remaining - 1) {
+            emit_text(m, "\n", 1);
+            *i = w->len;
+            m->at_line_start = 1;
+            m->cur_line_is_block = 0;
+            return STEP_ADVANCED;
+        }
+        if (final && line.kind == MD_LINE_THEMATIC) {
+            emit_text(m, "\n", 1);
+            *i += 1 + line.indent_length;
+            m->at_line_start = 1;
+            m->cur_line_is_block = 0;
+            return STEP_ADVANCED;
+        }
+        if (final && line.kind == MD_LINE_TEXT) {
+            if (m->trailing_spaces >= 2) {
+                emit_text(m, "\n", 1);
+                emit_text(m, w->data + *i + 1, remaining - 1);
+            } else {
+                char prev = *i > 0 ? w->data[*i - 1] : m->prev_byte;
+                if (prev != ' ' && prev != '\t' && prev != 0)
+                    emit_text(m, " ", 1);
+                size_t scan = *i + 1 + line.indent_length;
+                emit_text(m, w->data + scan, w->len - scan);
+            }
+            *i = w->len;
+            return STEP_ADVANCED;
         }
 
         int hard = 0;
@@ -890,8 +936,13 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
                 return STEP_ADVANCED;
             }
             /* Need the byte after `**` to check the right side. */
-            if (remaining < 3)
-                return STEP_DEFER;
+            if (remaining < 3) {
+                if (!final)
+                    return STEP_DEFER;
+                emit_text(m, "**", 2);
+                *i += 2;
+                return STEP_ADVANCED;
+            }
             char l = *i > 0 ? w->data[*i - 1] : m->prev_byte;
             char r = w->data[*i + 2];
             if (can_open_emphasis(l, r)) {
@@ -903,8 +954,17 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
             *i += 2;
             return STEP_ADVANCED;
         }
-        if (remaining < 2)
-            return STEP_DEFER;
+        if (remaining < 2) {
+            if (!final)
+                return STEP_DEFER;
+            /* A lone final star closes active italic but is otherwise literal. */
+            if (m->in_italic)
+                close_italic(m);
+            else
+                emit_text(m, &c, 1);
+            (*i)++;
+            return STEP_ADVANCED;
+        }
         if (m->in_italic) {
             close_italic(m);
             (*i)++;
@@ -928,8 +988,13 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
             (*i)++;
             return STEP_ADVANCED;
         }
-        if (remaining < 2)
-            return STEP_DEFER;
+        if (remaining < 2) {
+            if (!final)
+                return STEP_DEFER;
+            emit_text(m, &c, 1);
+            (*i)++;
+            return STEP_ADVANCED;
+        }
         char l = *i > 0 ? w->data[*i - 1] : m->prev_byte;
         char r = w->data[*i + 1];
         if (can_open_emphasis(l, r)) {
@@ -1007,7 +1072,8 @@ void md_free(struct md_renderer *m)
     free(m);
 }
 
-void md_feed(struct md_renderer *m, const char *s, size_t n)
+/* Final mode resolves deferred prefixes against EOF instead of saving another tail. */
+static void md_process(struct md_renderer *m, const char *s, size_t n, int final)
 {
     /* Combine pending tail with new input into a working buffer so the
      * walker sees one contiguous stream. */
@@ -1017,7 +1083,8 @@ void md_feed(struct md_renderer *m, const char *s, size_t n)
         buf_append(&w, m->tail.data, m->tail.len);
         buf_reset(&m->tail);
     }
-    buf_append(&w, s, n);
+    if (n)
+        buf_append(&w, s, n);
 
     size_t i = 0;
     while (i < w.len) {
@@ -1035,7 +1102,7 @@ void md_feed(struct md_renderer *m, const char *s, size_t n)
         }
 
         if (m->in_code_fence) {
-            step = step_in_code_fence(m, &w, &i);
+            step = step_in_code_fence(m, &w, &i, final);
             if (step == STEP_DEFER)
                 break;
             continue;
@@ -1052,7 +1119,7 @@ void md_feed(struct md_renderer *m, const char *s, size_t n)
         }
 
         if (m->at_line_start && !m->inline_only) {
-            step = step_line_start(m, &w, &i);
+            step = step_line_start(m, &w, &i, final);
             if (step == STEP_DEFER)
                 break;
             if (step == STEP_ADVANCED)
@@ -1062,7 +1129,7 @@ void md_feed(struct md_renderer *m, const char *s, size_t n)
             m->at_line_start = 0;
         }
 
-        step = step_inline(m, &w, &i);
+        step = step_inline(m, &w, &i, final);
         if (step == STEP_DEFER)
             break;
         /* step_inline always advances or defers — never PASSes. */
@@ -1072,7 +1139,13 @@ void md_feed(struct md_renderer *m, const char *s, size_t n)
      * so no bytes leak ahead of their buffered table. */
     size_t rem = w.len - i;
     struct md_table_context table_ctx = table_context(m);
-    if (md_table_bail_partial(&m->table, &table_ctx, w.data + i, rem)) {
+    if (rem > 0 && md_table_bail_partial(&m->table, &table_ctx, w.data + i, rem)) {
+        i = w.len;
+        rem = 0;
+    }
+    if (final && rem > 0) {
+        /* Preserve bytes literally if a handler unexpectedly still defers at EOF. */
+        emit_text(m, w.data + i, rem);
         i = w.len;
         rem = 0;
     }
@@ -1092,185 +1165,24 @@ void md_feed(struct md_renderer *m, const char *s, size_t n)
     buf_free(&w);
 }
 
+void md_feed(struct md_renderer *m, const char *s, size_t n)
+{
+    md_process(m, s, n, 0);
+}
+
 void md_flush(struct md_renderer *m)
 {
-    /* End-of-stream interpretation of any pending tail: the streaming loop
-     * deferred these bytes because it needed lookahead to decide. At flush
-     * the lookahead is "end of stream", which counts as non-alphanumeric
-     * for marker validity — so a trailing closer like ``` (no newline),
-     * `*` after italic, or `**` after bold should match cleanly instead of
-     * being emitted as literal text. */
-
+    int was_collecting_table = md_table_is_collecting(&m->table);
     struct md_table_context table_ctx = table_context(m);
     md_table_finish(&m->table, &table_ctx, &m->tail);
-
-    if (m->in_code_fence && m->tail.len > 0) {
-        /* Skip up to 3 leading spaces, matching step_in_code_fence —
-         * an indented closer (`  ``` ` nested in a list item) left in
-         * the tail at EOF must still be recognized, not emitted as
-         * literal/dim content. */
-        size_t lead = 0;
-        while (lead < m->tail.len && lead < 3 && m->tail.data[lead] == ' ')
-            lead++;
-        size_t cnt = 0;
-        while (lead + cnt < m->tail.len && m->tail.data[lead + cnt] == '`')
-            cnt++;
-        if (cnt >= m->fence_open_count) {
-            int valid = 1;
-            for (size_t i = lead + cnt; i < m->tail.len; i++) {
-                char tc = m->tail.data[i];
-                if (tc != ' ' && tc != '\t' && tc != '\r') {
-                    valid = 0;
-                    break;
-                }
-            }
-            if (valid) {
-                close_code_fence(m);
-                m->fence_open_count = 0;
-                buf_reset(&m->tail);
-            }
-        }
-    }
-
-    if (m->tail.len == 2 && m->in_bold && m->tail.data[0] == '*' && m->tail.data[1] == '*') {
-        close_bold(m);
-        buf_reset(&m->tail);
-    }
-
-    if (m->tail.len == 1 && m->in_italic && (m->tail.data[0] == '*' || m->tail.data[0] == '_')) {
-        close_italic(m);
-        buf_reset(&m->tail);
-    }
-
-    /* End-of-stream resolution for a deferred soft-break decision.
-     * The streaming \n handler defers when it can't tell yet whether
-     * the next line starts with a block marker (`**`, `## `, `1. `,
-     * `1) `, ` ``` `, etc. — any prefix needing more bytes for
-     * disambiguation). At md_flush we know no more bytes are coming,
-     * so an unmatched prefix is by definition NOT a marker — resolve
-     * the deferred \n as a soft join: emit a single space (unless the
-     * previous line already ended in whitespace) and pass the rest
-     * of the tail through as content. The blank-line case (tail is
-     * \n + only whitespace) stays a hard break.
-     *
-     * This only applies when the tail starts with \n; the marker-
-     * specific branches above (fence closer, ` ** ` / ` * ` / ` _ `
-     * tails) already handled their own EOF resolution. */
-    if (m->tail.len > 0 && m->tail.data[0] == '\n') {
-        size_t k = 1;
-        while (k < m->tail.len && (m->tail.data[k] == ' ' || m->tail.data[k] == '\t'))
-            k++;
-        if (k >= m->tail.len) {
-            /* "\n" alone, or "\n" + only whitespace — hard break. */
-            emit_text(m, "\n", 1);
-            buf_reset(&m->tail);
-        } else if (m->tail.data[k] == '\n') {
-            /* "\n  \n..." — paragraph break followed by more content.
-             * Emit the first \n; let the rest fall through as plain
-             * text below (the leading whitespace + second \n + tail). */
-            emit_text(m, "\n", 1);
-            /* Drop the leading whitespace before the second \n
-             * (CommonMark normalization), then keep the remainder. */
-            size_t rest_off = k;
-            size_t rest_len = m->tail.len - rest_off;
-            char *rest = xmalloc(rest_len);
-            memcpy(rest, m->tail.data + rest_off, rest_len);
-            buf_reset(&m->tail);
-            emit_text(m, rest, rest_len);
-            free(rest);
-        } else {
-            /* Before falling back to soft-join, check if the tail
-             * contains a thematic break or setext underline that
-             * happens to lack a trailing \n at end-of-stream. The
-             * streaming check requires \n to disambiguate; at EOF
-             * the bytes-we-have ARE the whole line, so a 3+ run of
-             * `-` / `*` / `_` / `=` (with whitespace allowed
-             * between) is a valid hard break even without \n.
-             * Heading / list / blockquote / table can't reach this
-             * branch — those marker checks never defer once the
-             * required bytes are present, so they were resolved by
-             * the streaming path. */
-            char first = m->tail.data[k];
-            int hard_at_eof = 0;
-            if (first == '-' || first == '*' || first == '_' || first == '=') {
-                size_t j = k;
-                size_t count = 0;
-                while (j < m->tail.len && (m->tail.data[j] == first || m->tail.data[j] == ' ' ||
-                                           m->tail.data[j] == '\t' || m->tail.data[j] == '\r')) {
-                    if (m->tail.data[j] == first)
-                        count++;
-                    j++;
-                }
-                if (j >= m->tail.len && count >= 3)
-                    hard_at_eof = 1;
-            }
-            if (hard_at_eof) {
-                /* Hard break, then the marker line. A `-`/`*`/`_` thematic
-                 * break renders as the dim divider (same as the streaming
-                 * path); a `=` setext underline stays literal. Leading
-                 * whitespace before the marker is dropped per CommonMark. */
-                emit_text(m, "\n", 1);
-                if (eof_thematic_marker(m->tail.data, k, m->tail.len)) {
-                    render_hrule(m);
-                    buf_reset(&m->tail);
-                } else {
-                    size_t rest_len = m->tail.len - k;
-                    char *rest = xmalloc(rest_len);
-                    memcpy(rest, m->tail.data + k, rest_len);
-                    buf_reset(&m->tail);
-                    emit_text(m, rest, rest_len);
-                    free(rest);
-                }
-            } else if (m->trailing_spaces >= 2) {
-                /* The streaming \n handler deferred here for an ambiguous
-                 * block prefix (`#`, `-`, `2024`, ...) that EOF resolves
-                 * to prose. The two trailing spaces still make it a hard
-                 * line break — emit \n and the rest verbatim (leading
-                 * whitespace preserved, matching the streaming inline
-                 * hard break) instead of soft-joining. */
-                emit_text(m, "\n", 1);
-                size_t rest_len = m->tail.len - 1;
-                char *rest = xmalloc(rest_len);
-                memcpy(rest, m->tail.data + 1, rest_len);
-                buf_reset(&m->tail);
-                emit_text(m, rest, rest_len);
-                free(rest);
-            } else {
-                /* Soft join: space + rest of content (past leading ws). */
-                char prev = m->prev_byte;
-                if (prev != ' ' && prev != '\t' && prev != 0)
-                    emit_text(m, " ", 1);
-                size_t rest_len = m->tail.len - k;
-                char *rest = xmalloc(rest_len);
-                memcpy(rest, m->tail.data + k, rest_len);
-                buf_reset(&m->tail);
-                emit_text(m, rest, rest_len);
-                free(rest);
-            }
-        }
-    }
-
-    /* A bare thematic break left in the tail at EOF (input ended with
-     * `---`/`***`/`___` and never got its \n) renders as the dim divider,
-     * matching the streaming path. */
-    if (m->tail.len) {
-        size_t s = 0;
-        while (s < m->tail.len && (m->tail.data[s] == ' ' || m->tail.data[s] == '\t'))
-            s++;
-        if (eof_thematic_marker(m->tail.data, s, m->tail.len)) {
-            render_hrule(m);
-            buf_reset(&m->tail);
-        }
-    }
-
-    /* Anything still in tail is a marker that never matched — emit literally. */
-    if (m->tail.len) {
+    /* A rejected final row is table fallback output, not fresh Markdown input. */
+    if (was_collecting_table && m->tail.len > 0) {
         emit_text(m, m->tail.data, m->tail.len);
         buf_reset(&m->tail);
     }
+    md_process(m, NULL, 0, 1);
 
-    /* Close any styles still open so the terminal isn't left in a
-     * styled state (e.g. an unmatched `**bold` opener). */
+    /* Close any styles still open so the terminal isn't left in a styled state. */
     if (m->in_inline_code)
         close_inline_code(m);
     if (m->in_code_fence)

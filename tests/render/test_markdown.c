@@ -2296,6 +2296,14 @@ static void test_table_header_only_eof_no_newline(void)
     free(got);
 }
 
+static void test_table_rejected_eof_row_stays_literal(void)
+{
+    /* A final non-row rejected by table collection is lossless fallback, not Markdown input. */
+    char *got = render_one("| H |\n|---|\n*+ ```");
+    EXPECT_STR_EQ(got, BLD "H" OFF "\n" DIM HL OFF "\n*+ ```");
+    free(got);
+}
+
 static void test_table_long_streamed_row_no_leak(void)
 {
     /* A body row longer than the parser tail cap must remain whole while
@@ -2857,6 +2865,7 @@ int main(void)
     test_table_cell_block_markers_stay_literal();
     test_table_header_cell_inline_bold_stays_bold();
     test_table_header_only_eof_no_newline();
+    test_table_rejected_eof_row_stays_literal();
     test_table_long_streamed_row_no_leak();
     test_table_oversized_inprogress_row_bails();
     test_table_oversized_complete_row_passes_through();
