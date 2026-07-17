@@ -7,6 +7,7 @@
 
 #include "util.h"
 #include "terminal/ansi.h"
+#include "terminal/theme.h"
 #include "text/utf8.h"
 
 /* Sanity bound on the deferred-tail size. Inline markers fit in a few bytes;
@@ -58,7 +59,7 @@ struct md_renderer {
     size_t fence_open_count;
 
     /* Style flags. All independent — each maps to a distinct SGR group, so
-     * e.g. inline code (cyan) inside bold leaves bold intact when the code
+     * e.g. an inline-code span inside bold leaves bold intact when the code
      * span closes. The one exception is heading-vs-inline-bold which both
      * use the same SGR; close_bold re-emits ANSI_BOLD if in_heading is
      * still set so the rest of the heading line stays bold. */
@@ -119,7 +120,7 @@ struct md_renderer {
      * Wrap is bypassed when in_code_fence (verbatim — terminal hard-wraps
      * if needed) and in_heading (single-line by convention). Inline code
      * spans are NOT bypassed — they wrap normally at embedded spaces; SGR
-     * persistence across \n keeps the cyan run continuous across the
+     * persistence across \n keeps the code-color run continuous across the
      * inserted break. */
     int wrap_width;
     struct utf8_stream cp_stream;
@@ -467,7 +468,8 @@ static void wrap_break(struct md_renderer *m)
             m->emit_cb(e, strlen(e), 1, m->user);
         }
         if (m->in_inline_code != m->snap_in_inline_code) {
-            const char *e = m->snap_in_inline_code ? ANSI_CYAN : ANSI_FG_DEFAULT;
+            const char *e = m->snap_in_inline_code ? theme_open(THEME_CODE_INLINE)
+                                                   : theme_close(THEME_CODE_INLINE);
             m->emit_cb(e, strlen(e), 1, m->user);
         }
     }
@@ -570,8 +572,8 @@ static void wrap_consume_codepoint(struct md_renderer *m, const char *out, size_
          * non-space content has already landed, otherwise wrapping
          * here would emit an empty row + indent + same content and
          * make no forward progress. Inline code spans are NOT
-         * exempted: a soft break inside cyan stays cyan thanks to
-         * SGR persistence across \n, which keeps the visual span
+         * exempted: a soft break inside one stays code-colored thanks
+         * to SGR persistence across \n, which keeps the visual span
          * coherent without forcing the wrap to overflow. */
         if (m->row_has_content) {
             size_t new_break = m->row_buf.len - 1;
@@ -755,8 +757,10 @@ static void close_bold(struct md_renderer *m)
         emit_raw(m, ANSI_BOLD_OFF);
     m->in_bold = 0;
     m->trailing_spaces = 0;
+    /* Re-assert the heading style: SGR 22 above closed its bold, and a
+     * themed heading open may carry a color too (re-opening is idempotent). */
     if (m->in_heading && !m->suppress_bold)
-        emit_raw(m, ANSI_BOLD);
+        emit_raw(m, theme_open(THEME_HEADING));
 }
 
 static void open_italic(struct md_renderer *m)
@@ -775,16 +779,21 @@ static void close_italic(struct md_renderer *m)
 
 static void open_inline_code(struct md_renderer *m)
 {
-    emit_raw(m, ANSI_CYAN);
+    emit_raw(m, theme_open(THEME_CODE_INLINE));
     m->in_inline_code = 1;
     m->trailing_spaces = 0;
 }
 
 static void close_inline_code(struct md_renderer *m)
 {
-    emit_raw(m, ANSI_FG_DEFAULT);
+    emit_raw(m, theme_close(THEME_CODE_INLINE));
     m->in_inline_code = 0;
     m->trailing_spaces = 0;
+    /* The code closer restored the default foreground; when a themed
+     * heading carries a color of its own (open != plain bold), bring
+     * it back for the rest of the heading line. */
+    if (m->in_heading && strcmp(theme_open(THEME_HEADING), ANSI_BOLD) != 0)
+        emit_raw(m, theme_open(THEME_HEADING));
 }
 
 static void open_code_fence(struct md_renderer *m)
@@ -793,12 +802,12 @@ static void open_code_fence(struct md_renderer *m)
      * path (escape goes direct to emit_cb instead of buffering into
      * row_buf with content that gets re-emitted on a wrap break). */
     m->in_code_fence = 1;
-    emit_raw(m, ANSI_DIM);
+    emit_raw(m, theme_open(THEME_CODE_BLOCK));
 }
 
 static void close_code_fence(struct md_renderer *m)
 {
-    emit_raw(m, ANSI_BOLD_OFF);
+    emit_raw(m, theme_close(THEME_CODE_BLOCK));
     m->in_code_fence = 0;
 }
 
@@ -806,12 +815,12 @@ static void open_heading(struct md_renderer *m)
 {
     /* Flag-first, see open_code_fence for rationale. */
     m->in_heading = 1;
-    emit_raw(m, ANSI_BOLD);
+    emit_raw(m, theme_open(THEME_HEADING));
 }
 
 static void close_heading(struct md_renderer *m)
 {
-    emit_raw(m, ANSI_BOLD_OFF);
+    emit_raw(m, theme_close(THEME_HEADING));
     m->in_heading = 0;
 }
 
@@ -1076,6 +1085,8 @@ static void cell_track_sgr(struct md_renderer *m, const char *s, size_t n)
         if (q < n)
             q++; /* include the final 'm' */
         size_t len = q - p;
+        const char *code_on = theme_open(THEME_CODE_INLINE);
+        const char *code_off = theme_close(THEME_CODE_INLINE);
         if (len == strlen(ANSI_BOLD) && !memcmp(s + p, ANSI_BOLD, len))
             m->in_bold = 1;
         else if (len == strlen(ANSI_BOLD_OFF) && !memcmp(s + p, ANSI_BOLD_OFF, len))
@@ -1084,9 +1095,9 @@ static void cell_track_sgr(struct md_renderer *m, const char *s, size_t n)
             m->in_italic = 1;
         else if (len == strlen(ANSI_ITALIC_OFF) && !memcmp(s + p, ANSI_ITALIC_OFF, len))
             m->in_italic = 0;
-        else if (len == strlen(ANSI_CYAN) && !memcmp(s + p, ANSI_CYAN, len))
+        else if (len == strlen(code_on) && !memcmp(s + p, code_on, len))
             m->in_inline_code = 1;
-        else if (len == strlen(ANSI_FG_DEFAULT) && !memcmp(s + p, ANSI_FG_DEFAULT, len))
+        else if (len == strlen(code_off) && !memcmp(s + p, code_off, len))
             m->in_inline_code = 0;
         p = q;
     }

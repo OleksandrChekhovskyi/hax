@@ -31,7 +31,7 @@ enum spinner_mode {
                           * drawn in place (cursor at column 0 of a
                           * fresh row) or parked below a content line
                           * via spinner_park. */
-    SPINNER_TOOL_STATUS, /* live tool-output status row: dim-cyan
+    SPINNER_TOOL_STATUS, /* live tool-output status row: quiet-chrome
                           * glyph + dim content, repainted at tick
                           * rate so animation keeps moving between
                           * content updates. */
@@ -57,7 +57,7 @@ void spinner_show(struct spinner *s);
 void spinner_park(struct spinner *s, int col);
 
 /* SPINNER_TOOL_STATUS — start showing a tool-output live status row:
- * `<dim-cyan glyph> <space> <dim content>`, repainted at tick rate.
+ * `<quiet-chrome glyph> <space> <dim content>`, repainted at tick rate.
  * `content` is copied. A parked line spinner is unwound first, so the
  * status row lands where the caller's next content row belongs. */
 void spinner_show_tool_status(struct spinner *s, const char *content);

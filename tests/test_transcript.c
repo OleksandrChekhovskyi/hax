@@ -171,7 +171,7 @@ static void test_user_compact_seed_label(void)
 {
     /* A compaction seed keeps the user body verbatim and untruncated (it
      * IS what went on the wire) but renders under its own rule with a dim
-     * body: magenta stays exclusive to human-typed input. */
+     * body: the accent stays exclusive to human-typed input. */
     struct item items[] = {
         {.kind = ITEM_USER_MESSAGE, .text = (char *)"line one\nline two", .compact_seed = 1}};
     char *out = render_to_string(NULL, items, 1);

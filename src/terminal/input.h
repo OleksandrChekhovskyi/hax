@@ -109,8 +109,8 @@ void input_set_modal_completer(struct input *in, const struct input_modal_comple
  * --history-file override. */
 void input_history_open_default(struct input *in);
 
-/* Render `text` (length `len`) as a committed user message — a bright-
- * magenta "▌ " stripe (repeated at every wrapped row) and magenta body,
+/* Render `text` (length `len`) as a committed user message — an
+ * accent-colored "▌ " stripe (repeated at every wrapped row) and body,
  * word-wrapped at the stripe indent to `term_cols`. Writes directly to
  * stdout and leaves the cursor at column 0 of a fresh row. The editor
  * uses it to repaint a submitted line; history replay (resume) uses it so

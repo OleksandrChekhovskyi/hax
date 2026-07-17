@@ -16,6 +16,7 @@
 #include "session_picker.h"
 #include "terminal/ansi.h"
 #include "terminal/interrupt.h"
+#include "terminal/theme.h"
 #include "tools/bash_export.h"
 #include "trace.h"
 #include "transcript.h"
@@ -105,10 +106,11 @@ static const struct help_opt {
 
 static void print_help(void)
 {
-    /* Cyan flags + bold headers on a terminal, matching the REPL's /help;
-     * piped output (hax -h | less, docs generation) stays plain. */
+    /* Chrome-colored flags + bold headers on a terminal, matching the
+     * REPL's /help; piped output (hax -h | less, docs generation) stays
+     * plain. */
     int tty = isatty(fileno(stdout));
-    const char *cyan = tty ? ANSI_CYAN : "";
+    const char *chrome = tty ? theme_open(THEME_CHROME) : "";
     const char *bold = tty ? ANSI_BOLD : "";
     const char *reset = tty ? ANSI_RESET : "";
 
@@ -124,7 +126,7 @@ static void print_help(void)
             col = w;
     }
     for (size_t i = 0; i < sizeof(HELP_OPTS) / sizeof(*HELP_OPTS); i++) {
-        printf("  %s%s%s%*s", cyan, HELP_OPTS[i].flags, reset,
+        printf("  %s%s%s%*s", chrome, HELP_OPTS[i].flags, reset,
                (int)(col - strlen(HELP_OPTS[i].flags) + 2), "");
         for (const char *p = HELP_OPTS[i].desc; *p;) {
             const char *nl = strchr(p, '\n');
@@ -254,6 +256,18 @@ int main(int argc, char **argv)
      * locale so printf output remains predictable. */
     locale_init_utf8();
 
+    /* Load the user config before anything else: settings resolve lazily
+     * through config_str/etc. (env still wins over the file), and even the
+     * earliest output — --help, preflight diagnostics, the resume picker —
+     * must already speak the configured theme, NO_COLOR included. Loading
+     * needs nothing from argv, so nothing is gained by deferring it.
+     * The env-only auto pick first: config_init's own warnings (malformed
+     * config) must already honor NO_COLOR/TERM, and the file's "theme"
+     * can't color diagnostics about the file itself failing to load. */
+    theme_set("auto");
+    config_init();
+    theme_init();
+
     struct hax_opts opts = {0};
     int print_mode = 0;
     int continue_mode = 0;
@@ -268,8 +282,8 @@ int main(int argc, char **argv)
     char *prompt = NULL;
     char *resume_path = NULL;
 
-    /* Selection overrides gathered during parsing and applied after
-     * config_init() below (the preset needs the config file loaded).
+    /* Selection overrides gathered during parsing and applied after the
+     * option loop (the preset block composes them with the config file).
      * Values are borrowed argv pointers — valid for the whole run. */
     const char *opt_provider = NULL;
     const char *opt_model = NULL;
@@ -312,7 +326,8 @@ int main(int argc, char **argv)
         switch (c) {
         case 'h':
             print_help();
-            return 0;
+            rc = 0;
+            goto err_prompt;
         case 'p':
             print_mode = 1;
             break;
@@ -347,9 +362,9 @@ int main(int argc, char **argv)
         case '?':
             /* getopt_long already printed the diagnostic. */
             fprintf(stderr, "Try 'hax --help' for usage.\n");
-            return 1;
+            goto err_prompt;
         default:
-            return 1;
+            goto err_prompt;
         }
     }
 
@@ -368,7 +383,7 @@ int main(int argc, char **argv)
             hax_err("subagent depth limit (%d) reached — run the task directly instead of "
                     "spawning another hax",
                     HAX_SUBAGENT_MAX_DEPTH);
-            return 1;
+            goto err_prompt;
         }
     }
 
@@ -508,11 +523,6 @@ int main(int argc, char **argv)
         hax_err("curl_global_init failed");
         goto err_prompt;
     }
-
-    /* Load the user config first: everything below resolves settings
-     * through config_str/etc. (env still wins over the file), including
-     * the trace/transcript paths. */
-    config_init();
 
     /* Apply the preset (if any), then the explicit selection flags on top.
      * Both land in the session-override tier, so the order alone gives the

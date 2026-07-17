@@ -61,10 +61,10 @@ void disp_block_separator(struct disp *d);
 void disp_first_delta_strip(const struct disp *d, const char **s, size_t *n);
 
 /* Visual gutter prefix for the body rows of a tool-output block — a
- * thin "│ " in dim cyan so the block reads as a quiet vertical rule
- * down the side. Self-contained: emits ANSI_DIM_CYAN, glyph + space,
- * then ANSI_RESET so callers can apply their own SGR to the content
- * that follows. Goes through disp_write so any held \n from the
+ * thin "│ " in quiet chrome so the block reads as a quiet vertical
+ * rule down the side. Self-contained: emits THEME_CHROME_DIM, glyph +
+ * space, then ANSI_RESET so callers can apply their own SGR to the
+ * content that follows. Goes through disp_write so any held \n from the
  * previous row is flushed first. */
 void disp_tool_strip(struct disp *d);
 

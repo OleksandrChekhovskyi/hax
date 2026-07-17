@@ -19,6 +19,7 @@
 #include "terminal/ansi.h"
 #include "terminal/clipboard.h"
 #include "terminal/picker.h"
+#include "terminal/theme.h"
 #include "terminal/ui.h"
 
 /* Maximum number of aliases a single command can advertise. Three is
@@ -686,7 +687,7 @@ static void pad_spaces(int n)
 static void print_cmd_row(const char *name, const char *summary, int dim, int gutter)
 {
     fputs("  ", stdout);
-    fputs(dim ? ANSI_DIM ANSI_CYAN : ANSI_CYAN, stdout);
+    fputs(theme_open(dim ? THEME_CHROME_DIM : THEME_CHROME), stdout);
     int w = 1 + (int)strlen(name);
     printf("/%s", name);
     fputs(ANSI_RESET, stdout);
@@ -741,7 +742,7 @@ static void slash_run_help(struct slash_ctx *ctx)
     for (size_t i = 0; i < N_SHORTCUTS; i++) {
         int avail = !SHORTCUTS[i].available || SHORTCUTS[i].available();
         fputs("  ", stdout);
-        fputs(avail ? ANSI_CYAN : ANSI_DIM ANSI_CYAN, stdout);
+        fputs(theme_open(avail ? THEME_CHROME : THEME_CHROME_DIM), stdout);
         fputs(SHORTCUTS[i].key, stdout);
         fputs(ANSI_RESET, stdout);
         pad_spaces(gutter - (int)strlen(SHORTCUTS[i].key));

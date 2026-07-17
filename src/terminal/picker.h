@@ -48,9 +48,9 @@ struct picker_item {
      * so the caller decides what accepting it means (typically: try
      * anyway and report the exact failure). */
     int dim;
-    /* When set, the row is tagged "✓ current" in green after the label —
-     * persistent state, distinct from the (magenta, moving) selection
-     * highlight. Callers mark the already-active choice with this rather
+    /* When set, the row is tagged "✓ current" in the ok color after the
+     * label — persistent state, distinct from the (accent, moving)
+     * selection highlight. Callers mark the already-active choice with this rather
      * than smuggling "current" through `detail`, where it would render
      * dim and read like a failure reason. */
     int current;

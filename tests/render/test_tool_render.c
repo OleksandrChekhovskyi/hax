@@ -26,10 +26,12 @@
  * captured bytes. Anything about animation timing or main-thread vs
  * spinner-thread interleaving needs a tty + manual visual check. */
 
-#define STRIP_FIRST      ANSI_DIM_CYAN "\xE2\x94\x8C " ANSI_RESET     /* ┌  */
-#define STRIP_BODY       ANSI_DIM_CYAN "\xE2\x94\x82 " ANSI_RESET     /* │  */
-#define STRIP_CLOSE      "\r" ANSI_DIM_CYAN "\xE2\x94\x94" ANSI_RESET /* └ */
-#define STRIP_CLOSE_SOLO "\r" ANSI_DIM_CYAN "\xE2\x80\xBA" ANSI_RESET /* › */
+/* The default theme preset ("ansi") resolves THEME_CHROME to ANSI_CYAN,
+ * so the strips are dim + cyan, emitted as two escapes. */
+#define STRIP_FIRST      ANSI_DIM ANSI_CYAN "\xE2\x94\x8C " ANSI_RESET     /* ┌  */
+#define STRIP_BODY       ANSI_DIM ANSI_CYAN "\xE2\x94\x82 " ANSI_RESET     /* │  */
+#define STRIP_CLOSE      "\r" ANSI_DIM ANSI_CYAN "\xE2\x94\x94" ANSI_RESET /* └ */
+#define STRIP_CLOSE_SOLO "\r" ANSI_DIM ANSI_CYAN "\xE2\x80\xBA" ANSI_RESET /* › */
 
 /* All Braille spinner frames in src/render/spinner.c share the U+28xx prefix
  * "\xE2\xA0\x..", so this two-byte needle proves a status_paint

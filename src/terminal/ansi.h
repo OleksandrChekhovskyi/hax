@@ -9,7 +9,7 @@
  *  - ANSI_RESET (`0m`) clears every attribute — use when we don't care
  *    what was open.
  *  - Per-attribute closers (`22m`, `23m`, `39m`) leave the others intact,
- *    so e.g. a heading's bold survives an inline-code cyan span.
+ *    so e.g. a heading's bold survives an inline-code color span.
  *
  * Note: SGR 22 is "normal intensity" — it closes BOTH bold and dim, so
  * ANSI_BOLD_OFF is the right closer for either. */
@@ -22,18 +22,16 @@
 #define ANSI_BOLD_OFF   "\x1b[22m" /* also closes dim — same SGR */
 #define ANSI_ITALIC_OFF "\x1b[23m"
 
+/* The 16-color palette entries below are the raw vocabulary for
+ * terminal/theme.c's "ansi" preset (and for tests). Production code
+ * should color through the semantic roles in terminal/theme.h; direct
+ * use here is for attributes (bold/dim/italic) and control sequences. */
 #define ANSI_RED            "\x1b[31m"
 #define ANSI_GREEN          "\x1b[32m"
 #define ANSI_YELLOW         "\x1b[33m"
-#define ANSI_MAGENTA        "\x1b[35m"
 #define ANSI_CYAN           "\x1b[36m"
 #define ANSI_BRIGHT_MAGENTA "\x1b[95m"
 #define ANSI_FG_DEFAULT     "\x1b[39m"
-
-/* Combined dim + cyan in one SGR set — used by the tool-block gutter
- * strip so the box-drawing glyphs read as a quiet cyan rule down the
- * side of the output. Closed by ANSI_RESET. */
-#define ANSI_DIM_CYAN "\x1b[2;36m"
 
 #define ANSI_ERASE_LINE "\x1b[K"
 

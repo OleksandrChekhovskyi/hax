@@ -9,6 +9,7 @@
 #include "provider.h"
 #include "util.h"
 #include "terminal/ansi.h"
+#include "terminal/theme.h"
 
 /* Fixed renderer width. Pager passes through; narrow terminals reflow.
  * Picked so the banner box and turn rules stay legible without taking
@@ -38,13 +39,14 @@ static void repeat_glyph(FILE *out, const char *glyph, int n)
         fputs(glyph, out);
 }
 
-/* Bold-cyan three-line box, drawn at the top of every transcript page.
+/* Bold chrome-colored three-line box, drawn at the top of every
+ * transcript page.
  * Visual weight is the point — it has to be unambiguous through the
  * pager's `q`-then-glance. The banner lives at the very top so there's
  * no need to make it grep-friendly; only turn rules carry the `#`
  * anchor that helps `/# turn` jump between round-trips.
  *
- * Each row opens with ANSI_BOLD ANSI_CYAN and closes with ANSI_RESET
+ * Each row opens with bold + the chrome color and closes with ANSI_RESET
  * before the newline: `less -R` resets SGR state at every line break,
  * so leaving the box "open" across rows would render rows 2 and 3 in
  * default fg. */
@@ -56,14 +58,16 @@ static void banner(FILE *out, int color)
     int left = (inner - label_w) / 2;
     int right = inner - label_w - left;
 
-    fputs(ANSI_IF(ANSI_BOLD ANSI_CYAN), out);
+    fputs(ANSI_IF(ANSI_BOLD), out);
+    fputs(ANSI_IF(theme_open(THEME_CHROME)), out);
     fputs("┏", out);
     repeat_glyph(out, "━", inner);
     fputs("┓", out);
     fputs(ANSI_IF(ANSI_RESET), out);
     fputc('\n', out);
 
-    fputs(ANSI_IF(ANSI_BOLD ANSI_CYAN), out);
+    fputs(ANSI_IF(ANSI_BOLD), out);
+    fputs(ANSI_IF(theme_open(THEME_CHROME)), out);
     fputs("┃", out);
     repeat_glyph(out, " ", left);
     fputs(label, out);
@@ -72,7 +76,8 @@ static void banner(FILE *out, int color)
     fputs(ANSI_IF(ANSI_RESET), out);
     fputc('\n', out);
 
-    fputs(ANSI_IF(ANSI_BOLD ANSI_CYAN), out);
+    fputs(ANSI_IF(ANSI_BOLD), out);
+    fputs(ANSI_IF(theme_open(THEME_CHROME)), out);
     fputs("┗", out);
     repeat_glyph(out, "━", inner);
     fputs("┛", out);
@@ -80,7 +85,7 @@ static void banner(FILE *out, int color)
     fputs("\n\n", out);
 }
 
-/* Turn separator: bold-cyan single-rule with a `# turn N` label.
+/* Turn separator: bold chrome-colored single-rule with a `# turn N` label.
  * Lighter than the banner box and heavier than the dim `── section ──`
  * sub-rules, so the hierarchy reads top-down — banner → turn → sub.
  * A "turn" here matches turn.c: one model round-trip. Boundaries come
@@ -98,7 +103,8 @@ static void turn_rule(FILE *out, int color, int n)
     int left = rule / 2;
     int right = rule - left;
 
-    fputs(ANSI_IF(ANSI_BOLD ANSI_CYAN), out);
+    fputs(ANSI_IF(ANSI_BOLD), out);
+    fputs(ANSI_IF(theme_open(THEME_CHROME)), out);
     repeat_glyph(out, "─", left);
     fputs(label, out);
     repeat_glyph(out, "─", right);
@@ -120,7 +126,7 @@ static void ensure_newline(FILE *out, const char *s)
  * `less -R` resets SGR state at every line break, so a single leading
  * escape would drop after the first newline (and a soft-wrapped long
  * line keeps its color either way). Shared by every colored-body block
- * — user (magenta), reasoning and the compaction seed (dim). */
+ * — user (accent), reasoning and the compaction seed (dim). */
 static void render_body_lines(FILE *out, int color, const char *text, const char *open,
                               const char *close)
 {
@@ -142,7 +148,7 @@ static void render_body_lines(FILE *out, int color, const char *text, const char
 }
 
 /* User messages: section() rule with the "user" label, then the body
- * in bright magenta. The transcript is intentionally raw — no wrap,
+ * in the accent color. The transcript is intentionally raw — no wrap,
  * no markdown, no per-line prefix — so the section rule plays the
  * same role for user messages that the `── assistant ──` / `── tool
  * result ──` rules play for the model side. A per-line `▌ ` strip
@@ -150,10 +156,10 @@ static void render_body_lines(FILE *out, int color, const char *text, const char
  * pager, so the rule is the only anchor; color carries the rest.
  *
  * A compaction seed goes on the wire as a user message, but rendering
- * it magenta would read as "the user typed this whole summary". The
- * transcript's visual grammar keeps magenta exclusively for typed
- * input, so the seed gets its own label and the dim body machinery
- * shares with reasoning — full text, just visibly not human. */
+ * it accent-colored would read as "the user typed this whole summary".
+ * The transcript's visual grammar keeps the accent exclusively for
+ * typed input, so the seed gets its own label and the dim body
+ * machinery shares with reasoning — full text, just visibly not human. */
 static void render_user(FILE *out, int color, const struct item *it)
 {
     const char *text = it->text ? it->text : "";
@@ -163,7 +169,7 @@ static void render_user(FILE *out, int color, const struct item *it)
         return;
     }
     section(out, color, "user");
-    render_body_lines(out, color, text, ANSI_BRIGHT_MAGENTA, ANSI_FG_DEFAULT);
+    render_body_lines(out, color, text, theme_open(THEME_ACCENT), theme_close(THEME_ACCENT));
 }
 
 static void render_assistant(FILE *out, int color, const struct item *it)
@@ -174,7 +180,7 @@ static void render_assistant(FILE *out, int color, const struct item *it)
     ensure_newline(out, it->text);
 }
 
-/* Tool call: `[name]` cyan, then args. Pretty-prints when the args parse
+/* Tool call: `[name]` in chrome, then args. Pretty-prints when the args parse
  * as JSON; otherwise dumps verbatim so a malformed payload still appears
  * in the transcript instead of silently disappearing. The call_id is
  * intentionally omitted — pairing happens inline (the matching result
@@ -182,8 +188,8 @@ static void render_assistant(FILE *out, int color, const struct item *it)
  * remains available via HAX_TRACE for protocol-level debugging. */
 static void render_tool_call(FILE *out, int color, const struct item *it)
 {
-    fprintf(out, "%s[%s]%s\n", ANSI_IF(ANSI_CYAN), it->tool_name ? it->tool_name : "?",
-            ANSI_IF(ANSI_RESET));
+    fprintf(out, "%s[%s]%s\n", ANSI_IF(theme_open(THEME_CHROME)),
+            it->tool_name ? it->tool_name : "?", ANSI_IF(ANSI_RESET));
 
     if (it->tool_arguments_json && *it->tool_arguments_json) {
         json_t *root = json_loads(it->tool_arguments_json, 0, NULL);
@@ -238,7 +244,7 @@ static void render_json_indented(FILE *out, const char *json_text)
 /* Tools section: one block per advertised tool, mirroring exactly the
  * fields the provider serializes for the model — name, description,
  * parameters_schema_json. The agent's display_arg / preview_tail / etc.
- * are UI-only and intentionally omitted. The cyan `[name]` header
+ * are UI-only and intentionally omitted. The chrome `[name]` header
  * matches render_tool_call so a reader scanning the transcript can
  * spot the matching tool definition above any specific call. */
 static void render_tools(FILE *out, int color, const struct tool_def *tools, size_t n)
@@ -247,8 +253,8 @@ static void render_tools(FILE *out, int color, const struct tool_def *tools, siz
         return;
     section(out, color, "tools");
     for (size_t i = 0; i < n; i++) {
-        fprintf(out, "%s[%s]%s\n", ANSI_IF(ANSI_CYAN), tools[i].name ? tools[i].name : "?",
-                ANSI_IF(ANSI_RESET));
+        fprintf(out, "%s[%s]%s\n", ANSI_IF(theme_open(THEME_CHROME)),
+                tools[i].name ? tools[i].name : "?", ANSI_IF(ANSI_RESET));
         if (tools[i].description) {
             fputs(tools[i].description, out);
             ensure_newline(out, tools[i].description);

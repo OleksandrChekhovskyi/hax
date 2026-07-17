@@ -11,6 +11,7 @@
 
 #include "util.h"
 #include "terminal/ansi.h"
+#include "terminal/theme.h"
 
 /* Braille spinner — ten frames at 80ms each give ~12fps, enough to
  * feel alive without being distracting. The frame index is derived
@@ -115,11 +116,12 @@ static void draw_frame_locked(struct spinner *s)
         return;
     }
     case SPINNER_TOOL_STATUS: {
-        /* Two-tone gutter row: cyan glyph (matches the tool block's
-         * box-drawing strip color) followed by dim content. Erase after
-         * drawing so shorter updates don't leave trailing chars without
-         * blanking the row first. */
-        fputs("\r" ANSI_DIM_CYAN, stdout);
+        /* Two-tone gutter row: quiet-chrome glyph (matches the tool
+         * block's box-drawing strip style) followed by dim content.
+         * Erase after drawing so shorter updates don't leave trailing
+         * chars without blanking the row first. */
+        fputs("\r", stdout);
+        fputs(theme_open(THEME_CHROME_DIM), stdout);
         fputs(glyph, stdout);
         fputs(" " ANSI_RESET ANSI_DIM, stdout);
         fputs(s->tool_status_content ? s->tool_status_content : "", stdout);

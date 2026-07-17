@@ -212,6 +212,14 @@ canonical key and its environment variable.
   and auto-compaction.
 - `display_width` / `HAX_DISPLAY_WIDTH` — force render width in columns.
 - `notify` / `HAX_NOTIFY` — desktop notification style: `osc9`, `bel`, or falsy to disable.
+- `theme` / `HAX_THEME` — color theme: `auto`, `dark`, `light`, `ansi`, or `off`. Default
+  `auto`. `dark` and `light` are fixed 256-color palettes tuned for the respective
+  background; `ansi` uses only the classic 16-color SGRs, so colors follow the terminal's
+  own scheme (the right choice for carefully themed terminals); `off` disables colors while
+  keeping bold/dim/italic. `auto` picks `off` when `NO_COLOR` is set (or the terminal is
+  dumb), `ansi` without 256-color support, and otherwise `dark` — or `light` when a
+  `COLORFGBG` environment variable reports a light background. Terminals rarely advertise
+  their background, so on a light scheme you typically want to set `light` explicitly.
 
 `HAX_CONTEXT_LIMIT` overrides provider auto-detection. Current auto-detection exists for
 Codex, llama.cpp, and OpenRouter; `openai`, `anthropic`, and custom providers with a

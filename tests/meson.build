@@ -53,6 +53,7 @@ test_sources = [
     'terminal/test_input_core.c',
     'terminal/test_interrupt.c',
     'terminal/test_picker_core.c',
+    'terminal/test_theme.c',
 
     'text/test_utf8.c',
     'text/test_utf8_sanitize.c',

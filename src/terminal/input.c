@@ -20,6 +20,7 @@
 #include "system/spawn.h"
 #include "terminal/ansi.h"
 #include "terminal/input_core.h"
+#include "terminal/theme.h"
 #include "text/utf8.h"
 #include "text/utf8_sanitize.h"
 
@@ -583,21 +584,24 @@ static void leave_edit_area(struct input *in)
 }
 
 /* Walker callback for the committed-user-message render. Appends a
- * bright-magenta `▌ ` stripe at every row break so wrapped continuation
+ * accent-colored `▌ ` stripe at every row break so wrapped continuation
  * rows stay marked, and resets foreground around the strip glyph so
- * the body inherits magenta without escapes nesting. Output is collected
- * into the caller's `struct buf` (passed as `user`). */
+ * the body inherits the accent without escapes nesting. Output is
+ * collected into the caller's `struct buf` (passed as `user`). */
 static void submitted_emit(const struct input_render_event *ev, void *user)
 {
     struct buf *f = user;
     if (ev->kind == INPUT_RENDER_GLYPH) {
         buf_append(f, ev->bytes, ev->n);
     } else {
-        buf_append_str(f, ANSI_FG_DEFAULT ANSI_ERASE_LINE "\r\n" ANSI_BRIGHT_MAGENTA "▌ ");
+        buf_append_str(f, theme_close(THEME_ACCENT));
+        buf_append_str(f, ANSI_ERASE_LINE "\r\n");
+        buf_append_str(f, theme_open(THEME_ACCENT));
+        buf_append_str(f, "▌ ");
     }
 }
 
-/* Append the magenta-striped user message to `f`. Shared by the public
+/* Append the accent-striped user message to `f`. Shared by the public
  * one-shot renderer and render_submitted so the stripe layout can't drift. */
 static void append_user_message(struct buf *f, const char *text, size_t len, int term_cols)
 {
@@ -605,10 +609,12 @@ static void append_user_message(struct buf *f, const char *text, size_t len, int
      * indents continuation rows to this column so wrapped content aligns
      * under the first row's text. */
     const int bar_col = 2;
-    buf_append_str(f, ANSI_BRIGHT_MAGENTA "▌ ");
+    buf_append_str(f, theme_open(THEME_ACCENT));
+    buf_append_str(f, "▌ ");
     input_core_render(text, len, /*cursor=*/0, bar_col, bar_col, term_cols, submitted_emit, f,
                       NULL);
-    buf_append_str(f, ANSI_FG_DEFAULT ANSI_ERASE_LINE "\r\n");
+    buf_append_str(f, theme_close(THEME_ACCENT));
+    buf_append_str(f, ANSI_ERASE_LINE "\r\n");
 }
 
 void input_render_user_message(const char *text, size_t len, int term_cols)
@@ -621,7 +627,7 @@ void input_render_user_message(const char *text, size_t len, int term_cols)
     buf_free(&f);
 }
 
-/* Replace the edit area with a magenta-striped committed user message. Draw
+/* Replace the edit area with an accent-striped committed user message. Draw
  * before erasing stale tails so sync-less terminals don't flash a blank prompt
  * on submit. */
 static void render_submitted(struct input *in)
@@ -994,10 +1000,11 @@ static enum rsearch_outcome reverse_search(struct input *in)
         }
 
         /* Modernized chrome: "<reverse|forward>-search · <query> → <result>".
-         * Bright magenta for the search chrome — matching the normal "❯"
+         * Accent-colored search framing — matching the normal "❯"
          * prompt — with the result reset to default; a failed query shows a
          * dim "(no match)" in place of the result. Glyphs fall back to ASCII
-         * (" : " / " > ") when the locale isn't UTF-8, like PROMPT_ASCII.
+         * (" : " / " > ") when the locale isn't UTF-8, like the prompt's
+         * ASCII fallback.
          *
          * The displayed query is sanitized (see sanitize_query_for_display):
          * the prompt is written raw via fputs (unlike the edit buffer, which
@@ -1030,14 +1037,15 @@ static enum rsearch_outcome reverse_search(struct input *in)
         if (fixed <= budget) {
             char *qdisp = qsafe ? clip_query_left(qsafe, budget - fixed, utf8) : NULL;
             const char *tail = failed ? ANSI_DIM "(no match)" ANSI_BOLD_OFF : "";
-            prompt_buf = xasprintf(ANSI_BRIGHT_MAGENTA "%s%s%s%s" ANSI_FG_DEFAULT "%s", label, dot,
-                                   qdisp ? qdisp : "", arrow, tail);
+            prompt_buf = xasprintf("%s%s%s%s%s%s%s", theme_open(THEME_ACCENT), label, dot,
+                                   qdisp ? qdisp : "", arrow, theme_close(THEME_ACCENT), tail);
             free(qdisp);
         } else {
             char *plain = xasprintf("%s%s%s%s%s", label, dot, qsafe ? qsafe : "", arrow,
                                     failed ? "(no match)" : "");
             char *fit = clip_query_left(plain, budget, utf8);
-            prompt_buf = xasprintf(ANSI_BRIGHT_MAGENTA "%s" ANSI_FG_DEFAULT, fit);
+            prompt_buf =
+                xasprintf("%s%s%s", theme_open(THEME_ACCENT), fit, theme_close(THEME_ACCENT));
             free(plain);
             free(fit);
         }

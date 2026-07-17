@@ -7,6 +7,7 @@
 
 #include "util.h"
 #include "terminal/ansi.h"
+#include "terminal/theme.h"
 
 void disp_emit_held(struct disp *d)
 {
@@ -98,41 +99,44 @@ void disp_first_delta_strip(const struct disp *d, const char **s, size_t *n)
     }
 }
 
-/* All three eager strip variants share the same envelope: ANSI_DIM_CYAN
- * sets dim cyan, the box-drawing glyph and trailing space land in that
- * style, then ANSI_RESET clears both attributes so callers can apply
- * their own SGR to the content that follows. */
+/* All three eager strip variants share the same envelope: the quiet
+ * chrome style, the box-drawing glyph and trailing space land in it,
+ * then ANSI_RESET clears everything so callers can apply their own SGR
+ * to the content that follows. Composed per call because the style
+ * comes from the active theme. */
+static void emit_strip(struct disp *d, const char *glyph_utf8)
+{
+    char strip[48];
+    int n = snprintf(strip, sizeof(strip), "%s%s " ANSI_RESET, theme_open(THEME_CHROME_DIM),
+                     glyph_utf8);
+    disp_write(d, strip, (size_t)n);
+}
 
 void disp_tool_strip(struct disp *d)
 {
-    /* dim+cyan │ (U+2502, 3-byte UTF-8) space reset */
-    static const char strip[] = ANSI_DIM_CYAN "\xE2\x94\x82 " ANSI_RESET;
-    disp_write(d, strip, sizeof(strip) - 1);
+    emit_strip(d, "\xE2\x94\x82"); /* │ U+2502 */
 }
 
 void disp_tool_strip_first(struct disp *d)
 {
-    /* dim+cyan ┌ (U+250C, 3-byte UTF-8) space reset */
-    static const char strip[] = ANSI_DIM_CYAN "\xE2\x94\x8C " ANSI_RESET;
-    disp_write(d, strip, sizeof(strip) - 1);
+    emit_strip(d, "\xE2\x94\x8C"); /* ┌ U+250C */
 }
 
 void disp_tool_strip_solo(struct disp *d)
 {
-    /* dim+cyan › (U+203A, 3-byte UTF-8) space reset */
-    static const char strip[] = ANSI_DIM_CYAN "\xE2\x80\xBA " ANSI_RESET;
-    disp_write(d, strip, sizeof(strip) - 1);
+    emit_strip(d, "\xE2\x80\xBA"); /* › U+203A */
 }
 
 /* Shared overprint: \r back to col 0 of the current row, redraw the
- * leading glyph in dim cyan, reset SGR. The "┌" or "│" originally
+ * leading glyph in quiet chrome, reset SGR. The "┌" or "│" originally
  * there is replaced by `glyph_utf8` (3-byte UTF-8 expected, single
  * cell). The space at col 1 and content from col 2 onward survive
  * untouched. Cursor lands at col 1; the next held-\n flush moves
  * down to a fresh row. */
 static void tool_strip_overprint(const char *glyph_utf8)
 {
-    fputs("\r" ANSI_DIM_CYAN, stdout);
+    fputs("\r", stdout);
+    fputs(theme_open(THEME_CHROME_DIM), stdout);
     fputs(glyph_utf8, stdout);
     fputs(ANSI_RESET, stdout);
     fflush(stdout);

@@ -30,13 +30,22 @@
 #include "terminal/input.h"
 #include "terminal/interrupt.h"
 #include "terminal/notify.h"
+#include "terminal/theme.h"
 #include "terminal/ui.h"
 
 /* The ASCII fallback is used when locale_init_utf8() couldn't establish a
  * UTF-8 LC_CTYPE — wcwidth() under a non-UTF-8 locale would mis-account
- * the multibyte glyph and break cursor positioning. */
-#define PROMPT_UTF8  ANSI_BRIGHT_MAGENTA ANSI_BOLD "❯" ANSI_BOLD_OFF ANSI_FG_DEFAULT " "
-#define PROMPT_ASCII ANSI_BOLD ">" ANSI_BOLD_OFF " "
+ * the multibyte glyph and break cursor positioning. Composed at runtime
+ * (into `buf`) because the accent color comes from the active theme. */
+static const char *build_prompt(char *buf, size_t n)
+{
+    if (locale_have_utf8())
+        snprintf(buf, n, "%s" ANSI_BOLD "❯" ANSI_BOLD_OFF "%s ", theme_open(THEME_ACCENT),
+                 theme_close(THEME_ACCENT));
+    else
+        snprintf(buf, n, ANSI_BOLD ">" ANSI_BOLD_OFF " ");
+    return buf;
+}
 
 /* Outcome of absorb_aborted_turn — drives whether a caller adds a
  * fallback standalone [interrupted] marker.
@@ -463,7 +472,7 @@ static int on_event(const struct stream_event *ev, void *user)
          * RS_IDLE transition flushes md's tail if RS_TEXT was open, so
          * partial pre-error text appears just above the error line. */
         render_open_block(r);
-        disp_raw(ANSI_RED);
+        disp_raw(theme_open(THEME_ERROR));
         disp_printf(d, "[error: %s]", ev->u.error.message);
         disp_raw(ANSI_RESET);
         disp_putc(d, '\n');
@@ -552,7 +561,8 @@ static void show_transcript_cb(void *user)
  * it composes cleanly with whatever surrounded the call. */
 void agent_print_banner(const struct provider *p, const struct agent_session *s)
 {
-    const char *bar = ANSI_CYAN "▌" ANSI_FG_DEFAULT;
+    char bar[32];
+    snprintf(bar, sizeof(bar), "%s▌%s", theme_open(THEME_CHROME), theme_close(THEME_CHROME));
     /* Active preset stance, shown dim as a qualifier of hax itself
      * ("this is hax in review trim"). Load-bearing, not decoration: a
      * preset may have swapped the system prompt, and the name is the only
@@ -730,7 +740,7 @@ static void render_interrupt_marker(struct render_ctx *r)
 }
 
 /* Echo a stored user message exactly as the live editor repaints a
- * submitted one — the magenta "▌ " stripe + magenta wrapped body — so a
+ * submitted one — the accent "▌ " stripe + accent wrapped body — so a
  * replayed prompt is indistinguishable from one just typed. The editor
  * writes directly to stdout (bypassing disp), ending at column 0 of a
  * fresh row, so we resync disp afterward the same way agent_run does after
@@ -1392,7 +1402,8 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
      * ttys (becomes a no-op in that case). */
     interrupt_init();
 
-    const char *prompt = locale_have_utf8() ? PROMPT_UTF8 : PROMPT_ASCII;
+    char prompt_buf[64];
+    const char *prompt = build_prompt(prompt_buf, sizeof(prompt_buf));
 
     /* The render state in r (state + cluster sub-state) lives across
      * the inner loop so RS_CLUSTER can span consecutive silent tool

@@ -61,6 +61,8 @@ static const struct config_setting REGISTRY[] = {
      "Force content width in columns (default: terminal width, clamped)"},
     {"notify",                     "HAX_NOTIFY",                  NULL,
      "Desktop-notification style (auto-detected)"},
+    {"theme",                      "HAX_THEME",                   "auto",
+     "Color theme: auto, dark, light, ansi, off (auto detects from the terminal)"},
 
     /* behavior */
     {"keep_awake",                 "HAX_KEEP_AWAKE",              "1",

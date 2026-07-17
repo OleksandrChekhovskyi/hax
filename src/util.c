@@ -20,6 +20,7 @@
 #include "config.h"
 #include "provider.h"
 #include "terminal/ansi.h"
+#include "terminal/theme.h"
 #include "text/utf8.h"
 
 static int locale_utf8 = 0;
@@ -51,12 +52,14 @@ static void oom(void)
  * 2>&1 captures stay plain. */
 static void hax_diag(const char *color, const char *fmt, va_list ap)
 {
-    int tty = isatty(fileno(stderr));
-    if (tty)
+    /* An empty color (theme off / NO_COLOR) suppresses the closing reset
+     * too — no escapes at all on a colorless line. */
+    int styled = isatty(fileno(stderr)) && *color;
+    if (styled)
         fputs(color, stderr);
     fputs("hax: ", stderr);
     vfprintf(stderr, fmt, ap);
-    if (tty)
+    if (styled)
         fputs(ANSI_RESET, stderr);
     fputc('\n', stderr);
 }
@@ -65,7 +68,7 @@ void hax_err(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    hax_diag(ANSI_RED, fmt, ap);
+    hax_diag(theme_open(THEME_ERROR), fmt, ap);
     va_end(ap);
 }
 
@@ -73,7 +76,7 @@ void hax_warn(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    hax_diag(ANSI_YELLOW, fmt, ap);
+    hax_diag(theme_open(THEME_WARN), fmt, ap);
     va_end(ap);
 }
 

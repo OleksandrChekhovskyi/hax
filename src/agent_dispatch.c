@@ -14,6 +14,7 @@
 #include "render/spinner.h"
 #include "render/tool_render.h"
 #include "terminal/ansi.h"
+#include "terminal/theme.h"
 
 /* Return a pointer into `path` at the basename — last component after
  * the final '/'. Trailing slashes (`src/`) fall back to the full path
@@ -69,7 +70,7 @@ static void display_tool_header(struct disp *d, const struct item *call)
     }
 
     disp_block_separator(d);
-    disp_raw(ANSI_CYAN);
+    disp_raw(theme_open(THEME_CHROME));
     disp_printf(d, "[%s]", call->tool_name);
     disp_raw(ANSI_RESET);
 
@@ -157,19 +158,21 @@ static void display_tool_header(struct disp *d, const struct item *call)
 /* Silent-header writer for the start of a quiet line ("[read]
  * basename", "[bash] cmd"). NOT newline-terminated — the caller
  * leaves read lines open for coalescing and closes bash lines right
- * away. Dim throughout so quiet calls recede as exploration
- * breadcrumbs; the cyan brackets keep the tag scannable.
+ * away. Quiet throughout so these calls recede as exploration
+ * breadcrumbs; the chrome-styled brackets keep the tag scannable.
  *
  * Returns the line's cell count so far — exact cells, not bytes,
  * because it doubles as the parked spinner's cursor-restore column. */
 static int write_silent_header(struct disp *d, const struct item *call, const char *arg_text)
 {
     int used = 0;
-    disp_raw(ANSI_DIM ANSI_CYAN);
+    disp_raw(theme_open(THEME_CHROME_DIM));
     disp_printf(d, "[%s]", call->tool_name);
-    /* Switch back to default foreground but keep DIM in effect so the
-     * arg is dim too. ANSI_RESET would drop the dim attribute. */
-    disp_raw(ANSI_FG_DEFAULT);
+    /* The tag's quiet style comes from the role; the arg sits on the
+     * default foreground, where SGR dim is portable, so re-open it
+     * after the closer (which may clear intensity). */
+    disp_raw(theme_close(THEME_CHROME_DIM));
+    disp_raw(ANSI_DIM);
     used += 2 + (int)strlen(call->tool_name); /* "[name]", ASCII */
     disp_putc(d, ' ');
     used += 1;
@@ -337,12 +340,13 @@ void render_collapsed_tool_call(struct render_ctx *r, const struct item *call)
 {
     struct disp *d = &r->disp;
     const char *name = call->tool_name ? call->tool_name : "?";
-    /* Dim throughout so replayed calls recede as past context. Cyan tag
-     * keeps it scannable; ANSI_FG_DEFAULT drops the cyan but leaves DIM
-     * in effect for the arg (ANSI_RESET would clear dim too). */
-    disp_raw(ANSI_DIM ANSI_CYAN);
+    /* Quiet throughout so replayed calls recede as past context: the
+     * role styles the tag, SGR dim (portable on the default foreground)
+     * quiets the arg. */
+    disp_raw(theme_open(THEME_CHROME_DIM));
     disp_printf(d, "[%s]", name);
-    disp_raw(ANSI_FG_DEFAULT);
+    disp_raw(theme_close(THEME_CHROME_DIM));
+    disp_raw(ANSI_DIM);
 
     int tag_cost = 2 + (int)strlen(name) + 1; /* "[name] " */
     const struct tool *t = call->tool_name ? find_tool(call->tool_name) : NULL;

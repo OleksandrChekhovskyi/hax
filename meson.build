@@ -91,6 +91,7 @@ sources = files(
     'src/terminal/notify.c',
     'src/terminal/picker.c',
     'src/terminal/picker_core.c',
+    'src/terminal/theme.c',
     'src/terminal/ui.c',
 
     'src/text/utf8.c',

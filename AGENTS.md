@@ -84,6 +84,8 @@ Core modules and responsibilities:
   Providers opt in by setting `provider->catalog_id`; cost *estimation* lives in the agent
   layer (`agent_session_spend`), never in provider adapters.
 - `src/terminal/ansi.h` centralizes ANSI escape sequences; do not inline raw escape literals.
+  Colors go through the semantic roles in `src/terminal/theme.{c,h}` (presets resolved from the
+  `theme` config key at startup); bold/dim/italic attributes stay direct `ANSI_*`.
 
 When adding a compiled-in provider: add the source under `src/providers/`, list it in
 `meson.build`, declare its factory in `registry.h`, and insert it into `BUILTINS[]` in

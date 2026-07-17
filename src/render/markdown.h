@@ -19,9 +19,9 @@
  * non-alphanumeric byte on the left to open, so identifiers like
  * `compile_commands.json` and arithmetic like `5*3*7` stay literal.
  *
- * Output uses real italic for emphasis, cyan for inline code, dim for code
- * fences, and bold for headings. Inline-code and code-fence spans are
- * verbatim — no nested marker processing inside them.
+ * Output uses real italic for emphasis and the theme's code_inline,
+ * code_block, and heading styles (see terminal/theme.h). Inline-code and
+ * code-fence spans are verbatim — no nested marker processing inside them.
  *
  * Code-fence opener and closer follow CommonMark's count rule: a 4-backtick
  * fence isn't closed by a 3-backtick line, and a closer cannot have an info

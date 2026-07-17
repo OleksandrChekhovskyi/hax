@@ -13,6 +13,7 @@
 #include "util.h"
 #include "terminal/ansi.h"
 #include "terminal/input_core.h"
+#include "terminal/theme.h"
 #include "terminal/picker_core.h"
 #include "terminal/ui.h"
 #include "text/utf8.h"
@@ -271,8 +272,8 @@ static void render_search(struct buf *out, const struct picker_state *s, int col
 }
 
 /* A row is `label [ ✓ current ] [ <sep> detail ]` after the marker column:
- * the green "current" tag marks persistent state (deliberately distinct
- * from the moving magenta highlight), then the dim detail text, close to
+ * the ok-colored "current" tag marks persistent state (deliberately
+ * distinct from the moving accent highlight), then the dim detail text, close to
  * the label rather than flush-right. On a dim row the detail is a failure
  * reason and its separator becomes a spaced dash so the reason reads as an
  * annotation instead of blurring into the equally-dim label. The tag and
@@ -288,10 +289,10 @@ static void render_row(struct buf *out, const struct picker_state *s, size_t fi,
         row_cells = 1;
 
     if (selected)
-        buf_append_str(out, ANSI_BRIGHT_MAGENTA);
+        buf_append_str(out, theme_open(THEME_ACCENT));
     buf_append_str(out, selected ? (utf8 ? "\xe2\x86\x92 " : "> ") : "  "); /* → */
     if (selected)
-        buf_append_str(out, ANSI_FG_DEFAULT);
+        buf_append_str(out, theme_close(THEME_ACCENT));
 
     const char *tag = it->current ? (utf8 ? "\xe2\x9c\x93 current" : "* current") : NULL; /* ✓ */
     int tag_cells = tag ? (int)strlen("  * current") : 0; /* gap included */
@@ -325,9 +326,10 @@ static void render_row(struct buf *out, const struct picker_state *s, size_t fi,
         buf_append_str(out, ANSI_BOLD_OFF);
 
     if (tag) {
-        buf_append_str(out, "  " ANSI_GREEN);
+        buf_append_str(out, "  ");
+        buf_append_str(out, theme_open(THEME_OK));
         buf_append_str(out, tag);
-        buf_append_str(out, ANSI_FG_DEFAULT);
+        buf_append_str(out, theme_close(THEME_OK));
     }
     if (detail_cells) {
         buf_append_str(out, ANSI_DIM);

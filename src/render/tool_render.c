@@ -9,6 +9,7 @@
 #include "render/disp.h"
 #include "render/spinner.h"
 #include "terminal/ansi.h"
+#include "terminal/theme.h"
 #include "text/utf8.h"
 
 /* Head-only preview (file-content tools — read top-down). */
@@ -94,20 +95,27 @@ static int line_is_blank(const char *bytes, size_t len)
 
 /* ---- Status / row painting ---- */
 
-/* Strip glyphs in dim cyan: spinner (one cell, dynamic) for the live
- * status row, "┌" for the first permanent row, "│" for body rows,
+/* Strip glyphs in quiet chrome: spinner (one cell, dynamic) for the
+ * live status row, "┌" for the first permanent row, "│" for body rows,
  * marker rows, and post-status replacements. Each is followed by one
- * space to give content breathing room from the gutter. */
+ * space to give content breathing room from the gutter. Composed per
+ * call because the style comes from the active theme. */
+static void emit_gutter_strip(struct disp *d, const char *glyph_utf8)
+{
+    char strip[48];
+    int n = snprintf(strip, sizeof(strip), "%s%s " ANSI_RESET, theme_open(THEME_CHROME_DIM),
+                     glyph_utf8);
+    disp_write(d, strip, (size_t)n);
+}
+
 static void emit_first_strip(struct disp *d)
 {
-    static const char strip[] = ANSI_DIM_CYAN "\xE2\x94\x8C " ANSI_RESET;
-    disp_write(d, strip, sizeof(strip) - 1);
+    emit_gutter_strip(d, "\xE2\x94\x8C"); /* ┌ U+250C */
 }
 
 static void emit_body_strip(struct disp *d)
 {
-    static const char strip[] = ANSI_DIM_CYAN "\xE2\x94\x82 " ANSI_RESET;
-    disp_write(d, strip, sizeof(strip) - 1);
+    emit_gutter_strip(d, "\xE2\x94\x82"); /* │ U+2502 */
 }
 
 /* Emit the appropriate strip for the row about to be written. The
@@ -369,14 +377,15 @@ static void process_line(struct tool_render *r, const char *bytes, size_t len, i
  * Everything but the actual changed lines is dimmed, matching the rest
  * of the tool preview (head/tail rows are all ANSI_DIM): context
  * (space-prefixed) lines, "@@" hunk headers, "\ No newline" markers,
- * and the "--- "/"+++ " file headers. Only "+" additions (green) and
- * "-" removals (red) keep a full-brightness signal color.
+ * and the "--- "/"+++ " file headers. Only "+" additions and "-"
+ * removals keep a full-brightness signal color (the add/remove roles).
  *
  * The split matters for robustness: inside a hunk every line carries a
  * one-char prefix, so the prefix alone is the classifier and we never
  * re-test the "--- "/"+++ " header patterns. That keeps a removed
- * "-- x" (rendered "--- x") red and an added "++ x" (rendered "+++ x")
- * green, instead of mistaking either for a file header and dimming it.
+ * "-- x" (rendered "--- x") and an added "++ x" (rendered "+++ x")
+ * signal-colored, instead of mistaking either for a file header and
+ * dimming it.
  * The "@@" and "\ No newline" markers match up front in either
  * position — a hunk-body content line never starts with a bare
  * "@@"/"\" (it always carries a +/-/space prefix), so that's
@@ -389,9 +398,9 @@ static const char *diff_line_color(const char *line, size_t len, int in_hunk)
         return ANSI_DIM;
     if (in_hunk) {
         if (len >= 1 && line[0] == '+')
-            return ANSI_GREEN;
+            return theme_open(THEME_ADD);
         if (len >= 1 && line[0] == '-')
-            return ANSI_RED;
+            return theme_open(THEME_REMOVE);
         return ANSI_DIM; /* context (space-prefixed) line */
     }
     /* Before the first hunk: file headers, then fall back to prefix
@@ -400,9 +409,9 @@ static const char *diff_line_color(const char *line, size_t len, int in_hunk)
     if (len >= 4 && (memcmp(line, "--- ", 4) == 0 || memcmp(line, "+++ ", 4) == 0))
         return ANSI_DIM;
     if (len >= 1 && line[0] == '+')
-        return ANSI_GREEN;
+        return theme_open(THEME_ADD);
     if (len >= 1 && line[0] == '-')
-        return ANSI_RED;
+        return theme_open(THEME_REMOVE);
     return ANSI_DIM;
 }
 
@@ -431,8 +440,8 @@ static void emit_diff_line(struct tool_render *r, const char *line, size_t len)
     if (!r->started)
         spinner_hide(r->spinner);
     emit_strip_for_next_row(r);
-    /* Every diff line gets a color: green/red for the changed lines,
-     * dim for everything else (context, headers, markers). */
+    /* Every diff line gets a color: the add/remove roles for the changed
+     * lines, dim for everything else (context, headers, markers). */
     disp_raw(diff_line_color(line, len, r->diff_in_hunk));
     char *trimmed = truncate_line(line, content_budget());
     disp_write(r->disp, trimmed, strlen(trimmed));

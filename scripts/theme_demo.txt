@@ -1,0 +1,48 @@
+# Mock provider script: a one-message tour of every semantic color role
+# (see src/terminal/theme.h), for eyeballing theme presets quickly:
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/theme_demo.txt build/hax
+#   HAX_THEME=dark  HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/theme_demo.txt build/hax
+#   HAX_THEME=light HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/theme_demo.txt build/hax
+#   ... and ansi / off. `auto` (the default) detects from the terminal.
+#
+# Type any message at the prompt; the whole sequence plays as one agentic
+# chain (every turn but the last ends in a tool call). The typed message
+# itself demos the accent role (prompt marker + user-message stripe).
+#
+# Not coverable from a script: the error/warn roles (hax_err/hax_warn and
+# stream errors) — provoke those with a bad config or ctrl-c instead.
+#
+# DSL recap (full spec in src/providers/mock.c):
+#   text <msg> / tool <name> <json> / delay <ms> / usage ... / end-turn
+
+# ---------- turn 1: markdown roles + a loud tool block --------------------
+# Heading role (bold + themed color), emphasis, italics, code_inline,
+# code_block (the fence), muted list bullets, and a thematic break.
+text ## Theme demo — heading role\n\nInline styles: **bold emphasis**, *italics*, and `code_inline` spans. A fenced block gets the code_block role:\n\n```c\nint main(void)\n{\n    return 0; /* code_block, not muted */\n}\n```\n\n- muted bullet, `code_inline` again\n- chrome: the `[bash]` tag and gutter strip below\n\n---\n\nNow a loud tool call:
+tool bash {"command":"printf 'tool output row one (muted)\\ntool output row two (muted)\\n'"}
+usage in=400 out=40
+end-turn
+
+# ---------- turn 2: scratch file for the diff ----------------------------
+text Seeding a scratch file, then editing it to show the add/remove diff roles:
+tool bash {"command":"mkdir -p {{CWD}}/.hax-themedemo && printf 'alpha\\nbeta\\ngamma\\n' > {{CWD}}/.hax-themedemo/demo.txt"}
+end-turn
+
+# ---------- turn 3: the diff (add + remove + muted context) ---------------
+tool edit {"path":"{{CWD}}/.hax-themedemo/demo.txt","old_string":"beta","new_string":"BETA"}
+end-turn
+
+# ---------- turn 4: quiet tool header (dim chrome tag) --------------------
+text A quiet read next — its dim chrome `[read]` tag should recede:
+tool read {"path":"{{CWD}}/.hax-themedemo/demo.txt"}
+end-turn
+
+# ---------- turn 5: table (bold header, muted rules), cleanup -------------
+text A table exercises bold header cells and muted column rules:\n\n| role | marks |\n|------|-------|\n| accent | prompt `❯`, user stripe |\n| chrome | tool tags, gutter strips |\n| code_block | fenced code bodies |\n\nCleaning up the scratch dir:
+tool bash {"command":"rm -rf {{CWD}}/.hax-themedemo"}
+end-turn
+
+# ---------- turn 6: close the chain ---------------------------------------
+text Done. Re-run under `HAX_THEME=dark`, `light`, `ansi`, or `off` to compare — the picker arrow (`/model`) and transcript user text (ctrl-t) also carry the accent role.
+end-turn
