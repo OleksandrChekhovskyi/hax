@@ -2,6 +2,7 @@
 #include "compact.h"
 
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "agent_core.h"
@@ -18,7 +19,7 @@
  * reference agents (opencode/pi): fixed sections, terse bullets, preserve
  * exact identifiers. The leading no-tools / output-only framing matters for
  * weaker local models that will otherwise try to keep working the task. */
-const char *const COMPACT_PROMPT =
+static const char *const COMPACT_PROMPT =
     "Summarize the conversation so far into a structured context checkpoint that lets the "
     "work continue without access to the full history above.\n"
     "\n"
@@ -59,7 +60,7 @@ const char *const COMPACT_PROMPT =
     "- Preserve exact file paths, function names, commands, and error strings.\n"
     "- Do not mention that a summary was produced or that context was compacted.";
 
-const char *const COMPACT_SEED_PREAMBLE =
+static const char *const COMPACT_SEED_PREAMBLE =
     "The earlier part of this conversation was condensed to free up context. The summary "
     "below captures everything that happened before this point — treat it as established "
     "context and continue the work from here.";
@@ -111,7 +112,7 @@ long compact_context_limit(const struct provider *p, const char *model)
     return 0;
 }
 
-char *compact_build_prompt(const char *instructions)
+static char *compact_build_prompt(const char *instructions)
 {
     if (instructions && *instructions)
         return xasprintf("%s\n\nAdditional focus for this summary:\n%s", COMPACT_PROMPT,
@@ -119,12 +120,12 @@ char *compact_build_prompt(const char *instructions)
     return xstrdup(COMPACT_PROMPT);
 }
 
-char *compact_build_seed(const char *summary)
+static char *compact_build_seed(const char *summary)
 {
     return xasprintf("%s\n\n%s", COMPACT_SEED_PREAMBLE, summary);
 }
 
-char *compact_extract_summary(const struct item *items, size_t n)
+static char *compact_extract_summary(const struct item *items, size_t n)
 {
     const char *found = NULL;
     for (size_t i = 0; i < n; i++) {
@@ -134,13 +135,23 @@ char *compact_extract_summary(const struct item *items, size_t n)
     return found ? xstrdup(found) : NULL;
 }
 
-void compact_usage_init(struct compact_usage *cu)
+#define COMPACT_ATTEMPTS_MAX 8
+struct compact_usage {
+    struct {
+        struct stream_usage u;
+        long ms;
+    } att[COMPACT_ATTEMPTS_MAX];
+    int n;
+    long t0;
+};
+
+static void compact_usage_init(struct compact_usage *cu)
 {
     cu->n = 0;
     cu->t0 = monotonic_ms();
 }
 
-void compact_usage_record(struct compact_usage *cu, const struct stream_usage *u)
+static void compact_usage_record(struct compact_usage *cu, const struct stream_usage *u)
 {
     long now = monotonic_ms();
     if (cu->n < COMPACT_ATTEMPTS_MAX) {
@@ -172,9 +183,9 @@ static void req_push(struct item **req, size_t *n, size_t *cap, struct item it)
     (*req)[(*n)++] = it;
 }
 
-char *compact_summarize(const struct agent_session *s, struct provider *p, const char *instructions,
-                        struct turn *t, stream_cb cb, void *cb_user, http_tick_cb tick,
-                        void *tick_user, int *attempts)
+static char *compact_summarize(const struct agent_session *s, struct provider *p,
+                               const char *instructions, struct turn *t, stream_cb cb,
+                               void *cb_user, http_tick_cb tick, void *tick_user, int *attempts)
 {
     /* The request is the live history plus a synthetic trailing user message
      * carrying the summarization prompt. Tools ARE advertised so the cached
@@ -268,8 +279,8 @@ char *compact_summarize(const struct agent_session *s, struct provider *p, const
     return summary;
 }
 
-void compact_apply(struct agent_session *s, struct session_log *slog, struct transcript_log *tlog,
-                   const char *summary)
+static void compact_apply(struct agent_session *s, struct session_log *slog,
+                          struct transcript_log *tlog, const char *summary)
 {
     char *seed = compact_build_seed(summary);
     agent_session_reset(s);
@@ -283,4 +294,107 @@ void compact_apply(struct agent_session *s, struct session_log *slog, struct tra
     session_log_append(slog, s->items, s->n_items);
     /* Bash temp files referenced by the discarded turns are now unreachable. */
     bash_cleanup_tempfiles();
+}
+
+struct compact_sink {
+    struct turn assembly;
+    struct compact_usage usage;
+    const struct compact_hooks *hooks;
+    char *error_message;
+};
+
+static int compact_sink_on_event(const struct stream_event *ev, void *user)
+{
+    struct compact_sink *sink = user;
+    const struct stream_usage *usage = NULL;
+
+    if (ev->kind == EV_DONE) {
+        usage = &ev->u.done.usage;
+    } else if (ev->kind == EV_ERROR) {
+        if (!sink->error_message)
+            sink->error_message =
+                xstrdup(ev->u.error.message ? ev->u.error.message : "stream failed");
+        usage = ev->u.error.usage;
+    }
+    if (usage)
+        compact_usage_record(&sink->usage, usage);
+    if (sink->hooks->observe)
+        sink->hooks->observe(ev, sink->hooks->user);
+    turn_on_event(ev, &sink->assembly);
+    return 0;
+}
+
+static void compact_flush_logs(const struct compact_params *params)
+{
+    transcript_log_append(params->tlog, params->session->items, params->session->n_items);
+    session_log_append(params->slog, params->session->items, params->session->n_items);
+}
+
+static void compact_add_usage(const struct compact_params *params,
+                              const struct compact_usage *usage, int from, int to)
+{
+    for (int i = from; i < to; i++)
+        agent_session_add_turn_usage(params->session, params->provider, &usage->att[i].u,
+                                     usage->att[i].ms);
+}
+
+void compact_run(const struct compact_params *params, struct compact_result *result)
+{
+    memset(result, 0, sizeof(*result));
+    if (!params->provider) {
+        result->outcome = COMPACT_NO_PROVIDER;
+        return;
+    }
+    if (!params->session->model || !params->session->model[0]) {
+        result->outcome = COMPACT_NO_MODEL;
+        return;
+    }
+    if (params->session->n_items == 0) {
+        result->outcome = COMPACT_EMPTY;
+        return;
+    }
+
+    struct compact_sink sink = {.hooks = &params->hooks};
+    turn_init(&sink.assembly);
+    compact_usage_init(&sink.usage);
+    char *summary = compact_summarize(params->session, params->provider, params->instructions,
+                                      &sink.assembly, compact_sink_on_event, &sink,
+                                      params->hooks.tick, params->hooks.user, &result->attempts);
+    int cancelled = params->hooks.cancelled && params->hooks.cancelled(params->hooks.user);
+    if (cancelled) {
+        free(summary);
+        summary = NULL;
+    }
+    turn_reset(&sink.assembly);
+    result->error_message = sink.error_message;
+
+    if (!summary || !summary[0]) {
+        compact_add_usage(params, &sink.usage, 0, sink.usage.n);
+        compact_flush_logs(params);
+        free(summary);
+        if (cancelled)
+            result->outcome = COMPACT_CANCELLED;
+        else if (result->error_message)
+            result->outcome = COMPACT_PROVIDER_ERROR;
+        else
+            result->outcome = COMPACT_NO_SUMMARY;
+        return;
+    }
+
+    /* Rejected attempts belong to the old history; the accepted attempt's
+     * footer follows the compact seed in the rotated logs. */
+    int accepted = sink.usage.n > 0 ? sink.usage.n - 1 : 0;
+    compact_add_usage(params, &sink.usage, 0, accepted);
+    compact_flush_logs(params);
+    compact_apply(params->session, params->slog, params->tlog, summary);
+    free(summary);
+    compact_add_usage(params, &sink.usage, accepted, sink.usage.n);
+    compact_flush_logs(params);
+    result->outcome = COMPACT_COMPLETE;
+}
+
+void compact_result_destroy(struct compact_result *result)
+{
+    free(result->error_message);
+    result->error_message = NULL;
 }

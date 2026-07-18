@@ -13,48 +13,27 @@
 #include "config.h"
 #include "session.h"
 #include "transcript.h"
-#include "turn.h"
 #include "util.h"
 #include "terminal/ansi.h"
 
-/* Compaction may make several provider attempts internally, so it keeps a
- * dedicated sink for per-attempt spend and usage footers. Normal continuation
- * uses agent_loop_run. */
+/* Compaction attempts count toward the one-shot exit spend just like normal
+ * turns. History mutation and footer capture stay inside compact_run. */
 struct oneshot_compact_ctx {
-    struct turn *turn;
-    char *error_msg; /* malloc'd; set on EV_ERROR */
-    /* Run-level spend accumulator (borrowed): every terminal event this
-     * sink sees is accounted directly, so a multi-attempt compaction
-     * stream (reject-and-retry on a stray tool call) bills every attempt
-     * into the exit summary. Records carry the catalog stamp below and
-     * are priced against the catalog at exit. */
     struct spend_totals *costs;
     const char *catalog_id;
     const char *model;
-    /* Per-attempt usage capture for the compaction footers; NULL on
-     * normal rounds (the main loop emits those footers itself). */
-    struct compact_usage *cap;
 };
 
 static int compact_on_event(const struct stream_event *ev, void *user)
 {
-    struct oneshot_compact_ctx *oc = user;
-    const struct stream_usage *u = NULL;
-    if (ev->kind == EV_ERROR) {
-        if (!oc->error_msg && ev->u.error.message)
-            oc->error_msg = xstrdup(ev->u.error.message);
-        /* A truncated response reports its usage on the error — billed
-         * like a complete one. */
-        u = ev->u.error.usage;
-    } else if (ev->kind == EV_DONE) {
-        u = &ev->u.done.usage;
-    }
-    if (u) {
-        spend_account(oc->costs, u, oc->catalog_id, oc->model);
-        if (oc->cap)
-            compact_usage_record(oc->cap, u);
-    }
-    turn_on_event(ev, oc->turn);
+    struct oneshot_compact_ctx *ctx = user;
+    const struct stream_usage *usage = NULL;
+    if (ev->kind == EV_DONE)
+        usage = &ev->u.done.usage;
+    else if (ev->kind == EV_ERROR)
+        usage = ev->u.error.usage;
+    if (usage)
+        spend_account(ctx->costs, usage, ctx->catalog_id, ctx->model);
     return 0;
 }
 
@@ -77,56 +56,27 @@ static void print_assistant_text(const struct item *items, size_t from, size_t t
     }
 }
 
-/* Summarize history into a single seed message in place — the non-interactive
- * twin of agent.c's agent_compact. No display, no tick, no Esc handling: a
- * summarization request, then history is replaced and both logs
- * rotate to fresh files (seeded /new). Returns 1 if compacted, 0 on
- * empty/failure (history left intact); either way *costs accumulates the
- * spend of the summarization round-trips (reported and unreported alike),
- * so the exit stats bill compaction like any other request. Used between
- * round-trips so a long agentic `-p` run survives its own context growth. */
-static int oneshot_compact(struct agent_session *s, struct provider *p, struct session_log *slog,
-                           struct transcript_log *tlog, struct spend_totals *costs)
+static int oneshot_compact(struct agent_session *session, struct provider *provider,
+                           struct session_log *slog, struct transcript_log *tlog,
+                           struct spend_totals *costs)
 {
-    if (s->n_items == 0)
-        return 0;
-
-    struct turn t;
-    turn_init(&t);
-    /* Reuse the normal sink (feeds the turn, captures any error); no tick,
-     * no display. */
-    struct compact_usage cap;
-    compact_usage_init(&cap);
-    struct oneshot_compact_ctx oc = {
-        .turn = &t, .costs = costs, .catalog_id = p->catalog_id, .model = s->model, .cap = &cap};
-    char *summary = compact_summarize(s, p, NULL, &t, compact_on_event, &oc, NULL, NULL, NULL);
-    free(oc.error_msg);
-    turn_reset(&t);
-
-    if (!summary || !summary[0]) {
-        /* Failed summarize: the completed/billed attempts still owe their
-         * footers into the intact history — same rationale as
-         * agent_compact's failure path. */
-        for (int i = 0; i < cap.n; i++)
-            agent_session_add_turn_usage(s, p, &cap.att[i].u, cap.att[i].ms);
-        agent_loop_flush_logs(tlog, slog, s->items, s->n_items);
-        free(summary);
-        return 0;
-    }
-
-    /* Rejected attempts' footers land in the old history before the
-     * rotation (archived in the outgoing session file); the successful
-     * attempt's follows the seed it produced — same shape as
-     * agent_compact's. */
-    for (int i = 0; i + 1 < cap.n; i++)
-        agent_session_add_turn_usage(s, p, &cap.att[i].u, cap.att[i].ms);
-    agent_loop_flush_logs(tlog, slog, s->items, s->n_items);
-    compact_apply(s, slog, tlog, summary);
-    free(summary);
-    if (cap.n > 0)
-        agent_session_add_turn_usage(s, p, &cap.att[cap.n - 1].u, cap.att[cap.n - 1].ms);
-    agent_loop_flush_logs(tlog, slog, s->items, s->n_items);
-    return 1;
+    struct oneshot_compact_ctx ctx = {
+        .costs = costs,
+        .catalog_id = provider->catalog_id,
+        .model = session->model,
+    };
+    struct compact_params params = {
+        .session = session,
+        .provider = provider,
+        .slog = slog,
+        .tlog = tlog,
+        .hooks = {.user = &ctx, .observe = compact_on_event},
+    };
+    struct compact_result result;
+    compact_run(&params, &result);
+    int compacted = result.outcome == COMPACT_COMPLETE;
+    compact_result_destroy(&result);
+    return compacted;
 }
 
 struct oneshot_loop_ctx {

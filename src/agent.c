@@ -19,7 +19,6 @@
 #include "slash.h"
 #include "tool.h"
 #include "transcript.h"
-#include "turn.h"
 #include "util.h"
 #include "render/disp.h"
 #include "render/markdown.h"
@@ -139,6 +138,22 @@ static int reasoning_visible(void)
 double agent_session_spend(const struct session_stats *t, int *approx)
 {
     return spend_total(&t->spend, approx);
+}
+
+/* Request counts and window snapshots stay with callers because compaction
+ * accounts them differently from ordinary continuation turns. */
+static void stats_account_usage(struct session_stats *stats, const struct stream_usage *usage,
+                                const char *catalog_id, const char *model)
+{
+    if (usage->input_tokens >= 0)
+        stats->input_tokens += usage->input_tokens;
+    if (usage->output_tokens >= 0)
+        stats->output_tokens += usage->output_tokens;
+    if (usage->cached_tokens > 0)
+        stats->cached_tokens += usage->cached_tokens;
+    if (usage->cache_write_tokens > 0)
+        stats->cache_write_tokens += usage->cache_write_tokens;
+    spend_account(&stats->spend, usage, catalog_id, model);
 }
 
 /* Dim per-user-turn stats line: "42s · 8.9k / 256k (3%) · $0.042",
@@ -996,58 +1011,42 @@ void agent_fork(struct agent_state *st, size_t turn)
     reshape_after_cut(st, cut, turn, "forked");
 }
 
-/* Event sink for the summary stream: feed the turn assembler, capture any
- * error, and account the round-trips into the session totals. Deliberately
- * renders nothing — the summary is drawn as a spinner-only operation and
- * surfaced as a one-line notice, not streamed as a normal assistant answer. */
+/* Compaction events render only through the spinner, but their usage still
+ * contributes to /session totals. History assembly and footer capture belong
+ * to compact_run. */
 struct compact_ev {
-    struct turn *turn;
-    char *err;                   /* owned; set from EV_ERROR */
-    struct session_stats *stats; /* accounted into on terminal events */
-    /* Catalog stamp for the spend records (borrowed from the live
-     * provider/session for the duration of the stream). */
+    struct session_stats *stats;
+    struct render_ctx *render;
     const char *catalog_id;
     const char *model;
-    /* Per-attempt usage for the compaction footers (compact.h). */
-    struct compact_usage cap;
 };
 
 static int compact_on_event(const struct stream_event *ev, void *user)
 {
     struct compact_ev *ce = user;
-    if (ev->kind == EV_ERROR && !ce->err)
-        ce->err = xstrdup(ev->u.error.message ? ev->u.error.message : "stream failed");
-    /* Compaction round-trips are real model requests, so their usage
-     * counts into /session's totals (token sums, spend) exactly like the
-     * main loop's. The *request count* is NOT tallied here: a
-     * user-cancelled attempt emits no terminal event at all, so
-     * agent_compact takes it from compact_summarize's attempts counter
-     * instead. The window snapshot (last_ctx) is deliberately not
-     * touched: the summarize request's input spans the full
-     * pre-compaction history plus prompt, which would misstate the
-     * post-compaction window until the next turn reports the real one. */
-    const struct stream_usage *u = NULL;
+    const struct stream_usage *usage = NULL;
     if (ev->kind == EV_DONE)
-        u = &ev->u.done.usage;
+        usage = &ev->u.done.usage;
     else if (ev->kind == EV_ERROR)
-        u = ev->u.error.usage; /* billed pre-failure usage, when reported */
-    if (ce->stats && u) {
-        if (u->input_tokens >= 0)
-            ce->stats->input_tokens += u->input_tokens;
-        if (u->output_tokens >= 0)
-            ce->stats->output_tokens += u->output_tokens;
-        if (u->cached_tokens > 0)
-            ce->stats->cached_tokens += u->cached_tokens;
-        if (u->cache_write_tokens > 0)
-            ce->stats->cache_write_tokens += u->cache_write_tokens;
-        spend_account(&ce->stats->spend, u, ce->catalog_id, ce->model);
-    }
-    /* u is non-NULL for every EV_DONE and for billed EV_ERRORs — exactly
-     * the terminal events that owe a transcript footer. */
-    if (u)
-        compact_usage_record(&ce->cap, u);
-    turn_on_event(ev, ce->turn);
+        usage = ev->u.error.usage;
+    if (!usage)
+        return 0;
+
+    stats_account_usage(ce->stats, usage, ce->catalog_id, ce->model);
     return 0;
+}
+
+static int compact_tick(void *user)
+{
+    struct compact_ev *ce = user;
+    return agent_stream_tick(ce->render);
+}
+
+static int compact_cancelled(void *user)
+{
+    (void)user;
+    interrupt_settle();
+    return interrupt_requested();
 }
 
 /* Draw a dim, out-of-band "── … ──" status line for compaction. */
@@ -1102,88 +1101,72 @@ int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
      * so it lands on a clean line regardless of entry point. */
     render_transition(r, RS_IDLE);
 
-    /* Spinner-only stream — mirror the main loop's begin/stream/close, but
-     * with no per-event rendering and a "compacting..." label. compact_on_event
-     * feeds the turn and captures usage / the error message for the notice. */
+    /* Spinner-only stream: compact_run owns event assembly and the history
+     * transaction; this wrapper supplies presentation, cancellation, and
+     * session accounting. */
     render_stream_begin(r);
     spinner_set_label(r->spinner, "compacting", "compacting...");
-
-    struct turn t;
-    turn_init(&t);
     struct compact_ev ce = {
-        .turn = &t, .stats = &st->stats, .catalog_id = p->catalog_id, .model = s->model};
-    compact_usage_init(&ce.cap);
+        .stats = &st->stats,
+        .render = r,
+        .catalog_id = p->catalog_id,
+        .model = s->model,
+    };
+    struct compact_params params = {
+        .session = s,
+        .provider = p,
+        .slog = st->slog,
+        .tlog = st->tlog,
+        .instructions = instructions,
+        .hooks =
+            {
+                .user = &ce,
+                .observe = compact_on_event,
+                .tick = compact_tick,
+                .cancelled = compact_cancelled,
+            },
+    };
 
     interrupt_clear();
     interrupt_arm();
-    int attempts = 0;
-    char *summary = compact_summarize(s, p, instructions, &t, compact_on_event, &ce,
-                                      agent_stream_tick, r, &attempts);
-    /* Counted by compact_summarize, not the event sink: a cancelled
-     * attempt aborts the transfer without any terminal event, but it
-     * still hit the backend and /session's "requests" counts it, same
-     * as the main loop's post-stream unconditional increment. */
-    st->stats.requests += attempts;
-    interrupt_settle();
-    int cancelled = interrupt_requested();
+    struct compact_result result;
+    compact_run(&params, &result);
+    /* Cancelled attempts emit no terminal event, so the transaction reports
+     * the authoritative request count separately from usage observation. */
+    st->stats.requests += result.attempts;
     interrupt_disarm();
-
     render_transition(r, RS_IDLE);
 
-    /* A cancel surfaces as resp.cancelled (not EV_ERROR), so compact_summarize
-     * may have returned a partial summary — discard it. */
-    if (cancelled) {
-        free(summary);
-        summary = NULL;
+    int compacted = result.outcome == COMPACT_COMPLETE;
+    switch (result.outcome) {
+    case COMPACT_COMPLETE:
+        compact_notice(r, "conversation compacted");
+        break;
+    case COMPACT_CANCELLED:
+        compact_notice(r, "compaction cancelled");
+        break;
+    case COMPACT_PROVIDER_ERROR:
+        compact_notice(r, "compaction failed: %s",
+                       result.error_message ? result.error_message : "stream failed");
+        break;
+    case COMPACT_NO_SUMMARY:
+        compact_notice(r, "compaction produced no summary");
+        break;
+    case COMPACT_NO_PROVIDER:
+        if (!is_auto)
+            compact_notice(r, "no provider selected — use /provider");
+        break;
+    case COMPACT_NO_MODEL:
+        if (!is_auto)
+            compact_notice(r, "no model selected — use /model (or /provider)");
+        break;
+    case COMPACT_EMPTY:
+        if (!is_auto)
+            compact_notice(r, "nothing to compact");
+        break;
     }
-
-    if (!summary || !summary[0]) {
-        if (cancelled)
-            compact_notice(r, "compaction cancelled");
-        else if (ce.err)
-            compact_notice(r, "compaction failed: %s", ce.err);
-        else
-            compact_notice(r, "compaction produced no summary");
-        /* Attempts that completed (or billed a truncation) before the
-         * failure still owe their footers — one per usage-bearing
-         * terminal event, matching the session totals the sink already
-         * fed. History is untouched, so they trail the last turn's
-         * content; a cancelled attempt recorded nothing and emits
-         * nothing. */
-        for (int i = 0; i < ce.cap.n; i++)
-            agent_session_add_turn_usage(s, p, &ce.cap.att[i].u, ce.cap.att[i].ms);
-        agent_loop_flush_logs(st->tlog, st->slog, s->items, s->n_items);
-        free(summary);
-        free(ce.err);
-        turn_reset(&t);
-        return 0;
-    }
-    free(ce.err);
-    turn_reset(&t);
-
-    /* Rejected attempts (the model answered with a tool call and was
-     * re-asked) were complete, billed requests: their footers land in the
-     * OLD history before the rotation, durably archived in the outgoing
-     * session file (the transcript mirror is truncated by the rotation
-     * moments later). */
-    for (int i = 0; i + 1 < ce.cap.n; i++)
-        agent_session_add_turn_usage(s, p, &ce.cap.att[i].u, ce.cap.att[i].ms);
-    agent_loop_flush_logs(st->tlog, st->slog, s->items, s->n_items);
-
-    compact_apply(s, st->slog, st->tlog, summary);
-    free(summary);
-
-    /* The successful attempt was likely the most expensive request of the
-     * session (it resent the full context), so it earns its footer like
-     * any round-trip — appended after the seed it produced, into the
-     * rotated logs. */
-    if (ce.cap.n > 0)
-        agent_session_add_turn_usage(s, p, &ce.cap.att[ce.cap.n - 1].u,
-                                     ce.cap.att[ce.cap.n - 1].ms);
-    agent_loop_flush_logs(st->tlog, st->slog, s->items, s->n_items);
-
-    compact_notice(r, "conversation compacted");
-    return 1;
+    compact_result_destroy(&result);
+    return compacted;
 }
 
 struct repl_loop_ctx {
@@ -1226,15 +1209,7 @@ static void repl_loop_turn_end(const struct agent_loop_turn *loop_turn, void *us
         stats->last_ctx = usage->input_tokens + usage->output_tokens;
         stats->last_limit = compact_context_limit(provider, session->model);
     }
-    if (usage->input_tokens >= 0)
-        stats->input_tokens += usage->input_tokens;
-    if (usage->output_tokens >= 0)
-        stats->output_tokens += usage->output_tokens;
-    if (usage->cached_tokens > 0)
-        stats->cached_tokens += usage->cached_tokens;
-    if (usage->cache_write_tokens > 0)
-        stats->cache_write_tokens += usage->cache_write_tokens;
-    spend_account(&stats->spend, usage, provider->catalog_id, session->model);
+    stats_account_usage(stats, usage, provider->catalog_id, session->model);
 }
 
 static int repl_loop_checkpoint(void *user)
