@@ -13,7 +13,7 @@
 #include "util.h"
 
 /* Stand-in tool symbols for the link. agent_core's TOOLS[] references
- * &TOOL_READ / &TOOL_BASH / &TOOL_WRITE / &TOOL_EDIT, so the test binary
+ * &TOOL_READ / &TOOL_EDIT / &TOOL_WRITE / &TOOL_BASH, so the test binary
  * needs definitions to satisfy the linker. We fill in just enough for
  * find_tool's name lookup; .run is never invoked in these tests. */
 static char *stub_run(const char *args, tool_emit_display_fn emit, void *user)
@@ -25,9 +25,9 @@ static char *stub_run(const char *args, tool_emit_display_fn emit, void *user)
 }
 
 const struct tool TOOL_READ = {.def = {.name = "read"}, .run = stub_run};
-const struct tool TOOL_BASH = {.def = {.name = "bash"}, .run = stub_run};
-const struct tool TOOL_WRITE = {.def = {.name = "write"}, .run = stub_run};
 const struct tool TOOL_EDIT = {.def = {.name = "edit"}, .run = stub_run};
+const struct tool TOOL_WRITE = {.def = {.name = "write"}, .run = stub_run};
+const struct tool TOOL_BASH = {.def = {.name = "bash"}, .run = stub_run};
 
 /* ---------- items_append ---------- */
 

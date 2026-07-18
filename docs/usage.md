@@ -178,7 +178,7 @@ Unless `--raw` is used, hax sends:
 2. an Environment section with working/home directories, operating system, command shell,
    model, Git root, and command preferences;
 3. discovered `AGENTS.md` files and skill descriptions; and
-4. tool schemas for `read`, `bash`, `write`, and `edit`.
+4. tool schemas for `read`, `edit`, `write`, and `bash`.
 
 `HAX_SYSTEM_PROMPT=""` omits only the system message; tools still remain available. `--raw`
 omits the system prompt, Environment section, AGENTS.md/skills, and tools.

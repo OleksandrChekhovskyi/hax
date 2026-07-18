@@ -16,7 +16,7 @@
  * agent_env_build_suffix; the assembled string is sent to the provider. */
 static const char DEFAULT_SYSTEM_PROMPT[] =
     "You are hax, a minimalist coding assistant running in the user's terminal. "
-    "You have access to `read`, `bash`, `write`, and `edit` tools.\n"
+    "You have access to `read`, `edit`, `write`, and `bash` tools.\n"
     "\n"
     "Prefer action over explanation: when a question can be answered by running a "
     "command or reading a file, do so. Be concise: no filler, no trailing "
@@ -56,9 +56,9 @@ static const char DEFAULT_SYSTEM_PROMPT[] =
  * list with one decision in agent_session_init. */
 static const struct tool *const TOOLS[] = {
     &TOOL_READ,
-    &TOOL_BASH,
-    &TOOL_WRITE,
     &TOOL_EDIT,
+    &TOOL_WRITE,
+    &TOOL_BASH,
 };
 static const size_t N_TOOLS = sizeof(TOOLS) / sizeof(TOOLS[0]);
 

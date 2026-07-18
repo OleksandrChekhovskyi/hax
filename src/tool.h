@@ -86,9 +86,9 @@ struct tool {
 };
 
 extern const struct tool TOOL_READ;
-extern const struct tool TOOL_BASH;
-extern const struct tool TOOL_WRITE;
 extern const struct tool TOOL_EDIT;
+extern const struct tool TOOL_WRITE;
+extern const struct tool TOOL_BASH;
 
 /* Unlink and forget every bash temp file we still hold — `bash` keeps
  * the file when output truncates so the model can `read` it on the next
