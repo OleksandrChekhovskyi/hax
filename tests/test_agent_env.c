@@ -11,36 +11,27 @@
 #include "harness.h"
 #include "util.h"
 
-/* Each test stages a fresh tmpdir tree, chdirs into it, runs
- * agent_env_build_suffix(), then chdirs back and rm -rfs the tree. We also pin
+/* Each test stages a fresh tmpdir tree (harness-cleaned at exit), chdirs into
+ * it, runs agent_env_build_suffix(), then chdirs back. We also pin
  * HOME and XDG_CONFIG_HOME inside the sandbox so the developer's real
  * ~/.config/hax/AGENTS.md doesn't leak into test output, and clear the
  * HAX_NO_* knobs unless a test sets them deliberately. */
 
 struct sandbox {
-    char *root;     /* mkdtemp result; everything else lives under this */
+    char *root;     /* resolved t_tempdir; everything else lives under this */
     char *prev_cwd; /* cwd to restore on cleanup */
 };
 
 static void sb_init(struct sandbox *s)
 {
     s->prev_cwd = getcwd(NULL, 0);
-    s->root = xstrdup("/tmp/hax-env-test-XXXXXX");
-    if (!mkdtemp(s->root)) {
-        FAIL("mkdtemp: %s", strerror(errno));
-        free(s->root);
-        s->root = NULL;
-        return;
-    }
+    char *tmp = t_tempdir();
     /* Resolve symlinks: macOS `/tmp` is a symlink to `/private/tmp`, so
-     * mkdtemp returns `/tmp/...` while getcwd after chdir returns
+     * t_tempdir returns `/tmp/...` while getcwd after chdir returns
      * `/private/tmp/...`. Anything that compares the two byte-for-byte
      * (collapse_home, HOME-prefix matching) needs them to agree. */
-    char *real = realpath(s->root, NULL);
-    if (real) {
-        free(s->root);
-        s->root = real;
-    }
+    char *real = realpath(tmp, NULL);
+    s->root = real ? real : xstrdup(tmp);
     /* Point HOME and XDG_CONFIG_HOME at the sandbox so global AGENTS.md
      * lookups don't escape it. Tests that want a global file create it
      * under $HOME/.config/hax/AGENTS.md. */
@@ -63,13 +54,7 @@ static void sb_free(struct sandbox *s)
             FAIL("chdir(prev_cwd=%s): %s", s->prev_cwd, strerror(errno));
         free(s->prev_cwd);
     }
-    if (s->root) {
-        char *cmd = xasprintf("rm -rf '%s'", s->root);
-        int rc = system(cmd);
-        (void)rc;
-        free(cmd);
-        free(s->root);
-    }
+    free(s->root);
 }
 
 static void mkdirs(const char *path)

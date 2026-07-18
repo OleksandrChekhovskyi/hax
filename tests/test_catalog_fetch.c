@@ -24,7 +24,7 @@
 #include "harness.h"
 
 /* Parent-made temp root; children carve their own XDG_CACHE_HOME under it. */
-static char g_root[] = "/tmp/hax_test_catfetch_XXXXXX";
+static char *g_root;
 
 /* ---------------- one-shot HTTP server ---------------- */
 
@@ -325,8 +325,7 @@ static void run_scenario(const char *name, void (*fn)(void))
 
 int main(void)
 {
-    if (!mkdtemp(g_root))
-        FAIL("mkdtemp: %s", strerror(errno));
+    g_root = t_tempdir();
 
     run_scenario("cold-start", scenario_cold_start);
     run_scenario("refresh-invalidates-memo", scenario_refresh_invalidates_memo);

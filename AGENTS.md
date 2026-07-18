@@ -34,7 +34,8 @@ BUILD_DIR=build-tsan scripts/check.sh test <name>
 ```
 
 Tests are plain C binaries using `tests/harness.h` (`EXPECT`, `EXPECT_STR_EQ`, `T_SKIP`,
-`T_REPORT`).
+`T_REPORT`). Create scratch directories with the harness's `t_tempdir()`, which removes them
+at process exit; raw `mkdtemp` in tests fails `make lint`.
 To add a test, append its source to `test_sources` in `tests/meson.build`, grouped to mirror
 the production `sources` list. Test names are path-derived: `tools/test_read.c` becomes
 `tools/read`, and `test_util.c` becomes `util`.

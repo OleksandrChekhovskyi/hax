@@ -275,9 +275,7 @@ static void test_apply_settings_keeps_stamped_spend(void)
     /* Catalog fixture that knows only the OUTGOING model: after the
      * switch, requests recorded under model-a must keep pricing at
      * model-a's rates — the record's stamp, not the live model, decides. */
-    static char dir[] = "/tmp/hax_test_agent_XXXXXX";
-    if (!mkdtemp(dir))
-        FAIL("mkdtemp: %s", strerror(errno));
+    char *dir = t_tempdir();
     setenv("XDG_CACHE_HOME", dir, 1);
     char path[600];
     snprintf(path, sizeof(path), "%s/hax", dir);
@@ -421,11 +419,9 @@ static void add_turn(struct agent_session *s, const char *prompt, const char *re
 }
 
 /* Fresh, isolated per-cwd session tree, with recording enabled. */
-static void set_state_dir(char *buf, size_t bufsz)
+static void set_state_dir(void)
 {
-    snprintf(buf, bufsz, "/tmp/hax_test_undofork_XXXXXX");
-    EXPECT(mkdtemp(buf) != NULL);
-    setenv("XDG_STATE_HOME", buf, 1);
+    setenv("XDG_STATE_HOME", t_tempdir(), 1);
     unsetenv("HAX_NO_SESSION");
 }
 
@@ -464,8 +460,7 @@ static void do_fork(void *user)
 
 static void test_undo_reverts_history_and_file(void)
 {
-    char dir[64];
-    set_state_dir(dir, sizeof(dir));
+    set_state_dir();
     struct fixture f;
     fixture_init(&f);
     add_turn(&f.sess, "first", "r1");
@@ -507,8 +502,7 @@ static void test_undo_reverts_history_and_file(void)
 
 static void test_fork_branches_and_switches_log(void)
 {
-    char dir[64];
-    set_state_dir(dir, sizeof(dir));
+    set_state_dir();
     struct fixture f;
     fixture_init(&f);
     add_turn(&f.sess, "first", "r1");
@@ -559,8 +553,7 @@ static void test_fork_branches_and_switches_log(void)
 
 static void test_fork_at_tip_clones_whole(void)
 {
-    char dir[64];
-    set_state_dir(dir, sizeof(dir));
+    set_state_dir();
     struct fixture f;
     fixture_init(&f);
     add_turn(&f.sess, "first", "r1");
@@ -599,8 +592,7 @@ static void test_fork_at_tip_clones_whole(void)
 
 static void test_fork_without_recording_leaves_state(void)
 {
-    char dir[64];
-    set_state_dir(dir, sizeof(dir));
+    set_state_dir();
     struct fixture f;
     fixture_init(&f);
     add_turn(&f.sess, "first", "r1");
@@ -627,8 +619,7 @@ static void test_fork_without_recording_leaves_state(void)
 
 static void test_undo_intact_when_truncate_fails(void)
 {
-    char dir[64];
-    set_state_dir(dir, sizeof(dir));
+    set_state_dir();
     struct fixture f;
     fixture_init(&f);
     add_turn(&f.sess, "first", "r1");

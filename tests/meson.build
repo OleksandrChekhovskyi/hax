@@ -19,6 +19,7 @@ test_sources = [
     'test_compact.c',
     'test_config.c',
     'test_file_mention.c',
+    'test_harness.c',
     'test_session.c',
     'test_slash.c',
     'test_trace.c',

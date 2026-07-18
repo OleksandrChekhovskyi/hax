@@ -172,22 +172,19 @@ static void test_slurp_directory_rejected(void)
     /* Some platforms let open(O_RDONLY) on a directory succeed and only
      * fail on read(); the regular-file pre-check rejects up front so
      * callers never get a bogus partial buffer back. */
-    char dir[] = "/tmp/hax-test-dir-XXXXXX";
-    EXPECT(mkdtemp(dir) != NULL);
+    char *dir = t_tempdir();
     errno = 0;
     char *p = slurp_file(dir, NULL);
     EXPECT(p == NULL);
     EXPECT(errno == EISDIR);
-    rmdir(dir);
 }
 
 static void test_slurp_fifo_rejected_no_hang(void)
 {
     /* If this test ever hangs, the regular-file guard regressed:
      * open(O_RDONLY) on a writer-less FIFO blocks indefinitely. */
-    char path[] = "/tmp/hax-test-fifo-XXXXXX";
-    EXPECT(mkdtemp(path) != NULL);
-    /* mkdtemp gives us a unique dir; place the FIFO inside. */
+    /* t_tempdir gives us a unique dir; place the FIFO inside. */
+    char *path = t_tempdir();
     char fifo[64];
     snprintf(fifo, sizeof(fifo), "%s/f", path);
     EXPECT(mkfifo(fifo, 0644) == 0);
@@ -201,8 +198,6 @@ static void test_slurp_fifo_rejected_no_hang(void)
     char *p2 = slurp_file_capped(fifo, 1024, NULL, &truncated);
     EXPECT(p2 == NULL);
     EXPECT(errno == EINVAL);
-    unlink(fifo);
-    rmdir(path);
 }
 
 /* ---------- slurp_file_capped ---------- */

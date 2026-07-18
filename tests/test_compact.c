@@ -60,9 +60,7 @@ static void test_context_limit_resolution(void)
      * model-catalog entry → 0 (unknown). The catalog tier reads a fixture
      * snapshot through the real catalog module. */
     unsetenv("HAX_CONTEXT_LIMIT");
-    char dir[] = "/tmp/hax_test_compact_XXXXXX";
-    if (!mkdtemp(dir))
-        FAIL("mkdtemp: %s", strerror(errno));
+    char *dir = t_tempdir();
     setenv("XDG_CACHE_HOME", dir, 1);
     char path[600];
     snprintf(path, sizeof(path), "%s/hax", dir);

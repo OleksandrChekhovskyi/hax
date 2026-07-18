@@ -9,24 +9,6 @@
 #include "tool.h"
 #include "util.h"
 
-static char *mk_tmpdir(void)
-{
-    char *path = xstrdup("/tmp/hax-edit-XXXXXX");
-    if (!mkdtemp(path)) {
-        FAIL("mkdtemp: %s", strerror(errno));
-        free(path);
-        return NULL;
-    }
-    return path;
-}
-
-static void rm_rf(const char *dir)
-{
-    char *cmd = xasprintf("rm -rf '%s'", dir);
-    (void)system(cmd);
-    free(cmd);
-}
-
 static char *seed_file(const char *dir, const char *name, const char *content)
 {
     char *path = xasprintf("%s/%s", dir, name);
@@ -82,7 +64,7 @@ static void test_edit_identical_strings(void)
 
 static void test_edit_unique_match(void)
 {
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = seed_file(dir, "f.txt", "alpha\nbeta\ngamma\n");
 
     char *args =
@@ -97,14 +79,12 @@ static void test_edit_unique_match(void)
     EXPECT_STR_EQ(got, "alpha\nBETA\ngamma\n");
     free(got);
 
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_edit_no_match(void)
 {
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = seed_file(dir, "f.txt", "alpha\n");
 
     char *args = xasprintf("{\"path\":\"%s\",\"old_string\":\"zzz\",\"new_string\":\"q\"}", path);
@@ -118,14 +98,12 @@ static void test_edit_no_match(void)
     EXPECT_STR_EQ(got, "alpha\n");
     free(got);
 
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_edit_multi_match_requires_replace_all(void)
 {
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = seed_file(dir, "f.txt", "foo\nfoo\nfoo\n");
 
     char *args = xasprintf("{\"path\":\"%s\",\"old_string\":\"foo\",\"new_string\":\"bar\"}", path);
@@ -139,14 +117,12 @@ static void test_edit_multi_match_requires_replace_all(void)
     EXPECT_STR_EQ(got, "foo\nfoo\nfoo\n");
     free(got);
 
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_edit_replace_all(void)
 {
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = seed_file(dir, "f.txt", "foo\nfoo\nfoo\n");
 
     char *args = xasprintf(
@@ -161,14 +137,12 @@ static void test_edit_replace_all(void)
     EXPECT_STR_EQ(got, "bar\nbar\nbar\n");
     free(got);
 
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_edit_multiline_match(void)
 {
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = seed_file(dir, "f.c", "int main(void)\n{\n\treturn 0;\n}\n");
 
     char *args = xasprintf(
@@ -184,16 +158,14 @@ static void test_edit_multiline_match(void)
     EXPECT_STR_EQ(got, "int main(void)\n{\n\treturn 42;\n}\n");
     free(got);
 
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_edit_refuses_fifo(void)
 {
     /* slurp_file_capped on a FIFO without a writer would block the
      * agent forever. The tool must refuse upfront with a clear error. */
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = xasprintf("%s/pipe", dir);
     EXPECT(mkfifo(path, 0644) == 0);
 
@@ -207,9 +179,7 @@ static void test_edit_refuses_fifo(void)
     EXPECT(stat(path, &st) == 0);
     EXPECT(S_ISFIFO(st.st_mode));
 
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_edit_nonexistent_file(void)

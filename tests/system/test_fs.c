@@ -11,16 +11,13 @@
 #include "system/fs.h"
 #include "system/path.h"
 
-/* Fresh scratch directory under TMPDIR; caller frees the returned path.
- * Contents are cleaned per-test with plain unlink/rmdir — the trees here
- * are tiny and explicit. */
+/* Fresh scratch directory; caller frees the returned path. Test-created
+ * contents are cleaned per-test with plain unlink/rmdir — the trees here
+ * are tiny and explicit — but the root is harness-owned: t_tempdir()
+ * removes it at exit, along with whatever a failing test leaves. */
 static char *scratch_dir(void)
 {
-    const char *tmp = getenv("TMPDIR");
-    char *tpl = path_join(tmp && *tmp ? tmp : "/tmp", "hax-test-fs-XXXXXX");
-    char *dir = mkdtemp(tpl);
-    EXPECT(dir != NULL);
-    return tpl;
+    return xstrdup(t_tempdir());
 }
 
 static void touch(const char *path, mode_t mode)
@@ -105,7 +102,6 @@ static void test_which_resolves_in_later_entry(void)
     free(pathvar);
     free(saved);
     unlink(exe);
-    rmdir(dir);
     free(exe);
     free(dir);
 }
@@ -135,8 +131,6 @@ static void test_which_skips_directory_match(void)
     free(saved);
     unlink(exe);
     rmdir(decoy);
-    rmdir(dir_a);
-    rmdir(dir_b);
     free(exe);
     free(decoy);
     free(dir_a);
@@ -169,7 +163,6 @@ static void test_which_skips_non_executable(void)
     setenv("PATH", saved, 1);
     free(saved);
     unlink(file);
-    rmdir(dir);
     free(file);
     free(dir);
 }
@@ -192,7 +185,6 @@ static void test_mkdir_p_creates_nested(void)
     rmdir(deep);
     rmdir(b);
     rmdir(a);
-    rmdir(dir);
     free(deep);
     free(b);
     free(a);
@@ -211,7 +203,6 @@ static void test_mkdir_p_trailing_slashes(void)
     char *x = path_join(dir, "x");
     rmdir(deep);
     rmdir(x);
-    rmdir(dir);
     free(slashed);
     free(deep);
     free(x);
@@ -229,7 +220,6 @@ static void test_mkdir_p_file_in_the_middle_fails(void)
     EXPECT(errno == ENOTDIR);
 
     unlink(file);
-    rmdir(dir);
     free(deep);
     free(file);
     free(dir);
@@ -247,7 +237,6 @@ static void test_mkdir_p_final_component_is_file_fails(void)
     EXPECT(errno == ENOTDIR);
 
     unlink(file);
-    rmdir(dir);
     free(file);
     free(dir);
 }

@@ -503,9 +503,7 @@ static void test_spend_accounting(void)
 
     /* Fixture snapshot first (the catalog memoizes misses per
      * provider/model, so no lookup may precede the write). */
-    char dir[] = "/tmp/hax_test_agent_core_XXXXXX";
-    if (!mkdtemp(dir))
-        FAIL("mkdtemp: %s", strerror(errno));
+    char *dir = t_tempdir();
     setenv("XDG_CACHE_HOME", dir, 1);
     char path[600];
     snprintf(path, sizeof(path), "%s/hax", dir);

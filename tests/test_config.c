@@ -286,18 +286,12 @@ static void test_provider_binding(void)
     config_load_state(NULL);
 }
 
-static void rm_rf_state(const char *dir); /* defined below; shared cleanup */
-
 static void test_persist_selection(void)
 {
     clear_env();
     config_free();
 
-    char tmpl[] = "/tmp/haxseltest.XXXXXX";
-    char *dir = mkdtemp(tmpl);
-    EXPECT(dir != NULL);
-    if (!dir)
-        return;
+    char *dir = t_tempdir();
     setenv("XDG_STATE_HOME", dir, 1);
     setenv("XDG_CONFIG_HOME", dir, 1); /* keep config_init off the real file */
 
@@ -347,7 +341,6 @@ static void test_persist_selection(void)
     unsetenv("XDG_CONFIG_HOME");
     unsetenv("XDG_STATE_HOME");
     config_free();
-    rm_rf_state(dir);
 }
 
 static void test_default_sentinel(void)
@@ -396,18 +389,6 @@ static void test_default_sentinel(void)
     config_load_state(NULL);
 }
 
-static void rm_rf_config(const char *dir); /* defined below; shared cleanup */
-
-static void rm_rf_state(const char *dir)
-{
-    char path[4096];
-    snprintf(path, sizeof path, "%s/hax/state.json", dir);
-    unlink(path);
-    snprintf(path, sizeof path, "%s/hax", dir);
-    rmdir(path);
-    rmdir(dir);
-}
-
 static void test_persist_state_roundtrip(void)
 {
     clear_env();
@@ -415,13 +396,8 @@ static void test_persist_state_roundtrip(void)
 
     /* Separate temp trees for config and state so we can prove the
      * state-tier write lands in the state dir, not the config dir. */
-    char cfg_tmpl[] = "/tmp/haxcfgtest.XXXXXX";
-    char st_tmpl[] = "/tmp/haxsttest.XXXXXX";
-    char *cfg_dir = mkdtemp(cfg_tmpl);
-    char *st_dir = mkdtemp(st_tmpl);
-    EXPECT(cfg_dir != NULL && st_dir != NULL);
-    if (!cfg_dir || !st_dir)
-        return;
+    char *cfg_dir = t_tempdir();
+    char *st_dir = t_tempdir();
     setenv("XDG_CONFIG_HOME", cfg_dir, 1);
     setenv("XDG_STATE_HOME", st_dir, 1);
 
@@ -454,18 +430,6 @@ static void test_persist_state_roundtrip(void)
 
     unsetenv("XDG_CONFIG_HOME");
     unsetenv("XDG_STATE_HOME");
-    rm_rf_config(cfg_dir);
-    rm_rf_state(st_dir);
-}
-
-static void rm_rf_config(const char *dir)
-{
-    char path[4096];
-    snprintf(path, sizeof path, "%s/hax/config.json", dir);
-    unlink(path);
-    snprintf(path, sizeof path, "%s/hax", dir);
-    rmdir(path);
-    rmdir(dir);
 }
 
 static void test_persist_roundtrip(void)
@@ -473,11 +437,7 @@ static void test_persist_roundtrip(void)
     clear_env();
     config_free();
 
-    char tmpl[] = "/tmp/haxcfgtest.XXXXXX";
-    char *dir = mkdtemp(tmpl);
-    EXPECT(dir != NULL);
-    if (!dir)
-        return;
+    char *dir = t_tempdir();
     setenv("XDG_CONFIG_HOME", dir, 1);
     /* Isolate the state dir too: config_init() reads state.json (the
      * state tier) from XDG_STATE_HOME, and a developer's real
@@ -522,7 +482,6 @@ static void test_persist_roundtrip(void)
 
     unsetenv("XDG_CONFIG_HOME");
     unsetenv("XDG_STATE_HOME");
-    rm_rf_config(dir);
 }
 
 static void test_persist_failure_rolls_back(void)
@@ -544,11 +503,7 @@ static void test_persist_flat_key(void)
     clear_env();
     config_free();
 
-    char tmpl[] = "/tmp/haxcfgtest.XXXXXX";
-    char *dir = mkdtemp(tmpl);
-    EXPECT(dir != NULL);
-    if (!dir)
-        return;
+    char *dir = t_tempdir();
     setenv("XDG_CONFIG_HOME", dir, 1);
     setenv("XDG_STATE_HOME", dir, 1); /* isolate the state tier — see roundtrip test */
 
@@ -571,7 +526,6 @@ static void test_persist_flat_key(void)
 
     unsetenv("XDG_CONFIG_HOME");
     unsetenv("XDG_STATE_HOME");
-    rm_rf_config(dir);
 }
 
 static void test_registry_introspection(void)

@@ -19,13 +19,10 @@
  * cached catalog snapshot. */
 static void write_cache_fixture(const char *json)
 {
-    static char dir[] = "/tmp/hax_test_catalog_XXXXXX";
-    static int made;
-    if (!made) {
-        if (!mkdtemp(dir))
-            FAIL("mkdtemp: %s", strerror(errno));
+    static char *dir;
+    if (!dir) {
+        dir = t_tempdir();
         setenv("XDG_CACHE_HOME", dir, 1);
-        made = 1;
     }
     char path[512];
     snprintf(path, sizeof(path), "%s/hax", dir);

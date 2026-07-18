@@ -70,6 +70,13 @@ test)
 lint)
     find src tests -type f \( -name '*.c' -o -name '*.h' \) -print0 |
         xargs -0 clang-format --dry-run --Werror
+    # Raw mkdtemp in tests leaks dirs under /tmp when a test fails or
+    # forgets cleanup; t_tempdir() (tests/harness.h) removes them at exit.
+    if grep -rn 'mkdtemp' tests --include='*.c' --include='*.h' |
+        grep -v '^tests/harness\.h:'; then
+        echo "error: raw mkdtemp in tests; use t_tempdir() from tests/harness.h" >&2
+        exit 1
+    fi
     echo "lint OK"
     ;;
 *)

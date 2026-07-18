@@ -110,24 +110,6 @@ static const char *run_write(const char *path, const char *content_json, struct 
     return cap;
 }
 
-static char *mk_tmpdir(void)
-{
-    char *dir = xstrdup("/tmp/hax-dispatch-XXXXXX");
-    if (!mkdtemp(dir)) {
-        FAIL("mkdtemp: %s", strerror(errno));
-        free(dir);
-        return NULL;
-    }
-    return dir;
-}
-
-static void rm_rf(const char *dir)
-{
-    char *cmd = xasprintf("rm -rf '%s'", dir);
-    (void)system(cmd);
-    free(cmd);
-}
-
 /* The regression this guards: a new-file write whose streamed content
  * preview renders zero rows (blank or control-only content) must fall
  * back to showing the "created ..." summary as the block body, not a bare
@@ -136,7 +118,7 @@ static void rm_rf(const char *dir)
  * fallback is what puts the summary on screen. */
 static void test_blank_content_summary_row_displayed(void)
 {
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = xasprintf("%s/blank.py", dir);
     struct item out;
 
@@ -147,9 +129,7 @@ static void test_blank_content_summary_row_displayed(void)
     EXPECT(out.output && strstr(out.output, "created") != NULL);
 
     item_free(&out);
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_control_only_content_summary_row_displayed(void)
@@ -158,7 +138,7 @@ static void test_control_only_content_summary_row_displayed(void)
      * lone bell (and would swallow an ANSI escape with its trailing
      * bytes), leaving zero rows. The fallback keys off the actual row
      * count, so it still surfaces the summary. */
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = xasprintf("%s/bell.py", dir);
     struct item out;
 
@@ -167,9 +147,7 @@ static void test_control_only_content_summary_row_displayed(void)
     EXPECT(strstr(cap, "bell.py") != NULL);
 
     item_free(&out);
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_visible_content_shows_preview_not_summary(void)
@@ -177,7 +155,7 @@ static void test_visible_content_shows_preview_not_summary(void)
     /* Contrast: content that renders rows shows the preview, and the
      * fallback must NOT fire — the "created ..." summary goes only to the
      * model, not the display. */
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = xasprintf("%s/real.py", dir);
     struct item out;
 
@@ -188,9 +166,7 @@ static void test_visible_content_shows_preview_not_summary(void)
     EXPECT(out.output && strstr(out.output, "created") != NULL);
 
     item_free(&out);
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 int main(void)

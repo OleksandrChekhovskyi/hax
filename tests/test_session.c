@@ -133,12 +133,7 @@ int main(void)
         check_codec(&CONVO[i]);
 
     /* ---- isolate persistence under a throwaway state dir ---- */
-    char tmpl[] = "/tmp/hax_sess_XXXXXX";
-    char *tmp = mkdtemp(tmpl);
-    EXPECT(tmp != NULL);
-    if (!tmp)
-        T_REPORT();
-    setenv("XDG_STATE_HOME", tmp, 1);
+    setenv("XDG_STATE_HOME", t_tempdir(), 1);
 
     /* HAX_NO_SESSION disables persistence entirely. */
     setenv("HAX_NO_SESSION", "1", 1);

@@ -10,25 +10,6 @@
 #include "tool.h"
 #include "util.h"
 
-static char *mk_tmpdir(void)
-{
-    char *path = xstrdup("/tmp/hax-write-XXXXXX");
-    if (!mkdtemp(path)) {
-        FAIL("mkdtemp: %s", strerror(errno));
-        free(path);
-        return NULL;
-    }
-    return path;
-}
-
-static void rm_rf(const char *dir)
-{
-    /* Tests stay shallow — a single `rm -rf` via shell is fine. */
-    char *cmd = xasprintf("rm -rf '%s'", dir);
-    (void)system(cmd);
-    free(cmd);
-}
-
 static char *call_write(const char *path, const char *content)
 {
     char *cesc = xasprintf("%s", content);
@@ -75,7 +56,7 @@ static void test_write_creates_new_file(void)
      * call arguments, so echoing it back as a `+`-prefixed diff would just
      * double the context cost. The diff is reserved for overwrites, where
      * it conveys real new-vs-old signal. */
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = xasprintf("%s/new.txt", dir);
 
     char *out = call_write(path, "alpha\\nbeta\\n");
@@ -92,14 +73,12 @@ static void test_write_creates_new_file(void)
     EXPECT_STR_EQ(got, "alpha\nbeta\n");
     free(got);
 
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_write_creates_parent_dirs(void)
 {
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = xasprintf("%s/sub/deeper/file.txt", dir);
 
     char *out = call_write(path, "content\\n");
@@ -110,14 +89,12 @@ static void test_write_creates_parent_dirs(void)
     EXPECT_STR_EQ(got, "content\n");
     free(got);
 
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_write_overwrites(void)
 {
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = xasprintf("%s/file.txt", dir);
 
     char *out = call_write(path, "first\\n");
@@ -132,14 +109,12 @@ static void test_write_overwrites(void)
     EXPECT_STR_EQ(got, "second\n");
     free(got);
 
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_write_preserves_mode(void)
 {
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = xasprintf("%s/script.sh", dir);
 
     char *out = call_write(path, "echo hi\\n");
@@ -153,9 +128,7 @@ static void test_write_preserves_mode(void)
     EXPECT(stat(path, &st) == 0);
     EXPECT((st.st_mode & 0777) == 0750);
 
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_write_preserves_setuid(void)
@@ -164,7 +137,7 @@ static void test_write_preserves_setuid(void)
      * does two things: mask with 07777 (not 0777) when capturing the
      * existing mode, and apply fchmod *after* write_all (Linux clears
      * S_ISUID/S_ISGID on write by an unprivileged user). */
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = xasprintf("%s/helper", dir);
 
     char *out = call_write(path, "old\\n");
@@ -178,14 +151,12 @@ static void test_write_preserves_setuid(void)
     EXPECT(stat(path, &st) == 0);
     EXPECT((st.st_mode & 07777) == 04755);
 
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_write_unchanged_yields_empty_diff(void)
 {
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = xasprintf("%s/file.txt", dir);
 
     char *out = call_write(path, "same\\n");
@@ -205,9 +176,7 @@ static void test_write_unchanged_yields_empty_diff(void)
     EXPECT(stat(path, &after) == 0);
     EXPECT(before.st_ino == after.st_ino);
 
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_write_refuses_fifo(void)
@@ -215,7 +184,7 @@ static void test_write_refuses_fifo(void)
     /* If we treated a FIFO as a regular file, slurp_file would block
      * forever waiting for a writer. The tool must refuse upfront with
      * a clear error rather than hang the agent. */
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = xasprintf("%s/pipe", dir);
     EXPECT(mkfifo(path, 0644) == 0);
 
@@ -228,9 +197,7 @@ static void test_write_refuses_fifo(void)
     EXPECT(stat(path, &st) == 0);
     EXPECT(S_ISFIFO(st.st_mode));
 
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_write_through_dangling_symlink(void)
@@ -238,7 +205,7 @@ static void test_write_through_dangling_symlink(void)
     /* `link -> real` where `real` doesn't yet exist. Writing to the
      * link should create `real` while leaving the link intact — matches
      * the documented "write creates missing files" contract. */
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *real = xasprintf("%s/real.txt", dir);
     char *link = xasprintf("%s/link.txt", dir);
 
@@ -258,10 +225,8 @@ static void test_write_through_dangling_symlink(void)
     EXPECT_STR_EQ(got, "hello\n");
     free(got);
 
-    rm_rf(dir);
     free(real);
     free(link);
-    free(dir);
 }
 
 static void test_write_empty_new_file(void)
@@ -269,7 +234,7 @@ static void test_write_empty_new_file(void)
     /* Creating an empty file is a valid request. The file must land on
      * disk *and* the tool must return an unambiguous success message so
      * the model can tell the difference from a no-op. */
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = xasprintf("%s/empty.txt", dir);
 
     char *out = call_write(path, "");
@@ -281,9 +246,7 @@ static void test_write_empty_new_file(void)
     EXPECT(stat(path, &st) == 0);
     EXPECT(st.st_size == 0);
 
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_write_blank_content_summary(void)
@@ -292,7 +255,7 @@ static void test_write_blank_content_summary(void)
      * "created ..." summary — the dispatch layer surfaces it as the block
      * body when the streamed preview renders no rows. Pin the summary text
      * (line/byte counts) the model and that fallback both rely on. */
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *path = xasprintf("%s/blank.txt", dir);
 
     char *out = call_write(path, "\\n   \\n"); /* only blank lines */
@@ -301,14 +264,12 @@ static void test_write_blank_content_summary(void)
     EXPECT(strstr(out, "5 bytes") != NULL);
     free(out);
 
-    rm_rf(dir);
     free(path);
-    free(dir);
 }
 
 static void test_write_through_symlink(void)
 {
-    char *dir = mk_tmpdir();
+    char *dir = t_tempdir();
     char *real = xasprintf("%s/real.txt", dir);
     char *link = xasprintf("%s/link.txt", dir);
 
@@ -330,10 +291,8 @@ static void test_write_through_symlink(void)
     EXPECT_STR_EQ(got, "second\n");
     free(got);
 
-    rm_rf(dir);
     free(real);
     free(link);
-    free(dir);
 }
 
 int main(void)
