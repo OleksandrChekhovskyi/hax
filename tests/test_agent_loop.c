@@ -269,6 +269,8 @@ struct loop_test_ctx {
     int compactions;
     int checkpoints;
     int cancel_at;
+    int pause_at;
+    int continued;
 };
 
 static void count_turn_begin(void *user)
@@ -311,7 +313,11 @@ static int cancel_checkpoint(void *user)
 {
     struct loop_test_ctx *ctx = user;
     ctx->checkpoints++;
-    return ctx->cancel_at > 0 && ctx->checkpoints >= ctx->cancel_at;
+    if (ctx->cancel_at > 0 && ctx->checkpoints >= ctx->cancel_at)
+        return AGENT_LOOP_SIG_ABORT;
+    if (ctx->pause_at > 0 && ctx->checkpoints >= ctx->pause_at)
+        return AGENT_LOOP_SIG_PAUSE;
+    return AGENT_LOOP_SIG_NONE;
 }
 
 static void count_compaction(void *user)
@@ -334,12 +340,13 @@ static struct agent_loop_result run_chain(struct agent_session *session, struct 
         .session = session,
         .provider = provider,
         .max_turns = max_turns,
+        .continued = ctx->continued,
         .hooks =
             {
                 .user = ctx,
                 .turn_begin = count_turn_begin,
                 .turn_end = count_turn,
-                .checkpoint = ctx->cancel_at ? cancel_checkpoint : NULL,
+                .checkpoint = (ctx->cancel_at || ctx->pause_at) ? cancel_checkpoint : NULL,
                 .tool_seen = count_tool,
                 .tool_call = run_test_tool,
                 .compact = count_compaction,
@@ -430,6 +437,7 @@ static void test_loop_cancels_tool_batch(void)
     /* Cancellation between calls runs the completed prefix, skips the suffix,
      * and still pairs the whole batch so resumed history is valid. */
     EXPECT(result.outcome == AGENT_LOOP_INTERRUPTED);
+    EXPECT(result.abort_marker_placed);
     EXPECT(ctx.tools_seen == 2);
     EXPECT(ctx.tools_run == 1);
     EXPECT(ctx.tools_skipped == 1);
@@ -465,6 +473,358 @@ static void test_loop_cancel_still_refuses_disabled_tool(void)
     agent_session_free(&session);
 }
 
+static void test_loop_pause_runs_whole_batch(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    session_enable_tools(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = chain_stream};
+    /* Pause is first observed at the post-stream checkpoint, before any
+     * tool has launched. */
+    struct loop_test_ctx ctx = {.pause_at = 1};
+    chain_turn = 0;
+    chain_two_tools = 1;
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
+    /* A pause must not cancel in-flight work: the whole accepted batch still
+     * runs and the stop lands at the seam, before the follow-up request. */
+    EXPECT(result.outcome == AGENT_LOOP_PAUSED);
+    EXPECT(chain_turn == 1);
+    EXPECT(ctx.tools_run == 2 && ctx.tools_skipped == 0);
+    EXPECT(!result.abort_marker_placed);
+
+    /* The seam is clean: every call paired, no interrupt markers anywhere,
+     * usage footer trailing — history a later run can continue verbatim. */
+    int calls = 0;
+    int results = 0;
+    for (size_t i = 0; i < session.n_items; i++) {
+        calls += session.items[i].kind == ITEM_TOOL_CALL;
+        results += session.items[i].kind == ITEM_TOOL_RESULT;
+        if (session.items[i].kind == ITEM_ASSISTANT_MESSAGE)
+            EXPECT(strcmp(session.items[i].text, INTERRUPT_MARKER) != 0);
+        if (session.items[i].kind == ITEM_TOOL_RESULT)
+            EXPECT_STR_EQ(session.items[i].output, "handled");
+    }
+    EXPECT(calls == 2 && results == 2);
+    EXPECT(session.items[session.n_items - 1].kind == ITEM_TURN_USAGE);
+
+    /* Resuming the paused history runs the follow-up turn to completion. */
+    agent_session_add_boundary(&session);
+    struct loop_test_ctx resume_ctx = {0};
+    struct agent_loop_result resumed = run_chain(&session, &provider, &resume_ctx, 4);
+    EXPECT(resumed.outcome == AGENT_LOOP_COMPLETE);
+    EXPECT_STR_EQ(session.items[resumed.final_items_from].text, "finished");
+
+    agent_loop_result_destroy(&resumed);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* A stream that ends without emitting any event — the shape a soft
+ * interrupt leaves when the frontend tick cancels a request that had
+ * produced no content yet (still prefilling). */
+static int silent_stream(struct provider *p, const struct context *ctx, const char *model,
+                         stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
+{
+    (void)p;
+    (void)model;
+    (void)cb;
+    (void)user;
+    (void)tick;
+    (void)tick_user;
+    EXPECT(ctx != NULL);
+    return 0;
+}
+
+static void test_loop_pause_preempts_empty_turn(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    session_enable_tools(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = silent_stream};
+    struct loop_test_ctx ctx = {.pause_at = 1};
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
+    /* An empty turn under a pause request is a pre-empted request, not a
+     * completion: pause with history untouched so a resume re-sends it. */
+    EXPECT(result.outcome == AGENT_LOOP_PAUSED);
+    EXPECT(!result.abort_marker_placed);
+    EXPECT(session.n_items == 2); /* boundary + user message only */
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* Turn 1 emits a tool call and completes; turn 2 emits nothing — the shape
+ * of a follow-up request pre-empted by a soft interrupt during prefill. */
+static int chain_then_silent_stream(struct provider *p, const struct context *ctx,
+                                    const char *model, stream_cb cb, void *user, http_tick_cb tick,
+                                    void *tick_user)
+{
+    (void)p;
+    (void)model;
+    (void)tick;
+    (void)tick_user;
+    EXPECT(ctx != NULL);
+    chain_turn++;
+    if (chain_turn > 1)
+        return 0;
+    emit_tool_call(cb, user, "c1");
+    struct stream_usage usage = {.input_tokens = 10,
+                                 .output_tokens = 2,
+                                 .cached_tokens = -1,
+                                 .cache_write_tokens = -1,
+                                 .cache_write_1h_tokens = -1,
+                                 .cost = -1};
+    emit_event(cb, user, (struct stream_event){.kind = EV_DONE, .u.done = {.usage = usage}});
+    return 0;
+}
+
+static void test_loop_pause_preempts_follow_up_leaves_no_boundary(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    session_enable_tools(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = chain_then_silent_stream};
+    /* Turn 1 checkpoints: post-stream, pre-c1, final. The pause is first
+     * observed at turn 2's post-stream checkpoint. */
+    struct loop_test_ctx ctx = {.pause_at = 4};
+    chain_turn = 0;
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
+    /* The pre-empted follow-up turn must leave no trace: no dangling
+     * boundary (which the transcript would render as an empty turn), no
+     * marker, no footer — history still ends at turn 1's seam. */
+    EXPECT(result.outcome == AGENT_LOOP_PAUSED);
+    EXPECT(session.items[session.n_items - 1].kind == ITEM_TURN_USAGE);
+
+    int boundaries = 0;
+    for (size_t i = 0; i < session.n_items; i++)
+        boundaries += session.items[i].kind == ITEM_TURN_BOUNDARY;
+    EXPECT(boundaries == 1); /* only the user message's */
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_loop_continued_run_owes_boundary(void)
+{
+    /* A continued run (empty-send resume): the first turn extends the prior
+     * seam, so once it leaves items it owes a boundary like a follow-up. */
+    struct agent_session session;
+    session_init(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = scripted_stream};
+    script = SCRIPT_COMPLETE;
+    struct loop_test_ctx ctx = {.continued = 1};
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
+    EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
+    int boundaries = 0;
+    for (size_t i = 0; i < session.n_items; i++)
+        boundaries += session.items[i].kind == ITEM_TURN_BOUNDARY;
+    EXPECT(boundaries == 2); /* the user message's, plus the continued turn's */
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_loop_continued_preempted_run_leaves_no_boundary(void)
+{
+    /* A continued run pre-empted again during prefill must stay traceless —
+     * an eagerly appended boundary here is exactly the dangling empty turn
+     * the lazy scheme exists to avoid. */
+    struct agent_session session;
+    session_init(&session);
+    session_enable_tools(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = silent_stream};
+    struct loop_test_ctx ctx = {.pause_at = 1, .continued = 1};
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
+    EXPECT(result.outcome == AGENT_LOOP_PAUSED);
+    EXPECT(session.n_items == 2); /* boundary + user message only */
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* Turn 1 emits a tool call; turn 2 completes successfully with no content
+ * (EV_DONE only, usage reported) — an empty but real round-trip. */
+static int chain_then_empty_done_stream(struct provider *p, const struct context *ctx,
+                                        const char *model, stream_cb cb, void *user,
+                                        http_tick_cb tick, void *tick_user)
+{
+    (void)p;
+    (void)model;
+    (void)tick;
+    (void)tick_user;
+    EXPECT(ctx != NULL);
+    chain_turn++;
+    if (chain_turn == 1)
+        emit_tool_call(cb, user, "c1");
+    struct stream_usage usage = {.input_tokens = 10 * chain_turn,
+                                 .output_tokens = 2,
+                                 .cached_tokens = -1,
+                                 .cache_write_tokens = -1,
+                                 .cache_write_1h_tokens = -1,
+                                 .cost = -1};
+    emit_event(cb, user, (struct stream_event){.kind = EV_DONE, .u.done = {.usage = usage}});
+    return 0;
+}
+
+static void test_loop_empty_completion_keeps_boundary(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    session_enable_tools(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = chain_then_empty_done_stream};
+    struct loop_test_ctx ctx = {0};
+    chain_turn = 0;
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
+    /* An empty but *completed* follow-up is a real round-trip: it owes its
+     * own boundary so its usage footer isn't attributed to the preceding
+     * tool turn — only a pause-cancelled stream (no EV_DONE) leaves no
+     * trace. */
+    EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
+    EXPECT(result.turns == 2);
+
+    int boundaries = 0;
+    int usage_items = 0;
+    for (size_t i = 0; i < session.n_items; i++) {
+        boundaries += session.items[i].kind == ITEM_TURN_BOUNDARY;
+        usage_items += session.items[i].kind == ITEM_TURN_USAGE;
+    }
+    EXPECT(boundaries == 2);
+    EXPECT(usage_items == 2);
+    /* The empty turn's representation is exactly boundary + footer. */
+    EXPECT(session.items[session.n_items - 2].kind == ITEM_TURN_BOUNDARY);
+    EXPECT(session.items[session.n_items - 1].kind == ITEM_TURN_USAGE);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_loop_pause_on_final_turn_completes(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = scripted_stream};
+    script = SCRIPT_COMPLETE;
+    struct loop_test_ctx ctx = {.pause_at = 1};
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
+    /* A pause requested during a tool-free response is moot: the user turn
+     * finishes right here and there is nothing left to resume. */
+    EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_loop_pause_defers_seam_compaction(void)
+{
+    config_set_override("compact.auto", "1");
+    config_set_override("compact.threshold", "50");
+    config_set_override("context_limit", "10");
+
+    struct agent_session session;
+    session_init(&session);
+    session_enable_tools(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = chain_stream};
+    /* Pause lands at the final seam checkpoint (post-stream, pre-c1, final). */
+    struct loop_test_ctx ctx = {.pause_at = 3};
+    chain_turn = 0;
+    chain_two_tools = 0;
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
+    /* A pause returns control without launching new work, even at an
+     * over-threshold seam: the owed compaction belongs to the run that
+     * continues the turn (the frontend settles it before re-entry). */
+    EXPECT(result.outcome == AGENT_LOOP_PAUSED);
+    EXPECT(ctx.compactions == 0);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+    config_set_override("context_limit", NULL);
+    config_set_override("compact.threshold", NULL);
+    config_set_override("compact.auto", NULL);
+}
+
+/* Turn 1 emits a tool call and completes; turn 2 fails before any content
+ * but reports billable usage on its EV_ERROR. */
+static int chain_then_error_usage_stream(struct provider *p, const struct context *ctx,
+                                         const char *model, stream_cb cb, void *user,
+                                         http_tick_cb tick, void *tick_user)
+{
+    (void)p;
+    (void)model;
+    (void)tick;
+    (void)tick_user;
+    EXPECT(ctx != NULL);
+    chain_turn++;
+    if (chain_turn == 1) {
+        emit_tool_call(cb, user, "c1");
+        struct stream_usage usage = {.input_tokens = 10,
+                                     .output_tokens = 2,
+                                     .cached_tokens = -1,
+                                     .cache_write_tokens = -1,
+                                     .cache_write_1h_tokens = -1,
+                                     .cost = -1};
+        emit_event(cb, user, (struct stream_event){.kind = EV_DONE, .u.done = {.usage = usage}});
+        return 0;
+    }
+    static const struct stream_usage usage = {.input_tokens = 20,
+                                              .output_tokens = 0,
+                                              .cached_tokens = -1,
+                                              .cache_write_tokens = -1,
+                                              .cache_write_1h_tokens = -1,
+                                              .cost = -1};
+    emit_event(
+        cb, user,
+        (struct stream_event){.kind = EV_ERROR, .u.error = {.message = "boom", .usage = &usage}});
+    return 0;
+}
+
+static void test_loop_error_with_usage_keeps_boundary(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    session_enable_tools(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = chain_then_error_usage_stream};
+    struct loop_test_ctx ctx = {0};
+    chain_turn = 0;
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
+    /* The failed follow-up produced no content but its reported usage is
+     * retained as a footer — which owes the boundary, or the footer would
+     * read as part of the preceding tool turn. */
+    EXPECT(result.outcome == AGENT_LOOP_PROVIDER_ERROR);
+    EXPECT(!result.abort_marker_placed);
+    EXPECT(session.items[session.n_items - 1].kind == ITEM_TURN_USAGE);
+    EXPECT(session.items[session.n_items - 2].kind == ITEM_TURN_BOUNDARY);
+
+    int boundaries = 0;
+    int usage_items = 0;
+    for (size_t i = 0; i < session.n_items; i++) {
+        boundaries += session.items[i].kind == ITEM_TURN_BOUNDARY;
+        usage_items += session.items[i].kind == ITEM_TURN_USAGE;
+    }
+    EXPECT(boundaries == 2);
+    EXPECT(usage_items == 2);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
 static void test_loop_reports_provider_error(void)
 {
     struct agent_session session;
@@ -487,6 +847,33 @@ static void test_loop_reports_provider_error(void)
     EXPECT(result.turns == 1);
     EXPECT_STR_EQ(session.items[result.final_items_from].text, "partial\n" INTERRUPT_MARKER);
     EXPECT(session.items[session.n_items - 1].kind == ITEM_TURN_USAGE);
+    /* Repair marked the partial text, so a resume must speak for the user. */
+    EXPECT(result.abort_marker_placed);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_loop_prestream_error_leaves_no_marker(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = scripted_stream};
+    script = SCRIPT_PRESTREAM_ERROR;
+    struct agent_loop_params params = {
+        .session = &session,
+        .provider = &provider,
+        .max_turns = 2,
+    };
+
+    struct agent_loop_result result;
+    agent_loop_run(&params, &result);
+    /* A failure before any output leaves history untouched — a marker-free
+     * stop, so an empty-send resume is a pure retry with nothing appended. */
+    EXPECT(result.outcome == AGENT_LOOP_PROVIDER_ERROR);
+    EXPECT(!result.abort_marker_placed);
+    EXPECT(session.n_items == 2); /* boundary + user message only */
 
     agent_loop_result_destroy(&result);
     agent_session_free(&session);
@@ -533,7 +920,17 @@ int main(void)
     test_loop_enforces_max_turns();
     test_loop_cancels_tool_batch();
     test_loop_cancel_still_refuses_disabled_tool();
+    test_loop_pause_runs_whole_batch();
+    test_loop_pause_preempts_empty_turn();
+    test_loop_pause_preempts_follow_up_leaves_no_boundary();
+    test_loop_continued_run_owes_boundary();
+    test_loop_continued_preempted_run_leaves_no_boundary();
+    test_loop_empty_completion_keeps_boundary();
+    test_loop_pause_on_final_turn_completes();
+    test_loop_pause_defers_seam_compaction();
+    test_loop_error_with_usage_keeps_boundary();
     test_loop_reports_provider_error();
+    test_loop_prestream_error_leaves_no_marker();
     test_loop_requests_mid_chain_compaction();
     T_REPORT();
 }

@@ -174,7 +174,8 @@ static const struct slash_cmd COMMANDS[] = {
 static const struct shortcut_def SHORTCUTS[] = {
     {.key = "enter", .desc = "submit prompt"},
     {.key = "shift-enter", .desc = "insert newline (terminal must be configured to send LF)"},
-    {.key = "esc", .desc = "interrupt model or running tool"},
+    {.key = "esc", .desc = "pause after the current step to steer the model"},
+    {.key = "esc esc", .desc = "interrupt model or running tool immediately"},
     {.key = "ctrl-c", .desc = "cancel current prompt line"},
     {.key = "ctrl-d", .desc = "quit (on empty prompt)"},
     {.key = "ctrl-l", .desc = "clear screen and redraw prompt"},

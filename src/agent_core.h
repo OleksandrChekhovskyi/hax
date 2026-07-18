@@ -18,6 +18,13 @@ struct catalog_split; /* catalog.h — consumers of spend_split include it */
  * loop (history shaping) and dispatch (the rendered skip block) agree. */
 #define INTERRUPT_MARKER "[interrupted]"
 
+/* Sentinel user message appended when the user resumes an interrupted (or
+ * error-marked) turn with an empty send: history ends in INTERRUPT_MARKERs
+ * there, and sampling straight past them would hand the model a stop and
+ * a go at once. The terse marker records the actual user act — a
+ * deliberate "keep going" — in the same bracket idiom. */
+#define CONTINUE_MARKER "[continue]"
+
 /* Run-wide options parsed from CLI flags. Lives here (not in agent.h)
  * so the one-shot path can consume it without dragging in the
  * interactive REPL header. */

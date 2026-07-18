@@ -1399,6 +1399,16 @@ void input_set_modal_completer(struct input *in, const struct input_modal_comple
     in->completer = mc;
 }
 
+void input_set_empty_submit(struct input *in, int enabled)
+{
+    in->empty_submit = enabled;
+}
+
+int input_cancelled(const struct input *in)
+{
+    return in->last_cancelled;
+}
+
 void input_history_open_default(struct input *in)
 {
     /* Skip persistence in non-interactive sessions. `echo prompt | hax`
@@ -1420,6 +1430,7 @@ void input_history_open_default(struct input *in)
 
 char *input_readline(struct input *in, const char *prompt)
 {
+    in->last_cancelled = 0;
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
         size_t n;
         char *raw = read_line_canonical(&n);
@@ -1527,8 +1538,9 @@ char *input_readline(struct input *in, const char *prompt)
             in->last_cursor_row = 0;
             in->last_rows = 0;
             break;
-        case 0x0d: /* CR — Enter submits, no-op on empty buffer */
-            if (in->len > 0)
+        case 0x0d: /* CR — Enter submits; empty buffer only when the
+                    * caller opted in (resumable-turn "continue") */
+            if (in->len > 0 || in->empty_submit)
                 submit = 1;
             break;
         case 0x0e: /* Ctrl-N */
@@ -1607,8 +1619,10 @@ char *input_readline(struct input *in, const char *prompt)
 
     if (eof && in->len == 0)
         return NULL;
-    if (cancel)
+    if (cancel) {
+        in->last_cancelled = 1;
         return xstrdup("");
+    }
     /* Sanitize before handing off: paste / $EDITOR content may contain
      * malformed UTF-8 (binary fragments, truncated multi-byte) that
      * downstream JSON builders (jansson) reject, silently dropping the

@@ -229,6 +229,25 @@ static void display_stats_line(struct render_ctx *r, const struct provider *p, c
 static int agent_stream_tick(void *user)
 {
     struct render_ctx *r = user;
+    /* Acknowledge a soft Esc: nothing visibly changes until the loop
+     * reaches its seam, so the spinner label is the confirmation that
+     * the pause was registered — and the reminder that a second Esc
+     * escalates. Force-set every tick: a keypress acknowledgment can't
+     * wait out settle hysteresis against per-delta "thinking" requests,
+     * and set_label is idempotent (redraws only on actual change) while
+     * discarding any deferred request that landed between ticks. */
+    if (interrupt_soft_requested() && !interrupt_requested()) {
+        spinner_set_label(r->spinner, "pausing", "pausing... (esc again to interrupt)");
+        /* A request that has produced no content yet — still prefilling,
+         * sent in the race window right after the previous seam, or
+         * sleeping out a retry backoff — is cancelled outright: there is
+         * nothing streamed for the pause to lose, and letting it run would
+         * delay the pause by a whole turn, tools included. The loop turns
+         * the resulting empty turn into AGENT_LOOP_PAUSED; resume simply
+         * re-sends the request. */
+        if (!r->stream_content_seen)
+            return 1;
+    }
     /* Retry countdown wins over the other tick windows: during a retry
      * sleep the model isn't streaming at all. Repaint each tick so the
      * seconds count visibly shrinks. */
@@ -265,6 +284,13 @@ static int render_on_event(const struct stream_event *ev, void *user)
         r->retry_deadline_at = 0;
         spinner_set_label(r->spinner, "working", "working...");
     }
+
+    /* First model output of any kind closes the soft-interrupt free-
+     * cancellation window (see agent_stream_tick): from here on a pause
+     * waits for the turn's seam instead of aborting the stream. */
+    if (ev->kind == EV_TEXT_DELTA || ev->kind == EV_REASONING_DELTA ||
+        ev->kind == EV_REASONING_ITEM || ev->kind == EV_TOOL_CALL_START)
+        r->stream_content_seen = 1;
 
     switch (ev->kind) {
     case EV_TEXT_DELTA:
@@ -598,8 +624,20 @@ int agent_apply_settings(struct agent_state *st, struct provider *p)
     return 0;
 }
 
+/* Any wholesale history rewrite invalidates a pending resumable turn: the
+ * trailing state an empty send would continue no longer exists (or no
+ * longer means what the hint claims). A deferred compaction debt dies with
+ * it — it described the size of history that is gone. */
+static void resume_clear(struct agent_state *st)
+{
+    st->resume = AGENT_RESUME_NONE;
+    st->resume_marked = 0;
+    st->compact_deferred = 0;
+}
+
 void agent_new_conversation(struct agent_state *st)
 {
+    resume_clear(st);
     agent_session_reset(st->sess);
     transcript_log_reset(st->tlog, st->sess->sys, st->sess->tools, st->sess->n_tools);
     /* Rotate to a fresh session file so the cleared conversation doesn't
@@ -617,9 +655,9 @@ void agent_new_conversation(struct agent_state *st)
 }
 
 /* Render the standalone "[interrupted]" marker as its own dim out-of-band
- * block. Shared by the live interrupt path (agent_run's turn-interrupted
- * branch) and history replay, so a resumed interrupt looks the same as a
- * fresh one rather than as plain assistant text. */
+ * block during history replay, rather than as plain assistant text. Live
+ * interrupts render no marker line — there the resume hint above the next
+ * prompt is the visible cue. */
 static void render_interrupt_marker(struct render_ctx *r)
 {
     render_open_block(r);
@@ -627,6 +665,44 @@ static void render_interrupt_marker(struct render_ctx *r)
     disp_printf(&r->disp, "%s", INTERRUPT_MARKER);
     disp_raw(ANSI_RESET);
     disp_putc(&r->disp, '\n');
+    fflush(stdout);
+}
+
+/* One dim line directly above the prompt while a resumable turn is
+ * pending, in the transcript's bracket idiom. Re-emitted on every prompt
+ * draw (not just once at the stop) so the explanation survives slash
+ * command output scrolling it away: the invariant is that whenever an
+ * empty send would continue the turn, the line saying so is on screen. */
+static void render_resume_hint(struct render_ctx *r, enum agent_resume resume)
+{
+    const char *what;
+    const char *action = "enter to continue";
+    switch (resume) {
+    case AGENT_RESUME_PAUSED:
+        what = "paused";
+        break;
+    case AGENT_RESUME_MAX_TURNS:
+        what = "max turns reached";
+        break;
+    case AGENT_RESUME_INTERRUPTED:
+        what = "interrupted";
+        break;
+    case AGENT_RESUME_ERROR:
+        what = "provider error";
+        action = "enter to retry";
+        break;
+    default:
+        return;
+    }
+    disp_raw(ANSI_DIM);
+    disp_printf(&r->disp, "[%s — %s]", what, action);
+    disp_raw(ANSI_RESET);
+    disp_putc(&r->disp, '\n');
+    disp_putc(&r->disp, '\n'); /* one blank line between hint and prompt */
+    /* Commit the newlines instead of leaving them held: the editor paints
+     * the prompt with \r + erase-line on the cursor's row, which would wipe
+     * the hint if the cursor were still parked at the end of its line. */
+    disp_emit_held(&r->disp);
     fflush(stdout);
 }
 
@@ -852,6 +928,7 @@ void agent_resume_session(struct agent_state *st, const char *path)
     /* Old bash temp files referenced by the prior conversation are now
      * unreachable, same as on /new. */
     bash_cleanup_tempfiles();
+    resume_clear(st);
     replay_user_turn(st->r, s, "resumed");
 }
 
@@ -898,6 +975,7 @@ const char *agent_user_turn_text(const struct agent_session *s, size_t turn)
 static void reshape_after_cut(struct agent_state *st, size_t cut, size_t turn, const char *lead)
 {
     struct agent_session *s = st->sess;
+    resume_clear(st);
 
     /* Capture the discarded prompt before its item is freed. The REPL seeds it
      * into recall after the /undo or /fork command line, so Up-arrow reaches
@@ -1036,17 +1114,20 @@ static int compact_on_event(const struct stream_event *ev, void *user)
     return 0;
 }
 
+/* Compaction has no seam to pause at — a soft Esc cancels it like a hard
+ * one. The transaction is retriable (auto-compact re-triggers, /compact
+ * can be re-run), so responsiveness wins over finishing the summary. */
 static int compact_tick(void *user)
 {
     struct compact_ev *ce = user;
-    return agent_stream_tick(ce->render);
+    return agent_stream_tick(ce->render) || interrupt_soft_requested();
 }
 
 static int compact_cancelled(void *user)
 {
     (void)user;
     interrupt_settle();
-    return interrupt_requested();
+    return interrupt_requested() || interrupt_soft_requested();
 }
 
 /* Draw a dim, out-of-band "── … ──" status line for compaction. */
@@ -1138,6 +1219,25 @@ int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
     render_transition(r, RS_IDLE);
 
     int compacted = result.outcome == COMPACT_COMPLETE;
+    /* The "current window" snapshot describes a response whose history no
+     * longer exists — clear it like reshape_after_cut does, so threshold
+     * checks against it (the resumable-prompt preflight in particular)
+     * don't re-compact the fresh seed on stale numbers. /session shows a
+     * context figure again after the next reported response. */
+    if (compacted) {
+        st->stats.last_ctx = 0;
+        st->stats.last_limit = 0;
+        /* Any successful compaction — manual included — settles a deferred
+         * end-of-turn pass: the oversized history it referred to is gone. */
+        st->compact_deferred = 0;
+    }
+    /* A manual /compact replaced the trailing turn a pending resume would
+     * have continued with the summary seed; the seed already prompts the
+     * model on its own, so drop the resumable state rather than have an
+     * empty send bolt a stale [continue] onto it. The auto path only runs
+     * where no resumable state exists (mid-loop, or after COMPLETE). */
+    if (compacted && !is_auto)
+        resume_clear(st);
     switch (result.outcome) {
     case COMPACT_COMPLETE:
         compact_notice(r, "conversation compacted");
@@ -1193,6 +1293,7 @@ static void repl_loop_turn_begin(void *user)
     if (r->md)
         md_reset(r->md, md_wrap_width());
     r->disp.saw_text = 0;
+    r->stream_content_seen = 0;
 }
 
 static void repl_loop_turn_end(const struct agent_loop_turn *loop_turn, void *user)
@@ -1216,7 +1317,11 @@ static int repl_loop_checkpoint(void *user)
 {
     (void)user;
     interrupt_settle();
-    return interrupt_requested();
+    if (interrupt_requested())
+        return AGENT_LOOP_SIG_ABORT;
+    if (interrupt_soft_requested())
+        return AGENT_LOOP_SIG_PAUSE;
+    return AGENT_LOOP_SIG_NONE;
 }
 
 static void repl_loop_tool_seen(const struct item *call, void *user)
@@ -1246,9 +1351,10 @@ static void repl_loop_compact(void *user)
     struct repl_loop_ctx *ctx = user;
     agent_compact(ctx->state, NULL, 1);
     /* agent_compact owns the watcher while it streams and leaves it disarmed.
-     * A cancel stays latched for agent_loop; otherwise restore the watcher for
-     * the next continuation turn. */
-    if (!interrupt_requested()) {
+     * A cancel — hard abort or soft pause — stays latched so the loop's
+     * post-compact checkpoint sees it; otherwise restore the watcher for the
+     * next continuation turn. */
+    if (!interrupt_requested() && !interrupt_soft_requested()) {
         interrupt_clear();
         interrupt_arm();
     }
@@ -1358,6 +1464,14 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
 
     for (;;) {
         disp_block_separator(&r.disp);
+        /* While a turn is resumable, the hint owns the empty-send meaning;
+         * emitted with every prompt draw so it can't be scrolled away by
+         * slash output while the state persists. */
+        if (state.resume != AGENT_RESUME_NONE)
+            render_resume_hint(&r, state.resume);
+        /* Only a resumable turn gives an empty send a meaning; otherwise
+         * the editor keeps swallowing bare Enter. */
+        input_set_empty_submit(input, state.resume != AGENT_RESUME_NONE);
         cursor_show();
         char *line = input_readline(input, prompt);
         cursor_hide();
@@ -1365,7 +1479,12 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
             putchar('\n');
             break;
         }
-        if (!*line) {
+        /* An empty send is a no-op — except against a resumable turn,
+         * where it means "continue": fall through with the empty line and
+         * the resume path below re-enters the loop without new input.
+         * Ctrl-C also returns "" but is a discard — a cancelled steering
+         * draft must never launch the turn it was meant to redirect. */
+        if (!*line && (state.resume == AGENT_RESUME_NONE || input_cancelled(input))) {
             free(line);
             continue;
         }
@@ -1384,25 +1503,27 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
          * a different cursor state (e.g. /resume's full-screen picker) can
          * override it. */
         r.disp.trail = 1;
-        struct slash_ctx sctx = {.state = &state};
-        if (slash_dispatch(line, &sctx) != SLASH_NOT_A_COMMAND) {
-            /* A /provider switch swaps state.provider (destroying the old
-             * one); resync the local so the next turn streams against the
-             * new provider and its context-limit / usage reads track it. */
-            p = (struct provider *)state.provider;
-            input_history_add_session(input, line);
-            /* /undo and /fork stash the prompt they discarded; seed it after
-             * the command line so Up-arrow reaches it first. */
-            if (state.pending_recall) {
-                input_history_add_session(input, state.pending_recall);
-                free(state.pending_recall);
-                state.pending_recall = NULL;
+        if (*line) {
+            struct slash_ctx sctx = {.state = &state};
+            if (slash_dispatch(line, &sctx) != SLASH_NOT_A_COMMAND) {
+                /* A /provider switch swaps state.provider (destroying the old
+                 * one); resync the local so the next turn streams against the
+                 * new provider and its context-limit / usage reads track it. */
+                p = (struct provider *)state.provider;
+                input_history_add_session(input, line);
+                /* /undo and /fork stash the prompt they discarded; seed it after
+                 * the command line so Up-arrow reaches it first. */
+                if (state.pending_recall) {
+                    input_history_add_session(input, state.pending_recall);
+                    free(state.pending_recall);
+                    state.pending_recall = NULL;
+                }
+                free(line);
+                continue;
             }
-            free(line);
-            continue;
-        }
 
-        input_history_add(input, line);
+            input_history_add(input, line);
+        }
 
         /* No provider yet (the configured/default one couldn't construct, so
          * the REPL started without one): we can't stream. Checked before the
@@ -1438,8 +1559,56 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
          * placing it ahead of the user message puts the first round-trip's
          * header above the triggering user input, so the prompt and the
          * response it produced read as one group. The shared runner inserts
-         * subsequent boundaries before follow-up turns after tool dispatch. */
-        agent_session_add_user(&sess, line);
+         * subsequent boundaries before follow-up turns after tool dispatch.
+         *
+         * An empty send continues the pending resumable turn instead: a
+         * marked stop (interrupt / mid-stream error) gets the CONTINUE_MARKER
+         * user message so the transcript doesn't end on a bare stop, while a
+         * clean seam gets nothing — the loop itself owes (and lazily appends)
+         * the continued run's boundary. A typed message against a resumable
+         * turn just steers — it is an ordinary user message and needs no
+         * marker. */
+
+        /* An Esc-touched or incomplete run skipped the end-of-turn
+         * auto-compaction (Esc must return control without launching new
+         * work), leaving compact_deferred set; the run that continues
+         * settles the debt here, before its first request would exceed the
+         * window — and before the user's input is appended, so a steering
+         * message is never summarized away. */
+        int compacted = 0;
+        if (state.compact_deferred) {
+            compacted = agent_compact(&state, NULL, 1);
+            /* agent_compact cleared the latched interrupt flags on entry, so
+             * any latch now is an Esc pressed during the transaction: the
+             * user is backing out of the whole send, not just the
+             * compaction, and the debt stands for the next attempt. Return
+             * to the prompt — a typed steering line is already in editor
+             * history, one Up-arrow away. */
+            if (interrupt_requested() || interrupt_soft_requested()) {
+                free(line);
+                continue;
+            }
+            /* Settled on success (agent_compact clears the flag), attempted
+             * on failure: either way, don't retry ahead of every send. */
+            state.compact_deferred = 0;
+        }
+
+        /* After a successful compaction the summary seed replaced both the
+         * paused turn and its markers: an empty send streams against the
+         * seed as this run's user input, and like any continued run the
+         * response still owes its lazily-appended boundary. */
+        int continued = 0;
+        /* /session's "user turns" counts typed prompts (fresh or steering);
+         * an empty-send continuation — clean, [continue]-marked, or
+         * compacted — extends the turn already counted, however many times
+         * the loop pauses along the way. */
+        int new_user_turn = *line != 0;
+        if (*line)
+            agent_session_add_user(&sess, line);
+        else if (!compacted && state.resume_marked)
+            agent_session_add_user(&sess, CONTINUE_MARKER);
+        else
+            continued = 1;
         free(line);
         /* Flush the prompt to the log immediately, before we hand
          * control to the provider. If the stream hangs or the process
@@ -1472,7 +1641,6 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
         long user_turn_ctx = -1;
         long user_turn_start_ms = monotonic_ms();
         int user_turn_errored = 0;
-        int user_turn_interrupted = 0;
 
         /* Immediate label reset: a fresh user turn is a clean slate,
          * and the previous turn's promoted label must not describe it
@@ -1482,19 +1650,26 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
         spinner_set_label(r.spinner, "working", "working...");
         spinner_set_timer(r.spinner, user_turn_start_ms);
 
-        /* Arm the watcher for the duration of the continuation run — Esc from
-         * here on aborts the stream or running tool. Cleared first so a
-         * stray Esc from a previous user turn (e.g. user typed Esc during
-         * readline editing) doesn't auto-cancel this one. */
+        /* Arm the watcher for the duration of the continuation run — from
+         * here on the first Esc requests a soft pause at the next loop
+         * seam and a second aborts the stream or running tool. Cleared
+         * first so a stray Esc from a previous user turn (e.g. user typed
+         * Esc during readline editing) doesn't auto-cancel this one. */
         interrupt_clear();
         interrupt_arm();
+        /* Optional per-user-turn round-trip budget ("check in with me every
+         * N turns"): the loop stops AGENT_LOOP_MAX_TURNS at a clean seam and
+         * the resumable prompt continues it on an empty send — a periodic
+         * soft pause the agent applies to itself. 0/unset = unlimited. */
+        int max_turns = config_int("max_turns");
         struct repl_loop_ctx loop_ctx = {.state = &state};
         struct agent_loop_params loop_params = {
             .session = &sess,
             .provider = p,
             .tlog = state.tlog,
             .slog = state.slog,
-            .max_turns = -1,
+            .max_turns = max_turns > 0 ? max_turns : -1,
+            .continued = continued,
             .hooks =
                 {
                     .user = &loop_ctx,
@@ -1512,9 +1687,39 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
         agent_loop_run(&loop_params, &loop_result);
         user_turn_ctx = loop_result.last_context_tokens;
         user_turn_errored = loop_result.outcome == AGENT_LOOP_PROVIDER_ERROR;
-        user_turn_interrupted = loop_result.outcome == AGENT_LOOP_INTERRUPTED;
+        int user_turn_complete = loop_result.outcome == AGENT_LOOP_COMPLETE;
+        /* Rederive the resumable state from this run's outcome: every
+         * incomplete stop is continuable with an empty send, and only stops
+         * whose repair left interrupt markers need the CONTINUE_MARKER
+         * spoken on resume. */
+        switch (loop_result.outcome) {
+        case AGENT_LOOP_COMPLETE:
+            resume_clear(&state);
+            break;
+        case AGENT_LOOP_PAUSED:
+            state.resume = AGENT_RESUME_PAUSED;
+            state.resume_marked = 0;
+            break;
+        case AGENT_LOOP_MAX_TURNS:
+            state.resume = AGENT_RESUME_MAX_TURNS;
+            state.resume_marked = 0;
+            break;
+        case AGENT_LOOP_INTERRUPTED:
+            state.resume = AGENT_RESUME_INTERRUPTED;
+            state.resume_marked = loop_result.abort_marker_placed;
+            break;
+        case AGENT_LOOP_PROVIDER_ERROR:
+            state.resume = AGENT_RESUME_ERROR;
+            state.resume_marked = loop_result.abort_marker_placed;
+            break;
+        }
         agent_loop_result_destroy(&loop_result);
         interrupt_disarm();
+        /* Snapshot "did the user press Esc this run" now: the latched flags
+         * survive disarm, but agent_compact (the auto path below) clears
+         * them while it owns the watcher — reading lazily would forget the
+         * keypress. Hard implies soft, so this covers every Esc. */
+        int user_turn_soft = interrupt_soft_requested();
         /* The user turn is over: the end-of-user-turn auto-compaction
          * below and the next user turn's pre-stream spinner must not
          * carry this one's counter. */
@@ -1525,34 +1730,63 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
          * OSC-9 would corrupt the escape sequence. */
         render_transition(&r, RS_IDLE);
 
-        if (user_turn_interrupted)
-            render_interrupt_marker(&r);
+        /* No live [interrupted] marker line: the marker lives in history
+         * (and replays from there), while the on-screen cue is the resume
+         * hint the prompt loop is about to draw — rendering both would say
+         * "interrupted" twice in three lines. */
+        if (user_turn_complete && user_turn_soft) {
+            /* A soft Esc raced the final response: the turn completed
+             * before any pause point, so there is nothing to resume.
+             * Say so — silence here reads as a dropped keypress. */
+            render_open_block(&r);
+            disp_raw(ANSI_DIM);
+            disp_printf(&r.disp, "[finished before pause]");
+            disp_raw(ANSI_RESET);
+            disp_putc(&r.disp, '\n');
+            fflush(stdout);
+        }
 
         /* Time worked counts errored/interrupted turns too — the wall time
          * was spent either way, and /session's total should reflect it. */
         long user_turn_ms = monotonic_ms() - user_turn_start_ms;
         state.stats.worked_ms += user_turn_ms;
-        state.stats.turns++;
+        if (new_user_turn)
+            state.stats.turns++;
 
         if (!user_turn_errored)
             display_stats_line(&r, p, sess.model, user_turn_ctx, user_turn_ms, &state.stats);
 
         /* Auto-compaction: once the reported context usage nears the window,
-         * summarize and replace history before the next prompt. Skipped on an
-         * errored/interrupted user turn (no reliable token count, and the
-         * user may want to retry against intact history). Runs at this natural
-         * pause — the model has finished responding and we're about to wait
-         * for input — so no mid-task continuation is needed. */
-        if (!user_turn_errored && !user_turn_interrupted &&
-            compact_should_auto(user_turn_ctx, compact_context_limit(p, sess.model)))
-            agent_compact(&state, NULL, 1);
+         * summarize and replace history before the next prompt. Only after a
+         * completed, Esc-free user turn: an errored/interrupted one has no
+         * reliable token count and the user may want to retry against intact
+         * history; a resumable stop — or any Esc, including one that lost
+         * the race to the final response — must not launch another long
+         * model request right after the user asked to stop. Clean stops
+         * (pause, max turns, a raced Esc on a completed turn) record the
+         * debt instead, and the next send's preflight settles it. Errored
+         * and interrupted turns record nothing: their partial/marked state
+         * is exactly what a retry or [continue] must present intact, and if
+         * overflow is what broke the turn, the error is the user's cue to
+         * /compact explicitly. Runs at this natural pause — the model has
+         * finished responding and we're about to wait for input — so no
+         * mid-task continuation is needed. */
+        if (compact_should_auto(user_turn_ctx, compact_context_limit(p, sess.model))) {
+            if (user_turn_complete && !user_turn_soft)
+                agent_compact(&state, NULL, 1);
+            else if (user_turn_complete || state.resume == AGENT_RESUME_PAUSED ||
+                     state.resume == AGENT_RESUME_MAX_TURNS)
+                state.compact_deferred = 1;
+        }
 
         /* Ping the terminal so the user gets a notification / dock
-         * bounce when hax is back to idle. Skipped on Esc-interrupt
-         * since the user just pressed a key — they're already at the
-         * terminal. Errored user turns still notify: the user needs to
-         * know the request bounced. */
-        if (!user_turn_interrupted)
+         * bounce when hax is back to idle. Skipped after any Esc this
+         * run — pause, hard interrupt, or a pause that lost the race to
+         * the final response — since the user just pressed a key:
+         * they're already at the terminal. Errored and max-turns user
+         * turns still notify: the user needs to know the request
+         * bounced / the loop is waiting on them. */
+        if (!user_turn_soft)
             notify_attention();
     }
 

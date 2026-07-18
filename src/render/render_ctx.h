@@ -75,6 +75,13 @@ struct render_ctx {
     int retry_attempt;
     int retry_max;
 
+    /* The current stream has produced content (text, reasoning, or a
+     * tool call) — the gate for soft-interrupt stream cancellation: a
+     * request still prefilling has produced nothing a pause could lose,
+     * so the tick aborts it and the pause lands immediately instead of
+     * after a full extra turn. Reset per provider turn. */
+    int stream_content_seen;
+
     /* HAX_SHOW_REASONING — when 0, reasoning deltas drive only the
      * spinner label; no RS_REASONING transition is taken. */
     int show_reasoning;

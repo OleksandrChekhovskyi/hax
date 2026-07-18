@@ -245,6 +245,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         rc = 1;
         break;
     case AGENT_LOOP_INTERRUPTED:
+    case AGENT_LOOP_PAUSED: /* no checkpoint hook here — not reachable */
         rc = 1;
         break;
     case AGENT_LOOP_MAX_TURNS:

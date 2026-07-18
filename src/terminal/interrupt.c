@@ -24,6 +24,10 @@ struct watcher {
     int wake_pipe_r; /* read end watched alongside stdin */
     int wake_pipe_w; /* write end pinged on disarm to break the watcher's poll */
     atomic_int requested;
+    /* Soft-pause stage: latched by the first confirmed bare Esc of an
+     * armed window; the next one escalates to `requested`. Hard implies
+     * soft — the escalation passes through it. */
+    atomic_int soft;
     /* 1 while the classifier is in IC_PENDING_ESC — \x1b seen, awaiting
      * the follow-up byte that decides CSI/SS3 vs bare Esc. Used by
      * interrupt_settle to let agent decisions wait out the window
@@ -139,6 +143,15 @@ static void leave_raw_mode(void)
     W.raw_mode_active = 0;
 }
 
+/* One confirmed bare Esc: first press pauses (soft), a repeat aborts
+ * (hard). atomic_exchange makes the two-press escalation race-free even
+ * against a concurrent interrupt_clear between the presses. */
+static void latch_request(void)
+{
+    if (atomic_exchange(&W.soft, 1))
+        atomic_store(&W.requested, 1);
+}
+
 /* ---------- watcher thread ---------- */
 
 /* Returns 0 on timeout, >0 on data, -1 on error (errno set). Sets *src
@@ -221,7 +234,7 @@ static void *watcher_thread(void *arg)
             if (pr == 0) {
                 /* Timeout while a \x1b was pending — confirmed bare Esc. */
                 if (interrupt_classifier_timeout(&ic))
-                    atomic_store(&W.requested, 1);
+                    latch_request();
                 atomic_store(&W.pending, ic.state == IC_PENDING_ESC);
                 continue;
             }
@@ -255,7 +268,7 @@ static void *watcher_thread(void *arg)
                 break; /* EOF on stdin — stop watching */
             for (ssize_t i = 0; i < n; i++) {
                 if (interrupt_classifier_feed(&ic, buf[i]))
-                    atomic_store(&W.requested, 1);
+                    latch_request();
             }
             atomic_store(&W.pending, ic.state == IC_PENDING_ESC);
         }
@@ -333,6 +346,7 @@ void interrupt_init(void)
     pthread_mutex_init(&W.mu, NULL);
     pthread_cond_init(&W.cv, NULL);
     atomic_store(&W.requested, 0);
+    atomic_store(&W.soft, 0);
 
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
         return;
@@ -441,6 +455,13 @@ int interrupt_requested(void)
     return atomic_load(&W.requested);
 }
 
+int interrupt_soft_requested(void)
+{
+    if (!W.started)
+        return 0;
+    return atomic_load(&W.soft);
+}
+
 /* Zero-timeout poll on stdin — true if there are bytes the watcher
  * hasn't read yet. Multiple concurrent pollers are fine on POSIX; we
  * never read from this fd, only ask the kernel about its readiness. */
@@ -480,4 +501,5 @@ void interrupt_settle(void)
 void interrupt_clear(void)
 {
     atomic_store(&W.requested, 0);
+    atomic_store(&W.soft, 0);
 }

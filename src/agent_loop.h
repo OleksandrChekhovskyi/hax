@@ -14,6 +14,11 @@ struct agent_loop_turn {
     struct stream_usage usage;
     char *error_message;
     long elapsed_ms;
+    /* EV_DONE arrived — the stream completed normally. Distinguishes a
+     * legitimately empty response (completed, owes its boundary and usage
+     * footer) from a stream cancelled before producing anything (a soft
+     * interrupt pre-empting a prefilling request — leaves no trace). */
+    int done;
 };
 
 /* Run one model turn. observer receives each event for optional
@@ -39,6 +44,12 @@ struct agent_abort_outcome {
     size_t items_to;
 };
 
+/* True when the turn's stream produced anything at all — finished items,
+ * open text/reasoning, or a pending tool call. Abort repair appends items
+ * exactly when this holds (plus the always-marked user-cancel case), so the
+ * loop uses it to decide whether a follow-up turn's boundary is owed. */
+int agent_loop_turn_has_state(const struct agent_loop_turn *loop_turn);
+
 /* Preserve partial output from an aborted turn and keep history well formed:
  * tag partial text, absorb completed items, synthesize results for calls that
  * were never run, and add a standalone marker when the abort policy requires
@@ -60,10 +71,23 @@ enum agent_loop_tool_action {
     AGENT_LOOP_TOOL_SKIP,
 };
 
-/* Optional frontend behavior. checkpoint settles and samples cancellation;
- * tool_call must return the matching owned result for the requested action.
- * A NULL tool_call uses silent semantic tool execution. compact performs the
- * frontend's compaction transaction when the shared threshold is reached. */
+/* What the frontend's checkpoint hook asks of the loop. ABORT stops now:
+ * remaining batch tools are skipped with interrupted results and the run
+ * ends AGENT_LOOP_INTERRUPTED. PAUSE is the soft variant: in-flight work
+ * (the streamed response, every tool in the batch) still completes, and
+ * the run ends AGENT_LOOP_PAUSED at the turn seam with clean, fully
+ * paired history — no marker — so the frontend can resume it verbatim. */
+enum agent_loop_signal {
+    AGENT_LOOP_SIG_NONE = 0,
+    AGENT_LOOP_SIG_PAUSE,
+    AGENT_LOOP_SIG_ABORT,
+};
+
+/* Optional frontend behavior. checkpoint settles and samples cancellation,
+ * returning an agent_loop_signal; tool_call must return the matching owned
+ * result for the requested action. A NULL tool_call uses silent semantic
+ * tool execution. compact performs the frontend's compaction transaction
+ * when the shared threshold is reached. */
 struct agent_loop_hooks {
     void *user;
     stream_cb observe;
@@ -77,10 +101,15 @@ struct agent_loop_hooks {
     void (*compact)(void *user);
 };
 
+/* Every outcome except COMPLETE leaves an incomplete user turn behind.
+ * PAUSED and MAX_TURNS stop at a clean turn seam (all calls paired, no
+ * markers), so re-running the loop against the same history continues the
+ * turn; INTERRUPTED and PROVIDER_ERROR ran abort repair first. */
 enum agent_loop_outcome {
     AGENT_LOOP_COMPLETE,
     AGENT_LOOP_PROVIDER_ERROR,
     AGENT_LOOP_INTERRUPTED,
+    AGENT_LOOP_PAUSED,
     AGENT_LOOP_MAX_TURNS,
 };
 
@@ -92,6 +121,12 @@ struct agent_loop_result {
      * usage items are outside this half-open range. */
     size_t final_items_from;
     size_t final_items_to;
+    /* Abort repair left interrupt markers in history (always for a user
+     * cancel; for a provider error only when the stream had produced
+     * state). A frontend resuming such a run must speak for the user —
+     * history ends mid-story otherwise — where a marker-free stop resumes
+     * silently. */
+    int abort_marker_placed;
     char *error_message;
 };
 
@@ -101,6 +136,13 @@ struct agent_loop_params {
     struct transcript_log *tlog;
     struct session_log *slog;
     int max_turns; /* < 0 means unlimited */
+    /* Resuming an incomplete user turn with no new user input: the first
+     * round-trip continues the previous seam rather than following a fresh
+     * user message, so it owes a turn boundary like a follow-up turn does
+     * (appended lazily, only once the turn leaves items — an eager one
+     * would dangle as an empty transcript turn if this request too is
+     * pre-empted or fails before output). */
+    int continued;
     struct agent_loop_hooks hooks;
 };
 

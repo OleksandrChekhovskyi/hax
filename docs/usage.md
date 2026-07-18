@@ -155,7 +155,8 @@ The REPL supports readline-style editing. Hax-specific or notable bindings:
 | --- | --- |
 | Enter | Submit prompt. |
 | Shift-Enter | Insert newline, if your terminal sends LF for Shift-Enter. |
-| Esc | Interrupt the model or a running tool. |
+| Esc | Pause after the current step (soft interrupt): in-flight work finishes, then the prompt returns. |
+| Esc Esc | Interrupt the model or a running tool immediately. |
 | Ctrl-C | Cancel the current prompt line. |
 | Ctrl-D | Quit on an empty prompt. |
 | Ctrl-L | Clear screen and redraw the prompt. |
@@ -169,6 +170,36 @@ project's files (tracked and untracked-but-not-ignored inside a git repository; 
 `@src` token; cancelling leaves the prompt untouched. The path is inserted as plain text — the
 model reads the file with its `read` tool as usual. fzf on `$PATH` is required: without it,
 Tab on an `@` word prints a short notice instead, and `/help` shows the binding dimmed.
+
+## Pausing, steering, and resuming
+
+While the model is working, the first Esc requests a *soft* pause: nothing in flight is
+cancelled — the streaming response finishes and any tool calls it made run to completion — and
+the loop then stops at the next clean turn boundary and returns to the normal prompt. The one
+exception is a request that has produced no output yet (the model is still processing the
+prompt): there is nothing a pause could lose, so it is stopped right away and simply re-sent on
+resume — without this, an Esc pressed during that silence would ride through a whole extra
+turn, tools included, before pausing. A dim hint above the prompt
+(`[paused — enter to continue]`) explains the state:
+
+- **Enter on an empty prompt** resumes the turn exactly where it stopped, adding nothing to
+  the conversation.
+- **Typing a message** steers: it lands as an ordinary user message at the boundary — after
+  the completed tool results, before the next model request — so it is written against the
+  state you can see, never against work that happened after you hit send.
+- **Slash commands work normally** at the paused prompt: `/model` to switch models
+  mid-task, `/compact`, `/session`, and the rest. The hint reappears with the prompt until
+  the turn is resumed or the state is cleared by a history-rewriting command (`/new`,
+  `/undo`, `/fork`, `/resume`, a manual `/compact`).
+
+A second Esc escalates to a hard interrupt — the stream is aborted, a running tool is killed,
+and the partial turn is repaired with `[interrupted]` markers so history stays well-formed.
+Hard-interrupted and provider-errored turns are resumable the same way: Enter continues
+(recorded as a terse `[continue]` user message when the transcript ends in `[interrupted]`
+markers, as a silent retry after a clean pre-stream failure), while a typed message simply
+takes the turn in a new direction instead. `max_turns` (see
+[configuration.md](./configuration.md)) stops the loop at the same kind of boundary every N
+round-trips, turning the pause into a periodic check-in.
 
 ## Prompt context
 

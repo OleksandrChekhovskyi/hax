@@ -6,17 +6,23 @@
  * Esc-key interrupt watcher.
  *
  * Owns a background thread that, while *armed*, reads bytes from stdin in
- * non-canonical mode and sets a latched flag when the user presses bare Esc.
+ * non-canonical mode and sets latched flags when the user presses bare Esc.
  * Bare Esc is distinguished from CSI/SS3 escape sequences (arrow keys, F-keys,
  * etc.) via a short follow-up timeout — \x1b followed by another byte within
  * ESC_TIMEOUT_MS is the start of an escape sequence and is consumed silently;
  * \x1b alone is the user wanting to interrupt.
  *
+ * Two-stage escalation: the first bare Esc in an armed window latches the
+ * *soft* flag (a pause request — let in-flight work finish, stop at the
+ * next clean boundary); a second bare Esc escalates to the *hard* flag
+ * (abort now). Hard implies soft. interrupt_clear() resets both.
+ *
  * Lifecycle:
  *   interrupt_init() once at startup.
  *   <user enters prompt — disarmed; the line editor owns the tty>
  *   interrupt_arm() — raw mode on, watcher reading.
- *   <stream and tools run, periodically check interrupt_requested()>
+ *   <stream and tools run, periodically check interrupt_requested() /
+ *    interrupt_soft_requested()>
  *   interrupt_disarm() — canonical mode restored, watcher paused, stdin drained.
  *   <next prompt>
  *
@@ -43,9 +49,14 @@ void interrupt_arm(void);
  * the next readline(). Idempotent. */
 void interrupt_disarm(void);
 
-/* Latched abort flag. Stays set until interrupt_clear(). Safe to call
- * from any thread. */
+/* Latched hard-abort flag — the second Esc of an armed window. Stays set
+ * until interrupt_clear(). Safe to call from any thread. */
 int interrupt_requested(void);
+
+/* Latched soft-pause flag — the first Esc of an armed window. Also set
+ * whenever the hard flag is (the escalation passes through it). Stays
+ * set until interrupt_clear(). Safe to call from any thread. */
+int interrupt_soft_requested(void);
 
 /* Block briefly while the classifier is mid-decision on a \x1b — i.e.
  * waiting for the CSI/SS3 follow-up byte or the timeout that confirms a
@@ -55,7 +66,7 @@ int interrupt_requested(void);
  * side-effecting tools, sending another model request). */
 void interrupt_settle(void);
 
-/* Clear the latched flag. Call before each new arm cycle. */
+/* Clear both latched flags. Call before each new arm cycle. */
 void interrupt_clear(void);
 
 /* ---------- pure-logic byte classifier (exposed for testing) ----------

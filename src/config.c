@@ -71,6 +71,8 @@ static const struct config_setting REGISTRY[] = {
      "Auto-summarize history when it nears the context window (manual /compact still works)"},
     {"compact.threshold",          "HAX_COMPACT_THRESHOLD",       "85",
      "Auto-compact when context usage reaches this percent of the window"},
+    {"max_turns",                  "HAX_MAX_TURNS",               NULL,
+     "Interactive: pause for confirmation after this many model round-trips per user turn"},
 
     /* model catalog */
     {"catalog.url",                "HAX_CATALOG_URL",             "https://models.dev/api.json",

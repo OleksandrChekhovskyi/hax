@@ -30,7 +30,8 @@ struct session_stats {
      * spend_free before zeroing the stats. */
     struct spend_totals spend;
     long worked_ms; /* wall time spent inside user turns */
-    long turns;     /* user turns run */
+    long turns;     /* user turns started by typed input; empty-send
+                     * continuations of a resumable turn don't re-count */
     long requests;  /* model round-trips streamed (glossary: turns) */
     /* Tool invocations the model made, total and per type. Per-type slots
      * key on the registry's static tool names (find_tool), which outlive
@@ -55,6 +56,20 @@ struct session_stats {
     long last_limit;
 };
 
+/* Why the last user turn stopped short of completion — the REPL's
+ * resumable state. While set, an empty send at the prompt continues the
+ * turn (a dim hint line above the prompt says so), and a typed message
+ * steers it; agent_run rederives it from every loop outcome, and any
+ * operation that rewrites history wholesale (/new, /resume, /undo,
+ * /fork, manual /compact) clears it back to NONE. */
+enum agent_resume {
+    AGENT_RESUME_NONE = 0,
+    AGENT_RESUME_PAUSED,      /* soft interrupt stopped the loop at a turn seam */
+    AGENT_RESUME_MAX_TURNS,   /* the per-user-turn round-trip budget ran out */
+    AGENT_RESUME_INTERRUPTED, /* hard interrupt; abort repair left markers */
+    AGENT_RESUME_ERROR,       /* provider error; empty send retries */
+};
+
 /* Live REPL state owned by agent_run, exposed to slash handlers (and
  * any future callers that need to mutate the conversation) so a single
  * pointer is enough to act on history, the optional HAX_TRANSCRIPT log,
@@ -76,6 +91,17 @@ struct agent_state {
      * recall *after* the command line so the first Up-arrow reaches the prompt,
      * not the /undo/fork line. Owned; consumed and freed per slash command. */
     char *pending_recall;
+    /* Resumable-turn state (see enum agent_resume). resume_marked says the
+     * stopped turn carries interrupt markers, so an empty-send resume must
+     * append the CONTINUE_MARKER user message rather than nothing. */
+    enum agent_resume resume;
+    int resume_marked;
+    /* The end-of-turn auto-compaction was owed but skipped because the run
+     * ended with an Esc or short of completion; the next send settles it
+     * before its request. An explicit flag, not re-derived from last_ctx,
+     * so a compaction that runs and fails degrades to one attempt — not a
+     * retry ahead of every future send. */
+    int compact_deferred;
     /* Session usage totals — read by /session, reset by /new. */
     struct session_stats stats;
 };

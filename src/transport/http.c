@@ -241,19 +241,24 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
     long status = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 
-    sse_parser_finalize(&s.parser);
+    /* Distinguish "user cancelled" from a real transport error so the
+     * agent can react cleanly without surfacing it as [error: ...]. Both
+     * the write-callback short-return (CURLE_WRITE_ERROR) and the
+     * progress-callback abort (CURLE_ABORTED_BY_CALLBACK) only fire when
+     * tick() returned non-zero, so trusting the tick hook here is safe.
+     * Decided before finalizing the parser: a cancelled stream must not
+     * flush a buffered event — the agent acted on "nothing arrived" when
+     * it aborted, and a late event would be rendered only to be dropped. */
+    int cancelled = rc != CURLE_OK && tick && tick(tick_user);
+    if (!cancelled)
+        sse_parser_finalize(&s.parser);
 
     curl_slist_free_all(hl);
     curl_easy_cleanup(curl);
 
     resp->status = status;
     resp->retry_after_ms = s.retry_after_ms;
-    /* Distinguish "user cancelled" from a real transport error so the
-     * agent can react cleanly without surfacing it as [error: ...]. Both
-     * the write-callback short-return (CURLE_WRITE_ERROR) and the
-     * progress-callback abort (CURLE_ABORTED_BY_CALLBACK) only fire when
-     * tick() returned non-zero, so trusting the tick hook here is safe. */
-    if (rc != CURLE_OK && tick && tick(tick_user)) {
+    if (cancelled) {
         resp->cancelled = 1;
     } else if (rc != CURLE_OK) {
         resp->error_body = xasprintf("libcurl: %s", curl_easy_strerror(rc));

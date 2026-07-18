@@ -278,6 +278,9 @@ where it matters.
   Default `1`.
 - `compact.threshold` / `HAX_COMPACT_THRESHOLD` — auto-compaction trigger percentage. Default
   `85`.
+- `max_turns` / `HAX_MAX_TURNS` — interactive only: pause the agent loop for confirmation
+  after this many model round-trips within one user turn (Enter resumes). Unset or `0`
+  means unlimited.
 
 ### Recording and observability
 

@@ -142,7 +142,7 @@ static int emit_chunked(stream_cb cb, void *user, const char *s, long delay_ms, 
     size_t i = 0;
     while (i < n) {
         if (mock_tick(tick, tick_user))
-            return 0;
+            return 1;
         size_t take = (n - i) < TEXT_CHUNK_BYTES ? (n - i) : TEXT_CHUNK_BYTES;
         /* Walk back into the chunk while the proposed cut byte is a
          * UTF-8 continuation (10xxxxxx). Don't cross past the start
@@ -167,7 +167,7 @@ static int emit_chunked(stream_cb cb, void *user, const char *s, long delay_ms, 
         i += take;
         if (i < n) {
             if (msleep(delay_ms, tick, tick_user))
-                return 0;
+                return 1;
         }
     }
     return 0;
@@ -335,9 +335,10 @@ static struct stream_usage parse_usage(const char *s)
 }
 
 /* Read directives from `f` up to and including the next end-turn (or
- * EOF), emitting events as we go. Returns 0 on clean turn, the
- * callback's non-zero return on cancellation, or -2 if EOF was hit
- * with no directives in this turn (caller should treat as "exhausted"). */
+ * EOF), emitting events as we go. Returns 0 on clean turn, non-zero on
+ * tick cancellation — with NO terminal event, matching a real provider
+ * whose transport was aborted mid-stream — or -2 if EOF was hit with no
+ * directives in this turn (caller should treat as "exhausted"). */
 static int play_one_turn(FILE *f, stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
 {
     char line[8192];
@@ -347,11 +348,9 @@ static int play_one_turn(FILE *f, stream_cb cb, void *user, http_tick_cb tick, v
 
     while (fgets(line, sizeof line, f)) {
         /* Poll the tick between directives so a long script can be cut
-         * short cleanly. Emit EV_DONE so the agent can absorb a
-         * partial turn the same way it would for a real cancelled
-         * stream. */
+         * short the way a real transport abort would cut a stream. */
         if (mock_tick(tick, tick_user))
-            return emit_done(cb, user, usage);
+            return 1;
 
         strip_eol(line);
         if (line_is_blank_or_comment(line))
@@ -372,7 +371,7 @@ static int play_one_turn(FILE *f, stream_cb cb, void *user, http_tick_cb tick, v
         if (starts_with(body, "text", &rest) || starts_with(body, "reasoning", &rest)) {
             int reasoning = body[0] == 'r';
             if (msleep(delay_ms, tick, tick_user))
-                return emit_done(cb, user, usage);
+                return 1;
             /* Decode minimal C-style escapes (\n, \t, \\) so script
              * lines can embed real newlines without breaking the
              * line-per-directive parser. Anything else passes
@@ -419,7 +418,7 @@ static int play_one_turn(FILE *f, stream_cb cb, void *user, http_tick_cb tick, v
              * to model "wait X then emit space" (e.g. a token-aligned
              * space delta arriving after a long pause). */
             if (msleep(delay_ms, tick, tick_user))
-                return emit_done(cb, user, usage);
+                return 1;
             struct stream_event sp = {.kind = EV_TEXT_DELTA, .u.text_delta = {.text = " "}};
             int rc = cb(&sp, user);
             if (rc)
@@ -445,7 +444,7 @@ static int play_one_turn(FILE *f, stream_cb cb, void *user, http_tick_cb tick, v
             if (msleep(delay_ms, tick, tick_user)) {
                 free(args);
                 free(name);
-                return emit_done(cb, user, usage);
+                return 1;
             }
             int rc = emit_tool_call(cb, user, name, args, delay_ms, tick, tick_user);
             free(args);
@@ -683,7 +682,13 @@ static int mock_stream(struct provider *p, const struct context *ctx, const char
     int skipped = skip_to_turn(f, m->next_turn);
     if (skipped < m->next_turn) {
         fclose(f);
-        emit_text_chunked(cb, user, "Script exhausted — no more turns.", 0, tick, tick_user);
+        /* Propagate cancellation without EV_DONE, like a scripted turn:
+         * even the exhausted-script notice must not report a pre-empted
+         * stream as a completed one. */
+        int rc =
+            emit_text_chunked(cb, user, "Script exhausted — no more turns.", 0, tick, tick_user);
+        if (rc)
+            return rc;
         return emit_done(cb, user, empty_usage());
     }
 
@@ -691,7 +696,9 @@ static int mock_stream(struct provider *p, const struct context *ctx, const char
     fclose(f);
 
     if (rc == -2) {
-        emit_text_chunked(cb, user, "Script exhausted — no more turns.", 0, tick, tick_user);
+        rc = emit_text_chunked(cb, user, "Script exhausted — no more turns.", 0, tick, tick_user);
+        if (rc)
+            return rc;
         return emit_done(cb, user, empty_usage());
     }
     if (rc == 0)

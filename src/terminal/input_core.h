@@ -97,6 +97,19 @@ struct input {
      * the editor (typically a const static). NULL = Tab always inserts
      * a literal tab. */
     const struct input_modal_completer *completer;
+
+    /* When set, Enter on an empty buffer submits the empty string
+     * instead of being a no-op (input.c only). The REPL enables it
+     * while a paused turn is resumable, where an empty send means
+     * "continue". */
+    int empty_submit;
+
+    /* The last input_readline() call ended with Ctrl-C (input.c only).
+     * Both cancellation and an empty submit return "", but they must
+     * not act alike: while a paused turn is resumable an empty submit
+     * means "continue", whereas Ctrl-C discards the typed line and
+     * must never launch anything. */
+    int last_cancelled;
 };
 
 /* Result of input_core_compute_layout. All fields are 0-indexed offsets

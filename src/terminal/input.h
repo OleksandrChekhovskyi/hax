@@ -100,6 +100,18 @@ void input_set_transcript_cb(struct input *in, void (*fn)(void *user), void *use
 struct input_modal_completer;
 void input_set_modal_completer(struct input *in, const struct input_modal_completer *mc);
 
+/* Toggle whether Enter on an empty buffer submits the empty string.
+ * Off, empty Enter is a no-op; on, input_readline returns "" — used by
+ * the REPL while a paused turn is resumable and an empty send means
+ * "continue". */
+void input_set_empty_submit(struct input *in, int enabled);
+
+/* True when the last input_readline() ended with Ctrl-C. Cancellation
+ * also returns "", so a caller that gives an empty submit a meaning
+ * (empty_submit above) must check this to keep "discard my typed line"
+ * from acting as that meaning. */
+int input_cancelled(const struct input *in);
+
 /* Convenience wrapper: open the conventional per-user history file at
  * $XDG_STATE_HOME/hax/history (default $HOME/.local/state/hax/history),
  * but only when stdin and stdout are both ttys — non-interactive use
