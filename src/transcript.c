@@ -8,6 +8,7 @@
 #include "config.h"
 #include "provider.h"
 #include "util.h"
+#include "render/diff_color.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
 
@@ -266,9 +267,124 @@ static void render_tools(FILE *out, int color, const struct tool_def *tools, siz
     fputc('\n', out);
 }
 
-static void render_tool_result(FILE *out, int color, const struct item *it)
+/* Byte length of read.c's `cat -n` style line prefix — leading spaces,
+ * at least one digit, then the READ_LINE_DELIM arrow — or 0 when the
+ * line doesn't start with one. Matching the exact producer format keeps
+ * false positives to lines that would render identically anyway. */
+static size_t read_prefix_len(const char *line, size_t len)
 {
+    size_t i = 0;
+    while (i < len && line[i] == ' ')
+        i++;
+    size_t digits_at = i;
+    while (i < len && line[i] >= '0' && line[i] <= '9')
+        i++;
+    if (i == digits_at)
+        return 0;
+    size_t dlen = strlen(READ_LINE_DELIM);
+    if (i + dlen > len || memcmp(line + i, READ_LINE_DELIM, dlen) != 0)
+        return 0;
+    return i + dlen;
+}
+
+/* Read result body: dim the line-number gutter, leave content on the
+ * default foreground. Lines without the prefix — the trailing
+ * `[truncated ...]` marker, error messages — pass through plain, so
+ * every non-happy path degrades safely per line. Color-mode only; the
+ * plain log takes the verbatim path in render_tool_result. */
+static void render_read_body(FILE *out, const char *text)
+{
+    const char *p = text;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        size_t plen = read_prefix_len(p, n);
+        if (plen > 0) {
+            fputs(ANSI_DIM, out);
+            fwrite(p, 1, plen, out);
+            fputs(ANSI_RESET, out);
+            fwrite(p + plen, 1, n - plen, out);
+        } else {
+            fwrite(p, 1, n, out);
+        }
+        if (!nl)
+            break;
+        fputc('\n', out);
+        p = nl + 1;
+    }
+    ensure_newline(out, text);
+}
+
+/* Unified-diff body (edit/write results): per-line coloring via the
+ * classifier shared with the live preview, but mapped to the
+ * transcript's grammar. Context lines stay on the default foreground —
+ * dim would demote real file content below the baseline every other
+ * tool result renders at (the live preview dims context only because
+ * its whole preview is dim). Dim marks the metadata lines instead
+ * ("---"/"+++" headers, "@@" markers, "\ No newline"), same role as
+ * the read gutter. Unlike the live view, the file headers stay and no
+ * line is truncated — the transcript shows the result exactly as the
+ * model received it. Color re-opens per line for `less -R`, same as
+ * render_body_lines. */
+static void render_diff_body(FILE *out, const char *text)
+{
+    int in_hunk = 0;
+    const char *p = text;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        const char *open = NULL;
+        switch (diff_line_classify(p, n, in_hunk)) {
+        case DIFF_LINE_ADD:
+            open = theme_open(THEME_ADD);
+            break;
+        case DIFF_LINE_REMOVE:
+            open = theme_open(THEME_REMOVE);
+            break;
+        case DIFF_LINE_META:
+            open = ANSI_DIM;
+            break;
+        case DIFF_LINE_CONTEXT:
+            break;
+        }
+        if (open)
+            fputs(open, out);
+        fwrite(p, 1, n, out);
+        if (open)
+            fputs(ANSI_RESET, out);
+        if (n >= 2 && memcmp(p, "@@", 2) == 0)
+            in_hunk = 1;
+        if (!nl)
+            break;
+        fputc('\n', out);
+        p = nl + 1;
+    }
+    ensure_newline(out, text);
+}
+
+/* `tool_name` comes from the paired TOOL_CALL (results don't carry one);
+ * NULL for orphan results. It gates the styled body renderers for the
+ * file tools — content stays byte-exact in every mode, styling is pure
+ * SGR wrapping and only in color mode, so the plain HAX_TRANSCRIPT log
+ * is untouched. Edit/write results are diff-colored only when the body
+ * actually is a diff (the same "--- " sniff the live preview's R_DIFF
+ * switch uses), which excludes edit errors and write's "created ..."
+ * new-file confirmation. */
+static void render_tool_result(FILE *out, int color, const struct item *it, const char *tool_name)
+{
+    const char *text = it->output ? it->output : "";
     section(out, color, "tool result");
+    if (color && tool_name) {
+        if (strcmp(tool_name, "read") == 0) {
+            render_read_body(out, text);
+            return;
+        }
+        if ((strcmp(tool_name, "edit") == 0 || strcmp(tool_name, "write") == 0) &&
+            strncmp(text, "--- ", 4) == 0) {
+            render_diff_body(out, text);
+            return;
+        }
+    }
     if (it->output)
         fputs(it->output, out);
     ensure_newline(out, it->output);
@@ -425,7 +541,7 @@ void transcript_render_items(FILE *out, int color, const struct item *items, siz
                     if (items[j].kind == ITEM_TOOL_RESULT && items[j].call_id &&
                         strcmp(items[j].call_id, it->call_id) == 0) {
                         fputc('\n', out);
-                        render_tool_result(out, color, &items[j]);
+                        render_tool_result(out, color, &items[j], it->tool_name);
                         result_emitted[j] = 1;
                         break;
                     }
@@ -435,8 +551,9 @@ void transcript_render_items(FILE *out, int color, const struct item *items, siz
         case ITEM_TOOL_RESULT:
             /* Orphan result (no preceding call with matching id) —
              * shouldn't happen in practice, but rendering it
-             * standalone is safer than dropping it. */
-            render_tool_result(out, color, it);
+             * standalone is safer than dropping it. No paired call
+             * means no tool name, so the body renders plain. */
+            render_tool_result(out, color, it, NULL);
             break;
         case ITEM_REASONING:
             render_reasoning(out, color, it);

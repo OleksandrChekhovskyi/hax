@@ -40,6 +40,7 @@ test_sources = [
     'providers/test_registry.c',
 
     'render/test_ctrl_strip.c',
+    'render/test_diff_color.c',
     'render/test_disp.c',
     'render/test_markdown.c',
     'render/test_markdown_scan.c',

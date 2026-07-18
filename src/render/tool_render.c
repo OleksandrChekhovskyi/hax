@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "util.h"
+#include "render/diff_color.h"
 #include "render/disp.h"
 #include "render/spinner.h"
 #include "terminal/ansi.h"
@@ -371,57 +372,22 @@ static void process_line(struct tool_render *r, const char *bytes, size_t len, i
 
 /* ---- Diff mode (line-buffered, per-line colored, hunk-aware) ---- */
 
-/* Color one diff line. `in_hunk` says whether a hunk body has begun
- * (we've already seen an "@@" header).
- *
- * Everything but the actual changed lines is dimmed, matching the rest
- * of the tool preview (head/tail rows are all ANSI_DIM): context
- * (space-prefixed) lines, "@@" hunk headers, "\ No newline" markers,
- * and the "--- "/"+++ " file headers. Only "+" additions and "-"
- * removals keep a full-brightness signal color (the add/remove roles).
- *
- * The split matters for robustness: inside a hunk every line carries a
- * one-char prefix, so the prefix alone is the classifier and we never
- * re-test the "--- "/"+++ " header patterns. That keeps a removed
- * "-- x" (rendered "--- x") and an added "++ x" (rendered "+++ x")
- * signal-colored, instead of mistaking either for a file header and
- * dimming it.
- * The "@@" and "\ No newline" markers match up front in either
- * position — a hunk-body content line never starts with a bare
- * "@@"/"\" (it always carries a +/-/space prefix), so that's
- * unambiguous and keeps inter-hunk separators dim in a multi-hunk diff. */
+/* Per-line diff coloring: everything but the actual changed lines is
+ * dimmed, matching the rest of the tool preview (head/tail rows are
+ * all ANSI_DIM). Classification lives in render/diff_color.c, shared
+ * with the transcript renderer (which maps the kinds differently). */
 static const char *diff_line_color(const char *line, size_t len, int in_hunk)
 {
-    if (len >= 1 && line[0] == '\\')
-        return ANSI_DIM;
-    if (len >= 2 && memcmp(line, "@@", 2) == 0)
-        return ANSI_DIM;
-    if (in_hunk) {
-        if (len >= 1 && line[0] == '+')
-            return theme_open(THEME_ADD);
-        if (len >= 1 && line[0] == '-')
-            return theme_open(THEME_REMOVE);
-        return ANSI_DIM; /* context (space-prefixed) line */
-    }
-    /* Before the first hunk: file headers, then fall back to prefix
-     * coloring so stray +/- lines in degenerate input with no "@@"
-     * header still read as additions/removals. */
-    if (len >= 4 && (memcmp(line, "--- ", 4) == 0 || memcmp(line, "+++ ", 4) == 0))
-        return ANSI_DIM;
-    if (len >= 1 && line[0] == '+')
+    switch (diff_line_classify(line, len, in_hunk)) {
+    case DIFF_LINE_ADD:
         return theme_open(THEME_ADD);
-    if (len >= 1 && line[0] == '-')
+    case DIFF_LINE_REMOVE:
         return theme_open(THEME_REMOVE);
+    case DIFF_LINE_META:
+    case DIFF_LINE_CONTEXT:
+        break;
+    }
     return ANSI_DIM;
-}
-
-/* The unified-diff file-header lines ("--- a/x" / "+++ b/x"). Only the
- * pair *before* the first hunk are headers; an identical-looking line
- * inside a hunk body is real removed/added content (handled by the
- * diff_in_hunk latch at the call site). */
-static int is_diff_file_header(const char *line, size_t len)
-{
-    return len >= 4 && (memcmp(line, "--- ", 4) == 0 || memcmp(line, "+++ ", 4) == 0);
 }
 
 static void emit_diff_line(struct tool_render *r, const char *line, size_t len)
@@ -431,7 +397,7 @@ static void emit_diff_line(struct tool_render *r, const char *line, size_t len)
      * duplication (and read as "a//abs/path" for absolute paths). The
      * full header stays in the tool result the model receives — this is
      * display-only elision, like the head/tail capping elsewhere. */
-    if (!r->diff_in_hunk && is_diff_file_header(line, len))
+    if (!r->diff_in_hunk && diff_is_file_header(line, len))
         return;
     /* First diff row: hide dispatch's parked spinner (the hide
      * returns the cursor to the fresh row under the header) so it

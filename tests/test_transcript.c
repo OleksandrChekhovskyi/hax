@@ -255,6 +255,140 @@ static void test_tool_result_unshortened(void)
     free(body);
 }
 
+static void test_read_result_dims_line_number_prefix(void)
+{
+    /* The gutter read.c fabricates (spaces, digits, arrow) is dimmed;
+     * the file content after the arrow stays on the default foreground
+     * and byte-exact. */
+    struct item items[] = {
+        {.kind = ITEM_TOOL_CALL, .call_id = (char *)"c1", .tool_name = (char *)"read"},
+        {.kind = ITEM_TOOL_RESULT,
+         .call_id = (char *)"c1",
+         .output = (char *)"     1→foo\n     2→bar\n"},
+    };
+    char *out = render_to_string(NULL, items, 2);
+    EXPECT(contains(out, ANSI_DIM "     1→" ANSI_RESET "foo"));
+    EXPECT(contains(out, ANSI_DIM "     2→" ANSI_RESET "bar"));
+    free(out);
+}
+
+static void test_read_result_non_prefixed_lines_stay_plain(void)
+{
+    /* Error messages and truncation markers carry no line-number
+     * prefix — they must pass through unstyled, per line. */
+    struct item items[] = {
+        {.kind = ITEM_TOOL_CALL, .call_id = (char *)"c1", .tool_name = (char *)"read"},
+        {.kind = ITEM_TOOL_RESULT,
+         .call_id = (char *)"c1",
+         .output = (char *)"     1→foo\n\n[truncated at 500 lines; file has more — pass "
+                           "offset/limit to read more]"},
+    };
+    char *out = render_to_string(NULL, items, 2);
+    EXPECT(contains(out, ANSI_DIM "     1→" ANSI_RESET "foo"));
+    EXPECT(contains(out, "\n[truncated at 500 lines"));
+    EXPECT(!contains(out, ANSI_DIM "[truncated"));
+    free(out);
+}
+
+static void test_edit_diff_result_colored(void)
+{
+    struct item items[] = {
+        {.kind = ITEM_TOOL_CALL, .call_id = (char *)"c1", .tool_name = (char *)"edit"},
+        {.kind = ITEM_TOOL_RESULT,
+         .call_id = (char *)"c1",
+         .output = (char *)"--- a/f.c\n+++ b/f.c\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n"},
+    };
+    char *out = render_to_string(NULL, items, 2);
+    /* Default (ansi) preset: THEME_REMOVE = red, THEME_ADD = green. */
+    EXPECT(contains(out, ANSI_RED "-old" ANSI_RESET));
+    EXPECT(contains(out, ANSI_GREEN "+new" ANSI_RESET));
+    /* Metadata lines are dimmed — and unlike the live preview, the
+     * file headers are kept, not elided. */
+    EXPECT(contains(out, ANSI_DIM "--- a/f.c" ANSI_RESET));
+    EXPECT(contains(out, ANSI_DIM "+++ b/f.c" ANSI_RESET));
+    EXPECT(contains(out, ANSI_DIM "@@ -1,2 +1,2 @@" ANSI_RESET));
+    /* Context is real file content: default foreground, no styling —
+     * the transcript's baseline for tool output (only the live
+     * preview dims it, to match its all-dim preview rows). */
+    EXPECT(contains(out, ANSI_RESET "\n keep\n"));
+    EXPECT(!contains(out, ANSI_DIM " keep"));
+    free(out);
+}
+
+static void test_write_created_confirmation_stays_plain(void)
+{
+    /* A new-file write returns "created ..." — not a diff, so no diff
+     * coloring may fire despite the tool being diff-capable. */
+    struct item items[] = {
+        {.kind = ITEM_TOOL_CALL, .call_id = (char *)"c1", .tool_name = (char *)"write"},
+        {.kind = ITEM_TOOL_RESULT,
+         .call_id = (char *)"c1",
+         .output = (char *)"created /tmp/x.c (3 lines, 42 bytes)"},
+    };
+    char *out = render_to_string(NULL, items, 2);
+    EXPECT(contains(out, "created /tmp/x.c"));
+    EXPECT(!contains(out, ANSI_GREEN));
+    EXPECT(!contains(out, ANSI_RED));
+    free(out);
+}
+
+static void test_diff_lookalike_from_other_tool_stays_plain(void)
+{
+    /* Only edit/write results are diff-colored — bash output that
+     * happens to be a unified diff renders verbatim. */
+    struct item items[] = {
+        {.kind = ITEM_TOOL_CALL, .call_id = (char *)"c1", .tool_name = (char *)"bash"},
+        {.kind = ITEM_TOOL_RESULT,
+         .call_id = (char *)"c1",
+         .output = (char *)"--- a/f.c\n+++ b/f.c\n@@ -1 +1 @@\n-old\n+new\n"},
+    };
+    char *out = render_to_string(NULL, items, 2);
+    EXPECT(contains(out, "-old\n+new"));
+    EXPECT(!contains(out, ANSI_GREEN));
+    EXPECT(!contains(out, ANSI_RED));
+    free(out);
+}
+
+static void test_orphan_read_result_stays_plain(void)
+{
+    /* An orphan result has no paired call, hence no tool name — the
+     * styled body renderers must not fire. */
+    struct item items[] = {
+        {.kind = ITEM_TOOL_RESULT, .call_id = (char *)"c9", .output = (char *)"     1→foo"}};
+    char *out = render_to_string(NULL, items, 1);
+    EXPECT(contains(out, "     1→foo"));
+    EXPECT(!contains(out, ANSI_DIM "     1→"));
+    free(out);
+}
+
+static void test_plain_mode_file_tool_results_have_no_escapes(void)
+{
+    /* The HAX_TRANSCRIPT log path (color=0) must stay pure plain text
+     * — styling is strictly a color-mode addition. */
+    struct item items[] = {
+        {.kind = ITEM_TOOL_CALL, .call_id = (char *)"c1", .tool_name = (char *)"read"},
+        {.kind = ITEM_TOOL_RESULT, .call_id = (char *)"c1", .output = (char *)"     1→foo\n"},
+        {.kind = ITEM_TOOL_CALL, .call_id = (char *)"c2", .tool_name = (char *)"edit"},
+        {.kind = ITEM_TOOL_RESULT,
+         .call_id = (char *)"c2",
+         .output = (char *)"--- a/f.c\n+++ b/f.c\n@@ -1 +1 @@\n-old\n+new\n"},
+    };
+    char *buf = NULL;
+    size_t len = 0;
+    FILE *f = open_memstream(&buf, &len);
+    if (!f) {
+        perror("open_memstream");
+        exit(1);
+    }
+    int turn_no = 0;
+    transcript_render_items(f, 0, items, 4, 0, &turn_no);
+    fclose(f);
+    EXPECT(contains(buf, "     1→foo"));
+    EXPECT(contains(buf, "-old\n+new"));
+    EXPECT(!contains(buf, "\x1b["));
+    free(buf);
+}
+
 static void test_tools_section_renders_each_tool(void)
 {
     struct tool_def tools[] = {
@@ -379,6 +513,13 @@ int main(void)
     test_tool_call_pretty_prints_args();
     test_tool_call_invalid_json_dumps_verbatim();
     test_tool_result_unshortened();
+    test_read_result_dims_line_number_prefix();
+    test_read_result_non_prefixed_lines_stay_plain();
+    test_edit_diff_result_colored();
+    test_write_created_confirmation_stays_plain();
+    test_diff_lookalike_from_other_tool_stays_plain();
+    test_orphan_read_result_stays_plain();
+    test_plain_mode_file_tool_results_have_no_escapes();
     test_tools_section_renders_each_tool();
     test_tools_section_omitted_when_empty();
     test_reasoning_shows_id();
