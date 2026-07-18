@@ -5,6 +5,9 @@
 #include <string.h>
 
 #include "agent_tool.h"
+#include "compact.h"
+#include "session.h"
+#include "transcript.h"
 #include "util.h"
 
 struct loop_turn_sink {
@@ -98,4 +101,202 @@ struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *se
         .items_from = items_from,
         .items_to = items_to,
     };
+}
+
+void agent_loop_flush_logs(struct transcript_log *tlog, struct session_log *slog,
+                           const struct item *items, size_t n_items)
+{
+    transcript_log_append(tlog, items, n_items);
+    session_log_append(slog, items, n_items);
+}
+
+static int loop_checkpoint(const struct agent_loop_hooks *hooks)
+{
+    return hooks->checkpoint && hooks->checkpoint(hooks->user);
+}
+
+static struct item loop_run_tool(const struct agent_loop_params *params, const struct item *call,
+                                 enum agent_loop_tool_action action)
+{
+    const struct agent_loop_hooks *hooks = &params->hooks;
+    if (hooks->tool_call)
+        return hooks->tool_call(call, action, hooks->user);
+
+    if (action == AGENT_LOOP_TOOL_REFUSE)
+        return agent_tool_result_make(call, "error: tool calls are disabled in this session");
+    if (action == AGENT_LOOP_TOOL_SKIP)
+        return agent_tool_result_make(call, INTERRUPT_MARKER);
+
+    struct agent_tool_call tool_call;
+    agent_tool_call_init(&tool_call, call);
+    char *output = agent_tool_call_run(&tool_call, NULL, NULL);
+    struct item result = agent_tool_result_make(call, output);
+    free(output);
+    agent_tool_call_destroy(&tool_call);
+    return result;
+}
+
+static void loop_observe_tools(const struct agent_loop_params *params, size_t from, size_t to)
+{
+    if (!params->hooks.tool_seen)
+        return;
+    for (size_t i = from; i < to; i++)
+        if (params->session->items[i].kind == ITEM_TOOL_CALL)
+            params->hooks.tool_seen(&params->session->items[i], params->hooks.user);
+}
+
+static void loop_add_usage(const struct agent_loop_params *params,
+                           const struct agent_loop_turn *loop_turn, int aborted)
+{
+    if (!aborted || usage_reported(&loop_turn->usage))
+        agent_session_add_turn_usage(params->session, params->provider, &loop_turn->usage,
+                                     loop_turn->elapsed_ms);
+}
+
+static void loop_flush(const struct agent_loop_params *params)
+{
+    agent_loop_flush_logs(params->tlog, params->slog, params->session->items,
+                          params->session->n_items);
+}
+
+void agent_loop_run(const struct agent_loop_params *params, struct agent_loop_result *result)
+{
+    struct agent_session *session = params->session;
+    const struct agent_loop_hooks *hooks = &params->hooks;
+    memset(result, 0, sizeof(*result));
+    /* Falling out of the loop is the only max-turn path; every terminal
+     * provider/cancel outcome returns from its branch below. */
+    result->outcome = AGENT_LOOP_MAX_TURNS;
+    result->last_context_tokens = -1;
+
+    for (int turn_n = 0; params->max_turns < 0 || turn_n < params->max_turns; turn_n++) {
+        if (turn_n > 0) {
+            /* The first boundary arrived with the user message. Follow-up
+             * turns need their own durable boundary before context is built. */
+            agent_session_add_boundary(session);
+            loop_flush(params);
+        }
+        if (hooks->turn_begin)
+            hooks->turn_begin(hooks->user);
+
+        struct agent_loop_turn loop_turn;
+        agent_loop_turn_run(&loop_turn, session, params->provider, hooks->observe, hooks->user,
+                            hooks->tick, hooks->user);
+        result->turns++;
+        /* Account the request before branching: errored and interrupted turns
+         * still reached the provider and may carry billable usage. */
+        if (hooks->turn_end)
+            hooks->turn_end(&loop_turn, hooks->user);
+
+        long turn_context = -1;
+        if (loop_turn.usage.input_tokens >= 0 && loop_turn.usage.output_tokens >= 0) {
+            turn_context = loop_turn.usage.input_tokens + loop_turn.usage.output_tokens;
+            result->last_context_tokens = turn_context;
+        }
+
+        if (loop_turn.assembly.error) {
+            /* Provider failure wins over a simultaneous frontend cancel. It
+             * supplies the diagnostic, while abort repair preserves any
+             * partial output and closes completed tool calls. */
+            struct agent_abort_outcome abort =
+                agent_loop_turn_absorb_abort(session, &loop_turn, AGENT_ABORT_PROVIDER_ERROR);
+            loop_observe_tools(params, abort.items_from, abort.items_to);
+            result->final_items_from = abort.items_from;
+            result->final_items_to = abort.items_to;
+            result->error_message =
+                loop_turn.error_message ? xstrdup(loop_turn.error_message) : NULL;
+            loop_add_usage(params, &loop_turn, 1);
+            loop_flush(params);
+            agent_loop_turn_destroy(&loop_turn);
+            result->outcome = AGENT_LOOP_PROVIDER_ERROR;
+            return;
+        }
+
+        /* Sample cancellation after a clean stream but before absorption or
+         * dispatch, so a late Esc cannot launch tools or another turn. */
+        if (loop_checkpoint(hooks)) {
+            struct agent_abort_outcome abort =
+                agent_loop_turn_absorb_abort(session, &loop_turn, AGENT_ABORT_USER_CANCEL);
+            loop_observe_tools(params, abort.items_from, abort.items_to);
+            result->final_items_from = abort.items_from;
+            result->final_items_to = abort.items_to;
+            loop_add_usage(params, &loop_turn, 1);
+            loop_flush(params);
+            agent_loop_turn_destroy(&loop_turn);
+            result->outcome = AGENT_LOOP_INTERRUPTED;
+            return;
+        }
+
+        size_t items_from;
+        int had_tool_call;
+        agent_session_absorb(session, &loop_turn.assembly, &items_from, &had_tool_call);
+        /* Freeze the streamed slice before appending results: tool results must
+         * never be mistaken for more calls, and frontends need the final turn
+         * range without its synthesized results or usage footer. */
+        size_t response_to = session->n_items;
+        loop_observe_tools(params, items_from, response_to);
+        result->final_items_from = items_from;
+        result->final_items_to = response_to;
+
+        if (!had_tool_call) {
+            /* A tool-free response completes the user turn. Commit its footer
+             * here; there is no later tool-batch flush to catch it. */
+            loop_add_usage(params, &loop_turn, 0);
+            loop_flush(params);
+            agent_loop_turn_destroy(&loop_turn);
+            result->outcome = AGENT_LOOP_COMPLETE;
+            return;
+        }
+
+        /* Every streamed tool call gets exactly one result. Disabled tools are
+         * refused rather than executed; once cancellation is observed, the
+         * remaining batch is paired with interrupted results. */
+        for (size_t i = items_from; i < response_to; i++) {
+            if (session->items[i].kind != ITEM_TOOL_CALL)
+                continue;
+            enum agent_loop_tool_action action = AGENT_LOOP_TOOL_RUN;
+            if (session->n_tools == 0)
+                action = AGENT_LOOP_TOOL_REFUSE;
+            else if (loop_checkpoint(hooks))
+                action = AGENT_LOOP_TOOL_SKIP;
+            struct item tool_result = loop_run_tool(params, &session->items[i], action);
+            items_append(&session->items, &session->n_items, &session->cap_items, tool_result);
+        }
+
+        /* The final checkpoint catches cancellation raised by the last tool,
+         * when there is no next call to sample it. Place the marker before the
+         * footer so usage remains the turn's trailing item. */
+        int interrupted = loop_checkpoint(hooks);
+        if (interrupted)
+            agent_session_mark_interrupt(session);
+        loop_add_usage(params, &loop_turn, 0);
+        loop_flush(params);
+        agent_loop_turn_destroy(&loop_turn);
+
+        if (interrupted) {
+            result->outcome = AGENT_LOOP_INTERRUPTED;
+            return;
+        }
+
+        /* Compact only at a continuation seam, after calls/results/footer are
+         * durable and before the next boundary. Cancellation during the
+         * frontend transaction must stop continuation against old history. */
+        if (compact_should_auto(turn_context,
+                                compact_context_limit(params->provider, session->model)) &&
+            hooks->compact) {
+            hooks->compact(hooks->user);
+            if (loop_checkpoint(hooks)) {
+                agent_session_mark_interrupt(session);
+                loop_flush(params);
+                result->outcome = AGENT_LOOP_INTERRUPTED;
+                return;
+            }
+        }
+    }
+}
+
+void agent_loop_result_destroy(struct agent_loop_result *result)
+{
+    free(result->error_message);
+    result->error_message = NULL;
 }

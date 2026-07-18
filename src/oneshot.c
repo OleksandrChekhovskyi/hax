@@ -8,7 +8,6 @@
 
 #include "agent_core.h"
 #include "agent_loop.h"
-#include "agent_tool.h"
 #include "catalog.h"
 #include "compact.h"
 #include "config.h"
@@ -19,18 +18,9 @@
 #include "system/keepawake.h"
 #include "terminal/ansi.h"
 
-/* Advance both append-only logs over the same item slice — see the twin
- * helper in agent.c. Both no-op on a NULL log or no new items. */
-static void oneshot_flush(struct transcript_log *tlog, struct session_log *slog,
-                          const struct item *items, size_t n)
-{
-    transcript_log_append(tlog, items, n);
-    session_log_append(slog, items, n);
-}
-
 /* Compaction may make several provider attempts internally, so it keeps a
- * dedicated sink for per-attempt spend and usage footers. Normal turns use
- * agent_loop_turn_run. */
+ * dedicated sink for per-attempt spend and usage footers. Normal continuation
+ * uses agent_loop_run. */
 struct oneshot_compact_ctx {
     struct turn *turn;
     char *error_msg; /* malloc'd; set on EV_ERROR */
@@ -120,7 +110,7 @@ static int oneshot_compact(struct agent_session *s, struct provider *p, struct s
          * agent_compact's failure path. */
         for (int i = 0; i < cap.n; i++)
             agent_session_add_turn_usage(s, p, &cap.att[i].u, cap.att[i].ms);
-        oneshot_flush(tlog, slog, s->items, s->n_items);
+        agent_loop_flush_logs(tlog, slog, s->items, s->n_items);
         free(summary);
         return 0;
     }
@@ -131,13 +121,36 @@ static int oneshot_compact(struct agent_session *s, struct provider *p, struct s
      * agent_compact's. */
     for (int i = 0; i + 1 < cap.n; i++)
         agent_session_add_turn_usage(s, p, &cap.att[i].u, cap.att[i].ms);
-    oneshot_flush(tlog, slog, s->items, s->n_items);
+    agent_loop_flush_logs(tlog, slog, s->items, s->n_items);
     compact_apply(s, slog, tlog, summary);
     free(summary);
     if (cap.n > 0)
         agent_session_add_turn_usage(s, p, &cap.att[cap.n - 1].u, cap.att[cap.n - 1].ms);
-    oneshot_flush(tlog, slog, s->items, s->n_items);
+    agent_loop_flush_logs(tlog, slog, s->items, s->n_items);
     return 1;
+}
+
+struct oneshot_loop_ctx {
+    struct agent_session *session;
+    struct provider *provider;
+    struct session_log *slog;
+    struct transcript_log *tlog;
+    struct spend_totals *costs;
+};
+
+static void oneshot_turn_end(const struct agent_loop_turn *loop_turn, void *user)
+{
+    struct oneshot_loop_ctx *ctx = user;
+    spend_account(ctx->costs, &loop_turn->usage, ctx->provider->catalog_id, ctx->session->model);
+}
+
+static void oneshot_auto_compact(void *user)
+{
+    struct oneshot_loop_ctx *ctx = user;
+    if (!oneshot_compact(ctx->session, ctx->provider, ctx->slog, ctx->tlog, ctx->costs))
+        return;
+    int tty = isatty(fileno(stderr));
+    fprintf(stderr, "%s[compacted context]%s\n", tty ? ANSI_DIM : "", tty ? ANSI_RESET : "");
 }
 
 int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *opts, int max_turns)
@@ -177,7 +190,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
      * a fresh file behind. NULL when the env var is unset; all
      * transcript_log_* entry points are NULL-safe. Appended at the end
      * of each round-trip so `tail -f` works during long agentic runs;
-     * the final append at `done:` catches the no-tool exit path and
+     * the final append during cleanup catches any remaining items and
      * is idempotent on the others (transcript_log_append no-ops when
      * n_items hasn't grown). */
     struct transcript_log *tlog = transcript_log_open(sess.sys, sess.tools, sess.n_tools);
@@ -194,7 +207,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
     /* Land the prompt on disk before any provider call so a hang or
      * crash mid-stream still leaves the triggering input visible in
      * the log. */
-    oneshot_flush(tlog, slog, sess.items, sess.n_items);
+    agent_loop_flush_logs(tlog, slog, sess.items, sess.n_items);
 
     /* Provenance banner — the light -p twin of the REPL's agent_print_banner.
      * What actually answers resolves through several tiers (env, state.json,
@@ -235,17 +248,15 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
     /* Keep the machine from idling to sleep across the whole agentic
      * run — a long unattended -p invocation (or one driven from
      * automation) shouldn't be cut short by the idle timer. Released at
-     * `done:`, the single cleanup funnel for every exit path below.
+     * the cleanup below.
      * Gated by the keep_awake config key; no-op when off or where no
      * inhibitor helper exists. */
     keepawake_acquire();
 
     int rc = 0;
-    int first_inner = 1;
     /* Run stats for the exit summary on stderr: latest reported context
-     * size, summed provider-reported cost (compaction round-trips
-     * included, via oneshot_compact's cost accumulator), wall time for
-     * the whole run. */
+     * size, summed provider-reported cost (compaction turns included, via
+     * oneshot_compact's cost accumulator), wall time for the whole run. */
     long start_ms = monotonic_ms();
     long last_ctx = -1;
     struct spend_totals costs = {0};
@@ -259,109 +270,51 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
             hax_warn("model catalog last refreshed %ld days ago — cost estimates may be stale",
                      stale_days);
     }
-    for (int turn_n = 0; turn_n < max_turns; turn_n++) {
-        if (!first_inner) {
-            agent_session_add_boundary(&sess);
-            /* Same: flush the new turn rule before the next stream. */
-            oneshot_flush(tlog, slog, sess.items, sess.n_items);
-        }
-        first_inner = 0;
+    struct oneshot_loop_ctx loop_ctx = {
+        .session = &sess,
+        .provider = p,
+        .slog = slog,
+        .tlog = tlog,
+        .costs = &costs,
+    };
+    struct agent_loop_params loop_params = {
+        .session = &sess,
+        .provider = p,
+        .tlog = tlog,
+        .slog = slog,
+        .max_turns = max_turns,
+        .hooks =
+            {
+                .user = &loop_ctx,
+                .turn_end = oneshot_turn_end,
+                .compact = oneshot_auto_compact,
+            },
+    };
+    struct agent_loop_result loop_result;
+    agent_loop_run(&loop_params, &loop_result);
+    last_ctx = loop_result.last_context_tokens;
 
-        struct agent_loop_turn loop_turn;
-        /* Oneshot doesn't arm interrupt and has no idle UI to surface
-         * — pass a NULL tick so http skips the progress hook entirely. */
-        agent_loop_turn_run(&loop_turn, &sess, p, NULL, NULL, NULL, NULL);
-        spend_account(&costs, &loop_turn.usage, p->catalog_id, sess.model);
-
-        /* round_ctx is the exact context size this round-trip reported
-         * (input subsumes the prior prefix, output is what was just
-         * generated) — the signal the between-round-trip auto-compaction
-         * check reads below. */
-        long round_ctx = (loop_turn.usage.input_tokens >= 0 && loop_turn.usage.output_tokens >= 0)
-                             ? loop_turn.usage.input_tokens + loop_turn.usage.output_tokens
-                             : -1;
-        if (round_ctx >= 0)
-            last_ctx = round_ctx;
-
-        if (loop_turn.assembly.error) {
-            hax_err("provider error: %s",
-                    loop_turn.error_message ? loop_turn.error_message : "(no message)");
-            /* Preserve any partial response in the resumable session while
-             * keeping stdout empty on failure. A pre-stream error adds no
-             * synthetic assistant item. */
-            agent_loop_turn_absorb_abort(&sess, &loop_turn, AGENT_ABORT_PROVIDER_ERROR);
-            if (usage_reported(&loop_turn.usage))
-                agent_session_add_turn_usage(&sess, p, &loop_turn.usage, loop_turn.elapsed_ms);
-            agent_loop_turn_destroy(&loop_turn);
-            rc = 1;
-            goto done;
-        }
-
-        size_t n_before;
-        int had_tool_call;
-        agent_session_absorb(&sess, &loop_turn.assembly, &n_before, &had_tool_call);
-        agent_loop_turn_destroy(&loop_turn);
-
-        if (!had_tool_call) {
-            agent_session_add_turn_usage(&sess, p, &loop_turn.usage, loop_turn.elapsed_ms);
-            print_assistant_text(sess.items, n_before, sess.n_items);
-            goto done;
-        }
-
-        /* Run tools silently — no display, no spinner. The result is
-         * ctrl_strip'd at the boundary just like the verbose path so
-         * the conversation lands in history in the same normalized
-         * form. emit_display callback is NULL: streamed output would
-         * have nowhere to go.
-         *
-         * --raw gate (sess.n_tools == 0): advertised no tools to the
-         * provider, so a tool_call coming back is either a model bug
-         * or a malicious backend. Refuse to execute and feed an error
-         * result to the model — the same gate exists in agent.c. */
-        size_t current_end = sess.n_items;
-        for (size_t i = n_before; i < current_end; i++) {
-            if (sess.items[i].kind != ITEM_TOOL_CALL)
-                continue;
-            struct item result;
-            if (sess.n_tools == 0) {
-                result = agent_tool_result_make(&sess.items[i],
-                                                "error: tool calls are disabled in this session");
-            } else {
-                struct agent_tool_call tc;
-                agent_tool_call_init(&tc, &sess.items[i]);
-                char *output = agent_tool_call_run(&tc, NULL, NULL);
-                result = agent_tool_result_make(&sess.items[i], output);
-                free(output);
-                agent_tool_call_destroy(&tc);
-            }
-            items_append(&sess.items, &sess.n_items, &sess.cap_items, result);
-        }
-        agent_session_add_turn_usage(&sess, p, &loop_turn.usage, loop_turn.elapsed_ms);
-        /* Round-trip complete (assistant + tool calls + their results
-         * all in sess.items): flush. CALL/RESULT pairing is intact for
-         * the renderer's lookahead. */
-        oneshot_flush(tlog, slog, sess.items, sess.n_items);
-
-        /* Between-round-trip auto-compaction: the model called tools and we
-         * loop for another request. If this round-trip's reported usage nears
-         * the window, summarize the completed work now so a long agentic chain
-         * doesn't run itself into an overflow. The next iteration streams from
-         * the seed. Quiet on stderr so a `tail`'d -p log shows it happened. */
-        if (compact_should_auto(round_ctx, compact_context_limit(p, sess.model)) &&
-            oneshot_compact(&sess, p, slog, tlog, &costs)) {
-            int tty = isatty(fileno(stderr));
-            fprintf(stderr, "%s[compacted context]%s\n", tty ? ANSI_DIM : "",
-                    tty ? ANSI_RESET : "");
-        }
+    switch (loop_result.outcome) {
+    case AGENT_LOOP_COMPLETE:
+        print_assistant_text(sess.items, loop_result.final_items_from, loop_result.final_items_to);
+        break;
+    case AGENT_LOOP_PROVIDER_ERROR:
+        hax_err("provider error: %s",
+                loop_result.error_message ? loop_result.error_message : "(no message)");
+        rc = 1;
+        break;
+    case AGENT_LOOP_INTERRUPTED:
+        rc = 1;
+        break;
+    case AGENT_LOOP_MAX_TURNS:
+        hax_err("max turns (%d) exceeded; aborting", max_turns);
+        rc = 1;
+        break;
     }
+    agent_loop_result_destroy(&loop_result);
 
-    /* Loop fell through without a final assistant-only response. */
-    hax_err("max turns (%d) exceeded; aborting", max_turns);
-    rc = 1;
-
-done:
     keepawake_release();
-    oneshot_flush(tlog, slog, sess.items, sess.n_items);
+    agent_loop_flush_logs(tlog, slog, sess.items, sess.n_items);
     /* Surface the session id on stderr (stdout is the model's answer, kept
      * clean for piping) so a one-shot run can be picked up with --resume.
      * NULL when nothing was recorded or persistence is disabled. */
