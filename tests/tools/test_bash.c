@@ -306,6 +306,11 @@ static void test_bash_timeout_no_grace_short_timeout(void)
 
 static void test_bash_timeout_grace_no_escape_via_pipe_close(void)
 {
+#ifdef T_TSAN
+    /* TSan's fork interceptors add hundreds of ms of spawn latency —
+     * no fixed pre-SIGTERM window is reliably wide enough. */
+    T_SKIP("spawn latency under TSan breaks the timing window");
+#endif
     /* A descendant traps SIGTERM, redirects stdout/stderr away from
      * the pipe (closing its inherited write end), and runs CPU work.
      * Without the EOF-during-grace handling, the parent reads EOF and

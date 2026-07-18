@@ -1,19 +1,19 @@
-# Convenience Makefile for nvim :make integration.
+# Build/test/lint entry points for humans, editors (nvim :make), and coding
+# agents. Delegates to scripts/check.sh, which keeps successful output compact
+# and lets failures pass through untouched.
 
-BUILD_DIR := build
+BUILD_DIR ?= build
 
 .PHONY: all tests lint clean
 
 all:
-	@[ -d $(BUILD_DIR) ] || meson setup $(BUILD_DIR)
-	meson compile -C $(BUILD_DIR)
+	@BUILD_DIR=$(BUILD_DIR) scripts/check.sh build
 
-tests: all
-	meson test -C $(BUILD_DIR) --print-errorlogs
+tests:
+	@BUILD_DIR=$(BUILD_DIR) scripts/check.sh test
 
 lint:
-	@find src tests -type f \( -name '*.c' -o -name '*.h' \) -print0 \
-		| xargs -0 clang-format --dry-run --Werror
+	@scripts/check.sh lint
 
 clean:
 	rm -rf $(BUILD_DIR)

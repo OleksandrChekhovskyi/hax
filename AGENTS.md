@@ -7,28 +7,34 @@ headers.
 ## Build, test, lint
 
 ```sh
-meson setup build                         # once
-meson compile -C build                    # build
-meson test -C build --print-errorlogs     # all tests
-meson test -C build <name>                # one test
+make                                      # build (quiet; sets up build/ on first run)
+make tests                                # build + all tests
+make lint                                 # clang-format check
+scripts/check.sh test <name>              # build + one test
 ```
 
-`Makefile` is a thin nvim `:make` wrapper around the same flow (`make`, `make tests`,
-`make lint`, `make clean`).
+`Makefile` delegates to `scripts/check.sh`, which keeps successful output to a compact
+confirmation and shows full compiler/test output only on failure — prefer these over raw
+meson invocations to keep output small. The verbose equivalents (`meson compile -C build`,
+`meson test -C build --print-errorlogs`) remain available for per-test timings or full
+build logs.
 
 `make lint` runs `clang-format --dry-run --Werror` over C sources/headers in `src/` and
 `tests/`. Run `clang-format -i` on any C source/header you touch before reporting done.
 Style is enforced by `.clang-format`: LLVM base, Linux braces, 4-space indent, spaces not
 tabs, 100-column limit.
 
-ASan/UBSan build for sharper failures:
+Sanitizer builds for sharper failures: set `BUILD_DIR=build-asan` (ASan/UBSan,
+`-Db_sanitize=address,undefined`) or `BUILD_DIR=build-tsan` (ThreadSanitizer,
+`-Db_sanitize=thread`); both are set up automatically when missing:
 
 ```sh
-meson setup build-asan -Db_sanitize=address,undefined
-meson compile -C build-asan
+BUILD_DIR=build-asan make tests
+BUILD_DIR=build-tsan scripts/check.sh test <name>
 ```
 
-Tests are plain C binaries using `tests/harness.h` (`EXPECT`, `EXPECT_STR_EQ`, `T_REPORT`).
+Tests are plain C binaries using `tests/harness.h` (`EXPECT`, `EXPECT_STR_EQ`, `T_SKIP`,
+`T_REPORT`).
 To add a test, append its source to `test_sources` in `tests/meson.build`, grouped to mirror
 the production `sources` list. Test names are path-derived: `tools/test_read.c` becomes
 `tools/read`, and `test_util.c` becomes `util`.
