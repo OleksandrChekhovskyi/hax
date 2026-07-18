@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "agent_core.h"
+#include "agent_loop.h"
 #include "agent_tool.h"
 #include "catalog.h"
 #include "compact.h"
@@ -27,16 +28,12 @@ static void oneshot_flush(struct transcript_log *tlog, struct session_log *slog,
     session_log_append(slog, items, n);
 }
 
-/* Per-stream callback state for the oneshot path. We hand turn.c every
- * event for item assembly and capture the human-readable error text on
- * EV_ERROR (turn sets t->error but doesn't carry the message). */
-struct oneshot_ctx {
+/* Compaction may make several provider attempts internally, so it keeps a
+ * dedicated sink for per-attempt spend and usage footers. Normal turns use
+ * agent_loop_turn_run. */
+struct oneshot_compact_ctx {
     struct turn *turn;
     char *error_msg; /* malloc'd; set on EV_ERROR */
-    /* Filled from EV_DONE; all fields -1 if the provider didn't report.
-     * Drives the auto-compaction threshold check between round-trips and
-     * the per-request transcript footer. */
-    struct stream_usage usage;
     /* Run-level spend accumulator (borrowed): every terminal event this
      * sink sees is accounted directly, so a multi-attempt compaction
      * stream (reject-and-retry on a stray tool call) bills every attempt
@@ -50,9 +47,9 @@ struct oneshot_ctx {
     struct compact_usage *cap;
 };
 
-static int on_event(const struct stream_event *ev, void *user)
+static int compact_on_event(const struct stream_event *ev, void *user)
 {
-    struct oneshot_ctx *oc = user;
+    struct oneshot_compact_ctx *oc = user;
     const struct stream_usage *u = NULL;
     if (ev->kind == EV_ERROR) {
         if (!oc->error_msg && ev->u.error.message)
@@ -64,7 +61,6 @@ static int on_event(const struct stream_event *ev, void *user)
         u = &ev->u.done.usage;
     }
     if (u) {
-        oc->usage = *u;
         spend_account(oc->costs, u, oc->catalog_id, oc->model);
         if (oc->cap)
             compact_usage_record(oc->cap, u);
@@ -112,13 +108,9 @@ static int oneshot_compact(struct agent_session *s, struct provider *p, struct s
      * no display. */
     struct compact_usage cap;
     compact_usage_init(&cap);
-    struct oneshot_ctx oc = {.turn = &t,
-                             .usage = {-1, -1, -1, -1, -1, -1},
-                             .costs = costs,
-                             .catalog_id = p->catalog_id,
-                             .model = s->model,
-                             .cap = &cap};
-    char *summary = compact_summarize(s, p, NULL, &t, on_event, &oc, NULL, NULL, NULL);
+    struct oneshot_compact_ctx oc = {
+        .turn = &t, .costs = costs, .catalog_id = p->catalog_id, .model = s->model, .cap = &cap};
+    char *summary = compact_summarize(s, p, NULL, &t, compact_on_event, &oc, NULL, NULL, NULL);
     free(oc.error_msg);
     turn_reset(&t);
 
@@ -275,55 +267,43 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         }
         first_inner = 0;
 
-        struct context ctx = agent_session_context(&sess);
-
-        struct turn t;
-        turn_init(&t);
-        struct oneshot_ctx oc = {.turn = &t,
-                                 .usage = {-1, -1, -1, -1, -1, -1},
-                                 .costs = &costs,
-                                 .catalog_id = p->catalog_id,
-                                 .model = sess.model};
-        long round_start_ms = monotonic_ms();
+        struct agent_loop_turn loop_turn;
         /* Oneshot doesn't arm interrupt and has no idle UI to surface
          * — pass a NULL tick so http skips the progress hook entirely. */
-        p->stream(p, &ctx, sess.model, on_event, &oc, NULL, NULL);
-        long round_ms = monotonic_ms() - round_start_ms;
+        agent_loop_turn_run(&loop_turn, &sess, p, NULL, NULL, NULL, NULL);
+        spend_account(&costs, &loop_turn.usage, p->catalog_id, sess.model);
 
-        /* Accounting ran in the sink even on the error exit: a truncated
-         * response reported its usage on the error and is billed like a
-         * complete one. round_ctx is the exact context size this
-         * round-trip reported (input subsumes the prior prefix, output is
-         * what was just generated) — the signal the between-round-trip
-         * auto-compaction check reads below. */
-        long round_ctx = (oc.usage.input_tokens >= 0 && oc.usage.output_tokens >= 0)
-                             ? oc.usage.input_tokens + oc.usage.output_tokens
+        /* round_ctx is the exact context size this round-trip reported
+         * (input subsumes the prior prefix, output is what was just
+         * generated) — the signal the between-round-trip auto-compaction
+         * check reads below. */
+        long round_ctx = (loop_turn.usage.input_tokens >= 0 && loop_turn.usage.output_tokens >= 0)
+                             ? loop_turn.usage.input_tokens + loop_turn.usage.output_tokens
                              : -1;
         if (round_ctx >= 0)
             last_ctx = round_ctx;
 
-        if (t.error) {
-            hax_err("provider error: %s", oc.error_msg ? oc.error_msg : "(no message)");
-            free(oc.error_msg);
-            turn_reset(&t);
-            /* A billed truncation earns its transcript footer even though
-             * the response items are discarded; a pre-stream failure
-             * reported nothing and gets none. Flushed by the `done:`
-             * catch-all. */
-            if (usage_reported(&oc.usage))
-                agent_session_add_turn_usage(&sess, p, &oc.usage, round_ms);
+        if (loop_turn.assembly.error) {
+            hax_err("provider error: %s",
+                    loop_turn.error_message ? loop_turn.error_message : "(no message)");
+            /* Preserve any partial response in the resumable session while
+             * keeping stdout empty on failure. A pre-stream error adds no
+             * synthetic assistant item. */
+            agent_loop_turn_absorb_abort(&sess, &loop_turn, AGENT_ABORT_PROVIDER_ERROR);
+            if (usage_reported(&loop_turn.usage))
+                agent_session_add_turn_usage(&sess, p, &loop_turn.usage, loop_turn.elapsed_ms);
+            agent_loop_turn_destroy(&loop_turn);
             rc = 1;
             goto done;
         }
-        free(oc.error_msg);
 
         size_t n_before;
         int had_tool_call;
-        agent_session_absorb(&sess, &t, &n_before, &had_tool_call);
-        turn_reset(&t);
+        agent_session_absorb(&sess, &loop_turn.assembly, &n_before, &had_tool_call);
+        agent_loop_turn_destroy(&loop_turn);
 
         if (!had_tool_call) {
-            agent_session_add_turn_usage(&sess, p, &oc.usage, round_ms);
+            agent_session_add_turn_usage(&sess, p, &loop_turn.usage, loop_turn.elapsed_ms);
             print_assistant_text(sess.items, n_before, sess.n_items);
             goto done;
         }
@@ -356,7 +336,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
             }
             items_append(&sess.items, &sess.n_items, &sess.cap_items, result);
         }
-        agent_session_add_turn_usage(&sess, p, &oc.usage, round_ms);
+        agent_session_add_turn_usage(&sess, p, &loop_turn.usage, loop_turn.elapsed_ms);
         /* Round-trip complete (assistant + tool calls + their results
          * all in sess.items): flush. CALL/RESULT pairing is intact for
          * the renderer's lookahead. */

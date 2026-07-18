@@ -10,6 +10,7 @@
 
 #include "agent_core.h"
 #include "agent_dispatch.h"
+#include "agent_loop.h"
 #include "catalog.h"
 #include "compact.h"
 #include "config.h"
@@ -47,24 +48,6 @@ static const char *build_prompt(char *buf, size_t n)
     return buf;
 }
 
-/* Outcome of absorb_aborted_turn — drives whether a caller adds a
- * fallback standalone [interrupted] marker.
- *
- *   had_state    Anything was streamed before the abort: in-flight
- *                text, an in-progress tool_call (start+args without
- *                a matching end), or completed items already pushed
- *                this turn (text flushed by EV_TOOL_CALL_START, a
- *                completed reasoning blob, etc.). 0 means the error
- *                fired before any wire content arrived (pre-stream
- *                500/401/429 after retries) — there's nothing for
- *                the model to "continue from".
- *   marker_placed [interrupted] landed inside the absorbed batch
- *                (in flushed text or as a synthesized tool_result). */
-struct absorb_outcome {
-    int had_state;
-    int marker_placed;
-};
-
 /* Tally one tool invocation for /session. The per-type slot keys on the
  * registry's static name (via find_tool) rather than the item-owned
  * string, which compaction can free while stats live on; unregistered
@@ -88,78 +71,6 @@ static void stats_count_tool_call(struct session_stats *st, const char *name)
     }
 }
 
-/* Shape conversation history for an aborted assistant turn — used by
- * both the mid-stream EV_ERROR path (network drop, length truncation)
- * and the Esc-cancel path. Both leave partial state behind that needs
- * the same three-step cleanup so the next user turn lands in a
- * well-formed conversation:
- *
- *   1. Tag any in-flight assistant text with [interrupted] before
- *      flushing — without the marker, the model on the next turn
- *      would see a complete-looking response and not know to
- *      continue or recover.
- *   2. Absorb the turn's items (the tagged text, any completed
- *      tool_calls) into the session vector.
- *   3. For each completed tool_call in the absorbed batch, synthesize
- *      a matching [interrupted] tool_result — none of them ran (we
- *      break before dispatch), and a tool_call without a matching
- *      result is malformed history that future turns reject.
- *
- * Returns the outcome flags so callers can decide whether to add a
- * standalone [interrupted] assistant message:
- *
- *   - Esc path: always add the fallback when marker_placed=0 (user
- *     cancellation needs explicit ack regardless of whether anything
- *     streamed).
- *   - EV_ERROR path: only add when had_state=1 && marker_placed=0
- *     (tag the "text-flushed-by-tool_call_start, then error" gap;
- *     skip when nothing streamed — a pre-stream 500 with no output
- *     would otherwise leave a fake assistant turn in history that
- *     misleads the model on the user's next prompt). */
-static struct absorb_outcome absorb_aborted_turn(struct agent_session *sess, struct turn *t,
-                                                 struct session_stats *stats)
-{
-    /* Capture state-before-mutation. n_items already covers any
-     * earlier flush (e.g. EV_TOOL_CALL_START flushed text on its
-     * way through); n_pending covers an in-flight tool_call that
-     * never reached EV_TOOL_CALL_END. in_reasoning covers a
-     * reasoning-only stream that errored/cancelled before any
-     * text/tool event flushed the buffered CoT — preserve it (the
-     * whole point of the reasoning round-trip) rather than dropping
-     * it in turn_reset. Flush it before the text so the reasoning
-     * item precedes the assistant message, matching the normal flow. */
-    int had_state = t->in_text || t->in_reasoning || t->n_pending > 0 || t->n_items > 0;
-    int had_partial_text = t->in_text;
-    turn_flush_reasoning(t);
-    turn_flush_text(t, had_partial_text ? "\n" INTERRUPT_MARKER : NULL);
-
-    size_t n_before;
-    int had_tc;
-    agent_session_absorb(sess, t, &n_before, &had_tc);
-    (void)had_tc;
-    turn_reset(t);
-
-    int marker_placed = had_partial_text;
-    size_t end = sess->n_items;
-    for (size_t i = n_before; i < end; i++) {
-        if (sess->items[i].kind == ITEM_TOOL_CALL) {
-            /* The model issued this call even though the abort keeps it
-             * from dispatching — /session's tool-call count includes it,
-             * same as the dispatch loop counts refused/skipped calls. */
-            if (stats)
-                stats_count_tool_call(stats, sess->items[i].tool_name);
-            items_append(&sess->items, &sess->n_items, &sess->cap_items,
-                         (struct item){
-                             .kind = ITEM_TOOL_RESULT,
-                             .call_id = xstrdup(sess->items[i].call_id),
-                             .output = xstrdup(INTERRUPT_MARKER),
-                         });
-            marker_placed = 1;
-        }
-    }
-    return (struct absorb_outcome){.had_state = had_state, .marker_placed = marker_placed};
-}
-
 /* Flush the same item slice to both append-only logs. The two share the
  * incremental [n_written..n_items) cursor design, so they're always
  * advanced together at each of the agent's commit points (after the user
@@ -171,14 +82,6 @@ static void flush_logs(struct transcript_log *tlog, struct session_log *slog,
     transcript_log_append(tlog, items, n);
     session_log_append(slog, items, n);
 }
-
-/* Per-stream slice the event callback needs alongside render_ctx. */
-struct event_ctx {
-    struct render_ctx *r;
-    struct turn *turn;
-    /* Filled in from EV_DONE; all fields -1 if the provider didn't report. */
-    struct stream_usage usage;
-};
 
 /* How long a table must keep buffering with no visible output before
  * the "composing..." spinner surfaces. A fast table finalizes within
@@ -342,10 +245,9 @@ static int agent_stream_tick(void *user)
     return interrupt_requested();
 }
 
-static int on_event(const struct stream_event *ev, void *user)
+static int render_on_event(const struct stream_event *ev, void *user)
 {
-    struct event_ctx *ec = user;
-    struct render_ctx *r = ec->r;
+    struct render_ctx *r = user;
     struct disp *d = &r->disp;
 
     /* last_text_at tracks "time since the last byte the user could
@@ -459,15 +361,9 @@ static int on_event(const struct stream_event *ev, void *user)
     case EV_DONE:
         /* Stream ended cleanly. No state transition — agent_run's
          * post-stream path closes whatever was open. */
-        ec->usage = ev->u.done.usage;
         fflush(stdout);
         break;
     case EV_ERROR:
-        /* Usage the provider reported before failing (a max_tokens/length
-         * truncation is billed like a complete response) — account it the
-         * same as EV_DONE's. */
-        if (ev->u.error.usage)
-            ec->usage = *ev->u.error.usage;
         /* Full close before drawing the error block. render_open_block's
          * RS_IDLE transition flushes md's tail if RS_TEXT was open, so
          * partial pre-error text appears just above the error line. */
@@ -480,7 +376,6 @@ static int on_event(const struct stream_event *ev, void *user)
         break;
     }
 
-    turn_on_event(ev, ec->turn);
     return 0;
 }
 
@@ -1564,22 +1459,17 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
                 flush_logs(tlog, state.slog, sess.items, sess.n_items);
             }
             first_inner = 0;
-            struct context ctx = agent_session_context(&sess);
 
             render_stream_begin(&r);
 
             if (r.md)
                 md_reset(r.md, md_wrap_width());
-            struct turn t;
-            turn_init(&t);
             r.disp.saw_text = 0;
-            struct event_ctx ec = {.r = &r, .turn = &t, .usage = {-1, -1, -1, -1, -1, -1}};
-            long round_start_ms = monotonic_ms();
+            struct agent_loop_turn loop_turn;
             /* agent_stream_tick combines cancel (Esc) with idle
              * detection: ~1Hz from libcurl's progress callback inside
              * curl_easy_perform, plus on every received chunk. */
-            p->stream(p, &ctx, sess.model, on_event, &ec, agent_stream_tick, &r);
-            long round_ms = monotonic_ms() - round_start_ms;
+            agent_loop_turn_run(&loop_turn, &sess, p, render_on_event, &r, agent_stream_tick, &r);
             /* Every stream call is one model round-trip, /session's
              * "requests" — counted regardless of outcome (an errored or
              * interrupted attempt still hit the backend). */
@@ -1589,8 +1479,8 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
              * truncated (max_tokens/length) response reports usage on its
              * EV_ERROR and is billed like a complete one, so the display
              * and /session totals must not skip it. */
-            if (ec.usage.input_tokens >= 0 && ec.usage.output_tokens >= 0)
-                user_turn_ctx = ec.usage.input_tokens + ec.usage.output_tokens;
+            if (loop_turn.usage.input_tokens >= 0 && loop_turn.usage.output_tokens >= 0)
+                user_turn_ctx = loop_turn.usage.input_tokens + loop_turn.usage.output_tokens;
 
             /* Session totals (/session): sums of what this round-trip
              * reported. Plain accumulators — unreported fields just
@@ -1599,56 +1489,35 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
                 state.stats.last_ctx = user_turn_ctx;
                 state.stats.last_limit = compact_context_limit(p, sess.model);
             }
-            if (ec.usage.input_tokens >= 0)
-                state.stats.input_tokens += ec.usage.input_tokens;
-            if (ec.usage.output_tokens >= 0)
-                state.stats.output_tokens += ec.usage.output_tokens;
-            if (ec.usage.cached_tokens > 0)
-                state.stats.cached_tokens += ec.usage.cached_tokens;
-            if (ec.usage.cache_write_tokens > 0)
-                state.stats.cache_write_tokens += ec.usage.cache_write_tokens;
-            spend_account(&state.stats.spend, &ec.usage, p->catalog_id, sess.model);
+            if (loop_turn.usage.input_tokens >= 0)
+                state.stats.input_tokens += loop_turn.usage.input_tokens;
+            if (loop_turn.usage.output_tokens >= 0)
+                state.stats.output_tokens += loop_turn.usage.output_tokens;
+            if (loop_turn.usage.cached_tokens > 0)
+                state.stats.cached_tokens += loop_turn.usage.cached_tokens;
+            if (loop_turn.usage.cache_write_tokens > 0)
+                state.stats.cache_write_tokens += loop_turn.usage.cache_write_tokens;
+            spend_account(&state.stats.spend, &loop_turn.usage, p->catalog_id, sess.model);
 
-            if (t.error) {
-                /* Mid-stream error (network drop, "length"/"content_filter"
-                 * truncation, provider parse failure, ...). Preserve the
-                 * partial assistant text in conversation history so the
-                 * user can ask the model to "continue" on the next turn
-                 * without losing what was already streamed. The on-screen
-                 * "[error: ...]" line was already drawn by on_event;
-                 * absorb_aborted_turn shapes what lands in history. */
-                struct absorb_outcome o = absorb_aborted_turn(&sess, &t, &state.stats);
-                if (o.had_state && !o.marker_placed) {
-                    /* Tag the gap when state was streamed but nothing
-                     * in the absorbed batch could carry the marker —
-                     * e.g. text flushed by EV_TOOL_CALL_START (so
-                     * in_text=0 by error time) with the pending
-                     * tool_call never finalized. Without this, the
-                     * model would see a complete-looking assistant
-                     * response with no signal it was cut short.
-                     *
-                     * Skip when had_state=0 (pre-stream 500/401/429
-                     * after retries): there's no partial work to
-                     * preserve, and synthesizing a fake assistant
-                     * "[interrupted]" would mislead the model on the
-                     * user's next prompt. The on-screen "[error: ...]"
-                     * line is the user-facing signal. */
-                    items_append(&sess.items, &sess.n_items, &sess.cap_items,
-                                 (struct item){
-                                     .kind = ITEM_ASSISTANT_MESSAGE,
-                                     .text = xstrdup(INTERRUPT_MARKER),
-                                 });
-                }
+            if (loop_turn.assembly.error) {
+                /* Preserve partial output and repair any completed tool
+                 * calls before committing the failed turn. The renderer
+                 * already drew the provider's error line. */
+                struct agent_abort_outcome o =
+                    agent_loop_turn_absorb_abort(&sess, &loop_turn, AGENT_ABORT_PROVIDER_ERROR);
+                for (size_t i = o.items_from; i < o.items_to; i++)
+                    if (sess.items[i].kind == ITEM_TOOL_CALL)
+                        stats_count_tool_call(&state.stats, sess.items[i].tool_name);
                 /* A truncated response is billed like a complete one, so
-                 * it earns a footer too; a pre-stream failure (the common
-                 * case here) reported nothing and gets none — not even
-                 * the duration-only form successful requests get. */
-                if (usage_reported(&ec.usage))
-                    agent_session_add_turn_usage(&sess, p, &ec.usage, round_ms);
+                 * it earns a footer too; a pre-stream failure reported
+                 * nothing and gets none. */
+                if (usage_reported(&loop_turn.usage))
+                    agent_session_add_turn_usage(&sess, p, &loop_turn.usage, loop_turn.elapsed_ms);
                 /* Land the partial state on disk now — the success
                  * path's later append doesn't run on this branch and
                  * post-mortem readers want to see how far we got. */
                 flush_logs(tlog, state.slog, sess.items, sess.n_items);
+                agent_loop_turn_destroy(&loop_turn);
                 user_turn_errored = 1;
                 break;
             }
@@ -1662,27 +1531,18 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
             int interrupted = interrupt_requested();
 
             if (interrupted) {
-                /* User pressed Esc. Same shape-history-as-aborted dance
-                 * as the EV_ERROR path; additionally, when nothing
-                 * could carry the marker, drop a standalone one so
-                 * the model sees the cancel signal on the next turn.
-                 * Esc adds it unconditionally on no-marker (unlike
-                 * EV_ERROR's had_state gate) — user cancellation
-                 * deserves explicit acknowledgement even if no
-                 * deltas had arrived yet ("Esc before any output"
-                 * and "only normally-flushed text completed" cases). */
-                struct absorb_outcome o = absorb_aborted_turn(&sess, &t, &state.stats);
-                if (!o.marker_placed) {
-                    items_append(&sess.items, &sess.n_items, &sess.cap_items,
-                                 (struct item){
-                                     .kind = ITEM_ASSISTANT_MESSAGE,
-                                     .text = xstrdup(INTERRUPT_MARKER),
-                                 });
-                }
+                /* User cancellation always leaves an explicit marker,
+                 * even when Esc arrived before the first stream event. */
+                struct agent_abort_outcome o =
+                    agent_loop_turn_absorb_abort(&sess, &loop_turn, AGENT_ABORT_USER_CANCEL);
+                for (size_t i = o.items_from; i < o.items_to; i++)
+                    if (sess.items[i].kind == ITEM_TOOL_CALL)
+                        stats_count_tool_call(&state.stats, sess.items[i].tool_name);
                 /* Footer only when the abort was billed (usage arrived
                  * before the Esc) — a plain cancel earns no line. */
-                if (usage_reported(&ec.usage))
-                    agent_session_add_turn_usage(&sess, p, &ec.usage, round_ms);
+                if (usage_reported(&loop_turn.usage))
+                    agent_session_add_turn_usage(&sess, p, &loop_turn.usage, loop_turn.elapsed_ms);
+                agent_loop_turn_destroy(&loop_turn);
                 user_turn_interrupted = 1;
                 break;
             }
@@ -1691,11 +1551,11 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
              * whether to loop for tool dispatch. */
             size_t n_before;
             int had_tool_call;
-            agent_session_absorb(&sess, &t, &n_before, &had_tool_call);
-            turn_reset(&t);
+            agent_session_absorb(&sess, &loop_turn.assembly, &n_before, &had_tool_call);
+            agent_loop_turn_destroy(&loop_turn);
 
             if (!had_tool_call) {
-                agent_session_add_turn_usage(&sess, p, &ec.usage, round_ms);
+                agent_session_add_turn_usage(&sess, p, &loop_turn.usage, loop_turn.elapsed_ms);
                 break;
             }
 
@@ -1738,7 +1598,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
             int batch_aborted = interrupt_requested();
             if (batch_aborted)
                 agent_session_mark_interrupt(&sess);
-            agent_session_add_turn_usage(&sess, p, &ec.usage, round_ms);
+            agent_session_add_turn_usage(&sess, p, &loop_turn.usage, loop_turn.elapsed_ms);
 
             /* Round-trip complete: assistant text, tool calls, and all
              * their results are in sess.items, so flush the slice into
