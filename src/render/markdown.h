@@ -4,78 +4,42 @@
 
 #include <stddef.h>
 
-/* Pragmatic Markdown renderer for streaming text — NOT a CommonMark
- * implementation. Supports `**bold**`, `*italic*`/`_italic_`, `` `code` ``,
- * line-start headers (#, ##, ###), and code fences (```, optional info
- * string). Unordered list markers (`*`/`-`/`+`) render as a dim `• ` bullet
- * and ordered markers (`N.`/`N)`) keep their number but dim it, so the marker
- * recedes and the item text leads. Thematic breaks (`---`/`***`/`___`) render
- * as a short dim row of spaced dots (kept distinct from the harness's
- * full-width solid rules), and GFM pipe tables are buffered whole and laid out
- * as an aligned grid with dim `│` column separators — or reflowed to a bulleted
- * `label: value` record list when too wide for the wrap width.
- * Bold and inline-code are tracked as independent attributes, so `**`code`**`
- * (bold around inline code) renders correctly. Emphasis markers require a
- * non-alphanumeric byte on the left to open, so identifiers like
- * `compile_commands.json` and arithmetic like `5*3*7` stay literal.
+/* Pragmatic streaming Markdown renderer, not a CommonMark implementation. Supports emphasis,
+ * inline and fenced code, line-start headings and lists, thematic breaks, and leading-pipe GFM
+ * tables. Wide tables reflow to bulleted label/value records. Prose newlines normally become
+ * spaces; two trailing spaces or a block boundary preserve a hard break.
  *
- * Output uses real italic for emphasis and the theme's code_inline,
- * code_block, and heading styles (see terminal/theme.h). Inline-code and
- * code-fence spans are verbatim — no nested marker processing inside them.
- *
- * Code-fence opener and closer follow CommonMark's count rule: a 4-backtick
- * fence isn't closed by a 3-backtick line, and a closer cannot have an info
- * string. Note that this means a model emitting a Markdown demo with a
- * 3-backtick outer fence containing a bare 3-backtick line will close at
- * that bare line — to nest, the source needs more outer backticks.
- *
- * The renderer is stateful across feed calls — it buffers a small tail of
- * ambiguous trailing bytes (a single `*` that may become `**`, etc.) so a
- * marker split across deltas resolves correctly on the next feed. Style
- * state spans deltas within a turn; call md_reset between turns. */
+ * Parser and style state span feeds, with ambiguous suffixes deferred until more input arrives.
+ * Call md_flush at end of turn and md_reset before the next turn. */
 
-/* Emit callback. is_raw is 1 for ANSI escape bytes (zero-width, must not
- * affect any held-newline state in the consumer) and 0 for content bytes
- * that are visible on the terminal. The split lets a downstream like the
- * disp_* helpers route raw bytes around their trail/held bookkeeping so a
- * style transition after a buffered \n doesn't reset the trail counter. */
+/* is_raw distinguishes zero-width ANSI escapes from visible content. Consumers must not let raw
+ * bytes alter held-newline or other display-width bookkeeping. */
 typedef void (*md_emit_fn)(const char *bytes, size_t n, int is_raw, void *user);
 
 struct md_renderer;
 
-/* wrap_width: cells per row before the renderer inserts a soft break at
- * the last word boundary. <= 0 means unlimited width — no reflow, and
- * tables lay out at their natural column widths rather than choosing the
- * record-list fallback (used by tests for byte-exact comparison and as a
- * safety hatch). Prettification (emphasis, headings, list markers, rules,
- * tables) applies regardless of wrap_width; only line wrapping is gated on
- * it. Code fences and headings are passed through without wrapping. The
- * renderer also collapses single \n inside paragraphs to a space
- * (CommonMark soft break) so a model emitting narrow lines is rewrapped to
- * the available width; \n followed by a block marker (list bullet, heading,
- * fence opener, blank line) stays a hard break. */
+/* Create a renderer for the given display width. <= 0 disables wrapping and table reflow.
+ * Headings remain unwrapped; fenced code remains verbatim. */
 struct md_renderer *md_new(md_emit_fn emit, void *user, int wrap_width);
-void md_feed(struct md_renderer *m, const char *s, size_t n);
-void md_flush(struct md_renderer *m); /* commit pending tail at end of turn */
-/* Re-sample wrap_width here; lets the agent pass display_width() between
- * turns so a SIGWINCH-style resize is picked up without a callback. */
+
+/* Reset for a new turn, discarding pending state, restoring defaults, and applying the width. */
 void md_reset(struct md_renderer *m, int wrap_width);
+
+/* Release the renderer without flushing pending output. Accepts NULL. */
 void md_free(struct md_renderer *m);
 
-/* Toggle inline SGR emission (bold / italic / code / heading / fence
- * color). Wrap and block structure still run — only color escapes are
- * suppressed when off. Use when the caller owns SGR around the
- * renderer's output (e.g. CoT inside a dim+italic span). Acts as a
- * soft reset at the mode boundary: flushes the tail under the old
- * setting, then clears parser + wrap state. Caller emits ANSI_RESET
- * at the seam; this function does not. Default is on. */
+/* Consume one input chunk, deferring ambiguous suffixes until a later feed or flush. */
+void md_feed(struct md_renderer *m, const char *s, size_t n);
+
+/* Finish the turn by resolving deferred input, closing styles, and emitting buffered output. */
+void md_flush(struct md_renderer *m);
+
+/* Enable or suppress SGR output without disabling wrapping or block parsing. A mode change flushes
+ * deferred input under the old setting, then resets parser and wrap state; the caller owns any
+ * ANSI_RESET at the seam. Styling is enabled by default. */
 void md_set_styled(struct md_renderer *m, int on);
 
-/* True while the renderer is buffering a GFM table — rows are being
- * collected into an internal buffer and nothing is emitted until the
- * whole grid lays out at end-of-table. The agent reads this to show a
- * "composing..." spinner during the otherwise-silent accumulation, the
- * way it does for the tool-call args window. */
+/* True while a GFM table is buffered for whole-table layout and no rows are emitted. */
 int md_in_table(const struct md_renderer *m);
 
 #endif /* HAX_MARKDOWN_H */

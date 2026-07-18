@@ -11,110 +11,57 @@
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
 
-/* Sanity bound on the deferred-tail size. Inline markers fit in a few bytes;
- * the only thing that can grow large is a partial fence opener whose info
- * string spans multiple deltas. Realistic openers are well under 1 KiB even
- * with attributes; this cap prevents runaway growth on malformed input. If
- * exceeded, the excess is flushed as plain text. */
+/* Inline markers are short, but a split fence info line can grow indefinitely on malformed
+ * input. Keep a bounded lookahead tail and emit excess bytes literally. */
 #define TAIL_MAX 8192
 
 struct md_renderer {
     md_emit_fn emit_cb;
     void *user;
 
-    /* Bytes deferred from a previous feed because they could form a
-     * multi-byte marker that needs lookahead. Grows dynamically so a
-     * long fence opener line that spans deltas (e.g. `` ```python
-     * title="..." ``) doesn't get its leading backticks flushed as
-     * literal text and unbalance subsequent fence parsing. */
+    /* Deferred lookahead, including fence opener lines split across feeds. */
     struct buf tail;
 
-    /* Last source byte processed in any prior feed — needed for the
-     * intraword check on a marker at position 0 of the current work
-     * buffer (e.g. feed("foo") then feed("_bar_") must NOT open italic
-     * because the `_` has `o` to its left in the source stream). */
+    /* Last consumed source byte, retained for emphasis checks across feeds. */
     char prev_byte;
 
     int at_line_start;
 
-    /* Run of space bytes at the current end-of-line, reset by any
-     * non-space content (in emit_text) and by every consumed inline
-     * delimiter (in the open_/close_ helpers). Lets the \n handler spot
-     * a CommonMark hard line break (2+ trailing spaces) without looking
-     * back into the work buffer — so the rule still fires when the
-     * spaces and the newline land in separate feeds (e.g. a provider
-     * that streams "  " and "\n" as two deltas), yet stays accurate when
-     * the spaces precede a delimiter (`foo  **\n`) rather than the line
-     * ending. */
+    /* Trailing source spaces across feeds. Delimiters clear the count so spaces before a
+     * marker cannot become hard-break spaces. */
     int trailing_spaces;
 
-    /* Number of backticks in the active fence's opener — closer must have
-     * at least this many, with no info string after, per CommonMark. Lets
-     * a ```markdown demo containing inner ```python lines stay open until
-     * a *bare* ``` line. */
+    /* Active fence width; a closer needs at least this many backticks and no info string. */
     size_t fence_open_count;
 
-    /* Style flags. All independent — each maps to a distinct SGR group, so
-     * e.g. an inline-code span inside bold leaves bold intact when the code
-     * span closes. The one exception is heading-vs-inline-bold which both
-     * use the same SGR; close_bold re-emits ANSI_BOLD if in_heading is
-     * still set so the rest of the heading line stays bold. */
+    /* Style flags track parser state independently; nested bold and inline code can still alter
+     * SGR attributes owned by a heading, so their closers restore its theme. */
     int in_heading;
     int in_code_fence;
     int in_inline_code;
     int in_bold;
     int in_italic;
 
-    /* When 0, the open_* / close_* helpers below suppress their SGR
-     * escapes but keep the in_* flag bookkeeping. The parser still
-     * tracks bold/italic/etc. correctly (so markers nest and close as
-     * usual) — only the visible color changes are dropped. Wrap and
-     * block structure are unaffected. Defaults to 1. See md_set_styled. */
+    /* Disables SGR output without disabling style-state tracking. */
     int styled;
 
-    /* Set when the current line starts with a marker that isolates it
-     * from surrounding prose (blockquote `>`, GFM table row `|`). The
-     * trailing \n of such a line is forced hard regardless of what's
-     * on the next line — so a blockquote line followed by plain
-     * prose doesn't soft-join into a single paragraph. Cleared on
-     * every hard \n; set in step_line_start when the leading byte
-     * matches. */
+    /* Block-isolated lines force a hard trailing newline instead of joining with prose. */
     int cur_line_is_block;
 
-    /* Set while output sits at a blank-line boundary — a blank line has
-     * just been emitted, or nothing has been emitted yet. Extra
-     * consecutive blank lines are then suppressed so a run collapses to a
-     * single one; models sometimes emit several, which reads as ragged
-     * vertical gaps in the terminal. Set when the one allowed blank line
-     * is emitted in step_line_start, cleared there as soon as a non-blank
-     * line is processed. Only prose blank lines route through that path —
-     * code-fence and table interiors bypass it, so their verbatim blank
-     * lines are preserved. */
+    /* Collapses prose blank-line runs; fence and table interiors bypass it. */
     int at_blank;
 
-    /* Set when a list marker consumed a space run that reached the buffer
-     * end: leading spaces at the head of the next feed are the tail of that
-     * marker's padding and must be dropped, not rendered as content, so the
-     * marker still collapses to one space across the boundary. Cleared by
-     * the first non-space byte in step_inline. */
+    /* Drops list-marker padding that continues into the next feed. */
     int skip_pad;
 
     struct md_wrap wrap;
 
     struct md_table table;
 
-    /* Inline-only mode: skip all line-start block parsing (headings,
-     * lists, fences, rules, tables) so the input is treated as a single
-     * run of inline Markdown. Used by render_cell — GFM table cells are
-     * inline contexts, so `# H`, `- x`, `---`, ``` ``` ``` inside a cell
-     * must stay literal text, not become block constructs. */
+    /* Table cells parse inline Markdown without recognizing block constructs. */
     int inline_only;
 
-    /* Suppress bold SGR (open_bold/close_bold emit nothing) while still
-     * tracking the in_bold flag for marker nesting. Set on the sub-renderer
-     * for a header / reflow-label cell, whose surrounding context already
-     * applies bold — so an inner `**...**` span doesn't emit a bold-off
-     * that cancels the outer header bold for the rest of the cell. */
+    /* Prevent inner emphasis from canceling a table cell's outer bold style. */
     int suppress_bold;
 };
 
@@ -155,7 +102,6 @@ static void emit_text(struct md_renderer *m, const char *s, size_t n)
     md_wrap_emit_text(&m->wrap, &ctx, s, n, verbatim);
 }
 
-/* Emit an ANSI escape (zero-width). */
 static void emit_raw(struct md_renderer *m, const char *s)
 {
     if (!m->styled)
@@ -165,11 +111,7 @@ static void emit_raw(struct md_renderer *m, const char *s)
     md_wrap_emit_raw(&m->wrap, &ctx, s, strlen(s), verbatim);
 }
 
-/* An inline delimiter (`*`, `**`, `_`, `` ` ``) is a non-space source
- * byte that's consumed without passing through emit_text, so it must
- * clear the trailing-space run itself — otherwise spaces sitting before
- * the delimiter (e.g. `foo  **`) would leave a stale count and a later
- * \n would wrongly read as a hard break. */
+/* Delimiters bypass emit_text, so their helpers must clear trailing_spaces. */
 static void open_bold(struct md_renderer *m)
 {
     if (!m->suppress_bold)
@@ -184,8 +126,7 @@ static void close_bold(struct md_renderer *m)
         emit_raw(m, ANSI_BOLD_OFF);
     m->in_bold = 0;
     m->trailing_spaces = 0;
-    /* Re-assert the heading style: SGR 22 above closed its bold, and a
-     * themed heading open may carry a color too (re-opening is idempotent). */
+    /* SGR 22 also closes the heading's bold; restore its full theme. */
     if (m->in_heading && !m->suppress_bold)
         emit_raw(m, theme_open(THEME_HEADING));
 }
@@ -216,18 +157,14 @@ static void close_inline_code(struct md_renderer *m)
     emit_raw(m, theme_close(THEME_CODE_INLINE));
     m->in_inline_code = 0;
     m->trailing_spaces = 0;
-    /* The code closer restored the default foreground; when a themed
-     * heading carries a color of its own (open != plain bold), bring
-     * it back for the rest of the heading line. */
+    /* A code closer resets foreground, so restore a colored heading theme. */
     if (m->in_heading && strcmp(theme_open(THEME_HEADING), ANSI_BOLD) != 0)
         emit_raw(m, theme_open(THEME_HEADING));
 }
 
 static void open_code_fence(struct md_renderer *m)
 {
-    /* Flip the flag before emitting so emit_raw takes the bypass
-     * path (escape goes direct to emit_cb instead of buffering into
-     * row_buf with content that gets re-emitted on a wrap break). */
+    /* Set first so the opening escape bypasses the wrapper's reflow buffer. */
     m->in_code_fence = 1;
     emit_raw(m, theme_open(THEME_CODE_BLOCK));
 }
@@ -240,7 +177,7 @@ static void close_code_fence(struct md_renderer *m)
 
 static void open_heading(struct md_renderer *m)
 {
-    /* Flag-first, see open_code_fence for rationale. */
+    /* Set first so the heading escape bypasses the wrapper's reflow buffer. */
     m->in_heading = 1;
     emit_raw(m, theme_open(THEME_HEADING));
 }
@@ -359,9 +296,7 @@ static struct md_table_context table_context(struct md_renderer *m)
     };
 }
 
-/* Per-state byte-dispatch outcome. STEP_ADVANCED: consumed bytes, advanced
- * *i. STEP_DEFER: not enough bytes to decide. STEP_PASS: handler didn't
- * apply; try the next. */
+/* A handler consumes input, defers for lookahead, or passes to the next state. */
 enum step_result {
     STEP_ADVANCED,
     STEP_DEFER,
@@ -370,12 +305,7 @@ enum step_result {
 
 /* ---------- thematic breaks ---------- */
 
-/* The model's thematic-break divider is a short row of spaced dim dots (a
- * typographic "dinkus"), so it reads as a quiet content separator rather
- * than competing with the harness's own structural chrome — the dim SOLID
- * full-width `─` rules in transcript.c and the `── resumed ──` marker in
- * agent.c. The convention: solid rule = system, spaced dots = model
- * divider. Tables use the solid line family for their internal grid. */
+/* Spaced dots distinguish model-authored dividers from solid system rules. */
 #define HRULE_DOT_GAP 3              /* spaces between divider dots */
 #define GLYPH_DOT     "\xc2\xb7"     /* · middle dot — model divider */
 #define GLYPH_BULLET  "\xe2\x80\xa2" /* • list marker */
@@ -402,10 +332,7 @@ static void temit_spaces(struct md_renderer *m, int n)
     }
 }
 
-/* Render a thematic break (`---` / `***` / `___`) as three spaced dim
- * dots — a quiet content divider, even by construction and distinct from
- * the harness's full-width solid rules. On a very narrow terminal it
- * drops dots so it never wraps; wrap_width <= 0 means unlimited (3 dots). */
+/* Drop dots as needed to keep the divider on one line. */
 static void render_hrule(struct md_renderer *m)
 {
     int dots = 3;
@@ -430,27 +357,10 @@ static void emit_bullet(struct md_renderer *m)
     emit_raw(m, ANSI_BOLD_OFF); /* SGR 22 closes dim */
 }
 
-/* ---------- per-state byte dispatch ----------
- *
- * md_feed splits its work into four handlers, each owning one slice of
- * the state machine. Each returns one of three outcomes:
- *
- *   STEP_ADVANCED  — handler consumed bytes and advanced *i.
- *   STEP_DEFER     — not enough bytes to decide; loop breaks and the
- *                    unprocessed remainder is saved as tail.
- *   STEP_PASS      — handler didn't apply; try the next one. Models the
- *                    fall-throughs (inline-code closing on \n, line-start
- *                    with no special pattern matching).
- */
+/* ---------- per-state byte dispatch ---------- */
 
-/* Inside a code fence: pass through verbatim. The only thing we look for
- * is a closing fence at line start — backticks >= opener count, followed
- * by only optional whitespace and \n (no info string per CommonMark).
- * Up to 3 leading spaces before the backticks are allowed, so a fence
- * nested in a list item (whose lines carry the item's indent) still
- * closes; without this the closer reads as content and the dim region
- * runs away to end-of-stream. The marker line is consumed entirely so
- * the dim region surrounds only the content lines. */
+/* Fence closers allow three leading spaces and require enough backticks followed only by
+ * whitespace. Consume the marker line outside the styled content. */
 static enum step_result step_in_code_fence(struct md_renderer *m, struct buf *w, size_t *i,
                                            int final)
 {
@@ -465,7 +375,7 @@ static enum step_result step_in_code_fence(struct md_renderer *m, struct buf *w,
         }
         if (scan >= w->len) {
             if (!final)
-                return STEP_DEFER; /* leading spaces with nothing after yet */
+                return STEP_DEFER;
         } else if (w->data[scan] == '`') {
             size_t cnt = 0;
             while (scan + cnt < w->len && w->data[scan + cnt] == '`')
@@ -473,10 +383,7 @@ static enum step_result step_in_code_fence(struct md_renderer *m, struct buf *w,
             if (scan + cnt >= w->len && !final)
                 return STEP_DEFER;
             if (cnt >= m->fence_open_count) {
-                /* Skip optional trailing whitespace; \r is included
-                 * so a CRLF-terminated closer (`` ```\r\n ``) is
-                 * recognized — without it the scan would stop at \r
-                 * and treat the line as content. */
+                /* Include \r so CRLF-terminated closers are recognized. */
                 size_t s2 = scan + cnt;
                 while (s2 < w->len && w->data[s2] != '\n' &&
                        (w->data[s2] == ' ' || w->data[s2] == '\t' || w->data[s2] == '\r'))
@@ -498,13 +405,9 @@ static enum step_result step_in_code_fence(struct md_renderer *m, struct buf *w,
                     m->at_line_start = 1;
                     return STEP_ADVANCED;
                 }
-                /* Non-whitespace before \n — info-string-like content
-                 * (e.g. ```python inside a markdown demo). Fall through. */
+                /* A closer cannot have an info string. */
             }
-            /* Too few backticks or invalid trailing — fall through. */
         }
-        /* Leading spaces that don't front a closer: fall through and
-         * emit them verbatim as code indentation. */
     }
     emit_text(m, &c, 1);
     m->at_line_start = (c == '\n');
@@ -512,10 +415,7 @@ static enum step_result step_in_code_fence(struct md_renderer *m, struct buf *w,
     return STEP_ADVANCED;
 }
 
-/* Inside an inline code span: verbatim until the closing backtick. A \n
- * inside an inline code span shouldn't happen in our prose, but if it
- * does we close the span and PASS so the inline handler emits the \n
- * with normal at_line_start bookkeeping. */
+/* A newline closes inline code, then passes through normal newline handling. */
 static enum step_result step_in_inline_code(struct md_renderer *m, struct buf *w, size_t *i)
 {
     char c = w->data[*i];
@@ -533,9 +433,6 @@ static enum step_result step_in_inline_code(struct md_renderer *m, struct buf *w
     return STEP_ADVANCED;
 }
 
-/* At line start: try the line-level patterns (fence open, heading, list
- * marker). Returns PASS for anything that doesn't match — the caller
- * clears at_line_start and falls through to inline processing. */
 static enum step_result step_line_start(struct md_renderer *m, struct buf *w, size_t *i, int final)
 {
     struct md_line_info line = md_scan_line(w->data + *i, w->len - *i, final);
@@ -545,7 +442,8 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
         normalize_indent = 0;
     if (normalize_indent)
         *i += line.indent_length;
-    /* Unindented dispatchers can resolve conservative lookahead results themselves. */
+    /* After requested normalization, indented incomplete prefixes defer here; unindented
+     * dispatchers can resolve their own lookahead. */
     if (!line.classification_complete && line.indent_length > 0)
         return STEP_DEFER;
 
@@ -571,14 +469,7 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
 
     char c = w->data[*i];
 
-    /* Blank line: paragraph break. Emit a single \n and stay at_line_start
-     * so a run of blank lines all hard-break (vs. the soft-join logic in
-     * step_inline that would otherwise see the second \n in a "\n\n" run as
-     * mid-paragraph). Consecutive blank lines collapse to one: at_blank
-     * gates the emit, so a model padding with several blank lines still
-     * renders a single-line gap. The paragraph-terminating \n was already
-     * emitted elsewhere (step_inline hard break / marker line end), so the
-     * first blank here is the second newline that opens the one gap. */
+    /* Stay at line start so blank-line runs collapse instead of soft-joining. */
     if (c == '\n') {
         if (!m->at_blank) {
             emit_text(m, "\n", 1);
@@ -589,21 +480,17 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
         (*i)++;
         return STEP_ADVANCED;
     }
-    /* A non-blank line begins: clear the boundary so its own trailing
-     * blank line (if any) is the next one allowed through. */
     m->at_blank = 0;
 
     if (c == '`') {
-        /* Count run length so we can support 4+ backtick fences (used
-         * to wrap content that itself contains ``` runs). */
+        /* Wider fences may contain shorter backtick runs. */
         size_t cnt = 0;
         while (*i + cnt < w->len && w->data[*i + cnt] == '`')
             cnt++;
         if (*i + cnt >= w->len)
             return STEP_DEFER;
         if (cnt >= 3) {
-            /* Need the rest of the opener line for the info
-             * string. If \n isn't here yet, defer. */
+            /* Defer until the complete info line is available. */
             size_t scan = *i + cnt;
             while (scan < w->len && w->data[scan] != '\n')
                 scan++;
@@ -611,11 +498,10 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
                 return STEP_DEFER;
             open_code_fence(m);
             m->fence_open_count = cnt;
-            *i = scan + 1; /* past the opener line's \n */
+            *i = scan + 1;
             m->at_line_start = 1;
             return STEP_ADVANCED;
         }
-        /* cnt < 3 — not a fence; fall through. */
     }
 
     if (c == '#') {
@@ -632,16 +518,10 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
                 return STEP_ADVANCED;
             }
         }
-        /* 4+ hashes or non-heading sequence — fall through. */
     }
 
-    /* Thematic break / setext heading underline: 3+ of `-`, `*`,
-     * `_`, or `=` on a line (possibly with whitespace between),
-     * terminated by \n. We consume the whole marker line verbatim
-     * so step_inline doesn't misinterpret the `**` / `__` runs as
-     * inline emphasis openers. CommonMark uses `=` and `-` for
-     * setext h1 / h2 underlines — we don't render setext specially,
-     * but the same pass-through is the right behaviour. */
+    /* Consume marker-only lines whole so their runs are not parsed as emphasis. `=` runs remain
+     * literal; the other thematic markers render as dividers. */
     if (c == '-' || c == '*' || c == '_' || c == '=') {
         size_t k = *i;
         size_t count = 0;
@@ -654,26 +534,18 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
         if (k >= w->len)
             return STEP_DEFER;
         if (w->data[k] == '\n' && count >= 3) {
-            /* Thematic break (`-`/`*`/`_`) renders as a dim divider; `=` is
-             * only ever a setext underline, so it's kept verbatim. */
             if (c != '=')
                 render_hrule(m);
             else
-                emit_text(m, w->data + *i, k - *i + 1); /* include the \n */
+                emit_text(m, w->data + *i, k - *i + 1);
             *i = k + 1;
             m->at_line_start = 1;
             return STEP_ADVANCED;
         }
-        /* Not a thematic break — fall through. */
     }
 
-    /* Unordered list bullet: optional indent then a single `*`, `-`, or
-     * `+` followed by a space. Render as a dim "• " — one bullet glyph for
-     * all three markers (interchangeable in Markdown), with the marker
-     * recessed so the item text leads. Leading indent is preserved so
-     * nested lists keep depth; compute_indent_cells recognizes "• " for
-     * continuation-row hanging indent. Thematic breaks (3+ markers) were
-     * already handled above, so a lone marker + space here is a bullet. */
+    /* Normalize unordered markers to a dim bullet; preserve indent for nesting and hanging
+     * continuation lines. */
     {
         size_t k = *i;
         while (k < w->len && w->data[k] == ' ')
@@ -682,29 +554,22 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
             if (k + 1 >= w->len)
                 return STEP_DEFER;
             if (w->data[k + 1] == ' ') {
-                /* Collapse the whole space run after the marker to the
-                 * bullet's own single space (some models pad it for
-                 * alignment). If the run reaches the buffer end the padding
-                 * may continue in the next feed — skip_pad carries the
-                 * collapse across the boundary (see step_inline) rather than
-                 * deferring the whole marker. */
+                /* Collapse marker padding across feeds instead of deferring output. */
                 size_t sp = k + 1;
                 while (sp < w->len && w->data[sp] == ' ')
                     sp++;
                 if (k > *i)
-                    emit_text(m, w->data + *i, k - *i); /* preserve indent */
-                emit_bullet(m);                         /* dim "• " */
+                    emit_text(m, w->data + *i, k - *i);
+                emit_bullet(m);
                 m->at_line_start = 0;
                 m->skip_pad = (sp >= w->len);
-                *i = sp; /* consume marker + space run */
+                *i = sp;
                 return STEP_ADVANCED;
             }
         }
     }
 
-    /* Ordered list marker: optional indent then digits then `.`/`)` then a
-     * space. Render the marker dim (number preserved) so it recedes like
-     * the bullet; the item text follows via inline processing. */
+    /* Dim ordered markers while preserving their number and indentation. */
     {
         size_t k = *i;
         while (k < w->len && w->data[k] == ' ')
@@ -716,39 +581,26 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
             if (d >= w->len || d + 1 >= w->len)
                 return STEP_DEFER;
             if ((w->data[d] == '.' || w->data[d] == ')') && w->data[d + 1] == ' ') {
-                /* Collapse the whole space run after the delimiter to the
-                 * single separating space below (some models pad it for
-                 * alignment). If the run reaches the buffer end the padding
-                 * may continue in the next feed — skip_pad carries the
-                 * collapse across the boundary (see step_inline) rather than
-                 * deferring the whole marker. */
+                /* Collapse marker padding across feeds instead of deferring output. */
                 size_t sp = d + 1;
                 while (sp < w->len && w->data[sp] == ' ')
                     sp++;
                 if (k > *i)
-                    emit_text(m, w->data + *i, k - *i); /* preserve indent */
+                    emit_text(m, w->data + *i, k - *i);
                 emit_raw(m, ANSI_DIM);
-                emit_text(m, w->data + k, (d - k) + 1); /* digits + `.`/`)` */
-                emit_text(m, " ", 1);                   /* separating space */
-                emit_raw(m, ANSI_BOLD_OFF);             /* SGR 22 closes dim */
+                emit_text(m, w->data + k, (d - k) + 1);
+                emit_text(m, " ", 1);
+                emit_raw(m, ANSI_BOLD_OFF); /* SGR 22 closes dim */
                 m->at_line_start = 0;
                 m->skip_pad = (sp >= w->len);
-                *i = sp; /* consume delimiter + space run */
+                *i = sp;
                 return STEP_ADVANCED;
             }
         }
     }
 
-    /* GFM table: a `|`-led line heading a delimiter row diverts into the
-     * table buffer for whole-block layout. Not-a-table falls through to
-     * the block-isolation handling.
-     *
-     * Intentionally pipe-LED only: GFM also allows borderless tables
-     * (`A | B` / `---|---`), but detecting those would mean probing every
-     * line that merely contains a `|` and deferring it one line to peek at
-     * the delimiter — a visible streaming stall for ordinary prose with a
-     * mid-line pipe (shell pipes, "a | b"). Models virtually always emit
-     * leading-pipe tables, so we keep the cheap, stall-free heuristic. */
+    /* Only leading-pipe tables are detected; probing every mid-line pipe for a delimiter row
+     * would stall ordinary prose by one line. */
     if (c == '|') {
         enum md_table_result r = md_table_try_start(&m->table, w, i);
         if (r == MD_TABLE_DEFER) {
@@ -763,11 +615,7 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
             return STEP_ADVANCED;
     }
 
-    /* Blockquote `>` and GFM table row `|`: not rendered specially
-     * (the marker and the row content pass through as plain text),
-     * but the line is flagged as block-isolated so its trailing \n
-     * is forced to a hard break — keeps a `>` line from soft-joining
-     * with the prose that follows it. */
+    /* Preserve these markers, but isolate their lines from surrounding prose. */
     if (c == '>' || c == '|') {
         m->cur_line_is_block = 1;
         return STEP_PASS;
@@ -776,30 +624,18 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
     return STEP_PASS;
 }
 
-/* Helper: emphasis marker is left-flanking (can open) when the byte to
- * the left is non-alphanumeric AND the byte to the right is non-space.
- * Catches the two common false positives — intraword markers (`5*3*7`,
- * `compile_commands.json`) and whitespace-flanked markers (`5 * 3`,
- * indented `  * item` list markers) — without paying for full CommonMark
- * delimiter-run rules. */
+/* Reject intraword and whitespace-flanked emphasis without full delimiter-run parsing. */
 static int can_open_emphasis(char left, char right)
 {
     return !is_alnum(left) && !is_space(right);
 }
 
-/* Inline byte dispatch: \n closes any open per-line styles and resets
- * at_line_start; ` opens inline code; *, **, _ open or close emphasis
- * with the left/right-flanking heuristic. Any other byte emits as text. */
 static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t *i, int final)
 {
     char c = w->data[*i];
     size_t remaining = w->len - *i;
 
-    /* Residual list-marker padding: a preceding marker consumed a space run
-     * that reached the buffer end, so leading spaces at the head of this
-     * feed are the continuation of that padding — drop them so the marker
-     * still collapses to its single canonical space. Cleared by the first
-     * non-space byte, which is the item's real content. */
+    /* Continue collapsing list-marker padding from the previous feed. */
     if (m->skip_pad) {
         if (c == ' ') {
             (*i)++;
@@ -809,7 +645,6 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
     }
 
     if (c == '\n') {
-        /* Headings are single-line: the trailing \n always terminates. */
         if (m->in_heading) {
             close_heading(m);
             emit_text(m, "\n", 1);
@@ -818,18 +653,16 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
             (*i)++;
             return STEP_ADVANCED;
         }
-        /* A physical newline is hard before a blank or block line and soft inside prose. The
-         * scanner may identify a definite block before its exact kind is complete, preserving
-         * eager boundary output while line dispatch waits for more. */
+        /* The scanner can identify a block boundary before its exact kind is complete, keeping
+         * boundary output eager while line dispatch waits for more. */
         struct md_line_info line = md_scan_line(w->data + *i + 1, remaining - 1, final);
         if (line.kind == MD_LINE_INCOMPLETE) {
-            /* Indented list candidates are not block starts in lookahead, but an all-whitespace
-             * prefix remains ambiguous regardless of indentation depth. */
+            /* An all-whitespace prefix remains ambiguous at any indentation depth. */
             if (line.indent_length == remaining - 1 || line.indent_length <= 3)
                 return STEP_DEFER;
         }
-        /* At EOF, whitespace keeps a hard break, thematic markers become complete lines, and
-         * unresolved prefixes remain literal rather than entering inline parsing. */
+        /* EOF resolves whitespace, thematic lines, and ambiguous prefixes without another
+         * deferred tail. */
         if (final && line.kind == MD_LINE_TEXT && line.indent_length == remaining - 1) {
             emit_text(m, "\n", 1);
             *i = w->len;
@@ -883,20 +716,8 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
             *i = normalize_indent ? scan : *i + 1;
             return STEP_ADVANCED;
         }
-        /* CommonMark hard line break: two or more spaces before the
-         * newline. Checked only after the block-marker lookahead above
-         * has ruled out a block opener — a hard *line* break is inline,
-         * so when the next line actually starts a new block the block
-         * path wins (and closes emphasis); only mid-paragraph does the
-         * trailing pair force a break. The spaces were emitted eagerly
-         * but, now at end-of-line before the \n, are invisible — the
-         * prior bug was a soft join leaving them inline as a stray
-         * double space. Open emphasis carries across (the break is
-         * inline), and the next line's leading whitespace is preserved
-         * so a list item's hanging continuation stays aligned. The count
-         * lives in m->trailing_spaces (maintained by emit_text, reset by
-         * any consumed inline delimiter) rather than a buffer scan, so it
-         * holds across feeds yet ignores spaces before a delimiter. */
+        /* Block lookahead takes precedence over an inline hard break. The tracked space count
+         * works across feeds while preserving eager output. */
         if (m->trailing_spaces >= 2) {
             emit_text(m, "\n", 1);
             m->at_line_start = 1;
@@ -904,12 +725,7 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
             (*i)++;
             return STEP_ADVANCED;
         }
-        /* Soft join: replace \n with a single space and skip leading
-         * whitespace on the joined line so trailing/leading spaces
-         * don't double up. Styles continue across the join — the model
-         * intended a paragraph that happened to be hard-wrapped, and
-         * resuming bold/italic in the middle of a logical sentence is
-         * what the reader expects. */
+        /* Join wrapped prose with one space, preserving inline styles. */
         size_t k = *i + 1;
         while (k < w->len && (w->data[k] == ' ' || w->data[k] == '\t'))
             k++;
@@ -935,7 +751,6 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
                 *i += 2;
                 return STEP_ADVANCED;
             }
-            /* Need the byte after `**` to check the right side. */
             if (remaining < 3) {
                 if (!final)
                     return STEP_DEFER;
@@ -1007,10 +822,7 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
         return STEP_ADVANCED;
     }
 
-    /* Plain run: scan forward to the next marker byte (or end-of-buffer)
-     * and emit the whole run in one call. Coalescing keeps the wrap
-     * layer's per-codepoint bookkeeping at word granularity instead of
-     * byte granularity, and halves the emit_text call count on prose. */
+    /* Coalesce plain text so the wrapper receives words rather than individual bytes. */
     size_t end = *i + 1;
     while (end < w->len) {
         char d = w->data[end];
@@ -1029,7 +841,7 @@ struct md_renderer *md_new(md_emit_fn emit_cb, void *user, int wrap_width)
     m->emit_cb = emit_cb;
     m->user = user;
     m->at_line_start = 1;
-    m->at_blank = 1; /* start of stream: swallow leading blank lines */
+    m->at_blank = 1;
     m->skip_pad = 0;
     m->styled = 1;
     md_wrap_reset(&m->wrap, wrap_width);
@@ -1051,11 +863,8 @@ void md_reset(struct md_renderer *m, int wrap_width)
     m->in_italic = 0;
     m->styled = 1;
     m->cur_line_is_block = 0;
-    /* Start of stream is a blank boundary — swallow leading blank lines. */
     m->at_blank = 1;
     m->skip_pad = 0;
-    /* Re-sample wrap width on turn boundary so SIGWINCH-style resizes
-     * between turns are picked up cheaply without callback plumbing. */
     md_wrap_reset(&m->wrap, wrap_width);
     md_table_reset(&m->table);
     m->inline_only = 0;
@@ -1075,8 +884,7 @@ void md_free(struct md_renderer *m)
 /* Final mode resolves deferred prefixes against EOF instead of saving another tail. */
 static void md_process(struct md_renderer *m, const char *s, size_t n, int final)
 {
-    /* Combine pending tail with new input into a working buffer so the
-     * walker sees one contiguous stream. */
+    /* Present deferred and new input as one contiguous stream. */
     struct buf w;
     buf_init(&w);
     if (m->tail.len) {
@@ -1098,7 +906,6 @@ static void md_process(struct md_renderer *m, const char *s, size_t n, int final
             if (table_step == MD_TABLE_ADVANCED)
                 continue;
             m->at_line_start = 1;
-            /* The table ended; fall through to handle this line. */
         }
 
         if (m->in_code_fence) {
@@ -1114,8 +921,7 @@ static void md_process(struct md_renderer *m, const char *s, size_t n, int final
                 break;
             if (step == STEP_ADVANCED)
                 continue;
-            /* STEP_PASS — \n inside inline code; let inline
-             * processing handle the actual newline emit. */
+            /* Normal newline handling resumes after inline code closes. */
         }
 
         if (m->at_line_start && !m->inline_only) {
@@ -1124,19 +930,16 @@ static void md_process(struct md_renderer *m, const char *s, size_t n, int final
                 break;
             if (step == STEP_ADVANCED)
                 continue;
-            /* STEP_PASS — no line-start pattern matched; clear
-             * at_line_start and fall through to inline. */
             m->at_line_start = 0;
         }
 
+        /* step_inline must advance or defer; STEP_PASS would spin without changing i. */
         step = step_inline(m, &w, &i, final);
         if (step == STEP_DEFER)
             break;
-        /* step_inline always advances or defers — never PASSes. */
     }
 
-    /* Save ambiguous parser input as tail. Incomplete table rows stay whole
-     * so no bytes leak ahead of their buffered table. */
+    /* Keep ambiguous input deferred; incomplete table rows must remain lossless and ordered. */
     size_t rem = w.len - i;
     struct md_table_context table_ctx = table_context(m);
     if (rem > 0 && md_table_bail_partial(&m->table, &table_ctx, w.data + i, rem)) {
@@ -1157,8 +960,7 @@ static void md_process(struct md_renderer *m, const char *s, size_t n, int final
     if (rem > 0)
         buf_append(&m->tail, w.data + i, rem);
 
-    /* Remember the last source byte we consumed so the next feed's
-     * intraword check at i=0 sees the correct left neighbor. */
+    /* Preserve the left neighbor for emphasis at the next feed boundary. */
     if (i > 0)
         m->prev_byte = w.data[i - 1];
 
@@ -1182,7 +984,7 @@ void md_flush(struct md_renderer *m)
     }
     md_process(m, NULL, 0, 1);
 
-    /* Close any styles still open so the terminal isn't left in a styled state. */
+    /* Never leave terminal styling open at EOF. */
     if (m->in_inline_code)
         close_inline_code(m);
     if (m->in_code_fence)
@@ -1202,10 +1004,7 @@ void md_set_styled(struct md_renderer *m, int on)
 {
     if (m->styled == on)
         return;
-    /* Flush the tail under the OLD setting so deferred markers resolve
-     * with the SGR rules they were buffered under, then soft-reset
-     * (same fields as md_reset, wrap_width preserved) so the next feed
-     * starts at column 0 to match the seam the caller is emitting. */
+    /* Resolve deferred markers under the old SGR mode, then reset at the caller's output seam. */
     md_flush(m);
     md_reset(m, md_wrap_width(&m->wrap));
     m->styled = on;
