@@ -263,11 +263,19 @@ struct loop_test_ctx {
     int tools_seen;
     int tools_run;
     int tools_skipped;
+    int tools_refused;
+    int turn_begins;
     int turns;
     int compactions;
     int checkpoints;
     int cancel_at;
 };
+
+static void count_turn_begin(void *user)
+{
+    struct loop_test_ctx *ctx = user;
+    ctx->turn_begins++;
+}
 
 static void count_turn(const struct agent_loop_turn *loop_turn, void *user)
 {
@@ -295,6 +303,7 @@ static struct item run_test_tool(const struct item *call, enum agent_loop_tool_a
         ctx->tools_skipped++;
         return agent_tool_result_make(call, INTERRUPT_MARKER);
     }
+    ctx->tools_refused++;
     return agent_tool_result_make(call, "refused");
 }
 
@@ -328,6 +337,7 @@ static struct agent_loop_result run_chain(struct agent_session *session, struct 
         .hooks =
             {
                 .user = ctx,
+                .turn_begin = count_turn_begin,
                 .turn_end = count_turn,
                 .checkpoint = ctx->cancel_at ? cancel_checkpoint : NULL,
                 .tool_seen = count_tool,
@@ -352,11 +362,11 @@ static void test_loop_runs_tool_chain(void)
     chain_two_tools = 0;
 
     struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
-    /* One tool turn must continue into one text-only turn, with accounting
-     * hooks firing once per provider request and context reflecting the latest
-     * request rather than a sum. */
+    /* One tool turn must continue into one text-only turn, with frontend
+     * begin and accounting hooks firing once per turn; context reflects the
+     * latest turn rather than a sum. */
     EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
-    EXPECT(result.turns == 2 && ctx.turns == 2);
+    EXPECT(result.turns == 2 && ctx.turn_begins == 2 && ctx.turns == 2);
     EXPECT(result.last_context_tokens == 22);
     EXPECT(ctx.tools_seen == 1 && ctx.tools_run == 1);
     /* The returned range is presentation-safe: final streamed text only, not
@@ -432,6 +442,29 @@ static void test_loop_cancels_tool_batch(void)
     agent_session_free(&session);
 }
 
+static void test_loop_cancel_still_refuses_disabled_tool(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = chain_stream};
+    /* Cancellation is first observed immediately before c1. */
+    struct loop_test_ctx ctx = {.cancel_at = 2};
+    chain_turn = 0;
+    chain_two_tools = 0;
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
+    /* The checkpoint must still run, but disabled-tool refusal takes precedence:
+     * a malformed backend call is never represented as an ordinary skipped
+     * tool that might hide the raw-mode policy violation. */
+    EXPECT(result.outcome == AGENT_LOOP_INTERRUPTED);
+    EXPECT(ctx.tools_run == 0 && ctx.tools_skipped == 0);
+    EXPECT(ctx.tools_refused == 1);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
 static void test_loop_reports_provider_error(void)
 {
     struct agent_session session;
@@ -489,6 +522,8 @@ static void test_loop_requests_mid_chain_compaction(void)
 
 int main(void)
 {
+    /* Loop tests exercise orchestration, not the platform inhibitor helper. */
+    config_set_override("keep_awake", "0");
     test_loop_turn_collects_success();
     test_partial_error_is_preserved();
     test_prestream_error_adds_no_marker();
@@ -497,6 +532,7 @@ int main(void)
     test_loop_runs_tool_chain();
     test_loop_enforces_max_turns();
     test_loop_cancels_tool_batch();
+    test_loop_cancel_still_refuses_disabled_tool();
     test_loop_reports_provider_error();
     test_loop_requests_mid_chain_compaction();
     T_REPORT();

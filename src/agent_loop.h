@@ -105,7 +105,8 @@ struct agent_loop_params {
 };
 
 /* Continue an already-appended user message through provider turns and tool
- * calls until the model returns without a tool call or the run aborts. */
+ * calls until the model returns without a tool call or the run aborts. Holds
+ * the idle-sleep inhibitor for the complete continuation run. */
 void agent_loop_run(const struct agent_loop_params *params, struct agent_loop_result *result);
 void agent_loop_result_destroy(struct agent_loop_result *result);
 

@@ -25,7 +25,6 @@
 #include "render/markdown.h"
 #include "render/render_ctx.h"
 #include "render/spinner.h"
-#include "system/keepawake.h"
 #include "system/spawn.h"
 #include "terminal/ansi.h"
 #include "terminal/input.h"
@@ -69,18 +68,6 @@ static void stats_count_tool_call(struct session_stats *st, const char *name)
             return;
         }
     }
-}
-
-/* Flush the same item slice to both append-only logs. The two share the
- * incremental [n_written..n_items) cursor design, so they're always
- * advanced together at each of the agent's commit points (after the user
- * message, after each round-trip, on the error/interrupt paths). Both
- * entry points no-op on a NULL log or when nothing new accumulated. */
-static void flush_logs(struct transcript_log *tlog, struct session_log *slog,
-                       const struct item *items, size_t n)
-{
-    transcript_log_append(tlog, items, n);
-    session_log_append(slog, items, n);
 }
 
 /* How long a table must keep buffering with no visible output before
@@ -1165,7 +1152,7 @@ int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
          * nothing. */
         for (int i = 0; i < ce.cap.n; i++)
             agent_session_add_turn_usage(s, p, &ce.cap.att[i].u, ce.cap.att[i].ms);
-        flush_logs(st->tlog, st->slog, s->items, s->n_items);
+        agent_loop_flush_logs(st->tlog, st->slog, s->items, s->n_items);
         free(summary);
         free(ce.err);
         turn_reset(&t);
@@ -1181,7 +1168,7 @@ int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
      * moments later). */
     for (int i = 0; i + 1 < ce.cap.n; i++)
         agent_session_add_turn_usage(s, p, &ce.cap.att[i].u, ce.cap.att[i].ms);
-    flush_logs(st->tlog, st->slog, s->items, s->n_items);
+    agent_loop_flush_logs(st->tlog, st->slog, s->items, s->n_items);
 
     compact_apply(s, st->slog, st->tlog, summary);
     free(summary);
@@ -1193,10 +1180,103 @@ int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
     if (ce.cap.n > 0)
         agent_session_add_turn_usage(s, p, &ce.cap.att[ce.cap.n - 1].u,
                                      ce.cap.att[ce.cap.n - 1].ms);
-    flush_logs(st->tlog, st->slog, s->items, s->n_items);
+    agent_loop_flush_logs(st->tlog, st->slog, s->items, s->n_items);
 
     compact_notice(r, "conversation compacted");
     return 1;
+}
+
+struct repl_loop_ctx {
+    struct agent_state *state;
+};
+
+static int repl_loop_on_event(const struct stream_event *ev, void *user)
+{
+    struct repl_loop_ctx *ctx = user;
+    return render_on_event(ev, ctx->state->r);
+}
+
+static int repl_loop_tick(void *user)
+{
+    struct repl_loop_ctx *ctx = user;
+    return agent_stream_tick(ctx->state->r);
+}
+
+static void repl_loop_turn_begin(void *user)
+{
+    struct repl_loop_ctx *ctx = user;
+    struct render_ctx *r = ctx->state->r;
+    render_stream_begin(r);
+    if (r->md)
+        md_reset(r->md, md_wrap_width());
+    r->disp.saw_text = 0;
+}
+
+static void repl_loop_turn_end(const struct agent_loop_turn *loop_turn, void *user)
+{
+    struct repl_loop_ctx *ctx = user;
+    struct agent_state *state = ctx->state;
+    struct agent_session *session = state->sess;
+    const struct provider *provider = state->provider;
+    struct session_stats *stats = &state->stats;
+    const struct stream_usage *usage = &loop_turn->usage;
+
+    stats->requests++;
+    if (usage->input_tokens >= 0 && usage->output_tokens >= 0) {
+        stats->last_ctx = usage->input_tokens + usage->output_tokens;
+        stats->last_limit = compact_context_limit(provider, session->model);
+    }
+    if (usage->input_tokens >= 0)
+        stats->input_tokens += usage->input_tokens;
+    if (usage->output_tokens >= 0)
+        stats->output_tokens += usage->output_tokens;
+    if (usage->cached_tokens > 0)
+        stats->cached_tokens += usage->cached_tokens;
+    if (usage->cache_write_tokens > 0)
+        stats->cache_write_tokens += usage->cache_write_tokens;
+    spend_account(&stats->spend, usage, provider->catalog_id, session->model);
+}
+
+static int repl_loop_checkpoint(void *user)
+{
+    (void)user;
+    interrupt_settle();
+    return interrupt_requested();
+}
+
+static void repl_loop_tool_seen(const struct item *call, void *user)
+{
+    struct repl_loop_ctx *ctx = user;
+    stats_count_tool_call(&ctx->state->stats, call->tool_name);
+}
+
+static struct item repl_loop_tool_call(const struct item *call, enum agent_loop_tool_action action,
+                                       void *user)
+{
+    struct repl_loop_ctx *ctx = user;
+    struct render_ctx *r = ctx->state->r;
+    if (action == AGENT_LOOP_TOOL_REFUSE) {
+        render_transition(r, RS_IDLE);
+        return dispatch_tool_refused(r, call);
+    }
+    if (action == AGENT_LOOP_TOOL_SKIP) {
+        render_transition(r, RS_IDLE);
+        return dispatch_tool_skipped(r, call);
+    }
+    return dispatch_tool_call(r, call);
+}
+
+static void repl_loop_compact(void *user)
+{
+    struct repl_loop_ctx *ctx = user;
+    agent_compact(ctx->state, NULL, 1);
+    /* agent_compact owns the watcher while it streams and leaves it disarmed.
+     * A cancel stays latched for agent_loop; otherwise restore the watcher for
+     * the next continuation turn. */
+    if (!interrupt_requested()) {
+        interrupt_clear();
+        interrupt_arm();
+    }
 }
 
 int agent_run(struct provider **provider, const struct hax_opts *opts)
@@ -1295,7 +1375,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
     const char *prompt = build_prompt(prompt_buf, sizeof(prompt_buf));
 
     /* The render state in r (state + cluster sub-state) lives across
-     * the inner loop so RS_CLUSTER can span consecutive silent tool
+     * the continuation run so RS_CLUSTER can span consecutive silent tool
      * calls (read/grep/find...) without intervening blank lines.
      * End-of-user-turn cleanup unconditionally transitions back to
      * RS_IDLE, so leftover state from a prior user turn is impossible
@@ -1382,16 +1462,15 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
          * renderer treats a TURN_BOUNDARY as a start-of-turn rule;
          * placing it ahead of the user message puts the first round-trip's
          * header above the triggering user input, so the prompt and the
-         * response it produced read as one group. The inner loop's
-         * subsequent iterations insert their own boundaries for follow-up
-         * round-trips after tool dispatch. */
+         * response it produced read as one group. The shared runner inserts
+         * subsequent boundaries before follow-up turns after tool dispatch. */
         agent_session_add_user(&sess, line);
         free(line);
         /* Flush the prompt to the log immediately, before we hand
          * control to the provider. If the stream hangs or the process
          * is killed, the user prompt that triggered the in-flight call
          * is preserved on disk for post-mortem reading. */
-        flush_logs(tlog, state.slog, sess.items, sess.n_items);
+        agent_loop_flush_logs(tlog, state.slog, sess.items, sess.n_items);
         /* input_readline left the cursor at column 0 of a fresh row. */
         r.disp.trail = 1;
 
@@ -1428,224 +1507,39 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
         spinner_set_label(r.spinner, "working", "working...");
         spinner_set_timer(r.spinner, user_turn_start_ms);
 
-        /* Arm the watcher for the duration of the inner loop — Esc from
+        /* Arm the watcher for the duration of the continuation run — Esc from
          * here on aborts the stream or running tool. Cleared first so a
          * stray Esc from a previous user turn (e.g. user typed Esc during
          * readline editing) doesn't auto-cancel this one. */
         interrupt_clear();
         interrupt_arm();
-        /* Keep the machine from idling to sleep for the duration of the
-         * inner loop (streaming + tool dispatch), so an unattended long
-         * run survives the idle timer. Released alongside interrupt_disarm
-         * below — there's no human-approval wait in this loop to hold it
-         * across. Gated by the keep_awake config key; no-op when off. */
-        keepawake_acquire();
-        /* The first iteration consumes the boundary that was placed
-         * with the user message above; subsequent iterations (when the
-         * model called tools and we loop back for the next round-trip)
-         * insert their own. */
-        int first_inner = 1;
-        for (;;) {
-            if (!first_inner) {
-                /* Inserted before ctx is built so the items_append's
-                 * potential xrealloc can't dangle ctx.items, and so
-                 * this call's n_items already reflects it (providers
-                 * skip ITEM_TURN_BOUNDARY in their item-translation
-                 * switch). */
-                agent_session_add_boundary(&sess);
-                /* Same rationale as the post-add_user flush above:
-                 * land the new turn rule on disk before we wait on
-                 * the next stream call. */
-                flush_logs(tlog, state.slog, sess.items, sess.n_items);
-            }
-            first_inner = 0;
-
-            render_stream_begin(&r);
-
-            if (r.md)
-                md_reset(r.md, md_wrap_width());
-            r.disp.saw_text = 0;
-            struct agent_loop_turn loop_turn;
-            /* agent_stream_tick combines cancel (Esc) with idle
-             * detection: ~1Hz from libcurl's progress callback inside
-             * curl_easy_perform, plus on every received chunk. */
-            agent_loop_turn_run(&loop_turn, &sess, p, render_on_event, &r, agent_stream_tick, &r);
-            /* Every stream call is one model round-trip, /session's
-             * "requests" — counted regardless of outcome (an errored or
-             * interrupted attempt still hit the backend). */
-            state.stats.requests++;
-
-            /* Usage accounting runs before the error branch below: a
-             * truncated (max_tokens/length) response reports usage on its
-             * EV_ERROR and is billed like a complete one, so the display
-             * and /session totals must not skip it. */
-            if (loop_turn.usage.input_tokens >= 0 && loop_turn.usage.output_tokens >= 0)
-                user_turn_ctx = loop_turn.usage.input_tokens + loop_turn.usage.output_tokens;
-
-            /* Session totals (/session): sums of what this round-trip
-             * reported. Plain accumulators — unreported fields just
-             * don't contribute. */
-            if (user_turn_ctx >= 0) {
-                state.stats.last_ctx = user_turn_ctx;
-                state.stats.last_limit = compact_context_limit(p, sess.model);
-            }
-            if (loop_turn.usage.input_tokens >= 0)
-                state.stats.input_tokens += loop_turn.usage.input_tokens;
-            if (loop_turn.usage.output_tokens >= 0)
-                state.stats.output_tokens += loop_turn.usage.output_tokens;
-            if (loop_turn.usage.cached_tokens > 0)
-                state.stats.cached_tokens += loop_turn.usage.cached_tokens;
-            if (loop_turn.usage.cache_write_tokens > 0)
-                state.stats.cache_write_tokens += loop_turn.usage.cache_write_tokens;
-            spend_account(&state.stats.spend, &loop_turn.usage, p->catalog_id, sess.model);
-
-            if (loop_turn.assembly.error) {
-                /* Preserve partial output and repair any completed tool
-                 * calls before committing the failed turn. The renderer
-                 * already drew the provider's error line. */
-                struct agent_abort_outcome o =
-                    agent_loop_turn_absorb_abort(&sess, &loop_turn, AGENT_ABORT_PROVIDER_ERROR);
-                for (size_t i = o.items_from; i < o.items_to; i++)
-                    if (sess.items[i].kind == ITEM_TOOL_CALL)
-                        stats_count_tool_call(&state.stats, sess.items[i].tool_name);
-                /* A truncated response is billed like a complete one, so
-                 * it earns a footer too; a pre-stream failure reported
-                 * nothing and gets none. */
-                if (usage_reported(&loop_turn.usage))
-                    agent_session_add_turn_usage(&sess, p, &loop_turn.usage, loop_turn.elapsed_ms);
-                /* Land the partial state on disk now — the success
-                 * path's later append doesn't run on this branch and
-                 * post-mortem readers want to see how far we got. */
-                flush_logs(tlog, state.slog, sess.items, sess.n_items);
-                agent_loop_turn_destroy(&loop_turn);
-                user_turn_errored = 1;
-                break;
-            }
-
-            /* Settle before deciding what to do with the response — Esc
-             * pressed in the last ~50ms of the stream may still be in
-             * the classifier's CSI/SS3-vs-bare window, and we must not
-             * dispatch tools (or send another request) on a flag that's
-             * about to flip. */
-            interrupt_settle();
-            int interrupted = interrupt_requested();
-
-            if (interrupted) {
-                /* User cancellation always leaves an explicit marker,
-                 * even when Esc arrived before the first stream event. */
-                struct agent_abort_outcome o =
-                    agent_loop_turn_absorb_abort(&sess, &loop_turn, AGENT_ABORT_USER_CANCEL);
-                for (size_t i = o.items_from; i < o.items_to; i++)
-                    if (sess.items[i].kind == ITEM_TOOL_CALL)
-                        stats_count_tool_call(&state.stats, sess.items[i].tool_name);
-                /* Footer only when the abort was billed (usage arrived
-                 * before the Esc) — a plain cancel earns no line. */
-                if (usage_reported(&loop_turn.usage))
-                    agent_session_add_turn_usage(&sess, p, &loop_turn.usage, loop_turn.elapsed_ms);
-                agent_loop_turn_destroy(&loop_turn);
-                user_turn_interrupted = 1;
-                break;
-            }
-
-            /* Normal completion: absorb without any marker, decide
-             * whether to loop for tool dispatch. */
-            size_t n_before;
-            int had_tool_call;
-            agent_session_absorb(&sess, &loop_turn.assembly, &n_before, &had_tool_call);
-            agent_loop_turn_destroy(&loop_turn);
-
-            if (!had_tool_call) {
-                agent_session_add_turn_usage(&sess, p, &loop_turn.usage, loop_turn.elapsed_ms);
-                break;
-            }
-
-            /* Execute tool calls just added — render header + output as
-             * one block per call so parallel calls don't interleave.
-             * Esc partway through the batch flips remaining calls to a
-             * synthesized "[interrupted]" result so the conversation
-             * stays well-formed; settle first so a fast-returning tool
-             * doesn't race past a pending \x1b in the classifier. */
-            size_t current_end = sess.n_items;
-            for (size_t i = n_before; i < current_end; i++) {
-                if (sess.items[i].kind != ITEM_TOOL_CALL)
-                    continue;
-                stats_count_tool_call(&state.stats, sess.items[i].tool_name);
-                interrupt_settle();
-                struct item result;
-                if (sess.n_tools == 0) {
-                    /* --raw advertised no tools; refuse to run anything
-                     * the provider returned anyway. Same gate exists in
-                     * oneshot.c — local execution must not be reachable
-                     * from a malformed or malicious backend response. */
-                    render_transition(&r, RS_IDLE);
-                    result = dispatch_tool_refused(&r, &sess.items[i]);
-                } else if (interrupt_requested()) {
-                    render_transition(&r, RS_IDLE);
-                    result = dispatch_tool_skipped(&r, &sess.items[i]);
-                } else {
-                    result = dispatch_tool_call(&r, &sess.items[i]);
-                }
-                items_append(&sess.items, &sess.n_items, &sess.cap_items, result);
-            }
-
-            /* Esc fired during or just after this batch: decide the
-             * marker BEFORE appending the usage footer, so the marked-
-             * result check sees the batch's final tool result and the
-             * footer stays the round-trip's last word, matching the
-             * other abort paths. Settle first so we don't race past a
-             * pending \x1b. */
-            interrupt_settle();
-            int batch_aborted = interrupt_requested();
-            if (batch_aborted)
-                agent_session_mark_interrupt(&sess);
-            agent_session_add_turn_usage(&sess, p, &loop_turn.usage, loop_turn.elapsed_ms);
-
-            /* Round-trip complete: assistant text, tool calls, and all
-             * their results are in sess.items, so flush the slice into
-             * the HAX_TRANSCRIPT log. Doing this *inside* the inner
-             * loop (rather than only at the bottom) means a hung
-             * follow-up stream, a crash mid-chain, or a SIGKILL leaves
-             * the prompt + completed tool output on disk for
-             * post-mortem reading — the main reason HAX_TRANSCRIPT
-             * exists. CALL/RESULT pairing is intact so the renderer's
-             * lookahead works. */
-            flush_logs(tlog, state.slog, sess.items, sess.n_items);
-
-            if (batch_aborted) {
-                user_turn_interrupted = 1;
-                break;
-            }
-
-            /* Mid-task auto-compaction: the model called tools and we're about
-             * to loop back for another round-trip. If this round-trip's
-             * reported context usage already nears the window, summarize now —
-             * before the next request — so a long autonomous tool chain can't
-             * run itself into an overflow. The just-completed work (assistant
-             * text, tool calls, results) is summarized and the model continues
-             * from the seed on the next iteration. Distinct from the
-             * end-of-user-turn check below, which fires before the *next user
-             * message* is added so that message is preserved verbatim. */
-            if (compact_should_auto(user_turn_ctx, compact_context_limit(p, sess.model))) {
-                agent_compact(&state, NULL, 1);
-                /* Esc during auto-compaction is the user's stop signal:
-                 * agent_compact aborts the summary but leaves the flag latched.
-                 * Honor it like any mid-turn Esc — stop the tool loop rather
-                 * than clearing it and firing another round-trip against the
-                 * (still uncompacted) history. */
-                if (interrupt_requested()) {
-                    agent_session_mark_interrupt(&sess);
-                    user_turn_interrupted = 1;
-                    break;
-                }
-                /* agent_compact runs its own arm/disarm and leaves the watcher
-                 * disarmed; the inner loop relies on it staying armed, so
-                 * re-arm (idempotent) for the remaining round-trips. */
-                interrupt_clear();
-                interrupt_arm();
-            }
-        }
+        struct repl_loop_ctx loop_ctx = {.state = &state};
+        struct agent_loop_params loop_params = {
+            .session = &sess,
+            .provider = p,
+            .tlog = state.tlog,
+            .slog = state.slog,
+            .max_turns = -1,
+            .hooks =
+                {
+                    .user = &loop_ctx,
+                    .observe = repl_loop_on_event,
+                    .tick = repl_loop_tick,
+                    .turn_begin = repl_loop_turn_begin,
+                    .turn_end = repl_loop_turn_end,
+                    .checkpoint = repl_loop_checkpoint,
+                    .tool_seen = repl_loop_tool_seen,
+                    .tool_call = repl_loop_tool_call,
+                    .compact = repl_loop_compact,
+                },
+        };
+        struct agent_loop_result loop_result;
+        agent_loop_run(&loop_params, &loop_result);
+        user_turn_ctx = loop_result.last_context_tokens;
+        user_turn_errored = loop_result.outcome == AGENT_LOOP_PROVIDER_ERROR;
+        user_turn_interrupted = loop_result.outcome == AGENT_LOOP_INTERRUPTED;
+        agent_loop_result_destroy(&loop_result);
         interrupt_disarm();
-        keepawake_release();
         /* The user turn is over: the end-of-user-turn auto-compaction
          * below and the next user turn's pre-stream spinner must not
          * carry this one's counter. */
@@ -1655,12 +1549,6 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
          * still-running cluster spinner racing with notify_attention's
          * OSC-9 would corrupt the escape sequence. */
         render_transition(&r, RS_IDLE);
-
-        /* Catch-all flush. The per-round-trip append above covers tool
-         * paths; this one picks up the no-tool exit (assistant message
-         * only) and the synthesized-results interrupt path. Idempotent
-         * when there are no new items — _append no-ops on n_items <= n_written. */
-        flush_logs(tlog, state.slog, sess.items, sess.n_items);
 
         if (user_turn_interrupted)
             render_interrupt_marker(&r);

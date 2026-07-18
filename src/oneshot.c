@@ -15,7 +15,6 @@
 #include "transcript.h"
 #include "turn.h"
 #include "util.h"
-#include "system/keepawake.h"
 #include "terminal/ansi.h"
 
 /* Compaction may make several provider attempts internally, so it keeps a
@@ -245,14 +244,6 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         fprintf(stderr, "%s\n\n", tty ? ANSI_RESET : "");
     }
 
-    /* Keep the machine from idling to sleep across the whole agentic
-     * run — a long unattended -p invocation (or one driven from
-     * automation) shouldn't be cut short by the idle timer. Released at
-     * the cleanup below.
-     * Gated by the keep_awake config key; no-op when off or where no
-     * inhibitor helper exists. */
-    keepawake_acquire();
-
     int rc = 0;
     /* Run stats for the exit summary on stderr: latest reported context
      * size, summed provider-reported cost (compaction turns included, via
@@ -313,7 +304,6 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
     }
     agent_loop_result_destroy(&loop_result);
 
-    keepawake_release();
     agent_loop_flush_logs(tlog, slog, sess.items, sess.n_items);
     /* Surface the session id on stderr (stdout is the model's answer, kept
      * clean for piping) so a one-shot run can be picked up with --resume.

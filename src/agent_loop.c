@@ -9,6 +9,7 @@
 #include "session.h"
 #include "transcript.h"
 #include "util.h"
+#include "system/keepawake.h"
 
 struct loop_turn_sink {
     struct agent_loop_turn *loop_turn;
@@ -159,7 +160,8 @@ static void loop_flush(const struct agent_loop_params *params)
                           params->session->n_items);
 }
 
-void agent_loop_run(const struct agent_loop_params *params, struct agent_loop_result *result)
+static void loop_run_active(const struct agent_loop_params *params,
+                            struct agent_loop_result *result)
 {
     struct agent_session *session = params->session;
     const struct agent_loop_hooks *hooks = &params->hooks;
@@ -254,10 +256,11 @@ void agent_loop_run(const struct agent_loop_params *params, struct agent_loop_re
         for (size_t i = items_from; i < response_to; i++) {
             if (session->items[i].kind != ITEM_TOOL_CALL)
                 continue;
+            int interrupted = loop_checkpoint(hooks);
             enum agent_loop_tool_action action = AGENT_LOOP_TOOL_RUN;
             if (session->n_tools == 0)
                 action = AGENT_LOOP_TOOL_REFUSE;
-            else if (loop_checkpoint(hooks))
+            else if (interrupted)
                 action = AGENT_LOOP_TOOL_SKIP;
             struct item tool_result = loop_run_tool(params, &session->items[i], action);
             items_append(&session->items, &session->n_items, &session->cap_items, tool_result);
@@ -293,6 +296,13 @@ void agent_loop_run(const struct agent_loop_params *params, struct agent_loop_re
             }
         }
     }
+}
+
+void agent_loop_run(const struct agent_loop_params *params, struct agent_loop_result *result)
+{
+    keepawake_acquire();
+    loop_run_active(params, result);
+    keepawake_release();
 }
 
 void agent_loop_result_destroy(struct agent_loop_result *result)
