@@ -7,9 +7,9 @@
 #include <string.h>
 
 #include "agent_core.h"
+#include "agent_tool.h"
 #include "tool.h"
 #include "util.h"
-#include "render/ctrl_strip.h"
 #include "render/disp.h"
 #include "render/spinner.h"
 #include "render/tool_render.h"
@@ -279,11 +279,7 @@ struct item dispatch_tool_skipped(struct render_ctx *r, const struct item *call)
     disp_raw(ANSI_RESET);
     disp_putc(d, '\n');
     fflush(stdout);
-    return (struct item){
-        .kind = ITEM_TOOL_RESULT,
-        .call_id = xstrdup(call->call_id),
-        .output = xstrdup(INTERRUPT_MARKER),
-    };
+    return agent_tool_result_make(call, INTERRUPT_MARKER);
 }
 
 /* Refuse a tool call without running it. Used in --raw mode: we
@@ -302,11 +298,7 @@ struct item dispatch_tool_refused(struct render_ctx *r, const struct item *call)
     disp_raw(ANSI_RESET);
     disp_putc(d, '\n');
     fflush(stdout);
-    return (struct item){
-        .kind = ITEM_TOOL_RESULT,
-        .call_id = xstrdup(call->call_id),
-        .output = xstrdup("error: tool calls are disabled in this session"),
-    };
+    return agent_tool_result_make(call, "error: tool calls are disabled in this session");
 }
 
 /* Build the dim arg shown after the tag in a collapsed (replayed) tool
@@ -377,9 +369,10 @@ void render_collapsed_tool_call(struct render_ctx *r, const struct item *call)
  * a clean column-0 row is below whatever came before.
  * cluster_last_tool == NULL distinguishes "just entered the cluster"
  * from "continuing a cluster started by a previous call". */
-static struct item dispatch_tool_call_silent(struct render_ctx *r, const struct item *call,
-                                             const struct tool *t)
+static struct item dispatch_tool_call_silent(struct render_ctx *r, struct agent_tool_call *tc)
 {
+    const struct item *call = &tc->effective;
+    const struct tool *t = tc->tool;
     struct disp *d = &r->disp;
     struct spinner *sp = r->spinner;
     int term_w = display_width();
@@ -468,19 +461,14 @@ static struct item dispatch_tool_call_silent(struct render_ctx *r, const struct 
 
     /* Run the tool with no display callback — silent path discards live
      * stream and only keeps the canonical history. */
-    char *ret = t->run(call->tool_arguments_json, NULL, NULL);
+    char *ret = agent_tool_call_run(tc, NULL, NULL);
     spinner_request_label(sp, "working", "working...");
 
     r->cluster_last_tool = t->def.name;
 
-    char *history = ctrl_strip_dup(ret ? ret : "");
+    struct item result = agent_tool_result_make(call, ret);
     free(ret);
-
-    return (struct item){
-        .kind = ITEM_TOOL_RESULT,
-        .call_id = xstrdup(call->call_id),
-        .output = history,
-    };
+    return result;
 }
 
 /* Render a single dim "solo" row (the "›" chevron block) carrying a terse
@@ -513,8 +501,10 @@ static void emit_tool_solo_marker(struct disp *d, struct spinner *sp, const char
  * is ctrl_stripped at this boundary so all tools' outputs land in the
  * conversation in the same normalized form; anything pushed through
  * emit_display is display-only and does not enter history. */
-static struct item dispatch_tool_call_verbose(struct render_ctx *r, const struct item *call)
+static struct item dispatch_tool_call_verbose(struct render_ctx *r, struct agent_tool_call *tc)
 {
+    const struct item *call = &tc->effective;
+    const struct tool *t = tc->tool;
     struct disp *d = &r->disp;
     struct spinner *sp = r->spinner;
     display_tool_header(d, call);
@@ -530,7 +520,6 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *r, const struct
     spinner_set_label(sp, "working", "working...");
     spinner_park(sp, 0);
 
-    const struct tool *t = find_tool(call->tool_name);
     /* Initial mode comes straight from tool capability. For diff-capable
      * tools (write/edit) we leave R_DIFF for after run() — they never
      * stream, so we'll have the full return string in hand to check the
@@ -538,8 +527,7 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *r, const struct
     enum render_mode mode = (t && t->preview_tail) ? R_HEAD_TAIL : R_HEAD_ONLY;
     struct tool_render rr;
     tool_render_init(&rr, d, sp, mode);
-    char *ret = t ? t->run(call->tool_arguments_json, tool_render_emit, &rr)
-                  : xasprintf("unknown tool: %s", call->tool_name);
+    char *ret = agent_tool_call_run(tc, tool_render_emit, &rr);
 
     /* If the tool called emit_display at any point, the live preview is
      * already rendered. Otherwise feed the canonical return value through
@@ -579,39 +567,21 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *r, const struct
     if (t && t->output_is_diff && rr.emit_called && rr.rows_emitted == 0 && ret && *ret)
         emit_tool_solo_marker(d, sp, ret);
 
-    char *history = ctrl_strip_dup(ret ? ret : "");
+    struct item result = agent_tool_result_make(call, ret);
     free(ret);
     tool_render_free(&rr);
-
-    return (struct item){
-        .kind = ITEM_TOOL_RESULT,
-        .call_id = xstrdup(call->call_id),
-        .output = history,
-    };
+    return result;
 }
 
 struct item dispatch_tool_call(struct render_ctx *r, const struct item *call)
 {
-    const struct tool *t = find_tool(call->tool_name);
+    struct agent_tool_call tc;
+    agent_tool_call_init(&tc, call);
 
-    /* Optional per-tool arg normalization, applied once so the preview
-     * and run() see the same rewritten payload. The model's original
-     * args stay in `call` (and thus in conversation history); only the
-     * local `effective` shadow item carries the rewrite. Field-by-field
-     * copy is fine because we never free `effective` — its non-
-     * rewritten fields still belong to `call`. */
-    char *rewritten = NULL;
-    if (t && t->preprocess_args && call->tool_arguments_json)
-        rewritten = t->preprocess_args(call->tool_arguments_json);
-    struct item effective = *call;
-    if (rewritten)
-        effective.tool_arguments_json = rewritten;
-    const struct item *eff = rewritten ? &effective : call;
-
-    int is_silent = t && call_is_silent(t, eff);
+    int is_silent = tc.tool && call_is_silent(tc.tool, &tc.effective);
     render_transition(r, is_silent ? RS_CLUSTER : RS_IDLE);
     struct item out =
-        is_silent ? dispatch_tool_call_silent(r, eff, t) : dispatch_tool_call_verbose(r, eff);
-    free(rewritten);
+        is_silent ? dispatch_tool_call_silent(r, &tc) : dispatch_tool_call_verbose(r, &tc);
+    agent_tool_call_destroy(&tc);
     return out;
 }

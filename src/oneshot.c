@@ -7,15 +7,14 @@
 #include <unistd.h>
 
 #include "agent_core.h"
+#include "agent_tool.h"
 #include "catalog.h"
 #include "compact.h"
 #include "config.h"
 #include "session.h"
-#include "tool.h"
 #include "transcript.h"
 #include "turn.h"
 #include "util.h"
-#include "render/ctrl_strip.h"
 #include "system/keepawake.h"
 #include "terminal/ansi.h"
 
@@ -343,31 +342,19 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         for (size_t i = n_before; i < current_end; i++) {
             if (sess.items[i].kind != ITEM_TOOL_CALL)
                 continue;
-            const struct tool *tool = sess.n_tools ? find_tool(sess.items[i].tool_name) : NULL;
-            char *result;
-            if (tool) {
-                /* Apply the same per-tool arg normalization as
-                 * interactive dispatch (agent.c::dispatch_tool_call) so
-                 * tool behavior doesn't silently differ between modes. */
-                char *rewritten = NULL;
-                if (tool->preprocess_args && sess.items[i].tool_arguments_json)
-                    rewritten = tool->preprocess_args(sess.items[i].tool_arguments_json);
-                const char *args = rewritten ? rewritten : sess.items[i].tool_arguments_json;
-                result = tool->run(args, NULL, NULL);
-                free(rewritten);
-            } else if (sess.n_tools == 0) {
-                result = xstrdup("error: tool calls are disabled in this session");
+            struct item result;
+            if (sess.n_tools == 0) {
+                result = agent_tool_result_make(&sess.items[i],
+                                                "error: tool calls are disabled in this session");
             } else {
-                result = xasprintf("unknown tool: %s", sess.items[i].tool_name);
+                struct agent_tool_call tc;
+                agent_tool_call_init(&tc, &sess.items[i]);
+                char *output = agent_tool_call_run(&tc, NULL, NULL);
+                result = agent_tool_result_make(&sess.items[i], output);
+                free(output);
+                agent_tool_call_destroy(&tc);
             }
-            char *history = ctrl_strip_dup(result);
-            free(result);
-            items_append(&sess.items, &sess.n_items, &sess.cap_items,
-                         (struct item){
-                             .kind = ITEM_TOOL_RESULT,
-                             .call_id = xstrdup(sess.items[i].call_id),
-                             .output = history,
-                         });
+            items_append(&sess.items, &sess.n_items, &sess.cap_items, result);
         }
         agent_session_add_turn_usage(&sess, p, &oc.usage, round_ms);
         /* Round-trip complete (assistant + tool calls + their results
