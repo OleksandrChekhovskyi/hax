@@ -85,6 +85,13 @@ static void test_presets(void)
     EXPECT_STR_EQ(theme_open(THEME_CHROME_DIM), ANSI_DIM);
     EXPECT_STR_EQ(theme_close(THEME_CHROME_DIM), ANSI_BOLD_OFF);
 
+    /* Names match case-insensitively, like the config enum validator, so a
+     * HAX_THEME=LIGHT resolves rather than falling back to auto. */
+    EXPECT(theme_set("LIGHT") == 0);
+    EXPECT_STR_EQ(theme_name(), "light");
+    EXPECT(theme_set("Off") == 0);
+    EXPECT_STR_EQ(theme_name(), "off");
+
     /* Unknown names fail without disturbing the active preset. */
     EXPECT(theme_set("bogus") == -1);
     EXPECT(theme_set(NULL) == -1);

@@ -77,7 +77,7 @@ char *session_picker_run(const char *cwd, const char *exclude_path, int *shown)
      * history; the title notes when the list is capped. */
     size_t n_load = n_shown < SESSION_PICKER_MAX ? n_shown : SESSION_PICKER_MAX;
     time_t now = time(NULL);
-    struct picker_item *items = xmalloc(n_load * sizeof(*items));
+    struct picker_item *items = xcalloc(n_load, sizeof(*items));
     char **details = xmalloc(n_load * sizeof(*details));
     for (size_t k = 0; k < n_load; k++) {
         struct session_entry *e = &list[map[k]];

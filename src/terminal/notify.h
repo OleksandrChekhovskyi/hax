@@ -14,8 +14,8 @@
  * to wrap OSC 9 in a DCS passthrough envelope when passthrough is
  * known to be enabled.
  *
- * No-op when stdout isn't a TTY, when HAX_NOTIFY=0/off/false, or when
- * TERM=dumb. Set HAX_NOTIFY=bel or HAX_NOTIFY=osc9 to force a method. */
+ * No-op when stdout isn't a TTY, when HAX_NOTIFY=off, or when TERM=dumb.
+ * Set HAX_NOTIFY=bel or HAX_NOTIFY=osc9 to force a method. */
 void notify_attention(void);
 
 #endif /* HAX_NOTIFY_H */

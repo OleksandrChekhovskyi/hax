@@ -79,13 +79,11 @@ int compact_over_threshold(long ctx_tokens, long limit, int pct)
 }
 
 /* Resolve the auto-compaction trigger point as a percentage of the context
- * window. Out-of-range values fall back to the registry default. */
+ * window. The registry bounds it to 1..100, so an out-of-range value already
+ * reads as the registry default. */
 static int threshold_pct(void)
 {
-    int p = config_int("compact.threshold");
-    if (p <= 0 || p > 100)
-        p = 85;
-    return p;
+    return config_int("compact.threshold");
 }
 
 int compact_should_auto(long ctx_tokens, long limit)

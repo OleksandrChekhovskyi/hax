@@ -91,6 +91,8 @@ struct agent_state {
      * recall *after* the command line so the first Up-arrow reaches the prompt,
      * not the /undo/fork line. Owned; consumed and freed per slash command. */
     char *pending_recall;
+    /* Owned text to seed into the next prompt after a slash command. */
+    char *pending_preseed;
     /* Resumable-turn state (see enum agent_resume). resume_marked says the
      * stopped turn carries interrupt markers, so an empty-send resume must
      * append the CONTINUE_MARKER user message rather than nothing. */
@@ -175,6 +177,10 @@ void agent_fork(struct agent_state *st, size_t turn);
  * the session and live provider stay intact; when p is a prospective
  * replacement, the caller retains ownership of it. */
 int agent_apply_settings(struct agent_state *st, struct provider *p);
+
+/* Re-apply runtime display settings. Only safe between streams because this
+ * may discard and rebuild the Markdown renderer. */
+void agent_display_refresh(struct agent_state *st);
 
 /* Total session spend for display, USD: provider-reported cost plus the
  * catalog-estimated cost of unreported responses, each priced at its own

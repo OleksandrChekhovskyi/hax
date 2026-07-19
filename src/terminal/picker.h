@@ -54,6 +54,8 @@ struct picker_item {
      * than smuggling "current" through `detail`, where it would render
      * dim and read like a failure reason. */
     int current;
+    /* Optional single-line description, wrapped below the list when selected. */
+    const char *desc;
 };
 
 struct picker_opts {

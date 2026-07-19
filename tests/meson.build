@@ -22,6 +22,7 @@ test_sources = [
     'test_config.c',
     'test_file_mention.c',
     'test_harness.c',
+    'test_select_config.c',
     'test_session.c',
     'test_slash.c',
     'test_trace.c',
@@ -37,6 +38,7 @@ test_sources = [
     'providers/test_llamacpp.c',
     'providers/test_openai_events.c',
     'providers/test_openai_messages.c',
+    'providers/test_openai_reasoning.c',
     'providers/test_registry.c',
 
     'render/test_ctrl_strip.c',

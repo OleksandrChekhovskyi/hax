@@ -46,6 +46,11 @@ void select_effort(struct agent_state *st);
  * failure rolls the whole application back. */
 void select_preset(struct agent_state *st, const char *name);
 
+/* View or change configuration. Without `arg`, opens the picker; otherwise
+ * accepts "<key> [value]". Changes are session-only overrides, and "default"
+ * clears an override. */
+void select_config(struct agent_state *st, const char *arg);
+
 struct provider;
 
 /* Cold-start auto-pick used when the built-in default provider can't be

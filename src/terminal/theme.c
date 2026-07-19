@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h> /* strcasecmp — POSIX puts it here, not in <string.h> */
 
 #include "config.h"
 #include "terminal/ansi.h"
@@ -197,10 +198,13 @@ int theme_set(const char *name)
 {
     if (!name)
         return -1;
-    if (strcmp(name, "auto") == 0)
+    /* Case-insensitive to match the config enum validator (and the other
+     * enum consumers, notify/sort_models), so HAX_THEME=LIGHT resolves rather
+     * than warning and falling back to auto. */
+    if (strcasecmp(name, "auto") == 0)
         name = autodetect();
     for (size_t i = 0; i < sizeof(THEMES) / sizeof(THEMES[0]); i++) {
-        if (strcmp(THEMES[i].name, name) == 0) {
+        if (strcasecmp(THEMES[i].name, name) == 0) {
             active = &THEMES[i];
             return 0;
         }
@@ -210,7 +214,7 @@ int theme_set(const char *name)
 
 void theme_init(void)
 {
-    const char *want = config_str_nonempty("theme");
+    const char *want = config_str("theme");
     if (!want)
         want = "auto";
     if (theme_set(want) != 0) {

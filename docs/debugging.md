@@ -83,7 +83,7 @@ and `python_buffer`.
 - `HAX_MARKDOWN=0` disables Markdown rendering.
 - `HAX_DISPLAY_WIDTH=<cols>` forces a stable render width, useful for fixtures.
 - `HAX_SHOW_REASONING=1` displays reasoning deltas when a provider emits them.
-- `HAX_NOTIFY=0` disables terminal/desktop completion notifications.
+- `HAX_NOTIFY=off` disables terminal/desktop completion notifications.
 
 ## Provider startup checks
 

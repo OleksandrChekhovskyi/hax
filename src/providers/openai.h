@@ -19,23 +19,11 @@
  * stderr). */
 struct provider *openai_provider_new(const char *name);
 
-/* Wire-format dialect for reasoning parameters. OpenAI-compatible
- * backends agree on the rest of the Chat Completions payload but
- * diverge here — the divergence is structural (different field name
- * and shape, not just a value), so each backend declares which dialect
- * to emit. New shapes (DeepSeek's `thinking: {type}`, Qwen's
- * `enable_thinking`, …) get a new value here and a matching arm in
- * build_body().
- *
- *   REASONING_FLAT    `reasoning_effort: <effort>` as a top-level
- *                     string, sent only when effort is set. The
- *                     default — real OpenAI's Chat Completions
- *                     accepts exactly this shape and rejects others.
- *   REASONING_NESTED  `reasoning: {enabled: true, effort?: <effort>}`
- *                     as a top-level object, always sent when
- *                     selected. The `enabled: true` is the opt-in
- *                     some routers (OpenRouter, …) need to wake CoT
- *                     emission on models that otherwise stay silent. */
+/* Reasoning-parameter wire format. Add a value and build_body() arm for new
+ * shapes. Both forms are omitted when effort is unset.
+ *   REASONING_FLAT:   `reasoning_effort: <effort>` (the OpenAI default)
+ *   REASONING_NESTED: `reasoning: {enabled: true, effort: <effort>}`; "none"
+ *                     sends `{enabled: false}` to disable. */
 enum reasoning_format {
     REASONING_FLAT = 0,
     REASONING_NESTED,
@@ -48,6 +36,13 @@ enum reasoning_format {
  * falls back, with a one-line stderr warning so a typo doesn't pass
  * silently. */
 enum reasoning_format reasoning_format_parse(const char *s, enum reasoning_format fallback);
+
+/* Encode the reasoning-effort request field into `body` for `fmt` (see enum
+ * reasoning_format for the wire shapes). A NULL/empty effort omits the field
+ * entirely, leaving the provider's own default; otherwise the level is
+ * requested, with "none" disabling. Exposed so the encoding can be unit-tested
+ * without an HTTP round-trip. */
+void openai_apply_reasoning(json_t *body, enum reasoning_format fmt, const char *effort);
 
 /* Preset configuration consumed by openai_provider_new_preset(). All fields
  * are optional except `default_base_url` (or HAX_OPENAI_BASE_URL must be

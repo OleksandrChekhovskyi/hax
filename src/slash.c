@@ -65,6 +65,7 @@ static void slash_run_provider(struct slash_ctx *ctx);
 static void slash_run_model(struct slash_ctx *ctx);
 static void slash_run_effort(struct slash_ctx *ctx);
 static void slash_run_preset(struct slash_ctx *ctx);
+static void slash_run_config(struct slash_ctx *ctx);
 static void slash_run_compact(struct slash_ctx *ctx);
 static void slash_run_copy(struct slash_ctx *ctx);
 static void slash_run_session(struct slash_ctx *ctx);
@@ -131,6 +132,14 @@ static const struct slash_cmd COMMANDS[] = {
         .takes_arg = 1,
         .drives_disp = 1,
         .run = slash_run_preset,
+    },
+    {
+        .name = "config",
+        .aliases = {NULL},
+        .summary = "view or change settings (optional: key value)",
+        .takes_arg = 1,
+        .drives_disp = 1,
+        .run = slash_run_config,
     },
     {
         .name = "compact",
@@ -342,7 +351,7 @@ static long undo_fork_picker(struct agent_session *s, size_t count, int is_undo)
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
         return -1;
 
-    struct picker_item *items = xmalloc(count * sizeof(*items));
+    struct picker_item *items = xcalloc(count, sizeof(*items));
     char **labels = xmalloc(count * sizeof(*labels));
     for (size_t t = 0; t < count; t++) {
         const char *text = agent_user_turn_text(s, t);
@@ -473,6 +482,13 @@ static void slash_run_preset(struct slash_ctx *ctx)
 {
     /* ctx->arg is a preset name for direct application, NULL for the picker. */
     select_preset(ctx->state, ctx->arg);
+}
+
+/* ---------- /config ---------- */
+
+static void slash_run_config(struct slash_ctx *ctx)
+{
+    select_config(ctx->state, ctx->arg);
 }
 
 /* ---------- /compact ---------- */

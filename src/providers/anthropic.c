@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "anthropic_events.h"
 #include "config.h"
@@ -186,7 +187,7 @@ json_t *anthropic_build_messages(const struct item *items, size_t n, const char 
 static json_t *make_cache_control(const char *ttl)
 {
     json_t *cc = json_pack("{s:s}", "type", "ephemeral");
-    if (ttl && strcmp(ttl, "1h") == 0)
+    if (ttl && strcasecmp(ttl, "1h") == 0)
         json_object_set_new(cc, "ttl", json_string("1h"));
     return cc;
 }
@@ -238,11 +239,11 @@ static enum anthropic_thinking_mode resolve_thinking_mode(struct anthropic *a)
     const char *m = config_str_nonempty(k);
     free(k);
     if (m) {
-        if (strcmp(m, "adaptive") == 0)
+        if (strcasecmp(m, "adaptive") == 0)
             return ANTHROPIC_THINKING_ADAPTIVE;
-        if (strcmp(m, "budget") == 0 || strcmp(m, "enabled") == 0)
+        if (strcasecmp(m, "budget") == 0)
             return ANTHROPIC_THINKING_BUDGET;
-        if (strcmp(m, "off") == 0 || strcmp(m, "disabled") == 0 || strcmp(m, "none") == 0)
+        if (strcasecmp(m, "off") == 0)
             return ANTHROPIC_THINKING_OFF;
         hax_warn("unknown anthropic.thinking_mode '%s' (adaptive/budget/off) — using default", m);
     }
@@ -272,16 +273,18 @@ static void apply_thinking(json_t *body, struct anthropic *a, const struct conte
         return;
     }
 
-    /* BUDGET */
+    /* BUDGET. Anthropic requires 1 <= budget_tokens < max_tokens, so a window
+     * under two tokens can't hold any thinking — leave it off rather than emit
+     * an out-of-range budget (max_tokens is a plain positive count here, not
+     * necessarily the registry-bounded one: a config-defined provider's
+     * providers.<name>.max_tokens carries no bound). */
+    if (max_tokens < 2)
+        return;
     char *k = preset_key(a->cfg_prefix, "thinking_budget");
     int budget = config_int(k);
     free(k);
-    if (budget <= 0)
+    if (budget <= 0 || budget >= max_tokens)
         budget = max_tokens - 1;
-    if (budget >= max_tokens)
-        budget = max_tokens - 1;
-    if (budget < 1)
-        budget = 1;
     json_object_set_new(body, "thinking",
                         json_pack("{s:s, s:i}", "type", "enabled", "budget_tokens", budget));
 }

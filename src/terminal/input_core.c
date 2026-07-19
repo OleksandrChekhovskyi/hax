@@ -30,6 +30,7 @@ void input_free(struct input *in)
         free(in->hist[i]);
     free(in->hist);
     free(in->persist_path);
+    free(in->preseed);
     free(in);
 }
 

@@ -23,6 +23,15 @@ runtime override → environment → state.json → config.json → registry/pro
 persist them to `state.json`. On the next launch, an explicit environment variable still wins
 over that state.
 
+`/config` lists every setting with its resolved value, source, and description. Bright rows
+are editable as session-only overrides; dimmed rows report how to change them. Use
+`/config <key> default` to clear an override. Provider, model, effort, and preset changes remain
+under their dedicated commands.
+
+API keys are shown only as `set` or `unset`. `/config` reflects hax's `HAX_*` settings, not
+provider fallbacks (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`), so a
+fallback-only key may appear unset even when authentication works.
+
 The CLI selection flags and presets also land in the runtime-override tier, applied in this
 order: a preset first, then explicit `--provider` / `--model` / `--effort` flags on top. So
 for a single run the effective order is: flags → preset → environment → `state.json` →
@@ -174,8 +183,8 @@ explicit selection, not to auto-selection.
 
 ## Setting reference
 
-The list below mirrors the setting registry in `src/config.c`. Each bullet starts with the
-canonical key and its environment variable.
+The list below mirrors `src/config.c`; each bullet starts with the canonical key and environment
+variable. `/config` marks settings that can be changed mid-session.
 
 ### Selection and prompt
 
@@ -203,15 +212,16 @@ canonical key and its environment variable.
 
 - `markdown` / `HAX_MARKDOWN` — render Markdown on TTY output; piped output is raw. Default
   `1`.
-- `show_reasoning` / `HAX_SHOW_REASONING` — show reasoning deltas live. For OpenRouter, also
-  requests reasoning output.
-- `sort_models` / `HAX_SORT_MODELS` — force the `/model` picker alphabetical (or, when falsy,
-  keep the server's catalog order) for every provider. Unset, each provider picks its own
-  default: alphabetical for `openai` and `openrouter`, catalog order elsewhere.
+- `show_reasoning` / `HAX_SHOW_REASONING` — show reasoning deltas live; changeable
+  mid-session. Controls display of reasoning, never whether the model reasons.
+- `sort_models` / `HAX_SORT_MODELS` — `on` forces the `/model` picker alphabetical, `off` keeps
+  the server's catalog order, for every provider. Default `auto`: each provider picks its own
+  default — alphabetical for `openai` and `openrouter`, catalog order elsewhere.
 - `context_limit` / `HAX_CONTEXT_LIMIT` — manual context-window size for percentage display
   and auto-compaction.
 - `display_width` / `HAX_DISPLAY_WIDTH` — force render width in columns.
-- `notify` / `HAX_NOTIFY` — desktop notification style: `osc9`, `bel`, or falsy to disable.
+- `notify` / `HAX_NOTIFY` — desktop notification style: `auto`, `bel`, `osc9`, or `off`. Default
+  `auto` detects from the terminal.
 - `theme` / `HAX_THEME` — color theme: `auto`, `dark`, `light`, `ansi`, or `off`. Default
   `auto`. `dark` and `light` are fixed 256-color palettes tuned for the respective
   background; `ansi` uses only the classic 16-color SGRs, so colors follow the terminal's
@@ -276,8 +286,8 @@ where it matters.
   running. Default `1`.
 - `compact.auto` / `HAX_COMPACT_AUTO` — auto-summarize history near the context window.
   Default `1`.
-- `compact.threshold` / `HAX_COMPACT_THRESHOLD` — auto-compaction trigger percentage. Default
-  `85`.
+- `compact.threshold` / `HAX_COMPACT_THRESHOLD` — auto-compaction trigger percentage, `1`–`100`.
+  Default `85`; an out-of-range value falls back to it.
 - `max_turns` / `HAX_MAX_TURNS` — interactive only: pause the agent loop for confirmation
   after this many model round-trips within one user turn (Enter resumes). Unset or `0`
   means unlimited.
@@ -285,8 +295,8 @@ where it matters.
 ### Recording and observability
 
 - `no_session` / `HAX_NO_SESSION` — disable session recording and resume.
-- `transcript` / `HAX_TRANSCRIPT` — file path for a plain-text transcript mirror.
-- `trace` / `HAX_TRACE` — file path for HTTP/SSE trace output.
+- `transcript` / `HAX_TRANSCRIPT` — file path for a plain-text transcript mirror; empty disables.
+- `trace` / `HAX_TRACE` — file path for HTTP/SSE trace output; empty disables.
 
 See [debugging.md](./debugging.md) for trace and transcript details.
 
@@ -307,7 +317,7 @@ The model can request `timeout_seconds` on a bash call, bounded by `bash.timeout
 ### HTTP transport
 
 - `http.max_retries` / `HAX_HTTP_MAX_RETRIES` — additional retries for transient HTTP
-  failures. Default `4`.
+  failures, up to `100`. Default `4`.
 - `http.retry_base` / `HAX_HTTP_RETRY_BASE` — initial retry backoff; later retries double with
   jitter. Default `1s`.
 - `http.idle_timeout` / `HAX_HTTP_IDLE_TIMEOUT` — streaming silence before giving up; `0`
@@ -326,11 +336,13 @@ These settings apply to built-in OpenAI-family presets: `openai`, `openai-compat
   `openai-compatible`. Default `flat`.
 - `openai.reasoning_roundtrip` / `HAX_REASONING_ROUNDTRIP` — replay reasoning text on later
   turns: `off`, `on`, or a field name. Default is provider-specific.
-- `openai.send_cache_key` / `HAX_OPENAI_SEND_CACHE_KEY` — send a stable `prompt_cache_key`
-  when enabled. Default is provider-specific.
-- `openai.request_cost` / `HAX_OPENAI_REQUEST_COST` — send `usage: {include: true}` so the
-  backend reports per-response cost (an OpenRouter extension). Default on for `openrouter`,
-  off elsewhere.
+- `openai.send_cache_key` / `HAX_OPENAI_SEND_CACHE_KEY` — `auto`, `on`, or `off`: `on`/`off`
+  force sending (or suppressing) a stable `prompt_cache_key`, while `auto` uses the provider
+  default. Because `auto` is a real value, setting it at a higher tier (env, `/config`)
+  shadows a lower-tier `on`/`off` and restores the provider default.
+- `openai.request_cost` / `HAX_OPENAI_REQUEST_COST` — `auto`, `on`, or `off`: `on`/`off` force
+  sending (or not) `usage: {include: true}` so the backend reports per-response cost (an
+  OpenRouter extension); `auto` uses the provider default (on for `openrouter`, off elsewhere).
 
 API-key fallbacks:
 
@@ -354,8 +366,8 @@ providers use the same leaf names under `providers.<name>`.
   Default is provider-specific.
 - `anthropic.thinking_budget` / `HAX_ANTHROPIC_THINKING_BUDGET` — budget-mode thinking tokens.
   Default is `max_tokens - 1`.
-- `anthropic.cache` / `HAX_ANTHROPIC_CACHE` — send prompt cache-control breakpoints. Default
-  is provider-specific.
+- `anthropic.cache` / `HAX_ANTHROPIC_CACHE` — `auto`, `on`, or `off`: `on`/`off` force sending
+  (or suppressing) prompt cache-control breakpoints, while `auto` uses the provider default.
 - `anthropic.cache_ttl` / `HAX_ANTHROPIC_CACHE_TTL` — cache TTL. Default `1h`; accepted
   values are provider/API dependent (`5m` or `1h`).
 - `anthropic.version` / `HAX_ANTHROPIC_VERSION` — `anthropic-version` request header. Default

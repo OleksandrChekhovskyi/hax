@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 #include "select.h"
 
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "util.h"
 #include "agent.h"
@@ -218,12 +220,14 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
     }
 
     /* The provider declares whether its catalog order is worth preserving
-     * (sort_models); the global sort_models key is a user override on top
-     * of that per-provider default. */
+     * (sort_models); the global sort_models key is a tri-state user override on
+     * top of that per-provider default — on/off force it, auto (and unset)
+     * defer. config_bool_or resolves exactly that, and /config's tri-state
+     * validation accepts the same grammar, so the two agree. */
     if (config_bool_or("sort_models", p->sort_models))
         qsort(ids, n, sizeof(*ids), cmp_model_id);
 
-    struct picker_item *items = xmalloc(n * sizeof(*items));
+    struct picker_item *items = xcalloc(n, sizeof(*items));
     size_t initial = 0;
     for (size_t i = 0; i < n; i++) {
         items[i].label = ids[i];
@@ -268,7 +272,7 @@ static enum pick_status choose_effort(struct agent_state *st, struct provider *p
         return PICK_NONE;
     }
 
-    struct picker_item *items = xmalloc((n + 1) * sizeof(*items));
+    struct picker_item *items = xcalloc((n + 1), sizeof(*items));
     items[0].label = "default";
     items[0].detail = "let the provider choose";
     items[0].dim = 0;
@@ -488,7 +492,7 @@ void select_provider(struct agent_state *st)
      * navigable row is the only way a long tail of unavailable providers
      * stays readable at all — the viewport follows the selection. */
     char *cur = st->provider ? current_provider_id(st->provider) : NULL;
-    struct picker_item *items = xmalloc(n * sizeof(*items));
+    struct picker_item *items = xcalloc(n, sizeof(*items));
     size_t initial = 0;
     for (size_t i = 0; i < n; i++) {
         items[i].label = facs[i]->name;
@@ -627,7 +631,7 @@ void select_preset(struct agent_state *st, const char *name)
             goto out;
         }
         qsort(names, n, sizeof(*names), cmp_model_id); /* plain char* compare */
-        struct picker_item *items = xmalloc(n * sizeof(*items));
+        struct picker_item *items = xcalloc(n, sizeof(*items));
         char **details = xcalloc(n, sizeof(*details)); /* owned detail strings */
         for (size_t i = 0; i < n; i++) {
             items[i].label = names[i];
@@ -744,4 +748,294 @@ out:
     for (size_t i = 0; i < n; i++)
         free(names[i]);
     free(names);
+}
+
+/* ---------- /config ---------- */
+
+static int setting_is_bool(const struct config_setting *s)
+{
+    return s->choices && strcmp(s->choices, CONFIG_CHOICES_BOOL) == 0;
+}
+
+/* Tri-state boolean: on/off plus "auto", where auto (and unset) defers to the
+ * consumer's own default — one it resolves itself (a provider preset), so
+ * /config can't compute it and shows "auto" rather than a concrete on/off. */
+static int setting_is_tristate(const struct config_setting *s)
+{
+    return s->choices && strcmp(s->choices, CONFIG_CHOICES_TRISTATE) == 0;
+}
+
+/* Display-safe effective value: secrets are redacted and booleans normalized.
+ * config_str applies the registry's empty policy, so the shown value matches
+ * what the setting actually reads (config_source mirrors the same rule).
+ * Borrowed until the next override write. */
+static const char *setting_display_value(const struct config_setting *s)
+{
+    const char *v = config_str(s->key);
+    if (s->secret)
+        return (v && *v) ? "set" : "unset";
+    if (setting_is_bool(s))
+        return config_bool(s->key) ? "on" : "off";
+    if (setting_is_tristate(s)) {
+        /* Unset or an explicit "auto" both mean "provider decides"; a valid
+         * on/off spelling normalizes, an invalid value shows raw (+ marker). */
+        if (!v || strcasecmp(v, "auto") == 0)
+            return "auto";
+        if (!config_value_valid(s, v))
+            return v;
+        return config_bool_or(s->key, 0) ? "on" : "off";
+    }
+    if (!v)
+        return "unset";
+    /* Only keep_empty settings resolve to a literal "" (config_str skips an
+     * empty tier otherwise); that empty is meaningful — e.g. system_prompt ""
+     * sends no system message where unset uses the built-in — so mark it. */
+    if (!*v)
+        return "(empty)";
+    return v;
+}
+
+/* Whether the resolved value is present but fails validation — a bad env/
+ * config entry the getter silently ignores in favor of the default. Free-form
+ * (CFG_STRING without choices) always validates, so this fires for enums,
+ * bools, and bounded numerics: a bad spelling or out-of-range value. */
+static int setting_value_invalid(const struct config_setting *s)
+{
+    const char *v = config_str(s->key);
+    return v && *v && !s->secret && !config_value_valid(s, v);
+}
+
+/* Print `key = value (source)` using the effective post-change value, marking
+ * a configured value the getter rejects so it doesn't look like it applies. */
+static void setting_note_current(struct agent_state *st, const struct config_setting *s)
+{
+    ui_note("%s = %s (%s%s)", s->key, setting_display_value(s), config_source(s->key),
+            setting_value_invalid(s) ? ", invalid" : "");
+    st->r->disp.trail = 1;
+}
+
+/* Dedicated command for settings that are runtime-changeable outside
+ * /config. Kept here so slash-command names stay out of the config layer. */
+static const char *setting_runtime_command(const char *key)
+{
+    static const struct {
+        const char *key;
+        const char *cmd;
+    } cmds[] = {
+        {"provider", "/provider"},
+        {"model", "/model"},
+        {"effort", "/effort"},
+        {"preset", "/preset"},
+    };
+    for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
+        if (strcmp(cmds[i].key, key) == 0)
+            return cmds[i].cmd;
+    return NULL;
+}
+
+/* Show a read-only setting and where it can be changed. */
+static void setting_note_readonly(struct agent_state *st, const struct config_setting *s)
+{
+    setting_note_current(st, s);
+    const char *cmd = setting_runtime_command(s->key);
+    if (cmd)
+        ui_note("  change it with %s", cmd);
+    else
+        ui_note("  read-only at runtime — set %s or config.json and restart to change", s->env);
+}
+
+/* Set or clear the override, then refresh display-cached settings. */
+static void setting_commit(struct agent_state *st, const struct config_setting *s, const char *val)
+{
+    config_set_override(s->key, val);
+    agent_display_refresh(st);
+    setting_note_current(st, s);
+}
+
+static size_t split_choices(const char *choices, char ***out)
+{
+    size_t n = 0, cap = 0;
+    char **arr = NULL;
+    const char *p = choices;
+    for (;;) {
+        const char *bar = strchr(p, '|');
+        size_t len = bar ? (size_t)(bar - p) : strlen(p);
+        if (n == cap) {
+            cap = cap ? cap * 2 : 8;
+            arr = xrealloc(arr, cap * sizeof(*arr));
+        }
+        char *seg = xmalloc(len + 1);
+        memcpy(seg, p, len);
+        seg[len] = '\0';
+        arr[n++] = seg;
+        if (!bar)
+            break;
+        p = bar + 1;
+    }
+    *out = arr;
+    return n;
+}
+
+/* Pick an enumerated value; "default" clears the override so lower tiers
+ * resolve again. */
+static void setting_pick_choice(struct agent_state *st, const struct config_setting *s)
+{
+    char **vals = NULL;
+    size_t n = split_choices(s->choices, &vals);
+
+    struct picker_item *items = xcalloc((n + 1), sizeof(*items));
+    items[0].label = "default";
+    items[0].detail = "clear the override — env/config resolves again";
+    items[0].dim = 0;
+    items[0].current = 0;
+    const char *cur = setting_display_value(s);
+    size_t initial = 0;
+    for (size_t i = 0; i < n; i++) {
+        items[i + 1].label = vals[i];
+        items[i + 1].detail = NULL;
+        items[i + 1].dim = 0;
+        items[i + 1].current = strcasecmp(vals[i], cur) == 0;
+        if (items[i + 1].current)
+            initial = i + 1;
+    }
+    char *title = xasprintf("%s — %s", s->key, s->desc);
+    struct picker_opts opts = {.title = title, .items = items, .n = n + 1, .initial = initial};
+    long sel = picker_run(&opts);
+    free(title);
+    free(items);
+
+    if (sel >= 0)
+        setting_commit(st, s, sel == 0 ? NULL : vals[sel - 1]);
+    for (size_t i = 0; i < n; i++)
+        free(vals[i]);
+    free(vals);
+}
+
+/* Seed the regular editor with a command for a free-form value. When the
+ * current value fails validation (a bad env/config entry), seed the registry
+ * default instead so pressing Enter commits something the getter accepts
+ * rather than re-submitting the rejected value. */
+static void setting_seed_prompt(struct agent_state *st, const struct config_setting *s)
+{
+    const char *v = config_str(s->key);
+    if (v && *v && !config_value_valid(s, v))
+        v = config_default(s->key);
+    free(st->pending_preseed);
+    st->pending_preseed =
+        (v && *v) ? xasprintf("/config %s %s", s->key, v) : xasprintf("/config %s ", s->key);
+}
+
+static void config_typed(struct agent_state *st, const char *arg)
+{
+    const char *p = arg;
+    while (*p && !isspace((unsigned char)*p))
+        p++;
+    char key[64];
+    size_t klen = (size_t)(p - arg);
+    if (klen >= sizeof(key)) {
+        ui_error("unknown setting '%.*s'", (int)klen, arg);
+        st->r->disp.trail = 1;
+        return;
+    }
+    memcpy(key, arg, klen);
+    key[klen] = '\0';
+    while (*p && isspace((unsigned char)*p))
+        p++;
+    const char *val = *p ? p : NULL;
+
+    const struct config_setting *s = config_setting_find(key);
+    if (!s) {
+        ui_error("unknown setting '%s' — /config lists them", key);
+        st->r->disp.trail = 1;
+        return;
+    }
+    if (!val) {
+        if (s->runtime)
+            setting_note_current(st, s);
+        else
+            setting_note_readonly(st, s);
+        return;
+    }
+    if (!s->runtime) {
+        const char *cmd = setting_runtime_command(key);
+        if (cmd)
+            ui_error("'%s' can't be changed from /config — use %s", key, cmd);
+        else
+            ui_error("'%s' can't be changed at runtime — set %s or config.json and restart", key,
+                     s->env);
+        st->r->disp.trail = 1;
+        return;
+    }
+    if (strcmp(val, "default") == 0) {
+        setting_commit(st, s, NULL);
+        return;
+    }
+    if (!config_value_valid(s, val)) {
+        char hint[64];
+        config_value_hint(s, hint, sizeof(hint));
+        ui_error("invalid value '%s' for %s (expected: %s, or default)", val, key, hint);
+        st->r->disp.trail = 1;
+        return;
+    }
+    /* Store the canonical spelling so a case-sensitive consumer matches. */
+    char *canon = config_value_canonical(s, val);
+    setting_commit(st, s, canon ? canon : val);
+    free(canon);
+}
+
+void select_config(struct agent_state *st, const char *arg)
+{
+    if (arg && *arg) {
+        config_typed(st, arg);
+        return;
+    }
+
+    /* Preserve registry grouping; dim rows are inspectable but read-only. */
+    size_t n = 0;
+    const struct config_setting *rows = config_settings(&n);
+
+    struct picker_item *items = xcalloc(n, sizeof(*items));
+    char **details = xmalloc(n * sizeof(*details));
+    char **descs = xcalloc(n, sizeof(*descs)); /* owned augmented descriptions */
+    for (size_t i = 0; i < n; i++) {
+        details[i] =
+            xasprintf("%s (%s%s)", setting_display_value(&rows[i]), config_source(rows[i].key),
+                      setting_value_invalid(&rows[i]) ? ", invalid" : "");
+        items[i].label = rows[i].key;
+        items[i].detail = details[i];
+        /* Surface the value grammar that isn't obvious from the prose: units
+         * for a size/duration, and the range for a bounded integer. A plain
+         * unbounded integer needs no hint. */
+        int show_hint = rows[i].kind == CFG_SIZE || rows[i].kind == CFG_DURATION ||
+                        (rows[i].kind == CFG_INT && (rows[i].min || rows[i].max));
+        if (show_hint) {
+            char hint[64];
+            config_value_hint(&rows[i], hint, sizeof(hint));
+            descs[i] = xasprintf("%s (%s)", rows[i].desc, hint);
+            items[i].desc = descs[i];
+        } else {
+            items[i].desc = rows[i].desc;
+        }
+        items[i].dim = !rows[i].runtime;
+        items[i].current = 0;
+    }
+    struct picker_opts opts = {.title = "configuration", .items = items, .n = n, .initial = 0};
+    long sel = picker_run(&opts);
+    free(items);
+    for (size_t i = 0; i < n; i++) {
+        free(details[i]);
+        free(descs[i]);
+    }
+    free(details);
+    free(descs);
+
+    if (sel >= 0) {
+        const struct config_setting *s = &rows[sel];
+        if (!s->runtime)
+            setting_note_readonly(st, s);
+        else if (s->choices)
+            setting_pick_choice(st, s);
+        else
+            setting_seed_prompt(st, s);
+    }
 }

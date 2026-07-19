@@ -1404,6 +1404,12 @@ void input_set_empty_submit(struct input *in, int enabled)
     in->empty_submit = enabled;
 }
 
+void input_set_preseed(struct input *in, const char *text)
+{
+    free(in->preseed);
+    in->preseed = (text && *text) ? xstrdup(text) : NULL;
+}
+
 int input_cancelled(const struct input *in)
 {
     return in->last_cancelled;
@@ -1432,6 +1438,9 @@ char *input_readline(struct input *in, const char *prompt)
 {
     in->last_cancelled = 0;
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        /* Prevent a stale seed from reaching a later interactive read. */
+        free(in->preseed);
+        in->preseed = NULL;
         size_t n;
         char *raw = read_line_canonical(&n);
         if (!raw)
@@ -1448,6 +1457,11 @@ char *input_readline(struct input *in, const char *prompt)
     in->len = 0;
     in->cursor = 0;
     in->buf[0] = '\0';
+    if (in->preseed) {
+        input_core_buf_set(in, in->preseed); /* cursor lands at the end */
+        free(in->preseed);
+        in->preseed = NULL;
+    }
     in->hist_pos = in->hist_n;
     free(in->draft);
     in->draft = NULL;

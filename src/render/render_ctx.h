@@ -82,8 +82,7 @@ struct render_ctx {
      * after a full extra turn. Reset per provider turn. */
     int stream_content_seen;
 
-    /* HAX_SHOW_REASONING — when 0, reasoning deltas drive only the
-     * spinner label; no RS_REASONING transition is taken. */
+    /* Whether reasoning deltas are rendered or only drive the spinner. */
     int show_reasoning;
 };
 

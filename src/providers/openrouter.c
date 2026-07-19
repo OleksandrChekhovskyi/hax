@@ -275,15 +275,6 @@ struct provider *openrouter_provider_new(const char *name)
     }
     headers[i] = NULL;
 
-    /* HAX_SHOW_REASONING also acts as a request-side opt-in here:
-     * many OpenRouter models gate CoT behind `reasoning.enabled=true`,
-     * so without this flag the deltas the user asked to see never
-     * arrive. When off, we fall back to the flat dialect so a plain
-     * `reasoning_effort` still reaches models that honor it. The same
-     * env var still gates the *display* side in the agent — provider
-     * opt-in alone doesn't render anything. */
-    int request_reasoning = config_bool("show_reasoning");
-
     struct openai_preset preset = {
         .display_name = "openrouter",
         .default_base_url = "https://openrouter.ai/api/v1",
@@ -292,7 +283,10 @@ struct provider *openrouter_provider_new(const char *name)
         .lock_base_url = 1,
         .request_cost = 1,
         .extra_headers = headers,
-        .reasoning_format = request_reasoning ? REASONING_NESTED : REASONING_FLAT,
+        /* The shared builder sends this object only when effort is set:
+         * NULL keeps the provider default and "none" disables reasoning.
+         * show_reasoning remains an independent display-only setting. */
+        .reasoning_format = REASONING_NESTED,
         /* OpenRouter normalizes the full OpenAI-style ladder across upstreams
          * and maps an unsupported level to the nearest one, so the whole
          * ladder is safe to offer. */

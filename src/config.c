@@ -15,143 +15,163 @@
 #include "util.h"
 #include "system/fs.h"
 
-/* The setting registry: the one place that knows a setting exists, which
- * env var binds it, its fixed default (NULL when the default is dynamic,
- * computed, or per-provider and the consumer supplies it), and a one-line
- * description (for help listings / a /config view). Adding a tunable means
- * adding a row here and reading it by its canonical key. Canonical keys
- * use '.' for grouping (openai.*, http.*, <provider>.*), which the file
- * can express as nested objects. Rows are grouped by area, and
- * config_settings() exposes them in this order — a help listing inherits
- * the grouping. Hand-aligned (clang-format off): key/env/default columns
- * on one line, description on the continuation line. */
+/* Canonical keys, env bindings, defaults, and /config metadata. Row order is
+ * user-visible. Runtime settings must be read live or refreshed after edits;
+ * numeric bounds are enforced by the typed getters. */
 // clang-format off
 static const struct config_setting REGISTRY[] = {
     /* selection */
-    {"preset",                     "HAX_PRESET",                  NULL,
-     "Preset from presets.<name> to apply at startup; empty disables"},
-    {"provider",                   "HAX_PROVIDER",                NULL,
-     "Backend: codex, openai, openai-compatible, anthropic, anthropic-compatible, "
-     "llama.cpp, ollama, openrouter, mock"},
-    {"model",                      "HAX_MODEL",                   NULL,
-     "Model id (provider-specific; some auto-fill or require it)"},
-    {"effort",                     "HAX_EFFORT",                  NULL,
-     "Reasoning effort (minimal/low/medium/high/xhigh); empty omits it"},
-    {"system_prompt",              "HAX_SYSTEM_PROMPT",           NULL,
-     "Override the built-in system prompt; empty sends no system message"},
-    {"no_env",                     "HAX_NO_ENV",                  NULL,
-     "Skip the Environment section in the system prompt"},
-    {"no_agents_md",               "HAX_NO_AGENTS_MD",            NULL,
-     "Skip AGENTS.md project instructions in the system prompt"},
-    {"no_skills",                  "HAX_NO_SKILLS",               NULL,
-     "Skip the skills listing in the system prompt"},
-    {"no_subagents",               "HAX_NO_SUBAGENTS",            NULL,
-     "Skip the subagents section in the system prompt"},
+    {.key = "preset", .env = "HAX_PRESET", .keep_empty = 1,
+     .desc = "Preset from presets.<name> to apply at startup; empty disables"},
+    {.key = "provider", .env = "HAX_PROVIDER", .keep_empty = 1,
+     .desc = "Backend: codex, openai, openai-compatible, anthropic, anthropic-compatible, "
+             "llama.cpp, ollama, openrouter, mock"},
+    {.key = "model", .env = "HAX_MODEL", .keep_empty = 1,
+     .desc = "Model id (provider-specific; some auto-fill or require it)"},
+    {.key = "effort", .env = "HAX_EFFORT", .keep_empty = 1,
+     .desc = "Reasoning effort (minimal/low/medium/high/xhigh); empty omits it"},
+    {.key = "system_prompt", .env = "HAX_SYSTEM_PROMPT", .keep_empty = 1,
+     .desc = "Override the built-in system prompt; empty sends no system message"},
+    {.key = "no_env", .env = "HAX_NO_ENV", .choices = CONFIG_CHOICES_BOOL,
+     .desc = "Skip the Environment section in the system prompt"},
+    {.key = "no_agents_md", .env = "HAX_NO_AGENTS_MD", .choices = CONFIG_CHOICES_BOOL,
+     .desc = "Skip AGENTS.md project instructions in the system prompt"},
+    {.key = "no_skills", .env = "HAX_NO_SKILLS", .choices = CONFIG_CHOICES_BOOL,
+     .desc = "Skip the skills listing in the system prompt"},
+    {.key = "no_subagents", .env = "HAX_NO_SUBAGENTS", .choices = CONFIG_CHOICES_BOOL,
+     .desc = "Skip the subagents section in the system prompt"},
 
     /* display */
-    {"markdown",                   "HAX_MARKDOWN",                "1",
-     "Render Markdown in the terminal (TTY only; piped output is always raw)"},
-    {"show_reasoning",             "HAX_SHOW_REASONING",          NULL,
-     "Show reasoning/CoT deltas live (default off)"},
-    {"sort_models",                "HAX_SORT_MODELS",             NULL,
-     "Sort the /model picker alphabetically (default depends on the provider)"},
-    {"context_limit",              "HAX_CONTEXT_LIMIT",           NULL,
-     "Manual context-window size for the % display (e.g. 256k); overrides auto-detect"},
-    {"display_width",              "HAX_DISPLAY_WIDTH",           NULL,
-     "Force content width in columns (default: terminal width, clamped)"},
-    {"notify",                     "HAX_NOTIFY",                  NULL,
-     "Desktop-notification style (auto-detected)"},
-    {"theme",                      "HAX_THEME",                   "auto",
-     "Color theme: auto, dark, light, ansi, off (auto detects from the terminal)"},
+    {.key = "markdown", .env = "HAX_MARKDOWN", .def = "1",
+     .desc = "Render Markdown in the terminal (TTY only; piped output is always raw)",
+     .choices = CONFIG_CHOICES_BOOL, .runtime = 1},
+    {.key = "show_reasoning", .env = "HAX_SHOW_REASONING",
+     .desc = "Show reasoning/CoT deltas live (default off)",
+     .choices = CONFIG_CHOICES_BOOL, .runtime = 1},
+    {.key = "sort_models", .env = "HAX_SORT_MODELS", .def = "auto",
+     .desc = "Sort the /model picker alphabetically; auto uses the provider's own default",
+     .choices = CONFIG_CHOICES_TRISTATE, .runtime = 1},
+    {.key = "context_limit", .env = "HAX_CONTEXT_LIMIT",
+     .desc = "Manual context-window size for the % display; overrides auto-detect",
+     .kind = CFG_SIZE, .runtime = 1},
+    {.key = "display_width", .env = "HAX_DISPLAY_WIDTH",
+     .desc = "Force content width in columns (default: terminal width, clamped)",
+     .kind = CFG_INT, .runtime = 1},
+    {.key = "notify", .env = "HAX_NOTIFY", .def = "auto",
+     .desc = "Desktop-notification style: auto, bel, osc9, off (auto detects from the terminal)",
+     .choices = "auto|bel|osc9|off", .runtime = 1},
+    {.key = "theme", .env = "HAX_THEME", .def = "auto",
+     .desc = "Color theme: auto, dark, light, ansi, off (auto detects from the terminal)",
+     .choices = "auto|dark|light|ansi|off", .runtime = 1},
 
     /* behavior */
-    {"keep_awake",                 "HAX_KEEP_AWAKE",              "1",
-     "Inhibit idle system sleep while a turn is running (display may still blank)"},
-    {"compact.auto",               "HAX_COMPACT_AUTO",            "1",
-     "Auto-summarize history when it nears the context window (manual /compact still works)"},
-    {"compact.threshold",          "HAX_COMPACT_THRESHOLD",       "85",
-     "Auto-compact when context usage reaches this percent of the window"},
-    {"max_turns",                  "HAX_MAX_TURNS",               NULL,
-     "Interactive: pause for confirmation after this many model round-trips per user turn"},
+    {.key = "keep_awake", .env = "HAX_KEEP_AWAKE", .def = "1",
+     .desc = "Inhibit idle system sleep while a turn is running (display may still blank)",
+     .choices = CONFIG_CHOICES_BOOL, .runtime = 1},
+    {.key = "compact.auto", .env = "HAX_COMPACT_AUTO", .def = "1",
+     .desc = "Auto-summarize history when it nears the context window "
+             "(manual /compact still works)",
+     .choices = CONFIG_CHOICES_BOOL, .runtime = 1},
+    {.key = "compact.threshold", .env = "HAX_COMPACT_THRESHOLD", .def = "85",
+     .desc = "Auto-compact when context usage reaches this percent of the window",
+     .kind = CFG_INT, .min = 1, .max = 100, .runtime = 1},
+    {.key = "max_turns", .env = "HAX_MAX_TURNS",
+     .desc = "Interactive: pause for confirmation after this many model round-trips per user turn",
+     .kind = CFG_INT, .runtime = 1},
 
     /* model catalog */
-    {"catalog.url",                "HAX_CATALOG_URL",             "https://models.dev/api.json",
-     "Model-metadata catalog endpoint (models.dev api.json shape); empty disables fetching"},
-    {"catalog.refresh",            "HAX_CATALOG_REFRESH",         "24h",
-     "Re-fetch the cached model catalog when older than this; 0 disables fetching"},
+    {.key = "catalog.url", .env = "HAX_CATALOG_URL", .def = "https://models.dev/api.json",
+     .keep_empty = 1,
+     .desc = "Model-metadata catalog endpoint (models.dev api.json shape); empty disables fetching"},
+    {.key = "catalog.refresh", .env = "HAX_CATALOG_REFRESH", .def = "24h",
+     .desc = "Re-fetch the cached model catalog when older than this; 0 disables fetching",
+     .kind = CFG_DURATION},
 
     /* recording */
-    {"no_session",                 "HAX_NO_SESSION",              NULL,
-     "Disable session recording when set truthy"},
-    {"transcript",                 "HAX_TRANSCRIPT",              NULL,
-     "Path to mirror the Ctrl-T transcript view"},
-    {"trace",                      "HAX_TRACE",                   NULL,
-     "Path to a wire-level HTTP/SSE trace dump"},
+    {.key = "no_session", .env = "HAX_NO_SESSION", .choices = CONFIG_CHOICES_BOOL,
+     .desc = "Disable session recording when set truthy"},
+    {.key = "transcript", .env = "HAX_TRANSCRIPT", .keep_empty = 1,
+     .desc = "Path to mirror the Ctrl-T transcript view; empty disables"},
+    {.key = "trace", .env = "HAX_TRACE", .keep_empty = 1,
+     .desc = "Path to a wire-level HTTP/SSE trace dump; empty disables"},
 
     /* tools */
-    {"tool_output_cap",            "HAX_TOOL_OUTPUT_CAP",         "50k",
-     "Max bytes captured from a tool's output"},
-    {"bash.timeout",               "HAX_BASH_TIMEOUT",            "2m",
-     "Default bash-tool command timeout; 0 disables"},
-    {"bash.timeout_max",           "HAX_BASH_TIMEOUT_MAX",        "30m",
-     "Ceiling on the model's per-call bash timeout; 0 disables"},
-    {"bash.timeout_grace",         "HAX_BASH_TIMEOUT_GRACE",      "2s",
-     "Grace window between SIGTERM and SIGKILL for bash commands; 0 skips"},
-    {"bash.shell",                 "HAX_BASH_SHELL",              NULL,
-     "Shell for the bash tool, a $PATH name or path (default: bash, else sh)"},
+    {.key = "tool_output_cap", .env = "HAX_TOOL_OUTPUT_CAP", .def = "50k",
+     .desc = "Max bytes captured from a tool's output",
+     .kind = CFG_SIZE, .runtime = 1},
+    {.key = "bash.timeout", .env = "HAX_BASH_TIMEOUT", .def = "2m",
+     .desc = "Default bash-tool command timeout; 0 disables",
+     .kind = CFG_DURATION, .runtime = 1},
+    {.key = "bash.timeout_max", .env = "HAX_BASH_TIMEOUT_MAX", .def = "30m",
+     .desc = "Ceiling on the model's per-call bash timeout; 0 disables",
+     .kind = CFG_DURATION, .runtime = 1},
+    {.key = "bash.timeout_grace", .env = "HAX_BASH_TIMEOUT_GRACE", .def = "2s",
+     .desc = "Grace window between SIGTERM and SIGKILL for bash commands; 0 skips",
+     .kind = CFG_DURATION, .runtime = 1},
+    {.key = "bash.shell", .env = "HAX_BASH_SHELL",
+     .desc = "Shell for the bash tool, a $PATH name or path (default: bash, else sh)"},
 
     /* http transport */
-    {"http.max_retries",           "HAX_HTTP_MAX_RETRIES",        "4",
-     "Additional retries for transient HTTP failures"},
-    {"http.retry_base",            "HAX_HTTP_RETRY_BASE",         "1s",
-     "Base backoff between HTTP retries"},
-    {"http.idle_timeout",          "HAX_HTTP_IDLE_TIMEOUT",       "10m",
-     "Silence on a streaming response before giving up; 0 disables"},
+    {.key = "http.max_retries", .env = "HAX_HTTP_MAX_RETRIES", .def = "4",
+     .desc = "Additional retries for transient HTTP failures",
+     .kind = CFG_INT, .max = 100, .runtime = 1},
+    {.key = "http.retry_base", .env = "HAX_HTTP_RETRY_BASE", .def = "1s",
+     .desc = "Base backoff between HTTP retries",
+     .kind = CFG_DURATION, .min = 1 /* ms: must be positive */, .runtime = 1},
+    {.key = "http.idle_timeout", .env = "HAX_HTTP_IDLE_TIMEOUT", .def = "10m",
+     .desc = "Silence on a streaming response before giving up; 0 disables",
+     .kind = CFG_DURATION, .runtime = 1},
 
     /* openai family (shared by the preset-based providers) */
-    {"openai.base_url",            "HAX_OPENAI_BASE_URL",         NULL,
-     "Base URL for the OpenAI-compatible endpoint"},
-    {"openai.api_key",             "HAX_OPENAI_API_KEY",          NULL,
-     "Bearer token for OpenAI-family providers"},
-    {"openai.reasoning_format",    "HAX_OPENAI_REASONING_FORMAT", NULL,
-     "Reasoning request dialect: flat or nested"},
-    {"openai.reasoning_roundtrip", "HAX_REASONING_ROUNDTRIP",     NULL,
-     "Replay reasoning text to the model (off/on, or a field name)"},
-    {"openai.send_cache_key",      "HAX_OPENAI_SEND_CACHE_KEY",   NULL,
-     "Send a stable prompt_cache_key (prefix-cache hint)"},
-    {"openai.request_cost",        "HAX_OPENAI_REQUEST_COST",     NULL,
-     "Request usage accounting (`usage: {include: true}`) for per-response cost"},
-    {"provider_name",              "HAX_PROVIDER_NAME",           NULL,
-     "Display name for the provider in the banner"},
+    {.key = "openai.base_url", .env = "HAX_OPENAI_BASE_URL",
+     .desc = "Base URL for the OpenAI-compatible endpoint"},
+    {.key = "openai.api_key", .env = "HAX_OPENAI_API_KEY", .secret = 1,
+     .desc = "Bearer token for OpenAI-family providers"},
+    {.key = "openai.reasoning_format", .env = "HAX_OPENAI_REASONING_FORMAT",
+     .desc = "Reasoning request dialect: flat or nested", .choices = "flat|nested"},
+    {.key = "openai.reasoning_roundtrip", .env = "HAX_REASONING_ROUNDTRIP", .keep_empty = 1,
+     .desc = "Replay reasoning text to the model (off/on, or a field name)"},
+    {.key = "openai.send_cache_key", .env = "HAX_OPENAI_SEND_CACHE_KEY", .choices = CONFIG_CHOICES_TRISTATE,
+     .desc = "Send a stable prompt_cache_key (prefix-cache hint); auto uses the provider default"},
+    {.key = "openai.request_cost", .env = "HAX_OPENAI_REQUEST_COST", .choices = CONFIG_CHOICES_TRISTATE,
+     .desc = "Request usage accounting (`usage: {include: true}`) for per-response cost; "
+             "auto uses the provider default"},
+    {.key = "provider_name", .env = "HAX_PROVIDER_NAME",
+     .desc = "Display name for the provider in the banner"},
 
     /* anthropic family (shared by the anthropic + anthropic-compatible providers) */
-    {"anthropic.base_url",         "HAX_ANTHROPIC_BASE_URL",      NULL,
-     "Base URL for an Anthropic-compatible /v1 endpoint (anthropic-compatible)"},
-    {"anthropic.api_key",          "HAX_ANTHROPIC_API_KEY",       NULL,
-     "x-api-key token for Anthropic-family providers"},
-    {"anthropic.max_tokens",       "HAX_ANTHROPIC_MAX_TOKENS",    "32000",
-     "Max output tokens (thinking + text) per response"},
-    {"anthropic.thinking_mode",    "HAX_ANTHROPIC_THINKING_MODE", NULL,
-     "Thinking mode: adaptive, budget, or off (default depends on the provider)"},
-    {"anthropic.thinking_budget",  "HAX_ANTHROPIC_THINKING_BUDGET", NULL,
-     "Budget-mode thinking tokens (default: max_tokens - 1)"},
-    {"anthropic.cache",            "HAX_ANTHROPIC_CACHE",         NULL,
-     "Send prompt cache_control breakpoints (default depends on the provider)"},
-    {"anthropic.cache_ttl",        "HAX_ANTHROPIC_CACHE_TTL",     "1h",
-     "Cache breakpoint TTL: 5m or 1h (1h suits an interactive agent's pauses)"},
-    {"anthropic.version",          "HAX_ANTHROPIC_VERSION",       "2023-06-01",
-     "anthropic-version request header value"},
+    {.key = "anthropic.base_url", .env = "HAX_ANTHROPIC_BASE_URL",
+     .desc = "Base URL for an Anthropic-compatible /v1 endpoint (anthropic-compatible)"},
+    {.key = "anthropic.api_key", .env = "HAX_ANTHROPIC_API_KEY", .secret = 1,
+     .desc = "x-api-key token for Anthropic-family providers"},
+    {.key = "anthropic.max_tokens", .env = "HAX_ANTHROPIC_MAX_TOKENS", .def = "32000",
+     .desc = "Max output tokens (thinking + text) per response",
+     .kind = CFG_INT, .min = 1},
+    {.key = "anthropic.thinking_mode", .env = "HAX_ANTHROPIC_THINKING_MODE",
+     .desc = "Thinking mode: adaptive, budget, or off (default depends on the provider)",
+     .choices = "adaptive|budget|off"},
+    {.key = "anthropic.thinking_budget", .env = "HAX_ANTHROPIC_THINKING_BUDGET",
+     .desc = "Budget-mode thinking tokens (default: max_tokens - 1)",
+     .kind = CFG_INT, .min = 1},
+    {.key = "anthropic.cache", .env = "HAX_ANTHROPIC_CACHE", .choices = CONFIG_CHOICES_TRISTATE,
+     .desc = "Send prompt cache_control breakpoints; auto uses the provider default"},
+    {.key = "anthropic.cache_ttl", .env = "HAX_ANTHROPIC_CACHE_TTL", .def = "1h",
+     .desc = "Cache breakpoint TTL: 5m or 1h (1h suits an interactive agent's pauses)",
+     .choices = "5m|1h"},
+    {.key = "anthropic.version", .env = "HAX_ANTHROPIC_VERSION", .def = "2023-06-01",
+     .desc = "anthropic-version request header value"},
 
     /* per-provider */
-    {"llamacpp.port",              "HAX_LLAMACPP_PORT",           "8080",
-     "Port for the local llama-server (when openai.base_url is unset)"},
-    {"openrouter.title",           "HAX_OPENROUTER_TITLE",        "hax",
-     "X-Title header for OpenRouter attribution (empty disables)"},
-    {"openrouter.referer",         "HAX_OPENROUTER_REFERER",
-     "https://github.com/OleksandrChekhovskyi/hax",
-     "HTTP-Referer header for OpenRouter attribution (empty disables)"},
-    {"mock.script",                "HAX_MOCK_SCRIPT",             NULL,
-     "Path to a mock-provider script (mock provider only)"},
+    {.key = "llamacpp.port", .env = "HAX_LLAMACPP_PORT", .def = "8080",
+     .desc = "Port for the local llama-server (when openai.base_url is unset)",
+     .kind = CFG_INT, .min = 1, .max = 65535},
+    {.key = "openrouter.title", .env = "HAX_OPENROUTER_TITLE", .def = "hax", .keep_empty = 1,
+     .desc = "X-Title header for OpenRouter attribution (empty disables)"},
+    {.key = "openrouter.referer", .env = "HAX_OPENROUTER_REFERER",
+     .def = "https://github.com/OleksandrChekhovskyi/hax", .keep_empty = 1,
+     .desc = "HTTP-Referer header for OpenRouter attribution (empty disables)"},
+    {.key = "mock.script", .env = "HAX_MOCK_SCRIPT",
+     .desc = "Path to a mock-provider script (mock provider only)"},
 };
 // clang-format on
 
@@ -168,6 +188,11 @@ const struct config_setting *config_settings(size_t *n)
 {
     *n = sizeof(REGISTRY) / sizeof(REGISTRY[0]);
     return REGISTRY;
+}
+
+const struct config_setting *config_setting_find(const char *key)
+{
+    return find_setting(key);
 }
 
 /* File tier (parsed config.json), state tier (parsed state.json — the
@@ -434,29 +459,61 @@ static const char *apply_sentinel(const char *v, const struct config_setting *s)
     return v;
 }
 
+/* Resolve a value and optionally its winning tier. "default" covers both a
+ * registry default and no value; a sentinel reports the tier that holds it. */
+static const char *resolve_src(const char *key, int skip_empty, const char **src)
+{
+    const char *from = "default";
+    const struct config_setting *s = find_setting(key);
+    const char *v = NULL;
+    const char *o = json_string_value(json_object_get(g_overrides, key));
+    if (o && (!skip_empty || *o)) {
+        v = apply_sentinel(o, s);
+        from = "session";
+    } else {
+        const char *e = s ? getenv(s->env) : NULL;
+        const char *sel = state_get(key);
+        const char *f = file_get(key);
+        if (e && (!skip_empty || *e)) {
+            v = apply_sentinel(e, s);
+            from = "env";
+        } else if (sel && (!skip_empty || *sel) && binding_allows(g_state, key)) {
+            v = apply_sentinel(sel, s);
+            from = "state";
+        } else if (f && (!skip_empty || *f) && binding_allows(g_config, key)) {
+            v = apply_sentinel(f, s);
+            from = "config";
+        } else {
+            v = s ? s->def : NULL;
+        }
+    }
+    if (src)
+        *src = from;
+    return v;
+}
+
 static const char *resolve(const char *key, int skip_empty)
 {
-    const struct config_setting *s = find_setting(key);
-    const char *o = json_string_value(json_object_get(g_overrides, key));
-    if (o && (!skip_empty || *o))
-        return apply_sentinel(o, s);
-    if (s) {
-        const char *e = getenv(s->env);
-        if (e && (!skip_empty || *e))
-            return apply_sentinel(e, s);
-    }
-    const char *sel = state_get(key);
-    if (sel && (!skip_empty || *sel) && binding_allows(g_state, key))
-        return apply_sentinel(sel, s);
-    const char *f = file_get(key);
-    if (f && (!skip_empty || *f) && binding_allows(g_config, key))
-        return apply_sentinel(f, s);
-    return s ? s->def : NULL;
+    return resolve_src(key, skip_empty, NULL);
+}
+
+/* Registered settings skip empty tiers unless explicitly marked otherwise;
+ * unknown dynamic keys preserve them. */
+static int config_skips_empty(const struct config_setting *s)
+{
+    return s && !s->keep_empty;
 }
 
 const char *config_str(const char *key)
 {
-    return resolve(key, 0);
+    return resolve(key, config_skips_empty(find_setting(key)));
+}
+
+const char *config_source(const char *key)
+{
+    const char *src;
+    resolve_src(key, config_skips_empty(find_setting(key)), &src);
+    return src;
 }
 
 const char *config_str_nonempty(const char *key)
@@ -491,21 +548,27 @@ size_t config_object_keys(const char *key, char ***out)
     return n;
 }
 
-/* The typed getters resolve skip-empty (resolve() already lands on the
- * registry default when every tier is unset or empty) and additionally
- * fall back to the registry default when the resolved value fails to
- * parse — a typo'd duration must not silently read as "0" and e.g.
- * disable a timeout. */
+/* Typed getters skip empty values and fall back to registry defaults on parse
+ * or bounds failures. Bounds use the setting's native unit; zero is unbounded. */
+static int in_bounds(const struct config_setting *s, long v)
+{
+    if (!s)
+        return 1;
+    if (s->min && v < s->min)
+        return 0;
+    if (s->max && v > s->max)
+        return 0;
+    return 1;
+}
 
 int config_int(const char *key)
 {
-    int v;
-    /* Negative values read as invalid: every int setting is a count or
-     * width, so "-1" is a typo, not a meaning — it must not be silently
-     * honored as something else (e.g. "no retries"). */
-    if (parse_int(resolve(key, 1), &v) && v >= 0)
-        return v;
     const struct config_setting *s = find_setting(key);
+    int v;
+    /* Negative values are invalid: every integer setting is a count or width.
+     * Bounds fail the same way, so consumers need not re-check them. */
+    if (parse_int(resolve(key, 1), &v) && v >= 0 && in_bounds(s, v))
+        return v;
     return s && parse_int(s->def, &v) ? v : 0;
 }
 
@@ -542,24 +605,121 @@ int config_bool_or(const char *key, int def)
     return v < 0 ? !!def : v;
 }
 
+int config_value_valid(const struct config_setting *s, const char *val)
+{
+    if (!s || !val)
+        return 0;
+    if (!s->choices) {
+        switch (s->kind) {
+        case CFG_INT: {
+            int v;
+            return parse_int(val, &v) && v >= 0 && in_bounds(s, v);
+        }
+        case CFG_SIZE: {
+            long v = parse_size(val);
+            return v > 0 && in_bounds(s, v);
+        }
+        case CFG_DURATION: {
+            long v = parse_duration_ms(val);
+            return v >= 0 && in_bounds(s, v);
+        }
+        case CFG_STRING:
+            return 1;
+        }
+        return 1;
+    }
+    /* Boolean choices accept the full config_bool grammar. Tri-state adds an
+     * "auto" literal on top (unset/auto defers to the consumer's own default),
+     * so on/off keep the same lenient spelling whether or not auto is present. */
+    if (strcmp(s->choices, CONFIG_CHOICES_BOOL) == 0)
+        return parse_bool(val) >= 0;
+    if (strcmp(s->choices, CONFIG_CHOICES_TRISTATE) == 0)
+        return strcasecmp(val, "auto") == 0 || parse_bool(val) >= 0;
+    const char *p = s->choices;
+    size_t vlen = strlen(val);
+    for (;;) {
+        const char *bar = strchr(p, '|');
+        size_t n = bar ? (size_t)(bar - p) : strlen(p);
+        if (n == vlen && strncasecmp(p, val, n) == 0)
+            return 1;
+        if (!bar)
+            return 0;
+        p = bar + 1;
+    }
+}
+
+void config_value_hint(const struct config_setting *s, char *buf, size_t n)
+{
+    if (n == 0)
+        return;
+    buf[0] = '\0';
+    if (!s)
+        return;
+    if (s->choices) {
+        snprintf(buf, n, "%s", s->choices);
+        return;
+    }
+    switch (s->kind) {
+    case CFG_INT:
+        if (s->min && s->max)
+            snprintf(buf, n, "a whole number from %ld to %ld", s->min, s->max);
+        else if (s->max)
+            snprintf(buf, n, "a whole number up to %ld", s->max);
+        else if (s->min)
+            snprintf(buf, n, "a whole number of at least %ld", s->min);
+        else
+            snprintf(buf, n, "a whole number");
+        break;
+    case CFG_SIZE:
+        snprintf(buf, n, "a size like 64k or 1M");
+        break;
+    case CFG_DURATION:
+        snprintf(buf, n, "a duration like 2s or 500ms");
+        break;
+    case CFG_STRING:
+        break;
+    }
+}
+
+char *config_value_canonical(const struct config_setting *s, const char *val)
+{
+    /* Only strict enums need this; booleans and free-form values are parsed
+     * directly at their point of use. */
+    if (!s || !val || !s->choices || strcmp(s->choices, CONFIG_CHOICES_BOOL) == 0)
+        return NULL;
+    const char *p = s->choices;
+    size_t vlen = strlen(val);
+    for (;;) {
+        const char *bar = strchr(p, '|');
+        size_t n = bar ? (size_t)(bar - p) : strlen(p);
+        if (n == vlen && strncasecmp(p, val, n) == 0) {
+            char *out = xmalloc(n + 1);
+            memcpy(out, p, n);
+            out[n] = '\0';
+            return out;
+        }
+        if (!bar)
+            return NULL;
+        p = bar + 1;
+    }
+}
+
 long config_size(const char *key)
 {
+    const struct config_setting *s = find_setting(key);
     long v = parse_size(resolve(key, 1)); /* NULL-safe; 0 = unset or invalid */
-    if (v == 0) {
-        const struct config_setting *s = find_setting(key);
-        if (s)
-            v = parse_size(s->def);
-    }
-    return v;
+    if (v > 0 && in_bounds(s, v))
+        return v;
+    return s ? parse_size(s->def) : 0;
 }
 
 long config_duration_ms(const char *key)
 {
+    const struct config_setting *s = find_setting(key);
     long v = parse_duration_ms(resolve(key, 1)); /* NULL-safe; -1 = unset or invalid */
-    if (v < 0) {
-        const struct config_setting *s = find_setting(key);
-        v = s ? parse_duration_ms(s->def) : -1;
-    }
+    if (v >= 0 && in_bounds(s, v))
+        return v;
+    v = s ? parse_duration_ms(s->def) : -1;
     return v < 0 ? 0 : v;
 }
 

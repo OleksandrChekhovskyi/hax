@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "config.h"
 #include "openai_events.h"
@@ -218,12 +219,37 @@ enum reasoning_format reasoning_format_parse(const char *s, enum reasoning_forma
 {
     if (!s || !*s)
         return fallback;
-    if (strcmp(s, "flat") == 0)
+    if (strcasecmp(s, "flat") == 0)
         return REASONING_FLAT;
-    if (strcmp(s, "nested") == 0)
+    if (strcasecmp(s, "nested") == 0)
         return REASONING_NESTED;
     hax_warn("unknown reasoning format %s (expected 'flat' or 'nested') — using default", s);
     return fallback;
+}
+
+void openai_apply_reasoning(json_t *body, enum reasoning_format fmt, const char *effort)
+{
+    /* Empty counts as unset (the "empty omits effort" contract): both dialects
+     * then omit the field, leaving the provider's own default. */
+    if (!effort || !*effort)
+        return;
+    switch (fmt) {
+    case REASONING_FLAT:
+        json_object_set_new(body, "reasoning_effort", json_string(effort));
+        break;
+    case REASONING_NESTED: {
+        /* Nested `reasoning` object. `enabled` is the explicit on/off gate some
+         * routers need to (de)activate reasoning: "none" sends enabled:false to
+         * disable, any real effort sends enabled:true and passes the level
+         * through. */
+        int on = strcmp(effort, "none") != 0;
+        json_t *r = json_pack("{s:b}", "enabled", on);
+        if (on)
+            json_object_set_new(r, "effort", json_string(effort));
+        json_object_set_new(body, "reasoning", r);
+        break;
+    }
+    }
 }
 
 static char *build_body(const struct context *ctx, const char *provider, const char *model,
@@ -265,22 +291,7 @@ static char *build_body(const struct context *ctx, const char *provider, const c
     if (request_cost)
         json_object_set_new(body, "usage", json_pack("{s:b}", "include", 1));
 
-    switch (reasoning) {
-    case REASONING_FLAT:
-        if (ctx->effort)
-            json_object_set_new(body, "reasoning_effort", json_string(ctx->effort));
-        break;
-    case REASONING_NESTED: {
-        /* `enabled: true` is the opt-in some routers need to wake CoT
-         * emission on models that otherwise stay silent. Effort
-         * piggybacks in the same object when set. */
-        json_t *r = json_pack("{s:b}", "enabled", 1);
-        if (ctx->effort)
-            json_object_set_new(r, "effort", json_string(ctx->effort));
-        json_object_set_new(body, "reasoning", r);
-        break;
-    }
-    }
+    openai_apply_reasoning(body, reasoning, ctx->effort);
 
     char *s = json_dumps(body, JSON_COMPACT);
     json_decref(body);

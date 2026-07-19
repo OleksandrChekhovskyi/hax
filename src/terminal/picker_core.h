@@ -26,6 +26,8 @@ struct picker_state {
     size_t sel; /* offset into filtered[] of the highlighted row */
     size_t top; /* offset into filtered[] of the first visible row */
     int viewport;
+    /* Fixed footer height; 0 when no item has a description. */
+    int footer_lines;
     struct buf query;
 
     int painted;   /* a paint has happened (so we can reposition over it) */

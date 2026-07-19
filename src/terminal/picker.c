@@ -27,6 +27,9 @@
  * list; the window scrolls to keep the selection in view past this. */
 #define PICKER_MAX_ROWS 12
 
+/* Ceiling on the desc footer's wrapped lines; longer text gets an ellipsis. */
+#define PICKER_FOOTER_LINES 3
+
 /* ---------------- terminal geometry ---------------- */
 
 static void term_size(int *cols, int *rows)
@@ -170,6 +173,85 @@ static void append_clip(struct buf *out, const char *s, int max_cells, int *used
     *used = cells;
 }
 
+/* Width of `s` as append_clip would render it without a cell limit. */
+static int clip_width(const char *s)
+{
+    size_t len = strlen(s);
+    size_t line_end = len;
+    for (size_t k = 0; k < len; k++) {
+        if (s[k] == '\n' || s[k] == '\r') {
+            line_end = k;
+            break;
+        }
+    }
+    int cells = 0;
+    for (size_t i = 0; i < line_end;) {
+        size_t cons;
+        int w = utf8_codepoint_cells(s, line_end, i, &cons);
+        cells += w < 0 ? 1 : w;
+        i += cons ? cons : 1;
+    }
+    return cells + (line_end < len ? 1 : 0);
+}
+
+/* Return bytes for the next line, preferring a space before `width` cells.
+ * `skip` receives the separator bytes to discard. */
+static size_t wrap_line(const char *s, int width, size_t *skip)
+{
+    size_t len = strlen(s);
+    size_t i = 0, last_space = 0;
+    int cells = 0;
+    while (i < len) {
+        size_t cons;
+        int w = utf8_codepoint_cells(s, len, i, &cons);
+        int cw = w < 0 ? 1 : w;
+        if (cells + cw > width)
+            break;
+        if (s[i] == ' ')
+            last_space = i;
+        cells += cw;
+        i += cons ? cons : 1;
+    }
+    if (i >= len) {
+        *skip = 0;
+        return len;
+    }
+    if (last_space > 0) {
+        *skip = 1;
+        return last_space;
+    }
+    *skip = 0;
+    return i;
+}
+
+/* Wrapped footer height, capped at `cap`; 0 for no description. */
+static int desc_lines(const char *desc, int width, int cap)
+{
+    if (!desc || !desc[0])
+        return 0;
+    const char *p = desc;
+    int lines = 0;
+    while (*p && lines < cap) {
+        size_t skip;
+        size_t nb = wrap_line(p, width, &skip);
+        p += nb + skip;
+        lines++;
+    }
+    return lines;
+}
+
+/* Footer text width after its indent and right margin. Clamped to the content
+ * display width so the description prose wraps at the same column as the rest
+ * of the app rather than stretching across a wide terminal. */
+static int footer_width(int cols)
+{
+    int dw = display_width();
+    if (dw < cols)
+        cols = dw;
+    int w = cols - MARKER_CELLS - 1;
+    return w < 8 ? 8 : w;
+}
+
 /* Copy one built row to `out`, passing ANSI escape sequences through at zero
  * width while clipping visible content to `cols` cells. This is the single
  * backstop that guarantees no painted row wraps — a wrapped row would desync
@@ -271,15 +353,8 @@ static void render_search(struct buf *out, const struct picker_state *s, int col
     }
 }
 
-/* A row is `label [ ✓ current ] [ <sep> detail ]` after the marker column:
- * the ok-colored "current" tag marks persistent state (deliberately
- * distinct from the moving accent highlight), then the dim detail text, close to
- * the label rather than flush-right. On a dim row the detail is a failure
- * reason and its separator becomes a spaced dash so the reason reads as an
- * annotation instead of blurring into the equally-dim label. The tag and
- * separator have fixed widths (measured on the ASCII variants — same cell
- * counts as their UTF-8 twins); the detail may take at most half the row;
- * the label is clipped to what remains. */
+/* Render `label [ ✓ current ] [ detail ]`. Detail uses remaining width; if
+ * both fields overflow, the label keeps at least half the available row. */
 static void render_row(struct buf *out, const struct picker_state *s, size_t fi, int selected,
                        int cols, int utf8)
 {
@@ -300,17 +375,22 @@ static void render_row(struct buf *out, const struct picker_state *s, size_t fi,
     const char *sep = it->dim ? (utf8 ? " \xe2\x80\x93 " : " - ") : "  "; /* – */
     int sep_cells = (int)strlen(it->dim ? " - " : "  ");
 
+    const char *label = it->label ? it->label : "";
+    int avail = row_cells - tag_cells;
+    int label_cells = avail;
+
     struct buf detail;
     buf_init(&detail);
     int detail_cells = 0;
     if (it->detail && it->detail[0]) {
-        int detail_max = row_cells / 2;
-        if (detail_max < 1)
-            detail_max = 1;
-        append_clip(&detail, it->detail, detail_max, &detail_cells, utf8);
+        int lbl_nat = clip_width(label);
+        int lbl_room = avail - sep_cells - clip_width(it->detail);
+        label_cells = avail / 2 > lbl_room ? avail / 2 : lbl_room;
+        if (lbl_nat < label_cells)
+            label_cells = lbl_nat;
+        append_clip(&detail, it->detail, avail - label_cells - sep_cells, &detail_cells, utf8);
     }
 
-    int label_cells = row_cells - tag_cells - (detail_cells ? sep_cells + detail_cells : 0);
     if (label_cells < 1)
         label_cells = 1;
     int label_used = 0;
@@ -321,7 +401,7 @@ static void render_row(struct buf *out, const struct picker_state *s, size_t fi,
         buf_append_str(out, ANSI_DIM);
     else if (selected)
         buf_append_str(out, ANSI_BOLD);
-    append_clip(out, it->label ? it->label : "", label_cells, &label_used, utf8);
+    append_clip(out, label, label_cells, &label_used, utf8);
     if (it->dim || selected)
         buf_append_str(out, ANSI_BOLD_OFF);
 
@@ -340,85 +420,133 @@ static void render_row(struct buf *out, const struct picker_state *s, size_t fi,
     buf_free(&detail);
 }
 
+/* Buffers and geometry for one picker repaint. */
+struct frame {
+    struct buf out; /* the whole escape-sequence frame, flushed in one write */
+    struct buf row; /* scratch for the row currently being built */
+    int rows;       /* rows emitted so far (the cursor parks on the last) */
+    int cols;
+    int utf8;
+};
+
+static void frame_init(struct frame *f, int cols, int utf8)
+{
+    buf_init(&f->out);
+    buf_init(&f->row);
+    f->rows = 0;
+    f->cols = cols;
+    f->utf8 = utf8;
+}
+
+/* Emit one clipped physical line and reset the row buffer. */
+static void frame_emit(struct frame *f)
+{
+    if (f->rows)
+        buf_append_str(&f->out, "\r\n");
+    f->rows++;
+    emit_line_clipped(&f->out, f->row.data ? f->row.data : "", f->row.len, f->cols, f->utf8);
+    buf_append_str(&f->out, ANSI_ERASE_LINE);
+    buf_reset(&f->row);
+}
+
+static void frame_free(struct frame *f)
+{
+    buf_free(&f->out);
+    buf_free(&f->row);
+}
+
+/* Render the selected item's description in a fixed-height footer so the
+ * frame does not move as selection changes. */
+static void render_footer(struct frame *f, const struct picker_state *s)
+{
+    if (s->footer_lines <= 0)
+        return;
+    frame_emit(f); /* blank line between the list and the footer */
+    const char *desc = s->n_filtered ? s->opts->items[s->filtered[s->sel]].desc : NULL;
+    int width = footer_width(f->cols);
+    const char *p = desc && desc[0] ? desc : "";
+    for (int line = 0; line < s->footer_lines; line++) {
+        if (*p) {
+            buf_append_str(&f->row, ANSI_DIM "  ");
+            if (line == s->footer_lines - 1) {
+                /* Clip the remainder with an ellipsis on the final line. */
+                int used = 0;
+                append_clip(&f->row, p, width, &used, f->utf8);
+                p += strlen(p);
+            } else {
+                size_t skip;
+                size_t nb = wrap_line(p, width, &skip);
+                buf_append(&f->row, p, nb);
+                p += nb + skip;
+            }
+            buf_append_str(&f->row, ANSI_BOLD_OFF);
+        }
+        frame_emit(f); /* empty when the desc ran out — pads to fixed height */
+    }
+}
+
 static void paint(struct picker_state *s)
 {
     int cols, rows;
     term_size(&cols, &rows);
     (void)rows;
-    int utf8 = locale_have_utf8();
 
-    struct buf out, row;
-    buf_init(&out);
-    buf_init(&row);
+    struct frame f;
+    frame_init(&f, cols, locale_have_utf8());
 
     /* The whole frame is one fwrite already; wrap it in synchronized output
      * (DEC 2026) too. Redraw before erasing stale tails so terminals or tmux
      * setups that ignore synchronized output don't show a blank picker between
      * frames. */
-    buf_append_str(&out, ANSI_SYNC_BEGIN);
+    buf_append_str(&f.out, ANSI_SYNC_BEGIN);
 
     /* Climb to the top of the prior paint. Stale content is cleared after
      * each redrawn row and below the final row. */
     if (s->painted && s->prev_rows > 1) {
         char up[16];
         snprintf(up, sizeof up, "\x1b[%dA", s->prev_rows - 1);
-        buf_append_str(&out, up);
+        buf_append_str(&f.out, up);
     }
     if (s->painted)
-        buf_append(&out, "\r", 1);
-
-    /* Each logical row is built into `row`, then flushed via the clipping
-     * backstop, tail-cleared, and joined with a leading CR/LF before all but
-     * the first — so the cursor parks on the final row, which the reposition
-     * math above and the exit erase both key off. */
-    int painted_rows = 0;
-#define EMIT_ROW()                                                                                 \
-    do {                                                                                           \
-        if (painted_rows)                                                                          \
-            buf_append_str(&out, "\r\n");                                                          \
-        painted_rows++;                                                                            \
-        emit_line_clipped(&out, row.data ? row.data : "", row.len, cols, utf8);                    \
-        buf_append_str(&out, ANSI_ERASE_LINE);                                                     \
-        buf_reset(&row);                                                                           \
-    } while (0)
+        buf_append(&f.out, "\r", 1);
 
     if (s->opts->title) {
-        buf_append_str(&row, ANSI_BOLD);
-        buf_append_str(&row, s->opts->title);
-        buf_append_str(&row, ANSI_BOLD_OFF);
-        EMIT_ROW();
-        EMIT_ROW(); /* blank line between the title and the search field */
+        buf_append_str(&f.row, ANSI_BOLD);
+        buf_append_str(&f.row, s->opts->title);
+        buf_append_str(&f.row, ANSI_BOLD_OFF);
+        frame_emit(&f);
+        frame_emit(&f); /* blank line between the title and the search field */
     }
 
-    render_search(&row, s, cols, utf8);
-    EMIT_ROW();
+    render_search(&f.row, s, f.cols, f.utf8);
+    frame_emit(&f);
 
-    EMIT_ROW(); /* blank line between the search field and the list */
+    frame_emit(&f); /* blank line between the search field and the list */
 
     if (s->n_filtered == 0) {
-        buf_append_str(&row, ANSI_DIM "  (no matches)" ANSI_BOLD_OFF);
-        EMIT_ROW();
+        buf_append_str(&f.row, ANSI_DIM "  (no matches)" ANSI_BOLD_OFF);
+        frame_emit(&f);
     } else {
         size_t end = s->top + (size_t)s->viewport;
         if (end > s->n_filtered)
             end = s->n_filtered;
         for (size_t fi = s->top; fi < end; fi++) {
-            render_row(&row, s, fi, fi == s->sel, cols, utf8);
-            EMIT_ROW();
+            render_row(&f.row, s, fi, fi == s->sel, f.cols, f.utf8);
+            frame_emit(&f);
         }
     }
-#undef EMIT_ROW
 
-    buf_append_str(&out, ANSI_ERASE_BELOW);
-    buf_append_str(&out, ANSI_SYNC_END);
+    render_footer(&f, s);
 
-    buf_free(&row);
-    fwrite(out.data ? out.data : "", 1, out.len, stdout);
+    buf_append_str(&f.out, ANSI_ERASE_BELOW);
+    buf_append_str(&f.out, ANSI_SYNC_END);
+
+    fwrite(f.out.data ? f.out.data : "", 1, f.out.len, stdout);
     fflush(stdout);
-    buf_free(&out);
 
-    s->prev_rows = painted_rows;
+    s->prev_rows = f.rows;
     s->painted = 1;
+    frame_free(&f);
 }
 
 /* ---------------- public entry ---------------- */
@@ -441,11 +569,17 @@ long picker_run(const struct picker_opts *opts)
 
     int cols, rows;
     term_size(&cols, &rows);
-    (void)cols;
-    /* Reserve the chrome rows so the list doesn't run off the bottom:
-     * optional title + its trailing blank, the search field + its trailing
-     * blank, and one row of breathing space. */
+    /* Keep footer height stable across selections. */
+    int fw = footer_width(cols);
+    for (size_t i = 0; i < opts->n; i++) {
+        int d = desc_lines(opts->items[i].desc, fw, PICKER_FOOTER_LINES);
+        if (d > s.footer_lines)
+            s.footer_lines = d;
+    }
+    /* Reserve title, search, spacing, and footer rows from the viewport. */
     int reserved = (opts->title ? 2 : 0) + 2 + 1;
+    if (s.footer_lines > 0)
+        reserved += s.footer_lines + 1;
     int vp = rows - reserved;
     if (vp < 1)
         vp = 1;

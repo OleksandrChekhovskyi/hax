@@ -213,7 +213,9 @@ string to disable attribution entirely.
 
 For the context percentage, hax probes
 `/api/v1/models/<model>/endpoints` and uses the largest returned `context_length`.
-`HAX_SHOW_REASONING=1` both requests OpenRouter reasoning output and shows reasoning deltas.
+Reasoning is requested when a reasoning effort is selected (`/effort` or `HAX_EFFORT`), which
+wakes chain-of-thought on models that gate it; `HAX_SHOW_REASONING=1` only controls whether the
+resulting deltas are shown live.
 
 OpenRouter reports per-response cost, which feeds the spend figure on the stats line and in
 `/session`. OpenRouter also supports `/usage`, showing the API key's total spend, the account's

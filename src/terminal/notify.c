@@ -19,14 +19,6 @@ enum method {
     M_OSC9,
 };
 
-static int env_truthy_off(const char *v)
-{
-    if (!v || !*v)
-        return 0;
-    return strcmp(v, "0") == 0 || strcasecmp(v, "off") == 0 || strcasecmp(v, "false") == 0 ||
-           strcasecmp(v, "no") == 0;
-}
-
 /* Identify the host terminal from the usual env breadcrumbs. We only
  * need to distinguish "supports OSC 9" from "doesn't" — anything we
  * can't positively identify falls back to BEL, which every terminal
@@ -56,11 +48,10 @@ static enum method resolve_method(void)
     if (!isatty(fileno(stdout)))
         return M_DISABLED;
 
-    /* Explicit user choice wins over the auto-detect heuristics so
-     * `HAX_NOTIFY=bel|osc9` actually forces the method (as the header
-     * advertises). The dumb-terminal opt-out below is auto-only. */
+    /* Explicit methods override detection; "auto", unset, and unknown values
+     * use the heuristics below. The dumb-terminal opt-out is auto-only. */
     const char *cfg = config_str("notify");
-    if (env_truthy_off(cfg))
+    if (cfg && strcasecmp(cfg, "off") == 0)
         return M_DISABLED;
     if (cfg && strcasecmp(cfg, "bel") == 0)
         return M_BEL;
@@ -102,9 +93,8 @@ static void emit_osc9(void)
 
 void notify_attention(void)
 {
-    static enum method m = M_UNRESOLVED;
-    if (m == M_UNRESOLVED)
-        m = resolve_method();
+    /* Resolve per call so runtime changes apply immediately. */
+    enum method m = resolve_method();
 
     switch (m) {
     case M_DISABLED:

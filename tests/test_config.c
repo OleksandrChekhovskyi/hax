@@ -141,6 +141,24 @@ static void test_default_on_unset_and_invalid(void)
     EXPECT_STR_EQ(config_default("llamacpp.port"), "8080");
     EXPECT(config_default("model") == NULL);
     EXPECT(config_default("no.such.key") == NULL);
+
+    /* Registry bounds are enforced by the typed getters, so an out-of-range
+     * value falls back to the default just like a parse failure — consumers
+     * read the resolved value without re-clamping. */
+    EXPECT(config_load("{\"compact\": {\"threshold\": \"50\"}}") == 0);
+    EXPECT(config_int("compact.threshold") == 50); /* in [1,100] */
+    EXPECT(config_load("{\"compact\": {\"threshold\": \"200\"}}") == 0);
+    EXPECT(config_int("compact.threshold") == 85); /* above max → default */
+    EXPECT(config_load("{\"compact\": {\"threshold\": \"0\"}}") == 0);
+    EXPECT(config_int("compact.threshold") == 85); /* below min → default */
+    EXPECT(config_load("{\"http\": {\"retry_base\": \"250ms\"}}") == 0);
+    EXPECT(config_duration_ms("http.retry_base") == 250);
+    EXPECT(config_load("{\"http\": {\"retry_base\": \"0\"}}") == 0);
+    EXPECT(config_duration_ms("http.retry_base") == 1000); /* 0 < min → 1s default */
+    EXPECT(config_load("{\"http\": {\"max_retries\": \"50\"}}") == 0);
+    EXPECT(config_int("http.max_retries") == 50);
+    EXPECT(config_load("{\"http\": {\"max_retries\": \"1000\"}}") == 0);
+    EXPECT(config_int("http.max_retries") == 4); /* above max 100 → default */
 }
 
 static void test_env_wins_over_file(void)
@@ -177,9 +195,14 @@ static void test_empty_means_unset(void)
     EXPECT_STR_EQ(config_str_nonempty("llamacpp.port"), "8080");
     EXPECT(config_duration_ms("bash.timeout") == 120 * 1000);
     EXPECT(config_bool("show_reasoning") == 0);
-    /* config_str itself stays verbatim — see test_env_wins_over_file. */
-    const char *e = config_str("llamacpp.port");
-    EXPECT(e != NULL && *e == '\0');
+    /* config_str applies the same policy now: an empty tier is skipped for a
+     * setting where "" has no meaning, so the port reads its default rather
+     * than a blank string. */
+    EXPECT_STR_EQ(config_str("llamacpp.port"), "8080");
+    /* A setting that documents a meaning for empty keeps it verbatim. */
+    setenv("HAX_SYSTEM_PROMPT", "", 1);
+    const char *sp = config_str("system_prompt");
+    EXPECT(sp != NULL && *sp == '\0');
     clear_env();
 }
 
@@ -374,16 +397,24 @@ static void test_default_sentinel(void)
 
     /* On a key with a registry default the sentinel lands on that default
      * instead of NULL — same shadowing of lower tiers, one definition of
-     * the default. An explicit empty value still reads verbatim (the
-     * opt-out state for settings where "" is meaningful). */
+     * the default. */
     setenv("HAX_LLAMACPP_PORT", "9999", 1);
     EXPECT_STR_EQ(config_str("llamacpp.port"), "9999");
     config_set_override("llamacpp.port", CONFIG_VALUE_DEFAULT);
     EXPECT_STR_EQ(config_str("llamacpp.port"), "8080");
+    /* An empty override on this key is "unset" (a port has no meaning for
+     * ""), so it falls through to the env value instead of reading blank —
+     * distinct from the sentinel above, which lands on the default. */
     config_set_override("llamacpp.port", "");
-    EXPECT_STR_EQ(config_str("llamacpp.port"), "");
+    EXPECT_STR_EQ(config_str("llamacpp.port"), "9999");
     config_set_override("llamacpp.port", NULL);
     unsetenv("HAX_LLAMACPP_PORT");
+
+    /* A setting that documents a meaning for empty reads it back verbatim. */
+    config_set_override("system_prompt", "");
+    const char *sp = config_str("system_prompt");
+    EXPECT(sp != NULL && *sp == '\0');
+    config_set_override("system_prompt", NULL);
 
     config_load(NULL);
     config_load_state(NULL);
@@ -540,7 +571,301 @@ static void test_registry_introspection(void)
         EXPECT(s[i].key && *s[i].key);
         EXPECT(s[i].env && *s[i].env);
         EXPECT(s[i].desc && *s[i].desc);
+        /* Choice lists classify a setting's valid values for the picker (when
+         * runtime) and for validation either way, so they're decoupled from
+         * runtime: read-only enums (reasoning_format, thinking_mode) carry
+         * choices purely to validate. Each listed value must be non-empty. */
+        if (s[i].choices) {
+            EXPECT(*s[i].choices && s[i].choices[strlen(s[i].choices) - 1] != '|');
+            EXPECT(!strstr(s[i].choices, "||"));
+        }
+        /* Numeric kinds type the free-form path. */
+        if (s[i].kind != CFG_STRING)
+            EXPECT(!s[i].choices);
+        /* Bounds are numeric and well-formed. They serve validation too, so a
+         * setting may declare a range without a registry default when its
+         * consumer supplies its own fallback (thinking_budget → max_tokens-1). */
+        if (s[i].min || s[i].max) {
+            EXPECT(s[i].kind != CFG_STRING);
+            if (s[i].min && s[i].max)
+                EXPECT(s[i].min <= s[i].max);
+        }
+        /* Runtime editing would expose a secret in the prompt. */
+        if (s[i].secret)
+            EXPECT(!s[i].runtime);
+        /* keep_empty only makes sense for a free-form string — a bool or
+         * numeric empty is always unset. */
+        if (s[i].keep_empty) {
+            EXPECT(s[i].kind == CFG_STRING);
+            EXPECT(!(s[i].choices && strcmp(s[i].choices, CONFIG_CHOICES_BOOL) == 0));
+        }
     }
+    /* A documented-empty setting carries the flag; an enum that falls back on
+     * empty does not. */
+    EXPECT(config_setting_find("system_prompt")->keep_empty);
+    EXPECT(config_setting_find("effort")->keep_empty);
+    EXPECT(!config_setting_find("theme")->keep_empty);
+    EXPECT(!config_setting_find("sort_models")->keep_empty);
+    const struct config_setting *sr = config_setting_find("show_reasoning");
+    EXPECT(sr != NULL && sr->runtime);
+    EXPECT_STR_EQ(sr->choices, CONFIG_CHOICES_BOOL);
+    EXPECT(config_setting_find("nonesuch") == NULL);
+    EXPECT(config_setting_find("openai.base_url") != NULL);
+    EXPECT(!config_setting_find("openai.base_url")->runtime);
+    const struct config_setting *sk = config_setting_find("openai.api_key");
+    EXPECT(sk != NULL && sk->secret);
+    EXPECT(!config_setting_find("markdown")->secret);
+}
+
+static void test_source_reports_winning_tier(void)
+{
+    clear_env();
+    EXPECT(config_load(NULL) == 0);
+    EXPECT(config_load_state(NULL) == 0);
+
+    /* Unset and registry-defaulted settings both report "default". */
+    EXPECT_STR_EQ(config_source("show_reasoning"), "default");
+    EXPECT_STR_EQ(config_source("llamacpp.port"), "default");
+
+    EXPECT(config_load("{\"show_reasoning\": \"1\"}") == 0);
+    EXPECT_STR_EQ(config_source("show_reasoning"), "config");
+
+    EXPECT(config_load_state("{\"show_reasoning\": \"0\"}") == 0);
+    EXPECT_STR_EQ(config_source("show_reasoning"), "state");
+
+    setenv("HAX_SHOW_REASONING", "1", 1);
+    EXPECT_STR_EQ(config_source("show_reasoning"), "env");
+
+    /* Session overrides win over the environment. */
+    config_set_override("show_reasoning", "0");
+    EXPECT_STR_EQ(config_source("show_reasoning"), "session");
+    EXPECT(config_bool("show_reasoning") == 0);
+
+    /* Clearing the override lets the tiers resurface in order. */
+    config_set_override("show_reasoning", NULL);
+    EXPECT_STR_EQ(config_source("show_reasoning"), "env");
+    unsetenv("HAX_SHOW_REASONING");
+    EXPECT_STR_EQ(config_source("show_reasoning"), "state");
+    EXPECT(config_load_state(NULL) == 0);
+    EXPECT_STR_EQ(config_source("show_reasoning"), "config");
+    EXPECT(config_load(NULL) == 0);
+    EXPECT_STR_EQ(config_source("show_reasoning"), "default");
+
+    /* An empty tier is skipped for settings whose consumer skips it (numeric
+     * and bool), so the reported source matches where the effective value
+     * comes from — not the empty tier shadowing it. */
+    EXPECT(config_load("{\"markdown\": \"0\", \"context_limit\": \"128k\"}") == 0);
+    setenv("HAX_MARKDOWN", "", 1);
+    setenv("HAX_CONTEXT_LIMIT", "", 1);
+    EXPECT_STR_EQ(config_source("markdown"), "config"); /* empty env skipped */
+    EXPECT(config_bool("markdown") == 0);               /* effective from file */
+    EXPECT_STR_EQ(config_source("context_limit"), "config");
+    EXPECT(config_size("context_limit") == 128 * 1024);
+    /* A free-form setting keeps empty-as-meaningful: the empty env wins. */
+    setenv("HAX_SYSTEM_PROMPT", "", 1);
+    EXPECT(config_load("{\"system_prompt\": \"from file\"}") == 0);
+    EXPECT_STR_EQ(config_source("system_prompt"), "env");
+    unsetenv("HAX_MARKDOWN");
+    unsetenv("HAX_CONTEXT_LIMIT");
+    unsetenv("HAX_SYSTEM_PROMPT");
+}
+
+static void test_value_valid(void)
+{
+    char hint[64];
+
+    /* Free-form strings accept any non-NULL value. */
+    const struct config_setting *ff = config_setting_find("system_prompt");
+    EXPECT(ff && !ff->choices && ff->kind == CFG_STRING);
+    EXPECT(config_value_valid(ff, "anything"));
+    EXPECT(!config_value_valid(ff, NULL));
+    EXPECT(!config_value_valid(NULL, "70"));
+    config_value_hint(ff, hint, sizeof(hint));
+    EXPECT_STR_EQ(hint, ""); /* nothing to reject, so no hint */
+
+    /* Integer settings reject malformed, negative, and out-of-bounds values;
+     * compact.threshold carries a 1..100 range that the hint names. */
+    const struct config_setting *i = config_setting_find("compact.threshold");
+    EXPECT(i && !i->choices && i->kind == CFG_INT && i->min == 1 && i->max == 100);
+    EXPECT(config_value_valid(i, "70"));
+    EXPECT(config_value_valid(i, "1"));
+    EXPECT(config_value_valid(i, "100"));
+    EXPECT(!config_value_valid(i, "0"));   /* below min */
+    EXPECT(!config_value_valid(i, "200")); /* above max */
+    EXPECT(!config_value_valid(i, "banana"));
+    EXPECT(!config_value_valid(i, "-5")); /* counts/widths are non-negative */
+    EXPECT(!config_value_valid(i, "12x"));
+    EXPECT(!config_value_valid(i, ""));
+    config_value_hint(i, hint, sizeof(hint));
+    EXPECT_STR_EQ(hint, "a whole number from 1 to 100");
+
+    /* An unbounded int keeps the plain hint. */
+    const struct config_setting *mt = config_setting_find("max_turns");
+    EXPECT(mt && mt->kind == CFG_INT && mt->min == 0 && mt->max == 0);
+    config_value_hint(mt, hint, sizeof(hint));
+    EXPECT_STR_EQ(hint, "a whole number");
+
+    /* A max-only int names its ceiling; the value is rejected above it. */
+    const struct config_setting *mr = config_setting_find("http.max_retries");
+    EXPECT(mr && mr->kind == CFG_INT && mr->min == 0 && mr->max == 100);
+    EXPECT(config_value_valid(mr, "100"));
+    EXPECT(config_value_valid(mr, "0")); /* disabling retries is allowed */
+    EXPECT(!config_value_valid(mr, "1000"));
+    config_value_hint(mr, hint, sizeof(hint));
+    EXPECT_STR_EQ(hint, "a whole number up to 100");
+
+    /* Sizes accept suffixes but reject zero. */
+    const struct config_setting *sz = config_setting_find("tool_output_cap");
+    EXPECT(sz && sz->kind == CFG_SIZE);
+    EXPECT(config_value_valid(sz, "64k"));
+    EXPECT(config_value_valid(sz, "4096"));
+    EXPECT(!config_value_valid(sz, "0"));
+    EXPECT(!config_value_valid(sz, "lots"));
+    config_value_hint(sz, hint, sizeof(hint));
+    EXPECT_STR_EQ(hint, "a size like 64k or 1M");
+
+    /* Durations accept suffixes and zero, unless a min forbids it. */
+    const struct config_setting *d = config_setting_find("bash.timeout");
+    EXPECT(d && d->kind == CFG_DURATION);
+    EXPECT(config_value_valid(d, "2s"));
+    EXPECT(config_value_valid(d, "500ms"));
+    EXPECT(config_value_valid(d, "0")); /* 0 disables — allowed here */
+    EXPECT(!config_value_valid(d, "soon"));
+    config_value_hint(d, hint, sizeof(hint));
+    EXPECT_STR_EQ(hint, "a duration like 2s or 500ms");
+
+    /* retry_base bounds out zero (0 backoff would hammer the server). */
+    const struct config_setting *rb = config_setting_find("http.retry_base");
+    EXPECT(rb && rb->kind == CFG_DURATION && rb->min == 1);
+    EXPECT(config_value_valid(rb, "1s"));
+    EXPECT(!config_value_valid(rb, "0"));
+
+    const struct config_setting *nr = config_setting_find("anthropic.max_tokens");
+    EXPECT(nr && !nr->runtime && nr->kind == CFG_INT && nr->min == 1);
+    EXPECT(config_value_valid(nr, "32000"));
+    EXPECT(!config_value_valid(nr, "lots"));
+    EXPECT(!config_value_valid(nr, "0")); /* zero is ignored by the consumer */
+
+    /* thinking_budget bounds zero out too, though its default is computed by
+     * the consumer (max_tokens - 1) rather than declared in the registry. */
+    const struct config_setting *tb = config_setting_find("anthropic.thinking_budget");
+    EXPECT(tb && tb->kind == CFG_INT && tb->min == 1 && tb->def == NULL);
+    EXPECT(config_value_valid(tb, "1000"));
+    EXPECT(!config_value_valid(tb, "0"));
+
+    /* Canonicalization: strict enums store the exact choice spelling, so a
+     * case-sensitive consumer matches; bool/free-form need none. */
+    const struct config_setting *th = config_setting_find("theme");
+    char *canon = config_value_canonical(th, "LIGHT");
+    EXPECT_STR_EQ(canon, "light");
+    free(canon);
+    EXPECT(config_value_canonical(th, "nonesuch") == NULL);
+    EXPECT(config_value_canonical(config_setting_find("markdown"), "ON") == NULL);
+    EXPECT(config_value_canonical(ff, "whatever") == NULL);
+
+    /* Bool settings admit the full config_bool grammar, both cases. */
+    const struct config_setting *b = config_setting_find("markdown");
+    EXPECT(b && b->choices);
+    EXPECT(config_value_valid(b, "on"));
+    EXPECT(config_value_valid(b, "OFF"));
+    EXPECT(config_value_valid(b, "1"));
+    EXPECT(config_value_valid(b, "0"));
+    EXPECT(config_value_valid(b, "true"));
+    EXPECT(config_value_valid(b, "No"));
+    EXPECT(!config_value_valid(b, "banana"));
+    EXPECT(!config_value_valid(b, ""));
+
+    /* Enum settings are strict membership, case-insensitive. */
+    const struct config_setting *e = config_setting_find("theme");
+    EXPECT(e && e->choices);
+    EXPECT(config_value_valid(e, "dark"));
+    EXPECT(config_value_valid(e, "AUTO"));
+    EXPECT(config_value_valid(e, "off")); /* last list element matches */
+    EXPECT(!config_value_valid(e, "dar"));
+    EXPECT(!config_value_valid(e, "darker"));
+    EXPECT(!config_value_valid(e, ""));
+}
+
+static void test_sort_models_auto(void)
+{
+    clear_env();
+    EXPECT(config_load(NULL) == 0);
+    /* Unset resolves to the "auto" default, which config_bool_or treats as
+     * unrecognized and so yields the caller's (provider) default — the /model
+     * picker's actual behavior. So a provider defaulting on stays on. */
+    const struct config_setting *s = config_setting_find("sort_models");
+    EXPECT(s && s->choices && strcmp(s->choices, "on|off") != 0);
+    EXPECT_STR_EQ(config_str("sort_models"), "auto");
+    EXPECT(config_bool_or("sort_models", 1) == 1);
+    EXPECT(config_bool_or("sort_models", 0) == 0);
+    /* An explicit choice overrides the provider default either way. */
+    EXPECT(config_load("{\"sort_models\": \"off\"}") == 0);
+    EXPECT(config_bool_or("sort_models", 1) == 0);
+    EXPECT(config_load("{\"sort_models\": \"on\"}") == 0);
+    EXPECT(config_bool_or("sort_models", 0) == 1);
+
+    /* Tri-state validation accepts "auto" plus the full bool grammar (so it
+     * agrees with config_bool_or, which honors bool spellings and defers
+     * everything else); a bogus value is invalid. The provider-defaulted cache
+     * toggles share the exact shape. */
+    EXPECT(config_value_valid(s, "auto"));
+    EXPECT(config_value_valid(s, "AUTO"));
+    EXPECT(config_value_valid(s, "on"));
+    EXPECT(config_value_valid(s, "1"));
+    EXPECT(config_value_valid(s, "true"));
+    EXPECT(config_value_valid(s, "off"));
+    EXPECT(!config_value_valid(s, "banana"));
+    EXPECT_STR_EQ(config_setting_find("openai.send_cache_key")->choices, CONFIG_CHOICES_TRISTATE);
+    EXPECT_STR_EQ(config_setting_find("openai.request_cost")->choices, CONFIG_CHOICES_TRISTATE);
+    EXPECT_STR_EQ(config_setting_find("anthropic.cache")->choices, CONFIG_CHOICES_TRISTATE);
+}
+
+static void test_empty_policy(void)
+{
+    clear_env();
+    /* Enums and numerics treat an empty tier as unset, so a stray empty env
+     * can't shadow a configured value or misreport its source. config_str,
+     * config_source, and the consumers (theme, sort_models, notify) all agree
+     * through the registry — no per-call-site skip-empty choice. */
+    EXPECT(config_load("{\"theme\": \"light\", \"sort_models\": \"on\","
+                       " \"notify\": \"bel\"}") == 0);
+    setenv("HAX_THEME", "", 1);
+    setenv("HAX_SORT_MODELS", "", 1);
+    setenv("HAX_NOTIFY", "", 1);
+    EXPECT_STR_EQ(config_str("theme"), "light");
+    EXPECT_STR_EQ(config_source("theme"), "config");
+    EXPECT_STR_EQ(config_str("sort_models"), "on");
+    EXPECT_STR_EQ(config_source("sort_models"), "config");
+    EXPECT(config_bool_or("sort_models", 0) == 1);
+    EXPECT_STR_EQ(config_str("notify"), "bel");
+    EXPECT_STR_EQ(config_source("notify"), "config");
+    clear_env();
+
+    /* Settings that document a meaning for empty keep it: the empty env wins
+     * and is reported there, matching what the consumer reads. */
+    EXPECT(config_load("{\"system_prompt\": \"from file\", \"effort\": \"high\","
+                       " \"openrouter\": {\"referer\": \"https://x\"},"
+                       " \"transcript\": \"/tmp/transcript\", \"trace\": \"/tmp/trace\"}") == 0);
+    setenv("HAX_SYSTEM_PROMPT", "", 1);
+    setenv("HAX_EFFORT", "", 1);
+    setenv("HAX_OPENROUTER_REFERER", "", 1);
+    setenv("HAX_TRANSCRIPT", "", 1);
+    setenv("HAX_TRACE", "", 1);
+    const char *sp = config_str("system_prompt");
+    EXPECT(sp && !*sp);
+    EXPECT_STR_EQ(config_source("system_prompt"), "env");
+    const char *ef = config_str("effort");
+    EXPECT(ef && !*ef);
+    const char *rf = config_str("openrouter.referer");
+    EXPECT(rf && !*rf);
+    EXPECT_STR_EQ(config_source("openrouter.referer"), "env");
+    const char *transcript = config_str("transcript");
+    EXPECT(transcript && !*transcript);
+    EXPECT_STR_EQ(config_source("transcript"), "env");
+    const char *trace = config_str("trace");
+    EXPECT(trace && !*trace);
+    EXPECT_STR_EQ(config_source("trace"), "env");
+    clear_env();
 }
 
 /* ---------- presets ---------- */
@@ -723,6 +1048,10 @@ int main(void)
 {
     test_load_validation();
     test_registry_introspection();
+    test_source_reports_winning_tier();
+    test_value_valid();
+    test_sort_models_auto();
+    test_empty_policy();
     test_nested_and_flat();
     test_scalar_normalization();
     test_typed_getters();

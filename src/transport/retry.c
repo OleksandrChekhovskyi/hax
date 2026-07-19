@@ -22,19 +22,16 @@
 struct retry_policy retry_policy_default(void)
 {
     /* The knob counts additional retries; the policy's max_attempts is
-     * total tries including the first, so add one. Clamp at a value
-     * users would never actually want to wait through. (Negative values
-     * already read as the registry default via config_int.) */
+     * total tries including the first, so add one. The registry bounds it to
+     * 100 (an out-of-range value reads as the registry default), so no clamp
+     * is needed here. */
     int n = config_int("http.max_retries");
-    if (n > 100)
-        n = 100;
 
     /* "0 disables" is not part of this knob's grammar: a zero base would
-     * make every delay zero and hammer an already-struggling server, so
-     * it reads as invalid → the registry default. */
+     * make every delay zero and hammer an already-struggling server. The
+     * registry bounds it to > 0, so a non-positive value already reads as
+     * the registry default. */
     long base = config_duration_ms("http.retry_base");
-    if (base <= 0)
-        base = parse_duration_ms(config_default("http.retry_base"));
 
     struct retry_policy p = {
         .max_attempts = n + 1,

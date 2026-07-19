@@ -135,6 +135,19 @@ static int reasoning_visible(void)
     return config_bool("show_reasoning");
 }
 
+void agent_display_refresh(struct agent_state *st)
+{
+    theme_init();
+    struct render_ctx *r = st->r;
+    r->show_reasoning = reasoning_visible();
+    if (r->md) {
+        md_free(r->md);
+        r->md = NULL;
+    }
+    if (markdown_enabled())
+        r->md = md_new(md_emit_to_disp, &r->disp, md_wrap_width());
+}
+
 double agent_session_spend(const struct session_stats *t, int *approx)
 {
     return spend_total(&t->spend, approx);
@@ -1453,7 +1466,6 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
     interrupt_init();
 
     char prompt_buf[64];
-    const char *prompt = build_prompt(prompt_buf, sizeof(prompt_buf));
 
     /* The render state in r (state + cluster sub-state) lives across
      * the continuation run so RS_CLUSTER can span consecutive silent tool
@@ -1473,7 +1485,9 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
          * the editor keeps swallowing bare Enter. */
         input_set_empty_submit(input, state.resume != AGENT_RESUME_NONE);
         cursor_show();
-        char *line = input_readline(input, prompt);
+        /* Rebuilt each iteration so a runtime theme change (/config theme …)
+         * recolors the prompt instead of keeping the startup theme's bytes. */
+        char *line = input_readline(input, build_prompt(prompt_buf, sizeof(prompt_buf)));
         cursor_hide();
         if (!line) {
             putchar('\n');
@@ -1517,6 +1531,11 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
                     input_history_add_session(input, state.pending_recall);
                     free(state.pending_recall);
                     state.pending_recall = NULL;
+                }
+                if (state.pending_preseed) {
+                    input_set_preseed(input, state.pending_preseed);
+                    free(state.pending_preseed);
+                    state.pending_preseed = NULL;
                 }
                 free(line);
                 continue;
@@ -1809,6 +1828,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
     transcript_log_close(tlog);
     session_log_close(state.slog);
     spend_free(&state.stats.spend);
+    free(state.pending_preseed);
     agent_session_free(&sess);
     return 0;
 }

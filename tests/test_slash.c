@@ -145,6 +145,11 @@ void select_preset(struct agent_state *st, const char *name)
     (void)st;
     (void)name;
 }
+void select_config(struct agent_state *st, const char *arg)
+{
+    (void)st;
+    (void)arg;
+}
 
 /* Redirect stdout to a temp file so we can inspect what slash_dispatch
  * printed. Returns the captured bytes (caller frees) and restores

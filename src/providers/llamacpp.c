@@ -218,7 +218,7 @@ struct provider *llamacpp_provider_new(const char *name)
     (void)name;
     /* The "8080" default lives in the config registry, so it's defined in
      * one place. */
-    char *default_url = xasprintf("http://127.0.0.1:%s/v1", config_str_nonempty("llamacpp.port"));
+    char *default_url = xasprintf("http://127.0.0.1:%d/v1", config_int("llamacpp.port"));
 
     /* Probe whichever URL the openai constructor will actually use, so a
      * user-supplied HAX_OPENAI_BASE_URL still benefits from auto-discovery.
@@ -284,7 +284,7 @@ struct provider *llamacpp_provider_new(const char *name)
 static int llamacpp_available(const char *name, const char **reason)
 {
     (void)name;
-    char *default_url = xasprintf("http://127.0.0.1:%s/v1", config_str_nonempty("llamacpp.port"));
+    char *default_url = xasprintf("http://127.0.0.1:%d/v1", config_int("llamacpp.port"));
     const char *base_env = config_str("openai.base_url");
     char *resolved = dup_trim_trailing_slash((base_env && *base_env) ? base_env : default_url);
     const char *key = config_str("openai.api_key");

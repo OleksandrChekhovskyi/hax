@@ -110,6 +110,9 @@ struct input {
      * means "continue", whereas Ctrl-C discards the typed line and
      * must never launch anything. */
     int last_cancelled;
+
+    /* Owned one-shot seed for the next input_readline (input.c only). */
+    char *preseed;
 };
 
 /* Result of input_core_compute_layout. All fields are 0-indexed offsets

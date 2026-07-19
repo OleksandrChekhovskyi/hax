@@ -24,8 +24,10 @@
  *   - override: set this session via config_set_override (e.g. a /model
  *     slash command); never persisted unless also written via config_persist
  *     or config_persist_state.
- *   - environment: the HAX_* var, verbatim including an empty string, so the
- *     quick `HAX_FOO=bar hax ...` invocation always wins.
+ *   - environment: the HAX_* var, so the quick `HAX_FOO=bar hax ...`
+ *     invocation always wins. An empty value is skipped (resolution falls
+ *     through to a lower tier) for most settings; it's honored verbatim only
+ *     for the keep_empty few where "" carries meaning — see config_str.
  *   - state: ~/.local/state/hax/state.json — the machine-local,
  *     *persisted* layer of the override tier (what /provider, /model, /effort
  *     write). It holds only canonical config keys, sits in the XDG state dir
@@ -103,16 +105,13 @@ void config_free(void);
 
 /* ---- read (by canonical key) ---- */
 
-/* Resolved string for `key` (override → env → file → registry default), or
- * NULL when unset everywhere. Borrowed. Values are returned verbatim
- * including "" — empty is meaningful for some settings (HAX_SYSTEM_PROMPT=""
- * sends no system prompt, HAX_EFFORT="" omits it). */
+/* Resolved value for `key`, or NULL when unset. Borrowed. Empty values are
+ * skipped unless the registry marks them meaningful; unknown keys preserve
+ * them. Use config_str_nonempty for unknown keys that must skip empty values. */
 const char *config_str(const char *key);
 
-/* Like config_str, but an empty value at any tier counts as unset there and
- * resolution falls through to the next tier. For string settings where ""
- * has no meaning (e.g. ports): a stray HAX_FOO= must not shadow a configured
- * value or end up interpolated into a URL. */
+/* Like config_str, but always skips empty tier values. Intended for dynamic
+ * keys absent from the registry; prefer config_str for registered settings. */
 const char *config_str_nonempty(const char *key);
 
 /* The registry default for `key` (the last resolution tier), or NULL when
@@ -256,19 +255,61 @@ size_t config_preset_names(char ***out);
 
 /* ---- introspection ---- */
 
-/* One row of the setting registry: canonical key, its env-var binding, the
- * fixed default (NULL when dynamic/computed/per-provider), and a one-line
- * human description. */
+/* Grammar for settings without enumerated choices. CFG_STRING accepts any
+ * non-NULL value; numeric kinds mirror the typed getters. */
+enum config_kind {
+    CFG_STRING = 0,
+    CFG_INT,      /* whole number >= 0 (parse_int / config_int) */
+    CFG_SIZE,     /* parse_size grammar: 4096, 64k, 1M (> 0) */
+    CFG_DURATION, /* parse_duration_ms grammar: 500, 2s (>= 0; 0 disables) */
+};
+
+/* Two choice strings carry special grammar in config_value_valid and in the
+ * /config display, so the registry, validator, and display reference them by
+ * name rather than repeating the literal. CONFIG_CHOICES_BOOL accepts the full
+ * boolean grammar (on/off/1/0/true/false/…); CONFIG_CHOICES_TRISTATE adds an
+ * "auto" literal on top, for a boolean whose default the consumer resolves
+ * itself (a provider preset), so unset/auto means "let it decide". */
+#define CONFIG_CHOICES_BOOL     "on|off"
+#define CONFIG_CHOICES_TRISTATE "auto|on|off"
+
+/* One setting registry row. */
 struct config_setting {
     const char *key;
     const char *env;
     const char *def;
     const char *desc;
+    const char *choices;     /* '|'-separated enum; see CONFIG_CHOICES_* above */
+    enum config_kind kind;   /* grammar when choices is NULL */
+    long min;                /* lower bound in int/bytes/ms; 0 = none */
+    long max;                /* upper bound in int/bytes/ms; 0 = none */
+    unsigned runtime : 1;    /* editable through /config */
+    unsigned secret : 1;     /* redact the value in /config */
+    unsigned keep_empty : 1; /* "" is meaningful rather than unset */
 };
 
 /* The setting registry as a read-only array; *n receives the count. The
  * single source of truth for "what settings exist" — for generating a help
  * listing or a /config view, and for keeping docs honest. */
 const struct config_setting *config_settings(size_t *n);
+
+/* Registry row for `key`, or NULL if unknown. */
+const struct config_setting *config_setting_find(const char *key);
+
+/* Winning tier: "session", "env", "state", "config", or "default". Uses
+ * the same empty-value policy as config_str. */
+const char *config_source(const char *key);
+
+/* Validate `val` against case-insensitive choices (with the full boolean
+ * grammar for "on|off"), or against the setting's kind and bounds. */
+int config_value_valid(const struct config_setting *s, const char *val);
+
+/* Format choices or the kind grammar and bounds for a rejection message.
+ * Empty for an unrestricted CFG_STRING. */
+void config_value_hint(const struct config_setting *s, char *buf, size_t n);
+
+/* Return the heap-owned canonical enum spelling matching `val`, or NULL for
+ * a non-enum or no match. Validate `val` first; the caller frees the result. */
+char *config_value_canonical(const struct config_setting *s, const char *val);
 
 #endif /* HAX_CONFIG_H */

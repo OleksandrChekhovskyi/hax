@@ -100,6 +100,10 @@ void input_set_transcript_cb(struct input *in, void (*fn)(void *user), void *use
 struct input_modal_completer;
 void input_set_modal_completer(struct input *in, const struct input_modal_completer *mc);
 
+/* Seed the next editable input with `text`, placing the cursor at the end.
+ * One-shot; NULL or "" clears it, and non-tty reads discard it. */
+void input_set_preseed(struct input *in, const char *text);
+
 /* Toggle whether Enter on an empty buffer submits the empty string.
  * Off, empty Enter is a no-op; on, input_readline returns "" — used by
  * the REPL while a paused turn is resumable and an empty send means
