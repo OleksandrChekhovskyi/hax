@@ -1,6 +1,13 @@
+<div align="center">
+
 # hax
 
-`hax` is a minimalist, terminal-native coding agent written in C.
+**A minimalist, terminal-native coding agent written in C.**
+
+<img src="./docs/screenshot.png" width="720"
+     alt="hax answering a question about its own source using a local llama.cpp model">
+
+</div>
 
 ## Key features
 
