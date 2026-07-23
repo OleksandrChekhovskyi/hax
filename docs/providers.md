@@ -23,7 +23,7 @@ Config-defined providers, including the built-in `ollama` recipe, are listed aft
 If a provider is explicitly configured and cannot start, the interactive REPL opens without a
 provider and points you at `/provider`; in `-p` mode the failure is fatal because there is no
 picker. Cold start with no configured provider tries available providers in the order above,
-in both modes. `-p` always prints a one-line `provider · model · effort` banner to stderr —
+in both modes. `-p` always prints a one-line `provider · model [· effort]` banner to stderr —
 marked `(auto-selected)` when the provider was inferred rather than explicitly configured —
 so the backend that answered is visible even in pipelines.
 
@@ -262,10 +262,10 @@ Recognized common keys:
   the catalog describes. See the model catalog section in
   [configuration.md](./configuration.md).
 
-OpenAI-style custom providers also recognize `reasoning_format` (`flat` or `nested`) and
-`send_cache_key`. Anthropic-style custom providers recognize the Anthropic settings from
-[configuration.md](./configuration.md): `max_tokens`, `thinking_mode`, `thinking_budget`,
-`cache`, `cache_ttl`, and `version`.
+OpenAI-style custom providers also recognize `reasoning_format` (`flat` or `nested`),
+`reasoning_roundtrip`, `send_cache_key`, and `request_cost`. Anthropic-style custom providers
+recognize the Anthropic settings from [configuration.md](./configuration.md): `max_tokens`,
+`thinking_mode`, `thinking_budget`, `cache`, `cache_ttl`, and `version`.
 
 Custom providers read only their own `providers.<name>` block. Global `HAX_OPENAI_*` or
 `HAX_ANTHROPIC_*` variables do not bleed into them, except for the explicit environment

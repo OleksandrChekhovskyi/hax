@@ -10,7 +10,8 @@ HAX_TRACE=/tmp/hax-trace.md hax
 
 The trace is plain Markdown-like text and is truncated at startup. Authorization is redacted.
 Entries include elapsed-time tags so pauses between streamed chunks are visible. `HAX_TRACE`
-only records provider traffic; it is silent for the mock provider because no network is used.
+records HTTP transport traffic, including provider requests, metadata probes, catalog refreshes,
+and account-usage queries. It is silent for a mock-only run because no network is used.
 
 ## Transcript log
 
@@ -51,7 +52,7 @@ reasoning <message>
 space
 tool <name> <json>
 delay <ms>
-usage in=N out=M [cached=K] [cache_write=W] [cost=D]
+usage in=N out=M [cached=K] [cache_write=W] [cache_write_1h=H] [cost=D]
 end-turn
 ```
 

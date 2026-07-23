@@ -29,7 +29,7 @@ static const struct config_setting REGISTRY[] = {
     {.key = "model", .env = "HAX_MODEL", .keep_empty = 1,
      .desc = "Model id (provider-specific; some auto-fill or require it)"},
     {.key = "effort", .env = "HAX_EFFORT", .keep_empty = 1,
-     .desc = "Reasoning effort (minimal/low/medium/high/xhigh); empty omits it"},
+     .desc = "Reasoning effort (provider-specific); empty omits it"},
     {.key = "system_prompt", .env = "HAX_SYSTEM_PROMPT", .keep_empty = 1,
      .desc = "Override the built-in system prompt; empty sends no system message"},
     {.key = "no_env", .env = "HAX_NO_ENV", .choices = CONFIG_CHOICES_BOOL,

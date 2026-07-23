@@ -31,11 +31,11 @@ In `-p` mode, positional arguments are joined with spaces. If no positional argu
 present and stdin is not a terminal, stdin becomes the prompt. A bare `-p` on a terminal is an
 error.
 
-`-p` prints a one-line `provider · model · effort · session <id>` banner to stderr before the
-run starts, so the backend that produced the answer is always visible; stdout carries only the
-answer. Silence it with `2>/dev/null` if needed. The session id appears up front (not only in
-the exit hint) so a run that is killed mid-flight — say, by a caller's timeout — can still be
-picked up with `--resume=<id>`.
+`-p` prints a one-line `provider · model [· effort] [· session <id>]` banner to stderr before
+the run starts, so the backend that produced the answer is always visible; stdout carries only
+the answer. Silence it with `2>/dev/null` if needed. When recording is enabled, the session id
+appears up front (not only in the exit hint) so a run that is killed mid-flight — say, by a
+caller's timeout — can still be picked up with `--resume=<id>`.
 
 `--resume` without an id opens a picker, so `-p --resume` requires `--resume=ID` instead.
 
@@ -90,13 +90,13 @@ name. Paths like `/tmp/repro.c crashes` pass through to the model.
 After each user turn the REPL prints a dim one-line summary:
 
 ```text
-8.9k / 256k (3%) · 42s · $0.042
+42s · 8.9k / 256k (3%) · $0.042
 ```
 
-- The leading figure is context usage as the last response reported it, with the window size
-  and percentage when the context limit is known (when it isn't, the bare count is labeled:
-  `context 8.9k`).
 - The duration is wall-clock time for that user turn, including tool runs.
+- The next figure is context usage as the last response reported it, with the window size and
+  percentage when the context limit is known (when it isn't, the bare count is labeled:
+  `context 8.9k`).
 - The dollar amount is the session's cumulative spend. When the provider reports per-response
   cost (currently OpenRouter), the figure is exact. Otherwise, for providers with a model
   catalog identity (`codex`, `openai`, `anthropic`, and custom providers — see `catalog_id`
@@ -264,5 +264,6 @@ Hax can summarize earlier history to free context:
 - `HAX_COMPACT_AUTO` controls automatic compaction near the context limit; it is on by default.
 - `HAX_COMPACT_THRESHOLD` sets the auto-compaction trigger percentage; default `85`.
 
-Automatic compaction needs a known context window, either from `HAX_CONTEXT_LIMIT` or a
-provider-specific auto-probe. Without a known window, manual `/compact` still works.
+Automatic compaction needs a known context window, from `HAX_CONTEXT_LIMIT`, a
+provider-specific auto-probe, or the model catalog. Without a known window, manual `/compact`
+still works.

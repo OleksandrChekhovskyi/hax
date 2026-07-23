@@ -65,8 +65,9 @@ Terminology:
 
 Core modules and responsibilities:
 
-- `src/agent.c` owns the REPL, conversation history, registered tools, dispatch loop, and
-  display buffering.
+- `src/agent_core.{c,h}` and `src/agent_loop.{c,h}` contain behavior shared by the interactive
+  (`src/agent.c`) and one-shot (`src/oneshot.c`) frontends. Keep frontend-specific I/O and
+  rendering out of the shared layers.
 - `src/turn.{c,h}` is a pure state machine: consume `struct stream_event`, emit
   `struct item`. Keep I/O out of it.
 - `src/provider.h` defines the flat conversation view (`struct context` / `struct item`) and

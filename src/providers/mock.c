@@ -55,8 +55,9 @@
  *       tool <name> <json>       One tool call. Args is a single-line JSON object.
  *       delay <ms>               Sleep before the next emission and between
  *                                auto-streamed text chunks.
- *       usage in=N out=M [cached=K] [cache_write=W] [cost=D]   Set usage on the upcoming
- *                                done event (cost is a decimal USD amount).
+ *       usage in=N out=M [cached=K] [cache_write=W] [cache_write_1h=H] [cost=D]
+ *                                Set usage on the upcoming done event (cost is a decimal
+ *                                USD amount).
  *       end-turn                 Finalize the current turn (emits EV_DONE).
  *       (blank or # line)        Ignored.
  *
