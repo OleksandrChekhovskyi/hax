@@ -35,7 +35,8 @@ static void test_reasoning_attached_when_field_set(void)
          .tool_name = "read",
          .tool_arguments_json = "{\"path\":\"x\"}"},
     };
-    json_t *msgs = openai_build_messages(NULL, items, 3, "reasoning_content", "llama.cpp", "m1");
+    json_t *msgs =
+        openai_build_messages(NULL, items, 3, "reasoning_content", "llama.cpp", "m1", -1);
 
     EXPECT(json_array_size(msgs) == 1);
     json_t *a = find_role(msgs, "assistant");
@@ -58,7 +59,7 @@ static void test_reasoning_omitted_when_field_null(void)
          .model = "m1"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "Hello."},
     };
-    json_t *msgs = openai_build_messages(NULL, items, 2, NULL, "llama.cpp", "m1");
+    json_t *msgs = openai_build_messages(NULL, items, 2, NULL, "llama.cpp", "m1", -1);
 
     json_t *a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
@@ -75,7 +76,7 @@ static void test_reasoning_custom_field_name(void)
         {.kind = ITEM_REASONING, .reasoning_text = "cot", .provider = "llama.cpp", .model = "m1"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "Hi."},
     };
-    json_t *msgs = openai_build_messages(NULL, items, 2, "reasoning", "llama.cpp", "m1");
+    json_t *msgs = openai_build_messages(NULL, items, 2, "reasoning", "llama.cpp", "m1", -1);
 
     json_t *a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
@@ -93,7 +94,7 @@ static void test_codex_reasoning_json_skipped(void)
         {.kind = ITEM_REASONING, .reasoning_json = "{\"id\":\"r1\"}"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "Done."},
     };
-    json_t *msgs = openai_build_messages(NULL, items, 2, "reasoning_content", "codex", "o3");
+    json_t *msgs = openai_build_messages(NULL, items, 2, "reasoning_content", "codex", "o3", -1);
 
     /* The reasoning_json item is its own (skipped) entry; the assistant
      * message stands alone with no reasoning attached. */
@@ -115,7 +116,8 @@ static void test_reasoning_only_turn(void)
          .provider = "llama.cpp",
          .model = "m1"},
     };
-    json_t *msgs = openai_build_messages(NULL, items, 1, "reasoning_content", "llama.cpp", "m1");
+    json_t *msgs =
+        openai_build_messages(NULL, items, 1, "reasoning_content", "llama.cpp", "m1", -1);
 
     json_t *a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
@@ -136,7 +138,7 @@ static void test_reasoning_only_field_null_emits_nothing(void)
         {.kind = ITEM_USER_MESSAGE, .text = "hi"},
         {.kind = ITEM_REASONING, .reasoning_text = "leaked cot, replay off"},
     };
-    json_t *msgs = openai_build_messages(NULL, items, 2, NULL, "llama.cpp", "m1");
+    json_t *msgs = openai_build_messages(NULL, items, 2, NULL, "llama.cpp", "m1", -1);
 
     EXPECT(json_array_size(msgs) == 1); /* just the user message */
     EXPECT(find_role(msgs, "assistant") == NULL);
@@ -157,7 +159,7 @@ static void test_reasoning_skipped_on_provenance_mismatch(void)
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "From codex."},
     };
     json_t *msgs =
-        openai_build_messages(NULL, provider_switch, 2, "reasoning_content", "llama.cpp", "m1");
+        openai_build_messages(NULL, provider_switch, 2, "reasoning_content", "llama.cpp", "m1", -1);
     json_t *a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
     EXPECT(json_object_get(a, "reasoning_content") == NULL); /* stale CoT dropped */
@@ -173,7 +175,7 @@ static void test_reasoning_skipped_on_provenance_mismatch(void)
          .model = "m0"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "Older model."},
     };
-    msgs = openai_build_messages(NULL, model_switch, 2, "reasoning_content", "llama.cpp", "m1");
+    msgs = openai_build_messages(NULL, model_switch, 2, "reasoning_content", "llama.cpp", "m1", -1);
     a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
     EXPECT(json_object_get(a, "reasoning_content") == NULL);
@@ -186,7 +188,7 @@ static void test_reasoning_skipped_on_provenance_mismatch(void)
         {.kind = ITEM_REASONING, .reasoning_text = "no stamp"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "Unstamped."},
     };
-    msgs = openai_build_messages(NULL, unstamped, 2, "reasoning_content", "llama.cpp", "m1");
+    msgs = openai_build_messages(NULL, unstamped, 2, "reasoning_content", "llama.cpp", "m1", -1);
     a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
     EXPECT(json_object_get(a, "reasoning_content") == NULL);
@@ -234,6 +236,53 @@ static void test_list_efforts_wiring(void)
     }
 }
 
+/* A tool result carrying an image part: the `tool` message keeps string
+ * content, and the part follows as a separate user message with an
+ * image_url data-URL block — placed after the whole run of consecutive
+ * tool messages so strict backends still see them adjacent. */
+static void test_tool_result_image_followup(void)
+{
+    struct item_image imgs[] = {
+        {.mime = "image/png", .data_b64 = "QUJD", .width = 4, .height = 2},
+    };
+    struct item items[] = {
+        {.kind = ITEM_TOOL_RESULT,
+         .call_id = "c1",
+         .output = "Read image x.png",
+         .images = imgs,
+         .n_images = 1},
+        {.kind = ITEM_TOOL_RESULT, .call_id = "c2", .output = "file1"},
+    };
+    json_t *msgs = openai_build_messages(NULL, items, 2, NULL, "llama.cpp", "m1", 1);
+
+    /* tool, tool, then the image user message — nothing interleaved. */
+    EXPECT(json_array_size(msgs) == 3);
+    json_t *m0 = json_array_get(msgs, 0);
+    json_t *m1 = json_array_get(msgs, 1);
+    json_t *m2 = json_array_get(msgs, 2);
+    EXPECT_STR_EQ(json_string_value(json_object_get(m0, "role")), "tool");
+    EXPECT(json_is_string(json_object_get(m0, "content")));
+    EXPECT_STR_EQ(json_string_value(json_object_get(m1, "role")), "tool");
+    EXPECT_STR_EQ(json_string_value(json_object_get(m2, "role")), "user");
+    json_t *parts = json_object_get(m2, "content");
+    EXPECT(json_is_array(parts));
+    EXPECT(json_array_size(parts) == 2);
+    json_t *img = json_array_get(parts, 1);
+    EXPECT_STR_EQ(json_string_value(json_object_get(img, "type")), "image_url");
+    const char *url = json_string_value(json_object_get(json_object_get(img, "image_url"), "url"));
+    EXPECT_STR_EQ(url, "data:image/png;base64,QUJD");
+    json_decref(msgs);
+
+    /* image_input == 0: no follow-up message; the placeholder is appended
+     * to the tool message's string content instead. */
+    msgs = openai_build_messages(NULL, items, 2, NULL, "llama.cpp", "m1", 0);
+    EXPECT(json_array_size(msgs) == 2);
+    const char *content = json_string_value(json_object_get(json_array_get(msgs, 0), "content"));
+    EXPECT(content && strstr(content, "Read image x.png") != NULL);
+    EXPECT(strstr(content, "[image:") != NULL);
+    json_decref(msgs);
+}
+
 int main(void)
 {
     test_reasoning_attached_when_field_set();
@@ -244,5 +293,6 @@ int main(void)
     test_reasoning_only_field_null_emits_nothing();
     test_reasoning_skipped_on_provenance_mismatch();
     test_list_efforts_wiring();
+    test_tool_result_image_followup();
     T_REPORT();
 }

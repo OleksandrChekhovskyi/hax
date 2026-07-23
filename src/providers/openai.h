@@ -164,7 +164,7 @@ int openai_base_url_reachable(const char *base_url, const char *api_key, const c
  * The handle is joined (with cancel first) by openai_destroy, which fits
  * preset shims like openrouter/llamacpp that spawn a context-window
  * probe but don't carry their own provider struct or destroy(). NULL
- * `probe` is a no-op (e.g. when probe_context_limit_spawn returned NULL
+ * `probe` is a no-op (e.g. when probe_spawn returned NULL
  * because pthread_create failed). There's one slot; before re-attaching
  * (a /model re-probe) the caller settles the old handle via
  * openai_context_probe_reset, so attach itself stays a plain setter. A
@@ -186,10 +186,13 @@ void openai_context_probe_reset(struct provider *p);
  * set, a reasoning item's text is replayed only if its provenance stamp
  * matches `cur_provider`/`cur_model` (both must be non-NULL and equal), so a
  * mid-conversation provider or model switch never feeds stale CoT to the new
- * backend. Returns a new jansson array the caller must json_decref. */
+ * backend. `image_input` is the context flag: 1/-1 emit tool-result image
+ * parts as a follow-up user message with image_url blocks (the `tool` role
+ * only takes strings), 0 degrades them to text placeholders. Returns a new
+ * jansson array the caller must json_decref. */
 json_t *openai_build_messages(const char *system_prompt, const struct item *items, size_t n,
                               const char *reasoning_field, const char *cur_provider,
-                              const char *cur_model);
+                              const char *cur_model, int image_input);
 
 extern const struct provider_factory PROVIDER_OPENAI;
 

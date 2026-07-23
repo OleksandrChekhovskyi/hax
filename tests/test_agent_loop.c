@@ -294,19 +294,20 @@ static void count_tool(const struct item *call, void *user)
 }
 
 static struct item run_test_tool(const struct item *call, enum agent_loop_tool_action action,
-                                 void *user)
+                                 int image_input, void *user)
 {
+    (void)image_input;
     struct loop_test_ctx *ctx = user;
     if (action == AGENT_LOOP_TOOL_RUN) {
         ctx->tools_run++;
-        return agent_tool_result_make(call, "handled");
+        return agent_tool_result_make(call, "handled", NULL);
     }
     if (action == AGENT_LOOP_TOOL_SKIP) {
         ctx->tools_skipped++;
-        return agent_tool_result_make(call, INTERRUPT_MARKER);
+        return agent_tool_result_make(call, INTERRUPT_MARKER, NULL);
     }
     ctx->tools_refused++;
-    return agent_tool_result_make(call, "refused");
+    return agent_tool_result_make(call, "refused", NULL);
 }
 
 static int cancel_checkpoint(void *user)

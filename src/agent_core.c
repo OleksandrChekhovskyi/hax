@@ -81,6 +81,29 @@ void items_append(struct item **items, size_t *n, size_t *cap, struct item it)
     (*items)[(*n)++] = it;
 }
 
+int agent_image_input(const struct provider *p, const char *model)
+{
+    /* "auto" falls through to detection; a real on/off pins the answer.
+     * Tested by string — the bool accessors can't express "not a bool". */
+    const char *cfg = config_str("image_input");
+    if (cfg && *cfg && strcmp(cfg, "auto") != 0)
+        return config_bool("image_input");
+    if (!p)
+        return -1;
+    struct provider *mp = (struct provider *)p;
+    long probed = atomic_load(&mp->image_input);
+    if (probed == PROVIDER_IMG_YES)
+        return 1;
+    if (probed == PROVIDER_IMG_NO)
+        return 0;
+    if (p->catalog_id && model && *model) {
+        struct catalog_entry e;
+        if (catalog_lookup(p->catalog_id, model, &e) == 0 && e.image_input >= 0)
+            return e.image_input;
+    }
+    return -1;
+}
+
 const char *resolve_effort(const struct provider *p)
 {
     /* A persisted/configured effort only makes sense for a provider that
@@ -422,6 +445,9 @@ struct context agent_session_context(const struct agent_session *s)
         .tools = s->tools,
         .n_tools = s->n_tools,
         .effort = s->effort,
+        /* Unknown by default (adapters treat it as yes); callers that
+         * know the provider overwrite with agent_image_input(). */
+        .image_input = -1,
     };
 }
 

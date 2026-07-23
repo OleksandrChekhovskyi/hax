@@ -52,6 +52,7 @@ void agent_loop_turn_run(struct agent_loop_turn *loop_turn, struct agent_session
         .observer_user = observer_user,
     };
     struct context ctx = agent_session_context(session);
+    ctx.image_input = agent_image_input(provider, session->model);
     long started_ms = monotonic_ms();
     provider->stream(provider, &ctx, session->model, loop_turn_on_event, &sink, tick, tick_user);
     loop_turn->elapsed_ms = monotonic_ms() - started_ms;
@@ -90,7 +91,7 @@ struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *se
         if (session->items[i].kind != ITEM_TOOL_CALL)
             continue;
         items_append(&session->items, &session->n_items, &session->cap_items,
-                     agent_tool_result_make(&session->items[i], INTERRUPT_MARKER));
+                     agent_tool_result_make(&session->items[i], INTERRUPT_MARKER, NULL));
         marker_placed = 1;
     }
 
@@ -127,20 +128,33 @@ static struct item loop_run_tool(const struct agent_loop_params *params, const s
                                  enum agent_loop_tool_action action)
 {
     const struct agent_loop_hooks *hooks = &params->hooks;
-    if (hooks->tool_call)
-        return hooks->tool_call(call, action, hooks->user);
+    /* Resolved per call, not per session: the answer can change under a
+     * runtime /model switch and when an async capability probe lands. */
+    int image_input = agent_image_input(params->provider, params->session->model);
 
-    if (action == AGENT_LOOP_TOOL_REFUSE)
-        return agent_tool_result_make(call, "error: tool calls are disabled in this session");
-    if (action == AGENT_LOOP_TOOL_SKIP)
-        return agent_tool_result_make(call, INTERRUPT_MARKER);
+    struct item result;
+    if (hooks->tool_call) {
+        result = hooks->tool_call(call, action, image_input, hooks->user);
+    } else if (action == AGENT_LOOP_TOOL_REFUSE) {
+        result =
+            agent_tool_result_make(call, "error: tool calls are disabled in this session", NULL);
+    } else if (action == AGENT_LOOP_TOOL_SKIP) {
+        result = agent_tool_result_make(call, INTERRUPT_MARKER, NULL);
+    } else {
+        struct agent_tool_call tool_call;
+        agent_tool_call_init(&tool_call, call);
+        struct tool_ctx tctx = {.image_input = image_input};
+        char *output = agent_tool_call_run(&tool_call, &tctx);
+        result = agent_tool_result_make(call, output, &tctx);
+        free(output);
+        agent_tool_call_destroy(&tool_call);
+    }
 
-    struct agent_tool_call tool_call;
-    agent_tool_call_init(&tool_call, call);
-    char *output = agent_tool_call_run(&tool_call, NULL, NULL);
-    struct item result = agent_tool_result_make(call, output);
-    free(output);
-    agent_tool_call_destroy(&tool_call);
+    /* Enforce the aggregate image budget at ingestion — history excludes
+     * `result`, which the caller appends next. Dropping the just-read image
+     * (rather than degrading older ones at serialization) keeps prior
+     * requests byte-stable, so the provider prefix cache survives. */
+    image_budget_enforce(params->session->items, params->session->n_items, &result);
     return result;
 }
 

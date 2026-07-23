@@ -42,6 +42,11 @@ static const char CACHE_FIXTURE[] =
     "             \"limit\": {\"context\": 200000, \"output\": 100000}},"
     "    \"o3-merge\": {\"cost\": {\"input\": 2, \"output\": 8},"
     "                   \"limit\": {\"context\": 200000}},"
+    "    \"o3-vision\": {\"cost\": {\"input\": 2, \"output\": 8},"
+    "                    \"modalities\": {\"input\": [\"text\", \"image\"],"
+    "                                     \"output\": [\"text\"]}},"
+    "    \"o3-text\": {\"cost\": {\"input\": 2, \"output\": 8},"
+    "                  \"modalities\": {\"input\": [\"text\"]}},"
     "    \"o3-tiered\": {\"cost\": {\"input\": 2, \"output\": 8, \"cache_read\": 0.5,"
     "                              \"tiers\": [{\"input\": 4, \"output\": 16, \"cache_read\": 1,"
     "                                           \"tier\": {\"type\": \"context\","
@@ -67,6 +72,16 @@ static void test_lookup_from_cache(void)
     EXPECT(e.cost_cache_write == -1); /* not declared */
     EXPECT(e.context == 200000);
     EXPECT(e.output == 100000);
+    EXPECT(e.image_input == -1); /* no modalities declared */
+}
+
+static void test_lookup_modalities(void)
+{
+    struct catalog_entry e;
+    EXPECT(catalog_lookup("openai", "o3-vision", &e) == 0);
+    EXPECT(e.image_input == 1);
+    EXPECT(catalog_lookup("openai", "o3-text", &e) == 0);
+    EXPECT(e.image_input == 0);
 }
 
 static void test_lookup_dotted_slashed_model_id(void)
@@ -359,6 +374,7 @@ int main(void)
 
     test_lookup_from_cache();
     test_lookup_dotted_slashed_model_id();
+    test_lookup_modalities();
     test_lookup_miss();
     test_config_overrides_and_merges();
     test_price_formula();

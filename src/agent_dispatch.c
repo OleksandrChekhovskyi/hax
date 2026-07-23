@@ -279,7 +279,7 @@ struct item dispatch_tool_skipped(struct render_ctx *r, const struct item *call)
     disp_raw(ANSI_RESET);
     disp_putc(d, '\n');
     fflush(stdout);
-    return agent_tool_result_make(call, INTERRUPT_MARKER);
+    return agent_tool_result_make(call, INTERRUPT_MARKER, NULL);
 }
 
 /* Refuse a tool call without running it. Used in --raw mode: we
@@ -298,7 +298,7 @@ struct item dispatch_tool_refused(struct render_ctx *r, const struct item *call)
     disp_raw(ANSI_RESET);
     disp_putc(d, '\n');
     fflush(stdout);
-    return agent_tool_result_make(call, "error: tool calls are disabled in this session");
+    return agent_tool_result_make(call, "error: tool calls are disabled in this session", NULL);
 }
 
 /* Build the dim arg shown after the tag in a collapsed (replayed) tool
@@ -369,7 +369,8 @@ void render_collapsed_tool_call(struct render_ctx *r, const struct item *call)
  * a clean column-0 row is below whatever came before.
  * cluster_last_tool == NULL distinguishes "just entered the cluster"
  * from "continuing a cluster started by a previous call". */
-static struct item dispatch_tool_call_silent(struct render_ctx *r, struct agent_tool_call *tc)
+static struct item dispatch_tool_call_silent(struct render_ctx *r, struct agent_tool_call *tc,
+                                             int image_input)
 {
     const struct item *call = &tc->effective;
     const struct tool *t = tc->tool;
@@ -461,12 +462,13 @@ static struct item dispatch_tool_call_silent(struct render_ctx *r, struct agent_
 
     /* Run the tool with no display callback — silent path discards live
      * stream and only keeps the canonical history. */
-    char *ret = agent_tool_call_run(tc, NULL, NULL);
+    struct tool_ctx tctx = {.image_input = image_input};
+    char *ret = agent_tool_call_run(tc, &tctx);
     spinner_request_label(sp, "working", "working...");
 
     r->cluster_last_tool = t->def.name;
 
-    struct item result = agent_tool_result_make(call, ret);
+    struct item result = agent_tool_result_make(call, ret, &tctx);
     free(ret);
     return result;
 }
@@ -501,7 +503,8 @@ static void emit_tool_solo_marker(struct disp *d, struct spinner *sp, const char
  * is ctrl_stripped at this boundary so all tools' outputs land in the
  * conversation in the same normalized form; anything pushed through
  * emit_display is display-only and does not enter history. */
-static struct item dispatch_tool_call_verbose(struct render_ctx *r, struct agent_tool_call *tc)
+static struct item dispatch_tool_call_verbose(struct render_ctx *r, struct agent_tool_call *tc,
+                                              int image_input)
 {
     const struct item *call = &tc->effective;
     const struct tool *t = tc->tool;
@@ -527,7 +530,12 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *r, struct agent
     enum render_mode mode = (t && t->preview_tail) ? R_HEAD_TAIL : R_HEAD_ONLY;
     struct tool_render rr;
     tool_render_init(&rr, d, sp, mode);
-    char *ret = agent_tool_call_run(tc, tool_render_emit, &rr);
+    struct tool_ctx tctx = {
+        .emit_display = tool_render_emit,
+        .emit_user = &rr,
+        .image_input = image_input,
+    };
+    char *ret = agent_tool_call_run(tc, &tctx);
 
     /* If the tool called emit_display at any point, the live preview is
      * already rendered. Otherwise feed the canonical return value through
@@ -567,21 +575,21 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *r, struct agent
     if (t && t->output_is_diff && rr.emit_called && rr.rows_emitted == 0 && ret && *ret)
         emit_tool_solo_marker(d, sp, ret);
 
-    struct item result = agent_tool_result_make(call, ret);
+    struct item result = agent_tool_result_make(call, ret, &tctx);
     free(ret);
     tool_render_free(&rr);
     return result;
 }
 
-struct item dispatch_tool_call(struct render_ctx *r, const struct item *call)
+struct item dispatch_tool_call(struct render_ctx *r, const struct item *call, int image_input)
 {
     struct agent_tool_call tc;
     agent_tool_call_init(&tc, call);
 
     int is_silent = tc.tool && call_is_silent(tc.tool, &tc.effective);
     render_transition(r, is_silent ? RS_CLUSTER : RS_IDLE);
-    struct item out =
-        is_silent ? dispatch_tool_call_silent(r, &tc) : dispatch_tool_call_verbose(r, &tc);
+    struct item out = is_silent ? dispatch_tool_call_silent(r, &tc, image_input)
+                                : dispatch_tool_call_verbose(r, &tc, image_input);
     agent_tool_call_destroy(&tc);
     return out;
 }

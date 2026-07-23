@@ -173,6 +173,21 @@ json_t *item_to_json(const struct item *it)
         json_object_set_new(o, "compact_seed", json_true());
     if (it->usage)
         json_object_set_new(o, "usage", turn_usage_to_json(it->usage));
+    if (it->n_images) {
+        json_t *arr = json_array();
+        for (size_t i = 0; i < it->n_images; i++) {
+            const struct item_image *img = &it->images[i];
+            json_t *io = json_object();
+            set_str(io, "mime", img->mime);
+            set_str(io, "data", img->data_b64);
+            if (img->width > 0)
+                json_object_set_new(io, "width", json_integer(img->width));
+            if (img->height > 0)
+                json_object_set_new(io, "height", json_integer(img->height));
+            json_array_append_new(arr, io);
+        }
+        json_object_set_new(o, "images", arr);
+    }
     return o;
 }
 
@@ -203,6 +218,34 @@ int item_from_json(const json_t *obj, struct item *out)
     out->compact_seed = json_is_true(json_object_get(obj, "compact_seed"));
     if (k == ITEM_TURN_USAGE)
         out->usage = turn_usage_from_json(json_object_get(obj, "usage"));
+    json_t *arr = json_object_get(obj, "images");
+    if (json_is_array(arr) && json_array_size(arr) > 0) {
+        size_t n = json_array_size(arr);
+        out->images = xcalloc(n, sizeof(*out->images));
+        for (size_t i = 0; i < n; i++) {
+            json_t *io = json_array_get(arr, i);
+            struct item_image *img = &out->images[out->n_images];
+            img->mime = dup_field(io, "mime");
+            img->data_b64 = dup_field(io, "data");
+            /* An image record without a payload is unusable — skip it
+             * rather than round-trip an empty block to a provider. */
+            if (!img->data_b64 || !img->mime) {
+                free(img->mime);
+                free(img->data_b64);
+                img->mime = img->data_b64 = NULL;
+                continue;
+            }
+            json_t *v = json_object_get(io, "width");
+            img->width = json_is_integer(v) ? (long)json_integer_value(v) : 0;
+            v = json_object_get(io, "height");
+            img->height = json_is_integer(v) ? (long)json_integer_value(v) : 0;
+            out->n_images++;
+        }
+        if (out->n_images == 0) {
+            free(out->images);
+            out->images = NULL;
+        }
+    }
     return 0;
 }
 
@@ -847,6 +890,49 @@ static void push_item(struct item **items, size_t *n, size_t *cap, struct item i
     (*items)[(*n)++] = it;
 }
 
+/* Degrade images to text placeholders once a resumed session's cumulative
+ * payload would exceed the aggregate caps ingestion enforces. A file written
+ * by another hax version or writer, or one whose budget was later lowered,
+ * can hold more than a request allows; left as-is it would reject every
+ * request after resume — including /compact — with no way to recover. Trims
+ * forward (keeps the earliest images) and modifies only in-memory items, so
+ * the drop is one-time and history stays byte-stable from here on. */
+static void degrade_images_over_budget(struct item *items, size_t n)
+{
+    size_t bytes = 0, count = 0;
+    for (size_t i = 0; i < n; i++) {
+        struct item *it = &items[i];
+        if (it->n_images == 0)
+            continue;
+        size_t ib = 0;
+        for (size_t k = 0; k < it->n_images; k++)
+            ib += it->images[k].data_b64 ? strlen(it->images[k].data_b64) : 0;
+        if (bytes + ib <= IMAGE_REQUEST_BUDGET_B64 &&
+            count + it->n_images <= IMAGE_REQUEST_MAX_COUNT) {
+            bytes += ib;
+            count += it->n_images;
+            continue;
+        }
+        /* Replace the payload with a placeholder line per image so the record
+         * stays legible while adding nothing to the request. */
+        char *out = xstrdup(it->output ? it->output : "");
+        for (size_t k = 0; k < it->n_images; k++) {
+            char *ph = item_image_placeholder(&it->images[k]);
+            char *next = xasprintf("%s\n%s", out, ph);
+            free(out);
+            free(ph);
+            out = next;
+            free(it->images[k].mime);
+            free(it->images[k].data_b64);
+        }
+        free(it->images);
+        it->images = NULL;
+        it->n_images = 0;
+        free(it->output);
+        it->output = out;
+    }
+}
+
 int session_load(const char *path, struct item **out_items, size_t *out_n,
                  struct session_meta *out_meta)
 {
@@ -937,6 +1023,8 @@ int session_load(const char *path, struct item **out_items, size_t *out_n,
         items[w++] = items[i];
     }
     n = w;
+
+    degrade_images_over_budget(items, n);
 
     *out_items = items;
     *out_n = n;

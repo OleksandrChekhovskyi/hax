@@ -133,15 +133,42 @@ static size_t emit_assistant_group(json_t *arr, const struct item *items, size_t
 
 /* Coalesce a run of consecutive TOOL_RESULT items into a single user message
  * carrying tool_result blocks — the Messages API groups results that way, and
- * some strict compat endpoints reject a tool_result message split per call. */
-static size_t emit_tool_results(json_t *arr, const struct item *items, size_t i, size_t n)
+ * some strict compat endpoints reject a tool_result message split per call.
+ * A result carrying image parts switches its content from the plain string
+ * to a block array; image_input == 0 degrades each part to a text
+ * placeholder block. */
+static size_t emit_tool_results(json_t *arr, const struct item *items, size_t i, size_t n,
+                                int image_input)
 {
     json_t *content = json_array();
     while (i < n && items[i].kind == ITEM_TOOL_RESULT) {
-        json_array_append_new(content,
-                              json_pack("{s:s, s:s, s:s}", "type", "tool_result", "tool_use_id",
-                                        items[i].call_id ? items[i].call_id : "", "content",
-                                        items[i].output ? items[i].output : ""));
+        const struct item *it = &items[i];
+        if (it->n_images == 0) {
+            json_array_append_new(content, json_pack("{s:s, s:s, s:s}", "type", "tool_result",
+                                                     "tool_use_id", it->call_id ? it->call_id : "",
+                                                     "content", it->output ? it->output : ""));
+        } else {
+            json_t *blocks = json_array();
+            if (it->output && *it->output)
+                json_array_append_new(blocks, content_text_block(it->output));
+            for (size_t k = 0; k < it->n_images; k++) {
+                const struct item_image *img = &it->images[k];
+                if (image_input != 0) {
+                    json_array_append_new(blocks,
+                                          json_pack("{s:s, s:{s:s, s:s, s:s}}", "type", "image",
+                                                    "source", "type", "base64", "media_type",
+                                                    img->mime ? img->mime : "image/png", "data",
+                                                    img->data_b64 ? img->data_b64 : ""));
+                } else {
+                    char *ph = item_image_placeholder(img);
+                    json_array_append_new(blocks, content_text_block(ph));
+                    free(ph);
+                }
+            }
+            json_array_append_new(content,
+                                  json_pack("{s:s, s:s, s:o}", "type", "tool_result", "tool_use_id",
+                                            it->call_id ? it->call_id : "", "content", blocks));
+        }
         i++;
     }
     json_array_append_new(arr, json_pack("{s:s, s:o}", "role", "user", "content", content));
@@ -149,7 +176,7 @@ static size_t emit_tool_results(json_t *arr, const struct item *items, size_t i,
 }
 
 json_t *anthropic_build_messages(const struct item *items, size_t n, const char *cur_provider,
-                                 const char *cur_model, int allow_empty_signature)
+                                 const char *cur_model, int allow_empty_signature, int image_input)
 {
     json_t *arr = json_array();
     size_t i = 0;
@@ -171,7 +198,7 @@ json_t *anthropic_build_messages(const struct item *items, size_t n, const char 
                                      allow_empty_signature);
             break;
         case ITEM_TOOL_RESULT:
-            i = emit_tool_results(arr, items, i, n);
+            i = emit_tool_results(arr, items, i, n, image_input);
             break;
         case ITEM_TURN_BOUNDARY:
         case ITEM_TURN_USAGE:
@@ -305,7 +332,7 @@ static char *build_body(struct anthropic *a, const struct context *ctx, const ch
     free(k);
 
     json_t *messages = anthropic_build_messages(ctx->items, ctx->n_items, a->base.name, model,
-                                                a->allow_empty_signature);
+                                                a->allow_empty_signature, ctx->image_input);
     json_t *body = json_pack("{s:s, s:i, s:b, s:o}", "model", model, "max_tokens", max_tokens,
                              "stream", 1, "messages", messages);
 

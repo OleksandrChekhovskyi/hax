@@ -43,6 +43,48 @@ static char *swap_path(const char *base, const char *new_path)
     return out;
 }
 
+/* Resolve the base URL the openai constructor will actually use: an explicit
+ * HAX_OPENAI_BASE_URL if set, else the llamacpp.port default. Trailing slash
+ * normalized so the probe and stream() paths match. Caller frees. */
+static char *resolve_base_url(void)
+{
+    char *default_url = xasprintf("http://127.0.0.1:%d/v1", config_int("llamacpp.port"));
+    const char *base_env = config_str("openai.base_url");
+    char *resolved = dup_trim_trailing_slash((base_env && *base_env) ? base_env : default_url);
+    free(default_url);
+    return resolved;
+}
+
+/* Build the /props probe URL, scoped to `model` with a `?model=` query when
+ * one is given. Router-mode llama-server loads several models on demand, so
+ * /props must name which one; the param is ignored (harmless) in the common
+ * single-model case. `model` (which may contain '/' or spaces) is URL-
+ * encoded. Caller frees. */
+char *llamacpp_props_url(const char *base_url, const char *model)
+{
+    char *url = swap_path(base_url, "/props");
+    if (!url || !model || !*model)
+        return url;
+
+    CURLU *u = curl_url();
+    if (!u)
+        return url;
+    char *query = xasprintf("model=%s", model);
+    char *out = url;
+    if (curl_url_set(u, CURLUPART_URL, url, 0) == CURLUE_OK &&
+        curl_url_set(u, CURLUPART_QUERY, query, CURLU_APPENDQUERY | CURLU_URLENCODE) == CURLUE_OK) {
+        char *built = NULL;
+        if (curl_url_get(u, CURLUPART_URL, &built, 0) == CURLUE_OK) {
+            out = xstrdup(built);
+            curl_free(built);
+            free(url);
+        }
+    }
+    free(query);
+    curl_url_cleanup(u);
+    return out;
+}
+
 /* The pure reconcile decision behind probe_model, split out for tests (no
  * HTTP): parse a /v1/models body and decide against `cur`. Returns 0 when
  * the list names at least one model — a resolvable state — with *adopt set
@@ -166,6 +208,25 @@ static long extract_llamacpp_n_ctx(const char *body, void *user)
     return out;
 }
 
+/* /props also reports the loaded model's modalities ({"vision": bool,
+ * ...}) — authoritative for image input, since vision requires an mmproj
+ * projector loaded on this server instance, which no external catalog
+ * can know. Absent on older servers → 0 (unknown, dropped). */
+static long extract_llamacpp_image_input(const char *body, void *user)
+{
+    (void)user;
+    json_t *root = json_loads(body, 0, NULL);
+    if (!root)
+        return 0;
+    long out = PROVIDER_IMG_UNKNOWN;
+    json_t *modalities = json_object_get(root, "modalities");
+    json_t *vision = modalities ? json_object_get(modalities, "vision") : NULL;
+    if (json_is_boolean(vision))
+        out = json_is_true(vision) ? PROVIDER_IMG_YES : PROVIDER_IMG_NO;
+    json_decref(root);
+    return out;
+}
+
 char *llamacpp_model_label(struct provider *p, const char *model)
 {
     (void)p;
@@ -190,13 +251,7 @@ char *llamacpp_model_label(struct provider *p, const char *model)
 
 static void spawn_context_probe(struct provider *p, const char *base_url, const char *api_key)
 {
-    /* A usable user-supplied context_limit wins; nothing for the probe
-     * to add. Ask config_size — the same question the display path asks —
-     * so an unparseable value falls back to auto-detection instead of
-     * silently hiding the % display. */
-    if (config_size("context_limit") > 0)
-        return;
-    char *url = swap_path(base_url, "/props");
+    char *url = llamacpp_props_url(base_url, config_str("model"));
     if (!url)
         return;
 
@@ -208,9 +263,31 @@ static void spawn_context_probe(struct provider *p, const char *base_url, const 
         a->headers[1] = NULL;
     }
     a->timeout_s = CTX_PROBE_TIMEOUT_S;
-    a->extract = extract_llamacpp_n_ctx;
-    a->target = &p->context_limit;
-    openai_attach_probe(p, probe_context_limit_spawn(a));
+    /* A usable user-supplied context_limit wins; skip that extraction so
+     * the probe never overwrites the override the constructor stored. Ask
+     * config_size — the same question the display path asks — so an
+     * unparseable value falls back to auto-detection. The probe itself
+     * still runs: /props is also the modalities source. */
+    a->fields[0].extract = config_size("context_limit") > 0 ? NULL : extract_llamacpp_n_ctx;
+    a->fields[0].target = &p->context_limit;
+    a->fields[1].extract = extract_llamacpp_image_input;
+    a->fields[1].target = &p->image_input;
+    openai_attach_probe(p, probe_spawn(a));
+}
+
+/* A runtime /model switch (router mode serves several models) changes both
+ * the context window and the vision capability, so re-probe /props for the
+ * newly selected model. openai_context_probe_reset settles the prior probe
+ * and clears context_limit + image_input to unknown; the agent commits the
+ * new model to config before calling this, so props_url picks it up. */
+static void llamacpp_refresh_context(struct provider *p, const char *model)
+{
+    (void)model;
+    openai_context_probe_reset(p);
+    char *resolved = resolve_base_url();
+    const char *key = config_str("openai.api_key");
+    spawn_context_probe(p, resolved, (key && *key) ? key : NULL);
+    free(resolved);
 }
 
 struct provider *llamacpp_provider_new(const char *name)
@@ -267,6 +344,7 @@ struct provider *llamacpp_provider_new(const char *name)
     struct provider *p = openai_provider_new_preset(&preset);
     if (p) {
         p->model_label = llamacpp_model_label;
+        p->refresh_context = llamacpp_refresh_context;
         /* Context-limit probe runs in the background: an older llama-server
          * without /props, or a proxy that doesn't expose it, just means the
          * percentage display is hidden — not a reason to refuse to start
@@ -284,13 +362,10 @@ struct provider *llamacpp_provider_new(const char *name)
 static int llamacpp_available(const char *name, const char **reason)
 {
     (void)name;
-    char *default_url = xasprintf("http://127.0.0.1:%d/v1", config_int("llamacpp.port"));
-    const char *base_env = config_str("openai.base_url");
-    char *resolved = dup_trim_trailing_slash((base_env && *base_env) ? base_env : default_url);
+    char *resolved = resolve_base_url();
     const char *key = config_str("openai.api_key");
     int ok = openai_base_url_reachable(resolved, (key && *key) ? key : NULL, reason);
     free(resolved);
-    free(default_url);
     return ok;
 }
 

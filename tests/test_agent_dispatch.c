@@ -99,7 +99,7 @@ static const char *run_write(const char *path, const char *content_json, struct 
     struct render_ctx r = {0};
     r.state = RS_IDLE;
     r.spinner = spinner_new(NULL);
-    *out = dispatch_tool_call(&r, &call);
+    *out = dispatch_tool_call(&r, &call, -1);
     const char *cap = cap_read();
     spinner_free(r.spinner);
 

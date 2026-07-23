@@ -80,15 +80,16 @@ Core modules and responsibilities:
   (`src/providers/openai.c` or `src/providers/anthropic.c`) where possible. Purely static
   endpoints should be config-defined providers rather than new C shims.
 - `src/tool.h` defines the tool seam. Each tool lives under `src/tools/`, exports exactly one
-  `const struct tool`, and returns freshly allocated output from `run(args_json)`; tool errors
-  are output the model can recover from, not NULL returns.
+  `const struct tool`, and returns freshly allocated output from `run(args_json, ctx)`; tool
+  errors are output the model can recover from, not NULL returns.
 - `src/transport/sse.{c,h}` and `src/transport/http.{c,h}` are the transport boundaries.
   Streaming code uses the shared tick callback for cancellation/idle handling.
 - `src/config.{c,h}` is the configuration access layer. Declare user-facing tunables in the
   config registry and read them by canonical key; reserve direct `getenv` calls for process
   environment facts or deliberately env-only secrets.
 - `src/catalog.{c,h}` is the model-metadata access layer (per-model cost rates, window
-  limits): a config `catalog.models` tier over a background-cached models.dev snapshot.
+  limits, input modalities): a config `catalog.models` tier over a background-cached
+  models.dev snapshot.
   Providers opt in by setting `provider->catalog_id`; cost *estimation* lives in the agent
   layer (`agent_session_spend`), never in provider adapters.
 - `src/terminal/ansi.h` centralizes ANSI escape sequences; do not inline raw escape literals.

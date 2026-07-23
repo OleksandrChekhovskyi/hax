@@ -144,9 +144,69 @@ static size_t emit_assistant_group(json_t *arr, const struct item *items, size_t
     return i;
 }
 
+/* Chat Completions' `tool` role only accepts string content, so image
+ * parts can't ride inside the result message itself. The whole run of
+ * consecutive tool results is emitted first (strict backends validate
+ * their adjacency after a parallel-call turn), then one trailing user
+ * message carries every part as an image_url data-URL block. Without
+ * image support each part degrades to a text placeholder appended to
+ * its tool message instead. */
+static size_t emit_tool_results(json_t *arr, const struct item *items, size_t i, size_t n,
+                                int image_input)
+{
+    size_t first = i;
+    for (; i < n && items[i].kind == ITEM_TOOL_RESULT; i++) {
+        const struct item *it = &items[i];
+        if (it->n_images > 0 && image_input == 0) {
+            struct buf b;
+            buf_init(&b);
+            if (it->output)
+                buf_append_str(&b, it->output);
+            for (size_t k = 0; k < it->n_images; k++) {
+                char *ph = item_image_placeholder(&it->images[k]);
+                if (b.len > 0)
+                    buf_append_str(&b, "\n");
+                buf_append_str(&b, ph);
+                free(ph);
+            }
+            json_array_append_new(arr, json_pack("{s:s, s:s, s:s}", "role", "tool", "tool_call_id",
+                                                 it->call_id ? it->call_id : "", "content",
+                                                 b.data ? b.data : ""));
+            buf_free(&b);
+        } else {
+            json_array_append_new(arr, json_pack("{s:s, s:s, s:s}", "role", "tool", "tool_call_id",
+                                                 it->call_id ? it->call_id : "", "content",
+                                                 it->output ? it->output : ""));
+        }
+    }
+    if (image_input == 0)
+        return i;
+    json_t *parts = NULL;
+    for (size_t j = first; j < i; j++) {
+        const struct item *it = &items[j];
+        for (size_t k = 0; k < it->n_images; k++) {
+            const struct item_image *img = &it->images[k];
+            if (!parts) {
+                parts = json_array();
+                json_array_append_new(parts,
+                                      json_pack("{s:s, s:s}", "type", "text", "text",
+                                                "Image(s) from the preceding tool result(s):"));
+            }
+            char *url = xasprintf("data:%s;base64,%s", img->mime ? img->mime : "image/png",
+                                  img->data_b64 ? img->data_b64 : "");
+            json_array_append_new(
+                parts, json_pack("{s:s, s:{s:s}}", "type", "image_url", "image_url", "url", url));
+            free(url);
+        }
+    }
+    if (parts)
+        json_array_append_new(arr, json_pack("{s:s, s:o}", "role", "user", "content", parts));
+    return i;
+}
+
 json_t *openai_build_messages(const char *system_prompt, const struct item *items, size_t n,
                               const char *reasoning_field, const char *cur_provider,
-                              const char *cur_model)
+                              const char *cur_model, int image_input)
 {
     json_t *arr = json_array();
 
@@ -168,11 +228,7 @@ json_t *openai_build_messages(const char *system_prompt, const struct item *item
             i = emit_assistant_group(arr, items, i, n, reasoning_field, cur_provider, cur_model);
             break;
         case ITEM_TOOL_RESULT:
-            json_array_append_new(arr,
-                                  json_pack("{s:s, s:s, s:s}", "role", "tool", "tool_call_id",
-                                            items[i].call_id ? items[i].call_id : "", "content",
-                                            items[i].output ? items[i].output : ""));
-            i++;
+            i = emit_tool_results(arr, items, i, n, image_input);
             break;
         case ITEM_REASONING:
             /* Text reasoning begins an assistant group so it can ride along
@@ -268,10 +324,11 @@ static char *build_body(const struct context *ctx, const char *provider, const c
      * flag. Modern OpenAI-compatible backends (vLLM, llama.cpp server,
      * Ollama, oMLX, hosted providers) all accept it. If we ever hit a
      * backend that 400s on the unknown field, gating goes here. */
-    json_t *body = json_pack("{s:s, s:b, s:o, s:{s:b}}", "model", model, "stream", 1, "messages",
-                             openai_build_messages(ctx->system_prompt, ctx->items, ctx->n_items,
-                                                   reasoning_field, provider, model),
-                             "stream_options", "include_usage", 1);
+    json_t *body =
+        json_pack("{s:s, s:b, s:o, s:{s:b}}", "model", model, "stream", 1, "messages",
+                  openai_build_messages(ctx->system_prompt, ctx->items, ctx->n_items,
+                                        reasoning_field, provider, model, ctx->image_input),
+                  "stream_options", "include_usage", 1);
 
     if (ctx->n_tools > 0)
         json_object_set_new(body, "tools", build_tools(ctx->tools, ctx->n_tools));
@@ -459,6 +516,9 @@ void openai_context_probe_reset(struct provider *p)
         o->probe = NULL;
     }
     atomic_store(&o->base.context_limit, 0);
+    /* Model-keyed capability goes stale with the limit: the re-probe that
+     * follows answers for the newly selected model. */
+    atomic_store(&o->base.image_input, PROVIDER_IMG_UNKNOWN);
 }
 
 /* Duplicate a NULL-terminated array of header strings. Returns NULL when

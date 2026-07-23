@@ -15,7 +15,7 @@
 /* Top-level dispatch: pick the silent (quiet exploration cluster) or
  * verbose (header + preview) path based on the tool's silent_preview
  * flag and, for bash, per-call classification of the command. */
-struct item dispatch_tool_call(struct render_ctx *r, const struct item *call);
+struct item dispatch_tool_call(struct render_ctx *r, const struct item *call, int image_input);
 
 /* Render a synthesized "[interrupted]" block in place of running a tool,
  * and produce the matching tool_result so the conversation stays

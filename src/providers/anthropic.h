@@ -90,9 +90,11 @@ extern const size_t ANTHROPIC_EFFORT_LADDER_N;
  * A reasoning item's stored block (reasoning_json) is replayed only when its
  * provenance stamp matches cur_provider/cur_model. When `allow_empty_signature`
  * is 0, a thinking block with an empty signature is downgraded to a text block
- * (or dropped if it has no text). Returns a new jansson array; caller frees. */
+ * (or dropped if it has no text). `image_input` is the context flag (1/-1
+ * serialize tool-result image parts as image blocks, 0 as text placeholders).
+ * Returns a new jansson array; caller frees. */
 json_t *anthropic_build_messages(const struct item *items, size_t n, const char *cur_provider,
-                                 const char *cur_model, int allow_empty_signature);
+                                 const char *cur_model, int allow_empty_signature, int image_input);
 
 extern const struct provider_factory PROVIDER_ANTHROPIC;
 

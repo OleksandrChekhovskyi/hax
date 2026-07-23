@@ -962,6 +962,42 @@ char *buf_steal(struct buf *b)
     return p;
 }
 
+char *item_image_placeholder(const struct item_image *img)
+{
+    /* Decoded size from the base64 length: every 4 encoded chars carry 3
+     * bytes; '=' padding overcounts by at most 2 bytes — irrelevant for a
+     * human-scale figure. */
+    size_t bytes = img->data_b64 ? strlen(img->data_b64) / 4 * 3 : 0;
+    char size[32];
+    if (bytes >= 1024 * 1024)
+        snprintf(size, sizeof(size), "%.1f MiB", (double)bytes / (1024 * 1024));
+    else if (bytes >= 1024)
+        snprintf(size, sizeof(size), "%.1f KiB", (double)bytes / 1024);
+    else
+        snprintf(size, sizeof(size), "%zu bytes", bytes);
+    const char *mime = img->mime ? img->mime : "image";
+    if (img->width > 0 && img->height > 0)
+        return xasprintf("[image: %s, %ldx%ld, %s]", mime, img->width, img->height, size);
+    return xasprintf("[image: %s, %s]", mime, size);
+}
+
+size_t images_total_b64(const struct item *items, size_t n)
+{
+    size_t total = 0;
+    for (size_t i = 0; i < n; i++)
+        for (size_t k = 0; k < items[i].n_images; k++)
+            total += items[i].images[k].data_b64 ? strlen(items[i].images[k].data_b64) : 0;
+    return total;
+}
+
+size_t images_total_count(const struct item *items, size_t n)
+{
+    size_t total = 0;
+    for (size_t i = 0; i < n; i++)
+        total += items[i].n_images;
+    return total;
+}
+
 void item_free(struct item *it)
 {
     if (!it)
@@ -971,6 +1007,11 @@ void item_free(struct item *it)
     free(it->tool_name);
     free(it->tool_arguments_json);
     free(it->output);
+    for (size_t i = 0; i < it->n_images; i++) {
+        free(it->images[i].mime);
+        free(it->images[i].data_b64);
+    }
+    free(it->images);
     free(it->reasoning_json);
     free(it->reasoning_text);
     free(it->provider);

@@ -56,15 +56,37 @@ static long extract_openrouter_context(const char *body, void *user)
     return out;
 }
 
+/* The same per-model response carries the model-level architecture block:
+ *     { "data": { "architecture": { "input_modalities": ["text","image",...] } } }
+ * Map its presence to a definite yes/no; an absent or malformed block
+ * returns 0 (unknown, dropped) so consumers keep their fallback. */
+static long extract_openrouter_image_input(const char *body, void *user)
+{
+    (void)user;
+    json_t *root = json_loads(body, 0, NULL);
+    if (!root)
+        return 0;
+    long out = PROVIDER_IMG_UNKNOWN;
+    json_t *data = json_object_get(root, "data");
+    json_t *arch = data ? json_object_get(data, "architecture") : NULL;
+    json_t *mods = arch ? json_object_get(arch, "input_modalities") : NULL;
+    if (json_is_array(mods)) {
+        out = PROVIDER_IMG_NO;
+        size_t i;
+        json_t *m;
+        json_array_foreach(mods, i, m)
+        {
+            const char *s = json_string_value(m);
+            if (s && strcmp(s, "image") == 0)
+                out = PROVIDER_IMG_YES;
+        }
+    }
+    json_decref(root);
+    return out;
+}
+
 static void spawn_context_probe(struct provider *p, const char *api_key)
 {
-    /* context_limit is the user override — when it's usable, the agent
-     * already prefers it, so there's nothing for the probe to add and we
-     * save a network round-trip. Ask config_size — the same question the
-     * display path asks — so an unparseable value falls back to
-     * auto-detection instead of silently hiding the % display. */
-    if (config_size("context_limit") > 0)
-        return;
     const char *model = config_str("model");
     if (!model || !*model)
         return; /* nothing to look up — agent will surface the missing-model error */
@@ -83,11 +105,16 @@ static void spawn_context_probe(struct provider *p, const char *api_key)
         a->headers[1] = NULL;
     }
     a->timeout_s = PROBE_TIMEOUT_S;
-    a->extract = extract_openrouter_context;
-    a->target = &p->context_limit;
+    /* A usable user-supplied context_limit wins; skip that extraction
+     * (never overwrite the override) but still fetch — the same response
+     * carries the input-modalities answer. */
+    a->fields[0].extract = config_size("context_limit") > 0 ? NULL : extract_openrouter_context;
+    a->fields[0].target = &p->context_limit;
+    a->fields[1].extract = extract_openrouter_image_input;
+    a->fields[1].target = &p->image_input;
     /* Hand off to the openai destroy() — it owns the join, so we don't
      * need to track the handle locally. */
-    openai_attach_probe(p, probe_context_limit_spawn(a));
+    openai_attach_probe(p, probe_spawn(a));
 }
 
 /* Re-resolve the API key exactly as the constructor does (HAX_OPENAI_API_KEY,

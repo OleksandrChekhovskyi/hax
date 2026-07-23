@@ -44,6 +44,7 @@ static void entry_init(struct catalog_entry *e)
     e->cost_cache_write = -1;
     e->context = 0;
     e->output = 0;
+    e->image_input = -1;
     e->n_tiers = 0;
     e->tiers_declared = 0;
 }
@@ -141,6 +142,21 @@ static void entry_fill(json_t *model_obj, struct catalog_entry *e)
         if (e->output <= 0)
             e->output = member_tokens(limit, "output");
     }
+    if (e->image_input < 0) {
+        json_t *modalities = json_object_get(model_obj, "modalities");
+        json_t *input = json_is_object(modalities) ? json_object_get(modalities, "input") : NULL;
+        if (json_is_array(input)) {
+            e->image_input = 0;
+            size_t i;
+            json_t *m;
+            json_array_foreach(input, i, m)
+            {
+                const char *s = json_string_value(m);
+                if (s && strcmp(s, "image") == 0)
+                    e->image_input = 1;
+            }
+        }
+    }
 }
 
 static int entry_complete(const struct catalog_entry *e)
@@ -150,7 +166,8 @@ static int entry_complete(const struct catalog_entry *e)
      * still fall through to the cache, or a tiered model would silently
      * price flat (the memoized lookup keeps that consult cheap). */
     return e->cost_input >= 0 && e->cost_output >= 0 && e->cost_cache_read >= 0 &&
-           e->cost_cache_write >= 0 && e->context > 0 && e->output > 0 && e->tiers_declared;
+           e->cost_cache_write >= 0 && e->context > 0 && e->output > 0 && e->image_input >= 0 &&
+           e->tiers_declared;
 }
 
 static int entry_any(const struct catalog_entry *e)
@@ -159,7 +176,8 @@ static int entry_any(const struct catalog_entry *e)
      * declaring just its long-context rates) is priceable above its
      * threshold, so it must not read as "unknown model". */
     return e->cost_input >= 0 || e->cost_output >= 0 || e->cost_cache_read >= 0 ||
-           e->cost_cache_write >= 0 || e->context > 0 || e->output > 0 || e->n_tiers > 0;
+           e->cost_cache_write >= 0 || e->context > 0 || e->output > 0 || e->image_input >= 0 ||
+           e->n_tiers > 0;
 }
 
 /* Fill the still-unknown fields of *dst from *src — the struct-to-struct
@@ -179,6 +197,8 @@ static void entry_merge(struct catalog_entry *dst, const struct catalog_entry *s
         dst->context = src->context;
     if (dst->output <= 0)
         dst->output = src->output;
+    if (dst->image_input < 0)
+        dst->image_input = src->image_input;
     if (!dst->tiers_declared && src->tiers_declared) {
         memcpy(dst->tiers, src->tiers, sizeof(dst->tiers));
         dst->n_tiers = src->n_tiers;

@@ -66,10 +66,29 @@ static void test_reconcile_model(void)
     EXPECT(adopt == NULL);
 }
 
+static void test_props_url(void)
+{
+    /* No model → bare /props on the same scheme/host/port, /v1 dropped. */
+    char *u = llamacpp_props_url("http://127.0.0.1:18080/v1", NULL);
+    EXPECT_STR_EQ(u, "http://127.0.0.1:18080/props");
+    free(u);
+    u = llamacpp_props_url("http://127.0.0.1:18080/v1", "");
+    EXPECT_STR_EQ(u, "http://127.0.0.1:18080/props");
+    free(u);
+
+    /* A gguf path model id is URL-encoded into the query: slashes → %2F,
+     * spaces → + (query form-encoding), so the probe reaches a valid,
+     * model-scoped URL. */
+    u = llamacpp_props_url("http://127.0.0.1:18080/v1", "/models/Qwen 3.gguf");
+    EXPECT_STR_EQ(u, "http://127.0.0.1:18080/props?model=%2Fmodels%2FQwen+3.gguf");
+    free(u);
+}
+
 int main(void)
 {
     test_model_label();
     test_model_warning();
     test_reconcile_model();
+    test_props_url();
     T_REPORT();
 }

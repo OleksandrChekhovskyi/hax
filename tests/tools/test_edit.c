@@ -27,21 +27,21 @@ static char *slurp(const char *path)
 
 static void test_edit_missing_path(void)
 {
-    char *out = TOOL_EDIT.run("{\"old_string\":\"a\",\"new_string\":\"b\"}", NULL, NULL);
+    char *out = TOOL_EDIT.run("{\"old_string\":\"a\",\"new_string\":\"b\"}", NULL);
     EXPECT(strstr(out, "missing 'path'") != NULL);
     free(out);
 }
 
 static void test_edit_missing_old(void)
 {
-    char *out = TOOL_EDIT.run("{\"path\":\"/tmp/x\",\"new_string\":\"b\"}", NULL, NULL);
+    char *out = TOOL_EDIT.run("{\"path\":\"/tmp/x\",\"new_string\":\"b\"}", NULL);
     EXPECT(strstr(out, "missing 'old_string'") != NULL);
     free(out);
 }
 
 static void test_edit_missing_new(void)
 {
-    char *out = TOOL_EDIT.run("{\"path\":\"/tmp/x\",\"old_string\":\"a\"}", NULL, NULL);
+    char *out = TOOL_EDIT.run("{\"path\":\"/tmp/x\",\"old_string\":\"a\"}", NULL);
     EXPECT(strstr(out, "missing 'new_string'") != NULL);
     free(out);
 }
@@ -49,15 +49,15 @@ static void test_edit_missing_new(void)
 static void test_edit_old_empty(void)
 {
     char *out =
-        TOOL_EDIT.run("{\"path\":\"/tmp/x\",\"old_string\":\"\",\"new_string\":\"b\"}", NULL, NULL);
+        TOOL_EDIT.run("{\"path\":\"/tmp/x\",\"old_string\":\"\",\"new_string\":\"b\"}", NULL);
     EXPECT(strstr(out, "'old_string' must be non-empty") != NULL);
     free(out);
 }
 
 static void test_edit_identical_strings(void)
 {
-    char *out = TOOL_EDIT.run("{\"path\":\"/tmp/x\",\"old_string\":\"a\",\"new_string\":\"a\"}",
-                              NULL, NULL);
+    char *out =
+        TOOL_EDIT.run("{\"path\":\"/tmp/x\",\"old_string\":\"a\",\"new_string\":\"a\"}", NULL);
     EXPECT(strstr(out, "identical") != NULL);
     free(out);
 }
@@ -69,7 +69,7 @@ static void test_edit_unique_match(void)
 
     char *args =
         xasprintf("{\"path\":\"%s\",\"old_string\":\"beta\",\"new_string\":\"BETA\"}", path);
-    char *out = TOOL_EDIT.run(args, NULL, NULL);
+    char *out = TOOL_EDIT.run(args, NULL);
     free(args);
     EXPECT(strstr(out, "-beta") != NULL);
     EXPECT(strstr(out, "+BETA") != NULL);
@@ -88,7 +88,7 @@ static void test_edit_no_match(void)
     char *path = seed_file(dir, "f.txt", "alpha\n");
 
     char *args = xasprintf("{\"path\":\"%s\",\"old_string\":\"zzz\",\"new_string\":\"q\"}", path);
-    char *out = TOOL_EDIT.run(args, NULL, NULL);
+    char *out = TOOL_EDIT.run(args, NULL);
     free(args);
     EXPECT(strstr(out, "not found") != NULL);
     free(out);
@@ -107,7 +107,7 @@ static void test_edit_multi_match_requires_replace_all(void)
     char *path = seed_file(dir, "f.txt", "foo\nfoo\nfoo\n");
 
     char *args = xasprintf("{\"path\":\"%s\",\"old_string\":\"foo\",\"new_string\":\"bar\"}", path);
-    char *out = TOOL_EDIT.run(args, NULL, NULL);
+    char *out = TOOL_EDIT.run(args, NULL);
     free(args);
     EXPECT(strstr(out, "matches 3 places") != NULL);
     free(out);
@@ -128,7 +128,7 @@ static void test_edit_replace_all(void)
     char *args = xasprintf(
         "{\"path\":\"%s\",\"old_string\":\"foo\",\"new_string\":\"bar\",\"replace_all\":true}",
         path);
-    char *out = TOOL_EDIT.run(args, NULL, NULL);
+    char *out = TOOL_EDIT.run(args, NULL);
     free(args);
     EXPECT(strstr(out, "+bar") != NULL);
     free(out);
@@ -148,7 +148,7 @@ static void test_edit_multiline_match(void)
     char *args = xasprintf(
         "{\"path\":\"%s\",\"old_string\":\"\\treturn 0;\\n\",\"new_string\":\"\\treturn 42;\\n\"}",
         path);
-    char *out = TOOL_EDIT.run(args, NULL, NULL);
+    char *out = TOOL_EDIT.run(args, NULL);
     free(args);
     EXPECT(strstr(out, "-\treturn 0;") != NULL);
     EXPECT(strstr(out, "+\treturn 42;") != NULL);
@@ -170,7 +170,7 @@ static void test_edit_refuses_fifo(void)
     EXPECT(mkfifo(path, 0644) == 0);
 
     char *args = xasprintf("{\"path\":\"%s\",\"old_string\":\"a\",\"new_string\":\"b\"}", path);
-    char *out = TOOL_EDIT.run(args, NULL, NULL);
+    char *out = TOOL_EDIT.run(args, NULL);
     free(args);
     EXPECT(strstr(out, "not a regular file") != NULL);
     free(out);
@@ -186,7 +186,7 @@ static void test_edit_nonexistent_file(void)
 {
     char *out = TOOL_EDIT.run("{\"path\":\"/nonexistent/hax/edit/path\",\"old_string\":\"a\","
                               "\"new_string\":\"b\"}",
-                              NULL, NULL);
+                              NULL);
     EXPECT(strstr(out, "error reading") != NULL);
     free(out);
 }

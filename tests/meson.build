@@ -34,6 +34,7 @@ test_sources = [
     'providers/test_anthropic_messages.c',
     'providers/test_codex.c',
     'providers/test_codex_events.c',
+    'providers/test_codex_messages.c',
     'providers/test_config_provider.c',
     'providers/test_llamacpp.c',
     'providers/test_openai_events.c',
@@ -64,6 +65,7 @@ test_sources = [
     'terminal/test_picker_core.c',
     'terminal/test_theme.c',
 
+    'text/test_base64.c',
     'text/test_utf8.c',
     'text/test_utf8_sanitize.c',
 
@@ -71,6 +73,7 @@ test_sources = [
     'tools/test_bash_cd_strip.c',
     'tools/test_bash_classify.c',
     'tools/test_edit.c',
+    'tools/test_image_sniff.c',
     'tools/test_read.c',
     'tools/test_write.c',
 

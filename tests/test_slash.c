@@ -15,11 +15,10 @@
 /* Stand-in tool symbols so agent_core.c (which references TOOLS[] in
  * agent_session_init) links. We never invoke .run; the tests touch
  * session items directly without going through any tool. */
-static char *stub_run(const char *args, tool_emit_display_fn emit, void *user)
+static char *stub_run(const char *args, struct tool_ctx *ctx)
 {
     (void)args;
-    (void)emit;
-    (void)user;
+    (void)ctx;
     return xstrdup("");
 }
 const struct tool TOOL_READ = {.def = {.name = "read"}, .run = stub_run};

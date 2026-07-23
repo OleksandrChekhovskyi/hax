@@ -42,8 +42,8 @@ struct probed_cmd {
     const char *replaces;
 };
 static const struct probed_cmd PROBED_COMMANDS[] = {
-    {"rg", "grep -r"}, {"fd", "find"},        {"jq", NULL},
-    {"gh", NULL},      {"python3", "python"}, {"node", NULL},
+    {"rg", "grep -r"},     {"fd", "find"}, {"jq", NULL},     {"gh", NULL},
+    {"python3", "python"}, {"node", NULL}, {"magick", NULL},
 };
 static const size_t N_PROBED_COMMANDS = sizeof(PROBED_COMMANDS) / sizeof(PROBED_COMMANDS[0]);
 

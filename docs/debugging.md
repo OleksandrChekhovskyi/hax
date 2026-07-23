@@ -75,9 +75,25 @@ Useful scripts in `scripts/`:
 | `diff_demo.txt` | Manual diff/rendering fixture. |
 | `pause_demo.txt` | Streaming-pause behavior fixture (no spinner over live text). |
 | `theme_demo.txt` | One-screen tour of the semantic color roles; run under each `HAX_THEME`. |
+| `vision_fixtures.py` | Deterministic image fixtures for testing model vision support. |
 
 `stream_demo.py` modes include `short`, `long`, `slow`, `burst`, `ansi`, `binary`, `piped`,
 and `python_buffer`.
+
+## Vision fixtures
+
+`scripts/vision_fixtures.py` writes small deterministic PNGs (default
+`/tmp/hax-vision-fixtures`) and prints, for each, the prompt to use and the expected answer —
+ask the model to `read` one and check that the answer matches. Each fixture isolates one
+question only the pixels can answer: a solid color to name (baseline pipeline check), a
+red/blue layout to locate, dots to count, block text to transcribe. `--edge` adds oversized
+fixtures the read tool must *refuse* (per-side pixel cap and byte cap), for exercising the
+downscale-hint error path. `docs/screenshot.png` doubles as a realistic text-heavy fixture.
+
+Capability detection can be pinned with `HAX_IMAGE_INPUT=on|off` (default `auto`: live
+llama.cpp `/props` or OpenRouter `/endpoints` probe, then models.dev catalog modalities).
+Wrong colors or counts indicate a pipeline bug; extra hallucinated detail on the layout
+fixture is model quality, not plumbing.
 
 ## Rendering and terminal knobs
 

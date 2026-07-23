@@ -100,6 +100,7 @@ sources = files(
     'src/terminal/theme.c',
     'src/terminal/ui.c',
 
+    'src/text/base64.c',
     'src/text/utf8.c',
     'src/text/utf8_sanitize.c',
 
@@ -109,6 +110,7 @@ sources = files(
     'src/tools/bash_export.c',
     'src/tools/bash_shell.c',
     'src/tools/edit.c',
+    'src/tools/image_sniff.c',
     'src/tools/path_preprocess.c',
     'src/tools/read.c',
     'src/tools/write.c',

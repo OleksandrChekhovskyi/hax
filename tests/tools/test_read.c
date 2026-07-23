@@ -28,7 +28,7 @@ static char *write_tmp(const void *data, size_t len)
 
 static char *call_read(const char *args_json)
 {
-    return TOOL_READ.run(args_json, NULL, NULL);
+    return TOOL_READ.run(args_json, NULL);
 }
 
 static void test_read_invalid_json(void)
@@ -627,6 +627,140 @@ static void test_read_display_extra(void)
     free(out);
 }
 
+/* A genuinely decodable 2x3 RGB PNG (IHDR + IDAT + IEND); `magick identify`
+ * accepts it. The read tool never decodes, but attachment requires a complete
+ * container, so the fixture must be a real image, not a header stub. */
+static const unsigned char TINY_PNG[] = {
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03, 0x08, 0x02, 0x00, 0x00, 0x00, 0x36, 0x88, 0x49,
+    0xd6, 0x00, 0x00, 0x00, 0x15, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x60, 0x80, 0x00, 0x8d,
+    0x80, 0x0a, 0x20, 0x62, 0x08, 0x58, 0xf0, 0x01, 0x88, 0x00, 0x1f, 0x05, 0x05, 0xa1, 0xfc, 0xf8,
+    0x4b, 0x42, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+};
+
+static void test_read_image_attached(void)
+{
+    struct tool_ctx ctx = {.image_input = 1};
+    char *path = write_tmp(TINY_PNG, sizeof(TINY_PNG));
+    char *args = xasprintf("{\"path\":\"%s\"}", path);
+    char *out = TOOL_READ.run(args, &ctx);
+    EXPECT(strstr(out, "Read image") != NULL);
+    EXPECT(strstr(out, "image/png") != NULL);
+    EXPECT(strstr(out, "2x3") != NULL);
+
+    EXPECT(ctx.n_images == 1);
+    EXPECT(ctx.images != NULL);
+    EXPECT_STR_EQ(ctx.images[0].mime, "image/png");
+    EXPECT(ctx.images[0].width == 2 && ctx.images[0].height == 3);
+    /* Base64 of the exact file bytes: decodes back to the same length. */
+    EXPECT(ctx.images[0].data_b64 &&
+           strlen(ctx.images[0].data_b64) == (sizeof(TINY_PNG) + 2) / 3 * 4);
+    free(ctx.images[0].mime);
+    free(ctx.images[0].data_b64);
+    free(ctx.images);
+
+    free(out);
+    free(args);
+    unlink(path);
+    free(path);
+}
+
+static void test_read_image_model_without_vision(void)
+{
+    struct tool_ctx ctx = {.image_input = 0};
+    char *path = write_tmp(TINY_PNG, sizeof(TINY_PNG));
+    char *args = xasprintf("{\"path\":\"%s\"}", path);
+    char *out = TOOL_READ.run(args, &ctx);
+    EXPECT(strstr(out, "does not accept image input") != NULL);
+    EXPECT(ctx.n_images == 0);
+    EXPECT(ctx.images == NULL);
+    free(out);
+    free(args);
+
+    /* NULL ctx means "nowhere to attach" and must behave the same way,
+     * not crash or leak. */
+    args = xasprintf("{\"path\":\"%s\"}", path);
+    out = call_read(args);
+    EXPECT(strstr(out, "does not accept image input") != NULL);
+    free(out);
+    free(args);
+
+    unlink(path);
+    free(path);
+}
+
+static void test_read_image_oversize_quotes_path(void)
+{
+    /* A complete, decodable 1x9000 PNG: it trips the per-side cap, and being
+     * a valid image it reaches the size check rather than the malformed one.
+     * The filename carries a single quote: the downscale hint embeds the path
+     * in shell, so it must escape rather than let the quote break out. */
+    unsigned char png[] = {
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+        0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x23, 0x28, 0x08, 0x02, 0x00, 0x00,
+        0x00, 0x4e, 0x81, 0x24, 0x21, 0x00, 0x00, 0x00, 0x40, 0x49, 0x44, 0x41, 0x54, 0x78,
+        0xda, 0xed, 0xc3, 0x31, 0x0d, 0x00, 0x00, 0x08, 0x03, 0xb0, 0x49, 0x43, 0x1a, 0xd2,
+        0x26, 0x0d, 0x1b, 0x1c, 0x6d, 0xd2, 0xcc, 0x36, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
+        0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
+        0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
+        0xea, 0x8b, 0x07, 0x06, 0xa5, 0xbf, 0x0d, 0x5d, 0x0d, 0xf5, 0x28, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82};
+    char *dir = t_tempdir();
+    char *path = xasprintf("%s/a'b.png", dir);
+    FILE *f = fopen(path, "wb");
+    EXPECT(f != NULL);
+    if (f) {
+        fwrite(png, 1, sizeof(png), f);
+        fclose(f);
+    }
+    struct tool_ctx ctx = {.image_input = 1};
+    char *args = xasprintf("{\"path\":\"%s\"}", path);
+    char *out = TOOL_READ.run(args, &ctx);
+    /* Over the side cap → a downscale hint, no image attached. */
+    EXPECT(strstr(out, "per side") != NULL);
+    EXPECT(ctx.n_images == 0);
+    /* The descriptive prefix ("<path> is WxH") shows the path verbatim, but
+     * the suggested shell command must quote it: shell_single_quote turns
+     * a'b into a'\''b. Only assert when a resize tool was found and a
+     * command was emitted (the no-tool branch has no command to check). */
+    if (strstr(out, "e.g.:"))
+        EXPECT(strstr(out, "a'\\''b.png") != NULL);
+    free(out);
+    free(args);
+    free(path);
+}
+
+/* Recognized image signatures that are not complete images must be refused,
+ * not attached: providers reject undecodable bytes and an attached one would
+ * persist in history and re-fail every turn. The refusal stays recoverable. */
+static void refuse_incomplete(const unsigned char *bytes, size_t len)
+{
+    struct tool_ctx ctx = {.image_input = 1};
+    char *path = write_tmp(bytes, len);
+    char *args = xasprintf("{\"path\":\"%s\"}", path);
+    char *out = TOOL_READ.run(args, &ctx);
+    EXPECT(strstr(out, "truncated or malformed") != NULL);
+    EXPECT(strstr(out, "image/png") != NULL);
+    EXPECT(ctx.n_images == 0);
+    EXPECT(ctx.images == NULL);
+    free(out);
+    free(args);
+    unlink(path);
+    free(path);
+}
+
+static void test_read_image_malformed_not_attached(void)
+{
+    /* Bare signature: recognized as image/png, but no IHDR means no dims. */
+    static const unsigned char SIG_ONLY[] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
+    refuse_incomplete(SIG_ONLY, sizeof(SIG_ONLY));
+
+    /* Valid header and dimensions but a truncated body (no IEND) — the
+     * classic partial download. Dims parse fine, so only the completeness
+     * check catches it. TINY_PNG minus its 12-byte IEND chunk. */
+    refuse_incomplete(TINY_PNG, sizeof(TINY_PNG) - 12);
+}
+
 int main(void)
 {
     /* The byte cap is the env-tunable knob; pin it to 256K so the tests
@@ -660,5 +794,9 @@ int main(void)
     test_read_past_eof_counts_trailing_line_in_skip_mode();
     test_read_refuses_special_file();
     test_read_display_extra();
+    test_read_image_attached();
+    test_read_image_model_without_vision();
+    test_read_image_oversize_quotes_path();
+    test_read_image_malformed_not_attached();
     T_REPORT();
 }

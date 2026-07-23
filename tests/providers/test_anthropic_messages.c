@@ -31,7 +31,7 @@ static const char *block_type(json_t *block)
 static void test_user_message(void)
 {
     struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
-    json_t *msgs = anthropic_build_messages(items, 1, "anthropic", "m", 0);
+    json_t *msgs = anthropic_build_messages(items, 1, "anthropic", "m", 0, -1);
     EXPECT(json_array_size(msgs) == 1);
     EXPECT_STR_EQ(role_of(msg_at(msgs, 0)), "user");
     json_t *blocks = content_of(msg_at(msgs, 0));
@@ -57,7 +57,7 @@ static void test_assistant_group_thinking_text_tool(void)
          .tool_name = "bash",
          .tool_arguments_json = "{\"cmd\":\"ls\"}"},
     };
-    json_t *msgs = anthropic_build_messages(items, 3, "anthropic", "m", 0);
+    json_t *msgs = anthropic_build_messages(items, 3, "anthropic", "m", 0, -1);
     EXPECT(json_array_size(msgs) == 1);
     json_t *a = msg_at(msgs, 0);
     EXPECT_STR_EQ(role_of(a), "assistant");
@@ -90,7 +90,7 @@ static void test_empty_signature_policy(void)
     };
 
     /* allow_empty_signature = 0 → downgrade thinking to a text block. */
-    json_t *strict = anthropic_build_messages(items, 2, "anthropic", "m", 0);
+    json_t *strict = anthropic_build_messages(items, 2, "anthropic", "m", 0, -1);
     json_t *sb = content_of(msg_at(strict, 0));
     EXPECT(json_array_size(sb) == 2);
     EXPECT_STR_EQ(block_type(json_array_get(sb, 0)), "text"); /* was thinking */
@@ -99,7 +99,7 @@ static void test_empty_signature_policy(void)
     json_decref(strict);
 
     /* allow_empty_signature = 1 → keep the thinking block verbatim. */
-    json_t *loose = anthropic_build_messages(items, 2, "anthropic", "m", 1);
+    json_t *loose = anthropic_build_messages(items, 2, "anthropic", "m", 1, -1);
     json_t *lb = content_of(msg_at(loose, 0));
     EXPECT_STR_EQ(block_type(json_array_get(lb, 0)), "thinking");
     json_decref(loose);
@@ -116,7 +116,7 @@ static void test_reasoning_provenance_mismatch_dropped(void)
          .model = "old-model"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "hi"},
     };
-    json_t *msgs = anthropic_build_messages(items, 2, "anthropic", "new-model", 0);
+    json_t *msgs = anthropic_build_messages(items, 2, "anthropic", "new-model", 0, -1);
     json_t *blocks = content_of(msg_at(msgs, 0));
     EXPECT(json_array_size(blocks) == 1); /* thinking dropped, only text */
     EXPECT_STR_EQ(block_type(json_array_get(blocks, 0)), "text");
@@ -131,7 +131,7 @@ static void test_tool_results_coalesced(void)
         {.kind = ITEM_TOOL_RESULT, .call_id = "a", .output = "out-a"},
         {.kind = ITEM_TOOL_RESULT, .call_id = "b", .output = "out-b"},
     };
-    json_t *msgs = anthropic_build_messages(items, 2, "anthropic", "m", 0);
+    json_t *msgs = anthropic_build_messages(items, 2, "anthropic", "m", 0, -1);
     EXPECT(json_array_size(msgs) == 1);
     json_t *u = msg_at(msgs, 0);
     EXPECT_STR_EQ(role_of(u), "user");
@@ -155,7 +155,7 @@ static void test_redacted_thinking_replayed(void)
          .model = "m"},
         {.kind = ITEM_TOOL_CALL, .call_id = "t", .tool_name = "x", .tool_arguments_json = "{}"},
     };
-    json_t *msgs = anthropic_build_messages(items, 2, "anthropic", "m", 0);
+    json_t *msgs = anthropic_build_messages(items, 2, "anthropic", "m", 0, -1);
     json_t *blocks = content_of(msg_at(msgs, 0));
     EXPECT(json_array_size(blocks) == 2);
     EXPECT_STR_EQ(block_type(json_array_get(blocks, 0)), "redacted_thinking");
@@ -173,11 +173,65 @@ static void test_tool_call_bad_args_empty_object(void)
          .tool_name = "x",
          .tool_arguments_json = "not json"},
     };
-    json_t *msgs = anthropic_build_messages(items, 1, "anthropic", "m", 0);
+    json_t *msgs = anthropic_build_messages(items, 1, "anthropic", "m", 0, -1);
     json_t *tu = json_array_get(content_of(msg_at(msgs, 0)), 0);
     json_t *input = json_object_get(tu, "input");
     EXPECT(json_is_object(input));
     EXPECT(json_object_size(input) == 0);
+    json_decref(msgs);
+}
+
+/* A tool result carrying an image part: with image input the content
+ * switches to a block array (text + base64 image); without it the image
+ * degrades to a text placeholder block. */
+static void test_tool_result_image(void)
+{
+    struct item_image imgs[] = {
+        {.mime = "image/png", .data_b64 = "QUJD", .width = 4, .height = 2},
+    };
+    struct item items[] = {
+        {.kind = ITEM_TOOL_RESULT,
+         .call_id = "toolu_9",
+         .output = "Read image x.png",
+         .images = imgs,
+         .n_images = 1},
+    };
+
+    json_t *msgs = anthropic_build_messages(items, 1, "anthropic", "m", 0, 1);
+    json_t *content = content_of(msg_at(msgs, 0));
+    json_t *tr = json_array_get(content, 0);
+    EXPECT_STR_EQ(block_type(tr), "tool_result");
+    json_t *blocks = json_object_get(tr, "content");
+    EXPECT(json_is_array(blocks));
+    EXPECT(json_array_size(blocks) == 2);
+    EXPECT_STR_EQ(block_type(json_array_get(blocks, 0)), "text");
+    json_t *img = json_array_get(blocks, 1);
+    EXPECT_STR_EQ(block_type(img), "image");
+    json_t *src = json_object_get(img, "source");
+    EXPECT_STR_EQ(json_string_value(json_object_get(src, "type")), "base64");
+    EXPECT_STR_EQ(json_string_value(json_object_get(src, "media_type")), "image/png");
+    EXPECT_STR_EQ(json_string_value(json_object_get(src, "data")), "QUJD");
+    json_decref(msgs);
+
+    /* image_input == 0: the part becomes a text placeholder block. */
+    msgs = anthropic_build_messages(items, 1, "anthropic", "m", 0, 0);
+    tr = json_array_get(content_of(msg_at(msgs, 0)), 0);
+    blocks = json_object_get(tr, "content");
+    EXPECT(json_array_size(blocks) == 2);
+    json_t *ph = json_array_get(blocks, 1);
+    EXPECT_STR_EQ(block_type(ph), "text");
+    const char *text = json_string_value(json_object_get(ph, "text"));
+    EXPECT(text && strstr(text, "[image:") != NULL);
+    EXPECT(strstr(text, "image/png") != NULL);
+    json_decref(msgs);
+
+    /* A plain result (no images) keeps the string content shape. */
+    struct item plain[] = {
+        {.kind = ITEM_TOOL_RESULT, .call_id = "toolu_9", .output = "ok"},
+    };
+    msgs = anthropic_build_messages(plain, 1, "anthropic", "m", 0, 1);
+    tr = json_array_get(content_of(msg_at(msgs, 0)), 0);
+    EXPECT(json_is_string(json_object_get(tr, "content")));
     json_decref(msgs);
 }
 
@@ -190,5 +244,6 @@ int main(void)
     test_tool_results_coalesced();
     test_redacted_thinking_replayed();
     test_tool_call_bad_args_empty_object();
+    test_tool_result_image();
     T_REPORT();
 }

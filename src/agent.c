@@ -1344,7 +1344,7 @@ static void repl_loop_tool_seen(const struct item *call, void *user)
 }
 
 static struct item repl_loop_tool_call(const struct item *call, enum agent_loop_tool_action action,
-                                       void *user)
+                                       int image_input, void *user)
 {
     struct repl_loop_ctx *ctx = user;
     struct render_ctx *r = ctx->state->r;
@@ -1356,7 +1356,7 @@ static struct item repl_loop_tool_call(const struct item *call, enum agent_loop_
         render_transition(r, RS_IDLE);
         return dispatch_tool_skipped(r, call);
     }
-    return dispatch_tool_call(r, call);
+    return dispatch_tool_call(r, call, image_input);
 }
 
 static void repl_loop_compact(void *user)

@@ -362,6 +362,18 @@ static void render_diff_body(FILE *out, const char *text)
     ensure_newline(out, text);
 }
 
+/* Images never inline into the text log — megabytes of base64 are noise,
+ * not fidelity (HAX_TRACE remains the literal wire view). Each part
+ * renders as one self-describing placeholder line instead. */
+static void render_result_images(FILE *out, int color, const struct item *it)
+{
+    for (size_t i = 0; i < it->n_images; i++) {
+        char *ph = item_image_placeholder(&it->images[i]);
+        fprintf(out, "%s%s%s\n", ANSI_IF(ANSI_DIM), ph, ANSI_IF(ANSI_RESET));
+        free(ph);
+    }
+}
+
 /* `tool_name` comes from the paired TOOL_CALL (results don't carry one);
  * NULL for orphan results. It gates the styled body renderers for the
  * file tools — content stays byte-exact in every mode, styling is pure
@@ -374,6 +386,7 @@ static void render_tool_result(FILE *out, int color, const struct item *it, cons
 {
     const char *text = it->output ? it->output : "";
     section(out, color, "tool result");
+    render_result_images(out, color, it);
     if (color && tool_name) {
         if (strcmp(tool_name, "read") == 0) {
             render_read_body(out, text);

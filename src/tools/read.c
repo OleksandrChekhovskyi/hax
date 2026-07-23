@@ -10,9 +10,19 @@
 
 #include "tool.h"
 #include "util.h"
+#include "system/fs.h"
 #include "system/path.h"
-#include "tools/path_preprocess.h"
+#include "text/base64.h"
 #include "text/utf8_sanitize.h"
+#include "tools/image_sniff.h"
+#include "tools/path_preprocess.h"
+
+/* Raw ceiling for an attached image: 3/4 of the 5 MB base64 cap that is
+ * the strictest common API limit (Anthropic rejects bigger payloads). */
+#define READ_IMAGE_MAX_BYTES ((size_t)5 * 1024 * 1024 / 4 * 3)
+/* Per-side pixel ceiling: Anthropic rejects above 8000px. The suggested
+ * resize target is the token-optimal ~1568px, not this ceiling. */
+#define READ_IMAGE_MAX_SIDE 8000L
 
 enum read_trunc {
     TRUNC_NONE,
@@ -276,10 +286,119 @@ end_loop:
     return 0;
 }
 
-static char *run(const char *args_json, tool_emit_display_fn emit_display, void *user)
+/* Actionable downscale suggestion for an oversized image, naming a tool
+ * that is actually installed. The resize geometry only shrinks (`>`),
+ * never enlarges. Caller frees. */
+static char *downscale_hint(const char *path)
 {
-    (void)emit_display;
-    (void)user;
+    /* The path is model-facing shell in a command the model may run
+     * verbatim — quote it so a filename with a space or a `'` produces a
+     * valid command and can't break out of the quoting into injection.
+     * A relative path starting with `-` also needs a `./` prefix, or the
+     * image tool parses it as an option rather than a filename. */
+    char *q = shell_single_quote(path);
+    const char *dot = path[0] == '-' ? "./" : "";
+    const char *im = NULL;
+    char *tool;
+    if ((tool = fs_which("magick")))
+        im = "magick";
+    else if ((tool = fs_which("convert")))
+        im = "convert"; /* ImageMagick 6 */
+    char *hint;
+    if (im) {
+        free(tool);
+        hint = xasprintf("downscale it first, e.g.: %s %s%s -resize '1568x1568>' "
+                         "/tmp/downscaled.png — then read the copy",
+                         im, dot, q);
+    } else if ((tool = fs_which("sips"))) {
+        free(tool);
+        hint = xasprintf("downscale it first, e.g.: sips -Z 1568 %s%s --out /tmp/downscaled.png "
+                         "— then read the copy",
+                         dot, q);
+    } else {
+        hint = xstrdup("downscale it first (no ImageMagick found on PATH; ask the user how "
+                       "they'd like to resize it)");
+    }
+    free(q);
+    return hint;
+}
+
+/* Image branch of run(): attach the file as an image part (via ctx)
+ * alongside a short text note. `path` is borrowed; the caller still
+ * owns/frees it. A NULL ctx has nowhere to attach, which is the same
+ * outcome as a model without image input. */
+static char *run_image(const char *path, size_t file_size, struct tool_ctx *ctx)
+{
+    if (!ctx || ctx->image_input == 0)
+        return xasprintf("%s is an image, but the current model does not accept image input, "
+                         "so it was not attached. Ask the user to switch to a vision-capable "
+                         "model (or set image_input=on if this detection is wrong).",
+                         path);
+
+    if (file_size > READ_IMAGE_MAX_BYTES) {
+        char *hint = downscale_hint(path);
+        char *msg = xasprintf("%s is %zu bytes; images over %zu bytes exceed provider "
+                              "limits — %s.",
+                              path, file_size, READ_IMAGE_MAX_BYTES, hint);
+        free(hint);
+        return msg;
+    }
+
+    size_t n = 0;
+    int truncated = 0;
+    char *data = slurp_file_capped(path, READ_IMAGE_MAX_BYTES, &n, &truncated);
+    if (!data || truncated) { /* grew past the stat; treat as read error */
+        free(data);
+        return xasprintf("error reading %s: file changed while reading", path);
+    }
+
+    struct image_info info;
+    if (!image_sniff(data, n, &info)) { /* raced with a rewrite; be safe */
+        free(data);
+        return xasprintf("error reading %s: file changed while reading", path);
+    }
+
+    /* Missing dimensions or a missing end marker means a truncated or
+     * malformed file. Providers reject undecodable images, and an attached
+     * one persists in history and re-fails every turn — refuse to attach it.
+     * Checked before the size cap: a downscale hint is useless on a file no
+     * tool can decode. */
+    if (info.width <= 0 || info.height <= 0 || !info.complete) {
+        free(data);
+        return xasprintf("%s looks like %s but is truncated or malformed, so it was not "
+                         "attached. Check that the file is a complete image.",
+                         path, info.mime);
+    }
+
+    if (info.width > READ_IMAGE_MAX_SIDE || info.height > READ_IMAGE_MAX_SIDE) {
+        char *hint = downscale_hint(path);
+        char *msg = xasprintf("%s is %ldx%ld; images over %ldpx per side exceed provider "
+                              "limits — %s.",
+                              path, info.width, info.height, READ_IMAGE_MAX_SIDE, hint);
+        free(hint);
+        free(data);
+        return msg;
+    }
+
+    struct item_image *img = xcalloc(1, sizeof(*img));
+    img->mime = xstrdup(info.mime);
+    img->data_b64 = base64_encode(data, n, NULL);
+    img->width = info.width;
+    img->height = info.height;
+    free(data);
+    ctx->images = img;
+    ctx->n_images = 1;
+
+    /* Neutral metadata only — no "attached" claim. The pixels ride as an
+     * image block when the model accepts them; a text-only model (or a
+     * budget/limit drop) sees just this line plus a placeholder, so the text
+     * must not assert the model saw an image it didn't. */
+    return xasprintf("Read image %s (%s, %ldx%ld, %zu bytes).", path, info.mime, info.width,
+                     info.height, n);
+}
+
+static char *run(const char *args_json, struct tool_ctx *ctx)
+{
     json_error_t jerr;
     json_t *root = json_loads(args_json ? args_json : "{}", 0, &jerr);
     if (!root)
@@ -339,6 +458,28 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
         free(path);
         json_decref(root);
         return msg;
+    }
+
+    /* Images take a separate path — sniff the signature before the text
+     * reader's NUL check refuses them as binary. offset/limit make no
+     * sense for pixels and are ignored. */
+    {
+        unsigned char head[16];
+        ssize_t got = -1;
+        int fd = open(path, O_RDONLY);
+        if (fd >= 0) {
+            do {
+                got = read(fd, head, sizeof(head));
+            } while (got < 0 && errno == EINTR);
+            close(fd);
+        }
+        struct image_info info;
+        if (got > 0 && image_sniff(head, (size_t)got, &info)) {
+            char *msg = run_image(path, (size_t)st.st_size, ctx);
+            free(path);
+            json_decref(root);
+            return msg;
+        }
     }
 
     size_t cap = output_cap_bytes();
@@ -459,7 +600,9 @@ const struct tool TOOL_READ = {
                 "NOT part of the file on disk; do not include it in `edit` tool "
                 "`old_string`/`new_string` "
                 "arguments. Optional 1-indexed line `offset` and `limit` slice a range; "
-                "without them, the whole file is returned.",
+                "without them, the whole file is returned. Image files (PNG/JPEG/GIF/WebP) "
+                "are detected by content and attached to the result as images when the "
+                "model supports image input.",
             .parameters_schema_json =
                 "{\"type\":\"object\","
                 "\"properties\":{"

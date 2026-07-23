@@ -1268,7 +1268,7 @@ static char *resolve_call_timeout_ms(json_t *root, long *out_ms)
     return NULL;
 }
 
-static char *run(const char *args_json, tool_emit_display_fn emit_display, void *user)
+static char *run(const char *args_json, struct tool_ctx *ctx)
 {
     json_error_t jerr;
     json_t *root = json_loads(args_json ? args_json : "{}", 0, &jerr);
@@ -1288,7 +1288,8 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
         return err;
     }
 
-    char *out = run_shell(cmd, timeout_ms, emit_display, user);
+    char *out =
+        run_shell(cmd, timeout_ms, ctx ? ctx->emit_display : NULL, ctx ? ctx->emit_user : NULL);
     json_decref(root);
     return out;
 }

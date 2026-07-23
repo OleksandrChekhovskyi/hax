@@ -41,6 +41,16 @@ enum item_kind {
     ITEM_TURN_USAGE,
 };
 
+/* One inline image carried by an item: base64 payload plus the metadata
+ * adapters, display, and persistence need. Dimensions are parsed from the
+ * image header at ingestion (0 = unknown). */
+struct item_image {
+    char *mime;     /* "image/png", "image/jpeg", "image/gif", "image/webp" */
+    char *data_b64; /* owned base64 payload */
+    long width;
+    long height;
+};
+
 struct item {
     enum item_kind kind;
     /* USER_MESSAGE / ASSISTANT_MESSAGE: */
@@ -52,6 +62,12 @@ struct item {
     char *tool_arguments_json;
     /* TOOL_RESULT: */
     char *output;
+    /* TOOL_RESULT: images attached alongside `output` (owned array of
+     * owned members; freed by item_free). Adapters serialize them as
+     * native image blocks or text placeholders depending on
+     * context.image_input (see below). NULL/0 everywhere else. */
+    struct item_image *images;
+    size_t n_images;
     /* REASONING round-trip form (Codex): full JSON object (e.g.
      * {"type":"reasoning","id":...,"summary":[...],"encrypted_content":...})
      * ready to be re-sent. This is what the model needs back. */
@@ -87,6 +103,38 @@ struct item {
 
 void item_free(struct item *it);
 
+/* One-line text stand-in for an image part — "[image: image/png,
+ * 1232x800, 240.1 KiB]" — used wherever pixels can't go (the transcript
+ * log, adapters serializing for a model without image input). Caller
+ * frees. */
+char *item_image_placeholder(const struct item_image *img);
+
+/* Aggregate limits on the images a conversation may hold, enforced at
+ * ingestion (a `read` that would exceed either doesn't attach — see
+ * image_budget_enforce) so history never accumulates past what the
+ * strictest backend accepts and no request — including /compact — can
+ * wedge on a permanently-rejected payload.
+ *
+ * Bytes: Anthropic rejects any request over 32 MB, and that ceiling covers
+ * the whole JSON body — system prompt (including AGENTS.md), tool schemas,
+ * and text history — not just the images. Budgeting images well under it
+ * reserves a worst-case margin for that non-image content, so even a
+ * /compact request (which resends the full history) stays admissible. 20 MB
+ * of base64 is still several full-size images or the whole count cap of
+ * small ones.
+ *
+ * Count: Anthropic allows at most 100 images per request AND drops the
+ * per-image dimension limit from 8000px to 2000px once more than 20 are
+ * present. Capping at 20 stays in that most-permissive tier — under the
+ * 100 limit and preserving the full per-image dimension cap (see
+ * READ_IMAGE_MAX_SIDE) — so no count-dependent dimension logic is needed. */
+#define IMAGE_REQUEST_BUDGET_B64 ((size_t)20 * 1024 * 1024)
+#define IMAGE_REQUEST_MAX_COUNT  20
+
+/* Total base64 bytes / total image-part count across `items`. */
+size_t images_total_b64(const struct item *items, size_t n);
+size_t images_total_count(const struct item *items, size_t n);
+
 struct tool_def {
     const char *name;
     const char *description;
@@ -106,6 +154,14 @@ struct context {
      * own default. Values like "minimal"/"low"/"medium"/"high"/"xhigh" are
      * passed through unchanged — hax doesn't validate or clamp. */
     const char *effort;
+    /* Does the target model accept image input? 1 yes, 0 no, -1 unknown.
+     * Unknown is treated as yes throughout: a wrong yes surfaces as a
+     * recoverable provider error, a wrong no silently drops content.
+     * Filled by the agent (agent_image_input). Adapters serialize
+     * tool-result image parts as native image blocks when nonzero and as
+     * text placeholders when 0 — a resumed or model-switched conversation
+     * must not send pixels to a text-only model. */
+    int image_input;
 };
 
 /* Token accounting for one completed response. -1 means "not reported by
@@ -334,9 +390,10 @@ struct provider {
      * and spawn a fresh probe for `model`. NULL when the limit isn't
      * model-specific — fixed, absent, or sourced only from
      * HAX_CONTEXT_LIMIT (which the agent honors ahead of this slot anyway).
-     * Only codex and openrouter, whose catalogs key the window by model,
-     * implement it; the local backends report server/loaded-model state a
-     * probe can't meaningfully re-derive on a switch. */
+     * codex and openrouter key the window by model via their catalogs;
+     * llama.cpp re-probes /props for the selected model (router mode serves
+     * several, differing in window and vision capability). Providers whose
+     * window is fixed or absent leave it NULL. */
     void (*refresh_context)(struct provider *p, const char *model);
     void (*destroy)(struct provider *p);
     /* Auto-discovered model context window in tokens. 0 = unknown (no
@@ -351,6 +408,20 @@ struct provider {
      * worker that writes here and are responsible for joining it in
      * their destroy() before any teardown that could free this slot. */
     _Atomic long context_limit;
+    /* Auto-discovered image-input capability of the active model, when
+     * the backend itself can answer (llama-server /props, OpenRouter
+     * /endpoints). enum provider_image_input values; UNKNOWN (0, the
+     * calloc default) falls back to the catalog. A live answer beats the
+     * catalog — llama.cpp vision depends on the mmproj loaded on this
+     * server instance, which no catalog can know. Same atomicity and
+     * ownership rules as context_limit. */
+    _Atomic long image_input;
+};
+
+enum provider_image_input {
+    PROVIDER_IMG_UNKNOWN = 0,
+    PROVIDER_IMG_YES = 1,
+    PROVIDER_IMG_NO = 2,
 };
 
 /* Static provider descriptor. Each provider .c file defines exactly one

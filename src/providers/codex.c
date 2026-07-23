@@ -287,8 +287,37 @@ static char *jwt_extract_email(const char *jwt)
 
 /* ---------- request body construction ---------- */
 
-static json_t *build_input_items(const struct item *items, size_t n, const char *provider,
-                                 const char *model)
+/* function_call_output.output for a result carrying images: the Responses
+ * API accepts an array of content items in place of the plain string —
+ * text as input_text, images as input_image with a base64 data URL (the
+ * exact shape codex-rs sends). When the model lacks image input each part
+ * degrades to an input_text placeholder instead. */
+static json_t *build_output_with_images(const struct item *it, int image_input)
+{
+    json_t *content = json_array();
+    if (it->output && *it->output)
+        json_array_append_new(content,
+                              json_pack("{s:s, s:s}", "type", "input_text", "text", it->output));
+    for (size_t k = 0; k < it->n_images; k++) {
+        const struct item_image *img = &it->images[k];
+        if (image_input != 0) {
+            char *url = xasprintf("data:%s;base64,%s", img->mime ? img->mime : "image/png",
+                                  img->data_b64 ? img->data_b64 : "");
+            json_array_append_new(content,
+                                  json_pack("{s:s, s:s}", "type", "input_image", "image_url", url));
+            free(url);
+        } else {
+            char *ph = item_image_placeholder(img);
+            json_array_append_new(content,
+                                  json_pack("{s:s, s:s}", "type", "input_text", "text", ph));
+            free(ph);
+        }
+    }
+    return content;
+}
+
+json_t *codex_build_input_items(const struct item *items, size_t n, const char *provider,
+                                const char *model, int image_input)
 {
     json_t *arr = json_array();
     for (size_t i = 0; i < n; i++) {
@@ -319,8 +348,14 @@ static json_t *build_input_items(const struct item *items, size_t n, const char 
                             it->tool_arguments_json ? it->tool_arguments_json : "{}");
             break;
         case ITEM_TOOL_RESULT:
-            obj = json_pack("{s:s, s:s, s:s}", "type", "function_call_output", "call_id",
-                            it->call_id ? it->call_id : "", "output", it->output ? it->output : "");
+            if (it->n_images > 0)
+                obj = json_pack("{s:s, s:s, s:o}", "type", "function_call_output", "call_id",
+                                it->call_id ? it->call_id : "", "output",
+                                build_output_with_images(it, image_input));
+            else
+                obj = json_pack("{s:s, s:s, s:s}", "type", "function_call_output", "call_id",
+                                it->call_id ? it->call_id : "", "output",
+                                it->output ? it->output : "");
             break;
         case ITEM_REASONING:
             /* The blob was already whitelisted to valid input fields when we
@@ -371,12 +406,12 @@ static char *build_body(const struct context *ctx, const char *provider, const c
     json_t *include = json_array();
     json_array_append_new(include, json_string("reasoning.encrypted_content"));
 
-    json_t *body =
-        json_pack("{s:s, s:b, s:b, s:s, s:o, s:o, s:{s:s}, s:s, s:b, s:o}", "model", model, "store",
-                  0, "stream", 1, "instructions", ctx->system_prompt ? ctx->system_prompt : "",
-                  "input", build_input_items(ctx->items, ctx->n_items, provider, model), "include",
-                  include, "text", "verbosity", "low", "tool_choice", "auto", "parallel_tool_calls",
-                  1, "tools", build_tools(ctx->tools, ctx->n_tools));
+    json_t *body = json_pack(
+        "{s:s, s:b, s:b, s:s, s:o, s:o, s:{s:s}, s:s, s:b, s:o}", "model", model, "store", 0,
+        "stream", 1, "instructions", ctx->system_prompt ? ctx->system_prompt : "", "input",
+        codex_build_input_items(ctx->items, ctx->n_items, provider, model, ctx->image_input),
+        "include", include, "text", "verbosity", "low", "tool_choice", "auto",
+        "parallel_tool_calls", 1, "tools", build_tools(ctx->tools, ctx->n_tools));
 
     if (cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(cache_key));
@@ -583,11 +618,11 @@ static void spawn_context_probe(struct codex *c, const char *model)
     a->headers[4] = xstrdup("Accept: application/json");
     a->headers[5] = NULL;
     a->timeout_s = CODEX_PROBE_TIMEOUT_S;
-    a->extract = extract_codex_context;
+    a->fields[0].extract = extract_codex_context;
+    a->fields[0].target = &c->base.context_limit;
     a->user = xstrdup(model);
     a->free_user = free;
-    a->target = &c->base.context_limit;
-    c->probe = probe_context_limit_spawn(a);
+    c->probe = probe_spawn(a);
 }
 
 /* /model switched the model under us: the catalog keys the context window by

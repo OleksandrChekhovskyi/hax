@@ -48,15 +48,20 @@ static void probe_run(struct bg_job *job, void *arg)
         rc = http_get(a->url, (const char *const *)a->headers, a->timeout_s, 0, bg_job_tick, job,
                       &body, NULL);
     if (rc == 0 && body) {
-        long v = a->extract(body, a->user);
-        if (v > 0)
-            atomic_store(a->target, v);
+        for (size_t i = 0; i < PROBE_FIELDS_MAX; i++) {
+            const struct probe_field *f = &a->fields[i];
+            if (!f->extract)
+                continue;
+            long v = f->extract(body, a->user);
+            if (v > 0)
+                atomic_store(f->target, v);
+        }
     }
     free(body);
     probe_args_free(a);
 }
 
-struct bg_job *probe_context_limit_spawn(struct probe_args *args)
+struct bg_job *probe_spawn(struct probe_args *args)
 {
     if (!args)
         return NULL;

@@ -16,11 +16,10 @@
  * &TOOL_READ / &TOOL_EDIT / &TOOL_WRITE / &TOOL_BASH, so the test binary
  * needs definitions to satisfy the linker. We fill in just enough for
  * find_tool's name lookup; .run is never invoked in these tests. */
-static char *stub_run(const char *args, tool_emit_display_fn emit, void *user)
+static char *stub_run(const char *args, struct tool_ctx *ctx)
 {
     (void)args;
-    (void)emit;
-    (void)user;
+    (void)ctx;
     return xstrdup("");
 }
 
@@ -678,6 +677,32 @@ static void test_turn_usage_make(void)
     }
 }
 
+static void test_agent_image_input_resolution(void)
+{
+    struct provider p = {.name = "x"};
+
+    /* No probe answer, no catalog identity: unknown. */
+    EXPECT(agent_image_input(&p, "m") == -1);
+    EXPECT(agent_image_input(NULL, NULL) == -1);
+
+    /* A live probe answer decides. */
+    atomic_store(&p.image_input, PROVIDER_IMG_YES);
+    EXPECT(agent_image_input(&p, "m") == 1);
+    atomic_store(&p.image_input, PROVIDER_IMG_NO);
+    EXPECT(agent_image_input(&p, "m") == 0);
+
+    /* The config tristate pins the answer over any probe result; "auto"
+     * (the default) falls through to detection. */
+    setenv("HAX_IMAGE_INPUT", "on", 1);
+    EXPECT(agent_image_input(&p, "m") == 1);
+    setenv("HAX_IMAGE_INPUT", "off", 1);
+    atomic_store(&p.image_input, PROVIDER_IMG_YES);
+    EXPECT(agent_image_input(&p, "m") == 0);
+    setenv("HAX_IMAGE_INPUT", "auto", 1);
+    EXPECT(agent_image_input(&p, "m") == 1);
+    unsetenv("HAX_IMAGE_INPUT");
+}
+
 int main(void)
 {
     test_items_append_growth();
@@ -700,5 +725,6 @@ int main(void)
     test_format_stats_segments_selection();
     test_spend_accounting();
     test_turn_usage_make();
+    test_agent_image_input_resolution();
     T_REPORT();
 }

@@ -96,6 +96,9 @@ static const struct config_setting REGISTRY[] = {
      .desc = "Path to a wire-level HTTP/SSE trace dump; empty disables"},
 
     /* tools */
+    {.key = "image_input", .env = "HAX_IMAGE_INPUT", .def = "auto",
+     .desc = "Let the model view images via the read tool; auto detects per provider/model",
+     .choices = CONFIG_CHOICES_TRISTATE, .runtime = 1},
     {.key = "tool_output_cap", .env = "HAX_TOOL_OUTPUT_CAP", .def = "50k",
      .desc = "Max bytes captured from a tool's output",
      .kind = CFG_SIZE, .runtime = 1},

@@ -215,6 +215,7 @@ static char *compact_summarize(const struct agent_session *s, struct provider *p
             .tools = s->tools,
             .n_tools = s->n_tools,
             .effort = s->effort,
+            .image_input = agent_image_input(p, s->model),
         };
         if (attempts)
             (*attempts)++;

@@ -57,6 +57,13 @@ void items_append(struct item **items, size_t *n, size_t *cap, struct item it);
  * the provider default; any non-empty value passes through verbatim. */
 const char *resolve_effort(const struct provider *p);
 
+/* Does the active provider+model accept image input? Layered like other
+ * tunables: the image_input config tristate pins the answer; a live
+ * probe result on the provider (llama.cpp /props, OpenRouter /endpoints)
+ * beats the catalog; the models.dev catalog fills the rest. Returns
+ * 1 yes, 0 no, -1 unknown. */
+int agent_image_input(const struct provider *p, const char *model);
+
 /* Build the malloc'd system prompt from the configured or default base plus
  * agent_env_build_suffix(). Return NULL for raw mode or an explicitly empty
  * HAX_SYSTEM_PROMPT. */

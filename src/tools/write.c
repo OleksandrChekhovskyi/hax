@@ -28,7 +28,7 @@ static size_t count_lines(const char *s, size_t n)
     return lines;
 }
 
-static char *run(const char *args_json, tool_emit_display_fn emit_display, void *user)
+static char *run(const char *args_json, struct tool_ctx *ctx)
 {
     json_error_t jerr;
     json_t *root = json_loads(args_json ? args_json : "{}", 0, &jerr);
@@ -74,8 +74,8 @@ static char *run(const char *args_json, tool_emit_display_fn emit_display, void 
          * so the block isn't a bare header — it decides on the actual row
          * count, which the tool can't predict through the renderer's
          * ctrl_strip. */
-        if (emit_display && content_len > 0)
-            emit_display(content, content_len, user);
+        if (ctx && ctx->emit_display && content_len > 0)
+            ctx->emit_display(content, content_len, ctx->emit_user);
         char *result;
         size_t lines = count_lines(content, content_len);
         if (content_len == 0)

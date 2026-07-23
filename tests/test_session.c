@@ -34,6 +34,19 @@ static int usage_eq(const struct turn_usage *a, const struct turn_usage *b)
            a->cost_total == b->cost_total && a->cost_estimated == b->cost_estimated;
 }
 
+static int images_eq(const struct item *a, const struct item *b)
+{
+    if (a->n_images != b->n_images)
+        return 0;
+    for (size_t i = 0; i < a->n_images; i++) {
+        if (!streq0(a->images[i].mime, b->images[i].mime) ||
+            !streq0(a->images[i].data_b64, b->images[i].data_b64) ||
+            a->images[i].width != b->images[i].width || a->images[i].height != b->images[i].height)
+            return 0;
+    }
+    return 1;
+}
+
 static int item_eq(const struct item *a, const struct item *b)
 {
     return a->kind == b->kind && streq0(a->text, b->text) && streq0(a->call_id, b->call_id) &&
@@ -41,7 +54,7 @@ static int item_eq(const struct item *a, const struct item *b)
            streq0(a->tool_arguments_json, b->tool_arguments_json) && streq0(a->output, b->output) &&
            streq0(a->reasoning_json, b->reasoning_json) &&
            streq0(a->reasoning_text, b->reasoning_text) && a->compact_seed == b->compact_seed &&
-           usage_eq(a->usage, b->usage);
+           usage_eq(a->usage, b->usage) && images_eq(a, b);
 }
 
 /* Round-trip one item through item_to_json -> json text -> json -> item,
@@ -98,6 +111,10 @@ static struct turn_usage TU_EXACT = {
     .cost_estimated = 0,
 };
 
+static struct item_image IMAGES[] = {
+    {.mime = (char *)"image/png", .data_b64 = (char *)"iVBORw0KGgo=", .width = 2, .height = 3},
+};
+
 /* A representative conversation covering every item kind. Strings are
  * literals — never freed, never written — so the array lives on the
  * stack with no ownership bookkeeping. */
@@ -113,6 +130,11 @@ static struct item CONVO[] = {
      .tool_name = (char *)"bash",
      .tool_arguments_json = (char *)"{\"cmd\":\"ls\"}"},
     {.kind = ITEM_TOOL_RESULT, .call_id = (char *)"c1", .output = (char *)"file1\nfile2"},
+    {.kind = ITEM_TOOL_RESULT,
+     .call_id = (char *)"c2",
+     .output = (char *)"Read image shot.png",
+     .images = IMAGES,
+     .n_images = 1},
     {.kind = ITEM_TURN_USAGE, .usage = &TU_EST, .provider = (char *)"alpha", .model = (char *)"m1"},
     {.kind = ITEM_TURN_USAGE, .usage = &TU_EXACT},
     {.kind = ITEM_USER_MESSAGE, .text = (char *)"summary of earlier work", .compact_seed = 1},
@@ -491,6 +513,43 @@ int main(void)
     }
     free(src_id);
     free(pathf);
+
+    /* ---- resume enforces the aggregate image count cap ---- */
+    /* A session carrying one more image than the cap allows (an older/newer
+     * writer, or a since-lowered limit) must not resume above budget: the
+     * overflow image is degraded to a placeholder so requests stay
+     * admissible. */
+    char imgcap[] = "/tmp/hax_imgcap_XXXXXX";
+    int ifd = mkstemp(imgcap);
+    EXPECT(ifd >= 0);
+    if (ifd >= 0) {
+        const char *hdr =
+            "{\"type\":\"session\",\"version\":1,\"provider\":\"pa\",\"model\":\"ma\"}\n";
+        EXPECT(write(ifd, hdr, strlen(hdr)) == (ssize_t)strlen(hdr));
+        for (int i = 0; i < IMAGE_REQUEST_MAX_COUNT + 1; i++) {
+            char *line = xasprintf("{\"kind\":\"tool_result\",\"call_id\":\"c%d\",\"output\":\"r\","
+                                   "\"images\":[{\"mime\":\"image/png\",\"data\":\"QUJD\","
+                                   "\"width\":2,\"height\":1}]}\n",
+                                   i);
+            EXPECT(write(ifd, line, strlen(line)) == (ssize_t)strlen(line));
+            free(line);
+        }
+        close(ifd);
+
+        struct item *ci;
+        size_t cn;
+        EXPECT(session_load(imgcap, &ci, &cn, NULL) == 0);
+        size_t total = 0, degraded = 0;
+        for (size_t i = 0; i < cn; i++) {
+            total += ci[i].n_images;
+            if (ci[i].n_images == 0 && ci[i].output && strstr(ci[i].output, "[image"))
+                degraded++;
+        }
+        EXPECT(total == IMAGE_REQUEST_MAX_COUNT); /* the overflow image dropped */
+        EXPECT(degraded == 1);                    /* replaced by a placeholder */
+        free_items(ci, cn);
+        unlink(imgcap);
+    }
 
     free(saved_id);
     free(path);

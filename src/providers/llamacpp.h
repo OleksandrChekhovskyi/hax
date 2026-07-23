@@ -23,10 +23,12 @@
  *                      first served entry is adopted as a session override;
  *                      replacing an explicit value emits a warning
  *   GET /props      →  fills provider->context_limit from
- *                      default_generation_settings.n_ctx (asynchronous —
- *                      runs in the background so a slow /props doesn't
- *                      delay the first prompt; the percentage display
- *                      just lights up once the response lands)
+ *                      default_generation_settings.n_ctx and image-input
+ *                      capability from modalities.vision (asynchronous — runs
+ *                      in the background so a slow /props doesn't delay the
+ *                      first prompt). Scoped to the selected model with a
+ *                      ?model= query (router mode serves several); re-run on a
+ *                      runtime /model switch via refresh_context.
  *
  * Probe behavior:
  *   - When no model is configured and the /v1/models probe fails,
@@ -56,6 +58,11 @@ char *llamacpp_model_warning(const char *configured, const char *served);
 /* Collapse a GGUF path to its extensionless filename for display and the env
  * block. Other model ids are duplicated unchanged. Caller frees. */
 char *llamacpp_model_label(struct provider *p, const char *model);
+
+/* Build the /props probe URL from `base_url`, appending a URL-encoded
+ * ?model= query when `model` is non-empty (NULL/empty → bare /props).
+ * Exposed for tests. Caller frees. */
+char *llamacpp_props_url(const char *base_url, const char *model);
 
 extern const struct provider_factory PROVIDER_LLAMACPP;
 

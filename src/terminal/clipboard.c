@@ -2,7 +2,6 @@
 #include "terminal/clipboard.h"
 
 #include <fcntl.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -10,39 +9,7 @@
 
 #include "util.h"
 #include "system/spawn.h"
-
-static const char B64_ALPHABET[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static char *base64_encode(const char *data, size_t len, size_t *out_len)
-{
-    size_t out_n = ((len + 2) / 3) * 4;
-    char *buf = xmalloc(out_n + 1);
-    const unsigned char *in = (const unsigned char *)data;
-    size_t o = 0;
-    size_t i = 0;
-    while (i + 3 <= len) {
-        uint32_t v = ((uint32_t)in[i] << 16) | ((uint32_t)in[i + 1] << 8) | in[i + 2];
-        buf[o++] = B64_ALPHABET[(v >> 18) & 0x3f];
-        buf[o++] = B64_ALPHABET[(v >> 12) & 0x3f];
-        buf[o++] = B64_ALPHABET[(v >> 6) & 0x3f];
-        buf[o++] = B64_ALPHABET[v & 0x3f];
-        i += 3;
-    }
-    if (i < len) {
-        uint32_t v = (uint32_t)in[i] << 16;
-        if (i + 1 < len)
-            v |= (uint32_t)in[i + 1] << 8;
-        buf[o++] = B64_ALPHABET[(v >> 18) & 0x3f];
-        buf[o++] = B64_ALPHABET[(v >> 12) & 0x3f];
-        buf[o++] = (i + 1 < len) ? B64_ALPHABET[(v >> 6) & 0x3f] : '=';
-        buf[o++] = '=';
-    }
-    buf[o] = '\0';
-    if (out_len)
-        *out_len = o;
-    return buf;
-}
+#include "text/base64.h"
 
 char *clipboard_osc52_sequence(const char *text, size_t len, int tmux_wrap, size_t *out_len)
 {

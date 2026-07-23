@@ -17,7 +17,7 @@ static char *call_write(const char *path, const char *content)
      * our tests. Be careful when adding a test that does. */
     char *args = xasprintf("{\"path\":\"%s\",\"content\":\"%s\"}", path, cesc);
     free(cesc);
-    char *out = TOOL_WRITE.run(args, NULL, NULL);
+    char *out = TOOL_WRITE.run(args, NULL);
     free(args);
     return out;
 }
@@ -30,21 +30,21 @@ static char *slurp(const char *path)
 
 static void test_write_invalid_json(void)
 {
-    char *out = TOOL_WRITE.run("not json", NULL, NULL);
+    char *out = TOOL_WRITE.run("not json", NULL);
     EXPECT(strstr(out, "invalid arguments") != NULL);
     free(out);
 }
 
 static void test_write_missing_path(void)
 {
-    char *out = TOOL_WRITE.run("{\"content\":\"x\"}", NULL, NULL);
+    char *out = TOOL_WRITE.run("{\"content\":\"x\"}", NULL);
     EXPECT(strstr(out, "missing 'path'") != NULL);
     free(out);
 }
 
 static void test_write_missing_content(void)
 {
-    char *out = TOOL_WRITE.run("{\"path\":\"/tmp/x\"}", NULL, NULL);
+    char *out = TOOL_WRITE.run("{\"path\":\"/tmp/x\"}", NULL);
     EXPECT(strstr(out, "missing 'content'") != NULL);
     free(out);
 }

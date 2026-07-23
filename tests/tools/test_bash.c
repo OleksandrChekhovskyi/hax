@@ -18,7 +18,7 @@
 static char *call_bash(const char *cmd_json_escaped)
 {
     char *args = xasprintf("{\"command\":\"%s\"}", cmd_json_escaped);
-    char *out = TOOL_BASH.run(args, NULL, NULL);
+    char *out = TOOL_BASH.run(args, NULL);
     free(args);
     return out;
 }
@@ -39,21 +39,22 @@ static int capture_write(const char *bytes, size_t n, void *user)
 static char *call_bash_streamed(const char *cmd_json_escaped, struct capture *cap)
 {
     char *args = xasprintf("{\"command\":\"%s\"}", cmd_json_escaped);
-    char *out = TOOL_BASH.run(args, capture_write, cap);
+    struct tool_ctx ctx = {.emit_display = capture_write, .emit_user = cap};
+    char *out = TOOL_BASH.run(args, &ctx);
     free(args);
     return out;
 }
 
 static void test_bash_invalid_json(void)
 {
-    char *out = TOOL_BASH.run("not json", NULL, NULL);
+    char *out = TOOL_BASH.run("not json", NULL);
     EXPECT(strstr(out, "invalid arguments") != NULL);
     free(out);
 }
 
 static void test_bash_missing_command(void)
 {
-    char *out = TOOL_BASH.run("{}", NULL, NULL);
+    char *out = TOOL_BASH.run("{}", NULL);
     EXPECT(strstr(out, "missing 'command'") != NULL);
     free(out);
 }
@@ -177,7 +178,7 @@ static void test_bash_per_call_timeout_overrides_env(void)
      * of the env path. The integer-seconds floor is irrelevant here
      * because the command finishes long before the arg expires. */
     setenv("HAX_BASH_TIMEOUT", "10ms", 1);
-    char *out = TOOL_BASH.run("{\"command\":\"sleep 0.05\",\"timeout_seconds\":60}", NULL, NULL);
+    char *out = TOOL_BASH.run("{\"command\":\"sleep 0.05\",\"timeout_seconds\":60}", NULL);
     EXPECT(strstr(out, "[timed out") == NULL);
     free(out);
     unsetenv("HAX_BASH_TIMEOUT");
@@ -188,7 +189,7 @@ static void test_bash_per_call_timeout_clamped_to_max(void)
     /* Model asks for 9999s but max is 30ms — should clamp. */
     setenv("HAX_BASH_TIMEOUT_MAX", "30ms", 1);
     time_t t0 = time(NULL);
-    char *out = TOOL_BASH.run("{\"command\":\"sleep 30\",\"timeout_seconds\":9999}", NULL, NULL);
+    char *out = TOOL_BASH.run("{\"command\":\"sleep 30\",\"timeout_seconds\":9999}", NULL);
     time_t elapsed = time(NULL) - t0;
     EXPECT(elapsed < 2);
     EXPECT(strstr(out, "[timed out after 30ms]") != NULL);
@@ -334,7 +335,7 @@ static void test_bash_timeout_grace_no_escape_via_pipe_close(void)
                           "sleep 30) & wait",
                           path);
     char *args = xasprintf("{\"command\":\"%s\"}", cmd);
-    char *out = TOOL_BASH.run(args, NULL, NULL);
+    char *out = TOOL_BASH.run(args, NULL);
     free(args);
     free(cmd);
     EXPECT(strstr(out, "[timed out") != NULL);
@@ -392,7 +393,7 @@ static void test_bash_redirected_background_job_does_not_leak(void)
 
     char *cmd = xasprintf("nohup sleep 30 >/dev/null 2>&1 & echo $! > %s", path);
     char *args = xasprintf("{\"command\":\"%s\"}", cmd);
-    char *out = TOOL_BASH.run(args, NULL, NULL);
+    char *out = TOOL_BASH.run(args, NULL);
     free(args);
     free(cmd);
     free(out);
@@ -441,15 +442,15 @@ static void test_bash_timeout_huge_does_not_overflow(void)
 
 static void test_bash_per_call_timeout_invalid(void)
 {
-    char *out = TOOL_BASH.run("{\"command\":\"true\",\"timeout_seconds\":0}", NULL, NULL);
+    char *out = TOOL_BASH.run("{\"command\":\"true\",\"timeout_seconds\":0}", NULL);
     EXPECT(strstr(out, "'timeout_seconds' must be >= 1") != NULL);
     free(out);
 
-    out = TOOL_BASH.run("{\"command\":\"true\",\"timeout_seconds\":-5}", NULL, NULL);
+    out = TOOL_BASH.run("{\"command\":\"true\",\"timeout_seconds\":-5}", NULL);
     EXPECT(strstr(out, "'timeout_seconds' must be >= 1") != NULL);
     free(out);
 
-    out = TOOL_BASH.run("{\"command\":\"true\",\"timeout_seconds\":\"30\"}", NULL, NULL);
+    out = TOOL_BASH.run("{\"command\":\"true\",\"timeout_seconds\":\"30\"}", NULL);
     EXPECT(strstr(out, "'timeout_seconds' must be an integer") != NULL);
     free(out);
 }

@@ -8,6 +8,7 @@
 #include <sys/types.h>
 
 #include "harness.h"
+#include "provider.h"
 #include "util.h"
 
 /* Helper: create a temp file with the given contents and return its path.
@@ -1141,6 +1142,36 @@ static void test_shell_single_quote(void)
     free(q);
 }
 
+/* A tool_result item owning one image whose base64 payload is `b64_len`
+ * bytes of filler — enough to drive image_budget_cutoff without real
+ * pixels. Freed by the caller via item_free. */
+static struct item make_image_item(size_t b64_len)
+{
+    struct item_image *img = xcalloc(1, sizeof(*img));
+    img->mime = xstrdup("image/png");
+    img->data_b64 = xmalloc(b64_len + 1);
+    memset(img->data_b64, 'A', b64_len);
+    img->data_b64[b64_len] = '\0';
+    return (struct item){.kind = ITEM_TOOL_RESULT, .images = img, .n_images = 1};
+}
+
+static void test_images_totals(void)
+{
+    struct item items[] = {make_image_item(1000),
+                           {.kind = ITEM_USER_MESSAGE},
+                           make_image_item(2500),
+                           {.kind = ITEM_ASSISTANT_MESSAGE}};
+    EXPECT(images_total_b64(items, 4) == 3500);
+    EXPECT(images_total_count(items, 4) == 2);
+
+    struct item none[] = {{.kind = ITEM_USER_MESSAGE}, {.kind = ITEM_ASSISTANT_MESSAGE}};
+    EXPECT(images_total_b64(none, 2) == 0);
+    EXPECT(images_total_count(none, 2) == 0);
+
+    for (size_t i = 0; i < 4; i++)
+        item_free(&items[i]);
+}
+
 int main(void)
 {
     /* truncate_for_display / wrap_break_pos / reflow_for_display use
@@ -1202,6 +1233,7 @@ int main(void)
     test_format_duration_ranges();
     test_format_cost_precision();
     test_shell_single_quote();
+    test_images_totals();
     test_format_context_with_and_without_limit();
 
     test_truncate_under_cap();
