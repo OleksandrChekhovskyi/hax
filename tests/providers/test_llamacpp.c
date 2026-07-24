@@ -78,9 +78,11 @@ static void test_props_url(void)
 
     /* A gguf path model id is URL-encoded into the query: slashes → %2F,
      * spaces → + (query form-encoding), so the probe reaches a valid,
-     * model-scoped URL. */
+     * model-scoped URL. Percent-escape hex digits may vary in case by
+     * libcurl version. */
     u = llamacpp_props_url("http://127.0.0.1:18080/v1", "/models/Qwen 3.gguf");
-    EXPECT_STR_EQ(u, "http://127.0.0.1:18080/props?model=%2Fmodels%2FQwen+3.gguf");
+    EXPECT(strcmp(u, "http://127.0.0.1:18080/props?model=%2Fmodels%2FQwen+3.gguf") == 0 ||
+           strcmp(u, "http://127.0.0.1:18080/props?model=%2fmodels%2fQwen+3.gguf") == 0);
     free(u);
 }
 
