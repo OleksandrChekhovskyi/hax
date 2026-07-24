@@ -166,11 +166,12 @@ The REPL supports readline-style editing. Hax-specific or notable bindings:
 | Tab | On an `@`-prefixed word: pick a project file to mention. Elsewhere: insert a tab. |
 
 Typing `@src` and pressing Tab opens [`fzf`](https://github.com/junegunn/fzf) over the
-project's files (tracked and untracked-but-not-ignored inside a git repository; a pruned
-`find` elsewhere), with the token pre-seeding the fuzzy filter. The selected path replaces the
-`@src` token; cancelling leaves the prompt untouched. The path is inserted as plain text — the
-model reads the file with its `read` tool as usual. fzf on `$PATH` is required: without it,
-Tab on an `@` word prints a short notice instead, and `/help` shows the binding dimmed.
+project's files (tracked + untracked-but-not-ignored in a git repo; pruned `find`
+elsewhere), with the token seeding the filter. `@../…`, `@~/…`, and absolute paths start
+the walk at that directory and keep the typed prefix on the selection; in-tree paths like
+`@src/foo` stay on the project list. The pick replaces the `@…` token; cancel leaves it
+alone. Inserted as plain text — the model reads the file with its `read` tool as usual.
+fzf on `$PATH` is required: without it Tab prints a short notice, and `/help` dims the row.
 
 ## Pausing, steering, and resuming
 

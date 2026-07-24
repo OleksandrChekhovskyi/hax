@@ -4,7 +4,9 @@
 
 #include "harness.h"
 #include "file_mention.h"
+#include "system/path.h"
 #include "terminal/input_core.h"
+#include "util.h"
 
 static void test_fzf_cmd_shape(void)
 {
@@ -22,6 +24,8 @@ static void test_fzf_cmd_shape(void)
     EXPECT(strncmp(cmd, "{ ", 2) == 0);
     EXPECT(strstr(cmd, "; } | fzf ") != NULL);
     EXPECT(strstr(cmd, "--query='src'") != NULL);
+    /* no path prefix → no cd; walk stays cwd-relative */
+    EXPECT(strstr(cmd, "cd ") == NULL);
     free(cmd);
 }
 
@@ -43,6 +47,77 @@ static void test_fzf_cmd_query_quoting(void)
     free(cmd);
     cmd = file_mention_fzf_cmd(NULL);
     EXPECT(strstr(cmd, "--query=''") != NULL);
+    free(cmd);
+}
+
+static void test_fzf_cmd_rooted(void)
+{
+    /* external tokens: cd to prefix-through-last-slash, filter = suffix */
+    char *cmd = file_mention_fzf_cmd("../");
+    EXPECT(strstr(cmd, "cd '../' 2>/dev/null") != NULL);
+    EXPECT(strstr(cmd, "--query=''") != NULL);
+    free(cmd);
+
+    cmd = file_mention_fzf_cmd("../foo");
+    EXPECT(strstr(cmd, "cd '../' 2>/dev/null") != NULL);
+    EXPECT(strstr(cmd, "--query='foo'") != NULL);
+    free(cmd);
+
+    cmd = file_mention_fzf_cmd(".."); /* bare → trailing slash for rejoin */
+    EXPECT(strstr(cmd, "cd '../' 2>/dev/null") != NULL);
+    EXPECT(strstr(cmd, "--query=''") != NULL);
+    free(cmd);
+
+    cmd = file_mention_fzf_cmd("../../lib/x");
+    EXPECT(strstr(cmd, "cd '../../lib/' 2>/dev/null") != NULL);
+    EXPECT(strstr(cmd, "--query='x'") != NULL);
+    free(cmd);
+
+    cmd = file_mention_fzf_cmd("/tmp/x");
+    EXPECT(strstr(cmd, "cd '/tmp/' 2>/dev/null") != NULL);
+    EXPECT(strstr(cmd, "--query='x'") != NULL);
+    free(cmd);
+
+    /* ~/ → $HOME before quoting (mirror the builder) */
+    char *expanded = expand_home("~/src/");
+    char *quoted = shell_single_quote(expanded);
+    char *want = xasprintf("cd %s 2>/dev/null", quoted);
+    cmd = file_mention_fzf_cmd("~/src/fil");
+    EXPECT(strstr(cmd, want) != NULL);
+    EXPECT(strstr(cmd, "cd '~") == NULL);
+    EXPECT(strstr(cmd, "--query='fil'") != NULL);
+    free(cmd);
+    free(want);
+    free(quoted);
+    free(expanded);
+
+    cmd = file_mention_fzf_cmd("../a b$(x)");
+    EXPECT(strstr(cmd, "cd '../' 2>/dev/null") != NULL);
+    EXPECT(strstr(cmd, "--query='a b$(x)'") != NULL);
+    free(cmd);
+}
+
+static void test_fzf_cmd_in_tree_keeps_cwd(void)
+{
+    /* in-tree/typos/./ / ~user stay cwd-relative with the full query */
+    char *cmd = file_mention_fzf_cmd("src/tools/ba");
+    EXPECT(strstr(cmd, "cd ") == NULL);
+    EXPECT(strstr(cmd, "--query='src/tools/ba'") != NULL);
+    free(cmd);
+
+    cmd = file_mention_fzf_cmd("mispted/file");
+    EXPECT(strstr(cmd, "cd ") == NULL);
+    EXPECT(strstr(cmd, "--query='mispted/file'") != NULL);
+    free(cmd);
+
+    cmd = file_mention_fzf_cmd("./src/x");
+    EXPECT(strstr(cmd, "cd ") == NULL);
+    EXPECT(strstr(cmd, "--query='./src/x'") != NULL);
+    free(cmd);
+
+    cmd = file_mention_fzf_cmd("~other/x");
+    EXPECT(strstr(cmd, "cd ") == NULL);
+    EXPECT(strstr(cmd, "--query='~other/x'") != NULL);
     free(cmd);
 }
 
@@ -106,6 +181,8 @@ int main(void)
 {
     test_fzf_cmd_shape();
     test_fzf_cmd_query_quoting();
+    test_fzf_cmd_rooted();
+    test_fzf_cmd_in_tree_keeps_cwd();
     test_match_triggers();
     test_match_rejects();
     T_REPORT();
