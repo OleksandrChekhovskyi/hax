@@ -209,9 +209,90 @@ static void test_sanitize_counted_not_terminated(void)
     buf_free(&b);
 }
 
+/* Build a label of exactly `cells` ASCII cells. */
+static char *label_of(int cells)
+{
+    char *s = xmalloc((size_t)cells + 1);
+    memset(s, 'x', (size_t)cells);
+    s[cells] = '\0';
+    return s;
+}
+
+static void test_label_cells_without_detail(void)
+{
+    /* Nothing competing: the label gets the row minus the marker column. */
+    struct picker_item it = {.label = "anything"};
+    EXPECT(picker_core_label_cells(&it, 100) == 98);
+    /* The "✓ current" tag reserves its own space. */
+    struct picker_item cur = {.label = "anything", .current = 1};
+    EXPECT(picker_core_label_cells(&cur, 100) == 98 - (int)strlen("  * current"));
+}
+
+static void test_label_cells_yields_to_detail(void)
+{
+    /* A detail claims the room the label doesn't need, so the label's
+     * allowance drops below the row width. This is the case the footer
+     * reservation used to miss: every /resume row carries a relative-time
+     * detail, so a label can be clipped well before it reaches 98 cells. */
+    char *lbl = label_of(95);
+    struct picker_item it = {.label = lbl, .detail = "3m ago"};
+    int cells = picker_core_label_cells(&it, 100);
+    EXPECT(cells == 90); /* 98 - 2 separator - 6 detail */
+    /* ... and that 95-cell label really is clipped by it. */
+    EXPECT(picker_core_clip_width(lbl) > cells);
+    free(lbl);
+}
+
+static void test_label_cells_keeps_half_the_row(void)
+{
+    /* A detail long enough to crowd the label out is capped at half the
+     * row — the label never shrinks past that. */
+    char *lbl = label_of(95);
+    char *huge = label_of(90);
+    struct picker_item it = {.label = lbl, .detail = huge};
+    EXPECT(picker_core_label_cells(&it, 100) == 49); /* 98 / 2 */
+    free(lbl);
+    free(huge);
+}
+
+static void test_label_cells_short_label_keeps_only_what_it_uses(void)
+{
+    /* A label shorter than its allowance hands the slack to the detail,
+     * and reports its natural width — so it is never treated as clipped. */
+    struct picker_item it = {.label = "short", .detail = "3m ago"};
+    int cells = picker_core_label_cells(&it, 100);
+    EXPECT(cells == 5);
+    EXPECT(picker_core_clip_width("short") == cells); /* fits exactly */
+}
+
+static void test_label_cells_dim_row_wider_separator(void)
+{
+    /* A dim row separates with " - " rather than "  ", one cell more. */
+    char *lbl = label_of(95);
+    struct picker_item plain = {.label = lbl, .detail = "3m ago"};
+    struct picker_item dim = {.label = lbl, .detail = "3m ago", .dim = 1};
+    EXPECT(picker_core_label_cells(&dim, 100) == picker_core_label_cells(&plain, 100) - 1);
+    free(lbl);
+}
+
+static void test_label_cells_narrow_terminal(void)
+{
+    /* Degenerate widths still yield a usable budget rather than 0 or less. */
+    struct picker_item it = {.label = "some label", .detail = "3m ago"};
+    EXPECT(picker_core_label_cells(&it, 4) >= 1);
+    EXPECT(picker_core_label_cells(&it, 1) >= 1);
+    EXPECT(picker_core_label_cells(&it, 0) >= 1);
+}
+
 int main(void)
 {
     locale_init_utf8();
+    test_label_cells_without_detail();
+    test_label_cells_yields_to_detail();
+    test_label_cells_keeps_half_the_row();
+    test_label_cells_short_label_keeps_only_what_it_uses();
+    test_label_cells_dim_row_wider_separator();
+    test_label_cells_narrow_terminal();
     test_sanitize_strips_escapes();
     test_sanitize_strips_c0_and_keeps_utf8();
     test_sanitize_counted_not_terminated();

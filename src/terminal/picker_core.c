@@ -2,8 +2,58 @@
 #include "terminal/picker_core.h"
 
 #include <ctype.h>
+#include <string.h>
 
 #include "text/utf8.h"
+
+/* ---------------- row layout ---------------- */
+
+int picker_core_clip_width(const char *s)
+{
+    size_t len = strlen(s);
+    size_t line_end = len;
+    for (size_t k = 0; k < len; k++) {
+        if (s[k] == '\n' || s[k] == '\r') {
+            line_end = k;
+            break;
+        }
+    }
+    int cells = 0;
+    for (size_t i = 0; i < line_end;) {
+        size_t cons;
+        int w = utf8_codepoint_cells(s, line_end, i, &cons);
+        cells += w < 0 ? 1 : w;
+        i += cons ? cons : 1;
+    }
+    return cells + (line_end < len ? 1 : 0);
+}
+
+int picker_core_label_cells(const struct picker_item *it, int cols)
+{
+    int row_cells = cols - PICKER_MARKER_CELLS;
+    if (row_cells < 1)
+        row_cells = 1;
+    /* Widths of the fixed decorations, in their ASCII spellings — the UTF-8
+     * glyphs the renderer may substitute occupy the same cells. */
+    int tag_cells = it->current ? (int)strlen("  * current") : 0;
+    int sep_cells = (int)strlen(it->dim ? " - " : "  ");
+
+    const char *label = it->label ? it->label : "";
+    int avail = row_cells - tag_cells;
+    int label_cells = avail;
+    if (it->detail && it->detail[0]) {
+        /* Give the detail the room it needs, but never more than half the
+         * row: a long detail must not squeeze the label to nothing. A label
+         * shorter than its allowance keeps only what it uses, handing the
+         * slack back to the detail. */
+        int lbl_nat = picker_core_clip_width(label);
+        int lbl_room = avail - sep_cells - picker_core_clip_width(it->detail);
+        label_cells = avail / 2 > lbl_room ? avail / 2 : lbl_room;
+        if (lbl_nat < label_cells)
+            label_cells = lbl_nat;
+    }
+    return label_cells < 1 ? 1 : label_cells;
+}
 
 /* ---------------- display sanitization ---------------- */
 
@@ -64,7 +114,7 @@ int picker_core_match(const char *text, const char *query)
 
 /* ---------------- selection / scroll state ---------------- */
 
-static void clamp_scroll(struct picker_state *s)
+void picker_core_clamp_scroll(struct picker_state *s)
 {
     if (s->n_filtered == 0) {
         s->sel = 0;
@@ -111,7 +161,7 @@ void picker_core_move_sel(struct picker_state *s, int delta)
         if (s->sel + 1 < s->n_filtered)
             s->sel++;
     }
-    clamp_scroll(s);
+    picker_core_clamp_scroll(s);
 }
 
 /* Park the window so the selection sits in the middle, clamped to the list
@@ -147,13 +197,13 @@ void picker_core_page_sel(struct picker_state *s, int dir)
 void picker_core_select_first(struct picker_state *s)
 {
     s->sel = 0;
-    clamp_scroll(s);
+    picker_core_clamp_scroll(s);
 }
 
 void picker_core_select_last(struct picker_state *s)
 {
     s->sel = s->n_filtered ? s->n_filtered - 1 : 0;
-    clamp_scroll(s);
+    picker_core_clamp_scroll(s);
 }
 
 void picker_core_select_item(struct picker_state *s, size_t item_idx)

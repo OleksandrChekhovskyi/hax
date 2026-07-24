@@ -371,6 +371,10 @@ static long undo_fork_picker(struct agent_session *s, size_t count, int is_undo)
         .n = count,
         .empty_note = NULL,
         .initial = count - 1,
+        /* Turn prompts are free text like the resume picker's, and picking
+         * the wrong one here rewrites history — so a clipped row gets its
+         * full text in the gutter. */
+        .label_gutter = 1,
     };
     long sel = picker_run(&opts);
 

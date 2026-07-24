@@ -69,6 +69,15 @@ struct picker_opts {
     /* Item index the cursor starts on (0 = first row). Callers pass the
      * "current" row so Enter-without-navigation re-picks what's active. */
     size_t initial;
+    /* Repeat the highlighted row's `label` in the footer, wrapped in full,
+     * whenever it was too wide for its row. For pickers whose labels are
+     * free text rather than identifiers — a session's opening prompt, a
+     * conversation turn — where one clipped line routinely stops short of
+     * the words that tell two similar rows apart. An item's own `desc`
+     * still wins, and a label that fit shows nothing (the footer keeps its
+     * reserved height either way, so this costs no rows). Leave 0 for
+     * pickers over short labels: they would only reserve blank space. */
+    int label_gutter;
 };
 
 /* Run the picker. Returns the selected 0-based index into `items`, or -1

@@ -72,9 +72,16 @@ char *session_picker_run(const char *cwd, const char *exclude_path, int *shown)
 
     /* Materialize a row per session, newest first: the first prompt is the
      * searchable label (the picker clips it to the row width for display),
-     * the relative time a dim detail column. Reads are capped at
-     * SESSION_PICKER_MAX so opening the picker never stalls on a huge
-     * history; the title notes when the list is capped. */
+     * the relative time a dim detail column. A prompt too long for its row
+     * repeats in the gutter in full (label_gutter) — one line usually stops
+     * short of the part that tells two similar sessions apart. Reads are
+     * capped at SESSION_PICKER_MAX so opening the picker never stalls on a
+     * huge history; the title notes when the list is capped.
+     *
+     * Deliberately nothing else in the gutter: the header's provider/model
+     * stamp is tempting, but resuming keeps the *current* provider and model
+     * (session_load is called with a NULL meta everywhere), so showing the
+     * recorded one would advertise a restore that doesn't happen. */
     size_t n_load = n_shown < SESSION_PICKER_MAX ? n_shown : SESSION_PICKER_MAX;
     time_t now = time(NULL);
     struct picker_item *items = xcalloc(n_load, sizeof(*items));
@@ -105,6 +112,7 @@ char *session_picker_run(const char *cwd, const char *exclude_path, int *shown)
         .items = items,
         .n = n_load,
         .empty_note = NULL,
+        .label_gutter = 1,
     };
     /* Set before handing off (see session_picker.h): /resume's trail
      * bookkeeping only needs that the cursor ends at the picker's start row,
