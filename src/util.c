@@ -127,20 +127,27 @@ char *xstrdup(const char *s)
     return r;
 }
 
-char *xasprintf(const char *fmt, ...)
+char *xvasprintf(const char *fmt, va_list ap)
 {
-    va_list ap, ap2;
-    va_start(ap, fmt);
+    va_list ap2;
     va_copy(ap2, ap);
-    int n = vsnprintf(NULL, 0, fmt, ap);
-    va_end(ap);
-    if (n < 0) {
-        va_end(ap2);
+    int n = vsnprintf(NULL, 0, fmt, ap2);
+    va_end(ap2);
+    if (n < 0)
         return NULL;
-    }
     char *p = xmalloc((size_t)n + 1);
+    va_copy(ap2, ap);
     vsnprintf(p, (size_t)n + 1, fmt, ap2);
     va_end(ap2);
+    return p;
+}
+
+char *xasprintf(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    char *p = xvasprintf(fmt, ap);
+    va_end(ap);
     return p;
 }
 

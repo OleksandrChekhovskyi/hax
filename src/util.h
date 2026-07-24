@@ -2,6 +2,7 @@
 #ifndef HAX_UTIL_H
 #define HAX_UTIL_H
 
+#include <stdarg.h>
 #include <stddef.h>
 
 /* Set LC_CTYPE — and only LC_CTYPE — to a UTF-8 locale so the line
@@ -24,7 +25,12 @@ void *xmalloc(size_t n);
 void *xcalloc(size_t n, size_t sz);
 void *xrealloc(void *p, size_t n);
 char *xstrdup(const char *s);
-char *xasprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+char *xasprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2), nonnull(1)));
+
+/* va_list form of xasprintf. Both return NULL if the format itself fails to
+ * encode; OOM still aborts. The caller keeps ownership of `ap` and must
+ * va_end it. */
+char *xvasprintf(const char *fmt, va_list ap) __attribute__((format(printf, 1, 0), nonnull(1)));
 
 /* Wrap `s` in single quotes for safe interpolation into a `sh -c`
  * command line, escaping embedded single quotes the conventional way

@@ -45,7 +45,8 @@ void disp_write(struct disp *d, const char *s, size_t n);
 void disp_raw(const char *s);
 
 /* Formatted write — bytes go through disp_write. */
-__attribute__((format(printf, 2, 3))) void disp_printf(struct disp *d, const char *fmt, ...);
+__attribute__((format(printf, 2, 3), nonnull(2))) void disp_printf(struct disp *d, const char *fmt,
+                                                                   ...);
 
 /* Bring the terminal trail to exactly one blank line (two NLs). Held NLs
  * from the previous block are dropped, so trailing blank lines in tool

@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "util.h"
 #include "terminal/ansi.h"
@@ -63,19 +64,13 @@ void disp_raw(const char *s)
 
 void disp_printf(struct disp *d, const char *fmt, ...)
 {
-    va_list ap, ap2;
+    va_list ap;
     va_start(ap, fmt);
-    va_copy(ap2, ap);
-    int n = vsnprintf(NULL, 0, fmt, ap);
+    char *buf = xvasprintf(fmt, ap);
     va_end(ap);
-    if (n < 0) {
-        va_end(ap2);
+    if (!buf)
         return;
-    }
-    char *buf = xmalloc((size_t)n + 1);
-    vsnprintf(buf, (size_t)n + 1, fmt, ap2);
-    va_end(ap2);
-    disp_write(d, buf, (size_t)n);
+    disp_write(d, buf, strlen(buf));
     free(buf);
 }
 
