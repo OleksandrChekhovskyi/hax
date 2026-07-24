@@ -47,6 +47,23 @@ Useful manual/debug knobs:
 - `HAX_TRACE=path` logs HTTP/SSE traffic with auth redacted.
 - `HAX_TRANSCRIPT=path` logs the model-facing transcript, including tools and results.
 
+### Driving the interactive UI
+
+The REPL prompt and the pickers need a real tty, so they can't be checked by piping stdin.
+Use tmux rather than hand-rolled pty scripts — send keys, capture the pane, read the result:
+
+```sh
+tmux new-session -d -s haxtest -x 110 -y 32 'HAX_PROVIDER=mock ./build/hax'
+tmux send-keys -t haxtest '/model' Enter   # keys; Enter/C-u/Escape as named keys
+tmux capture-pane -t haxtest -p            # pane text, escapes already resolved
+tmux kill-session -t haxtest
+```
+
+Scope cleanup to exactly what you started. The user may be working inside tmux, and this agent
+may itself be running inside hax, so anything that matches by name takes their session down
+along with the one under test: no `kill-server`, and no `pkill hax` / `killall hax` /
+`pkill -f hax`. Kill the session you named, or the PID you captured at launch.
+
 ## Architecture
 
 hax is a single-binary REPL:
