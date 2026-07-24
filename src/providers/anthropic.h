@@ -96,6 +96,13 @@ extern const size_t ANTHROPIC_EFFORT_LADDER_N;
 json_t *anthropic_build_messages(const struct item *items, size_t n, const char *cur_provider,
                                  const char *cur_model, int allow_empty_signature, int image_input);
 
+/* Fill `out` from one Anthropic `/models` entry: max_input_tokens and the
+ * capabilities block's image-input answer. `out` must be
+ * model_info_init'd with `id` already set; fields the entry doesn't carry —
+ * everything, on the compat backends this parser also serves — keep their
+ * unknown sentinels. Pure; exposed for unit tests. */
+void anthropic_parse_model(const json_t *entry, struct model_info *out);
+
 extern const struct provider_factory PROVIDER_ANTHROPIC;
 
 #endif /* HAX_ANTHROPIC_H */

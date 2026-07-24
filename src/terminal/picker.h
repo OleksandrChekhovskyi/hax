@@ -54,7 +54,10 @@ struct picker_item {
      * than smuggling "current" through `detail`, where it would render
      * dim and read like a failure reason. */
     int current;
-    /* Optional single-line description, wrapped below the list when selected. */
+    /* Optional description, wrapped below the list when the row is selected.
+     * A newline is a hard break, so a desc can put structured fields on one
+     * line and prose on the next rather than running them together; the
+     * footer's height is capped either way, and the overflow is elided. */
     const char *desc;
 };
 

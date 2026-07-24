@@ -14,6 +14,16 @@ struct provider *codex_provider_new(const char *name);
  * (0 = never reached). Exposed for unit tests. Heap-owned; caller frees. */
 char *codex_models_error(long status);
 
+/* Fill `out` from one entry of the Codex model catalog: served context
+ * window, image input, and the catalog's one-line description. `out` must
+ * be model_info_init'd with `id` already set; unreported fields keep their
+ * unknown sentinels. Pure — exposed for unit tests. */
+void codex_parse_model(const json_t *entry, struct model_info *out);
+
+/* Whether the catalog marks this entry `visibility: "hide"` — an internal
+ * model the /model picker should not offer. Exposed for unit tests. */
+int codex_model_hidden(const json_t *entry);
+
 /* Translate flat conversation items into the Responses API `input` array.
  * Exposed for unit testing the round-trip without an HTTP call: user/
  * assistant messages, function_call / function_call_output, reasoning-blob

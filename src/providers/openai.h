@@ -129,6 +129,15 @@ struct openai_preset {
      * provider.h). Borrowed — a static literal or a config-tier string
      * outliving the provider. NULL = no catalog presence. */
     const char *catalog_id;
+    /* Optional per-entry metadata parser for the /model picker. The shared
+     * list_models reads `id` out of each `data[]` element (all the base
+     * OpenAI shape carries) and then hands the element here so a preset can
+     * fill the rest of `out` from its own extensions — OpenRouter's
+     * pricing/limits/modalities block being the one that exists today.
+     * `out` arrives model_info_init'd with `id` already set; the hook only
+     * adds what it can read and must leave unknown fields at their
+     * sentinels. NULL = no extensions, ids only. */
+    void (*parse_model)(const json_t *entry, struct model_info *out);
 };
 
 /* The shared "OpenAI-style" reasoning-effort ladder, low→high:

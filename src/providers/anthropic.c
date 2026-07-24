@@ -14,7 +14,18 @@
 #include "transport/http.h"
 #include "transport/retry.h"
 
-#define ANTHROPIC_DEFAULT_VERSION    "2023-06-01"
+#define ANTHROPIC_DEFAULT_VERSION "2023-06-01"
+/* Model-list paging: the endpoint's maximum page size, and a bound on how
+ * many pages the picker will chase so a misbehaving server can't spin the
+ * foreground fetch. The bound is generous because it is a backstop, not a
+ * policy — a non-advancing cursor is caught directly below, and a proxy
+ * that ignores `limit` and paginates at the API default would otherwise hit
+ * this on a catalog that is merely large rather than pathological. Reaching
+ * it keeps the models collected so far: a truncated picker is recoverable
+ * (the user filters and picks), whereas failing the list rolls back a whole
+ * /provider switch and leaves them with nothing. */
+#define ANTHROPIC_MODEL_PAGE         1000
+#define ANTHROPIC_MODEL_PAGES        50
 #define ANTHROPIC_DEFAULT_MODEL      "claude-opus-4-8"
 #define ANTHROPIC_DEFAULT_MAX_TOKENS 32000
 
@@ -450,16 +461,46 @@ static int anthropic_stream(struct provider *p, const struct context *ctx, const
     return rc;
 }
 
-/* GET <base_url>/models and collect data[].id. Anthropic's catalog shares the
- * OpenAI-style {"data":[{"id":...}]} shape, as does llama-server's compat
- * endpoint, so one parser serves both shims. */
-static int anthropic_list_models(struct provider *p, char ***ids, size_t *n, char **err,
-                                 http_tick_cb tick, void *tick_user)
+void anthropic_parse_model(const json_t *entry, struct model_info *out)
 {
-    struct anthropic *a = (struct anthropic *)p;
-    *ids = NULL;
-    *n = 0;
-    char *url = xasprintf("%s/models", a->base_url);
+    json_t *ctx = json_object_get(entry, "max_input_tokens");
+    if (json_is_integer(ctx) && json_integer_value(ctx) > 0)
+        out->context = (long)json_integer_value(ctx);
+    /* capabilities.<name>.supported — absent on the compat backends this
+     * parser also serves, which simply leaves the answer unknown. */
+    json_t *caps = json_object_get(entry, "capabilities");
+    json_t *img = caps ? json_object_get(caps, "image_input") : NULL;
+    json_t *sup = img ? json_object_get(img, "supported") : NULL;
+    if (json_is_boolean(sup))
+        out->image_input = json_is_true(sup) ? PROVIDER_CAP_YES : PROVIDER_CAP_NO;
+}
+
+/* Is `s` safe to splice into the after_id query parameter unescaped? The
+ * cursor comes back from the server, so it is not ours to trust: model ids
+ * are plain [A-Za-z0-9._-] slugs, and anything else stops pagination rather
+ * than getting percent-encoding machinery we'd have nowhere else to use. */
+static int anthropic_cursor_ok(const char *s)
+{
+    if (!s || !*s)
+        return 0;
+    for (const char *p = s; *p; p++) {
+        int ok = (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') ||
+                 *p == '.' || *p == '_' || *p == '-';
+        if (!ok)
+            return 0;
+    }
+    return 1;
+}
+
+/* Fetch one page of <base_url>/models. `after_id` continues after that id
+ * (NULL for the first page). On success *root_out owns the parsed body. */
+static int anthropic_models_page(struct anthropic *a, const char *after_id, http_tick_cb tick,
+                                 void *tick_user, json_t **root_out, char **err)
+{
+    const char *name = a->base.name ? a->base.name : "provider";
+    char *url = after_id ? xasprintf("%s/models?limit=%d&after_id=%s", a->base_url,
+                                     ANTHROPIC_MODEL_PAGE, after_id)
+                         : xasprintf("%s/models?limit=%d", a->base_url, ANTHROPIC_MODEL_PAGE);
     char *key_hdr = a->api_key ? xasprintf("x-api-key: %s", a->api_key) : NULL;
     char *ver_hdr = xasprintf("anthropic-version: %s", a->version);
     const char *headers[3];
@@ -475,45 +516,99 @@ static int anthropic_list_models(struct provider *p, char ***ids, size_t *n, cha
     free(ver_hdr);
     free(url);
     if (rc != 0) {
-        *err = format_models_error(p->name, a->base_url, a->api_key != NULL, status);
+        *err = format_models_error(a->base.name, a->base_url, a->api_key != NULL, status);
         free(body);
         return -1;
     }
-    json_t *root = json_loads(body, 0, NULL);
+    *root_out = json_loads(body, 0, NULL);
     free(body);
-    if (!root) {
-        *err = xasprintf("%s /models response is not valid JSON", p->name ? p->name : "provider");
+    if (!*root_out) {
+        *err = xasprintf("%s /models response is not valid JSON", name);
         return -1;
     }
-    /* Same shape policy as openai_list_models: null / empty array = a
-     * legitimately empty catalog; any other non-array shape, or entries
-     * with no usable ids, = a malformed one. */
-    json_t *data = json_object_get(root, "data");
-    if (json_is_null(data) || (json_is_array(data) && json_array_size(data) == 0)) {
-        json_decref(root);
-        return 0;
-    }
+    return 0;
+}
+
+/* GET <base_url>/models and collect data[]. Anthropic's catalog shares the
+ * OpenAI-style {"data":[{"id":...}]} shape, as does llama-server's compat
+ * endpoint, so one parser serves both shims; the per-model limits and
+ * capabilities block is Anthropic's own and stays unknown elsewhere.
+ *
+ * The response is paginated (`has_more` / `last_id`), so this follows the
+ * cursor rather than showing whatever fits in one page — the default page
+ * size is well under the catalog's eventual size, and a silently truncated
+ * picker is worse than a slightly slower one. Compat backends report no
+ * `has_more` and so answer in a single page. */
+static int anthropic_list_models(struct provider *p, struct model_info **models, size_t *n,
+                                 char **err, http_tick_cb tick, void *tick_user)
+{
+    struct anthropic *a = (struct anthropic *)p;
+    *models = NULL;
+    *n = 0;
     const char *name = p->name ? p->name : "provider";
-    if (!json_is_array(data)) {
+
+    struct model_info *out = NULL;
+    size_t k = 0, cap = 0;
+    char *after = NULL;
+    int malformed = 0, saw_entry = 0;
+
+    for (int page = 0; page < ANTHROPIC_MODEL_PAGES; page++) {
+        json_t *root = NULL;
+        if (anthropic_models_page(a, after, tick, tick_user, &root, err) != 0) {
+            free(after);
+            model_info_free(out, k);
+            return -1;
+        }
+        /* Same shape policy as openai_list_models: null / empty array = a
+         * legitimately empty catalog; any other non-array shape, or entries
+         * with no usable ids, = a malformed one. */
+        json_t *data = json_object_get(root, "data");
+        if (!json_is_array(data) && !json_is_null(data)) {
+            json_decref(root);
+            malformed = 1;
+            break;
+        }
+        size_t cnt = json_array_size(data);
+        for (size_t i = 0; i < cnt; i++) {
+            json_t *entry = json_array_get(data, i);
+            json_t *id = json_object_get(entry, "id");
+            saw_entry = 1;
+            if (!json_is_string(id) || !*json_string_value(id))
+                continue;
+            if (k == cap) {
+                cap = cap ? cap * 2 : (cnt > 8 ? cnt : 8);
+                out = xrealloc(out, cap * sizeof(*out));
+            }
+            model_info_init(&out[k]);
+            out[k].id = xstrdup(json_string_value(id));
+            anthropic_parse_model(entry, &out[k]);
+            k++;
+        }
+        int more = json_is_true(json_object_get(root, "has_more"));
+        const char *last = json_string_value(json_object_get(root, "last_id"));
+        /* A cursor that doesn't move would refetch the same page — burning
+         * the page budget and, worse, duplicating every row of it in the
+         * picker. Stop on that as firmly as on a missing one. */
+        int advanced = anthropic_cursor_ok(last) && !(after && strcmp(after, last) == 0);
+        free(after);
+        after = (more && advanced) ? xstrdup(last) : NULL;
         json_decref(root);
+        if (!after)
+            break;
+    }
+    free(after);
+
+    if (malformed) {
+        model_info_free(out, k);
         *err = xasprintf("%s /models response has no model list", name);
         return -1;
     }
-    size_t cnt = json_array_size(data);
-    char **out = xmalloc(cnt * sizeof(*out));
-    size_t k = 0;
-    for (size_t i = 0; i < cnt; i++) {
-        json_t *id = json_object_get(json_array_get(data, i), "id");
-        if (json_is_string(id) && *json_string_value(id))
-            out[k++] = xstrdup(json_string_value(id));
-    }
-    json_decref(root);
-    if (k == 0) {
-        free(out);
+    if (saw_entry && k == 0) {
+        model_info_free(out, k);
         *err = xasprintf("%s /models response contains no usable model ids", name);
         return -1;
     }
-    *ids = out;
+    *models = out;
     *n = k;
     return 0;
 }

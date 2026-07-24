@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "harness.h"
+#include "util.h"
 #include "terminal/picker_core.h"
 
 /* picker_run itself needs a tty and can't be driven headless; picker_core
@@ -154,8 +155,66 @@ static void test_recompute_resets_selection(void)
     buf_free(&f.s.query);
 }
 
+/* Row text is not the picker's own: a model description can be written by a
+ * third party and relayed through a provider catalog. The frame emitter
+ * passes escape sequences through at zero width so the picker's own colors
+ * survive, so anything reaching it must already be stripped of them. */
+static void test_sanitize_strips_escapes(void)
+{
+    struct buf b;
+    buf_init(&b);
+    /* A CSI sequence that would otherwise clear the screen and reposition
+     * the cursor: every byte of it must land as a visible placeholder. */
+    const char *evil = "safe\x1b[2J\x1b[Hgone";
+    picker_core_append_sanitized(&b, evil, strlen(evil));
+    buf_append(&b, "", 1);
+    EXPECT(strchr(b.data, 0x1b) == NULL);
+    EXPECT_STR_EQ(b.data, "safe?[2J?[Hgone");
+    buf_free(&b);
+}
+
+static void test_sanitize_strips_c0_and_keeps_utf8(void)
+{
+    struct buf b;
+    buf_init(&b);
+    /* Bare CR and BEL are display hazards. Control filtering is locale
+     * independent; the multi-byte passthrough below is not, since cell
+     * measurement goes through wcwidth. */
+    const char *s = "a\rb\ac";
+    picker_core_append_sanitized(&b, s, strlen(s));
+    buf_append(&b, "", 1);
+    EXPECT_STR_EQ(b.data, "a?b?c");
+    buf_free(&b);
+
+    if (!locale_have_utf8())
+        return; /* no UTF-8 LC_CTYPE here — the ASCII checks above still ran */
+    buf_init(&b);
+    /* Multi-byte text must survive intact rather than being mangled into
+     * one placeholder per byte. */
+    picker_core_append_sanitized(&b, "c – ü", strlen("c – ü"));
+    buf_append(&b, "", 1);
+    EXPECT_STR_EQ(b.data, "c – ü");
+    buf_free(&b);
+}
+
+static void test_sanitize_counted_not_terminated(void)
+{
+    /* Takes a length, not a NUL-terminator — the footer hands it one
+     * wrapped slice of a longer description at a time. */
+    struct buf b;
+    buf_init(&b);
+    picker_core_append_sanitized(&b, "abcdef", 3);
+    buf_append(&b, "", 1);
+    EXPECT_STR_EQ(b.data, "abc");
+    buf_free(&b);
+}
+
 int main(void)
 {
+    locale_init_utf8();
+    test_sanitize_strips_escapes();
+    test_sanitize_strips_c0_and_keeps_utf8();
+    test_sanitize_counted_not_terminated();
     test_empty_query_matches_all();
     test_substring_case_insensitive();
     test_all_terms_must_match();

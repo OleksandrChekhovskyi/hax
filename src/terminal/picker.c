@@ -195,13 +195,18 @@ static int clip_width(const char *s)
 }
 
 /* Return bytes for the next line, preferring a space before `width` cells.
- * `skip` receives the separator bytes to discard. */
+ * A newline is a hard break, letting a desc separate structured fields from
+ * prose. `skip` receives the separator bytes to discard. */
 static size_t wrap_line(const char *s, int width, size_t *skip)
 {
     size_t len = strlen(s);
     size_t i = 0, last_space = 0;
     int cells = 0;
     while (i < len) {
+        if (s[i] == '\n') {
+            *skip = 1;
+            return i;
+        }
         size_t cons;
         int w = utf8_codepoint_cells(s, len, i, &cons);
         int cw = w < 0 ? 1 : w;
@@ -476,7 +481,7 @@ static void render_footer(struct frame *f, const struct picker_state *s)
             } else {
                 size_t skip;
                 size_t nb = wrap_line(p, width, &skip);
-                buf_append(&f->row, p, nb);
+                picker_core_append_sanitized(&f->row, p, nb);
                 p += nb + skip;
             }
             buf_append_str(&f->row, ANSI_BOLD_OFF);
@@ -512,7 +517,7 @@ static void paint(struct picker_state *s)
 
     if (s->opts->title) {
         buf_append_str(&f.row, ANSI_BOLD);
-        buf_append_str(&f.row, s->opts->title);
+        picker_core_append_sanitized(&f.row, s->opts->title, strlen(s->opts->title));
         buf_append_str(&f.row, ANSI_BOLD_OFF);
         frame_emit(&f);
         frame_emit(&f); /* blank line between the title and the search field */

@@ -3,6 +3,23 @@
 
 #include <ctype.h>
 
+#include "text/utf8.h"
+
+/* ---------------- display sanitization ---------------- */
+
+void picker_core_append_sanitized(struct buf *out, const char *s, size_t n)
+{
+    for (size_t i = 0; i < n;) {
+        size_t cons;
+        int w = utf8_codepoint_cells(s, n, i, &cons);
+        if (w < 0)
+            buf_append(out, "?", 1);
+        else
+            buf_append(out, s + i, cons ? cons : 1);
+        i += cons ? cons : 1;
+    }
+}
+
 /* ---------------- pure filter ---------------- */
 
 /* Case-insensitive "does `hay` contain `needle`" over ASCII case. Bytes

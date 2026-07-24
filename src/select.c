@@ -9,6 +9,7 @@
 #include "util.h"
 #include "agent.h"
 #include "busy.h"
+#include "catalog.h"
 #include "config.h"
 #include "provider.h"
 #include "providers/registry.h"
@@ -131,6 +132,98 @@ static int cmp_model_id(const void *a, const void *b)
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
+static int cmp_model_info(const void *a, const void *b)
+{
+    return strcmp(((const struct model_info *)a)->id, ((const struct model_info *)b)->id);
+}
+
+/* ---------- /model picker gutter ---------- */
+
+/* Token counts the way the rest of the UI writes them: "272k", "1M".
+ * Millions keep one decimal, trimmed when it's zero — the common windows are
+ * powers of two (1048576) that users know as "1M", not "1.05M". */
+static void fmt_tokens(char *buf, size_t n, long v)
+{
+    if (v >= 1000000) {
+        snprintf(buf, n, "%.1fM", (double)v / 1000000.0);
+        char *dot = strstr(buf, ".0M");
+        if (dot)
+            memmove(dot, dot + 2, strlen(dot + 2) + 1);
+    } else if (v >= 1000) {
+        snprintf(buf, n, "%ldk", v / 1000);
+    } else {
+        snprintf(buf, n, "%ld", v);
+    }
+}
+
+/* Append " · "-separated segments into a growing string. */
+static void seg_add(struct buf *b, const char *text)
+{
+    if (b->len)
+        buf_append_str(b, " · ");
+    buf_append_str(b, text);
+}
+
+char *model_desc_line(const struct model_info *m, const struct catalog_entry *cat)
+{
+    /* Reported-over-catalog, field by field: a backend describing its own
+     * model is both fresher and more specific than a snapshot (it knows the
+     * window it will actually serve, and it knows about models released
+     * after the snapshot was cut). */
+    long context = m->context > 0 ? m->context : (cat ? cat->context : 0);
+    int image = m->image_input;
+    if (image == PROVIDER_CAP_UNKNOWN && cat && cat->image_input >= 0)
+        image = cat->image_input ? PROVIDER_CAP_YES : PROVIDER_CAP_NO;
+    double cost_in = m->cost_input >= 0 ? m->cost_input : (cat ? cat->cost_input : -1);
+    double cost_out = m->cost_output >= 0 ? m->cost_output : (cat ? cat->cost_output : -1);
+    double cost_cached =
+        m->cost_cache_read >= 0 ? m->cost_cache_read : (cat ? cat->cost_cache_read : -1);
+
+    struct buf b;
+    buf_init(&b);
+    if (context > 0) {
+        char num[32], seg[48];
+        fmt_tokens(num, sizeof num, context);
+        snprintf(seg, sizeof seg, "%s context", num);
+        seg_add(&b, seg);
+    }
+    /* Only the negative earns a segment: multimodal input is the norm now,
+     * so naming it on every row is noise that crowds out what varies. Tool
+     * support isn't here at all — it decides whether the model works with
+     * hax rather than describing it, so it dims the row instead (see
+     * choose_model), where it's visible without moving the cursor. */
+    if (image == PROVIDER_CAP_NO)
+        seg_add(&b, "no images");
+    if (cost_in >= 0 && cost_out >= 0) {
+        char seg[96];
+        if (cost_in == 0 && cost_out == 0) {
+            snprintf(seg, sizeof seg, "free");
+        } else if (cost_cached >= 0) {
+            /* Cached input is called out rather than folded into the input
+             * rate: on a long conversation it is the dominant term, and the
+             * discount is not a constant across backends. */
+            snprintf(seg, sizeof seg, "$%.3g in / $%.3g cached / $%.3g out per Mtok", cost_in,
+                     cost_cached, cost_out);
+        } else {
+            snprintf(seg, sizeof seg, "$%.3g in / $%.3g out per Mtok", cost_in, cost_out);
+        }
+        seg_add(&b, seg);
+    }
+    /* Prose starts its own footer line (picker.h: a newline is a hard
+     * break), so a long marketing blurb can't run into the structured
+     * fields and make both harder to read. */
+    if (m->desc && *m->desc) {
+        if (b.len)
+            buf_append(&b, "\n", 1);
+        buf_append_str(&b, m->desc);
+    }
+    if (!b.len) {
+        buf_free(&b);
+        return NULL;
+    }
+    return buf_steal(&b);
+}
+
 /* Outcome of one picker step. The chained flows treat these differently:
  * cancel aborts the whole command with nothing changed, "no picker to
  * show" continues on the provider's defaults, and a failure also rolls a
@@ -151,7 +244,7 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
                           enum pick_status *status)
 {
     const char *name = p->name ? p->name : "?";
-    char **ids = NULL;
+    struct model_info *models = NULL;
     size_t n = 0;
 
     /* Distinguish the three "no menu" cases so the note is actionable: the
@@ -170,15 +263,13 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
      * fetch, not just in the picker. */
     struct busy *b = busy_begin("fetching models...");
     char *err = NULL;
-    int rc = p->list_models(p, &ids, &n, &err, busy_tick, NULL);
+    int rc = p->list_models(p, &models, &n, &err, busy_tick, NULL);
     if (busy_end(b)) {
         /* Esc during the fetch aborts like Esc in the picker; a result
          * that landed in the same instant is discarded, not committed.
          * busy_end printed the [interrupted] marker — mark the trail
          * like the other printed-note exits here. */
-        for (size_t i = 0; i < n; i++)
-            free(ids[i]);
-        free(ids);
+        model_info_free(models, n);
         free(err);
         st->r->disp.trail = 1;
         *status = PICK_CANCELLED;
@@ -195,7 +286,7 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
         st->r->disp.trail = 1;
         *status = PICK_FAILED;
         free(err);
-        free(ids);
+        model_info_free(models, n);
         return NULL;
     }
     if (n == 0) {
@@ -205,16 +296,15 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
         ui_note("%s has no models available", name);
         st->r->disp.trail = 1;
         *status = PICK_FAILED;
-        free(ids);
+        model_info_free(models, n);
         return NULL;
     }
     if (n == 1) {
         /* A single model isn't a choice — the common case for a single-model
          * llama.cpp / ollama server. Skip the picker and use it directly; the
          * post-switch confirmation still shows which model is now active. */
-        char *only = xstrdup(ids[0]);
-        free(ids[0]);
-        free(ids);
+        char *only = xstrdup(models[0].id);
+        model_info_free(models, n);
         *status = PICK_MADE;
         return only;
     }
@@ -225,28 +315,55 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
      * defer. config_bool_or resolves exactly that, and /config's tri-state
      * validation accepts the same grammar, so the two agree. */
     if (config_bool_or("sort_models", p->sort_models))
-        qsort(ids, n, sizeof(*ids), cmp_model_id);
+        qsort(models, n, sizeof(*models), cmp_model_info);
+
+    /* Fill the gaps in what the backend reported from the catalog, in one
+     * batch: a per-row catalog_lookup would re-slurp the snapshot once per
+     * model, which is seconds on a catalog of a few hundred. Providers with
+     * no catalog identity skip it and show only what they reported. */
+    struct catalog_entry *cat = NULL;
+    if (p->catalog_id && *p->catalog_id) {
+        const char **names = xmalloc(n * sizeof(*names));
+        for (size_t i = 0; i < n; i++)
+            names[i] = models[i].id;
+        cat = xmalloc(n * sizeof(*cat));
+        catalog_lookup_many(p->catalog_id, names, n, cat, NULL);
+        free(names);
+    }
 
     struct picker_item *items = xcalloc(n, sizeof(*items));
+    char **descs = xcalloc(n, sizeof(*descs)); /* owned gutter lines */
     size_t initial = 0;
     for (size_t i = 0; i < n; i++) {
-        items[i].label = ids[i];
-        items[i].detail = NULL;
-        items[i].dim = 0;
-        items[i].current = cur && strcmp(ids[i], cur) == 0;
+        descs[i] = model_desc_line(&models[i], cat ? &cat[i] : NULL);
+        items[i].label = models[i].id;
+        items[i].desc = descs[i];
+        /* A model that can't be given tools can't run hax's loop, so dim it
+         * with the reason — the same advisory treatment /provider gives an
+         * unreachable backend. Still selectable: the catalog is describing
+         * its default endpoint, not promising anything, and a hidden row is
+         * baffling when the user typed a filter that should have matched it.
+         * Only backends that actually report tool support (OpenRouter today)
+         * can dim anything; elsewhere the answer is unknown and no row
+         * changes. */
+        items[i].dim = models[i].tools == PROVIDER_CAP_NO;
+        items[i].detail = items[i].dim ? "no tool calling" : NULL;
+        items[i].current = cur && strcmp(models[i].id, cur) == 0;
         if (items[i].current)
             initial = i;
     }
     struct picker_opts opts = {
         .title = "select a model", .items = items, .n = n, .initial = initial};
     long sel = picker_run(&opts);
-    char *chosen = (sel >= 0) ? xstrdup(ids[sel]) : NULL;
+    char *chosen = (sel >= 0) ? xstrdup(models[sel].id) : NULL;
     *status = chosen ? PICK_MADE : PICK_CANCELLED;
 
-    free(items);
     for (size_t i = 0; i < n; i++)
-        free(ids[i]);
-    free(ids);
+        free(descs[i]);
+    free(descs);
+    free(items);
+    free(cat);
+    model_info_free(models, n);
     return chosen;
 }
 

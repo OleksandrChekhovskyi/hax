@@ -41,6 +41,7 @@ struct openai {
     enum reasoning_format reasoning_format;
     const char *const *efforts; /* borrowed effort ladder for /effort; NULL = none */
     size_t n_efforts;
+    void (*parse_model)(const json_t *entry, struct model_info *out); /* preset hook; may be NULL */
     char **extra_headers; /* NULL-terminated, each element heap-owned; NULL = none */
     /* Optional background probe — currently the context-window
      * discovery spawned by preset shims (openrouter, llama.cpp).
@@ -574,12 +575,15 @@ static char *resolve_roundtrip_field(const char *prefix, const char *preset_defa
 
 /* GET <base_url>/models and collect the `data[].id` slugs. The OpenAI
  * /v1/models shape is shared across the whole compat family — real OpenAI,
- * llama.cpp, ollama, OpenRouter — so this one parser serves every shim. */
-static int openai_list_models(struct provider *p, char ***ids, size_t *n, char **err,
+ * llama.cpp, ollama, OpenRouter — so this one parser serves every shim.
+ * Anything past the id is a per-backend extension, delegated to the
+ * preset's parse_model hook (see openai.h); real OpenAI's response carries
+ * nothing else, so it leaves every entry at the unknown sentinels. */
+static int openai_list_models(struct provider *p, struct model_info **models, size_t *n, char **err,
                               http_tick_cb tick, void *tick_user)
 {
     struct openai *o = (struct openai *)p;
-    *ids = NULL;
+    *models = NULL;
     *n = 0;
     char *url = xasprintf("%s/models", o->base_url);
     char *auth = o->api_key ? xasprintf("Authorization: Bearer %s", o->api_key) : NULL;
@@ -618,12 +622,18 @@ static int openai_list_models(struct provider *p, char ***ids, size_t *n, char *
         return -1;
     }
     size_t cnt = json_array_size(data);
-    char **out = xmalloc(cnt * sizeof(*out));
+    struct model_info *out = xmalloc(cnt * sizeof(*out));
     size_t k = 0;
     for (size_t i = 0; i < cnt; i++) {
-        json_t *id = json_object_get(json_array_get(data, i), "id");
-        if (json_is_string(id) && *json_string_value(id))
-            out[k++] = xstrdup(json_string_value(id));
+        json_t *entry = json_array_get(data, i);
+        json_t *id = json_object_get(entry, "id");
+        if (!json_is_string(id) || !*json_string_value(id))
+            continue;
+        model_info_init(&out[k]);
+        out[k].id = xstrdup(json_string_value(id));
+        if (o->parse_model)
+            o->parse_model(entry, &out[k]);
+        k++;
     }
     json_decref(root);
     /* Entries existed but none carried a usable id — malformed, not empty. */
@@ -632,7 +642,7 @@ static int openai_list_models(struct provider *p, char ***ids, size_t *n, char *
         *err = xasprintf("%s /models response contains no usable model ids", name);
         return -1;
     }
-    *ids = out;
+    *models = out;
     *n = k;
     return 0;
 }
@@ -760,6 +770,7 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
     o->reasoning_format = preset->reasoning_format;
     o->efforts = preset->efforts;
     o->n_efforts = preset->n_efforts;
+    o->parse_model = preset->parse_model;
     o->extra_headers = dup_headers(preset->extra_headers);
     char uuid[37];
     gen_uuid_v4(uuid);

@@ -52,6 +52,23 @@ void select_preset(struct agent_state *st, const char *name);
 void select_config(struct agent_state *st, const char *arg);
 
 struct provider;
+struct model_info;
+struct catalog_entry;
+
+/* Compose the /model picker's gutter for one model: context window, image
+ * input, and per-Mtok rates on the first line, then the backend's own
+ * one-line blurb (when it offered one) on the second. Tool support is
+ * deliberately absent — it dims the row instead, being a verdict on whether
+ * the model works here rather than a description of it.
+ *
+ * Two sources, layered the way agent_image_input layers its answer: what
+ * the backend reported about this model (`m`) wins field by field, and
+ * `cat` — the models.dev/config entry, NULL when the model isn't in the
+ * catalog — fills whatever it left unknown. Fields neither source knows are
+ * omitted rather than rendered as zeros, so a bare-ids backend with no
+ * catalog presence yields NULL (no gutter at all) instead of a row of
+ * placeholders. Returns malloc'd; caller frees. Pure, for unit tests. */
+char *model_desc_line(const struct model_info *m, const struct catalog_entry *cat);
 
 /* Cold-start auto-pick used when the built-in default provider can't be
  * constructed and the user hasn't explicitly chosen one. Probes every

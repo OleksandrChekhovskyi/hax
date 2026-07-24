@@ -307,6 +307,59 @@ struct stream_event {
 
 typedef int (*stream_cb)(const struct stream_event *ev, void *user);
 
+/* Tri-state capability answer, where 0 is "the backend didn't say" so a
+ * zeroed struct reads as all-unknown. Values coincide with enum
+ * provider_image_input, so an image_input answer can be stored straight
+ * into provider->image_input. */
+enum provider_cap {
+    PROVIDER_CAP_UNKNOWN = 0,
+    PROVIDER_CAP_YES = 1,
+    PROVIDER_CAP_NO = 2,
+};
+
+/* One model a provider can serve, plus whatever it volunteered about it.
+ *
+ * Backends differ wildly in how much they say: OpenRouter's catalog carries
+ * pricing, limits, modalities and tool support; the Codex and Anthropic
+ * catalogs carry limits, modalities and prose but no rates; real OpenAI's
+ * /v1/models is bare ids. So every field past `id` is optional, and the
+ * sentinels are what an adapter that knows nothing leaves behind —
+ * model_info_init sets them, and consumers treat "unknown" as "ask the
+ * catalog (catalog.h) instead" rather than as a negative answer.
+ *
+ * This is deliberately NOT struct catalog_entry: that one is the resolved
+ * metadata *view* (config over models.dev, with pricing tiers), while this
+ * is one backend's raw report. The picker layers them — reported wins,
+ * catalog fills the gaps — the same way agent_image_input layers config
+ * over probe over catalog. */
+struct model_info {
+    char *id;   /* owned; the exact wire id. Always set. */
+    char *desc; /* owned one-line blurb from the backend; NULL = none */
+    /* Context window in tokens; 0 = unknown. Where a backend reports both a
+     * served and a theoretical maximum (codex), this is the served one, so
+     * it agrees with the context-% display. */
+    long context;
+    int image_input; /* enum provider_cap */
+    int tools;       /* enum provider_cap — can it call tools at all */
+    /* USD per 1M tokens; negative = unknown. cost_cache_read is the rate for
+     * prefix-cache hits, which dominates the bill on a long agentic
+     * conversation (every turn re-sends the whole prefix) and is not a fixed
+     * fraction of the input rate — backends quote anywhere from 2% to 20%.
+     * Display only for now: cost estimation still prices against the catalog
+     * (see agent_core.c), so a backend rate the catalog lacks shows in the
+     * picker without retroactively re-rating a session. */
+    double cost_input;
+    double cost_cache_read;
+    double cost_output;
+};
+
+/* Set `m` to "nothing known": zeroed, with the negative cost sentinels.
+ * Adapters call this before filling whatever their catalog reports. */
+void model_info_init(struct model_info *m);
+
+/* Free `n` entries and the array itself. NULL-safe. */
+void model_info_free(struct model_info *models, size_t n);
+
 struct provider {
     const char *name;
     /* Model id used when HAX_MODEL is unset. NULL = no safe default; the
@@ -354,25 +407,25 @@ struct provider {
      * fetches under a busy window (busy.h) so a spinner shows and Esc
      * cancels; a cancelled fetch returns -1 with no diagnostic. */
     int (*query_usage)(struct provider *p);
-    /* Optional. Discover the model ids this provider can serve, for the
-     * runtime model picker (/model). Returns 0 with *ids a freshly-allocated
-     * array of *n heap-owned strings (caller frees; *n may be 0), or -1 on
-     * any failure with *ids=NULL and *err set to a malloc'd user-actionable
-     * diagnostic ("codex token expired — …", "could not reach <name> at
-     * <url>") that the caller prints and frees. Set *err on every failure
-     * path: only the adapter can name the endpoint and remedy; the caller's
-     * fallback for an unset *err is a bare generic line. When no menu can
-     * be built the selector prints a note and skips the model step; a
-     * failure (-1) or an empty catalog (*n==0) also rolls a /provider
-     * switch back entirely, while a NULL hook — the provider can't
-     * enumerate models — lets the switch proceed on the new provider's
-     * default_model. The picker calls this synchronously on the foreground
-     * path, so implementations must bound the network round-trip with a
-     * short timeout AND thread `tick` (same shape as stream()'s, may be
-     * NULL) into it — the picker cancels the fetch through it when the
-     * user presses Esc. */
-    int (*list_models)(struct provider *p, char ***ids, size_t *n, char **err, http_tick_cb tick,
-                       void *tick_user);
+    /* Optional. Discover the models this provider can serve, for the
+     * runtime model picker (/model). Returns 0 with *models a freshly
+     * allocated array of *n entries (caller frees with model_info_free;
+     * *n may be 0), or -1 on any failure with *models=NULL and *err set to
+     * a malloc'd user-actionable diagnostic ("codex token expired — …",
+     * "could not reach <name> at <url>") that the caller prints and frees.
+     * Set *err on every failure path: only the adapter can name the
+     * endpoint and remedy; the caller's fallback for an unset *err is a
+     * bare generic line. When no menu can be built the selector prints a
+     * note and skips the model step; a failure (-1) or an empty catalog
+     * (*n==0) also rolls a /provider switch back entirely, while a NULL
+     * hook — the provider can't enumerate models — lets the switch proceed
+     * on the new provider's default_model. The picker calls this
+     * synchronously on the foreground path, so implementations must bound
+     * the network round-trip with a short timeout AND thread `tick` (same
+     * shape as stream()'s, may be NULL) into it — the picker cancels the
+     * fetch through it when the user presses Esc. */
+    int (*list_models)(struct provider *p, struct model_info **models, size_t *n, char **err,
+                       http_tick_cb tick, void *tick_user);
     /* Optional. Reasoning-effort wire values this provider accepts (e.g.
      * "low", "high"), for the runtime effort picker (/effort). Points *out
      * at a borrowed array (typically static, owned by the provider; valid

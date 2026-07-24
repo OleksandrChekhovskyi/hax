@@ -96,6 +96,20 @@ struct catalog_entry {
  * (provider, model) per generation. */
 int catalog_lookup(const char *provider_id, const char *model, struct catalog_entry *out);
 
+/* Resolve `n` models of ONE provider in a single pass, filling out[0..n)
+ * (and, when non-NULL, found[i] with what catalog_lookup would have
+ * returned as 0/-1 — 1 = resolved, 0 = unknown). Same two tiers and the
+ * same merge order as catalog_lookup; the difference is cost, not policy:
+ * the cached artifact is slurped and slice-parsed once for the whole batch
+ * instead of once per model. That is what makes it affordable to describe
+ * every row of the /model picker — a provider listing hundreds of models
+ * would otherwise re-read the multi-MB snapshot hundreds of times.
+ * Deliberately not memoized: this is a bounded, one-shot batch, so nothing
+ * is retained past the call. NULL/empty entries in `models` resolve to
+ * unknown. */
+void catalog_lookup_many(const char *provider_id, const char *const *models, size_t n,
+                         struct catalog_entry *out, int *found);
+
 /* Scan `text` (a JSON object) for the top-level member named `key` and
  * tree-parse only that member's value — the primitive that keeps the
  * multi-MB artifact from ever being parsed whole. Byte-level scan: strings

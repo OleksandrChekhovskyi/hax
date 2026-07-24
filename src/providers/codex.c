@@ -890,14 +890,52 @@ char *codex_models_error(long status)
     return xstrdup("could not reach chatgpt.com to list models — check your network");
 }
 
+int codex_model_hidden(const json_t *entry)
+{
+    const char *vis = json_string_value(json_object_get(entry, "visibility"));
+    return vis && strcmp(vis, "hide") == 0;
+}
+
+void codex_parse_model(const json_t *entry, struct model_info *out)
+{
+    /* Same precedence extract_codex_context uses, and for the same reason:
+     * this is the window requests actually get, while max_context_window is
+     * the model's theoretical ceiling (they differ — gpt-5.4 serves 272k of
+     * a 1M maximum). Showing the ceiling here would contradict the
+     * context-% display, which the probe drives off context_window. */
+    json_t *ctx = json_object_get(entry, "context_window");
+    if (!json_is_integer(ctx) || json_integer_value(ctx) <= 0)
+        ctx = json_object_get(entry, "max_context_window");
+    if (json_is_integer(ctx) && json_integer_value(ctx) > 0)
+        out->context = (long)json_integer_value(ctx);
+
+    json_t *mods = json_object_get(entry, "input_modalities");
+    if (json_is_array(mods)) {
+        out->image_input = PROVIDER_CAP_NO;
+        for (size_t i = 0; i < json_array_size(mods); i++) {
+            const char *s = json_string_value(json_array_get(mods, i));
+            if (s && strcmp(s, "image") == 0)
+                out->image_input = PROVIDER_CAP_YES;
+        }
+    }
+
+    const char *desc = json_string_value(json_object_get(entry, "description"));
+    if (desc && *desc)
+        out->desc = xstrdup(desc);
+}
+
 /* Fetch the catalog and collect `models[].slug` — the same endpoint and
  * shape the context-window probe walks (extract_codex_context). The high
- * synthetic client_version keeps already-sendable models visible. */
-static int codex_list_models(struct provider *p, char ***ids, size_t *n, char **err,
-                             http_tick_cb tick, void *tick_user)
+ * synthetic client_version keeps already-sendable models visible.
+ *
+ * Entries the catalog marks `visibility: "hide"` are dropped: they are
+ * internal models the Codex UI never offers (the automatic approval-review
+ * one), not choices for a user at a /model prompt. */
+static int codex_list_models(struct provider *p, struct model_info **models_out, size_t *n,
+                             char **err, http_tick_cb tick, void *tick_user)
 {
     struct codex *c = (struct codex *)p;
-    *ids = NULL;
+    *models_out = NULL;
     *n = 0;
     char *url =
         xasprintf("%s?client_version=%s", CODEX_MODELS_ENDPOINT, CODEX_PROBE_CLIENT_VERSION);
@@ -929,21 +967,31 @@ static int codex_list_models(struct provider *p, char ***ids, size_t *n, char **
         return -1;
     }
     size_t cnt = json_array_size(models);
-    char **out = cnt ? xmalloc(cnt * sizeof(*out)) : NULL;
-    size_t k = 0;
+    struct model_info *out = cnt ? xmalloc(cnt * sizeof(*out)) : NULL;
+    size_t k = 0, with_slug = 0;
     for (size_t i = 0; i < cnt; i++) {
-        json_t *slug = json_object_get(json_array_get(models, i), "slug");
-        if (json_is_string(slug) && *json_string_value(slug))
-            out[k++] = xstrdup(json_string_value(slug));
+        json_t *entry = json_array_get(models, i);
+        json_t *slug = json_object_get(entry, "slug");
+        if (!json_is_string(slug) || !*json_string_value(slug))
+            continue;
+        with_slug++;
+        if (codex_model_hidden(entry))
+            continue;
+        model_info_init(&out[k]);
+        out[k].id = xstrdup(json_string_value(slug));
+        codex_parse_model(entry, &out[k]);
+        k++;
     }
     json_decref(root);
-    /* Entries existed but none carried a slug — malformed, not empty. */
-    if (cnt > 0 && k == 0) {
+    /* Entries existed but none carried a slug — malformed, not empty. A
+     * catalog whose every entry is hidden is empty, not malformed, so this
+     * counts slugs seen rather than models kept. */
+    if (cnt > 0 && with_slug == 0) {
         free(out);
         *err = xstrdup("codex model catalog response contains no usable model slugs");
         return -1;
     }
-    *ids = out;
+    *models_out = out;
     *n = k;
     return 0;
 }

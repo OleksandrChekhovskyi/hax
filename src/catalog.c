@@ -391,27 +391,43 @@ static void fill_from_config(const char *provider_id, const char *model, struct 
 
 /* ---------------- cache tier: the fetched snapshot ---------------- */
 
-/* Extract only the wanted provider's slice from the cached artifact and
- * tree-parse just that — a few ms, cheap enough for the foreground path;
- * the memo in cache_tier_lookup bounds repeats anyway. */
-static void fill_from_cache(const char *provider_id, const char *model, struct catalog_entry *e)
+/* Slurp the cached artifact and tree-parse only `provider_id`'s slice — a
+ * few ms and one slice's worth of memory. New reference, or NULL when the
+ * cache is missing, over the size cap, or has no such provider. */
+static json_t *cache_provider_slice(const char *provider_id)
 {
     char *path = xdg_hax_cache_path(CATALOG_CACHE_FILE);
     if (!path)
-        return;
+        return NULL;
     size_t len;
     int truncated;
     char *text = slurp_file_capped(path, CATALOG_MAX_BYTES, &len, &truncated);
     free(path);
     if (!text)
-        return;
+        return NULL;
     json_t *prov = truncated ? NULL : catalog_extract_member(text, provider_id);
     free(text);
-    if (!prov)
-        return;
-    json_t *models = json_object_get(prov, "models");
+    return prov;
+}
+
+/* Read one model out of an already-extracted provider slice. */
+static void fill_from_slice(const json_t *prov, const char *model, struct catalog_entry *e)
+{
+    json_t *models = prov ? json_object_get(prov, "models") : NULL;
     if (json_is_object(models))
         entry_fill(json_object_get(models, model), e);
+}
+
+/* Extract the wanted provider's slice and read one model out of it; the
+ * memo in cache_tier_lookup bounds repeats. Callers resolving many models
+ * of one provider at once should use catalog_lookup_many instead, which
+ * pays the slurp + slice-parse once for the whole batch. */
+static void fill_from_cache(const char *provider_id, const char *model, struct catalog_entry *e)
+{
+    json_t *prov = cache_provider_slice(provider_id);
+    if (!prov)
+        return;
+    fill_from_slice(prov, model, e);
     json_decref(prov);
 }
 
@@ -491,19 +507,81 @@ static int cache_tier_lookup(const char *provider_id, const char *model, struct 
     return found ? 0 : -1;
 }
 
-int catalog_lookup(const char *provider_id, const char *model, struct catalog_entry *out)
+/* ---------------- tier resolution ---------------- */
+
+/* Where one resolve reads its cache tier from. The two entry points differ
+ * only here: a single lookup pays the memoized per-model slurp+scan, while a
+ * batch extracts one provider slice up front and points every model at it.
+ *
+ * The indirection is what keeps "NULL means fall back to the memo" from ever
+ * being expressible: a batch whose slurp failed passes no cache tier at all,
+ * rather than silently degrading into the per-model reads that
+ * catalog_lookup_many exists to avoid. */
+struct cache_tier {
+    int (*fill)(const struct cache_tier *t, const char *model, struct catalog_entry *out);
+    const char *provider_id;
+    const json_t *slice;
+};
+
+static int cache_tier_memo(const struct cache_tier *t, const char *model, struct catalog_entry *out)
+{
+    return cache_tier_lookup(t->provider_id, model, out) == 0;
+}
+
+static int cache_tier_slice(const struct cache_tier *t, const char *model,
+                            struct catalog_entry *out)
+{
+    entry_init(out);
+    fill_from_slice(t->slice, model, out);
+    return entry_any(out);
+}
+
+/* The tier policy, in one place so the single and batch entry points cannot
+ * drift (catalog.h promises callers they agree): config wins field by field,
+ * the cache tier is consulted only for what config left undeclared and only
+ * fills the gaps, and a resolve counts as a hit when anything at all landed.
+ * A NULL `cache` resolves from config alone. Returns 1 on a hit. */
+static int entry_resolve(const char *provider_id, const char *model, const struct cache_tier *cache,
+                         struct catalog_entry *out)
 {
     entry_init(out);
     if (!provider_id || !*provider_id || !model || !*model)
-        return -1;
-
+        return 0;
     fill_from_config(provider_id, model, out);
-    if (!entry_complete(out)) {
-        struct catalog_entry cached;
-        if (cache_tier_lookup(provider_id, model, &cached) == 0)
-            entry_merge(out, &cached);
+    struct catalog_entry cached;
+    if (!entry_complete(out) && cache && cache->fill(cache, model, &cached))
+        entry_merge(out, &cached);
+    return entry_any(out);
+}
+
+int catalog_lookup(const char *provider_id, const char *model, struct catalog_entry *out)
+{
+    struct cache_tier memo = {.fill = cache_tier_memo, .provider_id = provider_id};
+    return entry_resolve(provider_id, model, &memo, out) ? 0 : -1;
+}
+
+void catalog_lookup_many(const char *provider_id, const char *const *models, size_t n,
+                         struct catalog_entry *out, int *found)
+{
+    for (size_t i = 0; i < n; i++) {
+        entry_init(&out[i]);
+        if (found)
+            found[i] = 0;
     }
-    return entry_any(out) ? 0 : -1;
+    if (!provider_id || !*provider_id || n == 0)
+        return;
+
+    /* The one slurp + slice-parse this entry point exists for. A miss (no
+     * cache file, provider absent from the snapshot) leaves every model to
+     * the config tier alone — deliberately not a per-model retry. */
+    json_t *prov = cache_provider_slice(provider_id);
+    struct cache_tier slice = {.fill = cache_tier_slice, .provider_id = provider_id, .slice = prov};
+    for (size_t i = 0; i < n; i++) {
+        int hit = entry_resolve(provider_id, models[i], prov ? &slice : NULL, &out[i]);
+        if (found)
+            found[i] = hit;
+    }
+    json_decref(prov);
 }
 
 double catalog_price(const struct catalog_entry *e, long input, long output, long cached,

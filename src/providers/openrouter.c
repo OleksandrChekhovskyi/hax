@@ -85,6 +85,81 @@ static long extract_openrouter_image_input(const char *body, void *user)
     return out;
 }
 
+/* ---------- /model picker metadata ---------- */
+
+/* Does `arr` (a JSON array of strings) list `want`? A non-array — the field
+ * is absent or a shape we don't recognize — is unknown, not a "no": the
+ * picker must not report "no images" just because OpenRouter reshuffled its
+ * catalog. */
+static int cap_from_array(const json_t *arr, const char *want)
+{
+    if (!json_is_array(arr))
+        return PROVIDER_CAP_UNKNOWN;
+    for (size_t i = 0; i < json_array_size(arr); i++) {
+        const char *s = json_string_value(json_array_get(arr, i));
+        if (s && strcmp(s, want) == 0)
+            return PROVIDER_CAP_YES;
+    }
+    return PROVIDER_CAP_NO;
+}
+
+/* OpenRouter quotes rates as USD-per-token decimal strings ("0.00001");
+ * hax works in USD per 1M tokens throughout (see catalog.h), so scale up.
+ * "-1" marks a model whose price is variable — the auto-routers — and must
+ * read as unknown rather than free; "0" is a genuinely free model and does
+ * survive as 0. */
+static double openrouter_rate(const json_t *pricing, const char *key)
+{
+    const char *s = json_string_value(json_object_get(pricing, key));
+    if (!s || !*s)
+        return -1;
+    char *end = NULL;
+    double v = strtod(s, &end);
+    if (end == s || v < 0)
+        return -1;
+    return v * 1e6;
+}
+
+/* The blurb's first line only: OpenRouter descriptions run to several
+ * markdown paragraphs, and the picker's gutter is a few lines shared with
+ * the metadata. Trailing whitespace trimmed; NULL when there's nothing. */
+static char *openrouter_lead_line(const json_t *entry)
+{
+    const char *d = json_string_value(json_object_get(entry, "description"));
+    if (!d)
+        return NULL;
+    size_t len = strcspn(d, "\r\n");
+    while (len > 0 && (d[len - 1] == ' ' || d[len - 1] == '\t'))
+        len--;
+    return len ? xasprintf("%.*s", (int)len, d) : NULL;
+}
+
+void openrouter_parse_model(const json_t *entry, struct model_info *out)
+{
+    json_t *ctx = json_object_get(entry, "context_length");
+    if (json_is_integer(ctx) && json_integer_value(ctx) > 0)
+        out->context = (long)json_integer_value(ctx);
+
+    json_t *arch = json_object_get(entry, "architecture");
+    out->image_input =
+        cap_from_array(arch ? json_object_get(arch, "input_modalities") : NULL, "image");
+    /* A model that can't be given tools can't run hax's loop at all, and a
+     * fifth of the catalog is in that state (image/audio generators, the
+     * moderation models, some chat-only endpoints). */
+    out->tools = cap_from_array(json_object_get(entry, "supported_parameters"), "tools");
+
+    json_t *pricing = json_object_get(entry, "pricing");
+    if (json_is_object(pricing)) {
+        out->cost_input = openrouter_rate(pricing, "prompt");
+        out->cost_output = openrouter_rate(pricing, "completion");
+        /* Roughly half the paid catalog quotes one; the rest simply don't
+         * cache, which is itself worth not claiming either way. */
+        out->cost_cache_read = openrouter_rate(pricing, "input_cache_read");
+    }
+
+    out->desc = openrouter_lead_line(entry);
+}
+
 static void spawn_context_probe(struct provider *p, const char *api_key)
 {
     const char *model = config_str("model");
@@ -319,6 +394,7 @@ struct provider *openrouter_provider_new(const char *name)
          * ladder is safe to offer. */
         .efforts = OPENAI_EFFORT_LADDER,
         .n_efforts = OPENAI_EFFORT_LADDER_N,
+        .parse_model = openrouter_parse_model,
     };
     /* Constructor copies headers internally, so the local strings can be
      * freed once it returns. */

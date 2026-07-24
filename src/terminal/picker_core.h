@@ -37,6 +37,19 @@ struct picker_state {
     int raw_active;
 };
 
+/* Append `n` bytes of `s` to `out`, substituting one '?' for every
+ * codepoint utf8_codepoint_cells rejects — C0 controls (ESC included), the
+ * Trojan Source bidi vectors, and the rest of the invisible-hazard set.
+ *
+ * Every byte of caller-supplied text must reach a painted frame through
+ * this or picker.c's append_clip, which applies the same filter under a
+ * cell budget. Item text is not the picker's own: a row can carry a model
+ * description written by a third party and relayed by a provider catalog,
+ * and the frame emitter deliberately passes escape sequences through at
+ * zero width so the picker's SGR codes survive — so a raw append would
+ * hand that party the terminal. */
+void picker_core_append_sanitized(struct buf *out, const char *s, size_t n);
+
 /* Pure filter predicate: case-insensitive, `query` split on spaces into
  * terms, every term must occur as a substring of `text`. An empty or
  * NULL query matches everything. NULL `text` matches only an empty query. */

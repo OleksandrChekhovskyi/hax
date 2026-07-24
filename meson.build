@@ -47,6 +47,7 @@ sources = files(
     'src/file_mention.c',
     'src/oneshot.c',
     'src/paste_image.c',
+    'src/provider.c',
     'src/select.c',
     'src/session.c',
     'src/session_picker.c',
