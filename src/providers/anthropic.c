@@ -568,6 +568,17 @@ static int anthropic_list_models(struct provider *p, struct model_info **models,
             malformed = 1;
             break;
         }
+        /* `after_id=X` asks for what comes after X, so a page that ends back
+         * at X did not advance — the server is repeating itself. Detect that
+         * before taking any of it: appending first and stopping afterwards
+         * would leave one duplicated page in the picker, which is worse than
+         * the truncation it was meant to avoid. */
+        const char *last = json_string_value(json_object_get(root, "last_id"));
+        if (after && last && strcmp(after, last) == 0) {
+            json_decref(root);
+            break;
+        }
+
         size_t cnt = json_array_size(data);
         for (size_t i = 0; i < cnt; i++) {
             json_t *entry = json_array_get(data, i);
@@ -585,14 +596,11 @@ static int anthropic_list_models(struct provider *p, struct model_info **models,
             k++;
         }
         int more = json_is_true(json_object_get(root, "has_more"));
-        const char *last = json_string_value(json_object_get(root, "last_id"));
-        /* A cursor that doesn't move would refetch the same page — burning
-         * the page budget and, worse, duplicating every row of it in the
-         * picker. Stop on that as firmly as on a missing one. */
-        int advanced = anthropic_cursor_ok(last) && !(after && strcmp(after, last) == 0);
         free(after);
-        after = (more && advanced) ? xstrdup(last) : NULL;
+        after = (more && anthropic_cursor_ok(last)) ? xstrdup(last) : NULL;
         json_decref(root);
+        /* No usable cursor to advance on: stop with what we have rather
+         * than refetch page one forever. */
         if (!after)
             break;
     }
