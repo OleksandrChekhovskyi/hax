@@ -190,6 +190,7 @@ static const struct shortcut_def SHORTCUTS[] = {
     {.key = "ctrl-l", .desc = "clear screen and redraw prompt"},
     {.key = "ctrl-g", .desc = "edit prompt in $EDITOR"},
     {.key = "ctrl-t", .desc = "view transcript in $PAGER"},
+    {.key = "ctrl-v", .desc = "paste image (or text) from clipboard"},
     {.key = "@ + tab",
      .desc = "pick a project file to mention",
      .available = file_mention_available,

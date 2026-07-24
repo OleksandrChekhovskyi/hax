@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -496,6 +497,45 @@ static void test_replace_span(void)
     input_core_replace_span(in, 2, 1, "X");
     input_core_replace_span(in, 0, 4, "X");
     EXPECT_STR_EQ(in->buf, "abc");
+
+    input_free(in);
+}
+
+/* ---------- paste commit ---------- */
+
+/* Uppercases bodies containing "uri", passes everything else through —
+ * a stand-in for the REPL's file:// URI conversion. */
+static char *upcase_uri_filter(const char *text, void *user)
+{
+    (void)user;
+    if (!strstr(text, "uri"))
+        return NULL;
+    char *out = strdup(text);
+    for (char *p = out; *p; p++)
+        *p = (char)toupper((unsigned char)*p);
+    return out;
+}
+
+static void test_paste_commit(void)
+{
+    struct input *in = new_with("");
+
+    /* no filter registered: verbatim insert */
+    input_core_paste_commit(in, "plain", 5);
+    EXPECT_STR_EQ(in->buf, "plain");
+
+    /* filter declines (NULL): verbatim insert */
+    input_core_buf_set(in, "");
+    in->paste_filter = upcase_uri_filter;
+    input_core_paste_commit(in, "plain", 5);
+    EXPECT_STR_EQ(in->buf, "plain");
+
+    /* filter rewrites: replacement inserted at the cursor instead */
+    input_core_buf_set(in, "see  here");
+    in->cursor = 4;
+    input_core_paste_commit(in, "uri", 3);
+    EXPECT_STR_EQ(in->buf, "see URI here");
+    EXPECT(in->cursor == 7);
 
     input_free(in);
 }
@@ -1338,6 +1378,7 @@ int main(void)
 
     test_buf_set_and_insert();
     test_replace_span();
+    test_paste_commit();
     test_motions_ascii();
     test_motions_utf8();
     test_motions_malformed_utf8();

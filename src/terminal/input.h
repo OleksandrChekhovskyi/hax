@@ -38,7 +38,14 @@
  *   - Standard motions: arrows, Home/End, Ctrl-A/E/B/F, backspace,
  *     Delete, Ctrl-H/K/U/W, Ctrl-L (clear screen + redraw).
  *   - Bracketed paste is enabled; pasted blocks (incl. newlines) insert
- *     verbatim.
+ *     verbatim, unless a caller-registered filter rewrites the body
+ *     first (see input_set_paste_filter) — typically "file:// URI list
+ *     from a file-manager copy or drag-and-drop → plain paths".
+ *   - Ctrl-V invokes a caller-supplied paste hook (see
+ *     input_set_paste_cb) — typically "clipboard image to temp file +
+ *     marker, else clipboard text". An *empty* bracketed paste probes
+ *     the same hook: that's what macOS terminals send for Cmd+V when
+ *     the clipboard holds an image rather than text.
  *   - Ctrl-D on an empty buffer returns NULL (EOF). Ctrl-C cancels the
  *     current line, returning an empty string. Ctrl-Z suspends the
  *     process (job control); editing resumes on `fg`.
@@ -99,6 +106,23 @@ void input_set_transcript_cb(struct input *in, void (*fn)(void *user), void *use
  * inserts a literal tab. */
 struct input_modal_completer;
 void input_set_modal_completer(struct input *in, const struct input_modal_completer *mc);
+
+/* Register the Ctrl-V paste hook. While the prompt is active, Ctrl-V
+ * (or an empty bracketed paste — see header comment) calls `fn(user)`
+ * and inserts the returned malloc'd string at the cursor, freeing it.
+ * NULL return inserts nothing; NULL `fn` disables the binding. The hook
+ * must not touch the tty — the editor stays in raw mode around the
+ * call. */
+void input_set_paste_cb(struct input *in, char *(*fn)(void *user), void *user);
+
+/* Register the bracketed-paste body filter. `fn` receives each
+ * completed non-empty paste body (NUL-terminated; CR/CRLF already
+ * normalized to LF, NULs substituted) and returns a malloc'd
+ * replacement to insert instead (the editor frees it), or NULL to
+ * insert the body verbatim. Same raw-mode constraint as the Ctrl-V
+ * hook. NULL `fn` disables filtering. */
+void input_set_paste_filter(struct input *in, char *(*fn)(const char *text, void *user),
+                            void *user);
 
 /* Seed the next editable input with `text`, placing the cursor at the end.
  * One-shot; NULL or "" clears it, and non-tty reads discard it. */

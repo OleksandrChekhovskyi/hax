@@ -46,6 +46,7 @@ sources = files(
     'src/config.c',
     'src/file_mention.c',
     'src/oneshot.c',
+    'src/paste_image.c',
     'src/select.c',
     'src/session.c',
     'src/session_picker.c',
@@ -89,6 +90,7 @@ sources = files(
     'src/system/os.c',
     'src/system/path.c',
     'src/system/spawn.c',
+    'src/system/tempfiles.c',
 
     'src/terminal/clipboard.c',
     'src/terminal/input.c',

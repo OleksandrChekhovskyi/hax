@@ -6,17 +6,20 @@
 #include <stdio.h>
 
 /*
- * Process-spawn helpers for interactive shell-command children.
+ * Process-spawn helpers for short-lived child processes.
  *
- * Two patterns covered:
+ * Three patterns covered:
  *   - spawn_run: fork+exec a shell command and wait for it. Same role
  *     as POSIX system(), but additionally resets SIGPIPE in the child
  *     so common shell pipelines work the way the user expects.
  *   - spawn_pipe_open / spawn_pipe_close: fork+exec a shell command
  *     with its stdin attached to a write-mode FILE*. Drop-in for the
  *     "pipe content into a pager / filter" use case.
+ *   - spawn_capture: fork+exec an argv-vector helper with stdout
+ *     captured and a hard deadline — for non-interactive helpers
+ *     (clipboard tools) whose output the caller consumes.
  *
- * Both ignore SIGINT, SIGQUIT, and SIGPIPE in the parent for the
+ * All three ignore SIGINT, SIGQUIT, and SIGPIPE in the parent for the
  * duration of the child run (matching system()'s POSIX-mandated
  * etiquette plus SIGPIPE), and reset all three to SIG_DFL in the
  * child so the helper sees terminal signals normally — Ctrl-C in less
@@ -30,6 +33,16 @@
  */
 
 int spawn_run(const char *shell_cmd);
+
+/* fork+exec `argv` (argv[0] resolved via PATH, no shell) with stdin
+ * and stderr on /dev/null and stdout piped back. Returns malloc'd
+ * output (*out_len set) when the child exited 0 within `timeout_ms`
+ * (must be > 0) and produced 1..max bytes; NULL otherwise. The
+ * deadline covers the whole run — a helper that stalls, overflows
+ * `max`, or closes stdout without exiting is SIGKILLed and reaped, so
+ * a caller holding the terminal in raw mode (where Ctrl-C is just a
+ * queued byte) can't be frozen by a stuck helper. */
+char *spawn_capture(const char *const *argv, size_t max, int timeout_ms, size_t *out_len);
 
 /* Lower-level signal/wait helpers for callers that own their own
  * fork+exec lifecycle (e.g. argv-based exec with custom child fd

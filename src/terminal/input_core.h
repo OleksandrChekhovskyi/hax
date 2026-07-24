@@ -98,6 +98,19 @@ struct input {
      * a literal tab. */
     const struct input_modal_completer *completer;
 
+    /* Ctrl-V paste hook (input.c only). Returns malloc'd text to insert
+     * at the cursor (the editor frees it) or NULL to insert nothing.
+     * Also probed on an empty bracketed paste — the tell for "clipboard
+     * holds an image, not text" (macOS Cmd+V sends exactly that). NULL =
+     * Ctrl-V is a no-op. */
+    char *(*paste_cb)(void *user);
+    void *paste_user;
+
+    /* Bracketed-paste body filter — see input_set_paste_filter in
+     * input.h. Applied by input_core_paste_commit. */
+    char *(*paste_filter)(const char *text, void *user);
+    void *paste_filter_user;
+
     /* When set, Enter on an empty buffer submits the empty string
      * instead of being a no-op (input.c only). The REPL enables it
      * while a paused turn is resumable, where an empty send means
@@ -127,6 +140,13 @@ struct input_layout {
 /* ---- buffer ---- */
 void input_core_buf_set(struct input *in, const char *s);
 void input_core_buf_insert(struct input *in, const char *bytes, size_t n);
+
+/* Insert a completed paste body at the cursor, giving the registered
+ * paste filter first refusal: a non-NULL filter result is inserted (and
+ * freed) in place of the body, NULL inserts the body verbatim. `body`
+ * must be NUL-terminated with n == strlen(body) — read_paste guarantees
+ * that (NULs are substituted during the body read). */
+void input_core_paste_commit(struct input *in, const char *body, size_t n);
 
 /* Replace buf[start..end) with `text` (NULL = delete the span), leaving
  * the cursor right after the inserted text. No-op when the span is out

@@ -197,14 +197,43 @@ static void read_paste(paste_sink sink, void *user)
 
 static void paste_into_buf(void *user, const char *bytes, size_t n)
 {
-    input_core_buf_insert((struct input *)user, bytes, n);
+    buf_append((struct buf *)user, bytes, n);
+}
+
+/* Run the caller's Ctrl-V paste hook and insert whatever it returns.
+ * The hook never touches the tty, so the editor stays in raw mode —
+ * no erase/repaint dance like Ctrl-G's $EDITOR. */
+static void handle_paste_hook(struct input *in)
+{
+    if (!in->paste_cb)
+        return;
+    char *ins = in->paste_cb(in->paste_user);
+    if (!ins)
+        return;
+    input_core_buf_insert(in, ins, strlen(ins));
+    free(ins);
 }
 
 /* Insert pasted content at the cursor. The start marker "\x1b[200~" has
- * already been consumed by the escape decoder. */
+ * already been consumed by the escape decoder. The body is buffered
+ * whole rather than streamed into the edit buffer so the caller's paste
+ * filter can rewrite it (file:// URI lists from a file-manager copy or
+ * drag-and-drop → plain paths) before insertion. An empty paste body is
+ * the tell for "clipboard holds an image, not text" — macOS terminals
+ * send exactly that for Cmd+V with an image on the clipboard — so probe
+ * the paste hook instead of inserting nothing. */
 static void handle_paste(struct input *in)
 {
-    read_paste(paste_into_buf, in);
+    struct buf body;
+    buf_init(&body);
+    read_paste(paste_into_buf, &body);
+    if (body.len == 0) {
+        buf_free(&body);
+        handle_paste_hook(in);
+        return;
+    }
+    input_core_paste_commit(in, body.data, body.len);
+    buf_free(&body);
 }
 
 /* ---------------- escape sequence dispatch ---------------- */
@@ -1399,6 +1428,18 @@ void input_set_modal_completer(struct input *in, const struct input_modal_comple
     in->completer = mc;
 }
 
+void input_set_paste_cb(struct input *in, char *(*fn)(void *user), void *user)
+{
+    in->paste_cb = fn;
+    in->paste_user = user;
+}
+
+void input_set_paste_filter(struct input *in, char *(*fn)(const char *text, void *user), void *user)
+{
+    in->paste_filter = fn;
+    in->paste_filter_user = user;
+}
+
 void input_set_empty_submit(struct input *in, int enabled)
 {
     in->empty_submit = enabled;
@@ -1572,6 +1613,10 @@ char *input_readline(struct input *in, const char *prompt)
             break;
         case 0x15: /* Ctrl-U */
             input_core_kill_to_bol(in);
+            break;
+        case 0x16: /* Ctrl-V — paste hook: image marker or clipboard text
+                    * (no-op if unset) */
+            handle_paste_hook(in);
             break;
         case 0x17: /* Ctrl-W */
             input_core_kill_word_back(in);

@@ -244,6 +244,78 @@ static void test_pipe_read_survives_closed_stdout(void)
     EXPECT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0);
 }
 
+/* ---------------- spawn_capture ---------------- */
+
+static void test_capture_collects_stdout(void)
+{
+    const char *argv[] = {"printf", "hello", NULL};
+    size_t n = 0;
+    char *out = spawn_capture(argv, 1024, 5000, &n);
+    EXPECT(out != NULL && n == 5 && memcmp(out, "hello", 5) == 0);
+    free(out);
+}
+
+static void test_capture_nonzero_exit_is_null(void)
+{
+    const char *argv[] = {"sh", "-c", "echo x; exit 1", NULL};
+    size_t n = 0;
+    EXPECT(spawn_capture(argv, 1024, 5000, &n) == NULL);
+}
+
+static void test_capture_empty_output_is_null(void)
+{
+    const char *argv[] = {"true", NULL};
+    size_t n = 0;
+    EXPECT(spawn_capture(argv, 1024, 5000, &n) == NULL);
+}
+
+static void test_capture_missing_helper_is_null(void)
+{
+    const char *argv[] = {"hax-no-such-helper", NULL};
+    size_t n = 0;
+    EXPECT(spawn_capture(argv, 1024, 5000, &n) == NULL);
+}
+
+static void test_capture_overflow_is_null(void)
+{
+    const char *argv[] = {"printf", "0123456789", NULL};
+    size_t n = 0;
+    EXPECT(spawn_capture(argv, 4, 5000, &n) == NULL);
+}
+
+static long elapsed_ms(const struct timespec *t0)
+{
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    return (t1.tv_sec - t0->tv_sec) * 1000 + (t1.tv_nsec - t0->tv_nsec) / 1000000;
+}
+
+/* The deadline is the whole point of spawn_capture: a helper that
+ * produces nothing must be killed and reaped well before it would have
+ * finished on its own, not waited out. */
+static void test_capture_timeout_kills_stalled_helper(void)
+{
+    const char *argv[] = {"sleep", "30", NULL};
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    size_t n = 0;
+    EXPECT(spawn_capture(argv, 1024, 200, &n) == NULL);
+    EXPECT(elapsed_ms(&t0) < 10000);
+}
+
+/* EOF on stdout is not exit: a helper that closes its stdout and then
+ * hangs must still be reaped within the deadline (and its output
+ * dropped — the exit-0 contract can't be verified). */
+static void test_capture_eof_then_hang_is_bounded(void)
+{
+    const char *argv[] = {"sh", "-c", "echo hi; exec 1>&-; sleep 30", NULL};
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    size_t n = 0;
+    EXPECT(spawn_capture(argv, 1024, 200, &n) == NULL);
+    EXPECT(elapsed_ms(&t0) < 10000);
+}
+
 /* ---------------- spawn_reap_if_exited ---------------- */
 
 /* A pid that isn't our child reaps as "exited": waitpid returns
@@ -366,6 +438,14 @@ int main(void)
     test_pipe_read_child_sigint_default();
     test_pipe_read_early_close_kills_writer();
     test_pipe_read_survives_closed_stdout();
+
+    test_capture_collects_stdout();
+    test_capture_nonzero_exit_is_null();
+    test_capture_empty_output_is_null();
+    test_capture_missing_helper_is_null();
+    test_capture_overflow_is_null();
+    test_capture_timeout_kills_stalled_helper();
+    test_capture_eof_then_hang_is_bounded();
 
     test_reap_non_child_is_exited();
     test_reap_live_child();

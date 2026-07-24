@@ -15,6 +15,7 @@
 #include "compact.h"
 #include "config.h"
 #include "file_mention.h"
+#include "paste_image.h"
 #include "session.h"
 #include "slash.h"
 #include "tool.h"
@@ -25,6 +26,7 @@
 #include "render/render_ctx.h"
 #include "render/spinner.h"
 #include "system/spawn.h"
+#include "system/tempfiles.h"
 #include "terminal/ansi.h"
 #include "terminal/input.h"
 #include "terminal/interrupt.h"
@@ -473,6 +475,22 @@ struct transcript_view {
     size_t n_tools;
 };
 
+/* Adapt paste_image_capture (stateless) to the editor's hook signature. */
+static char *paste_cb(void *user)
+{
+    (void)user;
+    return paste_image_capture();
+}
+
+/* Terminal-shortcut pastes and drag-and-drop arrive as bracketed-paste
+ * bodies, never through the Ctrl-V hook — run the same file:// URI
+ * conversion on them via the editor's body filter. */
+static char *paste_filter_cb(const char *text, void *user)
+{
+    (void)user;
+    return paste_image_uris_to_paths(text);
+}
+
 static void show_transcript_cb(void *user)
 {
     struct transcript_view *v = user;
@@ -657,10 +675,11 @@ void agent_new_conversation(struct agent_state *st)
      * keep appending to the prior session's record. */
     session_log_reset(st->slog);
     /* The model loses access to anything not in the conversation history,
-     * so any preserved bash temp files referenced by old turns become
-     * unreachable garbage. Drop them now rather than letting them sit in
-     * /tmp until process exit (or longer if the user kills the process). */
-    bash_cleanup_tempfiles();
+     * so tracked temp files referenced by old turns (bash spills, pasted
+     * images) become unreachable garbage. Drop them now rather than letting
+     * them sit in /tmp until process exit (or longer if the user kills the
+     * process). */
+    tempfiles_cleanup();
     /* A fresh conversation starts its /session ledger at zero too. */
     spend_free(&st->stats.spend);
     memset(&st->stats, 0, sizeof(st->stats));
@@ -938,9 +957,12 @@ void agent_resume_session(struct agent_state *st, const char *path)
     transcript_log_reset(st->tlog, s->sys, s->tools, s->n_tools);
     transcript_log_append(st->tlog, s->items, s->n_items);
 
-    /* Old bash temp files referenced by the prior conversation are now
-     * unreachable, same as on /new. */
-    bash_cleanup_tempfiles();
+    /* No tempfiles_cleanup() here, unlike /new: the loaded history can
+     * reference tracked files — resuming the parent of a /fork shares the
+     * fork's retained prefix, pasted images and bash spills included. The
+     * prior conversation's files flush at /new, compaction, or exit. (If
+     * accumulation ever matters, scan the loaded history and drop only
+     * unreferenced entries.) */
     resume_clear(st);
     replay_user_turn(st->r, s, "resumed");
 }
@@ -1016,10 +1038,10 @@ static void reshape_after_cut(struct agent_state *st, size_t cut, size_t turn, c
 
     transcript_log_reset(st->tlog, s->sys, s->tools, s->n_tools);
     transcript_log_append(st->tlog, s->items, s->n_items);
-    /* No bash_cleanup_tempfiles() here: it unlinks the whole spill-file
+    /* No tempfiles_cleanup() here: it unlinks the whole tracked-file
      * registry, but the retained prefix (all of it for /fork 0) can still hold
-     * "output saved to <path>" markers for those files, and the registry has
-     * no per-file removal. Leave the discarded turns' spills to /new and exit. */
+     * "output saved to <path>" markers or pasted-image references, and cleanup
+     * is all-or-nothing. Leave the discarded turns' files to /new and exit. */
     replay_user_turn(st->r, s, lead);
 }
 
@@ -1436,6 +1458,8 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
     };
     input_set_transcript_cb(input, show_transcript_cb, &tv);
     input_set_modal_completer(input, &file_mention_completer);
+    input_set_paste_cb(input, paste_cb, NULL);
+    input_set_paste_filter(input, paste_filter_cb, NULL);
     /* HAX_TRANSCRIPT — append-only mirror of the Ctrl-T view. NULL when
      * the env var is unset; all transcript_log_* entry points are
      * NULL-safe so the call sites don't need a guard. */

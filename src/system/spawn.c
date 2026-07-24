@@ -3,13 +3,19 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <poll.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/wait.h>
 
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
+
+#include "util.h"
 
 /* Parent-side signal mask. SIGINT and SIGQUIT match POSIX system()
  * semantics: while a foreground interactive child runs, terminal-
@@ -209,6 +215,116 @@ static int pipe_open_dir(struct spawn_pipe *sp, const char *shell_cmd, int read_
         sp->w = f;
     sp->pid = pid;
     return 0;
+}
+
+/* Reap with a deadline: WNOHANG-poll until `deadline_ms`, then SIGKILL
+ * and wait for real. EOF on the child's stdout only means it closed the
+ * fd, not that it exited — an unbounded waitpid here would reintroduce
+ * the hang spawn_capture exists to prevent. */
+static int wait_child_deadline(pid_t pid, long deadline_ms)
+{
+    for (;;) {
+        int status;
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid)
+            return status;
+        if (w < 0 && errno != EINTR)
+            return -1;
+        if (monotonic_ms() >= deadline_ms) {
+            kill(pid, SIGKILL);
+            return spawn_wait_child(pid);
+        }
+        struct timespec ts = {0, 5 * 1000000}; /* 5 ms */
+        nanosleep(&ts, NULL);
+    }
+}
+
+char *spawn_capture(const char *const *argv, size_t max, int timeout_ms, size_t *out_len)
+{
+    int p[2];
+    if (pipe(p) < 0)
+        return NULL;
+
+    struct sigaction saved_int, saved_quit, saved_pipe;
+    spawn_parent_ignore(&saved_int, &saved_quit, &saved_pipe);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(p[0]);
+        close(p[1]);
+        spawn_parent_restore(&saved_int, &saved_quit, &saved_pipe);
+        return NULL;
+    }
+    if (pid == 0) {
+        close(p[0]);
+        if (dup2(p[1], STDOUT_FILENO) < 0)
+            _exit(127);
+        if (p[1] != STDOUT_FILENO)
+            close(p[1]);
+        int dn = open("/dev/null", O_RDWR);
+        if (dn >= 0) {
+            dup2(dn, STDIN_FILENO);
+            dup2(dn, STDERR_FILENO);
+            if (dn > STDERR_FILENO)
+                close(dn);
+        }
+        spawn_child_default_signals();
+        execvp(argv[0], (char *const *)argv);
+        _exit(127);
+    }
+    close(p[1]);
+
+    long deadline = monotonic_ms() + timeout_ms;
+    struct buf out;
+    buf_init(&out);
+    int failed = 0; /* deadline expiry, overflow, or read error */
+    char chunk[65536];
+    for (;;) {
+        long left = deadline - monotonic_ms();
+        if (left <= 0) {
+            failed = 1;
+            break;
+        }
+        struct pollfd pfd = {.fd = p[0], .events = POLLIN};
+        int pr = poll(&pfd, 1, left > INT_MAX ? INT_MAX : (int)left);
+        if (pr < 0 && errno == EINTR)
+            continue;
+        if (pr <= 0) {
+            failed = 1;
+            break;
+        }
+        ssize_t r = read(p[0], chunk, sizeof(chunk));
+        if (r < 0 && errno == EINTR)
+            continue;
+        if (r < 0) {
+            failed = 1;
+            break;
+        }
+        if (r == 0)
+            break; /* EOF */
+        if (out.len + (size_t)r > max) {
+            failed = 1;
+            break;
+        }
+        buf_append(&out, chunk, (size_t)r);
+    }
+    close(p[0]);
+
+    int status;
+    if (failed) {
+        kill(pid, SIGKILL);
+        status = spawn_wait_child(pid);
+    } else {
+        status = wait_child_deadline(pid, deadline);
+    }
+    spawn_parent_restore(&saved_int, &saved_quit, &saved_pipe);
+
+    if (failed || status < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0 || out.len == 0) {
+        buf_free(&out);
+        return NULL;
+    }
+    *out_len = out.len;
+    return buf_steal(&out);
 }
 
 int spawn_pipe_open(struct spawn_pipe *sp, const char *shell_cmd)

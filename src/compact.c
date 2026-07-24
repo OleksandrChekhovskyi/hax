@@ -10,7 +10,6 @@
 #include "config.h"
 #include "provider.h"
 #include "session.h"
-#include "tool.h"
 #include "transcript.h"
 #include "turn.h"
 #include "util.h"
@@ -291,8 +290,10 @@ static void compact_apply(struct agent_session *s, struct session_log *slog,
     transcript_log_reset(tlog, s->sys, s->tools, s->n_tools);
     transcript_log_append(tlog, s->items, s->n_items);
     session_log_append(slog, s->items, s->n_items);
-    /* Bash temp files referenced by the discarded turns are now unreachable. */
-    bash_cleanup_tempfiles();
+    /* No tempfiles_cleanup() here: COMPACT_PROMPT tells the summary to
+     * preserve exact file paths, so the seed may reference tracked files
+     * — pasted images especially, whose pixels are otherwise
+     * unrecoverable. Files flush at /new and exit. */
 }
 
 struct compact_sink {

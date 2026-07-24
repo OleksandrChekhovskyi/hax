@@ -13,6 +13,7 @@
 #include "tool.h"
 #include "util.h"
 #include "system/fs.h"
+#include "system/tempfiles.h"
 #include "tools/bash_export.h"
 
 static char *call_bash(const char *cmd_json_escaped)
@@ -476,8 +477,9 @@ static void test_bash_head_tail_truncation(void)
     EXPECT(strstr(out, "omitted ") != NULL);
     EXPECT(strstr(out, "kept first ") != NULL);
     EXPECT(strstr(out, "saved to ") != NULL);
-    /* Hint mentions the file under $TMPDIR / /tmp. */
-    EXPECT(strstr(out, "hax-bash-") != NULL);
+    /* Hint mentions the file under the hax-XXXXXX container dir. */
+    EXPECT(strstr(out, "/hax-") != NULL);
+    EXPECT(strstr(out, "/bash-") != NULL);
     free(out);
 }
 
@@ -525,7 +527,7 @@ static void test_bash_tail_only_fallback_uses_full_budget(void)
 }
 
 /* Extract the saved-to path from a truncation marker like
- *   "[output truncated: ... full output saved to /var/.../hax-bash-XXX]"
+ *   "[output truncated: ... full output saved to /tmp/hax-XXXXXX/bash-1.log]"
  * Returns malloc'd path or NULL if not found. Caller frees. */
 static char *extract_saved_path(const char *out)
 {
@@ -702,14 +704,15 @@ static void test_bash_invalid_utf8_tmpdir_falls_back(void)
             if (len < sizeof(path)) {
                 memcpy(path, p, len);
                 path[len] = '\0';
-                EXPECT(strncmp(path, "/tmp/hax-bash-", 14) == 0);
+                EXPECT(strncmp(path, "/tmp/hax-", 9) == 0);
+                EXPECT(strstr(path, "/bash-") != NULL);
                 struct stat st;
                 EXPECT(stat(path, &st) == 0);
             }
         }
     }
     free(out);
-    bash_cleanup_tempfiles();
+    tempfiles_cleanup();
     unsetenv("TMPDIR");
 }
 
@@ -750,7 +753,7 @@ static void test_bash_drain_clamps_oversized_byte_cap(void)
 
 static void test_bash_cleanup_unlinks_kept_files(void)
 {
-    /* After bash_cleanup_tempfiles runs, the path embedded in a prior
+    /* After tempfiles_cleanup runs, the path embedded in a prior
      * truncation marker must no longer exist. Mirrors what
      * agent_new_conversation does on /new and atexit does on shutdown. */
     char *out = call_bash("seq 1 20000");
@@ -759,7 +762,7 @@ static void test_bash_cleanup_unlinks_kept_files(void)
     if (path) {
         struct stat st;
         EXPECT(stat(path, &st) == 0);
-        bash_cleanup_tempfiles();
+        tempfiles_cleanup();
         EXPECT(stat(path, &st) < 0);
         free(path);
     }

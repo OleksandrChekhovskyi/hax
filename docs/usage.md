@@ -163,6 +163,7 @@ The REPL supports readline-style editing. Hax-specific or notable bindings:
 | Ctrl-L | Clear screen and redraw the prompt. |
 | Ctrl-G | Edit the prompt in `$EDITOR`. |
 | Ctrl-T | View the current transcript in `$PAGER`. |
+| Ctrl-V | Paste an image from the clipboard (falls back to pasting clipboard text). |
 | Tab | On an `@`-prefixed word: pick a project file to mention. Elsewhere: insert a tab. |
 
 Typing `@src` and pressing Tab opens [`fzf`](https://github.com/junegunn/fzf) over the
@@ -172,6 +173,13 @@ the walk at that directory and keep the typed prefix on the selection; in-tree p
 `@src/foo` stay on the project list. The pick replaces the `@…` token; cancel leaves it
 alone. Inserted as plain text — the model reads the file with its `read` tool as usual.
 fzf on `$PATH` is required: without it Tab prints a short notice, and `/help` dims the row.
+
+Ctrl-V pastes an image from the clipboard (on macOS plain Cmd+V works too): the image lands
+in a temp file and a `[pasted image: …]` marker is inserted into the prompt — the model reads
+it like any other image path. With no image on the clipboard, Ctrl-V pastes its text instead,
+and copied files (file manager copy, drag-and-drop) paste as plain paths. On Linux this needs
+`wl-paste` (Wayland) or `xclip` (X11); macOS works out of the box. The temp files are cleaned
+up on `/new` and exit.
 
 ## Pausing, steering, and resuming
 

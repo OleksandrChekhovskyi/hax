@@ -14,7 +14,7 @@
 #include "config.h"
 #include "tool.h"
 #include "util.h"
-#include "system/path.h"
+#include "system/tempfiles.h"
 #include "terminal/interrupt.h"
 #include "text/utf8.h"
 #include "text/utf8_sanitize.h"
@@ -23,13 +23,13 @@
 #include "tools/bash_export.h"
 #include "tools/bash_shell.h"
 
-/* Output is captured to a temp file (mkstemp under $TMPDIR) so the model
- * sees a tail-truncated preview but can `read` the full output afterwards
- * via the path embedded in the truncation hint. The temp file is unlinked
- * when the output fits within the OUTPUT_CAP_* limits; otherwise it's
- * kept for the model to revisit. We deliberately don't GC kept files at
- * end of session — the model may reference one many turns later, and the
- * OS evicts /tmp on reboot. MAX_DRAIN_BYTES caps how much the reader is
+/* Output is captured to a temp file so the model sees a tail-truncated
+ * preview but can `read` the full output afterwards via the path
+ * embedded in the truncation hint. The temp file is unlinked when the
+ * output fits within the OUTPUT_CAP_* limits; otherwise it's kept for
+ * the model to revisit, tracked in the shared tempfile registry
+ * (system/tempfiles.h), which reclaims it once the referencing history
+ * dies. MAX_DRAIN_BYTES caps how much the reader is
  * willing to capture from a runaway producer (`yes`, `cat /dev/urandom`) —
  * the file size never exceeds this, and the producer is SIGKILLed once
  * we hit it. The effective byte cap (BASH_BYTE_CAP_MAX) is clamped
@@ -138,105 +138,22 @@ static size_t count_newlines(const char *data, size_t n)
     return k;
 }
 
-/* Per-session registry of preserved temp files. capture_open_tempfile
- * records each one; capture_unlink drops the entry. What's left is what
- * we kept past truncation — bash_cleanup_tempfiles unlinks all of them
- * on /new (via agent_new_conversation) and on process exit. Without
- * this, the model-facing path embedded in the truncation marker leaks
- * a file that nothing else cleans up: macOS doesn't evict /var/folders
- * for days, and Linux /tmp may live until reboot. Single-threaded
- * (tools run on the agent loop), so no locking.
+/* Open the spill file via the shared tracked-tempfile registry, whose
+ * conversation-reset flushes keep preserved spills from leaking (see
+ * system/tempfiles.h). On failure we set write_failed so the rest of
+ * the run becomes a no-op for capture — the command still runs to
+ * completion and the model gets the body that fit in mem.
  *
- * These files don't outlive the process, so after a session is resumed
- * the persisted "full output saved to <path>" marker points at a path
- * that's gone. We deliberately leave the marker verbatim rather than
- * rewrite it on load: editing history would break prompt-cache reuse on a
- * soon-after resume (the common case), the truncated head/tail is still
- * inline, and a read of the missing path just yields a recoverable error
- * the model re-runs past. (Surviving resume would mean session-scoped
- * spills — see Claude Code — at the cost of unbounded growth in a tool
- * with no "session done" hook; not worth it here.) */
-static char **kept_paths;
-static size_t kept_paths_n;
-static size_t kept_paths_cap;
-static int cleanup_atexit_registered;
-
-void bash_cleanup_tempfiles(void)
-{
-    for (size_t i = 0; i < kept_paths_n; i++) {
-        if (kept_paths[i]) {
-            unlink(kept_paths[i]);
-            free(kept_paths[i]);
-        }
-    }
-    kept_paths_n = 0;
-}
-
-static void track_kept_path(const char *path)
-{
-    if (!cleanup_atexit_registered) {
-        atexit(bash_cleanup_tempfiles);
-        cleanup_atexit_registered = 1;
-    }
-    if (kept_paths_n == kept_paths_cap) {
-        kept_paths_cap = kept_paths_cap ? kept_paths_cap * 2 : 4;
-        kept_paths = xrealloc(kept_paths, kept_paths_cap * sizeof(*kept_paths));
-    }
-    kept_paths[kept_paths_n++] = xstrdup(path);
-}
-
-static void untrack_kept_path(const char *path)
-{
-    for (size_t i = 0; i < kept_paths_n; i++) {
-        if (kept_paths[i] && strcmp(kept_paths[i], path) == 0) {
-            free(kept_paths[i]);
-            /* Order doesn't matter for cleanup, so swap-with-last is the
-             * cheapest removal. */
-            kept_paths_n--;
-            kept_paths[i] = kept_paths[kept_paths_n];
-            kept_paths[kept_paths_n] = NULL;
-            return;
-        }
-    }
-}
-
-static int is_valid_utf8(const char *s, size_t len)
-{
-    size_t i = 0;
-    while (i < len) {
-        int sl = utf8_seq_len((unsigned char)s[i]);
-        if (sl <= 0 || i + (size_t)sl > len || !utf8_seq_valid(s + i, sl))
-            return 0;
-        i += (size_t)sl;
-    }
-    return 1;
-}
-
-/* Open /tmp/hax-bash-XXXXXX exclusively (mkstemp gives us O_RDWR, mode
- * 0600). On failure we set write_failed so the rest of the run becomes
- * a no-op for capture — the command still runs to completion and the
- * model gets the body that fit in mem before the spill attempt.
- *
- * Falls back to "/tmp" when $TMPDIR contains bytes that aren't valid
- * UTF-8: the path travels back to the model embedded in the truncation
- * marker, so it must round-trip cleanly through the provider's JSON
- * encoder (jansson). Without the fallback we'd advertise a sanitized
- * path that doesn't exist on disk — the actual file lives at the raw-
- * byte path, but the model can only read what the marker says. */
+ * .log, not .txt: the spill holds the command's verbatim bytes — only
+ * the inline preview is UTF-8-sanitized — so it may be binary, and
+ * .log doesn't promise an encoding. */
 static int capture_open_tempfile(struct capture *c)
 {
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp || !is_valid_utf8(tmp, strlen(tmp)))
-        tmp = "/tmp";
-    c->path = path_join(tmp, "hax-bash-XXXXXX");
-    c->fd = mkstemp(c->path);
+    c->fd = tempfile_create("bash-", ".log", &c->path);
     if (c->fd < 0) {
-        free(c->path);
-        c->path = NULL;
         c->write_failed = 1;
         return -1;
     }
-    track_kept_path(c->path);
     return 0;
 }
 
@@ -315,7 +232,7 @@ static void capture_unlink(struct capture *c)
 {
     if (c->path) {
         unlink(c->path);
-        untrack_kept_path(c->path);
+        tempfile_untrack(c->path);
         free(c->path);
         c->path = NULL;
     }

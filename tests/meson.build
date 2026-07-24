@@ -22,6 +22,7 @@ test_sources = [
     'test_config.c',
     'test_file_mention.c',
     'test_harness.c',
+    'test_paste_image.c',
     'test_select_config.c',
     'test_session.c',
     'test_slash.c',
@@ -58,6 +59,7 @@ test_sources = [
     'system/test_os.c',
     'system/test_path.c',
     'system/test_spawn.c',
+    'system/test_tempfiles.c',
 
     'terminal/test_clipboard.c',
     'terminal/test_input_core.c',

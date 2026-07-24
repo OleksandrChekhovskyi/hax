@@ -99,6 +99,19 @@ void input_core_buf_insert(struct input *in, const char *bytes, size_t n)
     in->buf[in->len] = '\0';
 }
 
+void input_core_paste_commit(struct input *in, const char *body, size_t n)
+{
+    if (in->paste_filter) {
+        char *repl = in->paste_filter(body, in->paste_filter_user);
+        if (repl) {
+            input_core_buf_insert(in, repl, strlen(repl));
+            free(repl);
+            return;
+        }
+    }
+    input_core_buf_insert(in, body, n);
+}
+
 void input_core_replace_span(struct input *in, size_t start, size_t end, const char *text)
 {
     if (start > end || end > in->len)
