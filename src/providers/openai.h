@@ -153,21 +153,12 @@ extern const size_t OPENAI_EFFORT_LADDER_N;
  * HAX_OPENAI_BASE_URL is set). Returns NULL on failure. */
 struct provider *openai_provider_new_preset(const struct openai_preset *preset);
 
-/* Shared provider-picker availability helpers (provider_factory.available),
- * so each openai-family shim's check is a one-liner. Both set *reason (a
- * static string) and return 0 when unavailable, 1 when usable.
- *
- *   openai_key_available    — usable iff HAX_OPENAI_API_KEY or `api_key_env`
- *     (when non-NULL) holds a non-empty key. For hosted backends.
- *     `miss_reason` is the caller's exact no-key message (a static string
- *     naming its env var, e.g. "OPENAI_API_KEY not set"), so the picker's
- *     reason is actionable rather than a generic "no API key".
- *   openai_base_url_reachable — bounded GET <base_url>/models with a short
- *     timeout; usable iff it 2xx's. For local-server shims (llama.cpp,
- *     ollama) whose availability is "is the server up". May block briefly,
- *     so the picker runs it on a worker thread. */
+/* Shared provider-picker preparation helpers. The key check is immediate;
+ * the base-URL helper builds an owned GET <base_url>/models request for the
+ * picker to execute after all config reads have finished. */
 int openai_key_available(const char *api_key_env, const char *miss_reason, const char **reason);
-int openai_base_url_reachable(const char *base_url, const char *api_key, const char **reason);
+void openai_prepare_base_url_availability(const char *base_url, const char *api_key,
+                                          struct provider_availability *out);
 
 /* Translate flat conversation items into the Chat Completions `messages`
  * array. Exposed (rather than static) so the round-trip serialization —

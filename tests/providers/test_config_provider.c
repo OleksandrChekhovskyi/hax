@@ -94,6 +94,15 @@ int main(void)
      * probe) and takes its banner from the resolved display_name. A generic
      * config provider offers the advisory effort ladder. */
     const struct provider_factory *f = provider_find("myllm");
+    /* Availability captures an owned request before a worker is spawned. */
+    struct provider_availability probe = {0};
+    f->prepare_availability(f->name, &probe);
+    EXPECT_STR_EQ(probe.url, "http://127.0.0.1:9000/v1/models");
+    config_set_override("providers.myllm.base_url", "http://changed/v1");
+    EXPECT_STR_EQ(probe.url, "http://127.0.0.1:9000/v1/models");
+    config_set_override("providers.myllm.base_url", NULL);
+    provider_availability_clear(&probe);
+
     struct provider *p = f->new(f->name);
     EXPECT(p != NULL);
     if (p) {

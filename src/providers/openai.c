@@ -415,8 +415,8 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
         openai_events_init(&ev, cb, user);
         ev.emit_progress = o->emit_progress;
         ev.length_hint = o->length_hint;
-        rc = http_sse_post(o->endpoint, headers, body, body_len, on_sse, &ev, tick, tick_user,
-                           &resp);
+        rc = http_sse_post(o->endpoint, headers, body, body_len, pol.idle_timeout_s, on_sse, &ev,
+                           tick, tick_user, &resp);
 
         if (resp.cancelled)
             break;
@@ -641,32 +641,28 @@ int openai_key_available(const char *api_key_env, const char *miss_reason, const
     return 0;
 }
 
-int openai_base_url_reachable(const char *base_url, const char *api_key, const char **reason)
+void openai_prepare_base_url_availability(const char *base_url, const char *api_key,
+                                          struct provider_availability *out)
 {
-    char *url = xasprintf("%s/models", base_url);
-    char *auth = (api_key && *api_key) ? xasprintf("Authorization: Bearer %s", api_key) : NULL;
-    const char *headers[] = {auth, NULL};
-    char *body = NULL;
-    int rc =
-        http_get(url, auth ? headers : NULL, AVAIL_PROBE_TIMEOUT_S, 0, NULL, NULL, &body, NULL);
-    free(body);
-    free(auth);
-    free(url);
-    if (rc != 0) {
-        if (reason)
-            *reason = "server not reachable";
-        return 0;
+    out->available = 0;
+    out->reason = "server not reachable";
+    out->url = xasprintf("%s/models", base_url);
+    out->timeout_s = AVAIL_PROBE_TIMEOUT_S;
+    if (api_key && *api_key) {
+        out->headers = xcalloc(2, sizeof(*out->headers));
+        out->headers[0] = xasprintf("Authorization: Bearer %s", api_key);
     }
-    return 1;
 }
 
-static int openai_available(const char *name, const char **reason)
+static void openai_prepare_availability(const char *name, struct provider_availability *out)
 {
     (void)name;
     /* Fixed endpoint (api.openai.com), so selectability is just "is a key
      * configured" — HAX_OPENAI_BASE_URL no longer affects it (the preset
      * locks the base URL and ignores the override). */
-    return openai_key_available("OPENAI_API_KEY", "OPENAI_API_KEY not set", reason);
+    const char *reason = NULL;
+    out->available = openai_key_available("OPENAI_API_KEY", "OPENAI_API_KEY not set", &reason);
+    out->reason = reason;
 }
 
 struct provider *openai_provider_new_preset(const struct openai_preset *preset)
@@ -785,5 +781,5 @@ struct provider *openai_provider_new(const char *name)
 const struct provider_factory PROVIDER_OPENAI = {
     .name = "openai",
     .new = openai_provider_new,
-    .available = openai_available,
+    .prepare_availability = openai_prepare_availability,
 };

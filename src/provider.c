@@ -6,6 +6,19 @@
 
 #include "util.h"
 
+void provider_availability_clear(struct provider_availability *a)
+{
+    if (!a)
+        return;
+    free(a->url);
+    if (a->headers) {
+        for (char **h = a->headers; *h; h++)
+            free(*h);
+        free(a->headers);
+    }
+    memset(a, 0, sizeof(*a));
+}
+
 void model_info_init(struct model_info *m)
 {
     memset(m, 0, sizeof(*m));

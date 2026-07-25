@@ -431,8 +431,8 @@ static int anthropic_stream(struct provider *p, const struct context *ctx, const
     for (int attempt = 0; attempt < pol.max_attempts; attempt++) {
         memset(&resp, 0, sizeof(resp));
         anthropic_events_init(&ev, cb, user);
-        rc = http_sse_post(a->endpoint, headers, body, body_len, on_sse, &ev, tick, tick_user,
-                           &resp);
+        rc = http_sse_post(a->endpoint, headers, body, body_len, pol.idle_timeout_s, on_sse, &ev,
+                           tick, tick_user, &resp);
 
         if (resp.cancelled)
             break;
@@ -850,14 +850,16 @@ static int anthropic_key_available(const char *api_key_env, const char **reason)
     return 0;
 }
 
-static int anthropic_available(const char *name, const char **reason)
+static void anthropic_prepare_availability(const char *name, struct provider_availability *out)
 {
     (void)name;
-    return anthropic_key_available("ANTHROPIC_API_KEY", reason);
+    const char *reason = NULL;
+    out->available = anthropic_key_available("ANTHROPIC_API_KEY", &reason);
+    out->reason = reason;
 }
 
 const struct provider_factory PROVIDER_ANTHROPIC = {
     .name = "anthropic",
     .new = anthropic_provider_new,
-    .available = anthropic_available,
+    .prepare_availability = anthropic_prepare_availability,
 };

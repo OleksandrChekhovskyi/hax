@@ -205,16 +205,18 @@ static struct provider *config_provider_new(const char *name)
  * resolves, with no network probe (fast, and a 401 would be the only signal
  * anyway). A keyless one (a local server like ollama) is probed for
  * reachability, exactly as the constructor's endpoint would be reached.
- * Reason strings are static literals (this runs on a picker worker thread). */
-static int config_provider_available(const char *name, const char **reason)
+ * Preparation runs on the foreground; only its owned request reaches a
+ * picker worker. */
+static void config_provider_prepare_availability(const char *name,
+                                                 struct provider_availability *out)
 {
     const struct provider_recipe *r = recipe_find(name);
 
     const char *base = resolve(name, "base_url", r ? r->base_url : NULL);
     if (!base || !*base) {
-        if (reason)
-            *reason = "no base_url";
-        return 0;
+        out->available = 0;
+        out->reason = "no base_url";
+        return;
     }
 
     const char *key_env = resolve(name, "api_key_env", r ? r->api_key_env : NULL);
@@ -225,20 +227,17 @@ static int config_provider_available(const char *name, const char **reason)
 
     int keyed = (key_env && *key_env) || (inline_key && *inline_key);
     if (keyed) {
-        if (key && *key)
-            return 1;
-        if (reason)
-            *reason = "API key not set";
-        return 0;
+        out->available = key && *key;
+        out->reason = out->available ? NULL : "API key not set";
+        return;
     }
     /* Trim the trailing slash the constructor also trims, so the probe targets
      * the same "<base>/models" the running provider would — otherwise a
      * base_url ending in "/" probes "//models" and a reachable server looks
      * disabled. */
     char *probe = dup_trim_trailing_slash(base);
-    int ok = openai_base_url_reachable(probe, (key && *key) ? key : NULL, reason);
+    openai_prepare_base_url_availability(probe, (key && *key) ? key : NULL, out);
     free(probe);
-    return ok;
 }
 
 static struct provider_factory *make_factory(const char *name)
@@ -246,7 +245,7 @@ static struct provider_factory *make_factory(const char *name)
     struct provider_factory *f = xcalloc(1, sizeof(*f));
     f->name = xstrdup(name); /* process-lifetime; the registry never frees these */
     f->new = config_provider_new;
-    f->available = config_provider_available;
+    f->prepare_availability = config_provider_prepare_availability;
     return f;
 }
 

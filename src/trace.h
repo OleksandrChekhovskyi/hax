@@ -4,16 +4,13 @@
 
 #include <stddef.h>
 
-/* Wire-level diagnostics. Activated by setting HAX_TRACE to a file path; the
- * file is opened lazily on first call and truncated, so each run starts fresh.
- * Output is line-buffered so `tail -f` works. When HAX_TRACE is unset, every
- * entry point below is a no-op. */
+/* Wire-level diagnostics. trace_init resolves HAX_TRACE and truncates its file
+ * before background HTTP jobs start. Output is line-buffered so `tail -f`
+ * works. Until trace_init, and when HAX_TRACE is unset, every other entry point
+ * is a no-op. */
 
-/* Force the lazy file-open so the truncate happens at startup, not on
- * first request. Without this, a run that never makes an HTTP call
- * (HAX_PROVIDER=mock, or an immediate Ctrl-D) would leave the previous
- * trace file intact, contradicting the truncate-on-startup guarantee.
- * No-op when HAX_TRACE is unset; safe to call multiple times. */
+/* Resolve and open the configured trace file. No-op when HAX_TRACE is unset;
+ * safe to call multiple times. */
 void trace_init(void);
 
 int trace_enabled(void);

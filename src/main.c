@@ -681,9 +681,9 @@ int main(int argc, char **argv)
      * startup or session init. Without this, a fast-fail run (bad
      * config, missing HAX_MODEL, no OAuth) would exit with stale files
      * still on disk despite the documented truncate-on-startup
-     * behavior. trace_init forces the lazy fopen in trace.c; the
-     * transcript file is just truncated — its header gets written
-     * later when sys+tools are known. */
+     * behavior. trace_init resolves and opens the trace before any background
+     * HTTP job can run; the transcript file is just truncated — its header
+     * gets written later when sys+tools are known. */
     trace_init();
     transcript_log_init();
     session_prune_start(resume_path);

@@ -21,9 +21,10 @@ struct http_response {
  * alongside the cancel check. NULL = no tick (no cancel, no idle). */
 typedef int (*http_tick_cb)(void *user);
 
-/* headers: NULL-terminated array of "Key: Value" strings. */
+/* headers: NULL-terminated array of "Key: Value" strings. `idle_timeout_s`
+ * is the already-resolved low-speed timeout; 0 disables it. */
 int http_sse_post(const char *url, const char *const *headers, const char *body, size_t body_len,
-                  sse_cb cb, void *user, http_tick_cb tick, void *tick_user,
+                  long idle_timeout_s, sse_cb cb, void *user, http_tick_cb tick, void *tick_user,
                   struct http_response *resp);
 
 /* Synchronous GET into a freshly-allocated NUL-terminated buffer. Used for

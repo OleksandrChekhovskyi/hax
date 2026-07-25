@@ -20,13 +20,14 @@
  * HAX_HTTP_IDLE_TIMEOUT). */
 
 struct retry_policy {
-    int max_attempts;   /* total tries including the first; 1 = no retry */
-    long base_delay_ms; /* delay before the second attempt */
-    long max_delay_ms;  /* upper bound after exponential growth + jitter */
+    int max_attempts;    /* total tries including the first; 1 = no retry */
+    long base_delay_ms;  /* delay before the second attempt */
+    long max_delay_ms;   /* upper bound after exponential growth + jitter */
+    long idle_timeout_s; /* resolved streaming low-speed timeout; 0 disables */
 };
 
-/* Build the default policy from env (HAX_HTTP_MAX_RETRIES,
- * HAX_HTTP_RETRY_BASE) with sensible fallbacks. */
+/* Build the request policy from the current HTTP config. Call before entering
+ * any worker so the transport receives only scalar values. */
 struct retry_policy retry_policy_default(void);
 
 /* Classify (rc, status, body) from an http_sse_post call.

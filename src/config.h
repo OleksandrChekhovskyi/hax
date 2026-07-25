@@ -72,6 +72,10 @@
  * The whole system is optional: with no file and no overrides, every lookup
  * is just getenv-or-default, so an env-vars-only setup is unchanged.
  *
+ * Config is owned by the foreground thread. Background jobs must resolve and
+ * copy every value they need before spawning; the borrowed-return API cannot
+ * be made safe by locking only the lookup while a caller keeps its pointer.
+ *
  * Strings returned by config_str are borrowed and valid until config_free /
  * the next config_load / a config_set_override of the same key — i.e. for
  * the whole run in normal use.

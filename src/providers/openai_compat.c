@@ -40,19 +40,16 @@ struct provider *openai_compat_provider_new(const char *name)
 /* Availability is simply "a base URL is configured" — we can't probe an
  * arbitrary third-party endpoint cheaply or know its auth scheme, so a set
  * HAX_OPENAI_BASE_URL is the signal. */
-static int openai_compat_available(const char *name, const char **reason)
+static void openai_compat_prepare_availability(const char *name, struct provider_availability *out)
 {
     (void)name;
     const char *base = config_str("openai.base_url");
-    if (base && *base)
-        return 1;
-    if (reason)
-        *reason = "HAX_OPENAI_BASE_URL not set";
-    return 0;
+    out->available = base && *base;
+    out->reason = out->available ? NULL : "HAX_OPENAI_BASE_URL not set";
 }
 
 const struct provider_factory PROVIDER_OPENAI_COMPAT = {
     .name = "openai-compatible",
     .new = openai_compat_provider_new,
-    .available = openai_compat_available,
+    .prepare_availability = openai_compat_prepare_availability,
 };

@@ -19,48 +19,84 @@
 #include "system/bg_job.h"
 #include "terminal/picker.h"
 #include "terminal/ui.h"
+#include "transport/http.h"
 
 /* ---------- parallel availability probe ---------- */
 
-/* One factory's availability check, run on its own worker thread so a
- * local-server probe (bounded by http_get's connect timeout) doesn't
- * serialize behind the others. Writes into result slots that outlive the
- * join; frees its own arg per the bg_job contract. */
 struct avail_arg {
-    const struct provider_factory *f;
+    struct provider_availability probe;
     int *avail;
     const char **reason;
 };
 
+static void prepare_availability(const struct provider_factory *f,
+                                 struct provider_availability *probe)
+{
+    memset(probe, 0, sizeof(*probe));
+    probe->available = 1; /* no hook means immediately available */
+    if (f->prepare_availability)
+        f->prepare_availability(f->name, probe);
+}
+
+/* The worker receives a complete owned request. In particular, provider
+ * hooks and config resolution have already run on the foreground thread. */
 static void avail_worker(struct bg_job *job, void *arg)
 {
     (void)job;
     struct avail_arg *a = arg;
-    const char *reason = NULL;
-    int ok = a->f->available ? a->f->available(a->f->name, &reason) : 1; /* no hook ⇒ available */
+    char *body = NULL;
+    int ok = http_get(a->probe.url, (const char *const *)a->probe.headers, a->probe.timeout_s, 0,
+                      NULL, NULL, &body, NULL) == 0;
+    free(body);
     *a->avail = ok;
-    *a->reason = ok ? NULL : (reason ? reason : "unavailable");
+    *a->reason = ok ? NULL : (a->probe.reason ? a->probe.reason : "unavailable");
+    provider_availability_clear(&a->probe);
     free(a);
 }
 
-/* Probe every factory's availability concurrently and collect the verdicts
- * into avail[]/reason[]. Total wait is about one probe's worth of time (the
- * checks run in parallel and each self-bounds), so opening the picker stays
- * fast even when a configured local server is unreachable. */
+static int factory_available(const struct provider_factory *f, const char **reason)
+{
+    struct provider_availability probe;
+    prepare_availability(f, &probe);
+    int ok = probe.available;
+    if (probe.url) {
+        char *body = NULL;
+        ok = http_get(probe.url, (const char *const *)probe.headers, probe.timeout_s, 0, NULL, NULL,
+                      &body, NULL) == 0;
+        free(body);
+    }
+    if (reason)
+        *reason = ok ? NULL : (probe.reason ? probe.reason : "unavailable");
+    provider_availability_clear(&probe);
+    return ok;
+}
+
+/* Resolve every provider's config on the foreground, then run only the
+ * prepared network probes concurrently. Immediate key/file checks need no
+ * thread. */
 static void probe_availability(const struct provider_factory *const *facs, size_t n, int *avail,
                                const char **reason)
 {
     struct bg_job **jobs = xcalloc(n, sizeof(*jobs));
     for (size_t i = 0; i < n; i++) {
-        avail[i] = 1; /* default if the spawn fails: assume selectable */
+        avail[i] = 1; /* default if a network worker cannot be spawned */
         reason[i] = NULL;
-        struct avail_arg *a = xmalloc(sizeof(*a));
-        a->f = facs[i];
+        struct avail_arg *a = xcalloc(1, sizeof(*a));
+        prepare_availability(facs[i], &a->probe);
+        if (!a->probe.url) {
+            avail[i] = a->probe.available;
+            reason[i] = avail[i] ? NULL : (a->probe.reason ? a->probe.reason : "unavailable");
+            provider_availability_clear(&a->probe);
+            free(a);
+            continue;
+        }
         a->avail = &avail[i];
         a->reason = &reason[i];
         jobs[i] = bg_job_spawn(avail_worker, a);
-        if (!jobs[i])
-            free(a); /* worker never ran; leave the default-available slot */
+        if (!jobs[i]) {
+            provider_availability_clear(&a->probe);
+            free(a);
+        }
     }
     for (size_t i = 0; i < n; i++)
         bg_job_join(jobs[i]); /* NULL is a no-op */
@@ -84,7 +120,7 @@ struct provider *provider_autoselect(void)
      * parallel probe: the common logged-in start then stays instant. No note:
      * the default is what the user expects, not a surprising swap. */
     const struct provider_factory *def = provider_default();
-    if (def && (!def->available || def->available(def->name, NULL))) {
+    if (def && factory_available(def, NULL)) {
         struct provider *p = def->new(def->name);
         if (p) {
             /* Record the pick as a session-scoped override (NOT persisted),
@@ -115,7 +151,7 @@ struct provider *provider_autoselect(void)
     for (size_t i = 0; i < n && !p; i++) {
         if (facs[i] == def || !avail[i])
             continue; /* default already tried above */
-        /* available() is a pre-check, not a guarantee — construction can
+        /* Availability is a pre-check, not a guarantee — construction can
          * still fail (a server that dropped between probe and connect); on
          * that race just try the next available one. */
         p = facs[i]->new(facs[i]->name);
@@ -674,9 +710,9 @@ void select_provider(struct agent_state *st)
      * verdict may be stale, so re-check now. Still unavailable → report the
      * exact reason and stay on the current provider; a fresh pass (a server
      * that came up since) proceeds with the normal switch. */
-    if (!sel_avail && f->available) {
+    if (!sel_avail && f->prepare_availability) {
         const char *why = NULL;
-        if (!f->available(f->name, &why)) {
+        if (!factory_available(f, &why)) {
             ui_note("%s is unavailable — %s", f->name, why ? why : "unavailable");
             st->r->disp.trail = 1;
             free(cur);

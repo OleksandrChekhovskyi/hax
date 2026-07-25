@@ -10,7 +10,6 @@
 #include <time.h>
 #include <curl/curl.h>
 
-#include "config.h"
 #include "trace.h"
 #include "util.h"
 #include "transport/sse.h"
@@ -34,17 +33,6 @@ struct sse_trace_wrapper {
     sse_cb inner;
     void *inner_user;
 };
-
-/* Return the idle (low-speed) timeout in seconds; 0 disables the guard.
- * libcurl's CURLOPT_LOW_SPEED_TIME is whole seconds, so any non-zero ms
- * value rounds up — never time out earlier than the configured duration,
- * and sub-second values don't silently floor to 0 (which would mean
- * "disabled"). */
-static long resolve_idle_timeout(void)
-{
-    long ms = config_duration_ms("http.idle_timeout");
-    return ms / 1000 + (ms % 1000 ? 1 : 0);
-}
 
 static int sse_trace_cb(const char *event_name, const char *data, void *user)
 {
@@ -167,7 +155,7 @@ static int on_progress(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl
 }
 
 int http_sse_post(const char *url, const char *const *headers, const char *body, size_t body_len,
-                  sse_cb cb, void *user, http_tick_cb tick, void *tick_user,
+                  long idle_timeout_s, sse_cb cb, void *user, http_tick_cb tick, void *tick_user,
                   struct http_response *resp)
 {
     memset(resp, 0, sizeof(*resp));
@@ -228,10 +216,9 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
      * hosted endpoints push heartbeats or deltas regularly, but local
      * servers (notably llama-server) stay silent during prompt eval, so the
      * default is generous and HAX_HTTP_IDLE_TIMEOUT=0 disables it entirely. */
-    long idle = resolve_idle_timeout();
-    if (idle > 0) {
+    if (idle_timeout_s > 0) {
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
-        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, idle);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, idle_timeout_s);
     }
 
     trace_request("POST", url, headers, body, body_len);

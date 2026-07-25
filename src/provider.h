@@ -514,11 +514,25 @@ enum provider_image_input {
     PROVIDER_IMG_NO = 2,
 };
 
+/* Foreground-prepared availability check for one provider factory. A NULL
+ * `url` is an immediate verdict in `available`; otherwise the picker runs a
+ * GET using these owned request fields, in parallel with the other network
+ * probes. Keeping config resolution in the prepare hook and only the owned
+ * request in the worker preserves the bg_job isolation contract. */
+struct provider_availability {
+    int available;
+    const char *reason; /* static unavailable reason; NULL when available */
+    char *url;
+    char **headers; /* owned, NULL-terminated; NULL = none */
+    long timeout_s;
+};
+
+void provider_availability_clear(struct provider_availability *a);
+
 /* Static provider descriptor. Each provider .c file defines exactly one
  * `const struct provider_factory PROVIDER_<NAME>` symbol; main.c collects
- * them into a registry and matches HAX_PROVIDER against `name`. The
- * default when HAX_PROVIDER is unset lives in main.c's DEFAULT_PROVIDER
- * constant, decoupled from registry order. */
+ * them into a registry and matches HAX_PROVIDER against `name`. The default
+ * when HAX_PROVIDER is unset is the registry's highest-priority entry. */
 struct provider_factory {
     const char *name; /* HAX_PROVIDER value, e.g. "codex", "llama.cpp" */
     /* Construct the provider. `name` is this factory's own `name` field,
@@ -527,19 +541,13 @@ struct provider_factory {
      * config subtree). The compiled-in factories each serve one fixed
      * provider and ignore the argument. */
     struct provider *(*new)(const char *name);
-    /* Optional availability check for the runtime provider picker
-     * (/provider): is this provider expected to work right now? Advisory,
-     * not gating — the picker shows a failing provider dim with *reason
-     * ("OPENAI_API_KEY not set", "server not reachable") but still lets it
-     * be picked, re-running this check at commit time to report the fresh
-     * verdict. Returns 1 when usable, 0 when not (then may set *reason to
-     * a short static string). May perform a bounded network probe (a local
-     * server's reachability GET); the picker runs these off the foreground
-     * path and in parallel so opening the list stays fast even when a host
-     * hangs. The reason string, if set, must outlive the call (use static
-     * literals — these run on worker threads). `name` is the factory's own
-     * name (see `new`). NULL hook ⇒ always available. */
-    int (*available)(const char *name, const char **reason);
+    /* Optional availability preparation for the runtime provider picker.
+     * Called on the foreground thread, so it may resolve config. Leave `url`
+     * NULL and set `available`/`reason` for an immediate verdict, or fill an
+     * owned GET request for the picker to execute in a worker. The picker
+     * reruns the same preparation synchronously when a dim row is selected.
+     * `reason` must be static. NULL hook means immediately available. */
+    void (*prepare_availability)(const char *name, struct provider_availability *out);
     /* Dev-only backend, hidden from the enumerated provider set: excluded
      * from the /provider picker, cold-start auto-selection, and the
      * "supported" list in error messages. Still resolvable by name, so it

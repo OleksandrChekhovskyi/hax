@@ -104,9 +104,11 @@ static void test_default_env(void)
     /* Unset → defaults applied. */
     unsetenv("HAX_HTTP_MAX_RETRIES");
     unsetenv("HAX_HTTP_RETRY_BASE");
+    unsetenv("HAX_HTTP_IDLE_TIMEOUT");
     struct retry_policy d = retry_policy_default();
     EXPECT(d.max_attempts == 5);
     EXPECT(d.base_delay_ms == 1000);
+    EXPECT(d.idle_timeout_s == 10 * 60);
 
     /* Override max_retries (count of retries, not total attempts). */
     setenv("HAX_HTTP_MAX_RETRIES", "7", 1);
@@ -139,8 +141,18 @@ static void test_default_env(void)
     struct retry_policy zb = retry_policy_default();
     EXPECT(zb.base_delay_ms == 1000);
 
+    /* The transport receives whole seconds: non-zero sub-second values round
+     * up, while zero retains its explicit "disabled" meaning. */
+    setenv("HAX_HTTP_IDLE_TIMEOUT", "500ms", 1);
+    struct retry_policy subsecond = retry_policy_default();
+    EXPECT(subsecond.idle_timeout_s == 1);
+    setenv("HAX_HTTP_IDLE_TIMEOUT", "0", 1);
+    struct retry_policy disabled = retry_policy_default();
+    EXPECT(disabled.idle_timeout_s == 0);
+
     unsetenv("HAX_HTTP_MAX_RETRIES");
     unsetenv("HAX_HTTP_RETRY_BASE");
+    unsetenv("HAX_HTTP_IDLE_TIMEOUT");
 }
 
 static int always_cancel(void *user)

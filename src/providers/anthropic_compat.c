@@ -40,19 +40,17 @@ struct provider *anthropic_compat_provider_new(const char *name)
     return anthropic_provider_new_preset(&preset);
 }
 
-static int anthropic_compat_available(const char *name, const char **reason)
+static void anthropic_compat_prepare_availability(const char *name,
+                                                  struct provider_availability *out)
 {
     (void)name;
     const char *base = config_str("anthropic.base_url");
-    if (base && *base)
-        return 1;
-    if (reason)
-        *reason = "HAX_ANTHROPIC_BASE_URL not set";
-    return 0;
+    out->available = base && *base;
+    out->reason = out->available ? NULL : "HAX_ANTHROPIC_BASE_URL not set";
 }
 
 const struct provider_factory PROVIDER_ANTHROPIC_COMPAT = {
     .name = "anthropic-compatible",
     .new = anthropic_compat_provider_new,
-    .available = anthropic_compat_available,
+    .prepare_availability = anthropic_compat_prepare_availability,
 };

@@ -32,11 +32,15 @@ struct retry_policy retry_policy_default(void)
      * registry bounds it to > 0, so a non-positive value already reads as
      * the registry default. */
     long base = config_duration_ms("http.retry_base");
+    long idle_ms = config_duration_ms("http.idle_timeout");
 
     struct retry_policy p = {
         .max_attempts = n + 1,
         .base_delay_ms = base,
         .max_delay_ms = MAX_DELAY_MS,
+        /* libcurl accepts whole seconds; round up so a sub-second value does
+         * not become 0, which means disabled. */
+        .idle_timeout_s = idle_ms / 1000 + (idle_ms % 1000 ? 1 : 0),
     };
     return p;
 }

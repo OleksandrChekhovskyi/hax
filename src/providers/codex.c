@@ -475,8 +475,8 @@ static int codex_stream(struct provider *p, const struct context *ctx, const cha
     for (attempt = 0; attempt < pol.max_attempts; attempt++) {
         memset(&resp, 0, sizeof(resp));
         codex_events_init(&ev, cb, user);
-        rc = http_sse_post(CODEX_ENDPOINT, headers, body, body_len, on_sse, &ev, tick, tick_user,
-                           &resp);
+        rc = http_sse_post(CODEX_ENDPOINT, headers, body, body_len, pol.idle_timeout_s, on_sse, &ev,
+                           tick, tick_user, &resp);
 
         if (resp.cancelled)
             break;
@@ -1074,7 +1074,7 @@ struct provider *codex_provider_new(const char *name)
 /* Usable iff ~/.codex/auth.json parses and carries both tokens we need —
  * the cheap, file-only precondition the constructor checks, without the
  * network probe it then spawns. */
-static int codex_available(const char *name, const char **reason)
+static int codex_available_now(const char *name, const char **reason)
 {
     (void)name;
     char *path = expand_home("~/.codex/auth.json");
@@ -1108,8 +1108,15 @@ static int codex_available(const char *name, const char **reason)
     return ok;
 }
 
+static void codex_prepare_availability(const char *name, struct provider_availability *out)
+{
+    const char *reason = NULL;
+    out->available = codex_available_now(name, &reason);
+    out->reason = reason;
+}
+
 const struct provider_factory PROVIDER_CODEX = {
     .name = "codex",
     .new = codex_provider_new,
-    .available = codex_available,
+    .prepare_availability = codex_prepare_availability,
 };

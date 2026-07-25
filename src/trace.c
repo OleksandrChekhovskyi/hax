@@ -52,26 +52,27 @@ static void trace_close_atexit(void)
 
 static FILE *get_fp_locked(void)
 {
-    if (trace_init_done)
-        return trace_fp;
-    trace_init_done = 1;
-    const char *path = config_str("trace");
-    if (!path || !*path)
-        return NULL;
-    trace_fp = fopen(path, "we");
-    if (!trace_fp) {
-        hax_warn("HAX_TRACE: cannot open '%s' for writing", path);
-        return NULL;
-    }
-    setvbuf(trace_fp, NULL, _IOLBF, 0);
-    atexit(trace_close_atexit);
     return trace_fp;
 }
 
 void trace_init(void)
 {
     pthread_mutex_lock(&trace_mu);
-    (void)get_fp_locked();
+    if (trace_init_done)
+        goto out_unlock;
+    trace_init_done = 1;
+    const char *path = config_str("trace");
+    if (!path || !*path)
+        goto out_unlock;
+    trace_fp = fopen(path, "we");
+    if (!trace_fp) {
+        hax_warn("HAX_TRACE: cannot open '%s' for writing", path);
+        goto out_unlock;
+    }
+    setvbuf(trace_fp, NULL, _IOLBF, 0);
+    atexit(trace_close_atexit);
+
+out_unlock:
     pthread_mutex_unlock(&trace_mu);
 }
 

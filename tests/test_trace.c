@@ -13,13 +13,17 @@
  * insensitively, while passing non-secret headers through verbatim. */
 static void test_credential_headers_redacted(void)
 {
+    /* Worker-side trace calls are inert until the foreground initializes the
+     * destination; they never lazily resolve config themselves. */
+    EXPECT(!trace_enabled());
+
     char path[] = "/tmp/hax_trace_testXXXXXX";
     int fd = mkstemp(path);
     EXPECT(fd >= 0);
     if (fd >= 0)
         close(fd);
 
-    /* Point the trace at our temp file and force the lazy open. */
+    /* Point the trace at our temp file and initialize it explicitly. */
     config_set_override("trace", path);
     trace_init();
     EXPECT(trace_enabled());

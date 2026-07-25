@@ -330,18 +330,17 @@ struct provider *llamacpp_provider_new(const char *name)
 /* Availability is "is llama-server up": a bounded GET on the same /models
  * the model probe uses. Resolves the base URL exactly as the constructor
  * does so the probe targets the server the user would actually reach. */
-static int llamacpp_available(const char *name, const char **reason)
+static void llamacpp_prepare_availability(const char *name, struct provider_availability *out)
 {
     (void)name;
     char *resolved = resolve_base_url();
     const char *key = config_str("openai.api_key");
-    int ok = openai_base_url_reachable(resolved, (key && *key) ? key : NULL, reason);
+    openai_prepare_base_url_availability(resolved, (key && *key) ? key : NULL, out);
     free(resolved);
-    return ok;
 }
 
 const struct provider_factory PROVIDER_LLAMACPP = {
     .name = "llama.cpp",
     .new = llamacpp_provider_new,
-    .available = llamacpp_available,
+    .prepare_availability = llamacpp_prepare_availability,
 };

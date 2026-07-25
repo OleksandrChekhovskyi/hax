@@ -431,14 +431,17 @@ struct provider *openrouter_provider_new(const char *name)
 
 /* Usable iff a key is configured — HAX_OPENAI_API_KEY or the OPENROUTER_API_KEY
  * fallback the preset already consults. */
-static int openrouter_available(const char *name, const char **reason)
+static void openrouter_prepare_availability(const char *name, struct provider_availability *out)
 {
     (void)name;
-    return openai_key_available("OPENROUTER_API_KEY", "OPENROUTER_API_KEY not set", reason);
+    const char *reason = NULL;
+    out->available =
+        openai_key_available("OPENROUTER_API_KEY", "OPENROUTER_API_KEY not set", &reason);
+    out->reason = reason;
 }
 
 const struct provider_factory PROVIDER_OPENROUTER = {
     .name = "openrouter",
     .new = openrouter_provider_new,
-    .available = openrouter_available,
+    .prepare_availability = openrouter_prepare_availability,
 };
