@@ -331,6 +331,13 @@ const char *config_preset_tint(const char *name);
  * config_preset_description. */
 const char *config_preset_provider(const char *name);
 
+/* The explicitly written "model" / "effort" members of presets.<name>, or
+ * NULL when the preset or the member is absent. Borrowed, same lifetime as
+ * config_preset_description. These deliberately do not resolve provider
+ * defaults: picker callers use them to show exactly what the user configured. */
+const char *config_preset_model(const char *name);
+const char *config_preset_effort(const char *name);
+
 /* Enumerate the defined presets: the member names of the presets object,
  * merged and deduplicated across the state and file tiers, restricted to
  * names that resolve to a *structurally valid* preset — the same

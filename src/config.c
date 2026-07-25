@@ -1193,6 +1193,22 @@ const char *config_preset_provider(const char *name)
     return json_string_value(json_object_get(obj, "provider"));
 }
 
+const char *config_preset_model(const char *name)
+{
+    const json_t *obj = preset_node(name);
+    if (!obj)
+        return NULL;
+    return json_string_value(json_object_get(obj, "model"));
+}
+
+const char *config_preset_effort(const char *name)
+{
+    const json_t *obj = preset_node(name);
+    if (!obj)
+        return NULL;
+    return json_string_value(json_object_get(obj, "effort"));
+}
+
 size_t config_preset_names(char ***out)
 {
     /* Filter through the same resolution + validation that apply uses, so

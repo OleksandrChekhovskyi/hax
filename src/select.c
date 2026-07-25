@@ -822,25 +822,46 @@ void select_preset(struct agent_state *st, const char *name)
         qsort(names, n, sizeof(*names), cmp_model_id); /* plain char* compare */
         struct picker_item *items = xcalloc(n, sizeof(*items));
         char **details = xcalloc(n, sizeof(*details)); /* owned detail strings */
+        const char *active = config_str("preset");
+        size_t initial = 0;
         for (size_t i = 0; i < n; i++) {
             items[i].label = names[i];
-            items[i].detail = config_preset_description(names[i]);
+            items[i].desc = config_preset_description(names[i]);
             items[i].dim = 0;
-            items[i].current = 0;
-            /* A provider name the registry can't resolve is a typo, not a
-             * transient outage (availability is deliberately not probed
-             * here) — show the row dim with the defect as its detail, like
-             * the /provider picker's unavailable rows. Still selectable;
-             * committing it reports the same error and changes nothing. */
+            items[i].current = active && *active && strcmp(active, names[i]) == 0;
+            if (items[i].current)
+                initial = i;
+
+            /* Keep the inline detail compact and factual: only show non-empty
+             * fields explicitly written in the preset. Provider defaults
+             * belong in the post-apply banner, not in a picker that never
+             * constructs each provider just to resolve them. */
             const char *prov = config_preset_provider(names[i]);
-            if (!prov || !provider_find(prov)) {
+            if (prov && provider_find(prov)) {
+                struct buf b;
+                buf_init(&b);
+                seg_add(&b, prov);
+                const char *model = config_preset_model(names[i]);
+                const char *effort = config_preset_effort(names[i]);
+                if (model && *model)
+                    seg_add(&b, model);
+                if (effort && *effort)
+                    seg_add(&b, effort);
+                details[i] = buf_steal(&b);
+            } else {
+                /* A provider name the registry can't resolve is a typo, not a
+                 * transient outage (availability is deliberately not probed
+                 * here) — show the row dim with the defect as its detail,
+                 * like the /provider picker's unavailable rows. Still
+                 * selectable; committing it reports the same error and
+                 * changes nothing. */
                 details[i] = xasprintf("unknown provider '%s'", prov ? prov : "?");
-                items[i].detail = details[i];
                 items[i].dim = 1;
             }
+            items[i].detail = details[i];
         }
         struct picker_opts opts = {
-            .title = "select a preset", .items = items, .n = n, .initial = 0};
+            .title = "select a preset", .items = items, .n = n, .initial = initial};
         long sel = picker_run(&opts);
         free(items);
         for (size_t i = 0; i < n; i++)

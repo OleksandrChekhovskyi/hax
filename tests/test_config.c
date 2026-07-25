@@ -909,6 +909,12 @@ static void test_preset_apply(void)
     /* "description" is reserved metadata, not an override. */
     EXPECT(config_str("description") == NULL);
     EXPECT_STR_EQ(config_preset_description("review"), "code review stance");
+    EXPECT_STR_EQ(config_preset_provider("review"), "mock");
+    EXPECT_STR_EQ(config_preset_model("review"), "rev-model");
+    EXPECT_STR_EQ(config_preset_effort("review"), "high");
+    EXPECT_STR_EQ(config_preset_provider("min"), "mock");
+    EXPECT(config_preset_model("min") == NULL);
+    EXPECT(config_preset_effort("min") == NULL);
 
     /* A preset is a whole selection, so presets replace rather than
      * compose: one that names only the provider resets model/effort to the
