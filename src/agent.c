@@ -936,6 +936,9 @@ static void replay_user_turn(struct render_ctx *r, const struct agent_session *s
 
 void agent_resume_session(struct agent_state *st, const char *path)
 {
+    /* /resume can race a daily sweep started by another process just like a
+     * startup resume; claim activity before reading the selected file. */
+    (void)session_touch(path);
     struct agent_session *s = st->sess;
     struct item *loaded = NULL;
     size_t nl = 0;

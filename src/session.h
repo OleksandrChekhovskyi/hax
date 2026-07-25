@@ -164,6 +164,16 @@ const char *session_log_resume_hint(const struct session_log *log);
 
 /* ---------------- loading & listing ---------------- */
 
+/* True when `path` follows hax's timestamp + UUID session filename format.
+ * Pruning uses this to leave unrelated JSONL files untouched. */
+int session_path_is_standard(const char *path);
+
+/* Mark a selected session active before loading it. Takes the same shared
+ * advisory lock as a writer while updating mtime, so a concurrent pruner
+ * either sees the fresh timestamp or has already removed the path. Returns 0
+ * on success, -1 when the file could not be touched. */
+int session_touch(const char *path);
+
 /* Load a session file, replaying its items verbatim into a fresh malloc'd
  * vector (*out_items / *out_n) and, when out_meta is non-NULL, filling it
  * from the header and any later selection records (see session_read_meta).
@@ -192,8 +202,9 @@ struct session_entry {
     char *first_prompt; /* lazily filled by the caller via session_first_prompt; NULL until then */
 };
 
-/* List sessions recorded for `cwd`, newest first (by mtime). Enumeration
- * only — stats each file and reads the id from its name, but does NOT open
+/* List unexpired sessions recorded for `cwd`, newest first (by mtime).
+ * Retention-disabled listing includes every session. Enumeration only —
+ * stats each file and reads the id from its name, but does NOT open
  * any transcript, so --continue (newest path) and --resume=ID (id match)
  * stay cheap regardless of how many/large the sessions are. Fill
  * first_prompt lazily with session_first_prompt for the rows actually

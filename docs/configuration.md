@@ -311,6 +311,10 @@ where it matters.
   opens the session you point it at and earlier prompts still recall; this run just adds to
   neither. Default `auto`: record for real
   providers, skip for the `mock` dev backend. `--no-session` is the same switch for one run.
+- `session_retention_days` / `HAX_SESSION_RETENTION_DAYS` — delete sessions after this many
+  inactive days. Selecting a session to resume refreshes its activity time. Default `30`; `0`
+  disables pruning. Expired sessions are omitted from resume lists immediately, while a
+  throttled background sweep reclaims them from every project directory.
 - `transcript` / `HAX_TRANSCRIPT` — file path for a plain-text transcript mirror; empty disables.
 - `trace` / `HAX_TRACE` — file path for HTTP/SSE trace output; empty disables.
 

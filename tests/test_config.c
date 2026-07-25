@@ -706,6 +706,13 @@ static void test_value_valid(void)
     EXPECT_STR_EQ(hint, "a whole number");
 
     /* A max-only int names its ceiling; the value is rejected above it. */
+    const struct config_setting *ret = config_setting_find("session_retention_days");
+    EXPECT(ret && ret->kind == CFG_INT && ret->min == 0 && ret->max == 36500);
+    EXPECT_STR_EQ(ret->def, "30");
+    EXPECT(config_value_valid(ret, "0"));
+    EXPECT(config_value_valid(ret, "30"));
+    EXPECT(!config_value_valid(ret, "36501"));
+
     const struct config_setting *mr = config_setting_find("http.max_retries");
     EXPECT(mr && mr->kind == CFG_INT && mr->min == 0 && mr->max == 100);
     EXPECT(config_value_valid(mr, "100"));

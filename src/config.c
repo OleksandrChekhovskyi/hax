@@ -92,6 +92,9 @@ static const struct config_setting REGISTRY[] = {
      .desc = "Skip recording conversations and typed prompts; auto skips both for dev "
              "providers (mock)",
      .choices = CONFIG_CHOICES_TRISTATE},
+    {.key = "session_retention_days", .env = "HAX_SESSION_RETENTION_DAYS", .def = "30",
+     .desc = "Delete sessions after this many inactive days; 0 disables pruning",
+     .kind = CFG_INT, .max = 36500},
     {.key = "transcript", .env = "HAX_TRANSCRIPT", .keep_empty = 1,
      .desc = "Path to mirror the Ctrl-T transcript view; empty disables"},
     {.key = "trace", .env = "HAX_TRACE", .keep_empty = 1,

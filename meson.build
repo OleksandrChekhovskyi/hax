@@ -51,6 +51,7 @@ sources = files(
     'src/select.c',
     'src/session.c',
     'src/session_picker.c',
+    'src/session_prune.c',
     'src/slash.c',
     'src/trace.c',
     'src/transcript.c',

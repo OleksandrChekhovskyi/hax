@@ -8,11 +8,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "config.h"
+#include "session_prune.h"
 #include "util.h"
 #include "system/fs.h"
 
@@ -318,13 +320,6 @@ static char *session_dir(const char *cwd)
     return dir;
 }
 
-/* Pull the uuid out of a session filename ("<ts>_<uuid>.jsonl"): the part
- * after the last '_', minus the ".jsonl" suffix, validated as a v4-shaped
- * uuid (36 chars, hex with dashes at 8/13/18/23). Returns malloc'd, or
- * NULL when the basename doesn't fit the convention — e.g. a user-supplied
- * --resume=/some/path.jsonl, for which a derived "id" wouldn't resolve in
- * the cwd's session list and so would be a misleading resume hint. Caller
- * frees. */
 static int is_uuid(const char *s, size_t len)
 {
     if (len != 36)
@@ -340,24 +335,58 @@ static int is_uuid(const char *s, size_t len)
     return 1;
 }
 
+static int is_file_timestamp(const char *s)
+{
+    static const char shape[] = "dddd-dd-ddTdd-dd-ddZ";
+    for (size_t i = 0; i < sizeof(shape) - 1; i++) {
+        if (shape[i] == 'd') {
+            if (!isdigit((unsigned char)s[i]))
+                return 0;
+        } else if (s[i] != shape[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Pull the UUID out of a generated session filename. The timestamp shape is
+ * fixed by session_begin/session_fork_file; validating the whole basename is
+ * what lets pruning distinguish owned files from unrelated UUID-suffixed
+ * JSONL files. Returns malloc'd, or NULL when the basename is non-standard. */
 static char *id_from_path(const char *path)
 {
     const char *base = strrchr(path, '/');
     base = base ? base + 1 : path;
-    const char *us = strrchr(base, '_');
-    if (!us)
+    /* 20-byte timestamp + '_' + 36-byte UUID + ".jsonl". */
+    if (strlen(base) != 63 || !is_file_timestamp(base) || base[20] != '_' ||
+        strcmp(base + 57, ".jsonl") != 0 || !is_uuid(base + 21, 36))
         return NULL;
-    const char *id = us + 1;
-    size_t len = strlen(id);
-    if (len <= 6 || strcmp(id + len - 6, ".jsonl") != 0)
-        return NULL;
-    len -= 6;
-    if (!is_uuid(id, len))
-        return NULL;
-    char *out = xmalloc(len + 1);
-    memcpy(out, id, len);
-    out[len] = '\0';
+    char *out = xmalloc(37);
+    memcpy(out, base + 21, 36);
+    out[36] = '\0';
     return out;
+}
+
+int session_path_is_standard(const char *path)
+{
+    char *id = id_from_path(path);
+    int standard = id != NULL;
+    free(id);
+    return standard;
+}
+
+int session_touch(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return -1;
+    /* If flock is unsupported, pruning also fails closed; touching can still
+     * proceed. On supported filesystems this waits out an in-flight prune. */
+    (void)flock(fd, LOCK_SH);
+    struct stat st;
+    int result = fstat(fd, &st) == 0 && st.st_nlink > 0 ? futimens(fd, NULL) : -1;
+    close(fd);
+    return result;
 }
 
 struct session_log {
@@ -475,12 +504,25 @@ struct session_log *session_log_resume(const char *path, const char *provider, c
 static FILE *open_session_file(const char *path, int append)
 {
     /* Append needs O_RDWR (not O_WRONLY) so the torn-line check below can
-     * pread the last byte; a write-only fd would fail that read. */
-    int flags = O_CREAT | O_CLOEXEC | (append ? (O_RDWR | O_APPEND) : (O_WRONLY | O_TRUNC));
+     * pread the last byte; a write-only fd would fail that read. It omits
+     * O_CREAT so a session removed between load and resume is not recreated
+     * as a headerless log. */
+    int flags = O_CLOEXEC | (append ? (O_RDWR | O_APPEND) : (O_CREAT | O_WRONLY | O_TRUNC));
     int fd = open(path, flags, 0600);
     if (fd < 0)
         return NULL;
     fchmod(fd, 0600);
+    /* A pruner takes LOCK_EX before unlinking. Keep recording available on
+     * filesystems without flock support; the pruner fails closed there. If
+     * it won the open-to-lock race and already unlinked this inode, refuse
+     * to write invisibly into a file that no path can resume. */
+    if (flock(fd, LOCK_SH) == 0) {
+        struct stat locked;
+        if (fstat(fd, &locked) != 0 || locked.st_nlink == 0) {
+            close(fd);
+            return NULL;
+        }
+    }
     if (append) {
         /* A crash can leave the last record half-written with no trailing
          * newline; appending onto it would fuse two JSON objects into one
@@ -1258,6 +1300,7 @@ int session_list(const char *cwd, struct session_entry **out, size_t *n_out)
 
     struct session_entry *list = NULL;
     size_t n = 0, cap = 0;
+    time_t cutoff = session_retention_cutoff();
     struct dirent *de;
     while ((de = readdir(d))) {
         if (!has_jsonl_suffix(de->d_name))
@@ -1271,13 +1314,20 @@ int session_list(const char *cwd, struct session_entry **out, size_t *n_out)
         /* Enumeration only — no file reads here. The id is in the
          * filename; the first prompt is filled lazily by the picker for
          * just the rows it shows (session_first_prompt), so --continue and
-         * --resume=ID never touch a transcript. */
+         * --resume=ID never touch a transcript. Expired canonical files are
+         * hidden immediately; the background sweep reclaims their bytes. */
+        char *id = id_from_path(fpath);
+        if (id && cutoff && st.st_mtime < cutoff) {
+            free(id);
+            free(fpath);
+            continue;
+        }
         struct session_entry e;
         memset(&e, 0, sizeof(e));
         e.path = fpath;
         e.mtime = (long)st.st_mtime;
         e.mtime_nsec = ST_MTIME_NSEC(st);
-        e.id = id_from_path(fpath);
+        e.id = id;
         if (n == cap) {
             cap = cap ? cap * 2 : 8;
             list = xrealloc(list, cap * sizeof(*list));

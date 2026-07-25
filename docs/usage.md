@@ -48,7 +48,9 @@ ${XDG_STATE_HOME:-$HOME/.local/state}/hax/sessions/<encoded-cwd>/
 ```
 
 Sessions are keyed by working directory. `-c`, `--resume`, and `/resume` only list sessions
-for the directory you are currently in.
+for the directory you are currently in. Sessions inactive for 30 days are pruned automatically;
+selecting one to resume refreshes its activity time. Configure `session_retention_days` or set
+it to `0` to keep sessions indefinitely.
 
 Resuming appends to the same session file. `/new` starts a fresh session id. On exit, hax
 prints a resume hint such as:

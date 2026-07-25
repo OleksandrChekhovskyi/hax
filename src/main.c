@@ -14,6 +14,7 @@
 #include "select.h"
 #include "session.h"
 #include "session_picker.h"
+#include "session_prune.h"
 #include "terminal/ansi.h"
 #include "terminal/interrupt.h"
 #include "terminal/theme.h"
@@ -576,6 +577,11 @@ int main(int argc, char **argv)
             }
         }
     }
+    /* Selection itself counts as activity. Refresh mtime before metadata or
+     * provider setup so another process's pruner sees this conversation as
+     * live; failure is handled by the authoritative reads below. */
+    if (resume_path)
+        (void)session_touch(resume_path);
     opts.resume_path = resume_path;
 
     /* An empty HAX_PRESET names nothing: it's the env tier saying "no stance",
@@ -674,6 +680,7 @@ int main(int argc, char **argv)
      * later when sys+tools are known. */
     trace_init();
     transcript_log_init();
+    session_prune_start(resume_path);
 
     unsigned long diag_before_provider = hax_diag_sequence();
     struct provider *p = pick_provider(print_mode, &opts.provider_autoselected);
@@ -705,6 +712,7 @@ int main(int argc, char **argv)
     if (p)
         p->destroy(p);
 err_curl:
+    session_prune_shutdown();
     /* Like provider destroy: join the catalog's background fetch (it may
      * hold a libcurl handle) before curl_global_cleanup below. */
     catalog_shutdown();
