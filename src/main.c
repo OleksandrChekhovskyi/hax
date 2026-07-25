@@ -671,6 +671,12 @@ int main(int argc, char **argv)
     if (opt_no_session)
         config_set_override("no_session", "1");
 
+    /* Re-resolve the theme now that the selection has settled: a preset (or
+     * a resumed conversation's stance) may carry a tint. The first pass ran
+     * before any of this, early enough that config_init's own warnings come
+     * out themed — it can't also see a preset that hadn't been applied yet. */
+    theme_init();
+
     /* Truncate HAX_TRACE and HAX_TRANSCRIPT here, before any provider
      * startup or session init. Without this, a fast-fail run (bad
      * config, missing HAX_MODEL, no OAuth) would exit with stale files

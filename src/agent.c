@@ -518,12 +518,22 @@ void agent_print_banner(const struct provider *p, const struct agent_session *s)
 {
     char bar[32];
     snprintf(bar, sizeof(bar), "%s▌%s", theme_open(THEME_CHROME), theme_close(THEME_CHROME));
-    /* Active preset stance, shown dim as a qualifier of hax itself
-     * ("this is hax in review trim"). Load-bearing, not decoration: a
-     * preset may have swapped the system prompt, and the name is the only
-     * at-a-glance signal that a stance — persona included — is in effect. */
+    /* Active preset stance, the one colored token on an otherwise dim line.
+     * Load-bearing, not decoration: a preset may have swapped the system
+     * prompt, and the name is the only at-a-glance signal that a stance —
+     * persona included — is in effect. It carries the stance hue (the same
+     * one the preset's tint gives the model's markdown), so the banner and
+     * the replies below it agree on which persona this terminal is running.
+     * The bar stays chrome: hax is still hax.
+     *
+     * SGR 22 opens a hole in the surrounding dim run and ANSI_DIM closes it
+     * again — the token must not be dimmed, since faint over an indexed
+     * color is exactly what THEME_CHROME_DIM exists to avoid. */
     const char *preset = config_str("preset");
-    char *stance = (preset && *preset) ? xasprintf("[%s] ", preset) : xstrdup("");
+    char *stance = (preset && *preset)
+                       ? xasprintf(ANSI_BOLD_OFF "%s[%s]%s" ANSI_DIM " ", theme_open(THEME_STANCE),
+                                   preset, theme_close(THEME_STANCE))
+                       : xstrdup("");
     if (!p) {
         /* No provider could be constructed (the configured/default one isn't
          * usable — e.g. codex not logged in). The REPL still starts; point
@@ -576,6 +586,14 @@ int agent_apply_settings(struct agent_state *st, struct provider *p)
         free(prev_model);
         return -1;
     }
+
+    /* Past the last failure return, so the display is only re-resolved once
+     * the new settings are certain to stick — a caller that rolls its config
+     * snapshot back after a failure above never drew under them. Every
+     * selection commit lands here, which is what keeps the tint in step with
+     * the stance: /preset applying one, and /provider, /model, or /effort
+     * exiting it. The banner printed below is the first thing to need it. */
+    agent_display_refresh(st);
 
     /* Install a prospective provider only after its settings resolve. On
      * failure above, the live provider remains untouched and ownership of a

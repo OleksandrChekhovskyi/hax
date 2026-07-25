@@ -112,8 +112,8 @@ Custom provider with a key in the environment:
 ## Presets
 
 A preset is a named, complete selection: which provider to talk to, and optionally which
-model, reasoning effort, and system prompt. Define them under `presets.<name>` in
-`config.json`:
+model, reasoning effort, system prompt, and identity color. Define them under `presets.<name>`
+in `config.json`:
 
 ```json
 {
@@ -123,12 +123,14 @@ model, reasoning effort, and system prompt. Define them under `presets.<name>` i
       "provider": "codex",
       "model": "gpt-5.6-sol",
       "effort": "high",
+      "tint": "rose",
       "system_prompt": "You are a meticulous code reviewer. ..."
     },
     "scout": {
       "description": "fast, cheap exploration",
       "provider": "openrouter",
-      "model": "qwen/qwen3-coder:free"
+      "model": "qwen/qwen3-coder:free",
+      "tint": "sage"
     }
   }
 }
@@ -143,6 +145,12 @@ Semantics:
   Explicit `--model`/`--effort` flags still win over the preset.
 - `system_prompt` is optional. Omitted, normal resolution applies — your configured prompt,
   or the built-in one.
+- `tint` is optional: the persona's identity hue (`teal`, `violet`, `rose`, `sage` — see the
+  `tint` setting above), which colors the model's headings, code, and the `[name]` stance in
+  the banner. Omitted, your own `tint` setting applies. Unlike the other members it is never
+  written as an override — it is read back off the active stance — so a `/config tint` you set
+  afterwards outranks it, and survives the `/model`, `/provider`, or `/effort` pick that ends
+  the stance. An unknown hue fails validation, like any other invalid member.
 - Applying a preset writes the whole selection, so presets replace each other rather than
   compose: switching from a preset that set a system prompt to one that doesn't restores the
   regular prompt.
@@ -153,7 +161,8 @@ Semantics:
   are not assembled into a preset — the same exception to the flat-key grammar that other
   structured blocks (like `catalog.models`) carry.
 - Nothing else is presettable, deliberately: a preset must be fully honored whenever it is
-  applied, including mid-session via `/preset`, and only these per-request keys qualify.
+  applied, including mid-session via `/preset`, and only these per-request keys qualify
+  (`tint` too — it takes effect on the next thing drawn).
   Endpoint and credential settings are bound at provider construction — define a custom
   `providers.<name>` block and point the preset's `provider` at it. Project-context stripping
   and session recording are startup-bound — use the `--bare` / `--no-session` flags.
@@ -242,6 +251,13 @@ variable. `/config` marks settings that can be changed mid-session.
   dumb), `ansi` without 256-color support, and otherwise `dark` — or `light` when a
   `COLORFGBG` environment variable reports a light background. Terminals rarely advertise
   their background, so on a light scheme you typically want to set `light` explicitly.
+- `tint` / `HAX_TINT` — identity hue: `teal` (default), `violet`, `rose`, or `sage`. Recolors
+  the model's voice — headings, inline code, fence bodies, and the active preset's `[name]`
+  in the banner — so two terminals running different personas are distinguishable at a
+  glance. hax's own chrome, the prompt marker, and the diff/status colors keep their fixed
+  meanings under every tint. Presets can carry one (see [Presets](#presets)), which wins over
+  this setting until you change it with `/config tint`; the `dark` and `light` themes apply
+  tints, while `ansi` and `off` ignore them and defer to the terminal's own scheme.
 
 `HAX_CONTEXT_LIMIT` overrides provider auto-detection. Current auto-detection exists for
 Codex, llama.cpp, and OpenRouter; `openai`, `anthropic`, and custom providers with a

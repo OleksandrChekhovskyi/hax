@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "harness.h"
+#include "util.h"
 #include "config.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
@@ -30,6 +31,7 @@ static void test_default_is_ansi(void)
      * colors; the closer must undo both. */
     EXPECT_STR_EQ(theme_open(THEME_CHROME_DIM), ANSI_DIM ANSI_CYAN);
     EXPECT_STR_EQ(theme_close(THEME_CHROME_DIM), ANSI_FG_DEFAULT ANSI_BOLD_OFF);
+    EXPECT_STR_EQ(theme_open(THEME_STANCE), ANSI_CYAN);
     EXPECT_STR_EQ(theme_open(THEME_CODE_INLINE), ANSI_CYAN);
     EXPECT_STR_EQ(theme_open(THEME_CODE_BLOCK), ANSI_DIM);
     EXPECT_STR_EQ(theme_close(THEME_CODE_BLOCK), ANSI_BOLD_OFF);
@@ -101,6 +103,97 @@ static void test_presets(void)
     EXPECT_STR_EQ(theme_open(THEME_ACCENT), ANSI_BRIGHT_MAGENTA);
 }
 
+/* The model's voice: everything a tint recolors. */
+static const enum theme_role TINTED[] = {THEME_STANCE, THEME_CODE_INLINE, THEME_CODE_BLOCK,
+                                         THEME_HEADING};
+
+/* What a tint must leave alone — hax's own chrome, the user's marker, and
+ * the status vocabulary, whose meanings don't change with the persona. */
+static const enum theme_role FIXED[] = {THEME_ACCENT, THEME_CHROME, THEME_CHROME_DIM, THEME_ADD,
+                                        THEME_REMOVE, THEME_OK,     THEME_ERROR,      THEME_WARN};
+
+static void test_tints(void)
+{
+    EXPECT(theme_set("dark") == 0);
+    EXPECT(theme_tint_set("teal") == 0);
+    EXPECT_STR_EQ(theme_tint_name(), "teal");
+
+    /* Every sequence is a static literal, so these stay valid as the
+     * active tint changes underneath them. */
+    const char *base_open[THEME_ROLE_COUNT], *base_close[THEME_ROLE_COUNT];
+    for (int r = 0; r < THEME_ROLE_COUNT; r++) {
+        base_open[r] = theme_open((enum theme_role)r);
+        base_close[r] = theme_close((enum theme_role)r);
+    }
+
+    EXPECT(theme_tint_set("violet") == 0);
+    EXPECT_STR_EQ(theme_tint_name(), "violet");
+    for (size_t i = 0; i < sizeof(TINTED) / sizeof(TINTED[0]); i++)
+        EXPECT(strcmp(theme_open(TINTED[i]), base_open[TINTED[i]]) != 0);
+    for (size_t i = 0; i < sizeof(FIXED) / sizeof(FIXED[0]); i++)
+        EXPECT_STR_EQ(theme_open(FIXED[i]), base_open[FIXED[i]]);
+    /* A tint changes how a role opens, never how it closes. */
+    for (int r = 0; r < THEME_ROLE_COUNT; r++)
+        EXPECT_STR_EQ(theme_close((enum theme_role)r), base_close[r]);
+    /* The stance token and inline code share the hue, the heading is that
+     * hue plus bold, and fence bodies take the quieter sibling. */
+    EXPECT_STR_EQ(theme_open(THEME_STANCE), theme_open(THEME_CODE_INLINE));
+    EXPECT(strstr(theme_open(THEME_HEADING), ANSI_BOLD) != NULL);
+    EXPECT(strstr(theme_open(THEME_HEADING), theme_open(THEME_CODE_INLINE)) != NULL);
+    EXPECT(strcmp(theme_open(THEME_CODE_BLOCK), theme_open(THEME_CODE_INLINE)) != 0);
+    check_roles_defined();
+
+    /* "teal" is the presets' own palette rather than a copy of it, so it
+     * restores every role byte for byte. */
+    EXPECT(theme_tint_set("teal") == 0);
+    for (int r = 0; r < THEME_ROLE_COUNT; r++)
+        EXPECT_STR_EQ(theme_open((enum theme_role)r), base_open[r]);
+
+    /* No two tints share the model's hue — the whole point is telling two
+     * personas apart at a glance. */
+    static const char *const NAMES[] = {"teal", "violet", "rose", "sage"};
+    const size_t n_names = sizeof(NAMES) / sizeof(NAMES[0]);
+    const char *hue[sizeof(NAMES) / sizeof(NAMES[0])];
+    for (size_t i = 0; i < n_names; i++) {
+        EXPECT(theme_tint_set(NAMES[i]) == 0);
+        hue[i] = theme_open(THEME_CODE_INLINE);
+    }
+    for (size_t i = 0; i < n_names; i++)
+        for (size_t j = i + 1; j < n_names; j++)
+            EXPECT(strcmp(hue[i], hue[j]) != 0);
+
+    /* Either axis may be set first; the pair is re-resolved on every
+     * change, and each background gets its own row. */
+    EXPECT(theme_tint_set("rose") == 0);
+    EXPECT(theme_set("light") == 0);
+    const char *light_rose = theme_open(THEME_CODE_INLINE);
+    EXPECT(strstr(light_rose, "38;5;") != NULL);
+    EXPECT(theme_set("dark") == 0);
+    EXPECT(strcmp(theme_open(THEME_CODE_INLINE), light_rose) != 0);
+
+    /* ansi defers to the terminal's own scheme and off has no colors at
+     * all, so neither takes a tint — but the selection survives, ready for
+     * when a fixed palette comes back. */
+    EXPECT(theme_set("ansi") == 0);
+    EXPECT_STR_EQ(theme_open(THEME_STANCE), ANSI_CYAN);
+    EXPECT_STR_EQ(theme_open(THEME_CODE_INLINE), ANSI_CYAN);
+    EXPECT(theme_set("off") == 0);
+    EXPECT_STR_EQ(theme_open(THEME_STANCE), "");
+    EXPECT_STR_EQ(theme_open(THEME_CODE_INLINE), "");
+    EXPECT_STR_EQ(theme_tint_name(), "rose");
+    EXPECT(theme_set("dark") == 0);
+    EXPECT(strcmp(theme_open(THEME_CODE_INLINE), base_open[THEME_CODE_INLINE]) != 0);
+
+    /* Case-insensitive like the config enum validator; an unknown name
+     * fails without disturbing the active tint. */
+    EXPECT(theme_tint_set("SAGE") == 0);
+    EXPECT_STR_EQ(theme_tint_name(), "sage");
+    EXPECT(theme_tint_set("chartreuse") == -1);
+    EXPECT(theme_tint_set(NULL) == -1);
+    EXPECT_STR_EQ(theme_tint_name(), "sage");
+    EXPECT(theme_tint_set("teal") == 0);
+}
+
 static void test_autodetect(void)
 {
     /* NO_COLOR (non-empty) beats everything. */
@@ -165,13 +258,136 @@ static void test_init_from_config(void)
     config_set_override("theme", NULL);
     theme_init();
     EXPECT_STR_EQ(theme_name(), "dark");
+
+    /* The tint resolves on the same pass. */
+    config_set_override("tint", "rose");
+    theme_init();
+    EXPECT_STR_EQ(theme_tint_name(), "rose");
+
+    /* Unknown configured value warns and falls back to the base palette. */
+    config_set_override("tint", "chartreuse");
+    theme_init();
+    EXPECT_STR_EQ(theme_tint_name(), "teal");
+
+    /* Cleared — what config_preset_exit does when a stance ends — resolves
+     * to the registry default rather than leaving the outgoing hue up. */
+    config_set_override("tint", "violet");
+    theme_init();
+    EXPECT_STR_EQ(theme_tint_name(), "violet");
+    config_set_override("tint", NULL);
+    theme_init();
+    EXPECT_STR_EQ(theme_tint_name(), "teal");
+
+    /* Re-resolution is idempotent: both axes track the config on every call,
+     * which is what a preset switch and a /config edit rely on. */
+    config_set_override("theme", "light");
+    config_set_override("tint", "sage");
+    theme_init();
+    EXPECT_STR_EQ(theme_name(), "light");
+    EXPECT_STR_EQ(theme_tint_name(), "sage");
+    config_set_override("tint", "chartreuse");
+    theme_init();
+    EXPECT_STR_EQ(theme_tint_name(), "teal");
+    config_set_override("theme", NULL);
+    config_set_override("tint", NULL);
+}
+
+/* A preset's tint reaches the display without anything writing the "tint"
+ * key: the stance names it, and resolution reads it back off the stance. */
+static void test_tint_from_stance(void)
+{
+    setenv("TERM", "xterm-256color", 1);
+    unsetenv("NO_COLOR");
+    unsetenv("HAX_TINT");
+    config_set_override("theme", "dark");
+    config_set_override("tint", NULL);
+    EXPECT(config_load("{\"presets\": {\"review\": {\"provider\": \"mock\", \"tint\": \"rose\"},"
+                       " \"plain\": {\"provider\": \"mock\"}}}") == 0);
+
+    config_set_override("preset", NULL);
+    theme_init();
+    EXPECT_STR_EQ(theme_tint_name(), "teal");
+
+    config_set_override("preset", "review");
+    theme_init();
+    EXPECT_STR_EQ(theme_tint_name(), "rose");
+
+    /* The stance outranks env; a stance naming no hue falls through to it
+     * rather than forcing the default. */
+    setenv("HAX_TINT", "sage", 1);
+    theme_init();
+    EXPECT_STR_EQ(theme_tint_name(), "rose");
+    config_set_override("preset", "plain");
+    theme_init();
+    EXPECT_STR_EQ(theme_tint_name(), "sage");
+    unsetenv("HAX_TINT");
+
+    /* An explicit runtime tint (/config tint, which lands in the run tier)
+     * outranks the stance — and survives the stance ending, which is the
+     * whole reason presets don't write this key. */
+    config_set_override("preset", "review");
+    config_set_override("tint", "violet");
+    theme_init();
+    EXPECT_STR_EQ(theme_tint_name(), "violet");
+    config_preset_exit(CONFIG_TIER_RUN);
+    theme_init();
+    EXPECT_STR_EQ(theme_tint_name(), "violet");
+
+    config_set_override("tint", NULL);
+    config_set_override("preset", NULL);
+    config_set_override("theme", NULL);
+    EXPECT(config_load(NULL) == 0);
+}
+
+/* Resolution reruns constantly (startup twice, then every preset switch and
+ * /config edit), so an unresolvable name is reported once per distinct value
+ * rather than once per call. Silencing the reruns instead would look the same
+ * from the resolved value alone — but it loses the diagnostic entirely when a
+ * stance masks a broken lower-tier tint until it ends, so the count is what
+ * this checks. Uses a bogus name no earlier case has spent, since the
+ * report-once memory persists for the process. */
+static void test_invalid_tint_reported_once(void)
+{
+    setenv("TERM", "xterm-256color", 1);
+    unsetenv("NO_COLOR");
+    unsetenv("HAX_TINT");
+    config_set_override("theme", "dark");
+    config_set_override("tint", NULL);
+    EXPECT(config_load("{\"tint\": \"ultramarine\", \"presets\":"
+                       " {\"review\": {\"provider\": \"mock\", \"tint\": \"rose\"}}}") == 0);
+
+    /* Masked by the stance: the broken value is never consulted, so there is
+     * nothing to report yet. */
+    config_set_override("preset", "review");
+    unsigned long quiet = hax_diag_sequence();
+    theme_init();
+    EXPECT_STR_EQ(theme_tint_name(), "rose");
+    EXPECT(hax_diag_sequence() == quiet);
+
+    /* The stance ends, so the broken value becomes what's in effect — and
+     * that is when it has to be reported. */
+    config_set_override("preset", NULL);
+    theme_init();
+    EXPECT_STR_EQ(theme_tint_name(), "teal");
+    EXPECT(hax_diag_sequence() == quiet + 1);
+
+    /* Once, not once per re-resolution. */
+    theme_init();
+    theme_init();
+    EXPECT(hax_diag_sequence() == quiet + 1);
+
+    config_set_override("theme", NULL);
+    EXPECT(config_load(NULL) == 0);
 }
 
 int main(void)
 {
     test_default_is_ansi();
     test_presets();
+    test_tints();
     test_autodetect();
     test_init_from_config();
+    test_tint_from_stance();
+    test_invalid_tint_reported_once();
     T_REPORT();
 }

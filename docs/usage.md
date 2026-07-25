@@ -103,7 +103,7 @@ Type `/help` in the REPL for the live command list and keyboard shortcuts.
 | `/provider` | Switch provider, then choose model and effort where applicable. |
 | `/model` | Switch model for the current provider, then choose effort where applicable. |
 | `/effort` | Set reasoning effort when the provider exposes effort levels. |
-| `/preset [name]` | Switch to a config-defined preset (shown dim in the banner); without a name, pick from a list. Persists by name; an explicit `/provider`, `/model`, or `/effort` pick exits it. |
+| `/preset [name]` | Switch to a config-defined preset (shown as `[name]` in the banner, in the preset's `tint`); without a name, pick from a list. Persists by name; an explicit `/provider`, `/model`, or `/effort` pick exits it. |
 | `/config [key [value]]` | Inspect settings or change a runtime-tunable setting for this session. See [configuration.md](./configuration.md). |
 | `/compact [focus]` | Summarize history to free context; optional focus text guides the summary. |
 | `/copy` | Copy the latest assistant text response to the clipboard. |

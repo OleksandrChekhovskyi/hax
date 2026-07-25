@@ -886,6 +886,7 @@ static void test_preset_apply(void)
                        "\"provider\": \"mock\","
                        "\"model\": \"rev-model\","
                        "\"effort\": \"high\","
+                       "\"tint\": \"rose\","
                        "\"system_prompt\": \"you review code\"},"
                        "\"min\": {\"provider\": \"mock\"}}}") == 0);
 
@@ -898,6 +899,11 @@ static void test_preset_apply(void)
     EXPECT_STR_EQ(config_str("model"), "rev-model");
     EXPECT_STR_EQ(config_str("effort"), "high");
     EXPECT_STR_EQ(config_str("system_prompt"), "you review code");
+    /* The persona's identity hue is read back off the stance, not written as
+     * an override — the key has a second writer (/config tint) that stance
+     * bookkeeping must not clobber. */
+    EXPECT_STR_EQ(config_preset_tint("review"), "rose");
+    EXPECT(strcmp(config_source("tint"), "run") != 0);
     /* The applied name is recorded as the active stance (banner, /session). */
     EXPECT_STR_EQ(config_str("preset"), "review");
     /* "description" is reserved metadata, not an override. */
@@ -910,15 +916,37 @@ static void test_preset_apply(void)
      * resurface — and clears the system_prompt override, so normal
      * resolution returns and the env var DOES resurface. */
     setenv("HAX_SYSTEM_PROMPT", "custom prompt", 1);
+    setenv("HAX_TINT", "violet", 1);
     EXPECT(config_preset_apply("min", CONFIG_TIER_RUN, &err) == 0);
     EXPECT(err == NULL);
     EXPECT_STR_EQ(config_str("provider"), "mock");
     EXPECT(config_str("model") == NULL);
     EXPECT(config_str("effort") == NULL);
     EXPECT_STR_EQ(config_str("system_prompt"), "custom prompt");
+    /* A stance that names no hue leaves the user's own in force — applying
+     * only clears the run tier, so env and the config file still resolve. */
+    EXPECT(config_preset_tint("min") == NULL);
+    EXPECT_STR_EQ(config_str("tint"), "violet");
     EXPECT_STR_EQ(config_str("preset"), "min");
     unsetenv("HAX_MODEL");
     unsetenv("HAX_SYSTEM_PROMPT");
+    unsetenv("HAX_TINT");
+
+    /* Applying a stance does clear an explicit runtime tint, so its own hue
+     * takes over: presets replace what was picked before them. */
+    config_set_override("tint", "sage");
+    EXPECT_STR_EQ(config_source("tint"), "run");
+    EXPECT(config_preset_apply("review", CONFIG_TIER_RUN, &err) == 0);
+    EXPECT(strcmp(config_source("tint"), "run") != 0);
+
+    /* Leaving the stance must NOT take a runtime tint down with it. Unlike
+     * system_prompt, /config writes this key too, and an explicit choice has
+     * to outlive the /model or /provider pick that ends the stance. */
+    config_set_override("tint", "sage");
+    config_preset_exit(CONFIG_TIER_RUN);
+    EXPECT_STR_EQ(config_str("preset"), "");
+    EXPECT_STR_EQ(config_str("tint"), "sage");
+    config_set_override("tint", NULL);
 
     /* Clear the applied overrides so later tests see a clean tier. */
     config_set_override("preset", NULL);
@@ -1149,6 +1177,7 @@ static void test_preset_apply_errors(void)
                        "\"endpoint\": {\"provider\": \"mock\", \"openai.base_url\": \"u\"},"
                        "\"nonscalar\": {\"provider\": \"mock\", \"model\": {\"id\": \"x\"}},"
                        "\"badd\": {\"provider\": \"mock\", \"description\": {\"text\": \"x\"}},"
+                       "\"badtint\": {\"provider\": \"mock\", \"tint\": \"chartreuse\"},"
                        "\"anon\": {\"model\": \"x\"}}}") == 0);
 
     /* Unknown preset name. */
@@ -1179,6 +1208,15 @@ static void test_preset_apply_errors(void)
     EXPECT(config_preset_apply("badd", CONFIG_TIER_RUN, &err) == -1);
     EXPECT(err != NULL && strstr(err, "description") != NULL);
     free(err);
+
+    /* An unknown hue is an error, not a silent fall back to the default
+     * palette: the display layer resolves it long after apply returns, so
+     * only validation can keep application all-or-nothing here. */
+    err = NULL;
+    EXPECT(config_preset_apply("badtint", CONFIG_TIER_RUN, &err) == -1);
+    EXPECT(err != NULL && strstr(err, "chartreuse") != NULL);
+    free(err);
+    EXPECT(config_str("provider") == NULL);
 
     /* A preset must anchor a provider. */
     err = NULL;
@@ -1211,6 +1249,7 @@ static void test_preset_enumeration(void)
                        "\"presets.block\": {\"provider\": \"mock\"},"
                        "\"presets\": {"
                        "\"anon\": {\"model\": \"x\", \"description\": \"no provider\"},"
+                       "\"badtint\": {\"provider\": \"mock\", \"tint\": \"chartreuse\"},"
                        "\"typo\": {\"provider\": \"mock\", \"modle\": \"x\"}}}") == 0);
     n = config_preset_names(&names);
     EXPECT(n == 1);

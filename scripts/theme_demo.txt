@@ -6,6 +6,16 @@
 #   HAX_THEME=light HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/theme_demo.txt build/hax
 #   ... and ansi / off. `auto` (the default) detects from the terminal.
 #
+# The tint axis rides on top of the dark/light presets, recoloring the
+# model's voice (headings, code_inline, code_block, and the banner's
+# [preset] stance) while leaving chrome, accent, and the status roles put:
+#
+#   HAX_TINT=violet HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/theme_demo.txt build/hax
+#   ... and rose / sage. `teal` (the default) is the presets' own palette.
+#
+# The stance role needs a preset to show: define one in config.json with a
+# `tint` member and launch with --preset=<name> to see the banner token.
+#
 # Type any message at the prompt; the whole sequence plays as one agentic
 # chain (every turn but the last ends in a tool call). The typed message
 # itself demos the accent role (prompt marker + user-message stripe).
@@ -44,5 +54,5 @@ tool bash {"command":"rm -rf {{CWD}}/.hax-themedemo"}
 end-turn
 
 # ---------- turn 6: close the chain ---------------------------------------
-text Done. Re-run under `HAX_THEME=dark`, `light`, `ansi`, or `off` to compare — the picker arrow (`/model`) and transcript user text (ctrl-t) also carry the accent role.
+text Done. Re-run under `HAX_THEME=dark`, `light`, `ansi`, or `off` to compare — the picker arrow (`/model`) and transcript user text (ctrl-t) also carry the accent role. Re-run under `HAX_TINT=violet`, `rose`, or `sage` to check that only the headings, `code_inline`, and fence bodies above move hue, while the `[bash]` tags, gutter strips, diff colors, and the prompt marker stay exactly where they were.
 end-turn

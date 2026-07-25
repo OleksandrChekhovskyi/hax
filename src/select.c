@@ -842,7 +842,8 @@ void select_preset(struct agent_state *st, const char *name)
 
     /* This is the ownership-transfer point: validation above keeps failure
      * theoretical, but preserve the old provider and override tier if it
-     * still occurs. */
+     * still occurs. (agent_apply_settings re-resolves the display, so the
+     * stance's tint reaches the banner it prints.) */
     if (agent_apply_settings(st, newp) != 0) {
         newp->destroy(newp);
         config_snapshot_restore(ov);

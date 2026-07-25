@@ -293,7 +293,10 @@ int config_persist_selection(const char *provider, const char *model, const char
  * "model" and "effort" are optional and reset to
  * CONFIG_VALUE_DEFAULT when unnamed, so the provider's own default applies;
  * "system_prompt" is optional and cleared when unnamed, so normal
- * resolution returns. Because every apply writes the whole set, presets
+ * resolution returns. "tint" is optional and never written — the display
+ * layer reads it off the stance (config_preset_tint) — though applying does
+ * clear an earlier runtime tint, so a stance replaces one picked before it.
+ * Because every apply writes the whole set, presets
  * replace each other rather than compose. No other keys are presettable
  * (see PRESET_KEYS in config.c for why); "description" is reserved
  * metadata for the /preset picker and the system prompt's preset listing.
@@ -308,6 +311,13 @@ int config_preset_apply(const char *name, enum config_tier tier, char **err);
 /* The "description" member of presets.<name>, or NULL when the preset or
  * the member is absent. Borrowed; valid until config_free / config_load*. */
 const char *config_preset_description(const char *name);
+
+/* The "tint" member of presets.<name>, or NULL when the preset or the member
+ * is absent. Read off the active stance by the display layer rather than
+ * applied as an override — see PRESET_KEYS in config.c. Validation guarantees
+ * a non-NULL result names a hue the theme layer knows. Borrowed; valid until
+ * config_free / config_load*. */
+const char *config_preset_tint(const char *name);
 
 /* The "provider" member of presets.<name>, or NULL when the preset is
  * absent (validation guarantees it's present and non-empty for every

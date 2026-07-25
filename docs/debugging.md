@@ -78,7 +78,7 @@ Useful scripts in `scripts/`:
 | `mock_openai_server.py` | Lightweight OpenAI-compatible test server. |
 | `diff_demo.txt` | Manual diff/rendering fixture. |
 | `pause_demo.txt` | Streaming-pause behavior fixture (no spinner over live text). |
-| `theme_demo.txt` | One-screen tour of the semantic color roles; run under each `HAX_THEME`. |
+| `theme_demo.txt` | One-screen tour of the semantic color roles; run under each `HAX_THEME` and `HAX_TINT`. |
 | `vision_fixtures.py` | Deterministic image fixtures for testing model vision support. |
 
 `stream_demo.py` modes include `short`, `long`, `slow`, `burst`, `ansi`, `binary`, `piped`,

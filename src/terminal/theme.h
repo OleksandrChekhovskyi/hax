@@ -26,9 +26,11 @@
  * ansi.h's per-attribute closers. ANSI_RESET remains the blunt closer. */
 
 enum theme_role {
-    THEME_ACCENT,      /* user identity: prompt marker, input stripe, picker arrow */
-    THEME_CHROME,      /* app frame: banner bar, loud tool tags, help listings */
-    THEME_CHROME_DIM,  /* quiet chrome: gutter strips, silent/collapsed tool tags */
+    THEME_ACCENT,     /* user identity: prompt marker, input stripe, picker arrow */
+    THEME_CHROME,     /* app frame: banner bar, loud tool tags, help listings */
+    THEME_CHROME_DIM, /* quiet chrome: gutter strips, silent/collapsed tool tags */
+    /* The model's voice: the four roles a tint recolors (see below). */
+    THEME_STANCE,      /* the active preset's [name] in the banner */
     THEME_CODE_INLINE, /* markdown `code` spans */
     THEME_CODE_BLOCK,  /* markdown ``` fence bodies */
     THEME_HEADING,     /* markdown headings (may include bold) */
@@ -40,10 +42,20 @@ enum theme_role {
     THEME_ROLE_COUNT,
 };
 
+/* Tints are the second axis, orthogonal to the preset: the preset says
+ * which background we are on, the tint which hue the model's voice takes
+ * (THEME_STANCE and the three markdown roles). Personas — config presets —
+ * carry one, so two terminals running different stances don't look alike.
+ *
+ * Deliberately narrow. hax's own chrome keeps its fixed hue under every
+ * tint, since a persona changes what the *model* is, not what the app is;
+ * THEME_ACCENT stays put as the user's marker; and the status roles stay
+ * put because green means added and red means error regardless of stance. */
+
 /* Open/close sequences for a role under the active preset. Never NULL;
  * "" when the preset styles nothing (theme off). The returned pointers
- * are static — safe to cache within one preset, but theme_set/theme_init
- * invalidate the association, so prefer looking up per use. */
+ * are static — safe to cache within one preset and tint, but any of the
+ * setters below invalidates the association, so prefer looking up per use. */
 const char *theme_open(enum theme_role role);
 const char *theme_close(enum theme_role role);
 
@@ -54,12 +66,24 @@ const char *theme_close(enum theme_role role);
  * palette, so library-style use and tests need no setup. */
 int theme_set(const char *name);
 
-/* Resolve the "theme" config setting and activate it. Call once at
- * startup after config_init(); warns and falls back to auto on an
- * unknown name. */
+/* Activate a tint by name: teal (the presets' own palette), violet, rose,
+ * or sage. Returns 0, or -1 for an unknown name (active tint unchanged).
+ * Independent of theme_set in either order — the pair is re-resolved on
+ * every change — and a no-op under the ansi and off presets, which defer
+ * to the terminal's scheme and to NO_COLOR respectively. */
+int theme_tint_set(const char *name);
+
+/* Resolve the "theme" and "tint" config settings and activate them. Call at
+ * startup after config_init(), and again after anything that can change
+ * either — a preset switch, a /config edit — since a stance carries a tint.
+ * Falls back to auto / teal on a name that doesn't resolve, warning once per
+ * distinct one however often resolution reruns. */
 void theme_init(void);
 
 /* Name of the active preset (after auto-detection: the concrete pick). */
 const char *theme_name(void);
+
+/* Name of the active tint, whether or not the active preset applies it. */
+const char *theme_tint_name(void);
 
 #endif /* HAX_THEME_H */

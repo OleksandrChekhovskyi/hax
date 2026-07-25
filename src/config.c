@@ -63,6 +63,10 @@ static const struct config_setting REGISTRY[] = {
     {.key = "theme", .env = "HAX_THEME", .def = "auto",
      .desc = "Color theme: auto, dark, light, ansi, off (auto detects from the terminal)",
      .choices = "auto|dark|light|ansi|off", .runtime = 1},
+    {.key = "tint", .env = "HAX_TINT", .def = "teal",
+     .desc = "Identity hue for model output; an active preset's own tint wins until set here. "
+             "Ignored by the ansi and off themes",
+     .choices = "teal|violet|rose|sage", .runtime = 1},
 
     /* behavior */
     {.key = "keep_awake", .env = "HAX_KEEP_AWAKE", .def = "1",
@@ -772,7 +776,12 @@ void config_preset_exit(enum config_tier tier)
     /* The name is shadowed with the empty sentinel rather than deleted, so a
      * lower-tier name can't resurface as a stance that isn't applied; the
      * system prompt is dropped outright, since "" would mean "send no system
-     * message" instead of "resolve one normally". */
+     * message" instead of "resolve one normally".
+     *
+     * The stance's tint needs no undoing: it was never written here, and
+     * clearing the "tint" key would take an explicit /config tint down with
+     * it. Dropping the name is enough — the display layer stops finding a
+     * stance to read a hue off. */
     if (tier == CONFIG_TIER_RUN) {
         config_set_override("preset", "");
         config_set_override("system_prompt", NULL);
@@ -1034,8 +1043,13 @@ static const json_t *preset_node(const char *name)
  * settings qualify. Construction-bound settings (openai.base_url, api keys,
  * provider_name) belong in a providers.<name> block the preset points at;
  * startup-latched behavior (context stripping, session recording) belongs
- * to the --bare / --no-session flags. */
-static const char *const PRESET_KEYS[] = {"provider", "model", "effort", "system_prompt"};
+ * to the --bare / --no-session flags.
+ *
+ * "tint" is allowed as a member but is *not* written as an override: it is
+ * read back off the active stance by the display layer (config_preset_tint),
+ * because unlike the others this key has a second writer — /config tint —
+ * whose explicit runtime choice must not be clobbered by stance bookkeeping. */
+static const char *const PRESET_KEYS[] = {"provider", "model", "effort", "system_prompt", "tint"};
 
 /* Structural validation shared by apply and enumeration: the whole block
  * checks out or the preset is unusable — a typo'd member must not leave the
@@ -1063,7 +1077,7 @@ static int preset_validate(const json_t *obj, const char *name, char **err)
                 if (err)
                     *err = xasprintf(
                         "preset '%s': '%s' is not presettable (allowed: provider, model, "
-                        "effort, system_prompt); endpoint settings belong in a "
+                        "effort, system_prompt, tint); endpoint settings belong in a "
                         "providers.<name> block, context/recording in the --bare/--no-session "
                         "flags",
                         name, k);
@@ -1080,6 +1094,21 @@ static int preset_validate(const json_t *obj, const char *name, char **err)
     if (!prov || !*prov) {
         if (err)
             *err = xasprintf("preset '%s' must name a provider", name);
+        return -1;
+    }
+    /* "tint" is the one member whose *value* is checked here. The others are
+     * free-form (a model id, a prompt) or validated where they're consumed,
+     * but a tint is honored by the display layer, which can only fall back to
+     * the default palette on an unknown hue — silently, and long after the
+     * preset was advertised as appliable. Checking it here keeps application
+     * all-or-nothing and keeps the /preset picker's "enumerated ⊆ appliable"
+     * invariant honest. */
+    const struct config_setting *ts = find_setting("tint");
+    const char *tint = json_string_value(json_object_get((json_t *)obj, "tint"));
+    if (tint && !config_value_valid(ts, tint)) {
+        if (err)
+            *err = xasprintf("preset '%s': unknown tint '%s' (expected %s)", name, tint,
+                             ts ? ts->choices : "");
         return -1;
     }
     return 0;
@@ -1109,7 +1138,14 @@ int config_preset_apply(const char *name, enum config_tier tier, char **err)
      * override outright. system_prompt is the one preset-owned override
      * (nothing else writes it), and it isn't provider-bound, so falling back
      * to normal resolution (a user's configured prompt) is right where the
-     * sentinel would wrongly force the built-in. */
+     * sentinel would wrongly force the built-in.
+     *
+     * "tint" is not written at all — the display layer reads it off the stance
+     * — but an earlier /config tint in this tier is cleared, so a stance still
+     * replaces an explicit hue picked before it, the way it replaces an
+     * explicit model. A /config tint issued *after* this then outranks the
+     * stance again, which is the same newest-write-wins rule the rest of the
+     * tier follows. */
     const char *m = json_string_value(json_object_get((json_t *)obj, "model"));
     const char *e = json_string_value(json_object_get((json_t *)obj, "effort"));
     /* Replacing a stance ends the previous one first: a preset that names no
@@ -1120,6 +1156,7 @@ int config_preset_apply(const char *name, enum config_tier tier, char **err)
     set("model", m ? m : CONFIG_VALUE_DEFAULT);
     set("effort", e ? e : CONFIG_VALUE_DEFAULT);
     set("system_prompt", json_string_value(json_object_get((json_t *)obj, "system_prompt")));
+    set("tint", NULL);
     /* Record the active stance under the "preset" key — what the banner and
      * /session read, so a preset that swapped the system prompt is never
      * invisibly in effect. Cleared when an explicit selection commit exits
@@ -1134,6 +1171,14 @@ const char *config_preset_description(const char *name)
     if (!obj)
         return NULL;
     return json_string_value(json_object_get(obj, "description"));
+}
+
+const char *config_preset_tint(const char *name)
+{
+    const json_t *obj = preset_node(name);
+    if (!obj)
+        return NULL;
+    return json_string_value(json_object_get(obj, "tint"));
 }
 
 const char *config_preset_provider(const char *name)
