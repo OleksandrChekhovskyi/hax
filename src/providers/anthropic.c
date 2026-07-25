@@ -9,6 +9,7 @@
 
 #include "anthropic_events.h"
 #include "config.h"
+#include "model_meta.h"
 #include "util.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
@@ -32,6 +33,10 @@
 /* Short timeout for the /model picker's catalog fetch, mirroring the openai
  * family — tolerant of a small catalog without hanging on a wonky link. */
 #define MODEL_LIST_TIMEOUT_S 10
+
+/* Tighter for the background metadata fetch: nothing waits on it, so a
+ * wonky link should leave the lower tiers answering. */
+#define ANTHROPIC_META_TIMEOUT_S 5
 
 const char *const ANTHROPIC_EFFORT_LADDER[] = {"low", "medium", "high", "xhigh", "max"};
 const size_t ANTHROPIC_EFFORT_LADDER_N =
@@ -327,15 +332,33 @@ static void apply_thinking(json_t *body, struct anthropic *a, const struct conte
                         json_pack("{s:s, s:i}", "type", "enabled", "budget_tokens", budget));
 }
 
+/* Output cap for one response. Unset follows the model's own ceiling (128k
+ * on the current flagships), sparing the user a lookup after hitting
+ * "response incomplete: max_tokens"; configured is honored but clamped to
+ * that ceiling, since asking for more is a 400 and a value carried over
+ * from a larger-capacity model would fail every turn. The constant is the
+ * floor for a model nothing describes. */
+int anthropic_max_tokens(struct provider *p, const char *model)
+{
+    struct anthropic *a = (struct anthropic *)p;
+    char *k = preset_key(a->cfg_prefix, "max_tokens");
+    int configured = config_int(k);
+    int user_set = strcmp(config_source(k), "default") != 0;
+    free(k);
+
+    long cap = model_meta_max_output(&a->base, model);
+    if (user_set && configured > 0)
+        return (cap > 0 && configured > cap) ? (int)cap : configured;
+    if (cap > 0)
+        return (int)cap;
+    return configured > 0 ? configured : ANTHROPIC_DEFAULT_MAX_TOKENS;
+}
+
 static char *build_body(struct anthropic *a, const struct context *ctx, const char *model)
 {
-    char *k = preset_key(a->cfg_prefix, "max_tokens");
-    int max_tokens = config_int(k);
-    free(k);
-    if (max_tokens <= 0)
-        max_tokens = ANTHROPIC_DEFAULT_MAX_TOKENS;
+    int max_tokens = anthropic_max_tokens(&a->base, model);
 
-    k = preset_key(a->cfg_prefix, "cache");
+    char *k = preset_key(a->cfg_prefix, "cache");
     int cache = config_bool_or(k, a->send_cache_control_default);
     free(k);
     k = preset_key(a->cfg_prefix, "cache_ttl");
@@ -466,6 +489,11 @@ void anthropic_parse_model(const json_t *entry, struct model_info *out)
     json_t *ctx = json_object_get(entry, "max_input_tokens");
     if (json_is_integer(ctx) && json_integer_value(ctx) > 0)
         out->context = (long)json_integer_value(ctx);
+    /* The per-model output cap the request's max_tokens has to respect
+     * (see anthropic_max_tokens). */
+    json_t *max_out = json_object_get(entry, "max_tokens");
+    if (json_is_integer(max_out) && json_integer_value(max_out) > 0)
+        out->max_output = (long)json_integer_value(max_out);
     /* capabilities.<name>.supported — absent on the compat backends this
      * parser also serves, which simply leaves the answer unknown. */
     json_t *caps = json_object_get(entry, "capabilities");
@@ -473,6 +501,78 @@ void anthropic_parse_model(const json_t *entry, struct model_info *out)
     json_t *sup = img ? json_object_get(img, "supported") : NULL;
     if (json_is_boolean(sup))
         out->image_input = json_is_true(sup) ? PROVIDER_CAP_YES : PROVIDER_CAP_NO;
+
+    /* capabilities.effort: a `supported` flag plus one child object per
+     * level. A false flag is a real answer — the 4-5 generation takes a
+     * thinking budget instead — so it marks the set known and empty,
+     * skipping the /effort step rather than offering rejected levels.
+     *
+     * Probed in ladder order rather than by iterating the object, so the
+     * menu reads low-to-high whatever order the response used. */
+    json_t *eff = caps ? json_object_get(caps, "effort") : NULL;
+    json_t *eff_sup = eff ? json_object_get(eff, "supported") : NULL;
+    if (json_is_false(eff_sup)) {
+        out->efforts.known = 1;
+    } else if (json_is_object(eff)) {
+        for (size_t i = 0; i < ANTHROPIC_EFFORT_LADDER_N; i++) {
+            json_t *lvl = json_object_get(eff, ANTHROPIC_EFFORT_LADDER[i]);
+            if (json_is_object(lvl) && json_is_true(json_object_get(lvl, "supported")))
+                effort_set_add(&out->efforts, ANTHROPIC_EFFORT_LADDER[i]);
+        }
+        /* Then anything the ladder doesn't name yet, so a level introduced
+         * after this build still reaches the picker. Appended last, since
+         * member order here is jansson's rather than the vendor's. */
+        const char *key;
+        json_t *val;
+        json_object_foreach(eff, key, val)
+        {
+            if (strcmp(key, "supported") == 0 || !json_is_object(val))
+                continue;
+            if (json_is_true(json_object_get(val, "supported")))
+                effort_set_add(&out->efforts, key);
+        }
+    }
+}
+
+/* Locate `model` in a `{"data": [ ... ]}` page of /v1/models and hand the
+ * entry to the same parser the /model picker uses. The catalog is a handful
+ * of entries, so one page covers it. */
+static void anthropic_parse_meta(const char *body, const char *model, struct model_info *out)
+{
+    json_t *root = json_loads(body, 0, NULL);
+    if (!root)
+        return;
+    json_t *data = json_object_get(root, "data");
+    if (json_is_array(data)) {
+        size_t i;
+        json_t *entry;
+        json_array_foreach(data, i, entry)
+        {
+            const char *id = json_string_value(json_object_get(entry, "id"));
+            if (id && strcmp(id, model) == 0) {
+                anthropic_parse_model(entry, out);
+                break;
+            }
+        }
+    }
+    json_decref(root);
+}
+
+static int anthropic_probe_model(struct provider *p, const char *model, struct model_probe *out)
+{
+    struct anthropic *a = (struct anthropic *)p;
+    if (!model || !*model)
+        return -1;
+    out->url = xasprintf("%s/models?limit=%d", a->base_url, ANTHROPIC_MODEL_PAGE);
+    out->headers = xcalloc(3, sizeof(*out->headers));
+    size_t i = 0;
+    if (a->api_key)
+        out->headers[i++] = xasprintf("x-api-key: %s", a->api_key);
+    out->headers[i++] = xasprintf("anthropic-version: %s", a->version);
+    out->headers[i] = NULL;
+    out->timeout_s = ANTHROPIC_META_TIMEOUT_S;
+    out->parse = anthropic_parse_meta;
+    return 0;
 }
 
 /* Is `s` safe to splice into the after_id query parameter unescaped? The
@@ -637,6 +737,7 @@ static size_t anthropic_list_efforts(struct provider *p, const char *const **out
 static void anthropic_destroy(struct provider *p)
 {
     struct anthropic *a = (struct anthropic *)p;
+    model_meta_release(p);
     free(a->base_url);
     free(a->api_key);
     free(a->name_buf);
@@ -708,7 +809,13 @@ struct provider *anthropic_provider_new_preset(const struct anthropic_preset *pr
     a->base.stream = anthropic_stream;
     a->base.list_models = anthropic_list_models;
     a->base.list_efforts = anthropic_list_efforts;
+    a->base.probe_model = anthropic_probe_model;
     a->base.destroy = anthropic_destroy;
+    /* /v1/models is the only source for Anthropic's per-model output cap
+     * and effort levels; fetched in the background so it doesn't delay the
+     * first prompt. */
+    const char *cfg_model = config_str("model");
+    model_meta_refresh(&a->base, (cfg_model && *cfg_model) ? cfg_model : a->base.default_model);
     return &a->base;
 }
 

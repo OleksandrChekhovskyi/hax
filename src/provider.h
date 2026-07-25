@@ -2,9 +2,9 @@
 #ifndef HAX_PROVIDER_H
 #define HAX_PROVIDER_H
 
-#include <stdatomic.h>
 #include <stddef.h>
 
+#include "effort.h"
 #include "transport/http.h"
 
 /*
@@ -152,12 +152,13 @@ struct context {
      * field their API uses (Responses: reasoning.effort, Chat Completions:
      * reasoning_effort). NULL means "don't send" so the server picks its
      * own default. Values like "minimal"/"low"/"medium"/"high"/"xhigh" are
-     * passed through unchanged — hax doesn't validate or clamp. */
+     * passed through unchanged: narrowing to what the model accepts is
+     * resolved upstream, in model_meta.h. */
     const char *effort;
     /* Does the target model accept image input? 1 yes, 0 no, -1 unknown.
      * Unknown is treated as yes throughout: a wrong yes surfaces as a
      * recoverable provider error, a wrong no silently drops content.
-     * Filled by the agent (agent_image_input). Adapters serialize
+     * Resolved by model_meta_image_input. Adapters serialize
      * tool-result image parts as native image blocks when nonzero and as
      * text placeholders when 0 — a resumed or model-switched conversation
      * must not send pixels to a text-only model. */
@@ -329,9 +330,9 @@ enum provider_cap {
  *
  * This is deliberately NOT struct catalog_entry: that one is the resolved
  * metadata *view* (config over models.dev, with pricing tiers), while this
- * is one backend's raw report. The picker layers them — reported wins,
- * catalog fills the gaps — the same way agent_image_input layers config
- * over probe over catalog. */
+ * is one backend's raw report. model_meta.h layers them — reported wins,
+ * catalog fills the gaps — and every consumer asks it rather than either
+ * source directly. */
 struct model_info {
     char *id;   /* owned; the exact wire id. Always set. */
     char *desc; /* owned one-line blurb from the backend; NULL = none */
@@ -339,6 +340,11 @@ struct model_info {
      * served and a theoretical maximum (codex), this is the served one, so
      * it agrees with the context-% display. */
     long context;
+    /* Most output tokens one response may produce; 0 = unknown. Distinct
+     * from `context`, which covers the whole request: Anthropic serves a 1M
+     * window but caps a single response at 128k, and that cap is what a
+     * max_tokens request field has to respect. */
+    long max_output;
     int image_input; /* enum provider_cap */
     int tools;       /* enum provider_cap — can it call tools at all */
     /* USD per 1M tokens; negative = unknown. cost_cache_read is the rate for
@@ -351,14 +357,52 @@ struct model_info {
     double cost_input;
     double cost_cache_read;
     double cost_output;
+    /* Reasoning-effort levels this model accepts. Unknown (the zeroed
+     * state) on backends that don't describe their models, and on the
+     * per-entry parsers that read a catalog carrying no effort data.
+     *
+     * Adapters normalize to WIRE values here, not to whatever their
+     * catalog displays: codex's supported_reasoning_levels is the ladder
+     * its official UI shows, which lists a level the API rejects and omits
+     * one it accepts (see codex_parse_model). The consumer treats this as
+     * the truth about the model, so the translation belongs in the
+     * adapter that knows its own backend. */
+    struct effort_set efforts;
 };
 
 /* Set `m` to "nothing known": zeroed, with the negative cost sentinels.
  * Adapters call this before filling whatever their catalog reports. */
 void model_info_init(struct model_info *m);
 
+/* Deep-copy `src` into `dst` (which must not already own anything). */
+void model_info_copy(struct model_info *dst, const struct model_info *src);
+
+/* Release what one entry owns, leaving it zeroed. */
+void model_info_clear(struct model_info *m);
+
 /* Free `n` entries and the array itself. NULL-safe. */
 void model_info_free(struct model_info *models, size_t n);
+
+/* A single-model metadata fetch, described by the provider and executed by
+ * model_meta.c on a background thread.
+ *
+ * Split into "what to request" and "how to read it" so the worker never
+ * dereferences the live provider: the request is built on the foreground,
+ * and `parse` is a pure function of the response body. That satisfies the
+ * bg_job contract — workers touch only their argument and storage that
+ * outlives the join — and keeps the parsers testable without a socket. */
+struct model_probe {
+    char *url;      /* owned */
+    char **headers; /* owned, NULL-terminated; NULL = none */
+    /* Total request timeout. Metadata is best-effort and nothing waits on
+     * it, but a hung endpoint must not keep the thread alive to teardown. */
+    int timeout_s;
+    /* Locate `model` in the response and fill `out` (already
+     * model_info_init'd, with `id` set). Pure; runs off-thread. */
+    void (*parse)(const char *body, const char *model, struct model_info *out);
+};
+
+struct model_meta; /* model_meta.h — live metadata storage, opaque here */
 
 struct provider {
     const char *name;
@@ -436,39 +480,32 @@ struct provider {
      * The selector prepends its own "default (omit)" choice, so providers
      * list only real effort values here. */
     size_t (*list_efforts)(struct provider *p, const char *const **out);
-    /* Optional. Re-run the model-specific context-window probe after a
-     * runtime /model switch, so context_limit tracks the newly selected
-     * model rather than the one resolved at construction. Implementations
-     * cancel/join any in-flight probe, reset context_limit to 0 (unknown),
-     * and spawn a fresh probe for `model`. NULL when the limit isn't
-     * model-specific — fixed, absent, or sourced only from
-     * HAX_CONTEXT_LIMIT (which the agent honors ahead of this slot anyway).
-     * codex and openrouter key the window by model via their catalogs;
-     * llama.cpp re-probes /props for the selected model (router mode serves
-     * several, differing in window and vision capability). Providers whose
-     * window is fixed or absent leave it NULL. */
-    void (*refresh_context)(struct provider *p, const char *model);
+    /* Optional. Describe the metadata fetch for `model` — the live tier
+     * behind the model_meta.h accessors. Called on the foreground whenever
+     * the selection changes; fill *out and return 0, or return -1 for
+     * "nothing to fetch". model_meta.c owns the thread, the cancellation,
+     * and the storage.
+     *
+     * Unlike list_models, which enumerates a catalog for the picker, this
+     * names one model and runs at every switch, so it should stay small —
+     * OpenRouter's filtered query is 2.7 KB against a 535 KB catalog.
+     * Fetching a whole small catalog and picking one entry out (codex,
+     * anthropic) is fine.
+     *
+     * NULL when the backend can't describe a model at all (real OpenAI's
+     * /v1/models is bare ids); the catalog tier then answers alone. */
+    int (*probe_model)(struct provider *p, const char *model, struct model_probe *out);
     void (*destroy)(struct provider *p);
-    /* Auto-discovered model context window in tokens. 0 = unknown (no
-     * probe ran, hasn't completed yet, or failed); positive values are
-     * what the agent's status line uses to render the "%" of context
-     * used. Updated atomically — provider construction may set it
-     * synchronously from HAX_CONTEXT_LIMIT, or a background probe owned
-     * by the implementation may write it once the catalog response
-     * arrives. The agent reads it on every usage update, so a
-     * late-landing probe fills in the percentage starting with
-     * whichever turn it completes during. Implementations own the
-     * worker that writes here and are responsible for joining it in
-     * their destroy() before any teardown that could free this slot. */
-    _Atomic long context_limit;
-    /* Auto-discovered image-input capability of the active model, when
-     * the backend itself can answer (llama-server /props, OpenRouter
-     * /endpoints). enum provider_image_input values; UNKNOWN (0, the
-     * calloc default) falls back to the catalog. A live answer beats the
-     * catalog — llama.cpp vision depends on the mmproj loaded on this
-     * server instance, which no catalog can know. Same atomicity and
-     * ownership rules as context_limit. */
-    _Atomic long image_input;
+    /* Live per-model metadata: the latest probe result plus the job
+     * fetching it. Allocated on demand by model_meta.c; every destroy()
+     * must call model_meta_release(p) before tearing anything else down,
+     * since the worker writes here until joined.
+     *
+     * Per-provider rather than one module-level slot because two providers
+     * are live at once whenever /provider runs its pickers against a
+     * prospective backend — a rolled-back switch must leave the survivor's
+     * metadata untouched. Opaque; read it through model_meta.h. */
+    struct model_meta *meta;
 };
 
 enum provider_image_input {

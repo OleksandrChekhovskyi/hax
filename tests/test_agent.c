@@ -8,6 +8,7 @@
 
 #include "agent.h"
 #include "agent_core.h"
+#include "model_meta.h"
 #include "config.h"
 #include "harness.h"
 #include "provider.h"
@@ -106,6 +107,13 @@ static void fixture_init(struct fixture *f)
 
 static void fixture_free(struct fixture *f)
 {
+    /* These stub providers stand in for real ones, so they owe the same
+     * teardown: agent_apply_settings may have started a metadata fetch on
+     * whichever provider ended up live, and provider.h puts the release in
+     * destroy(). The fixtures have no destroy of their own. */
+    model_meta_release(&f->p);
+    if (f->st.provider && f->st.provider != &f->p)
+        model_meta_release((struct provider *)f->st.provider);
     agent_session_free(&f->sess);
     unsetenv("HAX_MODEL");
     unsetenv("HAX_SYSTEM_PROMPT");
@@ -190,7 +198,7 @@ static void test_apply_settings_no_model_fails_intact(void)
     fixture_free(&f);
 }
 
-/* ---------- agent_apply_settings: refresh_context gate ---------- */
+/* ---------- agent_apply_settings: metadata refresh gate ---------- */
 
 static int refresh_calls;
 static int provider_destroy_calls;
@@ -202,11 +210,16 @@ static void counting_provider_destroy(struct provider *p)
     provider_destroy_calls++;
 }
 
-static void counting_refresh_context(struct provider *p, const char *model)
+/* model_meta_refresh asks the provider to describe the fetch; counting the
+ * asks is how we observe that a switch re-resolved the model's metadata.
+ * Returning -1 ("nothing to fetch") keeps the test off the network. */
+static int counting_probe_model(struct provider *p, const char *model, struct model_probe *out)
 {
     (void)p;
+    (void)out;
     refresh_calls++;
     snprintf(refresh_last_model, sizeof(refresh_last_model), "%s", model ? model : "");
+    return -1;
 }
 
 static void test_apply_settings_failed_provider_change_keeps_old(void)
@@ -234,10 +247,10 @@ static void test_apply_settings_refreshes_on_model_or_provider_change(void)
 {
     struct fixture f;
     fixture_init(&f);
-    f.p.refresh_context = counting_refresh_context;
+    f.p.probe_model = counting_probe_model;
     refresh_calls = 0;
 
-    /* Same model re-applied (the /effort-tweak shape): the context probe
+    /* Same model re-applied (the /effort-tweak shape): the metadata fetch
      * must not re-run — re-probing on every apply would add a needless
      * network round-trip and cancel/join churn. */
     char *out = capture_stdout(do_apply, &f);
@@ -259,7 +272,7 @@ static void test_apply_settings_refreshes_on_model_or_provider_change(void)
      * ownership swap. */
     struct provider next = {
         .name = "prov-y",
-        .refresh_context = counting_refresh_context,
+        .probe_model = counting_probe_model,
     };
     f.p.destroy = counting_provider_destroy;
     f.candidate = &next;
@@ -273,6 +286,58 @@ static void test_apply_settings_refreshes_on_model_or_provider_change(void)
     EXPECT_STR_EQ(refresh_last_model, "model-b");
     free(out);
 
+    fixture_free(&f);
+}
+
+/* ---------- agent_session_resync_effort ---------- */
+
+static const char *const RESYNC_LADDER[] = {"low", "medium", "high", "max"};
+
+static size_t resync_list_efforts(struct provider *p, const char *const **out)
+{
+    (void)p;
+    *out = RESYNC_LADDER;
+    return sizeof(RESYNC_LADDER) / sizeof(RESYNC_LADDER[0]);
+}
+
+/* The probe behind the narrowing runs in the background, so a session
+ * resolves its effort before any answer exists. The next user turn has to
+ * pick the answer up — nothing else re-resolves until the user switches
+ * something. */
+static void test_resync_effort_follows_late_metadata(void)
+{
+    struct fixture f;
+    fixture_init(&f);
+    f.p.list_efforts = resync_list_efforts;
+    setenv("HAX_EFFORT", "max", 1);
+
+    /* Where a run starts: a ladder, nothing narrowing it, so the configured
+     * level stands. */
+    EXPECT(agent_session_resync_effort(&f.sess, &f.p, NULL) == 1);
+    EXPECT_STR_EQ(f.sess.effort, "max");
+    char *prev = (char *)"sentinel";
+    EXPECT(agent_session_resync_effort(&f.sess, &f.p, &prev) == 0);
+    EXPECT(prev == NULL); /* nothing replaced, nothing handed back */
+
+    /* What a landing probe publishes: this model stops at "high". */
+    struct model_info m;
+    model_info_init(&m);
+    m.id = xstrdup("model-a");
+    effort_set_add(&m.efforts, "low");
+    effort_set_add(&m.efforts, "medium");
+    effort_set_add(&m.efforts, "high");
+    model_meta_remember(&f.p, &m);
+    model_info_clear(&m);
+
+    /* The replaced value comes back for the note the REPL prints: the
+     * banner overhead is still asserting it. */
+    EXPECT(agent_session_resync_effort(&f.sess, &f.p, &prev) == 1);
+    EXPECT_STR_EQ(f.sess.effort, "high");
+    EXPECT_STR_EQ(prev, "max");
+    free(prev);
+    EXPECT(agent_session_resync_effort(&f.sess, &f.p, NULL) == 0);
+
+    unsetenv("HAX_EFFORT");
     fixture_free(&f);
 }
 
@@ -790,6 +855,7 @@ int main(void)
     test_apply_settings_no_model_fails_intact();
     test_apply_settings_failed_provider_change_keeps_old();
     test_apply_settings_refreshes_on_model_or_provider_change();
+    test_resync_effort_follows_late_metadata();
     test_apply_settings_keeps_stamped_spend();
     test_new_conversation_resets_everything();
     test_banner_no_provider_points_at_picker();

@@ -156,8 +156,12 @@ static const struct config_setting REGISTRY[] = {
      .desc = "Base URL for an Anthropic-compatible /v1 endpoint (anthropic-compatible)"},
     {.key = "anthropic.api_key", .env = "HAX_ANTHROPIC_API_KEY", .secret = 1,
      .desc = "x-api-key token for Anthropic-family providers"},
-    {.key = "anthropic.max_tokens", .env = "HAX_ANTHROPIC_MAX_TOKENS", .def = "32000",
-     .desc = "Max output tokens (thinking + text) per response",
+    /* No registry default: unset resolves to the model's own cap (see
+     * anthropic_max_tokens), so declaring one would make /config report a
+     * figure no request carries. The in-code floor covers a model nothing
+     * describes. */
+    {.key = "anthropic.max_tokens", .env = "HAX_ANTHROPIC_MAX_TOKENS",
+     .desc = "Max output tokens (thinking + text) per response; unset follows the model's own cap",
      .kind = CFG_INT, .min = 1},
     {.key = "anthropic.thinking_mode", .env = "HAX_ANTHROPIC_THINKING_MODE",
      .desc = "Thinking mode: adaptive, budget, or off (default depends on the provider)",

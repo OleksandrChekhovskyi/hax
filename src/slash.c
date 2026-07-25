@@ -591,6 +591,10 @@ static void slash_run_session(struct slash_ctx *ctx)
     if (preset && *preset)
         session_row("preset", preset);
 
+    /* Report what the next request would carry, not what startup resolved
+     * before the model's metadata landed. Whatever this moves, the next
+     * prompt re-stamps the log header with it. */
+    agent_session_resync_effort(st->sess, (struct provider *)st->provider, NULL);
     const char *prov = (st->provider && st->provider->name) ? st->provider->name : "?";
     const char *model = (st->sess && st->sess->model && *st->sess->model) ? st->sess->model : "?";
     const char *effort = st->sess ? st->sess->effort : NULL;

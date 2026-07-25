@@ -6,6 +6,7 @@
 
 #include "agent_tool.h"
 #include "compact.h"
+#include "model_meta.h"
 #include "session.h"
 #include "transcript.h"
 #include "util.h"
@@ -52,7 +53,7 @@ void agent_loop_turn_run(struct agent_loop_turn *loop_turn, struct agent_session
         .observer_user = observer_user,
     };
     struct context ctx = agent_session_context(session);
-    ctx.image_input = agent_image_input(provider, session->model);
+    ctx.image_input = model_meta_image_input(provider, session->model);
     long started_ms = monotonic_ms();
     provider->stream(provider, &ctx, session->model, loop_turn_on_event, &sink, tick, tick_user);
     loop_turn->elapsed_ms = monotonic_ms() - started_ms;
@@ -130,7 +131,7 @@ static struct item loop_run_tool(const struct agent_loop_params *params, const s
     const struct agent_loop_hooks *hooks = &params->hooks;
     /* Resolved per call, not per session: the answer can change under a
      * runtime /model switch and when an async capability probe lands. */
-    int image_input = agent_image_input(params->provider, params->session->model);
+    int image_input = model_meta_image_input(params->provider, params->session->model);
 
     struct item result;
     if (hooks->tool_call) {
@@ -357,7 +358,7 @@ static void loop_run_active(const struct agent_loop_params *params,
          * durable and before the next boundary. Cancellation during the
          * frontend transaction must stop continuation against old history. */
         if (compact_should_auto(turn_context,
-                                compact_context_limit(params->provider, session->model)) &&
+                                model_meta_context(params->provider, session->model)) &&
             hooks->compact) {
             hooks->compact(hooks->user);
             sig = loop_checkpoint(hooks);

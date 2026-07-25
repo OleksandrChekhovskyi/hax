@@ -22,13 +22,13 @@
  *                      present in the list is kept; unset or absent, the
  *                      first served entry is adopted as a session override;
  *                      replacing an explicit value emits a warning
- *   GET /props      →  fills provider->context_limit from
- *                      default_generation_settings.n_ctx and image-input
- *                      capability from modalities.vision (asynchronous — runs
- *                      in the background so a slow /props doesn't delay the
- *                      first prompt). Scoped to the selected model with a
- *                      ?model= query (router mode serves several); re-run on a
- *                      runtime /model switch via refresh_context.
+ *   GET /props      →  the model's context window from
+ *                      default_generation_settings.n_ctx and image input
+ *                      from modalities.vision, into the live metadata tier
+ *                      (model_meta.h; asynchronous, so a slow /props doesn't
+ *                      delay the first prompt). Scoped to the selected model
+ *                      with a ?model= query (router mode serves several) and
+ *                      re-run on every /model switch.
  *
  * Probe behavior:
  *   - When no model is configured and the /v1/models probe fails,

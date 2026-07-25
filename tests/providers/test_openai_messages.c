@@ -219,7 +219,7 @@ static void test_list_efforts_wiring(void)
         size_t n = p->list_efforts(p, &out);
         EXPECT(n == OPENAI_EFFORT_LADDER_N);
         EXPECT(out != NULL && strcmp(out[0], "none") == 0);
-        EXPECT(strcmp(out[n - 1], "xhigh") == 0);
+        EXPECT(strcmp(out[n - 1], "max") == 0);
         p->destroy(p);
     }
 

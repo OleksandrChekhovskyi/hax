@@ -10,6 +10,7 @@
 #include "agent_loop.h"
 #include "catalog.h"
 #include "compact.h"
+#include "model_meta.h"
 #include "config.h"
 #include "session.h"
 #include "transcript.h"
@@ -105,6 +106,11 @@ static void oneshot_auto_compact(void *user)
 int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *opts, int max_turns)
 {
     struct agent_session sess;
+    /* Settle the constructor's metadata probe before resolving anything
+     * from it. This run has one request and no pause to hide the fetch in,
+     * so the alternative is resolving the effort against the static ladder
+     * every time and sending a level the model may reject. */
+    model_meta_settle(p);
     if (agent_session_init(&sess, p, opts) < 0)
         return 1;
     /* No interactive picker in -p mode, so a missing model is fatal here
@@ -322,7 +328,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
              * (display_stats_line), minus the reflow — stderr footnotes
              * are plain single lines. */
             char segs[STATS_SEGS_MAX][STATS_SEG_LEN];
-            int n = format_stats_segments(segs, last_ctx, compact_context_limit(p, sess.model),
+            int n = format_stats_segments(segs, last_ctx, model_meta_context(p, sess.model),
                                           monotonic_ms() - start_ms, spend, spend_approx);
             fputs(tty ? ANSI_DIM : "", stderr);
             for (int i = 0; i < n; i++)

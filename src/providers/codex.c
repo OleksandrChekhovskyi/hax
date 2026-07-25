@@ -10,10 +10,9 @@
 #include "busy.h"
 #include "codex_events.h"
 #include "config.h"
-#include "probe.h"
+#include "model_meta.h"
 #include "util.h"
 #include "render/progress.h"
-#include "system/bg_job.h"
 #include "system/path.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
@@ -60,11 +59,6 @@ struct codex {
     char *default_effort;
     char *session_id; /* sent as prompt_cache_key — stable for process lifetime
                                              so the server can hit its prefix cache across turns */
-    /* Optional context-window probe spawned at construction; joined by
-     * codex_destroy. Local rather than on struct provider so codex
-     * stays free to grow more probes (capabilities, account state, ...)
-     * without redesigning the generic interface. */
-    struct bg_job *probe;
 };
 
 /* ---------- Codex config (~/.codex/config.toml) ---------- */
@@ -545,100 +539,57 @@ static int codex_stream(struct provider *p, const struct context *ctx, const cha
     return rc;
 }
 
-/* ---------- /models context-window probe ---------- */
+/* ---------- single-model metadata probe ---------- */
 
-/* Walk the chatgpt.com catalog response shape: `{ "models": [ { "slug":
- * ..., "context_window": N }, ... ] }` and pull the context_window for
- * the entry whose `slug` matches the model we're about to use. `user`
- * is the heap-owned model slug captured at spawn time. */
-static long extract_codex_context(const char *body, void *user)
+/* Auth headers for /models: the pair /responses rides on, with originator +
+ * UA mirroring the streaming path so the fetch looks like the same client to
+ * server-side telemetry. Heap-owned, NULL-terminated. */
+static char **codex_meta_headers(const struct codex *c)
 {
-    const char *model = user;
-    if (!model || !*model)
-        return 0;
+    char **h = xcalloc(6, sizeof(*h));
+    h[0] = xasprintf("Authorization: Bearer %s", c->access_token);
+    h[1] = xasprintf("chatgpt-account-id: %s", c->account_id);
+    h[2] = xstrdup(CODEX_ORIGINATOR);
+    h[3] = xstrdup(CODEX_USER_AGENT);
+    h[4] = xstrdup("Accept: application/json");
+    h[5] = NULL;
+    return h;
+}
+
+/* Find `model` in `{ "models": [ {"slug": ...}, ... ] }` and hand the entry
+ * to the same parser the /model picker uses, so the picker and the
+ * context-% display can't disagree about a window. */
+static void codex_parse_meta(const char *body, const char *model, struct model_info *out)
+{
     json_t *root = json_loads(body, 0, NULL);
     if (!root)
-        return 0;
-    long out = 0;
+        return;
     json_t *models = json_object_get(root, "models");
     if (json_is_array(models)) {
         size_t i;
         json_t *entry;
         json_array_foreach(models, i, entry)
         {
-            json_t *slug = json_object_get(entry, "slug");
-            if (!json_is_string(slug) || strcmp(json_string_value(slug), model) != 0)
-                continue;
-            json_t *ctx = json_object_get(entry, "context_window");
-            if (!json_is_integer(ctx) || json_integer_value(ctx) <= 0)
-                ctx = json_object_get(entry, "max_context_window");
-            if (json_is_integer(ctx) && json_integer_value(ctx) > 0)
-                out = (long)json_integer_value(ctx);
-            break;
+            const char *slug = json_string_value(json_object_get(entry, "slug"));
+            if (slug && strcmp(slug, model) == 0) {
+                codex_parse_model(entry, out);
+                break;
+            }
         }
     }
     json_decref(root);
-    return out;
 }
 
-/* Resolve the model slug the probe should look up: HAX_MODEL wins (per
- * agent.c's resolver), else the codex default. NULL/"" means there's
- * nothing to look up. Borrowed. */
-static const char *probe_model(const struct codex *c)
-{
-    const char *env_model = config_str("model");
-    return (env_model && *env_model) ? env_model : c->default_model;
-}
-
-static void spawn_context_probe(struct codex *c, const char *model)
-{
-    /* A usable user-supplied context_limit wins; nothing for the probe
-     * to add and we save a network round-trip + the matching shutdown
-     * join cost. Ask config_size — the same question the display path
-     * asks — so an unparseable value falls back to auto-detection
-     * instead of silently hiding the % display. */
-    if (config_size("context_limit") > 0)
-        return;
-    /* The probe needs a slug to match against the catalog — without one
-     * there's nothing useful to look up. */
-    if (!model || !*model)
-        return;
-
-    struct probe_args *a = xcalloc(1, sizeof(*a));
-    a->url = xasprintf("%s?client_version=%s", CODEX_MODELS_ENDPOINT, CODEX_PROBE_CLIENT_VERSION);
-    /* Same auth headers we already build for /responses; the chatgpt
-     * backend accepts the bearer token + account-id pair on /models
-     * too. originator + UA mirror the streaming path so the probe
-     * looks like the same client to server-side telemetry. */
-    a->headers = xcalloc(6, sizeof(*a->headers));
-    a->headers[0] = xasprintf("Authorization: Bearer %s", c->access_token);
-    a->headers[1] = xasprintf("chatgpt-account-id: %s", c->account_id);
-    a->headers[2] = xstrdup(CODEX_ORIGINATOR);
-    a->headers[3] = xstrdup(CODEX_USER_AGENT);
-    a->headers[4] = xstrdup("Accept: application/json");
-    a->headers[5] = NULL;
-    a->timeout_s = CODEX_PROBE_TIMEOUT_S;
-    a->fields[0].extract = extract_codex_context;
-    a->fields[0].target = &c->base.context_limit;
-    a->user = xstrdup(model);
-    a->free_user = free;
-    c->probe = probe_spawn(a);
-}
-
-/* /model switched the model under us: the catalog keys the context window by
- * slug, so the old probe's value is stale. Settle the in-flight probe (so it
- * can't land late and overwrite the new one), drop the limit back to unknown,
- * and re-probe for `model`. */
-static void codex_refresh_context(struct provider *p, const char *model)
+static int codex_probe_model(struct provider *p, const char *model, struct model_probe *out)
 {
     struct codex *c = (struct codex *)p;
-    if (c->probe) {
-        bg_job_cancel(c->probe);
-        bg_job_join(c->probe);
-        c->probe = NULL;
-    }
-    atomic_store(&c->base.context_limit, 0);
-    spawn_context_probe(c, model);
+    if (!model || !*model)
+        return -1;
+    out->url = xasprintf("%s?client_version=%s", CODEX_MODELS_ENDPOINT, CODEX_PROBE_CLIENT_VERSION);
+    out->headers = codex_meta_headers(c);
+    out->timeout_s = CODEX_PROBE_TIMEOUT_S;
+    out->parse = codex_parse_meta;
+    return 0;
 }
 
 /* ---------- /usage ---------- */
@@ -862,12 +813,16 @@ static int codex_query_usage(struct provider *p)
 
 /* ---------- runtime pickers (model / effort) ---------- */
 
-/* Codex's reasoning-effort ladder. Mirrors the backend enum
- * (none/minimal/low/medium/high/xhigh); per-model support is advertised in
- * the catalog's supported_reasoning_levels, but offering the full ladder
- * and letting the server narrow it keeps this simple — a refinement can
- * filter by the selected model's catalog entry later. */
-static const char *const CODEX_EFFORTS[] = {"none", "minimal", "low", "medium", "high", "xhigh"};
+/* Every effort value this backend accepts — the vocabulary, not the offer:
+ * "max" only works on the gpt-5.6 family, and model_meta narrows per model
+ * from what codex_parse_efforts reads. The narrowing is load-bearing
+ * because the server rejects an unsupported level outright (HTTP 400)
+ * rather than clamping it to the nearest.
+ *
+ * "ultra" is deliberately absent: the API takes no such value. The official
+ * client sends "max" and switches its own multi-agent policy to proactive
+ * delegation, which hax has no tools for. */
+static const char *const CODEX_EFFORTS[] = {"none", "low", "medium", "high", "xhigh", "max"};
 
 static size_t codex_list_efforts(struct provider *p, const char *const **out)
 {
@@ -898,11 +853,9 @@ int codex_model_hidden(const json_t *entry)
 
 void codex_parse_model(const json_t *entry, struct model_info *out)
 {
-    /* Same precedence extract_codex_context uses, and for the same reason:
-     * this is the window requests actually get, while max_context_window is
-     * the model's theoretical ceiling (they differ — gpt-5.4 serves 272k of
-     * a 1M maximum). Showing the ceiling here would contradict the
-     * context-% display, which the probe drives off context_window. */
+    /* context_window is what requests actually get; max_context_window is
+     * the model's theoretical ceiling, and they differ (gpt-5.4 serves 272k
+     * of a 1M maximum). */
     json_t *ctx = json_object_get(entry, "context_window");
     if (!json_is_integer(ctx) || json_integer_value(ctx) <= 0)
         ctx = json_object_get(entry, "max_context_window");
@@ -922,10 +875,41 @@ void codex_parse_model(const json_t *entry, struct model_info *out)
     const char *desc = json_string_value(json_object_get(entry, "description"));
     if (desc && *desc)
         out->desc = xstrdup(desc);
+
+    codex_parse_efforts(entry, &out->efforts);
+}
+
+/* Translate `supported_reasoning_levels` — [{effort, description}, …] — into
+ * the values /responses accepts for this model. The field is the ladder the
+ * official UI shows, so it needs two corrections: drop "ultra", which is
+ * not a wire value (see CODEX_EFFORTS), and add "none", which every model
+ * here accepts but the official picker doesn't offer. An entry without the
+ * field leaves the set unknown, so the lower tiers still answer — an empty
+ * list is the opposite, a model denying every level. */
+void codex_parse_efforts(const json_t *entry, struct effort_set *out)
+{
+    json_t *levels = json_object_get(entry, "supported_reasoning_levels");
+    if (!json_is_array(levels))
+        return;
+    out->known = 1;
+    if (json_array_size(levels) == 0)
+        return; /* denied every level, so not even "none" applies */
+
+    effort_set_add(out, "none");
+    for (size_t i = 0; i < json_array_size(levels); i++) {
+        json_t *lvl = json_array_get(levels, i);
+        /* Tolerate a bare string in place of the {effort, description}
+         * object: the field is presentation data on the vendor's side and
+         * has no schema guarantee we rely on. */
+        const char *e = json_is_string(lvl) ? json_string_value(lvl)
+                                            : json_string_value(json_object_get(lvl, "effort"));
+        if (e && strcmp(e, "ultra") != 0)
+            effort_set_add(out, e);
+    }
 }
 
 /* Fetch the catalog and collect `models[].slug` — the same endpoint and
- * shape the context-window probe walks (extract_codex_context). The high
+ * shape codex_parse_meta walks for the single-model probe. The high
  * synthetic client_version keeps already-sendable models visible.
  *
  * Entries the catalog marks `visibility: "hide"` are dropped: they are
@@ -999,13 +983,9 @@ static int codex_list_models(struct provider *p, struct model_info **models_out,
 static void codex_destroy(struct provider *p)
 {
     struct codex *c = (struct codex *)p;
-    /* Settle the bg probe before freeing what it writes to. Cancel
-     * first so the worker exits its http_get promptly via the bg
-     * cancel thunk wired through the progress callback. */
-    if (c->probe) {
-        bg_job_cancel(c->probe);
-        bg_job_join(c->probe);
-    }
+    /* Settle the metadata probe before freeing anything it could still be
+     * writing to; model_meta_release cancels and joins. */
+    model_meta_release(p);
     free(c->access_token);
     free(c->account_id);
     free(c->email);
@@ -1071,7 +1051,7 @@ struct provider *codex_provider_new(const char *name)
     c->base.query_usage = codex_query_usage;
     c->base.list_models = codex_list_models;
     c->base.list_efforts = codex_list_efforts;
-    c->base.refresh_context = codex_refresh_context;
+    c->base.probe_model = codex_probe_model;
     c->base.destroy = codex_destroy;
     c->access_token = xstrdup(access);
     c->account_id = xstrdup(account);
@@ -1081,11 +1061,13 @@ struct provider *codex_provider_new(const char *name)
     c->session_id = xstrdup(uuid);
 
     json_decref(root);
-    /* Best-effort context-window probe runs in the background — gives
-     * the agent a "%" once the catalog response lands without delaying
-     * the first prompt. Failure (expired token, network blip, missing
-     * slug) silently leaves the percentage display hidden. */
-    spawn_context_probe(c, probe_model(c));
+    /* Metadata for whichever model this run resolves to (HAX_MODEL wins,
+     * per agent.c's resolver, else the codex default), fetched in the
+     * background so the context percentage and effort ladder are live from
+     * the first prompt without delaying it. Failure — expired token,
+     * network blip, an unknown slug — leaves the lower tiers to answer. */
+    const char *cfg_m = config_str("model");
+    model_meta_refresh(&c->base, (cfg_m && *cfg_m) ? cfg_m : c->default_model);
     return &c->base;
 }
 

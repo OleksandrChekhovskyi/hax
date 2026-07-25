@@ -240,41 +240,62 @@ static void test_recording_enabled(void)
     EXPECT(agent_recording_enabled(NULL) == 1);
 }
 
+/* resolve_effort returns malloc'd; assert on the value and free it. */
+static void expect_effort(const struct provider *p, const char *model, const char *want)
+{
+    char *got = resolve_effort(p, model);
+    if (want)
+        EXPECT_STR_EQ(got, want);
+    else
+        EXPECT(got == NULL);
+    free(got);
+}
+
 static void test_resolve_effort(void)
 {
-    struct provider p = {.default_effort = "default-e", .list_efforts = test_list_efforts};
+    struct provider p = {
+        .name = "test", .default_effort = "high", .list_efforts = test_list_efforts};
 
     /* unset → provider default */
     unsetenv("HAX_EFFORT");
-    EXPECT_STR_EQ(resolve_effort(&p), "default-e");
+    expect_effort(&p, "m", "high");
 
     /* explicit empty → "force omit" (NULL), even though provider has a default */
     setenv("HAX_EFFORT", "", 1);
-    EXPECT(resolve_effort(&p) == NULL);
+    expect_effort(&p, "m", NULL);
 
     /* non-empty → passes through verbatim */
     setenv("HAX_EFFORT", "low", 1);
-    EXPECT_STR_EQ(resolve_effort(&p), "low");
+    expect_effort(&p, "m", "low");
 
     /* with no provider default and unset env, returns NULL */
     unsetenv("HAX_EFFORT");
-    struct provider p2 = {.default_effort = NULL, .list_efforts = test_list_efforts};
-    EXPECT(resolve_effort(&p2) == NULL);
+    struct provider p2 = {
+        .name = "test", .default_effort = NULL, .list_efforts = test_list_efforts};
+    expect_effort(&p2, "m", NULL);
 
     /* a provider with no effort ladder (NULL hook, or one that reports zero
      * levels) never resolves an effort — even one persisted in config — so a
      * stale value can't leak onto e.g. llama.cpp / ollama. */
     setenv("HAX_EFFORT", "high", 1);
-    struct provider p3 = {.default_effort = "default-e", .list_efforts = NULL};
-    EXPECT(resolve_effort(&p3) == NULL);
+    struct provider p3 = {.name = "test", .default_effort = "high", .list_efforts = NULL};
+    expect_effort(&p3, "m", NULL);
 
-    /* a value the provider's ladder doesn't accept (a stale pick carried over
-     * from a different backend) falls back to the provider default rather than
-     * being sent verbatim. test_list_efforts offers {low, high}. */
+    /* A stale pick carried over from another backend lands on the nearest
+     * level offered rather than being sent verbatim. test_list_efforts
+     * offers {low, high}, so "medium" rounds down and keeps the user's
+     * intent instead of reverting to the provider default. */
     setenv("HAX_EFFORT", "medium", 1);
-    EXPECT_STR_EQ(resolve_effort(&p), "default-e");
-    /* same, but no provider default to fall back to → omit. */
-    EXPECT(resolve_effort(&p2) == NULL);
+    expect_effort(&p, "m", "low");
+    expect_effort(&p2, "m", "low");
+    /* Above everything offered clamps down too. */
+    setenv("HAX_EFFORT", "xhigh", 1);
+    expect_effort(&p, "m", "high");
+    /* A name with no place in the ladder can't be clamped, so the provider
+     * default answers — and when there is none, nothing is sent. */
+    setenv("HAX_EFFORT", "ludicrous", 1);
+    expect_effort(&p, "m", "high");
+    expect_effort(&p2, "m", NULL);
     unsetenv("HAX_EFFORT");
 }
 
@@ -727,32 +748,6 @@ static void test_turn_usage_make(void)
     }
 }
 
-static void test_agent_image_input_resolution(void)
-{
-    struct provider p = {.name = "x"};
-
-    /* No probe answer, no catalog identity: unknown. */
-    EXPECT(agent_image_input(&p, "m") == -1);
-    EXPECT(agent_image_input(NULL, NULL) == -1);
-
-    /* A live probe answer decides. */
-    atomic_store(&p.image_input, PROVIDER_IMG_YES);
-    EXPECT(agent_image_input(&p, "m") == 1);
-    atomic_store(&p.image_input, PROVIDER_IMG_NO);
-    EXPECT(agent_image_input(&p, "m") == 0);
-
-    /* The config tristate pins the answer over any probe result; "auto"
-     * (the default) falls through to detection. */
-    setenv("HAX_IMAGE_INPUT", "on", 1);
-    EXPECT(agent_image_input(&p, "m") == 1);
-    setenv("HAX_IMAGE_INPUT", "off", 1);
-    atomic_store(&p.image_input, PROVIDER_IMG_YES);
-    EXPECT(agent_image_input(&p, "m") == 0);
-    setenv("HAX_IMAGE_INPUT", "auto", 1);
-    EXPECT(agent_image_input(&p, "m") == 1);
-    unsetenv("HAX_IMAGE_INPUT");
-}
-
 int main(void)
 {
     test_items_append_growth();
@@ -776,6 +771,5 @@ int main(void)
     test_format_stats_segments_selection();
     test_spend_accounting();
     test_turn_usage_make();
-    test_agent_image_input_resolution();
     T_REPORT();
 }

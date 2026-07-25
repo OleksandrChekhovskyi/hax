@@ -4,6 +4,8 @@
 
 #include <jansson.h>
 
+#include "effort.h"
+
 /*
  * Model-metadata catalog: per-model cost rates, window limits, and input
  * modalities, resolved from two tiers — user config over a cached
@@ -76,6 +78,14 @@ struct catalog_entry {
      * contains "image")? 1 = yes, 0 = no, -1 = unknown (the model object
      * doesn't declare modalities). */
     int image_input;
+    /* Reasoning-effort levels, from `reasoning_options`. The artifact
+     * distinguishes three reasoning shapes — an effort ladder, a token
+     * budget, and a plain on/off toggle — and only the first is a menu of
+     * wire values, so the other two resolve to known-and-empty ("this
+     * model has no levels to pick from"). The fallback tier for backends
+     * that describe their models poorly or not at all, which includes
+     * real OpenAI, whose /v1/models is bare ids. */
+    struct effort_set efforts;
     /* Context tiers, in artifact order; none for flat-priced models. The
      * list is taken whole from whichever tier *declares* one first
      * (config over cache) — tiers don't merge field-by-field the way

@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "config.h"
+#include "model_meta.h"
 #include "provider.h"
 #include "util.h"
 
@@ -710,6 +711,7 @@ static int mock_stream(struct provider *p, const struct context *ctx, const char
 static void mock_destroy(struct provider *p)
 {
     struct mock_provider *m = (struct mock_provider *)p;
+    model_meta_release(p);
     free(m->script_path);
     free(m);
 }

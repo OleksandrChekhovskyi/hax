@@ -8,6 +8,7 @@
 #include "agent_env.h"
 #include "catalog.h"
 #include "config.h"
+#include "model_meta.h"
 #include "util.h"
 #include "providers/registry.h"
 #include "tools/bash_export.h"
@@ -82,58 +83,40 @@ void items_append(struct item **items, size_t *n, size_t *cap, struct item it)
     (*items)[(*n)++] = it;
 }
 
-int agent_image_input(const struct provider *p, const char *model)
+char *resolve_effort(const struct provider *p, const char *model)
 {
-    /* "auto" falls through to detection; a real on/off pins the answer.
-     * Tested by string — the bool accessors can't express "not a bool". */
-    const char *cfg = config_str("image_input");
-    if (cfg && *cfg && strcmp(cfg, "auto") != 0)
-        return config_bool("image_input");
-    if (!p)
-        return -1;
-    struct provider *mp = (struct provider *)p;
-    long probed = atomic_load(&mp->image_input);
-    if (probed == PROVIDER_IMG_YES)
-        return 1;
-    if (probed == PROVIDER_IMG_NO)
-        return 0;
-    if (p->catalog_id && model && *model) {
-        struct catalog_entry e;
-        if (catalog_lookup(p->catalog_id, model, &e) == 0 && e.image_input >= 0)
-            return e.image_input;
-    }
-    return -1;
-}
-
-const char *resolve_effort(const struct provider *p)
-{
-    /* A persisted/configured effort only makes sense for a provider that
-     * exposes a categorical effort ladder. Without one (NULL hook or an empty
-     * list — llama.cpp, ollama, a non-reasoning model …) the value can't be
-     * sent meaningfully, so don't resolve it: this keeps a stale effort left in
-     * state.json from leaking into the banner, the wire request, and the logs
-     * after switching to such a provider. */
-    const char *const *eff = NULL;
-    struct provider *mp = (struct provider *)p;
-    size_t n = (p && p->list_efforts) ? p->list_efforts(mp, &eff) : 0;
-    if (n == 0)
+    /* An empty ladder covers both shapes of "this takes no effort": a
+     * provider that sends none at all (llama.cpp) and a model whose
+     * thinking is a budget or nothing (the Claude 4-5 generation).
+     * Resolving to NULL keeps a stale effort in state.json from leaking
+     * into the banner, the request, and the logs. */
+    struct effort_set levels;
+    model_meta_efforts(p, model, &levels);
+    if (levels.n == 0)
         return NULL;
+
+    /* The provider's default narrows too: codex reads it from
+     * ~/.codex/config.toml, which may name a level this model won't take. */
+    const char *def = p->default_effort;
+    if (def && *def && !effort_set_has(&levels, def))
+        def = effort_clamp(&levels, def);
 
     const char *e = config_str("effort");
     if (!e)
-        return p->default_effort; /* unset / "(default)" → provider default */
+        return (def && *def) ? xstrdup(def) : NULL; /* unset / "(default)" */
     if (!*e)
         return NULL; /* explicit empty → force omit */
+    if (effort_set_has(&levels, e))
+        return xstrdup(e);
 
-    /* The value must be one the current provider's ladder actually accepts. A
-     * stale pick carried in state.json from a different backend (e.g. "medium"
-     * persisted under codex, then a switch to a low/high-only provider) would
-     * otherwise be sent verbatim and 400 every turn. On a non-member fall back
-     * to the provider's default rather than honoring a value it can't take. */
-    for (size_t i = 0; i < n; i++)
-        if (strcmp(e, eff[i]) == 0)
-            return e;
-    return p->default_effort;
+    /* A pick carried over from another backend, or from a model with a
+     * longer ladder: land on the nearest level this one takes rather than
+     * sending a rejected one, and fall back to the default only when the
+     * value has no place in the ladder at all. */
+    const char *near = effort_clamp(&levels, e);
+    if (near)
+        return xstrdup(near);
+    return (def && *def) ? xstrdup(def) : NULL;
 }
 
 char *build_system_prompt(const char *model_label, int raw)
@@ -343,6 +326,12 @@ const char *agent_provider_id(const struct provider *p)
     return p ? p->name : NULL;
 }
 
+const char *provider_log_name(const struct provider *p)
+{
+    const char *id = agent_provider_id(p);
+    return (id && *id) ? id : "none";
+}
+
 int agent_recording_enabled(const struct provider *p)
 {
     const char *id = agent_provider_id(p);
@@ -384,8 +373,7 @@ int agent_session_init(struct agent_session *s, struct provider *p, const struct
      * narrower opt-out (no system message but tools stay). */
     s->raw = opts->raw;
     s->sys = build_system_prompt(s->model_label, opts->raw);
-    const char *effort = resolve_effort(p);
-    s->effort = effort ? xstrdup(effort) : NULL;
+    s->effort = resolve_effort(p, s->model);
 
     s->n_tools = opts->raw ? 0 : N_TOOLS;
     if (s->n_tools) {
@@ -419,11 +407,33 @@ int agent_session_reconfigure(struct agent_session *s, struct provider *p)
      * conversation going under the new settings. */
     free(s->sys);
     s->sys = build_system_prompt(s->model_label, s->raw);
-    const char *effort = resolve_effort(p);
+    char *effort = resolve_effort(p, s->model);
     free(s->effort);
-    s->effort = effort ? xstrdup(effort) : NULL;
+    s->effort = effort;
     export_selection(p, s);
     return 0;
+}
+
+int agent_session_resync_effort(struct agent_session *s, struct provider *p, char **out_prev)
+{
+    if (out_prev)
+        *out_prev = NULL;
+    if (!s || !p || !s->model || !*s->model)
+        return 0;
+    model_meta_settle(p);
+    char *e = resolve_effort(p, s->model);
+    int same = (!e && !s->effort) || (e && s->effort && strcmp(e, s->effort) == 0);
+    if (same) {
+        free(e);
+        return 0;
+    }
+    if (out_prev)
+        *out_prev = s->effort;
+    else
+        free(s->effort);
+    s->effort = e;
+    export_selection(p, s);
+    return 1;
 }
 
 void agent_session_free(struct agent_session *s)
@@ -456,7 +466,7 @@ struct context agent_session_context(const struct agent_session *s)
         .n_tools = s->n_tools,
         .effort = s->effort,
         /* Unknown by default (adapters treat it as yes); callers that
-         * know the provider overwrite with agent_image_input(). */
+         * know the provider overwrite with model_meta_image_input(). */
         .image_input = -1,
     };
 }

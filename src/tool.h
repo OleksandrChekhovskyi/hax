@@ -52,7 +52,7 @@ struct tool_ctx {
     tool_emit_display_fn emit_display;
     void *emit_user;
     /* In: image-input capability of the active provider+model, resolved
-     * by the agent loop (agent_image_input). Same convention as
+     * by the agent loop (model_meta_image_input). Same convention as
      * context.image_input in provider.h: 1 yes, 0 no, -1 unknown
      * (treated as yes). Zero — a definite no — is deliberately what a
      * zeroed ctx means (see above). */

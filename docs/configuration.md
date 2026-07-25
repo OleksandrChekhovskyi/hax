@@ -397,7 +397,8 @@ providers use the same leaf names under `providers.<name>`.
 - `anthropic.api_key` / `HAX_ANTHROPIC_API_KEY` — `x-api-key` token for Anthropic-family
   providers.
 - `anthropic.max_tokens` / `HAX_ANTHROPIC_MAX_TOKENS` — max output tokens, including thinking
-  and text. Default `32000`.
+  and text. Unset follows the model's own ceiling (128k on the current flagships), falling back
+  to `32000` for a model nothing describes; a configured value is clamped to that ceiling.
 - `anthropic.thinking_mode` / `HAX_ANTHROPIC_THINKING_MODE` — `adaptive`, `budget`, or `off`.
   Default is provider-specific.
 - `anthropic.thinking_budget` / `HAX_ANTHROPIC_THINKING_BUDGET` — budget-mode thinking tokens.

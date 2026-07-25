@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "util.h"
+
 void model_info_init(struct model_info *m)
 {
     memset(m, 0, sizeof(*m));
@@ -12,13 +14,25 @@ void model_info_init(struct model_info *m)
     m->cost_output = -1;
 }
 
+void model_info_copy(struct model_info *dst, const struct model_info *src)
+{
+    *dst = *src;
+    dst->id = src->id ? xstrdup(src->id) : NULL;
+    dst->desc = src->desc ? xstrdup(src->desc) : NULL;
+}
+
+void model_info_clear(struct model_info *m)
+{
+    free(m->id);
+    free(m->desc);
+    memset(m, 0, sizeof(*m));
+}
+
 void model_info_free(struct model_info *models, size_t n)
 {
     if (!models)
         return;
-    for (size_t i = 0; i < n; i++) {
-        free(models[i].id);
-        free(models[i].desc);
-    }
+    for (size_t i = 0; i < n; i++)
+        model_info_clear(&models[i]);
     free(models);
 }

@@ -47,6 +47,7 @@ static void entry_init(struct catalog_entry *e)
     e->image_input = -1;
     e->n_tiers = 0;
     e->tiers_declared = 0;
+    memset(&e->efforts, 0, sizeof(e->efforts));
 }
 
 /* Member `k` of `obj` as a non-negative rate. Accepts a JSON number (the
@@ -116,6 +117,49 @@ static void tiers_fill(json_t *tiers, struct catalog_entry *e)
     }
 }
 
+/* Take `reasoning_options` — the artifact's per-model description of how a
+ * model's thinking is controlled — into *e:
+ *
+ *     [{"type": "effort", "values": ["none","low","medium","high"]}]
+ *     [{"type": "budget_tokens", "min": 1024}]
+ *     [{"type": "toggle"}, {"type": "effort", "values": [...]}]
+ *
+ * Only an `effort` list is a menu of wire values; a budget or a toggle is a
+ * real answer of a different kind, so both resolve to known-and-empty and
+ * the /effort step disappears rather than offering a ladder the model would
+ * reject. `reasoning: false` lands in the same place. An entry carrying
+ * neither field leaves the set unknown. */
+static void efforts_fill(json_t *model_obj, struct catalog_entry *e)
+{
+    if (e->efforts.known)
+        return;
+    json_t *reasoning = json_object_get(model_obj, "reasoning");
+    if (json_is_false(reasoning)) {
+        e->efforts.known = 1;
+        return;
+    }
+    json_t *opts = json_object_get(model_obj, "reasoning_options");
+    if (!json_is_array(opts) || json_array_size(opts) == 0)
+        return;
+    size_t i;
+    json_t *opt;
+    json_array_foreach(opts, i, opt)
+    {
+        const char *type = json_string_value(json_object_get(opt, "type"));
+        if (!type || strcmp(type, "effort") != 0)
+            continue;
+        json_t *values = json_object_get(opt, "values");
+        if (!json_is_array(values))
+            continue;
+        size_t k;
+        json_t *v;
+        json_array_foreach(values, k, v) effort_set_add(&e->efforts, json_string_value(v));
+    }
+    /* Saying "no ladder" is the point: unknown would fall through to the
+     * provider's full static ladder. */
+    e->efforts.known = 1;
+}
+
 /* Fill the still-unknown fields of *e from a per-model object of the
  * models.dev shape ({"cost": {...}, "limit": {...}}). Known fields are
  * left alone, so a higher tier's values survive a lower tier's pass. */
@@ -142,6 +186,7 @@ static void entry_fill(json_t *model_obj, struct catalog_entry *e)
         if (e->output <= 0)
             e->output = member_tokens(limit, "output");
     }
+    efforts_fill(model_obj, e);
     if (e->image_input < 0) {
         json_t *modalities = json_object_get(model_obj, "modalities");
         json_t *input = json_is_object(modalities) ? json_object_get(modalities, "input") : NULL;
@@ -167,7 +212,7 @@ static int entry_complete(const struct catalog_entry *e)
      * price flat (the memoized lookup keeps that consult cheap). */
     return e->cost_input >= 0 && e->cost_output >= 0 && e->cost_cache_read >= 0 &&
            e->cost_cache_write >= 0 && e->context > 0 && e->output > 0 && e->image_input >= 0 &&
-           e->tiers_declared;
+           e->tiers_declared && e->efforts.known;
 }
 
 static int entry_any(const struct catalog_entry *e)
@@ -177,7 +222,7 @@ static int entry_any(const struct catalog_entry *e)
      * threshold, so it must not read as "unknown model". */
     return e->cost_input >= 0 || e->cost_output >= 0 || e->cost_cache_read >= 0 ||
            e->cost_cache_write >= 0 || e->context > 0 || e->output > 0 || e->image_input >= 0 ||
-           e->n_tiers > 0;
+           e->n_tiers > 0 || e->efforts.known;
 }
 
 /* Fill the still-unknown fields of *dst from *src — the struct-to-struct
@@ -204,6 +249,11 @@ static void entry_merge(struct catalog_entry *dst, const struct catalog_entry *s
         dst->n_tiers = src->n_tiers;
         dst->tiers_declared = 1;
     }
+    /* Whole-list, like tiers and for the same reason: a ladder merged
+     * level-by-level from two sources would offer a set that never existed
+     * on any one model. */
+    if (!dst->efforts.known)
+        dst->efforts = src->efforts;
 }
 
 /* ---------------- top-level member extraction ---------------- */

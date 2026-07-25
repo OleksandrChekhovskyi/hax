@@ -20,6 +20,12 @@ static int selectable(const char *name)
 
 int main(void)
 {
+    /* Constructing a provider starts a metadata probe for the configured
+     * model, and this file mutates config while one could be in flight. The
+     * providers here name no model of their own, so an ambient HAX_MODEL is
+     * the only way one arrives — drop it. */
+    unsetenv("HAX_MODEL");
+
     /* A config.json with custom OpenAI-compatible providers plus an override
      * of the shipped ollama recipe. Nested object form for most, and one in
      * the flat-dotted form config.c also accepts ("flatprov"), to prove a

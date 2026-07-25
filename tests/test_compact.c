@@ -1,11 +1,8 @@
 /* SPDX-License-Identifier: MIT */
-#include <errno.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/stat.h>
 
 #include "agent_core.h"
 #include "compact.h"
@@ -53,47 +50,6 @@ static void test_should_auto(void)
     config_set_override("compact.threshold", "0");
     EXPECT(!compact_should_auto(8499, 10000));
     EXPECT(compact_should_auto(8500, 10000));
-}
-
-static void test_context_limit_resolution(void)
-{
-    /* Resolution order: manual config override → provider probe value →
-     * model-catalog entry → 0 (unknown). The catalog tier reads a fixture
-     * snapshot through the real catalog module. */
-    unsetenv("HAX_CONTEXT_LIMIT");
-    char *dir = t_tempdir();
-    setenv("XDG_CACHE_HOME", dir, 1);
-    char path[600];
-    snprintf(path, sizeof(path), "%s/hax", dir);
-    mkdir(path, 0755);
-    snprintf(path, sizeof(path), "%s/hax/catalog.json", dir);
-    FILE *f = fopen(path, "w");
-    EXPECT(f != NULL);
-    if (f) {
-        fputs("{\"openai\": {\"models\": {\"m\": {\"limit\": {\"context\": 64000}}}}}", f);
-        fclose(f);
-    }
-
-    struct provider p = {.name = "x"};
-
-    /* No probe value and no catalog identity: unknown. */
-    EXPECT(compact_context_limit(&p, "m") == 0);
-
-    /* The catalog fills in for a mapped provider — but only with a model
-     * to key by, and only when the catalog knows it. */
-    p.catalog_id = "openai";
-    EXPECT(compact_context_limit(&p, "m") == 64000);
-    EXPECT(compact_context_limit(&p, NULL) == 0);
-    EXPECT(compact_context_limit(&p, "unknown-model") == 0);
-
-    /* A probe value beats the catalog... */
-    atomic_store(&p.context_limit, 32000);
-    EXPECT(compact_context_limit(&p, "m") == 32000);
-
-    /* ...and the manual override beats everything. */
-    config_set_override("context_limit", "16k");
-    EXPECT(compact_context_limit(&p, "m") == 16 * 1024);
-    config_set_override("context_limit", NULL);
 }
 
 enum transaction_script {
@@ -362,7 +318,6 @@ int main(void)
     unsetenv("HAX_NO_SESSION");
     test_over_threshold();
     test_should_auto();
-    test_context_limit_resolution();
     test_transaction_applies_summary();
     test_transaction_archives_rejected_attempt();
     test_transaction_preserves_failure();

@@ -8,9 +8,9 @@
 #include <strings.h>
 
 #include "config.h"
+#include "model_meta.h"
 #include "openai_events.h"
 #include "util.h"
-#include "system/bg_job.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 #include "transport/retry.h"
@@ -22,7 +22,13 @@
 #define AVAIL_PROBE_TIMEOUT_S 2
 #define MODEL_LIST_TIMEOUT_S  10
 
-const char *const OPENAI_EFFORT_LADDER[] = {"none", "minimal", "low", "medium", "high", "xhigh"};
+/* The family's whole `reasoning.effort` vocabulary, cheapest first. Every
+ * preset built on this adapter starts here and is narrowed per model by
+ * whatever describes it (model_meta.h) — which for a backend with no probe
+ * and no catalog entry is nothing, so a level missing here is one no such
+ * backend can ever offer. "max" arrived with the gpt-5.6 family. */
+const char *const OPENAI_EFFORT_LADDER[] = {"none", "minimal", "low", "medium",
+                                            "high", "xhigh",   "max"};
 const size_t OPENAI_EFFORT_LADDER_N =
     sizeof(OPENAI_EFFORT_LADDER) / sizeof(OPENAI_EFFORT_LADDER[0]);
 
@@ -43,10 +49,6 @@ struct openai {
     size_t n_efforts;
     void (*parse_model)(const json_t *entry, struct model_info *out); /* preset hook; may be NULL */
     char **extra_headers; /* NULL-terminated, each element heap-owned; NULL = none */
-    /* Optional background probe — currently the context-window
-     * discovery spawned by preset shims (openrouter, llama.cpp).
-     * Joined by openai_destroy below. */
-    struct bg_job *probe;
 };
 
 /* ---------- request body construction ---------- */
@@ -473,13 +475,9 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
 static void openai_destroy(struct provider *p)
 {
     struct openai *o = (struct openai *)p;
-    /* Settle any background probe before freeing its target. Cancel
-     * first so the worker exits its http_get promptly via the bg
-     * cancel thunk wired through the progress callback. */
-    if (o->probe) {
-        bg_job_cancel(o->probe);
-        bg_job_join(o->probe);
-    }
+    /* Settle the metadata probe before freeing anything it could still be
+     * writing to; model_meta_release cancels and joins. */
+    model_meta_release(p);
     free(o->base_url);
     free(o->api_key);
     free(o->name_buf);
@@ -492,34 +490,6 @@ static void openai_destroy(struct provider *p)
         free(o->extra_headers);
     }
     free(o);
-}
-
-void openai_attach_probe(struct provider *p, struct bg_job *probe)
-{
-    if (!p)
-        return;
-    struct openai *o = (struct openai *)p;
-    o->probe = probe;
-}
-
-void openai_context_probe_reset(struct provider *p)
-{
-    if (!p)
-        return;
-    struct openai *o = (struct openai *)p;
-    /* Settle the in-flight probe before a re-probe so the superseded worker
-     * can't land late and overwrite the new model's limit, then drop the
-     * limit to unknown. The slot is cleared so the follow-up
-     * openai_attach_probe just stores the fresh handle. */
-    if (o->probe) {
-        bg_job_cancel(o->probe);
-        bg_job_join(o->probe);
-        o->probe = NULL;
-    }
-    atomic_store(&o->base.context_limit, 0);
-    /* Model-keyed capability goes stale with the limit: the re-probe that
-     * follows answers for the newly selected model. */
-    atomic_store(&o->base.image_input, PROVIDER_IMG_UNKNOWN);
 }
 
 /* Duplicate a NULL-terminated array of header strings. Returns NULL when

@@ -55,12 +55,54 @@ static const char CACHE_FIXTURE[] =
     "                                           \"tier\": {\"type\": \"tokens_per_day\","
     "                                                      \"size\": 5}}]},"
     "                    \"limit\": {\"context\": 400000}}"
+    "    ,\"o3-effort\": {\"reasoning\": true,"
+    "                    \"reasoning_options\": [{\"type\": \"effort\","
+    "                                             \"values\": [\"none\", \"low\", \"high\"]}]},"
+    "    \"o3-budget\": {\"reasoning\": true,"
+    "                    \"reasoning_options\": [{\"type\": \"budget_tokens\", \"min\": 1024}]},"
+    "    \"o3-toggle-then-effort\": {\"reasoning\": true,"
+    "                    \"reasoning_options\": [{\"type\": \"toggle\"},"
+    "                                            {\"type\": \"effort\","
+    "                                             \"values\": [\"low\", \"max\"]}]},"
+    "    \"o3-no-reasoning\": {\"reasoning\": false, \"cost\": {\"input\": 1, \"output\": 2}}"
     "  }},"
     "  \"openrouter\": {\"models\": {"
     "    \"vendor/model.v1:free\": {\"cost\": {\"input\": 0.1, \"output\": 0.2},"
     "                               \"limit\": {\"context\": 131072}}"
     "  }}"
     "}";
+
+/* models.dev describes three reasoning shapes and only one of them is a
+ * menu of wire values. The distinction that matters downstream is between
+ * a known-empty ladder (a budget/toggle model, whose effort step should
+ * disappear) and an unknown one (nobody said, so the provider's static
+ * ladder still applies). */
+static void test_lookup_reasoning_options(void)
+{
+    struct catalog_entry e;
+    EXPECT(catalog_lookup("openai", "o3-effort", &e) == 0);
+    EXPECT(e.efforts.known && e.efforts.n == 3);
+    EXPECT_STR_EQ(e.efforts.v[0], "none");
+    EXPECT_STR_EQ(e.efforts.v[2], "high");
+
+    /* A token budget is a real answer of a different kind: no levels. */
+    EXPECT(catalog_lookup("openai", "o3-budget", &e) == 0);
+    EXPECT(e.efforts.known && e.efforts.n == 0);
+
+    /* Mixed options: the effort list is the one that yields a menu. */
+    EXPECT(catalog_lookup("openai", "o3-toggle-then-effort", &e) == 0);
+    EXPECT(e.efforts.known && e.efforts.n == 2);
+    EXPECT(effort_set_has(&e.efforts, "max"));
+
+    /* Declaring no reasoning at all lands in the same place. */
+    EXPECT(catalog_lookup("openai", "o3-no-reasoning", &e) == 0);
+    EXPECT(e.efforts.known && e.efforts.n == 0);
+
+    /* An entry that says nothing about reasoning stays unknown — this is
+     * the majority of the artifact, and it must not read as "no levels". */
+    EXPECT(catalog_lookup("openai", "o3", &e) == 0);
+    EXPECT(!e.efforts.known);
+}
 
 static void test_lookup_from_cache(void)
 {
@@ -375,6 +417,7 @@ int main(void)
     test_lookup_from_cache();
     test_lookup_dotted_slashed_model_id();
     test_lookup_modalities();
+    test_lookup_reasoning_options();
     test_lookup_miss();
     test_config_overrides_and_merges();
     test_price_formula();

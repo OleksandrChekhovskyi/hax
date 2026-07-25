@@ -15,8 +15,11 @@
 #include <unistd.h>
 #include <sys/socket.h>
 
+#include "config.h"
 #include "harness.h"
 #include "provider.h"
+#include "model_meta.h"
+#include "providers/anthropic.h"
 #include "providers/registry.h"
 
 #define MAX_PAGES 4
@@ -192,9 +195,73 @@ static void test_missing_cursor_stops(void)
         free(ids[i]);
 }
 
+/* Publish what a completed metadata probe would have learned about `model`. */
+static void remember_output_cap(struct provider *p, const char *model, long cap)
+{
+    struct model_info m;
+    model_info_init(&m);
+    m.id = xstrdup(model);
+    m.max_output = cap;
+    model_meta_remember(p, &m);
+    model_info_clear(&m);
+}
+
+/* The request's max_tokens has to fit the model's own ceiling: asking for
+ * more is a 400, and the fixed default hax used to send was a quarter of
+ * what the current flagships allow. */
+static void test_max_tokens_follows_the_model(void)
+{
+    unsetenv("HAX_ANTHROPIC_MAX_TOKENS");
+    /* Unset has to read as unset. A registry default would make /config
+     * report a figure the requests below never carry, since anything but a
+     * user-set value follows the model. */
+    EXPECT(config_str("anthropic.max_tokens") == NULL);
+    EXPECT(config_int("anthropic.max_tokens") == 0);
+
+    /* The compat shim over a dead port: max_tokens resolution is shared
+     * with real anthropic (same config namespace), but this preset has no
+     * default model, so constructing it can't reach api.anthropic.com. */
+    setenv("HAX_ANTHROPIC_BASE_URL", "http://127.0.0.1:1", 1);
+    const struct provider_factory *f = provider_find("anthropic-compatible");
+    EXPECT(f != NULL);
+    struct provider *p = f ? f->new(f->name) : NULL;
+    EXPECT(p != NULL);
+    if (!p)
+        return;
+
+    /* Nothing known about the model: the built-in floor still applies, so a
+     * compat endpoint that reports no limits behaves as before. */
+    EXPECT(anthropic_max_tokens(p, "unknown-model") == 32000);
+
+    /* Reported cap, unconfigured: follow the model. */
+    remember_output_cap(p, "claude-opus-5", 128000);
+    EXPECT(anthropic_max_tokens(p, "claude-opus-5") == 128000);
+
+    /* Configured below the cap: the user's value stands. */
+    setenv("HAX_ANTHROPIC_MAX_TOKENS", "8000", 1);
+    EXPECT(anthropic_max_tokens(p, "claude-opus-5") == 8000);
+
+    /* Configured above it — a value carried over from a
+     * larger-capacity model — is clamped rather than sent and rejected. */
+    setenv("HAX_ANTHROPIC_MAX_TOKENS", "200000", 1);
+    EXPECT(anthropic_max_tokens(p, "claude-opus-5") == 128000);
+
+    /* With no reported cap there is nothing to clamp against, so the
+     * configured value is honored as-is. */
+    EXPECT(anthropic_max_tokens(p, "unknown-model") == 200000);
+    unsetenv("HAX_ANTHROPIC_MAX_TOKENS");
+    p->destroy(p);
+}
+
 int main(void)
 {
     setenv("HAX_ANTHROPIC_API_KEY", "test-key", 1);
+    /* Constructing a provider starts a metadata probe for whatever model is
+     * configured, which here would race list_models() for the canned pages
+     * below. Nothing in this file selects a model, so an ambient HAX_MODEL
+     * is the only way one arrives — drop it. */
+    unsetenv("HAX_MODEL");
+    test_max_tokens_follows_the_model();
     test_follows_cursor();
     test_repeated_cursor_page_is_discarded();
     test_missing_cursor_stops();

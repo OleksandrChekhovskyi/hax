@@ -169,25 +169,6 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset);
 int openai_key_available(const char *api_key_env, const char *miss_reason, const char **reason);
 int openai_base_url_reachable(const char *base_url, const char *api_key, const char **reason);
 
-/* Hand off ownership of a background probe to an openai-derived provider.
- * The handle is joined (with cancel first) by openai_destroy, which fits
- * preset shims like openrouter/llamacpp that spawn a context-window
- * probe but don't carry their own provider struct or destroy(). NULL
- * `probe` is a no-op (e.g. when probe_spawn returned NULL
- * because pthread_create failed). There's one slot; before re-attaching
- * (a /model re-probe) the caller settles the old handle via
- * openai_context_probe_reset, so attach itself stays a plain setter. A
- * provider needing several probes would carry its own struct instead of
- * piggybacking on this. */
-struct bg_job;
-void openai_attach_probe(struct provider *p, struct bg_job *probe);
-
-/* Cancel and join any in-flight context probe and reset context_limit to
- * unknown (0), readying an openai-derived provider for a fresh probe after
- * a runtime /model switch. Pairs with a follow-up openai_attach_probe.
- * Used by the model-keyed shims (openrouter) in their refresh_context. */
-void openai_context_probe_reset(struct provider *p);
-
 /* Translate flat conversation items into the Chat Completions `messages`
  * array. Exposed (rather than static) so the round-trip serialization —
  * notably reasoning_content attachment — can be unit-tested without an HTTP

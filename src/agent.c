@@ -12,6 +12,7 @@
 #include "agent_dispatch.h"
 #include "agent_loop.h"
 #include "catalog.h"
+#include "model_meta.h"
 #include "compact.h"
 #include "config.h"
 #include "file_mention.h"
@@ -197,8 +198,8 @@ static void display_stats_line(struct render_ctx *r, const struct provider *p, c
     int approx = 0;
     double spend = agent_session_spend(stats, &approx);
     char segs[STATS_SEGS_MAX][STATS_SEG_LEN];
-    int n = format_stats_segments(segs, ctx, compact_context_limit(p, model), elapsed_ms, spend,
-                                  approx);
+    int n =
+        format_stats_segments(segs, ctx, model_meta_context(p, model), elapsed_ms, spend, approx);
     if (n == 0)
         return;
 
@@ -564,16 +565,6 @@ void agent_print_banner(const struct provider *p, const struct agent_session *s)
     free(stance);
 }
 
-/* Provider id for session-log metadata: the resolvable one (agent_provider_id
- * — a resume feeds it back to provider_find), with "none" for a not-yet-
- * selected provider (interactive startup when the configured one couldn't
- * construct — the user picks one with /provider). */
-static const char *provider_log_name(const struct provider *p)
-{
-    const char *id = agent_provider_id(p);
-    return (id && *id) ? id : "none";
-}
-
 int agent_apply_settings(struct agent_state *st, struct provider *p)
 {
     struct agent_session *s = st->sess;
@@ -606,16 +597,18 @@ int agent_apply_settings(struct agent_state *st, struct provider *p)
             old->destroy(old);
     }
 
-    /* A model or provider switch can change the context window. Provider
-     * identity matters even when the model id is unchanged: the fresh
-     * provider's constructor may have probed its default model, or skipped the
-     * probe while /provider transactionally hid the outgoing model. A bare
-     * /effort tweak still avoids needless cancel/join and network churn. */
+    /* A model or provider switch invalidates everything known about the
+     * previous selection — window, output cap, modalities, effort levels.
+     * Provider identity matters even when the model id is unchanged: the
+     * fresh provider's constructor may have probed its default model, or
+     * skipped the probe while /provider transactionally hid the outgoing
+     * model. A bare /effort tweak skips the churn, and so does a /model
+     * pick whose entry the picker already handed over. */
     int model_changed = (prev_model == NULL) != (s->model == NULL) ||
                         (prev_model && s->model && strcmp(prev_model, s->model) != 0);
     free(prev_model);
-    if ((provider_changed || model_changed) && p->refresh_context)
-        p->refresh_context(p, s->model);
+    if (provider_changed || model_changed)
+        model_meta_refresh(p, s->model);
 
     /* reconfigure rebuilt sess->sys (its Environment section names the new
      * model), so re-key the HAX_TRANSCRIPT mirror to it: rewrite the header and replay
@@ -1417,7 +1410,7 @@ static void repl_loop_turn_end(const struct agent_loop_turn *loop_turn, void *us
     stats->requests++;
     if (usage->input_tokens >= 0 && usage->output_tokens >= 0) {
         stats->last_ctx = usage->input_tokens + usage->output_tokens;
-        stats->last_limit = compact_context_limit(provider, session->model);
+        stats->last_limit = model_meta_context(provider, session->model);
     }
     stats_account_usage(stats, usage, provider->catalog_id, session->model);
 }
@@ -1757,13 +1750,36 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
         else
             continued = 1;
         free(line);
+        /* input_readline left the cursor at column 0 of a fresh row. */
+        r.disp.trail = 1;
+
+        /* Startup probes the model's metadata in the background, so the
+         * first prompts of a run can be the first moment this model's real
+         * effort ladder is known. Say so when the pick moves: the banner
+         * above is still asserting the level resolved without it, and the
+         * one about to be sent is the true one. The session-log header is
+         * likewise unwritten on the first turn, which is exactly when this
+         * fires. */
+        char *prev_effort = NULL;
+        if (agent_session_resync_effort(&sess, p, &prev_effort)) {
+            disp_block_separator(&r.disp);
+            ui_note("effort %s → %s · %s", prev_effort ? prev_effort : "(unset)",
+                    sess.effort ? sess.effort : "(unset)",
+                    sess.model_label ? sess.model_label : "?");
+            r.disp.trail = 1;
+        }
+        free(prev_effort);
+        /* Re-stamp the header with the live selection whatever moved it —
+         * this resync, /session's, or a compaction's. The header is still
+         * unwritten on the first turn, which is when a late probe lands;
+         * afterwards this is a no-op for the current file. */
+        session_log_set_meta(state.slog, provider_log_name(p), sess.model, sess.effort,
+                             config_str("preset"));
         /* Flush the prompt to the log immediately, before we hand
          * control to the provider. If the stream hangs or the process
          * is killed, the user prompt that triggered the in-flight call
          * is preserved on disk for post-mortem reading. */
         agent_loop_flush_logs(tlog, state.slog, sess.items, sess.n_items);
-        /* input_readline left the cursor at column 0 of a fresh row. */
-        r.disp.trail = 1;
 
         /* A user turn on a catalog-mapped provider is about to need catalog
          * metadata (cost estimate, window fallback) — kick the background
@@ -1918,7 +1934,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
          * /compact explicitly. Runs at this natural pause — the model has
          * finished responding and we're about to wait for input — so no
          * mid-task continuation is needed. */
-        if (compact_should_auto(user_turn_ctx, compact_context_limit(p, sess.model))) {
+        if (compact_should_auto(user_turn_ctx, model_meta_context(p, sess.model))) {
             if (user_turn_complete && !user_turn_soft)
                 agent_compact(&state, NULL, 1);
             else if (user_turn_complete || state.resume == AGENT_RESUME_PAUSED ||

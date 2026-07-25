@@ -56,6 +56,12 @@ const struct tool *find_tool(const char *name);
  * NULL when no provider is live. Borrowed. */
 const char *agent_provider_id(const struct provider *p);
 
+/* The same id as session-log metadata spells it, with "none" for a
+ * not-yet-selected provider (interactive startup when the configured one
+ * couldn't construct — the user picks one with /provider). Every
+ * session_log_set_meta call site names the provider through this. */
+const char *provider_log_name(const struct provider *p);
+
 /* Whether this run persists what was typed and what came back: the session
  * file behind /resume, and the prompt-recall history behind Up/Ctrl-R. Both
  * answer to the one `no_session` tri-state, because the case for turning
@@ -72,17 +78,11 @@ int agent_recording_enabled(const struct provider *p);
  * oneshot.c — extracted here so both paths grow it the same way. */
 void items_append(struct item **items, size_t *n, size_t *cap, struct item it);
 
-/* Resolve the `effort` value to send for this session.
- * Empty HAX_EFFORT means "force omit"; unset falls back to
- * the provider default; any non-empty value passes through verbatim. */
-const char *resolve_effort(const struct provider *p);
-
-/* Does the active provider+model accept image input? Layered like other
- * tunables: the image_input config tristate pins the answer; a live
- * probe result on the provider (llama.cpp /props, OpenRouter /endpoints)
- * beats the catalog; the models.dev catalog fills the rest. Returns
- * 1 yes, 0 no, -1 unknown. */
-int agent_image_input(const struct provider *p, const char *model);
+/* The `effort` value to send this session, narrowed to what `model` accepts
+ * (model_meta.h). Empty HAX_EFFORT forces omit; unset falls back to the
+ * provider default; a level the model doesn't take is clamped to the
+ * nearest it does. NULL means send no effort field. Returns malloc'd. */
+char *resolve_effort(const struct provider *p, const char *model);
 
 /* Build the malloc'd system prompt from the configured or default base plus
  * agent_env_build_suffix(). Return NULL for raw mode or an explicitly empty
@@ -219,6 +219,23 @@ int agent_session_init(struct agent_session *s, struct provider *p, const struct
  * intact — only the per-request settings change. Returns 0 on success, -1
  * when no model is available for `p` (logged to stderr). */
 int agent_session_reconfigure(struct agent_session *s, struct provider *p);
+
+/* Settle the metadata probe (model_meta.h) and re-resolve the effort
+ * against what it found, reporting whether the value changed. The effort is
+ * the one setting the session caches — window, output cap, and modalities
+ * are read per use, so they pick up a late probe on their own — and the
+ * probe is asynchronous, so a run can start before its answer exists.
+ *
+ * Call wherever a request or a report is about to depend on the effort: the
+ * settle is what makes the result independent of whether the fetch happened
+ * to land, and by then it nearly always has, so it usually waits for
+ * nothing. Without it a session resolved against the static ladder keeps
+ * sending a level this model rejects for as long as it runs.
+ *
+ * Idempotent, and a no-op with no provider or no model. `out_prev`
+ * (optional) takes ownership of the replaced value, for callers that report
+ * the change; NULL frees it. */
+int agent_session_resync_effort(struct agent_session *s, struct provider *p, char **out_prev);
 
 void agent_session_free(struct agent_session *s);
 

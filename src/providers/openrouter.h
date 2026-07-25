@@ -33,6 +33,21 @@ struct provider *openrouter_provider_new(const char *name);
  * shape can be unit-tested against a fixture. */
 void openrouter_parse_model(const json_t *entry, struct model_info *out);
 
+/* Read the entry's `reasoning` block into the effort levels the model
+ * accepts. Taken verbatim (OpenRouter normalizes upstream vocabularies
+ * itself); an entry with no such block reports "no categorical effort".
+ * Called by openrouter_parse_model; separate for unit tests. */
+void openrouter_parse_efforts(const json_t *entry, struct effort_set *out);
+
+/* Pull `model`'s entry out of a `{"data": [...]}` catalog page and parse it.
+ * Exposed for unit tests: the exact-id match is the whole point, because the
+ * ?q= query the probe uses is a substring search. */
+void openrouter_parse_meta(const char *body, const char *model, struct model_info *out);
+
+/* Describe the single-model metadata fetch (provider.h probe_model). `p` is
+ * unused, so tests may pass NULL. Fills *out with heap-owned url/headers. */
+int openrouter_probe_model(struct provider *p, const char *model, struct model_probe *out);
+
 extern const struct provider_factory PROVIDER_OPENROUTER;
 
 #endif /* HAX_OPENROUTER_H */

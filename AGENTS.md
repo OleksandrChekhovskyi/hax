@@ -104,11 +104,16 @@ Core modules and responsibilities:
 - `src/config.{c,h}` is the configuration access layer. Declare user-facing tunables in the
   config registry and read them by canonical key; reserve direct `getenv` calls for process
   environment facts or deliberately env-only secrets.
-- `src/catalog.{c,h}` is the model-metadata access layer (per-model cost rates, window
-  limits, input modalities): a config `catalog.models` tier over a background-cached
-  models.dev snapshot.
-  Providers opt in by setting `provider->catalog_id`; cost *estimation* lives in the agent
-  layer (`agent_session_spend`), never in provider adapters.
+- `src/model_meta.{c,h}` is the per-model metadata access layer — context window, output
+  cap, modalities, effort levels — resolving config over the backend's own report over the
+  catalog over provider defaults. Consumers ask it, never a tier directly. The live tier is
+  fetched by the provider's `probe_model` hook (a request built on the foreground plus a pure
+  parser, so the worker never touches a live provider) and stored on `struct provider`; every
+  `destroy()` must call `model_meta_release`.
+- `src/catalog.{c,h}` is the models.dev tier underneath it (per-model cost rates, window
+  limits, modalities, effort ladders): a config `catalog.models` tier over a background-cached
+  snapshot. Providers opt in by setting `provider->catalog_id`; cost *estimation* lives in the
+  agent layer (`agent_session_spend`), never in provider adapters.
 - `src/terminal/ansi.h` centralizes ANSI escape sequences; do not inline raw escape literals.
   Colors go through the semantic roles in `src/terminal/theme.{c,h}` (presets resolved from the
   `theme` config key at startup); bold/dim/italic attributes stay direct `ANSI_*`.

@@ -12,6 +12,7 @@
 #include "busy.h"
 #include "catalog.h"
 #include "config.h"
+#include "model_meta.h"
 #include "provider.h"
 #include "providers/registry.h"
 #include "render/render_ctx.h"
@@ -167,18 +168,18 @@ static void seg_add(struct buf *b, const char *text)
 
 char *model_desc_line(const struct model_info *m, const struct catalog_entry *cat)
 {
-    /* Reported-over-catalog, field by field: a backend describing its own
-     * model is both fresher and more specific than a snapshot (it knows the
-     * window it will actually serve, and it knows about models released
-     * after the snapshot was cut). */
-    long context = m->context > 0 ? m->context : (cat ? cat->context : 0);
-    int image = m->image_input;
-    if (image == PROVIDER_CAP_UNKNOWN && cat && cat->image_input >= 0)
-        image = cat->image_input ? PROVIDER_CAP_YES : PROVIDER_CAP_NO;
-    double cost_in = m->cost_input >= 0 ? m->cost_input : (cat ? cat->cost_input : -1);
-    double cost_out = m->cost_output >= 0 ? m->cost_output : (cat ? cat->cost_output : -1);
-    double cost_cached =
-        m->cost_cache_read >= 0 ? m->cost_cache_read : (cat ? cat->cost_cache_read : -1);
+    /* Reported-over-catalog, through the same merge every other consumer
+     * resolves with: a backend describing its own model is both fresher and
+     * more specific than a snapshot (it knows the window it will actually
+     * serve, and it knows about models released after the snapshot was
+     * cut). */
+    struct model_info v;
+    model_meta_merge(m, cat, &v);
+    long context = v.context;
+    int image = v.image_input;
+    double cost_in = v.cost_input;
+    double cost_out = v.cost_output;
+    double cost_cached = v.cost_cache_read;
 
     struct buf b;
     buf_init(&b);
@@ -305,6 +306,7 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
          * llama.cpp / ollama server. Skip the picker and use it directly; the
          * post-switch confirmation still shows which model is now active. */
         char *only = xstrdup(models[0].id);
+        model_meta_remember(p, &models[0]);
         model_info_free(models, n);
         *status = PICK_MADE;
         return only;
@@ -358,6 +360,13 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
     long sel = picker_run(&opts);
     char *chosen = (sel >= 0) ? xstrdup(models[sel].id) : NULL;
     *status = chosen ? PICK_MADE : PICK_CANCELLED;
+    /* Hand the entry to the metadata layer before the list is freed; the
+     * effort step that follows is its first reader. At pick time rather
+     * than at commit, since the chained pickers run against the prospective
+     * selection — which means it displaces what the running model had, and
+     * an aborted chain has to put that back (select_model). */
+    if (sel >= 0)
+        model_meta_remember(p, &models[sel]);
 
     for (size_t i = 0; i < n; i++)
         free(descs[i]);
@@ -368,23 +377,35 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
     return chosen;
 }
 
-/* Run the effort picker for `p`. On PICK_MADE *out is set: NULL for the
- * "default" row (clear the pick → provider / config default), or a malloc'd
- * effort value. PICK_NONE = no effort ladder, PICK_CANCELLED = Escape.
+/* Run the effort picker for `p` and `model`. On PICK_MADE *out is set: NULL
+ * for the "default" row (clear the pick → provider / config default), or a
+ * malloc'd effort value. PICK_NONE = no effort ladder, PICK_CANCELLED =
+ * Escape.
+ *
+ * The levels offered are the ones `model` accepts (model_meta.h), not the
+ * provider's whole vocabulary — an OpenRouter model may take three of the
+ * six, and codex and Anthropic reject an unsupported level outright.
  *
  * `announce` prints the no-ladder note only when the user asked for effort
  * directly (/effort); the chained tails of /model and /provider skip a
  * no-ladder provider silently. */
-static enum pick_status choose_effort(struct agent_state *st, struct provider *p, const char *cur,
-                                      char **out, int announce)
+static enum pick_status choose_effort(struct agent_state *st, struct provider *p, const char *model,
+                                      const char *cur, char **out, int announce)
 {
     *out = NULL;
-    const char *const *eff = NULL;
-    size_t n = p->list_efforts ? p->list_efforts(p, &eff) : 0;
+    struct effort_set levels;
+    model_meta_efforts(p, model, &levels);
+    size_t n = levels.n;
     if (n == 0) {
         if (announce) {
-            ui_note("the %s provider doesn't expose reasoning-effort levels",
-                    p->name ? p->name : "?");
+            /* Which of the two reasons applies decides the remedy: another
+             * model can fix the second, nothing fixes the first. */
+            const char *const *eff = NULL;
+            if (p->list_efforts && p->list_efforts(p, &eff) > 0)
+                ui_note("%s doesn't take reasoning-effort levels", model ? model : "this model");
+            else
+                ui_note("the %s provider doesn't expose reasoning-effort levels",
+                        p->name ? p->name : "?");
             st->r->disp.trail = 1;
         }
         return PICK_NONE;
@@ -397,10 +418,10 @@ static enum pick_status choose_effort(struct agent_state *st, struct provider *p
     items[0].current = 0;
     size_t initial = 0;
     for (size_t i = 0; i < n; i++) {
-        items[i + 1].label = eff[i];
+        items[i + 1].label = levels.v[i];
         items[i + 1].detail = NULL;
         items[i + 1].dim = 0;
-        items[i + 1].current = cur && strcmp(eff[i], cur) == 0;
+        items[i + 1].current = cur && strcmp(levels.v[i], cur) == 0;
         if (items[i + 1].current)
             initial = i + 1;
     }
@@ -415,7 +436,7 @@ static enum pick_status choose_effort(struct agent_state *st, struct provider *p
      * "default" differs from the ladder's "none": none sends none, default
      * sends nothing and lets the provider choose. */
     if (sel > 0)
-        *out = xstrdup(eff[sel - 1]);
+        *out = xstrdup(levels.v[sel - 1]);
     return PICK_MADE;
 }
 
@@ -485,9 +506,9 @@ void select_effort(struct agent_state *st)
         return;
     }
     char *e;
-    /* Explicit /effort: announce when the provider has no effort levels.
+    /* Explicit /effort: announce when there are no effort levels to offer.
      * Only a made pick commits; cancel and no-ladder both change nothing. */
-    if (choose_effort(st, p, st->sess->effort, &e, 1) != PICK_MADE)
+    if (choose_effort(st, p, st->sess->model, st->sess->effort, &e, 1) != PICK_MADE)
         return;
     /* The provider is pinned alongside the effort, for the same reason
      * select_model does: an explicit setting against an auto-selected provider
@@ -525,10 +546,21 @@ void select_model(struct agent_state *st)
         st->r->disp.trail = 1;
         return;
     }
+    /* choose_model publishes the candidate's metadata for the effort step
+     * below, displacing what the running model had. Hold a copy so an abort
+     * can put it back exactly, rather than leaving the session to answer
+     * window and modality questions from the catalog alone — from nothing
+     * at all on a provider that opts out of one, which silently disables
+     * auto-compaction. */
+    struct model_info saved;
+    int had_saved = model_meta_snapshot(p, &saved);
+
     enum pick_status ms;
     char *m = choose_model(st, p, st->sess->model, &ms);
-    if (!m)
+    if (!m) {
+        model_info_clear(&saved);
         return; /* cancelled or no menu — notes already printed */
+    }
 
     /* Run the chained effort pick BEFORE committing. commit_selection persists
      * into the state tier, which deep-copies and frees the old tier object —
@@ -537,12 +569,25 @@ void select_model(struct agent_state *st)
      * commit would be a use-after-free, so gather both picks first, then commit
      * once. Skips silently if this provider has no ladder. */
     char *e = NULL;
-    enum pick_status es = choose_effort(st, p, st->sess->effort, &e, 0);
+    /* Narrowed against the model just picked, not the one still running —
+     * gpt-5.6 takes "max" where gpt-5.5 rejects it. */
+    enum pick_status es = choose_effort(st, p, m, st->sess->effort, &e, 0);
     if (es == PICK_CANCELLED) {
-        /* Escape mid-chain: discard the model pick too — nothing commits. */
+        /* Escape mid-chain: discard the model pick too — nothing commits.
+         * Restoring the saved entry keeps this free of a second round-trip
+         * (and of the window, or the permanent gap on failure, one would
+         * leave). With nothing saved there was nothing to lose, but the
+         * candidate's entry has to go: refresh re-probes the running
+         * model. */
+        if (had_saved)
+            model_meta_remember(p, &saved);
+        else
+            model_meta_refresh(p, st->sess->model);
+        model_info_clear(&saved);
         free(m);
         return;
     }
+    model_info_clear(&saved);
 
     /* The provider is pinned alongside the model — otherwise a model picked
      * against an auto-selected (unpinned) provider would make the next
@@ -695,7 +740,7 @@ void select_provider(struct agent_state *st)
      * above). A completed switch resets effort to the pick, or — "default"
      * row / no ladder — to newp's own default via the sentinel. */
     char *e = NULL;
-    if (choose_effort(st, newp, NULL, &e, 0) == PICK_CANCELLED) {
+    if (choose_effort(st, newp, m ? m : newp->default_model, NULL, &e, 0) == PICK_CANCELLED) {
         newp->destroy(newp);
         config_snapshot_restore(ov);
         free(cur);

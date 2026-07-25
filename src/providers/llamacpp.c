@@ -9,18 +9,17 @@
 #include <curl/curl.h>
 
 #include "config.h"
+#include "model_meta.h"
 #include "openai.h"
-#include "probe.h"
 #include "util.h"
 #include "transport/http.h"
 
-/* Model probe runs synchronously at startup because HAX_MODEL must be
- * resolved before the first chat request body is built. The context-limit
- * probe is async (see spawn_context_probe) so a slow /props doesn't delay
- * the first prompt. Both stay short so a missing or slow server fails
- * cleanly. */
+/* The model reconcile runs synchronously at startup, because HAX_MODEL must
+ * be resolved before the first request body is built; the metadata fetch is
+ * async, so a slow /props doesn't delay the first prompt. Both stay short so
+ * a missing or slow server fails cleanly. */
 #define MODEL_PROBE_TIMEOUT_S 2
-#define CTX_PROBE_TIMEOUT_S   5
+#define META_PROBE_TIMEOUT_S  5
 
 /* Build a sibling URL with the same scheme/host/port as `base` but a
  * different path. Used to reach llama-server's `/props` (rooted, not under
@@ -85,8 +84,8 @@ char *llamacpp_props_url(const char *base_url, const char *model)
     return out;
 }
 
-/* The pure reconcile decision behind probe_model, split out for tests (no
- * HTTP): parse a /v1/models body and decide against `cur`. Returns 0 when
+/* The pure reconcile decision behind reconcile_model, split out for tests
+ * (no HTTP): parse a /v1/models body and decide against `cur`. Returns 0 when
  * the list names at least one model — a resolvable state — with *adopt set
  * to a malloc'd replacement (the first served entry) when `cur` is unset or
  * absent from the list, or NULL when the configured model is served and
@@ -150,7 +149,7 @@ char *llamacpp_model_warning(const char *configured, const char *served)
  * trusted while the server is briefly unreachable). Returns -1 only when the
  * server is unreachable AND nothing is configured — a strong "is it running?"
  * signal the caller surfaces instead of a downstream "HAX_MODEL is required". */
-static int probe_model(const char *base_url, const char *api_key)
+static int reconcile_model(const char *base_url, const char *api_key)
 {
     char *url = xasprintf("%s/models", base_url);
     char *auth = api_key ? xasprintf("Authorization: Bearer %s", api_key) : NULL;
@@ -190,41 +189,30 @@ static int probe_model(const char *base_url, const char *api_key)
     return rc;
 }
 
-/* /props returns the live n_ctx the server was started with — the only
- * cross-version-stable way to learn the context window from llama-server.
- * `user` is unused (single global value, no key to match). */
-static long extract_llamacpp_n_ctx(const char *body, void *user)
+/* /props describes the model this server instance actually has loaded:
+ * `default_generation_settings.n_ctx` is the live context window (the only
+ * cross-version-stable way to learn it from llama-server), and
+ * `modalities.vision` is authoritative for image input — vision needs an
+ * mmproj projector loaded here, which no external catalog can know. Both
+ * absent on older servers, which leaves them unknown.
+ *
+ * `model` is unused: /props reports on whichever model the URL selected. */
+static void llamacpp_parse_meta(const char *body, const char *model, struct model_info *out)
 {
-    (void)user;
+    (void)model;
     json_t *root = json_loads(body, 0, NULL);
     if (!root)
-        return 0;
-    long out = 0;
+        return;
     json_t *settings = json_object_get(root, "default_generation_settings");
     json_t *n_ctx = settings ? json_object_get(settings, "n_ctx") : NULL;
     if (json_is_integer(n_ctx) && json_integer_value(n_ctx) > 0)
-        out = (long)json_integer_value(n_ctx);
-    json_decref(root);
-    return out;
-}
+        out->context = (long)json_integer_value(n_ctx);
 
-/* /props also reports the loaded model's modalities ({"vision": bool,
- * ...}) — authoritative for image input, since vision requires an mmproj
- * projector loaded on this server instance, which no external catalog
- * can know. Absent on older servers → 0 (unknown, dropped). */
-static long extract_llamacpp_image_input(const char *body, void *user)
-{
-    (void)user;
-    json_t *root = json_loads(body, 0, NULL);
-    if (!root)
-        return 0;
-    long out = PROVIDER_IMG_UNKNOWN;
     json_t *modalities = json_object_get(root, "modalities");
     json_t *vision = modalities ? json_object_get(modalities, "vision") : NULL;
     if (json_is_boolean(vision))
-        out = json_is_true(vision) ? PROVIDER_IMG_YES : PROVIDER_IMG_NO;
+        out->image_input = json_is_true(vision) ? PROVIDER_CAP_YES : PROVIDER_CAP_NO;
     json_decref(root);
-    return out;
 }
 
 char *llamacpp_model_label(struct provider *p, const char *model)
@@ -249,45 +237,27 @@ char *llamacpp_model_label(struct provider *p, const char *model)
     return label;
 }
 
-static void spawn_context_probe(struct provider *p, const char *base_url, const char *api_key)
+/* Router mode serves several models, differing in window and vision
+ * capability, so /props is keyed by the selected model — hence a fresh
+ * fetch at every switch. */
+static int llamacpp_probe_model(struct provider *p, const char *model, struct model_probe *out)
 {
-    char *url = llamacpp_props_url(base_url, config_str("model"));
+    (void)p;
+    char *base = resolve_base_url();
+    char *url = llamacpp_props_url(base, model);
+    free(base);
     if (!url)
-        return;
-
-    struct probe_args *a = xcalloc(1, sizeof(*a));
-    a->url = url;
-    if (api_key && *api_key) {
-        a->headers = xcalloc(2, sizeof(*a->headers));
-        a->headers[0] = xasprintf("Authorization: Bearer %s", api_key);
-        a->headers[1] = NULL;
-    }
-    a->timeout_s = CTX_PROBE_TIMEOUT_S;
-    /* A usable user-supplied context_limit wins; skip that extraction so
-     * the probe never overwrites the override the constructor stored. Ask
-     * config_size — the same question the display path asks — so an
-     * unparseable value falls back to auto-detection. The probe itself
-     * still runs: /props is also the modalities source. */
-    a->fields[0].extract = config_size("context_limit") > 0 ? NULL : extract_llamacpp_n_ctx;
-    a->fields[0].target = &p->context_limit;
-    a->fields[1].extract = extract_llamacpp_image_input;
-    a->fields[1].target = &p->image_input;
-    openai_attach_probe(p, probe_spawn(a));
-}
-
-/* A runtime /model switch (router mode serves several models) changes both
- * the context window and the vision capability, so re-probe /props for the
- * newly selected model. openai_context_probe_reset settles the prior probe
- * and clears context_limit + image_input to unknown; the agent commits the
- * new model to config before calling this, so props_url picks it up. */
-static void llamacpp_refresh_context(struct provider *p, const char *model)
-{
-    (void)model;
-    openai_context_probe_reset(p);
-    char *resolved = resolve_base_url();
+        return -1;
+    out->url = url;
     const char *key = config_str("openai.api_key");
-    spawn_context_probe(p, resolved, (key && *key) ? key : NULL);
-    free(resolved);
+    if (key && *key) {
+        out->headers = xcalloc(2, sizeof(*out->headers));
+        out->headers[0] = xasprintf("Authorization: Bearer %s", key);
+        out->headers[1] = NULL;
+    }
+    out->timeout_s = META_PROBE_TIMEOUT_S;
+    out->parse = llamacpp_parse_meta;
+    return 0;
 }
 
 struct provider *llamacpp_provider_new(const char *name)
@@ -310,7 +280,7 @@ struct provider *llamacpp_provider_new(const char *name)
     const char *key = config_str("openai.api_key");
     if (key && !*key)
         key = NULL;
-    if (probe_model(resolved, key) != 0) {
+    if (reconcile_model(resolved, key) != 0) {
         hax_err("llama.cpp: failed to auto-discover model from %s/models\n"
                 "hax: is llama-server running? "
                 "(set HAX_MODEL to skip probing, or adjust HAX_LLAMACPP_PORT / "
@@ -344,12 +314,13 @@ struct provider *llamacpp_provider_new(const char *name)
     struct provider *p = openai_provider_new_preset(&preset);
     if (p) {
         p->model_label = llamacpp_model_label;
-        p->refresh_context = llamacpp_refresh_context;
-        /* Context-limit probe runs in the background: an older llama-server
+        p->probe_model = llamacpp_probe_model;
+        /* The metadata fetch runs in the background: an older llama-server
          * without /props, or a proxy that doesn't expose it, just means the
          * percentage display is hidden — not a reason to refuse to start
-         * (or to delay the first prompt). */
-        spawn_context_probe(p, resolved, key);
+         * (or to delay the first prompt). Reads the model the constructor
+         * just reconciled into the override tier. */
+        model_meta_refresh(p, config_str("model"));
     }
     free(resolved);
     free(default_url);

@@ -103,6 +103,11 @@ json_t *anthropic_build_messages(const struct item *items, size_t n, const char 
  * unknown sentinels. Pure; exposed for unit tests. */
 void anthropic_parse_model(const json_t *entry, struct model_info *out);
 
+/* Output cap for one response: the model's own reported ceiling when
+ * max_tokens is unconfigured, the configured value clamped to that ceiling
+ * when it is. Exposed for unit tests. */
+int anthropic_max_tokens(struct provider *p, const char *model);
+
 extern const struct provider_factory PROVIDER_ANTHROPIC;
 
 #endif /* HAX_ANTHROPIC_H */

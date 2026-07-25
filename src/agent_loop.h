@@ -97,7 +97,7 @@ struct agent_loop_hooks {
     int (*checkpoint)(void *user);
     void (*tool_seen)(const struct item *call, void *user);
     /* image_input: resolved capability of the active provider+model
-     * (agent_image_input), for the tool_ctx the hook builds on RUN. */
+     * (model_meta_image_input), for the tool_ctx the hook builds on RUN. */
     struct item (*tool_call)(const struct item *call, enum agent_loop_tool_action action,
                              int image_input, void *user);
     void (*compact)(void *user);

@@ -44,7 +44,9 @@ sources = files(
     'src/catalog.c',
     'src/compact.c',
     'src/config.c',
+    'src/effort.c',
     'src/file_mention.c',
+    'src/model_meta.c',
     'src/oneshot.c',
     'src/paste_image.c',
     'src/provider.c',
@@ -70,7 +72,6 @@ sources = files(
     'src/providers/openai_compat.c',
     'src/providers/openai_events.c',
     'src/providers/openrouter.c',
-    'src/providers/probe.c',
     'src/providers/registry.c',
 
     'src/render/ctrl_strip.c',

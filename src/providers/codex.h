@@ -24,6 +24,12 @@ void codex_parse_model(const json_t *entry, struct model_info *out);
  * model the /model picker should not offer. Exposed for unit tests. */
 int codex_model_hidden(const json_t *entry);
 
+/* Translate the entry's supported_reasoning_levels into the effort values
+ * the API accepts for it — a UI ladder in the catalog, so this drops a level
+ * the wire rejects and adds one it takes but never lists (see the
+ * definition). Called by codex_parse_model; separate for unit tests. */
+void codex_parse_efforts(const json_t *entry, struct effort_set *out);
+
 /* Translate flat conversation items into the Responses API `input` array.
  * Exposed for unit testing the round-trip without an HTTP call: user/
  * assistant messages, function_call / function_call_output, reasoning-blob

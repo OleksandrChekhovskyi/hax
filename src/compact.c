@@ -1,12 +1,11 @@
 /* SPDX-License-Identifier: MIT */
 #include "compact.h"
 
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "agent_core.h"
-#include "catalog.h"
+#include "model_meta.h"
 #include "config.h"
 #include "provider.h"
 #include "session.h"
@@ -90,23 +89,6 @@ int compact_should_auto(long ctx_tokens, long limit)
     if (!compact_auto_enabled())
         return 0;
     return compact_over_threshold(ctx_tokens, limit, threshold_pct());
-}
-
-long compact_context_limit(const struct provider *p, const char *model)
-{
-    long env = config_size("context_limit");
-    if (env > 0)
-        return env;
-    long auto_v = atomic_load(&p->context_limit);
-    if (auto_v > 0)
-        return auto_v;
-    if (p->catalog_id && model && *model) {
-        struct catalog_entry e;
-        catalog_lookup(p->catalog_id, model, &e);
-        if (e.context > 0)
-            return e.context;
-    }
-    return 0;
 }
 
 static char *compact_build_prompt(const char *instructions)
@@ -214,7 +196,7 @@ static char *compact_summarize(const struct agent_session *s, struct provider *p
             .tools = s->tools,
             .n_tools = s->n_tools,
             .effort = s->effort,
-            .image_input = agent_image_input(p, s->model),
+            .image_input = model_meta_image_input(p, s->model),
         };
         if (attempts)
             (*attempts)++;
@@ -353,6 +335,15 @@ void compact_run(const struct compact_params *params, struct compact_result *res
         result->outcome = COMPACT_EMPTY;
         return;
     }
+
+    /* Summarizing is a model call like any other, and it can be the first
+     * one a run makes (a resumed conversation already over the threshold),
+     * so it owes the same narrowing check the REPL does before a prompt.
+     * The records written below carry the selection, so re-stamp the header
+     * with it too. */
+    if (agent_session_resync_effort(params->session, params->provider, NULL))
+        session_log_set_meta(params->slog, provider_log_name(params->provider),
+                             params->session->model, params->session->effort, config_str("preset"));
 
     struct compact_sink sink = {.hooks = &params->hooks};
     turn_init(&sink.assembly);

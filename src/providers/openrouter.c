@@ -8,82 +8,19 @@
 
 #include "busy.h"
 #include "config.h"
+#include "model_meta.h"
 #include "openai.h"
-#include "probe.h"
 #include "util.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
 #include "transport/http.h"
 
-/* Single-model lookup is small (one entry's worth of metadata, a few KB)
- * vs the full catalog (~430 KB at the time of writing, hundreds of
- * entries) — even on a slow link this rarely takes more than a second.
- * Failure is silent: we just leave the percentage display hidden,
- * which the user can also fill manually via HAX_CONTEXT_LIMIT. */
+/* One entry's worth of metadata is a few KB, so this rarely takes more than
+ * a second even on a slow link. Failure is silent — the lower tiers answer,
+ * and HAX_CONTEXT_LIMIT remains a manual override. */
 #define PROBE_TIMEOUT_S 5
 
-/* Walk the per-model response shape:
- *     { "data": { "id": "...", "endpoints": [ { "context_length": N, ... }, ... ] } }
- *
- * One model can be served by several upstream providers (each is one
- * `endpoints[]` entry) with potentially different context windows.
- * Take the maximum — that matches the model-level `context_length`
- * the catalog and the OpenRouter UI advertise, which is what users
- * expect to see represented in the percentage display. An empty
- * `endpoints[]` (deprecated or restricted model) returns 0, which the
- * helper drops silently. `user` is unused — the URL already targets
- * one model, so there's no slug to match against here. */
-static long extract_openrouter_context(const char *body, void *user)
-{
-    (void)user;
-    json_t *root = json_loads(body, 0, NULL);
-    if (!root)
-        return 0;
-    long out = 0;
-    json_t *data = json_object_get(root, "data");
-    json_t *endpoints = data ? json_object_get(data, "endpoints") : NULL;
-    if (json_is_array(endpoints)) {
-        size_t i;
-        json_t *entry;
-        json_array_foreach(endpoints, i, entry)
-        {
-            json_t *ctx = json_object_get(entry, "context_length");
-            if (json_is_integer(ctx) && json_integer_value(ctx) > out)
-                out = (long)json_integer_value(ctx);
-        }
-    }
-    json_decref(root);
-    return out;
-}
-
-/* The same per-model response carries the model-level architecture block:
- *     { "data": { "architecture": { "input_modalities": ["text","image",...] } } }
- * Map its presence to a definite yes/no; an absent or malformed block
- * returns 0 (unknown, dropped) so consumers keep their fallback. */
-static long extract_openrouter_image_input(const char *body, void *user)
-{
-    (void)user;
-    json_t *root = json_loads(body, 0, NULL);
-    if (!root)
-        return 0;
-    long out = PROVIDER_IMG_UNKNOWN;
-    json_t *data = json_object_get(root, "data");
-    json_t *arch = data ? json_object_get(data, "architecture") : NULL;
-    json_t *mods = arch ? json_object_get(arch, "input_modalities") : NULL;
-    if (json_is_array(mods)) {
-        out = PROVIDER_IMG_NO;
-        size_t i;
-        json_t *m;
-        json_array_foreach(mods, i, m)
-        {
-            const char *s = json_string_value(m);
-            if (s && strcmp(s, "image") == 0)
-                out = PROVIDER_IMG_YES;
-        }
-    }
-    json_decref(root);
-    return out;
-}
+static const char *openrouter_api_key(void);
 
 /* ---------- /model picker metadata ---------- */
 
@@ -140,6 +77,14 @@ void openrouter_parse_model(const json_t *entry, struct model_info *out)
     if (json_is_integer(ctx) && json_integer_value(ctx) > 0)
         out->context = (long)json_integer_value(ctx);
 
+    /* The routed upstream's own cap on one response, where it declares one
+     * (most of the catalog does). Distinct from context_length, which covers
+     * the whole request. */
+    json_t *top = json_object_get(entry, "top_provider");
+    json_t *max_out = json_is_object(top) ? json_object_get(top, "max_completion_tokens") : NULL;
+    if (json_is_integer(max_out) && json_integer_value(max_out) > 0)
+        out->max_output = (long)json_integer_value(max_out);
+
     json_t *arch = json_object_get(entry, "architecture");
     out->image_input =
         cap_from_array(arch ? json_object_get(arch, "input_modalities") : NULL, "image");
@@ -157,39 +102,125 @@ void openrouter_parse_model(const json_t *entry, struct model_info *out)
         out->cost_cache_read = openrouter_rate(pricing, "input_cache_read");
     }
 
+    openrouter_parse_efforts(entry, &out->efforts);
     out->desc = openrouter_lead_line(entry);
 }
 
-static void spawn_context_probe(struct provider *p, const char *api_key)
+/* Effort levels from the entry's `reasoning` block:
+ *
+ *     "reasoning": {"mandatory": false, "default_enabled": true,
+ *                   "supported_efforts": ["max","xhigh","high","medium","low"],
+ *                   "default_effort": "high"}
+ *
+ * Taken verbatim: OpenRouter normalizes every upstream's vocabulary into
+ * this one field. It narrows hard — a third of the models listing efforts
+ * stop at three levels — and since OpenRouter maps an unsupported level to
+ * the nearest instead of failing, an un-narrowed picker would offer rows
+ * that silently do nothing.
+ *
+ * No `reasoning` block is a definite "no levels" — a third of the catalog
+ * can't reason at all — unless the entry lists the parameter anyway (see
+ * below). A block without `supported_efforts` (a toggle or a token budget)
+ * leaves the set unknown so the lower tiers can answer, as distinct from an
+ * empty list, which denies every level. */
+void openrouter_parse_efforts(const json_t *entry, struct effort_set *out)
 {
-    const char *model = config_str("model");
-    if (!model || !*model)
-        return; /* nothing to look up — agent will surface the missing-model error */
-
-    struct probe_args *a = xcalloc(1, sizeof(*a));
-    /* OpenRouter model ids contain `/` (and sometimes `:variant`)
-     * which are valid URL path-segment characters per RFC 3986
-     * sub-delims, so concatenation works without percent-encoding —
-     * confirmed against ids like `meta-llama/llama-3.2-3b-instruct:free`.
-     * If a more exotic id ever needs escaping, this is the place to
-     * add it. */
-    a->url = xasprintf("https://openrouter.ai/api/v1/models/%s/endpoints", model);
-    if (api_key && *api_key) {
-        a->headers = xcalloc(2, sizeof(*a->headers));
-        a->headers[0] = xasprintf("Authorization: Bearer %s", api_key);
-        a->headers[1] = NULL;
+    json_t *r = json_object_get(entry, "reasoning");
+    if (!json_is_object(r)) {
+        json_t *sp = json_object_get(entry, "supported_parameters");
+        if (!json_is_array(sp))
+            return;
+        /* The router entries (openrouter/auto and friends) carry no
+         * reasoning block — they describe no single model, having yet to
+         * choose one — but do accept the parameter. Taking that as "no
+         * levels" would hide /effort for them and drop a configured one, so
+         * leave the question to the static ladder. Only an entry that
+         * describes its parameters without any of these is a definite no. */
+        for (size_t i = 0; i < json_array_size(sp); i++) {
+            const char *s = json_string_value(json_array_get(sp, i));
+            if (s && (strcmp(s, "reasoning") == 0 || strcmp(s, "reasoning_effort") == 0))
+                return;
+        }
+        out->known = 1;
+        return;
     }
-    a->timeout_s = PROBE_TIMEOUT_S;
-    /* A usable user-supplied context_limit wins; skip that extraction
-     * (never overwrite the override) but still fetch — the same response
-     * carries the input-modalities answer. */
-    a->fields[0].extract = config_size("context_limit") > 0 ? NULL : extract_openrouter_context;
-    a->fields[0].target = &p->context_limit;
-    a->fields[1].extract = extract_openrouter_image_input;
-    a->fields[1].target = &p->image_input;
-    /* Hand off to the openai destroy() — it owns the join, so we don't
-     * need to track the handle locally. */
-    openai_attach_probe(p, probe_spawn(a));
+    json_t *levels = json_object_get(r, "supported_efforts");
+    if (!json_is_array(levels))
+        return;
+    out->known = 1; /* present-but-empty is an answer: no levels at all */
+    for (size_t i = 0; i < json_array_size(levels); i++)
+        effort_set_add(out, json_string_value(json_array_get(levels, i)));
+}
+
+/* Locate `model` in a `{"data": [ ... ]}` catalog page and hand the entry to
+ * the same parser the /model picker uses.
+ *
+ * The exact-id match is load-bearing: the ?q= query below is a substring
+ * search, so asking for "openai/gpt-5.6-sol" also returns
+ * "openai/gpt-5.6-sol-pro" — and returns it first. Taking data[0] would
+ * quietly describe a different (pricier) model than the one being used. */
+void openrouter_parse_meta(const char *body, const char *model, struct model_info *out)
+{
+    json_t *root = json_loads(body, 0, NULL);
+    if (!root)
+        return;
+    json_t *data = json_object_get(root, "data");
+    if (json_is_array(data)) {
+        size_t i;
+        json_t *entry;
+        json_array_foreach(data, i, entry)
+        {
+            const char *id = json_string_value(json_object_get(entry, "id"));
+            if (id && strcmp(id, model) == 0) {
+                openrouter_parse_model(entry, out);
+                break;
+            }
+        }
+    }
+    json_decref(root);
+}
+
+/* Percent-encode everything outside the RFC 3986 unreserved set. Model ids
+ * carry '/' and ':' ("meta-llama/llama-3.2-3b-instruct:free"), which are
+ * legal in a path segment but must not travel raw in a query. */
+static char *query_escape(const char *s)
+{
+    static const char HEX[] = "0123456789ABCDEF";
+    struct buf b;
+    buf_init(&b);
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') ||
+            *p == '-' || *p == '_' || *p == '.' || *p == '~') {
+            buf_append(&b, (const char *)p, 1);
+        } else {
+            char esc[3] = {'%', HEX[*p >> 4], HEX[*p & 0xf]};
+            buf_append(&b, esc, 3);
+        }
+    }
+    return buf_steal(&b);
+}
+
+/* Metadata for one model, from the catalog filtered by ?q=. The full
+ * /models document is ~535 KB and the per-model /endpoints one carries
+ * neither pricing nor effort levels; the filtered query answers in ~2.7 KB
+ * with the whole entry. */
+int openrouter_probe_model(struct provider *p, const char *model, struct model_probe *out)
+{
+    (void)p;
+    if (!model || !*model)
+        return -1;
+    char *q = query_escape(model);
+    out->url = xasprintf("https://openrouter.ai/api/v1/models?q=%s", q);
+    free(q);
+    const char *key = openrouter_api_key();
+    if (key) {
+        out->headers = xcalloc(2, sizeof(*out->headers));
+        out->headers[0] = xasprintf("Authorization: Bearer %s", key);
+        out->headers[1] = NULL;
+    }
+    out->timeout_s = PROBE_TIMEOUT_S;
+    out->parse = openrouter_parse_meta;
+    return 0;
 }
 
 /* Re-resolve the API key exactly as the constructor does (HAX_OPENAI_API_KEY,
@@ -333,18 +364,6 @@ static int openrouter_query_usage(struct provider *p)
     return 0;
 }
 
-/* /model switched the model: the per-model /endpoints catalog gives a
- * different window, so re-probe. openai_context_probe_reset settles the prior
- * probe and clears the limit; spawn_context_probe re-reads config_str("model")
- * (the agent committed the new value before apply), so the explicit `model`
- * isn't needed here. */
-static void openrouter_refresh_context(struct provider *p, const char *model)
-{
-    (void)model;
-    openai_context_probe_reset(p);
-    spawn_context_probe(p, openrouter_api_key());
-}
-
 struct provider *openrouter_provider_new(const char *name)
 {
     (void)name;
@@ -353,8 +372,6 @@ struct provider *openrouter_provider_new(const char *name)
      * headers can never reach an unrelated host, and a base URL
      * left set for another backend doesn't block selecting openrouter. Custom
      * endpoints belong on HAX_PROVIDER=openai-compatible. */
-    const char *key = openrouter_api_key();
-
     const char *title = config_str("openrouter.title");
     const char *referer = config_str("openrouter.referer");
 
@@ -389,9 +406,9 @@ struct provider *openrouter_provider_new(const char *name)
          * NULL keeps the provider default and "none" disables reasoning.
          * show_reasoning remains an independent display-only setting. */
         .reasoning_format = REASONING_NESTED,
-        /* OpenRouter normalizes the full OpenAI-style ladder across upstreams
-         * and maps an unsupported level to the nearest one, so the whole
-         * ladder is safe to offer. */
+        /* Safe as a vocabulary: OpenRouter maps an unsupported level to the
+         * nearest rather than rejecting it. What each model actually takes
+         * comes from openrouter_parse_efforts. */
         .efforts = OPENAI_EFFORT_LADDER,
         .n_efforts = OPENAI_EFFORT_LADDER_N,
         .parse_model = openrouter_parse_model,
@@ -402,12 +419,12 @@ struct provider *openrouter_provider_new(const char *name)
     free(title_hdr);
     free(referer_hdr);
     if (p) {
-        p->refresh_context = openrouter_refresh_context;
+        p->probe_model = openrouter_probe_model;
         p->query_usage = openrouter_query_usage;
         /* Hundreds of catalog entries in no meaningful order — alphabetize
          * so vendor prefixes group together in the picker. */
         p->sort_models = 1;
-        spawn_context_probe(p, key);
+        model_meta_refresh(p, config_str("model"));
     }
     return p;
 }
