@@ -72,6 +72,8 @@ static void check_codec(const struct item *src)
     struct item got;
     EXPECT(item_from_json(back, &got) == 0);
     EXPECT(item_eq(src, &got));
+    EXPECT(streq0(src->provider, got.provider));
+    EXPECT(streq0(src->model, got.model));
     item_free(&got);
     json_decref(back);
     free(s);
@@ -148,37 +150,56 @@ static void free_items(struct item *items, size_t n)
     free(items);
 }
 
-int main(void)
+static void reset_session_state(void)
 {
-    /* ---- codec: every kind round-trips ---- */
+    setenv("XDG_STATE_HOME", t_tempdir(), 1);
+    unsetenv("HAX_NO_SESSION");
+}
+
+static char *write_session(const char *provider, const char *model, const char *effort,
+                           const char *preset, const struct item *items, size_t n)
+{
+    struct session_log *log = session_log_open(provider, model, effort, preset);
+    EXPECT(log != NULL);
+    if (!log)
+        return xstrdup("/nonexistent");
+    char *path = xstrdup(session_log_path(log));
+    session_log_append(log, items, n);
+    session_log_close(log);
+    return path;
+}
+
+static void test_item_codec_round_trip(void)
+{
+    /* Session persistence depends on every item kind surviving the JSON codec
+     * without losing provider-facing state. */
     for (size_t i = 0; i < CONVO_N; i++)
         check_codec(&CONVO[i]);
+}
 
-    /* ---- isolate persistence under a throwaway state dir ---- */
-    setenv("XDG_STATE_HOME", t_tempdir(), 1);
+static void test_recording_control(void)
+{
+    reset_session_state();
 
-    /* HAX_NO_SESSION disables persistence entirely. */
+    /* Explicit opt-out must avoid even opening a log; "auto" is resolved by
+     * the agent and remains recordable at this lower layer. */
     setenv("HAX_NO_SESSION", "1", 1);
     EXPECT(session_log_open("alpha", "m1", "high", NULL) == NULL);
 
-    /* Its `auto` default is not this layer's to interpret — resolving it
-     * needs the live provider (agent_recording_enabled), which decides by
-     * not opening a log at all. Here it simply isn't truthy, so it records.
-     * Nothing is appended, so no file is left behind for the tests below. */
     setenv("HAX_NO_SESSION", "auto", 1);
-    struct session_log *autolog = session_log_open("alpha", "m1", "high", NULL);
-    EXPECT(autolog != NULL);
-    session_log_close(autolog);
-    unsetenv("HAX_NO_SESSION");
-
-    /* ---- write a session, then load it back ---- */
     struct session_log *log = session_log_open("alpha", "m1", "high", NULL);
     EXPECT(log != NULL);
-    char *path = xstrdup(session_log_path(log));
-    EXPECT(path[0] != '\0');
-    session_log_append(log, CONVO, CONVO_N);
     session_log_close(log);
+    unsetenv("HAX_NO_SESSION");
+}
 
+static void test_session_round_trip(void)
+{
+    reset_session_state();
+    char *path = write_session("alpha", "m1", "high", NULL, CONVO, CONVO_N);
+
+    /* A resume must recover both the complete conversation and the selection
+     * needed to continue it with the same provider. */
     struct item *items;
     size_t n;
     struct session_meta meta;
@@ -191,457 +212,528 @@ int main(void)
     EXPECT_STR_EQ(meta.provider, "alpha");
     EXPECT_STR_EQ(meta.model, "m1");
     EXPECT_STR_EQ(meta.effort, "high");
+
+    free_items(items, n);
+    session_meta_free(&meta);
+    free(path);
+}
+
+static void test_reasoning_provenance_round_trip(void)
+{
+    reset_session_state();
+    struct item conversation[] = {
+        {.kind = ITEM_USER_MESSAGE, .text = (char *)"q"},
+        {.kind = ITEM_REASONING,
+         .reasoning_json = (char *)"{\"id\":\"enc\"}",
+         .provider = (char *)"pa",
+         .model = (char *)"mX"},
+        {.kind = ITEM_REASONING, .reasoning_text = (char *)"plain cot"},
+        {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"a"},
+    };
+    char *path = write_session("pa", "ma", NULL, NULL, conversation, 4);
+
+    /* Loading is non-destructive: replay compatibility is decided later, so
+     * explicit provenance survives and unstamped reasoning inherits the header. */
+    struct item *items;
+    size_t n;
+    EXPECT(session_load(path, &items, &n, NULL) == 0);
+    const struct item *encoded = NULL;
+    const struct item *text = NULL;
+    for (size_t i = 0; i < n; i++) {
+        if (items[i].kind != ITEM_REASONING)
+            continue;
+        if (items[i].reasoning_json)
+            encoded = &items[i];
+        else
+            text = &items[i];
+    }
+    EXPECT(encoded && encoded->reasoning_json && encoded->provider &&
+           strcmp(encoded->provider, "pa") == 0);
+    EXPECT(encoded && encoded->model && strcmp(encoded->model, "mX") == 0);
+    EXPECT(text && text->reasoning_text && strcmp(text->reasoning_text, "plain cot") == 0);
+    EXPECT(text && text->provider && strcmp(text->provider, "pa") == 0);
+    EXPECT(text && text->model && strcmp(text->model, "ma") == 0);
+
+    free_items(items, n);
+    free(path);
+}
+
+static void test_session_listing(void)
+{
+    reset_session_state();
+    char *path = write_session("alpha", "m1", "high", NULL, CONVO, CONVO_N);
+    struct item *items;
+    size_t n;
+    struct session_meta meta;
+    EXPECT(session_load(path, &items, &n, &meta) == 0);
     char *saved_id = xstrdup(meta.id);
     free_items(items, n);
     session_meta_free(&meta);
 
-    /* ---- load is non-destructive: the opaque blob and its provenance stamp
-       survive verbatim. Whether a blob can be replayed is decided later by the
-       provider's build path (which compares the stamp to the request's model),
-       not by load — so a model switch never destroys history here. ---- */
-    EXPECT(session_load(path, &items, &n, NULL) == 0);
-    EXPECT(n == CONVO_N);
-    const struct item *rs = NULL;
-    for (size_t i = 0; i < n; i++)
-        if (items[i].kind == ITEM_REASONING)
-            rs = &items[i];
-    EXPECT(rs && rs->reasoning_json != NULL && rs->reasoning_text != NULL);
-    /* The fixture carries no per-item stamp, so it inherits the header's. */
-    EXPECT(rs && rs->provider && strcmp(rs->provider, "alpha") == 0);
-    EXPECT(rs && rs->model && strcmp(rs->model, "m1") == 0);
-    free_items(items, n);
-
-    /* ---- listing finds the session with a usable summary ---- */
+    /* Enumeration stays cheap by deriving identity from the filename and
+     * deferring prompt extraction until the picker asks for it. */
     char cwd[4096];
     EXPECT(getcwd(cwd, sizeof(cwd)) != NULL);
     struct session_entry *list;
-    size_t ln;
-    EXPECT(session_list(cwd, &list, &ln) == 0);
-    EXPECT(ln >= 1);
+    size_t list_n;
+    EXPECT(session_list(cwd, &list, &list_n) == 0);
+    EXPECT(list_n == 1);
     const struct session_entry *found = NULL;
-    for (size_t i = 0; i < ln; i++)
+    for (size_t i = 0; i < list_n; i++) {
         if (strcmp(list[i].path, path) == 0)
             found = &list[i];
+    }
     EXPECT(found != NULL);
     if (found) {
-        EXPECT_STR_EQ(found->id, saved_id);  /* id comes from the filename, no file read */
-        EXPECT(found->first_prompt == NULL); /* listing is enumeration-only */
-        char *fp = session_first_prompt(found->path, 64); /* lazily, on demand */
-        EXPECT(fp != NULL && strstr(fp, "hello world") != NULL);
-        free(fp);
+        EXPECT_STR_EQ(found->id, saved_id);
+        EXPECT(found->first_prompt == NULL);
+        char *prompt = session_first_prompt(found->path, 64);
+        EXPECT(prompt != NULL && strstr(prompt, "hello world") != NULL);
+        free(prompt);
     }
-    session_list_free(list, ln);
 
-    /* ---- session files are owner-only (no world-readable secrets) ---- */
-    struct stat pst;
-    EXPECT(stat(path, &pst) == 0);
-    EXPECT((pst.st_mode & 0077) == 0); /* no group/other permissions */
+    session_list_free(list, list_n);
+    free(saved_id);
+    free(path);
+}
 
-    /* ---- resume continues the same file ---- */
-    struct item convo_ext[CONVO_N + 2];
-    memcpy(convo_ext, CONVO, sizeof(CONVO));
-    convo_ext[CONVO_N] = (struct item){.kind = ITEM_TURN_BOUNDARY};
-    convo_ext[CONVO_N + 1] = (struct item){.kind = ITEM_USER_MESSAGE, .text = (char *)"again"};
+static void test_session_file_permissions(void)
+{
+    reset_session_state();
+    char *path = write_session("alpha", "m1", NULL, NULL, CONVO, CONVO_N);
 
-    struct session_log *r = session_log_resume(path, "alpha", "m1", "high", NULL, CONVO_N);
-    EXPECT(r != NULL);
-    session_log_append(r, convo_ext, CONVO_N + 2);
-    session_log_close(r);
+    /* Transcripts can contain secrets and must never be group/world-readable. */
+    struct stat st;
+    EXPECT(stat(path, &st) == 0);
+    EXPECT((st.st_mode & 0077) == 0);
 
+    free(path);
+}
+
+static void test_resume_appends_only_new_items(void)
+{
+    reset_session_state();
+    char *path = write_session("alpha", "m1", "high", NULL, CONVO, CONVO_N);
+    struct item extended[CONVO_N + 2];
+    memcpy(extended, CONVO, sizeof(CONVO));
+    extended[CONVO_N] = (struct item){.kind = ITEM_TURN_BOUNDARY};
+    extended[CONVO_N + 1] = (struct item){.kind = ITEM_USER_MESSAGE, .text = (char *)"again"};
+
+    /* Resume receives the full in-memory history but must append only the
+     * suffix beyond its persisted high-water mark. */
+    struct session_log *log = session_log_resume(path, "alpha", "m1", "high", NULL, CONVO_N);
+    EXPECT(log != NULL);
+    session_log_append(log, extended, CONVO_N + 2);
+    session_log_close(log);
+
+    struct item *items;
+    size_t n;
     EXPECT(session_load(path, &items, &n, NULL) == 0);
     EXPECT(n == CONVO_N + 2);
     if (n == CONVO_N + 2) {
         EXPECT(items[n - 1].kind == ITEM_USER_MESSAGE);
         EXPECT_STR_EQ(items[n - 1].text, "again");
     }
+
     free_items(items, n);
+    free(path);
+}
 
-    /* ---- the reasoning provenance stamp round-trips: a per-item stamp wins,
-       and an item lacking one inherits the header's ---- */
-    struct item conv_r[] = {
-        {.kind = ITEM_USER_MESSAGE, .text = (char *)"q"},
-        /* explicit per-item stamp (a different model than the header's) */
-        {.kind = ITEM_REASONING,
-         .reasoning_json = (char *)"{\"id\":\"enc\"}",
-         .provider = (char *)"pa",
-         .model = (char *)"mX"},
-        /* no stamp → inherits the header (pa/ma) */
-        {.kind = ITEM_REASONING, .reasoning_text = (char *)"plain cot"},
-        {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"a"},
-    };
-    struct session_log *lr = session_log_open("pa", "ma", NULL, NULL);
-    EXPECT(lr != NULL);
-    char *pathr = xstrdup(session_log_path(lr));
-    session_log_append(lr, conv_r, 4);
-    session_log_close(lr);
+static void test_first_prompt_labels(void)
+{
+    reset_session_state();
+    struct item boundary[] = {{.kind = ITEM_TURN_BOUNDARY}};
+    char *empty_path = write_session("pa", "ma", NULL, NULL, boundary, 1);
+    char *prompt = session_first_prompt(empty_path, 64);
+    EXPECT(prompt == NULL);
+    free(prompt);
+    free(empty_path);
 
-    EXPECT(session_load(pathr, &items, &n, NULL) == 0);
-    const struct item *enc = NULL, *txt = NULL;
-    for (size_t i = 0; i < n; i++)
-        if (items[i].kind == ITEM_REASONING) {
-            if (items[i].reasoning_json)
-                enc = &items[i];
-            else
-                txt = &items[i];
-        }
-    /* Both items survive (non-destructive); the blob keeps its own stamp... */
-    EXPECT(enc && enc->reasoning_json && enc->provider && strcmp(enc->provider, "pa") == 0);
-    EXPECT(enc && enc->model && strcmp(enc->model, "mX") == 0);
-    /* ...and the unstamped one inherits the header. */
-    EXPECT(txt && txt->reasoning_text && strcmp(txt->reasoning_text, "plain cot") == 0);
-    EXPECT(txt && txt->model && strcmp(txt->model, "ma") == 0);
-    free_items(items, n);
-
-    free(pathr);
-
-    /* ---- a session with no user message has no first prompt ---- */
-    struct item conv_b[] = {{.kind = ITEM_TURN_BOUNDARY}};
-    struct session_log *lb = session_log_open("pa", "ma", NULL, NULL);
-    EXPECT(lb != NULL);
-    char *pathb = xstrdup(session_log_path(lb));
-    session_log_append(lb, conv_b, 1);
-    session_log_close(lb);
-    char *empty_fp = session_first_prompt(pathb, 64);
-    EXPECT(empty_fp == NULL);
-    free(empty_fp);
-    free(pathb);
-
-    /* ---- the first-prompt label skips a compaction seed ---- */
-    /* A compacted-then-continued session labels by the first real prompt;
-     * one holding only the seed labels "(compacted)". */
-    struct item conv_seed[] = {
+    struct item compacted[] = {
         {.kind = ITEM_USER_MESSAGE, .text = (char *)"condensed summary", .compact_seed = 1},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"continuing"},
         {.kind = ITEM_TURN_BOUNDARY},
         {.kind = ITEM_USER_MESSAGE, .text = (char *)"real question"},
     };
-    struct session_log *ls = session_log_open("pa", "ma", NULL, NULL);
-    EXPECT(ls != NULL);
-    char *paths = xstrdup(session_log_path(ls));
-    session_log_append(ls, conv_seed, 4);
-    session_log_close(ls);
-    char *seed_fp = session_first_prompt(paths, 64);
-    EXPECT(seed_fp != NULL && strstr(seed_fp, "real question") != NULL);
-    EXPECT(seed_fp == NULL || strstr(seed_fp, "condensed summary") == NULL);
-    free(seed_fp);
-    free(paths);
 
-    struct session_log *lso = session_log_open("pa", "ma", NULL, NULL);
-    EXPECT(lso != NULL);
-    char *pathso = xstrdup(session_log_path(lso));
-    session_log_append(lso, conv_seed, 2); /* seed + assistant, no real prompt */
-    session_log_close(lso);
-    char *only_fp = session_first_prompt(pathso, 64);
-    EXPECT(only_fp != NULL);
-    if (only_fp)
-        EXPECT_STR_EQ(only_fp, "(compacted)");
-    free(only_fp);
-    free(pathso);
+    /* Compaction summaries are synthetic; picker labels must prefer the first
+     * real prompt and identify seed-only histories without presenting it as one. */
+    char *continued_path = write_session("pa", "ma", NULL, NULL, compacted, 4);
+    prompt = session_first_prompt(continued_path, 64);
+    EXPECT(prompt != NULL && strstr(prompt, "real question") != NULL);
+    EXPECT(prompt == NULL || strstr(prompt, "condensed summary") == NULL);
+    free(prompt);
+    free(continued_path);
 
-    /* ---- resuming repairs a torn final line instead of fusing onto it ---- */
-    /* Simulate a crash that left the last record half-written (no trailing
-     * newline). A naive append would concatenate the next record onto it
-     * and corrupt the file; the resume path must terminate it first. */
-    char tornpath[] = "/tmp/hax_torn_XXXXXX";
-    int tfd = mkstemp(tornpath);
-    EXPECT(tfd >= 0);
-    if (tfd >= 0) {
-        const char *torn =
-            "{\"type\":\"session\",\"version\":1,\"provider\":\"pa\",\"model\":\"ma\"}\n"
-            "{\"kind\":\"turn_boundary\"}\n"
-            "{\"kind\":\"user\",\"text\":\"hi\"}\n"
-            "{\"kind\":\"assistant\",\"text\":\"hello\"}\n"
-            "{\"kind\":\"user\",\"text\":\"torn"; /* no close, no newline */
-        EXPECT(write(tfd, torn, strlen(torn)) == (ssize_t)strlen(torn));
-        close(tfd);
+    char *seed_path = write_session("pa", "ma", NULL, NULL, compacted, 2);
+    prompt = session_first_prompt(seed_path, 64);
+    EXPECT(prompt != NULL);
+    if (prompt)
+        EXPECT_STR_EQ(prompt, "(compacted)");
+    free(prompt);
+    free(seed_path);
+}
 
-        struct item *base;
-        size_t nb;
-        EXPECT(session_load(tornpath, &base, &nb, NULL) == 0);
-        EXPECT(nb == 3); /* boundary, user, assistant — torn line skipped */
+static void test_resume_repairs_torn_final_line(void)
+{
+    char path[] = "/tmp/hax_torn_XXXXXX";
+    int fd = mkstemp(path);
+    EXPECT(fd >= 0);
+    if (fd < 0)
+        return;
 
-        struct item ext[5];
-        memcpy(ext, base, nb * sizeof(struct item));
-        ext[nb] = (struct item){.kind = ITEM_USER_MESSAGE, .text = (char *)"after crash"};
-        struct session_log *lt = session_log_resume(tornpath, "pa", "ma", NULL, NULL, nb);
-        EXPECT(lt != NULL);
-        session_log_append(lt, ext, nb + 1);
-        session_log_close(lt);
-        free_items(base, nb);
+    /* A crash can leave a partial JSON record. Resume must terminate that
+     * fragment before appending, or the next valid record is fused to it. */
+    const char *torn = "{\"type\":\"session\",\"version\":1,\"provider\":\"pa\",\"model\":\"ma\"}\n"
+                       "{\"kind\":\"turn_boundary\"}\n"
+                       "{\"kind\":\"user\",\"text\":\"hi\"}\n"
+                       "{\"kind\":\"assistant\",\"text\":\"hello\"}\n"
+                       "{\"kind\":\"user\",\"text\":\"torn";
+    EXPECT(write(fd, torn, strlen(torn)) == (ssize_t)strlen(torn));
+    close(fd);
 
-        /* The appended record must be intact, not fused onto the fragment. */
-        struct item *after;
-        size_t na;
-        EXPECT(session_load(tornpath, &after, &na, NULL) == 0);
-        EXPECT(na == 4); /* the 3 valid + the new one; torn fragment still skipped */
-        if (na == 4)
-            EXPECT_STR_EQ(after[3].text, "after crash");
-        free_items(after, na);
-        unlink(tornpath);
-    }
+    struct item *base;
+    size_t base_n;
+    EXPECT(session_load(path, &base, &base_n, NULL) == 0);
+    EXPECT(base_n == 3);
 
-    /* ---- a dangling tool_call (crash before its result) is trimmed ---- */
-    struct item conv_tc[] = {
+    struct item extended[5];
+    memcpy(extended, base, base_n * sizeof(struct item));
+    extended[base_n] = (struct item){.kind = ITEM_USER_MESSAGE, .text = (char *)"after crash"};
+    struct session_log *log = session_log_resume(path, "pa", "ma", NULL, NULL, base_n);
+    EXPECT(log != NULL);
+    session_log_append(log, extended, base_n + 1);
+    session_log_close(log);
+    free_items(base, base_n);
+
+    struct item *after;
+    size_t after_n;
+    EXPECT(session_load(path, &after, &after_n, NULL) == 0);
+    EXPECT(after_n == 4);
+    if (after_n == 4)
+        EXPECT_STR_EQ(after[3].text, "after crash");
+    free_items(after, after_n);
+    unlink(path);
+}
+
+static void test_load_trims_dangling_tool_call(void)
+{
+    reset_session_state();
+    struct item conversation[] = {
         {.kind = ITEM_TURN_BOUNDARY},
         {.kind = ITEM_USER_MESSAGE, .text = (char *)"run it"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"sure"},
         {.kind = ITEM_TOOL_CALL,
          .call_id = (char *)"c1",
          .tool_name = (char *)"bash",
-         .tool_arguments_json = (char *)"{}"}, /* no matching tool_result */
+         .tool_arguments_json = (char *)"{}"},
     };
-    struct session_log *ltc = session_log_open("pa", "ma", NULL, NULL);
-    EXPECT(ltc != NULL);
-    char *pathtc = xstrdup(session_log_path(ltc));
-    session_log_append(ltc, conv_tc, 4);
-    session_log_close(ltc);
-    EXPECT(session_load(pathtc, &items, &n, NULL) == 0);
-    EXPECT(n == 3); /* boundary, user, assistant — the unpaired call dropped */
+    char *path = write_session("pa", "ma", NULL, NULL, conversation, 4);
+
+    /* A crash before tool completion must not replay an unanswerable call into
+     * the provider on resume. */
+    struct item *items;
+    size_t n;
+    EXPECT(session_load(path, &items, &n, NULL) == 0);
+    EXPECT(n == 3);
     for (size_t i = 0; i < n; i++)
         EXPECT(items[i].kind != ITEM_TOOL_CALL);
+
     free_items(items, n);
-    free(pathtc);
+    free(path);
+}
 
-    /* ---- session_log_materialized flips on the first append ---- */
-    struct session_log *lm = session_log_open("pa", "ma", NULL, NULL);
-    EXPECT(lm != NULL);
-    EXPECT(session_log_materialized(lm) == 0); /* path assigned, file not written yet */
-    struct item one_turn[] = {{.kind = ITEM_TURN_BOUNDARY},
-                              {.kind = ITEM_USER_MESSAGE, .text = (char *)"hi"}};
-    session_log_append(lm, one_turn, 2);
-    EXPECT(session_log_materialized(lm) != 0); /* header + items now on disk */
-    session_log_close(lm);
+static void test_log_materialization(void)
+{
+    reset_session_state();
+    struct session_log *log = session_log_open("pa", "ma", NULL, NULL);
+    EXPECT(log != NULL);
+
+    /* Merely preparing a log must not create empty session clutter; the first
+     * append is the point at which the session becomes durable. */
+    EXPECT(session_log_materialized(log) == 0);
+    struct item turn[] = {{.kind = ITEM_TURN_BOUNDARY},
+                          {.kind = ITEM_USER_MESSAGE, .text = (char *)"hi"}};
+    session_log_append(log, turn, 2);
+    EXPECT(session_log_materialized(log) != 0);
+    session_log_close(log);
     EXPECT(session_log_materialized(NULL) == 0);
+}
 
-    /* ---- undo: session_log_truncate keeps the first N user turns ---- */
-    /* Three turns; each is boundary + user + assistant. */
-    struct item conv_u[] = {
-        {.kind = ITEM_TURN_BOUNDARY},
-        {.kind = ITEM_USER_MESSAGE, .text = (char *)"t0"},
-        {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"a0"},
-        {.kind = ITEM_TURN_BOUNDARY},
-        {.kind = ITEM_USER_MESSAGE, .text = (char *)"t1"},
-        {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"a1"},
-        {.kind = ITEM_TURN_BOUNDARY},
-        {.kind = ITEM_USER_MESSAGE, .text = (char *)"t2"},
-        {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"a2"},
-    };
-    struct session_log *lu = session_log_open("pa", "ma", NULL, NULL);
-    EXPECT(lu != NULL);
-    char *pathu = xstrdup(session_log_path(lu));
-    session_log_append(lu, conv_u, 9);
-    /* Keep 2 turns: the cut lands on the boundary opening turn index 2, so
-     * items [0,6) survive (through assistant "a1"). */
-    EXPECT(session_log_truncate(lu, 2, 6) == 0);
-    /* Appending resumes cleanly from the new high-water mark. */
-    struct item conv_u2[7];
-    memcpy(conv_u2, conv_u, 6 * sizeof(struct item));
-    conv_u2[6] = (struct item){.kind = ITEM_USER_MESSAGE, .text = (char *)"redo"};
-    session_log_append(lu, conv_u2, 7);
-    session_log_close(lu);
+static struct item UNDO_CONVERSATION[] = {
+    {.kind = ITEM_TURN_BOUNDARY},
+    {.kind = ITEM_USER_MESSAGE, .text = (char *)"t0"},
+    {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"a0"},
+    {.kind = ITEM_TURN_BOUNDARY},
+    {.kind = ITEM_USER_MESSAGE, .text = (char *)"t1"},
+    {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"a1"},
+    {.kind = ITEM_TURN_BOUNDARY},
+    {.kind = ITEM_USER_MESSAGE, .text = (char *)"t2"},
+    {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"a2"},
+};
 
-    EXPECT(session_load(pathu, &items, &n, NULL) == 0);
+static void test_truncate_and_reappend(void)
+{
+    reset_session_state();
+    struct session_log *log = session_log_open("pa", "ma", NULL, NULL);
+    EXPECT(log != NULL);
+    char *path = xstrdup(session_log_path(log));
+    session_log_append(log, UNDO_CONVERSATION, 9);
+
+    /* Undo cuts at a turn boundary and resets the append high-water mark, so a
+     * replacement turn follows the retained history without resurrecting data. */
+    EXPECT(session_log_truncate(log, 2, 6) == 0);
+    struct item replacement[7];
+    memcpy(replacement, UNDO_CONVERSATION, 6 * sizeof(struct item));
+    replacement[6] = (struct item){.kind = ITEM_USER_MESSAGE, .text = (char *)"redo"};
+    session_log_append(log, replacement, 7);
+    session_log_close(log);
+
+    struct item *items;
+    size_t n;
+    EXPECT(session_load(path, &items, &n, NULL) == 0);
     EXPECT(n == 7);
     if (n == 7) {
         EXPECT_STR_EQ(items[5].text, "a1");
         EXPECT_STR_EQ(items[6].text, "redo");
     }
     for (size_t i = 0; i < n; i++)
-        EXPECT(!(items[i].text && strcmp(items[i].text, "t2") == 0)); /* discarded turn gone */
-    free_items(items, n);
-    free(pathu);
+        EXPECT(!(items[i].text && strcmp(items[i].text, "t2") == 0));
 
-    /* ---- undo everything: keep 0 turns leaves just the header ---- */
-    struct session_log *lz = session_log_open("pa", "ma", NULL, NULL);
-    EXPECT(lz != NULL);
-    char *pathz = xstrdup(session_log_path(lz));
-    session_log_append(lz, conv_u, 9);
-    EXPECT(session_log_truncate(lz, 0, 0) == 0);
-    session_log_close(lz);
-    EXPECT(session_load(pathz, &items, &n, NULL) == 0);
+    free_items(items, n);
+    free(path);
+}
+
+static void test_truncate_all_turns(void)
+{
+    reset_session_state();
+    struct session_log *log = session_log_open("pa", "ma", NULL, NULL);
+    EXPECT(log != NULL);
+    char *path = xstrdup(session_log_path(log));
+    session_log_append(log, UNDO_CONVERSATION, 9);
+
+    /* Undoing every turn retains a valid header rather than deleting or
+     * corrupting the session file. */
+    EXPECT(session_log_truncate(log, 0, 0) == 0);
+    session_log_close(log);
+    struct item *items;
+    size_t n;
+    EXPECT(session_load(path, &items, &n, NULL) == 0);
     EXPECT(n == 0);
+
     free_items(items, n);
-    free(pathz);
+    free(path);
+}
 
-    /* ---- fork: prefix copy branches without touching the source ---- */
-    struct session_log *lf = session_log_open("pa", "ma", "hi", NULL);
-    EXPECT(lf != NULL);
-    char *pathf = xstrdup(session_log_path(lf));
-    session_log_append(lf, conv_u, 9);
-    session_log_close(lf);
-
-    /* Capture the source id to prove the fork gets a fresh one. */
-    EXPECT(session_load(pathf, &items, &n, &meta) == 0);
-    char *src_id = xstrdup(meta.id);
+static void test_fork_copies_prefix_without_touching_source(void)
+{
+    reset_session_state();
+    char *source_path = write_session("pa", "ma", "hi", NULL, UNDO_CONVERSATION, 9);
+    struct item *items;
+    size_t n;
+    struct session_meta meta;
+    EXPECT(session_load(source_path, &items, &n, &meta) == 0);
+    char *source_id = xstrdup(meta.id);
     free_items(items, n);
     session_meta_free(&meta);
 
-    char *forkpath = NULL;
-    EXPECT(session_fork_file(pathf, 1, &forkpath) == 0);
-    EXPECT(forkpath != NULL);
-    if (forkpath) {
-        EXPECT(session_load(forkpath, &items, &n, &meta) == 0);
-        EXPECT(n == 3); /* one turn: boundary, user, assistant */
+    /* A fork needs a fresh identity and inherited selection while preserving
+     * both the source file and only the requested turn prefix. */
+    char *fork_path = NULL;
+    EXPECT(session_fork_file(source_path, 1, &fork_path) == 0);
+    EXPECT(fork_path != NULL);
+    if (fork_path) {
+        EXPECT(session_load(fork_path, &items, &n, &meta) == 0);
+        EXPECT(n == 3);
         if (n == 3)
             EXPECT_STR_EQ(items[1].text, "t0");
         for (size_t i = 0; i < n; i++)
             EXPECT(!(items[i].text && strcmp(items[i].text, "t1") == 0));
-        /* Fresh identity, inherited settings. */
-        EXPECT(meta.id != NULL && strcmp(meta.id, src_id) != 0);
+        EXPECT(meta.id != NULL && strcmp(meta.id, source_id) != 0);
         EXPECT_STR_EQ(meta.provider, "pa");
         EXPECT_STR_EQ(meta.model, "ma");
         EXPECT_STR_EQ(meta.effort, "hi");
         free_items(items, n);
         session_meta_free(&meta);
 
-        /* The header records where it forked from. */
-        size_t flen;
-        char *fdata = slurp_file(forkpath, &flen);
-        EXPECT(fdata != NULL);
-        if (fdata) {
-            EXPECT(strstr(fdata, "forked_from") != NULL);
-            EXPECT(strstr(fdata, src_id) != NULL);
-            free(fdata);
+        size_t data_n;
+        char *data = slurp_file(fork_path, &data_n);
+        EXPECT(data != NULL);
+        if (data) {
+            EXPECT(strstr(data, "forked_from") != NULL);
+            EXPECT(strstr(data, source_id) != NULL);
+            free(data);
         }
-        free(forkpath);
+        free(fork_path);
     }
 
-    /* The source file is untouched — still three full turns. */
-    EXPECT(session_load(pathf, &items, &n, NULL) == 0);
+    EXPECT(session_load(source_path, &items, &n, NULL) == 0);
     EXPECT(n == 9);
     free_items(items, n);
 
-    /* Forking past the last turn clones the whole file. */
-    char *clonepath = NULL;
-    EXPECT(session_fork_file(pathf, 3, &clonepath) == 0);
-    if (clonepath) {
-        EXPECT(session_load(clonepath, &items, &n, NULL) == 0);
+    char *clone_path = NULL;
+    EXPECT(session_fork_file(source_path, 3, &clone_path) == 0);
+    if (clone_path) {
+        EXPECT(session_load(clone_path, &items, &n, NULL) == 0);
         EXPECT(n == 9);
         free_items(items, n);
-        free(clonepath);
+        free(clone_path);
     }
-    free(src_id);
-    free(pathf);
 
-    /* ---- the recorded selection: header, amended by later switches ---- */
-    struct session_log *lsel = session_log_open("pa", "ma", "hi", "review");
-    EXPECT(lsel != NULL);
-    char *selpath = xstrdup(session_log_path(lsel));
-    /* Before the file exists, a switch just corrects the pending header. */
-    session_log_set_meta(lsel, "pb", "mb", NULL, NULL);
-    session_log_append(lsel, conv_u, 3);
-    struct session_meta sm;
-    EXPECT(session_read_meta(selpath, &sm) == 0);
-    EXPECT_STR_EQ(sm.provider, "pb");
-    EXPECT_STR_EQ(sm.model, "mb");
-    EXPECT(sm.effort == NULL);
-    EXPECT(sm.preset == NULL);
-    session_meta_free(&sm);
+    free(source_id);
+    free(source_path);
+}
 
-    /* Once it's on disk, a switch appends a selection record — and that is
-     * what a resume reads, not the now-stale header. Items are unaffected. */
-    session_log_set_meta(lsel, "pc", "mc", "low", "review");
-    session_log_append(lsel, conv_u, 6);
-    session_log_close(lsel);
-    EXPECT(session_read_meta(selpath, &sm) == 0);
-    EXPECT_STR_EQ(sm.provider, "pc");
-    EXPECT_STR_EQ(sm.model, "mc");
-    EXPECT_STR_EQ(sm.effort, "low");
-    EXPECT_STR_EQ(sm.preset, "review");
-    EXPECT(sm.id != NULL && sm.cwd != NULL);
-    session_meta_free(&sm);
-    /* session_load reports the same effective selection, and the extra
-     * records don't show up as items. */
-    EXPECT(session_load(selpath, &items, &n, &meta) == 0);
+static void test_selection_metadata_tracks_productive_switches(void)
+{
+    reset_session_state();
+    struct session_log *log = session_log_open("pa", "ma", "hi", "review");
+    EXPECT(log != NULL);
+    char *path = xstrdup(session_log_path(log));
+
+    /* Before materialization a switch corrects the pending header; afterwards
+     * it is recorded only when an append proves the switch produced output. */
+    session_log_set_meta(log, "pb", "mb", NULL, NULL);
+    session_log_append(log, UNDO_CONVERSATION, 3);
+    struct session_meta meta;
+    EXPECT(session_read_meta(path, &meta) == 0);
+    EXPECT_STR_EQ(meta.provider, "pb");
+    EXPECT_STR_EQ(meta.model, "mb");
+    EXPECT(meta.effort == NULL);
+    EXPECT(meta.preset == NULL);
+    session_meta_free(&meta);
+
+    session_log_set_meta(log, "pc", "mc", "low", "review");
+    session_log_append(log, UNDO_CONVERSATION, 6);
+    session_log_close(log);
+    EXPECT(session_read_meta(path, &meta) == 0);
+    EXPECT_STR_EQ(meta.provider, "pc");
+    EXPECT_STR_EQ(meta.model, "mc");
+    EXPECT_STR_EQ(meta.effort, "low");
+    EXPECT_STR_EQ(meta.preset, "review");
+    EXPECT(meta.id != NULL && meta.cwd != NULL);
+    session_meta_free(&meta);
+
+    struct item *items;
+    size_t n;
+    EXPECT(session_load(path, &items, &n, &meta) == 0);
     EXPECT(n == 6);
     EXPECT_STR_EQ(meta.provider, "pc");
     EXPECT_STR_EQ(meta.preset, "review");
     free_items(items, n);
     session_meta_free(&meta);
 
-    /* A switch earns its place in the file by producing something: until the
-     * next append it is in-memory only, so merely opening a session (a resume
-     * whose restore couldn't be applied, say) can't rewrite what it records.
-     * Once a turn follows, the record precedes it — and it's a whole
-     * selection, so leaving the stance drops the preset rather than letting
-     * the previous one stand. */
-    struct session_log *lsel2 = session_log_resume(selpath, "pc", "mc", "low", "review", 6);
-    EXPECT(lsel2 != NULL);
-    session_log_set_meta(lsel2, "pc", "md", NULL, NULL);
-    EXPECT(session_read_meta(selpath, &sm) == 0);
-    EXPECT_STR_EQ(sm.model, "mc"); /* nothing written yet */
-    EXPECT_STR_EQ(sm.preset, "review");
-    session_meta_free(&sm);
-    session_log_append(lsel2, conv_u, 9);
-    session_log_close(lsel2);
-    EXPECT(session_read_meta(selpath, &sm) == 0);
-    EXPECT_STR_EQ(sm.model, "md");
-    EXPECT(sm.preset == NULL);
-    EXPECT(sm.effort == NULL);
-    session_meta_free(&sm);
+    struct session_log *resumed = session_log_resume(path, "pc", "mc", "low", "review", 6);
+    EXPECT(resumed != NULL);
+    session_log_set_meta(resumed, "pc", "md", NULL, NULL);
+    EXPECT(session_read_meta(path, &meta) == 0);
+    EXPECT_STR_EQ(meta.model, "mc");
+    EXPECT_STR_EQ(meta.preset, "review");
+    session_meta_free(&meta);
 
-    /* Truncating away the record that carried the live selection must not
-     * strand the file on an older one: the turns that follow are produced by
-     * what the run is on, so the cut re-states it ahead of them. */
-    struct session_log *lsel4 = session_log_open("pa", "ma", NULL, NULL);
-    EXPECT(lsel4 != NULL);
-    char *cutpath = xstrdup(session_log_path(lsel4));
-    session_log_append(lsel4, conv_u, 6);
-    session_log_set_meta(lsel4, "pb", "mb", NULL, "stance"); /* switch after turn 1 */
-    session_log_append(lsel4, conv_u, 9);
-    EXPECT(session_log_truncate(lsel4, 1, 3) == 0); /* drops the switch record */
-    session_log_append(lsel4, conv_u, 6);           /* ... and a turn follows */
-    session_log_close(lsel4);
-    EXPECT(session_read_meta(cutpath, &sm) == 0);
-    EXPECT_STR_EQ(sm.provider, "pb");
-    EXPECT_STR_EQ(sm.model, "mb");
-    EXPECT_STR_EQ(sm.preset, "stance");
-    session_meta_free(&sm);
-    free(cutpath);
-
-    /* An unreadable path reports failure with nothing to free. */
-    EXPECT(session_read_meta("/nonexistent/hax-session.jsonl", &sm) == -1);
-    EXPECT(sm.provider == NULL && sm.id == NULL);
-    free(selpath);
-
-    /* ---- resume enforces the aggregate image count cap ---- */
-    /* A session carrying one more image than the cap allows (an older/newer
-     * writer, or a since-lowered limit) must not resume above budget: the
-     * overflow image is degraded to a placeholder so requests stay
-     * admissible. */
-    char imgcap[] = "/tmp/hax_imgcap_XXXXXX";
-    int ifd = mkstemp(imgcap);
-    EXPECT(ifd >= 0);
-    if (ifd >= 0) {
-        const char *hdr =
-            "{\"type\":\"session\",\"version\":1,\"provider\":\"pa\",\"model\":\"ma\"}\n";
-        EXPECT(write(ifd, hdr, strlen(hdr)) == (ssize_t)strlen(hdr));
-        for (int i = 0; i < IMAGE_REQUEST_MAX_COUNT + 1; i++) {
-            char *line = xasprintf("{\"kind\":\"tool_result\",\"call_id\":\"c%d\",\"output\":\"r\","
-                                   "\"images\":[{\"mime\":\"image/png\",\"data\":\"QUJD\","
-                                   "\"width\":2,\"height\":1}]}\n",
-                                   i);
-            EXPECT(write(ifd, line, strlen(line)) == (ssize_t)strlen(line));
-            free(line);
-        }
-        close(ifd);
-
-        struct item *ci;
-        size_t cn;
-        EXPECT(session_load(imgcap, &ci, &cn, NULL) == 0);
-        size_t total = 0, degraded = 0;
-        for (size_t i = 0; i < cn; i++) {
-            total += ci[i].n_images;
-            if (ci[i].n_images == 0 && ci[i].output && strstr(ci[i].output, "[image"))
-                degraded++;
-        }
-        EXPECT(total == IMAGE_REQUEST_MAX_COUNT); /* the overflow image dropped */
-        EXPECT(degraded == 1);                    /* replaced by a placeholder */
-        free_items(ci, cn);
-        unlink(imgcap);
-    }
-
-    free(saved_id);
+    session_log_append(resumed, UNDO_CONVERSATION, 9);
+    session_log_close(resumed);
+    EXPECT(session_read_meta(path, &meta) == 0);
+    EXPECT_STR_EQ(meta.model, "md");
+    EXPECT(meta.preset == NULL);
+    EXPECT(meta.effort == NULL);
+    session_meta_free(&meta);
     free(path);
+}
+
+static void test_truncate_restates_live_selection(void)
+{
+    reset_session_state();
+    struct session_log *log = session_log_open("pa", "ma", NULL, NULL);
+    EXPECT(log != NULL);
+    char *path = xstrdup(session_log_path(log));
+    session_log_append(log, UNDO_CONVERSATION, 6);
+    session_log_set_meta(log, "pb", "mb", NULL, "stance");
+    session_log_append(log, UNDO_CONVERSATION, 9);
+
+    /* If undo removes the selection record, the next append must restate the
+     * live selection rather than silently reverting future resumes. */
+    EXPECT(session_log_truncate(log, 1, 3) == 0);
+    session_log_append(log, UNDO_CONVERSATION, 6);
+    session_log_close(log);
+
+    struct session_meta meta;
+    EXPECT(session_read_meta(path, &meta) == 0);
+    EXPECT_STR_EQ(meta.provider, "pb");
+    EXPECT_STR_EQ(meta.model, "mb");
+    EXPECT_STR_EQ(meta.preset, "stance");
+    session_meta_free(&meta);
+    free(path);
+}
+
+static void test_read_meta_failure_initializes_output(void)
+{
+    struct session_meta meta;
+
+    /* Callers must be able to clean up uniformly after an unreadable path. */
+    EXPECT(session_read_meta("/nonexistent/hax-session.jsonl", &meta) == -1);
+    EXPECT(meta.provider == NULL && meta.id == NULL);
+}
+
+static void test_load_enforces_image_count_cap(void)
+{
+    char path[] = "/tmp/hax_imgcap_XXXXXX";
+    int fd = mkstemp(path);
+    EXPECT(fd >= 0);
+    if (fd < 0)
+        return;
+
+    const char *header =
+        "{\"type\":\"session\",\"version\":1,\"provider\":\"pa\",\"model\":\"ma\"}\n";
+    EXPECT(write(fd, header, strlen(header)) == (ssize_t)strlen(header));
+    for (int i = 0; i < IMAGE_REQUEST_MAX_COUNT + 1; i++) {
+        char *line = xasprintf("{\"kind\":\"tool_result\",\"call_id\":\"c%d\",\"output\":\"r\","
+                               "\"images\":[{\"mime\":\"image/png\",\"data\":\"QUJD\","
+                               "\"width\":2,\"height\":1}]}\n",
+                               i);
+        EXPECT(write(fd, line, strlen(line)) == (ssize_t)strlen(line));
+        free(line);
+    }
+    close(fd);
+
+    /* Files from a writer with a higher limit must still resume within today's
+     * request budget, degrading only overflow images to placeholders. */
+    struct item *items;
+    size_t n;
+    EXPECT(session_load(path, &items, &n, NULL) == 0);
+    size_t total = 0;
+    size_t degraded = 0;
+    for (size_t i = 0; i < n; i++) {
+        total += items[i].n_images;
+        if (items[i].n_images == 0 && items[i].output && strstr(items[i].output, "[image"))
+            degraded++;
+    }
+    EXPECT(total == IMAGE_REQUEST_MAX_COUNT);
+    EXPECT(degraded == 1);
+
+    free_items(items, n);
+    unlink(path);
+}
+
+int main(void)
+{
+    test_item_codec_round_trip();
+    test_recording_control();
+    test_session_round_trip();
+    test_reasoning_provenance_round_trip();
+    test_session_listing();
+    test_session_file_permissions();
+    test_resume_appends_only_new_items();
+    test_first_prompt_labels();
+    test_resume_repairs_torn_final_line();
+    test_load_trims_dangling_tool_call();
+    test_log_materialization();
+    test_truncate_and_reappend();
+    test_truncate_all_turns();
+    test_fork_copies_prefix_without_touching_source();
+    test_selection_metadata_tracks_productive_switches();
+    test_truncate_restates_live_selection();
+    test_read_meta_failure_initializes_output();
+    test_load_enforces_image_count_cap();
     T_REPORT();
 }
