@@ -88,8 +88,10 @@ static const struct config_setting REGISTRY[] = {
      .kind = CFG_DURATION},
 
     /* recording */
-    {.key = "no_session", .env = "HAX_NO_SESSION", .choices = CONFIG_CHOICES_BOOL,
-     .desc = "Disable session recording when set truthy"},
+    {.key = "no_session", .env = "HAX_NO_SESSION", .def = "auto",
+     .desc = "Skip recording conversations and typed prompts; auto skips both for dev "
+             "providers (mock)",
+     .choices = CONFIG_CHOICES_TRISTATE},
     {.key = "transcript", .env = "HAX_TRANSCRIPT", .keep_empty = 1,
      .desc = "Path to mirror the Ctrl-T transcript view; empty disables"},
     {.key = "trace", .env = "HAX_TRACE", .keep_empty = 1,

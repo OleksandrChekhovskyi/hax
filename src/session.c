@@ -264,6 +264,9 @@ void session_meta_free(struct session_meta *m)
     memset(m, 0, sizeof(*m));
 }
 
+/* Only the explicit half of the `no_session` tri-state: "auto" isn't a truthy
+ * spelling, so it reads as "record" here and the callers who know which
+ * provider is live resolve what it means (agent_recording_enabled). */
 static int sessions_disabled(void)
 {
     return config_bool("no_session");

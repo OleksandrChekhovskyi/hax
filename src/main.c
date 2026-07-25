@@ -144,7 +144,9 @@ static const struct help_opt {
     {"--resume[=ID]", "Resume a past conversation in this directory. With no ID, pick one from\n"
                       "an interactive list; with a session ID, resume it directly — the ID form\n"
                       "also works with -p."},
-    {"--no-session", "Don't record this conversation (nothing to resume)."},
+    {"--no-session", "Don't record this conversation: nothing to resume afterwards, and\n"
+                     "the prompts you type aren't added to Ctrl-R recall. Earlier\n"
+                     "sessions and prompts stay readable."},
     {"--raw", "Send only the prompt text — no system prompt, no Environment section,\n"
               "no AGENTS.md, no skills, and no tools. Useful as a barebones chat\n"
               "interface."},

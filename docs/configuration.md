@@ -306,7 +306,11 @@ where it matters.
 
 ### Recording and observability
 
-- `no_session` / `HAX_NO_SESSION` — disable session recording and resume.
+- `no_session` / `HAX_NO_SESSION` — `on` keeps the run off disk: no session file (so nothing
+  to resume) and no new prompts in Ctrl-R recall. Both stores stay *readable* — `--resume`
+  opens the session you point it at and earlier prompts still recall; this run just adds to
+  neither. Default `auto`: record for real
+  providers, skip for the `mock` dev backend. `--no-session` is the same switch for one run.
 - `transcript` / `HAX_TRANSCRIPT` — file path for a plain-text transcript mirror; empty disables.
 - `trace` / `HAX_TRACE` — file path for HTTP/SSE trace output; empty disables.
 

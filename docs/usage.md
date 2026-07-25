@@ -18,7 +18,7 @@ Options:
 | `-c`, `--continue` | Resume the newest session recorded for the current directory. |
 | `--resume` | Pick a past session for the current directory. |
 | `--resume=ID` | Resume a specific session id or unique prefix. Also works with `-p`. |
-| `--no-session` | Don't record this conversation; there will be nothing to resume. |
+| `--no-session` | Don't record this conversation: nothing to resume, and the prompts you type aren't added to Ctrl-R recall (earlier ones still recall). |
 | `--raw` | Send only the prompt: no system prompt, Environment section, AGENTS.md, skills, or tools. Still recorded — a raw chat can be continued with `-c`. |
 | `--bare` | Drop project and delegation context (AGENTS.md, skills, and the subagents section); the Environment section, tools, and base prompt remain, unlike `--raw`. |
 | `--provider=NAME` | Select the backend for this run. Beats env vars, saved picks, and config. |
@@ -57,8 +57,11 @@ prints a resume hint such as:
 resume with: hax --resume=<id>
 ```
 
-In `-p` mode this hint goes to stderr so stdout stays suitable for piping. Set
-`HAX_NO_SESSION=1` to disable session recording.
+In `-p` mode this hint goes to stderr so stdout stays suitable for piping. Pass
+`--no-session` to keep a conversation off disk: there is nothing to resume afterwards, and
+the prompts you type aren't added to Ctrl-R recall. Both stores stay readable — resuming an
+older session and recalling an earlier prompt work as usual; this run just doesn't add to
+either.
 
 ### What resuming restores
 
@@ -180,6 +183,8 @@ The REPL supports readline-style editing. Hax-specific or notable bindings:
 | --- | --- |
 | Enter | Submit prompt. |
 | Shift-Enter | Insert newline, if your terminal sends LF for Shift-Enter. |
+| Up / Down | Recall the previous / next prompt. Kept across runs, unless `--no-session`. |
+| Ctrl-R | Search earlier prompts (incremental reverse search). |
 | Esc | Pause after the current step (soft interrupt): in-flight work finishes, then the prompt returns. |
 | Esc Esc | Interrupt the model or a running tool immediately. |
 | Ctrl-C | Cancel the current prompt line. |

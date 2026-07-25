@@ -90,6 +90,14 @@ void input_history_add_session(struct input *in, const char *line);
  *     in-memory state (already capped) is rewritten back atomically. */
 void input_history_open(struct input *in, const char *path);
 
+/* Load `path` for recall only: same in-memory result as input_history_open,
+ * but the file is never written — no persist path is stored (so
+ * input_history_add stays in-memory, like input_history_add_session), no
+ * parent directory is created, and the bloat rewrite is skipped. For runs
+ * that must not add to what the user has typed before, while still offering
+ * it back: recall is a read, and suppressing it was never the point. */
+void input_history_load(struct input *in, const char *path);
+
 /* Register a Ctrl-T handler. While the prompt is active, pressing Ctrl-T
  * drops the editor out of raw mode, calls `fn(user)`, and repaints.
  * `fn` owns stdout for the duration of the call — the typical
@@ -144,10 +152,11 @@ int input_cancelled(const struct input *in);
  * $XDG_STATE_HOME/hax/history (default $HOME/.local/state/hax/history),
  * but only when stdin and stdout are both ttys — non-interactive use
  * (`echo prompt | hax`) shouldn't leak scripted input into recall
- * history. No-op if neither env var is set. The path-taking variant
- * above remains the testable seam and the hook for a future
- * --history-file override. */
-void input_history_open_default(struct input *in);
+ * history. No-op if neither env var is set. `persist` picks which of the
+ * two variants above runs: 0 still recalls what is already there and just
+ * doesn't add to it. The path-taking variants remain the testable seam and
+ * the hook for a future --history-file override. */
+void input_history_open_default(struct input *in, int persist);
 
 /* Render `text` (length `len`) as a committed user message — an
  * accent-colored "▌ " stripe (repeated at every wrapped row) and body,

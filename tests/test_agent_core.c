@@ -190,6 +190,56 @@ static size_t test_list_efforts(struct provider *p, const char *const **out)
     return 2;
 }
 
+/* `no_session = auto` splits on provider_factory.internal, so these assert
+ * against the real registry: "mock" is the internal backend, "anthropic" a
+ * user-facing one. HAX_PROVIDER is what agent_provider_id reads first, so it
+ * — not p->name — decides when both are set. */
+static void test_recording_enabled(void)
+{
+    struct provider mock = {.name = "mock"};
+    struct provider real = {.name = "anthropic"};
+
+    unsetenv("HAX_NO_SESSION");
+    unsetenv("HAX_PROVIDER");
+
+    /* auto (unset): real providers record, the dev backend doesn't. */
+    EXPECT(agent_recording_enabled(&real) == 1);
+    EXPECT(agent_recording_enabled(&mock) == 0);
+    /* spelled out, same answers */
+    setenv("HAX_NO_SESSION", "auto", 1);
+    EXPECT(agent_recording_enabled(&real) == 1);
+    EXPECT(agent_recording_enabled(&mock) == 0);
+
+    /* explicit off wins for both — the escape hatch that lets a mock run
+     * exercise the session and prompt-history paths it normally skips. */
+    setenv("HAX_NO_SESSION", "0", 1);
+    EXPECT(agent_recording_enabled(&mock) == 1);
+    EXPECT(agent_recording_enabled(&real) == 1);
+
+    /* explicit on wins for both, dev backend or not */
+    setenv("HAX_NO_SESSION", "1", 1);
+    EXPECT(agent_recording_enabled(&mock) == 0);
+    EXPECT(agent_recording_enabled(&real) == 0);
+
+    /* an unparseable value falls back to the auto rule rather than to a
+     * fixed answer, so a typo can't silently start recording a mock run. */
+    setenv("HAX_NO_SESSION", "banana", 1);
+    EXPECT(agent_recording_enabled(&real) == 1);
+    EXPECT(agent_recording_enabled(&mock) == 0);
+    unsetenv("HAX_NO_SESSION");
+
+    /* the configured id outranks p->name (it's what a resume feeds back to
+     * provider_find), and an unknown one is treated as user-facing. */
+    setenv("HAX_PROVIDER", "mock", 1);
+    EXPECT(agent_recording_enabled(&real) == 0);
+    setenv("HAX_PROVIDER", "not-a-provider", 1);
+    EXPECT(agent_recording_enabled(&mock) == 1);
+    unsetenv("HAX_PROVIDER");
+
+    /* no provider resolved yet (startup before a /provider pick) records */
+    EXPECT(agent_recording_enabled(NULL) == 1);
+}
+
 static void test_resolve_effort(void)
 {
     struct provider p = {.default_effort = "default-e", .list_efforts = test_list_efforts};
@@ -714,6 +764,7 @@ int main(void)
     test_build_system_prompt_default_no_suffix();
     test_build_system_prompt_with_suffix();
     test_resolve_effort();
+    test_recording_enabled();
     test_session_init_model_label();
     test_session_init_raw();
     test_session_init_missing_model();

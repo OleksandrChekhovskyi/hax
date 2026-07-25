@@ -9,6 +9,7 @@
 #include "catalog.h"
 #include "config.h"
 #include "util.h"
+#include "providers/registry.h"
 #include "tools/bash_export.h"
 
 /* Default text used when HAX_SYSTEM_PROMPT is unset and --raw was not
@@ -340,6 +341,13 @@ const char *agent_provider_id(const struct provider *p)
     if (id && *id)
         return id;
     return p ? p->name : NULL;
+}
+
+int agent_recording_enabled(const struct provider *p)
+{
+    const char *id = agent_provider_id(p);
+    const struct provider_factory *f = id ? provider_find(id) : NULL;
+    return !config_bool_or("no_session", f && f->internal);
 }
 
 /* Publish the effective selection for subagent inheritance (see

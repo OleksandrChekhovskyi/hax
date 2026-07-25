@@ -65,6 +65,7 @@ test_sources = [
     'system/test_tempfiles.c',
 
     'terminal/test_clipboard.c',
+    'terminal/test_input.c',
     'terminal/test_input_core.c',
     'terminal/test_interrupt.c',
     'terminal/test_picker_core.c',

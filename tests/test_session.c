@@ -160,6 +160,15 @@ int main(void)
     /* HAX_NO_SESSION disables persistence entirely. */
     setenv("HAX_NO_SESSION", "1", 1);
     EXPECT(session_log_open("alpha", "m1", "high", NULL) == NULL);
+
+    /* Its `auto` default is not this layer's to interpret — resolving it
+     * needs the live provider (agent_recording_enabled), which decides by
+     * not opening a log at all. Here it simply isn't truthy, so it records.
+     * Nothing is appended, so no file is left behind for the tests below. */
+    setenv("HAX_NO_SESSION", "auto", 1);
+    struct session_log *autolog = session_log_open("alpha", "m1", "high", NULL);
+    EXPECT(autolog != NULL);
+    session_log_close(autolog);
     unsetenv("HAX_NO_SESSION");
 
     /* ---- write a session, then load it back ---- */

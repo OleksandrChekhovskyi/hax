@@ -981,8 +981,15 @@ void agent_resume_session(struct agent_state *st, const char *path)
      * transcript mirror to the restored history (reset writes the header,
      * the append replays the items). The log opens against what the file
      * records, so the set_meta that follows records a difference — a restore
-     * that couldn't be applied — as the switch it is. */
-    st->slog = session_log_resume(path, meta.provider, meta.model, meta.effort, meta.preset, nl);
+     * that couldn't be applied — as the switch it is.
+     *
+     * Asked again rather than inherited from startup: select_restore_session
+     * just put the run on the resumed conversation's provider, so a run that
+     * began on the dev backend — recording nothing — goes on recording this
+     * one if the session it opened belongs to a real one. */
+    if (agent_recording_enabled(st->provider))
+        st->slog =
+            session_log_resume(path, meta.provider, meta.model, meta.effort, meta.preset, nl);
     /* Stage the live selection against it. After a successful restore the two
      * agree and this is a no-op; after a failed one it records the fallback
      * the run is really on — but only once a turn is sent under it, so
@@ -1453,6 +1460,16 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
     if (agent_session_init(&sess, p, opts) < 0)
         return 1;
 
+    /* Governs what this run *adds* to the two on-disk stores: the session
+     * file opened below and the prompt history the editor appends to. Both
+     * stay readable either way — --resume loads the file it was pointed at
+     * and Up/Ctrl-R still recall earlier prompts; neither gains a line.
+     * Re-resolved wherever a log is opened later (/resume), where a
+     * /provider switch may since have moved the run off the dev backend that
+     * suppressed this one; the history file is opened once, here, so it
+     * follows the run's starting answer. */
+    int recording = agent_recording_enabled(p);
+
     /* Resume: load a prior conversation into history before anything else
      * touches it, so the Ctrl-T view, the HAX_TRANSCRIPT mirror, and the
      * session log all see the restored items from the start. An unreadable
@@ -1497,7 +1514,9 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
     if (n_resumed > 0)
         replay_user_turn(&r, &sess, "resumed");
     struct input *input = input_new();
-    input_history_open_default(input);
+    /* Recall is a read either way — what `recording` decides is whether this
+     * run's prompts join the file. */
+    input_history_open_default(input, recording);
     struct transcript_view tv = {
         /* Point at session fields so the Ctrl-T callback always sees
          * the latest values — the items vector grows via xrealloc so
@@ -1526,13 +1545,14 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
     struct agent_state state = {.sess = &sess, .provider = p, .tlog = tlog, .r = &r};
     /* Append-only session record. Resuming continues the same file (so
      * the restored items aren't re-written); otherwise a fresh file is
-     * begun. NULL when persistence is disabled — all entry points are
+     * begun. Left NULL when this run doesn't record — all entry points are
      * NULL-safe. */
-    state.slog =
-        opts->resume_path
-            ? session_log_resume(opts->resume_path, rmeta.provider, rmeta.model, rmeta.effort,
-                                 rmeta.preset, n_resumed)
-            : session_log_open(provider_log_name(p), sess.model, sess.effort, config_str("preset"));
+    if (recording)
+        state.slog = opts->resume_path
+                         ? session_log_resume(opts->resume_path, rmeta.provider, rmeta.model,
+                                              rmeta.effort, rmeta.preset, n_resumed)
+                         : session_log_open(provider_log_name(p), sess.model, sess.effort,
+                                            config_str("preset"));
     /* Stages the run's selection when it differs from what the file said —
      * i.e. when a selection flag redirected the resume — so the turns this
      * run produces are recorded under it and the next resume continues from

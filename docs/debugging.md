@@ -62,6 +62,10 @@ comments are ignored. The full DSL reference lives at the top of `src/providers/
 
 See `scripts/mock_demo.txt` for examples covering tool previews and multi-turn continuation.
 
+Mock runs leave nothing behind: no session file for `/resume` to list, and no prompts added
+to Up/Ctrl-R recall, so driving the UI doesn't bury real conversations under fixtures. Pass
+`HAX_NO_SESSION=0` when the thing under test *is* the session or recall machinery.
+
 ## Demo scripts
 
 Useful scripts in `scripts/`:

@@ -1341,17 +1341,11 @@ static void history_file_rewrite(struct input *in, const char *path)
     free(dup);
 }
 
-void input_history_open(struct input *in, const char *path)
+/* Read `path` into the in-memory history, returning the number of records
+ * seen (which can exceed what was kept — the in-memory ring is capped).
+ * Touches nothing on disk. */
+static size_t history_file_load(struct input *in, const char *path)
 {
-    if (!path || !*path)
-        return;
-    /* mkdir -p the parent — first run typically has no $XDG_STATE_HOME
-     * tree yet. Failure is non-fatal; the open below will fail and we
-     * silently disable persistence. */
-    char *dup = xstrdup(path);
-    fs_mkdir_p(dirname(dup));
-    free(dup);
-
     /* Refuse a non-regular file at startup — a FIFO would block fopen()
      * indefinitely, freezing the REPL before the first prompt. */
     FILE *f = (ensure_regular_file(path) == 0) ? fopen(path, "r") : NULL;
@@ -1390,6 +1384,28 @@ void input_history_open(struct input *in, const char *path)
         free(line);
         fclose(f);
     }
+    return loaded;
+}
+
+void input_history_load(struct input *in, const char *path)
+{
+    if (!path || !*path)
+        return;
+    history_file_load(in, path);
+}
+
+void input_history_open(struct input *in, const char *path)
+{
+    if (!path || !*path)
+        return;
+    /* mkdir -p the parent — first run typically has no $XDG_STATE_HOME
+     * tree yet. Failure is non-fatal; the load below will find nothing and
+     * the append path silently fails too. */
+    char *dup = xstrdup(path);
+    fs_mkdir_p(dirname(dup));
+    free(dup);
+
+    size_t loaded = history_file_load(in, path);
 
     /* Store path before any rewrite so we can no-op on rewrite failure
      * without losing append behavior. */
@@ -1456,20 +1472,24 @@ int input_cancelled(const struct input *in)
     return in->last_cancelled;
 }
 
-void input_history_open_default(struct input *in)
+void input_history_open_default(struct input *in, int persist)
 {
     /* Skip persistence in non-interactive sessions. `echo prompt | hax`
      * and other scripted invocations fall through to the canonical
      * non-tty read path (see input_readline), and persisting those
      * one-off lines into the user's recall history is surprising —
      * worse, it can leak secrets piped from a script. Gate on the same
-     * condition input_readline uses to choose its read path. */
+     * condition input_readline uses to choose its read path. Nothing to
+     * recall there either, so this returns before loading too. */
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
         return;
     char *path = xdg_hax_state_path("history");
     if (!path)
         return;
-    input_history_open(in, path);
+    if (persist)
+        input_history_open(in, path);
+    else
+        input_history_load(in, path);
     free(path);
 }
 

@@ -56,6 +56,17 @@ const struct tool *find_tool(const char *name);
  * NULL when no provider is live. Borrowed. */
 const char *agent_provider_id(const struct provider *p);
 
+/* Whether this run persists what was typed and what came back: the session
+ * file behind /resume, and the prompt-recall history behind Up/Ctrl-R. Both
+ * answer to the one `no_session` tri-state, because the case for turning
+ * either off — a throwaway run, or one whose prompts shouldn't outlive it —
+ * is the case for turning off both. `auto` records for real providers and
+ * skips for internal dev backends (see provider_factory.internal), so
+ * driving the mock doesn't fill the session picker and prompt recall with
+ * fixtures; an explicit on/off wins either way, so HAX_NO_SESSION=0 records
+ * a mock run that is exercising those very paths. */
+int agent_recording_enabled(const struct provider *p);
+
 /* Append `it` into a malloc'd vector, doubling capacity on overflow. The
  * three pointers form the canonical "items" vector used in agent.c and
  * oneshot.c — extracted here so both paths grow it the same way. */

@@ -151,12 +151,15 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
      * n_items hasn't grown). */
     struct transcript_log *tlog = transcript_log_open(sess.sys, sess.tools, sess.n_tools);
     /* Append-only session record — continue the resumed file, else begin
-     * a fresh one. NULL when persistence is disabled. */
-    struct session_log *slog =
-        opts->resume_path
-            ? session_log_resume(opts->resume_path, rmeta.provider, rmeta.model, rmeta.effort,
-                                 rmeta.preset, n_resumed)
-            : session_log_open(agent_provider_id(p), sess.model, sess.effort, config_str("preset"));
+     * a fresh one. NULL when this run doesn't record (see
+     * agent_recording_enabled); -p has no prompt history to go with it. */
+    struct session_log *slog = NULL;
+    if (agent_recording_enabled(p))
+        slog = opts->resume_path
+                   ? session_log_resume(opts->resume_path, rmeta.provider, rmeta.model,
+                                        rmeta.effort, rmeta.preset, n_resumed)
+                   : session_log_open(agent_provider_id(p), sess.model, sess.effort,
+                                      config_str("preset"));
     if (opts->resume_path)
         session_log_set_meta(slog, agent_provider_id(p), sess.model, sess.effort,
                              config_str("preset"));

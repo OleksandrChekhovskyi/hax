@@ -18,9 +18,10 @@
  * provider-shaped) and the HAX_TRANSCRIPT log (human plain text) — the only
  * one meant to be read back in.
  *
- * Set HAX_NO_SESSION (to any non-empty, non-"0" value) to disable
- * persistence entirely; session_log_open / _resume then return NULL and
- * all writer entry points become no-ops.
+ * Set HAX_NO_SESSION on to disable persistence entirely; session_log_open /
+ * _resume then return NULL and all writer entry points become no-ops. Its
+ * `auto` default is resolved a layer up, by whoever knows which provider is
+ * live (agent_recording_enabled), and applied by simply not opening a log.
  */
 
 /* Bumped when the on-disk item/header schema changes incompatibly. */
