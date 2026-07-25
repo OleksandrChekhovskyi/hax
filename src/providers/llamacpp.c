@@ -143,7 +143,7 @@ char *llamacpp_model_warning(const char *configured, const char *served)
  * the live /v1/models: keep the configured model only if the server is
  * actually serving it; otherwise adopt what it serves (the first entry — the
  * sole model in single-model mode, or the first router model). The effective
- * value is set as a session override (config tier), so it wins for this run
+ * value is set as a run override (config tier), so it wins for this run
  * without rewriting a persisted choice that may become valid again.
  *
  * Returns 0 when a model could be resolved (reconciled, or an explicit one

@@ -120,11 +120,18 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
      * rather than silently running the prompt against empty history; an
      * empty-but-readable session loads as zero items and resumes empty. */
     size_t n_resumed = 0;
+    /* What the resumed file records, kept until the log is opened against it
+     * below: it differs from the live selection only when a flag overrode the
+     * restore, and opening against the file makes that override record
+     * itself as a switch. */
+    struct session_meta rmeta;
+    memset(&rmeta, 0, sizeof(rmeta));
     if (opts->resume_path) {
         struct item *loaded = NULL;
         size_t nl = 0;
-        if (session_load(opts->resume_path, &loaded, &nl, NULL) != 0) {
+        if (session_load(opts->resume_path, &loaded, &nl, &rmeta) != 0) {
             hax_err("could not resume session '%s'", opts->resume_path);
+            session_meta_free(&rmeta);
             agent_session_free(&sess);
             return 1;
         }
@@ -147,8 +154,13 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
      * a fresh one. NULL when persistence is disabled. */
     struct session_log *slog =
         opts->resume_path
-            ? session_log_resume(opts->resume_path, p->name, sess.model, sess.effort, n_resumed)
-            : session_log_open(p->name, sess.model, sess.effort);
+            ? session_log_resume(opts->resume_path, rmeta.provider, rmeta.model, rmeta.effort,
+                                 rmeta.preset, n_resumed)
+            : session_log_open(agent_provider_id(p), sess.model, sess.effort, config_str("preset"));
+    if (opts->resume_path)
+        session_log_set_meta(slog, agent_provider_id(p), sess.model, sess.effort,
+                             config_str("preset"));
+    session_meta_free(&rmeta);
     if (n_resumed > 0)
         transcript_log_append(tlog, sess.items, sess.n_items);
 
@@ -185,6 +197,13 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
             fprintf(stderr, " · %s", sess.effort);
         if (opts->provider_autoselected)
             fprintf(stderr, " (auto-selected)");
+        else if (opts->resume_path)
+            /* Marks the selection above as the resumed conversation's own,
+             * which is why it can differ from HAX_MODEL and friends — the
+             * same courtesy "(auto-selected)" pays for an inferred pick.
+             * Unconditional: a marker that appears only when the restore
+             * happened to change something reads as noise. */
+            fprintf(stderr, " (resumed)");
         const char *sid = session_log_resume_hint(slog);
         if (sid)
             fprintf(stderr, " · session %s", sid);

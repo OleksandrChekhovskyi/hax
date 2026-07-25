@@ -37,22 +37,34 @@ static struct provider *pick_provider(int print_mode, int *provider_autoselected
 {
     const char *which = config_str("provider");
     /* "Explicit" = the user named a provider somewhere (HAX_PROVIDER, the
-     * config file's "provider" key, or a prior /provider pick in state.json). */
+     * config file's "provider" key, a prior /provider pick in state.json) or
+     * the resumed conversation recorded one. */
     if (which && *which) {
+        /* A resumed conversation's backend is not the user's stance for this
+         * run, so an unusable one gets a pointer at the way out rather than
+         * being quietly swapped for another: continuing the conversation
+         * elsewhere is a choice only the user can make. */
+        int from_conversation = strcmp(config_source("provider"), "conversation") == 0;
         const struct provider_factory *f = provider_find(which);
+        struct provider *p = NULL;
         if (!f) {
             /* Unknown name — a typo in HAX_PROVIDER / the config / a stale
-             * state.json pick. Name the value, not the source, with the
-             * supported set as the help. */
+             * state.json pick, or a provider that no longer exists. Name the
+             * value, not the source, with the supported set as the help. */
             fprintf(stderr, "hax: unknown provider '%s' (supported: ", which);
             provider_list_names(stderr);
             fprintf(stderr, ")\n");
-            return NULL;
+        } else {
+            /* Strict construction: the user asked for this backend, so "codex
+             * not logged in" / "server down" is the answer they need. Fatal in
+             * one-shot mode; interactively the REPL opens provider-less. */
+            p = f->new(f->name);
         }
-        /* Strict construction: the user asked for this backend, so "codex
-         * not logged in" / "server down" is the answer they need. Fatal in
-         * one-shot mode; interactively the REPL opens provider-less. */
-        return f->new(f->name);
+        if (!p && from_conversation)
+            hax_warn("'%s' is what this session was using — pass --provider/--model to "
+                     "continue it elsewhere",
+                     which);
+        return p;
     }
 
     /* Cold start with nothing configured: one path picks something in both
@@ -72,6 +84,49 @@ static struct provider *pick_provider(int print_mode, int *provider_autoselected
         hax_err("no provider available (set HAX_PROVIDER or configure one)");
     }
     return p;
+}
+
+/* Restore what a resumed conversation was last running under, into the
+ * conversation tier — below this run's selection flags, above env and
+ * everything persisted, so `--resume` continues the conversation on its own
+ * setup and a flag is how you say otherwise. Runs before the provider is
+ * constructed, because the restored provider is the one to construct.
+ *
+ * `keeps_stance` is false when the run names a selection of its own; the
+ * recorded preset is then not restored at all. A preset is a whole selection,
+ * so a flag naming one member can only exit the stance (as an explicit
+ * /provider, /model, or /effort pick exits a live one) — re-applying it would
+ * overwrite the very value the flag asked for, leaving the run recording a
+ * pairing it can't reproduce.
+ *
+ * Returns 0, or -1 when the run must not start: a recorded preset that no
+ * longer applies is fatal in one-shot mode, where nothing can ask the user and
+ * answering from a different persona is worse than not answering. The REPL
+ * opens the conversation on its recorded provider and model instead, with the
+ * loss called out. */
+static int restore_resumed_selection(const char *resume_path, int print_mode, int keeps_stance)
+{
+    struct session_meta m;
+    if (session_read_meta(resume_path, &m) != 0) {
+        session_meta_free(&m);
+        return 0; /* unreadable metadata: resume on this run's own settings */
+    }
+    char *err = NULL;
+    int rc = 0;
+    if (config_restore_selection(CONFIG_TIER_CONVERSATION, m.provider, m.model, m.effort,
+                                 keeps_stance ? m.preset : NULL, &err) != 0) {
+        if (print_mode) {
+            hax_err("%s (recorded by this session; pass --preset or --model to run "
+                    "it differently)",
+                    err ? err : "preset failed to apply");
+            rc = -1;
+        } else {
+            hax_warn("%s — resuming without it", err ? err : "preset failed to apply");
+        }
+    }
+    free(err);
+    session_meta_free(&m);
+    return rc;
 }
 
 /* Flag column + description lines per option; descriptions embed '\n' for
@@ -139,9 +194,11 @@ static void print_help(void)
     }
 
     printf("\nThe selection flags (--provider, --model, --effort, --preset) apply to this run\n"
-           "only and take priority over every other source. Persistent configuration is via\n"
-           "environment variables (HAX_PROVIDER, HAX_MODEL, and the rest), saved runtime picks,\n"
-           "then ~/.config/hax/config.json — in that order. See README.md.\n");
+           "only and take priority over every other source. Resuming a conversation restores\n"
+           "the provider, model, effort, and preset it was last using, which the flags\n"
+           "override. Persistent configuration is via environment variables (HAX_PROVIDER,\n"
+           "HAX_MODEL, and the rest), saved runtime picks, then ~/.config/hax/config.json —\n"
+           "in that order. See README.md.\n");
 }
 
 /* Concatenate `argv[0..n-1]` with single spaces between elements. Returns
@@ -519,14 +576,26 @@ int main(int argc, char **argv)
     }
     opts.resume_path = resume_path;
 
+    /* An empty HAX_PRESET names nothing: it's the env tier saying "no stance",
+     * which a resumed conversation outranks like any other env value — and
+     * it's what the bash tool exports into every subagent, so counting it as
+     * explicit would break resuming a preset-backed child exactly where it
+     * matters most. */
+    const char *env_preset = getenv("HAX_PRESET");
+    int names_selection =
+        opt_provider || opt_model || opt_effort || opt_preset || (env_preset && *env_preset);
+    if (resume_path && restore_resumed_selection(resume_path, print_mode, !names_selection) != 0)
+        goto err_prompt;
+
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
         hax_err("curl_global_init failed");
         goto err_prompt;
     }
 
     /* Apply the preset (if any), then the explicit selection flags on top.
-     * Both land in the session-override tier, so the order alone gives the
-     * precedence: flag > preset > env > saved state > config file. The
+     * Both land in the run-override tier, so the order alone gives the
+     * precedence: flag > preset > resumed conversation > env > saved state >
+     * config file. The
      * preset resolves through config too (--preset flag, else HAX_PRESET /
      * a "preset" key), read verbatim so an explicit empty disables a
      * configured default. Applied before trace_init so a preset can carry
@@ -546,7 +615,9 @@ int main(int argc, char **argv)
 
     const char *preset = opt_preset ? opt_preset : getenv("HAX_PRESET");
     int preset_explicit = preset != NULL;
-    if (!preset) {
+    if (!preset && strcmp(config_source("preset"), "conversation") != 0) {
+        /* A restored stance is already applied, in the tier it belongs to —
+         * re-applying it here would promote it above the user's env vars. */
         preset = config_str("preset"); /* state.json stance / config default */
         if (preset && *preset && explicit_sel) {
             config_set_override("preset", ""); /* keep the banner stance-free */
@@ -555,7 +626,7 @@ int main(int argc, char **argv)
     }
     if (preset && *preset) {
         char *err = NULL;
-        if (config_preset_apply(preset, &err) != 0) {
+        if (config_preset_apply(preset, CONFIG_TIER_RUN, &err) != 0) {
             /* An explicitly named preset (--preset or HAX_PRESET) is a hard
              * error — a subagent or scripted invocation must not silently
              * run on the wrong setup. A name that came from resolution

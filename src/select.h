@@ -46,8 +46,22 @@ void select_effort(struct agent_state *st);
  * failure rolls the whole application back. */
 void select_preset(struct agent_state *st, const char *name);
 
+/* Switch to the selection a resumed conversation recorded — the mid-session
+ * twin of the restore `--resume` does at startup, so /resume continues a
+ * conversation on the backend it was using rather than on whatever this run
+ * happens to be set to. Applies as run overrides (the newest explicit act
+ * wins over a /model made earlier in the run) and, unlike the flows above,
+ * persists nothing: resuming states what this conversation used, not a new
+ * default. A "none"/absent provider means the recording named no backend, so
+ * the run keeps its own. Anything that can't be restored — a provider that
+ * won't construct, no model for it, a preset since deleted — leaves the live
+ * setup in place with a note: the history is back either way, and moving the
+ * conversation to a different backend is the user's call. */
+void select_restore_session(struct agent_state *st, const char *provider, const char *model,
+                            const char *effort, const char *preset);
+
 /* View or change configuration. Without `arg`, opens the picker; otherwise
- * accepts "<key> [value]". Changes are session-only overrides, and "default"
+ * accepts "<key> [value]". Changes are run-scoped overrides, and "default"
  * clears an override. */
 void select_config(struct agent_state *st, const char *arg);
 

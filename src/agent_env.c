@@ -562,11 +562,7 @@ static void append_subagents(struct buf *b)
         free(name_clean);
     }
     if (list.len > 0) {
-        /* The resume caveat lives here, next to the flag it explains, not
-         * in the static preamble — which deliberately defines no selection
-         * flags, so the note would dangle without a referent there. */
-        buf_append_str(b, "\nPresets (select with `--preset <name>`, and repeat it when "
-                          "resuming — resume restores the conversation, not the selection):\n");
+        buf_append_str(b, "\nPresets (select with `--preset <name>`):\n");
         buf_append(b, list.data, list.len);
     }
     buf_free(&list);

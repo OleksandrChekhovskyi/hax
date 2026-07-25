@@ -955,9 +955,7 @@ static void test_subagents_section_and_presets(void)
     if (p) {
         EXPECT(contains(p, "# Subagents"));
         EXPECT(contains(p, "only when the user asks"));
-        /* The resume-selection caveat rides with the presets lead-in, so a
-         * preset-less setup sees neither it nor the flag it explains. */
-        EXPECT(!contains(p, "not the selection"));
+        /* With no presets defined, --preset isn't advertised at all. */
         EXPECT(!contains(p, "--preset"));
         const char *sub = strstr(p, "# Subagents");
         const char *env = strstr(p, "# Environment");
@@ -977,8 +975,7 @@ static void test_subagents_section_and_presets(void)
     p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {
-        EXPECT(contains(p, "Presets (select with `--preset <name>`, and repeat it when "
-                           "resuming — resume restores the conversation, not the selection):\n"
+        EXPECT(contains(p, "Presets (select with `--preset <name>`):\n"
                            "- review: code review stance\n- zeta\n"));
         EXPECT(!contains(p, "typo"));
         free(p);

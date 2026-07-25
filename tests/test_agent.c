@@ -8,6 +8,7 @@
 
 #include "agent.h"
 #include "agent_core.h"
+#include "config.h"
 #include "harness.h"
 #include "provider.h"
 #include "session.h"
@@ -73,6 +74,16 @@ struct fixture {
 
 static void fixture_init(struct fixture *f)
 {
+    /* Clear every registered binding before pinning this fixture's: the
+     * assertions below name an exact selection, and agent_provider_id
+     * resolves HAX_PROVIDER — which hax exports into every subagent, so a
+     * suite run from inside hax (or any shell with one set) would otherwise
+     * record the caller's provider instead of prov-x. */
+    size_t n_settings = 0;
+    const struct config_setting *settings = config_settings(&n_settings);
+    for (size_t i = 0; i < n_settings; i++)
+        unsetenv(settings[i].env);
+
     setenv("HAX_MODEL", "model-a", 1);
     setenv("HAX_SYSTEM_PROMPT", "sys", 1);
     setenv("HAX_NO_ENV", "1", 1);
@@ -467,7 +478,7 @@ static void test_undo_reverts_history_and_file(void)
     add_turn(&f.sess, "second", "r2");
     add_turn(&f.sess, "third", "r3");
 
-    f.st.slog = session_log_open("prov-x", "model-a", NULL);
+    f.st.slog = session_log_open("prov-x", "model-a", NULL, NULL);
     EXPECT(f.st.slog != NULL);
     session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
     char *path = xstrdup(session_log_path(f.st.slog));
@@ -509,7 +520,7 @@ static void test_fork_branches_and_switches_log(void)
     add_turn(&f.sess, "second", "r2");
     add_turn(&f.sess, "third", "r3");
 
-    f.st.slog = session_log_open("prov-x", "model-a", NULL);
+    f.st.slog = session_log_open("prov-x", "model-a", NULL, NULL);
     EXPECT(f.st.slog != NULL);
     session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
     char *orig = xstrdup(session_log_path(f.st.slog));
@@ -559,7 +570,7 @@ static void test_fork_at_tip_clones_whole(void)
     add_turn(&f.sess, "first", "r1");
     add_turn(&f.sess, "second", "r2");
 
-    f.st.slog = session_log_open("prov-x", "model-a", NULL);
+    f.st.slog = session_log_open("prov-x", "model-a", NULL, NULL);
     EXPECT(f.st.slog != NULL);
     session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
     char *orig = xstrdup(session_log_path(f.st.slog));
@@ -617,6 +628,127 @@ static void test_fork_without_recording_leaves_state(void)
     unsetenv("HAX_NO_AGENTS_MD");
 }
 
+/* A fork branches from a prefix that may predate the run's current settings
+ * (a /model or /preset switch since), so the branch has to carry what the run
+ * is actually on — otherwise resuming the fork would snap back to the
+ * prefix's older selection. */
+static void test_fork_records_live_selection(void)
+{
+    set_state_dir();
+    struct fixture f;
+    fixture_init(&f);
+    add_turn(&f.sess, "first", "r1");
+    add_turn(&f.sess, "second", "r2");
+
+    /* The source file records an older selection than the live one
+     * (prov-x · model-a, from the fixture). */
+    f.st.slog = session_log_open("old-prov", "old-model", "low", "old-stance");
+    EXPECT(f.st.slog != NULL);
+    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
+    char *orig = xstrdup(session_log_path(f.st.slog));
+
+    struct mut_call c = {.st = &f.st, .turn = 1};
+    char *out = capture_stdout(do_fork, &c);
+    char *branch = xstrdup(session_log_path(f.st.slog));
+
+    /* Branching alone changes nothing on disk — the prefix is still all the
+     * branch has produced. */
+    struct session_meta fm;
+    EXPECT(session_read_meta(branch, &fm) == 0);
+    EXPECT_STR_EQ(fm.provider, "old-prov");
+    session_meta_free(&fm);
+
+    /* The next turn is the run's, so it carries the run's selection. */
+    add_turn(&f.sess, "third", "r3");
+    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
+    EXPECT(session_read_meta(branch, &fm) == 0);
+    EXPECT_STR_EQ(fm.provider, "prov-x");
+    EXPECT_STR_EQ(fm.model, "model-a");
+    EXPECT(fm.preset == NULL); /* no stance is active in this run */
+    session_meta_free(&fm);
+    free(branch);
+
+    /* The source branch is untouched — still resumable as it was. */
+    EXPECT(session_read_meta(orig, &fm) == 0);
+    EXPECT_STR_EQ(fm.provider, "old-prov");
+    EXPECT_STR_EQ(fm.model, "old-model");
+    EXPECT_STR_EQ(fm.preset, "old-stance");
+    session_meta_free(&fm);
+
+    free(out);
+    free(orig);
+    free(f.st.pending_recall);
+    session_log_close(f.st.slog);
+    fixture_free(&f);
+}
+
+/* Session metadata is read back by a resume and handed to provider_find, so
+ * it has to carry the resolvable provider id — not the display name, which
+ * HAX_PROVIDER_NAME (and config-defined providers) can set to something that
+ * resolves to nothing. */
+static void test_session_records_provider_id(void)
+{
+    set_state_dir();
+    struct fixture f;
+    fixture_init(&f); /* clears the env, so pin the id after it */
+    setenv("HAX_PROVIDER", "prov-id", 1);
+    f.p.name = "Display Name"; /* what a provider_name override leaves behind */
+    add_turn(&f.sess, "first", "r1");
+
+    f.st.slog = session_log_open(agent_provider_id(&f.p), f.sess.model, NULL, NULL);
+    EXPECT(f.st.slog != NULL);
+    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
+    char *path = xstrdup(session_log_path(f.st.slog));
+
+    struct session_meta m;
+    EXPECT(session_read_meta(path, &m) == 0);
+    EXPECT_STR_EQ(m.provider, "prov-id");
+    session_meta_free(&m);
+
+    free(path);
+    session_log_close(f.st.slog);
+    fixture_free(&f);
+    unsetenv("HAX_PROVIDER");
+}
+
+/* A mid-session switch has to reach the session file, or a later resume would
+ * restore what the conversation started on rather than what it ended on. */
+static void test_apply_settings_records_switch(void)
+{
+    set_state_dir();
+    struct fixture f;
+    fixture_init(&f);
+    add_turn(&f.sess, "first", "r1");
+
+    f.st.slog = session_log_open("prov-x", "model-a", NULL, NULL);
+    EXPECT(f.st.slog != NULL);
+    session_log_append(f.st.slog, f.sess.items, f.sess.n_items); /* materializes it */
+    char *path = xstrdup(session_log_path(f.st.slog));
+
+    setenv("HAX_MODEL", "model-b", 1);
+    char *out = capture_stdout(do_apply, &f);
+    EXPECT(f.rc == 0);
+
+    /* A switch the user hasn't used yet stays out of the file. */
+    struct session_meta m;
+    EXPECT(session_read_meta(path, &m) == 0);
+    EXPECT_STR_EQ(m.model, "model-a");
+    session_meta_free(&m);
+
+    /* The turn that follows it is recorded under it. */
+    add_turn(&f.sess, "second", "r2");
+    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
+    EXPECT(session_read_meta(path, &m) == 0);
+    EXPECT_STR_EQ(m.provider, "prov-x");
+    EXPECT_STR_EQ(m.model, "model-b"); /* the header still says model-a */
+    session_meta_free(&m);
+
+    free(out);
+    free(path);
+    session_log_close(f.st.slog);
+    fixture_free(&f);
+}
+
 static void test_undo_intact_when_truncate_fails(void)
 {
     set_state_dir();
@@ -626,7 +758,7 @@ static void test_undo_intact_when_truncate_fails(void)
     add_turn(&f.sess, "second", "r2");
     add_turn(&f.sess, "third", "r3");
 
-    f.st.slog = session_log_open("prov-x", "model-a", NULL);
+    f.st.slog = session_log_open("prov-x", "model-a", NULL, NULL);
     EXPECT(f.st.slog != NULL);
     session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
     size_t items_before = f.sess.n_items;
@@ -667,6 +799,9 @@ int main(void)
     test_fork_branches_and_switches_log();
     test_fork_at_tip_clones_whole();
     test_fork_without_recording_leaves_state();
+    test_fork_records_live_selection();
+    test_apply_settings_records_switch();
+    test_session_records_provider_id();
     test_undo_intact_when_truncate_fails();
     T_REPORT();
 }

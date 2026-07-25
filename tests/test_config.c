@@ -636,9 +636,9 @@ static void test_source_reports_winning_tier(void)
     setenv("HAX_SHOW_REASONING", "1", 1);
     EXPECT_STR_EQ(config_source("show_reasoning"), "env");
 
-    /* Session overrides win over the environment. */
+    /* Run overrides win over the environment. */
     config_set_override("show_reasoning", "0");
-    EXPECT_STR_EQ(config_source("show_reasoning"), "session");
+    EXPECT_STR_EQ(config_source("show_reasoning"), "run");
     EXPECT(config_bool("show_reasoning") == 0);
 
     /* Clearing the override lets the tiers resurface in order. */
@@ -883,7 +883,7 @@ static void test_preset_apply(void)
                        "\"min\": {\"provider\": \"mock\"}}}") == 0);
 
     char *err = NULL;
-    EXPECT(config_preset_apply("review", &err) == 0);
+    EXPECT(config_preset_apply("review", CONFIG_TIER_RUN, &err) == 0);
     EXPECT(err == NULL);
     /* Members land in the override tier — above env and the file tier. */
     setenv("HAX_MODEL", "env-model", 1);
@@ -903,7 +903,7 @@ static void test_preset_apply(void)
      * resurface — and clears the system_prompt override, so normal
      * resolution returns and the env var DOES resurface. */
     setenv("HAX_SYSTEM_PROMPT", "custom prompt", 1);
-    EXPECT(config_preset_apply("min", &err) == 0);
+    EXPECT(config_preset_apply("min", CONFIG_TIER_RUN, &err) == 0);
     EXPECT(err == NULL);
     EXPECT_STR_EQ(config_str("provider"), "mock");
     EXPECT(config_str("model") == NULL);
@@ -921,6 +921,220 @@ static void test_preset_apply(void)
     config_set_override("system_prompt", NULL);
 }
 
+/* The conversation tier: what a resumed session recorded. Sits below run
+ * overrides and above env, and is provider-bound like state/file. */
+static void test_conversation_tier(void)
+{
+    clear_env();
+    config_clear_conversation();
+    EXPECT(config_load("{\"provider\": \"openai\", \"model\": \"file-model\"}") == 0);
+    EXPECT(config_load_state("{\"provider\": \"anthropic\", \"model\": \"state-model\"}") == 0);
+    EXPECT_STR_EQ(config_str("model"), "state-model");
+
+    /* A resumed conversation outranks both persisted tiers. */
+    config_set_conversation("provider", "codex");
+    config_set_conversation("model", "gpt-5.1-codex");
+    config_set_conversation("effort", "high");
+    EXPECT_STR_EQ(config_source("provider"), "conversation");
+    EXPECT_STR_EQ(config_str("provider"), "codex");
+    EXPECT_STR_EQ(config_str("model"), "gpt-5.1-codex");
+    EXPECT_STR_EQ(config_str("effort"), "high");
+
+    /* ... env included: resuming continues the conversation on the backend
+     * it was using, and configuration doesn't quietly redirect it. (A
+     * subagent inherits its parent's HAX_* selection, so this is what keeps
+     * `hax --resume=<child>` on the child's own setup.) */
+    setenv("HAX_PROVIDER", "mock", 1);
+    setenv("HAX_MODEL", "env-model", 1);
+    EXPECT_STR_EQ(config_str("provider"), "codex");
+    EXPECT_STR_EQ(config_str("model"), "gpt-5.1-codex");
+    unsetenv("HAX_PROVIDER");
+    unsetenv("HAX_MODEL");
+
+    /* The selection flags are the escape hatch: a run override wins, and
+     * --provider unpins the conversation's model/effort (bound to the
+     * provider they were picked for) instead of pairing them with another
+     * backend. */
+    config_set_override("provider", "mock");
+    EXPECT_STR_EQ(config_str("provider"), "mock");
+    EXPECT(config_str("model") == NULL);
+    EXPECT(config_str("effort") == NULL);
+    config_set_override("provider", NULL);
+    EXPECT_STR_EQ(config_str("model"), "gpt-5.1-codex");
+
+    /* --model alone keeps the conversation's provider. */
+    config_set_override("model", "flag-model");
+    EXPECT_STR_EQ(config_str("provider"), "codex");
+    EXPECT_STR_EQ(config_str("model"), "flag-model");
+    config_set_override("model", NULL);
+
+    /* A restored preset lands in the same tier — the stance a resumed
+     * conversation was running under, system prompt included. */
+    EXPECT(config_load("{\"presets\": {\"review\": {\"provider\": \"mock\","
+                       "\"model\": \"rev-model\", \"system_prompt\": \"you review\"}}}") == 0);
+    char *err = NULL;
+    EXPECT(config_preset_apply("review", CONFIG_TIER_CONVERSATION, &err) == 0);
+    EXPECT(err == NULL);
+    EXPECT_STR_EQ(config_str("preset"), "review");
+    EXPECT_STR_EQ(config_str("provider"), "mock");
+    EXPECT_STR_EQ(config_str("model"), "rev-model");
+    EXPECT_STR_EQ(config_str("system_prompt"), "you review");
+    /* An explicit --model overrides just the model: the restored stance's
+     * system prompt (and its provider) stay in effect, exactly as
+     * `--preset review --model x` composes. */
+    config_set_override("model", "flag-model");
+    EXPECT_STR_EQ(config_str("model"), "flag-model");
+    EXPECT_STR_EQ(config_str("system_prompt"), "you review");
+    EXPECT_STR_EQ(config_str("preset"), "review");
+    config_set_override("model", NULL);
+
+    /* Clearing the tier drops the whole restore at once. */
+    config_clear_conversation();
+    EXPECT(config_str("preset") == NULL);
+    EXPECT(config_str("system_prompt") == NULL);
+    EXPECT(config_load_state(NULL) == 0);
+    config_set_override("model", NULL);
+}
+
+/* config_restore_conversation: the write side of --resume, as the recorded
+ * metadata comes off disk. */
+static void test_restore_conversation(void)
+{
+    clear_env();
+    config_clear_conversation();
+    EXPECT(config_load("{\"presets\": {\"review\": {\"provider\": \"mock\","
+                       "\"model\": \"rev-model\", \"system_prompt\": \"you review\"}}}") == 0);
+    /* A stance persisted by /preset must not claim a conversation that ran
+     * without one. */
+    EXPECT(config_load_state("{\"preset\": \"review\", \"provider\": \"anthropic\","
+                             "\"model\": \"state-model\"}") == 0);
+
+    char *err = NULL;
+    EXPECT(config_restore_selection(CONFIG_TIER_CONVERSATION, "codex", "gpt-5.1-codex", NULL, NULL,
+                                    &err) == 0);
+    EXPECT(err == NULL);
+    EXPECT_STR_EQ(config_str("provider"), "codex");
+    EXPECT_STR_EQ(config_str("model"), "gpt-5.1-codex");
+    /* A recorded absence means "the provider's own default", not "whatever
+     * state.json saved" — the sentinel resolves to no value at all. */
+    EXPECT(config_str("effort") == NULL);
+    EXPECT_STR_EQ(config_str("preset"), "");
+
+    /* A recorded stance is restored whole, system prompt included. */
+    config_clear_conversation();
+    EXPECT(config_restore_selection(CONFIG_TIER_CONVERSATION, "mock", "rev-model", NULL, "review",
+                                    &err) == 0);
+    EXPECT_STR_EQ(config_str("preset"), "review");
+    EXPECT_STR_EQ(config_str("system_prompt"), "you review");
+
+    /* A stance that no longer applies reports why, and leaves the rest of
+     * the selection restored so an interactive caller can carry on. */
+    config_clear_conversation();
+    EXPECT(config_restore_selection(CONFIG_TIER_CONVERSATION, "mock", "rev-model", "high", "gone",
+                                    &err) == -1);
+    EXPECT(err != NULL);
+    free(err);
+    EXPECT_STR_EQ(config_str("provider"), "mock");
+    EXPECT_STR_EQ(config_str("model"), "rev-model");
+    EXPECT_STR_EQ(config_str("effort"), "high");
+    EXPECT_STR_EQ(config_str("preset"), "");
+
+    /* An explicit selection for the run exits the recorded stance — the
+     * caller passes preset=NULL — and what's left has to be a state the run
+     * can record and resume back into: the flag's value on top of the
+     * conversation's own, with no preset to overwrite it next time. */
+    config_clear_conversation();
+    EXPECT(config_restore_selection(CONFIG_TIER_CONVERSATION, "mock", "rev-model", NULL, NULL,
+                                    &err) == 0);
+    config_set_override("model", "flag-model");
+    EXPECT_STR_EQ(config_str("provider"), "mock");
+    EXPECT_STR_EQ(config_str("model"), "flag-model");
+    EXPECT_STR_EQ(config_str("preset"), "");
+    EXPECT(config_str("system_prompt") == NULL);
+    /* Resuming what that run records reproduces it exactly. */
+    config_set_override("model", NULL);
+    config_clear_conversation();
+    EXPECT(config_restore_selection(CONFIG_TIER_CONVERSATION, "mock", "flag-model", NULL, NULL,
+                                    &err) == 0);
+    EXPECT_STR_EQ(config_str("model"), "flag-model");
+    EXPECT_STR_EQ(config_str("preset"), "");
+
+    /* The same call writes the run tier for a mid-session /resume, where the
+     * restore is itself the newest explicit act. */
+    config_clear_conversation();
+    EXPECT(config_restore_selection(CONFIG_TIER_RUN, "mock", "rev-model", NULL, "review", &err) ==
+           0);
+    EXPECT_STR_EQ(config_source("provider"), "run");
+    EXPECT_STR_EQ(config_str("model"), "rev-model");
+    EXPECT_STR_EQ(config_str("system_prompt"), "you review");
+    config_set_override("provider", NULL);
+    config_set_override("model", NULL);
+    config_set_override("effort", NULL);
+    config_set_override("preset", NULL);
+    config_set_override("system_prompt", NULL);
+
+    /* Exiting a stance for the run has to end the restored one too: clearing
+     * the run override alone would just unhide the conversation tier, leaving
+     * the resumed preset's system prompt in force under a banner reporting no
+     * stance. */
+    config_clear_conversation();
+    EXPECT(config_restore_selection(CONFIG_TIER_CONVERSATION, "mock", "rev-model", NULL, "review",
+                                    &err) == 0);
+    EXPECT_STR_EQ(config_str("system_prompt"), "you review");
+    config_preset_exit(CONFIG_TIER_RUN);
+    EXPECT_STR_EQ(config_str("preset"), "");
+    EXPECT(config_str("system_prompt") == NULL);
+    config_set_override("preset", NULL);
+    config_set_override("system_prompt", NULL);
+
+    /* Same for replacing it with another preset that names no system prompt
+     * of its own — the outgoing one must not show through. */
+    config_clear_conversation();
+    EXPECT(config_restore_selection(CONFIG_TIER_CONVERSATION, "mock", "rev-model", NULL, "review",
+                                    &err) == 0);
+    EXPECT(config_load("{\"presets\": {"
+                       "\"review\": {\"provider\": \"mock\", \"system_prompt\": \"you review\"},"
+                       "\"plain\": {\"provider\": \"mock\"}}}") == 0);
+    EXPECT(config_preset_apply("plain", CONFIG_TIER_RUN, &err) == 0);
+    EXPECT_STR_EQ(config_str("preset"), "plain");
+    EXPECT(config_str("system_prompt") == NULL);
+    config_set_override("preset", NULL);
+    config_set_override("provider", NULL);
+    config_set_override("model", NULL);
+    config_set_override("effort", NULL);
+    config_set_override("system_prompt", NULL);
+
+    /* A rejected switch restores both caller-writable tiers. A run-tier
+     * stance change reaches into the conversation tier (config_preset_exit),
+     * so a snapshot covering only the overrides would roll back to a state
+     * that never existed: the resumed conversation's persona deleted, with
+     * nothing having replaced it. */
+    config_clear_conversation();
+    EXPECT(config_restore_selection(CONFIG_TIER_CONVERSATION, "mock", "rev-model", NULL, "review",
+                                    &err) == 0);
+    struct config_snapshot *snap = config_snapshot_take();
+    EXPECT(config_preset_apply("plain", CONFIG_TIER_RUN, &err) == 0); /* prospective... */
+    EXPECT_STR_EQ(config_str("preset"), "plain");
+    EXPECT(config_str("system_prompt") == NULL);
+    config_snapshot_restore(snap); /* ...and its provider wouldn't construct */
+    EXPECT_STR_EQ(config_str("preset"), "review");
+    EXPECT_STR_EQ(config_str("system_prompt"), "you review");
+    EXPECT_STR_EQ(config_str("provider"), "mock");
+
+    /* A provider-less recording ("none", or none at all) has no backend to
+     * go back to: only the stance is pinned, and the run's own configuration
+     * decides the rest. */
+    config_clear_conversation();
+    EXPECT(config_restore_selection(CONFIG_TIER_CONVERSATION, "none", "ghost-model", NULL, NULL,
+                                    &err) == 0);
+    EXPECT_STR_EQ(config_str("provider"), "anthropic");
+    EXPECT_STR_EQ(config_str("model"), "state-model");
+    EXPECT_STR_EQ(config_str("preset"), "");
+
+    config_clear_conversation();
+    EXPECT(config_load_state(NULL) == 0);
+}
+
 static void test_preset_apply_errors(void)
 {
     clear_env();
@@ -932,7 +1146,7 @@ static void test_preset_apply_errors(void)
 
     /* Unknown preset name. */
     char *err = NULL;
-    EXPECT(config_preset_apply("nope", &err) == -1);
+    EXPECT(config_preset_apply("nope", CONFIG_TIER_RUN, &err) == -1);
     EXPECT(err != NULL);
     free(err);
     EXPECT(config_preset_description("nope") == NULL);
@@ -940,7 +1154,7 @@ static void test_preset_apply_errors(void)
     /* Only selection keys are presettable; all-or-nothing, so the valid
      * "provider" member must not have been applied either. */
     err = NULL;
-    EXPECT(config_preset_apply("endpoint", &err) == -1);
+    EXPECT(config_preset_apply("endpoint", CONFIG_TIER_RUN, &err) == -1);
     EXPECT(err != NULL && strstr(err, "not presettable") != NULL);
     free(err);
     EXPECT(config_str("provider") == NULL);
@@ -948,20 +1162,20 @@ static void test_preset_apply_errors(void)
 
     /* Non-scalar member. */
     err = NULL;
-    EXPECT(config_preset_apply("nonscalar", &err) == -1);
+    EXPECT(config_preset_apply("nonscalar", CONFIG_TIER_RUN, &err) == -1);
     EXPECT(err != NULL);
     free(err);
 
     /* "description" skips the allowed-keys check but not the scalar one —
      * a structured description would silently read back as none. */
     err = NULL;
-    EXPECT(config_preset_apply("badd", &err) == -1);
+    EXPECT(config_preset_apply("badd", CONFIG_TIER_RUN, &err) == -1);
     EXPECT(err != NULL && strstr(err, "description") != NULL);
     free(err);
 
     /* A preset must anchor a provider. */
     err = NULL;
-    EXPECT(config_preset_apply("anon", &err) == -1);
+    EXPECT(config_preset_apply("anon", CONFIG_TIER_RUN, &err) == -1);
     EXPECT(err != NULL && strstr(err, "provider") != NULL);
     free(err);
     EXPECT(config_str("model") == NULL);
@@ -999,7 +1213,7 @@ static void test_preset_enumeration(void)
         free(names[i]);
     free(names);
     char *err = NULL;
-    EXPECT(config_preset_apply("flatleaf", &err) == -1);
+    EXPECT(config_preset_apply("flatleaf", CONFIG_TIER_RUN, &err) == -1);
     EXPECT(err != NULL);
     free(err);
 }
@@ -1021,7 +1235,7 @@ static void test_preset_dotted_name(void)
     free(names);
 
     char *err = NULL;
-    EXPECT(config_preset_apply("review.v2", &err) == 0);
+    EXPECT(config_preset_apply("review.v2", CONFIG_TIER_RUN, &err) == 0);
     EXPECT(err == NULL);
     EXPECT_STR_EQ(config_str("provider"), "mock");
     EXPECT_STR_EQ(config_str("model"), "m");
@@ -1034,7 +1248,7 @@ static void test_preset_dotted_name(void)
 
     /* The flat-authored top-level form still resolves via the fallback. */
     EXPECT(config_load("{\"presets.flat\": {\"provider\": \"mock\"}}") == 0);
-    EXPECT(config_preset_apply("flat", &err) == 0);
+    EXPECT(config_preset_apply("flat", CONFIG_TIER_RUN, &err) == 0);
     EXPECT(err == NULL);
     EXPECT_STR_EQ(config_str("provider"), "mock");
     config_set_override("preset", NULL);
@@ -1069,6 +1283,8 @@ int main(void)
     test_persist_failure_rolls_back();
     test_persist_flat_key();
     test_preset_apply();
+    test_conversation_tier();
+    test_restore_conversation();
     test_preset_apply_errors();
     test_preset_enumeration();
     test_preset_dotted_name();

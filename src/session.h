@@ -12,9 +12,11 @@
  * a per-cwd directory in the XDG state tree
  * ($XDG_STATE_HOME/hax/sessions/<encoded-cwd>/<ts>_<uuid>.jsonl). Line 1 is
  * a session header; every later line is one struct item, round-tripped
- * losslessly. This is a third serialization, distinct from a provider's
- * wire JSON (lossy, provider-shaped) and the HAX_TRANSCRIPT log (human
- * plain text) — the only one meant to be read back in.
+ * losslessly, except for the occasional `{"type":"selection"}` record
+ * marking a mid-session provider/model/effort/preset switch. This is a third
+ * serialization, distinct from a provider's wire JSON (lossy,
+ * provider-shaped) and the HAX_TRANSCRIPT log (human plain text) — the only
+ * one meant to be read back in.
  *
  * Set HAX_NO_SESSION (to any non-empty, non-"0" value) to disable
  * persistence entirely; session_log_open / _resume then return NULL and
@@ -40,52 +42,80 @@ int item_from_json(const json_t *obj, struct item *out);
 
 /* ---------------- session metadata (the header line) ---------------- */
 
+/* Identity plus the conversation's *effective* selection: the header's
+ * values as amended by every later selection record (see
+ * session_log_set_meta), so this is what the conversation was last running
+ * under, not what it started under. Restored into the config's conversation
+ * tier when the session is resumed. */
 struct session_meta {
     char *id;       /* uuid */
     char *cwd;      /* cwd recorded when the session began */
-    char *provider; /* HAX_PROVIDER name; may be NULL on old files */
+    char *provider; /* provider id; may be NULL on old files */
     char *model;    /* may be NULL */
     char *effort;   /* may be NULL */
+    char *preset;   /* active preset stance, or NULL for none */
 };
 
 void session_meta_free(struct session_meta *m);
+
+/* Read just the metadata of the session at `path` — the header plus any
+ * later selection records — without materializing its items. What the
+ * resume paths consult before a provider exists (the recorded selection has
+ * to be in the config's conversation tier before one is constructed).
+ * Returns 0 on success with *out filled (caller session_meta_free), -1 when
+ * the file can't be read (with *out zeroed). */
+int session_read_meta(const char *path, struct session_meta *out);
 
 /* ---------------- append-only writer ---------------- */
 
 struct session_log; /* opaque */
 
-/* Begin a fresh session for the current run. provider/model/effort are
- * stamped into the header (provider drives resume-time compatibility
- * checks); the file is keyed by getcwd(). Returns NULL when sessions are
- * disabled (HAX_NO_SESSION) or no state directory is resolvable. The file
- * is created lazily on the first append, so a run that sends nothing
- * leaves no file behind. */
-struct session_log *session_log_open(const char *provider, const char *model, const char *effort);
+/* Begin a fresh session for the current run. provider/model/effort/preset
+ * are stamped into the header (what a later resume restores); the file is
+ * keyed by getcwd(). Returns NULL when sessions are disabled
+ * (HAX_NO_SESSION) or no state directory is resolvable. The file is created
+ * lazily on the first append, so a run that sends nothing leaves no file
+ * behind. */
+struct session_log *session_log_open(const char *provider, const char *model, const char *effort,
+                                     const char *preset);
 
 /* Continue an existing session file: opens `path` for append and treats
  * the first `n_loaded` items as already written, so session_log_append
  * only emits items beyond them. The header is left untouched. Used by
  * both --resume and /resume so resuming continues the same file rather
  * than forking a new one. Returns NULL when sessions are disabled or the
- * file can't be opened for append. */
+ * file can't be opened for append.
+ *
+ * Pass the selection the *file* records (session_read_meta / session_load's
+ * meta), not the run's: the two differ whenever a flag overrode the restore
+ * or the restore couldn't be applied, and starting from the file's own values
+ * lets the session_log_set_meta that follows stage that difference as the
+ * switch it is — recorded only if the run goes on to produce a turn. */
 struct session_log *session_log_resume(const char *path, const char *provider, const char *model,
-                                       const char *effort, size_t n_loaded);
+                                       const char *effort, const char *preset, size_t n_loaded);
 
 /* Append items [n_written..n_items) as one JSONL line each. No-op when
  * `log` is NULL or nothing new accumulated. Materializes the file (and
  * its parent directory + header line) on first use. */
 void session_log_append(struct session_log *log, const struct item *items, size_t n_items);
 
-/* Refresh the header provider/model/effort fields (for a runtime /provider,
- * /model, or /effort switch). Only the header line is updated — per-item
- * reasoning provenance is stamped on the items themselves — so this matters
- * only before the header is written (the lazy first append): a session that
- * starts provider-less, then selects a provider before its first prompt, ends
- * up with an accurate header instead of "none". After the header is on disk it
- * is a harmless in-memory update that the next session_log_reset carries into
- * the rotated file. No-op when `log` is NULL. */
+/* Record the run's current selection (after a /provider, /model, /effort or
+ * /preset switch, or once one is chosen in a session that started without
+ * any). The values are kept in memory — so a session that starts
+ * provider-less and picks one before its first prompt writes an accurate
+ * header, and a later session_log_reset carries them into the rotated file.
+ * Once the header is already on disk that line can't be rewritten, so a
+ * changed selection becomes a `{"type":"selection"}` record instead — written
+ * by the *next* append, not here: a selection earns its place in the file by
+ * producing something, so merely opening a conversation (a resume whose
+ * restore couldn't be applied, a fork nobody continued) leaves it exactly as
+ * it was. That trailing record is what a resume restores; the header only
+ * knows what the conversation started under. The file's own append-only shape
+ * does the rest — /undo truncation drops records past the cut (and re-states
+ * the live selection for the turns that follow), /fork copies those inside
+ * the retained prefix. No-op when `log` is NULL or nothing changed. */
 void session_log_set_meta(struct session_log *log, const char *provider, const char *model,
-                          const char *effort);
+                          const char *effort, const char *preset);
 
 /* Rotate to a brand-new session id/file (for /new). Closes the current
  * file; the next append lazily materializes the fresh one. */
@@ -134,8 +164,8 @@ const char *session_log_resume_hint(const struct session_log *log);
 /* ---------------- loading & listing ---------------- */
 
 /* Load a session file, replaying its items verbatim into a fresh malloc'd
- * vector (*out_items / *out_n) and, when out_meta is non-NULL, filling it from
- * the header.
+ * vector (*out_items / *out_n) and, when out_meta is non-NULL, filling it
+ * from the header and any later selection records (see session_read_meta).
  *
  * The load is non-destructive: model-bound reasoning (Codex's encrypted
  * reasoning_json) is kept along with its origin provider+model stamp (each
@@ -145,8 +175,10 @@ const char *session_log_resume_hint(const struct session_log *log);
  * file may legitimately mix models, and switching back to a model still finds
  * its blobs intact.
  *
- * Returns 0 on success, -1 when the file can't be read. Caller frees the
- * items (item_free each, then free the vector) and session_meta_free. */
+ * Returns 0 on success, -1 when the file can't be read; the outputs are
+ * zeroed either way, so an error path can free them unconditionally. Caller
+ * frees the items (item_free each, then free the vector) and
+ * session_meta_free. */
 int session_load(const char *path, struct item **out_items, size_t *out_n,
                  struct session_meta *out_meta);
 

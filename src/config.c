@@ -199,10 +199,12 @@ const struct config_setting *config_setting_find(const char *key)
 }
 
 /* File tier (parsed config.json), state tier (parsed state.json — the
- * machine-local persisted overrides), and the session-only override tier
- * (a flat object keyed by canonical key). Each is NULL or a JSON object. */
+ * machine-local persisted overrides), the conversation tier (the selection a
+ * resumed session recorded), and the run-scoped override tier (a flat object
+ * keyed by canonical key). Each is NULL or a JSON object. */
 static json_t *g_config;
 static json_t *g_state;
+static json_t *g_conversation;
 static json_t *g_overrides;
 
 #define CONFIG_MAX_BYTES (1024 * 1024)
@@ -301,6 +303,7 @@ void config_free(void)
     g_config = NULL;
     json_decref(g_state);
     g_state = NULL;
+    config_clear_conversation();
     json_decref(g_overrides);
     g_overrides = NULL;
 }
@@ -426,13 +429,16 @@ static const char *state_get(const char *key)
 static const char *resolve(const char *key, int skip_empty);
 
 /* "model" and "effort" are provider-bound: the runtime selectors
- * persist them together with the "provider" they were picked for, and a
- * config file pairing them with a provider means the same. A bound value
- * applies only while that provider is the active one — otherwise the tier is
- * skipped for these keys, so a one-off HAX_PROVIDER=mock doesn't inherit a
- * model saved for codex. A tier that records no provider is unbound (a bare
- * "model" in config.json applies everywhere), and the env/override tiers are
- * always honored — they are set explicitly for this run/session. */
+ * persist them together with the "provider" they were picked for, a config
+ * file pairing them with a provider means the same, and a resumed
+ * conversation records the set it was last using. A bound value applies only
+ * while that provider is the active one — otherwise the tier is skipped for
+ * these keys, so a one-off HAX_PROVIDER=mock doesn't inherit a model saved
+ * for codex, and `--provider=x --resume=ID` doesn't run the resumed
+ * conversation's model against a different backend. A tier that records no
+ * provider is unbound (a bare "model" in config.json applies everywhere), and
+ * the env/override tiers are always honored — they are set explicitly for
+ * this run. */
 static int binding_allows(json_t *tier, const char *key)
 {
     if (strcmp(key, "model") != 0 && strcmp(key, "effort") != 0)
@@ -446,8 +452,8 @@ static int binding_allows(json_t *tier, const char *key)
     return active && *active && strcmp(active, bound) == 0;
 }
 
-/* Walk the tiers: override (session) → environment → state → file →
- * registry default. With skip_empty, "" counts as unset at a tier and
+/* Walk the tiers: run override → conversation → environment → state → file
+ * → registry default. With skip_empty, "" counts as unset at a tier and
  * resolution falls through — for settings whose grammar gives "" no meaning
  * (ports, durations), so a stray HAX_FOO= can't shadow a configured value.
  * Without it, values are returned verbatim, "" included. */
@@ -472,12 +478,16 @@ static const char *resolve_src(const char *key, int skip_empty, const char **src
     const char *o = json_string_value(json_object_get(g_overrides, key));
     if (o && (!skip_empty || *o)) {
         v = apply_sentinel(o, s);
-        from = "session";
+        from = "run";
     } else {
         const char *e = s ? getenv(s->env) : NULL;
+        const char *c = obj_get(g_conversation, key);
         const char *sel = state_get(key);
         const char *f = file_get(key);
-        if (e && (!skip_empty || *e)) {
+        if (c && (!skip_empty || *c) && binding_allows(g_conversation, key)) {
+            v = apply_sentinel(c, s);
+            from = "conversation";
+        } else if (e && (!skip_empty || *e)) {
             v = apply_sentinel(e, s);
             from = "env";
         } else if (sel && (!skip_empty || *sel) && binding_allows(g_state, key)) {
@@ -736,31 +746,98 @@ void config_set_override(const char *key, const char *val)
         json_object_del(g_overrides, key);
 }
 
-struct config_override_state {
-    json_t *overrides; /* deep copy of g_overrides at snapshot time, or NULL */
+void config_set_conversation(const char *key, const char *val)
+{
+    if (!g_conversation)
+        g_conversation = json_object();
+    if (val)
+        json_object_set_new(g_conversation, key, json_string(val));
+    else
+        json_object_del(g_conversation, key);
+}
+
+void config_clear_conversation(void)
+{
+    json_decref(g_conversation);
+    g_conversation = NULL;
+}
+
+void config_preset_exit(enum config_tier tier)
+{
+    /* The name is shadowed with the empty sentinel rather than deleted, so a
+     * lower-tier name can't resurface as a stance that isn't applied; the
+     * system prompt is dropped outright, since "" would mean "send no system
+     * message" instead of "resolve one normally". */
+    if (tier == CONFIG_TIER_RUN) {
+        config_set_override("preset", "");
+        config_set_override("system_prompt", NULL);
+        /* A stance restored from the resumed conversation sits *below* those
+         * overrides, where deleting the run value would expose it again. The
+         * run has made its own selection, so that stance is over. */
+        config_set_conversation("preset", NULL);
+        config_set_conversation("system_prompt", NULL);
+        return;
+    }
+    config_set_conversation("preset", "");
+    config_set_conversation("system_prompt", NULL);
+}
+
+int config_restore_selection(enum config_tier tier, const char *provider, const char *model,
+                             const char *effort, const char *preset, char **err)
+{
+    void (*set)(const char *, const char *) =
+        tier == CONFIG_TIER_CONVERSATION ? config_set_conversation : config_set_override;
+    if (err)
+        *err = NULL;
+    if (provider && *provider && strcmp(provider, "none") != 0) {
+        set("provider", provider);
+        set("model", (model && *model) ? model : CONFIG_VALUE_DEFAULT);
+        set("effort", (effort && *effort) ? effort : CONFIG_VALUE_DEFAULT);
+    }
+    config_preset_exit(tier);
+    if (!preset || !*preset)
+        return 0;
+    if (config_preset_apply(preset, tier, err) != 0) {
+        /* Leave the values pinned above in place: without the stance they are
+         * still what the conversation ran on, which is all an interactive
+         * caller needs to carry on. */
+        config_preset_exit(tier);
+        return -1;
+    }
+    return 0;
+}
+
+struct config_snapshot {
+    /* Deep copies at snapshot time, or NULL for an empty tier. */
+    json_t *overrides;
+    json_t *conversation;
 };
 
-struct config_override_state *config_override_snapshot(void)
+struct config_snapshot *config_snapshot_take(void)
 {
-    struct config_override_state *s = xmalloc(sizeof(*s));
+    struct config_snapshot *s = xmalloc(sizeof(*s));
     s->overrides = g_overrides ? json_deep_copy(g_overrides) : NULL;
+    s->conversation = g_conversation ? json_deep_copy(g_conversation) : NULL;
     return s;
 }
 
-void config_override_restore(struct config_override_state *snap)
+void config_snapshot_restore(struct config_snapshot *snap)
 {
     if (!snap)
         return;
     json_decref(g_overrides);
-    g_overrides = snap->overrides; /* transfer ownership back to the live tier */
+    g_overrides = snap->overrides; /* transfer ownership back to the live tiers */
+    json_decref(g_conversation);
+    g_conversation = snap->conversation;
     free(snap);
 }
 
-void config_override_state_free(struct config_override_state *snap)
+void config_snapshot_free(struct config_snapshot *snap)
 {
     if (!snap)
         return;
     json_decref(snap->overrides);
+    json_decref(snap->conversation);
     free(snap);
 }
 
@@ -1003,8 +1080,10 @@ static int preset_validate(const json_t *obj, const char *name, char **err)
     return 0;
 }
 
-int config_preset_apply(const char *name, char **err)
+int config_preset_apply(const char *name, enum config_tier tier, char **err)
 {
+    void (*set)(const char *, const char *) =
+        tier == CONFIG_TIER_CONVERSATION ? config_set_conversation : config_set_override;
     if (err)
         *err = NULL;
     const json_t *obj = preset_node(name);
@@ -1028,16 +1107,19 @@ int config_preset_apply(const char *name, char **err)
      * sentinel would wrongly force the built-in. */
     const char *m = json_string_value(json_object_get((json_t *)obj, "model"));
     const char *e = json_string_value(json_object_get((json_t *)obj, "effort"));
-    config_set_override("provider", json_string_value(json_object_get((json_t *)obj, "provider")));
-    config_set_override("model", m ? m : CONFIG_VALUE_DEFAULT);
-    config_set_override("effort", e ? e : CONFIG_VALUE_DEFAULT);
-    config_set_override("system_prompt",
-                        json_string_value(json_object_get((json_t *)obj, "system_prompt")));
+    /* Replacing a stance ends the previous one first: a preset that names no
+     * system_prompt must not inherit the outgoing one — including a stance a
+     * resumed conversation restored into the tier below this write. */
+    config_preset_exit(tier);
+    set("provider", json_string_value(json_object_get((json_t *)obj, "provider")));
+    set("model", m ? m : CONFIG_VALUE_DEFAULT);
+    set("effort", e ? e : CONFIG_VALUE_DEFAULT);
+    set("system_prompt", json_string_value(json_object_get((json_t *)obj, "system_prompt")));
     /* Record the active stance under the "preset" key — what the banner and
      * /session read, so a preset that swapped the system prompt is never
      * invisibly in effect. Cleared when an explicit selection commit exits
      * the stance (commit_selection). */
-    config_set_override("preset", name);
+    set("preset", name);
     return 0;
 }
 

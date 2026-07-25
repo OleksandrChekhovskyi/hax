@@ -16,15 +16,21 @@ Paths use XDG defaults:
 Resolution order:
 
 ```text
-runtime override → environment → state.json → config.json → registry/provider default
+run override → resumed conversation → environment → state.json → config.json → default
 ```
 
-`/provider`, `/model`, and `/effort` create runtime overrides for the current process and
+`/provider`, `/model`, and `/effort` create run overrides for the current process and
 persist them to `state.json`. On the next launch, an explicit environment variable still wins
 over that state.
 
+The *resumed conversation* tier is the provider, model, effort, and preset that the session
+you resumed (`-c`, `--resume`, `/resume`) was last running under. It outranks your
+environment and everything persisted, so resuming continues a conversation where it left
+off; the selection flags still win. See
+[what resuming restores](usage.md#what-resuming-restores).
+
 `/config` lists every setting with its resolved value, source, and description. Bright rows
-are editable as session-only overrides; dimmed rows report how to change them. Use
+are editable as run-scoped overrides; dimmed rows report how to change them. Use
 `/config <key> default` to clear an override. Provider, model, effort, and preset changes remain
 under their dedicated commands.
 
@@ -32,12 +38,12 @@ API keys are shown only as `set` or `unset`. `/config` reflects hax's `HAX_*` se
 provider fallbacks (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`), so a
 fallback-only key may appear unset even when authentication works.
 
-The CLI selection flags and presets also land in the runtime-override tier, applied in this
+The CLI selection flags and presets also land in the run-override tier, applied in this
 order: a preset first, then explicit `--provider` / `--model` / `--effort` flags on top. So
-for a single run the effective order is: flags → preset → environment → `state.json` →
-`config.json`. The flags and startup presets (`--preset`, `HAX_PRESET`) persist nothing;
-the interactive `/preset` persists the preset's *name* to `state.json` like the other
-selectors (see [Presets](#presets)).
+for a single run the effective order is: flags → preset → resumed conversation → environment
+→ `state.json` → `config.json`. The flags and startup presets (`--preset`, `HAX_PRESET`)
+persist nothing; the interactive `/preset` persists the preset's *name* to `state.json` like
+the other selectors (see [Presets](#presets)).
 
 ## Config file format
 
@@ -174,6 +180,12 @@ applies, and still shadows selection env vars per the flags → preset → env o
 `HAX_PRESET=` (empty) disables any preset for the run. A persisted name whose definition has
 since been renamed or deleted warns at startup and is skipped; a failing explicit `--preset`
 is an error.
+
+Resuming restores the preset the conversation was running under. Naming a preset for the run
+(`--preset`, `HAX_PRESET=name`) replaces it; naming a provider, model, or effort instead
+exits it, exactly as an explicit pick exits a live stance. `--preset` is also the way past a
+conversation whose preset has since been deleted, otherwise an error in `-p` and a warning
+interactively.
 
 Earlier `/provider`/`/model`/`/effort` picks stay in `state.json` underneath a persisted
 preset. They are fully shadowed while the preset is active (it writes the whole selection),

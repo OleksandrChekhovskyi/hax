@@ -130,10 +130,10 @@ static void test_set_and_default(void)
     reset();
     struct agent_state *st = fresh_state();
     char *out = run(st, "markdown off");
-    EXPECT_STR_EQ(config_source("markdown"), "session");
+    EXPECT_STR_EQ(config_source("markdown"), "run");
     EXPECT(config_bool("markdown") == 0);
     EXPECT(strstr(out, "markdown = off") != NULL);
-    EXPECT(strstr(out, "session") != NULL);
+    EXPECT(strstr(out, "run") != NULL);
     free(out);
 
     /* "default" clears the override so lower tiers resolve again. */
@@ -206,7 +206,7 @@ static void test_picker_commits_choice(void)
     /* Outer list picks the setting, inner list picks the value. */
     script_picks("markdown", "off");
     char *out = run(st, NULL);
-    EXPECT_STR_EQ(config_source("markdown"), "session");
+    EXPECT_STR_EQ(config_source("markdown"), "run");
     EXPECT(config_bool("markdown") == 0);
     free(out);
 }

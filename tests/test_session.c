@@ -159,11 +159,11 @@ int main(void)
 
     /* HAX_NO_SESSION disables persistence entirely. */
     setenv("HAX_NO_SESSION", "1", 1);
-    EXPECT(session_log_open("alpha", "m1", "high") == NULL);
+    EXPECT(session_log_open("alpha", "m1", "high", NULL) == NULL);
     unsetenv("HAX_NO_SESSION");
 
     /* ---- write a session, then load it back ---- */
-    struct session_log *log = session_log_open("alpha", "m1", "high");
+    struct session_log *log = session_log_open("alpha", "m1", "high", NULL);
     EXPECT(log != NULL);
     char *path = xstrdup(session_log_path(log));
     EXPECT(path[0] != '\0');
@@ -234,7 +234,7 @@ int main(void)
     convo_ext[CONVO_N] = (struct item){.kind = ITEM_TURN_BOUNDARY};
     convo_ext[CONVO_N + 1] = (struct item){.kind = ITEM_USER_MESSAGE, .text = (char *)"again"};
 
-    struct session_log *r = session_log_resume(path, "alpha", "m1", "high", CONVO_N);
+    struct session_log *r = session_log_resume(path, "alpha", "m1", "high", NULL, CONVO_N);
     EXPECT(r != NULL);
     session_log_append(r, convo_ext, CONVO_N + 2);
     session_log_close(r);
@@ -260,7 +260,7 @@ int main(void)
         {.kind = ITEM_REASONING, .reasoning_text = (char *)"plain cot"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"a"},
     };
-    struct session_log *lr = session_log_open("pa", "ma", NULL);
+    struct session_log *lr = session_log_open("pa", "ma", NULL, NULL);
     EXPECT(lr != NULL);
     char *pathr = xstrdup(session_log_path(lr));
     session_log_append(lr, conv_r, 4);
@@ -287,7 +287,7 @@ int main(void)
 
     /* ---- a session with no user message has no first prompt ---- */
     struct item conv_b[] = {{.kind = ITEM_TURN_BOUNDARY}};
-    struct session_log *lb = session_log_open("pa", "ma", NULL);
+    struct session_log *lb = session_log_open("pa", "ma", NULL, NULL);
     EXPECT(lb != NULL);
     char *pathb = xstrdup(session_log_path(lb));
     session_log_append(lb, conv_b, 1);
@@ -306,7 +306,7 @@ int main(void)
         {.kind = ITEM_TURN_BOUNDARY},
         {.kind = ITEM_USER_MESSAGE, .text = (char *)"real question"},
     };
-    struct session_log *ls = session_log_open("pa", "ma", NULL);
+    struct session_log *ls = session_log_open("pa", "ma", NULL, NULL);
     EXPECT(ls != NULL);
     char *paths = xstrdup(session_log_path(ls));
     session_log_append(ls, conv_seed, 4);
@@ -317,7 +317,7 @@ int main(void)
     free(seed_fp);
     free(paths);
 
-    struct session_log *lso = session_log_open("pa", "ma", NULL);
+    struct session_log *lso = session_log_open("pa", "ma", NULL, NULL);
     EXPECT(lso != NULL);
     char *pathso = xstrdup(session_log_path(lso));
     session_log_append(lso, conv_seed, 2); /* seed + assistant, no real prompt */
@@ -354,7 +354,7 @@ int main(void)
         struct item ext[5];
         memcpy(ext, base, nb * sizeof(struct item));
         ext[nb] = (struct item){.kind = ITEM_USER_MESSAGE, .text = (char *)"after crash"};
-        struct session_log *lt = session_log_resume(tornpath, "pa", "ma", NULL, nb);
+        struct session_log *lt = session_log_resume(tornpath, "pa", "ma", NULL, NULL, nb);
         EXPECT(lt != NULL);
         session_log_append(lt, ext, nb + 1);
         session_log_close(lt);
@@ -381,7 +381,7 @@ int main(void)
          .tool_name = (char *)"bash",
          .tool_arguments_json = (char *)"{}"}, /* no matching tool_result */
     };
-    struct session_log *ltc = session_log_open("pa", "ma", NULL);
+    struct session_log *ltc = session_log_open("pa", "ma", NULL, NULL);
     EXPECT(ltc != NULL);
     char *pathtc = xstrdup(session_log_path(ltc));
     session_log_append(ltc, conv_tc, 4);
@@ -394,7 +394,7 @@ int main(void)
     free(pathtc);
 
     /* ---- session_log_materialized flips on the first append ---- */
-    struct session_log *lm = session_log_open("pa", "ma", NULL);
+    struct session_log *lm = session_log_open("pa", "ma", NULL, NULL);
     EXPECT(lm != NULL);
     EXPECT(session_log_materialized(lm) == 0); /* path assigned, file not written yet */
     struct item one_turn[] = {{.kind = ITEM_TURN_BOUNDARY},
@@ -417,7 +417,7 @@ int main(void)
         {.kind = ITEM_USER_MESSAGE, .text = (char *)"t2"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"a2"},
     };
-    struct session_log *lu = session_log_open("pa", "ma", NULL);
+    struct session_log *lu = session_log_open("pa", "ma", NULL, NULL);
     EXPECT(lu != NULL);
     char *pathu = xstrdup(session_log_path(lu));
     session_log_append(lu, conv_u, 9);
@@ -443,7 +443,7 @@ int main(void)
     free(pathu);
 
     /* ---- undo everything: keep 0 turns leaves just the header ---- */
-    struct session_log *lz = session_log_open("pa", "ma", NULL);
+    struct session_log *lz = session_log_open("pa", "ma", NULL, NULL);
     EXPECT(lz != NULL);
     char *pathz = xstrdup(session_log_path(lz));
     session_log_append(lz, conv_u, 9);
@@ -455,7 +455,7 @@ int main(void)
     free(pathz);
 
     /* ---- fork: prefix copy branches without touching the source ---- */
-    struct session_log *lf = session_log_open("pa", "ma", "hi");
+    struct session_log *lf = session_log_open("pa", "ma", "hi", NULL);
     EXPECT(lf != NULL);
     char *pathf = xstrdup(session_log_path(lf));
     session_log_append(lf, conv_u, 9);
@@ -513,6 +513,87 @@ int main(void)
     }
     free(src_id);
     free(pathf);
+
+    /* ---- the recorded selection: header, amended by later switches ---- */
+    struct session_log *lsel = session_log_open("pa", "ma", "hi", "review");
+    EXPECT(lsel != NULL);
+    char *selpath = xstrdup(session_log_path(lsel));
+    /* Before the file exists, a switch just corrects the pending header. */
+    session_log_set_meta(lsel, "pb", "mb", NULL, NULL);
+    session_log_append(lsel, conv_u, 3);
+    struct session_meta sm;
+    EXPECT(session_read_meta(selpath, &sm) == 0);
+    EXPECT_STR_EQ(sm.provider, "pb");
+    EXPECT_STR_EQ(sm.model, "mb");
+    EXPECT(sm.effort == NULL);
+    EXPECT(sm.preset == NULL);
+    session_meta_free(&sm);
+
+    /* Once it's on disk, a switch appends a selection record — and that is
+     * what a resume reads, not the now-stale header. Items are unaffected. */
+    session_log_set_meta(lsel, "pc", "mc", "low", "review");
+    session_log_append(lsel, conv_u, 6);
+    session_log_close(lsel);
+    EXPECT(session_read_meta(selpath, &sm) == 0);
+    EXPECT_STR_EQ(sm.provider, "pc");
+    EXPECT_STR_EQ(sm.model, "mc");
+    EXPECT_STR_EQ(sm.effort, "low");
+    EXPECT_STR_EQ(sm.preset, "review");
+    EXPECT(sm.id != NULL && sm.cwd != NULL);
+    session_meta_free(&sm);
+    /* session_load reports the same effective selection, and the extra
+     * records don't show up as items. */
+    EXPECT(session_load(selpath, &items, &n, &meta) == 0);
+    EXPECT(n == 6);
+    EXPECT_STR_EQ(meta.provider, "pc");
+    EXPECT_STR_EQ(meta.preset, "review");
+    free_items(items, n);
+    session_meta_free(&meta);
+
+    /* A switch earns its place in the file by producing something: until the
+     * next append it is in-memory only, so merely opening a session (a resume
+     * whose restore couldn't be applied, say) can't rewrite what it records.
+     * Once a turn follows, the record precedes it — and it's a whole
+     * selection, so leaving the stance drops the preset rather than letting
+     * the previous one stand. */
+    struct session_log *lsel2 = session_log_resume(selpath, "pc", "mc", "low", "review", 6);
+    EXPECT(lsel2 != NULL);
+    session_log_set_meta(lsel2, "pc", "md", NULL, NULL);
+    EXPECT(session_read_meta(selpath, &sm) == 0);
+    EXPECT_STR_EQ(sm.model, "mc"); /* nothing written yet */
+    EXPECT_STR_EQ(sm.preset, "review");
+    session_meta_free(&sm);
+    session_log_append(lsel2, conv_u, 9);
+    session_log_close(lsel2);
+    EXPECT(session_read_meta(selpath, &sm) == 0);
+    EXPECT_STR_EQ(sm.model, "md");
+    EXPECT(sm.preset == NULL);
+    EXPECT(sm.effort == NULL);
+    session_meta_free(&sm);
+
+    /* Truncating away the record that carried the live selection must not
+     * strand the file on an older one: the turns that follow are produced by
+     * what the run is on, so the cut re-states it ahead of them. */
+    struct session_log *lsel4 = session_log_open("pa", "ma", NULL, NULL);
+    EXPECT(lsel4 != NULL);
+    char *cutpath = xstrdup(session_log_path(lsel4));
+    session_log_append(lsel4, conv_u, 6);
+    session_log_set_meta(lsel4, "pb", "mb", NULL, "stance"); /* switch after turn 1 */
+    session_log_append(lsel4, conv_u, 9);
+    EXPECT(session_log_truncate(lsel4, 1, 3) == 0); /* drops the switch record */
+    session_log_append(lsel4, conv_u, 6);           /* ... and a turn follows */
+    session_log_close(lsel4);
+    EXPECT(session_read_meta(cutpath, &sm) == 0);
+    EXPECT_STR_EQ(sm.provider, "pb");
+    EXPECT_STR_EQ(sm.model, "mb");
+    EXPECT_STR_EQ(sm.preset, "stance");
+    session_meta_free(&sm);
+    free(cutpath);
+
+    /* An unreadable path reports failure with nothing to free. */
+    EXPECT(session_read_meta("/nonexistent/hax-session.jsonl", &sm) == -1);
+    EXPECT(sm.provider == NULL && sm.id == NULL);
+    free(selpath);
 
     /* ---- resume enforces the aggregate image count cap ---- */
     /* A session carrying one more image than the cap allows (an older/newer

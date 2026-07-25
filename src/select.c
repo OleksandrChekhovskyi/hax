@@ -8,6 +8,7 @@
 
 #include "util.h"
 #include "agent.h"
+#include "agent_core.h"
 #include "busy.h"
 #include "catalog.h"
 #include "config.h"
@@ -418,7 +419,7 @@ static enum pick_status choose_effort(struct agent_state *st, struct provider *p
     return PICK_MADE;
 }
 
-/* Record a selection: session overrides for the members actually picked, and
+/* Record a selection: run overrides for the members actually picked, and
  * one atomic state-tier write for the whole set. NULL model/effort means "not
  * picked here" — config_persist_selection keeps the stored value when the
  * provider is unchanged and resets it to the sentinel when the commit re-pins
@@ -433,43 +434,33 @@ static void commit_selection(const char *provider, const char *model, const char
      * Presets are the only writer of that override, so clearing is
      * unambiguous; every commit path follows with agent_apply_settings,
      * which rebuilds the prompt. config_persist_selection below removes
-     * the persisted name in the same write. The name is shadowed with the
-     * empty sentinel, not deleted: a delete would let a lower-tier name
-     * (HAX_PRESET, a config-file default, or state if its write fails)
-     * resurface in the banner as a stance that is no longer applied. */
-    config_set_override("preset", "");
-    config_set_override("system_prompt", NULL);
+     * the persisted name in the same write. A stance restored from a
+     * resumed conversation ends here too — see config_preset_exit. */
+    config_preset_exit(CONFIG_TIER_RUN);
     config_set_override("provider", provider);
     if (model)
         config_set_override("model", model);
     if (effort)
         config_set_override("effort", effort);
     if (config_persist_selection(provider, model, effort) != 0) {
-        /* The overrides above keep the pick active this session, but it didn't
+        /* The overrides above keep the pick active for this run, but it didn't
          * reach state.json (an unwritable state dir), so it won't survive a
          * restart. Say so once — otherwise the user is left puzzled when
          * settings silently revert next launch. */
         static int warned;
         if (!warned) {
             warned = 1;
-            ui_note("couldn't save to state.json — this choice applies to this session only");
+            ui_note("couldn't save to state.json — this choice applies to this run only");
         }
     }
 }
 
-/* The resolvable id of the live provider: the "provider" config key that
- * provider_find (and, eventually, config-defined custom providers) consume —
- * NOT the display name, which HAX_PROVIDER_NAME or a custom provider can
- * change and which wouldn't resolve. autoselect records its pick under this
- * key (as a session override) and /provider commits it, so it's populated
- * whenever a provider is live; the display name is only a last-ditch
- * fallback. Returns malloc'd; caller frees. */
+/* agent_provider_id as an owned copy: the callers below commit it through
+ * config writes that invalidate the borrowed pointer. */
 static char *current_provider_id(const struct provider *p)
 {
-    const char *id = config_str("provider");
-    if (id && *id)
-        return xstrdup(id);
-    return xstrdup(p && p->name ? p->name : "");
+    const char *id = agent_provider_id(p);
+    return xstrdup(id ? id : "");
 }
 
 /* A constructor may diagnose directly through hax_err/hax_warn on stderr.
@@ -664,7 +655,7 @@ void select_provider(struct agent_state *st)
      * outgoing provider's exact model for intent against the new backend.
      * Every abort restores the snapshot; commit_selection replaces these
      * provisional values with the actual picks. */
-    struct config_override_state *ov = config_override_snapshot();
+    struct config_snapshot *ov = config_snapshot_take();
     config_set_override("provider", f->name);
     config_set_override("model", CONFIG_VALUE_DEFAULT);
     config_set_override("effort", CONFIG_VALUE_DEFAULT);
@@ -672,7 +663,7 @@ void select_provider(struct agent_state *st)
     struct provider *newp = f->new(f->name);
     sync_constructor_diagnostics(st, diag_before);
     if (!newp) {
-        config_override_restore(ov);
+        config_snapshot_restore(ov);
         st->r->disp.trail = 1; /* the factory printed a raw error line */
         free(cur);
         return;
@@ -696,7 +687,7 @@ void select_provider(struct agent_state *st)
             st->r->disp.trail = 1;
         }
         newp->destroy(newp);
-        config_override_restore(ov);
+        config_snapshot_restore(ov);
         free(cur);
         return;
     }
@@ -706,7 +697,7 @@ void select_provider(struct agent_state *st)
     char *e = NULL;
     if (choose_effort(st, newp, NULL, &e, 0) == PICK_CANCELLED) {
         newp->destroy(newp);
-        config_override_restore(ov);
+        config_snapshot_restore(ov);
         free(cur);
         free(m);
         return;
@@ -722,13 +713,13 @@ void select_provider(struct agent_state *st)
 
     if (agent_apply_settings(st, newp) != 0) {
         newp->destroy(newp); /* ownership transfers only on success */
-        config_override_restore(ov);
+        config_snapshot_restore(ov);
         free(cur);
         free(m);
         free(e);
         return;
     }
-    config_override_state_free(ov); /* committed constructor side effects remain */
+    config_snapshot_free(ov); /* committed constructor side effects remain */
 
     free(cur);
     free(m);
@@ -783,12 +774,12 @@ void select_preset(struct agent_state *st, const char *name)
     /* Snapshot the override tier before applying: a preset that fails
      * validation or lands on an unusable setup must leave the session
      * exactly as it was. */
-    struct config_override_state *ov = config_override_snapshot();
+    struct config_snapshot *ov = config_snapshot_take();
     char *err = NULL;
-    if (config_preset_apply(name, &err) != 0) {
+    if (config_preset_apply(name, CONFIG_TIER_RUN, &err) != 0) {
         ui_error("%s", err ? err : "preset failed to apply");
         free(err);
-        config_override_restore(ov);
+        config_snapshot_restore(ov);
         st->r->disp.trail = 1;
         goto out;
     }
@@ -804,7 +795,7 @@ void select_preset(struct agent_state *st, const char *name)
     const struct provider_factory *f = provider_find(after);
     if (!f) {
         ui_error("preset '%s': unknown provider '%s'", name, after);
-        config_override_restore(ov);
+        config_snapshot_restore(ov);
         st->r->disp.trail = 1;
         goto out;
     }
@@ -813,7 +804,7 @@ void select_preset(struct agent_state *st, const char *name)
     sync_constructor_diagnostics(st, diag_before);
     if (!newp) {
         /* The factory printed the reason (no key, server down, …). */
-        config_override_restore(ov);
+        config_snapshot_restore(ov);
         st->r->disp.trail = 1;
         goto out;
     }
@@ -831,7 +822,7 @@ void select_preset(struct agent_state *st, const char *name)
         ui_error("preset '%s': no model resolves for provider '%s' — name one in the preset", name,
                  after);
         newp->destroy(newp);
-        config_override_restore(ov);
+        config_snapshot_restore(ov);
         st->r->disp.trail = 1;
         goto out;
     }
@@ -845,7 +836,7 @@ void select_preset(struct agent_state *st, const char *name)
         static int warned;
         if (!warned) {
             warned = 1;
-            ui_note("couldn't save to state.json — this preset applies to this session only");
+            ui_note("couldn't save to state.json — this preset applies to this run only");
         }
     }
 
@@ -854,17 +845,105 @@ void select_preset(struct agent_state *st, const char *name)
      * still occurs. */
     if (agent_apply_settings(st, newp) != 0) {
         newp->destroy(newp);
-        config_override_restore(ov);
+        config_snapshot_restore(ov);
         st->r->disp.trail = 1;
         goto out;
     }
-    config_override_state_free(ov); /* committing — keep the applied overrides */
+    config_snapshot_free(ov); /* committing — keep the applied overrides */
 
 out:
     free(picked);
     for (size_t i = 0; i < n; i++)
         free(names[i]);
     free(names);
+}
+
+/* ---------- restoring a resumed conversation's selection ---------- */
+
+/* Equal, treating NULL and "" as the same absence. */
+static int sel_same(const char *a, const char *b)
+{
+    if (!a || !*a)
+        return !b || !*b;
+    return b && strcmp(a, b) == 0;
+}
+
+void select_restore_session(struct agent_state *st, const char *provider, const char *model,
+                            const char *effort, const char *preset)
+{
+    /* "none" is a provider-less recording — it names no backend to go back
+     * to, so the run keeps whatever it is on. */
+    if (!provider || !*provider || strcmp(provider, "none") == 0)
+        return;
+
+    struct provider *live = (struct provider *)st->provider;
+    char *cur = current_provider_id(live);
+    if (live && sel_same(cur, provider) && sel_same(st->sess->model, model) &&
+        sel_same(st->sess->effort, effort) && sel_same(config_str("preset"), preset)) {
+        free(cur); /* already running exactly this — nothing to say */
+        return;
+    }
+
+    /* Run overrides, not the conversation tier: mid-session this is a
+     * selection act like /preset, and the newest act wins — a /model made
+     * earlier in this run must not outrank the conversation the user just
+     * asked for. Not persisted either: resuming isn't a new default. What
+     * gets written is config's business (same call --resume makes at
+     * startup); rolling it back on a failure below is ours. */
+    struct config_snapshot *ov = config_snapshot_take();
+    char *err = NULL;
+    if (config_restore_selection(CONFIG_TIER_RUN, provider, model, effort, preset, &err) != 0) {
+        /* The preset was renamed or deleted since — the persona is gone, but
+         * the recorded provider/model still applies. Say so; the user can fix
+         * it with /preset. */
+        ui_note("%s — resuming without it", err ? err : "preset failed to apply");
+        st->r->disp.trail = 1;
+        free(err);
+    }
+
+    /* Construct fresh by name, exactly like a preset switch: construction is
+     * where value-dependent behavior runs, so a same-id provider is rebuilt
+     * rather than reused. */
+    const char *id = config_str("provider");
+    const struct provider_factory *f = provider_find(id);
+    unsigned long diag_before = hax_diag_sequence();
+    struct provider *newp = f ? f->new(f->name) : NULL;
+    sync_constructor_diagnostics(st, diag_before);
+    if (!newp) {
+        if (!f)
+            ui_error("session used unknown provider '%s'", id);
+        /* Else the factory printed why. Keep the live provider rather than
+         * silently answering this conversation from a backend it never used:
+         * the history is restored, the choice of where to continue it is
+         * the user's. */
+        ui_note("couldn't restore %s — staying on %s (use /provider to switch)", id,
+                cur ? cur : "no provider");
+        st->r->disp.trail = 1;
+        config_snapshot_restore(ov);
+        free(cur);
+        return;
+    }
+    /* A model must resolve for it, checked before the old provider is
+     * destroyed — same gather-then-commit shape as the other flows. */
+    const char *m = config_str("model");
+    if ((!m || !*m) && !(newp->default_model && *newp->default_model)) {
+        ui_note("couldn't restore %s — no model resolves for it; staying on %s", id,
+                cur ? cur : "no provider");
+        st->r->disp.trail = 1;
+        newp->destroy(newp);
+        config_snapshot_restore(ov);
+        free(cur);
+        return;
+    }
+    if (agent_apply_settings(st, newp) != 0) {
+        newp->destroy(newp);
+        config_snapshot_restore(ov);
+        st->r->disp.trail = 1;
+        free(cur);
+        return;
+    }
+    config_snapshot_free(ov);
+    free(cur);
 }
 
 /* ---------- /config ---------- */

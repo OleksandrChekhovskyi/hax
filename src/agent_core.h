@@ -47,6 +47,15 @@ struct hax_opts {
 
 const struct tool *find_tool(const char *name);
 
+/* The live provider's *resolvable* id: the "provider" config key that
+ * provider_find consumes, falling back to the factory name when nothing is
+ * configured. NOT p->name — that's a display name, which HAX_PROVIDER_NAME
+ * and config-defined providers can set to something (`vLLM`) that wouldn't
+ * resolve. Anything that has to be read back later — session metadata a
+ * resume restores, the selection exported to subagents — must record this.
+ * NULL when no provider is live. Borrowed. */
+const char *agent_provider_id(const struct provider *p);
+
 /* Append `it` into a malloc'd vector, doubling capacity on overflow. The
  * three pointers form the canonical "items" vector used in agent.c and
  * oneshot.c — extracted here so both paths grow it the same way. */

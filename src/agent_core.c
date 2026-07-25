@@ -334,20 +334,22 @@ static char *resolve_model_label(struct provider *p, const char *model)
     return (p && p->model_label) ? p->model_label(p, model) : xstrdup(model);
 }
 
-/* Publish the effective selection for subagent inheritance (see
- * bash_export_selection). The provider is exported by its resolvable id —
- * the "provider" config key the autoselector/selectors record — not the
- * display name, which HAX_PROVIDER_NAME can change to something
- * provider_find wouldn't accept; the factory name is only the last-ditch
- * fallback. Sited here (init + reconfigure) because these are the only two
- * places the session's model/effort are resolved, so every path — startup,
- * oneshot, /provider, /model, /effort, /preset — republishes for free. */
-static void export_selection(const struct provider *p, const struct agent_session *s)
+const char *agent_provider_id(const struct provider *p)
 {
     const char *id = config_str("provider");
-    if ((!id || !*id) && p)
-        id = p->name;
-    bash_export_selection(id, s->model, s->effort);
+    if (id && *id)
+        return id;
+    return p ? p->name : NULL;
+}
+
+/* Publish the effective selection for subagent inheritance (see
+ * bash_export_selection). Sited here (init + reconfigure) because these are
+ * the only two places the session's model/effort are resolved, so every path
+ * — startup, oneshot, /provider, /model, /effort, /preset — republishes for
+ * free. */
+static void export_selection(const struct provider *p, const struct agent_session *s)
+{
+    bash_export_selection(agent_provider_id(p), s->model, s->effort);
 }
 
 int agent_session_init(struct agent_session *s, struct provider *p, const struct hax_opts *opts)

@@ -16,6 +16,7 @@
 #include "config.h"
 #include "file_mention.h"
 #include "paste_image.h"
+#include "select.h"
 #include "session.h"
 #include "slash.h"
 #include "tool.h"
@@ -553,12 +554,14 @@ void agent_print_banner(const struct provider *p, const struct agent_session *s)
     free(stance);
 }
 
-/* Provider name for session-log / -load metadata, tolerating a not-yet-
+/* Provider id for session-log metadata: the resolvable one (agent_provider_id
+ * — a resume feeds it back to provider_find), with "none" for a not-yet-
  * selected provider (interactive startup when the configured one couldn't
  * construct — the user picks one with /provider). */
 static const char *provider_log_name(const struct provider *p)
 {
-    return p && p->name ? p->name : "none";
+    const char *id = agent_provider_id(p);
+    return (id && *id) ? id : "none";
 }
 
 int agent_apply_settings(struct agent_state *st, struct provider *p)
@@ -614,7 +617,7 @@ int agent_apply_settings(struct agent_state *st, struct provider *p)
      * a no-op for the current file; the next /new carries the values forward.
      * (Per-item reasoning blobs carry their own provider+model stamp, so a
      * mid-session switch stays correct independent of this header.) */
-    session_log_set_meta(st->slog, provider_log_name(p), s->model, s->effort);
+    session_log_set_meta(st->slog, provider_log_name(p), s->model, s->effort, config_str("preset"));
 
     /* On an empty conversation the startup banner is usually still on
      * screen just above, boldly asserting the old settings; a dim line
@@ -640,10 +643,16 @@ int agent_apply_settings(struct agent_state *st, struct provider *p)
      * conversation would just be context noise (and skew the transcript /
      * --resume view away from what the model actually saw). */
     const char *model_label = s->model_label ? s->model_label : s->model;
-    char *label =
-        s->effort
-            ? xasprintf("switched to %s · %s · %s", p->name ? p->name : "?", model_label, s->effort)
-            : xasprintf("switched to %s · %s", p->name ? p->name : "?", model_label);
+    /* The stance rides along like it does in the banner: a preset may have
+     * swapped the system prompt, so "switched to mock · m" alone would
+     * understate what changed (this covers /preset and a /resume restore). */
+    const char *preset = config_str("preset");
+    char *stance = (preset && *preset) ? xasprintf("[%s] ", preset) : xstrdup("");
+    char *label = s->effort ? xasprintf("switched to %s%s · %s · %s", stance,
+                                        p->name ? p->name : "?", model_label, s->effort)
+                            : xasprintf("switched to %s%s · %s", stance, p->name ? p->name : "?",
+                                        model_label);
+    free(stance);
 
     render_open_block(st->r);
     disp_raw(ANSI_DIM);
@@ -930,8 +939,10 @@ void agent_resume_session(struct agent_state *st, const char *path)
     struct agent_session *s = st->sess;
     struct item *loaded = NULL;
     size_t nl = 0;
-    if (session_load(path, &loaded, &nl, NULL) != 0 || nl == 0) {
+    struct session_meta meta;
+    if (session_load(path, &loaded, &nl, &meta) != 0 || nl == 0) {
         free(loaded);
+        session_meta_free(&meta);
         ui_error("could not read session");
         /* The error line is now the last thing printed, on its own fresh
          * row. /resume set trail = 2 for the picker that's now moot; correct
@@ -940,6 +951,23 @@ void agent_resume_session(struct agent_state *st, const char *path)
         st->r->disp.trail = 1;
         return;
     }
+
+    /* Leave the prior session's file before anything can stamp it: the
+     * restore below reconfigures the run, and that must not be recorded as a
+     * switch in the conversation the user just left. */
+    session_log_close(st->slog);
+    st->slog = NULL;
+
+    /* Continue on what this conversation was using, like --resume does at
+     * startup. Deliberately before the history swap, so the confirmation it
+     * prints is chosen against the conversation being *left*: from an empty
+     * one — the startup banner still on screen above, asserting settings this
+     * is about to invalidate — that's a fresh banner, and the replay below
+     * then follows it exactly as it does at startup. Mid-conversation it's
+     * the dim "switched to …" line instead, where a banner would falsely
+     * imply a reset. Also before the log/transcript re-key below, so both are
+     * opened against the restored system prompt and model. */
+    select_restore_session(st, meta.provider, meta.model, meta.effort, meta.preset);
 
     /* Swap the loaded conversation in for the current one. */
     for (size_t i = 0; i < s->n_items; i++)
@@ -951,9 +979,18 @@ void agent_resume_session(struct agent_state *st, const char *path)
 
     /* Continue the resumed file rather than the prior one, and re-key the
      * transcript mirror to the restored history (reset writes the header,
-     * the append replays the items). */
-    session_log_close(st->slog);
-    st->slog = session_log_resume(path, provider_log_name(st->provider), s->model, s->effort, nl);
+     * the append replays the items). The log opens against what the file
+     * records, so the set_meta that follows records a difference — a restore
+     * that couldn't be applied — as the switch it is. */
+    st->slog = session_log_resume(path, meta.provider, meta.model, meta.effort, meta.preset, nl);
+    /* Stage the live selection against it. After a successful restore the two
+     * agree and this is a no-op; after a failed one it records the fallback
+     * the run is really on — but only once a turn is sent under it, so
+     * opening a conversation whose backend is unavailable and quitting leaves
+     * its recorded setup intact. */
+    session_log_set_meta(st->slog, provider_log_name(st->provider), s->model, s->effort,
+                         config_str("preset"));
+    session_meta_free(&meta);
     transcript_log_reset(st->tlog, s->sys, s->tools, s->n_tools);
     transcript_log_append(st->tlog, s->items, s->n_items);
 
@@ -1107,9 +1144,16 @@ void agent_fork(struct agent_state *st, size_t turn)
     /* Open the new logger before retiring the old one: if it can't be opened,
      * the original stays live and the conversation is untouched (rather than
      * forking into an unrecordable branch). src borrows from st->slog, so it
-     * must outlive this call too. */
+     * must outlive this call too. It opens against what the copied prefix
+     * records and is then stamped with the live selection, so a fork made
+     * after a switch the retained turns predate carries that switch onto the
+     * branch with its first new turn — resuming the fork then continues on
+     * what the user is running. */
+    struct session_meta fmeta;
+    session_read_meta(newpath, &fmeta);
     struct session_log *newlog =
-        session_log_resume(newpath, provider_log_name(st->provider), s->model, s->effort, cut);
+        session_log_resume(newpath, fmeta.provider, fmeta.model, fmeta.effort, fmeta.preset, cut);
+    session_meta_free(&fmeta);
     if (!newlog) {
         unlink(newpath);
         free(newpath);
@@ -1117,6 +1161,8 @@ void agent_fork(struct agent_state *st, size_t turn)
         st->r->disp.trail = 1;
         return;
     }
+    session_log_set_meta(newlog, provider_log_name(st->provider), s->model, s->effort,
+                         config_str("preset"));
     free(newpath);
     session_log_close(st->slog);
     st->slog = newlog;
@@ -1414,11 +1460,18 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
      * history. An empty-but-readable session (e.g. truncated by a crash)
      * loads as zero items and just resumes empty, continuing that file. */
     size_t n_resumed = 0;
+    /* The selection the resumed file records, kept until the session log is
+     * opened against it below. main.c already restored it into the config, so
+     * it differs from the live selection only when a flag overrode the
+     * restore — which is then recorded as the switch it is. */
+    struct session_meta rmeta;
+    memset(&rmeta, 0, sizeof(rmeta));
     if (opts->resume_path) {
         struct item *loaded = NULL;
         size_t nl = 0;
-        if (session_load(opts->resume_path, &loaded, &nl, NULL) != 0) {
+        if (session_load(opts->resume_path, &loaded, &nl, &rmeta) != 0) {
             hax_err("could not resume session '%s'", opts->resume_path);
+            session_meta_free(&rmeta);
             agent_session_free(&sess);
             return 1;
         }
@@ -1475,10 +1528,20 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
      * the restored items aren't re-written); otherwise a fresh file is
      * begun. NULL when persistence is disabled — all entry points are
      * NULL-safe. */
-    state.slog = opts->resume_path
-                     ? session_log_resume(opts->resume_path, provider_log_name(p), sess.model,
-                                          sess.effort, n_resumed)
-                     : session_log_open(provider_log_name(p), sess.model, sess.effort);
+    state.slog =
+        opts->resume_path
+            ? session_log_resume(opts->resume_path, rmeta.provider, rmeta.model, rmeta.effort,
+                                 rmeta.preset, n_resumed)
+            : session_log_open(provider_log_name(p), sess.model, sess.effort, config_str("preset"));
+    /* Stages the run's selection when it differs from what the file said —
+     * i.e. when a selection flag redirected the resume — so the turns this
+     * run produces are recorded under it and the next resume continues from
+     * there. A no-op otherwise, and nothing reaches the file until a turn
+     * does. */
+    if (opts->resume_path)
+        session_log_set_meta(state.slog, provider_log_name(p), sess.model, sess.effort,
+                             config_str("preset"));
+    session_meta_free(&rmeta);
     /* Mirror restored history into the HAX_TRANSCRIPT log — its header
      * was just written by _open; the items follow so the mirror matches
      * the live conversation. */

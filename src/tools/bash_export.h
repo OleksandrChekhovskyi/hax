@@ -5,14 +5,19 @@
 #include <stddef.h>
 
 /*
- * The session's effective provider/model/effort, published by the agent
+ * The run's effective provider/model/effort, published by the agent
  * layer and exported into bash-tool children as HAX_PROVIDER / HAX_MODEL /
  * HAX_EFFORT — so a nested `hax -p` (subagent) inherits exactly
- * what the parent sends on the wire, including session-only state (an
+ * what the parent sends on the wire, including unpersisted state (an
  * auto-selected provider, a /model pick) that lives in the override tier,
  * not the environment. HAX_PRESET is cleared alongside: a preset the parent
  * ran under already shaped these values, and re-applying it in the child
  * would shadow them.
+ *
+ * A child that resumes a past conversation is deliberately not bound by any
+ * of this: the conversation tier outranks the environment (see config.h), so
+ * `hax --resume=<id> -p ...` continues that conversation on its own recorded
+ * setup instead of the parent's.
  *
  * Its own translation unit (not bash.c) so the agent core can publish
  * without linking the whole bash tool — unit tests stub TOOL_BASH.

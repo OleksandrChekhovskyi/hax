@@ -60,6 +60,30 @@ resume with: hax --resume=<id>
 In `-p` mode this hint goes to stderr so stdout stays suitable for piping. Set
 `HAX_NO_SESSION=1` to disable session recording.
 
+### What resuming restores
+
+Resuming restores the provider, model, effort, and preset the conversation was last using —
+a mid-session `/model` or `/preset` switch included — so it continues where it left off
+instead of on whatever this run happens to be set to. Environment variables and saved picks
+don't redirect it; the selection flags do:
+
+```sh
+hax --resume=<id> --model=<other>       # swaps the model
+hax --resume=<id> --provider=<other>    # the recorded model goes with its provider
+hax --resume=<id> --preset=<other>      # swaps the whole preset
+```
+
+A run redirected that way is itself recorded, so the next resume picks up from there rather
+than snapping back. Naming a provider, model, or effort leaves the conversation's preset
+behind — a preset is a whole selection, so it can't be half-kept, the same way an explicit
+`/model` exits a preset mid-session. Use `--preset` to move between presets.
+
+The `-p` banner marks a restored selection `(resumed)`, and `/resume` reports the switch in
+the REPL. If the recorded provider can't be used (logged out, server down, a provider that
+no longer exists) or its preset has since been deleted, hax says so rather than quietly
+answering from something else: `-p` exits with the reason, and the REPL opens the
+conversation with the problem called out so you can choose where to continue it.
+
 ## REPL commands
 
 Type `/help` in the REPL for the live command list and keyboard shortcuts.
@@ -246,8 +270,8 @@ when the user asks for it. There is no dedicated subagent machinery: a subagent 
 run by hax, so everything above about `-p`, sessions, and resume applies to it.
 
 - The child inherits the parent's exact provider, model, and effort: the bash tool exports the
-  parent session's effective selection as `HAX_PROVIDER` / `HAX_MODEL` / `HAX_EFFORT`
-  for its children, so even session-only picks (an auto-selected provider, a mid-session
+  parent run's effective selection as `HAX_PROVIDER` / `HAX_MODEL` / `HAX_EFFORT`
+  for its children, so even unpersisted picks (an auto-selected provider, a mid-session
   `/model`) carry over.
 - A different role or backend per subagent is one flag away: `--preset review`, or explicit
   `--provider` / `--model` / `--effort`; `--bare` makes a cheap scout without project context.
@@ -257,10 +281,9 @@ run by hax, so everything above about `-p`, sessions, and resume applies to it.
   a skill.
 - The child's session id is printed to stderr at startup, so a subagent that outlives the bash
   tool's timeout still leaves a resumable session; the parent can continue it with
-  `hax --resume=<id> -p "..."` instead of redoing the work. Resume restores the conversation,
-  not the selection (hax-wide behavior — `/resume` works the same), so a follow-up to a
-  preset-backed child must repeat the original `--preset`/flags; the prompt section says so.
-  `--no-session` opts a throwaway query out of this.
+  `hax --resume=<id> -p "..."` instead of redoing the work. That follow-up runs on the earlier
+  child's own provider, model, and preset rather than the inherited ones — resuming beats
+  inheritance, as everywhere else. `--no-session` opts a throwaway query out of this.
 - Nesting is capped: children run with `HAX_SUBAGENT_DEPTH` incremented, and hax refuses to
   start at depth 3 — a backstop against runaway recursive spawning.
 

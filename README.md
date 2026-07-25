@@ -83,15 +83,11 @@ See [docs/providers.md](./docs/providers.md) for provider-specific behavior and 
 
 Every registered setting has a canonical config key and, when applicable, an `HAX_*`
 environment variable. Runtime selections made with `/provider`, `/model`, and `/effort` are
-stored separately from your config file.
+stored separately from your config file. The more explicit the input, the higher it wins: a
+CLI flag beats an environment variable, which beats anything saved.
 
-Resolution order is:
-
-```text
-runtime selection → environment → state.json → config.json → default
-```
-
-See [docs/configuration.md](./docs/configuration.md) for the file format and setting reference.
+See [docs/configuration.md](./docs/configuration.md) for the file format, the full resolution
+order, and the setting reference.
 
 ## More docs
 
