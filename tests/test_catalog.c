@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -183,6 +184,7 @@ static void test_price_formula(void)
         .cost_output = 8,
         .cost_cache_read = 0.5,
         .cost_cache_write = 2.5,
+        .cost_cache_write_1h = -1, /* unknown: 1h writes fall back to 2x input */
         .context = 0,
         .output = 0,
     };
@@ -209,6 +211,11 @@ static void test_price_formula(void)
     EXPECT(s.cache_write == 0.775);
     EXPECT(s.out == 8.0);
     EXPECT(s.in + s.cache_read + s.cache_write + s.out == 9.525);
+    /* A declared 1h rate replaces the 2x-input fallback (OpenRouter quotes
+     * one): 0.25M*2 + 0.5M*0.5 + 0.15M*2.5 + 0.1M*3 = 1.425. */
+    e.cost_cache_write_1h = 3;
+    EXPECT(catalog_price(&e, 1000000, 0, 500000, 250000, 100000, NULL) == 1.425);
+    e.cost_cache_write_1h = -1;
     /* Unknown cache rates fall back to the input rate. */
     e.cost_cache_read = -1;
     e.cost_cache_write = -1;
@@ -216,6 +223,102 @@ static void test_price_formula(void)
     /* Unknown input or output rate: no estimate at all. */
     e.cost_input = -1;
     EXPECT(catalog_price(&e, 1000000, 1000000, 0, 0, 0, NULL) == -1);
+}
+
+/* A write rate below the input rate is a storage surcharge, not a
+ * replacement: those tokens are still billed as input. Figures measured
+ * from OpenRouter on google/gemini-3.1-pro-preview, whose reported
+ * prompt_tokens counts the same tokens as both cached and written. */
+static void test_price_surcharge_style_writes(void)
+{
+    struct catalog_entry e = {
+        .cost_input = 2,
+        .cost_output = 12,
+        .cost_cache_read = 0.2,
+        .cost_cache_write = 0.375,
+        .cost_cache_write_1h = -1,
+    };
+    EXPECT(!catalog_cache_write_replaces_input(&e));
+
+    /* The cache-write turn: 3523 real prompt tokens billed in full, plus
+     * a read and a write charge over the same 3524 tokens. Reported by
+     * the provider as $0.0090723. */
+    struct catalog_split s;
+    double got = catalog_price(&e, 7047, 0, 3524, 3524, 0, &s);
+    EXPECT(fabs(got - 0.0090723) < 1e-9);
+    EXPECT(fabs(s.in - 3523 * 2.0 / 1e6) < 1e-12);
+    EXPECT(fabs(s.cache_read - 3524 * 0.2 / 1e6) < 1e-12);
+    EXPECT(fabs(s.cache_write - 3524 * 0.375 / 1e6) < 1e-12);
+    /* Treating the write as a replacement would have subtracted those
+     * tokens twice and understated the turn 4.5x. */
+    EXPECT(got > 0.008);
+
+    /* The read turn (no writes) is unaffected by the distinction. */
+    EXPECT(fabs(catalog_price(&e, 7047, 0, 3524, 0, 0, NULL) - 0.0077508) < 1e-9);
+
+    /* A replacement-style entry keeps subtracting: 1.25x input over the
+     * written tokens, measured on anthropic/claude-sonnet-4.5. */
+    struct catalog_entry r = {
+        .cost_input = 3,
+        .cost_output = 15,
+        .cost_cache_read = 0.3,
+        .cost_cache_write = 3.75,
+        .cost_cache_write_1h = 6,
+    };
+    EXPECT(catalog_cache_write_replaces_input(&r));
+    EXPECT(fabs(catalog_price(&r, 2810, 0, 0, 2807, 0, NULL) - 0.01053525) < 1e-9);
+
+    /* Unknown write rate reads as replacement — today's behavior for the
+     * models.dev tier, which quotes no rate for many models. */
+    struct catalog_entry u = {.cost_input = 2, .cost_output = 8, .cost_cache_write = -1};
+    EXPECT(catalog_cache_write_replaces_input(&u));
+
+    /* Classification follows the rates the request actually bills at. A
+     * tier that lifts the input rate past the write rate turns a
+     * replacement into a surcharge, and the token accounting has to move
+     * with it — otherwise the tier prices against a split from rates it
+     * isn't using. */
+    struct catalog_entry flip = {
+        .cost_input = 2,
+        .cost_output = 8,
+        .cost_cache_read = -1,
+        .cost_cache_write = 2.5, /* base: replacement (2.5 >= 2) */
+        .cost_cache_write_1h = -1,
+        .n_tiers = 1,
+        .tiers = {{.above = 200000,
+                   .cost_input = 10, /* tier: surcharge (2.5 < 10) */
+                   .cost_output = -1,
+                   .cost_cache_read = -1,
+                   .cost_cache_write = -1,
+                   .cost_cache_write_1h = -1}},
+    };
+    /* Below the tier: writes replace input, so 1000 written tokens of a
+     * 1000-token prompt leave nothing uncached. */
+    EXPECT(fabs(catalog_price(&flip, 1000, 0, 0, 1000, 0, &s) - 1000 * 2.5 / 1e6) < 1e-12);
+    EXPECT(s.in == 0);
+    /* Above it, the tier restates only the input rate and inherits the
+     * base write rate — which now sits below it, making the write a
+     * surcharge. The written tokens stay in the input charge. */
+    EXPECT(fabs(catalog_price(&flip, 300000, 0, 0, 1000, 0, &s) -
+                (300000 * 10.0 + 1000 * 2.5) / 1e6) < 1e-9);
+    EXPECT(fabs(s.in - 300000 * 10.0 / 1e6) < 1e-9);
+
+    /* The token count travels with the split, so a display can't
+     * re-derive it against the base rates and contradict the cost sitting
+     * next to it: the same request crosses the tier into surcharge
+     * territory and the count moves with the classification. */
+    EXPECT(s.in_tokens == 300000);
+    catalog_price(&flip, 1000, 0, 0, 1000, 0, &s);
+    EXPECT(s.in_tokens == 0);
+
+    /* A tier restating the write rate above its own input rate stays a
+     * replacement, and the written tokens come back out of input. */
+    flip.tiers[0].cost_cache_write = 15;
+    EXPECT(fabs(catalog_price(&flip, 300000, 0, 0, 1000, 0, &s) -
+                (299000 * 10.0 + 1000 * 15.0) / 1e6) < 1e-9);
+    EXPECT(fabs(s.in - 299000 * 10.0 / 1e6) < 1e-9);
+    EXPECT(fabs(s.cache_write - 1000 * 15.0 / 1e6) < 1e-12);
+    EXPECT(s.in_tokens == 299000);
 }
 
 static void test_price_tiers(void)
@@ -421,6 +524,7 @@ int main(void)
     test_lookup_miss();
     test_config_overrides_and_merges();
     test_price_formula();
+    test_price_surcharge_style_writes();
     test_price_tiers();
     test_lookup_parses_tiers();
     test_tier_only_entry();

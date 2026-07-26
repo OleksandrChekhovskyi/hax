@@ -21,7 +21,7 @@
  * turns. History mutation and footer capture stay inside compact_run. */
 struct oneshot_compact_ctx {
     struct spend_totals *costs;
-    const char *catalog_id;
+    const struct provider *provider;
     const char *model;
 };
 
@@ -34,7 +34,7 @@ static int compact_on_event(const struct stream_event *ev, void *user)
     else if (ev->kind == EV_ERROR)
         usage = ev->u.error.usage;
     if (usage)
-        spend_account(ctx->costs, usage, ctx->catalog_id, ctx->model);
+        spend_account(ctx->costs, usage, ctx->provider, ctx->model);
     return 0;
 }
 
@@ -63,7 +63,7 @@ static int oneshot_compact(struct agent_session *session, struct provider *provi
 {
     struct oneshot_compact_ctx ctx = {
         .costs = costs,
-        .catalog_id = provider->catalog_id,
+        .provider = provider,
         .model = session->model,
     };
     struct compact_params params = {
@@ -91,7 +91,7 @@ struct oneshot_loop_ctx {
 static void oneshot_turn_end(const struct agent_loop_turn *loop_turn, void *user)
 {
     struct oneshot_loop_ctx *ctx = user;
-    spend_account(ctx->costs, &loop_turn->usage, ctx->provider->catalog_id, ctx->session->model);
+    spend_account(ctx->costs, &loop_turn->usage, ctx->provider, ctx->session->model);
 }
 
 static void oneshot_auto_compact(void *user)

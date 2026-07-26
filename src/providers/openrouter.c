@@ -71,6 +71,43 @@ static char *openrouter_lead_line(const json_t *entry)
     return len ? xasprintf("%.*s", (int)len, d) : NULL;
 }
 
+/* Long-context tiers from `pricing.overrides` — replacement rates that
+ * apply to the whole request once the prompt reaches min_prompt_tokens:
+ *
+ *     "overrides": [{"min_prompt_tokens": 200000, "prompt": "0.000006",
+ *                    "completion": "0.0000225", "input_cache_read": ...}]
+ *
+ * The threshold carries over unchanged: both this and catalog_tier's
+ * `above` are exclusive, describing the same upstream policy (Anthropic
+ * bills the premium on prompts *exceeding* 200K), so the same model must
+ * price identically whichever tier answered. An omitted rate stays
+ * negative, which catalog_price already reads as "use the base rate". */
+static void openrouter_parse_tiers(const json_t *pricing, struct model_info *out)
+{
+    json_t *overrides = json_object_get(pricing, "overrides");
+    if (!json_is_array(overrides))
+        return;
+    size_t i;
+    json_t *ov;
+    json_array_foreach(overrides, i, ov)
+    {
+        if (out->n_tiers >= CATALOG_TIERS_MAX)
+            break;
+        if (!json_is_object(ov))
+            continue;
+        json_t *min = json_object_get(ov, "min_prompt_tokens");
+        if (!json_is_integer(min) || json_integer_value(min) <= 0)
+            continue;
+        struct catalog_tier *t = &out->tiers[out->n_tiers++];
+        t->above = (long)json_integer_value(min);
+        t->cost_input = openrouter_rate(ov, "prompt");
+        t->cost_output = openrouter_rate(ov, "completion");
+        t->cost_cache_read = openrouter_rate(ov, "input_cache_read");
+        t->cost_cache_write = openrouter_rate(ov, "input_cache_write");
+        t->cost_cache_write_1h = openrouter_rate(ov, "input_cache_write_1h");
+    }
+}
+
 void openrouter_parse_model(const json_t *entry, struct model_info *out)
 {
     json_t *ctx = json_object_get(entry, "context_length");
@@ -100,6 +137,9 @@ void openrouter_parse_model(const json_t *entry, struct model_info *out)
         /* Roughly half the paid catalog quotes one; the rest simply don't
          * cache, which is itself worth not claiming either way. */
         out->cost_cache_read = openrouter_rate(pricing, "input_cache_read");
+        out->cost_cache_write = openrouter_rate(pricing, "input_cache_write");
+        out->cost_cache_write_1h = openrouter_rate(pricing, "input_cache_write_1h");
+        openrouter_parse_tiers(pricing, out);
     }
 
     openrouter_parse_efforts(entry, &out->efforts);
@@ -401,6 +441,9 @@ struct provider *openrouter_provider_new(const char *name)
         .send_cache_key_default = 1,
         .lock_base_url = 1,
         .request_cost = 1,
+        /* Anthropic models here cache only on request, and OpenRouter
+         * passes the marker through to them. */
+        .send_cache_control_default = 1,
         .extra_headers = headers,
         /* The shared builder sends this object only when effort is set:
          * NULL keeps the provider default and "none" disables reasoning.

@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "harness.h"
+#include "model_meta.h"
 #include "providers/openai.h"
 
 /* Find the first message with the given role in a built messages array. */
@@ -283,8 +284,184 @@ static void test_tool_result_image_followup(void)
     json_decref(msgs);
 }
 
+/* ---------- prompt cache breakpoints ---------- */
+
+/* The cache_control marker on a message's last content part, or NULL. */
+static json_t *breakpoint_of(json_t *msg)
+{
+    json_t *content = json_object_get(msg, "content");
+    if (!json_is_array(content) || json_array_size(content) == 0)
+        return NULL;
+    json_t *last = json_array_get(content, json_array_size(content) - 1);
+    return json_object_get(last, "cache_control");
+}
+
+static int count_breakpoints(json_t *msgs)
+{
+    int n = 0;
+    for (size_t i = 0; i < json_array_size(msgs); i++)
+        if (breakpoint_of(json_array_get(msgs, i)))
+            n++;
+    return n;
+}
+
+static void test_cache_breakpoints_system_and_tail(void)
+{
+    struct item items[] = {
+        {.kind = ITEM_USER_MESSAGE, .text = (char *)"first"},
+        {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"reply"},
+        {.kind = ITEM_USER_MESSAGE, .text = (char *)"second"},
+    };
+    json_t *msgs = openai_build_messages("sys", items, 3, NULL, "openrouter", "m", -1);
+    openai_apply_cache_breakpoints(msgs, "1h");
+
+    /* Exactly two: the stable prefix and the rolling tail. */
+    EXPECT(count_breakpoints(msgs) == 2);
+    json_t *sys = json_array_get(msgs, 0);
+    EXPECT(breakpoint_of(sys) != NULL);
+    /* String content is promoted to the one-part array form, text intact. */
+    json_t *part = json_array_get(json_object_get(sys, "content"), 0);
+    EXPECT_STR_EQ(json_string_value(json_object_get(part, "type")), "text");
+    EXPECT_STR_EQ(json_string_value(json_object_get(part, "text")), "sys");
+    json_t *cc = breakpoint_of(sys);
+    EXPECT_STR_EQ(json_string_value(json_object_get(cc, "type")), "ephemeral");
+    EXPECT_STR_EQ(json_string_value(json_object_get(cc, "ttl")), "1h");
+    /* The tail is the last message, not the last *user* one. */
+    EXPECT(breakpoint_of(json_array_get(msgs, json_array_size(msgs) - 1)) != NULL);
+    json_decref(msgs);
+}
+
+static void test_cache_breakpoint_lands_on_tool_result(void)
+{
+    /* The common agentic shape: the request ends on tool results. Stopping
+     * at the last user message would leave every tool result uncached —
+     * the bulk of the prefix an agent re-sends each turn. */
+    struct item items[] = {
+        {.kind = ITEM_USER_MESSAGE, .text = (char *)"go"},
+        {.kind = ITEM_TOOL_CALL, .call_id = (char *)"c1", .tool_name = (char *)"bash"},
+        {.kind = ITEM_TOOL_RESULT, .call_id = (char *)"c1", .output = (char *)"output"},
+    };
+    json_t *msgs = openai_build_messages(NULL, items, 3, NULL, "openrouter", "m", -1);
+    openai_apply_cache_breakpoints(msgs, "5m");
+    json_t *last = json_array_get(msgs, json_array_size(msgs) - 1);
+    EXPECT_STR_EQ(json_string_value(json_object_get(last, "role")), "tool");
+    EXPECT(breakpoint_of(last) != NULL);
+    /* No system message here, so the tail carries the only breakpoint. */
+    EXPECT(count_breakpoints(msgs) == 1);
+    /* 5m is the wire default: the TTL field is omitted entirely. */
+    EXPECT(json_object_get(breakpoint_of(last), "ttl") == NULL);
+    json_decref(msgs);
+}
+
+static void test_cache_breakpoint_skips_contentless_assistant(void)
+{
+    /* An assistant turn that was nothing but tool calls has content:null
+     * and no part to mark — the breakpoint walks back to a message that
+     * can hold one rather than being dropped. */
+    struct item items[] = {
+        {.kind = ITEM_USER_MESSAGE, .text = (char *)"go"},
+        {.kind = ITEM_TOOL_CALL, .call_id = (char *)"c1", .tool_name = (char *)"bash"},
+    };
+    json_t *msgs = openai_build_messages(NULL, items, 2, NULL, "openrouter", "m", -1);
+    json_t *last = json_array_get(msgs, json_array_size(msgs) - 1);
+    EXPECT(json_is_null(json_object_get(last, "content")));
+    openai_apply_cache_breakpoints(msgs, "1h");
+    EXPECT(breakpoint_of(last) == NULL);
+    EXPECT(breakpoint_of(json_array_get(msgs, 0)) != NULL); /* the user message */
+    EXPECT(count_breakpoints(msgs) == 1);
+    json_decref(msgs);
+}
+
+static void test_cache_breakpoint_system_only(void)
+{
+    /* Nothing but a system prompt: it takes the breakpoint once, and the
+     * tail pass must not double-mark it. */
+    json_t *msgs = openai_build_messages("sys", NULL, 0, NULL, "openrouter", "m", -1);
+    openai_apply_cache_breakpoints(msgs, "1h");
+    EXPECT(json_array_size(msgs) == 1);
+    EXPECT(count_breakpoints(msgs) == 1);
+    json_decref(msgs);
+}
+
+/* Publish `m` as the live report for its own id. */
+static void remember(struct provider *p, struct model_info *m)
+{
+    model_meta_remember(p, m);
+    model_info_clear(m);
+}
+
+/* Both caching decisions come from the model's rates, because a router
+ * forwards cache_control to backends whose caching works nothing like
+ * Anthropic's. Getting either wrong is silent: money, not an error. */
+static void test_cache_plan_follows_the_model_rates(void)
+{
+    struct provider p = {0};
+    struct model_info m;
+
+    /* Anthropic-shaped: writes replace input processing (1.25x), and a
+     * quoted 1h rate means the 1h premium is real. */
+    model_info_init(&m);
+    m.id = xstrdup("anthropic-ish");
+    m.cost_input = 3;
+    m.cost_output = 15;
+    m.cost_cache_write = 3.75;
+    m.cost_cache_write_1h = 6;
+    remember(&p, &m);
+    struct openai_cache_plan plan = openai_plan_cache(&p, "anthropic-ish", OPENAI_CACHE_AUTO, "1h");
+    EXPECT(plan.send_breakpoints == 1);
+    EXPECT(plan.writes_bill_1h == 1);
+    /* A 5m request on the same model bills writes at the ordinary rate. */
+    plan = openai_plan_cache(&p, "anthropic-ish", OPENAI_CACHE_AUTO, "5m");
+    EXPECT(plan.send_breakpoints == 1 && plan.writes_bill_1h == 0);
+    /* Caching switched off sends nothing, whatever the TTL says. */
+    plan = openai_plan_cache(&p, "anthropic-ish", OPENAI_CACHE_OFF, "1h");
+    EXPECT(plan.send_breakpoints == 0 && plan.writes_bill_1h == 0);
+
+    /* OpenAI-shaped: writes replace input, but no 1h rate exists to bill
+     * at — pricing those as 1h would use the 2x-input fallback and
+     * overstate the dearest category by half again. */
+    model_info_init(&m);
+    m.id = xstrdup("openai-ish");
+    m.cost_input = 1;
+    m.cost_output = 6;
+    m.cost_cache_write = 1.25;
+    remember(&p, &m);
+    plan = openai_plan_cache(&p, "openai-ish", OPENAI_CACHE_AUTO, "1h");
+    EXPECT(plan.send_breakpoints == 1 && plan.writes_bill_1h == 0);
+
+    /* Gemini-shaped: the write rate is a surcharge far below input, so an
+     * explicit cache is charged on top of input billed in full — asking
+     * for one costs more than not caching. */
+    model_info_init(&m);
+    m.id = xstrdup("gemini-ish");
+    m.cost_input = 2;
+    m.cost_output = 12;
+    m.cost_cache_read = 0.2;
+    m.cost_cache_write = 0.375;
+    remember(&p, &m);
+    plan = openai_plan_cache(&p, "gemini-ish", OPENAI_CACHE_AUTO, "1h");
+    EXPECT(plan.send_breakpoints == 0 && plan.writes_bill_1h == 0);
+    /* But the judgement is only the default's: an explicit `cache = on`
+     * is the user overriding it, which the config contract promises. */
+    plan = openai_plan_cache(&p, "gemini-ish", OPENAI_CACHE_ON, "1h");
+    EXPECT(plan.send_breakpoints == 1);
+    /* Still no 1h premium — it quotes no 1h rate to bill at. */
+    EXPECT(plan.writes_bill_1h == 0);
+
+    /* Nothing known: send breakpoints (the common case is a model that
+     * benefits) but never invent the 1h premium. */
+    plan = openai_plan_cache(&p, "unknown", OPENAI_CACHE_AUTO, "1h");
+    EXPECT(plan.send_breakpoints == 1 && plan.writes_bill_1h == 0);
+    model_meta_release(&p);
+}
+
 int main(void)
 {
+    test_cache_plan_follows_the_model_rates();
+    test_cache_breakpoints_system_and_tail();
+    test_cache_breakpoint_lands_on_tool_result();
+    test_cache_breakpoint_skips_contentless_assistant();
+    test_cache_breakpoint_system_only();
     test_reasoning_attached_when_field_set();
     test_reasoning_omitted_when_field_null();
     test_reasoning_custom_field_name();

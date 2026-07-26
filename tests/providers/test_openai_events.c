@@ -569,6 +569,59 @@ static void test_usage_cost_captured(void)
     TEARDOWN(cap, st);
 }
 
+/* Verbatim from an OpenRouter response (anthropic/claude-sonnet-4.5,
+ * cold prefix): the write side is reported alongside the read side. */
+static void test_usage_cache_write_captured(void)
+{
+    WITH_STATE(cap, st);
+    feed_finish(&st, "stop");
+    openai_events_feed(&st, "{\"choices\":[],\"usage\":{"
+                            "\"prompt_tokens\":2810,\"completion_tokens\":4,"
+                            "\"cost\":0.01059525,"
+                            "\"prompt_tokens_details\":{\"cached_tokens\":0,"
+                            "\"cache_write_tokens\":2807}}}");
+    openai_events_feed(&st, "[DONE]");
+    EXPECT(cap.events[0].usage.input_tokens == 2810);
+    EXPECT(cap.events[0].usage.cached_tokens == 0);
+    EXPECT(cap.events[0].usage.cache_write_tokens == 2807);
+    /* The wire says nothing about TTL, and this request didn't claim one. */
+    EXPECT(cap.events[0].usage.cache_write_1h_tokens == -1);
+    TEARDOWN(cap, st);
+}
+
+static void test_usage_cache_write_1h_attributed_from_request(void)
+{
+    /* The response reports one undifferentiated write count, so the
+     * sender's TTL decides which rate the whole of it billed at. */
+    WITH_STATE(cap, st);
+    st.cache_write_1h = 1;
+    feed_finish(&st, "stop");
+    openai_events_feed(&st, "{\"choices\":[],\"usage\":{"
+                            "\"prompt_tokens\":2816,\"completion_tokens\":4,"
+                            "\"prompt_tokens_details\":{\"cache_write_tokens\":2813}}}");
+    openai_events_feed(&st, "[DONE]");
+    EXPECT(cap.events[0].usage.cache_write_tokens == 2813);
+    EXPECT(cap.events[0].usage.cache_write_1h_tokens == 2813);
+    TEARDOWN(cap, st);
+}
+
+static void test_usage_cache_write_1h_needs_a_write(void)
+{
+    /* A cache *read* turn under the same 1h setting writes nothing, so
+     * nothing may be attributed to the 1h rate. */
+    WITH_STATE(cap, st);
+    st.cache_write_1h = 1;
+    feed_finish(&st, "stop");
+    openai_events_feed(&st, "{\"choices\":[],\"usage\":{"
+                            "\"prompt_tokens\":2810,\"completion_tokens\":4,"
+                            "\"prompt_tokens_details\":{\"cached_tokens\":2807}}}");
+    openai_events_feed(&st, "[DONE]");
+    EXPECT(cap.events[0].usage.cached_tokens == 2807);
+    EXPECT(cap.events[0].usage.cache_write_tokens == -1);
+    EXPECT(cap.events[0].usage.cache_write_1h_tokens == -1);
+    TEARDOWN(cap, st);
+}
+
 /* ---------- prompt progress (llama.cpp return_progress) ---------- */
 
 static void test_progress_ignored_when_flag_off(void)
@@ -650,6 +703,9 @@ int main(void)
     test_usage_captured_from_trailing_chunk();
     test_usage_without_cached_details();
     test_usage_cost_captured();
+    test_usage_cache_write_captured();
+    test_usage_cache_write_1h_attributed_from_request();
+    test_usage_cache_write_1h_needs_a_write();
     test_progress_ignored_when_flag_off();
     test_progress_emitted_when_flag_on();
     test_progress_missing_fields_default_zero();

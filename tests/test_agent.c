@@ -372,7 +372,7 @@ static void test_apply_settings_keeps_stamped_spend(void)
                              .cache_write_tokens = -1,
                              .cache_write_1h_tokens = -1,
                              .cost = -1};
-    spend_account(&f.st.stats.spend, &u, "prov", "model-a");
+    spend_account(&f.st.stats.spend, &u, &f.p, "model-a");
 
     setenv("HAX_MODEL", "model-b", 1); /* model-a -> model-b */
     char *out = capture_stdout(do_apply, &f);
@@ -385,8 +385,10 @@ static void test_apply_settings_keeps_stamped_spend(void)
     /* A record whose stamp resolves nowhere (catalog fetch never landed,
      * unknown model) leaves the total at the reported subtotal, marked
      * approximate — it's missing real usage. */
-    spend_account(&f.st.stats.spend, &u, "no-such-catalog-provider", "model-x");
-    f.st.stats.spend.reported = 0.03;
+    struct provider nowhere = {.catalog_id = "no-such-catalog-provider"};
+    spend_account(&f.st.stats.spend, &u, &nowhere, "model-x");
+    struct stream_usage paid = {-1, -1, -1, -1, -1, 0.03};
+    spend_account(&f.st.stats.spend, &paid, &f.p, "model-a");
     approx = 0;
     EXPECT(agent_session_spend(&f.st.stats, &approx) == 10.03);
     EXPECT(approx == 1);

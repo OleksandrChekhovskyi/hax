@@ -160,7 +160,7 @@ double agent_session_spend(const struct session_stats *t, int *approx)
 /* Request counts and window snapshots stay with callers because compaction
  * accounts them differently from ordinary continuation turns. */
 static void stats_account_usage(struct session_stats *stats, const struct stream_usage *usage,
-                                const char *catalog_id, const char *model)
+                                const struct provider *p, const char *model)
 {
     if (usage->input_tokens >= 0)
         stats->input_tokens += usage->input_tokens;
@@ -170,7 +170,9 @@ static void stats_account_usage(struct session_stats *stats, const struct stream
         stats->cached_tokens += usage->cached_tokens;
     if (usage->cache_write_tokens > 0)
         stats->cache_write_tokens += usage->cache_write_tokens;
-    spend_account(&stats->spend, usage, catalog_id, model);
+    if (usage->input_tokens > 0)
+        stats->uncached_tokens += usage_uncached_input(usage, p, model);
+    spend_account(&stats->spend, usage, p, model);
 }
 
 /* Dim per-user-turn stats line: "42s · 8.9k / 256k (3%) · $0.042",
@@ -1197,7 +1199,7 @@ void agent_fork(struct agent_state *st, size_t turn)
 struct compact_ev {
     struct session_stats *stats;
     struct render_ctx *render;
-    const char *catalog_id;
+    const struct provider *provider;
     const char *model;
 };
 
@@ -1212,7 +1214,7 @@ static int compact_on_event(const struct stream_event *ev, void *user)
     if (!usage)
         return 0;
 
-    stats_account_usage(ce->stats, usage, ce->catalog_id, ce->model);
+    stats_account_usage(ce->stats, usage, ce->provider, ce->model);
     return 0;
 }
 
@@ -1292,7 +1294,7 @@ int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
     struct compact_ev ce = {
         .stats = &st->stats,
         .render = r,
-        .catalog_id = p->catalog_id,
+        .provider = p,
         .model = s->model,
     };
     struct compact_params params = {
@@ -1412,7 +1414,7 @@ static void repl_loop_turn_end(const struct agent_loop_turn *loop_turn, void *us
         stats->last_ctx = usage->input_tokens + usage->output_tokens;
         stats->last_limit = model_meta_context(provider, session->model);
     }
-    stats_account_usage(stats, usage, provider->catalog_id, session->model);
+    stats_account_usage(stats, usage, provider, session->model);
 }
 
 static int repl_loop_checkpoint(void *user)

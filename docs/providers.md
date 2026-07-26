@@ -263,7 +263,8 @@ Recognized common keys:
   [configuration.md](./configuration.md).
 
 OpenAI-style custom providers also recognize `reasoning_format` (`flat` or `nested`),
-`reasoning_roundtrip`, `send_cache_key`, and `request_cost`. Anthropic-style custom providers
+`reasoning_roundtrip`, `send_cache_key`, `request_cost`, `cache`, and `cache_ttl`.
+Anthropic-style custom providers
 recognize the Anthropic settings from [configuration.md](./configuration.md): `max_tokens`,
 `thinking_mode`, `thinking_budget`, `cache`, `cache_ttl`, and `version`.
 

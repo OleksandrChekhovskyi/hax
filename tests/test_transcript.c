@@ -440,6 +440,7 @@ static void test_turn_usage_footer(void)
                   .cache_write_1h_tokens = -1,
                   .cost = -1},
         .elapsed_ms = 42000,
+        .in_tokens = 2048, /* 3072 input - 1024 cached */
         .cost_in = 0.025,
         .cost_cache_read = 0.048,
         .cost_cache_write = -1,
@@ -454,33 +455,82 @@ static void test_turn_usage_footer(void)
         {.kind = ITEM_TURN_USAGE, .usage = &est},
     };
     char *out = render_to_string(NULL, items, sizeof(items) / sizeof(items[0]));
-    EXPECT(contains(out, "42s · ~$0.157 · in 2.0k $0.025 · cache 1.0k $0.048 · out 512 $0.084"));
+    EXPECT(contains(out, "42s · ~$0.157 · in 2.0k ~$0.025 · cache 1.0k ~$0.048 · out 512 ~$0.084"));
     /* The footer trails the response it accounts. */
     const char *ans = strstr(out, "answer");
     const char *foot = strstr(out, "42s ·");
     EXPECT(ans && foot && ans < foot);
     free(out);
 
-    /* Reported request: exact total, bare token counts — a reported
-     * charge can't be decomposed, so no per-category dollars appear. */
+    /* Reported request: the total is exact and unmarked while the
+     * categories, being rate estimates, each carry their own "~". The
+     * asymmetry is the message — what the turn cost, and where it went. */
     struct turn_usage exact = {
         .usage = {.input_tokens = 1000,
                   .output_tokens = 50,
                   .cached_tokens = -1,
-                  .cache_write_tokens = -1,
+                  .cache_write_tokens = 400,
                   .cache_write_1h_tokens = -1,
                   .cost = 0.0012},
         .elapsed_ms = 3000,
-        .cost_in = -1,
+        .in_tokens = 600, /* 1000 input - 400 written */
+        .cost_in = 0.0002,
         .cost_cache_read = -1,
-        .cost_cache_write = -1,
-        .cost_out = -1,
+        .cost_cache_write = 0.0008,
+        .cost_out = 0.0002,
         .cost_total = 0.0012,
         .cost_estimated = 0,
     };
     items[3].usage = &exact;
     out = render_to_string(NULL, items, sizeof(items) / sizeof(items[0]));
-    EXPECT(contains(out, "3s · $0.0012 · in 1000 · out 50"));
+    EXPECT(contains(out, "3s · $0.0012 · in 600 ~$0.0002 · write 400 ~$0.0008 · out 50 ~$0.0002"));
+    /* The exact total is not marked, only the components. */
+    EXPECT(!contains(out, "~$0.0012"));
+    free(out);
+
+    /* A surcharge-style write (Gemini) leaves its tokens in the input
+     * charge, and the backend counts them twice over — input 7047 with
+     * 3524 both cached and written. The plain subtraction would print
+     * "in 0" beside the cost of 3523 real input tokens; the count comes
+     * from the payload so it agrees with what was priced. */
+    struct turn_usage surcharge = {
+        .usage = {.input_tokens = 7047,
+                  .output_tokens = 12,
+                  .cached_tokens = 3524,
+                  .cache_write_tokens = 3524,
+                  .cache_write_1h_tokens = -1,
+                  .cost = 0.0092163},
+        .elapsed_ms = 2000,
+        .in_tokens = 3523,
+        .cost_in = 0.007046,
+        .cost_cache_read = 0.0007048,
+        .cost_cache_write = 0.0013215,
+        .cost_out = 0.000144,
+        .cost_total = 0.0092163,
+        .cost_estimated = 0,
+    };
+    items[3].usage = &surcharge;
+    out = render_to_string(NULL, items, sizeof(items) / sizeof(items[0]));
+    EXPECT(contains(out, "in 3.4k ~$0.0070"));
+    EXPECT(!contains(out, "in 0"));
+    free(out);
+
+    /* A component too small to render (a handful of uncached tokens on a
+     * cheap model) drops the figure rather than printing "~$0.0000". */
+    struct turn_usage tiny = exact;
+    tiny.cost_in = 0.00003;
+    items[3].usage = &tiny;
+    out = render_to_string(NULL, items, sizeof(items) / sizeof(items[0]));
+    EXPECT(contains(out, "in 600 · write 400 ~$0.0008"));
+    EXPECT(!contains(out, "$0.0000"));
+    free(out);
+
+    /* No rates to price against: bare counts, no dollar figures at all. */
+    struct turn_usage bare = exact;
+    bare.cost_in = bare.cost_cache_write = bare.cost_out = -1;
+    items[3].usage = &bare;
+    out = render_to_string(NULL, items, sizeof(items) / sizeof(items[0]));
+    EXPECT(contains(out, "3s · $0.0012 · in 600 · write 400 · out 50"));
     EXPECT(!contains(out, "~$"));
     free(out);
 }

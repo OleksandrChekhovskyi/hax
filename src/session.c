@@ -113,6 +113,7 @@ static json_t *turn_usage_to_json(const struct turn_usage *tu)
     set_count(o, "cache_write_1h", tu->usage.cache_write_1h_tokens);
     set_usd(o, "cost", tu->usage.cost);
     set_count(o, "elapsed_ms", tu->elapsed_ms);
+    set_count(o, "in_tokens", tu->in_tokens);
     set_usd(o, "cost_in", tu->cost_in);
     set_usd(o, "cost_cache_read", tu->cost_cache_read);
     set_usd(o, "cost_cache_write", tu->cost_cache_write);
@@ -147,6 +148,15 @@ static struct turn_usage *turn_usage_from_json(const json_t *o)
     tu->usage.cache_write_1h_tokens = get_count(o, "cache_write_1h");
     tu->usage.cost = get_usd(o, "cost");
     tu->elapsed_ms = get_count(o, "elapsed_ms");
+    tu->in_tokens = get_count(o, "in_tokens");
+    if (tu->in_tokens < 0) {
+        /* Written before the field existed: every such record predates
+         * surcharge-style pricing, so the plain subtraction is right. */
+        long cr = tu->usage.cached_tokens > 0 ? tu->usage.cached_tokens : 0;
+        long cw = tu->usage.cache_write_tokens > 0 ? tu->usage.cache_write_tokens : 0;
+        long in = tu->usage.input_tokens - cr - cw;
+        tu->in_tokens = in > 0 ? in : 0;
+    }
     tu->cost_in = get_usd(o, "cost_in");
     tu->cost_cache_read = get_usd(o, "cost_cache_read");
     tu->cost_cache_write = get_usd(o, "cost_cache_write");

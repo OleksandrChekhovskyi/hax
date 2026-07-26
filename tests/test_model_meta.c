@@ -4,6 +4,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "catalog.h"
 #include "config.h"
 #include "harness.h"
 #include "model_meta.h"
@@ -31,6 +32,9 @@ static void write_catalog_fixture(void)
     if (f) {
         fputs("{\"openai\": {\"models\": {\"m\": {\"limit\": {\"context\": 64000},"
               "\"modalities\": {\"input\": [\"text\", \"image\"]}},"
+              "\"priced\": {\"cost\": {\"input\": 2, \"output\": 8, \"cache_read\": 0.5,"
+              " \"tiers\": [{\"tier\": {\"type\": \"context\", \"size\": 200000},"
+              " \"input\": 4, \"output\": 16}]}},"
               "\"foreign-ladder\": {\"reasoning_options\":"
               " [{\"type\": \"effort\", \"values\": [\"minimal\", \"low\", \"high\"]}]}}}}",
               f);
@@ -76,6 +80,77 @@ static void remember_efforts(struct provider *p, const char *model, const char *
         effort_set_add(&m.efforts, levels[i]);
     model_meta_remember(p, &m);
     model_info_clear(&m);
+}
+
+/* Remember `m` as the live report for its id, taking a copy so the caller
+ * keeps ownership of what it built. */
+static void remember_rates(struct provider *p, const struct model_info *m)
+{
+    struct model_info copy;
+    model_info_copy(&copy, m);
+    model_meta_remember(p, &copy);
+    model_info_clear(&copy);
+}
+
+/* The rate view pricing bills against: live over catalog, with tiers
+ * moving whole rather than field by field. */
+static void test_rates_resolution(void)
+{
+    struct provider p = make_provider("x", NULL);
+    struct catalog_entry e;
+
+    /* Nothing knows anything: not priceable, and the fields say so rather
+     * than reading as free. */
+    EXPECT(model_meta_rates(&p, "priced", &e) == 0);
+    EXPECT(e.cost_input < 0 && e.cost_output < 0);
+    EXPECT(e.cost_cache_write_1h < 0);
+    EXPECT(e.n_tiers == 0);
+
+    /* Catalog tier alone, tiers included. */
+    p.catalog_id = "openai";
+    EXPECT(model_meta_rates(&p, "priced", &e) == 1);
+    EXPECT(e.cost_input == 2 && e.cost_output == 8 && e.cost_cache_read == 0.5);
+    EXPECT(e.n_tiers == 1 && e.tiers[0].above == 200000);
+    EXPECT(catalog_price(&e, 1000000, 0, 0, 0, 0, NULL) == 4.0); /* over the tier */
+
+    /* The backend's own rates win: it quotes what it will actually charge
+     * (a router's margin included), where the snapshot quotes the
+     * upstream's list price. */
+    struct model_info live;
+    model_info_init(&live);
+    live.id = xstrdup("priced");
+    live.cost_input = 3;
+    live.cost_output = 12;
+    live.cost_cache_read = 0.3;
+    live.cost_cache_write = 3.75;
+    live.cost_cache_write_1h = 6;
+    remember_rates(&p, &live);
+    EXPECT(model_meta_rates(&p, "priced", &e) == 1);
+    EXPECT(e.cost_input == 3 && e.cost_output == 12);
+    EXPECT(e.cost_cache_read == 0.3 && e.cost_cache_write == 3.75);
+    EXPECT(e.cost_cache_write_1h == 6);
+    /* The catalog's thresholds must NOT attach to the backend's base
+     * rates — that would bill a request at rates that never coexisted. A
+     * backend quoting rates and no tiers is priced flat. */
+    EXPECT(e.n_tiers == 0);
+    EXPECT(catalog_price(&e, 1000000, 0, 0, 0, 0, NULL) == 3.0);
+
+    /* A backend that quotes tiers of its own keeps them. */
+    live.n_tiers = 1;
+    live.tiers[0] = (struct catalog_tier){.above = 99999,
+                                          .cost_input = 6,
+                                          .cost_output = -1,
+                                          .cost_cache_read = -1,
+                                          .cost_cache_write = -1,
+                                          .cost_cache_write_1h = -1};
+    remember_rates(&p, &live);
+    EXPECT(model_meta_rates(&p, "priced", &e) == 1);
+    EXPECT(e.n_tiers == 1 && e.tiers[0].above == 99999);
+    /* The tier's undeclared output rate falls back to the base rate. */
+    EXPECT(catalog_price(&e, 1000000, 1000000, 0, 0, 0, NULL) == 18.0);
+
+    model_info_clear(&live);
+    model_meta_release(&p);
 }
 
 static void test_effort_set_basics(void)
@@ -428,6 +503,7 @@ int main(void)
 {
     write_catalog_fixture();
     test_effort_set_basics();
+    test_rates_resolution();
     test_context_resolution();
     test_image_input_resolution();
     test_falls_back_to_static_ladder();

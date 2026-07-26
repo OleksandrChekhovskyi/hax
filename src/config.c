@@ -148,6 +148,12 @@ static const struct config_setting REGISTRY[] = {
     {.key = "openai.request_cost", .env = "HAX_OPENAI_REQUEST_COST", .choices = CONFIG_CHOICES_TRISTATE,
      .desc = "Request usage accounting (`usage: {include: true}`) for per-response cost; "
              "auto uses the provider default"},
+    {.key = "openai.cache", .env = "HAX_OPENAI_CACHE", .choices = CONFIG_CHOICES_TRISTATE,
+     .desc = "Send prompt cache_control breakpoints (routers fronting Anthropic models, which "
+             "cache only on request); auto uses the provider default"},
+    {.key = "openai.cache_ttl", .env = "HAX_OPENAI_CACHE_TTL", .def = "1h",
+     .desc = "Cache breakpoint TTL: 5m or 1h (1h suits an interactive agent's pauses)",
+     .choices = "5m|1h"},
     {.key = "provider_name", .env = "HAX_PROVIDER_NAME",
      .desc = "Display name for the provider in the banner"},
 

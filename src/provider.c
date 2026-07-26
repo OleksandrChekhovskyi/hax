@@ -25,6 +25,8 @@ void model_info_init(struct model_info *m)
     m->cost_input = -1;
     m->cost_cache_read = -1;
     m->cost_output = -1;
+    m->cost_cache_write = -1;
+    m->cost_cache_write_1h = -1;
 }
 
 void model_info_copy(struct model_info *dst, const struct model_info *src)

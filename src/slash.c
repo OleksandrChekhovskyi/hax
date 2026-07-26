@@ -550,10 +550,11 @@ static void session_row(const char *label, const char *value)
     printf("  " ANSI_DIM "%-*s%s" ANSI_RESET "\n", SESSION_LABEL_W, label, value);
 }
 
-/* Append one "<label> <count> [$cost]" segment of the tokens-total row,
+/* Append one "<label> <count> [~$cost]" segment of the tokens-total row,
  * " · "-separated — the row-buffer twin of the transcript footer's
- * usage_tokens. `usd` < 0 or 0 shows no dollar figure (unknown, or
- * nothing worth printing). Returns the new row length; safe to keep
+ * usage_tokens, "~" included: the categories are rate estimates even when
+ * the spend row below is exact. A cost that is unknown, or too small to
+ * render, shows no dollar figure. Returns the new row length; safe to keep
  * calling once the buffer is full (snprintf truncates, len clamps). */
 static int session_tok_seg(char *row, size_t sz, int len, const char *label, long tokens,
                            double usd)
@@ -563,9 +564,9 @@ static int session_tok_seg(char *row, size_t sz, int len, const char *label, lon
         return len;
     format_tokens(buf, sizeof(buf), tokens);
     len += snprintf(row + len, sz - (size_t)len, "%s%s %s", len ? " · " : "", label, buf);
-    if (usd > 0 && len > 0 && (size_t)len < sz) {
+    if (usd >= COST_DISPLAY_MIN && len > 0 && (size_t)len < sz) {
         format_cost(buf, sizeof(buf), usd);
-        len += snprintf(row + len, sz - (size_t)len, " %s", buf);
+        len += snprintf(row + len, sz - (size_t)len, " ~%s", buf);
     }
     return len;
 }
@@ -641,17 +642,16 @@ static void slash_run_session(struct slash_ctx *ctx)
      * per-request footers — `in` is the uncached remainder — so the two
      * surfaces read as one breakdown (cache effectiveness reads off the
      * cache-vs-in count ratio, same as there). Dollars are the summed
-     * per-record catalog estimates (spend_split); a reported charge
-     * (OpenRouter) can't be decomposed, so its categories show bare
-     * counts and its exact total stays on the spend row. */
+     * per-record rate estimates (spend_split), marked "~" because no
+     * backend decomposes what it billed — even where the spend row below
+     * is an exact reported charge. */
     if (t->input_tokens > 0 || t->output_tokens > 0) {
         struct catalog_split split;
         int have_split = spend_split(&t->spend, &split);
         long cr = t->cached_tokens > 0 ? t->cached_tokens : 0;
         long cw = t->cache_write_tokens > 0 ? t->cache_write_tokens : 0;
-        long in = t->input_tokens - cr - cw;
         int len = 0;
-        len = session_tok_seg(row, sizeof(row), len, "in", in > 0 ? in : 0,
+        len = session_tok_seg(row, sizeof(row), len, "in", t->uncached_tokens,
                               have_split ? split.in : -1);
         if (cr > 0)
             len = session_tok_seg(row, sizeof(row), len, "cache", cr,

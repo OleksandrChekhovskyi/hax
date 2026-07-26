@@ -130,8 +130,10 @@ After each user turn the REPL prints a dim one-line summary:
   cost (currently OpenRouter), the figure is exact. Otherwise, for providers with a model
   catalog identity (`codex`, `openai`, `anthropic`, and custom providers — see `catalog_id`
   in [providers.md](./providers.md)),
-  hax estimates it from the reported token counts and per-model rates fetched from
-  [models.dev](https://models.dev), shown with a tilde: `~$0.042`. For subscription backends
+  hax estimates it from the reported token counts and per-model rates — whatever the backend
+  itself quotes for the model, falling back to [models.dev](https://models.dev) — shown with
+  a tilde: `~$0.042`. A backend's own rates are preferred because they are what it will
+  actually charge, a router's margin included. For subscription backends
   like Codex this is the API-equivalent cost — what the same tokens would have billed on the
   paid API — which makes cost/benefit comparisons across models possible. Local backends
   (llama.cpp, ollama) show no dollar figure. See the model catalog section in
@@ -146,15 +148,21 @@ spend actually goes (context replay vs. cache reads vs. output) and for diagnosi
 behavior:
 
 ```text
-42s · ~$0.19 · in 20.3k $0.025 · cache 160k $0.048 · write 8.2k $0.031 · out 2.1k $0.084
+42s · $0.19 · in 20.3k ~$0.025 · cache 160k ~$0.048 · write 8.2k ~$0.031 · out 2.1k ~$0.084
 ```
 
-`in` is the uncached input remainder, `cache`/`write` are prefix-cache reads and writes, so
-the counts sum to what the request actually sent. The `~` on the total marks a catalog
-estimate and governs the whole line; when the provider reports an exact charge (OpenRouter),
-the total is exact and the categories show bare token counts — a reported charge can't be
-decomposed. Estimates are tier-aware: models with long-context pricing (e.g. different rates
-above 200k input tokens) bill each request at the tier its own input size selects.
+`in` is the uncached input remainder, `cache`/`write` are prefix-cache reads and writes.
+On most backends the three sum to what the request sent, since a cached or written token is
+one the model didn't have to process fresh. Not everywhere: where a cache write is billed as
+a surcharge on top of input rather than in place of it (Google's), the same tokens are both
+read and written and the counts deliberately overlap — each row is a charge, not a slice.
+The component costs always carry a `~`:
+no backend reports a decomposed charge, so the split is computed from rates even when the
+total beside it is exact. The total carries a `~` only when it too is an estimate. That
+asymmetry is the point — the total says what the turn cost, the categories say where it
+went, and on a long agentic session the answer is usually the cache line. Estimates are
+tier-aware: models with long-context pricing (e.g. different rates above 200k input tokens)
+bill each request at the tier its own input size selects.
 
 Once a user turn has been running for 30 seconds, the busy spinner shows the same elapsed
 counter live (`⠋ 42s · working...`), so a long-running user turn's age is visible before the
@@ -164,11 +172,11 @@ stats line lands.
 per-tool breakdown), time worked, current context usage, token totals, and spend for the
 current sitting. The `tokens total` row sums across every request in the same categories the
 transcript footers use — `in` (uncached input), `cache`/`write` (prefix-cache reads and
-writes), `out` — each with its summed estimated cost where catalog rates resolve, so the
+writes), `out` — each with its summed estimated cost where rates resolve, so the
 session's overall cost breakdown reads at a glance (a large `cache` count next to a small
 `in` is the prefix cache working). Each request resends the full conversation, so summed
-input grows faster than `context`. Provider-reported charges can't be decomposed, so their
-categories show bare counts and the exact total stays on the `spend` row. Compaction
+input grows faster than `context`. As in the transcript footers, the category costs are
+marked `~` even when the `spend` row is an exact provider-reported charge. Compaction
 requests (manual `/compact` or automatic) count like any other request, in
 both the request count and the token/spend totals. Totals reset on `/new` and are not carried
 across `--resume`. `/usage` is different — it asks the provider what it knows about your

@@ -180,6 +180,16 @@ static void capture_usage(struct openai_events *s, json_t *root)
         v = json_object_get(details, "cached_tokens");
         if (json_is_integer(v))
             s->pending_usage.cached_tokens = (long)json_integer_value(v);
+        /* OpenRouter also reports the write side, billed at a premium
+         * (1.25x input for Anthropic, 2x at a 1h TTL) — leaving it folded
+         * into the uncached remainder would price it as the cheapest
+         * category instead of the dearest. */
+        v = json_object_get(details, "cache_write_tokens");
+        if (json_is_integer(v)) {
+            s->pending_usage.cache_write_tokens = (long)json_integer_value(v);
+            if (s->cache_write_1h)
+                s->pending_usage.cache_write_1h_tokens = s->pending_usage.cache_write_tokens;
+        }
     }
 
     /* OpenRouter convention: with `usage: {include: true}` in the request,

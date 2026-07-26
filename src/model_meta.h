@@ -83,6 +83,23 @@ long model_meta_max_output(const struct provider *p, const char *model);
  * instance, which no snapshot can know. */
 int model_meta_image_input(const struct provider *p, const char *model);
 
+/* Rates to price one of `model`'s requests against, into *out — rates and
+ * tiers only, the other fields left at their unknown sentinels. Returns 1
+ * when input and output both resolved, i.e. catalog_price can price
+ * against *out; 0 otherwise (*out is filled either way).
+ *
+ * Same live-over-catalog policy as the accessors above, and it decides
+ * more here: a backend quotes what it will actually charge, margin
+ * included, where the snapshot quotes the upstream's list price — and for
+ * a provider with no catalog identity (openrouter) the live tier is the
+ * only one there is.
+ *
+ * Price at *account* time and keep the result rather than asking again at
+ * render time: the live tier follows the provider's current selection and
+ * is dropped on the next model_meta_refresh, so a later call would re-rate
+ * an old request against a model it never ran on. */
+int model_meta_rates(const struct provider *p, const char *model, struct catalog_entry *out);
+
 /* Reasoning-effort levels `model` accepts, into *out. Never returns
  * "unknown": an empty set means this model takes no categorical effort —
  * the provider sends none at all (llama.cpp), or the model's thinking is a

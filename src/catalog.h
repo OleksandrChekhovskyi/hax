@@ -61,6 +61,7 @@ struct catalog_tier {
     double cost_output;
     double cost_cache_read;
     double cost_cache_write;
+    double cost_cache_write_1h;
 };
 
 #define CATALOG_TIERS_MAX 4
@@ -70,7 +71,12 @@ struct catalog_entry {
     double cost_input;
     double cost_output;
     double cost_cache_read;  /* rate for prefix-cache read tokens */
-    double cost_cache_write; /* rate for cache write tokens */
+    double cost_cache_write; /* rate for cache write tokens (default TTL) */
+    /* Rate for 1h-TTL cache writes. models.dev carries none, so this is
+     * normally unknown and catalog_price falls back to 2x the input rate
+     * (Anthropic's documented multiplier); backends that quote it
+     * directly — OpenRouter's input_cache_write_1h — fill it instead. */
+    double cost_cache_write_1h;
     /* Window limits in tokens; 0 = unknown. */
     long context;
     long output;
@@ -128,6 +134,20 @@ void catalog_lookup_many(const char *provider_id, const char *const *models, siz
  * or NULL when absent/malformed. Exposed for unit tests. */
 json_t *catalog_extract_member(const char *text, const char *key);
 
+/* Does a cache write bill *instead of* processing those tokens as input,
+ * or *on top of* it? Anthropic, OpenAI and Qwen quote a write rate at
+ * 1.25x input: the write replaces the input charge. Google quotes a
+ * storage surcharge far below the input rate (0.06x-0.83x), which is
+ * added to input processing that is billed in full — a "replacement"
+ * rate below the input rate would mean caching cost less than not
+ * caching, which is the tell. Unknown rates read as replacement, the
+ * common case.
+ *
+ * Pricing needs the answer (catalog_price), and so does the decision to
+ * ask for caching at all: where writes are a surcharge, an explicit cache
+ * only adds cost. Pure. */
+int catalog_cache_write_replaces_input(const struct catalog_entry *e);
+
 /* Per-category component split of one priced request, USD. `in` is the
  * uncached input remainder; `cache_write` includes the 2x-rate 1h subset. */
 struct catalog_split {
@@ -135,6 +155,12 @@ struct catalog_split {
     double cache_read;
     double cache_write;
     double out;
+    /* The token count `in` prices. Reported rather than left to callers
+     * because deriving it means repeating the replacement-vs-surcharge
+     * decision — against the tier's rates, not the entry's — and a
+     * display that repeats it slightly differently shows a volume its
+     * own cost figure contradicts. */
+    long in_tokens;
 };
 
 /* Price ONE request against an entry's rates, in USD; -1 when the
@@ -142,10 +168,14 @@ struct catalog_split {
  * partial one). `cached` (prefix-cache reads) and `cache_write` are the
  * non-overlapping subsets of `input` that stream_usage reports; they are
  * priced at their own rates, falling back to the input rate when the
- * entry doesn't declare one. `cache_write_1h` is the 1h-TTL subset of
- * `cache_write`, priced at 2x the input rate — Anthropic's documented
- * multiplier; the catalog's cache_write rate covers only the default
- * 5-minute writes and models.dev carries no 1h rate to read instead.
+ * entry doesn't declare one — except where the write is a surcharge
+ * rather than a replacement (catalog_cache_write_replaces_input), in
+ * which case those tokens stay in the uncached remainder and the
+ * surcharge is added on top. `cache_write_1h` is the 1h-TTL subset of
+ * `cache_write`, priced at the entry's cost_cache_write_1h when it
+ * declares one and otherwise at 2x the input rate — Anthropic's
+ * documented multiplier, which every rate OpenRouter quotes agrees with;
+ * the plain cache_write rate covers only the default 5-minute writes.
  * Negative token counts (the "not reported" convention) read as 0.
  *
  * Tier selection is why this prices one request, never an aggregate:

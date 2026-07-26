@@ -58,6 +58,48 @@ static void test_openrouter_full(void)
     free(m.desc);
 }
 
+/* Trimmed from anthropic/claude-sonnet-4.5: the write rates, and the
+ * `overrides` list OpenRouter uses for long-context tiers. */
+static void test_openrouter_write_rates_and_tiers(void)
+{
+    WITH_ENTRY("{\"id\":\"anthropic/claude-sonnet-4.5\","
+               "\"pricing\":{\"prompt\":\"0.000003\",\"completion\":\"0.000015\","
+               "\"input_cache_read\":\"0.0000003\",\"input_cache_write\":\"0.00000375\","
+               "\"input_cache_write_1h\":\"0.000006\","
+               "\"overrides\":[{\"min_prompt_tokens\":200000,\"prompt\":\"0.000006\","
+               "\"completion\":\"0.0000225\",\"input_cache_read\":\"0.0000006\","
+               "\"input_cache_write\":\"0.0000075\"}]}}",
+               openrouter_parse_model, m);
+    EXPECT(m.cost_cache_write == 3.75);
+    /* Read, not assumed — the 2x-input fallback only happens to agree. */
+    EXPECT(m.cost_cache_write_1h == 6.0);
+    EXPECT(m.n_tiers == 1);
+    /* Carried over unchanged: both thresholds are exclusive, so a prompt
+     * of exactly 200k still bills at the base rates — the same answer the
+     * catalog tier gives for this model. */
+    EXPECT(m.tiers[0].above == 200000);
+    EXPECT(m.tiers[0].cost_input == 6.0);
+    EXPECT(m.tiers[0].cost_output == 22.5);
+    EXPECT(m.tiers[0].cost_cache_read == 0.6);
+    EXPECT(m.tiers[0].cost_cache_write == 7.5);
+    /* A field the override omits stays unknown, which catalog_price reads
+     * as "fall back to the base rate" rather than as free. */
+    EXPECT(m.tiers[0].cost_cache_write_1h < 0);
+    json_decref(m_j);
+}
+
+static void test_openrouter_flat_pricing_declares_no_tiers(void)
+{
+    /* Most of the catalog prices flat. No overrides must mean no tiers —
+     * not a zero-threshold tier that would capture every request. */
+    WITH_ENTRY("{\"pricing\":{\"prompt\":\"0.000001\",\"completion\":\"0.000006\"}}",
+               openrouter_parse_model, m);
+    EXPECT(m.n_tiers == 0);
+    EXPECT(m.cost_cache_write < 0);
+    EXPECT(m.cost_cache_write_1h < 0);
+    json_decref(m_j);
+}
+
 static void test_openrouter_free_vs_variable(void)
 {
     /* "0" is a genuinely free model and must survive as zero; "-1" marks a
@@ -409,6 +451,8 @@ int main(void)
     test_openrouter_meta_picks_the_exact_id();
     test_openrouter_probe_url_escapes_the_id();
     test_openrouter_full();
+    test_openrouter_write_rates_and_tiers();
+    test_openrouter_flat_pricing_declares_no_tiers();
     test_openrouter_free_vs_variable();
     test_openrouter_no_tools();
     test_openrouter_bare();

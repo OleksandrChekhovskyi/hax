@@ -4,6 +4,7 @@
 
 #include <stddef.h>
 
+#include "catalog.h"
 #include "effort.h"
 #include "transport/http.h"
 
@@ -176,9 +177,17 @@ struct context {
  * cache *reads* only: dialects that bill cache writes separately
  * (Anthropic's cache_creation_input_tokens) fold the written tokens into
  * input_tokens, keeping that count volume-accurate, and report them again
- * in cache_write_tokens — a second, non-overlapping subset of
- * input_tokens — so cost estimation can price the write surcharge.
- * Dialects with no such billing notion leave it at -1.
+ * in cache_write_tokens — usually a second subset of input_tokens
+ * disjoint from cached_tokens — so cost estimation can price the write
+ * surcharge. Dialects with no such billing notion leave it at -1.
+ *
+ * "Usually" because the disjointness is a convention, not a guarantee:
+ * Gemini through OpenRouter reports the same tokens as both read and
+ * written and inflates input_tokens to cover both, since there they are
+ * two charges over one body of text rather than two slices of it. Pricing
+ * decides what each count means (catalog_cache_write_replaces_input) and
+ * reports the resulting uncached remainder, so nothing downstream should
+ * assume the three subtract cleanly.
  * cache_write_1h_tokens narrows further: the subset of cache_write_tokens
  * written with a 1-hour TTL, which Anthropic bills at 2x the input rate
  * (the catalog's cache_write rate covers only the default 5-minute
@@ -204,10 +213,18 @@ struct turn_usage {
     struct stream_usage usage; /* -1 fields = not reported */
     long elapsed_ms;           /* stream wall time, retries included; -1 = unknown */
     /* USD. cost_total is the provider-reported charge when one was
-     * reported (exact), else the catalog estimate, marked by
-     * cost_estimated ("~$"); -1 = unknown. The per-category fields are
-     * catalog estimates and stay -1 when the total is exact — a reported
-     * charge arrives as one number and can't be decomposed. */
+     * reported (exact), else the rate estimate, marked by cost_estimated
+     * ("~$"); -1 = unknown.
+     *
+     * The per-category fields are always rate estimates — a reported
+     * charge arrives as one number, so the decomposition can only ever be
+     * computed — and so stay marked ("~$") beside an unmarked exact
+     * total. -1 = no rates to price against. */
+    /* Uncached input tokens, the count `cost_in` prices. Carried rather
+     * than recomputed by each renderer because it is a pricing decision:
+     * usually input minus both cache subsets, but a surcharge-style write
+     * (catalog.h) leaves its tokens in the input charge. -1 = unknown. */
+    long in_tokens;
     double cost_in;          /* uncached input */
     double cost_cache_read;  /* prefix-cache reads */
     double cost_cache_write; /* cache writes, 1h surcharge included */
@@ -351,12 +368,21 @@ struct model_info {
      * prefix-cache hits, which dominates the bill on a long agentic
      * conversation (every turn re-sends the whole prefix) and is not a fixed
      * fraction of the input rate — backends quote anywhere from 2% to 20%.
-     * Display only for now: cost estimation still prices against the catalog
-     * (see agent_core.c), so a backend rate the catalog lacks shows in the
-     * picker without retroactively re-rating a session. */
+     *
+     * These price the session, not just the picker: model_meta_rates layers
+     * them over the catalog, so a backend quoting its own rates is billed
+     * against what it actually charges (OpenRouter's margin included)
+     * rather than against models.dev's upstream list price. */
     double cost_input;
     double cost_cache_read;
     double cost_output;
+    double cost_cache_write;
+    double cost_cache_write_1h;
+    /* Long-context pricing tiers, in the backend's order; none when it
+     * prices flat or says nothing. catalog_entry's shape, so
+     * model_meta_rates can hand them to catalog_price unchanged. */
+    struct catalog_tier tiers[CATALOG_TIERS_MAX];
+    int n_tiers;
     /* Reasoning-effort levels this model accepts. Unknown (the zeroed
      * state) on backends that don't describe their models, and on the
      * per-entry parsers that read a catalog carrying no effort data.

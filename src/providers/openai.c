@@ -42,6 +42,8 @@ struct openai {
     int send_cache_key;
     int emit_progress;
     int request_cost;
+    enum openai_cache_mode cache_mode;
+    char *cache_ttl;                 /* "5m" / "1h"; owned, "" = provider default */
     const char *length_hint;         /* borrowed; appended to "length" truncation errors */
     char *roundtrip_reasoning_field; /* NULL = don't round-trip reasoning */
     enum reasoning_format reasoning_format;
@@ -257,6 +259,98 @@ json_t *openai_build_messages(const char *system_prompt, const struct item *item
     return arr;
 }
 
+/* ---------- prompt cache breakpoints ---------- */
+
+/* Anthropic models cache only what a request marks, and the routers
+ * fronting them pass the marker through the OpenAI-shaped body — on a
+ * content *part*, a Chat Completions message having no block list of its
+ * own:
+ *
+ *     {"role": "user", "content": [
+ *       {"type": "text", "text": "...",
+ *        "cache_control": {"type": "ephemeral", "ttl": "1h"}}]}
+ */
+static json_t *make_cache_control(const char *ttl)
+{
+    json_t *cc = json_pack("{s:s}", "type", "ephemeral");
+    if (ttl && strcasecmp(ttl, "1h") == 0)
+        json_object_set_new(cc, "ttl", json_string("1h"));
+    return cc;
+}
+
+/* Mark `msg`'s last content part, promoting plain string content to the
+ * one-part array form. Returns 0 when the message has no part to hang the
+ * marker on — an assistant turn of nothing but tool calls has
+ * `content: null`. */
+static int attach_cache_control(json_t *msg, const char *ttl)
+{
+    json_t *content = json_object_get(msg, "content");
+    if (json_is_string(content)) {
+        json_t *part = json_pack("{s:s, s:O}", "type", "text", "text", content);
+        json_object_set_new(part, "cache_control", make_cache_control(ttl));
+        json_t *arr = json_array();
+        json_array_append_new(arr, part);
+        json_object_set_new(msg, "content", arr);
+        return 1;
+    }
+    if (json_is_array(content) && json_array_size(content) > 0) {
+        json_t *last = json_array_get(content, json_array_size(content) - 1);
+        json_object_set_new(last, "cache_control", make_cache_control(ttl));
+        return 1;
+    }
+    return 0;
+}
+
+/* Two breakpoints, well under Anthropic's cap of 4: the system prompt
+ * (the prefix every turn shares) and the conversation tail (so each
+ * request caches what the next one re-sends). Mirrors the native
+ * Anthropic adapter minus its per-tool breakpoint, which Chat Completions
+ * has no object to carry.
+ *
+ * The tail walks backward past messages that can't hold a marker instead
+ * of stopping: a tool-calling turn ends on a `tool` result, and giving up
+ * there would leave every tool result — the bulk of an agentic prefix —
+ * uncached. */
+void openai_apply_cache_breakpoints(json_t *messages, const char *ttl)
+{
+    size_t n = json_array_size(messages);
+    if (n == 0)
+        return;
+    json_t *first = json_array_get(messages, 0);
+    const char *role = json_string_value(json_object_get(first, "role"));
+    size_t tail_floor = 0;
+    if (role && strcmp(role, "system") == 0 && attach_cache_control(first, ttl))
+        tail_floor = 1; /* already marked — don't spend the second one on it */
+    for (size_t i = n; i-- > tail_floor;) {
+        if (attach_cache_control(json_array_get(messages, i), ttl))
+            return;
+    }
+}
+
+/* What this request should do about prompt caching for `model`, from the
+ * one thing that describes its cache economics — its rates.
+ *
+ * Both answers hinge on facts a router hides: it forwards `cache_control`
+ * to backends whose caching works nothing like Anthropic's. Where a write
+ * is a surcharge on top of full input processing (Gemini), an explicit
+ * cache only adds cost, so AUTO declines to ask for one — while an
+ * explicit ON still gets what it asked for. And asking for a 1h TTL means
+ * nothing on a backend with no TTL concept: those still report writes,
+ * billed at their ordinary rate, so only a quoted 1h rate justifies
+ * pricing writes at the 1h premium. */
+struct openai_cache_plan openai_plan_cache(const struct provider *p, const char *model,
+                                           enum openai_cache_mode mode, const char *ttl)
+{
+    struct openai_cache_plan plan = {0};
+    struct catalog_entry rates;
+    model_meta_rates(p, model, &rates);
+    plan.send_breakpoints = mode == OPENAI_CACHE_ON || (mode == OPENAI_CACHE_AUTO &&
+                                                        catalog_cache_write_replaces_input(&rates));
+    plan.writes_bill_1h = plan.send_breakpoints && ttl && strcasecmp(ttl, "1h") == 0 &&
+                          rates.cost_cache_write_1h >= 0;
+    return plan;
+}
+
 static json_t *build_tools(const struct tool_def *tools, size_t n)
 {
     json_t *arr = json_array();
@@ -313,7 +407,8 @@ void openai_apply_reasoning(json_t *body, enum reasoning_format fmt, const char 
 
 static char *build_body(const struct context *ctx, const char *provider, const char *model,
                         const char *cache_key, enum reasoning_format reasoning, int return_progress,
-                        int request_cost, const char *reasoning_field)
+                        int request_cost, const char *reasoning_field, int cache,
+                        const char *cache_ttl)
 {
     /* Omit `tool_choice` and `parallel_tool_calls`: their defaults ("auto"
      * and true respectively) are exactly what we want, so explicitly setting
@@ -327,11 +422,13 @@ static char *build_body(const struct context *ctx, const char *provider, const c
      * flag. Modern OpenAI-compatible backends (vLLM, llama.cpp server,
      * Ollama, oMLX, hosted providers) all accept it. If we ever hit a
      * backend that 400s on the unknown field, gating goes here. */
-    json_t *body =
-        json_pack("{s:s, s:b, s:o, s:{s:b}}", "model", model, "stream", 1, "messages",
-                  openai_build_messages(ctx->system_prompt, ctx->items, ctx->n_items,
-                                        reasoning_field, provider, model, ctx->image_input),
-                  "stream_options", "include_usage", 1);
+    json_t *messages = openai_build_messages(ctx->system_prompt, ctx->items, ctx->n_items,
+                                             reasoning_field, provider, model, ctx->image_input);
+    if (cache)
+        openai_apply_cache_breakpoints(messages, cache_ttl);
+
+    json_t *body = json_pack("{s:s, s:b, s:o, s:{s:b}}", "model", model, "stream", 1, "messages",
+                             messages, "stream_options", "include_usage", 1);
 
     if (ctx->n_tools > 0)
         json_object_set_new(body, "tools", build_tools(ctx->tools, ctx->n_tools));
@@ -374,9 +471,16 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
 {
     struct openai *o = (struct openai *)p;
 
+    /* The plan reads this model's rates, so the startup probe has to have
+     * landed — the frontends settle it before a turn, but that is their
+     * business, not a guarantee this path can rely on. Settling twice
+     * costs nothing. */
+    model_meta_settle(p);
+    struct openai_cache_plan cache = openai_plan_cache(p, model, o->cache_mode, o->cache_ttl);
+
     char *body = build_body(ctx, p->name, model, o->send_cache_key ? o->session_id : NULL,
                             o->reasoning_format, o->emit_progress, o->request_cost,
-                            o->roundtrip_reasoning_field);
+                            o->roundtrip_reasoning_field, cache.send_breakpoints, o->cache_ttl);
     if (!body)
         return -1;
     size_t body_len = strlen(body);
@@ -415,6 +519,7 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
         openai_events_init(&ev, cb, user);
         ev.emit_progress = o->emit_progress;
         ev.length_hint = o->length_hint;
+        ev.cache_write_1h = cache.writes_bill_1h;
         rc = http_sse_post(o->endpoint, headers, body, body_len, pol.idle_timeout_s, on_sse, &ev,
                            tick, tick_user, &resp);
 
@@ -483,6 +588,7 @@ static void openai_destroy(struct provider *p)
     free(o->name_buf);
     free(o->endpoint);
     free(o->session_id);
+    free(o->cache_ttl);
     free(o->roundtrip_reasoning_field);
     if (o->extra_headers) {
         for (char **h = o->extra_headers; *h; h++)
@@ -516,6 +622,23 @@ static char **dup_headers(const char *const *src)
 static char *preset_key(const char *prefix, const char *leaf)
 {
     return xasprintf("%s.%s", prefix ? prefix : "openai", leaf);
+}
+
+/* Resolve <prefix>.cache into the three states openai_plan_cache needs.
+ * An explicit on/off is the user overriding the per-model judgement, so
+ * it has to survive the read — "auto", unset, and an unparseable value
+ * all leave the preset's default, where that judgement still applies.
+ * config_bool_or hides the difference (it answers with `def` for anything
+ * it can't parse), so ask it twice: agreeing answers mean it parsed a
+ * real boolean. */
+static enum openai_cache_mode resolve_cache_mode(const char *prefix, int preset_default)
+{
+    char *k = preset_key(prefix, "cache");
+    int as_off = config_bool_or(k, 0), as_on = config_bool_or(k, 1);
+    free(k);
+    if (as_off == as_on)
+        return as_on ? OPENAI_CACHE_ON : OPENAI_CACHE_OFF;
+    return preset_default ? OPENAI_CACHE_AUTO : OPENAI_CACHE_OFF;
 }
 
 /* Resolve the reasoning round-trip field. The <prefix>.reasoning_roundtrip
@@ -730,6 +853,11 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
     char *cost_key = preset_key(preset->config_prefix, "request_cost");
     o->request_cost = config_bool_or(cost_key, preset->request_cost);
     free(cost_key);
+    o->cache_mode = resolve_cache_mode(preset->config_prefix, preset->send_cache_control_default);
+    char *ttl_key = preset_key(preset->config_prefix, "cache_ttl");
+    const char *ttl = config_str(ttl_key);
+    o->cache_ttl = xstrdup(ttl ? ttl : "");
+    free(ttl_key);
     o->length_hint = preset->length_hint;
     o->roundtrip_reasoning_field =
         resolve_roundtrip_field(preset->config_prefix, preset->roundtrip_reasoning_field);

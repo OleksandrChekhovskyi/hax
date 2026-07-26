@@ -378,7 +378,18 @@ static void test_session_prints_totals(void)
     st.stats.output_tokens = 412;
     st.stats.cached_tokens = 2048;      /* 2.0k */
     st.stats.cache_write_tokens = 1024; /* 1.0k */
-    st.stats.spend.reported = 0.042;
+    /* Accumulated per response in production (the subtraction depends on
+     * the model's rates); here the plain replacement-style remainder. */
+    st.stats.uncached_tokens = 5530 - 2048 - 1024;
+    /* One response that reported its charge. No provider is attached, so
+     * nothing can price its categories — the counts stay bare. */
+    struct stream_usage reported = {.input_tokens = 5530,
+                                    .output_tokens = 412,
+                                    .cached_tokens = 2048,
+                                    .cache_write_tokens = 1024,
+                                    .cache_write_1h_tokens = -1,
+                                    .cost = 0.042};
+    spend_account(&st.stats.spend, &reported, NULL, NULL);
     st.stats.last_ctx = 4000; /* 3.9k; no provider ⇒ no limit/percent */
     struct slash_ctx ctx = {.state = &st};
     struct dispatch_call c = {.line = "/session", .ctx = &ctx};
@@ -396,12 +407,13 @@ static void test_session_prints_totals(void)
     EXPECT(strstr(out, "3.9k") != NULL);
     EXPECT(strstr(out, "tokens total") != NULL);
     /* Footer vocabulary: non-overlapping categories, `in` is the uncached
-     * remainder (5530 - 2048 - 1024). No spend records here (the cost was
-     * provider-reported), so the counts stay bare — a reported charge
-     * can't be decomposed. */
+     * remainder (5530 - 2048 - 1024). Nothing here can resolve rates, so
+     * the counts stay bare; the reported charge is exact and unmarked. */
     EXPECT(strstr(out, "in 2.4k · cache 2.0k · write 1.0k · out 412") != NULL);
     EXPECT(strstr(out, "$0.042") != NULL);
+    EXPECT(strstr(out, "~$") == NULL);
     free(out);
+    spend_free(&st.stats.spend);
 }
 
 static void test_session_hides_unreported_rows(void)
@@ -433,7 +445,8 @@ static void test_session_marks_estimated_spend(void)
     struct render_ctx r = {0};
     r.disp.trail = 1;
     struct agent_state st = {.r = &r};
-    st.stats.spend.reported = 0.030;
+    struct stream_usage paid = {-1, -1, -1, -1, -1, 0.030};
+    spend_account(&st.stats.spend, &paid, NULL, NULL);
     struct stream_usage u = {.input_tokens = 1000,
                              .output_tokens = 50,
                              .cached_tokens = -1,

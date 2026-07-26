@@ -107,11 +107,23 @@ int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long
 
 /* Spend accounting shared by the REPL and the -p path, so the exact-vs-
  * estimated policy lives in exactly one place (like format_stats_segments
- * does for the display side): a response that reports cost is exact and
- * sums into `reported`; one that doesn't is kept as a per-request record,
- * priced against catalog rates when read. */
+ * does for the display side).
+ *
+ * Every response becomes a record. A provider-reported charge is exact and
+ * is what the totals bill; the per-category breakdown is rate-estimated
+ * either way, since no backend reports a decomposed charge. The two are
+ * tracked side by side rather than as alternatives, so one request can
+ * carry an exact total and estimated components at once. */
 struct spend_rec {
-    struct stream_usage u; /* cost < 0 by construction (else it summed) */
+    struct stream_usage u;
+    double reported; /* the response's own reported charge; -1 = none */
+    /* Rates resolved at account time (model_meta_rates): its live tier
+     * describes the provider's *current* selection, so asking later would
+     * re-rate this request against whatever model is selected by then.
+     * Without them (`have_rates` = 0) the catalog identity below prices
+     * the record lazily instead. */
+    struct catalog_entry rates;
+    int have_rates;
     /* Catalog identity to price against, owned. Stamped at account time
      * so a later /provider or /model switch can't re-rate old requests;
      * NULL = no identity, the record stays unpriceable. */
@@ -120,44 +132,58 @@ struct spend_rec {
 };
 
 struct spend_totals {
-    double reported; /* provider-reported cost sum, USD */
-    /* Records of responses that reported no cost. Priced lazily at read
-     * (spend_total) so a late-landing catalog fetch retroactively covers
-     * earlier requests, and priced one request at a time so context-tier
-     * selection sees each request's own input size. */
+    /* One record per response. Records without their own rate snapshot are
+     * priced lazily at read (spend_total) so a late-landing catalog fetch
+     * retroactively covers earlier requests, and every record prices one
+     * request at a time so context-tier selection sees each request's own
+     * input size. */
     struct spend_rec *recs;
     size_t n_recs;
     size_t cap_recs;
 };
 
-/* Account one completed response into `t` — the single definition of the
- * reported-vs-estimated split. catalog_id/model (both may be NULL) stamp
- * the record when the response goes the estimated route. */
-void spend_account(struct spend_totals *t, const struct stream_usage *u, const char *catalog_id,
+/* Account one completed response into `t`. `p`/`model` (both may be NULL)
+ * name what ran it: the rates are snapshotted from them now, and the
+ * catalog identity stamped as the lazy fallback. */
+void spend_account(struct spend_totals *t, const struct stream_usage *u, const struct provider *p,
                    const char *model);
 
-/* Total spend for display, USD: reported cost plus the per-record catalog
- * estimates. Sets *approx (when non-NULL) to 1 iff any inexact component
- * exists — an estimate contributed, or a record couldn't be priced at all
- * — so callers can mark the figure ("~$0.42"). */
+/* Total spend for display, USD: each record's reported charge, or its
+ * estimate when it reported none. Sets *approx (when non-NULL) to 1 iff
+ * any inexact component exists — an estimate contributed, or a record
+ * couldn't be priced at all — so callers can mark the figure ("~$0.42").
+ * A session whose every response reported its charge is exact. */
 double spend_total(const struct spend_totals *t, int *approx);
 
-/* True when some record's real usage can't be priced right now (catalog
- * fetch not landed, unknown model, no identity). The oneshot exit path
- * uses it to decide whether draining the in-flight fetch could improve
- * the estimate. */
+/* True when some record contributes nothing knowable to spend_total: it
+ * reported no charge and its usage can't be priced either (catalog fetch
+ * not landed, unknown model, no identity). The oneshot exit path uses it
+ * to decide whether draining the in-flight fetch could improve the
+ * estimate. */
 int spend_unpriced(const struct spend_totals *t);
 
-/* Sum the per-record catalog splits into *out (USD per category; zeroed
- * first) — the estimated portion of the session's spend broken down the
- * same way the transcript footers are. Tier-correct: each record prices
- * at its own request's rates. Returns 1 when at least one record priced
- * (i.e. the split is worth showing), 0 otherwise. Reported-cost
- * responses keep no records, so their charge is deliberately absent
- * here — a reported charge can't be decomposed. */
+/* Sum the per-record splits into *out (USD per category; zeroed first) —
+ * the session's spend broken down the same way the transcript footers
+ * are. Tier-correct: each record prices at its own request's rates.
+ * Returns 1 when at least one record priced (i.e. the split is worth
+ * showing), 0 otherwise.
+ *
+ * Always an estimate, including for responses that reported an exact
+ * charge — no backend decomposes what it billed. Worth showing beside an
+ * exact total anyway: on a long agentic session the cache line is usually
+ * the largest of the four, which the total alone can't reveal. */
 int spend_split(const struct spend_totals *t, struct catalog_split *out);
 
 void spend_free(struct spend_totals *t);
+
+/* Uncached input tokens for one response — the count priced as `in`.
+ * Usually input minus both cache subsets, but where a cache write is a
+ * surcharge rather than a replacement (catalog.h) its tokens are still
+ * billed as input, so subtracting them would report a volume nobody was
+ * charged for. Rates come from `p`/`model`; unknown ones read as
+ * replacement, the common case. Never negative. */
+long usage_uncached_input(const struct stream_usage *u, const struct provider *p,
+                          const char *model);
 
 /* True when the response reported any billing signal (tokens or cost).
  * The gate the error/interrupt paths use before emitting a footer, so a
@@ -166,16 +192,15 @@ void spend_free(struct spend_totals *t);
 int usage_reported(const struct stream_usage *u);
 
 /* Build the priced payload for an ITEM_TURN_USAGE footer: raw usage plus
- * per-category catalog estimates (see struct turn_usage). Malloc'd, or
- * NULL when there is nothing to show at all (no tokens, no cost, no
- * elapsed time) — a backend that reports no usage still gets a
- * duration-only footer for a successful round-trip. The reported-vs-
- * estimated policy matches spend_account: a reported cost is exact and is
- * never decomposed (the category estimates stay -1); an unreported one
- * gets the catalog estimate, total and split alike, marked
- * cost_estimated. */
+ * per-category rate estimates (see struct turn_usage). Malloc'd, or NULL
+ * when there is nothing to show at all (no tokens, no cost, no elapsed
+ * time) — a backend that reports no usage still gets a duration-only
+ * footer for a successful round-trip. Same policy as spend_account: a
+ * reported charge is the total and is exact, an unreported one is
+ * estimated and marked cost_estimated, and the categories are estimated
+ * in both cases. */
 struct turn_usage *turn_usage_make(const struct stream_usage *u, long elapsed_ms,
-                                   const char *catalog_id, const char *model);
+                                   const struct provider *p, const char *model);
 
 /* Live per-run state shared by the interactive and one-shot paths.
  * Owns the items vector, the assembled system prompt, the tools table,

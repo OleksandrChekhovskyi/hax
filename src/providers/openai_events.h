@@ -67,6 +67,12 @@ struct openai_events {
      * truncation error to make a backend-specific cause actionable — e.g.
      * ollama's num_ctx default being too small for the prompt. NULL = none. */
     const char *length_hint;
+
+    /* This request carried 1h-TTL cache breakpoints, so its cache writes
+     * bill at the 1h rate. The response reports one undifferentiated
+     * `cache_write_tokens`, so only the sender knows which rate applies —
+     * hence the flag rather than a wire field. */
+    int cache_write_1h;
 };
 
 void openai_events_init(struct openai_events *s, stream_cb cb, void *user);

@@ -31,7 +31,8 @@ static int usage_eq(const struct turn_usage *a, const struct turn_usage *b)
            a->usage.cost == b->usage.cost && a->elapsed_ms == b->elapsed_ms &&
            a->cost_in == b->cost_in && a->cost_cache_read == b->cost_cache_read &&
            a->cost_cache_write == b->cost_cache_write && a->cost_out == b->cost_out &&
-           a->cost_total == b->cost_total && a->cost_estimated == b->cost_estimated;
+           a->cost_total == b->cost_total && a->cost_estimated == b->cost_estimated &&
+           a->in_tokens == b->in_tokens;
 }
 
 static int images_eq(const struct item *a, const struct item *b)
@@ -90,6 +91,7 @@ static struct turn_usage TU_EST = {
               .cache_write_1h_tokens = -1,
               .cost = -1},
     .elapsed_ms = 42000,
+    .in_tokens = 5800, /* 30000 - 16000 cached - 8200 written */
     .cost_in = 0.025,
     .cost_cache_read = 0.048,
     .cost_cache_write = 0.031,
@@ -105,6 +107,7 @@ static struct turn_usage TU_EXACT = {
               .cache_write_1h_tokens = -1,
               .cost = 0.0012},
     .elapsed_ms = -1,
+    .in_tokens = 1000,
     .cost_in = -1,
     .cost_cache_read = -1,
     .cost_cache_write = -1,

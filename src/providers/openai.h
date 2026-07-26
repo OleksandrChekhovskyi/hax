@@ -88,6 +88,11 @@ struct openai_preset {
      * field name is generic enough that an unknown-field-rejecting backend
      * (vLLM) could 400 on it. */
     int request_cost;
+    /* Emit prompt cache_control breakpoints by default. On for routers
+     * fronting Anthropic models, which cache only what a request marks;
+     * off elsewhere, where backends cache on their own and a strict one
+     * could 400 on the unknown content field. <prefix>.cache overrides. */
+    int send_cache_control_default;
     /* When non-NULL, captured reasoning text (ITEM_REASONING.reasoning_text)
      * is round-tripped back to the server under this field name on each
      * assistant message — "reasoning_content" for llama.cpp. Required for
@@ -174,6 +179,34 @@ void openai_prepare_base_url_availability(const char *base_url, const char *api_
 json_t *openai_build_messages(const char *system_prompt, const struct item *items, size_t n,
                               const char *reasoning_field, const char *cur_provider,
                               const char *cur_model, int image_input);
+
+/* Mark `messages` (in place) with prompt cache breakpoints — the system
+ * prompt and the conversation tail. `ttl` is "5m" or "1h"; anything else
+ * leaves the provider default (5m). Exposed for unit tests: a breakpoint
+ * on the wrong message costs money silently rather than failing. */
+void openai_apply_cache_breakpoints(json_t *messages, const char *ttl);
+
+/* What the user asked for, before the per-model judgement. AUTO is the
+ * preset's own default and defers to whether caching pays on this model;
+ * ON is an explicit <prefix>.cache=on, which the config contract says
+ * forces the breakpoints out regardless. */
+enum openai_cache_mode {
+    OPENAI_CACHE_OFF,
+    OPENAI_CACHE_AUTO,
+    OPENAI_CACHE_ON,
+};
+
+/* Prompt-caching decisions for one request, derived from `mode` and
+ * `model`'s rates (see openai_plan_cache). Exposed for unit tests: each
+ * is a silent money bug when wrong — breakpoints sent to a backend that
+ * charges a surcharge for them, or writes priced at a 1h premium that
+ * never applied. */
+struct openai_cache_plan {
+    int send_breakpoints;
+    int writes_bill_1h;
+};
+struct openai_cache_plan openai_plan_cache(const struct provider *p, const char *model,
+                                           enum openai_cache_mode mode, const char *ttl);
 
 extern const struct provider_factory PROVIDER_OPENAI;
 

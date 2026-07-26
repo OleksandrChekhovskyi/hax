@@ -175,37 +175,37 @@ int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long
     return n;
 }
 
-void spend_account(struct spend_totals *t, const struct stream_usage *u, const char *catalog_id,
+void spend_account(struct spend_totals *t, const struct stream_usage *u, const struct provider *p,
                    const char *model)
 {
-    if (u->cost >= 0) {
-        /* Any non-negative cost is a *reported* charge (stream_usage's
-         * convention: negative = not reported) — including an explicit
-         * zero, e.g. a free-tier model. Zero must not fall through to the
-         * record below, where catalog rates would re-price the free
-         * response as paid. */
-        t->reported += u->cost;
+    /* A reported charge (negative = not reported) earns a record on its
+     * own, tokens or not — it is what the session is billed. Otherwise
+     * there has to be something to price. */
+    if (u->cost < 0 && u->input_tokens <= 0 && u->output_tokens <= 0)
         return;
-    }
-    if (u->input_tokens <= 0 && u->output_tokens <= 0)
-        return; /* nothing billable was reported */
-    /* No reported charge: record the response for catalog estimation at
-     * read time (spend_total). */
     if (t->n_recs == t->cap_recs) {
         t->cap_recs = t->cap_recs ? t->cap_recs * 2 : 8;
         t->recs = xrealloc(t->recs, t->cap_recs * sizeof(*t->recs));
     }
     struct spend_rec *r = &t->recs[t->n_recs++];
     r->u = *u;
+    r->reported = u->cost;
+    r->have_rates = model_meta_rates(p, model, &r->rates);
+    const char *catalog_id = p ? p->catalog_id : NULL;
     r->catalog_id = catalog_id && *catalog_id ? xstrdup(catalog_id) : NULL;
     r->model = model && *model ? xstrdup(model) : NULL;
 }
 
-/* Price one record, USD; -1 when it can't be priced (no catalog identity,
- * model unknown to the catalog). `split` (optional) receives the
- * per-category components. */
+/* Price one record's tokens, USD; -1 when it can't be priced (no rates
+ * snapshotted, no catalog identity, model unknown to the catalog).
+ * `split` (optional) receives the per-category components. Always an
+ * estimate — see spend_split — even for a record that also carries a
+ * reported charge. */
 static double spend_rec_price(const struct spend_rec *r, struct catalog_split *split)
 {
+    if (r->have_rates)
+        return catalog_price(&r->rates, r->u.input_tokens, r->u.output_tokens, r->u.cached_tokens,
+                             r->u.cache_write_tokens, r->u.cache_write_1h_tokens, split);
     if (!r->catalog_id || !r->model)
         return -1;
     struct catalog_entry e;
@@ -215,28 +215,45 @@ static double spend_rec_price(const struct spend_rec *r, struct catalog_split *s
                          r->u.cache_write_tokens, r->u.cache_write_1h_tokens, split);
 }
 
+/* What one record contributes to the session total: its reported charge
+ * when it has one, else its estimate. -1 = contributes nothing knowable.
+ * `*exact` (optional) reports which of the two it was. */
+static double spend_rec_total(const struct spend_rec *r, int *exact)
+{
+    if (r->reported >= 0) {
+        if (exact)
+            *exact = 1;
+        return r->reported;
+    }
+    if (exact)
+        *exact = 0;
+    return spend_rec_price(r, NULL);
+}
+
 double spend_total(const struct spend_totals *t, int *approx)
 {
-    double est = 0;
+    double sum = 0;
+    int inexact = 0;
     for (size_t i = 0; i < t->n_recs; i++) {
-        double c = spend_rec_price(&t->recs[i], NULL);
+        int exact = 0;
+        double c = spend_rec_total(&t->recs[i], &exact);
         if (c >= 0)
-            est += c;
+            sum += c;
+        /* Anything that isn't a reported charge makes the figure inexact,
+         * whether it priced to an estimate, to zero (zero rates are still
+         * an estimate), or not at all. */
+        if (!exact)
+            inexact = 1;
     }
-    /* Every record exists because its response reported no cost, so any
-     * record at all makes the figure inexact — whether it priced to a
-     * positive estimate, to zero (zero catalog rates are still an
-     * estimate), or not at all. A reported subtotal must never display
-     * as an exact grand total. */
     if (approx)
-        *approx = t->n_recs > 0;
-    return t->reported + est;
+        *approx = inexact;
+    return sum;
 }
 
 int spend_unpriced(const struct spend_totals *t)
 {
     for (size_t i = 0; i < t->n_recs; i++)
-        if (spend_rec_price(&t->recs[i], NULL) < 0)
+        if (spend_rec_total(&t->recs[i], NULL) < 0)
             return 1;
     return 0;
 }
@@ -268,13 +285,35 @@ void spend_free(struct spend_totals *t)
     memset(t, 0, sizeof(*t));
 }
 
+/* The fallback split for a response nothing can price: every cache subset
+ * displaces input, which is what all but one backend family does. */
+static long uncached_input_default(const struct stream_usage *u)
+{
+    long cr = u->cached_tokens > 0 ? u->cached_tokens : 0;
+    long cw = u->cache_write_tokens > 0 ? u->cache_write_tokens : 0;
+    long in = u->input_tokens > 0 ? u->input_tokens : 0;
+    long rest = in - cr - cw;
+    return rest > 0 ? rest : 0;
+}
+
+long usage_uncached_input(const struct stream_usage *u, const struct provider *p, const char *model)
+{
+    struct catalog_entry e;
+    struct catalog_split split;
+    if (!model_meta_rates(p, model, &e) ||
+        catalog_price(&e, u->input_tokens, u->output_tokens, u->cached_tokens,
+                      u->cache_write_tokens, u->cache_write_1h_tokens, &split) < 0)
+        return uncached_input_default(u);
+    return split.in_tokens;
+}
+
 int usage_reported(const struct stream_usage *u)
 {
     return u->input_tokens >= 0 || u->output_tokens >= 0 || u->cost >= 0;
 }
 
 struct turn_usage *turn_usage_make(const struct stream_usage *u, long elapsed_ms,
-                                   const char *catalog_id, const char *model)
+                                   const struct provider *p, const char *model)
 {
     if (!usage_reported(u) && elapsed_ms < 0)
         return NULL;
@@ -284,30 +323,34 @@ struct turn_usage *turn_usage_make(const struct stream_usage *u, long elapsed_ms
     tu->cost_in = tu->cost_cache_read = tu->cost_cache_write = tu->cost_out = -1;
     tu->cost_total = -1;
     tu->cost_estimated = 0;
-    if (u->cost >= 0) {
+    tu->in_tokens = uncached_input_default(u); /* refined once priced */
+    if (u->cost >= 0)
         tu->cost_total = u->cost;
-        return tu;
-    }
-    if (!usage_reported(u))
-        return tu; /* duration-only — no tokens to price, and a $0
-                    * "estimate" would fabricate certainty about a
-                    * request whose usage is simply unknown */
-    if (!catalog_id || !*catalog_id || !model || !*model)
+    if (u->input_tokens < 0 && u->output_tokens < 0)
+        return tu; /* no tokens to price — and a $0 "estimate" would
+                    * fabricate certainty about usage that is simply
+                    * unknown, duration-only footer or not */
+    if (!model || !*model)
         return tu;
     struct catalog_entry e;
-    if (catalog_lookup(catalog_id, model, &e) != 0)
+    if (!model_meta_rates(p, model, &e))
         return tu;
     struct catalog_split split;
     double total = catalog_price(&e, u->input_tokens, u->output_tokens, u->cached_tokens,
                                  u->cache_write_tokens, u->cache_write_1h_tokens, &split);
     if (total < 0)
         return tu;
-    tu->cost_total = total;
+    tu->in_tokens = split.in_tokens;
     tu->cost_in = split.in;
     tu->cost_cache_read = split.cache_read;
     tu->cost_cache_write = split.cache_write;
     tu->cost_out = split.out;
-    tu->cost_estimated = 1;
+    /* cost_estimated describes the *total* only: when the provider
+     * reported one, the estimate merely decomposes it. */
+    if (tu->cost_total < 0) {
+        tu->cost_total = total;
+        tu->cost_estimated = 1;
+    }
     return tu;
 }
 
@@ -517,7 +560,7 @@ void agent_session_mark_interrupt(struct agent_session *s)
 void agent_session_add_turn_usage(struct agent_session *s, const struct provider *p,
                                   const struct stream_usage *u, long elapsed_ms)
 {
-    struct turn_usage *tu = turn_usage_make(u, elapsed_ms, p ? p->catalog_id : NULL, s->model);
+    struct turn_usage *tu = turn_usage_make(u, elapsed_ms, p, s->model);
     if (!tu)
         return;
     items_append(&s->items, &s->n_items, &s->cap_items,

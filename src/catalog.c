@@ -42,6 +42,7 @@ static void entry_init(struct catalog_entry *e)
     e->cost_output = -1;
     e->cost_cache_read = -1;
     e->cost_cache_write = -1;
+    e->cost_cache_write_1h = -1;
     e->context = 0;
     e->output = 0;
     e->image_input = -1;
@@ -114,6 +115,7 @@ static void tiers_fill(json_t *tiers, struct catalog_entry *e)
         t->cost_output = member_rate(tv, "output");
         t->cost_cache_read = member_rate(tv, "cache_read");
         t->cost_cache_write = member_rate(tv, "cache_write");
+        t->cost_cache_write_1h = member_rate(tv, "cache_write_1h");
     }
 }
 
@@ -177,6 +179,8 @@ static void entry_fill(json_t *model_obj, struct catalog_entry *e)
             e->cost_cache_read = member_rate(cost, "cache_read");
         if (e->cost_cache_write < 0)
             e->cost_cache_write = member_rate(cost, "cache_write");
+        if (e->cost_cache_write_1h < 0)
+            e->cost_cache_write_1h = member_rate(cost, "cache_write_1h");
         tiers_fill(json_object_get(cost, "tiers"), e);
     }
     json_t *limit = json_object_get(model_obj, "limit");
@@ -209,7 +213,12 @@ static int entry_complete(const struct catalog_entry *e)
     /* Tiers count toward completeness via the *declared* flag: a config
      * block that pins every scalar but says nothing about tiers must
      * still fall through to the cache, or a tiered model would silently
-     * price flat (the memoized lookup keeps that consult cheap). */
+     * price flat (the memoized lookup keeps that consult cheap).
+     *
+     * cost_cache_write_1h is absent for the opposite reason: models.dev
+     * quotes no 1h rate, so requiring it would leave every entry
+     * incomplete forever. It alone has a fallback (2x input) to be
+     * incomplete against. */
     return e->cost_input >= 0 && e->cost_output >= 0 && e->cost_cache_read >= 0 &&
            e->cost_cache_write >= 0 && e->context > 0 && e->output > 0 && e->image_input >= 0 &&
            e->tiers_declared && e->efforts.known;
@@ -221,8 +230,8 @@ static int entry_any(const struct catalog_entry *e)
      * declaring just its long-context rates) is priceable above its
      * threshold, so it must not read as "unknown model". */
     return e->cost_input >= 0 || e->cost_output >= 0 || e->cost_cache_read >= 0 ||
-           e->cost_cache_write >= 0 || e->context > 0 || e->output > 0 || e->image_input >= 0 ||
-           e->n_tiers > 0 || e->efforts.known;
+           e->cost_cache_write >= 0 || e->cost_cache_write_1h >= 0 || e->context > 0 ||
+           e->output > 0 || e->image_input >= 0 || e->n_tiers > 0 || e->efforts.known;
 }
 
 /* Fill the still-unknown fields of *dst from *src — the struct-to-struct
@@ -238,6 +247,8 @@ static void entry_merge(struct catalog_entry *dst, const struct catalog_entry *s
         dst->cost_cache_read = src->cost_cache_read;
     if (dst->cost_cache_write < 0)
         dst->cost_cache_write = src->cost_cache_write;
+    if (dst->cost_cache_write_1h < 0)
+        dst->cost_cache_write_1h = src->cost_cache_write_1h;
     if (dst->context <= 0)
         dst->context = src->context;
     if (dst->output <= 0)
@@ -634,6 +645,13 @@ void catalog_lookup_many(const char *provider_id, const char *const *models, siz
     json_decref(prov);
 }
 
+int catalog_cache_write_replaces_input(const struct catalog_entry *e)
+{
+    if (e->cost_cache_write < 0 || e->cost_input < 0)
+        return 1;
+    return e->cost_cache_write >= e->cost_input;
+}
+
 double catalog_price(const struct catalog_entry *e, long input, long output, long cached,
                      long cache_write, long cache_write_1h, struct catalog_split *split)
 {
@@ -646,6 +664,7 @@ double catalog_price(const struct catalog_entry *e, long input, long output, lon
      * to the base rates. */
     double r_in = e->cost_input, r_out = e->cost_output;
     double r_read = e->cost_cache_read, r_write = e->cost_cache_write;
+    double r_write1h = e->cost_cache_write_1h;
     long matched = -1;
     for (int i = 0; i < e->n_tiers; i++) {
         const struct catalog_tier *t = &e->tiers[i];
@@ -656,6 +675,7 @@ double catalog_price(const struct catalog_entry *e, long input, long output, lon
         r_out = t->cost_output >= 0 ? t->cost_output : e->cost_output;
         r_read = t->cost_cache_read >= 0 ? t->cost_cache_read : e->cost_cache_read;
         r_write = t->cost_cache_write >= 0 ? t->cost_cache_write : e->cost_cache_write;
+        r_write1h = t->cost_cache_write_1h >= 0 ? t->cost_cache_write_1h : e->cost_cache_write_1h;
     }
     if (r_in < 0 || r_out < 0)
         return -1;
@@ -666,20 +686,30 @@ double catalog_price(const struct catalog_entry *e, long input, long output, lon
     if (cw1h > cw)
         cw1h = cw; /* defensive: contract says 1h writes are a subset */
     long in = input > 0 ? input : 0;
-    long uncached = in - cr - cw;
-    if (uncached < 0)
-        uncached = 0;
     if (r_read < 0)
         r_read = r_in;
     if (r_write < 0)
         r_write = r_in;
+    /* Classified from the rates this request actually bills at, not the
+     * base ones: a tier that moves either rate can move the relationship
+     * with it. An unknown write rate has just become r_in, i.e.
+     * replacement — the same answer catalog_cache_write_replaces_input
+     * gives. A surcharge-style write leaves its tokens in the input
+     * charge, and the backend reports them twice over (Gemini counts the
+     * same tokens as both cached and written, inflating prompt_tokens to
+     * match), so subtracting them would erase real input. */
+    long uncached = in - cr - (r_write >= r_in ? cw : 0);
+    if (uncached < 0)
+        uncached = 0;
+    if (r_write1h < 0)
+        r_write1h = 2 * r_in; /* the documented multiplier — see the header */
     double c_in = (double)uncached * r_in / 1e6;
     double c_read = (double)cr * r_read / 1e6;
-    /* 1h cache writes bill at 2x input (see the header contract); only
-     * the remaining (5m) writes take the catalog's cache_write rate. */
-    double c_write = ((double)(cw - cw1h) * r_write + (double)cw1h * 2 * r_in) / 1e6;
+    /* Only the remaining (5m) writes take the plain cache_write rate. */
+    double c_write = ((double)(cw - cw1h) * r_write + (double)cw1h * r_write1h) / 1e6;
     double c_out = (output > 0 ? (double)output : 0) * r_out / 1e6;
     if (split) {
+        split->in_tokens = uncached;
         split->in = c_in;
         split->cache_read = c_read;
         split->cache_write = c_write;

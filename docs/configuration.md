@@ -379,6 +379,20 @@ These settings apply to built-in OpenAI-family presets: `openai`, `openai-compat
 - `openai.request_cost` / `HAX_OPENAI_REQUEST_COST` — `auto`, `on`, or `off`: `on`/`off` force
   sending (or not) `usage: {include: true}` so the backend reports per-response cost (an
   OpenRouter extension); `auto` uses the provider default (on for `openrouter`, off elsewhere).
+- `openai.cache` / `HAX_OPENAI_CACHE` — `auto`, `on`, or `off`: `on`/`off` force sending (or
+  suppressing) prompt `cache_control` breakpoints; `auto` uses the provider default (on for
+  `openrouter`, off elsewhere). Anthropic models cache only what a request marks, and a
+  router fronting them passes the marker through — without it, an agentic session re-sends
+  its whole prefix at full input rate every turn.
+  Breakpoints are skipped per model where they would cost rather than save: a backend whose
+  cache-write rate sits *below* its input rate (Google's, a storage surcharge) bills an
+  explicit cache on top of input charged in full, so caching there is a net loss. Forcing
+  `on` overrides that judgement for every model the provider serves.
+- `openai.cache_ttl` / `HAX_OPENAI_CACHE_TTL` — cache TTL, `5m` or `1h`. Default `1h`, which
+  suits an interactive agent's pauses; 1h writes bill at roughly double the 5m rate, so a
+  session of short bursts may prefer `5m`. Only models that quote a 1h rate are billed (and
+  priced) as such — elsewhere the router forwards the marker to a backend with no TTL
+  concept, which writes at its ordinary rate.
 
 API-key fallbacks:
 

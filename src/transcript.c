@@ -438,20 +438,19 @@ static void usage_sep(FILE *out, int *first)
     *first = 0;
 }
 
-/* One "<label> <count> [$cost]" segment; the dollar figure is shown only
- * when it's a positive estimate — a reported exact total is never
- * decomposed (its category costs stay negative), and "$0.00" would be
- * clutter, not information. */
+/* One "<label> <count> [~$cost]" segment. Category costs are always rate
+ * estimates (provider.h), hence the "~" even beside an exact total. A
+ * cost too small to render as anything but zeros is dropped. */
 static void usage_tokens(FILE *out, int *first, const char *label, long tokens, double usd)
 {
     char t[32];
     usage_sep(out, first);
     format_tokens(t, sizeof(t), tokens);
     fprintf(out, "%s %s", label, t);
-    if (usd > 0) {
+    if (usd >= COST_DISPLAY_MIN) {
         char c[32];
         format_cost(c, sizeof(c), usd);
-        fprintf(out, " %s", c);
+        fprintf(out, " ~%s", c);
     }
 }
 
@@ -479,12 +478,8 @@ static void render_turn_usage(FILE *out, int color, const struct turn_usage *tu)
     }
     long cr = u->cached_tokens > 0 ? u->cached_tokens : 0;
     long cw = u->cache_write_tokens > 0 ? u->cache_write_tokens : 0;
-    if (u->input_tokens >= 0) {
-        /* The categories are non-overlapping: "in" is the uncached
-         * remainder, so the counts sum to what was actually sent. */
-        long in = u->input_tokens - cr - cw;
-        usage_tokens(out, &first, "in", in > 0 ? in : 0, tu->cost_in);
-    }
+    if (u->input_tokens >= 0)
+        usage_tokens(out, &first, "in", tu->in_tokens > 0 ? tu->in_tokens : 0, tu->cost_in);
     if (cr > 0)
         usage_tokens(out, &first, "cache", cr, tu->cost_cache_read);
     if (cw > 0)

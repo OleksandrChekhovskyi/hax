@@ -178,6 +178,10 @@ void format_duration(char *buf, size_t buflen, long ms);
  * "$0.0042", "$0.042", "$1.23". Zero (and below) renders "$0.00". */
 void format_cost(char *buf, size_t buflen, double usd);
 
+/* Smallest cost format_cost renders as anything but zeros. Below it the
+ * per-category breakdowns drop the figure and show the count alone. */
+#define COST_DISPLAY_MIN 0.00005
+
 /* Format context usage against its window: "8.9k / 256k (3%)", or just
  * "8.9k" when the window is unknown (limit <= 0). */
 void format_context(char *buf, size_t buflen, long ctx, long limit);

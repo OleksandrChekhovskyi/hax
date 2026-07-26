@@ -9,6 +9,7 @@
 #include "agent_core.h"
 #include "catalog.h"
 #include "harness.h"
+#include "model_meta.h"
 #include "tool.h"
 #include "util.h"
 
@@ -590,48 +591,60 @@ static void test_spend_accounting(void)
         fclose(f);
     }
 
-    /* Reported cost is exact: sums into reported, no record kept. */
+    /* Providers exist here only to carry a catalog identity: no meta slot,
+     * so model_meta_rates resolves against the catalog tier alone. */
+    struct provider prov = {.catalog_id = "prov"};
+    struct provider noprov = {.catalog_id = "noprov"};
+    struct provider anon = {0};
+
+    /* Reported cost is exact and is what the total bills — but the record
+     * is kept all the same, so the categories can still be estimated. */
     struct stream_usage u = {.input_tokens = 1000,
                              .output_tokens = 50,
                              .cached_tokens = 200,
                              .cache_write_tokens = -1,
                              .cache_write_1h_tokens = -1,
                              .cost = 0.01};
-    spend_account(&t, &u, "prov", "m");
-    EXPECT(t.reported == 0.01);
-    EXPECT(t.n_recs == 0);
+    spend_account(&t, &u, &prov, "m");
+    EXPECT(t.n_recs == 1);
+    EXPECT(t.recs[0].reported == 0.01);
     EXPECT(spend_total(&t, &approx) == 0.01);
     EXPECT(!approx);
+    /* 800 uncached in + 200 cache reads at the input-rate fallback + 50
+     * out — an estimate of the $0.01 that was actually charged. */
+    struct catalog_split rep;
+    EXPECT(spend_split(&t, &rep) == 1);
+    EXPECT(rep.in == 800 * 2.0 / 1e6);
+    EXPECT(rep.cache_read == 200 * 2.0 / 1e6);
+    EXPECT(rep.out == 50 * 8.0 / 1e6);
 
     /* Unreported cost: each response becomes its own stamped record.
      * Neither stamp resolves in the catalog, so the total stays at the
      * reported subtotal, marked approximate — real usage exists that the
      * figure doesn't cover. */
     u.cost = -1;
-    spend_account(&t, &u, "noprov", "m");
-    spend_account(&t, &u, NULL, NULL);
-    EXPECT(t.reported == 0.01);
-    EXPECT(t.n_recs == 2);
-    EXPECT_STR_EQ(t.recs[0].catalog_id, "noprov");
-    EXPECT_STR_EQ(t.recs[0].model, "m");
-    EXPECT(t.recs[1].catalog_id == NULL && t.recs[1].model == NULL);
+    spend_account(&t, &u, &noprov, "m");
+    spend_account(&t, &u, &anon, NULL);
+    EXPECT(t.n_recs == 3);
+    EXPECT_STR_EQ(t.recs[1].catalog_id, "noprov");
+    EXPECT_STR_EQ(t.recs[1].model, "m");
+    EXPECT(t.recs[2].catalog_id == NULL && t.recs[2].model == NULL);
     EXPECT(spend_unpriced(&t));
     EXPECT(spend_total(&t, &approx) == 0.01);
     EXPECT(approx);
 
     /* A response that reported neither cost nor tokens records nothing. */
     struct stream_usage nothing = {-1, -1, -1, -1, -1, -1};
-    spend_account(&t, &nothing, "prov", "m");
-    EXPECT(t.n_recs == 2);
+    spend_account(&t, &nothing, &prov, "m");
+    EXPECT(t.n_recs == 3);
 
     /* An explicit zero cost is a *reported* free response, not "cost
-     * unknown": no record may be kept, where catalog rates would later
-     * re-price the free tokens as paid. */
+     * unknown": the total must stay an exact $0 rather than picking up
+     * the catalog's estimate of the tokens it burned. */
     struct spend_totals z = {0};
     u.cost = 0;
-    spend_account(&z, &u, "prov", "m");
-    EXPECT(z.reported == 0);
-    EXPECT(z.n_recs == 0);
+    spend_account(&z, &u, &prov, "m");
+    EXPECT(z.n_recs == 1);
     EXPECT(spend_total(&z, &approx) == 0);
     EXPECT(!approx);
     u.cost = -1;
@@ -646,12 +659,12 @@ static void test_spend_accounting(void)
                                 .cache_write_tokens = -1,
                                 .cache_write_1h_tokens = -1,
                                 .cost = -1};
-    spend_account(&big, &mega, "prov", "m");
+    spend_account(&big, &mega, &prov, "m");
     EXPECT(spend_total(&big, &approx) == 10.0);
     EXPECT(approx);
     EXPECT(!spend_unpriced(&big));
     struct spend_totals miss = {0};
-    spend_account(&miss, &mega, "prov", "unknown-model");
+    spend_account(&miss, &mega, &prov, "unknown-model");
     EXPECT(spend_total(&miss, &approx) == 0);
     EXPECT(approx);
     EXPECT(spend_unpriced(&miss));
@@ -665,10 +678,13 @@ static void test_spend_accounting(void)
     EXPECT(spend_split(&miss, &sp) == 0);
 
     /* Zero catalog rates price a record to $0 — still an estimate, so
-     * the figure stays approximate rather than passing off the reported
+     * the figure stays approximate rather than passing off a reported
      * subtotal as an exact grand total. */
-    struct spend_totals freebie = {.reported = 0.5};
-    spend_account(&freebie, &mega, "prov", "free-m");
+    struct spend_totals freebie = {0};
+    struct stream_usage paid = mega;
+    paid.cost = 0.5;
+    spend_account(&freebie, &paid, &prov, "m");
+    spend_account(&freebie, &mega, &prov, "free-m");
     EXPECT(spend_total(&freebie, &approx) == 0.5);
     EXPECT(approx);
     EXPECT(!spend_unpriced(&freebie));
@@ -681,21 +697,71 @@ static void test_spend_accounting(void)
     EXPECT(t.n_recs == 0 && t.recs == NULL);
 }
 
+/* Publish `rate` as the backend's reported input/output rate for `model`. */
+static void publish_rates(struct provider *p, const char *model, double in, double out)
+{
+    struct model_info m;
+    model_info_init(&m);
+    m.id = xstrdup(model);
+    m.cost_input = in;
+    m.cost_output = out;
+    model_meta_remember(p, &m);
+    model_info_clear(&m);
+}
+
+/* Rates are snapshotted when the response is accounted, not looked up
+ * when the total is read: the live tier follows the provider's current
+ * selection, so a later /model switch would otherwise re-rate every
+ * earlier request against a model that never ran them. */
+static void test_spend_rates_stamped_at_account_time(void)
+{
+    struct provider p = {0};
+    struct spend_totals t = {0};
+    struct stream_usage u = {.input_tokens = 1000000,
+                             .output_tokens = 1000000,
+                             .cached_tokens = -1,
+                             .cache_write_tokens = -1,
+                             .cache_write_1h_tokens = -1,
+                             .cost = -1};
+
+    publish_rates(&p, "cheap", 1, 2);
+    spend_account(&t, &u, &p, "cheap");
+
+    /* The user switches to a pricier model; the old record must not move. */
+    publish_rates(&p, "dear", 100, 200);
+    spend_account(&t, &u, &p, "dear");
+
+    int approx = 0;
+    EXPECT(spend_total(&t, &approx) == 303.0); /* 3 + 300 */
+    EXPECT(approx);
+    struct catalog_split sp;
+    EXPECT(spend_split(&t, &sp) == 1);
+    EXPECT(sp.in == 101.0 && sp.out == 202.0);
+
+    spend_free(&t);
+    model_meta_release(&p);
+}
+
 static void test_turn_usage_make(void)
 {
-    /* Reported cost: exact total, never decomposed. */
+    struct provider prov = {.catalog_id = "prov"};
+
+    /* Reported cost: exact total, categories still estimated from rates —
+     * no backend decomposes what it billed. */
     struct stream_usage u = {.input_tokens = 1000,
                              .output_tokens = 50,
                              .cached_tokens = 200,
                              .cache_write_tokens = -1,
                              .cache_write_1h_tokens = -1,
                              .cost = 0.01};
-    struct turn_usage *tu = turn_usage_make(&u, 1500, "prov", "m");
+    struct turn_usage *tu = turn_usage_make(&u, 1500, &prov, "m");
     EXPECT(tu != NULL);
     if (tu) {
         EXPECT(tu->cost_total == 0.01);
         EXPECT(!tu->cost_estimated);
-        EXPECT(tu->cost_in < 0 && tu->cost_out < 0);
+        EXPECT(tu->cost_in == 800 * 2.0 / 1e6);
+        EXPECT(tu->cost_cache_read == 200 * 2.0 / 1e6);
+        EXPECT(tu->cost_out == 50 * 8.0 / 1e6);
         EXPECT(tu->elapsed_ms == 1500);
         free(tu);
     }
@@ -705,15 +771,28 @@ static void test_turn_usage_make(void)
      * With no duration either there is nothing to show — NULL. */
     struct stream_usage nothing = {-1, -1, -1, -1, -1, -1};
     EXPECT(!usage_reported(&nothing));
-    tu = turn_usage_make(&nothing, 1500, "prov", "m");
+    tu = turn_usage_make(&nothing, 1500, &prov, "m");
     EXPECT(tu != NULL);
     if (tu) {
         EXPECT(tu->elapsed_ms == 1500);
         EXPECT(tu->cost_total < 0);
         EXPECT(!tu->cost_estimated);
+        EXPECT(tu->cost_in < 0 && tu->cost_out < 0);
         free(tu);
     }
-    EXPECT(turn_usage_make(&nothing, -1, "prov", "m") == NULL);
+    EXPECT(turn_usage_make(&nothing, -1, &prov, "m") == NULL);
+
+    /* A reported charge with no tokens to price: exact total, no split —
+     * $0.00 categories would fabricate a decomposition. */
+    struct stream_usage bare = {-1, -1, -1, -1, -1, 0.02};
+    tu = turn_usage_make(&bare, -1, &prov, "m");
+    EXPECT(tu != NULL);
+    if (tu) {
+        EXPECT(tu->cost_total == 0.02);
+        EXPECT(!tu->cost_estimated);
+        EXPECT(tu->cost_in < 0 && tu->cost_out < 0);
+        free(tu);
+    }
 
     /* Unreported cost against the fixture catalog (written by
      * test_spend_accounting, still in XDG_CACHE_HOME): estimated total
@@ -725,7 +804,7 @@ static void test_turn_usage_make(void)
                                .cache_write_tokens = -1,
                                .cache_write_1h_tokens = -1,
                                .cost = -1};
-    tu = turn_usage_make(&est, -1, "prov", "m");
+    tu = turn_usage_make(&est, -1, &prov, "m");
     EXPECT(tu != NULL);
     if (tu) {
         EXPECT(tu->cost_estimated);
@@ -770,6 +849,7 @@ int main(void)
     test_mark_interrupt();
     test_format_stats_segments_selection();
     test_spend_accounting();
+    test_spend_rates_stamped_at_account_time();
     test_turn_usage_make();
     T_REPORT();
 }

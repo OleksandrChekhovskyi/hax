@@ -20,6 +20,10 @@ struct session_stats {
     long output_tokens;      /* total tokens generated */
     long cached_tokens;      /* total input tokens served from the prefix cache */
     long cache_write_tokens; /* total input tokens billed as cache writes */
+    /* Summed uncached remainder (usage_uncached_input). Accumulated per
+     * response rather than derived from the three sums above, since the
+     * subtraction depends on rates that differ per model. */
+    long uncached_tokens;
     /* Spend accounting (agent_core.h): exact provider-reported cost plus
      * per-request records of responses that reported none, each stamped
      * with the catalog identity it ran under. Records are priced at

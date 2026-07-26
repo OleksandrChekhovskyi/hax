@@ -180,7 +180,8 @@ static int describes_anything(const struct model_info *src)
 {
     return src->context > 0 || src->max_output > 0 || src->image_input != PROVIDER_CAP_UNKNOWN ||
            src->tools != PROVIDER_CAP_UNKNOWN || src->efforts.known || src->cost_input >= 0 ||
-           src->cost_output >= 0 || src->cost_cache_read >= 0;
+           src->cost_output >= 0 || src->cost_cache_read >= 0 || src->cost_cache_write >= 0 ||
+           src->cost_cache_write_1h >= 0 || src->n_tiers > 0;
 }
 
 void model_meta_remember(struct provider *p, const struct model_info *src)
@@ -240,6 +241,7 @@ static void catalog_tier(const struct provider *p, const char *model, struct cat
 {
     memset(out, 0, sizeof(*out));
     out->cost_input = out->cost_output = out->cost_cache_read = out->cost_cache_write = -1;
+    out->cost_cache_write_1h = -1;
     out->image_input = -1;
     if (p && p->catalog_id && *p->catalog_id && model && *model)
         catalog_lookup(p->catalog_id, model, out);
@@ -257,6 +259,10 @@ void model_meta_merge(const struct model_info *reported, const struct catalog_en
     }
     if (!cat)
         return;
+    /* Captured before the field-by-field fill below overwrites it: what
+     * matters for the tier rule is whether the *backend* quoted base
+     * rates, not whether the merged view ends up with some. */
+    int reported_rates = reported && (reported->cost_input >= 0 || reported->cost_output >= 0);
     if (out->context <= 0)
         out->context = cat->context;
     if (out->max_output <= 0)
@@ -269,6 +275,18 @@ void model_meta_merge(const struct model_info *reported, const struct catalog_en
         out->cost_output = cat->cost_output;
     if (out->cost_cache_read < 0)
         out->cost_cache_read = cat->cost_cache_read;
+    if (out->cost_cache_write < 0)
+        out->cost_cache_write = cat->cost_cache_write;
+    if (out->cost_cache_write_1h < 0)
+        out->cost_cache_write_1h = cat->cost_cache_write_1h;
+    /* Tiers move whole, and only onto a report with no rates of its own:
+     * the backend's base rates under the snapshot's thresholds would bill
+     * a request at rates that never coexisted. A backend quoting rates but
+     * no tiers is taken at its word — flat. */
+    if (out->n_tiers == 0 && !reported_rates) {
+        memcpy(out->tiers, cat->tiers, sizeof(out->tiers));
+        out->n_tiers = cat->n_tiers;
+    }
     if (!out->efforts.known)
         out->efforts = cat->efforts;
 }
@@ -301,6 +319,23 @@ long model_meta_max_output(const struct provider *p, const char *model)
     struct model_info v;
     resolve(p, model, &v);
     return v.max_output;
+}
+
+int model_meta_rates(const struct provider *p, const char *model, struct catalog_entry *out)
+{
+    struct model_info v;
+    resolve(p, model, &v);
+    memset(out, 0, sizeof(*out));
+    out->image_input = -1;
+    out->cost_input = v.cost_input;
+    out->cost_output = v.cost_output;
+    out->cost_cache_read = v.cost_cache_read;
+    out->cost_cache_write = v.cost_cache_write;
+    out->cost_cache_write_1h = v.cost_cache_write_1h;
+    memcpy(out->tiers, v.tiers, sizeof(out->tiers));
+    out->n_tiers = v.n_tiers;
+    out->tiers_declared = 1;
+    return v.cost_input >= 0 && v.cost_output >= 0;
 }
 
 int model_meta_image_input(const struct provider *p, const char *model)
