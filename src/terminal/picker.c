@@ -27,7 +27,8 @@
  * list; the window scrolls to keep the selection in view past this. */
 #define PICKER_MAX_ROWS 12
 
-/* Ceiling on the desc footer's wrapped lines; longer text gets an ellipsis. */
+/* Ceilings on wrapped prose; longer text gets an ellipsis. */
+#define PICKER_TITLE_LINES  3
 #define PICKER_FOOTER_LINES 3
 
 /* ---------------- terminal geometry ---------------- */
@@ -42,6 +43,16 @@ static void term_size(int *cols, int *rows)
         *cols = 80;
         *rows = 24;
     }
+}
+
+/* Picker content follows the configured display width but can never exceed the
+ * physical row its repaint bookkeeping relies on. */
+static int picker_width(int cols)
+{
+    int width = display_width();
+    if (width > cols)
+        width = cols;
+    return width < 1 ? 1 : width;
 }
 
 /* ---------------- raw mode + byte input ---------------- */
@@ -224,10 +235,7 @@ static int desc_lines(const char *desc, int width, int cap)
  * of the app rather than stretching across a wide terminal. */
 static int footer_width(int cols)
 {
-    int dw = display_width();
-    if (dw < cols)
-        cols = dw;
-    int w = cols - PICKER_MARKER_CELLS - 1;
+    int w = picker_width(cols) - PICKER_MARKER_CELLS - 1;
     return w < 8 ? 8 : w;
 }
 
@@ -441,6 +449,26 @@ static void frame_free(struct frame *f)
     buf_free(&f->row);
 }
 
+static void render_title(struct frame *f, const char *title, int lines)
+{
+    const char *p = title;
+    for (int line = 0; line < lines; line++) {
+        buf_append_str(&f->row, ANSI_BOLD);
+        if (line == lines - 1) {
+            int used = 0;
+            append_clip(&f->row, p, f->cols, &used, f->utf8);
+        } else {
+            size_t skip;
+            size_t nb = wrap_line(p, f->cols, &skip);
+            picker_core_append_sanitized(&f->row, p, nb);
+            p += nb + skip;
+        }
+        buf_append_str(&f->row, ANSI_BOLD_OFF);
+        frame_emit(f);
+    }
+    frame_emit(f); /* blank line between the title and the search field */
+}
+
 /* Render the selected item's description in a fixed-height footer so the
  * frame does not move as selection changes. `sel_clipped` reports whether
  * the highlighted row's label was ellipsized, which is what makes repeating
@@ -490,9 +518,12 @@ static void picker_layout(struct picker_state *s, int cols, int rows)
     s->cols = cols;
     s->rows = rows;
 
+    int width = picker_width(cols);
+    s->title_lines = opts->title ? desc_lines(opts->title, width, PICKER_TITLE_LINES) : 0;
+
     /* One height for every row, so the frame doesn't jump as the selection
      * moves: the tallest description any row could show. */
-    int fw = footer_width(cols);
+    int fw = footer_width(width);
     s->footer_lines = 0;
     for (size_t i = 0; i < opts->n; i++) {
         const struct picker_item *it = &opts->items[i];
@@ -503,14 +534,14 @@ static void picker_layout(struct picker_state *s, int cols, int rows)
          * every /resume row carries one — and a row whose label is clipped
          * with no reserved footer has nowhere to show its full text. */
         if (!it->desc && opts->label_gutter && it->label &&
-            picker_core_clip_width(it->label) > picker_core_label_cells(it, cols))
+            picker_core_clip_width(it->label) > picker_core_label_cells(it, width))
             d = desc_lines(it->label, fw, PICKER_FOOTER_LINES);
         if (d > s->footer_lines)
             s->footer_lines = d;
     }
 
     /* Reserve title, search, spacing, and footer rows from the viewport. */
-    int reserved = (opts->title ? 2 : 0) + 2 + 1;
+    int reserved = (s->title_lines ? s->title_lines + 1 : 0) + 2 + 1;
     if (s->footer_lines > 0)
         reserved += s->footer_lines + 1;
     int vp = rows - reserved;
@@ -564,7 +595,7 @@ static void paint(struct picker_state *s)
     }
 
     struct frame f;
-    frame_init(&f, cols, locale_have_utf8());
+    frame_init(&f, picker_width(cols), locale_have_utf8());
 
     /* The whole frame is one fwrite already; wrap it in synchronized output
      * (DEC 2026) too. Redraw before erasing stale tails so terminals or tmux
@@ -583,13 +614,8 @@ static void paint(struct picker_state *s)
     if (s->painted)
         buf_append(&f.out, "\r", 1);
 
-    if (s->opts->title) {
-        buf_append_str(&f.row, ANSI_BOLD);
-        picker_core_append_sanitized(&f.row, s->opts->title, strlen(s->opts->title));
-        buf_append_str(&f.row, ANSI_BOLD_OFF);
-        frame_emit(&f);
-        frame_emit(&f); /* blank line between the title and the search field */
-    }
+    if (s->title_lines)
+        render_title(&f, s->opts->title, s->title_lines);
 
     render_search(&f.row, s, f.cols, f.utf8);
     frame_emit(&f);

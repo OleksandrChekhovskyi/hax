@@ -449,7 +449,7 @@ static enum pick_status choose_effort(struct agent_state *st, struct provider *p
 
     struct picker_item *items = xcalloc((n + 1), sizeof(*items));
     items[0].label = "default";
-    items[0].detail = "let the provider choose";
+    items[0].desc = "Let the provider choose the reasoning effort";
     items[0].dim = 0;
     items[0].current = 0;
     size_t initial = 0;
@@ -1053,7 +1053,7 @@ void select_restore_session(struct agent_state *st, const char *provider, const 
 
 static int setting_is_bool(const struct config_setting *s)
 {
-    return s->choices && strcmp(s->choices, CONFIG_CHOICES_BOOL) == 0;
+    return s->kind == CFG_STRING && s->choices && strcmp(s->choices, CONFIG_CHOICES_BOOL) == 0;
 }
 
 /* Tri-state boolean: on/off plus "auto", where auto (and unset) defers to the
@@ -1061,7 +1061,7 @@ static int setting_is_bool(const struct config_setting *s)
  * /config can't compute it and shows "auto" rather than a concrete on/off. */
 static int setting_is_tristate(const struct config_setting *s)
 {
-    return s->choices && strcmp(s->choices, CONFIG_CHOICES_TRISTATE) == 0;
+    return s->kind == CFG_STRING && s->choices && strcmp(s->choices, CONFIG_CHOICES_TRISTATE) == 0;
 }
 
 /* Display-safe effective value: secrets are redacted and booleans normalized.
@@ -1175,36 +1175,65 @@ static size_t split_choices(const char *choices, char ***out)
     return n;
 }
 
+static void setting_preseed(struct agent_state *st, const struct config_setting *s, const char *val)
+{
+    free(st->pending_preseed);
+    st->pending_preseed =
+        (val && *val) ? xasprintf("/config %s %s", s->key, val) : xasprintf("/config %s ", s->key);
+}
+
 /* Pick an enumerated value; "default" clears the override so lower tiers
- * resolve again. */
+ * resolve again. A non-string kind makes the choices additive and offers a
+ * handoff to the regular editor for an exact typed value. */
 static void setting_pick_choice(struct agent_state *st, const struct config_setting *s)
 {
     char **vals = NULL;
     size_t n = split_choices(s->choices, &vals);
+    int mixed = s->kind != CFG_STRING;
+    size_t nitems = n + 1 + (mixed ? 1 : 0);
 
-    struct picker_item *items = xcalloc((n + 1), sizeof(*items));
+    struct picker_item *items = xcalloc(nitems, sizeof(*items));
     items[0].label = "default";
-    items[0].detail = "clear the override — env/config resolves again";
-    items[0].dim = 0;
-    items[0].current = 0;
+    items[0].desc = "Clear the runtime override and use the environment, saved configuration, or "
+                    "built-in default";
     const char *cur = setting_display_value(s);
     size_t initial = 0;
+    int choice_current = 0;
     for (size_t i = 0; i < n; i++) {
         items[i + 1].label = vals[i];
-        items[i + 1].detail = NULL;
-        items[i + 1].dim = 0;
         items[i + 1].current = strcasecmp(vals[i], cur) == 0;
-        if (items[i + 1].current)
+        if (items[i + 1].current) {
             initial = i + 1;
+            choice_current = 1;
+        }
     }
+
+    int typed_current = mixed && !choice_current && config_value_valid(s, cur);
+    char *exact_desc = NULL;
+    if (mixed) {
+        items[n + 1].label = "exact value...";
+        if (s->example) {
+            exact_desc = xasprintf("Enter an exact value such as %s", s->example);
+            items[n + 1].desc = exact_desc;
+        }
+        items[n + 1].current = typed_current;
+        if (typed_current)
+            initial = n + 1;
+    }
+
     char *title = xasprintf("%s — %s", s->key, s->desc);
-    struct picker_opts opts = {.title = title, .items = items, .n = n + 1, .initial = initial};
+    struct picker_opts opts = {.title = title, .items = items, .n = nitems, .initial = initial};
     long sel = picker_run(&opts);
     free(title);
+    free(exact_desc);
     free(items);
 
-    if (sel >= 0)
-        setting_commit(st, s, sel == 0 ? NULL : vals[sel - 1]);
+    if (sel == 0)
+        setting_commit(st, s, NULL);
+    else if (sel > 0 && (size_t)sel <= n)
+        setting_commit(st, s, vals[sel - 1]);
+    else if (mixed && (size_t)sel == n + 1)
+        setting_preseed(st, s, typed_current ? cur : s->example);
     for (size_t i = 0; i < n; i++)
         free(vals[i]);
     free(vals);
@@ -1219,9 +1248,7 @@ static void setting_seed_prompt(struct agent_state *st, const struct config_sett
     const char *v = config_str(s->key);
     if (v && *v && !config_value_valid(s, v))
         v = config_default(s->key);
-    free(st->pending_preseed);
-    st->pending_preseed =
-        (v && *v) ? xasprintf("/config %s %s", s->key, v) : xasprintf("/config %s ", s->key);
+    setting_preseed(st, s, v);
 }
 
 static void config_typed(struct agent_state *st, const char *arg)

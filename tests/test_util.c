@@ -972,43 +972,51 @@ static void test_reflow_long_bash_command_truncated(void)
 
 static void test_display_width_capped(void)
 {
-    /* Default path: display_width clamps the raw term_width to
-     * [20, DISPLAY_WIDTH_CAP]. The override path is exercised in
-     * test_display_width_env_override below. */
     unsetenv("HAX_DISPLAY_WIDTH");
-    int dw = display_width();
-    EXPECT(dw <= DISPLAY_WIDTH_CAP);
-    EXPECT(dw >= 20);
+    int expected = term_width();
+    if (expected > DISPLAY_WIDTH_CAP)
+        expected = DISPLAY_WIDTH_CAP;
+    if (expected < 20)
+        expected = 20;
+    EXPECT(display_width() == expected);
+
+    setenv("HAX_DISPLAY_WIDTH", "auto", 1);
+    EXPECT(display_width() == expected);
+    unsetenv("HAX_DISPLAY_WIDTH");
 }
 
 static void test_display_width_env_override(void)
 {
-    /* HAX_DISPLAY_WIDTH bypasses the soft cap — explicit user choice,
-     * no upper bound. */
+    int terminal = term_width();
+    if (terminal < 20)
+        terminal = 20;
+    setenv("HAX_DISPLAY_WIDTH", "terminal", 1);
+    EXPECT(display_width() == terminal);
+    setenv("HAX_DISPLAY_WIDTH", "TERMINAL", 1);
+    EXPECT(display_width() == terminal);
+
+    /* An exact width bypasses both terminal detection and the soft cap. */
     setenv("HAX_DISPLAY_WIDTH", "120", 1);
     EXPECT(display_width() == 120);
     setenv("HAX_DISPLAY_WIDTH", "60", 1);
     EXPECT(display_width() == 60);
     setenv("HAX_DISPLAY_WIDTH", "500", 1);
     EXPECT(display_width() == 500);
-    /* Below the 20-cell floor. */
+
+    int automatic = term_width();
+    if (automatic > DISPLAY_WIDTH_CAP)
+        automatic = DISPLAY_WIDTH_CAP;
+    if (automatic < 20)
+        automatic = 20;
+    /* Out-of-range, malformed, and overflowing values fall back to auto. */
     setenv("HAX_DISPLAY_WIDTH", "5", 1);
-    EXPECT(display_width() == 20);
-    /* Garbage falls back to the default path. */
+    EXPECT(display_width() == automatic);
     setenv("HAX_DISPLAY_WIDTH", "abc", 1);
-    int dw = display_width();
-    EXPECT(dw <= DISPLAY_WIDTH_CAP);
-    EXPECT(dw >= 20);
-    /* Trailing garbage rejected too. */
+    EXPECT(display_width() == automatic);
     setenv("HAX_DISPLAY_WIDTH", "80x", 1);
-    dw = display_width();
-    EXPECT(dw <= DISPLAY_WIDTH_CAP);
-    /* Numeric overflow must NOT wrap into a bogus negative width
-     * (which markdown would treat as wrap-disabled). */
+    EXPECT(display_width() == automatic);
     setenv("HAX_DISPLAY_WIDTH", "999999999999999999999999999", 1);
-    dw = display_width();
-    EXPECT(dw > 0);
-    EXPECT(dw <= DISPLAY_WIDTH_CAP);
+    EXPECT(display_width() == automatic);
     unsetenv("HAX_DISPLAY_WIDTH");
 }
 

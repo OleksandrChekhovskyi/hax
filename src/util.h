@@ -198,15 +198,12 @@ void gen_uuid_v4(char out[37]);
  *
  * Use term_width() only when you need that *real* edge — cursor
  * positioning, ANSI erase-line, spinner placement, reserving the last
- * column for the wrap engine. For content layout (header reflow, tool
- * previews, markdown wrapping) prefer display_width(), which clamps the
- * result to a sane, readable range. */
+ * column for the wrap engine. For configurable content layout (header reflow,
+ * tool previews, markdown wrapping) prefer display_width(). */
 int term_width(void);
 
-/* Soft cap on content width applied by display_width(). Lines wrapped
- * to the display width stay at a readable length even on ultrawide
- * terminals (web-style "max-width" idiom). Tweak here if it ever
- * needs to grow. */
+/* Soft cap used by display_width=auto. It keeps lines readable on ultrawide
+ * terminals (a web-style max-width); terminal and exact modes bypass it. */
 #define DISPLAY_WIDTH_CAP 100
 
 /* Parse a base-10 integer that fits in int, with overflow protection.
@@ -216,14 +213,10 @@ int term_width(void);
  * with the parsed value in *out; 0 otherwise (caller falls back). */
 int parse_int(const char *s, int *out);
 
-/* Clamped variant of term_width() for content layout — clamps the
- * result to [20, DISPLAY_WIDTH_CAP] cells. Use anywhere width drives
- * word wrapping or text truncation; the unclamped term_width() stays
- * for cursor-edge concerns where the real terminal column matters.
- *
- * HAX_DISPLAY_WIDTH=N overrides both the ioctl and the soft cap, with
- * a 20-cell floor and no upper bound — used by mock_layout.txt and
- * tests to pin a reproducible width regardless of the host terminal. */
+/* Content width for wrapping and truncation. display_width=auto clamps the
+ * terminal to [20, DISPLAY_WIDTH_CAP], terminal removes the upper cap, and an
+ * integer >= 20 fixes the width regardless of terminal size. The latter is
+ * used by mock_layout.txt and tests for reproducible rendering. */
 int display_width(void);
 
 /* Truncate a UTF-8 string to fit in `cap` visual cells, replacing the

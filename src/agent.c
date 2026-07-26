@@ -769,9 +769,9 @@ static void render_resume_hint(struct render_ctx *r, enum agent_resume resume)
 static void replay_user_echo(struct render_ctx *r, const char *text)
 {
     render_open_block(r); /* one blank line above, cursor at column 0 */
-    /* input_display_cols(), not term_width(): match the editor's wrap width
-     * exactly (display_width() clamped to the tty, HAX_DISPLAY_WIDTH-aware)
-     * so a replayed prompt wraps identically to a freshly typed one. */
+    /* input_display_cols(), not term_width(): match the editor's configured
+     * display width clamped to the tty, so a replayed prompt wraps identically
+     * to a freshly typed one. */
     input_render_user_message(text ? text : "", text ? strlen(text) : 0, input_display_cols());
     r->disp.trail = 1;
     r->disp.held = 0;

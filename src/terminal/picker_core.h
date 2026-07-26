@@ -25,8 +25,8 @@
  * row labels align vertically. */
 #define PICKER_MARKER_CELLS 2
 
-/* Ceiling on the rows one painted frame can hold: title and its blank, the
- * search field and its blank, the list window, the footer and its blank.
+/* Ceiling on the rows one painted frame can hold: wrapped title and its blank,
+ * the search field and its blank, the list window, the footer and its blank.
  * Generous — it only bounds the recorded row widths below. */
 #define PICKER_FRAME_ROWS_MAX 32
 
@@ -37,6 +37,7 @@ struct picker_state {
     size_t sel; /* offset into filtered[] of the highlighted row */
     size_t top; /* offset into filtered[] of the first visible row */
     int viewport;
+    int title_lines; /* wrapped title height; recomputed on resize */
     /* Footer height, held constant across selections so the frame doesn't
      * jump; 0 when nothing can appear there. Recomputed on resize. */
     int footer_lines;

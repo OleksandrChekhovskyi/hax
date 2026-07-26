@@ -32,15 +32,23 @@ void agent_display_refresh(struct agent_state *st)
 static const char *g_picks[4];
 static int g_pick_n;
 static int g_pick_i;
+static char g_picked_detail[256];
+static char g_picked_desc[256];
 
 long picker_run(const struct picker_opts *opts)
 {
     if (g_pick_i >= g_pick_n || !g_picks[g_pick_i])
         return -1;
     const char *want = g_picks[g_pick_i++];
-    for (size_t i = 0; i < opts->n; i++)
-        if (opts->items[i].label && strcmp(opts->items[i].label, want) == 0)
-            return (long)i;
+    for (size_t i = 0; i < opts->n; i++) {
+        if (!opts->items[i].label || strcmp(opts->items[i].label, want) != 0)
+            continue;
+        snprintf(g_picked_detail, sizeof(g_picked_detail), "%s",
+                 opts->items[i].detail ? opts->items[i].detail : "");
+        snprintf(g_picked_desc, sizeof(g_picked_desc), "%s",
+                 opts->items[i].desc ? opts->items[i].desc : "");
+        return (long)i;
+    }
     return -1;
 }
 
@@ -50,6 +58,8 @@ static void script_picks(const char *a, const char *b)
     g_picks[1] = b;
     g_pick_n = (a ? 1 : 0) + (b ? 1 : 0);
     g_pick_i = 0;
+    g_picked_detail[0] = '\0';
+    g_picked_desc[0] = '\0';
 }
 
 /* Fresh tiers and no stray env for the keys under test. */
@@ -186,14 +196,29 @@ static void test_show_current(void)
     free(out);
 }
 
-static void test_picker_preseeds_freeform(void)
+static void test_picker_preseeds_mixed_value(void)
 {
     reset();
     struct agent_state *st = fresh_state();
+
+    /* An existing typed value is preserved when handing off from the choice
+     * picker to the editor. */
     config_set_override("display_width", "120");
-    script_picks("display_width", NULL);
+    script_picks("display_width", "exact value...");
     char *out = run(st, NULL);
+    EXPECT_STR_EQ(g_picked_detail, "");
+    EXPECT_STR_EQ(g_picked_desc, "Enter an exact value such as 100");
     EXPECT_STR_EQ(st->pending_preseed, "/config display_width 120");
+    free(st->pending_preseed);
+    st->pending_preseed = NULL;
+    free(out);
+
+    /* A symbolic current value uses the registry's concrete example. */
+    reset();
+    st = fresh_state();
+    script_picks("display_width", "exact value...");
+    out = run(st, NULL);
+    EXPECT_STR_EQ(st->pending_preseed, "/config display_width 100");
     free(st->pending_preseed);
     st->pending_preseed = NULL;
     free(out);
@@ -209,6 +234,24 @@ static void test_picker_commits_choice(void)
     EXPECT_STR_EQ(config_source("markdown"), "run");
     EXPECT(config_bool("markdown") == 0);
     free(out);
+
+    reset();
+    st = fresh_state();
+    config_set_override("markdown", "off");
+    script_picks("markdown", "default");
+    out = run(st, NULL);
+    EXPECT_STR_EQ(g_picked_detail, "");
+    EXPECT_STR_EQ(g_picked_desc, "Clear the runtime override and use the environment, saved "
+                                 "configuration, or built-in default");
+    EXPECT_STR_EQ(config_source("markdown"), "default");
+    free(out);
+
+    reset();
+    st = fresh_state();
+    script_picks("display_width", "terminal");
+    out = run(st, NULL);
+    EXPECT_STR_EQ(config_str("display_width"), "terminal");
+    free(out);
 }
 
 int main(void)
@@ -220,7 +263,7 @@ int main(void)
     test_canonicalization();
     test_tristate_alias_normalizes();
     test_show_current();
-    test_picker_preseeds_freeform();
+    test_picker_preseeds_mixed_value();
     test_picker_commits_choice();
     T_REPORT();
 }

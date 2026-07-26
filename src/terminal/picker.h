@@ -39,11 +39,16 @@
  */
 
 struct picker_item {
-    const char *label;  /* primary text; what the filter matches against */
-    const char *detail; /* optional dim text shown after the label; may be NULL */
+    /* Concise identity or action: the filter target and the part of a row that
+     * should remain recognizable under clipping. */
+    const char *label;
+    /* Optional terse status or metadata shown dim on the same row. It may be
+     * clipped, so explanatory prose and anything that must remain readable
+     * belongs in desc instead. */
+    const char *detail;
     /* When set, the whole row is rendered dim and `detail` gains a dash
      * separator — an advisory "exists but probably won't work right now"
-     * (e.g. an unconfigured provider, with `detail` carrying the reason).
+     * (e.g. an unconfigured provider, with `detail` carrying a short reason).
      * Purely visual: the row still matches the filter and is selectable,
      * so the caller decides what accepting it means (typically: try
      * anyway and report the exact failure). */
@@ -54,15 +59,16 @@ struct picker_item {
      * than smuggling "current" through `detail`, where it would render
      * dim and read like a failure reason. */
     int current;
-    /* Optional description, wrapped below the list when the row is selected.
+    /* Optional explanatory text, wrapped below the list when the row is
+     * selected. Use this rather than detail when clipping would lose meaning.
      * A newline is a hard break, so a desc can put structured fields on one
-     * line and prose on the next rather than running them together; the
-     * footer's height is capped either way, and the overflow is elided. */
+     * line and prose on the next; the footer's height is capped either way,
+     * and overflow is elided. */
     const char *desc;
 };
 
 struct picker_opts {
-    const char *title; /* bold header line; may be NULL */
+    const char *title; /* optional bold header, word-wrapped and capped at three lines */
     const struct picker_item *items;
     size_t n;
     const char *empty_note; /* dim note shown (and -1 returned) when n == 0; may be NULL */

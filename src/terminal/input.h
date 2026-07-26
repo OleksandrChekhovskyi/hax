@@ -167,10 +167,10 @@ void input_history_open_default(struct input *in, int persist);
  * not erase any prior content — the caller positions the cursor. */
 void input_render_user_message(const char *text, size_t len, int term_cols);
 
-/* The column budget the editor lays user input out within: display_width()
- * (honoring HAX_DISPLAY_WIDTH) clamped to the real tty width. Exposed so a
- * caller passing a width to input_render_user_message (e.g. history replay)
- * can match the editor's wrapping exactly. */
+/* The column budget the editor lays user input out within: the configured
+ * display_width() clamped to the real tty width. Exposed so a caller passing a
+ * width to input_render_user_message (e.g. history replay) can match the
+ * editor's wrapping exactly. */
 int input_display_cols(void);
 
 #endif /* HAX_INPUT_H */

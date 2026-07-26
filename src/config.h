@@ -353,8 +353,9 @@ size_t config_preset_names(char ***out);
 
 /* ---- introspection ---- */
 
-/* Grammar for settings without enumerated choices. CFG_STRING accepts any
- * non-NULL value; numeric kinds mirror the typed getters. */
+/* Base grammar for a setting. CFG_STRING accepts any non-NULL value when
+ * choices is absent; numeric kinds mirror the typed getters and may be combined
+ * with symbolic choices. */
 enum config_kind {
     CFG_STRING = 0,
     CFG_INT,      /* whole number >= 0 (parse_int / config_int) */
@@ -362,12 +363,12 @@ enum config_kind {
     CFG_DURATION, /* parse_duration_ms grammar: 500, 2s (>= 0; 0 disables) */
 };
 
-/* Two choice strings carry special grammar in config_value_valid and in the
- * /config display, so the registry, validator, and display reference them by
- * name rather than repeating the literal. CONFIG_CHOICES_BOOL accepts the full
- * boolean grammar (on/off/1/0/true/false/…); CONFIG_CHOICES_TRISTATE adds an
- * "auto" literal on top, for a boolean whose default the consumer resolves
- * itself (a provider preset), so unset/auto means "let it decide". */
+/* For CFG_STRING, two choice lists carry special grammar in config_value_valid
+ * and the /config display, so the registry, validator, and display reference
+ * them by name. CONFIG_CHOICES_BOOL accepts the full boolean grammar
+ * (on/off/1/0/true/false/…); CONFIG_CHOICES_TRISTATE adds an "auto" literal for
+ * a boolean whose default the consumer resolves itself, so unset/auto means
+ * "let it decide". */
 #define CONFIG_CHOICES_BOOL     "on|off"
 #define CONFIG_CHOICES_TRISTATE "auto|on|off"
 
@@ -377,8 +378,10 @@ struct config_setting {
     const char *env;
     const char *def;
     const char *desc;
-    const char *choices;     /* '|'-separated enum; see CONFIG_CHOICES_* above */
-    enum config_kind kind;   /* grammar when choices is NULL */
+    /* '|'-separated literals; exhaustive for CFG_STRING, additive otherwise */
+    const char *choices;
+    const char *example; /* typed-value example for a mixed-choice prompt */
+    enum config_kind kind;
     long min;                /* lower bound in int/bytes/ms; 0 = none */
     long max;                /* upper bound in int/bytes/ms; 0 = none */
     unsigned runtime : 1;    /* editable through /config */
@@ -399,11 +402,11 @@ const struct config_setting *config_setting_find(const char *key);
 const char *config_source(const char *key);
 
 /* Validate `val` against case-insensitive choices (with the full boolean
- * grammar for "on|off"), or against the setting's kind and bounds. */
+ * grammar for "on|off") and, for a non-string kind, its grammar and bounds. */
 int config_value_valid(const struct config_setting *s, const char *val);
 
-/* Format choices or the kind grammar and bounds for a rejection message.
- * Empty for an unrestricted CFG_STRING. */
+/* Format the accepted choices, kind grammar, bounds, and optional example for
+ * a rejection message. Empty for an unrestricted CFG_STRING. */
 void config_value_hint(const struct config_setting *s, char *buf, size_t n);
 
 /* Return the heap-owned canonical enum spelling matching `val`, or NULL for

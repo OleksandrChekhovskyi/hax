@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -224,21 +225,19 @@ int parse_int(const char *s, int *out)
 
 int display_width(void)
 {
-    /* HAX_DISPLAY_WIDTH overrides both term_width() and the soft cap so
-     * fixtures (mock_layout.txt) and tests can pin a known width without
-     * resizing the host terminal. No upper bound on the override —
-     * explicit user choice. */
+    const char *mode = config_str("display_width");
     int v = config_int("display_width");
-    if (v > 0)
-        return v < 20 ? 20 : v;
-    /* term_width() is the raw physical width; for content layout clamp
-     * it to [20, DISPLAY_WIDTH_CAP] — the floor keeps wrap/truncate
-     * paths viable on a tiny terminal, the cap keeps lines readable on
-     * an ultrawide one. The unclamped edge stays in term_width() for
-     * cursor-positioning callers that need the literal last column. */
+    if (v >= 20)
+        return v;
+
+    /* term_width() is the raw physical width. "terminal" follows it without
+     * the readability cap; "auto" (and invalid values) clamps it to the sane
+     * content range. Both keep the floor needed by wrap/truncate paths. */
     int w = term_width();
-    if (w > DISPLAY_WIDTH_CAP)
-        w = DISPLAY_WIDTH_CAP;
+    if (!mode || strcasecmp(mode, "terminal") != 0) {
+        if (w > DISPLAY_WIDTH_CAP)
+            w = DISPLAY_WIDTH_CAP;
+    }
     return w < 20 ? 20 : w;
 }
 

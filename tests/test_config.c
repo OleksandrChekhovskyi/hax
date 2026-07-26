@@ -50,8 +50,10 @@ static void test_scalar_normalization(void)
     clear_env();
     /* Numbers and bools read as strings, so the typed getters work whether
      * the file wrote 64000 or "64000", true or "1". */
-    EXPECT(config_load("{\"context_limit\": 64000, \"show_reasoning\": true}") == 0);
+    EXPECT(config_load("{\"context_limit\": 64000, \"display_width\": 120,"
+                       " \"show_reasoning\": true}") == 0);
     EXPECT(config_size("context_limit") == 64000);
+    EXPECT(config_int("display_width") == 120);
     EXPECT(config_bool("show_reasoning") == 1);
     EXPECT(config_load("{\"show_reasoning\": false}") == 0);
     EXPECT(config_bool("show_reasoning") == 0);
@@ -579,9 +581,12 @@ static void test_registry_introspection(void)
             EXPECT(*s[i].choices && s[i].choices[strlen(s[i].choices) - 1] != '|');
             EXPECT(!strstr(s[i].choices, "||"));
         }
-        /* Numeric kinds type the free-form path. */
-        if (s[i].kind != CFG_STRING)
-            EXPECT(!s[i].choices);
+        /* Examples seed the typed branch of a mixed-value picker. */
+        if (s[i].example) {
+            EXPECT(s[i].kind != CFG_STRING);
+            EXPECT(s[i].choices);
+            EXPECT(config_value_valid(&s[i], s[i].example));
+        }
         /* Bounds are numeric and well-formed. They serve validation too, so a
          * setting may declare a range without a registry default when its
          * consumer supplies its own fallback (thinking_budget → max_tokens-1). */
@@ -698,6 +703,40 @@ static void test_value_valid(void)
     EXPECT(!config_value_valid(i, ""));
     config_value_hint(i, hint, sizeof(hint));
     EXPECT_STR_EQ(hint, "a whole number from 1 to 100");
+
+    /* A typed setting with choices accepts either branch and includes both in
+     * its hint. The example is presentation metadata, not another choice. */
+    const struct config_setting *dw = config_setting_find("display_width");
+    EXPECT(dw && dw->kind == CFG_INT && dw->min == 20);
+    EXPECT_STR_EQ(dw->choices, "auto|terminal");
+    EXPECT_STR_EQ(dw->example, "100");
+    EXPECT(config_value_valid(dw, "auto"));
+    EXPECT(config_value_valid(dw, "TERMINAL"));
+    EXPECT(config_value_valid(dw, "20"));
+    EXPECT(config_value_valid(dw, "500"));
+    EXPECT(!config_value_valid(dw, "19"));
+    EXPECT(!config_value_valid(dw, "wide"));
+    config_value_hint(dw, hint, sizeof(hint));
+    EXPECT_STR_EQ(hint, "auto|terminal, or a whole number of at least 20; e.g. 100");
+    char *dw_canon = config_value_canonical(dw, "TERMINAL");
+    EXPECT_STR_EQ(dw_canon, "terminal");
+    free(dw_canon);
+    EXPECT(config_value_canonical(dw, "100") == NULL);
+
+    /* Boolean aliases remain special to boolean settings. If those literal
+     * choices are combined with an integer, numeric values obey its bounds. */
+    const struct config_setting mixed_bool = {
+        .choices = CONFIG_CHOICES_BOOL,
+        .kind = CFG_INT,
+        .min = 20,
+    };
+    EXPECT(config_value_valid(&mixed_bool, "on"));
+    EXPECT(config_value_valid(&mixed_bool, "20"));
+    EXPECT(!config_value_valid(&mixed_bool, "1"));
+    EXPECT(!config_value_valid(&mixed_bool, "true"));
+    char *mixed_canon = config_value_canonical(&mixed_bool, "ON");
+    EXPECT_STR_EQ(mixed_canon, "on");
+    free(mixed_canon);
 
     /* An unbounded int keeps the plain hint. */
     const struct config_setting *mt = config_setting_find("max_turns");

@@ -54,9 +54,9 @@ static const struct config_setting REGISTRY[] = {
     {.key = "context_limit", .env = "HAX_CONTEXT_LIMIT",
      .desc = "Manual context-window size for the % display; overrides auto-detect",
      .kind = CFG_SIZE, .runtime = 1},
-    {.key = "display_width", .env = "HAX_DISPLAY_WIDTH",
-     .desc = "Force content width in columns (default: terminal width, clamped)",
-     .kind = CFG_INT, .runtime = 1},
+    {.key = "display_width", .env = "HAX_DISPLAY_WIDTH", .def = "auto",
+     .desc = "Content width: auto caps at 100, terminal removes the cap, or set columns",
+     .choices = "auto|terminal", .example = "100", .kind = CFG_INT, .min = 20, .runtime = 1},
     {.key = "notify", .env = "HAX_NOTIFY", .def = "auto",
      .desc = "Desktop-notification style: auto, bel, osc9, off (auto detects from the terminal)",
      .choices = "auto|bel|osc9|off", .runtime = 1},
@@ -637,35 +637,36 @@ int config_bool_or(const char *key, int def)
     return v < 0 ? !!def : v;
 }
 
-int config_value_valid(const struct config_setting *s, const char *val)
+static int kind_value_valid(const struct config_setting *s, const char *val)
 {
-    if (!s || !val)
-        return 0;
-    if (!s->choices) {
-        switch (s->kind) {
-        case CFG_INT: {
-            int v;
-            return parse_int(val, &v) && v >= 0 && in_bounds(s, v);
-        }
-        case CFG_SIZE: {
-            long v = parse_size(val);
-            return v > 0 && in_bounds(s, v);
-        }
-        case CFG_DURATION: {
-            long v = parse_duration_ms(val);
-            return v >= 0 && in_bounds(s, v);
-        }
-        case CFG_STRING:
-            return 1;
-        }
+    switch (s->kind) {
+    case CFG_INT: {
+        int v;
+        return parse_int(val, &v) && v >= 0 && in_bounds(s, v);
+    }
+    case CFG_SIZE: {
+        long v = parse_size(val);
+        return v > 0 && in_bounds(s, v);
+    }
+    case CFG_DURATION: {
+        long v = parse_duration_ms(val);
+        return v >= 0 && in_bounds(s, v);
+    }
+    case CFG_STRING:
         return 1;
     }
-    /* Boolean choices accept the full config_bool grammar. Tri-state adds an
-     * "auto" literal on top (unset/auto defers to the consumer's own default),
-     * so on/off keep the same lenient spelling whether or not auto is present. */
-    if (strcmp(s->choices, CONFIG_CHOICES_BOOL) == 0)
+    return 0;
+}
+
+static int choice_value_valid(const struct config_setting *s, const char *val)
+{
+    /* Boolean string settings accept the full config_bool grammar. Tri-state
+     * adds an "auto" literal on top, so on/off keep the same lenient spelling.
+     * For a mixed numeric setting these strings are ordinary symbolic choices;
+     * aliases like "1" must still pass the numeric kind and its bounds. */
+    if (s->kind == CFG_STRING && strcmp(s->choices, CONFIG_CHOICES_BOOL) == 0)
         return parse_bool(val) >= 0;
-    if (strcmp(s->choices, CONFIG_CHOICES_TRISTATE) == 0)
+    if (s->kind == CFG_STRING && strcmp(s->choices, CONFIG_CHOICES_TRISTATE) == 0)
         return strcasecmp(val, "auto") == 0 || parse_bool(val) >= 0;
     const char *p = s->choices;
     size_t vlen = strlen(val);
@@ -680,17 +681,19 @@ int config_value_valid(const struct config_setting *s, const char *val)
     }
 }
 
-void config_value_hint(const struct config_setting *s, char *buf, size_t n)
+int config_value_valid(const struct config_setting *s, const char *val)
 {
-    if (n == 0)
-        return;
-    buf[0] = '\0';
-    if (!s)
-        return;
-    if (s->choices) {
-        snprintf(buf, n, "%s", s->choices);
-        return;
-    }
+    if (!s || !val)
+        return 0;
+    if (s->choices && choice_value_valid(s, val))
+        return 1;
+    if (s->choices && s->kind == CFG_STRING)
+        return 0;
+    return kind_value_valid(s, val);
+}
+
+static void kind_value_hint(const struct config_setting *s, char *buf, size_t n)
+{
     switch (s->kind) {
     case CFG_INT:
         if (s->min && s->max)
@@ -709,15 +712,42 @@ void config_value_hint(const struct config_setting *s, char *buf, size_t n)
         snprintf(buf, n, "a duration like 2s or 500ms");
         break;
     case CFG_STRING:
+        buf[0] = '\0';
         break;
     }
+}
+
+void config_value_hint(const struct config_setting *s, char *buf, size_t n)
+{
+    if (n == 0)
+        return;
+    buf[0] = '\0';
+    if (!s)
+        return;
+    if (s->kind == CFG_STRING) {
+        if (s->choices)
+            snprintf(buf, n, "%s", s->choices);
+        return;
+    }
+
+    char kind[64];
+    kind_value_hint(s, kind, sizeof(kind));
+    if (s->choices && s->example)
+        snprintf(buf, n, "%s, or %s; e.g. %s", s->choices, kind, s->example);
+    else if (s->choices)
+        snprintf(buf, n, "%s, or %s", s->choices, kind);
+    else if (s->example)
+        snprintf(buf, n, "%s; e.g. %s", kind, s->example);
+    else
+        snprintf(buf, n, "%s", kind);
 }
 
 char *config_value_canonical(const struct config_setting *s, const char *val)
 {
     /* Only strict enums need this; booleans and free-form values are parsed
      * directly at their point of use. */
-    if (!s || !val || !s->choices || strcmp(s->choices, CONFIG_CHOICES_BOOL) == 0)
+    if (!s || !val || !s->choices ||
+        (s->kind == CFG_STRING && strcmp(s->choices, CONFIG_CHOICES_BOOL) == 0))
         return NULL;
     const char *p = s->choices;
     size_t vlen = strlen(val);

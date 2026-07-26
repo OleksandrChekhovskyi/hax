@@ -66,11 +66,10 @@ struct input {
 
     /* per-call render cache */
     const char *prompt;
-    /* Wrap budget for one row of the edit area, sampled from
-     * display_width() — capped to DISPLAY_WIDTH_CAP and honoring
-     * HAX_DISPLAY_WIDTH, not the raw terminal width. Refreshed at
-     * input_readline entry, on resize, and after $EDITOR / pager
-     * handoffs that might land us in a different geometry. */
+    /* Wrap budget for one row of the edit area, sampled from the configured
+     * display_width(), not necessarily the raw terminal width. Refreshed at
+     * input_readline entry, on resize, and after $EDITOR / pager handoffs that
+     * might land us in a different geometry. */
     int term_cols;
     /* Viewport height in rows (ws_row), refreshed alongside term_cols.
      * 0 = unknown; row-window clipping is then disabled. */
