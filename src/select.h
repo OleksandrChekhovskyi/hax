@@ -43,8 +43,13 @@ void select_effort(struct agent_state *st);
  * prompt. The provider is always constructed fresh under the applied
  * overrides (construction runs value-dependent behavior like llama.cpp's
  * model reconciliation) and swapped in; a validation or construction
- * failure rolls the whole application back. */
-void select_preset(struct agent_state *st, const char *name);
+ * failure rolls the whole application back.
+ *
+ * `announce` = 0 suppresses the post-apply banner / "switched to …" line for
+ * callers that print their own (`/new <preset>`). Returns 0 when a preset was
+ * applied, -1 when nothing changed — a failure (diagnosed on screen) or a
+ * cancelled picker. */
+int select_preset(struct agent_state *st, const char *name, int announce);
 
 /* Switch to the selection a resumed conversation recorded — the mid-session
  * twin of the restore `--resume` does at startup, so /resume continues a

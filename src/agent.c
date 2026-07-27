@@ -567,7 +567,7 @@ void agent_print_banner(const struct provider *p, const struct agent_session *s)
     free(stance);
 }
 
-int agent_apply_settings(struct agent_state *st, struct provider *p)
+int agent_apply_settings(struct agent_state *st, struct provider *p, int announce)
 {
     struct agent_session *s = st->sess;
     struct provider *old = (struct provider *)st->provider;
@@ -631,6 +631,12 @@ int agent_apply_settings(struct agent_state *st, struct provider *p)
      * (Per-item reasoning blobs carry their own provider+model stamp, so a
      * mid-session switch stays correct independent of this header.) */
     session_log_set_meta(st->slog, provider_log_name(p), s->model, s->effort, config_str("preset"));
+
+    /* Silent apply: the caller says what changed. `/new <preset>` applies
+     * before it resets, so the only thing on screen is the fresh
+     * conversation's banner — already carrying the stance this just set. */
+    if (!announce)
+        return 0;
 
     /* On an empty conversation the startup banner is usually still on
      * screen just above, boldly asserting the old settings; a dim line

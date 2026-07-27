@@ -95,7 +95,7 @@ Type `/help` in the REPL for the live command list and keyboard shortcuts.
 
 | Command | Meaning |
 | --- | --- |
-| `/new` | Start a fresh conversation. |
+| `/new [preset]` | Start a fresh conversation, optionally switching to a config-defined preset in the same step (the `/new` + `/preset` pair as one command, with one banner). A preset that doesn't apply leaves the conversation untouched. |
 | `/clear` | Alias for `/new`. |
 | `/resume` | Pick and resume a past session for this directory. |
 | `/undo [n]` | Revert the conversation to before an earlier prompt: without an argument, pick one from a list; `n` counts turns back from the end (`/undo 1` drops the most recent). Destructive and not undoable — history and the session file are truncated in place, with no redo; the dropped prompt is left in editor recall (Up-arrow) to re-edit. |

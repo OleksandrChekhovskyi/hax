@@ -139,10 +139,17 @@ void select_effort(struct agent_state *st)
 {
     (void)st;
 }
-void select_preset(struct agent_state *st, const char *name)
+/* Scripts the select_preset stub: the result an apply reports, plus what the
+ * last call was asked for — /new routes its argument through here. */
+static int stub_preset_rc = 0;
+static const char *stub_preset_name = NULL;
+static int stub_preset_announce = -1;
+int select_preset(struct agent_state *st, const char *name, int announce)
 {
     (void)st;
-    (void)name;
+    stub_preset_name = name;
+    stub_preset_announce = announce;
+    return stub_preset_rc;
 }
 void select_config(struct agent_state *st, const char *arg)
 {
@@ -313,25 +320,6 @@ static void test_dispatch_bad_usage(void)
     free(out);
 }
 
-static void test_dispatch_bad_usage_uses_alias_name(void)
-{
-    /* When BAD_USAGE fires on an alias invocation, the diagnostic
-     * must echo what the user typed (`/clear`), not the canonical
-     * name it resolves to (`/new`). Otherwise the message reads as
-     * "I rejected /clear but I'm telling you about /new", which is
-     * confusing. */
-    struct render_ctx r = {0};
-    r.disp.trail = 1;
-    struct agent_state st = {.r = &r};
-    struct slash_ctx ctx = {.state = &st};
-    struct dispatch_call c = {.line = "/clear now", .ctx = &ctx};
-    char *out = capture_stdout(do_dispatch, &c);
-    EXPECT(c.result == SLASH_BAD_USAGE);
-    EXPECT(strstr(out, "/clear") != NULL);
-    EXPECT(strstr(out, "/new") == NULL);
-    free(out);
-}
-
 /* ---------- /help ---------- */
 
 static void test_help_lists_commands_and_shortcuts(void)
@@ -482,6 +470,7 @@ static void test_new_clears_session(void)
     EXPECT(s.n_items > 0);
     size_t cap_before = s.cap_items;
 
+    stub_preset_name = NULL;
     struct provider p = {.name = "test", .default_model = NULL};
     struct render_ctx r = {0};
     r.disp.trail = 1;
@@ -492,6 +481,8 @@ static void test_new_clears_session(void)
     EXPECT(c.result == SLASH_HANDLED);
     free(out);
 
+    /* Bare /new keeps the current stance — no preset call at all. */
+    EXPECT(stub_preset_name == NULL);
     EXPECT(s.n_items == 0);
     /* Capacity preserved — reset is for "fresh conversation", not
      * "free everything"; we shouldn't pay realloc overhead just to
@@ -524,26 +515,80 @@ static void test_clear_alias_runs_new(void)
     agent_session_free(&s);
 }
 
-static void test_new_rejects_extra_args(void)
+static void test_new_with_preset_switches_then_clears(void)
 {
-    /* "/new now" must NOT clear — extra args fall through to BAD_USAGE
-     * before the handler runs. Otherwise a typo could quietly nuke a
-     * conversation. */
+    /* "/new work" applies the named preset and then resets — one banner,
+     * no /new + /preset dance. The apply must be silent (announce = 0):
+     * the fresh conversation's banner already carries the new stance. */
     struct agent_session s = {0};
     seed_session(&s);
-    size_t n_before = s.n_items;
+    EXPECT(s.n_items > 0);
 
+    stub_preset_rc = 0;
+    stub_preset_name = NULL;
+    stub_preset_announce = -1;
     struct provider p = {.name = "test", .default_model = NULL};
     struct render_ctx r = {0};
     r.disp.trail = 1;
     struct agent_state st = {.sess = &s, .provider = &p, .r = &r};
     struct slash_ctx ctx = {.state = &st};
-    struct dispatch_call c = {.line = "/new now", .ctx = &ctx};
+    struct dispatch_call c = {.line = "/new work", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
-    EXPECT(c.result == SLASH_BAD_USAGE);
+    EXPECT(c.result == SLASH_HANDLED);
+    free(out);
+
+    EXPECT(stub_preset_name != NULL && strcmp(stub_preset_name, "work") == 0);
+    EXPECT(stub_preset_announce == 0);
+    EXPECT(s.n_items == 0);
+    agent_session_free(&s);
+}
+
+static void test_new_keeps_conversation_when_preset_fails(void)
+{
+    /* A preset that doesn't apply — a typo, or a provider that won't
+     * construct — must NOT clear. The switch runs before the reset exactly
+     * so a mistyped "/new nwo" can't quietly nuke a conversation. */
+    struct agent_session s = {0};
+    seed_session(&s);
+    size_t n_before = s.n_items;
+
+    stub_preset_rc = -1;
+    struct provider p = {.name = "test", .default_model = NULL};
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.sess = &s, .provider = &p, .r = &r};
+    struct slash_ctx ctx = {.state = &st};
+    struct dispatch_call c = {.line = "/new nwo", .ctx = &ctx};
+    char *out = capture_stdout(do_dispatch, &c);
+    EXPECT(c.result == SLASH_HANDLED);
     free(out);
 
     EXPECT(s.n_items == n_before);
+    stub_preset_rc = 0;
+    agent_session_free(&s);
+}
+
+static void test_clear_alias_takes_preset_too(void)
+{
+    /* The alias resolves to the same entry, so it accepts the same argument
+     * rather than reporting "/clear takes no arguments". */
+    struct agent_session s = {0};
+    seed_session(&s);
+
+    stub_preset_rc = 0;
+    stub_preset_name = NULL;
+    struct provider p = {.name = "test", .default_model = NULL};
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.sess = &s, .provider = &p, .r = &r};
+    struct slash_ctx ctx = {.state = &st};
+    struct dispatch_call c = {.line = "/clear work", .ctx = &ctx};
+    char *out = capture_stdout(do_dispatch, &c);
+    EXPECT(c.result == SLASH_HANDLED);
+    free(out);
+
+    EXPECT(stub_preset_name != NULL && strcmp(stub_preset_name, "work") == 0);
+    EXPECT(s.n_items == 0);
     agent_session_free(&s);
 }
 
@@ -699,14 +744,15 @@ int main(void)
     test_dispatch_control_bytes_fall_through();
     test_dispatch_bare_slash_falls_through();
     test_dispatch_bad_usage();
-    test_dispatch_bad_usage_uses_alias_name();
     test_help_lists_commands_and_shortcuts();
     test_session_prints_totals();
     test_session_hides_unreported_rows();
     test_session_marks_estimated_spend();
     test_new_clears_session();
     test_clear_alias_runs_new();
-    test_new_rejects_extra_args();
+    test_new_with_preset_switches_then_clears();
+    test_new_keeps_conversation_when_preset_fails();
+    test_clear_alias_takes_preset_too();
     test_dispatch_trims_trailing_whitespace();
     test_resume_cancelled_picker_keeps_trail();
     test_resume_selected_session_keeps_trail();

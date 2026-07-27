@@ -172,15 +172,19 @@ void agent_undo(struct agent_state *st, size_t turn);
 void agent_fork(struct agent_state *st, size_t turn);
 
 /* Re-resolve model + reasoning effort against `p`, rebuild the system prompt,
- * and confirm the change on screen: a dim one-line "switched to …" marker
- * mid-conversation, or a fresh banner while the conversation is empty. When
- * p differs from the live provider, this is an atomic provider replacement:
- * validate/reconfigure first, then transfer ownership into st and destroy the
- * old provider. A provider or model change refreshes model-specific context;
- * a same-provider effort change does not. Returns 0 on success. On failure,
- * the session and live provider stay intact; when p is a prospective
- * replacement, the caller retains ownership of it. */
-int agent_apply_settings(struct agent_state *st, struct provider *p);
+ * and — when `announce` is set — confirm the change on screen: a dim one-line
+ * "switched to …" marker mid-conversation, or a fresh banner while the
+ * conversation is empty. `announce = 0` applies the same settings silently,
+ * for callers that print their own summary afterwards (`/new <preset>`, whose
+ * banner would otherwise be the second one on screen); it leaves disp
+ * untouched for that caller to draw under. When p differs from the live
+ * provider, this is an atomic provider replacement: validate/reconfigure
+ * first, then transfer ownership into st and destroy the old provider. A
+ * provider or model change refreshes model-specific context; a same-provider
+ * effort change does not. Returns 0 on success. On failure, the session and
+ * live provider stay intact; when p is a prospective replacement, the caller
+ * retains ownership of it. */
+int agent_apply_settings(struct agent_state *st, struct provider *p, int announce);
 
 /* Re-apply runtime display settings. Only safe between streams because this
  * may discard and rebuild the Markdown renderer. */

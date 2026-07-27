@@ -15,10 +15,11 @@
 /* select.c reaches into agent.c for these; stub them so the test links
  * select.c without pulling the whole REPL graph (input, spinner, disp
  * pipeline). Neither has an observable effect on the /config paths here. */
-int agent_apply_settings(struct agent_state *st, struct provider *p)
+int agent_apply_settings(struct agent_state *st, struct provider *p, int announce)
 {
     (void)st;
     (void)p;
+    (void)announce;
     return 0;
 }
 void agent_display_refresh(struct agent_state *st)

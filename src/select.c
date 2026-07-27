@@ -568,7 +568,7 @@ void select_effort(struct agent_state *st)
     commit_selection(pid, eff_model, e ? e : CONFIG_VALUE_DEFAULT);
     free(pid);
     free(e);
-    agent_apply_settings(st, p);
+    agent_apply_settings(st, p, 1);
 }
 
 void select_model(struct agent_state *st)
@@ -638,7 +638,7 @@ void select_model(struct agent_state *st)
     free(pid);
     free(m);
     free(e);
-    agent_apply_settings(st, p);
+    agent_apply_settings(st, p, 1);
 }
 
 static int cmp_factory_name(const void *a, const void *b)
@@ -792,7 +792,7 @@ void select_provider(struct agent_state *st)
      * not keep). Then swap and apply. */
     commit_selection(f->name, m ? m : CONFIG_VALUE_DEFAULT, e ? e : CONFIG_VALUE_DEFAULT);
 
-    if (agent_apply_settings(st, newp) != 0) {
+    if (agent_apply_settings(st, newp, 1) != 0) {
         newp->destroy(newp); /* ownership transfers only on success */
         config_snapshot_restore(ov);
         free(cur);
@@ -807,11 +807,12 @@ void select_provider(struct agent_state *st)
     free(e);
 }
 
-void select_preset(struct agent_state *st, const char *name)
+int select_preset(struct agent_state *st, const char *name, int announce)
 {
     char **names = NULL;
     size_t n = config_preset_names(&names);
     char *picked = NULL;
+    int rc = -1;
 
     if (!name) {
         if (n == 0) {
@@ -946,19 +947,21 @@ void select_preset(struct agent_state *st, const char *name)
      * theoretical, but preserve the old provider and override tier if it
      * still occurs. (agent_apply_settings re-resolves the display, so the
      * stance's tint reaches the banner it prints.) */
-    if (agent_apply_settings(st, newp) != 0) {
+    if (agent_apply_settings(st, newp, announce) != 0) {
         newp->destroy(newp);
         config_snapshot_restore(ov);
         st->r->disp.trail = 1;
         goto out;
     }
     config_snapshot_free(ov); /* committing — keep the applied overrides */
+    rc = 0;
 
 out:
     free(picked);
     for (size_t i = 0; i < n; i++)
         free(names[i]);
     free(names);
+    return rc;
 }
 
 /* ---------- restoring a resumed conversation's selection ---------- */
@@ -1038,7 +1041,7 @@ void select_restore_session(struct agent_state *st, const char *provider, const 
         free(cur);
         return;
     }
-    if (agent_apply_settings(st, newp) != 0) {
+    if (agent_apply_settings(st, newp, 1) != 0) {
         newp->destroy(newp);
         config_snapshot_restore(ov);
         st->r->disp.trail = 1;

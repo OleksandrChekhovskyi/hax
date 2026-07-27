@@ -124,7 +124,7 @@ static void fixture_free(struct fixture *f)
 static void do_apply(void *user)
 {
     struct fixture *f = user;
-    f->rc = agent_apply_settings(&f->st, f->candidate);
+    f->rc = agent_apply_settings(&f->st, f->candidate, 1);
 }
 
 static void test_apply_settings_empty_reprints_banner(void)
@@ -165,6 +165,37 @@ static void test_apply_settings_nonempty_prints_marker(void)
      * (deferred), not committed — no manual trail resync involved. */
     EXPECT(f.r.disp.trail == 0);
     EXPECT(f.r.disp.held == 1);
+
+    free(out);
+    fixture_free(&f);
+}
+
+static void do_apply_quiet(void *user)
+{
+    struct fixture *f = user;
+    f->rc = agent_apply_settings(&f->st, f->candidate, 0);
+}
+
+static void test_apply_settings_quiet_prints_nothing(void)
+{
+    /* `/new <preset>` applies before it resets and prints its own banner
+     * afterwards, so announce = 0 must produce no output at all — not the
+     * mid-conversation marker this history would otherwise earn — while
+     * still applying the settings. disp is left exactly as the caller set
+     * it, so the banner that follows draws into the same gap. */
+    struct fixture f;
+    fixture_init(&f);
+    agent_session_add_user(&f.sess, "hello");
+    EXPECT(f.sess.n_items > 0);
+    setenv("HAX_MODEL", "model-b", 1); /* the change the silent apply resolves */
+
+    char *out = capture_stdout(do_apply_quiet, &f);
+    EXPECT(f.rc == 0);
+    EXPECT_STR_EQ(out, "");
+    /* Silence is about output, not effect. */
+    EXPECT_STR_EQ(f.sess.model, "model-b");
+    EXPECT(f.r.disp.trail == 2);
+    EXPECT(f.r.disp.held == 0);
 
     free(out);
     fixture_free(&f);
@@ -854,6 +885,7 @@ int main(void)
 {
     test_apply_settings_empty_reprints_banner();
     test_apply_settings_nonempty_prints_marker();
+    test_apply_settings_quiet_prints_nothing();
     test_apply_settings_no_model_fails_intact();
     test_apply_settings_failed_provider_change_keeps_old();
     test_apply_settings_refreshes_on_model_or_provider_change();

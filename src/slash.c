@@ -78,7 +78,8 @@ static const struct slash_cmd COMMANDS[] = {
     {
         .name = "new",
         .aliases = {"clear", NULL},
-        .summary = "start a fresh conversation",
+        .summary = "start a fresh conversation (optional: preset)",
+        .takes_arg = 1,
         .run = slash_run_new,
     },
     {
@@ -305,6 +306,15 @@ enum slash_result slash_dispatch(const char *line, struct slash_ctx *ctx)
 
 static void slash_run_new(struct slash_ctx *ctx)
 {
+    /* `/new <preset>` is the "start over as X" shorthand for /new + /preset.
+     * Switch first and keep it quiet: a preset that doesn't apply (typo,
+     * provider won't construct) then leaves the conversation untouched with
+     * only its own error on screen — the same protection the old
+     * "/new takes no arguments" rejection gave a mistyped argument — and a
+     * successful one is announced by the fresh banner below instead of a
+     * "switched to …" line the reset would immediately make stale. */
+    if (ctx->arg && select_preset(ctx->state, ctx->arg, 0) != 0)
+        return;
     agent_new_conversation(ctx->state);
 }
 
@@ -486,7 +496,7 @@ static void slash_run_effort(struct slash_ctx *ctx)
 static void slash_run_preset(struct slash_ctx *ctx)
 {
     /* ctx->arg is a preset name for direct application, NULL for the picker. */
-    select_preset(ctx->state, ctx->arg);
+    select_preset(ctx->state, ctx->arg, 1);
 }
 
 /* ---------- /config ---------- */
