@@ -40,7 +40,7 @@ void render_transition(struct render_ctx *r, enum render_state to)
     case RS_REASONING:
         if (r->md)
             md_flush(r->md);
-        disp_raw(ANSI_RESET);
+        disp_raw(&r->disp, ANSI_RESET);
         disp_putc(&r->disp, '\n');
         break;
     case RS_TEXT:
@@ -54,7 +54,7 @@ void render_transition(struct render_ctx *r, enum render_state to)
         spinner_hide(r->spinner);
         if (r->cluster_line_open)
             disp_putc(&r->disp, '\n');
-        fflush(stdout);
+        disp_flush(&r->disp);
         r->cluster_last_tool = NULL;
         r->cluster_line_open = 0;
         r->cluster_line_used = 0;
@@ -83,7 +83,7 @@ void render_transition(struct render_ctx *r, enum render_state to)
     case RS_REASONING:
         spinner_hide(r->spinner);
         disp_block_separator(&r->disp);
-        disp_raw(ANSI_DIM ANSI_ITALIC);
+        disp_raw(&r->disp, ANSI_DIM ANSI_ITALIC);
         /* Suppress md's inline SGR so the dim+italic span above is
          * the only active style; wrap and block structure still run. */
         if (r->md)
@@ -187,7 +187,7 @@ void render_text_chunk(struct render_ctx *r, const char *s, size_t n)
         md_feed(r->md, s, n);
     else
         disp_write(&r->disp, s, n);
-    fflush(stdout);
+    disp_flush(&r->disp);
     if (r->md && md_in_table(r->md)) {
         /* Still buffering: nothing more shows until the grid lays out,
          * so leave the stall clock pinned and let the tick surface the

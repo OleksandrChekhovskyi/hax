@@ -35,6 +35,10 @@ struct input_modal_completer {
     void *user;
 };
 
+/* Slots for application-bound modal control keys (input_bind_modal_key).
+ * Small on purpose: these are top-level views, not a general keymap. */
+#define INPUT_MODAL_KEYS_MAX 4
+
 struct input {
     /* current edit buffer (NUL-terminated, may contain '\n') */
     char *buf;
@@ -84,13 +88,15 @@ struct input {
      * appends each accepted entry to this file. */
     char *persist_path;
 
-    /* Ctrl-T hook (input.c only). When set, Ctrl-T at the prompt drops
-     * out of raw mode, calls `transcript_cb(transcript_user)`, and
-     * repaints. The callback is expected to take over stdout for the
-     * duration (typically: popen a pager and pipe rendered content).
-     * NULL = Ctrl-T is a no-op. */
-    void (*transcript_cb)(void *user);
-    void *transcript_user;
+    /* Modal control-key bindings (input.c only) — see
+     * input_bind_modal_key in input.h. Only consulted for control bytes
+     * the editor doesn't handle itself, so what a key *means* stays with
+     * the application. Unused slots have fn == NULL. */
+    struct input_modal_key {
+        unsigned char key;
+        void (*fn)(void *user);
+        void *user;
+    } modal_keys[INPUT_MODAL_KEYS_MAX];
 
     /* Modal Tab completer (input.c only) — caller-owned, must outlive
      * the editor (typically a const static). NULL = Tab always inserts

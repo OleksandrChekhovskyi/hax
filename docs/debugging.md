@@ -31,6 +31,10 @@ behavior rather than raw HTTP.
 In the REPL, press Ctrl-T to open the current transcript in `$PAGER`. This is an in-memory view
 and does not require `HAX_TRANSCRIPT`.
 
+Ctrl-O is its user-facing sibling: the same conversation as it was displayed (Markdown, tool
+previews, no system prompt or tool schemas). Reach for Ctrl-T when the question is what the
+model received, and Ctrl-O when it is what happened.
+
 ## Mock provider
 
 The mock provider exercises dispatch and rendering without an LLM:

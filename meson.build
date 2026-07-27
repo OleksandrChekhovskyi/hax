@@ -46,6 +46,7 @@ sources = files(
     'src/config.c',
     'src/effort.c',
     'src/file_mention.c',
+    'src/history.c',
     'src/model_meta.c',
     'src/oneshot.c',
     'src/paste_image.c',
@@ -104,6 +105,7 @@ sources = files(
     'src/terminal/picker_core.c',
     'src/terminal/theme.c',
     'src/terminal/ui.c',
+    'src/terminal/vt_resolve.c',
 
     'src/text/base64.c',
     'src/text/utf8.c',

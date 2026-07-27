@@ -646,13 +646,13 @@ static void append_user_message(struct buf *f, const char *text, size_t len, int
     buf_append_str(f, ANSI_ERASE_LINE "\r\n");
 }
 
-void input_render_user_message(const char *text, size_t len, int term_cols)
+void input_render_user_message_to(FILE *out, const char *text, size_t len, int term_cols)
 {
     struct buf f;
     buf_init(&f);
     append_user_message(&f, text, len, term_cols);
-    fwrite(f.data, 1, f.len, stdout);
-    fflush(stdout);
+    fwrite(f.data, 1, f.len, out);
+    fflush(out);
     buf_free(&f);
 }
 
@@ -788,27 +788,38 @@ reenter:
     in->term_rows = tty_rows();
 }
 
-/* ---------------- Ctrl-T transcript ---------------- */
+/* ---------------- Modal control keys ---------------- */
 
-/* Same shape as open_editor: erase the edit area, drop raw mode, hand
- * stdout off to the user's callback (which typically popens a pager),
- * then re-enter raw mode and let the caller's next paint redraw the
- * prompt. */
-static void show_transcript(struct input *in)
+/* Run an application-bound modal handler, same shape as open_editor:
+ * erase the edit area, drop raw mode, hand the terminal to the callback
+ * (which typically popens a pager), then re-enter raw mode and let the
+ * caller's next paint redraw the prompt. Returns 0 when `c` had no
+ * binding, so the caller can fall through to its own handling. */
+static int run_modal_key(struct input *in, unsigned char c)
 {
-    if (!in->transcript_cb)
-        return;
+    void (*fn)(void *user) = NULL;
+    void *user = NULL;
+    for (size_t i = 0; i < INPUT_MODAL_KEYS_MAX; i++) {
+        if (in->modal_keys[i].fn && in->modal_keys[i].key == c) {
+            fn = in->modal_keys[i].fn;
+            user = in->modal_keys[i].user;
+            break;
+        }
+    }
+    if (!fn)
+        return 0;
 
     erase_edit_area(in);
     raw_off(in);
 
-    in->transcript_cb(in->transcript_user);
+    fn(user);
 
     raw_on(in);
     /* Pager may have prompted a window resize; refresh before the next
      * paint so wrap math uses the current width. */
     in->term_cols = editor_cols();
     in->term_rows = tty_rows();
+    return 1;
 }
 
 /* ---------------- Tab modal completion ---------------- */
@@ -1433,10 +1444,35 @@ void input_history_add_session(struct input *in, const char *line)
     input_core_history_add(in, line);
 }
 
-void input_set_transcript_cb(struct input *in, void (*fn)(void *user), void *user)
+int input_bind_modal_key(struct input *in, unsigned char key, void (*fn)(void *user), void *user)
 {
-    in->transcript_cb = fn;
-    in->transcript_user = user;
+    if (key >= 0x20)
+        return -1;
+    /* Rebind in place when the key is already bound, so a caller can
+     * replace or clear a binding without leaking a slot. */
+    struct input_modal_key *slot = NULL;
+    for (size_t i = 0; i < INPUT_MODAL_KEYS_MAX; i++) {
+        if (in->modal_keys[i].fn && in->modal_keys[i].key == key) {
+            slot = &in->modal_keys[i];
+            break;
+        }
+    }
+    if (!slot && fn) {
+        for (size_t i = 0; i < INPUT_MODAL_KEYS_MAX; i++) {
+            if (!in->modal_keys[i].fn) {
+                slot = &in->modal_keys[i];
+                break;
+            }
+        }
+        if (!slot)
+            return -1;
+    }
+    if (!slot) /* clearing a key that wasn't bound */
+        return 0;
+    slot->key = key;
+    slot->fn = fn;
+    slot->user = user;
+    return 0;
 }
 
 void input_set_modal_completer(struct input *in, const struct input_modal_completer *mc)
@@ -1628,9 +1664,6 @@ char *input_readline(struct input *in, const char *prompt)
             if (reverse_search(in) == RSEARCH_SUBMIT && in->len > 0)
                 submit = 1;
             break;
-        case 0x14: /* Ctrl-T — open transcript pager (no-op if unset) */
-            show_transcript(in);
-            break;
         case 0x15: /* Ctrl-U */
             input_core_kill_to_bol(in);
             break;
@@ -1679,8 +1712,14 @@ char *input_readline(struct input *in, const char *prompt)
                     bytes[got++] = (char)b;
                 }
                 input_core_buf_insert(in, bytes, got);
+            } else {
+                /* A control byte the editor doesn't use itself: offer it
+                 * to the application's modal bindings (Ctrl-O, Ctrl-T).
+                 * Reaching them only from here is what makes editing keys
+                 * unshadowable — every case above already consumed its
+                 * byte. Unbound bytes are ignored (e.g. Ctrl-J). */
+                run_modal_key(in, c);
             }
-            /* otherwise ignore (e.g. Ctrl-J — unhandled) */
             break;
         }
 

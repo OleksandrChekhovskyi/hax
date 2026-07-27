@@ -10,12 +10,23 @@
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
 
+FILE *disp_sink(const struct disp *d)
+{
+    return d->out ? d->out : stdout;
+}
+
+void disp_flush(struct disp *d)
+{
+    fflush(disp_sink(d));
+}
+
 void disp_emit_held(struct disp *d)
 {
     if (d->held == 0)
         return;
+    FILE *out = disp_sink(d);
     for (int i = 0; i < d->held; i++)
-        fputc('\n', stdout);
+        fputc('\n', out);
     d->trail += d->held;
     d->held = 0;
 }
@@ -26,7 +37,7 @@ void disp_putc(struct disp *d, char c)
         d->held++;
     } else {
         disp_emit_held(d);
-        fputc(c, stdout);
+        fputc(c, disp_sink(d));
         d->trail = 0;
     }
 }
@@ -51,15 +62,15 @@ void disp_write(struct disp *d, const char *s, size_t n)
     }
     if (n > tail_bytes) {
         disp_emit_held(d);
-        fwrite(s, 1, n - tail_bytes, stdout);
+        fwrite(s, 1, n - tail_bytes, disp_sink(d));
         d->trail = 0;
     }
     d->held += tail_breaks;
 }
 
-void disp_raw(const char *s)
+void disp_raw(struct disp *d, const char *s)
 {
-    fputs(s, stdout);
+    fputs(s, disp_sink(d));
 }
 
 void disp_printf(struct disp *d, const char *fmt, ...)
@@ -77,8 +88,9 @@ void disp_printf(struct disp *d, const char *fmt, ...)
 void disp_block_separator(struct disp *d)
 {
     int need = 2 - d->trail;
+    FILE *out = disp_sink(d);
     for (int i = 0; i < need; i++)
-        fputc('\n', stdout);
+        fputc('\n', out);
     if (need > 0)
         d->trail += need;
     d->held = 0;
@@ -128,21 +140,22 @@ void disp_tool_strip_solo(struct disp *d)
  * cell). The space at col 1 and content from col 2 onward survive
  * untouched. Cursor lands at col 1; the next held-\n flush moves
  * down to a fresh row. */
-static void tool_strip_overprint(const char *glyph_utf8)
+static void tool_strip_overprint(struct disp *d, const char *glyph_utf8)
 {
-    fputs("\r", stdout);
-    fputs(theme_open(THEME_CHROME_DIM), stdout);
-    fputs(glyph_utf8, stdout);
-    fputs(ANSI_RESET, stdout);
-    fflush(stdout);
+    FILE *out = disp_sink(d);
+    fputs("\r", out);
+    fputs(theme_open(THEME_CHROME_DIM), out);
+    fputs(glyph_utf8, out);
+    fputs(ANSI_RESET, out);
+    fflush(out);
 }
 
-void disp_tool_strip_close(void)
+void disp_tool_strip_close(struct disp *d)
 {
-    tool_strip_overprint("\xE2\x94\x94"); /* └ U+2514 */
+    tool_strip_overprint(d, "\xE2\x94\x94"); /* └ U+2514 */
 }
 
-void disp_tool_strip_close_solo(void)
+void disp_tool_strip_close_solo(struct disp *d)
 {
-    tool_strip_overprint("\xE2\x80\xBA"); /* › U+203A */
+    tool_strip_overprint(d, "\xE2\x80\xBA"); /* › U+203A */
 }

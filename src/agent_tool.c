@@ -49,6 +49,8 @@ struct item agent_tool_result_make(const struct item *call, const char *output,
         it.n_images = ctx->n_images;
         ctx->images = NULL;
         ctx->n_images = 0;
+        if (ctx->output_summarizes_display)
+            it.origin = ITEM_ORIGIN_SUMMARIZED;
     }
     return it;
 }

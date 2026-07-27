@@ -18,6 +18,10 @@ typedef void (*md_emit_fn)(const char *bytes, size_t n, int is_raw, void *user);
 
 struct md_renderer;
 
+/* Return display_width(), capped one column before the terminal's physical edge. The spare
+ * column prevents deferred autowrap from breaking retro-wrap cursor positioning. */
+int md_cols(void);
+
 /* Create a renderer for the given display width. <= 0 disables wrapping and table reflow.
  * Headings remain unwrapped; fenced code remains verbatim. */
 struct md_renderer *md_new(md_emit_fn emit, void *user, int wrap_width);

@@ -2669,6 +2669,38 @@ static void test_wrap_heading_not_wrapped(void)
     free(got);
 }
 
+/* ---------- md_cols: the width every renderer is built with ---------- */
+
+/* The wrap engine retro-wraps with cursor-back + erase, math that assumes
+ * the cursor sits one cell *past* the last glyph. Filling the physical last
+ * column breaks that on terminals with deferred autowrap, so md_cols must
+ * stay below the real edge no matter how wide the configured display width
+ * is. */
+static void test_md_cols_never_reaches_last_column(void)
+{
+    int edge = term_width();
+    setenv("HAX_DISPLAY_WIDTH", "500", 1);
+    EXPECT(display_width() == 500); /* configuration alone would overflow */
+    EXPECT(md_cols() == edge - 1);
+    setenv("HAX_DISPLAY_WIDTH", "terminal", 1);
+    EXPECT(md_cols() == edge - 1);
+    unsetenv("HAX_DISPLAY_WIDTH");
+}
+
+/* A display width comfortably inside the terminal is used as-is — the edge
+ * reservation only bites when the two would collide. */
+static void test_md_cols_follows_narrower_display_width(void)
+{
+    int edge = term_width();
+    if (edge < 40) {
+        T_SKIP("terminal too narrow to distinguish the cases");
+        return;
+    }
+    setenv("HAX_DISPLAY_WIDTH", "30", 1);
+    EXPECT(md_cols() == 30);
+    unsetenv("HAX_DISPLAY_WIDTH");
+}
+
 int main(void)
 {
     /* Wrap mode measures cells via utf8_codepoint_cells which needs
@@ -2885,6 +2917,8 @@ int main(void)
     test_wrap_eof_preserves_trailing_space_when_within_budget();
     test_wrap_hard_break_at_budget_no_extra_line();
     test_wrap_heading_not_wrapped();
+    test_md_cols_never_reaches_last_column();
+    test_md_cols_follows_narrower_display_width();
 
     T_REPORT();
 }

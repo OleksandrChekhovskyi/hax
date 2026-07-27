@@ -73,9 +73,18 @@ static char *run(const char *args_json, struct tool_ctx *ctx)
          * dispatch layer falls back to showing the "created ..." summary
          * so the block isn't a bare header — it decides on the actual row
          * count, which the tool can't predict through the renderer's
-         * ctrl_strip. */
-        if (ctx && ctx->emit_display && content_len > 0)
+         * ctrl_strip. Because the preview lives only on the display side, the
+         * paged history view rebuilds it from this call's `content` argument
+         * (see src/history.c) — which it knows to do from the
+         * output_summarizes_display flag set below, not from the shape of the
+         * summary. */
+        if (ctx && ctx->emit_display && content_len > 0) {
             ctx->emit_display(content, content_len, ctx->emit_user);
+            /* Say so on the result: the summary below is a stand-in for these
+             * bytes, and only this call knows it (an existing file returns a
+             * diff, a failure returns its message). */
+            ctx->output_summarizes_display = 1;
+        }
         char *result;
         size_t lines = count_lines(content, content_len);
         if (content_len == 0)

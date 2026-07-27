@@ -201,7 +201,8 @@ The REPL supports readline-style editing. Hax-specific or notable bindings:
 | Ctrl-D | Quit on an empty prompt. |
 | Ctrl-L | Clear screen and redraw the prompt. |
 | Ctrl-G | Edit the prompt in `$EDITOR`. |
-| Ctrl-T | View the current transcript in `$PAGER`. |
+| Ctrl-O | View the conversation so far in `$PAGER`, rendered as it was on screen. |
+| Ctrl-T | View the model-facing transcript in `$PAGER`. |
 | Ctrl-V | Paste an image from the clipboard (falls back to pasting clipboard text). |
 | Tab | On an `@`-prefixed word: pick a project file to mention. Elsewhere: insert a tab. |
 
@@ -219,6 +220,38 @@ it like any other image path. With no image on the clipboard, Ctrl-V pastes its 
 and copied files (file manager copy, drag-and-drop) paste as plain paths. On Linux this needs
 `wl-paste` (Wayland) or `xclip` (X11); macOS works out of the box. The temp files are cleaned
 up on `/new` and exit.
+
+## Reviewing the conversation
+
+Two paged views, deliberately different:
+
+- **Ctrl-O — the conversation.** What was on screen: your prompts with their accent stripe,
+  the model's answers with Markdown rendering and wrapping, tool calls with their output
+  previews. Opens with a two-row banner: the provider, model, effort and preset the
+  conversation is on — the *current* selection, since a mid-conversation `/model` or
+  `/preset` switch is a display hint and never enters history — then the view's own label and
+  prompt count, in the slot the REPL's key tips occupy. Reasoning appears when
+  `show_reasoning` is on, so enabling it and pressing Ctrl-O shows the reasoning for turns
+  that were displayed without it. Scroll and search it in the pager without touching your
+  terminal scrollback.
+- **Ctrl-T — the transcript.** What the *model* sees: the system prompt, every advertised
+  tool schema, every tool argument and result verbatim and uncapped, plus per-request stats
+  footers. The debugging view (see [debugging.md](./debugging.md)).
+
+Both use `$PAGER`, defaulting to `less -R` so colors survive.
+
+Tool output in the Ctrl-O view is rebuilt from what the conversation stored, so for `bash` the
+preview reflects the output the model received — already capped, with `bash`'s own
+`[output truncated: …]` marker inside it. Expect elision counts to differ from the ones shown
+live: those counted the raw stream. A `write` that created a file replays its content from the
+call arguments, since that is what was on screen and the result recorded only a one-line
+summary. Exploration calls (`read`, a `bash` command classified as exploration) stay
+one-liners, as they were live.
+
+After `/resume`, `/undo`, or `/fork`, the last turn is replayed inline above the prompt with
+tool calls collapsed — one turn, deliberately, since the replay lands below everything
+already on screen. The dim rule counts the messages it isn't showing and points at Ctrl-O
+for the rest.
 
 ## Pausing, steering, and resuming
 

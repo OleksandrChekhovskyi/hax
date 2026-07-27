@@ -13,6 +13,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "agent_core.h" /* CONTINUE_MARKER predicate, shared with the in-memory scan */
 #include "config.h"
 #include "session_prune.h"
 #include "util.h"
@@ -166,6 +167,42 @@ static struct turn_usage *turn_usage_from_json(const json_t *o)
     return tu;
 }
 
+/* Provenance <-> the "origin" key, one table for every kind (the kind says
+ * which values can apply, so the spellings share a namespace). Absent — as on
+ * every record written before provenance was stored — reads as
+ * ITEM_ORIGIN_NONE, and so does a spelling this build doesn't know: presenting
+ * a synthetic item as an ordinary one is a cosmetic wart, while the reverse
+ * would drop a real prompt from the turn count /undo acts on. Shared by the
+ * item codec, the turn scan, and the picker label, so all three classify a
+ * line the same way. */
+static const struct {
+    enum item_origin origin;
+    const char *name;
+} ORIGIN_NAMES[] = {
+    {ITEM_ORIGIN_COMPACT_SEED, "compact_seed"}, {ITEM_ORIGIN_CONTINUATION, "continuation"},
+    {ITEM_ORIGIN_INTERRUPTED, "interrupted"},   {ITEM_ORIGIN_SKIPPED, "skipped"},
+    {ITEM_ORIGIN_REFUSED, "refused"},           {ITEM_ORIGIN_SUMMARIZED, "summarized"},
+};
+
+static const char *origin_to_str(enum item_origin origin)
+{
+    for (size_t i = 0; i < sizeof(ORIGIN_NAMES) / sizeof(ORIGIN_NAMES[0]); i++)
+        if (ORIGIN_NAMES[i].origin == origin)
+            return ORIGIN_NAMES[i].name;
+    return NULL; /* ITEM_ORIGIN_NONE: the key is omitted */
+}
+
+static enum item_origin json_origin(const json_t *o)
+{
+    const char *name = json_string_value(json_object_get(o, "origin"));
+    if (!name)
+        return ITEM_ORIGIN_NONE;
+    for (size_t i = 0; i < sizeof(ORIGIN_NAMES) / sizeof(ORIGIN_NAMES[0]); i++)
+        if (strcmp(ORIGIN_NAMES[i].name, name) == 0)
+            return ORIGIN_NAMES[i].origin;
+    return ITEM_ORIGIN_NONE;
+}
+
 json_t *item_to_json(const struct item *it)
 {
     json_t *o = json_object();
@@ -181,8 +218,7 @@ json_t *item_to_json(const struct item *it)
      * → omitted). */
     set_str(o, "provider", it->provider);
     set_str(o, "model", it->model);
-    if (it->compact_seed)
-        json_object_set_new(o, "compact_seed", json_true());
+    set_str(o, "origin", origin_to_str(it->origin)); /* NULL = omitted */
     if (it->usage)
         json_object_set_new(o, "usage", turn_usage_to_json(it->usage));
     if (it->n_images) {
@@ -227,7 +263,7 @@ int item_from_json(const json_t *obj, struct item *out)
     out->reasoning_text = dup_field(obj, "reasoning_text");
     out->provider = dup_field(obj, "provider");
     out->model = dup_field(obj, "model");
-    out->compact_seed = json_is_true(json_object_get(obj, "compact_seed"));
+    out->origin = json_origin(obj);
     if (k == ITEM_TURN_USAGE)
         out->usage = turn_usage_from_json(json_object_get(obj, "usage"));
     json_t *arr = json_object_get(obj, "images");
@@ -766,8 +802,22 @@ const char *session_log_resume_hint(const struct session_log *log)
 
 /* ---------------- undo / fork ---------------- */
 
+/* Whether a session line is a *typed* user prompt — the unit /undo and
+ * /fork count turns in. Must stay in step with agent.c's is_typed_prompt,
+ * which applies the same rule to the in-memory items: the caller derives
+ * `keep_turns` from that scan and the new item count from this one, so a
+ * disagreement cuts the file at a different turn than memory and then
+ * records the memory index as written — losing every line between. */
+static int line_is_typed_prompt(json_t *o)
+{
+    const char *kind = json_string_value(json_object_get(o, "kind"));
+    if (!kind || strcmp(kind, "user") != 0)
+        return 0;
+    return json_origin(o) == ITEM_ORIGIN_NONE;
+}
+
 /* Byte offset at which to end `path` to keep exactly the first `keep_turns`
- * user turns (non-seed user items). The cut lands on the turn_boundary that
+ * user turns (typed prompts). The cut lands on the turn_boundary that
  * opens the (keep_turns)-th turn — or that user line itself if no boundary
  * precedes it — dropping that turn and everything after. Keeps the whole file
  * when `keep_turns` covers every turn. Returns the offset, or -1 if `path`
@@ -795,13 +845,10 @@ static long scan_turn_offset(const char *path, size_t keep_turns)
         json_t *o = json_loads(line, 0, NULL);
         if (o) {
             const char *kind = json_string_value(json_object_get(o, "kind"));
-            if (kind) {
-                if (strcmp(kind, "turn_boundary") == 0)
-                    is_boundary = 1;
-                else if (strcmp(kind, "user") == 0 &&
-                         !json_is_true(json_object_get(o, "compact_seed")))
-                    is_user = 1;
-            }
+            if (kind && strcmp(kind, "turn_boundary") == 0)
+                is_boundary = 1;
+            else
+                is_user = line_is_typed_prompt(o);
             json_decref(o);
         }
 
@@ -1250,11 +1297,14 @@ char *session_first_prompt(const char *path, int max_cells)
             continue; /* a partial last line from the cap, or the header */
         const char *kind = json_string_value(json_object_get(o, "kind"));
         if (kind && strcmp(kind, "user") == 0) {
-            /* A compaction seed is synthetic — its text is the same generic
-             * preamble in every compacted session, useless as a label. Skip
-             * it and keep scanning for a real prompt. */
-            if (json_is_true(json_object_get(o, "compact_seed"))) {
-                saw_seed = 1;
+            /* Nothing synthetic labels a session: a compaction seed's text is
+             * the same generic preamble every time, and a continuation carries
+             * no words of the user's at all. Skip and keep scanning for a real
+             * prompt. */
+            enum item_origin origin = json_origin(o);
+            if (origin != ITEM_ORIGIN_NONE) {
+                if (origin == ITEM_ORIGIN_COMPACT_SEED)
+                    saw_seed = 1;
                 json_decref(o);
                 continue;
             }

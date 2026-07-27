@@ -334,6 +334,24 @@ static void session_enable_tools(struct agent_session *session)
     session->n_tools = 1;
 }
 
+/* Same run with no tool_call hook — the shape of a one-shot run, where the
+ * loop answers calls itself instead of a frontend rendering them. */
+static struct agent_loop_result run_chain_hookless(struct agent_session *session,
+                                                   struct provider *provider,
+                                                   struct loop_test_ctx *ctx, int max_turns)
+{
+    struct agent_loop_params params = {
+        .session = session,
+        .provider = provider,
+        .max_turns = max_turns,
+        .hooks = {.user = ctx,
+                  .checkpoint = (ctx->cancel_at || ctx->pause_at) ? cancel_checkpoint : NULL},
+    };
+    struct agent_loop_result result;
+    agent_loop_run(&params, &result);
+    return result;
+}
+
 static struct agent_loop_result run_chain(struct agent_session *session, struct provider *provider,
                                           struct loop_test_ctx *ctx, int max_turns)
 {
@@ -471,6 +489,53 @@ static void test_loop_cancel_still_refuses_disabled_tool(void)
     EXPECT(ctx.tools_refused == 1);
 
     agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* The core answers calls itself when no frontend hook is installed (one-shot),
+ * and owes the same provenance the rendered paths stamp: the action decides
+ * whether the tool ran, not who drew the block. Without it, a --raw refusal is
+ * recorded as an ordinary result and a later Ctrl-O replays it as executed. */
+static void test_hookless_fallback_stamps_origins(void)
+{
+    /* No tools advertised (session_enable_tools not called) → the call is
+     * refused unrun. */
+    struct agent_session session;
+    session_init(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = chain_stream};
+    struct loop_test_ctx ctx = {0};
+    chain_turn = 0;
+    chain_two_tools = 0;
+
+    struct agent_loop_result result = run_chain_hookless(&session, &provider, &ctx, 4);
+    const struct item *refusal = NULL;
+    for (size_t i = 0; i < session.n_items; i++)
+        if (session.items[i].kind == ITEM_TOOL_RESULT)
+            refusal = &session.items[i];
+    EXPECT(refusal != NULL);
+    EXPECT_STR_EQ(refusal->output, REFUSED_RESULT);
+    EXPECT(refusal->origin == ITEM_ORIGIN_REFUSED);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+
+    /* Same for a batch cut short by a cancel: skipped, not run. */
+    session_init(&session);
+    session_enable_tools(&session);
+    agent_session_add_user(&session, "start");
+    struct loop_test_ctx cancel_ctx = {.cancel_at = 3};
+    chain_turn = 0;
+    chain_two_tools = 1;
+
+    struct agent_loop_result cancelled = run_chain_hookless(&session, &provider, &cancel_ctx, 4);
+    const struct item *skipped = NULL;
+    for (size_t i = 0; i < session.n_items; i++)
+        if (session.items[i].kind == ITEM_TOOL_RESULT &&
+            strcmp(session.items[i].output, INTERRUPT_MARKER) == 0)
+            skipped = &session.items[i];
+    EXPECT(skipped != NULL);
+    EXPECT(skipped->origin == ITEM_ORIGIN_SKIPPED);
+    agent_loop_result_destroy(&cancelled);
     agent_session_free(&session);
 }
 
@@ -921,6 +986,7 @@ int main(void)
     test_loop_enforces_max_turns();
     test_loop_cancels_tool_batch();
     test_loop_cancel_still_refuses_disabled_tool();
+    test_hookless_fallback_stamps_origins();
     test_loop_pause_runs_whole_batch();
     test_loop_pause_preempts_empty_turn();
     test_loop_pause_preempts_follow_up_leaves_no_boundary();

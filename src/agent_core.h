@@ -18,11 +18,22 @@ struct catalog_split; /* catalog.h — consumers of spend_split include it */
  * loop (history shaping) and dispatch (the rendered skip block) agree. */
 #define INTERRUPT_MARKER "[interrupted]"
 
+/* What a call refused unrun stores for the model, and what the user sees in
+ * its place: the model gets an error it can act on (answer in text instead),
+ * the user gets the reason. Shared like INTERRUPT_MARKER — dispatch renders
+ * the marker, the loop's hookless fallback stores the result, and the history
+ * view replays one from the other. */
+#define REFUSED_RESULT "error: tool calls are disabled in this session"
+#define REFUSED_MARKER "[refused: --raw, no tools advertised]"
+
 /* Sentinel user message appended when the user resumes an interrupted (or
  * error-marked) turn with an empty send: history ends in INTERRUPT_MARKERs
  * there, and sampling straight past them would hand the model a stop and
  * a go at once. The terse marker records the actual user act — a
- * deliberate "keep going" — in the same bracket idiom. */
+ * deliberate "keep going" — in the same bracket idiom. The item carrying it
+ * is stamped ITEM_ORIGIN_CONTINUATION (provider.h) rather than recognized by
+ * this text: "[continue]" is ordinary text a user can type and mean, and
+ * display and turn counting must not confuse the two. */
 #define CONTINUE_MARKER "[continue]"
 
 /* Run-wide options parsed from CLI flags. Lives here (not in agent.h)
@@ -284,6 +295,14 @@ void agent_session_add_user(struct agent_session *s, const char *text);
 /* Append ITEM_TURN_BOUNDARY only — used between consecutive model
  * round-trips inside one user turn (after the first one) so the
  * transcript renderer can mark each round as its own boundary. */
+/* Append the empty-send continuation as its own turn: a turn_boundary plus
+ * the CONTINUE_MARKER user item, flagged as ours. Neither a message to show
+ * back (src/history.c) nor a turn to count — and every scan that counts
+ * "user turns" has to agree, in memory and on disk: agent.c's
+ * is_typed_prompt walks items, session.c's line_is_typed_prompt walks the
+ * JSONL mirror, and /undo hands the same turn number to both. */
+void agent_session_add_continuation(struct agent_session *s);
+
 void agent_session_add_boundary(struct agent_session *s);
 
 /* Append the round-trip's ITEM_TURN_USAGE footer — the transcript's

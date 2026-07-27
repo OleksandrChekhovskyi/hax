@@ -139,7 +139,7 @@ void agent_new_conversation(struct agent_state *st);
  * items into history, continue appending to that same session file, mirror
  * it into the HAX_TRANSCRIPT log, and replay the last user turn (a dim
  * "resumed" rule, then the final exchange rendered live) for orientation.
- * Earlier history is reachable via Ctrl-T rather than replayed inline.
+ * Earlier history is reachable via Ctrl-O rather than replayed inline.
  * Used by the /resume command. A load failure is reported and leaves the
  * current conversation untouched. */
 void agent_resume_session(struct agent_state *st, const char *path);

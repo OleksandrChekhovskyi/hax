@@ -699,9 +699,10 @@ static void test_fork_zero_clones_seed_only(void)
      * must still be allowed when there's history to copy. agent_fork is a
      * no-op stub, so we assert the zero-count guard did NOT fire. */
     struct agent_session s = {0};
-    items_append(
-        &s.items, &s.n_items, &s.cap_items,
-        (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup("seed"), .compact_seed = 1});
+    items_append(&s.items, &s.n_items, &s.cap_items,
+                 (struct item){.kind = ITEM_USER_MESSAGE,
+                               .text = xstrdup("seed"),
+                               .origin = ITEM_ORIGIN_COMPACT_SEED});
     struct render_ctx r = {0};
     r.disp.trail = 1;
     struct agent_state st = {.sess = &s, .r = &r};

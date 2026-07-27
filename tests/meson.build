@@ -21,6 +21,7 @@ test_sources = [
     'test_compact.c',
     'test_config.c',
     'test_file_mention.c',
+    'test_history.c',
     'test_model_meta.c',
     'test_harness.c',
     'test_paste_image.c',
@@ -72,6 +73,7 @@ test_sources = [
     'terminal/test_interrupt.c',
     'terminal/test_picker_core.c',
     'terminal/test_theme.c',
+    'terminal/test_vt_resolve.c',
 
     'text/test_base64.c',
     'text/test_utf8.c',

@@ -54,8 +54,8 @@ static int item_eq(const struct item *a, const struct item *b)
            streq0(a->tool_name, b->tool_name) &&
            streq0(a->tool_arguments_json, b->tool_arguments_json) && streq0(a->output, b->output) &&
            streq0(a->reasoning_json, b->reasoning_json) &&
-           streq0(a->reasoning_text, b->reasoning_text) && a->compact_seed == b->compact_seed &&
-           usage_eq(a->usage, b->usage) && images_eq(a, b);
+           streq0(a->reasoning_text, b->reasoning_text) && a->origin == b->origin &&
+           a->origin == b->origin && usage_eq(a->usage, b->usage) && images_eq(a, b);
 }
 
 /* Round-trip one item through item_to_json -> json text -> json -> item,
@@ -142,7 +142,20 @@ static struct item CONVO[] = {
      .n_images = 1},
     {.kind = ITEM_TURN_USAGE, .usage = &TU_EST, .provider = (char *)"alpha", .model = (char *)"m1"},
     {.kind = ITEM_TURN_USAGE, .usage = &TU_EXACT},
-    {.kind = ITEM_USER_MESSAGE, .text = (char *)"summary of earlier work", .compact_seed = 1},
+    {.kind = ITEM_USER_MESSAGE,
+     .text = (char *)"summary of earlier work",
+     .origin = ITEM_ORIGIN_COMPACT_SEED},
+    /* The other two provenance values, so the "origin" key round-trips for
+     * both kinds that carry one. */
+    {.kind = ITEM_USER_MESSAGE, .text = (char *)"[continue]", .origin = ITEM_ORIGIN_CONTINUATION},
+    {.kind = ITEM_TOOL_RESULT,
+     .call_id = (char *)"c3",
+     .output = (char *)"[interrupted]",
+     .origin = ITEM_ORIGIN_SKIPPED},
+    {.kind = ITEM_TOOL_RESULT,
+     .call_id = (char *)"c4",
+     .output = (char *)"error: tool calls are disabled in this session",
+     .origin = ITEM_ORIGIN_REFUSED},
 };
 #define CONVO_N (sizeof(CONVO) / sizeof(CONVO[0]))
 
@@ -353,7 +366,9 @@ static void test_first_prompt_labels(void)
     free(empty_path);
 
     struct item compacted[] = {
-        {.kind = ITEM_USER_MESSAGE, .text = (char *)"condensed summary", .compact_seed = 1},
+        {.kind = ITEM_USER_MESSAGE,
+         .text = (char *)"condensed summary",
+         .origin = ITEM_ORIGIN_COMPACT_SEED},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"continuing"},
         {.kind = ITEM_TURN_BOUNDARY},
         {.kind = ITEM_USER_MESSAGE, .text = (char *)"real question"},

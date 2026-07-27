@@ -42,6 +42,50 @@ enum item_kind {
     ITEM_TURN_USAGE,
 };
 
+/* Where an item came from, for the parts of a conversation the agent writes
+ * or rewrites itself. Everything it inserts goes on the wire as an ordinary
+ * message or result — the model must not have to parse prose to know what
+ * happened — so content cannot tell them apart, and display must: a synthetic
+ * user message was never typed and never echoed, an unrun tool call showed a
+ * fixed marker instead of an output preview, and a summarized one showed bytes
+ * that are not in its output at all.
+ *
+ * One field for every kind, since an item has exactly one provenance and the
+ * kind says which values can apply. Zero is "nothing to declare", so every
+ * construction site is right by default and only the agent's own insertions
+ * carry a value. Round-tripped through the session log under "origin".
+ *
+ * Stored provenance rather than inference: every one of these has a content
+ * form a model or user can reproduce exactly ("[interrupted]" as a final line,
+ * "[continue]" as a prompt, a tool printing either), and a view that guesses
+ * would then describe something that never happened. */
+enum item_origin {
+    /* The user typed it, the model sent it, the tool ran and returned this. */
+    ITEM_ORIGIN_NONE = 0,
+    /* USER_MESSAGE: the synthetic summary that replaced compacted history
+     * (compact.c). */
+    ITEM_ORIGIN_COMPACT_SEED,
+    /* USER_MESSAGE: the CONTINUE_MARKER an empty send stands for after an
+     * interrupted turn (agent_session_add_continuation). */
+    ITEM_ORIGIN_CONTINUATION,
+    /* ASSISTANT_MESSAGE: the agent appended INTERRUPT_MARKER as the text's
+     * final line — to a partial response, or as the whole of a synthetic one
+     * (agent_loop_turn_absorb_abort, agent_session_mark_interrupt). */
+    ITEM_ORIGIN_INTERRUPTED,
+    /* TOOL_RESULT: Esc cut a tool batch short, or the stream was aborted
+     * before dispatch reached the call (dispatch_tool_skipped, abort repair).
+     * The tool never ran. */
+    ITEM_ORIGIN_SKIPPED,
+    /* TOOL_RESULT: --raw advertised no tools, so the call was refused unrun
+     * (dispatch_tool_refused). */
+    ITEM_ORIGIN_REFUSED,
+    /* TOOL_RESULT: the tool ran, but its output stands in for what it streamed
+     * to the screen instead of repeating it (tool_ctx.output_summarizes_display
+     * — `write` creating a file). Replaying the output would put the stand-in
+     * where the body was. */
+    ITEM_ORIGIN_SUMMARIZED,
+};
+
 /* One inline image carried by an item: base64 payload plus the metadata
  * adapters, display, and persistence need. Dimensions are parsed from the
  * image header at ingestion (0 = unknown). */
@@ -90,13 +134,13 @@ struct item {
      * NULL on non-reasoning items and on records that predate stamping. */
     char *provider;
     char *model;
-    /* USER_MESSAGE: this is a compaction seed — the synthetic summary that
-     * replaced compacted history — not something the user typed. Provider
-     * adapters ignore it (the seed goes on the wire as a plain user
-     * message); the flag exists so display and session tooling (resume
-     * replay, the /resume picker label) never present it as a typed
-     * prompt. Round-tripped through the session log. */
-    int compact_seed;
+    /* What the agent did to this item, if anything — see enum item_origin.
+     * Provider adapters ignore it (a synthetic item goes on the wire as an
+     * ordinary one); it exists so display and session tooling — resume replay,
+     * the paged history view, the /resume picker label, the turn counting
+     * behind /undo — never present what the agent did as what the user or the
+     * model did. */
+    enum item_origin origin;
     /* TURN_USAGE: malloc'd accounting payload (owned; freed by
      * item_free). NULL on every other kind. */
     struct turn_usage *usage;

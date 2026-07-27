@@ -3,6 +3,7 @@
 #define HAX_INPUT_H
 
 #include <stddef.h> /* size_t */
+#include <stdio.h>  /* FILE */
 
 /*
  * Multi-line line editor with in-memory history.
@@ -27,9 +28,11 @@
  *   - Ctrl-G opens $EDITOR with the current buffer; on exit the edited
  *     content replaces the buffer. The user keeps editing in the REPL
  *     (no auto-submit).
- *   - Ctrl-T invokes a caller-supplied transcript handler (see
- *     input_set_transcript_cb) — typically pipes a full conversation
- *     view through $PAGER. The buffer is preserved.
+ *   - Control keys the editor doesn't use itself can be bound by the
+ *     caller to modal handlers (see input_bind_modal_key) — typically
+ *     "render a view and pipe it through $PAGER". The buffer is
+ *     preserved. hax binds Ctrl-O (conversation history) and Ctrl-T
+ *     (model-facing transcript) this way.
  *   - Tab consults a caller-registered modal completer (see
  *     input_set_modal_completer): when its match phase reports a
  *     completable span, its pick phase — typically an interactive file
@@ -98,12 +101,23 @@ void input_history_open(struct input *in, const char *path);
  * it back: recall is a read, and suppressing it was never the point. */
 void input_history_load(struct input *in, const char *path);
 
-/* Register a Ctrl-T handler. While the prompt is active, pressing Ctrl-T
- * drops the editor out of raw mode, calls `fn(user)`, and repaints.
- * `fn` owns stdout for the duration of the call — the typical
- * implementation popens a pager and pipes content to it. NULL `fn`
- * disables the binding. */
-void input_set_transcript_cb(struct input *in, void (*fn)(void *user), void *user);
+/* Control-byte value for Ctrl-<c>, for naming a binding at the call site
+ * (INPUT_KEY_CTRL('O') rather than 0x0f). */
+#define INPUT_KEY_CTRL(c) ((unsigned char)((c) & 0x1f))
+
+/* Bind a control key to a modal handler. While the prompt is active, the
+ * key drops the editor out of raw mode, calls `fn(user)`, then re-enters
+ * raw mode and repaints. `fn` owns the terminal for the duration — the
+ * typical implementation popens a pager and pipes a rendered view to it.
+ * What the key *means* stays with the caller: the editor knows only that
+ * something modal happens here.
+ *
+ * Editing keys win by construction — only bytes the editor doesn't handle
+ * itself reach these bindings — so an application can't shadow Ctrl-C or
+ * a readline motion by binding over it. Rebinding a key replaces it, and
+ * a NULL `fn` clears it. Returns 0, or -1 when `key` isn't a control byte
+ * (>= 0x20) or all INPUT_MODAL_KEYS_MAX slots are taken. */
+int input_bind_modal_key(struct input *in, unsigned char key, void (*fn)(void *user), void *user);
 
 /* Register a modal Tab completer (full contract on the struct in
  * input_core.h: pure `match` decides whether Tab completes and which
@@ -160,12 +174,13 @@ void input_history_open_default(struct input *in, int persist);
 
 /* Render `text` (length `len`) as a committed user message — an
  * accent-colored "▌ " stripe (repeated at every wrapped row) and body,
- * word-wrapped at the stripe indent to `term_cols`. Writes directly to
- * stdout and leaves the cursor at column 0 of a fresh row. The editor
- * uses it to repaint a submitted line; history replay (resume) uses it so
- * a restored user message looks byte-for-byte like one just typed. Does
- * not erase any prior content — the caller positions the cursor. */
-void input_render_user_message(const char *text, size_t len, int term_cols);
+ * word-wrapped at the stripe indent to `term_cols` — and write it to
+ * `out`, leaving the cursor at column 0 of a fresh row. The editor
+ * repaints a submitted line through the same layout code; the history
+ * view uses this entry point so a rendered prompt looks byte-for-byte
+ * like one just typed, whether it goes at the terminal or at a pipe.
+ * Does not erase any prior content — the caller positions the cursor. */
+void input_render_user_message_to(FILE *out, const char *text, size_t len, int term_cols);
 
 /* The column budget the editor lays user input out within: the configured
  * display_width() clamped to the real tty width. Exposed so a caller passing a

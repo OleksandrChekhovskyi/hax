@@ -62,6 +62,15 @@ struct tool_ctx {
      * onto the ITEM_TOOL_RESULT it builds (agent_tool_result_make). */
     struct item_image *images;
     size_t n_images;
+    /* Out: this call's output stands in for what it streamed through
+     * emit_display rather than repeating it — `write` creating a file sends
+     * the content to the screen and returns "created <path> (...)". The
+     * runner stamps ITEM_ORIGIN_SUMMARIZED on the result so a later replay
+     * knows the block body has to be rebuilt from the call's arguments
+     * instead of from the output (src/history.c). Only meaningful together
+     * with emit_display; a tool whose output *is* what it showed (bash)
+     * leaves it clear. */
+    int output_summarizes_display;
 };
 
 struct tool {

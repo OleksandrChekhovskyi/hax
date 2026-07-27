@@ -88,11 +88,27 @@ struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *se
 
     int marker_placed = had_partial_text;
     size_t items_to = session->n_items;
+    if (had_partial_text) {
+        /* The "\n[interrupted]" turn_flush_text appended above is ours, not
+         * the model's. Stamp the item that carries it — the last assistant
+         * message absorbed — so display strips exactly what we added instead
+         * of recognizing it by content (a response can legitimately end on
+         * that line). */
+        for (size_t i = items_to; i-- > items_from;) {
+            if (session->items[i].kind == ITEM_ASSISTANT_MESSAGE) {
+                session->items[i].origin = ITEM_ORIGIN_INTERRUPTED;
+                break;
+            }
+        }
+    }
     for (size_t i = items_from; i < items_to; i++) {
         if (session->items[i].kind != ITEM_TOOL_CALL)
             continue;
-        items_append(&session->items, &session->n_items, &session->cap_items,
-                     agent_tool_result_make(&session->items[i], INTERRUPT_MARKER, NULL));
+        struct item closed = agent_tool_result_make(&session->items[i], INTERRUPT_MARKER, NULL);
+        /* The stream was cut before dispatch reached this call: it never ran,
+         * same as one Esc skipped mid-batch. */
+        closed.origin = ITEM_ORIGIN_SKIPPED;
+        items_append(&session->items, &session->n_items, &session->cap_items, closed);
         marker_placed = 1;
     }
 
@@ -101,6 +117,7 @@ struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *se
                      (struct item){
                          .kind = ITEM_ASSISTANT_MESSAGE,
                          .text = xstrdup(INTERRUPT_MARKER),
+                         .origin = ITEM_ORIGIN_INTERRUPTED,
                      });
         marker_placed = 1;
     }
@@ -137,10 +154,14 @@ static struct item loop_run_tool(const struct agent_loop_params *params, const s
     if (hooks->tool_call) {
         result = hooks->tool_call(call, action, image_input, hooks->user);
     } else if (action == AGENT_LOOP_TOOL_REFUSE) {
-        result =
-            agent_tool_result_make(call, "error: tool calls are disabled in this session", NULL);
+        /* No frontend hook (one-shot): the core answers the call itself, and
+         * owes the same provenance the rendered paths stamp — the action is
+         * what makes it undispatched, not who drew it. */
+        result = agent_tool_result_make(call, REFUSED_RESULT, NULL);
+        result.origin = ITEM_ORIGIN_REFUSED;
     } else if (action == AGENT_LOOP_TOOL_SKIP) {
         result = agent_tool_result_make(call, INTERRUPT_MARKER, NULL);
+        result.origin = ITEM_ORIGIN_SKIPPED;
     } else {
         struct agent_tool_call tool_call;
         agent_tool_call_init(&tool_call, call);

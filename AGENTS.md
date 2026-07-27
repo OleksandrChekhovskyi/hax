@@ -80,7 +80,7 @@ Terminology:
   tools.
 - `ITEM_TURN_BOUNDARY` separates consecutive turns inside one user turn.
 
-Core modules and responsibilities:
+Layer boundaries and the rules that keep them:
 
 - `src/agent_core.{c,h}` and `src/agent_loop.{c,h}` contain behavior shared by the interactive
   (`src/agent.c`) and one-shot (`src/oneshot.c`) frontends. Keep frontend-specific I/O and
@@ -90,9 +90,8 @@ Core modules and responsibilities:
 - `src/provider.h` defines the flat conversation view (`struct context` / `struct item`) and
   the provider streaming interface. Provider adapters translate native APIs/SSE into
   `struct stream_event`; provider-specific JSON should not leak into the agent.
-- `src/providers/registry.{c,h}` owns provider discovery. Compiled-in providers export one
-  `const struct provider_factory PROVIDER_<NAME>` and are listed in `BUILTINS[]` in
-  autoselect priority order.
+- `src/providers/registry.{c,h}` owns provider discovery: each compiled-in provider exports one
+  `const struct provider_factory PROVIDER_<NAME>`, and `BUILTINS[]` order is autoselect priority.
 - Protocol-compatible providers should reuse the shared family translation via presets
   (`src/providers/openai.c` or `src/providers/anthropic.c`) where possible. Purely static
   endpoints should be config-defined providers rather than new C shims.
@@ -104,19 +103,20 @@ Core modules and responsibilities:
 - `src/config.{c,h}` is the configuration access layer. Declare user-facing tunables in the
   config registry and read them by canonical key; reserve direct `getenv` calls for process
   environment facts or deliberately env-only secrets.
-- `src/model_meta.{c,h}` is the per-model metadata access layer — context window, output
-  cap, modalities, effort levels — resolving config over the backend's own report over the
-  catalog over provider defaults. Consumers ask it, never a tier directly. The live tier is
-  fetched by the provider's `probe_model` hook (a request built on the foreground plus a pure
-  parser, so the worker never touches a live provider) and stored on `struct provider`; every
+- `src/model_meta.{c,h}` is the per-model metadata access layer (window, output cap,
+  modalities, effort levels). Consumers ask it, never a tier directly; every provider
   `destroy()` must call `model_meta_release`.
-- `src/catalog.{c,h}` is the models.dev tier underneath it (per-model cost rates, window
-  limits, modalities, effort ladders): a config `catalog.models` tier over a background-cached
-  snapshot. Providers opt in by setting `provider->catalog_id`; cost *estimation* lives in the
-  agent layer (`agent_session_spend`), never in provider adapters.
+- `src/catalog.{c,h}` is the models.dev tier underneath it; providers opt in by setting
+  `provider->catalog_id`. Cost *estimation* lives in the agent layer (`agent_session_spend`),
+  never in provider adapters.
 - `src/terminal/ansi.h` centralizes ANSI escape sequences; do not inline raw escape literals.
   Colors go through the semantic roles in `src/terminal/theme.{c,h}` (presets resolved from the
   `theme` config key at startup); bold/dim/italic attributes stay direct `ANSI_*`.
+- `src/render/disp.{c,h}` owns where display bytes go: every renderer writes through a
+  `struct disp` and its sink, never `stdout` directly. Cursor-addressed output (markdown
+  retro-wrap, tool-block overprints) is settled by `src/terminal/vt_resolve.{c,h}` before it
+  can go anywhere but a terminal. `src/transcript.{c,h}` is what the model saw,
+  `src/history.{c,h}` what the user saw — keep them distinct.
 
 When adding a compiled-in provider: add the source under `src/providers/`, list it in
 `meson.build`, declare its factory in `registry.h`, and insert it into `BUILTINS[]` in

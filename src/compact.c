@@ -264,8 +264,9 @@ static void compact_apply(struct agent_session *s, struct session_log *slog,
 {
     char *seed = compact_build_seed(summary);
     agent_session_reset(s);
-    items_append(&s->items, &s->n_items, &s->cap_items,
-                 (struct item){.kind = ITEM_USER_MESSAGE, .text = seed, .compact_seed = 1});
+    items_append(
+        &s->items, &s->n_items, &s->cap_items,
+        (struct item){.kind = ITEM_USER_MESSAGE, .text = seed, .origin = ITEM_ORIGIN_COMPACT_SEED});
     /* Rotate both logs to fresh files, then write the seed. The old records
      * remain on disk for archaeology. */
     session_log_reset(slog);

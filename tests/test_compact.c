@@ -186,7 +186,8 @@ static void test_transaction_applies_summary(void)
     EXPECT(transaction_events == 2);
     /* Successful compaction leaves only the seed and its own usage footer. */
     EXPECT(session.n_items == 2);
-    EXPECT(session.items[0].kind == ITEM_USER_MESSAGE && session.items[0].compact_seed);
+    EXPECT(session.items[0].kind == ITEM_USER_MESSAGE &&
+           session.items[0].origin == ITEM_ORIGIN_COMPACT_SEED);
     EXPECT(session.items[0].text && strstr(session.items[0].text, "earlier part") != NULL);
     EXPECT(session.items[0].text && strstr(session.items[0].text, "continue") != NULL);
     EXPECT(session.items[1].kind == ITEM_TURN_USAGE);
@@ -236,7 +237,8 @@ static void test_transaction_archives_rejected_attempt(void)
     EXPECT(strcmp(old_path, session_log_path(slog)) != 0);
     EXPECT(session_load(session_log_path(slog), &new_items, &n_new, NULL) == 0);
     EXPECT(n_new == 2);
-    EXPECT(new_items[0].kind == ITEM_USER_MESSAGE && new_items[0].compact_seed);
+    EXPECT(new_items[0].kind == ITEM_USER_MESSAGE &&
+           new_items[0].origin == ITEM_ORIGIN_COMPACT_SEED);
     EXPECT(new_items[1].kind == ITEM_TURN_USAGE);
     EXPECT(new_items[1].usage->usage.input_tokens == 200);
 

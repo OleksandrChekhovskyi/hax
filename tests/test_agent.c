@@ -538,7 +538,7 @@ static size_t count_users(const struct item *items, size_t n)
 {
     size_t c = 0;
     for (size_t i = 0; i < n; i++)
-        if (items[i].kind == ITEM_USER_MESSAGE && !items[i].compact_seed)
+        if (items[i].kind == ITEM_USER_MESSAGE && items[i].origin != ITEM_ORIGIN_COMPACT_SEED)
             c++;
     return c;
 }
@@ -565,6 +565,33 @@ static void do_fork(void *user)
 {
     struct mut_call *c = user;
     agent_fork(c->st, c->turn);
+}
+
+/* An empty send after a marked stop appends CONTINUE_MARKER as a user item,
+ * but it is not a prompt: it extends the turn already counted. Counting it
+ * would inflate the history banner and offer /undo a revert point the user
+ * never typed. */
+static void test_continue_marker_is_not_a_user_turn(void)
+{
+    struct fixture f;
+    fixture_init(&f);
+    add_turn(&f.sess, "first", "r1");
+    agent_session_add_continuation(&f.sess);
+    items_append(&f.sess.items, &f.sess.n_items, &f.sess.cap_items,
+                 (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("r1 continued")});
+    add_turn(&f.sess, "second", "r2");
+
+    EXPECT(agent_user_turn_count(&f.sess) == 2);
+    EXPECT_STR_EQ(agent_user_turn_text(&f.sess, 0), "first");
+    EXPECT_STR_EQ(agent_user_turn_text(&f.sess, 1), "second");
+
+    /* The same text typed by hand is a prompt like any other — provenance is
+     * the item's flag, not its bytes, so a user who writes "[continue]" gets a
+     * turn they can /undo back to. */
+    agent_session_add_user(&f.sess, CONTINUE_MARKER);
+    EXPECT(agent_user_turn_count(&f.sess) == 3);
+    EXPECT_STR_EQ(agent_user_turn_text(&f.sess, 2), CONTINUE_MARKER);
+    fixture_free(&f);
 }
 
 static void test_undo_reverts_history_and_file(void)
@@ -596,6 +623,68 @@ static void test_undo_reverts_history_and_file(void)
     size_t n;
     EXPECT(session_load(path, &items, &n, NULL) == 0);
     EXPECT(count_users(items, n) == 1);
+    free_items(items, n);
+
+    free(out);
+    free(path);
+    free(f.st.pending_recall);
+    session_log_close(f.st.slog);
+    agent_session_free(&f.sess);
+    unsetenv("HAX_MODEL");
+    unsetenv("HAX_SYSTEM_PROMPT");
+    unsetenv("HAX_NO_ENV");
+    unsetenv("HAX_NO_AGENTS_MD");
+}
+
+/* The in-memory cut and the on-disk cut have to land on the same turn. /undo
+ * passes a turn number derived from the item scan and an item count derived
+ * from it too; if the file scan counts a continuation marker as a turn, it
+ * cuts a turn earlier, and the item count then recorded as written skips
+ * every line in between — the log silently loses the retained tail and
+ * everything appended after it. */
+static void test_undo_with_continuation_cuts_disk_and_memory_alike(void)
+{
+    set_state_dir();
+    struct fixture f;
+    fixture_init(&f);
+    add_turn(&f.sess, "first", "r1");
+    /* An interrupted first turn resumed by an empty send. */
+    agent_session_add_continuation(&f.sess);
+    items_append(&f.sess.items, &f.sess.n_items, &f.sess.cap_items,
+                 (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("r1 continued")});
+    add_turn(&f.sess, "second", "r2");
+
+    f.st.slog = session_log_open("prov-x", "model-a", NULL, NULL);
+    EXPECT(f.st.slog != NULL);
+    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
+    char *path = xstrdup(session_log_path(f.st.slog));
+    EXPECT(agent_user_turn_count(&f.sess) == 2);
+
+    /* Revert to before "second": the whole first turn, continuation included,
+     * survives in memory... */
+    struct mut_call c = {.st = &f.st, .turn = 1};
+    char *out = capture_stdout(do_undo, &c);
+    EXPECT(agent_user_turn_count(&f.sess) == 1);
+    size_t kept = f.sess.n_items;
+
+    /* ...and on disk, item for item. */
+    struct item *items;
+    size_t n;
+    EXPECT(session_load(path, &items, &n, NULL) == 0);
+    EXPECT(n == kept);
+    int saw_continuation = 0;
+    for (size_t i = 0; i < n; i++)
+        if (items[i].origin == ITEM_ORIGIN_CONTINUATION)
+            saw_continuation = 1;
+    EXPECT(saw_continuation);
+    free_items(items, n);
+
+    /* A later append lands after the retained tail rather than overwriting
+     * it: n_written must match what the file actually holds. */
+    add_turn(&f.sess, "third", "r3");
+    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
+    EXPECT(session_load(path, &items, &n, NULL) == 0);
+    EXPECT(n == f.sess.n_items);
     free_items(items, n);
 
     free(out);
@@ -895,7 +984,9 @@ int main(void)
     test_banner_no_provider_points_at_picker();
     test_banner_no_model_points_at_picker();
     test_banner_prefers_label_and_appends_effort();
+    test_continue_marker_is_not_a_user_turn();
     test_undo_reverts_history_and_file();
+    test_undo_with_continuation_cuts_disk_and_memory_alike();
     test_fork_branches_and_switches_log();
     test_fork_at_tip_clones_whole();
     test_fork_without_recording_leaves_state();

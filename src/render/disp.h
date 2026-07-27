@@ -3,6 +3,7 @@
 #define HAX_DISP_H
 
 #include <stddef.h>
+#include <stdio.h>
 
 /* Block-aware terminal output.
  *
@@ -12,22 +13,32 @@
  * model and tools happen to emit.
  *
  * Trailing newline runs are deferred into `held` instead of being committed
- * to stdout, so a later disp_block_separator can cap them at 2 (one blank
+ * to the sink, so a later disp_block_separator can cap them at 2 (one blank
  * line). Without buffering they'd already be on the terminal and we
  * couldn't take them back. Within a block, a non-newline byte commits any
  * held newlines verbatim.
  *
- * disp does not own stdout — callers free to fflush/fputs around it as
+ * disp does not own its sink — callers free to fflush/fputs around it as
  * long as they don't write content bytes directly (escapes are fine via
  * disp_raw). */
 
 struct disp {
-    int trail;    /* trailing newlines committed to terminal */
+    /* Where bytes go. NULL means stdout, so a zero-initialized disp
+     * behaves like the live REPL one; set it to route a render at a
+     * pipe or a memory stream (history_render into $PAGER, tests). */
+    FILE *out;
+    int trail;    /* trailing newlines committed to the sink */
     int held;     /* trailing newlines received but not yet committed */
     int saw_text; /* have we emitted real model text yet this turn? */
 };
 
-/* Drain held newlines to stdout. */
+/* The sink `d` writes to — d->out, or stdout when unset. */
+FILE *disp_sink(const struct disp *d);
+
+/* Flush the sink. */
+void disp_flush(struct disp *d);
+
+/* Drain held newlines to the sink. */
 void disp_emit_held(struct disp *d);
 
 /* Write one byte. '\n' is deferred into held; everything else commits
@@ -42,7 +53,7 @@ void disp_write(struct disp *d, const char *s, size_t n);
 /* Write zero-width bytes (ANSI escapes). Caller guarantees no NLs in s.
  * Does not flush held — escapes land ahead of any pending NLs in byte
  * order, but since they're zero-width that's visually identical. */
-void disp_raw(const char *s);
+void disp_raw(struct disp *d, const char *s);
 
 /* Formatted write — bytes go through disp_write. */
 __attribute__((format(printf, 2, 3), nonnull(2))) void disp_printf(struct disp *d, const char *fmt,
@@ -88,16 +99,18 @@ void disp_tool_strip_solo(struct disp *d);
 
 /* Close the open tool block by overprinting the most recently emitted
  * strip with the appropriate end-of-block glyph. Writes \r + the new
- * glyph directly to stdout (bypassing disp's held / trail tracking).
+ * glyph directly to the sink (bypassing disp's held / trail tracking).
  * Caller invariant: the cursor is on the same row as the strip about
  * to be overprinted, with the row's trailing \n still held in disp —
  * i.e. the row's content was the last thing to write to that row.
+ * Cursor-addressed, so only for a live terminal: a paged or captured
+ * render wants tool_render's cursor-free mode instead.
  *
  * The two variants exist because the streaming path doesn't know its
  * row count up front: at finalize, pick "└" if more than one row was
  * emitted (multi-row close), or "›" if only one (effectively promotes
  * the leading "┌" to a solo chevron). */
-void disp_tool_strip_close(void);
-void disp_tool_strip_close_solo(void);
+void disp_tool_strip_close(struct disp *d);
+void disp_tool_strip_close_solo(struct disp *d);
 
 #endif /* HAX_DISP_H */

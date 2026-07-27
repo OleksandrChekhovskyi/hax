@@ -835,6 +835,15 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
     return STEP_ADVANCED;
 }
 
+int md_cols(void)
+{
+    int w = display_width();
+    /* term_width() is the raw physical edge, so this holds even on the
+     * sub-20-column terminals display_width() floors away from. */
+    int edge = term_width() - 1;
+    return w < edge ? w : edge;
+}
+
 struct md_renderer *md_new(md_emit_fn emit_cb, void *user, int wrap_width)
 {
     struct md_renderer *m = xcalloc(1, sizeof(*m));

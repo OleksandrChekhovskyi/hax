@@ -169,13 +169,13 @@ static void status_commit(struct tool_render *r)
         return;
     spinner_hide(r->spinner);
     emit_strip_for_next_row(r);
-    disp_raw(ANSI_DIM);
+    disp_raw(r->disp, ANSI_DIM);
     char *trimmed = truncate_line(r->status_content.data, content_budget());
     disp_write(r->disp, trimmed, strlen(trimmed));
     free(trimmed);
-    disp_raw(ANSI_RESET);
+    disp_raw(r->disp, ANSI_RESET);
     disp_putc(r->disp, '\n');
-    fflush(stdout);
+    disp_flush(r->disp);
     r->rows_emitted++;
     r->lines_emitted++;
     r->bytes_emitted += r->status_content.len + 1;
@@ -190,13 +190,13 @@ static void status_replace_with_marker(struct tool_render *r, const char *marker
 {
     spinner_hide(r->spinner);
     emit_strip_for_next_row(r);
-    disp_raw(ANSI_DIM);
+    disp_raw(r->disp, ANSI_DIM);
     char *trimmed = truncate_line(marker, content_budget());
     disp_write(r->disp, trimmed, strlen(trimmed));
     free(trimmed);
-    disp_raw(ANSI_RESET);
+    disp_raw(r->disp, ANSI_RESET);
     disp_putc(r->disp, '\n');
-    fflush(stdout);
+    disp_flush(r->disp);
     r->rows_emitted++;
     r->status_painted = 0;
     r->started = 1;
@@ -225,7 +225,7 @@ static void status_drop(struct tool_render *r)
 static void emit_permanent_row(struct tool_render *r, const char *content, size_t len)
 {
     emit_strip_for_next_row(r);
-    disp_raw(ANSI_DIM);
+    disp_raw(r->disp, ANSI_DIM);
     /* truncate_for_display takes NUL-terminated input — copy into a
      * temporary buffer since `content` is a slice. */
     char *tmp = xmalloc(len + 1);
@@ -235,7 +235,7 @@ static void emit_permanent_row(struct tool_render *r, const char *content, size_
     free(tmp);
     disp_write(r->disp, trimmed, strlen(trimmed));
     free(trimmed);
-    disp_raw(ANSI_RESET);
+    disp_raw(r->disp, ANSI_RESET);
     disp_putc(r->disp, '\n');
     r->rows_emitted++;
     r->started = 1;
@@ -408,11 +408,11 @@ static void emit_diff_line(struct tool_render *r, const char *line, size_t len)
     emit_strip_for_next_row(r);
     /* Every diff line gets a color: the add/remove roles for the changed
      * lines, dim for everything else (context, headers, markers). */
-    disp_raw(diff_line_color(line, len, r->diff_in_hunk));
+    disp_raw(r->disp, diff_line_color(line, len, r->diff_in_hunk));
     char *trimmed = truncate_line(line, content_budget());
     disp_write(r->disp, trimmed, strlen(trimmed));
     free(trimmed);
-    disp_raw(ANSI_RESET);
+    disp_raw(r->disp, ANSI_RESET);
     disp_putc(r->disp, '\n');
     r->rows_emitted++;
     r->started = 1;
@@ -552,7 +552,7 @@ void tool_render_feed(struct tool_render *r, const char *bytes, size_t n)
         free(out);
     if (clean != stack_strip)
         free(clean);
-    fflush(stdout);
+    disp_flush(r->disp);
 }
 
 /* Walk the tail ring contiguously into a linear buffer, back-walking
@@ -783,11 +783,11 @@ void tool_render_finalize(struct tool_render *r)
      * only one row — promotes the leading "┌" to a self-contained
      * chevron. */
     if (r->rows_emitted >= 2)
-        disp_tool_strip_close();
+        disp_tool_strip_close(r->disp);
     else if (r->rows_emitted == 1)
-        disp_tool_strip_close_solo();
+        disp_tool_strip_close_solo(r->disp);
 
-    fflush(stdout);
+    disp_flush(r->disp);
 
     /* Make finalize idempotent: clear started so a second call
      * short-circuits at the early-return above instead of re-emitting

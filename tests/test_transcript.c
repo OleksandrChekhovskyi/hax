@@ -167,13 +167,14 @@ static void test_user_message_has_section_rule(void)
     free(out);
 }
 
-static void test_user_compact_seed_label(void)
+static void test_synthetic_user_labels(void)
 {
     /* A compaction seed keeps the user body verbatim and untruncated (it
      * IS what went on the wire) but renders under its own rule with a dim
      * body: the accent stays exclusive to human-typed input. */
-    struct item items[] = {
-        {.kind = ITEM_USER_MESSAGE, .text = (char *)"line one\nline two", .compact_seed = 1}};
+    struct item items[] = {{.kind = ITEM_USER_MESSAGE,
+                            .text = (char *)"line one\nline two",
+                            .origin = ITEM_ORIGIN_COMPACT_SEED}};
     char *out = render_to_string(NULL, items, 1);
     EXPECT(contains(out, "── compaction seed ──"));
     EXPECT(!contains(out, "── user ──"));
@@ -181,6 +182,17 @@ static void test_user_compact_seed_label(void)
     /* Dim, re-applied per line so it survives the pager. */
     EXPECT(contains(out, ANSI_DIM "line one" ANSI_RESET "\n" ANSI_DIM "line two" ANSI_RESET));
     free(out);
+
+    /* An empty-send continuation is the agent's too, and gets its own rule
+     * rather than posing as a typed prompt. */
+    struct item cont[] = {{.kind = ITEM_USER_MESSAGE,
+                           .text = (char *)"[continue]",
+                           .origin = ITEM_ORIGIN_CONTINUATION}};
+    char *c = render_to_string(NULL, cont, 1);
+    EXPECT(contains(c, "── continuation ──"));
+    EXPECT(!contains(c, "── user ──"));
+    EXPECT(!contains(c, ANSI_BRIGHT_MAGENTA));
+    free(c);
 }
 
 static void test_user_multiline_raw(void)
@@ -557,7 +569,7 @@ int main(void)
     test_no_boundary_no_turn_rule();
     test_system_prompt();
     test_user_message_has_section_rule();
-    test_user_compact_seed_label();
+    test_synthetic_user_labels();
     test_user_multiline_raw();
     test_assistant_message();
     test_tool_call_pretty_prints_args();

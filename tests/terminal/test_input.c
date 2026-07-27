@@ -100,10 +100,87 @@ static void test_history_missing_file(void)
     free(path);
 }
 
+/* Modal control-key bindings. The dispatch half needs a tty (it drops raw
+ * mode and hands over the terminal), so these pin the registration rules
+ * the editor guarantees to callers. */
+
+static void noop_view(void *user)
+{
+    (void)user;
+}
+
+static void other_view(void *user)
+{
+    (void)user;
+}
+
+/* The naming macro must land on the C0 byte the terminal actually sends,
+ * or a binding would be registered for a key nobody can press. */
+static void test_modal_key_macro(void)
+{
+    EXPECT(INPUT_KEY_CTRL('O') == 0x0f);
+    EXPECT(INPUT_KEY_CTRL('T') == 0x14);
+    EXPECT(INPUT_KEY_CTRL('A') == 0x01);
+}
+
+static void test_modal_key_bind_and_rebind(void)
+{
+    struct input *in = input_new();
+    int slot_a = 0;
+
+    EXPECT(input_bind_modal_key(in, INPUT_KEY_CTRL('O'), noop_view, &slot_a) == 0);
+    EXPECT(input_bind_modal_key(in, INPUT_KEY_CTRL('T'), noop_view, NULL) == 0);
+    EXPECT(in->modal_keys[0].key == INPUT_KEY_CTRL('O'));
+    EXPECT(in->modal_keys[0].user == &slot_a);
+    EXPECT(in->modal_keys[1].key == INPUT_KEY_CTRL('T'));
+
+    /* Rebinding replaces in place rather than consuming a second slot —
+     * otherwise a caller that re-registers on every prompt would exhaust
+     * the table. */
+    EXPECT(input_bind_modal_key(in, INPUT_KEY_CTRL('O'), other_view, NULL) == 0);
+    EXPECT(in->modal_keys[0].fn == other_view);
+    EXPECT(in->modal_keys[0].user == NULL);
+    EXPECT(in->modal_keys[2].fn == NULL);
+
+    /* Clearing frees the slot for reuse. An empty slot always has
+     * fn == NULL, which is also what keeps a stray NUL byte from matching
+     * one during dispatch. */
+    EXPECT(input_bind_modal_key(in, INPUT_KEY_CTRL('O'), NULL, NULL) == 0);
+    EXPECT(in->modal_keys[0].fn == NULL);
+
+    input_free(in);
+}
+
+/* Only control bytes can be bound: a printable key would shadow typing. */
+static void test_modal_key_rejects_printable(void)
+{
+    struct input *in = input_new();
+    EXPECT(input_bind_modal_key(in, 'q', noop_view, NULL) == -1);
+    EXPECT(in->modal_keys[0].fn == NULL);
+    input_free(in);
+}
+
+/* A full table refuses rather than dropping a binding on the floor, so an
+ * over-eager caller finds out instead of losing a key silently. Clearing an
+ * unbound key is not an error and consumes nothing. */
+static void test_modal_key_table_full(void)
+{
+    struct input *in = input_new();
+    for (int i = 0; i < INPUT_MODAL_KEYS_MAX; i++)
+        EXPECT(input_bind_modal_key(in, (unsigned char)(i + 1), noop_view, NULL) == 0);
+    EXPECT(input_bind_modal_key(in, 0x1f, noop_view, NULL) == -1);
+    EXPECT(input_bind_modal_key(in, 0x1f, NULL, NULL) == 0);
+    input_free(in);
+}
+
 int main(void)
 {
     test_history_load_is_read_only();
     test_history_open_appends();
     test_history_missing_file();
+    test_modal_key_macro();
+    test_modal_key_bind_and_rebind();
+    test_modal_key_rejects_printable();
+    test_modal_key_table_full();
     T_REPORT();
 }

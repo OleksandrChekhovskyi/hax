@@ -16,6 +16,7 @@
 #include "compact.h"
 #include "config.h"
 #include "file_mention.h"
+#include "history.h"
 #include "paste_image.h"
 #include "select.h"
 #include "session.h"
@@ -35,6 +36,7 @@
 #include "terminal/notify.h"
 #include "terminal/theme.h"
 #include "terminal/ui.h"
+#include "terminal/vt_resolve.h"
 
 /* The ASCII fallback is used when locale_init_utf8() couldn't establish a
  * UTF-8 LC_CTYPE — wcwidth() under a non-UTF-8 locale would mis-account
@@ -90,10 +92,11 @@ static void stats_count_tool_call(struct session_stats *st, const char *name)
  * but is zero-width, so the visible result is identical. */
 static void md_emit_to_disp(const char *bytes, size_t n, int is_raw, void *user)
 {
+    struct disp *d = user;
     if (is_raw)
-        fwrite(bytes, 1, n, stdout);
+        fwrite(bytes, 1, n, disp_sink(d));
     else
-        disp_write((struct disp *)user, bytes, n);
+        disp_write(d, bytes, n);
 }
 
 static int markdown_enabled(void)
@@ -106,27 +109,6 @@ static int markdown_enabled(void)
     if (!isatty(fileno(stdout)))
         return 0;
     return config_bool("markdown");
-}
-
-/* Cell budget for the markdown wrap engine. display_width() is the
- * content width we'd like, but the eager-wrap engine streams each
- * codepoint to the terminal and retro-wraps with CSI nD + CSI K
- * (markdown.c:wrap_break) — math that assumes the cursor sits one cell
- * past the last glyph. A glyph in the *physical* last column violates
- * that: terminals that defer the autowrap (xterm's pending-wrap,
- * libvterm's at_phantom) leave the cursor on the last column, not past
- * it, so the cursor-back lands one cell too far left and the erase eats
- * the previous word's last character. Reserve the last column so the
- * engine never fills it and the cursor model holds on every terminal.
- * Only bites when display_width() == term_width() (narrow terminals,
- * e.g. nvim's sidebar); the wide case is already capped well short.
- * term_width() is the raw physical edge, so this holds even on the
- * sub-20-column terminals display_width() floors away from. */
-static int md_wrap_width(void)
-{
-    int w = display_width();
-    int edge = term_width() - 1;
-    return w < edge ? w : edge;
 }
 
 /* Whether to render reasoning/CoT deltas live in a dim block. Default
@@ -149,7 +131,7 @@ void agent_display_refresh(struct agent_state *st)
         r->md = NULL;
     }
     if (markdown_enabled())
-        r->md = md_new(md_emit_to_disp, &r->disp, md_wrap_width());
+        r->md = md_new(md_emit_to_disp, &r->disp, md_cols());
 }
 
 double agent_session_spend(const struct session_stats *t, int *approx)
@@ -207,7 +189,7 @@ static void display_stats_line(struct render_ctx *r, const struct provider *p, c
 
     struct disp *d = &r->disp;
     render_open_block(r);
-    disp_raw(ANSI_DIM);
+    disp_raw(d, ANSI_DIM);
 
     /* Greedy fill: emit segments joined by " · ", breaking to a fresh line
      * when the next one wouldn't fit. Segment text is ASCII (byte length ==
@@ -229,9 +211,9 @@ static void display_stats_line(struct render_ctx *r, const struct provider *p, c
         disp_printf(d, "%s", segs[i]);
         col += len;
     }
-    disp_raw(ANSI_RESET);
+    disp_raw(d, ANSI_RESET);
     disp_putc(d, '\n');
-    fflush(stdout);
+    disp_flush(d);
 }
 
 /* Per-stream side-channel hook: label/timer bookkeeping plus the
@@ -408,18 +390,18 @@ static int render_on_event(const struct stream_event *ev, void *user)
     case EV_DONE:
         /* Stream ended cleanly. No state transition — agent_run's
          * post-stream path closes whatever was open. */
-        fflush(stdout);
+        disp_flush(d);
         break;
     case EV_ERROR:
         /* Full close before drawing the error block. render_open_block's
          * RS_IDLE transition flushes md's tail if RS_TEXT was open, so
          * partial pre-error text appears just above the error line. */
         render_open_block(r);
-        disp_raw(theme_open(THEME_ERROR));
+        disp_raw(d, theme_open(THEME_ERROR));
         disp_printf(d, "[error: %s]", ev->u.error.message);
-        disp_raw(ANSI_RESET);
+        disp_raw(d, ANSI_RESET);
         disp_putc(d, '\n');
-        fflush(stdout);
+        disp_flush(d);
         break;
     }
 
@@ -456,28 +438,26 @@ static void cursor_hide(void)
     fflush(stdout);
 }
 
-/* Indirect references into the live agent_session so the Ctrl-T
- * callback always sees the latest values — `items` is reassigned by
- * xrealloc as the vector grows, and `n_items` advances with every
- * append. Holding the addresses sidesteps the moving target. `sys` is
- * fixed for the session's lifetime, but routing it through the same
- * indirection keeps the three fields uniform.
- *
- * Lifetime: instances live on agent_run's stack frame and are
- * registered with the input editor for the duration of that call.
- * input_free must run before agent_run returns (it does — see the
- * cleanup at the end of agent_run), otherwise `input` would outlive
- * the storage and a stray Ctrl-T would dereference a dead frame. */
-struct transcript_view {
-    const char *const *sys_ref;
-    struct item *const *items_ref;
-    const size_t *n_items_ref;
-    /* Tools and n_tools are stable for the session's lifetime (set in
-     * agent_session_init, freed in _destroy, not touched by /new), so
-     * they're held by value — no indirection needed. */
-    const struct tool_def *tools;
-    size_t n_tools;
-};
+/* Defined with the rest of the banner below; the paged history view opens
+ * with its own two banner rows. */
+static const char *banner_bar(char *buf, size_t n);
+static void print_banner_identity(FILE *out, const struct provider *p,
+                                  const struct agent_session *s);
+
+/* Open the user's pager. Falls back to `less -R` so the ANSI both views
+ * carry renders as color rather than escape soup. */
+static int view_pager_open(struct spawn_pipe *sp)
+{
+    const char *pager = getenv("PAGER");
+    if (!pager || !*pager)
+        pager = "less -R";
+    /* spawn_pipe_open shields the parent from terminal-generated
+     * SIGINT/SIGQUIT (so Ctrl-C in the pager exits the pager, not
+     * hax) and from SIGPIPE on the write path (so quitting the pager
+     * early gives EPIPE rather than killing hax). The child sees all
+     * three at default disposition, so less behaves normally. */
+    return spawn_pipe_open(sp, pager);
+}
 
 /* Adapt paste_image_capture (stateless) to the editor's hook signature. */
 static char *paste_cb(void *user)
@@ -495,32 +475,127 @@ static char *paste_filter_cb(const char *text, void *user)
     return paste_image_uris_to_paths(text);
 }
 
+/* Both view hooks take the live agent_state as their user pointer: reading
+ * the session and provider through it is what keeps a view current, since
+ * the items vector moves as xrealloc grows it and /provider replaces the
+ * provider outright. Lifetime is agent_run's frame — input_free runs before
+ * it returns (see the cleanup at the end), so a stray keypress can never
+ * reach a dead frame. */
 static void show_transcript_cb(void *user)
 {
-    struct transcript_view *v = user;
-    const char *pager = getenv("PAGER");
-    if (!pager || !*pager)
-        pager = "less -R";
-    /* spawn_pipe_open shields the parent from terminal-generated
-     * SIGINT/SIGQUIT (so Ctrl-C in the pager exits the pager, not
-     * hax) and from SIGPIPE on the fputs path (so quitting the pager
-     * early gives EPIPE rather than killing hax). The child sees all
-     * three at default disposition, so less behaves normally. */
+    const struct agent_state *st = user;
+    const struct agent_session *s = st->sess;
     struct spawn_pipe sp;
-    if (spawn_pipe_open(&sp, pager) < 0)
+    if (view_pager_open(&sp) < 0)
         return;
-    transcript_render(sp.w, *v->sys_ref, v->tools, v->n_tools, *v->items_ref, *v->n_items_ref);
+    transcript_render(sp.w, s->sys, s->tools, s->n_tools, s->items, s->n_items);
     spawn_pipe_close(&sp);
 }
 
-/* Caller is expected to have already emitted the leading blank-line
- * gap (slash_dispatch does this for /new; agent_run does it at startup
- * before the first call). The banner itself is just two output rows so
- * it composes cleanly with whatever surrounded the call. */
-void agent_print_banner(const struct provider *p, const struct agent_session *s)
+/* Ctrl-O: the whole conversation in the on-screen idiom, paged.
+ *
+ * Rendered through a private render_ctx rather than the live one: this
+ * must not disturb the real display's block/held bookkeeping, and it
+ * needs its own markdown stream (the live one may be mid-block). No
+ * spinner — every spinner call is NULL-safe, and an animation would be
+ * meaningless in a file.
+ *
+ * The pipeline paints with the cursor (markdown retro-wrap, the tool
+ * block's closing overprint), so it renders into a memory stream first
+ * and the bytes go through vt_resolve, which settles them into the plain
+ * rows a terminal would be showing. Rendering completes before the pager
+ * is spawned, so `less` sees one clean stream and never sits waiting on a
+ * half-rendered conversation.
+ *
+ * Reasoning follows the live setting, read per invocation: turning
+ * show_reasoning on with /config and pressing Ctrl-O shows the reasoning
+ * for turns that were rendered without it.
+ *
+ * Opens with two banner rows — the identity row, so the view starts the way
+ * the session did on screen and names the provider, model, effort and
+ * stance the conversation is on, then this view's own label. The selection
+ * named is the *current* one: a mid-conversation switch is a UI hint only
+ * and never enters history (see agent_apply_settings), so no view can
+ * reconstruct one — the same compromise the Ctrl-T transcript makes with the
+ * system prompt. */
+static void show_history_cb(void *user)
+{
+    const struct agent_state *st = user;
+    const struct agent_session *s = st->sess;
+    struct render_ctx r = {.show_reasoning = reasoning_visible()};
+    char *buf = NULL;
+    size_t len = 0;
+    FILE *mem = open_memstream(&buf, &len);
+    if (!mem)
+        return;
+    r.disp.out = mem;
+    if (markdown_enabled())
+        r.md = md_new(md_emit_to_disp, &r.disp, md_cols());
+
+    print_banner_identity(mem, st->provider, s);
+    /* Second banner row: which of the two paged views this is, in the slot
+     * the REPL's key-tip row occupies. A label, not advice — how to leave
+     * the view belongs to $PAGER, which hax doesn't control. The prompt
+     * count is the one thing the pager can't convey (its indicator is byte
+     * progress, not conversation size); dropped when there is nothing to
+     * count, since the note below then says so. */
+    char bar[32];
+    size_t prompts = agent_user_turn_count(s);
+    if (prompts > 0)
+        fprintf(mem, "%s " ANSI_DIM "conversation history · %zu prompt%s" ANSI_BOLD_OFF "\n",
+                banner_bar(bar, sizeof(bar)), prompts, prompts == 1 ? "" : "s");
+    else
+        fprintf(mem, "%s " ANSI_DIM "conversation history" ANSI_BOLD_OFF "\n",
+                banner_bar(bar, sizeof(bar)));
+    /* The banner rows write straight at the sink (bypassing disp) and end on
+     * a fresh row: trail = 1 tells the first block separator to add the
+     * single blank line the live screen has under the banner. */
+    r.disp.trail = 1;
+
+    if (s->n_items == 0) {
+        render_open_block(&r);
+        disp_raw(&r.disp, ANSI_DIM);
+        disp_printf(&r.disp, "(nothing in this conversation yet)");
+        disp_raw(&r.disp, ANSI_RESET);
+        disp_putc(&r.disp, '\n');
+    } else {
+        history_render(&r, HISTORY_FULL, s->items, s->n_items, 0);
+    }
+    /* Close the last block so a trailing markdown tail is flushed and the
+     * final row is terminated, exactly as the replay path does. */
+    render_transition(&r, RS_IDLE);
+    disp_emit_held(&r.disp);
+    md_free(r.md);
+    fclose(mem);
+
+    struct spawn_pipe sp;
+    if (view_pager_open(&sp) == 0) {
+        vt_resolve(buf, len, sp.w);
+        spawn_pipe_close(&sp);
+    }
+    free(buf);
+}
+
+/* The banner's leading chrome bar, composed into `buf` (the glyph carries
+ * theme escapes, so it can't be a literal) and returned for inline use in
+ * a format argument — same shape as build_prompt. */
+static const char *banner_bar(char *buf, size_t n)
+{
+    snprintf(buf, n, "%s▌%s", theme_open(THEME_CHROME), theme_close(THEME_CHROME));
+    return buf;
+}
+
+/* The banner's first row: the bar, the name, the active stance, and the
+ * selection. Split out from agent_print_banner because it is the half that
+ * makes sense outside the live prompt — the paged history view opens with
+ * it, so the view starts the way the session did on screen and says what
+ * the conversation is running on. The second row is the key tip, which is
+ * advice for the REPL only (and wrong in a pager, where ctrl-d scrolls). */
+static void print_banner_identity(FILE *out, const struct provider *p,
+                                  const struct agent_session *s)
 {
     char bar[32];
-    snprintf(bar, sizeof(bar), "%s▌%s", theme_open(THEME_CHROME), theme_close(THEME_CHROME));
+    banner_bar(bar, sizeof(bar));
     /* Active preset stance, the one colored token on an otherwise dim line.
      * Load-bearing, not decoration: a preset may have swapped the system
      * prompt, and the name is the only at-a-glance signal that a stance —
@@ -541,10 +616,10 @@ void agent_print_banner(const struct provider *p, const struct agent_session *s)
         /* No provider could be constructed (the configured/default one isn't
          * usable — e.g. codex not logged in). The REPL still starts; point
          * the user at /provider to choose a working one. */
-        printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM
-               "%s› no provider — use /provider" ANSI_BOLD_OFF "\n",
-               bar, stance);
-        printf("%s " ANSI_DIM "ctrl-d quit · try /help" ANSI_BOLD_OFF "\n", bar);
+        fprintf(out,
+                "%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM
+                "%s› no provider — use /provider" ANSI_BOLD_OFF "\n",
+                bar, stance);
         free(stance);
         return;
     }
@@ -553,18 +628,32 @@ void agent_print_banner(const struct provider *p, const struct agent_session *s)
     if (!s->model || !*s->model)
         /* No model resolved (a provider with no default, nothing configured
          * yet). The REPL still starts; point the user at /model. */
-        printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM
-               "%s› %s · no model — use /model" ANSI_BOLD_OFF "\n",
-               bar, stance, name);
+        fprintf(out,
+                "%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM
+                "%s› %s · no model — use /model" ANSI_BOLD_OFF "\n",
+                bar, stance, name);
     else if (s->effort)
-        printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "%s› %s · %s · %s" ANSI_BOLD_OFF
-               "\n",
-               bar, stance, name, model_label, s->effort);
+        fprintf(out,
+                "%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "%s› %s · %s · %s" ANSI_BOLD_OFF
+                "\n",
+                bar, stance, name, model_label, s->effort);
     else
-        printf("%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "%s› %s · %s" ANSI_BOLD_OFF "\n",
-               bar, stance, name, model_label);
-    printf("%s " ANSI_DIM "ctrl-d quit · try /help" ANSI_BOLD_OFF "\n", bar);
+        fprintf(out,
+                "%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "%s› %s · %s" ANSI_BOLD_OFF "\n",
+                bar, stance, name, model_label);
     free(stance);
+}
+
+/* Caller is expected to have already emitted the leading blank-line
+ * gap (slash_dispatch does this for /new; agent_run does it at startup
+ * before the first call). The banner itself is just two output rows so
+ * it composes cleanly with whatever surrounded the call. */
+void agent_print_banner(const struct provider *p, const struct agent_session *s)
+{
+    print_banner_identity(stdout, p, s);
+    char bar[32];
+    printf("%s " ANSI_DIM "ctrl-d quit · try /help" ANSI_BOLD_OFF "\n",
+           banner_bar(bar, sizeof(bar)));
 }
 
 int agent_apply_settings(struct agent_state *st, struct provider *p, int announce)
@@ -674,11 +763,11 @@ int agent_apply_settings(struct agent_state *st, struct provider *p, int announc
     free(stance);
 
     render_open_block(st->r);
-    disp_raw(ANSI_DIM);
+    disp_raw(&st->r->disp, ANSI_DIM);
     disp_printf(&st->r->disp, "%s", label);
-    disp_raw(ANSI_RESET);
+    disp_raw(&st->r->disp, ANSI_RESET);
     disp_putc(&st->r->disp, '\n');
-    fflush(stdout);
+    disp_flush(&st->r->disp);
     free(label);
     return 0;
 }
@@ -714,20 +803,6 @@ void agent_new_conversation(struct agent_state *st)
     agent_print_banner(st->provider, st->sess);
 }
 
-/* Render the standalone "[interrupted]" marker as its own dim out-of-band
- * block during history replay, rather than as plain assistant text. Live
- * interrupts render no marker line — there the resume hint above the next
- * prompt is the visible cue. */
-static void render_interrupt_marker(struct render_ctx *r)
-{
-    render_open_block(r);
-    disp_raw(ANSI_DIM);
-    disp_printf(&r->disp, "%s", INTERRUPT_MARKER);
-    disp_raw(ANSI_RESET);
-    disp_putc(&r->disp, '\n');
-    fflush(stdout);
-}
-
 /* One dim line directly above the prompt while a resumable turn is
  * pending, in the transcript's bracket idiom. Re-emitted on every prompt
  * draw (not just once at the stop) so the explanation survives slash
@@ -754,97 +829,16 @@ static void render_resume_hint(struct render_ctx *r, enum agent_resume resume)
     default:
         return;
     }
-    disp_raw(ANSI_DIM);
+    disp_raw(&r->disp, ANSI_DIM);
     disp_printf(&r->disp, "[%s — %s]", what, action);
-    disp_raw(ANSI_RESET);
+    disp_raw(&r->disp, ANSI_RESET);
     disp_putc(&r->disp, '\n');
     disp_putc(&r->disp, '\n'); /* one blank line between hint and prompt */
     /* Commit the newlines instead of leaving them held: the editor paints
      * the prompt with \r + erase-line on the cursor's row, which would wipe
      * the hint if the cursor were still parked at the end of its line. */
     disp_emit_held(&r->disp);
-    fflush(stdout);
-}
-
-/* Echo a stored user message exactly as the live editor repaints a
- * submitted one — the accent "▌ " stripe + accent wrapped body — so a
- * replayed prompt is indistinguishable from one just typed. The editor
- * writes directly to stdout (bypassing disp), ending at column 0 of a
- * fresh row, so we resync disp afterward the same way agent_run does after
- * input_readline. */
-static void replay_user_echo(struct render_ctx *r, const char *text)
-{
-    render_open_block(r); /* one blank line above, cursor at column 0 */
-    /* input_display_cols(), not term_width(): match the editor's configured
-     * display width clamped to the tty, so a replayed prompt wraps identically
-     * to a freshly typed one. */
-    input_render_user_message(text ? text : "", text ? strlen(text) : 0, input_display_cols());
-    r->disp.trail = 1;
-    r->disp.held = 0;
-}
-
-/* Feed a stored assistant message or reasoning blob into the markdown
- * stream exactly as the live path would, so wrapping and block spacing
- * come out identical. NULL/empty is a no-op — opaque (Codex) reasoning has
- * no reasoning_text and replays as nothing, matching the live display. */
-static void replay_text(struct render_ctx *r, enum render_state target, const char *text)
-{
-    if (!text || !*text)
-        return;
-    if (r->state != target) {
-        /* Close the previous block to RS_IDLE first: render_transition's
-         * close-half runs md_flush, emitting any deferred markdown tail
-         * (an unmatched *, a backtick, a pending newline) to the terminal.
-         * Only then reset md for the fresh block — resetting before the
-         * flush would discard those bytes and silently drop characters.
-         * This matches the live order, where md_reset runs while idle
-         * between streams. saw_text=0 arms the first-text newline strip
-         * for this block, like a fresh stream live. Skipped when already
-         * in `target`: consecutive same-kind items concatenate into one
-         * md stream (no reset, no re-strip mid-stream). */
-        render_transition(r, RS_IDLE);
-        if (r->md)
-            md_reset(r->md, md_wrap_width());
-        r->disp.saw_text = 0;
-    }
-    if (target == RS_TEXT) {
-        /* Same strip + open + feed the live text-delta path uses. */
-        render_text_delta(r, text, strlen(text));
-    } else {
-        /* Reasoning: no leading-newline strip — the live reasoning-delta
-         * path doesn't strip either. */
-        render_transition(r, target);
-        render_text_chunk(r, text, strlen(text));
-    }
-}
-
-/* Replay a stored assistant message. A synthetic interrupt marker is split
- * off and rendered through the dim out-of-band block, matching live: a
- * standalone "[interrupted]" (aborted before output) shows only the dim
- * block, and a partial response with "\n[interrupted]" appended (aborted
- * mid-text) shows the partial as normal markdown then the dim block. The
- * marker is recognized only at a line boundary (whole message, or right
- * after a \n) — its exact stored forms — so a legitimate response that
- * merely ends with the literal "[interrupted]" is left as normal text. */
-static void replay_assistant(struct render_ctx *r, const char *text)
-{
-    if (!text || !*text)
-        return;
-    size_t len = strlen(text);
-    size_t mlen = strlen(INTERRUPT_MARKER);
-    if (len >= mlen && strcmp(text + len - mlen, INTERRUPT_MARKER) == 0) {
-        size_t before = len - mlen; /* bytes before the marker */
-        if (before == 0 || text[before - 1] == '\n') {
-            if (before > 1) { /* a partial response precedes "\n[interrupted]" */
-                char *partial = xasprintf("%.*s", (int)(before - 1), text);
-                replay_text(r, RS_TEXT, partial);
-                free(partial);
-            }
-            render_interrupt_marker(r);
-            return;
-        }
-    }
-    replay_text(r, RS_TEXT, text);
+    disp_flush(&r->disp);
 }
 
 /* Replay the last user turn — the final user message plus every turn the
@@ -852,17 +846,31 @@ static void replay_assistant(struct render_ctx *r, const char *text)
  * resuming looks like the conversation never scrolled away rather than
  * dropping the user at a bare prompt. Assistant text and (when shown)
  * reasoning render at full fidelity; tool calls collapse to dim one-line
- * headers, since their output previews can't be rebuilt from stored items
- * and the tools can't be safely re-run. Earlier history stays one Ctrl-T
- * away, summarized by the dim rule's count. `lead` is the verb clause inside
- * the dim rule ("resumed", "undid 2 turns", "forked"), so /resume, /undo and
- * /fork share one replay with different framing.
+ * headers. Deliberately one turn and no tool output: the replay lands
+ * *below* whatever is already on screen, so a bigger budget would push the
+ * real history — which after /undo or /fork is exactly what the user is
+ * looking at — out of view. The whole conversation, tool output included,
+ * is one Ctrl-O away; the dim rule says so and counts what it isn't
+ * showing. `lead` is the verb clause inside that rule ("resumed", "undid 2
+ * turns", "forked"), so /resume, /undo and /fork share one replay with
+ * different framing.
  *
- * Anchored on the last ITEM_USER_MESSAGE, not the last TURN_BOUNDARY: one
- * user prompt can span several round-trips (turns), and we want them all.
- * Interactive-only — gated on both stdin and stdout being TTYs (same as
+ * Anchored on the last user message the view draws, not the last
+ * TURN_BOUNDARY: one user prompt can span several round-trips (turns), and we
+ * want them all. Interactive-only — gated on both stdin and stdout being TTYs (same as
  * cursor_supported()), so a non-interactive run (`printf … | hax --resume`,
  * or any piped stdin/stdout) renders nothing extra before processing input. */
+/* A user item the replay can start from: one the view draws something for. A
+ * compaction seed qualifies — it renders as the "conversation compacted"
+ * marker, and after a compaction it may be the only user item left. An
+ * empty-send continuation draws nothing at all (src/history.c), so anchoring
+ * there would begin the replay *below* the prompt that started the work,
+ * dropping it from the turn and counting it among the earlier messages. */
+static int is_replay_anchor(const struct item *it)
+{
+    return it->kind == ITEM_USER_MESSAGE && it->origin != ITEM_ORIGIN_CONTINUATION;
+}
+
 static void replay_user_turn(struct render_ctx *r, const struct agent_session *s, const char *lead)
 {
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
@@ -872,7 +880,7 @@ static void replay_user_turn(struct render_ctx *r, const struct agent_session *s
     int found = 0;
     size_t earlier = 0;
     for (size_t i = s->n_items; i-- > 0;) {
-        if (s->items[i].kind != ITEM_USER_MESSAGE)
+        if (!is_replay_anchor(&s->items[i]))
             continue;
         if (!found) {
             anchor = i;
@@ -892,54 +900,17 @@ static void replay_user_turn(struct render_ctx *r, const struct agent_session *s
     r->disp.held = 0;
 
     render_open_block(r);
-    disp_raw(ANSI_DIM);
+    disp_raw(&r->disp, ANSI_DIM);
     if (earlier > 0)
-        disp_printf(&r->disp, "── %s · %zu earlier message%s · ctrl-t for full history ──", lead,
+        disp_printf(&r->disp, "── %s · %zu earlier message%s · ctrl-o for full history ──", lead,
                     earlier, earlier == 1 ? "" : "s");
     else
-        disp_printf(&r->disp, "── %s · ctrl-t for full history ──", lead);
-    disp_raw(ANSI_RESET);
+        disp_printf(&r->disp, "── %s · ctrl-o for full history ──", lead);
+    disp_raw(&r->disp, ANSI_RESET);
     disp_putc(&r->disp, '\n');
 
-    if (found) {
-        for (size_t i = anchor; i < s->n_items; i++) {
-            const struct item *it = &s->items[i];
-            switch (it->kind) {
-            case ITEM_USER_MESSAGE:
-                /* A compaction seed is synthetic — mark the boundary the way
-                 * the live path's notice did instead of echoing the whole
-                 * summary as a typed prompt. */
-                if (it->compact_seed) {
-                    render_open_block(r);
-                    disp_raw(ANSI_DIM);
-                    disp_printf(&r->disp, "── conversation compacted ──");
-                    disp_raw(ANSI_RESET);
-                    disp_putc(&r->disp, '\n');
-                } else {
-                    replay_user_echo(r, it->text);
-                }
-                break;
-            case ITEM_ASSISTANT_MESSAGE:
-                replay_assistant(r, it->text);
-                break;
-            case ITEM_REASONING:
-                if (r->show_reasoning)
-                    replay_text(r, RS_REASONING, it->reasoning_text);
-                break;
-            case ITEM_TOOL_CALL:
-                /* RS_CLUSTER groups consecutive calls under one block
-                 * separator and lets them stack tight (the next non-tool
-                 * item transitions out cleanly). */
-                render_transition(r, RS_CLUSTER);
-                render_collapsed_tool_call(r, it);
-                break;
-            case ITEM_TOOL_RESULT:
-            case ITEM_TURN_BOUNDARY:
-            case ITEM_TURN_USAGE:
-                break;
-            }
-        }
-    }
+    if (found)
+        history_render(r, HISTORY_BRIEF, s->items, s->n_items, anchor);
 
     /* Land at column 0 with one committed trailing newline, so the prompt
      * that follows is separated by a clean blank line. md_flush leaves the
@@ -950,7 +921,7 @@ static void replay_user_turn(struct render_ctx *r, const struct agent_session *s
     if (r->disp.trail == 0 && r->disp.held == 0)
         disp_putc(&r->disp, '\n');
     disp_emit_held(&r->disp);
-    fflush(stdout);
+    disp_flush(&r->disp);
 }
 
 void agent_resume_session(struct agent_state *st, const char *path)
@@ -1033,14 +1004,26 @@ void agent_resume_session(struct agent_state *st, const char *path)
     replay_user_turn(st->r, s, "resumed");
 }
 
-/* Item index of the 0-based non-seed user message `turn`, or -1 when out of
+/* A user item the user actually typed — what /undo, /fork and the history
+ * banner mean by a turn. Compaction seeds and empty-send continuations are
+ * ours: neither was typed, and a continuation extends the turn already
+ * counted rather than opening one (see the empty-send branch in agent_run).
+ * session.c's line_is_typed_prompt is the same rule over the JSONL mirror,
+ * and the two have to agree — /undo derives the file cut from one and the
+ * item count from the other. */
+static int is_typed_prompt(const struct item *it)
+{
+    return it->kind == ITEM_USER_MESSAGE && it->origin == ITEM_ORIGIN_NONE;
+}
+
+/* Item index of the 0-based typed user message `turn`, or -1 when out of
  * range. The truncation point for /undo and /fork is this index, backed up
  * over the turn_boundary that opens the turn (so the boundary goes too). */
 static int turn_item_index(const struct agent_session *s, size_t turn, size_t *out)
 {
     size_t seen = 0;
     for (size_t i = 0; i < s->n_items; i++) {
-        if (s->items[i].kind == ITEM_USER_MESSAGE && !s->items[i].compact_seed) {
+        if (is_typed_prompt(&s->items[i])) {
             if (seen == turn) {
                 *out = i;
                 return 0;
@@ -1055,7 +1038,7 @@ size_t agent_user_turn_count(const struct agent_session *s)
 {
     size_t n = 0;
     for (size_t i = 0; i < s->n_items; i++)
-        if (s->items[i].kind == ITEM_USER_MESSAGE && !s->items[i].compact_seed)
+        if (is_typed_prompt(&s->items[i]))
             n++;
     return n;
 }
@@ -1249,11 +1232,11 @@ static void compact_notice(struct render_ctx *r, const char *fmt, ...)
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     render_open_block(r);
-    disp_raw(ANSI_DIM);
+    disp_raw(&r->disp, ANSI_DIM);
     disp_printf(&r->disp, "── %s ──", buf);
-    disp_raw(ANSI_RESET);
+    disp_raw(&r->disp, ANSI_RESET);
     disp_putc(&r->disp, '\n');
-    fflush(stdout);
+    disp_flush(&r->disp);
 }
 
 int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
@@ -1401,7 +1384,7 @@ static void repl_loop_turn_begin(void *user)
     struct render_ctx *r = ctx->state->r;
     render_stream_begin(r);
     if (r->md)
-        md_reset(r->md, md_wrap_width());
+        md_reset(r->md, md_cols());
     r->disp.saw_text = 0;
     r->stream_content_seen = 0;
 }
@@ -1526,9 +1509,10 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
      * call. disp is embedded (same lifetime as agent_run's frame), so
      * md_emit_to_disp's user pointer is &r.disp; spinner / md are
      * opaque handles owned here and freed below. */
-    struct render_ctx r = {.disp = {.trail = 1}, .show_reasoning = reasoning_visible()};
+    struct render_ctx r = {.disp = {.out = stdout, .trail = 1},
+                           .show_reasoning = reasoning_visible()};
     r.spinner = spinner_new("working...");
-    r.md = markdown_enabled() ? md_new(md_emit_to_disp, &r.disp, md_wrap_width()) : NULL;
+    r.md = markdown_enabled() ? md_new(md_emit_to_disp, &r.disp, md_cols()) : NULL;
     /* On a --continue/--resume startup, replay the last user turn through
      * the live pipeline (same as /resume mid-session). Needs r/md ready,
      * so it lands here rather than right after the banner — nothing prints
@@ -1539,18 +1523,6 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
     /* Recall is a read either way — what `recording` decides is whether this
      * run's prompts join the file. */
     input_history_open_default(input, recording);
-    struct transcript_view tv = {
-        /* Point at session fields so the Ctrl-T callback always sees
-         * the latest values — the items vector grows via xrealloc so
-         * its address changes, and these are read-only views. The cast
-         * appeases C's lack of implicit multi-level const conversion. */
-        .sys_ref = (const char *const *)&sess.sys,
-        .items_ref = &sess.items,
-        .n_items_ref = &sess.n_items,
-        .tools = sess.tools,
-        .n_tools = sess.n_tools,
-    };
-    input_set_transcript_cb(input, show_transcript_cb, &tv);
     input_set_modal_completer(input, &file_mention_completer);
     input_set_paste_cb(input, paste_cb, NULL);
     input_set_paste_filter(input, paste_filter_cb, NULL);
@@ -1565,6 +1537,12 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
      * mid-run via agent_resume_session — every later use reads state.slog
      * so it tracks that swap instead of dangling on the closed handle. */
     struct agent_state state = {.sess = &sess, .provider = p, .tlog = tlog, .r = &r};
+    /* The two paged conversation views, bound now that `state` — the
+     * up-to-date session and provider they read through — exists. Ctrl-O is
+     * safe to claim even though it is the tty's VDISCARD on BSD/macOS: the
+     * editor's raw mode clears IEXTEN, so the driver never acts on it. */
+    input_bind_modal_key(input, INPUT_KEY_CTRL('O'), show_history_cb, &state);
+    input_bind_modal_key(input, INPUT_KEY_CTRL('T'), show_transcript_cb, &state);
     /* Append-only session record. Resuming continues the same file (so
      * the restored items aren't re-written); otherwise a fresh file is
      * begun. Left NULL when this run doesn't record — all entry points are
@@ -1754,7 +1732,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
         if (*line)
             agent_session_add_user(&sess, line);
         else if (!compacted && state.resume_marked)
-            agent_session_add_user(&sess, CONTINUE_MARKER);
+            agent_session_add_continuation(&sess);
         else
             continued = 1;
         free(line);
@@ -1910,11 +1888,11 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
              * before any pause point, so there is nothing to resume.
              * Say so — silence here reads as a dropped keypress. */
             render_open_block(&r);
-            disp_raw(ANSI_DIM);
+            disp_raw(&r.disp, ANSI_DIM);
             disp_printf(&r.disp, "[finished before pause]");
-            disp_raw(ANSI_RESET);
+            disp_raw(&r.disp, ANSI_RESET);
             disp_putc(&r.disp, '\n');
-            fflush(stdout);
+            disp_flush(&r.disp);
         }
 
         /* Time worked counts errored/interrupted turns too — the wall time

@@ -208,6 +208,74 @@ static void test_first_delta_strip_noop_when_saw_text(void)
     EXPECT(n == 7);
 }
 
+/* ---------- the output sink ---------- */
+
+/* An explicit sink takes every kind of write — content, escapes, held
+ * newlines, separators — and stdout sees none of it. This is what lets the
+ * live pipeline render into a pager or a memory stream. */
+static void test_explicit_sink_takes_all_writes(void)
+{
+    cap_reset();
+    char *buf = NULL;
+    size_t len = 0;
+    FILE *mem = open_memstream(&buf, &len);
+    EXPECT(mem != NULL);
+    if (!mem)
+        return;
+
+    struct disp d = {.out = mem, .trail = 2};
+    disp_raw(&d, "\x1b[1m");
+    disp_printf(&d, "body");
+    disp_putc(&d, '\n');
+    disp_emit_held(&d);
+    disp_block_separator(&d);
+    disp_flush(&d);
+    fclose(mem);
+
+    EXPECT_STR_EQ(buf, "\x1b[1mbody\n\n");
+    EXPECT_STR_EQ(cap_read(), ""); /* nothing leaked to stdout */
+    free(buf);
+}
+
+/* A zero-initialized disp writes to stdout. Load-bearing: callers that
+ * never touch `out` (the live REPL, tests constructing `struct disp {0}`)
+ * depend on NULL meaning stdout, so this can't become "must be set". */
+static void test_null_sink_means_stdout(void)
+{
+    cap_reset();
+    struct disp d = {0};
+    EXPECT(disp_sink(&d) == stdout);
+    disp_write(&d, "to stdout", 9);
+    EXPECT_STR_EQ(cap_read(), "to stdout");
+}
+
+/* Held/trail bookkeeping lives on the disp, not on the sink, so two disps
+ * over different sinks don't interfere. */
+static void test_sinks_keep_separate_bookkeeping(void)
+{
+    cap_reset();
+    char *buf = NULL;
+    size_t len = 0;
+    FILE *mem = open_memstream(&buf, &len);
+    EXPECT(mem != NULL);
+    if (!mem)
+        return;
+
+    struct disp to_mem = {.out = mem};
+    struct disp to_out = {0};
+    disp_write(&to_mem, "a\n", 2); /* newline held, not committed */
+    disp_write(&to_out, "b", 1);
+    EXPECT(to_mem.held == 1 && to_mem.trail == 0);
+    EXPECT(to_out.held == 0 && to_out.trail == 0);
+    disp_emit_held(&to_mem);
+    disp_flush(&to_mem);
+    fclose(mem);
+
+    EXPECT_STR_EQ(buf, "a\n");
+    EXPECT_STR_EQ(cap_read(), "b");
+    free(buf);
+}
+
 int main(void)
 {
     cap_init();
@@ -226,6 +294,9 @@ int main(void)
     test_first_delta_strip_drops_leading_newlines();
     test_first_delta_strip_drops_cr_too();
     test_first_delta_strip_noop_when_saw_text();
+    test_explicit_sink_takes_all_writes();
+    test_null_sink_means_stdout();
+    test_sinks_keep_separate_bookkeeping();
 
     T_REPORT();
 }

@@ -521,6 +521,17 @@ void agent_session_add_user(struct agent_session *s, const char *text)
                  (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup(text)});
 }
 
+void agent_session_add_continuation(struct agent_session *s)
+{
+    items_append(&s->items, &s->n_items, &s->cap_items, (struct item){.kind = ITEM_TURN_BOUNDARY});
+    items_append(&s->items, &s->n_items, &s->cap_items,
+                 (struct item){
+                     .kind = ITEM_USER_MESSAGE,
+                     .text = xstrdup(CONTINUE_MARKER),
+                     .origin = ITEM_ORIGIN_CONTINUATION,
+                 });
+}
+
 void agent_session_add_boundary(struct agent_session *s)
 {
     items_append(&s->items, &s->n_items, &s->cap_items, (struct item){.kind = ITEM_TURN_BOUNDARY});
@@ -554,7 +565,9 @@ void agent_session_mark_interrupt(struct agent_session *s)
     if (i > 0 && tool_result_is_marked(&s->items[i - 1]))
         return;
     items_append(&s->items, &s->n_items, &s->cap_items,
-                 (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup(INTERRUPT_MARKER)});
+                 (struct item){.kind = ITEM_ASSISTANT_MESSAGE,
+                               .text = xstrdup(INTERRUPT_MARKER),
+                               .origin = ITEM_ORIGIN_INTERRUPTED});
 }
 
 void agent_session_add_turn_usage(struct agent_session *s, const struct provider *p,

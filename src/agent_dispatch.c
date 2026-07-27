@@ -44,6 +44,14 @@ static int call_is_silent(const struct tool *t, const struct item *call)
     return 0;
 }
 
+int tool_call_is_silent(const struct item *call)
+{
+    /* Classified off the stored args, not dispatch's preprocessed
+     * `effective` copy: path normalization can't change the answer, and a
+     * replayed call is all a later view has. */
+    return call->tool_name ? call_is_silent(find_tool(call->tool_name), call) : 0;
+}
+
 /* Hard cap on the dim suffix appended after the bold display_arg
  * (read's ":N-M" line range, etc.). The model controls the suffix
  * content via tool args; without a cap, an adversarial offset/limit
@@ -59,7 +67,10 @@ static int call_is_silent(const struct tool *t, const struct item *call)
  * committed so the spinner or output draws below. */
 static void display_tool_header(struct disp *d, const struct item *call)
 {
-    const struct tool *tool = find_tool(call->tool_name);
+    /* Same "?" stand-in as the quiet line: a nameless call is a malformed
+     * provider response, and the history view replays whatever is stored. */
+    const char *name = call->tool_name ? call->tool_name : "?";
+    const struct tool *tool = find_tool(name);
     const char *display_arg = NULL;
     json_t *root = NULL;
     if (tool && tool->def.display_arg && call->tool_arguments_json) {
@@ -70,13 +81,13 @@ static void display_tool_header(struct disp *d, const struct item *call)
     }
 
     disp_block_separator(d);
-    disp_raw(theme_open(THEME_CHROME));
-    disp_printf(d, "[%s]", call->tool_name);
-    disp_raw(ANSI_RESET);
+    disp_raw(d, theme_open(THEME_CHROME));
+    disp_printf(d, "[%s]", name);
+    disp_raw(d, ANSI_RESET);
 
     int width = display_width();
     /* Tool names are ASCII so strlen == cells. */
-    int prefix_cost = (int)strlen(call->tool_name) + 3; /* "[name] " */
+    int prefix_cost = (int)strlen(name) + 3; /* "[name] " */
 
     if (display_arg) {
         /* Reserve the dim extra suffix's cells out of the last row's
@@ -116,22 +127,22 @@ static void display_tool_header(struct disp *d, const struct item *call)
             mid_row = 8;
 
         disp_putc(d, ' ');
-        disp_raw(ANSI_BOLD);
+        disp_raw(d, ANSI_BOLD);
         char *flat = flatten_for_display(display_arg);
         char *laid = reflow_for_display(flat, first_row, mid_row, rows, extra_cost);
         free(flat);
         disp_write(d, laid, strlen(laid));
         free(laid);
-        disp_raw(ANSI_RESET);
+        disp_raw(d, ANSI_RESET);
         if (extra && *extra) {
-            disp_raw(ANSI_DIM);
+            disp_raw(d, ANSI_DIM);
             disp_write(d, extra, strlen(extra));
-            disp_raw(ANSI_RESET);
+            disp_raw(d, ANSI_RESET);
         }
         free(extra);
     } else if (call->tool_arguments_json && *call->tool_arguments_json) {
         disp_putc(d, ' ');
-        disp_raw(ANSI_DIM);
+        disp_raw(d, ANSI_DIM);
         char *flat = flatten_for_display(call->tool_arguments_json);
         /* Generic JSON arg (for tools without a display_arg field): one
          * row, plain truncate. These are debug-grade — no point laying
@@ -143,7 +154,7 @@ static void display_tool_header(struct disp *d, const struct item *call)
         disp_write(d, trimmed, strlen(trimmed));
         free(trimmed);
         free(flat);
-        disp_raw(ANSI_RESET);
+        disp_raw(d, ANSI_RESET);
     }
     disp_putc(d, '\n');
     /* Commit the trailing newline so the parked spinner and the tool
@@ -152,7 +163,7 @@ static void display_tool_header(struct disp *d, const struct item *call)
 
     if (root)
         json_decref(root);
-    fflush(stdout);
+    disp_flush(d);
 }
 
 /* Silent-header writer for the start of a quiet line ("[read]
@@ -165,24 +176,27 @@ static void display_tool_header(struct disp *d, const struct item *call)
  * because it doubles as the parked spinner's cursor-restore column. */
 static int write_silent_header(struct disp *d, const struct item *call, const char *arg_text)
 {
+    /* A nameless call is a malformed provider response, not something we
+     * refuse to draw — the history view replays whatever is stored. */
+    const char *name = call->tool_name ? call->tool_name : "?";
     int used = 0;
-    disp_raw(theme_open(THEME_CHROME_DIM));
-    disp_printf(d, "[%s]", call->tool_name);
+    disp_raw(d, theme_open(THEME_CHROME_DIM));
+    disp_printf(d, "[%s]", name);
     /* The tag's quiet style comes from the role; the arg sits on the
      * default foreground, where SGR dim is portable, so re-open it
      * after the closer (which may clear intensity). */
-    disp_raw(theme_close(THEME_CHROME_DIM));
-    disp_raw(ANSI_DIM);
-    used += 2 + (int)strlen(call->tool_name); /* "[name]", ASCII */
+    disp_raw(d, theme_close(THEME_CHROME_DIM));
+    disp_raw(d, ANSI_DIM);
+    used += 2 + (int)strlen(name); /* "[name]", ASCII */
     disp_putc(d, ' ');
     used += 1;
     if (arg_text && *arg_text) {
         disp_write(d, arg_text, strlen(arg_text));
         used += (int)display_cells(arg_text);
     }
-    disp_raw(ANSI_RESET);
+    disp_raw(d, ANSI_RESET);
     disp_emit_held(d);
-    fflush(stdout);
+    disp_flush(d);
     return used;
 }
 
@@ -192,78 +206,82 @@ static int write_silent_header(struct disp *d, const struct item *call, const ch
  * the appended cell count. */
 static int write_silent_append(struct disp *d, const char *short_name)
 {
-    disp_raw(ANSI_DIM);
+    disp_raw(d, ANSI_DIM);
     disp_write(d, ", ", 2);
     disp_write(d, short_name, strlen(short_name));
-    disp_raw(ANSI_RESET);
+    disp_raw(d, ANSI_RESET);
     disp_emit_held(d);
-    fflush(stdout);
+    disp_flush(d);
     return 2 + (int)display_cells(short_name);
 }
 
-/* Compute the arg text shown after the bracketed tag for a silent
- * call. Read uses basename of the file plus optional `:N-M`; bash uses
- * the command, truncated to fit in the available column budget.
- * `tag_cost` is the cells consumed by `[name] ` so we know how many
- * columns are left for the arg. One cell is always held back so the
- * line never reaches the physical last column (deferred-autowrap
- * guard). Returns malloc'd; caller frees. */
+/* The arg text shown after the bracketed tag on a quiet line, at full
+ * length: the tool's declared display_arg value (read/edit/write → path,
+ * bash → command) plus its optional `:N-M` suffix, with `read` shortened
+ * to a basename because an exploration run reads as a list of files, not
+ * of paths. Tools that render verbosely live still come through here in
+ * HISTORY_BRIEF, so the fallback has to say something useful rather than
+ * leave a bare tag.
+ *
+ * Flattened to one row: a model can send a path with embedded newlines
+ * (basename_view only splits on the last `/`), and bash_classify accepts
+ * multi-line exploration commands like `ls\npwd` — either would break the
+ * line's single-row invariant. Returns malloc'd; caller frees. */
+static char *silent_arg_text(const struct tool *tool, const struct item *call)
+{
+    if (!tool || !tool->def.display_arg || !call->tool_arguments_json)
+        return xstrdup("");
+
+    json_t *root = json_loads(call->tool_arguments_json, 0, NULL);
+    const char *val = root ? json_string_value(json_object_get(root, tool->def.display_arg)) : NULL;
+    if (strcmp(tool->def.name, "read") == 0)
+        val = basename_view(val); /* "?" when the path is missing */
+    char *out;
+    if (!val) {
+        out = xstrdup("");
+    } else {
+        char *extra = tool->format_display_extra
+                          ? tool->format_display_extra(call->tool_arguments_json)
+                          : NULL;
+        char *full = (extra && *extra) ? xasprintf("%s%s", val, extra) : xstrdup(val);
+        free(extra);
+        out = flatten_for_display(full);
+        free(full);
+    }
+    if (root)
+        json_decref(root);
+    return out;
+}
+
+/* Same, capped to the columns left over after `[name] ` (`tag_cost`). One
+ * cell is always held back so the line never reaches the physical last
+ * column (deferred-autowrap guard). Returns malloc'd; caller frees. */
 static char *make_silent_arg(const struct tool *tool, const struct item *call, int tag_cost,
                              int term_w)
 {
-    const char *name = call->tool_name;
     int budget = term_w - tag_cost - 1;
     if (budget < 8)
         budget = 8;
+    char *full = silent_arg_text(tool, call);
+    char *trimmed = truncate_for_display(full, (size_t)budget);
+    free(full);
+    return trimmed;
+}
 
-    if (strcmp(name, "read") == 0) {
-        const char *path = NULL;
-        json_t *root = NULL;
-        if (call->tool_arguments_json) {
-            json_error_t jerr;
-            root = json_loads(call->tool_arguments_json, 0, &jerr);
-            if (root)
-                path = json_string_value(json_object_get(root, "path"));
-        }
-        const char *base = basename_view(path);
-        char *extra = NULL;
-        if (tool && tool->format_display_extra)
-            extra = tool->format_display_extra(call->tool_arguments_json);
-        char *full = (extra && *extra) ? xasprintf("%s%s", base, extra) : xstrdup(base);
-        free(extra);
-        if (root)
-            json_decref(root);
-        /* Flatten before truncating: a model could send a path with
-         * embedded newlines/control bytes; basename_view's split point
-         * is the last `/` so any newline elsewhere comes through and
-         * would break the silent header's single-line invariant. */
-        char *flat = flatten_for_display(full);
-        free(full);
-        char *trimmed = truncate_for_display(flat, (size_t)budget);
-        free(flat);
-        return trimmed;
-    }
-    if (strcmp(name, "bash") == 0) {
-        const char *cmd = NULL;
-        json_t *root = NULL;
-        if (call->tool_arguments_json) {
-            json_error_t jerr;
-            root = json_loads(call->tool_arguments_json, 0, &jerr);
-            if (root)
-                cmd = json_string_value(json_object_get(root, "command"));
-        }
-        /* Flatten before truncating: a multi-line command (bash_classify
-         * accepts e.g. `ls\npwd` as exploration) would otherwise break
-         * the silent header's single-line invariant. */
-        char *flat = flatten_for_display(cmd ? cmd : "");
-        char *trimmed = truncate_for_display(flat, (size_t)budget);
-        free(flat);
-        if (root)
-            json_decref(root);
-        return trimmed;
-    }
-    /* Generic fallback (no other tool currently goes silent). */
-    return xstrdup("");
+void render_tool_call_header(struct render_ctx *r, const struct item *call)
+{
+    display_tool_header(&r->disp, call);
+}
+
+/* Header for a call we answer without running it. Goes through
+ * agent_tool_call_init like a dispatched call so the args are spelled the
+ * same way — the preprocessed form — whether or not the tool got to run. */
+static void display_undispatched_header(struct disp *d, const struct item *call)
+{
+    struct agent_tool_call tc;
+    agent_tool_call_init(&tc, call);
+    display_tool_header(d, &tc.effective);
+    agent_tool_call_destroy(&tc);
 }
 
 /* Render a synthesized "[interrupted]" block in place of running a tool,
@@ -272,14 +290,16 @@ static char *make_silent_arg(const struct tool *tool, const struct item *call, i
 struct item dispatch_tool_skipped(struct render_ctx *r, const struct item *call)
 {
     struct disp *d = &r->disp;
-    display_tool_header(d, call);
+    display_undispatched_header(d, call);
     disp_tool_strip_solo(d);
-    disp_raw(ANSI_DIM);
+    disp_raw(d, ANSI_DIM);
     disp_printf(d, "%s", INTERRUPT_MARKER);
-    disp_raw(ANSI_RESET);
+    disp_raw(d, ANSI_RESET);
     disp_putc(d, '\n');
-    fflush(stdout);
-    return agent_tool_result_make(call, INTERRUPT_MARKER, NULL);
+    disp_flush(d);
+    struct item result = agent_tool_result_make(call, INTERRUPT_MARKER, NULL);
+    result.origin = ITEM_ORIGIN_SKIPPED;
+    return result;
 }
 
 /* Refuse a tool call without running it. Used in --raw mode: we
@@ -291,71 +311,85 @@ struct item dispatch_tool_skipped(struct render_ctx *r, const struct item *call)
 struct item dispatch_tool_refused(struct render_ctx *r, const struct item *call)
 {
     struct disp *d = &r->disp;
-    display_tool_header(d, call);
+    display_undispatched_header(d, call);
     disp_tool_strip_solo(d);
-    disp_raw(ANSI_DIM);
-    disp_printf(d, "[refused: --raw, no tools advertised]");
-    disp_raw(ANSI_RESET);
+    disp_raw(d, ANSI_DIM);
+    disp_printf(d, "%s", REFUSED_MARKER);
+    disp_raw(d, ANSI_RESET);
     disp_putc(d, '\n');
-    fflush(stdout);
-    return agent_tool_result_make(call, "error: tool calls are disabled in this session", NULL);
+    disp_flush(d);
+    struct item result = agent_tool_result_make(call, REFUSED_RESULT, NULL);
+    result.origin = ITEM_ORIGIN_REFUSED;
+    return result;
 }
 
-/* Build the dim arg shown after the tag in a collapsed (replayed) tool
- * line: the tool's declared display_arg value (read/edit/write → path,
- * bash → command), plus read's ":N-M" range suffix when present,
- * flattened to one row and truncated to `budget` cells. Returns malloc'd
- * (caller frees) or NULL when there's nothing useful to show. */
-static char *collapsed_arg(const struct tool *t, const struct item *call, int budget)
+/* Write one quiet cluster line for `call` — the breadcrumb a silent tool
+ * leaves instead of a header and preview — coalescing onto the line already
+ * open when both this call and the previous one are `read`, the only kind
+ * that chains visually. Shared by the live silent path and the history
+ * view, so a replayed exploration run abbreviates and stacks exactly as it
+ * did on screen.
+ *
+ * A read line is left open (its newline uncommitted) for the next call to
+ * append to; RS_CLUSTER's close-half terminates it. `cluster_last_tool`
+ * keeps the kind for that decision and must be a registry-static name —
+ * item-owned strings die with the conversation.
+ *
+ * Caller has already transitioned to RS_CLUSTER and hidden any spinner. */
+static void write_cluster_line(struct render_ctx *r, const struct item *call)
 {
-    if (!t || !t->def.display_arg || !call->tool_arguments_json)
-        return NULL;
-    json_t *root = json_loads(call->tool_arguments_json, 0, NULL);
-    const char *val = root ? json_string_value(json_object_get(root, t->def.display_arg)) : NULL;
-    char *out = NULL;
-    if (val) {
-        char *extra =
-            t->format_display_extra ? t->format_display_extra(call->tool_arguments_json) : NULL;
-        char *full = (extra && *extra) ? xasprintf("%s%s", val, extra) : xstrdup(val);
-        free(extra);
-        char *flat = flatten_for_display(full);
-        free(full);
-        out = truncate_for_display(flat, (size_t)(budget < 8 ? 8 : budget));
-        free(flat);
+    struct disp *d = &r->disp;
+    const struct tool *t = call->tool_name ? find_tool(call->tool_name) : NULL;
+    int term_w = display_width();
+    int is_read = call->tool_name && strcmp(call->tool_name, "read") == 0;
+    int can_coalesce = r->cluster_line_open && r->cluster_last_tool &&
+                       strcmp(r->cluster_last_tool, "read") == 0 && is_read;
+
+    if (can_coalesce) {
+        char *append = silent_arg_text(t, call);
+        /* Cap the coalesced line one cell short of the terminal edge
+         * so it never wraps (and the spinner's cursor-restore column
+         * stays on this physical row). The 2 covers ", ". */
+        if (r->cluster_line_used + 2 + (int)display_cells(append) > term_w - 1) {
+            /* Overflow → close current line, start a new `[read] …` header. */
+            disp_putc(d, '\n');
+            disp_emit_held(d);
+            char *arg = make_silent_arg(t, call, 7 /* "[read] " */, term_w);
+            r->cluster_line_used = write_silent_header(d, call, arg);
+            free(arg);
+        } else {
+            r->cluster_line_used += write_silent_append(d, append);
+        }
+        free(append);
+    } else {
+        if (r->cluster_line_open) {
+            /* Already inside the cluster but the open read line can't
+             * absorb this call (different silent kind): close it and
+             * write a fresh header below — but stay in RS_CLUSTER, so
+             * no block separator between the lines. */
+            disp_putc(d, '\n');
+            disp_emit_held(d);
+        }
+        /* Else: first call after entering RS_CLUSTER — the transition
+         * already left a clean column-0 row below prior content. */
+        int tag_cost = 2 + (int)strlen(call->tool_name ? call->tool_name : "?") + 1; /* "[name] " */
+        char *arg = make_silent_arg(t, call, tag_cost, term_w);
+        r->cluster_line_used = write_silent_header(d, call, arg);
+        free(arg);
+        if (!is_read) {
+            /* Non-coalescing kinds never revisit their line — commit
+             * its \n now so disp's trail stays truthful. */
+            disp_putc(d, '\n');
+            disp_emit_held(d);
+        }
     }
-    if (root)
-        json_decref(root);
-    return out;
+    r->cluster_line_open = is_read;
+    r->cluster_last_tool = t ? t->def.name : NULL;
 }
 
 void render_collapsed_tool_call(struct render_ctx *r, const struct item *call)
 {
-    struct disp *d = &r->disp;
-    const char *name = call->tool_name ? call->tool_name : "?";
-    /* Quiet throughout so replayed calls recede as past context: the
-     * role styles the tag, SGR dim (portable on the default foreground)
-     * quiets the arg. */
-    disp_raw(theme_open(THEME_CHROME_DIM));
-    disp_printf(d, "[%s]", name);
-    disp_raw(theme_close(THEME_CHROME_DIM));
-    disp_raw(ANSI_DIM);
-
-    int tag_cost = 2 + (int)strlen(name) + 1; /* "[name] " */
-    const struct tool *t = call->tool_name ? find_tool(call->tool_name) : NULL;
-    char *arg = collapsed_arg(t, call, display_width() - tag_cost - 2);
-    if (arg && *arg) {
-        disp_putc(d, ' ');
-        disp_write(d, arg, strlen(arg));
-    }
-    free(arg);
-    disp_raw(ANSI_RESET);
-    disp_putc(d, '\n');
-    /* Commit the line's newline (like display_tool_header) so the cursor
-     * sits at column 0 of a fresh row and disp's trail accounting matches
-     * the terminal — otherwise RS_CLUSTER's close-half assumes a fresh row
-     * that isn't there and the next block's separator collapses to no gap. */
-    disp_emit_held(d);
-    fflush(stdout);
+    write_cluster_line(r, call);
 }
 
 /* Silent dispatch: header-only, parked spinner, no preview. Coalesces
@@ -373,79 +407,14 @@ static struct item dispatch_tool_call_silent(struct render_ctx *r, struct agent_
                                              int image_input)
 {
     const struct item *call = &tc->effective;
-    const struct tool *t = tc->tool;
-    struct disp *d = &r->disp;
     struct spinner *sp = r->spinner;
-    int term_w = display_width();
+    int is_read = strcmp(call->tool_name, "read") == 0;
 
     /* Hide the parked spinner from the previous call in this cluster
      * (no-op on first entry). For an open read line the hide restores
      * the cursor to the end of the line, ready to coalesce. */
     spinner_hide(sp);
-
-    int is_read = strcmp(call->tool_name, "read") == 0;
-    int can_coalesce = r->cluster_line_open && r->cluster_last_tool &&
-                       strcmp(r->cluster_last_tool, "read") == 0 && is_read;
-
-    if (can_coalesce) {
-        const char *path = NULL;
-        json_t *root = NULL;
-        if (call->tool_arguments_json) {
-            json_error_t jerr;
-            root = json_loads(call->tool_arguments_json, 0, &jerr);
-            if (root)
-                path = json_string_value(json_object_get(root, "path"));
-        }
-        const char *base = basename_view(path);
-        char *extra = NULL;
-        if (t && t->format_display_extra)
-            extra = t->format_display_extra(call->tool_arguments_json);
-        char *full = (extra && *extra) ? xasprintf("%s%s", base, extra) : xstrdup(base);
-        free(extra);
-        /* Flatten before measuring/appending so an embedded newline
-         * in the path doesn't break the coalesced single-line header
-         * (same reason as make_silent_arg's read branch). */
-        char *append = flatten_for_display(full);
-        free(full);
-        /* Cap the coalesced line one cell short of the terminal edge
-         * so it never wraps (and the spinner's cursor-restore column
-         * stays on this physical row). The 2 covers ", ". */
-        if (r->cluster_line_used + 2 + (int)display_cells(append) > term_w - 1) {
-            /* Overflow → close current line, start a new `[read] …` header. */
-            disp_putc(d, '\n');
-            disp_emit_held(d);
-            char *arg = make_silent_arg(t, call, 7 /* "[read] " */, term_w);
-            r->cluster_line_used = write_silent_header(d, call, arg);
-            free(arg);
-        } else {
-            r->cluster_line_used += write_silent_append(d, append);
-        }
-        free(append);
-        if (root)
-            json_decref(root);
-    } else {
-        if (r->cluster_line_open) {
-            /* Already inside the cluster but the open read line can't
-             * absorb this call (different silent kind): close it and
-             * write a fresh header below — but stay in RS_CLUSTER, so
-             * no block separator between the lines. */
-            disp_putc(d, '\n');
-            disp_emit_held(d);
-        }
-        /* Else: first call after entering RS_CLUSTER — the transition
-         * already left a clean column-0 row below prior content. */
-        int tag_cost = 2 + (int)strlen(call->tool_name) + 1; /* "[name] " */
-        char *arg = make_silent_arg(t, call, tag_cost, term_w);
-        r->cluster_line_used = write_silent_header(d, call, arg);
-        free(arg);
-        if (!is_read) {
-            /* Non-coalescing kinds never revisit their line — commit
-             * its \n now so disp's trail stays truthful. */
-            disp_putc(d, '\n');
-            disp_emit_held(d);
-        }
-    }
-    r->cluster_line_open = is_read;
+    write_cluster_line(r, call);
 
     /* Park the spinner below the quiet line: at the read line's exact
      * end column (the next coalesce restores there), or column 0 of
@@ -466,8 +435,6 @@ static struct item dispatch_tool_call_silent(struct render_ctx *r, struct agent_
     char *ret = agent_tool_call_run(tc, &tctx);
     spinner_request_label(sp, "working", "working...");
 
-    r->cluster_last_tool = t->def.name;
-
     struct item result = agent_tool_result_make(call, ret, &tctx);
     free(ret);
     return result;
@@ -483,7 +450,7 @@ static void emit_tool_solo_marker(struct disp *d, struct spinner *sp, const char
 {
     spinner_hide(sp);
     disp_tool_strip_solo(d);
-    disp_raw(ANSI_DIM);
+    disp_raw(d, ANSI_DIM);
     int budget = display_width() - 2; /* "› " strip glyph + space */
     if (budget < 8)
         budget = 8;
@@ -492,9 +459,14 @@ static void emit_tool_solo_marker(struct disp *d, struct spinner *sp, const char
     free(flat);
     disp_write(d, line, strlen(line));
     free(line);
-    disp_raw(ANSI_RESET);
+    disp_raw(d, ANSI_RESET);
     disp_putc(d, '\n');
-    fflush(stdout);
+    disp_flush(d);
+}
+
+void render_tool_solo_marker(struct render_ctx *r, const char *text)
+{
+    emit_tool_solo_marker(&r->disp, r->spinner, text);
 }
 
 /* Run one tool call: render the header, drive the renderer over either

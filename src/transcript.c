@@ -164,8 +164,11 @@ static void render_body_lines(FILE *out, int color, const char *text, const char
 static void render_user(FILE *out, int color, const struct item *it)
 {
     const char *text = it->text ? it->text : "";
-    if (it->compact_seed) {
-        section(out, color, "compaction seed");
+    /* Anything the agent inserted itself gets its own label and the dim body:
+     * an empty-send continuation is no more typed input than a seed is. */
+    if (it->origin != ITEM_ORIGIN_NONE) {
+        section(out, color,
+                it->origin == ITEM_ORIGIN_COMPACT_SEED ? "compaction seed" : "continuation");
         render_body_lines(out, color, text, ANSI_DIM, ANSI_RESET);
         return;
     }
