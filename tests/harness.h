@@ -108,10 +108,13 @@ static inline void t_tempdir_cleanup(void)
     t_tmpdir_first = 0;
 }
 
-/* Create a throwaway directory under /tmp. The harness owns the returned
- * path and removes the whole tree at exit; callers must not free, remove,
- * or outlive-reference it in spawned processes. Aborts on failure: no
- * test proceeds meaningfully without its fixture dir. */
+/* Create a throwaway directory under /tmp. The returned path is canonical:
+ * on macOS /tmp is a symlink to /private/tmp, so a fixture that chdir()s
+ * here and code under test that calls getcwd() would otherwise disagree on
+ * the same directory's name. The harness owns the returned path and removes
+ * the whole tree at exit; callers must not free, remove, or
+ * outlive-reference it in spawned processes. Aborts on failure: no test
+ * proceeds meaningfully without its fixture dir. */
 static inline char *t_tempdir(void)
 {
     if (t_tmpdir_owner != getpid()) {
@@ -129,6 +132,16 @@ static inline char *t_tempdir(void)
         fprintf(stderr, "t_tempdir: %s\n", strerror(errno));
         abort();
     }
+    /* Canonical or nothing: quietly handing back the /tmp spelling would
+     * resurface as a puzzling assertion in whichever test compares this
+     * against a getcwd, far from the actual cause. */
+    char *real = realpath(dir, NULL);
+    if (!real) {
+        fprintf(stderr, "t_tempdir: realpath(%s): %s\n", dir, strerror(errno));
+        abort();
+    }
+    free(dir);
+    dir = real;
     char **grown = realloc(t_tmpdirs, (t_n_tmpdirs + 1) * sizeof(*grown));
     if (!grown)
         abort();

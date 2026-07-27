@@ -25,13 +25,9 @@ struct sandbox {
 static void sb_init(struct sandbox *s)
 {
     s->prev_cwd = getcwd(NULL, 0);
-    char *tmp = t_tempdir();
-    /* Resolve symlinks: macOS `/tmp` is a symlink to `/private/tmp`, so
-     * t_tempdir returns `/tmp/...` while getcwd after chdir returns
-     * `/private/tmp/...`. Anything that compares the two byte-for-byte
-     * (collapse_home, HOME-prefix matching) needs them to agree. */
-    char *real = realpath(tmp, NULL);
-    s->root = real ? real : xstrdup(tmp);
+    /* t_tempdir hands back a canonical path, so this compares byte-for-byte
+     * against a later getcwd (collapse_home, HOME-prefix matching). */
+    s->root = xstrdup(t_tempdir());
     /* Point HOME and XDG_CONFIG_HOME at the sandbox so global AGENTS.md
      * lookups don't escape it. Tests that want a global file create it
      * under $HOME/.config/hax/AGENTS.md. */
