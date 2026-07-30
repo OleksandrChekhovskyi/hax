@@ -148,9 +148,12 @@ char *llamacpp_model_warning(const char *configured, const char *served)
  * Returns 0 when a model could be resolved (reconciled, or an explicit one
  * trusted while the server is briefly unreachable). Returns -1 only when the
  * server is unreachable AND nothing is configured — a strong "is it running?"
- * signal the caller surfaces instead of a downstream "HAX_MODEL is required". */
-static int reconcile_model(const char *base_url, const char *api_key)
+ * signal the caller surfaces instead of a downstream "HAX_MODEL is required".
+ * *discovered reports whether the value came off the server rather than from
+ * the user (provider.model_discovered). */
+static int reconcile_model(const char *base_url, const char *api_key, int *discovered)
 {
+    *discovered = 0;
     char *url = xasprintf("%s/models", base_url);
     char *auth = api_key ? xasprintf("Authorization: Bearer %s", api_key) : NULL;
     const char *headers[] = {auth, NULL};
@@ -173,6 +176,7 @@ static int reconcile_model(const char *base_url, const char *api_key)
                 }
                 config_set_override("model", adopt);
                 free(adopt);
+                *discovered = 1;
             }
             rc = 0;
         }
@@ -280,7 +284,8 @@ struct provider *llamacpp_provider_new(const char *name)
     const char *key = config_str("openai.api_key");
     if (key && !*key)
         key = NULL;
-    if (reconcile_model(resolved, key) != 0) {
+    int discovered = 0;
+    if (reconcile_model(resolved, key, &discovered) != 0) {
         hax_err("llama.cpp: failed to auto-discover model from %s/models\n"
                 "hax: is llama-server running? "
                 "(set HAX_MODEL to skip probing, or adjust HAX_LLAMACPP_PORT / "
@@ -315,6 +320,7 @@ struct provider *llamacpp_provider_new(const char *name)
     if (p) {
         p->model_label = llamacpp_model_label;
         p->probe_model = llamacpp_probe_model;
+        p->model_discovered = discovered;
         /* The metadata fetch runs in the background: an older llama-server
          * without /props, or a proxy that doesn't expose it, just means the
          * percentage display is hidden — not a reason to refuse to start

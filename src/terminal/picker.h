@@ -59,6 +59,11 @@ struct picker_item {
      * than smuggling "current" through `detail`, where it would render
      * dim and read like a failure reason. */
     int current;
+    /* Optional color for the label: a theme role's open sequence (theme.h),
+     * never a raw escape, for pickers whose items *are* colors. It must set
+     * only a foreground — the picker closes it with fg-default — and styles the
+     * label alone. Ignored on a dim row, which owns its styling. */
+    const char *label_color;
     /* Optional explanatory text, wrapped below the list when the row is
      * selected. Use this rather than detail when clipping would lose meaning.
      * A newline is a hard break, so a desc can put structured fields on one

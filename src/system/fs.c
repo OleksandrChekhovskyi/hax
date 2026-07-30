@@ -68,15 +68,7 @@ static char *parent_dir_of(const char *path)
     return copy;
 }
 
-/* Walk the symlink chain at `path` and return where its ultimate target
- * lives — without requiring that target to exist. realpath(3) refuses
- * dangling chains, but write/edit are documented to create missing files,
- * so for `link -> real` we want to land on `real`'s path even when `real`
- * doesn't exist yet. Stops on the first non-symlink (existing or not),
- * resolving relative link targets against the link's own directory.
- * Capped at MAX_HOPS to break loops; returns NULL with errno set on
- * hard failure (readlink error, loop, etc.). */
-static char *resolve_link_target(const char *path)
+char *fs_resolve_link_target(const char *path)
 {
     enum { MAX_HOPS = 32 };
     char *current = xstrdup(path);
@@ -147,7 +139,7 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
      * resolver tolerates dangling chains so a `link -> new` pattern can
      * still create `new`. Diff labels keep the model-supplied path so the
      * user sees what they asked for, not an internal canonicalization. */
-    target = resolve_link_target(path);
+    target = fs_resolve_link_target(path);
     if (!target) {
         *errmsg = xasprintf("resolving %s: %s", path, strerror(errno));
         goto out;

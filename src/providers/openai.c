@@ -34,11 +34,12 @@ const size_t OPENAI_EFFORT_LADDER_N =
 
 struct openai {
     struct provider base;
-    char *base_url;   /* e.g. "http://127.0.0.1:8000/v1" (no trailing slash) */
-    char *api_key;    /* may be NULL for unauthenticated local servers */
-    char *name_buf;   /* backing storage for base.name (heap-owned) */
-    char *endpoint;   /* base_url + "/chat/completions" */
-    char *session_id; /* sent as prompt_cache_key when send_cache_key is set */
+    char *base_url;    /* e.g. "http://127.0.0.1:8000/v1" (no trailing slash) */
+    char *api_key;     /* may be NULL for unauthenticated local servers */
+    char *name_buf;    /* backing storage for base.name (heap-owned) */
+    char *catalog_buf; /* backing storage for base.catalog_id; NULL = opted out */
+    char *endpoint;    /* base_url + "/chat/completions" */
+    char *session_id;  /* sent as prompt_cache_key when send_cache_key is set */
     int send_cache_key;
     int emit_progress;
     int request_cost;
@@ -586,6 +587,7 @@ static void openai_destroy(struct provider *p)
     free(o->base_url);
     free(o->api_key);
     free(o->name_buf);
+    free(o->catalog_buf);
     free(o->endpoint);
     free(o->session_id);
     free(o->cache_ttl);
@@ -870,7 +872,11 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
     gen_uuid_v4(uuid);
     o->session_id = xstrdup(uuid);
     o->base.name = o->name_buf;
-    o->base.catalog_id = preset->catalog_id;
+    /* Owned: a preset's catalog_id may be a config-tier string, which does not
+     * survive a mid-session write of config.json, while this is read on every
+     * cost lookup for the provider's whole life. */
+    o->catalog_buf = preset->catalog_id ? xstrdup(preset->catalog_id) : NULL;
+    o->base.catalog_id = o->catalog_buf;
     o->base.stream = openai_stream;
     o->base.list_models = openai_list_models;
     o->base.list_efforts = openai_list_efforts;

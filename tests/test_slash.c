@@ -151,6 +151,13 @@ int select_preset(struct agent_state *st, const char *name, int announce)
     stub_preset_announce = announce;
     return stub_preset_rc;
 }
+/* Records what /preset-save routed through, same as the select_preset stub. */
+static const char *stub_preset_save_arg = NULL;
+void select_preset_save(struct agent_state *st, const char *arg)
+{
+    (void)st;
+    stub_preset_save_arg = arg;
+}
 void select_config(struct agent_state *st, const char *arg)
 {
     (void)st;
@@ -592,6 +599,33 @@ static void test_clear_alias_takes_preset_too(void)
     agent_session_free(&s);
 }
 
+static void test_preset_save_routes_whole_argument(void)
+{
+    /* select.c parses "<name> [tint]", so dispatch hands the trailing text
+     * over untouched — and the longer name must not be shadowed by the
+     * "/preset" prefix it starts with. A bare call is legal, not BAD_USAGE. */
+    struct render_ctx r = {0};
+    r.disp.trail = 1;
+    struct agent_state st = {.r = &r};
+    struct slash_ctx ctx = {.state = &st};
+
+    stub_preset_save_arg = NULL;
+    stub_preset_name = NULL;
+    struct dispatch_call c = {.line = "/preset-save scout rose", .ctx = &ctx};
+    char *out = capture_stdout(do_dispatch, &c);
+    EXPECT(c.result == SLASH_HANDLED);
+    free(out);
+    EXPECT(stub_preset_save_arg != NULL && strcmp(stub_preset_save_arg, "scout rose") == 0);
+    EXPECT(stub_preset_name == NULL); /* not routed to /preset */
+
+    stub_preset_save_arg = (const char *)-1; /* a sentinel the run must overwrite */
+    struct dispatch_call bare = {.line = "/preset-save", .ctx = &ctx};
+    out = capture_stdout(do_dispatch, &bare);
+    EXPECT(bare.result == SLASH_HANDLED);
+    free(out);
+    EXPECT(stub_preset_save_arg == NULL);
+}
+
 static void test_dispatch_trims_trailing_whitespace(void)
 {
     /* "/help   " (no other args, just trailing whitespace) must be
@@ -754,6 +788,7 @@ int main(void)
     test_new_with_preset_switches_then_clears();
     test_new_keeps_conversation_when_preset_fails();
     test_clear_alias_takes_preset_too();
+    test_preset_save_routes_whole_argument();
     test_dispatch_trims_trailing_whitespace();
     test_resume_cancelled_picker_keeps_trail();
     test_resume_selected_session_keeps_trail();

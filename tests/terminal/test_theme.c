@@ -194,6 +194,49 @@ static void test_tints(void)
     EXPECT(theme_tint_set("teal") == 0);
 }
 
+static void test_tint_preview(void)
+{
+    /* Each tint's own stance color under the active preset, read without
+     * activating it — so a picker shows four colors while one tint is live. */
+    EXPECT(theme_set("dark") == 0);
+    EXPECT(theme_tint_set("rose") == 0);
+    static const char *const NAMES[] = {"teal", "violet", "rose", "sage"};
+    const size_t n = sizeof(NAMES) / sizeof(NAMES[0]);
+    const char *seen[sizeof(NAMES) / sizeof(NAMES[0])];
+    for (size_t i = 0; i < n; i++) {
+        seen[i] = theme_tint_open(NAMES[i]);
+        EXPECT(seen[i] != NULL && strstr(seen[i], "38;5;") != NULL);
+        /* For the live tint, the preview is what theme_open reports. */
+        if (strcmp(NAMES[i], theme_tint_name()) == 0)
+            EXPECT_STR_EQ(seen[i], theme_open(THEME_STANCE));
+    }
+    for (size_t i = 0; i < n; i++)
+        for (size_t j = i + 1; j < n; j++)
+            EXPECT(strcmp(seen[i], seen[j]) != 0);
+
+    /* "teal" is the preset's own palette, not an overlay: it must preview as
+     * the untinted stance color rather than as whatever tint is active. */
+    const char *teal = theme_tint_open("teal");
+    EXPECT(theme_tint_set("teal") == 0);
+    EXPECT_STR_EQ(teal, theme_open(THEME_STANCE));
+
+    /* Each background has its own row. */
+    const char *dark_sage = theme_tint_open("sage");
+    EXPECT(theme_set("light") == 0);
+    EXPECT(strcmp(theme_tint_open("sage"), dark_sage) != 0);
+
+    /* No preview where no tint applies — the caller then paints plain rows
+     * instead of coloring all four identically. */
+    EXPECT(theme_set("ansi") == 0);
+    EXPECT(theme_tint_open("sage") == NULL);
+    EXPECT(theme_set("off") == 0);
+    EXPECT(theme_tint_open("sage") == NULL);
+
+    EXPECT(theme_set("dark") == 0);
+    EXPECT(theme_tint_open("chartreuse") == NULL);
+    EXPECT(theme_tint_open(NULL) == NULL);
+}
+
 static void test_autodetect(void)
 {
     /* NO_COLOR (non-empty) beats everything. */
@@ -385,6 +428,7 @@ int main(void)
     test_default_is_ansi();
     test_presets();
     test_tints();
+    test_tint_preview();
     test_autodetect();
     test_init_from_config();
     test_tint_from_stance();

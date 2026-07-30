@@ -599,7 +599,7 @@ static void print_banner_identity(FILE *out, const struct provider *p,
     /* Active preset stance, the one colored token on an otherwise dim line.
      * Load-bearing, not decoration: a preset may have swapped the system
      * prompt, and the name is the only at-a-glance signal that a stance —
-     * persona included — is in effect. It carries the stance hue (the same
+     * persona included — is in effect. It carries the stance tint (the same
      * one the preset's tint gives the model's markdown), so the banner and
      * the replies below it agree on which persona this terminal is running.
      * The bar stays chrome: hax is still hax.

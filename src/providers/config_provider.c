@@ -94,9 +94,10 @@ static const char *resolve(const char *name, const char *leaf, const char *recip
  * opt-out; a recipe's curated value (or curated absence) is final; a pure
  * config-defined provider defaults to its own name, so a block named after
  * a models.dev id (deepseek, groq, …) gets cost/limit metadata with zero
- * extra keys — also the shape a config generator would emit. Returned
- * pointers outlive the provider: config-tier strings are process-lifetime,
- * `name` is the factory's own (cached) name, recipes are static. */
+ * extra keys — also the shape a config generator would emit. The result is
+ * borrowed for the duration of construction only — a config-tier string does
+ * not outlive a mid-session write of the file — so a provider that keeps it
+ * copies it (see catalog_buf in openai.c / anthropic.c). */
 static const char *resolve_catalog_id(const char *name, const struct provider_recipe *r)
 {
     char *k = xasprintf("providers.%s.catalog_id", name);

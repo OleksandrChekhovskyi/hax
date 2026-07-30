@@ -486,6 +486,17 @@ struct provider {
     /* Reasoning effort used when HAX_EFFORT is unset. NULL means
      * omit the field and let the backend choose. */
     const char *default_effort;
+    /* The model in effect was discovered from the backend, not chosen: what
+     * this server happens to be serving right now (llama.cpp adopting its
+     * loaded model), which the constructor writes into the override tier so
+     * the run has a model at all. Set it there and hax stops treating the id
+     * as durable: /preset-save omits it, and a /provider or /model commit
+     * stores the sentinel rather than the value, so both re-run discovery
+     * instead of pinning a path that matched one server invocation. Providers
+     * set it only when they adopted a model the user hadn't named — an
+     * explicitly configured model is a preference and persists as one, and so
+     * does one the user picks out of a list of several, which clears this. */
+    int model_discovered;
     /* Sort list_models output alphabetically in the /model picker. Set by
      * providers whose catalog order carries no meaning; leave 0 where the
      * server's order is deliberate (curated, newest-first) or trivially
@@ -499,8 +510,9 @@ struct provider {
      * local backends whose models have no catalog presence, providers that
      * report exact cost and probe their own limits (openrouter), and
      * config-defined providers that opted out (their default is their own
-     * name — see config_provider.c). Borrowed static/config string that
-     * outlives the provider. */
+     * name — see config_provider.c). Either static or owned by the provider:
+     * a config-derived value must be copied, since the config tier it came
+     * from does not survive a mid-session write of the file. */
     const char *catalog_id;
     /* Stream a model response. The provider drives the HTTP round-trip
      * and translates SSE events into stream_event callbacks (`cb`). The

@@ -44,12 +44,13 @@ const size_t ANTHROPIC_EFFORT_LADDER_N =
 
 struct anthropic {
     struct provider base;
-    char *base_url;   /* e.g. "https://api.anthropic.com/v1" (no trailing slash) */
-    char *api_key;    /* may be NULL for an unauthenticated local compat server */
-    char *name_buf;   /* backing storage for base.name */
-    char *endpoint;   /* base_url + "/messages" */
-    char *version;    /* anthropic-version header value */
-    char *cfg_prefix; /* config namespace: NULL (global anthropic.*) or "providers.<name>" */
+    char *base_url;    /* e.g. "https://api.anthropic.com/v1" (no trailing slash) */
+    char *api_key;     /* may be NULL for an unauthenticated local compat server */
+    char *name_buf;    /* backing storage for base.name */
+    char *catalog_buf; /* backing storage for base.catalog_id; NULL = opted out */
+    char *endpoint;    /* base_url + "/messages" */
+    char *version;     /* anthropic-version header value */
+    char *cfg_prefix;  /* config namespace: NULL (global anthropic.*) or "providers.<name>" */
     enum anthropic_thinking_mode default_mode;
     int allow_empty_signature;
     int send_cache_control_default;
@@ -741,6 +742,7 @@ static void anthropic_destroy(struct provider *p)
     free(a->base_url);
     free(a->api_key);
     free(a->name_buf);
+    free(a->catalog_buf);
     free(a->endpoint);
     free(a->version);
     free(a->cfg_prefix);
@@ -802,7 +804,9 @@ struct provider *anthropic_provider_new_preset(const struct anthropic_preset *pr
     a->send_cache_control_default = preset->send_cache_control_default;
 
     a->base.name = a->name_buf;
-    a->base.catalog_id = preset->catalog_id;
+    /* Owned — see the same assignment in openai.c. */
+    a->catalog_buf = preset->catalog_id ? xstrdup(preset->catalog_id) : NULL;
+    a->base.catalog_id = a->catalog_buf;
     /* Real Anthropic has a fixed default model; the compat shim and
      * config-defined providers leave this NULL (rely on HAX_MODEL or /model). */
     a->base.default_model = preset->lock_base_url ? ANTHROPIC_DEFAULT_MODEL : NULL;

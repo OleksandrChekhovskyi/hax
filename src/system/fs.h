@@ -35,6 +35,19 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
  * -1 with errno set otherwise. */
 int fs_mkdir_p(const char *path);
 
+/* Walk the symlink chain at `path` and return where its ultimate target lives
+ * — without requiring that target to exist. realpath(3) refuses dangling
+ * chains, but a writer is expected to create a missing file, so for
+ * `link -> real` this lands on `real`'s path even when `real` doesn't exist
+ * yet. That is what keeps a config or note symlinked into a dotfiles repo a
+ * symlink: writers stage a temp file beside the target and rename onto it,
+ * which would otherwise replace the link itself. Stops on the first
+ * non-symlink (existing or not), resolving relative link targets against the
+ * link's own directory. Capped internally to break loops. Returns a malloc'd
+ * path the caller frees, or NULL with errno set on hard failure (readlink
+ * error, loop). */
+char *fs_resolve_link_target(const char *path);
+
 /* which(1): resolve `name` against $PATH, returning the first candidate
  * that is an executable regular file (symlinks followed) as a malloc'd
  * string, or NULL when nothing matches. A `name` containing '/' skips

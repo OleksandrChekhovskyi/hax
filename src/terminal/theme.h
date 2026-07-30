@@ -43,11 +43,11 @@ enum theme_role {
 };
 
 /* Tints are the second axis, orthogonal to the preset: the preset says
- * which background we are on, the tint which hue the model's voice takes
+ * which background we are on, the tint which color the model's voice takes
  * (THEME_STANCE and the three markdown roles). Personas — config presets —
  * carry one, so two terminals running different stances don't look alike.
  *
- * Deliberately narrow. hax's own chrome keeps its fixed hue under every
+ * Deliberately narrow. hax's own chrome keeps its fixed color under every
  * tint, since a persona changes what the *model* is, not what the app is;
  * THEME_ACCENT stays put as the user's marker; and the status roles stay
  * put because green means added and red means error regardless of stance. */
@@ -85,5 +85,12 @@ const char *theme_name(void);
 
 /* Name of the active tint, whether or not the active preset applies it. */
 const char *theme_tint_name(void);
+
+/* What the named tint would open the model's voice with under the active
+ * preset, without activating it — for showing a tint rather than naming it.
+ * It samples THEME_STANCE, so a row previews the banner's [name]; close with
+ * theme_close(THEME_STANCE). NULL for an unknown name, or a preset that takes
+ * no tint (ansi, off), where the caller shows plain rows instead. */
+const char *theme_tint_open(const char *name);
 
 #endif /* HAX_THEME_H */

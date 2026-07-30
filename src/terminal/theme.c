@@ -211,16 +211,34 @@ static const struct theme *active = &THEMES[0]; /* "ansi" until theme_init */
 static const struct tint *tint = &TINTS[0];     /* "teal" until theme_init */
 static const char *const *tint_rows;            /* active overlay, or NULL */
 
+static const struct tint *tint_find(const char *name)
+{
+    if (!name)
+        return NULL;
+    for (size_t i = 0; i < sizeof(TINTS) / sizeof(TINTS[0]); i++) {
+        if (strcasecmp(TINTS[i].name, name) == 0)
+            return &TINTS[i];
+    }
+    return NULL;
+}
+
+/* The overlay `t` supplies under the active preset, or NULL when the preset
+ * takes no tint (ansi, off) — the one place the two axes are paired, so
+ * activating a tint and previewing one can't diverge. */
+static const char *const *tint_overlay(const struct tint *t)
+{
+    if (active->row == TINT_ROW_DARK)
+        return t->dark;
+    if (active->row == TINT_ROW_LIGHT)
+        return t->light;
+    return NULL;
+}
+
 /* Re-pair the two axes: either setter can run first, and the preset
  * decides whether the tint applies at all. */
 static void tint_resolve(void)
 {
-    if (active->row == TINT_ROW_DARK)
-        tint_rows = tint->dark;
-    else if (active->row == TINT_ROW_LIGHT)
-        tint_rows = tint->light;
-    else
-        tint_rows = NULL;
+    tint_rows = tint_overlay(tint);
 }
 
 static int tint_slot(enum theme_role role)
@@ -238,15 +256,24 @@ static int tint_slot(enum theme_role role)
     }
 }
 
-const char *theme_open(enum theme_role role)
+/* Resolve `role` under `rows` (an overlay, or NULL for none): the overlay's
+ * entry where it has one, else the active preset's own. "teal" carries no rows
+ * at all and a tinted preset leaves the untinted roles empty, so the fallback
+ * is load-bearing in both directions. */
+static const char *role_open(const char *const *rows, enum theme_role role)
 {
-    if (tint_rows) {
+    if (rows) {
         int slot = tint_slot(role);
-        if (slot >= 0 && tint_rows[slot])
-            return tint_rows[slot];
+        if (slot >= 0 && rows[slot])
+            return rows[slot];
     }
     const char *s = active->open[role];
     return s ? s : "";
+}
+
+const char *theme_open(enum theme_role role)
+{
+    return role_open(tint_rows, role);
 }
 
 /* No tint counterpart: under the fixed palettes every tinted role already
@@ -267,6 +294,23 @@ const char *theme_name(void)
 const char *theme_tint_name(void)
 {
     return tint->name;
+}
+
+const char *theme_tint_open(const char *name)
+{
+    const struct tint *t = tint_find(name);
+    if (!t)
+        return NULL;
+    const char *const *rows = tint_overlay(t);
+    /* No overlay under this preset means no tint applies at all (ansi, off) —
+     * distinct from an overlay that leaves a role to the preset, which
+     * role_open resolves. Falling through would preview every tint as the
+     * preset's own color. */
+    if (!rows)
+        return NULL;
+    /* Deliberately not theme_open: that resolves against the *active* tint,
+     * which is exactly what a preview must not do. */
+    return role_open(rows, THEME_STANCE);
 }
 
 /* Pick a preset from the terminal environment. NO_COLOR (non-empty, per
@@ -320,16 +364,12 @@ int theme_set(const char *name)
 
 int theme_tint_set(const char *name)
 {
-    if (!name)
+    const struct tint *t = tint_find(name);
+    if (!t)
         return -1;
-    for (size_t i = 0; i < sizeof(TINTS) / sizeof(TINTS[0]); i++) {
-        if (strcasecmp(TINTS[i].name, name) == 0) {
-            tint = &TINTS[i];
-            tint_resolve();
-            return 0;
-        }
-    }
-    return -1;
+    tint = t;
+    tint_resolve();
+    return 0;
 }
 
 /* Whether `value` is a new mistake worth a line. Resolution runs often —
@@ -337,7 +377,7 @@ int theme_tint_set(const char *name)
  * switch and /config edit — and an unresolvable name is one mistake in one
  * config file, so each distinct one is reported once. Deduping by value
  * rather than by call count is what keeps a name that only becomes effective
- * later reportable: a stance can supply a valid hue at startup and mask a
+ * later reportable: a stance can supply a valid tint at startup and mask a
  * broken HAX_TINT until the stance ends. */
 static int first_report(char **seen, const char *value)
 {

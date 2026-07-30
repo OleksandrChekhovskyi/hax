@@ -1,11 +1,13 @@
 /* SPDX-License-Identifier: MIT */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
 
 #include "config.h"
 #include "harness.h"
+#include "util.h"
 
 /* config_init() reads a file from the XDG path; the load + resolve layer
  * underneath is what carries the logic, so most tests drive config_load()
@@ -18,6 +20,18 @@ static void clear_env(void)
     const struct config_setting *s = config_settings(&n);
     for (size_t i = 0; i < n; i++)
         unsetenv(s[i].env);
+}
+
+/* Write `text` to `path`, for tests that need the file on disk rather than
+ * only in a loaded tier — the writers merge into what is on disk. */
+static void write_file(const char *path, const char *text)
+{
+    FILE *fp = fopen(path, "w");
+    EXPECT(fp != NULL);
+    if (!fp)
+        return;
+    EXPECT(fputs(text, fp) >= 0);
+    EXPECT(fclose(fp) == 0);
 }
 
 static void test_load_validation(void)
@@ -541,8 +555,16 @@ static void test_persist_flat_key(void)
     setenv("XDG_STATE_HOME", dir, 1); /* isolate the state tier — see roundtrip test */
 
     /* A hand-written flat dotted key takes lookup precedence, so persist
-     * must remove it or it would shadow the nested value it writes. */
-    EXPECT(config_load("{\"openai.base_url\": \"old\"}") == 0);
+     * must remove it or it would shadow the nested value it writes. On disk,
+     * not merely loaded: a write merges into the file, so an in-memory-only
+     * key would be dropped by the reload instead of by the removal under
+     * test. */
+    char cfgdir[2048], cfgpath[4096];
+    snprintf(cfgdir, sizeof cfgdir, "%s/hax", dir);
+    EXPECT(mkdir(cfgdir, 0700) == 0);
+    snprintf(cfgpath, sizeof cfgpath, "%s/config.json", cfgdir);
+    write_file(cfgpath, "{\"openai.base_url\": \"old\"}");
+    config_init();
     EXPECT(config_persist("openai.base_url", "new") == 0);
     EXPECT_STR_EQ(config_str("openai.base_url"), "new");
     config_load(NULL);
@@ -550,7 +572,8 @@ static void test_persist_flat_key(void)
     EXPECT_STR_EQ(config_str("openai.base_url"), "new");
 
     /* Deleting a key written in flat form must actually delete it. */
-    EXPECT(config_load("{\"openai.base_url\": \"old\"}") == 0);
+    write_file(cfgpath, "{\"openai.base_url\": \"old\"}");
+    config_init();
     EXPECT(config_persist("openai.base_url", NULL) == 0);
     EXPECT(config_str("openai.base_url") == NULL);
     config_load(NULL);
@@ -1349,11 +1372,623 @@ static void test_preset_dotted_name(void)
     config_set_override("system_prompt", NULL);
 }
 
+static void test_preset_name_valid(void)
+{
+    /* A dot is a name character (preset_node takes names literally); a path
+     * separator or a space is not. */
+    EXPECT(config_preset_name_valid("review"));
+    EXPECT(config_preset_name_valid("review.v2"));
+    EXPECT(config_preset_name_valid("fast-scout_2"));
+    EXPECT(!config_preset_name_valid(""));
+    EXPECT(!config_preset_name_valid(NULL));
+    EXPECT(!config_preset_name_valid(".hidden"));   /* must start alphanumeric */
+    EXPECT(!config_preset_name_valid("-flaglike")); /* would read as an option */
+    EXPECT(!config_preset_name_valid("two words"));
+    EXPECT(!config_preset_name_valid("slash/es"));
+    char long_name[80];
+    memset(long_name, 'a', sizeof long_name);
+    long_name[sizeof long_name - 1] = '\0';
+    EXPECT(!config_preset_name_valid(long_name));
+}
+
+static void test_preset_save(void)
+{
+    clear_env();
+    config_free();
+
+    char *dir = t_tempdir();
+    setenv("XDG_CONFIG_HOME", dir, 1);
+    setenv("XDG_STATE_HOME", dir, 1); /* isolate the state tier — see roundtrip test */
+
+    /* Saving into a file that already has unrelated keys keeps them, and the
+     * written preset is appliable immediately (in-memory tier updated) and
+     * after a reload (it reached the disk). The key is written to disk rather
+     * than only loaded: what a save merges into is the file, not this
+     * process's snapshot of it (see test_preset_save_merges_external_edit). */
+    char precfg[4096];
+    snprintf(precfg, sizeof precfg, "%s/hax", dir);
+    EXPECT(mkdir(precfg, 0700) == 0);
+    snprintf(precfg, sizeof precfg, "%s/hax/config.json", dir);
+    write_file(precfg, "{\"model\": \"keep-me\"}");
+    config_init();
+    struct config_preset def = {.provider = "mock",
+                                .model = "m",
+                                .effort = "high",
+                                .tint = "rose",
+                                .description = "saved from the session"};
+    char *err = NULL;
+    EXPECT(config_preset_save("scout", &def, &err) == 0);
+    EXPECT(err == NULL);
+    EXPECT_STR_EQ(config_preset_provider("scout"), "mock");
+    EXPECT(config_preset_exists("scout"));
+
+    config_load(NULL);
+    config_init();
+    EXPECT_STR_EQ(config_str("model"), "keep-me");
+    EXPECT_STR_EQ(config_preset_provider("scout"), "mock");
+    EXPECT_STR_EQ(config_preset_model("scout"), "m");
+    EXPECT_STR_EQ(config_preset_effort("scout"), "high");
+    EXPECT_STR_EQ(config_preset_tint("scout"), "rose");
+    EXPECT_STR_EQ(config_preset_description("scout"), "saved from the session");
+    EXPECT(config_preset_apply("scout", CONFIG_TIER_RUN, &err) == 0);
+    EXPECT(err == NULL);
+    config_preset_exit(CONFIG_TIER_RUN);
+    config_set_override("preset", NULL);
+    config_set_override("provider", NULL);
+    config_set_override("model", NULL);
+    config_set_override("effort", NULL);
+
+    /* A second save keeps the first preset and replaces only its own name.
+     * Omitted members are absent rather than empty, so the provider's own
+     * defaults apply when it is used. */
+    struct config_preset min = {.provider = "mock"};
+    EXPECT(config_preset_save("bare", &min, &err) == 0);
+    config_load(NULL);
+    config_init();
+    EXPECT_STR_EQ(config_preset_provider("scout"), "mock");
+    EXPECT(config_preset_model("bare") == NULL);
+    EXPECT(config_preset_effort("bare") == NULL);
+    EXPECT(config_preset_tint("bare") == NULL);
+    EXPECT(config_preset_description("bare") == NULL);
+
+    /* A dotted name is a literal member: what was saved must read back and
+     * apply under the same spelling, not become nesting. */
+    EXPECT(config_preset_save("review.v2", &def, &err) == 0);
+    config_load(NULL);
+    config_init();
+    EXPECT_STR_EQ(config_preset_provider("review.v2"), "mock");
+    EXPECT(config_preset_apply("review.v2", CONFIG_TIER_RUN, &err) == 0);
+    config_preset_exit(CONFIG_TIER_RUN);
+    config_set_override("preset", NULL);
+    config_set_override("provider", NULL);
+    config_set_override("model", NULL);
+    config_set_override("effort", NULL);
+
+    /* The file must stay private: it sits beside API keys in the same file. */
+    char cfgpath[4096];
+    snprintf(cfgpath, sizeof cfgpath, "%s/hax/config.json", dir);
+    struct stat sb;
+    EXPECT(stat(cfgpath, &sb) == 0 && (sb.st_mode & 0777) == 0600);
+
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_STATE_HOME");
+}
+
+static void test_preset_save_errors(void)
+{
+    clear_env();
+    config_free();
+
+    char *dir = t_tempdir();
+    setenv("XDG_CONFIG_HOME", dir, 1);
+    setenv("XDG_STATE_HOME", dir, 1);
+
+    /* Validation is the same one apply runs, so a save can never write a
+     * definition /preset would then reject. Nothing is written on failure. */
+    char *err = NULL;
+    struct config_preset anon = {.model = "m"};
+    EXPECT(config_preset_save("anon", &anon, &err) == -1);
+    EXPECT(err != NULL);
+    free(err);
+    err = NULL;
+    EXPECT(!config_preset_exists("anon"));
+
+    struct config_preset badtint = {.provider = "mock", .tint = "chartreuse"};
+    EXPECT(config_preset_save("hue", &badtint, &err) == -1);
+    EXPECT(err != NULL);
+    free(err);
+    err = NULL;
+    EXPECT(!config_preset_exists("hue"));
+
+    struct config_preset ok = {.provider = "mock"};
+    EXPECT(config_preset_save("two words", &ok, &err) == -1);
+    EXPECT(err != NULL);
+    free(err);
+    err = NULL;
+
+    /* A flat-authored "presets.<name>" key is only a lookup fallback, so the
+     * nested member a save writes already wins — but the old block must not be
+     * left in the file, where it would read as the live definition to whoever
+     * edits it next. On disk, since that is what the save merges into. */
+    char cfgdir[2048], cfgpath[4096];
+    snprintf(cfgdir, sizeof cfgdir, "%s/hax", dir);
+    EXPECT(mkdir(cfgdir, 0700) == 0);
+    snprintf(cfgpath, sizeof cfgpath, "%s/config.json", cfgdir);
+    write_file(cfgpath, "{\"presets.flat\": {\"provider\": \"mock\", \"model\": \"old\"}}");
+    config_init();
+    EXPECT_STR_EQ(config_preset_model("flat"), "old");
+    struct config_preset fresh = {.provider = "mock", .model = "new"};
+    EXPECT(config_preset_save("flat", &fresh, &err) == 0);
+    EXPECT_STR_EQ(config_preset_model("flat"), "new");
+    size_t len = 0;
+    char *written = slurp_file(cfgpath, &len);
+    EXPECT(written != NULL && strstr(written, "presets.flat") == NULL);
+    free(written);
+    config_load(NULL);
+    config_init();
+    EXPECT_STR_EQ(config_preset_model("flat"), "new");
+
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_STATE_HOME");
+}
+
+static void test_preset_save_overwrites_external_edit(void)
+{
+    clear_env();
+    config_free();
+
+    char *dir = t_tempdir();
+    setenv("XDG_CONFIG_HOME", dir, 1);
+    setenv("XDG_STATE_HOME", dir, 1);
+
+    /* The file is rewritten from the tier this process holds, so an edit made
+     * while the session ran is overwritten — the same way it had no effect on
+     * the running session. Deliberate: one snapshot governs both. */
+    char cfgdir[2048], cfgpath[4096];
+    snprintf(cfgdir, sizeof cfgdir, "%s/hax", dir);
+    EXPECT(mkdir(cfgdir, 0700) == 0);
+    snprintf(cfgpath, sizeof cfgpath, "%s/config.json", cfgdir);
+    write_file(cfgpath, "{\"model\": \"at-startup\"}");
+    config_init();
+    write_file(cfgpath, "{\"model\": \"edited-since\"}");
+
+    struct config_preset def = {.provider = "mock", .model = "m"};
+    char *err = NULL;
+    EXPECT(config_preset_save("scout", &def, &err) == 0);
+    EXPECT(err == NULL);
+    config_load(NULL);
+    config_init();
+    EXPECT_STR_EQ(config_str("model"), "at-startup");
+    EXPECT_STR_EQ(config_preset_provider("scout"), "mock");
+
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_STATE_HOME");
+}
+
+static void test_write_refuses_unusable_file(void)
+{
+    clear_env();
+    config_free();
+
+    char *dir = t_tempdir();
+    char cfgdir[2048], cfgpath[4096];
+    snprintf(cfgdir, sizeof cfgdir, "%s/hax", dir);
+    EXPECT(mkdir(cfgdir, 0700) == 0);
+    snprintf(cfgpath, sizeof cfgpath, "%s/config.json", cfgdir);
+    setenv("XDG_CONFIG_HOME", dir, 1);
+    setenv("XDG_STATE_HOME", dir, 1);
+
+    /* A file that couldn't be read at startup leaves the tier empty, so a write
+     * built from it would replace hand-authored content this process never saw.
+     * Both writers refuse, and the file stays exactly as it is. */
+    write_file(cfgpath, "{ this is not json");
+    config_init();
+    struct config_preset def = {.provider = "mock", .model = "m"};
+    char *err = NULL;
+    EXPECT(config_preset_save("scout", &def, &err) == -1);
+    EXPECT(err != NULL);
+    free(err);
+    err = NULL;
+    EXPECT(config_persist("model", "m") == -1);
+    size_t len = 0;
+    char *still = slurp_file(cfgpath, &len);
+    EXPECT(still != NULL && strcmp(still, "{ this is not json") == 0);
+    free(still);
+
+    /* The verdict belongs to the last load, not to the process: a tier loaded
+     * from text (what most tests drive) supersedes it, and so does a
+     * config_init over a fixed-up file. */
+    EXPECT(config_load("{\"model\": \"from-text\"}") == 0);
+    EXPECT(config_preset_save("scout", &def, &err) == 0);
+    EXPECT(err == NULL);
+
+    write_file(cfgpath, "{\"model\": \"fixed\"}");
+    config_init();
+    EXPECT(config_preset_save("scout", &def, &err) == 0);
+    EXPECT(err == NULL);
+    EXPECT_STR_EQ(config_str("model"), "fixed");
+
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_STATE_HOME");
+}
+
+static void test_preset_save_rejects_state_definition(void)
+{
+    clear_env();
+    config_free();
+
+    char *dir = t_tempdir();
+    setenv("XDG_CONFIG_HOME", dir, 1);
+    setenv("XDG_STATE_HOME", dir, 1);
+
+    /* A hand-placed nested state-tier preset outranks the config file, so
+     * writing the same name there would resolve to the state one — reporting a
+     * save that isn't in effect. Refuse and name the file instead. (The flat
+     * spelling doesn't outrank it — see
+     * test_preset_save_state_flat_does_not_shadow.) */
+    EXPECT(config_load_state("{\"presets\": {\"scout\": {\"provider\": \"mock\"}}}") == 0);
+    struct config_preset def = {.provider = "mock", .model = "m"};
+    char *err = NULL;
+    EXPECT(config_preset_save("scout", &def, &err) == -1);
+    EXPECT(err != NULL && strstr(err, "state.json") != NULL);
+    free(err);
+    err = NULL;
+
+    /* An unrelated name is unaffected. */
+    EXPECT(config_preset_save("other", &def, &err) == 0);
+    EXPECT_STR_EQ(config_preset_provider("other"), "mock");
+
+    /* Nor is a name the state tier mentions with a non-object: that doesn't
+     * shadow the file (preset_node falls through to it), so the write does take
+     * effect and must not be refused. */
+    EXPECT(config_load_state("{\"presets\": {\"junky\": \"draft\"}}") == 0);
+    EXPECT(config_preset_save("junky", &def, &err) == 0);
+    EXPECT(err == NULL);
+    EXPECT_STR_EQ(config_preset_provider("junky"), "mock");
+    config_load_state(NULL);
+
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_STATE_HOME");
+}
+
+static void test_preset_save_follows_symlink(void)
+{
+    clear_env();
+    config_free();
+
+    /* config.json is commonly a symlink into a dotfiles repo. Writing must
+     * land on the file the link names, leaving the link a link — renaming
+     * over it would detach the config from the repo that manages it. */
+    char *dir = t_tempdir();
+    char cfgdir[2048], link[4096], real[4096];
+    snprintf(cfgdir, sizeof cfgdir, "%s/hax", dir);
+    EXPECT(mkdir(cfgdir, 0700) == 0);
+    snprintf(link, sizeof link, "%s/config.json", cfgdir);
+    snprintf(real, sizeof real, "%s/dotfiles-config.json", dir);
+    FILE *fp = fopen(real, "w");
+    EXPECT(fp != NULL);
+    fputs("{\"model\": \"from-dotfiles\"}\n", fp);
+    fclose(fp);
+    EXPECT(symlink(real, link) == 0);
+
+    setenv("XDG_CONFIG_HOME", dir, 1);
+    setenv("XDG_STATE_HOME", dir, 1);
+    config_init();
+    EXPECT_STR_EQ(config_str("model"), "from-dotfiles");
+
+    struct config_preset def = {.provider = "mock", .model = "m"};
+    char *err = NULL;
+    EXPECT(config_preset_save("scout", &def, &err) == 0);
+
+    struct stat sb;
+    EXPECT(lstat(link, &sb) == 0 && S_ISLNK(sb.st_mode));
+    config_load(NULL);
+    config_init(); /* reads through the link — i.e. the real file was written */
+    EXPECT_STR_EQ(config_preset_provider("scout"), "mock");
+    EXPECT_STR_EQ(config_str("model"), "from-dotfiles");
+
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_STATE_HOME");
+}
+
+static void test_preset_save_follows_dangling_symlink(void)
+{
+    clear_env();
+    config_free();
+
+    /* The link points at a file that doesn't exist yet — a dotfiles repo whose
+     * config.json hasn't been created. realpath(3) refuses such a chain, and
+     * falling back to the link path would replace the link with a regular
+     * file; the write must create the target instead. */
+    char *dir = t_tempdir();
+    char cfgdir[2048], link[4096], real[4096];
+    snprintf(cfgdir, sizeof cfgdir, "%s/hax", dir);
+    EXPECT(mkdir(cfgdir, 0700) == 0);
+    snprintf(link, sizeof link, "%s/config.json", cfgdir);
+    snprintf(real, sizeof real, "%s/dotfiles-config.json", dir);
+    EXPECT(symlink(real, link) == 0);
+
+    setenv("XDG_CONFIG_HOME", dir, 1);
+    setenv("XDG_STATE_HOME", dir, 1);
+    config_init();
+
+    struct config_preset def = {.provider = "mock", .model = "m"};
+    char *err = NULL;
+    EXPECT(config_preset_save("scout", &def, &err) == 0);
+    EXPECT(err == NULL);
+
+    struct stat sb;
+    EXPECT(lstat(link, &sb) == 0 && S_ISLNK(sb.st_mode)); /* still a link */
+    EXPECT(stat(real, &sb) == 0 && S_ISREG(sb.st_mode));  /* target created */
+    config_load(NULL);
+    config_init();
+    EXPECT_STR_EQ(config_preset_provider("scout"), "mock");
+
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_STATE_HOME");
+}
+
+static void test_persist_into_empty_file(void)
+{
+    clear_env();
+    config_free();
+
+    /* An existing but empty file is an empty tier at startup, so a write must
+     * read it the same way rather than refusing everything. */
+    char *dir = t_tempdir();
+    char cfgdir[2048], stdir[2048], path[4096];
+    snprintf(cfgdir, sizeof cfgdir, "%s/hax", dir);
+    EXPECT(mkdir(cfgdir, 0700) == 0);
+    snprintf(path, sizeof path, "%s/config.json", cfgdir);
+    write_file(path, "\n  \n"); /* whitespace only is empty, not malformed */
+    snprintf(stdir, sizeof stdir, "%s/state", dir);
+    EXPECT(mkdir(stdir, 0700) == 0);
+    snprintf(path, sizeof path, "%s/hax", stdir);
+    EXPECT(mkdir(path, 0700) == 0);
+    snprintf(path, sizeof path, "%s/hax/state.json", stdir);
+    write_file(path, "");
+
+    setenv("XDG_CONFIG_HOME", dir, 1);
+    setenv("XDG_STATE_HOME", stdir, 1);
+    config_init();
+
+    struct config_preset def = {.provider = "mock", .model = "m"};
+    char *err = NULL;
+    EXPECT(config_preset_save("scout", &def, &err) == 0);
+    EXPECT(err == NULL);
+    EXPECT_STR_EQ(config_preset_provider("scout"), "mock");
+    EXPECT(config_persist_state("provider", "mock") == 0);
+    EXPECT_STR_EQ(config_str("provider"), "mock");
+    /* Zero-byte reads the same way, in either file. */
+    snprintf(path, sizeof path, "%s/config.json", cfgdir);
+    write_file(path, "");
+    config_init();
+    EXPECT(config_preset_save("scout2", &def, &err) == 0);
+    EXPECT(err == NULL);
+
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_STATE_HOME");
+}
+
+static void test_preset_exists_counts_any_member(void)
+{
+    clear_env();
+    /* A half-written definition — a string where an object belongs — is still
+     * the user's content under that name. It isn't appliable (enumeration skips
+     * it), but a save must see that the name is taken rather than replace it
+     * without asking. */
+    EXPECT(config_load("{\"presets\": {\"work\": \"draft\"}}") == 0);
+    EXPECT(config_preset_exists("work"));
+    EXPECT(config_preset_provider("work") == NULL); /* nothing appliable there */
+    char **names = NULL;
+    EXPECT(config_preset_names(&names) == 0);
+    free(names);
+
+    /* The flat spelling counts the same way, and an unrelated name doesn't. */
+    EXPECT(config_load("{\"presets.work\": 7}") == 0);
+    EXPECT(config_preset_exists("work"));
+    EXPECT(!config_preset_exists("other"));
+    EXPECT(!config_preset_exists(""));
+    EXPECT(!config_preset_exists(NULL));
+
+    /* A non-object in the state tier does not shadow a config-file definition
+     * (preset_node falls through to the file), so it must not make a save
+     * refuse — only an appliable object there does. */
+    EXPECT(config_load("{\"presets\": {\"work\": {\"provider\": \"mock\"}}}") == 0);
+    EXPECT(config_load_state("{\"presets\": {\"work\": \"junk\"}}") == 0);
+    EXPECT_STR_EQ(config_preset_provider("work"), "mock");
+    config_load_state(NULL);
+}
+
+static void test_write_fails_on_unresolvable_link(void)
+{
+    clear_env();
+    config_free();
+
+    /* fs_resolve_link_target reports a hard failure by returning NULL. Falling
+     * back to the link path would rename over the very link the resolution
+     * exists to preserve, so the write must fail instead.
+     *
+     * A chain longer than the resolver's 32-hop cap but shorter than the
+     * kernel's own limit is the case that reaches this: reading the file at
+     * startup succeeds (here it ends at a missing target, so the tier is just
+     * empty — no unusable-file verdict to refuse on), while resolution gives
+     * up. */
+    char *dir = t_tempdir();
+    char cfgdir[2048], link[4096], next[4096];
+    snprintf(cfgdir, sizeof cfgdir, "%s/hax", dir);
+    EXPECT(mkdir(cfgdir, 0700) == 0);
+    snprintf(link, sizeof link, "%s/config.json", cfgdir);
+    /* config.json -> hop1 -> ... -> hop33 (absent) */
+    for (int i = 1; i <= 33; i++) {
+        snprintf(next, sizeof next, "%s/hop%d", cfgdir, i);
+        const char *from = (i == 1) ? link : NULL;
+        char prev[4096];
+        if (!from) {
+            snprintf(prev, sizeof prev, "%s/hop%d", cfgdir, i - 1);
+            from = prev;
+        }
+        EXPECT(symlink(next, from) == 0);
+    }
+
+    setenv("XDG_CONFIG_HOME", dir, 1);
+    setenv("XDG_STATE_HOME", dir, 1);
+    config_init();
+
+    struct config_preset def = {.provider = "mock", .model = "m"};
+    char *err = NULL;
+    EXPECT(config_preset_save("scout", &def, &err) == -1);
+    EXPECT(err != NULL);
+    free(err);
+    EXPECT(config_persist("model", "m") == -1);
+    struct stat sb;
+    EXPECT(lstat(link, &sb) == 0 && S_ISLNK(sb.st_mode)); /* still a link */
+
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_STATE_HOME");
+}
+
+static void test_write_creates_link_target_directory(void)
+{
+    clear_env();
+    config_free();
+
+    /* config.json -> a dotfiles path whose directory doesn't exist yet: the
+     * temp file is staged beside the *resolved* target, so that directory is
+     * the one that has to be created. */
+    char *dir = t_tempdir();
+    char cfgdir[2048], link[4096], real[4096];
+    snprintf(cfgdir, sizeof cfgdir, "%s/hax", dir);
+    EXPECT(mkdir(cfgdir, 0700) == 0);
+    snprintf(link, sizeof link, "%s/config.json", cfgdir);
+    snprintf(real, sizeof real, "%s/dotfiles/hax/config.json", dir);
+    EXPECT(symlink(real, link) == 0);
+
+    setenv("XDG_CONFIG_HOME", dir, 1);
+    setenv("XDG_STATE_HOME", dir, 1);
+    config_init();
+
+    struct config_preset def = {.provider = "mock", .model = "m"};
+    char *err = NULL;
+    EXPECT(config_preset_save("scout", &def, &err) == 0);
+    EXPECT(err == NULL);
+
+    struct stat sb;
+    EXPECT(lstat(link, &sb) == 0 && S_ISLNK(sb.st_mode));
+    EXPECT(stat(real, &sb) == 0 && S_ISREG(sb.st_mode));
+    config_load(NULL);
+    config_init();
+    EXPECT_STR_EQ(config_preset_provider("scout"), "mock");
+
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_STATE_HOME");
+}
+
+static void test_preset_save_refuses_bad_presets_container(void)
+{
+    clear_env();
+    config_free();
+
+    char *dir = t_tempdir();
+    char cfgdir[2048], cfgpath[4096];
+    snprintf(cfgdir, sizeof cfgdir, "%s/hax", dir);
+    EXPECT(mkdir(cfgdir, 0700) == 0);
+    snprintf(cfgpath, sizeof cfgpath, "%s/config.json", cfgdir);
+    setenv("XDG_CONFIG_HOME", dir, 1);
+    setenv("XDG_STATE_HOME", dir, 1);
+
+    /* The file parses, so it is usable — but "presets" holds something that
+     * isn't a block of them. Writing would drop it, and there is no name to
+     * describe in the usual prompt, so the save refuses and the file stays. */
+    struct config_preset def = {.provider = "mock", .model = "m"};
+    char *err = NULL;
+    const char *const bad[] = {"{\"presets\": \"draft\"}", "{\"presets\": [\"work\"]}"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        write_file(cfgpath, bad[i]);
+        config_init();
+        EXPECT(config_preset_save("scout", &def, &err) == -1);
+        EXPECT(err != NULL);
+        free(err);
+        err = NULL;
+        size_t len = 0;
+        char *still = slurp_file(cfgpath, &len);
+        EXPECT(still != NULL && strcmp(still, bad[i]) == 0);
+        free(still);
+    }
+
+    /* A missing container is created, and a real one is added to. */
+    write_file(cfgpath, "{\"model\": \"m\"}");
+    config_init();
+    EXPECT(config_preset_save("scout", &def, &err) == 0);
+    EXPECT(config_preset_save("other", &def, &err) == 0);
+    EXPECT_STR_EQ(config_preset_provider("scout"), "mock");
+    EXPECT_STR_EQ(config_preset_provider("other"), "mock");
+
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_STATE_HOME");
+}
+
+static void test_preset_save_state_flat_does_not_shadow(void)
+{
+    clear_env();
+    config_free();
+
+    char *dir = t_tempdir();
+    setenv("XDG_CONFIG_HOME", dir, 1);
+    setenv("XDG_STATE_HOME", dir, 1);
+
+    /* A *flat* state definition is preset_node's last-resort fallback, which the
+     * nested member a save writes already beats — so the write does take effect
+     * and must not be refused with a claim that state outranks it. */
+    EXPECT(config_load_state("{\"presets.work\": {\"provider\": \"anthropic\"}}") == 0);
+    struct config_preset def = {.provider = "mock", .model = "m"};
+    char *err = NULL;
+    EXPECT(config_preset_save("work", &def, &err) == 0);
+    EXPECT(err == NULL);
+    EXPECT_STR_EQ(config_preset_provider("work"), "mock");
+
+    /* A nested one does outrank it, so that save is still refused. */
+    EXPECT(config_load_state("{\"presets\": {\"nest\": {\"provider\": \"anthropic\"}}}") == 0);
+    EXPECT(config_preset_save("nest", &def, &err) == -1);
+    EXPECT(err != NULL && strstr(err, "state.json") != NULL);
+    free(err);
+    config_load_state(NULL);
+
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_STATE_HOME");
+}
+
+static void test_str_below_run(void)
+{
+    clear_env();
+    config_free();
+
+    /* What a key resolves to with this run's own picks out of the way — for a
+     * caller showing the result of an act that clears them. */
+    EXPECT(config_load("{\"tint\": \"sage\"}") == 0);
+    EXPECT_STR_EQ(config_str("tint"), "sage");
+    EXPECT_STR_EQ(config_str_below_run("tint"), "sage"); /* nothing to skip */
+
+    config_set_override("tint", "violet");
+    EXPECT_STR_EQ(config_str("tint"), "violet");
+    EXPECT_STR_EQ(config_str_below_run("tint"), "sage");
+
+    /* Every lower tier still applies in order, and the registry default is the
+     * floor once none of them names one. */
+    setenv("HAX_TINT", "rose", 1);
+    EXPECT_STR_EQ(config_str_below_run("tint"), "rose");
+    unsetenv("HAX_TINT");
+    EXPECT(config_load(NULL) == 0);
+    EXPECT_STR_EQ(config_str_below_run("tint"), "teal");
+    config_set_override("tint", NULL);
+}
+
 int main(void)
 {
     test_load_validation();
     test_registry_introspection();
     test_source_reports_winning_tier();
+    test_str_below_run();
     test_value_valid();
     test_sort_models_auto();
     test_empty_policy();
@@ -1379,6 +2014,20 @@ int main(void)
     test_preset_apply_errors();
     test_preset_enumeration();
     test_preset_dotted_name();
+    test_preset_name_valid();
+    test_preset_save();
+    test_preset_save_errors();
+    test_preset_save_follows_symlink();
+    test_preset_save_follows_dangling_symlink();
+    test_write_creates_link_target_directory();
+    test_write_fails_on_unresolvable_link();
+    test_preset_exists_counts_any_member();
+    test_preset_save_overwrites_external_edit();
+    test_write_refuses_unusable_file();
+    test_preset_save_rejects_state_definition();
+    test_preset_save_state_flat_does_not_shadow();
+    test_preset_save_refuses_bad_presets_container();
+    test_persist_into_empty_file();
     config_free();
     T_REPORT();
 }

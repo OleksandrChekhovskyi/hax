@@ -390,7 +390,15 @@ static void render_row(struct buf *out, const struct picker_state *s, size_t fi,
         buf_append_str(out, ANSI_DIM);
     else if (selected)
         buf_append_str(out, ANSI_BOLD);
+    /* Here the color is the row's content, not decoration, so it survives the
+     * highlight (bold in the color, like a heading) instead of being replaced
+     * by it. A dim row owns its styling. */
+    int colored = !it->dim && it->label_color && it->label_color[0];
+    if (colored)
+        buf_append_str(out, it->label_color);
     append_clip(out, label, label_cells, &label_used, utf8);
+    if (colored)
+        buf_append_str(out, ANSI_FG_DEFAULT);
     if (it->dim || selected)
         buf_append_str(out, ANSI_BOLD_OFF);
 

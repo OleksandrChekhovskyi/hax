@@ -18,6 +18,7 @@
 #include "render/render_ctx.h"
 #include "system/bg_job.h"
 #include "terminal/picker.h"
+#include "terminal/theme.h"
 #include "terminal/ui.h"
 #include "transport/http.h"
 
@@ -202,6 +203,33 @@ static void seg_add(struct buf *b, const char *text)
     buf_append_str(b, text);
 }
 
+/* Split a setting's "a|b|c" choices into owned strings, so a picker over an
+ * enumerated setting builds its rows from the registry rather than a second
+ * copy of the vocabulary. Caller frees each element, then the array. */
+static size_t split_choices(const char *choices, char ***out)
+{
+    size_t n = 0, cap = 0;
+    char **arr = NULL;
+    const char *p = choices;
+    for (;;) {
+        const char *bar = strchr(p, '|');
+        size_t len = bar ? (size_t)(bar - p) : strlen(p);
+        if (n == cap) {
+            cap = cap ? cap * 2 : 8;
+            arr = xrealloc(arr, cap * sizeof(*arr));
+        }
+        char *seg = xmalloc(len + 1);
+        memcpy(seg, p, len);
+        seg[len] = '\0';
+        arr[n++] = seg;
+        if (!bar)
+            break;
+        p = bar + 1;
+    }
+    *out = arr;
+    return n;
+}
+
 char *model_desc_line(const struct model_info *m, const struct catalog_entry *cat)
 {
     /* Reported-over-catalog, through the same merge every other consumer
@@ -277,10 +305,16 @@ enum pick_status {
  * /provider flow picks against the prospective new one before committing).
  * Returns a malloc'd model id iff *status is PICK_MADE, else NULL with
  * *status saying why (a note/error was already printed for NONE/FAILED).
- * `cur` marks the row currently in use, if it appears in the list. */
+ * `cur` marks the row currently in use, if it appears in the list.
+ *
+ * *picked reports whether the id came from the user choosing among several,
+ * as opposed to the sole model a single-model server offered (taken without a
+ * picker below). Callers use it to tell intent from circumstance — see
+ * provider.model_discovered. */
 static char *choose_model(struct agent_state *st, struct provider *p, const char *cur,
-                          enum pick_status *status)
+                          enum pick_status *status, int *picked)
 {
+    *picked = 0;
     const char *name = p->name ? p->name : "?";
     struct model_info *models = NULL;
     size_t n = 0;
@@ -396,6 +430,7 @@ static char *choose_model(struct agent_state *st, struct provider *p, const char
     long sel = picker_run(&opts);
     char *chosen = (sel >= 0) ? xstrdup(models[sel].id) : NULL;
     *status = chosen ? PICK_MADE : PICK_CANCELLED;
+    *picked = chosen != NULL; /* several were offered and one was taken */
     /* Hand the entry to the metadata layer before the list is freed; the
      * effort step that follows is its first reader. At pick time rather
      * than at commit, since the chained pickers run against the prospective
@@ -481,8 +516,17 @@ static enum pick_status choose_effort(struct agent_state *st, struct provider *p
  * picked here" — config_persist_selection keeps the stored value when the
  * provider is unchanged and resets it to the sentinel when the commit re-pins
  * a different one (e.g. an /effort pick promoting a one-off HAX_PROVIDER run
- * must not carry the old provider's saved model along). */
-static void commit_selection(const char *provider, const char *model, const char *effort)
+ * must not carry the old provider's saved model along).
+ *
+ * `model_discovered` is the committing provider's own flag (provider.h): the
+ * model is what the backend currently serves rather than a preference, so a
+ * `model` given here is *stored* as the sentinel — the next launch re-runs
+ * discovery instead of carrying a path that matched one server invocation. The
+ * run override still takes the concrete value: a discovering provider has no
+ * default_model to resolve from within this run. A NULL model is unaffected,
+ * keeping its "not picked here" meaning. */
+static void commit_selection(const char *provider, const char *model, const char *effort,
+                             int model_discovered)
 {
     /* An explicit pick exits any active preset stance — atomically, not as
      * a blend: the stance name is cleared (the banner must not keep
@@ -499,7 +543,8 @@ static void commit_selection(const char *provider, const char *model, const char
         config_set_override("model", model);
     if (effort)
         config_set_override("effort", effort);
-    if (config_persist_selection(provider, model, effort) != 0) {
+    const char *stored = (model && model_discovered) ? CONFIG_VALUE_DEFAULT : model;
+    if (config_persist_selection(provider, stored, effort) != 0) {
         /* The overrides above keep the pick active for this run, but it didn't
          * reach state.json (an unwritable state dir), so it won't survive a
          * restart. Say so once — otherwise the user is left puzzled when
@@ -565,7 +610,7 @@ void select_effort(struct agent_state *st)
     const char *eff_model =
         (stance && *stance && st->sess->model && *st->sess->model) ? st->sess->model : NULL;
     char *pid = current_provider_id(p);
-    commit_selection(pid, eff_model, e ? e : CONFIG_VALUE_DEFAULT);
+    commit_selection(pid, eff_model, e ? e : CONFIG_VALUE_DEFAULT, p->model_discovered);
     free(pid);
     free(e);
     agent_apply_settings(st, p, 1);
@@ -592,7 +637,8 @@ void select_model(struct agent_state *st)
     int had_saved = model_meta_snapshot(p, &saved);
 
     enum pick_status ms;
-    char *m = choose_model(st, p, st->sess->model, &ms);
+    int picked = 0;
+    char *m = choose_model(st, p, st->sess->model, &ms, &picked);
     if (!m) {
         model_info_clear(&saved);
         return; /* cancelled or no menu — notes already printed */
@@ -625,6 +671,13 @@ void select_model(struct agent_state *st)
     }
     model_info_clear(&saved);
 
+    /* Choosing among several models is intent, whatever the backend served up
+     * at construction: the id stops being this provider's server state, so it
+     * persists as itself and a later /preset-save pins it. Taking a
+     * single-model server's only model is not a choice, and stays discovery. */
+    if (picked)
+        p->model_discovered = 0;
+
     /* The provider is pinned alongside the model — otherwise a model picked
      * against an auto-selected (unpinned) provider would make the next
      * launch re-auto-select and warn. Effort commits as the picked value,
@@ -634,7 +687,7 @@ void select_model(struct agent_state *st)
      * lower-tier env/config value leak into) an effort it never advertised.
      * Same resolution /provider applies on a switch. */
     char *pid = current_provider_id(p);
-    commit_selection(pid, m, e ? e : CONFIG_VALUE_DEFAULT);
+    commit_selection(pid, m, e ? e : CONFIG_VALUE_DEFAULT, p->model_discovered);
     free(pid);
     free(m);
     free(e);
@@ -760,7 +813,8 @@ void select_provider(struct agent_state *st)
      * it follows the red diagnostic. newp isn't live during these picks,
      * so choose_* take it explicitly. */
     enum pick_status ms;
-    char *m = choose_model(st, newp, NULL, &ms);
+    int picked = 0;
+    char *m = choose_model(st, newp, NULL, &ms, &picked);
     int has_default = newp->default_model && *newp->default_model;
     if (!m && (ms != PICK_NONE || !has_default)) {
         if (ms != PICK_CANCELLED) {
@@ -784,13 +838,17 @@ void select_provider(struct agent_state *st)
         return;
     }
 
+    if (picked)
+        newp->model_discovered = 0; /* a real choice — see select_model */
+
     /* Commit: a provider switch invalidates the old model/effort (they belong
      * to the old backend), so set the new model and effort to the picked value
      * or the sentinel — "use newp's default", which shadows a stale lower-tier
      * env/config value instead of leaking it into the new provider (passed
      * explicitly rather than as NULL: a same-provider re-pick must reset too,
      * not keep). Then swap and apply. */
-    commit_selection(f->name, m ? m : CONFIG_VALUE_DEFAULT, e ? e : CONFIG_VALUE_DEFAULT);
+    commit_selection(f->name, m ? m : CONFIG_VALUE_DEFAULT, e ? e : CONFIG_VALUE_DEFAULT,
+                     newp->model_discovered);
 
     if (agent_apply_settings(st, newp, 1) != 0) {
         newp->destroy(newp); /* ownership transfers only on success */
@@ -816,7 +874,9 @@ int select_preset(struct agent_state *st, const char *name, int announce)
 
     if (!name) {
         if (n == 0) {
-            ui_note("no presets defined — add a presets.<name> block to config.json");
+            /* The one-command route; hand-authoring is the docs' job. */
+            ui_note("no presets defined in config.json — use /preset-save to save the current "
+                    "selection");
             st->r->disp.trail = 1;
             goto out;
         }
@@ -829,6 +889,14 @@ int select_preset(struct agent_state *st, const char *name, int announce)
             items[i].label = names[i];
             items[i].desc = config_preset_description(names[i]);
             items[i].dim = 0;
+            /* Each name in the tint it will run under — the same identity color
+             * the banner's [name] takes, so the row shows which persona this
+             * is. A preset naming no tint falls back to the `tint` setting
+             * rather than the plain foreground, since that is what applying it
+             * would look like: not the tint in force now, which is whatever
+             * stance or runtime /config tint the apply is about to clear. */
+            const char *tint = config_preset_tint(names[i]);
+            items[i].label_color = theme_tint_open(tint ? tint : config_str_below_run("tint"));
             items[i].current = active && *active && strcmp(active, names[i]) == 0;
             if (items[i].current)
                 initial = i;
@@ -962,6 +1030,211 @@ out:
         free(names[i]);
     free(names);
     return rc;
+}
+
+/* ---------- saving the live selection as a preset ---------- */
+
+/* Pick the tint a saved preset carries, built from the tint setting's own
+ * choices and painted in the tints they name. On PICK_MADE *out is a malloc'd
+ * name, or NULL for the "none" row (no tint of its own). PICK_CANCELLED is
+ * Escape, or a non-tty — where a tint has to be an argument instead. */
+static enum pick_status choose_tint(const char *cur, char **out)
+{
+    *out = NULL;
+    const struct config_setting *s = config_setting_find("tint");
+    if (!s || !s->choices)
+        return PICK_NONE;
+
+    char **vals = NULL;
+    size_t n = split_choices(s->choices, &vals);
+    struct picker_item *items = xcalloc(n + 1, sizeof(*items));
+    items[0].label = "none";
+    items[0].desc = "Carry no tint of its own: your tint setting applies";
+    items[0].current = !cur;
+    size_t initial = 0;
+    for (size_t i = 0; i < n; i++) {
+        items[i + 1].label = vals[i];
+        items[i + 1].label_color = theme_tint_open(vals[i]);
+        /* Case-insensitively, like the validator and the theme layer: a
+         * hand-written "ROSE" must still show as the current row rather than
+         * leaving the cursor on "none", where Enter would drop it. */
+        items[i + 1].current = cur && strcasecmp(vals[i], cur) == 0;
+        if (items[i + 1].current)
+            initial = i + 1;
+    }
+    struct picker_opts opts = {
+        .title = "tint for this preset", .items = items, .n = n + 1, .initial = initial};
+    long sel = picker_run(&opts);
+    free(items);
+    if (sel > 0)
+        *out = xstrdup(vals[sel - 1]);
+    for (size_t i = 0; i < n; i++)
+        free(vals[i]);
+    free(vals);
+    return sel < 0 ? PICK_CANCELLED : PICK_MADE;
+}
+
+/* Confirm replacing an existing definition, showing what it would replace: a
+ * mistyped name must not silently overwrite a hand-written preset. Returns 1
+ * to go ahead; Escape and the "keep it" row both decline. */
+static int confirm_overwrite(const char *name)
+{
+    struct buf b;
+    buf_init(&b);
+    const char *prov = config_preset_provider(name);
+    seg_add(&b, prov && *prov ? prov : "no provider");
+    const char *model = config_preset_model(name);
+    const char *effort = config_preset_effort(name);
+    if (model && *model)
+        seg_add(&b, model);
+    if (effort && *effort)
+        seg_add(&b, effort);
+    char *cur = buf_steal(&b);
+
+    struct picker_item items[] = {
+        {.label = "keep it", .desc = "Leave the existing definition alone", .current = 1},
+        {.label = "overwrite", .detail = cur, .desc = "Replace it with the current selection"},
+    };
+    char *title = xasprintf("preset '%s' already exists", name);
+    struct picker_opts opts = {
+        .title = title, .items = items, .n = sizeof(items) / sizeof(*items), .initial = 0};
+    long sel = picker_run(&opts);
+    free(title);
+    free(cur);
+    return sel == 1;
+}
+
+/* The system_prompt to write into a saved preset, or NULL to omit it. Only a
+ * prompt that omission would *not* reproduce is worth writing down: one already
+ * in config.json (or the built-in) comes back on its own, and copying it would
+ * just go stale against the original, while a stance's or the environment's
+ * would not come back at all. */
+static const char *capture_system_prompt(void)
+{
+    const char *sys = config_str("system_prompt");
+    if (!sys)
+        return NULL;
+    const char *src = config_source("system_prompt");
+    if (strcmp(src, "config") == 0 || strcmp(src, "default") == 0)
+        return NULL;
+    return sys;
+}
+
+void select_preset_save(struct agent_state *st, const char *arg)
+{
+    struct provider *p = (struct provider *)st->provider;
+    if (!p) {
+        ui_note("no provider selected — use /provider to choose one first");
+        st->r->disp.trail = 1;
+        return;
+    }
+    /* Saved without a model, the preset would resolve to the provider's
+     * default — not what this session is running. */
+    if (!st->sess->model || !*st->sess->model) {
+        ui_note("no model resolved yet — use /model to pick one first");
+        st->r->disp.trail = 1;
+        return;
+    }
+    /* Nothing here to infer a name from, so seed the command back into the
+     * prompt rather than fail — the handoff /config makes for a typed value. */
+    if (!arg || !*arg) {
+        ui_note("name it: /preset-save <name> [tint]");
+        free(st->pending_preseed);
+        st->pending_preseed = xstrdup("/preset-save ");
+        st->r->disp.trail = 1;
+        return;
+    }
+
+    /* "<name> [tint]" — the inline spelling of the picker below. */
+    const char *sp = arg;
+    while (*sp && !isspace((unsigned char)*sp))
+        sp++;
+    char *name = xmalloc((size_t)(sp - arg) + 1);
+    memcpy(name, arg, (size_t)(sp - arg));
+    name[sp - arg] = '\0';
+    while (*sp && isspace((unsigned char)*sp))
+        sp++;
+    const char *tint_arg = *sp ? sp : NULL;
+    char *tint = NULL;
+
+    if (!config_preset_name_valid(name)) {
+        ui_error("'%s' can't be a preset name — use letters, digits, '.', '-' or '_', starting "
+                 "with a letter or digit",
+                 name);
+        st->r->disp.trail = 1;
+        goto out;
+    }
+    const struct config_setting *ts = config_setting_find("tint");
+    if (tint_arg && !config_value_valid(ts, tint_arg)) {
+        ui_error("unknown tint '%s' (expected %s)", tint_arg, ts ? ts->choices : "");
+        st->r->disp.trail = 1;
+        goto out;
+    }
+
+    int exists = config_preset_exists(name);
+    if (exists && !confirm_overwrite(name)) {
+        ui_note("left preset '%s' unchanged", name);
+        st->r->disp.trail = 1;
+        goto out;
+    }
+
+    if (tint_arg) {
+        /* Canonical spelling, like /config commits: validation accepts "ROSE",
+         * but storing it verbatim leaves a value that only compares equal
+         * case-insensitively — and reads oddly next to the other members. */
+        char *canon = config_value_canonical(ts, tint_arg);
+        tint = canon ? canon : xstrdup(tint_arg);
+    } else {
+        /* Start on the tint the session is showing, by the precedence the
+         * display resolves it with (theme_init): a runtime /config tint, else
+         * the running stance's. A save captures what is running, so that is the
+         * tint to offer — not the one the preset happens to hold, which would
+         * ignore a hue picked since. Only when nothing session-specific is in
+         * force does a re-save fall back to the definition's own tint, so
+         * updating a model doesn't silently drop it. */
+        const char *cur = NULL;
+        if (strcmp(config_source("tint"), "run") == 0)
+            cur = config_str("tint");
+        const char *stance = config_str("preset");
+        if (!cur && stance && *stance)
+            cur = config_preset_tint(stance);
+        if (!cur && exists)
+            cur = config_preset_tint(name);
+        if (choose_tint(cur, &tint) == PICK_CANCELLED)
+            goto out; /* Escape means "never mind", as in every other picker */
+    }
+
+    struct config_preset def = {
+        .provider = agent_provider_id(p),
+        /* A discovered model is this server's current state, not a choice (see
+         * provider.model_discovered): omitting it makes the preset re-discover
+         * on every apply, which is both what a hand-written one would say and
+         * what survives restarting llama-server on a different model. */
+        .model = p->model_discovered ? NULL : st->sess->model,
+        .effort = st->sess->effort,
+        .system_prompt = capture_system_prompt(),
+        .tint = tint,
+        /* A description states the role, which a re-save isn't changing. */
+        .description = exists ? config_preset_description(name) : NULL,
+    };
+    char *err = NULL;
+    if (config_preset_save(name, &def, &err) != 0) {
+        ui_error("%s", err ? err : "couldn't save the preset");
+        free(err);
+        st->r->disp.trail = 1;
+        goto out;
+    }
+    ui_note("%s preset '%s' in config.json", exists ? "updated" : "saved", name);
+    st->r->disp.trail = 1;
+
+    /* Enter the stance just defined. It names what is already running, so no
+     * setting changes — the banner names the preset, its tint takes effect, and
+     * the name persists for the next launch. */
+    select_preset(st, name, 1);
+
+out:
+    free(tint);
+    free(name);
 }
 
 /* ---------- restoring a resumed conversation's selection ---------- */
@@ -1154,30 +1427,6 @@ static void setting_commit(struct agent_state *st, const struct config_setting *
     setting_note_current(st, s);
 }
 
-static size_t split_choices(const char *choices, char ***out)
-{
-    size_t n = 0, cap = 0;
-    char **arr = NULL;
-    const char *p = choices;
-    for (;;) {
-        const char *bar = strchr(p, '|');
-        size_t len = bar ? (size_t)(bar - p) : strlen(p);
-        if (n == cap) {
-            cap = cap ? cap * 2 : 8;
-            arr = xrealloc(arr, cap * sizeof(*arr));
-        }
-        char *seg = xmalloc(len + 1);
-        memcpy(seg, p, len);
-        seg[len] = '\0';
-        arr[n++] = seg;
-        if (!bar)
-            break;
-        p = bar + 1;
-    }
-    *out = arr;
-    return n;
-}
-
 static void setting_preseed(struct agent_state *st, const struct config_setting *s, const char *val)
 {
     free(st->pending_preseed);
@@ -1204,6 +1453,10 @@ static void setting_pick_choice(struct agent_state *st, const struct config_sett
     int choice_current = 0;
     for (size_t i = 0; i < n; i++) {
         items[i + 1].label = vals[i];
+        /* The one setting whose values *are* colors shows them, rather than
+         * naming four words the user has to try one at a time. */
+        if (strcmp(s->key, "tint") == 0)
+            items[i + 1].label_color = theme_tint_open(vals[i]);
         items[i + 1].current = strcasecmp(vals[i], cur) == 0;
         if (items[i + 1].current) {
             initial = i + 1;

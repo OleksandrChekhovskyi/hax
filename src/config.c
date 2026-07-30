@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "config.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <libgen.h>
 #include <stdio.h>
@@ -64,7 +65,7 @@ static const struct config_setting REGISTRY[] = {
      .desc = "Color theme: auto, dark, light, ansi, off (auto detects from the terminal)",
      .choices = "auto|dark|light|ansi|off", .runtime = 1},
     {.key = "tint", .env = "HAX_TINT", .def = "teal",
-     .desc = "Identity hue for model output; an active preset's own tint wins until set here. "
+     .desc = "Identity tint for model output; an active preset's own tint wins until set here. "
              "Ignored by the ansi and off themes",
      .choices = "teal|violet|rose|sage", .runtime = 1},
 
@@ -221,6 +222,13 @@ const struct config_setting *config_setting_find(const char *key)
  * machine-local persisted overrides), the conversation tier (the selection a
  * resumed session recorded), and the run-scoped override tier (a flat object
  * keyed by canonical key). Each is NULL or a JSON object. */
+/* Set when config.json exists but couldn't be used (malformed, oversized,
+ * unreadable) — the tier is empty for the run, so a write built from it would
+ * replace hand-authored content this process never read. The writers refuse
+ * instead; state.json carries no such flag, being machine-local and
+ * regenerable. */
+static int g_config_unusable;
+
 static json_t *g_config;
 static json_t *g_state;
 static json_t *g_conversation;
@@ -262,6 +270,11 @@ static int load_tier(json_t **tier, const char *text)
 {
     json_decref(*tier);
     *tier = NULL;
+    /* Nothing, or only whitespace: an empty tier rather than a malformed one.
+     * `echo > config.json` writes exactly that, and calling it malformed would
+     * both warn and (for the config file) block every later write. */
+    while (text && isspace((unsigned char)*text))
+        text++;
     if (!text || !*text)
         return 0;
     json_t *root = json_loads(text, 0, NULL);
@@ -278,6 +291,7 @@ static int load_tier(json_t **tier, const char *text)
 
 int config_load(const char *text)
 {
+    g_config_unusable = 0; /* a tier loaded from text supersedes the file verdict */
     return load_tier(&g_config, text);
 }
 
@@ -289,35 +303,44 @@ int config_load_state(const char *text)
 /* Read `path` into `*tier` via load_tier. Absent is silent (the tier is
  * optional); present-but-unusable (malformed, oversized, unreadable) is
  * ignored with a warning naming `what` — the user wrote the file and it
- * isn't being honored. Consumes `path` (frees it). */
-static void init_tier_file(json_t **tier, char *path, const char *what)
+ * isn't being honored. Returns -1 in exactly that case, so a caller can refuse
+ * to overwrite content it couldn't read. Consumes `path` (frees it). */
+static int init_tier_file(json_t **tier, char *path, const char *what)
 {
     if (!path)
-        return;
+        return 0;
+    int unusable = 0;
     size_t len;
     int truncated;
     errno = 0;
     char *data = slurp_file_capped(path, CONFIG_MAX_BYTES, &len, &truncated);
     if (data) {
-        if (truncated)
+        if (truncated) {
             hax_warn("ignoring %s at %s: larger than the 1 MiB limit", what, path);
-        else if (load_tier(tier, data) != 0)
+            unusable = 1;
+        } else if (load_tier(tier, data) != 0) {
             hax_warn("ignoring malformed %s at %s (expected a JSON object)", what, path);
+            unusable = 1;
+        }
         free(data);
     } else if (errno != ENOENT) {
         hax_warn("ignoring unreadable %s at %s: %s", what, path, strerror(errno));
+        unusable = 1;
     }
     free(path);
+    return unusable ? -1 : 0;
 }
 
 void config_init(void)
 {
-    init_tier_file(&g_config, xdg_hax_config_path("config.json"), "config");
+    g_config_unusable =
+        init_tier_file(&g_config, xdg_hax_config_path("config.json"), "config") != 0;
     init_tier_file(&g_state, xdg_hax_state_path("state.json"), "state");
 }
 
 void config_free(void)
 {
+    g_config_unusable = 0;
     json_decref(g_config);
     g_config = NULL;
     json_decref(g_state);
@@ -489,12 +512,12 @@ static const char *apply_sentinel(const char *v, const struct config_setting *s)
 
 /* Resolve a value and optionally its winning tier. "default" covers both a
  * registry default and no value; a sentinel reports the tier that holds it. */
-static const char *resolve_src(const char *key, int skip_empty, const char **src)
+static const char *resolve_src(const char *key, int skip_empty, int skip_run, const char **src)
 {
     const char *from = "default";
     const struct config_setting *s = find_setting(key);
     const char *v = NULL;
-    const char *o = json_string_value(json_object_get(g_overrides, key));
+    const char *o = skip_run ? NULL : json_string_value(json_object_get(g_overrides, key));
     if (o && (!skip_empty || *o)) {
         v = apply_sentinel(o, s);
         from = "run";
@@ -526,7 +549,7 @@ static const char *resolve_src(const char *key, int skip_empty, const char **src
 
 static const char *resolve(const char *key, int skip_empty)
 {
-    return resolve_src(key, skip_empty, NULL);
+    return resolve_src(key, skip_empty, 0, NULL);
 }
 
 /* Registered settings skip empty tiers unless explicitly marked otherwise;
@@ -544,8 +567,13 @@ const char *config_str(const char *key)
 const char *config_source(const char *key)
 {
     const char *src;
-    resolve_src(key, config_skips_empty(find_setting(key)), &src);
+    resolve_src(key, config_skips_empty(find_setting(key)), 0, &src);
     return src;
+}
+
+const char *config_str_below_run(const char *key)
+{
+    return resolve_src(key, config_skips_empty(find_setting(key)), 1, NULL);
 }
 
 const char *config_str_nonempty(const char *key)
@@ -821,7 +849,7 @@ void config_preset_exit(enum config_tier tier)
      * The stance's tint needs no undoing: it was never written here, and
      * clearing the "tint" key would take an explicit /config tint down with
      * it. Dropping the name is enough — the display layer stops finding a
-     * stance to read a hue off. */
+     * stance to read a tint off. */
     if (tier == CONFIG_TIER_RUN) {
         config_set_override("preset", "");
         config_set_override("system_prompt", NULL);
@@ -933,14 +961,30 @@ static void set_nested(json_t *root, const char *key, const char *val)
  * Returns 0 on success, -1 on any I/O failure. */
 static int write_json_atomic(const char *path, json_t *obj)
 {
-    char *dup = xstrdup(path);
+    /* Follow a symlinked target: config.json is commonly a link into a
+     * dotfiles repo, and renaming onto the link would replace it with a
+     * regular file. Resolving also keeps the temp file a sibling of the real
+     * destination, so the rename stays within one directory. Not realpath(3),
+     * which refuses a chain whose target doesn't exist yet — the very case
+     * where the link must survive (see fs_resolve_link_target). A hard failure
+     * there (a loop, an unreadable link) fails the write: carrying on with
+     * `path` would replace the link this is meant to preserve. */
+    char *dest = fs_resolve_link_target(path);
+    if (!dest)
+        return -1;
+
+    /* The resolved destination's directory, not the link's — a link into a
+     * dotfiles repo that hasn't been created yet must land there instead of
+     * failing in mkstemp. Same order fs_write_with_diff uses. */
+    char *dup = xstrdup(dest);
     fs_mkdir_p(dirname(dup));
     free(dup);
 
-    char *tmp = xasprintf("%s.tmp.XXXXXX", path);
+    char *tmp = xasprintf("%s.tmp.XXXXXX", dest);
     int fd = mkstemp(tmp);
     if (fd < 0) {
         free(tmp);
+        free(dest);
         return -1;
     }
     /* mkstemp's 0600 is still masked by the process umask; fchmod is
@@ -950,6 +994,7 @@ static int write_json_atomic(const char *path, json_t *obj)
         close(fd);
         unlink(tmp);
         free(tmp);
+        free(dest);
         return -1;
     }
     FILE *fp = fdopen(fd, "w");
@@ -957,23 +1002,28 @@ static int write_json_atomic(const char *path, json_t *obj)
         close(fd);
         unlink(tmp);
         free(tmp);
+        free(dest);
         return -1;
     }
     int rc = json_dumpf(obj, fp, JSON_INDENT(2) | JSON_PRESERVE_ORDER);
     if (fclose(fp) != 0)
         rc = -1;
-    if (rc == 0 && rename(tmp, path) != 0)
+    if (rc == 0 && rename(tmp, dest) != 0)
         rc = -1;
     if (rc != 0)
         unlink(tmp);
     free(tmp);
+    free(dest);
     return rc;
 }
 
 /* Persist `key` = `val` into the JSON object at `path`, swapping the result
- * into `*tier`. Consumes `path` (frees it). Mutate a copy and swap it in only
- * after the write succeeds, so a failed write can't leave the in-memory tier
- * claiming a value the disk never saw. Shared by the config-file and state
+ * into `*tier`. Consumes `path` (frees it). Mutate a copy of the tier this
+ * process holds and swap it in only after the write succeeds, so a failed write
+ * can't leave the in-memory tier claiming a value the disk never saw. The file
+ * is rewritten from that copy, so an external edit made while hax runs is
+ * overwritten — the session's view of configuration is the one it started with,
+ * and a write is that view landing on disk. Shared by the config-file and state
  * writers. */
 static int persist_tier(json_t **tier, char *path, const char *key, const char *val)
 {
@@ -1004,6 +1054,8 @@ static int persist_tier(json_t **tier, char *path, const char *key, const char *
 
 int config_persist(const char *key, const char *val)
 {
+    if (g_config_unusable)
+        return -1; /* never replace a file this process couldn't read */
     return persist_tier(&g_config, xdg_hax_config_path("config.json"), key, val);
 }
 
@@ -1139,7 +1191,7 @@ static int preset_validate(const json_t *obj, const char *name, char **err)
     /* "tint" is the one member whose *value* is checked here. The others are
      * free-form (a model id, a prompt) or validated where they're consumed,
      * but a tint is honored by the display layer, which can only fall back to
-     * the default palette on an unknown hue — silently, and long after the
+     * the default palette on an unknown tint — silently, and long after the
      * preset was advertised as appliable. Checking it here keeps application
      * all-or-nothing and keeps the /preset picker's "enumerated ⊆ appliable"
      * invariant honest. */
@@ -1182,7 +1234,7 @@ int config_preset_apply(const char *name, enum config_tier tier, char **err)
      *
      * "tint" is not written at all — the display layer reads it off the stance
      * — but an earlier /config tint in this tier is cleared, so a stance still
-     * replaces an explicit hue picked before it, the way it replaces an
+     * replaces an explicit tint picked before it, the way it replaces an
      * explicit model. A /config tint issued *after* this then outranks the
      * stance again, which is the same newest-write-wins rule the rest of the
      * tier follows. */
@@ -1243,6 +1295,165 @@ const char *config_preset_effort(const char *name)
     if (!obj)
         return NULL;
     return json_string_value(json_object_get(obj, "effort"));
+}
+
+/* The nested presets.<name> member of `tier`, whatever its JSON type, or NULL.
+ * The type-blind counterpart to preset_node, for the difference between "no
+ * definition" and "a definition that isn't usable yet". */
+static json_t *preset_nested(json_t *tier, const char *name)
+{
+    json_t *presets = obj_get_node(tier, "presets");
+    return json_is_object(presets) ? json_object_get(presets, name) : NULL;
+}
+
+/* Same, extended to the flat top-level "presets.<name>" spelling preset_node
+ * also accepts. */
+static json_t *preset_member(json_t *tier, const char *name)
+{
+    json_t *m = preset_nested(tier, name);
+    if (m)
+        return m;
+    char *key = xasprintf("presets.%s", name);
+    m = obj_get_node(tier, key);
+    free(key);
+    return m;
+}
+
+/* Whether a state-tier definition would outrank what a config-file write puts
+ * under `name` — see config_preset_save, which refuses rather than report a
+ * save that isn't in effect. Two narrowings, both from preset_node's order:
+ * only an object counts (anything else is skipped, and resolution falls through
+ * to the file tier), and only the nested spelling does (a flat
+ * "presets.<name>" is a last-resort fallback, which the nested member every
+ * save writes already beats). Nothing in hax writes presets to the state tier;
+ * such a definition can only be hand-placed. */
+static int state_defines_preset(const char *name)
+{
+    return json_is_object(preset_nested(g_state, name));
+}
+
+int config_preset_exists(const char *name)
+{
+    if (!name || !*name)
+        return 0;
+    /* Any type counts, not just an appliable object: a half-written
+     * "work": "draft" is still the user's content under that name, and a save
+     * that reported it absent would replace it without asking. */
+    return preset_member(g_state, name) != NULL || preset_member(g_config, name) != NULL;
+}
+
+int config_preset_name_valid(const char *name)
+{
+    if (!name || !isalnum((unsigned char)name[0]))
+        return 0;
+    size_t n = strlen(name);
+    if (n >= 64)
+        return 0;
+    for (size_t i = 1; i < n; i++) {
+        char c = name[i];
+        if (!isalnum((unsigned char)c) && c != '.' && c != '-' && c != '_')
+            return 0;
+    }
+    return 1;
+}
+
+int config_preset_save(const char *name, const struct config_preset *def, char **err)
+{
+    if (err)
+        *err = NULL;
+    if (!config_preset_name_valid(name)) {
+        if (err)
+            *err = xasprintf("'%s' can't be a preset name — use letters, digits, '.', '-' or '_', "
+                             "starting with a letter or digit",
+                             name ? name : "");
+        return -1;
+    }
+
+    if (state_defines_preset(name)) {
+        if (err)
+            *err = xasprintf("preset '%s' is defined in state.json, which outranks the config "
+                             "file — remove it there first",
+                             name);
+        return -1;
+    }
+
+    json_t *obj = json_object();
+    /* What the preset is and how it looks first, then the machinery behind it —
+     * the documented example's order, so a saved block reads like a
+     * hand-written one. */
+    const struct {
+        const char *key;
+        const char *val;
+    } members[] = {
+        {"description", def->description}, {"tint", def->tint},
+        {"provider", def->provider},       {"model", def->model},
+        {"effort", def->effort},           {"system_prompt", def->system_prompt},
+    };
+    for (size_t i = 0; i < sizeof(members) / sizeof(*members); i++) {
+        if (members[i].val)
+            json_object_set_new(obj, members[i].key, json_string(members[i].val));
+    }
+    /* The same validation apply runs, so a saved preset is appliable by
+     * construction. */
+    if (preset_validate(obj, name, err) != 0) {
+        json_decref(obj);
+        return -1;
+    }
+
+    char *path = xdg_hax_config_path("config.json");
+    /* A file this process couldn't read is never rewritten: the tier is empty,
+     * so the result would hold just this preset and nothing the user authored. */
+    json_t *next =
+        (path && !g_config_unusable) ? (g_config ? json_deep_copy(g_config) : json_object()) : NULL;
+    if (!next) {
+        if (err)
+            *err = g_config_unusable ? xasprintf("couldn't read %s — fix or remove it first", path)
+                                     : xstrdup("couldn't locate the config directory");
+        free(path);
+        json_decref(obj);
+        return -1;
+    }
+
+    /* Drop a flat-authored "presets.<name>" key. The nested member written
+     * below already wins at lookup (preset_node consults the flat spelling only
+     * as a fallback), so this is about the file: leaving it would strand a
+     * stale duplicate definition that reads as authoritative to whoever edits
+     * it next. persist_tier normalizes a scalar key the same way. */
+    char *flat = xasprintf("presets.%s", name);
+    json_object_del(next, flat);
+    free(flat);
+    json_t *presets = json_object_get(next, "presets");
+    if (presets && !json_is_object(presets)) {
+        /* Something is under "presets" that isn't a block of them — a stray
+         * string, a list from a hand-conversion. Replacing it would drop it
+         * from the file, and no prompt can describe what is being replaced the
+         * way the per-name one does, so refuse and say where to look. */
+        if (err)
+            *err = xasprintf("\"presets\" in %s is not a block of presets — fix it first", path);
+        free(path);
+        json_decref(next);
+        json_decref(obj);
+        return -1;
+    }
+    if (!presets) {
+        presets = json_object();
+        json_object_set_new(next, "presets", presets);
+    }
+    json_object_set(presets, name, obj); /* literal member: a dotted name is a name */
+    json_decref(obj);
+
+    int rc = write_json_atomic(path, next);
+    if (rc != 0) {
+        if (err)
+            *err = xasprintf("couldn't write %s", path);
+        free(path);
+        json_decref(next);
+        return -1;
+    }
+    free(path);
+    json_decref(g_config);
+    g_config = next;
+    return 0;
 }
 
 size_t config_preset_names(char ***out)

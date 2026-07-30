@@ -65,6 +65,7 @@ static void slash_run_provider(struct slash_ctx *ctx);
 static void slash_run_model(struct slash_ctx *ctx);
 static void slash_run_effort(struct slash_ctx *ctx);
 static void slash_run_preset(struct slash_ctx *ctx);
+static void slash_run_preset_save(struct slash_ctx *ctx);
 static void slash_run_config(struct slash_ctx *ctx);
 static void slash_run_compact(struct slash_ctx *ctx);
 static void slash_run_copy(struct slash_ctx *ctx);
@@ -133,6 +134,14 @@ static const struct slash_cmd COMMANDS[] = {
         .takes_arg = 1,
         .drives_disp = 1,
         .run = slash_run_preset,
+    },
+    {
+        .name = "preset-save",
+        .aliases = {NULL},
+        .summary = "save the current selection as a preset (name, optional tint)",
+        .takes_arg = 1,
+        .drives_disp = 1,
+        .run = slash_run_preset_save,
     },
     {
         .name = "config",
@@ -498,6 +507,17 @@ static void slash_run_preset(struct slash_ctx *ctx)
 {
     /* ctx->arg is a preset name for direct application, NULL for the picker. */
     select_preset(ctx->state, ctx->arg, 1);
+}
+
+/* ---------- /preset-save ---------- */
+
+/* A separate command rather than a `/preset save <name>` subcommand: /preset's
+ * argument is a name, so the word would be ambiguous with a preset called
+ * "save". */
+static void slash_run_preset_save(struct slash_ctx *ctx)
+{
+    /* ctx->arg is "<name> [tint]", NULL to be prompted for one. */
+    select_preset_save(ctx->state, ctx->arg);
 }
 
 /* ---------- /config ---------- */

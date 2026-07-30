@@ -124,6 +124,13 @@ void config_free(void);
  * them. Use config_str_nonempty for unknown keys that must skip empty values. */
 const char *config_str(const char *key);
 
+/* Resolve `key` as config_str does, but ignoring the run-override tier — what
+ * the value would be with this run's own picks out of the way. For a caller
+ * that must show the result of an act which clears them: applying a preset
+ * drops a runtime /config tint (config_preset_exit), so the /preset picker
+ * previews each row in the tint applying it would actually leave in force. */
+const char *config_str_below_run(const char *key);
+
 /* Like config_str, but always skips empty tier values. Intended for dynamic
  * keys absent from the registry; prefer config_str for registered settings. */
 const char *config_str_nonempty(const char *key);
@@ -259,8 +266,17 @@ void config_snapshot_free(struct config_snapshot *snap);
 
 /* Persist `key` = `val` into ~/.config/hax/config.json (nested form),
  * preserving the file's other keys; val == NULL removes the key. Atomic
- * (temp + rename, 0600). Updates the in-memory file tier too, so the new
- * value is visible immediately. Returns 0 on success, -1 on I/O failure.
+ * (temp + rename, 0600, following a symlinked target). Updates the in-memory
+ * file tier too, so the new value is visible immediately.
+ *
+ * The file is rewritten from the tier this process holds — the configuration it
+ * has been running on — so an edit made to the file while hax runs is
+ * overwritten, the same way it has no effect on the running session. The one
+ * exception is a file that couldn't be read at startup: the tier is empty, so
+ * writing would replace hand-authored content this process never saw, and the
+ * write fails instead.
+ *
+ * Returns 0 on success, -1 on I/O failure or that unreadable-file case.
  * The "remember this setting" seam for the committed config file. */
 int config_persist(const char *key, const char *val);
 
@@ -319,7 +335,7 @@ const char *config_preset_description(const char *name);
 /* The "tint" member of presets.<name>, or NULL when the preset or the member
  * is absent. Read off the active stance by the display layer rather than
  * applied as an override — see PRESET_KEYS in config.c. Validation guarantees
- * a non-NULL result names a hue the theme layer knows. Borrowed; valid until
+ * a non-NULL result names a tint the theme layer knows. Borrowed; valid until
  * config_free / config_load*. */
 const char *config_preset_tint(const char *name);
 
@@ -337,6 +353,46 @@ const char *config_preset_provider(const char *name);
  * defaults: picker callers use them to show exactly what the user configured. */
 const char *config_preset_model(const char *name);
 const char *config_preset_effort(const char *name);
+
+/* Whether a presets.<name> definition resolves, valid or not. Distinct from
+ * config_preset_names, which lists only appliable ones: a save must not
+ * silently replace an invalid block its author is still fixing. */
+int config_preset_exists(const char *name);
+
+/* Whether `name` is usable as a preset name. The grammar is about what a user
+ * can retype at `--preset` and pick out of a list, not what JSON can hold — a
+ * dot included, since lookup takes names literally (preset_node in config.c).
+ * Returns 1 for ok, 0 otherwise. */
+int config_preset_name_valid(const char *name);
+
+/* A preset definition as config_preset_save takes it: the presettable keys
+ * (PRESET_KEYS in config.c) plus the reserved "description" metadata. A NULL
+ * member is omitted from the written block, a non-NULL one written verbatim —
+ * so "" carries whatever meaning its key gives it. `provider` is required. */
+struct config_preset {
+    const char *description;
+    const char *tint;
+    const char *provider;
+    const char *model;
+    const char *effort;
+    const char *system_prompt;
+};
+
+/* Write `def` as the presets.<name> block in ~/.config/hax/config.json,
+ * replacing any existing definition of that name and preserving the file's
+ * other keys. Same atomic write, in-memory tier update, normalizing rewrite,
+ * and treatment of external edits and unreadable files as config_persist, so
+ * the definition applies immediately. Validated exactly as an apply validates
+ * it: a save cannot write a block that /preset would then reject.
+ *
+ * The committed config file, not the machine-local state tier the read path
+ * would also accept: a preset is authored content to edit, diff, and carry
+ * between machines, and one saved where hand-written presets don't live is one
+ * nobody finds again.
+ *
+ * Returns 0, or -1 with *err (when non-NULL) set to a malloc'd reason the
+ * caller prints and frees. */
+int config_preset_save(const char *name, const struct config_preset *def, char **err);
 
 /* Enumerate the defined presets: the member names of the presets object,
  * merged and deduplicated across the state and file tiers, restricted to

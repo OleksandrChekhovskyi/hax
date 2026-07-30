@@ -160,6 +160,10 @@ is served, it keeps it; otherwise it adopts the first served model. If the serve
 unreachable and no model is configured, startup fails with the URL it tried. If `HAX_MODEL` is
 set, hax trusts it and lets the first request surface any connection error.
 
+A model hax adopted on its own is not a choice, so nothing records it: `/provider`, `/model`,
+and `/preset-save` store "use the server's model" and each launch re-discovers. A model you
+named (`HAX_MODEL`, config) or picked from a multi-model list is recorded as itself.
+
 The context-window percentage is probed from `/props` in the background. If `/props` is slow
 or unavailable, only absolute token counts are shown. For long prompts, start llama-server
 with a large enough `-c` / `--ctx-size`.

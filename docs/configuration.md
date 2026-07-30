@@ -113,24 +113,25 @@ Custom provider with a key in the environment:
 
 A preset is a named, complete selection: which provider to talk to, and optionally which
 model, reasoning effort, system prompt, and identity color. Define them under `presets.<name>`
-in `config.json`:
+in `config.json` — or save the selection you are already running as one with `/preset-save`
+(see [Saving one from the session](#saving-one-from-the-session)):
 
 ```json
 {
   "presets": {
     "review": {
       "description": "thorough code review on a strong model",
+      "tint": "rose",
       "provider": "codex",
       "model": "gpt-5.6-sol",
       "effort": "high",
-      "tint": "rose",
       "system_prompt": "You are a meticulous code reviewer. ..."
     },
     "scout": {
       "description": "fast, cheap exploration",
+      "tint": "sage",
       "provider": "openrouter",
-      "model": "qwen/qwen3-coder:free",
-      "tint": "sage"
+      "model": "qwen/qwen3-coder:free"
     }
   }
 }
@@ -145,12 +146,13 @@ Semantics:
   Explicit `--model`/`--effort` flags still win over the preset.
 - `system_prompt` is optional. Omitted, normal resolution applies — your configured prompt,
   or the built-in one.
-- `tint` is optional: the persona's identity hue (`teal`, `violet`, `rose`, `sage` — see the
-  `tint` setting above), which colors the model's headings, code, and the `[name]` stance in
-  the banner. Omitted, your own `tint` setting applies. Unlike the other members it is never
-  written as an override — it is read back off the active stance — so a `/config tint` you set
-  afterwards outranks it, and survives the `/model`, `/provider`, or `/effort` pick that ends
-  the stance. An unknown hue fails validation, like any other invalid member.
+- `tint` is optional: the persona's identity tint (`teal`, `violet`, `rose`, `sage` — see the
+  `tint` setting above), which colors the model's headings, code, the `[name]` stance in the
+  banner, and the preset's own row in the `/preset` picker. Omitted, your own `tint` setting
+  applies. Unlike the other members it is never written as an override — it is read back off
+  the active stance — so a `/config tint` you set afterwards outranks it, and survives the
+  `/model`, `/provider`, or `/effort` pick that ends the stance. An unknown tint fails
+  validation, like any other invalid member.
 - Applying a preset writes the whole selection, so presets replace each other rather than
   compose: switching from a preset that set a system prompt to one that doesn't restores the
   regular prompt.
@@ -195,6 +197,27 @@ Resuming restores the preset the conversation was running under. Naming a preset
 exits it, exactly as an explicit pick exits a live stance. `--preset` is also the way past a
 conversation whose preset has since been deleted, otherwise an error in `-p` and a warning
 interactively.
+
+### Saving one from the session
+
+`/preset-save <name> [tint]` writes what the session is running as `presets.<name>` and
+switches into it, so the banner names the stance and the next launch starts there. It is the
+only command that writes `config.json`, and it rewrites the file from the configuration hax
+loaded at startup: your other keys are kept, hand-formatting is normalized, and an edit you make
+to the file while hax is running is overwritten — the same way that edit has no effect on the
+running session. A file hax couldn't parse is never rewritten, so a broken config is safe from
+it.
+
+What it captures:
+
+- the provider, model, and effort in effect — minus a model the backend picked for itself,
+  which is left out so the preset re-discovers one ([llama.cpp](providers.md#llamacpp))
+- the tint given as the second word, or chosen from the list that opens without one
+- the system prompt, only when omitting it wouldn't bring the same one back: a stance's or
+  `HAX_SYSTEM_PROMPT`'s, not one already in `config.json`
+
+Re-saving an existing name keeps its `description` and asks before replacing the rest. Writing
+a description, or anything else a block can hold, is what editing `config.json` is for.
 
 Earlier `/provider`/`/model`/`/effort` picks stay in `state.json` underneath a persisted
 preset. They are fully shadowed while the preset is active (it writes the whole selection),
@@ -253,7 +276,7 @@ variable. `/config` marks settings that can be changed mid-session.
   dumb), `ansi` without 256-color support, and otherwise `dark` — or `light` when a
   `COLORFGBG` environment variable reports a light background. Terminals rarely advertise
   their background, so on a light scheme you typically want to set `light` explicitly.
-- `tint` / `HAX_TINT` — identity hue: `teal` (default), `violet`, `rose`, or `sage`. Recolors
+- `tint` / `HAX_TINT` — identity tint: `teal` (default), `violet`, `rose`, or `sage`. Recolors
   the model's voice — headings, inline code, fence bodies, and the active preset's `[name]`
   in the banner — so two terminals running different personas are distinguishable at a
   glance. hax's own chrome, the prompt marker, and the diff/status colors keep their fixed

@@ -51,6 +51,17 @@ void select_effort(struct agent_state *st);
  * cancelled picker. */
 int select_preset(struct agent_state *st, const char *name, int announce);
 
+/* Save the live selection as the preset named by `arg` ("<name> [tint]") and
+ * switch into it, so the banner names the stance and the next launch starts in
+ * it (config_preset_save writes the block). Provider, model, and effort come
+ * from the session — except a model the backend discovered rather than the user
+ * choosing it, which is left out so the preset re-discovers; a system prompt
+ * only when normal resolution wouldn't bring it back; a re-save keeps the
+ * existing description. Without the second word a picker asks for the tint,
+ * where Escape abandons the save; with no `arg` at all, `/preset-save ` is
+ * seeded back into the prompt. An existing name asks before it is replaced. */
+void select_preset_save(struct agent_state *st, const char *arg);
+
 /* Switch to the selection a resumed conversation recorded — the mid-session
  * twin of the restore `--resume` does at startup, so /resume continues a
  * conversation on the backend it was using rather than on whatever this run
