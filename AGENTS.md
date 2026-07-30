@@ -141,8 +141,10 @@ When adapter event translation is non-trivial, split pure translation into
 - Avoid non-portable kernel idioms: no `likely()`/`unlikely()`, `BUG_ON`, `ERR_PTR`, or
   `kmalloc`. Use `<stdint.h>` types and plain negative-int returns plus `errno`.
 - Markdown is hard-wrapped around 100 columns, same as code.
-- Only add comments that add significant value by explaining things not obvious from the code
-  directly. Keep comments concise, avoid "walls of text".
+- Follow [`docs/code-style.md`](docs/code-style.md): prefer precise names, types, and structure over
+  explanatory comments.
+- Comments document only durable contracts, constraints, or non-obvious rationale. Do not narrate
+  code, preserve change history or reviewer discussion, or inventory current implementation details.
 
 ## Git conventions
 
