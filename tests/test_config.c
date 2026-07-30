@@ -9,21 +9,16 @@
 #include "harness.h"
 #include "util.h"
 
-/* config_init() reads a file from the XDG path; the load + resolve layer
- * underneath is what carries the logic, so most tests drive config_load()
- * directly. Every registered env var is cleared first so a developer's or
- * CI's environment can't perturb the assertions — the registry itself is
- * the list, so new settings are covered automatically. */
+/* Isolate resolution tests from the developer or CI environment. */
 static void clear_env(void)
 {
-    size_t n = 0;
-    const struct config_setting *s = config_settings(&n);
-    for (size_t i = 0; i < n; i++)
-        unsetenv(s[i].env);
+    size_t count = 0;
+    const struct config_setting *settings = config_settings(&count);
+    for (size_t i = 0; i < count; i++)
+        unsetenv(settings[i].env_var);
 }
 
-/* Write `text` to `path`, for tests that need the file on disk rather than
- * only in a loaded tier — the writers merge into what is on disk. */
+/* Write a config fixture for tests that exercise the file-backed API. */
 static void write_file(const char *path, const char *text)
 {
     FILE *fp = fopen(path, "w");
@@ -586,62 +581,51 @@ static void test_persist_flat_key(void)
 
 static void test_registry_introspection(void)
 {
-    /* The registry is the source for help / a /config view: every entry
-     * must carry a key, env binding, and description (default may be NULL). */
-    size_t n = 0;
-    const struct config_setting *s = config_settings(&n);
-    EXPECT(s != NULL);
-    EXPECT(n > 0);
-    for (size_t i = 0; i < n; i++) {
-        EXPECT(s[i].key && *s[i].key);
-        EXPECT(s[i].env && *s[i].env);
-        EXPECT(s[i].desc && *s[i].desc);
-        /* Choice lists classify a setting's valid values for the picker (when
-         * runtime) and for validation either way, so they're decoupled from
-         * runtime: read-only enums (reasoning_format, thinking_mode) carry
-         * choices purely to validate. Each listed value must be non-empty. */
-        if (s[i].choices) {
-            EXPECT(*s[i].choices && s[i].choices[strlen(s[i].choices) - 1] != '|');
-            EXPECT(!strstr(s[i].choices, "||"));
+    size_t count = 0;
+    const struct config_setting *settings = config_settings(&count);
+    EXPECT(settings != NULL);
+    EXPECT(count > 0);
+
+    for (size_t i = 0; i < count; i++) {
+        const struct config_setting *setting = &settings[i];
+        EXPECT(setting->key && *setting->key);
+        EXPECT(setting->env_var && *setting->env_var);
+        EXPECT(setting->description && *setting->description);
+        if (setting->choices) {
+            EXPECT(*setting->choices && setting->choices[strlen(setting->choices) - 1] != '|');
+            EXPECT(!strstr(setting->choices, "||"));
         }
-        /* Examples seed the typed branch of a mixed-value picker. */
-        if (s[i].example) {
-            EXPECT(s[i].kind != CFG_STRING);
-            EXPECT(s[i].choices);
-            EXPECT(config_value_valid(&s[i], s[i].example));
+        if (setting->example) {
+            EXPECT(setting->kind != CONFIG_KIND_STRING);
+            EXPECT(setting->choices);
+            EXPECT(config_value_valid(setting, setting->example));
         }
-        /* Bounds are numeric and well-formed. They serve validation too, so a
-         * setting may declare a range without a registry default when its
-         * consumer supplies its own fallback (thinking_budget → max_tokens-1). */
-        if (s[i].min || s[i].max) {
-            EXPECT(s[i].kind != CFG_STRING);
-            if (s[i].min && s[i].max)
-                EXPECT(s[i].min <= s[i].max);
+        if (setting->min || setting->max) {
+            EXPECT(setting->kind != CONFIG_KIND_STRING);
+            if (setting->min && setting->max)
+                EXPECT(setting->min <= setting->max);
         }
-        /* Runtime editing would expose a secret in the prompt. */
-        if (s[i].secret)
-            EXPECT(!s[i].runtime);
-        /* keep_empty only makes sense for a free-form string — a bool or
-         * numeric empty is always unset. */
-        if (s[i].keep_empty) {
-            EXPECT(s[i].kind == CFG_STRING);
-            EXPECT(!(s[i].choices && strcmp(s[i].choices, CONFIG_CHOICES_BOOL) == 0));
+        /* Editing secrets would expose them in the picker prompt. */
+        if (setting->secret)
+            EXPECT(!setting->editable);
+        if (setting->keep_empty) {
+            EXPECT(setting->kind == CONFIG_KIND_STRING);
+            EXPECT(!(setting->choices && strcmp(setting->choices, CONFIG_CHOICES_BOOL) == 0));
         }
     }
-    /* A documented-empty setting carries the flag; an enum that falls back on
-     * empty does not. */
+
     EXPECT(config_setting_find("system_prompt")->keep_empty);
     EXPECT(config_setting_find("effort")->keep_empty);
     EXPECT(!config_setting_find("theme")->keep_empty);
     EXPECT(!config_setting_find("sort_models")->keep_empty);
-    const struct config_setting *sr = config_setting_find("show_reasoning");
-    EXPECT(sr != NULL && sr->runtime);
-    EXPECT_STR_EQ(sr->choices, CONFIG_CHOICES_BOOL);
+    const struct config_setting *show_reasoning = config_setting_find("show_reasoning");
+    EXPECT(show_reasoning != NULL && show_reasoning->editable);
+    EXPECT_STR_EQ(show_reasoning->choices, CONFIG_CHOICES_BOOL);
     EXPECT(config_setting_find("nonesuch") == NULL);
     EXPECT(config_setting_find("openai.base_url") != NULL);
-    EXPECT(!config_setting_find("openai.base_url")->runtime);
-    const struct config_setting *sk = config_setting_find("openai.api_key");
-    EXPECT(sk != NULL && sk->secret);
+    EXPECT(!config_setting_find("openai.base_url")->editable);
+    const struct config_setting *api_key = config_setting_find("openai.api_key");
+    EXPECT(api_key != NULL && api_key->secret);
     EXPECT(!config_setting_find("markdown")->secret);
 }
 
@@ -698,161 +682,159 @@ static void test_source_reports_winning_tier(void)
     unsetenv("HAX_SYSTEM_PROMPT");
 }
 
-static void test_value_valid(void)
+static void test_string_and_integer_value_validation(void)
 {
     char hint[64];
 
-    /* Free-form strings accept any non-NULL value. */
-    const struct config_setting *ff = config_setting_find("system_prompt");
-    EXPECT(ff && !ff->choices && ff->kind == CFG_STRING);
-    EXPECT(config_value_valid(ff, "anything"));
-    EXPECT(!config_value_valid(ff, NULL));
+    const struct config_setting *system_prompt = config_setting_find("system_prompt");
+    EXPECT(system_prompt && !system_prompt->choices && system_prompt->kind == CONFIG_KIND_STRING);
+    EXPECT(config_value_valid(system_prompt, "anything"));
+    EXPECT(!config_value_valid(system_prompt, NULL));
     EXPECT(!config_value_valid(NULL, "70"));
-    config_value_hint(ff, hint, sizeof(hint));
-    EXPECT_STR_EQ(hint, ""); /* nothing to reject, so no hint */
+    config_value_hint(system_prompt, hint, sizeof(hint));
+    EXPECT_STR_EQ(hint, "");
 
-    /* Integer settings reject malformed, negative, and out-of-bounds values;
-     * compact.threshold carries a 1..100 range that the hint names. */
-    const struct config_setting *i = config_setting_find("compact.threshold");
-    EXPECT(i && !i->choices && i->kind == CFG_INT && i->min == 1 && i->max == 100);
-    EXPECT(config_value_valid(i, "70"));
-    EXPECT(config_value_valid(i, "1"));
-    EXPECT(config_value_valid(i, "100"));
-    EXPECT(!config_value_valid(i, "0"));   /* below min */
-    EXPECT(!config_value_valid(i, "200")); /* above max */
-    EXPECT(!config_value_valid(i, "banana"));
-    EXPECT(!config_value_valid(i, "-5")); /* counts/widths are non-negative */
-    EXPECT(!config_value_valid(i, "12x"));
-    EXPECT(!config_value_valid(i, ""));
-    config_value_hint(i, hint, sizeof(hint));
+    const struct config_setting *threshold = config_setting_find("compact.threshold");
+    EXPECT(threshold && !threshold->choices && threshold->kind == CONFIG_KIND_INT &&
+           threshold->min == 1 && threshold->max == 100);
+    EXPECT(config_value_valid(threshold, "70"));
+    EXPECT(config_value_valid(threshold, "1"));
+    EXPECT(config_value_valid(threshold, "100"));
+    EXPECT(!config_value_valid(threshold, "0"));
+    EXPECT(!config_value_valid(threshold, "200"));
+    EXPECT(!config_value_valid(threshold, "banana"));
+    EXPECT(!config_value_valid(threshold, "-5"));
+    EXPECT(!config_value_valid(threshold, "12x"));
+    EXPECT(!config_value_valid(threshold, ""));
+    config_value_hint(threshold, hint, sizeof(hint));
     EXPECT_STR_EQ(hint, "a whole number from 1 to 100");
 
-    /* A typed setting with choices accepts either branch and includes both in
-     * its hint. The example is presentation metadata, not another choice. */
-    const struct config_setting *dw = config_setting_find("display_width");
-    EXPECT(dw && dw->kind == CFG_INT && dw->min == 20);
-    EXPECT_STR_EQ(dw->choices, "auto|terminal");
-    EXPECT_STR_EQ(dw->example, "100");
-    EXPECT(config_value_valid(dw, "auto"));
-    EXPECT(config_value_valid(dw, "TERMINAL"));
-    EXPECT(config_value_valid(dw, "20"));
-    EXPECT(config_value_valid(dw, "500"));
-    EXPECT(!config_value_valid(dw, "19"));
-    EXPECT(!config_value_valid(dw, "wide"));
-    config_value_hint(dw, hint, sizeof(hint));
+    const struct config_setting *display_width = config_setting_find("display_width");
+    EXPECT(display_width && display_width->kind == CONFIG_KIND_INT && display_width->min == 20);
+    EXPECT_STR_EQ(display_width->choices, "auto|terminal");
+    EXPECT_STR_EQ(display_width->example, "100");
+    EXPECT(config_value_valid(display_width, "auto"));
+    EXPECT(config_value_valid(display_width, "TERMINAL"));
+    EXPECT(config_value_valid(display_width, "20"));
+    EXPECT(config_value_valid(display_width, "500"));
+    EXPECT(!config_value_valid(display_width, "19"));
+    EXPECT(!config_value_valid(display_width, "wide"));
+    config_value_hint(display_width, hint, sizeof(hint));
     EXPECT_STR_EQ(hint, "auto|terminal, or a whole number of at least 20; e.g. 100");
-    char *dw_canon = config_value_canonical(dw, "TERMINAL");
-    EXPECT_STR_EQ(dw_canon, "terminal");
-    free(dw_canon);
-    EXPECT(config_value_canonical(dw, "100") == NULL);
+    char *canonical = config_value_canonical(display_width, "TERMINAL");
+    EXPECT_STR_EQ(canonical, "terminal");
+    free(canonical);
+    EXPECT(config_value_canonical(display_width, "100") == NULL);
 
-    /* Boolean aliases remain special to boolean settings. If those literal
-     * choices are combined with an integer, numeric values obey its bounds. */
+    /* Boolean aliases do not bypass bounds when attached to a numeric setting. */
     const struct config_setting mixed_bool = {
         .choices = CONFIG_CHOICES_BOOL,
-        .kind = CFG_INT,
+        .kind = CONFIG_KIND_INT,
         .min = 20,
     };
     EXPECT(config_value_valid(&mixed_bool, "on"));
     EXPECT(config_value_valid(&mixed_bool, "20"));
     EXPECT(!config_value_valid(&mixed_bool, "1"));
     EXPECT(!config_value_valid(&mixed_bool, "true"));
-    char *mixed_canon = config_value_canonical(&mixed_bool, "ON");
-    EXPECT_STR_EQ(mixed_canon, "on");
-    free(mixed_canon);
+    canonical = config_value_canonical(&mixed_bool, "ON");
+    EXPECT_STR_EQ(canonical, "on");
+    free(canonical);
 
-    /* An unbounded int keeps the plain hint. */
-    const struct config_setting *mt = config_setting_find("max_turns");
-    EXPECT(mt && mt->kind == CFG_INT && mt->min == 0 && mt->max == 0);
-    config_value_hint(mt, hint, sizeof(hint));
+    const struct config_setting *max_turns = config_setting_find("max_turns");
+    EXPECT(max_turns && max_turns->kind == CONFIG_KIND_INT && max_turns->min == 0 &&
+           max_turns->max == 0);
+    config_value_hint(max_turns, hint, sizeof(hint));
     EXPECT_STR_EQ(hint, "a whole number");
+}
 
-    /* A max-only int names its ceiling; the value is rejected above it. */
-    const struct config_setting *ret = config_setting_find("session_retention_days");
-    EXPECT(ret && ret->kind == CFG_INT && ret->min == 0 && ret->max == 36500);
-    EXPECT_STR_EQ(ret->def, "30");
-    EXPECT(config_value_valid(ret, "0"));
-    EXPECT(config_value_valid(ret, "30"));
-    EXPECT(!config_value_valid(ret, "36501"));
+static void test_bounded_and_scaled_value_validation(void)
+{
+    char hint[64];
 
-    const struct config_setting *mr = config_setting_find("http.max_retries");
-    EXPECT(mr && mr->kind == CFG_INT && mr->min == 0 && mr->max == 100);
-    EXPECT(config_value_valid(mr, "100"));
-    EXPECT(config_value_valid(mr, "0")); /* disabling retries is allowed */
-    EXPECT(!config_value_valid(mr, "1000"));
-    config_value_hint(mr, hint, sizeof(hint));
+    const struct config_setting *retention = config_setting_find("session_retention_days");
+    EXPECT(retention && retention->kind == CONFIG_KIND_INT && retention->min == 0 &&
+           retention->max == 36500);
+    EXPECT_STR_EQ(retention->default_value, "30");
+    EXPECT(config_value_valid(retention, "0"));
+    EXPECT(config_value_valid(retention, "30"));
+    EXPECT(!config_value_valid(retention, "36501"));
+
+    const struct config_setting *max_retries = config_setting_find("http.max_retries");
+    EXPECT(max_retries && max_retries->kind == CONFIG_KIND_INT && max_retries->min == 0 &&
+           max_retries->max == 100);
+    EXPECT(config_value_valid(max_retries, "100"));
+    EXPECT(config_value_valid(max_retries, "0"));
+    EXPECT(!config_value_valid(max_retries, "1000"));
+    config_value_hint(max_retries, hint, sizeof(hint));
     EXPECT_STR_EQ(hint, "a whole number up to 100");
 
-    /* Sizes accept suffixes but reject zero. */
-    const struct config_setting *sz = config_setting_find("tool_output_cap");
-    EXPECT(sz && sz->kind == CFG_SIZE);
-    EXPECT(config_value_valid(sz, "64k"));
-    EXPECT(config_value_valid(sz, "4096"));
-    EXPECT(!config_value_valid(sz, "0"));
-    EXPECT(!config_value_valid(sz, "lots"));
-    config_value_hint(sz, hint, sizeof(hint));
+    const struct config_setting *output_cap = config_setting_find("tool_output_cap");
+    EXPECT(output_cap && output_cap->kind == CONFIG_KIND_SIZE);
+    EXPECT(config_value_valid(output_cap, "64k"));
+    EXPECT(config_value_valid(output_cap, "4096"));
+    EXPECT(!config_value_valid(output_cap, "0"));
+    EXPECT(!config_value_valid(output_cap, "lots"));
+    config_value_hint(output_cap, hint, sizeof(hint));
     EXPECT_STR_EQ(hint, "a size like 64k or 1M");
 
-    /* Durations accept suffixes and zero, unless a min forbids it. */
-    const struct config_setting *d = config_setting_find("bash.timeout");
-    EXPECT(d && d->kind == CFG_DURATION);
-    EXPECT(config_value_valid(d, "2s"));
-    EXPECT(config_value_valid(d, "500ms"));
-    EXPECT(config_value_valid(d, "0")); /* 0 disables — allowed here */
-    EXPECT(!config_value_valid(d, "soon"));
-    config_value_hint(d, hint, sizeof(hint));
+    const struct config_setting *timeout = config_setting_find("bash.timeout");
+    EXPECT(timeout && timeout->kind == CONFIG_KIND_DURATION);
+    EXPECT(config_value_valid(timeout, "2s"));
+    EXPECT(config_value_valid(timeout, "500ms"));
+    EXPECT(config_value_valid(timeout, "0"));
+    EXPECT(!config_value_valid(timeout, "soon"));
+    config_value_hint(timeout, hint, sizeof(hint));
     EXPECT_STR_EQ(hint, "a duration like 2s or 500ms");
 
-    /* retry_base bounds out zero (0 backoff would hammer the server). */
-    const struct config_setting *rb = config_setting_find("http.retry_base");
-    EXPECT(rb && rb->kind == CFG_DURATION && rb->min == 1);
-    EXPECT(config_value_valid(rb, "1s"));
-    EXPECT(!config_value_valid(rb, "0"));
+    /* A zero retry delay would create a tight retry loop. */
+    const struct config_setting *retry_base = config_setting_find("http.retry_base");
+    EXPECT(retry_base && retry_base->kind == CONFIG_KIND_DURATION && retry_base->min == 1);
+    EXPECT(config_value_valid(retry_base, "1s"));
+    EXPECT(!config_value_valid(retry_base, "0"));
 
-    const struct config_setting *nr = config_setting_find("anthropic.max_tokens");
-    EXPECT(nr && !nr->runtime && nr->kind == CFG_INT && nr->min == 1);
-    EXPECT(config_value_valid(nr, "32000"));
-    EXPECT(!config_value_valid(nr, "lots"));
-    EXPECT(!config_value_valid(nr, "0")); /* zero is ignored by the consumer */
+    const struct config_setting *max_tokens = config_setting_find("anthropic.max_tokens");
+    EXPECT(max_tokens && !max_tokens->editable && max_tokens->kind == CONFIG_KIND_INT &&
+           max_tokens->min == 1);
+    EXPECT(config_value_valid(max_tokens, "32000"));
+    EXPECT(!config_value_valid(max_tokens, "lots"));
+    EXPECT(!config_value_valid(max_tokens, "0"));
 
-    /* thinking_budget bounds zero out too, though its default is computed by
-     * the consumer (max_tokens - 1) rather than declared in the registry. */
-    const struct config_setting *tb = config_setting_find("anthropic.thinking_budget");
-    EXPECT(tb && tb->kind == CFG_INT && tb->min == 1 && tb->def == NULL);
-    EXPECT(config_value_valid(tb, "1000"));
-    EXPECT(!config_value_valid(tb, "0"));
+    const struct config_setting *thinking_budget = config_setting_find("anthropic.thinking_budget");
+    EXPECT(thinking_budget && thinking_budget->kind == CONFIG_KIND_INT &&
+           thinking_budget->min == 1 && thinking_budget->default_value == NULL);
+    EXPECT(config_value_valid(thinking_budget, "1000"));
+    EXPECT(!config_value_valid(thinking_budget, "0"));
+}
 
-    /* Canonicalization: strict enums store the exact choice spelling, so a
-     * case-sensitive consumer matches; bool/free-form need none. */
-    const struct config_setting *th = config_setting_find("theme");
-    char *canon = config_value_canonical(th, "LIGHT");
-    EXPECT_STR_EQ(canon, "light");
-    free(canon);
-    EXPECT(config_value_canonical(th, "nonesuch") == NULL);
+static void test_choice_value_validation(void)
+{
+    const struct config_setting *system_prompt = config_setting_find("system_prompt");
+    const struct config_setting *theme = config_setting_find("theme");
+    char *canonical = config_value_canonical(theme, "LIGHT");
+    EXPECT_STR_EQ(canonical, "light");
+    free(canonical);
+    EXPECT(config_value_canonical(theme, "nonesuch") == NULL);
     EXPECT(config_value_canonical(config_setting_find("markdown"), "ON") == NULL);
-    EXPECT(config_value_canonical(ff, "whatever") == NULL);
+    EXPECT(config_value_canonical(system_prompt, "whatever") == NULL);
 
-    /* Bool settings admit the full config_bool grammar, both cases. */
-    const struct config_setting *b = config_setting_find("markdown");
-    EXPECT(b && b->choices);
-    EXPECT(config_value_valid(b, "on"));
-    EXPECT(config_value_valid(b, "OFF"));
-    EXPECT(config_value_valid(b, "1"));
-    EXPECT(config_value_valid(b, "0"));
-    EXPECT(config_value_valid(b, "true"));
-    EXPECT(config_value_valid(b, "No"));
-    EXPECT(!config_value_valid(b, "banana"));
-    EXPECT(!config_value_valid(b, ""));
+    const struct config_setting *markdown = config_setting_find("markdown");
+    EXPECT(markdown && markdown->choices);
+    EXPECT(config_value_valid(markdown, "on"));
+    EXPECT(config_value_valid(markdown, "OFF"));
+    EXPECT(config_value_valid(markdown, "1"));
+    EXPECT(config_value_valid(markdown, "0"));
+    EXPECT(config_value_valid(markdown, "true"));
+    EXPECT(config_value_valid(markdown, "No"));
+    EXPECT(!config_value_valid(markdown, "banana"));
+    EXPECT(!config_value_valid(markdown, ""));
 
-    /* Enum settings are strict membership, case-insensitive. */
-    const struct config_setting *e = config_setting_find("theme");
-    EXPECT(e && e->choices);
-    EXPECT(config_value_valid(e, "dark"));
-    EXPECT(config_value_valid(e, "AUTO"));
-    EXPECT(config_value_valid(e, "off")); /* last list element matches */
-    EXPECT(!config_value_valid(e, "dar"));
-    EXPECT(!config_value_valid(e, "darker"));
-    EXPECT(!config_value_valid(e, ""));
+    EXPECT(theme && theme->choices);
+    EXPECT(config_value_valid(theme, "dark"));
+    EXPECT(config_value_valid(theme, "AUTO"));
+    EXPECT(config_value_valid(theme, "off"));
+    EXPECT(!config_value_valid(theme, "dar"));
+    EXPECT(!config_value_valid(theme, "darker"));
+    EXPECT(!config_value_valid(theme, ""));
 }
 
 static void test_sort_models_auto(void)
@@ -862,8 +844,8 @@ static void test_sort_models_auto(void)
     /* Unset resolves to the "auto" default, which config_bool_or treats as
      * unrecognized and so yields the caller's (provider) default — the /model
      * picker's actual behavior. So a provider defaulting on stays on. */
-    const struct config_setting *s = config_setting_find("sort_models");
-    EXPECT(s && s->choices && strcmp(s->choices, "on|off") != 0);
+    const struct config_setting *sort_models = config_setting_find("sort_models");
+    EXPECT(sort_models && sort_models->choices && strcmp(sort_models->choices, "on|off") != 0);
     EXPECT_STR_EQ(config_str("sort_models"), "auto");
     EXPECT(config_bool_or("sort_models", 1) == 1);
     EXPECT(config_bool_or("sort_models", 0) == 0);
@@ -877,13 +859,13 @@ static void test_sort_models_auto(void)
      * agrees with config_bool_or, which honors bool spellings and defers
      * everything else); a bogus value is invalid. The provider-defaulted cache
      * toggles share the exact shape. */
-    EXPECT(config_value_valid(s, "auto"));
-    EXPECT(config_value_valid(s, "AUTO"));
-    EXPECT(config_value_valid(s, "on"));
-    EXPECT(config_value_valid(s, "1"));
-    EXPECT(config_value_valid(s, "true"));
-    EXPECT(config_value_valid(s, "off"));
-    EXPECT(!config_value_valid(s, "banana"));
+    EXPECT(config_value_valid(sort_models, "auto"));
+    EXPECT(config_value_valid(sort_models, "AUTO"));
+    EXPECT(config_value_valid(sort_models, "on"));
+    EXPECT(config_value_valid(sort_models, "1"));
+    EXPECT(config_value_valid(sort_models, "true"));
+    EXPECT(config_value_valid(sort_models, "off"));
+    EXPECT(!config_value_valid(sort_models, "banana"));
     EXPECT_STR_EQ(config_setting_find("openai.send_cache_key")->choices, CONFIG_CHOICES_TRISTATE);
     EXPECT_STR_EQ(config_setting_find("openai.request_cost")->choices, CONFIG_CHOICES_TRISTATE);
     EXPECT_STR_EQ(config_setting_find("anthropic.cache")->choices, CONFIG_CHOICES_TRISTATE);
@@ -1400,11 +1382,8 @@ static void test_preset_save(void)
     setenv("XDG_CONFIG_HOME", dir, 1);
     setenv("XDG_STATE_HOME", dir, 1); /* isolate the state tier — see roundtrip test */
 
-    /* Saving into a file that already has unrelated keys keeps them, and the
-     * written preset is appliable immediately (in-memory tier updated) and
-     * after a reload (it reached the disk). The key is written to disk rather
-     * than only loaded: what a save merges into is the file, not this
-     * process's snapshot of it (see test_preset_save_merges_external_edit). */
+    /* Seed and load unrelated content so the save must preserve the process's config snapshot. The
+     * new preset must apply both immediately and after a reload. */
     char precfg[4096];
     snprintf(precfg, sizeof precfg, "%s/hax", dir);
     EXPECT(mkdir(precfg, 0700) == 0);
@@ -1989,7 +1968,9 @@ int main(void)
     test_registry_introspection();
     test_source_reports_winning_tier();
     test_str_below_run();
-    test_value_valid();
+    test_string_and_integer_value_validation();
+    test_bounded_and_scaled_value_validation();
+    test_choice_value_validation();
     test_sort_models_auto();
     test_empty_policy();
     test_nested_and_flat();

@@ -22,179 +22,188 @@
 // clang-format off
 static const struct config_setting REGISTRY[] = {
     /* selection */
-    {.key = "preset", .env = "HAX_PRESET", .keep_empty = 1,
-     .desc = "Preset from presets.<name> to apply at startup; empty disables"},
-    {.key = "provider", .env = "HAX_PROVIDER", .keep_empty = 1,
-     .desc = "Backend: codex, openai, openai-compatible, anthropic, anthropic-compatible, "
-             "llama.cpp, ollama, openrouter, mock"},
-    {.key = "model", .env = "HAX_MODEL", .keep_empty = 1,
-     .desc = "Model id (provider-specific; some auto-fill or require it)"},
-    {.key = "effort", .env = "HAX_EFFORT", .keep_empty = 1,
-     .desc = "Reasoning effort (provider-specific); empty omits it"},
-    {.key = "system_prompt", .env = "HAX_SYSTEM_PROMPT", .keep_empty = 1,
-     .desc = "Override the built-in system prompt; empty sends no system message"},
-    {.key = "no_env", .env = "HAX_NO_ENV", .choices = CONFIG_CHOICES_BOOL,
-     .desc = "Skip the Environment section in the system prompt"},
-    {.key = "no_agents_md", .env = "HAX_NO_AGENTS_MD", .choices = CONFIG_CHOICES_BOOL,
-     .desc = "Skip AGENTS.md project instructions in the system prompt"},
-    {.key = "no_skills", .env = "HAX_NO_SKILLS", .choices = CONFIG_CHOICES_BOOL,
-     .desc = "Skip the skills listing in the system prompt"},
-    {.key = "no_subagents", .env = "HAX_NO_SUBAGENTS", .choices = CONFIG_CHOICES_BOOL,
-     .desc = "Skip the subagents section in the system prompt"},
+    {.key = "preset", .env_var = "HAX_PRESET", .keep_empty = 1,
+     .description = "Preset from presets.<name> to apply at startup; empty disables"},
+    {.key = "provider", .env_var = "HAX_PROVIDER", .keep_empty = 1,
+     .description = "Backend: codex, openai, openai-compatible, anthropic, anthropic-compatible, "
+                    "llama.cpp, ollama, openrouter, mock"},
+    {.key = "model", .env_var = "HAX_MODEL", .keep_empty = 1,
+     .description = "Model id (provider-specific; some auto-fill or require it)"},
+    {.key = "effort", .env_var = "HAX_EFFORT", .keep_empty = 1,
+     .description = "Reasoning effort (provider-specific); empty omits it"},
+    {.key = "system_prompt", .env_var = "HAX_SYSTEM_PROMPT", .keep_empty = 1,
+     .description = "Override the built-in system prompt; empty sends no system message"},
+    {.key = "no_env", .env_var = "HAX_NO_ENV", .choices = CONFIG_CHOICES_BOOL,
+     .description = "Skip the Environment section in the system prompt"},
+    {.key = "no_agents_md", .env_var = "HAX_NO_AGENTS_MD", .choices = CONFIG_CHOICES_BOOL,
+     .description = "Skip AGENTS.md project instructions in the system prompt"},
+    {.key = "no_skills", .env_var = "HAX_NO_SKILLS", .choices = CONFIG_CHOICES_BOOL,
+     .description = "Skip the skills listing in the system prompt"},
+    {.key = "no_subagents", .env_var = "HAX_NO_SUBAGENTS", .choices = CONFIG_CHOICES_BOOL,
+     .description = "Skip the subagents section in the system prompt"},
 
     /* display */
-    {.key = "markdown", .env = "HAX_MARKDOWN", .def = "1",
-     .desc = "Render Markdown in the terminal (TTY only; piped output is always raw)",
-     .choices = CONFIG_CHOICES_BOOL, .runtime = 1},
-    {.key = "show_reasoning", .env = "HAX_SHOW_REASONING",
-     .desc = "Show reasoning/CoT deltas live (default off)",
-     .choices = CONFIG_CHOICES_BOOL, .runtime = 1},
-    {.key = "sort_models", .env = "HAX_SORT_MODELS", .def = "auto",
-     .desc = "Sort the /model picker alphabetically; auto uses the provider's own default",
-     .choices = CONFIG_CHOICES_TRISTATE, .runtime = 1},
-    {.key = "context_limit", .env = "HAX_CONTEXT_LIMIT",
-     .desc = "Manual context-window size for the % display; overrides auto-detect",
-     .kind = CFG_SIZE, .runtime = 1},
-    {.key = "display_width", .env = "HAX_DISPLAY_WIDTH", .def = "auto",
-     .desc = "Content width: auto caps at 100, terminal removes the cap, or set columns",
-     .choices = "auto|terminal", .example = "100", .kind = CFG_INT, .min = 20, .runtime = 1},
-    {.key = "notify", .env = "HAX_NOTIFY", .def = "auto",
-     .desc = "Desktop-notification style: auto, bel, osc9, off (auto detects from the terminal)",
-     .choices = "auto|bel|osc9|off", .runtime = 1},
-    {.key = "theme", .env = "HAX_THEME", .def = "auto",
-     .desc = "Color theme: auto, dark, light, ansi, off (auto detects from the terminal)",
-     .choices = "auto|dark|light|ansi|off", .runtime = 1},
-    {.key = "tint", .env = "HAX_TINT", .def = "teal",
-     .desc = "Identity tint for model output; an active preset's own tint wins until set here. "
-             "Ignored by the ansi and off themes",
-     .choices = "teal|violet|rose|sage", .runtime = 1},
+    {.key = "markdown", .env_var = "HAX_MARKDOWN", .default_value = "1",
+     .description = "Render Markdown in the terminal (TTY only; piped output is always raw)",
+     .choices = CONFIG_CHOICES_BOOL, .editable = 1},
+    {.key = "show_reasoning", .env_var = "HAX_SHOW_REASONING",
+     .description = "Show reasoning/CoT deltas live (default off)",
+     .choices = CONFIG_CHOICES_BOOL, .editable = 1},
+    {.key = "sort_models", .env_var = "HAX_SORT_MODELS", .default_value = "auto",
+     .description = "Sort the /model picker alphabetically; auto uses the provider's own default",
+     .choices = CONFIG_CHOICES_TRISTATE, .editable = 1},
+    {.key = "context_limit", .env_var = "HAX_CONTEXT_LIMIT",
+     .description = "Manual context-window size for the % display; overrides auto-detect",
+     .kind = CONFIG_KIND_SIZE, .editable = 1},
+    {.key = "display_width", .env_var = "HAX_DISPLAY_WIDTH", .default_value = "auto",
+     .description = "Content width: auto caps at 100, terminal removes the cap, or set columns",
+     .choices = "auto|terminal", .example = "100", .kind = CONFIG_KIND_INT, .min = 20,
+     .editable = 1},
+    {.key = "notify", .env_var = "HAX_NOTIFY", .default_value = "auto",
+     .description = "Desktop-notification style: auto, bel, osc9, off "
+                    "(auto detects from the terminal)",
+     .choices = "auto|bel|osc9|off", .editable = 1},
+    {.key = "theme", .env_var = "HAX_THEME", .default_value = "auto",
+     .description = "Color theme: auto, dark, light, ansi, off (auto detects from the terminal)",
+     .choices = "auto|dark|light|ansi|off", .editable = 1},
+    {.key = "tint", .env_var = "HAX_TINT", .default_value = "teal",
+     .description = "Identity tint for model output; an active preset's own tint wins until set "
+                    "here. Ignored by the ansi and off themes",
+     .choices = "teal|violet|rose|sage", .editable = 1},
 
     /* behavior */
-    {.key = "keep_awake", .env = "HAX_KEEP_AWAKE", .def = "1",
-     .desc = "Inhibit idle system sleep while a turn is running (display may still blank)",
-     .choices = CONFIG_CHOICES_BOOL, .runtime = 1},
-    {.key = "compact.auto", .env = "HAX_COMPACT_AUTO", .def = "1",
-     .desc = "Auto-summarize history when it nears the context window "
-             "(manual /compact still works)",
-     .choices = CONFIG_CHOICES_BOOL, .runtime = 1},
-    {.key = "compact.threshold", .env = "HAX_COMPACT_THRESHOLD", .def = "85",
-     .desc = "Auto-compact when context usage reaches this percent of the window",
-     .kind = CFG_INT, .min = 1, .max = 100, .runtime = 1},
-    {.key = "max_turns", .env = "HAX_MAX_TURNS",
-     .desc = "Interactive: pause for confirmation after this many model round-trips per user turn",
-     .kind = CFG_INT, .runtime = 1},
+    {.key = "keep_awake", .env_var = "HAX_KEEP_AWAKE", .default_value = "1",
+     .description = "Inhibit idle system sleep while a turn is running (display may still blank)",
+     .choices = CONFIG_CHOICES_BOOL, .editable = 1},
+    {.key = "compact.auto", .env_var = "HAX_COMPACT_AUTO", .default_value = "1",
+     .description = "Auto-summarize history when it nears the context window "
+                    "(manual /compact still works)",
+     .choices = CONFIG_CHOICES_BOOL, .editable = 1},
+    {.key = "compact.threshold", .env_var = "HAX_COMPACT_THRESHOLD", .default_value = "85",
+     .description = "Auto-compact when context usage reaches this percent of the window",
+     .kind = CONFIG_KIND_INT, .min = 1, .max = 100, .editable = 1},
+    {.key = "max_turns", .env_var = "HAX_MAX_TURNS",
+     .description = "Interactive: pause for confirmation after this many model round-trips per "
+                    "user turn",
+     .kind = CONFIG_KIND_INT, .editable = 1},
 
     /* model catalog */
-    {.key = "catalog.url", .env = "HAX_CATALOG_URL", .def = "https://models.dev/api.json",
-     .keep_empty = 1,
-     .desc = "Model-metadata catalog endpoint (models.dev api.json shape); empty disables fetching"},
-    {.key = "catalog.refresh", .env = "HAX_CATALOG_REFRESH", .def = "24h",
-     .desc = "Re-fetch the cached model catalog when older than this; 0 disables fetching",
-     .kind = CFG_DURATION},
+    {.key = "catalog.url", .env_var = "HAX_CATALOG_URL",
+     .default_value = "https://models.dev/api.json", .keep_empty = 1,
+     .description = "Model-metadata catalog endpoint (models.dev api.json shape); empty disables "
+                    "fetching"},
+    {.key = "catalog.refresh", .env_var = "HAX_CATALOG_REFRESH", .default_value = "24h",
+     .description = "Re-fetch the cached model catalog when older than this; 0 disables fetching",
+     .kind = CONFIG_KIND_DURATION},
 
     /* recording */
-    {.key = "no_session", .env = "HAX_NO_SESSION", .def = "auto",
-     .desc = "Skip recording conversations and typed prompts; auto skips both for dev "
-             "providers (mock)",
+    {.key = "no_session", .env_var = "HAX_NO_SESSION", .default_value = "auto",
+     .description = "Skip recording conversations and typed prompts; auto skips both for dev "
+                    "providers (mock)",
      .choices = CONFIG_CHOICES_TRISTATE},
-    {.key = "session_retention_days", .env = "HAX_SESSION_RETENTION_DAYS", .def = "30",
-     .desc = "Delete sessions after this many inactive days; 0 disables pruning",
-     .kind = CFG_INT, .max = 36500},
-    {.key = "transcript", .env = "HAX_TRANSCRIPT", .keep_empty = 1,
-     .desc = "Path to mirror the Ctrl-T transcript view; empty disables"},
-    {.key = "trace", .env = "HAX_TRACE", .keep_empty = 1,
-     .desc = "Path to a wire-level HTTP/SSE trace dump; empty disables"},
+    {.key = "session_retention_days", .env_var = "HAX_SESSION_RETENTION_DAYS",
+     .default_value = "30",
+     .description = "Delete sessions after this many inactive days; 0 disables pruning",
+     .kind = CONFIG_KIND_INT, .max = 36500},
+    {.key = "transcript", .env_var = "HAX_TRANSCRIPT", .keep_empty = 1,
+     .description = "Path to mirror the Ctrl-T transcript view; empty disables"},
+    {.key = "trace", .env_var = "HAX_TRACE", .keep_empty = 1,
+     .description = "Path to a wire-level HTTP/SSE trace dump; empty disables"},
 
     /* tools */
-    {.key = "image_input", .env = "HAX_IMAGE_INPUT", .def = "auto",
-     .desc = "Let the model view images via the read tool; auto detects per provider/model",
-     .choices = CONFIG_CHOICES_TRISTATE, .runtime = 1},
-    {.key = "tool_output_cap", .env = "HAX_TOOL_OUTPUT_CAP", .def = "50k",
-     .desc = "Max bytes captured from a tool's output",
-     .kind = CFG_SIZE, .runtime = 1},
-    {.key = "bash.timeout", .env = "HAX_BASH_TIMEOUT", .def = "2m",
-     .desc = "Default bash-tool command timeout; 0 disables",
-     .kind = CFG_DURATION, .runtime = 1},
-    {.key = "bash.timeout_max", .env = "HAX_BASH_TIMEOUT_MAX", .def = "30m",
-     .desc = "Ceiling on the model's per-call bash timeout; 0 disables",
-     .kind = CFG_DURATION, .runtime = 1},
-    {.key = "bash.timeout_grace", .env = "HAX_BASH_TIMEOUT_GRACE", .def = "2s",
-     .desc = "Grace window between SIGTERM and SIGKILL for bash commands; 0 skips",
-     .kind = CFG_DURATION, .runtime = 1},
-    {.key = "bash.shell", .env = "HAX_BASH_SHELL",
-     .desc = "Shell for the bash tool, a $PATH name or path (default: bash, else sh)"},
+    {.key = "image_input", .env_var = "HAX_IMAGE_INPUT", .default_value = "auto",
+     .description = "Let the model view images via the read tool; auto detects per provider/model",
+     .choices = CONFIG_CHOICES_TRISTATE, .editable = 1},
+    {.key = "tool_output_cap", .env_var = "HAX_TOOL_OUTPUT_CAP", .default_value = "50k",
+     .description = "Max bytes captured from a tool's output",
+     .kind = CONFIG_KIND_SIZE, .editable = 1},
+    {.key = "bash.timeout", .env_var = "HAX_BASH_TIMEOUT", .default_value = "2m",
+     .description = "Default bash-tool command timeout; 0 disables",
+     .kind = CONFIG_KIND_DURATION, .editable = 1},
+    {.key = "bash.timeout_max", .env_var = "HAX_BASH_TIMEOUT_MAX", .default_value = "30m",
+     .description = "Ceiling on the model's per-call bash timeout; 0 disables",
+     .kind = CONFIG_KIND_DURATION, .editable = 1},
+    {.key = "bash.timeout_grace", .env_var = "HAX_BASH_TIMEOUT_GRACE", .default_value = "2s",
+     .description = "Grace window between SIGTERM and SIGKILL for bash commands; 0 skips",
+     .kind = CONFIG_KIND_DURATION, .editable = 1},
+    {.key = "bash.shell", .env_var = "HAX_BASH_SHELL",
+     .description = "Shell for the bash tool, a $PATH name or path (default: bash, else sh)"},
 
     /* http transport */
-    {.key = "http.max_retries", .env = "HAX_HTTP_MAX_RETRIES", .def = "4",
-     .desc = "Additional retries for transient HTTP failures",
-     .kind = CFG_INT, .max = 100, .runtime = 1},
-    {.key = "http.retry_base", .env = "HAX_HTTP_RETRY_BASE", .def = "1s",
-     .desc = "Base backoff between HTTP retries",
-     .kind = CFG_DURATION, .min = 1 /* ms: must be positive */, .runtime = 1},
-    {.key = "http.idle_timeout", .env = "HAX_HTTP_IDLE_TIMEOUT", .def = "10m",
-     .desc = "Silence on a streaming response before giving up; 0 disables",
-     .kind = CFG_DURATION, .runtime = 1},
+    {.key = "http.max_retries", .env_var = "HAX_HTTP_MAX_RETRIES", .default_value = "4",
+     .description = "Additional retries for transient HTTP failures",
+     .kind = CONFIG_KIND_INT, .max = 100, .editable = 1},
+    {.key = "http.retry_base", .env_var = "HAX_HTTP_RETRY_BASE", .default_value = "1s",
+     .description = "Base backoff between HTTP retries",
+     .kind = CONFIG_KIND_DURATION, .min = 1 /* ms: must be positive */, .editable = 1},
+    {.key = "http.idle_timeout", .env_var = "HAX_HTTP_IDLE_TIMEOUT", .default_value = "10m",
+     .description = "Silence on a streaming response before giving up; 0 disables",
+     .kind = CONFIG_KIND_DURATION, .editable = 1},
 
     /* openai family (shared by the preset-based providers) */
-    {.key = "openai.base_url", .env = "HAX_OPENAI_BASE_URL",
-     .desc = "Base URL for the OpenAI-compatible endpoint"},
-    {.key = "openai.api_key", .env = "HAX_OPENAI_API_KEY", .secret = 1,
-     .desc = "Bearer token for OpenAI-family providers"},
-    {.key = "openai.reasoning_format", .env = "HAX_OPENAI_REASONING_FORMAT",
-     .desc = "Reasoning request dialect: flat or nested", .choices = "flat|nested"},
-    {.key = "openai.reasoning_roundtrip", .env = "HAX_REASONING_ROUNDTRIP", .keep_empty = 1,
-     .desc = "Replay reasoning text to the model (off/on, or a field name)"},
-    {.key = "openai.send_cache_key", .env = "HAX_OPENAI_SEND_CACHE_KEY", .choices = CONFIG_CHOICES_TRISTATE,
-     .desc = "Send a stable prompt_cache_key (prefix-cache hint); auto uses the provider default"},
-    {.key = "openai.request_cost", .env = "HAX_OPENAI_REQUEST_COST", .choices = CONFIG_CHOICES_TRISTATE,
-     .desc = "Request usage accounting (`usage: {include: true}`) for per-response cost; "
-             "auto uses the provider default"},
-    {.key = "openai.cache", .env = "HAX_OPENAI_CACHE", .choices = CONFIG_CHOICES_TRISTATE,
-     .desc = "Send prompt cache_control breakpoints (routers fronting Anthropic models, which "
-             "cache only on request); auto uses the provider default"},
-    {.key = "openai.cache_ttl", .env = "HAX_OPENAI_CACHE_TTL", .def = "1h",
-     .desc = "Cache breakpoint TTL: 5m or 1h (1h suits an interactive agent's pauses)",
+    {.key = "openai.base_url", .env_var = "HAX_OPENAI_BASE_URL",
+     .description = "Base URL for the OpenAI-compatible endpoint"},
+    {.key = "openai.api_key", .env_var = "HAX_OPENAI_API_KEY", .secret = 1,
+     .description = "Bearer token for OpenAI-family providers"},
+    {.key = "openai.reasoning_format", .env_var = "HAX_OPENAI_REASONING_FORMAT",
+     .description = "Reasoning request dialect: flat or nested", .choices = "flat|nested"},
+    {.key = "openai.reasoning_roundtrip", .env_var = "HAX_REASONING_ROUNDTRIP", .keep_empty = 1,
+     .description = "Replay reasoning text to the model (off/on, or a field name)"},
+    {.key = "openai.send_cache_key", .env_var = "HAX_OPENAI_SEND_CACHE_KEY",
+     .choices = CONFIG_CHOICES_TRISTATE,
+     .description = "Send a stable prompt_cache_key (prefix-cache hint); auto uses the provider "
+                    "default"},
+    {.key = "openai.request_cost", .env_var = "HAX_OPENAI_REQUEST_COST",
+     .choices = CONFIG_CHOICES_TRISTATE,
+     .description = "Request usage accounting (`usage: {include: true}`) for per-response cost; "
+                    "auto uses the provider default"},
+    {.key = "openai.cache", .env_var = "HAX_OPENAI_CACHE",
+     .choices = CONFIG_CHOICES_TRISTATE,
+     .description = "Send prompt cache_control breakpoints (routers fronting Anthropic models, "
+                    "which cache only on request); auto uses the provider default"},
+    {.key = "openai.cache_ttl", .env_var = "HAX_OPENAI_CACHE_TTL", .default_value = "1h",
+     .description = "Cache breakpoint TTL: 5m or 1h (1h suits an interactive agent's pauses)",
      .choices = "5m|1h"},
-    {.key = "provider_name", .env = "HAX_PROVIDER_NAME",
-     .desc = "Display name for the provider in the banner"},
+    {.key = "provider_name", .env_var = "HAX_PROVIDER_NAME",
+     .description = "Display name for the provider in the banner"},
 
     /* anthropic family (shared by the anthropic + anthropic-compatible providers) */
-    {.key = "anthropic.base_url", .env = "HAX_ANTHROPIC_BASE_URL",
-     .desc = "Base URL for an Anthropic-compatible /v1 endpoint (anthropic-compatible)"},
-    {.key = "anthropic.api_key", .env = "HAX_ANTHROPIC_API_KEY", .secret = 1,
-     .desc = "x-api-key token for Anthropic-family providers"},
-    /* No registry default: unset resolves to the model's own cap (see
-     * anthropic_max_tokens), so declaring one would make /config report a
-     * figure no request carries. The in-code floor covers a model nothing
-     * describes. */
-    {.key = "anthropic.max_tokens", .env = "HAX_ANTHROPIC_MAX_TOKENS",
-     .desc = "Max output tokens (thinking + text) per response; unset follows the model's own cap",
-     .kind = CFG_INT, .min = 1},
-    {.key = "anthropic.thinking_mode", .env = "HAX_ANTHROPIC_THINKING_MODE",
-     .desc = "Thinking mode: adaptive, budget, or off (default depends on the provider)",
+    {.key = "anthropic.base_url", .env_var = "HAX_ANTHROPIC_BASE_URL",
+     .description = "Base URL for an Anthropic-compatible /v1 endpoint (anthropic-compatible)"},
+    {.key = "anthropic.api_key", .env_var = "HAX_ANTHROPIC_API_KEY", .secret = 1,
+     .description = "x-api-key token for Anthropic-family providers"},
+    /* Unset follows model metadata; a registry default would make /config report a value the
+     * request does not necessarily use. */
+    {.key = "anthropic.max_tokens", .env_var = "HAX_ANTHROPIC_MAX_TOKENS",
+     .description = "Max output tokens (thinking + text) per response; unset follows the model's "
+                    "own cap",
+     .kind = CONFIG_KIND_INT, .min = 1},
+    {.key = "anthropic.thinking_mode", .env_var = "HAX_ANTHROPIC_THINKING_MODE",
+     .description = "Thinking mode: adaptive, budget, or off (default depends on the provider)",
      .choices = "adaptive|budget|off"},
-    {.key = "anthropic.thinking_budget", .env = "HAX_ANTHROPIC_THINKING_BUDGET",
-     .desc = "Budget-mode thinking tokens (default: max_tokens - 1)",
-     .kind = CFG_INT, .min = 1},
-    {.key = "anthropic.cache", .env = "HAX_ANTHROPIC_CACHE", .choices = CONFIG_CHOICES_TRISTATE,
-     .desc = "Send prompt cache_control breakpoints; auto uses the provider default"},
-    {.key = "anthropic.cache_ttl", .env = "HAX_ANTHROPIC_CACHE_TTL", .def = "1h",
-     .desc = "Cache breakpoint TTL: 5m or 1h (1h suits an interactive agent's pauses)",
+    {.key = "anthropic.thinking_budget", .env_var = "HAX_ANTHROPIC_THINKING_BUDGET",
+     .description = "Budget-mode thinking tokens (default: max_tokens - 1)",
+     .kind = CONFIG_KIND_INT, .min = 1},
+    {.key = "anthropic.cache", .env_var = "HAX_ANTHROPIC_CACHE", .choices = CONFIG_CHOICES_TRISTATE,
+     .description = "Send prompt cache_control breakpoints; auto uses the provider default"},
+    {.key = "anthropic.cache_ttl", .env_var = "HAX_ANTHROPIC_CACHE_TTL", .default_value = "1h",
+     .description = "Cache breakpoint TTL: 5m or 1h (1h suits an interactive agent's pauses)",
      .choices = "5m|1h"},
-    {.key = "anthropic.version", .env = "HAX_ANTHROPIC_VERSION", .def = "2023-06-01",
-     .desc = "anthropic-version request header value"},
+    {.key = "anthropic.version", .env_var = "HAX_ANTHROPIC_VERSION", .default_value = "2023-06-01",
+     .description = "anthropic-version request header value"},
 
     /* per-provider */
-    {.key = "llamacpp.port", .env = "HAX_LLAMACPP_PORT", .def = "8080",
-     .desc = "Port for the local llama-server (when openai.base_url is unset)",
-     .kind = CFG_INT, .min = 1, .max = 65535},
-    {.key = "openrouter.title", .env = "HAX_OPENROUTER_TITLE", .def = "hax", .keep_empty = 1,
-     .desc = "X-Title header for OpenRouter attribution (empty disables)"},
-    {.key = "openrouter.referer", .env = "HAX_OPENROUTER_REFERER",
-     .def = "https://github.com/OleksandrChekhovskyi/hax", .keep_empty = 1,
-     .desc = "HTTP-Referer header for OpenRouter attribution (empty disables)"},
-    {.key = "mock.script", .env = "HAX_MOCK_SCRIPT",
-     .desc = "Path to a mock-provider script (mock provider only)"},
+    {.key = "llamacpp.port", .env_var = "HAX_LLAMACPP_PORT", .default_value = "8080",
+     .description = "Port for the local llama-server (when openai.base_url is unset)",
+     .kind = CONFIG_KIND_INT, .min = 1, .max = 65535},
+    {.key = "openrouter.title", .env_var = "HAX_OPENROUTER_TITLE", .default_value = "hax",
+     .keep_empty = 1,
+     .description = "X-Title header for OpenRouter attribution (empty disables)"},
+    {.key = "openrouter.referer", .env_var = "HAX_OPENROUTER_REFERER",
+     .default_value = "https://github.com/OleksandrChekhovskyi/hax", .keep_empty = 1,
+     .description = "HTTP-Referer header for OpenRouter attribution (empty disables)"},
+    {.key = "mock.script", .env_var = "HAX_MOCK_SCRIPT",
+     .description = "Path to a mock-provider script (mock provider only)"},
 };
 // clang-format on
 
@@ -207,9 +216,9 @@ static const struct config_setting *find_setting(const char *key)
     return NULL;
 }
 
-const struct config_setting *config_settings(size_t *n)
+const struct config_setting *config_settings(size_t *count)
 {
-    *n = sizeof(REGISTRY) / sizeof(REGISTRY[0]);
+    *count = sizeof(REGISTRY) / sizeof(REGISTRY[0]);
     return REGISTRY;
 }
 
@@ -218,362 +227,300 @@ const struct config_setting *config_setting_find(const char *key)
     return find_setting(key);
 }
 
-/* File tier (parsed config.json), state tier (parsed state.json — the
- * machine-local persisted overrides), the conversation tier (the selection a
- * resumed session recorded), and the run-scoped override tier (a flat object
- * keyed by canonical key). Each is NULL or a JSON object. */
-/* Set when config.json exists but couldn't be used (malformed, oversized,
- * unreadable) — the tier is empty for the run, so a write built from it would
- * replace hand-authored content this process never read. The writers refuse
- * instead; state.json carries no such flag, being machine-local and
- * regenerable. */
-static int g_config_unusable;
+struct config_store {
+    json_t *file;
+    json_t *state;
+    json_t *conversation;
+    json_t *run;
+    /* Prevent writes from replacing config.json content that was never loaded. */
+    int file_unusable;
+};
 
-static json_t *g_config;
-static json_t *g_state;
-static json_t *g_conversation;
-static json_t *g_overrides;
+static struct config_store store;
 
 #define CONFIG_MAX_BYTES (1024 * 1024)
 
-/* Rewrite non-string scalar leaves as strings, so a value written as 5000
- * or true reads the same as "5000"/"1" and config_str can always hand back
- * a borrowed string. Recurses into nested objects; leaves arrays/null as-is
- * (they read as "unset"). */
-static void normalize(json_t *obj)
+static void normalize_scalars(json_t *object)
 {
-    const char *k;
-    json_t *v;
-    void *tmp;
-    json_object_foreach_safe(obj, tmp, k, v)
+    const char *key;
+    json_t *value;
+    void *iter;
+
+    json_object_foreach_safe(object, iter, key, value)
     {
-        if (json_is_object(v)) {
-            normalize(v);
-        } else if (json_is_integer(v)) {
-            char buf[32];
-            snprintf(buf, sizeof buf, "%lld", (long long)json_integer_value(v));
-            json_object_set_new(obj, k, json_string(buf));
-        } else if (json_is_real(v)) {
-            char buf[32];
-            snprintf(buf, sizeof buf, "%g", json_real_value(v));
-            json_object_set_new(obj, k, json_string(buf));
-        } else if (json_is_boolean(v)) {
-            json_object_set_new(obj, k, json_string(json_is_true(v) ? "1" : "0"));
+        if (json_is_object(value)) {
+            normalize_scalars(value);
+        } else if (json_is_integer(value)) {
+            char buffer[32];
+            snprintf(buffer, sizeof buffer, "%lld", (long long)json_integer_value(value));
+            json_object_set_new(object, key, json_string(buffer));
+        } else if (json_is_real(value)) {
+            char buffer[32];
+            snprintf(buffer, sizeof buffer, "%g", json_real_value(value));
+            json_object_set_new(object, key, json_string(buffer));
+        } else if (json_is_boolean(value)) {
+            json_object_set_new(object, key, json_string(json_is_true(value) ? "1" : "0"));
         }
     }
 }
 
-/* Replace `*tier` with the JSON object parsed from `text`. Shared by the
- * config-file and state loaders — same grammar (object root, scalar leaves
- * normalized to strings) and return contract. */
 static int load_tier(json_t **tier, const char *text)
 {
     json_decref(*tier);
     *tier = NULL;
-    /* Nothing, or only whitespace: an empty tier rather than a malformed one.
-     * `echo > config.json` writes exactly that, and calling it malformed would
-     * both warn and (for the config file) block every later write. */
+
     while (text && isspace((unsigned char)*text))
         text++;
     if (!text || !*text)
         return 0;
+
     json_t *root = json_loads(text, 0, NULL);
-    if (!root)
-        return -1;
     if (!json_is_object(root)) {
         json_decref(root);
         return -1;
     }
-    normalize(root);
+
+    normalize_scalars(root);
     *tier = root;
     return 0;
 }
 
 int config_load(const char *text)
 {
-    g_config_unusable = 0; /* a tier loaded from text supersedes the file verdict */
-    return load_tier(&g_config, text);
+    store.file_unusable = 0;
+    return load_tier(&store.file, text);
 }
 
 int config_load_state(const char *text)
 {
-    return load_tier(&g_state, text);
+    return load_tier(&store.state, text);
 }
 
-/* Read `path` into `*tier` via load_tier. Absent is silent (the tier is
- * optional); present-but-unusable (malformed, oversized, unreadable) is
- * ignored with a warning naming `what` — the user wrote the file and it
- * isn't being honored. Returns -1 in exactly that case, so a caller can refuse
- * to overwrite content it couldn't read. Consumes `path` (frees it). */
-static int init_tier_file(json_t **tier, char *path, const char *what)
+/* `path` is consumed. Missing files are valid empty tiers. */
+static int load_tier_file(json_t **tier, char *path, const char *label)
 {
     if (!path)
         return 0;
+
     int unusable = 0;
-    size_t len;
     int truncated;
     errno = 0;
-    char *data = slurp_file_capped(path, CONFIG_MAX_BYTES, &len, &truncated);
-    if (data) {
+    char *text = slurp_file_capped(path, CONFIG_MAX_BYTES, NULL, &truncated);
+    if (text) {
         if (truncated) {
-            hax_warn("ignoring %s at %s: larger than the 1 MiB limit", what, path);
+            hax_warn("ignoring %s at %s: larger than the 1 MiB limit", label, path);
             unusable = 1;
-        } else if (load_tier(tier, data) != 0) {
-            hax_warn("ignoring malformed %s at %s (expected a JSON object)", what, path);
+        } else if (load_tier(tier, text) != 0) {
+            hax_warn("ignoring malformed %s at %s (expected a JSON object)", label, path);
             unusable = 1;
         }
-        free(data);
+        free(text);
     } else if (errno != ENOENT) {
-        hax_warn("ignoring unreadable %s at %s: %s", what, path, strerror(errno));
+        hax_warn("ignoring unreadable %s at %s: %s", label, path, strerror(errno));
         unusable = 1;
     }
+
     free(path);
     return unusable ? -1 : 0;
 }
 
 void config_init(void)
 {
-    g_config_unusable =
-        init_tier_file(&g_config, xdg_hax_config_path("config.json"), "config") != 0;
-    init_tier_file(&g_state, xdg_hax_state_path("state.json"), "state");
+    store.file_unusable =
+        load_tier_file(&store.file, xdg_hax_config_path("config.json"), "config") != 0;
+    load_tier_file(&store.state, xdg_hax_state_path("state.json"), "state");
 }
 
 void config_free(void)
 {
-    g_config_unusable = 0;
-    json_decref(g_config);
-    g_config = NULL;
-    json_decref(g_state);
-    g_state = NULL;
+    store.file_unusable = 0;
+    json_decref(store.file);
+    store.file = NULL;
+    json_decref(store.state);
+    store.state = NULL;
     config_clear_conversation();
-    json_decref(g_overrides);
-    g_overrides = NULL;
+    json_decref(store.run);
+    store.run = NULL;
 }
 
-/* Look up `key` in a JSON-object tier: the flat literal key first (the
- * dotted-key form), then a walk down nested objects on '.'. Returns the
- * leaf string, or NULL. Shared by the file and state tiers. */
-static const char *obj_get(json_t *root, const char *key)
+/* Flat dotted keys take precedence over their nested spelling. */
+static json_t *object_get_dotted(json_t *root, const char *key)
 {
     if (!root)
         return NULL;
-    json_t *v = json_object_get(root, key);
-    if (!v) {
-        json_t *cur = root;
-        const char *p = key;
-        for (;;) {
-            const char *dot = strchr(p, '.');
-            if (!dot) {
-                v = json_object_get(cur, p);
-                break;
-            }
-            char seg[64];
-            size_t n = (size_t)(dot - p);
-            if (n >= sizeof seg)
-                return NULL;
-            memcpy(seg, p, n);
-            seg[n] = '\0';
-            cur = json_object_get(cur, seg);
-            if (!json_is_object(cur))
-                return NULL;
-            p = dot + 1;
-        }
-    }
-    return json_string_value(v);
-}
 
-/* Like obj_get, but returns the JSON *node* at `key` (object, array, or
- * scalar) rather than its string value — for callers that need to walk an
- * object's members. NULL when absent or a path segment isn't an object. */
-static json_t *obj_get_node(json_t *root, const char *key)
-{
-    if (!root)
-        return NULL;
-    json_t *v = json_object_get(root, key); /* flat dotted key */
-    if (v)
-        return v;
-    json_t *cur = root;
-    const char *p = key;
+    json_t *value = json_object_get(root, key);
+    if (value)
+        return value;
+
+    json_t *object = root;
+    const char *segment = key;
     for (;;) {
-        const char *dot = strchr(p, '.');
+        const char *dot = strchr(segment, '.');
         if (!dot)
-            return json_object_get(cur, p);
-        char seg[64];
-        size_t n = (size_t)(dot - p);
-        if (n >= sizeof seg)
+            return json_object_get(object, segment);
+
+        char segment_name[64];
+        size_t segment_length = (size_t)(dot - segment);
+        if (segment_length >= sizeof segment_name)
             return NULL;
-        memcpy(seg, p, n);
-        seg[n] = '\0';
-        cur = json_object_get(cur, seg);
-        if (!json_is_object(cur))
+        memcpy(segment_name, segment, segment_length);
+        segment_name[segment_length] = '\0';
+
+        object = json_object_get(object, segment_name);
+        if (!json_is_object(object))
             return NULL;
-        p = dot + 1;
+        segment = dot + 1;
     }
 }
 
-/* Add the name `k`[0..len) to *arr if absent (growing it), so the merged
- * result is deduplicated. */
-static void add_object_key(char ***arr, size_t *n, size_t *cap, const char *k, size_t len)
+static const char *object_get_string(json_t *root, const char *key)
 {
-    for (size_t i = 0; i < *n; i++)
-        if (strlen((*arr)[i]) == len && strncmp((*arr)[i], k, len) == 0)
-            return;
-    if (*n == *cap) {
-        *cap = *cap ? *cap * 2 : 8;
-        *arr = xrealloc(*arr, *cap * sizeof(**arr));
-    }
-    char *s = xmalloc(len + 1);
-    memcpy(s, k, len);
-    s[len] = '\0';
-    (*arr)[(*n)++] = s;
+    return json_string_value(object_get_dotted(root, key));
 }
 
-/* Append the immediate member names of the object at `key` in `tier` to *arr.
- * Both authoring forms config.c accepts are honored, mirroring obj_get's read
- * path: the nested object ({"providers": {"<name>": {...}}}) and top-level
- * flat-dotted leaves ({"providers.<name>.<leaf>": "..."}, whose immediate
- * child is the segment after "<key>." up to the next '.'). Without the flat
- * scan a flat-defined provider would be readable but undiscoverable. Names
- * already present are skipped, so the merged result is deduplicated. */
-static void collect_object_keys(json_t *tier, const char *key, char ***arr, size_t *n, size_t *cap)
+static void add_object_key(char ***keys, size_t *count, size_t *capacity, const char *key,
+                           size_t key_length)
+{
+    for (size_t i = 0; i < *count; i++) {
+        if (strlen((*keys)[i]) == key_length && strncmp((*keys)[i], key, key_length) == 0)
+            return;
+    }
+
+    if (*count == *capacity) {
+        *capacity = *capacity ? *capacity * 2 : 8;
+        *keys = xrealloc(*keys, *capacity * sizeof(**keys));
+    }
+
+    char *copy = xmalloc(key_length + 1);
+    memcpy(copy, key, key_length);
+    copy[key_length] = '\0';
+    (*keys)[(*count)++] = copy;
+}
+
+/* Include both nested members and immediate children represented by flat dotted keys. */
+static void collect_object_keys(json_t *tier, const char *key, char ***keys, size_t *count,
+                                size_t *capacity)
 {
     if (!json_is_object(tier))
         return;
-    const char *k;
-    json_t *v;
-    json_t *obj = obj_get_node(tier, key);
-    if (json_is_object(obj)) {
-        json_object_foreach(obj, k, v) add_object_key(arr, n, cap, k, strlen(k));
+
+    const char *member_name;
+    json_t *member_value;
+    json_t *object = object_get_dotted(tier, key);
+    if (json_is_object(object)) {
+        json_object_foreach(object, member_name, member_value)
+            add_object_key(keys, count, capacity, member_name, strlen(member_name));
     }
-    size_t prefix = strlen(key);
-    json_object_foreach(tier, k, v)
+
+    size_t prefix_length = strlen(key);
+    json_object_foreach(tier, member_name, member_value)
     {
-        if (strncmp(k, key, prefix) != 0 || k[prefix] != '.')
+        if (strncmp(member_name, key, prefix_length) != 0 || member_name[prefix_length] != '.')
             continue;
-        const char *seg = k + prefix + 1;
-        const char *dot = strchr(seg, '.');
-        size_t len = dot ? (size_t)(dot - seg) : strlen(seg);
-        if (len)
-            add_object_key(arr, n, cap, seg, len);
+
+        const char *child = member_name + prefix_length + 1;
+        const char *dot = strchr(child, '.');
+        size_t child_length = dot ? (size_t)(dot - child) : strlen(child);
+        if (child_length)
+            add_object_key(keys, count, capacity, child, child_length);
     }
-}
-
-static const char *file_get(const char *key)
-{
-    return obj_get(g_config, key);
-}
-
-static const char *state_get(const char *key)
-{
-    return obj_get(g_state, key);
 }
 
 static const char *resolve(const char *key, int skip_empty);
 
-/* "model" and "effort" are provider-bound: the runtime selectors
- * persist them together with the "provider" they were picked for, a config
- * file pairing them with a provider means the same, and a resumed
- * conversation records the set it was last using. A bound value applies only
- * while that provider is the active one — otherwise the tier is skipped for
- * these keys, so a one-off HAX_PROVIDER=mock doesn't inherit a model saved
- * for codex, and `--provider=x --resume=ID` doesn't run the resumed
- * conversation's model against a different backend. A tier that records no
- * provider is unbound (a bare "model" in config.json applies everywhere), and
- * the env/override tiers are always honored — they are set explicitly for
- * this run. */
-static int binding_allows(json_t *tier, const char *key)
+/* A model or effort stored beside a provider applies only while that provider is active. */
+static int provider_binding_allows(json_t *tier, const char *key)
 {
     if (strcmp(key, "model") != 0 && strcmp(key, "effort") != 0)
         return 1;
-    const char *bound = obj_get(tier, "provider");
-    if (!bound || !*bound)
+
+    const char *bound_provider = object_get_string(tier, "provider");
+    if (!bound_provider || !*bound_provider)
         return 1;
-    /* The verbatim read mirrors pick_provider: NULL/empty means no provider
-     * resolved (auto-select will infer one), which no bound value can claim. */
-    const char *active = resolve("provider", 0);
-    return active && *active && strcmp(active, bound) == 0;
+
+    const char *active_provider = resolve("provider", 0);
+    return active_provider && *active_provider && strcmp(active_provider, bound_provider) == 0;
 }
 
-/* Walk the tiers: run override → conversation → environment → state → file
- * → registry default. With skip_empty, "" counts as unset at a tier and
- * resolution falls through — for settings whose grammar gives "" no meaning
- * (ports, durations), so a stray HAX_FOO= can't shadow a configured value.
- * Without it, values are returned verbatim, "" included. */
-/* The CONFIG_VALUE_DEFAULT sentinel is honored at every tier (a literal
- * HAX_FOO="(default)" too): resolution stops there, shadowing lower tiers,
- * and yields the registry default — or NULL when the key declares none,
- * leaving the consumer's own default in charge. */
-static const char *apply_sentinel(const char *v, const struct config_setting *s)
+static int value_present(const char *value, int skip_empty)
 {
-    if (v && strcmp(v, CONFIG_VALUE_DEFAULT) == 0)
-        return s ? s->def : NULL;
-    return v;
+    return value && (!skip_empty || *value);
 }
 
-/* Resolve a value and optionally its winning tier. "default" covers both a
- * registry default and no value; a sentinel reports the tier that holds it. */
-static const char *resolve_src(const char *key, int skip_empty, int skip_run, const char **src)
+static const char *apply_default_sentinel(const char *value, const struct config_setting *setting)
 {
-    const char *from = "default";
-    const struct config_setting *s = find_setting(key);
-    const char *v = NULL;
-    const char *o = skip_run ? NULL : json_string_value(json_object_get(g_overrides, key));
-    if (o && (!skip_empty || *o)) {
-        v = apply_sentinel(o, s);
-        from = "run";
+    if (value && strcmp(value, CONFIG_VALUE_DEFAULT) == 0)
+        return setting ? setting->default_value : NULL;
+    return value;
+}
+
+/* A sentinel reports the tier that contains it even though its resolved value may be NULL. */
+static const char *resolve_with_source(const char *key, int skip_empty, int skip_run,
+                                       const char **source)
+{
+    const struct config_setting *setting = find_setting(key);
+    const char *value = skip_run ? NULL : object_get_string(store.run, key);
+    const char *value_source = "default";
+
+    if (value_present(value, skip_empty)) {
+        value_source = "run";
     } else {
-        const char *e = s ? getenv(s->env) : NULL;
-        const char *c = obj_get(g_conversation, key);
-        const char *sel = state_get(key);
-        const char *f = file_get(key);
-        if (c && (!skip_empty || *c) && binding_allows(g_conversation, key)) {
-            v = apply_sentinel(c, s);
-            from = "conversation";
-        } else if (e && (!skip_empty || *e)) {
-            v = apply_sentinel(e, s);
-            from = "env";
-        } else if (sel && (!skip_empty || *sel) && binding_allows(g_state, key)) {
-            v = apply_sentinel(sel, s);
-            from = "state";
-        } else if (f && (!skip_empty || *f) && binding_allows(g_config, key)) {
-            v = apply_sentinel(f, s);
-            from = "config";
+        const char *conversation_value = object_get_string(store.conversation, key);
+        const char *environment_value = setting ? getenv(setting->env_var) : NULL;
+        const char *state_value = object_get_string(store.state, key);
+        const char *file_value = object_get_string(store.file, key);
+
+        if (value_present(conversation_value, skip_empty) &&
+            provider_binding_allows(store.conversation, key)) {
+            value = conversation_value;
+            value_source = "conversation";
+        } else if (value_present(environment_value, skip_empty)) {
+            value = environment_value;
+            value_source = "env";
+        } else if (value_present(state_value, skip_empty) &&
+                   provider_binding_allows(store.state, key)) {
+            value = state_value;
+            value_source = "state";
+        } else if (value_present(file_value, skip_empty) &&
+                   provider_binding_allows(store.file, key)) {
+            value = file_value;
+            value_source = "config";
         } else {
-            v = s ? s->def : NULL;
+            value = setting ? setting->default_value : NULL;
         }
     }
-    if (src)
-        *src = from;
-    return v;
+
+    if (source)
+        *source = value_source;
+    return apply_default_sentinel(value, setting);
 }
 
 static const char *resolve(const char *key, int skip_empty)
 {
-    return resolve_src(key, skip_empty, 0, NULL);
+    return resolve_with_source(key, skip_empty, 0, NULL);
 }
 
-/* Registered settings skip empty tiers unless explicitly marked otherwise;
- * unknown dynamic keys preserve them. */
-static int config_skips_empty(const struct config_setting *s)
+static int setting_skips_empty(const struct config_setting *setting)
 {
-    return s && !s->keep_empty;
+    return setting && !setting->keep_empty;
 }
 
 const char *config_str(const char *key)
 {
-    return resolve(key, config_skips_empty(find_setting(key)));
+    return resolve(key, setting_skips_empty(find_setting(key)));
 }
 
 const char *config_source(const char *key)
 {
-    const char *src;
-    resolve_src(key, config_skips_empty(find_setting(key)), 0, &src);
-    return src;
+    const char *source;
+    resolve_with_source(key, setting_skips_empty(find_setting(key)), 0, &source);
+    return source;
 }
 
 const char *config_str_below_run(const char *key)
 {
-    return resolve_src(key, config_skips_empty(find_setting(key)), 1, NULL);
+    return resolve_with_source(key, setting_skips_empty(find_setting(key)), 1, NULL);
 }
 
 const char *config_str_nonempty(const char *key)
@@ -583,260 +530,259 @@ const char *config_str_nonempty(const char *key)
 
 const char *config_default(const char *key)
 {
-    const struct config_setting *s = find_setting(key);
-    return s ? s->def : NULL;
+    const struct config_setting *setting = find_setting(key);
+    return setting ? setting->default_value : NULL;
 }
 
 const json_t *config_json_node(const char *key)
 {
-    /* State over file mirrors resolve()'s tier order; no cross-tier merge —
-     * a block is taken whole from the highest tier that defines it. */
-    json_t *v = obj_get_node(g_state, key);
-    return v ? v : obj_get_node(g_config, key);
+    json_t *node = object_get_dotted(store.state, key);
+    return node ? node : object_get_dotted(store.file, key);
 }
 
 size_t config_object_keys(const char *key, char ***out)
 {
-    char **arr = NULL;
-    size_t n = 0, cap = 0;
-    /* File and state tiers only: this enumerates user-authored structure
-     * (config.json's providers.*, primarily), and the override tier is
-     * flat-keyed so it holds no nested objects to walk. */
-    collect_object_keys(g_config, key, &arr, &n, &cap);
-    collect_object_keys(g_state, key, &arr, &n, &cap);
-    *out = arr;
-    return n;
+    char **keys = NULL;
+    size_t count = 0;
+    size_t capacity = 0;
+
+    collect_object_keys(store.file, key, &keys, &count, &capacity);
+    collect_object_keys(store.state, key, &keys, &count, &capacity);
+    *out = keys;
+    return count;
 }
 
-/* Typed getters skip empty values and fall back to registry defaults on parse
- * or bounds failures. Bounds use the setting's native unit; zero is unbounded. */
-static int in_bounds(const struct config_setting *s, long v)
+static int value_in_bounds(const struct config_setting *setting, long value)
 {
-    if (!s)
+    if (!setting)
         return 1;
-    if (s->min && v < s->min)
+    if (setting->min && value < setting->min)
         return 0;
-    if (s->max && v > s->max)
+    if (setting->max && value > setting->max)
         return 0;
     return 1;
 }
 
 int config_int(const char *key)
 {
-    const struct config_setting *s = find_setting(key);
-    int v;
-    /* Negative values are invalid: every integer setting is a count or width.
-     * Bounds fail the same way, so consumers need not re-check them. */
-    if (parse_int(resolve(key, 1), &v) && v >= 0 && in_bounds(s, v))
-        return v;
-    return s && parse_int(s->def, &v) ? v : 0;
+    const struct config_setting *setting = find_setting(key);
+    int value;
+
+    if (parse_int(resolve(key, 1), &value) && value >= 0 && value_in_bounds(setting, value))
+        return value;
+    return setting && parse_int(setting->default_value, &value) ? value : 0;
 }
 
-/* Shared boolean grammar. Returns 1/0 for a recognized spelling, -1
- * otherwise. Both directions are explicit — most bool settings are no_*
- * switches, so a typo'd value reading as "true" would silently disable
- * sessions or strip the system prompt. */
-static int parse_bool(const char *s)
+/* Returns -1 rather than treating an unknown spelling as truthy. */
+static int parse_bool(const char *value)
 {
-    if (!s || !*s)
+    if (!value || !*value)
         return -1;
-    if (strcmp(s, "1") == 0 || strcasecmp(s, "true") == 0 || strcasecmp(s, "yes") == 0 ||
-        strcasecmp(s, "on") == 0)
+    if (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 ||
+        strcasecmp(value, "yes") == 0 || strcasecmp(value, "on") == 0)
         return 1;
-    if (strcmp(s, "0") == 0 || strcasecmp(s, "false") == 0 || strcasecmp(s, "no") == 0 ||
-        strcasecmp(s, "off") == 0)
+    if (strcmp(value, "0") == 0 || strcasecmp(value, "false") == 0 ||
+        strcasecmp(value, "no") == 0 || strcasecmp(value, "off") == 0)
         return 0;
     return -1;
 }
 
 int config_bool(const char *key)
 {
-    int v = parse_bool(resolve(key, 1));
-    if (v < 0) {
-        const struct config_setting *s = find_setting(key);
-        v = s ? parse_bool(s->def) : -1;
+    int value = parse_bool(resolve(key, 1));
+    if (value < 0) {
+        const struct config_setting *setting = find_setting(key);
+        value = setting ? parse_bool(setting->default_value) : -1;
     }
-    return v > 0;
+    return value > 0;
 }
 
-int config_bool_or(const char *key, int def)
+int config_bool_or(const char *key, int default_value)
 {
-    int v = parse_bool(resolve(key, 1));
-    return v < 0 ? !!def : v;
+    int value = parse_bool(resolve(key, 1));
+    return value < 0 ? !!default_value : value;
 }
 
-static int kind_value_valid(const struct config_setting *s, const char *val)
+static int kind_value_valid(const struct config_setting *setting, const char *value)
 {
-    switch (s->kind) {
-    case CFG_INT: {
-        int v;
-        return parse_int(val, &v) && v >= 0 && in_bounds(s, v);
+    switch (setting->kind) {
+    case CONFIG_KIND_INT: {
+        int parsed;
+        return parse_int(value, &parsed) && parsed >= 0 && value_in_bounds(setting, parsed);
     }
-    case CFG_SIZE: {
-        long v = parse_size(val);
-        return v > 0 && in_bounds(s, v);
+    case CONFIG_KIND_SIZE: {
+        long parsed = parse_size(value);
+        return parsed > 0 && value_in_bounds(setting, parsed);
     }
-    case CFG_DURATION: {
-        long v = parse_duration_ms(val);
-        return v >= 0 && in_bounds(s, v);
+    case CONFIG_KIND_DURATION: {
+        long parsed = parse_duration_ms(value);
+        return parsed >= 0 && value_in_bounds(setting, parsed);
     }
-    case CFG_STRING:
+    case CONFIG_KIND_STRING:
         return 1;
     }
     return 0;
 }
 
-static int choice_value_valid(const struct config_setting *s, const char *val)
+static const char *find_choice(const char *choices, const char *value, size_t *choice_length)
 {
-    /* Boolean string settings accept the full config_bool grammar. Tri-state
-     * adds an "auto" literal on top, so on/off keep the same lenient spelling.
-     * For a mixed numeric setting these strings are ordinary symbolic choices;
-     * aliases like "1" must still pass the numeric kind and its bounds. */
-    if (s->kind == CFG_STRING && strcmp(s->choices, CONFIG_CHOICES_BOOL) == 0)
-        return parse_bool(val) >= 0;
-    if (s->kind == CFG_STRING && strcmp(s->choices, CONFIG_CHOICES_TRISTATE) == 0)
-        return strcasecmp(val, "auto") == 0 || parse_bool(val) >= 0;
-    const char *p = s->choices;
-    size_t vlen = strlen(val);
+    size_t value_length = strlen(value);
+    const char *choice = choices;
+
     for (;;) {
-        const char *bar = strchr(p, '|');
-        size_t n = bar ? (size_t)(bar - p) : strlen(p);
-        if (n == vlen && strncasecmp(p, val, n) == 0)
-            return 1;
-        if (!bar)
-            return 0;
-        p = bar + 1;
-    }
-}
-
-int config_value_valid(const struct config_setting *s, const char *val)
-{
-    if (!s || !val)
-        return 0;
-    if (s->choices && choice_value_valid(s, val))
-        return 1;
-    if (s->choices && s->kind == CFG_STRING)
-        return 0;
-    return kind_value_valid(s, val);
-}
-
-static void kind_value_hint(const struct config_setting *s, char *buf, size_t n)
-{
-    switch (s->kind) {
-    case CFG_INT:
-        if (s->min && s->max)
-            snprintf(buf, n, "a whole number from %ld to %ld", s->min, s->max);
-        else if (s->max)
-            snprintf(buf, n, "a whole number up to %ld", s->max);
-        else if (s->min)
-            snprintf(buf, n, "a whole number of at least %ld", s->min);
-        else
-            snprintf(buf, n, "a whole number");
-        break;
-    case CFG_SIZE:
-        snprintf(buf, n, "a size like 64k or 1M");
-        break;
-    case CFG_DURATION:
-        snprintf(buf, n, "a duration like 2s or 500ms");
-        break;
-    case CFG_STRING:
-        buf[0] = '\0';
-        break;
-    }
-}
-
-void config_value_hint(const struct config_setting *s, char *buf, size_t n)
-{
-    if (n == 0)
-        return;
-    buf[0] = '\0';
-    if (!s)
-        return;
-    if (s->kind == CFG_STRING) {
-        if (s->choices)
-            snprintf(buf, n, "%s", s->choices);
-        return;
-    }
-
-    char kind[64];
-    kind_value_hint(s, kind, sizeof(kind));
-    if (s->choices && s->example)
-        snprintf(buf, n, "%s, or %s; e.g. %s", s->choices, kind, s->example);
-    else if (s->choices)
-        snprintf(buf, n, "%s, or %s", s->choices, kind);
-    else if (s->example)
-        snprintf(buf, n, "%s; e.g. %s", kind, s->example);
-    else
-        snprintf(buf, n, "%s", kind);
-}
-
-char *config_value_canonical(const struct config_setting *s, const char *val)
-{
-    /* Only strict enums need this; booleans and free-form values are parsed
-     * directly at their point of use. */
-    if (!s || !val || !s->choices ||
-        (s->kind == CFG_STRING && strcmp(s->choices, CONFIG_CHOICES_BOOL) == 0))
-        return NULL;
-    const char *p = s->choices;
-    size_t vlen = strlen(val);
-    for (;;) {
-        const char *bar = strchr(p, '|');
-        size_t n = bar ? (size_t)(bar - p) : strlen(p);
-        if (n == vlen && strncasecmp(p, val, n) == 0) {
-            char *out = xmalloc(n + 1);
-            memcpy(out, p, n);
-            out[n] = '\0';
-            return out;
+        const char *separator = strchr(choice, '|');
+        size_t length = separator ? (size_t)(separator - choice) : strlen(choice);
+        if (length == value_length && strncasecmp(choice, value, length) == 0) {
+            if (choice_length)
+                *choice_length = length;
+            return choice;
         }
-        if (!bar)
+        if (!separator)
             return NULL;
-        p = bar + 1;
+        choice = separator + 1;
     }
+}
+
+static int choice_value_valid(const struct config_setting *setting, const char *value)
+{
+    /* Boolean aliases apply only to string settings, not numeric settings with symbolic choices. */
+    if (setting->kind == CONFIG_KIND_STRING && strcmp(setting->choices, CONFIG_CHOICES_BOOL) == 0)
+        return parse_bool(value) >= 0;
+    if (setting->kind == CONFIG_KIND_STRING &&
+        strcmp(setting->choices, CONFIG_CHOICES_TRISTATE) == 0)
+        return strcasecmp(value, "auto") == 0 || parse_bool(value) >= 0;
+    return find_choice(setting->choices, value, NULL) != NULL;
+}
+
+int config_value_valid(const struct config_setting *setting, const char *value)
+{
+    if (!setting || !value)
+        return 0;
+    if (setting->choices && choice_value_valid(setting, value))
+        return 1;
+    if (setting->choices && setting->kind == CONFIG_KIND_STRING)
+        return 0;
+    return kind_value_valid(setting, value);
+}
+
+static void kind_value_hint(const struct config_setting *setting, char *buffer, size_t size)
+{
+    switch (setting->kind) {
+    case CONFIG_KIND_INT:
+        if (setting->min && setting->max)
+            snprintf(buffer, size, "a whole number from %ld to %ld", setting->min, setting->max);
+        else if (setting->max)
+            snprintf(buffer, size, "a whole number up to %ld", setting->max);
+        else if (setting->min)
+            snprintf(buffer, size, "a whole number of at least %ld", setting->min);
+        else
+            snprintf(buffer, size, "a whole number");
+        break;
+    case CONFIG_KIND_SIZE:
+        snprintf(buffer, size, "a size like 64k or 1M");
+        break;
+    case CONFIG_KIND_DURATION:
+        snprintf(buffer, size, "a duration like 2s or 500ms");
+        break;
+    case CONFIG_KIND_STRING:
+        buffer[0] = '\0';
+        break;
+    }
+}
+
+void config_value_hint(const struct config_setting *setting, char *buffer, size_t size)
+{
+    if (size == 0)
+        return;
+    buffer[0] = '\0';
+    if (!setting)
+        return;
+    if (setting->kind == CONFIG_KIND_STRING) {
+        if (setting->choices)
+            snprintf(buffer, size, "%s", setting->choices);
+        return;
+    }
+
+    char kind_hint[64];
+    kind_value_hint(setting, kind_hint, sizeof(kind_hint));
+    if (setting->choices && setting->example)
+        snprintf(buffer, size, "%s, or %s; e.g. %s", setting->choices, kind_hint, setting->example);
+    else if (setting->choices)
+        snprintf(buffer, size, "%s, or %s", setting->choices, kind_hint);
+    else if (setting->example)
+        snprintf(buffer, size, "%s; e.g. %s", kind_hint, setting->example);
+    else
+        snprintf(buffer, size, "%s", kind_hint);
+}
+
+char *config_value_canonical(const struct config_setting *setting, const char *value)
+{
+    if (!setting || !value || !setting->choices ||
+        (setting->kind == CONFIG_KIND_STRING && strcmp(setting->choices, CONFIG_CHOICES_BOOL) == 0))
+        return NULL;
+
+    size_t choice_length;
+    const char *choice = find_choice(setting->choices, value, &choice_length);
+    if (!choice)
+        return NULL;
+
+    char *canonical = xmalloc(choice_length + 1);
+    memcpy(canonical, choice, choice_length);
+    canonical[choice_length] = '\0';
+    return canonical;
 }
 
 long config_size(const char *key)
 {
-    const struct config_setting *s = find_setting(key);
-    long v = parse_size(resolve(key, 1)); /* NULL-safe; 0 = unset or invalid */
-    if (v > 0 && in_bounds(s, v))
-        return v;
-    return s ? parse_size(s->def) : 0;
+    const struct config_setting *setting = find_setting(key);
+    long value = parse_size(resolve(key, 1));
+    if (value > 0 && value_in_bounds(setting, value))
+        return value;
+    return setting ? parse_size(setting->default_value) : 0;
 }
 
 long config_duration_ms(const char *key)
 {
-    const struct config_setting *s = find_setting(key);
-    long v = parse_duration_ms(resolve(key, 1)); /* NULL-safe; -1 = unset or invalid */
-    if (v >= 0 && in_bounds(s, v))
-        return v;
-    v = s ? parse_duration_ms(s->def) : -1;
-    return v < 0 ? 0 : v;
+    const struct config_setting *setting = find_setting(key);
+    long value = parse_duration_ms(resolve(key, 1));
+    if (value >= 0 && value_in_bounds(setting, value))
+        return value;
+    value = setting ? parse_duration_ms(setting->default_value) : -1;
+    return value < 0 ? 0 : value;
 }
 
-void config_set_override(const char *key, const char *val)
+static void set_tier_value(json_t **tier, const char *key, const char *value)
 {
-    if (!g_overrides)
-        g_overrides = json_object();
-    if (val)
-        json_object_set_new(g_overrides, key, json_string(val));
+    if (!*tier)
+        *tier = json_object();
+    if (value)
+        json_object_set_new(*tier, key, json_string(value));
     else
-        json_object_del(g_overrides, key);
+        json_object_del(*tier, key);
 }
 
-void config_set_conversation(const char *key, const char *val)
+void config_set_override(const char *key, const char *value)
 {
-    if (!g_conversation)
-        g_conversation = json_object();
-    if (val)
-        json_object_set_new(g_conversation, key, json_string(val));
+    set_tier_value(&store.run, key, value);
+}
+
+void config_set_conversation(const char *key, const char *value)
+{
+    set_tier_value(&store.conversation, key, value);
+}
+
+static void set_writable_tier(enum config_tier tier, const char *key, const char *value)
+{
+    if (tier == CONFIG_TIER_CONVERSATION)
+        config_set_conversation(key, value);
     else
-        json_object_del(g_conversation, key);
+        config_set_override(key, value);
 }
 
 void config_clear_conversation(void)
 {
-    json_decref(g_conversation);
-    g_conversation = NULL;
+    json_decref(store.conversation);
+    store.conversation = NULL;
 }
 
 void config_preset_exit(enum config_tier tier)
@@ -865,24 +811,20 @@ void config_preset_exit(enum config_tier tier)
 }
 
 int config_restore_selection(enum config_tier tier, const char *provider, const char *model,
-                             const char *effort, const char *preset, char **err)
+                             const char *effort, const char *preset, char **error)
 {
-    void (*set)(const char *, const char *) =
-        tier == CONFIG_TIER_CONVERSATION ? config_set_conversation : config_set_override;
-    if (err)
-        *err = NULL;
+    if (error)
+        *error = NULL;
     if (provider && *provider && strcmp(provider, "none") != 0) {
-        set("provider", provider);
-        set("model", (model && *model) ? model : CONFIG_VALUE_DEFAULT);
-        set("effort", (effort && *effort) ? effort : CONFIG_VALUE_DEFAULT);
+        set_writable_tier(tier, "provider", provider);
+        set_writable_tier(tier, "model", (model && *model) ? model : CONFIG_VALUE_DEFAULT);
+        set_writable_tier(tier, "effort", (effort && *effort) ? effort : CONFIG_VALUE_DEFAULT);
     }
+
     config_preset_exit(tier);
     if (!preset || !*preset)
         return 0;
-    if (config_preset_apply(preset, tier, err) != 0) {
-        /* Leave the values pinned above in place: without the stance they are
-         * still what the conversation ran on, which is all an interactive
-         * caller needs to carry on. */
+    if (config_preset_apply(preset, tier, error) != 0) {
         config_preset_exit(tier);
         return -1;
     }
@@ -890,178 +832,163 @@ int config_restore_selection(enum config_tier tier, const char *provider, const 
 }
 
 struct config_snapshot {
-    /* Deep copies at snapshot time, or NULL for an empty tier. */
-    json_t *overrides;
+    json_t *run;
     json_t *conversation;
 };
 
 struct config_snapshot *config_snapshot_take(void)
 {
-    struct config_snapshot *s = xmalloc(sizeof(*s));
-    s->overrides = g_overrides ? json_deep_copy(g_overrides) : NULL;
-    s->conversation = g_conversation ? json_deep_copy(g_conversation) : NULL;
-    return s;
+    struct config_snapshot *snapshot = xmalloc(sizeof(*snapshot));
+    snapshot->run = store.run ? json_deep_copy(store.run) : NULL;
+    snapshot->conversation = store.conversation ? json_deep_copy(store.conversation) : NULL;
+    return snapshot;
 }
 
-void config_snapshot_restore(struct config_snapshot *snap)
+void config_snapshot_restore(struct config_snapshot *snapshot)
 {
-    if (!snap)
+    if (!snapshot)
         return;
-    json_decref(g_overrides);
-    g_overrides = snap->overrides; /* transfer ownership back to the live tiers */
-    json_decref(g_conversation);
-    g_conversation = snap->conversation;
-    free(snap);
+
+    json_decref(store.run);
+    store.run = snapshot->run;
+    json_decref(store.conversation);
+    store.conversation = snapshot->conversation;
+    free(snapshot);
 }
 
-void config_snapshot_free(struct config_snapshot *snap)
+void config_snapshot_free(struct config_snapshot *snapshot)
 {
-    if (!snap)
+    if (!snapshot)
         return;
-    json_decref(snap->overrides);
-    json_decref(snap->conversation);
-    free(snap);
+    json_decref(snapshot->run);
+    json_decref(snapshot->conversation);
+    free(snapshot);
 }
 
-/* Set (or, for val==NULL, delete) the nested leaf at canonical `key`,
- * creating intermediate objects as needed. */
-static void set_nested(json_t *root, const char *key, const char *val)
+static void set_nested(json_t *root, const char *key, const char *value)
 {
-    json_t *cur = root;
-    const char *p = key;
+    json_t *object = root;
+    const char *segment = key;
+
     for (;;) {
-        const char *dot = strchr(p, '.');
+        const char *dot = strchr(segment, '.');
         if (!dot) {
-            if (val)
-                json_object_set_new(cur, p, json_string(val));
+            if (value)
+                json_object_set_new(object, segment, json_string(value));
             else
-                json_object_del(cur, p);
+                json_object_del(object, segment);
             return;
         }
-        char seg[64];
-        size_t n = (size_t)(dot - p);
-        if (n >= sizeof seg)
+
+        char segment_name[64];
+        size_t segment_length = (size_t)(dot - segment);
+        if (segment_length >= sizeof segment_name)
             return;
-        memcpy(seg, p, n);
-        seg[n] = '\0';
-        json_t *next = json_object_get(cur, seg);
-        if (!json_is_object(next)) {
-            next = json_object();
-            json_object_set_new(cur, seg, next);
+        memcpy(segment_name, segment, segment_length);
+        segment_name[segment_length] = '\0';
+
+        json_t *child = json_object_get(object, segment_name);
+        if (!json_is_object(child)) {
+            child = json_object();
+            json_object_set_new(object, segment_name, child);
         }
-        cur = next;
-        p = dot + 1;
+        object = child;
+        segment = dot + 1;
     }
 }
 
-/* Dump `obj` to `path` via a sibling temp file + rename, mode 0600 (config
- * may hold API keys). mkstemp, not open(O_CREAT): a unique name created
- * 0600 regardless of what existed before — a stale predictable .tmp could
- * otherwise carry a permissive mode through rename() onto config.json.
- * Returns 0 on success, -1 on any I/O failure. */
-static int write_json_atomic(const char *path, json_t *obj)
+static int write_json_atomic(const char *path, json_t *object)
 {
-    /* Follow a symlinked target: config.json is commonly a link into a
-     * dotfiles repo, and renaming onto the link would replace it with a
-     * regular file. Resolving also keeps the temp file a sibling of the real
-     * destination, so the rename stays within one directory. Not realpath(3),
-     * which refuses a chain whose target doesn't exist yet — the very case
-     * where the link must survive (see fs_resolve_link_target). A hard failure
-     * there (a loop, an unreadable link) fails the write: carrying on with
-     * `path` would replace the link this is meant to preserve. */
-    char *dest = fs_resolve_link_target(path);
-    if (!dest)
+    int result = -1;
+    int fd = -1;
+    FILE *file = NULL;
+    char *temp_path = NULL;
+
+    /* Renaming onto config.json would replace a symlink instead of updating its target. */
+    char *destination = fs_resolve_link_target(path);
+    if (!destination)
         return -1;
 
-    /* The resolved destination's directory, not the link's — a link into a
-     * dotfiles repo that hasn't been created yet must land there instead of
-     * failing in mkstemp. Same order fs_write_with_diff uses. */
-    char *dup = xstrdup(dest);
-    fs_mkdir_p(dirname(dup));
-    free(dup);
+    char *directory = xstrdup(destination);
+    fs_mkdir_p(dirname(directory));
+    free(directory);
 
-    char *tmp = xasprintf("%s.tmp.XXXXXX", dest);
-    int fd = mkstemp(tmp);
-    if (fd < 0) {
-        free(tmp);
-        free(dest);
-        return -1;
+    temp_path = xasprintf("%s.tmp.XXXXXX", destination);
+    fd = mkstemp(temp_path);
+    if (fd < 0)
+        goto out;
+
+    /* fchmod preserves the 0600 contract even under a restrictive process umask. */
+    if (fchmod(fd, 0600) != 0)
+        goto out;
+
+    file = fdopen(fd, "w");
+    if (!file)
+        goto out;
+    fd = -1;
+
+    if (json_dumpf(object, file, JSON_INDENT(2) | JSON_PRESERVE_ORDER) != 0)
+        goto out;
+    if (fclose(file) != 0) {
+        file = NULL;
+        goto out;
     }
-    /* mkstemp's 0600 is still masked by the process umask; fchmod is
-     * not. Pin the contract exactly — neither looser than 0600 nor a
-     * hostile-umask 000 that rename() would promote onto config.json. */
-    if (fchmod(fd, 0600) != 0) {
+    file = NULL;
+
+    if (rename(temp_path, destination) != 0)
+        goto out;
+    result = 0;
+
+out:
+    if (file)
+        fclose(file);
+    if (fd >= 0)
         close(fd);
-        unlink(tmp);
-        free(tmp);
-        free(dest);
-        return -1;
-    }
-    FILE *fp = fdopen(fd, "w");
-    if (!fp) {
-        close(fd);
-        unlink(tmp);
-        free(tmp);
-        free(dest);
-        return -1;
-    }
-    int rc = json_dumpf(obj, fp, JSON_INDENT(2) | JSON_PRESERVE_ORDER);
-    if (fclose(fp) != 0)
-        rc = -1;
-    if (rc == 0 && rename(tmp, dest) != 0)
-        rc = -1;
-    if (rc != 0)
-        unlink(tmp);
-    free(tmp);
-    free(dest);
-    return rc;
+    if (result != 0 && temp_path)
+        unlink(temp_path);
+    free(temp_path);
+    free(destination);
+    return result;
 }
 
-/* Persist `key` = `val` into the JSON object at `path`, swapping the result
- * into `*tier`. Consumes `path` (frees it). Mutate a copy of the tier this
- * process holds and swap it in only after the write succeeds, so a failed write
- * can't leave the in-memory tier claiming a value the disk never saw. The file
- * is rewritten from that copy, so an external edit made while hax runs is
- * overwritten — the session's view of configuration is the one it started with,
- * and a write is that view landing on disk. Shared by the config-file and state
- * writers. */
-static int persist_tier(json_t **tier, char *path, const char *key, const char *val)
+/* `path` is consumed. Commit the in-memory copy only after the disk write succeeds. */
+static int persist_tier(json_t **tier, char *path, const char *key, const char *value)
 {
     if (!path)
         return -1;
-    json_t *next = *tier ? json_deep_copy(*tier) : json_object();
-    if (!next) {
+
+    json_t *updated = *tier ? json_deep_copy(*tier) : json_object();
+    if (!updated) {
         free(path);
         return -1;
     }
-    /* A hand-written flat dotted key ({"openai.base_url": ...}) shadows
-     * the nested path in obj_get, so drop it — otherwise it would mask
-     * the value persisted below (or survive a deletion). Rewriting the
-     * file also normalizes it to nested form as a side effect. */
-    json_object_del(next, key);
-    set_nested(next, key, val);
 
-    int rc = write_json_atomic(path, next);
+    /* A flat dotted key would otherwise shadow the nested value written below. */
+    json_object_del(updated, key);
+    set_nested(updated, key, value);
+
+    int result = write_json_atomic(path, updated);
     free(path);
-    if (rc != 0) {
-        json_decref(next);
+    if (result != 0) {
+        json_decref(updated);
         return -1;
     }
+
     json_decref(*tier);
-    *tier = next;
+    *tier = updated;
     return 0;
 }
 
-int config_persist(const char *key, const char *val)
+int config_persist(const char *key, const char *value)
 {
-    if (g_config_unusable)
-        return -1; /* never replace a file this process couldn't read */
-    return persist_tier(&g_config, xdg_hax_config_path("config.json"), key, val);
+    if (store.file_unusable)
+        return -1;
+    return persist_tier(&store.file, xdg_hax_config_path("config.json"), key, value);
 }
 
-int config_persist_state(const char *key, const char *val)
+int config_persist_state(const char *key, const char *value)
 {
-    return persist_tier(&g_state, xdg_hax_state_path("state.json"), key, val);
+    return persist_tier(&store.state, xdg_hax_state_path("state.json"), key, value);
 }
 
 int config_persist_selection(const char *provider, const char *model, const char *effort)
@@ -1071,265 +998,199 @@ int config_persist_selection(const char *provider, const char *model, const char
     char *path = xdg_hax_state_path("state.json");
     if (!path)
         return -1;
-    /* Mutate a copy and swap after the write succeeds, like persist_tier. */
-    json_t *next = g_state ? json_deep_copy(g_state) : json_object();
-    if (!next) {
+    json_t *updated = store.state ? json_deep_copy(store.state) : json_object();
+    if (!updated) {
         free(path);
         return -1;
     }
 
-    /* Re-pinning a different provider orphans the members not picked this
-     * time — they belong to the old provider — so they reset to the sentinel
-     * (the new provider's own default beats a stale lower-tier value). On an
-     * unchanged provider an unpicked member keeps its stored value: an
-     * /effort pick must not wipe a saved model. */
-    const char *old = obj_get(g_state, "provider");
-    int repin = !old || strcmp(old, provider) != 0;
-    /* An explicit selection commit replaces a persisted preset stance:
-     * without this, the preset would re-apply next launch as an override
-     * and shadow the very selection being committed here. The session-side
-     * counterpart (clearing the "preset" and "system_prompt" overrides)
-     * lives in the selectors' commit path. */
-    json_object_del(next, "preset");
-    json_object_set_new(next, "provider", json_string(provider));
-    if (model || repin)
-        json_object_set_new(next, "model", json_string(model ? model : CONFIG_VALUE_DEFAULT));
-    if (effort || repin)
-        json_object_set_new(next, "effort", json_string(effort ? effort : CONFIG_VALUE_DEFAULT));
+    const char *previous_provider = object_get_string(store.state, "provider");
+    int provider_changed = !previous_provider || strcmp(previous_provider, provider) != 0;
 
-    int rc = write_json_atomic(path, next);
+    /* A selection replaces the preset stance that would otherwise reapply on launch. */
+    json_object_del(updated, "preset");
+    json_object_set_new(updated, "provider", json_string(provider));
+    if (model || provider_changed)
+        json_object_set_new(updated, "model", json_string(model ? model : CONFIG_VALUE_DEFAULT));
+    if (effort || provider_changed)
+        json_object_set_new(updated, "effort", json_string(effort ? effort : CONFIG_VALUE_DEFAULT));
+
+    int result = write_json_atomic(path, updated);
     free(path);
-    if (rc != 0) {
-        json_decref(next);
+    if (result != 0) {
+        json_decref(updated);
         return -1;
     }
-    json_decref(g_state);
-    g_state = next;
+
+    json_decref(store.state);
+    store.state = updated;
     return 0;
 }
 
-/* The presets.<name> object for `name`, or NULL. Looked up as a *literal*
- * member of each tier's "presets" object — never through the dotted-path
- * grammar, which would misread a user-chosen name like "review.v2" as
- * nesting and make an enumerated preset unappliable. State over file per
- * name, matching config_object_keys' merged enumeration. The flat-authored
- * top-level form ({"presets.<name>": {...}}) is kept working via the dotted
- * fallback, which by construction only resolves dot-free names. */
+/* Preset names are literal object members, so dots in a name do not become path separators. */
 static const json_t *preset_node(const char *name)
 {
-    json_t *const tiers[] = {g_state, g_config};
+    json_t *const tiers[] = {store.state, store.file};
     for (size_t i = 0; i < sizeof(tiers) / sizeof(*tiers); i++) {
-        json_t *presets = obj_get_node(tiers[i], "presets");
-        json_t *obj = json_is_object(presets) ? json_object_get(presets, name) : NULL;
-        if (json_is_object(obj))
-            return obj;
+        json_t *presets = object_get_dotted(tiers[i], "presets");
+        json_t *preset = json_is_object(presets) ? json_object_get(presets, name) : NULL;
+        if (json_is_object(preset))
+            return preset;
     }
+
+    /* Preserve the one-level flat form: {"presets.<name>": {...}}. */
     char *key = xasprintf("presets.%s", name);
-    const json_t *obj = config_json_node(key);
+    const json_t *preset = config_json_node(key);
     free(key);
-    return json_is_object(obj) ? obj : NULL;
+    return json_is_object(preset) ? preset : NULL;
 }
 
-/* The presettable keys. Deliberately narrow: a preset must be fully honored
- * whenever it is applied — startup or mid-session — so only per-request
- * settings qualify. Construction-bound settings (openai.base_url, api keys,
- * provider_name) belong in a providers.<name> block the preset points at;
- * startup-latched behavior (context stripping, session recording) belongs
- * to the --bare / --no-session flags.
- *
- * "tint" is allowed as a member but is *not* written as an override: it is
- * read back off the active stance by the display layer (config_preset_tint),
- * because unlike the others this key has a second writer — /config tint —
- * whose explicit runtime choice must not be clobbered by stance bookkeeping. */
-static const char *const PRESET_KEYS[] = {"provider", "model", "effort", "system_prompt", "tint"};
+/* Construction- and startup-bound settings cannot be honored by a mid-session preset. Tint is
+ * read from the active preset instead of copied into a tier because /config can override it. */
+static const char *const PRESET_SETTING_KEYS[] = {
+    "provider", "model", "effort", "system_prompt", "tint",
+};
 
-/* Structural validation shared by apply and enumeration: the whole block
- * checks out or the preset is unusable — a typo'd member must not leave the
- * session running half a preset, and the enumerators must not advertise a
- * definition that would then fail. "description" is reserved metadata
- * (picker/prompt listings), not a setting. Load-time normalization already
- * turned scalar members into strings, so a non-string here is a nested
- * object or an array — not expressible as an override. Non-mutating;
- * *err (when non-NULL) receives a malloc'd reason on failure. */
-static int preset_validate(const json_t *obj, const char *name, char **err)
+static int preset_key_allowed(const char *key)
 {
-    const char *k;
-    json_t *v;
-    json_object_foreach((json_t *)obj, k, v)
+    if (strcmp(key, "description") == 0)
+        return 1;
+    for (size_t i = 0; i < sizeof(PRESET_SETTING_KEYS) / sizeof(*PRESET_SETTING_KEYS); i++) {
+        if (strcmp(key, PRESET_SETTING_KEYS[i]) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* Apply and enumeration share validation so every advertised preset is appliable. */
+static int preset_validate(const json_t *preset, const char *name, char **error)
+{
+    const char *member_name;
+    json_t *member;
+
+    json_object_foreach((json_t *)preset, member_name, member)
     {
-        /* "description" is exempt from the allowed-keys check (reserved
-         * metadata, not a setting) but not from the scalar check below: a
-         * structured value would silently read back as "no description" —
-         * exactly where descriptions matter, guiding preset choice. */
-        if (strcmp(k, "description") != 0) {
-            int allowed = 0;
-            for (size_t i = 0; i < sizeof(PRESET_KEYS) / sizeof(*PRESET_KEYS) && !allowed; i++)
-                allowed = strcmp(k, PRESET_KEYS[i]) == 0;
-            if (!allowed) {
-                if (err)
-                    *err = xasprintf(
-                        "preset '%s': '%s' is not presettable (allowed: provider, model, "
-                        "effort, system_prompt, tint); endpoint settings belong in a "
-                        "providers.<name> block, context/recording in the --bare/--no-session "
-                        "flags",
-                        name, k);
-                return -1;
-            }
+        if (!preset_key_allowed(member_name)) {
+            if (error)
+                *error = xasprintf(
+                    "preset '%s': '%s' is not presettable (allowed: provider, model, "
+                    "effort, system_prompt, tint); endpoint settings belong in a "
+                    "providers.<name> block, context/recording in the --bare/--no-session flags",
+                    name, member_name);
+            return -1;
         }
-        if (!json_is_string(v)) {
-            if (err)
-                *err = xasprintf("preset '%s': '%s' must be a scalar", name, k);
+        if (!json_is_string(member)) {
+            if (error)
+                *error = xasprintf("preset '%s': '%s' must be a scalar", name, member_name);
             return -1;
         }
     }
-    const char *prov = json_string_value(json_object_get((json_t *)obj, "provider"));
-    if (!prov || !*prov) {
-        if (err)
-            *err = xasprintf("preset '%s' must name a provider", name);
+
+    const char *provider = json_string_value(json_object_get((json_t *)preset, "provider"));
+    if (!provider || !*provider) {
+        if (error)
+            *error = xasprintf("preset '%s' must name a provider", name);
         return -1;
     }
-    /* "tint" is the one member whose *value* is checked here. The others are
-     * free-form (a model id, a prompt) or validated where they're consumed,
-     * but a tint is honored by the display layer, which can only fall back to
-     * the default palette on an unknown tint — silently, and long after the
-     * preset was advertised as appliable. Checking it here keeps application
-     * all-or-nothing and keeps the /preset picker's "enumerated ⊆ appliable"
-     * invariant honest. */
-    const struct config_setting *ts = find_setting("tint");
-    const char *tint = json_string_value(json_object_get((json_t *)obj, "tint"));
-    if (tint && !config_value_valid(ts, tint)) {
-        if (err)
-            *err = xasprintf("preset '%s': unknown tint '%s' (expected %s)", name, tint,
-                             ts ? ts->choices : "");
+
+    const struct config_setting *tint_setting = find_setting("tint");
+    const char *tint = json_string_value(json_object_get((json_t *)preset, "tint"));
+    if (tint && !config_value_valid(tint_setting, tint)) {
+        if (error)
+            *error = xasprintf("preset '%s': unknown tint '%s' (expected %s)", name, tint,
+                               tint_setting ? tint_setting->choices : "");
         return -1;
     }
     return 0;
 }
 
-int config_preset_apply(const char *name, enum config_tier tier, char **err)
+static const char *preset_member_string(const json_t *preset, const char *member)
 {
-    void (*set)(const char *, const char *) =
-        tier == CONFIG_TIER_CONVERSATION ? config_set_conversation : config_set_override;
-    if (err)
-        *err = NULL;
-    const json_t *obj = preset_node(name);
-    if (!obj) {
-        if (err)
-            *err = xasprintf("unknown preset '%s' (define a presets.%s block in config.json)", name,
-                             name);
+    return json_string_value(json_object_get((json_t *)preset, member));
+}
+
+int config_preset_apply(const char *name, enum config_tier tier, char **error)
+{
+    if (error)
+        *error = NULL;
+
+    const json_t *preset = preset_node(name);
+    if (!preset) {
+        if (error)
+            *error = xasprintf("unknown preset '%s' (define a presets.%s block in config.json)",
+                               name, name);
         return -1;
     }
-    if (preset_validate(obj, name, err) != 0)
+    if (preset_validate(preset, name, error) != 0)
         return -1;
 
-    /* A preset is a whole selection, so applying one replaces the previous
-     * preset instead of composing with it: unnamed model/effort reset to the
-     * sentinel — the named provider's own default applies, shadowing stale
-     * lower-tier values exactly like a /provider re-pin (see
-     * config_persist_selection) — and an unnamed system_prompt clears the
-     * override outright. system_prompt is the one preset-owned override
-     * (nothing else writes it), and it isn't provider-bound, so falling back
-     * to normal resolution (a user's configured prompt) is right where the
-     * sentinel would wrongly force the built-in.
-     *
-     * "tint" is not written at all — the display layer reads it off the stance
-     * — but an earlier /config tint in this tier is cleared, so a stance still
-     * replaces an explicit tint picked before it, the way it replaces an
-     * explicit model. A /config tint issued *after* this then outranks the
-     * stance again, which is the same newest-write-wins rule the rest of the
-     * tier follows. */
-    const char *m = json_string_value(json_object_get((json_t *)obj, "model"));
-    const char *e = json_string_value(json_object_get((json_t *)obj, "effort"));
-    /* Replacing a stance ends the previous one first: a preset that names no
-     * system_prompt must not inherit the outgoing one — including a stance a
-     * resumed conversation restored into the tier below this write. */
+    const char *model = preset_member_string(preset, "model");
+    const char *effort = preset_member_string(preset, "effort");
+
+    /* End the previous stance first so an omitted system prompt cannot inherit from it. */
     config_preset_exit(tier);
-    set("provider", json_string_value(json_object_get((json_t *)obj, "provider")));
-    set("model", m ? m : CONFIG_VALUE_DEFAULT);
-    set("effort", e ? e : CONFIG_VALUE_DEFAULT);
-    set("system_prompt", json_string_value(json_object_get((json_t *)obj, "system_prompt")));
-    set("tint", NULL);
-    /* Record the active stance under the "preset" key — what the banner and
-     * /session read, so a preset that swapped the system prompt is never
-     * invisibly in effect. Cleared when an explicit selection commit exits
-     * the stance (commit_selection). */
-    set("preset", name);
+    set_writable_tier(tier, "provider", preset_member_string(preset, "provider"));
+    set_writable_tier(tier, "model", model ? model : CONFIG_VALUE_DEFAULT);
+    set_writable_tier(tier, "effort", effort ? effort : CONFIG_VALUE_DEFAULT);
+    set_writable_tier(tier, "system_prompt", preset_member_string(preset, "system_prompt"));
+    set_writable_tier(tier, "tint", NULL);
+    set_writable_tier(tier, "preset", name);
     return 0;
+}
+
+static const char *preset_value(const char *name, const char *member)
+{
+    const json_t *preset = preset_node(name);
+    return preset ? preset_member_string(preset, member) : NULL;
 }
 
 const char *config_preset_description(const char *name)
 {
-    const json_t *obj = preset_node(name);
-    if (!obj)
-        return NULL;
-    return json_string_value(json_object_get(obj, "description"));
+    return preset_value(name, "description");
 }
 
 const char *config_preset_tint(const char *name)
 {
-    const json_t *obj = preset_node(name);
-    if (!obj)
-        return NULL;
-    return json_string_value(json_object_get(obj, "tint"));
+    return preset_value(name, "tint");
 }
 
 const char *config_preset_provider(const char *name)
 {
-    const json_t *obj = preset_node(name);
-    if (!obj)
-        return NULL;
-    return json_string_value(json_object_get(obj, "provider"));
+    return preset_value(name, "provider");
 }
 
 const char *config_preset_model(const char *name)
 {
-    const json_t *obj = preset_node(name);
-    if (!obj)
-        return NULL;
-    return json_string_value(json_object_get(obj, "model"));
+    return preset_value(name, "model");
 }
 
 const char *config_preset_effort(const char *name)
 {
-    const json_t *obj = preset_node(name);
-    if (!obj)
-        return NULL;
-    return json_string_value(json_object_get(obj, "effort"));
+    return preset_value(name, "effort");
 }
 
-/* The nested presets.<name> member of `tier`, whatever its JSON type, or NULL.
- * The type-blind counterpart to preset_node, for the difference between "no
- * definition" and "a definition that isn't usable yet". */
-static json_t *preset_nested(json_t *tier, const char *name)
+static json_t *preset_nested_member(json_t *tier, const char *name)
 {
-    json_t *presets = obj_get_node(tier, "presets");
+    json_t *presets = object_get_dotted(tier, "presets");
     return json_is_object(presets) ? json_object_get(presets, name) : NULL;
 }
 
-/* Same, extended to the flat top-level "presets.<name>" spelling preset_node
- * also accepts. */
 static json_t *preset_member(json_t *tier, const char *name)
 {
-    json_t *m = preset_nested(tier, name);
-    if (m)
-        return m;
+    json_t *preset = preset_nested_member(tier, name);
+    if (preset)
+        return preset;
+
     char *key = xasprintf("presets.%s", name);
-    m = obj_get_node(tier, key);
+    preset = object_get_dotted(tier, key);
     free(key);
-    return m;
+    return preset;
 }
 
-/* Whether a state-tier definition would outrank what a config-file write puts
- * under `name` — see config_preset_save, which refuses rather than report a
- * save that isn't in effect. Two narrowings, both from preset_node's order:
- * only an object counts (anything else is skipped, and resolution falls through
- * to the file tier), and only the nested spelling does (a flat
- * "presets.<name>" is a last-resort fallback, which the nested member every
- * save writes already beats). Nothing in hax writes presets to the state tier;
- * such a definition can only be hand-placed. */
+/* A nested state definition would outrank the nested config definition written by save. */
 static int state_defines_preset(const char *name)
 {
-    return json_is_object(preset_nested(g_state, name));
+    return json_is_object(preset_nested_member(store.state, name));
 }
 
 int config_preset_exists(const char *name)
@@ -1339,7 +1200,7 @@ int config_preset_exists(const char *name)
     /* Any type counts, not just an appliable object: a half-written
      * "work": "draft" is still the user's content under that name, and a save
      * that reported it absent would replace it without asking. */
-    return preset_member(g_state, name) != NULL || preset_member(g_config, name) != NULL;
+    return preset_member(store.state, name) != NULL || preset_member(store.file, name) != NULL;
 }
 
 int config_preset_name_valid(const char *name)
@@ -1357,138 +1218,134 @@ int config_preset_name_valid(const char *name)
     return 1;
 }
 
-int config_preset_save(const char *name, const struct config_preset *def, char **err)
+int config_preset_save(const char *name, const struct config_preset *definition, char **error)
 {
-    if (err)
-        *err = NULL;
+    int result = -1;
+    char *path = NULL;
+    json_t *updated = NULL;
+    json_t *preset = NULL;
+
+    if (error)
+        *error = NULL;
     if (!config_preset_name_valid(name)) {
-        if (err)
-            *err = xasprintf("'%s' can't be a preset name — use letters, digits, '.', '-' or '_', "
-                             "starting with a letter or digit",
-                             name ? name : "");
-        return -1;
+        if (error)
+            *error = xasprintf("'%s' can't be a preset name — use letters, digits, '.', '-' or "
+                               "'_', starting with a letter or digit",
+                               name ? name : "");
+        goto out;
     }
-
     if (state_defines_preset(name)) {
-        if (err)
-            *err = xasprintf("preset '%s' is defined in state.json, which outranks the config "
-                             "file — remove it there first",
-                             name);
-        return -1;
+        if (error)
+            *error = xasprintf("preset '%s' is defined in state.json, which outranks the config "
+                               "file — remove it there first",
+                               name);
+        goto out;
     }
 
-    json_t *obj = json_object();
-    /* What the preset is and how it looks first, then the machinery behind it —
-     * the documented example's order, so a saved block reads like a
-     * hand-written one. */
+    preset = json_object();
+    if (!preset)
+        goto out;
+
+    /* Keep the user-facing identity fields first in the serialized object. */
     const struct {
         const char *key;
-        const char *val;
+        const char *value;
     } members[] = {
-        {"description", def->description}, {"tint", def->tint},
-        {"provider", def->provider},       {"model", def->model},
-        {"effort", def->effort},           {"system_prompt", def->system_prompt},
+        {"description", definition->description}, {"tint", definition->tint},
+        {"provider", definition->provider},       {"model", definition->model},
+        {"effort", definition->effort},           {"system_prompt", definition->system_prompt},
     };
     for (size_t i = 0; i < sizeof(members) / sizeof(*members); i++) {
-        if (members[i].val)
-            json_object_set_new(obj, members[i].key, json_string(members[i].val));
+        if (members[i].value)
+            json_object_set_new(preset, members[i].key, json_string(members[i].value));
     }
-    /* The same validation apply runs, so a saved preset is appliable by
-     * construction. */
-    if (preset_validate(obj, name, err) != 0) {
-        json_decref(obj);
-        return -1;
+    if (preset_validate(preset, name, error) != 0)
+        goto out;
+
+    path = xdg_hax_config_path("config.json");
+    if (!path) {
+        if (error)
+            *error = xstrdup("couldn't locate the config directory");
+        goto out;
+    }
+    if (store.file_unusable) {
+        if (error)
+            *error = xasprintf("couldn't read %s — fix or remove it first", path);
+        goto out;
     }
 
-    char *path = xdg_hax_config_path("config.json");
-    /* A file this process couldn't read is never rewritten: the tier is empty,
-     * so the result would hold just this preset and nothing the user authored. */
-    json_t *next =
-        (path && !g_config_unusable) ? (g_config ? json_deep_copy(g_config) : json_object()) : NULL;
-    if (!next) {
-        if (err)
-            *err = g_config_unusable ? xasprintf("couldn't read %s — fix or remove it first", path)
-                                     : xstrdup("couldn't locate the config directory");
-        free(path);
-        json_decref(obj);
-        return -1;
-    }
+    updated = store.file ? json_deep_copy(store.file) : json_object();
+    if (!updated)
+        goto out;
 
-    /* Drop a flat-authored "presets.<name>" key. The nested member written
-     * below already wins at lookup (preset_node consults the flat spelling only
-     * as a fallback), so this is about the file: leaving it would strand a
-     * stale duplicate definition that reads as authoritative to whoever edits
-     * it next. persist_tier normalizes a scalar key the same way. */
-    char *flat = xasprintf("presets.%s", name);
-    json_object_del(next, flat);
-    free(flat);
-    json_t *presets = json_object_get(next, "presets");
+    /* Remove the flat fallback so the file does not retain two definitions of the same preset. */
+    char *flat_key = xasprintf("presets.%s", name);
+    json_object_del(updated, flat_key);
+    free(flat_key);
+
+    json_t *presets = json_object_get(updated, "presets");
     if (presets && !json_is_object(presets)) {
-        /* Something is under "presets" that isn't a block of them — a stray
-         * string, a list from a hand-conversion. Replacing it would drop it
-         * from the file, and no prompt can describe what is being replaced the
-         * way the per-name one does, so refuse and say where to look. */
-        if (err)
-            *err = xasprintf("\"presets\" in %s is not a block of presets — fix it first", path);
-        free(path);
-        json_decref(next);
-        json_decref(obj);
-        return -1;
+        if (error)
+            *error = xasprintf("\"presets\" in %s is not a block of presets — fix it first", path);
+        goto out;
     }
     if (!presets) {
         presets = json_object();
-        json_object_set_new(next, "presets", presets);
+        if (!presets || json_object_set_new(updated, "presets", presets) != 0)
+            goto out;
     }
-    json_object_set(presets, name, obj); /* literal member: a dotted name is a name */
-    json_decref(obj);
+    if (json_object_set(presets, name, preset) != 0)
+        goto out;
 
-    int rc = write_json_atomic(path, next);
-    if (rc != 0) {
-        if (err)
-            *err = xasprintf("couldn't write %s", path);
-        free(path);
-        json_decref(next);
-        return -1;
+    if (write_json_atomic(path, updated) != 0) {
+        if (error)
+            *error = xasprintf("couldn't write %s", path);
+        goto out;
     }
+
+    json_decref(store.file);
+    store.file = updated;
+    updated = NULL;
+    result = 0;
+
+out:
+    if (result != 0 && error && !*error)
+        *error = xstrdup("couldn't save preset");
     free(path);
-    json_decref(g_config);
-    g_config = next;
-    return 0;
+    json_decref(updated);
+    json_decref(preset);
+    return result;
 }
 
 size_t config_preset_names(char ***out)
 {
-    /* Filter through the same resolution + validation that apply uses, so
-     * "enumerated ⊆ appliable" holds by construction — the /preset picker
-     * and the system prompt's listing must never advertise a preset that
-     * then fails, whether unresolvable (a name spelled only as fully-flat
-     * leaves, which preset_node cannot assemble) or structurally invalid
-     * (missing provider, unknown member). Skipped definitions are still
-     * user-authored config that isn't being honored, so they warn — once
-     * per process, since enumeration runs on every prompt rebuild. */
-    static int warned;
+    /* Invalid user-authored definitions warn once because this runs on every prompt rebuild. */
+    static int warnings_emitted;
     char **names = NULL;
-    size_t n = config_object_keys("presets", &names);
-    size_t kept = 0;
-    for (size_t i = 0; i < n; i++) {
-        const json_t *obj = preset_node(names[i]);
-        char *err = NULL;
-        if (obj && preset_validate(obj, names[i], warned ? NULL : &err) == 0) {
-            names[kept++] = names[i];
+    size_t count = config_object_keys("presets", &names);
+    size_t valid_count = 0;
+
+    for (size_t i = 0; i < count; i++) {
+        const json_t *preset = preset_node(names[i]);
+        char *error = NULL;
+        if (preset && preset_validate(preset, names[i], warnings_emitted ? NULL : &error) == 0) {
+            names[valid_count++] = names[i];
             continue;
         }
-        if (!warned) {
-            if (err)
-                hax_warn("%s — ignoring it", err);
-            else if (!obj)
+
+        if (!warnings_emitted) {
+            if (error)
+                hax_warn("%s — ignoring it", error);
+            else if (!preset)
                 hax_warn("preset '%s' is not an object (define a presets.%s block) — "
                          "ignoring it",
                          names[i], names[i]);
         }
-        free(err);
+        free(error);
         free(names[i]);
     }
-    warned = 1;
+
+    warnings_emitted = 1;
     *out = names;
-    return kept;
+    return valid_count;
 }

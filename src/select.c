@@ -1329,7 +1329,8 @@ void select_restore_session(struct agent_state *st, const char *provider, const 
 
 static int setting_is_bool(const struct config_setting *s)
 {
-    return s->kind == CFG_STRING && s->choices && strcmp(s->choices, CONFIG_CHOICES_BOOL) == 0;
+    return s->kind == CONFIG_KIND_STRING && s->choices &&
+           strcmp(s->choices, CONFIG_CHOICES_BOOL) == 0;
 }
 
 /* Tri-state boolean: on/off plus "auto", where auto (and unset) defers to the
@@ -1337,7 +1338,8 @@ static int setting_is_bool(const struct config_setting *s)
  * /config can't compute it and shows "auto" rather than a concrete on/off. */
 static int setting_is_tristate(const struct config_setting *s)
 {
-    return s->kind == CFG_STRING && s->choices && strcmp(s->choices, CONFIG_CHOICES_TRISTATE) == 0;
+    return s->kind == CONFIG_KIND_STRING && s->choices &&
+           strcmp(s->choices, CONFIG_CHOICES_TRISTATE) == 0;
 }
 
 /* Display-safe effective value: secrets are redacted and booleans normalized.
@@ -1372,7 +1374,7 @@ static const char *setting_display_value(const struct config_setting *s)
 
 /* Whether the resolved value is present but fails validation — a bad env/
  * config entry the getter silently ignores in favor of the default. Free-form
- * (CFG_STRING without choices) always validates, so this fires for enums,
+ * (CONFIG_KIND_STRING without choices) always validates, so this fires for enums,
  * bools, and bounded numerics: a bad spelling or out-of-range value. */
 static int setting_value_invalid(const struct config_setting *s)
 {
@@ -1416,7 +1418,7 @@ static void setting_note_readonly(struct agent_state *st, const struct config_se
     if (cmd)
         ui_note("  change it with %s", cmd);
     else
-        ui_note("  read-only at runtime — set %s or config.json and restart to change", s->env);
+        ui_note("  read-only at runtime — set %s or config.json and restart to change", s->env_var);
 }
 
 /* Set or clear the override, then refresh display-cached settings. */
@@ -1441,7 +1443,7 @@ static void setting_pick_choice(struct agent_state *st, const struct config_sett
 {
     char **vals = NULL;
     size_t n = split_choices(s->choices, &vals);
-    int mixed = s->kind != CFG_STRING;
+    int mixed = s->kind != CONFIG_KIND_STRING;
     size_t nitems = n + 1 + (mixed ? 1 : 0);
 
     struct picker_item *items = xcalloc(nitems, sizeof(*items));
@@ -1477,7 +1479,7 @@ static void setting_pick_choice(struct agent_state *st, const struct config_sett
             initial = n + 1;
     }
 
-    char *title = xasprintf("%s — %s", s->key, s->desc);
+    char *title = xasprintf("%s — %s", s->key, s->description);
     struct picker_opts opts = {.title = title, .items = items, .n = nitems, .initial = initial};
     long sel = picker_run(&opts);
     free(title);
@@ -1532,19 +1534,19 @@ static void config_typed(struct agent_state *st, const char *arg)
         return;
     }
     if (!val) {
-        if (s->runtime)
+        if (s->editable)
             setting_note_current(st, s);
         else
             setting_note_readonly(st, s);
         return;
     }
-    if (!s->runtime) {
+    if (!s->editable) {
         const char *cmd = setting_runtime_command(key);
         if (cmd)
             ui_error("'%s' can't be changed from /config — use %s", key, cmd);
         else
             ui_error("'%s' can't be changed at runtime — set %s or config.json and restart", key,
-                     s->env);
+                     s->env_var);
         st->r->disp.trail = 1;
         return;
     }
@@ -1588,17 +1590,17 @@ void select_config(struct agent_state *st, const char *arg)
         /* Surface the value grammar that isn't obvious from the prose: units
          * for a size/duration, and the range for a bounded integer. A plain
          * unbounded integer needs no hint. */
-        int show_hint = rows[i].kind == CFG_SIZE || rows[i].kind == CFG_DURATION ||
-                        (rows[i].kind == CFG_INT && (rows[i].min || rows[i].max));
+        int show_hint = rows[i].kind == CONFIG_KIND_SIZE || rows[i].kind == CONFIG_KIND_DURATION ||
+                        (rows[i].kind == CONFIG_KIND_INT && (rows[i].min || rows[i].max));
         if (show_hint) {
             char hint[64];
             config_value_hint(&rows[i], hint, sizeof(hint));
-            descs[i] = xasprintf("%s (%s)", rows[i].desc, hint);
+            descs[i] = xasprintf("%s (%s)", rows[i].description, hint);
             items[i].desc = descs[i];
         } else {
-            items[i].desc = rows[i].desc;
+            items[i].desc = rows[i].description;
         }
-        items[i].dim = !rows[i].runtime;
+        items[i].dim = !rows[i].editable;
         items[i].current = 0;
     }
     struct picker_opts opts = {.title = "configuration", .items = items, .n = n, .initial = 0};
@@ -1613,7 +1615,7 @@ void select_config(struct agent_state *st, const char *arg)
 
     if (sel >= 0) {
         const struct config_setting *s = &rows[sel];
-        if (!s->runtime)
+        if (!s->editable)
             setting_note_readonly(st, s);
         else if (s->choices)
             setting_pick_choice(st, s);

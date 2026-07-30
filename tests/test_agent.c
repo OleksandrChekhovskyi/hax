@@ -83,7 +83,7 @@ static void fixture_init(struct fixture *f)
     size_t n_settings = 0;
     const struct config_setting *settings = config_settings(&n_settings);
     for (size_t i = 0; i < n_settings; i++)
-        unsetenv(settings[i].env);
+        unsetenv(settings[i].env_var);
 
     setenv("HAX_MODEL", "model-a", 1);
     setenv("HAX_SYSTEM_PROMPT", "sys", 1);

@@ -6,369 +6,120 @@
 #include <stddef.h>
 
 /*
- * Process-wide configuration.
+ * Process-wide configuration, owned by the foreground thread. Settings resolve in this order:
  *
- * One uniform system for every tunable. Each setting has a canonical,
- * provider-agnostic key (e.g. "model", "openai.base_url", "http.retry_base")
- * and an environment-variable binding (HAX_MODEL, HAX_OPENAI_BASE_URL, ...)
- * declared once in a registry inside config.c. Callers read settings by
- * canonical key — never getenv — so a setting can't be accidentally
- * env-only, and so the file, presets, runtime overrides, and a future
- * /config view all speak the same names; the env var is just one binding.
+ *   run override -> resumed conversation -> environment -> state.json -> config.json -> default
  *
- * Resolution, highest priority first:
+ * Callers use canonical keys rather than reading HAX_* variables directly. See
+ * docs/configuration.md for user-facing file formats and resolution behavior.
  *
- *   run override  →  conversation  →  environment  →  state  →  config file
- *                                                            →  registry default
- *
- *   - run override: set for this run via config_set_override (a CLI
- *     selection flag, an explicit --preset, a /model slash command); never
- *     persisted unless also written via config_persist or
- *     config_persist_state.
- *   - conversation: the selection a resumed session recorded (see
- *     config_set_conversation). It is the payload of an explicit `--resume` /
- *     `-c` / `/resume`, so it outranks configuration — resuming a
- *     conversation continues it on the backend it was using, and the
- *     selection flags are how you say otherwise. Empty when nothing was
- *     resumed.
- *   - environment: the HAX_* var, so a `HAX_FOO=bar hax ...` invocation wins
- *     over everything persisted. An empty value is skipped (resolution falls
- *     through to a lower tier) for most settings; it's honored verbatim only
- *     for the keep_empty few where "" carries meaning — see config_str.
- *   - state: ~/.local/state/hax/state.json — the machine-local,
- *     *persisted* layer of the run-override tier (what /provider, /model,
- *     /effort write). It holds only canonical config keys, sits in the XDG state dir
- *     (not the config dir) so it stays out of a dotfiles repo, and overrides
- *     the committed config file while still yielding to an explicit env var
- *     for a one-off invocation. Same nested/flat key grammar as the config
- *     file. Genuinely different-shaped state (prompt history, sessions,
- *     future auth tokens) lives in its own files, not here.
- *   - config file: ~/.config/hax/config.json (the same dir as AGENTS.md /
- *     skills) — the declared, committable defaults. Nested objects are the
- *     friendly form — {"openai": {"base_url": "..."}} — and a flat dotted key
- *     ({"openai.base_url": "..."}) is also accepted. Plain JSON (jansson
- *     parses no comments or trailing commas); scalar values are read as
- *     strings, so 5000 and "5000" are equivalent.
- *   - registry default: a fixed fallback declared with the setting, so a
- *     shared default lives in exactly one place. Settings whose default is
- *     dynamic (model → the provider's), computed (notify → terminal
- *     detection), or per-provider (openai.base_url) carry no registry
- *     default and their consumer supplies it when config_str returns NULL.
- *
- * Two keys resolve with one extra rule: "model" and "effort" are
- * provider-bound. They only mean something relative to a provider, so the
- * selectors persist them as one set with the "provider" they were picked for
- * (config_persist_selection), a config file pairing them with a provider
- * reads the same way, and a resumed conversation records the set it was last
- * using. At the conversation, state, and file tiers a bound value applies
- * only while that tier's recorded provider is the active one; otherwise the
- * tier is skipped for these keys and resolution falls through — a one-off
- * HAX_PROVIDER=mock doesn't inherit a model saved for codex, and
- * `--provider=x --resume=ID` doesn't run a resumed conversation's model
- * against a different backend. A tier that records no provider is unbound and
- * applies as-is, and the env/run-override tiers always apply: they are
- * explicit for this run.
- *
- * The whole system is optional: with no file and no overrides, every lookup
- * is just getenv-or-default, so an env-vars-only setup is unchanged.
- *
- * Config is owned by the foreground thread. Background jobs must resolve and
- * copy every value they need before spawning; the borrowed-return API cannot
- * be made safe by locking only the lookup while a caller keeps its pointer.
- *
- * Strings returned by config_str are borrowed and valid until config_free /
- * the next config_load / a config_set_override of the same key — i.e. for
- * the whole run in normal use.
+ * Returned strings and JSON nodes are borrowed. Copy values that must survive a config mutation or
+ * environment change, and resolve all values before starting a background job.
  */
 
-/* Sentinel value meaning "explicitly use the default". When a tier resolves
- * to this, config_str returns the registry default when the key declares one,
- * else NULL — so the consumer falls to its own (or the provider's) default —
- * AND resolution stops there: it does NOT fall through to lower tiers. It's
- * the third state beyond "absent" (fall through to the next tier) and "a
- * value" (use it verbatim). The runtime selectors write it
- * for a "use the provider's default" pick (the effort picker's "default" row,
- * or a provider switch that keeps no model), so the choice shadows a stale
- * lower-tier value (env/config) instead of letting it resurface under the new
- * provider. (An env var still wins on a fresh launch, per the order above —
- * the sentinel sits in the override/state tiers, not above env.) */
+/* Stops resolution at the current tier. Resolves to the registry default, or NULL when the
+ * consumer owns the default. */
 #define CONFIG_VALUE_DEFAULT "(default)"
 
-/* ---- lifecycle ---- */
-
-/* Load the config-file tier from JSON text, replacing any prior file tier.
- * Returns 0 for NULL/empty (cleared) or a JSON object, -1 for malformed or
- * non-object input (tier left empty). Scalar leaves are normalized to
- * strings. The pure seam config_init() builds on, and what tests drive. */
+/* Load a JSON object into the config-file or state tier, replacing its previous contents. NULL,
+ * empty, and whitespace-only input clear the tier. Scalar leaves are normalized to strings.
+ * Returns 0 on success, -1 for malformed JSON or a non-object root. */
 int config_load(const char *text);
-
-/* Like config_load, but for the state tier (state.json). Same grammar and
- * return contract; the pure seam config_init() builds on for the state file,
- * and what tests drive. */
 int config_load_state(const char *text);
 
-/* Read ~/.config/hax/config.json into the file tier. Absent file is silent
- * (config is optional); a present-but-unusable file (malformed, non-object,
- * oversized) is ignored with a warning. Call once at startup, before any
- * setting is read. */
+/* Load config.json and state.json from their XDG paths. Missing files are ignored; unusable files
+ * produce a warning. */
 void config_init(void);
-
-/* Release the file tier and any overrides. Optional — for clean shutdown /
- * ASan; a no-op when nothing is loaded. */
 void config_free(void);
 
-/* ---- read (by canonical key) ---- */
-
-/* Resolved value for `key`, or NULL when unset. Borrowed. Empty values are
- * skipped unless the registry marks them meaningful; unknown keys preserve
- * them. Use config_str_nonempty for unknown keys that must skip empty values. */
+/* Resolve a canonical key. config_str preserves empty values only for settings that mark them
+ * meaningful; config_str_nonempty always skips them. */
 const char *config_str(const char *key);
-
-/* Resolve `key` as config_str does, but ignoring the run-override tier — what
- * the value would be with this run's own picks out of the way. For a caller
- * that must show the result of an act which clears them: applying a preset
- * drops a runtime /config tint (config_preset_exit), so the /preset picker
- * previews each row in the tint applying it would actually leave in force. */
-const char *config_str_below_run(const char *key);
-
-/* Like config_str, but always skips empty tier values. Intended for dynamic
- * keys absent from the registry; prefer config_str for registered settings. */
 const char *config_str_nonempty(const char *key);
 
-/* The registry default for `key` (the last resolution tier), or NULL when
- * the setting has none (or the key is unknown). For call sites whose
- * validity rules are stricter than the shared grammar (e.g. a retry base
- * must be > 0): a semantically invalid value falls back to this without
- * re-stating the constant at the site. */
+/* Resolve a key without the run-override tier. */
+const char *config_str_below_run(const char *key);
+
+/* Return the registry default, or NULL for an unknown or dynamically defaulted setting. */
 const char *config_default(const char *key);
 
-/* The JSON node at nested `key` — state tier first, then the config file
- * (highest tier that defines the block wins; no cross-tier merge). For
- * structured blocks whose member keys can themselves contain dots
- * (catalog.models.<provider>.<model-id> — model ids like "llama-3.2" would
- * split wrong under the flat dotted-key grammar), so the caller walks the
- * object with jansson directly. Borrowed; valid until config_free / the next
- * config_load*. Scalar leaves follow the load-time normalization: numbers
- * and booleans read as strings. NULL when absent. */
+/* Return a structured block from the state tier, then the config-file tier. The first tier that
+ * defines the block wins; blocks are not merged. */
 const json_t *config_json_node(const char *key);
 
-/* Enumerate the immediate member names of the JSON object at nested key
- * `key` (e.g. "providers"), merged and deduplicated across the file and
- * state tiers. Returns the count; *out receives a freshly-allocated array of
- * `count` heap-owned strings (caller frees each element, then the array;
- * NULL with count 0 when the object is absent). The basis for config-defined
- * providers: each providers.<name> block is one selectable provider. */
+/* Merge the immediate member names at `key` across the config-file and state tiers. `out` receives
+ * an allocated array of allocated strings, or NULL when empty; the caller frees each string and
+ * the array. */
 size_t config_object_keys(const char *key, char ***out);
 
-/* Typed views over the same resolution, centralizing the parse so every
- * setting shares one grammar. They resolve like config_str_nonempty (the
- * grammars give "" no meaning), and a value that fails to parse falls back
- * to the registry default (a typo'd timeout must not read as "disabled");
- * with no registry default either, the type-zero (0 / 0 / false) is
- * returned. Note parse_size treats 0 as invalid, so an explicit "0" also
- * reads as the default for config_size — but is honored by
- * config_duration_ms, where "0 disables" is part of the grammar. Same for
- * negative values via config_int: every int setting is a count or width,
- * so they read as invalid (add a signed variant if that ever changes). */
+/* Typed lookups skip empty values and fall back to the registry default on parse or bounds errors.
+ * With no valid default they return zero. Sizes must be positive; durations may be zero. */
 int config_int(const char *key);
-int config_bool(const char *key);         /* 1/true/yes/on vs 0/false/no/off (case-insensitive) */
-long config_size(const char *key);        /* parse_size grammar: 4096, 64k, 1M */
-long config_duration_ms(const char *key); /* parse_duration_ms grammar: 500, 2s */
+int config_bool(const char *key);
+long config_size(const char *key);
+long config_duration_ms(const char *key);
 
-/* config_bool for settings whose default lives at the single call site,
- * not in the registry (openai.send_cache_key's per-preset choice): unset,
- * empty, or unrecognized values read as `def` — so a typo'd value never
- * flips the switch away from the caller-supplied default. */
-int config_bool_or(const char *key, int def);
+/* Parse a boolean setting, using `default_value` when it is unset or invalid. */
+int config_bool_or(const char *key, int default_value);
 
-/* ---- write ---- */
-
-/* Which tier a write lands in. Only the two caller-selectable ones: the
- * lower tiers are file-backed and written through config_persist*. */
 enum config_tier {
-    CONFIG_TIER_RUN = 0,      /* config_set_override */
-    CONFIG_TIER_CONVERSATION, /* config_set_conversation */
+    CONFIG_TIER_RUN = 0,
+    CONFIG_TIER_CONVERSATION,
 };
 
-/* Set a run-scoped override for `key` (highest priority); val == NULL
- * clears it. Not persisted. The seam runtime selection (/model, /provider,
- * /effort, /preset) and the CLI selection flags write to. */
-void config_set_override(const char *key, const char *val);
-
-/* Set `key` in the conversation tier (below run overrides and above env);
- * val == NULL clears just that key. Never persisted: it describes the
- * conversation being resumed, not a new default, so an explicit pick made
- * during the run writes a run override (and state.json) as usual and
- * shadows this. Write "provider" alongside "model"/"effort" so the
- * provider-binding rule above can skip a stale pair when the active
- * provider differs. */
-void config_set_conversation(const char *key, const char *val);
-
-/* Drop the whole conversation tier (nothing resumed / the restore was
- * rejected), so resolution falls back to env, state, and file. */
+/* Set or clear (`value == NULL`) a value in a writable tier. */
+void config_set_override(const char *key, const char *value);
+void config_set_conversation(const char *key, const char *value);
 void config_clear_conversation(void);
 
-/* Exit any preset stance in `tier`: clears the stance name (empty, not
- * absent, at the run tier — the banner must never claim a stance that isn't
- * applied) and the preset-owned system prompt. At CONFIG_TIER_RUN it also
- * drops a stance a resumed conversation restored into the tier below,
- * because clearing a run override only unhides the lower tier: an explicit
- * pick would otherwise keep running under the resumed preset's system prompt
- * while reporting no stance. What an explicit /provider, /model, or /effort
- * commit calls; the preset writers below call it for themselves. */
+/* End the active preset in `tier`, including any preset-owned system prompt. A run-tier exit also
+ * removes a preset restored in the conversation tier so it cannot resurface. */
 void config_preset_exit(enum config_tier tier);
 
-/* Write a selection a session recorded into `tier` — the one definition of
- * what "resume this conversation's setup" means, shared by the two paths that
- * restore one: `--resume` / `-c` at startup writes CONFIG_TIER_CONVERSATION
- * (a restore the run's own flags still outrank), and `/resume` mid-session
- * writes CONFIG_TIER_RUN (the newest explicit act, so it outranks a pick made
- * earlier in the run).
- *
- * `provider` anchors it: absent, empty, or the "none" a provider-less
- * recording carries means there is nothing to go back to, and only the stance
- * below is pinned. A recorded model/effort is pinned as the pair it was used
- * as; a recorded *absence* pins the sentinel, so the conversation keeps
- * running on the provider's own default instead of picking up a value saved
- * for it in state.json.
- *
- * `preset` restores the stance whole (system prompt included), replacing the
- * individual values above — by name, so an edited definition applies as
- * edited. Pass NULL when the conversation recorded none, or when the caller
- * makes an explicit selection of its own: a preset is all-or-nothing, so
- * naming one member can only exit the stance (exactly as an explicit
- * /provider, /model, or /effort pick exits a live one), never half-keep it.
- * Either way the tier pins an empty stance and drops any system prompt the
- * outgoing one set, so no preset can claim a conversation that didn't run
- * under it.
- *
- * Returns 0, or -1 when a recorded preset no longer applies (renamed,
- * deleted, made invalid) with *err set to a malloc'd reason — the caller
- * decides whether that's fatal. The rest of the selection is restored either
- * way, so an interactive caller can carry on without the stance. */
+/* Restore recorded selection metadata into `tier`. Missing model/effort values select the provider
+ * defaults. A provider of NULL, empty, or "none" restores only the preset stance. Returns -1 when
+ * the recorded preset is no longer valid; the provider/model/effort remain restored. On failure,
+ * `error` receives an allocated message when non-NULL. */
 int config_restore_selection(enum config_tier tier, const char *provider, const char *model,
-                             const char *effort, const char *preset, char **err);
+                             const char *effort, const char *preset, char **error);
 
-/* Snapshot / restore both caller-writable tiers (run overrides and the
- * conversation tier), for trying an operation that may mutate them as a side
- * effect and rolling it back on abort — e.g. constructing a prospective
- * provider (some set an override during probing) before the user has
- * committed to the switch. Both, not just the overrides: a run-tier stance
- * change reaches into the conversation tier too (config_preset_exit), so
- * restoring one without the other would leave a rejected switch half-applied.
- * `snapshot` returns an opaque owned handle; `restore` consumes it, replacing
- * the live tiers (so on the success path, discard the handle with
- * config_snapshot_free instead of restoring). */
+/* Snapshot both writable tiers. Restore consumes the snapshot; free discards it. */
 struct config_snapshot;
 struct config_snapshot *config_snapshot_take(void);
-void config_snapshot_restore(struct config_snapshot *snap);
-void config_snapshot_free(struct config_snapshot *snap);
+void config_snapshot_restore(struct config_snapshot *snapshot);
+void config_snapshot_free(struct config_snapshot *snapshot);
 
-/* Persist `key` = `val` into ~/.config/hax/config.json (nested form),
- * preserving the file's other keys; val == NULL removes the key. Atomic
- * (temp + rename, 0600, following a symlinked target). Updates the in-memory
- * file tier too, so the new value is visible immediately.
- *
- * The file is rewritten from the tier this process holds — the configuration it
- * has been running on — so an edit made to the file while hax runs is
- * overwritten, the same way it has no effect on the running session. The one
- * exception is a file that couldn't be read at startup: the tier is empty, so
- * writing would replace hand-authored content this process never saw, and the
- * write fails instead.
- *
- * Returns 0 on success, -1 on I/O failure or that unreadable-file case.
- * The "remember this setting" seam for the committed config file. */
-int config_persist(const char *key, const char *val);
+/* Atomically persist a nested key in config.json or state.json and update the in-memory tier.
+ * `value == NULL` removes the key. The config-file write refuses to replace a file that could not
+ * be loaded. Returns 0 on success, -1 on failure. */
+int config_persist(const char *key, const char *value);
+int config_persist_state(const char *key, const char *value);
 
-/* Like config_persist, but writes the machine-local state tier
- * (~/.local/state/hax/state.json) instead of the committed config file.
- * The "remember my runtime pick" seam — what /provider, /model, /effort
- * call so a selection sticks across runs without touching dotfiles-managed
- * config. Pair with config_set_override for immediate same-session effect. */
-int config_persist_state(const char *key, const char *val);
-
-/* Persist a provider/model/effort selection into the state tier as one
- * atomic write — the seam the runtime selectors commit through, keeping the
- * set coherent for the provider-binding resolution rule above. `provider`
- * anchors the selection and is required. A NULL model/effort means "not
- * picked this time": the stored value is kept when `provider` matches the
- * recorded one (an /effort pick must not wipe a saved model) and reset to
- * CONFIG_VALUE_DEFAULT when the selection re-pins a different provider (the
- * old value was picked for the old provider). To write "explicitly use the
- * provider's default", pass CONFIG_VALUE_DEFAULT itself. Also removes any
- * persisted preset name in the same write: an explicit selection commit
- * replaces the preset stance (see config_preset_apply). Returns 0 on
- * success, -1 on I/O failure (the in-memory tier is then left unchanged). */
+/* Persist a provider-bound selection to state.json in one write. `provider` is required. A NULL
+ * model or effort preserves the stored value for the same provider and selects the new provider's
+ * default when the provider changes. Passing CONFIG_VALUE_DEFAULT explicitly always selects that
+ * default. Returns 0 on success or -1 with the in-memory tier unchanged. */
 int config_persist_selection(const char *provider, const char *model, const char *effort);
 
-/* ---- presets ---- */
+/* Apply a complete presets.<name> selection to `tier`. The preset must contain a provider; omitted
+ * model and effort values select provider defaults. Returns -1 with an optional allocated `error`
+ * message if the preset is absent or invalid. */
+int config_preset_apply(const char *name, enum config_tier tier, char **error);
 
-/* Apply the preset named `name` — a full selection commit from the config's
- * presets.<name> object, written to `tier`. CONFIG_TIER_RUN is an explicit
- * apply (a --preset flag, /preset, a configured stance): above env, below
- * the explicit CLI selection flags, which the caller applies afterwards.
- * CONFIG_TIER_CONVERSATION restores the stance a resumed session recorded,
- * so a user's env var and flags both still win. The members: "provider"
- * (required) anchors the selection;
- * "model" and "effort" are optional and reset to
- * CONFIG_VALUE_DEFAULT when unnamed, so the provider's own default applies;
- * "system_prompt" is optional and cleared when unnamed, so normal
- * resolution returns. "tint" is optional and never written — the display
- * layer reads it off the stance (config_preset_tint) — though applying does
- * clear an earlier runtime tint, so a stance replaces one picked before it.
- * Because every apply writes the whole set, presets
- * replace each other rather than compose. No other keys are presettable
- * (see PRESET_KEYS in config.c for why); "description" is reserved
- * metadata for the /preset picker and the system prompt's preset listing.
- * Validation is all-or-nothing: any invalid member applies nothing.
- * A successful apply also records `name` under the "preset" key in the same
- * tier — the active-stance signal the banners and /session read; an explicit
- * /provider, /model, or /effort commit clears it (the pick exits the
- * stance). Returns 0 on success; -1 on failure with *err (when non-NULL)
- * set to a malloc'd human-readable reason the caller prints and frees. */
-int config_preset_apply(const char *name, enum config_tier tier, char **err);
-
-/* The "description" member of presets.<name>, or NULL when the preset or
- * the member is absent. Borrowed; valid until config_free / config_load*. */
+/* Borrowed preset members, or NULL when the preset or member is absent. */
 const char *config_preset_description(const char *name);
-
-/* The "tint" member of presets.<name>, or NULL when the preset or the member
- * is absent. Read off the active stance by the display layer rather than
- * applied as an override — see PRESET_KEYS in config.c. Validation guarantees
- * a non-NULL result names a tint the theme layer knows. Borrowed; valid until
- * config_free / config_load*. */
 const char *config_preset_tint(const char *name);
-
-/* The "provider" member of presets.<name>, or NULL when the preset is
- * absent (validation guarantees it's present and non-empty for every
- * enumerated name). For consumers that check the name resolves against the
- * provider registry — a check that lives above this layer, since config
- * must not depend on provider discovery. Borrowed, same lifetime as
- * config_preset_description. */
 const char *config_preset_provider(const char *name);
-
-/* The explicitly written "model" / "effort" members of presets.<name>, or
- * NULL when the preset or the member is absent. Borrowed, same lifetime as
- * config_preset_description. These deliberately do not resolve provider
- * defaults: picker callers use them to show exactly what the user configured. */
 const char *config_preset_model(const char *name);
 const char *config_preset_effort(const char *name);
 
-/* Whether a presets.<name> definition resolves, valid or not. Distinct from
- * config_preset_names, which lists only appliable ones: a save must not
- * silently replace an invalid block its author is still fixing. */
+/* Return whether a definition exists, including an invalid or non-object definition. */
 int config_preset_exists(const char *name);
 
-/* Whether `name` is usable as a preset name. The grammar is about what a user
- * can retype at `--preset` and pick out of a list, not what JSON can hold — a
- * dot included, since lookup takes names literally (preset_node in config.c).
- * Returns 1 for ok, 0 otherwise. */
+/* Names contain 1-63 letters, digits, dots, hyphens, or underscores and start alphanumeric. */
 int config_preset_name_valid(const char *name);
 
-/* A preset definition as config_preset_save takes it: the presettable keys
- * (PRESET_KEYS in config.c) plus the reserved "description" metadata. A NULL
- * member is omitted from the written block, a non-NULL one written verbatim —
- * so "" carries whatever meaning its key gives it. `provider` is required. */
+/* `provider` is required; NULL optional members are omitted when saving. */
 struct config_preset {
     const char *description;
     const char *tint;
@@ -378,95 +129,55 @@ struct config_preset {
     const char *system_prompt;
 };
 
-/* Write `def` as the presets.<name> block in ~/.config/hax/config.json,
- * replacing any existing definition of that name and preserving the file's
- * other keys. Same atomic write, in-memory tier update, normalizing rewrite,
- * and treatment of external edits and unreadable files as config_persist, so
- * the definition applies immediately. Validated exactly as an apply validates
- * it: a save cannot write a block that /preset would then reject.
- *
- * The committed config file, not the machine-local state tier the read path
- * would also accept: a preset is authored content to edit, diff, and carry
- * between machines, and one saved where hand-written presets don't live is one
- * nobody finds again.
- *
- * Returns 0, or -1 with *err (when non-NULL) set to a malloc'd reason the
- * caller prints and frees. */
-int config_preset_save(const char *name, const struct config_preset *def, char **err);
+/* Save a validated preset to config.json, replacing the same name and preserving other loaded
+ * content. Returns -1 with an optional allocated `error` message on failure. */
+int config_preset_save(const char *name, const struct config_preset *preset, char **error);
 
-/* Enumerate the defined presets: the member names of the presets object,
- * merged and deduplicated across the state and file tiers, restricted to
- * names that resolve to a *structurally valid* preset — the same
- * validation apply runs — so everything listed is guaranteed to apply.
- * Unusable definitions (fully-flat leaf spellings, a missing provider, an
- * unknown member) are skipped with a once-per-process warning: they are
- * user-authored config that isn't being honored. (A definition must be an
- * object: nested under "presets", or a single flat "presets.<name>" key —
- * the same exception to the flat-key grammar that structured blocks like
- * catalog.models carry.) Same ownership contract as config_object_keys:
- * caller frees each element, then the array. */
+/* Enumerate valid, appliable preset names. Uses the config_object_keys ownership contract. */
 size_t config_preset_names(char ***out);
 
-/* ---- introspection ---- */
-
-/* Base grammar for a setting. CFG_STRING accepts any non-NULL value when
- * choices is absent; numeric kinds mirror the typed getters and may be combined
- * with symbolic choices. */
 enum config_kind {
-    CFG_STRING = 0,
-    CFG_INT,      /* whole number >= 0 (parse_int / config_int) */
-    CFG_SIZE,     /* parse_size grammar: 4096, 64k, 1M (> 0) */
-    CFG_DURATION, /* parse_duration_ms grammar: 500, 2s (>= 0; 0 disables) */
+    CONFIG_KIND_STRING = 0,
+    CONFIG_KIND_INT,
+    CONFIG_KIND_SIZE,
+    CONFIG_KIND_DURATION,
 };
 
-/* For CFG_STRING, two choice lists carry special grammar in config_value_valid
- * and the /config display, so the registry, validator, and display reference
- * them by name. CONFIG_CHOICES_BOOL accepts the full boolean grammar
- * (on/off/1/0/true/false/…); CONFIG_CHOICES_TRISTATE adds an "auto" literal for
- * a boolean whose default the consumer resolves itself, so unset/auto means
- * "let it decide". */
+/* Named choice grammars shared by registry validation and the /config UI. */
 #define CONFIG_CHOICES_BOOL     "on|off"
 #define CONFIG_CHOICES_TRISTATE "auto|on|off"
 
-/* One setting registry row. */
 struct config_setting {
     const char *key;
-    const char *env;
-    const char *def;
-    const char *desc;
-    /* '|'-separated literals; exhaustive for CFG_STRING, additive otherwise */
-    const char *choices;
-    const char *example; /* typed-value example for a mixed-choice prompt */
+    const char *env_var;
+    const char *default_value;
+    const char *description;
+    const char *choices; /* '|'-separated; exhaustive for strings, additive for numeric kinds */
+    const char *example; /* numeric example for a setting that also has symbolic choices */
     enum config_kind kind;
-    long min;                /* lower bound in int/bytes/ms; 0 = none */
-    long max;                /* upper bound in int/bytes/ms; 0 = none */
-    unsigned runtime : 1;    /* editable through /config */
-    unsigned secret : 1;     /* redact the value in /config */
-    unsigned keep_empty : 1; /* "" is meaningful rather than unset */
+    long min;                /* native units (integer, bytes, or ms); 0 means no lower bound */
+    long max;                /* native units (integer, bytes, or ms); 0 means no upper bound */
+    unsigned editable : 1;   /* editable through /config */
+    unsigned secret : 1;     /* value is redacted in /config */
+    unsigned keep_empty : 1; /* an empty string is meaningful */
 };
 
-/* The setting registry as a read-only array; *n receives the count. The
- * single source of truth for "what settings exist" — for generating a help
- * listing or a /config view, and for keeping docs honest. */
-const struct config_setting *config_settings(size_t *n);
-
-/* Registry row for `key`, or NULL if unknown. */
+/* Registry rows are static and ordered for display. */
+const struct config_setting *config_settings(size_t *count);
 const struct config_setting *config_setting_find(const char *key);
 
-/* Winning tier: "session", "env", "state", "config", or "default". Uses
- * the same empty-value policy as config_str. */
+/* Return "run", "conversation", "env", "state", "config", or "default". */
 const char *config_source(const char *key);
 
-/* Validate `val` against case-insensitive choices (with the full boolean
- * grammar for "on|off") and, for a non-string kind, its grammar and bounds. */
-int config_value_valid(const struct config_setting *s, const char *val);
+/* Validate a value against the setting's choices, kind, and bounds. */
+int config_value_valid(const struct config_setting *setting, const char *value);
 
-/* Format the accepted choices, kind grammar, bounds, and optional example for
- * a rejection message. Empty for an unrestricted CFG_STRING. */
-void config_value_hint(const struct config_setting *s, char *buf, size_t n);
+/* Describe the accepted values for a validation error. Writes an empty string for unrestricted
+ * string settings. */
+void config_value_hint(const struct config_setting *setting, char *buffer, size_t size);
 
-/* Return the heap-owned canonical enum spelling matching `val`, or NULL for
- * a non-enum or no match. Validate `val` first; the caller frees the result. */
-char *config_value_canonical(const struct config_setting *s, const char *val);
+/* Return the allocated canonical enum choice matching `value`, or NULL for non-enums or no match.
+ */
+char *config_value_canonical(const struct config_setting *setting, const char *value);
 
 #endif /* HAX_CONFIG_H */
