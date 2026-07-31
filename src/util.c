@@ -24,107 +24,100 @@
 #include "terminal/theme.h"
 #include "text/utf8.h"
 
-static int locale_utf8 = 0;
+static int locale_is_utf8;
 
 void locale_init_utf8(void)
 {
     setlocale(LC_CTYPE, "");
     if (strcmp(nl_langinfo(CODESET), "UTF-8") == 0) {
-        locale_utf8 = 1;
+        locale_is_utf8 = 1;
         return;
     }
     if (setlocale(LC_CTYPE, "C.UTF-8") || setlocale(LC_CTYPE, "en_US.UTF-8"))
-        locale_utf8 = 1;
+        locale_is_utf8 = 1;
 }
 
 int locale_have_utf8(void)
 {
-    return locale_utf8;
+    return locale_is_utf8;
 }
 
-static void oom(void)
+static void die_oom(void)
 {
     fprintf(stderr, "hax: out of memory\n");
     abort();
 }
 
-/* Monotonic diagnostic generation lets mixed stdout/stderr presentation
- * resynchronize after lower layers print directly here, without carrying
- * individual warning payloads through their APIs. */
-static _Atomic unsigned long diag_sequence;
+/* Lets stdout presentation detect diagnostics emitted directly by lower layers. */
+static _Atomic unsigned long diagnostic_sequence;
 
 unsigned long hax_diag_sequence(void)
 {
-    return atomic_load_explicit(&diag_sequence, memory_order_relaxed);
+    return atomic_load_explicit(&diagnostic_sequence, memory_order_relaxed);
 }
 
-/* Shared core for hax_err/hax_warn: a "hax: <msg>\n" line on stderr,
- * wrapped in `color` only when stderr is a TTY so redirected output and
- * 2>&1 captures stay plain. */
-static void hax_diag(const char *color, const char *fmt, va_list ap)
+static void emit_diagnostic(const char *color, const char *format, va_list args)
 {
-    /* An empty color (theme off / NO_COLOR) suppresses the closing reset
-     * too — no escapes at all on a colorless line. */
     int styled = isatty(fileno(stderr)) && *color;
     if (styled)
         fputs(color, stderr);
     fputs("hax: ", stderr);
-    vfprintf(stderr, fmt, ap);
+    vfprintf(stderr, format, args);
     if (styled)
         fputs(ANSI_RESET, stderr);
     fputc('\n', stderr);
     fflush(stderr);
-    atomic_fetch_add_explicit(&diag_sequence, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&diagnostic_sequence, 1, memory_order_relaxed);
 }
 
-void hax_err(const char *fmt, ...)
+void hax_err(const char *format, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    hax_diag(theme_open(THEME_ERROR), fmt, ap);
-    va_end(ap);
+    va_list args;
+    va_start(args, format);
+    emit_diagnostic(theme_open(THEME_ERROR), format, args);
+    va_end(args);
 }
 
-void hax_warn(const char *fmt, ...)
+void hax_warn(const char *format, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    hax_diag(theme_open(THEME_WARN), fmt, ap);
-    va_end(ap);
+    va_list args;
+    va_start(args, format);
+    emit_diagnostic(theme_open(THEME_WARN), format, args);
+    va_end(args);
 }
 
-void *xmalloc(size_t n)
+void *xmalloc(size_t size)
 {
-    void *p = malloc(n);
-    if (!p)
-        oom();
-    return p;
+    void *result = malloc(size ? size : 1);
+    if (!result)
+        die_oom();
+    return result;
 }
 
-void *xcalloc(size_t n, size_t sz)
+void *xcalloc(size_t count, size_t element_size)
 {
-    void *p = calloc(n, sz);
-    if (!p)
-        oom();
-    return p;
+    void *result = (count && element_size) ? calloc(count, element_size) : calloc(1, 1);
+    if (!result)
+        die_oom();
+    return result;
 }
 
-void *xrealloc(void *p, size_t n)
+void *xrealloc(void *ptr, size_t size)
 {
-    void *q = realloc(p, n);
-    if (!q && n)
-        oom();
-    return q;
+    void *result = realloc(ptr, size ? size : 1);
+    if (!result)
+        die_oom();
+    return result;
 }
 
-char *xstrdup(const char *s)
+char *xstrdup(const char *str)
 {
-    if (!s)
+    if (!str)
         return NULL;
-    char *r = strdup(s);
-    if (!r)
-        oom();
-    return r;
+    char *result = strdup(str);
+    if (!result)
+        die_oom();
+    return result;
 }
 
 void string_array_free(char **strings)
@@ -136,76 +129,82 @@ void string_array_free(char **strings)
     free(strings);
 }
 
-char *xvasprintf(const char *fmt, va_list ap)
+char *xvasprintf(const char *format, va_list args)
 {
-    va_list ap2;
-    va_copy(ap2, ap);
-    int n = vsnprintf(NULL, 0, fmt, ap2);
-    va_end(ap2);
-    if (n < 0)
+    va_list copy;
+    va_copy(copy, args);
+    int length = vsnprintf(NULL, 0, format, copy);
+    va_end(copy);
+    if (length < 0)
         return NULL;
-    char *p = xmalloc((size_t)n + 1);
-    va_copy(ap2, ap);
-    vsnprintf(p, (size_t)n + 1, fmt, ap2);
-    va_end(ap2);
-    return p;
-}
 
-char *xasprintf(const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    char *p = xvasprintf(fmt, ap);
-    va_end(ap);
-    return p;
-}
-
-char *shell_single_quote(const char *s)
-{
-    struct buf b;
-    buf_init(&b);
-    buf_append(&b, "'", 1);
-    for (; s && *s; s++) {
-        if (*s == '\'')
-            buf_append_str(&b, "'\\''");
-        else
-            buf_append(&b, s, 1);
+    char *result = xmalloc((size_t)length + 1);
+    va_copy(copy, args);
+    int written = vsnprintf(result, (size_t)length + 1, format, copy);
+    va_end(copy);
+    if (written < 0 || written > length) {
+        free(result);
+        return NULL;
     }
-    buf_append(&b, "'", 1);
-    return buf_steal(&b);
+    return result;
+}
+
+char *xasprintf(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    char *result = xvasprintf(format, args);
+    va_end(args);
+    return result;
+}
+
+char *shell_single_quote(const char *str)
+{
+    struct buf quoted;
+    buf_init(&quoted);
+    buf_append(&quoted, "'", 1);
+    for (; str && *str; str++) {
+        if (*str == '\'')
+            buf_append_str(&quoted, "'\\''");
+        else
+            buf_append(&quoted, str, 1);
+    }
+    buf_append(&quoted, "'", 1);
+    return buf_steal(&quoted);
 }
 
 void gen_uuid_v4(char out[37])
 {
-    uint8_t b[16];
+    uint8_t bytes[16];
     int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         hax_err("open /dev/urandom: %s", strerror(errno));
         abort();
     }
-    size_t got = 0;
-    while (got < sizeof(b)) {
-        ssize_t r = read(fd, b + got, sizeof(b) - got);
-        if (r < 0) {
+
+    size_t bytes_read = 0;
+    while (bytes_read < sizeof(bytes)) {
+        ssize_t count = read(fd, bytes + bytes_read, sizeof(bytes) - bytes_read);
+        if (count < 0) {
             if (errno == EINTR)
                 continue;
             hax_err("read /dev/urandom: %s", strerror(errno));
             abort();
         }
-        if (r == 0) {
+        if (count == 0) {
             hax_err("unexpected EOF on /dev/urandom");
             abort();
         }
-        got += (size_t)r;
+        bytes_read += (size_t)count;
     }
     close(fd);
 
-    b[6] = (b[6] & 0x0f) | 0x40; /* RFC 4122 version 4 */
-    b[8] = (b[8] & 0x3f) | 0x80; /* RFC 4122 variant */
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; /* RFC 4122 version 4 */
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; /* RFC 4122 variant */
 
-    snprintf(out, 37, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", b[0],
-             b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13],
-             b[14], b[15]);
+    snprintf(out, 37, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+             bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
 }
 
 int term_width(void)
@@ -213,653 +212,567 @@ int term_width(void)
     struct winsize ws;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
         return ws.ws_col;
-    return 120; /* not a tty / ioctl failed — pick a roomy default */
+    return 120;
 }
 
-int parse_int(const char *s, int *out)
+int parse_int(const char *str, int *out)
 {
-    if (!s || !*s)
+    if (!str || !*str)
         return 0;
+
     char *end;
     errno = 0;
-    long v = strtol(s, &end, 10);
-    if (end == s || *end != '\0')
+    long value = strtol(str, &end, 10);
+    if (end == str || *end != '\0')
         return 0;
-    if (errno == ERANGE || v > INT_MAX || v < INT_MIN)
+    if (errno == ERANGE || value > INT_MAX || value < INT_MIN)
         return 0;
-    *out = (int)v;
+    *out = (int)value;
     return 1;
 }
 
 int display_width(void)
 {
     const char *mode = config_str("display_width");
-    int v = config_int("display_width");
-    if (v >= 20)
-        return v;
+    int configured_width = config_int("display_width");
+    if (configured_width >= 20)
+        return configured_width;
 
-    /* term_width() is the raw physical width. "terminal" follows it without
-     * the readability cap; "auto" (and invalid values) clamps it to the sane
-     * content range. Both keep the floor needed by wrap/truncate paths. */
-    int w = term_width();
-    if (!mode || strcasecmp(mode, "terminal") != 0) {
-        if (w > DISPLAY_WIDTH_CAP)
-            w = DISPLAY_WIDTH_CAP;
-    }
-    return w < 20 ? 20 : w;
+    int width = term_width();
+    if ((!mode || strcasecmp(mode, "terminal") != 0) && width > DISPLAY_WIDTH_CAP)
+        width = DISPLAY_WIDTH_CAP;
+    return width < 20 ? 20 : width;
 }
 
-/* Width of the codepoint at s[i..] in cells. Sets *consumed to the
- * codepoint's byte length. Substitutes a 1-cell width for control /
- * malformed / "dangerous" codepoints so a non-printable can't make
- * the running total go negative. Caller is responsible for ensuring
- * i < len; utf8_codepoint_cells guarantees *consumed >= 1 in that
- * case. */
-static size_t cells_at(const char *s, size_t len, size_t i, size_t *consumed)
+static size_t codepoint_cells_at(const char *str, size_t length, size_t offset,
+                                 size_t *codepoint_bytes)
 {
-    int w = utf8_codepoint_cells(s, len, i, consumed);
-    if (w < 0)
-        w = 1;
-    return (size_t)w;
+    int cells = utf8_codepoint_cells(str, length, offset, codepoint_bytes);
+    return cells < 0 ? 1 : (size_t)cells;
 }
 
-/* Skip past any zero-width codepoints (combining marks, etc.)
- * starting at `i`. They ride visually on the prior glyph and must
- * stay attached to it across a cut or wrap boundary — without this,
- * a string ending in a combining mark would mis-render after
- * truncation, and a hard wrap immediately before a combining mark
- * would orphan the mark on the next row. */
-static size_t skip_zero_width(const char *s, size_t len, size_t i)
+/* Combining marks stay with the preceding visible codepoint across cuts. */
+static size_t skip_zero_width(const char *str, size_t length, size_t offset)
 {
-    while (i < len) {
-        size_t consumed;
-        size_t w = cells_at(s, len, i, &consumed);
-        if (w != 0)
+    while (offset < length) {
+        size_t codepoint_bytes;
+        size_t cells = codepoint_cells_at(str, length, offset, &codepoint_bytes);
+        if (cells != 0)
             break;
-        i += consumed;
+        offset += codepoint_bytes;
     }
-    return i;
+    return offset;
 }
 
-/* Walk forward until `target_cells` cells of content have been
- * consumed (or end-of-buffer), returning the resulting byte position.
- * Trailing zero-width codepoints are absorbed so the cut point doesn't
- * orphan a combining mark from its base character. */
-static size_t advance_cells(const char *s, size_t len, size_t target_cells)
+static size_t advance_cells(const char *str, size_t length, size_t max_cells)
 {
-    size_t i = 0;
+    size_t offset = 0;
     size_t cells = 0;
-    while (i < len && cells < target_cells) {
-        size_t consumed;
-        size_t w = cells_at(s, len, i, &consumed);
-        if (cells + w > target_cells)
+    while (offset < length && cells < max_cells) {
+        size_t codepoint_bytes;
+        size_t next_cells = codepoint_cells_at(str, length, offset, &codepoint_bytes);
+        if (cells + next_cells > max_cells)
             break;
-        cells += w;
-        i += consumed;
+        cells += next_cells;
+        offset += codepoint_bytes;
     }
-    return skip_zero_width(s, len, i);
+    return skip_zero_width(str, length, offset);
 }
 
-size_t display_cells(const char *s)
+size_t display_cells(const char *str)
 {
-    if (!s)
+    if (!str)
         return 0;
-    size_t len = strlen(s);
-    size_t i = 0;
+
+    size_t length = strlen(str);
+    size_t offset = 0;
     size_t cells = 0;
-    while (i < len) {
-        size_t consumed;
-        cells += cells_at(s, len, i, &consumed);
-        i += consumed;
+    while (offset < length) {
+        size_t codepoint_bytes;
+        cells += codepoint_cells_at(str, length, offset, &codepoint_bytes);
+        offset += codepoint_bytes;
     }
     return cells;
 }
 
-char *truncate_for_display(const char *s, size_t cap)
+char *truncate_for_display(const char *str, size_t max_cells)
 {
-    if (!s)
+    if (!str)
         return xstrdup("");
-    size_t n = strlen(s);
-    /* Cheap fast path: byte length <= cap implies cell count <= cap
-     * (each cell takes >= 1 byte in UTF-8). The reverse isn't true
-     * (multi-byte codepoints make n > cap possible while cells <=
-     * cap), so the in-budget check below covers the rest. */
-    if (n <= cap)
-        return xstrdup(s);
-    /* If walking exactly `cap` cells reaches end-of-buffer, the whole
-     * string fits — no truncation needed. */
-    if (advance_cells(s, n, cap) == n)
-        return xstrdup(s);
-    /* Below 4 cells we can't fit a meaningful "..." marker — hard cut
-     * at the codepoint boundary. Callers normally clamp budgets above
-     * this floor; the branch is here so pathological inputs don't
-     * underflow. */
-    if (cap < 4) {
-        size_t cut = advance_cells(s, n, cap);
-        char *out = xmalloc(cut + 1);
-        memcpy(out, s, cut);
-        out[cut] = '\0';
-        return out;
-    }
-    size_t cut = advance_cells(s, n, cap - 3);
-    char *out = xmalloc(cut + 4);
-    memcpy(out, s, cut);
-    memcpy(out + cut, "...", 3);
-    out[cut + 3] = '\0';
-    return out;
+
+    size_t length = strlen(str);
+    if (length <= max_cells || advance_cells(str, length, max_cells) == length)
+        return xstrdup(str);
+
+    size_t content_cells = max_cells < 4 ? max_cells : max_cells - 3;
+    size_t content_bytes = advance_cells(str, length, content_cells);
+    size_t ellipsis_bytes = max_cells < 4 ? 0 : 3;
+    char *result = xmalloc(content_bytes + ellipsis_bytes + 1);
+    memcpy(result, str, content_bytes);
+    memcpy(result + content_bytes, "...", ellipsis_bytes);
+    result[content_bytes + ellipsis_bytes] = '\0';
+    return result;
 }
 
-/* Strict word-boundary break: rightmost-ASCII-space-within-budget,
- * else hard cut at max_cells cells. Returns 0 if even the first
- * codepoint exceeds the budget — wrap_break_pos adds a forward-
- * progress fallback on top for the wrap case, but the truncate path
- * in reflow_for_display calls this directly so an appended "..."
- * doesn't push the row past its width. */
-static size_t strict_break_pos(const char *s, size_t len, size_t max_cells, size_t *resume_at)
+/* Unlike wrapping, ellipsis truncation may return zero rather than exceed max_cells. */
+static size_t strict_break_pos(const char *str, size_t length, size_t max_cells,
+                               size_t *next_offset)
 {
-    /* Forward walk counting cells. A space sitting exactly at column
-     * max_cells is a valid break point — its width "belongs" to the
-     * fence between rows, not the row content, so we record it even
-     * when adding its width would push us over. */
-    size_t i = 0;
+    size_t offset = 0;
     size_t cells = 0;
-    size_t last_space_byte = (size_t)-1;
-    while (i < len) {
-        size_t consumed;
-        size_t w = cells_at(s, len, i, &consumed);
-        if (cells + w > max_cells) {
-            if (s[i] == ' ' && cells == max_cells)
-                last_space_byte = i;
+    size_t last_space = SIZE_MAX;
+    while (offset < length) {
+        size_t codepoint_bytes;
+        size_t next_cells = codepoint_cells_at(str, length, offset, &codepoint_bytes);
+        if (cells + next_cells > max_cells) {
+            /* A boundary space separates rows and does not consume a content cell. */
+            if (str[offset] == ' ' && cells == max_cells)
+                last_space = offset;
             break;
         }
-        if (s[i] == ' ')
-            last_space_byte = i;
-        cells += w;
-        i += consumed;
+        if (str[offset] == ' ')
+            last_space = offset;
+        cells += next_cells;
+        offset += codepoint_bytes;
     }
-    if (i >= len) {
-        if (resume_at)
-            *resume_at = len;
-        return len;
+
+    if (offset >= length) {
+        if (next_offset)
+            *next_offset = length;
+        return length;
     }
-    if (last_space_byte == (size_t)-1) {
-        size_t cut = advance_cells(s, len, max_cells);
-        if (resume_at)
-            *resume_at = cut;
-        return cut;
+    if (last_space == SIZE_MAX) {
+        size_t row_end = advance_cells(str, length, max_cells);
+        if (next_offset)
+            *next_offset = row_end;
+        return row_end;
     }
-    /* Trim any preceding spaces from the row tail (defensive against
-     * unflattened input — flatten_for_display normally collapses
-     * multi-space runs, but the helper shouldn't depend on that). */
-    size_t end = last_space_byte;
-    while (end > 0 && s[end - 1] == ' ')
-        end--;
-    if (resume_at)
-        *resume_at = last_space_byte + 1;
-    return end;
+
+    size_t row_end = last_space;
+    while (row_end > 0 && str[row_end - 1] == ' ')
+        row_end--;
+    if (next_offset)
+        *next_offset = last_space + 1;
+    return row_end;
 }
 
-size_t wrap_break_pos(const char *s, size_t len, size_t max_cells, size_t *resume_at)
+size_t wrap_break_pos(const char *str, size_t length, size_t max_cells, size_t *next_offset)
 {
-    /* Precondition: max_cells >= 1 (see util.h). */
     assert(max_cells >= 1);
-    size_t resume = 0;
-    size_t end = strict_break_pos(s, len, max_cells, &resume);
-    /* Forward-progress fallback: if the very first codepoint is
-     * already wider than the budget (e.g. an emoji on a 1-cell row),
-     * strict_break_pos returns 0 and the caller's outer wrap loop
-     * would stall. Advance by one full codepoint instead — the
-     * visible row overflows by ≤1 cell in that pathological case.
-     * Truncate callers don't go through here. */
-    if (end == 0 && resume == 0 && len > 0) {
-        end = skip_zero_width(s, len, utf8_next(s, len, 0));
-        resume = end;
+    size_t next = 0;
+    size_t row_end = strict_break_pos(str, length, max_cells, &next);
+    if (row_end == 0 && next == 0 && length > 0) {
+        /* Taking one oversized codepoint preserves forward progress. */
+        row_end = skip_zero_width(str, length, utf8_next(str, length, 0));
+        next = row_end;
     }
-    if (resume_at)
-        *resume_at = resume;
-    return end;
+    if (next_offset)
+        *next_offset = next;
+    return row_end;
 }
 
-char *reflow_for_display(const char *s, int first_row, int mid_row, int max_rows,
+char *reflow_for_display(const char *str, int first_row_cells, int other_row_cells, int max_rows,
                          int last_row_reserve)
 {
-    if (!s)
+    if (!str)
         return xstrdup("");
     if (max_rows < 1)
         max_rows = 1;
-    if (first_row < 1)
-        first_row = 1;
-    if (mid_row < 1)
-        mid_row = 1;
+    if (first_row_cells < 1)
+        first_row_cells = 1;
+    if (other_row_cells < 1)
+        other_row_cells = 1;
     if (last_row_reserve < 0)
         last_row_reserve = 0;
 
-    size_t len = strlen(s);
-    int single_budget = first_row - last_row_reserve;
-    if (single_budget < 1)
-        single_budget = 1;
-    /* Cheap fast-path for ASCII / short inputs: byte length <= budget
-     * implies cell count <= budget (each cell takes >= 1 byte). For
-     * non-ASCII we fall through and let the loop measure properly. */
-    if (len <= (size_t)single_budget)
-        return xstrdup(s);
+    size_t length = strlen(str);
+    int single_row_cells = first_row_cells - last_row_reserve;
+    if (single_row_cells < 1)
+        single_row_cells = 1;
+    if (length <= (size_t)single_row_cells)
+        return xstrdup(str);
 
-    struct buf out;
-    buf_init(&out);
-    size_t pos = 0;
+    struct buf result;
+    buf_init(&result);
+    size_t offset = 0;
     for (int row = 0; row < max_rows; row++) {
-        int width = (row == 0) ? first_row : mid_row;
-        /* `last_width` is what the row gets if IT turns out to be the
-         * final one — full width minus the caller's reserve so an
-         * appended suffix doesn't push the row past `width`. Applies
-         * both to natural termination (tail fits on this row) and
-         * forced termination (row == max_rows - 1). Non-final rows
-         * are free to use the full width since later rows absorb the
-         * remainder. */
-        int last_width = width - last_row_reserve;
-        if (last_width < 1)
-            last_width = 1;
-        int forced_last = (row == max_rows - 1);
-        size_t rem = len - pos;
-        /* Probe with last_width: if the rest fits there, this row is
-         * the final one and the suffix will fit too. */
-        if (advance_cells(s + pos, rem, (size_t)last_width) == rem) {
-            buf_append(&out, s + pos, rem);
+        int row_cells = row == 0 ? first_row_cells : other_row_cells;
+        /* Any emitted row may become the last, so all rows leave room for the suffix. */
+        int content_cells = row_cells - last_row_reserve;
+        if (content_cells < 1)
+            content_cells = 1;
+
+        size_t remaining = length - offset;
+        if (advance_cells(str + offset, remaining, (size_t)content_cells) == remaining) {
+            buf_append(&result, str + offset, remaining);
             break;
         }
-        if (forced_last) {
-            /* Out of rows but content remains. Reserve 3 cells for
-             * "..."; if the budget is so tight that "..." doesn't fit,
-             * hard-cut at the row boundary as a last resort. */
-            int target = last_width - 3;
-            if (target < 1) {
-                size_t cut = advance_cells(s + pos, rem, (size_t)last_width);
-                buf_append(&out, s + pos, cut);
+
+        if (row == max_rows - 1) {
+            int before_ellipsis_cells = content_cells - 3;
+            if (before_ellipsis_cells < 1) {
+                size_t row_bytes = advance_cells(str + offset, remaining, (size_t)content_cells);
+                buf_append(&result, str + offset, row_bytes);
                 break;
             }
-            /* Use strict_break_pos (no forward-progress fallback) so a
-             * wide first codepoint can't overshoot — we'd append "..."
-             * after, and that would push the row past `width` cells. */
-            size_t end = strict_break_pos(s + pos, rem, (size_t)target, NULL);
-            buf_append(&out, s + pos, end);
-            buf_append(&out, "...", 3);
+            size_t row_bytes =
+                strict_break_pos(str + offset, remaining, (size_t)before_ellipsis_cells, NULL);
+            buf_append(&result, str + offset, row_bytes);
+            buf_append(&result, "...", 3);
             break;
         }
-        /* Wrap with last_width (not full width). Even non-final rows
-         * use the reduced budget so whichever row turns out to be
-         * final has room for the caller's suffix — avoids the "tail
-         * fits in width but not last_width" wart that would otherwise
-         * leave a trailing \n and push the suffix to its own row. */
-        size_t resume;
-        size_t end = wrap_break_pos(s + pos, rem, (size_t)last_width, &resume);
-        buf_append(&out, s + pos, end);
-        buf_append(&out, "\n", 1);
-        pos += resume;
+
+        size_t next_offset;
+        size_t row_bytes =
+            wrap_break_pos(str + offset, remaining, (size_t)content_cells, &next_offset);
+        buf_append(&result, str + offset, row_bytes);
+        buf_append(&result, "\n", 1);
+        offset += next_offset;
     }
-    /* Loop is guaranteed to append at least once (max_rows >= 1, and
-     * each iteration ends in a buf_append before break/continue), so
-     * out.data is non-NULL here in practice. The fallback keeps the
-     * "never returns NULL" contract honest under NDEBUG / future
-     * refactors. */
-    if (!out.data)
-        return xstrdup("");
-    return buf_steal(&out);
+    return buf_steal(&result);
 }
 
-int write_all(int fd, const void *data, size_t n)
+int write_all(int fd, const void *data, size_t length)
 {
-    const char *p = data;
-    while (n > 0) {
-        ssize_t w = write(fd, p, n);
-        if (w < 0) {
+    const char *cursor = data;
+    while (length > 0) {
+        size_t request = length > (size_t)SSIZE_MAX ? (size_t)SSIZE_MAX : length;
+        ssize_t written = write(fd, cursor, request);
+        if (written < 0) {
             if (errno == EINTR)
                 continue;
             return -1;
         }
-        p += w;
-        n -= (size_t)w;
+        if (written == 0) {
+            errno = EIO;
+            return -1;
+        }
+        cursor += written;
+        length -= (size_t)written;
     }
     return 0;
+}
+
+static int regular_mode_or_error(mode_t mode)
+{
+    if (S_ISREG(mode))
+        return 0;
+    errno = S_ISDIR(mode) ? EISDIR : EINVAL;
+    return -1;
 }
 
 int ensure_regular_file(const char *path)
 {
-    struct stat st;
-    if (stat(path, &st) != 0)
+    struct stat status;
+    if (stat(path, &status) < 0)
         return -1;
-    if (!S_ISREG(st.st_mode)) {
-        errno = S_ISDIR(st.st_mode) ? EISDIR : EINVAL;
+    return regular_mode_or_error(status.st_mode);
+}
+
+int open_regular_file(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0)
         return -1;
-    }
-    return 0;
+
+    struct stat status;
+    if (fstat(fd, &status) == 0 && regular_mode_or_error(status.st_mode) == 0)
+        return fd;
+
+    int saved_errno = errno;
+    close(fd);
+    errno = saved_errno;
+    return -1;
+}
+
+static ssize_t read_retry(int fd, void *data, size_t length)
+{
+    ssize_t bytes_read;
+    do {
+        bytes_read = read(fd, data, length);
+    } while (bytes_read < 0 && errno == EINTR);
+    return bytes_read;
 }
 
 char *slurp_file(const char *path, size_t *out_len)
 {
-    if (ensure_regular_file(path) < 0)
-        return NULL;
-
-    int fd = open(path, O_RDONLY);
+    int saved_errno;
+    int fd = open_regular_file(path);
     if (fd < 0)
         return NULL;
 
-    struct stat st;
-    if (fstat(fd, &st) < 0)
-        goto err_close;
-
-    size_t sz = (size_t)st.st_size;
-    char *buf = malloc(sz + 1);
-    if (!buf)
-        goto err_close;
-
-    size_t got = 0;
-    while (got < sz) {
-        ssize_t r = read(fd, buf + got, sz - got);
-        if (r < 0) {
-            if (errno == EINTR)
-                continue;
-            goto err_free;
-        }
-        if (r == 0)
+    struct buf contents;
+    buf_init(&contents);
+    char chunk[8192];
+    for (;;) {
+        ssize_t bytes_read = read_retry(fd, chunk, sizeof(chunk));
+        if (bytes_read < 0)
+            goto error;
+        if (bytes_read == 0)
             break;
-        got += (size_t)r;
+        buf_append(&contents, chunk, (size_t)bytes_read);
     }
-    buf[got] = '\0';
+
     close(fd);
     if (out_len)
-        *out_len = got;
-    return buf;
+        *out_len = contents.len;
+    return buf_steal(&contents);
 
-err_free:
-    free(buf);
-err_close:
+error:
+    saved_errno = errno;
+    buf_free(&contents);
     close(fd);
+    errno = saved_errno;
     return NULL;
 }
 
 char *slurp_file_capped(const char *path, size_t cap, size_t *out_len, int *out_truncated)
 {
-    if (ensure_regular_file(path) < 0)
-        return NULL;
-
-    int fd = open(path, O_RDONLY);
+    int saved_errno;
+    int truncated = 0;
+    int fd = open_regular_file(path);
     if (fd < 0)
         return NULL;
 
-    char *buf = malloc(cap + 1);
-    if (!buf) {
-        close(fd);
-        return NULL;
-    }
-
-    size_t got = 0;
-    while (got < cap) {
-        ssize_t r = read(fd, buf + got, cap - got);
-        if (r < 0) {
-            if (errno == EINTR)
-                continue;
-            free(buf);
-            close(fd);
-            return NULL;
-        }
-        if (r == 0)
+    struct buf contents;
+    buf_init(&contents);
+    char chunk[8192];
+    while (contents.len < cap) {
+        size_t remaining = cap - contents.len;
+        size_t request = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+        ssize_t bytes_read = read_retry(fd, chunk, request);
+        if (bytes_read < 0)
+            goto error;
+        if (bytes_read == 0)
             break;
-        got += (size_t)r;
+        buf_append(&contents, chunk, (size_t)bytes_read);
     }
 
-    int truncated = 0;
-    if (got == cap) {
-        char probe;
-        ssize_t r = read(fd, &probe, 1);
-        if (r > 0)
-            truncated = 1;
+    if (contents.len == cap) {
+        char extra;
+        ssize_t bytes_read = read_retry(fd, &extra, 1);
+        if (bytes_read < 0)
+            goto error;
+        truncated = bytes_read > 0;
     }
 
     close(fd);
-    buf[got] = '\0';
     if (out_len)
-        *out_len = got;
+        *out_len = contents.len;
     if (out_truncated)
         *out_truncated = truncated;
-    return buf;
-}
+    return buf_steal(&contents);
 
-char *cap_line_lengths(const char *data, size_t len, size_t max_line, size_t *out_len)
-{
-    struct buf out;
-    buf_init(&out);
-    size_t i = 0;
-    while (i < len) {
-        size_t line_start = i;
-        while (i < len && data[i] != '\n')
-            i++;
-        size_t line_len = i - line_start;
-        if (line_len > max_line) {
-            buf_append(&out, data + line_start, max_line);
-            char marker[64];
-            int m = snprintf(marker, sizeof(marker), "...[%zu bytes elided]", line_len - max_line);
-            buf_append(&out, marker, (size_t)m);
-        } else {
-            buf_append(&out, data + line_start, line_len);
-        }
-        if (i < len) {
-            buf_append(&out, "\n", 1);
-            i++;
-        }
-    }
-    if (!out.data)
-        out.data = xstrdup("");
-    if (out_len)
-        *out_len = out.len;
-    return buf_steal(&out);
-}
-
-/* Cap on consecutive zero-width codepoints (combining marks,
- * variation selectors) attached to one base glyph. Devanagari,
- * Arabic, and other scripts use a handful per base; Unicode's Stream-
- * Safe Format upper bound is 30. Beyond this cap, additional zero-
- * width codepoints are model-supplied flooding (~1 visual cell for
- * arbitrary bytes — would let a hostile tool arg dump huge terminal
- * output and visually modify the preceding glyph). */
-#define MAX_ZW_PER_BASE 8
-
-char *flatten_for_display(const char *s)
-{
-    if (!s)
-        return xstrdup("");
-    size_t n = strlen(s);
-    /* Output is at most n bytes — every transformation either drops
-     * bytes (whitespace collapse, zero-width cap) or substitutes 1
-     * byte ('?') for a multi-byte dangerous codepoint. */
-    char *out = xmalloc(n + 1);
-    size_t j = 0;
-    int prev_space = 1; /* drop leading whitespace */
-    int zw_run = 0;     /* consecutive zero-width codepoints emitted */
-    size_t i = 0;
-    while (i < n) {
-        unsigned char c = (unsigned char)s[i];
-        if (c < 0x80) {
-            /* ASCII fast path: original whitespace-collapse + drop-
-             * controls behavior. Locale-independent. */
-            int is_space = c == ' ' || c == '\t' || c == '\n' || c == '\r' || c < 0x20 || c == 0x7f;
-            if (is_space) {
-                if (!prev_space) {
-                    out[j++] = ' ';
-                    prev_space = 1;
-                }
-            } else {
-                out[j++] = (char)c;
-                prev_space = 0;
-            }
-            zw_run = 0;
-            i++;
-            continue;
-        }
-        /* Multi-byte UTF-8: utf8_codepoint_cells flags "dangerous"
-         * codepoints (Trojan Source bidi vectors, ZWJ, BOM, malformed
-         * sequences) by returning < 0, and zero-width legitimate
-         * combining marks by returning 0. Substitute one '?' per
-         * dangerous codepoint; cap consecutive zero-width runs at
-         * MAX_ZW_PER_BASE; otherwise pass through. The width math
-         * elsewhere substitutes 1 cell for w<0 and 0 cells for w==0,
-         * so cell budgeting stays consistent with what we emit. */
-        size_t consumed;
-        int w = utf8_codepoint_cells(s, n, i, &consumed);
-        if (w < 0) {
-            out[j++] = '?';
-            zw_run = 0;
-            prev_space = 0;
-        } else if (w == 0) {
-            if (zw_run < MAX_ZW_PER_BASE) {
-                for (size_t k = 0; k < consumed; k++)
-                    out[j++] = s[i + k];
-                zw_run++;
-            }
-            /* prev_space unchanged: zero-width doesn't change the
-             * trailing-whitespace question. */
-        } else {
-            for (size_t k = 0; k < consumed; k++)
-                out[j++] = s[i + k];
-            zw_run = 0;
-            prev_space = 0;
-        }
-        i += consumed ? consumed : 1;
-    }
-    while (j > 0 && out[j - 1] == ' ')
-        j--;
-    out[j] = '\0';
-    return out;
-}
-
-/* Shared resolver behind xdg_hax_config_path / xdg_hax_state_path:
- * "$<env_var>/hax/<relpath>" when the env var is set and non-empty,
- * else "$HOME/<home_default>/hax/<relpath>". Returns NULL when neither
- * is available. */
-static char *xdg_hax_path(const char *env_var, const char *home_default, const char *relpath)
-{
-    const char *xdg = getenv(env_var);
-    if (xdg && *xdg)
-        return xasprintf("%s/hax/%s", xdg, relpath);
-    const char *home = getenv("HOME");
-    if (home && *home)
-        return xasprintf("%s/%s/hax/%s", home, home_default, relpath);
+error:
+    saved_errno = errno;
+    buf_free(&contents);
+    close(fd);
+    errno = saved_errno;
     return NULL;
 }
 
-char *xdg_hax_config_path(const char *relpath)
+char *cap_line_lengths(const char *data, size_t length, size_t max_line_bytes, size_t *out_len)
 {
-    return xdg_hax_path("XDG_CONFIG_HOME", ".config", relpath);
+    struct buf result;
+    buf_init(&result);
+    size_t offset = 0;
+    while (offset < length) {
+        size_t line_start = offset;
+        while (offset < length && data[offset] != '\n')
+            offset++;
+        size_t line_length = offset - line_start;
+        if (line_length > max_line_bytes) {
+            buf_append(&result, data + line_start, max_line_bytes);
+            char marker[64];
+            int marker_length = snprintf(marker, sizeof(marker), "...[%zu bytes elided]",
+                                         line_length - max_line_bytes);
+            buf_append(&result, marker, (size_t)marker_length);
+        } else {
+            buf_append(&result, data + line_start, line_length);
+        }
+        if (offset < length) {
+            buf_append(&result, "\n", 1);
+            offset++;
+        }
+    }
+    if (out_len)
+        *out_len = result.len;
+    return buf_steal(&result);
 }
 
-char *xdg_hax_state_path(const char *relpath)
+/* Bounds invisible byte growth while preserving ordinary combining sequences. */
+#define MAX_ZERO_WIDTH_PER_BASE 8
+
+char *flatten_for_display(const char *str)
 {
-    return xdg_hax_path("XDG_STATE_HOME", ".local/state", relpath);
+    if (!str)
+        return xstrdup("");
+
+    size_t length = strlen(str);
+    /* Every transformation preserves, removes, or replaces input bytes with one byte. */
+    char *result = xmalloc(length + 1);
+    size_t result_length = 0;
+    int previous_was_space = 1;
+    int zero_width_run = 0;
+    size_t offset = 0;
+    while (offset < length) {
+        unsigned char byte = (unsigned char)str[offset];
+        if (byte < 0x80) {
+            int is_space = byte == ' ' || byte == '\t' || byte == '\n' || byte == '\r' ||
+                           byte < 0x20 || byte == 0x7f;
+            if (is_space) {
+                if (!previous_was_space) {
+                    result[result_length++] = ' ';
+                    previous_was_space = 1;
+                }
+            } else {
+                result[result_length++] = (char)byte;
+                previous_was_space = 0;
+            }
+            zero_width_run = 0;
+            offset++;
+            continue;
+        }
+
+        size_t codepoint_bytes;
+        int cells = utf8_codepoint_cells(str, length, offset, &codepoint_bytes);
+        if (cells < 0) {
+            result[result_length++] = '?';
+            zero_width_run = 0;
+            previous_was_space = 0;
+        } else if (cells == 0) {
+            if (zero_width_run < MAX_ZERO_WIDTH_PER_BASE) {
+                memcpy(result + result_length, str + offset, codepoint_bytes);
+                result_length += codepoint_bytes;
+                zero_width_run++;
+            }
+        } else {
+            memcpy(result + result_length, str + offset, codepoint_bytes);
+            result_length += codepoint_bytes;
+            zero_width_run = 0;
+            previous_was_space = 0;
+        }
+        offset += codepoint_bytes;
+    }
+
+    if (result_length > 0 && result[result_length - 1] == ' ')
+        result_length--;
+    result[result_length] = '\0';
+    return result;
 }
 
-char *xdg_hax_cache_path(const char *relpath)
+static char *xdg_hax_path(const char *env_name, const char *home_relative,
+                          const char *relative_path)
 {
-    return xdg_hax_path("XDG_CACHE_HOME", ".cache", relpath);
+    const char *xdg_base = getenv(env_name);
+    if (xdg_base && *xdg_base)
+        return xasprintf("%s/hax/%s", xdg_base, relative_path);
+    const char *home = getenv("HOME");
+    if (home && *home)
+        return xasprintf("%s/%s/hax/%s", home, home_relative, relative_path);
+    return NULL;
 }
 
-char *dup_trim_trailing_slash(const char *s)
+char *xdg_hax_config_path(const char *relative_path)
 {
-    size_t n = strlen(s);
-    while (n > 0 && s[n - 1] == '/')
-        n--;
-    char *out = xmalloc(n + 1);
-    memcpy(out, s, n);
-    out[n] = '\0';
-    return out;
+    return xdg_hax_path("XDG_CONFIG_HOME", ".config", relative_path);
+}
+
+char *xdg_hax_state_path(const char *relative_path)
+{
+    return xdg_hax_path("XDG_STATE_HOME", ".local/state", relative_path);
+}
+
+char *xdg_hax_cache_path(const char *relative_path)
+{
+    return xdg_hax_path("XDG_CACHE_HOME", ".cache", relative_path);
+}
+
+char *dup_trim_trailing_slash(const char *str)
+{
+    size_t length = strlen(str);
+    while (length > 0 && str[length - 1] == '/')
+        length--;
+    char *result = xmalloc(length + 1);
+    memcpy(result, str, length);
+    result[length] = '\0';
+    return result;
 }
 
 size_t output_cap_bytes(void)
 {
-    /* The registry default ("50k") also covers an explicit 0 or invalid
-     * value — config_size treats both as unset, so the cap is never 0
-     * ("truncate everything"). */
     return (size_t)config_size("tool_output_cap");
 }
 
-long parse_size(const char *s)
+long parse_size(const char *str)
 {
-    if (!s || !*s)
+    if (!str || !*str)
         return 0;
+
     char *end;
     errno = 0;
-    long v = strtol(s, &end, 10);
-    /* ERANGE catches numerals like "99999999999999999999" — strtol clamps
-     * to LONG_MAX and the suffix multiply would either pass uselessly or
-     * overflow. Treat as invalid and let the caller's default kick in. */
-    if (end == s || v <= 0 || errno == ERANGE)
+    long value = strtol(str, &end, 10);
+    if (end == str || value <= 0 || errno == ERANGE)
         return 0;
     while (*end == ' ' || *end == '\t')
         end++;
-    long mul = 1;
+
+    long multiplier = 1;
     switch (*end) {
     case 'k':
     case 'K':
-        mul = 1024L;
+        multiplier = 1024L;
         end++;
         break;
     case 'm':
     case 'M':
-        mul = 1024L * 1024L;
+        multiplier = 1024L * 1024L;
         end++;
         break;
     }
     while (*end == ' ' || *end == '\t')
         end++;
-    if (*end != '\0')
+    if (*end != '\0' || value > LONG_MAX / multiplier)
         return 0;
-    /* Reject values that would overflow when scaled. v is positive; only
-     * the multiply needs guarding. */
-    if (mul > 1 && v > LONG_MAX / mul)
-        return 0;
-    return v * mul;
+    return value * multiplier;
 }
 
-long parse_duration_ms(const char *s)
+long parse_duration_ms(const char *str)
 {
-    if (!s || !*s)
+    if (!str || !*str)
         return -1;
+
     char *end;
     errno = 0;
-    long v = strtol(s, &end, 10);
-    /* ERANGE catches out-of-range numerals like "99...99ms" — strtol
-     * clamps to LONG_MAX, and the mul==1 ms path below would otherwise
-     * skip the overflow guard and silently accept a near-LONG_MAX value. */
-    if (end == s || v < 0 || errno == ERANGE)
+    long value = strtol(str, &end, 10);
+    if (end == str || value < 0 || errno == ERANGE)
         return -1;
     while (*end == ' ' || *end == '\t')
         end++;
-    long mul;
-    /* `ms` must be matched before bare `m` so "5ms" doesn't parse as
-     * "5m" (300_000) followed by stray "s". */
+
+    long multiplier;
+    /* Match "ms" before "m". */
     if ((end[0] == 'm' || end[0] == 'M') && (end[1] == 's' || end[1] == 'S')) {
-        mul = 1;
+        multiplier = 1;
         end += 2;
     } else if (*end == '\0' || *end == 's' || *end == 'S') {
-        mul = 1000;
+        multiplier = 1000;
         if (*end)
             end++;
     } else if (*end == 'm' || *end == 'M') {
-        mul = 60000;
+        multiplier = 60000;
         end++;
     } else if (*end == 'h' || *end == 'H') {
-        mul = 3600000;
+        multiplier = 3600000;
         end++;
     } else {
         return -1;
     }
     while (*end == ' ' || *end == '\t')
         end++;
-    if (*end != '\0')
+    if (*end != '\0' || (multiplier > 1 && value > LONG_MAX / multiplier))
         return -1;
-    /* Reject values that would overflow when scaled. v is non-negative;
-     * only the multiply needs guarding. */
-    if (mul > 1 && v > LONG_MAX / mul)
-        return -1;
-    return v * mul;
+    return value * multiplier;
 }
 
 long monotonic_ms(void)
@@ -869,109 +782,127 @@ long monotonic_ms(void)
     return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
 }
 
-void format_tokens(char *buf, size_t buflen, long n)
+void format_tokens(char *out, size_t out_size, long tokens)
 {
-    if (n < 0)
-        snprintf(buf, buflen, "?");
-    else if (n < 1024)
-        snprintf(buf, buflen, "%ld", n);
-    else if (n < 10L * 1024)
-        snprintf(buf, buflen, "%.1fk", (double)n / 1024.0);
-    else if (n < 1024L * 1024)
-        snprintf(buf, buflen, "%ldk", (n + 512) / 1024);
-    else if (n < 10L * 1024 * 1024)
-        snprintf(buf, buflen, "%.1fM", (double)n / (1024.0 * 1024.0));
-    else
-        snprintf(buf, buflen, "%ldM", (n + 512L * 1024) / (1024L * 1024));
-}
-
-void format_duration(char *buf, size_t buflen, long ms)
-{
-    long s = (ms + 500) / 1000;
-    if (s < 0)
-        s = 0;
-    if (s < 60)
-        snprintf(buf, buflen, "%lds", s);
-    else if (s < 3600)
-        snprintf(buf, buflen, "%ldm %02lds", s / 60, s % 60);
-    else
-        snprintf(buf, buflen, "%ldh %02ldm", s / 3600, s % 3600 / 60);
-}
-
-void format_cost(char *buf, size_t buflen, double usd)
-{
-    /* Zero is a real value here (a fresh key's account spend), not an
-     * unreported one — but "$0.0000" reads like a formatting bug. */
-    if (usd <= 0)
-        snprintf(buf, buflen, "$0.00");
-    else if (usd < 0.01)
-        snprintf(buf, buflen, "$%.4f", usd);
-    else if (usd < 1.0)
-        snprintf(buf, buflen, "$%.3f", usd);
-    else
-        snprintf(buf, buflen, "$%.2f", usd);
-}
-
-void format_context(char *buf, size_t buflen, long ctx, long limit)
-{
-    char a[32], b[32];
-    format_tokens(a, sizeof(a), ctx);
-    if (limit > 0) {
-        format_tokens(b, sizeof(b), limit);
-        snprintf(buf, buflen, "%s / %s (%ld%%)", a, b, ctx * 100 / limit);
-    } else {
-        snprintf(buf, buflen, "%s", a);
+    if (tokens < 0)
+        snprintf(out, out_size, "?");
+    else if (tokens < 1024)
+        snprintf(out, out_size, "%ld", tokens);
+    else if (tokens < 10L * 1024)
+        snprintf(out, out_size, "%.1fk", (double)tokens / 1024.0);
+    else if (tokens < 1024L * 1024)
+        snprintf(out, out_size, "%ldk", tokens / 1024 + (tokens % 1024 >= 512));
+    else if (tokens < 10L * 1024 * 1024)
+        snprintf(out, out_size, "%.1fM", (double)tokens / (1024.0 * 1024.0));
+    else {
+        const long million = 1024L * 1024L;
+        snprintf(out, out_size, "%ldM", tokens / million + (tokens % million >= million / 2));
     }
 }
 
-void buf_init(struct buf *b)
+void format_duration(char *out, size_t out_size, long duration_ms)
 {
-    b->data = NULL;
-    b->len = 0;
-    b->cap = 0;
+    long seconds = 0;
+    if (duration_ms > 0)
+        seconds = duration_ms / 1000 + (duration_ms % 1000 >= 500);
+
+    if (seconds < 60)
+        snprintf(out, out_size, "%lds", seconds);
+    else if (seconds < 3600)
+        snprintf(out, out_size, "%ldm %02lds", seconds / 60, seconds % 60);
+    else
+        snprintf(out, out_size, "%ldh %02ldm", seconds / 3600, seconds % 3600 / 60);
 }
 
-void buf_free(struct buf *b)
+void format_cost(char *out, size_t out_size, double usd)
 {
-    free(b->data);
-    b->data = NULL;
-    b->len = b->cap = 0;
+    if (usd <= 0)
+        snprintf(out, out_size, "$0.00");
+    else if (usd < 0.01)
+        snprintf(out, out_size, "$%.4f", usd);
+    else if (usd < 1.0)
+        snprintf(out, out_size, "$%.3f", usd);
+    else
+        snprintf(out, out_size, "$%.2f", usd);
 }
 
-static void buf_grow(struct buf *b, size_t need)
+void format_context(char *out, size_t out_size, long context_tokens, long context_limit)
 {
-    if (b->cap >= need)
+    char used[32];
+    format_tokens(used, sizeof(used), context_tokens);
+    if (context_limit > 0) {
+        char limit[32];
+        long double ratio = (long double)context_tokens * 100.0L / (long double)context_limit;
+        long percentage;
+        if (ratio > LONG_MAX)
+            percentage = LONG_MAX;
+        else if (ratio < LONG_MIN)
+            percentage = LONG_MIN;
+        else
+            percentage = (long)ratio;
+        format_tokens(limit, sizeof(limit), context_limit);
+        snprintf(out, out_size, "%s / %s (%ld%%)", used, limit, percentage);
+    } else {
+        snprintf(out, out_size, "%s", used);
+    }
+}
+
+void buf_init(struct buf *buf)
+{
+    buf->data = NULL;
+    buf->len = 0;
+    buf->cap = 0;
+}
+
+void buf_free(struct buf *buf)
+{
+    free(buf->data);
+    buf_init(buf);
+}
+
+static void buf_grow(struct buf *buf, size_t required_capacity)
+{
+    if (buf->cap >= required_capacity)
         return;
-    size_t cap = b->cap ? b->cap : 256;
-    while (cap < need)
-        cap *= 2;
-    b->data = xrealloc(b->data, cap);
-    b->cap = cap;
+
+    size_t capacity = buf->cap ? buf->cap : 256;
+    while (capacity < required_capacity) {
+        if (capacity > SIZE_MAX / 2) {
+            capacity = required_capacity;
+            break;
+        }
+        capacity *= 2;
+    }
+    buf->data = xrealloc(buf->data, capacity);
+    buf->cap = capacity;
 }
 
-void buf_append(struct buf *b, const void *data, size_t n)
+void buf_append(struct buf *buf, const void *data, size_t length)
 {
-    buf_grow(b, b->len + n + 1);
-    memcpy(b->data + b->len, data, n);
-    b->len += n;
-    b->data[b->len] = '\0';
+    if (buf->len == SIZE_MAX || length > SIZE_MAX - buf->len - 1)
+        die_oom();
+    buf_grow(buf, buf->len + length + 1);
+    if (length > 0)
+        memcpy(buf->data + buf->len, data, length);
+    buf->len += length;
+    buf->data[buf->len] = '\0';
 }
 
-void buf_append_str(struct buf *b, const char *s)
+void buf_append_str(struct buf *buf, const char *str)
 {
-    buf_append(b, s, strlen(s));
+    buf_append(buf, str, strlen(str));
 }
 
-void buf_reset(struct buf *b)
+void buf_reset(struct buf *buf)
 {
-    b->len = 0;
-    if (b->data)
-        b->data[0] = '\0';
+    buf->len = 0;
+    if (buf->data)
+        buf->data[0] = '\0';
 }
 
-char *buf_steal(struct buf *b)
+char *buf_steal(struct buf *buf)
 {
-    char *p = b->data;
-    buf_init(b);
-    return p;
+    char *data = buf->data ? buf->data : xstrdup("");
+    buf_init(buf);
+    return data;
 }

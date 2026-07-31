@@ -1233,7 +1233,7 @@ static char *read_line_canonical(size_t *out_len)
             break;
         if (ch == '\n') {
             *out_len = b.len;
-            return b.data ? buf_steal(&b) : xstrdup("");
+            return buf_steal(&b);
         }
         char c = (char)ch;
         buf_append(&b, &c, 1);
@@ -1279,25 +1279,23 @@ static char *read_line_canonical(size_t *out_len)
  * must never disrupt the REPL. */
 static void history_file_append(const char *path, const char *line)
 {
-    /* Refuse a non-regular file (FIFO, device) so a user-planted special
-     * node at the history path can't block the REPL on submit. ENOENT
-     * is fine — O_CREAT below will make a fresh regular file. */
-    if (ensure_regular_file(path) < 0 && errno != ENOENT)
-        return;
     char *enc = input_core_history_encode(line);
     size_t n = strlen(enc);
-    /* Drop oversized records — see HISTORY_RECORD_MAX. The encoded form
-     * can be up to 2x the raw input, so the gate sits here, after
-     * encoding. */
     if (n + 1 > HISTORY_RECORD_MAX) {
         free(enc);
         return;
     }
-    int fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0600);
-    if (fd < 0) {
+
+    /* O_NONBLOCK makes opening a planted FIFO safe; fstat closes the replacement race. */
+    int fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC | O_NONBLOCK, 0600);
+    struct stat status;
+    if (fd < 0 || fstat(fd, &status) < 0 || !S_ISREG(status.st_mode)) {
+        if (fd >= 0)
+            close(fd);
         free(enc);
         return;
     }
+
     char *rec = xmalloc(n + 1);
     memcpy(rec, enc, n);
     rec[n] = '\n';
@@ -1357,9 +1355,11 @@ static void history_file_rewrite(struct input *in, const char *path)
  * Touches nothing on disk. */
 static size_t history_file_load(struct input *in, const char *path)
 {
-    /* Refuse a non-regular file at startup — a FIFO would block fopen()
-     * indefinitely, freezing the REPL before the first prompt. */
-    FILE *f = (ensure_regular_file(path) == 0) ? fopen(path, "r") : NULL;
+    int fd = open_regular_file(path);
+    FILE *f = fd >= 0 ? fdopen(fd, "r") : NULL;
+    if (fd >= 0 && !f)
+        close(fd);
+
     size_t loaded = 0;
     if (f) {
         /* Fixed-size buffer instead of getline() — bounds the worst-case

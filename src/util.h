@@ -5,340 +5,153 @@
 #include <stdarg.h>
 #include <stddef.h>
 
-/* Set LC_CTYPE — and only LC_CTYPE — to a UTF-8 locale so the line
- * editor and renderers can decode multibyte text and measure it with
- * wcwidth() (see utf8_codepoint_cells). We
- * deliberately avoid LC_ALL/"" so the user's LC_NUMERIC etc. don't slip
- * in and break printf/JSON output (e.g. German "1,5" instead of "1.5").
- * Cascade: env-defined LC_CTYPE → C.UTF-8 → en_US.UTF-8. Idempotent and
- * safe to call before anything else; should be the first thing in main. */
+/* Set only LC_CTYPE to a UTF-8 locale. Changing LC_ALL would make numeric formatting depend on the
+ * user's locale and could produce invalid JSON. Call before other initialization. */
 void locale_init_utf8(void);
-
-/* True iff locale_init_utf8() established a UTF-8 LC_CTYPE. Callers that
- * emit multibyte glyphs (prompt, spinner, picker markers) should fall
- * back to ASCII when this returns 0. */
+/* Return whether UTF-8 LC_CTYPE initialization succeeded. */
 int locale_have_utf8(void);
 
-/* Allocate-or-die helpers. On OOM they print to stderr and abort — we are a
- * CLI, not a library; a clean crash is better than leaking partial state. */
-void *xmalloc(size_t n);
-void *xcalloc(size_t n, size_t sz);
-void *xrealloc(void *p, size_t n);
-char *xstrdup(const char *s);
+/* Allocation failures are fatal. Zero-sized allocation requests return non-NULL. */
+void *xmalloc(size_t size);
+void *xcalloc(size_t count, size_t element_size);
+void *xrealloc(void *ptr, size_t size);
+/* Return an allocated duplicate, or NULL for NULL input. */
+char *xstrdup(const char *str);
+/* Return an allocated formatted string, or NULL if formatting fails. */
+char *xasprintf(const char *format, ...) __attribute__((format(printf, 1, 2), nonnull(1)));
+/* As xasprintf(), without consuming or ending args. */
+char *xvasprintf(const char *format, va_list args)
+    __attribute__((format(printf, 1, 0), nonnull(1)));
 
-/* Free a NULL-terminated array and each string it owns. NULL-safe. */
+/* Free a NULL-terminated array and its strings. NULL-safe. */
 void string_array_free(char **strings);
 
-char *xasprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2), nonnull(1)));
+/* Return a newly allocated shell-safe, single-quoted copy. NULL becomes empty. */
+char *shell_single_quote(const char *str);
 
-/* va_list form of xasprintf. Both return NULL if the format itself fails to
- * encode; OOM still aborts. The caller keeps ownership of `ap` and must
- * va_end it. */
-char *xvasprintf(const char *fmt, va_list ap) __attribute__((format(printf, 1, 0), nonnull(1)));
+/* Emit one `hax: <message>` line to stderr, without changing control flow. Callers supply no prefix
+ * or newline. hax_err uses the error color and hax_warn the warning color on terminals. */
+__attribute__((format(printf, 1, 2))) void hax_err(const char *format, ...);
+__attribute__((format(printf, 1, 2))) void hax_warn(const char *format, ...);
 
-/* Wrap `s` in single quotes for safe interpolation into a `sh -c`
- * command line, escaping embedded single quotes the conventional way
- * ("it's" -> "'it'\''s'"). NULL is treated as "". Returns malloc'd;
- * caller frees. */
-char *shell_single_quote(const char *s);
-
-/* Startup / CLI diagnostics. Both print a single "hax: <msg>\n" line to
- * stderr — the machine-greppable prefix scripts expect — and color it only
- * when stderr is a TTY (piped/redirected output stays plain so logs and
- * `2>&1` captures don't collect escape bytes). The caller keeps its own
- * control flow afterward (return an error code, fall through, goto an
- * unwind label); pass a printf-style message with no prefix and no newline.
- *
- *   hax_err  — red; a failure (bad args, missing auth, unreachable backend).
- *   hax_warn — yellow; a non-fatal notice where the run still proceeds
- *              (optional logging disabled, recovered from a bad schema,
- *              starting a fresh conversation).
- *
- * REPL-owned status uses ui_error/ui_note (terminal/ui.h) instead. Lower
- * layers that can run both at startup and during the REPL keep using these;
- * presentation code detects their completed writes through
- * hax_diag_sequence(). */
-__attribute__((format(printf, 1, 2))) void hax_err(const char *fmt, ...);
-__attribute__((format(printf, 1, 2))) void hax_warn(const char *fmt, ...);
-
-/* Monotonic count of completed hax_err/hax_warn writes. Presentation code
- * snapshots this around lower-layer operations that may diagnose directly,
- * then resynchronizes its stdout newline state when the value changed. */
+/* Monotonic count of completed hax_err() and hax_warn() writes. */
 unsigned long hax_diag_sequence(void);
 
-/* Reject anything that isn't a regular file before opening it. open()
- * on a FIFO without a writer blocks indefinitely, which would freeze a
- * startup that touches a path the user doesn't fully control (config
- * files, the history file, tool inputs). Returns 0 if `path` exists
- * and is a regular file, -1 otherwise with errno set (EISDIR or EINVAL
- * when stat succeeded but the type was wrong). There's a tiny TOCTOU
- * window between stat and the subsequent open; the alternative (open
- * with O_NONBLOCK then fstat) doesn't reliably help because the FIFO
- * open is what blocks, before fstat runs. */
+/* Return 0 for a regular file, or -1 with errno set for any other path. */
 int ensure_regular_file(const char *path);
 
-/* Read an entire file into a newly-allocated NUL-terminated string.
- * Returns NULL on error and sets errno. Caller frees. Rejects anything
- * that isn't a regular file (errno EISDIR for directories, EINVAL for
- * FIFOs / sockets / devices) so an unlucky path can't block startup. */
+/* Open a regular file for reading without blocking on special files. The caller owns the returned
+ * descriptor. Returns -1 with errno set on failure or when the path is not a regular file. */
+int open_regular_file(const char *path);
+
+/* Return newly allocated, NUL-terminated file contents, or NULL with errno set. */
 char *slurp_file(const char *path, size_t *out_len);
 
-/* Write exactly n bytes to fd, restarting on EINTR/short writes. Returns 0
- * on success, -1 on error (errno set). */
-int write_all(int fd, const void *data, size_t n);
-
-/* Read up to cap bytes from path into a newly-allocated NUL-terminated
- * string. Allocates at most cap+1 bytes regardless of file size. If the
- * file has more bytes than the cap, sets *out_truncated to 1. Returns
- * NULL on error and sets errno. Caller frees. Same regular-file guard
- * as slurp_file. */
+/* Read at most cap bytes. On success, optional outputs report the returned length and whether more
+ * data exists. The allocation grows with the bytes read rather than cap. Returns NULL with errno
+ * set on failure. */
 char *slurp_file_capped(const char *path, size_t cap, size_t *out_len, int *out_truncated);
 
-/* Resolve hax's XDG-style paths under the per-user config and state
- * trees, both namespaced as `<base>/hax/<relpath>`:
- *   xdg_hax_config_path("AGENTS.md") -> $XDG_CONFIG_HOME/hax/AGENTS.md,
- *     or $HOME/.config/hax/AGENTS.md as fallback.
- *   xdg_hax_state_path("history") -> $XDG_STATE_HOME/hax/history, or
- *     $HOME/.local/state/hax/history as fallback.
- * Config holds user-edited preferences (AGENTS.md, skills); state
- * holds runtime/volatile data (history). Returns NULL when neither
- * the env var nor $HOME is set. Caller frees. */
-char *xdg_hax_config_path(const char *relpath);
-char *xdg_hax_state_path(const char *relpath);
+/* Write exactly length bytes, retrying interrupted and short writes. Returns 0 on success or -1
+ * with errno set. */
+int write_all(int fd, const void *data, size_t length);
 
-/* Same resolution for the per-user cache tree: $XDG_CACHE_HOME/hax/<relpath>,
- * or $HOME/.cache/hax/<relpath>. For re-fetchable data (the model-metadata
- * catalog) that must survive restarts but may be deleted freely. */
-char *xdg_hax_cache_path(const char *relpath);
+/* Return an allocated `<base>/hax/<relative_path>`, using the named non-empty XDG base or the HOME
+ * fallback. Return NULL when neither base is available. */
+char *xdg_hax_config_path(const char *relative_path); /* XDG_CONFIG_HOME or HOME/.config */
+char *xdg_hax_state_path(const char *relative_path);  /* XDG_STATE_HOME or HOME/.local/state */
+char *xdg_hax_cache_path(const char *relative_path);  /* XDG_CACHE_HOME or HOME/.cache */
 
-/* Duplicate `s` with any trailing '/' characters stripped. Lets callers
- * normalize a base URL so "http://x/v1/" and "http://x/v1" produce the
- * same downstream concatenation. Caller frees. */
-char *dup_trim_trailing_slash(const char *s);
+/* Return a copy with all trailing slashes removed. */
+char *dup_trim_trailing_slash(const char *str);
 
-/* Shared limits applied to tool results (bash, read) before they go back
- * to the model. Three knobs:
- *
- *   - byte cap: the only one that scales with the host model's context
- *     size. Tunable via the tool_output_cap setting using parse_size
- *     grammar ("25k", "200k", "1m"). 50 KiB default — matches opencode/
- *     pi-mono and is roughly 12K tokens, a sensible bite for both small
- *     local models and frontier ones.
- *
- *   - line count cap: guardrail against "10000 short lines" output
- *     shapes that don't trip the byte cap but still drown context. Not
- *     env-tunable — the right value doesn't change with model size.
- *
- *   - per-line width cap: guardrail against single-line megabyte
- *     pathologies (minified JS, log lines without newlines). Same
- *     reasoning: not model-dependent, hardcoded.
- *
- * Whichever cap fires first wins. */
+/* Parse positive byte counts with optional case-insensitive k/m binary suffixes. */
+long parse_size(const char *str);
+
+/* Parse a non-negative duration with an optional ms/s/m/h suffix and return milliseconds. A missing
+ * suffix means seconds. Returns -1 for invalid input. */
+long parse_duration_ms(const char *str);
+
+/* Parse a complete base-10 integer into out. Returns 1 on success and 0 otherwise. */
+int parse_int(const char *str, int *out);
+
+/* CLOCK_MONOTONIC milliseconds since an unspecified epoch. */
+long monotonic_ms(void);
+
+/* Use binary k/M suffixes for token counts; negative values produce "?". */
+void format_tokens(char *out, size_t out_size, long tokens);
+/* Round to seconds and format compactly; non-positive values produce "0s". */
+void format_duration(char *out, size_t out_size, long duration_ms);
+/* Use more decimal places for sub-dollar values; non-positive values produce "$0.00". */
+void format_cost(char *out, size_t out_size, double usd);
+/* Include the usage percentage when context_limit is positive. */
+void format_context(char *out, size_t out_size, long context_tokens, long context_limit);
+
+#define COST_DISPLAY_MIN 0.00005
+
+/* Write a lowercase UUIDv4 (36 bytes plus the NUL terminator). Aborts on entropy failure. */
+void gen_uuid_v4(char out[37]);
+
+/* Physical terminal width on stdout, or 120 when unavailable. */
+int term_width(void);
+
+#define DISPLAY_WIDTH_CAP 100
+
+/* Width used for content layout. "auto" clamps the terminal width to [20, DISPLAY_WIDTH_CAP],
+ * "terminal" removes the upper bound, and an integer >= 20 selects an exact width. */
+int display_width(void);
+
+/* The following helpers require locale_init_utf8() for accurate non-ASCII widths. */
+
+/* Return the visual cell width of a NUL-terminated UTF-8 string. NULL has width zero. */
+size_t display_cells(const char *str);
+
+/* Return a newly allocated string fitting within max_cells. Truncated strings end in "..." when at
+ * least four cells are available. NULL is treated as an empty string. */
+char *truncate_for_display(const char *str, size_t max_cells);
+
+/* Choose a UTF-8 byte boundary for one row of at most max_cells. Word breaks consume one separating
+ * ASCII space: the return value ends the current row and next_offset starts the next. If no word
+ * break fits, the function uses a codepoint boundary. max_cells must be positive. */
+size_t wrap_break_pos(const char *str, size_t length, size_t max_cells, size_t *next_offset);
+
+/* Reflow a string to at most max_rows. first_row_cells and other_row_cells are row budgets;
+ * last_row_reserve leaves room for a caller-owned suffix. Rows are joined by '\n', and overflow is
+ * marked with "..." when space permits. Returns an allocated string; NULL input becomes empty. */
+char *reflow_for_display(const char *str, int first_row_cells, int other_row_cells, int max_rows,
+                         int last_row_reserve);
+
+/* Prepare untrusted UTF-8 for one-line display: collapse ASCII whitespace, replace malformed or
+ * direction-changing codepoints, and bound combining-mark runs. Returns an allocated string; NULL
+ * input becomes empty. Requires UTF-8 LC_CTYPE initialization for accurate width classification. */
+char *flatten_for_display(const char *str);
+
+/* Replace each line suffix beyond max_line_bytes with an elision marker while preserving newline
+ * structure. Returns a newly allocated NUL-terminated buffer and stores its length in out_len. */
+char *cap_line_lengths(const char *data, size_t length, size_t max_line_bytes, size_t *out_len);
+
+/* Tool-result limits applied before output is sent to the model. */
 size_t output_cap_bytes(void);
-
 #define OUTPUT_CAP_LINES      2000
 #define OUTPUT_CAP_LINE_WIDTH 500
 
-/* Delimiter between the read tool's line-number column and the line content.
- * A visible arrow (U+2192 "→"), not a tab: models conflate a leading tab
- * with the file's own tab indentation and then echo the wrong whitespace
- * back in edit old_string/new_string. A non-whitespace glyph can't be
- * mistaken for indentation. Written as a string literal so callers can
- * concatenate it (`"%6ld" READ_LINE_DELIM`) — keeping it separate from
- * adjacent content literals also avoids \x hex-escape greediness. */
+/* Visible separator between read-tool line numbers and content. Unlike whitespace, it cannot be
+ * mistaken for indentation when a model copies text into an edit request. */
 #define READ_LINE_DELIM "\xE2\x86\x92"
 
-/* Parse a size with optional k/m suffix (case-insensitive, 1024-base):
- *   "256k" → 262144, "128K" → 131072, "1m" → 1048576, "4096" → 4096.
- * Returns 0 on empty/invalid input — callers using 0 as a "disabled"
- * sentinel can't distinguish, but every current caller wants a positive
- * size and falls back to a hardcoded default on 0. */
-long parse_size(const char *s);
-
-/* Parse a duration with optional ms/s/m/h suffix (case-insensitive):
- *   "30" → 30000 (no suffix = seconds, the common case)
- *   "30s" → 30000, "30ms" → 30, "5m" → 300000, "2h" → 7200000.
- * Whitespace between the number and suffix is allowed. Returns the
- * duration in milliseconds, or -1 on empty/invalid input (so 0 remains
- * a valid "disabled" value for callers that treat it as a sentinel). */
-long parse_duration_ms(const char *s);
-
-/* CLOCK_MONOTONIC milliseconds since an unspecified epoch — used for
- * elapsed-time math (timeouts, idle thresholds, animation cadence). */
-long monotonic_ms(void);
-
-/* Format a token count in 1024-base: "412", "5.4k", "128k", "1.2M".
- * Powers-of-two because advertised context windows are typically
- * 32k/128k/256k (= 32×1024 etc.), so 1024-base produces the round
- * numbers users expect. < 0 → "?" (provider didn't report). */
-void format_tokens(char *buf, size_t buflen, long n);
-
-/* Format a duration for stats display: "0s", "42s", "1m 08s", "1h 02m".
- * Rounds to the nearest second; negative values clamp to "0s". */
-void format_duration(char *buf, size_t buflen, long ms);
-
-/* Format a dollar amount with magnitude-dependent precision, so small
- * per-turn costs stay meaningful without adding noise to large ones:
- * "$0.0042", "$0.042", "$1.23". Zero (and below) renders "$0.00". */
-void format_cost(char *buf, size_t buflen, double usd);
-
-/* Smallest cost format_cost renders as anything but zeros. Below it the
- * per-category breakdowns drop the figure and show the count alone. */
-#define COST_DISPLAY_MIN 0.00005
-
-/* Format context usage against its window: "8.9k / 256k (3%)", or just
- * "8.9k" when the window is unknown (limit <= 0). */
-void format_context(char *buf, size_t buflen, long ctx, long limit);
-
-/* Write a random UUIDv4 (36 chars + NUL terminator) to out. Aborts on
- * failure (e.g. /dev/urandom unavailable) — same convention as xmalloc. */
-void gen_uuid_v4(char out[37]);
-
-/* Host terminal width via TIOCGWINSZ on stdout. Falls back to 120 cols
- * when stdout isn't a TTY or the ioctl fails. Returns the raw reported
- * width otherwise — no clamping, so it is the literal physical edge of
- * the row. Re-queried on each call so SIGWINCH-style resizes are picked
- * up without explicit signal handling.
- *
- * Use term_width() only when you need that *real* edge — cursor
- * positioning, ANSI erase-line, spinner placement, reserving the last
- * column for the wrap engine. For configurable content layout (header reflow,
- * tool previews, markdown wrapping) prefer display_width(). */
-int term_width(void);
-
-/* Soft cap used by display_width=auto. It keeps lines readable on ultrawide
- * terminals (a web-style max-width); terminal and exact modes bypass it. */
-#define DISPLAY_WIDTH_CAP 100
-
-/* Parse a base-10 integer that fits in int, with overflow protection.
- * Used by env-var parsers that take a plain count (no k/M suffix —
- * see parse_size for that) and need to refuse "abc", "", a value past
- * INT range, and trailing garbage like "80x". Returns 1 on success
- * with the parsed value in *out; 0 otherwise (caller falls back). */
-int parse_int(const char *s, int *out);
-
-/* Content width for wrapping and truncation. display_width=auto clamps the
- * terminal to [20, DISPLAY_WIDTH_CAP], terminal removes the upper cap, and an
- * integer >= 20 fixes the width regardless of terminal size. The latter is
- * used by mock_layout.txt and tests for reproducible rendering. */
-int display_width(void);
-
-/* Truncate a UTF-8 string to fit in `cap` visual cells, replacing the
- * cut suffix with "..." so the user sees an explicit "more here"
- * marker. Returns a fresh dup when content already fits. Width is
- * via utf8_codepoint_cells — locale-dependent, requires
- * locale_init_utf8() at startup. Returns malloc'd; caller frees. */
-char *truncate_for_display(const char *s, size_t cap);
-
-/* Visual cell width of an entire UTF-8 string on one terminal row.
- * Non-printables count 1 cell (the substitute-glyph policy of
- * utf8_codepoint_cells), zero-width codepoints 0. Callers that need
- * an exact cursor column (not just a truncation budget) use this —
- * byte length over-counts multi-byte codepoints. Locale-dependent,
- * see truncate_for_display. */
-size_t display_cells(const char *s);
-
-/* Find the byte offset where to break `s` (length `len`) so the
- * current row fits in at most `max_cells` visual cells. Returns the
- * end-of-row byte offset (s[0..return) is the row content). When
- * *resume_at is non-NULL, also reports the byte offset where the
- * next row's content starts — differs from the end offset when the
- * break consumes a separating space.
- *
- * Algorithm: walks forward codepoint-by-codepoint, accumulating cell
- * widths via utf8_codepoint_cells. The rightmost ASCII space within
- * the budget is the break point (end excludes the space, resume
- * skips it). A space sitting exactly at column max_cells is also a
- * valid break — its width belongs to the inter-row fence. If the row
- * holds no space at all, hard-breaks at the codepoint boundary that
- * would push past max_cells. When the whole input fits, returns len.
- *
- * Width is measured in cells — see truncate_for_display for the
- * locale caveat.
- *
- * Precondition: max_cells >= 1. A zero-width row has no meaningful
- * break position (would stall the caller's loop) — callers must
- * clamp first. reflow_for_display clamps internally; the streaming-
- * markdown wrapper will need to do the same.
- *
- * Stateless primitive; both reflow_for_display and the (upcoming)
- * streaming markdown wrapper layer their own state on top. */
-size_t wrap_break_pos(const char *s, size_t len, size_t max_cells, size_t *resume_at);
-
-/* Reflow `s` so it fits in at most `max_rows` terminal rows, breaking
- * at word boundaries (ASCII spaces). Long unbroken words hard-break
- * at the row boundary. If content exceeds the budget, the last
- * visible row is truncated with a trailing "..." marker.
- *
- *   first_row         — cells available on the first row (caller may
- *                       have a prefix already laid down, e.g.
- *                       "[bash] ")
- *   mid_row           — cells on subsequent rows (full row width)
- *   max_rows          — maximum rows of output (>= 1)
- *   last_row_reserve  — cells to reserve at the end of the last row
- *                       for a suffix the caller will append after this
- *                       (e.g. read's ":N-M" extra). 0 if none.
- *
- * Returns malloc'd; rows are joined by '\n' (no trailing newline).
- * The returned string never contains ANSI escapes — caller wraps with
- * styling. NULL input returns "". Caller frees.
- *
- * Width is measured in cells — see truncate_for_display for the
- * locale caveat. */
-char *reflow_for_display(const char *s, int first_row, int mid_row, int max_rows,
-                         int last_row_reserve);
-
-/* Prepare an arbitrary UTF-8 string for one-line display. Three
- * passes in one walk:
- *
- *   - Replace ASCII control bytes (newline, CR, tab, etc.) with
- *     single spaces and collapse runs of whitespace to one space;
- *     strip leading/trailing whitespace. Lets multi-line content
- *     (a bash command, a JSON arg) render on a single visual line.
- *
- *   - Substitute one '?' per "dangerous" multi-byte codepoint —
- *     Trojan Source bidi vectors, ZWJ and other invisibles, malformed
- *     UTF-8. Without this, a model-supplied path or shell command
- *     could embed bidi overrides and have the rendered header
- *     reordered or hidden in the terminal. Mirrors the cell-width
- *     substitution policy of utf8_codepoint_cells.
- *
- *   - Cap consecutive zero-width codepoints (combining marks, VS-N)
- *     at a small bound per base glyph. Legitimate scripts use 0-6;
- *     the cap stops adversarial floods of marks that nominally take
- *     ~1 cell but consume arbitrary bytes.
- *
- *   - Pass through everything else (printable ASCII, well-formed
- *     multi-byte codepoints with non-negative wcwidth) verbatim.
- *
- * Locale-dependent — the dangerous-codepoint detection routes through
- * mbrtowc + wcwidth, so locale_init_utf8() must run at startup.
- *
- * Returns malloc'd; caller frees. NULL input returns "". */
-char *flatten_for_display(const char *s);
-
-/* Truncate any line in `data` longer than `max_line` bytes to its first
- * `max_line` bytes followed by an inline `...[N bytes elided]` marker.
- * Newline structure is preserved (one input line → one output line) so
- * line-counting downstream still works. Returns a newly-allocated
- * NUL-terminated string with the result; *out_len receives its byte
- * length. Caller frees. When no line exceeds the cap, the returned
- * buffer is a freshly-allocated copy of the input (so the caller can
- * unconditionally free both old and new pointers). */
-char *cap_line_lengths(const char *data, size_t len, size_t max_line, size_t *out_len);
-
-/* Dynamic byte buffer — append-only, NUL-terminated at current length. */
+/* Append-only byte buffer, NUL-terminated whenever data is non-NULL. */
 struct buf {
     char *data;
     size_t len;
     size_t cap;
 };
 
-void buf_init(struct buf *b);
-void buf_free(struct buf *b);
-void buf_append(struct buf *b, const void *data, size_t n);
-void buf_append_str(struct buf *b, const char *s);
-void buf_reset(struct buf *b);
-char *buf_steal(struct buf *b); /* takes ownership, re-inits buf */
+void buf_init(struct buf *buf);
+void buf_free(struct buf *buf);
+void buf_append(struct buf *buf, const void *data, size_t length);
+void buf_append_str(struct buf *buf, const char *str);
+void buf_reset(struct buf *buf);
+/* Transfer an allocated NUL-terminated string to the caller and reset buf. */
+char *buf_steal(struct buf *buf);
 
 #endif /* HAX_UTIL_H */

@@ -66,27 +66,22 @@ static void flush_text(struct turn *t)
 {
     if (!t->in_text)
         return;
-    /* buf_steal returns NULL if the buf was never appended to (all deltas
-     * were empty strings). Guarantee a non-NULL text string for callers. */
     struct item it = {
         .kind = ITEM_ASSISTANT_MESSAGE,
-        .text = t->text_buf.data ? buf_steal(&t->text_buf) : xstrdup(""),
+        .text = buf_steal(&t->text_buf),
     };
     items_append(t, it);
     t->in_text = 0;
 }
 
-/* Commit accumulated reasoning_content text as an ITEM_REASONING. Same
- * non-NULL guarantee as flush_text. Placed before the assistant text /
- * tool-call items it precedes so build_messages can attach it as
- * reasoning_content on that assistant message. */
+/* Reasoning must precede the assistant item that carries it back to the provider. */
 static void flush_reasoning(struct turn *t)
 {
     if (!t->in_reasoning)
         return;
     struct item it = {
         .kind = ITEM_REASONING,
-        .reasoning_text = t->reasoning_buf.data ? buf_steal(&t->reasoning_buf) : xstrdup(""),
+        .reasoning_text = buf_steal(&t->reasoning_buf),
     };
     items_append(t, it);
     t->in_reasoning = 0;
@@ -146,13 +141,11 @@ int turn_on_event(const struct stream_event *ev, struct turn *t)
         struct pending_tool *p = turn_find_pending(t, ev->u.tool_call_end.id);
         if (!p)
             break;
-        /* Same non-NULL guarantee as flush_text: if no delta ever arrived
-         * for this tool call, emit an empty args string rather than NULL. */
         struct item it = {
             .kind = ITEM_TOOL_CALL,
             .call_id = xstrdup(p->call_id),
             .tool_name = xstrdup(p->name),
-            .tool_arguments_json = p->args.data ? buf_steal(&p->args) : xstrdup(""),
+            .tool_arguments_json = buf_steal(&p->args),
         };
         items_append(t, it);
         break;

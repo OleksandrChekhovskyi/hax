@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -10,19 +12,17 @@
 #include "harness.h"
 #include "util.h"
 
-/* Helper: create a temp file with the given contents and return its path.
- * The caller owns the returned string and is responsible for unlink + free. */
-static char *write_tmp(const void *data, size_t len)
+static char *write_temp_file(const void *data, size_t length)
 {
-    char *path = xstrdup("/tmp/hax-test-XXXXXX");
-    int fd = mkstemp(path);
+    char *path = xasprintf("%s/file", t_tempdir());
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) {
-        FAIL("mkstemp: %s", strerror(errno));
+        FAIL("open %s: %s", path, strerror(errno));
         free(path);
         return NULL;
     }
-    if (len && write(fd, data, len) != (ssize_t)len)
-        FAIL("short write to %s", path);
+    if (write_all(fd, data, length) < 0)
+        FAIL("write %s: %s", path, strerror(errno));
     close(fd);
     return path;
 }
@@ -80,7 +80,21 @@ static void test_uuid_v4_unique(void)
     EXPECT(strcmp(a, b) != 0);
 }
 
-/* ---------- buf_* ---------- */
+/* ---------- allocation and buffer ---------- */
+
+static void test_zero_sized_allocations(void)
+{
+    void *malloc_result = xmalloc(0);
+    void *calloc_result = xcalloc(0, SIZE_MAX);
+    void *realloc_result = xrealloc(NULL, 0);
+
+    EXPECT(malloc_result != NULL);
+    EXPECT(calloc_result != NULL);
+    EXPECT(realloc_result != NULL);
+    free(malloc_result);
+    free(calloc_result);
+    free(realloc_result);
+}
 
 static void test_buf_append_and_steal(void)
 {
@@ -96,6 +110,18 @@ static void test_buf_append_and_steal(void)
     free(s);
 }
 
+static void test_buf_steal_empty(void)
+{
+    struct buf buf;
+    buf_init(&buf);
+
+    char *contents = buf_steal(&buf);
+
+    EXPECT_STR_EQ(contents, "");
+    EXPECT(buf.data == NULL && buf.len == 0 && buf.cap == 0);
+    free(contents);
+}
+
 static void test_buf_reset_keeps_capacity(void)
 {
     struct buf b;
@@ -109,9 +135,8 @@ static void test_buf_reset_keeps_capacity(void)
     buf_free(&b);
 }
 
-static void test_buf_growth_crosses_default_cap(void)
+static void test_buf_grows_repeatedly(void)
 {
-    /* Default cap is 256; append enough to force several doublings. */
     struct buf b;
     buf_init(&b);
     char chunk[128];
@@ -141,7 +166,7 @@ static void test_slurp_missing(void)
 
 static void test_slurp_empty(void)
 {
-    char *path = write_tmp("", 0);
+    char *path = write_temp_file("", 0);
     size_t n = 999;
     char *p = slurp_file(path, &n);
     EXPECT(p != NULL);
@@ -156,7 +181,7 @@ static void test_slurp_normal(void)
 {
     const char content[] = "line one\nline two\n";
     size_t clen = sizeof(content) - 1;
-    char *path = write_tmp(content, clen);
+    char *path = write_temp_file(content, clen);
     size_t n = 0;
     char *p = slurp_file(path, &n);
     EXPECT(p != NULL);
@@ -181,13 +206,17 @@ static void test_slurp_directory_rejected(void)
 
 static void test_slurp_fifo_rejected_no_hang(void)
 {
-    /* If this test ever hangs, the regular-file guard regressed:
-     * open(O_RDONLY) on a writer-less FIFO blocks indefinitely. */
-    /* t_tempdir gives us a unique dir; place the FIFO inside. */
+    /* A blocking read-only open on a writer-less FIFO never returns. */
     char *path = t_tempdir();
     char fifo[64];
     snprintf(fifo, sizeof(fifo), "%s/f", path);
     EXPECT(mkfifo(fifo, 0644) == 0);
+
+    errno = 0;
+    int fd = open_regular_file(fifo);
+    EXPECT(fd < 0);
+    EXPECT(errno == EINVAL);
+
     errno = 0;
     char *p = slurp_file(fifo, NULL);
     EXPECT(p == NULL);
@@ -214,7 +243,7 @@ static void test_slurp_capped_under(void)
 {
     const char content[] = "short";
     size_t clen = sizeof(content) - 1;
-    char *path = write_tmp(content, clen);
+    char *path = write_temp_file(content, clen);
     size_t n = 0;
     int tr = 1;
     char *p = slurp_file_capped(path, 1024, &n, &tr);
@@ -227,13 +256,43 @@ static void test_slurp_capped_under(void)
     free(path);
 }
 
+static void test_slurp_capped_zero(void)
+{
+    char *path = write_temp_file("x", 1);
+    size_t length = 1;
+    int truncated = 0;
+
+    char *contents = slurp_file_capped(path, 0, &length, &truncated);
+
+    EXPECT_STR_EQ(contents, "");
+    EXPECT(length == 0);
+    EXPECT(truncated == 1);
+    free(contents);
+    free(path);
+}
+
+static void test_slurp_capped_does_not_preallocate_cap(void)
+{
+    char *path = write_temp_file("short", 5);
+    size_t length = 0;
+    int truncated = 1;
+
+    char *contents = slurp_file_capped(path, SIZE_MAX, &length, &truncated);
+
+    EXPECT_STR_EQ(contents, "short");
+    EXPECT(length == 5);
+    EXPECT(truncated == 0);
+    free(contents);
+    free(path);
+}
+
 static void test_slurp_capped_over(void)
 {
     /* File is cap+100 bytes; we expect cap bytes kept and truncated=1. */
     const size_t cap = 64;
     char big[200];
     memset(big, 'a', sizeof(big));
-    char *path = write_tmp(big, sizeof(big));
+    char *path = write_temp_file(big, sizeof(big));
     size_t n = 0;
     int tr = 0;
     char *p = slurp_file_capped(path, cap, &n, &tr);
@@ -258,7 +317,7 @@ static void test_slurp_capped_exact(void)
     const size_t cap = 32;
     char buf[32];
     memset(buf, 'z', cap);
-    char *path = write_tmp(buf, cap);
+    char *path = write_temp_file(buf, cap);
     size_t n = 0;
     int tr = 1;
     char *p = slurp_file_capped(path, cap, &n, &tr);
@@ -495,12 +554,7 @@ static void test_flatten_substitutes_malformed_utf8(void)
 
 static void test_flatten_caps_zero_width_run(void)
 {
-    /* Adversarial case: a single base glyph with a long flood of
-     * combining marks would render as ~1 cell but consume arbitrary
-     * bytes — defeating the "cap content width" goal of the new
-     * reflow path. flatten caps consecutive zero-width codepoints
-     * (each combining acute U+0301 = CC 81, 2 bytes, 0 cells) at
-     * MAX_ZW_PER_BASE = 8. Excess marks are silently dropped. */
+    /* Bound bytes consumed by a visually zero-width run. */
     char input[1 + 2 * 100 + 1];
     input[0] = 'a';
     for (int k = 0; k < 100; k++) {
@@ -829,17 +883,7 @@ static void test_reflow_first_row_smaller(void)
 
 static void test_reflow_last_row_strict_for_wide_codepoint(void)
 {
-    /* Regression: when target = width-3 is tight and the first
-     * codepoint is wider than target (e.g. a 2-cell CJK glyph in a
-     * 1-cell window), the truncate path used to fall through to
-     * wrap_break_pos's forward-progress fallback and emit one full
-     * codepoint anyway. Appending "..." after pushed the row past
-     * its width budget — defeating the "no terminal hard-wrap"
-     * guarantee. The truncate row should now drop the over-wide
-     * codepoint and emit just "..." so the row stays within budget.
-     *
-     * "界xxx" is 5 cells, 6 bytes (界 = 3 bytes, 2 cells). With
-     * width=4, max_rows=1, target=1: 界 doesn't fit, output is "...". */
+    /* The ellipsis must not force a wide codepoint beyond the row budget. */
     char *out = reflow_for_display("\xE7\x95\x8C"
                                    "xxx",
                                    4, 4, 1, 0);
@@ -849,13 +893,7 @@ static void test_reflow_last_row_strict_for_wide_codepoint(void)
 
 static void test_reflow_reserve_applies_when_tail_fits_early(void)
 {
-    /* Regression: when the tail fits in `width` but not in
-     * `width - reserve`, last_row_reserve must still apply — every
-     * row could become the final one and the suffix needs room.
-     * "abcdef" (6 cells) with first_row=10, mid_row=10, max_rows=3,
-     * last_row_reserve=5: last_width=5. Row 0 wraps at 5 cells,
-     * emitting "abcde\n"; row 1 absorbs the trailing "f". Suffix
-     * appended by the caller lands on row 1 with 4 cells of room. */
+    /* Every row leaves suffix space because it may become the last emitted row. */
     char *out = reflow_for_display("abcdef", 10, 10, 3, 5);
     EXPECT_STR_EQ(out, "abcde\nf");
     free(out);
@@ -887,12 +925,6 @@ static void test_reflow_empty_input(void)
     free(out);
 }
 
-/* Illustrative: a long, realistic bash command laid out for a
- * verbose tool header on a typical 100-cell display. The "[bash] "
- * prefix consumes 7 cells, so first_row = 100 - 7 = 93; subsequent
- * rows get the full 100. Three rows are allowed before truncation
- * kicks in. The expected output shows rows breaking on spaces, with
- * the last row ending in "..." when content overflows. */
 static void test_reflow_long_bash_command(void)
 {
     const char *cmd =
@@ -901,14 +933,9 @@ static void test_reflow_long_bash_command(void)
         "| head -20 "
         "| while read f; do echo \"== $f ==\"; grep -n TODO \"$f\"; done";
 
-    /* first_row = 93, mid_row = 100, max_rows = 3, no extra reserve. */
     char *out = reflow_for_display(cmd, 93, 100, 3, 0);
 
-    /* Asserting structural properties (three or fewer rows; each row
-     * within its width budget; the head of the input is preserved
-     * verbatim) rather than the exact byte layout — the latter is
-     * brittle to whitespace tweaks in the fixture and the wrap
-     * algorithm proves itself with the simpler unit tests above. */
+    /* Assert layout constraints rather than coupling this fixture to exact word breaks. */
     int rows = 1;
     for (const char *p = out; *p; p++)
         if (*p == '\n')
@@ -938,13 +965,8 @@ static void test_reflow_long_bash_command(void)
     free(out);
 }
 
-/* Same input, but constrained to 2 rows on a narrower budget so
- * truncation visibly fires regardless of fixture length. */
 static void test_reflow_long_bash_command_truncated(void)
 {
-    /* A fixture that's deliberately too long for 2*40 cells. With
-     * first_row=33 (40 minus a "[bash] " prefix) and mid_row=40, the
-     * total budget is 73 cells; this command is well over 80. */
     const char *cmd = "find . -type f -name '*.c' -not -path './build/*' "
                       "| xargs grep -l TODO | head | while read f; do echo $f; done";
 
@@ -967,7 +989,29 @@ static void test_reflow_long_bash_command_truncated(void)
     free(out);
 }
 
-/* ---------- display_width ---------- */
+/* ---------- parse_int / display_width ---------- */
+
+static void test_parse_int(void)
+{
+    int value = 0;
+    EXPECT(parse_int("42", &value));
+    EXPECT(value == 42);
+
+    char text[64];
+    snprintf(text, sizeof(text), "%d", INT_MIN);
+    EXPECT(parse_int(text, &value));
+    EXPECT(value == INT_MIN);
+    snprintf(text, sizeof(text), "%d", INT_MAX);
+    EXPECT(parse_int(text, &value));
+    EXPECT(value == INT_MAX);
+
+    value = 7;
+    EXPECT(!parse_int(NULL, &value));
+    EXPECT(!parse_int("", &value));
+    EXPECT(!parse_int("12x", &value));
+    EXPECT(!parse_int("999999999999999999999", &value));
+    EXPECT(value == 7);
+}
 
 static void test_display_width_capped(void)
 {
@@ -1125,6 +1169,22 @@ static void test_format_cost_precision(void)
     EXPECT_STR_EQ(buf, "$42.13");
 }
 
+static void test_format_extreme_values(void)
+{
+    char formatted[64];
+    format_tokens(formatted, sizeof(formatted), LONG_MAX);
+    EXPECT(formatted[0] != '-');
+
+    format_duration(formatted, sizeof(formatted), LONG_MAX);
+    EXPECT(formatted[0] != '-');
+    EXPECT(strchr(formatted, 'h') != NULL);
+
+    format_context(formatted, sizeof(formatted), LONG_MAX, 1);
+    char max_percentage[32];
+    snprintf(max_percentage, sizeof(max_percentage), "%ld%%", LONG_MAX);
+    EXPECT(strstr(formatted, max_percentage) != NULL);
+}
+
 static void test_shell_single_quote(void)
 {
     char *q = shell_single_quote("plain");
@@ -1161,9 +1221,11 @@ int main(void)
     test_uuid_v4_format();
     test_uuid_v4_unique();
 
+    test_zero_sized_allocations();
     test_buf_append_and_steal();
+    test_buf_steal_empty();
     test_buf_reset_keeps_capacity();
-    test_buf_growth_crosses_default_cap();
+    test_buf_grows_repeatedly();
 
     test_slurp_missing();
     test_slurp_empty();
@@ -1172,6 +1234,8 @@ int main(void)
     test_slurp_fifo_rejected_no_hang();
     test_slurp_capped_missing();
     test_slurp_capped_under();
+    test_slurp_capped_zero();
+    test_slurp_capped_does_not_preallocate_cap();
     test_slurp_capped_over();
     test_slurp_capped_exact();
 
@@ -1209,6 +1273,7 @@ int main(void)
     test_format_tokens_ranges();
     test_format_duration_ranges();
     test_format_cost_precision();
+    test_format_extreme_values();
     test_shell_single_quote();
     test_format_context_with_and_without_limit();
 
@@ -1248,6 +1313,7 @@ int main(void)
     test_reflow_long_bash_command();
     test_reflow_long_bash_command_truncated();
 
+    test_parse_int();
     test_display_width_capped();
     test_display_width_env_override();
 

@@ -119,10 +119,7 @@ static char *strip_html_and_flatten(const char *body)
         out.data[out.len - 1] = '\0';
         out.len--;
     }
-    /* buf_steal returns NULL on a never-appended buf. Normalize so
-     * callers don't need a NULL check. */
-    char *s = buf_steal(&out);
-    return s ? s : xstrdup("");
+    return buf_steal(&out);
 }
 
 /* Cap `s` at `max` bytes, walking back from the cut to the nearest

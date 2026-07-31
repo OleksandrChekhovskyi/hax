@@ -91,9 +91,7 @@ static void capture_kind(const char *bytes, size_t n, int is_raw, void *user)
         buf_append(&c->kinds, &kind, 1);
 }
 
-/* Common helper: feed the whole input as one block, flush, return string.
- * buf_steal returns NULL if nothing was appended; coerce to "" so callers
- * can EXPECT_STR_EQ unconditionally. */
+/* Feed the whole input as one block and return the rendered text. */
 static char *render_width(const char *input, int wrap_width)
 {
     struct buf out;
@@ -102,8 +100,7 @@ static char *render_width(const char *input, int wrap_width)
     md_feed(m, input, strlen(input));
     md_flush(m);
     md_free(m);
-    char *s = buf_steal(&out);
-    return s ? s : xstrdup("");
+    return buf_steal(&out);
 }
 
 static char *render_one(const char *input)
@@ -121,8 +118,7 @@ static char *render_split(const char *input, int wrap_width, size_t split)
     md_feed(m, input + split, len - split);
     md_flush(m);
     md_free(m);
-    char *s = buf_steal(&out);
-    return s ? s : xstrdup("");
+    return buf_steal(&out);
 }
 
 static char *render_bytewise(const char *input, int wrap_width)
@@ -134,8 +130,7 @@ static char *render_bytewise(const char *input, int wrap_width)
         md_feed(m, input + i, 1);
     md_flush(m);
     md_free(m);
-    char *s = buf_steal(&out);
-    return s ? s : xstrdup("");
+    return buf_steal(&out);
 }
 
 /* ---------- pass-through ---------- */
@@ -1804,8 +1799,7 @@ static char *interpret_terminal(const char *in, int cols)
     }
 
     buf_append(&out, row, row_len);
-    char *s = buf_steal(&out);
-    return s ? s : xstrdup("");
+    return buf_steal(&out);
 }
 
 /* Render with wrap enabled at the given cell budget, then interpret the

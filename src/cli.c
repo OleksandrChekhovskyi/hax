@@ -245,7 +245,7 @@ static char *read_stream(FILE *input)
         break;
     }
 
-    return buffer.data ? buf_steal(&buffer) : xstrdup("");
+    return buf_steal(&buffer);
 }
 
 static void strip_final_newline(char *text)
