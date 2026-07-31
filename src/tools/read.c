@@ -327,7 +327,7 @@ static char *downscale_hint(const char *path)
  * alongside a short text note. `path` is borrowed; the caller still
  * owns/frees it. A NULL ctx has nowhere to attach, which is the same
  * outcome as a model without image input. */
-static char *run_image(const char *path, size_t file_size, struct tool_ctx *ctx)
+static char *run_image(const char *path, size_t file_size, struct tool_run_ctx *ctx)
 {
     if (!ctx || ctx->image_input == 0)
         return xasprintf("%s is an image, but the current model does not accept image input, "
@@ -386,8 +386,8 @@ static char *run_image(const char *path, size_t file_size, struct tool_ctx *ctx)
     img->width = info.width;
     img->height = info.height;
     free(data);
-    ctx->images = img;
-    ctx->n_images = 1;
+    ctx->result_images = img;
+    ctx->n_result_images = 1;
 
     /* Neutral metadata only — no "attached" claim. The pixels ride as an
      * image block when the model accepts them; a text-only model (or a
@@ -397,7 +397,7 @@ static char *run_image(const char *path, size_t file_size, struct tool_ctx *ctx)
                      info.height, n);
 }
 
-static char *run(const char *args_json, struct tool_ctx *ctx)
+static char *run(const char *args_json, struct tool_run_ctx *ctx)
 {
     json_error_t jerr;
     json_t *root = json_loads(args_json ? args_json : "{}", 0, &jerr);
@@ -555,7 +555,7 @@ static char *run(const char *args_json, struct tool_ctx *ctx)
 /* Render a short ":N-M" suffix when the model asked for a line range, so
  * the user sees what slice was requested without needing to read the JSON
  * args. Open-ended (only offset, no limit) renders as ":N-". */
-static char *format_display_extra(const char *args_json)
+static char *format_line_range(const char *args_json)
 {
     if (!args_json)
         return NULL;
@@ -613,10 +613,10 @@ const struct tool TOOL_READ = {
                 "\"description\":\"Maximum number of lines to return. Default: to EOF.\"}"
                 "},"
                 "\"required\":[\"path\"]}",
-            .display_arg = "path",
         },
     .run = run,
-    .preprocess_args = tool_normalize_path_args,
-    .format_display_extra = format_display_extra,
-    .silent_preview = 1,
+    .preprocess_args = tool_relativize_path_args,
+    .display = {.arg_name = "path",
+                .format_extra = format_line_range,
+                .preview_mode = TOOL_PREVIEW_COLLAPSED},
 };

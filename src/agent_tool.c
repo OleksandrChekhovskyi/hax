@@ -17,18 +17,18 @@ void agent_tool_call_init(struct agent_tool_call *tc, const struct item *call)
     tc->tool = call->tool_name ? agent_find_tool(call->tool_name) : NULL;
 
     if (tc->tool && tc->tool->preprocess_args && call->tool_arguments_json)
-        tc->rewritten_args = tc->tool->preprocess_args(call->tool_arguments_json);
-    if (tc->rewritten_args)
-        tc->effective.tool_arguments_json = tc->rewritten_args;
+        tc->owned_args_json = tc->tool->preprocess_args(call->tool_arguments_json);
+    if (tc->owned_args_json)
+        tc->effective.tool_arguments_json = tc->owned_args_json;
 }
 
 void agent_tool_call_destroy(struct agent_tool_call *tc)
 {
-    free(tc->rewritten_args);
+    free(tc->owned_args_json);
     memset(tc, 0, sizeof(*tc));
 }
 
-char *agent_tool_call_run(const struct agent_tool_call *tc, struct tool_ctx *ctx)
+char *agent_tool_call_run(const struct agent_tool_call *tc, struct tool_run_ctx *ctx)
 {
     if (!tc->tool)
         return xasprintf("unknown tool: %s",
@@ -37,58 +37,58 @@ char *agent_tool_call_run(const struct agent_tool_call *tc, struct tool_ctx *ctx
 }
 
 struct item agent_tool_result_make(const struct item *call, const char *output,
-                                   struct tool_ctx *ctx)
+                                   struct tool_run_ctx *ctx)
 {
-    struct item it = {
+    struct item result = {
         .kind = ITEM_TOOL_RESULT,
         .call_id = xstrdup(call->call_id),
         .output = ctrl_strip_dup(output ? output : ""),
     };
     if (ctx) {
-        it.images = ctx->images;
-        it.n_images = ctx->n_images;
-        ctx->images = NULL;
-        ctx->n_images = 0;
+        result.images = ctx->result_images;
+        result.n_images = ctx->n_result_images;
+        ctx->result_images = NULL;
+        ctx->n_result_images = 0;
         if (ctx->output_summarizes_display)
-            it.origin = ITEM_ORIGIN_SUMMARIZED;
+            result.origin = ITEM_ORIGIN_SUMMARIZED;
     }
-    return it;
+    return result;
 }
 
-void image_budget_enforce(const struct item *history, size_t n_history, struct item *result)
+void agent_tool_result_enforce_image_budget(const struct item *history, size_t n_history,
+                                            struct item *result)
 {
     if (result->n_images == 0)
         return;
-    size_t incoming = 0;
-    for (size_t k = 0; k < result->n_images; k++)
-        incoming += result->images[k].data_b64 ? strlen(result->images[k].data_b64) : 0;
+    size_t incoming_bytes = 0;
+    for (size_t i = 0; i < result->n_images; i++)
+        incoming_bytes += result->images[i].data_b64 ? strlen(result->images[i].data_b64) : 0;
 
-    int over_bytes =
-        items_image_base64_bytes(history, n_history) + incoming > IMAGE_REQUEST_BASE64_BUDGET_BYTES;
-    int over_count =
+    int exceeds_bytes = items_image_base64_bytes(history, n_history) + incoming_bytes >
+                        IMAGE_REQUEST_BASE64_BUDGET_BYTES;
+    int exceeds_count =
         items_image_count(history, n_history) + result->n_images > IMAGE_REQUEST_MAX_COUNT;
-    if (!over_bytes && !over_count)
+    if (!exceeds_bytes && !exceeds_count)
         return;
 
-    for (size_t k = 0; k < result->n_images; k++) {
-        free(result->images[k].mime);
-        free(result->images[k].data_b64);
+    for (size_t i = 0; i < result->n_images; i++) {
+        free(result->images[i].mime);
+        free(result->images[i].data_b64);
     }
     free(result->images);
     result->images = NULL;
     result->n_images = 0;
 
-    /* Name whichever limit tripped: count is the tighter one for many small
-     * images, bytes for a few large ones. */
-    char cap[48];
-    if (over_count)
-        snprintf(cap, sizeof(cap), "holds too many images (max %d)", IMAGE_REQUEST_MAX_COUNT);
+    char limit_description[48];
+    if (exceeds_count)
+        snprintf(limit_description, sizeof(limit_description), "holds too many images (max %d)",
+                 IMAGE_REQUEST_MAX_COUNT);
     else
-        snprintf(cap, sizeof(cap), "is at its image budget (~%zu MB)",
+        snprintf(limit_description, sizeof(limit_description), "is at its image budget (~%zu MB)",
                  (size_t)IMAGE_REQUEST_BASE64_BUDGET_BYTES / (1024 * 1024));
     char *note = xasprintf("%s\n\n[image not attached: this conversation %s. Ask the user to "
                            "/compact (summarizes and frees it) or /new.]",
-                           result->output ? result->output : "", cap);
+                           result->output ? result->output : "", limit_description);
     free(result->output);
     result->output = note;
 }

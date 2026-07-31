@@ -448,7 +448,7 @@ void tool_render_feed(struct tool_render *r, const char *bytes, size_t n)
      * expands, so n bytes in → ≤ n bytes out). utf8_sanitize then
      * replaces malformed bytes with U+FFFD (worst case 3x expansion),
      * holding partial multi-byte sequences across chunks so a codepoint
-     * split at an emit_display-chunk boundary isn't double-replaced. */
+     * split at a display-chunk boundary isn't double-replaced. */
     char stack_strip[4096];
     char *clean = n <= sizeof(stack_strip) ? stack_strip : xmalloc(n);
     size_t cn = ctrl_strip_feed(&r->strip, bytes, n, clean);
@@ -797,10 +797,9 @@ void tool_render_finalize(struct tool_render *r)
     r->started = 0;
 }
 
-int tool_render_emit(const char *bytes, size_t n, void *user)
+void tool_render_emit(const char *bytes, size_t n, void *data)
 {
-    struct tool_render *r = user;
-    r->emit_called = 1;
+    struct tool_render *r = data;
+    r->display_called = 1;
     tool_render_feed(r, bytes, n);
-    return 0;
 }

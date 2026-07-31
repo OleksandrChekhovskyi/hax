@@ -526,14 +526,14 @@ static void test_emit_callback_sets_flag(void)
     struct spinner *sp = spinner_new(NULL);
     struct tool_render r;
     tool_render_init(&r, &d, sp, R_HEAD_ONLY);
-    EXPECT(r.emit_called == 0);
+    EXPECT(r.display_called == 0);
     tool_render_emit("x", 1, &r);
-    EXPECT(r.emit_called == 1);
+    EXPECT(r.display_called == 1);
     /* Even an empty feed should mark called. */
     struct tool_render r2;
     tool_render_init(&r2, &d, sp, R_HEAD_ONLY);
     tool_render_emit("", 0, &r2);
-    EXPECT(r2.emit_called == 1);
+    EXPECT(r2.display_called == 1);
     tool_render_finalize(&r);
     tool_render_free(&r);
     tool_render_finalize(&r2);

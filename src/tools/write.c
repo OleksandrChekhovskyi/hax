@@ -28,7 +28,7 @@ static size_t count_lines(const char *s, size_t n)
     return lines;
 }
 
-static char *run(const char *args_json, struct tool_ctx *ctx)
+static char *run(const char *args_json, struct tool_run_ctx *ctx)
 {
     json_error_t jerr;
     json_t *root = json_loads(args_json ? args_json : "{}", 0, &jerr);
@@ -60,29 +60,11 @@ static char *run(const char *args_json, struct tool_ctx *ctx)
         return errmsg;
     }
 
-    /* For new files the unified diff is just the content again with `+`
-     * prefixes — wasteful in history since the model already sent the
-     * bytes in this call's arguments. Push the content through the
-     * display-only emit_display channel (see tool.h) so the user still gets a
-     * head-capped dim preview, and return a short confirmation as the
-     * canonical output. */
     if (was_new) {
         free(diff);
-        /* Stream the content for a display-only preview. When it renders
-         * no rows (empty / whitespace / control-only content), the
-         * dispatch layer falls back to showing the "created ..." summary
-         * so the block isn't a bare header — it decides on the actual row
-         * count, which the tool can't predict through the renderer's
-         * ctrl_strip. Because the preview lives only on the display side, the
-         * paged history view rebuilds it from this call's `content` argument
-         * (see src/history.c) — which it knows to do from the
-         * output_summarizes_display flag set below, not from the shape of the
-         * summary. */
-        if (ctx && ctx->emit_display && content_len > 0) {
-            ctx->emit_display(content, content_len, ctx->emit_user);
-            /* Say so on the result: the summary below is a stand-in for these
-             * bytes, and only this call knows it (an existing file returns a
-             * diff, a failure returns its message). */
+        /* Avoid echoing content into model history. Replay rebuilds this preview from the args. */
+        if (ctx && ctx->display && content_len > 0) {
+            ctx->display(content, content_len, ctx->display_data);
             ctx->output_summarizes_display = 1;
         }
         char *result;
@@ -116,9 +98,8 @@ const struct tool TOOL_WRITE = {
                                       "\"description\":\"Full new contents of the file.\"}"
                                       "},"
                                       "\"required\":[\"path\",\"content\"]}",
-            .display_arg = "path",
         },
     .run = run,
-    .preprocess_args = tool_normalize_path_args,
-    .output_is_diff = 1,
+    .preprocess_args = tool_relativize_path_args,
+    .display = {.arg_name = "path", .output_style = TOOL_OUTPUT_UNIFIED_DIFF},
 };

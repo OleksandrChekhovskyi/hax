@@ -849,13 +849,13 @@ static void exec_shell_child(const char *shell, const char *argv0, const char *c
 }
 
 /* Stream the trailing suffix (binary marker, footer, or "(no output)")
- * through emit_display at the end of a streamed run. The body was already
+ * through display at the end of a streamed run. The body was already
  * streamed live; this only writes what comes after, using the same
  * append_run_suffix helper as the canonical-history path so the live display
  * and history stay byte-identical past the body. The truncation marker is
  * not part of the suffix — the live display conveys truncation through the
  * renderer's own head/tail elision (see append_run_suffix). */
-static void stream_suffix(tool_emit_display_fn emit_display, void *user, size_t total_bytes,
+static void stream_suffix(tool_display_fn display, void *display_data, size_t total_bytes,
                           int has_nul, int streamed_anything, int timed_out, int interrupted,
                           long timeout_ms, int status)
 {
@@ -873,12 +873,12 @@ static void stream_suffix(tool_emit_display_fn emit_display, void *user, size_t 
     append_run_suffix(&suf, total_bytes, has_nul, streamed_anything, timed_out, interrupted,
                       timeout_ms, status);
     if (suf.len > 0)
-        emit_display(suf.data, suf.len, user);
+        display(suf.data, suf.len, display_data);
     buf_free(&suf);
 }
 
-static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn emit_display,
-                       void *user)
+static char *run_shell(const char *cmd, long timeout_ms, tool_display_fn display,
+                       void *display_data)
 {
     /* Build the env vector and resolve the shell before fork so the
      * post-fork child only performs async-signal-safe calls (strrchr
@@ -1105,8 +1105,8 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
          * stay out of the streamed display. The capture is still updated
          * (we still want total_bytes for the binary marker) but the
          * temp file gets the binary content too — finalize unlinks it. */
-        if (emit_display && !has_nul) {
-            emit_display(chunk, (size_t)r, user);
+        if (display && !has_nul) {
+            display(chunk, (size_t)r, display_data);
             streamed_anything = 1;
         }
         capture_write(&cap, chunk, (size_t)r, cap_bytes);
@@ -1141,12 +1141,12 @@ static char *run_shell(const char *cmd, long timeout_ms, tool_emit_display_fn em
     buf_init(&body);
     build_body_and_trunc(&cap, has_nul, &body);
 
-    if (emit_display) {
-        /* Streaming path: live chunks already went through emit_display.
+    if (display) {
+        /* Streaming path: live chunks already went through display.
          * Push the trailing suffix (footers / binary marker) through it too
          * so the user sees the exit status in the dim block. Truncation is
          * conveyed by the renderer's own head/tail elision, not a marker. */
-        stream_suffix(emit_display, user, cap.total_bytes, has_nul, streamed_anything, timed_out,
+        stream_suffix(display, display_data, cap.total_bytes, has_nul, streamed_anything, timed_out,
                       interrupted, timeout_ms, status);
     }
 
@@ -1192,7 +1192,7 @@ static char *resolve_call_timeout_ms(json_t *root, long *out_ms)
     return NULL;
 }
 
-static char *run(const char *args_json, struct tool_ctx *ctx)
+static char *run(const char *args_json, struct tool_run_ctx *ctx)
 {
     json_error_t jerr;
     json_t *root = json_loads(args_json ? args_json : "{}", 0, &jerr);
@@ -1213,7 +1213,7 @@ static char *run(const char *args_json, struct tool_ctx *ctx)
     }
 
     char *out =
-        run_shell(cmd, timeout_ms, ctx ? ctx->emit_display : NULL, ctx ? ctx->emit_user : NULL);
+        run_shell(cmd, timeout_ms, ctx ? ctx->display : NULL, ctx ? ctx->display_data : NULL);
     json_decref(root);
     return out;
 }
@@ -1255,23 +1255,20 @@ static char *bash_preprocess_args(const char *args_json)
     return out;
 }
 
-/* Decide at dispatch time whether this call's output should be hidden
- * from the live preview. The model still sees the canonical output —
- * this is purely a display heuristic. bash_classify is conservative:
- * any redirection / subshell / unknown utility falls through to the
- * normal head+tail preview. */
-static int bash_is_silent(const char *args_json)
+static enum tool_preview_mode bash_select_preview(const char *args_json)
 {
     if (!args_json)
-        return 0;
+        return TOOL_PREVIEW_HEAD_TAIL;
     json_error_t jerr;
     json_t *root = json_loads(args_json, 0, &jerr);
     if (!root)
-        return 0;
-    const char *cmd = json_string_value(json_object_get(root, "command"));
-    int verdict = cmd ? bash_cmd_is_exploration(cmd) : 0;
+        return TOOL_PREVIEW_HEAD_TAIL;
+    const char *command = json_string_value(json_object_get(root, "command"));
+    enum tool_preview_mode mode = command && bash_cmd_is_exploration(command)
+                                      ? TOOL_PREVIEW_COLLAPSED
+                                      : TOOL_PREVIEW_HEAD_TAIL;
     json_decref(root);
-    return verdict;
+    return mode;
 }
 
 const struct tool TOOL_BASH = {
@@ -1299,11 +1296,11 @@ const struct tool TOOL_BASH = {
                 "clamps to a configured maximum.\"}"
                 "},"
                 "\"required\":[\"command\"]}",
-            .display_arg = "command",
         },
     .run = run,
-    .header_rows = 3,
-    .preview_tail = 1,
-    .is_silent = bash_is_silent,
     .preprocess_args = bash_preprocess_args,
+    .display = {.arg_name = "command",
+                .preview_mode = TOOL_PREVIEW_HEAD_TAIL,
+                .header_rows = 3,
+                .select_preview = bash_select_preview},
 };

@@ -245,12 +245,7 @@ static void render_json_indented(FILE *out, const char *json_text)
     }
 }
 
-/* Tools section: one block per advertised tool, mirroring exactly the
- * fields the provider serializes for the model — name, description,
- * parameters_schema_json. The agent's display_arg / preview_tail / etc.
- * are UI-only and intentionally omitted. The chrome `[name]` header
- * matches render_tool_call so a reader scanning the transcript can
- * spot the matching tool definition above any specific call. */
+/* Render only the tool definitions sent to the model; local display metadata is omitted. */
 static void render_tools(FILE *out, int color, const struct tool_def *tools, size_t n)
 {
     if (!tools || n == 0)

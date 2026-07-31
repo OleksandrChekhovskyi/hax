@@ -163,20 +163,21 @@ static struct item loop_run_tool(const struct agent_loop_params *params, const s
         result = agent_tool_result_make(call, INTERRUPT_MARKER, NULL);
         result.origin = ITEM_ORIGIN_SKIPPED;
     } else {
-        struct agent_tool_call tool_call;
-        agent_tool_call_init(&tool_call, call);
-        struct tool_ctx tctx = {.image_input = image_input};
-        char *output = agent_tool_call_run(&tool_call, &tctx);
-        result = agent_tool_result_make(call, output, &tctx);
+        struct agent_tool_call prepared;
+        agent_tool_call_init(&prepared, call);
+        struct tool_run_ctx run_ctx = {.image_input = image_input};
+        char *output = agent_tool_call_run(&prepared, &run_ctx);
+        result = agent_tool_result_make(call, output, &run_ctx);
         free(output);
-        agent_tool_call_destroy(&tool_call);
+        agent_tool_call_destroy(&prepared);
     }
 
     /* Enforce the aggregate image budget at ingestion — history excludes
      * `result`, which the caller appends next. Dropping the just-read image
      * (rather than degrading older ones at serialization) keeps prior
      * requests byte-stable, so the provider prefix cache survives. */
-    image_budget_enforce(params->session->items, params->session->n_items, &result);
+    agent_tool_result_enforce_image_budget(params->session->items, params->session->n_items,
+                                           &result);
     return result;
 }
 

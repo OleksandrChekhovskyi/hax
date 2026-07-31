@@ -9,7 +9,7 @@
 
 #include "system/path.h"
 
-char *tool_normalize_path_args(const char *args_json)
+char *tool_relativize_path_args(const char *args_json)
 {
     if (!args_json)
         return NULL;
@@ -19,27 +19,25 @@ char *tool_normalize_path_args(const char *args_json)
     if (!root)
         return NULL;
 
-    char *out = NULL;
-    const char *raw = json_string_value(json_object_get(root, "path"));
-    if (!raw)
+    char *rewritten = NULL;
+    const char *path = json_string_value(json_object_get(root, "path"));
+    if (!path)
         goto done;
 
-    /* expand_home first so a `~`-rooted path can be compared against cwd;
-     * leaves anything else untouched. */
-    char *abs = expand_home(raw);
+    char *absolute_path = expand_home(path);
     char cwd[PATH_MAX];
-    char *rel = NULL;
+    char *relative_path = NULL;
     if (getcwd(cwd, sizeof(cwd)))
-        rel = path_relativize(abs, cwd);
-    free(abs);
-    if (!rel)
+        relative_path = path_relativize(absolute_path, cwd);
+    free(absolute_path);
+    if (!relative_path)
         goto done;
 
-    json_object_set_new(root, "path", json_string(rel));
-    free(rel);
-    out = json_dumps(root, JSON_COMPACT);
+    json_object_set_new(root, "path", json_string(relative_path));
+    free(relative_path);
+    rewritten = json_dumps(root, JSON_COMPACT);
 
 done:
     json_decref(root);
-    return out;
+    return rewritten;
 }

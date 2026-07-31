@@ -24,23 +24,20 @@ static char *call_bash(const char *cmd_json_escaped)
     return out;
 }
 
-/* Capturing emit_display: accumulates every chunk into a buf so tests
- * can assert what bash sent live for display. */
 struct capture {
     struct buf buf;
 };
 
-static int capture_write(const char *bytes, size_t n, void *user)
+static void capture_write(const char *bytes, size_t n, void *data)
 {
-    struct capture *c = user;
-    buf_append(&c->buf, bytes, n);
-    return 0;
+    struct capture *capture = data;
+    buf_append(&capture->buf, bytes, n);
 }
 
 static char *call_bash_streamed(const char *cmd_json_escaped, struct capture *cap)
 {
     char *args = xasprintf("{\"command\":\"%s\"}", cmd_json_escaped);
-    struct tool_ctx ctx = {.emit_display = capture_write, .emit_user = cap};
+    struct tool_run_ctx ctx = {.display = capture_write, .display_data = cap};
     char *out = TOOL_BASH.run(args, &ctx);
     free(args);
     return out;
@@ -828,8 +825,8 @@ static void test_bash_binary_output_keeps_exit_footer(void)
 
 static void test_bash_streamed_basic(void)
 {
-    /* With emit_display attached, bash streams stdout chunks live AND
-     * returns the canonical history. emit_display should see "hello\n"
+    /* With display attached, bash streams stdout chunks live AND
+     * returns the canonical history. display should see "hello\n"
      * (live display); the returned string should also be "hello\n". */
     struct capture cap = {0};
     buf_init(&cap.buf);
@@ -855,11 +852,11 @@ static void test_bash_streamed_binary_history_clean(void)
     EXPECT(strstr(out, "[binary output suppressed:") != NULL);
     EXPECT(strstr(out, "BEFORE") == NULL);
     EXPECT(strstr(out, "AFTER") == NULL);
-    /* Live display: emit_display also got the suffix at the end. The
+    /* Live display: display also got the suffix at the end. The
      * pre-NUL bytes may or may not have been streamed depending on
      * whether the NUL landed in chunk 1 (printf is small enough that
      * it does — but we don't assert that, only that the marker
-     * reached emit_display). */
+     * reached display). */
     EXPECT(strstr(cap.buf.data, "[binary output suppressed:") != NULL);
     free(out);
     buf_free(&cap.buf);
@@ -873,7 +870,7 @@ static void test_bash_streamed_binary_marker_isolated_from_escape(void)
      * consumed as the CSI introducer and silently swallowed. The fix
      * is for the streaming suffix to lead with \n (an abort byte for
      * ctrl_strip) so the marker always renders cleanly. Verify the
-     * leading \n is in the captured emit_display stream. */
+     * leading \n is in the captured display stream. */
     struct capture cap = {0};
     buf_init(&cap.buf);
     /* The first printf emits an unterminated CSI introducer; the
@@ -887,7 +884,7 @@ static void test_bash_streamed_binary_marker_isolated_from_escape(void)
         call_bash_streamed("printf '\\u001b['; sleep 0.03; printf 'pad pad pad pad\\\\0bin'", &cap);
     EXPECT(out != NULL);
     EXPECT(cap.buf.data != NULL);
-    /* Marker must reach emit_display. */
+    /* Marker must reach display. */
     const char *marker = strstr(cap.buf.data, "[binary output suppressed:");
     EXPECT(marker != NULL);
     /* …and be preceded by \n so ctrl_strip's escape state aborts.
@@ -1131,7 +1128,7 @@ static void test_bash_shell_override_bad_value_falls_back(void)
 static void test_bash_streamed_history_truncated(void)
 {
     /* Streamed bash history must apply the same OUTPUT_CAP as the
-     * non-streamed path — emit_display can see the full output, but the
+     * non-streamed path — display can see the full output, but the
      * returned string (model history) is bounded so a busy command
      * doesn't blow the context. Use yes piped through head to produce
      * many lines deterministically. */
@@ -1149,7 +1146,7 @@ static void test_bash_streamed_history_truncated(void)
      * the renderer conveys truncation through its own head/tail elision
      * ("... (N more lines) ..."), so emitting a marker here would be a
      * redundant, differently-counted second signal. The raw "hi" output
-     * still flows through emit_display. */
+     * still flows through display. */
     EXPECT(strstr(cap.buf.data, "hi") != NULL);
     EXPECT(strstr(cap.buf.data, "[output truncated") == NULL);
     free(out);

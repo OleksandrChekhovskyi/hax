@@ -9,7 +9,7 @@
 #include "util.h"
 
 /* agent_core's static tool table requires these link-time stand-ins. */
-static char *stub_run(const char *args, struct tool_ctx *ctx)
+static char *stub_run(const char *args, struct tool_run_ctx *ctx)
 {
     (void)args;
     (void)ctx;

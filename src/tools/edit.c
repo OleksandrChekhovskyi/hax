@@ -66,7 +66,7 @@ static char *do_replace(const char *hay, size_t hay_len, const char *old_str, si
     return buf_steal(&out);
 }
 
-static char *run(const char *args_json, struct tool_ctx *ctx)
+static char *run(const char *args_json, struct tool_run_ctx *ctx)
 {
     (void)ctx;
     json_error_t jerr;
@@ -204,9 +204,8 @@ const struct tool TOOL_EDIT = {
                 "\"description\":\"Replace every occurrence instead of requiring uniqueness.\"}"
                 "},"
                 "\"required\":[\"path\",\"old_string\",\"new_string\"]}",
-            .display_arg = "path",
         },
     .run = run,
-    .preprocess_args = tool_normalize_path_args,
-    .output_is_diff = 1,
+    .preprocess_args = tool_relativize_path_args,
+    .display = {.arg_name = "path", .output_style = TOOL_OUTPUT_UNIFIED_DIFF},
 };

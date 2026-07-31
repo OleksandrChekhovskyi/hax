@@ -8,7 +8,7 @@
 
 static char *last_args;
 static int preprocess_calls;
-static int emit_calls;
+static int display_calls;
 
 static char *rewrite_args(const char *args)
 {
@@ -17,22 +17,21 @@ static char *rewrite_args(const char *args)
     return xstrdup("{\"path\":\"rewritten\"}");
 }
 
-static char *record_run(const char *args, struct tool_ctx *ctx)
+static char *record_run(const char *args, struct tool_run_ctx *ctx)
 {
     free(last_args);
     last_args = xstrdup(args);
-    if (ctx && ctx->emit_display)
-        ctx->emit_display("preview", 7, ctx->emit_user);
+    if (ctx && ctx->display)
+        ctx->display("preview", 7, ctx->display_data);
     return xstrdup("ok\a\n");
 }
 
-static int record_emit(const char *bytes, size_t n, void *user)
+static void record_display(const char *bytes, size_t n, void *data)
 {
-    (void)user;
+    (void)data;
     EXPECT(n == 7);
     EXPECT(strncmp(bytes, "preview", n) == 0);
-    emit_calls++;
-    return 0;
+    display_calls++;
 }
 
 const struct tool TOOL_READ = {
@@ -59,7 +58,7 @@ static void test_preprocess_run_and_result(void)
     struct item call = make_call("read", "{\"path\":\"original\"}");
     struct agent_tool_call tc;
     preprocess_calls = 0;
-    emit_calls = 0;
+    display_calls = 0;
 
     agent_tool_call_init(&tc, &call);
     EXPECT(tc.tool == &TOOL_READ);
@@ -67,10 +66,10 @@ static void test_preprocess_run_and_result(void)
     EXPECT_STR_EQ(call.tool_arguments_json, "{\"path\":\"original\"}");
     EXPECT_STR_EQ(tc.effective.tool_arguments_json, "{\"path\":\"rewritten\"}");
 
-    struct tool_ctx ctx = {.emit_display = record_emit};
+    struct tool_run_ctx ctx = {.display = record_display};
     char *output = agent_tool_call_run(&tc, &ctx);
     EXPECT_STR_EQ(last_args, "{\"path\":\"rewritten\"}");
-    EXPECT(emit_calls == 1);
+    EXPECT(display_calls == 1);
 
     struct item result = agent_tool_result_make(&call, output, &ctx);
     EXPECT(result.kind == ITEM_TOOL_RESULT);
@@ -105,7 +104,7 @@ static void test_unmodified_args(void)
     agent_tool_call_init(&tc, &call);
 
     EXPECT(tc.tool == &TOOL_BASH);
-    EXPECT(tc.rewritten_args == NULL);
+    EXPECT(tc.owned_args_json == NULL);
     EXPECT(tc.effective.tool_arguments_json == call.tool_arguments_json);
 
     char *output = agent_tool_call_run(&tc, NULL);
@@ -116,70 +115,102 @@ static void test_unmodified_args(void)
     item_free(&call);
 }
 
-/* A tool_result owning one image with `b64_len` bytes of filler base64. */
-static struct item make_image_result(size_t b64_len)
+static struct item_image *make_image(size_t base64_len)
 {
-    struct item_image *img = xcalloc(1, sizeof(*img));
-    img->mime = xstrdup("image/png");
-    img->data_b64 = xmalloc(b64_len + 1);
-    memset(img->data_b64, 'A', b64_len);
-    img->data_b64[b64_len] = '\0';
+    struct item_image *image = xcalloc(1, sizeof(*image));
+    image->mime = xstrdup("image/png");
+    image->data_b64 = xmalloc(base64_len + 1);
+    memset(image->data_b64, 'A', base64_len);
+    image->data_b64[base64_len] = '\0';
+    return image;
+}
+
+static struct item make_image_result(size_t base64_len)
+{
     return (struct item){.kind = ITEM_TOOL_RESULT,
                          .call_id = xstrdup("c1"),
                          .output = xstrdup("Read image x.png"),
-                         .images = img,
+                         .images = make_image(base64_len),
                          .n_images = 1};
 }
 
-static void test_image_budget_enforce(void)
+static void test_result_moves_run_context(void)
+{
+    struct item call = make_call("read", "{}");
+    struct tool_run_ctx ctx = {
+        .result_images = make_image(8),
+        .n_result_images = 1,
+        .output_summarizes_display = 1,
+    };
+
+    struct item result = agent_tool_result_make(&call, "summary", &ctx);
+
+    EXPECT(result.images != NULL);
+    EXPECT(result.n_images == 1);
+    EXPECT(result.origin == ITEM_ORIGIN_SUMMARIZED);
+    EXPECT(ctx.result_images == NULL);
+    EXPECT(ctx.n_result_images == 0);
+    item_free(&result);
+    item_free(&call);
+}
+
+static void test_image_budget_accepts_result(void)
 {
     const size_t five_mb = 5u * 1024 * 1024;
-
-    /* History well under budget: the new image is kept untouched. */
-    struct item hist_ok[] = {make_image_result(five_mb)};
+    struct item history[] = {make_image_result(five_mb)};
     struct item result = make_image_result(five_mb);
-    image_budget_enforce(hist_ok, 1, &result);
+
+    agent_tool_result_enforce_image_budget(history, 1, &result);
+
     EXPECT(result.n_images == 1);
     EXPECT(strstr(result.output, "not attached") == NULL);
     item_free(&result);
-    item_free(&hist_ok[0]);
+    item_free(&history[0]);
+}
 
-    /* History near the byte budget: adding another 5 MiB tips over, so the
-     * new image is dropped and a recoverable note appended — the history
-     * items are never touched (cache-safe). */
-    struct item hist_full[] = {make_image_result(8u * 1024 * 1024),
-                               make_image_result(8u * 1024 * 1024)};
-    result = make_image_result(five_mb);
-    image_budget_enforce(hist_full, 2, &result);
+static void test_image_budget_drops_new_image(void)
+{
+    struct item history[] = {make_image_result(8u * 1024 * 1024),
+                             make_image_result(8u * 1024 * 1024)};
+    struct item result = make_image_result(5u * 1024 * 1024);
+
+    agent_tool_result_enforce_image_budget(history, 2, &result);
+
     EXPECT(result.n_images == 0);
     EXPECT(result.images == NULL);
     EXPECT(strstr(result.output, "not attached") != NULL);
-    EXPECT(strstr(result.output, "Read image x.png") != NULL); /* original text kept */
-    EXPECT(hist_full[0].n_images == 1 && hist_full[1].n_images == 1);
+    EXPECT(strstr(result.output, "Read image x.png") != NULL);
+    EXPECT(history[0].n_images == 1 && history[1].n_images == 1);
     item_free(&result);
-    item_free(&hist_full[0]);
-    item_free(&hist_full[1]);
+    item_free(&history[0]);
+    item_free(&history[1]);
+}
 
-    /* Count cap: many tiny images stay under the byte budget but a history
-     * already holding IMAGE_REQUEST_MAX_COUNT of them refuses the next one,
-     * with a count-specific note. */
-    struct item *tiny = xcalloc(IMAGE_REQUEST_MAX_COUNT, sizeof(*tiny));
+static void test_image_budget_enforces_count(void)
+{
+    struct item *history = xcalloc(IMAGE_REQUEST_MAX_COUNT, sizeof(*history));
     for (size_t i = 0; i < IMAGE_REQUEST_MAX_COUNT; i++)
-        tiny[i] = make_image_result(64);
-    result = make_image_result(64);
-    image_budget_enforce(tiny, IMAGE_REQUEST_MAX_COUNT, &result);
+        history[i] = make_image_result(64);
+    struct item result = make_image_result(64);
+
+    agent_tool_result_enforce_image_budget(history, IMAGE_REQUEST_MAX_COUNT, &result);
+
     EXPECT(result.n_images == 0);
     EXPECT(strstr(result.output, "too many images") != NULL);
     item_free(&result);
     for (size_t i = 0; i < IMAGE_REQUEST_MAX_COUNT; i++)
-        item_free(&tiny[i]);
-    free(tiny);
+        item_free(&history[i]);
+    free(history);
+}
 
-    /* A result with no images is a no-op regardless of history. */
-    struct item plain = {.kind = ITEM_TOOL_RESULT, .output = xstrdup("ok")};
-    image_budget_enforce(hist_full, 0, &plain);
-    EXPECT_STR_EQ(plain.output, "ok");
-    item_free(&plain);
+static void test_image_budget_ignores_plain_result(void)
+{
+    struct item result = {.kind = ITEM_TOOL_RESULT, .output = xstrdup("ok")};
+
+    agent_tool_result_enforce_image_budget(NULL, 0, &result);
+
+    EXPECT_STR_EQ(result.output, "ok");
+    item_free(&result);
 }
 
 int main(void)
@@ -187,7 +218,11 @@ int main(void)
     test_preprocess_run_and_result();
     test_unknown_tool();
     test_unmodified_args();
-    test_image_budget_enforce();
+    test_result_moves_run_context();
+    test_image_budget_accepts_result();
+    test_image_budget_drops_new_image();
+    test_image_budget_enforces_count();
+    test_image_budget_ignores_plain_result();
     free(last_args);
     T_REPORT();
 }

@@ -15,7 +15,7 @@
 
 /* Render `items` at `detail` and return the settled rows — the bytes go
  * through a memory stream (disp's sink) and then vt_resolve, which is how
- * the paged view produces its output. Markdown stays off (r.md == NULL) so
+ * the paged view produces its output. Markdown stays off (render.md == NULL) so
  * assistant text lands verbatim and assertions don't depend on the wrap
  * engine; the spinner stays off the way it does for any non-live render.
  * Caller frees. */
@@ -28,10 +28,10 @@ static char *render(enum history_detail detail, const struct item *items, size_t
         perror("open_memstream");
         exit(1);
     }
-    struct render_ctx r = {.disp = {.out = mem, .trail = 2}, .show_reasoning = reasoning};
-    history_render(&r, detail, items, n, 0);
-    render_transition(&r, RS_IDLE);
-    disp_emit_held(&r.disp);
+    struct render_ctx render = {.disp = {.out = mem, .trail = 2}, .show_reasoning = reasoning};
+    history_render(&render, detail, items, n, 0);
+    render_transition(&render, RS_IDLE);
+    disp_emit_held(&render.disp);
     fclose(mem);
 
     char *out = NULL;
@@ -73,8 +73,8 @@ static char *strip_sgr(const char *s)
 
 /* One user prompt, one verbose bash call, its result, one answer — the
  * shape almost every turn has. The command is deliberately not one
- * bash_classify calls exploration, or the call would render silent (which
- * test_full_keeps_silent_calls_quiet covers separately). Strings are
+ * bash_classify calls exploration, or the call would render collapsed (which
+ * test_full_keeps_collapsed_calls_quiet covers separately). Strings are
  * literals: history_render only reads, and nothing here goes through
  * item_free. */
 static struct item *sample_turn(size_t *n)
@@ -130,9 +130,9 @@ static void test_full_shows_tool_output(void)
     free(out);
 }
 
-/* A silent call showed no output live, so it must not gain any here —
- * `read` is silent_preview, and its result can be a whole file. */
-static void test_full_keeps_silent_calls_quiet(void)
+/* A collapsed call showed no output live, so it must not gain any here —
+ * `read` is collapsed preview, and its result can be a whole file. */
+static void test_full_keeps_collapsed_calls_quiet(void)
 {
     struct item items[2] = {0};
     items[0].kind = ITEM_TOOL_CALL;
@@ -146,7 +146,7 @@ static void test_full_keeps_silent_calls_quiet(void)
     char *out = render(HISTORY_FULL, items, 2, 0);
     EXPECT(strstr(out, "[read]") != NULL);
     /* Abbreviated to the basename, as the live breadcrumb is — the full path
-     * belongs to the verbose header, which a silent call never gets. */
+     * belongs to the verbose header, which a collapsed call never gets. */
     EXPECT(strstr(out, "hostname") != NULL);
     EXPECT(strstr(out, "/etc/hostname") == NULL);
     EXPECT(strstr(out, "secret-file-contents") == NULL);
@@ -157,7 +157,7 @@ static void test_full_keeps_silent_calls_quiet(void)
  * the run survives turn boundaries: the cluster deliberately outlives a
  * stream boundary (render_ctx.h), so breaking it per turn would space out
  * breadcrumbs the screen kept together and split a coalesced read line. */
-static void test_silent_cluster_spans_turns_tightly(void)
+static void test_collapsed_cluster_spans_turns_tightly(void)
 {
     struct item items[5] = {0};
     items[0].kind = ITEM_TOOL_CALL;
@@ -281,7 +281,7 @@ static void test_batched_results_pair_by_id(void)
 /* Brief collapses every call onto a quiet line, including the tools that
  * render verbosely live — so the line still has to name what was touched.
  * `read` abbreviates to a basename (it reads as a list of files); everything
- * else keeps its declared display_arg, which for edit/write is the path. */
+ * else keeps its configured display argument, which for edit/write is the path. */
 static void test_brief_names_verbose_tool_args(void)
 {
     struct item items[3] = {0};
@@ -388,7 +388,7 @@ static void test_skipped_call_replays_its_outcome(void)
  * happened to print those same bytes (`printf '[interrupted]'`, or a command
  * echoing the refusal message) is a call that ran, and replaying it as
  * skipped would have the view inventing an outcome. Here that means the quiet
- * breadcrumb a silent `read` earns, with its result still unshown. */
+ * breadcrumb a collapsed `read` earns, with its result still unshown. */
 static void test_ran_call_printing_a_marker_is_not_undispatched(void)
 {
     struct item items[2] = {0};
@@ -613,10 +613,10 @@ static char *render_from(enum history_detail detail, const struct item *items, s
         perror("open_memstream");
         exit(1);
     }
-    struct render_ctx r = {.disp = {.out = mem, .trail = 2}};
-    history_render(&r, detail, items, n, start);
-    render_transition(&r, RS_IDLE);
-    disp_emit_held(&r.disp);
+    struct render_ctx render = {.disp = {.out = mem, .trail = 2}};
+    history_render(&render, detail, items, n, start);
+    render_transition(&render, RS_IDLE);
+    disp_emit_held(&render.disp);
     fclose(mem);
 
     char *out = NULL;
@@ -883,16 +883,9 @@ static void test_turns_do_not_merge_text(void)
     free(out);
 }
 
-/* ---------- silent-call classification ---------- */
+/* ---------- collapsed-preview selection ---------- */
 
-/* The rule the view depends on, checked at its own seam rather than only
- * through a rendered block: a call that showed no output live must not gain
- * any later. Both inputs are pinned — the static per-tool flag and bash's
- * per-command classifier — so a change to either surfaces here instead of
- * as a file dump in the pager. (This test lives with the history view
- * because it needs the real tool table; test_agent_dispatch.c deliberately
- * stubs agent_find_tool down to a single tool.) */
-static struct item silent_probe(const char *tool_name, const char *args_json)
+static struct item collapsed_probe(const char *tool_name, const char *args_json)
 {
     struct item call = {0};
     call.kind = ITEM_TOOL_CALL;
@@ -901,42 +894,36 @@ static struct item silent_probe(const char *tool_name, const char *args_json)
     return call;
 }
 
-static void test_silent_by_tool_flag(void)
+static void test_collapsed_by_static_mode(void)
 {
-    /* read is silent_preview: its result is file content, never previewed. */
-    struct item call = silent_probe("read", "{\"path\":\"/etc/hostname\"}");
-    EXPECT(tool_call_is_silent(&call) == 1);
+    struct item call = collapsed_probe("read", "{\"path\":\"/etc/hostname\"}");
+    EXPECT(tool_call_preview_mode(&call) == TOOL_PREVIEW_COLLAPSED);
 }
 
-static void test_silent_by_per_call_classifier(void)
+static void test_collapsed_by_selector(void)
 {
-    /* bash decides per command: exploration is quiet, mutation is verbose. */
-    struct item explore = silent_probe("bash", "{\"command\":\"ls src\"}");
-    EXPECT(tool_call_is_silent(&explore) == 1);
-    struct item mutate = silent_probe("bash", "{\"command\":\"rm -rf build\"}");
-    EXPECT(tool_call_is_silent(&mutate) == 0);
+    struct item explore = collapsed_probe("bash", "{\"command\":\"ls src\"}");
+    EXPECT(tool_call_preview_mode(&explore) == TOOL_PREVIEW_COLLAPSED);
+    struct item mutate = collapsed_probe("bash", "{\"command\":\"rm -rf build\"}");
+    EXPECT(tool_call_preview_mode(&mutate) == TOOL_PREVIEW_HEAD_TAIL);
 }
 
-static void test_verbose_tools_are_not_silent(void)
+static void test_verbose_tools_are_not_collapsed(void)
 {
-    struct item write_call = silent_probe("write", "{\"path\":\"/tmp/x\",\"content\":\"y\"}");
-    EXPECT(tool_call_is_silent(&write_call) == 0);
-    struct item edit_call = silent_probe("edit", "{\"path\":\"/tmp/x\"}");
-    EXPECT(tool_call_is_silent(&edit_call) == 0);
+    struct item write_call = collapsed_probe("write", "{\"path\":\"/tmp/x\",\"content\":\"y\"}");
+    EXPECT(tool_call_preview_mode(&write_call) == TOOL_PREVIEW_HEAD);
+    struct item edit_call = collapsed_probe("edit", "{\"path\":\"/tmp/x\"}");
+    EXPECT(tool_call_preview_mode(&edit_call) == TOOL_PREVIEW_HEAD);
 }
 
-/* A name the registry doesn't know (model bug, a tool renamed since the
- * session was recorded) has no flags to consult — treat it as verbose
- * rather than silently swallowing it, and don't crash looking. */
 static void test_unknown_and_nameless_calls(void)
 {
-    struct item unknown = silent_probe("no_such_tool", "{}");
-    EXPECT(tool_call_is_silent(&unknown) == 0);
-    struct item nameless = silent_probe(NULL, NULL);
-    EXPECT(tool_call_is_silent(&nameless) == 0);
-    /* Missing args can't crash the per-call classifier either. */
-    struct item argless = silent_probe("bash", NULL);
-    EXPECT(tool_call_is_silent(&argless) == 0);
+    struct item unknown = collapsed_probe("no_such_tool", "{}");
+    EXPECT(tool_call_preview_mode(&unknown) == TOOL_PREVIEW_HEAD);
+    struct item nameless = collapsed_probe(NULL, NULL);
+    EXPECT(tool_call_preview_mode(&nameless) == TOOL_PREVIEW_HEAD);
+    struct item argless = collapsed_probe("bash", NULL);
+    EXPECT(tool_call_preview_mode(&argless) == TOOL_PREVIEW_HEAD_TAIL);
 }
 
 int main(void)
@@ -944,8 +931,8 @@ int main(void)
     locale_init_utf8();
     test_brief_omits_tool_output();
     test_full_shows_tool_output();
-    test_full_keeps_silent_calls_quiet();
-    test_silent_cluster_spans_turns_tightly();
+    test_full_keeps_collapsed_calls_quiet();
+    test_collapsed_cluster_spans_turns_tightly();
     test_brief_names_verbose_tool_args();
     test_nameless_call_renders_in_both_modes();
     test_replays_preprocessed_args();
@@ -973,9 +960,9 @@ int main(void)
     test_overwrite_still_replays_diff();
     test_text_after_tool_call_renders_above_it();
     test_turns_do_not_merge_text();
-    test_silent_by_tool_flag();
-    test_silent_by_per_call_classifier();
-    test_verbose_tools_are_not_silent();
+    test_collapsed_by_static_mode();
+    test_collapsed_by_selector();
+    test_verbose_tools_are_not_collapsed();
     test_unknown_and_nameless_calls();
     T_REPORT();
 }

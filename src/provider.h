@@ -90,7 +90,6 @@ struct tool_def {
     const char *name;
     const char *description;
     const char *parameters_schema_json; /* literal JSON Schema */
-    const char *display_arg;            /* name of the JSON field shown after "[tool]" in the UI */
 };
 
 struct context {

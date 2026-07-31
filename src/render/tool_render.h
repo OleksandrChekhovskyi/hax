@@ -11,7 +11,7 @@
 /* Streaming tool-output renderer.
  *
  * Tool output flows through this renderer chunk by chunk: bytes arrive
- * via tool_render_feed (driven by the emit_display callback the agent
+ * via tool_render_feed (driven by the display callback the agent
  * hands to each tool's run()), and the renderer ctrl_strips them and
  * emits a live preview to the terminal in one of three modes:
  *
@@ -61,14 +61,10 @@ struct tool_render {
     /* Stateful UTF-8 sanitization: bytes pass through ctrl_strip first
      * (drops C0/escape sequences), then this validator (replaces
      * malformed UTF-8 with U+FFFD). Stateful so a multi-byte codepoint
-     * split across emit_display chunks isn't double-FFFD'd. */
+     * split across display chunks isn't double-FFFD'd. */
     struct utf8_sanitize utf8;
-    /* "Did the tool call emit_display?" — set on every tool_render_emit
-     * invocation regardless of byte count, so a call that strips to
-     * zero clean bytes still counts as having emitted. The dispatch
-     * wiring uses this to decide whether to feed the tool's return
-     * value through emit_display for one-shot rendering. */
-    int emit_called;
+    /* Set on every display callback, including calls whose bytes strip to empty. */
+    int display_called;
 
     enum render_mode mode;
 
@@ -148,8 +144,7 @@ void tool_render_feed(struct tool_render *r, const char *bytes, size_t n);
  * emit close glyph. Idempotent for empty output (no preview emitted). */
 void tool_render_finalize(struct tool_render *r);
 
-/* tool_emit_display_fn-shaped callback that feeds bytes into the
- * renderer pointed to by `user`. Sets emit_called for every invocation. */
-int tool_render_emit(const char *bytes, size_t n, void *user);
+/* tool_display_fn callback; `data` points to a struct tool_render. */
+void tool_render_emit(const char *bytes, size_t n, void *data);
 
 #endif /* HAX_TOOL_RENDER_H */

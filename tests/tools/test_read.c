@@ -592,29 +592,29 @@ static void test_read_offset_one_on_empty(void)
 static void test_read_display_extra(void)
 {
     /* No range → no suffix. */
-    char *out = TOOL_READ.format_display_extra("{\"path\":\"x\"}");
+    char *out = TOOL_READ.display.format_extra("{\"path\":\"x\"}");
     EXPECT(out == NULL || *out == '\0');
     free(out);
 
     /* Both bounds → ":N-M" form. */
-    out = TOOL_READ.format_display_extra("{\"path\":\"x\",\"offset\":5,\"limit\":10}");
+    out = TOOL_READ.display.format_extra("{\"path\":\"x\",\"offset\":5,\"limit\":10}");
     EXPECT_STR_EQ(out, ":5-14");
     free(out);
 
     /* Offset only (no limit) → open-ended ":N-". */
-    out = TOOL_READ.format_display_extra("{\"path\":\"x\",\"offset\":3}");
+    out = TOOL_READ.display.format_extra("{\"path\":\"x\",\"offset\":3}");
     EXPECT_STR_EQ(out, ":3-");
     free(out);
 
     /* Limit only → offset defaults to 1. */
-    out = TOOL_READ.format_display_extra("{\"path\":\"x\",\"limit\":7}");
+    out = TOOL_READ.display.format_extra("{\"path\":\"x\",\"limit\":7}");
     EXPECT_STR_EQ(out, ":1-7");
     free(out);
 
     /* Adversarial: offset+limit would overflow LONG_MAX. End must clamp
      * rather than wrap (which would produce a negative number / UB). */
     char *args = xasprintf("{\"path\":\"x\",\"offset\":%ld,\"limit\":2}", LONG_MAX);
-    out = TOOL_READ.format_display_extra(args);
+    out = TOOL_READ.display.format_extra(args);
     char expected[64];
     snprintf(expected, sizeof(expected), ":%ld-%ld", LONG_MAX, LONG_MAX);
     EXPECT_STR_EQ(out, expected);
@@ -622,7 +622,7 @@ static void test_read_display_extra(void)
     free(args);
 
     /* Garbage limit (<= 0) → fall back to open-ended form. */
-    out = TOOL_READ.format_display_extra("{\"path\":\"x\",\"offset\":3,\"limit\":0}");
+    out = TOOL_READ.display.format_extra("{\"path\":\"x\",\"offset\":3,\"limit\":0}");
     EXPECT_STR_EQ(out, ":3-");
     free(out);
 }
@@ -640,7 +640,7 @@ static const unsigned char TINY_PNG[] = {
 
 static void test_read_image_attached(void)
 {
-    struct tool_ctx ctx = {.image_input = 1};
+    struct tool_run_ctx ctx = {.image_input = 1};
     char *path = write_tmp(TINY_PNG, sizeof(TINY_PNG));
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = TOOL_READ.run(args, &ctx);
@@ -648,16 +648,16 @@ static void test_read_image_attached(void)
     EXPECT(strstr(out, "image/png") != NULL);
     EXPECT(strstr(out, "2x3") != NULL);
 
-    EXPECT(ctx.n_images == 1);
-    EXPECT(ctx.images != NULL);
-    EXPECT_STR_EQ(ctx.images[0].mime, "image/png");
-    EXPECT(ctx.images[0].width == 2 && ctx.images[0].height == 3);
+    EXPECT(ctx.n_result_images == 1);
+    EXPECT(ctx.result_images != NULL);
+    EXPECT_STR_EQ(ctx.result_images[0].mime, "image/png");
+    EXPECT(ctx.result_images[0].width == 2 && ctx.result_images[0].height == 3);
     /* Base64 of the exact file bytes: decodes back to the same length. */
-    EXPECT(ctx.images[0].data_b64 &&
-           strlen(ctx.images[0].data_b64) == (sizeof(TINY_PNG) + 2) / 3 * 4);
-    free(ctx.images[0].mime);
-    free(ctx.images[0].data_b64);
-    free(ctx.images);
+    EXPECT(ctx.result_images[0].data_b64 &&
+           strlen(ctx.result_images[0].data_b64) == (sizeof(TINY_PNG) + 2) / 3 * 4);
+    free(ctx.result_images[0].mime);
+    free(ctx.result_images[0].data_b64);
+    free(ctx.result_images);
 
     free(out);
     free(args);
@@ -667,13 +667,13 @@ static void test_read_image_attached(void)
 
 static void test_read_image_model_without_vision(void)
 {
-    struct tool_ctx ctx = {.image_input = 0};
+    struct tool_run_ctx ctx = {.image_input = 0};
     char *path = write_tmp(TINY_PNG, sizeof(TINY_PNG));
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = TOOL_READ.run(args, &ctx);
     EXPECT(strstr(out, "does not accept image input") != NULL);
-    EXPECT(ctx.n_images == 0);
-    EXPECT(ctx.images == NULL);
+    EXPECT(ctx.n_result_images == 0);
+    EXPECT(ctx.result_images == NULL);
     free(out);
     free(args);
 
@@ -713,12 +713,12 @@ static void test_read_image_oversize_quotes_path(void)
         fwrite(png, 1, sizeof(png), f);
         fclose(f);
     }
-    struct tool_ctx ctx = {.image_input = 1};
+    struct tool_run_ctx ctx = {.image_input = 1};
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = TOOL_READ.run(args, &ctx);
     /* Over the side cap → a downscale hint, no image attached. */
     EXPECT(strstr(out, "per side") != NULL);
-    EXPECT(ctx.n_images == 0);
+    EXPECT(ctx.n_result_images == 0);
     /* The descriptive prefix ("<path> is WxH") shows the path verbatim, but
      * the suggested shell command must quote it: shell_single_quote turns
      * a'b into a'\''b. Only assert when a resize tool was found and a
@@ -735,14 +735,14 @@ static void test_read_image_oversize_quotes_path(void)
  * persist in history and re-fail every turn. The refusal stays recoverable. */
 static void refuse_incomplete(const unsigned char *bytes, size_t len)
 {
-    struct tool_ctx ctx = {.image_input = 1};
+    struct tool_run_ctx ctx = {.image_input = 1};
     char *path = write_tmp(bytes, len);
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = TOOL_READ.run(args, &ctx);
     EXPECT(strstr(out, "truncated or malformed") != NULL);
     EXPECT(strstr(out, "image/png") != NULL);
-    EXPECT(ctx.n_images == 0);
-    EXPECT(ctx.images == NULL);
+    EXPECT(ctx.n_result_images == 0);
+    EXPECT(ctx.result_images == NULL);
     free(out);
     free(args);
     unlink(path);

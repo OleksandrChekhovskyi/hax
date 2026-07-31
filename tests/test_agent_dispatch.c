@@ -14,16 +14,38 @@
 #include "render/render_ctx.h"
 #include "render/spinner.h"
 
+static char *run_mode_probe(const char *args_json, struct tool_run_ctx *ctx)
+{
+    (void)args_json;
+    (void)ctx;
+    return xstrdup("row1\nrow2\nrow3\nrow4\nrow5\nrow6\nrow7\nrow8\nrow9\ntail-marker\n");
+}
+
+static enum tool_preview_mode select_head(const char *args_json)
+{
+    (void)args_json;
+    return TOOL_PREVIEW_HEAD;
+}
+
+static const struct tool TOOL_MODE_PROBE = {
+    .def = {.name = "mode-probe"},
+    .run = run_mode_probe,
+    .display = {.preview_mode = TOOL_PREVIEW_HEAD_TAIL, .select_preview = select_head},
+};
+
 /* agent_find_tool lives in agent_core.c alongside the full tool table; stub it
- * so this test links only `write` (the tool under test) and the render
- * stack rather than every tool and its dependencies. */
+ * so this test links only its two tools and the render stack. */
 const struct tool *agent_find_tool(const char *name)
 {
-    return strcmp(name, "write") == 0 ? &TOOL_WRITE : NULL;
+    if (strcmp(name, "write") == 0)
+        return &TOOL_WRITE;
+    if (strcmp(name, "mode-probe") == 0)
+        return &TOOL_MODE_PROBE;
+    return NULL;
 }
 
 /* render_ctx references the markdown sink, but every md_* call is guarded
- * by `r->md != NULL` and we run with md == NULL — stub these so we don't
+ * by `render.md != NULL` and we run with md == NULL — stub these so we don't
  * have to link markdown.c. None are ever invoked. */
 void md_feed(struct md_renderer *m, const char *s, size_t n)
 {
@@ -96,12 +118,12 @@ static const char *run_write(const char *path, const char *content_json, struct 
     call.tool_arguments_json = xstrdup(args);
 
     cap_reset();
-    struct render_ctx r = {0};
-    r.state = RS_IDLE;
-    r.spinner = spinner_new(NULL);
-    *out = dispatch_tool_call(&r, &call, -1);
+    struct render_ctx render = {0};
+    render.state = RS_IDLE;
+    render.spinner = spinner_new(NULL);
+    *out = dispatch_tool_call(&render, &call, -1);
     const char *cap = cap_read();
-    spinner_free(r.spinner);
+    spinner_free(render.spinner);
 
     free(call.call_id);
     free(call.tool_name);
@@ -169,11 +191,33 @@ static void test_visible_content_shows_preview_not_summary(void)
     free(path);
 }
 
+static void test_selector_overrides_non_collapsed_mode(void)
+{
+    struct item call = {
+        .kind = ITEM_TOOL_CALL,
+        .call_id = xstrdup("call-mode"),
+        .tool_name = xstrdup("mode-probe"),
+        .tool_arguments_json = xstrdup("{}"),
+    };
+    struct render_ctx render = {.state = RS_IDLE, .spinner = spinner_new(NULL)};
+
+    cap_reset();
+    struct item result = dispatch_tool_call(&render, &call, -1);
+    const char *cap = cap_read();
+
+    EXPECT(strstr(cap, "more line") != NULL);
+    EXPECT(strstr(cap, "tail-marker") == NULL);
+    item_free(&result);
+    spinner_free(render.spinner);
+    item_free(&call);
+}
+
 int main(void)
 {
     cap_init();
     test_blank_content_summary_row_displayed();
     test_control_only_content_summary_row_displayed();
     test_visible_content_shows_preview_not_summary();
+    test_selector_overrides_non_collapsed_mode();
     T_REPORT();
 }

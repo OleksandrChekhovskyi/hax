@@ -72,8 +72,7 @@ void render_transition(struct render_ctx *r, enum render_state to)
      * (item seams, compose batches). */
     switch (to) {
     case RS_IDLE:
-        /* No separator emitted — out-of-band block writers
-         * (render_open_block, display_tool_header) own that decision. */
+        /* Out-of-band block writers own separator placement. */
         break;
     case RS_WAITING:
         disp_block_separator(&r->disp);

@@ -15,7 +15,7 @@
 /* Stand-in tool symbols so agent_core.c (which references TOOLS[] in
  * agent_session_init) links. We never invoke .run; the tests touch
  * session items directly without going through any tool. */
-static char *stub_run(const char *args, struct tool_ctx *ctx)
+static char *stub_run(const char *args, struct tool_run_ctx *ctx)
 {
     (void)args;
     (void)ctx;
