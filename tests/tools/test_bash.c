@@ -956,7 +956,8 @@ static void test_bash_env_overrides(void)
      *     (presence-probing tools), AI_AGENT=hax (vitest minimal
      *     reporter), GIT_TERMINAL_PROMPT=0 (git fails fast on
      *     credential prompts), PYTHONUNBUFFERED=1 (CPython line-
-     *     flushes under pipes).
+     *     flushes under pipes), TQDM_DISABLE=1 (tqdm progress bars
+     *     don't isatty-gate themselves).
      *
      * For each var: set the parent to a contradicting value, run a
      * single shell that echoes them all, and assert the full block.
@@ -987,6 +988,7 @@ static void test_bash_env_overrides(void)
     setenv("AI_AGENT", "other", 1);
     setenv("GIT_TERMINAL_PROMPT", "1", 1);
     setenv("PYTHONUNBUFFERED", "0", 1);
+    setenv("TQDM_DISABLE", "0", 1);
     setenv("FORCE_COLOR", "1", 1);
     setenv("MAKEFLAGS", "-j8", 1);
     char *out = call_bash("echo PAGER=$PAGER; echo GIT_PAGER=$GIT_PAGER; "
@@ -998,6 +1000,7 @@ static void test_bash_env_overrides(void)
                           "echo TERM=$TERM; echo NO_COLOR=$NO_COLOR; echo COLORTERM=$COLORTERM; "
                           "echo AI_AGENT=$AI_AGENT; echo GIT_TERMINAL_PROMPT=$GIT_TERMINAL_PROMPT; "
                           "echo PYTHONUNBUFFERED=$PYTHONUNBUFFERED; "
+                          "echo TQDM_DISABLE=$TQDM_DISABLE; "
                           "echo FORCE_COLOR=$FORCE_COLOR; echo MAKEFLAGS=$MAKEFLAGS");
     EXPECT_STR_EQ(out, "PAGER=cat\n"
                        "GIT_PAGER=cat\n"
@@ -1014,6 +1017,7 @@ static void test_bash_env_overrides(void)
                        "AI_AGENT=hax\n"
                        "GIT_TERMINAL_PROMPT=0\n"
                        "PYTHONUNBUFFERED=1\n"
+                       "TQDM_DISABLE=1\n"
                        "FORCE_COLOR=1\n"
                        "MAKEFLAGS=-j8\n");
     free(out);
@@ -1032,6 +1036,7 @@ static void test_bash_env_overrides(void)
     unsetenv("AI_AGENT");
     unsetenv("GIT_TERMINAL_PROMPT");
     unsetenv("PYTHONUNBUFFERED");
+    unsetenv("TQDM_DISABLE");
     unsetenv("FORCE_COLOR");
     unsetenv("MAKEFLAGS");
 }

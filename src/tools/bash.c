@@ -723,6 +723,12 @@ static void build_body_and_trunc(struct capture *cap, int has_nul, struct buf *b
  *   - PYTHONUNBUFFERED=1: critical for streaming. Without it, CPython
  *     block-buffers stdout when not on a TTY (4 KiB chunks), so a
  *     long-running Python script looks hung from the agent's side.
+ *   - TQDM_DISABLE=1: tqdm's `disable` defaults to False, and only the
+ *     None value triggers its isatty check — so Python progress bars
+ *     (meson setup, conda, huggingface) \r-repaint into our pipe no
+ *     matter what TERM says. tqdm reads TQDM_* as constructor defaults,
+ *     so this only reaches callers that omitted `disable`; one passing
+ *     an explicit value still wins. Older tqdm ignores the var.
  */
 static char **build_child_env(void)
 {
@@ -750,6 +756,7 @@ static char **build_child_env(void)
         {"GIT_TERMINAL_PROMPT", "GIT_TERMINAL_PROMPT=0"},
         {"AI_AGENT", "AI_AGENT=hax"},
         {"PYTHONUNBUFFERED", "PYTHONUNBUFFERED=1"},
+        {"TQDM_DISABLE", "TQDM_DISABLE=1"},
         /* Per-process observability, not inheritable config: a nested hax
          * truncates these paths at startup, so passing them through would
          * destroy this process's live logs and leave both writing to the
