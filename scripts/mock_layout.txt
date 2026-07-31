@@ -291,6 +291,17 @@ text \n\n\n\n\nSecond block after the collapsed run — the gap above should be 
 usage in=1060 out=28
 end-turn
 
+# ---------- turn 28: tight em dashes gain breathing room -------------
+# Recent models write clause dashes without spaces, which welds both
+# words to the dash in a monospace cell. Each side with a glyph on it
+# gets a space, whatever that glyph is; dashes already spaced and dashes
+# inside code stay exactly as written.
+text Tight clause dash—like this one—gets spaced on both sides, and GPT-5—this one—is spaced the same way.
+text \n\nAlready spaced — unchanged, and `a—b` inside code is quoted source, so it stays tight too.
+text \n\n```text\nfence—content is verbatim\n```
+usage in=1040 out=52
+end-turn
+
 text Done — markdown wrap demo complete.
 usage in=980 out=18
 end-turn

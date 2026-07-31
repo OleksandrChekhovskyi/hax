@@ -22,6 +22,7 @@
 #define CUB(n)   "\x1b[" #n "D"                  /* cursor back n columns (retro-wrap) */
 #define BUL      DIM "\xe2\x80\xa2 " OFF         /* dim "• " bullet */
 #define DOT      "\xc2\xb7"                      /* · middle dot (divider) */
+#define EMD      "\xe2\x80\x94"                  /* — em dash */
 #define DINKUS   DIM DOT "   " DOT "   " DOT OFF /* 3-dot divider (wide/unlimited width) */
 #define HL       "\xe2\x94\x80"                  /* ─ table rule */
 #define VB       "\xe2\x94\x82"                  /* │ table column separator */
@@ -526,6 +527,134 @@ static void test_bare_marker_no_space_stays_literal(void)
     free(got);
     got = render_one("1.");
     EXPECT_STR_EQ(got, "1.");
+    free(got);
+}
+
+/* ---------- em dash spacing ---------- */
+
+static void test_em_dash_tight_gets_spaced(void)
+{
+    char *got = render_one("Yes" EMD "this works");
+    EXPECT_STR_EQ(got, "Yes " EMD " this works");
+    free(got);
+}
+
+static void test_em_dash_spaced_stays_spaced(void)
+{
+    char *got = render_one("Yes " EMD " this works");
+    EXPECT_STR_EQ(got, "Yes " EMD " this works");
+    free(got);
+}
+
+static void test_em_dash_spaces_only_the_crowded_side(void)
+{
+    char *got = render_one("Yes" EMD " this");
+    EXPECT_STR_EQ(got, "Yes " EMD " this");
+    free(got);
+    got = render_one("Yes " EMD "this");
+    EXPECT_STR_EQ(got, "Yes " EMD " this");
+    free(got);
+}
+
+static void test_em_dash_neighbors_are_rendered_glyphs(void)
+{
+    /* Emphasis delimiters render as style changes, not glyphs, so they must not stand in for the
+     * dash's neighbors: the space belongs on the side the reader sees. */
+    char *got = render_one("**word" EMD "** next");
+    EXPECT_STR_EQ(got, BLD "word " EMD OFF " next");
+    free(got);
+    /* The trailing space resolves against the next rendered glyph, so it lands after the style
+     * opener — no inline role sets underline, reverse, or a background, so a styled space and a
+     * plain one are the same cells. */
+    got = render_one("word" EMD "**bold**");
+    EXPECT_STR_EQ(got, "word " EMD BLD " bold" OFF);
+    free(got);
+    got = render_one("`code`" EMD "word");
+    EXPECT_STR_EQ(got, CODE "code" CODE_OFF " " EMD " word");
+    free(got);
+}
+
+static void test_em_dash_next_to_literal_marker(void)
+{
+    /* A whitespace-flanked marker opens nothing and renders as itself, so the dash crowds it. */
+    char *got = render_one("word" EMD "* text");
+    EXPECT_STR_EQ(got, "word " EMD " * text");
+    free(got);
+}
+
+static void test_em_dash_before_emphasis_closer(void)
+{
+    /* The closing marker renders as a style change, so the space after it is the only one. */
+    char *got = render_one("*aside" EMD "* rest");
+    EXPECT_STR_EQ(got, ITAL "aside " EMD ITAL_OFF " rest");
+    free(got);
+}
+
+static void test_em_dash_spacing_is_symmetric_around_digits(void)
+{
+    /* Every glyph crowds equally: a digit on one side must not leave the dash welded to the word
+     * on the other. */
+    char *got = render_one("GPT-5" EMD "this model");
+    EXPECT_STR_EQ(got, "GPT-5 " EMD " this model");
+    free(got);
+    got = render_one("ISO" EMD "9001");
+    EXPECT_STR_EQ(got, "ISO " EMD " 9001");
+    free(got);
+    got = render_one("**2014**" EMD "2015");
+    EXPECT_STR_EQ(got, BLD "2014" OFF " " EMD " 2015");
+    free(got);
+}
+
+static void test_em_dash_at_stream_edges(void)
+{
+    /* Nothing precedes the first byte of a response, so there is no glyph to separate from. */
+    char *got = render_one(EMD "aside");
+    EXPECT_STR_EQ(got, EMD " aside");
+    free(got);
+}
+
+static void test_em_dash_before_line_break_uses_soft_join(void)
+{
+    /* The joined line supplies the right-hand space. */
+    char *got = render_one("clause" EMD "\nnext");
+    EXPECT_STR_EQ(got, "clause " EMD " next");
+    free(got);
+}
+
+static void test_em_dash_in_code_stays_tight(void)
+{
+    /* Code is quoted source: spacing it would misrepresent what it says. */
+    char *got = render_one("`a" EMD "b`");
+    EXPECT_STR_EQ(got, CODE "a" EMD "b" CODE_OFF);
+    free(got);
+    got = render_one("```\na" EMD "b\n```\n");
+    EXPECT_STR_EQ(got, DIM "a" EMD "b\n" OFF);
+    free(got);
+}
+
+static void test_non_em_dash_glyph_stays_eager(void)
+{
+    /* Only an em dash needs its right neighbor; other glyphs sharing its lead byte must not wait
+     * for the next feed. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 0);
+    md_feed(m, "a\xe2\x80\xa6", 4); /* … */
+    EXPECT_MEM_EQ(out.data, out.len, "a\xe2\x80\xa6", 4);
+    md_flush(m);
+    md_free(m);
+    buf_free(&out);
+}
+
+static void test_em_dash_split_across_feeds(void)
+{
+    /* The dash and its right neighbor can arrive in separate feeds; both must be seen before
+     * either side can be spaced. */
+    char *got = render_split("Yes" EMD "this", 0, 4);
+    EXPECT_STR_EQ(got, "Yes " EMD " this");
+    free(got);
+    got = render_bytewise("Yes" EMD "this", 0);
+    EXPECT_STR_EQ(got, "Yes " EMD " this");
     free(got);
 }
 
@@ -2253,6 +2382,19 @@ static void test_table_cell_inline_styles(void)
     free(got);
 }
 
+static void test_em_dash_in_table_cell_keeps_alignment(void)
+{
+    /* Cell widths are measured after inline rendering, so the spaced dash widens the column
+     * instead of pushing the separator out of line. */
+    const char *in = "| Col | Note |\n|---|---|\n| a" EMD "b | x |\n| bb | y |";
+    char *got = render_wrap(in, 40);
+    EXPECT_STR_EQ(got, BLD "Col" OFF "  " TSEP BLD "Note" OFF
+                           "\n" DIM HL HL HL HL HL HL CR HL HL HL HL HL OFF "\n"
+                           "a " EMD " b" TSEP "x\n"
+                           "bb   " TSEP "y\n");
+    free(got);
+}
+
 static void test_table_cell_block_markers_stay_literal(void)
 {
     /* GFM table cells are inline contexts, so leading block markers in a
@@ -2750,6 +2892,19 @@ int main(void)
     test_bullet_marker_only_at_eof_stays_literal();
     test_bare_marker_no_space_stays_literal();
 
+    test_em_dash_tight_gets_spaced();
+    test_em_dash_spaced_stays_spaced();
+    test_em_dash_spaces_only_the_crowded_side();
+    test_em_dash_neighbors_are_rendered_glyphs();
+    test_em_dash_next_to_literal_marker();
+    test_em_dash_before_emphasis_closer();
+    test_em_dash_spacing_is_symmetric_around_digits();
+    test_em_dash_at_stream_edges();
+    test_em_dash_before_line_break_uses_soft_join();
+    test_em_dash_in_code_stays_tight();
+    test_non_em_dash_glyph_stays_eager();
+    test_em_dash_split_across_feeds();
+
     test_split_double_star();
     test_split_inline_code();
     test_split_fence_at_line_start();
@@ -2888,6 +3043,7 @@ int main(void)
 
     test_table_buffering_is_feed_split_invariant();
     test_table_cell_inline_styles();
+    test_em_dash_in_table_cell_keeps_alignment();
     test_table_cell_block_markers_stay_literal();
     test_table_header_cell_inline_bold_stays_bold();
     test_table_header_only_eof_no_newline();

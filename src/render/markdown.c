@@ -25,6 +25,15 @@ struct md_renderer {
     /* Last consumed source byte, retained for emphasis checks across feeds. */
     char prev_byte;
 
+    /* Last byte rendered as content. Delimiters emit style runs instead, so this is the nearest
+     * glyph to the left of the current byte. */
+    char prev_text_byte;
+
+    /* A tight em dash owes its right-hand space to whichever glyph renders next. Which byte that
+     * is depends on parse decisions still ahead, so the space waits for the next content instead
+     * of guessing from the source. */
+    int pending_dash_space;
+
     int at_line_start;
 
     /* Trailing source spaces across feeds. Delimiters clear the count so spaces before a
@@ -75,6 +84,14 @@ static int is_space(char c)
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
+#define GLYPH_EM_DASH "\xe2\x80\x94" /* — clause dash */
+
+/* NUL is the stream or table-cell edge, where a space would be visible padding. */
+static int em_dash_crowds(char neighbor)
+{
+    return neighbor != 0 && !is_space(neighbor);
+}
+
 static struct md_wrap_context wrap_context(const struct md_renderer *m)
 {
     return (struct md_wrap_context){
@@ -89,6 +106,12 @@ static struct md_wrap_context wrap_context(const struct md_renderer *m)
 
 static void emit_text(struct md_renderer *m, const char *s, size_t n)
 {
+    if (m->pending_dash_space) {
+        m->pending_dash_space = 0;
+        if (n && em_dash_crowds(s[0]))
+            emit_text(m, " ", 1);
+    }
+
     /* Track the source bytes before the wrap layer substitutes tabs. */
     for (size_t j = 0; j < n; j++) {
         if (s[j] == ' ')
@@ -96,6 +119,8 @@ static void emit_text(struct md_renderer *m, const char *s, size_t n)
         else if (s[j] != '\r')
             m->trailing_spaces = 0;
     }
+    if (n)
+        m->prev_text_byte = s[n - 1];
 
     struct md_wrap_context ctx = wrap_context(m);
     int verbatim = m->in_code_fence || m->in_heading;
@@ -822,11 +847,28 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
         return STEP_ADVANCED;
     }
 
+    /* Models write clause dashes without surrounding spaces, which welds both words to the dash in
+     * a monospace cell. Space each side the dash crowds, the right one once the next glyph is
+     * known. A line break renders as the soft-join space, so it takes no space of its own. */
+    if (c == GLYPH_EM_DASH[0]) {
+        if (remaining < 3) {
+            if (!final)
+                return STEP_DEFER;
+        } else if (memcmp(w->data + *i, GLYPH_EM_DASH, 3) == 0) {
+            if (em_dash_crowds(m->prev_text_byte))
+                emit_text(m, " ", 1);
+            emit_text(m, GLYPH_EM_DASH, 3);
+            m->pending_dash_space = 1;
+            *i += 3;
+            return STEP_ADVANCED;
+        }
+    }
+
     /* Coalesce plain text so the wrapper receives words rather than individual bytes. */
     size_t end = *i + 1;
     while (end < w->len) {
         char d = w->data[end];
-        if (d == '\n' || d == '`' || d == '*' || d == '_')
+        if (d == '\n' || d == '`' || d == '*' || d == '_' || d == GLYPH_EM_DASH[0])
             break;
         end++;
     }
@@ -862,6 +904,8 @@ void md_reset(struct md_renderer *m, int wrap_width)
 {
     buf_reset(&m->tail);
     m->prev_byte = 0;
+    m->prev_text_byte = 0;
+    m->pending_dash_space = 0;
     m->at_line_start = 1;
     m->trailing_spaces = 0;
     m->fence_open_count = 0;
