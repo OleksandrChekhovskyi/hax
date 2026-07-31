@@ -103,7 +103,7 @@ static void test_loop_turn_collects_success(void)
     agent_loop_turn_run(&loop_turn, &session, &provider, observe, NULL, NULL, NULL);
     /* Collection is authoritative even with a presentation observer: terminal
      * usage, timing, and assembled text cannot depend on frontend behavior. */
-    EXPECT(!loop_turn.assembly.error);
+    EXPECT(loop_turn.assembly.state == TURN_DONE);
     EXPECT(loop_turn.usage.input_tokens == 100);
     EXPECT(loop_turn.usage.output_tokens == 20);
     EXPECT(loop_turn.elapsed_ms >= 0);
@@ -128,7 +128,7 @@ static void test_partial_error_is_preserved(void)
     script = SCRIPT_PARTIAL_ERROR;
 
     agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
-    EXPECT(loop_turn.assembly.error);
+    EXPECT(loop_turn.assembly.state == TURN_FAILED);
     EXPECT_STR_EQ(loop_turn.error_message, "stream failed");
     EXPECT(loop_turn.usage.input_tokens == 100);
 

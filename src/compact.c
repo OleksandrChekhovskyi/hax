@@ -204,7 +204,7 @@ static char *compact_summarize(const struct agent_session *s, struct provider *p
 
         /* A stream error leaves the turn holding partial items for the
          * caller's turn_reset to free; don't extract from a half-formed turn. */
-        if (t->error)
+        if (t->state == TURN_FAILED)
             break;
 
         size_t got_n;
@@ -218,7 +218,7 @@ static char *compact_summarize(const struct agent_session *s, struct provider *p
             }
 
         /* Accept only a tool-free response as the checkpoint. A tool call —
-         * even alongside a text preamble that turn_on_event already flushed
+         * even alongside a text preamble that turn_consume already flushed
          * into an assistant message ("I'll inspect the files" then read) —
          * means the model ignored "text only": never keep that preamble as the
          * summary and never run the tool. With no call, take the summary and
@@ -303,7 +303,7 @@ static int compact_sink_on_event(const struct stream_event *ev, void *user)
         compact_usage_record(&sink->usage, usage);
     if (sink->hooks->observe)
         sink->hooks->observe(ev, sink->hooks->user);
-    turn_on_event(ev, &sink->assembly);
+    turn_consume(&sink->assembly, ev);
     return 0;
 }
 

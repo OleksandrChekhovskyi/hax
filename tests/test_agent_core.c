@@ -362,7 +362,7 @@ static void test_session_add_user(void)
 
 static void feed_turn(struct turn *turn, struct stream_event event)
 {
-    turn_on_event(&event, turn);
+    turn_consume(turn, &event);
 }
 
 static void test_session_absorb_no_tool_call(void)

@@ -26,7 +26,6 @@ static int loop_turn_on_event(const struct stream_event *ev, void *user)
 
     if (ev->kind == EV_DONE) {
         loop_turn->usage = ev->u.done.usage;
-        loop_turn->done = 1;
     } else if (ev->kind == EV_ERROR) {
         if (!loop_turn->error_message && ev->u.error.message)
             loop_turn->error_message = xstrdup(ev->u.error.message);
@@ -36,7 +35,7 @@ static int loop_turn_on_event(const struct stream_event *ev, void *user)
 
     if (sink->observer)
         sink->observer(ev, sink->observer_user);
-    turn_on_event(ev, &loop_turn->assembly);
+    turn_consume(&loop_turn->assembly, ev);
     return 0;
 }
 
@@ -70,7 +69,7 @@ void agent_loop_turn_destroy(struct agent_loop_turn *loop_turn)
 int agent_loop_turn_has_state(const struct agent_loop_turn *loop_turn)
 {
     const struct turn *assembly = &loop_turn->assembly;
-    return assembly->in_text || assembly->in_reasoning || assembly->n_pending > 0 ||
+    return assembly->has_text || assembly->has_reasoning || assembly->n_pending_calls > 0 ||
            assembly->n_items > 0;
 }
 
@@ -80,7 +79,7 @@ struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *se
 {
     struct turn *assembly = &loop_turn->assembly;
     int had_state = agent_loop_turn_has_state(loop_turn);
-    int had_partial_text = assembly->in_text;
+    int had_partial_text = assembly->has_text;
     turn_flush_reasoning(assembly);
     turn_flush_text(assembly, had_partial_text ? "\n" INTERRUPT_MARKER : NULL);
 
@@ -243,7 +242,7 @@ static void loop_run_active(const struct agent_loop_params *params,
             result->last_context_tokens = turn_context;
         }
 
-        if (loop_turn.assembly.error) {
+        if (loop_turn.assembly.state == TURN_FAILED) {
             /* Provider failure wins over a simultaneous frontend cancel. It
              * supplies the diagnostic, while abort repair preserves any
              * partial output and closes completed tool calls. Repair appends
@@ -301,7 +300,8 @@ static void loop_run_active(const struct agent_loop_params *params,
          * no trace: no boundary, no footer, outcome PAUSED. Every other turn
          * leaves items and/or a footer (even a legitimately empty completed
          * response gets its duration footer), so its boundary is owed. */
-        int paused_empty = pause_pending && !loop_turn.done && loop_turn.assembly.n_items == 0;
+        int paused_empty = pause_pending && loop_turn.assembly.state == TURN_STREAMING &&
+                           loop_turn.assembly.n_items == 0;
         if (owes_boundary && !paused_empty)
             agent_session_add_boundary(session);
         struct agent_absorb_result absorbed = agent_session_absorb(session, &loop_turn.assembly);

@@ -4,210 +4,203 @@
 #include <stdlib.h>
 #include <string.h>
 
-void turn_init(struct turn *t)
+struct pending_tool_call {
+    char *id;
+    char *name;
+    struct buf arguments;
+};
+
+void turn_init(struct turn *turn)
 {
-    memset(t, 0, sizeof(*t));
+    memset(turn, 0, sizeof(*turn));
 }
 
-void turn_reset(struct turn *t)
+static void pending_tool_call_free(struct pending_tool_call *call)
 {
-    for (size_t i = 0; i < t->n_pending; i++) {
-        free(t->pending[i].call_id);
-        free(t->pending[i].name);
-        buf_free(&t->pending[i].args);
+    free(call->id);
+    free(call->name);
+    buf_free(&call->arguments);
+}
+
+void turn_reset(struct turn *turn)
+{
+    for (size_t i = 0; i < turn->n_pending_calls; i++)
+        pending_tool_call_free(&turn->pending_calls[i]);
+    free(turn->pending_calls);
+
+    buf_free(&turn->text);
+    buf_free(&turn->reasoning);
+
+    for (size_t i = 0; i < turn->n_items; i++)
+        item_free(&turn->items[i]);
+    free(turn->items);
+
+    turn_init(turn);
+}
+
+struct item *turn_take_items(struct turn *turn, size_t *out_count)
+{
+    struct item *items = turn->items;
+    if (out_count)
+        *out_count = turn->n_items;
+    turn->items = NULL;
+    turn->n_items = 0;
+    turn->cap_items = 0;
+    return items;
+}
+
+static void append_item(struct turn *turn, struct item item)
+{
+    if (turn->n_items == turn->cap_items) {
+        size_t capacity = turn->cap_items ? turn->cap_items * 2 : 16;
+        turn->items = xrealloc(turn->items, capacity * sizeof(*turn->items));
+        turn->cap_items = capacity;
     }
-    free(t->pending);
-
-    buf_free(&t->text_buf);
-    buf_free(&t->reasoning_buf);
-
-    /* Items may still own their strings on the error path; turn_take_items
-     * nulls the vector in the success path so this loop is then a no-op. */
-    for (size_t i = 0; i < t->n_items; i++)
-        item_free(&t->items[i]);
-    free(t->items);
-
-    memset(t, 0, sizeof(*t));
+    turn->items[turn->n_items++] = item;
 }
 
-struct pending_tool *turn_find_pending(struct turn *t, const char *call_id)
+static void flush_text(struct turn *turn)
 {
-    if (!call_id)
+    if (!turn->has_text)
+        return;
+
+    append_item(turn, (struct item){
+                          .kind = ITEM_ASSISTANT_MESSAGE,
+                          .text = buf_steal(&turn->text),
+                      });
+    turn->has_text = 0;
+}
+
+static void flush_reasoning(struct turn *turn)
+{
+    if (!turn->has_reasoning)
+        return;
+
+    append_item(turn, (struct item){
+                          .kind = ITEM_REASONING,
+                          .reasoning_text = buf_steal(&turn->reasoning),
+                      });
+    turn->has_reasoning = 0;
+}
+
+void turn_flush_text(struct turn *turn, const char *suffix)
+{
+    if (!turn->has_text)
+        return;
+    if (suffix && *suffix)
+        buf_append_str(&turn->text, suffix);
+    flush_text(turn);
+}
+
+void turn_flush_reasoning(struct turn *turn)
+{
+    flush_reasoning(turn);
+}
+
+static struct pending_tool_call *find_pending_call(struct turn *turn, const char *id)
+{
+    if (!id)
         return NULL;
-    for (size_t i = 0; i < t->n_pending; i++) {
-        if (t->pending[i].call_id && strcmp(t->pending[i].call_id, call_id) == 0)
-            return &t->pending[i];
+    for (size_t i = 0; i < turn->n_pending_calls; i++) {
+        if (turn->pending_calls[i].id && strcmp(turn->pending_calls[i].id, id) == 0)
+            return &turn->pending_calls[i];
     }
     return NULL;
 }
 
-struct item *turn_take_items(struct turn *t, size_t *out_n)
+static void start_tool_call(struct turn *turn, const char *id, const char *name)
 {
-    struct item *items = t->items;
-    if (out_n)
-        *out_n = t->n_items;
-    t->items = NULL;
-    t->n_items = 0;
-    t->cap_items = 0;
-    return items;
-}
-
-static void items_append(struct turn *t, struct item it)
-{
-    if (t->n_items == t->cap_items) {
-        size_t c = t->cap_items ? t->cap_items * 2 : 16;
-        t->items = xrealloc(t->items, c * sizeof(struct item));
-        t->cap_items = c;
+    if (turn->n_pending_calls == turn->cap_pending_calls) {
+        size_t capacity = turn->cap_pending_calls ? turn->cap_pending_calls * 2 : 4;
+        turn->pending_calls =
+            xrealloc(turn->pending_calls, capacity * sizeof(*turn->pending_calls));
+        turn->cap_pending_calls = capacity;
     }
-    t->items[t->n_items++] = it;
-}
 
-static void flush_text(struct turn *t)
-{
-    if (!t->in_text)
-        return;
-    struct item it = {
-        .kind = ITEM_ASSISTANT_MESSAGE,
-        .text = buf_steal(&t->text_buf),
+    turn->pending_calls[turn->n_pending_calls++] = (struct pending_tool_call){
+        .id = xstrdup(id),
+        .name = xstrdup(name),
     };
-    items_append(t, it);
-    t->in_text = 0;
 }
 
-/* Reasoning must precede the assistant item that carries it back to the provider. */
-static void flush_reasoning(struct turn *t)
+static void finish_tool_call(struct turn *turn, const char *id)
 {
-    if (!t->in_reasoning)
+    struct pending_tool_call *call = find_pending_call(turn, id);
+    if (!call)
         return;
-    struct item it = {
-        .kind = ITEM_REASONING,
-        .reasoning_text = buf_steal(&t->reasoning_buf),
-    };
-    items_append(t, it);
-    t->in_reasoning = 0;
+
+    append_item(turn, (struct item){
+                          .kind = ITEM_TOOL_CALL,
+                          .call_id = call->id,
+                          .tool_name = call->name,
+                          .tool_arguments_json = buf_steal(&call->arguments),
+                      });
+    call->id = NULL;
+    call->name = NULL;
+
+    size_t index = (size_t)(call - turn->pending_calls);
+    size_t remaining = turn->n_pending_calls - index - 1;
+    if (remaining > 0)
+        memmove(call, call + 1, remaining * sizeof(*call));
+    turn->n_pending_calls--;
 }
 
-void turn_flush_text(struct turn *t, const char *suffix)
+void turn_consume(struct turn *turn, const struct stream_event *event)
 {
-    if (!t->in_text)
+    if (turn->state != TURN_STREAMING)
         return;
-    if (suffix && *suffix)
-        buf_append_str(&t->text_buf, suffix);
-    flush_text(t);
-}
 
-void turn_flush_reasoning(struct turn *t)
-{
-    flush_reasoning(t);
-}
-
-static struct pending_tool *pending_push(struct turn *t, const char *call_id, const char *name)
-{
-    if (t->n_pending == t->cap_pending) {
-        size_t c = t->cap_pending ? t->cap_pending * 2 : 4;
-        t->pending = xrealloc(t->pending, c * sizeof(*t->pending));
-        t->cap_pending = c;
-    }
-    struct pending_tool *p = &t->pending[t->n_pending++];
-    p->call_id = xstrdup(call_id);
-    p->name = xstrdup(name);
-    buf_init(&p->args);
-    return p;
-}
-
-int turn_on_event(const struct stream_event *ev, struct turn *t)
-{
-    switch (ev->kind) {
+    switch (event->kind) {
     case EV_TEXT_DELTA:
-        /* First visible content closes the preceding reasoning block so the
-         * ITEM_REASONING lands before this assistant message. */
-        flush_reasoning(t);
-        buf_append_str(&t->text_buf, ev->u.text_delta.text);
-        t->in_text = 1;
+        flush_reasoning(turn);
+        buf_append_str(&turn->text, event->u.text_delta.text);
+        turn->has_text = 1;
         break;
     case EV_TOOL_CALL_START:
-        flush_reasoning(t);
-        flush_text(t);
-        pending_push(t, ev->u.tool_call_start.id, ev->u.tool_call_start.name);
+        flush_reasoning(turn);
+        flush_text(turn);
+        start_tool_call(turn, event->u.tool_call_start.id, event->u.tool_call_start.name);
         break;
     case EV_TOOL_CALL_DELTA: {
-        struct pending_tool *p = turn_find_pending(t, ev->u.tool_call_delta.id);
-        if (!p)
-            break;
-        buf_append_str(&p->args, ev->u.tool_call_delta.args_delta);
+        struct pending_tool_call *call = find_pending_call(turn, event->u.tool_call_delta.id);
+        if (call)
+            buf_append_str(&call->arguments, event->u.tool_call_delta.args_delta);
         break;
     }
-    case EV_TOOL_CALL_END: {
-        struct pending_tool *p = turn_find_pending(t, ev->u.tool_call_end.id);
-        if (!p)
-            break;
-        struct item it = {
-            .kind = ITEM_TOOL_CALL,
-            .call_id = xstrdup(p->call_id),
-            .tool_name = xstrdup(p->name),
-            .tool_arguments_json = buf_steal(&p->args),
-        };
-        items_append(t, it);
+    case EV_TOOL_CALL_END:
+        finish_tool_call(turn, event->u.tool_call_end.id);
         break;
-    }
     case EV_REASONING_DELTA: {
-        /* Accumulate CoT text so it can be round-tripped to the model as
-         * reasoning_content (see flush_reasoning / build_messages). Some
-         * models (notably Qwen3 via llama.cpp) degrade and emit tool calls
-         * inside the reasoning channel when their prior reasoning isn't fed
-         * back; preserving it here is what prevents that. Skip NULL/empty
-         * deltas: provider.h allows state-only reasoning events that only
-         * nudge the UI spinner and carry no text to store. */
-        const char *rt = ev->u.reasoning_delta.text;
-        if (rt && *rt) {
-            buf_append_str(&t->reasoning_buf, rt);
-            t->in_reasoning = 1;
+        const char *text = event->u.reasoning_delta.text;
+        if (text && *text) {
+            /* Some providers require prior reasoning text on the next request. */
+            buf_append_str(&turn->reasoning, text);
+            turn->has_reasoning = 1;
         }
         break;
     }
+    case EV_REASONING_ITEM:
+        /* Opaque state and its preceding display text form one reasoning item. */
+        flush_text(turn);
+        append_item(turn,
+                    (struct item){
+                        .kind = ITEM_REASONING,
+                        .reasoning_json = xstrdup(event->u.reasoning_item.json),
+                        .reasoning_text = turn->has_reasoning ? buf_steal(&turn->reasoning) : NULL,
+                    });
+        turn->has_reasoning = 0;
+        break;
     case EV_RETRY:
     case EV_PROGRESS:
-        /* UX-only signals — nothing to commit to history. EV_RETRY just
-         * tells the agent to update its spinner; EV_PROGRESS drives
-         * the prefill % indicator. The eventual outcome (success or
-         * EV_ERROR) drives state. */
         break;
-    case EV_REASONING_ITEM: {
-        /* Server typically emits the reasoning item before the assistant
-         * text/tool-call output items, but flush any in-flight text just
-         * in case so wire order is preserved on the round-trip. */
-        flush_text(t);
-        /* Codex streams the human-readable reasoning as EV_REASONING_DELTA
-         * (for the spinner) and finalizes the round-trip form as this
-         * structured item. Carry both on one item: the buffered plaintext
-         * for the transcript, the opaque JSON for the next request. The
-         * plaintext is NOT re-sent (codex.c round-trips reasoning_json). */
-        char *rtext = t->in_reasoning ? buf_steal(&t->reasoning_buf) : NULL;
-        t->in_reasoning = 0;
-        struct item it = {
-            .kind = ITEM_REASONING,
-            .reasoning_json = xstrdup(ev->u.reasoning_item.json),
-            .reasoning_text = rtext,
-        };
-        items_append(t, it);
-        break;
-    }
     case EV_DONE:
-        /* Commit reasoning before text so a reasoning-only turn (the
-         * leaked-tool-call case) still carries its CoT into history. */
-        flush_reasoning(t);
-        flush_text(t);
+        flush_reasoning(turn);
+        flush_text(turn);
+        turn->state = TURN_DONE;
         break;
     case EV_ERROR:
-        /* Don't flush here. The agent's error handler mirrors the
-         * Esc-interrupt path: it tags any in-flight text with an
-         * [interrupted] marker before flushing, so a "continue"
-         * follow-up turn carries history of what was already streamed.
-         * Calling flush_text now would commit the text without the
-         * marker and clear t->in_text, leaving the agent unable to
-         * tell partial-text from no-text. */
-        t->error = 1;
+        /* Abort repair must tag partial text before it becomes a history item. */
+        turn->state = TURN_FAILED;
         break;
     }
-    return 0;
 }

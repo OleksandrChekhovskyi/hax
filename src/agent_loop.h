@@ -14,11 +14,6 @@ struct agent_loop_turn {
     struct stream_usage usage;
     char *error_message;
     long elapsed_ms;
-    /* EV_DONE arrived — the stream completed normally. Distinguishes a
-     * legitimately empty response (completed, owes its boundary and usage
-     * footer) from a stream cancelled before producing anything (a soft
-     * interrupt pre-empting a prefilling request — leaves no trace). */
-    int done;
 };
 
 /* Run one model turn. observer receives each event for optional
