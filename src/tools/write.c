@@ -84,21 +84,23 @@ static char *run(const char *args_json, struct tool_run_ctx *ctx)
     return diff;
 }
 
+static const char WRITE_DESCRIPTION[] =
+    "Write a file, replacing it entirely (creating it if needed). Parent directories are created "
+    "automatically.";
+
+static const struct tool_param WRITE_PARAMS[] = {
+    {.name = "path", .type = "string", .required = 1, .description = "Path to the file."},
+    {.name = "content",
+     .type = "string",
+     .required = 1,
+     .description = "Full new contents of the file."},
+};
+
 const struct tool TOOL_WRITE = {
-    .def =
-        {
-            .name = "write",
-            .description = "Write a file, replacing it entirely (creating it if needed). "
-                           "Parent directories are created automatically.",
-            .parameters_schema_json = "{\"type\":\"object\","
-                                      "\"properties\":{"
-                                      "\"path\":{\"type\":\"string\","
-                                      "\"description\":\"Path to the file.\"},"
-                                      "\"content\":{\"type\":\"string\","
-                                      "\"description\":\"Full new contents of the file.\"}"
-                                      "},"
-                                      "\"required\":[\"path\",\"content\"]}",
-        },
+    .def = {.name = "write",
+            .description = WRITE_DESCRIPTION,
+            .params = WRITE_PARAMS,
+            .n_params = sizeof(WRITE_PARAMS) / sizeof(WRITE_PARAMS[0])},
     .run = run,
     .preprocess_args = tool_relativize_path_args,
     .display = {.arg_name = "path", .output_style = TOOL_OUTPUT_UNIFIED_DIFF},

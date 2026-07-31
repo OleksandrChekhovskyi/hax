@@ -1271,32 +1271,31 @@ static enum tool_preview_mode bash_select_preview(const char *args_json)
     return mode;
 }
 
+static const char BASH_DESCRIPTION[] =
+    "Run a shell command via bash -c (POSIX sh -c where bash is unavailable). Returns combined "
+    "stdout+stderr plus exit code.\n"
+    "\n"
+    "Rules:\n"
+    "- Each call starts in the working directory listed under `# Environment`; `cd` does not "
+    "persist across calls.\n"
+    "- Follow the command preferences under `# Environment` when present.\n"
+    "- Default timeout is 120s; pass `timeout_seconds` for slow commands (test suites, builds). "
+    "The harness enforces a hard ceiling.";
+
+static const struct tool_param BASH_PARAMS[] = {
+    {.name = "command", .type = "string", .required = 1, .description = "Shell command to run."},
+    {.name = "timeout_seconds",
+     .type = "integer",
+     .minimum = 1,
+     .description = "Optional override of the default timeout. Use a higher value for slow builds "
+                    "or test suites; the harness clamps to a configured maximum."},
+};
+
 const struct tool TOOL_BASH = {
-    .def =
-        {
-            .name = "bash",
-            .description =
-                "Run a shell command via bash -c (POSIX sh -c where bash is unavailable). "
-                "Returns combined stdout+stderr plus exit code.\n"
-                "\n"
-                "Rules:\n"
-                "- Each call starts in the working directory listed under `# Environment`; "
-                "`cd` does not persist across calls.\n"
-                "- Follow the command preferences under `# Environment` when present.\n"
-                "- Default timeout is 120s; pass `timeout_seconds` for slow commands "
-                "(test suites, builds). The harness enforces a hard ceiling.",
-            .parameters_schema_json =
-                "{\"type\":\"object\","
-                "\"properties\":{"
-                "\"command\":{\"type\":\"string\","
-                "\"description\":\"Shell command to run.\"},"
-                "\"timeout_seconds\":{\"type\":\"integer\",\"minimum\":1,"
-                "\"description\":\"Optional override of the default timeout. "
-                "Use a higher value for slow builds or test suites; the harness "
-                "clamps to a configured maximum.\"}"
-                "},"
-                "\"required\":[\"command\"]}",
-        },
+    .def = {.name = "bash",
+            .description = BASH_DESCRIPTION,
+            .params = BASH_PARAMS,
+            .n_params = sizeof(BASH_PARAMS) / sizeof(BASH_PARAMS[0])},
     .run = run,
     .preprocess_args = bash_preprocess_args,
     .display = {.arg_name = "command",

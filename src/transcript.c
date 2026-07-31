@@ -7,6 +7,7 @@
 
 #include "config.h"
 #include "provider.h"
+#include "tool_schema.h"
 #include "util.h"
 #include "render/diff_color.h"
 #include "terminal/ansi.h"
@@ -218,31 +219,18 @@ static void render_tool_call(FILE *out, int color, const struct item *it)
     }
 }
 
-/* Pretty-print a JSON literal, falling back to a verbatim dump when
- * parsing or encoding fails (deeply nested input, malformed payload).
- * Writes a leading newline before the body so the schema sits on its own
- * line below the description. */
-static void render_json_indented(FILE *out, const char *json_text)
+/* Pretty-print a tool's parameter schema on its own line below the description. */
+static void render_tool_schema(FILE *out, const struct tool_def *tool)
 {
-    if (!json_text || !*json_text)
+    json_t *schema = tool_schema_build(tool);
+    char *pretty = json_dumps(schema, JSON_INDENT(2));
+    json_decref(schema);
+    if (!pretty)
         return;
     fputc('\n', out);
-    json_t *root = json_loads(json_text, 0, NULL);
-    if (root) {
-        char *pretty = json_dumps(root, JSON_INDENT(2) | JSON_PRESERVE_ORDER);
-        if (pretty) {
-            fputs(pretty, out);
-            ensure_newline(out, pretty);
-            free(pretty);
-        } else {
-            fputs(json_text, out);
-            ensure_newline(out, json_text);
-        }
-        json_decref(root);
-    } else {
-        fputs(json_text, out);
-        ensure_newline(out, json_text);
-    }
+    fputs(pretty, out);
+    ensure_newline(out, pretty);
+    free(pretty);
 }
 
 /* Render only the tool definitions sent to the model; local display metadata is omitted. */
@@ -258,7 +246,7 @@ static void render_tools(FILE *out, int color, const struct tool_def *tools, siz
             fputs(tools[i].description, out);
             ensure_newline(out, tools[i].description);
         }
-        render_json_indented(out, tools[i].parameters_schema_json);
+        render_tool_schema(out, &tools[i]);
         if (i + 1 < n)
             fputc('\n', out);
     }

@@ -589,31 +589,32 @@ static char *format_line_range(const char *args_json)
     return out;
 }
 
+static const char READ_DESCRIPTION[] =
+    "Read a file from disk and return its contents in `cat -n` style: each line is prefixed with "
+    "its 1-indexed line number, a " READ_LINE_DELIM " arrow, then the line's content. The prefix "
+    "is presentation only — it is NOT part of the file on disk; do not include it in `edit` tool "
+    "`old_string`/`new_string` arguments. Optional 1-indexed line `offset` and `limit` slice a "
+    "range; without them, the whole file is returned. Image files (PNG/JPEG/GIF/WebP) are "
+    "detected by content and attached to the result as images when the model supports image "
+    "input.";
+
+static const struct tool_param READ_PARAMS[] = {
+    {.name = "path", .type = "string", .required = 1, .description = "Path to the file."},
+    {.name = "offset",
+     .type = "integer",
+     .minimum = 1,
+     .description = "1-indexed first line to return. Default 1."},
+    {.name = "limit",
+     .type = "integer",
+     .minimum = 1,
+     .description = "Maximum number of lines to return. Default: to EOF."},
+};
+
 const struct tool TOOL_READ = {
-    .def =
-        {
-            .name = "read",
-            .description =
-                "Read a file from disk and return its contents in `cat -n` style: each "
-                "line is prefixed with its 1-indexed line number, a " READ_LINE_DELIM
-                " arrow, then the line's content. The prefix is presentation only — it is "
-                "NOT part of the file on disk; do not include it in `edit` tool "
-                "`old_string`/`new_string` "
-                "arguments. Optional 1-indexed line `offset` and `limit` slice a range; "
-                "without them, the whole file is returned. Image files (PNG/JPEG/GIF/WebP) "
-                "are detected by content and attached to the result as images when the "
-                "model supports image input.",
-            .parameters_schema_json =
-                "{\"type\":\"object\","
-                "\"properties\":{"
-                "\"path\":{\"type\":\"string\",\"description\":\"Path to the file.\"},"
-                "\"offset\":{\"type\":\"integer\",\"minimum\":1,"
-                "\"description\":\"1-indexed first line to return. Default 1.\"},"
-                "\"limit\":{\"type\":\"integer\",\"minimum\":1,"
-                "\"description\":\"Maximum number of lines to return. Default: to EOF.\"}"
-                "},"
-                "\"required\":[\"path\"]}",
-        },
+    .def = {.name = "read",
+            .description = READ_DESCRIPTION,
+            .params = READ_PARAMS,
+            .n_params = sizeof(READ_PARAMS) / sizeof(READ_PARAMS[0])},
     .run = run,
     .preprocess_args = tool_relativize_path_args,
     .display = {.arg_name = "path",

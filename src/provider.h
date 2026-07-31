@@ -86,10 +86,21 @@ char *item_image_placeholder(const struct item_image *image);
 size_t items_image_base64_bytes(const struct item *items, size_t n_items);
 size_t items_image_count(const struct item *items, size_t n_items);
 
+/* One JSON Schema property advertised for a tool. Zeroed optional fields are omitted from the
+ * generated schema, so `minimum` cannot express a bound of 0. */
+struct tool_param {
+    const char *name;
+    const char *type; /* JSON Schema primitive: "string", "integer", "boolean" */
+    const char *description;
+    int required;
+    long minimum;
+};
+
 struct tool_def {
     const char *name;
     const char *description;
-    const char *parameters_schema_json; /* literal JSON Schema */
+    const struct tool_param *params;
+    size_t n_params;
 };
 
 struct context {

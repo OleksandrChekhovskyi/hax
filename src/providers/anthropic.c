@@ -10,6 +10,7 @@
 #include "anthropic_events.h"
 #include "config.h"
 #include "model_meta.h"
+#include "tool_schema.h"
 #include "util.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
@@ -240,12 +241,7 @@ static json_t *build_tools(const struct tool_def *tools, size_t n, int cache_las
 {
     json_t *arr = json_array();
     for (size_t i = 0; i < n; i++) {
-        json_error_t err;
-        json_t *schema = json_loads(tools[i].parameters_schema_json, 0, &err);
-        if (!schema) {
-            hax_warn("bad tool schema for %s: %s", tools[i].name, err.text);
-            schema = json_object();
-        }
+        json_t *schema = tool_schema_build(&tools[i]);
         json_t *tool = json_pack("{s:s, s:s, s:o}", "name", tools[i].name, "description",
                                  tools[i].description, "input_schema", schema);
         if (cache_last && i == n - 1)

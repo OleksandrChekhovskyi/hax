@@ -179,32 +179,30 @@ static char *run(const char *args_json, struct tool_run_ctx *ctx)
     return diff;
 }
 
+static const char EDIT_DESCRIPTION[] =
+    "Replace an exact string in a file. The `old_string` must match a byte sequence in the file "
+    "exactly once unless `replace_all` is true. The `read` tool prefixes each line with a line "
+    "number and a " READ_LINE_DELIM " arrow for display; that prefix is NOT part of the file on "
+    "disk, so do not include it in `old_string` or `new_string`. Returns a unified diff of the "
+    "change.";
+
+static const struct tool_param EDIT_PARAMS[] = {
+    {.name = "path", .type = "string", .required = 1, .description = "Path to the file."},
+    {.name = "old_string",
+     .type = "string",
+     .required = 1,
+     .description = "Exact text to find. Must be unique unless replace_all is set."},
+    {.name = "new_string", .type = "string", .required = 1, .description = "Replacement text."},
+    {.name = "replace_all",
+     .type = "boolean",
+     .description = "Replace every occurrence instead of requiring uniqueness."},
+};
+
 const struct tool TOOL_EDIT = {
-    .def =
-        {
-            .name = "edit",
-            .description = "Replace an exact string in a file. The `old_string` must match a "
-                           "byte sequence in the file exactly once unless `replace_all` is "
-                           "true. The `read` tool prefixes each line with a line number and "
-                           "a " READ_LINE_DELIM " arrow for display; that prefix is NOT part "
-                           "of the file on disk, so do not include it in `old_string` or "
-                           "`new_string`. "
-                           "Returns a unified diff of the change.",
-            .parameters_schema_json =
-                "{\"type\":\"object\","
-                "\"properties\":{"
-                "\"path\":{\"type\":\"string\","
-                "\"description\":\"Path to the file.\"},"
-                "\"old_string\":{\"type\":\"string\","
-                "\"description\":\"Exact text to find. Must be unique unless replace_all is "
-                "set.\"},"
-                "\"new_string\":{\"type\":\"string\","
-                "\"description\":\"Replacement text.\"},"
-                "\"replace_all\":{\"type\":\"boolean\","
-                "\"description\":\"Replace every occurrence instead of requiring uniqueness.\"}"
-                "},"
-                "\"required\":[\"path\",\"old_string\",\"new_string\"]}",
-        },
+    .def = {.name = "edit",
+            .description = EDIT_DESCRIPTION,
+            .params = EDIT_PARAMS,
+            .n_params = sizeof(EDIT_PARAMS) / sizeof(EDIT_PARAMS[0])},
     .run = run,
     .preprocess_args = tool_relativize_path_args,
     .display = {.arg_name = "path", .output_style = TOOL_OUTPUT_UNIFIED_DIFF},

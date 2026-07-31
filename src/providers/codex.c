@@ -11,6 +11,7 @@
 #include "codex_events.h"
 #include "config.h"
 #include "model_meta.h"
+#include "tool_schema.h"
 #include "util.h"
 #include "render/progress.h"
 #include "system/path.h"
@@ -381,12 +382,7 @@ static json_t *build_tools(const struct tool_def *tools, size_t n)
 {
     json_t *arr = json_array();
     for (size_t i = 0; i < n; i++) {
-        json_error_t err;
-        json_t *params = json_loads(tools[i].parameters_schema_json, 0, &err);
-        if (!params) {
-            hax_warn("bad tool schema for %s: %s", tools[i].name, err.text);
-            params = json_object();
-        }
+        json_t *params = tool_schema_build(&tools[i]);
         json_array_append_new(arr, json_pack("{s:s, s:s, s:s, s:o}", "type", "function", "name",
                                              tools[i].name, "description", tools[i].description,
                                              "parameters", params));

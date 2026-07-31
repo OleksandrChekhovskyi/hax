@@ -403,16 +403,21 @@ static void test_plain_mode_file_tool_results_have_no_escapes(void)
 
 static void test_tools_section_renders_each_tool(void)
 {
+    static const struct tool_param read_params[] = {
+        {.name = "path", .type = "string", .required = 1},
+    };
+    static const struct tool_param bash_params[] = {
+        {.name = "command", .type = "string"},
+    };
     struct tool_def tools[] = {
         {.name = "read",
          .description = "Read a file from disk.",
-         .parameters_schema_json = "{\"type\":\"object\","
-                                   "\"properties\":{\"path\":{\"type\":\"string\"}},"
-                                   "\"required\":[\"path\"]}"},
+         .params = read_params,
+         .n_params = 1},
         {.name = "bash",
          .description = "Run a shell command.",
-         .parameters_schema_json = "{\"type\":\"object\","
-                                   "\"properties\":{\"command\":{\"type\":\"string\"}}}"},
+         .params = bash_params,
+         .n_params = 1},
     };
     char *out = render_with_tools(tools, 2);
     EXPECT(contains(out, "── tools ──"));
