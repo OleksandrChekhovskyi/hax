@@ -43,6 +43,7 @@ sources = files(
     'src/agent_usage.c',
     'src/busy.c',
     'src/catalog.c',
+    'src/cli.c',
     'src/compact.c',
     'src/config.c',
     'src/effort.c',

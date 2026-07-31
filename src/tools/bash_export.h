@@ -25,11 +25,7 @@
  * concurrently with a settings change), so no locking.
  */
 
-/* Nesting cap for hax-in-hax. The bash tool stamps children with
- * HAX_SUBAGENT_DEPTH = parent + 1 (build_child_env) and main() refuses to
- * start at this depth — the backstop against a confused model recursively
- * spawning subagents. Lives here because the stamp and the guard must
- * agree on the value. */
+/* The child environment stamp and startup guard must use the same recursion cap. */
 #define HAX_SUBAGENT_MAX_DEPTH 3
 
 /* Publish the selection. Called by the agent layer whenever the session's
