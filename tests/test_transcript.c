@@ -452,11 +452,11 @@ static void test_turn_usage_footer(void)
                   .cache_write_1h_tokens = -1,
                   .cost = -1},
         .elapsed_ms = 42000,
-        .in_tokens = 2048, /* 3072 input - 1024 cached */
-        .cost_in = 0.025,
+        .uncached_input_tokens = 2048, /* 3072 input - 1024 cached */
+        .cost_input = 0.025,
         .cost_cache_read = 0.048,
         .cost_cache_write = -1,
-        .cost_out = 0.084,
+        .cost_output = 0.084,
         .cost_total = 0.157,
         .cost_estimated = 1,
     };
@@ -485,11 +485,11 @@ static void test_turn_usage_footer(void)
                   .cache_write_1h_tokens = -1,
                   .cost = 0.0012},
         .elapsed_ms = 3000,
-        .in_tokens = 600, /* 1000 input - 400 written */
-        .cost_in = 0.0002,
+        .uncached_input_tokens = 600, /* 1000 input - 400 written */
+        .cost_input = 0.0002,
         .cost_cache_read = -1,
         .cost_cache_write = 0.0008,
-        .cost_out = 0.0002,
+        .cost_output = 0.0002,
         .cost_total = 0.0012,
         .cost_estimated = 0,
     };
@@ -513,11 +513,11 @@ static void test_turn_usage_footer(void)
                   .cache_write_1h_tokens = -1,
                   .cost = 0.0092163},
         .elapsed_ms = 2000,
-        .in_tokens = 3523,
-        .cost_in = 0.007046,
+        .uncached_input_tokens = 3523,
+        .cost_input = 0.007046,
         .cost_cache_read = 0.0007048,
         .cost_cache_write = 0.0013215,
-        .cost_out = 0.000144,
+        .cost_output = 0.000144,
         .cost_total = 0.0092163,
         .cost_estimated = 0,
     };
@@ -530,7 +530,7 @@ static void test_turn_usage_footer(void)
     /* A component too small to render (a handful of uncached tokens on a
      * cheap model) drops the figure rather than printing "~$0.0000". */
     struct turn_usage tiny = exact;
-    tiny.cost_in = 0.00003;
+    tiny.cost_input = 0.00003;
     items[3].usage = &tiny;
     out = render_to_string(NULL, items, sizeof(items) / sizeof(items[0]));
     EXPECT(contains(out, "in 600 · write 400 ~$0.0008"));
@@ -539,7 +539,7 @@ static void test_turn_usage_footer(void)
 
     /* No rates to price against: bare counts, no dollar figures at all. */
     struct turn_usage bare = exact;
-    bare.cost_in = bare.cost_cache_write = bare.cost_out = -1;
+    bare.cost_input = bare.cost_cache_write = bare.cost_output = -1;
     items[3].usage = &bare;
     out = render_to_string(NULL, items, sizeof(items) / sizeof(items[0]));
     EXPECT(contains(out, "3s · $0.0012 · in 600 · write 400 · out 50"));

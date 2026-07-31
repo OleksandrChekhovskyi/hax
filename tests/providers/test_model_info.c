@@ -53,9 +53,9 @@ static void test_openrouter_full(void)
     EXPECT(m.cost_output == 50.0);
     EXPECT(m.cost_cache_read == 1.0);
     /* Only the blurb's lead line — the rest is markdown paragraphs. */
-    EXPECT_STR_EQ(m.desc, "Fast-mode variant of [Opus 5](/x).");
+    EXPECT_STR_EQ(m.description, "Fast-mode variant of [Opus 5](/x).");
     json_decref(m_j);
-    free(m.desc);
+    free(m.description);
 }
 
 /* Trimmed from anthropic/claude-sonnet-4.5: the write rates, and the
@@ -142,7 +142,7 @@ static void test_openrouter_bare(void)
     EXPECT(m.tools == PROVIDER_CAP_UNKNOWN);
     EXPECT(m.cost_input < 0);
     EXPECT(m.cost_cache_read < 0);
-    EXPECT(m.desc == NULL);
+    EXPECT(m.description == NULL);
     json_decref(m_j);
 }
 
@@ -177,10 +177,10 @@ static void test_codex_serves_context_window(void)
                codex_parse_model, m);
     EXPECT(m.context == 272000);
     EXPECT(m.image_input == PROVIDER_CAP_YES);
-    EXPECT_STR_EQ(m.desc, "Strong model for everyday coding.");
+    EXPECT_STR_EQ(m.description, "Strong model for everyday coding.");
     EXPECT(!codex_model_hidden(m_j));
     json_decref(m_j);
-    free(m.desc);
+    free(m.description);
 }
 
 static void test_codex_context_fallback(void)
@@ -435,12 +435,7 @@ static void test_openrouter_probe_url_escapes_the_id(void)
     EXPECT_STR_EQ(req.url, "https://openrouter.ai/api/v1/models"
                            "?q=meta-llama%2Fllama-3.2-3b-instruct%3Afree");
     EXPECT(req.parse != NULL);
-    free(req.url);
-    if (req.headers) {
-        for (char **h = req.headers; *h; h++)
-            free(*h);
-        free(req.headers);
-    }
+    model_probe_clear(&req);
     /* No model, nothing to fetch. */
     memset(&req, 0, sizeof(req));
     EXPECT(openrouter_probe_model(NULL, "", &req) == -1);

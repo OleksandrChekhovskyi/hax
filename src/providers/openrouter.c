@@ -143,7 +143,7 @@ void openrouter_parse_model(const json_t *entry, struct model_info *out)
     }
 
     openrouter_parse_efforts(entry, &out->efforts);
-    out->desc = openrouter_lead_line(entry);
+    out->description = openrouter_lead_line(entry);
 }
 
 /* Effort levels from the entry's `reasoning` block:

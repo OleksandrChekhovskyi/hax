@@ -76,16 +76,11 @@ struct probe_job {
     struct model_probe req;
 };
 
-static void probe_job_free(struct probe_job *j)
+static void probe_job_free(struct probe_job *job)
 {
-    free(j->req.url);
-    if (j->req.headers) {
-        for (char **h = j->req.headers; *h; h++)
-            free(*h);
-        free(j->req.headers);
-    }
-    free(j->model);
-    free(j);
+    model_probe_clear(&job->req);
+    free(job->model);
+    free(job);
 }
 
 static void probe_worker(struct bg_job *job, void *arg)
@@ -154,7 +149,7 @@ void model_meta_refresh(struct provider *p, const char *model)
     struct model_probe req;
     memset(&req, 0, sizeof(req));
     if (p->probe_model(p, model, &req) != 0 || !req.url || !req.parse) {
-        free(req.url);
+        model_probe_clear(&req);
         return;
     }
     struct probe_job *j = xcalloc(1, sizeof(*j));
@@ -254,7 +249,7 @@ void model_meta_merge(const struct model_info *reported, const struct catalog_en
     if (reported) {
         struct model_info r = *reported;
         r.id = NULL; /* the merged view describes a model, it isn't one */
-        r.desc = NULL;
+        r.description = NULL;
         *out = r;
     }
     if (!cat)

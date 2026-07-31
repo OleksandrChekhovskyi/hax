@@ -759,9 +759,9 @@ static void test_turn_usage_make(void)
     if (tu) {
         EXPECT(tu->cost_total == 0.01);
         EXPECT(!tu->cost_estimated);
-        EXPECT(tu->cost_in == 800 * 2.0 / 1e6);
+        EXPECT(tu->cost_input == 800 * 2.0 / 1e6);
         EXPECT(tu->cost_cache_read == 200 * 2.0 / 1e6);
-        EXPECT(tu->cost_out == 50 * 8.0 / 1e6);
+        EXPECT(tu->cost_output == 50 * 8.0 / 1e6);
         EXPECT(tu->elapsed_ms == 1500);
         free(tu);
     }
@@ -777,7 +777,7 @@ static void test_turn_usage_make(void)
         EXPECT(tu->elapsed_ms == 1500);
         EXPECT(tu->cost_total < 0);
         EXPECT(!tu->cost_estimated);
-        EXPECT(tu->cost_in < 0 && tu->cost_out < 0);
+        EXPECT(tu->cost_input < 0 && tu->cost_output < 0);
         free(tu);
     }
     EXPECT(turn_usage_make(&nothing, -1, &prov, "m") == NULL);
@@ -790,7 +790,7 @@ static void test_turn_usage_make(void)
     if (tu) {
         EXPECT(tu->cost_total == 0.02);
         EXPECT(!tu->cost_estimated);
-        EXPECT(tu->cost_in < 0 && tu->cost_out < 0);
+        EXPECT(tu->cost_input < 0 && tu->cost_output < 0);
         free(tu);
     }
 
@@ -809,10 +809,10 @@ static void test_turn_usage_make(void)
     if (tu) {
         EXPECT(tu->cost_estimated);
         EXPECT(tu->cost_total == 10.0);
-        EXPECT(tu->cost_in == 1.0);
+        EXPECT(tu->cost_input == 1.0);
         EXPECT(tu->cost_cache_read == 1.0);
         EXPECT(tu->cost_cache_write == 0);
-        EXPECT(tu->cost_out == 8.0);
+        EXPECT(tu->cost_output == 8.0);
         free(tu);
     }
 

@@ -320,10 +320,10 @@ struct turn_usage *turn_usage_make(const struct stream_usage *u, long elapsed_ms
     struct turn_usage *tu = xmalloc(sizeof(*tu));
     tu->usage = *u;
     tu->elapsed_ms = elapsed_ms;
-    tu->cost_in = tu->cost_cache_read = tu->cost_cache_write = tu->cost_out = -1;
+    tu->cost_input = tu->cost_cache_read = tu->cost_cache_write = tu->cost_output = -1;
     tu->cost_total = -1;
     tu->cost_estimated = 0;
-    tu->in_tokens = uncached_input_default(u); /* refined once priced */
+    tu->uncached_input_tokens = uncached_input_default(u);
     if (u->cost >= 0)
         tu->cost_total = u->cost;
     if (u->input_tokens < 0 && u->output_tokens < 0)
@@ -340,13 +340,11 @@ struct turn_usage *turn_usage_make(const struct stream_usage *u, long elapsed_ms
                                  u->cache_write_tokens, u->cache_write_1h_tokens, &split);
     if (total < 0)
         return tu;
-    tu->in_tokens = split.in_tokens;
-    tu->cost_in = split.in;
+    tu->uncached_input_tokens = split.in_tokens;
+    tu->cost_input = split.in;
     tu->cost_cache_read = split.cache_read;
     tu->cost_cache_write = split.cache_write;
-    tu->cost_out = split.out;
-    /* cost_estimated describes the *total* only: when the provider
-     * reported one, the estimate merely decomposes it. */
+    tu->cost_output = split.out;
     if (tu->cost_total < 0) {
         tu->cost_total = total;
         tu->cost_estimated = 1;

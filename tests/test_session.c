@@ -29,10 +29,10 @@ static int usage_eq(const struct turn_usage *a, const struct turn_usage *b)
            a->usage.cache_write_tokens == b->usage.cache_write_tokens &&
            a->usage.cache_write_1h_tokens == b->usage.cache_write_1h_tokens &&
            a->usage.cost == b->usage.cost && a->elapsed_ms == b->elapsed_ms &&
-           a->cost_in == b->cost_in && a->cost_cache_read == b->cost_cache_read &&
-           a->cost_cache_write == b->cost_cache_write && a->cost_out == b->cost_out &&
+           a->cost_input == b->cost_input && a->cost_cache_read == b->cost_cache_read &&
+           a->cost_cache_write == b->cost_cache_write && a->cost_output == b->cost_output &&
            a->cost_total == b->cost_total && a->cost_estimated == b->cost_estimated &&
-           a->in_tokens == b->in_tokens;
+           a->uncached_input_tokens == b->uncached_input_tokens;
 }
 
 static int images_eq(const struct item *a, const struct item *b)
@@ -91,11 +91,11 @@ static struct turn_usage TU_EST = {
               .cache_write_1h_tokens = -1,
               .cost = -1},
     .elapsed_ms = 42000,
-    .in_tokens = 5800, /* 30000 - 16000 cached - 8200 written */
-    .cost_in = 0.025,
+    .uncached_input_tokens = 5800, /* 30000 - 16000 cached - 8200 written */
+    .cost_input = 0.025,
     .cost_cache_read = 0.048,
     .cost_cache_write = 0.031,
-    .cost_out = 0.084,
+    .cost_output = 0.084,
     .cost_total = 0.188,
     .cost_estimated = 1,
 };
@@ -107,11 +107,11 @@ static struct turn_usage TU_EXACT = {
               .cache_write_1h_tokens = -1,
               .cost = 0.0012},
     .elapsed_ms = -1,
-    .in_tokens = 1000,
-    .cost_in = -1,
+    .uncached_input_tokens = 1000,
+    .cost_input = -1,
     .cost_cache_read = -1,
     .cost_cache_write = -1,
-    .cost_out = -1,
+    .cost_output = -1,
     .cost_total = 0.0012,
     .cost_estimated = 0,
 };

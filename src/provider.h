@@ -8,94 +8,44 @@
 #include "effort.h"
 #include "transport/http.h"
 
-/*
- * A flat, provider-agnostic view of a conversation. Each item is one thing:
- * a user message, an assistant message, a tool call, or a tool result.
- * This maps cleanly to the OpenAI Responses API "input" array, and with a
- * small amount of grouping in the adapter, to Anthropic Messages too.
- */
+/* Flat, provider-independent conversation records. Adapters may group adjacent records when their
+ * wire format requires compound assistant messages or tool-result blocks. */
 enum item_kind {
     ITEM_USER_MESSAGE,
     ITEM_ASSISTANT_MESSAGE,
     ITEM_TOOL_CALL,
     ITEM_TOOL_RESULT,
-    /* Reasoning carried across turns. Two flavors share this kind and the
-     * reasoning_* fields on struct item: the Codex Responses adapter emits
-     * an opaque encrypted blob (reasoning_json) for chain-of-thought
-     * continuity, while the openai-family adapters capture plain CoT text
-     * (reasoning_text) to replay as reasoning_content for interleaved-
-     * thinking models. Adapters that need neither simply skip this kind. */
+    /* May carry opaque provider state, displayable text, or both. */
     ITEM_REASONING,
-    /* Inert marker the agent emits before each fresh model request, so
-     * downstream consumers (currently the transcript renderer) can mark
-     * turn boundaries the same way agent.c/turn.c sees them — one per
-     * HTTP round-trip — without re-deriving them by heuristics. Carries
-     * no fields. Provider adapters ignore it when serializing the
-     * conversation. */
+    /* Fieldless marker before each model request; adapters do not serialize it. */
     ITEM_TURN_BOUNDARY,
-    /* Inert accounting footer for the model round-trip whose items
-     * precede it, appended by the agent when the round-trip completes
-     * (its usage is only known then, which is why it trails the turn
-     * rather than riding the boundary that opened it). Carries a
-     * `usage` payload; the transcript renders it as a per-request stats
-     * line. Provider adapters ignore it like ITEM_TURN_BOUNDARY. */
+    /* Usage for the preceding model request; adapters do not serialize it. */
     ITEM_TURN_USAGE,
 };
 
-/* Where an item came from, for the parts of a conversation the agent writes
- * or rewrites itself. Everything it inserts goes on the wire as an ordinary
- * message or result — the model must not have to parse prose to know what
- * happened — so content cannot tell them apart, and display must: a synthetic
- * user message was never typed and never echoed, an unrun tool call showed a
- * fixed marker instead of an output preview, and a summarized one showed bytes
- * that are not in its output at all.
- *
- * One field for every kind, since an item has exactly one provenance and the
- * kind says which values can apply. Zero is "nothing to declare", so every
- * construction site is right by default and only the agent's own insertions
- * carry a value. Round-tripped through the session log under "origin".
- *
- * Stored provenance rather than inference: every one of these has a content
- * form a model or user can reproduce exactly ("[interrupted]" as a final line,
- * "[continue]" as a prompt, a tool printing either), and a view that guesses
- * would then describe something that never happened. */
+/* Agent-authored provenance cannot be inferred from content because users, models, and tools may
+ * reproduce the same marker text. Zero denotes an ordinary, externally authored item. */
 enum item_origin {
-    /* The user typed it, the model sent it, the tool ran and returned this. */
     ITEM_ORIGIN_NONE = 0,
-    /* USER_MESSAGE: the synthetic summary that replaced compacted history
-     * (compact.c). */
-    ITEM_ORIGIN_COMPACT_SEED,
-    /* USER_MESSAGE: the CONTINUE_MARKER an empty send stands for after an
-     * interrupted turn (agent_session_add_continuation). */
-    ITEM_ORIGIN_CONTINUATION,
-    /* ASSISTANT_MESSAGE: the agent appended INTERRUPT_MARKER as the text's
-     * final line — to a partial response, or as the whole of a synthetic one
-     * (agent_loop_turn_absorb_abort, agent_session_mark_interrupt). */
-    ITEM_ORIGIN_INTERRUPTED,
-    /* TOOL_RESULT: Esc cut a tool batch short, or the stream was aborted
-     * before dispatch reached the call (dispatch_tool_skipped, abort repair).
-     * The tool never ran. */
-    ITEM_ORIGIN_SKIPPED,
-    /* TOOL_RESULT: --raw advertised no tools, so the call was refused unrun
-     * (dispatch_tool_refused). */
-    ITEM_ORIGIN_REFUSED,
-    /* TOOL_RESULT: the tool ran, but its output stands in for what it streamed
-     * to the screen instead of repeating it (tool_ctx.output_summarizes_display
-     * — `write` creating a file). Replaying the output would put the stand-in
-     * where the body was. */
-    ITEM_ORIGIN_SUMMARIZED,
+    ITEM_ORIGIN_COMPACT_SEED, /* synthetic USER_MESSAGE replacing compacted history */
+    ITEM_ORIGIN_CONTINUATION, /* synthetic USER_MESSAGE after an interrupted turn */
+    ITEM_ORIGIN_INTERRUPTED,  /* ASSISTANT_MESSAGE marked as interrupted */
+    ITEM_ORIGIN_SKIPPED,      /* TOOL_RESULT for a call that did not run after an abort */
+    ITEM_ORIGIN_REFUSED,      /* TOOL_RESULT for a call disabled by the frontend */
+    ITEM_ORIGIN_SUMMARIZED,   /* TOOL_RESULT standing in for separately displayed output */
 };
 
 /* One inline image carried by an item: base64 payload plus the metadata
  * adapters, display, and persistence need. Dimensions are parsed from the
  * image header at ingestion (0 = unknown). */
 struct item_image {
-    char *mime;     /* "image/png", "image/jpeg", "image/gif", "image/webp" */
+    char *mime;     /* owned MIME type */
     char *data_b64; /* owned base64 payload */
-    long width;
-    long height;
+    long width;     /* pixels; 0 = unknown */
+    long height;    /* pixels; 0 = unknown */
 };
 
+/* Pointer fields are owned by the item and released by item_free. */
 struct item {
     enum item_kind kind;
     /* USER_MESSAGE / ASSISTANT_MESSAGE: */
@@ -107,78 +57,34 @@ struct item {
     char *tool_arguments_json;
     /* TOOL_RESULT: */
     char *output;
-    /* TOOL_RESULT: images attached alongside `output` (owned array of
-     * owned members; freed by item_free). Adapters serialize them as
-     * native image blocks or text placeholders depending on
-     * context.image_input (see below). NULL/0 everywhere else. */
+    /* TOOL_RESULT: owned image parts attached alongside `output`. */
     struct item_image *images;
     size_t n_images;
-    /* REASONING round-trip form (Codex): full JSON object (e.g.
-     * {"type":"reasoning","id":...,"summary":[...],"encrypted_content":...})
-     * ready to be re-sent. This is what the model needs back. */
+    /* REASONING: opaque provider state ready to send back unchanged. */
     char *reasoning_json;
-    /* REASONING human-readable form: plain chain-of-thought text. For the
-     * openai-family it arrives via `reasoning_content`/`reasoning` and is
-     * round-tripped as reasoning_content when the provider opts in (see
-     * openai_preset.roundtrip_reasoning_field). For Codex it is the streamed
-     * summary, carried alongside reasoning_json purely for display (the JSON
-     * is what gets re-sent). An item may have either or both; the transcript
-     * prefers this text and falls back to the opaque reasoning_json tag. */
+    /* REASONING: human-readable reasoning; an item may carry either form or both. */
     char *reasoning_text;
-    /* REASONING provenance: the provider name and model id that produced this
-     * item, stamped when it enters history (and round-tripped through the
-     * session log). reasoning_json is signed/bound to that exact model, so the
-     * build path replays it only when this stamp matches the provider+model of
-     * the current request — after a /model or /provider switch (mid-session or
-     * across a resume) the older items carry the old stamp and are skipped.
-     * NULL on non-reasoning items and on records that predate stamping. */
+    /* REASONING / TURN_USAGE: source identity. Opaque reasoning may be bound to this exact pair. */
     char *provider;
     char *model;
-    /* What the agent did to this item, if anything — see enum item_origin.
-     * Provider adapters ignore it (a synthetic item goes on the wire as an
-     * ordinary one); it exists so display and session tooling — resume replay,
-     * the paged history view, the /resume picker label, the turn counting
-     * behind /undo — never present what the agent did as what the user or the
-     * model did. */
     enum item_origin origin;
-    /* TURN_USAGE: malloc'd accounting payload (owned; freed by
-     * item_free). NULL on every other kind. */
+    /* TURN_USAGE: owned accounting payload; NULL for other kinds. */
     struct turn_usage *usage;
 };
 
-void item_free(struct item *it);
+/* Release all fields owned by `item`. The item must not be used afterward. NULL-safe. */
+void item_free(struct item *item);
 
-/* One-line text stand-in for an image part — "[image: image/png,
- * 1232x800, 240.1 KiB]" — used wherever pixels can't go (the transcript
- * log, adapters serializing for a model without image input). Caller
- * frees. */
-char *item_image_placeholder(const struct item_image *img);
+/* Return an allocated one-line text replacement for an image part. */
+char *item_image_placeholder(const struct item_image *image);
 
-/* Aggregate limits on the images a conversation may hold, enforced at
- * ingestion (a `read` that would exceed either doesn't attach — see
- * image_budget_enforce) so history never accumulates past what the
- * strictest backend accepts and no request — including /compact — can
- * wedge on a permanently-rejected payload.
- *
- * Bytes: Anthropic rejects any request over 32 MB, and that ceiling covers
- * the whole JSON body — system prompt (including AGENTS.md), tool schemas,
- * and text history — not just the images. Budgeting images well under it
- * reserves a worst-case margin for that non-image content, so even a
- * /compact request (which resends the full history) stays admissible. 20 MB
- * of base64 is still several full-size images or the whole count cap of
- * small ones.
- *
- * Count: Anthropic allows at most 100 images per request AND drops the
- * per-image dimension limit from 8000px to 2000px once more than 20 are
- * present. Capping at 20 stays in that most-permissive tier — under the
- * 100 limit and preserving the full per-image dimension cap (see
- * READ_IMAGE_MAX_SIDE) — so no count-dependent dimension logic is needed. */
-#define IMAGE_REQUEST_BUDGET_B64 ((size_t)20 * 1024 * 1024)
-#define IMAGE_REQUEST_MAX_COUNT  20
+/* Keeping at most 20 images preserves Anthropic's larger per-image dimension limit. Reserving only
+ * 20 MiB of base64 under its 32 MB body limit leaves room for prompts, tools, and text history. */
+#define IMAGE_REQUEST_BASE64_BUDGET_BYTES ((size_t)20 * 1024 * 1024)
+#define IMAGE_REQUEST_MAX_COUNT           20
 
-/* Total base64 bytes / total image-part count across `items`. */
-size_t images_total_b64(const struct item *items, size_t n);
-size_t images_total_count(const struct item *items, size_t n);
+size_t items_image_base64_bytes(const struct item *items, size_t n_items);
+size_t items_image_count(const struct item *items, size_t n_items);
 
 struct tool_def {
     const char *name;
@@ -193,54 +99,18 @@ struct context {
     size_t n_items;
     const struct tool_def *tools;
     size_t n_tools;
-    /* Optional. When non-NULL, providers pass it verbatim to whichever
-     * field their API uses (Responses: reasoning.effort, Chat Completions:
-     * reasoning_effort). NULL means "don't send" so the server picks its
-     * own default. Values like "minimal"/"low"/"medium"/"high"/"xhigh" are
-     * passed through unchanged: narrowing to what the model accepts is
-     * resolved upstream, in model_meta.h. */
+    /* Wire reasoning-effort value, or NULL to let the provider choose. */
     const char *effort;
-    /* Does the target model accept image input? 1 yes, 0 no, -1 unknown.
-     * Unknown is treated as yes throughout: a wrong yes surfaces as a
-     * recoverable provider error, a wrong no silently drops content.
-     * Resolved by model_meta_image_input. Adapters serialize
-     * tool-result image parts as native image blocks when nonzero and as
-     * text placeholders when 0 — a resumed or model-switched conversation
-     * must not send pixels to a text-only model. */
+    /* Image-input capability: 1 yes, 0 no, -1 unknown. Unknown is treated as yes because rejecting
+     * an image is recoverable, while suppressing one silently loses content. */
     int image_input;
 };
 
-/* Token accounting for one completed response. -1 means "not reported by
- * this provider/backend" — many OpenAI-compatible servers don't surface
- * cached_tokens, and some omit usage entirely. Callers must check for -1
- * before formatting. input_tokens is everything we just sent (system +
- * full history + the new user message); output_tokens is what was just generated.
- * "context used" for display = input + output, since both will be in the
- * next request's input. cached_tokens is a subset of input_tokens (prefix
- * cache hit) — informational, not additive. Note that cached_tokens means
- * cache *reads* only: dialects that bill cache writes separately
- * (Anthropic's cache_creation_input_tokens) fold the written tokens into
- * input_tokens, keeping that count volume-accurate, and report them again
- * in cache_write_tokens — usually a second subset of input_tokens
- * disjoint from cached_tokens — so cost estimation can price the write
- * surcharge. Dialects with no such billing notion leave it at -1.
- *
- * "Usually" because the disjointness is a convention, not a guarantee:
- * Gemini through OpenRouter reports the same tokens as both read and
- * written and inflates input_tokens to cover both, since there they are
- * two charges over one body of text rather than two slices of it. Pricing
- * decides what each count means (catalog_cache_write_replaces_input) and
- * reports the resulting uncached remainder, so nothing downstream should
- * assume the three subtract cleanly.
- * cache_write_1h_tokens narrows further: the subset of cache_write_tokens
- * written with a 1-hour TTL, which Anthropic bills at 2x the input rate
- * (the catalog's cache_write rate covers only the default 5-minute
- * writes). -1 where the dialect doesn't break writes down by TTL.
- *
- * cost is the provider-reported charge for this response in USD (e.g.
- * OpenRouter's usage.cost when usage accounting is requested); negative
- * means not reported. Providers never compute cost from token prices
- * themselves — estimation from catalog rates is the agent's job. */
+/* Usage reported for one response. Negative values mean unreported. `cached_tokens` and
+ * `cache_write_tokens` are normally subsets of `input_tokens`, but providers may report overlapping
+ * cache reads and writes; consumers must not assume those categories subtract cleanly. The 1-hour
+ * count is a subset of cache writes. `cost` is a provider-reported USD charge, never an estimate.
+ */
 struct stream_usage {
     long input_tokens;
     long output_tokens;
@@ -250,68 +120,32 @@ struct stream_usage {
     double cost;
 };
 
-/* ITEM_TURN_USAGE payload: raw reported usage plus the costs resolved at
- * emission time (cost estimation is the agent layer's job — see
- * turn_usage_make — so display consumers stay pure formatting). */
+/* Accounting payload stored in an ITEM_TURN_USAGE record. Costs are USD; negative values are
+ * unknown. Category costs are always estimates. The total prefers an exact provider-reported cost,
+ * with `cost_estimated` indicating when it is an estimate instead. */
 struct turn_usage {
-    struct stream_usage usage; /* -1 fields = not reported */
-    long elapsed_ms;           /* stream wall time, retries included; -1 = unknown */
-    /* USD. cost_total is the provider-reported charge when one was
-     * reported (exact), else the rate estimate, marked by cost_estimated
-     * ("~$"); -1 = unknown.
-     *
-     * The per-category fields are always rate estimates — a reported
-     * charge arrives as one number, so the decomposition can only ever be
-     * computed — and so stay marked ("~$") beside an unmarked exact
-     * total. -1 = no rates to price against. */
-    /* Uncached input tokens, the count `cost_in` prices. Carried rather
-     * than recomputed by each renderer because it is a pricing decision:
-     * usually input minus both cache subsets, but a surcharge-style write
-     * (catalog.h) leaves its tokens in the input charge. -1 = unknown. */
-    long in_tokens;
-    double cost_in;          /* uncached input */
-    double cost_cache_read;  /* prefix-cache reads */
-    double cost_cache_write; /* cache writes, 1h surcharge included */
-    double cost_out;
+    struct stream_usage usage;
+    long elapsed_ms;            /* stream wall time, including retries; -1 = unknown */
+    long uncached_input_tokens; /* count priced by cost_input; -1 = unknown */
+    double cost_input;
+    double cost_cache_read;
+    double cost_cache_write; /* includes the 1-hour surcharge */
+    double cost_output;
     double cost_total;
     int cost_estimated;
 };
 
-/* Events emitted by a provider's stream() into a stream_cb. */
+/* Events emitted by a provider's stream(). Pointer payloads are borrowed and remain valid only for
+ * the callback invocation. */
 enum stream_event_kind {
     EV_TEXT_DELTA,
     EV_TOOL_CALL_START, /* id + name known */
     EV_TOOL_CALL_DELTA, /* partial JSON args */
     EV_TOOL_CALL_END,   /* args finalized */
-    EV_REASONING_ITEM,  /* opaque provider blob to round-trip on next turn */
-    /* The model is currently producing reasoning/thinking tokens. Carries
-     * the delta text (may be NULL/empty if the provider only signals the
-     * state without exposing content, e.g. OpenAI o-series via Responses
-     * API — such state-only deltas are ignored). Drives the "thinking..."
-     * spinner, and the text is accumulated into an ITEM_REASONING
-     * (reasoning_text). For opted-in openai-family providers that text is
-     * replayed to the model as reasoning_content (see
-     * openai_preset.roundtrip_reasoning_field); Codex instead round-trips
-     * an opaque blob via EV_REASONING_ITEM and keeps the delta text only
-     * for the transcript. */
-    EV_REASONING_DELTA,
-    /* A streaming HTTP attempt failed with a transient error and the
-     * provider is about to retry. Pure UX signal — the agent uses it
-     * to update the spinner label so the user sees that we're not
-     * stuck on a dead connection. The eventual outcome (success or
-     * EV_ERROR after exhausting retries) arrives later. */
-    EV_RETRY,
-    /* Prompt-processing (prefill) progress for this turn. Carries
-     * llama.cpp-style counts: `processed`/`total` are tokens, `cache`
-     * is the prefix-cache hit subset of `total` (so cache <=
-     * processed <= total). The UX-meaningful fraction is
-     * (processed - cache) / (total - cache), which starts at 0% each
-     * turn regardless of cache reuse. Pure UX signal — never committed
-     * to history. Only llama.cpp currently sources these; the openai
-     * translation gates emission behind a per-preset flag (set
-     * return_progress:true in the request body) so backends that don't
-     * speak it never see synthesized events. */
-    EV_PROGRESS,
+    EV_REASONING_ITEM,  /* opaque provider state to preserve for the next request */
+    EV_REASONING_DELTA, /* text may be NULL or empty to signal activity without exposing content */
+    EV_RETRY,           /* transient attempt failed; another will follow */
+    EV_PROGRESS,        /* prompt-prefill progress; not committed to history */
     EV_DONE,
     EV_ERROR,
 };
@@ -369,238 +203,102 @@ struct stream_event {
 
 typedef int (*stream_cb)(const struct stream_event *ev, void *user);
 
-/* Tri-state capability answer, where 0 is "the backend didn't say" so a
- * zeroed struct reads as all-unknown. Values coincide with enum
- * provider_image_input, so an image_input answer can be stored straight
- * into provider->image_input. */
+/* Tri-state capability answer. Zero is unknown so zero-initialized metadata is valid. */
 enum provider_cap {
     PROVIDER_CAP_UNKNOWN = 0,
     PROVIDER_CAP_YES = 1,
     PROVIDER_CAP_NO = 2,
 };
 
-/* One model a provider can serve, plus whatever it volunteered about it.
- *
- * Backends differ wildly in how much they say: OpenRouter's catalog carries
- * pricing, limits, modalities and tool support; the Codex and Anthropic
- * catalogs carry limits, modalities and prose but no rates; real OpenAI's
- * /v1/models is bare ids. So every field past `id` is optional, and the
- * sentinels are what an adapter that knows nothing leaves behind —
- * model_info_init sets them, and consumers treat "unknown" as "ask the
- * catalog (catalog.h) instead" rather than as a negative answer.
- *
- * This is deliberately NOT struct catalog_entry: that one is the resolved
- * metadata *view* (config over models.dev, with pricing tiers), while this
- * is one backend's raw report. model_meta.h layers them — reported wins,
- * catalog fills the gaps — and every consumer asks it rather than either
- * source directly. */
+/* Raw metadata reported by a provider for one model. Every field after `id` is optional;
+ * model_info_init establishes the unknown sentinels. Resolved metadata belongs in model_meta.h. */
 struct model_info {
-    char *id;   /* owned; the exact wire id. Always set. */
-    char *desc; /* owned one-line blurb from the backend; NULL = none */
-    /* Context window in tokens; 0 = unknown. Where a backend reports both a
-     * served and a theoretical maximum (codex), this is the served one, so
-     * it agrees with the context-% display. */
-    long context;
-    /* Most output tokens one response may produce; 0 = unknown. Distinct
-     * from `context`, which covers the whole request: Anthropic serves a 1M
-     * window but caps a single response at 128k, and that cap is what a
-     * max_tokens request field has to respect. */
-    long max_output;
-    int image_input; /* enum provider_cap */
-    int tools;       /* enum provider_cap — can it call tools at all */
-    /* USD per 1M tokens; negative = unknown. cost_cache_read is the rate for
-     * prefix-cache hits, which dominates the bill on a long agentic
-     * conversation (every turn re-sends the whole prefix) and is not a fixed
-     * fraction of the input rate — backends quote anywhere from 2% to 20%.
-     *
-     * These price the session, not just the picker: model_meta_rates layers
-     * them over the catalog, so a backend quoting its own rates is billed
-     * against what it actually charges (OpenRouter's margin included)
-     * rather than against models.dev's upstream list price. */
+    char *id;          /* owned exact wire id; NULL in metadata-only merged views */
+    char *description; /* owned one-line description; NULL when absent */
+    long context;      /* served context window in tokens; 0 = unknown */
+    long max_output;   /* maximum output tokens per response; 0 = unknown */
+    enum provider_cap image_input;
+    enum provider_cap tools;
+    /* Provider-reported USD rates per million tokens; negative = unknown. */
     double cost_input;
     double cost_cache_read;
     double cost_output;
     double cost_cache_write;
     double cost_cache_write_1h;
-    /* Long-context pricing tiers, in the backend's order; none when it
-     * prices flat or says nothing. catalog_entry's shape, so
-     * model_meta_rates can hand them to catalog_price unchanged. */
+    /* Long-context pricing tiers in provider order. */
     struct catalog_tier tiers[CATALOG_TIERS_MAX];
     int n_tiers;
-    /* Reasoning-effort levels this model accepts. Unknown (the zeroed
-     * state) on backends that don't describe their models, and on the
-     * per-entry parsers that read a catalog carrying no effort data.
-     *
-     * Adapters normalize to WIRE values here, not to whatever their
-     * catalog displays: codex's supported_reasoning_levels is the ladder
-     * its official UI shows, which lists a level the API rejects and omits
-     * one it accepts (see codex_parse_model). The consumer treats this as
-     * the truth about the model, so the translation belongs in the
-     * adapter that knows its own backend. */
+    /* Accepted wire effort values, not provider-specific display labels. */
     struct effort_set efforts;
 };
 
-/* Set `m` to "nothing known": zeroed, with the negative cost sentinels.
- * Adapters call this before filling whatever their catalog reports. */
-void model_info_init(struct model_info *m);
+/* Initialize `info` with all fields unknown. */
+void model_info_init(struct model_info *info);
 
 /* Deep-copy `src` into `dst` (which must not already own anything). */
 void model_info_copy(struct model_info *dst, const struct model_info *src);
 
-/* Release what one entry owns, leaving it zeroed. */
-void model_info_clear(struct model_info *m);
+/* Release fields owned by `info` and leave it zeroed. */
+void model_info_clear(struct model_info *info);
 
-/* Free `n` entries and the array itself. NULL-safe. */
-void model_info_free(struct model_info *models, size_t n);
+/* Clear `n_models` entries and free the array. NULL-safe. */
+void model_info_free(struct model_info *models, size_t n_models);
 
-/* A single-model metadata fetch, described by the provider and executed by
- * model_meta.c on a background thread.
- *
- * Split into "what to request" and "how to read it" so the worker never
- * dereferences the live provider: the request is built on the foreground,
- * and `parse` is a pure function of the response body. That satisfies the
- * bg_job contract — workers touch only their argument and storage that
- * outlives the join — and keeps the parsers testable without a socket. */
+/* Prepared single-model metadata request. Request construction stays on the foreground thread;
+ * only these owned fields and the pure parser cross into the background worker. */
 struct model_probe {
     char *url;      /* owned */
     char **headers; /* owned, NULL-terminated; NULL = none */
-    /* Total request timeout. Metadata is best-effort and nothing waits on
-     * it, but a hung endpoint must not keep the thread alive to teardown. */
     int timeout_s;
-    /* Locate `model` in the response and fill `out` (already
-     * model_info_init'd, with `id` set). Pure; runs off-thread. */
+    /* Locate `model` in the response and fill initialized `out`. Runs off-thread without access to
+     * the provider, so implementations must be pure and thread-safe. */
     void (*parse)(const char *body, const char *model, struct model_info *out);
 };
+
+/* Release all request fields owned by `probe` and leave it zeroed. NULL-safe. */
+void model_probe_clear(struct model_probe *probe);
 
 struct model_meta; /* model_meta.h — live metadata storage, opaque here */
 
 struct provider {
     const char *name;
-    /* Model id used when HAX_MODEL is unset. NULL = no safe default; the
-     * agent will refuse to start and print an error. */
-    const char *default_model;
-    /* Optional presentation formatter for model ids. Returns a newly allocated
-     * display label that the caller owns; the exact id is still used on the wire
-     * and in persisted metadata. NULL means use the id unchanged. */
-    char *(*model_label)(struct provider *p, const char *model);
-    /* Reasoning effort used when HAX_EFFORT is unset. NULL means
-     * omit the field and let the backend choose. */
-    const char *default_effort;
-    /* The model in effect was discovered from the backend, not chosen: what
-     * this server happens to be serving right now (llama.cpp adopting its
-     * loaded model), which the constructor writes into the override tier so
-     * the run has a model at all. Set it there and hax stops treating the id
-     * as durable: /preset-save omits it, and a /provider or /model commit
-     * stores the sentinel rather than the value, so both re-run discovery
-     * instead of pinning a path that matched one server invocation. Providers
-     * set it only when they adopted a model the user hadn't named — an
-     * explicitly configured model is a preference and persists as one, and so
-     * does one the user picks out of a list of several, which clears this. */
+    const char *default_model; /* NULL when no safe default exists */
+    /* Return an allocated display label, or NULL to use the wire id unchanged. */
+    char *(*model_label)(struct provider *provider, const char *model);
+    const char *default_effort; /* NULL omits reasoning effort */
+    /* The active model was detected from transient server state and must not be persisted. */
     int model_discovered;
-    /* Sort list_models output alphabetically in the /model picker. Set by
-     * providers whose catalog order carries no meaning; leave 0 where the
-     * server's order is deliberate (curated, newest-first) or trivially
-     * short. A default only — the global sort_models config key lets the
-     * user force either order at the picker. */
+    /* Default model-picker ordering; user configuration may override it. */
     int sort_models;
-    /* Identity in the model-metadata catalog (catalog.h): the models.dev
-     * provider key this provider's model ids resolve under — "openai" for
-     * both codex and openai, "anthropic" for anthropic. Drives catalog-based
-     * cost estimation and the context/output-limit fallback. NULL opts out:
-     * local backends whose models have no catalog presence, providers that
-     * report exact cost and probe their own limits (openrouter), and
-     * config-defined providers that opted out (their default is their own
-     * name — see config_provider.c). Either static or owned by the provider:
-     * a config-derived value must be copied, since the config tier it came
-     * from does not survive a mid-session write of the file. */
+    /* models.dev provider key used for metadata fallback. NULL opts out. A dynamically resolved key
+     * must be owned by the provider because configuration storage may be replaced at runtime. */
     const char *catalog_id;
-    /* Stream a model response. The provider drives the HTTP round-trip
-     * and translates SSE events into stream_event callbacks (`cb`). The
-     * `tick` slot is the agent's side-channel hook into the wait loop —
-     * called periodically (~1Hz) and on each received chunk, with the
-     * agent's user pointer. Returning non-zero aborts the transfer.
-     * Providers thread it straight through to http_sse_post; the mock
-     * provider polls it from its sleep loop so scripted pauses exercise
-     * the same path. NULL tick disables the hook. */
-    int (*stream)(struct provider *p, const struct context *ctx, const char *model, stream_cb cb,
-                  void *user, http_tick_cb tick, void *tick_user);
-    /* Optional. Print a provider-specific subscription/usage report to
-     * stdout (rate-limit windows for a Codex-style plan, paid-API spend
-     * totals, etc.). NULL means "/usage is not supported on this
-     * provider". Returns 0 on success, -1 on fetch/parse failure (the
-     * implementation is expected to have already printed a diagnostic
-     * to stderr in that case). Implementations run their blocking
-     * fetches under a busy window (busy.h) so a spinner shows and Esc
-     * cancels; a cancelled fetch returns -1 with no diagnostic. */
-    int (*query_usage)(struct provider *p);
-    /* Optional. Discover the models this provider can serve, for the
-     * runtime model picker (/model). Returns 0 with *models a freshly
-     * allocated array of *n entries (caller frees with model_info_free;
-     * *n may be 0), or -1 on any failure with *models=NULL and *err set to
-     * a malloc'd user-actionable diagnostic ("codex token expired — …",
-     * "could not reach <name> at <url>") that the caller prints and frees.
-     * Set *err on every failure path: only the adapter can name the
-     * endpoint and remedy; the caller's fallback for an unset *err is a
-     * bare generic line. When no menu can be built the selector prints a
-     * note and skips the model step; a failure (-1) or an empty catalog
-     * (*n==0) also rolls a /provider switch back entirely, while a NULL
-     * hook — the provider can't enumerate models — lets the switch proceed
-     * on the new provider's default_model. The picker calls this
-     * synchronously on the foreground path, so implementations must bound
-     * the network round-trip with a short timeout AND thread `tick` (same
-     * shape as stream()'s, may be NULL) into it — the picker cancels the
-     * fetch through it when the user presses Esc. */
-    int (*list_models)(struct provider *p, struct model_info **models, size_t *n, char **err,
-                       http_tick_cb tick, void *tick_user);
-    /* Optional. Reasoning-effort wire values this provider accepts (e.g.
-     * "low", "high"), for the runtime effort picker (/effort). Points *out
-     * at a borrowed array (typically static, owned by the provider; valid
-     * for the provider's lifetime) and returns its length. Returns 0 (or a
-     * NULL hook) when the provider has no categorical reasoning effort — its
-     * thinking is a token budget/toggle, or it has none — in which case the
-     * picker reports "not supported" and the chained flow skips the step.
-     * The selector prepends its own "default (omit)" choice, so providers
-     * list only real effort values here. */
-    size_t (*list_efforts)(struct provider *p, const char *const **out);
-    /* Optional. Describe the metadata fetch for `model` — the live tier
-     * behind the model_meta.h accessors. Called on the foreground whenever
-     * the selection changes; fill *out and return 0, or return -1 for
-     * "nothing to fetch". model_meta.c owns the thread, the cancellation,
-     * and the storage.
-     *
-     * Unlike list_models, which enumerates a catalog for the picker, this
-     * names one model and runs at every switch, so it should stay small —
-     * OpenRouter's filtered query is 2.7 KB against a 535 KB catalog.
-     * Fetching a whole small catalog and picking one entry out (codex,
-     * anthropic) is fine.
-     *
-     * NULL when the backend can't describe a model at all (real OpenAI's
-     * /v1/models is bare ids); the catalog tier then answers alone. */
-    int (*probe_model)(struct provider *p, const char *model, struct model_probe *out);
-    void (*destroy)(struct provider *p);
-    /* Live per-model metadata: the latest probe result plus the job
-     * fetching it. Allocated on demand by model_meta.c; every destroy()
-     * must call model_meta_release(p) before tearing anything else down,
-     * since the worker writes here until joined.
-     *
-     * Per-provider rather than one module-level slot because two providers
-     * are live at once whenever /provider runs its pickers against a
-     * prospective backend — a rolled-back switch must leave the survivor's
-     * metadata untouched. Opaque; read it through model_meta.h. */
+    /* Emit provider-independent events for one response. `tick` is called periodically and on
+     * received data; a nonzero return aborts the transfer. NULL disables ticking. */
+    int (*stream)(struct provider *provider, const struct context *context, const char *model,
+                  stream_cb callback, void *user, http_tick_cb tick, void *tick_user);
+    /* Print a provider-specific usage report. Return 0 on success or -1 after reporting an error;
+     * cancellation also returns -1 but prints nothing. NULL means unsupported. */
+    int (*query_usage)(struct provider *provider);
+    /* Return a newly allocated model array, or -1 with `*models == NULL` and an allocated,
+     * user-actionable `*error`. The caller clears successful arrays with model_info_free and frees
+     * errors. Network implementations must use a short timeout and honor `tick`. NULL means the
+     * provider cannot enumerate models. */
+    int (*list_models)(struct provider *provider, struct model_info **models, size_t *n_models,
+                       char **error, http_tick_cb tick, void *tick_user);
+    /* Return a borrowed array of accepted wire effort values. Zero or NULL means unsupported. */
+    size_t (*list_efforts)(struct provider *provider, const char *const **efforts);
+    /* Prepare a small metadata request for one model. Return 0 with owned request fields, or -1
+     * when nothing can be fetched. NULL leaves metadata resolution to the catalog. */
+    int (*probe_model)(struct provider *provider, const char *model, struct model_probe *probe);
+    void (*destroy)(struct provider *provider);
+    /* Opaque live metadata and its worker. Every destroy callback must call model_meta_release
+     * before releasing provider state that the worker may access. */
     struct model_meta *meta;
 };
 
-enum provider_image_input {
-    PROVIDER_IMG_UNKNOWN = 0,
-    PROVIDER_IMG_YES = 1,
-    PROVIDER_IMG_NO = 2,
-};
-
-/* Foreground-prepared availability check for one provider factory. A NULL
- * `url` is an immediate verdict in `available`; otherwise the picker runs a
- * GET using these owned request fields, in parallel with the other network
- * probes. Keeping config resolution in the prepare hook and only the owned
- * request in the worker preserves the bg_job isolation contract. */
+/* Prepared provider availability check. A NULL `url` makes `available` the immediate verdict;
+ * otherwise the owned GET request may be passed safely to a worker. */
 struct provider_availability {
     int available;
     const char *reason; /* static unavailable reason; NULL when available */
@@ -609,32 +307,18 @@ struct provider_availability {
     long timeout_s;
 };
 
-void provider_availability_clear(struct provider_availability *a);
+/* Release owned request fields and leave `availability` zeroed. NULL-safe. */
+void provider_availability_clear(struct provider_availability *availability);
 
-/* Static provider descriptor. Each provider .c file defines exactly one
- * `const struct provider_factory PROVIDER_<NAME>` symbol; main.c collects
- * them into a registry and matches HAX_PROVIDER against `name`. The default
- * when HAX_PROVIDER is unset is the registry's highest-priority entry. */
+/* Static provider descriptor registered by src/providers/registry.c. */
 struct provider_factory {
     const char *name; /* HAX_PROVIDER value, e.g. "codex", "llama.cpp" */
-    /* Construct the provider. `name` is this factory's own `name` field,
-     * threaded in so a single generic constructor can serve many config-
-     * defined providers (each a distinct name ⇒ a distinct providers.<name>.*
-     * config subtree). The compiled-in factories each serve one fixed
-     * provider and ignore the argument. */
+    /* `name` allows one constructor to serve multiple config-defined provider identities. */
     struct provider *(*new)(const char *name);
-    /* Optional availability preparation for the runtime provider picker.
-     * Called on the foreground thread, so it may resolve config. Leave `url`
-     * NULL and set `available`/`reason` for an immediate verdict, or fill an
-     * owned GET request for the picker to execute in a worker. The picker
-     * reruns the same preparation synchronously when a dim row is selected.
-     * `reason` must be static. NULL hook means immediately available. */
-    void (*prepare_availability)(const char *name, struct provider_availability *out);
-    /* Dev-only backend, hidden from the enumerated provider set: excluded
-     * from the /provider picker, cold-start auto-selection, and the
-     * "supported" list in error messages. Still resolvable by name, so it
-     * stays reachable via an explicit HAX_PROVIDER=<name> (e.g. the mock
-     * provider for manual pipeline testing). */
+    /* Prepare an immediate verdict or an owned GET request on the foreground thread. `reason` must
+     * be static. NULL means immediately available. */
+    void (*prepare_availability)(const char *name, struct provider_availability *availability);
+    /* Hidden from enumeration and automatic selection, but still resolvable explicitly by name. */
     int internal;
 };
 

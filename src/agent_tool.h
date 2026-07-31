@@ -33,7 +33,7 @@ struct item agent_tool_result_make(const struct item *call, const char *output,
 
 /* Enforce the aggregate image budget at ingestion: if attaching `result`'s
  * images to a conversation already holding `history` (n_history items, the
- * session so far, excluding `result`) would exceed IMAGE_REQUEST_BUDGET_B64,
+ * session so far, excluding `result`) would exceed IMAGE_REQUEST_BASE64_BUDGET_BYTES,
  * drop them and append a recoverable note to the output. The just-read image
  * loses, not older ones — so images the model is already reasoning about
  * stay put and the request prefix (hence the provider's cache) is never

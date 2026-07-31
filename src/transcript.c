@@ -482,13 +482,14 @@ static void render_turn_usage(FILE *out, int color, const struct turn_usage *tu)
     long cr = u->cached_tokens > 0 ? u->cached_tokens : 0;
     long cw = u->cache_write_tokens > 0 ? u->cache_write_tokens : 0;
     if (u->input_tokens >= 0)
-        usage_tokens(out, &first, "in", tu->in_tokens > 0 ? tu->in_tokens : 0, tu->cost_in);
+        usage_tokens(out, &first, "in",
+                     tu->uncached_input_tokens > 0 ? tu->uncached_input_tokens : 0, tu->cost_input);
     if (cr > 0)
         usage_tokens(out, &first, "cache", cr, tu->cost_cache_read);
     if (cw > 0)
         usage_tokens(out, &first, "write", cw, tu->cost_cache_write);
     if (u->output_tokens >= 0)
-        usage_tokens(out, &first, "out", u->output_tokens, tu->cost_out);
+        usage_tokens(out, &first, "out", u->output_tokens, tu->cost_output);
     fputs(ANSI_IF(ANSI_RESET), out);
     fputc('\n', out);
 }

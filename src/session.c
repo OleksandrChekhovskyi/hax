@@ -114,11 +114,11 @@ static json_t *turn_usage_to_json(const struct turn_usage *tu)
     set_count(o, "cache_write_1h", tu->usage.cache_write_1h_tokens);
     set_usd(o, "cost", tu->usage.cost);
     set_count(o, "elapsed_ms", tu->elapsed_ms);
-    set_count(o, "in_tokens", tu->in_tokens);
-    set_usd(o, "cost_in", tu->cost_in);
+    set_count(o, "in_tokens", tu->uncached_input_tokens);
+    set_usd(o, "cost_in", tu->cost_input);
     set_usd(o, "cost_cache_read", tu->cost_cache_read);
     set_usd(o, "cost_cache_write", tu->cost_cache_write);
-    set_usd(o, "cost_out", tu->cost_out);
+    set_usd(o, "cost_out", tu->cost_output);
     set_usd(o, "cost_total", tu->cost_total);
     if (tu->cost_estimated)
         json_object_set_new(o, "cost_estimated", json_true());
@@ -149,19 +149,19 @@ static struct turn_usage *turn_usage_from_json(const json_t *o)
     tu->usage.cache_write_1h_tokens = get_count(o, "cache_write_1h");
     tu->usage.cost = get_usd(o, "cost");
     tu->elapsed_ms = get_count(o, "elapsed_ms");
-    tu->in_tokens = get_count(o, "in_tokens");
-    if (tu->in_tokens < 0) {
+    tu->uncached_input_tokens = get_count(o, "in_tokens");
+    if (tu->uncached_input_tokens < 0) {
         /* Written before the field existed: every such record predates
          * surcharge-style pricing, so the plain subtraction is right. */
         long cr = tu->usage.cached_tokens > 0 ? tu->usage.cached_tokens : 0;
         long cw = tu->usage.cache_write_tokens > 0 ? tu->usage.cache_write_tokens : 0;
         long in = tu->usage.input_tokens - cr - cw;
-        tu->in_tokens = in > 0 ? in : 0;
+        tu->uncached_input_tokens = in > 0 ? in : 0;
     }
-    tu->cost_in = get_usd(o, "cost_in");
+    tu->cost_input = get_usd(o, "cost_in");
     tu->cost_cache_read = get_usd(o, "cost_cache_read");
     tu->cost_cache_write = get_usd(o, "cost_cache_write");
-    tu->cost_out = get_usd(o, "cost_out");
+    tu->cost_output = get_usd(o, "cost_out");
     tu->cost_total = get_usd(o, "cost_total");
     tu->cost_estimated = json_is_true(json_object_get(o, "cost_estimated"));
     return tu;
@@ -1087,7 +1087,7 @@ static void degrade_images_over_budget(struct item *items, size_t n)
         size_t ib = 0;
         for (size_t k = 0; k < it->n_images; k++)
             ib += it->images[k].data_b64 ? strlen(it->images[k].data_b64) : 0;
-        if (bytes + ib <= IMAGE_REQUEST_BUDGET_B64 &&
+        if (bytes + ib <= IMAGE_REQUEST_BASE64_BUDGET_BYTES &&
             count + it->n_images <= IMAGE_REQUEST_MAX_COUNT) {
             bytes += ib;
             count += it->n_images;

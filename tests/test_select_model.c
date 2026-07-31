@@ -33,7 +33,7 @@ static void test_reported_full(void)
     m.cost_input = 10;
     m.cost_cache_read = 1;
     m.cost_output = 50;
-    m.desc = "Fast-mode variant.";
+    m.description = "Fast-mode variant.";
 
     /* Multimodal + tools are the norm and stay unsaid; prose gets its own
      * footer line so it can't run into the structured fields. */
@@ -153,7 +153,7 @@ static void test_desc_only(void)
     /* Prose with no metadata still earns a gutter, with no stray separator. */
     struct model_info m;
     model_info_init(&m);
-    m.desc = "Latest frontier agentic coding model.";
+    m.description = "Latest frontier agentic coding model.";
 
     char *s = model_desc_line(&m, NULL);
     EXPECT_STR_EQ(s, "Latest frontier agentic coding model.");

@@ -592,11 +592,7 @@ static void openai_destroy(struct provider *p)
     free(o->session_id);
     free(o->cache_ttl);
     free(o->roundtrip_reasoning_field);
-    if (o->extra_headers) {
-        for (char **h = o->extra_headers; *h; h++)
-            free(*h);
-        free(o->extra_headers);
-    }
+    string_array_free(o->extra_headers);
     free(o);
 }
 

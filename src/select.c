@@ -278,10 +278,10 @@ char *model_desc_line(const struct model_info *m, const struct catalog_entry *ca
     /* Prose starts its own footer line (picker.h: a newline is a hard
      * break), so a long marketing blurb can't run into the structured
      * fields and make both harder to read. */
-    if (m->desc && *m->desc) {
+    if (m->description && *m->description) {
         if (b.len)
             buf_append(&b, "\n", 1);
-        buf_append_str(&b, m->desc);
+        buf_append_str(&b, m->description);
     }
     if (!b.len) {
         buf_free(&b);

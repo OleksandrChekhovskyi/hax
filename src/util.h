@@ -25,6 +25,10 @@ void *xmalloc(size_t n);
 void *xcalloc(size_t n, size_t sz);
 void *xrealloc(void *p, size_t n);
 char *xstrdup(const char *s);
+
+/* Free a NULL-terminated array and each string it owns. NULL-safe. */
+void string_array_free(char **strings);
+
 char *xasprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2), nonnull(1)));
 
 /* va_list form of xasprintf. Both return NULL if the format itself fails to

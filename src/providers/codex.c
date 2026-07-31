@@ -874,7 +874,7 @@ void codex_parse_model(const json_t *entry, struct model_info *out)
 
     const char *desc = json_string_value(json_object_get(entry, "description"));
     if (desc && *desc)
-        out->desc = xstrdup(desc);
+        out->description = xstrdup(desc);
 
     codex_parse_efforts(entry, &out->efforts);
 }

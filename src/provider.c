@@ -1,53 +1,121 @@
 /* SPDX-License-Identifier: MIT */
 #include "provider.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "util.h"
 
-void provider_availability_clear(struct provider_availability *a)
+char *item_image_placeholder(const struct item_image *image)
 {
-    if (!a)
-        return;
-    free(a->url);
-    if (a->headers) {
-        for (char **h = a->headers; *h; h++)
-            free(*h);
-        free(a->headers);
-    }
-    memset(a, 0, sizeof(*a));
+    /* Padding can overstate the decoded size by at most two bytes, which is
+     * immaterial at the displayed precision. */
+    size_t bytes = image->data_b64 ? strlen(image->data_b64) / 4 * 3 : 0;
+    char size[32];
+
+    if (bytes >= 1024 * 1024)
+        snprintf(size, sizeof(size), "%.1f MiB", (double)bytes / (1024 * 1024));
+    else if (bytes >= 1024)
+        snprintf(size, sizeof(size), "%.1f KiB", (double)bytes / 1024);
+    else
+        snprintf(size, sizeof(size), "%zu bytes", bytes);
+
+    const char *mime = image->mime ? image->mime : "image";
+    if (image->width > 0 && image->height > 0)
+        return xasprintf("[image: %s, %ldx%ld, %s]", mime, image->width, image->height, size);
+    return xasprintf("[image: %s, %s]", mime, size);
 }
 
-void model_info_init(struct model_info *m)
+size_t items_image_base64_bytes(const struct item *items, size_t n_items)
 {
-    memset(m, 0, sizeof(*m));
-    m->cost_input = -1;
-    m->cost_cache_read = -1;
-    m->cost_output = -1;
-    m->cost_cache_write = -1;
-    m->cost_cache_write_1h = -1;
+    size_t total = 0;
+
+    for (size_t i = 0; i < n_items; i++)
+        for (size_t j = 0; j < items[i].n_images; j++)
+            total += items[i].images[j].data_b64 ? strlen(items[i].images[j].data_b64) : 0;
+    return total;
+}
+
+size_t items_image_count(const struct item *items, size_t n_items)
+{
+    size_t total = 0;
+
+    for (size_t i = 0; i < n_items; i++)
+        total += items[i].n_images;
+    return total;
+}
+
+void item_free(struct item *item)
+{
+    if (!item)
+        return;
+
+    free(item->text);
+    free(item->call_id);
+    free(item->tool_name);
+    free(item->tool_arguments_json);
+    free(item->output);
+    for (size_t i = 0; i < item->n_images; i++) {
+        free(item->images[i].mime);
+        free(item->images[i].data_b64);
+    }
+    free(item->images);
+    free(item->reasoning_json);
+    free(item->reasoning_text);
+    free(item->provider);
+    free(item->model);
+    free(item->usage);
+    memset(item, 0, sizeof(*item));
+}
+
+void model_info_init(struct model_info *info)
+{
+    memset(info, 0, sizeof(*info));
+    info->cost_input = -1;
+    info->cost_cache_read = -1;
+    info->cost_output = -1;
+    info->cost_cache_write = -1;
+    info->cost_cache_write_1h = -1;
 }
 
 void model_info_copy(struct model_info *dst, const struct model_info *src)
 {
     *dst = *src;
     dst->id = src->id ? xstrdup(src->id) : NULL;
-    dst->desc = src->desc ? xstrdup(src->desc) : NULL;
+    dst->description = src->description ? xstrdup(src->description) : NULL;
 }
 
-void model_info_clear(struct model_info *m)
+void model_info_clear(struct model_info *info)
 {
-    free(m->id);
-    free(m->desc);
-    memset(m, 0, sizeof(*m));
+    free(info->id);
+    free(info->description);
+    memset(info, 0, sizeof(*info));
 }
 
-void model_info_free(struct model_info *models, size_t n)
+void model_info_free(struct model_info *models, size_t n_models)
 {
     if (!models)
         return;
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < n_models; i++)
         model_info_clear(&models[i]);
     free(models);
+}
+
+void model_probe_clear(struct model_probe *probe)
+{
+    if (!probe)
+        return;
+    free(probe->url);
+    string_array_free(probe->headers);
+    memset(probe, 0, sizeof(*probe));
+}
+
+void provider_availability_clear(struct provider_availability *availability)
+{
+    if (!availability)
+        return;
+    free(availability->url);
+    string_array_free(availability->headers);
+    memset(availability, 0, sizeof(*availability));
 }

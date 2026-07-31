@@ -63,9 +63,10 @@ void image_budget_enforce(const struct item *history, size_t n_history, struct i
     for (size_t k = 0; k < result->n_images; k++)
         incoming += result->images[k].data_b64 ? strlen(result->images[k].data_b64) : 0;
 
-    int over_bytes = images_total_b64(history, n_history) + incoming > IMAGE_REQUEST_BUDGET_B64;
+    int over_bytes =
+        items_image_base64_bytes(history, n_history) + incoming > IMAGE_REQUEST_BASE64_BUDGET_BYTES;
     int over_count =
-        images_total_count(history, n_history) + result->n_images > IMAGE_REQUEST_MAX_COUNT;
+        items_image_count(history, n_history) + result->n_images > IMAGE_REQUEST_MAX_COUNT;
     if (!over_bytes && !over_count)
         return;
 
@@ -84,7 +85,7 @@ void image_budget_enforce(const struct item *history, size_t n_history, struct i
         snprintf(cap, sizeof(cap), "holds too many images (max %d)", IMAGE_REQUEST_MAX_COUNT);
     else
         snprintf(cap, sizeof(cap), "is at its image budget (~%zu MB)",
-                 (size_t)IMAGE_REQUEST_BUDGET_B64 / (1024 * 1024));
+                 (size_t)IMAGE_REQUEST_BASE64_BUDGET_BYTES / (1024 * 1024));
     char *note = xasprintf("%s\n\n[image not attached: this conversation %s. Ask the user to "
                            "/compact (summarizes and frees it) or /new.]",
                            result->output ? result->output : "", cap);
