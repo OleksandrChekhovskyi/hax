@@ -7,127 +7,100 @@
 #include <unistd.h>
 
 #include "session.h"
-#include "util.h"
 #include "terminal/picker.h"
 #include "terminal/ui.h"
+#include "util.h"
 
-/* Search/display budget for the first-prompt label. The picker clips it to
- * the row width for display; the extra reach lets a filter match terms well
- * past the on-screen preview, not just its first few words. */
+/* Search farther than the visible row so filters can match later prompt text. */
 #define SESSION_LABEL_CELLS 512
 
-/* Cap on how many sessions the picker reads before first paint (newest
- * first). Each row reads a bounded transcript prefix, so without a cap a
- * repo with thousands of sessions would stall the picker on open. Older
- * sessions stay reachable by id via `--resume=<id>`. */
+/* Bound startup work; older sessions remain addressable through --resume=<id>. */
 #define SESSION_PICKER_MAX 200
 
-/* Coarse "3m ago" / "2d ago" stamp from a delta in seconds. Good enough
- * to disambiguate sessions in a picker; not a precise clock. */
-static void rel_time(long secs_ago, char *buf, size_t n)
+static void format_relative_time(long seconds_ago, char *buffer, size_t size)
 {
-    if (secs_ago < 0)
-        secs_ago = 0;
-    if (secs_ago < 60)
-        snprintf(buf, n, "just now");
-    else if (secs_ago < 3600)
-        snprintf(buf, n, "%ldm ago", secs_ago / 60);
-    else if (secs_ago < 86400)
-        snprintf(buf, n, "%ldh ago", secs_ago / 3600);
+    if (seconds_ago < 0)
+        seconds_ago = 0;
+    if (seconds_ago < 60)
+        snprintf(buffer, size, "just now");
+    else if (seconds_ago < 3600)
+        snprintf(buffer, size, "%ldm ago", seconds_ago / 60);
+    else if (seconds_ago < 86400)
+        snprintf(buffer, size, "%ldh ago", seconds_ago / 3600);
     else
-        snprintf(buf, n, "%ldd ago", secs_ago / 86400);
+        snprintf(buffer, size, "%ldd ago", seconds_ago / 86400);
 }
 
-char *session_picker_run(const char *cwd, const char *exclude_path, int *shown)
+char *session_picker_run(const char *cwd, const char *exclude_path, int *picker_opened)
 {
-    if (shown)
-        *shown = 0;
+    if (picker_opened)
+        *picker_opened = 0;
 
-    /* The picker is interactive (raw-mode list + stdin selection); require
-     * both ends to be terminals so `hax --resume >out` doesn't paint a menu
-     * into a file and block waiting on stdin. picker_run re-checks this, but
-     * gating here lets us skip the whole list build on the non-tty path. */
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
         return NULL;
 
-    struct session_entry *list;
-    size_t n;
-    session_list(cwd, &list, &n);
+    struct session_entry *entries;
+    size_t entry_count;
+    session_list(cwd, &entries, &entry_count);
 
-    /* Build the display order, dropping the excluded (live) session. */
-    size_t *map = n ? xmalloc(n * sizeof(*map)) : NULL;
-    size_t n_shown = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (exclude_path && list[i].path && strcmp(list[i].path, exclude_path) == 0)
+    size_t *entry_indexes = entry_count ? xmalloc(entry_count * sizeof(*entry_indexes)) : NULL;
+    size_t visible_count = 0;
+    for (size_t i = 0; i < entry_count; i++) {
+        if (exclude_path && entries[i].path && strcmp(entries[i].path, exclude_path) == 0)
             continue;
-        map[n_shown++] = i;
+        entry_indexes[visible_count++] = i;
     }
 
-    if (n_shown == 0) {
+    if (visible_count == 0) {
         ui_note("no past conversations in this directory");
-        free(map);
-        session_list_free(list, n);
+        free(entry_indexes);
+        session_list_free(entries, entry_count);
         return NULL;
     }
 
-    /* Materialize a row per session, newest first: the first prompt is the
-     * searchable label (the picker clips it to the row width for display),
-     * the relative time a dim detail column. A prompt too long for its row
-     * repeats in the gutter in full (label_gutter) — one line usually stops
-     * short of the part that tells two similar sessions apart. Reads are
-     * capped at SESSION_PICKER_MAX so opening the picker never stalls on a
-     * huge history; the title notes when the list is capped.
-     *
-     * Deliberately nothing else in the gutter: the header's provider/model
-     * stamp is tempting, but resuming keeps the *current* provider and model
-     * (session_load is called with a NULL meta everywhere), so showing the
-     * recorded one would advertise a restore that doesn't happen. */
-    size_t n_load = n_shown < SESSION_PICKER_MAX ? n_shown : SESSION_PICKER_MAX;
+    size_t picker_count = visible_count < SESSION_PICKER_MAX ? visible_count : SESSION_PICKER_MAX;
     time_t now = time(NULL);
-    struct picker_item *items = xcalloc(n_load, sizeof(*items));
-    char **details = xmalloc(n_load * sizeof(*details));
-    for (size_t k = 0; k < n_load; k++) {
-        struct session_entry *e = &list[map[k]];
-        if (!e->first_prompt)
-            e->first_prompt = session_first_prompt(e->path, SESSION_LABEL_CELLS);
-        char when[24];
-        rel_time((long)(now - e->mtime), when, sizeof(when));
-        details[k] = xstrdup(when);
-        items[k].label = (e->first_prompt && e->first_prompt[0]) ? e->first_prompt : "(no preview)";
-        items[k].detail = details[k];
-        items[k].dim = 0;
-        items[k].current = 0;
+    struct picker_item *items = xcalloc(picker_count, sizeof(*items));
+    char **details = xmalloc(picker_count * sizeof(*details));
+    for (size_t i = 0; i < picker_count; i++) {
+        struct session_entry *entry = &entries[entry_indexes[i]];
+        if (!entry->first_prompt)
+            entry->first_prompt = session_first_prompt(entry->path, SESSION_LABEL_CELLS);
+        char relative_time[24];
+        format_relative_time((long)(now - entry->mtime), relative_time, sizeof(relative_time));
+        details[i] = xstrdup(relative_time);
+        items[i].label =
+            entry->first_prompt && entry->first_prompt[0] ? entry->first_prompt : "(no preview)";
+        items[i].detail = details[i];
     }
 
-    char title_buf[96];
+    char counted_title[96];
     const char *title = "resume a conversation";
-    if (n_load < n_shown) {
-        snprintf(title_buf, sizeof title_buf, "resume a conversation · newest %zu of %zu", n_load,
-                 n_shown);
-        title = title_buf;
+    if (picker_count < visible_count) {
+        snprintf(counted_title, sizeof(counted_title), "resume a conversation · newest %zu of %zu",
+                 picker_count, visible_count);
+        title = counted_title;
     }
 
-    struct picker_opts opts = {
+    struct picker_opts options = {
         .title = title,
         .items = items,
-        .n = n_load,
-        .empty_note = NULL,
+        .n = picker_count,
         .label_gutter = 1,
     };
-    /* Set before handing off (see session_picker.h): /resume's trail
-     * bookkeeping only needs that the cursor ends at the picker's start row,
-     * which holds even if picker_run's raw-mode setup fails without ever
-     * painting — so this need not wait on a successful paint. */
-    if (shown)
-        *shown = 1;
-    long sel = picker_run(&opts);
-    char *path = (sel >= 0) ? xstrdup(list[map[sel]].path) : NULL;
+    /* Even a raw-mode setup failure leaves the cursor at the picker's start row. */
+    if (picker_opened)
+        *picker_opened = 1;
+    long selection = picker_run(&options);
+    char *path = NULL;
+    if (selection >= 0 && (size_t)selection < picker_count)
+        path = xstrdup(entries[entry_indexes[selection]].path);
 
-    for (size_t k = 0; k < n_load; k++)
-        free(details[k]);
+    for (size_t i = 0; i < picker_count; i++)
+        free(details[i]);
     free(details);
     free(items);
-    free(map);
-    session_list_free(list, n);
+    free(entry_indexes);
+    session_list_free(entries, entry_count);
     return path;
 }

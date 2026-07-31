@@ -5,226 +5,108 @@
 #include <jansson.h>
 #include <stddef.h>
 
-#include "provider.h" /* struct item */
+#include "provider.h"
 
-/*
- * Conversation persistence: one append-only JSONL file per session, under
- * a per-cwd directory in the XDG state tree
- * ($XDG_STATE_HOME/hax/sessions/<encoded-cwd>/<ts>_<uuid>.jsonl). Line 1 is
- * a session header; every later line is one struct item, round-tripped
- * losslessly, except for the occasional `{"type":"selection"}` record
- * marking a mid-session provider/model/effort/preset switch. This is a third
- * serialization, distinct from a provider's wire JSON (lossy,
- * provider-shaped) and the HAX_TRANSCRIPT log (human plain text) — the only
- * one meant to be read back in.
- *
- * Set HAX_NO_SESSION on to disable persistence entirely; session_log_open /
- * _resume then return NULL and all writer entry points become no-ops. Its
- * `auto` default is resolved a layer up, by whoever knows which provider is
- * live (agent_recording_enabled), and applied by simply not opening a log.
- */
+/* Append-only conversation persistence. Each session is a JSONL file under the current
+ * directory's bucket in the XDG state tree. The first line is a header; subsequent lines are
+ * items or complete provider/model/effort/preset selection records. */
 
-/* Bumped when the on-disk item/header schema changes incompatibly. */
 #define SESSION_FORMAT_VERSION 1
 
-/* ---------------- lossless item <-> JSON codec ---------------- */
+/* Returns a new JSON reference. NULL item fields are omitted. */
+json_t *item_to_json(const struct item *item);
 
-/* Serialize one item into a fresh JSON object (new reference — caller
- * json_decref). Every field present on the item is emitted; absent
- * (NULL) fields are omitted. ITEM_TURN_BOUNDARY round-trips as a
- * field-less {"kind":"turn_boundary"}. */
-json_t *item_to_json(const struct item *it);
+/* Zeroes and fills out with owned fields. Free with item_free. Returns -1 for an invalid kind. */
+int item_from_json(const json_t *object, struct item *out);
 
-/* Parse one item object into *out (zeroed first; string fields are
- * xstrdup'd, so the caller owns them and frees via item_free). Returns 0
- * on success, -1 when `obj` is not an object or carries an unrecognized
- * (or missing) "kind". */
-int item_from_json(const json_t *obj, struct item *out);
-
-/* ---------------- session metadata (the header line) ---------------- */
-
-/* Identity plus the conversation's *effective* selection: the header's
- * values as amended by every later selection record (see
- * session_log_set_meta), so this is what the conversation was last running
- * under, not what it started under. Restored into the config's conversation
- * tier when the session is resumed. */
+/* Identity and the effective selection after applying every selection record. */
 struct session_meta {
-    char *id;       /* uuid */
-    char *cwd;      /* cwd recorded when the session began */
-    char *provider; /* provider id; may be NULL on old files */
-    char *model;    /* may be NULL */
-    char *effort;   /* may be NULL */
-    char *preset;   /* active preset stance, or NULL for none */
+    char *id;
+    char *cwd;
+    char *provider; /* may be NULL in old files */
+    char *model;
+    char *effort;
+    char *preset;
 };
 
-void session_meta_free(struct session_meta *m);
+void session_meta_free(struct session_meta *meta);
 
-/* Read just the metadata of the session at `path` — the header plus any
- * later selection records — without materializing its items. What the
- * resume paths consult before a provider exists (the recorded selection has
- * to be in the config's conversation tier before one is constructed).
- * Returns 0 on success with *out filled (caller session_meta_free), -1 when
- * the file can't be read (with *out zeroed). */
+/* Reads the header and selection records without retaining items. Zeroes out on failure. */
 int session_read_meta(const char *path, struct session_meta *out);
 
-/* ---------------- append-only writer ---------------- */
+struct session_log;
 
-struct session_log; /* opaque */
-
-/* Begin a fresh session for the current run. provider/model/effort/preset
- * are stamped into the header (what a later resume restores); the file is
- * keyed by getcwd(). Returns NULL when sessions are disabled
- * (HAX_NO_SESSION) or no state directory is resolvable. The file is created
- * lazily on the first append, so a run that sends nothing leaves no file
- * behind. */
+/* Prepares a fresh session for the current directory. The file is created on the first append.
+ * Returns NULL when recording is disabled or the state path cannot be resolved. */
 struct session_log *session_log_open(const char *provider, const char *model, const char *effort,
                                      const char *preset);
 
-/* Continue an existing session file: opens `path` for append and treats
- * the first `n_loaded` items as already written, so session_log_append
- * only emits items beyond them. The header is left untouched. Used by
- * both --resume and /resume so resuming continues the same file rather
- * than forking a new one. Returns NULL when sessions are disabled or the
- * file can't be opened for append.
- *
- * Pass the selection the *file* records (session_read_meta / session_load's
- * meta), not the run's: the two differ whenever a flag overrode the restore
- * or the restore couldn't be applied, and starting from the file's own values
- * lets the session_log_set_meta that follows stage that difference as the
- * switch it is — recorded only if the run goes on to produce a turn. */
+/* Opens path for append. loaded_item_count is the number of items already represented in the file.
+ * Pass the file's recorded selection so session_log_set_meta can detect a run-time override.
+ * Returns NULL when recording is disabled or path cannot be opened for append. */
 struct session_log *session_log_resume(const char *path, const char *provider, const char *model,
-                                       const char *effort, const char *preset, size_t n_loaded);
+                                       const char *effort, const char *preset,
+                                       size_t loaded_item_count);
 
-/* Append items [n_written..n_items) as one JSONL line each. No-op when
- * `log` is NULL or nothing new accumulated. Materializes the file (and
- * its parent directory + header line) on first use. */
-void session_log_append(struct session_log *log, const struct item *items, size_t n_items);
+/* Appends items not previously written. All writer functions accept a NULL log. */
+void session_log_append(struct session_log *log, const struct item *items, size_t item_count);
 
-/* Record the run's current selection (after a /provider, /model, /effort or
- * /preset switch, or once one is chosen in a session that started without
- * any). The values are kept in memory — so a session that starts
- * provider-less and picks one before its first prompt writes an accurate
- * header, and a later session_log_reset carries them into the rotated file.
- * Once the header is already on disk that line can't be rewritten, so a
- * changed selection becomes a `{"type":"selection"}` record instead — written
- * by the *next* append, not here: a selection earns its place in the file by
- * producing something, so merely opening a conversation (a resume whose
- * restore couldn't be applied, a fork nobody continued) leaves it exactly as
- * it was. That trailing record is what a resume restores; the header only
- * knows what the conversation started under. The file's own append-only shape
- * does the rest — /undo truncation drops records past the cut (and re-states
- * the live selection for the turns that follow), /fork copies those inside
- * the retained prefix. No-op when `log` is NULL or nothing changed. */
+/* Updates the effective selection. Before materialization, the values update the pending header.
+ * Later changes are written immediately before the next appended item, so an unused selection does
+ * not alter a resumed or forked conversation. */
 void session_log_set_meta(struct session_log *log, const char *provider, const char *model,
                           const char *effort, const char *preset);
 
-/* Rotate to a brand-new session id/file (for /new). Closes the current
- * file; the next append lazily materializes the fresh one. */
+/* Closes the current file and prepares a lazily materialized session with a fresh identity. */
 void session_log_reset(struct session_log *log);
-
 void session_log_close(struct session_log *log);
 
-/* ---------------- undo / fork ---------------- */
-
-/* Truncate the file backing `log` to keep only its first `keep_turns` user
- * turns (non-seed user messages, each with its boundary and responses); the
- * cut drops the boundary opening the (keep_turns)-th turn and everything after
- * it. `new_item_count` is the caller's post-truncation in-memory item count,
- * recorded as the writer's high-water mark so later appends resume correctly.
- * No-op returning 0 when `log` is NULL or unmaterialized. Returns 0 on
- * success, -1 on I/O failure — in which case the file is left unchanged, so
- * the caller keeps its in-memory history to stay consistent. Used by /undo. */
+/* Keeps the first keep_turns typed user turns. new_item_count becomes the writer's in-memory high
+ * water mark. An unmaterialized or NULL log is a successful no-op. On failure the file is
+ * unchanged. */
 int session_log_truncate(struct session_log *log, size_t keep_turns, size_t new_item_count);
 
-/* True once the session's file exists on disk (its header was written).
- * session_log_path is non-NULL even before that first write, so callers that
- * must touch the actual file — /fork copying it — gate on this instead. */
+/* True after the header has been written. */
 int session_log_materialized(const struct session_log *log);
 
-/* Create a new session file next to `src_path` holding a copy of its header
- * (restamped with a fresh id/timestamp and a `forked_from` field naming the
- * source) followed by the source's first `keep_turns` user turns. The source
- * file is left untouched, so it stays resumable as the pre-fork branch. On
- * success returns 0 and stores the new file's path in *out_path (caller
- * frees); returns -1 on I/O failure (with *out_path left NULL). Used by
- * /fork. */
-int session_fork_file(const char *src_path, size_t keep_turns, char **out_path);
+/* Copies the first keep_turns typed user turns into a sibling session with a fresh identity and a
+ * forked_from header field. On success, out_path receives an owned path; it is NULL on failure. */
+int session_fork_file(const char *source_path, size_t keep_turns, char **out_path);
 
-/* The on-disk path of the current session file (borrowed; valid until
- * reset/close). Non-NULL even before the file is materialized — it's
- * where the session will be written. NULL only when `log` is NULL or
- * sessions became unavailable after a failed reset. */
+/* Borrowed until reset or close; non-NULL before materialization when recording is available. */
 const char *session_log_path(const struct session_log *log);
 
-/* The session id to suggest after `--resume=` to reopen this run later, or
- * NULL when nothing has been written yet (no file to resume) or `log` is
- * NULL. Resumable sessions live in the current cwd's directory, so the id
- * resolves there. Borrowed; valid until reset/close. */
+/* Borrowed resumable id, or NULL until the session is materialized. */
 const char *session_log_resume_hint(const struct session_log *log);
 
-/* ---------------- loading & listing ---------------- */
-
-/* True when `path` follows hax's timestamp + UUID session filename format.
- * Pruning uses this to leave unrelated JSONL files untouched. */
+/* True when path has hax's timestamp-and-UUID session filename. */
 int session_path_is_standard(const char *path);
 
-/* Mark a selected session active before loading it. Takes the same shared
- * advisory lock as a writer while updating mtime, so a concurrent pruner
- * either sees the fresh timestamp or has already removed the path. Returns 0
- * on success, -1 when the file could not be touched. */
+/* Refreshes path's mtime while coordinating with the pruner.
+ * Returns 0 on success, -1 on failure. */
 int session_touch(const char *path);
 
-/* Load a session file, replaying its items verbatim into a fresh malloc'd
- * vector (*out_items / *out_n) and, when out_meta is non-NULL, filling it
- * from the header and any later selection records (see session_read_meta).
- *
- * The load is non-destructive: model-bound reasoning (Codex's encrypted
- * reasoning_json) is kept along with its origin provider+model stamp (each
- * reasoning item carries one; older files fall back to the header). Whether a
- * blob can be replayed for a given request is decided later, by the provider's
- * build path, which compares the stamp to the current model — so a resumed
- * file may legitimately mix models, and switching back to a model still finds
- * its blobs intact.
- *
- * Returns 0 on success, -1 when the file can't be read; the outputs are
- * zeroed either way, so an error path can free them unconditionally. Caller
- * frees the items (item_free each, then free the vector) and
- * session_meta_free. */
-int session_load(const char *path, struct item **out_items, size_t *out_n,
+/* Loads owned items and optional metadata. Invalid JSON lines are skipped, incomplete tool calls
+ * are removed, and old reasoning items inherit header provenance. Outputs are zeroed on failure.
+ * Free items with item_free followed by free, and metadata with session_meta_free. */
+int session_load(const char *path, struct item **out_items, size_t *out_count,
                  struct session_meta *out_meta);
 
-/* One row for the resume picker. */
 struct session_entry {
-    char *path;         /* full path to the .jsonl */
-    char *id;           /* uuid, taken from the filename (may be NULL) */
-    long mtime;         /* st_mtime seconds — sort + relative-time display */
-    long mtime_nsec;    /* sub-second mtime — tiebreaks same-second sessions */
-    char *first_prompt; /* lazily filled by the caller via session_first_prompt; NULL until then */
+    char *path;
+    char *id;
+    long mtime;
+    long mtime_nsec;
+    char *first_prompt; /* NULL until populated by session_first_prompt */
 };
 
-/* List unexpired sessions recorded for `cwd`, newest first (by mtime).
- * Retention-disabled listing includes every session. Enumeration only —
- * stats each file and reads the id from its name, but does NOT open
- * any transcript, so --continue (newest path) and --resume=ID (id match)
- * stay cheap regardless of how many/large the sessions are. Fill
- * first_prompt lazily with session_first_prompt for the rows actually
- * shown. Returns a malloc'd array (*out / *n_out); an empty/absent
- * directory yields *out=NULL, *n_out=0. Always returns 0 (a missing
- * directory is "no sessions", not an error). Free via session_list_free. */
-int session_list(const char *cwd, struct session_entry **out, size_t *n_out);
+/* Lists unexpired regular session files for cwd, newest first. The owned result may be empty. File
+ * contents are not read; prompt labels are populated separately. */
+int session_list(const char *cwd, struct session_entry **out_entries, size_t *out_count);
+void session_list_free(struct session_entry *entries, size_t count);
 
-void session_list_free(struct session_entry *list, size_t n);
-
-/* First user prompt of a session, flattened to one line and truncated to
- * `max_cells` display cells, or NULL if none / unreadable. Compaction seed
- * messages are skipped — every compacted session starts with the same
- * generic preamble, useless as a label — and a session holding only a seed
- * (compacted, no follow-up prompt within the scanned prefix) labels as
- * "(compacted)". Reads only a bounded prefix of the file (the first user
- * message is near the top), so it's cheap to call per picker row.
- * `max_cells` bounds both the cost and how far into the prompt a filter can
- * match: pass enough to search past what a row visibly shows, not just the
- * on-screen preview. Caller frees. */
+/* Returns an owned, single-line first typed prompt limited to max_cells, "(compacted)" for a
+ * seed-only session, or NULL when no label can be read. Reads only a bounded file prefix. */
 char *session_first_prompt(const char *path, int max_cells);
 
 #endif /* HAX_SESSION_H */
