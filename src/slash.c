@@ -271,8 +271,8 @@ enum slash_result slash_dispatch(const char *line, struct slash_ctx *ctx)
      * trailing newline left, so the pre-prompt separator still emits the
      * trailing blank. drives_disp handlers maintain disp themselves and are
      * left untouched. */
-    struct disp *d = &ctx->state->r->disp;
-    disp_block_separator(d);
+    struct disp *disp = &ctx->state->render->disp;
+    disp_block_separator(disp);
 
     /* Stack copy so we can NUL-terminate without touching the caller's
      * buffer. 64 is generous for command names — the longest plausible
@@ -280,7 +280,7 @@ enum slash_result slash_dispatch(const char *line, struct slash_ctx *ctx)
     char name_buf[64];
     if (name_len >= sizeof(name_buf)) {
         ui_error("unknown command. type /help for the list.");
-        d->trail = 1;
+        disp->trail = 1;
         return SLASH_UNKNOWN;
     }
     memcpy(name_buf, start, name_len);
@@ -289,7 +289,7 @@ enum slash_result slash_dispatch(const char *line, struct slash_ctx *ctx)
     const struct slash_cmd *cmd = find_command(name_buf);
     if (!cmd) {
         ui_error("unknown command: /%s. type /help for the list.", name_buf);
-        d->trail = 1;
+        disp->trail = 1;
         return SLASH_UNKNOWN;
     }
     if (has_extra && !cmd->takes_arg) {
@@ -297,7 +297,7 @@ enum slash_result slash_dispatch(const char *line, struct slash_ctx *ctx)
          * name — `/clear now` should report on `/clear`, not on the
          * `/new` it resolves to. */
         ui_error("/%s takes no arguments.", name_buf);
-        d->trail = 1;
+        disp->trail = 1;
         return SLASH_BAD_USAGE;
     }
 
@@ -308,7 +308,7 @@ enum slash_result slash_dispatch(const char *line, struct slash_ctx *ctx)
     ctx->arg = (cmd->takes_arg && has_extra) ? p : NULL;
     cmd->run(ctx);
     if (!cmd->drives_disp)
-        d->trail = 1;
+        disp->trail = 1;
     return SLASH_HANDLED;
 }
 
@@ -341,7 +341,7 @@ static void slash_run_resume(struct slash_ctx *ctx)
      * you're already in is a no-op. The picker prints its own "nothing
      * to resume" note and returns NULL when the list is empty or the
      * user cancels. */
-    const char *current = session_log_path(ctx->state->slog);
+    const char *current = session_log_path(ctx->state->session_log);
     int shown = 0;
     char *path = session_picker_run(cwd, current, &shown);
     /* The dispatcher's leading-gap separator left disp at trail = 2. A shown
@@ -351,7 +351,7 @@ static void slash_run_resume(struct slash_ctx *ctx)
      * (non-tty, or nothing to resume), a raw note was printed instead, so model
      * its fresh-line end (trail = 1) for the pre-prompt separator. */
     if (!shown)
-        ctx->state->r->disp.trail = 1;
+        ctx->state->render->disp.trail = 1;
     if (!path)
         return;
     agent_resume_session(ctx->state, path);
@@ -367,25 +367,26 @@ static void slash_run_resume(struct slash_ctx *ctx)
 /* Show a picker over the conversation's user turns (oldest first, most recent
  * pre-selected) and return the chosen 0-based turn ordinal, or -1 on cancel
  * or a non-tty. */
-static long undo_fork_picker(struct agent_session *s, size_t count, int is_undo)
+static long undo_fork_picker(struct agent_session *session, size_t count, int is_undo)
 {
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
         return -1;
 
     struct picker_item *items = xcalloc(count, sizeof(*items));
     char **labels = xmalloc(count * sizeof(*labels));
-    for (size_t t = 0; t < count; t++) {
-        const char *text = agent_user_turn_text(s, t);
+    for (size_t turn_index = 0; turn_index < count; turn_index++) {
+        const char *text = agent_user_turn_text(session, turn_index);
         char *flat = flatten_for_display(text ? text : "");
-        labels[t] = truncate_for_display(flat, TURN_LABEL_CELLS);
+        labels[turn_index] = truncate_for_display(flat, TURN_LABEL_CELLS);
         free(flat);
-        items[t].label = (labels[t] && labels[t][0]) ? labels[t] : "(empty)";
-        items[t].detail = NULL;
-        items[t].dim = 0;
-        items[t].current = 0;
+        items[turn_index].label =
+            (labels[turn_index] && labels[turn_index][0]) ? labels[turn_index] : "(empty)";
+        items[turn_index].detail = NULL;
+        items[turn_index].dim = 0;
+        items[turn_index].current = 0;
     }
 
-    struct picker_opts opts = {
+    struct picker_opts options = {
         .title = is_undo ? "revert to before which message" : "fork before which message",
         .items = items,
         .n = count,
@@ -396,13 +397,13 @@ static long undo_fork_picker(struct agent_session *s, size_t count, int is_undo)
          * full text in the gutter. */
         .label_gutter = 1,
     };
-    long sel = picker_run(&opts);
+    long selected_index = picker_run(&options);
 
-    for (size_t t = 0; t < count; t++)
-        free(labels[t]);
+    for (size_t turn_index = 0; turn_index < count; turn_index++)
+        free(labels[turn_index]);
     free(labels);
     free(items);
-    return sel;
+    return selected_index;
 }
 
 /* Shared /undo and /fork body: resolve the target user turn (from the "turns
@@ -411,64 +412,65 @@ static long undo_fork_picker(struct agent_session *s, size_t count, int is_undo)
  * and the raw-note/error paths reset the trail themselves. */
 static void slash_run_undo_fork(struct slash_ctx *ctx, int is_undo)
 {
-    struct agent_state *st = ctx->state;
-    struct agent_session *s = st->sess;
+    struct agent_state *state = ctx->state;
+    struct agent_session *session = state->session;
     const char *verb = is_undo ? "undo" : "fork";
-    size_t count = agent_user_turn_count(s);
+    size_t turn_count = agent_user_turn_count(session);
 
-    long turn;
+    long turn_index;
     if (ctx->arg) {
-        /* N counts turns back from the end: 1 is the most recent turn, `count`
+        /* N counts turns back from the end: 1 is the most recent turn, `turn_count`
          * the first. /fork also accepts 0 — the current tip — which clones the
          * whole conversation; that stays valid even when the only user item is
-         * a compaction seed (count 0), as long as there's history to copy.
+         * a compaction seed (turn_count 0), as long as there's history to copy.
          * "undo nothing" is meaningless, so /undo starts at 1. */
-        long min = is_undo ? 1 : 0;
+        long minimum = is_undo ? 1 : 0;
         char *end;
-        long n = strtol(ctx->arg, &end, 10);
+        long turns_back = strtol(ctx->arg, &end, 10);
         while (isspace((unsigned char)*end))
             end++;
-        if (!is_undo && *end == '\0' && n == 0) {
-            if (s->n_items == 0) {
+        if (!is_undo && *end == '\0' && turns_back == 0) {
+            if (session->n_items == 0) {
                 ui_note("nothing to fork yet");
-                st->r->disp.trail = 1;
+                state->render->disp.trail = 1;
                 return;
             }
-            agent_fork(st, count); /* turn == count → clone the tip */
+            agent_fork(state, turn_count);
             return;
         }
-        if (*end != '\0' || n < min || (size_t)n > count) {
-            if (count == 0)
+        if (*end != '\0' || turns_back < minimum || (size_t)turns_back > turn_count) {
+            if (turn_count == 0)
                 ui_note("nothing to %s yet", verb);
             else
-                ui_error("/%s takes a number of turns between %ld and %zu", verb, min, count);
-            st->r->disp.trail = 1;
+                ui_error("/%s takes a number of turns between %ld and %zu", verb, minimum,
+                         turn_count);
+            state->render->disp.trail = 1;
             return;
         }
-        turn = (long)count - n;
+        turn_index = (long)turn_count - turns_back;
     } else {
-        if (count == 0) {
+        if (turn_count == 0) {
             ui_note("nothing to %s yet", verb);
-            st->r->disp.trail = 1;
+            state->render->disp.trail = 1;
             return;
         }
-        turn = undo_fork_picker(s, count, is_undo);
-        if (turn < 0) {
+        turn_index = undo_fork_picker(session, turn_count, is_undo);
+        if (turn_index < 0) {
             /* A shown picker erased back to its start row, so leave disp as
              * the dispatcher's separator set it. With no tty there was no
              * picker and no way to choose — point at the argument form. */
             if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
                 ui_note("/%s needs a number of turns when not interactive", verb);
-                st->r->disp.trail = 1;
+                state->render->disp.trail = 1;
             }
             return;
         }
     }
 
     if (is_undo)
-        agent_undo(st, (size_t)turn);
+        agent_undo(state, (size_t)turn_index);
     else
-        agent_fork(st, (size_t)turn);
+        agent_fork(state, (size_t)turn_index);
 }
 
 static void slash_run_undo(struct slash_ctx *ctx)
@@ -546,28 +548,28 @@ static void slash_run_copy(struct slash_ctx *ctx)
      * items, and turn boundaries are skipped — they're not what the
      * user means by "the last response". The text field already holds
      * the model's raw Markdown, so no conversion is needed. */
-    const struct item *msg = NULL;
-    if (ctx->state && ctx->state->sess) {
-        struct agent_session *s = ctx->state->sess;
-        for (size_t i = s->n_items; i > 0; i--) {
-            const struct item *it = &s->items[i - 1];
-            if (it->kind == ITEM_ASSISTANT_MESSAGE && it->text && it->text[0]) {
-                msg = it;
+    const struct item *message = NULL;
+    if (ctx->state && ctx->state->session) {
+        struct agent_session *session = ctx->state->session;
+        for (size_t i = session->n_items; i > 0; i--) {
+            const struct item *item = &session->items[i - 1];
+            if (item->kind == ITEM_ASSISTANT_MESSAGE && item->text && item->text[0]) {
+                message = item;
                 break;
             }
         }
     }
-    if (!msg) {
+    if (!message) {
         ui_note("no assistant response to copy");
         return;
     }
-    size_t len = strlen(msg->text);
-    const char *err = NULL;
-    if (clipboard_copy(msg->text, len, &err) == 0) {
-        ui_note("copied %zu byte%s to clipboard", len, len == 1 ? "" : "s");
+    size_t byte_count = strlen(message->text);
+    const char *error = NULL;
+    if (clipboard_copy(message->text, byte_count, &error) == 0) {
+        ui_note("copied %zu byte%s to clipboard", byte_count, byte_count == 1 ? "" : "s");
         return;
     }
-    ui_error("clipboard copy failed: %s", err ? err : "unknown error");
+    ui_error("clipboard copy failed: %s", error ? error : "unknown error");
 }
 
 /* ---------- /session ---------- */
@@ -586,20 +588,21 @@ static void session_row(const char *label, const char *value)
  * usage_tokens, "~" included: the categories are rate estimates even when
  * the spend row below is exact. A cost that is unknown, or too small to
  * render, shows no dollar figure. Returns the new row length; safe to keep
- * calling once the buffer is full (snprintf truncates, len clamps). */
-static int session_tok_seg(char *row, size_t sz, int len, const char *label, long tokens,
-                           double usd)
+ * calling once the buffer is full because snprintf truncates and length clamps. */
+static int append_token_segment(char *row, size_t size, int length, const char *label, long tokens,
+                                double cost)
 {
     char buf[32];
-    if (len < 0 || (size_t)len >= sz)
-        return len;
+    if (length < 0 || (size_t)length >= size)
+        return length;
     format_tokens(buf, sizeof(buf), tokens);
-    len += snprintf(row + len, sz - (size_t)len, "%s%s %s", len ? " · " : "", label, buf);
-    if (usd >= COST_DISPLAY_MIN && len > 0 && (size_t)len < sz) {
-        format_cost(buf, sizeof(buf), usd);
-        len += snprintf(row + len, sz - (size_t)len, " ~%s", buf);
+    length +=
+        snprintf(row + length, size - (size_t)length, "%s%s %s", length ? " · " : "", label, buf);
+    if (cost >= COST_DISPLAY_MIN && length > 0 && (size_t)length < size) {
+        format_cost(buf, sizeof(buf), cost);
+        length += snprintf(row + length, size - (size_t)length, " ~%s", buf);
     }
-    return len;
+    return length;
 }
 
 /* Local counterpart to /usage: everything here is computed from this
@@ -610,11 +613,11 @@ static int session_tok_seg(char *row, size_t sz, int len, const char *label, lon
  * rather than shown as zeros. */
 static void slash_run_session(struct slash_ctx *ctx)
 {
-    struct agent_state *st = ctx->state;
-    const struct session_stats *t = &st->stats;
-    char row[160], a[32];
+    struct agent_state *state = ctx->state;
+    const struct session_stats *stats = &state->stats;
+    char row[160], formatted[32];
 
-    const char *hint = session_log_resume_hint(st->slog);
+    const char *hint = session_log_resume_hint(state->session_log);
     session_row("session", hint ? hint : "not recorded");
 
     /* Active stance, when one is applied — above the provider row it
@@ -626,46 +629,49 @@ static void slash_run_session(struct slash_ctx *ctx)
     /* Report what the next request would carry, not what startup resolved
      * before the model's metadata landed. Whatever this moves, the next
      * prompt re-stamps the log header with it. */
-    agent_session_resync_effort(st->sess, (struct provider *)st->provider, NULL);
-    const char *prov = (st->provider && st->provider->name) ? st->provider->name : "?";
-    const char *model = (st->sess && st->sess->model && *st->sess->model) ? st->sess->model : "?";
-    const char *effort = st->sess ? st->sess->effort : NULL;
+    agent_session_resync_effort(state->session, state->provider, NULL);
+    const char *provider_name =
+        (state->provider && state->provider->name) ? state->provider->name : "?";
+    const char *model = (state->session && state->session->model && *state->session->model)
+                            ? state->session->model
+                            : "?";
+    const char *effort = state->session ? state->session->effort : NULL;
     if (effort && *effort)
-        snprintf(row, sizeof(row), "%s · %s · %s", prov, model, effort);
+        snprintf(row, sizeof(row), "%s · %s · %s", provider_name, model, effort);
     else
-        snprintf(row, sizeof(row), "%s · %s", prov, model);
+        snprintf(row, sizeof(row), "%s · %s", provider_name, model);
     session_row("provider", row);
 
     /* Two counts per the project glossary: user turns (prompts) and
      * requests (model round-trips — each resends the full context, which
      * is what makes the tokens-total sums below grow). */
-    snprintf(row, sizeof(row), "%ld", t->turns);
+    snprintf(row, sizeof(row), "%ld", stats->user_turns);
     session_row("user turns", row);
 
-    snprintf(row, sizeof(row), "%ld", t->requests);
+    snprintf(row, sizeof(row), "%ld", stats->requests);
     session_row("requests", row);
 
-    if (t->tool_calls > 0) {
-        int len = snprintf(row, sizeof(row), "%ld", t->tool_calls);
-        for (size_t i = 0; i < SESSION_STATS_MAX_TOOLS && t->tools[i].name; i++) {
-            if (len < 0 || (size_t)len >= sizeof(row))
+    if (stats->tool_calls > 0) {
+        int row_length = snprintf(row, sizeof(row), "%ld", stats->tool_calls);
+        for (size_t i = 0; i < SESSION_STATS_MAX_TOOLS && stats->tools[i].name; i++) {
+            if (row_length < 0 || (size_t)row_length >= sizeof(row))
                 break;
-            len += snprintf(row + len, sizeof(row) - (size_t)len, " · %s %ld", t->tools[i].name,
-                            t->tools[i].count);
+            row_length += snprintf(row + row_length, sizeof(row) - (size_t)row_length, " · %s %ld",
+                                   stats->tools[i].name, stats->tools[i].count);
         }
         session_row("tool calls", row);
     }
 
-    format_duration(a, sizeof(a), t->worked_ms);
-    session_row("time worked", a);
+    format_duration(formatted, sizeof(formatted), stats->worked_ms);
+    session_row("time worked", formatted);
 
     /* Two distinct frames, one row each. `context` is window state — the
      * latest response's usage, matching the per-turn stats line. `tokens
      * total` is the billing frame — sums across every round-trip (each of
      * which resends the full context), so summed input outgrows `context`
      * as soon as a second request happens. */
-    if (t->last_ctx > 0) {
-        format_context(row, sizeof(row), t->last_ctx, t->last_limit);
+    if (stats->latest_context_tokens > 0) {
+        format_context(row, sizeof(row), stats->latest_context_tokens, stats->context_limit);
         session_row("context", row);
     }
 
@@ -676,32 +682,34 @@ static void slash_run_session(struct slash_ctx *ctx)
      * per-record rate estimates (agent_spend_split), marked "~" because no
      * backend decomposes what it billed — even where the spend row below
      * is an exact reported charge. */
-    if (t->input_tokens > 0 || t->output_tokens > 0) {
+    if (stats->input_tokens > 0 || stats->output_tokens > 0) {
         struct catalog_split split;
-        int have_split = agent_spend_split(&t->spend, &split);
-        long cr = t->cached_tokens > 0 ? t->cached_tokens : 0;
-        long cw = t->cache_write_tokens > 0 ? t->cache_write_tokens : 0;
-        int len = 0;
-        len = session_tok_seg(row, sizeof(row), len, "in", t->uncached_tokens,
-                              have_split ? split.in : -1);
-        if (cr > 0)
-            len = session_tok_seg(row, sizeof(row), len, "cache", cr,
-                                  have_split ? split.cache_read : -1);
-        if (cw > 0)
-            len = session_tok_seg(row, sizeof(row), len, "write", cw,
-                                  have_split ? split.cache_write : -1);
-        session_tok_seg(row, sizeof(row), len, "out", t->output_tokens,
-                        have_split ? split.out : -1);
+        int split_available = agent_spend_split(&stats->spend, &split);
+        long cached_tokens = stats->cached_tokens > 0 ? stats->cached_tokens : 0;
+        long cache_write_tokens = stats->cache_write_tokens > 0 ? stats->cache_write_tokens : 0;
+        int row_length = 0;
+        row_length =
+            append_token_segment(row, sizeof(row), row_length, "in", stats->uncached_input_tokens,
+                                 split_available ? split.in : -1);
+        if (cached_tokens > 0)
+            row_length = append_token_segment(row, sizeof(row), row_length, "cache", cached_tokens,
+                                              split_available ? split.cache_read : -1);
+        if (cache_write_tokens > 0)
+            row_length =
+                append_token_segment(row, sizeof(row), row_length, "write", cache_write_tokens,
+                                     split_available ? split.cache_write : -1);
+        append_token_segment(row, sizeof(row), row_length, "out", stats->output_tokens,
+                             split_available ? split.out : -1);
         session_row("tokens total", row);
     }
 
     /* Reported cost plus the catalog estimate for unreported responses,
      * same figure the per-turn stats line shows; "~" marks an estimate. */
-    int approx = 0;
-    double spend = agent_session_spend(t, &approx);
+    int estimated = 0;
+    double spend = agent_session_spend(stats, &estimated);
     if (spend > 0) {
-        format_cost(a, sizeof(a), spend);
-        snprintf(row, sizeof(row), "%s%s", approx ? "~" : "", a);
+        format_cost(formatted, sizeof(formatted), spend);
+        snprintf(row, sizeof(row), "%s%s", estimated ? "~" : "", formatted);
         session_row("spend", row);
     }
 }
@@ -710,21 +718,17 @@ static void slash_run_session(struct slash_ctx *ctx)
 
 static void slash_run_usage(struct slash_ctx *ctx)
 {
-    /* Cast away const: provider methods (stream, query_usage, destroy)
-     * all take a writable `struct provider *` since they may mutate
-     * adapter state. agent_state holds a const pointer because most
-     * commands only need read-only fields (->name, ->default_model);
-     * this is the one place we hand the object to a method. */
-    struct provider *p = (struct provider *)ctx->state->provider;
-    if (!p) {
+    struct provider *provider = ctx->state->provider;
+    if (!provider) {
         ui_note("no provider selected — use /provider to choose one first");
         return;
     }
-    if (!p->query_usage) {
-        ui_note("/usage is not supported by the %s provider", p->name ? p->name : "?");
+    if (!provider->query_usage) {
+        ui_note("/usage is not supported by the %s provider",
+                provider->name ? provider->name : "?");
         return;
     }
-    p->query_usage(p);
+    provider->query_usage(provider);
 }
 
 /* ---------- /help ---------- */

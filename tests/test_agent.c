@@ -16,19 +16,7 @@
 #include "render/render_ctx.h"
 #include "util.h"
 
-/* Tests for agent.c's settings-change confirmation: agent_apply_settings
- * prints a fresh banner while the conversation is empty (the startup
- * banner right above would otherwise keep asserting the old settings)
- * and the dim "switched to" marker once history exists (a banner there
- * would falsely imply a reset).
- *
- * Unlike test_slash.c, this binary deliberately links the real agent.o
- * (hax_dep's lazy archive pulls its closure in), so no tool or banner
- * stubs: the real TOOL_* symbols come along via agent_core's TOOLS[]. */
-
-/* Redirect stdout to a temp file so we can inspect what the call printed.
- * Same pattern as test_slash.c. Returns the captured bytes (caller frees)
- * and restores stdout. */
+/* Run `body` with captured stdout, restore stdout, and return owned output. */
 static char *capture_stdout(void (*body)(void *), void *user)
 {
     fflush(stdout);
@@ -59,18 +47,14 @@ static char *capture_stdout(void (*body)(void *), void *user)
 
 /* ---------- agent_apply_settings: banner / marker split ---------- */
 
-/* The fixture pins every input agent_apply_settings resolves from:
- * HAX_MODEL (env tier — shadows any real config/state.json on the
- * machine running the tests) and a provider without an effort ladder,
- * so resolve_effort is deterministically NULL. tlog/slog stay
- * NULL — both log layers are NULL-safe by contract. */
+/* Environment overrides isolate settings resolution from the user's configuration. */
 struct fixture {
-    struct provider p;
-    struct agent_session sess;
-    struct render_ctx r;
-    struct agent_state st;
+    struct provider provider;
+    struct agent_session session;
+    struct render_ctx render;
+    struct agent_state state;
     struct provider *candidate;
-    int rc;
+    int result;
 };
 
 static void fixture_init(struct fixture *f)
@@ -92,17 +76,17 @@ static void fixture_init(struct fixture *f)
     unsetenv("HAX_EFFORT");
 
     memset(f, 0, sizeof(*f));
-    f->p.name = "prov-x";
+    f->provider.name = "prov-x";
     struct hax_opts opts = {0};
-    agent_session_init(&f->sess, &f->p, &opts);
+    agent_session_init(&f->session, &f->provider, &opts);
 
     /* Model the dispatcher's state at the point select.c calls apply:
      * the leading-gap separator has run, cursor on a blank line. */
-    f->r.disp.trail = 2;
-    f->st.sess = &f->sess;
-    f->st.provider = &f->p;
-    f->st.r = &f->r;
-    f->candidate = &f->p;
+    f->render.disp.trail = 2;
+    f->state.session = &f->session;
+    f->state.provider = &f->provider;
+    f->state.render = &f->render;
+    f->candidate = &f->provider;
 }
 
 static void fixture_free(struct fixture *f)
@@ -111,10 +95,10 @@ static void fixture_free(struct fixture *f)
      * teardown: agent_apply_settings may have started a metadata fetch on
      * whichever provider ended up live, and provider.h puts the release in
      * destroy(). The fixtures have no destroy of their own. */
-    model_meta_release(&f->p);
-    if (f->st.provider && f->st.provider != &f->p)
-        model_meta_release((struct provider *)f->st.provider);
-    agent_session_free(&f->sess);
+    model_meta_release(&f->provider);
+    if (f->state.provider && f->state.provider != &f->provider)
+        model_meta_release(f->state.provider);
+    agent_session_free(&f->session);
     unsetenv("HAX_MODEL");
     unsetenv("HAX_SYSTEM_PROMPT");
     unsetenv("HAX_NO_ENV");
@@ -124,27 +108,25 @@ static void fixture_free(struct fixture *f)
 static void do_apply(void *user)
 {
     struct fixture *f = user;
-    f->rc = agent_apply_settings(&f->st, f->candidate, 1);
+    f->result = agent_apply_settings(&f->state, f->candidate, 1);
 }
 
 static void test_apply_settings_empty_reprints_banner(void)
 {
     struct fixture f;
     fixture_init(&f);
-    EXPECT(f.sess.n_items == 0);
+    EXPECT(f.session.n_items == 0);
 
     char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.rc == 0);
-    /* The full two-row banner, carrying the new identity... */
+    EXPECT(f.result == 0);
     EXPECT(strstr(out, "hax") != NULL);
     EXPECT(strstr(out, "prov-x · model-a") != NULL);
     EXPECT(strstr(out, "ctrl-d quit") != NULL);
-    /* ...instead of the mid-conversation marker. */
     EXPECT(strstr(out, "switched to") == NULL);
     /* The banner bypasses disp, so the branch must resync the trail to
      * the fresh line its raw output ended on — otherwise the pre-prompt
      * separator would trust the stale pre-banner value. */
-    EXPECT(f.r.disp.trail == 1);
+    EXPECT(f.render.disp.trail == 1);
 
     free(out);
     fixture_free(&f);
@@ -154,17 +136,17 @@ static void test_apply_settings_nonempty_prints_marker(void)
 {
     struct fixture f;
     fixture_init(&f);
-    agent_session_add_user(&f.sess, "hello");
-    EXPECT(f.sess.n_items > 0);
+    agent_session_add_user(&f.session, "hello");
+    EXPECT(f.session.n_items > 0);
 
     char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.rc == 0);
+    EXPECT(f.result == 0);
     EXPECT(strstr(out, "switched to prov-x · model-a") != NULL);
     EXPECT(strstr(out, "ctrl-d quit") == NULL);
     /* The marker drives disp itself, so its trailing newline is held
      * (deferred), not committed — no manual trail resync involved. */
-    EXPECT(f.r.disp.trail == 0);
-    EXPECT(f.r.disp.held == 1);
+    EXPECT(f.render.disp.trail == 0);
+    EXPECT(f.render.disp.held == 1);
 
     free(out);
     fixture_free(&f);
@@ -173,7 +155,7 @@ static void test_apply_settings_nonempty_prints_marker(void)
 static void do_apply_quiet(void *user)
 {
     struct fixture *f = user;
-    f->rc = agent_apply_settings(&f->st, f->candidate, 0);
+    f->result = agent_apply_settings(&f->state, f->candidate, 0);
 }
 
 static void test_apply_settings_quiet_prints_nothing(void)
@@ -185,17 +167,17 @@ static void test_apply_settings_quiet_prints_nothing(void)
      * it, so the banner that follows draws into the same gap. */
     struct fixture f;
     fixture_init(&f);
-    agent_session_add_user(&f.sess, "hello");
-    EXPECT(f.sess.n_items > 0);
+    agent_session_add_user(&f.session, "hello");
+    EXPECT(f.session.n_items > 0);
     setenv("HAX_MODEL", "model-b", 1); /* the change the silent apply resolves */
 
     char *out = capture_stdout(do_apply_quiet, &f);
-    EXPECT(f.rc == 0);
+    EXPECT(f.result == 0);
     EXPECT_STR_EQ(out, "");
     /* Silence is about output, not effect. */
-    EXPECT_STR_EQ(f.sess.model, "model-b");
-    EXPECT(f.r.disp.trail == 2);
-    EXPECT(f.r.disp.held == 0);
+    EXPECT_STR_EQ(f.session.model, "model-b");
+    EXPECT(f.render.disp.trail == 2);
+    EXPECT(f.render.disp.held == 0);
 
     free(out);
     fixture_free(&f);
@@ -205,9 +187,9 @@ static void test_apply_settings_no_model_fails_intact(void)
 {
     struct fixture f;
     fixture_init(&f);
-    agent_session_add_user(&f.sess, "hello");
-    size_t items_before = f.sess.n_items;
-    char *model_before = xstrdup(f.sess.model);
+    agent_session_add_user(&f.session, "hello");
+    size_t items_before = f.session.n_items;
+    char *model_before = xstrdup(f.session.model);
 
     /* Pull the model out from under the next resolve: no env value and no
      * provider default. reconfigure must fail without touching history or
@@ -215,12 +197,12 @@ static void test_apply_settings_no_model_fails_intact(void)
      * model available" diagnostic goes to stderr and shows in the test
      * log — expected, not a failure.) */
     unsetenv("HAX_MODEL");
-    f.p.default_model = NULL;
+    f.provider.default_model = NULL;
 
     char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.rc == -1);
-    EXPECT(f.sess.n_items == items_before);
-    EXPECT_STR_EQ(f.sess.model, model_before);
+    EXPECT(f.result == -1);
+    EXPECT(f.session.n_items == items_before);
+    EXPECT_STR_EQ(f.session.model, model_before);
     EXPECT(strstr(out, "switched to") == NULL);
     EXPECT(strstr(out, "ctrl-d quit") == NULL);
 
@@ -258,16 +240,16 @@ static void test_apply_settings_failed_provider_change_keeps_old(void)
     struct fixture f;
     fixture_init(&f);
     unsetenv("HAX_MODEL");
-    f.p.destroy = counting_provider_destroy;
+    f.provider.destroy = counting_provider_destroy;
     struct provider next = {.name = "prov-y"};
     f.candidate = &next;
     provider_destroy_calls = 0;
 
     char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.rc == -1);
-    EXPECT(f.st.provider == &f.p);
+    EXPECT(f.result == -1);
+    EXPECT(f.state.provider == &f.provider);
     EXPECT(provider_destroy_calls == 0);
-    EXPECT_STR_EQ(f.sess.provider_name, "prov-x");
+    EXPECT_STR_EQ(f.session.provider_name, "prov-x");
     EXPECT(out[0] == '\0');
 
     free(out);
@@ -278,21 +260,21 @@ static void test_apply_settings_refreshes_on_model_or_provider_change(void)
 {
     struct fixture f;
     fixture_init(&f);
-    f.p.probe_model = counting_probe_model;
+    f.provider.probe_model = counting_probe_model;
     refresh_calls = 0;
 
     /* Same model re-applied (the /effort-tweak shape): the metadata fetch
      * must not re-run — re-probing on every apply would add a needless
      * network round-trip and cancel/join churn. */
     char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.rc == 0);
+    EXPECT(f.result == 0);
     EXPECT(refresh_calls == 0);
     free(out);
 
     /* A real model change re-probes, with the new model. */
     setenv("HAX_MODEL", "model-b", 1);
     out = capture_stdout(do_apply, &f);
-    EXPECT(f.rc == 0);
+    EXPECT(f.result == 0);
     EXPECT(refresh_calls == 1);
     EXPECT_STR_EQ(refresh_last_model, "model-b");
     free(out);
@@ -305,13 +287,13 @@ static void test_apply_settings_refreshes_on_model_or_provider_change(void)
         .name = "prov-y",
         .probe_model = counting_probe_model,
     };
-    f.p.destroy = counting_provider_destroy;
+    f.provider.destroy = counting_provider_destroy;
     f.candidate = &next;
     refresh_calls = 0;
     provider_destroy_calls = 0;
     out = capture_stdout(do_apply, &f);
-    EXPECT(f.rc == 0);
-    EXPECT(f.st.provider == &next);
+    EXPECT(f.result == 0);
+    EXPECT(f.state.provider == &next);
     EXPECT(provider_destroy_calls == 1);
     EXPECT(refresh_calls == 1);
     EXPECT_STR_EQ(refresh_last_model, "model-b");
@@ -339,15 +321,15 @@ static void test_resync_effort_follows_late_metadata(void)
 {
     struct fixture f;
     fixture_init(&f);
-    f.p.list_efforts = resync_list_efforts;
+    f.provider.list_efforts = resync_list_efforts;
     setenv("HAX_EFFORT", "max", 1);
 
     /* Where a run starts: a ladder, nothing narrowing it, so the configured
      * level stands. */
-    EXPECT(agent_session_resync_effort(&f.sess, &f.p, NULL) == 1);
-    EXPECT_STR_EQ(f.sess.effort, "max");
+    EXPECT(agent_session_resync_effort(&f.session, &f.provider, NULL) == 1);
+    EXPECT_STR_EQ(f.session.effort, "max");
     char *prev = (char *)"sentinel";
-    EXPECT(agent_session_resync_effort(&f.sess, &f.p, &prev) == 0);
+    EXPECT(agent_session_resync_effort(&f.session, &f.provider, &prev) == 0);
     EXPECT(prev == NULL); /* nothing replaced, nothing handed back */
 
     /* What a landing probe publishes: this model stops at "high". */
@@ -357,16 +339,16 @@ static void test_resync_effort_follows_late_metadata(void)
     effort_set_add(&m.efforts, "low");
     effort_set_add(&m.efforts, "medium");
     effort_set_add(&m.efforts, "high");
-    model_meta_remember(&f.p, &m);
+    model_meta_remember(&f.provider, &m);
     model_info_clear(&m);
 
     /* The replaced value comes back for the note the REPL prints: the
      * banner overhead is still asserting it. */
-    EXPECT(agent_session_resync_effort(&f.sess, &f.p, &prev) == 1);
-    EXPECT_STR_EQ(f.sess.effort, "high");
+    EXPECT(agent_session_resync_effort(&f.session, &f.provider, &prev) == 1);
+    EXPECT_STR_EQ(f.session.effort, "high");
     EXPECT_STR_EQ(prev, "max");
     free(prev);
-    EXPECT(agent_session_resync_effort(&f.sess, &f.p, NULL) == 0);
+    EXPECT(agent_session_resync_effort(&f.session, &f.provider, NULL) == 0);
 
     unsetenv("HAX_EFFORT");
     fixture_free(&f);
@@ -396,20 +378,20 @@ static void test_apply_settings_keeps_stamped_spend(void)
               cf);
         fclose(cf);
     }
-    f.p.catalog_id = "prov";
+    f.provider.catalog_id = "prov";
     struct stream_usage u = {.input_tokens = 1000000,
                              .output_tokens = 1000000,
                              .cached_tokens = -1,
                              .cache_write_tokens = -1,
                              .cache_write_1h_tokens = -1,
                              .cost = -1};
-    agent_spend_account(&f.st.stats.spend, &u, &f.p, "model-a");
+    agent_spend_account(&f.state.stats.spend, &u, &f.provider, "model-a");
 
     setenv("HAX_MODEL", "model-b", 1); /* model-a -> model-b */
     char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.rc == 0);
+    EXPECT(f.result == 0);
     int approx = 0;
-    EXPECT(agent_session_spend(&f.st.stats, &approx) == 10.0); /* 1M*$2 + 1M*$8 per Mtok */
+    EXPECT(agent_session_spend(&f.state.stats, &approx) == 10.0); /* 1M*$2 + 1M*$8 per Mtok */
     EXPECT(approx == 1);
     free(out);
 
@@ -417,14 +399,14 @@ static void test_apply_settings_keeps_stamped_spend(void)
      * unknown model) leaves the total at the reported subtotal, marked
      * approximate — it's missing real usage. */
     struct provider nowhere = {.catalog_id = "no-such-catalog-provider"};
-    agent_spend_account(&f.st.stats.spend, &u, &nowhere, "model-x");
+    agent_spend_account(&f.state.stats.spend, &u, &nowhere, "model-x");
     struct stream_usage paid = {-1, -1, -1, -1, -1, 0.03};
-    agent_spend_account(&f.st.stats.spend, &paid, &f.p, "model-a");
+    agent_spend_account(&f.state.stats.spend, &paid, &f.provider, "model-a");
     approx = 0;
-    EXPECT(agent_session_spend(&f.st.stats, &approx) == 10.03);
+    EXPECT(agent_session_spend(&f.state.stats, &approx) == 10.03);
     EXPECT(approx == 1);
 
-    agent_spend_free(&f.st.stats.spend);
+    agent_spend_free(&f.state.stats.spend);
     fixture_free(&f);
 }
 
@@ -433,7 +415,7 @@ static void test_apply_settings_keeps_stamped_spend(void)
 static void do_new_conversation(void *user)
 {
     struct fixture *f = user;
-    agent_new_conversation(&f->st);
+    agent_new_conversation(&f->state);
 }
 
 static void test_new_conversation_resets_everything(void)
@@ -442,16 +424,16 @@ static void test_new_conversation_resets_everything(void)
     fixture_init(&f);
 
     /* Seed every per-conversation accumulator /new promises to clear. */
-    agent_session_add_user(&f.sess, "hello");
-    f.st.stats.turns = 3;
-    f.st.stats.requests = 7;
-    f.st.stats.input_tokens = 1000;
-    f.st.stats.tool_calls = 2;
+    agent_session_add_user(&f.session, "hello");
+    f.state.stats.user_turns = 3;
+    f.state.stats.requests = 7;
+    f.state.stats.input_tokens = 1000;
+    f.state.stats.tool_calls = 2;
 
     char *out = capture_stdout(do_new_conversation, &f);
-    EXPECT(f.sess.n_items == 0);
+    EXPECT(f.session.n_items == 0);
     struct session_stats zero = {0};
-    EXPECT(memcmp(&f.st.stats, &zero, sizeof(zero)) == 0);
+    EXPECT(memcmp(&f.state.stats, &zero, sizeof(zero)) == 0);
     /* The fresh start is announced with the same banner as startup. */
     EXPECT(strstr(out, "prov-x · model-a") != NULL);
     EXPECT(strstr(out, "ctrl-d quit") != NULL);
@@ -467,19 +449,19 @@ static void test_new_conversation_resets_everything(void)
  * pin the fallback logic (which hint, which label), not exact wording. */
 
 struct banner_call {
-    const struct provider *p;
-    const struct agent_session *s;
+    const struct provider *provider;
+    const struct agent_session *session;
 };
 
 static void do_banner(void *user)
 {
     struct banner_call *c = user;
-    agent_print_banner(c->p, c->s);
+    agent_print_banner(c->provider, c->session);
 }
 
 static void test_banner_no_provider_points_at_picker(void)
 {
-    struct banner_call c = {.p = NULL, .s = NULL};
+    struct banner_call c = {.provider = NULL, .session = NULL};
     char *out = capture_stdout(do_banner, &c);
     EXPECT(strstr(out, "/provider") != NULL);
     EXPECT(strstr(out, "ctrl-d quit") != NULL);
@@ -490,7 +472,7 @@ static void test_banner_no_model_points_at_picker(void)
 {
     struct provider p = {.name = "prov-x"};
     struct agent_session s = {0};
-    struct banner_call c = {.p = &p, .s = &s};
+    struct banner_call c = {.provider = &p, .session = &s};
     char *out = capture_stdout(do_banner, &c);
     EXPECT(strstr(out, "prov-x") != NULL);
     EXPECT(strstr(out, "/model") != NULL);
@@ -505,7 +487,7 @@ static void test_banner_prefers_label_and_appends_effort(void)
         .model_label = "short-name",
         .effort = "high",
     };
-    struct banner_call c = {.p = &p, .s = &s};
+    struct banner_call c = {.provider = &p, .session = &s};
     char *out = capture_stdout(do_banner, &c);
     EXPECT(strstr(out, "prov-x · short-name · high") != NULL);
     EXPECT(strstr(out, "long-file-name") == NULL);
@@ -514,56 +496,50 @@ static void test_banner_prefers_label_and_appends_effort(void)
 
 /* ---------- agent_undo / agent_fork: the real mutators ---------- */
 
-/* These exercise the composition test_session.c can't reach: the in-memory
- * cut, the session-log swap, pending_recall capture, and failure atomicity,
- * all driven through the live agent.o. replay_user_turn no-ops off a tty (as
- * here), so the assertions pin state, not the replayed rule; ui_error prints
- * to stdout regardless, so the failure paths check the message too. */
-
-static void add_turn(struct agent_session *s, const char *prompt, const char *reply)
+static void add_turn(struct agent_session *session, const char *prompt, const char *reply)
 {
-    agent_session_add_user(s, prompt); /* boundary + user */
-    agent_session_append(s, (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup(reply)});
+    agent_session_add_user(session, prompt);
+    agent_session_append(session,
+                         (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup(reply)});
 }
 
-/* Fresh, isolated per-cwd session tree, with recording enabled. */
 static void set_state_dir(void)
 {
     setenv("XDG_STATE_HOME", t_tempdir(), 1);
     unsetenv("HAX_NO_SESSION");
 }
 
-static size_t count_users(const struct item *items, size_t n)
+static size_t count_users(const struct item *items, size_t item_count)
 {
-    size_t c = 0;
-    for (size_t i = 0; i < n; i++)
+    size_t user_count = 0;
+    for (size_t i = 0; i < item_count; i++)
         if (items[i].kind == ITEM_USER_MESSAGE && items[i].origin != ITEM_ORIGIN_COMPACT_SEED)
-            c++;
-    return c;
+            user_count++;
+    return user_count;
 }
 
-static void free_items(struct item *items, size_t n)
+static void free_items(struct item *items, size_t item_count)
 {
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < item_count; i++)
         item_free(&items[i]);
     free(items);
 }
 
-struct mut_call {
-    struct agent_state *st;
-    size_t turn;
+struct history_mutation_call {
+    struct agent_state *state;
+    size_t turn_index;
 };
 
 static void do_undo(void *user)
 {
-    struct mut_call *c = user;
-    agent_undo(c->st, c->turn);
+    struct history_mutation_call *c = user;
+    agent_undo(c->state, c->turn_index);
 }
 
 static void do_fork(void *user)
 {
-    struct mut_call *c = user;
-    agent_fork(c->st, c->turn);
+    struct history_mutation_call *c = user;
+    agent_fork(c->state, c->turn_index);
 }
 
 /* An empty send after a marked stop appends CONTINUE_MARKER as a user item,
@@ -574,22 +550,22 @@ static void test_continue_marker_is_not_a_user_turn(void)
 {
     struct fixture f;
     fixture_init(&f);
-    add_turn(&f.sess, "first", "r1");
-    agent_session_add_continuation(&f.sess);
+    add_turn(&f.session, "first", "r1");
+    agent_session_add_continuation(&f.session);
     agent_session_append(
-        &f.sess, (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("r1 continued")});
-    add_turn(&f.sess, "second", "r2");
+        &f.session, (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("r1 continued")});
+    add_turn(&f.session, "second", "r2");
 
-    EXPECT(agent_user_turn_count(&f.sess) == 2);
-    EXPECT_STR_EQ(agent_user_turn_text(&f.sess, 0), "first");
-    EXPECT_STR_EQ(agent_user_turn_text(&f.sess, 1), "second");
+    EXPECT(agent_user_turn_count(&f.session) == 2);
+    EXPECT_STR_EQ(agent_user_turn_text(&f.session, 0), "first");
+    EXPECT_STR_EQ(agent_user_turn_text(&f.session, 1), "second");
 
     /* The same text typed by hand is a prompt like any other — provenance is
      * the item's flag, not its bytes, so a user who writes "[continue]" gets a
      * turn they can /undo back to. */
-    agent_session_add_user(&f.sess, CONTINUE_MARKER);
-    EXPECT(agent_user_turn_count(&f.sess) == 3);
-    EXPECT_STR_EQ(agent_user_turn_text(&f.sess, 2), CONTINUE_MARKER);
+    agent_session_add_user(&f.session, CONTINUE_MARKER);
+    EXPECT(agent_user_turn_count(&f.session) == 3);
+    EXPECT_STR_EQ(agent_user_turn_text(&f.session, 2), CONTINUE_MARKER);
     fixture_free(&f);
 }
 
@@ -598,24 +574,24 @@ static void test_undo_reverts_history_and_file(void)
     set_state_dir();
     struct fixture f;
     fixture_init(&f);
-    add_turn(&f.sess, "first", "r1");
-    add_turn(&f.sess, "second", "r2");
-    add_turn(&f.sess, "third", "r3");
+    add_turn(&f.session, "first", "r1");
+    add_turn(&f.session, "second", "r2");
+    add_turn(&f.session, "third", "r3");
 
-    f.st.slog = session_log_open("prov-x", "model-a", NULL, NULL);
-    EXPECT(f.st.slog != NULL);
-    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
-    char *path = xstrdup(session_log_path(f.st.slog));
-    EXPECT(agent_user_turn_count(&f.sess) == 3);
+    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL);
+    EXPECT(f.state.session_log != NULL);
+    session_log_append(f.state.session_log, f.session.items, f.session.n_items);
+    char *path = xstrdup(session_log_path(f.state.session_log));
+    EXPECT(agent_user_turn_count(&f.session) == 3);
 
     /* Revert to before turn 1: turn 0 survives, turns 1 and 2 drop. */
-    struct mut_call c = {.st = &f.st, .turn = 1};
+    struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
     char *out = capture_stdout(do_undo, &c);
 
-    EXPECT(agent_user_turn_count(&f.sess) == 1);
-    EXPECT_STR_EQ(agent_user_turn_text(&f.sess, 0), "first");
+    EXPECT(agent_user_turn_count(&f.session) == 1);
+    EXPECT_STR_EQ(agent_user_turn_text(&f.session, 0), "first");
     /* The discarded prompt is staged for editor recall. */
-    EXPECT_STR_EQ(f.st.pending_recall, "second");
+    EXPECT_STR_EQ(f.state.pending_recall, "second");
 
     /* The truncation reached disk: reloading shows only turn 0. */
     struct item *items;
@@ -626,9 +602,9 @@ static void test_undo_reverts_history_and_file(void)
 
     free(out);
     free(path);
-    free(f.st.pending_recall);
-    session_log_close(f.st.slog);
-    agent_session_free(&f.sess);
+    free(f.state.pending_recall);
+    session_log_close(f.state.session_log);
+    agent_session_free(&f.session);
     unsetenv("HAX_MODEL");
     unsetenv("HAX_SYSTEM_PROMPT");
     unsetenv("HAX_NO_ENV");
@@ -646,25 +622,25 @@ static void test_undo_with_continuation_cuts_disk_and_memory_alike(void)
     set_state_dir();
     struct fixture f;
     fixture_init(&f);
-    add_turn(&f.sess, "first", "r1");
+    add_turn(&f.session, "first", "r1");
     /* An interrupted first turn resumed by an empty send. */
-    agent_session_add_continuation(&f.sess);
+    agent_session_add_continuation(&f.session);
     agent_session_append(
-        &f.sess, (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("r1 continued")});
-    add_turn(&f.sess, "second", "r2");
+        &f.session, (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("r1 continued")});
+    add_turn(&f.session, "second", "r2");
 
-    f.st.slog = session_log_open("prov-x", "model-a", NULL, NULL);
-    EXPECT(f.st.slog != NULL);
-    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
-    char *path = xstrdup(session_log_path(f.st.slog));
-    EXPECT(agent_user_turn_count(&f.sess) == 2);
+    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL);
+    EXPECT(f.state.session_log != NULL);
+    session_log_append(f.state.session_log, f.session.items, f.session.n_items);
+    char *path = xstrdup(session_log_path(f.state.session_log));
+    EXPECT(agent_user_turn_count(&f.session) == 2);
 
     /* Revert to before "second": the whole first turn, continuation included,
      * survives in memory... */
-    struct mut_call c = {.st = &f.st, .turn = 1};
+    struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
     char *out = capture_stdout(do_undo, &c);
-    EXPECT(agent_user_turn_count(&f.sess) == 1);
-    size_t kept = f.sess.n_items;
+    EXPECT(agent_user_turn_count(&f.session) == 1);
+    size_t kept = f.session.n_items;
 
     /* ...and on disk, item for item. */
     struct item *items;
@@ -680,17 +656,17 @@ static void test_undo_with_continuation_cuts_disk_and_memory_alike(void)
 
     /* A later append lands after the retained tail rather than overwriting
      * it: n_written must match what the file actually holds. */
-    add_turn(&f.sess, "third", "r3");
-    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
+    add_turn(&f.session, "third", "r3");
+    session_log_append(f.state.session_log, f.session.items, f.session.n_items);
     EXPECT(session_load(path, &items, &n, NULL) == 0);
-    EXPECT(n == f.sess.n_items);
+    EXPECT(n == f.session.n_items);
     free_items(items, n);
 
     free(out);
     free(path);
-    free(f.st.pending_recall);
-    session_log_close(f.st.slog);
-    agent_session_free(&f.sess);
+    free(f.state.pending_recall);
+    session_log_close(f.state.session_log);
+    agent_session_free(&f.session);
     unsetenv("HAX_MODEL");
     unsetenv("HAX_SYSTEM_PROMPT");
     unsetenv("HAX_NO_ENV");
@@ -702,24 +678,24 @@ static void test_fork_branches_and_switches_log(void)
     set_state_dir();
     struct fixture f;
     fixture_init(&f);
-    add_turn(&f.sess, "first", "r1");
-    add_turn(&f.sess, "second", "r2");
-    add_turn(&f.sess, "third", "r3");
+    add_turn(&f.session, "first", "r1");
+    add_turn(&f.session, "second", "r2");
+    add_turn(&f.session, "third", "r3");
 
-    f.st.slog = session_log_open("prov-x", "model-a", NULL, NULL);
-    EXPECT(f.st.slog != NULL);
-    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
-    char *orig = xstrdup(session_log_path(f.st.slog));
+    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL);
+    EXPECT(f.state.session_log != NULL);
+    session_log_append(f.state.session_log, f.session.items, f.session.n_items);
+    char *orig = xstrdup(session_log_path(f.state.session_log));
 
-    struct mut_call c = {.st = &f.st, .turn = 1};
+    struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
     char *out = capture_stdout(do_fork, &c);
 
     /* History cut to the branch point, discarded prompt staged. */
-    EXPECT(agent_user_turn_count(&f.sess) == 1);
-    EXPECT_STR_EQ(f.st.pending_recall, "second");
+    EXPECT(agent_user_turn_count(&f.session) == 1);
+    EXPECT_STR_EQ(f.state.pending_recall, "second");
 
     /* The live log moved to a new file... */
-    const char *newpath = session_log_path(f.st.slog);
+    const char *newpath = session_log_path(f.state.session_log);
     EXPECT(newpath != NULL);
     EXPECT(strcmp(newpath, orig) != 0);
 
@@ -739,9 +715,9 @@ static void test_fork_branches_and_switches_log(void)
 
     free(out);
     free(orig);
-    free(f.st.pending_recall);
-    session_log_close(f.st.slog);
-    agent_session_free(&f.sess);
+    free(f.state.pending_recall);
+    session_log_close(f.state.session_log);
+    agent_session_free(&f.session);
     unsetenv("HAX_MODEL");
     unsetenv("HAX_SYSTEM_PROMPT");
     unsetenv("HAX_NO_ENV");
@@ -753,23 +729,23 @@ static void test_fork_at_tip_clones_whole(void)
     set_state_dir();
     struct fixture f;
     fixture_init(&f);
-    add_turn(&f.sess, "first", "r1");
-    add_turn(&f.sess, "second", "r2");
+    add_turn(&f.session, "first", "r1");
+    add_turn(&f.session, "second", "r2");
 
-    f.st.slog = session_log_open("prov-x", "model-a", NULL, NULL);
-    EXPECT(f.st.slog != NULL);
-    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
-    char *orig = xstrdup(session_log_path(f.st.slog));
-    size_t items_before = f.sess.n_items;
+    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL);
+    EXPECT(f.state.session_log != NULL);
+    session_log_append(f.state.session_log, f.session.items, f.session.n_items);
+    char *orig = xstrdup(session_log_path(f.state.session_log));
+    size_t items_before = f.session.n_items;
 
     /* turn == count: clone at the tip, nothing discarded. */
-    struct mut_call c = {.st = &f.st, .turn = 2};
+    struct history_mutation_call c = {.state = &f.state, .turn_index = 2};
     char *out = capture_stdout(do_fork, &c);
 
-    EXPECT(f.sess.n_items == items_before);
-    EXPECT(f.st.pending_recall == NULL); /* no prompt discarded */
+    EXPECT(f.session.n_items == items_before);
+    EXPECT(f.state.pending_recall == NULL); /* no prompt discarded */
 
-    const char *newpath = session_log_path(f.st.slog);
+    const char *newpath = session_log_path(f.state.session_log);
     EXPECT(strcmp(newpath, orig) != 0);
     struct item *items;
     size_t n;
@@ -779,8 +755,8 @@ static void test_fork_at_tip_clones_whole(void)
 
     free(out);
     free(orig);
-    session_log_close(f.st.slog);
-    agent_session_free(&f.sess);
+    session_log_close(f.state.session_log);
+    agent_session_free(&f.session);
     unsetenv("HAX_MODEL");
     unsetenv("HAX_SYSTEM_PROMPT");
     unsetenv("HAX_NO_ENV");
@@ -792,22 +768,22 @@ static void test_fork_without_recording_leaves_state(void)
     set_state_dir();
     struct fixture f;
     fixture_init(&f);
-    add_turn(&f.sess, "first", "r1");
-    add_turn(&f.sess, "second", "r2");
-    f.st.slog = NULL; /* recording off/unavailable: nothing to preserve */
-    size_t items_before = f.sess.n_items;
+    add_turn(&f.session, "first", "r1");
+    add_turn(&f.session, "second", "r2");
+    f.state.session_log = NULL; /* recording off/unavailable: nothing to preserve */
+    size_t items_before = f.session.n_items;
 
-    struct mut_call c = {.st = &f.st, .turn = 1};
+    struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
     char *out = capture_stdout(do_fork, &c);
 
     /* Refused, conversation fully intact. */
     EXPECT(strstr(out, "session recording") != NULL);
-    EXPECT(f.sess.n_items == items_before);
-    EXPECT(f.st.pending_recall == NULL);
-    EXPECT(f.st.slog == NULL);
+    EXPECT(f.session.n_items == items_before);
+    EXPECT(f.state.pending_recall == NULL);
+    EXPECT(f.state.session_log == NULL);
 
     free(out);
-    agent_session_free(&f.sess);
+    agent_session_free(&f.session);
     unsetenv("HAX_MODEL");
     unsetenv("HAX_SYSTEM_PROMPT");
     unsetenv("HAX_NO_ENV");
@@ -823,19 +799,19 @@ static void test_fork_records_live_selection(void)
     set_state_dir();
     struct fixture f;
     fixture_init(&f);
-    add_turn(&f.sess, "first", "r1");
-    add_turn(&f.sess, "second", "r2");
+    add_turn(&f.session, "first", "r1");
+    add_turn(&f.session, "second", "r2");
 
     /* The source file records an older selection than the live one
      * (prov-x · model-a, from the fixture). */
-    f.st.slog = session_log_open("old-prov", "old-model", "low", "old-stance");
-    EXPECT(f.st.slog != NULL);
-    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
-    char *orig = xstrdup(session_log_path(f.st.slog));
+    f.state.session_log = session_log_open("old-prov", "old-model", "low", "old-stance");
+    EXPECT(f.state.session_log != NULL);
+    session_log_append(f.state.session_log, f.session.items, f.session.n_items);
+    char *orig = xstrdup(session_log_path(f.state.session_log));
 
-    struct mut_call c = {.st = &f.st, .turn = 1};
+    struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
     char *out = capture_stdout(do_fork, &c);
-    char *branch = xstrdup(session_log_path(f.st.slog));
+    char *branch = xstrdup(session_log_path(f.state.session_log));
 
     /* Branching alone changes nothing on disk — the prefix is still all the
      * branch has produced. */
@@ -845,8 +821,8 @@ static void test_fork_records_live_selection(void)
     session_meta_free(&fm);
 
     /* The next turn is the run's, so it carries the run's selection. */
-    add_turn(&f.sess, "third", "r3");
-    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
+    add_turn(&f.session, "third", "r3");
+    session_log_append(f.state.session_log, f.session.items, f.session.n_items);
     EXPECT(session_read_meta(branch, &fm) == 0);
     EXPECT_STR_EQ(fm.provider, "prov-x");
     EXPECT_STR_EQ(fm.model, "model-a");
@@ -863,8 +839,8 @@ static void test_fork_records_live_selection(void)
 
     free(out);
     free(orig);
-    free(f.st.pending_recall);
-    session_log_close(f.st.slog);
+    free(f.state.pending_recall);
+    session_log_close(f.state.session_log);
     fixture_free(&f);
 }
 
@@ -878,13 +854,14 @@ static void test_session_records_provider_id(void)
     struct fixture f;
     fixture_init(&f); /* clears the env, so pin the id after it */
     setenv("HAX_PROVIDER", "prov-id", 1);
-    f.p.name = "Display Name"; /* what a provider_name override leaves behind */
-    add_turn(&f.sess, "first", "r1");
+    f.provider.name = "Display Name"; /* what a provider_name override leaves behind */
+    add_turn(&f.session, "first", "r1");
 
-    f.st.slog = session_log_open(agent_provider_id(&f.p), f.sess.model, NULL, NULL);
-    EXPECT(f.st.slog != NULL);
-    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
-    char *path = xstrdup(session_log_path(f.st.slog));
+    f.state.session_log =
+        session_log_open(agent_provider_id(&f.provider), f.session.model, NULL, NULL);
+    EXPECT(f.state.session_log != NULL);
+    session_log_append(f.state.session_log, f.session.items, f.session.n_items);
+    char *path = xstrdup(session_log_path(f.state.session_log));
 
     struct session_meta m;
     EXPECT(session_read_meta(path, &m) == 0);
@@ -892,7 +869,7 @@ static void test_session_records_provider_id(void)
     session_meta_free(&m);
 
     free(path);
-    session_log_close(f.st.slog);
+    session_log_close(f.state.session_log);
     fixture_free(&f);
     unsetenv("HAX_PROVIDER");
 }
@@ -904,16 +881,17 @@ static void test_apply_settings_records_switch(void)
     set_state_dir();
     struct fixture f;
     fixture_init(&f);
-    add_turn(&f.sess, "first", "r1");
+    add_turn(&f.session, "first", "r1");
 
-    f.st.slog = session_log_open("prov-x", "model-a", NULL, NULL);
-    EXPECT(f.st.slog != NULL);
-    session_log_append(f.st.slog, f.sess.items, f.sess.n_items); /* materializes it */
-    char *path = xstrdup(session_log_path(f.st.slog));
+    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL);
+    EXPECT(f.state.session_log != NULL);
+    session_log_append(f.state.session_log, f.session.items,
+                       f.session.n_items); /* materializes it */
+    char *path = xstrdup(session_log_path(f.state.session_log));
 
     setenv("HAX_MODEL", "model-b", 1);
     char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.rc == 0);
+    EXPECT(f.result == 0);
 
     /* A switch the user hasn't used yet stays out of the file. */
     struct session_meta m;
@@ -922,8 +900,8 @@ static void test_apply_settings_records_switch(void)
     session_meta_free(&m);
 
     /* The turn that follows it is recorded under it. */
-    add_turn(&f.sess, "second", "r2");
-    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
+    add_turn(&f.session, "second", "r2");
+    session_log_append(f.state.session_log, f.session.items, f.session.n_items);
     EXPECT(session_read_meta(path, &m) == 0);
     EXPECT_STR_EQ(m.provider, "prov-x");
     EXPECT_STR_EQ(m.model, "model-b"); /* the header still says model-a */
@@ -931,7 +909,7 @@ static void test_apply_settings_records_switch(void)
 
     free(out);
     free(path);
-    session_log_close(f.st.slog);
+    session_log_close(f.state.session_log);
     fixture_free(&f);
 }
 
@@ -940,29 +918,29 @@ static void test_undo_intact_when_truncate_fails(void)
     set_state_dir();
     struct fixture f;
     fixture_init(&f);
-    add_turn(&f.sess, "first", "r1");
-    add_turn(&f.sess, "second", "r2");
-    add_turn(&f.sess, "third", "r3");
+    add_turn(&f.session, "first", "r1");
+    add_turn(&f.session, "second", "r2");
+    add_turn(&f.session, "third", "r3");
 
-    f.st.slog = session_log_open("prov-x", "model-a", NULL, NULL);
-    EXPECT(f.st.slog != NULL);
-    session_log_append(f.st.slog, f.sess.items, f.sess.n_items);
-    size_t items_before = f.sess.n_items;
+    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL);
+    EXPECT(f.state.session_log != NULL);
+    session_log_append(f.state.session_log, f.session.items, f.session.n_items);
+    size_t items_before = f.session.n_items;
 
     /* Make the on-disk truncation fail: unlink the file so scan_turn_offset's
      * reopen can't find it. agent_undo must bail before touching memory. */
-    EXPECT(unlink(session_log_path(f.st.slog)) == 0);
+    EXPECT(unlink(session_log_path(f.state.session_log)) == 0);
 
-    struct mut_call c = {.st = &f.st, .turn = 1};
+    struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
     char *out = capture_stdout(do_undo, &c);
 
     EXPECT(strstr(out, "could not truncate") != NULL);
-    EXPECT(f.sess.n_items == items_before); /* history untouched */
-    EXPECT(f.st.pending_recall == NULL);
+    EXPECT(f.session.n_items == items_before); /* history untouched */
+    EXPECT(f.state.pending_recall == NULL);
 
     free(out);
-    session_log_close(f.st.slog);
-    agent_session_free(&f.sess);
+    session_log_close(f.state.session_log);
+    agent_session_free(&f.session);
     unsetenv("HAX_MODEL");
     unsetenv("HAX_SYSTEM_PROMPT");
     unsetenv("HAX_NO_ENV");

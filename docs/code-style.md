@@ -8,8 +8,9 @@ are for important information the code cannot express clearly.
 - Use the shortest name that is unambiguous in its scope. Include purpose, ownership, units, or
   state when relevant, but do not repeat context supplied by the containing function, type, or
   module. Prefer `window_rows`, `bytes_read`, and `timeout_ms` to `wh`, `r`, and `timeout`; avoid
-  names such as `bytes_read_from_child_process_pipe` when `bytes_read` is clear. Short conventional
-  names such as `i` are fine in small, obvious scopes.
+  names such as `bytes_read_from_child_process_pipe` when `bytes_read` is clear. Conventional names
+  such as `i`, `fd`, `buf`, and `ctx` are fine when their meaning is established by the type or API
+  and remains obvious throughout the scope; expand them when multiple instances or roles coexist.
 - Keep functions at one level of abstraction and control flow straightforward. Extract a named
   operation when that makes a commented block unnecessary; do not create trivial wrappers merely
   to avoid a comment.
@@ -30,7 +31,8 @@ A useful comment records something a maintainer needs for correctness but cannot
 - the intent behind an inherently subtle algorithm.
 
 State the constraint directly and as briefly as possible. Prefer present-tense explanations of why
-the code must have its current shape.
+the code must have its current shape. Put `/*` beside the first line of text and `*/` beside the
+last rather than on delimiter-only lines.
 
 ```c
 const char *provider_name; /* borrowed; valid for the provider's lifetime */

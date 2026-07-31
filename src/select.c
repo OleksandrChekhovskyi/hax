@@ -24,1213 +24,1057 @@
 
 /* ---------- parallel availability probe ---------- */
 
-struct avail_arg {
-    struct provider_availability probe;
-    int *avail;
-    const char **reason;
+struct availability_result {
+    int available;
+    const char *reason; /* static provider reason */
 };
 
-static void prepare_availability(const struct provider_factory *f,
+struct availability_job_ctx {
+    struct provider_availability probe;
+    struct availability_result *result;
+};
+
+static void prepare_availability(const struct provider_factory *factory,
                                  struct provider_availability *probe)
 {
     memset(probe, 0, sizeof(*probe));
     probe->available = 1; /* no hook means immediately available */
-    if (f->prepare_availability)
-        f->prepare_availability(f->name, probe);
+    if (factory->prepare_availability)
+        factory->prepare_availability(factory->name, probe);
 }
 
 /* The worker receives a complete owned request. In particular, provider
  * hooks and config resolution have already run on the foreground thread. */
-static void avail_worker(struct bg_job *job, void *arg)
+static void availability_worker(struct bg_job *job, void *arg)
 {
     (void)job;
-    struct avail_arg *a = arg;
+    struct availability_job_ctx *ctx = arg;
     char *body = NULL;
-    int ok = http_get(a->probe.url, (const char *const *)a->probe.headers, a->probe.timeout_s, 0,
-                      NULL, NULL, &body, NULL) == 0;
+    int available = http_get(ctx->probe.url, (const char *const *)ctx->probe.headers,
+                             ctx->probe.timeout_s, 0, NULL, NULL, &body, NULL) == 0;
     free(body);
-    *a->avail = ok;
-    *a->reason = ok ? NULL : (a->probe.reason ? a->probe.reason : "unavailable");
-    provider_availability_clear(&a->probe);
-    free(a);
+    ctx->result->available = available;
+    ctx->result->reason =
+        available ? NULL : (ctx->probe.reason ? ctx->probe.reason : "unavailable");
+    provider_availability_clear(&ctx->probe);
+    free(ctx);
 }
 
-static int factory_available(const struct provider_factory *f, const char **reason)
+static int factory_available(const struct provider_factory *factory, const char **reason)
 {
     struct provider_availability probe;
-    prepare_availability(f, &probe);
-    int ok = probe.available;
+    prepare_availability(factory, &probe);
+    int available = probe.available;
     if (probe.url) {
         char *body = NULL;
-        ok = http_get(probe.url, (const char *const *)probe.headers, probe.timeout_s, 0, NULL, NULL,
-                      &body, NULL) == 0;
+        available = http_get(probe.url, (const char *const *)probe.headers, probe.timeout_s, 0,
+                             NULL, NULL, &body, NULL) == 0;
         free(body);
     }
     if (reason)
-        *reason = ok ? NULL : (probe.reason ? probe.reason : "unavailable");
+        *reason = available ? NULL : (probe.reason ? probe.reason : "unavailable");
     provider_availability_clear(&probe);
-    return ok;
+    return available;
 }
 
-/* Resolve every provider's config on the foreground, then run only the
- * prepared network probes concurrently. Immediate key/file checks need no
- * thread. */
-static void probe_availability(const struct provider_factory *const *facs, size_t n, int *avail,
-                               const char **reason)
+/* Resolve provider config on the foreground; only prepared network probes run concurrently. */
+static void probe_availability(const struct provider_factory *const *factories, size_t count,
+                               struct availability_result *results)
 {
-    struct bg_job **jobs = xcalloc(n, sizeof(*jobs));
-    for (size_t i = 0; i < n; i++) {
-        avail[i] = 1; /* default if a network worker cannot be spawned */
-        reason[i] = NULL;
-        struct avail_arg *a = xcalloc(1, sizeof(*a));
-        prepare_availability(facs[i], &a->probe);
-        if (!a->probe.url) {
-            avail[i] = a->probe.available;
-            reason[i] = avail[i] ? NULL : (a->probe.reason ? a->probe.reason : "unavailable");
-            provider_availability_clear(&a->probe);
-            free(a);
+    struct bg_job **jobs = xcalloc(count, sizeof(*jobs));
+    for (size_t i = 0; i < count; i++) {
+        results[i].available = 1; /* default if a network worker cannot be spawned */
+        results[i].reason = NULL;
+        struct availability_job_ctx *ctx = xcalloc(1, sizeof(*ctx));
+        prepare_availability(factories[i], &ctx->probe);
+        if (!ctx->probe.url) {
+            results[i].available = ctx->probe.available;
+            results[i].reason = results[i].available
+                                    ? NULL
+                                    : (ctx->probe.reason ? ctx->probe.reason : "unavailable");
+            provider_availability_clear(&ctx->probe);
+            free(ctx);
             continue;
         }
-        a->avail = &avail[i];
-        a->reason = &reason[i];
-        jobs[i] = bg_job_spawn(avail_worker, a);
+        ctx->result = &results[i];
+        jobs[i] = bg_job_spawn(availability_worker, ctx);
         if (!jobs[i]) {
-            provider_availability_clear(&a->probe);
-            free(a);
+            provider_availability_clear(&ctx->probe);
+            free(ctx);
         }
     }
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < count; i++)
         bg_job_join(jobs[i]); /* NULL is a no-op */
     free(jobs);
 }
 
-/* Cold-start provider pick when the user hasn't configured one: the single
- * "start on something sensible" path. Returns a constructed provider, or NULL
- * when nothing is available (the caller then opens the REPL provider-less,
- * with a banner pointing at /provider).
- *
- * Priority: the built-in default first, then the rest. The pick is NOT
- * persisted — it's an inference for this run, so once the user's real default
- * becomes usable again it transparently comes back; an explicit /model or
- * /effort is what promotes the inference to a stored choice (it pins the
- * provider alongside). */
+/* Try providers in autoselect priority order. The inferred choice is run-scoped; an explicit
+ * selector later promotes it to persisted state. */
 struct provider *provider_autoselect(void)
 {
-    /* The default (highest-priority provider) is cheap to check — codex reads
-     * a local auth file — so try it first and short-circuit before the
-     * parallel probe: the common logged-in start then stays instant. No note:
-     * the default is what the user expects, not a surprising swap. */
-    const struct provider_factory *def = provider_default();
-    if (def && factory_available(def, NULL)) {
-        struct provider *p = def->new(def->name);
-        if (p) {
-            /* Record the pick as a session-scoped override (NOT persisted),
-             * so config_str("provider") names the live provider for the rest
-             * of the run — that's the resolvable id (factory name / future
-             * config-defined name) an explicit /model or /effort then pins.
-             * Leaving it unpersisted is deliberate: with no follow-up action
-             * the real default transparently returns next launch. */
-            config_set_override("provider", def->name);
-            return p;
+    /* Avoid parallel probe setup when the inexpensive default succeeds. */
+    const struct provider_factory *default_factory = provider_default();
+    if (default_factory && factory_available(default_factory, NULL)) {
+        struct provider *provider = default_factory->new(default_factory->name);
+        if (provider) {
+            /* Expose the inferred provider to later selectors without persisting it. */
+            config_set_override("provider", default_factory->name);
+            return provider;
         }
     }
 
-    /* Default unusable: probe the rest in parallel (bounded, so the list
-     * stays responsive even when a local server hangs) and start on the first
-     * available one in priority order. That order is why a configured
-     * HAX_OPENAI_BASE_URL lands on openai-compatible rather than llama.cpp /
-     * ollama (which honor the same override but rank lower). No note — the
-     * banner that prints next already shows the active provider, and the
-     * "why" lives in /provider, where the default shows dimmed with a reason. */
-    size_t n = 0;
-    const struct provider_factory *const *facs = provider_all(&n);
-    int *avail = xmalloc(n * sizeof(*avail));
-    const char **reason = xmalloc(n * sizeof(*reason));
-    probe_availability(facs, n, avail, reason);
+    /* Probe the remaining providers concurrently, then construct in priority order. */
+    size_t factory_count = 0;
+    const struct provider_factory *const *factories = provider_all(&factory_count);
+    struct availability_result *availability = xcalloc(factory_count, sizeof(*availability));
+    probe_availability(factories, factory_count, availability);
 
-    struct provider *p = NULL;
-    for (size_t i = 0; i < n && !p; i++) {
-        if (facs[i] == def || !avail[i])
-            continue; /* default already tried above */
-        /* Availability is a pre-check, not a guarantee — construction can
-         * still fail (a server that dropped between probe and connect); on
-         * that race just try the next available one. */
-        p = facs[i]->new(facs[i]->name);
-        if (p)
-            config_set_override("provider", facs[i]->name); /* see codex branch above */
+    struct provider *provider = NULL;
+    for (size_t i = 0; i < factory_count && !provider; i++) {
+        if (factories[i] == default_factory || !availability[i].available)
+            continue;
+        /* Availability can change between probe and construction; continue on failure. */
+        provider = factories[i]->new(factories[i]->name);
+        if (provider)
+            config_set_override("provider", factories[i]->name);
     }
-    free(avail);
-    free(reason);
-    return p;
+    free(availability);
+    return provider;
 }
 
 /* ---------- model / effort pick steps ---------- */
 
-static int cmp_model_id(const void *a, const void *b)
+static int compare_string_pointers(const void *left, const void *right)
 {
-    return strcmp(*(char *const *)a, *(char *const *)b);
+    return strcmp(*(char *const *)left, *(char *const *)right);
 }
 
-static int cmp_model_info(const void *a, const void *b)
+static int compare_model_info(const void *left, const void *right)
 {
-    return strcmp(((const struct model_info *)a)->id, ((const struct model_info *)b)->id);
+    const struct model_info *left_model = left;
+    const struct model_info *right_model = right;
+    return strcmp(left_model->id, right_model->id);
 }
 
 /* ---------- /model picker gutter ---------- */
 
-/* Token counts the way the rest of the UI writes them: "272k", "1M".
- * Millions keep one decimal, trimmed when it's zero — the common windows are
- * powers of two (1048576) that users know as "1M", not "1.05M". */
-static void fmt_tokens(char *buf, size_t n, long v)
+/* Keep one decimal for millions, trimming a zero fraction. */
+static void format_token_count(char *output, size_t output_size, long tokens)
 {
-    if (v >= 1000000) {
-        snprintf(buf, n, "%.1fM", (double)v / 1000000.0);
-        char *dot = strstr(buf, ".0M");
-        if (dot)
-            memmove(dot, dot + 2, strlen(dot + 2) + 1);
-    } else if (v >= 1000) {
-        snprintf(buf, n, "%ldk", v / 1000);
+    if (tokens >= 1000000) {
+        snprintf(output, output_size, "%.1fM", (double)tokens / 1000000.0);
+        char *zero_fraction = strstr(output, ".0M");
+        if (zero_fraction)
+            memmove(zero_fraction, zero_fraction + 2, strlen(zero_fraction + 2) + 1);
+    } else if (tokens >= 1000) {
+        snprintf(output, output_size, "%ldk", tokens / 1000);
     } else {
-        snprintf(buf, n, "%ld", v);
+        snprintf(output, output_size, "%ld", tokens);
     }
 }
 
-/* Append " · "-separated segments into a growing string. */
-static void seg_add(struct buf *b, const char *text)
+static void append_segment(struct buf *buffer, const char *text)
 {
-    if (b->len)
-        buf_append_str(b, " · ");
-    buf_append_str(b, text);
+    if (buffer->len)
+        buf_append_str(buffer, " · ");
+    buf_append_str(buffer, text);
 }
 
-/* Split a setting's "a|b|c" choices into owned strings, so a picker over an
- * enumerated setting builds its rows from the registry rather than a second
- * copy of the vocabulary. Caller frees each element, then the array. */
-static size_t split_choices(const char *choices, char ***out)
+/* Split registry choices into an owned array; the caller frees each string and the array. */
+static size_t split_choices(const char *choices, char ***values_out)
 {
-    size_t n = 0, cap = 0;
-    char **arr = NULL;
-    const char *p = choices;
+    size_t count = 0;
+    size_t capacity = 0;
+    char **values = NULL;
+    const char *start = choices;
     for (;;) {
-        const char *bar = strchr(p, '|');
-        size_t len = bar ? (size_t)(bar - p) : strlen(p);
-        if (n == cap) {
-            cap = cap ? cap * 2 : 8;
-            arr = xrealloc(arr, cap * sizeof(*arr));
+        const char *separator = strchr(start, '|');
+        size_t length = separator ? (size_t)(separator - start) : strlen(start);
+        if (count == capacity) {
+            capacity = capacity ? capacity * 2 : 8;
+            values = xrealloc(values, capacity * sizeof(*values));
         }
-        char *seg = xmalloc(len + 1);
-        memcpy(seg, p, len);
-        seg[len] = '\0';
-        arr[n++] = seg;
-        if (!bar)
+        char *value = xmalloc(length + 1);
+        memcpy(value, start, length);
+        value[length] = '\0';
+        values[count++] = value;
+        if (!separator)
             break;
-        p = bar + 1;
+        start = separator + 1;
     }
-    *out = arr;
-    return n;
+    *values_out = values;
+    return count;
 }
 
-char *model_desc_line(const struct model_info *m, const struct catalog_entry *cat)
+char *model_desc_line(const struct model_info *model, const struct catalog_entry *catalog)
 {
-    /* Reported-over-catalog, through the same merge every other consumer
-     * resolves with: a backend describing its own model is both fresher and
-     * more specific than a snapshot (it knows the window it will actually
-     * serve, and it knows about models released after the snapshot was
-     * cut). */
-    struct model_info v;
-    model_meta_merge(m, cat, &v);
-    long context = v.context;
-    int image = v.image_input;
-    double cost_in = v.cost_input;
-    double cost_out = v.cost_output;
-    double cost_cached = v.cost_cache_read;
+    /* Backend metadata is fresher and more specific, so it overrides catalog fields. */
+    struct model_info merged;
+    model_meta_merge(model, catalog, &merged);
+    long context_tokens = merged.context;
+    int image_input = merged.image_input;
+    double input_cost = merged.cost_input;
+    double output_cost = merged.cost_output;
+    double cached_input_cost = merged.cost_cache_read;
 
-    struct buf b;
-    buf_init(&b);
-    if (context > 0) {
-        char num[32], seg[48];
-        fmt_tokens(num, sizeof num, context);
-        snprintf(seg, sizeof seg, "%s context", num);
-        seg_add(&b, seg);
+    struct buf description;
+    buf_init(&description);
+    if (context_tokens > 0) {
+        char token_count[32];
+        char segment[48];
+        format_token_count(token_count, sizeof(token_count), context_tokens);
+        snprintf(segment, sizeof(segment), "%s context", token_count);
+        append_segment(&description, segment);
     }
-    /* Only the negative earns a segment: multimodal input is the norm now,
-     * so naming it on every row is noise that crowds out what varies. Tool
-     * support isn't here at all — it decides whether the model works with
-     * hax rather than describing it, so it dims the row instead (see
-     * choose_model), where it's visible without moving the cursor. */
-    if (image == PROVIDER_CAP_NO)
-        seg_add(&b, "no images");
-    if (cost_in >= 0 && cost_out >= 0) {
-        char seg[96];
-        if (cost_in == 0 && cost_out == 0) {
-            snprintf(seg, sizeof seg, "free");
-        } else if (cost_cached >= 0) {
-            /* Cached input is called out rather than folded into the input
-             * rate: on a long conversation it is the dominant term, and the
-             * discount is not a constant across backends. */
-            snprintf(seg, sizeof seg, "$%.3g in / $%.3g cached / $%.3g out per Mtok", cost_in,
-                     cost_cached, cost_out);
+    /* Image support is usually present, so describe only its absence. Tool support controls row
+     * availability rather than model description. */
+    if (image_input == PROVIDER_CAP_NO)
+        append_segment(&description, "no images");
+    if (input_cost >= 0 && output_cost >= 0) {
+        char segment[96];
+        if (input_cost == 0 && output_cost == 0) {
+            snprintf(segment, sizeof(segment), "free");
+        } else if (cached_input_cost >= 0) {
+            /* Cache discounts vary by backend and can dominate long conversations. */
+            snprintf(segment, sizeof(segment), "$%.3g in / $%.3g cached / $%.3g out per Mtok",
+                     input_cost, cached_input_cost, output_cost);
         } else {
-            snprintf(seg, sizeof seg, "$%.3g in / $%.3g out per Mtok", cost_in, cost_out);
+            snprintf(segment, sizeof(segment), "$%.3g in / $%.3g out per Mtok", input_cost,
+                     output_cost);
         }
-        seg_add(&b, seg);
+        append_segment(&description, segment);
     }
-    /* Prose starts its own footer line (picker.h: a newline is a hard
-     * break), so a long marketing blurb can't run into the structured
-     * fields and make both harder to read. */
-    if (m->description && *m->description) {
-        if (b.len)
-            buf_append(&b, "\n", 1);
-        buf_append_str(&b, m->description);
+    /* Keep backend prose separate from structured metadata. */
+    if (model->description && *model->description) {
+        if (description.len)
+            buf_append(&description, "\n", 1);
+        buf_append_str(&description, model->description);
     }
-    if (!b.len) {
-        buf_free(&b);
+    if (!description.len) {
+        buf_free(&description);
         return NULL;
     }
-    return buf_steal(&b);
+    return buf_steal(&description);
 }
 
-/* Outcome of one picker step. The chained flows treat these differently:
- * cancel aborts the whole command with nothing changed, "no picker to
- * show" continues on the provider's defaults, and a failure also rolls a
- * provider switch back. */
+/* Cancellation aborts a picker chain; PICK_NONE permits provider defaults; failure rolls back. */
 enum pick_status {
-    PICK_MADE,      /* a choice was made; the value out-param is set */
-    PICK_CANCELLED, /* user cancelled the picker (Escape / non-tty) */
-    PICK_NONE,      /* no picker to show: can't enumerate / no ladder */
-    PICK_FAILED,    /* enumeration failed — provider looks unusable now */
+    PICK_MADE,
+    PICK_CANCELLED,
+    PICK_NONE,
+    PICK_FAILED,
 };
 
-/* Run the model picker for `p` (which need not be the live provider — the
- * /provider flow picks against the prospective new one before committing).
- * Returns a malloc'd model id iff *status is PICK_MADE, else NULL with
- * *status saying why (a note/error was already printed for NONE/FAILED).
- * `cur` marks the row currently in use, if it appears in the list.
- *
- * *picked reports whether the id came from the user choosing among several,
- * as opposed to the sole model a single-model server offered (taken without a
- * picker below). Callers use it to tell intent from circumstance — see
- * provider.model_discovered. */
-static char *choose_model(struct agent_state *st, struct provider *p, const char *cur,
-                          enum pick_status *status, int *picked)
+struct value_pick_result {
+    enum pick_status status;
+    char *value; /* owned when non-NULL */
+};
+
+struct model_pick_result {
+    enum pick_status status;
+    char *model; /* owned when status is PICK_MADE */
+    int explicit_choice;
+};
+
+static struct model_pick_result pick_model_from_list(struct provider *provider,
+                                                     struct model_info *models, size_t model_count,
+                                                     const char *current_model)
 {
-    *picked = 0;
-    const char *name = p->name ? p->name : "?";
-    struct model_info *models = NULL;
-    size_t n = 0;
+    if (config_bool_or("sort_models", provider->sort_models))
+        qsort(models, model_count, sizeof(*models), compare_model_info);
 
-    /* Distinguish the three "no menu" cases so the note is actionable: the
-     * provider can't enumerate at all, the fetch failed (server down /
-     * unreachable), or the catalog came back empty (e.g. ollama with
-     * nothing pulled). The last is a normal state, not an error. */
-    if (!p->list_models) {
-        ui_note("%s can't list models — set one with HAX_MODEL or in config", name);
-        st->r->disp.trail = 1;
-        *status = PICK_NONE;
-        return NULL;
-    }
-    /* The catalog fetch blocks the foreground for up to the adapter's
-     * timeout (OpenRouter's list runs to hundreds of entries): run it
-     * under a busy window so a spinner shows and Esc cancels during the
-     * fetch, not just in the picker. */
-    struct busy *b = busy_begin("fetching models...");
-    char *err = NULL;
-    int rc = p->list_models(p, &models, &n, &err, busy_tick, NULL);
-    if (busy_end(b)) {
-        /* Esc during the fetch aborts like Esc in the picker; a result
-         * that landed in the same instant is discarded, not committed.
-         * busy_end printed the [interrupted] marker — mark the trail
-         * like the other printed-note exits here. */
-        model_info_free(models, n);
-        free(err);
-        st->r->disp.trail = 1;
-        *status = PICK_CANCELLED;
-        return NULL;
-    }
-    if (rc != 0) {
-        /* The adapter's diagnostic names the endpoint and remedy ("codex
-         * token expired — …"); the bare fallback only covers an adapter
-         * that left *err unset. Red — same class as a failed /usage fetch. */
-        if (err)
-            ui_error("%s", err);
-        else
-            ui_error("failed to list models for %s", name);
-        st->r->disp.trail = 1;
-        *status = PICK_FAILED;
-        free(err);
-        model_info_free(models, n);
-        return NULL;
-    }
-    if (n == 0) {
-        /* Reachable but empty. The remedy is backend-specific (ollama: pull
-         * one; llama.cpp: load one; a proxy: configure one), so state the
-         * fact without prescribing a fix the provider may not support. */
-        ui_note("%s has no models available", name);
-        st->r->disp.trail = 1;
-        *status = PICK_FAILED;
-        model_info_free(models, n);
-        return NULL;
-    }
-    if (n == 1) {
-        /* A single model isn't a choice — the common case for a single-model
-         * llama.cpp / ollama server. Skip the picker and use it directly; the
-         * post-switch confirmation still shows which model is now active. */
-        char *only = xstrdup(models[0].id);
-        model_meta_remember(p, &models[0]);
-        model_info_free(models, n);
-        *status = PICK_MADE;
-        return only;
+    /* Batch catalog lookup avoids loading the snapshot once per model. */
+    struct catalog_entry *catalog = NULL;
+    if (provider->catalog_id && *provider->catalog_id) {
+        const char **model_ids = xmalloc(model_count * sizeof(*model_ids));
+        for (size_t i = 0; i < model_count; i++)
+            model_ids[i] = models[i].id;
+        catalog = xmalloc(model_count * sizeof(*catalog));
+        catalog_lookup_many(provider->catalog_id, model_ids, model_count, catalog, NULL);
+        free(model_ids);
     }
 
-    /* The provider declares whether its catalog order is worth preserving
-     * (sort_models); the global sort_models key is a tri-state user override on
-     * top of that per-provider default — on/off force it, auto (and unset)
-     * defer. config_bool_or resolves exactly that, and /config's tri-state
-     * validation accepts the same grammar, so the two agree. */
-    if (config_bool_or("sort_models", p->sort_models))
-        qsort(models, n, sizeof(*models), cmp_model_info);
-
-    /* Fill the gaps in what the backend reported from the catalog, in one
-     * batch: a per-row catalog_lookup would re-slurp the snapshot once per
-     * model, which is seconds on a catalog of a few hundred. Providers with
-     * no catalog identity skip it and show only what they reported. */
-    struct catalog_entry *cat = NULL;
-    if (p->catalog_id && *p->catalog_id) {
-        const char **names = xmalloc(n * sizeof(*names));
-        for (size_t i = 0; i < n; i++)
-            names[i] = models[i].id;
-        cat = xmalloc(n * sizeof(*cat));
-        catalog_lookup_many(p->catalog_id, names, n, cat, NULL);
-        free(names);
-    }
-
-    struct picker_item *items = xcalloc(n, sizeof(*items));
-    char **descs = xcalloc(n, sizeof(*descs)); /* owned gutter lines */
+    struct picker_item *items = xcalloc(model_count, sizeof(*items));
+    char **descriptions = xcalloc(model_count, sizeof(*descriptions));
     size_t initial = 0;
-    for (size_t i = 0; i < n; i++) {
-        descs[i] = model_desc_line(&models[i], cat ? &cat[i] : NULL);
+    for (size_t i = 0; i < model_count; i++) {
+        descriptions[i] = model_desc_line(&models[i], catalog ? &catalog[i] : NULL);
         items[i].label = models[i].id;
-        items[i].desc = descs[i];
-        /* A model that can't be given tools can't run hax's loop, so dim it
-         * with the reason — the same advisory treatment /provider gives an
-         * unreachable backend. Still selectable: the catalog is describing
-         * its default endpoint, not promising anything, and a hidden row is
-         * baffling when the user typed a filter that should have matched it.
-         * Only backends that actually report tool support (OpenRouter today)
-         * can dim anything; elsewhere the answer is unknown and no row
-         * changes. */
+        items[i].desc = descriptions[i];
+        /* Known lack of tool support dims but does not hide the row; catalog capability is
+         * advisory and unknown elsewhere. */
         items[i].dim = models[i].tools == PROVIDER_CAP_NO;
         items[i].detail = items[i].dim ? "no tool calling" : NULL;
-        items[i].current = cur && strcmp(models[i].id, cur) == 0;
+        items[i].current = current_model && strcmp(models[i].id, current_model) == 0;
         if (items[i].current)
             initial = i;
     }
-    struct picker_opts opts = {
-        .title = "select a model", .items = items, .n = n, .initial = initial};
-    long sel = picker_run(&opts);
-    char *chosen = (sel >= 0) ? xstrdup(models[sel].id) : NULL;
-    *status = chosen ? PICK_MADE : PICK_CANCELLED;
-    *picked = chosen != NULL; /* several were offered and one was taken */
-    /* Hand the entry to the metadata layer before the list is freed; the
-     * effort step that follows is its first reader. At pick time rather
-     * than at commit, since the chained pickers run against the prospective
-     * selection — which means it displaces what the running model had, and
-     * an aborted chain has to put that back (select_model). */
-    if (sel >= 0)
-        model_meta_remember(p, &models[sel]);
+    struct picker_opts options = {
+        .title = "select a model", .items = items, .n = model_count, .initial = initial};
+    long selected_index = picker_run(&options);
 
-    for (size_t i = 0; i < n; i++)
-        free(descs[i]);
-    free(descs);
+    struct model_pick_result result = {.status = PICK_CANCELLED};
+    if (selected_index >= 0) {
+        result.status = PICK_MADE;
+        result.model = xstrdup(models[selected_index].id);
+        result.explicit_choice = 1;
+        /* Publish metadata before freeing the list so the chained effort picker can use it. This
+         * temporarily displaces live-model metadata and must be restored on cancellation. */
+        model_meta_remember(provider, &models[selected_index]);
+    }
+    for (size_t i = 0; i < model_count; i++)
+        free(descriptions[i]);
+    free(descriptions);
     free(items);
-    free(cat);
-    model_info_free(models, n);
-    return chosen;
+    free(catalog);
+    return result;
 }
 
-/* Run the effort picker for `p` and `model`. On PICK_MADE *out is set: NULL
- * for the "default" row (clear the pick → provider / config default), or a
- * malloc'd effort value. PICK_NONE = no effort ladder, PICK_CANCELLED =
- * Escape.
- *
- * The levels offered are the ones `model` accepts (model_meta.h), not the
- * provider's whole vocabulary — an OpenRouter model may take three of the
- * six, and codex and Anthropic reject an unsupported level outright.
- *
- * `announce` prints the no-ladder note only when the user asked for effort
- * directly (/effort); the chained tails of /model and /provider skip a
- * no-ladder provider silently. */
-static enum pick_status choose_effort(struct agent_state *st, struct provider *p, const char *model,
-                                      const char *cur, char **out, int announce)
+/* Pick against `provider`, which may be prospective rather than live. */
+static struct model_pick_result choose_model(struct agent_state *state, struct provider *provider,
+                                             const char *current_model)
 {
-    *out = NULL;
+    struct model_pick_result result = {.status = PICK_NONE};
+    const char *provider_name = provider->name ? provider->name : "?";
+    struct model_info *models = NULL;
+    size_t model_count = 0;
+
+    /* Missing enumeration, fetch failure, and an empty catalog need different diagnostics. */
+    if (!provider->list_models) {
+        ui_note("%s can't list models — set one with HAX_MODEL or in config", provider_name);
+        state->render->disp.trail = 1;
+        return result;
+    }
+    /* Model enumeration can block, so expose progress and cancellation before the picker opens. */
+    struct busy *busy = busy_begin("fetching models...");
+    char *error = NULL;
+    int list_result =
+        provider->list_models(provider, &models, &model_count, &error, busy_tick, NULL);
+    if (busy_end(busy)) {
+        /* Discard a result that races cancellation; busy_end already rendered interruption. */
+        model_info_free(models, model_count);
+        free(error);
+        state->render->disp.trail = 1;
+        result.status = PICK_CANCELLED;
+        return result;
+    }
+    if (list_result != 0) {
+        /* Prefer the adapter's actionable diagnostic when available. */
+        if (error)
+            ui_error("%s", error);
+        else
+            ui_error("failed to list models for %s", provider_name);
+        state->render->disp.trail = 1;
+        result.status = PICK_FAILED;
+        free(error);
+        model_info_free(models, model_count);
+        return result;
+    }
+    if (model_count == 0) {
+        /* An empty catalog has no provider-independent remedy. */
+        ui_note("%s has no models available", provider_name);
+        state->render->disp.trail = 1;
+        result.status = PICK_FAILED;
+        model_info_free(models, model_count);
+        return result;
+    }
+    if (model_count == 1) {
+        /* One available model needs no picker and does not imply user intent. */
+        result.status = PICK_MADE;
+        result.model = xstrdup(models[0].id);
+        model_meta_remember(provider, &models[0]);
+        model_info_free(models, model_count);
+        return result;
+    }
+
+    result = pick_model_from_list(provider, models, model_count, current_model);
+    model_info_free(models, model_count);
+    return result;
+}
+
+/* Offer only effort levels accepted by `model`. A NULL value means provider default. */
+static struct value_pick_result choose_effort(struct agent_state *state, struct provider *provider,
+                                              const char *model, const char *current_effort,
+                                              int announce_unavailable)
+{
+    struct value_pick_result result = {.status = PICK_NONE};
     struct effort_set levels;
-    model_meta_efforts(p, model, &levels);
-    size_t n = levels.n;
-    if (n == 0) {
-        if (announce) {
-            /* Which of the two reasons applies decides the remedy: another
-             * model can fix the second, nothing fixes the first. */
-            const char *const *eff = NULL;
-            if (p->list_efforts && p->list_efforts(p, &eff) > 0)
+    model_meta_efforts(provider, model, &levels);
+    if (levels.n == 0) {
+        if (announce_unavailable) {
+            /* Distinguish a model-specific restriction from a provider without effort support. */
+            const char *const *provider_efforts = NULL;
+            if (provider->list_efforts && provider->list_efforts(provider, &provider_efforts) > 0)
                 ui_note("%s doesn't take reasoning-effort levels", model ? model : "this model");
             else
                 ui_note("the %s provider doesn't expose reasoning-effort levels",
-                        p->name ? p->name : "?");
-            st->r->disp.trail = 1;
+                        provider->name ? provider->name : "?");
+            state->render->disp.trail = 1;
         }
-        return PICK_NONE;
+        return result;
     }
 
-    struct picker_item *items = xcalloc((n + 1), sizeof(*items));
+    struct picker_item *items = xcalloc(levels.n + 1, sizeof(*items));
     items[0].label = "default";
     items[0].desc = "Let the provider choose the reasoning effort";
-    items[0].dim = 0;
-    items[0].current = 0;
     size_t initial = 0;
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = 0; i < levels.n; i++) {
         items[i + 1].label = levels.v[i];
-        items[i + 1].detail = NULL;
-        items[i + 1].dim = 0;
-        items[i + 1].current = cur && strcmp(levels.v[i], cur) == 0;
+        items[i + 1].current = current_effort && strcmp(levels.v[i], current_effort) == 0;
         if (items[i + 1].current)
             initial = i + 1;
     }
-    struct picker_opts opts = {
-        .title = "select reasoning effort", .items = items, .n = n + 1, .initial = initial};
-    long sel = picker_run(&opts);
+    struct picker_opts options = {
+        .title = "select reasoning effort",
+        .items = items,
+        .n = levels.n + 1,
+        .initial = initial,
+    };
+    long selected_index = picker_run(&options);
     free(items);
 
-    if (sel < 0)
-        return PICK_CANCELLED;
-    /* sel == 0 is "default" (leave *out NULL → clear); sel > 0 is a value.
-     * "default" differs from the ladder's "none": none sends none, default
-     * sends nothing and lets the provider choose. */
-    if (sel > 0)
-        *out = xstrdup(levels.v[sel - 1]);
-    return PICK_MADE;
+    if (selected_index < 0) {
+        result.status = PICK_CANCELLED;
+        return result;
+    }
+    result.status = PICK_MADE;
+    /* Default omits effort; a literal ladder value such as "none" remains explicit. */
+    if (selected_index > 0)
+        result.value = xstrdup(levels.v[selected_index - 1]);
+    return result;
 }
 
-/* Record a selection: run overrides for the members actually picked, and
- * one atomic state-tier write for the whole set. NULL model/effort means "not
- * picked here" — config_persist_selection keeps the stored value when the
- * provider is unchanged and resets it to the sentinel when the commit re-pins
- * a different one (e.g. an /effort pick promoting a one-off HAX_PROVIDER run
- * must not carry the old provider's saved model along).
- *
- * `model_discovered` is the committing provider's own flag (provider.h): the
- * model is what the backend currently serves rather than a preference, so a
- * `model` given here is *stored* as the sentinel — the next launch re-runs
- * discovery instead of carrying a path that matched one server invocation. The
- * run override still takes the concrete value: a discovering provider has no
- * default_model to resolve from within this run. A NULL model is unaffected,
- * keeping its "not picked here" meaning. */
-static void commit_selection(const char *provider, const char *model, const char *effort,
-                             int model_discovered)
+/* NULL model or effort retains same-provider state; callers pass default sentinels when changing
+ * provider. */
+static void apply_selection_overrides(const char *provider_id, const char *model,
+                                      const char *effort)
 {
-    /* An explicit pick exits any active preset stance — atomically, not as
-     * a blend: the stance name is cleared (the banner must not keep
-     * claiming a preset whose selection was just overridden) along with
-     * the preset's system_prompt override, so the regular prompt returns.
-     * Presets are the only writer of that override, so clearing is
-     * unambiguous; every commit path follows with agent_apply_settings,
-     * which rebuilds the prompt. config_persist_selection below removes
-     * the persisted name in the same write. A stance restored from a
-     * resumed conversation ends here too — see config_preset_exit. */
     config_preset_exit(CONFIG_TIER_RUN);
-    config_set_override("provider", provider);
+    config_set_override("provider", provider_id);
     if (model)
         config_set_override("model", model);
     if (effort)
         config_set_override("effort", effort);
-    const char *stored = (model && model_discovered) ? CONFIG_VALUE_DEFAULT : model;
-    if (config_persist_selection(provider, stored, effort) != 0) {
-        /* The overrides above keep the pick active for this run, but it didn't
-         * reach state.json (an unwritable state dir), so it won't survive a
-         * restart. Say so once — otherwise the user is left puzzled when
-         * settings silently revert next launch. */
+}
+
+static void persist_selection(struct agent_state *state, const char *provider_id, const char *model,
+                              const char *effort, int model_discovered)
+{
+    /* Discovered models remain concrete this run but must be rediscovered next launch. */
+    const char *stored_model = (model && model_discovered) ? CONFIG_VALUE_DEFAULT : model;
+    if (config_persist_selection(provider_id, stored_model, effort) != 0) {
+        /* The run override remains valid; warn once that persistence failed. */
         static int warned;
         if (!warned) {
             warned = 1;
             ui_note("couldn't save to state.json — this choice applies to this run only");
+            state->render->disp.trail = 1;
         }
     }
 }
 
-/* agent_provider_id as an owned copy: the callers below commit it through
- * config writes that invalidate the borrowed pointer. */
-static char *current_provider_id(const struct provider *p)
+/* Config writes invalidate the borrowed provider id, so copy it before committing. */
+static char *current_provider_id(const struct provider *provider)
 {
-    const char *id = agent_provider_id(p);
-    return xstrdup(id ? id : "");
+    const char *provider_id = agent_provider_id(provider);
+    return xstrdup(provider_id ? provider_id : "");
 }
 
-/* A constructor may diagnose directly through hax_err/hax_warn on stderr.
- * Resynchronize disp with the fresh terminal row that output left behind so
- * the next stdout block still gets its separator. */
-static void sync_constructor_diagnostics(struct agent_state *st, unsigned long before)
+/* Raw constructor diagnostics bypass disp; synchronize its trailing-row state afterward. */
+static void sync_constructor_diagnostics(struct agent_state *state, unsigned long before)
 {
     if (hax_diag_sequence() != before) {
-        st->r->disp.held = 0;
-        st->r->disp.trail = 1;
+        state->render->disp.held = 0;
+        state->render->disp.trail = 1;
     }
 }
 
 /* ---------- public flows ---------- */
 
-void select_effort(struct agent_state *st)
+void select_effort(struct agent_state *state)
 {
-    struct provider *p = (struct provider *)st->provider;
-    if (!p) {
+    struct provider *provider = state->provider;
+    if (!provider) {
         ui_note("no provider selected — use /provider to choose one first");
-        st->r->disp.trail = 1;
+        state->render->disp.trail = 1;
         return;
     }
-    char *e;
-    /* Explicit /effort: announce when there are no effort levels to offer.
-     * Only a made pick commits; cancel and no-ladder both change nothing. */
-    if (choose_effort(st, p, st->sess->model, st->sess->effort, &e, 1) != PICK_MADE)
+
+    struct value_pick_result effort_pick =
+        choose_effort(state, provider, state->session->model, state->session->effort, 1);
+    if (effort_pick.status != PICK_MADE)
         return;
-    /* The provider is pinned alongside the effort, for the same reason
-     * select_model does: an explicit setting against an auto-selected provider
-     * should promote the whole set to a stored choice. Idempotent when already
-     * pinned. The "default" row → the sentinel (use the provider's default,
-     * shadowing a lower-tier env/config effort), not a delete (which would let
-     * it leak); the model isn't picked here, so NULL — kept unless the pin
-     * changes the stored provider.
-     *
-     * Exiting a preset stance is the exception to the NULL model: the
-     * session keeps running the preset's model (an effort pick shouldn't
-     * change the model), but NULL would persist "keep the previously
-     * *stored* model" — the pre-preset one — and the next launch would
-     * diverge from what this pick left running. Materialize the stance's
-     * effective model into the replacement selection instead. Read before
-     * commit_selection clears the stance. */
-    const char *stance = config_str("preset");
-    const char *eff_model =
-        (stance && *stance && st->sess->model && *st->sess->model) ? st->sess->model : NULL;
-    char *pid = current_provider_id(p);
-    commit_selection(pid, eff_model, e ? e : CONFIG_VALUE_DEFAULT, p->model_discovered);
-    free(pid);
-    free(e);
-    agent_apply_settings(st, p, 1);
+
+    /* Pin the provider with explicit effort so autoselection becomes stable. Default uses the
+     * sentinel to shadow lower tiers. When exiting a preset, persist its effective model rather
+     * than reviving the pre-preset stored model. */
+    const char *preset = config_str("preset");
+    char *model = (preset && *preset && state->session->model && *state->session->model)
+                      ? xstrdup(state->session->model)
+                      : NULL;
+    const char *effort = effort_pick.value ? effort_pick.value : CONFIG_VALUE_DEFAULT;
+    char *provider_id = current_provider_id(provider);
+    struct config_snapshot *snapshot = config_snapshot_take();
+    apply_selection_overrides(provider_id, model, effort);
+    if (agent_apply_settings(state, provider, 1) != 0) {
+        config_snapshot_restore(snapshot);
+    } else {
+        config_snapshot_free(snapshot);
+        persist_selection(state, provider_id, model, effort, provider->model_discovered);
+    }
+    free(provider_id);
+    free(model);
+    free(effort_pick.value);
 }
 
-void select_model(struct agent_state *st)
+static void restore_model_metadata(struct provider *provider, struct model_info *saved_metadata,
+                                   int had_saved_metadata, const char *model)
 {
-    /* Escape anywhere in the chain (model picker or the chained effort
-     * picker) aborts the whole /model with no change; a completed chain
-     * applies once. */
-    struct provider *p = (struct provider *)st->provider;
-    if (!p) {
+    if (had_saved_metadata)
+        model_meta_remember(provider, saved_metadata);
+    else
+        model_meta_refresh(provider, model);
+    model_info_clear(saved_metadata);
+}
+
+void select_model(struct agent_state *state)
+{
+    struct provider *provider = state->provider;
+    if (!provider) {
         ui_note("no provider selected — use /provider to choose one first");
-        st->r->disp.trail = 1;
+        state->render->disp.trail = 1;
         return;
     }
-    /* choose_model publishes the candidate's metadata for the effort step
-     * below, displacing what the running model had. Hold a copy so an abort
-     * can put it back exactly, rather than leaving the session to answer
-     * window and modality questions from the catalog alone — from nothing
-     * at all on a provider that opts out of one, which silently disables
-     * auto-compaction. */
-    struct model_info saved;
-    int had_saved = model_meta_snapshot(p, &saved);
+    /* The candidate metadata needed by effort selection temporarily displaces the live model's;
+     * snapshot it for cancellation. */
+    struct model_info saved_metadata;
+    int had_saved_metadata = model_meta_snapshot(provider, &saved_metadata);
 
-    enum pick_status ms;
-    int picked = 0;
-    char *m = choose_model(st, p, st->sess->model, &ms, &picked);
-    if (!m) {
-        model_info_clear(&saved);
+    struct model_pick_result model_pick = choose_model(state, provider, state->session->model);
+    if (!model_pick.model) {
+        model_info_clear(&saved_metadata);
         return; /* cancelled or no menu — notes already printed */
     }
 
-    /* Run the chained effort pick BEFORE committing. commit_selection persists
-     * into the state tier, which deep-copies and frees the old tier object —
-     * and st->sess->effort may point into it (after a prior
-     * session's /effort). Reading it as the picker's "current" marker after a
-     * commit would be a use-after-free, so gather both picks first, then commit
-     * once. Skips silently if this provider has no ladder. */
-    char *e = NULL;
-    /* Narrowed against the model just picked, not the one still running —
-     * gpt-5.6 takes "max" where gpt-5.5 rejects it. */
-    enum pick_status es = choose_effort(st, p, m, st->sess->effort, &e, 0);
-    if (es == PICK_CANCELLED) {
-        /* Escape mid-chain: discard the model pick too — nothing commits.
-         * Restoring the saved entry keeps this free of a second round-trip
-         * (and of the window, or the permanent gap on failure, one would
-         * leave). With nothing saved there was nothing to lose, but the
-         * candidate's entry has to go: refresh re-probes the running
-         * model. */
-        if (had_saved)
-            model_meta_remember(p, &saved);
-        else
-            model_meta_refresh(p, st->sess->model);
-        model_info_clear(&saved);
-        free(m);
+    /* Resolve effort before config writes invalidate borrowed values. */
+    struct value_pick_result effort_pick =
+        choose_effort(state, provider, model_pick.model, state->session->effort, 0);
+    if (effort_pick.status == PICK_CANCELLED) {
+        restore_model_metadata(provider, &saved_metadata, had_saved_metadata,
+                               state->session->model);
+        free(model_pick.model);
         return;
     }
-    model_info_clear(&saved);
 
-    /* Choosing among several models is intent, whatever the backend served up
-     * at construction: the id stops being this provider's server state, so it
-     * persists as itself and a later /preset-save pins it. Taking a
-     * single-model server's only model is not a choice, and stays discovery. */
-    if (picked)
-        p->model_discovered = 0;
+    /* An explicit choice converts discovered server state into a persisted model preference. */
+    int model_discovered = model_pick.explicit_choice ? 0 : provider->model_discovered;
 
-    /* The provider is pinned alongside the model — otherwise a model picked
-     * against an auto-selected (unpinned) provider would make the next
-     * launch re-auto-select and warn. Effort commits as the picked value,
-     * or the sentinel for both the "default" row and a no-ladder skip: a
-     * provider without an effort ladder shouldn't be sent one, so the pin
-     * resets to "provider default" instead of keeping (or letting a
-     * lower-tier env/config value leak into) an effort it never advertised.
-     * Same resolution /provider applies on a switch. */
-    char *pid = current_provider_id(p);
-    commit_selection(pid, m, e ? e : CONFIG_VALUE_DEFAULT, p->model_discovered);
-    free(pid);
-    free(m);
-    free(e);
-    agent_apply_settings(st, p, 1);
+    /* Pin the provider with an explicit model. Missing/default effort uses the sentinel so stale
+     * lower-tier effort cannot leak into a provider that did not advertise it. */
+    const char *effort = effort_pick.value ? effort_pick.value : CONFIG_VALUE_DEFAULT;
+    char *provider_id = current_provider_id(provider);
+    struct config_snapshot *snapshot = config_snapshot_take();
+    apply_selection_overrides(provider_id, model_pick.model, effort);
+    if (agent_apply_settings(state, provider, 1) != 0) {
+        config_snapshot_restore(snapshot);
+        restore_model_metadata(provider, &saved_metadata, had_saved_metadata,
+                               state->session->model);
+    } else {
+        model_info_clear(&saved_metadata);
+        provider->model_discovered = model_discovered;
+        config_snapshot_free(snapshot);
+        persist_selection(state, provider_id, model_pick.model, effort, model_discovered);
+    }
+    free(provider_id);
+    free(model_pick.model);
+    free(effort_pick.value);
 }
 
-static int cmp_factory_name(const void *a, const void *b)
+static int compare_factory_names(const void *left, const void *right)
 {
-    const struct provider_factory *const *fa = a;
-    const struct provider_factory *const *fb = b;
-    return strcmp((*fa)->name, (*fb)->name);
+    const struct provider_factory *const *left_factory = left;
+    const struct provider_factory *const *right_factory = right;
+    return strcmp((*left_factory)->name, (*right_factory)->name);
 }
 
-void select_provider(struct agent_state *st)
+struct provider_pick_result {
+    const struct provider_factory *factory;
+    int probe_available;
+};
+
+static struct provider_pick_result choose_provider_factory(const char *current_provider_id)
 {
-    size_t n = 0;
-    const struct provider_factory *const *all = provider_all(&n);
+    size_t factory_count = 0;
+    const struct provider_factory *const *registered_factories = provider_all(&factory_count);
 
-    /* Display order is alphabetical, not registry priority: priority drives
-     * cold-start autoselect, but in a picker predictable lookup wins as the
-     * list grows. */
-    const struct provider_factory **facs = xmalloc(n * sizeof(*facs));
-    memcpy(facs, all, n * sizeof(*facs));
-    qsort(facs, n, sizeof(*facs), cmp_factory_name);
+    /* Picker order is alphabetical; registry order remains autoselect priority. */
+    const struct provider_factory **factories = xmalloc(factory_count * sizeof(*factories));
+    memcpy(factories, registered_factories, factory_count * sizeof(*factories));
+    qsort(factories, factory_count, sizeof(*factories), compare_factory_names);
 
-    /* Esc is not observed during the pre-pick phases — this probe, the
-     * dim-row recheck at commit, provider construction. All are bounded by
-     * the short probe/connect timeouts (a couple of seconds worst case),
-     * so cancellation plumbing isn't worth it there; Esc coverage starts
-     * with the pickers and the busy-window catalog fetch. */
-    int *avail = xmalloc(n * sizeof(*avail));
-    const char **reason = xmalloc(n * sizeof(*reason));
-    probe_availability(facs, n, avail, reason);
+    /* Pre-picker work uses bounded timeouts; cancellation starts at the picker. */
+    struct availability_result *availability = xcalloc(factory_count, sizeof(*availability));
+    probe_availability(factories, factory_count, availability);
 
-    /* Mark the live provider's row "current". Compare against its resolvable
-     * id (the "provider" config key the rows are keyed by), not p->name —
-     * HAX_PROVIDER_NAME / a custom provider can rename the display name so it
-     * no longer equals any factory id, which would leave the row unmarked and
-     * make re-selecting it rebuild instead of continuing into /model. NULL
-     * when no provider constructed at startup; then nothing is current.
-     *
-     * Unavailable rows are dim-with-a-reason but still selectable: the probe
-     * is advisory (and possibly stale by the time the user commits), and a
-     * navigable row is the only way a long tail of unavailable providers
-     * stays readable at all — the viewport follows the selection. */
-    char *cur = st->provider ? current_provider_id(st->provider) : NULL;
-    struct picker_item *items = xcalloc(n, sizeof(*items));
+    /* Keep unavailable rows selectable because probe results are advisory and may become stale. */
+    struct picker_item *items = xcalloc(factory_count, sizeof(*items));
     size_t initial = 0;
-    for (size_t i = 0; i < n; i++) {
-        items[i].label = facs[i]->name;
-        items[i].dim = !avail[i];
-        items[i].detail = avail[i] ? NULL : (reason[i] ? reason[i] : "unavailable");
-        items[i].current = cur && strcmp(facs[i]->name, cur) == 0;
+    for (size_t i = 0; i < factory_count; i++) {
+        items[i].label = factories[i]->name;
+        items[i].dim = !availability[i].available;
+        items[i].detail = availability[i].reason;
+        items[i].current =
+            current_provider_id && strcmp(factories[i]->name, current_provider_id) == 0;
         if (items[i].current)
             initial = i;
     }
-    struct picker_opts opts = {
-        .title = "select a provider", .items = items, .n = n, .initial = initial};
-    long sel = picker_run(&opts);
+    struct picker_opts options = {
+        .title = "select a provider",
+        .items = items,
+        .n = factory_count,
+        .initial = initial,
+    };
+    long selected_index = picker_run(&options);
 
-    const struct provider_factory *f = (sel >= 0) ? facs[sel] : NULL;
-    int sel_avail = (sel >= 0) ? avail[sel] : 1;
+    struct provider_pick_result result = {0};
+    if (selected_index >= 0) {
+        result.factory = factories[selected_index];
+        result.probe_available = availability[selected_index].available;
+    }
     free(items);
-    free(avail);
-    free(reason);
-    free(facs);
-    if (!f) {
-        free(cur);
+    free(availability);
+    free(factories);
+    return result;
+}
+
+void select_provider(struct agent_state *state)
+{
+    char *current_id = state->provider ? current_provider_id(state->provider) : NULL;
+    struct provider_pick_result provider_pick = choose_provider_factory(current_id);
+    const struct provider_factory *factory = provider_pick.factory;
+    if (!factory) {
+        free(current_id);
         return; /* cancelled / non-tty — leave disp as the dispatcher's separator */
     }
 
-    /* A dim row was picked: the open-time probe said unavailable, but that
-     * verdict may be stale, so re-check now. Still unavailable → report the
-     * exact reason and stay on the current provider; a fresh pass (a server
-     * that came up since) proceeds with the normal switch. */
-    if (!sel_avail && f->prepare_availability) {
-        const char *why = NULL;
-        if (!factory_available(f, &why)) {
-            ui_note("%s is unavailable — %s", f->name, why ? why : "unavailable");
-            st->r->disp.trail = 1;
-            free(cur);
+    /* Recheck an unavailable row at commit because the advisory probe may be stale. */
+    if (!provider_pick.probe_available && factory->prepare_availability) {
+        const char *unavailable_reason = NULL;
+        if (!factory_available(factory, &unavailable_reason)) {
+            ui_note("%s is unavailable — %s", factory->name,
+                    unavailable_reason ? unavailable_reason : "unavailable");
+            state->render->disp.trail = 1;
+            free(current_id);
             return;
         }
     }
 
-    /* Re-picking the current provider just continues into model/effort,
-     * with standalone semantics (a cancelled model pick aborts), rather
-     * than tearing down and rebuilding the same connection. */
-    if (cur && strcmp(f->name, cur) == 0) {
-        free(cur);
-        select_model(st);
+    /* Re-picking the live provider avoids rebuilding it and continues to model selection. */
+    if (current_id && strcmp(factory->name, current_id) == 0) {
+        free(current_id);
+        select_model(state);
         return;
     }
 
-    /* Construct transactionally under the prospective selection. A provider
-     * switch invalidates the old backend's model/effort, so shadow them with
-     * the default sentinel before construction; otherwise value-dependent
-     * constructors (notably llama.cpp's live-model reconciliation) mistake the
-     * outgoing provider's exact model for intent against the new backend.
-     * Every abort restores the snapshot; commit_selection replaces these
-     * provisional values with the actual picks. */
-    struct config_snapshot *ov = config_snapshot_take();
-    config_set_override("provider", f->name);
+    /* Construct under a snapshotted prospective selection. Default sentinels prevent the old
+     * backend's model and effort from influencing value-dependent constructors. */
+    struct config_snapshot *snapshot = config_snapshot_take();
+    config_set_override("provider", factory->name);
     config_set_override("model", CONFIG_VALUE_DEFAULT);
     config_set_override("effort", CONFIG_VALUE_DEFAULT);
-    unsigned long diag_before = hax_diag_sequence();
-    struct provider *newp = f->new(f->name);
-    sync_constructor_diagnostics(st, diag_before);
-    if (!newp) {
-        config_snapshot_restore(ov);
-        st->r->disp.trail = 1; /* the factory printed a raw error line */
-        free(cur);
+    unsigned long diagnostics_before = hax_diag_sequence();
+    struct provider *candidate = factory->new(factory->name);
+    sync_constructor_diagnostics(state, diagnostics_before);
+    if (!candidate) {
+        config_snapshot_restore(snapshot);
+        state->render->disp.trail = 1; /* the factory printed a raw error line */
+        free(current_id);
         return;
     }
 
-    /* Choose model and effort *against the new provider* but DON'T commit
-     * yet: Escape at either picker or an unusable backend must leave the
-     * current provider untouched. Only PICK_NONE (no enumerate hook — no
-     * picker shown, nothing cancelled) falls back to newp's default model;
-     * cancel and failure roll the whole switch back. A cancel bails
-     * silently — Esc is deliberate, and a killed fetch already left its
-     * [interrupted] marker; the "staying on" note is for failures, where
-     * it follows the red diagnostic. newp isn't live during these picks,
-     * so choose_* take it explicitly. */
-    enum pick_status ms;
-    int picked = 0;
-    char *m = choose_model(st, newp, NULL, &ms, &picked);
-    int has_default = newp->default_model && *newp->default_model;
-    if (!m && (ms != PICK_NONE || !has_default)) {
-        if (ms != PICK_CANCELLED) {
-            ui_note("staying on %s — no model chosen for %s", cur ? cur : "?", f->name);
-            st->r->disp.trail = 1;
+    /* Gather picks against the prospective provider before ownership transfer. PICK_NONE may use
+     * its default model; cancellation and failure roll back silently or after their diagnostic. */
+    struct model_pick_result model_pick = choose_model(state, candidate, NULL);
+    int has_default_model = candidate->default_model && *candidate->default_model;
+    if (!model_pick.model && (model_pick.status != PICK_NONE || !has_default_model)) {
+        if (model_pick.status != PICK_CANCELLED) {
+            ui_note("staying on %s — no model chosen for %s", current_id ? current_id : "?",
+                    factory->name);
+            state->render->disp.trail = 1;
         }
-        newp->destroy(newp);
-        config_snapshot_restore(ov);
-        free(cur);
-        return;
-    }
-    /* Escape at the effort step aborts the switch too, silently (see
-     * above). A completed switch resets effort to the pick, or — "default"
-     * row / no ladder — to newp's own default via the sentinel. */
-    char *e = NULL;
-    if (choose_effort(st, newp, m ? m : newp->default_model, NULL, &e, 0) == PICK_CANCELLED) {
-        newp->destroy(newp);
-        config_snapshot_restore(ov);
-        free(cur);
-        free(m);
+        candidate->destroy(candidate);
+        config_snapshot_restore(snapshot);
+        free(current_id);
         return;
     }
 
-    if (picked)
-        newp->model_discovered = 0; /* a real choice — see select_model */
-
-    /* Commit: a provider switch invalidates the old model/effort (they belong
-     * to the old backend), so set the new model and effort to the picked value
-     * or the sentinel — "use newp's default", which shadows a stale lower-tier
-     * env/config value instead of leaking it into the new provider (passed
-     * explicitly rather than as NULL: a same-provider re-pick must reset too,
-     * not keep). Then swap and apply. */
-    commit_selection(f->name, m ? m : CONFIG_VALUE_DEFAULT, e ? e : CONFIG_VALUE_DEFAULT,
-                     newp->model_discovered);
-
-    if (agent_apply_settings(st, newp, 1) != 0) {
-        newp->destroy(newp); /* ownership transfers only on success */
-        config_snapshot_restore(ov);
-        free(cur);
-        free(m);
-        free(e);
+    /* Effort cancellation rolls back; default or no ladder commits the sentinel. */
+    const char *model = model_pick.model ? model_pick.model : candidate->default_model;
+    struct value_pick_result effort_pick = choose_effort(state, candidate, model, NULL, 0);
+    if (effort_pick.status == PICK_CANCELLED) {
+        candidate->destroy(candidate);
+        config_snapshot_restore(snapshot);
+        free(current_id);
+        free(model_pick.model);
         return;
     }
-    config_snapshot_free(ov); /* committed constructor side effects remain */
 
-    free(cur);
-    free(m);
-    free(e);
+    int model_discovered = model_pick.explicit_choice ? 0 : candidate->model_discovered;
+    const char *model_override = model_pick.model ? model_pick.model : CONFIG_VALUE_DEFAULT;
+    const char *effort_override = effort_pick.value ? effort_pick.value : CONFIG_VALUE_DEFAULT;
+    apply_selection_overrides(factory->name, model_override, effort_override);
+
+    if (agent_apply_settings(state, candidate, 1) != 0) {
+        candidate->destroy(candidate); /* ownership transfers only on success */
+        config_snapshot_restore(snapshot);
+        free(current_id);
+        free(model_pick.model);
+        free(effort_pick.value);
+        return;
+    }
+    candidate->model_discovered = model_discovered;
+    config_snapshot_free(snapshot);
+    persist_selection(state, factory->name, model_override, effort_override, model_discovered);
+
+    free(current_id);
+    free(model_pick.model);
+    free(effort_pick.value);
 }
 
-int select_preset(struct agent_state *st, const char *name, int announce)
+static char *choose_preset_name(char **names, size_t count)
+{
+    qsort(names, count, sizeof(*names), compare_string_pointers);
+    struct picker_item *items = xcalloc(count, sizeof(*items));
+    char **details = xcalloc(count, sizeof(*details));
+    const char *active_preset = config_str("preset");
+    size_t initial = 0;
+    for (size_t i = 0; i < count; i++) {
+        items[i].label = names[i];
+        items[i].desc = config_preset_description(names[i]);
+        /* Preview the preset's tint, falling back below run overrides because applying the
+         * preset clears the current stance. */
+        const char *tint = config_preset_tint(names[i]);
+        items[i].label_color = theme_tint_open(tint ? tint : config_str_below_run("tint"));
+        items[i].current = active_preset && *active_preset && strcmp(active_preset, names[i]) == 0;
+        if (items[i].current)
+            initial = i;
+
+        /* Show only explicit preset fields; resolving defaults would require construction. */
+        const char *provider_id = config_preset_provider(names[i]);
+        if (provider_id && provider_find(provider_id)) {
+            struct buf detail;
+            buf_init(&detail);
+            append_segment(&detail, provider_id);
+            const char *model = config_preset_model(names[i]);
+            const char *effort = config_preset_effort(names[i]);
+            if (model && *model)
+                append_segment(&detail, model);
+            if (effort && *effort)
+                append_segment(&detail, effort);
+            details[i] = buf_steal(&detail);
+        } else {
+            /* Unknown provider ids are configuration defects, not availability failures. Keep
+             * them selectable so commit can report the same error. */
+            details[i] = xasprintf("unknown provider '%s'", provider_id ? provider_id : "?");
+            items[i].dim = 1;
+        }
+        items[i].detail = details[i];
+    }
+    struct picker_opts options = {
+        .title = "select a preset", .items = items, .n = count, .initial = initial};
+    long selected_index = picker_run(&options);
+    char *selected_name = selected_index >= 0 ? xstrdup(names[selected_index]) : NULL;
+    free(items);
+    for (size_t i = 0; i < count; i++)
+        free(details[i]);
+    free(details);
+    return selected_name;
+}
+
+int select_preset(struct agent_state *state, const char *name, int announce)
 {
     char **names = NULL;
-    size_t n = config_preset_names(&names);
-    char *picked = NULL;
-    int rc = -1;
+    size_t preset_count = config_preset_names(&names);
+    char *selected_name = NULL;
+    int result = -1;
 
     if (!name) {
-        if (n == 0) {
-            /* The one-command route; hand-authoring is the docs' job. */
+        if (preset_count == 0) {
             ui_note("no presets defined in config.json — use /preset-save to save the current "
                     "selection");
-            st->r->disp.trail = 1;
+            state->render->disp.trail = 1;
             goto out;
         }
-        qsort(names, n, sizeof(*names), cmp_model_id); /* plain char* compare */
-        struct picker_item *items = xcalloc(n, sizeof(*items));
-        char **details = xcalloc(n, sizeof(*details)); /* owned detail strings */
-        const char *active = config_str("preset");
-        size_t initial = 0;
-        for (size_t i = 0; i < n; i++) {
-            items[i].label = names[i];
-            items[i].desc = config_preset_description(names[i]);
-            items[i].dim = 0;
-            /* Each name in the tint it will run under — the same identity color
-             * the banner's [name] takes, so the row shows which persona this
-             * is. A preset naming no tint falls back to the `tint` setting
-             * rather than the plain foreground, since that is what applying it
-             * would look like: not the tint in force now, which is whatever
-             * stance or runtime /config tint the apply is about to clear. */
-            const char *tint = config_preset_tint(names[i]);
-            items[i].label_color = theme_tint_open(tint ? tint : config_str_below_run("tint"));
-            items[i].current = active && *active && strcmp(active, names[i]) == 0;
-            if (items[i].current)
-                initial = i;
-
-            /* Keep the inline detail compact and factual: only show non-empty
-             * fields explicitly written in the preset. Provider defaults
-             * belong in the post-apply banner, not in a picker that never
-             * constructs each provider just to resolve them. */
-            const char *prov = config_preset_provider(names[i]);
-            if (prov && provider_find(prov)) {
-                struct buf b;
-                buf_init(&b);
-                seg_add(&b, prov);
-                const char *model = config_preset_model(names[i]);
-                const char *effort = config_preset_effort(names[i]);
-                if (model && *model)
-                    seg_add(&b, model);
-                if (effort && *effort)
-                    seg_add(&b, effort);
-                details[i] = buf_steal(&b);
-            } else {
-                /* A provider name the registry can't resolve is a typo, not a
-                 * transient outage (availability is deliberately not probed
-                 * here) — show the row dim with the defect as its detail,
-                 * like the /provider picker's unavailable rows. Still
-                 * selectable; committing it reports the same error and
-                 * changes nothing. */
-                details[i] = xasprintf("unknown provider '%s'", prov ? prov : "?");
-                items[i].dim = 1;
-            }
-            items[i].detail = details[i];
-        }
-        struct picker_opts opts = {
-            .title = "select a preset", .items = items, .n = n, .initial = initial};
-        long sel = picker_run(&opts);
-        free(items);
-        for (size_t i = 0; i < n; i++)
-            free(details[i]);
-        free(details);
-        if (sel < 0)
+        selected_name = choose_preset_name(names, preset_count);
+        if (!selected_name)
             goto out; /* cancelled / non-tty */
-        picked = xstrdup(names[sel]);
-        name = picked;
+        name = selected_name;
     }
 
-    /* Snapshot the override tier before applying: a preset that fails
-     * validation or lands on an unusable setup must leave the session
-     * exactly as it was. */
-    struct config_snapshot *ov = config_snapshot_take();
-    char *err = NULL;
-    if (config_preset_apply(name, CONFIG_TIER_RUN, &err) != 0) {
-        ui_error("%s", err ? err : "preset failed to apply");
-        free(err);
-        config_snapshot_restore(ov);
-        st->r->disp.trail = 1;
+    /* Preset application is transactional across overrides and provider construction. */
+    struct config_snapshot *snapshot = config_snapshot_take();
+    char *error = NULL;
+    if (config_preset_apply(name, CONFIG_TIER_RUN, &error) != 0) {
+        ui_error("%s", error ? error : "preset failed to apply");
+        free(error);
+        config_snapshot_restore(snapshot);
+        state->render->disp.trail = 1;
         goto out;
     }
 
-    /* The preset named a provider (config_preset_apply requires one).
-     * Always construct it fresh under the applied overrides — even when the
-     * id matches the live provider: construction is where value-dependent
-     * behavior runs (llama.cpp reconciles the preset's model against the
-     * live /v1/models, warning on a stale pick), so reusing the live
-     * connection would let a same-provider preset bypass it. Strictly by
-     * name, no picker chain: the preset carries the rest. */
-    const char *after = config_str("provider");
-    const struct provider_factory *f = provider_find(after);
-    if (!f) {
-        ui_error("preset '%s': unknown provider '%s'", name, after);
-        config_snapshot_restore(ov);
-        st->r->disp.trail = 1;
+    /* Always construct under preset overrides, even for the live provider id; value-dependent
+     * reconciliation occurs during construction. */
+    const char *provider_id = config_str("provider");
+    const struct provider_factory *factory = provider_find(provider_id);
+    if (!factory) {
+        ui_error("preset '%s': unknown provider '%s'", name, provider_id);
+        config_snapshot_restore(snapshot);
+        state->render->disp.trail = 1;
         goto out;
     }
-    unsigned long diag_before = hax_diag_sequence();
-    struct provider *newp = f->new(f->name);
-    sync_constructor_diagnostics(st, diag_before);
-    if (!newp) {
-        /* The factory printed the reason (no key, server down, …). */
-        config_snapshot_restore(ov);
-        st->r->disp.trail = 1;
+    unsigned long diagnostics_before = hax_diag_sequence();
+    struct provider *candidate = factory->new(factory->name);
+    sync_constructor_diagnostics(state, diagnostics_before);
+    if (!candidate) {
+        /* The constructor already diagnosed the failure. */
+        config_snapshot_restore(snapshot);
+        state->render->disp.trail = 1;
         goto out;
     }
 
-    /* Gather-then-commit, like select_provider: a model must resolve for
-     * the provider the preset lands on — checked BEFORE the old provider is
-     * destroyed and the snapshot freed, so a preset that leaves no model
-     * (omitted, provider has no default) rolls back to the previous
-     * provider+model instead of committing a mismatched pair. Checked after
-     * construction, which may have reconciled a discovered model into the
-     * override tier (llama.cpp). Mirrors agent_session_reconfigure's own
-     * test, so the agent_apply_settings below cannot fail it. */
-    const char *m = config_str("model");
-    if ((!m || !*m) && !(newp->default_model && *newp->default_model)) {
+    /* Validate the post-construction model before ownership transfer; construction may have
+     * reconciled a discovered model into the override tier. */
+    const char *model = config_str("model");
+    if ((!model || !*model) && !(candidate->default_model && *candidate->default_model)) {
         ui_error("preset '%s': no model resolves for provider '%s' — name one in the preset", name,
-                 after);
-        newp->destroy(newp);
-        config_snapshot_restore(ov);
-        st->r->disp.trail = 1;
+                 factory->name);
+        candidate->destroy(candidate);
+        config_snapshot_restore(snapshot);
+        state->render->disp.trail = 1;
         goto out;
     }
 
-    /* Persist the stance like the other selectors, so the next launch
-     * starts back in it (an explicit env var still wins). By name, not
-     * values: the preset definition stays authoritative — editing it
-     * changes what the next launch applies. Deliberately not
-     * config_persist_selection, which is the exit-the-stance commit. */
+    /* Ownership transfers only after validation; unexpected apply failure still rolls back. */
+    if (agent_apply_settings(state, candidate, announce) != 0) {
+        candidate->destroy(candidate);
+        config_snapshot_restore(snapshot);
+        state->render->disp.trail = 1;
+        goto out;
+    }
+    config_snapshot_free(snapshot);
+
+    /* Persist the name only after application succeeds, keeping its definition authoritative. */
     if (config_persist_state("preset", name) != 0) {
         static int warned;
         if (!warned) {
             warned = 1;
             ui_note("couldn't save to state.json — this preset applies to this run only");
+            state->render->disp.trail = 1;
         }
     }
-
-    /* This is the ownership-transfer point: validation above keeps failure
-     * theoretical, but preserve the old provider and override tier if it
-     * still occurs. (agent_apply_settings re-resolves the display, so the
-     * stance's tint reaches the banner it prints.) */
-    if (agent_apply_settings(st, newp, announce) != 0) {
-        newp->destroy(newp);
-        config_snapshot_restore(ov);
-        st->r->disp.trail = 1;
-        goto out;
-    }
-    config_snapshot_free(ov); /* committing — keep the applied overrides */
-    rc = 0;
+    result = 0;
 
 out:
-    free(picked);
-    for (size_t i = 0; i < n; i++)
+    free(selected_name);
+    for (size_t i = 0; i < preset_count; i++)
         free(names[i]);
     free(names);
-    return rc;
+    return result;
 }
 
 /* ---------- saving the live selection as a preset ---------- */
 
-/* Pick the tint a saved preset carries, built from the tint setting's own
- * choices and painted in the tints they name. On PICK_MADE *out is a malloc'd
- * name, or NULL for the "none" row (no tint of its own). PICK_CANCELLED is
- * Escape, or a non-tty — where a tint has to be an argument instead. */
-static enum pick_status choose_tint(const char *cur, char **out)
+/* A NULL value means the preset carries no tint. */
+static struct value_pick_result choose_tint(const char *current_tint)
 {
-    *out = NULL;
-    const struct config_setting *s = config_setting_find("tint");
-    if (!s || !s->choices)
-        return PICK_NONE;
+    struct value_pick_result result = {.status = PICK_NONE};
+    const struct config_setting *setting = config_setting_find("tint");
+    if (!setting || !setting->choices)
+        return result;
 
-    char **vals = NULL;
-    size_t n = split_choices(s->choices, &vals);
-    struct picker_item *items = xcalloc(n + 1, sizeof(*items));
+    char **values = NULL;
+    size_t value_count = split_choices(setting->choices, &values);
+    struct picker_item *items = xcalloc(value_count + 1, sizeof(*items));
     items[0].label = "none";
     items[0].desc = "Carry no tint of its own: your tint setting applies";
-    items[0].current = !cur;
+    items[0].current = !current_tint;
     size_t initial = 0;
-    for (size_t i = 0; i < n; i++) {
-        items[i + 1].label = vals[i];
-        items[i + 1].label_color = theme_tint_open(vals[i]);
-        /* Case-insensitively, like the validator and the theme layer: a
-         * hand-written "ROSE" must still show as the current row rather than
-         * leaving the cursor on "none", where Enter would drop it. */
-        items[i + 1].current = cur && strcasecmp(vals[i], cur) == 0;
+    for (size_t i = 0; i < value_count; i++) {
+        items[i + 1].label = values[i];
+        items[i + 1].label_color = theme_tint_open(values[i]);
+        /* Keep hand-written case variants selected. */
+        items[i + 1].current = current_tint && strcasecmp(values[i], current_tint) == 0;
         if (items[i + 1].current)
             initial = i + 1;
     }
-    struct picker_opts opts = {
-        .title = "tint for this preset", .items = items, .n = n + 1, .initial = initial};
-    long sel = picker_run(&opts);
+    struct picker_opts options = {
+        .title = "tint for this preset",
+        .items = items,
+        .n = value_count + 1,
+        .initial = initial,
+    };
+    long selected_index = picker_run(&options);
     free(items);
-    if (sel > 0)
-        *out = xstrdup(vals[sel - 1]);
-    for (size_t i = 0; i < n; i++)
-        free(vals[i]);
-    free(vals);
-    return sel < 0 ? PICK_CANCELLED : PICK_MADE;
+    if (selected_index >= 0) {
+        result.status = PICK_MADE;
+        if (selected_index > 0)
+            result.value = xstrdup(values[selected_index - 1]);
+    } else {
+        result.status = PICK_CANCELLED;
+    }
+    for (size_t i = 0; i < value_count; i++)
+        free(values[i]);
+    free(values);
+    return result;
 }
 
-/* Confirm replacing an existing definition, showing what it would replace: a
- * mistyped name must not silently overwrite a hand-written preset. Returns 1
- * to go ahead; Escape and the "keep it" row both decline. */
+/* Require explicit confirmation before replacing an existing preset; cancellation declines. */
 static int confirm_overwrite(const char *name)
 {
-    struct buf b;
-    buf_init(&b);
-    const char *prov = config_preset_provider(name);
-    seg_add(&b, prov && *prov ? prov : "no provider");
+    struct buf current_selection;
+    buf_init(&current_selection);
+    const char *provider_id = config_preset_provider(name);
+    append_segment(&current_selection, provider_id && *provider_id ? provider_id : "no provider");
     const char *model = config_preset_model(name);
     const char *effort = config_preset_effort(name);
     if (model && *model)
-        seg_add(&b, model);
+        append_segment(&current_selection, model);
     if (effort && *effort)
-        seg_add(&b, effort);
-    char *cur = buf_steal(&b);
+        append_segment(&current_selection, effort);
+    char *selection_detail = buf_steal(&current_selection);
 
     struct picker_item items[] = {
         {.label = "keep it", .desc = "Leave the existing definition alone", .current = 1},
-        {.label = "overwrite", .detail = cur, .desc = "Replace it with the current selection"},
+        {.label = "overwrite",
+         .detail = selection_detail,
+         .desc = "Replace it with the current selection"},
     };
     char *title = xasprintf("preset '%s' already exists", name);
-    struct picker_opts opts = {
+    struct picker_opts options = {
         .title = title, .items = items, .n = sizeof(items) / sizeof(*items), .initial = 0};
-    long sel = picker_run(&opts);
+    long selected_index = picker_run(&options);
     free(title);
-    free(cur);
-    return sel == 1;
+    free(selection_detail);
+    return selected_index == 1;
 }
 
-/* The system_prompt to write into a saved preset, or NULL to omit it. Only a
- * prompt that omission would *not* reproduce is worth writing down: one already
- * in config.json (or the built-in) comes back on its own, and copying it would
- * just go stale against the original, while a stance's or the environment's
- * would not come back at all. */
+/* Save only a system prompt that normal resolution would not reproduce; copying config/default
+ * values would become stale. */
 static const char *capture_system_prompt(void)
 {
-    const char *sys = config_str("system_prompt");
-    if (!sys)
+    const char *system_prompt = config_str("system_prompt");
+    if (!system_prompt)
         return NULL;
-    const char *src = config_source("system_prompt");
-    if (strcmp(src, "config") == 0 || strcmp(src, "default") == 0)
+    const char *source = config_source("system_prompt");
+    if (strcmp(source, "config") == 0 || strcmp(source, "default") == 0)
         return NULL;
-    return sys;
+    return system_prompt;
 }
 
-void select_preset_save(struct agent_state *st, const char *arg)
+static const char *preset_save_initial_tint(const char *name, int preset_exists)
 {
-    struct provider *p = (struct provider *)st->provider;
-    if (!p) {
+    if (strcmp(config_source("tint"), "run") == 0)
+        return config_str("tint");
+    const char *active_preset = config_str("preset");
+    if (active_preset && *active_preset) {
+        const char *tint = config_preset_tint(active_preset);
+        if (tint)
+            return tint;
+    }
+    return preset_exists ? config_preset_tint(name) : NULL;
+}
+
+void select_preset_save(struct agent_state *state, const char *argument)
+{
+    struct provider *provider = state->provider;
+    if (!provider) {
         ui_note("no provider selected — use /provider to choose one first");
-        st->r->disp.trail = 1;
+        state->render->disp.trail = 1;
         return;
     }
-    /* Saved without a model, the preset would resolve to the provider's
-     * default — not what this session is running. */
-    if (!st->sess->model || !*st->sess->model) {
+    /* A model-less preset could resolve differently from the live session. */
+    if (!state->session->model || !*state->session->model) {
         ui_note("no model resolved yet — use /model to pick one first");
-        st->r->disp.trail = 1;
+        state->render->disp.trail = 1;
         return;
     }
-    /* Nothing here to infer a name from, so seed the command back into the
-     * prompt rather than fail — the handoff /config makes for a typed value. */
-    if (!arg || !*arg) {
+    /* Missing names return to editable input rather than failing. */
+    if (!argument || !*argument) {
         ui_note("name it: /preset-save <name> [tint]");
-        free(st->pending_preseed);
-        st->pending_preseed = xstrdup("/preset-save ");
-        st->r->disp.trail = 1;
+        free(state->pending_preseed);
+        state->pending_preseed = xstrdup("/preset-save ");
+        state->render->disp.trail = 1;
         return;
     }
 
-    /* "<name> [tint]" — the inline spelling of the picker below. */
-    const char *sp = arg;
-    while (*sp && !isspace((unsigned char)*sp))
-        sp++;
-    char *name = xmalloc((size_t)(sp - arg) + 1);
-    memcpy(name, arg, (size_t)(sp - arg));
-    name[sp - arg] = '\0';
-    while (*sp && isspace((unsigned char)*sp))
-        sp++;
-    const char *tint_arg = *sp ? sp : NULL;
+    const char *separator = argument;
+    while (*separator && !isspace((unsigned char)*separator))
+        separator++;
+    size_t name_length = (size_t)(separator - argument);
+    char *name = xmalloc(name_length + 1);
+    memcpy(name, argument, name_length);
+    name[name_length] = '\0';
+    while (*separator && isspace((unsigned char)*separator))
+        separator++;
+    const char *tint_argument = *separator ? separator : NULL;
     char *tint = NULL;
 
     if (!config_preset_name_valid(name)) {
         ui_error("'%s' can't be a preset name — use letters, digits, '.', '-' or '_', starting "
                  "with a letter or digit",
                  name);
-        st->r->disp.trail = 1;
+        state->render->disp.trail = 1;
         goto out;
     }
-    const struct config_setting *ts = config_setting_find("tint");
-    if (tint_arg && !config_value_valid(ts, tint_arg)) {
-        ui_error("unknown tint '%s' (expected %s)", tint_arg, ts ? ts->choices : "");
-        st->r->disp.trail = 1;
+    const struct config_setting *tint_setting = config_setting_find("tint");
+    if (tint_argument && !config_value_valid(tint_setting, tint_argument)) {
+        ui_error("unknown tint '%s' (expected %s)", tint_argument,
+                 tint_setting ? tint_setting->choices : "");
+        state->render->disp.trail = 1;
         goto out;
     }
 
-    int exists = config_preset_exists(name);
-    if (exists && !confirm_overwrite(name)) {
+    int preset_exists = config_preset_exists(name);
+    if (preset_exists && !confirm_overwrite(name)) {
         ui_note("left preset '%s' unchanged", name);
-        st->r->disp.trail = 1;
+        state->render->disp.trail = 1;
         goto out;
     }
 
-    if (tint_arg) {
-        /* Canonical spelling, like /config commits: validation accepts "ROSE",
-         * but storing it verbatim leaves a value that only compares equal
-         * case-insensitively — and reads oddly next to the other members. */
-        char *canon = config_value_canonical(ts, tint_arg);
-        tint = canon ? canon : xstrdup(tint_arg);
+    if (tint_argument) {
+        /* Persist canonical tint spelling after case-insensitive validation. */
+        char *canonical_tint = config_value_canonical(tint_setting, tint_argument);
+        tint = canonical_tint ? canonical_tint : xstrdup(tint_argument);
     } else {
-        /* Start on the tint the session is showing, by the precedence the
-         * display resolves it with (theme_init): a runtime /config tint, else
-         * the running stance's. A save captures what is running, so that is the
-         * tint to offer — not the one the preset happens to hold, which would
-         * ignore a hue picked since. Only when nothing session-specific is in
-         * force does a re-save fall back to the definition's own tint, so
-         * updating a model doesn't silently drop it. */
-        const char *cur = NULL;
-        if (strcmp(config_source("tint"), "run") == 0)
-            cur = config_str("tint");
-        const char *stance = config_str("preset");
-        if (!cur && stance && *stance)
-            cur = config_preset_tint(stance);
-        if (!cur && exists)
-            cur = config_preset_tint(name);
-        if (choose_tint(cur, &tint) == PICK_CANCELLED)
-            goto out; /* Escape means "never mind", as in every other picker */
+        const char *initial_tint = preset_save_initial_tint(name, preset_exists);
+        struct value_pick_result tint_pick = choose_tint(initial_tint);
+        if (tint_pick.status == PICK_CANCELLED)
+            goto out;
+        tint = tint_pick.value;
     }
 
-    struct config_preset def = {
-        .provider = agent_provider_id(p),
-        /* A discovered model is this server's current state, not a choice (see
-         * provider.model_discovered): omitting it makes the preset re-discover
-         * on every apply, which is both what a hand-written one would say and
-         * what survives restarting llama-server on a different model. */
-        .model = p->model_discovered ? NULL : st->sess->model,
-        .effort = st->sess->effort,
+    struct config_preset definition = {
+        .provider = agent_provider_id(provider),
+        /* Omit discovered server state so applying the preset re-discovers the model. */
+        .model = provider->model_discovered ? NULL : state->session->model,
+        .effort = state->session->effort,
         .system_prompt = capture_system_prompt(),
         .tint = tint,
-        /* A description states the role, which a re-save isn't changing. */
-        .description = exists ? config_preset_description(name) : NULL,
+        /* Preserve the existing description on re-save. */
+        .description = preset_exists ? config_preset_description(name) : NULL,
     };
-    char *err = NULL;
-    if (config_preset_save(name, &def, &err) != 0) {
-        ui_error("%s", err ? err : "couldn't save the preset");
-        free(err);
-        st->r->disp.trail = 1;
+    char *error = NULL;
+    if (config_preset_save(name, &definition, &error) != 0) {
+        ui_error("%s", error ? error : "couldn't save the preset");
+        free(error);
+        state->render->disp.trail = 1;
         goto out;
     }
-    ui_note("%s preset '%s' in config.json", exists ? "updated" : "saved", name);
-    st->r->disp.trail = 1;
+    ui_note("%s preset '%s' in config.json", preset_exists ? "updated" : "saved", name);
+    state->render->disp.trail = 1;
 
-    /* Enter the stance just defined. It names what is already running, so no
-     * setting changes — the banner names the preset, its tint takes effect, and
-     * the name persists for the next launch. */
-    select_preset(st, name, 1);
+    /* Enter the saved stance so its name and tint become active and persistent. */
+    select_preset(state, name, 1);
 
 out:
     free(tint);
@@ -1240,386 +1084,370 @@ out:
 /* ---------- restoring a resumed conversation's selection ---------- */
 
 /* Equal, treating NULL and "" as the same absence. */
-static int sel_same(const char *a, const char *b)
+static int selection_value_equal(const char *left, const char *right)
 {
-    if (!a || !*a)
-        return !b || !*b;
-    return b && strcmp(a, b) == 0;
+    if (!left || !*left)
+        return !right || !*right;
+    return right && strcmp(left, right) == 0;
 }
 
-void select_restore_session(struct agent_state *st, const char *provider, const char *model,
+void select_restore_session(struct agent_state *state, const char *provider_id, const char *model,
                             const char *effort, const char *preset)
 {
-    /* "none" is a provider-less recording — it names no backend to go back
-     * to, so the run keeps whatever it is on. */
-    if (!provider || !*provider || strcmp(provider, "none") == 0)
+    /* A provider-less recording leaves the live provider unchanged. */
+    if (!provider_id || !*provider_id || strcmp(provider_id, "none") == 0)
         return;
 
-    struct provider *live = (struct provider *)st->provider;
-    char *cur = current_provider_id(live);
-    if (live && sel_same(cur, provider) && sel_same(st->sess->model, model) &&
-        sel_same(st->sess->effort, effort) && sel_same(config_str("preset"), preset)) {
-        free(cur); /* already running exactly this — nothing to say */
+    struct provider *live_provider = state->provider;
+    char *current_id = current_provider_id(live_provider);
+    if (live_provider && selection_value_equal(current_id, provider_id) &&
+        selection_value_equal(state->session->model, model) &&
+        selection_value_equal(state->session->effort, effort) &&
+        selection_value_equal(config_str("preset"), preset)) {
+        free(current_id);
         return;
     }
 
-    /* Run overrides, not the conversation tier: mid-session this is a
-     * selection act like /preset, and the newest act wins — a /model made
-     * earlier in this run must not outrank the conversation the user just
-     * asked for. Not persisted either: resuming isn't a new default. What
-     * gets written is config's business (same call --resume makes at
-     * startup); rolling it back on a failure below is ours. */
-    struct config_snapshot *ov = config_snapshot_take();
-    char *err = NULL;
-    if (config_restore_selection(CONFIG_TIER_RUN, provider, model, effort, preset, &err) != 0) {
-        /* The preset was renamed or deleted since — the persona is gone, but
-         * the recorded provider/model still applies. Say so; the user can fix
-         * it with /preset. */
-        ui_note("%s — resuming without it", err ? err : "preset failed to apply");
-        st->r->disp.trail = 1;
-        free(err);
+    /* Restore into run overrides so it outranks earlier selectors without becoming a persisted
+     * default. Roll back the tier if provider restoration fails. */
+    struct config_snapshot *snapshot = config_snapshot_take();
+    char *error = NULL;
+    if (config_restore_selection(CONFIG_TIER_RUN, provider_id, model, effort, preset, &error) !=
+        0) {
+        /* A missing preset does not prevent restoring its recorded provider and model. */
+        ui_note("%s — resuming without it", error ? error : "preset failed to apply");
+        state->render->disp.trail = 1;
+        free(error);
     }
 
-    /* Construct fresh by name, exactly like a preset switch: construction is
-     * where value-dependent behavior runs, so a same-id provider is rebuilt
-     * rather than reused. */
-    const char *id = config_str("provider");
-    const struct provider_factory *f = provider_find(id);
-    unsigned long diag_before = hax_diag_sequence();
-    struct provider *newp = f ? f->new(f->name) : NULL;
-    sync_constructor_diagnostics(st, diag_before);
-    if (!newp) {
-        if (!f)
-            ui_error("session used unknown provider '%s'", id);
-        /* Else the factory printed why. Keep the live provider rather than
-         * silently answering this conversation from a backend it never used:
-         * the history is restored, the choice of where to continue it is
-         * the user's. */
-        ui_note("couldn't restore %s — staying on %s (use /provider to switch)", id,
-                cur ? cur : "no provider");
-        st->r->disp.trail = 1;
-        config_snapshot_restore(ov);
-        free(cur);
+    /* Reconstruct even the same provider id so value-dependent setup runs under restored values. */
+    const char *restored_provider_id = config_str("provider");
+    const struct provider_factory *factory = provider_find(restored_provider_id);
+    const char *display_provider_id = factory ? factory->name : restored_provider_id;
+    unsigned long diagnostics_before = hax_diag_sequence();
+    struct provider *candidate = factory ? factory->new(factory->name) : NULL;
+    sync_constructor_diagnostics(state, diagnostics_before);
+    if (!candidate) {
+        if (!factory)
+            ui_error("session used unknown provider '%s'", display_provider_id);
+        /* Do not silently move restored history to another backend. */
+        ui_note("couldn't restore %s — staying on %s (use /provider to switch)",
+                display_provider_id, current_id ? current_id : "no provider");
+        state->render->disp.trail = 1;
+        config_snapshot_restore(snapshot);
+        free(current_id);
         return;
     }
-    /* A model must resolve for it, checked before the old provider is
-     * destroyed — same gather-then-commit shape as the other flows. */
-    const char *m = config_str("model");
-    if ((!m || !*m) && !(newp->default_model && *newp->default_model)) {
-        ui_note("couldn't restore %s — no model resolves for it; staying on %s", id,
-                cur ? cur : "no provider");
-        st->r->disp.trail = 1;
-        newp->destroy(newp);
-        config_snapshot_restore(ov);
-        free(cur);
+    /* Validate the model before transferring provider ownership. */
+    const char *restored_model = config_str("model");
+    if ((!restored_model || !*restored_model) &&
+        !(candidate->default_model && *candidate->default_model)) {
+        ui_note("couldn't restore %s — no model resolves for it; staying on %s",
+                display_provider_id, current_id ? current_id : "no provider");
+        state->render->disp.trail = 1;
+        candidate->destroy(candidate);
+        config_snapshot_restore(snapshot);
+        free(current_id);
         return;
     }
-    if (agent_apply_settings(st, newp, 1) != 0) {
-        newp->destroy(newp);
-        config_snapshot_restore(ov);
-        st->r->disp.trail = 1;
-        free(cur);
+    if (agent_apply_settings(state, candidate, 1) != 0) {
+        candidate->destroy(candidate);
+        config_snapshot_restore(snapshot);
+        state->render->disp.trail = 1;
+        free(current_id);
         return;
     }
-    config_snapshot_free(ov);
-    free(cur);
+    config_snapshot_free(snapshot);
+    free(current_id);
 }
 
 /* ---------- /config ---------- */
 
-static int setting_is_bool(const struct config_setting *s)
+static int setting_is_bool(const struct config_setting *setting)
 {
-    return s->kind == CONFIG_KIND_STRING && s->choices &&
-           strcmp(s->choices, CONFIG_CHOICES_BOOL) == 0;
+    return setting->kind == CONFIG_KIND_STRING && setting->choices &&
+           strcmp(setting->choices, CONFIG_CHOICES_BOOL) == 0;
 }
 
-/* Tri-state boolean: on/off plus "auto", where auto (and unset) defers to the
- * consumer's own default — one it resolves itself (a provider preset), so
- * /config can't compute it and shows "auto" rather than a concrete on/off. */
-static int setting_is_tristate(const struct config_setting *s)
+/* "auto" defers to a consumer-specific default that /config cannot resolve to on or off. */
+static int setting_is_tristate(const struct config_setting *setting)
 {
-    return s->kind == CONFIG_KIND_STRING && s->choices &&
-           strcmp(s->choices, CONFIG_CHOICES_TRISTATE) == 0;
+    return setting->kind == CONFIG_KIND_STRING && setting->choices &&
+           strcmp(setting->choices, CONFIG_CHOICES_TRISTATE) == 0;
 }
 
-/* Display-safe effective value: secrets are redacted and booleans normalized.
- * config_str applies the registry's empty policy, so the shown value matches
- * what the setting actually reads (config_source mirrors the same rule).
- * Borrowed until the next override write. */
-static const char *setting_display_value(const struct config_setting *s)
+/* Return a borrowed display-safe value: redact secrets, normalize booleans, and honor registry
+ * empty-value policy. Invalidated by the next override write. */
+static const char *setting_display_value(const struct config_setting *setting)
 {
-    const char *v = config_str(s->key);
-    if (s->secret)
-        return (v && *v) ? "set" : "unset";
-    if (setting_is_bool(s))
-        return config_bool(s->key) ? "on" : "off";
-    if (setting_is_tristate(s)) {
-        /* Unset or an explicit "auto" both mean "provider decides"; a valid
-         * on/off spelling normalizes, an invalid value shows raw (+ marker). */
-        if (!v || strcasecmp(v, "auto") == 0)
+    const char *value = config_str(setting->key);
+    if (setting->secret)
+        return (value && *value) ? "set" : "unset";
+    if (setting_is_bool(setting))
+        return config_bool(setting->key) ? "on" : "off";
+    if (setting_is_tristate(setting)) {
+        /* Preserve invalid raw values for the diagnostic marker; normalize valid aliases. */
+        if (!value || strcasecmp(value, "auto") == 0)
             return "auto";
-        if (!config_value_valid(s, v))
-            return v;
-        return config_bool_or(s->key, 0) ? "on" : "off";
+        if (!config_value_valid(setting, value))
+            return value;
+        return config_bool_or(setting->key, 0) ? "on" : "off";
     }
-    if (!v)
+    if (!value)
         return "unset";
-    /* Only keep_empty settings resolve to a literal "" (config_str skips an
-     * empty tier otherwise); that empty is meaningful — e.g. system_prompt ""
-     * sends no system message where unset uses the built-in — so mark it. */
-    if (!*v)
+    /* A resolved empty value is meaningful only for keep_empty settings; distinguish it from
+     * unset. */
+    if (!*value)
         return "(empty)";
-    return v;
+    return value;
 }
 
-/* Whether the resolved value is present but fails validation — a bad env/
- * config entry the getter silently ignores in favor of the default. Free-form
- * (CONFIG_KIND_STRING without choices) always validates, so this fires for enums,
- * bools, and bounded numerics: a bad spelling or out-of-range value. */
-static int setting_value_invalid(const struct config_setting *s)
+/* Detect configured values rejected by typed consumers, excluding secrets. */
+static int setting_value_invalid(const struct config_setting *setting)
 {
-    const char *v = config_str(s->key);
-    return v && *v && !s->secret && !config_value_valid(s, v);
+    const char *value = config_str(setting->key);
+    return value && *value && !setting->secret && !config_value_valid(setting, value);
 }
 
-/* Print `key = value (source)` using the effective post-change value, marking
- * a configured value the getter rejects so it doesn't look like it applies. */
-static void setting_note_current(struct agent_state *st, const struct config_setting *s)
+/* Mark rejected configured values so they do not appear effective. */
+static void note_current_setting(struct agent_state *state, const struct config_setting *setting)
 {
-    ui_note("%s = %s (%s%s)", s->key, setting_display_value(s), config_source(s->key),
-            setting_value_invalid(s) ? ", invalid" : "");
-    st->r->disp.trail = 1;
+    ui_note("%s = %s (%s%s)", setting->key, setting_display_value(setting),
+            config_source(setting->key), setting_value_invalid(setting) ? ", invalid" : "");
+    state->render->disp.trail = 1;
 }
 
-/* Dedicated command for settings that are runtime-changeable outside
- * /config. Kept here so slash-command names stay out of the config layer. */
+/* Keep slash-command knowledge out of the config layer. */
 static const char *setting_runtime_command(const char *key)
 {
     static const struct {
         const char *key;
-        const char *cmd;
-    } cmds[] = {
+        const char *command;
+    } commands[] = {
         {"provider", "/provider"},
         {"model", "/model"},
         {"effort", "/effort"},
         {"preset", "/preset"},
     };
-    for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
-        if (strcmp(cmds[i].key, key) == 0)
-            return cmds[i].cmd;
+    for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
+        if (strcmp(commands[i].key, key) == 0)
+            return commands[i].command;
     return NULL;
 }
 
-/* Show a read-only setting and where it can be changed. */
-static void setting_note_readonly(struct agent_state *st, const struct config_setting *s)
+static void note_readonly_setting(struct agent_state *state, const struct config_setting *setting)
 {
-    setting_note_current(st, s);
-    const char *cmd = setting_runtime_command(s->key);
-    if (cmd)
-        ui_note("  change it with %s", cmd);
+    note_current_setting(state, setting);
+    const char *command = setting_runtime_command(setting->key);
+    if (command)
+        ui_note("  change it with %s", command);
     else
-        ui_note("  read-only at runtime — set %s or config.json and restart to change", s->env_var);
+        ui_note("  read-only at runtime — set %s or config.json and restart to change",
+                setting->env_var);
 }
 
-/* Set or clear the override, then refresh display-cached settings. */
-static void setting_commit(struct agent_state *st, const struct config_setting *s, const char *val)
+static void commit_setting(struct agent_state *state, const struct config_setting *setting,
+                           const char *value)
 {
-    config_set_override(s->key, val);
-    agent_display_refresh(st);
-    setting_note_current(st, s);
+    config_set_override(setting->key, value);
+    agent_display_refresh(state);
+    note_current_setting(state, setting);
 }
 
-static void setting_preseed(struct agent_state *st, const struct config_setting *s, const char *val)
+static void preseed_setting(struct agent_state *state, const struct config_setting *setting,
+                            const char *value)
 {
-    free(st->pending_preseed);
-    st->pending_preseed =
-        (val && *val) ? xasprintf("/config %s %s", s->key, val) : xasprintf("/config %s ", s->key);
+    free(state->pending_preseed);
+    state->pending_preseed = (value && *value) ? xasprintf("/config %s %s", setting->key, value)
+                                               : xasprintf("/config %s ", setting->key);
 }
 
-/* Pick an enumerated value; "default" clears the override so lower tiers
- * resolve again. A non-string kind makes the choices additive and offers a
- * handoff to the regular editor for an exact typed value. */
-static void setting_pick_choice(struct agent_state *st, const struct config_setting *s)
+/* "default" clears the override. Numeric choice lists also hand off to editable exact input. */
+static void pick_setting_choice(struct agent_state *state, const struct config_setting *setting)
 {
-    char **vals = NULL;
-    size_t n = split_choices(s->choices, &vals);
-    int mixed = s->kind != CONFIG_KIND_STRING;
-    size_t nitems = n + 1 + (mixed ? 1 : 0);
+    char **values = NULL;
+    size_t value_count = split_choices(setting->choices, &values);
+    int accepts_exact_value = setting->kind != CONFIG_KIND_STRING;
+    size_t item_count = value_count + 1 + (accepts_exact_value ? 1 : 0);
 
-    struct picker_item *items = xcalloc(nitems, sizeof(*items));
+    struct picker_item *items = xcalloc(item_count, sizeof(*items));
     items[0].label = "default";
     items[0].desc = "Clear the runtime override and use the environment, saved configuration, or "
                     "built-in default";
-    const char *cur = setting_display_value(s);
+    const char *current_value = setting_display_value(setting);
     size_t initial = 0;
-    int choice_current = 0;
-    for (size_t i = 0; i < n; i++) {
-        items[i + 1].label = vals[i];
-        /* The one setting whose values *are* colors shows them, rather than
-         * naming four words the user has to try one at a time. */
-        if (strcmp(s->key, "tint") == 0)
-            items[i + 1].label_color = theme_tint_open(vals[i]);
-        items[i + 1].current = strcasecmp(vals[i], cur) == 0;
+    int choice_is_current = 0;
+    for (size_t i = 0; i < value_count; i++) {
+        items[i + 1].label = values[i];
+        /* Preview tint choices in their colors. */
+        if (strcmp(setting->key, "tint") == 0)
+            items[i + 1].label_color = theme_tint_open(values[i]);
+        items[i + 1].current = strcasecmp(values[i], current_value) == 0;
         if (items[i + 1].current) {
             initial = i + 1;
-            choice_current = 1;
+            choice_is_current = 1;
         }
     }
 
-    int typed_current = mixed && !choice_current && config_value_valid(s, cur);
-    char *exact_desc = NULL;
-    if (mixed) {
-        items[n + 1].label = "exact value...";
-        if (s->example) {
-            exact_desc = xasprintf("Enter an exact value such as %s", s->example);
-            items[n + 1].desc = exact_desc;
+    int exact_value_is_current =
+        accepts_exact_value && !choice_is_current && config_value_valid(setting, current_value);
+    char *exact_value_description = NULL;
+    if (accepts_exact_value) {
+        items[value_count + 1].label = "exact value...";
+        if (setting->example) {
+            exact_value_description =
+                xasprintf("Enter an exact value such as %s", setting->example);
+            items[value_count + 1].desc = exact_value_description;
         }
-        items[n + 1].current = typed_current;
-        if (typed_current)
-            initial = n + 1;
+        items[value_count + 1].current = exact_value_is_current;
+        if (exact_value_is_current)
+            initial = value_count + 1;
     }
 
-    char *title = xasprintf("%s — %s", s->key, s->description);
-    struct picker_opts opts = {.title = title, .items = items, .n = nitems, .initial = initial};
-    long sel = picker_run(&opts);
+    char *title = xasprintf("%s — %s", setting->key, setting->description);
+    struct picker_opts options = {
+        .title = title, .items = items, .n = item_count, .initial = initial};
+    long selected_index = picker_run(&options);
     free(title);
-    free(exact_desc);
+    free(exact_value_description);
     free(items);
 
-    if (sel == 0)
-        setting_commit(st, s, NULL);
-    else if (sel > 0 && (size_t)sel <= n)
-        setting_commit(st, s, vals[sel - 1]);
-    else if (mixed && (size_t)sel == n + 1)
-        setting_preseed(st, s, typed_current ? cur : s->example);
-    for (size_t i = 0; i < n; i++)
-        free(vals[i]);
-    free(vals);
+    if (selected_index == 0)
+        commit_setting(state, setting, NULL);
+    else if (selected_index > 0 && (size_t)selected_index <= value_count)
+        commit_setting(state, setting, values[selected_index - 1]);
+    else if (accepts_exact_value && (size_t)selected_index == value_count + 1)
+        preseed_setting(state, setting, exact_value_is_current ? current_value : setting->example);
+    for (size_t i = 0; i < value_count; i++)
+        free(values[i]);
+    free(values);
 }
 
-/* Seed the regular editor with a command for a free-form value. When the
- * current value fails validation (a bad env/config entry), seed the registry
- * default instead so pressing Enter commits something the getter accepts
- * rather than re-submitting the rejected value. */
-static void setting_seed_prompt(struct agent_state *st, const struct config_setting *s)
+/* Seed invalid current values from the registry default rather than resubmitting them. */
+static void seed_setting_prompt(struct agent_state *state, const struct config_setting *setting)
 {
-    const char *v = config_str(s->key);
-    if (v && *v && !config_value_valid(s, v))
-        v = config_default(s->key);
-    setting_preseed(st, s, v);
+    const char *value = config_str(setting->key);
+    if (value && *value && !config_value_valid(setting, value))
+        value = config_default(setting->key);
+    preseed_setting(state, setting, value);
 }
 
-static void config_typed(struct agent_state *st, const char *arg)
+static void select_config_argument(struct agent_state *state, const char *argument)
 {
-    const char *p = arg;
-    while (*p && !isspace((unsigned char)*p))
-        p++;
+    const char *separator = argument;
+    while (*separator && !isspace((unsigned char)*separator))
+        separator++;
     char key[64];
-    size_t klen = (size_t)(p - arg);
-    if (klen >= sizeof(key)) {
-        ui_error("unknown setting '%.*s'", (int)klen, arg);
-        st->r->disp.trail = 1;
+    size_t key_length = (size_t)(separator - argument);
+    if (key_length >= sizeof(key)) {
+        ui_error("unknown setting '%.*s'", (int)key_length, argument);
+        state->render->disp.trail = 1;
         return;
     }
-    memcpy(key, arg, klen);
-    key[klen] = '\0';
-    while (*p && isspace((unsigned char)*p))
-        p++;
-    const char *val = *p ? p : NULL;
+    memcpy(key, argument, key_length);
+    key[key_length] = '\0';
+    while (*separator && isspace((unsigned char)*separator))
+        separator++;
+    const char *value = *separator ? separator : NULL;
 
-    const struct config_setting *s = config_setting_find(key);
-    if (!s) {
+    const struct config_setting *setting = config_setting_find(key);
+    if (!setting) {
         ui_error("unknown setting '%s' — /config lists them", key);
-        st->r->disp.trail = 1;
+        state->render->disp.trail = 1;
         return;
     }
-    if (!val) {
-        if (s->editable)
-            setting_note_current(st, s);
+    if (!value) {
+        if (setting->editable)
+            note_current_setting(state, setting);
         else
-            setting_note_readonly(st, s);
+            note_readonly_setting(state, setting);
         return;
     }
-    if (!s->editable) {
-        const char *cmd = setting_runtime_command(key);
-        if (cmd)
-            ui_error("'%s' can't be changed from /config — use %s", key, cmd);
+    if (!setting->editable) {
+        const char *command = setting_runtime_command(key);
+        if (command)
+            ui_error("'%s' can't be changed from /config — use %s", key, command);
         else
             ui_error("'%s' can't be changed at runtime — set %s or config.json and restart", key,
-                     s->env_var);
-        st->r->disp.trail = 1;
+                     setting->env_var);
+        state->render->disp.trail = 1;
         return;
     }
-    if (strcmp(val, "default") == 0) {
-        setting_commit(st, s, NULL);
+    if (strcmp(value, "default") == 0) {
+        commit_setting(state, setting, NULL);
         return;
     }
-    if (!config_value_valid(s, val)) {
+    if (!config_value_valid(setting, value)) {
         char hint[64];
-        config_value_hint(s, hint, sizeof(hint));
-        ui_error("invalid value '%s' for %s (expected: %s, or default)", val, key, hint);
-        st->r->disp.trail = 1;
+        config_value_hint(setting, hint, sizeof(hint));
+        ui_error("invalid value '%s' for %s (expected: %s, or default)", value, key, hint);
+        state->render->disp.trail = 1;
         return;
     }
     /* Store the canonical spelling so a case-sensitive consumer matches. */
-    char *canon = config_value_canonical(s, val);
-    setting_commit(st, s, canon ? canon : val);
-    free(canon);
+    char *canonical_value = config_value_canonical(setting, value);
+    commit_setting(state, setting, canonical_value ? canonical_value : value);
+    free(canonical_value);
 }
 
-void select_config(struct agent_state *st, const char *arg)
+static const struct config_setting *choose_config_setting(void)
 {
-    if (arg && *arg) {
-        config_typed(st, arg);
+    /* Preserve registry grouping; dim rows are inspectable but read-only. */
+    size_t setting_count = 0;
+    const struct config_setting *settings = config_settings(&setting_count);
+
+    struct picker_item *items = xcalloc(setting_count, sizeof(*items));
+    char **details = xmalloc(setting_count * sizeof(*details));
+    char **descriptions = xcalloc(setting_count, sizeof(*descriptions));
+    for (size_t i = 0; i < setting_count; i++) {
+        const struct config_setting *setting = &settings[i];
+        details[i] =
+            xasprintf("%s (%s%s)", setting_display_value(setting), config_source(setting->key),
+                      setting_value_invalid(setting) ? ", invalid" : "");
+        items[i].label = setting->key;
+        items[i].detail = details[i];
+        /* Show units or bounds only when the value grammar adds useful information. */
+        int show_hint = setting->kind == CONFIG_KIND_SIZE ||
+                        setting->kind == CONFIG_KIND_DURATION ||
+                        (setting->kind == CONFIG_KIND_INT && (setting->min || setting->max));
+        if (show_hint) {
+            char hint[64];
+            config_value_hint(setting, hint, sizeof(hint));
+            descriptions[i] = xasprintf("%s (%s)", setting->description, hint);
+            items[i].desc = descriptions[i];
+        } else {
+            items[i].desc = setting->description;
+        }
+        items[i].dim = !setting->editable;
+    }
+    struct picker_opts options = {
+        .title = "configuration", .items = items, .n = setting_count, .initial = 0};
+    long selected_index = picker_run(&options);
+    free(items);
+    for (size_t i = 0; i < setting_count; i++) {
+        free(details[i]);
+        free(descriptions[i]);
+    }
+    free(details);
+    free(descriptions);
+
+    return selected_index >= 0 ? &settings[selected_index] : NULL;
+}
+
+void select_config(struct agent_state *state, const char *argument)
+{
+    if (argument && *argument) {
+        select_config_argument(state, argument);
         return;
     }
 
-    /* Preserve registry grouping; dim rows are inspectable but read-only. */
-    size_t n = 0;
-    const struct config_setting *rows = config_settings(&n);
-
-    struct picker_item *items = xcalloc(n, sizeof(*items));
-    char **details = xmalloc(n * sizeof(*details));
-    char **descs = xcalloc(n, sizeof(*descs)); /* owned augmented descriptions */
-    for (size_t i = 0; i < n; i++) {
-        details[i] =
-            xasprintf("%s (%s%s)", setting_display_value(&rows[i]), config_source(rows[i].key),
-                      setting_value_invalid(&rows[i]) ? ", invalid" : "");
-        items[i].label = rows[i].key;
-        items[i].detail = details[i];
-        /* Surface the value grammar that isn't obvious from the prose: units
-         * for a size/duration, and the range for a bounded integer. A plain
-         * unbounded integer needs no hint. */
-        int show_hint = rows[i].kind == CONFIG_KIND_SIZE || rows[i].kind == CONFIG_KIND_DURATION ||
-                        (rows[i].kind == CONFIG_KIND_INT && (rows[i].min || rows[i].max));
-        if (show_hint) {
-            char hint[64];
-            config_value_hint(&rows[i], hint, sizeof(hint));
-            descs[i] = xasprintf("%s (%s)", rows[i].description, hint);
-            items[i].desc = descs[i];
-        } else {
-            items[i].desc = rows[i].description;
-        }
-        items[i].dim = !rows[i].editable;
-        items[i].current = 0;
-    }
-    struct picker_opts opts = {.title = "configuration", .items = items, .n = n, .initial = 0};
-    long sel = picker_run(&opts);
-    free(items);
-    for (size_t i = 0; i < n; i++) {
-        free(details[i]);
-        free(descs[i]);
-    }
-    free(details);
-    free(descs);
-
-    if (sel >= 0) {
-        const struct config_setting *s = &rows[sel];
-        if (!s->editable)
-            setting_note_readonly(st, s);
-        else if (s->choices)
-            setting_pick_choice(st, s);
-        else
-            setting_seed_prompt(st, s);
-    }
+    const struct config_setting *setting = choose_config_setting();
+    if (!setting)
+        return;
+    if (!setting->editable)
+        note_readonly_setting(state, setting);
+    else if (setting->choices)
+        pick_setting_choice(state, setting);
+    else
+        seed_setting_prompt(state, setting);
 }

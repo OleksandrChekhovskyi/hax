@@ -34,19 +34,19 @@ const struct tool TOOL_EDIT = {.def = {.name = "edit"}, .run = stub_run};
  * - agent_new_conversation: stand in for the real /new behavior. Only
  *   the session-reset half is observable in slash tests (transcript log
  *   stays NULL, banner is silent), so we replicate just that. */
-void agent_print_banner(const struct provider *p, const struct agent_session *s)
+void agent_print_banner(const struct provider *provider, const struct agent_session *session)
 {
-    (void)p;
-    (void)s;
+    (void)provider;
+    (void)session;
 }
-void agent_new_conversation(struct agent_state *st)
+void agent_new_conversation(struct agent_state *state)
 {
-    agent_session_reset(st->sess);
+    agent_session_reset(state->session);
 }
 /* The real agent_session_spend lives in agent.c, which this test does not link. */
-double agent_session_spend(const struct session_stats *t, int *approx)
+double agent_session_spend(const struct session_stats *stats, int *estimated)
 {
-    return agent_spend_total(&t->spend, approx);
+    return agent_spend_total(&stats->spend, estimated);
 }
 
 /* /resume reaches into session.c / session_picker.c / agent.c too. None
@@ -79,42 +79,42 @@ char *session_picker_run(const char *cwd, const char *exclude_path, int *shown)
         *shown = stub_picker_shown;
     return stub_picker_path ? xstrdup(stub_picker_path) : NULL;
 }
-void agent_resume_session(struct agent_state *st, const char *path)
+void agent_resume_session(struct agent_state *state, const char *path)
 {
-    (void)st;
+    (void)state;
     (void)path;
 }
-int agent_compact(struct agent_state *st, const char *instructions, int is_auto)
+int agent_compact(struct agent_state *state, const char *instructions, int automatic)
 {
-    (void)st;
+    (void)state;
     (void)instructions;
-    (void)is_auto;
+    (void)automatic;
     return 0;
 }
 
 /* /undo and /fork reach into agent.c (the turn helpers and the mutators) and
  * terminal/picker.c. None are linked here; the dispatch tests exercise the
  * empty-conversation guard, which returns before any of these run. */
-size_t agent_user_turn_count(const struct agent_session *s)
+size_t agent_user_turn_count(const struct agent_session *session)
 {
-    (void)s;
+    (void)session;
     return 0;
 }
-const char *agent_user_turn_text(const struct agent_session *s, size_t turn)
+const char *agent_user_turn_text(const struct agent_session *session, size_t turn_index)
 {
-    (void)s;
-    (void)turn;
+    (void)session;
+    (void)turn_index;
     return NULL;
 }
-void agent_undo(struct agent_state *st, size_t turn)
+void agent_undo(struct agent_state *state, size_t turn_index)
 {
-    (void)st;
-    (void)turn;
+    (void)state;
+    (void)turn_index;
 }
-void agent_fork(struct agent_state *st, size_t turn)
+void agent_fork(struct agent_state *state, size_t turn_index)
 {
-    (void)st;
-    (void)turn;
+    (void)state;
+    (void)turn_index;
 }
 struct picker_opts;
 long picker_run(const struct picker_opts *opts)
@@ -126,41 +126,41 @@ long picker_run(const struct picker_opts *opts)
 /* /provider, /model, /effort, /preset dispatch into select.c, which pulls
  * in the whole provider + picker + agent graph. The slash tests only assert
  * on dispatch routing, so stub the entry points the registry calls. */
-void select_provider(struct agent_state *st)
+void select_provider(struct agent_state *state)
 {
-    (void)st;
+    (void)state;
 }
-void select_model(struct agent_state *st)
+void select_model(struct agent_state *state)
 {
-    (void)st;
+    (void)state;
 }
-void select_effort(struct agent_state *st)
+void select_effort(struct agent_state *state)
 {
-    (void)st;
+    (void)state;
 }
 /* Scripts the select_preset stub: the result an apply reports, plus what the
  * last call was asked for — /new routes its argument through here. */
 static int stub_preset_rc = 0;
 static const char *stub_preset_name = NULL;
 static int stub_preset_announce = -1;
-int select_preset(struct agent_state *st, const char *name, int announce)
+int select_preset(struct agent_state *state, const char *name, int announce)
 {
-    (void)st;
+    (void)state;
     stub_preset_name = name;
     stub_preset_announce = announce;
     return stub_preset_rc;
 }
 /* Records what /preset-save routed through, same as the select_preset stub. */
 static const char *stub_preset_save_arg = NULL;
-void select_preset_save(struct agent_state *st, const char *arg)
+void select_preset_save(struct agent_state *state, const char *argument)
 {
-    (void)st;
-    stub_preset_save_arg = arg;
+    (void)state;
+    stub_preset_save_arg = argument;
 }
-void select_config(struct agent_state *st, const char *arg)
+void select_config(struct agent_state *state, const char *argument)
 {
-    (void)st;
-    (void)arg;
+    (void)state;
+    (void)argument;
 }
 
 /* Redirect stdout to a temp file so we can inspect what slash_dispatch
@@ -213,8 +213,8 @@ static void test_dispatch_not_a_command(void)
 {
     /* Lines that don't start with '/' must return NOT_A_COMMAND and
      * print nothing — the agent loop relies on silent passthrough. */
-    struct agent_state st = {0};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {0};
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "hello world", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_NOT_A_COMMAND);
@@ -238,8 +238,8 @@ static void test_dispatch_unknown(void)
      * not silently shipped to the model. */
     struct render_ctx r = {0};
     r.disp.trail = 1; /* models the cursor one line below the echoed command */
-    struct agent_state st = {.r = &r};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {.render = &r};
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/nonesuch", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_UNKNOWN);
@@ -255,8 +255,8 @@ static void test_dispatch_path_falls_through(void)
      * the agent forwards them to the model verbatim — losing a
      * prompt like "/tmp/repro.c crashes, inspect it" to an "unknown
      * command" error would be much worse than not catching a typo. */
-    struct agent_state st = {0};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {0};
+    struct slash_ctx ctx = {.state = &state};
     const char *paths[] = {
         "/tmp/repro.c crashes, inspect it",
         "/etc/passwd is owned by root",
@@ -279,8 +279,8 @@ static void test_dispatch_control_bytes_fall_through(void)
      * terminal would interpret the embedded escape. Bareword check
      * makes this unreachable: any non-[a-zA-Z0-9_-] byte in the
      * first token routes the line to the model as plain text. */
-    struct agent_state st = {0};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {0};
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/\x1b[2J", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_NOT_A_COMMAND);
@@ -295,8 +295,8 @@ static void test_dispatch_bare_slash_falls_through(void)
      * command" would be inconsistent with the bareword rule
      * (which routes anything that isn't a clean command to the
      * model). Make them silent fall-throughs instead. */
-    struct agent_state st = {0};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {0};
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_NOT_A_COMMAND);
@@ -317,8 +317,8 @@ static void test_dispatch_bad_usage(void)
      * run the handler. */
     struct render_ctx r = {0};
     r.disp.trail = 1;
-    struct agent_state st = {.r = &r};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {.render = &r};
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/help foo", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_BAD_USAGE);
@@ -332,8 +332,8 @@ static void test_help_lists_commands_and_shortcuts(void)
 {
     struct render_ctx r = {0};
     r.disp.trail = 1;
-    struct agent_state st = {.r = &r};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {.render = &r};
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/help", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
@@ -359,22 +359,22 @@ static void test_session_prints_totals(void)
 {
     struct render_ctx r = {0};
     r.disp.trail = 1;
-    struct agent_state st = {.r = &r};
-    st.stats.turns = 3;
-    st.stats.requests = 7;
-    st.stats.tool_calls = 6;
-    st.stats.tools[0].name = "bash";
-    st.stats.tools[0].count = 4;
-    st.stats.tools[1].name = "read";
-    st.stats.tools[1].count = 2;
-    st.stats.worked_ms = 68000;   /* 1m 08s */
-    st.stats.input_tokens = 5530; /* categories below subtract to 2.4k uncached */
-    st.stats.output_tokens = 412;
-    st.stats.cached_tokens = 2048;      /* 2.0k */
-    st.stats.cache_write_tokens = 1024; /* 1.0k */
+    struct agent_state state = {.render = &r};
+    state.stats.user_turns = 3;
+    state.stats.requests = 7;
+    state.stats.tool_calls = 6;
+    state.stats.tools[0].name = "bash";
+    state.stats.tools[0].count = 4;
+    state.stats.tools[1].name = "read";
+    state.stats.tools[1].count = 2;
+    state.stats.worked_ms = 68000;   /* 1m 08s */
+    state.stats.input_tokens = 5530; /* categories below subtract to 2.4k uncached */
+    state.stats.output_tokens = 412;
+    state.stats.cached_tokens = 2048;      /* 2.0k */
+    state.stats.cache_write_tokens = 1024; /* 1.0k */
     /* Accumulated per response in production (the subtraction depends on
      * the model's rates); here the plain replacement-style remainder. */
-    st.stats.uncached_tokens = 5530 - 2048 - 1024;
+    state.stats.uncached_input_tokens = 5530 - 2048 - 1024;
     /* One response that reported its charge. No provider is attached, so
      * nothing can price its categories — the counts stay bare. */
     struct stream_usage reported = {.input_tokens = 5530,
@@ -383,9 +383,9 @@ static void test_session_prints_totals(void)
                                     .cache_write_tokens = 1024,
                                     .cache_write_1h_tokens = -1,
                                     .cost = 0.042};
-    agent_spend_account(&st.stats.spend, &reported, NULL, NULL);
-    st.stats.last_ctx = 4000; /* 3.9k; no provider ⇒ no limit/percent */
-    struct slash_ctx ctx = {.state = &st};
+    agent_spend_account(&state.stats.spend, &reported, NULL, NULL);
+    state.stats.latest_context_tokens = 4000; /* 3.9k; no provider ⇒ no limit/percent */
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/session", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
@@ -407,7 +407,7 @@ static void test_session_prints_totals(void)
     EXPECT(strstr(out, "$0.042") != NULL);
     EXPECT(strstr(out, "~$") == NULL);
     free(out);
-    agent_spend_free(&st.stats.spend);
+    agent_spend_free(&state.stats.spend);
 }
 
 static void test_session_hides_unreported_rows(void)
@@ -417,8 +417,8 @@ static void test_session_hides_unreported_rows(void)
      * zeros; turns and time worked always render. */
     struct render_ctx r = {0};
     r.disp.trail = 1;
-    struct agent_state st = {.r = &r};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {.render = &r};
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/session", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
@@ -438,23 +438,23 @@ static void test_session_marks_estimated_spend(void)
      * marker — the reported subtotal is not the whole story. */
     struct render_ctx r = {0};
     r.disp.trail = 1;
-    struct agent_state st = {.r = &r};
+    struct agent_state state = {.render = &r};
     struct stream_usage paid = {-1, -1, -1, -1, -1, 0.030};
-    agent_spend_account(&st.stats.spend, &paid, NULL, NULL);
+    agent_spend_account(&state.stats.spend, &paid, NULL, NULL);
     struct stream_usage u = {.input_tokens = 1000,
                              .output_tokens = 50,
                              .cached_tokens = -1,
                              .cache_write_tokens = -1,
                              .cache_write_1h_tokens = -1,
                              .cost = -1};
-    agent_spend_account(&st.stats.spend, &u, NULL, NULL);
-    struct slash_ctx ctx = {.state = &st};
+    agent_spend_account(&state.stats.spend, &u, NULL, NULL);
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/session", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
     EXPECT(strstr(out, "~$0.030") != NULL);
     free(out);
-    agent_spend_free(&st.stats.spend);
+    agent_spend_free(&state.stats.spend);
 }
 
 /* ---------- /new and its alias /clear ---------- */
@@ -480,8 +480,8 @@ static void test_new_clears_session(void)
     struct provider p = {.name = "test", .default_model = NULL};
     struct render_ctx r = {0};
     r.disp.trail = 1;
-    struct agent_state st = {.sess = &s, .provider = &p, .r = &r};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {.session = &s, .provider = &p, .render = &r};
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/new", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
@@ -510,8 +510,8 @@ static void test_clear_alias_runs_new(void)
     struct provider p = {.name = "test", .default_model = NULL};
     struct render_ctx r = {0};
     r.disp.trail = 1;
-    struct agent_state st = {.sess = &s, .provider = &p, .r = &r};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {.session = &s, .provider = &p, .render = &r};
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/clear", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
@@ -536,8 +536,8 @@ static void test_new_with_preset_switches_then_clears(void)
     struct provider p = {.name = "test", .default_model = NULL};
     struct render_ctx r = {0};
     r.disp.trail = 1;
-    struct agent_state st = {.sess = &s, .provider = &p, .r = &r};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {.session = &s, .provider = &p, .render = &r};
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/new work", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
@@ -562,8 +562,8 @@ static void test_new_keeps_conversation_when_preset_fails(void)
     struct provider p = {.name = "test", .default_model = NULL};
     struct render_ctx r = {0};
     r.disp.trail = 1;
-    struct agent_state st = {.sess = &s, .provider = &p, .r = &r};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {.session = &s, .provider = &p, .render = &r};
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/new nwo", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
@@ -586,8 +586,8 @@ static void test_clear_alias_takes_preset_too(void)
     struct provider p = {.name = "test", .default_model = NULL};
     struct render_ctx r = {0};
     r.disp.trail = 1;
-    struct agent_state st = {.sess = &s, .provider = &p, .r = &r};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {.session = &s, .provider = &p, .render = &r};
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/clear work", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
@@ -605,8 +605,8 @@ static void test_preset_save_routes_whole_argument(void)
      * "/preset" prefix it starts with. A bare call is legal, not BAD_USAGE. */
     struct render_ctx r = {0};
     r.disp.trail = 1;
-    struct agent_state st = {.r = &r};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {.render = &r};
+    struct slash_ctx ctx = {.state = &state};
 
     stub_preset_save_arg = NULL;
     stub_preset_name = NULL;
@@ -632,8 +632,8 @@ static void test_dispatch_trims_trailing_whitespace(void)
      * accidental space-Enter shouldn't break a known command. */
     struct render_ctx r = {0};
     r.disp.trail = 1;
-    struct agent_state st = {.r = &r};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {.render = &r};
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/help   ", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
@@ -650,8 +650,8 @@ static void test_resume_cancelled_picker_keeps_trail(void)
     stub_picker_path = NULL;
     struct render_ctx r = {0};
     r.disp.trail = 1;
-    struct agent_state st = {.r = &r};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {.render = &r};
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/resume", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
@@ -670,8 +670,8 @@ static void test_resume_selected_session_keeps_trail(void)
     stub_picker_path = "/tmp/some-session.jsonl";
     struct render_ctx r = {0};
     r.disp.trail = 1;
-    struct agent_state st = {.r = &r};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {.render = &r};
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/resume", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
@@ -690,8 +690,8 @@ static void test_resume_no_picker_repairs_trail(void)
     stub_picker_path = NULL;
     struct render_ctx r = {0};
     r.disp.trail = 1;
-    struct agent_state st = {.r = &r};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {.render = &r};
+    struct slash_ctx ctx = {.state = &state};
     struct dispatch_call c = {.line = "/resume", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
@@ -709,8 +709,8 @@ static void test_undo_fork_empty_conversation(void)
     struct render_ctx r = {0};
     r.disp.trail = 1;
     struct agent_session s = {0};
-    struct agent_state st = {.sess = &s, .r = &r};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {.session = &s, .render = &r};
+    struct slash_ctx ctx = {.state = &state};
 
     struct dispatch_call cu = {.line = "/undo", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &cu);
@@ -737,8 +737,8 @@ static void test_fork_zero_clones_seed_only(void)
                                            .origin = ITEM_ORIGIN_COMPACT_SEED});
     struct render_ctx r = {0};
     r.disp.trail = 1;
-    struct agent_state st = {.sess = &s, .r = &r};
-    struct slash_ctx ctx = {.state = &st};
+    struct agent_state state = {.session = &s, .render = &r};
+    struct slash_ctx ctx = {.state = &state};
 
     struct dispatch_call cf = {.line = "/fork 0", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &cf);
