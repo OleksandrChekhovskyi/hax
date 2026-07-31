@@ -46,14 +46,21 @@ static void render_stored_text(struct render_ctx *render, enum render_state stat
     }
 }
 
-static void render_interrupt_marker(struct render_ctx *render)
+/* The marker text is visible content, so disp_write, not disp_raw: clearing the
+ * trail is what makes the next block's separator emit its blank line. */
+static void render_dim_marker(struct render_ctx *render, const char *text)
 {
     render_open_block(render);
     disp_raw(&render->disp, ANSI_DIM);
-    disp_raw(&render->disp, INTERRUPT_MARKER);
+    disp_write(&render->disp, text, strlen(text));
     disp_raw(&render->disp, ANSI_RESET);
     disp_putc(&render->disp, '\n');
     disp_flush(&render->disp);
+}
+
+static void render_interrupt_marker(struct render_ctx *render)
+{
+    render_dim_marker(render, INTERRUPT_MARKER);
 }
 
 /* Provenance, not marker text, distinguishes an interrupt from model-authored output. */
@@ -202,11 +209,7 @@ static int is_streamed_kind(enum item_kind kind)
 
 static void render_compaction_marker(struct render_ctx *render)
 {
-    render_open_block(render);
-    disp_raw(&render->disp, ANSI_DIM);
-    disp_raw(&render->disp, "── conversation compacted ──");
-    disp_raw(&render->disp, ANSI_RESET);
-    disp_putc(&render->disp, '\n');
+    render_dim_marker(render, "── conversation compacted ──");
 }
 
 static void render_streamed_range(struct render_ctx *render, const struct item *items, size_t from,

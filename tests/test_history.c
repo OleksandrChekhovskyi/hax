@@ -529,6 +529,35 @@ static void test_compaction_seed_renders_as_marker(void)
     free(out);
 }
 
+/* A session resumed on a compaction seed must not print its first real prompt
+ * onto the marker's row. */
+static void test_marker_separates_from_next_block(void)
+{
+    struct item items[2] = {0};
+    items[0].kind = ITEM_USER_MESSAGE;
+    items[0].text = (char *)"SUMMARY OF EARLIER WORK";
+    items[0].origin = ITEM_ORIGIN_COMPACT_SEED;
+    items[1].kind = ITEM_USER_MESSAGE;
+    items[1].text = (char *)"FIRST_REAL_PROMPT";
+
+    char *out = render(HISTORY_FULL, items, 2, 0);
+    char *plain = strip_sgr(out);
+    EXPECT(strstr(plain, "conversation compacted ──\n\n") != NULL);
+    EXPECT(strstr(plain, "compacted ──\xE2\x96\x8C") == NULL);
+    free(plain);
+    free(out);
+
+    items[0].kind = ITEM_ASSISTANT_MESSAGE;
+    items[0].text = (char *)"[interrupted]";
+    items[0].origin = ITEM_ORIGIN_INTERRUPTED;
+
+    char *after_interrupt = render(HISTORY_FULL, items, 2, 0);
+    char *iplain = strip_sgr(after_interrupt);
+    EXPECT(strstr(iplain, "[interrupted]\n\n") != NULL);
+    free(iplain);
+    free(after_interrupt);
+}
+
 /* Reasoning follows the live setting, so turning it on shows reasoning for
  * turns that were displayed without it. */
 static void test_reasoning_follows_setting(void)
@@ -946,6 +975,7 @@ int main(void)
     test_repeated_call_ids_do_not_pair_across_turns();
     test_orphan_call_renders_header();
     test_compaction_seed_renders_as_marker();
+    test_marker_separates_from_next_block();
     test_reasoning_follows_setting();
     test_interrupt_marker_split_out();
     test_diff_result_and_no_op_marker();
