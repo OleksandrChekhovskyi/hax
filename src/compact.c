@@ -190,7 +190,7 @@ static char *compact_summarize(const struct agent_session *s, struct provider *p
     char *summary = NULL;
     for (int attempt = 0; attempt < COMPACT_MAX_ATTEMPTS; attempt++) {
         struct context ctx = {
-            .system_prompt = s->sys,
+            .system_prompt = s->system_prompt,
             .items = req,
             .n_items = n,
             .tools = s->tools,
@@ -264,13 +264,13 @@ static void compact_apply(struct agent_session *s, struct session_log *slog,
 {
     char *seed = compact_build_seed(summary);
     agent_session_reset(s);
-    items_append(
-        &s->items, &s->n_items, &s->cap_items,
+    agent_session_append(
+        s,
         (struct item){.kind = ITEM_USER_MESSAGE, .text = seed, .origin = ITEM_ORIGIN_COMPACT_SEED});
     /* Rotate both logs to fresh files, then write the seed. The old records
      * remain on disk for archaeology. */
     session_log_reset(slog);
-    transcript_log_reset(tlog, s->sys, s->tools, s->n_tools);
+    transcript_log_reset(tlog, s->system_prompt, s->tools, s->n_tools);
     transcript_log_append(tlog, s->items, s->n_items);
     session_log_append(slog, s->items, s->n_items);
     /* No tempfiles_cleanup() here: COMPACT_PROMPT tells the summary to
@@ -343,7 +343,7 @@ void compact_run(const struct compact_params *params, struct compact_result *res
      * The records written below carry the selection, so re-stamp the header
      * with it too. */
     if (agent_session_resync_effort(params->session, params->provider, NULL))
-        session_log_set_meta(params->slog, provider_log_name(params->provider),
+        session_log_set_meta(params->slog, agent_provider_log_name(params->provider),
                              params->session->model, params->session->effort, config_str("preset"));
 
     struct compact_sink sink = {.hooks = &params->hooks};

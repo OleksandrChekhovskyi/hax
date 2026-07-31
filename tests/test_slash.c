@@ -43,11 +43,10 @@ void agent_new_conversation(struct agent_state *st)
 {
     agent_session_reset(st->sess);
 }
-/* The real agent_session_spend lives in agent.c (not linked here) but is
- * a plain wrapper over agent_core's spend_total — mirror that. */
+/* The real agent_session_spend lives in agent.c, which this test does not link. */
 double agent_session_spend(const struct session_stats *t, int *approx)
 {
-    return spend_total(&t->spend, approx);
+    return agent_spend_total(&t->spend, approx);
 }
 
 /* /resume reaches into session.c / session_picker.c / agent.c too. None
@@ -384,7 +383,7 @@ static void test_session_prints_totals(void)
                                     .cache_write_tokens = 1024,
                                     .cache_write_1h_tokens = -1,
                                     .cost = 0.042};
-    spend_account(&st.stats.spend, &reported, NULL, NULL);
+    agent_spend_account(&st.stats.spend, &reported, NULL, NULL);
     st.stats.last_ctx = 4000; /* 3.9k; no provider ⇒ no limit/percent */
     struct slash_ctx ctx = {.state = &st};
     struct dispatch_call c = {.line = "/session", .ctx = &ctx};
@@ -408,7 +407,7 @@ static void test_session_prints_totals(void)
     EXPECT(strstr(out, "$0.042") != NULL);
     EXPECT(strstr(out, "~$") == NULL);
     free(out);
-    spend_free(&st.stats.spend);
+    agent_spend_free(&st.stats.spend);
 }
 
 static void test_session_hides_unreported_rows(void)
@@ -441,21 +440,21 @@ static void test_session_marks_estimated_spend(void)
     r.disp.trail = 1;
     struct agent_state st = {.r = &r};
     struct stream_usage paid = {-1, -1, -1, -1, -1, 0.030};
-    spend_account(&st.stats.spend, &paid, NULL, NULL);
+    agent_spend_account(&st.stats.spend, &paid, NULL, NULL);
     struct stream_usage u = {.input_tokens = 1000,
                              .output_tokens = 50,
                              .cached_tokens = -1,
                              .cache_write_tokens = -1,
                              .cache_write_1h_tokens = -1,
                              .cost = -1};
-    spend_account(&st.stats.spend, &u, NULL, NULL);
+    agent_spend_account(&st.stats.spend, &u, NULL, NULL);
     struct slash_ctx ctx = {.state = &st};
     struct dispatch_call c = {.line = "/session", .ctx = &ctx};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
     EXPECT(strstr(out, "~$0.030") != NULL);
     free(out);
-    spend_free(&st.stats.spend);
+    agent_spend_free(&st.stats.spend);
 }
 
 /* ---------- /new and its alias /clear ---------- */
@@ -465,8 +464,8 @@ static void seed_session(struct agent_session *s)
     /* Pretend a couple of turns happened. agent_session_reset must
      * clear all of them. */
     agent_session_add_user(s, "first prompt");
-    items_append(&s->items, &s->n_items, &s->cap_items,
-                 (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("first reply")});
+    agent_session_append(
+        s, (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("first reply")});
     agent_session_add_user(s, "second prompt");
 }
 
@@ -733,10 +732,9 @@ static void test_fork_zero_clones_seed_only(void)
      * must still be allowed when there's history to copy. agent_fork is a
      * no-op stub, so we assert the zero-count guard did NOT fire. */
     struct agent_session s = {0};
-    items_append(&s.items, &s.n_items, &s.cap_items,
-                 (struct item){.kind = ITEM_USER_MESSAGE,
-                               .text = xstrdup("seed"),
-                               .origin = ITEM_ORIGIN_COMPACT_SEED});
+    agent_session_append(&s, (struct item){.kind = ITEM_USER_MESSAGE,
+                                           .text = xstrdup("seed"),
+                                           .origin = ITEM_ORIGIN_COMPACT_SEED});
     struct render_ctx r = {0};
     r.disp.trail = 1;
     struct agent_state st = {.sess = &s, .r = &r};

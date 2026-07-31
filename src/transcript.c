@@ -462,7 +462,7 @@ static void usage_tokens(FILE *out, int *first, const char *label, long tokens, 
  * catalog rates), then the token categories with their per-category
  * estimates. One raw line by design: the transcript never wraps content;
  * pagers and editors do. All figures come precomputed in the payload
- * (turn_usage_make), keeping this pure formatting. */
+ * (agent_turn_usage_new), keeping this pure formatting. */
 static void render_turn_usage(FILE *out, int color, const struct turn_usage *tu)
 {
     const struct stream_usage *u = &tu->usage;

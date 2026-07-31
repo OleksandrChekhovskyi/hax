@@ -49,7 +49,7 @@ int tool_call_is_silent(const struct item *call)
     /* Classified off the stored args, not dispatch's preprocessed
      * `effective` copy: path normalization can't change the answer, and a
      * replayed call is all a later view has. */
-    return call->tool_name ? call_is_silent(find_tool(call->tool_name), call) : 0;
+    return call->tool_name ? call_is_silent(agent_find_tool(call->tool_name), call) : 0;
 }
 
 /* Hard cap on the dim suffix appended after the bold display_arg
@@ -70,7 +70,7 @@ static void display_tool_header(struct disp *d, const struct item *call)
     /* Same "?" stand-in as the quiet line: a nameless call is a malformed
      * provider response, and the history view replays whatever is stored. */
     const char *name = call->tool_name ? call->tool_name : "?";
-    const struct tool *tool = find_tool(name);
+    const struct tool *tool = agent_find_tool(name);
     const char *display_arg = NULL;
     json_t *root = NULL;
     if (tool && tool->def.display_arg && call->tool_arguments_json) {
@@ -339,7 +339,7 @@ struct item dispatch_tool_refused(struct render_ctx *r, const struct item *call)
 static void write_cluster_line(struct render_ctx *r, const struct item *call)
 {
     struct disp *d = &r->disp;
-    const struct tool *t = call->tool_name ? find_tool(call->tool_name) : NULL;
+    const struct tool *t = call->tool_name ? agent_find_tool(call->tool_name) : NULL;
     int term_w = display_width();
     int is_read = call->tool_name && strcmp(call->tool_name, "read") == 0;
     int can_coalesce = r->cluster_line_open && r->cluster_last_tool &&

@@ -3,6 +3,7 @@
 #define HAX_AGENT_H
 
 #include "agent_core.h"
+#include "agent_usage.h"
 #include "provider.h"
 
 struct transcript_log;
@@ -20,25 +21,18 @@ struct session_stats {
     long output_tokens;      /* total tokens generated */
     long cached_tokens;      /* total input tokens served from the prefix cache */
     long cache_write_tokens; /* total input tokens billed as cache writes */
-    /* Summed uncached remainder (usage_uncached_input). Accumulated per
+    /* Summed uncached remainder (agent_usage_uncached_input). Accumulated per
      * response rather than derived from the three sums above, since the
      * subtraction depends on rates that differ per model. */
     long uncached_tokens;
-    /* Spend accounting (agent_core.h): exact provider-reported cost plus
-     * per-request records of responses that reported none, each stamped
-     * with the catalog identity it ran under. Records are priced at
-     * *render* time — so a late-landing catalog fetch retroactively
-     * covers earlier turns — and each at its own request's rates, so
-     * provider/model switches need no settling and context-tier pricing
-     * sees true per-request input sizes. Owns heap memory: release with
-     * spend_free before zeroing the stats. */
+    /* Per-response spend records; release with agent_spend_free before zeroing the stats. */
     struct spend_totals spend;
     long worked_ms; /* wall time spent inside user turns */
     long turns;     /* user turns started by typed input; empty-send
                      * continuations of a resumable turn don't re-count */
     long requests;  /* model round-trips streamed (glossary: turns) */
     /* Tool invocations the model made, total and per type. Per-type slots
-     * key on the registry's static tool names (find_tool), which outlive
+     * key on the registry's static tool names (agent_find_tool), which outlive
      * items — an item-owned name would dangle once compaction frees the
      * history that carried it. Slots fill in first-use order; calls to
      * unregistered names count only toward the total. */
@@ -190,11 +184,7 @@ int agent_apply_settings(struct agent_state *st, struct provider *p, int announc
  * may discard and rebuild the Markdown renderer. */
 void agent_display_refresh(struct agent_state *st);
 
-/* Total session spend for display, USD: provider-reported cost plus the
- * catalog-estimated cost of unreported responses, each priced at its own
- * recorded catalog identity (spend_total). Sets *approx (when non-NULL)
- * to 1 iff any inexact component exists, so callers can mark the figure
- * ("~$0.42"). */
+/* Return session spend in USD; `approx` follows agent_spend_total. */
 double agent_session_spend(const struct session_stats *t, int *approx);
 
 /* Summarize the live conversation and replace history with the summary,

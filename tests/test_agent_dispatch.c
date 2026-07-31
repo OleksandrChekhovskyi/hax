@@ -14,10 +14,10 @@
 #include "render/render_ctx.h"
 #include "render/spinner.h"
 
-/* find_tool lives in agent_core.c alongside the full tool table; stub it
+/* agent_find_tool lives in agent_core.c alongside the full tool table; stub it
  * so this test links only `write` (the tool under test) and the render
  * stack rather than every tool and its dependencies. */
-const struct tool *find_tool(const char *name)
+const struct tool *agent_find_tool(const char *name)
 {
     return strcmp(name, "write") == 0 ? &TOOL_WRITE : NULL;
 }

@@ -94,7 +94,7 @@ static void fixture_init(struct fixture *f)
     memset(f, 0, sizeof(*f));
     f->p.name = "prov-x";
     struct hax_opts opts = {0};
-    EXPECT(agent_session_init(&f->sess, &f->p, &opts) == 0);
+    agent_session_init(&f->sess, &f->p, &opts);
 
     /* Model the dispatcher's state at the point select.c calls apply:
      * the leading-gap separator has run, cursor on a blank line. */
@@ -403,7 +403,7 @@ static void test_apply_settings_keeps_stamped_spend(void)
                              .cache_write_tokens = -1,
                              .cache_write_1h_tokens = -1,
                              .cost = -1};
-    spend_account(&f.st.stats.spend, &u, &f.p, "model-a");
+    agent_spend_account(&f.st.stats.spend, &u, &f.p, "model-a");
 
     setenv("HAX_MODEL", "model-b", 1); /* model-a -> model-b */
     char *out = capture_stdout(do_apply, &f);
@@ -417,14 +417,14 @@ static void test_apply_settings_keeps_stamped_spend(void)
      * unknown model) leaves the total at the reported subtotal, marked
      * approximate — it's missing real usage. */
     struct provider nowhere = {.catalog_id = "no-such-catalog-provider"};
-    spend_account(&f.st.stats.spend, &u, &nowhere, "model-x");
+    agent_spend_account(&f.st.stats.spend, &u, &nowhere, "model-x");
     struct stream_usage paid = {-1, -1, -1, -1, -1, 0.03};
-    spend_account(&f.st.stats.spend, &paid, &f.p, "model-a");
+    agent_spend_account(&f.st.stats.spend, &paid, &f.p, "model-a");
     approx = 0;
     EXPECT(agent_session_spend(&f.st.stats, &approx) == 10.03);
     EXPECT(approx == 1);
 
-    spend_free(&f.st.stats.spend);
+    agent_spend_free(&f.st.stats.spend);
     fixture_free(&f);
 }
 
@@ -523,8 +523,7 @@ static void test_banner_prefers_label_and_appends_effort(void)
 static void add_turn(struct agent_session *s, const char *prompt, const char *reply)
 {
     agent_session_add_user(s, prompt); /* boundary + user */
-    items_append(&s->items, &s->n_items, &s->cap_items,
-                 (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup(reply)});
+    agent_session_append(s, (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup(reply)});
 }
 
 /* Fresh, isolated per-cwd session tree, with recording enabled. */
@@ -577,8 +576,8 @@ static void test_continue_marker_is_not_a_user_turn(void)
     fixture_init(&f);
     add_turn(&f.sess, "first", "r1");
     agent_session_add_continuation(&f.sess);
-    items_append(&f.sess.items, &f.sess.n_items, &f.sess.cap_items,
-                 (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("r1 continued")});
+    agent_session_append(
+        &f.sess, (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("r1 continued")});
     add_turn(&f.sess, "second", "r2");
 
     EXPECT(agent_user_turn_count(&f.sess) == 2);
@@ -650,8 +649,8 @@ static void test_undo_with_continuation_cuts_disk_and_memory_alike(void)
     add_turn(&f.sess, "first", "r1");
     /* An interrupted first turn resumed by an empty send. */
     agent_session_add_continuation(&f.sess);
-    items_append(&f.sess.items, &f.sess.n_items, &f.sess.cap_items,
-                 (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("r1 continued")});
+    agent_session_append(
+        &f.sess, (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("r1 continued")});
     add_turn(&f.sess, "second", "r2");
 
     f.st.slog = session_log_open("prov-x", "model-a", NULL, NULL);

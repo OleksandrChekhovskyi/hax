@@ -1,22 +1,14 @@
 /* SPDX-License-Identifier: MIT */
-#include <errno.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/stat.h>
 
 #include "agent_core.h"
-#include "catalog.h"
 #include "harness.h"
-#include "model_meta.h"
 #include "tool.h"
+#include "turn.h"
 #include "util.h"
 
-/* Stand-in tool symbols for the link. agent_core's TOOLS[] references
- * &TOOL_READ / &TOOL_EDIT / &TOOL_WRITE / &TOOL_BASH, so the test binary
- * needs definitions to satisfy the linker. We fill in just enough for
- * find_tool's name lookup; .run is never invoked in these tests. */
+/* agent_core's static tool table requires these link-time stand-ins. */
 static char *stub_run(const char *args, struct tool_ctx *ctx)
 {
     (void)args;
@@ -29,104 +21,75 @@ const struct tool TOOL_EDIT = {.def = {.name = "edit"}, .run = stub_run};
 const struct tool TOOL_WRITE = {.def = {.name = "write"}, .run = stub_run};
 const struct tool TOOL_BASH = {.def = {.name = "bash"}, .run = stub_run};
 
-/* ---------- items_append ---------- */
-
-static void test_items_append_growth(void)
+static void test_session_append(void)
 {
-    struct item *items = NULL;
-    size_t n = 0, cap = 0;
+    struct agent_session session = {0};
 
-    /* Verify capacity doubling: empty → 16 → 32. We don't strictly need
-     * to depend on the doubling factor (that's an internal detail), but
-     * cap must always be >= n and growth must be amortized — i.e. cap
-     * grows in steps, not on every append. */
-    size_t prev_cap = 0;
-    int cap_changes = 0;
-    for (int i = 0; i < 40; i++) {
-        items_append(&items, &n, &cap, (struct item){.kind = ITEM_USER_MESSAGE});
-        if (cap != prev_cap) {
-            cap_changes++;
-            prev_cap = cap;
-        }
-    }
-    EXPECT(n == 40);
-    EXPECT(cap >= 40);
-    EXPECT(cap_changes <= 5); /* a handful of grows, not 40 */
+    agent_session_append(&session,
+                         (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup("hello")});
+    agent_session_append(&session, (struct item){.kind = ITEM_TURN_BOUNDARY});
+    agent_session_append(&session,
+                         (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("world")});
 
-    for (size_t i = 0; i < n; i++)
-        item_free(&items[i]);
-    free(items);
+    EXPECT(session.n_items == 3);
+    EXPECT(session.items[0].kind == ITEM_USER_MESSAGE);
+    EXPECT_STR_EQ(session.items[0].text, "hello");
+    EXPECT(session.items[1].kind == ITEM_TURN_BOUNDARY);
+    EXPECT(session.items[2].kind == ITEM_ASSISTANT_MESSAGE);
+    EXPECT_STR_EQ(session.items[2].text, "world");
+
+    agent_session_free(&session);
 }
-
-static void test_items_append_preserves_payload(void)
-{
-    struct item *items = NULL;
-    size_t n = 0, cap = 0;
-
-    items_append(&items, &n, &cap,
-                 (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup("hello")});
-    items_append(&items, &n, &cap, (struct item){.kind = ITEM_TURN_BOUNDARY});
-    items_append(&items, &n, &cap,
-                 (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("world")});
-
-    EXPECT(n == 3);
-    EXPECT(items[0].kind == ITEM_USER_MESSAGE);
-    EXPECT_STR_EQ(items[0].text, "hello");
-    EXPECT(items[1].kind == ITEM_TURN_BOUNDARY);
-    EXPECT(items[2].kind == ITEM_ASSISTANT_MESSAGE);
-    EXPECT_STR_EQ(items[2].text, "world");
-
-    for (size_t i = 0; i < n; i++)
-        item_free(&items[i]);
-    free(items);
-}
-
-/* ---------- find_tool ---------- */
 
 static void test_find_tool(void)
 {
-    EXPECT(find_tool("read") == &TOOL_READ);
-    EXPECT(find_tool("bash") == &TOOL_BASH);
-    EXPECT(find_tool("write") == &TOOL_WRITE);
-    EXPECT(find_tool("edit") == &TOOL_EDIT);
-    EXPECT(find_tool("nonexistent") == NULL);
-    EXPECT(find_tool("") == NULL);
+    EXPECT(agent_find_tool("read") == &TOOL_READ);
+    EXPECT(agent_find_tool("bash") == &TOOL_BASH);
+    EXPECT(agent_find_tool("write") == &TOOL_WRITE);
+    EXPECT(agent_find_tool("edit") == &TOOL_EDIT);
+    EXPECT(agent_find_tool("nonexistent") == NULL);
+    EXPECT(agent_find_tool("") == NULL);
 }
 
-/* ---------- build_system_prompt ---------- */
+static char *build_test_system_prompt(int raw)
+{
+    setenv("HAX_MODEL", "model-x", 1);
+    struct provider provider = {.name = "test"};
+    struct hax_opts opts = {.raw = raw};
+    struct agent_session session;
+    agent_session_init(&session, &provider, &opts);
+    char *prompt = session.system_prompt;
+    session.system_prompt = NULL;
+    agent_session_free(&session);
+    unsetenv("HAX_MODEL");
+    return prompt;
+}
 
 static void test_build_system_prompt_raw(void)
 {
-    /* raw=1 short-circuits: returns NULL no matter what HAX_SYSTEM_PROMPT
-     * says or what the cwd contains. */
     setenv("HAX_SYSTEM_PROMPT", "ignored", 1);
-    char *out = build_system_prompt("model-x", 1);
+    char *out = build_test_system_prompt(1);
     EXPECT(out == NULL);
     unsetenv("HAX_SYSTEM_PROMPT");
 }
 
 static void test_build_system_prompt_explicit_empty(void)
 {
-    /* HAX_SYSTEM_PROMPT="" is the narrower opt-out: no system message
-     * even when raw=0. */
     setenv("HAX_SYSTEM_PROMPT", "", 1);
-    char *out = build_system_prompt("model-x", 0);
+    char *out = build_test_system_prompt(0);
     EXPECT(out == NULL);
     unsetenv("HAX_SYSTEM_PROMPT");
 }
 
 static void test_build_system_prompt_custom_no_suffix(void)
 {
-    /* With the Environment section + AGENTS.md suppressed, agent_env_build_suffix returns
-     * NULL and the result is just the custom system prompt verbatim.
-     * Lets us assert byte-equality without depending on cwd state. */
     setenv("HAX_SYSTEM_PROMPT", "you are a teapot", 1);
     setenv("HAX_NO_ENV", "1", 1);
     setenv("HAX_NO_AGENTS_MD", "1", 1);
     setenv("HAX_NO_SKILLS", "1", 1);
     setenv("HAX_NO_SUBAGENTS", "1", 1);
 
-    char *out = build_system_prompt("model-x", 0);
+    char *out = build_test_system_prompt(0);
     EXPECT(out != NULL);
     if (out)
         EXPECT_STR_EQ(out, "you are a teapot");
@@ -141,14 +104,11 @@ static void test_build_system_prompt_custom_no_suffix(void)
 
 static void test_build_system_prompt_default_no_suffix(void)
 {
-    /* HAX_SYSTEM_PROMPT unset → DEFAULT_SYSTEM_PROMPT. We don't pin the
-     * full text (which evolves), but the opening sentence is stable
-     * enough to sanity-check we got the default and not a stub. */
     unsetenv("HAX_SYSTEM_PROMPT");
     setenv("HAX_NO_ENV", "1", 1);
     setenv("HAX_NO_AGENTS_MD", "1", 1);
 
-    char *out = build_system_prompt("model-x", 0);
+    char *out = build_test_system_prompt(0);
     EXPECT(out != NULL);
     if (out)
         EXPECT(strncmp(out, "You are hax", 11) == 0);
@@ -160,14 +120,11 @@ static void test_build_system_prompt_default_no_suffix(void)
 
 static void test_build_system_prompt_with_suffix(void)
 {
-    /* When the Environment section is enabled, the result should start with
-     * the custom prompt, then a blank-line separator, then its Markdown
-     * heading. We don't pin the dynamic contents, but the shape is stable. */
     setenv("HAX_SYSTEM_PROMPT", "PREFIX", 1);
-    setenv("HAX_NO_AGENTS_MD", "1", 1); /* suppress AGENTS.md content */
-    unsetenv("HAX_NO_ENV");             /* keep Environment on */
+    setenv("HAX_NO_AGENTS_MD", "1", 1);
+    unsetenv("HAX_NO_ENV");
 
-    char *out = build_system_prompt("model-x", 0);
+    char *out = build_test_system_prompt(0);
     EXPECT(out != NULL);
     if (out) {
         EXPECT(strncmp(out, "PREFIX\n\n", 8) == 0);
@@ -179,8 +136,6 @@ static void test_build_system_prompt_with_suffix(void)
     unsetenv("HAX_SYSTEM_PROMPT");
     unsetenv("HAX_NO_AGENTS_MD");
 }
-
-/* ---------- resolve_effort ---------- */
 
 static const char *const test_effort_levels[] = {"low", "high"};
 
@@ -241,15 +196,18 @@ static void test_recording_enabled(void)
     EXPECT(agent_recording_enabled(NULL) == 1);
 }
 
-/* resolve_effort returns malloc'd; assert on the value and free it. */
-static void expect_effort(const struct provider *p, const char *model, const char *want)
+static void expect_effort(struct provider *provider, const char *model, const char *expected)
 {
-    char *got = resolve_effort(p, model);
-    if (want)
-        EXPECT_STR_EQ(got, want);
+    setenv("HAX_MODEL", model, 1);
+    struct hax_opts opts = {0};
+    struct agent_session session;
+    agent_session_init(&session, provider, &opts);
+    if (expected)
+        EXPECT_STR_EQ(session.effort, expected);
     else
-        EXPECT(got == NULL);
-    free(got);
+        EXPECT(session.effort == NULL);
+    agent_session_free(&session);
+    unsetenv("HAX_MODEL");
 }
 
 static void test_resolve_effort(void)
@@ -300,8 +258,6 @@ static void test_resolve_effort(void)
     unsetenv("HAX_EFFORT");
 }
 
-/* ---------- agent_session_init ---------- */
-
 static char *test_model_label(struct provider *p, const char *model)
 {
     (void)p;
@@ -319,11 +275,11 @@ static void test_session_init_model_label(void)
     struct provider p = {.name = "test", .model_label = test_model_label};
     struct hax_opts opts = {0};
     struct agent_session s;
-    EXPECT(agent_session_init(&s, &p, &opts) == 0);
+    agent_session_init(&s, &p, &opts);
     EXPECT_STR_EQ(s.model, "/models/long-model.gguf");
     EXPECT_STR_EQ(s.model_label, "short-model");
-    EXPECT(s.sys != NULL && strstr(s.sys, "- Model: short-model") != NULL);
-    EXPECT(s.sys != NULL && strstr(s.sys, "/models/long-model.gguf") == NULL);
+    EXPECT(s.system_prompt != NULL && strstr(s.system_prompt, "- Model: short-model") != NULL);
+    EXPECT(s.system_prompt != NULL && strstr(s.system_prompt, "/models/long-model.gguf") == NULL);
 
     agent_session_free(&s);
     unsetenv("HAX_MODEL");
@@ -333,9 +289,6 @@ static void test_session_init_model_label(void)
 
 static void test_session_init_raw(void)
 {
-    /* --raw must produce sys=NULL, n_tools=0, tools=NULL even when
-     * HAX_SYSTEM_PROMPT and HAX_MODEL would otherwise produce
-     * substantive content. The model still resolves from env. */
     setenv("HAX_MODEL", "m-raw", 1);
     setenv("HAX_SYSTEM_PROMPT", "ignored", 1);
 
@@ -343,13 +296,12 @@ static void test_session_init_raw(void)
     struct hax_opts opts = {.raw = 1};
 
     struct agent_session s;
-    EXPECT(agent_session_init(&s, &p, &opts) == 0);
-    EXPECT(s.sys == NULL);
+    agent_session_init(&s, &p, &opts);
+    EXPECT(s.system_prompt == NULL);
     EXPECT(s.tools == NULL);
     EXPECT(s.n_tools == 0);
     EXPECT_STR_EQ(s.model, "m-raw");
 
-    /* Composed snapshot must match what the provider sees on the wire. */
     struct context ctx = agent_session_context(&s);
     EXPECT(ctx.system_prompt == NULL);
     EXPECT(ctx.tools == NULL);
@@ -362,21 +314,32 @@ static void test_session_init_raw(void)
 
 static void test_session_init_missing_model(void)
 {
-    /* No HAX_MODEL and no provider default: init now succeeds with an
-     * empty model rather than failing, so the interactive REPL can start
-     * and prompt the user to pick one at runtime (/model, /provider). The
-     * one-shot path checks the empty model itself and fails fast there. */
     unsetenv("HAX_MODEL");
-    struct provider p = {.name = "test", .default_model = NULL};
+    struct provider p = {.name = "test"};
     struct hax_opts opts = {0};
 
     struct agent_session s;
-    EXPECT(agent_session_init(&s, &p, &opts) == 0);
-    EXPECT(s.model == NULL || s.model[0] == '\0');
+    agent_session_init(&s, &p, &opts);
+    EXPECT(s.model == NULL);
     agent_session_free(&s);
 }
 
-/* ---------- agent_session_add_user / add_boundary ---------- */
+static void test_session_init_missing_provider(void)
+{
+    unsetenv("HAX_MODEL");
+    unsetenv("HAX_EFFORT");
+    setenv("HAX_SYSTEM_PROMPT", "", 1);
+    struct hax_opts opts = {0};
+
+    struct agent_session s;
+    agent_session_init(&s, NULL, &opts);
+    EXPECT(s.model == NULL);
+    EXPECT(s.provider_name == NULL);
+    EXPECT(s.effort == NULL);
+    agent_session_free(&s);
+
+    unsetenv("HAX_SYSTEM_PROMPT");
+}
 
 static void test_session_add_user(void)
 {
@@ -397,13 +360,9 @@ static void test_session_add_user(void)
     EXPECT(s.n_items == 0);
 }
 
-/* ---------- agent_session_absorb ---------- */
-
-/* Drive a `struct turn` through an event sequence without going through
- * a provider, so we have a deterministic source of new items to absorb. */
-static void feed(struct turn *t, struct stream_event ev)
+static void feed_turn(struct turn *turn, struct stream_event event)
 {
-    turn_on_event(&ev, t);
+    turn_on_event(&event, turn);
 }
 
 static void test_session_absorb_no_tool_call(void)
@@ -413,16 +372,14 @@ static void test_session_absorb_no_tool_call(void)
 
     struct turn t;
     turn_init(&t);
-    feed(&t, (struct stream_event){.kind = EV_TEXT_DELTA, .u.text_delta = {.text = "answer"}});
-    feed(&t, (struct stream_event){.kind = EV_DONE});
+    feed_turn(&t, (struct stream_event){.kind = EV_TEXT_DELTA, .u.text_delta = {.text = "answer"}});
+    feed_turn(&t, (struct stream_event){.kind = EV_DONE});
 
-    size_t n_before = 999;
-    int had_tc = 1;
-    agent_session_absorb(&s, &t, &n_before, &had_tc);
+    struct agent_absorb_result absorbed = agent_session_absorb(&s, &t);
     turn_reset(&t);
 
-    EXPECT(n_before == 2); /* before this absorb, items had user+boundary */
-    EXPECT(had_tc == 0);
+    EXPECT(absorbed.items_from == 2);
+    EXPECT(!absorbed.had_tool_call);
     EXPECT(s.n_items == 3);
     EXPECT(s.items[2].kind == ITEM_ASSISTANT_MESSAGE);
     EXPECT_STR_EQ(s.items[2].text, "answer");
@@ -436,28 +393,24 @@ static void test_session_absorb_with_tool_call(void)
 
     struct turn t;
     turn_init(&t);
-    feed(&t, (struct stream_event){.kind = EV_TOOL_CALL_START,
-                                   .u.tool_call_start = {.id = "c1", .name = "bash"}});
-    feed(&t, (struct stream_event){.kind = EV_TOOL_CALL_DELTA,
-                                   .u.tool_call_delta = {.id = "c1", .args_delta = "{}"}});
-    feed(&t, (struct stream_event){.kind = EV_TOOL_CALL_END, .u.tool_call_end = {.id = "c1"}});
-    feed(&t, (struct stream_event){.kind = EV_DONE});
+    feed_turn(&t, (struct stream_event){.kind = EV_TOOL_CALL_START,
+                                        .u.tool_call_start = {.id = "c1", .name = "bash"}});
+    feed_turn(&t, (struct stream_event){.kind = EV_TOOL_CALL_DELTA,
+                                        .u.tool_call_delta = {.id = "c1", .args_delta = "{}"}});
+    feed_turn(&t, (struct stream_event){.kind = EV_TOOL_CALL_END, .u.tool_call_end = {.id = "c1"}});
+    feed_turn(&t, (struct stream_event){.kind = EV_DONE});
 
-    size_t n_before;
-    int had_tc;
-    agent_session_absorb(&s, &t, &n_before, &had_tc);
+    struct agent_absorb_result absorbed = agent_session_absorb(&s, &t);
     turn_reset(&t);
 
-    EXPECT(n_before == 0);
-    EXPECT(had_tc == 1);
+    EXPECT(absorbed.items_from == 0);
+    EXPECT(absorbed.had_tool_call);
     EXPECT(s.n_items == 1);
     EXPECT(s.items[0].kind == ITEM_TOOL_CALL);
     EXPECT_STR_EQ(s.items[0].tool_name, "bash");
 
     agent_session_free(&s);
 }
-
-/* ---------- agent_session_context ---------- */
 
 static void test_session_context_snapshot(void)
 {
@@ -466,7 +419,7 @@ static void test_session_context_snapshot(void)
     struct agent_session s = {
         .model = xstrdup("m1"),
         .effort = xstrdup("high"),
-        .sys = NULL,
+        .system_prompt = NULL,
         .tools = NULL,
         .n_tools = 0,
     };
@@ -483,354 +436,62 @@ static void test_session_context_snapshot(void)
     agent_session_free(&s);
 }
 
-static void test_mark_interrupt(void)
+static struct stream_usage reported_usage(void)
 {
-    struct stream_usage u = {.input_tokens = 100,
-                             .output_tokens = 10,
-                             .cached_tokens = -1,
-                             .cache_write_tokens = -1,
-                             .cache_write_1h_tokens = -1,
-                             .cost = -1};
-
-    /* The regression case: a tool result already marked at the abort
-     * boundary (bash's own "[interrupted]" footer), with the round-trip's
-     * usage footer appended after it. The marker check must look past the
-     * inert footer, see the marked result, and add no duplicate. */
-    struct agent_session s = {0};
-    items_append(&s.items, &s.n_items, &s.cap_items,
-                 (struct item){.kind = ITEM_TOOL_RESULT,
-                               .call_id = xstrdup("c1"),
-                               .output = xstrdup("partial output\n" INTERRUPT_MARKER)});
-    agent_session_add_turn_usage(&s, NULL, &u, 1000);
-    EXPECT(s.n_items == 2);
-    size_t before = s.n_items;
-    agent_session_mark_interrupt(&s);
-    EXPECT(s.n_items == before);
-    agent_session_free(&s);
-
-    /* A clean (unmarked) result behind the footer still gets the
-     * synthetic assistant marker. */
-    struct agent_session s2 = {0};
-    items_append(&s2.items, &s2.n_items, &s2.cap_items,
-                 (struct item){.kind = ITEM_TOOL_RESULT,
-                               .call_id = xstrdup("c2"),
-                               .output = xstrdup("clean result")});
-    agent_session_add_turn_usage(&s2, NULL, &u, 1000);
-    agent_session_mark_interrupt(&s2);
-    EXPECT(s2.n_items == 3);
-    if (s2.n_items == 3) {
-        EXPECT(s2.items[2].kind == ITEM_ASSISTANT_MESSAGE);
-        EXPECT_STR_EQ(s2.items[2].text, INTERRUPT_MARKER);
-    }
-    agent_session_free(&s2);
-
-    /* Empty history: the marker is the whole record of the abort. */
-    struct agent_session s3 = {0};
-    agent_session_mark_interrupt(&s3);
-    EXPECT(s3.n_items == 1);
-    EXPECT(s3.n_items == 1 && s3.items[0].kind == ITEM_ASSISTANT_MESSAGE);
-    agent_session_free(&s3);
+    return (struct stream_usage){
+        .input_tokens = 100,
+        .output_tokens = 10,
+        .cached_tokens = -1,
+        .cache_write_tokens = -1,
+        .cache_write_1h_tokens = -1,
+        .cost = -1,
+    };
 }
 
-static void test_format_stats_segments_selection(void)
+static void test_mark_interrupt_skips_marked_result(void)
 {
-    char segs[STATS_SEGS_MAX][STATS_SEG_LEN];
+    struct agent_session session = {0};
+    agent_session_append(&session,
+                         (struct item){.kind = ITEM_TOOL_RESULT,
+                                       .call_id = xstrdup("c1"),
+                                       .output = xstrdup("partial output\n" INTERRUPT_MARKER)});
+    struct stream_usage usage = reported_usage();
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000);
 
-    /* Duration, context gauge, spend — scope order, this turn before
-     * session state; the single token figure carries no word label. */
-    int n = format_stats_segments(segs, 9113, 262144, 42000, 0.042, 0);
-    EXPECT(n == 3);
-    EXPECT_STR_EQ(segs[0], "42s");
-    EXPECT_STR_EQ(segs[1], "8.9k / 256k (3%)");
-    EXPECT_STR_EQ(segs[2], "$0.042");
-
-    /* Unknown window: no gauge shape to identify the bare number, so the
-     * "context" label sticks to this figure only. */
-    n = format_stats_segments(segs, 9113, 0, 42000, 0.042, 0);
-    EXPECT(n == 3);
-    EXPECT_STR_EQ(segs[0], "42s");
-    EXPECT_STR_EQ(segs[1], "context 8.9k");
-    EXPECT_STR_EQ(segs[2], "$0.042");
-
-    /* Estimated spend is marked approximate. */
-    n = format_stats_segments(segs, -1, 0, -1, 0.042, 1);
-    EXPECT(n == 1);
-    EXPECT_STR_EQ(segs[0], "~$0.042");
-
-    /* Unreported fields are skipped: no usage, no cost ⇒ duration only. */
-    n = format_stats_segments(segs, -1, 0, 42000, 0, 0);
-    EXPECT(n == 1);
-    EXPECT_STR_EQ(segs[0], "42s");
-
-    /* Nothing reported at all. */
-    n = format_stats_segments(segs, -1, 0, -1, 0, 0);
-    EXPECT(n == 0);
+    size_t before = session.n_items;
+    agent_session_mark_interrupt(&session);
+    EXPECT(session.n_items == before);
+    agent_session_free(&session);
 }
 
-static void test_spend_accounting(void)
+static void test_mark_interrupt_marks_clean_result(void)
 {
-    struct spend_totals t = {0};
-    int approx = 0;
+    struct agent_session session = {0};
+    agent_session_append(&session, (struct item){.kind = ITEM_TOOL_RESULT,
+                                                 .call_id = xstrdup("c2"),
+                                                 .output = xstrdup("clean result")});
+    struct stream_usage usage = reported_usage();
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000);
+    agent_session_mark_interrupt(&session);
 
-    /* Fixture snapshot first (the catalog memoizes misses per
-     * provider/model, so no lookup may precede the write). */
-    char *dir = t_tempdir();
-    setenv("XDG_CACHE_HOME", dir, 1);
-    char path[600];
-    snprintf(path, sizeof(path), "%s/hax", dir);
-    mkdir(path, 0755);
-    snprintf(path, sizeof(path), "%s/hax/catalog.json", dir);
-    FILE *f = fopen(path, "w");
-    EXPECT(f != NULL);
-    if (f) {
-        fputs("{\"prov\": {\"models\": {"
-              "\"m\": {\"cost\": {\"input\": 2, \"output\": 8}},"
-              "\"free-m\": {\"cost\": {\"input\": 0, \"output\": 0}}"
-              "}}}",
-              f);
-        fclose(f);
-    }
-
-    /* Providers exist here only to carry a catalog identity: no meta slot,
-     * so model_meta_rates resolves against the catalog tier alone. */
-    struct provider prov = {.catalog_id = "prov"};
-    struct provider noprov = {.catalog_id = "noprov"};
-    struct provider anon = {0};
-
-    /* Reported cost is exact and is what the total bills — but the record
-     * is kept all the same, so the categories can still be estimated. */
-    struct stream_usage u = {.input_tokens = 1000,
-                             .output_tokens = 50,
-                             .cached_tokens = 200,
-                             .cache_write_tokens = -1,
-                             .cache_write_1h_tokens = -1,
-                             .cost = 0.01};
-    spend_account(&t, &u, &prov, "m");
-    EXPECT(t.n_recs == 1);
-    EXPECT(t.recs[0].reported == 0.01);
-    EXPECT(spend_total(&t, &approx) == 0.01);
-    EXPECT(!approx);
-    /* 800 uncached in + 200 cache reads at the input-rate fallback + 50
-     * out — an estimate of the $0.01 that was actually charged. */
-    struct catalog_split rep;
-    EXPECT(spend_split(&t, &rep) == 1);
-    EXPECT(rep.in == 800 * 2.0 / 1e6);
-    EXPECT(rep.cache_read == 200 * 2.0 / 1e6);
-    EXPECT(rep.out == 50 * 8.0 / 1e6);
-
-    /* Unreported cost: each response becomes its own stamped record.
-     * Neither stamp resolves in the catalog, so the total stays at the
-     * reported subtotal, marked approximate — real usage exists that the
-     * figure doesn't cover. */
-    u.cost = -1;
-    spend_account(&t, &u, &noprov, "m");
-    spend_account(&t, &u, &anon, NULL);
-    EXPECT(t.n_recs == 3);
-    EXPECT_STR_EQ(t.recs[1].catalog_id, "noprov");
-    EXPECT_STR_EQ(t.recs[1].model, "m");
-    EXPECT(t.recs[2].catalog_id == NULL && t.recs[2].model == NULL);
-    EXPECT(spend_unpriced(&t));
-    EXPECT(spend_total(&t, &approx) == 0.01);
-    EXPECT(approx);
-
-    /* A response that reported neither cost nor tokens records nothing. */
-    struct stream_usage nothing = {-1, -1, -1, -1, -1, -1};
-    spend_account(&t, &nothing, &prov, "m");
-    EXPECT(t.n_recs == 3);
-
-    /* An explicit zero cost is a *reported* free response, not "cost
-     * unknown": the total must stay an exact $0 rather than picking up
-     * the catalog's estimate of the tokens it burned. */
-    struct spend_totals z = {0};
-    u.cost = 0;
-    spend_account(&z, &u, &prov, "m");
-    EXPECT(z.n_recs == 1);
-    EXPECT(spend_total(&z, &approx) == 0);
-    EXPECT(!approx);
-    u.cost = -1;
-
-    /* The positive path: a stamp the catalog resolves prices its record
-     * into the total (fixture snapshot, real catalog module) — still
-     * approximate, being an estimate. */
-    struct spend_totals big = {0};
-    struct stream_usage mega = {.input_tokens = 1000000,
-                                .output_tokens = 1000000,
-                                .cached_tokens = -1,
-                                .cache_write_tokens = -1,
-                                .cache_write_1h_tokens = -1,
-                                .cost = -1};
-    spend_account(&big, &mega, &prov, "m");
-    EXPECT(spend_total(&big, &approx) == 10.0);
-    EXPECT(approx);
-    EXPECT(!spend_unpriced(&big));
-    struct spend_totals miss = {0};
-    spend_account(&miss, &mega, &prov, "unknown-model");
-    EXPECT(spend_total(&miss, &approx) == 0);
-    EXPECT(approx);
-    EXPECT(spend_unpriced(&miss));
-
-    /* spend_split: the estimated spend broken down per category (the
-     * /session row), summed across priceable records only. */
-    struct catalog_split sp;
-    EXPECT(spend_split(&big, &sp) == 1);
-    EXPECT(sp.in == 2.0 && sp.out == 8.0);
-    EXPECT(sp.cache_read == 0 && sp.cache_write == 0);
-    EXPECT(spend_split(&miss, &sp) == 0);
-
-    /* Zero catalog rates price a record to $0 — still an estimate, so
-     * the figure stays approximate rather than passing off a reported
-     * subtotal as an exact grand total. */
-    struct spend_totals freebie = {0};
-    struct stream_usage paid = mega;
-    paid.cost = 0.5;
-    spend_account(&freebie, &paid, &prov, "m");
-    spend_account(&freebie, &mega, &prov, "free-m");
-    EXPECT(spend_total(&freebie, &approx) == 0.5);
-    EXPECT(approx);
-    EXPECT(!spend_unpriced(&freebie));
-    spend_free(&freebie);
-
-    spend_free(&t);
-    spend_free(&z);
-    spend_free(&big);
-    spend_free(&miss);
-    EXPECT(t.n_recs == 0 && t.recs == NULL);
+    EXPECT(session.n_items == 3);
+    EXPECT(session.items[2].kind == ITEM_ASSISTANT_MESSAGE);
+    EXPECT_STR_EQ(session.items[2].text, INTERRUPT_MARKER);
+    agent_session_free(&session);
 }
 
-/* Publish `rate` as the backend's reported input/output rate for `model`. */
-static void publish_rates(struct provider *p, const char *model, double in, double out)
+static void test_mark_interrupt_empty_session(void)
 {
-    struct model_info m;
-    model_info_init(&m);
-    m.id = xstrdup(model);
-    m.cost_input = in;
-    m.cost_output = out;
-    model_meta_remember(p, &m);
-    model_info_clear(&m);
-}
-
-/* Rates are snapshotted when the response is accounted, not looked up
- * when the total is read: the live tier follows the provider's current
- * selection, so a later /model switch would otherwise re-rate every
- * earlier request against a model that never ran them. */
-static void test_spend_rates_stamped_at_account_time(void)
-{
-    struct provider p = {0};
-    struct spend_totals t = {0};
-    struct stream_usage u = {.input_tokens = 1000000,
-                             .output_tokens = 1000000,
-                             .cached_tokens = -1,
-                             .cache_write_tokens = -1,
-                             .cache_write_1h_tokens = -1,
-                             .cost = -1};
-
-    publish_rates(&p, "cheap", 1, 2);
-    spend_account(&t, &u, &p, "cheap");
-
-    /* The user switches to a pricier model; the old record must not move. */
-    publish_rates(&p, "dear", 100, 200);
-    spend_account(&t, &u, &p, "dear");
-
-    int approx = 0;
-    EXPECT(spend_total(&t, &approx) == 303.0); /* 3 + 300 */
-    EXPECT(approx);
-    struct catalog_split sp;
-    EXPECT(spend_split(&t, &sp) == 1);
-    EXPECT(sp.in == 101.0 && sp.out == 202.0);
-
-    spend_free(&t);
-    model_meta_release(&p);
-}
-
-static void test_turn_usage_make(void)
-{
-    struct provider prov = {.catalog_id = "prov"};
-
-    /* Reported cost: exact total, categories still estimated from rates —
-     * no backend decomposes what it billed. */
-    struct stream_usage u = {.input_tokens = 1000,
-                             .output_tokens = 50,
-                             .cached_tokens = 200,
-                             .cache_write_tokens = -1,
-                             .cache_write_1h_tokens = -1,
-                             .cost = 0.01};
-    struct turn_usage *tu = turn_usage_make(&u, 1500, &prov, "m");
-    EXPECT(tu != NULL);
-    if (tu) {
-        EXPECT(tu->cost_total == 0.01);
-        EXPECT(!tu->cost_estimated);
-        EXPECT(tu->cost_input == 800 * 2.0 / 1e6);
-        EXPECT(tu->cost_cache_read == 200 * 2.0 / 1e6);
-        EXPECT(tu->cost_output == 50 * 8.0 / 1e6);
-        EXPECT(tu->elapsed_ms == 1500);
-        free(tu);
-    }
-
-    /* No usage but a known duration: a duration-only footer, so
-     * usage-less backends still document each successful round-trip.
-     * With no duration either there is nothing to show — NULL. */
-    struct stream_usage nothing = {-1, -1, -1, -1, -1, -1};
-    EXPECT(!usage_reported(&nothing));
-    tu = turn_usage_make(&nothing, 1500, &prov, "m");
-    EXPECT(tu != NULL);
-    if (tu) {
-        EXPECT(tu->elapsed_ms == 1500);
-        EXPECT(tu->cost_total < 0);
-        EXPECT(!tu->cost_estimated);
-        EXPECT(tu->cost_input < 0 && tu->cost_output < 0);
-        free(tu);
-    }
-    EXPECT(turn_usage_make(&nothing, -1, &prov, "m") == NULL);
-
-    /* A reported charge with no tokens to price: exact total, no split —
-     * $0.00 categories would fabricate a decomposition. */
-    struct stream_usage bare = {-1, -1, -1, -1, -1, 0.02};
-    tu = turn_usage_make(&bare, -1, &prov, "m");
-    EXPECT(tu != NULL);
-    if (tu) {
-        EXPECT(tu->cost_total == 0.02);
-        EXPECT(!tu->cost_estimated);
-        EXPECT(tu->cost_input < 0 && tu->cost_output < 0);
-        free(tu);
-    }
-
-    /* Unreported cost against the fixture catalog (written by
-     * test_spend_accounting, still in XDG_CACHE_HOME): estimated total
-     * with the per-category split. 500k uncached in ($1) + 500k cached
-     * reads at the input-rate fallback ($1) + 1M out ($8). */
-    struct stream_usage est = {.input_tokens = 1000000,
-                               .output_tokens = 1000000,
-                               .cached_tokens = 500000,
-                               .cache_write_tokens = -1,
-                               .cache_write_1h_tokens = -1,
-                               .cost = -1};
-    tu = turn_usage_make(&est, -1, &prov, "m");
-    EXPECT(tu != NULL);
-    if (tu) {
-        EXPECT(tu->cost_estimated);
-        EXPECT(tu->cost_total == 10.0);
-        EXPECT(tu->cost_input == 1.0);
-        EXPECT(tu->cost_cache_read == 1.0);
-        EXPECT(tu->cost_cache_write == 0);
-        EXPECT(tu->cost_output == 8.0);
-        free(tu);
-    }
-
-    /* No catalog identity: raw usage carries through, costs unknown. */
-    tu = turn_usage_make(&est, 2000, NULL, NULL);
-    EXPECT(tu != NULL);
-    if (tu) {
-        EXPECT(tu->cost_total < 0);
-        EXPECT(!tu->cost_estimated);
-        EXPECT(tu->usage.input_tokens == 1000000);
-        free(tu);
-    }
+    struct agent_session session = {0};
+    agent_session_mark_interrupt(&session);
+    EXPECT(session.n_items == 1);
+    EXPECT(session.items[0].kind == ITEM_ASSISTANT_MESSAGE);
+    agent_session_free(&session);
 }
 
 int main(void)
 {
-    test_items_append_growth();
-    test_items_append_preserves_payload();
+    test_session_append();
     test_find_tool();
     test_build_system_prompt_raw();
     test_build_system_prompt_explicit_empty();
@@ -842,14 +503,13 @@ int main(void)
     test_session_init_model_label();
     test_session_init_raw();
     test_session_init_missing_model();
+    test_session_init_missing_provider();
     test_session_add_user();
     test_session_absorb_no_tool_call();
     test_session_absorb_with_tool_call();
     test_session_context_snapshot();
-    test_mark_interrupt();
-    test_format_stats_segments_selection();
-    test_spend_accounting();
-    test_spend_rates_stamped_at_account_time();
-    test_turn_usage_make();
+    test_mark_interrupt_skips_marked_result();
+    test_mark_interrupt_marks_clean_result();
+    test_mark_interrupt_empty_session();
     T_REPORT();
 }

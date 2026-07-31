@@ -8,6 +8,7 @@
 
 #include "agent_core.h"
 #include "agent_loop.h"
+#include "agent_usage.h"
 #include "catalog.h"
 #include "compact.h"
 #include "model_meta.h"
@@ -34,7 +35,7 @@ static int compact_on_event(const struct stream_event *ev, void *user)
     else if (ev->kind == EV_ERROR)
         usage = ev->u.error.usage;
     if (usage)
-        spend_account(ctx->costs, usage, ctx->provider, ctx->model);
+        agent_spend_account(ctx->costs, usage, ctx->provider, ctx->model);
     return 0;
 }
 
@@ -91,7 +92,7 @@ struct oneshot_loop_ctx {
 static void oneshot_turn_end(const struct agent_loop_turn *loop_turn, void *user)
 {
     struct oneshot_loop_ctx *ctx = user;
-    spend_account(ctx->costs, &loop_turn->usage, ctx->provider, ctx->session->model);
+    agent_spend_account(ctx->costs, &loop_turn->usage, ctx->provider, ctx->session->model);
 }
 
 static void oneshot_auto_compact(void *user)
@@ -111,10 +112,8 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
      * so the alternative is resolving the effort against the static ladder
      * every time and sending a level the model may reject. */
     model_meta_settle(p);
-    if (agent_session_init(&sess, p, opts) < 0)
-        return 1;
-    /* No interactive picker in -p mode, so a missing model is fatal here
-     * (agent_session_init now tolerates it for the REPL's sake). */
+    agent_session_init(&sess, p, opts);
+    /* One-shot mode cannot prompt for a missing model. */
     if (!sess.model || !*sess.model) {
         hax_err("HAX_MODEL is required for provider '%s' (no default)", p->name ? p->name : "?");
         agent_session_free(&sess);
@@ -155,7 +154,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
      * the final append during cleanup catches any remaining items and
      * is idempotent on the others (transcript_log_append no-ops when
      * n_items hasn't grown). */
-    struct transcript_log *tlog = transcript_log_open(sess.sys, sess.tools, sess.n_tools);
+    struct transcript_log *tlog = transcript_log_open(sess.system_prompt, sess.tools, sess.n_tools);
     /* Append-only session record — continue the resumed file, else begin
      * a fresh one. NULL when this run doesn't record (see
      * agent_recording_enabled); -p has no prompt history to go with it. */
@@ -293,10 +292,10 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
      * that sends no usage keeps -p output free of a "context ?" stub. Time
      * alone isn't worth a line. */
     /* Total spend: reported cost, plus each unreported response priced
-     * against the catalog (spend_total). Approximate ("~$") whenever
+     * against the catalog (agent_spend_total). Approximate ("~$") whenever
      * unreported usage exists at all — priced or not, a reported subtotal
      * must never display as an exact grand total. */
-    if (spend_unpriced(&costs)) {
+    if (agent_spend_has_unpriced(&costs)) {
         /* Unpriced usage the cache couldn't answer for — likely a cold
          * cache racing the download this run started. Give the fetch a
          * bounded moment to land instead of letting shutdown cancel it,
@@ -309,7 +308,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         catalog_drain(3000);
     }
     int spend_approx = 0;
-    double spend = spend_total(&costs, &spend_approx);
+    double spend = agent_spend_total(&costs, &spend_approx);
     int have_stats = last_ctx >= 0 || spend > 0;
     if (hint || have_stats) {
         /* Flush the answer (block-buffered when stdout is piped) before the
@@ -327,12 +326,13 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
             /* Same field selection/formatting as the REPL stats line
              * (display_stats_line), minus the reflow — stderr footnotes
              * are plain single lines. */
-            char segs[STATS_SEGS_MAX][STATS_SEG_LEN];
-            int n = format_stats_segments(segs, last_ctx, model_meta_context(p, sess.model),
-                                          monotonic_ms() - start_ms, spend, spend_approx);
+            char segments[AGENT_STATS_MAX_SEGMENTS][AGENT_STATS_SEGMENT_LEN];
+            int n =
+                agent_format_stats_segments(segments, last_ctx, model_meta_context(p, sess.model),
+                                            monotonic_ms() - start_ms, spend, spend_approx);
             fputs(tty ? ANSI_DIM : "", stderr);
             for (int i = 0; i < n; i++)
-                fprintf(stderr, "%s%s", i ? " · " : "", segs[i]);
+                fprintf(stderr, "%s%s", i ? " · " : "", segments[i]);
             fprintf(stderr, "%s\n", tty ? ANSI_RESET : "");
         }
         if (hint)
@@ -341,7 +341,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
     }
     transcript_log_close(tlog);
     session_log_close(slog);
-    spend_free(&costs);
+    agent_spend_free(&costs);
     agent_session_free(&sess);
     return rc;
 }

@@ -673,12 +673,12 @@ static void slash_run_session(struct slash_ctx *ctx)
      * per-request footers — `in` is the uncached remainder — so the two
      * surfaces read as one breakdown (cache effectiveness reads off the
      * cache-vs-in count ratio, same as there). Dollars are the summed
-     * per-record rate estimates (spend_split), marked "~" because no
+     * per-record rate estimates (agent_spend_split), marked "~" because no
      * backend decomposes what it billed — even where the spend row below
      * is an exact reported charge. */
     if (t->input_tokens > 0 || t->output_tokens > 0) {
         struct catalog_split split;
-        int have_split = spend_split(&t->spend, &split);
+        int have_split = agent_spend_split(&t->spend, &split);
         long cr = t->cached_tokens > 0 ? t->cached_tokens : 0;
         long cw = t->cache_write_tokens > 0 ? t->cache_write_tokens : 0;
         int len = 0;

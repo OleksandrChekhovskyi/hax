@@ -53,13 +53,13 @@ static const char *build_prompt(char *buf, size_t n)
 }
 
 /* Tally one tool invocation for /session. The per-type slot keys on the
- * registry's static name (via find_tool) rather than the item-owned
+ * registry's static name (via agent_find_tool) rather than the item-owned
  * string, which compaction can free while stats live on; unregistered
  * names (refused/unknown calls) still count toward the total. */
 static void stats_count_tool_call(struct session_stats *st, const char *name)
 {
     st->tool_calls++;
-    const struct tool *tl = name ? find_tool(name) : NULL;
+    const struct tool *tl = name ? agent_find_tool(name) : NULL;
     if (!tl)
         return;
     for (size_t i = 0; i < SESSION_STATS_MAX_TOOLS; i++) {
@@ -136,7 +136,7 @@ void agent_display_refresh(struct agent_state *st)
 
 double agent_session_spend(const struct session_stats *t, int *approx)
 {
-    return spend_total(&t->spend, approx);
+    return agent_spend_total(&t->spend, approx);
 }
 
 /* Request counts and window snapshots stay with callers because compaction
@@ -153,8 +153,8 @@ static void stats_account_usage(struct session_stats *stats, const struct stream
     if (usage->cache_write_tokens > 0)
         stats->cache_write_tokens += usage->cache_write_tokens;
     if (usage->input_tokens > 0)
-        stats->uncached_tokens += usage_uncached_input(usage, p, model);
-    spend_account(&stats->spend, usage, p, model);
+        stats->uncached_tokens += agent_usage_uncached_input(usage, p, model);
+    agent_spend_account(&stats->spend, usage, p, model);
 }
 
 /* Dim per-user-turn stats line: "42s · 8.9k / 256k (3%) · $0.042",
@@ -170,7 +170,7 @@ static void stats_account_usage(struct session_stats *stats, const struct stream
  * *session's* cumulative cost — provider-reported, plus the catalog
  * estimate for responses that reported none (agent_session_spend), the
  * latter marking the figure "~$". Field selection and formatting live in
- * format_stats_segments, shared with oneshot's exit summary.
+ * agent_format_stats_segments, shared with oneshot's exit summary.
  *
  * Segments wrap at the " · " seams against the content width, so a narrow
  * terminal reflows between fields instead of the terminal hard-wrapping
@@ -181,9 +181,9 @@ static void display_stats_line(struct render_ctx *r, const struct provider *p, c
 {
     int approx = 0;
     double spend = agent_session_spend(stats, &approx);
-    char segs[STATS_SEGS_MAX][STATS_SEG_LEN];
-    int n =
-        format_stats_segments(segs, ctx, model_meta_context(p, model), elapsed_ms, spend, approx);
+    char segments[AGENT_STATS_MAX_SEGMENTS][AGENT_STATS_SEGMENT_LEN];
+    int n = agent_format_stats_segments(segments, ctx, model_meta_context(p, model), elapsed_ms,
+                                        spend, approx);
     if (n == 0)
         return;
 
@@ -198,7 +198,7 @@ static void display_stats_line(struct render_ctx *r, const struct provider *p, c
     int width = display_width();
     int col = 0;
     for (int i = 0; i < n; i++) {
-        int len = (int)strlen(segs[i]);
+        int len = (int)strlen(segments[i]);
         if (col > 0) {
             if (col + 3 + len > width) {
                 disp_putc(d, '\n');
@@ -208,7 +208,7 @@ static void display_stats_line(struct render_ctx *r, const struct provider *p, c
                 col += 3;
             }
         }
-        disp_printf(d, "%s", segs[i]);
+        disp_printf(d, "%s", segments[i]);
         col += len;
     }
     disp_raw(d, ANSI_RESET);
@@ -488,7 +488,7 @@ static void show_transcript_cb(void *user)
     struct spawn_pipe sp;
     if (view_pager_open(&sp) < 0)
         return;
-    transcript_render(sp.w, s->sys, s->tools, s->n_tools, s->items, s->n_items);
+    transcript_render(sp.w, s->system_prompt, s->tools, s->n_tools, s->items, s->n_items);
     spawn_pipe_close(&sp);
 }
 
@@ -701,14 +701,10 @@ int agent_apply_settings(struct agent_state *st, struct provider *p, int announc
     if (provider_changed || model_changed)
         model_meta_refresh(p, s->model);
 
-    /* reconfigure rebuilt sess->sys (its Environment section names the new
-     * model), so re-key the HAX_TRANSCRIPT mirror to it: rewrite the header and replay
-     * history (like /new, but keeping the conversation) so the file keeps
-     * matching the Ctrl-T view instead of claiming later turns used the old
-     * system prompt. No-op when HAX_TRANSCRIPT is unset. (The session log's
-     * per-item reasoning stamp tracks the switch on its own — items carry
-     * their own provider+model now.) */
-    transcript_log_reset(st->tlog, s->sys, s->tools, s->n_tools);
+    /* Reconfigure changes the model embedded in the Environment section. Rewrite the transcript
+     * header and replay history so its system prompt matches the Ctrl-T view. Reasoning items carry
+     * their own provider and model stamps. */
+    transcript_log_reset(st->tlog, s->system_prompt, s->tools, s->n_tools);
     transcript_log_append(st->tlog, s->items, s->n_items);
 
     /* Keep the session-log header in step with the live settings. The header
@@ -719,7 +715,8 @@ int agent_apply_settings(struct agent_state *st, struct provider *p, int announc
      * a no-op for the current file; the next /new carries the values forward.
      * (Per-item reasoning blobs carry their own provider+model stamp, so a
      * mid-session switch stays correct independent of this header.) */
-    session_log_set_meta(st->slog, provider_log_name(p), s->model, s->effort, config_str("preset"));
+    session_log_set_meta(st->slog, agent_provider_log_name(p), s->model, s->effort,
+                         config_str("preset"));
 
     /* Silent apply: the caller says what changed. `/new <preset>` applies
      * before it resets, so the only thing on screen is the fresh
@@ -787,7 +784,7 @@ void agent_new_conversation(struct agent_state *st)
 {
     resume_clear(st);
     agent_session_reset(st->sess);
-    transcript_log_reset(st->tlog, st->sess->sys, st->sess->tools, st->sess->n_tools);
+    transcript_log_reset(st->tlog, st->sess->system_prompt, st->sess->tools, st->sess->n_tools);
     /* Rotate to a fresh session file so the cleared conversation doesn't
      * keep appending to the prior session's record. */
     session_log_reset(st->slog);
@@ -798,7 +795,7 @@ void agent_new_conversation(struct agent_state *st)
      * process). */
     tempfiles_cleanup();
     /* A fresh conversation starts its /session ledger at zero too. */
-    spend_free(&st->stats.spend);
+    agent_spend_free(&st->stats.spend);
     memset(&st->stats, 0, sizeof(st->stats));
     agent_print_banner(st->provider, st->sess);
 }
@@ -988,10 +985,10 @@ void agent_resume_session(struct agent_state *st, const char *path)
      * the run is really on — but only once a turn is sent under it, so
      * opening a conversation whose backend is unavailable and quitting leaves
      * its recorded setup intact. */
-    session_log_set_meta(st->slog, provider_log_name(st->provider), s->model, s->effort,
+    session_log_set_meta(st->slog, agent_provider_log_name(st->provider), s->model, s->effort,
                          config_str("preset"));
     session_meta_free(&meta);
-    transcript_log_reset(st->tlog, s->sys, s->tools, s->n_tools);
+    transcript_log_reset(st->tlog, s->system_prompt, s->tools, s->n_tools);
     transcript_log_append(st->tlog, s->items, s->n_items);
 
     /* No tempfiles_cleanup() here, unlike /new: the loaded history can
@@ -1085,7 +1082,7 @@ static void reshape_after_cut(struct agent_state *st, size_t cut, size_t turn, c
         st->stats.last_limit = 0;
     }
 
-    transcript_log_reset(st->tlog, s->sys, s->tools, s->n_tools);
+    transcript_log_reset(st->tlog, s->system_prompt, s->tools, s->n_tools);
     transcript_log_append(st->tlog, s->items, s->n_items);
     /* No tempfiles_cleanup() here: it unlinks the whole tracked-file
      * registry, but the retained prefix (all of it for /fork 0) can still hold
@@ -1173,7 +1170,7 @@ void agent_fork(struct agent_state *st, size_t turn)
         st->r->disp.trail = 1;
         return;
     }
-    session_log_set_meta(newlog, provider_log_name(st->provider), s->model, s->effort,
+    session_log_set_meta(newlog, agent_provider_log_name(st->provider), s->model, s->effort,
                          config_str("preset"));
     free(newpath);
     session_log_close(st->slog);
@@ -1462,8 +1459,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
      * live at exit. */
     struct provider *p = *provider;
     struct agent_session sess;
-    if (agent_session_init(&sess, p, opts) < 0)
-        return 1;
+    agent_session_init(&sess, p, opts);
 
     /* Governs what this run *adds* to the two on-disk stores: the session
      * file opened below and the prompt history the editor appends to. Both
@@ -1529,7 +1525,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
     /* HAX_TRANSCRIPT — append-only mirror of the Ctrl-T view. NULL when
      * the env var is unset; all transcript_log_* entry points are
      * NULL-safe so the call sites don't need a guard. */
-    struct transcript_log *tlog = transcript_log_open(sess.sys, sess.tools, sess.n_tools);
+    struct transcript_log *tlog = transcript_log_open(sess.system_prompt, sess.tools, sess.n_tools);
     /* Aggregate handed to slash handlers so they can mutate live state
      * without each one taking a separate argument. Pointers into stack
      * frames here — agent_state never outlives agent_run. The session log
@@ -1551,7 +1547,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
         state.slog = opts->resume_path
                          ? session_log_resume(opts->resume_path, rmeta.provider, rmeta.model,
                                               rmeta.effort, rmeta.preset, n_resumed)
-                         : session_log_open(provider_log_name(p), sess.model, sess.effort,
+                         : session_log_open(agent_provider_log_name(p), sess.model, sess.effort,
                                             config_str("preset"));
     /* Stages the run's selection when it differs from what the file said —
      * i.e. when a selection flag redirected the resume — so the turns this
@@ -1559,7 +1555,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
      * there. A no-op otherwise, and nothing reaches the file until a turn
      * does. */
     if (opts->resume_path)
-        session_log_set_meta(state.slog, provider_log_name(p), sess.model, sess.effort,
+        session_log_set_meta(state.slog, agent_provider_log_name(p), sess.model, sess.effort,
                              config_str("preset"));
     session_meta_free(&rmeta);
     /* Mirror restored history into the HAX_TRANSCRIPT log — its header
@@ -1759,7 +1755,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
          * this resync, /session's, or a compaction's. The header is still
          * unwritten on the first turn, which is when a late probe lands;
          * afterwards this is a no-op for the current file. */
-        session_log_set_meta(state.slog, provider_log_name(p), sess.model, sess.effort,
+        session_log_set_meta(state.slog, agent_provider_log_name(p), sess.model, sess.effort,
                              config_str("preset"));
         /* Flush the prompt to the log immediately, before we hand
          * control to the provider. If the stream hangs or the process
@@ -1957,7 +1953,7 @@ int agent_run(struct provider **provider, const struct hax_opts *opts)
         md_free(r.md);
     transcript_log_close(tlog);
     session_log_close(state.slog);
-    spend_free(&state.stats.spend);
+    agent_spend_free(&state.stats.spend);
     free(state.pending_preseed);
     agent_session_free(&sess);
     return 0;

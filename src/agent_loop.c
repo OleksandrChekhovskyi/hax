@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "agent_tool.h"
+#include "agent_usage.h"
 #include "compact.h"
 #include "model_meta.h"
 #include "session.h"
@@ -83,10 +84,10 @@ struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *se
     turn_flush_reasoning(assembly);
     turn_flush_text(assembly, had_partial_text ? "\n" INTERRUPT_MARKER : NULL);
 
-    size_t items_from;
-    agent_session_absorb(session, assembly, &items_from, NULL);
+    struct agent_absorb_result absorbed = agent_session_absorb(session, assembly);
 
     int marker_placed = had_partial_text;
+    size_t items_from = absorbed.items_from;
     size_t items_to = session->n_items;
     if (had_partial_text) {
         /* The "\n[interrupted]" turn_flush_text appended above is ours, not
@@ -108,17 +109,16 @@ struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *se
         /* The stream was cut before dispatch reached this call: it never ran,
          * same as one Esc skipped mid-batch. */
         closed.origin = ITEM_ORIGIN_SKIPPED;
-        items_append(&session->items, &session->n_items, &session->cap_items, closed);
+        agent_session_append(session, closed);
         marker_placed = 1;
     }
 
     if (!marker_placed && (reason == AGENT_ABORT_USER_CANCEL || had_state)) {
-        items_append(&session->items, &session->n_items, &session->cap_items,
-                     (struct item){
-                         .kind = ITEM_ASSISTANT_MESSAGE,
-                         .text = xstrdup(INTERRUPT_MARKER),
-                         .origin = ITEM_ORIGIN_INTERRUPTED,
-                     });
+        agent_session_append(session, (struct item){
+                                          .kind = ITEM_ASSISTANT_MESSAGE,
+                                          .text = xstrdup(INTERRUPT_MARKER),
+                                          .origin = ITEM_ORIGIN_INTERRUPTED,
+                                      });
         marker_placed = 1;
     }
 
@@ -192,7 +192,7 @@ static void loop_observe_tools(const struct agent_loop_params *params, size_t fr
 static void loop_add_usage(const struct agent_loop_params *params,
                            const struct agent_loop_turn *loop_turn, int aborted)
 {
-    if (!aborted || usage_reported(&loop_turn->usage))
+    if (!aborted || agent_usage_is_reported(&loop_turn->usage))
         agent_session_add_turn_usage(params->session, params->provider, &loop_turn->usage,
                                      loop_turn->elapsed_ms);
 }
@@ -251,8 +251,8 @@ static void loop_run_active(const struct agent_loop_params *params,
              * footer owes the boundary too, or it would read as part of the
              * preceding turn. Only a no-state, no-usage failure leaves
              * history (and the owed boundary) untouched. */
-            if (owes_boundary &&
-                (agent_loop_turn_has_state(&loop_turn) || usage_reported(&loop_turn.usage)))
+            if (owes_boundary && (agent_loop_turn_has_state(&loop_turn) ||
+                                  agent_usage_is_reported(&loop_turn.usage)))
                 agent_session_add_boundary(session);
             struct agent_abort_outcome abort =
                 agent_loop_turn_absorb_abort(session, &loop_turn, AGENT_ABORT_PROVIDER_ERROR);
@@ -303,18 +303,16 @@ static void loop_run_active(const struct agent_loop_params *params,
         int paused_empty = pause_pending && !loop_turn.done && loop_turn.assembly.n_items == 0;
         if (owes_boundary && !paused_empty)
             agent_session_add_boundary(session);
-        size_t items_from;
-        int had_tool_call;
-        agent_session_absorb(session, &loop_turn.assembly, &items_from, &had_tool_call);
+        struct agent_absorb_result absorbed = agent_session_absorb(session, &loop_turn.assembly);
         /* Freeze the streamed slice before appending results: tool results must
          * never be mistaken for more calls, and frontends need the final turn
          * range without its synthesized results or usage footer. */
         size_t response_to = session->n_items;
-        loop_observe_tools(params, items_from, response_to);
-        result->final_items_from = items_from;
+        loop_observe_tools(params, absorbed.items_from, response_to);
+        result->final_items_from = absorbed.items_from;
         result->final_items_to = response_to;
 
-        if (!had_tool_call) {
+        if (!absorbed.had_tool_call) {
             /* A tool-free response completes the user turn — unless the
              * pause pre-empted the request (paused_empty above): an empty
              * cancelled turn is nothing to complete, so pause here and let
@@ -330,7 +328,7 @@ static void loop_run_active(const struct agent_loop_params *params,
          * refused rather than executed; once cancellation is observed, the
          * remaining batch is paired with interrupted results. A pause request
          * never skips: the whole batch runs and the stop waits for the seam. */
-        for (size_t i = items_from; i < response_to; i++) {
+        for (size_t i = absorbed.items_from; i < response_to; i++) {
             if (session->items[i].kind != ITEM_TOOL_CALL)
                 continue;
             sig = loop_checkpoint(hooks);
@@ -342,7 +340,7 @@ static void loop_run_active(const struct agent_loop_params *params,
             else if (sig == AGENT_LOOP_SIG_ABORT)
                 action = AGENT_LOOP_TOOL_SKIP;
             struct item tool_result = loop_run_tool(params, &session->items[i], action);
-            items_append(&session->items, &session->n_items, &session->cap_items, tool_result);
+            agent_session_append(session, tool_result);
         }
 
         /* The final checkpoint catches cancellation raised by the last tool,

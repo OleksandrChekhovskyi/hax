@@ -148,8 +148,8 @@ static void transaction_session_init(struct agent_session *session)
     memset(session, 0, sizeof(*session));
     session->model = xstrdup("model");
     session->provider_name = "test";
-    items_append(&session->items, &session->n_items, &session->cap_items,
-                 (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup("old history")});
+    agent_session_append(session,
+                         (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup("old history")});
 }
 
 static struct compact_result transaction_run(struct agent_session *session,

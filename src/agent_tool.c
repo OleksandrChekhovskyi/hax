@@ -14,7 +14,7 @@ void agent_tool_call_init(struct agent_tool_call *tc, const struct item *call)
     memset(tc, 0, sizeof(*tc));
     tc->original = call;
     tc->effective = *call;
-    tc->tool = call->tool_name ? find_tool(call->tool_name) : NULL;
+    tc->tool = call->tool_name ? agent_find_tool(call->tool_name) : NULL;
 
     if (tc->tool && tc->tool->preprocess_args && call->tool_arguments_json)
         tc->rewritten_args = tc->tool->preprocess_args(call->tool_arguments_json);

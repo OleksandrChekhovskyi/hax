@@ -891,7 +891,7 @@ static void test_turns_do_not_merge_text(void)
  * per-command classifier — so a change to either surfaces here instead of
  * as a file dump in the pager. (This test lives with the history view
  * because it needs the real tool table; test_agent_dispatch.c deliberately
- * stubs find_tool down to a single tool.) */
+ * stubs agent_find_tool down to a single tool.) */
 static struct item silent_probe(const char *tool_name, const char *args_json)
 {
     struct item call = {0};

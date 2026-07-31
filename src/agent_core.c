@@ -1,21 +1,19 @@
 /* SPDX-License-Identifier: MIT */
 #include "agent_core.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "agent_env.h"
-#include "catalog.h"
-#include "config.h"
-#include "model_meta.h"
 #include "util.h"
+#include "turn.h"
+#include "config.h"
+#include "agent_env.h"
+#include "agent_usage.h"
+#include "model_meta.h"
 #include "providers/registry.h"
 #include "tools/bash_export.h"
 
-/* Default text used when HAX_SYSTEM_PROMPT is unset and --raw was not
- * passed. The Environment, AGENTS.md, and skills sections are appended via
- * agent_env_build_suffix; the assembled string is sent to the provider. */
+/* Dynamic environment and project guidance are appended by build_system_prompt. */
 static const char DEFAULT_SYSTEM_PROMPT[] =
     "You are hax, a minimalist coding assistant running in the user's terminal. "
     "You have access to `read`, `edit`, `write`, and `bash` tools.\n"
@@ -53,9 +51,6 @@ static const char DEFAULT_SYSTEM_PROMPT[] =
     "fix if they knew. Skip pre-existing issues and trivial style. Calibrate "
     "severity honestly; no flattery. Empty findings is a valid result.";
 
-/* Tool table shared between the interactive REPL and the non-interactive
- * one-shot path: both register the same set, and `--raw` omits the whole
- * list with one decision in agent_session_init. */
 static const struct tool *const TOOLS[] = {
     &TOOL_READ,
     &TOOL_EDIT,
@@ -64,7 +59,7 @@ static const struct tool *const TOOLS[] = {
 };
 static const size_t N_TOOLS = sizeof(TOOLS) / sizeof(TOOLS[0]);
 
-const struct tool *find_tool(const char *name)
+const struct tool *agent_find_tool(const char *name)
 {
     for (size_t i = 0; i < N_TOOLS; i++) {
         if (strcmp(TOOLS[i]->def.name, name) == 0)
@@ -73,473 +68,233 @@ const struct tool *find_tool(const char *name)
     return NULL;
 }
 
-void items_append(struct item **items, size_t *n, size_t *cap, struct item it)
+void agent_session_append(struct agent_session *session, struct item item)
 {
-    if (*n == *cap) {
-        size_t c = *cap ? *cap * 2 : 16;
-        *items = xrealloc(*items, c * sizeof(struct item));
-        *cap = c;
+    if (session->n_items == session->cap_items) {
+        size_t capacity = session->cap_items ? session->cap_items * 2 : 16;
+        session->items = xrealloc(session->items, capacity * sizeof(*session->items));
+        session->cap_items = capacity;
     }
-    (*items)[(*n)++] = it;
+    session->items[session->n_items++] = item;
 }
 
-char *resolve_effort(const struct provider *p, const char *model)
+static char *resolve_effort(const struct provider *provider, const char *model)
 {
-    /* An empty ladder covers both shapes of "this takes no effort": a
-     * provider that sends none at all (llama.cpp) and a model whose
-     * thinking is a budget or nothing (the Claude 4-5 generation).
-     * Resolving to NULL keeps a stale effort in state.json from leaking
-     * into the banner, the request, and the logs. */
     struct effort_set levels;
-    model_meta_efforts(p, model, &levels);
+    model_meta_efforts(provider, model, &levels);
     if (levels.n == 0)
         return NULL;
 
-    /* The provider's default narrows too: codex reads it from
-     * ~/.codex/config.toml, which may name a level this model won't take. */
-    const char *def = p->default_effort;
-    if (def && *def && !effort_set_has(&levels, def))
-        def = effort_clamp(&levels, def);
+    /* Provider defaults can also name a level that the selected model rejects. */
+    const char *default_effort = provider ? provider->default_effort : NULL;
+    if (default_effort && *default_effort && !effort_set_has(&levels, default_effort))
+        default_effort = effort_clamp(&levels, default_effort);
 
-    const char *e = config_str("effort");
-    if (!e)
-        return (def && *def) ? xstrdup(def) : NULL; /* unset / "(default)" */
-    if (!*e)
-        return NULL; /* explicit empty → force omit */
-    if (effort_set_has(&levels, e))
-        return xstrdup(e);
+    const char *requested = config_str("effort");
+    if (!requested)
+        return (default_effort && *default_effort) ? xstrdup(default_effort) : NULL;
+    if (!*requested)
+        return NULL;
+    if (effort_set_has(&levels, requested))
+        return xstrdup(requested);
 
-    /* A pick carried over from another backend, or from a model with a
-     * longer ladder: land on the nearest level this one takes rather than
-     * sending a rejected one, and fall back to the default only when the
-     * value has no place in the ladder at all. */
-    const char *near = effort_clamp(&levels, e);
-    if (near)
-        return xstrdup(near);
-    return (def && *def) ? xstrdup(def) : NULL;
+    /* A setting carried across models is clamped instead of sent as an invalid level. */
+    const char *clamped = effort_clamp(&levels, requested);
+    if (clamped)
+        return xstrdup(clamped);
+    return (default_effort && *default_effort) ? xstrdup(default_effort) : NULL;
 }
 
-char *build_system_prompt(const char *model_label, int raw)
+static char *build_system_prompt(const char *model_label, int raw)
 {
     if (raw)
         return NULL;
 
-    const char *sys = config_str("system_prompt");
-    if (!sys)
-        sys = DEFAULT_SYSTEM_PROMPT;
-    if (!*sys)
+    const char *base_prompt = config_str("system_prompt");
+    if (!base_prompt)
+        base_prompt = DEFAULT_SYSTEM_PROMPT;
+    if (!*base_prompt)
         return NULL;
 
     char *suffix = agent_env_build_suffix(model_label);
     if (!suffix)
-        return xstrdup(sys);
+        return xstrdup(base_prompt);
 
-    char *out = xasprintf("%s\n\n%s", sys, suffix);
+    char *system_prompt = xasprintf("%s\n\n%s", base_prompt, suffix);
     free(suffix);
-    return out;
+    return system_prompt;
 }
 
-int format_stats_segments(char segs[][STATS_SEG_LEN], long ctx, long limit, long elapsed_ms,
-                          double spend, int spend_approx)
-{
-    int n = 0;
-    /* Sized so the longest prefix ("context ", 8 cols) plus the scratch
-     * value provably fits in a segment — GCC's -Wformat-truncation flags
-     * the snprintfs below otherwise. Humanized values are ~20 chars at
-     * worst ("9.9M / 9.9M (100%)"), so the headroom costs nothing. */
-    char buf[STATS_SEG_LEN - 16];
-
-    /* Segment order is scope order, narrow to wide: this user turn's
-     * activity (worked), then current window state (context), then the
-     * session total (spent). */
-    if (elapsed_ms >= 0) {
-        format_duration(buf, sizeof(buf), elapsed_ms);
-        snprintf(segs[n++], STATS_SEG_LEN, "%s", buf);
-    }
-    if (ctx >= 0) {
-        format_context(buf, sizeof(buf), ctx, limit);
-        /* The "context" word is disambiguation, not decoration: with an
-         * unknown window the figure is a bare number ("8.9k") that
-         * nothing identifies. The gauge form ("8.9k / 256k (3%)")
-         * self-identifies — next to fields whose units (s, $) label
-         * themselves — and drops it. */
-        if (limit <= 0)
-            snprintf(segs[n++], STATS_SEG_LEN, "context %s", buf);
-        else
-            snprintf(segs[n++], STATS_SEG_LEN, "%s", buf);
-    }
-    if (spend > 0) {
-        format_cost(buf, sizeof(buf), spend);
-        snprintf(segs[n++], STATS_SEG_LEN, "%s%s", spend_approx ? "~" : "", buf);
-    }
-    return n;
-}
-
-void spend_account(struct spend_totals *t, const struct stream_usage *u, const struct provider *p,
-                   const char *model)
-{
-    /* A reported charge (negative = not reported) earns a record on its
-     * own, tokens or not — it is what the session is billed. Otherwise
-     * there has to be something to price. */
-    if (u->cost < 0 && u->input_tokens <= 0 && u->output_tokens <= 0)
-        return;
-    if (t->n_recs == t->cap_recs) {
-        t->cap_recs = t->cap_recs ? t->cap_recs * 2 : 8;
-        t->recs = xrealloc(t->recs, t->cap_recs * sizeof(*t->recs));
-    }
-    struct spend_rec *r = &t->recs[t->n_recs++];
-    r->u = *u;
-    r->reported = u->cost;
-    r->have_rates = model_meta_rates(p, model, &r->rates);
-    const char *catalog_id = p ? p->catalog_id : NULL;
-    r->catalog_id = catalog_id && *catalog_id ? xstrdup(catalog_id) : NULL;
-    r->model = model && *model ? xstrdup(model) : NULL;
-}
-
-/* Price one record's tokens, USD; -1 when it can't be priced (no rates
- * snapshotted, no catalog identity, model unknown to the catalog).
- * `split` (optional) receives the per-category components. Always an
- * estimate — see spend_split — even for a record that also carries a
- * reported charge. */
-static double spend_rec_price(const struct spend_rec *r, struct catalog_split *split)
-{
-    if (r->have_rates)
-        return catalog_price(&r->rates, r->u.input_tokens, r->u.output_tokens, r->u.cached_tokens,
-                             r->u.cache_write_tokens, r->u.cache_write_1h_tokens, split);
-    if (!r->catalog_id || !r->model)
-        return -1;
-    struct catalog_entry e;
-    if (catalog_lookup(r->catalog_id, r->model, &e) != 0)
-        return -1;
-    return catalog_price(&e, r->u.input_tokens, r->u.output_tokens, r->u.cached_tokens,
-                         r->u.cache_write_tokens, r->u.cache_write_1h_tokens, split);
-}
-
-/* What one record contributes to the session total: its reported charge
- * when it has one, else its estimate. -1 = contributes nothing knowable.
- * `*exact` (optional) reports which of the two it was. */
-static double spend_rec_total(const struct spend_rec *r, int *exact)
-{
-    if (r->reported >= 0) {
-        if (exact)
-            *exact = 1;
-        return r->reported;
-    }
-    if (exact)
-        *exact = 0;
-    return spend_rec_price(r, NULL);
-}
-
-double spend_total(const struct spend_totals *t, int *approx)
-{
-    double sum = 0;
-    int inexact = 0;
-    for (size_t i = 0; i < t->n_recs; i++) {
-        int exact = 0;
-        double c = spend_rec_total(&t->recs[i], &exact);
-        if (c >= 0)
-            sum += c;
-        /* Anything that isn't a reported charge makes the figure inexact,
-         * whether it priced to an estimate, to zero (zero rates are still
-         * an estimate), or not at all. */
-        if (!exact)
-            inexact = 1;
-    }
-    if (approx)
-        *approx = inexact;
-    return sum;
-}
-
-int spend_unpriced(const struct spend_totals *t)
-{
-    for (size_t i = 0; i < t->n_recs; i++)
-        if (spend_rec_total(&t->recs[i], NULL) < 0)
-            return 1;
-    return 0;
-}
-
-int spend_split(const struct spend_totals *t, struct catalog_split *out)
-{
-    *out = (struct catalog_split){0};
-    int priced = 0;
-    for (size_t i = 0; i < t->n_recs; i++) {
-        struct catalog_split s;
-        if (spend_rec_price(&t->recs[i], &s) < 0)
-            continue;
-        out->in += s.in;
-        out->cache_read += s.cache_read;
-        out->cache_write += s.cache_write;
-        out->out += s.out;
-        priced = 1;
-    }
-    return priced;
-}
-
-void spend_free(struct spend_totals *t)
-{
-    for (size_t i = 0; i < t->n_recs; i++) {
-        free(t->recs[i].catalog_id);
-        free(t->recs[i].model);
-    }
-    free(t->recs);
-    memset(t, 0, sizeof(*t));
-}
-
-/* The fallback split for a response nothing can price: every cache subset
- * displaces input, which is what all but one backend family does. */
-static long uncached_input_default(const struct stream_usage *u)
-{
-    long cr = u->cached_tokens > 0 ? u->cached_tokens : 0;
-    long cw = u->cache_write_tokens > 0 ? u->cache_write_tokens : 0;
-    long in = u->input_tokens > 0 ? u->input_tokens : 0;
-    long rest = in - cr - cw;
-    return rest > 0 ? rest : 0;
-}
-
-long usage_uncached_input(const struct stream_usage *u, const struct provider *p, const char *model)
-{
-    struct catalog_entry e;
-    struct catalog_split split;
-    if (!model_meta_rates(p, model, &e) ||
-        catalog_price(&e, u->input_tokens, u->output_tokens, u->cached_tokens,
-                      u->cache_write_tokens, u->cache_write_1h_tokens, &split) < 0)
-        return uncached_input_default(u);
-    return split.in_tokens;
-}
-
-int usage_reported(const struct stream_usage *u)
-{
-    return u->input_tokens >= 0 || u->output_tokens >= 0 || u->cost >= 0;
-}
-
-struct turn_usage *turn_usage_make(const struct stream_usage *u, long elapsed_ms,
-                                   const struct provider *p, const char *model)
-{
-    if (!usage_reported(u) && elapsed_ms < 0)
-        return NULL;
-    struct turn_usage *tu = xmalloc(sizeof(*tu));
-    tu->usage = *u;
-    tu->elapsed_ms = elapsed_ms;
-    tu->cost_input = tu->cost_cache_read = tu->cost_cache_write = tu->cost_output = -1;
-    tu->cost_total = -1;
-    tu->cost_estimated = 0;
-    tu->uncached_input_tokens = uncached_input_default(u);
-    if (u->cost >= 0)
-        tu->cost_total = u->cost;
-    if (u->input_tokens < 0 && u->output_tokens < 0)
-        return tu; /* no tokens to price — and a $0 "estimate" would
-                    * fabricate certainty about usage that is simply
-                    * unknown, duration-only footer or not */
-    if (!model || !*model)
-        return tu;
-    struct catalog_entry e;
-    if (!model_meta_rates(p, model, &e))
-        return tu;
-    struct catalog_split split;
-    double total = catalog_price(&e, u->input_tokens, u->output_tokens, u->cached_tokens,
-                                 u->cache_write_tokens, u->cache_write_1h_tokens, &split);
-    if (total < 0)
-        return tu;
-    tu->uncached_input_tokens = split.in_tokens;
-    tu->cost_input = split.in;
-    tu->cost_cache_read = split.cache_read;
-    tu->cost_cache_write = split.cache_write;
-    tu->cost_output = split.out;
-    if (tu->cost_total < 0) {
-        tu->cost_total = total;
-        tu->cost_estimated = 1;
-    }
-    return tu;
-}
-
-static char *resolve_model_label(struct provider *p, const char *model)
+static char *resolve_model_label(struct provider *provider, const char *model)
 {
     if (!model)
         return NULL;
-    return (p && p->model_label) ? p->model_label(p, model) : xstrdup(model);
+    return (provider && provider->model_label) ? provider->model_label(provider, model)
+                                               : xstrdup(model);
 }
 
-const char *agent_provider_id(const struct provider *p)
+const char *agent_provider_id(const struct provider *provider)
 {
     const char *id = config_str("provider");
     if (id && *id)
         return id;
-    return p ? p->name : NULL;
+    return provider ? provider->name : NULL;
 }
 
-const char *provider_log_name(const struct provider *p)
+const char *agent_provider_log_name(const struct provider *provider)
 {
-    const char *id = agent_provider_id(p);
+    const char *id = agent_provider_id(provider);
     return (id && *id) ? id : "none";
 }
 
-int agent_recording_enabled(const struct provider *p)
+int agent_recording_enabled(const struct provider *provider)
 {
-    const char *id = agent_provider_id(p);
-    const struct provider_factory *f = id ? provider_find(id) : NULL;
-    return !config_bool_or("no_session", f && f->internal);
+    const char *id = agent_provider_id(provider);
+    const struct provider_factory *factory = id ? provider_find(id) : NULL;
+    return !config_bool_or("no_session", factory && factory->internal);
 }
 
-/* Publish the effective selection for subagent inheritance (see
- * bash_export_selection). Sited here (init + reconfigure) because these are
- * the only two places the session's model/effort are resolved, so every path
- * — startup, oneshot, /provider, /model, /effort, /preset — republishes for
- * free. */
-static void export_selection(const struct provider *p, const struct agent_session *s)
+/* Keep subprocess inheritance synchronized at every settings-resolution point. */
+static void export_selection(const struct provider *provider, const struct agent_session *session)
 {
-    bash_export_selection(agent_provider_id(p), s->model, s->effort);
+    bash_export_selection(agent_provider_id(provider), session->model, session->effort);
 }
 
-int agent_session_init(struct agent_session *s, struct provider *p, const struct hax_opts *opts)
+void agent_session_init(struct agent_session *session, struct provider *provider,
+                        const struct hax_opts *opts)
 {
-    memset(s, 0, sizeof(*s));
+    memset(session, 0, sizeof(*session));
 
-    /* model may resolve empty: a provider with no default (openai, ollama,
-     * …) and nothing configured yet — or no provider at all (`p == NULL`),
-     * when the configured/default one couldn't construct (codex not logged
-     * in, …) and the user will pick another with /provider. That's no longer
-     * fatal — the interactive REPL starts anyway and prompts the user to pick
-     * one with /model or /provider, guarding the stream path until they do.
-     * The one-shot path, which can't prompt, checks for an empty model /
-     * missing provider itself and fails fast there. */
     const char *model = config_str("model");
-    if ((!model || !*model) && p)
-        model = p->default_model;
-    s->model = model ? xstrdup(model) : NULL;
-    s->model_label = resolve_model_label(p, s->model);
-    s->provider_name = p ? p->name : NULL;
+    if ((!model || !*model) && provider)
+        model = provider->default_model;
+    session->model = model ? xstrdup(model) : NULL;
+    session->model_label = resolve_model_label(provider, session->model);
+    session->provider_name = provider ? provider->name : NULL;
 
-    /* --raw collapses to "no system message + no tools advertised" so the
-     * model sees only the user text. HAX_SYSTEM_PROMPT="" remains the
-     * narrower opt-out (no system message but tools stay). */
-    s->raw = opts->raw;
-    s->sys = build_system_prompt(s->model_label, opts->raw);
-    s->effort = resolve_effort(p, s->model);
+    /* An empty system prompt suppresses only that message; raw mode also suppresses tools. */
+    session->raw_mode = opts->raw;
+    session->system_prompt = build_system_prompt(session->model_label, opts->raw);
+    session->effort = resolve_effort(provider, session->model);
 
-    s->n_tools = opts->raw ? 0 : N_TOOLS;
-    if (s->n_tools) {
-        s->tools = xmalloc(s->n_tools * sizeof(*s->tools));
-        for (size_t i = 0; i < s->n_tools; i++)
-            s->tools[i] = TOOLS[i]->def;
+    session->n_tools = opts->raw ? 0 : N_TOOLS;
+    if (session->n_tools) {
+        session->tools = xmalloc(session->n_tools * sizeof(*session->tools));
+        for (size_t i = 0; i < session->n_tools; i++)
+            session->tools[i] = TOOLS[i]->def;
     }
-    export_selection(p, s);
-    return 0;
+    export_selection(provider, session);
 }
 
-int agent_session_reconfigure(struct agent_session *s, struct provider *p)
+int agent_session_reconfigure(struct agent_session *session, struct provider *provider)
 {
     const char *model = config_str("model");
     if (!model || !*model)
-        model = p->default_model;
+        model = provider->default_model;
     if (!model || !*model) {
         hax_err("no model available for provider '%s' (set one with /model)",
-                p->name ? p->name : "?");
+                provider->name ? provider->name : "?");
         return -1;
     }
     char *new_model = xstrdup(model);
-    char *new_model_label = resolve_model_label(p, new_model);
-    free(s->model);
-    free(s->model_label);
-    s->model = new_model;
-    s->model_label = new_model_label;
-    s->provider_name = p->name;
-    /* Rebuild the system prompt so its Environment section names the new model.
-     * Tools and history are deliberately untouched — a switch keeps the
-     * conversation going under the new settings. */
-    free(s->sys);
-    s->sys = build_system_prompt(s->model_label, s->raw);
-    char *effort = resolve_effort(p, s->model);
-    free(s->effort);
-    s->effort = effort;
-    export_selection(p, s);
+    char *new_model_label = resolve_model_label(provider, new_model);
+    free(session->model);
+    free(session->model_label);
+    session->model = new_model;
+    session->model_label = new_model_label;
+    session->provider_name = provider->name;
+    /* The Environment section embeds the selected model. */
+    free(session->system_prompt);
+    session->system_prompt = build_system_prompt(session->model_label, session->raw_mode);
+    char *effort = resolve_effort(provider, session->model);
+    free(session->effort);
+    session->effort = effort;
+    export_selection(provider, session);
     return 0;
 }
 
-int agent_session_resync_effort(struct agent_session *s, struct provider *p, char **out_prev)
+int agent_session_resync_effort(struct agent_session *session, struct provider *provider,
+                                char **previous)
 {
-    if (out_prev)
-        *out_prev = NULL;
-    if (!s || !p || !s->model || !*s->model)
+    if (previous)
+        *previous = NULL;
+    if (!session || !provider || !session->model || !*session->model)
         return 0;
-    model_meta_settle(p);
-    char *e = resolve_effort(p, s->model);
-    int same = (!e && !s->effort) || (e && s->effort && strcmp(e, s->effort) == 0);
-    if (same) {
-        free(e);
+    model_meta_settle(provider);
+    char *effort = resolve_effort(provider, session->model);
+    int unchanged = (!effort && !session->effort) ||
+                    (effort && session->effort && strcmp(effort, session->effort) == 0);
+    if (unchanged) {
+        free(effort);
         return 0;
     }
-    if (out_prev)
-        *out_prev = s->effort;
+    if (previous)
+        *previous = session->effort;
     else
-        free(s->effort);
-    s->effort = e;
-    export_selection(p, s);
+        free(session->effort);
+    session->effort = effort;
+    export_selection(provider, session);
     return 1;
 }
 
-void agent_session_free(struct agent_session *s)
+void agent_session_free(struct agent_session *session)
 {
-    for (size_t i = 0; i < s->n_items; i++)
-        item_free(&s->items[i]);
-    free(s->items);
-    free(s->tools);
-    free(s->sys);
-    free(s->model);
-    free(s->model_label);
-    free(s->effort);
-    memset(s, 0, sizeof(*s));
+    for (size_t i = 0; i < session->n_items; i++)
+        item_free(&session->items[i]);
+    free(session->items);
+    free(session->tools);
+    free(session->system_prompt);
+    free(session->model);
+    free(session->model_label);
+    free(session->effort);
+    memset(session, 0, sizeof(*session));
 }
 
-void agent_session_reset(struct agent_session *s)
+void agent_session_reset(struct agent_session *session)
 {
-    for (size_t i = 0; i < s->n_items; i++)
-        item_free(&s->items[i]);
-    s->n_items = 0;
+    for (size_t i = 0; i < session->n_items; i++)
+        item_free(&session->items[i]);
+    session->n_items = 0;
 }
 
-struct context agent_session_context(const struct agent_session *s)
+struct context agent_session_context(const struct agent_session *session)
 {
     return (struct context){
-        .system_prompt = s->sys,
-        .items = s->items,
-        .n_items = s->n_items,
-        .tools = s->tools,
-        .n_tools = s->n_tools,
-        .effort = s->effort,
+        .system_prompt = session->system_prompt,
+        .items = session->items,
+        .n_items = session->n_items,
+        .tools = session->tools,
+        .n_tools = session->n_tools,
+        .effort = session->effort,
         /* Unknown by default (adapters treat it as yes); callers that
          * know the provider overwrite with model_meta_image_input(). */
         .image_input = -1,
     };
 }
 
-void agent_session_add_user(struct agent_session *s, const char *text)
+void agent_session_add_user(struct agent_session *session, const char *text)
 {
-    items_append(&s->items, &s->n_items, &s->cap_items, (struct item){.kind = ITEM_TURN_BOUNDARY});
-    items_append(&s->items, &s->n_items, &s->cap_items,
-                 (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup(text)});
+    agent_session_append(session, (struct item){.kind = ITEM_TURN_BOUNDARY});
+    agent_session_append(session, (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup(text)});
 }
 
-void agent_session_add_continuation(struct agent_session *s)
+void agent_session_add_continuation(struct agent_session *session)
 {
-    items_append(&s->items, &s->n_items, &s->cap_items, (struct item){.kind = ITEM_TURN_BOUNDARY});
-    items_append(&s->items, &s->n_items, &s->cap_items,
-                 (struct item){
-                     .kind = ITEM_USER_MESSAGE,
-                     .text = xstrdup(CONTINUE_MARKER),
-                     .origin = ITEM_ORIGIN_CONTINUATION,
-                 });
+    agent_session_append(session, (struct item){.kind = ITEM_TURN_BOUNDARY});
+    agent_session_append(session, (struct item){
+                                      .kind = ITEM_USER_MESSAGE,
+                                      .text = xstrdup(CONTINUE_MARKER),
+                                      .origin = ITEM_ORIGIN_CONTINUATION,
+                                  });
 }
 
-void agent_session_add_boundary(struct agent_session *s)
+void agent_session_add_boundary(struct agent_session *session)
 {
-    items_append(&s->items, &s->n_items, &s->cap_items, (struct item){.kind = ITEM_TURN_BOUNDARY});
+    agent_session_append(session, (struct item){.kind = ITEM_TURN_BOUNDARY});
 }
 
-/* True when `it` is a tool_result whose output already ends with the
- * interrupt marker — i.e. bash appended its "[interrupted]" footer when
- * killed by user-Esc. Non-bash tools (read, write, edit) finish normally
- * without any footer, so their results never read as marked. */
-static int tool_result_is_marked(const struct item *it)
+/* An interrupted tool may already carry the marker as its output suffix. */
+static int tool_result_has_interrupt_marker(const struct item *it)
 {
     if (it->kind != ITEM_TOOL_RESULT || !it->output)
         return 0;
@@ -550,72 +305,58 @@ static int tool_result_is_marked(const struct item *it)
     return strcmp(it->output + out_len - marker_len, INTERRUPT_MARKER) == 0;
 }
 
-void agent_session_mark_interrupt(struct agent_session *s)
+void agent_session_mark_interrupt(struct agent_session *session)
 {
     /* Look past inert trailing items (usage footers, boundaries) to the
      * last *content* item — footer emission between the tool batch and
      * this check must not hide an already-marked result and provoke a
      * duplicate marker. */
-    size_t i = s->n_items;
-    while (i > 0 &&
-           (s->items[i - 1].kind == ITEM_TURN_USAGE || s->items[i - 1].kind == ITEM_TURN_BOUNDARY))
+    size_t i = session->n_items;
+    while (i > 0 && (session->items[i - 1].kind == ITEM_TURN_USAGE ||
+                     session->items[i - 1].kind == ITEM_TURN_BOUNDARY))
         i--;
-    if (i > 0 && tool_result_is_marked(&s->items[i - 1]))
+    if (i > 0 && tool_result_has_interrupt_marker(&session->items[i - 1]))
         return;
-    items_append(&s->items, &s->n_items, &s->cap_items,
-                 (struct item){.kind = ITEM_ASSISTANT_MESSAGE,
-                               .text = xstrdup(INTERRUPT_MARKER),
-                               .origin = ITEM_ORIGIN_INTERRUPTED});
+    agent_session_append(session, (struct item){
+                                      .kind = ITEM_ASSISTANT_MESSAGE,
+                                      .text = xstrdup(INTERRUPT_MARKER),
+                                      .origin = ITEM_ORIGIN_INTERRUPTED,
+                                  });
 }
 
-void agent_session_add_turn_usage(struct agent_session *s, const struct provider *p,
-                                  const struct stream_usage *u, long elapsed_ms)
+void agent_session_add_turn_usage(struct agent_session *session, const struct provider *provider,
+                                  const struct stream_usage *usage, long elapsed_ms)
 {
-    struct turn_usage *tu = turn_usage_make(u, elapsed_ms, p, s->model);
-    if (!tu)
+    struct turn_usage *turn_usage =
+        agent_turn_usage_new(usage, elapsed_ms, provider, session->model);
+    if (!turn_usage)
         return;
-    items_append(&s->items, &s->n_items, &s->cap_items,
-                 (struct item){
+    agent_session_append(
+        session, (struct item){
                      .kind = ITEM_TURN_USAGE,
-                     .usage = tu,
-                     .provider = s->provider_name ? xstrdup(s->provider_name) : NULL,
-                     .model = s->model && *s->model ? xstrdup(s->model) : NULL,
+                     .usage = turn_usage,
+                     .provider = session->provider_name ? xstrdup(session->provider_name) : NULL,
+                     .model = session->model && *session->model ? xstrdup(session->model) : NULL,
                  });
 }
 
-void agent_session_absorb(struct agent_session *s, struct turn *t, size_t *out_before,
-                          int *out_had_tool_call)
+struct agent_absorb_result agent_session_absorb(struct agent_session *session, struct turn *turn)
 {
-    size_t n_new = 0;
-    struct item *new_items = turn_take_items(t, &n_new);
+    struct agent_absorb_result result = {.items_from = session->n_items};
+    size_t count = 0;
+    struct item *items = turn_take_items(turn, &count);
 
-    if (out_before)
-        *out_before = s->n_items;
-    int had_tc = 0;
-    for (size_t i = 0; i < n_new; i++) {
-        if (new_items[i].kind == ITEM_TOOL_CALL)
-            had_tc = 1;
-        /* Stamp reasoning with the provider+model that produced it, so a later
-         * /model or /provider switch (or a resumed mixed-model file) can't
-         * replay its model-bound blob against the wrong backend. Owned by the
-         * item (freed in item_free); the session's borrowed names are valid
-         * here — the producing provider is still live.
-         *
-         * The provider stamp is the display name (s->provider_name = p->name),
-         * which is intentionally the provider's identity: HAX_PROVIDER_NAME (and
-         * config-defined custom providers) name a backend, so it distinguishes
-         * two openai-compatible endpoints that share the "openai-compatible"
-         * factory id. Renaming a backend therefore re-identifies it and older
-         * CoT stops replaying — acceptable, since this is soft reasoning_text
-         * (assistant text + tool history always replay); Codex's model-bound
-         * encrypted blob rides provider "codex", which has no display override. */
-        if (new_items[i].kind == ITEM_REASONING) {
-            new_items[i].provider = s->provider_name ? xstrdup(s->provider_name) : NULL;
-            new_items[i].model = s->model ? xstrdup(s->model) : NULL;
+    for (size_t i = 0; i < count; i++) {
+        if (items[i].kind == ITEM_TOOL_CALL)
+            result.had_tool_call = 1;
+        /* Reasoning can be model-bound. Display identity also distinguishes custom endpoints
+         * that share one provider factory. */
+        if (items[i].kind == ITEM_REASONING) {
+            items[i].provider = session->provider_name ? xstrdup(session->provider_name) : NULL;
+            items[i].model = session->model ? xstrdup(session->model) : NULL;
         }
-        items_append(&s->items, &s->n_items, &s->cap_items, new_items[i]);
+        agent_session_append(session, items[i]);
     }
-    free(new_items);
-    if (out_had_tool_call)
-        *out_had_tool_call = had_tc;
+    free(items);
+    return result;
 }

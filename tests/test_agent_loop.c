@@ -109,11 +109,9 @@ static void test_loop_turn_collects_success(void)
     EXPECT(loop_turn.elapsed_ms >= 0);
     EXPECT(observer_events == 2);
 
-    size_t before;
-    int had_tool_call;
-    agent_session_absorb(&session, &loop_turn.assembly, &before, &had_tool_call);
-    EXPECT(before == 0);
-    EXPECT(!had_tool_call);
+    struct agent_absorb_result absorbed = agent_session_absorb(&session, &loop_turn.assembly);
+    EXPECT(absorbed.items_from == 0);
+    EXPECT(!absorbed.had_tool_call);
     EXPECT(session.n_items == 1);
     EXPECT_STR_EQ(session.items[0].text, "partial");
 

@@ -172,7 +172,7 @@ static void render_result_preview(struct render_ctx *r, const struct item *call,
                                   const struct item *result)
 {
     const char *output = result->output;
-    const struct tool *t = call->tool_name ? find_tool(call->tool_name) : NULL;
+    const struct tool *t = call->tool_name ? agent_find_tool(call->tool_name) : NULL;
     size_t streamed_len = 0;
     char *streamed = streamed_preview_body(call, result, &streamed_len);
     const char *body = streamed ? streamed : output;
@@ -264,7 +264,7 @@ static void render_tool_call(struct render_ctx *r, enum history_detail detail,
      * runs on the effective copy (the current hooks can't change its answer:
      * bash_classify already treats a `cd` prefix as neutral, and a path
      * rewrite says nothing about `read`'s static flag). */
-    const struct tool *t = items[i].tool_name ? find_tool(items[i].tool_name) : NULL;
+    const struct tool *t = items[i].tool_name ? agent_find_tool(items[i].tool_name) : NULL;
     char *effective_args =
         t && t->preprocess_args ? t->preprocess_args(items[i].tool_arguments_json) : NULL;
     struct item call = items[i];
