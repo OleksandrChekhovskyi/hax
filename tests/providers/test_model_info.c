@@ -154,10 +154,10 @@ static int efforts_are(const struct effort_set *s, const char *const *want)
     size_t n = 0;
     while (want[n])
         n++;
-    if (!s->known || s->n != n)
+    if (!s->known || s->count != n)
         return 0;
     for (size_t i = 0; i < n; i++)
-        if (strcmp(s->v[i], want[i]) != 0)
+        if (strcmp(s->values[i], want[i]) != 0)
             return 0;
     return 1;
 }
@@ -245,7 +245,7 @@ static void test_codex_efforts_absent(void)
     struct effort_set s = {0};
     json_t *j = parse("{\"slug\":\"x\",\"context_window\":272000}");
     codex_parse_efforts(j, &s);
-    EXPECT(!s.known && s.n == 0);
+    EXPECT(!s.known && s.count == 0);
     json_decref(j);
 
     /* Present but empty is the opposite answer: every level denied, so not
@@ -254,7 +254,7 @@ static void test_codex_efforts_absent(void)
     struct effort_set e = {0};
     json_t *k = parse("{\"slug\":\"x\",\"supported_reasoning_levels\":[]}");
     codex_parse_efforts(k, &e);
-    EXPECT(e.known && e.n == 0);
+    EXPECT(e.known && e.count == 0);
     json_decref(k);
 }
 
@@ -301,7 +301,7 @@ static void test_anthropic_efforts_unsupported(void)
     WITH_ENTRY("{\"id\":\"claude-haiku-4-5\",\"capabilities\":{\"effort\":{\"supported\":false},"
                "\"thinking\":{\"supported\":true,\"types\":{\"enabled\":{\"supported\":true}}}}}",
                anthropic_parse_model, m);
-    EXPECT(m.efforts.known && m.efforts.n == 0);
+    EXPECT(m.efforts.known && m.efforts.count == 0);
     json_decref(m_j);
 }
 
@@ -328,7 +328,7 @@ static void test_anthropic_efforts_unknown_level(void)
                "\"low\":{\"supported\":true},\"ludicrous\":{\"supported\":true},"
                "\"high\":{\"supported\":false}}}}",
                anthropic_parse_model, m);
-    EXPECT(m.efforts.known && m.efforts.n == 2);
+    EXPECT(m.efforts.known && m.efforts.count == 2);
     EXPECT(effort_set_has(&m.efforts, "low"));
     EXPECT(effort_set_has(&m.efforts, "ludicrous"));
     /* An explicit false is not support. */
@@ -361,7 +361,7 @@ static void test_openrouter_efforts_none(void)
     struct effort_set s = {0};
     json_t *j = parse("{\"id\":\"vendor/plain\",\"supported_parameters\":[\"tools\",\"stop\"]}");
     openrouter_parse_efforts(j, &s);
-    EXPECT(s.known && s.n == 0);
+    EXPECT(s.known && s.count == 0);
     json_decref(j);
 
     /* Reasoning without levels (a toggle or token budget) is unknown, not
@@ -370,7 +370,7 @@ static void test_openrouter_efforts_none(void)
     json_t *k = parse("{\"id\":\"moonshotai/kimi\",\"supported_parameters\":[\"reasoning\"],"
                       "\"reasoning\":{\"mandatory\":false,\"default_enabled\":true}}");
     openrouter_parse_efforts(k, &b);
-    EXPECT(!b.known && b.n == 0);
+    EXPECT(!b.known && b.count == 0);
     json_decref(k);
 
     /* The router entries describe no model yet, so they carry no reasoning
@@ -380,14 +380,14 @@ static void test_openrouter_efforts_none(void)
     json_t *a = parse("{\"id\":\"openrouter/auto\",\"supported_parameters\":"
                       "[\"tools\",\"include_reasoning\",\"reasoning\",\"reasoning_effort\"]}");
     openrouter_parse_efforts(a, &r);
-    EXPECT(!r.known && r.n == 0);
+    EXPECT(!r.known && r.count == 0);
     json_decref(a);
 
     /* An empty list is a stated no, distinct from the absent field above. */
     struct effort_set c = {0};
     json_t *q = parse("{\"id\":\"vendor/m\",\"reasoning\":{\"supported_efforts\":[]}}");
     openrouter_parse_efforts(q, &c);
-    EXPECT(c.known && c.n == 0);
+    EXPECT(c.known && c.count == 0);
     json_decref(q);
 }
 
@@ -412,7 +412,7 @@ static void test_openrouter_meta_picks_the_exact_id(void)
     EXPECT(m.context == 1050000);
     EXPECT(m.max_output == 128000);
     EXPECT(m.cost_input == 5.0);
-    EXPECT(m.efforts.known && m.efforts.n == 2);
+    EXPECT(m.efforts.known && m.efforts.count == 2);
     model_info_clear(&m);
 
     /* A model the page doesn't carry leaves everything unknown rather than

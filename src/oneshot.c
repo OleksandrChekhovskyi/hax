@@ -107,11 +107,8 @@ static void oneshot_auto_compact(void *user)
 int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *opts, int max_turns)
 {
     struct agent_session sess;
-    /* Settle the constructor's metadata probe before resolving anything
-     * from it. This run has one request and no pause to hide the fetch in,
-     * so the alternative is resolving the effort against the static ladder
-     * every time and sending a level the model may reject. */
-    model_meta_settle(p);
+    /* One-shot mode must resolve effort after the startup probe, not while it is still pending. */
+    model_meta_wait(p);
     agent_session_init(&sess, p, opts);
     /* One-shot mode cannot prompt for a missing model. */
     if (!sess.model || !*sess.model) {

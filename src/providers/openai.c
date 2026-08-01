@@ -468,11 +468,8 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
 {
     struct openai *o = (struct openai *)p;
 
-    /* The plan reads this model's rates, so the startup probe has to have
-     * landed — the frontends settle it before a turn, but that is their
-     * business, not a guarantee this path can rely on. Settling twice
-     * costs nothing. */
-    model_meta_settle(p);
+    /* Cache planning requires the startup probe's final rates. */
+    model_meta_wait(p);
     struct openai_cache_plan cache = openai_plan_cache(p, model, o->cache_mode, o->cache_ttl);
 
     char *body = build_body(ctx, p->name, model, o->send_cache_key ? o->session_id : NULL,
@@ -577,8 +574,6 @@ static int openai_stream(struct provider *p, const struct context *ctx, const ch
 static void openai_destroy(struct provider *p)
 {
     struct openai *o = (struct openai *)p;
-    /* Settle the metadata probe before freeing anything it could still be
-     * writing to; model_meta_release cancels and joins. */
     model_meta_release(p);
     free(o->base_url);
     free(o->api_key);

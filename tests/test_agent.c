@@ -339,7 +339,7 @@ static void test_resync_effort_follows_late_metadata(void)
     effort_set_add(&m.efforts, "low");
     effort_set_add(&m.efforts, "medium");
     effort_set_add(&m.efforts, "high");
-    model_meta_remember(&f.provider, &m);
+    model_meta_store(&f.provider, &m);
     model_info_clear(&m);
 
     /* The replaced value comes back for the note the REPL prints: the

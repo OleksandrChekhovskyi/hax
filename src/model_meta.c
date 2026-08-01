@@ -8,233 +8,202 @@
 #include "catalog.h"
 #include "config.h"
 #include "provider.h"
-#include "util.h"
 #include "system/bg_job.h"
 #include "transport/http.h"
+#include "util.h"
 
-/* Live metadata for one provider's current model, plus the job fetching it.
- * Allocated on demand; hung off struct provider (see the `meta` field
- * there for why it lives per-provider). */
 struct model_meta {
-    struct bg_job *job;
-    char *model;            /* what `info` describes; NULL = nothing held */
-    struct model_info info; /* valid when model != NULL */
+    struct bg_job *probe;
+    struct model_info reported;
 };
 
-/* One lock for every provider's slot: readers copy fields out under it, the
- * single background writer publishes under it. Module-level rather than
- * per-provider to avoid initializing a mutex inside each adapter's calloc'd
- * struct; it guards no state of its own, and contention is nil (one probe
- * in flight at a time). */
-static pthread_mutex_t meta_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Provider slots are foreground-owned; this lock protects reports shared with probe workers. */
+static pthread_mutex_t report_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static struct model_meta *meta_of(struct provider *p)
+static struct model_meta *get_or_create_meta(struct provider *provider)
 {
-    if (!p->meta)
-        p->meta = xcalloc(1, sizeof(*p->meta));
-    return p->meta;
+    if (!provider->meta)
+        provider->meta = xcalloc(1, sizeof(*provider->meta));
+    return provider->meta;
 }
 
-/* Drop the held snapshot. Caller holds the lock. */
-static void meta_clear_locked(struct model_meta *m)
+static void clear_report_locked(struct model_meta *meta)
 {
-    free(m->model);
-    m->model = NULL;
-    model_info_clear(&m->info);
+    model_info_clear(&meta->reported);
 }
 
-/* Settle the in-flight job so it cannot publish after this returns. Must be
- * called without the lock: the worker takes it to publish, so joining while
- * holding it would deadlock. */
-static void meta_settle_job(struct model_meta *m)
+/* Joining while holding report_lock would deadlock with a worker publishing its result. */
+static void cancel_probe(struct model_meta *meta)
 {
-    if (!m->job)
+    if (!meta->probe)
         return;
-    bg_job_cancel(m->job);
-    bg_job_join(m->job);
-    m->job = NULL;
+    bg_job_cancel(meta->probe);
+    bg_job_join(meta->probe);
+    meta->probe = NULL;
 }
 
-void model_meta_release(struct provider *p)
+void model_meta_release(struct provider *provider)
 {
-    if (!p || !p->meta)
+    if (!provider || !provider->meta)
         return;
-    struct model_meta *m = p->meta;
-    meta_settle_job(m);
-    pthread_mutex_lock(&meta_lock);
-    meta_clear_locked(m);
-    pthread_mutex_unlock(&meta_lock);
-    free(m);
-    p->meta = NULL;
+
+    struct model_meta *meta = provider->meta;
+    cancel_probe(meta);
+    pthread_mutex_lock(&report_lock);
+    clear_report_locked(meta);
+    pthread_mutex_unlock(&report_lock);
+    free(meta);
+    provider->meta = NULL;
 }
 
-/* ---------------- the background probe ---------------- */
-
-struct probe_job {
-    struct model_meta *target; /* outlives the join — see model_meta_release */
-    char *model;
-    struct model_probe req;
+struct probe_task {
+    struct model_meta *target; /* valid until the owning provider joins the probe */
+    char *model_id;
+    struct model_probe request;
 };
 
-static void probe_job_free(struct probe_job *job)
+static void probe_task_free(struct probe_task *task)
 {
-    model_probe_clear(&job->req);
-    free(job->model);
-    free(job);
+    model_probe_clear(&task->request);
+    free(task->model_id);
+    free(task);
 }
 
 static void probe_worker(struct bg_job *job, void *arg)
 {
-    struct probe_job *j = arg;
-    /* Cancelled before the transfer started, where the tick that
-     * short-circuits libcurl can't help yet. */
+    struct probe_task *task = arg;
+    /* The HTTP tick cannot observe cancellation until the transfer starts. */
     if (bg_job_cancelled(job)) {
-        probe_job_free(j);
+        probe_task_free(task);
         return;
     }
 
     char *body = NULL;
-    int rc = http_get(j->req.url, (const char *const *)j->req.headers, j->req.timeout_s, 0,
-                      bg_job_tick, job, &body, NULL);
-
+    int rc = http_get(task->request.url, (const char *const *)task->request.headers,
+                      task->request.timeout_s, 0, bg_job_tick, job, &body, NULL);
     if (rc == 0 && body && !bg_job_cancelled(job)) {
-        struct model_info info;
-        model_info_init(&info);
-        info.id = xstrdup(j->model);
-        j->req.parse(body, j->model, &info);
-        pthread_mutex_lock(&meta_lock);
-        /* Publish only over the model this job was started for: a cancel
-         * racing the parse must not overwrite a newer selection's answer
-         * with this older one. */
-        if (!j->target->model || strcmp(j->target->model, j->model) == 0) {
-            meta_clear_locked(j->target);
-            j->target->model = xstrdup(j->model);
-            j->target->info = info;
-            memset(&info, 0, sizeof(info)); /* ownership moved */
+        struct model_info report;
+        model_info_init(&report);
+        report.id = xstrdup(task->model_id);
+        task->request.parse(body, task->model_id, &report);
+
+        pthread_mutex_lock(&report_lock);
+        /* A cancelled probe must not overwrite a newer selection after parsing. */
+        if (!task->target->reported.id || strcmp(task->target->reported.id, task->model_id) == 0) {
+            clear_report_locked(task->target);
+            model_info_copy(&task->target->reported, &report);
         }
-        pthread_mutex_unlock(&meta_lock);
-        model_info_clear(&info); /* no-op when it was adopted */
+        pthread_mutex_unlock(&report_lock);
+        model_info_clear(&report);
     }
+
     free(body);
-    probe_job_free(j);
+    probe_task_free(task);
 }
 
-void model_meta_refresh(struct provider *p, const char *model)
+void model_meta_refresh(struct provider *provider, const char *model)
 {
-    /* Nothing to fetch and nothing held: don't allocate a slot a backend
-     * that can't describe its models would never fill. */
-    if (!p || (!p->probe_model && !p->meta))
-        return;
-    struct model_meta *m = meta_of(p);
-
-    /* Already describing this model — the picker handed its entry over on
-     * the way past, from the same document a probe would fetch. Skipping
-     * the round-trip is why a switch through /model costs one fetch, not
-     * two. */
-    pthread_mutex_lock(&meta_lock);
-    int held = m->model && model && strcmp(m->model, model) == 0;
-    pthread_mutex_unlock(&meta_lock);
-    if (held)
+    if (!provider || (!provider->probe_model && !provider->meta))
         return;
 
-    meta_settle_job(m);
-    /* The held snapshot described the previous selection; keeping it would
-     * answer the next question with the wrong model's numbers. */
-    pthread_mutex_lock(&meta_lock);
-    meta_clear_locked(m);
-    pthread_mutex_unlock(&meta_lock);
-
-    if (!p->probe_model || !model || !*model)
+    struct model_meta *meta = get_or_create_meta(provider);
+    pthread_mutex_lock(&report_lock);
+    int already_reported = meta->reported.id && model && strcmp(meta->reported.id, model) == 0;
+    pthread_mutex_unlock(&report_lock);
+    if (already_reported)
         return;
-    struct model_probe req;
-    memset(&req, 0, sizeof(req));
-    if (p->probe_model(p, model, &req) != 0 || !req.url || !req.parse) {
-        model_probe_clear(&req);
+
+    cancel_probe(meta);
+    pthread_mutex_lock(&report_lock);
+    clear_report_locked(meta);
+    pthread_mutex_unlock(&report_lock);
+
+    if (!provider->probe_model || !model || !*model)
+        return;
+
+    struct model_probe request = {0};
+    if (provider->probe_model(provider, model, &request) != 0 || !request.url || !request.parse) {
+        model_probe_clear(&request);
         return;
     }
-    struct probe_job *j = xcalloc(1, sizeof(*j));
-    j->target = m;
-    j->model = xstrdup(model);
-    j->req = req;
-    m->job = bg_job_spawn(probe_worker, j);
-    if (!m->job)
-        probe_job_free(j); /* worker never ran, so nothing will free it */
+
+    struct probe_task *task = xcalloc(1, sizeof(*task));
+    task->target = meta;
+    task->model_id = xstrdup(model);
+    task->request = request;
+    meta->probe = bg_job_spawn(probe_worker, task);
+    if (!meta->probe)
+        probe_task_free(task);
 }
 
-void model_meta_settle(struct provider *p)
+void model_meta_wait(struct provider *provider)
 {
-    if (!p || !p->meta || !p->meta->job)
+    if (!provider || !provider->meta || !provider->meta->probe)
         return;
-    /* Joined, not cancelled: the point is to have the answer. */
-    bg_job_join(p->meta->job);
-    p->meta->job = NULL;
+    bg_job_join(provider->meta->probe);
+    provider->meta->probe = NULL;
 }
 
-/* Does `src` state any fact a probe would otherwise go and fetch? */
-static int describes_anything(const struct model_info *src)
+static int model_info_has_details(const struct model_info *info)
 {
-    return src->context > 0 || src->max_output > 0 || src->image_input != PROVIDER_CAP_UNKNOWN ||
-           src->tools != PROVIDER_CAP_UNKNOWN || src->efforts.known || src->cost_input >= 0 ||
-           src->cost_output >= 0 || src->cost_cache_read >= 0 || src->cost_cache_write >= 0 ||
-           src->cost_cache_write_1h >= 0 || src->n_tiers > 0;
+    return info->context > 0 || info->max_output > 0 || info->image_input != PROVIDER_CAP_UNKNOWN ||
+           info->tools != PROVIDER_CAP_UNKNOWN || info->efforts.known || info->cost_input >= 0 ||
+           info->cost_output >= 0 || info->cost_cache_read >= 0 || info->cost_cache_write >= 0 ||
+           info->cost_cache_write_1h >= 0 || info->n_tiers > 0;
 }
 
-void model_meta_remember(struct provider *p, const struct model_info *src)
+void model_meta_store(struct provider *provider, const struct model_info *info)
 {
-    if (!p || !src || !src->id || !*src->id)
+    if (!provider || !info || !info->id || !*info->id || !model_info_has_details(info))
         return;
-    /* A row that is nothing but an id describes no model — llama.cpp's
-     * /v1/models, whose window and vision live in /props. Adopting it would
-     * still count as a snapshot naming that model, which is what
-     * model_meta_refresh skips the fetch on, so the answer would never
-     * arrive. Return before touching the in-flight job, too: it may be
-     * exactly that fetch. */
-    if (!describes_anything(src))
-        return;
-    struct model_meta *m = meta_of(p);
-    /* Same document the probe would fetch, so settle it rather than race. */
-    meta_settle_job(m);
-    pthread_mutex_lock(&meta_lock);
-    meta_clear_locked(m);
-    m->model = xstrdup(src->id);
-    model_info_copy(&m->info, src);
-    pthread_mutex_unlock(&meta_lock);
+
+    struct model_meta *meta = get_or_create_meta(provider);
+    cancel_probe(meta);
+    pthread_mutex_lock(&report_lock);
+    clear_report_locked(meta);
+    model_info_copy(&meta->reported, info);
+    pthread_mutex_unlock(&report_lock);
 }
 
-int model_meta_snapshot(const struct provider *p, struct model_info *out)
+int model_meta_snapshot(const struct provider *provider, struct model_info *out)
 {
     model_info_init(out);
-    if (!p || !p->meta)
+    if (!provider || !provider->meta)
         return 0;
-    pthread_mutex_lock(&meta_lock);
-    int held = p->meta->model != NULL;
-    if (held)
-        model_info_copy(out, &p->meta->info);
-    pthread_mutex_unlock(&meta_lock);
-    return held;
+
+    pthread_mutex_lock(&report_lock);
+    int has_report = provider->meta->reported.id != NULL;
+    if (has_report)
+        model_info_copy(out, &provider->meta->reported);
+    pthread_mutex_unlock(&report_lock);
+    return has_report;
 }
 
-/* ---------------- resolution ---------------- */
-
-/* Copy the live snapshot for `model` under the lock, or return 0. */
-static int live_copy(const struct provider *p, const char *model, struct model_info *out)
+static int copy_report(const struct provider *provider, const char *model, struct model_info *out)
 {
-    if (!p || !p->meta || !model || !*model)
+    model_info_init(out);
+    if (!provider || !provider->meta || !model || !*model)
         return 0;
-    pthread_mutex_lock(&meta_lock);
-    int ok = p->meta->model && strcmp(p->meta->model, model) == 0;
-    if (ok)
-        model_info_copy(out, &p->meta->info);
-    pthread_mutex_unlock(&meta_lock);
-    return ok;
+
+    pthread_mutex_lock(&report_lock);
+    int matches = provider->meta->reported.id && strcmp(provider->meta->reported.id, model) == 0;
+    if (matches)
+        model_info_copy(out, &provider->meta->reported);
+    pthread_mutex_unlock(&report_lock);
+    return matches;
 }
 
-static void load_catalog_entry(const struct provider *p, const char *model,
+static void load_catalog_entry(const struct provider *provider, const char *model,
                                struct catalog_entry *out)
 {
     catalog_entry_init(out);
-    if (p && p->catalog_id && *p->catalog_id && model && *model)
-        catalog_lookup(p->catalog_id, model, out);
+    if (provider && provider->catalog_id && *provider->catalog_id && model && *model)
+        catalog_lookup(provider->catalog_id, model, out);
+}
+
+static int report_has_base_rates(const struct model_info *report)
+{
+    return report && (report->cost_input >= 0 || report->cost_output >= 0);
 }
 
 void model_meta_merge(const struct model_info *reported, const struct catalog_entry *catalog,
@@ -242,14 +211,13 @@ void model_meta_merge(const struct model_info *reported, const struct catalog_en
 {
     model_info_init(out);
     if (reported) {
-        struct model_info reported_view = *reported;
-        reported_view.id = NULL; /* The merged view describes a model; it is not a model row. */
-        reported_view.description = NULL;
-        *out = reported_view;
+        *out = *reported;
+        out->id = NULL;
+        out->description = NULL;
     }
     if (!catalog)
         return;
-    int backend_has_rates = reported && (reported->cost_input >= 0 || reported->cost_output >= 0);
+
     if (out->context <= 0)
         out->context = catalog->context_window;
     if (out->max_output <= 0)
@@ -267,11 +235,9 @@ void model_meta_merge(const struct model_info *reported, const struct catalog_en
         out->cost_cache_write = catalog->cost_cache_write;
     if (out->cost_cache_write_1h < 0)
         out->cost_cache_write_1h = catalog->cost_cache_write_1h;
-    /* Tiers move whole, and only onto a report with no rates of its own:
-     * the backend's base rates under the snapshot's thresholds would bill
-     * a request at rates that never coexisted. A backend quoting rates but
-     * no tiers is taken at its word — flat. */
-    if (out->n_tiers == 0 && !backend_has_rates) {
+
+    /* Catalog tiers cannot be combined with base rates reported by a different billing source. */
+    if (out->n_tiers == 0 && !report_has_base_rates(reported)) {
         memcpy(out->tiers, catalog->tiers, sizeof(out->tiers));
         out->n_tiers = catalog->n_tiers;
     }
@@ -279,38 +245,39 @@ void model_meta_merge(const struct model_info *reported, const struct catalog_en
         out->efforts = catalog->efforts;
 }
 
-static void resolve_model_info(const struct provider *p, const char *model, struct model_info *out)
+static void resolve_model_info(const struct provider *provider, const char *model,
+                               struct model_info *out)
 {
-    struct model_info live;
-    int has_live_metadata = live_copy(p, model, &live);
+    struct model_info reported;
+    int has_report = copy_report(provider, model, &reported);
     struct catalog_entry catalog;
-    load_catalog_entry(p, model, &catalog);
-    model_meta_merge(has_live_metadata ? &live : NULL, &catalog, out);
-    if (has_live_metadata)
-        model_info_clear(&live);
+    load_catalog_entry(provider, model, &catalog);
+    model_meta_merge(has_report ? &reported : NULL, &catalog, out);
+    model_info_clear(&reported);
 }
 
-long model_meta_context(const struct provider *p, const char *model)
+long model_meta_context(const struct provider *provider, const char *model)
 {
-    long configured_context = config_size("context_limit");
-    if (configured_context > 0)
-        return configured_context;
+    long configured = config_size("context_limit");
+    if (configured > 0)
+        return configured;
+
     struct model_info info;
-    resolve_model_info(p, model, &info);
+    resolve_model_info(provider, model, &info);
     return info.context;
 }
 
-long model_meta_max_output(const struct provider *p, const char *model)
+long model_meta_max_output(const struct provider *provider, const char *model)
 {
     struct model_info info;
-    resolve_model_info(p, model, &info);
+    resolve_model_info(provider, model, &info);
     return info.max_output;
 }
 
-int model_meta_rates(const struct provider *p, const char *model, struct catalog_entry *out)
+int model_meta_rates(const struct provider *provider, const char *model, struct catalog_entry *out)
 {
     struct model_info info;
-    resolve_model_info(p, model, &info);
+    resolve_model_info(provider, model, &info);
     catalog_entry_init(out);
     out->cost_input = info.cost_input;
     out->cost_output = info.cost_output;
@@ -323,115 +290,62 @@ int model_meta_rates(const struct provider *p, const char *model, struct catalog
     return info.cost_input >= 0 && info.cost_output >= 0;
 }
 
-int model_meta_image_input(const struct provider *p, const char *model)
+int model_meta_image_input(const struct provider *provider, const char *model)
 {
-    /* "auto" falls through to detection; a real on/off pins the answer.
-     * Tested by string — the bool accessors can't express "not a bool". */
     const char *configured = config_str("image_input");
     if (configured && *configured && strcmp(configured, "auto") != 0)
         return config_bool("image_input");
+
     struct model_info info;
-    resolve_model_info(p, model, &info);
-    enum provider_cap capability = info.image_input;
-    if (capability == PROVIDER_CAP_YES)
+    resolve_model_info(provider, model, &info);
+    if (info.image_input == PROVIDER_CAP_YES)
         return 1;
-    if (capability == PROVIDER_CAP_NO)
+    if (info.image_input == PROVIDER_CAP_NO)
         return 0;
     return -1;
 }
 
-void model_meta_efforts(const struct provider *p, const char *model, struct effort_set *out)
+void model_meta_efforts(const struct provider *provider, const char *model, struct effort_set *out)
 {
     memset(out, 0, sizeof(*out));
     out->known = 1;
 
-    /* The provider's static ladder is the vocabulary hax knows how to send
-     * on this backend, so an empty one settles the question before any
-     * metadata is consulted: a provider that never sends an effort field
-     * must not grow a menu because a catalog happens to describe its
-     * model. It also supplies the presentation order below. */
-    const char *const *ladder = NULL;
-    struct provider *mutable_provider = (struct provider *)p;
-    size_t ladder_count = (p && p->list_efforts) ? p->list_efforts(mutable_provider, &ladder) : 0;
-    if (ladder_count == 0)
+    const char *const *provider_levels = NULL;
+    struct provider *mutable_provider = (struct provider *)provider;
+    size_t provider_level_count = (provider && provider->list_efforts)
+                                      ? provider->list_efforts(mutable_provider, &provider_levels)
+                                      : 0;
+    /* Metadata cannot enable effort values on a provider that has no way to send them. */
+    if (provider_level_count == 0)
         return;
 
-    struct effort_set reported = {0};
-    struct model_info live;
-    if (live_copy(p, model, &live)) {
-        reported = live.efforts;
-        model_info_clear(&live);
+    struct effort_set accepted = {0};
+    struct model_info reported;
+    if (copy_report(provider, model, &reported)) {
+        accepted = reported.efforts;
+        model_info_clear(&reported);
     }
-    /* Which tier answered decides whether it may widen the ladder below. */
-    int from_backend = reported.known;
-    if (!reported.known) {
+    int reported_by_provider = accepted.known;
+    if (!accepted.known) {
         struct catalog_entry catalog;
-        load_catalog_entry(p, model, &catalog);
-        reported = catalog.efforts;
+        load_catalog_entry(provider, model, &catalog);
+        accepted = catalog.efforts;
     }
 
-    if (!reported.known) {
-        for (size_t i = 0; i < ladder_count; i++)
-            effort_set_add(out, ladder[i]);
+    if (!accepted.known) {
+        for (size_t i = 0; i < provider_level_count; i++)
+            effort_set_add(out, provider_levels[i]);
         return;
     }
-    if (reported.n == 0)
-        return; /* known to take no levels — the empty answer is the answer */
+    if (accepted.count == 0)
+        return;
 
-    for (size_t i = 0; i < ladder_count; i++)
-        if (effort_set_has(&reported, ladder[i]))
-            effort_set_add(out, ladder[i]);
-    /* Only a backend may name a level the ladder doesn't: it is describing
-     * the model it will itself serve. The catalog is keyed by a shared id
-     * (codex borrows "openai" for want of an entry of its own), so its
-     * vocabulary is some other API's — "minimal" is an OpenAI level the
-     * codex backend answers 400 for — and it narrows only. */
-    if (from_backend)
-        for (size_t i = 0; i < reported.n; i++)
-            effort_set_add(out, reported.v[i]);
-}
+    for (size_t i = 0; i < provider_level_count; i++)
+        if (effort_set_has(&accepted, provider_levels[i]))
+            effort_set_add(out, provider_levels[i]);
 
-/* Canonical ordering for clamping, separate from any provider's ladder: the
- * level being placed is by definition absent from the set being searched,
- * so only a shared scale can say which neighbor is nearer. An unrecognized
- * name has no rank and declines to clamp rather than guessing. */
-static const char *const EFFORT_RANK[] = {"none", "minimal", "low", "medium",
-                                          "high", "xhigh",   "max"};
-
-static int effort_rank(const char *level)
-{
-    if (!level)
-        return -1;
-    for (size_t i = 0; i < sizeof(EFFORT_RANK) / sizeof(EFFORT_RANK[0]); i++)
-        if (strcmp(EFFORT_RANK[i], level) == 0)
-            return (int)i;
-    return -1;
-}
-
-const char *effort_clamp(const struct effort_set *s, const char *want)
-{
-    if (!s->known || s->n == 0 || !want || !*want)
-        return NULL;
-    if (effort_set_has(s, want))
-        return want;
-    int target = effort_rank(want);
-    if (target < 0)
-        return NULL;
-
-    const char *below = NULL, *above = NULL;
-    int below_rank = -1, above_rank = 0;
-    for (size_t i = 0; i < s->n; i++) {
-        int rank = effort_rank(s->v[i]);
-        if (rank < 0)
-            continue;
-        if (rank <= target && rank > below_rank) {
-            below_rank = rank;
-            below = s->v[i];
-        }
-        if (rank > target && (!above || rank < above_rank)) {
-            above_rank = rank;
-            above = s->v[i];
-        }
-    }
-    return below ? below : above;
+    /* Catalog metadata may narrow a provider's vocabulary; only the provider may extend it. */
+    if (reported_by_provider)
+        for (size_t i = 0; i < accepted.count; i++)
+            effort_set_add(out, accepted.values[i]);
 }

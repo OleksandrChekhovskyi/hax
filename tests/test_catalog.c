@@ -94,22 +94,22 @@ static void test_lookup_reasoning_options(void)
 {
     struct catalog_entry entry;
     EXPECT(catalog_lookup("openai", "o3-effort", &entry) == 0);
-    EXPECT(entry.efforts.known && entry.efforts.n == 3);
-    EXPECT_STR_EQ(entry.efforts.v[0], "none");
-    EXPECT_STR_EQ(entry.efforts.v[2], "high");
+    EXPECT(entry.efforts.known && entry.efforts.count == 3);
+    EXPECT_STR_EQ(entry.efforts.values[0], "none");
+    EXPECT_STR_EQ(entry.efforts.values[2], "high");
 
     /* A token budget is a real answer of a different kind: no levels. */
     EXPECT(catalog_lookup("openai", "o3-budget", &entry) == 0);
-    EXPECT(entry.efforts.known && entry.efforts.n == 0);
+    EXPECT(entry.efforts.known && entry.efforts.count == 0);
 
     /* Mixed options: the effort list is the one that yields a menu. */
     EXPECT(catalog_lookup("openai", "o3-toggle-then-effort", &entry) == 0);
-    EXPECT(entry.efforts.known && entry.efforts.n == 2);
+    EXPECT(entry.efforts.known && entry.efforts.count == 2);
     EXPECT(effort_set_has(&entry.efforts, "max"));
 
     /* Declaring no reasoning at all lands in the same place. */
     EXPECT(catalog_lookup("openai", "o3-no-reasoning", &entry) == 0);
-    EXPECT(entry.efforts.known && entry.efforts.n == 0);
+    EXPECT(entry.efforts.known && entry.efforts.count == 0);
 
     /* An entry that says nothing about reasoning stays unknown — this is
      * the majority of the artifact, and it must not read as "no levels". */

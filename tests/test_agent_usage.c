@@ -181,7 +181,7 @@ static void publish_rates(struct provider *provider, const char *model, double i
     info.id = xstrdup(model);
     info.cost_input = input;
     info.cost_output = output;
-    model_meta_remember(provider, &info);
+    model_meta_store(provider, &info);
     model_info_clear(&info);
 }
 

@@ -320,7 +320,7 @@ static struct model_pick_result pick_model_from_list(struct provider *provider,
         result.explicit_choice = 1;
         /* Publish metadata before freeing the list so the chained effort picker can use it. This
          * temporarily displaces live-model metadata and must be restored on cancellation. */
-        model_meta_remember(provider, &models[selected_index]);
+        model_meta_store(provider, &models[selected_index]);
     }
     for (size_t i = 0; i < model_count; i++)
         free(descriptions[i]);
@@ -382,7 +382,7 @@ static struct model_pick_result choose_model(struct agent_state *state, struct p
         /* One available model needs no picker and does not imply user intent. */
         result.status = PICK_MADE;
         result.model = xstrdup(models[0].id);
-        model_meta_remember(provider, &models[0]);
+        model_meta_store(provider, &models[0]);
         model_info_free(models, model_count);
         return result;
     }
@@ -400,7 +400,7 @@ static struct value_pick_result choose_effort(struct agent_state *state, struct 
     struct value_pick_result result = {.status = PICK_NONE};
     struct effort_set levels;
     model_meta_efforts(provider, model, &levels);
-    if (levels.n == 0) {
+    if (levels.count == 0) {
         if (announce_unavailable) {
             /* Distinguish a model-specific restriction from a provider without effort support. */
             const char *const *provider_efforts = NULL;
@@ -414,20 +414,20 @@ static struct value_pick_result choose_effort(struct agent_state *state, struct 
         return result;
     }
 
-    struct picker_item *items = xcalloc(levels.n + 1, sizeof(*items));
+    struct picker_item *items = xcalloc(levels.count + 1, sizeof(*items));
     items[0].label = "default";
     items[0].desc = "Let the provider choose the reasoning effort";
     size_t initial = 0;
-    for (size_t i = 0; i < levels.n; i++) {
-        items[i + 1].label = levels.v[i];
-        items[i + 1].current = current_effort && strcmp(levels.v[i], current_effort) == 0;
+    for (size_t i = 0; i < levels.count; i++) {
+        items[i + 1].label = levels.values[i];
+        items[i + 1].current = current_effort && strcmp(levels.values[i], current_effort) == 0;
         if (items[i + 1].current)
             initial = i + 1;
     }
     struct picker_opts options = {
         .title = "select reasoning effort",
         .items = items,
-        .n = levels.n + 1,
+        .n = levels.count + 1,
         .initial = initial,
     };
     long selected_index = picker_run(&options);
@@ -440,7 +440,7 @@ static struct value_pick_result choose_effort(struct agent_state *state, struct 
     result.status = PICK_MADE;
     /* Default omits effort; a literal ladder value such as "none" remains explicit. */
     if (selected_index > 0)
-        result.value = xstrdup(levels.v[selected_index - 1]);
+        result.value = xstrdup(levels.values[selected_index - 1]);
     return result;
 }
 
@@ -531,7 +531,7 @@ static void restore_model_metadata(struct provider *provider, struct model_info 
                                    int had_saved_metadata, const char *model)
 {
     if (had_saved_metadata)
-        model_meta_remember(provider, saved_metadata);
+        model_meta_store(provider, saved_metadata);
     else
         model_meta_refresh(provider, model);
     model_info_clear(saved_metadata);

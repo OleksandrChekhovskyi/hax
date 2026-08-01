@@ -272,7 +272,7 @@ struct model_probe {
 /* Release all request fields owned by `probe` and leave it zeroed. NULL-safe. */
 void model_probe_clear(struct model_probe *probe);
 
-struct model_meta; /* model_meta.h — live metadata storage, opaque here */
+struct model_meta; /* model_meta.h; opaque provider-owned storage */
 
 struct provider {
     const char *name;
@@ -306,8 +306,7 @@ struct provider {
      * when nothing can be fetched. NULL leaves metadata resolution to the catalog. */
     int (*probe_model)(struct provider *provider, const char *model, struct model_probe *probe);
     void (*destroy)(struct provider *provider);
-    /* Opaque live metadata and its worker. Every destroy callback must call model_meta_release
-     * before releasing provider state that the worker may access. */
+    /* Every destroy callback must call model_meta_release before freeing the provider. */
     struct model_meta *meta;
 };
 

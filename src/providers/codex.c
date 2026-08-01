@@ -979,8 +979,6 @@ static int codex_list_models(struct provider *p, struct model_info **models_out,
 static void codex_destroy(struct provider *p)
 {
     struct codex *c = (struct codex *)p;
-    /* Settle the metadata probe before freeing anything it could still be
-     * writing to; model_meta_release cancels and joins. */
     model_meta_release(p);
     free(c->access_token);
     free(c->account_id);

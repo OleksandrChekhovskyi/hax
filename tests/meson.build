@@ -22,6 +22,7 @@ test_sources = [
     'test_cli.c',
     'test_compact.c',
     'test_config.c',
+    'test_effort.c',
     'test_file_mention.c',
     'test_history.c',
     'test_model_meta.c',

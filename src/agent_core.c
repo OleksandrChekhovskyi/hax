@@ -82,7 +82,7 @@ static char *resolve_effort(const struct provider *provider, const char *model)
 {
     struct effort_set levels;
     model_meta_efforts(provider, model, &levels);
-    if (levels.n == 0)
+    if (levels.count == 0)
         return NULL;
 
     /* Provider defaults can also name a level that the selected model rejects. */
@@ -220,7 +220,7 @@ int agent_session_resync_effort(struct agent_session *session, struct provider *
         *previous = NULL;
     if (!session || !provider || !session->model || !*session->model)
         return 0;
-    model_meta_settle(provider);
+    model_meta_wait(provider);
     char *effort = resolve_effort(provider, session->model);
     int unchanged = (!effort && !session->effort) ||
                     (effort && session->effort && strcmp(effort, session->effort) == 0);

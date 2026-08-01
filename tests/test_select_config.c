@@ -365,7 +365,7 @@ static void test_model_apply_failure_restores_selection(void)
     model_info_init(&old_metadata);
     old_metadata.id = "old";
     old_metadata.context = 100000;
-    model_meta_remember(&provider, &old_metadata);
+    model_meta_store(&provider, &old_metadata);
     script_picks("new", NULL);
     g_apply_result = -1;
 

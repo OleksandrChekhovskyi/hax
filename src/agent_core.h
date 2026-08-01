@@ -58,7 +58,7 @@ void agent_session_init(struct agent_session *session, struct provider *provider
  * the provider has no configured or default model; the existing settings remain unchanged. */
 int agent_session_reconfigure(struct agent_session *session, struct provider *provider);
 
-/* Settle model metadata and update cached effort. Returns true if it changed. `previous`, when
+/* Wait for model metadata and update cached effort. Returns true if it changed. `previous`, when
  * non-NULL, receives ownership of the replaced value; otherwise the old value is freed. */
 int agent_session_resync_effort(struct agent_session *session, struct provider *provider,
                                 char **previous);

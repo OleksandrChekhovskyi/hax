@@ -195,15 +195,58 @@ static void test_missing_cursor_stops(void)
         free(ids[i]);
 }
 
-/* Publish what a completed metadata probe would have learned about `model`. */
-static void remember_output_cap(struct provider *p, const char *model, long cap)
+static void store_output_cap(struct provider *p, const char *model, long cap)
 {
     struct model_info m;
     model_info_init(&m);
     m.id = xstrdup(model);
     m.max_output = cap;
-    model_meta_remember(p, &m);
+    model_meta_store(p, &m);
     model_info_clear(&m);
+}
+
+static void test_background_probe_publishes_metadata(void)
+{
+    struct srv s = {.n_bodies = 1};
+    s.bodies[0] = "{\"data\":[{\"id\":\"probe-model\",\"max_input_tokens\":12345,"
+                  "\"max_tokens\":6789}]}";
+    int port = srv_listen(&s);
+    if (port < 0)
+        T_SKIP("cannot run a loopback server here");
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d", port);
+    setenv("HAX_ANTHROPIC_BASE_URL", url, 1);
+    setenv("HAX_MODEL", "probe-model", 1);
+
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, serve_pages, &s) != 0) {
+        close(s.fd);
+        unsetenv("HAX_MODEL");
+        T_SKIP("cannot start a loopback server thread");
+    }
+
+    const struct provider_factory *factory = provider_find("anthropic-compatible");
+    EXPECT(factory != NULL);
+    struct provider *provider = factory ? factory->new(factory->name) : NULL;
+    EXPECT(provider != NULL);
+    if (provider) {
+        model_meta_wait(provider);
+        EXPECT(model_meta_context(provider, "probe-model") == 12345);
+        EXPECT(model_meta_max_output(provider, "probe-model") == 6789);
+
+        model_meta_refresh(provider, "probe-model");
+        struct model_info snapshot;
+        EXPECT(model_meta_snapshot(provider, &snapshot) == 1);
+        EXPECT_STR_EQ(snapshot.id, "probe-model");
+        model_info_clear(&snapshot);
+        provider->destroy(provider);
+    }
+
+    pthread_join(thread, NULL);
+    close(s.fd);
+    EXPECT(atomic_load(&s.served) == 1);
+    unsetenv("HAX_MODEL");
 }
 
 /* The request's max_tokens has to fit the model's own ceiling: asking for
@@ -234,7 +277,7 @@ static void test_max_tokens_follows_the_model(void)
     EXPECT(anthropic_max_tokens(p, "unknown-model") == 32000);
 
     /* Reported cap, unconfigured: follow the model. */
-    remember_output_cap(p, "claude-opus-5", 128000);
+    store_output_cap(p, "claude-opus-5", 128000);
     EXPECT(anthropic_max_tokens(p, "claude-opus-5") == 128000);
 
     /* Configured below the cap: the user's value stands. */
@@ -262,6 +305,7 @@ int main(void)
      * is the only way one arrives — drop it. */
     unsetenv("HAX_MODEL");
     test_max_tokens_follows_the_model();
+    test_background_probe_publishes_metadata();
     test_follows_cursor();
     test_repeated_cursor_page_is_discarded();
     test_missing_cursor_stops();

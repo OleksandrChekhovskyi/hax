@@ -383,10 +383,9 @@ static void test_cache_breakpoint_system_only(void)
     json_decref(msgs);
 }
 
-/* Publish `m` as the live report for its own id. */
-static void remember(struct provider *p, struct model_info *m)
+static void store_report(struct provider *p, struct model_info *m)
 {
-    model_meta_remember(p, m);
+    model_meta_store(p, m);
     model_info_clear(m);
 }
 
@@ -406,7 +405,7 @@ static void test_cache_plan_follows_the_model_rates(void)
     m.cost_output = 15;
     m.cost_cache_write = 3.75;
     m.cost_cache_write_1h = 6;
-    remember(&p, &m);
+    store_report(&p, &m);
     struct openai_cache_plan plan = openai_plan_cache(&p, "anthropic-ish", OPENAI_CACHE_AUTO, "1h");
     EXPECT(plan.send_breakpoints == 1);
     EXPECT(plan.writes_bill_1h == 1);
@@ -425,7 +424,7 @@ static void test_cache_plan_follows_the_model_rates(void)
     m.cost_input = 1;
     m.cost_output = 6;
     m.cost_cache_write = 1.25;
-    remember(&p, &m);
+    store_report(&p, &m);
     plan = openai_plan_cache(&p, "openai-ish", OPENAI_CACHE_AUTO, "1h");
     EXPECT(plan.send_breakpoints == 1 && plan.writes_bill_1h == 0);
 
@@ -438,7 +437,7 @@ static void test_cache_plan_follows_the_model_rates(void)
     m.cost_output = 12;
     m.cost_cache_read = 0.2;
     m.cost_cache_write = 0.375;
-    remember(&p, &m);
+    store_report(&p, &m);
     plan = openai_plan_cache(&p, "gemini-ish", OPENAI_CACHE_AUTO, "1h");
     EXPECT(plan.send_breakpoints == 0 && plan.writes_bill_1h == 0);
     /* But the judgement is only the default's: an explicit `cache = on`
