@@ -407,7 +407,7 @@ static void test_die_with_parent_alive_does_not_exit(void)
 {
     pid_t pid = fork();
     if (pid == 0) {
-        spawn_child_die_with_parent(getppid());
+        spawn_child_die_with_parent(getppid(), SIGTERM);
         _exit(7);
     }
     if (pid < 0) {

@@ -33,6 +33,7 @@ enum item_origin {
     ITEM_ORIGIN_SKIPPED,      /* TOOL_RESULT for a call that did not run after an abort */
     ITEM_ORIGIN_REFUSED,      /* TOOL_RESULT for a call disabled by the frontend */
     ITEM_ORIGIN_SUMMARIZED,   /* TOOL_RESULT standing in for separately displayed output */
+    ITEM_ORIGIN_TASK_NOTE,    /* synthetic USER_MESSAGE reporting finished background tasks */
 };
 
 /* One inline image carried by an item: base64 payload plus the metadata
@@ -94,7 +95,8 @@ size_t items_context_floor(const struct item *items, size_t n_items);
  * generated schema, so `minimum` cannot express a bound of 0. */
 struct tool_param {
     const char *name;
-    const char *type; /* JSON Schema primitive: "string", "integer", "boolean" */
+    const char *type;      /* JSON Schema primitive: "string", "integer", "boolean", or "array" */
+    const char *item_type; /* element type when `type` is "array" */
     const char *description;
     int required;
     long minimum;

@@ -20,6 +20,7 @@
 #include "terminal/clipboard.h"
 #include "terminal/picker.h"
 #include "terminal/theme.h"
+#include "tools/task_registry.h"
 #include "terminal/ui.h"
 
 /* Maximum number of aliases a single command can advertise. Three is
@@ -70,6 +71,7 @@ static void slash_run_config(struct slash_ctx *ctx);
 static void slash_run_compact(struct slash_ctx *ctx);
 static void slash_run_copy(struct slash_ctx *ctx);
 static void slash_run_session(struct slash_ctx *ctx);
+static void slash_run_tasks(struct slash_ctx *ctx);
 static void slash_run_usage(struct slash_ctx *ctx);
 static void slash_run_help(struct slash_ctx *ctx);
 
@@ -164,6 +166,13 @@ static const struct slash_cmd COMMANDS[] = {
         .aliases = {NULL},
         .summary = "copy last response to clipboard",
         .run = slash_run_copy,
+    },
+    {
+        .name = "tasks",
+        .aliases = {NULL},
+        .summary = "list background tasks (optional: kill <id>... | kill all)",
+        .takes_arg = 1,
+        .run = slash_run_tasks,
     },
     {
         .name = "session",
@@ -603,6 +612,99 @@ static int append_token_segment(char *row, size_t size, int length, const char *
         length += snprintf(row + length, size - (size_t)length, " ~%s", buf);
     }
     return length;
+}
+
+/* Stop tasks named after "kill" (or all of them), leaving the final-state note for the model's
+ * next request. */
+static void slash_tasks_kill(const char *arg)
+{
+    const char **ids = NULL;
+    size_t n_ids = 0, cap = 0;
+    char *words = xstrdup(arg);
+    int all = 0;
+    for (char *word = strtok(words, " \t"); word; word = strtok(NULL, " \t")) {
+        if (strcmp(word, "all") == 0) {
+            all = 1;
+            continue;
+        }
+        if (n_ids == cap) {
+            cap = cap ? cap * 2 : 4;
+            ids = xrealloc(ids, cap * sizeof(*ids));
+        }
+        ids[n_ids++] = word;
+    }
+    if (!all && n_ids == 0) {
+        ui_error("usage: /tasks kill <id>... | kill all");
+    } else {
+        size_t stopped = task_stop(all ? NULL : ids, all ? 0 : n_ids);
+        printf("  stopped %zu task%s\n", stopped, stopped == 1 ? "" : "s");
+    }
+    free(ids);
+    free(words);
+}
+
+static void slash_run_tasks(struct slash_ctx *ctx)
+{
+    if (config_bool("no_tasks")) {
+        ui_note("background tasks are disabled (no_tasks)");
+        return;
+    }
+    const char *arg = ctx->arg;
+    if (arg && *arg) {
+        if (strncmp(arg, "kill", 4) == 0 && (arg[4] == '\0' || arg[4] == ' ' || arg[4] == '\t'))
+            slash_tasks_kill(arg + 4);
+        else
+            ui_error("usage: /tasks [kill <id>... | kill all]");
+        return;
+    }
+
+    struct task_info *rows = NULL;
+    size_t n_rows = task_list(&rows);
+    if (n_rows == 0) {
+        printf("  " ANSI_DIM "no background tasks" ANSI_RESET "\n");
+        free(rows);
+        return;
+    }
+    /* "<id>  <state · elapsed>  <command>": the elapsed rides with the state so no column
+     * floats, the bold id separates from the plain status, and the dim command absorbs the
+     * rest of the row (truncated, never wrapped). Ids and statuses are validated/generated
+     * ASCII, so byte lengths are display cells. */
+    char (*statuses)[40] = xmalloc(n_rows * sizeof(*statuses));
+    int width = display_width();
+    int id_width = 4, status_width = 0;
+    for (size_t i = 0; i < n_rows; i++) {
+        int id_cells = (int)strlen(rows[i].id);
+        if (id_cells > id_width)
+            id_width = id_cells;
+        char state[16], elapsed[16];
+        if (rows[i].running)
+            snprintf(state, sizeof(state), "running");
+        else if (rows[i].term_signal)
+            snprintf(state, sizeof(state), "signal %d", rows[i].term_signal);
+        else
+            snprintf(state, sizeof(state), "exit %d", rows[i].exit_code);
+        format_duration(elapsed, sizeof(elapsed), rows[i].elapsed_ms);
+        snprintf(statuses[i], sizeof(statuses[i]), "%s · %s", state, elapsed);
+        /* The separator is multi-byte UTF-8 but two display cells wide including spaces. */
+        int status_cells = (int)display_cells(statuses[i]);
+        if (status_cells > status_width)
+            status_width = status_cells;
+    }
+    for (size_t i = 0; i < n_rows; i++) {
+        int status_pad = status_width - (int)display_cells(statuses[i]);
+        int used = 2 + id_width + 2 + status_width + 2;
+        int room = width - used - 1;
+        if (room < 8)
+            room = 8;
+        char *flattened = flatten_for_display(rows[i].command);
+        char *head = truncate_for_display(flattened, (size_t)room);
+        free(flattened);
+        printf("  " ANSI_BOLD "%-*s" ANSI_BOLD_OFF "  %s%*s  " ANSI_DIM "%s" ANSI_RESET "\n",
+               id_width, rows[i].id, statuses[i], status_pad, "", head);
+        free(head);
+    }
+    free(statuses);
+    free(rows);
 }
 
 /* Local counterpart to /usage: everything here is computed from this

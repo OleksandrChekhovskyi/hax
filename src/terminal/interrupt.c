@@ -315,8 +315,17 @@ static void atexit_handler(void)
     restore_tty_only();
 }
 
+static void (*volatile fatal_signal_hook)(void);
+
+void interrupt_set_fatal_hook(void (*hook)(void))
+{
+    fatal_signal_hook = hook;
+}
+
 static void signal_restore_and_reraise(int sig)
 {
+    if (fatal_signal_hook)
+        fatal_signal_hook();
     restore_tty_only();
     /* Re-raise with default disposition so the parent shell sees the
      * expected exit signal (e.g. 130 for SIGINT). signal() back to
@@ -325,7 +334,7 @@ static void signal_restore_and_reraise(int sig)
     raise(sig);
 }
 
-static void install_signal_handlers(void)
+void interrupt_install_signal_handlers(void)
 {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -358,7 +367,7 @@ void interrupt_init(void)
      * doomed-but-still-interactive prompt loop. */
     W.stdout_is_tty = 1;
     atexit(atexit_handler);
-    install_signal_handlers();
+    interrupt_install_signal_handlers();
 
     if (tcgetattr(STDIN_FILENO, &W.saved_termios) == 0)
         W.saved_termios_valid = 1;

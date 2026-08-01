@@ -808,6 +808,24 @@ void format_duration(char *out, size_t out_size, long duration_ms)
 
     if (seconds < 60)
         snprintf(out, out_size, "%lds", seconds);
+    else if (seconds < 3600 && seconds % 60 == 0)
+        snprintf(out, out_size, "%ldm", seconds / 60);
+    else if (seconds < 3600)
+        snprintf(out, out_size, "%ldm %02lds", seconds / 60, seconds % 60);
+    else if (seconds % 3600 == 0)
+        snprintf(out, out_size, "%ldh", seconds / 3600);
+    else
+        snprintf(out, out_size, "%ldh %02ldm", seconds / 3600, seconds % 3600 / 60);
+}
+
+void format_duration_steady(char *out, size_t out_size, long duration_ms)
+{
+    long seconds = 0;
+    if (duration_ms > 0)
+        seconds = duration_ms / 1000 + (duration_ms % 1000 >= 500);
+
+    if (seconds < 60)
+        snprintf(out, out_size, "%lds", seconds);
     else if (seconds < 3600)
         snprintf(out, out_size, "%ldm %02lds", seconds / 60, seconds % 60);
     else

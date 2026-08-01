@@ -12,6 +12,7 @@
 #include "transcript.h"
 #include "util.h"
 #include "system/keepawake.h"
+#include "tools/task_registry.h"
 
 struct loop_turn_sink {
     struct agent_loop_turn *loop_turn;
@@ -225,6 +226,24 @@ static void loop_run_active(const struct agent_loop_params *params,
          * dangling empty turn header in the transcript. Boundaries are
          * inert to providers, so context built without one is unaffected. */
         int owes_boundary = turn_n > 0 || params->continued;
+
+        /* Deliver finished-task notes before building this turn's request, so the model hears
+         * about completions at the earliest seam: between tool batches mid-turn, and with the
+         * user's next prompt at the start of a run. */
+        char *note = task_collect_notes();
+        if (note) {
+            agent_session_append(session, (struct item){
+                                              .kind = ITEM_USER_MESSAGE,
+                                              .text = note,
+                                              .origin = ITEM_ORIGIN_TASK_NOTE,
+                                          });
+            /* The model hears the note with this request, so a session resumed after a
+             * mid-request crash must already contain it. */
+            loop_flush(params);
+            if (hooks->task_note)
+                hooks->task_note(note, hooks->user);
+        }
+
         if (hooks->turn_begin)
             hooks->turn_begin(hooks->user);
 

@@ -34,6 +34,7 @@ test_sources = [
     'test_session.c',
     'test_session_prune.c',
     'test_slash.c',
+    'test_tool_schema.c',
     'test_trace.c',
     'test_transcript.c',
     'test_turn.c',
@@ -90,6 +91,8 @@ test_sources = [
     'tools/test_edit.c',
     'tools/test_image_sniff.c',
     'tools/test_read.c',
+    'tools/test_task.c',
+    'tools/test_task_wait.c',
     'tools/test_write.c',
 
     'transport/test_api_error.c',

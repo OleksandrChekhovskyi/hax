@@ -251,6 +251,8 @@ variable. `/config` marks settings that can be changed mid-session.
 - `no_skills` / `HAX_NO_SKILLS` — skip the skills listing.
 - `no_subagents` / `HAX_NO_SUBAGENTS` — skip the subagents section (see
   [usage.md](./usage.md)).
+- `no_tasks` / `HAX_NO_TASKS` — disable background tasks entirely: bash reverts to
+  kill-at-timeout and the task tools are not offered (see [usage.md](./usage.md)).
 
 ### Display
 
@@ -365,13 +367,21 @@ See [debugging.md](./debugging.md) for trace and transcript details.
 
 - `tool_output_cap` / `HAX_TOOL_OUTPUT_CAP` — max bytes of tool output sent back to the
   model. Default `50k`.
-- `bash.timeout` / `HAX_BASH_TIMEOUT` — default bash-tool timeout; `0` disables. Default `2m`.
+- `bash.timeout` / `HAX_BASH_TIMEOUT` — default bash-tool timeout, at which the command
+  detaches into a background task (kills when `no_tasks` is set); `0` disables. Default `2m`.
 - `bash.timeout_max` / `HAX_BASH_TIMEOUT_MAX` — maximum timeout the model may request per
   bash call; `0` disables the cap. Default `30m`.
 - `bash.timeout_grace` / `HAX_BASH_TIMEOUT_GRACE` — grace period between SIGTERM and SIGKILL;
-  `0` skips the grace period. Default `2s`.
+  `0` skips the grace period, `5m` is the ceiling. Default `2s`.
+- `bash.background_yield` / `HAX_BASH_BACKGROUND_YIELD` — initial-output window before an
+  explicitly backgrounded command detaches into a task. Default `5s`.
 - `bash.shell` / `HAX_BASH_SHELL` — shell the bash tool execs, as a `$PATH` name or a path.
   Default: `bash` when available, otherwise `sh`.
+- `task.wait_timeout` / `HAX_TASK_WAIT_TIMEOUT` — default `task_wait` timeout when the model
+  omits one. Default `10m`.
+- `task.max_running` / `HAX_TASK_MAX_RUNNING` — maximum concurrently running background tasks:
+  further `background: true` requests are refused up front, and a timed-out command is killed
+  instead of detaching. Default `32`.
 
 The model can request `timeout_seconds` on a bash call, bounded by `bash.timeout_max`.
 

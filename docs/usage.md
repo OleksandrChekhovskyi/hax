@@ -111,6 +111,7 @@ Type `/help` in the REPL for the live command list and keyboard shortcuts.
 | `/config [key [value]]` | Inspect settings or change a runtime-tunable setting for this session. See [configuration.md](./configuration.md). |
 | `/compact [focus]` | Summarize history to free context; optional focus text guides the summary. |
 | `/copy` | Copy the latest assistant text response to the clipboard. |
+| `/tasks [kill <id>... \| kill all]` | List background tasks (see below); `kill` stops the named ones (or all of them) — the model still learns their final state with its next prompt. |
 | `/session` | Show this session's info and local usage totals (tokens, time worked, spend). |
 | `/usage` | Show provider account usage (subscription windows, key credits) when supported. |
 | `/help` | Show commands and shortcuts. |
@@ -315,6 +316,25 @@ own opt-out: `HAX_NO_ENV=1` skips Environment, `HAX_NO_AGENTS_MD=1` skips AGENTS
 `HAX_NO_SKILLS=1` skips the skills listing, and `HAX_NO_SUBAGENTS=1` skips the subagents
 section described below. `--bare` sets the latter three while retaining Environment.
 
+## Background tasks
+
+A bash command that outlives its timeout is not killed: it detaches into a background task and
+keeps running, with its output accumulating in a log file. The model can also detach a command
+up front (`background: true`, optionally with a short task name), wait on one task at a time —
+streaming its output live, exactly like a foreground command — and stop tasks it no longer
+needs. A backgrounded command that finishes within its brief initial-output window returns
+synchronously instead, reporting that no task was created. When a task finishes while the model
+is busy elsewhere, a one-line note is delivered with the model's next request, so nothing needs
+polling. A task tracks the shell itself, so processes that detach from it (a trailing `&`) are
+killed when the shell exits rather than left running untracked.
+
+Tasks belong to the hax process: `/tasks` lists and stops them, quitting or dying by a signal
+stops the running ones, and in `-p` mode any task nobody waited on is killed once the final
+answer is printed.
+
+`no_tasks` / `HAX_NO_TASKS=1` disables the whole mechanism, restoring kill-at-timeout bash.
+See [configuration.md](./configuration.md) for the related settings.
+
 ## Subagents
 
 The system prompt includes a short section telling the model it can delegate a self-contained
@@ -332,8 +352,10 @@ run by hax, so everything above about `-p`, sessions, and resume applies to it.
   preset values are user-vetted, whereas the explicit flags would have it guess identifiers
   it can't enumerate. To make the model use a specific setup, name the flags in AGENTS.md or
   a skill.
-- The child's session id is printed to stderr at startup, so a subagent that outlives the bash
-  tool's timeout still leaves a resumable session; the parent can continue it with
+- Subagents run as background tasks (`background: true`), so several can explore in parallel
+  while the parent waits on whichever result it needs next.
+- The child's session id is printed to stderr at startup, so a subagent that dies with its
+  task (a kill, a hax exit) still leaves a resumable session; the parent can continue it with
   `hax --resume=<id> -p "..."` instead of redoing the work. That follow-up runs on the earlier
   child's own provider, model, and preset rather than the inherited ones — resuming beats
   inheritance, as everywhere else. `--no-session` opts a throwaway query out of this.

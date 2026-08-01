@@ -93,7 +93,7 @@ static void spawn_helper(void)
         return;
     if (pid == 0) {
         /* Linux uses PDEATHSIG; caffeinate -w provides the same orphan cleanup on macOS. */
-        spawn_child_die_with_parent(parent_pid);
+        spawn_child_die_with_parent(parent_pid, SIGTERM);
         spawn_child_default_signals();
         spawn_child_redirect_null();
         execv(helper_path, argv);

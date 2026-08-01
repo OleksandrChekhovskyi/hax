@@ -885,6 +885,9 @@ int main(void)
 {
     /* Pin the cap so inherited configuration cannot invalidate truncation fixtures. */
     setenv("HAX_TOOL_OUTPUT_CAP", "50k", 1);
+    /* This suite covers the synchronous kill-on-timeout path; task detachment is covered by
+     * tools/test_task.c. */
+    setenv("HAX_NO_TASKS", "1", 1);
 
     test_bash_invalid_json();
     test_bash_missing_command();

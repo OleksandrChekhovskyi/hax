@@ -41,6 +41,9 @@ static const struct config_setting REGISTRY[] = {
      .description = "Skip the skills listing in the system prompt"},
     {.key = "no_subagents", .env_var = "HAX_NO_SUBAGENTS", .choices = CONFIG_CHOICES_BOOL,
      .description = "Skip the subagents section in the system prompt"},
+    {.key = "no_tasks", .env_var = "HAX_NO_TASKS", .choices = CONFIG_CHOICES_BOOL,
+     .description = "Disable background tasks: bash timeouts kill instead of detaching, and the "
+                    "task tools are not offered"},
 
     /* display */
     {.key = "markdown", .env_var = "HAX_MARKDOWN", .default_value = "1",
@@ -118,16 +121,28 @@ static const struct config_setting REGISTRY[] = {
      .description = "Max bytes captured from a tool's output",
      .kind = CONFIG_KIND_SIZE, .editable = 1},
     {.key = "bash.timeout", .env_var = "HAX_BASH_TIMEOUT", .default_value = "2m",
-     .description = "Default bash-tool command timeout; 0 disables",
+     .description = "Default bash-tool command timeout: the command detaches into a background "
+                    "task (kills when tasks are disabled); 0 disables",
      .kind = CONFIG_KIND_DURATION, .editable = 1},
     {.key = "bash.timeout_max", .env_var = "HAX_BASH_TIMEOUT_MAX", .default_value = "30m",
      .description = "Ceiling on the model's per-call bash timeout; 0 disables",
      .kind = CONFIG_KIND_DURATION, .editable = 1},
     {.key = "bash.timeout_grace", .env_var = "HAX_BASH_TIMEOUT_GRACE", .default_value = "2s",
      .description = "Grace window between SIGTERM and SIGKILL for bash commands; 0 skips",
+     .kind = CONFIG_KIND_DURATION, .max = 300000, .editable = 1},
+    {.key = "bash.background_yield", .env_var = "HAX_BASH_BACKGROUND_YIELD",
+     .default_value = "5s",
+     .description = "Initial output window before an explicitly backgrounded bash command "
+                    "detaches into a task",
      .kind = CONFIG_KIND_DURATION, .editable = 1},
     {.key = "bash.shell", .env_var = "HAX_BASH_SHELL",
      .description = "Shell for the bash tool, a $PATH name or path (default: bash, else sh)"},
+    {.key = "task.wait_timeout", .env_var = "HAX_TASK_WAIT_TIMEOUT", .default_value = "10m",
+     .description = "Default task_wait timeout when the model omits one",
+     .kind = CONFIG_KIND_DURATION, .editable = 1},
+    {.key = "task.max_running", .env_var = "HAX_TASK_MAX_RUNNING", .default_value = "32",
+     .description = "Maximum concurrently running background tasks",
+     .kind = CONFIG_KIND_INT, .min = 1, .max = 64, .editable = 1},
 
     /* http transport */
     {.key = "http.max_retries", .env_var = "HAX_HTTP_MAX_RETRIES", .default_value = "4",

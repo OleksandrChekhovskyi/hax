@@ -37,10 +37,11 @@ static void sb_init(struct sandbox *s)
     unsetenv("HAX_NO_AGENTS_MD");
     unsetenv("HAX_NO_SKILLS");
     setenv("HAX_BASH_SHELL", CONFIG_VALUE_DEFAULT, 1);
-    /* The subagents section is static text present in every suffix, which
-     * would smear across every assertion below; suppress it by default and
-     * let the dedicated subagents tests unset this deliberately. */
+    /* The subagents and tasks sections are static text present in every
+     * suffix, which would smear across every assertion below; suppress them
+     * by default and let the dedicated tests unset this deliberately. */
     setenv("HAX_NO_SUBAGENTS", "1", 1);
+    setenv("HAX_NO_TASKS", "1", 1);
 }
 
 static void sb_free(struct sandbox *s)
@@ -942,22 +943,40 @@ static void test_subagents_section_and_presets(void)
         return;
     }
     unsetenv("HAX_NO_SUBAGENTS");
+    unsetenv("HAX_NO_TASKS");
 
     /* Present by default, with the conservative framing, and placed before
      * the Environment section — it's hax-level instruction, not project
-     * context. With no presets defined, --preset isn't advertised at all. */
+     * context. The tasks section leads because subagent guidance builds on
+     * task_wait. With no presets defined, --preset isn't advertised at all. */
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {
         EXPECT(contains(p, "# Subagents"));
         EXPECT(contains(p, "only when the user asks"));
+        EXPECT(contains(p, "task_wait"));
         /* With no presets defined, --preset isn't advertised at all. */
         EXPECT(!contains(p, "--preset"));
+        const char *tasks = strstr(p, "# Background tasks");
         const char *sub = strstr(p, "# Subagents");
         const char *env = strstr(p, "# Environment");
-        EXPECT(sub && env && sub < env);
+        EXPECT(tasks && sub && env && tasks < sub && sub < env);
         free(p);
     }
+
+    /* With tasks disabled, the subagents section falls back to synchronous
+     * guidance and the tasks section disappears. */
+    setenv("HAX_NO_TASKS", "1", 1);
+    p = agent_env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(!contains(p, "# Background tasks"));
+        EXPECT(contains(p, "# Subagents"));
+        EXPECT(contains(p, "timeout_seconds (e.g. 1800)"));
+        EXPECT(!contains(p, "task_wait"));
+        free(p);
+    }
+    unsetenv("HAX_NO_TASKS");
 
     /* Defined presets are listed sorted, with descriptions when present,
      * under a lead-in that names the flag. A preset naming a provider the
@@ -993,6 +1012,7 @@ static void test_subagents_section_and_presets(void)
     config_load(NULL);
 
     setenv("HAX_NO_SUBAGENTS", "1", 1);
+    setenv("HAX_NO_TASKS", "1", 1);
     sb_free(&s);
 }
 

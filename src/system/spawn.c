@@ -68,16 +68,17 @@ void spawn_child_redirect_null(void)
         close(devnull);
 }
 
-void spawn_child_die_with_parent(pid_t parent)
+void spawn_child_die_with_parent(pid_t parent, int signal_number)
 {
 #ifdef __linux__
-    prctl(PR_SET_PDEATHSIG, SIGTERM);
+    prctl(PR_SET_PDEATHSIG, signal_number);
     /* Close the fork/exec race: if the parent exited before the arm
      * above, the death signal will never come, so bail out now. */
     if (getppid() != parent)
         _exit(0);
 #else
     (void)parent;
+    (void)signal_number;
 #endif
 }
 

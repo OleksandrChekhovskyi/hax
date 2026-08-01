@@ -15,8 +15,7 @@
 
 /* Dynamic environment and project guidance are appended by build_system_prompt. */
 static const char DEFAULT_SYSTEM_PROMPT[] =
-    "You are hax, a minimalist coding assistant running in the user's terminal. "
-    "You have access to `read`, `edit`, `write`, and `bash` tools.\n"
+    "You are hax, a minimalist coding assistant running in the user's terminal.\n"
     "\n"
     "Prefer action over explanation: when a question can be answered by running a "
     "command or reading a file, do so. Be concise: no filler, no trailing "
@@ -52,10 +51,7 @@ static const char DEFAULT_SYSTEM_PROMPT[] =
     "severity honestly; no flattery. Empty findings is a valid result.";
 
 static const struct tool *const TOOLS[] = {
-    &TOOL_READ,
-    &TOOL_EDIT,
-    &TOOL_WRITE,
-    &TOOL_BASH,
+    &TOOL_READ, &TOOL_EDIT, &TOOL_WRITE, &TOOL_BASH, &TOOL_TASK_WAIT, &TOOL_TASK_KILL,
 };
 static const size_t N_TOOLS = sizeof(TOOLS) / sizeof(TOOLS[0]);
 
@@ -177,11 +173,14 @@ void agent_session_init(struct agent_session *session, struct provider *provider
     session->system_prompt = build_system_prompt(session->model_label, opts->raw);
     session->effort = resolve_effort(provider, session->model);
 
-    session->n_tools = opts->raw ? 0 : N_TOOLS;
-    if (session->n_tools) {
-        session->tools = xmalloc(session->n_tools * sizeof(*session->tools));
-        for (size_t i = 0; i < session->n_tools; i++)
-            session->tools[i] = TOOLS[i]->def;
+    if (!opts->raw) {
+        session->tools = xmalloc(N_TOOLS * sizeof(*session->tools));
+        for (size_t i = 0; i < N_TOOLS; i++) {
+            const struct tool_def *def =
+                TOOLS[i]->advertise ? TOOLS[i]->advertise() : &TOOLS[i]->def;
+            if (def)
+                session->tools[session->n_tools++] = *def;
+        }
     }
     export_selection(provider, session);
 }

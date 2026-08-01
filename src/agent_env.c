@@ -504,9 +504,41 @@ static const char SUBAGENTS_PROMPT[] =
     "`hax -p \"<task>\"` (via the bash tool) runs a fresh hax instance with clean context in "
     "this directory and prints its final answer to stdout. Delegate to subagents only when "
     "the user asks for it. The child inherits this session's provider, model, and effort. "
+    "Launch each subagent with `background: true` and collect answers with task_wait — that "
+    "is also how several run in parallel. The child prints its session id to stderr at "
+    "startup (captured in the task log); follow up on a finished (or killed) run with "
+    "`hax --resume=<id> -p \"<follow-up>\"`.\n";
+
+/* Task-less variant: synchronous calls need a wide timeout to survive a slow child. */
+static const char SUBAGENTS_PROMPT_NO_TASKS[] =
+    "# Subagents\n"
+    "\n"
+    "`hax -p \"<task>\"` (via the bash tool) runs a fresh hax instance with clean context in "
+    "this directory and prints its final answer to stdout. Delegate to subagents only when "
+    "the user asks for it. The child inherits this session's provider, model, and effort. "
     "Subagents are slow: pass a generous timeout_seconds (e.g. 1800). The child prints its "
     "session id to stderr at startup; follow up on a finished (or timed-out) run with "
     "`hax --resume=<id> -p \"<follow-up>\"`.\n";
+
+/* What no single tool description carries: the working loop, the notification contract, and
+ * the process-bound lifetime of background tasks. */
+static const char TASKS_PROMPT[] =
+    "# Background tasks\n"
+    "\n"
+    "A bash command that outlives its timeout, or is launched with `background: true`, "
+    "continues as a background task. Wait on the task whose result you need next with "
+    "task_wait — it streams that task's output and returns it. Completions of other tasks are "
+    "announced automatically as one-line notes (with the pending output size); collect an "
+    "announced task with task_wait when you want its output. Never sleep or poll in a loop. "
+    "Tasks do not survive the hax process: in a one-shot (-p) run, tasks nobody waited on are "
+    "killed once the final answer is produced. The user manages tasks with /tasks.\n";
+
+static void append_tasks(struct buf *b)
+{
+    if (b->len > 0)
+        buf_append_str(b, "\n");
+    buf_append_str(b, TASKS_PROMPT);
+}
 
 /* Defined presets are listed with their descriptions so the model knows
  * what roles exist without guessing at names. */
@@ -514,7 +546,7 @@ static void append_subagents(struct buf *b)
 {
     if (b->len > 0)
         buf_append_str(b, "\n");
-    buf_append_str(b, SUBAGENTS_PROMPT);
+    buf_append_str(b, config_bool("no_tasks") ? SUBAGENTS_PROMPT_NO_TASKS : SUBAGENTS_PROMPT);
 
     char **names = NULL;
     size_t n = config_preset_names(&names);
@@ -577,13 +609,17 @@ char *agent_env_build_suffix(const char *model)
     int do_agents = !config_bool("no_agents_md");
     int do_skills = !config_bool("no_skills");
     int do_subagents = !config_bool("no_subagents");
+    int do_tasks = !config_bool("no_tasks");
 
     struct buf b;
     buf_init(&b);
 
-    /* Subagents first: it's hax-level instruction like the base prompt it
-     * follows, not project context — after the AGENTS.md sections it would
-     * read as part of them in the assembled prompt. */
+    /* hax-level instruction first, like the base prompt it follows, not
+     * project context — after the AGENTS.md sections it would read as part
+     * of them in the assembled prompt. Tasks precede subagents because the
+     * subagents section builds on task_wait. */
+    if (do_tasks)
+        append_tasks(&b);
     if (do_subagents)
         append_subagents(&b);
 

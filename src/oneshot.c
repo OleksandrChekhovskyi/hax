@@ -17,6 +17,9 @@
 #include "transcript.h"
 #include "util.h"
 #include "terminal/ansi.h"
+#include "terminal/interrupt.h"
+#include "tools/bash_process.h"
+#include "tools/task_registry.h"
 
 /* Compaction attempts count toward the one-shot exit spend just like normal
  * turns. History mutation and footer capture stay inside compact_run. */
@@ -107,6 +110,10 @@ static void oneshot_auto_compact(void *user)
 int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *opts, int max_turns)
 {
     struct agent_session sess;
+    /* -p runs headless (no interrupt_init), but a SIGTERM from a parent hax stopping this
+     * subagent must still take the spawned shells down. */
+    interrupt_install_signal_handlers();
+    interrupt_set_fatal_hook(bash_shell_pgids_kill);
     /* One-shot mode must resolve effort after the startup probe, not while it is still pending. */
     model_meta_wait(p);
     agent_session_init(&sess, p, opts);
@@ -271,6 +278,21 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         break;
     }
     agent_loop_result_destroy(&loop_result);
+
+    /* The process is about to exit: any task the model launched and never awaited dies here.
+     * Notes for tasks that finished after the last request still make the transcript. */
+    /* Resolve every uncollected task in the record — final status for finished ones,
+     * killed-at-exit for the rest — so a resumed session never dangles on a
+     * "[detached as task ...]" report or advertises output this exit destroys. */
+    char *exit_note = task_exit_note();
+    if (exit_note) {
+        agent_session_append(&sess, (struct item){
+                                        .kind = ITEM_USER_MESSAGE,
+                                        .text = exit_note,
+                                        .origin = ITEM_ORIGIN_TASK_NOTE,
+                                    });
+    }
+    task_registry_shutdown();
 
     agent_loop_flush_logs(tlog, slog, sess.items, sess.n_items);
     /* Surface the session id on stderr (stdout is the model's answer, kept

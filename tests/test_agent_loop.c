@@ -1,12 +1,15 @@
 /* SPDX-License-Identifier: MIT */
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "agent_loop.h"
 #include "agent_tool.h"
 #include "config.h"
 #include "harness.h"
+#include "tool.h"
 #include "util.h"
+#include "tools/task_registry.h"
 
 enum script_mode {
     SCRIPT_COMPLETE,
@@ -971,6 +974,65 @@ static void test_loop_requests_mid_chain_compaction(void)
     config_set_override("compact.auto", NULL);
 }
 
+static void observed_task_note(const char *text, void *user)
+{
+    EXPECT(text != NULL);
+    (*(int *)user)++;
+}
+
+static void test_loop_injects_finished_task_note(void)
+{
+    setenv("HAX_BASH_BACKGROUND_YIELD", "30ms", 1);
+    char *launch =
+        TOOL_BASH.run("{\"command\":\"sleep 0.1; echo bg-note-done\",\"background\":true}", NULL);
+    EXPECT(strstr(launch, "detached as task t") != NULL);
+    free(launch);
+    unsetenv("HAX_BASH_BACKGROUND_YIELD");
+
+    time_t start = time(NULL);
+    while (task_running_count() > 0 && time(NULL) - start < 10) {
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = 20 * 1000000L};
+        nanosleep(&ts, NULL);
+    }
+    EXPECT(task_running_count() == 0);
+
+    struct agent_session session;
+    session_init(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = scripted_stream};
+    script = SCRIPT_COMPLETE;
+    int notes_seen = 0;
+    struct agent_loop_params params = {
+        .session = &session,
+        .provider = &provider,
+        .max_turns = 2,
+        .hooks = {.user = &notes_seen, .task_note = observed_task_note},
+    };
+    struct agent_loop_result result;
+    agent_loop_run(&params, &result);
+    EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
+    EXPECT(notes_seen == 1);
+
+    int note_index = -1;
+    for (size_t i = 0; i < session.n_items; i++) {
+        if (session.items[i].kind == ITEM_USER_MESSAGE &&
+            session.items[i].origin == ITEM_ORIGIN_TASK_NOTE) {
+            note_index = (int)i;
+            EXPECT(strstr(session.items[i].text, "[task t") != NULL);
+            EXPECT(strstr(session.items[i].text, "finished (exit 0)") != NULL);
+            /* Announce-only: the output body stays in the registry for a wait to collect. */
+            EXPECT(strstr(session.items[i].text, "bg-note-done") == NULL);
+        }
+    }
+    /* The note precedes the response items in this turn's request context. */
+    EXPECT(note_index >= 0);
+    EXPECT(result.final_items_from > (size_t)note_index);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+    task_registry_shutdown();
+}
+
 int main(void)
 {
     /* Loop tests exercise orchestration, not the platform inhibitor helper. */
@@ -997,5 +1059,6 @@ int main(void)
     test_loop_reports_provider_error();
     test_loop_prestream_error_leaves_no_marker();
     test_loop_requests_mid_chain_compaction();
+    test_loop_injects_finished_task_note();
     T_REPORT();
 }

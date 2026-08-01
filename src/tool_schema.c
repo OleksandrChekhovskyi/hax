@@ -14,6 +14,8 @@ json_t *tool_schema_build(const struct tool_def *def)
 
         if (param->type)
             json_object_set_new(prop, "type", json_string(param->type));
+        if (param->item_type)
+            json_object_set_new(prop, "items", json_pack("{s:s}", "type", param->item_type));
         if (param->description)
             json_object_set_new(prop, "description", json_string(param->description));
         if (param->minimum)

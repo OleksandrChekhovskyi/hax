@@ -97,7 +97,7 @@ static void draw_frame_locked(struct spinner *s)
             long elapsed = monotonic_ms() - s->timer_base;
             if (elapsed >= TIMER_MIN_MS) {
                 char t[32];
-                format_duration(t, sizeof(t), elapsed);
+                format_duration_steady(t, sizeof(t), elapsed);
                 if ((int)(strlen(t) + 3 + strlen(s->label)) <= budget) {
                     fputs(t, stdout);
                     fputs(" \xC2\xB7 ", stdout);

@@ -88,6 +88,7 @@ static void test_build_system_prompt_custom_no_suffix(void)
     setenv("HAX_NO_AGENTS_MD", "1", 1);
     setenv("HAX_NO_SKILLS", "1", 1);
     setenv("HAX_NO_SUBAGENTS", "1", 1);
+    setenv("HAX_NO_TASKS", "1", 1);
 
     char *out = build_test_system_prompt(0);
     EXPECT(out != NULL);
@@ -100,6 +101,7 @@ static void test_build_system_prompt_custom_no_suffix(void)
     unsetenv("HAX_NO_AGENTS_MD");
     unsetenv("HAX_NO_SKILLS");
     unsetenv("HAX_NO_SUBAGENTS");
+    unsetenv("HAX_NO_TASKS");
 }
 
 static void test_build_system_prompt_default_no_suffix(void)

@@ -124,7 +124,11 @@ static void render_styled_lines(const struct transcript_renderer *renderer, cons
 
 static const char *synthetic_user_label(enum item_origin origin)
 {
-    return origin == ITEM_ORIGIN_COMPACT_SEED ? "compaction seed" : "continuation";
+    if (origin == ITEM_ORIGIN_COMPACT_SEED)
+        return "compaction seed";
+    if (origin == ITEM_ORIGIN_TASK_NOTE)
+        return "task update";
+    return "continuation";
 }
 
 static void render_user(const struct transcript_renderer *renderer, const struct item *item)

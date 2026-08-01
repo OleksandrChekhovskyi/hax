@@ -34,6 +34,10 @@ enum tool_preview_mode {
 struct tool_display {
     /* Name of the JSON argument shown after the tool name. */
     const char *arg_name;
+    /* Optional allocated replacement for the displayed argument, for tools whose arguments
+     * are not a single string; the caller frees it. NULL results fall back to arg_name
+     * extraction and then to the raw JSON. */
+    char *(*format_argument)(const char *args_json);
     enum tool_output_style output_style;
     enum tool_preview_mode preview_mode;
     /* Zero uses the one-row default. */
@@ -51,6 +55,11 @@ struct tool {
     char *(*run)(const char *args_json, struct tool_run_ctx *ctx);
     /* Returns allocated arguments for local execution, or NULL to use the original payload. */
     char *(*preprocess_args)(const char *args_json);
+    /* Optional configuration-dependent advertisement: the def to offer the model, or NULL to
+     * withhold the tool entirely. NULL hook means always advertise `def`. Dispatch is not
+     * gated by this — a withheld tool's run() must answer stray calls with a recoverable
+     * error. */
+    const struct tool_def *(*advertise)(void);
     struct tool_display display;
 };
 
@@ -58,5 +67,7 @@ extern const struct tool TOOL_READ;
 extern const struct tool TOOL_EDIT;
 extern const struct tool TOOL_WRITE;
 extern const struct tool TOOL_BASH;
+extern const struct tool TOOL_TASK_WAIT;
+extern const struct tool TOOL_TASK_KILL;
 
 #endif /* HAX_TOOL_H */

@@ -7,7 +7,10 @@ the streaming pipeline.
 
 Most modes take ``--delay <seconds>`` and ``--count <int>`` so a human can
 watch the rendering at a comfortable pace. Defaults are tuned to the
-specific behavior each mode is meant to surface.
+specific behavior each mode is meant to surface. Line-producing modes
+(short/long/slow/burst) also take ``--prefix <word>`` to label their lines,
+so parallel producers (e.g. the background tasks in scripts/task_demo.txt)
+stay tellable apart.
 
 Modes:
   short          A handful of lines with sleeps — proves live emission and
@@ -80,13 +83,14 @@ def sleep(seconds: float) -> None:
 
 def mode_short(args: argparse.Namespace) -> None:
     for i in range(1, args.count + 1):
-        write(f"line {i}\n")
+        write(f"{args.prefix or 'line'} {i}\n")
         sleep(args.delay)
 
 
 def mode_long(args: argparse.Namespace) -> None:
+    label = args.prefix or "long line"
     for i in range(1, args.count + 1):
-        write(f"long line {i} — pretend this is build output of some kind\n")
+        write(f"{label} {i} — pretend this is build output of some kind\n")
         sleep(args.delay)
 
 
@@ -101,12 +105,12 @@ def mode_ansi(_: argparse.Namespace) -> None:
 
 def mode_burst(args: argparse.Namespace) -> None:
     for i in range(1, args.count + 1):
-        write(f"burst {i}\n")
+        write(f"{args.prefix or 'burst'} {i}\n")
 
 
 def mode_slow(args: argparse.Namespace) -> None:
     for i in range(1, args.count + 1):
-        write(f"slow {i}\n")
+        write(f"{args.prefix or 'slow'} {i}\n")
         sleep(args.delay)
 
 
@@ -187,6 +191,9 @@ def main() -> int:
     parser.add_argument("--count", type=int, default=None,
                         help="Number of lines / iterations. Default depends "
                              "on mode; ignored by modes with fixed length.")
+    parser.add_argument("--prefix", default=None,
+                        help="Label for emitted lines in the line-producing "
+                             "modes (default: the mode's own word).")
     args = parser.parse_args()
 
     defaults = MODE_DEFAULTS[args.mode]

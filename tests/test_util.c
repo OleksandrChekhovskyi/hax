@@ -1143,6 +1143,18 @@ static void test_format_duration_ranges(void)
     EXPECT_STR_EQ(buf, "1m 08s");
     format_duration(buf, sizeof(buf), 3720000);
     EXPECT_STR_EQ(buf, "1h 02m");
+    /* Zero remainders are omitted: whole minutes and hours read bare. */
+    format_duration(buf, sizeof(buf), 600000);
+    EXPECT_STR_EQ(buf, "10m");
+    format_duration(buf, sizeof(buf), 7200000);
+    EXPECT_STR_EQ(buf, "2h");
+    /* The steady variant keeps them, so ticking displays never shrink. */
+    format_duration_steady(buf, sizeof(buf), 600000);
+    EXPECT_STR_EQ(buf, "10m 00s");
+    format_duration_steady(buf, sizeof(buf), 7200000);
+    EXPECT_STR_EQ(buf, "2h 00m");
+    format_duration_steady(buf, sizeof(buf), 68000);
+    EXPECT_STR_EQ(buf, "1m 08s");
 }
 
 static void test_format_context_with_and_without_limit(void)

@@ -78,15 +78,16 @@ void spawn_child_default_signals(void);
 void spawn_child_redirect_null(void);
 
 /* Arrange for the post-fork child to die with its parent: on Linux,
- * request SIGTERM via PR_SET_PDEATHSIG so a parent that exits without
- * reaping (a SIGKILL, say) doesn't strand the child. `parent` is the
- * pid captured *before* fork; this re-checks getppid() against it and
- * self-exits if the parent already died in the fork/exec window (the
- * death signal only fires for deaths after the arm). A no-op where
- * PR_SET_PDEATHSIG is unavailable; callers that also need a
- * non-Linux backstop (e.g. a self-terminating exec) supply that
- * separately. */
-void spawn_child_die_with_parent(pid_t parent);
+ * request `signal_number` via PR_SET_PDEATHSIG so a parent that exits
+ * without reaping (a SIGKILL, say) doesn't strand the child. Pass
+ * SIGTERM when the child cleans up on it, SIGKILL when nothing may
+ * ignore the death. `parent` is the pid captured *before* fork; this
+ * re-checks getppid() against it and self-exits if the parent already
+ * died in the fork/exec window (the death signal only fires for deaths
+ * after the arm). A no-op where PR_SET_PDEATHSIG is unavailable;
+ * callers that also need a non-Linux backstop (e.g. a self-terminating
+ * exec) supply that separately. */
+void spawn_child_die_with_parent(pid_t parent, int signal_number);
 
 /* waitpid(pid, &status, 0) with an EINTR retry loop. Returns the
  * waitpid status word on success, -1 on non-EINTR error. */

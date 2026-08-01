@@ -139,7 +139,7 @@ static void output_unlink(struct bash_output *output)
     }
 }
 
-static void format_byte_size(char *buf, size_t buf_size, size_t bytes)
+void bash_format_byte_size(char *buf, size_t buf_size, size_t bytes)
 {
     if (bytes < 1024)
         snprintf(buf, buf_size, "%zuB", bytes);
@@ -153,11 +153,8 @@ static void format_byte_size(char *buf, size_t buf_size, size_t bytes)
         snprintf(buf, buf_size, "%zuM", (bytes + 512L * 1024) / (1024L * 1024));
 }
 
-/* Preserve a small leading summary while reserving most of the budget for trailing results. */
-#define OUTPUT_HEAD_DIVISOR 8
-
 /* Line capping may split a UTF-8 codepoint, so sanitize before building JSON output. */
-static void append_sanitized(struct buf *body, const char *data, size_t len)
+void bash_output_append_sanitized(struct buf *body, const char *data, size_t len)
 {
     size_t capped_len = 0;
     char *capped = cap_line_lengths(data ? data : "", len, OUTPUT_CAP_LINE_WIDTH, &capped_len);
@@ -167,24 +164,26 @@ static void append_sanitized(struct buf *body, const char *data, size_t len)
     free(sanitized);
 }
 
-/* Read a line-aligned head that cannot overlap `limit_off`. A long first line yields no head. */
-static int read_head_slice(int fd, size_t cap_bytes, size_t cap_lines, off_t limit_off,
-                           struct buf *out, size_t *kept_bytes_out, size_t *kept_lines_out)
+int bash_read_head_slice(int fd, off_t range_start, size_t cap_bytes, size_t cap_lines,
+                         off_t limit_off, struct buf *out, size_t *kept_bytes_out,
+                         size_t *kept_lines_out)
 {
     *kept_bytes_out = 0;
     *kept_lines_out = 0;
     size_t bytes_to_read = cap_bytes;
-    if (limit_off >= 0 && (off_t)bytes_to_read > limit_off)
-        bytes_to_read = (size_t)limit_off;
+    if (limit_off >= 0) {
+        size_t available = limit_off > range_start ? (size_t)(limit_off - range_start) : 0;
+        if (bytes_to_read > available)
+            bytes_to_read = available;
+    }
     if (bytes_to_read == 0)
         return 0;
-    if (lseek(fd, 0, SEEK_SET) < 0)
-        return -1;
 
     char chunk[8192];
     while (out->len < bytes_to_read) {
         size_t remaining = bytes_to_read - out->len;
-        ssize_t bytes_read = read(fd, chunk, remaining < sizeof(chunk) ? remaining : sizeof(chunk));
+        ssize_t bytes_read = pread(fd, chunk, remaining < sizeof(chunk) ? remaining : sizeof(chunk),
+                                   range_start + (off_t)out->len);
         if (bytes_read < 0) {
             if (errno == EINTR)
                 continue;
@@ -225,16 +224,15 @@ static int read_head_slice(int fd, size_t cap_bytes, size_t cap_lines, off_t lim
     return 0;
 }
 
-/* Read a line-aligned tail, retaining raw bytes when alignment would empty a long line. */
-static int read_tail_slice(int fd, size_t total_bytes, size_t cap_bytes, size_t cap_lines,
-                           struct buf *out, size_t *kept_bytes_out, size_t *kept_lines_out)
+int bash_read_tail_slice(int fd, off_t range_start, size_t range_bytes, size_t cap_bytes,
+                         size_t cap_lines, struct buf *out, size_t *kept_bytes_out,
+                         size_t *kept_lines_out)
 {
-    size_t bytes_to_read = total_bytes < cap_bytes ? total_bytes : cap_bytes;
-    off_t start = (off_t)(total_bytes - bytes_to_read);
+    size_t bytes_to_read = range_bytes < cap_bytes ? range_bytes : cap_bytes;
+    off_t start = range_start + (off_t)(range_bytes - bytes_to_read);
 
-    /* pread preserves the offset needed for the subsequent tail read. */
     int needs_alignment = 0;
-    if (start > 0) {
+    if (start > range_start) {
         char previous_byte;
         ssize_t read_result;
         do {
@@ -246,12 +244,11 @@ static int read_tail_slice(int fd, size_t total_bytes, size_t cap_bytes, size_t 
         needs_alignment = (read_result != 1) || (previous_byte != '\n');
     }
 
-    if (lseek(fd, start, SEEK_SET) < 0)
-        return -1;
-
     char chunk[8192];
-    for (;;) {
-        ssize_t bytes_read = read(fd, chunk, sizeof(chunk));
+    while (out->len < bytes_to_read) {
+        size_t remaining = bytes_to_read - out->len;
+        ssize_t bytes_read = pread(fd, chunk, remaining < sizeof(chunk) ? remaining : sizeof(chunk),
+                                   start + (off_t)out->len);
         if (bytes_read < 0) {
             if (errno == EINTR)
                 continue;
@@ -303,13 +300,17 @@ static void append_status(struct buf *out, enum bash_stop_reason reason, long ti
 {
     if (reason == BASH_STOP_INTERRUPT) {
         buf_append_str(out, "\n[interrupted]");
-    } else if (reason == BASH_STOP_TIMEOUT) {
+        return;
+    }
+    if (reason == BASH_STOP_TIMEOUT) {
         char formatted_timeout[32];
         format_timeout_for_model(formatted_timeout, sizeof(formatted_timeout), timeout_ms);
         char footer[64];
         snprintf(footer, sizeof(footer), "\n[timed out after %s]", formatted_timeout);
         buf_append_str(out, footer);
-    } else if (WIFEXITED(wait_status)) {
+        return;
+    }
+    if (WIFEXITED(wait_status)) {
         int code = WEXITSTATUS(wait_status);
         if (code != 0) {
             char footer[64];
@@ -321,6 +322,16 @@ static void append_status(struct buf *out, enum bash_stop_reason reason, long ti
         snprintf(footer, sizeof(footer), "\n[signal %d]", WTERMSIG(wait_status));
         buf_append_str(out, footer);
     }
+    if (reason == BASH_STOP_ORPHANED) {
+        char formatted_timeout[32];
+        format_timeout_for_model(formatted_timeout, sizeof(formatted_timeout), timeout_ms);
+        char footer[160];
+        snprintf(footer, sizeof(footer),
+                 "\n[orphaned processes killed after %s: a task tracks its shell, so drop '&' "
+                 "or end the command with 'wait']",
+                 formatted_timeout);
+        buf_append_str(out, footer);
+    }
 }
 
 static void append_run_suffix(struct buf *out, size_t total_bytes, int binary, int body_present,
@@ -329,7 +340,7 @@ static void append_run_suffix(struct buf *out, size_t total_bytes, int binary, i
     size_t before = out->len;
     if (binary) {
         char total_size[16];
-        format_byte_size(total_size, sizeof(total_size), total_bytes);
+        bash_format_byte_size(total_size, sizeof(total_size), total_bytes);
         char marker[64];
         snprintf(marker, sizeof(marker), "[binary output suppressed: %s]", total_size);
         buf_append_str(out, marker);
@@ -357,7 +368,7 @@ static void build_model_body(struct bash_output *output, int binary, struct buf 
     }
 
     if (!output->spilled) {
-        append_sanitized(body, output->memory.data, output->memory.len);
+        bash_output_append_sanitized(body, output->memory.data, output->memory.len);
         output_unlink(output);
         return;
     }
@@ -368,14 +379,14 @@ static void build_model_body(struct bash_output *output, int binary, struct buf 
         /* Open failure retains the memory prefix; a partial file is not safe to advertise. */
         size_t kept_bytes = 0, kept_lines = 0;
         if (output->memory.len > 0) {
-            append_sanitized(body, output->memory.data, output->memory.len);
+            bash_output_append_sanitized(body, output->memory.data, output->memory.len);
             kept_bytes = output->memory.len;
             kept_lines = count_newlines(output->memory.data, output->memory.len) +
                          (output->memory.data[output->memory.len - 1] != '\n' ? 1 : 0);
         }
         char kept_size[16], total_size[16];
-        format_byte_size(kept_size, sizeof(kept_size), kept_bytes);
-        format_byte_size(total_size, sizeof(total_size), output->total_bytes);
+        bash_format_byte_size(kept_size, sizeof(kept_size), kept_bytes);
+        bash_format_byte_size(total_size, sizeof(total_size), output->total_bytes);
         append_sanitized_marker(body,
                                 xasprintf("\n[output truncated: last %zu of %zu lines, %s of %s; "
                                           "full output unavailable (temp file write failed)]",
@@ -385,16 +396,16 @@ static void build_model_body(struct bash_output *output, int binary, struct buf 
     }
 
     size_t total_cap = output_cap_bytes();
-    size_t head_cap_bytes = total_cap / OUTPUT_HEAD_DIVISOR;
-    size_t head_cap_lines = OUTPUT_CAP_LINES / OUTPUT_HEAD_DIVISOR;
+    size_t head_cap_bytes = total_cap / BASH_OUTPUT_HEAD_DIVISOR;
+    size_t head_cap_lines = OUTPUT_CAP_LINES / BASH_OUTPUT_HEAD_DIVISOR;
     size_t tail_cap_bytes = total_cap - head_cap_bytes;
     size_t tail_cap_lines = OUTPUT_CAP_LINES - head_cap_lines;
 
     struct buf tail_raw;
     buf_init(&tail_raw);
     size_t tail_bytes = 0, tail_lines = 0;
-    if (read_tail_slice(output->fd, output->total_bytes, tail_cap_bytes, tail_cap_lines, &tail_raw,
-                        &tail_bytes, &tail_lines) != 0) {
+    if (bash_read_tail_slice(output->fd, 0, output->total_bytes, tail_cap_bytes, tail_cap_lines,
+                             &tail_raw, &tail_bytes, &tail_lines) != 0) {
         buf_free(&tail_raw);
         append_sanitized_marker(body, xasprintf("\n[output truncated: %zu lines, full output "
                                                 "unavailable (spill read failed)]",
@@ -407,15 +418,15 @@ static void build_model_body(struct bash_output *output, int binary, struct buf 
     struct buf head_raw;
     buf_init(&head_raw);
     size_t head_bytes = 0, head_lines = 0;
-    read_head_slice(output->fd, head_cap_bytes, head_cap_lines, tail_offset, &head_raw, &head_bytes,
-                    &head_lines);
+    bash_read_head_slice(output->fd, 0, head_cap_bytes, head_cap_lines, tail_offset, &head_raw,
+                         &head_bytes, &head_lines);
 
     /* A byte gap can exist within one long line even when no whole lines were omitted. */
     size_t omitted_lines =
         line_count > head_lines + tail_lines ? line_count - head_lines - tail_lines : 0;
     size_t gap_bytes = (size_t)tail_offset - head_bytes;
     if (head_lines > 0 && gap_bytes > 0) {
-        append_sanitized(body, head_raw.data, head_raw.len);
+        bash_output_append_sanitized(body, head_raw.data, head_raw.len);
         char *marker;
         if (omitted_lines > 0) {
             marker = xasprintf("... [output truncated: omitted %zu of %zu lines (kept first %zu, "
@@ -423,29 +434,29 @@ static void build_model_body(struct bash_output *output, int binary, struct buf 
                                omitted_lines, line_count, head_lines, tail_lines, output->path);
         } else {
             char gap_size[16];
-            format_byte_size(gap_size, sizeof(gap_size), gap_bytes);
+            bash_format_byte_size(gap_size, sizeof(gap_size), gap_bytes);
             marker = xasprintf("... [output truncated: omitted %s mid-line; full output saved to "
                                "%s] ...\n",
                                gap_size, output->path);
         }
         append_sanitized_marker(body, marker);
-        append_sanitized(body, tail_raw.data, tail_raw.len);
+        bash_output_append_sanitized(body, tail_raw.data, tail_raw.len);
     } else {
         /* Tail-only fallback reclaims the budget initially reserved for the head. */
         buf_reset(&tail_raw);
         tail_bytes = 0;
         tail_lines = 0;
-        if (read_tail_slice(output->fd, output->total_bytes, output_cap_bytes(), OUTPUT_CAP_LINES,
-                            &tail_raw, &tail_bytes, &tail_lines) != 0) {
+        if (bash_read_tail_slice(output->fd, 0, output->total_bytes, output_cap_bytes(),
+                                 OUTPUT_CAP_LINES, &tail_raw, &tail_bytes, &tail_lines) != 0) {
             append_sanitized_marker(body, xasprintf("\n[output truncated: %zu lines, full output "
                                                     "unavailable (spill read failed)]",
                                                     line_count));
             output_unlink(output);
         } else {
             char kept_size[16], total_size[16];
-            format_byte_size(kept_size, sizeof(kept_size), tail_bytes);
-            format_byte_size(total_size, sizeof(total_size), output->total_bytes);
-            append_sanitized(body, tail_raw.data, tail_raw.len);
+            bash_format_byte_size(kept_size, sizeof(kept_size), tail_bytes);
+            bash_format_byte_size(total_size, sizeof(total_size), output->total_bytes);
+            bash_output_append_sanitized(body, tail_raw.data, tail_raw.len);
             append_sanitized_marker(
                 body, xasprintf("\n[output truncated: last %zu of %zu lines, %s of %s; "
                                 "full output saved to %s]",
@@ -471,6 +482,26 @@ void bash_output_append(struct bash_output *output, const char *data, size_t len
 size_t bash_output_size(const struct bash_output *output)
 {
     return output->total_bytes;
+}
+
+int bash_output_detach_file(struct bash_output *output, char **path_out)
+{
+    *path_out = NULL;
+    if (!output->spilled)
+        output_spill(output);
+    if (output->fd < 0 || output->write_failed)
+        return -1;
+    int fd = output->fd;
+    *path_out = output->path;
+    output->fd = -1;
+    output->path = NULL;
+    return fd;
+}
+
+void bash_output_reattach_file(struct bash_output *output, int fd, char *path)
+{
+    output->fd = fd;
+    output->path = path;
 }
 
 char *bash_output_format_suffix(size_t total_bytes, int binary, int body_present,

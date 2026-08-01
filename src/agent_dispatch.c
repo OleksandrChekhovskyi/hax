@@ -57,7 +57,14 @@ static int tool_has_diff_output(const struct tool *tool)
 
 static char *display_argument(const struct tool *tool, const char *args_json)
 {
-    if (!tool || !tool->display.arg_name || !args_json)
+    if (!tool || !args_json)
+        return NULL;
+    if (tool->display.format_argument) {
+        char *formatted = tool->display.format_argument(args_json);
+        if (formatted)
+            return formatted;
+    }
+    if (!tool->display.arg_name)
         return NULL;
     json_t *root = json_loads(args_json, 0, NULL);
     if (!root)

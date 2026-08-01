@@ -31,6 +31,8 @@
 #include "system/spawn.h"
 #include "system/tempfiles.h"
 #include "terminal/ansi.h"
+#include "tools/bash_process.h"
+#include "tools/task_registry.h"
 #include "terminal/input.h"
 #include "terminal/interrupt.h"
 #include "terminal/notify.h"
@@ -605,10 +607,12 @@ static void render_resume_hint(struct render_ctx *render, enum agent_resume_reas
     disp_flush(&render->disp);
 }
 
-/* Continuations render nothing and cannot anchor replay; compaction seeds remain visible. */
+/* Only typed prompts and compaction seeds render as replay anchors; continuations and task
+ * notes would replay as an empty turn heading. */
 static int is_replay_anchor(const struct item *item)
 {
-    return item->kind == ITEM_USER_MESSAGE && item->origin != ITEM_ORIGIN_CONTINUATION;
+    return item->kind == ITEM_USER_MESSAGE &&
+           (item->origin == ITEM_ORIGIN_NONE || item->origin == ITEM_ORIGIN_COMPACT_SEED);
 }
 
 /* Replay only the final visible user turn so restored context does not displace live history.
@@ -1105,6 +1109,20 @@ static void repl_loop_compact(void *user)
     }
 }
 
+static void repl_loop_task_note(const char *text, void *user)
+{
+    struct repl_loop_ctx *ctx = user;
+    struct render_ctx *render = ctx->state->render;
+    spinner_hide(render->spinner);
+    render_transition(render, RS_IDLE);
+    render_open_block(render);
+    disp_raw(&render->disp, ANSI_DIM);
+    disp_write(&render->disp, text, strlen(text));
+    disp_raw(&render->disp, ANSI_RESET);
+    disp_putc(&render->disp, '\n');
+    disp_flush(&render->disp);
+}
+
 static int handle_slash_input(struct input *input, struct agent_state *state, const char *line)
 {
     if (!*line)
@@ -1236,6 +1254,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         transcript_log_append(transcript, session.items, session.n_items);
     /* Capture terminal state before raw input; non-TTY initialization is a no-op. */
     interrupt_init();
+    interrupt_set_fatal_hook(bash_shell_pgids_kill);
 
     char prompt_buffer[64];
 
@@ -1387,6 +1406,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
                     .tool_seen = repl_loop_tool_seen,
                     .tool_call = repl_loop_tool_call,
                     .compact = repl_loop_compact,
+                    .task_note = repl_loop_task_note,
                 },
         };
         struct agent_loop_result loop_result;
@@ -1444,6 +1464,24 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         if (!user_pressed_escape)
             notify_attention();
     }
+
+    size_t running_tasks = task_running_count();
+    if (running_tasks > 0)
+        ui_note("stopping %zu running background task%s", running_tasks,
+                running_tasks == 1 ? "" : "s");
+    /* Resolve every uncollected task in the record — final status for finished ones,
+     * killed-at-exit for the rest — so a resumed session never dangles on a
+     * "[detached as task ...]" report or advertises output this exit destroys. */
+    char *exit_note = task_exit_note();
+    if (exit_note) {
+        agent_session_append(&session, (struct item){
+                                           .kind = ITEM_USER_MESSAGE,
+                                           .text = exit_note,
+                                           .origin = ITEM_ORIGIN_TASK_NOTE,
+                                       });
+        agent_loop_flush_logs(transcript, state.session_log, session.items, session.n_items);
+    }
+    task_registry_shutdown();
 
     const char *resume_hint = session_log_resume_hint(state.session_log);
     if (resume_hint)

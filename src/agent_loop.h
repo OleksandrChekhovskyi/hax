@@ -95,6 +95,9 @@ struct agent_loop_hooks {
     struct item (*tool_call)(const struct item *call, enum agent_loop_tool_action action,
                              int image_input, void *user);
     void (*compact)(void *user);
+    /* A background-task note was appended to history before this turn's request; text is
+     * borrowed for the call. Display-only. */
+    void (*task_note)(const char *text, void *user);
 };
 
 /* Every outcome except COMPLETE leaves an incomplete user turn behind.

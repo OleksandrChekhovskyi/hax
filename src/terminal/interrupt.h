@@ -41,6 +41,16 @@
 
 void interrupt_init(void);
 
+/* Install just the fatal-signal handlers (SIGINT/SIGTERM/SIGHUP/SIGQUIT: hook,
+ * tty restore, re-raise) without the tty machinery — for non-tty frontends
+ * where interrupt_init() would bail before installing them. interrupt_init()
+ * includes this. */
+void interrupt_install_signal_handlers(void);
+
+/* Register a hook the fatal-signal handlers run before re-raising, e.g. to
+ * kill processes that must not outlive hax. Must be async-signal-safe. */
+void interrupt_set_fatal_hook(void (*hook)(void));
+
 /* Begin listening for Esc. Idempotent — safe to call when already armed. */
 void interrupt_arm(void);
 
