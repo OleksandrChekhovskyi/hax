@@ -63,6 +63,7 @@ static enum transaction_script transaction_script;
 static int transaction_turn;
 static int transaction_cancel;
 static int transaction_events;
+static size_t transaction_request_items;
 
 static void transaction_emit(stream_cb cb, void *user, struct stream_event event)
 {
@@ -89,6 +90,7 @@ static int transaction_stream(struct provider *provider, const struct context *c
     (void)tick;
     (void)tick_user;
     EXPECT(ctx != NULL);
+    transaction_request_items = ctx->n_items;
     transaction_turn++;
 
     if (transaction_script == TRANSACTION_RETRY && transaction_turn == 1) {
@@ -184,16 +186,62 @@ static void test_transaction_applies_summary(void)
     EXPECT(result.outcome == COMPACT_COMPLETE);
     EXPECT(result.attempts == 1);
     EXPECT(transaction_events == 2);
-    /* Successful compaction leaves only the seed and its own usage footer. */
-    EXPECT(session.n_items == 2);
-    EXPECT(session.items[0].kind == ITEM_USER_MESSAGE &&
-           session.items[0].origin == ITEM_ORIGIN_COMPACT_SEED);
-    EXPECT(session.items[0].text && strstr(session.items[0].text, "earlier part") != NULL);
-    EXPECT(session.items[0].text && strstr(session.items[0].text, "continue") != NULL);
-    EXPECT(session.items[1].kind == ITEM_TURN_USAGE);
-    EXPECT(session.items[1].usage->usage.input_tokens == 100);
+    /* The summarized history stays; the seed and its usage footer are appended after it. */
+    EXPECT(session.n_items == 4);
+    EXPECT_STR_EQ(session.items[0].text, "old history");
+    EXPECT(session.items[1].kind == ITEM_TURN_BOUNDARY);
+    EXPECT(session.items[2].kind == ITEM_USER_MESSAGE &&
+           session.items[2].origin == ITEM_ORIGIN_COMPACT_SEED);
+    EXPECT(session.items[2].text && strstr(session.items[2].text, "earlier part") != NULL);
+    EXPECT(session.items[2].text && strstr(session.items[2].text, "continue") != NULL);
+    EXPECT(session.items[3].kind == ITEM_TURN_USAGE);
+    EXPECT(session.items[3].usage->usage.input_tokens == 100);
+
+    /* What the model sees starts at the seed. */
+    struct context window = agent_session_context(&session);
+    EXPECT(window.n_items == 2);
+    EXPECT(window.items[0].origin == ITEM_ORIGIN_COMPACT_SEED);
+    EXPECT(window.items[1].kind == ITEM_TURN_USAGE);
 
     compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* A second pass summarizes only the window the first one left. */
+static void test_transaction_compacts_twice(void)
+{
+    struct agent_session session;
+    transaction_session_init(&session);
+    struct provider provider = {.name = "test", .stream = transaction_stream};
+    transaction_script = TRANSACTION_SUCCESS;
+    transaction_turn = 0;
+    transaction_cancel = 0;
+
+    struct compact_result first = transaction_run(&session, &provider, NULL);
+    EXPECT(first.outcome == COMPACT_COMPLETE);
+    /* One history item plus the summarization prompt. */
+    EXPECT(transaction_request_items == 2);
+    compact_result_destroy(&first);
+
+    struct compact_result second = transaction_run(&session, &provider, NULL);
+    EXPECT(second.outcome == COMPACT_COMPLETE);
+    /* The first seed and its footer plus the prompt — the summarized prefix is not re-read. */
+    EXPECT(transaction_request_items == 3);
+    EXPECT(session.n_items == 7);
+    EXPECT_STR_EQ(session.items[0].text, "old history");
+    EXPECT(session.items[2].origin == ITEM_ORIGIN_COMPACT_SEED);
+    EXPECT(session.items[5].origin == ITEM_ORIGIN_COMPACT_SEED);
+
+    /* The newest seed wins; the first one is now part of the summarized prefix. */
+    struct context window = agent_session_context(&session);
+    EXPECT(window.n_items == 2);
+    EXPECT(window.items == &session.items[5]);
+
+    /* Cutting past a seed, as /undo does, falls back to the older one and then to no seed. */
+    EXPECT(items_context_floor(session.items, 5) == 2);
+    EXPECT(items_context_floor(session.items, 2) == 0);
+
+    compact_result_destroy(&second);
     agent_session_free(&session);
 }
 
@@ -204,7 +252,9 @@ static void free_items(struct item *items, size_t n_items)
     free(items);
 }
 
-static void test_transaction_archives_rejected_attempt(void)
+/* Compaction continues the session file it was given, so one compacted conversation stays one
+ * entry in the picker instead of a chain of them. */
+static void test_transaction_keeps_one_session(void)
 {
     struct agent_session session;
     transaction_session_init(&session);
@@ -212,7 +262,7 @@ static void test_transaction_archives_rejected_attempt(void)
     struct session_log *slog = session_log_open("test", "model", NULL, NULL);
     EXPECT(slog != NULL);
     session_log_append(slog, session.items, session.n_items);
-    char *old_path = xstrdup(session_log_path(slog));
+    char *path = xstrdup(session_log_path(slog));
     transaction_script = TRANSACTION_RETRY;
     transaction_turn = 0;
     transaction_cancel = 0;
@@ -220,34 +270,65 @@ static void test_transaction_archives_rejected_attempt(void)
     struct compact_result result = transaction_run(&session, &provider, slog);
     EXPECT(result.outcome == COMPACT_COMPLETE);
     EXPECT(result.attempts == 2);
-    /* The rejected turn is archived with old history; only the accepted
-     * turn's footer follows the new seed. */
-    struct item *old_items = NULL;
-    size_t n_old = 0;
-    EXPECT(session_load(old_path, &old_items, &n_old, NULL) == 0);
-    EXPECT(n_old == 2);
-    EXPECT(old_items[1].kind == ITEM_TURN_USAGE);
-    EXPECT(old_items[1].usage->usage.input_tokens == 100);
-    EXPECT(session.n_items == 2);
+    EXPECT_STR_EQ(path, session_log_path(slog));
+
+    /* The rejected attempt's footer belongs to the summarized prefix; only the accepted
+     * attempt's footer follows the seed. */
+    EXPECT(session.n_items == 5);
     EXPECT(session.items[1].kind == ITEM_TURN_USAGE);
-    EXPECT(session.items[1].usage->usage.input_tokens == 200);
+    EXPECT(session.items[1].usage->usage.input_tokens == 100);
+    EXPECT(session.items[3].origin == ITEM_ORIGIN_COMPACT_SEED);
+    EXPECT(session.items[4].kind == ITEM_TURN_USAGE);
+    EXPECT(session.items[4].usage->usage.input_tokens == 200);
 
-    struct item *new_items = NULL;
-    size_t n_new = 0;
-    EXPECT(strcmp(old_path, session_log_path(slog)) != 0);
-    EXPECT(session_load(session_log_path(slog), &new_items, &n_new, NULL) == 0);
-    EXPECT(n_new == 2);
-    EXPECT(new_items[0].kind == ITEM_USER_MESSAGE &&
-           new_items[0].origin == ITEM_ORIGIN_COMPACT_SEED);
-    EXPECT(new_items[1].kind == ITEM_TURN_USAGE);
-    EXPECT(new_items[1].usage->usage.input_tokens == 200);
+    struct item *recorded = NULL;
+    size_t n_recorded = 0;
+    EXPECT(session_load(path, &recorded, &n_recorded, NULL) == 0);
+    EXPECT(n_recorded == 5);
+    EXPECT_STR_EQ(recorded[0].text, "old history");
+    EXPECT(recorded[3].kind == ITEM_USER_MESSAGE && recorded[3].origin == ITEM_ORIGIN_COMPACT_SEED);
+    EXPECT(recorded[4].usage->usage.input_tokens == 200);
 
-    free_items(new_items, n_new);
-    free_items(old_items, n_old);
-    free(old_path);
+    free_items(recorded, n_recorded);
+    free(path);
     compact_result_destroy(&result);
     session_log_close(slog);
     agent_session_free(&session);
+}
+
+/* The floor is derived from the recorded seed, so a resumed file needs no carried-over state. */
+static void test_resumed_session_floors_at_seed(void)
+{
+    struct agent_session session;
+    transaction_session_init(&session);
+    struct provider provider = {.name = "test", .stream = transaction_stream};
+    struct session_log *slog = session_log_open("test", "model", NULL, NULL);
+    EXPECT(slog != NULL);
+    session_log_append(slog, session.items, session.n_items);
+    char *path = xstrdup(session_log_path(slog));
+    transaction_script = TRANSACTION_SUCCESS;
+    transaction_turn = 0;
+    transaction_cancel = 0;
+
+    struct compact_result result = transaction_run(&session, &provider, slog);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    compact_result_destroy(&result);
+    session_log_close(slog);
+    agent_session_free(&session);
+
+    struct agent_session resumed;
+    memset(&resumed, 0, sizeof(resumed));
+    EXPECT(session_load(path, &resumed.items, &resumed.n_items, NULL) == 0);
+    resumed.cap_items = resumed.n_items;
+    EXPECT(resumed.n_items == 4);
+    EXPECT_STR_EQ(resumed.items[0].text, "old history");
+
+    struct context window = agent_session_context(&resumed);
+    EXPECT(window.n_items == 2);
+    EXPECT(window.items[0].origin == ITEM_ORIGIN_COMPACT_SEED);
+
+    free(path);
+    agent_session_free(&resumed);
 }
 
 static void test_transaction_preserves_failure(void)
@@ -321,7 +402,9 @@ int main(void)
     test_over_threshold();
     test_should_auto();
     test_transaction_applies_summary();
-    test_transaction_archives_rejected_attempt();
+    test_transaction_compacts_twice();
+    test_transaction_keeps_one_session();
+    test_resumed_session_floors_at_seed();
     test_transaction_preserves_failure();
     test_transaction_rejects_empty_summary();
     test_transaction_discards_cancelled_summary();

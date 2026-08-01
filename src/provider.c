@@ -46,6 +46,14 @@ size_t items_image_count(const struct item *items, size_t n_items)
     return total;
 }
 
+size_t items_context_floor(const struct item *items, size_t n_items)
+{
+    for (size_t i = n_items; i-- > 0;)
+        if (items[i].kind == ITEM_USER_MESSAGE && items[i].origin == ITEM_ORIGIN_COMPACT_SEED)
+            return i;
+    return 0;
+}
+
 void item_free(struct item *item)
 {
     if (!item)

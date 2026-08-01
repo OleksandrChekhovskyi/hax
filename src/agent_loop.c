@@ -171,12 +171,13 @@ static struct item loop_run_tool(const struct agent_loop_params *params, const s
         agent_tool_call_destroy(&prepared);
     }
 
-    /* Enforce the aggregate image budget at ingestion — history excludes
+    /* Enforce the aggregate image budget at ingestion — the window excludes
      * `result`, which the caller appends next. Dropping the just-read image
      * (rather than degrading older ones at serialization) keeps prior
-     * requests byte-stable, so the provider prefix cache survives. */
-    agent_tool_result_enforce_image_budget(params->session->items, params->session->n_items,
-                                           &result);
+     * requests byte-stable, so the provider prefix cache survives. The budget
+     * is what a request may carry, so a compacted-away image no longer counts. */
+    struct context window = agent_session_context(params->session);
+    agent_tool_result_enforce_image_budget(window.items, window.n_items, &result);
     return result;
 }
 

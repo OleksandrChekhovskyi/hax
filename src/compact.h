@@ -8,16 +8,16 @@ struct agent_session;
 struct session_log;
 struct transcript_log;
 
-/*
- * Conversation compaction: replace a long history with a model-generated
- * structured summary so the session can keep going without overflowing the
- * context window.
+/* Conversation compaction: append a model-generated structured summary of the
+ * history so far, so the session can keep going without overflowing the context
+ * window. The summarized items stay in history and on disk; the seed is what
+ * agent_session_context floors the model's view to, which keeps one compacted
+ * conversation a single session rather than a chain of them.
  *
  * The shared mechanism lives here: prompt/seed policy, auto-trigger and
- * context-window resolution, summary retries, attempt footers, history
- * replacement, and log rotation. Frontends supply only event accounting,
- * transport ticks, cancellation, and presentation around compact_run.
- */
+ * context-window resolution, summary retries, attempt footers, and the seed
+ * append. Frontends supply only event accounting, transport ticks,
+ * cancellation, and presentation around compact_run. */
 
 enum compact_outcome {
     COMPACT_COMPLETE,
@@ -55,8 +55,8 @@ struct compact_result {
 };
 
 /* Run the complete compaction transaction: summarize, reject stray tool calls,
- * preserve footers from every billed attempt, replace history on success, and
- * rotate/flush both logs at the canonical commit points. */
+ * preserve footers from every billed attempt, append the seed on success, and
+ * flush both logs at the canonical commit points. */
 void compact_run(const struct compact_params *params, struct compact_result *result);
 void compact_result_destroy(struct compact_result *result);
 

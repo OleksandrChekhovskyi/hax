@@ -718,6 +718,43 @@ static void test_load_enforces_image_count_cap(void)
     unlink(path);
 }
 
+/* A summarized prefix is never sent, so its images must not spend the window's image budget. */
+static void test_load_budgets_images_from_compaction_seed(void)
+{
+    char path[] = "/tmp/hax_imgfloor_XXXXXX";
+    int fd = mkstemp(path);
+    EXPECT(fd >= 0);
+    if (fd < 0)
+        return;
+
+    const char *header =
+        "{\"type\":\"session\",\"version\":1,\"provider\":\"pa\",\"model\":\"ma\"}\n";
+    EXPECT(write(fd, header, strlen(header)) == (ssize_t)strlen(header));
+    for (int i = 0; i < IMAGE_REQUEST_MAX_COUNT; i++) {
+        char *line = xasprintf("{\"kind\":\"tool_result\",\"call_id\":\"c%d\",\"output\":\"r\","
+                               "\"images\":[{\"mime\":\"image/png\",\"data\":\"QUJD\","
+                               "\"width\":2,\"height\":1}]}\n",
+                               i);
+        EXPECT(write(fd, line, strlen(line)) == (ssize_t)strlen(line));
+        free(line);
+    }
+    const char *after_seed =
+        "{\"kind\":\"user\",\"text\":\"summary\",\"origin\":\"compact_seed\"}\n"
+        "{\"kind\":\"tool_result\",\"call_id\":\"live\",\"output\":\"r\","
+        "\"images\":[{\"mime\":\"image/png\",\"data\":\"QUJD\",\"width\":2,\"height\":1}]}\n";
+    EXPECT(write(fd, after_seed, strlen(after_seed)) == (ssize_t)strlen(after_seed));
+    close(fd);
+
+    struct item *items;
+    size_t n;
+    EXPECT(session_load(path, &items, &n, NULL) == 0);
+    EXPECT(n == IMAGE_REQUEST_MAX_COUNT + 2);
+    EXPECT(items[n - 1].n_images == 1);
+
+    free_items(items, n);
+    unlink(path);
+}
+
 int main(void)
 {
     test_item_codec_round_trip();
@@ -739,5 +776,6 @@ int main(void)
     test_read_meta_failure_initializes_output();
     test_session_readers_reject_fifo();
     test_load_enforces_image_count_cap();
+    test_load_budgets_images_from_compaction_seed();
     T_REPORT();
 }

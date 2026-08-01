@@ -259,10 +259,16 @@ void agent_session_reset(struct agent_session *session)
 
 struct context agent_session_context(const struct agent_session *session)
 {
+    /* Derived, not tracked: /undo, /fork, and a resumed file all land on the right answer with no
+     * cached index to keep honest. */
+    size_t floor = items_context_floor(session->items, session->n_items);
+    /* Ctrl-T reaches an untouched session, and offsetting a null pointer is undefined even by
+     * zero. */
+    struct item *items = session->items ? session->items + floor : NULL;
     return (struct context){
         .system_prompt = session->system_prompt,
-        .items = session->items,
-        .n_items = session->n_items,
+        .items = items,
+        .n_items = session->n_items - floor,
         .tools = session->tools,
         .n_tools = session->n_tools,
         .effort = session->effort,

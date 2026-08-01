@@ -166,38 +166,34 @@ static char *compact_summarize(const struct agent_session *s, struct provider *p
                                const char *instructions, struct turn *t, stream_cb cb,
                                void *cb_user, http_tick_cb tick, void *tick_user, int *attempts)
 {
-    /* The request is the live history plus a synthetic trailing user message
-     * carrying the summarization prompt. Tools ARE advertised so the cached
-     * prefix the live conversation built (tools → system → messages) stays
-     * warm for this whole-history read; the prompt tells the model to answer
-     * in text only. A weaker model may ignore that and emit a tool call
+    /* The request is the model-visible window plus a synthetic trailing user
+     * message carrying the summarization prompt. Tools ARE advertised so the
+     * cached prefix the live conversation built (tools → system → messages)
+     * stays warm for this whole-window read; the prompt tells the model to
+     * answer in text only. A weaker model may ignore that and emit a tool call
      * instead — we then append a rejected tool_result and stream again
      * (cache-warm: only a tiny suffix is new each retry), capped so a stubborn
      * model can't loop forever.
      *
-     * req[0..base) are shallow copies of the session's items (strings borrowed
+     * req[0..base) are shallow copies of the window's items (strings borrowed
      * — never item_free'd); req[base] is the prompt slot (its text is `prompt`,
      * freed once at the end, not via item_free); anything appended past that is
      * owned by req and item_free'd on cleanup. */
+    struct context window = agent_session_context(s);
+    window.image_input = model_meta_image_input(p, s->model);
     char *prompt = compact_build_prompt(instructions);
-    size_t base = s->n_items;
+    size_t base = window.n_items;
     size_t cap = base + 1;
     struct item *req = xmalloc(cap * sizeof(*req));
-    memcpy(req, s->items, base * sizeof(*req));
+    memcpy(req, window.items, base * sizeof(*req));
     req[base] = (struct item){.kind = ITEM_USER_MESSAGE, .text = prompt};
     size_t n = base + 1;
 
     char *summary = NULL;
     for (int attempt = 0; attempt < COMPACT_MAX_ATTEMPTS; attempt++) {
-        struct context ctx = {
-            .system_prompt = s->system_prompt,
-            .items = req,
-            .n_items = n,
-            .tools = s->tools,
-            .n_tools = s->n_tools,
-            .effort = s->effort,
-            .image_input = model_meta_image_input(p, s->model),
-        };
+        struct context ctx = window;
+        ctx.items = req;
+        ctx.n_items = n;
         if (attempts)
             (*attempts)++;
         p->stream(p, &ctx, s->model, cb, cb_user, tick, tick_user);
@@ -259,24 +255,14 @@ static char *compact_summarize(const struct agent_session *s, struct provider *p
     return summary;
 }
 
-static void compact_apply(struct agent_session *s, struct session_log *slog,
-                          struct transcript_log *tlog, const char *summary)
+/* The summarized items stay put; only the model's view moves. The boundary keeps the seed from
+ * rendering as a continuation of the turn it follows. */
+static void compact_apply(struct agent_session *session, const char *summary)
 {
-    char *seed = compact_build_seed(summary);
-    agent_session_reset(s);
-    agent_session_append(
-        s,
-        (struct item){.kind = ITEM_USER_MESSAGE, .text = seed, .origin = ITEM_ORIGIN_COMPACT_SEED});
-    /* Rotate both logs to fresh files, then write the seed. The old records
-     * remain on disk for archaeology. */
-    session_log_reset(slog);
-    transcript_log_reset(tlog, s->system_prompt, s->tools, s->n_tools);
-    transcript_log_append(tlog, s->items, s->n_items);
-    session_log_append(slog, s->items, s->n_items);
-    /* No tempfiles_cleanup() here: COMPACT_PROMPT tells the summary to
-     * preserve exact file paths, so the seed may reference tracked files
-     * — pasted images especially, whose pixels are otherwise
-     * unrecoverable. Files flush at /new and exit. */
+    agent_session_add_boundary(session);
+    agent_session_append(session, (struct item){.kind = ITEM_USER_MESSAGE,
+                                                .text = compact_build_seed(summary),
+                                                .origin = ITEM_ORIGIN_COMPACT_SEED});
 }
 
 struct compact_sink {
@@ -373,12 +359,11 @@ void compact_run(const struct compact_params *params, struct compact_result *res
         return;
     }
 
-    /* Rejected attempts belong to the old history; the accepted attempt's
-     * footer follows the compact seed in the rotated logs. */
+    /* Rejected attempts belong to the summarized prefix, so their footers precede the seed; the
+     * accepted attempt's footer follows it. One append-only flush records the whole order. */
     int accepted = sink.usage.n > 0 ? sink.usage.n - 1 : 0;
     compact_add_usage(params, &sink.usage, 0, accepted);
-    compact_flush_logs(params);
-    compact_apply(params->session, params->slog, params->tlog, summary);
+    compact_apply(params->session, summary);
     free(summary);
     compact_add_usage(params, &sink.usage, accepted, sink.usage.n);
     compact_flush_logs(params);

@@ -27,7 +27,7 @@ enum item_kind {
  * reproduce the same marker text. Zero denotes an ordinary, externally authored item. */
 enum item_origin {
     ITEM_ORIGIN_NONE = 0,
-    ITEM_ORIGIN_COMPACT_SEED, /* synthetic USER_MESSAGE replacing compacted history */
+    ITEM_ORIGIN_COMPACT_SEED, /* synthetic USER_MESSAGE summarizing the history before it */
     ITEM_ORIGIN_CONTINUATION, /* synthetic USER_MESSAGE after an interrupted turn */
     ITEM_ORIGIN_INTERRUPTED,  /* ASSISTANT_MESSAGE marked as interrupted */
     ITEM_ORIGIN_SKIPPED,      /* TOOL_RESULT for a call that did not run after an abort */
@@ -85,6 +85,10 @@ char *item_image_placeholder(const struct item_image *image);
 
 size_t items_image_base64_bytes(const struct item *items, size_t n_items);
 size_t items_image_count(const struct item *items, size_t n_items);
+
+/* Index of the newest compaction seed, or 0 when there is none. Compaction summarizes a prefix
+ * instead of discarding it, so a request built from `items` starts here, not at 0. */
+size_t items_context_floor(const struct item *items, size_t n_items);
 
 /* One JSON Schema property advertised for a tool. Zeroed optional fields are omitted from the
  * generated schema, so `minimum` cannot express a bound of 0. */

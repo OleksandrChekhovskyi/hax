@@ -941,12 +941,14 @@ static void push_item(struct item **items, size_t *count, size_t *capacity, stru
     (*items)[(*count)++] = item;
 }
 
-/* Keep earliest images when a file exceeds the current request limits. */
+/* Keep earliest images when a file exceeds the current request limits. Only the model-visible
+ * window is budgeted: images a compaction summarized away are never sent, so charging the limit
+ * for them would degrade the live images that replaced them. */
 static void degrade_excess_images(struct item *items, size_t item_count)
 {
     size_t encoded_bytes = 0;
     size_t image_count = 0;
-    for (size_t i = 0; i < item_count; i++) {
+    for (size_t i = items_context_floor(items, item_count); i < item_count; i++) {
         struct item *item = &items[i];
         if (item->n_images == 0)
             continue;

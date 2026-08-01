@@ -358,12 +358,13 @@ static char *paste_filter_cb(const char *text, void *user)
 static void show_transcript_cb(void *user)
 {
     const struct agent_state *state = user;
-    const struct agent_session *session = state->session;
     struct spawn_pipe pager;
     if (view_pager_open(&pager) < 0)
         return;
-    transcript_render(pager.w, session->system_prompt, session->tools, session->n_tools,
-                      session->items, session->n_items);
+    /* Only the model-visible window: a compacted prefix is what the seed stands in for. */
+    struct context window = agent_session_context(state->session);
+    transcript_render(pager.w, window.system_prompt, window.tools, window.n_tools, window.items,
+                      window.n_items);
     spawn_pipe_close(&pager);
 }
 
@@ -549,8 +550,8 @@ int agent_apply_settings(struct agent_state *state, struct provider *provider, i
     return 0;
 }
 
-/* History replacement invalidates both resumable state and compaction debt tied to the old
- * tail. */
+/* Swapping or cutting history invalidates both resumable state and compaction debt tied to the
+ * old tail. */
 static void clear_resume_state(struct agent_state *state)
 {
     state->resume_reason = AGENT_RESUME_NONE;
@@ -971,8 +972,8 @@ int agent_compact(struct agent_state *state, const char *instructions, int autom
     render_transition(render, RS_IDLE);
 
     int compacted = result.outcome == COMPACT_COMPLETE;
-    /* Replaced history invalidates the window snapshot; retaining it could immediately recompact
-     * the fresh seed. */
+    /* The snapshot describes the window the seed replaced; retaining it could immediately
+     * recompact the fresh seed. */
     if (compacted) {
         state->stats.latest_context_tokens = 0;
         state->stats.context_limit = 0;
@@ -980,8 +981,8 @@ int agent_compact(struct agent_state *state, const char *instructions, int autom
          * end-of-turn pass: the oversized history it referred to is gone. */
         state->compaction_deferred = 0;
     }
-    /* Manual compaction replaces the resumable tail, so its summary seed must not receive a stale
-     * continuation marker. */
+    /* Manual compaction moves the model past the resumable tail, so its summary seed must not
+     * receive a stale continuation marker. */
     if (compacted && !automatic)
         clear_resume_state(state);
     switch (result.outcome) {

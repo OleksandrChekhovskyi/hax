@@ -237,7 +237,8 @@ Two paged views, deliberately different:
   terminal scrollback.
 - **Ctrl-T — the transcript.** What the *model* sees: the system prompt, every advertised
   tool schema, every tool argument and result verbatim and uncapped, plus per-request stats
-  footers. The debugging view (see [debugging.md](./debugging.md)).
+  footers. After a compaction it starts at the summary, because that is where the model's
+  context now begins. The debugging view (see [debugging.md](./debugging.md)).
 
 Both use `$PAGER`, defaulting to `less -R` so colors survive.
 

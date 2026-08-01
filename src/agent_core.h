@@ -44,6 +44,7 @@ struct agent_session {
     size_t n_tools;
     int raw_mode;
 
+    /* The whole conversation, including prefixes a compaction has already summarized. */
     struct item *items;
     size_t n_items;
     size_t cap_items;
@@ -67,7 +68,9 @@ void agent_session_free(struct agent_session *session);
 /* Clear conversation items while preserving session settings and item-vector capacity. */
 void agent_session_reset(struct agent_session *session);
 
-/* Return a borrowed provider context, valid until the next session mutation. */
+/* Return a borrowed provider context, valid until the next session mutation. Items before the
+ * newest compaction seed are excluded: compaction summarizes a prefix rather than discarding it,
+ * so this is the only view that answers what the model sees. */
 struct context agent_session_context(const struct agent_session *session);
 
 /* Transfer ownership of `item` into the session. */
