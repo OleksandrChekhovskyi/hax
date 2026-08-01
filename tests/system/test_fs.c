@@ -11,16 +11,7 @@
 #include "system/fs.h"
 #include "system/path.h"
 
-/* Fresh scratch directory; caller frees the returned path. Test-created
- * contents are cleaned per-test with plain unlink/rmdir — the trees here
- * are tiny and explicit — but the root is harness-owned: t_tempdir()
- * removes it at exit, along with whatever a failing test leaves. */
-static char *scratch_dir(void)
-{
-    return xstrdup(t_tempdir());
-}
-
-static void touch(const char *path, mode_t mode)
+static void touch_file(const char *path, mode_t mode)
 {
     int fd = open(path, O_CREAT | O_WRONLY, mode);
     EXPECT(fd >= 0);
@@ -28,217 +19,290 @@ static void touch(const char *path, mode_t mode)
         close(fd);
 }
 
-/* ---------- fs_which ---------- */
+static char *replace_path_env(const char *value)
+{
+    const char *current = getenv("PATH");
+    char *saved = current ? xstrdup(current) : NULL;
+    if (value)
+        setenv("PATH", value, 1);
+    else
+        unsetenv("PATH");
+    return saved;
+}
+
+static void restore_path_env(char *saved)
+{
+    if (saved)
+        setenv("PATH", saved, 1);
+    else
+        unsetenv("PATH");
+    free(saved);
+}
 
 static void test_which_finds_sh(void)
 {
-    /* `sh` exists on every supported platform; the result must be an
-     * absolute path that is itself executable. */
-    char *p = fs_which("sh");
-    EXPECT(p != NULL);
-    EXPECT(p && p[0] == '/');
-    EXPECT(p && access(p, X_OK) == 0);
-    free(p);
+    /* `sh` is present on every supported platform. */
+    char *path = fs_which("sh");
+    EXPECT(path != NULL);
+    EXPECT(path && path[0] == '/');
+    EXPECT(path && access(path, X_OK) == 0);
+    free(path);
 }
 
 static void test_which_missing_is_null(void)
 {
-    char *p = fs_which("hax-definitely-not-a-real-binary");
-    EXPECT(p == NULL);
-    free(p);
+    char *path = fs_which("hax-definitely-not-a-real-binary");
+    EXPECT(path == NULL);
+    free(path);
 }
 
 static void test_which_slash_passes_through(void)
 {
-    char *p = fs_which("/bin/sh");
-    EXPECT(p != NULL);
-    EXPECT(p && strcmp(p, "/bin/sh") == 0);
-    free(p);
+    char *path = fs_which("/bin/sh");
+    EXPECT(path != NULL);
+    EXPECT(path && strcmp(path, "/bin/sh") == 0);
+    free(path);
 }
 
 static void test_which_slash_nonexecutable_is_null(void)
 {
-    char *p = fs_which("/dev/null/nope");
-    EXPECT(p == NULL);
-    free(p);
+    char *path = fs_which("/dev/null/nope");
+    EXPECT(path == NULL);
+    free(path);
 }
 
-static void test_which_empty_and_null(void)
+static void test_which_empty_null_and_unset_path(void)
 {
     EXPECT(fs_which("") == NULL);
     EXPECT(fs_which(NULL) == NULL);
+
+    char *saved_path = replace_path_env(NULL);
+    EXPECT(fs_which("sh") == NULL);
+    restore_path_env(saved_path);
 }
 
 static void test_which_skips_relative_path_entries(void)
 {
-    /* A PATH of only relative/empty entries must not resolve anything —
-     * picking a binary out of cwd is the footgun fs_which refuses. */
-    char *saved = xstrdup(getenv("PATH"));
-    setenv("PATH", ".:relative/dir:", 1);
-    char *p = fs_which("sh");
-    EXPECT(p == NULL);
-    free(p);
-    setenv("PATH", saved, 1);
-    free(saved);
+    char *saved_path = replace_path_env(".:relative/dir:");
+    char *path = fs_which("sh");
+    EXPECT(path == NULL);
+    free(path);
+    restore_path_env(saved_path);
 }
 
 static void test_which_resolves_in_later_entry(void)
 {
-    /* Earlier entries that don't exist or don't hold the name must not
-     * stop the search. */
-    char *dir = scratch_dir();
-    char *exe = path_join(dir, "hax-test-tool");
-    touch(exe, 0755);
-    char *saved = xstrdup(getenv("PATH"));
-    char *pathvar = xasprintf("/nonexistent-hax-dir:%s", dir);
-    setenv("PATH", pathvar, 1);
+    const char *dir = t_tempdir();
+    char *executable_path = path_join(dir, "hax-test-tool");
+    touch_file(executable_path, 0755);
+    char *path_env = xasprintf("/nonexistent-hax-dir:%s", dir);
+    char *saved_path = replace_path_env(path_env);
 
-    char *p = fs_which("hax-test-tool");
-    EXPECT(p != NULL);
-    EXPECT(p && strcmp(p, exe) == 0);
+    char *resolved_path = fs_which("hax-test-tool");
+    EXPECT(resolved_path != NULL);
+    EXPECT(resolved_path && strcmp(resolved_path, executable_path) == 0);
 
-    setenv("PATH", saved, 1);
-    free(p);
-    free(pathvar);
-    free(saved);
-    unlink(exe);
-    free(exe);
-    free(dir);
+    restore_path_env(saved_path);
+    free(resolved_path);
+    free(path_env);
+    free(executable_path);
 }
 
 static void test_which_skips_directory_match(void)
 {
-    /* A *directory* named like the target passes access(X_OK) (the x
-     * bit means searchable), but exec'ing it would fail on every call.
-     * It must be skipped in favor of a real file in a later entry. */
-    char *dir_a = scratch_dir();
-    char *dir_b = scratch_dir();
-    char *decoy = path_join(dir_a, "hax-test-tool");
-    EXPECT(mkdir(decoy, 0755) == 0);
-    char *exe = path_join(dir_b, "hax-test-tool");
-    touch(exe, 0755);
-    char *saved = xstrdup(getenv("PATH"));
-    char *pathvar = xasprintf("%s:%s", dir_a, dir_b);
-    setenv("PATH", pathvar, 1);
+    /* access(X_OK) accepts searchable directories, so a later regular file must win. */
+    const char *first_dir = t_tempdir();
+    const char *second_dir = t_tempdir();
+    char *directory_match = path_join(first_dir, "hax-test-tool");
+    EXPECT(mkdir(directory_match, 0755) == 0);
+    char *executable_path = path_join(second_dir, "hax-test-tool");
+    touch_file(executable_path, 0755);
+    char *path_env = xasprintf("%s:%s", first_dir, second_dir);
+    char *saved_path = replace_path_env(path_env);
 
-    char *p = fs_which("hax-test-tool");
-    EXPECT(p != NULL);
-    EXPECT(p && strcmp(p, exe) == 0);
+    char *resolved_path = fs_which("hax-test-tool");
+    EXPECT(resolved_path != NULL);
+    EXPECT(resolved_path && strcmp(resolved_path, executable_path) == 0);
 
-    setenv("PATH", saved, 1);
-    free(p);
-    free(pathvar);
-    free(saved);
-    unlink(exe);
-    rmdir(decoy);
-    free(exe);
-    free(decoy);
-    free(dir_a);
-    free(dir_b);
+    restore_path_env(saved_path);
+    free(resolved_path);
+    free(path_env);
+    free(executable_path);
+    free(directory_match);
 }
 
 static void test_which_slash_directory_is_null(void)
 {
-    /* Slash form takes the same regular-file check: a searchable
-     * directory (/tmp here) is not an executable. */
-    char *p = fs_which("/tmp");
-    EXPECT(p == NULL);
-    free(p);
+    char *path = fs_which("/tmp");
+    EXPECT(path == NULL);
+    free(path);
 }
 
 static void test_which_skips_non_executable(void)
 {
-    /* A matching name without the x bit is not a hit — same as which(1)
-     * and shells' PATH search. */
-    char *dir = scratch_dir();
-    char *file = path_join(dir, "hax-test-tool");
-    touch(file, 0644);
-    char *saved = xstrdup(getenv("PATH"));
-    setenv("PATH", dir, 1);
+    const char *dir = t_tempdir();
+    char *file_path = path_join(dir, "hax-test-tool");
+    touch_file(file_path, 0644);
+    char *saved_path = replace_path_env(dir);
 
-    char *p = fs_which("hax-test-tool");
-    EXPECT(p == NULL);
-    free(p);
+    char *resolved_path = fs_which("hax-test-tool");
+    EXPECT(resolved_path == NULL);
+    free(resolved_path);
 
-    setenv("PATH", saved, 1);
-    free(saved);
-    unlink(file);
-    free(file);
-    free(dir);
+    restore_path_env(saved_path);
+    free(file_path);
 }
 
-/* ---------- fs_mkdir_p ---------- */
+static void test_resolve_link_target_regular_file(void)
+{
+    const char *dir = t_tempdir();
+    char *path = path_join(dir, "file");
+    touch_file(path, 0644);
+
+    char *resolved_path = fs_resolve_link_target(path);
+    EXPECT_STR_EQ(resolved_path, path);
+
+    free(resolved_path);
+    free(path);
+}
+
+static void test_resolve_link_target_missing_file(void)
+{
+    const char *dir = t_tempdir();
+    char *path = path_join(dir, "missing");
+
+    char *resolved_path = fs_resolve_link_target(path);
+    EXPECT_STR_EQ(resolved_path, path);
+
+    free(resolved_path);
+    free(path);
+}
+
+static void test_resolve_link_target_relative_chain(void)
+{
+    const char *dir = t_tempdir();
+    char *first_link = path_join(dir, "first");
+    char *second_link = path_join(dir, "second");
+    char *target_path = path_join(dir, "target");
+    EXPECT(symlink("second", first_link) == 0);
+    EXPECT(symlink("target", second_link) == 0);
+
+    char *resolved_path = fs_resolve_link_target(first_link);
+    EXPECT_STR_EQ(resolved_path, target_path);
+
+    free(resolved_path);
+    free(target_path);
+    free(second_link);
+    free(first_link);
+}
+
+static void test_resolve_link_target_long_target(void)
+{
+    const char *dir = t_tempdir();
+    char *link_path = path_join(dir, "link");
+    struct buf target;
+    buf_init(&target);
+    for (int i = 0; i < 30; i++)
+        buf_append_str(&target, "missing/../");
+    buf_append_str(&target, "target");
+    EXPECT(symlink(target.data, link_path) == 0);
+
+    char *expected_path = path_join(dir, target.data);
+    char *resolved_path = fs_resolve_link_target(link_path);
+    EXPECT_STR_EQ(resolved_path, expected_path);
+
+    free(resolved_path);
+    free(expected_path);
+    buf_free(&target);
+    free(link_path);
+}
+
+static void test_resolve_link_target_loop(void)
+{
+    const char *dir = t_tempdir();
+    char *first_link = path_join(dir, "first");
+    char *second_link = path_join(dir, "second");
+    EXPECT(symlink("second", first_link) == 0);
+    EXPECT(symlink("first", second_link) == 0);
+
+    errno = 0;
+    char *resolved_path = fs_resolve_link_target(first_link);
+    EXPECT(resolved_path == NULL);
+    EXPECT(errno == ELOOP);
+
+    free(resolved_path);
+    free(second_link);
+    free(first_link);
+}
 
 static void test_mkdir_p_creates_nested(void)
 {
-    char *dir = scratch_dir();
-    char *deep = path_join(dir, "a/b/c");
-    EXPECT(fs_mkdir_p(deep) == 0);
+    const char *dir = t_tempdir();
+    char *path = path_join(dir, "a/b/c");
+    EXPECT(fs_mkdir_p(path) == 0);
     struct stat st;
-    EXPECT(stat(deep, &st) == 0 && S_ISDIR(st.st_mode));
-
-    /* Idempotent: everything already exists. */
-    EXPECT(fs_mkdir_p(deep) == 0);
-
-    char *b = path_join(dir, "a/b");
-    char *a = path_join(dir, "a");
-    rmdir(deep);
-    rmdir(b);
-    rmdir(a);
-    free(deep);
-    free(b);
-    free(a);
-    free(dir);
+    EXPECT(stat(path, &st) == 0 && S_ISDIR(st.st_mode));
+    EXPECT(fs_mkdir_p(path) == 0);
+    free(path);
 }
 
 static void test_mkdir_p_trailing_slashes(void)
 {
-    char *dir = scratch_dir();
-    char *deep = path_join(dir, "x/y");
-    char *slashed = xasprintf("%s//", deep);
-    EXPECT(fs_mkdir_p(slashed) == 0);
+    const char *dir = t_tempdir();
+    char *path = path_join(dir, "x/y");
+    char *path_with_slashes = xasprintf("%s//", path);
+    EXPECT(fs_mkdir_p(path_with_slashes) == 0);
     struct stat st;
-    EXPECT(stat(deep, &st) == 0 && S_ISDIR(st.st_mode));
+    EXPECT(stat(path, &st) == 0 && S_ISDIR(st.st_mode));
 
-    char *x = path_join(dir, "x");
-    rmdir(deep);
-    rmdir(x);
-    free(slashed);
-    free(deep);
-    free(x);
-    free(dir);
+    free(path_with_slashes);
+    free(path);
+}
+
+static void test_mkdir_p_accepts_directory_symlink(void)
+{
+    const char *dir = t_tempdir();
+    char *target_dir = path_join(dir, "target");
+    char *link_path = path_join(dir, "link");
+    char *nested_path = path_join(link_path, "nested");
+    EXPECT(mkdir(target_dir, 0755) == 0);
+    EXPECT(symlink(target_dir, link_path) == 0);
+
+    EXPECT(fs_mkdir_p(nested_path) == 0);
+    struct stat st;
+    EXPECT(stat(nested_path, &st) == 0 && S_ISDIR(st.st_mode));
+
+    free(nested_path);
+    free(link_path);
+    free(target_dir);
 }
 
 static void test_mkdir_p_file_in_the_middle_fails(void)
 {
-    char *dir = scratch_dir();
-    char *file = path_join(dir, "blocker");
-    touch(file, 0644);
-    char *deep = path_join(dir, "blocker/sub");
+    const char *dir = t_tempdir();
+    char *file_path = path_join(dir, "blocker");
+    touch_file(file_path, 0644);
+    char *nested_path = path_join(dir, "blocker/sub");
+
     errno = 0;
-    EXPECT(fs_mkdir_p(deep) == -1);
+    EXPECT(fs_mkdir_p(nested_path) == -1);
     EXPECT(errno == ENOTDIR);
 
-    unlink(file);
-    free(deep);
-    free(file);
-    free(dir);
+    free(nested_path);
+    free(file_path);
 }
 
 static void test_mkdir_p_final_component_is_file_fails(void)
 {
-    /* mkdir(2) reports EEXIST here; fs_mkdir_p must not report success
-     * when what exists is not a directory — `mkdir -p` fails too. */
-    char *dir = scratch_dir();
-    char *file = path_join(dir, "taken");
-    touch(file, 0644);
+    const char *dir = t_tempdir();
+    char *file_path = path_join(dir, "taken");
+    touch_file(file_path, 0644);
+
     errno = 0;
-    EXPECT(fs_mkdir_p(file) == -1);
+    EXPECT(fs_mkdir_p(file_path) == -1);
     EXPECT(errno == ENOTDIR);
 
-    unlink(file);
-    free(file);
-    free(dir);
+    free(file_path);
 }
 
 static void test_mkdir_p_null_and_empty(void)
@@ -253,15 +317,22 @@ int main(void)
     test_which_missing_is_null();
     test_which_slash_passes_through();
     test_which_slash_nonexecutable_is_null();
-    test_which_empty_and_null();
+    test_which_empty_null_and_unset_path();
     test_which_skips_relative_path_entries();
     test_which_resolves_in_later_entry();
     test_which_skips_directory_match();
     test_which_slash_directory_is_null();
     test_which_skips_non_executable();
 
+    test_resolve_link_target_regular_file();
+    test_resolve_link_target_missing_file();
+    test_resolve_link_target_relative_chain();
+    test_resolve_link_target_long_target();
+    test_resolve_link_target_loop();
+
     test_mkdir_p_creates_nested();
     test_mkdir_p_trailing_slashes();
+    test_mkdir_p_accepts_directory_symlink();
     test_mkdir_p_file_in_the_middle_fails();
     test_mkdir_p_final_component_is_file_fails();
     test_mkdir_p_null_and_empty();

@@ -93,7 +93,6 @@ static void test_edit_no_match(void)
     EXPECT(strstr(out, "not found") != NULL);
     free(out);
 
-    /* File untouched. */
     char *got = slurp(path);
     EXPECT_STR_EQ(got, "alpha\n");
     free(got);
@@ -112,7 +111,6 @@ static void test_edit_multi_match_requires_replace_all(void)
     EXPECT(strstr(out, "matches 3 places") != NULL);
     free(out);
 
-    /* Untouched. */
     char *got = slurp(path);
     EXPECT_STR_EQ(got, "foo\nfoo\nfoo\n");
     free(got);
@@ -137,6 +135,24 @@ static void test_edit_replace_all(void)
     EXPECT_STR_EQ(got, "bar\nbar\nbar\n");
     free(got);
 
+    free(path);
+}
+
+static void test_edit_deletes_entire_content(void)
+{
+    char *dir = t_tempdir();
+    char *path = seed_file(dir, "f.txt", "delete me");
+
+    char *args =
+        xasprintf("{\"path\":\"%s\",\"old_string\":\"delete me\",\"new_string\":\"\"}", path);
+    char *out = TOOL_EDIT.run(args, NULL);
+    free(args);
+    EXPECT(strstr(out, "-delete me") != NULL);
+    free(out);
+
+    char *got = slurp(path);
+    EXPECT_STR_EQ(got, "");
+    free(got);
     free(path);
 }
 
@@ -202,6 +218,7 @@ int main(void)
     test_edit_no_match();
     test_edit_multi_match_requires_replace_all();
     test_edit_replace_all();
+    test_edit_deletes_entire_content();
     test_edit_multiline_match();
     test_edit_refuses_fifo();
     test_edit_nonexistent_file();

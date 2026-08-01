@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,17 +12,18 @@
 #include "tool.h"
 #include "util.h"
 
-static char *write_tmp(const void *data, size_t len)
+static char *create_temp_file(const void *data, size_t len)
 {
-    char *path = xstrdup("/tmp/hax-test-XXXXXX");
-    int fd = mkstemp(path);
+    char *dir = t_tempdir();
+    char *path = xasprintf("%s/input", dir);
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) {
-        FAIL("mkstemp: %s", strerror(errno));
+        FAIL("creating %s: %s", path, strerror(errno));
         free(path);
         return NULL;
     }
-    if (len && write(fd, data, len) != (ssize_t)len)
-        FAIL("short write to %s", path);
+    if (write_all(fd, data, len) < 0)
+        FAIL("writing %s: %s", path, strerror(errno));
     close(fd);
     return path;
 }
@@ -61,11 +63,8 @@ static void test_read_nonexistent(void)
 
 static void test_read_normal(void)
 {
-    /* `cat -n` style: each line gets a right-aligned 6-char line-number
-     * column followed by a → arrow (READ_LINE_DELIM), then the original
-     * content. */
     const char content[] = "hello\nworld\n";
-    char *path = write_tmp(content, sizeof(content) - 1);
+    char *path = create_temp_file(content, sizeof(content) - 1);
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = call_read(args);
     EXPECT_STR_EQ(out, "     1" READ_LINE_DELIM "hello\n     2" READ_LINE_DELIM "world\n");
@@ -80,7 +79,7 @@ static void test_read_sanitizes_utf8(void)
     /* An invalid UTF-8 leading byte must become U+FFFD. (Embedded NULs
      * are caught by the binary-file guard and tested separately.) */
     const char content[] = {'a', (char)0xFF, 'b'};
-    char *path = write_tmp(content, sizeof(content));
+    char *path = create_temp_file(content, sizeof(content));
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = call_read(args);
     EXPECT_STR_EQ(out, "     1" READ_LINE_DELIM "a\xEF\xBF\xBD"
@@ -93,10 +92,8 @@ static void test_read_sanitizes_utf8(void)
 
 static void test_read_refuses_binary(void)
 {
-    /* A NUL byte in the first chunk marks the file as binary; the model
-     * gets a clear refusal instead of 256 KiB of replacement characters. */
     const char content[] = {'a', 0x00, 'b'};
-    char *path = write_tmp(content, sizeof(content));
+    char *path = create_temp_file(content, sizeof(content));
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = call_read(args);
     EXPECT(strstr(out, "appears to be binary") != NULL);
@@ -108,15 +105,13 @@ static void test_read_refuses_binary(void)
 
 static void test_read_refuses_oversize_no_slice(void)
 {
-    /* READ_CAP is 256 KiB. Without offset/limit the tool refuses upfront
-     * and tells the model how big the file is, so it can ask for a slice
-     * or grep via bash instead of accepting a silently truncated prefix. */
+    /* Unsliced reads reject files larger than the configured output cap. */
     size_t over = 256 * 1024 + 32;
     char *big = xmalloc(over);
     /* Multi-line so binary detection doesn't fire. */
     for (size_t i = 0; i < over; i++)
         big[i] = (i % 80 == 79) ? '\n' : 'q';
-    char *path = write_tmp(big, over);
+    char *path = create_temp_file(big, over);
     free(big);
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = call_read(args);
@@ -130,14 +125,12 @@ static void test_read_refuses_oversize_no_slice(void)
 
 static void test_read_oversize_with_slice_ok(void)
 {
-    /* The pre-stat refusal only fires when neither offset nor limit is
-     * provided. With a slice request, streaming proceeds — the model has
-     * told us it knows what window it wants. */
+    /* An explicit slice permits streaming a file larger than the output cap. */
     size_t over = 256 * 1024 + 32;
     char *big = xmalloc(over);
     for (size_t i = 0; i < over; i++)
         big[i] = (i % 80 == 79) ? '\n' : 'q';
-    char *path = write_tmp(big, over);
+    char *path = create_temp_file(big, over);
     free(big);
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":1,\"limit\":1}", path);
     char *out = call_read(args);
@@ -152,7 +145,7 @@ static void test_read_oversize_with_slice_ok(void)
 static void test_read_offset_limit(void)
 {
     const char content[] = "one\ntwo\nthree\nfour\nfive\n";
-    char *path = write_tmp(content, sizeof(content) - 1);
+    char *path = create_temp_file(content, sizeof(content) - 1);
 
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":2,\"limit\":2}", path);
     char *out = call_read(args);
@@ -179,7 +172,7 @@ static void test_read_offset_limit(void)
 static void test_read_offset_past_eof(void)
 {
     const char content[] = "one\ntwo\n";
-    char *path = write_tmp(content, sizeof(content) - 1);
+    char *path = create_temp_file(content, sizeof(content) - 1);
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":5}", path);
     char *out = call_read(args);
     EXPECT(strstr(out, "past EOF") != NULL);
@@ -193,7 +186,7 @@ static void test_read_offset_past_eof(void)
 static void test_read_no_trailing_newline(void)
 {
     const char content[] = "alpha\nbeta";
-    char *path = write_tmp(content, sizeof(content) - 1);
+    char *path = create_temp_file(content, sizeof(content) - 1);
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":2}", path);
     char *out = call_read(args);
     EXPECT_STR_EQ(out, "     2" READ_LINE_DELIM "beta");
@@ -206,7 +199,7 @@ static void test_read_no_trailing_newline(void)
 static void test_read_offset_validation(void)
 {
     const char content[] = "x\n";
-    char *path = write_tmp(content, sizeof(content) - 1);
+    char *path = create_temp_file(content, sizeof(content) - 1);
 
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":0}", path);
     char *out = call_read(args);
@@ -232,10 +225,7 @@ static void test_read_offset_validation(void)
 
 static void test_read_range_past_cap_in_large_file(void)
 {
-    /* The previous implementation slurped the first 256K and falsely
-     * reported "past readable region" for ranges starting after that
-     * prefix. With streaming, an offset that lives well past the cap
-     * should still be reachable. */
+    /* The output cap limits returned bytes, not how far the reader may seek by line. */
     size_t n_lines = 100 * 1024;
     size_t doc_len = n_lines * 4;
     char *doc = xmalloc(doc_len);
@@ -245,11 +235,9 @@ static void test_read_range_past_cap_in_large_file(void)
         doc[i * 4 + 2] = 'c';
         doc[i * 4 + 3] = '\n';
     }
-    char *path = write_tmp(doc, doc_len);
+    char *path = create_temp_file(doc, doc_len);
     free(doc);
 
-    /* Line 90000 is far past the old 256K cap. With the fix, we should
-     * still get exactly that line. */
     long which = 90000;
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":%ld,\"limit\":1}", path, which);
     char *out = call_read(args);
@@ -268,22 +256,16 @@ static void test_read_range_past_cap_in_large_file(void)
 
 static void test_read_first_line_larger_than_cap(void)
 {
-    /* A 300 KiB single-line file with explicit slice request: the
-     * pre-stat refusal is bypassed (offset/limit given), streaming
-     * proceeds, and the per-line cap kicks in — the result is the
-     * first MAX_LINE_LEN bytes of the line plus an inline elision
-     * marker. The model can fall back to bash if it needs the rest. */
+    /* A slice of an enormous line is reduced by the per-line cap. */
     size_t huge_line_len = 300 * 1024;
     char *doc = xmalloc(huge_line_len + 1);
     memset(doc, 'q', huge_line_len);
     doc[huge_line_len] = '\n';
-    char *path = write_tmp(doc, huge_line_len + 1);
+    char *path = create_temp_file(doc, huge_line_len + 1);
     free(doc);
 
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":1,\"limit\":1}", path);
     char *out = call_read(args);
-    /* Per-line cap is OUTPUT_CAP_LINE_WIDTH (500); result is well under
-     * the byte cap and shows the inline elision marker. */
     EXPECT(strlen(out) < 1000);
     EXPECT(strstr(out, "bytes elided") != NULL);
     free(out);
@@ -312,7 +294,7 @@ static void test_read_no_false_marker_when_under_cap(void)
         memset(doc + i * line_len, 'q', line_len - 1);
         doc[i * line_len + line_len - 1] = '\n';
     }
-    char *path = write_tmp(doc, total);
+    char *path = create_temp_file(doc, total);
     free(doc);
 
     char *args = xasprintf("{\"path\":\"%s\"}", path);
@@ -348,7 +330,7 @@ static void test_read_pre_stat_boundary_st_size_at_cap(void)
         memset(doc + i * line_len, 'q', line_len - 1);
         doc[i * line_len + line_len - 1] = '\n';
     }
-    char *path = write_tmp(doc, total);
+    char *path = create_temp_file(doc, total);
     free(doc);
 
     char *args = xasprintf("{\"path\":\"%s\"}", path);
@@ -370,8 +352,6 @@ static void test_read_pre_stat_boundary_st_size_at_cap(void)
 
 static void test_read_caps_long_line(void)
 {
-    /* A single line longer than OUTPUT_CAP_LINE_WIDTH (500) gets truncated
-     * with an inline marker; surrounding short lines are left alone. */
     struct buf b;
     buf_init(&b);
     buf_append_str(&b, "short before\n");
@@ -379,14 +359,13 @@ static void test_read_caps_long_line(void)
     memset(filler, 'x', sizeof(filler));
     buf_append(&b, filler, sizeof(filler));
     buf_append_str(&b, "\nshort after\n");
-    char *path = write_tmp(b.data, b.len);
+    char *path = create_temp_file(b.data, b.len);
 
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":1,\"limit\":3}", path);
     char *out = call_read(args);
     EXPECT(strstr(out, "short before\n") != NULL);
     EXPECT(strstr(out, "short after\n") != NULL);
     EXPECT(strstr(out, "bytes elided") != NULL);
-    /* The 3000-x line is reduced to ~500 + a short marker. */
     EXPECT(strlen(out) < 700);
     free(out);
     free(args);
@@ -409,7 +388,7 @@ static void test_read_exact_line_cap_no_false_marker(void)
         doc[i * 2] = 'x';
         doc[i * 2 + 1] = '\n';
     }
-    char *path = write_tmp(doc, doc_len);
+    char *path = create_temp_file(doc, doc_len);
     free(doc);
 
     char *args = xasprintf("{\"path\":\"%s\"}", path);
@@ -436,7 +415,7 @@ static void test_read_unterminated_final_line_at_cap(void)
         doc[i * 2 + 1] = '\n';
     }
     memcpy(doc + n_lines * 2, "abcde", 5);
-    char *path = write_tmp(doc, doc_len);
+    char *path = create_temp_file(doc, doc_len);
     free(doc);
 
     char *args = xasprintf("{\"path\":\"%s\"}", path);
@@ -463,7 +442,7 @@ static void test_read_caps_implicit_line_count(void)
         doc[i * 2] = 'x';
         doc[i * 2 + 1] = '\n';
     }
-    char *path = write_tmp(doc, doc_len);
+    char *path = create_temp_file(doc, doc_len);
     free(doc);
 
     char *args = xasprintf("{\"path\":\"%s\"}", path);
@@ -498,13 +477,9 @@ static void test_read_caps_implicit_line_count(void)
 
 static void test_read_past_eof_counts_trailing_line_in_skip_mode(void)
 {
-    /* "abc" has no final newline. With offset=2 the reader stays in
-     * skip mode and never reaches the collect path that updates
-     * saw_data_in_current_line. Without the fix, lines_complete stays
-     * at 0 and the past-EOF message reports "file has 0 lines" — wrong,
-     * the file has 1. */
+    /* Unterminated lines count toward the total even when skipped before the offset. */
     const char content[] = "abc";
-    char *path = write_tmp(content, sizeof(content) - 1);
+    char *path = create_temp_file(content, sizeof(content) - 1);
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":2}", path);
     char *out = call_read(args);
     EXPECT(strstr(out, "file has 1 line") != NULL);
@@ -517,9 +492,7 @@ static void test_read_past_eof_counts_trailing_line_in_skip_mode(void)
 
 static void test_read_refuses_special_file(void)
 {
-    /* A FIFO open(O_RDONLY) without a writer would block read() forever.
-     * /dev/zero would stream until cap (correct memory-wise but useless
-     * to the model). Stat upfront and refuse. */
+    /* Opening a FIFO without a writer could block indefinitely. */
     char path[] = "/tmp/hax-test-fifo-XXXXXX";
     int fd = mkstemp(path);
     EXPECT(fd >= 0);
@@ -554,7 +527,7 @@ static void test_read_bounded_slice_suppresses_truncation_marker(void)
         doc.buf[i * 4 + 2] = '_';
         doc.buf[i * 4 + 3] = '\n';
     }
-    char *path = write_tmp(doc.buf, doc.len);
+    char *path = create_temp_file(doc.buf, doc.len);
     free(doc.buf);
 
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":1,\"limit\":1}", path);
@@ -578,8 +551,7 @@ static void test_read_bounded_slice_suppresses_truncation_marker(void)
 
 static void test_read_offset_one_on_empty(void)
 {
-    /* Default-case sanity: offset=1 on empty file is benign, returns "". */
-    char *path = write_tmp("", 0);
+    char *path = create_temp_file("", 0);
     char *args = xasprintf("{\"path\":\"%s\",\"offset\":1}", path);
     char *out = call_read(args);
     EXPECT_STR_EQ(out, "");
@@ -591,22 +563,18 @@ static void test_read_offset_one_on_empty(void)
 
 static void test_read_display_extra(void)
 {
-    /* No range → no suffix. */
     char *out = TOOL_READ.display.format_extra("{\"path\":\"x\"}");
     EXPECT(out == NULL || *out == '\0');
     free(out);
 
-    /* Both bounds → ":N-M" form. */
     out = TOOL_READ.display.format_extra("{\"path\":\"x\",\"offset\":5,\"limit\":10}");
     EXPECT_STR_EQ(out, ":5-14");
     free(out);
 
-    /* Offset only (no limit) → open-ended ":N-". */
     out = TOOL_READ.display.format_extra("{\"path\":\"x\",\"offset\":3}");
     EXPECT_STR_EQ(out, ":3-");
     free(out);
 
-    /* Limit only → offset defaults to 1. */
     out = TOOL_READ.display.format_extra("{\"path\":\"x\",\"limit\":7}");
     EXPECT_STR_EQ(out, ":1-7");
     free(out);
@@ -621,7 +589,6 @@ static void test_read_display_extra(void)
     free(out);
     free(args);
 
-    /* Garbage limit (<= 0) → fall back to open-ended form. */
     out = TOOL_READ.display.format_extra("{\"path\":\"x\",\"offset\":3,\"limit\":0}");
     EXPECT_STR_EQ(out, ":3-");
     free(out);
@@ -641,7 +608,7 @@ static const unsigned char TINY_PNG[] = {
 static void test_read_image_attached(void)
 {
     struct tool_run_ctx ctx = {.image_input = 1};
-    char *path = write_tmp(TINY_PNG, sizeof(TINY_PNG));
+    char *path = create_temp_file(TINY_PNG, sizeof(TINY_PNG));
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = TOOL_READ.run(args, &ctx);
     EXPECT(strstr(out, "Read image") != NULL);
@@ -652,7 +619,6 @@ static void test_read_image_attached(void)
     EXPECT(ctx.result_images != NULL);
     EXPECT_STR_EQ(ctx.result_images[0].mime, "image/png");
     EXPECT(ctx.result_images[0].width == 2 && ctx.result_images[0].height == 3);
-    /* Base64 of the exact file bytes: decodes back to the same length. */
     EXPECT(ctx.result_images[0].data_b64 &&
            strlen(ctx.result_images[0].data_b64) == (sizeof(TINY_PNG) + 2) / 3 * 4);
     free(ctx.result_images[0].mime);
@@ -668,7 +634,7 @@ static void test_read_image_attached(void)
 static void test_read_image_model_without_vision(void)
 {
     struct tool_run_ctx ctx = {.image_input = 0};
-    char *path = write_tmp(TINY_PNG, sizeof(TINY_PNG));
+    char *path = create_temp_file(TINY_PNG, sizeof(TINY_PNG));
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = TOOL_READ.run(args, &ctx);
     EXPECT(strstr(out, "does not accept image input") != NULL);
@@ -716,7 +682,6 @@ static void test_read_image_oversize_quotes_path(void)
     struct tool_run_ctx ctx = {.image_input = 1};
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = TOOL_READ.run(args, &ctx);
-    /* Over the side cap → a downscale hint, no image attached. */
     EXPECT(strstr(out, "per side") != NULL);
     EXPECT(ctx.n_result_images == 0);
     /* The descriptive prefix ("<path> is WxH") shows the path verbatim, but
@@ -736,7 +701,7 @@ static void test_read_image_oversize_quotes_path(void)
 static void refuse_incomplete(const unsigned char *bytes, size_t len)
 {
     struct tool_run_ctx ctx = {.image_input = 1};
-    char *path = write_tmp(bytes, len);
+    char *path = create_temp_file(bytes, len);
     char *args = xasprintf("{\"path\":\"%s\"}", path);
     char *out = TOOL_READ.run(args, &ctx);
     EXPECT(strstr(out, "truncated or malformed") != NULL);
@@ -751,7 +716,7 @@ static void refuse_incomplete(const unsigned char *bytes, size_t len)
 
 static void test_read_image_malformed_not_attached(void)
 {
-    /* Bare signature: recognized as image/png, but no IHDR means no dims. */
+    /* A bare signature has no dimensions. */
     static const unsigned char SIG_ONLY[] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
     refuse_incomplete(SIG_ONLY, sizeof(SIG_ONLY));
 

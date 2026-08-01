@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include <errno.h>
+#include <jansson.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -12,14 +13,12 @@
 
 static char *call_write(const char *path, const char *content)
 {
-    char *cesc = xasprintf("%s", content);
-    /* Build JSON with jansson? No — content has no quotes/backslashes in
-     * our tests. Be careful when adding a test that does. */
-    char *args = xasprintf("{\"path\":\"%s\",\"content\":\"%s\"}", path, cesc);
-    free(cesc);
-    char *out = TOOL_WRITE.run(args, NULL);
-    free(args);
-    return out;
+    json_t *arguments = json_pack("{s:s, s:s}", "path", path, "content", content);
+    char *args_json = json_dumps(arguments, JSON_COMPACT);
+    json_decref(arguments);
+    char *result = TOOL_WRITE.run(args_json, NULL);
+    free(args_json);
+    return result;
 }
 
 static char *slurp(const char *path)
@@ -51,20 +50,15 @@ static void test_write_missing_content(void)
 
 static void test_write_creates_new_file(void)
 {
-    /* New-file writes return a short "created <path> (...)" confirmation
-     * rather than a full diff: the content is already in the model's tool
-     * call arguments, so echoing it back as a `+`-prefixed diff would just
-     * double the context cost. The diff is reserved for overwrites, where
-     * it conveys real new-vs-old signal. */
+    /* New-file output summarizes the arguments instead of echoing them as a diff. */
     char *dir = t_tempdir();
     char *path = xasprintf("%s/new.txt", dir);
 
-    char *out = call_write(path, "alpha\\nbeta\\n");
+    char *out = call_write(path, "alpha\nbeta\n");
     EXPECT(strstr(out, "created ") != NULL);
     EXPECT(strstr(out, path) != NULL);
     EXPECT(strstr(out, "2 lines") != NULL);
     EXPECT(strstr(out, "11 bytes") != NULL);
-    /* No diff content for new files. */
     EXPECT(strstr(out, "--- /dev/null") == NULL);
     EXPECT(strstr(out, "+alpha") == NULL);
     free(out);
@@ -81,7 +75,7 @@ static void test_write_creates_parent_dirs(void)
     char *dir = t_tempdir();
     char *path = xasprintf("%s/sub/deeper/file.txt", dir);
 
-    char *out = call_write(path, "content\\n");
+    char *out = call_write(path, "content\n");
     EXPECT(strstr(out, "created ") != NULL);
     free(out);
 
@@ -97,10 +91,10 @@ static void test_write_overwrites(void)
     char *dir = t_tempdir();
     char *path = xasprintf("%s/file.txt", dir);
 
-    char *out = call_write(path, "first\\n");
+    char *out = call_write(path, "first\n");
     free(out);
 
-    out = call_write(path, "second\\n");
+    out = call_write(path, "second\n");
     EXPECT(strstr(out, "-first") != NULL);
     EXPECT(strstr(out, "+second") != NULL);
     free(out);
@@ -117,11 +111,11 @@ static void test_write_preserves_mode(void)
     char *dir = t_tempdir();
     char *path = xasprintf("%s/script.sh", dir);
 
-    char *out = call_write(path, "echo hi\\n");
+    char *out = call_write(path, "echo hi\n");
     free(out);
     chmod(path, 0750);
 
-    out = call_write(path, "echo bye\\n");
+    out = call_write(path, "echo bye\n");
     free(out);
 
     struct stat st;
@@ -133,18 +127,14 @@ static void test_write_preserves_mode(void)
 
 static void test_write_preserves_setuid(void)
 {
-    /* setuid/setgid/sticky must round-trip through a write. The fix
-     * does two things: mask with 07777 (not 0777) when capturing the
-     * existing mode, and apply fchmod *after* write_all (Linux clears
-     * S_ISUID/S_ISGID on write by an unprivileged user). */
     char *dir = t_tempdir();
     char *path = xasprintf("%s/helper", dir);
 
-    char *out = call_write(path, "old\\n");
+    char *out = call_write(path, "old\n");
     free(out);
     EXPECT(chmod(path, 04755) == 0); /* setuid + rwxr-xr-x */
 
-    out = call_write(path, "new\\n");
+    out = call_write(path, "new\n");
     free(out);
 
     struct stat st;
@@ -159,17 +149,14 @@ static void test_write_unchanged_yields_empty_diff(void)
     char *dir = t_tempdir();
     char *path = xasprintf("%s/file.txt", dir);
 
-    char *out = call_write(path, "same\\n");
+    char *out = call_write(path, "same\n");
     free(out);
 
-    /* Capture inode + mtime before the no-op write so we can confirm the
-     * file was not replaced. With identical content, fs_write_with_diff
-     * must skip the rename so hard links and inode-keyed metadata stay
-     * intact. */
+    /* Unchanged writes must preserve inode identity and hard links. */
     struct stat before, after;
     EXPECT(stat(path, &before) == 0);
 
-    out = call_write(path, "same\\n");
+    out = call_write(path, "same\n");
     EXPECT_STR_EQ(out, "");
     free(out);
 
@@ -181,18 +168,15 @@ static void test_write_unchanged_yields_empty_diff(void)
 
 static void test_write_refuses_fifo(void)
 {
-    /* If we treated a FIFO as a regular file, slurp_file would block
-     * forever waiting for a writer. The tool must refuse upfront with
-     * a clear error rather than hang the agent. */
+    /* Reading a FIFO to generate a diff could block indefinitely. */
     char *dir = t_tempdir();
     char *path = xasprintf("%s/pipe", dir);
     EXPECT(mkfifo(path, 0644) == 0);
 
-    char *out = call_write(path, "x\\n");
+    char *out = call_write(path, "x\n");
     EXPECT(strstr(out, "not a regular file") != NULL);
     free(out);
 
-    /* The FIFO should still be a FIFO — not replaced by a regular file. */
     struct stat st;
     EXPECT(stat(path, &st) == 0);
     EXPECT(S_ISFIFO(st.st_mode));
@@ -202,18 +186,13 @@ static void test_write_refuses_fifo(void)
 
 static void test_write_through_dangling_symlink(void)
 {
-    /* `link -> real` where `real` doesn't yet exist. Writing to the
-     * link should create `real` while leaving the link intact — matches
-     * the documented "write creates missing files" contract. */
     char *dir = t_tempdir();
     char *real = xasprintf("%s/real.txt", dir);
     char *link = xasprintf("%s/link.txt", dir);
 
     EXPECT(symlink(real, link) == 0); /* dangling on purpose */
 
-    char *out = call_write(link, "hello\\n");
-    /* Dangling-link target didn't exist, so this counts as a new-file
-     * create — short confirmation, no diff. */
+    char *out = call_write(link, "hello\n");
     EXPECT(strstr(out, "created ") != NULL);
     free(out);
 
@@ -231,9 +210,6 @@ static void test_write_through_dangling_symlink(void)
 
 static void test_write_empty_new_file(void)
 {
-    /* Creating an empty file is a valid request. The file must land on
-     * disk *and* the tool must return an unambiguous success message so
-     * the model can tell the difference from a no-op. */
     char *dir = t_tempdir();
     char *path = xasprintf("%s/empty.txt", dir);
 
@@ -251,14 +227,10 @@ static void test_write_empty_new_file(void)
 
 static void test_write_blank_content_summary(void)
 {
-    /* A new file with no visible content still gets an unambiguous
-     * "created ..." summary — the dispatch layer surfaces it as the block
-     * body when the streamed preview renders no rows. Pin the summary text
-     * (line/byte counts) the model and that fallback both rely on. */
     char *dir = t_tempdir();
     char *path = xasprintf("%s/blank.txt", dir);
 
-    char *out = call_write(path, "\\n   \\n"); /* only blank lines */
+    char *out = call_write(path, "\n   \n"); /* only blank lines */
     EXPECT(strstr(out, "created ") != NULL);
     EXPECT(strstr(out, "2 lines") != NULL);
     EXPECT(strstr(out, "5 bytes") != NULL);
@@ -273,13 +245,11 @@ static void test_write_through_symlink(void)
     char *real = xasprintf("%s/real.txt", dir);
     char *link = xasprintf("%s/link.txt", dir);
 
-    char *out = call_write(real, "first\\n");
+    char *out = call_write(real, "first\n");
     free(out);
     EXPECT(symlink(real, link) == 0);
 
-    /* Write through the symlink — the link must be preserved and the
-     * underlying file's contents must change. */
-    out = call_write(link, "second\\n");
+    out = call_write(link, "second\n");
     EXPECT(strstr(out, "+second") != NULL);
     free(out);
 

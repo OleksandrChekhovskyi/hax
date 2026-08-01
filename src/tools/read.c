@@ -24,310 +24,249 @@
  * resize target is the token-optimal ~1568px, not this ceiling. */
 #define READ_IMAGE_MAX_SIDE 8000L
 
-enum read_trunc {
-    TRUNC_NONE,
-    TRUNC_BYTES, /* hit OUTPUT_CAP byte cap mid-content */
-    TRUNC_LINES, /* hit OUTPUT_CAP_LINES before EOF (only when no explicit limit) */
+enum read_truncation {
+    READ_NOT_TRUNCATED,
+    READ_TRUNCATED_BYTES,
+    READ_TRUNCATED_LINES,
 };
 
 struct read_result {
-    char *body;            /* malloc'd; "" on success-with-no-content */
-    size_t body_len;       /* byte length of body */
-    enum read_trunc trunc; /* TRUNC_NONE if EOF/limit reached cleanly */
-    int past_eof;          /* requested offset exceeded what's in the file */
-    int is_binary;         /* NUL byte found in first chunk; refuse */
-    long lines_seen;       /* total lines streamed (only meaningful when past_eof) */
+    char *content; /* allocated; empty string when no content was read */
+    size_t content_len;
+    enum read_truncation truncation;
+    int offset_past_eof;
+    int is_binary;
+    long line_count;
 };
 
-/* Append [chunk+run_start, chunk+end) to `out`, respecting `cap`. Returns
- * 1 if the cap was hit (some or all of the run was rejected) so the
- * caller can stop reading; 0 if the whole run fit. Empty runs are no-ops. */
-static int append_capped(struct buf *out, const char *chunk, size_t run_start, size_t end,
-                         size_t cap)
+static int append_with_limit(struct buf *output, const char *chunk, size_t start, size_t end,
+                             size_t output_limit)
 {
-    if (end <= run_start)
+    if (end <= start)
         return 0;
-    if (out->len >= cap)
+    if (output->len >= output_limit)
         return 1;
-    size_t run_len = end - run_start;
-    if (out->len + run_len > cap) {
-        buf_append(out, chunk + run_start, cap - out->len);
+
+    size_t length = end - start;
+    if (length > output_limit - output->len) {
+        buf_append(output, chunk + start, output_limit - output->len);
         return 1;
     }
-    buf_append(out, chunk + run_start, run_len);
+    buf_append(output, chunk + start, length);
     return 0;
 }
 
-/* Emit the line-number prefix ("%6ld" + READ_LINE_DELIM) for `line_no` into
- * `out`, then the content run. Prefix is emitted lazily — only when there is
- * at least one byte of content to attach it to — so we never produce orphan
- * prefixes for lines we won't reach (cap, EOF, or limit-stop). If the
- * prefix wouldn't fit whole, signal cap-hit before writing anything; a
- * half-written "     12" would look like file content. */
-static int emit_run(struct buf *out, const char *chunk, size_t run_start, size_t end, size_t cap,
-                    long line_no, int *need_prefix)
+static int append_numbered_run(struct buf *output, const char *chunk, size_t start, size_t end,
+                               size_t output_limit, long line_number, int *needs_prefix)
 {
-    if (end <= run_start)
+    if (end <= start)
         return 0;
-    if (*need_prefix) {
+
+    if (*needs_prefix) {
         char prefix[24];
-        int plen = snprintf(prefix, sizeof(prefix), "%6ld" READ_LINE_DELIM, line_no);
-        if (plen < 0)
-            plen = 0;
-        if ((size_t)plen >= sizeof(prefix))
-            plen = (int)sizeof(prefix) - 1;
-        /* `>=`, not `>`: if the prefix would land exactly at the cap, we'd
-         * write it and then have no room for any content — an orphan
-         * "     42→" right before the truncation marker. Treat zero
-         * content headroom as cap-hit and bail without writing anything. */
-        if (out->len + (size_t)plen >= cap)
+        int prefix_len = snprintf(prefix, sizeof(prefix), "%6ld" READ_LINE_DELIM, line_number);
+        if (prefix_len < 0)
+            prefix_len = 0;
+        if ((size_t)prefix_len >= sizeof(prefix))
+            prefix_len = (int)sizeof(prefix) - 1;
+
+        /* A prefix without at least one content byte would look like file content. */
+        if ((size_t)prefix_len >= output_limit - output->len)
             return 1;
-        buf_append(out, prefix, (size_t)plen);
-        *need_prefix = 0;
+        buf_append(output, prefix, (size_t)prefix_len);
+        *needs_prefix = 0;
     }
-    return append_capped(out, chunk, run_start, end, cap);
+    return append_with_limit(output, chunk, start, end, output_limit);
 }
 
-/* Stream the file in 8K chunks, scanning for newlines manually so we can
- * skip past the requested offset and accumulate up to `cap` bytes of body.
- * Memory is hard-bounded by `cap`: we never call into a primitive (like
- * getline) that allocates one line worth of buffer up front, so a
- * pathological 10GB single-line file is safe to read. /dev/zero and
- * other non-regular files are filtered out by the caller before we get
- * here, since open(O_RDONLY) on a FIFO without a writer would block.
- *
- * Bytes are appended in runs (between newlines or chunk boundaries)
- * rather than one at a time, so a 256K result takes ~32 buf_append calls
- * instead of 256K.
- *
- * Truncation flag fires only when we refuse content we've already read
- * — that's proof more bytes exist. A file whose size lands exactly at
- * the cap exits via read()==0 with the flag clear.
- *
- * Returns 0 on success (caller frees r->body), -1 on hard read error
- * (errno set). */
-static int read_lines_capped(const char *path, long offset, long limit, size_t cap,
-                             struct read_result *r)
+/* A read error after collecting a complete slice is conservatively treated as more content. */
+static int stream_has_more_content(int fd, size_t consumed, size_t chunk_len)
 {
-    r->body = NULL;
-    r->body_len = 0;
-    r->trunc = TRUNC_NONE;
-    r->past_eof = 0;
-    r->is_binary = 0;
-    r->lines_seen = 0;
+    if (consumed < chunk_len)
+        return 1;
+
+    char byte;
+    ssize_t bytes_read;
+    do {
+        bytes_read = read(fd, &byte, 1);
+    } while (bytes_read < 0 && errno == EINTR);
+    return bytes_read != 0;
+}
+
+/* Streams by fixed-size chunks so memory remains bounded even for a single enormous line.
+ * Returns 0 on success and -1 with errno set on a read error. */
+static int read_text_slice(const char *path, long offset, long limit, size_t output_limit,
+                           struct read_result *result)
+{
+    result->content = NULL;
+    result->content_len = 0;
+    result->truncation = READ_NOT_TRUNCATED;
+    result->offset_past_eof = 0;
+    result->is_binary = 0;
+    result->line_count = 0;
 
     int fd = open(path, O_RDONLY);
     if (fd < 0)
         return -1;
 
-    /* The shared line cap is an absolute ceiling, not a default — an
-     * explicit `limit` can only tighten it, never raise it. A model
-     * passing `limit: 30000` on a file of short lines would otherwise
-     * defeat the "many tiny lines" context-flooding protection that the
-     * cap exists to enforce, even when the byte cap doesn't fire. */
-    long effective_line_limit = (long)OUTPUT_CAP_LINES;
-    if (limit > 0 && limit < effective_line_limit)
-        effective_line_limit = limit;
+    /* An explicit limit may tighten the shared line ceiling, but cannot raise it. */
+    long line_limit = (long)OUTPUT_CAP_LINES;
+    if (limit > 0 && limit < line_limit)
+        line_limit = limit;
 
-    struct buf out;
-    buf_init(&out);
+    struct buf output;
+    buf_init(&output);
     char chunk[8192];
-    long lines_complete = 0;
-    int collecting = (offset == 1);
-    long taken = 0;
-    int hit_eof = 0;
-    enum read_trunc trunc = TRUNC_NONE;
-    int saw_data_in_current_line = 0;
-    int first_chunk = 1;
-    long current_line_no = offset;
-    int need_prefix = collecting;
+    long completed_lines = 0;
+    long returned_lines = 0;
+    long line_number = offset;
+    enum read_truncation truncation = READ_NOT_TRUNCATED;
+    int in_range = offset == 1;
+    int reached_eof = 0;
+    int current_line_has_content = 0;
+    int checking_first_chunk = 1;
+    int needs_prefix = in_range;
 
     for (;;) {
-        ssize_t n = read(fd, chunk, sizeof(chunk));
-        if (n < 0) {
+        ssize_t bytes_read = read(fd, chunk, sizeof(chunk));
+        if (bytes_read < 0) {
             if (errno == EINTR)
                 continue;
-            int saved = errno;
+            int saved_errno = errno;
             close(fd);
-            buf_free(&out);
-            errno = saved;
+            buf_free(&output);
+            errno = saved_errno;
             return -1;
         }
-        if (n == 0) {
-            hit_eof = 1;
+        if (bytes_read == 0) {
+            reached_eof = 1;
             break;
         }
 
-        /* Binary detection on the first chunk only — typical binaries
-         * (executables, archives, images) have NUL bytes in their
-         * headers, so an early sniff is reliable and bails before the
-         * buffer grows. Source files with embedded NULs are rare; the
-         * model can fall back to bash for those. */
-        if (first_chunk) {
-            for (ssize_t i = 0; i < n; i++) {
-                if (chunk[i] == 0) {
-                    r->is_binary = 1;
-                    close(fd);
-                    buf_free(&out);
-                    return 0;
-                }
+        if (checking_first_chunk) {
+            if (memchr(chunk, '\0', (size_t)bytes_read)) {
+                result->is_binary = 1;
+                close(fd);
+                buf_free(&output);
+                return 0;
             }
-            first_chunk = 0;
+            checking_first_chunk = 0;
         }
 
         size_t run_start = 0;
-        for (size_t i = 0; i < (size_t)n; i++) {
-            char c = chunk[i];
-            /* Track "any byte since last newline" in either mode so a
-             * trailing line without a final newline can be counted on
-             * EOF. Without this, a 3-byte file "abc" with offset=2
-             * would report "file has 0 lines" instead of 1. */
-            if (c != '\n')
-                saw_data_in_current_line = 1;
+        for (size_t i = 0; i < (size_t)bytes_read; i++) {
+            char byte = chunk[i];
+            if (byte != '\n')
+                current_line_has_content = 1;
 
-            if (!collecting) {
-                if (c == '\n') {
-                    lines_complete++;
-                    saw_data_in_current_line = 0;
-                    if (lines_complete + 1 >= offset) {
-                        collecting = 1;
-                        need_prefix = 1;
+            if (!in_range) {
+                if (byte == '\n') {
+                    completed_lines++;
+                    current_line_has_content = 0;
+                    if (completed_lines + 1 >= offset) {
+                        in_range = 1;
+                        needs_prefix = 1;
                         run_start = i + 1;
                     }
                 }
                 continue;
             }
 
-            if (c == '\n') {
-                if (emit_run(&out, chunk, run_start, i + 1, cap, current_line_no, &need_prefix)) {
-                    trunc = TRUNC_BYTES;
-                    goto end_loop;
-                }
-                run_start = i + 1;
-                lines_complete++;
-                taken++;
-                current_line_no++;
-                need_prefix = 1;
-                saw_data_in_current_line = 0;
-                if (taken >= effective_line_limit) {
-                    /* Model's explicit `limit` was fulfilled (and was
-                     * tighter than the shared cap) — clean stop, no
-                     * truncation flag. */
-                    if (limit > 0 && limit <= (long)OUTPUT_CAP_LINES) {
-                        goto end_loop;
-                    }
-                    /* Otherwise the shared cap was the stopper (no explicit
-                     * limit, or limit > cap). Only flag truncation if more
-                     * content actually exists past this point — a file
-                     * whose line count happens to land exactly at the cap
-                     * shouldn't carry a misleading "truncated" marker.
-                     * Check the rest of this chunk first; if the cap
-                     * landed at the chunk boundary, do one more read to
-                     * detect EOF. */
-                    if (i + 1 < (size_t)n) {
-                        trunc = TRUNC_LINES;
-                    } else {
-                        char peek[1];
-                        ssize_t pr;
-                        do {
-                            pr = read(fd, peek, 1);
-                        } while (pr < 0 && errno == EINTR);
-                        /* pr > 0: more content. pr < 0: read error after
-                         * a successful collection — treat as truncated to
-                         * stay conservative. pr == 0: clean EOF, no
-                         * truncation. */
-                        if (pr != 0)
-                            trunc = TRUNC_LINES;
-                    }
-                    goto end_loop;
-                }
+            if (byte != '\n')
+                continue;
+
+            if (append_numbered_run(&output, chunk, run_start, i + 1, output_limit, line_number,
+                                    &needs_prefix)) {
+                truncation = READ_TRUNCATED_BYTES;
+                goto done;
             }
+            run_start = i + 1;
+            completed_lines++;
+            returned_lines++;
+            line_number++;
+            needs_prefix = 1;
+            current_line_has_content = 0;
+
+            if (returned_lines < line_limit)
+                continue;
+
+            if (limit > 0 && limit <= (long)OUTPUT_CAP_LINES)
+                goto done;
+            if (stream_has_more_content(fd, i + 1, (size_t)bytes_read))
+                truncation = READ_TRUNCATED_LINES;
+            goto done;
         }
-        /* End of chunk: flush whatever's been collected since the last
-         * newline. emit_run handles the lazy prefix for an unfinished line
-         * that started mid-chunk; the cap check inside append_capped
-         * handles overflow. */
-        if (collecting &&
-            emit_run(&out, chunk, run_start, (size_t)n, cap, current_line_no, &need_prefix)) {
-            trunc = TRUNC_BYTES;
-            goto end_loop;
+
+        if (in_range && append_numbered_run(&output, chunk, run_start, (size_t)bytes_read,
+                                            output_limit, line_number, &needs_prefix)) {
+            truncation = READ_TRUNCATED_BYTES;
+            goto done;
         }
     }
-end_loop:
+
+done:
     close(fd);
 
-    /* Trailing line without a final newline still counts. `wc -l` would
-     * ignore it, but the model would be confused if it disappeared from
-     * the line count. taken only ticks when we were collecting — past-EOF
-     * reporting cares about lines_complete. */
-    if (saw_data_in_current_line && hit_eof) {
-        lines_complete++;
-        if (collecting)
-            taken++;
+    if (current_line_has_content && reached_eof) {
+        completed_lines++;
+        if (in_range)
+            returned_lines++;
     }
 
-    r->lines_seen = lines_complete;
-    r->trunc = trunc;
+    result->line_count = completed_lines;
+    result->truncation = truncation;
 
-    /* Past-EOF: hit EOF without emitting any of the requested lines.
-     * offset=1 on an empty file is a benign "no lines", not an error. */
-    if (hit_eof && taken == 0 && (lines_complete > 0 || offset > 1)) {
-        r->past_eof = 1;
-        buf_free(&out);
+    if (reached_eof && returned_lines == 0 && (completed_lines > 0 || offset > 1)) {
+        result->offset_past_eof = 1;
+        buf_free(&output);
         return 0;
     }
 
-    if (!out.data) {
-        r->body = xstrdup("");
+    if (!output.data) {
+        result->content = xstrdup("");
         return 0;
     }
-    r->body_len = out.len;
-    r->body = buf_steal(&out);
+    result->content_len = output.len;
+    result->content = buf_steal(&output);
     return 0;
 }
 
-/* Actionable downscale suggestion for an oversized image, naming a tool
- * that is actually installed. The resize geometry only shrinks (`>`),
- * never enlarges. Caller frees. */
-static char *downscale_hint(const char *path)
+static char *format_downscale_hint(const char *path)
 {
-    /* The path is model-facing shell in a command the model may run
-     * verbatim — quote it so a filename with a space or a `'` produces a
-     * valid command and can't break out of the quoting into injection.
-     * A relative path starting with `-` also needs a `./` prefix, or the
-     * image tool parses it as an option rather than a filename. */
-    char *q = shell_single_quote(path);
-    const char *dot = path[0] == '-' ? "./" : "";
-    const char *im = NULL;
-    char *tool;
-    if ((tool = fs_which("magick")))
-        im = "magick";
-    else if ((tool = fs_which("convert")))
-        im = "convert"; /* ImageMagick 6 */
+    /* The suggested command may be run verbatim, so quote untrusted paths for the shell. */
+    char *quoted_path = shell_single_quote(path);
+    const char *path_prefix = path[0] == '-' ? "./" : "";
+
+    char *executable_path = fs_which("magick");
+    const char *command = NULL;
+    if (executable_path) {
+        command = "magick";
+    } else {
+        executable_path = fs_which("convert");
+        if (executable_path)
+            command = "convert"; /* ImageMagick 6 */
+    }
+
     char *hint;
-    if (im) {
-        free(tool);
+    if (command) {
         hint = xasprintf("downscale it first, e.g.: %s %s%s -resize '1568x1568>' "
                          "/tmp/downscaled.png — then read the copy",
-                         im, dot, q);
-    } else if ((tool = fs_which("sips"))) {
-        free(tool);
-        hint = xasprintf("downscale it first, e.g.: sips -Z 1568 %s%s --out /tmp/downscaled.png "
-                         "— then read the copy",
-                         dot, q);
+                         command, path_prefix, quoted_path);
+    } else if ((executable_path = fs_which("sips"))) {
+        hint = xasprintf("downscale it first, e.g.: sips -Z 1568 %s%s "
+                         "--out /tmp/downscaled.png — then read the copy",
+                         path_prefix, quoted_path);
     } else {
         hint = xstrdup("downscale it first (no ImageMagick found on PATH; ask the user how "
                        "they'd like to resize it)");
     }
-    free(q);
+
+    free(executable_path);
+    free(quoted_path);
     return hint;
 }
 
-/* Image branch of run(): attach the file as an image part (via ctx)
- * alongside a short text note. `path` is borrowed; the caller still
- * owns/frees it. A NULL ctx has nowhere to attach, which is the same
- * outcome as a model without image input. */
-static char *run_image(const char *path, size_t file_size, struct tool_run_ctx *ctx)
+static char *read_image(const char *path, size_t file_size, struct tool_run_ctx *ctx)
 {
     if (!ctx || ctx->image_input == 0)
         return xasprintf("%s is an image, but the current model does not accept image input, "
@@ -336,33 +275,29 @@ static char *run_image(const char *path, size_t file_size, struct tool_run_ctx *
                          path);
 
     if (file_size > READ_IMAGE_MAX_BYTES) {
-        char *hint = downscale_hint(path);
-        char *msg = xasprintf("%s is %zu bytes; images over %zu bytes exceed provider "
-                              "limits — %s.",
-                              path, file_size, READ_IMAGE_MAX_BYTES, hint);
+        char *hint = format_downscale_hint(path);
+        char *result = xasprintf("%s is %zu bytes; images over %zu bytes exceed provider "
+                                 "limits — %s.",
+                                 path, file_size, READ_IMAGE_MAX_BYTES, hint);
         free(hint);
-        return msg;
+        return result;
     }
 
-    size_t n = 0;
+    size_t image_len = 0;
     int truncated = 0;
-    char *data = slurp_file_capped(path, READ_IMAGE_MAX_BYTES, &n, &truncated);
-    if (!data || truncated) { /* grew past the stat; treat as read error */
+    char *data = slurp_file_capped(path, READ_IMAGE_MAX_BYTES, &image_len, &truncated);
+    if (!data || truncated) {
         free(data);
         return xasprintf("error reading %s: file changed while reading", path);
     }
 
     struct image_info info;
-    if (!image_sniff(data, n, &info)) { /* raced with a rewrite; be safe */
+    if (!image_sniff(data, image_len, &info)) {
         free(data);
         return xasprintf("error reading %s: file changed while reading", path);
     }
 
-    /* Missing dimensions or a missing end marker means a truncated or
-     * malformed file. Providers reject undecodable images, and an attached
-     * one persists in history and re-fails every turn — refuse to attach it.
-     * Checked before the size cap: a downscale hint is useless on a file no
-     * tool can decode. */
+    /* Undecodable attachments persist in history and would fail every subsequent turn. */
     if (info.width <= 0 || info.height <= 0 || !info.complete) {
         free(data);
         return xasprintf("%s looks like %s but is truncated or malformed, so it was not "
@@ -371,222 +306,199 @@ static char *run_image(const char *path, size_t file_size, struct tool_run_ctx *
     }
 
     if (info.width > READ_IMAGE_MAX_SIDE || info.height > READ_IMAGE_MAX_SIDE) {
-        char *hint = downscale_hint(path);
-        char *msg = xasprintf("%s is %ldx%ld; images over %ldpx per side exceed provider "
-                              "limits — %s.",
-                              path, info.width, info.height, READ_IMAGE_MAX_SIDE, hint);
+        char *hint = format_downscale_hint(path);
+        char *result = xasprintf("%s is %ldx%ld; images over %ldpx per side exceed provider "
+                                 "limits — %s.",
+                                 path, info.width, info.height, READ_IMAGE_MAX_SIDE, hint);
         free(hint);
         free(data);
-        return msg;
+        return result;
     }
 
-    struct item_image *img = xcalloc(1, sizeof(*img));
-    img->mime = xstrdup(info.mime);
-    img->data_b64 = base64_encode(data, n, NULL);
-    img->width = info.width;
-    img->height = info.height;
+    struct item_image *image = xcalloc(1, sizeof(*image));
+    image->mime = xstrdup(info.mime);
+    image->data_b64 = base64_encode(data, image_len, NULL);
+    image->width = info.width;
+    image->height = info.height;
     free(data);
-    ctx->result_images = img;
+    ctx->result_images = image;
     ctx->n_result_images = 1;
 
-    /* Neutral metadata only — no "attached" claim. The pixels ride as an
-     * image block when the model accepts them; a text-only model (or a
-     * budget/limit drop) sees just this line plus a placeholder, so the text
-     * must not assert the model saw an image it didn't. */
+    /* Do not claim attachment: provider limits may still drop the image from model context. */
     return xasprintf("Read image %s (%s, %ldx%ld, %zu bytes).", path, info.mime, info.width,
-                     info.height, n);
+                     info.height, image_len);
+}
+
+static int file_has_image_signature(const char *path)
+{
+    unsigned char header[16];
+    ssize_t bytes_read;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 0;
+
+    do {
+        bytes_read = read(fd, header, sizeof(header));
+    } while (bytes_read < 0 && errno == EINTR);
+    close(fd);
+
+    struct image_info info;
+    return bytes_read > 0 && image_sniff(header, (size_t)bytes_read, &info);
+}
+
+static char *parse_line_argument(json_t *root, const char *name, long *value, int *provided)
+{
+    json_t *argument = json_object_get(root, name);
+    *provided = argument != NULL;
+    if (!argument)
+        return NULL;
+    if (!json_is_integer(argument))
+        return xasprintf("'%s' must be an integer", name);
+
+    *value = (long)json_integer_value(argument);
+    if (*value < 1)
+        return xasprintf("'%s' must be >= 1", name);
+    return NULL;
+}
+
+/* Consumes `read_result->content` and returns allocated model-facing text. */
+static char *format_text_result(struct read_result *read_result, long offset, size_t output_limit)
+{
+    if (read_result->offset_past_eof) {
+        char *result =
+            xasprintf("(file has %ld line%s; offset %ld is past EOF)", read_result->line_count,
+                      read_result->line_count == 1 ? "" : "s", offset);
+        free(read_result->content);
+        return result;
+    }
+
+    /* Cap lines before sanitizing so the generated elision markers remain valid UTF-8. */
+    size_t capped_len = 0;
+    char *capped = cap_line_lengths(read_result->content, read_result->content_len,
+                                    OUTPUT_CAP_LINE_WIDTH, &capped_len);
+    free(read_result->content);
+
+    char *content = sanitize_utf8(capped, capped_len);
+    free(capped);
+
+    if (read_result->truncation == READ_TRUNCATED_BYTES) {
+        char *result =
+            xasprintf("%s\n\n[truncated at %zu bytes; file is larger — pass offset/limit "
+                      "to read more]",
+                      content, output_limit);
+        free(content);
+        return result;
+    }
+    if (read_result->truncation == READ_TRUNCATED_LINES) {
+        char *result = xasprintf("%s\n\n[truncated at %d lines; file has more — pass offset/limit "
+                                 "to read more]",
+                                 content, OUTPUT_CAP_LINES);
+        free(content);
+        return result;
+    }
+    return content;
 }
 
 static char *run(const char *args_json, struct tool_run_ctx *ctx)
 {
-    json_error_t jerr;
-    json_t *root = json_loads(args_json ? args_json : "{}", 0, &jerr);
+    json_error_t json_error;
+    json_t *root = json_loads(args_json ? args_json : "{}", 0, &json_error);
     if (!root)
-        return xasprintf("invalid arguments: %s", jerr.text);
+        return xasprintf("invalid arguments: %s", json_error.text);
 
+    char *result = NULL;
+    char *path = NULL;
     const char *raw_path = json_string_value(json_object_get(root, "path"));
     if (!raw_path || !*raw_path) {
-        json_decref(root);
-        return xstrdup("missing 'path' argument");
+        result = xstrdup("missing 'path' argument");
+        goto out;
     }
 
     long offset = 1;
     long limit = 0;
-    json_t *jo = json_object_get(root, "offset");
-    if (jo) {
-        if (!json_is_integer(jo)) {
-            json_decref(root);
-            return xstrdup("'offset' must be an integer");
-        }
-        offset = (long)json_integer_value(jo);
-        if (offset < 1) {
-            json_decref(root);
-            return xstrdup("'offset' must be >= 1");
-        }
-    }
-    json_t *jl = json_object_get(root, "limit");
-    if (jl) {
-        if (!json_is_integer(jl)) {
-            json_decref(root);
-            return xstrdup("'limit' must be an integer");
-        }
-        limit = (long)json_integer_value(jl);
-        if (limit < 1) {
-            json_decref(root);
-            return xstrdup("'limit' must be >= 1");
-        }
-    }
+    int offset_provided;
+    int limit_provided;
+    result = parse_line_argument(root, "offset", &offset, &offset_provided);
+    if (result)
+        goto out;
+    result = parse_line_argument(root, "limit", &limit, &limit_provided);
+    if (result)
+        goto out;
 
-    /* Allocate the expanded path only after cheap validation passes — keeps
-     * the early-error paths free of cleanup. */
-    char *path = expand_home(raw_path);
-
-    /* Refuse non-regular files before opening: a FIFO with no writer
-     * blocks on open(O_RDONLY) forever, /dev/zero would stream until
-     * we hit the cap (correct memory-wise but useless to the model),
-     * and reading a directory or socket is meaningless. The model
-     * gets a clear error and can recover. */
+    path = expand_home(raw_path);
     struct stat st;
     if (stat(path, &st) < 0) {
-        char *msg = xasprintf("error reading %s: %s", path, strerror(errno));
-        free(path);
-        json_decref(root);
-        return msg;
+        result = xasprintf("error reading %s: %s", path, strerror(errno));
+        goto out;
     }
+    /* Opening a FIFO without a writer can block indefinitely. */
     if (!S_ISREG(st.st_mode)) {
-        char *msg = xasprintf("%s exists but is not a regular file", path);
-        free(path);
-        json_decref(root);
-        return msg;
+        result = xasprintf("%s exists but is not a regular file", path);
+        goto out;
     }
 
-    /* Images take a separate path — sniff the signature before the text
-     * reader's NUL check refuses them as binary. offset/limit make no
-     * sense for pixels and are ignored. */
-    {
-        unsigned char head[16];
-        ssize_t got = -1;
-        int fd = open(path, O_RDONLY);
-        if (fd >= 0) {
-            do {
-                got = read(fd, head, sizeof(head));
-            } while (got < 0 && errno == EINTR);
-            close(fd);
-        }
-        struct image_info info;
-        if (got > 0 && image_sniff(head, (size_t)got, &info)) {
-            char *msg = run_image(path, (size_t)st.st_size, ctx);
-            free(path);
-            json_decref(root);
-            return msg;
-        }
+    /* Image signatures must be checked before the text reader's binary-file rejection. */
+    if (file_has_image_signature(path)) {
+        result = read_image(path, (size_t)st.st_size, ctx);
+        goto out;
     }
 
-    size_t cap = output_cap_bytes();
-
-    /* When no slice is requested, refuse oversize files upfront so the
-     * model gets a useful error ("here's how big it is, narrow your
-     * request") instead of a silently truncated prefix. With offset or
-     * limit, streaming is the right thing — the model is asking for a
-     * specific window and the cap may not even fire. */
-    if (!jo && !jl && (size_t)st.st_size > cap) {
-        char *msg = xasprintf("%s is %lld bytes; cap is %zu. Pass offset/limit to read a slice, "
-                              "or use bash with grep/head/tail.",
-                              path, (long long)st.st_size, cap);
-        free(path);
-        json_decref(root);
-        return msg;
+    size_t output_limit = output_cap_bytes();
+    if (!offset_provided && !limit_provided && (size_t)st.st_size > output_limit) {
+        result = xasprintf("%s is %lld bytes; cap is %zu. Pass offset/limit to read a slice, "
+                           "or use bash with grep/head/tail.",
+                           path, (long long)st.st_size, output_limit);
+        goto out;
     }
 
-    struct read_result rr;
-    if (read_lines_capped(path, offset, limit, cap, &rr) < 0) {
-        char *msg = xasprintf("error reading %s: %s", path, strerror(errno));
-        free(path);
-        json_decref(root);
-        return msg;
+    struct read_result read_result;
+    if (read_text_slice(path, offset, limit, output_limit, &read_result) < 0) {
+        result = xasprintf("error reading %s: %s", path, strerror(errno));
+        goto out;
     }
+    if (read_result.is_binary) {
+        result = xasprintf("%s appears to be binary (NUL byte found in first 8 KiB)", path);
+        free(read_result.content);
+        goto out;
+    }
+    result = format_text_result(&read_result, offset, output_limit);
 
-    if (rr.is_binary) {
-        char *msg = xasprintf("%s appears to be binary (NUL byte found in first 8 KiB)", path);
-        free(rr.body);
-        free(path);
-        json_decref(root);
-        return msg;
-    }
+out:
     free(path);
     json_decref(root);
-
-    if (rr.past_eof) {
-        char *msg = xasprintf("(file has %ld line%s; offset %ld is past EOF)", rr.lines_seen,
-                              rr.lines_seen == 1 ? "" : "s", offset);
-        free(rr.body);
-        return msg;
-    }
-
-    /* Cap individual lines before UTF-8 sanitization so the marker text
-     * is itself valid UTF-8 and unaffected. Minified JS, CSV with no
-     * newlines, and similar can fill the byte cap with one line of
-     * useless content; this turns each pathological line into a small
-     * tagged stub instead. */
-    size_t capped_len = 0;
-    char *capped = cap_line_lengths(rr.body, rr.body_len, OUTPUT_CAP_LINE_WIDTH, &capped_len);
-    free(rr.body);
-
-    char *clean = sanitize_utf8(capped, capped_len);
-    free(capped);
-
-    if (rr.trunc == TRUNC_BYTES) {
-        char *msg = xasprintf("%s\n\n[truncated at %zu bytes; file is larger — pass offset/limit "
-                              "to read more]",
-                              clean, cap);
-        free(clean);
-        return msg;
-    }
-    if (rr.trunc == TRUNC_LINES) {
-        char *msg = xasprintf("%s\n\n[truncated at %d lines; file has more — pass offset/limit "
-                              "to read more]",
-                              clean, OUTPUT_CAP_LINES);
-        free(clean);
-        return msg;
-    }
-    return clean;
+    return result;
 }
 
-/* Render a short ":N-M" suffix when the model asked for a line range, so
- * the user sees what slice was requested without needing to read the JSON
- * args. Open-ended (only offset, no limit) renders as ":N-". */
 static char *format_line_range(const char *args_json)
 {
     if (!args_json)
         return NULL;
-    json_error_t jerr;
-    json_t *root = json_loads(args_json, 0, &jerr);
+
+    json_error_t json_error;
+    json_t *root = json_loads(args_json, 0, &json_error);
     if (!root)
         return NULL;
-    json_t *jo = json_object_get(root, "offset");
-    json_t *jl = json_object_get(root, "limit");
-    char *out = NULL;
-    if (jo || jl) {
-        long offset = (jo && json_is_integer(jo)) ? (long)json_integer_value(jo) : 1;
-        if (jl && json_is_integer(jl)) {
-            long limit = (long)json_integer_value(jl);
-            /* `offset + limit - 1` would invoke signed overflow (UB) for
-             * adversarial inputs near LONG_MAX. Tool args come from the
-             * model and the schema has no maximum, so guard before the
-             * addition. Garbage limits (<= 0) fall back to the open-ended
-             * ":N-" form; the tool itself will reject them when run. */
+
+    json_t *offset_json = json_object_get(root, "offset");
+    json_t *limit_json = json_object_get(root, "limit");
+    char *range = NULL;
+    if (offset_json || limit_json) {
+        long offset = json_is_integer(offset_json) ? (long)json_integer_value(offset_json) : 1;
+        if (json_is_integer(limit_json)) {
+            long limit = (long)json_integer_value(limit_json);
             if (limit < 1) {
-                out = xasprintf(":%ld-", offset);
+                range = xasprintf(":%ld-", offset);
             } else {
-                long end = (offset > LONG_MAX - limit + 1) ? LONG_MAX : offset + limit - 1;
-                out = xasprintf(":%ld-%ld", offset, end);
+                /* Tool arguments are untrusted; clamp rather than overflowing the range end. */
+                long end = offset > LONG_MAX - limit + 1 ? LONG_MAX : offset + limit - 1;
+                range = xasprintf(":%ld-%ld", offset, end);
             }
         } else {
-            out = xasprintf(":%ld-", offset);
+            range = xasprintf(":%ld-", offset);
         }
     }
     json_decref(root);
-    return out;
+    return range;
 }
 
 static const char READ_DESCRIPTION[] =

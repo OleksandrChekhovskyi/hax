@@ -7,81 +7,74 @@
 #include "system/path.h"
 #include "tools/path_preprocess.h"
 
-/* Count '\n' bytes plus a trailing partial line (content not ending in
- * '\n' still counts as one line — matches what `wc -l` would feel intuitive
- * for, even though wc itself only counts terminators). Empty content is
- * 0 lines. */
-static size_t count_lines(const char *s, size_t n)
+static size_t count_lines(const char *content, size_t content_len)
 {
-    size_t lines = 0;
-    int saw_data = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (s[i] == '\n') {
-            lines++;
-            saw_data = 0;
-        } else {
-            saw_data = 1;
-        }
+    if (content_len == 0)
+        return 0;
+
+    size_t line_count = content[content_len - 1] == '\n' ? 0 : 1;
+    for (size_t i = 0; i < content_len; i++) {
+        if (content[i] == '\n')
+            line_count++;
     }
-    if (saw_data)
-        lines++;
-    return lines;
+    return line_count;
 }
 
 static char *run(const char *args_json, struct tool_run_ctx *ctx)
 {
-    json_error_t jerr;
-    json_t *root = json_loads(args_json ? args_json : "{}", 0, &jerr);
+    json_error_t json_error;
+    json_t *root = json_loads(args_json ? args_json : "{}", 0, &json_error);
     if (!root)
-        return xasprintf("invalid arguments: %s", jerr.text);
+        return xasprintf("invalid arguments: %s", json_error.text);
 
+    char *result = NULL;
+    char *path = NULL;
     const char *raw_path = json_string_value(json_object_get(root, "path"));
-    json_t *jc = json_object_get(root, "content");
+    json_t *content_json = json_object_get(root, "content");
     if (!raw_path || !*raw_path) {
-        json_decref(root);
-        return xstrdup("missing 'path' argument");
+        result = xstrdup("missing 'path' argument");
+        goto out;
     }
-    if (!jc || !json_is_string(jc)) {
-        json_decref(root);
-        return xstrdup("missing 'content' argument");
-    }
-    char *path = expand_home(raw_path);
-    const char *content = json_string_value(jc);
-    size_t content_len = json_string_length(jc);
-
-    char *errmsg = NULL;
-    int was_new = 0;
-    char *diff = fs_write_with_diff(path, content, content_len, &errmsg, &was_new);
-
-    if (errmsg) {
-        free(diff);
-        free(path);
-        json_decref(root);
-        return errmsg;
+    if (!json_is_string(content_json)) {
+        result = xstrdup("missing 'content' argument");
+        goto out;
     }
 
-    if (was_new) {
-        free(diff);
-        /* Avoid echoing content into model history. Replay rebuilds this preview from the args. */
+    path = expand_home(raw_path);
+    const char *content = json_string_value(content_json);
+    size_t content_len = json_string_length(content_json);
+
+    char *error = NULL;
+    int created = 0;
+    result = fs_write_with_diff(path, content, content_len, &error, &created);
+    if (error) {
+        free(result);
+        result = error;
+        goto out;
+    }
+
+    if (created) {
+        free(result);
+        /* The streamed preview already carries new-file content in the user-facing history. */
         if (ctx && ctx->display && content_len > 0) {
             ctx->display(content, content_len, ctx->display_data);
             ctx->output_summarizes_display = 1;
         }
-        char *result;
-        size_t lines = count_lines(content, content_len);
-        if (content_len == 0)
+
+        size_t line_count = count_lines(content, content_len);
+        if (content_len == 0) {
             result = xasprintf("created %s (empty)", path);
-        else
-            result = xasprintf("created %s (%zu line%s, %zu byte%s)", path, lines,
-                               lines == 1 ? "" : "s", content_len, content_len == 1 ? "" : "s");
-        free(path);
-        json_decref(root);
-        return result;
+        } else {
+            result =
+                xasprintf("created %s (%zu line%s, %zu byte%s)", path, line_count,
+                          line_count == 1 ? "" : "s", content_len, content_len == 1 ? "" : "s");
+        }
     }
 
+out:
     free(path);
     json_decref(root);
-    return diff;
+    return result;
 }
 
 static const char WRITE_DESCRIPTION[] =

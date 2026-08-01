@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,286 +15,294 @@
 #include "system/diff.h"
 #include "system/path.h"
 
-/* mkdir -p: create path and any missing intermediate components. EEXIST on
- * an intermediate is fine as-is — if the existing entry is not a directory,
- * the next component's mkdir fails with ENOTDIR. The final component needs
- * the explicit directory check: a plain file there also yields EEXIST, and
- * real `mkdir -p` fails on that rather than "succeeding" with no dir. */
 int fs_mkdir_p(const char *path)
 {
     if (!path || !*path)
         return 0;
-    char *p = xstrdup(path);
-    size_t len = strlen(p);
-    while (len > 1 && p[len - 1] == '/')
-        p[--len] = '\0';
 
-    for (size_t i = 1; i < len; i++) {
-        if (p[i] == '/') {
-            p[i] = '\0';
-            if (mkdir(p, 0755) < 0 && errno != EEXIST)
-                goto err;
-            p[i] = '/';
-        }
+    char *path_copy = xstrdup(path);
+    size_t path_len = strlen(path_copy);
+    int saved_errno;
+    while (path_len > 1 && path_copy[path_len - 1] == '/')
+        path_copy[--path_len] = '\0';
+
+    for (size_t i = 1; i < path_len; i++) {
+        if (path_copy[i] != '/')
+            continue;
+        path_copy[i] = '\0';
+        if (mkdir(path_copy, 0755) < 0 && errno != EEXIST)
+            goto error;
+        path_copy[i] = '/';
     }
-    if (mkdir(p, 0755) < 0) {
+
+    if (mkdir(path_copy, 0755) < 0) {
         if (errno != EEXIST)
-            goto err;
-        /* stat follows symlinks, so a link pointing at a directory
-         * passes — consistent with `mkdir -p` through such a link. */
+            goto error;
+
+        /* EEXIST is success only when the final component resolves to a directory. */
         struct stat st;
-        if (stat(p, &st) < 0 || !S_ISDIR(st.st_mode)) {
+        if (stat(path_copy, &st) < 0 || !S_ISDIR(st.st_mode)) {
             errno = ENOTDIR;
-            goto err;
+            goto error;
         }
     }
-    free(p);
+
+    free(path_copy);
     return 0;
 
-err:;
-    int saved = errno;
-    free(p);
-    errno = saved;
+error:
+    saved_errno = errno;
+    free(path_copy);
+    errno = saved_errno;
     return -1;
 }
 
-static char *parent_dir_of(const char *path)
+static char *parent_dir(const char *path)
 {
-    /* dirname() may modify its argument and may return a static buffer —
-     * always copy the result before touching the duplicate again. */
-    char *dup = xstrdup(path);
-    const char *p = dirname(dup);
-    char *copy = xstrdup((p && *p) ? p : ".");
-    free(dup);
-    return copy;
+    /* dirname() may modify its argument and return storage owned by the C library. */
+    char *path_copy = xstrdup(path);
+    const char *parent = dirname(path_copy);
+    char *result = xstrdup(parent && *parent ? parent : ".");
+    free(path_copy);
+    return result;
+}
+
+static char *read_symlink_target(const char *path)
+{
+    size_t capacity = 256;
+    char *target = xmalloc(capacity + 1);
+
+    for (;;) {
+        ssize_t target_len = readlink(path, target, capacity);
+        if (target_len < 0) {
+            free(target);
+            return NULL;
+        }
+        if ((size_t)target_len < capacity) {
+            target[target_len] = '\0';
+            return target;
+        }
+        if (capacity > SIZE_MAX / 2) {
+            free(target);
+            errno = ENAMETOOLONG;
+            return NULL;
+        }
+        capacity *= 2;
+        target = xrealloc(target, capacity + 1);
+    }
 }
 
 char *fs_resolve_link_target(const char *path)
 {
-    enum { MAX_HOPS = 32 };
-    char *current = xstrdup(path);
-    for (int hops = 0; hops < MAX_HOPS; hops++) {
-        struct stat lst;
-        if (lstat(current, &lst) < 0) {
-            /* Final component is absent — the "create new file" case.
-             * Hand back the path so the caller can stage a tempfile
-             * next to it. Anything other than ENOENT is a real error. */
+    enum { MAX_SYMLINK_HOPS = 32 };
+    char *current_path = xstrdup(path);
+
+    for (int hop = 0; hop < MAX_SYMLINK_HOPS; hop++) {
+        struct stat st;
+        if (lstat(current_path, &st) < 0) {
             if (errno == ENOENT)
-                return current;
-            free(current);
+                return current_path;
+            free(current_path);
             return NULL;
         }
-        if (!S_ISLNK(lst.st_mode))
-            return current;
+        if (!S_ISLNK(st.st_mode))
+            return current_path;
 
-        char buf[4096];
-        ssize_t n = readlink(current, buf, sizeof(buf) - 1);
-        if (n < 0) {
-            free(current);
+        char *target = read_symlink_target(current_path);
+        if (!target) {
+            free(current_path);
             return NULL;
         }
-        buf[n] = '\0';
 
-        char *next;
-        if (buf[0] == '/') {
-            next = xstrdup(buf);
+        char *next_path;
+        if (target[0] == '/') {
+            next_path = target;
         } else {
-            char *parent = parent_dir_of(current);
-            next = path_join(parent, buf);
+            char *parent = parent_dir(current_path);
+            next_path = path_join(parent, target);
             free(parent);
+            free(target);
         }
-        free(current);
-        current = next;
+        free(current_path);
+        current_path = next_path;
     }
-    free(current);
+
+    free(current_path);
     errno = ELOOP;
     return NULL;
 }
 
-char *fs_write_with_diff(const char *path, const char *content, size_t content_len, char **errmsg,
-                         int *out_was_new)
+struct write_target {
+    char *old_content;
+    size_t old_content_len;
+    mode_t mode;
+    int existed;
+};
+
+static int inspect_write_target(const char *path, struct write_target *target, char **error)
 {
-    char *target = NULL, *old = NULL, *parent = NULL, *tmp = NULL, *diff = NULL;
-    char *a_label = NULL, *b_label = NULL;
-    int fd = -1;
-    int file_existed = 0;
-    int tmp_created = 0; /* mkstemp succeeded — there's a file at tmp to clean up */
-    int committed = 0;   /* rename succeeded — tmp is gone from disk */
-    int ok = 0;
-    size_t old_len = 0;
-    mode_t mode = 0;
     struct stat st;
-
-    *errmsg = NULL;
-    /* Default to "no", overwritten on the success exit. Any failure path
-     * goes through `goto out` with this still 0 — callers must check the
-     * NULL return / errmsg before consulting was_new, but at least they
-     * won't see a stale 1 from an aborted create attempt. */
-    if (out_was_new)
-        *out_was_new = 0;
-
-    /* If `path` is a symlink, resolve it so we update the target file's
-     * contents and leave the link intact — matches what vim/emacs/etc do.
-     * Replacing the symlink with a regular file would be surprising for
-     * the common ~/.config-style "symlink into a repo" setup. The
-     * resolver tolerates dangling chains so a `link -> new` pattern can
-     * still create `new`. Diff labels keep the model-supplied path so the
-     * user sees what they asked for, not an internal canonicalization. */
-    target = fs_resolve_link_target(path);
-    if (!target) {
-        *errmsg = xasprintf("resolving %s: %s", path, strerror(errno));
-        goto out;
-    }
-
-    if (stat(target, &st) == 0) {
-        /* Refuse FIFOs, sockets, devices, directories upfront. The
-         * eventual rename would replace the special node with a plain
-         * file, which is surprising. slurp_file's own guard would also
-         * reject these now, but a tool-specific "not a regular file"
-         * error gives the model a much clearer hint than the
-         * "Invalid argument" it would otherwise see. */
+    if (stat(path, &st) == 0) {
+        /* Special files may block on read and must not be replaced with regular files. */
         if (!S_ISREG(st.st_mode)) {
-            *errmsg = xasprintf("%s exists but is not a regular file", target);
-            goto out;
+            *error = xasprintf("%s exists but is not a regular file", path);
+            return -1;
         }
-        file_existed = 1;
-        /* 07777 (not 0777) preserves setuid/setgid/sticky bits on
-         * existing files. Standard "owned helper" patterns like 04755
-         * would otherwise silently lose their elevation through a
-         * write/edit. */
-        mode = st.st_mode & 07777;
-        old = slurp_file(target, &old_len);
-        if (!old) {
-            *errmsg = xasprintf("error reading %s: %s", target, strerror(errno));
-            goto out;
+
+        target->existed = 1;
+        target->mode = st.st_mode & 07777;
+        target->old_content = slurp_file(path, &target->old_content_len);
+        if (!target->old_content) {
+            *error = xasprintf("error reading %s: %s", path, strerror(errno));
+            return -1;
         }
-    } else if (errno == ENOENT) {
-        /* Genuinely new file. Anything else (EACCES, EOVERFLOW, EIO,
-         * ELOOP, …) means the file likely exists but we couldn't
-         * inspect it — falling into the create path would diff against
-         * /dev/null and rename over real content. Bail with the errno
-         * instead. */
-        mode_t um = umask(0);
-        umask(um);
-        mode = 0666 & ~um;
-    } else {
-        *errmsg = xasprintf("stat %s: %s", target, strerror(errno));
-        goto out;
+        return 0;
     }
 
-    parent = parent_dir_of(target);
-    if (fs_mkdir_p(parent) < 0) {
-        *errmsg = xasprintf("creating %s: %s", parent, strerror(errno));
-        goto out;
+    if (errno != ENOENT) {
+        *error = xasprintf("stat %s: %s", path, strerror(errno));
+        return -1;
     }
 
-    tmp = path_join(parent, ".hax-write-XXXXXX");
-    fd = mkstemp(tmp);
-    if (fd < 0) {
-        *errmsg = xasprintf("mkstemp: %s", strerror(errno));
-        goto out;
-    }
-    tmp_created = 1;
-    if (write_all(fd, content, content_len) < 0) {
-        *errmsg = xasprintf("write %s: %s", tmp, strerror(errno));
-        goto out;
-    }
-    /* fchmod must happen *after* write: Linux's write(2) clears S_ISUID
-     * and S_ISGID when an unprivileged process writes to a file, so a
-     * chmod beforehand would silently lose those bits. Best-effort —
-     * mkstemp's 0600 is the fallback if this somehow fails on a weird
-     * filesystem. */
-    (void)fchmod(fd, mode);
-    /* fsync forces writeback so delayed-allocation failures (ENOSPC, EIO,
-     * EDQUOT on ext4 et al.) surface here rather than silently corrupting
-     * the file we're about to rename into place. close() is checked too —
-     * NFS in particular can report errors only at close. */
-    if (fsync(fd) < 0) {
-        *errmsg = xasprintf("fsync %s: %s", tmp, strerror(errno));
-        goto out;
-    }
-    if (close(fd) < 0) {
-        fd = -1; /* close failure leaves fd unspecified; don't double-close */
-        *errmsg = xasprintf("close %s: %s", tmp, strerror(errno));
-        goto out;
-    }
-    fd = -1;
+    mode_t mask = umask(0);
+    umask(mask);
+    target->mode = 0666 & ~mask;
+    return 0;
+}
 
-    /* The `a/`/`b/` prefixes are the git convention for *relative* paths;
-     * a path the model passed as absolute (one outside cwd — under-cwd
-     * paths are relativized before they reach here) would otherwise read
-     * as "a//abs/path". For those, emit the bare path like plain
-     * `diff -u`. The new-file source stays "/dev/null" either way. */
-    int absolute = path[0] == '/';
-    a_label = !file_existed ? xstrdup("/dev/null")
-              : absolute    ? xstrdup(path)
-                            : xasprintf("a/%s", path);
-    b_label = absolute ? xstrdup(path) : xasprintf("b/%s", path);
-    diff = make_unified_diff(file_existed ? old : "", file_existed ? old_len : 0, content,
-                             content_len, a_label, b_label);
+static char *make_write_diff(const char *path, const char *old_content, size_t old_content_len,
+                             const char *content, size_t content_len, int existed, char **error)
+{
+    int absolute_path = path[0] == '/';
+    char *old_label = !existed        ? xstrdup("/dev/null")
+                      : absolute_path ? xstrdup(path)
+                                      : xasprintf("a/%s", path);
+    char *new_label = absolute_path ? xstrdup(path) : xasprintf("b/%s", path);
+    char *diff = make_unified_diff(existed ? old_content : "", existed ? old_content_len : 0,
+                                   content, content_len, old_label, new_label);
     if (!diff) {
-        *errmsg = xstrdup("diff(1) failed");
+        *error = xstrdup("diff(1) failed");
         goto out;
     }
 
-    /* Creating an empty file would otherwise yield "" — visually
-     * identical to "no changes" and confusing for the model writing
-     * sentinel files like __init__.py or .keep. Synthesize a minimal
-     * headers-only diff so both UI and model see "file created at path,
-     * no content". */
-    if (!file_existed && !*diff) {
+    /* An empty new file still needs a visible creation result. */
+    if (!existed && !*diff) {
         free(diff);
-        diff = xasprintf("--- /dev/null\n+++ %s\n", b_label);
+        diff = xasprintf("--- /dev/null\n+++ %s\n", new_label);
     }
-
-    /* Byte-identical content on an existing file: skip the rename so the
-     * file's inode, mtime, ownership, and any hard links are preserved.
-     * The unwind below unlinks tmp. For a *missing* file with empty
-     * content, an empty diff still has to land on disk — otherwise
-     * "create empty file" silently no-ops. */
-    if (file_existed && !*diff) {
-        ok = 1;
-        goto out;
-    }
-
-    if (rename(tmp, target) < 0) {
-        *errmsg = xasprintf("rename to %s: %s", target, strerror(errno));
-        goto out;
-    }
-    committed = 1;
-    ok = 1;
 
 out:
-    if (fd >= 0)
-        close(fd);
-    if (tmp_created && !committed)
-        unlink(tmp);
-    free(a_label);
-    free(b_label);
-    free(tmp);
-    free(parent);
-    free(old);
-    free(target);
-    if (!ok) {
-        free(diff);
-        return NULL;
-    }
-    /* Success — file_existed captures the pre-call state. The byte-
-     * identical short-circuit also lands here with file_existed=1, so
-     * the !file_existed branch covers exactly the create cases. */
-    if (out_was_new)
-        *out_was_new = !file_existed;
+    free(old_label);
+    free(new_label);
     return diff;
 }
 
-/* X_OK alone is not enough: a *directory* with the search bit passes
- * access() too, and a directory shadowing a real binary in a later
- * $PATH entry would then be "resolved" and fail at exec time on every
- * call. Require a regular file, like which(1) and shell PATH search;
- * stat follows symlinks so `bash -> bash-5.2` links still pass. */
+static char *stage_write(const char *parent, const char *content, size_t content_len, mode_t mode,
+                         char **error)
+{
+    char *temp_path = path_join(parent, ".hax-write-XXXXXX");
+    int fd = mkstemp(temp_path);
+    if (fd < 0) {
+        *error = xasprintf("mkstemp: %s", strerror(errno));
+        free(temp_path);
+        return NULL;
+    }
+
+    if (write_all(fd, content, content_len) < 0) {
+        *error = xasprintf("write %s: %s", temp_path, strerror(errno));
+        goto error;
+    }
+
+    /* write(2) may clear set-ID bits, so restore the destination mode afterward. */
+    if (fchmod(fd, mode) < 0) {
+        *error = xasprintf("chmod %s: %s", temp_path, strerror(errno));
+        goto error;
+    }
+    /* Surface delayed-allocation failures before replacing the destination. */
+    if (fsync(fd) < 0) {
+        *error = xasprintf("fsync %s: %s", temp_path, strerror(errno));
+        goto error;
+    }
+    if (close(fd) < 0) {
+        fd = -1; /* A failed close leaves the descriptor state unspecified. */
+        *error = xasprintf("close %s: %s", temp_path, strerror(errno));
+        goto error;
+    }
+    return temp_path;
+
+error:
+    if (fd >= 0)
+        close(fd);
+    unlink(temp_path);
+    free(temp_path);
+    return NULL;
+}
+
+char *fs_write_with_diff(const char *path, const char *content, size_t content_len, char **error,
+                         int *was_created)
+{
+    char *target_path = NULL;
+    char *parent = NULL;
+    char *temp_path = NULL;
+    char *diff = NULL;
+    struct write_target target = {0};
+
+    *error = NULL;
+    if (was_created)
+        *was_created = 0;
+
+    /* Write through symlinks, including dangling chains, rather than replacing the link itself. */
+    target_path = fs_resolve_link_target(path);
+    if (!target_path) {
+        *error = xasprintf("resolving %s: %s", path, strerror(errno));
+        goto out;
+    }
+
+    if (inspect_write_target(target_path, &target, error) < 0)
+        goto out;
+
+    diff = make_write_diff(path, target.old_content, target.old_content_len, content, content_len,
+                           target.existed, error);
+    if (!diff)
+        goto out;
+
+    /* Preserve inode identity, metadata, and hard links when the content is unchanged. */
+    if (target.existed && !*diff)
+        goto out;
+
+    parent = parent_dir(target_path);
+    if (fs_mkdir_p(parent) < 0) {
+        *error = xasprintf("creating %s: %s", parent, strerror(errno));
+        goto out;
+    }
+
+    temp_path = stage_write(parent, content, content_len, target.mode, error);
+    if (!temp_path)
+        goto out;
+    if (rename(temp_path, target_path) < 0) {
+        *error = xasprintf("rename to %s: %s", target_path, strerror(errno));
+        unlink(temp_path);
+        goto out;
+    }
+
+out:
+    free(temp_path);
+    free(parent);
+    free(target.old_content);
+    free(target_path);
+    if (*error) {
+        free(diff);
+        return NULL;
+    }
+    if (was_created)
+        *was_created = !target.existed;
+    return diff;
+}
+
 static int is_executable_file(const char *path)
 {
     struct stat st;
+    /* Directories may pass access(X_OK), but cannot be executed as programs. */
     return access(path, X_OK) == 0 && stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
@@ -303,23 +312,27 @@ char *fs_which(const char *name)
         return NULL;
     if (strchr(name, '/'))
         return is_executable_file(name) ? xstrdup(name) : NULL;
-    const char *path = getenv("PATH");
-    if (!path)
+
+    const char *path_env = getenv("PATH");
+    if (!path_env)
         return NULL;
-    const char *p = path;
+
+    const char *entry = path_env;
     for (;;) {
-        const char *sep = strchr(p, ':');
-        size_t len = sep ? (size_t)(sep - p) : strlen(p);
-        if (len > 0 && p[0] == '/') {
-            char *dir = xasprintf("%.*s", (int)len, p);
-            char *cand = path_join(dir, name);
-            free(dir);
-            if (is_executable_file(cand))
-                return cand;
-            free(cand);
+        const char *separator = strchr(entry, ':');
+        size_t entry_len = separator ? (size_t)(separator - entry) : strlen(entry);
+        if (entry_len > 0 && entry[0] == '/') {
+            char *directory = xmalloc(entry_len + 1);
+            memcpy(directory, entry, entry_len);
+            directory[entry_len] = '\0';
+            char *candidate = path_join(directory, name);
+            free(directory);
+            if (is_executable_file(candidate))
+                return candidate;
+            free(candidate);
         }
-        if (!sep)
+        if (!separator)
             return NULL;
-        p = sep + 1;
+        entry = separator + 1;
     }
 }
