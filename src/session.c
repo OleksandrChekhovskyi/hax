@@ -18,6 +18,7 @@
 #include "config.h"
 #include "session_prune.h"
 #include "system/fs.h"
+#include "system/git.h"
 
 /* struct stat's sub-second mtime field is spelled differently across
  * platforms. Used to break ties between sessions created in the same
@@ -410,6 +411,7 @@ struct session_log {
     char *timestamp;
     char *provider;
     char *model;
+    char *model_label;
     char *effort;
     char *preset;
 };
@@ -460,7 +462,8 @@ enum session_file_mode {
 
 static FILE *open_session_file(const char *path, enum session_file_mode mode);
 
-struct session_log *session_log_open(const char *provider, const char *model, const char *effort,
+struct session_log *session_log_open(const char *provider, const char *model,
+                                     const char *model_label, const char *effort,
                                      const char *preset)
 {
     if (sessions_disabled())
@@ -468,6 +471,7 @@ struct session_log *session_log_open(const char *provider, const char *model, co
     struct session_log *log = xcalloc(1, sizeof(*log));
     log->provider = provider ? xstrdup(provider) : NULL;
     log->model = model ? xstrdup(model) : NULL;
+    log->model_label = model_label ? xstrdup(model_label) : NULL;
     log->effort = effort ? xstrdup(effort) : NULL;
     log->preset = (preset && *preset) ? xstrdup(preset) : NULL;
     if (prepare_fresh_session(log) < 0) {
@@ -568,6 +572,15 @@ static int materialize_log(struct session_log *log)
     return log->file ? 0 : -1;
 }
 
+/* Recorded only when it says something the wire id doesn't, so a reader can treat its absence as
+ * "the id is the label" — which is also what files predating labels mean. */
+static const char *differing_model_label(const struct session_log *log)
+{
+    if (!log->model_label || !log->model || strcmp(log->model_label, log->model) == 0)
+        return NULL;
+    return log->model_label;
+}
+
 static int write_json_line(FILE *file, const json_t *object)
 {
     char *json = json_dumps(object, JSON_COMPACT);
@@ -588,8 +601,19 @@ static int write_header(struct session_log *log)
     json_set_optional_string(header, "cwd", log->cwd);
     json_set_optional_string(header, "provider", log->provider);
     json_set_optional_string(header, "model", log->model);
+    json_set_optional_string(header, "model_label", differing_model_label(log));
     json_set_optional_string(header, "effort", log->effort);
     json_set_optional_string(header, "preset", log->preset);
+
+    /* Probed at materialization rather than at open: the position recorded is the one the
+     * conversation actually started from, and runs that never send a message pay nothing. */
+    struct git_state git;
+    git_state_probe(&git);
+    json_set_optional_string(header, "git_branch", git.branch);
+    json_set_optional_string(header, "git_commit", git.commit);
+    json_set_optional_string(header, "git_subject", git.subject);
+    git_state_free(&git);
+
     int result = write_json_line(log->file, header);
     json_decref(header);
     return result;
@@ -611,6 +635,7 @@ static int write_selection(struct session_log *log)
     json_object_set_new(selection, "type", json_string("selection"));
     json_set_optional_string(selection, "provider", log->provider);
     json_set_optional_string(selection, "model", log->model);
+    json_set_optional_string(selection, "model_label", differing_model_label(log));
     json_set_optional_string(selection, "effort", log->effort);
     json_set_optional_string(selection, "preset", log->preset);
     int result = write_json_line(log->file, selection);
@@ -651,10 +676,15 @@ void session_log_append(struct session_log *log, const struct item *items, size_
 }
 
 void session_log_set_meta(struct session_log *log, const char *provider, const char *model,
-                          const char *effort, const char *preset)
+                          const char *model_label, const char *effort, const char *preset)
 {
     if (!log)
         return;
+    /* A label renders the model it belongs to, so it cannot differ on its own: keep it current
+     * without letting it stage a selection record. */
+    free(log->model_label);
+    log->model_label = model_label ? xstrdup(model_label) : NULL;
+
     if (optional_strings_equal(log->provider, provider) &&
         optional_strings_equal(log->model, model) && optional_strings_equal(log->effort, effort) &&
         optional_strings_equal(log->preset, preset))
@@ -702,6 +732,7 @@ void session_log_close(struct session_log *log)
     free(log->timestamp);
     free(log->provider);
     free(log->model);
+    free(log->model_label);
     free(log->effort);
     free(log->preset);
     free(log);
@@ -1155,15 +1186,15 @@ int session_load(const char *path, struct item **out_items, size_t *out_count,
 }
 
 /* A prompt should occur before this bound; avoid reading an early multi-megabyte result. */
-#define FIRST_PROMPT_SCAN_CAP (64 * 1024)
+#define LABEL_SCAN_CAP (64 * 1024)
 
-char *session_first_prompt(const char *path, int max_cells)
+void session_label_read(const char *path, int max_cells, struct session_label *out)
 {
-    char *data = slurp_file_capped(path, FIRST_PROMPT_SCAN_CAP, NULL, NULL);
+    *out = (struct session_label){0};
+    char *data = slurp_file_capped(path, LABEL_SCAN_CAP, NULL, NULL);
     if (!data)
-        return NULL;
+        return;
 
-    char *result = NULL;
     char *save = NULL;
     int saw_compaction_seed = 0;
     for (char *line = strtok_r(data, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
@@ -1172,6 +1203,31 @@ char *session_first_prompt(const char *path, int max_cells)
         json_t *object = json_loads(line, 0, NULL);
         if (!object)
             continue;
+
+        const char *type = json_string_value(json_object_get(object, "type"));
+        if (type && (strcmp(type, "session") == 0 || strcmp(type, "selection") == 0)) {
+            /* Only records ahead of the opening prompt are seen, so a later /model switch does not
+             * show up — the label describes what the conversation started as. */
+            free(out->provider);
+            out->provider = json_dup_string(object, "provider");
+            free(out->model);
+            out->model = json_dup_string(object, "model_label");
+            if (!out->model)
+                out->model = json_dup_string(object, "model");
+            free(out->effort);
+            out->effort = json_dup_string(object, "effort");
+            free(out->preset);
+            out->preset = json_dup_string(object, "preset");
+            if (strcmp(type, "session") == 0) {
+                free(out->git_branch);
+                out->git_branch = json_dup_string(object, "git_branch");
+                free(out->git_subject);
+                out->git_subject = json_dup_string(object, "git_subject");
+            }
+            json_decref(object);
+            continue;
+        }
+
         const char *kind = json_string_value(json_object_get(object, "kind"));
         if (kind && strcmp(kind, "user") == 0) {
             enum item_origin origin = json_get_item_origin(object);
@@ -1184,7 +1240,7 @@ char *session_first_prompt(const char *path, int max_cells)
             const char *text = json_string_value(json_object_get(object, "text"));
             if (text) {
                 char *flattened = flatten_for_display(text);
-                result = truncate_for_display(flattened, (size_t)max_cells);
+                out->prompt = truncate_for_display(flattened, (size_t)max_cells);
                 free(flattened);
             }
             json_decref(object);
@@ -1193,9 +1249,20 @@ char *session_first_prompt(const char *path, int max_cells)
         json_decref(object);
     }
     free(data);
-    if (!result && saw_compaction_seed)
-        result = xstrdup("(compacted)");
-    return result;
+    if (!out->prompt && saw_compaction_seed)
+        out->prompt = xstrdup("(compacted)");
+}
+
+void session_label_free(struct session_label *label)
+{
+    free(label->prompt);
+    free(label->provider);
+    free(label->model);
+    free(label->effort);
+    free(label->preset);
+    free(label->git_branch);
+    free(label->git_subject);
+    *label = (struct session_label){0};
 }
 
 static int compare_session_mtime_desc(const void *left_pointer, const void *right_pointer)
@@ -1274,7 +1341,7 @@ void session_list_free(struct session_entry *entries, size_t count)
     for (size_t i = 0; i < count; i++) {
         free(entries[i].path);
         free(entries[i].id);
-        free(entries[i].first_prompt);
+        session_label_free(&entries[i].label);
     }
     free(entries);
 }

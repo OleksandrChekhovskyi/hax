@@ -330,7 +330,8 @@ void compact_run(const struct compact_params *params, struct compact_result *res
      * with it too. */
     if (agent_session_resync_effort(params->session, params->provider, NULL))
         session_log_set_meta(params->slog, agent_provider_log_name(params->provider),
-                             params->session->model, params->session->effort, config_str("preset"));
+                             params->session->model, params->session->model_label,
+                             params->session->effort, config_str("preset"));
 
     struct compact_sink sink = {.hooks = &params->hooks};
     turn_init(&sink.assembly);

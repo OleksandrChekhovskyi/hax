@@ -48,9 +48,12 @@ ${XDG_STATE_HOME:-$HOME/.local/state}/hax/sessions/<encoded-cwd>/
 ```
 
 Sessions are keyed by working directory. `-c`, `--resume`, and `/resume` only list sessions
-for the directory you are currently in. Sessions inactive for 30 days are pruned automatically;
-selecting one to resume refreshes its activity time. Configure `session_retention_days` or set
-it to `0` to keep sessions indefinitely.
+for the directory you are currently in. Rows are labeled with the opening prompt; the selected
+row also shows what the session started as — the banner's `[preset] provider · model · effort`,
+then the git branch and HEAD commit subject at the time — followed by the rest of a prompt too
+long for one row. Sessions inactive for 30 days are pruned automatically; selecting one to resume
+refreshes its activity time. Configure `session_retention_days` or set it to `0` to keep sessions
+indefinitely.
 
 Resuming appends to the same session file. `/new` starts a fresh session id. On exit, hax
 prints a resume hint such as:

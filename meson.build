@@ -93,6 +93,7 @@ sources = files(
     'src/system/bg_job.c',
     'src/system/diff.c',
     'src/system/fs.c',
+    'src/system/git.c',
     'src/system/keepawake.c',
     'src/system/os.c',
     'src/system/path.c',

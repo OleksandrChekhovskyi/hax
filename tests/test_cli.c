@@ -153,7 +153,7 @@ static void test_resolve_missing_session(void)
 static char *create_session(char **id)
 {
     *id = NULL;
-    struct session_log *log = session_log_open("test", "model", NULL, NULL);
+    struct session_log *log = session_log_open("test", "model", NULL, NULL, NULL);
     EXPECT(log != NULL);
     if (!log)
         return NULL;

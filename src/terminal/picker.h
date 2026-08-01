@@ -84,10 +84,11 @@ struct picker_opts {
      * whenever it was too wide for its row. For pickers whose labels are
      * free text rather than identifiers — a session's opening prompt, a
      * conversation turn — where one clipped line routinely stops short of
-     * the words that tell two similar rows apart. An item's own `desc`
-     * still wins, and a label that fit shows nothing (the footer keeps its
-     * reserved height either way, so this costs no rows). Leave 0 for
-     * pickers over short labels: they would only reserve blank space. */
+     * the words that tell two similar rows apart. The repeat follows the
+     * item's own `desc` when it has one, and a label that fit shows nothing
+     * (the footer keeps its reserved height either way, so this costs no
+     * rows). Leave 0 for pickers over short labels: they would only reserve
+     * blank space. */
     int label_gutter;
 };
 

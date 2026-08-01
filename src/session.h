@@ -37,12 +37,16 @@ int session_read_meta(const char *path, struct session_meta *out);
 struct session_log;
 
 /* Prepares a fresh session for the current directory. The file is created on the first append.
+ * model_label is how the provider renders model for people; it is recorded only when it differs,
+ * so a later reader shows what the banner showed without knowing any provider's conventions.
  * Returns NULL when recording is disabled or the state path cannot be resolved. */
-struct session_log *session_log_open(const char *provider, const char *model, const char *effort,
+struct session_log *session_log_open(const char *provider, const char *model,
+                                     const char *model_label, const char *effort,
                                      const char *preset);
 
 /* Opens path for append. loaded_item_count is the number of items already represented in the file.
- * Pass the file's recorded selection so session_log_set_meta can detect a run-time override.
+ * Pass the file's recorded selection so session_log_set_meta can detect a run-time override; a
+ * label is not part of a selection, so it arrives through session_log_set_meta instead.
  * Returns NULL when recording is disabled or path cannot be opened for append. */
 struct session_log *session_log_resume(const char *path, const char *provider, const char *model,
                                        const char *effort, const char *preset,
@@ -55,7 +59,7 @@ void session_log_append(struct session_log *log, const struct item *items, size_
  * Later changes are written immediately before the next appended item, so an unused selection does
  * not alter a resumed or forked conversation. */
 void session_log_set_meta(struct session_log *log, const char *provider, const char *model,
-                          const char *effort, const char *preset);
+                          const char *model_label, const char *effort, const char *preset);
 
 /* Closes the current file and prepares a lazily materialized session with a fresh identity. */
 void session_log_reset(struct session_log *log);
@@ -92,21 +96,36 @@ int session_touch(const char *path);
 int session_load(const char *path, struct item **out_items, size_t *out_count,
                  struct session_meta *out_meta);
 
+/* What a picker row can say about a session without replaying it. Every field is owned and
+ * optional: old files predate the git fields, and a file may be unreadable or empty. The header
+ * also records the HEAD hash, which identifies nothing to a reader and so is not surfaced. */
+struct session_label {
+    char *prompt; /* single-line first typed prompt, or "(compacted)" for a seed-only session */
+    char *provider;
+    char *model; /* the recorded display label, falling back to the wire id */
+    char *effort;
+    char *preset;
+    char *git_branch;
+    char *git_subject;
+};
+
 struct session_entry {
     char *path;
     char *id;
     long mtime;
     long mtime_nsec;
-    char *first_prompt; /* NULL until populated by session_first_prompt */
+    struct session_label label; /* zeroed until populated by session_label_read */
 };
 
 /* Lists unexpired regular session files for cwd, newest first. The owned result may be empty. File
- * contents are not read; prompt labels are populated separately. */
+ * contents are not read; labels are populated separately. */
 int session_list(const char *cwd, struct session_entry **out_entries, size_t *out_count);
 void session_list_free(struct session_entry *entries, size_t count);
 
-/* Returns an owned, single-line first typed prompt limited to max_cells, "(compacted)" for a
- * seed-only session, or NULL when no label can be read. Reads only a bounded file prefix. */
-char *session_first_prompt(const char *path, int max_cells);
+/* Reads a bounded file prefix, describing the session as it started: a later model or preset
+ * switch is not reflected. The prompt is limited to max_cells. Overwrites out without releasing
+ * it, so pass a zeroed or freed struct; unreadable files leave it zeroed. */
+void session_label_read(const char *path, int max_cells, struct session_label *out);
+void session_label_free(struct session_label *label);
 
 #endif /* HAX_SESSION_H */

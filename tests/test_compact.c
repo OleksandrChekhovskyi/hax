@@ -259,7 +259,7 @@ static void test_transaction_keeps_one_session(void)
     struct agent_session session;
     transaction_session_init(&session);
     struct provider provider = {.name = "test", .stream = transaction_stream};
-    struct session_log *slog = session_log_open("test", "model", NULL, NULL);
+    struct session_log *slog = session_log_open("test", "model", NULL, NULL, NULL);
     EXPECT(slog != NULL);
     session_log_append(slog, session.items, session.n_items);
     char *path = xstrdup(session_log_path(slog));
@@ -302,7 +302,7 @@ static void test_resumed_session_floors_at_seed(void)
     struct agent_session session;
     transaction_session_init(&session);
     struct provider provider = {.name = "test", .stream = transaction_stream};
-    struct session_log *slog = session_log_open("test", "model", NULL, NULL);
+    struct session_log *slog = session_log_open("test", "model", NULL, NULL, NULL);
     EXPECT(slog != NULL);
     session_log_append(slog, session.items, session.n_items);
     char *path = xstrdup(session_log_path(slog));

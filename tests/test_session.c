@@ -7,6 +7,7 @@
 #include "harness.h"
 #include "session.h"
 #include "util.h"
+#include "system/git.h"
 
 static int nullable_strings_equal(const char *a, const char *b)
 {
@@ -171,7 +172,7 @@ static void use_fresh_session_state(void)
 static char *write_session(const char *provider, const char *model, const char *effort,
                            const char *preset, const struct item *items, size_t n)
 {
-    struct session_log *log = session_log_open(provider, model, effort, preset);
+    struct session_log *log = session_log_open(provider, model, NULL, effort, preset);
     EXPECT(log != NULL);
     if (!log)
         return xstrdup("/nonexistent");
@@ -194,10 +195,10 @@ static void test_recording_control(void)
     /* Explicit opt-out must avoid even opening a log; "auto" is resolved by
      * the agent and remains recordable at this lower layer. */
     setenv("HAX_NO_SESSION", "1", 1);
-    EXPECT(session_log_open("alpha", "m1", "high", NULL) == NULL);
+    EXPECT(session_log_open("alpha", "m1", NULL, "high", NULL) == NULL);
 
     setenv("HAX_NO_SESSION", "auto", 1);
-    struct session_log *log = session_log_open("alpha", "m1", "high", NULL);
+    struct session_log *log = session_log_open("alpha", "m1", NULL, "high", NULL);
     EXPECT(log != NULL);
     session_log_close(log);
     unsetenv("HAX_NO_SESSION");
@@ -290,10 +291,12 @@ static void test_session_listing(void)
     EXPECT(found != NULL);
     if (found) {
         EXPECT_STR_EQ(found->id, saved_id);
-        EXPECT(found->first_prompt == NULL);
-        char *prompt = session_first_prompt(found->path, 64);
-        EXPECT(prompt != NULL && strstr(prompt, "hello world") != NULL);
-        free(prompt);
+        EXPECT(found->label.prompt == NULL);
+        struct session_label label;
+        session_label_read(found->path, 64, &label);
+        EXPECT(label.prompt != NULL && strstr(label.prompt, "hello world") != NULL);
+        EXPECT_STR_EQ(label.model, "m1");
+        session_label_free(&label);
     }
 
     session_list_free(list, list_n);
@@ -342,14 +345,15 @@ static void test_resume_appends_only_new_items(void)
     free(path);
 }
 
-static void test_first_prompt_labels(void)
+static void test_prompt_labels(void)
 {
     use_fresh_session_state();
     struct item boundary[] = {{.kind = ITEM_TURN_BOUNDARY}};
     char *empty_path = write_session("pa", "ma", NULL, NULL, boundary, 1);
-    char *prompt = session_first_prompt(empty_path, 64);
-    EXPECT(prompt == NULL);
-    free(prompt);
+    struct session_label label;
+    session_label_read(empty_path, 64, &label);
+    EXPECT(label.prompt == NULL);
+    session_label_free(&label);
     free(empty_path);
 
     struct item compacted[] = {
@@ -362,19 +366,70 @@ static void test_first_prompt_labels(void)
     };
 
     char *continued_path = write_session("pa", "ma", NULL, NULL, compacted, 4);
-    prompt = session_first_prompt(continued_path, 64);
-    EXPECT(prompt != NULL && strstr(prompt, "real question") != NULL);
-    EXPECT(prompt == NULL || strstr(prompt, "condensed summary") == NULL);
-    free(prompt);
+    session_label_read(continued_path, 64, &label);
+    EXPECT(label.prompt != NULL && strstr(label.prompt, "real question") != NULL);
+    EXPECT(label.prompt == NULL || strstr(label.prompt, "condensed summary") == NULL);
+    session_label_free(&label);
     free(continued_path);
 
     char *seed_path = write_session("pa", "ma", NULL, NULL, compacted, 2);
-    prompt = session_first_prompt(seed_path, 64);
-    EXPECT(prompt != NULL);
-    if (prompt)
-        EXPECT_STR_EQ(prompt, "(compacted)");
-    free(prompt);
+    session_label_read(seed_path, 64, &label);
+    EXPECT(label.prompt != NULL);
+    if (label.prompt)
+        EXPECT_STR_EQ(label.prompt, "(compacted)");
+    session_label_free(&label);
     free(seed_path);
+}
+
+static void test_label_reports_recorded_context(void)
+{
+    use_fresh_session_state();
+    char *path = write_session("alpha", "m1", NULL, "review", CONVERSATION, CONVERSATION_COUNT);
+
+    struct session_label label;
+    session_label_read(path, 64, &label);
+    EXPECT_STR_EQ(label.provider, "alpha");
+    EXPECT_STR_EQ(label.model, "m1");
+    EXPECT_STR_EQ(label.preset, "review");
+
+    /* Comparing against a live probe ties the header writer to the label reader without assuming
+     * the build tree is a repository. */
+    struct git_state git;
+    git_state_probe(&git);
+    if (git.subject)
+        EXPECT_STR_EQ(label.git_subject, git.subject);
+    else
+        EXPECT(label.git_subject == NULL);
+    if (git.branch)
+        EXPECT_STR_EQ(label.git_branch, git.branch);
+    else
+        EXPECT(label.git_branch == NULL);
+    git_state_free(&git);
+
+    session_label_free(&label);
+    free(path);
+}
+
+/* A local weights path identifies nothing in a picker row, so the provider's rendering of it is
+ * what gets recorded and read back. */
+static void test_label_prefers_recorded_model_label(void)
+{
+    use_fresh_session_state();
+    struct session_log *log =
+        session_log_open("llama.cpp", "/models/Qwen3.6-35B.gguf", "Qwen3.6-35B", NULL, NULL);
+    EXPECT(log != NULL);
+    if (!log)
+        return;
+    char *path = xstrdup(session_log_path(log));
+    struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = (char *)"hello"}};
+    session_log_append(log, items, 1);
+    session_log_close(log);
+
+    struct session_label label;
+    session_label_read(path, 64, &label);
+    EXPECT_STR_EQ(label.model, "Qwen3.6-35B");
+    session_label_free(&label);
+    free(path);
 }
 
 static void test_resume_repairs_torn_final_line(void)
@@ -445,7 +500,7 @@ static void test_load_trims_dangling_tool_call(void)
 static void test_log_materialization(void)
 {
     use_fresh_session_state();
-    struct session_log *log = session_log_open("pa", "ma", NULL, NULL);
+    struct session_log *log = session_log_open("pa", "ma", NULL, NULL, NULL);
     EXPECT(log != NULL);
 
     EXPECT(session_log_materialized(log) == 0);
@@ -472,7 +527,7 @@ static struct item UNDO_CONVERSATION[] = {
 static void test_truncate_and_reappend(void)
 {
     use_fresh_session_state();
-    struct session_log *log = session_log_open("pa", "ma", NULL, NULL);
+    struct session_log *log = session_log_open("pa", "ma", NULL, NULL, NULL);
     EXPECT(log != NULL);
     char *path = xstrdup(session_log_path(log));
     session_log_append(log, UNDO_CONVERSATION, 9);
@@ -502,7 +557,7 @@ static void test_truncate_and_reappend(void)
 static void test_truncate_all_turns(void)
 {
     use_fresh_session_state();
-    struct session_log *log = session_log_open("pa", "ma", NULL, NULL);
+    struct session_log *log = session_log_open("pa", "ma", NULL, NULL, NULL);
     EXPECT(log != NULL);
     char *path = xstrdup(session_log_path(log));
     session_log_append(log, UNDO_CONVERSATION, 9);
@@ -578,11 +633,11 @@ static void test_fork_copies_prefix_without_touching_source(void)
 static void test_selection_metadata_tracks_productive_switches(void)
 {
     use_fresh_session_state();
-    struct session_log *log = session_log_open("pa", "ma", "hi", "review");
+    struct session_log *log = session_log_open("pa", "ma", NULL, "hi", "review");
     EXPECT(log != NULL);
     char *path = xstrdup(session_log_path(log));
 
-    session_log_set_meta(log, "pb", "mb", NULL, NULL);
+    session_log_set_meta(log, "pb", "mb", NULL, NULL, NULL);
     session_log_append(log, UNDO_CONVERSATION, 3);
     struct session_meta meta;
     EXPECT(session_read_meta(path, &meta) == 0);
@@ -592,7 +647,7 @@ static void test_selection_metadata_tracks_productive_switches(void)
     EXPECT(meta.preset == NULL);
     session_meta_free(&meta);
 
-    session_log_set_meta(log, "pc", "mc", "low", "review");
+    session_log_set_meta(log, "pc", "mc", NULL, "low", "review");
     session_log_append(log, UNDO_CONVERSATION, 6);
     session_log_close(log);
     EXPECT(session_read_meta(path, &meta) == 0);
@@ -614,7 +669,7 @@ static void test_selection_metadata_tracks_productive_switches(void)
 
     struct session_log *resumed = session_log_resume(path, "pc", "mc", "low", "review", 6);
     EXPECT(resumed != NULL);
-    session_log_set_meta(resumed, "pc", "md", NULL, NULL);
+    session_log_set_meta(resumed, "pc", "md", NULL, NULL, NULL);
     EXPECT(session_read_meta(path, &meta) == 0);
     EXPECT_STR_EQ(meta.model, "mc");
     EXPECT_STR_EQ(meta.preset, "review");
@@ -633,11 +688,11 @@ static void test_selection_metadata_tracks_productive_switches(void)
 static void test_truncate_restates_live_selection(void)
 {
     use_fresh_session_state();
-    struct session_log *log = session_log_open("pa", "ma", NULL, NULL);
+    struct session_log *log = session_log_open("pa", "ma", NULL, NULL, NULL);
     EXPECT(log != NULL);
     char *path = xstrdup(session_log_path(log));
     session_log_append(log, UNDO_CONVERSATION, 6);
-    session_log_set_meta(log, "pb", "mb", NULL, "stance");
+    session_log_set_meta(log, "pb", "mb", NULL, NULL, "stance");
     session_log_append(log, UNDO_CONVERSATION, 9);
 
     EXPECT(session_log_truncate(log, 1, 3) == 0);
@@ -764,7 +819,9 @@ int main(void)
     test_session_listing();
     test_session_file_permissions();
     test_resume_appends_only_new_items();
-    test_first_prompt_labels();
+    test_prompt_labels();
+    test_label_reports_recorded_context();
+    test_label_prefers_recorded_model_label();
     test_resume_repairs_torn_final_line();
     test_load_trims_dangling_tool_call();
     test_log_materialization();

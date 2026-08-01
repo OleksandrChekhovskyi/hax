@@ -156,10 +156,10 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         slog = opts->resume_path
                    ? session_log_resume(opts->resume_path, rmeta.provider, rmeta.model,
                                         rmeta.effort, rmeta.preset, n_resumed)
-                   : session_log_open(agent_provider_id(p), sess.model, sess.effort,
-                                      config_str("preset"));
+                   : session_log_open(agent_provider_id(p), sess.model, sess.model_label,
+                                      sess.effort, config_str("preset"));
     if (opts->resume_path)
-        session_log_set_meta(slog, agent_provider_id(p), sess.model, sess.effort,
+        session_log_set_meta(slog, agent_provider_id(p), sess.model, sess.model_label, sess.effort,
                              config_str("preset"));
     session_meta_free(&rmeta);
     if (n_resumed > 0)

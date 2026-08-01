@@ -29,7 +29,7 @@
 
 /* Ceilings on wrapped prose; longer text gets an ellipsis. */
 #define PICKER_TITLE_LINES  3
-#define PICKER_FOOTER_LINES 3
+#define PICKER_FOOTER_LINES 4
 
 /* ---------------- terminal geometry ---------------- */
 
@@ -488,10 +488,15 @@ static void render_footer(struct frame *f, const struct picker_state *s, int sel
     frame_emit(f); /* blank line between the list and the footer */
     const struct picker_item *sel = s->n_filtered ? &s->opts->items[s->filtered[s->sel]] : NULL;
     const char *desc = sel ? sel->desc : NULL;
-    /* An explicit desc always wins; the label is the fallback for rows that
-     * have none and didn't fit. */
-    if (!desc && sel && s->opts->label_gutter && sel_clipped)
-        desc = sel->label;
+    /* A clipped label follows the desc rather than replacing it: the two answer different
+     * questions (what this row is about, versus the words the row had no room for). */
+    char *joined = NULL;
+    if (sel && sel->label && s->opts->label_gutter && sel_clipped) {
+        if (desc && desc[0])
+            desc = joined = xasprintf("%s\n%s", desc, sel->label);
+        else
+            desc = sel->label;
+    }
     int width = footer_width(f->cols);
     const char *p = desc && desc[0] ? desc : "";
     for (int line = 0; line < s->footer_lines; line++) {
@@ -512,6 +517,7 @@ static void render_footer(struct frame *f, const struct picker_state *s, int sel
         }
         frame_emit(f); /* empty when the desc ran out — pads to fixed height */
     }
+    free(joined);
 }
 
 /* Size the footer and the list window for a `cols` x `rows` terminal.
@@ -540,10 +546,12 @@ static void picker_layout(struct picker_state *s, int cols, int rows)
          * layout the renderer will apply. Testing against the bare row width
          * instead would miss labels clipped only to make room for a detail —
          * every /resume row carries one — and a row whose label is clipped
-         * with no reserved footer has nowhere to show its full text. */
-        if (!it->desc && opts->label_gutter && it->label &&
+         * with no reserved footer has nowhere to show its full text. The
+         * remainder after the desc is what the renderer's hard break leaves
+         * the label. */
+        if (opts->label_gutter && it->label &&
             picker_core_clip_width(it->label) > picker_core_label_cells(it, width))
-            d = desc_lines(it->label, fw, PICKER_FOOTER_LINES);
+            d += desc_lines(it->label, fw, PICKER_FOOTER_LINES - d);
         if (d > s->footer_lines)
             s->footer_lines = d;
     }

@@ -514,7 +514,7 @@ int agent_apply_settings(struct agent_state *state, struct provider *provider, i
 
     /* Metadata is staged until the next append, so unused selections stay out of the log. */
     session_log_set_meta(state->session_log, agent_provider_log_name(provider), session->model,
-                         session->effort, config_str("preset"));
+                         session->model_label, session->effort, config_str("preset"));
 
     if (!announce)
         return 0;
@@ -700,7 +700,8 @@ void agent_resume_session(struct agent_state *state, const char *path)
                                metadata.preset, loaded_item_count);
     /* Stage a failed selection restore without changing the file until a turn is appended. */
     session_log_set_meta(state->session_log, agent_provider_log_name(state->provider),
-                         session->model, session->effort, config_str("preset"));
+                         session->model, session->model_label, session->effort,
+                         config_str("preset"));
     session_meta_free(&metadata);
     transcript_log_reset(state->transcript, session->system_prompt, session->tools,
                          session->n_tools);
@@ -853,7 +854,7 @@ void agent_fork(struct agent_state *state, size_t turn_index)
         return;
     }
     session_log_set_meta(new_session_log, agent_provider_log_name(state->provider), session->model,
-                         session->effort, config_str("preset"));
+                         session->model_label, session->effort, config_str("preset"));
     free(new_path);
     session_log_close(state->session_log);
     state->session_log = new_session_log;
@@ -1224,11 +1225,12 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
                                      resume_metadata.model, resume_metadata.effort,
                                      resume_metadata.preset, resumed_item_count)
                 : session_log_open(agent_provider_log_name(current_provider), session.model,
-                                   session.effort, config_str("preset"));
+                                   session.model_label, session.effort, config_str("preset"));
     /* Stage flag-overridden selection metadata; it reaches disk only with the next turn. */
     if (options->resume_path)
         session_log_set_meta(state.session_log, agent_provider_log_name(current_provider),
-                             session.model, session.effort, config_str("preset"));
+                             session.model, session.model_label, session.effort,
+                             config_str("preset"));
     session_meta_free(&resume_metadata);
     if (resumed_item_count > 0)
         transcript_log_append(transcript, session.items, session.n_items);
@@ -1334,7 +1336,8 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         free(previous_effort);
         /* Stage the final pre-request selection; an already-written header is unaffected. */
         session_log_set_meta(state.session_log, agent_provider_log_name(current_provider),
-                             session.model, session.effort, config_str("preset"));
+                             session.model, session.model_label, session.effort,
+                             config_str("preset"));
         /* Persist the prompt before entering a provider call that may hang or be interrupted. */
         agent_loop_flush_logs(transcript, state.session_log, session.items, session.n_items);
 

@@ -578,7 +578,7 @@ static void test_undo_reverts_history_and_file(void)
     add_turn(&f.session, "second", "r2");
     add_turn(&f.session, "third", "r3");
 
-    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL);
+    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL, NULL);
     EXPECT(f.state.session_log != NULL);
     session_log_append(f.state.session_log, f.session.items, f.session.n_items);
     char *path = xstrdup(session_log_path(f.state.session_log));
@@ -629,7 +629,7 @@ static void test_undo_with_continuation_cuts_disk_and_memory_alike(void)
         &f.session, (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("r1 continued")});
     add_turn(&f.session, "second", "r2");
 
-    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL);
+    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL, NULL);
     EXPECT(f.state.session_log != NULL);
     session_log_append(f.state.session_log, f.session.items, f.session.n_items);
     char *path = xstrdup(session_log_path(f.state.session_log));
@@ -682,7 +682,7 @@ static void test_fork_branches_and_switches_log(void)
     add_turn(&f.session, "second", "r2");
     add_turn(&f.session, "third", "r3");
 
-    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL);
+    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL, NULL);
     EXPECT(f.state.session_log != NULL);
     session_log_append(f.state.session_log, f.session.items, f.session.n_items);
     char *orig = xstrdup(session_log_path(f.state.session_log));
@@ -732,7 +732,7 @@ static void test_fork_at_tip_clones_whole(void)
     add_turn(&f.session, "first", "r1");
     add_turn(&f.session, "second", "r2");
 
-    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL);
+    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL, NULL);
     EXPECT(f.state.session_log != NULL);
     session_log_append(f.state.session_log, f.session.items, f.session.n_items);
     char *orig = xstrdup(session_log_path(f.state.session_log));
@@ -804,7 +804,7 @@ static void test_fork_records_live_selection(void)
 
     /* The source file records an older selection than the live one
      * (prov-x · model-a, from the fixture). */
-    f.state.session_log = session_log_open("old-prov", "old-model", "low", "old-stance");
+    f.state.session_log = session_log_open("old-prov", "old-model", NULL, "low", "old-stance");
     EXPECT(f.state.session_log != NULL);
     session_log_append(f.state.session_log, f.session.items, f.session.n_items);
     char *orig = xstrdup(session_log_path(f.state.session_log));
@@ -858,7 +858,7 @@ static void test_session_records_provider_id(void)
     add_turn(&f.session, "first", "r1");
 
     f.state.session_log =
-        session_log_open(agent_provider_id(&f.provider), f.session.model, NULL, NULL);
+        session_log_open(agent_provider_id(&f.provider), f.session.model, NULL, NULL, NULL);
     EXPECT(f.state.session_log != NULL);
     session_log_append(f.state.session_log, f.session.items, f.session.n_items);
     char *path = xstrdup(session_log_path(f.state.session_log));
@@ -883,7 +883,7 @@ static void test_apply_settings_records_switch(void)
     fixture_init(&f);
     add_turn(&f.session, "first", "r1");
 
-    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL);
+    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL, NULL);
     EXPECT(f.state.session_log != NULL);
     session_log_append(f.state.session_log, f.session.items,
                        f.session.n_items); /* materializes it */
@@ -922,7 +922,7 @@ static void test_undo_intact_when_truncate_fails(void)
     add_turn(&f.session, "second", "r2");
     add_turn(&f.session, "third", "r3");
 
-    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL);
+    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL, NULL);
     EXPECT(f.state.session_log != NULL);
     session_log_append(f.state.session_log, f.session.items, f.session.n_items);
     size_t items_before = f.session.n_items;

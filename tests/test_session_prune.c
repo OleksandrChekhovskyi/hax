@@ -49,7 +49,7 @@ static void fixture_free(struct fixture *f)
 static char *write_session(const char *cwd, struct session_log **keep_open)
 {
     EXPECT(chdir(cwd) == 0);
-    struct session_log *log = session_log_open("test", "model", NULL, NULL);
+    struct session_log *log = session_log_open("test", "model", NULL, NULL, NULL);
     EXPECT(log != NULL);
     if (!log)
         return xstrdup("/nonexistent");
