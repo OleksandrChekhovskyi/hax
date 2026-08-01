@@ -5,22 +5,23 @@
 static const char *CWD = "/Users/me/proj";
 static const char *HOME = "/Users/me";
 
-/* Helper: compare the stripped suffix of `cmd` against `want`. The
- * empty-string `want` asserts "no strip" (offset 0); a non-empty `want`
- * asserts the suffix equals `want` exactly. */
-static void expect_strip(const char *cmd, const char *cwd, const char *home, const char *want)
+static void expect_strip(const char *command, const char *cwd, const char *home,
+                         const char *expected_suffix)
 {
-    size_t off = bash_strip_cd_prefix(cmd, cwd, home);
-    if (want == NULL || *want == '\0') {
-        if (off != 0)
-            FAIL("expected no strip for %s, got offset %zu (suffix=\"%s\")", cmd, off, cmd + off);
+    size_t offset = bash_strip_cd_prefix(command, cwd, home);
+    if (offset == 0) {
+        FAIL("expected strip for %s, got offset 0", command);
         return;
     }
-    if (off == 0) {
-        FAIL("expected strip for %s, got offset 0", cmd);
-        return;
-    }
-    EXPECT_STR_EQ(cmd + off, want);
+    EXPECT_STR_EQ(command + offset, expected_suffix);
+}
+
+static void expect_no_strip(const char *command, const char *cwd, const char *home)
+{
+    size_t offset = bash_strip_cd_prefix(command, cwd, home);
+    if (offset != 0)
+        FAIL("expected no strip for %s, got offset %zu (suffix=\"%s\")", command, offset,
+             command + offset);
 }
 
 static void test_strip_absolute_path(void)
@@ -46,7 +47,7 @@ static void test_strip_bare_tilde_when_home_matches(void)
 static void test_strip_bare_tilde_when_home_doesnt_match(void)
 {
     /* HOME != cwd: cd ~ would change directories — not a no-op. */
-    expect_strip("cd ~ && pwd", CWD, HOME, "");
+    expect_no_strip("cd ~ && pwd", CWD, HOME);
 }
 
 static void test_strip_home_variable(void)
@@ -61,9 +62,9 @@ static void test_strip_home_braced(void)
 
 static void test_no_strip_pwd_variable(void)
 {
-    expect_strip("cd $PWD && rg foo", CWD, HOME, "");
-    expect_strip("cd ${PWD} && rg foo", CWD, HOME, "");
-    expect_strip("cd \"$PWD\" && rg foo", CWD, HOME, "");
+    expect_no_strip("cd $PWD && rg foo", CWD, HOME);
+    expect_no_strip("cd ${PWD} && rg foo", CWD, HOME);
+    expect_no_strip("cd \"$PWD\" && rg foo", CWD, HOME);
 }
 
 static void test_strip_dot(void)
@@ -97,76 +98,76 @@ static void test_single_quoted_tilde_is_literal(void)
 {
     /* `'~/proj'` is literally the directory `~/proj`, not $HOME/proj.
      * Stripping here would change semantics — keep as-is. */
-    expect_strip("cd '~/proj' && rg foo", CWD, HOME, "");
+    expect_no_strip("cd '~/proj' && rg foo", CWD, HOME);
 }
 
 static void test_double_quoted_tilde_is_literal(void)
 {
     /* Same story for double quotes — bash does not perform tilde
      * expansion inside `"..."`. */
-    expect_strip("cd \"~/proj\" && rg foo", CWD, HOME, "");
+    expect_no_strip("cd \"~/proj\" && rg foo", CWD, HOME);
 }
 
 static void test_no_strip_when_cd_target_differs(void)
 {
-    expect_strip("cd /elsewhere && rg foo", CWD, HOME, "");
-    expect_strip("cd ~/other && rg foo", CWD, HOME, "");
-    expect_strip("cd $HOME/other && rg foo", CWD, HOME, "");
+    expect_no_strip("cd /elsewhere && rg foo", CWD, HOME);
+    expect_no_strip("cd ~/other && rg foo", CWD, HOME);
+    expect_no_strip("cd $HOME/other && rg foo", CWD, HOME);
 }
 
 static void test_no_strip_on_relative_path(void)
 {
-    expect_strip("cd proj && rg foo", "/Users/me", HOME, "");
-    expect_strip("cd ../proj && rg foo", "/Users/me/other", HOME, "");
+    expect_no_strip("cd proj && rg foo", "/Users/me", HOME);
+    expect_no_strip("cd ../proj && rg foo", "/Users/me/other", HOME);
 }
 
 static void test_no_strip_when_no_double_amp(void)
 {
-    expect_strip("cd /Users/me/proj; rg foo", CWD, HOME, "");
-    expect_strip("cd /Users/me/proj & rg foo", CWD, HOME, "");
-    expect_strip("cd /Users/me/proj || rg foo", CWD, HOME, "");
-    expect_strip("cd /Users/me/proj | rg foo", CWD, HOME, "");
+    expect_no_strip("cd /Users/me/proj; rg foo", CWD, HOME);
+    expect_no_strip("cd /Users/me/proj & rg foo", CWD, HOME);
+    expect_no_strip("cd /Users/me/proj || rg foo", CWD, HOME);
+    expect_no_strip("cd /Users/me/proj | rg foo", CWD, HOME);
 }
 
 static void test_no_strip_on_command_substitution(void)
 {
-    expect_strip("cd $(pwd) && rg foo", CWD, HOME, "");
-    expect_strip("cd `pwd` && rg foo", CWD, HOME, "");
+    expect_no_strip("cd $(pwd) && rg foo", CWD, HOME);
+    expect_no_strip("cd `pwd` && rg foo", CWD, HOME);
 }
 
 static void test_no_strip_on_glob_or_escape(void)
 {
-    expect_strip("cd /Users/me/pro* && rg foo", CWD, HOME, "");
-    expect_strip("cd /Users/me/\\proj && rg foo", CWD, HOME, "");
+    expect_no_strip("cd /Users/me/pro* && rg foo", CWD, HOME);
+    expect_no_strip("cd /Users/me/\\proj && rg foo", CWD, HOME);
 }
 
 static void test_no_strip_on_userhome_form(void)
 {
     /* `~oleksandr/proj` needs getpwnam — we don't try. */
-    expect_strip("cd ~oleksandr/proj && rg foo", CWD, HOME, "");
+    expect_no_strip("cd ~oleksandr/proj && rg foo", CWD, HOME);
 }
 
 static void test_no_strip_on_homex_variable(void)
 {
     /* $HOMEx is a different (typically unset) variable. */
-    expect_strip("cd $HOMEx/proj && rg foo", CWD, HOME, "");
+    expect_no_strip("cd $HOMEx/proj && rg foo", CWD, HOME);
 }
 
 static void test_no_strip_when_no_cd(void)
 {
-    expect_strip("ls && rg foo", CWD, HOME, "");
-    expect_strip("rg foo", CWD, HOME, "");
+    expect_no_strip("ls && rg foo", CWD, HOME);
+    expect_no_strip("rg foo", CWD, HOME);
 }
 
 static void test_no_strip_when_cd_alone(void)
 {
-    expect_strip("cd && rg foo", CWD, HOME, "");
+    expect_no_strip("cd && rg foo", CWD, HOME);
 }
 
 static void test_no_strip_when_empty_suffix(void)
 {
-    expect_strip("cd /Users/me/proj && ", CWD, HOME, "");
-    expect_strip("cd /Users/me/proj &&", CWD, HOME, "");
+    expect_no_strip("cd /Users/me/proj && ", CWD, HOME);
+    expect_no_strip("cd /Users/me/proj &&", CWD, HOME);
 }
 
 static void test_leading_whitespace_tolerated(void)
@@ -177,8 +178,8 @@ static void test_leading_whitespace_tolerated(void)
 static void test_no_strip_when_home_unset(void)
 {
     /* HOME=NULL means we can't expand ~ or $HOME safely. */
-    expect_strip("cd ~/proj && rg foo", CWD, NULL, "");
-    expect_strip("cd $HOME/proj && rg foo", CWD, NULL, "");
+    expect_no_strip("cd ~/proj && rg foo", CWD, NULL);
+    expect_no_strip("cd $HOME/proj && rg foo", CWD, NULL);
     /* But an absolute literal still works. */
     expect_strip("cd /Users/me/proj && rg foo", CWD, NULL, "rg foo");
 }
@@ -186,12 +187,12 @@ static void test_no_strip_when_home_unset(void)
 static void test_no_strip_on_mixed_quoting(void)
 {
     /* `"/a"foo` is bash word concatenation — too clever for us. */
-    expect_strip("cd \"/Users/me/proj\"x && rg foo", CWD, HOME, "");
+    expect_no_strip("cd \"/Users/me/proj\"x && rg foo", CWD, HOME);
 }
 
 static void test_no_strip_on_backslash_in_double_quotes(void)
 {
-    expect_strip("cd \"/Users/me/\\proj\" && rg foo", CWD, HOME, "");
+    expect_no_strip("cd \"/Users/me/\\proj\" && rg foo", CWD, HOME);
 }
 
 static void test_strip_cwd_is_root(void)
@@ -212,9 +213,9 @@ static void test_strip_tight_amp(void)
  * working one — exactly the semantics drift we promised to avoid. */
 static void test_no_strip_unquoted_home_var_with_space(void)
 {
-    expect_strip("cd $HOME/proj && rg foo", "/tmp/a b/proj", "/tmp/a b", "");
-    expect_strip("cd ${HOME}/proj && rg foo", "/tmp/a b/proj", "/tmp/a b", "");
-    expect_strip("cd $HOME && pwd", "/tmp/a b", "/tmp/a b", "");
+    expect_no_strip("cd $HOME/proj && rg foo", "/tmp/a b/proj", "/tmp/a b");
+    expect_no_strip("cd ${HOME}/proj && rg foo", "/tmp/a b/proj", "/tmp/a b");
+    expect_no_strip("cd $HOME && pwd", "/tmp/a b", "/tmp/a b");
 }
 
 /* Quoted forms aren't subject to word splitting or pathname expansion,
@@ -229,8 +230,8 @@ static void test_no_strip_unquoted_var_with_glob(void)
 {
     /* `*` / `?` / `[` in the expanded value would be subject to
      * pathname expansion and could resolve to a different directory. */
-    expect_strip("cd $HOME/proj && rg foo", "/tmp/a*/proj", "/tmp/a*", "");
-    expect_strip("cd $HOME && ls", "/tmp/q?", "/tmp/q?", "");
+    expect_no_strip("cd $HOME/proj && rg foo", "/tmp/a*/proj", "/tmp/a*");
+    expect_no_strip("cd $HOME && ls", "/tmp/q?", "/tmp/q?");
 }
 
 /* Double quotes suppress word splitting and globbing, so spaces and
@@ -250,13 +251,13 @@ static void test_no_strip_double_quoted_with_dollar(void)
 {
     /* Literal `$` inside double quotes would still trigger parameter
      * expansion at runtime — bail rather than guess what it resolves to. */
-    expect_strip("cd \"/tmp/$x\" && ls", "/tmp/foo", HOME, "");
+    expect_no_strip("cd \"/tmp/$x\" && ls", "/tmp/foo", HOME);
 }
 
 static void test_no_strip_double_quoted_with_backtick(void)
 {
     /* Backticks trigger command substitution inside double quotes. */
-    expect_strip("cd \"/tmp/`cmd`\" && ls", "/tmp/foo", HOME, "");
+    expect_no_strip("cd \"/tmp/`cmd`\" && ls", "/tmp/foo", HOME);
 }
 
 static void test_no_strip_tilde_with_space_in_home(void)
@@ -264,8 +265,8 @@ static void test_no_strip_tilde_with_space_in_home(void)
     /* Tilde is the borderline case — POSIX exempts tilde from word
      * splitting but pathname expansion is per-word, and behavior
      * across shells is implementation-defined. Stay conservative. */
-    expect_strip("cd ~/proj && rg foo", "/tmp/a b/proj", "/tmp/a b", "");
-    expect_strip("cd ~ && pwd", "/tmp/a b", "/tmp/a b", "");
+    expect_no_strip("cd ~/proj && rg foo", "/tmp/a b/proj", "/tmp/a b");
+    expect_no_strip("cd ~ && pwd", "/tmp/a b", "/tmp/a b");
 }
 
 int main(void)

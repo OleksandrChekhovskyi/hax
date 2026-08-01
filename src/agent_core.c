@@ -11,7 +11,7 @@
 #include "agent_usage.h"
 #include "model_meta.h"
 #include "providers/registry.h"
-#include "tools/bash_export.h"
+#include "tools/bash_env.h"
 
 /* Dynamic environment and project guidance are appended by build_system_prompt. */
 static const char DEFAULT_SYSTEM_PROMPT[] =
@@ -157,7 +157,7 @@ int agent_recording_enabled(const struct provider *provider)
 /* Keep subprocess inheritance synchronized at every settings-resolution point. */
 static void export_selection(const struct provider *provider, const struct agent_session *session)
 {
-    bash_export_selection(agent_provider_id(provider), session->model, session->effort);
+    bash_env_set_selection(agent_provider_id(provider), session->model, session->effort);
 }
 
 void agent_session_init(struct agent_session *session, struct provider *provider,

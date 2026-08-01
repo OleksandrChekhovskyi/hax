@@ -6,10 +6,13 @@
 
 #include "util.h"
 
-/* Path-safe character: one of the chars an LLM emits in a directory
- * token without introducing shell semantics. Restrictive on purpose —
- * if we see anything else (glob, escape, command substitution), we
- * bail rather than risk a wrong rewrite. */
+enum quote_mode {
+    QUOTE_NONE,
+    QUOTE_DOUBLE,
+    QUOTE_SINGLE,
+};
+
+/* Restrict unquoted bytes to characters that cannot introduce shell semantics. */
 static int is_path_safe(char c)
 {
     unsigned char u = (unsigned char)c;
@@ -20,229 +23,178 @@ static int is_path_safe(char c)
     return c == '/' || c == '.' || c == '_' || c == '-' || c == '+';
 }
 
-/* Whether a byte inside a parsed cd-target token is acceptable as
- * part of the resolved path. The acceptable set widens with quoting:
- *
- *   - quoting == 0 (unquoted): bash applies word splitting on IFS
- *     whitespace and pathname expansion on glob meta to anything
- *     unquoted, so the literal portion must be path-safe too —
- *     no whitespace, no `*`/`?`/`[`, no shell metachars.
- *
- *   - quoting == 1 (double-quoted): word splitting and globbing
- *     don't fire inside `"..."`. Spaces, glob meta, parens, etc.
- *     are literal; only `$` (parameter / command substitution) and
- *     backtick remain dangerous. (Backslash is already rejected at
- *     tokenize time.)
- *
- *   - quoting == 2 (single-quoted) bypasses this entirely; its
- *     branch in resolve_cd_target copies the contents verbatim. */
-static int is_token_safe(char c, int quoting)
+/* Double quotes permit literal path bytes except the remaining expansion operators. */
+static int is_token_safe(char c, enum quote_mode quote)
 {
-    if (quoting == 1)
+    if (quote == QUOTE_DOUBLE)
         return c != '$' && c != '`';
     return is_path_safe(c);
 }
 
-/* Whether a value is safe to substitute into an unquoted shell
- * context. Bash word-splits unquoted parameter-expansion results on
- * IFS whitespace and applies pathname expansion (glob meta) to every
- * resulting word — so a space or `*` in $HOME makes the original
- * `cd $HOME/proj` parse as multiple args, or expand to a different
- * path than the literal value. Either way it isn't equivalent to
- * "treat the value as a single path", and stripping would change
- * execution semantics. Tilde results escape word splitting (POSIX
- * 2.6.5 limits it to parameter/command/arithmetic expansion) but
- * pathname expansion is per-word and the bash manual doesn't carve
- * them out, so we apply the same conservative check there too.
- * Quoted contexts ("$VAR", '~/x') bypass both steps and don't need
- * this. */
-static int unquoted_expansion_safe(const char *s)
+/* Unquoted expansion values must survive word splitting and pathname expansion unchanged. */
+static int unquoted_expansion_safe(const char *value)
 {
-    for (; *s; s++) {
-        if (*s == ' ' || *s == '\t' || *s == '\n' || *s == '*' || *s == '?' || *s == '[')
+    for (; *value; value++) {
+        if (*value == ' ' || *value == '\t' || *value == '\n' || *value == '*' || *value == '?' ||
+            *value == '[')
             return 0;
     }
     return 1;
 }
 
-/* Compare two paths ignoring any trailing slash on either side (so
- * "/foo" == "/foo/"). The cwd from getcwd() never has a trailing slash
- * except at root ("/"), so we preserve a lone "/" by keeping at least
- * one character on each side. */
-static int paths_equal(const char *a, size_t al, const char *b, size_t bl)
+/* Ignore trailing slashes without reducing the root path to an empty string. */
+static int paths_equal(const char *a, size_t a_len, const char *b, size_t b_len)
 {
-    while (al > 1 && a[al - 1] == '/')
-        al--;
-    while (bl > 1 && b[bl - 1] == '/')
-        bl--;
-    return al == bl && memcmp(a, b, al) == 0;
+    while (a_len > 1 && a[a_len - 1] == '/')
+        a_len--;
+    while (b_len > 1 && b[b_len - 1] == '/')
+        b_len--;
+    return a_len == b_len && memcmp(a, b, a_len) == 0;
 }
 
-/* Resolve a parsed cd target to an absolute path string (caller frees),
- * or return NULL if the token is too fancy to handle safely. Quoting:
- *   0 = unquoted    — supports leading ~, ~/, $HOME, ${HOME}, bare "."
- *   1 = "double"    — supports leading $HOME, ${HOME}
- *                     (bash leaves ~ literal inside double quotes)
- *   2 = 'single'    — strict literal, no expansion
- *
- * The portion of the token *after* a recognized prefix must be all
- * path-safe characters; that's how we keep `$HOMEx`, `$(...)`, globs,
- * and similar shell-significant input from sneaking past as a "literal
- * path with a leading var". */
-static char *resolve_cd_target(const char *tok, size_t tok_len, int quoting, const char *cwd,
-                               const char *home)
+/* Return an owned absolute path, or NULL for shell syntax not modeled here. */
+static char *resolve_cd_target(const char *token, size_t token_len, enum quote_mode quote,
+                               const char *cwd, const char *home)
 {
-    /* `cd .` is a cwd alias in any quoting — single quotes don't change
-     * the meaning of a bare `.` and there's no expansion to suppress.
-     * Checked before the single-quoted branch so `cd '.'` matches too. */
-    if (tok_len == 1 && tok[0] == '.')
+    /* Dot aliases cwd regardless of quoting. */
+    if (token_len == 1 && token[0] == '.')
         return xstrdup(cwd);
 
-    /* Single-quoted: bash performs no expansion at all. */
-    if (quoting == 2) {
-        char *out = xmalloc(tok_len + 1);
-        memcpy(out, tok, tok_len);
-        out[tok_len] = '\0';
-        return out;
+    if (quote == QUOTE_SINGLE) {
+        char *path = xmalloc(token_len + 1);
+        memcpy(path, token, token_len);
+        path[token_len] = '\0';
+        return path;
     }
 
-    /* Tilde expansion — bash only honors a leading `~` when unquoted. */
-    if (quoting == 0 && tok_len >= 1 && tok[0] == '~') {
+    /* Shells do not expand a quoted tilde. */
+    if (quote == QUOTE_NONE && token_len >= 1 && token[0] == '~') {
         if (!home || !*home)
             return NULL;
         if (!unquoted_expansion_safe(home))
             return NULL;
-        if (tok_len == 1)
+        if (token_len == 1)
             return xstrdup(home);
-        if (tok[1] != '/') /* `~user/...` would need getpwnam — bail */
+        if (token[1] != '/') /* `~user/...` would need getpwnam — bail */
             return NULL;
-        for (size_t i = 2; i < tok_len; i++) {
-            if (!is_path_safe(tok[i]))
+        for (size_t i = 2; i < token_len; i++) {
+            if (!is_path_safe(token[i]))
                 return NULL;
         }
-        return xasprintf("%s%.*s", home, (int)(tok_len - 1), tok + 1);
+        return xasprintf("%s%.*s", home, (int)(token_len - 1), token + 1);
     }
 
-    /* $HOME / ${HOME} at the start of the token. The boundary check
-     * after the bare-name form prevents us from misreading $HOMEx as
-     * $HOME + "x" — bash would parse that as the (typically unset)
-     * variable $HOMEx. */
-    const char *var_val = NULL;
-    size_t consumed = 0;
-    if (tok_len >= 5 && memcmp(tok, "$HOME", 5) == 0 && (tok_len == 5 || tok[5] == '/')) {
-        var_val = home;
-        consumed = 5;
-    } else if (tok_len >= 7 && memcmp(tok, "${HOME}", 7) == 0) {
-        var_val = home;
-        consumed = 7;
+    /* The slash boundary distinguishes $HOME/path from the variable $HOMEx. */
+    const char *expansion = NULL;
+    size_t prefix_len = 0;
+    if (token_len >= 5 && memcmp(token, "$HOME", 5) == 0 && (token_len == 5 || token[5] == '/')) {
+        expansion = home;
+        prefix_len = 5;
+    } else if (token_len >= 7 && memcmp(token, "${HOME}", 7) == 0) {
+        expansion = home;
+        prefix_len = 7;
     }
 
-    if (var_val) {
-        if (!*var_val)
+    if (expansion) {
+        if (!*expansion)
             return NULL;
-        if (quoting == 0 && !unquoted_expansion_safe(var_val))
+        if (quote == QUOTE_NONE && !unquoted_expansion_safe(expansion))
             return NULL;
-        for (size_t i = consumed; i < tok_len; i++) {
-            if (!is_token_safe(tok[i], quoting))
+        for (size_t i = prefix_len; i < token_len; i++) {
+            if (!is_token_safe(token[i], quote))
                 return NULL;
         }
-        return xasprintf("%s%.*s", var_val, (int)(tok_len - consumed), tok + consumed);
+        return xasprintf("%s%.*s", expansion, (int)(token_len - prefix_len), token + prefix_len);
     }
 
-    /* No variable / tilde. Treat as a literal path only when it's
-     * absolute and made entirely of token-safe characters. Relative
-     * paths could only match cwd by accident (and only when the agent
-     * happens to be at their parent), so we don't try. */
-    if (tok_len < 1 || tok[0] != '/')
+    /* Resolving relative paths would require filesystem state, so accept only absolute literals. */
+    if (token_len < 1 || token[0] != '/')
         return NULL;
-    for (size_t i = 0; i < tok_len; i++) {
-        if (!is_token_safe(tok[i], quoting))
+    for (size_t i = 0; i < token_len; i++) {
+        if (!is_token_safe(token[i], quote))
             return NULL;
     }
-    char *out = xmalloc(tok_len + 1);
-    memcpy(out, tok, tok_len);
-    out[tok_len] = '\0';
-    return out;
+    char *path = xmalloc(token_len + 1);
+    memcpy(path, token, token_len);
+    path[token_len] = '\0';
+    return path;
 }
 
-size_t bash_strip_cd_prefix(const char *cmd, const char *cwd, const char *home)
+size_t bash_strip_cd_prefix(const char *command, const char *cwd, const char *home)
 {
-    if (!cmd || !cwd)
+    if (!command || !cwd)
         return 0;
 
-    const char *p = cmd;
-    while (*p == ' ' || *p == '\t')
-        p++;
+    const char *cursor = command;
+    while (*cursor == ' ' || *cursor == '\t')
+        cursor++;
 
-    /* `cd` keyword followed by at least one whitespace char. We don't
-     * accept `cd\n…` etc. because LLMs don't emit those, and accepting
-     * them would force us to track newlines through the rest of the
-     * parser. */
-    if (p[0] != 'c' || p[1] != 'd' || (p[2] != ' ' && p[2] != '\t'))
+    /* Accept only horizontal whitespace to keep the grammar on one command line. */
+    if (cursor[0] != 'c' || cursor[1] != 'd' || (cursor[2] != ' ' && cursor[2] != '\t'))
         return 0;
-    p += 2;
-    while (*p == ' ' || *p == '\t')
-        p++;
+    cursor += 2;
+    while (*cursor == ' ' || *cursor == '\t')
+        cursor++;
 
-    /* Parse exactly one shell word. Reject mixed quoting like
-     * `cd "/a"'/b'` and any escape sequence — both are signals the
-     * model is doing something we shouldn't second-guess. */
-    const char *tok;
-    size_t tok_len;
-    int quoting;
-    if (*p == '\'') {
-        quoting = 2;
-        p++;
-        tok = p;
-        while (*p && *p != '\'')
-            p++;
-        if (*p != '\'')
+    /* Mixed quoting and escapes are outside this conservative grammar. */
+    const char *token;
+    size_t token_len;
+    enum quote_mode quote;
+    if (*cursor == '\'') {
+        quote = QUOTE_SINGLE;
+        cursor++;
+        token = cursor;
+        while (*cursor && *cursor != '\'')
+            cursor++;
+        if (*cursor != '\'')
             return 0;
-        tok_len = (size_t)(p - tok);
-        p++;
-    } else if (*p == '"') {
-        quoting = 1;
-        p++;
-        tok = p;
-        while (*p && *p != '"') {
-            if (*p == '\\') /* backslash escapes — bail rather than interpret */
+        token_len = (size_t)(cursor - token);
+        cursor++;
+    } else if (*cursor == '"') {
+        quote = QUOTE_DOUBLE;
+        cursor++;
+        token = cursor;
+        while (*cursor && *cursor != '"') {
+            if (*cursor == '\\') /* backslash escapes — bail rather than interpret */
                 return 0;
-            p++;
+            cursor++;
         }
-        if (*p != '"')
+        if (*cursor != '"')
             return 0;
-        tok_len = (size_t)(p - tok);
-        p++;
+        token_len = (size_t)(cursor - token);
+        cursor++;
     } else {
-        quoting = 0;
-        tok = p;
-        while (*p && *p != ' ' && *p != '\t' && *p != ';' && *p != '&' && *p != '|' && *p != '<' &&
-               *p != '>' && *p != '(' && *p != ')' && *p != '`' && *p != '\\' && *p != '"' &&
-               *p != '\'')
-            p++;
-        tok_len = (size_t)(p - tok);
-        if (tok_len == 0)
+        quote = QUOTE_NONE;
+        token = cursor;
+        while (*cursor && *cursor != ' ' && *cursor != '\t' && *cursor != ';' && *cursor != '&' &&
+               *cursor != '|' && *cursor != '<' && *cursor != '>' && *cursor != '(' &&
+               *cursor != ')' && *cursor != '`' && *cursor != '\\' && *cursor != '"' &&
+               *cursor != '\'')
+            cursor++;
+        token_len = (size_t)(cursor - token);
+        if (token_len == 0)
             return 0;
     }
     /* Reject quoted-then-anything (e.g. `cd "/a"foo`) — that's word
      * concatenation in bash, which we don't model. */
-    if (quoting != 0 && *p != ' ' && *p != '\t' && *p != '&' && *p != ';')
+    if (quote != QUOTE_NONE && *cursor != ' ' && *cursor != '\t' && *cursor != '&' &&
+        *cursor != ';')
         return 0;
 
-    while (*p == ' ' || *p == '\t')
-        p++;
-    if (p[0] != '&' || p[1] != '&')
+    while (*cursor == ' ' || *cursor == '\t')
+        cursor++;
+    if (cursor[0] != '&' || cursor[1] != '&')
         return 0;
-    p += 2;
-    while (*p == ' ' || *p == '\t')
-        p++;
-    if (*p == '\0') /* `cd X &&` with no follow-up — nothing to keep */
+    cursor += 2;
+    while (*cursor == ' ' || *cursor == '\t')
+        cursor++;
+    if (*cursor == '\0') /* `cd X &&` with no follow-up — nothing to keep */
         return 0;
 
-    char *resolved = resolve_cd_target(tok, tok_len, quoting, cwd, home);
-    if (!resolved)
+    char *resolved_path = resolve_cd_target(token, token_len, quote, cwd, home);
+    if (!resolved_path)
         return 0;
-    int eq = paths_equal(resolved, strlen(resolved), cwd, strlen(cwd));
-    free(resolved);
-    return eq ? (size_t)(p - cmd) : 0;
+    int matches_cwd = paths_equal(resolved_path, strlen(resolved_path), cwd, strlen(cwd));
+    free(resolved_path);
+    return matches_cwd ? (size_t)(cursor - command) : 0;
 }

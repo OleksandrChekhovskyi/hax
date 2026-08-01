@@ -12,7 +12,7 @@
 #include "terminal/ansi.h"
 #include "terminal/interrupt.h"
 #include "terminal/theme.h"
-#include "tools/bash_export.h"
+#include "tools/bash_env.h"
 #include "util.h"
 
 static const struct help_option {

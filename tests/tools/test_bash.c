@@ -14,30 +14,30 @@
 #include "util.h"
 #include "system/fs.h"
 #include "system/tempfiles.h"
-#include "tools/bash_export.h"
+#include "tools/bash_env.h"
 
-static char *call_bash(const char *cmd_json_escaped)
+static char *call_bash(const char *escaped_command)
 {
-    char *args = xasprintf("{\"command\":\"%s\"}", cmd_json_escaped);
+    char *args = xasprintf("{\"command\":\"%s\"}", escaped_command);
     char *out = TOOL_BASH.run(args, NULL);
     free(args);
     return out;
 }
 
-struct capture {
+struct display_capture {
     struct buf buf;
 };
 
-static void capture_write(const char *bytes, size_t n, void *data)
+static void append_display(const char *bytes, size_t len, void *data)
 {
-    struct capture *capture = data;
-    buf_append(&capture->buf, bytes, n);
+    struct display_capture *capture = data;
+    buf_append(&capture->buf, bytes, len);
 }
 
-static char *call_bash_streamed(const char *cmd_json_escaped, struct capture *cap)
+static char *call_bash_streamed(const char *escaped_command, struct display_capture *capture)
 {
-    char *args = xasprintf("{\"command\":\"%s\"}", cmd_json_escaped);
-    struct tool_run_ctx ctx = {.display = capture_write, .display_data = cap};
+    char *args = xasprintf("{\"command\":\"%s\"}", escaped_command);
+    struct tool_run_ctx ctx = {.display = append_display, .display_data = capture};
     char *out = TOOL_BASH.run(args, &ctx);
     free(args);
     return out;
@@ -80,7 +80,6 @@ static void test_bash_exit_code(void)
 
 static void test_bash_signal(void)
 {
-    /* Self-kill with SIGTERM. */
     char *out = call_bash("kill -TERM $$");
     EXPECT(strstr(out, "[signal 15]") != NULL);
     free(out);
@@ -95,9 +94,6 @@ static void test_bash_no_output(void)
 
 static void test_bash_stdin_detached(void)
 {
-    /* `cat` with no args reads stdin; if stdin wasn't /dev/null'd, it would
-     * block forever. With EOF on stdin it returns immediately and produces
-     * no output. */
     time_t t0 = time(NULL);
     char *out = call_bash("cat");
     time_t elapsed = time(NULL) - t0;
@@ -108,13 +104,7 @@ static void test_bash_stdin_detached(void)
 
 static void test_bash_dev_tty_does_not_hang(void)
 {
-    /* Programs that bypass stdin and read /dev/tty directly (sudo,
-     * ssh host-key prompts, gpg passphrase prompts, …) would otherwise
-     * find the agent's terminal and block on input we can't deliver.
-     * The child runs setsid(), so it has no controlling terminal —
-     * `open("/dev/tty")` fails with ENXIO before anything blocks.
-     * Worst case here is timeout, so a tight elapsed bound is the
-     * load-bearing assertion; the marker check is sanity. */
+    /* The child has no controlling terminal, so direct /dev/tty reads must fail promptly. */
     time_t t0 = time(NULL);
     char *out = call_bash("stty sane </dev/tty 2>&1; cat /dev/tty 2>&1; echo done");
     time_t elapsed = time(NULL) - t0;
@@ -125,9 +115,6 @@ static void test_bash_dev_tty_does_not_hang(void)
 
 static void test_bash_background_job_does_not_hang(void)
 {
-    /* Shell exits immediately; backgrounded sleep would keep the
-     * pipe write end open (and so the parent's read blocked) unless
-     * pgroup cleanup collapses it. */
     time_t t0 = time(NULL);
     char *out = call_bash("echo spawned; sleep 30 &");
     time_t elapsed = time(NULL) - t0;
@@ -138,7 +125,6 @@ static void test_bash_background_job_does_not_hang(void)
 
 static void test_bash_foreground_infinite_writer_caps(void)
 {
-    /* `yes` never exits on its own; must be killed once OUTPUT_CAP is hit. */
     time_t t0 = time(NULL);
     char *out = call_bash("yes foo");
     time_t elapsed = time(NULL) - t0;
@@ -152,10 +138,6 @@ static void test_bash_foreground_infinite_writer_caps(void)
 
 static void test_bash_timeout_kills_process_tree(void)
 {
-    /* A 30s sleep with HAX_BASH_TIMEOUT=30ms must be killed quickly and
-     * the timeout annotation surfaced to the model. The pgroup SIGTERM
-     * collapses the subprocess tree (sleep is the shell's child and
-     * honors SIGTERM with default disposition). */
     setenv("HAX_BASH_TIMEOUT", "30ms", 1);
     time_t t0 = time(NULL);
     char *out = call_bash("sleep 30");
@@ -170,11 +152,6 @@ static void test_bash_timeout_kills_process_tree(void)
 
 static void test_bash_per_call_timeout_overrides_env(void)
 {
-    /* Env timeout (10ms) would fire on this 50ms sleep, but the per-call
-     * `timeout_seconds=60` arg overrides it — so the sleep finishes
-     * cleanly with no timeout marker. Proves the arg path is hit instead
-     * of the env path. The integer-seconds floor is irrelevant here
-     * because the command finishes long before the arg expires. */
     setenv("HAX_BASH_TIMEOUT", "10ms", 1);
     char *out = TOOL_BASH.run("{\"command\":\"sleep 0.05\",\"timeout_seconds\":60}", NULL);
     EXPECT(strstr(out, "[timed out") == NULL);
@@ -184,7 +161,6 @@ static void test_bash_per_call_timeout_overrides_env(void)
 
 static void test_bash_per_call_timeout_clamped_to_max(void)
 {
-    /* Model asks for 9999s but max is 30ms — should clamp. */
     setenv("HAX_BASH_TIMEOUT_MAX", "30ms", 1);
     time_t t0 = time(NULL);
     char *out = TOOL_BASH.run("{\"command\":\"sleep 30\",\"timeout_seconds\":9999}", NULL);
@@ -197,8 +173,6 @@ static void test_bash_per_call_timeout_clamped_to_max(void)
 
 static void test_bash_timeout_graceful_sigterm(void)
 {
-    /* `sleep` honors SIGTERM with default disposition — it should die
-     * during the grace window, not require SIGKILL escalation. */
     setenv("HAX_BASH_TIMEOUT", "30ms", 1);
     time_t t0 = time(NULL);
     char *out = call_bash("sleep 30");
@@ -211,9 +185,6 @@ static void test_bash_timeout_graceful_sigterm(void)
 
 static void test_bash_timeout_escalates_to_sigkill(void)
 {
-    /* Shell traps SIGTERM (SIG_IGN) and busy-loops on builtins (no fork,
-     * pgroup is just the shell). SIGTERM hits but is ignored, so we must
-     * wait the grace window and escalate to SIGKILL. */
     setenv("HAX_BASH_TIMEOUT", "30ms", 1);
     setenv("HAX_BASH_TIMEOUT_GRACE", "30ms", 1);
     time_t t0 = time(NULL);
@@ -228,22 +199,8 @@ static void test_bash_timeout_escalates_to_sigkill(void)
 
 static void test_bash_timeout_grace_allows_cleanup(void)
 {
-    /* Foreground shell traps SIGTERM and takes a moment to flush output
-     * before exiting (the common pytest / npm-test / cargo-test
-     * cleanup-handler pattern). The naive "deadline hit → SIGKILL"
-     * path would lose that final output. The grace window defers the
-     * SIGKILL so well-behaved cleanup handlers can finish.
-     *
-     * The deadline clock starts at fork(), so the child must exec the
-     * shell and install the trap before SIGTERM fires. On a loaded
-     * machine (parallel ASan suite) shell startup alone can exceed the
-     * timeout. The "armed" marker printed right after trap installation
-     * distinguishes that benign startup race (no armed, no cleaned →
-     * escalate the timeout and retry) from the regression this test
-     * guards against (armed but no cleaned: the trap existed and its
-     * output was still lost → fail immediately). Success stays keyed on
-     * "cleaned" alone: SIGTERM can land between the trap and the echo,
-     * running the pending trap first — cleaned without armed. */
+    /* Retry with wider startup windows until the child installs its trap; an armed trap must flush
+     * cleanup output during the grace period. */
     static const char *const timeouts[] = {"100ms", "400ms", "1600ms"};
     setenv("HAX_BASH_TIMEOUT_GRACE", "500ms", 1);
     char *out = NULL;
@@ -263,9 +220,6 @@ static void test_bash_timeout_grace_allows_cleanup(void)
 
 static void test_bash_timeout_grace_disabled(void)
 {
-    /* HAX_BASH_TIMEOUT_GRACE=0 skips SIGTERM entirely and SIGKILLs at
-     * the deadline — so a SIGTERM-trapping busy loop dies immediately,
-     * not after a grace window. */
     setenv("HAX_BASH_TIMEOUT", "30ms", 1);
     setenv("HAX_BASH_TIMEOUT_GRACE", "0", 1);
     time_t t0 = time(NULL);
@@ -280,17 +234,7 @@ static void test_bash_timeout_grace_disabled(void)
 
 static void test_bash_timeout_no_grace_short_timeout(void)
 {
-    /* Smallest practical timeout (1ms) with grace disabled — the
-     * single-shot SIGKILL on deadline must still reach the child even
-     * though setsid() in the child races with the parent's first
-     * kill. The race is a POSIX-permitted ordering: if the parent
-     * kills before the child setsid()'s, kill(-pid, …) fails with
-     * ESRCH and the post-loop waitpid would block until the command
-     * exits naturally (here, 30s of sleep). The race window is
-     * microseconds and doesn't reliably reproduce on macOS, but
-     * kill_descendants() in run_shell falls back to kill(pid, …) on
-     * ESRCH so the path is correct under both orderings on any
-     * platform. */
+    /* A direct SIGKILL must work even if the parent signals before the child completes setsid(). */
     setenv("HAX_BASH_TIMEOUT", "1ms", 1);
     setenv("HAX_BASH_TIMEOUT_GRACE", "0", 1);
     time_t t0 = time(NULL);
@@ -310,16 +254,8 @@ static void test_bash_timeout_grace_no_escape_via_pipe_close(void)
      * no fixed pre-SIGTERM window is reliably wide enough. */
     T_SKIP("spawn latency under TSan breaks the timing window");
 #endif
-    /* A descendant traps SIGTERM, redirects stdout/stderr away from
-     * the pipe (closing its inherited write end), and runs CPU work.
-     * Without the EOF-during-grace handling, the parent reads EOF and
-     * returns immediately — the descendant survives. With the fix,
-     * the grace-window SIGKILL collapses the pgroup. We probe the pgroup
-     * directly: the subshell records its PGID via $$ (POSIX: subshell
-     * inherits parent shell's $$, and the parent IS the pgroup
-     * leader). The 80ms timeout gives the subshell margin to write
-     * $$ and install its trap before SIGTERM arrives (matters under
-     * ASan, which slows fork). */
+    /* The descendant closes the output pipe during its TERM handler; its recorded process group
+     * must still be gone when the grace period expires. */
     setenv("HAX_BASH_TIMEOUT", "80ms", 1);
     setenv("HAX_BASH_TIMEOUT_GRACE", "20ms", 1);
 
@@ -349,10 +285,7 @@ static void test_bash_timeout_grace_no_escape_via_pipe_close(void)
     unlink(path);
     EXPECT(pgid > 0);
 
-    /* With the fix, SIGKILL has already collapsed the pgroup; ESRCH or
-     * EPERM (Darwin's "any members could not be signaled") arrives on
-     * the first probe. Without the fix, the busy loop survives — poll
-     * briefly to fail-fast, then clean up before the EXPECT. */
+    /* ESRCH on Linux or EPERM on Darwin means the group is gone; clean up before failing. */
     int alive = 1;
     for (int i = 0; i < 20; i++) {
         if (kill(-pgid, 0) < 0 && (errno == ESRCH || errno == EPERM)) {
@@ -372,18 +305,8 @@ static void test_bash_timeout_grace_no_escape_via_pipe_close(void)
 
 static void test_bash_redirected_background_job_does_not_leak(void)
 {
-    /* `sleep N >/dev/null 2>&1 &` redirects its output away from the
-     * pipe and detaches; the shell exits immediately, the last pipe
-     * write reference drops, and EOF can arrive before the parent's
-     * iteration-top waitpid notices the shell is gone. Without
-     * explicit pgroup cleanup at EOF, the backgrounded sleep would
-     * survive past our return and leak indefinitely. `nohup` is
-     * belt-and-braces here: although pipes don't trigger the SIGHUP
-     * cascade that PTY session-leader exit does, some shells/setups
-     * do propagate SIGHUP to backgrounded jobs at exit; nohup ensures
-     * sleep survives unless our explicit cleanup signals it. We
-     * capture sleep's pid via $! so the test can verify the cleanup
-     * fired. */
+    /* A redirected background process does not hold the output pipe open, so verify it is still
+     * killed when the shell exits. */
     char path[] = "/tmp/hax-test-bg-pid-XXXXXX";
     int fd = mkstemp(path);
     EXPECT(fd >= 0);
@@ -406,9 +329,7 @@ static void test_bash_redirected_background_job_does_not_leak(void)
     unlink(path);
     EXPECT(pid > 0);
 
-    /* With the fix, SIGKILL has already collapsed the pgroup; ESRCH
-     * (Linux) or EPERM (Darwin, zombie-only) arrives quickly. Without
-     * it, sleep would survive the full 30s. */
+    /* ESRCH on Linux or EPERM on Darwin means the process is gone. */
     int alive = 1;
     for (int i = 0; i < 20; i++) {
         if (kill(pid, 0) < 0 && (errno == ESRCH || errno == EPERM)) {
@@ -425,12 +346,6 @@ static void test_bash_redirected_background_job_does_not_leak(void)
 
 static void test_bash_timeout_huge_does_not_overflow(void)
 {
-    /* HAX_BASH_TIMEOUT close to LONG_MAX must not overflow the deadline
-     * arithmetic. Plain builds may accidentally tolerate the wrap (the
-     * `deadline > 0` guard catches the negative result and silently
-     * disables the timeout) but UBSan flags the signed-overflow UB
-     * directly. With saturation the deadline pegs at LONG_MAX —
-     * effectively disabled, but well-defined. */
     setenv("HAX_BASH_TIMEOUT", "9223372036854775000ms", 1);
     char *out = call_bash("echo hi");
     EXPECT_STR_EQ(out, "hi\n");
@@ -455,13 +370,6 @@ static void test_bash_per_call_timeout_invalid(void)
 
 static void test_bash_head_tail_truncation(void)
 {
-    /* Produce ~108 KiB — more than the default OUTPUT_CAP (50 KiB), so
-     * the capture spills to a temp file and the model gets a head+tail
-     * preview with a gap marker. Both the leading HEAD line (in the head
-     * slice — output that front-loads a summary keeps it) and the trailing
-     * TAIL line (in the tail slice) must survive. The gap marker names the
-     * omitted middle and the saved file path so the model can read the
-     * rest. The marker sits between the two slices, not after the body. */
     char *out = call_bash("echo HEAD; seq 1 20000; echo TAIL");
     char *head = strstr(out, "HEAD");
     char *marker = strstr(out, "[output truncated");
@@ -482,21 +390,14 @@ static void test_bash_head_tail_truncation(void)
 
 static void test_bash_head_kept_when_long_line_spans_gap(void)
 {
-    /* A front-loaded summary followed by one line longer than the byte cap:
-     * the tail window holds no newline (it starts mid-line), so no *whole*
-     * line is omitted (omitted_lines == 0) even though a large byte range
-     * is. Eligibility must key on the byte gap, not the line count —
-     * otherwise this falls back to tail-only and drops the SUMMARY line the
-     * head+tail split exists to preserve. The gap marker reports the
-     * omission in bytes ("mid-line") since a line count would read as 0. */
+    /* A byte gap within one long line has no omitted whole lines, but the leading summary must
+     * still survive. */
     char *out = call_bash("echo SUMMARY; printf 'x%.0s' $(seq 1 60000)");
     char *head = strstr(out, "SUMMARY");
     char *marker = strstr(out, "[output truncated");
     EXPECT(head != NULL);
     EXPECT(marker != NULL);
-    /* SUMMARY survives in the head, ahead of the gap marker. */
     EXPECT(head < marker);
-    /* Within-line gap is reported in bytes, not "0 lines". */
     EXPECT(strstr(out, "mid-line") != NULL);
     EXPECT(strstr(out, "0 lines") == NULL);
     EXPECT(strstr(out, "saved to ") != NULL);
@@ -505,49 +406,35 @@ static void test_bash_head_kept_when_long_line_spans_gap(void)
 
 static void test_bash_tail_only_fallback_uses_full_budget(void)
 {
-    /* When the first line is longer than the head slice (~6 KiB at the
-     * 50 KiB cap) read_head_capped keeps nothing, so the body falls back to
-     * tail-only. That fallback must re-read the tail at the FULL budget
-     * (2000 lines), not the reduced 7/8 head+tail budget (1750) — the
-     * fallback should keep as much as plain tail-only truncation always
-     * did. Fixture: an 8 KiB first line (no newline within the head slice)
-     * then 5000 short lines (5001 total, so the line cap trips the spill).
-     * Total stays well under the byte cap, so the kept count is line-bound. */
+    /* Without a complete head line, tail-only output should reclaim the full 2000-line budget. */
     char *out = call_bash("printf 'X%.0s' $(seq 1 8000); echo; seq 1 5000");
     EXPECT(strstr(out, "[output truncated") != NULL);
-    /* Full budget keeps the last 2000 lines; the reduced budget would have
-     * kept only 1750 — assert the full count and the absence of the bug's. */
     EXPECT(strstr(out, "last 2000 of 5001 lines") != NULL);
     EXPECT(strstr(out, "last 1750 of") == NULL);
     EXPECT(strstr(out, "saved to ") != NULL);
     free(out);
 }
 
-/* Extract the saved-to path from a truncation marker like
- *   "[output truncated: ... full output saved to /tmp/hax-XXXXXX/bash-1.log]"
- * Returns malloc'd path or NULL if not found. Caller frees. */
-static char *extract_saved_path(const char *out)
+/* Return the owned saved-output path from a truncation marker, or NULL. */
+static char *extract_saved_path(const char *result)
 {
     const char *needle = "saved to ";
-    const char *p = strstr(out, needle);
-    if (!p)
+    const char *path_start = strstr(result, needle);
+    if (!path_start)
         return NULL;
-    p += strlen(needle);
-    const char *end = strchr(p, ']');
-    if (!end)
+    path_start += strlen(needle);
+    const char *path_end = strchr(path_start, ']');
+    if (!path_end)
         return NULL;
-    size_t len = (size_t)(end - p);
-    char *path = xmalloc(len + 1);
-    memcpy(path, p, len);
-    path[len] = '\0';
+    size_t path_len = (size_t)(path_end - path_start);
+    char *path = xmalloc(path_len + 1);
+    memcpy(path, path_start, path_len);
+    path[path_len] = '\0';
     return path;
 }
 
 static void test_bash_saved_path_holds_full_output(void)
 {
-    /* The save-to-temp contract is "the model can recover the full
-     * output via this path." Verify the file actually exists with the
-     * full byte count (not just the truncated tail). */
     char *out = call_bash("echo HEAD; seq 1 20000; echo TAIL");
     char *path = extract_saved_path(out);
     EXPECT(path != NULL);
@@ -573,10 +460,6 @@ static void test_bash_saved_path_holds_full_output(void)
 
 static void test_bash_single_line_over_cap_keeps_body(void)
 {
-    /* Single line longer than OUTPUT_CAP_BYTES (50 KiB default): there's
-     * no '\n' for read_tail_capped to align to. Earlier versions silently
-     * dropped every chunk and produced an empty body — make sure the line
-     * survives (per-line cap then trims it with an inline elision marker). */
     char *out = call_bash("printf 'x%.0s' $(seq 1 60000)");
     EXPECT(strstr(out, "[output truncated") != NULL);
     EXPECT(strstr(out, "saved to ") != NULL);
@@ -590,9 +473,6 @@ static void test_bash_single_line_over_cap_keeps_body(void)
 
 static void test_bash_line_cap_triggers_spill(void)
 {
-    /* Many short lines: byte cap (50 KiB) is untouched but line cap
-     * (2000) is exceeded. Spill must still trigger so the truncation
-     * marker shows up with the saved-to path. */
     char *out = call_bash("yes x | head -n 5000");
     EXPECT(strstr(out, "[output truncated") != NULL);
     EXPECT(strstr(out, "saved to ") != NULL);
@@ -603,12 +483,7 @@ static void test_bash_line_cap_triggers_spill(void)
 
 static void test_bash_unterminated_final_line_triggers_spill(void)
 {
-    /* 2000 fully-terminated lines plus a trailing line with no '\n' is
-     * 2001 logical lines. The newline count alone (2000) sits at the
-     * line cap, but the partial line pushes the human-visible count one
-     * over — spill must fire. Total bytes (~16 KiB) stays under the byte
-     * cap so this case can only be caught by including trails_no_nl in
-     * the spill check. */
+    /* The unterminated final line is the 2001st logical line and must trigger truncation. */
     char *out = call_bash("for i in $(seq 1 2000); do echo line$i; done; printf 'partial-no-nl'");
     EXPECT(strstr(out, "[output truncated") != NULL);
     EXPECT(strstr(out, "saved to ") != NULL);
@@ -617,17 +492,11 @@ static void test_bash_unterminated_final_line_triggers_spill(void)
 
 static void test_bash_mkstemp_failure_falls_back_to_mem(void)
 {
-    /* When TMPDIR points somewhere unwritable, mkstemp fails and the
-     * spill path can't open a backing file. The pre-spill in-memory
-     * prefix must still come through as the body so the model isn't
-     * left with an empty result. Keep total output below MAX_DRAIN_BYTES
-     * (16 MiB) and just over OUTPUT_CAP_BYTES (50 KiB) so spill triggers. */
+    /* If the spill file cannot be created, preserve the in-memory prefix and report that the
+     * remainder is unavailable. */
     setenv("TMPDIR", "/no/such/hax-test-dir/", 1);
     char *out = call_bash("seq 1 20000");
-    /* Body must contain content from the early portion of the producer
-     * — proof we didn't drop the in-memory prefix. */
     EXPECT(strstr(out, "1\n") != NULL);
-    /* Marker still appears, but with the unavailable variant. */
     EXPECT(strstr(out, "[output truncated") != NULL);
     EXPECT(strstr(out, "unavailable") != NULL);
     EXPECT(strstr(out, "saved to") == NULL);
@@ -637,19 +506,7 @@ static void test_bash_mkstemp_failure_falls_back_to_mem(void)
 
 static void test_bash_tail_keeps_line_at_window_boundary(void)
 {
-    /* When the tail window's start (total_bytes - tail_cap_bytes) lands
-     * exactly on a line start, the byte before it is '\n' — the window
-     * already begins on a boundary, no alignment trim needed. The earlier
-     * implementation always dropped through the first '\n', losing the
-     * leading line in this edge case.
-     *
-     * Fixture uses 32-byte lines (`printf '%-31s\n' "lineN"` → "lineN"
-     * + spaces + '\n'). With cap pinned to 50 KiB = 51200 bytes the head
-     * gets 51200/8 = 6400 bytes (= 200 lines) and the tail the remaining
-     * 44800 bytes. total = 2000 × 32 = 64000, so the tail window starts at
-     * 64000 - 44800 = 19200 = line 600 (zero-indexed) — exactly on a
-     * boundary, the case under test. The head therefore keeps line0..199,
-     * the tail line600..1999. */
+    /* The tail window starts exactly at line 600 and must retain that complete boundary line. */
     char *out = call_bash("for i in $(seq 0 1999); do printf '%-31s\\n' line$i; done");
     EXPECT(strstr(out, "[output truncated") != NULL);
     /* The head slice comes first: its first line is line0. */
@@ -674,13 +531,8 @@ static void test_bash_tail_keeps_line_at_window_boundary(void)
 
 static void test_bash_invalid_utf8_tmpdir_falls_back(void)
 {
-    /* TMPDIR can carry arbitrary bytes on Linux (paths are byte
-     * sequences, not UTF-8). When it does, capture_open_tempfile must
-     * fall back to /tmp instead of advertising a sanitized path that
-     * doesn't exist on disk — the marker's saved-to path has to be a
-     * real file the model can `read`. We don't need a real bad-byte
-     * directory for this: the validator runs on the env value and the
-     * fallback kicks in before mkstemp. */
+    /* An invalid UTF-8 TMPDIR cannot be advertised to the model; the spill must use a valid
+     * fallback path. */
     setenv("TMPDIR", "/tmp/hax-test-bad-\xff-XXXXXX-NOTREAL", 1);
     char *out = call_bash("seq 1 20000");
     EXPECT(strstr(out, "[output truncated") != NULL);
@@ -715,13 +567,7 @@ static void test_bash_invalid_utf8_tmpdir_falls_back(void)
 
 static void test_bash_long_line_with_trailing_newline_keeps_body(void)
 {
-    /* Single line longer than cap_bytes but ending in '\n': the tail
-     * window contains only the line's tail bytes and the terminating
-     * newline. Earlier alignment logic always trimmed through the
-     * first '\n', leaving an empty body — only the truncation marker
-     * survived. The fix detects "the only '\n' is the last byte" and
-     * preserves the bytes so cap_line_lengths can emit the inline
-     * elision marker. */
+    /* Alignment must not erase a long line when its only newline is the final byte. */
     char *out = call_bash("printf 'x%.0s' $(seq 1 60000); printf '\\n'");
     EXPECT(strstr(out, "[output truncated") != NULL);
     /* Body must contain at least the line content tail, not be empty.
@@ -733,12 +579,8 @@ static void test_bash_long_line_with_trailing_newline_keeps_body(void)
 
 static void test_bash_drain_clamps_oversized_byte_cap(void)
 {
-    /* When HAX_TOOL_OUTPUT_CAP exceeds MAX_DRAIN_BYTES, the spill
-     * threshold would be unreachable (drain SIGKILLs first) and
-     * finalization could silently report "fit in mem, no truncation"
-     * for a producer the kernel killed. The clamp ensures spill always
-     * fires before drain. Use a single-line fixture so the line cap
-     * doesn't trigger spill instead. */
+    /* The spill threshold must remain below the hard drain limit even with an oversized configured
+     * cap. */
     setenv("HAX_TOOL_OUTPUT_CAP", "32m", 1);
     char *out = call_bash("yes x | tr -d '\\n' | head -c 17000000");
     EXPECT(strstr(out, "[output truncated") != NULL);
@@ -750,9 +592,6 @@ static void test_bash_drain_clamps_oversized_byte_cap(void)
 
 static void test_bash_cleanup_unlinks_kept_files(void)
 {
-    /* After tempfiles_cleanup runs, the path embedded in a prior
-     * truncation marker must no longer exist. Mirrors what
-     * agent_new_conversation does on /new and atexit does on shutdown. */
     char *out = call_bash("seq 1 20000");
     char *path = extract_saved_path(out);
     EXPECT(path != NULL);
@@ -768,8 +607,6 @@ static void test_bash_cleanup_unlinks_kept_files(void)
 
 static void test_bash_short_output_no_elision(void)
 {
-    /* Output that fits comfortably in head should not get an elision
-     * marker — we'd be lying about truncation that didn't happen. */
     char *out = call_bash("for i in 1 2 3 4 5; do echo line $i; done");
     EXPECT(strstr(out, "bytes elided") == NULL);
     EXPECT(strstr(out, "[output truncated]") == NULL);
@@ -779,8 +616,6 @@ static void test_bash_short_output_no_elision(void)
 
 static void test_bash_caps_long_line(void)
 {
-    /* Single 5000-byte line (no newlines from `head -c`) gets per-line
-     * capped at MAX_LINE_LEN with an inline marker. */
     char *out = call_bash("head -c 5000 /dev/zero | tr '\\\\0' x");
     EXPECT(strstr(out, "bytes elided") != NULL);
     EXPECT(strlen(out) < 2500);
@@ -800,9 +635,6 @@ static void test_bash_sanitizes_non_utf8(void)
 
 static void test_bash_binary_output_suppressed(void)
 {
-    /* A NUL byte in the stream marks the output binary. The body is
-     * replaced with the suppression marker; no U+FFFD glyphs leak
-     * through, and the exit footer (success here) is preserved. */
     char *out = call_bash("printf 'BEFORE\\\\0AFTER'");
     EXPECT(strstr(out, "[binary output suppressed: ") != NULL);
     /* 12 bytes ("BEFORE\0AFTER") formats via format_byte_size as "12B". */
@@ -815,8 +647,6 @@ static void test_bash_binary_output_suppressed(void)
 
 static void test_bash_binary_output_keeps_exit_footer(void)
 {
-    /* Binary output that exits non-zero must still surface the exit
-     * code so the model can tell success from failure. */
     char *out = call_bash("printf 'BEFORE\\\\0AFTER'; exit 7");
     EXPECT(strstr(out, "[binary output suppressed:") != NULL);
     EXPECT(strstr(out, "[exit 7]") != NULL);
@@ -825,87 +655,50 @@ static void test_bash_binary_output_keeps_exit_footer(void)
 
 static void test_bash_streamed_basic(void)
 {
-    /* With display attached, bash streams stdout chunks live AND
-     * returns the canonical history. display should see "hello\n"
-     * (live display); the returned string should also be "hello\n". */
-    struct capture cap = {0};
-    buf_init(&cap.buf);
-    char *out = call_bash_streamed("echo hello", &cap);
+    struct display_capture display_output = {0};
+    buf_init(&display_output.buf);
+    char *out = call_bash_streamed("echo hello", &display_output);
     EXPECT_STR_EQ(out, "hello\n");
-    EXPECT(cap.buf.len > 0);
-    EXPECT(strstr(cap.buf.data, "hello") != NULL);
+    EXPECT(display_output.buf.len > 0);
+    EXPECT(strstr(display_output.buf.data, "hello") != NULL);
     free(out);
-    buf_free(&cap.buf);
+    buf_free(&display_output.buf);
 }
 
 static void test_bash_streamed_binary_history_clean(void)
 {
-    /* Mid-stream NUL: pre-NUL bytes are streamed live for display, but
-     * the canonical history (returned string) must contain the binary
-     * marker and NOT any of the body bytes. This matches the legacy
-     * non-streamed behavior so the model sees the same suppression
-     * either way. */
-    struct capture cap = {0};
-    buf_init(&cap.buf);
-    char *out = call_bash_streamed("printf 'BEFORE\\\\0AFTER'; exit 0", &cap);
-    /* Returned string: marker, no body bytes. */
+    /* Once any NUL is seen, canonical history contains only the binary marker and status. */
+    struct display_capture display_output = {0};
+    buf_init(&display_output.buf);
+    char *out = call_bash_streamed("printf 'BEFORE\\\\0AFTER'; exit 0", &display_output);
     EXPECT(strstr(out, "[binary output suppressed:") != NULL);
     EXPECT(strstr(out, "BEFORE") == NULL);
     EXPECT(strstr(out, "AFTER") == NULL);
-    /* Live display: display also got the suffix at the end. The
-     * pre-NUL bytes may or may not have been streamed depending on
-     * whether the NUL landed in chunk 1 (printf is small enough that
-     * it does — but we don't assert that, only that the marker
-     * reached display). */
-    EXPECT(strstr(cap.buf.data, "[binary output suppressed:") != NULL);
+    EXPECT(strstr(display_output.buf.data, "[binary output suppressed:") != NULL);
     free(out);
-    buf_free(&cap.buf);
+    buf_free(&display_output.buf);
 }
 
 static void test_bash_streamed_binary_marker_isolated_from_escape(void)
 {
-    /* When pre-NUL bytes were streamed, the renderer's ctrl_strip may
-     * still be inside an unterminated escape sequence by the time the
-     * binary marker arrives. The marker starts with `[`, which would be
-     * consumed as the CSI introducer and silently swallowed. The fix
-     * is for the streaming suffix to lead with \n (an abort byte for
-     * ctrl_strip) so the marker always renders cleanly. Verify the
-     * leading \n is in the captured display stream. */
-    struct capture cap = {0};
-    buf_init(&cap.buf);
-    /* The first printf emits an unterminated CSI introducer; the
-     * second pads enough bytes to (likely) flush the kernel buffer in
-     * its own read so streamed_anything becomes true before the
-     * trailing NUL triggers binary suppression. ESC reaches the shell
-     * as a raw byte via the JSON \u001b escape — the JSON parser
-     * decodes it, so the shell's printf interprets no escapes here and
-     * the fixture is portable across /bin/sh implementations. */
-    char *out =
-        call_bash_streamed("printf '\\u001b['; sleep 0.03; printf 'pad pad pad pad\\\\0bin'", &cap);
+    /* A newline must abort an unterminated escape before the binary marker's opening bracket. */
+    struct display_capture display_output = {0};
+    buf_init(&display_output.buf);
+    /* The delay separates reads so the escape reaches display before the later NUL. JSON supplies
+     * the raw ESC byte portably. */
+    char *out = call_bash_streamed(
+        "printf '\\u001b['; sleep 0.03; printf 'pad pad pad pad\\\\0bin'", &display_output);
     EXPECT(out != NULL);
-    EXPECT(cap.buf.data != NULL);
-    /* Marker must reach display. */
-    const char *marker = strstr(cap.buf.data, "[binary output suppressed:");
+    EXPECT(display_output.buf.data != NULL);
+    const char *marker = strstr(display_output.buf.data, "[binary output suppressed:");
     EXPECT(marker != NULL);
-    /* …and be preceded by \n so ctrl_strip's escape state aborts.
-     * The leading \n protects the marker only when streamed_anything
-     * is true (i.e., bytes ran live before the NUL was detected).
-     * The sleep above is the cheapest way to force two reads. */
-    EXPECT(marker != NULL && marker > cap.buf.data && marker[-1] == '\n');
+    EXPECT(marker != NULL && marker > display_output.buf.data && marker[-1] == '\n');
     free(out);
-    buf_free(&cap.buf);
+    buf_free(&display_output.buf);
 }
 
 static void test_bash_stdout_is_not_a_tty(void)
 {
-    /* Stdout is a plain pipe, so isatty(1) is false. Tools that gate
-     * fancy output on this (progress bars, pagers, color) take the
-     * non-TTY branch — exactly what we want. We tried PTY-based exec
-     * to keep stdout line-buffered, but reproducing terminal behavior
-     * faithfully (\r-rewrites, cursor positioning, OSC) was too much
-     * complexity for too little benefit; env vars (TERM=dumb,
-     * AI_AGENT, PYTHONUNBUFFERED) cover the same ground with one-
-     * tenth the failure modes. */
     char *out = call_bash("[ -t 1 ] && echo TTY || echo NOTTY");
     EXPECT_STR_EQ(out, "NOTTY\n");
     free(out);
@@ -913,7 +706,6 @@ static void test_bash_stdout_is_not_a_tty(void)
 
 static void test_bash_stderr_is_not_a_tty(void)
 {
-    /* Stderr also pipes through the same fd; isatty(2) is false. */
     char *out = call_bash("[ -t 2 ] && echo TTY 1>&2 || echo NOTTY 1>&2");
     EXPECT_STR_EQ(out, "NOTTY\n");
     free(out);
@@ -921,9 +713,6 @@ static void test_bash_stderr_is_not_a_tty(void)
 
 static void test_bash_lf_not_crlf(void)
 {
-    /* Pipes don't apply ONLCR (that was a PTY artifact), so `\n`
-     * reaches us as `\n` byte-for-byte. The two-line probe forces a
-     * between-lines newline. */
     char *out = call_bash("printf 'a\\nb\\n'");
     EXPECT_STR_EQ(out, "a\nb\n");
     free(out);
@@ -931,45 +720,8 @@ static void test_bash_lf_not_crlf(void)
 
 static void test_bash_env_overrides(void)
 {
-    /* build_child_env() forces a fixed value for each var in its
-     * override table, regardless of what the parent had set. Keeping
-     * hax behavior independent of how the user launched it matters
-     * because users invoke hax from disparate environments — a
-     * developer with PAGER=less, MANPAGER=most, EDITOR=vim, FORCE_
-     * COLOR=1 set in their shell rc shouldn't see the agent's bash
-     * tool inherit any of that.
-     *
-     * The cluster of overrides has three purposes:
-     *   - Pagers (PAGER/GIT_PAGER/MANPAGER/SYSTEMD_PAGER/GH_PAGER) →
-     *     `cat` so commands like `git log` / `man printf` /
-     *     `systemctl status` stream rather than waiting on `q`.
-     *   - Editors (GIT_EDITOR/VISUAL/EDITOR) → `false` so commands
-     *     that pop $EDITOR (git commit without -m, rebase -i,
-     *     crontab -e) abort fail-closed instead of hanging on the
-     *     TTY the agent can't drive.
-     *   - Token-friendly output: TERM=dumb (kills ninja \r-rewrites
-     *     and chalk colors; combined with non-TTY stdout this also
-     *     suppresses cargo/rg/fd/python-rich color), COLORTERM= empty
-     *     (presence-probing tools), AI_AGENT=hax (vitest minimal
-     *     reporter), GIT_TERMINAL_PROMPT=0 (git fails fast on
-     *     credential prompts), PYTHONUNBUFFERED=1 (CPython line-
-     *     flushes under pipes), TQDM_DISABLE=1 (tqdm progress bars
-     *     don't isatty-gate themselves).
-     *
-     * For each var: set the parent to a contradicting value, run a
-     * single shell that echoes them all, and assert the full block.
-     *
-     * Three intentional non-overrides verified by the trailing lines:
-     *   - NO_COLOR and FORCE_COLOR pass through unchanged. Setting
-     *     NO_COLOR ourselves triggers Node's "'NO_COLOR' env is
-     *     ignored due to the 'FORCE_COLOR' env being set" warning
-     *     whenever a child (npm, playwright) injects FORCE_COLOR
-     *     into its own subprocess env — which we can't prevent.
-     *     TERM=dumb + non-TTY stdout already cover the no-color
-     *     ground for tools that honor either signal.
-     *   - MAKEFLAGS passes through so parallel builds keep their
-     *     `-j` and jobserver fds.
-     */
+    /* Contradicting parent values verify replacements; NO_COLOR, FORCE_COLOR, and MAKEFLAGS verify
+     * passthrough. */
     setenv("PAGER", "less", 1);
     setenv("GIT_PAGER", "less", 1);
     setenv("MANPAGER", "less", 1);
@@ -1040,15 +792,8 @@ static void test_bash_env_overrides(void)
 
 static void test_bash_subagent_env(void)
 {
-    /* The published selection (bash_export_selection) is exported into
-     * children — the seam a nested `hax -p` subagent inherits its
-     * provider/model/effort through. Contradicting parent values prove the
-     * entries replace rather than pass through; a NULL effort exports as
-     * empty (force "send none"); HAX_PRESET is cleared so a parent preset
-     * can't re-shadow the exported values in the child. The depth marker is
-     * always stamped at parent + 1 (computed from this process's own env,
-     * so the expectation holds even when the tests themselves run inside a
-     * hax subagent). */
+    /* Contradicting parent values verify selection replacement, preset clearing, and depth
+     * stamping. */
     const char *d = getenv("HAX_SUBAGENT_DEPTH");
     char depth_expect[32];
     snprintf(depth_expect, sizeof(depth_expect), "d=%d\n", (d ? atoi(d) : 0) + 1);
@@ -1059,7 +804,7 @@ static void test_bash_subagent_env(void)
     setenv("HAX_PRESET", "parent-preset", 1);
     setenv("HAX_TRACE", "/tmp/parent.trace", 1);
     setenv("HAX_TRANSCRIPT", "/tmp/parent.transcript", 1);
-    bash_export_selection("mock", "m-1", NULL);
+    bash_env_set_selection("mock", "m-1", NULL);
     char *out = call_bash("echo p=$HAX_PROVIDER; echo m=$HAX_MODEL; "
                           "echo e=$HAX_EFFORT; echo ps=$HAX_PRESET; "
                           "echo d=$HAX_SUBAGENT_DEPTH; echo tr=$HAX_TRACE; "
@@ -1073,7 +818,7 @@ static void test_bash_subagent_env(void)
      * the depth marker and the trace/transcript clearing are unconditional
      * (a nested hax truncates those paths at startup — inheriting them
      * would destroy this process's live logs). */
-    bash_export_selection(NULL, NULL, NULL);
+    bash_env_set_selection(NULL, NULL, NULL);
     out = call_bash("echo p=$HAX_PROVIDER; echo ps=$HAX_PRESET; echo d=$HAX_SUBAGENT_DEPTH; "
                     "echo tr=$HAX_TRACE; echo tl=$HAX_TRANSCRIPT");
     want = xasprintf("p=parent-provider\nps=parent-preset\n%str=\ntl=\n", depth_expect);
@@ -1091,11 +836,7 @@ static void test_bash_subagent_env(void)
 
 static void test_bash_shell_prefers_bash(void)
 {
-    /* `$0` echoes the argv[0] the tool exec'd with. Default resolution
-     * must pick bash whenever PATH has one and fall back to sh
-     * (Alpine/busybox, minimal containers). The CONFIG_VALUE_DEFAULT
-     * sentinel pins the built-in chain so a developer's own
-     * config.json bash.shell can't skew the assertion. */
+    /* Pin the built-in resolution chain so user configuration cannot affect the assertion. */
     setenv("HAX_BASH_SHELL", CONFIG_VALUE_DEFAULT, 1);
     char *bash = fs_which("bash");
     char *out = call_bash("echo $0");
@@ -1116,8 +857,6 @@ static void test_bash_shell_override(void)
 
 static void test_bash_shell_override_bad_value_falls_back(void)
 {
-    /* A shell that doesn't resolve must degrade to the default chain
-     * (with a one-time stderr warning), not break every bash call. */
     setenv("HAX_BASH_SHELL", "hax-definitely-not-a-shell", 1);
     char *out = call_bash("echo still-works");
     EXPECT_STR_EQ(out, "still-works\n");
@@ -1127,40 +866,24 @@ static void test_bash_shell_override_bad_value_falls_back(void)
 
 static void test_bash_streamed_history_truncated(void)
 {
-    /* Streamed bash history must apply the same OUTPUT_CAP as the
-     * non-streamed path — display can see the full output, but the
-     * returned string (model history) is bounded so a busy command
-     * doesn't blow the context. Use yes piped through head to produce
-     * many lines deterministically. */
-    struct capture cap = {0};
-    buf_init(&cap.buf);
-    char *out = call_bash_streamed("yes hi | head -c 150000", &cap);
-    /* Truncation marker in the model history is the unambiguous signal
-     * that capture spilled to a temp file and the truncation pipeline ran. */
+    /* Live display receives raw output, while canonical model history remains bounded and contains
+     * the saved-output marker. */
+    struct display_capture display_output = {0};
+    buf_init(&display_output.buf);
+    char *out = call_bash_streamed("yes hi | head -c 150000", &display_output);
     EXPECT(strstr(out, "[output truncated") != NULL);
     EXPECT(strstr(out, "saved to ") != NULL);
-    /* Result is bounded by OUTPUT_CAP plus marker plus footer — well
-     * under the 150 KB live stream. */
     EXPECT(strlen(out) < 100 * 1024);
-    /* The live display gets the raw stream but NOT the truncation marker:
-     * the renderer conveys truncation through its own head/tail elision
-     * ("... (N more lines) ..."), so emitting a marker here would be a
-     * redundant, differently-counted second signal. The raw "hi" output
-     * still flows through display. */
-    EXPECT(strstr(cap.buf.data, "hi") != NULL);
-    EXPECT(strstr(cap.buf.data, "[output truncated") == NULL);
+    /* The renderer applies display-row elision, so the model-facing marker is not streamed. */
+    EXPECT(strstr(display_output.buf.data, "hi") != NULL);
+    EXPECT(strstr(display_output.buf.data, "[output truncated") == NULL);
     free(out);
-    buf_free(&cap.buf);
+    buf_free(&display_output.buf);
 }
 
 int main(void)
 {
-    /* Pin the byte cap so tests are insensitive to a caller-supplied
-     * HAX_TOOL_OUTPUT_CAP. Several tests assert truncation against
-     * fixtures sized just over the default 50 KiB; running with a larger
-     * inherited cap (e.g. `HAX_TOOL_OUTPUT_CAP=1m meson test`) would
-     * silently disable those checks. The drain-clamp test below
-     * temporarily overrides this pin. */
+    /* Pin the cap so inherited configuration cannot invalidate truncation fixtures. */
     setenv("HAX_TOOL_OUTPUT_CAP", "50k", 1);
 
     test_bash_invalid_json();
