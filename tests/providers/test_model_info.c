@@ -77,7 +77,7 @@ static void test_openrouter_write_rates_and_tiers(void)
     /* Carried over unchanged: both thresholds are exclusive, so a prompt
      * of exactly 200k still bills at the base rates — the same answer the
      * catalog tier gives for this model. */
-    EXPECT(m.tiers[0].above == 200000);
+    EXPECT(m.tiers[0].context_threshold == 200000);
     EXPECT(m.tiers[0].cost_input == 6.0);
     EXPECT(m.tiers[0].cost_output == 22.5);
     EXPECT(m.tiers[0].cost_cache_read == 0.6);

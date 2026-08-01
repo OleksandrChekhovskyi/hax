@@ -1,9 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-/* End-to-end tests for the catalog's background fetch worker: a local
- * one-shot HTTP server stands in for models.dev, and each scenario runs
- * in a forked child so the module's process-lifetime latches (the
- * once-per-run fetch flag, the warm-pair tracking, the memo) start fresh
- * every time — one process can only ever exercise one fetch. */
+/* Each fetch scenario runs in a child because catalog_prefetch is process-wide and runs once. */
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -28,53 +24,51 @@ static char *g_root;
 
 /* ---------------- one-shot HTTP server ---------------- */
 
-struct srv {
-    int fd;
+struct test_server {
+    int listen_fd;
     const char *body;
-    int delay_ms;       /* pause before responding (drain-race scenarios) */
-    _Atomic int served; /* response fully written — the worker has its bytes */
+    int delay_ms;
+    _Atomic int served; /* Response fully written; the fetch worker has its bytes. */
 };
 
-/* Serve exactly one request, then exit. The 10s accept guard keeps a
- * broken test from hanging the suite: if nothing ever connects, the
- * thread returns and the scenario's own assertions fail. */
+/* The timeout turns a missing client into a failed scenario rather than a hung test. */
 static void *serve_once(void *arg)
 {
-    struct srv *s = arg;
-    struct pollfd pfd = {.fd = s->fd, .events = POLLIN};
-    if (poll(&pfd, 1, 10000) <= 0)
+    struct test_server *server = arg;
+    struct pollfd poll_fd = {.fd = server->listen_fd, .events = POLLIN};
+    if (poll(&poll_fd, 1, 10000) <= 0)
         return NULL;
-    int c = accept(s->fd, NULL, NULL);
-    if (c < 0)
+    int client_fd = accept(server->listen_fd, NULL, NULL);
+    if (client_fd < 0)
         return NULL;
-    char buf[2048];
-    (void)!read(c, buf, sizeof(buf)); /* a small GET arrives in one read */
-    if (s->delay_ms > 0) {
-        struct timespec ts = {s->delay_ms / 1000, (s->delay_ms % 1000) * 1000000L};
-        nanosleep(&ts, NULL);
+    char request[2048];
+    (void)!read(client_fd, request, sizeof(request));
+    if (server->delay_ms > 0) {
+        struct timespec delay = {server->delay_ms / 1000, (server->delay_ms % 1000) * 1000000L};
+        nanosleep(&delay, NULL);
     }
-    dprintf(c, "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
-            strlen(s->body), s->body);
-    close(c);
-    atomic_store(&s->served, 1);
+    dprintf(client_fd, "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+            strlen(server->body), server->body);
+    close(client_fd);
+    atomic_store(&server->served, 1);
     return NULL;
 }
 
-/* Bind 127.0.0.1:ephemeral and listen; returns the port (or -1). */
-static int srv_listen(struct srv *s)
+static int server_listen(struct test_server *server)
 {
-    s->fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (s->fd < 0)
+    server->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server->listen_fd < 0)
         return -1;
-    struct sockaddr_in a = {0};
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(s->fd, (struct sockaddr *)&a, sizeof(a)) != 0 || listen(s->fd, 1) != 0)
+    struct sockaddr_in address = {0};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(server->listen_fd, (struct sockaddr *)&address, sizeof(address)) != 0 ||
+        listen(server->listen_fd, 1) != 0)
         return -1;
-    socklen_t len = sizeof(a);
-    if (getsockname(s->fd, (struct sockaddr *)&a, &len) != 0)
+    socklen_t address_length = sizeof(address);
+    if (getsockname(server->listen_fd, (struct sockaddr *)&address, &address_length) != 0)
         return -1;
-    return ntohs(a.sin_port);
+    return ntohs(address.sin_port);
 }
 
 /* ---------------- child-side helpers ---------------- */
@@ -106,14 +100,12 @@ static void write_snapshot(const char *json)
     fclose(f);
 }
 
-/* Poll until (provider, model) resolves with the wanted input rate — the
- * eventually-consistent assertion for the async fetch/warm pipeline.
- * Bounded at ~3s so a regression fails rather than hangs. */
-static int wait_for_rate(const char *provider, const char *model, double want)
+/* Poll the asynchronous refresh for at most three seconds. */
+static int wait_for_rate(const char *provider_id, const char *model, double expected_rate)
 {
-    for (int i = 0; i < 300; i++) {
-        struct catalog_entry e;
-        if (catalog_lookup(provider, model, &e) == 0 && e.cost_input == want)
+    for (int attempt = 0; attempt < 300; attempt++) {
+        struct catalog_entry entry;
+        if (catalog_lookup(provider_id, model, &entry) == 0 && entry.cost_input == expected_rate)
             return 1;
         struct timespec ts = {0, 10 * 1000 * 1000};
         nanosleep(&ts, NULL);
@@ -125,22 +117,19 @@ static int wait_for_rate(const char *provider, const char *model, double want)
 
 static void scenario_cold_start(void)
 {
-    /* No snapshot on disk: the polls below memoize a *miss* first; the
-     * fetch must land, bump the generation (invalidating that miss), and
-     * make the model resolvable — the full cold-start pipeline including
-     * the worker's post-fetch re-warm. */
-    struct srv s = {.body = "{\"openai\": {\"models\": {"
-                            "\"m1\": {\"cost\": {\"input\": 7, \"output\": 1}}}}}"};
-    int port = srv_listen(&s);
+    /* The generation bump must invalidate the miss memoized while the first fetch runs. */
+    struct test_server server = {.body = "{\"openai\": {\"models\": {"
+                                         "\"m1\": {\"cost\": {\"input\": 7, \"output\": 1}}}}}"};
+    int port = server_listen(&server);
     EXPECT(port > 0);
     child_env("cold", port);
-    pthread_t th;
-    EXPECT(pthread_create(&th, NULL, serve_once, &s) == 0);
+    pthread_t server_thread;
+    EXPECT(pthread_create(&server_thread, NULL, serve_once, &server) == 0);
 
     EXPECT(catalog_prefetch() == 0); /* no snapshot yet ⇒ nothing to be stale */
     EXPECT(wait_for_rate("openai", "m1", 7));
 
-    pthread_join(th, NULL);
+    pthread_join(server_thread, NULL);
     catalog_shutdown();
 }
 
@@ -150,60 +139,55 @@ static void scenario_refresh_invalidates_memo(void)
      * replace the file and the generation bump must invalidate the
      * memoized old value — the "estimates self-heal when a refresh lands
      * mid-session" contract. */
-    struct srv s = {.body = "{\"openai\": {\"models\": {"
-                            "\"m2\": {\"cost\": {\"input\": 9, \"output\": 1}}}}}"};
-    int port = srv_listen(&s);
+    struct test_server server = {.body = "{\"openai\": {\"models\": {"
+                                         "\"m2\": {\"cost\": {\"input\": 9, \"output\": 1}}}}}"};
+    int port = server_listen(&server);
     EXPECT(port > 0);
     child_env("refresh", port);
     write_snapshot("{\"openai\": {\"models\": {"
                    "\"m2\": {\"cost\": {\"input\": 2, \"output\": 1}}}}}");
 
-    struct catalog_entry e;
-    EXPECT(catalog_lookup("openai", "m2", &e) == 0);
-    EXPECT(e.cost_input == 2); /* old snapshot, now memoized */
+    struct catalog_entry entry;
+    EXPECT(catalog_lookup("openai", "m2", &entry) == 0);
+    EXPECT(entry.cost_input == 2); /* old snapshot, now memoized */
 
-    pthread_t th;
-    EXPECT(pthread_create(&th, NULL, serve_once, &s) == 0);
+    pthread_t server_thread;
+    EXPECT(pthread_create(&server_thread, NULL, serve_once, &server) == 0);
     EXPECT(catalog_prefetch() == 0); /* stale for the TTL, not for the alarm */
     EXPECT(wait_for_rate("openai", "m2", 9));
 
-    pthread_join(th, NULL);
+    pthread_join(server_thread, NULL);
     catalog_shutdown();
 }
 
-/* Shared body for the two must-not-replace scenarios: a good snapshot on
- * disk, a 200 response carrying `bad_body`, and the assertion that the
- * snapshot survives. */
 static void run_bad_payload_scenario(const char *name, const char *bad_body)
 {
-    struct srv s = {.body = bad_body};
-    int port = srv_listen(&s);
+    struct test_server server = {.body = bad_body};
+    int port = server_listen(&server);
     EXPECT(port > 0);
     child_env(name, port);
     write_snapshot("{\"openai\": {\"models\": {"
                    "\"m3\": {\"cost\": {\"input\": 2, \"output\": 1}}}}}");
 
-    struct catalog_entry e;
-    EXPECT(catalog_lookup("openai", "m3", &e) == 0);
-    EXPECT(e.cost_input == 2);
+    struct catalog_entry entry;
+    EXPECT(catalog_lookup("openai", "m3", &entry) == 0);
+    EXPECT(entry.cost_input == 2);
 
-    pthread_t th;
-    EXPECT(pthread_create(&th, NULL, serve_once, &s) == 0);
+    pthread_t server_thread;
+    EXPECT(pthread_create(&server_thread, NULL, serve_once, &server) == 0);
     catalog_prefetch();
-    /* Wait until the worker has the response bytes, then join it via
-     * shutdown — validation runs to completion before the join returns,
-     * so the assertion below is deterministic, not a sleep-and-hope. */
-    for (int i = 0; i < 300 && !atomic_load(&s.served); i++) {
+    /* catalog_shutdown joins validation after the server has delivered the full response. */
+    for (int i = 0; i < 300 && !atomic_load(&server.served); i++) {
         struct timespec ts = {0, 10 * 1000 * 1000};
         nanosleep(&ts, NULL);
     }
-    EXPECT(atomic_load(&s.served));
-    pthread_join(th, NULL);
-    catalog_shutdown(); /* also clears the memo... */
+    EXPECT(atomic_load(&server.served));
+    pthread_join(server_thread, NULL);
+    catalog_shutdown();
 
-    /* ...so this re-parses whatever is on disk: still the good snapshot. */
-    EXPECT(catalog_lookup("openai", "m3", &e) == 0);
-    EXPECT(e.cost_input == 2);
+    /* Shutdown clears the memo, forcing this lookup to read the snapshot on disk. */
+    EXPECT(catalog_lookup("openai", "m3", &entry) == 0);
+    EXPECT(entry.cost_input == 2);
 }
 
 static void scenario_garbage_keeps_snapshot(void)
@@ -255,22 +239,22 @@ static void scenario_drain_completes_fetch(void)
      * of letting shutdown cancel it: with a server slower than the run, a
      * post-drain lookup must already see the fetched values — no polling,
      * and no cold cache left behind. */
-    struct srv s = {.body = "{\"openai\": {\"models\": {"
-                            "\"m5\": {\"cost\": {\"input\": 7, \"output\": 1}}}}}",
-                    .delay_ms = 400};
-    int port = srv_listen(&s);
+    struct test_server server = {.body = "{\"openai\": {\"models\": {"
+                                         "\"m5\": {\"cost\": {\"input\": 7, \"output\": 1}}}}}",
+                                 .delay_ms = 400};
+    int port = server_listen(&server);
     EXPECT(port > 0);
     child_env("drain", port);
-    pthread_t th;
-    EXPECT(pthread_create(&th, NULL, serve_once, &s) == 0);
+    pthread_t server_thread;
+    EXPECT(pthread_create(&server_thread, NULL, serve_once, &server) == 0);
 
     EXPECT(catalog_prefetch() == 0);
     catalog_drain(5000);
-    struct catalog_entry e;
-    EXPECT(catalog_lookup("openai", "m5", &e) == 0);
-    EXPECT(e.cost_input == 7);
+    struct catalog_entry entry;
+    EXPECT(catalog_lookup("openai", "m5", &entry) == 0);
+    EXPECT(entry.cost_input == 7);
 
-    pthread_join(th, NULL);
+    pthread_join(server_thread, NULL);
     catalog_shutdown();
 }
 
@@ -280,9 +264,9 @@ static void scenario_stale_snapshot_warns(void)
      * makes prefetch report its age — the caller's cue to warn that
      * estimates may have drifted — while the refresh it spawns still
      * recovers as usual. */
-    struct srv s = {.body = "{\"openai\": {\"models\": {"
-                            "\"m4\": {\"cost\": {\"input\": 9, \"output\": 1}}}}}"};
-    int port = srv_listen(&s);
+    struct test_server server = {.body = "{\"openai\": {\"models\": {"
+                                         "\"m4\": {\"cost\": {\"input\": 9, \"output\": 1}}}}}"};
+    int port = server_listen(&server);
     EXPECT(port > 0);
     child_env("stale", port);
     write_snapshot("{\"openai\": {\"models\": {"
@@ -294,33 +278,33 @@ static void scenario_stale_snapshot_warns(void)
                             {time(NULL) - 40L * 24 * 60 * 60, 0}};
     EXPECT(utimes(path, tv) == 0);
 
-    pthread_t th;
-    EXPECT(pthread_create(&th, NULL, serve_once, &s) == 0);
+    pthread_t server_thread;
+    EXPECT(pthread_create(&server_thread, NULL, serve_once, &server) == 0);
     long stale_days = catalog_prefetch();
     EXPECT(stale_days >= 39 && stale_days <= 41);
     EXPECT(catalog_prefetch() == 0); /* one report (and one fetch) per run */
     EXPECT(wait_for_rate("openai", "m4", 9));
 
-    pthread_join(th, NULL);
+    pthread_join(server_thread, NULL);
     catalog_shutdown();
 }
 
 /* ---------------- parent orchestration ---------------- */
 
-static void run_scenario(const char *name, void (*fn)(void))
+static void run_scenario(const char *name, void (*scenario)(void))
 {
     pid_t pid = fork();
     if (pid == 0) {
-        fn();
+        scenario();
         _exit(t_failures ? 1 : 0);
     }
     EXPECT(pid > 0);
     if (pid <= 0)
         return;
-    int st = 0;
-    waitpid(pid, &st, 0);
-    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
-        FAIL("scenario '%s' failed in child (status 0x%x)", name, st);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        FAIL("scenario '%s' failed in child (status 0x%x)", name, status);
 }
 
 int main(void)

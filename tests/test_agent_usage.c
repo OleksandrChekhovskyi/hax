@@ -82,9 +82,9 @@ static void test_reported_spend_is_exact(void)
 
     struct catalog_split split;
     EXPECT(agent_spend_split(&totals, &split));
-    EXPECT(split.in == 800 * 2.0 / 1e6);
-    EXPECT(split.cache_read == 200 * 2.0 / 1e6);
-    EXPECT(split.out == 50 * 8.0 / 1e6);
+    EXPECT(split.cost_input == 800 * 2.0 / 1e6);
+    EXPECT(split.cost_cache_read == 200 * 2.0 / 1e6);
+    EXPECT(split.cost_output == 50 * 8.0 / 1e6);
 
     agent_spend_free(&totals);
 }
@@ -144,8 +144,8 @@ static void test_catalog_spend_estimate(void)
 
     struct catalog_split split;
     EXPECT(agent_spend_split(&priced, &split));
-    EXPECT(split.in == 2.0 && split.out == 8.0);
-    EXPECT(split.cache_read == 0 && split.cache_write == 0);
+    EXPECT(split.cost_input == 2.0 && split.cost_output == 8.0);
+    EXPECT(split.cost_cache_read == 0 && split.cost_cache_write == 0);
 
     struct spend_totals missing = {0};
     agent_spend_account(&missing, &unreported, &CATALOG_PROVIDER, "unknown-model");
@@ -201,7 +201,7 @@ static void test_spend_snapshots_live_rates(void)
     EXPECT(estimated);
     struct catalog_split split;
     EXPECT(agent_spend_split(&totals, &split));
-    EXPECT(split.in == 101.0 && split.out == 202.0);
+    EXPECT(split.cost_input == 101.0 && split.cost_output == 202.0);
 
     agent_spend_free(&totals);
     model_meta_release(&provider);

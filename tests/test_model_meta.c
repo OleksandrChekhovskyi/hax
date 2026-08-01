@@ -97,21 +97,21 @@ static void remember_rates(struct provider *p, const struct model_info *m)
 static void test_rates_resolution(void)
 {
     struct provider p = make_provider("x", NULL);
-    struct catalog_entry e;
+    struct catalog_entry entry;
 
     /* Nothing knows anything: not priceable, and the fields say so rather
      * than reading as free. */
-    EXPECT(model_meta_rates(&p, "priced", &e) == 0);
-    EXPECT(e.cost_input < 0 && e.cost_output < 0);
-    EXPECT(e.cost_cache_write_1h < 0);
-    EXPECT(e.n_tiers == 0);
+    EXPECT(model_meta_rates(&p, "priced", &entry) == 0);
+    EXPECT(entry.cost_input < 0 && entry.cost_output < 0);
+    EXPECT(entry.cost_cache_write_1h < 0);
+    EXPECT(entry.n_tiers == 0);
 
     /* Catalog tier alone, tiers included. */
     p.catalog_id = "openai";
-    EXPECT(model_meta_rates(&p, "priced", &e) == 1);
-    EXPECT(e.cost_input == 2 && e.cost_output == 8 && e.cost_cache_read == 0.5);
-    EXPECT(e.n_tiers == 1 && e.tiers[0].above == 200000);
-    EXPECT(catalog_price(&e, 1000000, 0, 0, 0, 0, NULL) == 4.0); /* over the tier */
+    EXPECT(model_meta_rates(&p, "priced", &entry) == 1);
+    EXPECT(entry.cost_input == 2 && entry.cost_output == 8 && entry.cost_cache_read == 0.5);
+    EXPECT(entry.n_tiers == 1 && entry.tiers[0].context_threshold == 200000);
+    EXPECT(catalog_price(&entry, 1000000, 0, 0, 0, 0, NULL) == 4.0); /* over the tier */
 
     /* The backend's own rates win: it quotes what it will actually charge
      * (a router's margin included), where the snapshot quotes the
@@ -125,29 +125,29 @@ static void test_rates_resolution(void)
     live.cost_cache_write = 3.75;
     live.cost_cache_write_1h = 6;
     remember_rates(&p, &live);
-    EXPECT(model_meta_rates(&p, "priced", &e) == 1);
-    EXPECT(e.cost_input == 3 && e.cost_output == 12);
-    EXPECT(e.cost_cache_read == 0.3 && e.cost_cache_write == 3.75);
-    EXPECT(e.cost_cache_write_1h == 6);
+    EXPECT(model_meta_rates(&p, "priced", &entry) == 1);
+    EXPECT(entry.cost_input == 3 && entry.cost_output == 12);
+    EXPECT(entry.cost_cache_read == 0.3 && entry.cost_cache_write == 3.75);
+    EXPECT(entry.cost_cache_write_1h == 6);
     /* The catalog's thresholds must NOT attach to the backend's base
      * rates — that would bill a request at rates that never coexisted. A
      * backend quoting rates and no tiers is priced flat. */
-    EXPECT(e.n_tiers == 0);
-    EXPECT(catalog_price(&e, 1000000, 0, 0, 0, 0, NULL) == 3.0);
+    EXPECT(entry.n_tiers == 0);
+    EXPECT(catalog_price(&entry, 1000000, 0, 0, 0, 0, NULL) == 3.0);
 
     /* A backend that quotes tiers of its own keeps them. */
     live.n_tiers = 1;
-    live.tiers[0] = (struct catalog_tier){.above = 99999,
+    live.tiers[0] = (struct catalog_tier){.context_threshold = 99999,
                                           .cost_input = 6,
                                           .cost_output = -1,
                                           .cost_cache_read = -1,
                                           .cost_cache_write = -1,
                                           .cost_cache_write_1h = -1};
     remember_rates(&p, &live);
-    EXPECT(model_meta_rates(&p, "priced", &e) == 1);
-    EXPECT(e.n_tiers == 1 && e.tiers[0].above == 99999);
+    EXPECT(model_meta_rates(&p, "priced", &entry) == 1);
+    EXPECT(entry.n_tiers == 1 && entry.tiers[0].context_threshold == 99999);
     /* The tier's undeclared output rate falls back to the base rate. */
-    EXPECT(catalog_price(&e, 1000000, 1000000, 0, 0, 0, NULL) == 18.0);
+    EXPECT(catalog_price(&entry, 1000000, 1000000, 0, 0, 0, NULL) == 18.0);
 
     model_info_clear(&live);
     model_meta_release(&p);

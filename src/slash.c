@@ -690,16 +690,16 @@ static void slash_run_session(struct slash_ctx *ctx)
         int row_length = 0;
         row_length =
             append_token_segment(row, sizeof(row), row_length, "in", stats->uncached_input_tokens,
-                                 split_available ? split.in : -1);
+                                 split_available ? split.cost_input : -1);
         if (cached_tokens > 0)
             row_length = append_token_segment(row, sizeof(row), row_length, "cache", cached_tokens,
-                                              split_available ? split.cache_read : -1);
+                                              split_available ? split.cost_cache_read : -1);
         if (cache_write_tokens > 0)
             row_length =
                 append_token_segment(row, sizeof(row), row_length, "write", cache_write_tokens,
-                                     split_available ? split.cache_write : -1);
+                                     split_available ? split.cost_cache_write : -1);
         append_token_segment(row, sizeof(row), row_length, "out", stats->output_tokens,
-                             split_available ? split.out : -1);
+                             split_available ? split.cost_output : -1);
         session_row("tokens total", row);
     }
 

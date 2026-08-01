@@ -6,57 +6,17 @@
 
 #include "effort.h"
 
-/*
- * Model-metadata catalog: per-model cost rates, window limits, and input
- * modalities, resolved from two tiers — user config over a cached
- * models.dev snapshot:
- *
- *   - config: the `catalog.models` block in config.json (nested under the
- *     same `catalog` namespace as catalog.url/catalog.refresh), keyed by
- *     catalog provider id then model id, mirroring the models.dev
- *     per-model field names so values can be pasted verbatim:
- *
- *       "catalog": {
- *         "models": {
- *           "openai": {
- *             "gpt-5.2-codex": {
- *               "cost": {"input": 1.25, "output": 10, "cache_read": 0.125},
- *               "limit": {"context": 400000, "output": 128000}
- *             }
- *           }
- *         }
- *       }
- *
- *   - catalog cache: $XDG_CACHE_HOME/hax/catalog.json, a verbatim copy of
- *     the catalog.url artifact (models.dev api.json by default), fetched
- *     in the background and refreshed when older than catalog.refresh.
- *
- * Config fields win; the catalog fills whatever the user didn't declare.
- * Both tiers fail soft: an absent block, missing cache file, or unknown
- * model simply leaves fields unknown, and consumers (cost estimation, the
- * context-% display) skip what they can't resolve.
- *
- * The provider id is a *catalog* identity (models.dev's provider key),
- * distinct from hax's provider name: codex and openai both map to
- * "openai". Providers declare it via provider->catalog_id; NULL opts out
- * (local backends, providers that opted out explicitly).
- *
- * The multi-MB artifact is never tree-parsed whole (jansson inflates JSON
- * ~10x in memory): lookups scan the raw bytes for the one top-level
- * provider member they need and parse only that slice — a few ms, cheap
- * enough for the foreground path, memoized per (provider, model). The
- * catalog can therefore grow without a parse-cost ceiling; the only bound
- * left is the download/buffer cap. Threading reduces to one background
- * fetch worker that touches nothing but the cache file and an atomic
- * generation counter invalidating the foreground memo.
- */
+/* The model catalog resolves per-model pricing, token limits, image support, and reasoning-effort
+ * metadata. User `catalog.models` configuration takes precedence over a cached models.dev
+ * snapshot; missing providers, models, and fields remain unknown. `provider_id` is the models.dev
+ * provider key and may differ from the runtime provider name. The prefetch lifecycle refreshes the
+ * cached snapshot asynchronously. */
 
-/* One long-context pricing tier: replacement rates that apply to the
- * whole request once its total input exceeds `above` tokens. Mirrors the
- * models.dev `cost.tiers` shape ({rates..., tier: {type: "context",
- * size: N}}). Negative rates fall back to the base entry's. */
+#define CATALOG_TIERS_MAX 4
+
+/* Rate overrides for requests whose total input exceeds a positive `context_threshold`. */
 struct catalog_tier {
-    long above;
+    long context_threshold;
     double cost_input;
     double cost_output;
     double cost_cache_read;
@@ -64,156 +24,89 @@ struct catalog_tier {
     double cost_cache_write_1h;
 };
 
-#define CATALOG_TIERS_MAX 4
+enum catalog_support {
+    CATALOG_SUPPORT_UNKNOWN = -1,
+    CATALOG_SUPPORT_NO,
+    CATALOG_SUPPORT_YES,
+};
 
+/* Metadata merged from catalog.models configuration over the cached models.dev snapshot. */
 struct catalog_entry {
-    /* USD per 1M tokens; negative = unknown. */
+    /* USD per million tokens; negative = unknown. */
     double cost_input;
     double cost_output;
-    double cost_cache_read;  /* rate for prefix-cache read tokens */
-    double cost_cache_write; /* rate for cache write tokens (default TTL) */
-    /* Rate for 1h-TTL cache writes. models.dev carries none, so this is
-     * normally unknown and catalog_price falls back to 2x the input rate
-     * (Anthropic's documented multiplier); backends that quote it
-     * directly — OpenRouter's input_cache_write_1h — fill it instead. */
+    double cost_cache_read;
+    double cost_cache_write;
     double cost_cache_write_1h;
-    /* Window limits in tokens; 0 = unknown. */
-    long context;
-    long output;
-    /* Does the model accept image input (models.dev `modalities.input`
-     * contains "image")? 1 = yes, 0 = no, -1 = unknown (the model object
-     * doesn't declare modalities). */
-    int image_input;
-    /* Reasoning-effort levels, from `reasoning_options`. The artifact
-     * distinguishes three reasoning shapes — an effort ladder, a token
-     * budget, and a plain on/off toggle — and only the first is a menu of
-     * wire values, so the other two resolve to known-and-empty ("this
-     * model has no levels to pick from"). The fallback tier for backends
-     * that describe their models poorly or not at all, which includes
-     * real OpenAI, whose /v1/models is bare ids. */
+
+    /* Token limits; 0 = unknown. */
+    long context_window;
+    long max_output;
+
+    enum catalog_support image_input;
+
+    /* `known` distinguishes an unsupported effort ladder from absent metadata. */
     struct effort_set efforts;
-    /* Context tiers, in artifact order; none for flat-priced models. The
-     * list is taken whole from whichever tier *declares* one first
-     * (config over cache) — tiers don't merge field-by-field the way
-     * base rates do, since a mixed list would price against rates that
-     * never coexisted. Declaring is distinct from having entries:
-     * "tiers": [] in config declares an empty list, pinning flat pricing
-     * over whatever tiers the cached snapshot carries. */
+
+    /* A declared list replaces the lower-priority list rather than merging with it. */
     struct catalog_tier tiers[CATALOG_TIERS_MAX];
     int n_tiers;
-    int tiers_declared;
+    int tiers_declared; /* Distinguishes an absent list from a declared empty list. */
 };
 
-/* Resolve metadata for (provider_id, model). Fills *out (unknown fields
- * get the sentinels above) and returns 0 when at least one field resolved,
- * -1 when the model is unknown to both tiers. Cache-tier results —
- * including misses — are memoized until a background refresh lands, so
- * per-render calls are cheap: the cache file is scanned at most once per
- * (provider, model) per generation. */
+/* Initialize every field to its documented unknown state. */
+void catalog_entry_init(struct catalog_entry *entry);
+
+/* Resolve one model. Configuration wins field by field over the cached snapshot. Returns 0 when
+ * any metadata resolved and -1 otherwise. `out` is always initialized. Results from the snapshot,
+ * including misses, are memoized until a successful refresh. */
 int catalog_lookup(const char *provider_id, const char *model, struct catalog_entry *out);
 
-/* Resolve `n` models of ONE provider in a single pass, filling out[0..n)
- * (and, when non-NULL, found[i] with what catalog_lookup would have
- * returned as 0/-1 — 1 = resolved, 0 = unknown). Same two tiers and the
- * same merge order as catalog_lookup; the difference is cost, not policy:
- * the cached artifact is slurped and slice-parsed once for the whole batch
- * instead of once per model. That is what makes it affordable to describe
- * every row of the /model picker — a provider listing hundreds of models
- * would otherwise re-read the multi-MB snapshot hundreds of times.
- * Deliberately not memoized: this is a bounded, one-shot batch, so nothing
- * is retained past the call. NULL/empty entries in `models` resolve to
- * unknown. */
-void catalog_lookup_many(const char *provider_id, const char *const *models, size_t n,
+/* Resolve `model_count` models for one provider while loading its cached snapshot once. `models`
+ * and `out` must contain `model_count` elements. If non-NULL, `found[i]` receives 1 when any
+ * metadata resolved and 0 otherwise. NULL or empty model IDs are unresolved. */
+void catalog_lookup_many(const char *provider_id, const char *const *models, size_t model_count,
                          struct catalog_entry *out, int *found);
 
-/* Scan `text` (a JSON object) for the top-level member named `key` and
- * tree-parse only that member's value — the primitive that keeps the
- * multi-MB artifact from ever being parsed whole. Byte-level scan: strings
- * (with escapes) and brace/bracket nesting are honored; grammar validation
- * of the slice is jansson's. Returns a new reference (caller json_decref)
- * or NULL when absent/malformed. Exposed for unit tests. */
+/* Parse the top-level member named `key` without tree-parsing the full JSON object. Returns a new
+ * reference, or NULL when the member is absent or malformed. The caller must call json_decref. */
 json_t *catalog_extract_member(const char *text, const char *key);
 
-/* Does a cache write bill *instead of* processing those tokens as input,
- * or *on top of* it? Anthropic, OpenAI and Qwen quote a write rate at
- * 1.25x input: the write replaces the input charge. Google quotes a
- * storage surcharge far below the input rate (0.06x-0.83x), which is
- * added to input processing that is billed in full — a "replacement"
- * rate below the input rate would mean caching cost less than not
- * caching, which is the tell. Unknown rates read as replacement, the
- * common case.
- *
- * Pricing needs the answer (catalog_price), and so does the decision to
- * ask for caching at all: where writes are a surcharge, an explicit cache
- * only adds cost. Pure. */
-int catalog_cache_write_replaces_input(const struct catalog_entry *e);
+/* Return whether cache writes replace the input charge. A known write rate below the input rate is
+ * treated as a storage surcharge; unknown rates use the more common replacement policy. */
+int catalog_cache_write_replaces_input(const struct catalog_entry *entry);
 
-/* Per-category component split of one priced request, USD. `in` is the
- * uncached input remainder; `cache_write` includes the 2x-rate 1h subset. */
+/* Per-category costs for one request, in USD. */
 struct catalog_split {
-    double in;
-    double cache_read;
-    double cache_write;
-    double out;
-    /* The token count `in` prices. Reported rather than left to callers
-     * because deriving it means repeating the replacement-vs-surcharge
-     * decision — against the tier's rates, not the entry's — and a
-     * display that repeats it slightly differently shows a volume its
-     * own cost figure contradicts. */
-    long in_tokens;
+    double cost_input;
+    double cost_cache_read;
+    double cost_cache_write;
+    double cost_output;
+    long uncached_input_tokens;
 };
 
-/* Price ONE request against an entry's rates, in USD; -1 when the
- * input or output rate is unknown (no estimate is better than a wildly
- * partial one). `cached` (prefix-cache reads) and `cache_write` are the
- * non-overlapping subsets of `input` that stream_usage reports; they are
- * priced at their own rates, falling back to the input rate when the
- * entry doesn't declare one — except where the write is a surcharge
- * rather than a replacement (catalog_cache_write_replaces_input), in
- * which case those tokens stay in the uncached remainder and the
- * surcharge is added on top. `cache_write_1h` is the 1h-TTL subset of
- * `cache_write`, priced at the entry's cost_cache_write_1h when it
- * declares one and otherwise at 2x the input rate — Anthropic's
- * documented multiplier, which every rate OpenRouter quotes agrees with;
- * the plain cache_write rate covers only the default 5-minute writes.
- * Negative token counts (the "not reported" convention) read as 0.
- *
- * Tier selection is why this prices one request, never an aggregate:
- * `input` (cache subsets included) picks the highest tier it exceeds and
- * the whole request bills at that tier's rates — summed batches would
- * cross thresholds their individual requests never did. When non-NULL,
- * *split receives the per-category component costs (zeros when the total
- * is -1). Pure math — no I/O. */
-double catalog_price(const struct catalog_entry *e, long input, long output, long cached,
-                     long cache_write, long cache_write_1h, struct catalog_split *split);
+/* Price one request in USD. Cache-read and cache-write counts are subsets of input, and
+ * `cache_write_1h_tokens` is a subset of cache writes. Negative counts are treated as zero. The
+ * highest context tier exceeded by total input replaces the base rates for the whole request, with
+ * unknown tier rates falling back to their base rates. An unknown 1h write rate uses twice the
+ * input rate. Returns -1 unless input and output rates are known. If non-NULL, `split` is zeroed
+ * even when pricing fails. */
+double catalog_price(const struct catalog_entry *entry, long input_tokens, long output_tokens,
+                     long cache_read_tokens, long cache_write_tokens, long cache_write_1h_tokens,
+                     struct catalog_split *split);
 
-/* Spawn the once-per-run background snapshot fetch if the cache file is
- * missing or older than catalog.refresh (empty catalog.url or zero
- * refresh opt out). Call when a stream is about to need metadata — the
- * agent does, once per run, for providers with a catalog_id. Fetch
- * failure is silent (a stale cache keeps serving; no cache means lookups
- * miss), but a *persistently* failing refresh is surfaced: returns the
- * snapshot's age in days when it exceeds the staleness alarm (~30 days —
- * whatever the cause: endpoint gone, artifact over the size cap, broken
- * proxy), else 0. The caller owns presenting that warning through its own
- * channel (ui_note in the REPL, stderr in -p). */
+/* Start the process-wide background refresh when the snapshot is older than catalog.refresh.
+ * Empty catalog.url or a non-positive refresh interval disables fetching. Only the first call per
+ * process does work. Returns the stale snapshot's age in days once it exceeds the warning
+ * threshold, otherwise 0. Fetch failures leave the existing snapshot untouched. */
 long catalog_prefetch(void);
 
-/* Give an in-flight background fetch up to `max_wait_ms` to finish
- * WITHOUT cancelling it (polled, ~20 ms granularity), then settle its
- * handle — a fetch still running at the bound is cancelled exactly as
- * catalog_shutdown would. No-op when no fetch is in flight. For the
- * one-shot exit path: a short cold-cache -p run would otherwise compute
- * its estimate against an empty cache and then cancel the download at
- * shutdown — on every run, so the cache could never populate. The
- * interactive REPL never calls this (exit stays prompt; its sessions are
- * long enough for the fetch to land on its own). */
+/* Give short-lived runs up to `max_wait_ms` to finish a background refresh, then cancel and join
+ * it. No-op when no refresh is running. */
 void catalog_drain(long max_wait_ms);
 
-/* Cancel/join the background fetch and free the memo. Call once at
- * process teardown, before curl_global_cleanup (the fetch worker holds a
- * libcurl handle) — this is for ASan-clean shutdown and prompt cancel of
- * an in-flight transfer. */
+/* Cancel and join the background refresh, then clear memoized lookups. Must run before
+ * curl_global_cleanup(). */
 void catalog_shutdown(void);
 
 #endif /* HAX_CATALOG_H */

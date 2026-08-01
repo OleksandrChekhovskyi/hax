@@ -99,7 +99,7 @@ static void openrouter_parse_tiers(const json_t *pricing, struct model_info *out
         if (!json_is_integer(min) || json_integer_value(min) <= 0)
             continue;
         struct catalog_tier *t = &out->tiers[out->n_tiers++];
-        t->above = (long)json_integer_value(min);
+        t->context_threshold = (long)json_integer_value(min);
         t->cost_input = openrouter_rate(ov, "prompt");
         t->cost_output = openrouter_rate(ov, "completion");
         t->cost_cache_read = openrouter_rate(ov, "input_cache_read");

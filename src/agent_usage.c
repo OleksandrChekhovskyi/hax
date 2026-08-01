@@ -129,10 +129,10 @@ int agent_spend_split(const struct spend_totals *totals, struct catalog_split *s
         struct catalog_split record_split;
         if (spend_record_estimate(&totals->records[i], &record_split) < 0)
             continue;
-        split->in += record_split.in;
-        split->cache_read += record_split.cache_read;
-        split->cache_write += record_split.cache_write;
-        split->out += record_split.out;
+        split->cost_input += record_split.cost_input;
+        split->cost_cache_read += record_split.cost_cache_read;
+        split->cost_cache_write += record_split.cost_cache_write;
+        split->cost_output += record_split.cost_output;
         has_priced_record = 1;
     }
     return has_priced_record;
@@ -167,7 +167,7 @@ long agent_usage_uncached_input(const struct stream_usage *usage, const struct p
         catalog_price(&rates, usage->input_tokens, usage->output_tokens, usage->cached_tokens,
                       usage->cache_write_tokens, usage->cache_write_1h_tokens, &split) < 0)
         return default_uncached_input(usage);
-    return split.in_tokens;
+    return split.uncached_input_tokens;
 }
 
 int agent_usage_is_reported(const struct stream_usage *usage)
@@ -209,11 +209,11 @@ struct turn_usage *agent_turn_usage_new(const struct stream_usage *usage, long e
     if (total < 0)
         return turn_usage;
 
-    turn_usage->uncached_input_tokens = split.in_tokens;
-    turn_usage->cost_input = split.in;
-    turn_usage->cost_cache_read = split.cache_read;
-    turn_usage->cost_cache_write = split.cache_write;
-    turn_usage->cost_output = split.out;
+    turn_usage->uncached_input_tokens = split.uncached_input_tokens;
+    turn_usage->cost_input = split.cost_input;
+    turn_usage->cost_cache_read = split.cost_cache_read;
+    turn_usage->cost_cache_write = split.cost_cache_write;
+    turn_usage->cost_output = split.cost_output;
     if (turn_usage->cost_total < 0) {
         turn_usage->cost_total = total;
         turn_usage->cost_estimated = 1;

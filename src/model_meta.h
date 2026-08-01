@@ -120,7 +120,7 @@ void model_meta_efforts(const struct provider *p, const char *model, struct effo
  * mean a lookup each. *out describes a model rather than being one: it
  * resolves the facts and carries neither id nor prose, so it owns nothing
  * and needs no freeing. */
-void model_meta_merge(const struct model_info *reported, const struct catalog_entry *cat,
+void model_meta_merge(const struct model_info *reported, const struct catalog_entry *catalog,
                       struct model_info *out);
 
 /* The level to use when `want` is not one `s` offers: the nearest at or
