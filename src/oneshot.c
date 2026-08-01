@@ -146,14 +146,7 @@ int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *o
         n_resumed = nl;
     }
 
-    /* HAX_TRANSCRIPT mirror, opened (and the file truncated) before
-     * any model call so even an early-error or zero-turn run leaves
-     * a fresh file behind. NULL when the env var is unset; all
-     * transcript_log_* entry points are NULL-safe. Appended at the end
-     * of each round-trip so `tail -f` works during long agentic runs;
-     * the final append during cleanup catches any remaining items and
-     * is idempotent on the others (transcript_log_append no-ops when
-     * n_items hasn't grown). */
+    /* Open before the model call so early failures still leave a fresh transcript. */
     struct transcript_log *tlog = transcript_log_open(sess.system_prompt, sess.tools, sess.n_tools);
     /* Append-only session record — continue the resumed file, else begin
      * a fresh one. NULL when this run doesn't record (see
