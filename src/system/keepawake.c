@@ -8,28 +8,22 @@
 #include <unistd.h>
 
 #ifdef __APPLE__
-#include <stdio.h> /* snprintf, for the caffeinate -w <pid> argument */
+#include <stdio.h>
+#elif defined(__linux__)
+#include <stdlib.h>
 #endif
 
-/* The single helper holding the assertion, or 0 when none is up. The
- * agent is single-threaded around the user-turn seam that drives this,
- * so a plain global needs no locking. */
-static pid_t helper_pid = 0;
+/* Calls occur on the main thread at the user-turn boundary. */
+static pid_t helper_pid;
 
-/* Clear helper_pid if the helper already exited on its own (so a later
- * acquire respawns rather than assuming a live assertion). */
-static void reap_if_dead(void)
+static void reap_dead_helper(void)
 {
     if (helper_pid > 0 && spawn_reap_if_exited(helper_pid))
         helper_pid = 0;
 }
 
-/* First executable path in `candidates` (NULL-terminated), or NULL when
- * none exists. Called in the parent so the post-fork child can execv an
- * already-resolved absolute path instead of a PATH search (see
- * spawn_helper). */
 #if defined(__APPLE__) || defined(__linux__)
-static const char *resolve_helper(const char *const *candidates)
+static const char *resolve_executable(const char *const *candidates)
 {
     for (size_t i = 0; candidates[i]; i++)
         if (access(candidates[i], X_OK) == 0)
@@ -38,71 +32,71 @@ static const char *resolve_helper(const char *const *candidates)
 }
 #endif
 
-/* fork+exec the platform helper. Sets helper_pid on success; a fork or
- * exec failure leaves it 0 (the exec failure surfaces as the child's
- * _exit(127), reaped by the next acquire's reap_if_dead). No-op on
- * unsupported platforms, or when the helper binary isn't installed. */
+#ifdef __linux__
+static int systemd_inhibit_supports_no_ask_password(const char *path)
+{
+    static int supported = -1;
+    if (supported >= 0)
+        return supported;
+
+    /* The option and interactive polkit agent were introduced together in systemd v257. Probe the
+     * option instead of parsing a version so distro backports work too. */
+    const char *const argv[] = {path, "--no-ask-password", "--version", NULL};
+    size_t output_len;
+    char *output = spawn_capture(argv, 4096, 1000, &output_len);
+    supported = output != NULL;
+    free(output);
+    return supported;
+}
+#endif
+
 static void spawn_helper(void)
 {
-    pid_t parent = getpid();
+#if defined(__APPLE__) || defined(__linux__)
+    pid_t parent_pid = getpid();
+    /* Resolve before fork; PATH lookup may allocate and deadlock after a multithreaded fork. */
 #ifdef __APPLE__
-    /* -i: inhibit idle *system* sleep only (display may still blank).
-     * -w: exit once hax (parent) exits — self-heals an orphan. */
-    char pidbuf[16];
-    snprintf(pidbuf, sizeof(pidbuf), "%d", (int)parent);
-    char *const argv[] = {(char *)"caffeinate", (char *)"-i", (char *)"-w", pidbuf, NULL};
     static const char *const candidates[] = {"/usr/bin/caffeinate", NULL};
+    const char *helper_path = resolve_executable(candidates);
+    if (!helper_path)
+        return;
+
+    char parent_pid_arg[16];
+    snprintf(parent_pid_arg, sizeof(parent_pid_arg), "%d", (int)parent_pid);
+    char *const argv[] = {(char *)"caffeinate", (char *)"-i", (char *)"-w", parent_pid_arg, NULL};
 #elif defined(__linux__)
     static const char *const candidates[] = {"/usr/bin/systemd-inhibit", "/bin/systemd-inhibit",
                                              NULL};
-    /* systemd-inhibit execvp()s its wrapped command, so resolve sleep to
-     * an absolute path here too: a bare "sleep" would go through the
-     * caller's PATH and run automatically every turn (keep_awake is on by
-     * default), letting `PATH=/tmp/evil:$PATH hax` hijack it — and would
-     * also break silently when PATH lacks coreutils. An absolute path
-     * makes systemd-inhibit's execvp skip the PATH search. NULL (no sleep
-     * binary) skips the spawn. */
     static const char *const sleep_candidates[] = {"/usr/bin/sleep", "/bin/sleep", NULL};
-    const char *sleep_path = resolve_helper(sleep_candidates);
-    if (!sleep_path)
+    const char *helper_path = resolve_executable(candidates);
+    const char *sleep_path = resolve_executable(sleep_candidates);
+    if (!helper_path || !sleep_path)
         return;
-    /* sleep for ~68 years (i32::MAX seconds, accepted by coreutils
-     * sleep); the inhibitor lock lives as long as systemd-inhibit, which
-     * we terminate on release or which dies with us via PDEATHSIG. */
-    char *const argv[] = {(char *)"systemd-inhibit",
-                          (char *)"--what=idle",
-                          (char *)"--mode=block",
-                          (char *)"--who=hax",
-                          (char *)"--why=hax is running a turn",
-                          (char *)sleep_path,
-                          (char *)"2147483647",
-                          NULL};
-#else
-    (void)parent;
-    return;
-#endif
 
-#if defined(__APPLE__) || defined(__linux__)
-    /* Resolve to an absolute path here in the (multithreaded) parent: the
-     * post-fork child must touch only async-signal-safe calls before exec,
-     * and execvp's PATH search can malloc — deadlocking on the arena lock
-     * if a vanished thread (the interrupt watcher, a provider probe) held
-     * it at fork time. Same rule the bash runner follows. */
-    const char *path = resolve_helper(candidates);
-    if (!path)
-        return; /* helper not installed — silent no-op */
+    /* systemd-inhibit uses execvp() for its command; keep PATH out of the trust boundary. */
+    char *argv[9];
+    size_t argc = 0;
+    argv[argc++] = (char *)"systemd-inhibit";
+    if (systemd_inhibit_supports_no_ask_password(helper_path))
+        argv[argc++] = (char *)"--no-ask-password";
+    argv[argc++] = (char *)"--what=idle";
+    argv[argc++] = (char *)"--mode=block";
+    argv[argc++] = (char *)"--who=hax";
+    argv[argc++] = (char *)"--why=hax is running a turn";
+    argv[argc++] = (char *)sleep_path;
+    argv[argc++] = (char *)"2147483647"; /* INT32_MAX seconds; release ends it first. */
+    argv[argc] = NULL;
+#endif
 
     pid_t pid = fork();
     if (pid < 0)
         return;
     if (pid == 0) {
-        /* Die with hax so a SIGKILLed parent (which skips release)
-         * doesn't strand the lock. Linux-only; macOS self-heals via
-         * caffeinate's -w above. */
-        spawn_child_die_with_parent(parent);
+        /* Linux uses PDEATHSIG; caffeinate -w provides the same orphan cleanup on macOS. */
+        spawn_child_die_with_parent(parent_pid);
         spawn_child_default_signals();
         spawn_child_redirect_null();
-        execv(path, argv); /* absolute path — no async-unsafe PATH search */
+        execv(helper_path, argv);
         _exit(127);
     }
     helper_pid = pid;
@@ -113,9 +107,9 @@ void keepawake_acquire(void)
 {
     if (!config_bool_or("keep_awake", 1))
         return;
-    reap_if_dead();
+    reap_dead_helper();
     if (helper_pid > 0)
-        return; /* already holding the assertion */
+        return;
     spawn_helper();
 }
 
