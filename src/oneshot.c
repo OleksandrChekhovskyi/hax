@@ -11,8 +11,8 @@
 #include "agent_usage.h"
 #include "catalog.h"
 #include "compact.h"
-#include "model_meta.h"
 #include "config.h"
+#include "model_meta.h"
 #include "session.h"
 #include "transcript.h"
 #include "util.h"
@@ -21,339 +21,300 @@
 #include "tools/bash_process.h"
 #include "tools/task_registry.h"
 
-/* Compaction attempts count toward the one-shot exit spend just like normal
- * turns. History mutation and footer capture stay inside compact_run. */
-struct oneshot_compact_ctx {
-    struct spend_totals *costs;
-    const struct provider *provider;
-    const char *model;
+struct oneshot_state {
+    struct provider *provider;
+    struct agent_session session;
+    struct transcript_log *transcript;
+    struct session_log *session_log;
+    struct spend_totals spend;
+    long started_ms;
+    long context_tokens;
 };
 
-static int compact_on_event(const struct stream_event *ev, void *user)
+static int account_compaction_event(const struct stream_event *event, void *user)
 {
-    struct oneshot_compact_ctx *ctx = user;
+    struct oneshot_state *state = user;
     const struct stream_usage *usage = NULL;
-    if (ev->kind == EV_DONE)
-        usage = &ev->u.done.usage;
-    else if (ev->kind == EV_ERROR)
-        usage = ev->u.error.usage;
+
+    if (event->kind == EV_DONE)
+        usage = &event->u.done.usage;
+    else if (event->kind == EV_ERROR)
+        usage = event->u.error.usage;
     if (usage)
-        agent_spend_account(ctx->costs, usage, ctx->provider, ctx->model);
+        agent_spend_account(&state->spend, usage, state->provider, state->session.model);
     return 0;
 }
 
-/* Walk `items` and write the text of every assistant message produced
- * after `from` to stdout, one terminating newline per message. The model
- * may emit multiple assistant messages in a single response (rare with
- * the providers we ship, but legal); printing all of them avoids
- * silently swallowing content. */
-static void print_assistant_text(const struct item *items, size_t from, size_t to)
+static int compact_context(struct oneshot_state *state)
 {
-    for (size_t i = from; i < to; i++) {
-        if (items[i].kind != ITEM_ASSISTANT_MESSAGE || !items[i].text)
-            continue;
-        size_t n = strlen(items[i].text);
-        if (n == 0)
-            continue;
-        fwrite(items[i].text, 1, n, stdout);
-        if (items[i].text[n - 1] != '\n')
-            fputc('\n', stdout);
-    }
-}
-
-static int oneshot_compact(struct agent_session *session, struct provider *provider,
-                           struct session_log *slog, struct transcript_log *tlog,
-                           struct spend_totals *costs)
-{
-    struct oneshot_compact_ctx ctx = {
-        .costs = costs,
-        .provider = provider,
-        .model = session->model,
-    };
     struct compact_params params = {
-        .session = session,
-        .provider = provider,
-        .slog = slog,
-        .tlog = tlog,
-        .hooks = {.user = &ctx, .observe = compact_on_event},
+        .session = &state->session,
+        .provider = state->provider,
+        .slog = state->session_log,
+        .tlog = state->transcript,
+        .hooks = {.user = state, .observe = account_compaction_event},
     };
     struct compact_result result;
+
     compact_run(&params, &result);
-    int compacted = result.outcome == COMPACT_COMPLETE;
+    int completed = result.outcome == COMPACT_COMPLETE;
     compact_result_destroy(&result);
-    return compacted;
+    return completed;
 }
 
-struct oneshot_loop_ctx {
-    struct agent_session *session;
-    struct provider *provider;
-    struct session_log *slog;
-    struct transcript_log *tlog;
-    struct spend_totals *costs;
-};
-
-static void oneshot_turn_end(const struct agent_loop_turn *loop_turn, void *user)
+static void account_turn(const struct agent_loop_turn *turn, void *user)
 {
-    struct oneshot_loop_ctx *ctx = user;
-    agent_spend_account(ctx->costs, &loop_turn->usage, ctx->provider, ctx->session->model);
+    struct oneshot_state *state = user;
+    agent_spend_account(&state->spend, &turn->usage, state->provider, state->session.model);
 }
 
-static void oneshot_auto_compact(void *user)
+static void auto_compact(void *user)
 {
-    struct oneshot_loop_ctx *ctx = user;
-    if (!oneshot_compact(ctx->session, ctx->provider, ctx->slog, ctx->tlog, ctx->costs))
+    struct oneshot_state *state = user;
+
+    if (!compact_context(state))
         return;
     int tty = isatty(fileno(stderr));
     fprintf(stderr, "%s[compacted context]%s\n", tty ? ANSI_DIM : "", tty ? ANSI_RESET : "");
 }
 
-int oneshot_run(struct provider *p, const char *prompt, const struct hax_opts *opts, int max_turns)
+static int resume_session(struct oneshot_state *state, const char *path,
+                          struct session_meta *metadata, size_t *item_count)
 {
-    struct agent_session sess;
-    /* -p runs headless (no interrupt_init), but a SIGTERM from a parent hax stopping this
-     * subagent must still take the spawned shells down. */
+    if (!path)
+        return 0;
+
+    struct item *items = NULL;
+    size_t count = 0;
+    if (session_load(path, &items, &count, metadata) != 0) {
+        hax_err("could not resume session '%s'", path);
+        return -1;
+    }
+
+    state->session.items = items;
+    state->session.n_items = count;
+    state->session.cap_items = count;
+    *item_count = count;
+    return 0;
+}
+
+static void open_logs(struct oneshot_state *state, const struct hax_opts *options,
+                      const struct session_meta *resume_metadata, size_t resumed_item_count)
+{
+    struct agent_session *session = &state->session;
+    struct provider *provider = state->provider;
+
+    state->transcript =
+        transcript_log_open(session->system_prompt, session->tools, session->n_tools);
+    if (agent_recording_enabled(provider)) {
+        state->session_log =
+            options->resume_path
+                ? session_log_resume(options->resume_path, resume_metadata->provider,
+                                     resume_metadata->model, resume_metadata->effort,
+                                     resume_metadata->preset, resumed_item_count)
+                : session_log_open(agent_provider_id(provider), session->model,
+                                   session->model_label, session->effort, config_str("preset"));
+    }
+    if (options->resume_path)
+        session_log_set_meta(state->session_log, agent_provider_id(provider), session->model,
+                             session->model_label, session->effort, config_str("preset"));
+    if (resumed_item_count > 0)
+        transcript_log_append(state->transcript, session->items, session->n_items);
+}
+
+static void print_start_banner(const struct oneshot_state *state, const struct hax_opts *options)
+{
+    const struct agent_session *session = &state->session;
+    const char *provider_name = state->provider->name ? state->provider->name : "?";
+    const char *model_label = session->model_label ? session->model_label : session->model;
+    const char *preset = config_str("preset");
+    int tty = isatty(fileno(stderr));
+
+    /* Provenance remains useful in redirected diagnostics, so only the styling is TTY-gated. */
+    if (preset && *preset)
+        fprintf(stderr, "%shax [%s]: %s · %s", tty ? ANSI_DIM : "", preset, provider_name,
+                model_label);
+    else
+        fprintf(stderr, "%shax: %s · %s", tty ? ANSI_DIM : "", provider_name, model_label);
+    if (session->effort)
+        fprintf(stderr, " · %s", session->effort);
+    if (options->provider_autoselected)
+        fprintf(stderr, " (auto-selected)");
+    else if (options->resume_path)
+        fprintf(stderr, " (resumed)");
+
+    const char *session_id = session_log_resume_hint(state->session_log);
+    if (session_id)
+        fprintf(stderr, " · session %s", session_id);
+    fprintf(stderr, "%s\n\n", tty ? ANSI_RESET : "");
+}
+
+static void print_assistant_messages(const struct item *items, size_t from, size_t to)
+{
+    for (size_t i = from; i < to; i++) {
+        if (items[i].kind != ITEM_ASSISTANT_MESSAGE || !items[i].text || !*items[i].text)
+            continue;
+
+        size_t text_len = strlen(items[i].text);
+        fwrite(items[i].text, 1, text_len, stdout);
+        if (items[i].text[text_len - 1] != '\n')
+            fputc('\n', stdout);
+    }
+}
+
+static int handle_loop_result(const struct oneshot_state *state,
+                              const struct agent_loop_result *result, int max_turns)
+{
+    switch (result->outcome) {
+    case AGENT_LOOP_COMPLETE:
+        print_assistant_messages(state->session.items, result->final_items_from,
+                                 result->final_items_to);
+        return 0;
+    case AGENT_LOOP_PROVIDER_ERROR:
+        hax_err("provider error: %s",
+                result->error_message ? result->error_message : "(no message)");
+        return 1;
+    case AGENT_LOOP_MAX_TURNS:
+        hax_err("max turns (%d) exceeded; aborting", max_turns);
+        return 1;
+    case AGENT_LOOP_INTERRUPTED:
+    case AGENT_LOOP_PAUSED:
+        return 1;
+    }
+    return 1;
+}
+
+static void finalize_tasks(struct oneshot_state *state)
+{
+    /* Record the terminal state before shutdown destroys uncollected task output. */
+    char *exit_note = task_exit_note();
+    if (exit_note) {
+        agent_session_append(&state->session, (struct item){
+                                                  .kind = ITEM_USER_MESSAGE,
+                                                  .text = exit_note,
+                                                  .origin = ITEM_ORIGIN_TASK_NOTE,
+                                              });
+    }
+    task_registry_shutdown();
+}
+
+static void print_stats_line(const struct oneshot_state *state, double spend, int spend_approx,
+                             int tty)
+{
+    char segments[AGENT_STATS_MAX_SEGMENTS][AGENT_STATS_SEGMENT_LEN];
+    int segment_count = agent_format_stats_segments(
+        segments, state->context_tokens, model_meta_context(state->provider, state->session.model),
+        monotonic_ms() - state->started_ms, spend, spend_approx);
+
+    fputs(tty ? ANSI_DIM : "", stderr);
+    for (int i = 0; i < segment_count; i++)
+        fprintf(stderr, "%s%s", i ? " · " : "", segments[i]);
+    fprintf(stderr, "%s\n", tty ? ANSI_RESET : "");
+}
+
+static void print_exit_notes(struct oneshot_state *state)
+{
+    const char *resume_hint = session_log_resume_hint(state->session_log);
+
+    /* A short run may finish before the initial catalog fetch can price its usage. */
+    if (agent_spend_has_unpriced(&state->spend))
+        catalog_drain(3000);
+
+    int spend_approx = 0;
+    double spend = agent_spend_total(&state->spend, &spend_approx);
+    int have_stats = state->context_tokens >= 0 || spend > 0;
+    if (!resume_hint && !have_stats)
+        return;
+
+    /* Preserve answer-before-diagnostics ordering when stdout and stderr share a destination. */
+    fflush(stdout);
+    int tty = isatty(fileno(stderr));
+    fputc('\n', stderr);
+    if (have_stats)
+        print_stats_line(state, spend, spend_approx, tty);
+    if (resume_hint)
+        fprintf(stderr, "%sresume with: hax --resume=%s%s\n", tty ? ANSI_DIM : "", resume_hint,
+                tty ? ANSI_RESET : "");
+}
+
+static void oneshot_state_destroy(struct oneshot_state *state)
+{
+    transcript_log_close(state->transcript);
+    session_log_close(state->session_log);
+    agent_spend_free(&state->spend);
+    agent_session_free(&state->session);
+}
+
+int oneshot_run(struct provider *provider, const char *prompt, const struct hax_opts *options,
+                int max_turns)
+{
+    struct oneshot_state state = {
+        .provider = provider,
+        .context_tokens = -1,
+    };
+
+    /* Headless mode still needs fatal signals to terminate its spawned process groups. */
     interrupt_install_signal_handlers();
     interrupt_set_fatal_hook(bash_shell_pgids_kill);
-    /* One-shot mode must resolve effort after the startup probe, not while it is still pending. */
-    model_meta_wait(p);
-    agent_session_init(&sess, p, opts);
-    /* One-shot mode cannot prompt for a missing model. */
-    if (!sess.model || !*sess.model) {
-        hax_err("HAX_MODEL is required for provider '%s' (no default)", p->name ? p->name : "?");
-        agent_session_free(&sess);
+
+    /* Effort must reflect the completed startup probe before session initialization. */
+    model_meta_wait(provider);
+    agent_session_init(&state.session, provider, options);
+    if (!state.session.model || !*state.session.model) {
+        hax_err("HAX_MODEL is required for provider '%s' (no default)",
+                provider->name ? provider->name : "?");
+        oneshot_state_destroy(&state);
         return 1;
     }
 
-    /* Resume: seed history from a prior session before the new prompt is
-     * added, so -p can continue a conversation. An unreadable file is fatal
-     * rather than silently running the prompt against empty history; an
-     * empty-but-readable session loads as zero items and resumes empty. */
-    size_t n_resumed = 0;
-    /* What the resumed file records, kept until the log is opened against it
-     * below: it differs from the live selection only when a flag overrode the
-     * restore, and opening against the file makes that override record
-     * itself as a switch. */
-    struct session_meta rmeta;
-    memset(&rmeta, 0, sizeof(rmeta));
-    if (opts->resume_path) {
-        struct item *loaded = NULL;
-        size_t nl = 0;
-        if (session_load(opts->resume_path, &loaded, &nl, &rmeta) != 0) {
-            hax_err("could not resume session '%s'", opts->resume_path);
-            session_meta_free(&rmeta);
-            agent_session_free(&sess);
-            return 1;
-        }
-        sess.items = loaded;
-        sess.n_items = nl;
-        sess.cap_items = nl;
-        n_resumed = nl;
+    struct session_meta resume_metadata = {0};
+    size_t resumed_item_count = 0;
+    if (resume_session(&state, options->resume_path, &resume_metadata, &resumed_item_count) != 0) {
+        session_meta_free(&resume_metadata);
+        oneshot_state_destroy(&state);
+        return 1;
     }
 
-    /* Open before the model call so early failures still leave a fresh transcript. */
-    struct transcript_log *tlog = transcript_log_open(sess.system_prompt, sess.tools, sess.n_tools);
-    /* Append-only session record — continue the resumed file, else begin
-     * a fresh one. NULL when this run doesn't record (see
-     * agent_recording_enabled); -p has no prompt history to go with it. */
-    struct session_log *slog = NULL;
-    if (agent_recording_enabled(p))
-        slog = opts->resume_path
-                   ? session_log_resume(opts->resume_path, rmeta.provider, rmeta.model,
-                                        rmeta.effort, rmeta.preset, n_resumed)
-                   : session_log_open(agent_provider_id(p), sess.model, sess.model_label,
-                                      sess.effort, config_str("preset"));
-    if (opts->resume_path)
-        session_log_set_meta(slog, agent_provider_id(p), sess.model, sess.model_label, sess.effort,
-                             config_str("preset"));
-    session_meta_free(&rmeta);
-    if (n_resumed > 0)
-        transcript_log_append(tlog, sess.items, sess.n_items);
+    open_logs(&state, options, &resume_metadata, resumed_item_count);
+    session_meta_free(&resume_metadata);
 
-    agent_session_add_user(&sess, prompt);
-    /* Land the prompt on disk before any provider call so a hang or
-     * crash mid-stream still leaves the triggering input visible in
-     * the log. */
-    agent_loop_flush_logs(tlog, slog, sess.items, sess.n_items);
+    agent_session_add_user(&state.session, prompt);
+    /* Persist the triggering prompt before entering a provider call that may not return. */
+    agent_loop_flush_logs(state.transcript, state.session_log, state.session.items,
+                          state.session.n_items);
+    print_start_banner(&state, options);
 
-    /* Provenance banner — the light -p twin of the REPL's agent_print_banner.
-     * What actually answers resolves through several tiers (env, state.json,
-     * config, auto-selection), so name it up front, before any model call.
-     * stderr keeps piped stdout clean; deliberately not TTY-gated so CI and
-     * pipeline logs capture which backend produced the answer. Dim only on a
-     * terminal, like the resume hint below. Emitted after the first flush
-     * (not at entry) so the session id can ride along: the flush above
-     * materialized the file, and an id visible *at startup* is what lets a
-     * subagent killed mid-run (bash-tool timeout) still be picked up with
-     * --resume — the exit-time hint never prints for it. */
-    {
-        int tty = isatty(fileno(stderr));
-        const char *model_label = sess.model_label ? sess.model_label : sess.model;
-        /* Active preset stance, like the REPL banner: the answer's
-         * provenance includes the stance that shaped it (possibly a swapped
-         * system prompt), not just the backend. */
-        const char *preset = config_str("preset");
-        if (preset && *preset)
-            fprintf(stderr, "%shax [%s]: %s · %s", tty ? ANSI_DIM : "", preset,
-                    p->name ? p->name : "?", model_label);
-        else
-            fprintf(stderr, "%shax: %s · %s", tty ? ANSI_DIM : "", p->name ? p->name : "?",
-                    model_label);
-        if (sess.effort)
-            fprintf(stderr, " · %s", sess.effort);
-        if (opts->provider_autoselected)
-            fprintf(stderr, " (auto-selected)");
-        else if (opts->resume_path)
-            /* Marks the selection above as the resumed conversation's own,
-             * which is why it can differ from HAX_MODEL and friends — the
-             * same courtesy "(auto-selected)" pays for an inferred pick.
-             * Unconditional: a marker that appears only when the restore
-             * happened to change something reads as noise. */
-            fprintf(stderr, " (resumed)");
-        const char *sid = session_log_resume_hint(slog);
-        if (sid)
-            fprintf(stderr, " · session %s", sid);
-        /* Trailing blank line for the same reason the resume hint leads with
-         * one: in a combined 2>&1 stream the banner would otherwise run
-         * straight into the answer. */
-        fprintf(stderr, "%s\n\n", tty ? ANSI_RESET : "");
-    }
-
-    int rc = 0;
-    /* Run stats for the exit summary on stderr: latest reported context
-     * size, summed provider-reported cost (compaction turns included, via
-     * oneshot_compact's cost accumulator), wall time for the whole run. */
-    long start_ms = monotonic_ms();
-    long last_ctx = -1;
-    struct spend_totals costs = {0};
-    /* A run on a catalog-mapped provider will want metadata for the exit
-     * estimate / window fallback — start the background refresh now so it
-     * lands while the model works. A snapshot that has been failing to
-     * refresh for weeks earns a warning: estimates may have drifted. */
-    if (p->catalog_id) {
+    state.started_ms = monotonic_ms();
+    if (provider->catalog_id) {
         long stale_days = catalog_prefetch();
         if (stale_days > 0)
             hax_warn("model catalog last refreshed %ld days ago — cost estimates may be stale",
                      stale_days);
     }
-    struct oneshot_loop_ctx loop_ctx = {
-        .session = &sess,
-        .provider = p,
-        .slog = slog,
-        .tlog = tlog,
-        .costs = &costs,
-    };
+
     struct agent_loop_params loop_params = {
-        .session = &sess,
-        .provider = p,
-        .tlog = tlog,
-        .slog = slog,
+        .session = &state.session,
+        .provider = provider,
+        .tlog = state.transcript,
+        .slog = state.session_log,
         .max_turns = max_turns,
         .hooks =
             {
-                .user = &loop_ctx,
-                .turn_end = oneshot_turn_end,
-                .compact = oneshot_auto_compact,
+                .user = &state,
+                .turn_end = account_turn,
+                .compact = auto_compact,
             },
     };
     struct agent_loop_result loop_result;
     agent_loop_run(&loop_params, &loop_result);
-    last_ctx = loop_result.last_context_tokens;
-
-    switch (loop_result.outcome) {
-    case AGENT_LOOP_COMPLETE:
-        print_assistant_text(sess.items, loop_result.final_items_from, loop_result.final_items_to);
-        break;
-    case AGENT_LOOP_PROVIDER_ERROR:
-        hax_err("provider error: %s",
-                loop_result.error_message ? loop_result.error_message : "(no message)");
-        rc = 1;
-        break;
-    case AGENT_LOOP_INTERRUPTED:
-    case AGENT_LOOP_PAUSED: /* no checkpoint hook here — not reachable */
-        rc = 1;
-        break;
-    case AGENT_LOOP_MAX_TURNS:
-        hax_err("max turns (%d) exceeded; aborting", max_turns);
-        rc = 1;
-        break;
-    }
+    state.context_tokens = loop_result.last_context_tokens;
+    int result = handle_loop_result(&state, &loop_result, max_turns);
     agent_loop_result_destroy(&loop_result);
 
-    /* The process is about to exit: any task the model launched and never awaited dies here.
-     * Notes for tasks that finished after the last request still make the transcript. */
-    /* Resolve every uncollected task in the record — final status for finished ones,
-     * killed-at-exit for the rest — so a resumed session never dangles on a
-     * "[detached as task ...]" report or advertises output this exit destroys. */
-    char *exit_note = task_exit_note();
-    if (exit_note) {
-        agent_session_append(&sess, (struct item){
-                                        .kind = ITEM_USER_MESSAGE,
-                                        .text = exit_note,
-                                        .origin = ITEM_ORIGIN_TASK_NOTE,
-                                    });
-    }
-    task_registry_shutdown();
-
-    agent_loop_flush_logs(tlog, slog, sess.items, sess.n_items);
-    /* Surface the session id on stderr (stdout is the model's answer, kept
-     * clean for piping) so a one-shot run can be picked up with --resume.
-     * NULL when nothing was recorded or persistence is disabled. */
-    const char *hint = session_log_resume_hint(slog);
-    /* Run stats mirror the REPL's per-turn line (context · time · spend),
-     * printed only when a backend actually reported something — a provider
-     * that sends no usage keeps -p output free of a "context ?" stub. Time
-     * alone isn't worth a line. */
-    /* Total spend: reported cost, plus each unreported response priced
-     * against the catalog (agent_spend_total). Approximate ("~$") whenever
-     * unreported usage exists at all — priced or not, a reported subtotal
-     * must never display as an exact grand total. */
-    if (agent_spend_has_unpriced(&costs)) {
-        /* Unpriced usage the cache couldn't answer for — likely a cold
-         * cache racing the download this run started. Give the fetch a
-         * bounded moment to land instead of letting shutdown cancel it,
-         * then reprice: this run's estimate can resolve, and repeated
-         * short -p runs can't keep a cold cache cold forever. Deliberately
-         * conditional — when a stale-but-usable snapshot already priced
-         * the run, exit latency wins over refresh eagerness (a hanging
-         * endpoint would otherwise tax every run 3s while the mtime stays
-         * old), and the 30-day staleness alarm still backstops real rot. */
-        catalog_drain(3000);
-    }
-    int spend_approx = 0;
-    double spend = agent_spend_total(&costs, &spend_approx);
-    int have_stats = last_ctx >= 0 || spend > 0;
-    if (hint || have_stats) {
-        /* Flush the answer (block-buffered when stdout is piped) before the
-         * unbuffered stderr write, so a combined 2>&1 stream shows the hint
-         * after the answer rather than racing ahead of it. */
-        fflush(stdout);
-        /* Always lead with a blank line so the footnotes read as such
-         * rather than part of the answer — agents commonly fold stderr
-         * into stdout (2>&1), where the model's output would otherwise run
-         * straight into them. Dim only on a terminal; a captured log stays
-         * plain (no stray ANSI). */
-        int tty = isatty(fileno(stderr));
-        fputc('\n', stderr);
-        if (have_stats) {
-            /* Same field selection/formatting as the REPL stats line
-             * (display_stats_line), minus the reflow — stderr footnotes
-             * are plain single lines. */
-            char segments[AGENT_STATS_MAX_SEGMENTS][AGENT_STATS_SEGMENT_LEN];
-            int n =
-                agent_format_stats_segments(segments, last_ctx, model_meta_context(p, sess.model),
-                                            monotonic_ms() - start_ms, spend, spend_approx);
-            fputs(tty ? ANSI_DIM : "", stderr);
-            for (int i = 0; i < n; i++)
-                fprintf(stderr, "%s%s", i ? " · " : "", segments[i]);
-            fprintf(stderr, "%s\n", tty ? ANSI_RESET : "");
-        }
-        if (hint)
-            fprintf(stderr, "%sresume with: hax --resume=%s%s\n", tty ? ANSI_DIM : "", hint,
-                    tty ? ANSI_RESET : "");
-    }
-    transcript_log_close(tlog);
-    session_log_close(slog);
-    agent_spend_free(&costs);
-    agent_session_free(&sess);
-    return rc;
+    finalize_tasks(&state);
+    agent_loop_flush_logs(state.transcript, state.session_log, state.session.items,
+                          state.session.n_items);
+    print_exit_notes(&state);
+    oneshot_state_destroy(&state);
+    return result;
 }

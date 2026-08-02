@@ -335,8 +335,6 @@ static void session_enable_tools(struct agent_session *session)
     session->n_tools = 1;
 }
 
-/* Same run with no tool_call hook — the shape of a one-shot run, where the
- * loop answers calls itself instead of a frontend rendering them. */
 static struct agent_loop_result run_chain_hookless(struct agent_session *session,
                                                    struct provider *provider,
                                                    struct loop_test_ctx *ctx, int max_turns)
@@ -493,10 +491,8 @@ static void test_loop_cancel_still_refuses_disabled_tool(void)
     agent_session_free(&session);
 }
 
-/* The core answers calls itself when no frontend hook is installed (one-shot),
- * and owes the same provenance the rendered paths stamp: the action decides
- * whether the tool ran, not who drew the block. Without it, a --raw refusal is
- * recorded as an ordinary result and a later Ctrl-O replays it as executed. */
+/* Hookless results still need action provenance; otherwise history replay presents refused or
+ * skipped calls as executed. */
 static void test_hookless_fallback_stamps_origins(void)
 {
     /* No tools advertised (session_enable_tools not called) → the call is

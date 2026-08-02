@@ -27,6 +27,7 @@ test_sources = [
     'test_history.c',
     'test_model_meta.c',
     'test_harness.c',
+    'test_oneshot.c',
     'test_paste_image.c',
     'test_provider.c',
     'test_select_config.c',

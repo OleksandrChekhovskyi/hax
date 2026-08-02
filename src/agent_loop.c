@@ -154,9 +154,8 @@ static struct item loop_run_tool(const struct agent_loop_params *params, const s
     if (hooks->tool_call) {
         result = hooks->tool_call(call, action, image_input, hooks->user);
     } else if (action == AGENT_LOOP_TOOL_REFUSE) {
-        /* No frontend hook (one-shot): the core answers the call itself, and
-         * owes the same provenance the rendered paths stamp — the action is
-         * what makes it undispatched, not who drew it. */
+        /* Hookless execution owes the same provenance as frontend-rendered results: the action,
+         * not the presentation path, determines whether the call was dispatched. */
         result = agent_tool_result_make(call, REFUSED_RESULT, NULL);
         result.origin = ITEM_ORIGIN_REFUSED;
     } else if (action == AGENT_LOOP_TOOL_SKIP) {
