@@ -1274,9 +1274,8 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             putchar('\n');
             break;
         }
-        /* Empty input continues only resumable turns. Ctrl-C also returns empty but must discard
-         * the cancelled draft. */
-        if (!*line && (state.resume_reason == AGENT_RESUME_NONE || input_cancelled(input))) {
+        /* Empty input continues only resumable turns. */
+        if (!*line && state.resume_reason == AGENT_RESUME_NONE) {
             free(line);
             continue;
         }

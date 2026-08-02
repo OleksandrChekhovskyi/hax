@@ -13,14 +13,16 @@ struct input;
 struct input *input_new(void);
 void input_free(struct input *in);
 
-/* Return a malloc'd message, which may contain '\n'; return NULL on EOF and "" on Ctrl-C. */
+/* Return a malloc'd message, which may contain '\n'; return NULL on EOF or a
+ * double Ctrl-C quit. Ctrl-C with text clears the buffer and editing continues. */
 char *input_readline(struct input *in, const char *prompt);
 
 /* Add a non-empty line with erasedups semantics. When persistence is open, append it to
  * disk as well. */
 void input_history_add(struct input *in, const char *line);
 
-/* Add a non-empty line to in-memory history without writing it to disk. */
+/* Add a non-empty line to in-memory history without writing it to disk. A later
+ * input_history_add of the same line still persists it. */
 void input_history_add_session(struct input *in, const char *line);
 
 /* Load history from `path` and append later input_history_add entries there. Create parent
@@ -66,9 +68,6 @@ void input_set_preseed(struct input *in, const char *text);
 
 /* When enabled, Enter on an empty buffer returns "" instead of doing nothing. */
 void input_set_empty_submit(struct input *in, int enabled);
-
-/* Distinguish Ctrl-C from an enabled empty submission; both return "". */
-int input_cancelled(const struct input *in);
 
 /* Load the conventional XDG history file only for tty sessions. `persist` controls whether
  * later entries are appended; scripted input is never retained. */

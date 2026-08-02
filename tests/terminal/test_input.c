@@ -88,6 +88,38 @@ static void test_history_missing_file(void)
     free(path);
 }
 
+static void test_history_session_entry_persists_on_resubmit(void)
+{
+    char *path = history_fixture("first\n");
+
+    struct input *in = input_new();
+    input_history_open(in, path);
+    long before = file_size(path);
+
+    input_history_add_session(in, "stashed draft");
+    EXPECT(in->hist_n == 2);
+    EXPECT(file_size(path) == before);
+
+    /* Submitting the recalled draft unchanged must reach the file despite being
+     * a repeat of the newest in-memory entry. */
+    input_history_add(in, "stashed draft");
+    EXPECT(in->hist_n == 2);
+    long after = file_size(path);
+    EXPECT(after > before);
+
+    input_history_add(in, "stashed draft");
+    EXPECT(file_size(path) == after);
+
+    struct input *reloaded = input_new();
+    input_history_load(reloaded, path);
+    EXPECT(reloaded->hist_n == 2);
+    EXPECT_STR_EQ(reloaded->hist[1], "stashed draft");
+
+    input_free(reloaded);
+    input_free(in);
+    free(path);
+}
+
 static void noop_view(void *user)
 {
     (void)user;
@@ -150,6 +182,7 @@ int main(void)
     test_history_load_is_read_only();
     test_history_open_appends();
     test_history_missing_file();
+    test_history_session_entry_persists_on_resubmit();
     test_modal_key_macro();
     test_modal_key_bind_and_rebind();
     test_modal_key_rejects_printable();

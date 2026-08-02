@@ -399,6 +399,18 @@ static void paint(struct input *in)
                           in->display_columns, paint_emit, &context, NULL);
     }
 
+    /* Ghost text after the empty prompt; the cursor repositioning below lands on top of it. */
+    in->hint_painted = 0;
+    if (in->exit_armed && in->len == 0) {
+        static const char exit_hint[] = "ctrl+c again to exit";
+        if (prompt_width + (int)sizeof(exit_hint) - 1 <= in->display_columns) {
+            buf_append_str(&frame, ANSI_DIM);
+            buf_append_str(&frame, exit_hint);
+            buf_append_str(&frame, ANSI_BOLD_OFF);
+            in->hint_painted = 1;
+        }
+    }
+
     if (clipped) {
         buf_append_str(&frame, ANSI_ERASE_LINE "\r\n");
         append_clip_indicator(&frame, layout.total_rows - first_row - visible_rows,
@@ -610,6 +622,7 @@ static void erase_edit_area(struct input *in)
     buf_free(&frame);
     in->painted_cursor_row = 0;
     in->painted_rows = 0;
+    in->hint_painted = 0;
 }
 
 /* ---------------- $EDITOR escape ---------------- */
@@ -1162,8 +1175,11 @@ void input_history_add(struct input *in, const char *line)
 {
     if (!line || !*line)
         return;
-    if (!input_core_history_add(in, line))
+    /* A non-empty line that leaves history unchanged is a repeat of the newest
+     * entry; it still needs the append when that entry was session-only. */
+    if (!input_core_history_add(in, line) && !in->hist_newest_unpersisted)
         return;
+    in->hist_newest_unpersisted = 0;
     if (in->persist_path)
         history_file_append(in->persist_path, line);
 }
@@ -1172,7 +1188,8 @@ void input_history_add_session(struct input *in, const char *line)
 {
     if (!line || !*line)
         return;
-    input_core_history_add(in, line);
+    if (input_core_history_add(in, line))
+        in->hist_newest_unpersisted = 1;
 }
 
 int input_bind_modal_key(struct input *in, unsigned char key, void (*fn)(void *user), void *user)
@@ -1232,11 +1249,6 @@ void input_set_preseed(struct input *in, const char *text)
     in->preseed = (text && *text) ? xstrdup(text) : NULL;
 }
 
-int input_cancelled(const struct input *in)
-{
-    return in->last_cancelled;
-}
-
 void input_history_open_default(struct input *in, int persist)
 {
     /* Never retain piped input; it may contain secrets from unattended scripts. */
@@ -1256,7 +1268,6 @@ void input_history_open_default(struct input *in, int persist)
 
 char *input_readline(struct input *in, const char *prompt)
 {
-    in->last_cancelled = 0;
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
         /* Prevent a stale seed from reaching a later interactive read. */
         free(in->preseed);
@@ -1283,6 +1294,7 @@ char *input_readline(struct input *in, const char *prompt)
     in->hist_pos = in->hist_n;
     free(in->draft);
     in->draft = NULL;
+    in->exit_armed = 0;
     in->painted_cursor_row = 0;
     in->painted_rows = 0;
     in->previous_paint_clipped = 0;
@@ -1295,9 +1307,8 @@ char *input_readline(struct input *in, const char *prompt)
 
     int submit = 0;
     int eof = 0;
-    int cancel = 0;
 
-    while (!submit && !eof && !cancel) {
+    while (!submit && !eof) {
         unsigned char c;
         int r = read_byte_blocking(&c);
         if (r <= 0) {
@@ -1309,6 +1320,9 @@ char *input_readline(struct input *in, const char *prompt)
         if (handle_resize(in))
             paint(in);
 
+        if (c != 0x03)
+            in->exit_armed = 0;
+
         switch (c) {
         case 0x01: /* Ctrl-A */
             in->cursor = input_core_line_start(in);
@@ -1316,8 +1330,19 @@ char *input_readline(struct input *in, const char *prompt)
         case 0x02: /* Ctrl-B */
             input_core_move_left(in);
             break;
-        case 0x03: /* Ctrl-C */
-            cancel = 1;
+        case 0x03: /* Ctrl-C — clear the buffer; twice on empty quits */
+            if (in->len > 0) {
+                /* Keep the discarded draft recallable via Up, in memory only. */
+                input_history_add_session(in, in->buf);
+                in->hist_pos = in->hist_n;
+                free(in->draft);
+                in->draft = NULL;
+                input_core_set_buffer(in, "");
+            } else if (in->exit_armed) {
+                eof = 1;
+            } else {
+                in->exit_armed = 1;
+            }
             break;
         case 0x04: /* Ctrl-D — EOF on empty, else delete-fwd */
             if (in->len == 0) {
@@ -1419,6 +1444,13 @@ char *input_readline(struct input *in, const char *prompt)
             paint(in);
     }
 
+    /* A key that ends the loop skips the disarm repaint, so a painted hint
+     * would outlive the editor; erase it before leaving. */
+    if (in->hint_painted) {
+        in->exit_armed = 0;
+        paint(in);
+    }
+
     if (submit && in->len > 0)
         render_submitted(in);
     else
@@ -1427,10 +1459,6 @@ char *input_readline(struct input *in, const char *prompt)
 
     if (eof && in->len == 0)
         return NULL;
-    if (cancel) {
-        in->last_cancelled = 1;
-        return xstrdup("");
-    }
     /* Jansson rejects malformed UTF-8, so normalize external input before returning it. */
     return sanitize_utf8(in->buf, in->len);
 }

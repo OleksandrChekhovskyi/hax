@@ -33,12 +33,17 @@ struct input {
     size_t hist_pos;
     char *draft; /* saved buffer at first Up; restored on Down past end */
 
+    /* The newest entry came from a session-only add; a persistent re-add of the
+     * same line must still reach the file. */
+    int hist_newest_unpersisted;
+
     /* Screen-relative state for repainting the visible edit area. */
     int painted_cursor_row;
     int painted_rows;
     int previous_paint_clipped;
     int window_top;
     int top_indicator_width;
+    int hint_painted; /* the last paint drew the exit hint */
 
     int continuation_at_column_zero;
     const char *prompt; /* borrowed for the duration of input_readline */
@@ -72,8 +77,9 @@ struct input {
     /* Enter on an empty buffer submits when set. */
     int empty_submit;
 
-    /* Distinguishes Ctrl-C from an empty submission; both return "". */
-    int last_cancelled;
+    /* Ctrl-C on an empty buffer arms this; a consecutive Ctrl-C quits and
+     * any other key disarms. */
+    int exit_armed;
 
     char *preseed; /* owned; consumed by the next input_readline */
 };

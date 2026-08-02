@@ -202,7 +202,7 @@ The REPL supports readline-style editing. Hax-specific or notable bindings:
 | Ctrl-R | Search earlier prompts (incremental reverse search). |
 | Esc | Pause after the current step (soft interrupt): in-flight work finishes, then the prompt returns. |
 | Esc Esc | Interrupt the model or a running tool immediately. |
-| Ctrl-C | Cancel the current prompt line. |
+| Ctrl-C | Clear the prompt line (recallable with Up); twice on an empty prompt to quit. |
 | Ctrl-D | Quit on an empty prompt. |
 | Ctrl-L | Clear screen and redraw the prompt. |
 | Ctrl-G | Edit the prompt in `$EDITOR`. |
