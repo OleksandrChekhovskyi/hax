@@ -1128,8 +1128,7 @@ static int handle_slash_input(struct input *input, struct agent_state *state, co
     if (!*line)
         return 0;
 
-    struct slash_ctx ctx = {.state = state};
-    if (slash_dispatch(line, &ctx) == SLASH_NOT_A_COMMAND)
+    if (slash_dispatch(line, state) == SLASH_NOT_A_COMMAND)
         return 0;
 
     input_history_add_session(input, line);

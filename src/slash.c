@@ -7,190 +7,172 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "util.h"
 #include "agent.h"
 #include "catalog.h"
 #include "config.h"
 #include "file_mention.h"
-#include "render/render_ctx.h"
 #include "select.h"
 #include "session.h"
 #include "session_picker.h"
-#include "util.h"
+#include "render/render_ctx.h"
 #include "terminal/ansi.h"
 #include "terminal/clipboard.h"
 #include "terminal/picker.h"
 #include "terminal/theme.h"
-#include "tools/task_registry.h"
 #include "terminal/ui.h"
+#include "tools/task_registry.h"
 
-/* Maximum number of aliases a single command can advertise. Three is
- * already plenty (e.g. /new + /clear + /reset is the absolute ceiling
- * I'd expect any single command to want); the array is NULL-terminated
- * so unused slots stay empty. */
-#define SLASH_MAX_ALIASES 3
+/* Managed handlers leave disp bookkeeping accurate; raw handlers end on an untracked newline. */
+enum command_display {
+    COMMAND_DISPLAY_RAW,
+    COMMAND_DISPLAY_MANAGED,
+};
 
-struct slash_cmd {
+struct command_call {
+    struct agent_state *state;
+    const char *argument;
+};
+
+struct slash_command {
     const char *name;
-    const char *aliases[SLASH_MAX_ALIASES + 1]; /* NULL-terminated */
+    const char *alias;
     const char *summary;
-    /* When set, the command accepts an optional trailing argument (passed
-     * via slash_ctx.arg) instead of being rejected with "takes no
-     * arguments." The argument is still optional — the command runs with
-     * arg == NULL when none is given. */
-    int takes_arg;
-    /* When set, the handler drives the render pipeline (disp) itself and
-     * leaves the trailing-newline state correct — e.g. /compact's notice,
-     * /resume's replay. Raw-output handlers (the default) print straight to
-     * stdout and bypass disp, so the dispatcher resets the trail after them
-     * (see slash_dispatch) to model the fresh line their output ended on. */
-    int drives_disp;
-    void (*run)(struct slash_ctx *ctx);
+    int accepts_argument;
+    enum command_display display;
+    void (*handler)(const struct command_call *call);
 };
 
-struct shortcut_def {
+struct shortcut {
     const char *key;
-    const char *desc;
-    /* Optional availability probe. When set and returning 0, /help
-     * renders the row dim with `missing` appended after the
-     * description — the binding exists but needs something the
-     * environment doesn't provide (e.g. fzf on $PATH). */
+    const char *description;
     int (*available)(void);
-    const char *missing;
+    const char *unavailable_note;
 };
 
-static void slash_run_new(struct slash_ctx *ctx);
-static void slash_run_resume(struct slash_ctx *ctx);
-static void slash_run_undo(struct slash_ctx *ctx);
-static void slash_run_fork(struct slash_ctx *ctx);
-static void slash_run_provider(struct slash_ctx *ctx);
-static void slash_run_model(struct slash_ctx *ctx);
-static void slash_run_effort(struct slash_ctx *ctx);
-static void slash_run_preset(struct slash_ctx *ctx);
-static void slash_run_preset_save(struct slash_ctx *ctx);
-static void slash_run_config(struct slash_ctx *ctx);
-static void slash_run_compact(struct slash_ctx *ctx);
-static void slash_run_copy(struct slash_ctx *ctx);
-static void slash_run_session(struct slash_ctx *ctx);
-static void slash_run_tasks(struct slash_ctx *ctx);
-static void slash_run_usage(struct slash_ctx *ctx);
-static void slash_run_help(struct slash_ctx *ctx);
+struct parsed_command {
+    char *name;
+    const char *argument;
+};
 
-/* Registry. Order is preserved in /help output, so list user-facing
- * commands before meta ones. */
-static const struct slash_cmd COMMANDS[] = {
+static void run_new(const struct command_call *call);
+static void run_resume(const struct command_call *call);
+static void run_undo(const struct command_call *call);
+static void run_fork(const struct command_call *call);
+static void run_provider(const struct command_call *call);
+static void run_model(const struct command_call *call);
+static void run_effort(const struct command_call *call);
+static void run_preset(const struct command_call *call);
+static void run_preset_save(const struct command_call *call);
+static void run_config(const struct command_call *call);
+static void run_compact(const struct command_call *call);
+static void run_copy(const struct command_call *call);
+static void run_session(const struct command_call *call);
+static void run_tasks(const struct command_call *call);
+static void run_usage(const struct command_call *call);
+static void run_help(const struct command_call *call);
+
+/* Registry order is also /help order. */
+static const struct slash_command COMMANDS[] = {
     {
         .name = "new",
-        .aliases = {"clear", NULL},
+        .alias = "clear",
         .summary = "start a fresh conversation (optional: preset)",
-        .takes_arg = 1,
-        .run = slash_run_new,
+        .accepts_argument = 1,
+        .handler = run_new,
     },
     {
         .name = "resume",
-        .aliases = {NULL},
         .summary = "resume a past conversation",
-        .drives_disp = 1,
-        .run = slash_run_resume,
+        .display = COMMAND_DISPLAY_MANAGED,
+        .handler = run_resume,
     },
     {
         .name = "undo",
-        .aliases = {NULL},
         .summary = "revert conversation to before an earlier message (optional: turns back)",
-        .takes_arg = 1,
-        .drives_disp = 1,
-        .run = slash_run_undo,
+        .accepts_argument = 1,
+        .display = COMMAND_DISPLAY_MANAGED,
+        .handler = run_undo,
     },
     {
         .name = "fork",
-        .aliases = {NULL},
         .summary = "branch a new session before an earlier message (optional: turns back)",
-        .takes_arg = 1,
-        .drives_disp = 1,
-        .run = slash_run_fork,
+        .accepts_argument = 1,
+        .display = COMMAND_DISPLAY_MANAGED,
+        .handler = run_fork,
     },
     {
         .name = "provider",
-        .aliases = {NULL},
         .summary = "switch provider, then model and effort",
-        .drives_disp = 1,
-        .run = slash_run_provider,
+        .display = COMMAND_DISPLAY_MANAGED,
+        .handler = run_provider,
     },
     {
         .name = "model",
-        .aliases = {NULL},
         .summary = "switch model, then effort",
-        .drives_disp = 1,
-        .run = slash_run_model,
+        .display = COMMAND_DISPLAY_MANAGED,
+        .handler = run_model,
     },
     {
         .name = "effort",
-        .aliases = {NULL},
         .summary = "set reasoning effort",
-        .drives_disp = 1,
-        .run = slash_run_effort,
+        .display = COMMAND_DISPLAY_MANAGED,
+        .handler = run_effort,
     },
     {
         .name = "preset",
-        .aliases = {NULL},
         .summary = "switch to a config-defined preset (optional: name)",
-        .takes_arg = 1,
-        .drives_disp = 1,
-        .run = slash_run_preset,
+        .accepts_argument = 1,
+        .display = COMMAND_DISPLAY_MANAGED,
+        .handler = run_preset,
     },
+    /* `/preset save` would conflict with a preset named "save". */
     {
         .name = "preset-save",
-        .aliases = {NULL},
         .summary = "save the current selection as a preset (name, optional tint)",
-        .takes_arg = 1,
-        .drives_disp = 1,
-        .run = slash_run_preset_save,
+        .accepts_argument = 1,
+        .display = COMMAND_DISPLAY_MANAGED,
+        .handler = run_preset_save,
     },
     {
         .name = "config",
-        .aliases = {NULL},
         .summary = "view or change settings (optional: key value)",
-        .takes_arg = 1,
-        .drives_disp = 1,
-        .run = slash_run_config,
+        .accepts_argument = 1,
+        .display = COMMAND_DISPLAY_MANAGED,
+        .handler = run_config,
     },
     {
         .name = "compact",
-        .aliases = {NULL},
         .summary = "summarize history to free up context (optional: focus instructions)",
-        .takes_arg = 1,
-        .drives_disp = 1,
-        .run = slash_run_compact,
+        .accepts_argument = 1,
+        .display = COMMAND_DISPLAY_MANAGED,
+        .handler = run_compact,
     },
     {
         .name = "copy",
-        .aliases = {NULL},
         .summary = "copy last response to clipboard",
-        .run = slash_run_copy,
+        .handler = run_copy,
     },
     {
         .name = "tasks",
-        .aliases = {NULL},
         .summary = "list background tasks (optional: kill <id>... | kill all)",
-        .takes_arg = 1,
-        .run = slash_run_tasks,
+        .accepts_argument = 1,
+        .handler = run_tasks,
     },
     {
         .name = "session",
-        .aliases = {NULL},
         .summary = "show this session's info and usage totals",
-        .run = slash_run_session,
+        .handler = run_session,
     },
     {
         .name = "usage",
-        .aliases = {NULL},
         .summary = "show provider account usage",
-        .run = slash_run_usage,
+        .handler = run_usage,
     },
     {
         .name = "help",
-        .aliases = {NULL},
         .summary = "show this help",
-        .run = slash_run_help,
+        .handler = run_help,
     },
 };
 #define N_COMMANDS (sizeof(COMMANDS) / sizeof(COMMANDS[0]))
@@ -199,191 +181,153 @@ static const struct slash_cmd COMMANDS[] = {
  * motion set (Ctrl-A/E/B/F/W/U/K/H, arrows, Home/End) is intentionally
  * omitted: users who know readline already know them, and listing
  * everything would push the more useful bindings off the screen. */
-static const struct shortcut_def SHORTCUTS[] = {
-    {.key = "enter", .desc = "submit prompt"},
-    {.key = "shift-enter", .desc = "insert newline (terminal must be configured to send LF)"},
-    {.key = "esc", .desc = "pause after the current step to steer the model"},
-    {.key = "esc esc", .desc = "interrupt model or running tool immediately"},
-    {.key = "ctrl-c", .desc = "cancel current prompt line"},
-    {.key = "ctrl-d", .desc = "quit (on empty prompt)"},
-    {.key = "ctrl-l", .desc = "clear screen and redraw prompt"},
-    {.key = "ctrl-g", .desc = "edit prompt in $EDITOR"},
-    {.key = "ctrl-o", .desc = "view conversation history in $PAGER"},
-    {.key = "ctrl-t", .desc = "view model-facing transcript in $PAGER"},
-    {.key = "ctrl-v", .desc = "paste image (or text) from clipboard"},
+static const struct shortcut SHORTCUTS[] = {
+    {.key = "enter", .description = "submit prompt"},
+    {.key = "shift-enter",
+     .description = "insert newline (terminal must be configured to send LF)"},
+    {.key = "esc", .description = "pause after the current step to steer the model"},
+    {.key = "esc esc", .description = "interrupt model or running tool immediately"},
+    {.key = "ctrl-c", .description = "cancel current prompt line"},
+    {.key = "ctrl-d", .description = "quit (on empty prompt)"},
+    {.key = "ctrl-l", .description = "clear screen and redraw prompt"},
+    {.key = "ctrl-g", .description = "edit prompt in $EDITOR"},
+    {.key = "ctrl-o", .description = "view conversation history in $PAGER"},
+    {.key = "ctrl-t", .description = "view model-facing transcript in $PAGER"},
+    {.key = "ctrl-v", .description = "paste image (or text) from clipboard"},
     {.key = "@ + tab",
-     .desc = "pick a project file to mention",
+     .description = "pick a project file to mention",
      .available = file_mention_available,
-     .missing = "(fzf not installed)"},
+     .unavailable_note = "(fzf not installed)"},
 };
 #define N_SHORTCUTS (sizeof(SHORTCUTS) / sizeof(SHORTCUTS[0]))
 
-static const struct slash_cmd *find_command(const char *name)
+static int parse_command(const char *line, struct parsed_command *parsed)
+{
+    if (!line || line[0] != '/')
+        return 0;
+
+    const char *name = line + 1;
+    const char *cursor = name;
+    while (*cursor && !isspace((unsigned char)*cursor)) {
+        unsigned char c = (unsigned char)*cursor;
+        /* Restrict command-shaped input so paths and terminal control bytes pass through. */
+        if (!isalnum(c) && c != '_' && c != '-')
+            return 0;
+        cursor++;
+    }
+    if (cursor == name)
+        return 0;
+
+    size_t name_length = (size_t)(cursor - name);
+    parsed->name = xmalloc(name_length + 1);
+    memcpy(parsed->name, name, name_length);
+    parsed->name[name_length] = '\0';
+
+    while (*cursor && isspace((unsigned char)*cursor))
+        cursor++;
+    parsed->argument = *cursor ? cursor : NULL;
+    return 1;
+}
+
+static const struct slash_command *find_command(const char *name)
 {
     for (size_t i = 0; i < N_COMMANDS; i++) {
-        if (strcmp(COMMANDS[i].name, name) == 0)
+        if (strcmp(COMMANDS[i].name, name) == 0 ||
+            (COMMANDS[i].alias && strcmp(COMMANDS[i].alias, name) == 0))
             return &COMMANDS[i];
-        for (size_t j = 0; COMMANDS[i].aliases[j]; j++) {
-            if (strcmp(COMMANDS[i].aliases[j], name) == 0)
-                return &COMMANDS[i];
-        }
     }
     return NULL;
 }
 
-enum slash_result slash_dispatch(const char *line, struct slash_ctx *ctx)
+enum slash_result slash_dispatch(const char *line, struct agent_state *state)
 {
-    if (!line || line[0] != '/')
+    struct parsed_command parsed;
+    if (!parse_command(line, &parsed))
         return SLASH_NOT_A_COMMAND;
 
-    /* Parse the first whitespace-delimited token after '/'. Only treat
-     * the line as a slash command when that token is a "bareword" —
-     * letters, digits, '_' or '-'. Anything else (most importantly a
-     * '/' or '.', as in "/tmp/repro.c crashes") falls through to the
-     * model as plain text, so absolute paths in normal prompts aren't
-     * swallowed by the dispatcher. The narrow case this can't disam-
-     * biguate is a bareword path on its own ("/tmp" alone) — rare in
-     * practice; rephrase as "the /tmp dir" or wrap in backticks. We
-     * can revisit with a "//" escape if it ever becomes a real pain. */
-    const char *p = line + 1;
-    const char *start = p;
-    int is_bareword = 1;
-    while (*p && !isspace((unsigned char)*p)) {
-        unsigned char c = (unsigned char)*p;
-        if (!isalnum(c) && c != '_' && c != '-')
-            is_bareword = 0;
-        p++;
-    }
-    size_t name_len = (size_t)(p - start);
-
-    if (name_len == 0 || !is_bareword)
-        return SLASH_NOT_A_COMMAND;
-
-    while (*p && isspace((unsigned char)*p))
-        p++;
-    int has_extra = (*p != '\0');
-
-    /* From here the line is committed as a slash command — every outcome
-     * (handler output, "unknown command", "no arguments", etc.) is slash
-     * output and gets the standard leading blank-line gap that ordinary model
-     * turns get. Emit it through disp (not a raw putchar) so the trail counter
-     * stays truthful: handlers that drive the render pipeline (/compact's
-     * agent_compact, /resume's replay) then see the real cursor position
-     * instead of stacking a second separator. Doing it once here also means
-     * handlers don't each have to remember, and /usage's spinner-prep gets its
-     * prepped row for free.
-     *
-     * Raw-output handlers (the default — /help, /usage, ... and the error
-     * paths below) print straight to stdout, bypassing disp, so afterwards the
-     * trail still reflects this gap rather than their output. Reset it to 1
-     * once they return (and on the error paths) to model the fresh line their
-     * trailing newline left, so the pre-prompt separator still emits the
-     * trailing blank. drives_disp handlers maintain disp themselves and are
-     * left untouched. */
-    struct disp *disp = &ctx->state->render->disp;
+    struct disp *disp = &state->render->disp;
     disp_block_separator(disp);
 
-    /* Stack copy so we can NUL-terminate without touching the caller's
-     * buffer. 64 is generous for command names — the longest plausible
-     * one is ~12 chars. */
-    char name_buf[64];
-    if (name_len >= sizeof(name_buf)) {
-        ui_error("unknown command. type /help for the list.");
-        disp->trail = 1;
-        return SLASH_UNKNOWN;
+    enum slash_result result;
+    const struct slash_command *command = find_command(parsed.name);
+    if (!command) {
+        ui_error("unknown command: /%s. type /help for the list.", parsed.name);
+        result = SLASH_UNKNOWN;
+        goto raw_output;
     }
-    memcpy(name_buf, start, name_len);
-    name_buf[name_len] = '\0';
-
-    const struct slash_cmd *cmd = find_command(name_buf);
-    if (!cmd) {
-        ui_error("unknown command: /%s. type /help for the list.", name_buf);
-        disp->trail = 1;
-        return SLASH_UNKNOWN;
-    }
-    if (has_extra && !cmd->takes_arg) {
-        /* Echo the token the user actually typed, not the canonical
-         * name — `/clear now` should report on `/clear`, not on the
-         * `/new` it resolves to. */
-        ui_error("/%s takes no arguments.", name_buf);
-        disp->trail = 1;
-        return SLASH_BAD_USAGE;
+    if (parsed.argument && !command->accepts_argument) {
+        ui_error("/%s takes no arguments.", parsed.name);
+        result = SLASH_BAD_USAGE;
+        goto raw_output;
     }
 
-    /* For arg-taking commands, hand over the trailing text (NULL when none).
-     * `p` already sits past the command token and its following whitespace;
-     * the line is NUL-terminated so it needs no further trimming on the left,
-     * and the input editor strips trailing whitespace before dispatch. */
-    ctx->arg = (cmd->takes_arg && has_extra) ? p : NULL;
-    cmd->run(ctx);
-    if (!cmd->drives_disp)
+    struct command_call call = {
+        .state = state,
+        .argument = command->accepts_argument ? parsed.argument : NULL,
+    };
+    command->handler(&call);
+    if (command->display == COMMAND_DISPLAY_RAW)
         disp->trail = 1;
+    free(parsed.name);
     return SLASH_HANDLED;
+
+raw_output:
+    disp->trail = 1;
+    free(parsed.name);
+    return result;
 }
 
 /* ---------- /new ---------- */
 
-static void slash_run_new(struct slash_ctx *ctx)
+static void run_new(const struct command_call *call)
 {
-    /* `/new <preset>` is the "start over as X" shorthand for /new + /preset.
-     * Switch first and keep it quiet: a preset that doesn't apply (typo,
-     * provider won't construct) then leaves the conversation untouched with
-     * only its own error on screen — the same protection the old
-     * "/new takes no arguments" rejection gave a mistyped argument — and a
-     * successful one is announced by the fresh banner below instead of a
-     * "switched to …" line the reset would immediately make stale. */
-    if (ctx->arg && select_preset(ctx->state, ctx->arg, 0) != 0)
+    /* Apply first so an invalid preset cannot discard the current conversation. */
+    if (call->argument && select_preset(call->state, call->argument, 0) != 0)
         return;
-    agent_new_conversation(ctx->state);
+    agent_new_conversation(call->state);
 }
 
 /* ---------- /resume ---------- */
 
-static void slash_run_resume(struct slash_ctx *ctx)
+static void run_resume(const struct command_call *call)
 {
     char cwd[4096];
     if (!getcwd(cwd, sizeof(cwd))) {
         ui_error("cannot determine working directory");
         return;
     }
-    /* Hide the live session from the list — resuming the conversation
-     * you're already in is a no-op. The picker prints its own "nothing
-     * to resume" note and returns NULL when the list is empty or the
-     * user cancels. */
-    const char *current = session_log_path(ctx->state->session_log);
-    int shown = 0;
-    char *path = session_picker_run(cwd, current, &shown);
-    /* The dispatcher's leading-gap separator left disp at trail = 2. A shown
-     * picker draws full-screen then erases itself back onto that same blank
-     * line (its raw drawing bypasses disp but lands where it started), so
-     * trail = 2 still matches the cursor — leave it. When no picker was shown
-     * (non-tty, or nothing to resume), a raw note was printed instead, so model
-     * its fresh-line end (trail = 1) for the pre-prompt separator. */
-    if (!shown)
-        ctx->state->render->disp.trail = 1;
+    const char *current_path = session_log_path(call->state->session_log);
+    int picker_opened = 0;
+    char *path = session_picker_run(cwd, current_path, &picker_opened);
+    /* An opened picker erases back to the separator row. Without one, a raw note ends one row
+     * below it and the display state must follow. */
+    if (!picker_opened)
+        call->state->render->disp.trail = 1;
     if (!path)
         return;
-    agent_resume_session(ctx->state, path);
+    agent_resume_session(call->state, path);
     free(path);
 }
 
 /* ---------- /undo, /fork ---------- */
 
-/* Search-and-display budget for a turn's prompt preview in the picker; the
- * picker clips it to the row width, the slack lets a filter reach past it. */
+/* The picker clips labels to its row width; extra cells remain searchable. */
 #define TURN_LABEL_CELLS 512
 
-/* Show a picker over the conversation's user turns (oldest first, most recent
- * pre-selected) and return the chosen 0-based turn ordinal, or -1 on cancel
- * or a non-tty. */
-static long undo_fork_picker(struct agent_session *session, size_t count, int is_undo)
+enum history_action {
+    HISTORY_UNDO,
+    HISTORY_FORK,
+};
+
+static long choose_history_turn(struct agent_session *session, size_t turn_count,
+                                enum history_action action)
 {
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
         return -1;
 
-    struct picker_item *items = xcalloc(count, sizeof(*items));
-    char **labels = xmalloc(count * sizeof(*labels));
-    for (size_t turn_index = 0; turn_index < count; turn_index++) {
+    struct picker_item *items = xcalloc(turn_count, sizeof(*items));
+    char **labels = xmalloc(turn_count * sizeof(*labels));
+    for (size_t turn_index = 0; turn_index < turn_count; turn_index++) {
         const char *text = agent_user_turn_text(session, turn_index);
         char *flat = flatten_for_display(text ? text : "");
         labels[turn_index] = truncate_for_display(flat, TURN_LABEL_CELLS);
@@ -393,46 +337,42 @@ static long undo_fork_picker(struct agent_session *session, size_t count, int is
     }
 
     struct picker_opts options = {
-        .title = is_undo ? "revert to before which message" : "fork before which message",
+        .title =
+            action == HISTORY_UNDO ? "revert to before which message" : "fork before which message",
         .items = items,
-        .item_count = count,
-        .initial_index = count - 1,
-        /* The full prompt disambiguates clipped rows before a history rewrite. */
+        .item_count = turn_count,
+        .initial_index = turn_count - 1,
         .repeat_clipped_label = 1,
     };
     long selected_index = picker_run(&options);
 
-    for (size_t turn_index = 0; turn_index < count; turn_index++)
+    for (size_t turn_index = 0; turn_index < turn_count; turn_index++)
         free(labels[turn_index]);
     free(labels);
     free(items);
     return selected_index;
 }
 
-/* Shared /undo and /fork body: resolve the target user turn (from the "turns
- * back" argument, or a picker when none is given) and hand off to the agent.
- * Both are drives_disp — the agent's replay drives the pipeline on success,
- * and the raw-note/error paths reset the trail themselves. */
-static void slash_run_undo_fork(struct slash_ctx *ctx, int is_undo)
+static void run_history_action(const struct command_call *call, enum history_action action)
 {
-    struct agent_state *state = ctx->state;
+    struct agent_state *state = call->state;
     struct agent_session *session = state->session;
-    const char *verb = is_undo ? "undo" : "fork";
+    const char *verb = action == HISTORY_UNDO ? "undo" : "fork";
     size_t turn_count = agent_user_turn_count(session);
 
     long turn_index;
-    if (ctx->arg) {
+    if (call->argument) {
         /* N counts turns back from the end: 1 is the most recent turn, `turn_count`
          * the first. /fork also accepts 0 — the current tip — which clones the
          * whole conversation; that stays valid even when the only user item is
          * a compaction seed (turn_count 0), as long as there's history to copy.
          * "undo nothing" is meaningless, so /undo starts at 1. */
-        long minimum = is_undo ? 1 : 0;
+        long minimum_turns_back = action == HISTORY_UNDO ? 1 : 0;
         char *end;
-        long turns_back = strtol(ctx->arg, &end, 10);
+        long turns_back = strtol(call->argument, &end, 10);
         while (isspace((unsigned char)*end))
             end++;
-        if (!is_undo && *end == '\0' && turns_back == 0) {
+        if (action == HISTORY_FORK && *end == '\0' && turns_back == 0) {
             if (session->n_items == 0) {
                 ui_note("nothing to fork yet");
                 state->render->disp.trail = 1;
@@ -441,12 +381,12 @@ static void slash_run_undo_fork(struct slash_ctx *ctx, int is_undo)
             agent_fork(state, turn_count);
             return;
         }
-        if (*end != '\0' || turns_back < minimum || (size_t)turns_back > turn_count) {
+        if (*end != '\0' || turns_back < minimum_turns_back || (size_t)turns_back > turn_count) {
             if (turn_count == 0)
                 ui_note("nothing to %s yet", verb);
             else
-                ui_error("/%s takes a number of turns between %ld and %zu", verb, minimum,
-                         turn_count);
+                ui_error("/%s takes a number of turns between %ld and %zu", verb,
+                         minimum_turns_back, turn_count);
             state->render->disp.trail = 1;
             return;
         }
@@ -457,7 +397,7 @@ static void slash_run_undo_fork(struct slash_ctx *ctx, int is_undo)
             state->render->disp.trail = 1;
             return;
         }
-        turn_index = undo_fork_picker(session, turn_count, is_undo);
+        turn_index = choose_history_turn(session, turn_count, action);
         if (turn_index < 0) {
             /* A shown picker erased back to its start row, so leave disp as
              * the dispatcher's separator set it. With no tty there was no
@@ -470,261 +410,221 @@ static void slash_run_undo_fork(struct slash_ctx *ctx, int is_undo)
         }
     }
 
-    if (is_undo)
+    if (action == HISTORY_UNDO)
         agent_undo(state, (size_t)turn_index);
     else
         agent_fork(state, (size_t)turn_index);
 }
 
-static void slash_run_undo(struct slash_ctx *ctx)
+static void run_undo(const struct command_call *call)
 {
-    slash_run_undo_fork(ctx, 1);
+    run_history_action(call, HISTORY_UNDO);
 }
 
-static void slash_run_fork(struct slash_ctx *ctx)
+static void run_fork(const struct command_call *call)
 {
-    slash_run_undo_fork(ctx, 0);
+    run_history_action(call, HISTORY_FORK);
 }
 
-/* ---------- /provider, /model, /effort ---------- */
+/* ---------- forwarding handlers ---------- */
 
-/* All three drive the picker + render pipeline themselves (drives_disp),
- * so the dispatcher leaves disp bookkeeping to the select flow. The chain
- * is provider → model → effort; /model and /effort enter partway in. */
-static void slash_run_provider(struct slash_ctx *ctx)
+static void run_provider(const struct command_call *call)
 {
-    select_provider(ctx->state);
+    select_provider(call->state);
 }
 
-static void slash_run_model(struct slash_ctx *ctx)
+static void run_model(const struct command_call *call)
 {
-    select_model(ctx->state);
+    select_model(call->state);
 }
 
-static void slash_run_effort(struct slash_ctx *ctx)
+static void run_effort(const struct command_call *call)
 {
-    select_effort(ctx->state);
+    select_effort(call->state);
 }
 
-/* ---------- /preset ---------- */
-
-static void slash_run_preset(struct slash_ctx *ctx)
+static void run_preset(const struct command_call *call)
 {
-    /* ctx->arg is a preset name for direct application, NULL for the picker. */
-    select_preset(ctx->state, ctx->arg, 1);
+    select_preset(call->state, call->argument, 1);
 }
 
-/* ---------- /preset-save ---------- */
-
-/* A separate command rather than a `/preset save <name>` subcommand: /preset's
- * argument is a name, so the word would be ambiguous with a preset called
- * "save". */
-static void slash_run_preset_save(struct slash_ctx *ctx)
+static void run_preset_save(const struct command_call *call)
 {
-    /* ctx->arg is "<name> [tint]", NULL to be prompted for one. */
-    select_preset_save(ctx->state, ctx->arg);
+    select_preset_save(call->state, call->argument);
 }
 
-/* ---------- /config ---------- */
-
-static void slash_run_config(struct slash_ctx *ctx)
+static void run_config(const struct command_call *call)
 {
-    select_config(ctx->state, ctx->arg);
+    select_config(call->state, call->argument);
 }
 
-/* ---------- /compact ---------- */
-
-static void slash_run_compact(struct slash_ctx *ctx)
+static void run_compact(const struct command_call *call)
 {
-    /* agent_compact drives the same render pipeline /resume does, so the
-     * spinner + dim notice land below the echoed command like any other
-     * slash output. ctx->arg carries optional focus instructions. */
-    agent_compact(ctx->state, ctx->arg, 0);
+    agent_compact(call->state, call->argument, 0);
 }
 
 /* ---------- /copy ---------- */
 
-static void slash_run_copy(struct slash_ctx *ctx)
+static const char *last_response_text(const struct agent_session *session)
 {
-    /* Walk the items vector backwards for the most recent assistant
-     * message with non-empty text. Tool calls, tool results, reasoning
-     * items, and turn boundaries are skipped — they're not what the
-     * user means by "the last response". The text field already holds
-     * the model's raw Markdown, so no conversion is needed. */
-    const struct item *message = NULL;
-    if (ctx->state && ctx->state->session) {
-        struct agent_session *session = ctx->state->session;
-        for (size_t i = session->n_items; i > 0; i--) {
-            const struct item *item = &session->items[i - 1];
-            if (item->kind == ITEM_ASSISTANT_MESSAGE && item->text && item->text[0]) {
-                message = item;
-                break;
-            }
-        }
+    if (!session)
+        return NULL;
+    for (size_t i = session->n_items; i > 0; i--) {
+        const struct item *item = &session->items[i - 1];
+        if (item->kind == ITEM_ASSISTANT_MESSAGE && item->text && item->text[0])
+            return item->text;
     }
-    if (!message) {
+    return NULL;
+}
+
+static void run_copy(const struct command_call *call)
+{
+    const char *text = last_response_text(call->state->session);
+    if (!text) {
         ui_note("no assistant response to copy");
         return;
     }
-    size_t byte_count = strlen(message->text);
+    size_t byte_count = strlen(text);
     const char *error = NULL;
-    if (clipboard_copy(message->text, byte_count, &error) == 0) {
+    if (clipboard_copy(text, byte_count, &error) == 0) {
         ui_note("copied %zu byte%s to clipboard", byte_count, byte_count == 1 ? "" : "s");
         return;
     }
     ui_error("clipboard copy failed: %s", error ? error : "unknown error");
 }
 
-/* ---------- /session ---------- */
+/* ---------- task and session status ---------- */
 
-/* Label column width: longest label ("tokens total") plus a two-space
- * gutter, matching the /help table's alignment approach. */
-#define SESSION_LABEL_W 14
+#define SESSION_LABEL_WIDTH 14
 
-static void session_row(const char *label, const char *value)
+static void print_session_row(const char *label, const char *value)
 {
-    printf("  " ANSI_DIM "%-*s%s" ANSI_RESET "\n", SESSION_LABEL_W, label, value);
+    printf("  " ANSI_DIM "%-*s%s" ANSI_RESET "\n", SESSION_LABEL_WIDTH, label, value);
 }
 
-/* Append one "<label> <count> [~$cost]" segment of the tokens-total row,
- * " · "-separated — the row-buffer twin of the transcript footer's
- * usage_tokens, "~" included: the categories are rate estimates even when
- * the spend row below is exact. A cost that is unknown, or too small to
- * render, shows no dollar figure. Returns the new row length; safe to keep
- * calling once the buffer is full because snprintf truncates and length clamps. */
-static int append_token_segment(char *row, size_t size, int length, const char *label, long tokens,
-                                double cost)
+/* Unknown and negligible cost estimates are omitted. The returned length may exceed the buffer. */
+static int append_token_segment(char *row, size_t row_size, int row_length, const char *label,
+                                long tokens, double cost)
 {
-    char buf[32];
-    if (length < 0 || (size_t)length >= size)
-        return length;
-    format_tokens(buf, sizeof(buf), tokens);
-    length +=
-        snprintf(row + length, size - (size_t)length, "%s%s %s", length ? " · " : "", label, buf);
-    if (cost >= COST_DISPLAY_MIN && length > 0 && (size_t)length < size) {
-        format_cost(buf, sizeof(buf), cost);
-        length += snprintf(row + length, size - (size_t)length, " ~%s", buf);
+    char formatted[32];
+    if (row_length < 0 || (size_t)row_length >= row_size)
+        return row_length;
+    format_tokens(formatted, sizeof(formatted), tokens);
+    row_length += snprintf(row + row_length, row_size - (size_t)row_length, "%s%s %s",
+                           row_length ? " · " : "", label, formatted);
+    if (cost >= COST_DISPLAY_MIN && row_length > 0 && (size_t)row_length < row_size) {
+        format_cost(formatted, sizeof(formatted), cost);
+        row_length += snprintf(row + row_length, row_size - (size_t)row_length, " ~%s", formatted);
     }
-    return length;
+    return row_length;
 }
 
-/* Stop tasks named after "kill" (or all of them), leaving the final-state note for the model's
- * next request. */
-static void slash_tasks_kill(const char *arg)
+static void kill_tasks(const char *arguments)
 {
     const char **ids = NULL;
-    size_t n_ids = 0, cap = 0;
-    char *words = xstrdup(arg);
+    size_t id_count = 0;
+    size_t id_capacity = 0;
+    char *words = xstrdup(arguments);
     int all = 0;
     for (char *word = strtok(words, " \t"); word; word = strtok(NULL, " \t")) {
         if (strcmp(word, "all") == 0) {
             all = 1;
             continue;
         }
-        if (n_ids == cap) {
-            cap = cap ? cap * 2 : 4;
-            ids = xrealloc(ids, cap * sizeof(*ids));
+        if (id_count == id_capacity) {
+            id_capacity = id_capacity ? id_capacity * 2 : 4;
+            ids = xrealloc(ids, id_capacity * sizeof(*ids));
         }
-        ids[n_ids++] = word;
+        ids[id_count++] = word;
     }
-    if (!all && n_ids == 0) {
+    if (!all && id_count == 0) {
         ui_error("usage: /tasks kill <id>... | kill all");
     } else {
-        size_t stopped = task_stop(all ? NULL : ids, all ? 0 : n_ids);
+        size_t stopped = task_stop(all ? NULL : ids, all ? 0 : id_count);
         printf("  stopped %zu task%s\n", stopped, stopped == 1 ? "" : "s");
     }
     free(ids);
     free(words);
 }
 
-static void slash_run_tasks(struct slash_ctx *ctx)
+static void run_tasks(const struct command_call *call)
 {
     if (config_bool("no_tasks")) {
         ui_note("background tasks are disabled (no_tasks)");
         return;
     }
-    const char *arg = ctx->arg;
-    if (arg && *arg) {
-        if (strncmp(arg, "kill", 4) == 0 && (arg[4] == '\0' || arg[4] == ' ' || arg[4] == '\t'))
-            slash_tasks_kill(arg + 4);
+    const char *argument = call->argument;
+    if (argument && *argument) {
+        if (strncmp(argument, "kill", 4) == 0 &&
+            (argument[4] == '\0' || argument[4] == ' ' || argument[4] == '\t'))
+            kill_tasks(argument + 4);
         else
             ui_error("usage: /tasks [kill <id>... | kill all]");
         return;
     }
 
-    struct task_info *rows = NULL;
-    size_t n_rows = task_list(&rows);
-    if (n_rows == 0) {
+    struct task_info *tasks = NULL;
+    size_t task_count = task_list(&tasks);
+    if (task_count == 0) {
         printf("  " ANSI_DIM "no background tasks" ANSI_RESET "\n");
-        free(rows);
+        free(tasks);
         return;
     }
-    /* "<id>  <state · elapsed>  <command>": the elapsed rides with the state so no column
-     * floats, the bold id separates from the plain status, and the dim command absorbs the
-     * rest of the row (truncated, never wrapped). Ids and statuses are validated/generated
-     * ASCII, so byte lengths are display cells. */
-    char (*statuses)[40] = xmalloc(n_rows * sizeof(*statuses));
-    int width = display_width();
-    int id_width = 4, status_width = 0;
-    for (size_t i = 0; i < n_rows; i++) {
-        int id_cells = (int)strlen(rows[i].id);
+
+    char (*statuses)[40] = xmalloc(task_count * sizeof(*statuses));
+    int terminal_width = display_width();
+    int id_width = 4;
+    int status_width = 0;
+    for (size_t i = 0; i < task_count; i++) {
+        int id_cells = (int)strlen(tasks[i].id);
         if (id_cells > id_width)
             id_width = id_cells;
-        char state[16], elapsed[16];
-        if (rows[i].running)
-            snprintf(state, sizeof(state), "running");
-        else if (rows[i].term_signal)
-            snprintf(state, sizeof(state), "signal %d", rows[i].term_signal);
+        char state_label[16];
+        char elapsed_label[16];
+        if (tasks[i].running)
+            snprintf(state_label, sizeof(state_label), "running");
+        else if (tasks[i].term_signal)
+            snprintf(state_label, sizeof(state_label), "signal %d", tasks[i].term_signal);
         else
-            snprintf(state, sizeof(state), "exit %d", rows[i].exit_code);
-        format_duration(elapsed, sizeof(elapsed), rows[i].elapsed_ms);
-        snprintf(statuses[i], sizeof(statuses[i]), "%s · %s", state, elapsed);
-        /* The separator is multi-byte UTF-8 but two display cells wide including spaces. */
+            snprintf(state_label, sizeof(state_label), "exit %d", tasks[i].exit_code);
+        format_duration(elapsed_label, sizeof(elapsed_label), tasks[i].elapsed_ms);
+        snprintf(statuses[i], sizeof(statuses[i]), "%s · %s", state_label, elapsed_label);
         int status_cells = (int)display_cells(statuses[i]);
         if (status_cells > status_width)
             status_width = status_cells;
     }
-    for (size_t i = 0; i < n_rows; i++) {
-        int status_pad = status_width - (int)display_cells(statuses[i]);
-        int used = 2 + id_width + 2 + status_width + 2;
-        int room = width - used - 1;
-        if (room < 8)
-            room = 8;
-        char *flattened = flatten_for_display(rows[i].command);
-        char *head = truncate_for_display(flattened, (size_t)room);
+    for (size_t i = 0; i < task_count; i++) {
+        int status_padding = status_width - (int)display_cells(statuses[i]);
+        int fixed_width = 2 + id_width + 2 + status_width + 2;
+        int command_width = terminal_width - fixed_width - 1;
+        if (command_width < 8)
+            command_width = 8;
+        char *flattened = flatten_for_display(tasks[i].command);
+        char *command = truncate_for_display(flattened, (size_t)command_width);
         free(flattened);
         printf("  " ANSI_BOLD "%-*s" ANSI_BOLD_OFF "  %s%*s  " ANSI_DIM "%s" ANSI_RESET "\n",
-               id_width, rows[i].id, statuses[i], status_pad, "", head);
-        free(head);
+               id_width, tasks[i].id, statuses[i], status_padding, "", command);
+        free(command);
     }
     free(statuses);
-    free(rows);
+    free(tasks);
 }
 
-/* Local counterpart to /usage: everything here is computed from this
- * process's own accumulators (struct session_stats) — no network. Totals
- * are per-sitting by design: /new zeroes them, /resume does not restore
- * the resumed session's history. Rows whose numbers were never reported
- * (a backend that sends no usage, no provider-reported cost) are dropped
- * rather than shown as zeros. */
-static void slash_run_session(struct slash_ctx *ctx)
+/* Stats cover the current process: /new resets them and /resume does not restore old totals. */
+static void run_session(const struct command_call *call)
 {
-    struct agent_state *state = ctx->state;
+    struct agent_state *state = call->state;
     const struct session_stats *stats = &state->stats;
     char row[160], formatted[32];
 
     const char *hint = session_log_resume_hint(state->session_log);
-    session_row("session", hint ? hint : "not recorded");
+    print_session_row("session", hint ? hint : "not recorded");
 
-    /* Active stance, when one is applied — above the provider row it
-     * qualifies, mirroring the banner's `hax [preset]`. */
     const char *preset = config_str("preset");
     if (preset && *preset)
-        session_row("preset", preset);
+        print_session_row("preset", preset);
 
-    /* Report what the next request would carry, not what startup resolved
-     * before the model's metadata landed. Whatever this moves, the next
-     * prompt re-stamps the log header with it. */
+    /* Report the effort the next request will carry after metadata resolution. */
     agent_session_resync_effort(state->session, state->provider, NULL);
     const char *provider_name =
         (state->provider && state->provider->name) ? state->provider->name : "?";
@@ -736,16 +636,13 @@ static void slash_run_session(struct slash_ctx *ctx)
         snprintf(row, sizeof(row), "%s · %s · %s", provider_name, model, effort);
     else
         snprintf(row, sizeof(row), "%s · %s", provider_name, model);
-    session_row("provider", row);
+    print_session_row("provider", row);
 
-    /* Two counts per the project glossary: user turns (prompts) and
-     * requests (model round-trips — each resends the full context, which
-     * is what makes the tokens-total sums below grow). */
     snprintf(row, sizeof(row), "%ld", stats->user_turns);
-    session_row("user turns", row);
+    print_session_row("user turns", row);
 
     snprintf(row, sizeof(row), "%ld", stats->requests);
-    session_row("requests", row);
+    print_session_row("requests", row);
 
     if (stats->tool_calls > 0) {
         int row_length = snprintf(row, sizeof(row), "%ld", stats->tool_calls);
@@ -755,29 +652,19 @@ static void slash_run_session(struct slash_ctx *ctx)
             row_length += snprintf(row + row_length, sizeof(row) - (size_t)row_length, " · %s %ld",
                                    stats->tools[i].name, stats->tools[i].count);
         }
-        session_row("tool calls", row);
+        print_session_row("tool calls", row);
     }
 
     format_duration(formatted, sizeof(formatted), stats->worked_ms);
-    session_row("time worked", formatted);
+    print_session_row("time worked", formatted);
 
-    /* Two distinct frames, one row each. `context` is window state — the
-     * latest response's usage, matching the per-turn stats line. `tokens
-     * total` is the billing frame — sums across every round-trip (each of
-     * which resends the full context), so summed input outgrows `context`
-     * as soon as a second request happens. */
+    /* Context is the latest request's window use; token totals accumulate across requests. */
     if (stats->latest_context_tokens > 0) {
         format_context(row, sizeof(row), stats->latest_context_tokens, stats->context_limit);
-        session_row("context", row);
+        print_session_row("context", row);
     }
 
-    /* Same non-overlapping categories and vocabulary as the transcript's
-     * per-request footers — `in` is the uncached remainder — so the two
-     * surfaces read as one breakdown (cache effectiveness reads off the
-     * cache-vs-in count ratio, same as there). Dollars are the summed
-     * per-record rate estimates (agent_spend_split), marked "~" because no
-     * backend decomposes what it billed — even where the spend row below
-     * is an exact reported charge. */
+    /* Category costs are rate estimates even when the provider reported an exact total charge. */
     if (stats->input_tokens > 0 || stats->output_tokens > 0) {
         struct catalog_split split;
         int split_available = agent_spend_split(&stats->spend, &split);
@@ -796,25 +683,24 @@ static void slash_run_session(struct slash_ctx *ctx)
                                      split_available ? split.cost_cache_write : -1);
         append_token_segment(row, sizeof(row), row_length, "out", stats->output_tokens,
                              split_available ? split.cost_output : -1);
-        session_row("tokens total", row);
+        print_session_row("tokens total", row);
     }
 
-    /* Reported cost plus the catalog estimate for unreported responses,
-     * same figure the per-turn stats line shows; "~" marks an estimate. */
+    /* A mixed reported/estimated total remains an estimate. */
     int estimated = 0;
     double spend = agent_session_spend(stats, &estimated);
     if (spend > 0) {
         format_cost(formatted, sizeof(formatted), spend);
         snprintf(row, sizeof(row), "%s%s", estimated ? "~" : "", formatted);
-        session_row("spend", row);
+        print_session_row("spend", row);
     }
 }
 
 /* ---------- /usage ---------- */
 
-static void slash_run_usage(struct slash_ctx *ctx)
+static void run_usage(const struct command_call *call)
 {
-    struct provider *provider = ctx->state->provider;
+    struct provider *provider = call->state->provider;
     if (!provider) {
         ui_note("no provider selected — use /provider to choose one first");
         return;
@@ -835,61 +721,51 @@ static void pad_spaces(int n)
         fputc(' ', stdout);
 }
 
-/* Aliases get their own row rather than being squeezed inline next to
- * the canonical name — folding `/new (alias: /clear)` onto one line
- * pushes the description column far to the right and only gets worse
- * as commands accumulate. Each alias renders dim on both sides so it
- * reads as a sub-entry of the command above without breaking the
- * scannable single-column-of-names layout. */
-static void print_cmd_row(const char *name, const char *summary, int dim, int gutter)
+static void print_command_row(const char *name, const char *summary, int dimmed,
+                              int description_column)
 {
     fputs("  ", stdout);
-    fputs(theme_open(dim ? THEME_CHROME_DIM : THEME_CHROME), stdout);
-    int w = 1 + (int)strlen(name);
+    fputs(theme_open(dimmed ? THEME_CHROME_DIM : THEME_CHROME), stdout);
+    int name_width = 1 + (int)strlen(name);
     printf("/%s", name);
     fputs(ANSI_RESET, stdout);
-    pad_spaces(gutter - w);
-    if (dim)
+    pad_spaces(description_column - name_width);
+    if (dimmed)
         fputs(ANSI_DIM, stdout);
     fputs(summary, stdout);
-    if (dim)
+    if (dimmed)
         fputs(ANSI_RESET, stdout);
     fputc('\n', stdout);
 }
 
-static void slash_run_help(struct slash_ctx *ctx)
+static void run_help(const struct command_call *call)
 {
-    (void)ctx;
+    (void)call;
 
-    /* Column-1 width: longest "/name" (canonical or alias) across the
-     * commands section, longest key in the shortcuts section, take
-     * the max, +2 for gutter. Computed dynamically so adding a
-     * longer command or shortcut key in the future keeps the
-     * columns aligned without retuning a magic number. */
-    size_t col1 = 0;
+    size_t label_width = 0;
     for (size_t i = 0; i < N_COMMANDS; i++) {
-        size_t w = 1 + strlen(COMMANDS[i].name); /* "/name" */
-        if (w > col1)
-            col1 = w;
-        for (size_t j = 0; COMMANDS[i].aliases[j]; j++) {
-            size_t aw = 1 + strlen(COMMANDS[i].aliases[j]);
-            if (aw > col1)
-                col1 = aw;
+        size_t command_width = 1 + strlen(COMMANDS[i].name);
+        if (command_width > label_width)
+            label_width = command_width;
+        if (COMMANDS[i].alias) {
+            size_t alias_width = 1 + strlen(COMMANDS[i].alias);
+            if (alias_width > label_width)
+                label_width = alias_width;
         }
     }
     for (size_t i = 0; i < N_SHORTCUTS; i++) {
-        size_t w = strlen(SHORTCUTS[i].key);
-        if (w > col1)
-            col1 = w;
+        size_t shortcut_width = strlen(SHORTCUTS[i].key);
+        if (shortcut_width > label_width)
+            label_width = shortcut_width;
     }
-    int gutter = (int)col1 + 2;
+    int description_column = (int)label_width + 2;
 
     fputs(ANSI_BOLD "commands" ANSI_RESET "\n", stdout);
     for (size_t i = 0; i < N_COMMANDS; i++) {
-        print_cmd_row(COMMANDS[i].name, COMMANDS[i].summary, 0, gutter);
-        for (size_t j = 0; COMMANDS[i].aliases[j]; j++) {
+        print_command_row(COMMANDS[i].name, COMMANDS[i].summary, 0, description_column);
+        if (COMMANDS[i].alias) {
             char *summary = xasprintf("alias for /%s", COMMANDS[i].name);
-            print_cmd_row(COMMANDS[i].aliases[j], summary, 1, gutter);
+            print_command_row(COMMANDS[i].alias, summary, 1, description_column);
             free(summary);
         }
     }
@@ -897,19 +773,19 @@ static void slash_run_help(struct slash_ctx *ctx)
     fputc('\n', stdout);
     fputs(ANSI_BOLD "shortcuts" ANSI_RESET "\n", stdout);
     for (size_t i = 0; i < N_SHORTCUTS; i++) {
-        int avail = !SHORTCUTS[i].available || SHORTCUTS[i].available();
+        int available = !SHORTCUTS[i].available || SHORTCUTS[i].available();
         fputs("  ", stdout);
-        fputs(theme_open(avail ? THEME_CHROME : THEME_CHROME_DIM), stdout);
+        fputs(theme_open(available ? THEME_CHROME : THEME_CHROME_DIM), stdout);
         fputs(SHORTCUTS[i].key, stdout);
         fputs(ANSI_RESET, stdout);
-        pad_spaces(gutter - (int)strlen(SHORTCUTS[i].key));
-        if (avail) {
-            fputs(SHORTCUTS[i].desc, stdout);
+        pad_spaces(description_column - (int)strlen(SHORTCUTS[i].key));
+        if (available) {
+            fputs(SHORTCUTS[i].description, stdout);
         } else {
             fputs(ANSI_DIM, stdout);
-            fputs(SHORTCUTS[i].desc, stdout);
+            fputs(SHORTCUTS[i].description, stdout);
             fputc(' ', stdout);
-            fputs(SHORTCUTS[i].missing, stdout);
+            fputs(SHORTCUTS[i].unavailable_note, stdout);
             fputs(ANSI_RESET, stdout);
         }
         fputc('\n', stdout);
