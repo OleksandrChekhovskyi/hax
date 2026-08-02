@@ -46,7 +46,7 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
  * set it when the URL is user-configurable (the catalog fetch).
  *
  * `tick` is an optional side-channel hook (same shape as for
- * http_sse_post). Background probes pass `bg_job_tick` with their job
+ * http_sse_post). Background probes pass `bg_job_cancel_tick` with their job
  * pointer so shutdown can abort an in-flight transfer in well under a
  * second instead of waiting out the timeout. NULL = no tick.
  *

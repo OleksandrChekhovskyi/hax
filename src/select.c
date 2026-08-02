@@ -104,7 +104,7 @@ static void probe_availability(const struct provider_factory *const *factories, 
         }
     }
     for (size_t i = 0; i < count; i++)
-        bg_job_join(jobs[i]); /* NULL is a no-op */
+        bg_job_join(jobs[i]);
     free(jobs);
 }
 

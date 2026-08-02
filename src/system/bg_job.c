@@ -1,32 +1,37 @@
 /* SPDX-License-Identifier: MIT */
 #include "system/bg_job.h"
 
+#include <assert.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdlib.h>
 
 #include "util.h"
 
 struct bg_job {
-    pthread_t tid;
+    pthread_t thread;
     bg_job_fn fn;
     void *arg;
-    _Atomic int cancelled;
+    atomic_bool cancel_requested;
 };
 
-static void *bg_job_trampoline(void *p)
+static void *run_job(void *arg)
 {
-    struct bg_job *job = p;
+    struct bg_job *job = arg;
     job->fn(job, job->arg);
     return NULL;
 }
 
 struct bg_job *bg_job_spawn(bg_job_fn fn, void *arg)
 {
+    assert(fn);
+
     struct bg_job *job = xcalloc(1, sizeof(*job));
     job->fn = fn;
     job->arg = arg;
-    if (pthread_create(&job->tid, NULL, bg_job_trampoline, job) != 0) {
+    atomic_init(&job->cancel_requested, false);
+    if (pthread_create(&job->thread, NULL, run_job, job) != 0) {
         free(job);
         return NULL;
     }
@@ -36,23 +41,23 @@ struct bg_job *bg_job_spawn(bg_job_fn fn, void *arg)
 void bg_job_cancel(struct bg_job *job)
 {
     if (job)
-        atomic_store(&job->cancelled, 1);
+        atomic_store(&job->cancel_requested, true);
 }
 
-int bg_job_cancelled(const struct bg_job *job)
+int bg_job_cancel_requested(const struct bg_job *job)
 {
-    return job ? atomic_load(&job->cancelled) : 0;
+    return job && atomic_load(&job->cancel_requested);
 }
 
-int bg_job_tick(void *job)
+int bg_job_cancel_tick(void *job)
 {
-    return bg_job_cancelled(job);
+    return bg_job_cancel_requested(job);
 }
 
 void bg_job_join(struct bg_job *job)
 {
     if (!job)
         return;
-    pthread_join(job->tid, NULL);
+    pthread_join(job->thread, NULL);
     free(job);
 }

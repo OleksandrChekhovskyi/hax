@@ -95,7 +95,7 @@ static void task_drain(struct bg_job *job, void *arg)
     free(arg);
     char chunk[4096];
     for (;;) {
-        if (bg_job_cancelled(job))
+        if (bg_job_cancel_requested(job))
             break;
         struct pollfd pfd = {.fd = t->pipe_fd, .events = POLLIN};
         int poll_result = poll(&pfd, 1, 100);

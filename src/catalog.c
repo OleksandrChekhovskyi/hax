@@ -674,7 +674,7 @@ double catalog_price(const struct catalog_entry *entry, long input_tokens, long 
 
 /* ---------------- background fetch ---------------- */
 
-static struct bg_job *g_fetch;
+static struct bg_job *g_fetch_job;
 static int g_prefetch_attempted;
 /* bg_job has no timed join, so catalog_drain polls this worker-owned flag. */
 static _Atomic int g_fetch_done;
@@ -717,13 +717,13 @@ static int write_cache_atomic(const char *path, const char *body, size_t body_le
     return result;
 }
 
-static void fetch_run(struct bg_job *job, void *arg)
+static void fetch_worker(struct bg_job *job, void *arg)
 {
     struct fetch_args *args = arg;
-    if (!bg_job_cancelled(job)) {
+    if (!bg_job_cancel_requested(job)) {
         char *body = NULL;
-        if (http_get(args->url, NULL, CATALOG_FETCH_TIMEOUT_S, CATALOG_MAX_BYTES, bg_job_tick, job,
-                     &body, NULL) == 0 &&
+        if (http_get(args->url, NULL, CATALOG_FETCH_TIMEOUT_S, CATALOG_MAX_BYTES,
+                     bg_job_cancel_tick, job, &body, NULL) == 0 &&
             body) {
             if (catalog_text_valid(body) && write_cache_atomic(args->path, body, strlen(body)) == 0)
                 atomic_fetch_add(&g_cache_generation, 1);
@@ -765,15 +765,15 @@ long catalog_prefetch(void)
     struct fetch_args *args = xcalloc(1, sizeof(*args));
     args->url = xstrdup(url);
     args->path = path;
-    g_fetch = bg_job_spawn(fetch_run, args);
-    if (!g_fetch)
+    g_fetch_job = bg_job_spawn(fetch_worker, args);
+    if (!g_fetch_job)
         fetch_args_free(args);
     return stale_days;
 }
 
 void catalog_drain(long max_wait_ms)
 {
-    if (!g_fetch)
+    if (!g_fetch_job)
         return;
     for (long waited_ms = 0; waited_ms < max_wait_ms && !atomic_load(&g_fetch_done);
          waited_ms += 20) {
@@ -781,17 +781,17 @@ void catalog_drain(long max_wait_ms)
         nanosleep(&delay, NULL);
     }
     if (!atomic_load(&g_fetch_done))
-        bg_job_cancel(g_fetch);
-    bg_job_join(g_fetch);
-    g_fetch = NULL;
+        bg_job_cancel(g_fetch_job);
+    bg_job_join(g_fetch_job);
+    g_fetch_job = NULL;
 }
 
 void catalog_shutdown(void)
 {
-    if (g_fetch) {
-        bg_job_cancel(g_fetch);
-        bg_job_join(g_fetch);
-        g_fetch = NULL;
+    if (g_fetch_job) {
+        bg_job_cancel(g_fetch_job);
+        bg_job_join(g_fetch_job);
+        g_fetch_job = NULL;
     }
     memo_clear();
     g_memo_generation = atomic_load(&g_cache_generation);

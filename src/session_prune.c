@@ -52,7 +52,7 @@ static int prune_tree(const char *sessions_dir, time_t cutoff, const char *exclu
     struct dirent *project_entry;
 
     while ((project_entry = readdir(sessions))) {
-        if (bg_job_cancelled(job)) {
+        if (bg_job_cancel_requested(job)) {
             closedir(sessions);
             return -1;
         }
@@ -77,7 +77,7 @@ static int prune_tree(const char *sessions_dir, time_t cutoff, const char *exclu
 
         struct dirent *session_entry;
         while ((session_entry = readdir(project))) {
-            if (bg_job_cancelled(job)) {
+            if (bg_job_cancel_requested(job)) {
                 closedir(project);
                 closedir(sessions);
                 return -1;
@@ -142,7 +142,7 @@ static void prune_args_free(struct prune_args *args)
     free(args);
 }
 
-static void prune_run(struct bg_job *job, void *arg)
+static void prune_worker(struct bg_job *job, void *arg)
 {
     struct prune_args *args = arg;
     if (prune_tree(args->sessions_dir, args->cutoff, args->exclude_path, job) == 0) {
@@ -205,7 +205,7 @@ void session_prune_start(const char *exclude_path)
     args->exclude_path = exclude_path ? xstrdup(exclude_path) : NULL;
     args->cutoff = cutoff;
     args->marker_fd = marker_fd;
-    active_prune_job = bg_job_spawn(prune_run, args);
+    active_prune_job = bg_job_spawn(prune_worker, args);
     if (!active_prune_job) {
         (void)flock(marker_fd, LOCK_UN);
         close(marker_fd);

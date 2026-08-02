@@ -13,7 +13,7 @@
 #include "util.h"
 
 struct model_meta {
-    struct bg_job *probe;
+    struct bg_job *probe_job;
     struct model_info reported;
 };
 
@@ -35,11 +35,11 @@ static void clear_report_locked(struct model_meta *meta)
 /* Joining while holding report_lock would deadlock with a worker publishing its result. */
 static void cancel_probe(struct model_meta *meta)
 {
-    if (!meta->probe)
+    if (!meta->probe_job)
         return;
-    bg_job_cancel(meta->probe);
-    bg_job_join(meta->probe);
-    meta->probe = NULL;
+    bg_job_cancel(meta->probe_job);
+    bg_job_join(meta->probe_job);
+    meta->probe_job = NULL;
 }
 
 void model_meta_release(struct provider *provider)
@@ -73,15 +73,15 @@ static void probe_worker(struct bg_job *job, void *arg)
 {
     struct probe_task *task = arg;
     /* The HTTP tick cannot observe cancellation until the transfer starts. */
-    if (bg_job_cancelled(job)) {
+    if (bg_job_cancel_requested(job)) {
         probe_task_free(task);
         return;
     }
 
     char *body = NULL;
     int rc = http_get(task->request.url, (const char *const *)task->request.headers,
-                      task->request.timeout_s, 0, bg_job_tick, job, &body, NULL);
-    if (rc == 0 && body && !bg_job_cancelled(job)) {
+                      task->request.timeout_s, 0, bg_job_cancel_tick, job, &body, NULL);
+    if (rc == 0 && body && !bg_job_cancel_requested(job)) {
         struct model_info report;
         model_info_init(&report);
         report.id = xstrdup(task->model_id);
@@ -131,17 +131,17 @@ void model_meta_refresh(struct provider *provider, const char *model)
     task->target = meta;
     task->model_id = xstrdup(model);
     task->request = request;
-    meta->probe = bg_job_spawn(probe_worker, task);
-    if (!meta->probe)
+    meta->probe_job = bg_job_spawn(probe_worker, task);
+    if (!meta->probe_job)
         probe_task_free(task);
 }
 
 void model_meta_wait(struct provider *provider)
 {
-    if (!provider || !provider->meta || !provider->meta->probe)
+    if (!provider || !provider->meta || !provider->meta->probe_job)
         return;
-    bg_job_join(provider->meta->probe);
-    provider->meta->probe = NULL;
+    bg_job_join(provider->meta->probe_job);
+    provider->meta->probe_job = NULL;
 }
 
 static int model_info_has_details(const struct model_info *info)
