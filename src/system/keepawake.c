@@ -43,7 +43,7 @@ static int systemd_inhibit_supports_no_ask_password(const char *path)
      * option instead of parsing a version so distro backports work too. */
     const char *const argv[] = {path, "--no-ask-password", "--version", NULL};
     size_t output_len;
-    char *output = spawn_capture(argv, 4096, 1000, &output_len);
+    char *output = spawn_capture_stdout(argv, 4096, 1000, &output_len);
     supported = output != NULL;
     free(output);
     return supported;
@@ -94,8 +94,8 @@ static void spawn_helper(void)
     if (pid == 0) {
         /* Linux uses PDEATHSIG; caffeinate -w provides the same orphan cleanup on macOS. */
         spawn_child_die_with_parent(parent_pid, SIGTERM);
-        spawn_child_default_signals();
-        spawn_child_redirect_null();
+        spawn_child_reset_signals();
+        spawn_child_redirect_stdio_to_null();
         execv(helper_path, argv);
         _exit(127);
     }

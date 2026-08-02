@@ -21,7 +21,7 @@ static int git_available(void)
 static void run_quiet(const char *command)
 {
     char *silenced = xasprintf("%s >/dev/null 2>&1", command);
-    int status = spawn_run(silenced);
+    int status = spawn_shell_wait(silenced);
     EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     free(silenced);
 }

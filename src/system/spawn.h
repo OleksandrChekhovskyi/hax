@@ -5,134 +5,59 @@
 #include <signal.h>
 #include <stdio.h>
 
-/*
- * Process-spawn helpers for short-lived child processes.
- *
- * Three patterns covered:
- *   - spawn_run: fork+exec a shell command and wait for it. Same role
- *     as POSIX system(), but additionally resets SIGPIPE in the child
- *     so common shell pipelines work the way the user expects.
- *   - spawn_pipe_open / spawn_pipe_close: fork+exec a shell command
- *     with its stdin attached to a write-mode FILE*. Drop-in for the
- *     "pipe content into a pager / filter" use case.
- *   - spawn_capture: fork+exec an argv-vector helper with stdout
- *     captured and a hard deadline — for non-interactive helpers
- *     (clipboard tools) whose output the caller consumes.
- *
- * All three ignore SIGINT, SIGQUIT, and SIGPIPE in the parent for the
- * duration of the child run (matching system()'s POSIX-mandated
- * etiquette plus SIGPIPE), and reset all three to SIG_DFL in the
- * child so the helper sees terminal signals normally — Ctrl-C in less
- * quits less, not hax; `:!yes | head` inside vim works the same as it
- * would from a regular shell.
- *
- * Out of scope: the bash tool's command runner. It owns the child's
- * stdout/stderr pipe, manages a process group, enforces output caps
- * and timeouts, and reads in a loop — too bespoke to share this code
- * path. It does its own signal reset post-fork.
- */
+struct spawn_signal_state {
+    struct sigaction sigint;
+    struct sigaction sigquit;
+    struct sigaction sigpipe;
+};
 
-int spawn_run(const char *shell_cmd);
+/* Run `shell_cmd` via /bin/sh and return its waitpid status, or -1 on error. */
+int spawn_shell_wait(const char *shell_cmd);
 
-/* fork+exec `argv` (argv[0] resolved via PATH, no shell) with stdin
- * and stderr on /dev/null and stdout piped back. Returns malloc'd
- * output (*out_len set) when the child exited 0 within `timeout_ms`
- * (must be > 0) and produced 1..max bytes; NULL otherwise. The
- * deadline covers the whole run — a helper that stalls, overflows
- * `max`, or closes stdout without exiting is SIGKILLed and reaped, so
- * a caller holding the terminal in raw mode (where Ctrl-C is just a
- * queued byte) can't be frozen by a stuck helper. */
-char *spawn_capture(const char *const *argv, size_t max, int timeout_ms, size_t *out_len);
+/* Run `argv` directly, with stdin and stderr redirected to /dev/null, and capture stdout.
+ * Return malloc'd output of 1..max_bytes on a zero exit status, or NULL on error, timeout,
+ * overflow, or empty output. `argv`, argv[0], and out_len must be non-NULL and timeout_ms must be
+ * positive. The child is killed and reaped on timeout or overflow. On success, *out_len receives
+ * the output size. */
+char *spawn_capture_stdout(const char *const *argv, size_t max_bytes, int timeout_ms,
+                           size_t *out_len);
 
-/* Lower-level signal/wait helpers for callers that own their own
- * fork+exec lifecycle (e.g. argv-based exec with custom child fd
- * wiring, where neither spawn_run nor spawn_pipe_open's shell-and-
- * FILE* shape fits). Exposed so we can have one canonical
- * implementation of the POSIX system()-style parent/child signal
- * etiquette plus the EINTR-tolerant waitpid loop, instead of
- * duplicating ~10 lines per caller. */
+/* Ignore terminal signals in the parent while a child runs. The child must reset them before
+ * exec, and the parent must restore `state` after waiting. This follows system() semantics for
+ * SIGINT and SIGQUIT; SIGPIPE also protects parent writes to a child that exits early. */
+void spawn_parent_ignore_signals(struct spawn_signal_state *state);
+void spawn_parent_restore_signals(const struct spawn_signal_state *state);
+void spawn_child_reset_signals(void);
 
-/* Save current SIGINT/SIGQUIT/SIGPIPE dispositions and replace them
- * with SIG_IGN. Caller must pair with spawn_parent_restore. The
- * three-signal set matches POSIX system()'s etiquette plus SIGPIPE,
- * so a child writing to a closed pipe — or a terminal-generated
- * Ctrl-C / Ctrl-\ during the child run — doesn't take down hax. */
-void spawn_parent_ignore(struct sigaction *saved_int, struct sigaction *saved_quit,
-                         struct sigaction *saved_pipe);
+/* Redirect all three standard descriptors to /dev/null on a best-effort basis. */
+void spawn_child_redirect_stdio_to_null(void);
 
-/* Restore dispositions saved by spawn_parent_ignore. */
-void spawn_parent_restore(const struct sigaction *saved_int, const struct sigaction *saved_quit,
-                          const struct sigaction *saved_pipe);
+/* On Linux, arrange for the post-fork child to receive `signal_number` when `parent_pid` dies.
+ * `parent_pid` must be captured before fork so the helper can close the fork/arm race. This is a
+ * no-op where PR_SET_PDEATHSIG is unavailable. */
+void spawn_child_die_with_parent(pid_t parent_pid, int signal_number);
 
-/* Reset SIGINT/SIGQUIT/SIGPIPE to SIG_DFL — call from the post-fork
- * child before exec so the spawned program sees terminal signals
- * normally (Ctrl-C in less quits less, not the parent). */
-void spawn_child_default_signals(void);
-
-/* Redirect the post-fork child's stdin/stdout/stderr to /dev/null
- * before exec — for background helpers that should neither read the
- * terminal nor scribble on the REPL (cf. spawn_run / spawn_pipe_open,
- * which deliberately inherit parent stdio for interactive children).
- * Best-effort: if /dev/null can't be opened the child just keeps the
- * inherited descriptors. */
-void spawn_child_redirect_null(void);
-
-/* Arrange for the post-fork child to die with its parent: on Linux,
- * request `signal_number` via PR_SET_PDEATHSIG so a parent that exits
- * without reaping (a SIGKILL, say) doesn't strand the child. Pass
- * SIGTERM when the child cleans up on it, SIGKILL when nothing may
- * ignore the death. `parent` is the pid captured *before* fork; this
- * re-checks getppid() against it and self-exits if the parent already
- * died in the fork/exec window (the death signal only fires for deaths
- * after the arm). A no-op where PR_SET_PDEATHSIG is unavailable;
- * callers that also need a non-Linux backstop (e.g. a self-terminating
- * exec) supply that separately. */
-void spawn_child_die_with_parent(pid_t parent, int signal_number);
-
-/* waitpid(pid, &status, 0) with an EINTR retry loop. Returns the
- * waitpid status word on success, -1 on non-EINTR error. */
+/* Return the child's waitpid status, retrying EINTR, or -1 on error. */
 int spawn_wait_child(pid_t pid);
 
-/* Non-blocking reap: if `pid` has already exited, reap it and return 1;
- * return 0 while it is still running. ECHILD (not our child, or already
- * reaped elsewhere) counts as exited; any other waitpid error returns 0
- * so a transient failure doesn't falsely report a live child as gone.
- * The WNOHANG sibling of spawn_wait_child, for callers polling a
- * long-lived background helper they may later respawn. */
+/* Reap an exited child and return 1; return 0 if it is running or waitpid otherwise fails.
+ * ECHILD counts as exited. */
 int spawn_reap_if_exited(pid_t pid);
 
 struct spawn_pipe {
-    FILE *w; /* write-mode variant (spawn_pipe_open); NULL otherwise */
-    FILE *r; /* read-mode variant (spawn_pipe_open_read); NULL otherwise */
+    FILE *stream;
     pid_t pid;
-    /* Saved parent-side dispositions, restored by spawn_pipe_close. */
-    struct sigaction saved_int;
-    struct sigaction saved_quit;
-    struct sigaction saved_pipe;
+    struct spawn_signal_state parent_signals;
 };
 
-/* Opens a write-mode pipe to a shell command. On success, *sp is
- * populated and the caller writes content via sp->w then calls
- * spawn_pipe_close to flush, wait, and restore parent signals. On
- * failure, returns -1 with errno set; *sp is left zeroed and the
- * caller must NOT call spawn_pipe_close (no resources to release). */
-int spawn_pipe_open(struct spawn_pipe *sp, const char *shell_cmd);
+/* Open a pipe to a shell command. The write variant connects `stream` to the child's stdin; the
+ * read variant connects it to the child's stdout. Other standard descriptors remain inherited.
+ * On failure, return -1 with errno set and leave `pipe` zeroed. */
+int spawn_pipe_open_write(struct spawn_pipe *pipe, const char *shell_cmd);
+int spawn_pipe_open_read(struct spawn_pipe *pipe, const char *shell_cmd);
 
-/* Read-mode sibling of spawn_pipe_open: the child's stdout is the pipe
- * and the caller reads its output via sp->r. stdin/stderr stay
- * inherited, so an interactive child (fzf) can still reach the tty.
- * Same contract otherwise. Unlike popen(), the child gets the full
- * spawn signal etiquette — SIGINT/SIGQUIT/SIGPIPE reset to SIG_DFL
- * (popen's child would inherit the parent's SIG_IGN across exec,
- * leaving terminal Ctrl-C unable to drive it). */
-int spawn_pipe_open_read(struct spawn_pipe *sp, const char *shell_cmd);
-
-/* Closes the parent's pipe end, waits for the child, restores parent
- * signals. Returns waitpid-style status, or -1 on internal error.
- * Idempotent on a zeroed struct (no-op + return 0) so callers can
- * pair it with a failed open without branching. For a read pipe,
- * closing before the child finishes writing tears it down via
- * SIGPIPE — at default disposition in the child, per the above. */
-int spawn_pipe_close(struct spawn_pipe *sp);
+/* Close the stream, wait for the child, restore parent signals, and return waitpid status. A NULL
+ * or zeroed pipe is a successful no-op. */
+int spawn_pipe_close(struct spawn_pipe *pipe);
 
 #endif /* HAX_SPAWN_H */

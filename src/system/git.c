@@ -18,7 +18,7 @@
 static char *run_git(const char *const *argv)
 {
     size_t length = 0;
-    char *output = spawn_capture(argv, GIT_MAX_BYTES, GIT_TIMEOUT_MS, &length);
+    char *output = spawn_capture_stdout(argv, GIT_MAX_BYTES, GIT_TIMEOUT_MS, &length);
     if (!output)
         return NULL;
     while (length > 0 && (output[length - 1] == '\n' || output[length - 1] == '\r'))

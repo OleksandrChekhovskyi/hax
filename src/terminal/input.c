@@ -739,24 +739,12 @@ static void open_editor(struct input *in)
     if (!editor || !*editor)
         editor = "vi";
 
-    /* The mkstemp path is single-quoted so paths with metacharacters
-     * are safe (mkstemp templates only produce [/A-Za-z0-9_-] anyway).
-     * `editor` itself is interpolated raw, on the assumption the user's
-     * own env (VISUAL/EDITOR) is trusted — same posture as every other
-     * tool that honors $EDITOR.
-     *
-     * spawn_run, like system(), shields the parent from terminal-
-     * generated SIGINT/SIGQUIT during the editor's run, and additionally
-     * resets SIGPIPE in the child so editor-internal pipelines (e.g.
-     * vim's `:!yes | head`) work the way the user expects. */
+    /* The mkstemp path is shell-safe; VISUAL/EDITOR is trusted user configuration. */
     char *cmd = xasprintf("%s '%s'", editor, path);
-    int rc = spawn_run(cmd);
+    int status = spawn_shell_wait(cmd);
     free(cmd);
 
-    /* If the editor exited non-zero (e.g. vim's :cq, or fork/exec
-     * failed), treat it as "abort, don't apply the edit". This matches
-     * the conventional editor-launched-from-other-tools contract. */
-    int aborted = (rc == -1) || (WIFEXITED(rc) && WEXITSTATUS(rc) != 0) || !WIFEXITED(rc);
+    int aborted = status < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
 
     size_t n = 0;
     char *content = aborted ? NULL : slurp_file(path, &n);

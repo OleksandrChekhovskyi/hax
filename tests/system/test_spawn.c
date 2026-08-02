@@ -5,23 +5,14 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <sys/stat.h>
 #include <sys/wait.h>
 
 #include "harness.h"
 #include "system/spawn.h"
 
-/* Per-binary tmpdir so a parallel `meson test` run doesn't clobber
- * fixtures across processes. */
-static char tmpdir[64];
+static const char *tmpdir;
 
-static void tmp_setup(void)
-{
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/haxspawn.%d", (int)getpid());
-    mkdir(tmpdir, 0700);
-}
-
-static char *tmp_path(const char *name)
+static const char *tmp_path(const char *name)
 {
     static char buf[128];
     snprintf(buf, sizeof(buf), "%s/%s", tmpdir, name);
@@ -34,299 +25,250 @@ static char *slurp(const char *path)
     if (!f)
         return NULL;
     fseek(f, 0, SEEK_END);
-    long n = ftell(f);
+    long file_size = ftell(f);
     fseek(f, 0, SEEK_SET);
-    char *buf = malloc((size_t)n + 1);
-    fread(buf, 1, (size_t)n, f);
-    buf[n] = '\0';
+    char *content = malloc((size_t)file_size + 1);
+    fread(content, 1, (size_t)file_size, f);
+    content[file_size] = '\0';
     fclose(f);
-    return buf;
+    return content;
 }
 
-/* ---------------- spawn_run ---------------- */
-
-static void test_run_zero_exit(void)
+static void test_shell_zero_exit(void)
 {
-    int rc = spawn_run("true");
-    EXPECT(WIFEXITED(rc));
-    EXPECT(WEXITSTATUS(rc) == 0);
+    int status = spawn_shell_wait("true");
+    EXPECT(WIFEXITED(status));
+    EXPECT(WEXITSTATUS(status) == 0);
 }
 
-static void test_run_nonzero_exit(void)
+static void test_shell_nonzero_exit(void)
 {
-    int rc = spawn_run("exit 42");
-    EXPECT(WIFEXITED(rc));
-    EXPECT(WEXITSTATUS(rc) == 42);
+    int status = spawn_shell_wait("exit 42");
+    EXPECT(WIFEXITED(status));
+    EXPECT(WEXITSTATUS(status) == 42);
 }
 
-static void test_run_executes_shell(void)
+static void test_shell_executes_command(void)
 {
-    char *path = tmp_path("ran.txt");
-    char cmd[256];
-    /* asprintf is a GNU/BSD extension, not in POSIX with the feature
-     * test macros this project uses; snprintf into a stack buffer is
-     * portable and fits since tmp_path output is bounded. */
-    snprintf(cmd, sizeof(cmd), "echo hello > '%s'", path);
-    int rc = spawn_run(cmd);
-    EXPECT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0);
+    const char *path = tmp_path("ran.txt");
+    char shell_cmd[256];
+    snprintf(shell_cmd, sizeof(shell_cmd), "echo hello > '%s'", path);
+    int status = spawn_shell_wait(shell_cmd);
+    EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     char *content = slurp(path);
     EXPECT(content && strcmp(content, "hello\n") == 0);
     free(content);
-    unlink(path);
 }
 
-/* The contract of spawn_run vs system() includes resetting SIGPIPE
- * in the child. We assert this directly: have the shell send itself
- * SIGPIPE. With SIG_DFL the shell dies via signal (WIFSIGNALED +
- * WTERMSIG == SIGPIPE); with SIG_IGN inherited from the parent it
- * would exit normally with 0. `trap -p` is unreliable here — bash
- * only reports traps set via the `trap` builtin, not inherited
- * dispositions, so a self-kill is the only portable signal. */
-static void test_run_child_sigpipe_default(void)
+static void test_shell_child_sigpipe_default(void)
 {
-    /* Reproduce hax's runtime parent state: ignore SIGPIPE here so
-     * that without spawn_run's child reset, the child would inherit
-     * SIG_IGN through fork+exec (SIG_IGN is preserved across exec). */
-    struct sigaction ign, saved;
-    memset(&ign, 0, sizeof(ign));
-    ign.sa_handler = SIG_IGN;
-    sigemptyset(&ign.sa_mask);
-    sigaction(SIGPIPE, &ign, &saved);
+    /* Ignored dispositions survive exec, so the child must explicitly reset SIGPIPE. */
+    struct sigaction ignored, saved;
+    memset(&ignored, 0, sizeof(ignored));
+    ignored.sa_handler = SIG_IGN;
+    sigemptyset(&ignored.sa_mask);
+    sigaction(SIGPIPE, &ignored, &saved);
 
-    int rc = spawn_run("kill -PIPE $$");
+    int status = spawn_shell_wait("kill -PIPE $$");
 
     sigaction(SIGPIPE, &saved, NULL);
-    EXPECT(WIFSIGNALED(rc));
-    EXPECT(WTERMSIG(rc) == SIGPIPE);
+    EXPECT(WIFSIGNALED(status));
+    EXPECT(WTERMSIG(status) == SIGPIPE);
 }
-
-/* ---------------- spawn_pipe_open / close ---------------- */
 
 static void test_pipe_writes_to_child_stdin(void)
 {
-    char *path = tmp_path("piped.txt");
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "cat > '%s'", path);
-    struct spawn_pipe sp;
-    EXPECT(spawn_pipe_open(&sp, cmd) == 0);
-    fputs("hello from parent\n", sp.w);
-    int rc = spawn_pipe_close(&sp);
-    EXPECT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0);
+    const char *path = tmp_path("piped.txt");
+    char shell_cmd[256];
+    snprintf(shell_cmd, sizeof(shell_cmd), "cat > '%s'", path);
+    struct spawn_pipe pipe;
+    EXPECT(spawn_pipe_open_write(&pipe, shell_cmd) == 0);
+    fputs("hello from parent\n", pipe.stream);
+    int status = spawn_pipe_close(&pipe);
+    EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     char *content = slurp(path);
     EXPECT(content && strcmp(content, "hello from parent\n") == 0);
     free(content);
-    unlink(path);
 }
 
 static void test_pipe_close_after_failed_open_is_noop(void)
 {
-    /* A struct that was zeroed by a failed open must be safe to pass
-     * to spawn_pipe_close. */
-    struct spawn_pipe sp;
-    memset(&sp, 0, sizeof(sp));
-    EXPECT(spawn_pipe_close(&sp) == 0);
+    struct spawn_pipe pipe;
+    EXPECT(spawn_pipe_open_write(&pipe, NULL) == -1);
+    EXPECT(spawn_pipe_close(&pipe) == 0);
 }
 
-static void test_pipe_open_rejects_bad_args(void)
+static void test_pipe_write_rejects_bad_args(void)
 {
-    EXPECT(spawn_pipe_open(NULL, "true") == -1);
-    struct spawn_pipe sp;
-    EXPECT(spawn_pipe_open(&sp, NULL) == -1);
+    EXPECT(spawn_pipe_open_write(NULL, "true") == -1);
+    struct spawn_pipe pipe;
+    EXPECT(spawn_pipe_open_write(&pipe, NULL) == -1);
 }
 
-/* SIGPIPE handling: a child that exits before reading anything would
- * cause the parent's fputs to fail with EPIPE. Without spawn_pipe's
- * SIG_IGN around the write window, that EPIPE would arrive as a
- * SIGPIPE and kill the test process. Verify we survive. */
 static void test_pipe_early_child_exit_does_not_kill_parent(void)
 {
-    struct spawn_pipe sp;
-    /* `true` ignores stdin and exits immediately. Give it a moment
-     * to die before the parent writes — sleep would race; instead
-     * we rely on the fact that even if we get there first, eventual
-     * fputs after the child reaps will produce EPIPE silently. */
-    EXPECT(spawn_pipe_open(&sp, "true") == 0);
-    /* Push enough bytes that we're guaranteed to hit EPIPE at some
-     * point if the child has already exited. PIPE_BUF on Linux/macOS
-     * is at least 4096; one MiB easily exceeds that. */
+    struct spawn_pipe pipe;
+    EXPECT(spawn_pipe_open_write(&pipe, "true") == 0);
     for (int i = 0; i < 4096; i++)
-        fputs("xxxxxxxxxx", sp.w);
-    int rc = spawn_pipe_close(&sp);
-    /* Test process is still alive — that's the assertion. The
-     * child's exit is also reapable. */
-    EXPECT(WIFEXITED(rc));
+        fputs("xxxxxxxxxx", pipe.stream);
+    int status = spawn_pipe_close(&pipe);
+    EXPECT(WIFEXITED(status));
 }
-
-/* ---------------- spawn_pipe_open_read ---------------- */
 
 static void test_pipe_read_child_stdout(void)
 {
-    struct spawn_pipe sp;
-    EXPECT(spawn_pipe_open_read(&sp, "printf 'picked/path.c\\n'") == 0);
+    struct spawn_pipe pipe;
+    EXPECT(spawn_pipe_open_read(&pipe, "printf 'picked/path.c\\n'") == 0);
     char line[64];
-    EXPECT(fgets(line, sizeof(line), sp.r) != NULL);
+    EXPECT(fgets(line, sizeof(line), pipe.stream) != NULL);
     EXPECT(strcmp(line, "picked/path.c\n") == 0);
-    int rc = spawn_pipe_close(&sp);
-    EXPECT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0);
+    int status = spawn_pipe_close(&pipe);
+    EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
 static void test_pipe_read_nonzero_exit(void)
 {
-    struct spawn_pipe sp;
-    EXPECT(spawn_pipe_open_read(&sp, "exit 42") == 0);
+    struct spawn_pipe pipe;
+    EXPECT(spawn_pipe_open_read(&pipe, "exit 42") == 0);
     char line[8];
-    EXPECT(fgets(line, sizeof(line), sp.r) == NULL); /* EOF, no output */
-    int rc = spawn_pipe_close(&sp);
-    EXPECT(WIFEXITED(rc) && WEXITSTATUS(rc) == 42);
+    EXPECT(fgets(line, sizeof(line), pipe.stream) == NULL);
+    int status = spawn_pipe_close(&pipe);
+    EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 42);
 }
 
 static void test_pipe_read_rejects_bad_args(void)
 {
     EXPECT(spawn_pipe_open_read(NULL, "true") == -1);
-    struct spawn_pipe sp;
-    EXPECT(spawn_pipe_open_read(&sp, NULL) == -1);
-    EXPECT(spawn_pipe_close(&sp) == 0); /* zeroed by the failed open: no-op */
+    struct spawn_pipe pipe;
+    EXPECT(spawn_pipe_open_read(&pipe, NULL) == -1);
+    EXPECT(spawn_pipe_close(&pipe) == 0);
 }
 
-/* The reason this helper exists over popen(): the child must get
- * default SIGINT even while the parent (spawn_parent_ignore) ignores
- * it — popen's child inherits SIG_IGN across exec and shrugs off
- * terminal Ctrl-C. `kill -INT $$` self-signals the shell: at default
- * disposition it dies by SIGINT; with inherited ignore it would fall
- * through and exit 0, failing the test. */
 static void test_pipe_read_child_sigint_default(void)
 {
-    struct spawn_pipe sp;
-    EXPECT(spawn_pipe_open_read(&sp, "kill -INT $$; exit 0") == 0);
-    int rc = spawn_pipe_close(&sp);
-    EXPECT(WIFSIGNALED(rc));
-    EXPECT(WTERMSIG(rc) == SIGINT);
+    struct spawn_pipe pipe;
+    EXPECT(spawn_pipe_open_read(&pipe, "kill -INT $$; exit 0") == 0);
+    int status = spawn_pipe_close(&pipe);
+    EXPECT(WIFSIGNALED(status));
+    EXPECT(WTERMSIG(status) == SIGINT);
 }
 
-/* Early close tears down a still-streaming producer via SIGPIPE — the
- * fzf-exits-before-the-file-walk-finishes case. */
 static void test_pipe_read_early_close_kills_writer(void)
 {
-    struct spawn_pipe sp;
-    EXPECT(spawn_pipe_open_read(&sp, "while :; do echo x; done") == 0);
+    struct spawn_pipe pipe;
+    EXPECT(spawn_pipe_open_read(&pipe, "while :; do echo x; done") == 0);
     char line[8];
-    EXPECT(fgets(line, sizeof(line), sp.r) != NULL);
-    int rc = spawn_pipe_close(&sp);
-    EXPECT(WIFSIGNALED(rc));
-    EXPECT(WTERMSIG(rc) == SIGPIPE);
+    EXPECT(fgets(line, sizeof(line), pipe.stream) != NULL);
+    int status = spawn_pipe_close(&pipe);
+    EXPECT(WIFSIGNALED(status));
+    EXPECT(WTERMSIG(status) == SIGPIPE);
 }
 
-/* With stdout closed, pipe() hands out fd 1, so the parent's read end
- * collides with the child's target stdout. The child must drop the
- * parent's end *before* dup2'ing its own onto fd 1 — closing it after
- * would re-close the freshly installed stdout and lose all output.
- * Runs in a fork so the closed fd 1 can't disturb the test process;
- * results come back via the exit code (2 = open failed, 1 = bad read
- * or child status, 0 = ok), like test_redirect_null_stdin_is_eof. */
+/* Closing stdout forces a pipe fd to reuse the child's target descriptor. */
 static void test_pipe_read_survives_closed_stdout(void)
 {
     pid_t pid = fork();
     if (pid == 0) {
         close(STDOUT_FILENO);
-        struct spawn_pipe sp;
-        if (spawn_pipe_open_read(&sp, "echo hi") != 0)
+        struct spawn_pipe pipe;
+        if (spawn_pipe_open_read(&pipe, "echo hi") != 0)
             _exit(2);
         char line[8];
-        int ok = fgets(line, sizeof(line), sp.r) && strcmp(line, "hi\n") == 0;
-        int rc = spawn_pipe_close(&sp);
-        _exit((ok && WIFEXITED(rc) && WEXITSTATUS(rc) == 0) ? 0 : 1);
+        int output_matches = fgets(line, sizeof(line), pipe.stream) && strcmp(line, "hi\n") == 0;
+        int status = spawn_pipe_close(&pipe);
+        _exit((output_matches && WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : 1);
     }
     if (pid < 0) {
         EXPECT(0); /* fork failed: bail before spawn_wait_child(-1) */
         return;
     }
-    int rc = spawn_wait_child(pid);
-    EXPECT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0);
+    int status = spawn_wait_child(pid);
+    EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
-
-/* ---------------- spawn_capture ---------------- */
 
 static void test_capture_collects_stdout(void)
 {
     const char *argv[] = {"printf", "hello", NULL};
-    size_t n = 0;
-    char *out = spawn_capture(argv, 1024, 5000, &n);
-    EXPECT(out != NULL && n == 5 && memcmp(out, "hello", 5) == 0);
-    free(out);
+    size_t output_len = 0;
+    char *output = spawn_capture_stdout(argv, 5, 5000, &output_len);
+    EXPECT(output != NULL && output_len == 5 && memcmp(output, "hello", 5) == 0);
+    free(output);
 }
 
 static void test_capture_nonzero_exit_is_null(void)
 {
     const char *argv[] = {"sh", "-c", "echo x; exit 1", NULL};
-    size_t n = 0;
-    EXPECT(spawn_capture(argv, 1024, 5000, &n) == NULL);
+    size_t output_len = 0;
+    EXPECT(spawn_capture_stdout(argv, 1024, 5000, &output_len) == NULL);
 }
 
 static void test_capture_empty_output_is_null(void)
 {
     const char *argv[] = {"true", NULL};
-    size_t n = 0;
-    EXPECT(spawn_capture(argv, 1024, 5000, &n) == NULL);
+    size_t output_len = 0;
+    EXPECT(spawn_capture_stdout(argv, 1024, 5000, &output_len) == NULL);
 }
 
 static void test_capture_missing_helper_is_null(void)
 {
     const char *argv[] = {"hax-no-such-helper", NULL};
-    size_t n = 0;
-    EXPECT(spawn_capture(argv, 1024, 5000, &n) == NULL);
+    size_t output_len = 0;
+    EXPECT(spawn_capture_stdout(argv, 1024, 5000, &output_len) == NULL);
 }
 
 static void test_capture_overflow_is_null(void)
 {
     const char *argv[] = {"printf", "0123456789", NULL};
-    size_t n = 0;
-    EXPECT(spawn_capture(argv, 4, 5000, &n) == NULL);
+    size_t output_len = 0;
+    EXPECT(spawn_capture_stdout(argv, 4, 5000, &output_len) == NULL);
 }
 
-static long elapsed_ms(const struct timespec *t0)
+static void test_capture_rejects_bad_args(void)
 {
-    struct timespec t1;
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    return (t1.tv_sec - t0->tv_sec) * 1000 + (t1.tv_nsec - t0->tv_nsec) / 1000000;
+    const char *const empty_argv[] = {NULL};
+    const char *const argv[] = {"printf", "hello", NULL};
+    size_t output_len;
+
+    EXPECT(spawn_capture_stdout(NULL, 1024, 5000, &output_len) == NULL);
+    EXPECT(spawn_capture_stdout(empty_argv, 1024, 5000, &output_len) == NULL);
+    EXPECT(spawn_capture_stdout(argv, 1024, 0, &output_len) == NULL);
+    EXPECT(spawn_capture_stdout(argv, 1024, 5000, NULL) == NULL);
 }
 
-/* The deadline is the whole point of spawn_capture: a helper that
- * produces nothing must be killed and reaped well before it would have
- * finished on its own, not waited out. */
+static long elapsed_ms(const struct timespec *started_at)
+{
+    struct timespec finished_at;
+    clock_gettime(CLOCK_MONOTONIC, &finished_at);
+    return (finished_at.tv_sec - started_at->tv_sec) * 1000 +
+           (finished_at.tv_nsec - started_at->tv_nsec) / 1000000;
+}
+
 static void test_capture_timeout_kills_stalled_helper(void)
 {
     const char *argv[] = {"sleep", "30", NULL};
-    struct timespec t0;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    size_t n = 0;
-    EXPECT(spawn_capture(argv, 1024, 200, &n) == NULL);
-    EXPECT(elapsed_ms(&t0) < 10000);
+    struct timespec started_at;
+    clock_gettime(CLOCK_MONOTONIC, &started_at);
+    size_t output_len = 0;
+    EXPECT(spawn_capture_stdout(argv, 1024, 200, &output_len) == NULL);
+    EXPECT(elapsed_ms(&started_at) < 10000);
 }
 
-/* EOF on stdout is not exit: a helper that closes its stdout and then
- * hangs must still be reaped within the deadline (and its output
- * dropped — the exit-0 contract can't be verified). */
+/* EOF on stdout does not prove the child exited. */
 static void test_capture_eof_then_hang_is_bounded(void)
 {
     const char *argv[] = {"sh", "-c", "echo hi; exec 1>&-; sleep 30", NULL};
-    struct timespec t0;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    size_t n = 0;
-    EXPECT(spawn_capture(argv, 1024, 200, &n) == NULL);
-    EXPECT(elapsed_ms(&t0) < 10000);
+    struct timespec started_at;
+    clock_gettime(CLOCK_MONOTONIC, &started_at);
+    size_t output_len = 0;
+    EXPECT(spawn_capture_stdout(argv, 1024, 200, &output_len) == NULL);
+    EXPECT(elapsed_ms(&started_at) < 10000);
 }
 
-/* ---------------- spawn_reap_if_exited ---------------- */
-
-/* A pid that isn't our child reaps as "exited": waitpid returns
- * -1/ECHILD, which the helper treats as gone. Our own pid is a safe,
- * deterministic stand-in (never our child). */
 static void test_reap_non_child_is_exited(void)
 {
     EXPECT(spawn_reap_if_exited(getpid()) == 1);
 }
 
-/* A live child reads as not-yet-exited; we reap it ourselves after. */
 static void test_reap_live_child(void)
 {
     pid_t pid = fork();
@@ -361,48 +303,31 @@ static void test_reap_exited_child(void)
             reaped = 1;
             break;
         }
-        struct timespec ts = {0, 1000000}; /* 1ms */
-        nanosleep(&ts, NULL);
+        const struct timespec retry_interval = {.tv_nsec = 1000000};
+        nanosleep(&retry_interval, NULL);
     }
     EXPECT(reaped);
-    /* Re-poll after the reap: waitpid now returns ECHILD, still
-     * reported as exited — the idempotent shape keepawake's acquire
-     * path relies on. */
     EXPECT(spawn_reap_if_exited(pid) == 1);
 }
 
-/* ---------------- spawn_child_redirect_null ---------------- */
-
-/* After the redirect the child's stdin is /dev/null, which reads as
- * immediate EOF. The child reports the outcome through its exit status
- * so the parent can assert without shared memory. */
 static void test_redirect_null_stdin_is_eof(void)
 {
     pid_t pid = fork();
     if (pid == 0) {
-        spawn_child_redirect_null();
+        spawn_child_redirect_stdio_to_null();
         char c;
-        ssize_t n = read(STDIN_FILENO, &c, 1);
-        _exit(n == 0 ? 0 : 1);
+        ssize_t bytes_read = read(STDIN_FILENO, &c, 1);
+        _exit(bytes_read == 0 ? 0 : 1);
     }
     if (pid < 0) {
         EXPECT(0); /* fork failed: bail before spawn_wait_child(-1) */
         return;
     }
-    int rc = spawn_wait_child(pid);
-    EXPECT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0);
+    int status = spawn_wait_child(pid);
+    EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
-/* ---------------- spawn_child_die_with_parent ---------------- */
-
-/* With the parent still alive, the race-check must NOT self-exit — a
- * child passing its real parent pid should run through to its normal
- * exit. Guards against an inverted getppid() comparison. Run inside a
- * forked child so the (Linux) PR_SET_PDEATHSIG arm doesn't perturb the
- * test process; on non-Linux the call is a no-op and this still holds.
- * The death-propagation behavior itself (parent dies => SIGTERM) is
- * integration-level and racy (grandchild + reparenting), so it's left
- * out of this unit test. */
+/* Isolate the Linux parent-death signal from the test runner. */
 static void test_die_with_parent_alive_does_not_exit(void)
 {
     pid_t pid = fork();
@@ -414,22 +339,22 @@ static void test_die_with_parent_alive_does_not_exit(void)
         EXPECT(0); /* fork failed: bail before spawn_wait_child(-1) */
         return;
     }
-    int rc = spawn_wait_child(pid);
-    EXPECT(WIFEXITED(rc) && WEXITSTATUS(rc) == 7);
+    int status = spawn_wait_child(pid);
+    EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 7);
 }
 
 int main(void)
 {
-    tmp_setup();
+    tmpdir = t_tempdir();
 
-    test_run_zero_exit();
-    test_run_nonzero_exit();
-    test_run_executes_shell();
-    test_run_child_sigpipe_default();
+    test_shell_zero_exit();
+    test_shell_nonzero_exit();
+    test_shell_executes_command();
+    test_shell_child_sigpipe_default();
 
     test_pipe_writes_to_child_stdin();
     test_pipe_close_after_failed_open_is_noop();
-    test_pipe_open_rejects_bad_args();
+    test_pipe_write_rejects_bad_args();
     test_pipe_early_child_exit_does_not_kill_parent();
 
     test_pipe_read_child_stdout();
@@ -444,6 +369,7 @@ int main(void)
     test_capture_empty_output_is_null();
     test_capture_missing_helper_is_null();
     test_capture_overflow_is_null();
+    test_capture_rejects_bad_args();
     test_capture_timeout_kills_stalled_helper();
     test_capture_eof_then_hang_is_bounded();
 
@@ -455,6 +381,5 @@ int main(void)
 
     test_die_with_parent_alive_does_not_exit();
 
-    rmdir(tmpdir);
     T_REPORT();
 }

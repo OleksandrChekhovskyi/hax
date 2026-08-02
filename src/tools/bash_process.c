@@ -64,7 +64,7 @@ static char *start_shell(const char *command, struct shell_process *process)
         return error;
     }
 
-    pid_t parent = getpid();
+    pid_t parent_pid = getpid();
     pid_t pid = fork();
     if (pid < 0) {
         char *error = xasprintf("fork: %s", strerror(errno));
@@ -81,7 +81,7 @@ static char *start_shell(const char *command, struct shell_process *process)
         /* Backstop for a hax death no handler can see (SIGKILL, OOM): pdeathsig survives the
          * execve, so an exec-optimized `bash -c` leader dies with hax even then. SIGKILL,
          * not SIGTERM — a command that traps TERM must not outlive a dead hax either. */
-        spawn_child_die_with_parent(parent, SIGKILL);
+        spawn_child_die_with_parent(parent_pid, SIGKILL);
         dup2(pipe_fds[1], STDOUT_FILENO);
         dup2(pipe_fds[1], STDERR_FILENO);
         if (pipe_fds[1] > STDERR_FILENO)

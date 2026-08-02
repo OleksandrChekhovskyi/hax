@@ -339,7 +339,7 @@ static int view_pager_open(struct spawn_pipe *pipe)
     if (!pager || !*pager)
         pager = "less -R";
     /* Keep pager signals in the child; early pager exit must become EPIPE, not terminate hax. */
-    return spawn_pipe_open(pipe, pager);
+    return spawn_pipe_open_write(pipe, pager);
 }
 
 static char *paste_cb(void *user)
@@ -365,8 +365,8 @@ static void show_transcript_cb(void *user)
         return;
     /* Only the model-visible window: a compacted prefix is what the seed stands in for. */
     struct context window = agent_session_context(state->session);
-    transcript_render(pager.w, window.system_prompt, window.tools, window.n_tools, window.items,
-                      window.n_items);
+    transcript_render(pager.stream, window.system_prompt, window.tools, window.n_tools,
+                      window.items, window.n_items);
     spawn_pipe_close(&pager);
 }
 
@@ -418,7 +418,7 @@ static void show_history_cb(void *user)
 
     struct spawn_pipe pager;
     if (view_pager_open(&pager) == 0) {
-        vt_resolve(output, output_len, pager.w);
+        vt_resolve(output, output_len, pager.stream);
         spawn_pipe_close(&pager);
     }
     free(output);

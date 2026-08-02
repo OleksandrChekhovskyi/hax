@@ -156,29 +156,26 @@ static char *run_fzf(const char *query)
     free(filter);
 
     char *cmd = file_mention_fzf_cmd(query);
-    /* spawn_pipe_open_read (not popen): parent ignores SIGINT/SIGQUIT/
-     * SIGPIPE for the duration, child resets them — Ctrl-C drives fzf,
-     * and a still-streaming producer dies on SIGPIPE if fzf exits early. */
-    struct spawn_pipe sp;
-    char *out = NULL;
-    if (spawn_pipe_open_read(&sp, cmd) == 0) {
-        char rec[PICK_RECORD_MAX];
-        if (read_record(sp.r, rec, sizeof(rec)) && *rec) {
+    /* Unlike popen(), the spawn pipe gives fzf default terminal-signal handling. */
+    struct spawn_pipe pipe;
+    char *selection = NULL;
+    if (spawn_pipe_open_read(&pipe, cmd) == 0) {
+        char record[PICK_RECORD_MAX];
+        if (read_record(pipe.stream, record, sizeof(record)) && *record) {
             /* find(1) emits "./path"; strip to match git ls-files form. */
-            const char *path = (rec[0] == '.' && rec[1] == '/') ? rec + 2 : rec;
+            const char *path = (record[0] == '.' && record[1] == '/') ? record + 2 : record;
             if (*path)
-                out = root ? xasprintf("%s%s", root, path) : xstrdup(path);
+                selection = root ? xasprintf("%s%s", root, path) : xstrdup(path);
         }
-        int rc = spawn_pipe_close(&sp);
-        /* fzf exits 0 only on a real selection (else 1/2/127/130). */
-        if (!(WIFEXITED(rc) && WEXITSTATUS(rc) == 0)) {
-            free(out);
-            out = NULL;
+        int status = spawn_pipe_close(&pipe);
+        if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) {
+            free(selection);
+            selection = NULL;
         }
     }
     free(cmd);
     free(root);
-    return out;
+    return selection;
 }
 
 int file_mention_available(void)

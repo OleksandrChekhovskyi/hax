@@ -83,57 +83,49 @@ char *clipboard_osc52_sequence(const char *text, size_t len, int tmux_wrap, size
     return out;
 }
 
-/* fork+exec a clipboard helper, piping `text` to its stdin. The child's
- * stdout/stderr are redirected to /dev/null so a noisy helper can't
- * scribble on the REPL (and "command not found" diagnostics from
- * execvp failure stay invisible to the user). Signal etiquette during
- * the child run is delegated to spawn.c's helpers — same parent/child
- * mask as spawn_run, the only differences here are argv-based exec
- * (so we can probe PATH via execvp's ENOENT) and the /dev/null fd
- * redirection. Returns 0 iff the child exited 0 (which also implies
- * execvp found it on PATH); -1 covers everything else. */
-static int spawn_pipe_in(const char *cmd, const char *const *argv, const char *text, size_t len)
+/* Use argv-based exec so probing PATH does not require shell interpretation. */
+static int run_copy_helper(const char *const *argv, const char *text, size_t len)
 {
-    int p[2];
-    if (pipe(p) < 0)
+    int pipe_fds[2];
+    if (pipe(pipe_fds) < 0)
         return -1;
 
-    struct sigaction saved_int, saved_quit, saved_pipe;
-    spawn_parent_ignore(&saved_int, &saved_quit, &saved_pipe);
+    struct spawn_signal_state signals;
+    spawn_parent_ignore_signals(&signals);
 
     pid_t pid = fork();
     if (pid < 0) {
-        close(p[0]);
-        close(p[1]);
-        spawn_parent_restore(&saved_int, &saved_quit, &saved_pipe);
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        spawn_parent_restore_signals(&signals);
         return -1;
     }
     if (pid == 0) {
-        close(p[1]);
-        if (dup2(p[0], STDIN_FILENO) < 0)
+        close(pipe_fds[1]);
+        if (dup2(pipe_fds[0], STDIN_FILENO) < 0)
             _exit(127);
-        close(p[0]);
-        int dn = open("/dev/null", O_WRONLY);
-        if (dn >= 0) {
-            dup2(dn, STDOUT_FILENO);
-            dup2(dn, STDERR_FILENO);
-            if (dn > 2)
-                close(dn);
+        close(pipe_fds[0]);
+
+        int null_fd = open("/dev/null", O_WRONLY);
+        if (null_fd >= 0) {
+            dup2(null_fd, STDOUT_FILENO);
+            dup2(null_fd, STDERR_FILENO);
+            if (null_fd > STDERR_FILENO)
+                close(null_fd);
         }
-        spawn_child_default_signals();
-        execvp(cmd, (char *const *)argv);
+        spawn_child_reset_signals();
+        execvp(argv[0], (char *const *)argv);
         _exit(127);
     }
-    close(p[0]);
-    int wr = write_all(p[1], text, len);
-    close(p[1]);
+
+    close(pipe_fds[0]);
+    int write_status = write_all(pipe_fds[1], text, len);
+    close(pipe_fds[1]);
     int status = spawn_wait_child(pid);
-    spawn_parent_restore(&saved_int, &saved_quit, &saved_pipe);
-    if (status < 0 || wr < 0)
+    spawn_parent_restore_signals(&signals);
+    if (status < 0 || write_status < 0)
         return -1;
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
-        return 0;
-    return -1;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
 }
 
 static int try_native(const char *text, size_t len)
@@ -143,7 +135,7 @@ static int try_native(const char *text, size_t len)
      * uname or compile-time platform macros. */
     {
         const char *argv[] = {"pbcopy", NULL};
-        if (spawn_pipe_in("pbcopy", argv, text, len) == 0)
+        if (run_copy_helper(argv, text, len) == 0)
             return 0;
     }
     /* Wayland: try wl-copy first when WAYLAND_DISPLAY is set. xclip /
@@ -153,17 +145,17 @@ static int try_native(const char *text, size_t len)
      * tool can't connect to a compositor and would always fail. */
     if (getenv("WAYLAND_DISPLAY")) {
         const char *argv[] = {"wl-copy", NULL};
-        if (spawn_pipe_in("wl-copy", argv, text, len) == 0)
+        if (run_copy_helper(argv, text, len) == 0)
             return 0;
     }
     {
         const char *argv[] = {"xclip", "-selection", "clipboard", NULL};
-        if (spawn_pipe_in("xclip", argv, text, len) == 0)
+        if (run_copy_helper(argv, text, len) == 0)
             return 0;
     }
     {
         const char *argv[] = {"xsel", "-b", "-i", NULL};
-        if (spawn_pipe_in("xsel", argv, text, len) == 0)
+        if (run_copy_helper(argv, text, len) == 0)
             return 0;
     }
     return -1;
@@ -201,12 +193,14 @@ static int is_ssh(void)
  * deadline skips the helper outright, so one stall can't stack with
  * the fallback chain's later attempts (see CLIPBOARD_PASTE_TIMEOUT_MS
  * in clipboard.h). */
-static char *paste_capture(const char *const *argv, size_t max, long deadline_ms, size_t *out_len)
+static char *paste_capture(const char *const *argv, size_t max_bytes, long deadline_ms,
+                           size_t *out_len)
 {
-    long left = deadline_ms - monotonic_ms();
-    if (left <= 0)
+    long remaining_ms = deadline_ms - monotonic_ms();
+    if (remaining_ms <= 0)
         return NULL;
-    return spawn_capture(argv, max, left > INT_MAX ? INT_MAX : (int)left, out_len);
+    int timeout_ms = remaining_ms > INT_MAX ? INT_MAX : (int)remaining_ms;
+    return spawn_capture_stdout(argv, max_bytes, timeout_ms, out_len);
 }
 
 /* macOS clipboard image via osascript — no extra install needed
