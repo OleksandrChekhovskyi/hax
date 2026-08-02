@@ -4,96 +4,31 @@
 
 #include <stddef.h>
 
-/*
- * Generic interactive "choose one from a list" selector.
- *
- * A raw-mode, redraw-in-place list with live type-to-filter — the shape
- * you want whenever the REPL needs the user to pick something from a set
- * that may be small (providers, reasoning levels) or large (an
- * OpenRouter model catalog). Built on the same escape-sequence decoder
- * the line editor uses (input_core_decode_escape), so arrow keys and the
- * usual control bindings behave consistently.
- *
- * Layout is an optional bold title, a dim search field (a magnifier glyph
- * with a "type to search" placeholder, gaining a matched/total count once
- * you type), then the scrolling list. The terminal cursor is hidden for the
- * duration — the search field is a labeled box, not a prompt — so the
- * highlighted row is the only focus indicator.
- *
- * Keys:
- *   - Up / Down (or Ctrl-P / Ctrl-N) move the selection
- *   - Home / End jump to first / last match
- *   - printable bytes extend the filter; Backspace shortens it; Ctrl-U clears
- *   - Enter selects the highlighted row
- *   - Esc / Ctrl-C / Ctrl-G cancel
- *
- * The filter is a case-insensitive, space-separated AND of substrings
- * matched against each item's `label` (see picker_core_match). On exit the
- * picker erases its own painted area, leaving the cursor at column 0 of
- * the line it started on so the caller can print a confirmation (or
- * nothing) with no leftover rows.
- *
- * Like the line editor, the picker needs an interactive terminal: it
- * returns -1 immediately when stdin or stdout isn't a tty (so a piped
- * invocation doesn't dump a menu into a file and block on input).
- */
-
 struct picker_item {
-    /* Concise identity or action: the filter target and the part of a row that
-     * should remain recognizable under clipping. */
-    const char *label;
-    /* Optional terse status or metadata shown dim on the same row. It may be
-     * clipped, so explanatory prose and anything that must remain readable
-     * belongs in desc instead. */
-    const char *detail;
-    /* When set, the whole row is rendered dim and `detail` gains a dash
-     * separator — an advisory "exists but probably won't work right now"
-     * (e.g. an unconfigured provider, with `detail` carrying a short reason).
-     * Purely visual: the row still matches the filter and is selectable,
-     * so the caller decides what accepting it means (typically: try
-     * anyway and report the exact failure). */
-    int dim;
-    /* When set, the row is tagged "✓ current" in the ok color after the
-     * label — persistent state, distinct from the (accent, moving)
-     * selection highlight. Callers mark the already-active choice with this rather
-     * than smuggling "current" through `detail`, where it would render
-     * dim and read like a failure reason. */
+    const char *label;  /* filter target and primary row text */
+    const char *detail; /* optional terse metadata shown on the same row */
+    int dim;            /* advisory only; dim rows remain selectable */
     int current;
-    /* Optional color for the label: a theme role's open sequence (theme.h),
-     * never a raw escape, for pickers whose items *are* colors. It must set
-     * only a foreground — the picker closes it with fg-default — and styles the
-     * label alone. Ignored on a dim row, which owns its styling. */
+    /* Optional theme foreground opening sequence. Ignored when `dim` is set. */
     const char *label_color;
-    /* Optional explanatory text, wrapped below the list when the row is
-     * selected. Use this rather than detail when clipping would lose meaning.
-     * A newline is a hard break, so a desc can put structured fields on one
-     * line and prose on the next; the footer's height is capped either way,
-     * and overflow is elided. */
-    const char *desc;
+    /* Optional explanatory text shown below the list for the selected item. */
+    const char *description;
 };
 
 struct picker_opts {
-    const char *title; /* optional bold header, word-wrapped and capped at three lines */
-    const struct picker_item *items;
-    size_t n;
-    const char *empty_note; /* dim note shown (and -1 returned) when n == 0; may be NULL */
-    /* Item index the cursor starts on (0 = first row). Callers pass the
-     * "current" row so Enter-without-navigation re-picks what's active. */
-    size_t initial;
-    /* Repeat the highlighted row's `label` in the footer, wrapped in full,
-     * whenever it was too wide for its row. For pickers whose labels are
-     * free text rather than identifiers — a session's opening prompt, a
-     * conversation turn — where one clipped line routinely stops short of
-     * the words that tell two similar rows apart. The repeat follows the
-     * item's own `desc` when it has one, and a label that fit shows nothing
-     * (the footer keeps its reserved height either way, so this costs no
-     * rows). Leave 0 for pickers over short labels: they would only reserve
-     * blank space. */
-    int label_gutter;
+    const char *title;
+    const struct picker_item *items; /* required when `item_count` is nonzero */
+    size_t item_count;
+    const char *empty_message; /* optional note shown for an empty list */
+    size_t initial_index;      /* defaults to 0 */
+    /* Show a clipped label in full below the list. */
+    int repeat_clipped_label;
 };
 
-/* Run the picker. Returns the selected 0-based index into `items`, or -1
- * on cancel, an empty list, or a non-tty stdin/stdout. */
-long picker_run(const struct picker_opts *opts);
+/* Opens an interactive, type-to-filter list and returns an index into `items`. The filter matches
+ * every space-separated query term as an ASCII-case-insensitive substring of `label`. Returns -1
+ * on cancellation, an empty list, or non-TTY input/output. All pointers are borrowed for the
+ * duration of the call. */
+long picker_run(const struct picker_opts *options);
 
 #endif /* HAX_PICKER_H */

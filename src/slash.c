@@ -390,21 +390,15 @@ static long undo_fork_picker(struct agent_session *session, size_t count, int is
         free(flat);
         items[turn_index].label =
             (labels[turn_index] && labels[turn_index][0]) ? labels[turn_index] : "(empty)";
-        items[turn_index].detail = NULL;
-        items[turn_index].dim = 0;
-        items[turn_index].current = 0;
     }
 
     struct picker_opts options = {
         .title = is_undo ? "revert to before which message" : "fork before which message",
         .items = items,
-        .n = count,
-        .empty_note = NULL,
-        .initial = count - 1,
-        /* Turn prompts are free text like the resume picker's, and picking
-         * the wrong one here rewrites history — so a clipped row gets its
-         * full text in the gutter. */
-        .label_gutter = 1,
+        .item_count = count,
+        .initial_index = count - 1,
+        /* The full prompt disambiguates clipped rows before a history rewrite. */
+        .repeat_clipped_label = 1,
     };
     long selected_index = picker_run(&options);
 

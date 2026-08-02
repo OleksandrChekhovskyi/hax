@@ -14,6 +14,7 @@
  * Note: SGR 22 is "normal intensity" — it closes BOTH bold and dim, so
  * ANSI_BOLD_OFF is the right closer for either. */
 
+#define ANSI_CSI   "\x1b["
 #define ANSI_RESET "\x1b[0m"
 
 #define ANSI_BOLD       "\x1b[1m"

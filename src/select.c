@@ -300,7 +300,7 @@ static struct model_pick_result pick_model_from_list(struct provider *provider,
     for (size_t i = 0; i < model_count; i++) {
         descriptions[i] = model_desc_line(&models[i], catalog ? &catalog[i] : NULL);
         items[i].label = models[i].id;
-        items[i].desc = descriptions[i];
+        items[i].description = descriptions[i];
         /* Known lack of tool support dims but does not hide the row; catalog capability is
          * advisory and unknown elsewhere. */
         items[i].dim = models[i].tools == PROVIDER_CAP_NO;
@@ -309,8 +309,10 @@ static struct model_pick_result pick_model_from_list(struct provider *provider,
         if (items[i].current)
             initial = i;
     }
-    struct picker_opts options = {
-        .title = "select a model", .items = items, .n = model_count, .initial = initial};
+    struct picker_opts options = {.title = "select a model",
+                                  .items = items,
+                                  .item_count = model_count,
+                                  .initial_index = initial};
     long selected_index = picker_run(&options);
 
     struct model_pick_result result = {.status = PICK_CANCELLED};
@@ -416,7 +418,7 @@ static struct value_pick_result choose_effort(struct agent_state *state, struct 
 
     struct picker_item *items = xcalloc(levels.count + 1, sizeof(*items));
     items[0].label = "default";
-    items[0].desc = "Let the provider choose the reasoning effort";
+    items[0].description = "Let the provider choose the reasoning effort";
     size_t initial = 0;
     for (size_t i = 0; i < levels.count; i++) {
         items[i + 1].label = levels.values[i];
@@ -427,8 +429,8 @@ static struct value_pick_result choose_effort(struct agent_state *state, struct 
     struct picker_opts options = {
         .title = "select reasoning effort",
         .items = items,
-        .n = levels.count + 1,
-        .initial = initial,
+        .item_count = levels.count + 1,
+        .initial_index = initial,
     };
     long selected_index = picker_run(&options);
     free(items);
@@ -631,8 +633,8 @@ static struct provider_pick_result choose_provider_factory(const char *current_p
     struct picker_opts options = {
         .title = "select a provider",
         .items = items,
-        .n = factory_count,
-        .initial = initial,
+        .item_count = factory_count,
+        .initial_index = initial,
     };
     long selected_index = picker_run(&options);
 
@@ -750,7 +752,7 @@ static char *choose_preset_name(char **names, size_t count)
     size_t initial = 0;
     for (size_t i = 0; i < count; i++) {
         items[i].label = names[i];
-        items[i].desc = config_preset_description(names[i]);
+        items[i].description = config_preset_description(names[i]);
         /* Preview the preset's tint, falling back below run overrides because applying the
          * preset clears the current stance. */
         const char *tint = config_preset_tint(names[i]);
@@ -781,7 +783,7 @@ static char *choose_preset_name(char **names, size_t count)
         items[i].detail = details[i];
     }
     struct picker_opts options = {
-        .title = "select a preset", .items = items, .n = count, .initial = initial};
+        .title = "select a preset", .items = items, .item_count = count, .initial_index = initial};
     long selected_index = picker_run(&options);
     char *selected_name = selected_index >= 0 ? xstrdup(names[selected_index]) : NULL;
     free(items);
@@ -896,7 +898,7 @@ static struct value_pick_result choose_tint(const char *current_tint)
     size_t value_count = split_choices(setting->choices, &values);
     struct picker_item *items = xcalloc(value_count + 1, sizeof(*items));
     items[0].label = "none";
-    items[0].desc = "Carry no tint of its own: your tint setting applies";
+    items[0].description = "Carry no tint of its own: your tint setting applies";
     items[0].current = !current_tint;
     size_t initial = 0;
     for (size_t i = 0; i < value_count; i++) {
@@ -910,8 +912,8 @@ static struct value_pick_result choose_tint(const char *current_tint)
     struct picker_opts options = {
         .title = "tint for this preset",
         .items = items,
-        .n = value_count + 1,
-        .initial = initial,
+        .item_count = value_count + 1,
+        .initial_index = initial,
     };
     long selected_index = picker_run(&options);
     free(items);
@@ -944,14 +946,16 @@ static int confirm_overwrite(const char *name)
     char *selection_detail = buf_steal(&current_selection);
 
     struct picker_item items[] = {
-        {.label = "keep it", .desc = "Leave the existing definition alone", .current = 1},
+        {.label = "keep it", .description = "Leave the existing definition alone", .current = 1},
         {.label = "overwrite",
          .detail = selection_detail,
-         .desc = "Replace it with the current selection"},
+         .description = "Replace it with the current selection"},
     };
     char *title = xasprintf("preset '%s' already exists", name);
-    struct picker_opts options = {
-        .title = title, .items = items, .n = sizeof(items) / sizeof(*items), .initial = 0};
+    struct picker_opts options = {.title = title,
+                                  .items = items,
+                                  .item_count = sizeof(items) / sizeof(*items),
+                                  .initial_index = 0};
     long selected_index = picker_run(&options);
     free(title);
     free(selection_detail);
@@ -1272,8 +1276,9 @@ static void pick_setting_choice(struct agent_state *state, const struct config_s
 
     struct picker_item *items = xcalloc(item_count, sizeof(*items));
     items[0].label = "default";
-    items[0].desc = "Clear the runtime override and use the environment, saved configuration, or "
-                    "built-in default";
+    items[0].description =
+        "Clear the runtime override and use the environment, saved configuration, or "
+        "built-in default";
     const char *current_value = setting_display_value(setting);
     size_t initial = 0;
     int choice_is_current = 0;
@@ -1297,7 +1302,7 @@ static void pick_setting_choice(struct agent_state *state, const struct config_s
         if (setting->example) {
             exact_value_description =
                 xasprintf("Enter an exact value such as %s", setting->example);
-            items[value_count + 1].desc = exact_value_description;
+            items[value_count + 1].description = exact_value_description;
         }
         items[value_count + 1].current = exact_value_is_current;
         if (exact_value_is_current)
@@ -1306,7 +1311,7 @@ static void pick_setting_choice(struct agent_state *state, const struct config_s
 
     char *title = xasprintf("%s — %s", setting->key, setting->description);
     struct picker_opts options = {
-        .title = title, .items = items, .n = item_count, .initial = initial};
+        .title = title, .items = items, .item_count = item_count, .initial_index = initial};
     long selected_index = picker_run(&options);
     free(title);
     free(exact_value_description);
@@ -1414,14 +1419,14 @@ static const struct config_setting *choose_config_setting(void)
             char hint[64];
             config_value_hint(setting, hint, sizeof(hint));
             descriptions[i] = xasprintf("%s (%s)", setting->description, hint);
-            items[i].desc = descriptions[i];
+            items[i].description = descriptions[i];
         } else {
-            items[i].desc = setting->description;
+            items[i].description = setting->description;
         }
         items[i].dim = !setting->editable;
     }
     struct picker_opts options = {
-        .title = "configuration", .items = items, .n = setting_count, .initial = 0};
+        .title = "configuration", .items = items, .item_count = setting_count, .initial_index = 0};
     long selected_index = picker_run(&options);
     free(items);
     for (size_t i = 0; i < setting_count; i++) {

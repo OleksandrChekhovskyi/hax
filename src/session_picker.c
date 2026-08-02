@@ -142,7 +142,7 @@ char *session_picker_run(const char *cwd, const char *exclude_path, int *picker_
         const char *prompt = entry->label.prompt;
         items[i].label = prompt && prompt[0] ? prompt : "(no preview)";
         items[i].detail = details[i];
-        items[i].desc = provenances[i];
+        items[i].description = provenances[i];
     }
 
     char counted_title[96];
@@ -156,8 +156,8 @@ char *session_picker_run(const char *cwd, const char *exclude_path, int *picker_
     struct picker_opts options = {
         .title = title,
         .items = items,
-        .n = picker_count,
-        .label_gutter = 1,
+        .item_count = picker_count,
+        .repeat_clipped_label = 1,
     };
     /* Even a raw-mode setup failure leaves the cursor at the picker's start row. */
     if (picker_opened)

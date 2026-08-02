@@ -11,57 +11,68 @@
 #include <sys/ioctl.h>
 
 #include "util.h"
+#include "text/utf8.h"
 #include "terminal/ansi.h"
 #include "terminal/input_core.h"
-#include "terminal/theme.h"
 #include "terminal/picker_core.h"
+#include "terminal/theme.h"
 #include "terminal/ui.h"
-#include "text/utf8.h"
 
-/* Per-byte timeout for reassembling a multi-byte key (escape sequence or
- * UTF-8 glyph). Mirrors the line editor's ESC_TIMEOUT_MS — long enough for
- * a real terminal's burst, short enough that a lone ESC reads as cancel. */
+/* Terminal key sequences arrive as a burst; a lone Escape means cancel. */
 #define ESC_TIMEOUT_MS 50
 
-/* Hard ceiling on visible rows so a tall terminal doesn't paint a wall of
- * list; the window scrolls to keep the selection in view past this. */
 #define PICKER_MAX_ROWS 12
+/* Search, list separator, and one row below the frame. */
+#define PICKER_BASE_ROWS 3
 
-/* Ceilings on wrapped prose; longer text gets an ellipsis. */
 #define PICKER_TITLE_LINES  3
 #define PICKER_FOOTER_LINES 4
+/* Title/footer separators, search row, and list separator. */
+#define PICKER_FRAME_FIXED_ROWS 4
+#define PICKER_FRAME_ROWS_MAX                                                                      \
+    (PICKER_TITLE_LINES + PICKER_MAX_ROWS + PICKER_FOOTER_LINES + PICKER_FRAME_FIXED_ROWS)
 
-/* ---------------- terminal geometry ---------------- */
+struct picker {
+    struct picker_core core;
+    int title_lines;
+    int footer_lines;
+    int painted;
+    int previous_row_count;
+    /* A terminal resize can reflow each previously painted row. */
+    int previous_row_widths[PICKER_FRAME_ROWS_MAX];
+    int terminal_cols;
+    int terminal_rows;
+    struct termios saved_termios;
+    int raw_mode_active;
+};
 
-static void term_size(int *cols, int *rows)
+static void get_terminal_size(int *terminal_cols, int *terminal_rows)
 {
     struct winsize ws;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) {
-        *cols = ws.ws_col > 0 ? ws.ws_col : 80;
-        *rows = ws.ws_row > 0 ? ws.ws_row : 24;
+        *terminal_cols = ws.ws_col > 0 ? ws.ws_col : 80;
+        *terminal_rows = ws.ws_row > 0 ? ws.ws_row : 24;
     } else {
-        *cols = 80;
-        *rows = 24;
+        *terminal_cols = 80;
+        *terminal_rows = 24;
     }
 }
 
 /* Picker content follows the configured display width but can never exceed the
  * physical row its repaint bookkeeping relies on. */
-static int picker_width(int cols)
+static int picker_width(int terminal_cols)
 {
     int width = display_width();
-    if (width > cols)
-        width = cols;
+    if (width > terminal_cols)
+        width = terminal_cols;
     return width < 1 ? 1 : width;
 }
 
-/* ---------------- raw mode + byte input ---------------- */
-
-static int raw_on(struct picker_state *s)
+static int enable_raw_mode(struct picker *picker)
 {
-    if (tcgetattr(STDIN_FILENO, &s->saved) < 0)
+    if (tcgetattr(STDIN_FILENO, &picker->saved_termios) < 0)
         return -1;
-    struct termios raw = s->saved;
+    struct termios raw = picker->saved_termios;
     raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
     raw.c_iflag &= ~(IXON | ICRNL | INPCK | ISTRIP | BRKINT);
     raw.c_oflag &= ~OPOST;
@@ -70,161 +81,120 @@ static int raw_on(struct picker_state *s)
     raw.c_cc[VTIME] = 0;
     if (tcsetattr(STDIN_FILENO, TCSADRAIN, &raw) < 0)
         return -1;
-    s->raw_active = 1;
+    picker->raw_mode_active = 1;
     return 0;
 }
 
-static void raw_off(struct picker_state *s)
+static void disable_raw_mode(struct picker *picker)
 {
-    if (!s->raw_active)
+    if (!picker->raw_mode_active)
         return;
-    tcsetattr(STDIN_FILENO, TCSADRAIN, &s->saved);
-    s->raw_active = 0;
+    tcsetattr(STDIN_FILENO, TCSADRAIN, &picker->saved_termios);
+    picker->raw_mode_active = 0;
 }
 
-static int read_byte_blocking(unsigned char *out)
+static int read_byte_blocking(unsigned char *output)
 {
     for (;;) {
-        ssize_t n = read(STDIN_FILENO, out, 1);
-        if (n == 1)
+        ssize_t bytes_read = read(STDIN_FILENO, output, 1);
+        if (bytes_read == 1)
             return 1;
-        if (n == 0)
-            return 0; /* EOF */
+        if (bytes_read == 0)
+            return 0;
         if (errno == EINTR)
             continue;
         return -1;
     }
 }
 
-static int read_byte_timeout(unsigned char *out, int ms)
+static int read_byte_timeout(unsigned char *output, int timeout_ms)
 {
-    struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
-    int r;
+    struct pollfd input = {.fd = STDIN_FILENO, .events = POLLIN};
+    int result;
     do {
-        r = poll(&pfd, 1, ms);
-    } while (r < 0 && errno == EINTR);
-    if (r <= 0)
-        return r;
-    return read_byte_blocking(out);
+        result = poll(&input, 1, timeout_ms);
+    } while (result < 0 && errno == EINTR);
+    if (result <= 0)
+        return result;
+    return read_byte_blocking(output);
 }
 
-/* A byte source for input_core_decode_escape that can replay one byte we
- * already consumed (to tell a bare ESC from a real sequence) before
- * falling through to the timed tty read. */
-struct seq_reader {
-    int pending; /* a byte already read, or -1 */
+/* Replay the byte used to distinguish bare Escape before continuing the timed read. */
+struct escape_reader {
+    int pending_byte; /* -1 after the first read */
 };
 
-static int seq_byte(void *user)
+static int read_escape_byte(void *user)
 {
-    struct seq_reader *r = user;
-    if (r->pending >= 0) {
-        int b = r->pending;
-        r->pending = -1;
-        return b;
+    struct escape_reader *reader = user;
+    if (reader->pending_byte >= 0) {
+        int byte = reader->pending_byte;
+        reader->pending_byte = -1;
+        return byte;
     }
-    unsigned char b;
-    return read_byte_timeout(&b, ESC_TIMEOUT_MS) <= 0 ? -1 : b;
+    unsigned char byte;
+    return read_byte_timeout(&byte, ESC_TIMEOUT_MS) <= 0 ? -1 : byte;
 }
 
-/* ---------------- render ---------------- */
-
-/* Append a one-line, display-safe clip of `s` (at most `max_cells` cells)
- * to `out`, stopping at the first newline and substituting non-printable
- * codepoints with '?'. When the source overflows the budget (or has more
- * lines), the tail is replaced by an ellipsis. Writes the cells consumed
- * to *used. Keeps every rendered row exactly one physical row, which is
- * what the reposition math in paint() relies on. */
-static void append_clip(struct buf *out, const char *s, int max_cells, int *used, int utf8)
+/* Sanitize user-provided text while clipping it to one physical line. */
+static void append_clipped_text(struct buf *output, const char *text, int max_cells, int use_utf8)
 {
-    if (max_cells < 1) {
-        *used = 0;
+    if (max_cells < 1)
         return;
+
+    size_t len = strlen(text);
+    size_t line_len = strcspn(text, "\r\n");
+    int natural_cells = 0;
+    for (size_t offset = 0; offset < line_len;) {
+        size_t bytes;
+        int width = utf8_codepoint_cells(text, line_len, offset, &bytes);
+        natural_cells += width < 0 ? 1 : width;
+        offset += bytes ? bytes : 1;
     }
-    size_t len = strlen(s);
-    size_t line_end = len;
-    for (size_t k = 0; k < len; k++) {
-        if (s[k] == '\n' || s[k] == '\r') {
-            line_end = k;
-            break;
-        }
-    }
-    int full = 0;
-    for (size_t i = 0; i < line_end;) {
-        size_t cons;
-        int w = utf8_codepoint_cells(s, line_end, i, &cons);
-        full += w < 0 ? 1 : w;
-        i += cons ? cons : 1;
-    }
-    int overflow = (line_end < len) || (full > max_cells);
-    int budget = overflow ? max_cells - 1 : max_cells;
+
+    int clipped = line_len < len || natural_cells > max_cells;
+    int budget = clipped ? max_cells - 1 : max_cells;
     int cells = 0;
-    for (size_t i = 0; i < line_end;) {
-        size_t cons;
-        int w = utf8_codepoint_cells(s, line_end, i, &cons);
-        int cw = w < 0 ? 1 : w;
-        if (cells + cw > budget)
+    for (size_t offset = 0; offset < line_len;) {
+        size_t bytes;
+        int width = utf8_codepoint_cells(text, line_len, offset, &bytes);
+        int codepoint_cells = width < 0 ? 1 : width;
+        if (cells + codepoint_cells > budget)
             break;
-        if (w < 0)
-            buf_append(out, "?", 1);
+        if (width < 0)
+            buf_append(output, "?", 1);
         else
-            buf_append(out, s + i, cons ? cons : 1);
-        cells += cw;
-        i += cons ? cons : 1;
+            buf_append(output, text + offset, bytes ? bytes : 1);
+        cells += codepoint_cells;
+        offset += bytes ? bytes : 1;
     }
-    if (overflow) {
-        buf_append_str(out, utf8 ? "\xe2\x80\xa6" : ".");
-        cells++;
-    }
-    *used = cells;
+    if (clipped)
+        buf_append_str(output, use_utf8 ? "\xe2\x80\xa6" : ".");
 }
 
-/* Return bytes for the next line, preferring a space before `width` cells.
- * A newline is a hard break, letting a desc separate structured fields from
- * prose. `skip` receives the separator bytes to discard. */
-static size_t wrap_line(const char *s, int width, size_t *skip)
+/* Returns the source bytes to render and the separator bytes to discard. */
+static size_t wrapped_line_bytes(const char *text, int max_cells, size_t *separator_bytes)
 {
-    size_t len = strlen(s);
-    size_t i = 0, last_space = 0;
-    int cells = 0;
-    while (i < len) {
-        if (s[i] == '\n') {
-            *skip = 1;
-            return i;
-        }
-        size_t cons;
-        int w = utf8_codepoint_cells(s, len, i, &cons);
-        int cw = w < 0 ? 1 : w;
-        if (cells + cw > width)
-            break;
-        if (s[i] == ' ')
-            last_space = i;
-        cells += cw;
-        i += cons ? cons : 1;
-    }
-    if (i >= len) {
-        *skip = 0;
-        return len;
-    }
-    if (last_space > 0) {
-        *skip = 1;
-        return last_space;
-    }
-    *skip = 0;
-    return i;
+    size_t text_len = strlen(text);
+    size_t paragraph_len = strcspn(text, "\n");
+    size_t next_offset;
+    size_t line_len = wrap_break_pos(text, paragraph_len, (size_t)max_cells, &next_offset);
+    if (next_offset == paragraph_len && paragraph_len < text_len)
+        next_offset++;
+    *separator_bytes = next_offset - line_len;
+    return line_len;
 }
 
-/* Wrapped footer height, capped at `cap`; 0 for no description. */
-static int desc_lines(const char *desc, int width, int cap)
+static int wrapped_line_count(const char *text, int width, int max_lines)
 {
-    if (!desc || !desc[0])
+    if (!text || !text[0])
         return 0;
-    const char *p = desc;
+
     int lines = 0;
-    while (*p && lines < cap) {
-        size_t skip;
-        size_t nb = wrap_line(p, width, &skip);
-        p += nb + skip;
+    while (*text && lines < max_lines) {
+        size_t separator_bytes;
+        size_t line_bytes = wrapped_line_bytes(text, width, &separator_bytes);
+        text += line_bytes + separator_bytes;
         lines++;
     }
     return lines;
@@ -233,560 +203,536 @@ static int desc_lines(const char *desc, int width, int cap)
 /* Footer text width after its indent and right margin. Clamped to the content
  * display width so the description prose wraps at the same column as the rest
  * of the app rather than stretching across a wide terminal. */
-static int footer_width(int cols)
+static int footer_text_width(int terminal_cols)
 {
-    int w = picker_width(cols) - PICKER_MARKER_CELLS - 1;
+    int w = picker_width(terminal_cols) - PICKER_MARKER_CELLS - 1;
     return w < 8 ? 8 : w;
 }
 
-/* Copy one built row to `out`, passing ANSI escape sequences through at zero
- * width while clipping visible content to `cols` cells. This is the single
- * backstop that guarantees no painted row wraps — a wrapped row would desync
- * paint()'s one-physical-row-per-logical-row reposition/erase math. The
- * per-row append_clip() calls still size each row's text for layout (which
- * part to drop, e.g. keep the count/detail); this just holds the invariant no
- * matter how a row was composed, and neutralizes any stray control byte
- * (including an embedded newline) to one cell. On truncation it appends an
- * ellipsis (when a cell is free) and a reset, so a clipped row can't leave an
- * SGR attribute bleeding into the next line. Returns the cells painted, so
- * the frame can record each row's width for resize recovery. */
-static int emit_line_clipped(struct buf *out, const char *line, size_t len, int cols, int utf8)
+/* Trusted picker ANSI sequences have zero width. Final clipping keeps each logical row on one
+ * physical row; the returned width supports cursor recovery after terminal reflow. */
+static int append_clipped_line(struct buf *output, const char *line, size_t line_len,
+                               int terminal_cols, int use_utf8)
 {
     int cells = 0;
-    size_t i = 0;
-    while (i < len) {
-        if ((unsigned char)line[i] == 0x1b) {
-            /* Copy an escape sequence verbatim at zero width: ESC '[' params,
-             * up to and including the final byte (0x40-0x7E). */
-            size_t j = i + 1;
-            if (j < len && line[j] == '[') {
-                j++;
-                while (j < len && !(line[j] >= 0x40 && line[j] <= 0x7e))
-                    j++;
-                if (j < len)
-                    j++;
+    size_t offset = 0;
+    while (offset < line_len) {
+        if ((unsigned char)line[offset] == 0x1b) {
+            size_t escape_end = offset + 1;
+            if (escape_end < line_len && line[escape_end] == '[') {
+                escape_end++;
+                while (escape_end < line_len &&
+                       !(line[escape_end] >= 0x40 && line[escape_end] <= 0x7e))
+                    escape_end++;
+                if (escape_end < line_len)
+                    escape_end++;
             }
-            buf_append(out, line + i, j - i);
-            i = j;
+            buf_append(output, line + offset, escape_end - offset);
+            offset = escape_end;
             continue;
         }
-        size_t cons;
-        int w = utf8_codepoint_cells(line, len, i, &cons);
-        int cw = w < 0 ? 1 : w;
-        if (cells + cw > cols) {
-            if (cells < cols) {
-                buf_append_str(out, utf8 ? "\xe2\x80\xa6" : ".");
+
+        size_t bytes;
+        int width = utf8_codepoint_cells(line, line_len, offset, &bytes);
+        int codepoint_cells = width < 0 ? 1 : width;
+        if (cells + codepoint_cells > terminal_cols) {
+            if (cells < terminal_cols) {
+                buf_append_str(output, use_utf8 ? "\xe2\x80\xa6" : ".");
                 cells++;
             }
-            buf_append_str(out, ANSI_RESET);
+            buf_append_str(output, ANSI_RESET);
             return cells;
         }
-        if (w < 0)
-            buf_append(out, "?", 1);
+        if (width < 0)
+            buf_append(output, "?", 1);
         else
-            buf_append(out, line + i, cons ? cons : 1);
-        cells += cw;
-        i += cons ? cons : 1;
+            buf_append(output, line + offset, bytes ? bytes : 1);
+        cells += codepoint_cells;
+        offset += bytes ? bytes : 1;
     }
     return cells;
 }
 
-/* The search field: a dim magnifier glyph, then either a dim "type to
- * search" placeholder (empty) or the typed query followed — close by, after
- * a small gap — by the dim matched/total count. Always two cells of icon so
- * the query lines up under the rows' marker column. */
-static void render_search(struct buf *out, const struct picker_state *s, int cols, int utf8)
+static void render_search(struct buf *output, const struct picker *picker, int terminal_cols,
+                          int use_utf8)
 {
-    const char *icon = utf8 ? "\xe2\x8c\x95 " : "/ "; /* ⌕ */
-    int budget = cols - PICKER_MARKER_CELLS;          /* cells left for text after the icon */
-    if (budget < 0)
-        budget = 0;
+    const char *icon = use_utf8 ? "\xe2\x8c\x95 " : "/ "; /* ⌕ */
+    int text_cells = terminal_cols - PICKER_MARKER_CELLS;
+    if (text_cells < 0)
+        text_cells = 0;
 
-    buf_append_str(out, ANSI_DIM);
-    buf_append_str(out, icon);
+    buf_append_str(output, ANSI_DIM);
+    buf_append_str(output, icon);
 
-    if (s->query.len == 0) {
-        /* Still dim from the icon — show the placeholder and the total so
-         * the list's size is visible before any filtering. Clipped to the
-         * remaining width: a wrapped header would throw off paint()'s
-         * one-physical-row-per-logical-row repaint/erase math. */
-        char total[48];
-        snprintf(total, sizeof total, "type to search %zu item%s", s->opts->n,
-                 s->opts->n == 1 ? "" : "s");
-        int used = 0;
-        append_clip(out, total, budget, &used, utf8);
-        buf_append_str(out, ANSI_BOLD_OFF);
+    if (picker->core.query.len == 0) {
+        char placeholder[48];
+        snprintf(placeholder, sizeof placeholder, "type to search %zu item%s",
+                 picker->core.options->item_count,
+                 picker->core.options->item_count == 1 ? "" : "s");
+        append_clipped_text(output, placeholder, text_cells, use_utf8);
+        buf_append_str(output, ANSI_BOLD_OFF);
         return;
     }
 
     char count[32];
-    snprintf(count, sizeof count, "%zu/%zu", s->n_filtered, s->opts->n);
-    int count_w = (int)strlen(count);
+    snprintf(count, sizeof count, "%zu/%zu", picker->core.match_count,
+             picker->core.options->item_count);
+    int count_cells = (int)strlen(count);
 
-    /* Keep "<query>  <count>" inside the row: reserve the count (plus its
-     * two-space gap) only when at least one query cell would still fit,
-     * else drop it and give the whole budget to the query. Either way the
-     * visible width stays <= cols, so the row can't wrap. */
-    int show_count = budget >= count_w + 2 + 1;
-    int qbudget = show_count ? budget - (count_w + 2) : budget;
-    if (qbudget < 0)
-        qbudget = 0;
+    int show_count = text_cells >= count_cells + 3;
+    int query_cells = show_count ? text_cells - count_cells - 2 : text_cells;
 
-    buf_append_str(out, ANSI_BOLD_OFF); /* query in normal intensity */
-    int qused = 0;
-    append_clip(out, s->query.data, qbudget, &qused, utf8);
+    buf_append_str(output, ANSI_BOLD_OFF); /* query in normal intensity */
+    append_clipped_text(output, picker->core.query.data, query_cells, use_utf8);
 
     if (show_count) {
-        buf_append_str(out, "  ");
-        buf_append_str(out, ANSI_DIM);
-        buf_append_str(out, count);
-        buf_append_str(out, ANSI_BOLD_OFF);
+        buf_append_str(output, "  ");
+        buf_append_str(output, ANSI_DIM);
+        buf_append_str(output, count);
+        buf_append_str(output, ANSI_BOLD_OFF);
     }
 }
 
-/* Render `label [ ✓ current ] [ detail ]`. Detail uses remaining width; if
- * both fields overflow, the label keeps at least half the available row.
- * When `clipped` is non-NULL it receives whether the label had to be
- * ellipsized — the footer uses that to decide whether repeating it says
- * anything the row didn't (see picker_opts.label_gutter). */
-static void render_row(struct buf *out, const struct picker_state *s, size_t fi, int selected,
-                       int cols, int utf8, int *clipped)
+static void render_row(struct buf *output, const struct picker *picker, size_t match, int selected,
+                       int terminal_cols, int use_utf8, int *label_clipped)
 {
-    const struct picker_item *it = &s->opts->items[s->filtered[fi]];
-    int row_cells = cols - PICKER_MARKER_CELLS;
+    const struct picker_item *item = &picker->core.options->items[picker->core.matches[match]];
+    int row_cells = terminal_cols - PICKER_MARKER_CELLS;
     if (row_cells < 1)
         row_cells = 1;
 
     if (selected)
-        buf_append_str(out, theme_open(THEME_ACCENT));
-    buf_append_str(out, selected ? (utf8 ? "\xe2\x86\x92 " : "> ") : "  "); /* → */
+        buf_append_str(output, theme_open(THEME_ACCENT));
+    buf_append_str(output, selected ? (use_utf8 ? "\xe2\x86\x92 " : "> ") : "  "); /* → */
     if (selected)
-        buf_append_str(out, theme_close(THEME_ACCENT));
+        buf_append_str(output, theme_close(THEME_ACCENT));
 
-    const char *tag = it->current ? (utf8 ? "\xe2\x9c\x93 current" : "* current") : NULL; /* ✓ */
-    int tag_cells = tag ? (int)strlen("  * current") : 0; /* gap included */
+    const char *current_tag =
+        item->current ? (use_utf8 ? "\xe2\x9c\x93 current" : "* current") : NULL; /* ✓ */
+    int current_tag_cells = current_tag ? PICKER_CURRENT_TAG_CELLS : 0;
 
-    const char *sep = it->dim ? (utf8 ? " \xe2\x80\x93 " : " - ") : "  "; /* – */
-    int sep_cells = (int)strlen(it->dim ? " - " : "  ");
+    const char *separator = item->dim ? (use_utf8 ? " \xe2\x80\x93 " : " - ") : "  "; /* – */
+    int separator_cells =
+        item->dim ? PICKER_DIM_DETAIL_SEPARATOR_CELLS : PICKER_DETAIL_SEPARATOR_CELLS;
 
-    const char *label = it->label ? it->label : "";
-    int label_cells = picker_core_label_cells(it, cols);
+    const char *label = item->label ? item->label : "";
+    int label_cells = picker_core_label_cells(item, terminal_cols);
 
     struct buf detail;
     buf_init(&detail);
-    int detail_cells = 0;
-    if (it->detail && it->detail[0]) {
-        int budget = row_cells - tag_cells - label_cells - sep_cells;
-        append_clip(&detail, it->detail, budget, &detail_cells, utf8);
+    if (item->detail && item->detail[0]) {
+        int detail_cells = row_cells - current_tag_cells - label_cells - separator_cells;
+        append_clipped_text(&detail, item->detail, detail_cells, use_utf8);
     }
 
-    if (clipped)
-        *clipped = picker_core_clip_width(label) > label_cells;
-    int label_used = 0;
-    /* A dim row's label stays dim even under the highlight — the arrow
-     * alone marks focus there; bold would contradict the "probably won't
-     * work" signal. */
-    if (it->dim)
-        buf_append_str(out, ANSI_DIM);
+    if (label_clipped)
+        *label_clipped = picker_core_text_cells(label) > label_cells;
+    /* The arrow remains the focus indicator when a selected item is dim. */
+    if (item->dim)
+        buf_append_str(output, ANSI_DIM);
     else if (selected)
-        buf_append_str(out, ANSI_BOLD);
-    /* Here the color is the row's content, not decoration, so it survives the
-     * highlight (bold in the color, like a heading) instead of being replaced
-     * by it. A dim row owns its styling. */
-    int colored = !it->dim && it->label_color && it->label_color[0];
-    if (colored)
-        buf_append_str(out, it->label_color);
-    append_clip(out, label, label_cells, &label_used, utf8);
-    if (colored)
-        buf_append_str(out, ANSI_FG_DEFAULT);
-    if (it->dim || selected)
-        buf_append_str(out, ANSI_BOLD_OFF);
+        buf_append_str(output, ANSI_BOLD);
+    /* A custom foreground is label content; selection does not replace it. */
+    int color_label = !item->dim && item->label_color && item->label_color[0];
+    if (color_label)
+        buf_append_str(output, item->label_color);
+    append_clipped_text(output, label, label_cells, use_utf8);
+    if (color_label)
+        buf_append_str(output, ANSI_FG_DEFAULT);
+    if (item->dim || selected)
+        buf_append_str(output, ANSI_BOLD_OFF);
 
-    if (tag) {
-        buf_append_str(out, "  ");
-        buf_append_str(out, theme_open(THEME_OK));
-        buf_append_str(out, tag);
-        buf_append_str(out, theme_close(THEME_OK));
+    if (current_tag) {
+        buf_append_str(output, "  ");
+        buf_append_str(output, theme_open(THEME_OK));
+        buf_append_str(output, current_tag);
+        buf_append_str(output, theme_close(THEME_OK));
     }
-    if (detail_cells) {
-        buf_append_str(out, ANSI_DIM);
-        buf_append_str(out, sep);
-        buf_append(out, detail.data ? detail.data : "", detail.len);
-        buf_append_str(out, ANSI_BOLD_OFF);
+    if (detail.len) {
+        buf_append_str(output, ANSI_DIM);
+        buf_append_str(output, separator);
+        buf_append(output, detail.data ? detail.data : "", detail.len);
+        buf_append_str(output, ANSI_BOLD_OFF);
     }
     buf_free(&detail);
 }
 
-/* Buffers and geometry for one picker repaint. */
 struct frame {
-    struct buf out;                    /* the whole escape-sequence frame, flushed in one write */
-    struct buf row;                    /* scratch for the row currently being built */
-    int rows;                          /* rows emitted so far (the cursor parks on the last) */
-    int widths[PICKER_FRAME_ROWS_MAX]; /* cells painted per row */
-    int cols;
-    int utf8;
+    struct buf output;
+    struct buf row;
+    int row_count;
+    int row_widths[PICKER_FRAME_ROWS_MAX];
+    int width;
+    int use_utf8;
 };
 
-static void frame_init(struct frame *f, int cols, int utf8)
+static void frame_init(struct frame *frame, int terminal_cols, int use_utf8)
 {
-    buf_init(&f->out);
-    buf_init(&f->row);
-    f->rows = 0;
-    memset(f->widths, 0, sizeof(f->widths));
-    f->cols = cols;
-    f->utf8 = utf8;
+    buf_init(&frame->output);
+    buf_init(&frame->row);
+    frame->row_count = 0;
+    memset(frame->row_widths, 0, sizeof(frame->row_widths));
+    frame->width = terminal_cols;
+    frame->use_utf8 = use_utf8;
 }
 
 /* Emit one clipped physical line and reset the row buffer. */
-static void frame_emit(struct frame *f)
+static void frame_emit(struct frame *frame)
 {
-    if (f->rows)
-        buf_append_str(&f->out, "\r\n");
-    int cells =
-        emit_line_clipped(&f->out, f->row.data ? f->row.data : "", f->row.len, f->cols, f->utf8);
-    if (f->rows < PICKER_FRAME_ROWS_MAX)
-        f->widths[f->rows] = cells;
-    f->rows++;
-    buf_append_str(&f->out, ANSI_ERASE_LINE);
-    buf_reset(&f->row);
+    if (frame->row_count)
+        buf_append_str(&frame->output, "\r\n");
+    int cells = append_clipped_line(&frame->output, frame->row.data ? frame->row.data : "",
+                                    frame->row.len, frame->width, frame->use_utf8);
+    if (frame->row_count < PICKER_FRAME_ROWS_MAX)
+        frame->row_widths[frame->row_count] = cells;
+    frame->row_count++;
+    buf_append_str(&frame->output, ANSI_ERASE_LINE);
+    buf_reset(&frame->row);
 }
 
-static void frame_free(struct frame *f)
+static void frame_free(struct frame *frame)
 {
-    buf_free(&f->out);
-    buf_free(&f->row);
+    buf_free(&frame->output);
+    buf_free(&frame->row);
 }
 
-static void render_title(struct frame *f, const char *title, int lines)
+static void render_title(struct frame *frame, const char *title, int line_count)
 {
-    const char *p = title;
-    for (int line = 0; line < lines; line++) {
-        buf_append_str(&f->row, ANSI_BOLD);
-        if (line == lines - 1) {
-            int used = 0;
-            append_clip(&f->row, p, f->cols, &used, f->utf8);
+    const char *remaining = title;
+    for (int line = 0; line < line_count; line++) {
+        buf_append_str(&frame->row, ANSI_BOLD);
+        if (line == line_count - 1) {
+            append_clipped_text(&frame->row, remaining, frame->width, frame->use_utf8);
         } else {
-            size_t skip;
-            size_t nb = wrap_line(p, f->cols, &skip);
-            picker_core_append_sanitized(&f->row, p, nb);
-            p += nb + skip;
+            size_t separator_bytes;
+            size_t line_bytes = wrapped_line_bytes(remaining, frame->width, &separator_bytes);
+            picker_core_append_sanitized(&frame->row, remaining, line_bytes);
+            remaining += line_bytes + separator_bytes;
         }
-        buf_append_str(&f->row, ANSI_BOLD_OFF);
-        frame_emit(f);
+        buf_append_str(&frame->row, ANSI_BOLD_OFF);
+        frame_emit(frame);
     }
-    frame_emit(f); /* blank line between the title and the search field */
+    frame_emit(frame); /* blank line between the title and the search field */
 }
 
-/* Render the selected item's description in a fixed-height footer so the
- * frame does not move as selection changes. `sel_clipped` reports whether
- * the highlighted row's label was ellipsized, which is what makes repeating
- * it worthwhile under label_gutter. */
-static void render_footer(struct frame *f, const struct picker_state *s, int sel_clipped)
+/* A fixed footer height prevents the list from moving as selection changes. */
+static void render_footer(struct frame *frame, const struct picker *picker,
+                          int selected_label_clipped)
 {
-    if (s->footer_lines <= 0)
+    if (picker->footer_lines <= 0)
         return;
-    frame_emit(f); /* blank line between the list and the footer */
-    const struct picker_item *sel = s->n_filtered ? &s->opts->items[s->filtered[s->sel]] : NULL;
-    const char *desc = sel ? sel->desc : NULL;
-    /* A clipped label follows the desc rather than replacing it: the two answer different
-     * questions (what this row is about, versus the words the row had no room for). */
-    char *joined = NULL;
-    if (sel && sel->label && s->opts->label_gutter && sel_clipped) {
-        if (desc && desc[0])
-            desc = joined = xasprintf("%s\n%s", desc, sel->label);
+    frame_emit(frame);
+
+    const struct picker_item *selected_item =
+        picker->core.match_count
+            ? &picker->core.options->items[picker->core.matches[picker->core.selection]]
+            : NULL;
+    const char *description = selected_item ? selected_item->description : NULL;
+    char *combined_description = NULL;
+    if (selected_item && selected_item->label && picker->core.options->repeat_clipped_label &&
+        selected_label_clipped) {
+        if (description && description[0])
+            description = combined_description =
+                xasprintf("%s\n%s", description, selected_item->label);
         else
-            desc = sel->label;
+            description = selected_item->label;
     }
-    int width = footer_width(f->cols);
-    const char *p = desc && desc[0] ? desc : "";
-    for (int line = 0; line < s->footer_lines; line++) {
-        if (*p) {
-            buf_append_str(&f->row, ANSI_DIM "  ");
-            if (line == s->footer_lines - 1) {
-                /* Clip the remainder with an ellipsis on the final line. */
-                int used = 0;
-                append_clip(&f->row, p, width, &used, f->utf8);
-                p += strlen(p);
+
+    int text_cells = footer_text_width(frame->width);
+    const char *remaining = description && description[0] ? description : "";
+    for (int line = 0; line < picker->footer_lines; line++) {
+        if (*remaining) {
+            buf_append_str(&frame->row, ANSI_DIM "  ");
+            if (line == picker->footer_lines - 1) {
+                append_clipped_text(&frame->row, remaining, text_cells, frame->use_utf8);
             } else {
-                size_t skip;
-                size_t nb = wrap_line(p, width, &skip);
-                picker_core_append_sanitized(&f->row, p, nb);
-                p += nb + skip;
+                size_t separator_bytes;
+                size_t line_bytes = wrapped_line_bytes(remaining, text_cells, &separator_bytes);
+                picker_core_append_sanitized(&frame->row, remaining, line_bytes);
+                remaining += line_bytes + separator_bytes;
             }
-            buf_append_str(&f->row, ANSI_BOLD_OFF);
+            buf_append_str(&frame->row, ANSI_BOLD_OFF);
         }
-        frame_emit(f); /* empty when the desc ran out — pads to fixed height */
+        frame_emit(frame);
     }
-    free(joined);
+    free(combined_description);
 }
 
-/* Size the footer and the list window for a `cols` x `rows` terminal.
- *
- * Both depend on geometry, so both are redone when the terminal is resized —
- * a stale viewport paints more rows than exist (desyncing the reposition
- * math until the picker is closed), and stale footer_lines can leave a row
- * that now clips with nowhere to show its full text. */
-static void picker_layout(struct picker_state *s, int cols, int rows)
+/* Viewport and footer reservations both depend on terminal geometry. */
+static void picker_layout(struct picker *picker, int terminal_cols, int terminal_rows)
 {
-    const struct picker_opts *opts = s->opts;
-    s->cols = cols;
-    s->rows = rows;
+    const struct picker_opts *options = picker->core.options;
+    picker->terminal_cols = terminal_cols;
+    picker->terminal_rows = terminal_rows;
 
-    int width = picker_width(cols);
-    s->title_lines = opts->title ? desc_lines(opts->title, width, PICKER_TITLE_LINES) : 0;
+    int width = picker_width(terminal_cols);
+    picker->title_lines =
+        options->title ? wrapped_line_count(options->title, width, PICKER_TITLE_LINES) : 0;
 
-    /* One height for every row, so the frame doesn't jump as the selection
-     * moves: the tallest description any row could show. */
-    int fw = footer_width(width);
-    s->footer_lines = 0;
-    for (size_t i = 0; i < opts->n; i++) {
-        const struct picker_item *it = &opts->items[i];
-        int d = desc_lines(it->desc, fw, PICKER_FOOTER_LINES);
-        /* Reserve for a label the gutter may have to repeat, asking the same
-         * layout the renderer will apply. Testing against the bare row width
-         * instead would miss labels clipped only to make room for a detail —
-         * every /resume row carries one — and a row whose label is clipped
-         * with no reserved footer has nowhere to show its full text. The
-         * remainder after the desc is what the renderer's hard break leaves
-         * the label. */
-        if (opts->label_gutter && it->label &&
-            picker_core_clip_width(it->label) > picker_core_label_cells(it, width))
-            d += desc_lines(it->label, fw, PICKER_FOOTER_LINES - d);
-        if (d > s->footer_lines)
-            s->footer_lines = d;
+    int footer_cells = footer_text_width(width);
+    picker->footer_lines = 0;
+    for (size_t i = 0; i < options->item_count; i++) {
+        const struct picker_item *item = &options->items[i];
+        int item_lines = wrapped_line_count(item->description, footer_cells, PICKER_FOOTER_LINES);
+        /* Detail can make a label clip before it reaches the full row width. */
+        if (options->repeat_clipped_label && item->label &&
+            picker_core_text_cells(item->label) > picker_core_label_cells(item, width)) {
+            item_lines +=
+                wrapped_line_count(item->label, footer_cells, PICKER_FOOTER_LINES - item_lines);
+        }
+        if (item_lines > picker->footer_lines)
+            picker->footer_lines = item_lines;
     }
 
-    /* Reserve title, search, spacing, and footer rows from the viewport. */
-    int reserved = (s->title_lines ? s->title_lines + 1 : 0) + 2 + 1;
-    if (s->footer_lines > 0)
-        reserved += s->footer_lines + 1;
-    int vp = rows - reserved;
-    if (vp < 1)
-        vp = 1;
-    if (vp > PICKER_MAX_ROWS)
-        vp = PICKER_MAX_ROWS;
-    s->viewport = vp;
+    int reserved_rows = PICKER_BASE_ROWS;
+    if (picker->title_lines)
+        reserved_rows += picker->title_lines + 1;
+    if (picker->footer_lines > 0)
+        reserved_rows += picker->footer_lines + 1;
+    int viewport_rows = terminal_rows - reserved_rows;
+    if (viewport_rows < 1)
+        viewport_rows = 1;
+    if (viewport_rows > PICKER_MAX_ROWS)
+        viewport_rows = PICKER_MAX_ROWS;
+    picker->core.viewport_rows = viewport_rows;
 }
 
-/* How far the cursor must climb to reach the first row of the last painted
- * frame, at the terminal's *current* width.
- *
- * Each row was painted one per screen row, but a width shrink makes the
- * terminal reflow it: a row of w cells becomes ceil(w / cols) rows. Deriving
- * the climb from the recorded widths rather than the row count is what keeps
- * a post-resize repaint from stopping short and painting the new frame over
- * the middle of the old one — the duplicated title that leaves.
- *
- * Like the line editor's resize recovery, this assumes the terminal reflows
- * on resize (xterm, kitty, tmux, ...); one that truncates instead may leave
- * a stale row for a frame. At an unchanged width every row is one physical
- * row and this reduces to prev_rows - 1. */
-static int reflow_climb(const struct picker_state *s, int cols, int rows)
+/* A width change can reflow each old logical row across multiple physical rows. This calculation
+ * assumes xterm-style reflow; terminals that truncate on resize may leave stale content. */
+static int reflow_climb(const struct picker *picker, int terminal_cols, int terminal_rows)
 {
-    if (!s->painted || s->prev_rows <= 0 || cols <= 0)
+    if (!picker->painted || picker->previous_row_count <= 0 || terminal_cols <= 0)
         return 0;
-    int n = s->prev_rows < PICKER_FRAME_ROWS_MAX ? s->prev_rows : PICKER_FRAME_ROWS_MAX;
-    int phys = 0;
-    for (int i = 0; i < n; i++) {
-        int w = s->prev_widths[i];
-        phys += w > 0 ? (w + cols - 1) / cols : 1; /* a blank row still holds one */
+
+    int recorded_rows = picker->previous_row_count < PICKER_FRAME_ROWS_MAX
+                            ? picker->previous_row_count
+                            : PICKER_FRAME_ROWS_MAX;
+    int physical_rows = 0;
+    for (int row = 0; row < recorded_rows; row++) {
+        int width = picker->previous_row_widths[row];
+        physical_rows += width > 0 ? (width + terminal_cols - 1) / terminal_cols : 1;
     }
-    int climb = phys - 1;
-    /* A reflow estimate can exceed what the screen holds; climbing past the
-     * top would repaint from the wrong row. */
-    if (rows > 0 && climb > rows - 1)
-        climb = rows - 1;
+    int climb = physical_rows - 1;
+    /* Climbing beyond the screen top would start the repaint on the wrong row. */
+    if (terminal_rows > 0 && climb > terminal_rows - 1)
+        climb = terminal_rows - 1;
     return climb < 0 ? 0 : climb;
 }
 
-static void paint(struct picker_state *s)
+static void paint(struct picker *picker)
 {
-    int cols, rows;
-    term_size(&cols, &rows);
-    if (cols != s->cols || rows != s->rows) {
-        picker_layout(s, cols, rows);
-        /* The window was valid for the old viewport; pull the selection
-         * back into the new one. */
-        picker_core_clamp_scroll(s);
+    int terminal_cols, terminal_rows;
+    get_terminal_size(&terminal_cols, &terminal_rows);
+    if (terminal_cols != picker->terminal_cols || terminal_rows != picker->terminal_rows) {
+        picker_layout(picker, terminal_cols, terminal_rows);
+        picker_core_clamp_view(&picker->core);
     }
 
-    struct frame f;
-    frame_init(&f, picker_width(cols), locale_have_utf8());
+    struct frame frame;
+    frame_init(&frame, picker_width(terminal_cols), locale_have_utf8());
 
-    /* The whole frame is one fwrite already; wrap it in synchronized output
-     * (DEC 2026) too. Redraw before erasing stale tails so terminals or tmux
-     * setups that ignore synchronized output don't show a blank picker between
-     * frames. */
-    buf_append_str(&f.out, ANSI_SYNC_BEGIN);
+    /* Redraw before erasing stale tails for terminals that ignore synchronized output. */
+    buf_append_str(&frame.output, ANSI_SYNC_BEGIN);
 
-    /* Climb to the top of the prior paint. Stale content is cleared after
-     * each redrawn row and below the final row. */
-    int climb = reflow_climb(s, cols, rows);
+    int climb = reflow_climb(picker, terminal_cols, terminal_rows);
     if (climb > 0) {
-        char up[16];
-        snprintf(up, sizeof up, "\x1b[%dA", climb);
-        buf_append_str(&f.out, up);
+        char cursor_up[16];
+        snprintf(cursor_up, sizeof cursor_up, ANSI_CSI "%dA", climb);
+        buf_append_str(&frame.output, cursor_up);
     }
-    if (s->painted)
-        buf_append(&f.out, "\r", 1);
+    if (picker->painted)
+        buf_append(&frame.output, "\r", 1);
 
-    if (s->title_lines)
-        render_title(&f, s->opts->title, s->title_lines);
+    if (picker->title_lines)
+        render_title(&frame, picker->core.options->title, picker->title_lines);
 
-    render_search(&f.row, s, f.cols, f.utf8);
-    frame_emit(&f);
+    render_search(&frame.row, picker, frame.width, frame.use_utf8);
+    frame_emit(&frame);
 
-    frame_emit(&f); /* blank line between the search field and the list */
+    frame_emit(&frame); /* blank line between the search field and the list */
 
-    int sel_clipped = 0;
-    if (s->n_filtered == 0) {
-        buf_append_str(&f.row, ANSI_DIM "  (no matches)" ANSI_BOLD_OFF);
-        frame_emit(&f);
+    int selected_label_clipped = 0;
+    if (picker->core.match_count == 0) {
+        buf_append_str(&frame.row, ANSI_DIM "  (no matches)" ANSI_BOLD_OFF);
+        frame_emit(&frame);
     } else {
-        size_t end = s->top + (size_t)s->viewport;
-        if (end > s->n_filtered)
-            end = s->n_filtered;
-        for (size_t fi = s->top; fi < end; fi++) {
-            int selected = fi == s->sel;
-            render_row(&f.row, s, fi, selected, f.cols, f.utf8, selected ? &sel_clipped : NULL);
-            frame_emit(&f);
+        size_t first_hidden = picker->core.first_visible + (size_t)picker->core.viewport_rows;
+        if (first_hidden > picker->core.match_count)
+            first_hidden = picker->core.match_count;
+        for (size_t match = picker->core.first_visible; match < first_hidden; match++) {
+            int row_selected = match == picker->core.selection;
+            render_row(&frame.row, picker, match, row_selected, frame.width, frame.use_utf8,
+                       row_selected ? &selected_label_clipped : NULL);
+            frame_emit(&frame);
         }
     }
 
-    render_footer(&f, s, sel_clipped);
+    render_footer(&frame, picker, selected_label_clipped);
 
-    buf_append_str(&f.out, ANSI_ERASE_BELOW);
-    buf_append_str(&f.out, ANSI_SYNC_END);
+    buf_append_str(&frame.output, ANSI_ERASE_BELOW);
+    buf_append_str(&frame.output, ANSI_SYNC_END);
 
-    fwrite(f.out.data ? f.out.data : "", 1, f.out.len, stdout);
+    fwrite(frame.output.data ? frame.output.data : "", 1, frame.output.len, stdout);
     fflush(stdout);
 
-    memcpy(s->prev_widths, f.widths, sizeof(s->prev_widths));
-    s->prev_rows = f.rows;
-    s->painted = 1;
-    frame_free(&f);
+    memcpy(picker->previous_row_widths, frame.row_widths, sizeof(picker->previous_row_widths));
+    picker->previous_row_count = frame.row_count;
+    picker->painted = 1;
+    frame_free(&frame);
 }
 
-/* ---------------- public entry ---------------- */
+enum picker_input_result {
+    PICKER_INPUT_CONTINUE,
+    PICKER_INPUT_ACCEPT,
+    PICKER_INPUT_CANCEL,
+};
 
-long picker_run(const struct picker_opts *opts)
+static void apply_navigation_action(struct picker_core *core, enum input_action action)
 {
-    if (!opts || !isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
+    switch (action) {
+    case INPUT_ACTION_HISTORY_PREV:
+        picker_core_move_selection(core, PICKER_DIRECTION_PREVIOUS);
+        break;
+    case INPUT_ACTION_HISTORY_NEXT:
+        picker_core_move_selection(core, PICKER_DIRECTION_NEXT);
+        break;
+    case INPUT_ACTION_LINE_START:
+        picker_core_select_first(core);
+        break;
+    case INPUT_ACTION_LINE_END:
+        picker_core_select_last(core);
+        break;
+    case INPUT_ACTION_PAGE_UP:
+        picker_core_page_selection(core, PICKER_DIRECTION_PREVIOUS);
+        break;
+    case INPUT_ACTION_PAGE_DOWN:
+        picker_core_page_selection(core, PICKER_DIRECTION_NEXT);
+        break;
+    default:
+        break;
+    }
+}
+
+static enum picker_input_result process_input_byte(struct picker_core *core, unsigned char byte)
+{
+    if (byte == 0x03 || byte == 0x07) /* Ctrl-C / Ctrl-G */
+        return PICKER_INPUT_CANCEL;
+    if (byte == 0x0d || byte == 0x0a) /* Enter / LF */
+        return core->match_count ? PICKER_INPUT_ACCEPT : PICKER_INPUT_CONTINUE;
+    if (byte == 0x7f || byte == 0x08) { /* Backspace */
+        if (core->query.len) {
+            core->query.len = utf8_prev(core->query.data, core->query.len);
+            core->query.data[core->query.len] = '\0';
+            picker_core_update_matches(core);
+        }
+        return PICKER_INPUT_CONTINUE;
+    }
+    if (byte == 0x15) { /* Ctrl-U */
+        if (core->query.len) {
+            core->query.len = 0;
+            core->query.data[0] = '\0';
+            picker_core_update_matches(core);
+        }
+        return PICKER_INPUT_CONTINUE;
+    }
+    if (byte == 0x0e || byte == 0x10) { /* Ctrl-N / Ctrl-P */
+        picker_core_move_selection(core, byte == 0x0e ? PICKER_DIRECTION_NEXT
+                                                      : PICKER_DIRECTION_PREVIOUS);
+        return PICKER_INPUT_CONTINUE;
+    }
+    if (byte == 0x1b) {
+        unsigned char next_byte;
+        if (read_byte_timeout(&next_byte, ESC_TIMEOUT_MS) <= 0)
+            return PICKER_INPUT_CANCEL;
+        struct escape_reader reader = {.pending_byte = next_byte};
+        enum input_action action = input_core_decode_escape(read_escape_byte, &reader);
+        apply_navigation_action(core, action);
+        return PICKER_INPUT_CONTINUE;
+    }
+    if (byte < 0x20)
+        return PICKER_INPUT_CONTINUE;
+
+    int sequence_len = utf8_seq_len(byte);
+    char bytes[4] = {(char)byte};
+    int bytes_read = 1;
+    for (int i = 1; i < sequence_len; i++) {
+        unsigned char continuation;
+        if (read_byte_timeout(&continuation, ESC_TIMEOUT_MS) <= 0)
+            break;
+        bytes[bytes_read++] = (char)continuation;
+    }
+    buf_append(&core->query, bytes, bytes_read);
+    picker_core_update_matches(core);
+    return PICKER_INPUT_CONTINUE;
+}
+
+long picker_run(const struct picker_opts *options)
+{
+    if (!options || !isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
         return -1;
-    if (opts->n == 0) {
-        if (opts->empty_note)
-            ui_note("%s", opts->empty_note);
+    if (options->item_count == 0) {
+        if (options->empty_message)
+            ui_note("%s", options->empty_message);
         return -1;
     }
+    if (!options->items)
+        return -1;
 
-    struct picker_state s;
-    memset(&s, 0, sizeof s);
-    s.opts = opts;
-    s.filtered = xmalloc(opts->n * sizeof(*s.filtered));
-    buf_init(&s.query);
+    struct picker picker;
+    memset(&picker, 0, sizeof picker);
+    picker.core.options = options;
+    picker.core.matches = xmalloc(options->item_count * sizeof(*picker.core.matches));
+    buf_init(&picker.core.query);
 
-    int cols, rows;
-    term_size(&cols, &rows);
-    picker_layout(&s, cols, rows);
+    int terminal_cols, terminal_rows;
+    get_terminal_size(&terminal_cols, &terminal_rows);
+    picker_layout(&picker, terminal_cols, terminal_rows);
 
-    picker_core_recompute(&s);
-    if (opts->initial)
-        picker_core_select_item(&s, opts->initial);
+    picker_core_update_matches(&picker.core);
+    if (options->initial_index)
+        picker_core_select_item(&picker.core, options->initial_index);
 
-    if (raw_on(&s) < 0) {
-        free(s.filtered);
-        buf_free(&s.query);
+    if (enable_raw_mode(&picker) < 0) {
+        free(picker.core.matches);
+        buf_free(&picker.core.query);
         return -1;
     }
-    /* The search field is a labeled box, not a cursor position — hide the
-     * terminal cursor so it doesn't sit distractingly at the end of a row. */
+    /* Selection, not the search field, is the focus indicator. */
     fputs(ANSI_CURSOR_HIDE, stdout);
     fflush(stdout);
-    paint(&s);
+    paint(&picker);
 
     long result = -1;
-    int done = 0;
-    while (!done) {
-        unsigned char c;
-        if (read_byte_blocking(&c) <= 0)
-            break; /* EOF — cancel */
-
-        if (c == 0x03 || c == 0x07) /* Ctrl-C / Ctrl-G — cancel */
+    for (;;) {
+        unsigned char byte;
+        if (read_byte_blocking(&byte) <= 0)
             break;
-        if (c == 0x0d || c == 0x0a) { /* Enter / LF — accept */
-            if (s.n_filtered) {
-                result = (long)s.filtered[s.sel];
-                done = 1;
-            }
-        } else if (c == 0x7f || c == 0x08) { /* Backspace */
-            if (s.query.len) {
-                s.query.len = utf8_prev(s.query.data, s.query.len);
-                s.query.data[s.query.len] = '\0';
-                picker_core_recompute(&s);
-            }
-        } else if (c == 0x15) { /* Ctrl-U — clear filter */
-            if (s.query.len) {
-                s.query.len = 0;
-                s.query.data[0] = '\0';
-                picker_core_recompute(&s);
-            }
-        } else if (c == 0x0e || c == 0x10) { /* Ctrl-N / Ctrl-P */
-            picker_core_move_sel(&s, c == 0x0e ? +1 : -1);
-        } else if (c == 0x1b) { /* ESC: bare = cancel, otherwise a key sequence */
-            unsigned char nb;
-            if (read_byte_timeout(&nb, ESC_TIMEOUT_MS) <= 0)
-                break; /* bare ESC — cancel */
-            struct seq_reader r = {.pending = nb};
-            enum input_action a = input_core_decode_escape(seq_byte, &r);
-            if (a == INPUT_ACTION_HISTORY_PREV)
-                picker_core_move_sel(&s, -1);
-            else if (a == INPUT_ACTION_HISTORY_NEXT)
-                picker_core_move_sel(&s, +1);
-            else if (a == INPUT_ACTION_LINE_START)
-                picker_core_select_first(&s);
-            else if (a == INPUT_ACTION_LINE_END)
-                picker_core_select_last(&s);
-            else if (a == INPUT_ACTION_PAGE_UP)
-                picker_core_page_sel(&s, -1);
-            else if (a == INPUT_ACTION_PAGE_DOWN)
-                picker_core_page_sel(&s, +1);
-            /* Any other sequence (unknown key) is ignored — never an
-             * accidental cancel. */
-        } else if (c >= 0x20) { /* printable — extend the filter */
-            int seq = utf8_seq_len(c);
-            char bytes[4];
-            bytes[0] = (char)c;
-            int got = 1;
-            for (int i = 1; i < seq; i++) {
-                unsigned char b;
-                if (read_byte_timeout(&b, ESC_TIMEOUT_MS) <= 0)
-                    break;
-                bytes[got++] = (char)b;
-            }
-            buf_append(&s.query, bytes, got);
-            picker_core_recompute(&s);
-        }
-        /* Other control bytes: ignore. */
 
-        if (!done)
-            paint(&s);
+        enum picker_input_result input_result = process_input_byte(&picker.core, byte);
+        if (input_result == PICKER_INPUT_CANCEL)
+            break;
+        if (input_result == PICKER_INPUT_ACCEPT) {
+            result = (long)picker.core.matches[picker.core.selection];
+            break;
+        }
+        paint(&picker);
     }
 
     /* Erase the picker's painted area; leave the cursor at column 0 of a
      * clean line for the caller's next output, and restore the cursor. */
-    if (s.painted && s.prev_rows > 0) {
-        int cur_cols, cur_rows;
-        term_size(&cur_cols, &cur_rows);
-        int climb = reflow_climb(&s, cur_cols, cur_rows);
+    if (picker.painted && picker.previous_row_count > 0) {
+        int current_terminal_cols, current_terminal_rows;
+        get_terminal_size(&current_terminal_cols, &current_terminal_rows);
+        int climb = reflow_climb(&picker, current_terminal_cols, current_terminal_rows);
         if (climb > 0)
-            printf("\x1b[%dA", climb);
-        fputs("\r\x1b[J", stdout);
+            printf(ANSI_CSI "%dA", climb);
+        fputs("\r" ANSI_ERASE_BELOW, stdout);
     }
     fputs(ANSI_CURSOR_SHOW, stdout);
     fflush(stdout);
-    raw_off(&s);
+    disable_raw_mode(&picker);
 
-    free(s.filtered);
-    buf_free(&s.query);
+    free(picker.core.matches);
+    buf_free(&picker.core.query);
     return result;
 }

@@ -39,23 +39,23 @@ void agent_display_refresh(struct agent_state *state)
  * entry (NULL or past the end = cancel). One script drives both the outer
  * config list and the inner choice list, in call order. */
 static const char *g_picks[4];
-static int g_pick_n;
-static int g_pick_i;
+static int g_pick_count;
+static int g_pick_index;
 static char g_picked_detail[256];
-static char g_picked_desc[256];
+static char g_picked_description[256];
 
-long picker_run(const struct picker_opts *opts)
+long picker_run(const struct picker_opts *options)
 {
-    if (g_pick_i >= g_pick_n || !g_picks[g_pick_i])
+    if (g_pick_index >= g_pick_count || !g_picks[g_pick_index])
         return -1;
-    const char *want = g_picks[g_pick_i++];
-    for (size_t i = 0; i < opts->n; i++) {
-        if (!opts->items[i].label || strcmp(opts->items[i].label, want) != 0)
+    const char *label = g_picks[g_pick_index++];
+    for (size_t i = 0; i < options->item_count; i++) {
+        if (!options->items[i].label || strcmp(options->items[i].label, label) != 0)
             continue;
         snprintf(g_picked_detail, sizeof(g_picked_detail), "%s",
-                 opts->items[i].detail ? opts->items[i].detail : "");
-        snprintf(g_picked_desc, sizeof(g_picked_desc), "%s",
-                 opts->items[i].desc ? opts->items[i].desc : "");
+                 options->items[i].detail ? options->items[i].detail : "");
+        snprintf(g_picked_description, sizeof(g_picked_description), "%s",
+                 options->items[i].description ? options->items[i].description : "");
         return (long)i;
     }
     return -1;
@@ -65,10 +65,10 @@ static void script_picks(const char *a, const char *b)
 {
     g_picks[0] = a;
     g_picks[1] = b;
-    g_pick_n = (a ? 1 : 0) + (b ? 1 : 0);
-    g_pick_i = 0;
+    g_pick_count = (a ? 1 : 0) + (b ? 1 : 0);
+    g_pick_index = 0;
     g_picked_detail[0] = '\0';
-    g_picked_desc[0] = '\0';
+    g_picked_description[0] = '\0';
 }
 
 /* Fresh tiers and no stray env for the keys under test. */
@@ -220,7 +220,7 @@ static void test_picker_preseeds_mixed_value(void)
     script_picks("display_width", "exact value...");
     char *out = run(state, NULL);
     EXPECT_STR_EQ(g_picked_detail, "");
-    EXPECT_STR_EQ(g_picked_desc, "Enter an exact value such as 100");
+    EXPECT_STR_EQ(g_picked_description, "Enter an exact value such as 100");
     EXPECT_STR_EQ(state->pending_preseed, "/config display_width 120");
     free(state->pending_preseed);
     state->pending_preseed = NULL;
@@ -254,8 +254,8 @@ static void test_picker_commits_choice(void)
     script_picks("markdown", "default");
     out = run(state, NULL);
     EXPECT_STR_EQ(g_picked_detail, "");
-    EXPECT_STR_EQ(g_picked_desc, "Clear the runtime override and use the environment, saved "
-                                 "configuration, or built-in default");
+    EXPECT_STR_EQ(g_picked_description, "Clear the runtime override and use the environment, saved "
+                                        "configuration, or built-in default");
     EXPECT_STR_EQ(config_source("markdown"), "default");
     free(out);
 
