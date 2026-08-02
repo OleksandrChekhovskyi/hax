@@ -34,96 +34,97 @@ void input_free(struct input *in)
     free(in);
 }
 
-int input_core_prompt_width(const char *s)
+int input_core_prompt_width(const char *prompt)
 {
-    int w = 0;
-    size_t i = 0, len = strlen(s);
-    while (i < len) {
-        unsigned char c = (unsigned char)s[i];
-        if (c == '\n')
+    int width = 0;
+    size_t len = strlen(prompt);
+
+    for (size_t offset = 0; offset < len;) {
+        unsigned char byte = (unsigned char)prompt[offset];
+        if (byte == '\n')
             break;
-        if (c == 0x1b && i + 1 < len && s[i + 1] == '[') {
-            i += 2;
-            while (i < len && (unsigned char)s[i] < 0x40)
-                i++;
-            if (i < len)
-                i++;
+        if (byte == 0x1b && offset + 1 < len && prompt[offset + 1] == '[') {
+            offset += 2;
+            while (offset < len && (unsigned char)prompt[offset] < 0x40)
+                offset++;
+            if (offset < len)
+                offset++;
             continue;
         }
+
         size_t consumed;
-        int cw = utf8_codepoint_cells(s, len, i, &consumed);
-        /* Substituted glyphs (controls, dangerous) render as 1 col;
-         * mirror that here so a stray non-printable in a prompt can't
-         * make the width go negative and corrupt continuation indent. */
-        if (cw < 0)
-            cw = 1;
-        w += cw;
-        i += consumed ? consumed : 1;
+        int glyph_width = utf8_codepoint_cells(prompt, len, offset, &consumed);
+        if (glyph_width < 0)
+            glyph_width = 1;
+        width += glyph_width;
+        offset += consumed ? consumed : 1;
     }
-    return w;
+    return width;
 }
 
 /* ---------------- buffer ops ---------------- */
 
-static void buf_grow(struct input *in, size_t need)
+static void ensure_buffer_capacity(struct input *in, size_t required)
 {
-    if (need <= in->cap)
+    if (required <= in->cap)
         return;
-    size_t cap = in->cap ? in->cap : 64;
-    while (cap < need)
-        cap *= 2;
-    in->buf = xrealloc(in->buf, cap);
-    in->cap = cap;
+
+    size_t capacity = in->cap ? in->cap : 64;
+    while (capacity < required)
+        capacity *= 2;
+    in->buf = xrealloc(in->buf, capacity);
+    in->cap = capacity;
 }
 
-void input_core_buf_set(struct input *in, const char *s)
+void input_core_set_buffer(struct input *in, const char *text)
 {
-    size_t n = s ? strlen(s) : 0;
-    buf_grow(in, n + 1);
-    if (n)
-        memcpy(in->buf, s, n);
-    in->buf[n] = '\0';
-    in->len = n;
-    in->cursor = n;
+    size_t len = text ? strlen(text) : 0;
+
+    ensure_buffer_capacity(in, len + 1);
+    if (len > 0)
+        memcpy(in->buf, text, len);
+    in->buf[len] = '\0';
+    in->len = len;
+    in->cursor = len;
 }
 
-void input_core_buf_insert(struct input *in, const char *bytes, size_t n)
+void input_core_insert(struct input *in, const char *bytes, size_t len)
 {
-    if (n == 0)
+    if (len == 0)
         return;
-    buf_grow(in, in->len + n + 1);
-    memmove(in->buf + in->cursor + n, in->buf + in->cursor, in->len - in->cursor);
-    memcpy(in->buf + in->cursor, bytes, n);
-    in->len += n;
-    in->cursor += n;
+    ensure_buffer_capacity(in, in->len + len + 1);
+    memmove(in->buf + in->cursor + len, in->buf + in->cursor, in->len - in->cursor);
+    memcpy(in->buf + in->cursor, bytes, len);
+    in->len += len;
+    in->cursor += len;
     in->buf[in->len] = '\0';
 }
 
-void input_core_paste_commit(struct input *in, const char *body, size_t n)
+void input_core_commit_paste(struct input *in, const char *body, size_t len)
 {
     if (in->paste_filter) {
-        char *repl = in->paste_filter(body, in->paste_filter_user);
-        if (repl) {
-            input_core_buf_insert(in, repl, strlen(repl));
-            free(repl);
+        char *replacement = in->paste_filter(body, in->paste_filter_user);
+        if (replacement) {
+            input_core_insert(in, replacement, strlen(replacement));
+            free(replacement);
             return;
         }
     }
-    input_core_buf_insert(in, body, n);
+    input_core_insert(in, body, len);
 }
 
 void input_core_replace_span(struct input *in, size_t start, size_t end, const char *text)
 {
     if (start > end || end > in->len)
         return;
-    size_t tn = text ? strlen(text) : 0;
-    size_t tail = in->len - end;
-    buf_grow(in, in->len - (end - start) + tn + 1);
-    memmove(in->buf + start + tn, in->buf + end, tail);
-    if (tn)
-        memcpy(in->buf + start, text, tn);
-    in->len = start + tn + tail;
-    in->cursor = start + tn;
+    size_t replacement_len = text ? strlen(text) : 0;
+    size_t tail_len = in->len - end;
+    ensure_buffer_capacity(in, in->len - (end - start) + replacement_len + 1);
+    memmove(in->buf + start + replacement_len, in->buf + end, tail_len);
+    if (replacement_len > 0)
+        memcpy(in->buf + start, text, replacement_len);
+    in->len = start + replacement_len + tail_len;
+    in->cursor = start + replacement_len;
     in->buf[in->len] = '\0';
 }
 
@@ -202,22 +203,8 @@ void input_core_kill_to_bol(struct input *in)
     buf_erase(in, b, in->cursor - b);
 }
 
-/* Two word-boundary flavors, matching readline:
- *   - whitespace scan: only ASCII whitespace breaks words. Used by
- *     Ctrl-W (`unix-word-rubout`) so "rm foo/bar" → one Ctrl-W deletes
- *     the whole path, the long-standing shell idiom.
- *   - alnum scan: any non-alnum ASCII byte breaks (so `/`, `.`, `-`,
- *     `_`... no wait, `_` is alnum-adjacent — readline treats only
- *     alnum as word chars, so `_` is a boundary too). Used by Meta-
- *     bound ops (M-b/M-f/M-d/M-DEL) and the modified-arrow CSI keys,
- *     matching `backward-word` / `forward-word` / `kill-word` /
- *     `backward-kill-word`.
- *
- * Both scans are byte-wise. UTF-8 continuation/leader bytes are all
- * >= 0x80; the alnum predicate explicitly treats those as word chars,
- * so multi-byte letters (é, ö, …) stay inside words instead of
- * splitting mid-codepoint. The whitespace predicate already handles
- * UTF-8 correctly because isspace returns 0 for any byte >= 0x80. */
+/* Ctrl-W uses whitespace boundaries; Meta word operations use readline's alphanumeric
+ * boundaries. Bytes >= 0x80 count as word bytes so neither scan splits a UTF-8 sequence. */
 static size_t scan_ws_left(const char *buf, size_t i)
 {
     while (i > 0 && isspace((unsigned char)buf[i - 1]))
@@ -280,23 +267,13 @@ void input_core_kill_word_fwd(struct input *in)
 
 /* ---------------- history ---------------- */
 
-/* Append `line` to history without touching any persistence layer.
- * Erases any prior exact-match occurrences first (zsh
- * HIST_IGNORE_ALL_DUPS / bash HISTCONTROL=erasedups semantics) so a
- * recalled entry bumps to the top instead of duplicating — the same
- * canned prompts get reused constantly in a coding-agent REPL.
- *
- * Fast path: if `line` is already the most-recent entry, the erasedups
- * would self-cancel (erase idx hist_n-1, then re-append the same
- * string). Skip outright — saves the on-disk wrapper an append too. */
 int input_core_history_add(struct input *in, const char *line)
 {
     if (!line || !*line)
         return 0;
     if (in->hist_n > 0 && strcmp(in->hist[in->hist_n - 1], line) == 0)
         return 0;
-    /* Erase prior exact matches. Walk back-to-front so indices stay
-     * valid as we remove. */
+    /* Remove back-to-front so each deletion preserves unvisited indices. */
     for (size_t i = in->hist_n; i > 0; i--) {
         if (strcmp(in->hist[i - 1], line) == 0) {
             free(in->hist[i - 1]);
@@ -317,10 +294,6 @@ int input_core_history_add(struct input *in, const char *line)
     return 1;
 }
 
-/* Scan history for `query` as a substring, from `start` stepping by
- * `dir` (-1 older, +1 newer). The `i >= 0 && i < hist_n` guard makes an
- * out-of-range `start` (e.g. match-1 when already at the oldest entry, or
- * match+1 at the newest) fall straight through to -1. */
 long input_core_history_search(const struct input *in, const char *query, long start, int dir)
 {
     if (!query || !*query || in->hist_n == 0 || (dir != 1 && dir != -1))
@@ -334,73 +307,57 @@ long input_core_history_search(const struct input *in, const char *query, long s
 
 /* ---------------- history persistence (encode/decode) ---------------- */
 
-/* Encode an entry for the on-disk one-line-per-record format: literal
- * backslash -> "\\", literal LF -> "\n". Caller frees. The result has
- * no trailing newline — the file writer adds one. */
-char *input_core_history_encode(const char *s)
+char *input_core_history_encode(const char *entry)
 {
-    if (!s)
+    if (!entry)
         return xstrdup("");
-    size_t n = strlen(s);
-    char *out = xmalloc(n * 2 + 1);
-    size_t j = 0;
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)s[i];
-        if (c == '\\') {
-            out[j++] = '\\';
-            out[j++] = '\\';
-        } else if (c == '\n') {
-            out[j++] = '\\';
-            out[j++] = 'n';
+
+    size_t len = strlen(entry);
+    char *encoded = xmalloc(len * 2 + 1);
+    size_t encoded_len = 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char byte = (unsigned char)entry[i];
+        if (byte == '\\') {
+            encoded[encoded_len++] = '\\';
+            encoded[encoded_len++] = '\\';
+        } else if (byte == '\n') {
+            encoded[encoded_len++] = '\\';
+            encoded[encoded_len++] = 'n';
         } else {
-            out[j++] = (char)c;
+            encoded[encoded_len++] = (char)byte;
         }
     }
-    out[j] = '\0';
-    return out;
+    encoded[encoded_len] = '\0';
+    return encoded;
 }
 
-/* Decode `n` bytes of an encoded entry. Recognizes "\\" -> '\\' and
- * "\n" -> LF. An unrecognized escape (or trailing backslash) is
- * preserved verbatim — forward-compatible with future escape additions
- * and resilient to a hand-edited file. Caller frees. */
-char *input_core_history_decode(const char *s, size_t n)
+char *input_core_history_decode(const char *encoded, size_t len)
 {
-    char *out = xmalloc(n + 1);
-    size_t j = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (s[i] == '\\' && i + 1 < n) {
-            char nx = s[i + 1];
-            if (nx == '\\') {
-                out[j++] = '\\';
+    char *entry = xmalloc(len + 1);
+    size_t entry_len = 0;
+
+    for (size_t i = 0; i < len; i++) {
+        if (encoded[i] == '\\' && i + 1 < len) {
+            char escaped = encoded[i + 1];
+            if (escaped == '\\') {
+                entry[entry_len++] = '\\';
                 i++;
                 continue;
             }
-            if (nx == 'n') {
-                out[j++] = '\n';
+            if (escaped == 'n') {
+                entry[entry_len++] = '\n';
                 i++;
                 continue;
             }
         }
-        out[j++] = s[i];
+        entry[entry_len++] = encoded[i];
     }
-    out[j] = '\0';
-    return out;
+    entry[entry_len] = '\0';
+    return entry;
 }
 
-/* History navigation convention:
- *
- * `hist_pos` ranges over [0, hist_n]. Values < hist_n point at a
- * recalled entry; the sentinel `hist_pos == hist_n` means "we're on
- * the user's current draft, not a history entry".
- *
- * On the first Up out of the draft, save the current buffer to
- * `draft`; subsequent Ups don't re-save (the user is browsing
- * history). On Down past the last entry, restore from `draft` and
- * free it. Edits made to a recalled entry are local to the buffer —
- * `hist[i]` strings are never mutated, so navigating away discards
- * those edits.
- */
+/* hist_pos == hist_n denotes the live draft. Entering history snapshots that draft;
+ * returning past the newest entry restores and releases it. */
 static void hist_save_draft(struct input *in)
 {
     free(in->draft);
@@ -410,10 +367,10 @@ static void hist_save_draft(struct input *in)
 static void hist_load(struct input *in, size_t pos)
 {
     if (pos < in->hist_n) {
-        input_core_buf_set(in, in->hist[pos]);
+        input_core_set_buffer(in, in->hist[pos]);
         in->hist_pos = pos;
     } else {
-        input_core_buf_set(in, in->draft ? in->draft : "");
+        input_core_set_buffer(in, in->draft ? in->draft : "");
         free(in->draft);
         in->draft = NULL;
         in->hist_pos = in->hist_n;
@@ -439,108 +396,73 @@ void input_core_history_next(struct input *in)
 
 /* ---------------- render walker ---------------- */
 
-/* One decoded glyph from the source buffer. For ASCII tabs and unsafe
- * bytes, `bytes` points at a static substitute (so the caller can write
- * it verbatim); for valid codepoints, `bytes` slices `buf` in place.
- * `consumed` is the number of source bytes this glyph covers. */
-struct walk_glyph {
+struct render_glyph {
     const char *bytes;
-    size_t n;
+    size_t len;
     int width;
-    size_t byte_index;
+    size_t offset;
     size_t consumed;
-    int is_space; /* ASCII ' ' — a candidate word-wrap boundary */
+    int is_space;
 };
 
-/* Substitute glyph for non-printables (C0/C1 controls, malformed UTF-8,
- * dangerous bidi/format codepoints). Same '?' the legacy emit_safe_span
- * used; substituting at the walker level means every rendering site —
- * editor paint, submitted-message paint, layout math — sees the same
- * cell count. */
-static const char SUBST_BYTES[1] = {'?'};
-
-/* Tab substitute: rendered as INPUT_CORE_TAB_WIDTH spaces. Stored as a
- * static buffer so callers can point at it without owning storage; the
- * walker only emits up to INPUT_CORE_TAB_WIDTH bytes from it. */
+static const char SUBSTITUTE_BYTES[1] = {'?'};
 static const char TAB_SPACES[INPUT_CORE_TAB_WIDTH] = {' ', ' ', ' ', ' '};
 
-static int decode_glyph(const char *buf, size_t len, size_t i, struct walk_glyph *g)
+static int decode_glyph(const char *buf, size_t len, size_t offset, struct render_glyph *glyph)
 {
-    if (i >= len)
+    if (offset >= len)
         return 0;
-    unsigned char c = (unsigned char)buf[i];
-    g->byte_index = i;
-    if (c == '\t') {
-        g->bytes = TAB_SPACES;
-        g->n = INPUT_CORE_TAB_WIDTH;
-        g->width = INPUT_CORE_TAB_WIDTH;
-        g->consumed = 1;
-        g->is_space = 0;
+
+    unsigned char byte = (unsigned char)buf[offset];
+    glyph->offset = offset;
+    if (byte == '\t') {
+        glyph->bytes = TAB_SPACES;
+        glyph->len = INPUT_CORE_TAB_WIDTH;
+        glyph->width = INPUT_CORE_TAB_WIDTH;
+        glyph->consumed = 1;
+        glyph->is_space = 0;
         return 1;
     }
-    if (c < 0x20 || c == 0x7f) {
-        /* C0 control or DEL: substitute one '?'. Matches the old
-         * emit_safe_span policy of refusing to write raw control bytes
-         * that some terminals interpret as escape sequences. */
-        g->bytes = SUBST_BYTES;
-        g->n = 1;
-        g->width = 1;
-        g->consumed = 1;
-        g->is_space = 0;
+    if (byte < 0x20 || byte == 0x7f) {
+        glyph->bytes = SUBSTITUTE_BYTES;
+        glyph->len = 1;
+        glyph->width = 1;
+        glyph->consumed = 1;
+        glyph->is_space = 0;
         return 1;
     }
+
     size_t consumed;
-    int w = utf8_codepoint_cells(buf, len, i, &consumed);
-    if (w < 0) {
-        /* Non-printable codepoint (C1 in UTF-8, format chars, malformed
-         * sequence). Substitute one '?' for the leader byte; the
-         * caller advances by 1 so each problem byte gets its own
-         * substitute. */
-        g->bytes = SUBST_BYTES;
-        g->n = 1;
-        g->width = 1;
-        g->consumed = consumed ? consumed : 1;
-        g->is_space = 0;
+    int width = utf8_codepoint_cells(buf, len, offset, &consumed);
+    if (width < 0) {
+        glyph->bytes = SUBSTITUTE_BYTES;
+        glyph->len = 1;
+        glyph->width = 1;
+        glyph->consumed = consumed ? consumed : 1;
+        glyph->is_space = 0;
         return 1;
     }
-    g->bytes = buf + i;
-    g->n = consumed;
-    g->width = w; /* may be 0 for combining marks */
-    g->consumed = consumed ? consumed : 1;
-    g->is_space = (consumed == 1 && c == ' ');
+    glyph->bytes = buf + offset;
+    glyph->len = consumed;
+    glyph->width = width;
+    glyph->consumed = consumed ? consumed : 1;
+    glyph->is_space = consumed == 1 && byte == ' ';
     return 1;
 }
 
-/* Walker state. Glyphs since the last committed wrap candidate (row
- * start or last emitted space) live in `wbuf` so a word that runs past
- * `cols` can be replayed onto the next row instead of breaking mid-
- * token. The buffer is fixed-size; an unbroken token longer than the
- * buffer (a pathological URL / hash) is committed as it grows, with
- * char-wrap behavior taking over.
- *
- * `cursor_resolved` is set when the walker sees a byte index that
- * lies inside the cursor's byte range; the cursor's row/col is taken
- * from the glyph's *final* emit position (after any wrap replay), not
- * its pre-buffer position.
- *
- * Wrap policy: post-emit column must stay strictly less than `cols`.
- * The terminal's last cell (col == cols-1) is the "phantom" position
- * — most terminals enter delayed-wrap state when the cursor advances
- * past it, and CUF (`\x1b[NC`) clamps to col cols-1, which would put
- * a cursor positioned at col=cols visually on top of the last glyph.
- * Triggering wrap one column earlier (post-emit >= cols ⇒ wrap)
- * keeps the cursor unambiguously in [0, cols-1] for every row. */
-#define WBUF_CAP 256
+/* Buffer the current word so overflow can replay it on the next row; overlong words
+ * degrade to character wrapping. Resolve the cursor only at a glyph's final position after any
+ * replay. Keep post-emit columns below `columns` to avoid terminals' delayed-wrap state in the
+ * last cell, where subsequent cursor positioning becomes ambiguous. */
+#define PENDING_GLYPHS_MAX 256
 
-struct walker {
-    int prompt_w;
-    int cont_indent;
-    int cols;
+struct render_state {
+    int continuation_column;
+    int columns;
     size_t cursor;
-    input_render_cb cb;
+    input_render_cb emit;
     void *user;
 
-    /* Position at which the next committed glyph would emit. */
     int row;
     int col;
 
@@ -548,11 +470,10 @@ struct walker {
     int cursor_col;
     int cursor_resolved;
 
-    /* Pending tail (current word). */
-    struct walk_glyph wbuf[WBUF_CAP];
-    size_t wbuf_n;
-    int wbuf_width;       /* sum of widths in wbuf */
-    int wbuf_after_space; /* wbuf may replay to next row at a word boundary */
+    struct render_glyph pending[PENDING_GLYPHS_MAX];
+    size_t pending_len;
+    int pending_width;
+    int pending_after_space;
 };
 
 static int cursor_in_range(size_t cursor, size_t start, size_t consumed)
@@ -560,254 +481,222 @@ static int cursor_in_range(size_t cursor, size_t start, size_t consumed)
     return cursor >= start && cursor < start + consumed;
 }
 
-static void emit_glyph(struct walker *w, const struct walk_glyph *g)
+static void emit_glyph(struct render_state *state, const struct render_glyph *glyph)
 {
-    if (!w->cursor_resolved && cursor_in_range(w->cursor, g->byte_index, g->consumed)) {
-        w->cursor_row = w->row;
-        w->cursor_col = w->col;
-        w->cursor_resolved = 1;
+    if (!state->cursor_resolved && cursor_in_range(state->cursor, glyph->offset, glyph->consumed)) {
+        state->cursor_row = state->row;
+        state->cursor_col = state->col;
+        state->cursor_resolved = 1;
     }
-    if (w->cb) {
-        struct input_render_event ev = {.kind = INPUT_RENDER_GLYPH,
-                                        .bytes = g->bytes,
-                                        .n = g->n,
-                                        .width = g->width,
-                                        .row = w->row,
-                                        .col = w->col};
-        w->cb(&ev, w->user);
+    if (state->emit) {
+        struct input_render_event event = {
+            .kind = INPUT_RENDER_GLYPH,
+            .bytes = glyph->bytes,
+            .n = glyph->len,
+            .width = glyph->width,
+            .row = state->row,
+            .col = state->col,
+        };
+        state->emit(&event, state->user);
     }
-    w->col += g->width;
+    state->col += glyph->width;
 }
 
-static void emit_row_break(struct walker *w)
+static void emit_row_break(struct render_state *state)
 {
-    w->row++;
-    w->col = w->cont_indent;
-    if (w->cb) {
-        struct input_render_event ev = {.kind = INPUT_RENDER_ROW_BREAK,
-                                        .bytes = NULL,
-                                        .n = 0,
-                                        .width = 0,
-                                        .row = w->row,
-                                        .col = w->col};
-        w->cb(&ev, w->user);
+    state->row++;
+    state->col = state->continuation_column;
+    if (state->emit) {
+        struct input_render_event event = {
+            .kind = INPUT_RENDER_ROW_BREAK,
+            .bytes = NULL,
+            .n = 0,
+            .width = 0,
+            .row = state->row,
+            .col = state->col,
+        };
+        state->emit(&event, state->user);
     }
 }
 
-static void wbuf_flush(struct walker *w)
+static void flush_pending(struct render_state *state)
 {
-    for (size_t i = 0; i < w->wbuf_n; i++)
-        emit_glyph(w, &w->wbuf[i]);
-    w->wbuf_n = 0;
-    w->wbuf_width = 0;
-    w->wbuf_after_space = 0;
+    for (size_t i = 0; i < state->pending_len; i++)
+        emit_glyph(state, &state->pending[i]);
+    state->pending_len = 0;
+    state->pending_width = 0;
+    state->pending_after_space = 0;
 }
 
-/* Move the contents of wbuf to a fresh row. Used when a glyph would
- * overflow and wbuf began immediately after an emitted space. After
- * replay, later overflow in the same over-long token must char-wrap
- * instead of replaying again, so wbuf_after_space is cleared. */
-static void wbuf_replay_on_new_row(struct walker *w)
+/* Clear the replay flag so later overflow in the same overlong token character-wraps. */
+static void replay_pending_on_new_row(struct render_state *state)
 {
-    emit_row_break(w);
-    /* Replay buffered glyphs at the new row's starting column. */
-    for (size_t i = 0; i < w->wbuf_n; i++)
-        emit_glyph(w, &w->wbuf[i]);
-    w->wbuf_n = 0;
-    w->wbuf_width = 0;
-    w->wbuf_after_space = 0;
+    emit_row_break(state);
+    for (size_t i = 0; i < state->pending_len; i++)
+        emit_glyph(state, &state->pending[i]);
+    state->pending_len = 0;
+    state->pending_width = 0;
+    state->pending_after_space = 0;
 }
 
-/* The byte index that follows the walker's most recently consumed
- * glyph (whether committed or buffered). Used so an end-of-buffer
- * cursor lands on the correct row/col when no glyph was emitted at
- * cursor's index (cursor == len). */
-static void resolve_cursor_at_end(struct walker *w, size_t len)
+static void resolve_cursor(struct render_state *state)
 {
-    if (w->cursor_resolved)
+    if (state->cursor_resolved)
         return;
-    if (w->cursor >= len) {
-        /* Cursor at end-of-buffer: it sits where the next glyph would
-         * land — i.e. after any pending wbuf flush. The wbuf flush is
-         * the caller's responsibility (input_core_render flushes
-         * before resolving). */
-        w->cursor_row = w->row;
-        w->cursor_col = w->col;
-        w->cursor_resolved = 1;
-        return;
-    }
-    /* Cursor mid-buffer but no glyph matched its range (e.g. cursor
-     * past the leader of a malformed sequence we substituted as one
-     * byte). Fall back to current emit position; matches the old
-     * compute_layout behavior. */
-    w->cursor_row = w->row;
-    w->cursor_col = w->col;
-    w->cursor_resolved = 1;
+
+    state->cursor_row = state->row;
+    state->cursor_col = state->col;
+    state->cursor_resolved = 1;
 }
 
-void input_core_render(const char *buf, size_t len, size_t cursor, int prompt_w,
-                       int cont_indent_col, int cols, input_render_cb cb, void *user,
+void input_core_render(const char *buf, size_t len, size_t cursor, int prompt_width,
+                       int continuation_column, int columns, input_render_cb emit, void *user,
                        struct input_layout *out)
 {
-    struct walker w = {.prompt_w = prompt_w,
-                       .cont_indent = cont_indent_col,
-                       .cols = cols,
-                       .cursor = cursor,
-                       .cb = cb,
-                       .user = user,
-                       .row = 0,
-                       .col = prompt_w};
+    struct render_state state = {
+        .continuation_column = continuation_column,
+        .columns = columns,
+        .cursor = cursor,
+        .emit = emit,
+        .user = user,
+        .row = 0,
+        .col = prompt_width,
+    };
 
-    size_t i = 0;
-    while (i < len) {
-        unsigned char c = (unsigned char)buf[i];
-        if (c == '\n') {
-            wbuf_flush(&w);
-            /* Cursor exactly on the '\n': it visually sits at the
-             * end of the current row (just after the trailing
-             * content), matching the legacy compute_layout's
-             * "cursor on \n stays at row, col after content"
-             * behavior. */
-            if (!w.cursor_resolved && w.cursor == i) {
-                w.cursor_row = w.row;
-                w.cursor_col = w.col;
-                w.cursor_resolved = 1;
+    size_t offset = 0;
+    while (offset < len) {
+        unsigned char byte = (unsigned char)buf[offset];
+        if (byte == '\n') {
+            flush_pending(&state);
+            /* A cursor on '\n' remains at the end of the current row. */
+            if (!state.cursor_resolved && state.cursor == offset) {
+                state.cursor_row = state.row;
+                state.cursor_col = state.col;
+                state.cursor_resolved = 1;
             }
-            emit_row_break(&w);
-            i++;
+            emit_row_break(&state);
+            offset++;
             continue;
         }
 
-        struct walk_glyph g;
-        if (!decode_glyph(buf, len, i, &g))
+        struct render_glyph glyph;
+        if (!decode_glyph(buf, len, offset, &glyph))
             break;
 
-        /* Combining marks (width 0) ride along on the previous glyph.
-         * Append to wbuf without any overflow check — they don't push
-         * the column. If wbuf is at capacity, flush it first so the
-         * mark emits at the correct visual position (immediately
-         * after its host glyph) and its cursor resolution uses the
-         * post-flush row/col; emitting the mark before the flush
-         * would attach it to whatever glyph last committed before
-         * the wbuf fill and put cursor reporting at the wrong column. */
-        if (g.width == 0) {
-            if (w.wbuf_n < WBUF_CAP) {
-                w.wbuf[w.wbuf_n++] = g;
+        /* Flush a full pending buffer before a combining mark so it remains attached to
+         * its host glyph and cursor resolution uses the post-flush position. */
+        if (glyph.width == 0) {
+            if (state.pending_len < PENDING_GLYPHS_MAX) {
+                state.pending[state.pending_len++] = glyph;
             } else {
-                wbuf_flush(&w);
-                emit_glyph(&w, &g);
+                flush_pending(&state);
+                emit_glyph(&state, &glyph);
             }
-            i += g.consumed;
+            offset += glyph.consumed;
             continue;
         }
 
-        if (g.is_space) {
-            /* Space: commit the trailing word to this row. Then,
-             * if the space itself overflows the row, drop it as
-             * the wrap point and break — leaves the new row clean
-             * of a leading space. Otherwise emit it normally so it
-             * separates this word from the next. */
-            int over = (w.cols > 0 && w.col + w.wbuf_width + g.width >= w.cols);
-            wbuf_flush(&w);
-            if (over && w.col > w.cont_indent) {
-                if (!w.cursor_resolved && cursor_in_range(w.cursor, g.byte_index, g.consumed)) {
-                    w.cursor_row = w.row;
-                    w.cursor_col = w.col;
-                    w.cursor_resolved = 1;
+        if (glyph.is_space) {
+            /* Drop an overflowing boundary space rather than leading the next row with it. */
+            int space_overflows = (state.columns > 0 &&
+                                   state.col + state.pending_width + glyph.width >= state.columns);
+            flush_pending(&state);
+            if (space_overflows && state.col > state.continuation_column) {
+                if (!state.cursor_resolved &&
+                    cursor_in_range(state.cursor, glyph.offset, glyph.consumed)) {
+                    state.cursor_row = state.row;
+                    state.cursor_col = state.col;
+                    state.cursor_resolved = 1;
                 }
-                emit_row_break(&w);
+                emit_row_break(&state);
             } else {
-                emit_glyph(&w, &g);
-                w.wbuf_after_space = 1;
+                emit_glyph(&state, &glyph);
+                state.pending_after_space = 1;
             }
-            i += g.consumed;
+            offset += glyph.consumed;
             continue;
         }
 
-        /* Non-space glyph. */
-        int prospective = w.col + w.wbuf_width + g.width;
-        if (w.cols > 0 && prospective >= w.cols) {
-            if (w.wbuf_n > 0 && w.wbuf_after_space && w.col > w.cont_indent) {
-                /* Buffer holds the trailing word after a real word
-                 * boundary; move it to a fresh row. `w.col >
-                 * w.cont_indent` guards an empty-row replay. */
-                wbuf_replay_on_new_row(&w);
+        int prospective_column = state.col + state.pending_width + glyph.width;
+        if (state.columns > 0 && prospective_column >= state.columns) {
+            if (state.pending_len > 0 && state.pending_after_space &&
+                state.col > state.continuation_column) {
+                /* Never replay onto another empty row. */
+                replay_pending_on_new_row(&state);
             } else {
-                /* No earlier word boundary on this row, or we're
-                 * already at row start with an over-long token in
-                 * the buffer. Flush the buffer to commit what fit,
-                 * then break before the current glyph. */
-                wbuf_flush(&w);
-                if (w.col > w.cont_indent)
-                    emit_row_break(&w);
+                flush_pending(&state);
+                if (state.col > state.continuation_column)
+                    emit_row_break(&state);
             }
         }
 
-        if (w.wbuf_n < WBUF_CAP) {
-            w.wbuf[w.wbuf_n++] = g;
-            w.wbuf_width += g.width;
+        if (state.pending_len < PENDING_GLYPHS_MAX) {
+            state.pending[state.pending_len++] = glyph;
+            state.pending_width += glyph.width;
         } else {
-            /* Token longer than wbuf budget — degrade to char-wrap.
-             * Flush, break if needed, then emit directly. */
-            wbuf_flush(&w);
-            if (w.cols > 0 && w.col + g.width >= w.cols && w.col > w.cont_indent)
-                emit_row_break(&w);
-            emit_glyph(&w, &g);
+            /* The fixed pending buffer bounds memory for unbroken tokens. */
+            flush_pending(&state);
+            if (state.columns > 0 && state.col + glyph.width >= state.columns &&
+                state.col > state.continuation_column)
+                emit_row_break(&state);
+            emit_glyph(&state, &glyph);
         }
-        i += g.consumed;
+        offset += glyph.consumed;
     }
 
-    /* Flush any pending tail. If it overflows, replay onto a new
-     * row first — same rule as mid-walk. */
-    if (w.wbuf_n > 0 && w.cols > 0 && w.col + w.wbuf_width >= w.cols && w.wbuf_after_space &&
-        w.col > w.cont_indent) {
-        wbuf_replay_on_new_row(&w);
+    if (state.pending_len > 0 && state.columns > 0 &&
+        state.col + state.pending_width >= state.columns && state.pending_after_space &&
+        state.col > state.continuation_column) {
+        replay_pending_on_new_row(&state);
     } else {
-        wbuf_flush(&w);
+        flush_pending(&state);
     }
 
-    resolve_cursor_at_end(&w, len);
+    resolve_cursor(&state);
 
     if (out) {
-        out->cursor_row = w.cursor_row;
-        out->cursor_col = w.cursor_col;
-        out->end_row = w.row;
-        out->end_col = w.col;
-        out->total_rows = w.row + 1;
+        out->cursor_row = state.cursor_row;
+        out->cursor_col = state.cursor_col;
+        out->end_row = state.row;
+        out->end_col = state.col;
+        out->total_rows = state.row + 1;
     }
 }
 
-void input_core_compute_layout(const char *buf, size_t len, size_t cursor, int prompt_w, int cols,
-                               struct input_layout *out)
+void input_core_compute_layout(const char *buf, size_t len, size_t cursor, int prompt_width,
+                               int columns, struct input_layout *out)
 {
-    input_core_render(buf, len, cursor, prompt_w, prompt_w, cols, NULL, NULL, out);
+    input_core_render(buf, len, cursor, prompt_width, prompt_width, columns, NULL, NULL, out);
 }
 
-/* Trampoline for input_core_render_window: passes through events whose
- * row lies in [lo, hi]. GLYPH events carry their own row; ROW_BREAK
- * events carry the destination row, so the break into `lo` passes and
- * the break out of `hi` (destination hi+1) is dropped. */
-struct row_window {
-    int lo, hi;
-    input_render_cb cb;
+struct render_window {
+    int first_row;
+    int last_row;
+    input_render_cb emit;
     void *user;
 };
 
-static void window_cb(const struct input_render_event *ev, void *user)
+static void emit_window_event(const struct input_render_event *event, void *user)
 {
-    struct row_window *w = user;
-    if (ev->row < w->lo || ev->row > w->hi)
+    struct render_window *window = user;
+
+    if (event->row < window->first_row || event->row > window->last_row)
         return;
-    w->cb(ev, w->user);
+    window->emit(event, window->user);
 }
 
-void input_core_render_window(const char *buf, size_t len, size_t cursor, int prompt_w,
-                              int cont_indent_col, int cols, int row_lo, int row_hi,
-                              input_render_cb cb, void *user, struct input_layout *out)
+void input_core_render_window(const char *buf, size_t len, size_t cursor, int prompt_width,
+                              int continuation_column, int columns, int first_row, int last_row,
+                              input_render_cb emit, void *user, struct input_layout *out)
 {
-    struct row_window w = {.lo = row_lo, .hi = row_hi, .cb = cb, .user = user};
-    input_core_render(buf, len, cursor, prompt_w, cont_indent_col, cols, cb ? window_cb : NULL,
-                      cb ? &w : NULL, out);
+    struct render_window window = {
+        .first_row = first_row,
+        .last_row = last_row,
+        .emit = emit,
+        .user = user,
+    };
+    input_core_render(buf, len, cursor, prompt_width, continuation_column, columns,
+                      emit ? emit_window_event : NULL, emit ? &window : NULL, out);
 }
 
 int input_core_window_top(int prev_top, int cursor_row, int total_rows, int rows)
@@ -831,31 +720,9 @@ int input_core_window_top(int prev_top, int cursor_row, int total_rows, int rows
 
 /* ---------------- escape-sequence decoder ---------------- */
 
-/* Read the body of a CSI / SS3 sequence into `seq`: bytes after the
- * leading "ESC [" or "ESC O" up to and including the final byte.
- * Returns the number of bytes captured, or -1 on EOF, overflow, or a
- * runaway non-terminating stream — caller aborts in all three cases.
- *
- * Final-byte detection accepts both the ECMA-48 standard range
- * (0x40-0x7E) and '$' (0x24). The latter is technically an
- * "intermediate byte" in ECMA-48, but rxvt uses it as a final for
- * Shift-modified tilde keys (e.g. Shift+Home = "ESC[7$"); since this
- * function only parses keyboard input, no legitimate keyboard
- * sequence puts '$' mid-payload, so the relaxed termination is safe.
- *
- * On overflow (sequence longer than `seq`) we keep reading and
- * discard the excess bytes, then return -1 once the final byte
- * arrives. Stopping at the first overflow byte would leave the rest
- * of the sequence — including the final — queued in stdin, and the
- * main keystroke loop would then insert those bytes as text.
- *
- * Two hard caps bound the work in pathological cases: the per-byte
- * timeout in the real reader (a stalled sequence can't wedge the
- * prompt past Ctrl-C, since ISIG is off in raw mode), and a total
- * read count limit (a peer that streams non-final bytes inside the
- * timeout window otherwise spins this loop indefinitely). Real
- * keyboard sequences are well under a dozen bytes, so the cap is
- * generous. */
+/* Capture through the final byte and return -1 on EOF, overflow, or the read cap. Continue
+ * after overflow so the unconsumed tail cannot leak into text input. rxvt uses '$' as a final for
+ * modified tilde keys even though ECMA-48 classifies it as an intermediate byte. */
 static int read_csi_seq(input_byte_reader read, void *user, char *seq, int cap)
 {
     const int MAX_READS = 64;
@@ -879,17 +746,9 @@ static int read_csi_seq(input_byte_reader read, void *user, char *seq, int cap)
     return -1;
 }
 
-/* Parse the xterm-style modifier parameter from a CSI/SS3 cursor-key
- * payload of the form "1;<mod><final>" (e.g. "1;5D" for Ctrl+Left).
- * Returns the raw modifier value (1 = no modifier, 2 = Shift, 3 = Alt,
- * 5 = Ctrl, ...; encoding is 1 + bitmask with bits Shift=1, Alt=2,
- * Ctrl=4, Meta=8). Returns 1 (no modifier) for any payload that
- * doesn't structurally match, including the unmodified short forms.
- *
- * Tolerates trailing parameters separated by additional semicolons
- * (kitty / xterm in modifyOtherKeys mode emit "1;5;2D" with a key-
- * event-type after the modifier). Only the modifier — the parameter
- * we care about — is parsed; the rest is ignored. */
+/* Parse xterm's "1;<modifier><final>" form, where the modifier is one plus a
+ * Shift/Alt/Ctrl/Meta bitmask. Ignore trailing parameters such as kitty's key-event type and
+ * return the unmodified value for malformed or short forms. */
 static int parse_xterm_mod(const char *seq, int n)
 {
     if (n < 4 || seq[0] != '1' || seq[1] != ';')
@@ -907,11 +766,7 @@ static int parse_xterm_mod(const char *seq, int n)
     return v ? v : 1;
 }
 
-/* True when an xterm modifier value implies word motion for arrow
- * keys: Alt, Ctrl, or Meta is part of the chord (bits 2|4|8 in mod-1).
- * Plain (mod=1) and Shift-only (mod=2) fall through to single-char
- * motion — Shift+arrow has no selection meaning in this editor, so
- * the least-surprising fallback is a normal arrow. */
+/* Shift alone remains character motion because the editor has no selection state. */
 static int xterm_mod_implies_word(int mod)
 {
     if (mod < 1)
@@ -919,9 +774,6 @@ static int xterm_mod_implies_word(int mod)
     return ((mod - 1) & 0xE) != 0;
 }
 
-/* Map a CSI/SS3 cursor-key final byte to an action. Letters outside
- * the cursor-key set (e.g. 'Z' for Shift-Tab, function-key finals)
- * fall through to NONE. */
 static enum input_action arrow_to_action(char final, int word)
 {
     switch (final) {
@@ -947,13 +799,8 @@ enum input_action input_core_decode_escape(input_byte_reader read, void *user)
     if (b < 0)
         return INPUT_ACTION_NONE; /* bare ESC */
 
-    /* iTerm2's "Esc+" mode for Option emits ESC ESC <CSI/SS3> for
-     * Alt-modified cursor keys (kLFT3 = "ESC ESC [ D" etc.). Strip
-     * leading ESCs and force word motion on the inner arrow. For
-     * bare-ESC + letter (b/f/d/...), `meta` is redundant since those
-     * bindings are already meta-defined; the flag is harmless there.
-     * The strip cap is paranoia against a peer flooding ESCs within
-     * the timeout window — real terminals send at most one extra. */
+    /* iTerm2's Esc+ mode prefixes Option cursor keys with another ESC. Bound stripping
+     * prevents a stream of ESC bytes from monopolizing the decoder. */
     int meta = 0;
     for (int strip = 0; b == 0x1b && strip < 4; strip++) {
         b = read(user);
@@ -971,10 +818,7 @@ enum input_action input_core_decode_escape(input_byte_reader read, void *user)
             return INPUT_ACTION_NONE;
 
         if (n == 1) {
-            /* Unmodified arrow / Home / End. rxvt encodes Shift+arrow
-             * here as lowercase a/b/c/d; without selection support
-             * the least-surprising fallback is plain single-char
-             * motion, so normalize the case and dispatch unmodified. */
+            /* rxvt lowercase CSI arrows denote Shift, which remains character motion. */
             char final = seq[0];
             if (final >= 'a' && final <= 'd')
                 final -= 'a' - 'A';
@@ -983,19 +827,9 @@ enum input_action input_core_decode_escape(input_byte_reader read, void *user)
         if (strcmp(seq, "200~") == 0)
             return INPUT_ACTION_PASTE_BEGIN;
 
-        /* Tilde-key family: Home/End/Delete/PageUp/PageDown, encoded as
-         * "<digit><final>" with optional modifier. xterm uses '~' and
-         * "<digit>;<mod>~" for modified; rxvt encodes the modifier in
-         * the final byte itself ('~' = none, '$' = Shift, '^' = Ctrl,
-         * '@' = Ctrl+Shift). Modifier doesn't change the action for
-         * the keys we care about, so the final byte is treated
-         * uniformly.
-         *
-         * The code prefix must be a single digit — multi-digit codes
-         * (function keys F5+: "15~", "17~", ...) deliberately fall
-         * through, otherwise their leading digit would alias to
-         * Home/End/Delete. Accept the unmodified short form ("3~")
-         * and the xterm modified form ("3;5~"). */
+        /* xterm and rxvt vary the final byte for modified tilde keys, but modifiers do not
+         * change these actions. Require a one-digit key code so function keys cannot alias
+         * Home, End, or Delete. */
         char final = seq[n - 1];
         if ((final == '~' || final == '^' || final == '$' || final == '@') &&
             (n == 2 || (n >= 4 && seq[1] == ';'))) {
@@ -1014,11 +848,7 @@ enum input_action input_core_decode_escape(input_byte_reader read, void *user)
                 return INPUT_ACTION_PAGE_DOWN;
             }
         }
-        /* Modified arrows / Home / End: "1;<mod><letter>". Modifier
-         * value is decoded; only Alt/Ctrl/Meta-flavored arrows take
-         * the word-motion path, while Shift-only and unmodified fall
-         * back to single-character motion. Home/End ignore the
-         * modifier. */
+        /* Alt, Ctrl, and Meta select word motion; Home and End ignore modifiers. */
         if (n >= 4 && seq[0] == '1' && seq[1] == ';') {
             int mod = parse_xterm_mod(seq, n);
             return arrow_to_action(seq[n - 1], xterm_mod_implies_word(mod) || meta);
@@ -1027,14 +857,8 @@ enum input_action input_core_decode_escape(input_byte_reader read, void *user)
     }
 
     if (b == 'O') {
-        /* SS3 cursor keys, used by some terminals in application-
-         * cursor mode. Three flavors:
-         *   - unmodified: "ESC O <A|B|C|D|H|F>"
-         *   - xterm modified: "ESC O 1;<mod><letter>"
-         *   - rxvt Ctrl+arrow: "ESC O <a|b|c|d>" (lowercase final)
-         * Reading to the final byte handles all three and drains any
-         * unrecognized SS3 payload (function keys F1-F4) cleanly so
-         * leftover bytes don't leak into the keystroke loop as text. */
+        /* SS3 supports plain, xterm-modified, and rxvt lowercase cursor keys. Reading
+         * through the final byte also drains unrecognized SS3 function keys. */
         char seq[32];
         int n = read_csi_seq(read, user, seq, sizeof(seq));
         if (n < 0)
@@ -1050,15 +874,11 @@ enum input_action input_core_decode_escape(input_byte_reader read, void *user)
         return arrow_to_action(final, word || meta);
     }
 
-    /* Alt+Enter (ESC + CR/LF) inserts a newline, for terminals that
-     * don't deliver Shift+Enter as a bare LF. */
+    /* Alt+Enter is the newline fallback for terminals without distinct Shift+Enter. */
     if (b == '\r' || b == '\n')
         return INPUT_ACTION_INSERT_NEWLINE;
 
-    /* Readline-style Meta bindings — also what macOS Terminal sends
-     * for Option+Left/Right when "Use Option as Meta key" is enabled,
-     * doubling as Alt+arrow handling on terminals that don't emit
-     * CSI modified arrows. */
+    /* macOS Terminal emits these Meta bindings when Option is configured as Meta. */
     switch (b) {
     case 'b':
     case 'B':

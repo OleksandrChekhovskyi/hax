@@ -5,29 +5,11 @@
 #include <stddef.h>
 #include <termios.h>
 
-/*
- * Pure (no-IO) line-editor state and operations, exposed for testing.
- * `input.c` owns the tty/IO layer and drives these ops in response to
- * decoded keypresses; tests can drive them directly without a tty.
- *
- * `struct input` is the shared state between the two layers — its tty
- * fields (saved_termios, raw_active) are touched only by input.c and
- * stay zero / unused in headless test contexts.
- */
+/* Shared editor state and terminal-independent operations. */
 
-/* A modal Tab completer — see input_set_modal_completer in input.h.
- * Split in two phases because the editor must know whether Tab
- * triggers *before* it mutates the screen (erase + raw-mode drop):
- *
- *   match — pure, no I/O. Given the buffer state, decide whether Tab
- *     completes here and which span [start, end) the result replaces.
- *     Trigger policy (what a completable token looks like) lives
- *     entirely in the implementation, not in the editor.
- *   pick — modal. Runs with the edit area erased and the terminal in
- *     cooked mode; owns the tty for the duration (fzf, a picker, ...).
- *     Receives the matched span's text and returns the malloc'd
- *     replacement, or NULL to leave the buffer untouched.
- */
+/* `match` performs no I/O and returns the replacement span [start, end).
+ * `pick` runs in cooked mode with the edit area erased and owns the terminal until it returns.
+ * It returns a malloc'd replacement, or NULL to leave the buffer unchanged. */
 struct input_modal_completer {
     int (*match)(const char *buf, size_t len, size_t cursor, size_t *start, size_t *end,
                  void *user);
@@ -51,86 +33,49 @@ struct input {
     size_t hist_pos;
     char *draft; /* saved buffer at first Up; restored on Down past end */
 
-    /* paint state — screen-relative offsets within the painted edit
-     * area. When the paint is clipped to a row window (buffer taller
-     * than the viewport), these describe the on-screen window, not the
-     * full buffer, so relative cursor motion stays within reach. */
-    int last_cursor_row;
-    int last_rows;
-    int last_clipped;  /* previous paint was clipped to a row window */
-    int win_top;       /* first content row painted by the previous clipped paint */
-    int top_ind_cells; /* cell width of that paint's top indicator (0 = blank) */
+    /* Screen-relative state for repainting the visible edit area. */
+    int painted_cursor_row;
+    int painted_rows;
+    int previous_paint_clipped;
+    int window_top;
+    int top_indicator_width;
 
-    /* When set, the live paint wraps continuation rows to column 0 rather
-     * than aligning them under the prompt (the usual cont_indent =
-     * prompt_w). Used by the Ctrl-R search prompt, whose wide
-     * "reverse-search · query → " prefix would otherwise shove every
-     * wrapped row of a long match far to the right. input.c-only. */
-    int wrap_cont_col0;
+    int continuation_at_column_zero;
+    const char *prompt; /* borrowed for the duration of input_readline */
+    int display_columns;
+    int terminal_rows; /* 0 disables viewport clipping */
 
-    /* per-call render cache */
-    const char *prompt;
-    /* Wrap budget for one row of the edit area, sampled from the configured
-     * display_width(), not necessarily the raw terminal width. Refreshed at
-     * input_readline entry, on resize, and after $EDITOR / pager handoffs that
-     * might land us in a different geometry. */
-    int term_cols;
-    /* Viewport height in rows (ws_row), refreshed alongside term_cols.
-     * 0 = unknown; row-window clipping is then disabled. */
-    int term_rows;
-
-    /* tty (input.c only) */
+    /* Terminal state */
     struct termios saved_termios;
     int raw_active;
 
-    /* on-disk history persistence (input.c only). NULL = disabled. Set
-     * by input_history_open; once set, input_history_add additionally
-     * appends each accepted entry to this file. */
-    char *persist_path;
+    char *persist_path; /* owned; NULL disables persistence */
 
-    /* Modal control-key bindings (input.c only) — see
-     * input_bind_modal_key in input.h. Only consulted for control bytes
-     * the editor doesn't handle itself, so what a key *means* stays with
-     * the application. Unused slots have fn == NULL. */
+    /* Built-in editing keys take precedence; fn == NULL marks an unused slot. */
     struct input_modal_key {
         unsigned char key;
         void (*fn)(void *user);
         void *user;
     } modal_keys[INPUT_MODAL_KEYS_MAX];
 
-    /* Modal Tab completer (input.c only) — caller-owned, must outlive
-     * the editor (typically a const static). NULL = Tab always inserts
-     * a literal tab. */
+    /* Borrowed; NULL makes Tab insert a literal tab. */
     const struct input_modal_completer *completer;
 
-    /* Ctrl-V paste hook (input.c only). Returns malloc'd text to insert
-     * at the cursor (the editor frees it) or NULL to insert nothing.
-     * Also probed on an empty bracketed paste — the tell for "clipboard
-     * holds an image, not text" (macOS Cmd+V sends exactly that). NULL =
-     * Ctrl-V is a no-op. */
-    char *(*paste_cb)(void *user);
-    void *paste_user;
+    /* Returns malloc'd insertion text. Empty bracketed pastes also invoke this hook. */
+    char *(*paste_hook)(void *user);
+    void *paste_hook_user;
 
-    /* Bracketed-paste body filter — see input_set_paste_filter in
-     * input.h. Applied by input_core_paste_commit. */
+    /* Returns a malloc'd replacement, or NULL to preserve the paste body. */
     char *(*paste_filter)(const char *text, void *user);
     void *paste_filter_user;
 
-    /* When set, Enter on an empty buffer submits the empty string
-     * instead of being a no-op (input.c only). The REPL enables it
-     * while a paused turn is resumable, where an empty send means
-     * "continue". */
+    /* Enter on an empty buffer submits when set. */
     int empty_submit;
 
-    /* The last input_readline() call ended with Ctrl-C (input.c only).
-     * Both cancellation and an empty submit return "", but they must
-     * not act alike: while a paused turn is resumable an empty submit
-     * means "continue", whereas Ctrl-C discards the typed line and
-     * must never launch anything. */
+    /* Distinguishes Ctrl-C from an empty submission; both return "". */
     int last_cancelled;
 
-    /* Owned one-shot seed for the next input_readline (input.c only). */
-    char *preseed;
+    char *preseed; /* owned; consumed by the next input_readline */
 };
 
 /* Result of input_core_compute_layout. All fields are 0-indexed offsets
@@ -143,15 +88,12 @@ struct input_layout {
 };
 
 /* ---- buffer ---- */
-void input_core_buf_set(struct input *in, const char *s);
-void input_core_buf_insert(struct input *in, const char *bytes, size_t n);
+void input_core_set_buffer(struct input *in, const char *text);
+void input_core_insert(struct input *in, const char *bytes, size_t len);
 
-/* Insert a completed paste body at the cursor, giving the registered
- * paste filter first refusal: a non-NULL filter result is inserted (and
- * freed) in place of the body, NULL inserts the body verbatim. `body`
- * must be NUL-terminated with n == strlen(body) — read_paste guarantees
- * that (NULs are substituted during the body read). */
-void input_core_paste_commit(struct input *in, const char *body, size_t n);
+/* `body` must be NUL-terminated with len == strlen(body). Insert and free a non-NULL
+ * filter result; insert `body` verbatim when the filter returns NULL. */
+void input_core_commit_paste(struct input *in, const char *body, size_t len);
 
 /* Replace buf[start..end) with `text` (NULL = delete the span), leaving
  * the cursor right after the inserted text. No-op when the span is out
@@ -177,86 +119,43 @@ void input_core_kill_word_fwd(struct input *in);
 void input_core_history_prev(struct input *in);
 void input_core_history_next(struct input *in);
 
-/* Incremental history search (Ctrl-R / Ctrl-S). Scan history for the
- * first entry containing `query` as a substring, beginning at index
- * `start` and stepping by `dir` — -1 toward older entries (reverse
- * search), +1 toward newer (forward search). Returns the matching index,
- * or -1 if none is found (also -1 for an empty/NULL query, an out-of-range
- * `start`, or an empty history). Match is a plain case-sensitive substring
- * test, mirroring readline's default. The IO layer in input.c drives this
- * from its Ctrl-R sub-loop; exposing it here keeps the scan testable
- * without a tty. */
+/* Return the first case-sensitive substring match from `start`, stepping by `dir` (-1
+ * older, +1 newer). Return -1 for no match, invalid direction, empty query, or invalid start. */
 long input_core_history_search(const struct input *in, const char *query, long start, int dir);
 
-/* In-memory history append with erasedups semantics: any prior exact
- * match is removed first, so a recalled entry bumps to the top instead
- * of duplicating. No-op for NULL/empty input or for an exact repeat of
- * the current most-recent entry (the erasedups would be a self-cancel
- * anyway, and skipping spares an on-disk record).
- *
- * Returns 1 if the entry actually changed history, 0 if it was skipped.
- * The IO-layer wrapper in input.c (`input_history_add`) uses the return
- * value to decide whether to append to the on-disk file. */
+/* Add a non-empty entry after removing prior exact matches. Return 1 when history changes;
+ * return 0 for invalid input or a repeat of the newest entry. */
 int input_core_history_add(struct input *in, const char *line);
 
-/* Pure encode/decode for the on-disk one-line-per-record format. Encode
- * maps literal backslash -> "\\" and literal LF -> "\n"; decode reverses
- * those, leaving unknown escapes verbatim for forward compatibility.
- * Both return malloc'd strings the caller frees. */
-char *input_core_history_encode(const char *s);
-char *input_core_history_decode(const char *s, size_t n);
+/* Encode backslash as "\\" and LF as "\n"; decode reverses both and preserves unknown
+ * escapes. Both return malloc'd strings. */
+char *input_core_history_encode(const char *entry);
+char *input_core_history_decode(const char *encoded, size_t len);
 
-/* In-memory history cap. Older entries are evicted past this. The IO
- * layer in input.c uses it as the basis for its on-disk bloat threshold,
- * so it lives in the header rather than as duplicated constants. */
+/* Older entries are evicted past this cap. */
 #define INPUT_CORE_HISTORY_MAX 1000
 
 /* ---- layout / utf-8 ---- */
 
-/* Display columns of `s` up to its first '\n' or end, treating CSI
- * sequences (\x1b[...<final>) as zero columns. Used to compute the
- * prompt's painted width. */
-int input_core_prompt_width(const char *s);
+/* Display columns of `prompt` up to its first '\n' or end, treating CSI
+ * sequences (\x1b[...<final>) as zero columns. */
+int input_core_prompt_width(const char *prompt);
 
-/* Walk the buffer once, computing where the cursor lands on screen and
- * where the painted content ends. Continuation rows (after '\n' or a
- * soft wrap) land at column `prompt_w` so they align with the first
- * line's content. Soft wrap is word-aware: a row break is placed at
- * the latest preceding ASCII space when the next glyph would overflow
- * `cols`; if no space is on the current row, the break falls mid-token
- * (char-wrap fallback). Tabs expand to INPUT_CORE_TAB_WIDTH spaces and
- * unsafe bytes substitute to one cell, identical to render output. */
-void input_core_compute_layout(const char *buf, size_t len, size_t cursor, int prompt_w, int cols,
-                               struct input_layout *out);
+/* Compute cursor and end positions using the renderer's word wrapping, tab expansion, and
+ * unsafe-byte substitution. Continuation rows start at `prompt_width`. */
+void input_core_compute_layout(const char *buf, size_t len, size_t cursor, int prompt_width,
+                               int columns, struct input_layout *out);
 
-/* --- shared render walker ---
- *
- * Pure walk over a buffer that emits per-glyph + per-row-break events
- * in visual order. Both the live editor's paint() and the commit-time
- * submitted-message renderer drive this, so cursor-layout math and
- * byte emission can't drift. input_core_compute_layout is a thin
- * wrapper that runs the walker with a NULL callback.
- *
- * Word-wrap is built in: glyphs since the last ASCII space are
- * buffered, so on overflow the trailing word can be replayed onto the
- * next row instead of breaking mid-token. A token longer than the row
- * budget falls back to a mid-token break (the terminal's own wrap as a
- * last resort isn't relied on — the walker emits its own ROW_BREAK).
- *
- * `prompt_w` is the column on row 0 where the first glyph lands.
- * `cont_indent_col` is the column where continuation rows (after '\n'
- * or a soft break) start; typically equals prompt_w. `cols` is the
- * per-row cell budget — pass display_width() in interactive contexts
- * (terminal width capped to a readable cell count) or 0 to disable
- * wrap entirely (content flows through verbatim, useful for non-tty
- * contexts and tests). */
-enum {
-    INPUT_RENDER_GLYPH,     /* one visible glyph to emit */
-    INPUT_RENDER_ROW_BREAK, /* go to a new row, indent to `col` */
+/* Emit glyph and row-break events in visual order while computing layout. Word wrapping
+ * prefers the last ASCII space and falls back to a mid-token break. `prompt_width` positions the
+ * first row, `continuation_column` positions later rows, and `columns == 0` disables wrapping. */
+enum input_render_kind {
+    INPUT_RENDER_GLYPH,
+    INPUT_RENDER_ROW_BREAK,
 };
 
 struct input_render_event {
-    int kind;          /* INPUT_RENDER_GLYPH or INPUT_RENDER_ROW_BREAK */
+    enum input_render_kind kind;
     const char *bytes; /* GLYPH: bytes to write (may point at a static substitute) */
     size_t n;          /* GLYPH: byte length */
     int width;         /* GLYPH: cell width */
@@ -266,42 +165,24 @@ struct input_render_event {
 
 typedef void (*input_render_cb)(const struct input_render_event *ev, void *user);
 
-void input_core_render(const char *buf, size_t len, size_t cursor, int prompt_w,
-                       int cont_indent_col, int cols, input_render_cb cb, void *user,
+void input_core_render(const char *buf, size_t len, size_t cursor, int prompt_width,
+                       int continuation_column, int columns, input_render_cb emit, void *user,
                        struct input_layout *out);
 
-/* Row-windowed variant of input_core_render: forwards only the events
- * belonging to rows [row_lo, row_hi] — glyphs on those rows, and
- * ROW_BREAKs whose destination row is in range. The break *into*
- * row_lo is included so a caller whose window starts on a continuation
- * row still learns its indent column. Layout out-params describe the
- * full, unclipped walk. */
-void input_core_render_window(const char *buf, size_t len, size_t cursor, int prompt_w,
-                              int cont_indent_col, int cols, int row_lo, int row_hi,
-                              input_render_cb cb, void *user, struct input_layout *out);
+/* Forward events for rows [first_row, last_row], including the break into first_row.
+ * Layout output still describes the full buffer. */
+void input_core_render_window(const char *buf, size_t len, size_t cursor, int prompt_width,
+                              int continuation_column, int columns, int first_row, int last_row,
+                              input_render_cb emit, void *user, struct input_layout *out);
 
-/* Sliding-window scroll for a viewport of `rows` screen rows over
- * `total_rows` content rows. Returns the window's new top row: keeps
- * `prev_top` when the cursor row is already visible (sticky, minimal
- * scrolling), otherwise slides just enough to bring it back in view,
- * clamped to the content. Returns 0 when everything fits. */
+/* Keep `prev_top` while the cursor is visible; otherwise move the window minimally and
+ * clamp it to the content. */
 int input_core_window_top(int prev_top, int cursor_row, int total_rows, int rows);
 
-/* Spaces per tab. Layout and rendering both expand a tab to exactly
- * this many columns regardless of the current column — soft-tab style,
- * so each tab in the buffer advances the cursor by a consistent amount
- * (true tab-stop snapping makes the first tab after a prompt feel
- * short). We own both ends so the value is a free parameter. */
+/* Tabs use a fixed width rather than terminal tab stops. */
 #define INPUT_CORE_TAB_WIDTH 4
 
-/* ---- escape-sequence decoder ----
- *
- * The decoder is the pure (no-IO) heart of the line editor's terminal
- * input handling: it recognizes the various CSI / SS3 / rxvt / iTerm2
- * encodings emitted by real terminals and returns an action enum the
- * IO layer maps onto buffer mutations. Splitting it out from input.c
- * means we can exercise every encoding from unit tests by feeding a
- * byte array, without spinning up a pty. */
+/* ---- terminal-independent escape-sequence decoder ---- */
 
 enum input_action {
     INPUT_ACTION_NONE = 0, /* unknown / abandoned (timeout, overflow) */
@@ -319,21 +200,14 @@ enum input_action {
     INPUT_ACTION_KILL_WORD_FWD,
     INPUT_ACTION_KILL_WORD_BACK_ALNUM,
     INPUT_ACTION_INSERT_NEWLINE,
-    INPUT_ACTION_PASTE_BEGIN, /* "ESC [ 2 0 0 ~" — caller reads body */
+    INPUT_ACTION_PASTE_BEGIN, /* body follows in the byte stream */
 };
 
-/* Byte-source callback: returns 0..255 on success or -1 on EOF /
- * timeout / cancel. The decoder calls this once per byte it needs;
- * tests pass a byte-array reader, the real path passes a poll-backed
- * adapter. */
+/* Return 0..255, or -1 when no byte is available. */
 typedef int (*input_byte_reader)(void *user);
 
-/* Decode the bytes following an ESC byte (the leading ESC has already
- * been consumed by the caller). Reads as many bytes as the encoding
- * requires via `read`, internally bounded against runaway streams
- * (read cap, fixed seq buffer, ESC-strip cap). Returns
- * INPUT_ACTION_NONE for unknown payloads, partial sequences, or
- * abandoned reads. */
+/* Decode bytes following an already-consumed ESC. Reads are bounded; unknown, partial, or
+ * abandoned sequences return INPUT_ACTION_NONE. */
 enum input_action input_core_decode_escape(input_byte_reader read, void *user);
 
 #endif /* HAX_INPUT_CORE_H */

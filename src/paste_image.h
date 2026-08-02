@@ -6,7 +6,7 @@
 
 /*
  * Ctrl-V paste policy for the REPL prompt, registered with the editor
- * via input_set_paste_cb. A clipboard image is persisted to a tracked
+ * via input_set_paste_hook. A clipboard image is persisted to a tracked
  * temp file (system/tempfiles.h) and handed back as a
  * "[pasted image: <path>] " marker — the model fetches the pixels with
  * the `read` tool, which owns validation, size budgets, and

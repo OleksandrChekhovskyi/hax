@@ -34,10 +34,15 @@
 #define ANSI_BRIGHT_MAGENTA "\x1b[95m"
 #define ANSI_FG_DEFAULT     "\x1b[39m"
 
-#define ANSI_ERASE_LINE "\x1b[K"
+#define ANSI_ERASE_LINE   "\x1b[K"
+#define ANSI_ERASE_SCREEN "\x1b[2J"
+#define ANSI_CURSOR_HOME  "\x1b[H"
 
 /* Erase from the cursor to the end of the screen (ED 0). */
 #define ANSI_ERASE_BELOW "\x1b[J"
+
+#define ANSI_BRACKETED_PASTE_ENABLE  "\x1b[?2004h"
+#define ANSI_BRACKETED_PASTE_DISABLE "\x1b[?2004l"
 
 /* DEC private mode 2026 — synchronized output. Between BEGIN and END the
  * terminal buffers everything we write and presents it as one atomic

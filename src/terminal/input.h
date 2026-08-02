@@ -5,144 +5,58 @@
 #include <stddef.h> /* size_t */
 #include <stdio.h>  /* FILE */
 
-/*
- * Multi-line line editor with in-memory history.
- *
- * Replacement for libedit/readline tailored to a coding-agent REPL:
- *   - Multi-line buffer; redraws across rows on each edit.
- *   - Plain Enter (\r) submits; Shift+Enter (\n) inserts a newline.
- *     Enter on an empty buffer is a no-op (won't submit empty input).
- *     Assumes the terminal sends LF for Shift+Enter — most modern
- *     terminals can be configured this way (iTerm2, kitty, ghostty,
- *     foot, ...).
- *   - Up/Down recall previous/next history; multi-line entries redraw
- *     correctly. Edits to a recalled entry are kept locally; the
- *     in-progress draft is preserved while navigating and restored on
- *     Down past the last entry.
- *   - Ctrl-R starts an incremental reverse history search (readline-style
- *     behavior, freshened presentation): the prompt becomes
- *     "reverse-search · query → match" and the buffer tracks the most recent
- *     matching entry as you type. Ctrl-R/Ctrl-S step to older/newer matches,
- *     Backspace shortens the query, Enter accepts and submits, ESC accepts
- *     and keeps editing, Ctrl-G/Ctrl-C abort.
- *   - Ctrl-G opens $EDITOR with the current buffer; on exit the edited
- *     content replaces the buffer. The user keeps editing in the REPL
- *     (no auto-submit).
- *   - Control keys the editor doesn't use itself can be bound by the
- *     caller to modal handlers (see input_bind_modal_key) — typically
- *     "render a view and pipe it through $PAGER". The buffer is
- *     preserved. hax binds Ctrl-O (conversation history) and Ctrl-T
- *     (model-facing transcript) this way.
- *   - Tab consults a caller-registered modal completer (see
- *     input_set_modal_completer): when its match phase reports a
- *     completable span, its pick phase — typically an interactive file
- *     picker — takes over the terminal and the result replaces the
- *     span. Otherwise Tab inserts a literal tab.
- *   - Standard motions: arrows, Home/End, Ctrl-A/E/B/F, backspace,
- *     Delete, Ctrl-H/K/U/W, Ctrl-L (clear screen + redraw).
- *   - Bracketed paste is enabled; pasted blocks (incl. newlines) insert
- *     verbatim, unless a caller-registered filter rewrites the body
- *     first (see input_set_paste_filter) — typically "file:// URI list
- *     from a file-manager copy or drag-and-drop → plain paths".
- *   - Ctrl-V invokes a caller-supplied paste hook (see
- *     input_set_paste_cb) — typically "clipboard image to temp file +
- *     marker, else clipboard text". An *empty* bracketed paste probes
- *     the same hook: that's what macOS terminals send for Cmd+V when
- *     the clipboard holds an image rather than text.
- *   - Ctrl-D on an empty buffer returns NULL (EOF). Ctrl-C cancels the
- *     current line, returning an empty string. Ctrl-Z suspends the
- *     process (job control); editing resumes on `fg`.
- *
- * On a non-tty stdin/stdout, falls back to fgets-style canonical reads
- * (one line per call, no editing) so piped input still works.
- */
+/* Multi-line terminal editor with history, completion, and modal callback hooks.
+ * Non-tty input uses canonical one-line reads without prompts or editing. */
 
 struct input;
 
 struct input *input_new(void);
 void input_free(struct input *in);
 
-/* Read one message. Returns malloc'd string (caller frees), NULL on EOF
- * (Ctrl-D at empty prompt or non-tty stdin closed). Returns an empty
- * string on Ctrl-C cancellation — the agent loop discards it and re-
- * prompts. The returned string may contain embedded '\n'. */
+/* Return a malloc'd message, which may contain '\n'; return NULL on EOF and "" on Ctrl-C. */
 char *input_readline(struct input *in, const char *prompt);
 
-/* Append `line` to history. Erasedups semantics: a prior exact match
- * (anywhere in history, not just the most recent) is removed first, so
- * a recalled entry bumps to the top instead of duplicating. No-op for
- * NULL/empty input. When persistence is open (see input_history_open),
- * the entry is also appended to the on-disk file. */
+/* Add a non-empty line with erasedups semantics. When persistence is open, append it to
+ * disk as well. */
 void input_history_add(struct input *in, const char *line);
 
-/* Like input_history_add, but in-memory only — never touches the on-disk
- * file. For ephemeral, session-scoped lines (e.g. slash commands) that are
- * worth recalling with Up-arrow now but pointless to replay in a future,
- * unrelated session. */
+/* Add a non-empty line to in-memory history without writing it to disk. */
 void input_history_add_session(struct input *in, const char *line);
 
-/* Enable on-disk history persistence at `path`:
- *   - Loads existing entries (decoded one-line-per-record) into memory,
- *     so Up-arrow recalls them across invocations.
- *   - Stores `path` on `in`; subsequent input_history_add calls append
- *     each accepted entry to the file.
- *   - Creates parent directories as needed; silently no-ops on any I/O
- *     failure (missing $HOME, unwritable dir, etc) — losing history is
- *     never worth crashing the REPL.
- *   - If the on-disk file has grown well past the in-memory cap, the
- *     in-memory state (already capped) is rewritten back atomically. */
+/* Load history from `path` and append later input_history_add entries there. Create parent
+ * directories as needed and ignore I/O failures. Oversized files are atomically compacted to the
+ * retained in-memory entries. */
 void input_history_open(struct input *in, const char *path);
 
-/* Load `path` for recall only: same in-memory result as input_history_open,
- * but the file is never written — no persist path is stored (so
- * input_history_add stays in-memory, like input_history_add_session), no
- * parent directory is created, and the bloat rewrite is skipped. For runs
- * that must not add to what the user has typed before, while still offering
- * it back: recall is a read, and suppressing it was never the point. */
+/* Load `path` for recall without creating, rewriting, or appending to the file.
+ * Subsequent input_history_add calls remain in-memory only. */
 void input_history_load(struct input *in, const char *path);
 
 /* Control-byte value for Ctrl-<c>, for naming a binding at the call site
  * (INPUT_KEY_CTRL('O') rather than 0x0f). */
 #define INPUT_KEY_CTRL(c) ((unsigned char)((c) & 0x1f))
 
-/* Bind a control key to a modal handler. While the prompt is active, the
- * key drops the editor out of raw mode, calls `fn(user)`, then re-enters
- * raw mode and repaints. `fn` owns the terminal for the duration — the
- * typical implementation popens a pager and pipes a rendered view to it.
- * What the key *means* stays with the caller: the editor knows only that
- * something modal happens here.
- *
- * Editing keys win by construction — only bytes the editor doesn't handle
- * itself reach these bindings — so an application can't shadow Ctrl-C or
- * a readline motion by binding over it. Rebinding a key replaces it, and
- * a NULL `fn` clears it. Returns 0, or -1 when `key` isn't a control byte
- * (>= 0x20) or all INPUT_MODAL_KEYS_MAX slots are taken. */
+/* Bind a control byte to a cooked-mode callback that owns the terminal until it returns.
+ * Built-in editing keys take precedence. Rebinding replaces the callback and NULL clears it.
+ * Return -1 for printable keys or when all slots are occupied. */
 int input_bind_modal_key(struct input *in, unsigned char key, void (*fn)(void *user), void *user);
 
-/* Register a modal Tab completer (full contract on the struct in
- * input_core.h: pure `match` decides whether Tab completes and which
- * span the result replaces; modal `pick` owns the terminal and returns
- * the replacement). The editor stores the pointer, so `mc` must outlive
- * the editor — typically a const static exported by the implementation
- * (see file_mention_completer). NULL unregisters; Tab then always
- * inserts a literal tab. */
+/* Register a modal Tab completer. The editor borrows `completer`, which must outlive it.
+ * NULL unregisters the completer and makes Tab insert a literal tab. */
 struct input_modal_completer;
-void input_set_modal_completer(struct input *in, const struct input_modal_completer *mc);
+void input_set_modal_completer(struct input *in, const struct input_modal_completer *completer);
 
-/* Register the Ctrl-V paste hook. While the prompt is active, Ctrl-V
- * (or an empty bracketed paste — see header comment) calls `fn(user)`
- * and inserts the returned malloc'd string at the cursor, freeing it.
+/* Register the Ctrl-V paste hook. Ctrl-V or an empty bracketed paste calls
+ * `fn(user)` and inserts the returned malloc'd string at the cursor, freeing it.
  * NULL return inserts nothing; NULL `fn` disables the binding. The hook
  * must not touch the tty — the editor stays in raw mode around the
  * call. */
-void input_set_paste_cb(struct input *in, char *(*fn)(void *user), void *user);
+void input_set_paste_hook(struct input *in, char *(*fn)(void *user), void *user);
 
-/* Register the bracketed-paste body filter. `fn` receives each
- * completed non-empty paste body (NUL-terminated; CR/CRLF already
- * normalized to LF, NULs substituted) and returns a malloc'd
- * replacement to insert instead (the editor frees it), or NULL to
- * insert the body verbatim. Same raw-mode constraint as the Ctrl-V
- * hook. NULL `fn` disables filtering. */
+/* Register the bracketed-paste body filter. `fn` receives each non-empty,
+ * NUL-terminated body after CR/CRLF normalization and NUL-byte replacement. It returns a
+ * malloc'd replacement, which the editor frees, or NULL to insert the body verbatim. The hook
+ * must not touch the tty; NULL disables it. */
 void input_set_paste_filter(struct input *in, char *(*fn)(const char *text, void *user),
                             void *user);
 
@@ -150,42 +64,21 @@ void input_set_paste_filter(struct input *in, char *(*fn)(const char *text, void
  * One-shot; NULL or "" clears it, and non-tty reads discard it. */
 void input_set_preseed(struct input *in, const char *text);
 
-/* Toggle whether Enter on an empty buffer submits the empty string.
- * Off, empty Enter is a no-op; on, input_readline returns "" — used by
- * the REPL while a paused turn is resumable and an empty send means
- * "continue". */
+/* When enabled, Enter on an empty buffer returns "" instead of doing nothing. */
 void input_set_empty_submit(struct input *in, int enabled);
 
-/* True when the last input_readline() ended with Ctrl-C. Cancellation
- * also returns "", so a caller that gives an empty submit a meaning
- * (empty_submit above) must check this to keep "discard my typed line"
- * from acting as that meaning. */
+/* Distinguish Ctrl-C from an enabled empty submission; both return "". */
 int input_cancelled(const struct input *in);
 
-/* Convenience wrapper: open the conventional per-user history file at
- * $XDG_STATE_HOME/hax/history (default $HOME/.local/state/hax/history),
- * but only when stdin and stdout are both ttys — non-interactive use
- * (`echo prompt | hax`) shouldn't leak scripted input into recall
- * history. No-op if neither env var is set. `persist` picks which of the
- * two variants above runs: 0 still recalls what is already there and just
- * doesn't add to it. The path-taking variants remain the testable seam and
- * the hook for a future --history-file override. */
+/* Load the conventional XDG history file only for tty sessions. `persist` controls whether
+ * later entries are appended; scripted input is never retained. */
 void input_history_open_default(struct input *in, int persist);
 
-/* Render `text` (length `len`) as a committed user message — an
- * accent-colored "▌ " stripe (repeated at every wrapped row) and body,
- * word-wrapped at the stripe indent to `term_cols` — and write it to
- * `out`, leaving the cursor at column 0 of a fresh row. The editor
- * repaints a submitted line through the same layout code; the history
- * view uses this entry point so a rendered prompt looks byte-for-byte
- * like one just typed, whether it goes at the terminal or at a pipe.
- * Does not erase any prior content — the caller positions the cursor. */
-void input_render_user_message_to(FILE *out, const char *text, size_t len, int term_cols);
+/* Write a committed user message with an accent stripe on each row, wrapped to
+ * `display_columns`. Leave the cursor at column 0 of a fresh row without erasing prior content. */
+void input_render_user_message_to(FILE *out, const char *text, size_t len, int display_columns);
 
-/* The column budget the editor lays user input out within: the configured
- * display_width() clamped to the real tty width. Exposed so a caller passing a
- * width to input_render_user_message (e.g. history replay) can match the
- * editor's wrapping exactly. */
+/* Return display_width() clamped to the current terminal width. */
 int input_display_cols(void);
 
 #endif /* HAX_INPUT_H */

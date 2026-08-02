@@ -26,44 +26,49 @@
 
 #define ESC_TIMEOUT_MS 50
 
-static int tty_cols(void)
+static void terminal_size(int *columns, int *rows)
 {
-    struct winsize ws;
+    struct winsize size;
 
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
-        return ws.ws_col;
-    return 0;
+    *columns = 0;
+    *rows = 0;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) < 0)
+        return;
+    if (size.ws_col > 0)
+        *columns = size.ws_col;
+    if (size.ws_row > 0)
+        *rows = size.ws_row;
 }
 
-static int tty_rows(void)
+static int editor_columns(int terminal_columns)
 {
-    struct winsize ws;
+    int columns = display_width();
 
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0)
-        return ws.ws_row;
-    return 0;
+    if (terminal_columns > 0 && columns > terminal_columns)
+        columns = terminal_columns;
+    return columns > 0 ? columns : 1;
 }
 
-static int editor_cols(void)
+static void refresh_terminal_size(struct input *in)
 {
-    int cols = display_width();
-    int real = tty_cols();
+    int terminal_columns;
 
-    if (real > 0 && cols > real)
-        cols = real;
-    if (cols < 1)
-        cols = 1;
-    return cols;
+    terminal_size(&terminal_columns, &in->terminal_rows);
+    in->display_columns = editor_columns(terminal_columns);
 }
 
 int input_display_cols(void)
 {
-    return editor_cols();
+    int terminal_columns;
+    int rows;
+
+    terminal_size(&terminal_columns, &rows);
+    return editor_columns(terminal_columns);
 }
 
-/* ---------------- raw mode ---------------- */
+/* Raw mode */
 
-static void raw_on(struct input *in)
+static void enable_raw_mode(struct input *in)
 {
     if (in->raw_active)
         return;
@@ -82,17 +87,16 @@ static void raw_on(struct input *in)
     if (tcsetattr(STDIN_FILENO, TCSADRAIN, &raw) < 0)
         return;
 
-    /* Enable bracketed paste so multi-line pastes don't fire keybindings. */
-    fputs("\x1b[?2004h", stdout);
+    fputs(ANSI_BRACKETED_PASTE_ENABLE, stdout);
     fflush(stdout);
     in->raw_active = 1;
 }
 
-static void raw_off(struct input *in)
+static void disable_raw_mode(struct input *in)
 {
     if (!in->raw_active)
         return;
-    fputs("\x1b[?2004l", stdout);
+    fputs(ANSI_BRACKETED_PASTE_DISABLE, stdout);
     fflush(stdout);
     tcsetattr(STDIN_FILENO, TCSADRAIN, &in->saved_termios);
     in->raw_active = 0;
@@ -114,133 +118,107 @@ static int read_byte_blocking(unsigned char *out)
     }
 }
 
-static int read_byte_timeout(unsigned char *out, int ms)
+static int read_byte_timeout(unsigned char *out, int timeout_ms)
 {
-    struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
-    int r;
+    struct pollfd input = {.fd = STDIN_FILENO, .events = POLLIN};
+    int result;
+
     do {
-        r = poll(&pfd, 1, ms);
-    } while (r < 0 && errno == EINTR);
-    if (r <= 0)
-        return r;
+        result = poll(&input, 1, timeout_ms);
+    } while (result < 0 && errno == EINTR);
+    if (result <= 0)
+        return result;
     return read_byte_blocking(out);
 }
 
 /* ---------------- bracketed paste ---------------- */
 
-/* Sink for paste-body bytes — receives the content between the bracketed-
- * paste markers, after CR→LF/NUL normalization, one byte at a time. The
- * main editor feeds it into the edit buffer; the Ctrl-R loop feeds it into
- * the search query. */
-typedef void (*paste_sink)(void *user, const char *bytes, size_t n);
+typedef void (*paste_sink_fn)(void *user, const char *bytes, size_t len);
 
-/* Read a paste body until we see "\x1b[201~", handing bytes to `sink`.
- * CR is normalized to LF; an LF immediately following a normalized CR
- * is swallowed so Windows-style CRLF pastes become a single newline.
- * NULs are substituted with spaces so they can't truncate downstream
- * NUL-terminated string operations. Held bytes are flushed if they
- * turn out not to be the prefix of the end marker.
- *
- * Bounded against runaway / malicious input: a 5 s idle timeout
- * abandons the paste if bytes stop arriving (a buggy or hostile
- * counterpart can otherwise hold the prompt open indefinitely), and
- * sunk bytes are capped at PASTE_MAX. We keep consuming bytes
- * past the cap so leftover paste body doesn't leak into the next
- * keystroke loop as garbage input. */
-static void read_paste(paste_sink sink, void *user)
+/* Keep consuming after the size cap so paste bytes cannot leak into the keypress loop. */
+static void read_bracketed_paste(paste_sink_fn sink, void *user)
 {
-    static const char END[] = "\x1b[201~";
-    const size_t ELEN = sizeof(END) - 1;
-    const size_t PASTE_MAX = 1u << 20; /* 1 MiB of insertable content */
-    const int IDLE_MS = 5000;
-    char held[8];
-    size_t hlen = 0;
+    static const char end_marker[] = "\x1b[201~";
+    const size_t end_marker_len = sizeof(end_marker) - 1;
+    const size_t max_bytes = 1u << 20;
+    const int idle_timeout_ms = 5000;
+    char pending[sizeof(end_marker)];
+    size_t pending_len = 0;
+    size_t emitted_bytes = 0;
     int swallow_lf = 0;
-    size_t inserted = 0;
 
     for (;;) {
-        unsigned char b;
-        if (read_byte_timeout(&b, IDLE_MS) <= 0)
+        unsigned char byte;
+        if (read_byte_timeout(&byte, idle_timeout_ms) <= 0)
             return;
-        if (b == '\n' && swallow_lf) {
+        if (byte == '\n' && swallow_lf) {
             swallow_lf = 0;
             continue;
         }
-        if (b == '\r') {
-            b = '\n';
+        if (byte == '\r') {
+            byte = '\n';
             swallow_lf = 1;
         } else {
             swallow_lf = 0;
         }
-        if (b == '\0')
-            b = ' ';
-        held[hlen++] = (char)b;
+        if (byte == '\0')
+            byte = ' ';
+        pending[pending_len++] = (char)byte;
 
         for (;;) {
-            size_t cmp = hlen < ELEN ? hlen : ELEN;
-            if (memcmp(held, END, cmp) == 0) {
-                if (hlen == ELEN)
-                    return; /* full marker matched */
-                break;      /* still a possible prefix; keep reading */
+            size_t prefix_len = pending_len < end_marker_len ? pending_len : end_marker_len;
+            if (memcmp(pending, end_marker, prefix_len) == 0) {
+                if (pending_len == end_marker_len)
+                    return;
+                break;
             }
-            if (inserted < PASTE_MAX) {
-                sink(user, &held[0], 1);
-                inserted++;
+            if (emitted_bytes < max_bytes) {
+                sink(user, pending, 1);
+                emitted_bytes++;
             }
-            memmove(held, held + 1, hlen - 1);
-            hlen--;
-            if (hlen == 0)
+            memmove(pending, pending + 1, pending_len - 1);
+            pending_len--;
+            if (pending_len == 0)
                 break;
         }
     }
 }
 
-static void paste_into_buf(void *user, const char *bytes, size_t n)
+static void append_paste_body(void *user, const char *bytes, size_t n)
 {
     buf_append((struct buf *)user, bytes, n);
 }
 
-/* Run the caller's Ctrl-V paste hook and insert whatever it returns.
- * The hook never touches the tty, so the editor stays in raw mode —
- * no erase/repaint dance like Ctrl-G's $EDITOR. */
-static void handle_paste_hook(struct input *in)
+static void invoke_paste_hook(struct input *in)
 {
-    if (!in->paste_cb)
+    if (!in->paste_hook)
         return;
-    char *ins = in->paste_cb(in->paste_user);
+    char *ins = in->paste_hook(in->paste_hook_user);
     if (!ins)
         return;
-    input_core_buf_insert(in, ins, strlen(ins));
+    input_core_insert(in, ins, strlen(ins));
     free(ins);
 }
 
-/* Insert pasted content at the cursor. The start marker "\x1b[200~" has
- * already been consumed by the escape decoder. The body is buffered
- * whole rather than streamed into the edit buffer so the caller's paste
- * filter can rewrite it (file:// URI lists from a file-manager copy or
- * drag-and-drop → plain paths) before insertion. An empty paste body is
- * the tell for "clipboard holds an image, not text" — macOS terminals
- * send exactly that for Cmd+V with an image on the clipboard — so probe
- * the paste hook instead of inserting nothing. */
-static void handle_paste(struct input *in)
+/* Buffer the complete body for filtering. macOS uses an empty body when the clipboard
+ * contains an image, so defer that case to the paste hook. */
+static void handle_bracketed_paste(struct input *in)
 {
     struct buf body;
     buf_init(&body);
-    read_paste(paste_into_buf, &body);
+    read_bracketed_paste(append_paste_body, &body);
     if (body.len == 0) {
         buf_free(&body);
-        handle_paste_hook(in);
+        invoke_paste_hook(in);
         return;
     }
-    input_core_paste_commit(in, body.data, body.len);
+    input_core_commit_paste(in, body.data, body.len);
     buf_free(&body);
 }
 
 /* ---------------- escape sequence dispatch ---------------- */
 
-/* Adapt read_byte_timeout to the input_byte_reader signature so
- * input_core_decode_escape can drive it without knowing about poll. */
-static int byte_reader_tty(void *user)
+static int read_escape_byte(void *user)
 {
     (void)user;
     unsigned char b;
@@ -250,9 +228,6 @@ static int byte_reader_tty(void *user)
     return b;
 }
 
-/* Apply a decoded action to the edit buffer. Keeping this switch in
- * the IO layer means the decoder stays pure; testing the action
- * dispatch itself is unnecessary because each branch is one line. */
 static void apply_action(struct input *in, enum input_action a)
 {
     switch (a) {
@@ -297,430 +272,353 @@ static void apply_action(struct input *in, enum input_action a)
         input_core_kill_word_back_alnum(in);
         return;
     case INPUT_ACTION_INSERT_NEWLINE:
-        input_core_buf_insert(in, "\n", 1);
+        input_core_insert(in, "\n", 1);
         return;
     case INPUT_ACTION_PASTE_BEGIN:
-        handle_paste(in);
+        handle_bracketed_paste(in);
         return;
     }
 }
 
-/* Called after we've consumed an ESC byte. Decodes the rest of the
- * sequence via the pure decoder and applies the resulting action. */
-static void handle_escape(struct input *in)
+static void handle_escape_sequence(struct input *in)
 {
-    apply_action(in, input_core_decode_escape(byte_reader_tty, NULL));
+    apply_action(in, input_core_decode_escape(read_escape_byte, NULL));
 }
 
 /* ---------------- render / paint ---------------- */
 
-/* Append a CSI sequence like "\x1b[<n><final>" to `f`. */
-static void buf_append_csi(struct buf *f, int n, char final)
+static void buf_append_csi(struct buf *out, int value, char final)
 {
-    char tmp[24];
-    int len = snprintf(tmp, sizeof(tmp), "\x1b[%d%c", n, final);
-    buf_append(f, tmp, (size_t)len);
+    char sequence[24];
+    int len = snprintf(sequence, sizeof(sequence), ANSI_CSI "%d%c", value, final);
+
+    buf_append(out, sequence, (size_t)len);
 }
 
-/* Walker callback for the live edit area: appends glyph bytes verbatim
- * and clears the tail of each completed row before a `\r\n` + indent-spaces
- * row break. With OPOST off (raw mode) the terminal won't add the CR for us.
- * The indent target is delivered via ev->col — the walker has resolved it
- * from the cont_indent_col passed in. When the paint is clipped to a row
- * window that starts on a continuation row, the break *into* the first
- * visible row emits only the indent: the frame is already positioned at
- * the start of that screen row. Output goes into the caller's frame
- * `struct buf` so the whole repaint reaches the tty as one write — see
- * paint(). */
-struct paint_ctx {
-    struct buf *f;
-    int win_top; /* first painted content row; 0 when unclipped */
+/* Raw mode disables OPOST, so row breaks must include CR. A clipped window already
+ * starts on its first visible row and needs only that row's indent. */
+struct paint_context {
+    struct buf *frame;
+    int first_row;
 };
 
-static void paint_emit(const struct input_render_event *ev, void *user)
+static void paint_emit(const struct input_render_event *event, void *user)
 {
-    struct paint_ctx *p = user;
-    if (ev->kind == INPUT_RENDER_GLYPH) {
-        buf_append(p->f, ev->bytes, ev->n);
+    struct paint_context *context = user;
+
+    if (event->kind == INPUT_RENDER_GLYPH) {
+        buf_append(context->frame, event->bytes, event->n);
         return;
     }
-    if (ev->row > p->win_top)
-        buf_append_str(p->f, ANSI_ERASE_LINE "\r\n");
-    for (int k = 0; k < ev->col; k++)
-        buf_append(p->f, " ", 1);
+    if (event->row > context->first_row)
+        buf_append_str(context->frame, ANSI_ERASE_LINE "\r\n");
+    for (int column = 0; column < event->col; column++)
+        buf_append(context->frame, " ", 1);
 }
 
-/* One indicator row for a clipped paint: dim "… +N lines" when rows are
- * hidden past this edge, blank otherwise. Dropped entirely when it
- * wouldn't fit the row budget, so it can never soft-wrap — the paint's
- * row accounting models it as exactly one screen row. Returns the cell
- * width actually painted (0 for a blank row) so resize recovery can
- * compute how many physical rows the indicator reflows to under a
- * narrower width. */
-static int append_clip_indicator(struct buf *f, int hidden, int cols)
+/* Omit an indicator that would wrap because paint accounts for it as one row. Return
+ * its width so resize recovery can account for later terminal reflow. */
+static int append_clip_indicator(struct buf *frame, int hidden_rows, int columns)
 {
-    int painted = 0;
-    if (hidden > 0) {
-        int utf8 = locale_have_utf8();
-        char *s = xasprintf("%s +%d line%s", utf8 ? "\xe2\x80\xa6" : "...", hidden,
-                            hidden == 1 ? "" : "s");
-        int cells = (int)strlen(s) - (utf8 ? 2 : 0); /* "…" is 3 bytes, 1 cell */
-        if (cells < cols) {
-            buf_append_str(f, ANSI_DIM);
-            buf_append_str(f, s);
-            buf_append_str(f, ANSI_BOLD_OFF);
-            painted = cells;
+    int painted_width = 0;
+
+    if (hidden_rows > 0) {
+        int have_utf8 = locale_have_utf8();
+        char *indicator = xasprintf("%s +%d line%s", have_utf8 ? "\xe2\x80\xa6" : "...",
+                                    hidden_rows, hidden_rows == 1 ? "" : "s");
+        int width = (int)strlen(indicator) - (have_utf8 ? 2 : 0);
+        if (width < columns) {
+            buf_append_str(frame, ANSI_DIM);
+            buf_append_str(frame, indicator);
+            buf_append_str(frame, ANSI_BOLD_OFF);
+            painted_width = width;
         }
-        free(s);
+        free(indicator);
     }
-    buf_append_str(f, ANSI_ERASE_LINE);
-    return painted;
+    buf_append_str(frame, ANSI_ERASE_LINE);
+    return painted_width;
 }
 
-/* Edit-area height cap: ~40% of the viewport, the same proportion as
- * the fzf @file picker (see file_mention.c). */
-static int edit_area_rows(int term_rows)
+/* Keep the prompt compact while reserving two rows for clipping indicators. */
+static int edit_area_rows(int terminal_rows)
 {
-    int cap = term_rows * 2 / 5;
+    int cap = terminal_rows * 2 / 5;
     if (cap < 3)
         cap = 3;
-    if (cap > term_rows)
-        cap = term_rows;
+    if (cap > terminal_rows)
+        cap = terminal_rows;
     return cap;
 }
 
-/* Repaint the whole edit area. The entire frame — sync-begin, the climb,
- * prompt, rendered buffer, tail clear, cursor repositioning, sync-end — is
- * assembled in one `struct buf` and emitted with a single fwrite. Two things
- * matter for flicker on a tall prompt: (1) stdout is line-buffered on a tty,
- * so emitting row-by-row would flush once per `\n` and hand the terminal a
- * separate write (and a chance to present a half-drawn frame) for every
- * visual row — batching collapses that to one write; (2) DEC 2026
- * (ANSI_SYNC_BEGIN/END) tells terminals that support it to present the frame
- * atomically. We still redraw before erasing stale tails so terminals or tmux
- * setups that ignore DEC 2026 don't show a blank prompt between frames.
- *
- * The painted area is capped at a fraction of the viewport. Relative
- * cursor motion can't climb above the visible screen, so painting more
- * rows than the terminal has would scroll the top of the edit area into
- * scrollback where later repaints can't reach it — each repaint would then
- * push another stale copy of the prompt into scrollback. And even within
- * the screen, the prompt is meant to stay a compact area: a huge paste or
- * a recalled history entry shouldn't shove the conversation out of view.
- * A buffer taller than the cap paints a sliding window of content rows
- * that keeps the cursor visible, with one indicator row on each edge.
- * Clipping needs at least 3 rows (two indicators + a content row);
- * tinier or unknown viewports keep the unclipped behavior. */
+/* Batch each repaint under DEC synchronized output and draw before clearing stale rows,
+ * avoiding partial or blank frames on terminals that ignore synchronization. Clip tall buffers
+ * because relative cursor motion cannot reach rows pushed into scrollback; clipping requires two
+ * indicator rows and at least one content row. */
 static void paint(struct input *in)
 {
-    int prompt_w = input_core_prompt_width(in->prompt);
-    int cols = in->term_cols;
-    int rows = in->term_rows;
-    int cont = in->wrap_cont_col0 ? 0 : prompt_w;
+    int prompt_width = input_core_prompt_width(in->prompt);
+    int continuation_column = in->continuation_at_column_zero ? 0 : prompt_width;
+    struct input_layout layout;
 
-    /* Layout pass first: the row window must be chosen before emission. */
-    struct input_layout L;
-    input_core_render(in->buf, in->len, in->cursor, prompt_w, cont, cols, NULL, NULL, &L);
+    input_core_render(in->buf, in->len, in->cursor, prompt_width, continuation_column,
+                      in->display_columns, NULL, NULL, &layout);
 
-    int limit = edit_area_rows(rows);
-    int clipped = rows >= 3 && L.total_rows > limit;
-    int top = 0;
-    int wh = L.total_rows; /* content rows painted */
+    int row_limit = edit_area_rows(in->terminal_rows);
+    int clipped = in->terminal_rows >= 3 && layout.total_rows > row_limit;
+    int first_row = 0;
+    int visible_rows = layout.total_rows;
     if (clipped) {
-        wh = limit - 2;
-        top = input_core_window_top(in->win_top, L.cursor_row, L.total_rows, wh);
+        visible_rows = row_limit - 2;
+        first_row = input_core_window_top(in->window_top, layout.cursor_row, layout.total_rows,
+                                          visible_rows);
     }
 
-    struct buf f;
-    buf_init(&f);
-    buf_append_str(&f, ANSI_SYNC_BEGIN);
+    struct buf frame;
+    buf_init(&frame);
+    buf_append_str(&frame, ANSI_SYNC_BEGIN);
 
-    /* Move to top of last edit area. Stale content is cleared after redraw. */
-    if (in->last_cursor_row > 0)
-        buf_append_csi(&f, in->last_cursor_row, 'A');
-    buf_append(&f, "\r", 1);
+    if (in->painted_cursor_row > 0)
+        buf_append_csi(&frame, in->painted_cursor_row, 'A');
+    buf_append(&frame, "\r", 1);
 
-    int top_ind_cells = 0;
+    int top_indicator_width = 0;
     if (clipped) {
-        top_ind_cells = append_clip_indicator(&f, top, cols);
-        buf_append_str(&f, "\r\n");
+        top_indicator_width = append_clip_indicator(&frame, first_row, in->display_columns);
+        buf_append_str(&frame, "\r\n");
     }
-    if (top == 0)
-        buf_append_str(&f, in->prompt);
+    if (first_row == 0)
+        buf_append_str(&frame, in->prompt);
 
-    struct paint_ctx pc = {.f = &f, .win_top = top};
-    if (clipped)
-        input_core_render_window(in->buf, in->len, in->cursor, prompt_w, cont, cols, top,
-                                 top + wh - 1, paint_emit, &pc, NULL);
-    else
-        input_core_render(in->buf, in->len, in->cursor, prompt_w, cont, cols, paint_emit, &pc,
-                          NULL);
+    struct paint_context context = {.frame = &frame, .first_row = first_row};
+    if (clipped) {
+        input_core_render_window(in->buf, in->len, in->cursor, prompt_width, continuation_column,
+                                 in->display_columns, first_row, first_row + visible_rows - 1,
+                                 paint_emit, &context, NULL);
+    } else {
+        input_core_render(in->buf, in->len, in->cursor, prompt_width, continuation_column,
+                          in->display_columns, paint_emit, &context, NULL);
+    }
 
     if (clipped) {
-        buf_append_str(&f, ANSI_ERASE_LINE "\r\n");
-        append_clip_indicator(&f, L.total_rows - (top + wh), cols);
+        buf_append_str(&frame, ANSI_ERASE_LINE "\r\n");
+        append_clip_indicator(&frame, layout.total_rows - first_row - visible_rows,
+                              in->display_columns);
     }
-    buf_append_str(&f, ANSI_ERASE_BELOW);
+    buf_append_str(&frame, ANSI_ERASE_BELOW);
 
-    /* From end-of-frame position, climb up to the cursor row, then right.
-     * Screen rows: unclipped they equal content rows; clipped, screen row
-     * 0 is the top indicator, content row r sits at 1 + (r - top), and the
-     * bottom indicator is last. The window keeps the cursor row inside
-     * [top, top + wh), so the climb never leaves the viewport. */
-    int cursor_srow = clipped ? 1 + (L.cursor_row - top) : L.cursor_row;
-    int end_srow = clipped ? wh + 1 : L.end_row;
-    int up = end_srow - cursor_srow;
-    if (up > 0)
-        buf_append_csi(&f, up, 'A');
-    buf_append(&f, "\r", 1);
-    if (L.cursor_col > 0)
-        buf_append_csi(&f, L.cursor_col, 'C');
+    int cursor_screen_row = clipped ? layout.cursor_row - first_row + 1 : layout.cursor_row;
+    int end_screen_row = clipped ? visible_rows + 1 : layout.end_row;
+    int rows_up = end_screen_row - cursor_screen_row;
+    if (rows_up > 0)
+        buf_append_csi(&frame, rows_up, 'A');
+    buf_append(&frame, "\r", 1);
+    if (layout.cursor_col > 0)
+        buf_append_csi(&frame, layout.cursor_col, 'C');
 
-    buf_append_str(&f, ANSI_SYNC_END);
-
-    fwrite(f.data, 1, f.len, stdout);
+    buf_append_str(&frame, ANSI_SYNC_END);
+    fwrite(frame.data, 1, frame.len, stdout);
     fflush(stdout);
-    buf_free(&f);
+    buf_free(&frame);
 
-    in->last_cursor_row = cursor_srow;
-    in->last_rows = clipped ? wh + 2 : L.total_rows;
-    in->last_clipped = clipped;
-    in->win_top = top;
-    in->top_ind_cells = top_ind_cells;
+    in->painted_cursor_row = cursor_screen_row;
+    in->painted_rows = clipped ? visible_rows + 2 : layout.total_rows;
+    in->previous_paint_clipped = clipped;
+    in->window_top = first_row;
+    in->top_indicator_width = top_indicator_width;
 }
 
-/* Per-logical-row content width collector. The walker emits a glyph
- * event per cell and a row-break event between rows; tracking the max
- * post-emit col per row gives each row's end column under the OLD
- * width, which is what we need to compute physical-row counts under
- * the new width. */
-struct row_widths_state {
-    int *widths;
-    int cap;
-    int n;
-    int current; /* highest post-emit col seen so far on current row */
+/* Record row widths under the old geometry for resize reflow calculations. */
+struct row_widths {
+    int *values;
+    int capacity;
+    int count;
+    int current;
 };
 
-static void row_widths_cb(const struct input_render_event *ev, void *user)
+static void collect_row_width(const struct input_render_event *event, void *user)
 {
-    struct row_widths_state *s = user;
-    if (ev->kind == INPUT_RENDER_GLYPH) {
-        int post = ev->col + ev->width;
-        if (post > s->current)
-            s->current = post;
-    } else { /* ROW_BREAK */
-        if (s->n < s->cap)
-            s->widths[s->n] = s->current;
-        s->n++;
-        s->current = ev->col; /* new row starts at cont_indent */
+    struct row_widths *widths = user;
+
+    if (event->kind == INPUT_RENDER_GLYPH) {
+        int end_column = event->col + event->width;
+        if (end_column > widths->current)
+            widths->current = end_column;
+        return;
     }
+    if (widths->count < widths->capacity)
+        widths->values[widths->count] = widths->current;
+    widths->count++;
+    widths->current = event->col;
 }
 
-/* Detect a terminal resize. The painted edit area's manual `\r\n`
- * breaks survive on screen, but each painted row can still char-wrap
- * to multiple physical rows under a narrower width on terminals that
- * reflow on SIGWINCH (xterm, iTerm2, kitty, Alacritty, …). To clear
- * the right region we re-walk the buffer at the *previous* width to
- * recover each logical row's content width, then translate into a
- * physical-row climb under the new width. The next paint performs that climb
- * inside its synchronized frame and clears stale content after redraw.
- *
- * This assumes the terminal reflows soft-wrapped screen rows on resize,
- * which is the common behavior for modern terminal emulators. Terminals
- * that clamp/truncate instead may leave a stale row behind or briefly
- * over-clear during the next repaint; optimizing the common path keeps
- * resize UX smooth instead of restarting the prompt for every shrink.
- *
- * Called at the top of each loop iteration — *before* applying the
- * next keypress — so last_rows / last_cursor_row still describe what's on
- * screen. Returns 1 if a resize was handled (caller should repaint). */
+/* On width changes, rewalk the old layout to account for terminals that reflow each
+ * painted row into multiple physical rows. This must run before applying the next key so the
+ * saved paint state still describes the screen. Terminals that truncate instead of reflowing
+ * may briefly over-clear or leave one stale row. */
 static int handle_resize(struct input *in)
 {
-    int new_cols = editor_cols();
-    int new_rows = tty_rows();
-    if (new_cols == in->term_cols && new_rows == in->term_rows)
-        return 0;
-    int old_cols = in->term_cols;
-    in->term_cols = new_cols;
-    in->term_rows = new_rows;
+    int terminal_columns;
+    int new_rows;
 
-    if (new_cols == old_cols) {
-        /* Row-count-only change: no column reflow, so the painted rows
-         * keep their shape and last_cursor_row stays valid — unless a
-         * shrink scrolled the top of the edit area out of reach, so
-         * clamp to the viewport. Repaint to re-derive the row window. */
-        if (new_rows > 0 && in->last_cursor_row > new_rows - 1)
-            in->last_cursor_row = new_rows - 1;
+    terminal_size(&terminal_columns, &new_rows);
+    int new_columns = editor_columns(terminal_columns);
+    if (new_columns == in->display_columns && new_rows == in->terminal_rows)
+        return 0;
+
+    int old_columns = in->display_columns;
+    in->display_columns = new_columns;
+    in->terminal_rows = new_rows;
+    if (new_columns == old_columns) {
+        if (new_rows > 0 && in->painted_cursor_row >= new_rows)
+            in->painted_cursor_row = new_rows - 1;
         return 1;
     }
 
-    int climb = 0;
-    if (in->last_rows > 0 && new_cols > 0) {
-        int prompt_w = input_core_prompt_width(in->prompt);
-        /* +1 for the post-walk final row. win_top offsets the cap for a
-         * clipped previous paint, whose replayed rows start there (it's
-         * 0 otherwise). */
-        int cap = in->win_top + in->last_rows + 1;
-        int *widths = xcalloc((size_t)cap, sizeof(int));
-        struct row_widths_state s = {.widths = widths, .cap = cap, .n = 0, .current = prompt_w};
-        struct input_layout L;
-        int cont = in->wrap_cont_col0 ? 0 : prompt_w;
-        input_core_render(in->buf, in->len, in->cursor, prompt_w, cont, old_cols, row_widths_cb, &s,
-                          &L);
-        if (s.n < s.cap)
-            s.widths[s.n] = s.current;
-        s.n++;
+    int cursor_climb = 0;
+    if (in->painted_rows > 0 && new_columns > 0) {
+        int prompt_width = input_core_prompt_width(in->prompt);
+        int capacity = in->window_top + in->painted_rows + 1;
+        struct row_widths widths = {
+            .values = xcalloc((size_t)capacity, sizeof(int)),
+            .capacity = capacity,
+            .current = prompt_width,
+        };
+        struct input_layout layout;
+        int continuation_column = in->continuation_at_column_zero ? 0 : prompt_width;
 
-        /* Physical rows above the cursor's logical row + cursor's
-         * offset within its own row under the new width. An empty
-         * logical row still occupies one physical row, so floor at 1.
-         * For a clipped previous paint, only the painted window rows
-         * are on screen: count from win_top and add the top indicator
-         * row — which was sized for the old width and reflows under
-         * the new one just like a content row. */
-        int start = in->last_clipped ? in->win_top : 0;
-        if (in->last_clipped) {
-            climb = in->top_ind_cells > 0 ? (in->top_ind_cells + new_cols - 1) / new_cols : 1;
+        input_core_render(in->buf, in->len, in->cursor, prompt_width, continuation_column,
+                          old_columns, collect_row_width, &widths, &layout);
+        if (widths.count < widths.capacity)
+            widths.values[widths.count] = widths.current;
+        widths.count++;
+
+        int first_row = in->previous_paint_clipped ? in->window_top : 0;
+        if (in->previous_paint_clipped) {
+            cursor_climb = in->top_indicator_width > 0
+                               ? (in->top_indicator_width + new_columns - 1) / new_columns
+                               : 1;
         }
-        for (int i = start; i < L.cursor_row && i < s.n; i++) {
-            int pr = s.widths[i] > 0 ? (s.widths[i] + new_cols - 1) / new_cols : 1;
-            climb += pr;
+        for (int row = first_row; row < layout.cursor_row && row < widths.count; row++) {
+            int physical_rows =
+                widths.values[row] > 0 ? (widths.values[row] + new_columns - 1) / new_columns : 1;
+            cursor_climb += physical_rows;
         }
-        climb += L.cursor_col / new_cols;
-        free(widths);
-        /* Reflow estimates can overshoot what the viewport can actually
-         * hold; an over-climb would repaint from the wrong row. */
-        if (new_rows > 0 && climb > new_rows - 1)
-            climb = new_rows - 1;
+        cursor_climb += layout.cursor_col / new_columns;
+        free(widths.values);
+
+        /* A terminal cannot retain more rows above the cursor than its viewport. */
+        if (new_rows > 0 && cursor_climb >= new_rows)
+            cursor_climb = new_rows - 1;
     }
 
-    in->last_cursor_row = climb;
-    in->last_rows = 0;
+    in->painted_cursor_row = cursor_climb;
+    in->painted_rows = 0;
     return 1;
 }
 
-/* Move the terminal cursor below the current edit area and start a
- * fresh row. Used on EOF / Ctrl-C / Ctrl-L. */
 static void leave_edit_area(struct input *in)
 {
-    int down = in->last_rows - 1 - in->last_cursor_row;
+    int down = in->painted_rows - 1 - in->painted_cursor_row;
     if (down > 0)
-        printf("\x1b[%dB", down);
+        printf(ANSI_CSI "%dB", down);
     fputs("\r\n", stdout);
     fflush(stdout);
-    in->last_cursor_row = 0;
-    in->last_rows = 0;
+    in->painted_cursor_row = 0;
+    in->painted_rows = 0;
 }
 
-/* Walker callback for the committed-user-message render. Appends a
- * accent-colored `▌ ` stripe at every row break so wrapped continuation
- * rows stay marked, and resets foreground around the strip glyph so
- * the body inherits the accent without escapes nesting. Output is
- * collected into the caller's `struct buf` (passed as `user`). */
-static void submitted_emit(const struct input_render_event *ev, void *user)
+/* Reset the accent around each continuation stripe so attributes do not nest. */
+static void submitted_emit(const struct input_render_event *event, void *user)
 {
-    struct buf *f = user;
-    if (ev->kind == INPUT_RENDER_GLYPH) {
-        buf_append(f, ev->bytes, ev->n);
+    struct buf *frame = user;
+
+    if (event->kind == INPUT_RENDER_GLYPH) {
+        buf_append(frame, event->bytes, event->n);
     } else {
-        buf_append_str(f, theme_close(THEME_ACCENT));
-        buf_append_str(f, ANSI_ERASE_LINE "\r\n");
-        buf_append_str(f, theme_open(THEME_ACCENT));
-        buf_append_str(f, "▌ ");
+        buf_append_str(frame, theme_close(THEME_ACCENT));
+        buf_append_str(frame, ANSI_ERASE_LINE "\r\n");
+        buf_append_str(frame, theme_open(THEME_ACCENT));
+        buf_append_str(frame, "▌ ");
     }
 }
 
-/* Append the accent-striped user message to `f`. Shared by the public
- * one-shot renderer and render_submitted so the stripe layout can't drift. */
-static void append_user_message(struct buf *f, const char *text, size_t len, int term_cols)
+static void append_user_message(struct buf *frame, const char *text, size_t len,
+                                int display_columns)
 {
-    /* Cell width of "▌ ": one box-drawing glyph plus a space. The walker
-     * indents continuation rows to this column so wrapped content aligns
-     * under the first row's text. */
-    const int bar_col = 2;
-    buf_append_str(f, theme_open(THEME_ACCENT));
-    buf_append_str(f, "▌ ");
-    input_core_render(text, len, /*cursor=*/0, bar_col, bar_col, term_cols, submitted_emit, f,
-                      NULL);
-    buf_append_str(f, theme_close(THEME_ACCENT));
-    buf_append_str(f, ANSI_ERASE_LINE "\r\n");
+    const int body_column = 2;
+
+    buf_append_str(frame, theme_open(THEME_ACCENT));
+    buf_append_str(frame, "▌ ");
+    input_core_render(text, len, 0, body_column, body_column, display_columns, submitted_emit,
+                      frame, NULL);
+    buf_append_str(frame, theme_close(THEME_ACCENT));
+    buf_append_str(frame, ANSI_ERASE_LINE "\r\n");
 }
 
-void input_render_user_message_to(FILE *out, const char *text, size_t len, int term_cols)
+void input_render_user_message_to(FILE *out, const char *text, size_t len, int display_columns)
 {
-    struct buf f;
-    buf_init(&f);
-    append_user_message(&f, text, len, term_cols);
-    fwrite(f.data, 1, f.len, out);
+    struct buf frame;
+
+    buf_init(&frame);
+    append_user_message(&frame, text, len, display_columns);
+    fwrite(frame.data, 1, frame.len, out);
     fflush(out);
-    buf_free(&f);
+    buf_free(&frame);
 }
 
-/* Replace the edit area with an accent-striped committed user message. Draw
- * before erasing stale tails so sync-less terminals don't flash a blank prompt
- * on submit. */
+/* Draw before erasing stale rows so terminals without synchronization do not flash. */
 static void render_submitted(struct input *in)
 {
-    struct buf f;
-    buf_init(&f);
-    buf_append_str(&f, ANSI_SYNC_BEGIN);
-    if (in->last_cursor_row > 0)
-        buf_append_csi(&f, in->last_cursor_row, 'A');
-    buf_append(&f, "\r", 1);
-    append_user_message(&f, in->buf, in->len, in->term_cols);
-    buf_append_str(&f, ANSI_ERASE_BELOW);
-    buf_append_str(&f, ANSI_SYNC_END);
-    fwrite(f.data, 1, f.len, stdout);
-    fflush(stdout);
-    buf_free(&f);
+    struct buf frame;
 
-    in->last_cursor_row = 0;
-    in->last_rows = 0;
+    buf_init(&frame);
+    buf_append_str(&frame, ANSI_SYNC_BEGIN);
+    if (in->painted_cursor_row > 0)
+        buf_append_csi(&frame, in->painted_cursor_row, 'A');
+    buf_append(&frame, "\r", 1);
+    append_user_message(&frame, in->buf, in->len, in->display_columns);
+    buf_append_str(&frame, ANSI_ERASE_BELOW);
+    buf_append_str(&frame, ANSI_SYNC_END);
+    fwrite(frame.data, 1, frame.len, stdout);
+    fflush(stdout);
+    buf_free(&frame);
+
+    in->painted_cursor_row = 0;
+    in->painted_rows = 0;
 }
 
-/* Erase the painted edit area in place, leaving the cursor at its
- * top-left, ready for a modal handoff (editor / pager / picker) or the
- * next paint. Deliberately erases line-by-line (erase-line + cursor-
- * down, which clamps at the bottom row and never scrolls) rather than
- * with one erase-below: when the edit area starts at the top of the
- * screen (a capped tall buffer on a small terminal, or a prompt
- * repainted right after Ctrl-L), an erase-below from home is a
- * full-screen clear, and tmux (like some terminals) preserves cleared
- * screens by pushing them into scrollback — leaving a stale copy of
- * the prompt above the handoff. */
+/* Erase line-by-line because erase-below from the top of the screen can push a stale
+ * screen into scrollback in tmux and some terminals. Cursor-down clamps instead of scrolling. */
 static void erase_edit_area(struct input *in)
 {
-    struct buf f;
-    buf_init(&f);
-    if (in->last_cursor_row > 0)
-        buf_append_csi(&f, in->last_cursor_row, 'A');
-    buf_append(&f, "\r", 1);
-    int rows = in->last_rows > 0 ? in->last_rows : 1;
-    for (int i = 0; i < rows; i++) {
-        buf_append_str(&f, ANSI_ERASE_LINE);
-        if (i + 1 < rows)
-            buf_append_csi(&f, 1, 'B');
+    struct buf frame;
+    int rows = in->painted_rows > 0 ? in->painted_rows : 1;
+
+    buf_init(&frame);
+    if (in->painted_cursor_row > 0)
+        buf_append_csi(&frame, in->painted_cursor_row, 'A');
+    buf_append(&frame, "\r", 1);
+    for (int row = 0; row < rows; row++) {
+        buf_append_str(&frame, ANSI_ERASE_LINE);
+        if (row + 1 < rows)
+            buf_append_csi(&frame, 1, 'B');
     }
     if (rows > 1)
-        buf_append_csi(&f, rows - 1, 'A');
-    fwrite(f.data, 1, f.len, stdout);
+        buf_append_csi(&frame, rows - 1, 'A');
+    fwrite(frame.data, 1, frame.len, stdout);
     fflush(stdout);
-    buf_free(&f);
-    in->last_cursor_row = 0;
-    in->last_rows = 0;
+    buf_free(&frame);
+    in->painted_cursor_row = 0;
+    in->painted_rows = 0;
 }
 
 /* ---------------- $EDITOR escape ---------------- */
 
 static void open_editor(struct input *in)
 {
-    /* Erase the current edit area before handing off to the editor so
-     * the next paint replaces the prompt in place. For altscreen-using
-     * editors (vim, nvim, helix, ...) altscreen restore returns the
-     * cursor to this cleared position; non-altscreen editors will
-     * leave their output visible above. */
+    /* Alternate-screen editors restore the cursor to this cleared position. */
     erase_edit_area(in);
-    raw_off(in);
+    disable_raw_mode(in);
 
     char path[] = "/tmp/hax-edit-XXXXXX";
     int fd = mkstemp(path);
@@ -750,11 +648,7 @@ static void open_editor(struct input *in)
     char *content = aborted ? NULL : slurp_file(path, &n);
     unlink(path);
     if (content) {
-        /* Substitute embedded NULs with spaces. The rest of the
-         * pipeline (xstrdup at submit, history strdup, strlen-based
-         * comparisons) treats the buffer as a NUL-terminated string,
-         * so a stray NUL would silently truncate everything past it.
-         * Substitution preserves byte length for what remains. */
+        /* The edit buffer is NUL-terminated; preserve embedded NUL positions as spaces. */
         for (size_t k = 0; k < n; k++) {
             if (content[k] == '\0')
                 content[k] = ' ';
@@ -762,33 +656,24 @@ static void open_editor(struct input *in)
         /* Drop one trailing newline — most editors append one automatically. */
         if (n > 0 && content[n - 1] == '\n')
             content[--n] = '\0';
-        input_core_buf_set(in, content);
+        input_core_set_buffer(in, content);
         free(content);
     }
 
 reenter:
-    raw_on(in);
-    /* Terminal may have been resized while the editor had the screen.
-     * SIGWINCH delivered during system() is consumed by the child, so
-     * we won't see it here — refresh explicitly before the caller's
-     * next paint, otherwise wrap math uses pre-editor width. */
-    in->term_cols = editor_cols();
-    in->term_rows = tty_rows();
+    enable_raw_mode(in);
+    refresh_terminal_size(in);
 }
 
 /* ---------------- Modal control keys ---------------- */
 
-/* Run an application-bound modal handler, same shape as open_editor:
- * erase the edit area, drop raw mode, hand the terminal to the callback
- * (which typically popens a pager), then re-enter raw mode and let the
- * caller's next paint redraw the prompt. Returns 0 when `c` had no
- * binding, so the caller can fall through to its own handling. */
-static int run_modal_key(struct input *in, unsigned char c)
+static int run_modal_key(struct input *in, unsigned char key)
 {
     void (*fn)(void *user) = NULL;
     void *user = NULL;
+
     for (size_t i = 0; i < INPUT_MODAL_KEYS_MAX; i++) {
-        if (in->modal_keys[i].fn && in->modal_keys[i].key == c) {
+        if (in->modal_keys[i].fn && in->modal_keys[i].key == key) {
             fn = in->modal_keys[i].fn;
             user = in->modal_keys[i].user;
             break;
@@ -798,405 +683,305 @@ static int run_modal_key(struct input *in, unsigned char c)
         return 0;
 
     erase_edit_area(in);
-    raw_off(in);
+    disable_raw_mode(in);
 
     fn(user);
 
-    raw_on(in);
-    /* Pager may have prompted a window resize; refresh before the next
-     * paint so wrap math uses the current width. */
-    in->term_cols = editor_cols();
-    in->term_rows = tty_rows();
+    enable_raw_mode(in);
+    refresh_terminal_size(in);
     return 1;
 }
 
 /* ---------------- Tab modal completion ---------------- */
 
-/* Run the registered completer's modal phase over the span its match
- * phase reported. Same handoff shape as show_transcript: erase the
- * edit area, drop raw mode, let pick own the terminal (fzf or a picker
- * draws and cleans up after itself), then re-enter raw mode; the
- * caller's next paint redraws the prompt. On a non-empty result the
- * matched span is replaced with it; on NULL/empty (cancel) the buffer
- * is left untouched. */
 static void complete_modal(struct input *in, size_t start, size_t end)
 {
-    size_t tn = end - start;
-    char *token = xmalloc(tn + 1);
-    if (tn)
-        memcpy(token, in->buf + start, tn);
-    token[tn] = '\0';
+    size_t token_len = end - start;
+    char *token = xmalloc(token_len + 1);
+
+    if (token_len > 0)
+        memcpy(token, in->buf + start, token_len);
+    token[token_len] = '\0';
 
     erase_edit_area(in);
-    raw_off(in);
+    disable_raw_mode(in);
 
-    char *pick = in->completer->pick(token, in->completer->user);
+    char *replacement = in->completer->pick(token, in->completer->user);
     free(token);
 
-    raw_on(in);
-    /* The picker may have prompted a window resize; refresh before the
-     * next paint so wrap math uses the current width. */
-    in->term_cols = editor_cols();
-    in->term_rows = tty_rows();
-    if (pick && *pick)
-        input_core_replace_span(in, start, end, pick);
-    free(pick);
+    enable_raw_mode(in);
+    refresh_terminal_size(in);
+    if (replacement && *replacement)
+        input_core_replace_span(in, start, end, replacement);
+    free(replacement);
 }
 
 /* ---------------- reverse / forward incremental search ---------------- */
 
-/* Outcome of the Ctrl-R sub-loop, reported back to the main keystroke
- * loop. ACCEPT leaves the matched (or, on abort, the original) line in the
- * edit buffer and returns to editing; SUBMIT additionally asks the caller
- * to submit it, matching readline's Enter-during-isearch behavior. */
-enum rsearch_outcome {
-    RSEARCH_ACCEPT,
-    RSEARCH_SUBMIT,
+enum history_search_outcome {
+    HISTORY_SEARCH_ACCEPT,
+    HISTORY_SEARCH_SUBMIT,
 };
 
-/* Paste sink for the search query: append printable bytes, dropping ASCII
- * controls and DEL (a pasted newline/tab must not enter the single-line
- * query). UTF-8 lead/continuation bytes (>= 0x80) are kept so multi-byte
- * glyphs survive; any dangerous ones (C1, bidi) are neutralized when the
- * query is sanitized for display — see the prompt build in reverse_search. */
-static void paste_into_query(void *user, const char *bytes, size_t n)
+enum history_search_direction {
+    HISTORY_SEARCH_OLDER = -1,
+    HISTORY_SEARCH_NEWER = 1,
+};
+
+/* A history-search query is single-line, so pasted control bytes are discarded. */
+static void paste_into_query(void *user, const char *bytes, size_t len)
 {
-    struct buf *q = user;
-    for (size_t i = 0; i < n; i++) {
-        unsigned char b = (unsigned char)bytes[i];
-        if (b >= 0x20 && b != 0x7f)
-            buf_append(q, &bytes[i], 1);
+    struct buf *query = user;
+
+    for (size_t i = 0; i < len; i++) {
+        unsigned char byte = (unsigned char)bytes[i];
+        if (byte >= 0x20 && byte != 0x7f)
+            buf_append(query, &bytes[i], 1);
     }
 }
 
-/* Recompute the current match after the query changed. An empty query has
- * no match (the pre-search line is shown); otherwise scan from the current
- * match — so refining keeps you on the same entry when it still matches —
- * toward `dir`, marking `failed` when nothing matches. */
-static void rsearch_recompute(struct input *in, const struct buf *q, int dir, long *match,
-                              int *failed)
+static void recompute_history_match(struct input *in, const struct buf *query,
+                                    enum history_search_direction direction, long *match,
+                                    int *no_match)
 {
-    if (q->len == 0) {
+    if (query->len == 0) {
         *match = -1;
-        *failed = 0;
+        *no_match = 0;
         return;
     }
-    long start = (*match >= 0) ? *match : (dir < 0 ? (long)in->hist_n - 1 : 0);
-    long m = input_core_history_search(in, q->data, start, dir);
-    if (m >= 0) {
-        *match = m;
-        *failed = 0;
+
+    long start = *match >= 0 ? *match : direction < 0 ? (long)in->hist_n - 1 : 0;
+    long found = input_core_history_search(in, query->data, start, direction);
+    if (found >= 0) {
+        *match = found;
+        *no_match = 0;
     } else {
-        *failed = 1;
+        *no_match = 1;
     }
 }
 
-/* Sanitize the search query for display in the prompt. The prompt is
- * written raw via fputs (unlike the edit buffer, which renders through the
- * substituting walker), so dangerous codepoints must be neutralized here.
- * Substitutes one '?' per ASCII control / DEL / C1 / malformed / dangerous
- * (bidi, invisible) codepoint — the same policy as the buffer walker, keyed
- * on utf8_codepoint_cells returning negative — but passes every other glyph,
- * crucially ordinary spaces, through byte-for-byte: spaces are meaningful in
- * the raw query that drives input_core_history_search, so the prompt must
- * show them verbatim. Returns malloc'd; caller frees. */
-static char *sanitize_query_for_display(const char *s)
+/* Search prompts bypass the render walker, so sanitize untrusted query bytes here. */
+static char *sanitize_query_for_display(const char *query)
 {
-    size_t len = strlen(s);
-    struct buf out;
-    buf_init(&out);
-    for (size_t i = 0; i < len;) {
-        unsigned char c = (unsigned char)s[i];
-        if (c < 0x20 || c == 0x7f) {
-            /* ASCII control / DEL — input filters these out, so this is just
-             * defensive; one '?' each. */
-            buf_append(&out, "?", 1);
-            i++;
+    size_t len = strlen(query);
+    struct buf sanitized;
+
+    buf_init(&sanitized);
+    for (size_t offset = 0; offset < len;) {
+        unsigned char byte = (unsigned char)query[offset];
+        if (byte < 0x20 || byte == 0x7f) {
+            buf_append(&sanitized, "?", 1);
+            offset++;
             continue;
         }
-        size_t cons;
-        int w = utf8_codepoint_cells(s, len, i, &cons);
-        if (w < 0) {
-            buf_append(&out, "?", 1); /* one '?' per dangerous codepoint */
-            i += cons ? cons : 1;
+
+        size_t consumed;
+        int width = utf8_codepoint_cells(query, len, offset, &consumed);
+        if (width < 0) {
+            buf_append(&sanitized, "?", 1);
+            offset += consumed ? consumed : 1;
             continue;
         }
-        size_t n = cons ? cons : 1;
-        buf_append(&out, s + i, n);
-        i += n;
+        consumed = consumed ? consumed : 1;
+        buf_append(&sanitized, query + offset, consumed);
+        offset += consumed;
     }
-    return buf_steal(&out);
+    return buf_steal(&sanitized);
 }
 
-/* Clip `s` to at most `avail` display cells, keeping its tail and prefixing
- * a one-cell marker ("…", or "<" without UTF-8) when truncated. Used to keep
- * the search prompt within one row so it can't soft-wrap the terminal —
- * paint()/handle_resize() track only the rows input_core_render() produces
- * and assume the prompt fits on one row. Applied to the query alone (keeping
- * the tail the user is typing) when the chrome fits, or to the whole plain
- * prompt as a last resort on a terminal too narrow for the chrome. The full
- * query still drives the search; only the display is windowed. Returns
- * malloc'd; caller frees. */
-static char *clip_query_left(const char *s, int avail, int utf8)
+/* Keep the tail because it contains the portion of the query being edited. */
+static char *clip_query_left(const char *query, int available_columns, int have_utf8)
 {
-    size_t len = strlen(s);
-    int total = 0;
-    for (size_t i = 0; i < len;) {
-        size_t cons;
-        int w = utf8_codepoint_cells(s, len, i, &cons);
-        total += w < 0 ? 1 : w;
-        i += cons ? cons : 1;
+    size_t len = strlen(query);
+    int total_width = 0;
+
+    for (size_t offset = 0; offset < len;) {
+        size_t consumed;
+        int width = utf8_codepoint_cells(query, len, offset, &consumed);
+        total_width += width < 0 ? 1 : width;
+        offset += consumed ? consumed : 1;
     }
-    if (avail < 1)
+    if (available_columns < 1)
         return xstrdup("");
-    if (total <= avail)
-        return xstrdup(s);
+    if (total_width <= available_columns)
+        return xstrdup(query);
 
-    const char *mark = utf8 ? "\xe2\x80\xa6" : "<"; /* … */
-    int budget = avail - 1;                         /* one cell for the marker */
-    size_t keep = len;
-    int used = 0;
-    for (size_t i = len; i > 0;) {
-        size_t prev = utf8_prev(s, i);
-        size_t cons;
-        int w = utf8_codepoint_cells(s, len, prev, &cons);
-        if (w < 0)
-            w = 1;
-        if (used + w > budget)
+    const char *marker = have_utf8 ? "\xe2\x80\xa6" : "<";
+    int budget = available_columns - 1;
+    size_t keep_from = len;
+    int kept_width = 0;
+    for (size_t offset = len; offset > 0;) {
+        size_t previous = utf8_prev(query, offset);
+        size_t consumed;
+        int width = utf8_codepoint_cells(query, len, previous, &consumed);
+        if (width < 0)
+            width = 1;
+        if (kept_width + width > budget)
             break;
-        used += w;
-        keep = prev;
-        i = prev;
+        kept_width += width;
+        keep_from = previous;
+        offset = previous;
     }
-    return xasprintf("%s%s", mark, s + keep);
+    return xasprintf("%s%s", marker, query + keep_from);
 }
 
-/* Readline-style incremental history search. Entered on Ctrl-R; the prompt
- * is replaced with "reverse-search · query → " and the edit buffer mirrors
- * the most recent history entry containing `query`, with the cursor parked
- * at the match. Keys:
- *   - printable bytes extend the query (UTF-8 reassembled like the main loop)
- *   - Backspace shortens it
- *   - Ctrl-R steps to the next older match, Ctrl-S to the next newer one
- *     (Ctrl-S reaches us because raw mode clears IXON; the prompt flips to
- *     "forward-search")
- *   - Enter accepts the match and submits; LF / ESC (or any escape sequence)
- *     accept it and drop back into editing
- *   - Ctrl-G / Ctrl-C abort, restoring the line as it was on entry
- * During the loop the buffer holds only the painted view (the match, the
- * pre-search line, or empty under "(no match)"); the committed line is
- * rebuilt from `match` at `done` on accept, and abort restores the saved
- * copy. Accepting while nothing matches restores the entry line and does not
- * submit — you only ever accept/submit a match that is actually showing.
- * in->prompt is borrowed for our search prompt and restored on exit. */
-static enum rsearch_outcome reverse_search(struct input *in)
+static void show_history_search_match(struct input *in, const char *original,
+                                      size_t original_cursor, const struct buf *query, long match,
+                                      int no_match)
 {
-    char *orig = xstrdup(in->buf);
-    size_t orig_cursor = in->cursor;
-    size_t orig_hist_pos = in->hist_pos;
-    const char *orig_prompt = in->prompt;
+    if (no_match) {
+        input_core_set_buffer(in, "");
+        return;
+    }
+    if (match < 0) {
+        input_core_set_buffer(in, original);
+        in->cursor = original_cursor <= in->len ? original_cursor : in->len;
+        return;
+    }
 
-    struct buf q;
-    buf_init(&q);
-    long match = -1;  /* index of current match, or -1 = none */
-    int failed = 0;   /* current query matches nothing — painted as "(no match)" */
-    int dir = -1;     /* -1 reverse (older), +1 forward (newer) */
-    int accepted = 0; /* exiting to editing with the matched entry (not abort) */
-    char *prompt_buf = NULL;
-    enum rsearch_outcome outcome = RSEARCH_ACCEPT;
+    input_core_set_buffer(in, in->hist[match]);
+    char *match_start = query->len > 0 ? strstr(in->buf, query->data) : NULL;
+    in->cursor = match_start ? (size_t)(match_start - in->buf) : in->len;
+}
 
-    /* The search prefix is wide; wrap a long match's continuation rows to
-     * column 0 instead of aligning them under it. */
-    in->wrap_cont_col0 = 1;
+/* The search prompt must remain one row because paint tracks only rendered buffer rows. */
+static char *build_history_search_prompt(const struct buf *query,
+                                         enum history_search_direction direction, int no_match,
+                                         int display_columns)
+{
+    int have_utf8 = locale_have_utf8();
+    const char *label = direction == HISTORY_SEARCH_OLDER ? "reverse-search" : "forward-search";
+    const char *separator = query->len > 0 ? (have_utf8 ? " \xc2\xb7 " : " : ") : "";
+    const char *arrow = have_utf8 ? " \xe2\x86\x92 " : " > ";
+    char *safe_query = query->len > 0 ? sanitize_query_for_display(query->data) : NULL;
+    int budget = display_columns > 1 ? display_columns - 1 : 1;
+    int fixed_width = (int)strlen(label) + (query->len > 0 ? 3 : 0) + 3 + (no_match ? 10 : 0);
+    char *prompt;
+
+    if (fixed_width <= budget) {
+        char *visible_query =
+            safe_query ? clip_query_left(safe_query, budget - fixed_width, have_utf8) : NULL;
+        const char *suffix = no_match ? ANSI_DIM "(no match)" ANSI_BOLD_OFF : "";
+        prompt =
+            xasprintf("%s%s%s%s%s%s%s", theme_open(THEME_ACCENT), label, separator,
+                      visible_query ? visible_query : "", arrow, theme_close(THEME_ACCENT), suffix);
+        free(visible_query);
+    } else {
+        char *plain = xasprintf("%s%s%s%s%s", label, separator, safe_query ? safe_query : "", arrow,
+                                no_match ? "(no match)" : "");
+        char *visible = clip_query_left(plain, budget, have_utf8);
+        prompt = xasprintf("%s%s%s", theme_open(THEME_ACCENT), visible, theme_close(THEME_ACCENT));
+        free(visible);
+        free(plain);
+    }
+    free(safe_query);
+    return prompt;
+}
+
+static enum history_search_outcome search_history(struct input *in)
+{
+    char *original = xstrdup(in->buf);
+    size_t original_cursor = in->cursor;
+    size_t original_history_position = in->hist_pos;
+    const char *original_prompt = in->prompt;
+    struct buf query;
+    long match = -1;
+    int no_match = 0;
+    enum history_search_direction direction = HISTORY_SEARCH_OLDER;
+    int accepted = 0;
+    char *search_prompt = NULL;
+    enum history_search_outcome outcome = HISTORY_SEARCH_ACCEPT;
+
+    buf_init(&query);
+    in->continuation_at_column_zero = 1;
 
     for (;;) {
-        /* Mirror the current state into the edit buffer for display: the
-         * matched entry (cursor parked on the matched span), or the saved
-         * line when there's no query yet, or an empty line when the current
-         * query matches nothing (the prompt then shows "(no match)"). The
-         * line actually committed on accept is rebuilt at `done` from
-         * `match`/`orig`, so this is purely what's painted. */
-        if (failed) {
-            input_core_buf_set(in, "");
-        } else if (match >= 0) {
-            input_core_buf_set(in, in->hist[match]);
-            char *p = q.len > 0 ? strstr(in->buf, q.data) : NULL;
-            in->cursor = p ? (size_t)(p - in->buf) : in->len;
-        } else {
-            input_core_buf_set(in, orig);
-            in->cursor = orig_cursor <= in->len ? orig_cursor : in->len;
-        }
-
-        /* Modernized chrome: "<reverse|forward>-search · <query> → <result>".
-         * Accent-colored search framing — matching the normal "❯"
-         * prompt — with the result reset to default; a failed query shows a
-         * dim "(no match)" in place of the result. Glyphs fall back to ASCII
-         * (" : " / " > ") when the locale isn't UTF-8, like the prompt's
-         * ASCII fallback.
-         *
-         * The displayed query is sanitized (see sanitize_query_for_display):
-         * the prompt is written raw via fputs (unlike the edit buffer, which
-         * renders through the substituting walker), so pasted/typed control,
-         * DEL, C1 and dangerous bidi/format codepoints must be neutralized
-         * here or they could corrupt the terminal. Ordinary spaces are kept
-         * verbatim (they matter to the search); the raw query still drives
-         * the byte-safe search.
-         *
-         * The assembled prompt is kept within one row so it can't soft-wrap
-         * (paint()/handle_resize() model it as a single row): with room for
-         * the chrome, the query is windowed to its tail to fill the leftover
-         * width; on a terminal too narrow even for the chrome, the whole
-         * plain prompt is left-clipped to fit. input_core_prompt_width strips
-         * the CSI sequences, so the wrap and cursor math stay correct. */
-        int utf8 = locale_have_utf8();
-        const char *label = dir < 0 ? "reverse-search" : "forward-search";
-        const char *dot = q.len > 0 ? (utf8 ? " \xc2\xb7 " : " : ") : "";
-        const char *arrow = utf8 ? " \xe2\x86\x92 " : " > ";
-        char *qsafe = q.len > 0 ? sanitize_query_for_display(q.data) : NULL;
-
-        int budget = in->term_cols - 1;
-        if (budget < 1)
-            budget = 1;
-        /* Fixed chrome: label + " · "/" → " (3 each, dot only with a query) +
-         * "(no match)" (10, failed only). */
-        int fixed = (int)strlen(label) + (q.len > 0 ? 3 : 0) + 3 + (failed ? 10 : 0);
-
-        free(prompt_buf);
-        if (fixed <= budget) {
-            char *qdisp = qsafe ? clip_query_left(qsafe, budget - fixed, utf8) : NULL;
-            const char *tail = failed ? ANSI_DIM "(no match)" ANSI_BOLD_OFF : "";
-            prompt_buf = xasprintf("%s%s%s%s%s%s%s", theme_open(THEME_ACCENT), label, dot,
-                                   qdisp ? qdisp : "", arrow, theme_close(THEME_ACCENT), tail);
-            free(qdisp);
-        } else {
-            char *plain = xasprintf("%s%s%s%s%s", label, dot, qsafe ? qsafe : "", arrow,
-                                    failed ? "(no match)" : "");
-            char *fit = clip_query_left(plain, budget, utf8);
-            prompt_buf =
-                xasprintf("%s%s%s", theme_open(THEME_ACCENT), fit, theme_close(THEME_ACCENT));
-            free(plain);
-            free(fit);
-        }
-        free(qsafe);
-        in->prompt = prompt_buf;
+        show_history_search_match(in, original, original_cursor, &query, match, no_match);
+        free(search_prompt);
+        search_prompt =
+            build_history_search_prompt(&query, direction, no_match, in->display_columns);
+        in->prompt = search_prompt;
         paint(in);
 
-        unsigned char c;
-        if (read_byte_blocking(&c) <= 0) /* EOF: abort, restore */
+        unsigned char key;
+        if (read_byte_blocking(&key) <= 0)
             break;
 
-        /* Resize bookkeeping before the next top-of-loop paint, same as
-         * the main keystroke loop. */
         handle_resize(in);
 
-        if (c == 0x12 || c == 0x13) { /* Ctrl-R / Ctrl-S — step the search */
-            dir = (c == 0x12) ? -1 : 1;
-            /* Nothing to step when there's no query yet, or the query
-             * matches nothing at all (stays "(no match)"). Otherwise a
-             * match is showing (match >= 0); try the next one in `dir`.
-             * If exhausted, keep the current match shown — a silent no-op,
-             * like Up/Down at the history boundaries — rather than blanking
-             * to "(no match)", which would wrongly imply the query stopped
-             * matching. So stepping never sets `failed`. */
-            if (q.len == 0 || failed)
+        if (key == 0x12 || key == 0x13) {
+            direction = key == 0x12 ? HISTORY_SEARCH_OLDER : HISTORY_SEARCH_NEWER;
+            if (query.len == 0 || no_match)
                 continue;
-            long m = input_core_history_search(in, q.data, match + dir, dir);
-            if (m >= 0)
-                match = m;
+            long found = input_core_history_search(in, query.data, match + direction, direction);
+            if (found >= 0)
+                match = found;
             continue;
         }
-        if (c == 0x7f || c == 0x08) { /* Backspace — shorten the query */
-            if (q.len > 0) {
-                q.len = utf8_prev(q.data, q.len);
-                q.data[q.len] = '\0';
+        if (key == 0x7f || key == 0x08) {
+            if (query.len > 0) {
+                query.len = utf8_prev(query.data, query.len);
+                query.data[query.len] = '\0';
             }
-            rsearch_recompute(in, &q, dir, &match, &failed);
+            recompute_history_match(in, &query, direction, &match, &no_match);
             continue;
         }
-        if (c == 0x07 || c == 0x03) /* Ctrl-G / Ctrl-C — abort, restore */
+        if (key == 0x07 || key == 0x03)
             break;
-        if (c == 0x0d) { /* Enter — accept the match and submit */
+        if (key == 0x0d) {
             accepted = 1;
-            outcome = RSEARCH_SUBMIT;
+            outcome = HISTORY_SEARCH_SUBMIT;
             goto done;
         }
-        if (c == 0x0a) { /* LF — accept the match, keep editing */
+        if (key == 0x0a) {
             accepted = 1;
             goto done;
         }
-        if (c == 0x1b) {
-            /* An escape sequence. A bracketed paste feeds its body into the
-             * query (so a paste during search extends it, and — crucially —
-             * the paste body and its end marker can't leak into the main
-             * keystroke loop where a pasted newline could submit the prompt).
-             * Any other sequence (arrow, bare ESC, ...) accepts the match and
-             * returns to editing; input_core_decode_escape has already drained
-             * its bytes, so nothing leaks. */
-            if (input_core_decode_escape(byte_reader_tty, NULL) == INPUT_ACTION_PASTE_BEGIN) {
-                read_paste(paste_into_query, &q);
-                rsearch_recompute(in, &q, dir, &match, &failed);
+        if (key == 0x1b) {
+            if (input_core_decode_escape(read_escape_byte, NULL) == INPUT_ACTION_PASTE_BEGIN) {
+                read_bracketed_paste(paste_into_query, &query);
+                recompute_history_match(in, &query, direction, &match, &no_match);
                 continue;
             }
             accepted = 1;
             goto done;
         }
-        if (c >= 0x20) { /* printable — extend the query */
-            int seq = utf8_seq_len(c);
-            char bytes[4];
-            bytes[0] = (char)c;
-            int got = 1;
-            for (int i = 1; i < seq; i++) {
-                unsigned char b;
-                if (read_byte_timeout(&b, ESC_TIMEOUT_MS) <= 0)
+        if (key >= 0x20) {
+            int sequence_len = utf8_seq_len(key);
+            char bytes[4] = {(char)key};
+            int bytes_read = 1;
+            for (int i = 1; i < sequence_len; i++) {
+                unsigned char byte;
+                if (read_byte_timeout(&byte, ESC_TIMEOUT_MS) <= 0)
                     break;
-                bytes[got++] = (char)b;
+                bytes[bytes_read++] = (char)byte;
             }
-            buf_append(&q, bytes, got);
-            rsearch_recompute(in, &q, dir, &match, &failed);
+            buf_append(&query, bytes, bytes_read);
+            recompute_history_match(in, &query, direction, &match, &no_match);
             continue;
         }
-        /* Other control bytes: ignore, stay in search. */
     }
 
-    /* Abort / EOF path: restore the line exactly as it was on entry. */
-    input_core_buf_set(in, orig);
-    in->cursor = orig_cursor <= in->len ? orig_cursor : in->len;
+    show_history_search_match(in, original, original_cursor, &query, -1, 0);
 
 done:
-    if (accepted) {
-        /* Rebuild the committed line from `match` (the display buffer may be
-         * the transient empty "(no match)" view). A match is committable only
-         * when one is actually showing (!failed) — accepting out of a
-         * "(no match)" state must not resurrect a stale, typed-past match, nor
-         * submit the original line. So if the current query has no match, we
-         * fall back to the line as it was on entry and never submit. */
-        if (!failed && match >= 0) {
-            input_core_buf_set(in, in->hist[match]);
-            char *p = q.len > 0 ? strstr(in->buf, q.data) : NULL;
-            in->cursor = p ? (size_t)(p - in->buf) : in->len;
-            /* Land history navigation on the matched entry so a subsequent
-             * Up/Down steps from there — as if reached by arrowing, matching
-             * bash's Ctrl-R. */
-            in->hist_pos = (size_t)match;
-            /* If the search began on the live draft, preserve it so Down past
-             * the newest entry restores what the user was typing. (If they
-             * had already arrowed into history, the existing draft is their
-             * real in-progress line — leave it untouched.) */
-            if (orig_hist_pos == in->hist_n) {
-                free(in->draft);
-                in->draft = xstrdup(orig);
-            }
-        } else {
-            input_core_buf_set(in, orig);
-            in->cursor = orig_cursor <= in->len ? orig_cursor : in->len;
-            outcome = RSEARCH_ACCEPT; /* nothing matched — don't submit */
+    if (accepted && !no_match && match >= 0) {
+        show_history_search_match(in, original, original_cursor, &query, match, 0);
+        in->hist_pos = (size_t)match;
+        /* Preserve a live draft for Down past the newest search result. */
+        if (original_history_position == in->hist_n) {
+            free(in->draft);
+            in->draft = xstrdup(original);
         }
+    } else if (accepted) {
+        show_history_search_match(in, original, original_cursor, &query, -1, 0);
+        outcome = HISTORY_SEARCH_ACCEPT;
     }
-    in->wrap_cont_col0 = 0;
-    in->prompt = orig_prompt;
-    free(prompt_buf);
-    buf_free(&q);
-    free(orig);
+    in->continuation_at_column_zero = 0;
+    in->prompt = original_prompt;
+    free(search_prompt);
+    buf_free(&query);
+    free(original);
     return outcome;
 }
 
@@ -1204,15 +989,7 @@ done:
 
 static char *read_line_canonical(size_t *out_len)
 {
-    /* No prompt in the non-tty path: stdout may be a pipe or file, in
-     * which case ANSI prompt bytes pollute scriptable output, and stdin
-     * may be piped with no human to read a prompt anyway. */
-    /* Read byte-by-byte rather than fgets+strlen so embedded NULs in
-     * piped input survive (fgets terminates at \n but strlen-based
-     * append truncates at the first NUL). fgetc returns int and
-     * distinguishes 0 from EOF; the length is returned out-of-band so
-     * sanitize_utf8 in the caller can turn embedded NULs into U+FFFD
-     * without truncating. */
+    /* Byte-wise reads preserve embedded NULs until sanitize_utf8 can replace them. */
     struct buf b;
     buf_init(&b);
     for (;;) {
@@ -1237,34 +1014,14 @@ static char *read_line_canonical(size_t *out_len)
 
 /* ---------------- history persistence ---------------- */
 
-/* Threshold (multiplier of in-memory cap) for rewriting the on-disk
- * history file at open time. The file grows unboundedly via append; we
- * compact it back to the in-memory snapshot once it gets this far past
- * the cap, so it stays bounded over months of use without paying the
- * rewrite cost on every submit. */
+/* Compact append-only history only after it substantially exceeds the in-memory cap. */
 #define HISTORY_FILE_BLOAT_FACTOR 3
 
-/* Hard cap on a single encoded record (bytes between newlines on disk).
- * Drops both at append and at load, so the load path can use a fixed
- * buffer instead of unbounded getline(). 64KB swallows any prompt a
- * human would deliberately submit; the cap exists to defend against
- * file corruption (concurrent-write truncation per the comment above
- * splicing two records together) and against accidentally-edited
- * history files turning into an unbounded allocation at startup. */
+/* Bound both writes and startup allocation when history is corrupt or hand-edited. */
 #define HISTORY_RECORD_MAX 65536
 
-/* Append one already-encoded entry plus a trailing newline to `path`.
- *
- * Concurrency: the record is built in one buffer and emitted via a
- * single write(2) under O_APPEND. Linux atomically pairs the implicit
- * seek-to-end with the write, so concurrent hax processes don't
- * overlap each other's records — at typical prompt sizes (well under
- * one page) the kernel doesn't return short writes for regular files.
- * A retry loop on a short write would defeat that atomicity (another
- * process could append between our two write calls), so we emit once
- * and accept that a >page record on a stressed system might end up
- * truncated on disk. Errors are swallowed — a failed history write
- * must never disrupt the REPL. */
+/* Use one O_APPEND write so concurrent processes cannot interleave a record. Retrying a
+ * short write would lose that property, so a rare short write is allowed to truncate history. */
 static void history_file_append(const char *path, const char *line)
 {
     char *enc = input_core_history_encode(line);
@@ -1296,12 +1053,8 @@ static void history_file_append(const char *path, const char *line)
     close(fd);
 }
 
-/* Atomically rewrite `path` with the current in-memory history. Uses a
- * sibling tmpfile + rename, so readers and concurrent appenders see
- * either the old or the new file, never a half-written one. The race
- * window with concurrent appenders is small (only invoked at startup
- * after a bloat threshold is crossed) and the worst case is losing a
- * few records that another instance appended during our rewrite. */
+/* A sibling temporary file prevents partial reads. Concurrent appends during rename may be
+ * lost; compaction runs only at startup after the bloat threshold. */
 static void history_file_rewrite(struct input *in, const char *path)
 {
     char *dup = xstrdup(path);
@@ -1338,9 +1091,7 @@ static void history_file_rewrite(struct input *in, const char *path)
     free(dup);
 }
 
-/* Read `path` into the in-memory history, returning the number of records
- * seen (which can exceed what was kept — the in-memory ring is capped).
- * Touches nothing on disk. */
+/* Return records seen, including entries later evicted from the in-memory cap. */
 static size_t history_file_load(struct input *in, const char *path)
 {
     int fd = open_regular_file(path);
@@ -1350,11 +1101,7 @@ static size_t history_file_load(struct input *in, const char *path)
 
     size_t loaded = 0;
     if (f) {
-        /* Fixed-size buffer instead of getline() — bounds the worst-case
-         * allocation if the file contains a corrupt or pathologically
-         * long line. Records >= HISTORY_RECORD_MAX bytes are dropped,
-         * with the rest of the offending line consumed up to the next
-         * newline so we resync on the following record. */
+        /* Drop oversized records but consume through newline to resynchronize the file. */
         char *line = xmalloc(HISTORY_RECORD_MAX);
         for (;;) {
             size_t n = 0;
@@ -1397,17 +1144,13 @@ void input_history_open(struct input *in, const char *path)
 {
     if (!path || !*path)
         return;
-    /* mkdir -p the parent — first run typically has no $XDG_STATE_HOME
-     * tree yet. Failure is non-fatal; the load below will find nothing and
-     * the append path silently fails too. */
     char *dup = xstrdup(path);
     fs_mkdir_p(dirname(dup));
     free(dup);
 
     size_t loaded = history_file_load(in, path);
 
-    /* Store path before any rewrite so we can no-op on rewrite failure
-     * without losing append behavior. */
+    /* A failed compaction must not disable later appends. */
     free(in->persist_path);
     in->persist_path = xstrdup(path);
 
@@ -1436,8 +1179,6 @@ int input_bind_modal_key(struct input *in, unsigned char key, void (*fn)(void *u
 {
     if (key >= 0x20)
         return -1;
-    /* Rebind in place when the key is already bound, so a caller can
-     * replace or clear a binding without leaking a slot. */
     struct input_modal_key *slot = NULL;
     for (size_t i = 0; i < INPUT_MODAL_KEYS_MAX; i++) {
         if (in->modal_keys[i].fn && in->modal_keys[i].key == key) {
@@ -1455,7 +1196,7 @@ int input_bind_modal_key(struct input *in, unsigned char key, void (*fn)(void *u
         if (!slot)
             return -1;
     }
-    if (!slot) /* clearing a key that wasn't bound */
+    if (!slot)
         return 0;
     slot->key = key;
     slot->fn = fn;
@@ -1463,15 +1204,15 @@ int input_bind_modal_key(struct input *in, unsigned char key, void (*fn)(void *u
     return 0;
 }
 
-void input_set_modal_completer(struct input *in, const struct input_modal_completer *mc)
+void input_set_modal_completer(struct input *in, const struct input_modal_completer *completer)
 {
-    in->completer = mc;
+    in->completer = completer;
 }
 
-void input_set_paste_cb(struct input *in, char *(*fn)(void *user), void *user)
+void input_set_paste_hook(struct input *in, char *(*fn)(void *user), void *user)
 {
-    in->paste_cb = fn;
-    in->paste_user = user;
+    in->paste_hook = fn;
+    in->paste_hook_user = user;
 }
 
 void input_set_paste_filter(struct input *in, char *(*fn)(const char *text, void *user), void *user)
@@ -1498,13 +1239,7 @@ int input_cancelled(const struct input *in)
 
 void input_history_open_default(struct input *in, int persist)
 {
-    /* Skip persistence in non-interactive sessions. `echo prompt | hax`
-     * and other scripted invocations fall through to the canonical
-     * non-tty read path (see input_readline), and persisting those
-     * one-off lines into the user's recall history is surprising —
-     * worse, it can leak secrets piped from a script. Gate on the same
-     * condition input_readline uses to choose its read path. Nothing to
-     * recall there either, so this returns before loading too. */
+    /* Never retain piped input; it may contain secrets from unattended scripts. */
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
         return;
     char *path = xdg_hax_state_path("history");
@@ -1535,29 +1270,27 @@ char *input_readline(struct input *in, const char *prompt)
         return clean;
     }
 
-    /* Reset per-call edit state. History is preserved across calls. */
     in->prompt = prompt;
-    in->term_cols = editor_cols();
-    in->term_rows = tty_rows();
+    refresh_terminal_size(in);
     in->len = 0;
     in->cursor = 0;
     in->buf[0] = '\0';
     if (in->preseed) {
-        input_core_buf_set(in, in->preseed); /* cursor lands at the end */
+        input_core_set_buffer(in, in->preseed);
         free(in->preseed);
         in->preseed = NULL;
     }
     in->hist_pos = in->hist_n;
     free(in->draft);
     in->draft = NULL;
-    in->last_cursor_row = 0;
-    in->last_rows = 0;
-    in->last_clipped = 0;
-    in->win_top = 0;
-    in->top_ind_cells = 0;
+    in->painted_cursor_row = 0;
+    in->painted_rows = 0;
+    in->previous_paint_clipped = 0;
+    in->window_top = 0;
+    in->top_indicator_width = 0;
 
     fflush(stdout);
-    raw_on(in);
+    enable_raw_mode(in);
     paint(in);
 
     int submit = 0;
@@ -1572,12 +1305,7 @@ char *input_readline(struct input *in, const char *prompt)
             break;
         }
 
-        /* Resize detection runs after read but before applying the
-         * keypress: the buffer still matches what's on screen (the
-         * terminal reflowed our last paint while we blocked in read),
-         * so the climb-and-clear math has the right inputs. After
-         * mutation we'd be working off post-keypress state and the
-         * terminal would still show pre-keypress content. */
+        /* Resize recovery needs the buffer state that produced the current screen. */
         if (handle_resize(in))
             paint(in);
 
@@ -1588,10 +1316,7 @@ char *input_readline(struct input *in, const char *prompt)
         case 0x02: /* Ctrl-B */
             input_core_move_left(in);
             break;
-        case 0x03: /* Ctrl-C — cancel: return empty string per readline
-                    * convention. The agent loop discards empty results
-                    * and re-prompts, leaving the partially-typed line
-                    * visible in scrollback. */
+        case 0x03: /* Ctrl-C */
             cancel = 1;
             break;
         case 0x04: /* Ctrl-D — EOF on empty, else delete-fwd */
@@ -1614,31 +1339,28 @@ char *input_readline(struct input *in, const char *prompt)
         case 0x7f: /* DEL / backspace */
             input_core_delete_back(in);
             break;
-        case 0x09: { /* Tab — modal completion when a completer matches;
-                      * else insert a literal tab. The span is validated
-                      * here so a buggy match can't splice out of range. */
+        case 0x09: { /* Tab */
             size_t cs, ce;
             if (in->completer &&
                 in->completer->match(in->buf, in->len, in->cursor, &cs, &ce, in->completer->user) &&
                 cs <= ce && ce <= in->len)
                 complete_modal(in, cs, ce);
             else
-                input_core_buf_insert(in, "\t", 1);
+                input_core_insert(in, "\t", 1);
             break;
         }
         case 0x0a: /* LF — Shift+Enter inserts a newline */
-            input_core_buf_insert(in, "\n", 1);
+            input_core_insert(in, "\n", 1);
             break;
         case 0x0b: /* Ctrl-K */
             input_core_kill_to_eol(in);
             break;
         case 0x0c: /* Ctrl-L — clear screen + repaint */
-            fputs("\x1b[2J\x1b[H", stdout);
-            in->last_cursor_row = 0;
-            in->last_rows = 0;
+            fputs(ANSI_ERASE_SCREEN ANSI_CURSOR_HOME, stdout);
+            in->painted_cursor_row = 0;
+            in->painted_rows = 0;
             break;
-        case 0x0d: /* CR — Enter submits; empty buffer only when the
-                    * caller opted in (resumable-turn "continue") */
+        case 0x0d: /* CR — Enter; empty requires empty_submit */
             if (in->len > 0 || in->empty_submit)
                 submit = 1;
             break;
@@ -1649,46 +1371,32 @@ char *input_readline(struct input *in, const char *prompt)
             input_core_history_prev(in);
             break;
         case 0x12: /* Ctrl-R — incremental reverse history search */
-            if (reverse_search(in) == RSEARCH_SUBMIT && in->len > 0)
+            if (search_history(in) == HISTORY_SEARCH_SUBMIT && in->len > 0)
                 submit = 1;
             break;
         case 0x15: /* Ctrl-U */
             input_core_kill_to_bol(in);
             break;
-        case 0x16: /* Ctrl-V — paste hook: image marker or clipboard text
-                    * (no-op if unset) */
-            handle_paste_hook(in);
+        case 0x16: /* Ctrl-V */
+            invoke_paste_hook(in);
             break;
         case 0x17: /* Ctrl-W */
             input_core_kill_word_back(in);
             break;
-        case 0x1a: /* Ctrl-Z — suspend (raw mode disables ISIG, so the
-                    * tty driver won't generate SIGTSTP for us). Drop
-                    * out of raw mode, leave the partial line visible
-                    * in scrollback, and raise the signal ourselves. */
+        case 0x1a: /* Ctrl-Z; raw mode disables the tty's ISIG handling. */
             leave_edit_area(in);
-            raw_off(in);
+            disable_raw_mode(in);
             raise(SIGTSTP);
-            /* Resumed. The terminal may have been resized while we
-             * were stopped; paint state was cleared by leave_edit_area
-             * so the next paint draws fresh. */
-            raw_on(in);
-            in->term_cols = editor_cols();
-            in->term_rows = tty_rows();
+            enable_raw_mode(in);
+            refresh_terminal_size(in);
             break;
         case 0x1b: /* ESC — start of escape sequence */
-            handle_escape(in);
+            handle_escape_sequence(in);
             break;
         default:
             if (c >= 0x20) {
-                /* Read remaining bytes of the UTF-8 sequence with the
-                 * same timeout we use for ESC: a stray malformed leader
-                 * (Meta-key from a misconfigured terminal, serial-line
-                 * glitch, paste outside bracketed-paste) would otherwise
-                 * block here, and ISIG is off so Ctrl-C/D would be
-                 * consumed as continuation bytes instead of working.
-                 * On timeout we insert what we have; render-time
-                 * substitution renders the partial sequence as `?`. */
+                /* Time out malformed leaders because raw mode would consume Ctrl-C/D as
+                 * continuation bytes. Partial sequences render as a substitute glyph. */
                 int seq = utf8_seq_len(c);
                 char bytes[4];
                 bytes[0] = (char)c;
@@ -1699,20 +1407,14 @@ char *input_readline(struct input *in, const char *prompt)
                         break;
                     bytes[got++] = (char)b;
                 }
-                input_core_buf_insert(in, bytes, got);
+                input_core_insert(in, bytes, got);
             } else {
-                /* A control byte the editor doesn't use itself: offer it
-                 * to the application's modal bindings (Ctrl-O, Ctrl-T).
-                 * Reaching them only from here is what makes editing keys
-                 * unshadowable — every case above already consumed its
-                 * byte. Unbound bytes are ignored (e.g. Ctrl-J). */
+                /* Built-in editing keys take precedence over application bindings. */
                 run_modal_key(in, c);
             }
             break;
         }
 
-        /* No paint on submit: render_submitted replaces the edit area
-         * wholesale, so a paint here would be pure churn. */
         if (!eof && !submit)
             paint(in);
     }
@@ -1721,7 +1423,7 @@ char *input_readline(struct input *in, const char *prompt)
         render_submitted(in);
     else
         leave_edit_area(in);
-    raw_off(in);
+    disable_raw_mode(in);
 
     if (eof && in->len == 0)
         return NULL;
@@ -1729,9 +1431,6 @@ char *input_readline(struct input *in, const char *prompt)
         in->last_cancelled = 1;
         return xstrdup("");
     }
-    /* Sanitize before handing off: paste / $EDITOR content may contain
-     * malformed UTF-8 (binary fragments, truncated multi-byte) that
-     * downstream JSON builders (jansson) reject, silently dropping the
-     * user's message. Replace invalid sequences with U+FFFD. */
+    /* Jansson rejects malformed UTF-8, so normalize external input before returning it. */
     return sanitize_utf8(in->buf, in->len);
 }
