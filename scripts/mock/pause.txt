@@ -1,0 +1,41 @@
+# Streaming-pause fixture.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/pause.txt build/hax
+#
+# Each 2500 ms delay emits no events. Once text is visible it is the progress
+# indicator, so no spinner or cursor movement should appear during the delay.
+
+# Turn 1: reasoning pauses and resumes in place.
+# With HAX_SHOW_REASONING=1, the visible dim-italic text remains undisturbed.
+# With reasoning hidden, the thinking spinner remains active because no text is visible.
+reasoning Thinking through the user's question — what's the simplest answer that still covers the asked-for bits?\n\n
+delay 2500
+reasoning Right, I have it. The pause between these two thoughts should have shown nothing new on screen.
+delay 0
+text Here's the answer after that pause.
+usage in=80 out=22
+end-turn
+
+# Turn 2: text pauses remain quiet and preserve the paragraph.
+text Sentence one — the model emits this then pauses.
+space
+delay 2500
+text Sentence two arrives after the pause; nothing should have appeared during the wait, and the paragraph continues unbroken.
+delay 0
+space
+delay 2500
+text Sentence three — same again.
+usage in=100 out=20
+end-turn
+
+# Turn 3: a pause after text stays quiet until tool arguments begin streaming.
+text Let me look at a few more key pieces.
+delay 2500
+tool read {"path":"src/agent.c"}
+usage in=120 out=15
+end-turn
+
+# Turn 4: finish the tool-calling chain.
+text Done — that wraps up the second pattern.
+usage in=140 out=12
+end-turn

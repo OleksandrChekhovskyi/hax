@@ -1,0 +1,38 @@
+# Semantic theme-role fixture.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/theme.txt build/hax
+#   HAX_THEME=light HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/theme.txt build/hax
+#   HAX_TINT=violet HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/theme.txt build/hax
+#
+# Repeat with dark/light/ansi/off themes and violet/rose/sage tints. The prompt
+# and typed message cover the accent role. Error and warning roles require a
+# deliberate runtime error and are not emitted by this fixture.
+
+# Turn 1: Markdown voice roles and loud tool chrome.
+text ## Theme demo — heading role\n\nInline styles: **bold emphasis**, *italics*, and `code_inline` spans. A fenced block gets the code_block role:\n\n```c\nint main(void)\n{\n    return 0; /* code_block, not muted */\n}\n```\n\n- muted bullet, `code_inline` again\n- chrome: the `[bash]` tag and gutter strip below\n\n---\n\nNow a loud tool call:
+tool bash {"command":"printf 'tool output row one (muted)\\ntool output row two (muted)\\n'"}
+usage in=400 out=40
+end-turn
+
+# Turn 2: create stable input for the diff.
+text Seeding a scratch file, then editing it to show the add/remove diff roles:
+tool bash {"command":"mkdir -p {{CWD}}/.hax-themedemo && printf 'alpha\\nbeta\\ngamma\\n' > {{CWD}}/.hax-themedemo/demo.txt"}
+end-turn
+
+# Turn 3: diff add, remove, and context roles.
+tool edit {"path":"{{CWD}}/.hax-themedemo/demo.txt","old_string":"beta","new_string":"BETA"}
+end-turn
+
+# Turn 4: quiet tool chrome.
+text A quiet read next — its dim chrome `[read]` tag should recede:
+tool read {"path":"{{CWD}}/.hax-themedemo/demo.txt"}
+end-turn
+
+# Turn 5: table styling and cleanup.
+text A table exercises bold header cells and muted column rules:\n\n| role | marks |\n|------|-------|\n| accent | prompt `❯`, user stripe |\n| chrome | tool tags, gutter strips |\n| code_block | fenced code bodies |\n\nCleaning up the scratch dir:
+tool bash {"command":"rm -rf {{CWD}}/.hax-themedemo"}
+end-turn
+
+# Turn 6: end the chain.
+text Done. Re-run under `HAX_THEME=dark`, `light`, `ansi`, or `off` to compare — the picker arrow (`/model`) and transcript user text (ctrl-t) also carry the accent role. Re-run under `HAX_TINT=violet`, `rose`, or `sage` to check that only the headings, `code_inline`, and fence bodies above move hue, while the `[bash]` tags, gutter strips, diff colors, and the prompt marker stay exactly where they were.
+end-turn

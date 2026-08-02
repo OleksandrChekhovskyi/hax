@@ -1,241 +1,298 @@
 #!/usr/bin/env python3
-"""Generate deterministic image fixtures for testing model vision support.
+"""Generate deterministic PNG fixtures for manual vision-pipeline tests.
 
-Every major provider path (Anthropic image blocks, OpenAI Chat image_url,
-Responses input_image, llama.cpp mmproj) can be smoke-tested by asking the
-model to `read` one of these and answer a question only the pixels can
-answer. Pure stdlib (zlib PNG writer) — no imaging dependencies, identical
-bytes on every run, so failures are always the pipeline or the model, never
-the fixture.
-
-Usage:
-    scripts/vision_fixtures.py [--dir DIR] [--edge]
-
-Writes to --dir (default /tmp/hax-vision-fixtures) and prints, for each
-file, the prompt to use and the expected answer. --edge additionally
-generates oversized fixtures that must be *rejected* by the read tool
-(dimension cap and byte cap) — useful for testing the downscale-hint error
-path without a real photo.
-
-The model sees the path in the tool call, so a filename must not leak
-anything the accompanying prompt doesn't already state — solid-magenta.png
-would hand over the answer, and an oversize fixture named big-noise.png
-would let the model declare "too big" without ever calling the tool. Task
-words the prompt itself uses (solid color, dots, text) are fine; the edge
-fixtures get deliberately uninformative names. Expected answers live only
-here and in the printed table.
-
-Fixture expectations:
-  solid-color.png     "The image is a single solid color. Name it."
-                      -> magenta. The baseline pipeline check.
-  layout.png          "Describe the colors and where each is located."
-                      -> red left half, blue right half. Layout/orientation
-                      check. Small or heavily quantized models sometimes
-                      hallucinate extra stripes here; treat wrong *colors*
-                      or wrong *order* as a pipeline bug, extra detail as
-                      model quality.
-  count-dots.png      "How many dots does the image contain?"
-                      -> 5. Counting check (the count is not in the name);
-                      also sensitive to accidental downscaling artifacts.
-  text-word.png       "What text does the image show?"
-                      -> HAX. Crude OCR check (block letters). For a
-                      realistic text-heavy fixture use docs/screenshot.png,
-                      which shows a real hax session.
-  edge-a.png          (--edge) 900x8400 — read must REFUSE (8000px side
-                      cap) with a downscale hint; the model must discover
-                      this by calling read, not from the name. Content
-                      survives the resize: after following the hint, the
-                      image shows red/green/blue horizontal bands, so the
-                      full refuse -> downscale -> re-read recovery loop is
-                      testable end to end.
-  edge-b.png          (--edge) 4000x1400, ~4.6MB — read must REFUSE (raw
-                      size over the ~3.75MB cap; a seeded noise strip
-                      makes the file incompressible). After downscaling,
-                      the image shows the text HAX beside the noise strip.
-
-Stale fixtures from previous runs (e.g. edge files after a run without
---edge) are removed from --dir first, so the directory always matches the
-printed table exactly.
-
-Other formats: the read tool sniffs magic bytes for PNG/JPEG/GIF/WebP, but
-only PNG can be written dependency-free — convert a fixture with e.g.
-`magick solid-color.png solid-color.webp` to cover the other parsers.
+The default fixtures test color, layout, counting, and block-letter OCR. ``--edge``
+also creates images that the read tool must reject for exceeding dimension or byte
+limits. Filenames intentionally do not reveal their expected answers.
 """
 
+from __future__ import annotations
+
 import argparse
-import os
 import random
 import struct
 import sys
 import zlib
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 
+Rgb = tuple[int, int, int]
+RowRenderer = Callable[[int], bytes]
+PixelRenderer = Callable[[int, int], Rgb]
 
-def png_chunk(tag: bytes, data: bytes) -> bytes:
-    return (
-        struct.pack(">I", len(data))
-        + tag
-        + data
-        + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
-    )
-
-
-def write_png(path: str, width: int, height: int, row_at) -> int:
-    """Write an 8-bit RGB PNG; row_at(y) returns 3*width bytes of RGB."""
-    rows = bytearray()
-    for y in range(height):
-        rows.append(0)  # filter: none
-        rows += row_at(y)
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
-    blob = (
-        b"\x89PNG\r\n\x1a\n"
-        + png_chunk(b"IHDR", ihdr)
-        + png_chunk(b"IDAT", zlib.compress(bytes(rows)))
-        + png_chunk(b"IEND", b"")
-    )
-    with open(path, "wb") as f:
-        f.write(blob)
-    return len(blob)
-
-
-# 5x7 block font, just the letters the fixture needs.
-FONT = {
-    "H": ["10001", "10001", "10001", "11111", "10001", "10001", "10001"],
-    "A": ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
-    "X": ["10001", "10001", "01010", "00100", "01010", "10001", "10001"],
-}
-
-
-def pixel_rows(width: int, pixel_at):
-    """Adapt a per-pixel (x, y) -> (r, g, b) function to write_png's row form."""
-    return lambda y: bytes(v for x in range(width) for v in pixel_at(x, y))
-
-
-def text_row_bytes(text: str, scale: int, cy: int, fg=(0, 0, 0), bg=(255, 255, 255)) -> bytes:
-    """One rendered row of `text` (font row cy, 0..6) at `scale`, as RGB bytes.
-    Width is (len(text) * 6 - 1) * scale: 5-wide glyphs, 1-column gaps."""
-    fg3, bg3 = bytes(fg), bytes(bg)
-    out = bytearray()
-    for cx in range(len(text) * 6 - 1):
-        on = cx % 6 < 5 and FONT[text[cx // 6]][cy][cx % 6] == "1"
-        out += (fg3 if on else bg3) * scale
-    return bytes(out)
-
-
-def text_fixture(text: str, scale: int, margin: int):
-    cols = len(text) * 6 - 1
-    width = cols * scale + 2 * margin
-    height = 7 * scale + 2 * margin
-    blank = b"\xff\xff\xff" * width
-    pad = b"\xff\xff\xff" * margin
-
-    def row(y: int) -> bytes:
-        cy = (y - margin) // scale
-        if 0 <= cy < 7:
-            return pad + text_row_bytes(text, scale, cy) + pad
-        return blank
-
-    return width, height, row
-
-
-def dots_pixel_fn(centers, radius: int):
-    def at(x: int, y: int):
-        for cx, cy in centers:
-            if (x - cx) ** 2 + (y - cy) ** 2 <= radius**2:
-                return (0, 0, 0)
-        return (255, 255, 255)
-
-    return at
-
-
-# Every name this script has ever owned, for stale cleanup — the directory
-# must always match the printed table, never mix runs.
-ALL_FIXTURES = [
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+FIXTURE_NAMES = (
     "solid-color.png",
     "layout.png",
     "count-dots.png",
     "text-word.png",
     "edge-a.png",
     "edge-b.png",
-]
+)
+
+# Only the glyphs needed by the fixtures are defined.
+FONT = {
+    "H": ("10001", "10001", "10001", "11111", "10001", "10001", "10001"),
+    "A": ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
+    "X": ("10001", "10001", "01010", "00100", "01010", "10001", "10001"),
+}
+
+
+@dataclass(frozen=True)
+class FixtureResult:
+    name: str
+    width: int
+    height: int
+    size_bytes: int
+    prompt: str
+    expected: str
+
+
+def encode_png_chunk(tag: bytes, data: bytes) -> bytes:
+    checksum = zlib.crc32(tag + data) & 0xFFFFFFFF
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", checksum)
+
+
+def write_png(path: Path, width: int, height: int, row_bytes: RowRenderer) -> int:
+    """Write an 8-bit RGB PNG and return its encoded size."""
+    scanlines = bytearray()
+    expected_row_bytes = width * 3
+    for y in range(height):
+        row = row_bytes(y)
+        if len(row) != expected_row_bytes:
+            raise ValueError(
+                f"row {y} has {len(row)} bytes; expected {expected_row_bytes}"
+            )
+        scanlines.append(0)  # PNG filter type: none
+        scanlines.extend(row)
+
+    image_header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    encoded = (
+        PNG_SIGNATURE
+        + encode_png_chunk(b"IHDR", image_header)
+        + encode_png_chunk(b"IDAT", zlib.compress(bytes(scanlines)))
+        + encode_png_chunk(b"IEND", b"")
+    )
+    path.write_bytes(encoded)
+    return len(encoded)
+
+
+def rows_from_pixels(width: int, pixel_color: PixelRenderer) -> RowRenderer:
+    def row_bytes(y: int) -> bytes:
+        return bytes(channel for x in range(width) for channel in pixel_color(x, y))
+
+    return row_bytes
+
+
+def render_text_row(
+    text: str,
+    scale: int,
+    font_row: int,
+    foreground: Rgb = BLACK,
+    background: Rgb = WHITE,
+) -> bytes:
+    foreground_bytes = bytes(foreground)
+    background_bytes = bytes(background)
+    rendered = bytearray()
+    for font_column in range(len(text) * 6 - 1):
+        glyph_column = font_column % 6
+        pixel_on = (
+            glyph_column < 5
+            and FONT[text[font_column // 6]][font_row][glyph_column] == "1"
+        )
+        color = foreground_bytes if pixel_on else background_bytes
+        rendered.extend(color * scale)
+    return bytes(rendered)
+
+
+def make_text_fixture(text: str, scale: int, margin: int) -> tuple[int, int, RowRenderer]:
+    text_columns = len(text) * 6 - 1
+    width = text_columns * scale + 2 * margin
+    height = 7 * scale + 2 * margin
+    blank_row = bytes(WHITE) * width
+    horizontal_margin = bytes(WHITE) * margin
+
+    def row_bytes(y: int) -> bytes:
+        font_row = (y - margin) // scale
+        if 0 <= font_row < 7:
+            return (
+                horizontal_margin
+                + render_text_row(text, scale, font_row)
+                + horizontal_margin
+            )
+        return blank_row
+
+    return width, height, row_bytes
+
+
+def make_dot_renderer(centers: tuple[tuple[int, int], ...], radius: int) -> PixelRenderer:
+    def pixel_color(x: int, y: int) -> Rgb:
+        for center_x, center_y in centers:
+            if (x - center_x) ** 2 + (y - center_y) ** 2 <= radius**2:
+                return BLACK
+        return WHITE
+
+    return pixel_color
+
+
+def create_fixture(
+    output_dir: Path,
+    results: list[FixtureResult],
+    name: str,
+    width: int,
+    height: int,
+    row_bytes: RowRenderer,
+    prompt: str,
+    expected: str,
+) -> None:
+    size_bytes = write_png(output_dir / name, width, height, row_bytes)
+    results.append(
+        FixtureResult(name, width, height, size_bytes, prompt, expected)
+    )
+
+
+def create_standard_fixtures(
+    output_dir: Path, results: list[FixtureResult]
+) -> None:
+    magenta_row = b"\xff\x00\xff" * 96
+    create_fixture(
+        output_dir,
+        results,
+        "solid-color.png",
+        96,
+        96,
+        lambda _y: magenta_row,
+        "The image is a single solid color. Name it.",
+        "magenta",
+    )
+
+    halves_row = b"\xff\x00\x00" * 48 + b"\x00\x00\xff" * 48
+    create_fixture(
+        output_dir,
+        results,
+        "layout.png",
+        96,
+        96,
+        lambda _y: halves_row,
+        "Describe the colors and where each is located.",
+        "red left half, blue right half",
+    )
+
+    dot_centers = ((24, 24), (104, 24), (64, 64), (24, 104), (104, 104))
+    create_fixture(
+        output_dir,
+        results,
+        "count-dots.png",
+        128,
+        128,
+        rows_from_pixels(128, make_dot_renderer(dot_centers, radius=10)),
+        "How many dots does the image contain?",
+        "5",
+    )
+
+    width, height, row_bytes = make_text_fixture("HAX", scale=8, margin=8)
+    create_fixture(
+        output_dir,
+        results,
+        "text-word.png",
+        width,
+        height,
+        row_bytes,
+        "What text does the image show?",
+        "HAX",
+    )
+
+
+def create_edge_fixtures(output_dir: Path, results: list[FixtureResult]) -> None:
+    band_rows = (
+        b"\xff\x00\x00" * 900,
+        b"\x00\xff\x00" * 900,
+        b"\x00\x00\xff" * 900,
+    )
+    create_fixture(
+        output_dir,
+        results,
+        "edge-a.png",
+        900,
+        8400,
+        lambda y: band_rows[y // 2800],
+        "What does the image show?",
+        "read refuses (dimension cap); after downscaling: red, green, and blue "
+        "horizontal bands from top to bottom",
+    )
+
+    # Seeded noise keeps the source over the byte cap but shrinks below it when resized.
+    white_pixel = bytes(WHITE)
+
+    def edge_b_row(y: int) -> bytes:
+        random_source = random.Random(0x48410000 + y)
+        noise = bytes(random_source.getrandbits(8) for _ in range(1100 * 3))
+        font_row = (y - 105) // 170
+        if 0 <= font_row < 7:
+            return (
+                noise
+                + white_pixel * 5
+                + render_text_row("HAX", 170, font_row)
+                + white_pixel * 5
+            )
+        return noise + white_pixel * 2900
+
+    create_fixture(
+        output_dir,
+        results,
+        "edge-b.png",
+        4000,
+        1400,
+        edge_b_row,
+        "What does the image show?",
+        "read refuses (byte cap); after downscaling: HAX beside a noise strip",
+    )
+
+
+def print_results(output_dir: Path, results: list[FixtureResult]) -> None:
+    name_width = max(len(result.name) for result in results)
+    print(f"wrote {len(results)} fixture(s) to {output_dir}\n")
+    for result in results:
+        dimensions = f"{result.width}x{result.height}"
+        print(
+            f"  {result.name:<{name_width}}  {dimensions:>9}  "
+            f"{result.size_bytes:>8} bytes"
+        )
+        print(f"  {'':<{name_width}}  prompt: {result.prompt}")
+        print(f"  {'':<{name_width}}  expect: {result.expected}\n")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--dir",
+        dest="output_dir",
+        type=Path,
+        default=Path("/tmp/hax-vision-fixtures"),
+    )
+    parser.add_argument(
+        "--edge",
+        action="store_true",
+        help="also generate fixtures that exceed read-tool limits",
+    )
+    return parser.parse_args()
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--dir", default="/tmp/hax-vision-fixtures")
-    ap.add_argument("--edge", action="store_true", help="also generate the oversized fixtures")
-    args = ap.parse_args()
-    os.makedirs(args.dir, exist_ok=True)
-    for name in ALL_FIXTURES:
-        try:
-            os.remove(os.path.join(args.dir, name))
-        except FileNotFoundError:
-            pass
+    args = parse_args()
+    output_dir: Path = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for name in FIXTURE_NAMES:
+        (output_dir / name).unlink(missing_ok=True)
 
-    made = []
-
-    def emit(name, width, height, row_at, prompt, expect):
-        path = os.path.join(args.dir, name)
-        size = write_png(path, width, height, row_at)
-        made.append((name, f"{width}x{height}", size, prompt, expect))
-
-    magenta_row = b"\xff\x00\xff" * 96
-    emit(
-        "solid-color.png", 96, 96, lambda y: magenta_row,
-        "The image is a single solid color. Name it.", "magenta",
-    )
-    halves_row = b"\xff\x00\x00" * 48 + b"\x00\x00\xff" * 48
-    emit(
-        "layout.png", 96, 96, lambda y: halves_row,
-        "Describe the colors and where each is located.", "red left half, blue right half",
-    )
-    emit(
-        "count-dots.png", 128, 128,
-        pixel_rows(128, dots_pixel_fn([(24, 24), (104, 24), (64, 64), (24, 104), (104, 104)], 10)),
-        "How many dots does the image contain?", "5",
-    )
-    w, h, row = text_fixture("HAX", scale=8, margin=8)
-    emit("text-word.png", w, h, row, "What text does the image show?", "HAX")
-
+    results: list[FixtureResult] = []
+    create_standard_fixtures(output_dir, results)
     if args.edge:
-        # Both edge fixtures carry content that survives the suggested
-        # downscale, so the whole recovery loop is testable: read refuses
-        # with a hint, the model resizes via bash, re-reads the copy, and
-        # only then can answer the content question.
-        bands = [b"\xff\x00\x00" * 900, b"\x00\xff\x00" * 900, b"\x00\x00\xff" * 900]
-        emit(
-            "edge-a.png", 900, 8400, lambda y: bands[y // 2800],
-            "What does the image show?",
-            "read refuses (per-side pixel cap) with a downscale hint; after downscaling: "
-            "three horizontal bands — red, green, blue, top to bottom",
-        )
-        # Byte-cap trigger: ~4.6MB of seeded, incompressible noise in the
-        # left strip; the rest is compressible text. The 4000px width keeps
-        # the hint effective — at 1568px the noise shrinks ~6.5x in area,
-        # putting the downscaled copy safely under the cap (pure noise at
-        # the original size would still exceed it after a resize).
-        rng = random.Random(0x4841)
-        white = b"\xff\xff\xff"
-
-        def edge_b_row(y: int) -> bytes:
-            noise = bytes(rng.getrandbits(8) for _ in range(1100 * 3))
-            cy = (y - 105) // 170
-            if 0 <= cy < 7:
-                return noise + white * 5 + text_row_bytes("HAX", 170, cy) + white * 5
-            return noise + white * 2900
-
-        emit(
-            "edge-b.png", 4000, 1400, edge_b_row,
-            "What does the image show?",
-            "read refuses (byte cap) with a downscale hint; after downscaling: the text "
-            "HAX beside a noise strip",
-        )
-
-    name_w = max(len(m[0]) for m in made)
-    print(f"wrote {len(made)} fixture(s) to {args.dir}\n")
-    for name, dims, size, prompt, expect in made:
-        print(f"  {name:<{name_w}}  {dims:>9}  {size:>8} bytes")
-        print(f"  {'':<{name_w}}  prompt: {prompt}")
-        print(f"  {'':<{name_w}}  expect: {expect}\n")
+        create_edge_fixtures(output_dir, results)
+    print_results(output_dir, results)
     return 0
 
 

@@ -1,18 +1,13 @@
 #!/bin/sh
-# Quiet build/test/lint wrapper for humans, editors, and coding agents.
-#
-# Success prints a compact confirmation (a line per phase, plus meson's
-# test summary); failures pass through untouched (compiler diagnostics,
-# failing-test logs). BUILD_DIR selects the meson
-# build directory (default: build). `build`, `build-asan`, and `build-tsan`
-# are set up automatically when missing; any other directory must already
-# exist.
+# Build, test, and lint wrapper for terminal use and editor integration.
+# Successful phases print compact confirmations; failures preserve full diagnostics.
+# BUILD_DIR defaults to build. build, build-asan, and build-tsan are created when
+# missing; any other build directory must already exist.
 #
 # Usage:
-#   scripts/check.sh build              # quiet build
-#   scripts/check.sh test [name...]     # quiet build, then all/named tests
-#   scripts/check.sh lint               # clang-format check over src/ and tests/
-#
+#   scripts/check.sh build
+#   scripts/check.sh test [name...]
+#   scripts/check.sh lint
 #   BUILD_DIR=build-asan scripts/check.sh test
 
 set -eu
@@ -20,67 +15,77 @@ set -eu
 cd "$(dirname "$0")/.."
 
 BUILD_DIR=${BUILD_DIR:-build}
-
-# Name the build dir in messages only when it isn't the default one.
 if [ "$BUILD_DIR" = build ]; then
-    where=""
+    build_suffix=
 else
-    where=" ($BUILD_DIR)"
+    build_suffix=" ($BUILD_DIR)"
 fi
 
-setup() {
-    [ -d "$BUILD_DIR" ] && return 0
+setup_build_dir() {
+    [ -d "$BUILD_DIR" ] && return
+
     case $BUILD_DIR in
     build)
-        set -- ;;
+        set --
+        ;;
     build-asan)
-        set -- -Db_sanitize=address,undefined ;;
+        set -- -Db_sanitize=address,undefined
+        ;;
     build-tsan)
-        set -- -Db_sanitize=thread ;;
+        set -- -Db_sanitize=thread
+        ;;
     *)
-        echo "error: build dir '$BUILD_DIR' does not exist;" \
-            "run: meson setup $BUILD_DIR <options>" >&2
-        exit 1 ;;
+        printf "error: build dir '%s' does not exist; run: meson setup %s <options>\n" \
+            "$BUILD_DIR" "$BUILD_DIR" >&2
+        exit 1
+        ;;
     esac
-    log=$(mktemp)
-    if ! meson setup "$BUILD_DIR" "$@" >"$log" 2>&1; then
-        cat "$log" >&2
-        rm -f "$log"
+
+    setup_log=$(mktemp)
+    trap 'rm -f "$setup_log"' 0
+    if ! meson setup "$BUILD_DIR" "$@" >"$setup_log" 2>&1; then
+        cat "$setup_log" >&2
         exit 1
     fi
-    rm -f "$log"
-    echo "setup OK$where"
+    rm -f "$setup_log"
+    trap - 0
+    printf "setup OK%s\n" "$build_suffix"
 }
 
-build() {
-    setup
+build_project() {
+    setup_build_dir
     ninja -C "$BUILD_DIR" --quiet
-    echo "build OK$where"
+    printf "build OK%s\n" "$build_suffix"
+}
+
+lint_sources() {
+    find src tests -type f \( -name '*.c' -o -name '*.h' \) \
+        -exec clang-format --dry-run --Werror {} +
+
+    # Tests use t_tempdir() so temporary directories are removed on early exits.
+    if grep -rn --include='*.c' --include='*.h' 'mkdtemp' tests |
+        grep -v '^tests/harness\.h:'; then
+        printf '%s\n' \
+            'error: raw mkdtemp in tests; use t_tempdir() from tests/harness.h' >&2
+        exit 1
+    fi
+    printf '%s\n' 'lint OK'
 }
 
 case ${1:-} in
 build)
-    build
+    build_project
     ;;
 test)
     shift
-    build
+    build_project
     meson test -C "$BUILD_DIR" --no-rebuild -q --print-errorlogs "$@"
     ;;
 lint)
-    find src tests -type f \( -name '*.c' -o -name '*.h' \) -print0 |
-        xargs -0 clang-format --dry-run --Werror
-    # Raw mkdtemp in tests leaks dirs under /tmp when a test fails or
-    # forgets cleanup; t_tempdir() (tests/harness.h) removes them at exit.
-    if grep -rn 'mkdtemp' tests --include='*.c' --include='*.h' |
-        grep -v '^tests/harness\.h:'; then
-        echo "error: raw mkdtemp in tests; use t_tempdir() from tests/harness.h" >&2
-        exit 1
-    fi
-    echo "lint OK"
+    lint_sources
     ;;
 *)
-    echo "usage: scripts/check.sh build|test|lint [test name...]" >&2
+    printf '%s\n' 'usage: scripts/check.sh build|test|lint [test name...]' >&2
     exit 2
     ;;
 esac

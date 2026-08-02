@@ -286,7 +286,7 @@ or model.
 
 ```sh
 HAX_PROVIDER=mock hax
-HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock_demo.txt hax
+HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/demo.txt hax
 ```
 
 With `HAX_MOCK_SCRIPT`, the mock provider plays a small line-based script. Without a script,

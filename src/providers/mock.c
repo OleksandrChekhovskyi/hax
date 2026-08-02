@@ -40,7 +40,7 @@
  *       text <message>           One text delta with the rest of the line.
  *                                Decodes \n, \t, \\ so a single delta can
  *                                span multiple lines (used by the markdown
- *                                wrap fixtures in mock_layout.txt).
+ *                                wrap fixtures in scripts/mock/layout.txt).
  *       reasoning <message>      One reasoning/chain-of-thought delta.
  *                                Same auto-chunking and \-escape decoding
  *                                as `text`. Renders only when HAX_SHOW_
@@ -66,7 +66,7 @@
  *     process working directory at emit time (see expand_cwd). Lets a
  *     checked-in script reference paths under cwd — whose absolute root
  *     is machine-specific — to exercise path relativization and
- *     cd-stripping (see scripts/diff_demo.txt).
+ *     cd-stripping (see scripts/mock/diff.txt).
  *
  *     Long text is auto-streamed in TEXT_CHUNK_BYTES-sized deltas with
  *     `delay` between chunks, so the live preview shows incremental

@@ -1,0 +1,74 @@
+# End-to-end mock-provider rendering fixture.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/demo.txt build/hax
+#
+# The first user message runs turns 1–7 as one tool-calling chain. A second
+# message runs turns 8–9.
+
+# Turn 1: stream reasoning, prose, and a bash call.
+# HAX_SHOW_REASONING=1 displays the reasoning as dim italic Markdown; otherwise
+# only the "thinking..." spinner label is visible.
+delay 30
+reasoning The user just said hello, so I should poke around to see what kind of repo this is before answering. A single `ls scripts/` is enough — the directory is flat, no need for `find` or `-R`.\n\nLet me run it and then summarize.
+text Let me poke around the repo to start.
+tool bash {"command":"ls scripts/"}
+usage in=420 out=18
+end-turn
+
+# Turn 2: show live output and spinner repaints between slow lines.
+text Now a slow streamer to show the spinner between chunks.
+tool bash {"command":"scripts/stream_demo.py slow --delay 0.4 --count 6"}
+usage in=520 out=22
+end-turn
+
+# Turn 3: exceed the display head budget and show head/elision/tail output.
+text This one overruns the display head and lands content in the tail.
+tool bash {"command":"scripts/stream_demo.py long --delay 0.05"}
+usage in=640 out=28
+end-turn
+
+# Turn 4: exceed the model-facing output cap.
+# The display should show its normal head/elision/tail preview. With
+# HAX_TRANSCRIPT=/tmp/t.txt, the tool result should retain the SUMMARY and
+# TRAILER around a truncation marker that names the saved full output.
+text This one is big enough that the model gets a head+tail summary with a gap marker.
+tool bash {"command":"echo '=== SUMMARY (front-loaded line; must survive in the head) ==='; seq 1 20000; echo '=== TRAILER (must survive in the tail) ==='"}
+usage in=700 out=30
+end-turn
+
+# Turn 5: show the read tool's head-only preview.
+text And here's the read tool's head-only preview.
+tool read {"path":"src/render/disp.h"}
+usage in=780 out=24
+end-turn
+
+# Turn 6: seed a file so write reliably produces a diff.
+# The 800 ms pause exposes `[bash] composing...`; the short second pause should
+# switch directly to `[write] composing...` without flashing `working...`.
+text One write to /tmp so the diff renderer has something to color.
+delay 800
+tool bash {"command":"printf 'hello from a previous run\\n' > /tmp/hax_mock_demo.txt"}
+delay 80
+tool write {"path":"/tmp/hax_mock_demo.txt","content":"hello from the mock provider — second time around\n"}
+usage in=860 out=30
+end-turn
+
+# Turn 7: end the first agentic chain.
+text All done — that covered live preview, display elision, model truncation, file read, and diff coloring.
+usage in=920 out=44
+end-turn
+
+# Turn 8: begin a new chain on the next user message.
+text Sure, here's one more — a tiny ls just to show the continuation works.
+tool bash {"command":"ls -1 src/providers"}
+usage in=980 out=20
+end-turn
+
+# Turn 9: keep a Markdown table buffered long enough to show `composing...`.
+# The intro renders immediately; the completed table should replace the spinner
+# without leaving an extra status row.
+text Here's a quick comparison of the OpenAI-family presets:
+delay 250
+text \n\n| Preset | Default base URL | Context probe |\n| --- | --- | --- |\n| openai | api.openai.com | none |\n| openai_compat | (your URL) | none |\n| llamacpp | 127.0.0.1:8080 | /props background |\n| openrouter | openrouter.ai/api | /endpoints background |\n
+usage in=1020 out=72
+end-turn

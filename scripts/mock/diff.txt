@@ -1,0 +1,67 @@
+# Path-normalization and diff-rendering fixture.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/diff.txt build/hax
+#
+# Type one message to run the full chain. {{CWD}} expands to the process
+# working directory, allowing the fixture to exercise absolute paths under a
+# machine-specific repository root.
+
+# Turn 1: create inputs inside and outside the working directory.
+# JSON consumes one backslash, leaving \n escapes for printf to interpret.
+text Setting up a scratch area to demo path normalization and diff display.
+tool bash {"command":"mkdir -p {{CWD}}/.hax-diffdemo && printf 'line one\\nline two\\nline three\\n' > {{CWD}}/.hax-diffdemo/calc.py && printf 'first\\n' > {{CWD}}/.hax-diffdemo/over.txt && printf 'outside\\n' > /tmp/hax-diffdemo-outside.txt"}
+end-turn
+
+# Turn 2: remove a redundant `cd <cwd> &&` from the displayed command.
+text Note the redundant `cd <cwd> &&` prefix is stripped from the shown command.
+tool bash {"command":"cd {{CWD}} && ls .hax-diffdemo"}
+end-turn
+
+# Turn 3: show an under-cwd absolute path as `.hax-diffdemo/calc.py`.
+text Editing via an absolute path under cwd — shown relative, diff headers elided.
+tool edit {"path":"{{CWD}}/.hax-diffdemo/calc.py","old_string":"line two","new_string":"line TWO"}
+end-turn
+
+# Turn 4: preserve an absolute path outside cwd.
+text Editing a file outside cwd — the path stays absolute.
+tool edit {"path":"/tmp/hax-diffdemo-outside.txt","old_string":"outside","new_string":"OUTSIDE"}
+end-turn
+
+# Turn 5: apply the same path normalization to read headers.
+text Reading shows the same relativized header.
+tool read {"path":"{{CWD}}/.hax-diffdemo/calc.py"}
+end-turn
+
+# Turn 6: preview a newly created file without echoing a diff.
+text New file with content — a content preview, terse returned summary.
+tool write {"path":"{{CWD}}/.hax-diffdemo/new.py","content":"print('hi')\nprint('bye')\n"}
+end-turn
+
+# Turn 7: render a visible summary when a new file has no preview rows.
+text Empty new file — a "(empty)" summary, not a blank block.
+tool write {"path":"{{CWD}}/.hax-diffdemo/empty.py","content":""}
+end-turn
+
+# Turn 8: treat whitespace-only content like an empty preview.
+text Whitespace-only new file — also a visible summary, not a blank block.
+tool write {"path":"{{CWD}}/.hax-diffdemo/blank.py","content":"\n   \n"}
+end-turn
+
+# Turn 9: show a unified diff for an overwrite.
+text Overwriting an existing file shows a colored diff.
+tool write {"path":"{{CWD}}/.hax-diffdemo/over.txt","content":"second\n"}
+end-turn
+
+# Turn 10: identify a byte-identical overwrite as having no changes.
+text Overwriting with identical content shows "(no changes)".
+tool write {"path":"{{CWD}}/.hax-diffdemo/over.txt","content":"second\n"}
+end-turn
+
+# Turn 11: remove all scratch files.
+text Cleaning up the scratch area.
+tool bash {"command":"rm -rf {{CWD}}/.hax-diffdemo /tmp/hax-diffdemo-outside.txt"}
+end-turn
+
+# Turn 12: end the agentic chain.
+text Done — that covered cd-strip, path relativization, bare absolute labels, diff-header elision, content previews, empty/blank/no-change markers, and a colored diff.
+end-turn

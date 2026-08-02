@@ -41,7 +41,7 @@ The mock provider exercises dispatch and rendering without an LLM:
 
 ```sh
 HAX_PROVIDER=mock hax
-HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock_demo.txt hax
+HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/demo.txt hax
 ```
 
 Without a script, it parses the latest user message heuristically. For example, typing
@@ -64,7 +64,16 @@ end-turn
 `space` joins consecutive `text` directives with a single-space delta. Blank lines and `#`
 comments are ignored. The full DSL reference lives at the top of `src/providers/mock.c`.
 
-See `scripts/mock_demo.txt` for examples covering tool previews and multi-turn continuation.
+Mock-provider fixtures live under `scripts/mock/`:
+
+| Fixture | Use |
+| --- | --- |
+| `demo.txt` | End-to-end rendering and multi-turn tool dispatch. |
+| `layout.txt` | Header, gutter, and Markdown layout. |
+| `diff.txt` | Path normalization and diff rendering. |
+| `pause.txt` | Pauses between streamed events. |
+| `tasks.txt` | Background-task lifecycle. |
+| `theme.txt` | Semantic color roles. |
 
 Mock runs leave nothing behind: no session file for `/resume` to list, and no prompts added
 to Up/Ctrl-R recall, so driving the UI doesn't bury real conversations under fixtures. Pass
@@ -72,18 +81,12 @@ to Up/Ctrl-R recall, so driving the UI doesn't bury real conversations under fix
 
 ## Demo scripts
 
-Useful scripts in `scripts/`:
+Useful executable helpers in `scripts/`:
 
 | Script | Use |
 | --- | --- |
-| `mock_demo.txt` | Scripted mock-provider demo. |
-| `mock_layout.txt` | Layout fixtures: header reflow, gutter rendering, markdown wrap. |
 | `stream_demo.py` | Streaming patterns through the bash tool. |
 | `mock_openai_server.py` | Lightweight OpenAI-compatible test server. |
-| `diff_demo.txt` | Manual diff/rendering fixture. |
-| `pause_demo.txt` | Streaming-pause behavior fixture (no spinner over live text). |
-| `theme_demo.txt` | One-screen tour of the semantic color roles; run under each `HAX_THEME` and `HAX_TINT`. |
-| `vision_fixtures.py` | Deterministic image fixtures for testing model vision support. |
 
 `stream_demo.py` modes include `short`, `long`, `slow`, `burst`, `ansi`, `binary`, `piped`,
 and `python_buffer`.
