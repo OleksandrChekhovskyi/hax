@@ -139,28 +139,21 @@ int main(void)
         op->destroy(op);
     }
 
-    /* An anthropic-messages provider constructs offline (no probe). Its
-     * default budget thinking mode ignores effort, so /effort is hidden;
-     * switching to adaptive mode advertises the ladder (low..max). */
-    const struct provider_factory *af = provider_find("claudish");
-    EXPECT(af != NULL);
+    const struct provider_factory *anthropic_factory = provider_find("claudish");
+    EXPECT(anthropic_factory != NULL);
     EXPECT(selectable("claudish"));
-    struct provider *ap = af->new(af->name);
-    EXPECT(ap != NULL);
-    if (ap) {
-        const char *const *eff = NULL;
-        EXPECT_STR_EQ(ap->name, "claudish");
-        /* An explicit catalog_id wins over the own-name default. */
-        EXPECT_STR_EQ(ap->catalog_id, "anthropic");
-        /* providers.<name>.sort_models is dialect-agnostic: resolved by the
-         * config-provider layer, so it reaches an anthropic-dialect provider
-         * the same as an openai one. */
-        EXPECT(ap->sort_models == 1);
-        EXPECT(ap->list_efforts && ap->list_efforts(ap, &eff) == 0); /* budget → hidden */
+    struct provider *anthropic = anthropic_factory->new(anthropic_factory->name);
+    EXPECT(anthropic != NULL);
+    if (anthropic) {
+        const char *const *efforts = NULL;
+        EXPECT_STR_EQ(anthropic->name, "claudish");
+        EXPECT_STR_EQ(anthropic->catalog_id, "anthropic");
+        EXPECT(anthropic->sort_models == 1);
+        EXPECT(anthropic->list_efforts && anthropic->list_efforts(anthropic, &efforts) == 0);
         config_set_override("providers.claudish.thinking_mode", "adaptive");
-        EXPECT(ap->list_efforts(ap, &eff) == 5); /* adaptive → ladder shown */
+        EXPECT(anthropic->list_efforts(anthropic, &efforts) == 5);
         config_set_override("providers.claudish.thinking_mode", NULL);
-        ap->destroy(ap);
+        anthropic->destroy(anthropic);
     }
 
     /* An unsupported dialect is a construction failure, not a crash. */

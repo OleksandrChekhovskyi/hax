@@ -5,22 +5,21 @@
 
 #include "harness.h"
 #include "provider.h"
-#include "providers/anthropic.h"
+#include "providers/anthropic_messages.h"
 
-/* Nth message in the built array. */
-static json_t *msg_at(json_t *msgs, size_t i)
+static json_t *message_at(json_t *messages, size_t i)
 {
-    return json_array_get(msgs, i);
+    return json_array_get(messages, i);
 }
 
-static const char *role_of(json_t *msg)
+static const char *message_role(json_t *message)
 {
-    return json_string_value(json_object_get(msg, "role"));
+    return json_string_value(json_object_get(message, "role"));
 }
 
-static json_t *content_of(json_t *msg)
+static json_t *message_content(json_t *message)
 {
-    return json_object_get(msg, "content");
+    return json_object_get(message, "content");
 }
 
 static const char *block_type(json_t *block)
@@ -28,23 +27,19 @@ static const char *block_type(json_t *block)
     return json_string_value(json_object_get(block, "type"));
 }
 
-/* A plain user message becomes role:user with a single text block. */
 static void test_user_message(void)
 {
     struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
-    json_t *msgs = anthropic_build_messages(items, 1, "anthropic", "m", 0, -1);
-    EXPECT(json_array_size(msgs) == 1);
-    EXPECT_STR_EQ(role_of(msg_at(msgs, 0)), "user");
-    json_t *blocks = content_of(msg_at(msgs, 0));
+    json_t *messages = anthropic_build_messages(items, 1, "anthropic", "m", 0, -1);
+    EXPECT(json_array_size(messages) == 1);
+    EXPECT_STR_EQ(message_role(message_at(messages, 0)), "user");
+    json_t *blocks = message_content(message_at(messages, 0));
     EXPECT(json_array_size(blocks) == 1);
     EXPECT_STR_EQ(block_type(json_array_get(blocks, 0)), "text");
     EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(blocks, 0), "text")), "hello");
-    json_decref(msgs);
+    json_decref(messages);
 }
 
-/* Reasoning (thinking block, valid signature) + assistant text + tool call
- * collapse into one assistant message with blocks ordered thinking, text,
- * tool_use; the tool input parses back into a JSON object. */
 static void test_assistant_group_thinking_text_tool(void)
 {
     struct item items[] = {
@@ -58,28 +53,25 @@ static void test_assistant_group_thinking_text_tool(void)
          .tool_name = "bash",
          .tool_arguments_json = "{\"cmd\":\"ls\"}"},
     };
-    json_t *msgs = anthropic_build_messages(items, 3, "anthropic", "m", 0, -1);
-    EXPECT(json_array_size(msgs) == 1);
-    json_t *a = msg_at(msgs, 0);
-    EXPECT_STR_EQ(role_of(a), "assistant");
-    json_t *blocks = content_of(a);
+    json_t *messages = anthropic_build_messages(items, 3, "anthropic", "m", 0, -1);
+    EXPECT(json_array_size(messages) == 1);
+    json_t *assistant = message_at(messages, 0);
+    EXPECT_STR_EQ(message_role(assistant), "assistant");
+    json_t *blocks = message_content(assistant);
     EXPECT(json_array_size(blocks) == 3);
     EXPECT_STR_EQ(block_type(json_array_get(blocks, 0)), "thinking");
     EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(blocks, 0), "signature")), "S");
     EXPECT_STR_EQ(block_type(json_array_get(blocks, 1)), "text");
-    json_t *tu = json_array_get(blocks, 2);
-    EXPECT_STR_EQ(block_type(tu), "tool_use");
-    EXPECT_STR_EQ(json_string_value(json_object_get(tu, "id")), "toolu_1");
-    EXPECT_STR_EQ(json_string_value(json_object_get(tu, "name")), "bash");
-    json_t *input = json_object_get(tu, "input");
+    json_t *tool_use = json_array_get(blocks, 2);
+    EXPECT_STR_EQ(block_type(tool_use), "tool_use");
+    EXPECT_STR_EQ(json_string_value(json_object_get(tool_use, "id")), "toolu_1");
+    EXPECT_STR_EQ(json_string_value(json_object_get(tool_use, "name")), "bash");
+    json_t *input = json_object_get(tool_use, "input");
     EXPECT(json_is_object(input));
     EXPECT_STR_EQ(json_string_value(json_object_get(input, "cmd")), "ls");
-    json_decref(msgs);
+    json_decref(messages);
 }
 
-/* Empty-signature thinking: downgraded to a text block when the preset
- * disallows empty signatures (real Anthropic), kept as a thinking block when
- * allowed (compat servers). */
 static void test_empty_signature_policy(void)
 {
     struct item items[] = {
@@ -90,24 +82,21 @@ static void test_empty_signature_policy(void)
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "ok"},
     };
 
-    /* allow_empty_signature = 0 → downgrade thinking to a text block. */
     json_t *strict = anthropic_build_messages(items, 2, "anthropic", "m", 0, -1);
-    json_t *sb = content_of(msg_at(strict, 0));
-    EXPECT(json_array_size(sb) == 2);
-    EXPECT_STR_EQ(block_type(json_array_get(sb, 0)), "text"); /* was thinking */
-    EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(sb, 0), "text")), "cot");
-    EXPECT_STR_EQ(block_type(json_array_get(sb, 1)), "text");
+    json_t *strict_content = message_content(message_at(strict, 0));
+    EXPECT(json_array_size(strict_content) == 2);
+    EXPECT_STR_EQ(block_type(json_array_get(strict_content, 0)), "text");
+    EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(strict_content, 0), "text")),
+                  "cot");
+    EXPECT_STR_EQ(block_type(json_array_get(strict_content, 1)), "text");
     json_decref(strict);
 
-    /* allow_empty_signature = 1 → keep the thinking block verbatim. */
     json_t *loose = anthropic_build_messages(items, 2, "anthropic", "m", 1, -1);
-    json_t *lb = content_of(msg_at(loose, 0));
-    EXPECT_STR_EQ(block_type(json_array_get(lb, 0)), "thinking");
+    json_t *compat_content = message_content(message_at(loose, 0));
+    EXPECT_STR_EQ(block_type(json_array_get(compat_content, 0)), "thinking");
     json_decref(loose);
 }
 
-/* Reasoning whose provenance stamp doesn't match the live provider/model is
- * dropped (a signature is bound to the model that produced it). */
 static void test_reasoning_provenance_mismatch_dropped(void)
 {
     struct item items[] = {
@@ -117,36 +106,33 @@ static void test_reasoning_provenance_mismatch_dropped(void)
          .model = "old-model"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "hi"},
     };
-    json_t *msgs = anthropic_build_messages(items, 2, "anthropic", "new-model", 0, -1);
-    json_t *blocks = content_of(msg_at(msgs, 0));
-    EXPECT(json_array_size(blocks) == 1); /* thinking dropped, only text */
+    json_t *messages = anthropic_build_messages(items, 2, "anthropic", "new-model", 0, -1);
+    json_t *blocks = message_content(message_at(messages, 0));
+    EXPECT(json_array_size(blocks) == 1);
     EXPECT_STR_EQ(block_type(json_array_get(blocks, 0)), "text");
-    json_decref(msgs);
+    json_decref(messages);
 }
 
-/* Consecutive tool results coalesce into one user message with one
- * tool_result block per result. */
 static void test_tool_results_coalesced(void)
 {
     struct item items[] = {
         {.kind = ITEM_TOOL_RESULT, .call_id = "a", .output = "out-a"},
         {.kind = ITEM_TOOL_RESULT, .call_id = "b", .output = "out-b"},
     };
-    json_t *msgs = anthropic_build_messages(items, 2, "anthropic", "m", 0, -1);
-    EXPECT(json_array_size(msgs) == 1);
-    json_t *u = msg_at(msgs, 0);
-    EXPECT_STR_EQ(role_of(u), "user");
-    json_t *blocks = content_of(u);
+    json_t *messages = anthropic_build_messages(items, 2, "anthropic", "m", 0, -1);
+    EXPECT(json_array_size(messages) == 1);
+    json_t *user = message_at(messages, 0);
+    EXPECT_STR_EQ(message_role(user), "user");
+    json_t *blocks = message_content(user);
     EXPECT(json_array_size(blocks) == 2);
     EXPECT_STR_EQ(block_type(json_array_get(blocks, 0)), "tool_result");
     EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(blocks, 0), "tool_use_id")),
                   "a");
     EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(blocks, 1), "tool_use_id")),
                   "b");
-    json_decref(msgs);
+    json_decref(messages);
 }
 
-/* Redacted thinking is replayed verbatim (provenance permitting). */
 static void test_redacted_thinking_replayed(void)
 {
     struct item items[] = {
@@ -156,16 +142,14 @@ static void test_redacted_thinking_replayed(void)
          .model = "m"},
         {.kind = ITEM_TOOL_CALL, .call_id = "t", .tool_name = "x", .tool_arguments_json = "{}"},
     };
-    json_t *msgs = anthropic_build_messages(items, 2, "anthropic", "m", 0, -1);
-    json_t *blocks = content_of(msg_at(msgs, 0));
+    json_t *messages = anthropic_build_messages(items, 2, "anthropic", "m", 0, -1);
+    json_t *blocks = message_content(message_at(messages, 0));
     EXPECT(json_array_size(blocks) == 2);
     EXPECT_STR_EQ(block_type(json_array_get(blocks, 0)), "redacted_thinking");
     EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(blocks, 0), "data")), "ENC");
-    json_decref(msgs);
+    json_decref(messages);
 }
 
-/* A tool call with malformed arguments still yields a valid (empty) input
- * object rather than null — the API requires input to be an object. */
 static void test_tool_call_bad_args_empty_object(void)
 {
     struct item items[] = {
@@ -174,66 +158,61 @@ static void test_tool_call_bad_args_empty_object(void)
          .tool_name = "x",
          .tool_arguments_json = "not json"},
     };
-    json_t *msgs = anthropic_build_messages(items, 1, "anthropic", "m", 0, -1);
-    json_t *tu = json_array_get(content_of(msg_at(msgs, 0)), 0);
-    json_t *input = json_object_get(tu, "input");
+    json_t *messages = anthropic_build_messages(items, 1, "anthropic", "m", 0, -1);
+    json_t *tool_use = json_array_get(message_content(message_at(messages, 0)), 0);
+    json_t *input = json_object_get(tool_use, "input");
     EXPECT(json_is_object(input));
     EXPECT(json_object_size(input) == 0);
-    json_decref(msgs);
+    json_decref(messages);
 }
 
-/* A tool result carrying an image part: with image input the content
- * switches to a block array (text + base64 image); without it the image
- * degrades to a text placeholder block. */
 static void test_tool_result_image(void)
 {
-    struct item_image imgs[] = {
+    struct item_image images[] = {
         {.mime = "image/png", .data_b64 = "QUJD", .width = 4, .height = 2},
     };
     struct item items[] = {
         {.kind = ITEM_TOOL_RESULT,
          .call_id = "toolu_9",
          .output = "Read image x.png",
-         .images = imgs,
+         .images = images,
          .n_images = 1},
     };
 
-    json_t *msgs = anthropic_build_messages(items, 1, "anthropic", "m", 0, 1);
-    json_t *content = content_of(msg_at(msgs, 0));
-    json_t *tr = json_array_get(content, 0);
-    EXPECT_STR_EQ(block_type(tr), "tool_result");
-    json_t *blocks = json_object_get(tr, "content");
+    json_t *messages = anthropic_build_messages(items, 1, "anthropic", "m", 0, 1);
+    json_t *content = message_content(message_at(messages, 0));
+    json_t *tool_result = json_array_get(content, 0);
+    EXPECT_STR_EQ(block_type(tool_result), "tool_result");
+    json_t *blocks = json_object_get(tool_result, "content");
     EXPECT(json_is_array(blocks));
     EXPECT(json_array_size(blocks) == 2);
     EXPECT_STR_EQ(block_type(json_array_get(blocks, 0)), "text");
-    json_t *img = json_array_get(blocks, 1);
-    EXPECT_STR_EQ(block_type(img), "image");
-    json_t *src = json_object_get(img, "source");
+    json_t *image = json_array_get(blocks, 1);
+    EXPECT_STR_EQ(block_type(image), "image");
+    json_t *src = json_object_get(image, "source");
     EXPECT_STR_EQ(json_string_value(json_object_get(src, "type")), "base64");
     EXPECT_STR_EQ(json_string_value(json_object_get(src, "media_type")), "image/png");
     EXPECT_STR_EQ(json_string_value(json_object_get(src, "data")), "QUJD");
-    json_decref(msgs);
+    json_decref(messages);
 
-    /* image_input == 0: the part becomes a text placeholder block. */
-    msgs = anthropic_build_messages(items, 1, "anthropic", "m", 0, 0);
-    tr = json_array_get(content_of(msg_at(msgs, 0)), 0);
-    blocks = json_object_get(tr, "content");
+    messages = anthropic_build_messages(items, 1, "anthropic", "m", 0, 0);
+    tool_result = json_array_get(message_content(message_at(messages, 0)), 0);
+    blocks = json_object_get(tool_result, "content");
     EXPECT(json_array_size(blocks) == 2);
-    json_t *ph = json_array_get(blocks, 1);
-    EXPECT_STR_EQ(block_type(ph), "text");
-    const char *text = json_string_value(json_object_get(ph, "text"));
+    json_t *placeholder = json_array_get(blocks, 1);
+    EXPECT_STR_EQ(block_type(placeholder), "text");
+    const char *text = json_string_value(json_object_get(placeholder, "text"));
     EXPECT(text && strstr(text, "[image:") != NULL);
     EXPECT(strstr(text, "image/png") != NULL);
-    json_decref(msgs);
+    json_decref(messages);
 
-    /* A plain result (no images) keeps the string content shape. */
     struct item plain[] = {
         {.kind = ITEM_TOOL_RESULT, .call_id = "toolu_9", .output = "ok"},
     };
-    msgs = anthropic_build_messages(plain, 1, "anthropic", "m", 0, 1);
-    tr = json_array_get(content_of(msg_at(msgs, 0)), 0);
-    EXPECT(json_is_string(json_object_get(tr, "content")));
-    json_decref(msgs);
+    messages = anthropic_build_messages(plain, 1, "anthropic", "m", 0, 1);
+    tool_result = json_array_get(message_content(message_at(messages, 0)), 0);
+    EXPECT(json_is_string(json_object_get(tool_result, "content")));
+    json_decref(messages);
 }
 
 int main(void)

@@ -149,16 +149,11 @@ static struct provider *config_provider_new(const char *name)
     if (!display || !*display)
         display = name;
 
-    /* The dialect's preset resolves the per-provider settings itself from this
-     * prefix; the rest we pass as already-resolved fields. The prefix is read
-     * synchronously during construction (the preset copies what it keeps), so
-     * the stack-built string is safe to free on return. */
+    /* Provider constructors copy any prefix-backed state before this buffer is freed. */
     char *cfg_prefix = xasprintf("providers.%s", name);
 
     if (is_anthropic) {
-        /* Generic Anthropic Messages endpoint: budget-mode thinking, tolerant
-         * of empty signatures, caching off — the compat-shim baseline, all
-         * overridable per provider via providers.<name>.{thinking_mode,cache,…}. */
+        /* Generic endpoints default to compat-safe thinking and caching behavior. */
         struct anthropic_preset preset = {
             .display_name = display,
             .default_base_url = base,

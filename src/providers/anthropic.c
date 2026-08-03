@@ -2,7 +2,6 @@
 #include "providers/anthropic.h"
 
 #include <jansson.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -14,32 +13,21 @@
 #include "tool_schema.h"
 #include "util.h"
 #include "providers/anthropic_events.h"
+#include "providers/anthropic_messages.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 #include "transport/retry.h"
 
-#define ANTHROPIC_DEFAULT_VERSION "2023-06-01"
-/* Model-list paging: the endpoint's maximum page size, and a bound on how
- * many pages the picker will chase so a misbehaving server can't spin the
- * foreground fetch. The bound is generous because it is a backstop, not a
- * policy — a non-advancing cursor is caught directly below, and a proxy
- * that ignores `limit` and paginates at the API default would otherwise hit
- * this on a catalog that is merely large rather than pathological. Reaching
- * it keeps the models collected so far: a truncated picker is recoverable
- * (the user filters and picks), whereas failing the list rolls back a whole
- * /provider switch and leaves them with nothing. */
-#define ANTHROPIC_MODEL_PAGE         1000
-#define ANTHROPIC_MODEL_PAGES        50
+#define ANTHROPIC_DEFAULT_VERSION    "2023-06-01"
 #define ANTHROPIC_DEFAULT_MODEL      "claude-opus-4-8"
 #define ANTHROPIC_DEFAULT_MAX_TOKENS 32000
 
-/* Short timeout for the /model picker's catalog fetch, mirroring the openai
- * family — tolerant of a small catalog without hanging on a wonky link. */
-#define MODEL_LIST_TIMEOUT_S 10
+/* Bound foreground pagination if a server keeps returning advancing cursors. */
+#define ANTHROPIC_MODEL_PAGE_SIZE  1000
+#define ANTHROPIC_MODEL_PAGE_LIMIT 50
 
-/* Tighter for the background metadata fetch: nothing waits on it, so a
- * wonky link should leave the lower tiers answering. */
-#define ANTHROPIC_META_TIMEOUT_S 5
+#define MODEL_LIST_TIMEOUT_S  10
+#define MODEL_PROBE_TIMEOUT_S 5
 
 const char *const ANTHROPIC_EFFORT_LADDER[] = {"low", "medium", "high", "xhigh", "max"};
 const size_t ANTHROPIC_EFFORT_LADDER_N =
@@ -47,262 +35,110 @@ const size_t ANTHROPIC_EFFORT_LADDER_N =
 
 struct anthropic {
     struct provider base;
-    char *base_url;    /* e.g. "https://api.anthropic.com/v1" (no trailing slash) */
-    char *api_key;     /* may be NULL for an unauthenticated local compat server */
-    char *name_buf;    /* backing storage for base.name */
-    char *catalog_buf; /* backing storage for base.catalog_id; NULL = opted out */
-    char *endpoint;    /* base_url + "/messages" */
-    char *version;     /* anthropic-version header value */
-    char *cfg_prefix;  /* config namespace: NULL (global anthropic.*) or "providers.<name>" */
-    enum anthropic_thinking_mode default_mode;
+    char *base_url;
+    char *api_key;
+    char *name;
+    char *catalog_id;
+    char *endpoint;
+    char *version;
+    char *config_prefix;
+    enum anthropic_thinking_mode default_thinking_mode;
     int allow_empty_signature;
-    int send_cache_control_default;
+    int cache_default;
 };
 
-/* Build the config key for one preset-resolved leaf: "<prefix>.<leaf>". A
- * config-defined provider (prefix "providers.<name>") reads its own subtree;
- * the compiled-in shims (prefix NULL) read the shared global "anthropic.*"
- * namespace, env-bound via HAX_ANTHROPIC_*. Caller frees. Mirrors openai.c's
- * preset_key. */
-static char *preset_key(const char *prefix, const char *leaf)
+static char *make_config_key(const char *prefix, const char *leaf)
 {
     return xasprintf("%s.%s", prefix ? prefix : "anthropic", leaf);
 }
 
-/* ---------- message translation ---------- */
-
-static json_t *content_text_block(const char *text)
+static const char *preset_config(const char *prefix, const char *leaf)
 {
-    return json_pack("{s:s, s:s}", "type", "text", "text", text ? text : "");
+    char *key = make_config_key(prefix, leaf);
+    const char *value = config_str(key);
+    free(key);
+    return value;
 }
 
-static int reasoning_stamp_ok(const struct item *it, const char *cur_provider,
-                              const char *cur_model)
+static int preset_bool(const char *prefix, const char *leaf, int fallback)
 {
-    return it->provider && it->model && cur_provider && cur_model &&
-           strcmp(it->provider, cur_provider) == 0 && strcmp(it->model, cur_model) == 0;
+    char *key = make_config_key(prefix, leaf);
+    int value = config_bool_or(key, fallback);
+    free(key);
+    return value;
 }
 
-/* Append the thinking/redacted_thinking block stored in reasoning_json to the
- * assistant content `blocks`, honoring the empty-signature policy. A thinking
- * block with an empty signature can't be verified by real Anthropic (it 400s),
- * so unless the preset opts into empty signatures it is downgraded to a plain
- * text block (preserving the reasoning as context) or dropped when it has no
- * text either. */
-static void append_reasoning_block(json_t *blocks, const struct item *it, int allow_empty_signature)
+static int preset_int(const char *prefix, const char *leaf)
 {
-    if (!it->reasoning_json)
-        return;
-    json_t *obj = json_loads(it->reasoning_json, 0, NULL);
-    if (!obj)
-        return;
-    const char *type = json_string_value(json_object_get(obj, "type"));
-    if (type && strcmp(type, "thinking") == 0 && !allow_empty_signature) {
-        const char *sig = json_string_value(json_object_get(obj, "signature"));
-        if (!sig || !*sig) {
-            const char *think = json_string_value(json_object_get(obj, "thinking"));
-            if (think && *think)
-                json_array_append_new(blocks, content_text_block(think));
-            json_decref(obj);
-            return;
-        }
-    }
-    json_array_append_new(blocks, obj);
+    char *key = make_config_key(prefix, leaf);
+    int value = config_int(key);
+    free(key);
+    return value;
 }
 
-/* Emit one assistant message for a run of REASONING + ASSISTANT_MESSAGE +
- * TOOL_CALL items, as an ordered content-block array: thinking block(s) first
- * (so a tool-use turn leads with its preserved reasoning), then text, then
- * tool_use. An empty group (e.g. reasoning-only with a dropped empty-sig
- * block) produces no message. Returns the index past the consumed run. */
-static size_t emit_assistant_group(json_t *arr, const struct item *items, size_t i, size_t n,
-                                   const char *cur_provider, const char *cur_model,
-                                   int allow_empty_signature)
+static json_t *build_cache_control(const char *ttl)
 {
-    json_t *blocks = json_array();
-    while (i < n && (items[i].kind == ITEM_ASSISTANT_MESSAGE || items[i].kind == ITEM_TOOL_CALL ||
-                     items[i].kind == ITEM_REASONING)) {
-        const struct item *it = &items[i];
-        if (it->kind == ITEM_ASSISTANT_MESSAGE) {
-            if (it->text && *it->text)
-                json_array_append_new(blocks, content_text_block(it->text));
-        } else if (it->kind == ITEM_REASONING) {
-            if (reasoning_stamp_ok(it, cur_provider, cur_model))
-                append_reasoning_block(blocks, it, allow_empty_signature);
-        } else { /* ITEM_TOOL_CALL */
-            json_t *input =
-                it->tool_arguments_json ? json_loads(it->tool_arguments_json, 0, NULL) : NULL;
-            if (!json_is_object(input)) {
-                if (input)
-                    json_decref(input);
-                input = json_object();
-            }
-            json_array_append_new(blocks,
-                                  json_pack("{s:s, s:s, s:s, s:o}", "type", "tool_use", "id",
-                                            it->call_id ? it->call_id : "", "name",
-                                            it->tool_name ? it->tool_name : "", "input", input));
-        }
-        i++;
-    }
-    if (json_array_size(blocks) == 0)
-        json_decref(blocks);
-    else
-        json_array_append_new(arr, json_pack("{s:s, s:o}", "role", "assistant", "content", blocks));
-    return i;
-}
-
-/* Coalesce a run of consecutive TOOL_RESULT items into a single user message
- * carrying tool_result blocks — the Messages API groups results that way, and
- * some strict compat endpoints reject a tool_result message split per call.
- * A result carrying image parts switches its content from the plain string
- * to a block array; image_input == 0 degrades each part to a text
- * placeholder block. */
-static size_t emit_tool_results(json_t *arr, const struct item *items, size_t i, size_t n,
-                                int image_input)
-{
-    json_t *content = json_array();
-    while (i < n && items[i].kind == ITEM_TOOL_RESULT) {
-        const struct item *it = &items[i];
-        if (it->n_images == 0) {
-            json_array_append_new(content, json_pack("{s:s, s:s, s:s}", "type", "tool_result",
-                                                     "tool_use_id", it->call_id ? it->call_id : "",
-                                                     "content", it->output ? it->output : ""));
-        } else {
-            json_t *blocks = json_array();
-            if (it->output && *it->output)
-                json_array_append_new(blocks, content_text_block(it->output));
-            for (size_t k = 0; k < it->n_images; k++) {
-                const struct item_image *img = &it->images[k];
-                if (image_input != 0) {
-                    json_array_append_new(blocks,
-                                          json_pack("{s:s, s:{s:s, s:s, s:s}}", "type", "image",
-                                                    "source", "type", "base64", "media_type",
-                                                    img->mime ? img->mime : "image/png", "data",
-                                                    img->data_b64 ? img->data_b64 : ""));
-                } else {
-                    char *ph = item_image_placeholder(img);
-                    json_array_append_new(blocks, content_text_block(ph));
-                    free(ph);
-                }
-            }
-            json_array_append_new(content,
-                                  json_pack("{s:s, s:s, s:o}", "type", "tool_result", "tool_use_id",
-                                            it->call_id ? it->call_id : "", "content", blocks));
-        }
-        i++;
-    }
-    json_array_append_new(arr, json_pack("{s:s, s:o}", "role", "user", "content", content));
-    return i;
-}
-
-json_t *anthropic_build_messages(const struct item *items, size_t n, const char *cur_provider,
-                                 const char *cur_model, int allow_empty_signature, int image_input)
-{
-    json_t *arr = json_array();
-    size_t i = 0;
-    while (i < n) {
-        switch (items[i].kind) {
-        case ITEM_USER_MESSAGE: {
-            json_t *blocks = json_array();
-            json_array_append_new(blocks, content_text_block(items[i].text));
-            json_array_append_new(arr, json_pack("{s:s, s:o}", "role", "user", "content", blocks));
-            i++;
-            break;
-        }
-        case ITEM_ASSISTANT_MESSAGE:
-        case ITEM_TOOL_CALL:
-        case ITEM_REASONING:
-            /* Reasoning leads an assistant group (thinking precedes text/tool
-             * use); a bare assistant message or tool call starts one too. */
-            i = emit_assistant_group(arr, items, i, n, cur_provider, cur_model,
-                                     allow_empty_signature);
-            break;
-        case ITEM_TOOL_RESULT:
-            i = emit_tool_results(arr, items, i, n, image_input);
-            break;
-        case ITEM_TURN_BOUNDARY:
-        case ITEM_TURN_USAGE:
-            i++;
-            break;
-        }
-    }
-    return arr;
-}
-
-/* ---------- request body ---------- */
-
-static json_t *make_cache_control(const char *ttl)
-{
-    json_t *cc = json_pack("{s:s}", "type", "ephemeral");
+    json_t *cache_control = json_pack("{s:s}", "type", "ephemeral");
     if (ttl && strcasecmp(ttl, "1h") == 0)
-        json_object_set_new(cc, "ttl", json_string("1h"));
-    return cc;
+        json_object_set_new(cache_control, "ttl", json_string("1h"));
+    return cache_control;
 }
 
-static json_t *build_tools(const struct tool_def *tools, size_t n, int cache_last, const char *ttl)
+static json_t *build_tools(const struct tool_def *tools, size_t n_tools, int cache_last,
+                           const char *ttl)
 {
-    json_t *arr = json_array();
-    for (size_t i = 0; i < n; i++) {
+    json_t *tool_list = json_array();
+    for (size_t i = 0; i < n_tools; i++) {
         json_t *schema = tool_schema_build(&tools[i]);
         json_t *tool = json_pack("{s:s, s:s, s:o}", "name", tools[i].name, "description",
                                  tools[i].description, "input_schema", schema);
-        if (cache_last && i == n - 1)
-            json_object_set_new(tool, "cache_control", make_cache_control(ttl));
-        json_array_append_new(arr, tool);
+        if (cache_last && i == n_tools - 1)
+            json_object_set_new(tool, "cache_control", build_cache_control(ttl));
+        json_array_append_new(tool_list, tool);
     }
-    return arr;
+    return tool_list;
 }
 
-/* Place a cache breakpoint on the last content block of the last message — the
- * rolling tail of the conversation, so the whole prompt prefix is cached for
- * the next request. Skips a trailing thinking block (cache_control belongs on
- * text/tool_use/tool_result, never thinking). Combined with the system and
- * last-tool breakpoints this stays at 3, under Anthropic's cap of 4. */
 static void attach_cache_to_last_message(json_t *messages, const char *ttl)
 {
-    size_t n = json_array_size(messages);
-    if (n == 0)
+    size_t n_messages = json_array_size(messages);
+    if (n_messages == 0)
         return;
-    json_t *content = json_object_get(json_array_get(messages, n - 1), "content");
+
+    json_t *message = json_array_get(messages, n_messages - 1);
+    json_t *content = json_object_get(message, "content");
     if (!json_is_array(content) || json_array_size(content) == 0)
         return;
+
     json_t *block = json_array_get(content, json_array_size(content) - 1);
-    const char *bt = json_string_value(json_object_get(block, "type"));
-    /* cache_control belongs on text / tool_use / tool_result, never on a
-     * thinking or redacted_thinking block. */
-    if (bt && (strcmp(bt, "thinking") == 0 || strcmp(bt, "redacted_thinking") == 0))
+    const char *type = json_string_value(json_object_get(block, "type"));
+    /* Anthropic rejects cache_control on thinking blocks. */
+    if (type && (strcmp(type, "thinking") == 0 || strcmp(type, "redacted_thinking") == 0))
         return;
-    json_object_set_new(block, "cache_control", make_cache_control(ttl));
+    json_object_set_new(block, "cache_control", build_cache_control(ttl));
 }
 
-static enum anthropic_thinking_mode resolve_thinking_mode(struct anthropic *a)
+static enum anthropic_thinking_mode resolve_thinking_mode(const struct anthropic *anthropic)
 {
-    char *k = preset_key(a->cfg_prefix, "thinking_mode");
-    const char *m = config_str_nonempty(k);
-    free(k);
-    if (m) {
-        if (strcasecmp(m, "adaptive") == 0)
-            return ANTHROPIC_THINKING_ADAPTIVE;
-        if (strcasecmp(m, "budget") == 0)
-            return ANTHROPIC_THINKING_BUDGET;
-        if (strcasecmp(m, "off") == 0)
-            return ANTHROPIC_THINKING_OFF;
-        hax_warn("unknown anthropic.thinking_mode '%s' (adaptive/budget/off) — using default", m);
-    }
-    return a->default_mode;
+    const char *configured = preset_config(anthropic->config_prefix, "thinking_mode");
+    if (!configured || !*configured)
+        return anthropic->default_thinking_mode;
+    if (strcasecmp(configured, "adaptive") == 0)
+        return ANTHROPIC_THINKING_ADAPTIVE;
+    if (strcasecmp(configured, "budget") == 0)
+        return ANTHROPIC_THINKING_BUDGET;
+    if (strcasecmp(configured, "off") == 0)
+        return ANTHROPIC_THINKING_OFF;
+
+    hax_warn("unknown anthropic.thinking_mode '%s' (adaptive/budget/off) — using default",
+             configured);
+    return anthropic->default_thinking_mode;
 }
 
-/* Configure the thinking parameter. Adaptive mode (real flagships) sends
- * thinking:{type:"adaptive"} plus the categorical output_config.effort, with
- * display following show_reasoning (summarized when the user wants live CoT,
- * omitted otherwise for faster time-to-first-text — the signature still
- * round-trips either way). Budget mode (older / local compat) sends
- * thinking:{type:"enabled", budget_tokens}; the budget fits inside max_tokens
- * (Anthropic requires budget < max_tokens), defaulting to "fill the window". */
-static void apply_thinking(json_t *body, struct anthropic *a, const struct context *ctx,
-                           int max_tokens)
+static void apply_thinking(json_t *body, const struct anthropic *anthropic,
+                           const struct context *context, int max_tokens)
 {
-    enum anthropic_thinking_mode mode = resolve_thinking_mode(a);
+    enum anthropic_thinking_mode mode = resolve_thinking_mode(anthropic);
     if (mode == ANTHROPIC_THINKING_OFF)
         return;
 
@@ -310,515 +146,479 @@ static void apply_thinking(json_t *body, struct anthropic *a, const struct conte
         const char *display = config_bool("show_reasoning") ? "summarized" : "omitted";
         json_object_set_new(body, "thinking",
                             json_pack("{s:s, s:s}", "type", "adaptive", "display", display));
-        if (ctx->effort && *ctx->effort)
-            json_object_set_new(body, "output_config", json_pack("{s:s}", "effort", ctx->effort));
+        if (context->effort && *context->effort) {
+            json_object_set_new(body, "output_config",
+                                json_pack("{s:s}", "effort", context->effort));
+        }
         return;
     }
 
-    /* BUDGET. Anthropic requires 1 <= budget_tokens < max_tokens, so a window
-     * under two tokens can't hold any thinking — leave it off rather than emit
-     * an out-of-range budget (max_tokens is a plain positive count here, not
-     * necessarily the registry-bounded one: a config-defined provider's
-     * providers.<name>.max_tokens carries no bound). */
+    /* Anthropic requires 1 <= budget_tokens < max_tokens. */
     if (max_tokens < 2)
         return;
-    char *k = preset_key(a->cfg_prefix, "thinking_budget");
-    int budget = config_int(k);
-    free(k);
-    if (budget <= 0 || budget >= max_tokens)
-        budget = max_tokens - 1;
+    int budget_tokens = preset_int(anthropic->config_prefix, "thinking_budget");
+    if (budget_tokens <= 0 || budget_tokens >= max_tokens)
+        budget_tokens = max_tokens - 1;
     json_object_set_new(body, "thinking",
-                        json_pack("{s:s, s:i}", "type", "enabled", "budget_tokens", budget));
+                        json_pack("{s:s, s:i}", "type", "enabled", "budget_tokens", budget_tokens));
 }
 
-/* Output cap for one response. Unset follows the model's own ceiling (128k
- * on the current flagships), sparing the user a lookup after hitting
- * "response incomplete: max_tokens"; configured is honored but clamped to
- * that ceiling, since asking for more is a 400 and a value carried over
- * from a larger-capacity model would fail every turn. The constant is the
- * floor for a model nothing describes. */
-int anthropic_max_tokens(struct provider *p, const char *model)
+int anthropic_max_tokens(struct provider *provider, const char *model)
 {
-    struct anthropic *a = (struct anthropic *)p;
-    char *k = preset_key(a->cfg_prefix, "max_tokens");
-    int configured = config_int(k);
-    int user_set = strcmp(config_source(k), "default") != 0;
-    free(k);
+    struct anthropic *anthropic = (struct anthropic *)provider;
+    char *key = make_config_key(anthropic->config_prefix, "max_tokens");
+    int configured = config_int(key);
+    int user_set = strcmp(config_source(key), "default") != 0;
+    free(key);
 
-    long cap = model_meta_max_output(&a->base, model);
+    long model_limit = model_meta_max_output(provider, model);
     if (user_set && configured > 0)
-        return (cap > 0 && configured > cap) ? (int)cap : configured;
-    if (cap > 0)
-        return (int)cap;
+        return model_limit > 0 && configured > model_limit ? (int)model_limit : configured;
+    if (model_limit > 0)
+        return (int)model_limit;
     return configured > 0 ? configured : ANTHROPIC_DEFAULT_MAX_TOKENS;
 }
 
-static char *build_body(struct anthropic *a, const struct context *ctx, const char *model)
+static char *build_request_body(struct anthropic *anthropic, const struct context *context,
+                                const char *model)
 {
-    int max_tokens = anthropic_max_tokens(&a->base, model);
+    int max_tokens = anthropic_max_tokens(&anthropic->base, model);
+    int cache = preset_bool(anthropic->config_prefix, "cache", anthropic->cache_default);
+    const char *cache_ttl = preset_config(anthropic->config_prefix, "cache_ttl");
 
-    char *k = preset_key(a->cfg_prefix, "cache");
-    int cache = config_bool_or(k, a->send_cache_control_default);
-    free(k);
-    k = preset_key(a->cfg_prefix, "cache_ttl");
-    const char *ttl = config_str_nonempty(k);
-    free(k);
-
-    json_t *messages = anthropic_build_messages(ctx->items, ctx->n_items, a->base.name, model,
-                                                a->allow_empty_signature, ctx->image_input);
+    json_t *messages =
+        anthropic_build_messages(context->items, context->n_items, anthropic->base.name, model,
+                                 anthropic->allow_empty_signature, context->image_input);
     json_t *body = json_pack("{s:s, s:i, s:b, s:o}", "model", model, "max_tokens", max_tokens,
                              "stream", 1, "messages", messages);
 
-    if (ctx->system_prompt && *ctx->system_prompt) {
-        json_t *block = content_text_block(ctx->system_prompt);
+    if (context->system_prompt && *context->system_prompt) {
+        json_t *system_block =
+            json_pack("{s:s, s:s}", "type", "text", "text", context->system_prompt);
         if (cache)
-            json_object_set_new(block, "cache_control", make_cache_control(ttl));
+            json_object_set_new(system_block, "cache_control", build_cache_control(cache_ttl));
         json_t *system = json_array();
-        json_array_append_new(system, block);
+        json_array_append_new(system, system_block);
         json_object_set_new(body, "system", system);
     }
 
-    if (ctx->n_tools > 0)
-        json_object_set_new(body, "tools", build_tools(ctx->tools, ctx->n_tools, cache, ttl));
-
+    if (context->n_tools > 0) {
+        json_object_set_new(body, "tools",
+                            build_tools(context->tools, context->n_tools, cache, cache_ttl));
+    }
     if (cache)
-        attach_cache_to_last_message(messages, ttl);
+        attach_cache_to_last_message(messages, cache_ttl);
 
-    apply_thinking(body, a, ctx, max_tokens);
+    apply_thinking(body, anthropic, context, max_tokens);
 
-    char *s = json_dumps(body, JSON_COMPACT);
+    char *json = json_dumps(body, JSON_COMPACT);
     json_decref(body);
-    return s;
+    return json;
 }
 
-/* ---------- SSE glue ---------- */
-
-static int on_sse(const char *event_name, const char *data, void *user)
+static int handle_sse_data(const char *event_name, const char *data, void *user)
 {
     anthropic_events_feed(user, event_name, data);
     return 0;
 }
 
-/* ---------- provider interface ---------- */
-
-static int anthropic_stream(struct provider *p, const struct context *ctx, const char *model,
-                            stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
+static int anthropic_stream(struct provider *provider, const struct context *context,
+                            const char *model, stream_cb callback, void *callback_user,
+                            http_tick_cb tick, void *tick_user)
 {
-    struct anthropic *a = (struct anthropic *)p;
+    struct anthropic *anthropic = (struct anthropic *)provider;
 
-    char *body = build_body(a, ctx, model);
+    char *body = build_request_body(anthropic, context, model);
     if (!body)
         return -1;
+
     size_t body_len = strlen(body);
+    char *api_key_header =
+        anthropic->api_key ? xasprintf("x-api-key: %s", anthropic->api_key) : NULL;
+    char *version_header = xasprintf("anthropic-version: %s", anthropic->version);
+    const char *headers[] = {api_key_header, version_header, "Accept: text/event-stream",
+                             "Content-Type: application/json", NULL};
+    const char **request_headers = api_key_header ? headers : &headers[1];
 
-    char *key_hdr = a->api_key ? xasprintf("x-api-key: %s", a->api_key) : NULL;
-    char *ver_hdr = xasprintf("anthropic-version: %s", a->version);
-    const char *headers[6];
-    size_t hi = 0;
-    if (key_hdr)
-        headers[hi++] = key_hdr;
-    headers[hi++] = ver_hdr;
-    headers[hi++] = "Accept: text/event-stream";
-    headers[hi++] = "Content-Type: application/json";
-    headers[hi] = NULL;
+    struct retry_policy policy = retry_policy_default();
+    struct http_response response;
+    struct anthropic_events parser;
+    int result = -1;
 
-    struct retry_policy pol = retry_policy_default();
-    struct http_response resp;
-    struct anthropic_events ev;
-    int rc = -1;
+    /* Each retry needs fresh parser state; request bytes are safe to resend unchanged. */
+    for (int attempt = 0; attempt < policy.max_attempts; attempt++) {
+        memset(&response, 0, sizeof(response));
+        anthropic_events_init(&parser, callback, callback_user);
+        result = http_sse_post(anthropic->endpoint, request_headers, body, body_len,
+                               policy.idle_timeout_s, handle_sse_data, &parser, tick, tick_user,
+                               &response);
 
-    for (int attempt = 0; attempt < pol.max_attempts; attempt++) {
-        memset(&resp, 0, sizeof(resp));
-        anthropic_events_init(&ev, cb, user);
-        rc = http_sse_post(a->endpoint, headers, body, body_len, pol.idle_timeout_s, on_sse, &ev,
-                           tick, tick_user, &resp);
-
-        if (resp.cancelled)
+        if (response.cancelled ||
+            !retry_should_attempt(result, response.status, response.error_body) ||
+            attempt + 1 >= policy.max_attempts) {
             break;
-        if (!retry_should_attempt(rc, resp.status, resp.error_body))
-            break;
-        if (attempt + 1 >= pol.max_attempts)
-            break;
+        }
 
-        long delay = resp.retry_after_ms > 0 ? resp.retry_after_ms : retry_delay_ms(&pol, attempt);
-        struct stream_event re = {
+        long delay_ms = response.retry_after_ms > 0 ? response.retry_after_ms
+                                                    : retry_delay_ms(&policy, attempt);
+        struct stream_event retry = {
             .kind = EV_RETRY,
-            .u.retry = {.attempt = attempt + 1,
-                        .max_attempts = pol.max_attempts,
-                        .delay_ms = delay,
-                        .http_status = (int)resp.status},
+            .u.retry =
+                {
+                    .attempt = attempt + 1,
+                    .max_attempts = policy.max_attempts,
+                    .delay_ms = delay_ms,
+                    .http_status = (int)response.status,
+                },
         };
-        cb(&re, user);
+        callback(&retry, callback_user);
 
-        free(resp.error_body);
-        resp.error_body = NULL;
-        anthropic_events_free(&ev);
+        free(response.error_body);
+        response.error_body = NULL;
+        anthropic_events_free(&parser);
 
-        if (retry_sleep_with_tick(delay, tick, tick_user)) {
-            resp.cancelled = 1;
-            memset(&ev, 0, sizeof(ev));
+        if (retry_sleep_with_tick(delay_ms, tick, tick_user)) {
+            response.cancelled = 1;
+            memset(&parser, 0, sizeof(parser));
             break;
         }
     }
 
-    if (resp.cancelled) {
-        /* User-initiated abort — agent handles the partial state. */
-    } else if (rc != 0 || resp.status < 200 || resp.status >= 300) {
-        char *msg = format_api_error(resp.status, resp.error_body);
-        struct stream_event e = {
-            .kind = EV_ERROR,
-            .u.error = {.message = msg, .http_status = (int)resp.status},
-        };
-        cb(&e, user);
-        free(msg);
-    } else {
-        anthropic_events_finalize(&ev);
+    if (!response.cancelled) {
+        if (result != 0 || response.status < 200 || response.status >= 300) {
+            char *message = format_api_error(response.status, response.error_body);
+            struct stream_event error = {
+                .kind = EV_ERROR,
+                .u.error = {.message = message, .http_status = (int)response.status},
+            };
+            callback(&error, callback_user);
+            free(message);
+        } else {
+            anthropic_events_finalize(&parser);
+        }
     }
 
-    free(resp.error_body);
-    free(key_hdr);
-    free(ver_hdr);
+    free(response.error_body);
+    anthropic_events_free(&parser);
+    free(api_key_header);
+    free(version_header);
     free(body);
-    anthropic_events_free(&ev);
-    return rc;
+    return result;
+}
+
+static void parse_model_efforts(json_t *effort, struct effort_set *out)
+{
+    if (json_is_false(json_object_get(effort, "supported"))) {
+        out->known = 1;
+        return;
+    }
+    if (!json_is_object(effort))
+        return;
+
+    /* Preserve the picker order rather than the JSON object's member order. */
+    for (size_t i = 0; i < ANTHROPIC_EFFORT_LADDER_N; i++) {
+        json_t *level = json_object_get(effort, ANTHROPIC_EFFORT_LADDER[i]);
+        if (json_is_object(level) && json_is_true(json_object_get(level, "supported")))
+            effort_set_add(out, ANTHROPIC_EFFORT_LADDER[i]);
+    }
+
+    const char *name;
+    json_t *level;
+    json_object_foreach(effort, name, level)
+    {
+        if (strcmp(name, "supported") != 0 && json_is_object(level) &&
+            json_is_true(json_object_get(level, "supported"))) {
+            effort_set_add(out, name);
+        }
+    }
 }
 
 void anthropic_parse_model(const json_t *entry, struct model_info *out)
 {
-    json_t *ctx = json_object_get(entry, "max_input_tokens");
-    if (json_is_integer(ctx) && json_integer_value(ctx) > 0)
-        out->context = (long)json_integer_value(ctx);
-    /* The per-model output cap the request's max_tokens has to respect
-     * (see anthropic_max_tokens). */
-    json_t *max_out = json_object_get(entry, "max_tokens");
-    if (json_is_integer(max_out) && json_integer_value(max_out) > 0)
-        out->max_output = (long)json_integer_value(max_out);
-    /* capabilities.<name>.supported — absent on the compat backends this
-     * parser also serves, which simply leaves the answer unknown. */
-    json_t *caps = json_object_get(entry, "capabilities");
-    json_t *img = caps ? json_object_get(caps, "image_input") : NULL;
-    json_t *sup = img ? json_object_get(img, "supported") : NULL;
-    if (json_is_boolean(sup))
-        out->image_input = json_is_true(sup) ? PROVIDER_CAP_YES : PROVIDER_CAP_NO;
+    json_t *max_input = json_object_get(entry, "max_input_tokens");
+    if (json_is_integer(max_input) && json_integer_value(max_input) > 0)
+        out->context = (long)json_integer_value(max_input);
 
-    /* capabilities.effort: a `supported` flag plus one child object per
-     * level. A false flag is a real answer — the 4-5 generation takes a
-     * thinking budget instead — so it marks the set known and empty,
-     * skipping the /effort step rather than offering rejected levels.
-     *
-     * Probed in ladder order rather than by iterating the object, so the
-     * menu reads low-to-high whatever order the response used. */
-    json_t *eff = caps ? json_object_get(caps, "effort") : NULL;
-    json_t *eff_sup = eff ? json_object_get(eff, "supported") : NULL;
-    if (json_is_false(eff_sup)) {
-        out->efforts.known = 1;
-    } else if (json_is_object(eff)) {
-        for (size_t i = 0; i < ANTHROPIC_EFFORT_LADDER_N; i++) {
-            json_t *lvl = json_object_get(eff, ANTHROPIC_EFFORT_LADDER[i]);
-            if (json_is_object(lvl) && json_is_true(json_object_get(lvl, "supported")))
-                effort_set_add(&out->efforts, ANTHROPIC_EFFORT_LADDER[i]);
-        }
-        /* Then anything the ladder doesn't name yet, so a level introduced
-         * after this build still reaches the picker. Appended last, since
-         * member order here is jansson's rather than the vendor's. */
-        const char *key;
-        json_t *val;
-        json_object_foreach(eff, key, val)
-        {
-            if (strcmp(key, "supported") == 0 || !json_is_object(val))
-                continue;
-            if (json_is_true(json_object_get(val, "supported")))
-                effort_set_add(&out->efforts, key);
-        }
+    json_t *max_output = json_object_get(entry, "max_tokens");
+    if (json_is_integer(max_output) && json_integer_value(max_output) > 0)
+        out->max_output = (long)json_integer_value(max_output);
+
+    json_t *capabilities = json_object_get(entry, "capabilities");
+    json_t *image = json_object_get(capabilities, "image_input");
+    json_t *image_supported = json_object_get(image, "supported");
+    if (json_is_boolean(image_supported)) {
+        out->image_input = json_is_true(image_supported) ? PROVIDER_CAP_YES : PROVIDER_CAP_NO;
     }
+
+    parse_model_efforts(json_object_get(capabilities, "effort"), &out->efforts);
 }
 
-/* Locate `model` in a `{"data": [ ... ]}` page of /v1/models and hand the
- * entry to the same parser the /model picker uses. The catalog is a handful
- * of entries, so one page covers it. */
-static void anthropic_parse_meta(const char *body, const char *model, struct model_info *out)
+static void parse_model_probe_response(const char *response_body, const char *model,
+                                       struct model_info *out)
 {
-    json_t *root = json_loads(body, 0, NULL);
+    json_t *root = json_loads(response_body, 0, NULL);
     if (!root)
         return;
+
     json_t *data = json_object_get(root, "data");
-    if (json_is_array(data)) {
-        size_t i;
-        json_t *entry;
-        json_array_foreach(data, i, entry)
-        {
-            const char *id = json_string_value(json_object_get(entry, "id"));
-            if (id && strcmp(id, model) == 0) {
-                anthropic_parse_model(entry, out);
-                break;
-            }
+    size_t index;
+    json_t *entry;
+    json_array_foreach(data, index, entry)
+    {
+        const char *model_id = json_string_value(json_object_get(entry, "id"));
+        if (model_id && strcmp(model_id, model) == 0) {
+            anthropic_parse_model(entry, out);
+            break;
         }
     }
     json_decref(root);
 }
 
-static int anthropic_probe_model(struct provider *p, const char *model, struct model_probe *out)
+static int anthropic_probe_model(struct provider *provider, const char *model,
+                                 struct model_probe *probe)
 {
-    struct anthropic *a = (struct anthropic *)p;
+    struct anthropic *anthropic = (struct anthropic *)provider;
     if (!model || !*model)
         return -1;
-    out->url = xasprintf("%s/models?limit=%d", a->base_url, ANTHROPIC_MODEL_PAGE);
-    out->headers = xcalloc(3, sizeof(*out->headers));
-    size_t i = 0;
-    if (a->api_key)
-        out->headers[i++] = xasprintf("x-api-key: %s", a->api_key);
-    out->headers[i++] = xasprintf("anthropic-version: %s", a->version);
-    out->headers[i] = NULL;
-    out->timeout_s = ANTHROPIC_META_TIMEOUT_S;
-    out->parse = anthropic_parse_meta;
+
+    probe->url = xasprintf("%s/models?limit=%d", anthropic->base_url, ANTHROPIC_MODEL_PAGE_SIZE);
+    probe->headers = xcalloc(3, sizeof(*probe->headers));
+    size_t n_headers = 0;
+    if (anthropic->api_key)
+        probe->headers[n_headers++] = xasprintf("x-api-key: %s", anthropic->api_key);
+    probe->headers[n_headers++] = xasprintf("anthropic-version: %s", anthropic->version);
+    probe->headers[n_headers] = NULL;
+    probe->timeout_s = MODEL_PROBE_TIMEOUT_S;
+    probe->parse = parse_model_probe_response;
     return 0;
 }
 
-/* Is `s` safe to splice into the after_id query parameter unescaped? The
- * cursor comes back from the server, so it is not ours to trust: model ids
- * are plain [A-Za-z0-9._-] slugs, and anything else stops pagination rather
- * than getting percent-encoding machinery we'd have nowhere else to use. */
-static int anthropic_cursor_ok(const char *s)
+/* The server-provided cursor is inserted into a query parameter without encoding. */
+static int cursor_is_safe(const char *cursor)
 {
-    if (!s || !*s)
+    if (!cursor || !*cursor)
         return 0;
-    for (const char *p = s; *p; p++) {
-        int ok = (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') ||
-                 *p == '.' || *p == '_' || *p == '-';
-        if (!ok)
+    for (const char *byte = cursor; *byte; byte++) {
+        int safe = (*byte >= 'A' && *byte <= 'Z') || (*byte >= 'a' && *byte <= 'z') ||
+                   (*byte >= '0' && *byte <= '9') || *byte == '.' || *byte == '_' || *byte == '-';
+        if (!safe)
             return 0;
     }
     return 1;
 }
 
-/* Fetch one page of <base_url>/models. `after_id` continues after that id
- * (NULL for the first page). On success *root_out owns the parsed body. */
-static int anthropic_models_page(struct anthropic *a, const char *after_id, http_tick_cb tick,
-                                 void *tick_user, json_t **root_out, char **err)
+/* On success, `page` owns the parsed response. */
+static int fetch_models_page(const struct anthropic *anthropic, const char *after_id,
+                             http_tick_cb tick, void *tick_user, json_t **page, char **error)
 {
-    const char *name = a->base.name ? a->base.name : "provider";
-    char *url = after_id ? xasprintf("%s/models?limit=%d&after_id=%s", a->base_url,
-                                     ANTHROPIC_MODEL_PAGE, after_id)
-                         : xasprintf("%s/models?limit=%d", a->base_url, ANTHROPIC_MODEL_PAGE);
-    char *key_hdr = a->api_key ? xasprintf("x-api-key: %s", a->api_key) : NULL;
-    char *ver_hdr = xasprintf("anthropic-version: %s", a->version);
-    const char *headers[3];
-    size_t hi = 0;
-    if (key_hdr)
-        headers[hi++] = key_hdr;
-    headers[hi++] = ver_hdr;
-    headers[hi] = NULL;
-    char *body = NULL;
+    char *url =
+        after_id ? xasprintf("%s/models?limit=%d&after_id=%s", anthropic->base_url,
+                             ANTHROPIC_MODEL_PAGE_SIZE, after_id)
+                 : xasprintf("%s/models?limit=%d", anthropic->base_url, ANTHROPIC_MODEL_PAGE_SIZE);
+    char *api_key_header =
+        anthropic->api_key ? xasprintf("x-api-key: %s", anthropic->api_key) : NULL;
+    char *version_header = xasprintf("anthropic-version: %s", anthropic->version);
+    const char *headers[] = {api_key_header, version_header, NULL};
+    const char **request_headers = api_key_header ? headers : &headers[1];
+
+    char *response_body = NULL;
     long status = 0;
-    int rc = http_get(url, headers, MODEL_LIST_TIMEOUT_S, 0, tick, tick_user, &body, &status);
-    free(key_hdr);
-    free(ver_hdr);
+    int result = http_get(url, request_headers, MODEL_LIST_TIMEOUT_S, 0, tick, tick_user,
+                          &response_body, &status);
+    free(api_key_header);
+    free(version_header);
     free(url);
-    if (rc != 0) {
-        *err = format_models_error(a->base.name, a->base_url, a->api_key != NULL, status);
-        free(body);
+
+    if (result != 0) {
+        *error = format_models_error(anthropic->base.name, anthropic->base_url,
+                                     anthropic->api_key != NULL, status);
+        free(response_body);
         return -1;
     }
-    *root_out = json_loads(body, 0, NULL);
-    free(body);
-    if (!*root_out) {
-        *err = xasprintf("%s /models response is not valid JSON", name);
+
+    *page = json_loads(response_body, 0, NULL);
+    free(response_body);
+    if (!*page) {
+        const char *provider_name = anthropic->base.name ? anthropic->base.name : "provider";
+        *error = xasprintf("%s /models response is not valid JSON", provider_name);
         return -1;
     }
     return 0;
 }
 
-/* GET <base_url>/models and collect data[]. Anthropic's catalog shares the
- * OpenAI-style {"data":[{"id":...}]} shape, as does llama-server's compat
- * endpoint, so one parser serves both shims; the per-model limits and
- * capabilities block is Anthropic's own and stays unknown elsewhere.
- *
- * The response is paginated (`has_more` / `last_id`), so this follows the
- * cursor rather than showing whatever fits in one page — the default page
- * size is well under the catalog's eventual size, and a silently truncated
- * picker is worse than a slightly slower one. Compat backends report no
- * `has_more` and so answer in a single page. */
-static int anthropic_list_models(struct provider *p, struct model_info **models, size_t *n,
-                                 char **err, http_tick_cb tick, void *tick_user)
+static void append_models(json_t *data, struct model_info **models, size_t *n_models,
+                          size_t *capacity, int *saw_entry)
 {
-    struct anthropic *a = (struct anthropic *)p;
+    size_t n_entries = json_array_size(data);
+    for (size_t i = 0; i < n_entries; i++) {
+        json_t *entry = json_array_get(data, i);
+        const char *model_id = json_string_value(json_object_get(entry, "id"));
+        *saw_entry = 1;
+        if (!model_id || !*model_id)
+            continue;
+
+        if (*n_models == *capacity) {
+            *capacity = *capacity ? *capacity * 2 : (n_entries > 8 ? n_entries : 8);
+            *models = xrealloc(*models, *capacity * sizeof(**models));
+        }
+        model_info_init(&(*models)[*n_models]);
+        (*models)[*n_models].id = xstrdup(model_id);
+        anthropic_parse_model(entry, &(*models)[*n_models]);
+        (*n_models)++;
+    }
+}
+
+static int anthropic_list_models(struct provider *provider, struct model_info **models,
+                                 size_t *n_models, char **error, http_tick_cb tick, void *tick_user)
+{
+    struct anthropic *anthropic = (struct anthropic *)provider;
     *models = NULL;
-    *n = 0;
-    const char *name = p->name ? p->name : "provider";
+    *n_models = 0;
 
-    struct model_info *out = NULL;
-    size_t k = 0, cap = 0;
-    char *after = NULL;
-    int malformed = 0, saw_entry = 0;
+    struct model_info *available = NULL;
+    size_t n_available = 0;
+    size_t capacity = 0;
+    char *after_id = NULL;
+    int saw_entry = 0;
 
-    for (int page = 0; page < ANTHROPIC_MODEL_PAGES; page++) {
-        json_t *root = NULL;
-        if (anthropic_models_page(a, after, tick, tick_user, &root, err) != 0) {
-            free(after);
-            model_info_free(out, k);
-            return -1;
-        }
-        /* Same shape policy as openai_list_models: null / empty array = a
-         * legitimately empty catalog; any other non-array shape, or entries
-         * with no usable ids, = a malformed one. */
-        json_t *data = json_object_get(root, "data");
+    for (int page_number = 0; page_number < ANTHROPIC_MODEL_PAGE_LIMIT; page_number++) {
+        json_t *page = NULL;
+        if (fetch_models_page(anthropic, after_id, tick, tick_user, &page, error) != 0)
+            goto fail;
+
+        json_t *data = json_object_get(page, "data");
         if (!json_is_array(data) && !json_is_null(data)) {
-            json_decref(root);
-            malformed = 1;
-            break;
+            json_decref(page);
+            const char *name = provider->name ? provider->name : "provider";
+            *error = xasprintf("%s /models response has no model list", name);
+            goto fail;
         }
-        /* `after_id=X` asks for what comes after X, so a page that ends back
-         * at X did not advance — the server is repeating itself. Detect that
-         * before taking any of it: appending first and stopping afterwards
-         * would leave one duplicated page in the picker, which is worse than
-         * the truncation it was meant to avoid. */
-        const char *last = json_string_value(json_object_get(root, "last_id"));
-        if (after && last && strcmp(after, last) == 0) {
-            json_decref(root);
+
+        const char *last_id = json_string_value(json_object_get(page, "last_id"));
+        /* Discard a repeated page before it can duplicate models already collected. */
+        if (after_id && last_id && strcmp(after_id, last_id) == 0) {
+            json_decref(page);
             break;
         }
 
-        size_t cnt = json_array_size(data);
-        for (size_t i = 0; i < cnt; i++) {
-            json_t *entry = json_array_get(data, i);
-            json_t *id = json_object_get(entry, "id");
-            saw_entry = 1;
-            if (!json_is_string(id) || !*json_string_value(id))
-                continue;
-            if (k == cap) {
-                cap = cap ? cap * 2 : (cnt > 8 ? cnt : 8);
-                out = xrealloc(out, cap * sizeof(*out));
-            }
-            model_info_init(&out[k]);
-            out[k].id = xstrdup(json_string_value(id));
-            anthropic_parse_model(entry, &out[k]);
-            k++;
-        }
-        int more = json_is_true(json_object_get(root, "has_more"));
-        free(after);
-        after = (more && anthropic_cursor_ok(last)) ? xstrdup(last) : NULL;
-        json_decref(root);
-        /* No usable cursor to advance on: stop with what we have rather
-         * than refetch page one forever. */
-        if (!after)
+        append_models(data, &available, &n_available, &capacity, &saw_entry);
+        int has_more = json_is_true(json_object_get(page, "has_more"));
+        free(after_id);
+        after_id = has_more && cursor_is_safe(last_id) ? xstrdup(last_id) : NULL;
+        json_decref(page);
+        if (!after_id)
             break;
     }
-    free(after);
+    free(after_id);
 
-    if (malformed) {
-        model_info_free(out, k);
-        *err = xasprintf("%s /models response has no model list", name);
+    if (saw_entry && n_available == 0) {
+        const char *name = provider->name ? provider->name : "provider";
+        *error = xasprintf("%s /models response contains no usable model ids", name);
+        model_info_free(available, n_available);
         return -1;
     }
-    if (saw_entry && k == 0) {
-        model_info_free(out, k);
-        *err = xasprintf("%s /models response contains no usable model ids", name);
-        return -1;
-    }
-    *models = out;
-    *n = k;
+
+    *models = available;
+    *n_models = n_available;
     return 0;
+
+fail:
+    free(after_id);
+    model_info_free(available, n_available);
+    return -1;
 }
 
-static size_t anthropic_list_efforts(struct provider *p, const char *const **out)
+static size_t anthropic_list_efforts(struct provider *provider, const char *const **efforts)
 {
-    /* Effort only reaches the wire in adaptive mode (output_config.effort);
-     * budget mode ignores it. So advertise the ladder for /effort only when
-     * the resolved mode is adaptive — otherwise the picker would persist a
-     * setting that has no effect on this provider's requests. */
-    struct anthropic *a = (struct anthropic *)p;
-    if (resolve_thinking_mode(a) != ANTHROPIC_THINKING_ADAPTIVE)
+    struct anthropic *anthropic = (struct anthropic *)provider;
+    if (resolve_thinking_mode(anthropic) != ANTHROPIC_THINKING_ADAPTIVE)
         return 0;
-    *out = ANTHROPIC_EFFORT_LADDER;
+    *efforts = ANTHROPIC_EFFORT_LADDER;
     return ANTHROPIC_EFFORT_LADDER_N;
 }
 
-static void anthropic_destroy(struct provider *p)
+static void anthropic_destroy(struct provider *provider)
 {
-    struct anthropic *a = (struct anthropic *)p;
-    model_meta_release(p);
-    free(a->base_url);
-    free(a->api_key);
-    free(a->name_buf);
-    free(a->catalog_buf);
-    free(a->endpoint);
-    free(a->version);
-    free(a->cfg_prefix);
-    free(a);
+    struct anthropic *anthropic = (struct anthropic *)provider;
+    model_meta_release(provider);
+    free(anthropic->base_url);
+    free(anthropic->api_key);
+    free(anthropic->name);
+    free(anthropic->catalog_id);
+    free(anthropic->endpoint);
+    free(anthropic->version);
+    free(anthropic->config_prefix);
+    free(anthropic);
 }
 
-/* ---------- construction ---------- */
-
-struct provider *anthropic_provider_new_preset(const struct anthropic_preset *preset)
+static char *resolve_base_url(const struct anthropic_preset *preset)
 {
-    struct anthropic_preset zero = {0};
-    if (!preset)
-        preset = &zero;
-
-    /* Resolve every per-provider setting through preset_key, which reads the
-     * preset's own subtree (providers.<name>.*) for a config-defined provider
-     * and the shared global "anthropic.*" for the compiled-in shims (NULL
-     * prefix). Mirrors openai_provider_new_preset. */
-    const char *prefix = preset->config_prefix;
-
-    char *base_key = preset_key(prefix, "base_url");
-    const char *base_cfg = config_str(base_key);
-    free(base_key);
-    const char *base =
-        (!preset->lock_base_url && base_cfg && *base_cfg) ? base_cfg : preset->default_base_url;
-    if (!base || !*base) {
+    const char *configured =
+        preset->lock_base_url ? NULL : preset_config(preset->config_prefix, "base_url");
+    const char *base_url = configured && *configured ? configured : preset->default_base_url;
+    if (!base_url || !*base_url) {
         hax_err("internal: anthropic preset has no base URL");
         return NULL;
     }
+    return dup_trim_trailing_slash(base_url);
+}
 
-    char *key_key = preset_key(prefix, "api_key");
-    const char *key = config_str(key_key);
-    free(key_key);
-    if ((!key || !*key) && preset->api_key_env)
-        key = getenv(preset->api_key_env);
+static const char *resolve_api_key(const struct anthropic_preset *preset)
+{
+    const char *api_key = preset_config(preset->config_prefix, "api_key");
+    if ((!api_key || !*api_key) && preset->api_key_env)
+        api_key = getenv(preset->api_key_env);
+    return api_key;
+}
 
-    /* A config-defined provider takes its banner from preset->display_name
-     * only (the resolved providers.<name>.display_name); the compiled-in shims
-     * read the global provider_name override. */
-    const char *name = prefix ? NULL : config_str("provider_name");
-    if (!name || !*name)
-        name = (preset->display_name && *preset->display_name) ? preset->display_name : "anthropic";
+static const char *resolve_display_name(const struct anthropic_preset *preset)
+{
+    const char *name = preset->config_prefix ? NULL : config_str("provider_name");
+    if (name && *name)
+        return name;
+    if (preset->display_name && *preset->display_name)
+        return preset->display_name;
+    return "anthropic";
+}
 
-    char *ver_key = preset_key(prefix, "version");
-    const char *version = config_str_nonempty(ver_key);
-    free(ver_key);
-    if (!version)
-        version = ANTHROPIC_DEFAULT_VERSION;
+struct provider *anthropic_provider_new_preset(const struct anthropic_preset *preset)
+{
+    const struct anthropic_preset empty = {0};
+    if (!preset)
+        preset = &empty;
 
-    struct anthropic *a = xcalloc(1, sizeof(*a));
-    a->base_url = dup_trim_trailing_slash(base);
-    a->api_key = (key && *key) ? xstrdup(key) : NULL;
-    a->name_buf = xstrdup(name);
-    a->endpoint = xasprintf("%s/messages", a->base_url);
-    a->version = xstrdup(version);
-    a->cfg_prefix = prefix ? xstrdup(prefix) : NULL;
-    a->default_mode = preset->default_thinking_mode;
-    a->allow_empty_signature = preset->allow_empty_signature;
-    a->send_cache_control_default = preset->send_cache_control_default;
+    char *base_url = resolve_base_url(preset);
+    if (!base_url)
+        return NULL;
 
-    a->base.name = a->name_buf;
-    /* Owned — see the same assignment in openai.c. */
-    a->catalog_buf = preset->catalog_id ? xstrdup(preset->catalog_id) : NULL;
-    a->base.catalog_id = a->catalog_buf;
-    /* Real Anthropic has a fixed default model; the compat shim and
-     * config-defined providers leave this NULL (rely on HAX_MODEL or /model). */
-    a->base.default_model = preset->lock_base_url ? ANTHROPIC_DEFAULT_MODEL : NULL;
-    a->base.stream = anthropic_stream;
-    a->base.list_models = anthropic_list_models;
-    a->base.list_efforts = anthropic_list_efforts;
-    a->base.probe_model = anthropic_probe_model;
-    a->base.destroy = anthropic_destroy;
-    /* /v1/models is the only source for Anthropic's per-model output cap
-     * and effort levels; fetched in the background so it doesn't delay the
-     * first prompt. */
-    const char *cfg_model = config_str("model");
-    model_meta_refresh(&a->base, (cfg_model && *cfg_model) ? cfg_model : a->base.default_model);
-    return &a->base;
+    struct anthropic *anthropic = xcalloc(1, sizeof(*anthropic));
+    anthropic->base_url = base_url;
+    const char *api_key = resolve_api_key(preset);
+    anthropic->api_key = api_key && *api_key ? xstrdup(api_key) : NULL;
+    anthropic->name = xstrdup(resolve_display_name(preset));
+    anthropic->catalog_id = preset->catalog_id ? xstrdup(preset->catalog_id) : NULL;
+    anthropic->endpoint = xasprintf("%s/messages", anthropic->base_url);
+    const char *version = preset_config(preset->config_prefix, "version");
+    anthropic->version = xstrdup(version && *version ? version : ANTHROPIC_DEFAULT_VERSION);
+    anthropic->config_prefix = preset->config_prefix ? xstrdup(preset->config_prefix) : NULL;
+    anthropic->default_thinking_mode = preset->default_thinking_mode;
+    anthropic->allow_empty_signature = preset->allow_empty_signature;
+    anthropic->cache_default = preset->send_cache_control_default;
+
+    anthropic->base.name = anthropic->name;
+    anthropic->base.catalog_id = anthropic->catalog_id;
+    anthropic->base.default_model = preset->lock_base_url ? ANTHROPIC_DEFAULT_MODEL : NULL;
+    anthropic->base.stream = anthropic_stream;
+    anthropic->base.list_models = anthropic_list_models;
+    anthropic->base.list_efforts = anthropic_list_efforts;
+    anthropic->base.probe_model = anthropic_probe_model;
+    anthropic->base.destroy = anthropic_destroy;
+
+    const char *configured_model = config_str("model");
+    const char *model =
+        configured_model && *configured_model ? configured_model : anthropic->base.default_model;
+    model_meta_refresh(&anthropic->base, model);
+    return &anthropic->base;
 }
 
 struct provider *anthropic_provider_new(const char *name)

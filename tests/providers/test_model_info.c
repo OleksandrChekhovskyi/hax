@@ -254,8 +254,6 @@ static void test_anthropic_capabilities(void)
                "\"capabilities\":{\"image_input\":{\"supported\":true}}}",
                anthropic_parse_model, m);
     EXPECT(m.context == 1000000);
-    /* The response cap is its own limit, four times the fixed default the
-     * request used to carry. */
     EXPECT(m.max_output == 128000);
     EXPECT(m.image_input == PROVIDER_CAP_YES);
     json_decref(m_j);
@@ -271,18 +269,12 @@ static void test_anthropic_capability_false(void)
 
 static void test_anthropic_compat_shape(void)
 {
-    /* The same parser serves llama-server's Anthropic-compat endpoint, whose
-     * entries carry none of this — everything must stay unknown. */
     WITH_ENTRY("{\"id\":\"local-model\",\"type\":\"model\"}", anthropic_parse_model, m);
     EXPECT(m.context == 0);
     EXPECT(m.image_input == PROVIDER_CAP_UNKNOWN);
     json_decref(m_j);
 }
 
-/* Anthropic states effort support as a flag plus one child per level. The
- * 4-5 generation says supported:false — a real answer ("this model takes a
- * thinking budget, not levels"), which must skip the /effort step rather
- * than fall through to a ladder it rejects. */
 static void test_anthropic_efforts_unsupported(void)
 {
     WITH_ENTRY("{\"id\":\"claude-haiku-4-5\",\"capabilities\":{\"effort\":{\"supported\":false},"
@@ -294,23 +286,18 @@ static void test_anthropic_efforts_unsupported(void)
 
 static void test_anthropic_efforts_partial_ladder(void)
 {
-    /* Opus 4.6 supports max but not xhigh — the gap in the middle is why
-     * the whole static ladder can't just be offered. Probed in ladder
-     * order, so the menu reads low-to-high whatever order the JSON used. */
     WITH_ENTRY("{\"id\":\"claude-opus-4-6\",\"capabilities\":{\"effort\":{"
                "\"max\":{\"supported\":true},\"supported\":true,"
                "\"high\":{\"supported\":true},\"low\":{\"supported\":true},"
                "\"medium\":{\"supported\":true}}}}",
                anthropic_parse_model, m);
-    static const char *const want[] = {"low", "medium", "high", "max", NULL};
-    EXPECT(efforts_are(&m.efforts, want));
+    static const char *const expected[] = {"low", "medium", "high", "max", NULL};
+    EXPECT(efforts_are(&m.efforts, expected));
     json_decref(m_j);
 }
 
 static void test_anthropic_efforts_unknown_level(void)
 {
-    /* A level newer than this build still reaches the picker, appended
-     * after the ones the ladder can order. */
     WITH_ENTRY("{\"id\":\"claude-opus-9\",\"capabilities\":{\"effort\":{\"supported\":true,"
                "\"low\":{\"supported\":true},\"ludicrous\":{\"supported\":true},"
                "\"high\":{\"supported\":false}}}}",
@@ -318,7 +305,6 @@ static void test_anthropic_efforts_unknown_level(void)
     EXPECT(m.efforts.known && m.efforts.count == 2);
     EXPECT(effort_set_has(&m.efforts, "low"));
     EXPECT(effort_set_has(&m.efforts, "ludicrous"));
-    /* An explicit false is not support. */
     EXPECT(!effort_set_has(&m.efforts, "high"));
     json_decref(m_j);
 }

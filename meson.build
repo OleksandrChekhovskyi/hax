@@ -70,6 +70,7 @@ sources = files(
     'src/providers/anthropic.c',
     'src/providers/anthropic_compat.c',
     'src/providers/anthropic_events.c',
+    'src/providers/anthropic_messages.c',
     'src/providers/codex.c',
     'src/providers/codex_events.c',
     'src/providers/config_provider.c',
