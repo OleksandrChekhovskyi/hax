@@ -850,14 +850,10 @@ void format_context(char *out, size_t out_size, long context_tokens, long contex
     format_tokens(used, sizeof(used), context_tokens);
     if (context_limit > 0) {
         char limit[32];
-        long double ratio = (long double)context_tokens * 100.0L / (long double)context_limit;
-        long percentage;
-        if (ratio > LONG_MAX)
-            percentage = LONG_MAX;
-        else if (ratio < LONG_MIN)
-            percentage = LONG_MIN;
-        else
-            percentage = (long)ratio;
+        /* Usage above the window is real (stale model metadata), so report it rather than
+         * capping at 100; the ceiling only keeps the field three digits wide. */
+        double ratio = (double)context_tokens * 100.0 / (double)context_limit;
+        long percentage = ratio > 999.0 ? 999 : ratio < 0.0 ? 0 : (long)ratio;
         format_tokens(limit, sizeof(limit), context_limit);
         snprintf(out, out_size, "%s / %s (%ld%%)", used, limit, percentage);
     } else {

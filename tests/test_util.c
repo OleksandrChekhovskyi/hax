@@ -1164,6 +1164,8 @@ static void test_format_context_with_and_without_limit(void)
     EXPECT_STR_EQ(buf, "8.9k / 256k (3%)");
     format_context(buf, sizeof(buf), 9113, 0); /* unknown window */
     EXPECT_STR_EQ(buf, "8.9k");
+    format_context(buf, sizeof(buf), 300000, 262144); /* stale window metadata reports over 100% */
+    EXPECT_STR_EQ(buf, "293k / 256k (114%)");
 }
 
 static void test_format_cost_precision(void)
@@ -1192,9 +1194,7 @@ static void test_format_extreme_values(void)
     EXPECT(strchr(formatted, 'h') != NULL);
 
     format_context(formatted, sizeof(formatted), LONG_MAX, 1);
-    char max_percentage[32];
-    snprintf(max_percentage, sizeof(max_percentage), "%ld%%", LONG_MAX);
-    EXPECT(strstr(formatted, max_percentage) != NULL);
+    EXPECT(strstr(formatted, "(999%)") != NULL);
 }
 
 static void test_shell_single_quote(void)
