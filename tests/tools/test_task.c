@@ -303,7 +303,7 @@ static void test_kill_escalates_past_term_exiting_shell(void)
     /* SIGTERM ends the shell at once while the child ignores it (SIG_IGN survives the exec);
      * only the SIGKILL escalation after the grace can end the child, and it must fire
      * although the shell is gone. */
-    char *out = call_bash_background("bash -c 'trap \\\"\\\" TERM; exec sleep 30' & echo $!; wait");
+    char *out = call_bash_background("sh -c 'trap \\\"\\\" TERM; exec sleep 30' & echo $!; wait");
     char *id = extract_task_id(out);
     EXPECT(id != NULL);
     int child_pid = atoi(out);
@@ -329,7 +329,7 @@ static void test_kill_grace_covers_redirected_cleanup(void)
 
     /* The shell dies on SIGTERM at once (pipe EOF included: the child's output is
      * redirected), yet the child's TERM cleanup must still get the grace window. */
-    char *cmd = xasprintf("bash -c 'trap \\\"sleep " TEST_PAUSE "; echo bye > %s\\\" TERM; "
+    char *cmd = xasprintf("sh -c 'trap \\\"sleep " TEST_PAUSE "; echo bye > %s\\\" TERM; "
                           "sleep 30' >/dev/null 2>&1 & wait",
                           path);
     char *out = call_bash_background(cmd);

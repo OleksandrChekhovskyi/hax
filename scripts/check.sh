@@ -41,15 +41,18 @@ llvm_tool() {
 
 # Meson forces colored diagnostics, while compilers report paths relative to the build directory.
 # Strip ANSI codes and rebase in-repo paths so editor quickfix parsers resolve them from the root.
+# Samurai lacks Ninja's --quiet, so Ninja progress gets a shared marker that is removed here.
 relay_log() {
     esc=$(printf '\033')
     case $BUILD_DIR in
     /* | ../*)
-        sed "s|$esc\[[0-9;]*[mK]||g" "$captured_log"
+        sed -e "s|$esc\[[0-9;]*[mK]||g" \
+            -e '/^HAX_NINJA_STATUS /d' "$captured_log"
         ;;
     *)
         up_prefix=$(printf '%s/' "$BUILD_DIR" | sed 's|[^/][^/]*|..|g')
         sed -e "s|$esc\[[0-9;]*[mK]||g" \
+            -e '/^HAX_NINJA_STATUS /d' \
             -e "s|^$(printf '%s' "$up_prefix" | sed 's|\.|\\.|g')||" "$captured_log"
         ;;
     esac
@@ -109,7 +112,7 @@ setup_build_dir() {
 
 build_project() {
     setup_build_dir
-    run_captured ninja -C "$BUILD_DIR" --quiet
+    run_captured env NINJA_STATUS='HAX_NINJA_STATUS ' ninja -C "$BUILD_DIR"
     drop_captured
     printf "build OK%s\n" "$build_suffix"
 }
@@ -133,7 +136,7 @@ lint_sources() {
     # Regenerate the compile database before clang-tidy; otherwise translation units added since
     # the last Meson setup are silently skipped.
     setup_build_dir quiet
-    run_captured ninja -C "$BUILD_DIR" --quiet build.ninja
+    run_captured env NINJA_STATUS='HAX_NINJA_STATUS ' ninja -C "$BUILD_DIR" build.ninja
     drop_captured
     run_clang_tidy_captured "$run_clang_tidy" -clang-tidy-binary "$clang_tidy" -quiet \
         -p "$BUILD_DIR"
