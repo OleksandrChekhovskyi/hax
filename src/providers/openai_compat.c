@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 #include "providers/openai_compat.h"
 
+#include <stddef.h>
+
 #include "config.h"
 #include "provider.h"
 #include "util.h"
