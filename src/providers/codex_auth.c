@@ -93,6 +93,17 @@ enum codex_auth_status codex_auth_load(struct codex_auth *auth, char **detail)
     return status;
 }
 
+static int same_string(const char *a, const char *b)
+{
+    return a == b || (a && b && strcmp(a, b) == 0);
+}
+
+int codex_auth_equal(const struct codex_auth *a, const struct codex_auth *b)
+{
+    return same_string(a->access_token, b->access_token) &&
+           same_string(a->account_id, b->account_id);
+}
+
 const char *codex_auth_status_reason(enum codex_auth_status status)
 {
     switch (status) {

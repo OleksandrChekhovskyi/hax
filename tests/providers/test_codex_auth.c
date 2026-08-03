@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #include <jansson.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "harness.h"
 #include "util.h"
@@ -151,6 +153,141 @@ static void test_rejected_load_zeroes_output(void)
     codex_auth_release(&auth);
 }
 
+/* Point HOME at a scratch directory so the loader reads a file the test controls. */
+static char *auth_home(void)
+{
+    char *home = t_tempdir();
+    char *codex_dir = xasprintf("%s/.codex", home);
+    EXPECT(mkdir(codex_dir, 0700) == 0);
+    free(codex_dir);
+    setenv("HOME", home, 1);
+    return home;
+}
+
+static void write_auth(const char *home, const char *contents)
+{
+    char *path = xasprintf("%s/.codex/auth.json", home);
+    FILE *file = fopen(path, "w");
+    EXPECT(file != NULL);
+    if (file) {
+        fputs(contents, file);
+        fclose(file);
+    }
+    free(path);
+}
+
+static void test_load_missing_file(void)
+{
+    auth_home();
+    struct codex_auth auth;
+    char *detail = NULL;
+    EXPECT(codex_auth_load(&auth, &detail) == CODEX_AUTH_NO_FILE);
+    EXPECT(auth.access_token == NULL);
+    EXPECT(detail != NULL);
+    if (detail)
+        EXPECT(strstr(detail, "/.codex/auth.json") != NULL);
+    free(detail);
+}
+
+static void test_load_bad_json(void)
+{
+    char *home = auth_home();
+    write_auth(home, "{not json");
+
+    struct codex_auth auth;
+    char *detail = NULL;
+    EXPECT(codex_auth_load(&auth, &detail) == CODEX_AUTH_BAD_JSON);
+    EXPECT(detail != NULL);
+    free(detail);
+}
+
+static void test_load_valid_file(void)
+{
+    char *home = auth_home();
+    write_auth(home, "{\"tokens\":{\"access_token\":\"at\",\"account_id\":\"acc\"}}");
+
+    struct codex_auth auth;
+    char *detail = NULL;
+    EXPECT(codex_auth_load(&auth, &detail) == CODEX_AUTH_OK);
+    EXPECT(detail == NULL);
+    EXPECT_STR_EQ(auth.access_token, "at");
+    EXPECT_STR_EQ(auth.account_id, "acc");
+    codex_auth_release(&auth);
+}
+
+/* Reloading after the codex CLI rewrites auth.json is what lets a refreshed token be picked up
+ * without restarting, so a second load must see the new credentials. */
+static void test_load_sees_rewritten_credentials(void)
+{
+    char *home = auth_home();
+    write_auth(home, "{\"tokens\":{\"access_token\":\"old\",\"account_id\":\"acc1\"}}");
+
+    struct codex_auth auth;
+    EXPECT(codex_auth_load(&auth, NULL) == CODEX_AUTH_OK);
+    EXPECT_STR_EQ(auth.access_token, "old");
+    codex_auth_release(&auth);
+
+    write_auth(home, "{\"tokens\":{\"access_token\":\"new\",\"account_id\":\"acc2\"}}");
+    EXPECT(codex_auth_load(&auth, NULL) == CODEX_AUTH_OK);
+    EXPECT_STR_EQ(auth.access_token, "new");
+    EXPECT_STR_EQ(auth.account_id, "acc2");
+    codex_auth_release(&auth);
+}
+
+/* A failed reload must leave the caller's existing credentials usable rather than half-replaced. */
+static void test_failed_reload_reports_zeroed_auth(void)
+{
+    char *home = auth_home();
+    write_auth(home, "{\"tokens\":{}}");
+
+    struct codex_auth auth;
+    EXPECT(codex_auth_load(&auth, NULL) == CODEX_AUTH_NO_TOKENS);
+    EXPECT(auth.access_token == NULL);
+    EXPECT(auth.account_id == NULL);
+    EXPECT(auth.email == NULL);
+    codex_auth_release(&auth);
+}
+
+static void test_equal_compares_both_header_values(void)
+{
+    struct codex_auth base = {.access_token = (char *)"at", .account_id = (char *)"acc"};
+    struct codex_auth same = {.access_token = (char *)"at", .account_id = (char *)"acc"};
+    struct codex_auth other_token = {.access_token = (char *)"at2", .account_id = (char *)"acc"};
+    struct codex_auth other_account = {.access_token = (char *)"at", .account_id = (char *)"acc2"};
+
+    EXPECT(codex_auth_equal(&base, &same));
+    EXPECT(!codex_auth_equal(&base, &other_token));
+    EXPECT(!codex_auth_equal(&base, &other_account));
+}
+
+/* The email is a display label rather than something sent, so it must not force a reload. */
+static void test_equal_ignores_email(void)
+{
+    struct codex_auth with_email = {.access_token = (char *)"at",
+                                    .account_id = (char *)"acc",
+                                    .email = (char *)"a@example.com"};
+    struct codex_auth other_email = {.access_token = (char *)"at",
+                                     .account_id = (char *)"acc",
+                                     .email = (char *)"b@example.com"};
+    struct codex_auth no_email = {.access_token = (char *)"at", .account_id = (char *)"acc"};
+
+    EXPECT(codex_auth_equal(&with_email, &other_email));
+    EXPECT(codex_auth_equal(&with_email, &no_email));
+}
+
+/* Released credentials are zeroed, and comparing them must not dereference NULL. */
+static void test_equal_handles_zeroed(void)
+{
+    struct codex_auth zeroed = {0};
+    struct codex_auth loaded = {.access_token = (char *)"at", .account_id = (char *)"acc"};
+    struct codex_auth partial = {.access_token = (char *)"at"};
+
+    EXPECT(codex_auth_equal(&zeroed, &zeroed));
+    EXPECT(!codex_auth_equal(&zeroed, &loaded));
+    EXPECT(!codex_auth_equal(&loaded, &zeroed));
+    EXPECT(!codex_auth_equal(&partial, &loaded));
+}
+
 static void test_status_reasons(void)
 {
     EXPECT(codex_auth_status_reason(CODEX_AUTH_OK) == NULL);
@@ -171,6 +308,14 @@ int main(void)
     test_tokens_carry_email();
     test_incomplete_tokens_rejected();
     test_rejected_load_zeroes_output();
+    test_load_missing_file();
+    test_load_bad_json();
+    test_load_valid_file();
+    test_load_sees_rewritten_credentials();
+    test_failed_reload_reports_zeroed_auth();
+    test_equal_compares_both_header_values();
+    test_equal_ignores_email();
+    test_equal_handles_zeroed();
     test_status_reasons();
     T_REPORT();
 }

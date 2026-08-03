@@ -29,6 +29,10 @@ enum codex_auth_status codex_auth_load(struct codex_auth *auth, char **detail);
  * `auth` outlives `root`. */
 enum codex_auth_status codex_auth_from_json(const json_t *root, struct codex_auth *auth);
 
+/* Compare the values sent as authentication headers, access_token and account_id. The email is an
+ * informational label and is ignored, so a reload that changes only it counts as unchanged. */
+int codex_auth_equal(const struct codex_auth *a, const struct codex_auth *b);
+
 /* A short description suitable for the provider picker; NULL for CODEX_AUTH_OK. */
 const char *codex_auth_status_reason(enum codex_auth_status status);
 

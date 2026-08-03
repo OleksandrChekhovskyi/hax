@@ -40,15 +40,40 @@
 #define CODEX_ORIGINATOR "originator: codex_cli_rs"
 #define CODEX_USER_AGENT "User-Agent: codex_cli_rs/0.144.1 hax/0.1"
 
+/* Only the codex CLI can refresh the token; hax re-reads auth.json on the next request. */
+#define CODEX_TOKEN_EXPIRED "codex token expired — run `codex` once to refresh, then retry"
+
 struct codex {
     struct provider base;
-    char *access_token;
-    char *account_id;
-    char *account_email;
+    struct codex_auth auth;
+    /* Set when a request is rejected as unauthenticated, so the next one re-reads auth.json and
+     * picks up a token the codex CLI refreshed meanwhile. */
+    int auth_stale;
     char *default_model;
     char *default_effort;
     char *session_id; /* stable prompt-cache and request-routing key */
 };
+
+/* Clearing the mark only once a different token is adopted keeps callers that cannot re-mark from
+ * consuming it: model probes discard their HTTP status, so a probe's 401 is invisible here. */
+static void reload_auth_if_stale(struct codex *codex)
+{
+    if (!codex->auth_stale)
+        return;
+
+    struct codex_auth refreshed;
+    if (codex_auth_load(&refreshed, NULL) != CODEX_AUTH_OK)
+        return;
+
+    if (codex_auth_equal(&codex->auth, &refreshed)) {
+        codex_auth_release(&refreshed);
+        return;
+    }
+
+    codex_auth_release(&codex->auth);
+    codex->auth = refreshed;
+    codex->auth_stale = 0;
+}
 
 static json_t *build_tools(const struct tool_def *tools, size_t n_tools)
 {
@@ -99,14 +124,15 @@ static int codex_stream(struct provider *provider, const struct context *context
                         stream_cb callback, void *callback_user, http_tick_cb tick, void *tick_user)
 {
     struct codex *codex = (struct codex *)provider;
+    reload_auth_if_stale(codex);
 
     char *body = build_request_body(context, codex->base.name, model, codex->session_id);
     if (!body)
         return -1;
     size_t body_len = strlen(body);
 
-    char *authorization = xasprintf("Authorization: Bearer %s", codex->access_token);
-    char *account = xasprintf("chatgpt-account-id: %s", codex->account_id);
+    char *authorization = xasprintf("Authorization: Bearer %s", codex->auth.access_token);
+    char *account = xasprintf("chatgpt-account-id: %s", codex->auth.account_id);
     char *session = xasprintf("session-id: %s", codex->session_id);
     char *request_id = xasprintf("x-client-request-id: %s", codex->session_id);
     const char *headers[] = {
@@ -161,11 +187,10 @@ static int codex_stream(struct provider *provider, const struct context *context
 
     if (!response.cancelled) {
         if (response.status == 401) {
+            codex->auth_stale = 1;
             struct stream_event error_event = {
                 .kind = EV_ERROR,
-                .u.error = {.message = "codex token expired — run `codex` "
-                                       "once to refresh, then retry",
-                            .http_status = 401},
+                .u.error = {.message = CODEX_TOKEN_EXPIRED, .http_status = 401},
             };
             callback(&error_event, callback_user);
         } else if (result != 0 || response.status < 200 || response.status >= 300) {
@@ -194,8 +219,8 @@ static int codex_stream(struct provider *provider, const struct context *context
 static char **build_model_headers(const struct codex *codex)
 {
     char **headers = xcalloc(6, sizeof(*headers));
-    headers[0] = xasprintf("Authorization: Bearer %s", codex->access_token);
-    headers[1] = xasprintf("chatgpt-account-id: %s", codex->account_id);
+    headers[0] = xasprintf("Authorization: Bearer %s", codex->auth.access_token);
+    headers[1] = xasprintf("chatgpt-account-id: %s", codex->auth.account_id);
     headers[2] = xstrdup(CODEX_ORIGINATOR);
     headers[3] = xstrdup(CODEX_USER_AGENT);
     headers[4] = xstrdup("Accept: application/json");
@@ -235,6 +260,7 @@ static int codex_probe_model(struct provider *provider, const char *model,
     if (!model || !*model)
         return -1;
 
+    reload_auth_if_stale(codex);
     probe->url =
         xasprintf("%s?client_version=%s", CODEX_MODELS_ENDPOINT, CODEX_MODEL_CLIENT_VERSION);
     probe->headers = build_model_headers(codex);
@@ -331,9 +357,10 @@ static void print_usage_window(const char *fallback_label, json_t *window)
 static int codex_query_usage(struct provider *provider)
 {
     struct codex *codex = (struct codex *)provider;
+    reload_auth_if_stale(codex);
 
-    char *authorization = xasprintf("Authorization: Bearer %s", codex->access_token);
-    char *account = xasprintf("chatgpt-account-id: %s", codex->account_id);
+    char *authorization = xasprintf("Authorization: Bearer %s", codex->auth.access_token);
+    char *account = xasprintf("chatgpt-account-id: %s", codex->auth.account_id);
     const char *headers[] = {
         authorization, account, CODEX_ORIGINATOR, CODEX_USER_AGENT, "Accept: application/json",
         NULL,
@@ -352,10 +379,12 @@ static int codex_query_usage(struct provider *provider)
         return -1;
     }
     if (result != 0 || !body) {
-        if (status == 401)
-            ui_error("codex token expired — run `codex` once to refresh, then retry");
-        else
+        if (status == 401) {
+            codex->auth_stale = 1;
+            ui_error(CODEX_TOKEN_EXPIRED);
+        } else {
             ui_error("failed to fetch usage from %s", CODEX_USAGE_ENDPOINT);
+        }
         free(body);
         return -1;
     }
@@ -372,8 +401,8 @@ static int codex_query_usage(struct provider *provider)
     json_t *rate_limit = json_object_get(root, "rate_limit");
 
     printf(ANSI_DIM "codex");
-    if (codex->account_email)
-        printf(" · %s", codex->account_email);
+    if (codex->auth.email)
+        printf(" · %s", codex->auth.email);
     if (plan && *plan)
         printf(" · %s", plan);
     printf(ANSI_RESET "\n");
@@ -403,7 +432,7 @@ static size_t codex_list_efforts(struct provider *provider, const char *const **
 char *codex_model_catalog_error(long http_status)
 {
     if (http_status == 401)
-        return xstrdup("codex token expired — run `codex` once to refresh, then retry");
+        return xstrdup(CODEX_TOKEN_EXPIRED);
     if (http_status >= 200 && http_status < 300)
         return xstrdup("codex sent an empty or truncated model catalog response");
     if (http_status != 0)
@@ -474,6 +503,7 @@ static int codex_list_models(struct provider *provider, struct model_info **mode
     struct codex *codex = (struct codex *)provider;
     *models_out = NULL;
     *model_count = 0;
+    reload_auth_if_stale(codex);
 
     char *url =
         xasprintf("%s?client_version=%s", CODEX_MODELS_ENDPOINT, CODEX_MODEL_CLIENT_VERSION);
@@ -485,6 +515,8 @@ static int codex_list_models(struct provider *provider, struct model_info **mode
     string_array_free(headers);
     free(url);
     if (result != 0) {
+        if (http_status == 401)
+            codex->auth_stale = 1;
         *error = codex_model_catalog_error(http_status);
         free(body);
         return -1;
@@ -542,9 +574,7 @@ static void codex_destroy(struct provider *provider)
 {
     struct codex *codex = (struct codex *)provider;
     model_meta_release(provider);
-    free(codex->access_token);
-    free(codex->account_id);
-    free(codex->account_email);
+    codex_auth_release(&codex->auth);
     free(codex->default_model);
     free(codex->default_effort);
     free(codex->session_id);
@@ -580,9 +610,7 @@ struct provider *codex_provider_new(const char *name)
     codex_load_settings(&default_model, &default_effort);
 
     struct codex *codex = xcalloc(1, sizeof(*codex));
-    codex->access_token = auth.access_token;
-    codex->account_id = auth.account_id;
-    codex->account_email = auth.email;
+    codex->auth = auth;
     codex->default_model = default_model ? default_model : xstrdup("gpt-5.3-codex");
     codex->default_effort = default_effort;
     char session_id[37];
