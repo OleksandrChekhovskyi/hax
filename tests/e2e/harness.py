@@ -46,6 +46,8 @@ def hermetic_env(home: Path) -> dict[str, str]:
         if not key.startswith("HAX_") and not key.startswith("XDG_")
     }
     env["HOME"] = str(home)
+    # Never fork real power-management helpers (caffeinate / systemd-inhibit).
+    env["HAX_KEEP_AWAKE"] = "0"
     return env
 
 

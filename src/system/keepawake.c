@@ -118,6 +118,8 @@ void keepawake_release(void)
     if (helper_pid <= 0)
         return;
     kill(helper_pid, SIGTERM);
-    (void)spawn_wait_child(helper_pid);
+    /* A helper that survives SIGTERM (caffeinate has been seen wedged on virtualized
+     * macOS) must not hang the turn boundary; escalate instead of waiting forever. */
+    (void)spawn_wait_child_timeout(helper_pid, 500);
     helper_pid = 0;
 }

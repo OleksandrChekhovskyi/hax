@@ -40,6 +40,10 @@ void spawn_child_die_with_parent(pid_t parent_pid, int signal_number);
 /* Return the child's waitpid status, retrying EINTR, or -1 on error. */
 int spawn_wait_child(pid_t pid);
 
+/* spawn_wait_child with a deadline: a child still running after timeout_ms is SIGKILLed and
+ * reaped. For children that normally exit promptly but must never hang the caller. */
+int spawn_wait_child_timeout(pid_t pid, int timeout_ms);
+
 /* Reap an exited child and return 1; return 0 if it is running or waitpid otherwise fails.
  * ECHILD counts as exited. */
 int spawn_reap_if_exited(pid_t pid);

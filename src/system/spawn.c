@@ -233,6 +233,11 @@ static int wait_child_until(pid_t pid, long deadline_ms)
     }
 }
 
+int spawn_wait_child_timeout(pid_t pid, int timeout_ms)
+{
+    return wait_child_until(pid, monotonic_ms() + timeout_ms);
+}
+
 char *spawn_capture_stdout(const char *const *argv, size_t max_bytes, int timeout_ms,
                            size_t *out_len)
 {

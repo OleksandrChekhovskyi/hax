@@ -114,6 +114,8 @@ static void configure_test_run(void)
     config_set_override("no_session", "1");
     config_set_override("no_tasks", "1");
     config_set_override("transcript", "");
+    /* Never fork real power-management helpers (caffeinate / systemd-inhibit). */
+    config_set_override("keep_awake", "0");
 }
 
 static void test_final_messages_are_pipeable(void)
