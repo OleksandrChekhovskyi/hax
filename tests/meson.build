@@ -47,6 +47,7 @@ test_sources = [
     'providers/test_codex.c',
     'providers/test_codex_events.c',
     'providers/test_codex_messages.c',
+    'providers/test_codex_settings.c',
     'providers/test_config_provider.c',
     'providers/test_llamacpp.c',
     'providers/test_model_info.c',

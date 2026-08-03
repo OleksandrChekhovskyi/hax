@@ -16,6 +16,7 @@
 #include "util.h"
 #include "providers/codex_events.h"
 #include "providers/codex_messages.h"
+#include "providers/codex_settings.h"
 #include "render/progress.h"
 #include "system/path.h"
 #include "terminal/ansi.h"
@@ -49,116 +50,6 @@ struct codex {
     char *default_effort;
     char *session_id; /* stable prompt-cache and request-routing key */
 };
-
-static const char *skip_inline_whitespace(const char *cursor, const char *end)
-{
-    while (cursor < end && (*cursor == ' ' || *cursor == '\t'))
-        cursor++;
-    return cursor;
-}
-
-static int toml_key_matches(const char *cursor, const char *end, const char *key)
-{
-    size_t key_len = strlen(key);
-    if ((size_t)(end - cursor) < key_len || memcmp(cursor, key, key_len) != 0)
-        return 0;
-
-    cursor += key_len;
-    return cursor == end || *cursor == '=' || *cursor == ' ' || *cursor == '\t';
-}
-
-static char *parse_toml_string(const char *value, const char *end)
-{
-    if (value >= end || (*value != '"' && *value != '\''))
-        return NULL;
-
-    char quote = *value++;
-    struct buf result;
-    buf_init(&result);
-
-    while (value < end) {
-        char byte = *value++;
-        if (byte == quote)
-            return buf_steal(&result);
-
-        if (quote == '"' && byte == '\\' && value < end) {
-            byte = *value++;
-            switch (byte) {
-            case 'b':
-                byte = '\b';
-                break;
-            case 't':
-                byte = '\t';
-                break;
-            case 'n':
-                byte = '\n';
-                break;
-            case 'f':
-                byte = '\f';
-                break;
-            case 'r':
-                byte = '\r';
-                break;
-            case '"':
-            case '\\':
-                break;
-            default:
-                /* Preserve unsupported escaped bytes instead of rejecting otherwise usable Codex
-                 * settings. */
-                break;
-            }
-        }
-        buf_append(&result, &byte, 1);
-    }
-
-    buf_free(&result);
-    return NULL;
-}
-
-static char *parse_top_level_toml_string(const char *contents, size_t contents_len, const char *key)
-{
-    const char *cursor = contents;
-    const char *end = contents + contents_len;
-
-    while (cursor < end) {
-        const char *line_end = memchr(cursor, '\n', (size_t)(end - cursor));
-        if (!line_end)
-            line_end = end;
-
-        const char *assignment = skip_inline_whitespace(cursor, line_end);
-        if (assignment < line_end && *assignment == '[')
-            return NULL;
-        if (assignment < line_end && *assignment != '#' &&
-            toml_key_matches(assignment, line_end, key)) {
-            assignment = skip_inline_whitespace(assignment + strlen(key), line_end);
-            if (assignment < line_end && *assignment == '=') {
-                assignment = skip_inline_whitespace(assignment + 1, line_end);
-                return parse_toml_string(assignment, line_end);
-            }
-        }
-
-        cursor = line_end < end ? line_end + 1 : end;
-    }
-
-    return NULL;
-}
-
-static void load_codex_settings(char **model, char **effort)
-{
-    *model = NULL;
-    *effort = NULL;
-
-    char *path = expand_home("~/.codex/config.toml");
-    size_t contents_len = 0;
-    char *contents = slurp_file(path, &contents_len);
-    free(path);
-    if (!contents)
-        return;
-
-    *model = parse_top_level_toml_string(contents, contents_len, "model");
-    *effort = parse_top_level_toml_string(contents, contents_len, "model_reasoning_effort");
-    free(contents);
-}
 
 /* This is an informational label, not authentication: the JWT from Codex's protected auth file is
  * decoded but not verified. Some login flows put email only in the namespaced profile claim. */
@@ -740,15 +631,7 @@ struct provider *codex_provider_new(const char *name)
 
     char *default_model = NULL;
     char *default_effort = NULL;
-    load_codex_settings(&default_model, &default_effort);
-    if (default_model && !*default_model) {
-        free(default_model);
-        default_model = NULL;
-    }
-    if (default_effort && !*default_effort) {
-        free(default_effort);
-        default_effort = NULL;
-    }
+    codex_load_settings(&default_model, &default_effort);
 
     struct codex *codex = xcalloc(1, sizeof(*codex));
     codex->access_token = xstrdup(access_token);

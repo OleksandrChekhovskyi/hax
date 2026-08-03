@@ -74,6 +74,7 @@ sources = files(
     'src/providers/codex.c',
     'src/providers/codex_events.c',
     'src/providers/codex_messages.c',
+    'src/providers/codex_settings.c',
     'src/providers/config_provider.c',
     'src/providers/llamacpp.c',
     'src/providers/mock.c',
