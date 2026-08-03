@@ -3,10 +3,11 @@
 
 #include <stdio.h>
 
+#include "util.h"
+#include "render/disp.h"
 #include "render/markdown.h"
 #include "render/spinner.h"
 #include "terminal/ansi.h"
-#include "util.h"
 
 /* Move the live render state to `to`: close whatever is currently
  * open (SGR reset, md tail flush, state-owned spinner hidden), then

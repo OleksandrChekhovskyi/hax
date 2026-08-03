@@ -4,6 +4,8 @@
 
 #include "agent_tool.h"
 #include "harness.h"
+#include "provider.h"
+#include "tool.h"
 #include "util.h"
 
 static char *last_args;

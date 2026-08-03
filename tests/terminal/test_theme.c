@@ -2,9 +2,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "config.h"
 #include "harness.h"
 #include "util.h"
-#include "config.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
 

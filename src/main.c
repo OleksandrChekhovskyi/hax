@@ -10,14 +10,15 @@
 #include "cli.h"
 #include "config.h"
 #include "oneshot.h"
-#include "providers/registry.h"
+#include "provider.h"
 #include "select.h"
 #include "session.h"
 #include "session_prune.h"
-#include "terminal/theme.h"
 #include "trace.h"
 #include "transcript.h"
 #include "util.h"
+#include "providers/registry.h"
+#include "terminal/theme.h"
 
 /* Bounds unattended agent loops when an interrupt cannot reliably reach a pipeline. */
 #define ONESHOT_MAX_TURNS 100

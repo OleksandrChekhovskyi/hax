@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_NOTIFY_H
-#define HAX_NOTIFY_H
+#ifndef HAX_TERMINAL_NOTIFY_H
+#define HAX_TERMINAL_NOTIFY_H
 
 /* Emit a terminal "attention" notification on stdout: an OSC 9 desktop
  * notification on terminals that support it (iTerm2, Ghostty, WezTerm,
@@ -18,4 +18,4 @@
  * Set HAX_NOTIFY=bel or HAX_NOTIFY=osc9 to force a method. */
 void notify_attention(void);
 
-#endif /* HAX_NOTIFY_H */
+#endif /* HAX_TERMINAL_NOTIFY_H */

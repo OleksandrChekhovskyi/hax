@@ -5,12 +5,15 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "harness.h"
 #include "agent_core.h"
 #include "agent_dispatch.h"
+#include "harness.h"
 #include "history.h"
 #include "provider.h"
+#include "tool.h"
 #include "util.h"
+#include "render/disp.h"
+#include "render/render_ctx.h"
 #include "terminal/vt_resolve.h"
 
 /* Render `items` at `detail` and return the settled rows — the bytes go

@@ -5,8 +5,8 @@
 
 #include "harness.h"
 #include "util.h"
-#include "terminal/vt_resolve.h"
 #include "terminal/ansi.h"
+#include "terminal/vt_resolve.h"
 
 /* Resolve `in` and return the settled rows. Caller frees. */
 static char *resolve(const char *in)

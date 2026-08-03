@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_OPENROUTER_H
-#define HAX_OPENROUTER_H
+#ifndef HAX_PROVIDERS_OPENROUTER_H
+#define HAX_PROVIDERS_OPENROUTER_H
 
 #include <jansson.h>
 
@@ -50,4 +50,4 @@ int openrouter_probe_model(struct provider *p, const char *model, struct model_p
 
 extern const struct provider_factory PROVIDER_OPENROUTER;
 
-#endif /* HAX_OPENROUTER_H */
+#endif /* HAX_PROVIDERS_OPENROUTER_H */

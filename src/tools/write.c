@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #include <jansson.h>
+#include <stddef.h>
+#include <stdlib.h>
 
+#include "provider.h"
 #include "tool.h"
 #include "util.h"
 #include "system/fs.h"

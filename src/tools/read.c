@@ -4,10 +4,12 @@
 #include <jansson.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "provider.h"
 #include "tool.h"
 #include "util.h"
 #include "system/fs.h"

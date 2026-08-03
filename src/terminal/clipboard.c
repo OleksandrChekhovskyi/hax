@@ -1,17 +1,20 @@
 /* SPDX-License-Identifier: MIT */
 #include "terminal/clipboard.h"
 
-#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
+/* fstat backs the __APPLE__-only osascript path, which the Linux lint pass
+ * cannot see; the wait macros are used unconditionally but glibc also leaks
+ * them through <stdlib.h>, so the include cleaner cannot attribute them. */
+#include <sys/stat.h> // IWYU pragma: keep
+#include <sys/wait.h> // IWYU pragma: keep
 
 #include "util.h"
-#include "system/path.h"
+/* path_join is __APPLE__-only here, invisible to the Linux lint pass. */
+#include "system/path.h" // IWYU pragma: keep
 #include "system/spawn.h"
 #include "text/base64.h"
 

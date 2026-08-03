@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #define ESC_TIMEOUT_MS 50

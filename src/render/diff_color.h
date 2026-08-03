@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_DIFF_COLOR_H
-#define HAX_DIFF_COLOR_H
+#ifndef HAX_RENDER_DIFF_COLOR_H
+#define HAX_RENDER_DIFF_COLOR_H
 
 #include <stddef.h>
 
@@ -21,4 +21,4 @@ enum diff_line_kind diff_line_classify(const char *line, size_t length, int in_h
 /* Return whether `line` is a unified-diff file header. Call only before the first hunk. */
 int diff_is_file_header(const char *line, size_t length);
 
-#endif /* HAX_DIFF_COLOR_H */
+#endif /* HAX_RENDER_DIFF_COLOR_H */

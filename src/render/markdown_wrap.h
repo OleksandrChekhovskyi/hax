@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_MARKDOWN_WRAP_H
-#define HAX_MARKDOWN_WRAP_H
+#ifndef HAX_RENDER_MARKDOWN_WRAP_H
+#define HAX_RENDER_MARKDOWN_WRAP_H
 
 #include <stddef.h>
 
@@ -72,4 +72,4 @@ void md_wrap_commit_pending(struct md_wrap *w, const struct md_wrap_context *ctx
 /* Drain partial UTF-8 and discard the emitted row shadow without adding a newline. */
 void md_wrap_flush(struct md_wrap *w, const struct md_wrap_context *ctx);
 
-#endif /* HAX_MARKDOWN_WRAP_H */
+#endif /* HAX_RENDER_MARKDOWN_WRAP_H */

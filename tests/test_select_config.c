@@ -8,10 +8,12 @@
 #include "config.h"
 #include "harness.h"
 #include "model_meta.h"
-#include "render/render_ctx.h"
+#include "provider.h"
 #include "select.h"
-#include "terminal/picker.h"
 #include "util.h"
+#include "render/render_ctx.h"
+#include "terminal/picker.h"
+#include "transport/http.h"
 
 /* select.c reaches into agent.c for these; stub them so the test links without pulling the whole
  * REPL graph. */

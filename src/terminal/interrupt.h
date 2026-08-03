@@ -1,9 +1,8 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_INTERRUPT_H
-#define HAX_INTERRUPT_H
+#ifndef HAX_TERMINAL_INTERRUPT_H
+#define HAX_TERMINAL_INTERRUPT_H
 
-/*
- * Esc-key interrupt watcher.
+/* Esc-key interrupt watcher.
  *
  * Owns a background thread that, while *armed*, reads bytes from stdin in
  * non-canonical mode and sets latched flags when the user presses bare Esc.
@@ -36,8 +35,7 @@
  * No-tty mode: when stdin or stdout isn't a tty, all entry points become
  * no-ops — there's no Esc to detect on a piped stdin, and putting a
  * non-tty stdin into raw mode is a no-op anyway. interrupt_requested()
- * always returns 0 in that case.
- */
+ * always returns 0 in that case. */
 
 void interrupt_init(void);
 
@@ -108,4 +106,4 @@ int interrupt_classifier_feed(struct interrupt_classifier *c, unsigned char byte
  * PENDING_ESC); 0 otherwise. */
 int interrupt_classifier_timeout(struct interrupt_classifier *c);
 
-#endif /* HAX_INTERRUPT_H */
+#endif /* HAX_TERMINAL_INTERRUPT_H */

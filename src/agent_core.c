@@ -4,12 +4,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "util.h"
-#include "turn.h"
-#include "config.h"
 #include "agent_env.h"
 #include "agent_usage.h"
+#include "config.h"
+#include "effort.h"
 #include "model_meta.h"
+#include "provider.h"
+#include "tool.h"
+#include "turn.h"
+#include "util.h"
 #include "providers/registry.h"
 #include "tools/bash_env.h"
 

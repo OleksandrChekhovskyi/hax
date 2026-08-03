@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_SPAWN_H
-#define HAX_SPAWN_H
+#ifndef HAX_SYSTEM_SPAWN_H
+#define HAX_SYSTEM_SPAWN_H
 
 #include <signal.h>
 #include <stdio.h>
@@ -60,4 +60,4 @@ int spawn_pipe_open_read(struct spawn_pipe *pipe, const char *shell_cmd);
  * or zeroed pipe is a successful no-op. */
 int spawn_pipe_close(struct spawn_pipe *pipe);
 
-#endif /* HAX_SPAWN_H */
+#endif /* HAX_SYSTEM_SPAWN_H */

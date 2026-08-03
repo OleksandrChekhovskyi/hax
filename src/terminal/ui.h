@@ -1,9 +1,8 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_UI_H
-#define HAX_UI_H
+#ifndef HAX_TERMINAL_UI_H
+#define HAX_TERMINAL_UI_H
 
-/*
- * User-facing status lines for the interactive REPL surface.
+/* User-facing status lines for the interactive REPL surface.
  *
  * These own the "status line in the terminal" convention in one place:
  * they pick the stream (stdout, so the message interleaves correctly with
@@ -21,9 +20,8 @@
  *   - startup / CLI errors, which print "hax: ..." to stderr before the
  *     REPL exists (see hax_err() in util.h) so scripts can parse them;
  *   - mid-stream provider errors, which flow through the unified EV_ERROR
- *     event and are rendered by the agent's display layer.
- */
+ *     event and are rendered by the agent's display layer. */
 __attribute__((format(printf, 1, 2))) void ui_error(const char *fmt, ...);
 __attribute__((format(printf, 1, 2))) void ui_note(const char *fmt, ...);
 
-#endif /* HAX_UI_H */
+#endif /* HAX_TERMINAL_UI_H */

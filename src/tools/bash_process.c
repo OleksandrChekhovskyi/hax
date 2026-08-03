@@ -6,12 +6,15 @@
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 
 #include "config.h"
+#include "tool.h"
 #include "util.h"
 #include "system/spawn.h"
 #include "terminal/interrupt.h"

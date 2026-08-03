@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_OPENAI_COMPAT_H
-#define HAX_OPENAI_COMPAT_H
+#ifndef HAX_PROVIDERS_OPENAI_COMPAT_H
+#define HAX_PROVIDERS_OPENAI_COMPAT_H
 
 #include "provider.h"
 
@@ -30,4 +30,4 @@ struct provider *openai_compat_provider_new(const char *name);
 
 extern const struct provider_factory PROVIDER_OPENAI_COMPAT;
 
-#endif /* HAX_OPENAI_COMPAT_H */
+#endif /* HAX_PROVIDERS_OPENAI_COMPAT_H */

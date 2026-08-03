@@ -3,10 +3,10 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h> /* strcasecmp — POSIX puts it here, not in <string.h> */
+#include <strings.h>
 
-#include "util.h"
 #include "config.h"
+#include "util.h"
 #include "terminal/ansi.h"
 
 /* A preset is two string tables indexed by role. Missing entries read as

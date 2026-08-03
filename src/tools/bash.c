@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "config.h"
+#include "provider.h"
 #include "tool.h"
 #include "util.h"
 #include "tools/bash_cd_strip.h"

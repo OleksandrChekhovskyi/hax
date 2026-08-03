@@ -1,14 +1,15 @@
 /* SPDX-License-Identifier: MIT */
 #include <errno.h>
+#include <jansson.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <sys/stat.h>
 
 #include "catalog.h"
 #include "config.h"
+#include "effort.h"
 #include "harness.h"
 
 /* Point the cache tier at a private temp tree and write `json` as the cached snapshot. */

@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "harness.h"
+#include "util.h"
 #include "render/markdown_wrap.h"
 #include "terminal/ansi.h"
 

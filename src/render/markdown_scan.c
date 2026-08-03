@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 #include "render/markdown_scan.h"
 
+#include <stddef.h>
+
 static struct md_line_info line_info(enum md_line_kind kind, size_t indent_length)
 {
     return (struct md_line_info){

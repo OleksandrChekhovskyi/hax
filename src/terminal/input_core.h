@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_INPUT_CORE_H
-#define HAX_INPUT_CORE_H
+#ifndef HAX_TERMINAL_INPUT_CORE_H
+#define HAX_TERMINAL_INPUT_CORE_H
 
 #include <stddef.h>
 #include <termios.h>
@@ -216,4 +216,4 @@ typedef int (*input_byte_reader)(void *user);
  * abandoned sequences return INPUT_ACTION_NONE. */
 enum input_action input_core_decode_escape(input_byte_reader read, void *user);
 
-#endif /* HAX_INPUT_CORE_H */
+#endif /* HAX_TERMINAL_INPUT_CORE_H */

@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 #include <jansson.h>
+#include <stddef.h>
 
+#include "harness.h"
 #include "provider.h"
 #include "tool_schema.h"
-#include "harness.h"
 
 static void test_empty_def_yields_object_schema(void)
 {

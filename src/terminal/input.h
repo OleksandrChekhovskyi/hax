@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_INPUT_H
-#define HAX_INPUT_H
+#ifndef HAX_TERMINAL_INPUT_H
+#define HAX_TERMINAL_INPUT_H
 
-#include <stddef.h> /* size_t */
-#include <stdio.h>  /* FILE */
+#include <stddef.h>
+#include <stdio.h>
 
 /* Multi-line terminal editor with history, completion, and modal callback hooks.
  * Non-tty input uses canonical one-line reads without prompts or editing. */
@@ -80,4 +80,4 @@ void input_render_user_message_to(FILE *out, const char *text, size_t len, int d
 /* Return display_width() clamped to the current terminal width. */
 int input_display_cols(void);
 
-#endif /* HAX_INPUT_H */
+#endif /* HAX_TERMINAL_INPUT_H */

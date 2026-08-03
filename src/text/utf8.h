@@ -1,11 +1,10 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_UTF8_H
-#define HAX_UTF8_H
+#ifndef HAX_TEXT_UTF8_H
+#define HAX_TEXT_UTF8_H
 
 #include <stddef.h>
 
-/*
- * UTF-8 structural helpers and visual-cell measurement.
+/* UTF-8 structural helpers and visual-cell measurement.
  *
  * Two kinds of routine live here:
  *
@@ -24,8 +23,7 @@
  * different concern with its own streaming state machine.
  *
  * All functions take a counted buffer (no NUL-terminator required)
- * and never allocate.
- */
+ * and never allocate. */
 
 /* Number of bytes in the UTF-8 sequence whose leader byte is `c`. Returns
  * 1 for ASCII (c < 0x80), 2/3/4 for valid leaders, and 1 for any byte
@@ -124,4 +122,4 @@ int utf8_stream_flush(struct utf8_stream *s, const char **out, size_t *out_n, in
 
 void utf8_stream_reset(struct utf8_stream *s);
 
-#endif /* HAX_UTF8_H */
+#endif /* HAX_TEXT_UTF8_H */

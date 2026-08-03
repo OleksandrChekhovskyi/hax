@@ -1,13 +1,23 @@
 /* SPDX-License-Identifier: MIT */
+#include <jansson.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "harness.h"
+#include "provider.h"
 #include "session.h"
 #include "util.h"
 #include "system/git.h"
+
+static void expect_write(int fd, const char *text)
+{
+    /* The include cleaner knows no glibc provider for ssize_t except <stdio.h>,
+     * which this file has no other use for. */
+    // NOLINTNEXTLINE(misc-include-cleaner)
+    EXPECT(write(fd, text, strlen(text)) == (ssize_t)strlen(text));
+}
 
 static int nullable_strings_equal(const char *a, const char *b)
 {
@@ -450,7 +460,7 @@ static void test_resume_repairs_torn_final_line(void)
                        "{\"kind\":\"user\",\"text\":\"hi\"}\n"
                        "{\"kind\":\"assistant\",\"text\":\"hello\"}\n"
                        "{\"kind\":\"user\",\"text\":\"torn";
-    EXPECT(write(fd, torn, strlen(torn)) == (ssize_t)strlen(torn));
+    expect_write(fd, torn);
     close(fd);
 
     struct item *base;
@@ -750,13 +760,13 @@ static void test_load_enforces_image_count_cap(void)
 
     const char *header =
         "{\"type\":\"session\",\"version\":1,\"provider\":\"pa\",\"model\":\"ma\"}\n";
-    EXPECT(write(fd, header, strlen(header)) == (ssize_t)strlen(header));
+    expect_write(fd, header);
     for (int i = 0; i < IMAGE_REQUEST_MAX_COUNT + 1; i++) {
         char *line = xasprintf("{\"kind\":\"tool_result\",\"call_id\":\"c%d\",\"output\":\"r\","
                                "\"images\":[{\"mime\":\"image/png\",\"data\":\"QUJD\","
                                "\"width\":2,\"height\":1}]}\n",
                                i);
-        EXPECT(write(fd, line, strlen(line)) == (ssize_t)strlen(line));
+        expect_write(fd, line);
         free(line);
     }
     close(fd);
@@ -789,20 +799,20 @@ static void test_load_budgets_images_from_compaction_seed(void)
 
     const char *header =
         "{\"type\":\"session\",\"version\":1,\"provider\":\"pa\",\"model\":\"ma\"}\n";
-    EXPECT(write(fd, header, strlen(header)) == (ssize_t)strlen(header));
+    expect_write(fd, header);
     for (int i = 0; i < IMAGE_REQUEST_MAX_COUNT; i++) {
         char *line = xasprintf("{\"kind\":\"tool_result\",\"call_id\":\"c%d\",\"output\":\"r\","
                                "\"images\":[{\"mime\":\"image/png\",\"data\":\"QUJD\","
                                "\"width\":2,\"height\":1}]}\n",
                                i);
-        EXPECT(write(fd, line, strlen(line)) == (ssize_t)strlen(line));
+        expect_write(fd, line);
         free(line);
     }
     const char *after_seed =
         "{\"kind\":\"user\",\"text\":\"summary\",\"origin\":\"compact_seed\"}\n"
         "{\"kind\":\"tool_result\",\"call_id\":\"live\",\"output\":\"r\","
         "\"images\":[{\"mime\":\"image/png\",\"data\":\"QUJD\",\"width\":2,\"height\":1}]}\n";
-    EXPECT(write(fd, after_seed, strlen(after_seed)) == (ssize_t)strlen(after_seed));
+    expect_write(fd, after_seed);
     close(fd);
 
     struct item *items;

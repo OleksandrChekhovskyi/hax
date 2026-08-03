@@ -3,13 +3,17 @@
 #include <string.h>
 #include <time.h>
 
+#include "agent_core.h"
 #include "agent_loop.h"
 #include "agent_tool.h"
 #include "config.h"
 #include "harness.h"
+#include "provider.h"
 #include "tool.h"
+#include "turn.h"
 #include "util.h"
 #include "tools/task_registry.h"
+#include "transport/http.h"
 
 enum script_mode {
     SCRIPT_COMPLETE,

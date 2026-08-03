@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_RENDER_CTX_H
-#define HAX_RENDER_CTX_H
+#ifndef HAX_RENDER_RENDER_CTX_H
+#define HAX_RENDER_RENDER_CTX_H
 
 #include <stddef.h>
 
@@ -136,4 +136,4 @@ void render_table_spinner_show(struct render_ctx *r);
  * (so the seconds count visibly decreases during the backoff sleep). */
 void update_retry_label(struct render_ctx *r);
 
-#endif /* HAX_RENDER_CTX_H */
+#endif /* HAX_RENDER_RENDER_CTX_H */

@@ -7,10 +7,11 @@
 
 #include "catalog.h"
 #include "config.h"
+#include "effort.h"
 #include "provider.h"
+#include "util.h"
 #include "system/bg_job.h"
 #include "transport/http.h"
-#include "util.h"
 
 struct model_meta {
     struct bg_job *probe_job;

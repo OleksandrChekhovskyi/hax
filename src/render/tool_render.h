@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_TOOL_RENDER_H
-#define HAX_TOOL_RENDER_H
+#ifndef HAX_RENDER_TOOL_RENDER_H
+#define HAX_RENDER_TOOL_RENDER_H
 
 #include <stddef.h>
 
-#include "util.h" /* struct buf */
+#include "util.h"
 #include "render/ctrl_strip.h"
 #include "text/utf8_sanitize.h"
 
@@ -147,4 +147,4 @@ void tool_render_finalize(struct tool_render *r);
 /* tool_display_fn callback; `data` points to a struct tool_render. */
 void tool_render_emit(const char *bytes, size_t n, void *data);
 
-#endif /* HAX_TOOL_RENDER_H */
+#endif /* HAX_RENDER_TOOL_RENDER_H */

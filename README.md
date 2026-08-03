@@ -47,6 +47,19 @@ meson compile -C build
 The examples below use `hax` as if it is on `PATH`; after a source build, use `./build/hax`
 or install it with `meson install -C build`.
 
+For development, `make lint` additionally needs `clang-format`, `clang-tidy`, and Python 3:
+
+```sh
+# Debian/Ubuntu
+sudo apt install clang-format clang-tidy python3
+
+# Arch Linux
+sudo pacman -S --needed clang python
+
+# macOS (Homebrew)
+brew install llvm
+```
+
 ## Quick start
 
 ```sh

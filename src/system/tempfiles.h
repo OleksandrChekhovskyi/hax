@@ -2,8 +2,7 @@
 #ifndef HAX_SYSTEM_TEMPFILES_H
 #define HAX_SYSTEM_TEMPFILES_H
 
-/*
- * Process-wide registry of temp files whose paths travel to the model
+/* Process-wide registry of temp files whose paths travel to the model
  * embedded in conversation history — bash output spills preserved past
  * truncation, images written on clipboard paste. The registry itself is
  * mechanism only: create-and-track plus bulk unlink. Policy — *when* the
@@ -24,8 +23,7 @@
  * rewriting history on load (that would break prompt-cache reuse).
  *
  * Single-threaded by design (all callers run on the agent loop), so no
- * locking.
- */
+ * locking. */
 
 /* Create and track a temp file (mode 0600, O_RDWR) inside a lazily
  * created private per-process 0700 directory under $TMPDIR; names are

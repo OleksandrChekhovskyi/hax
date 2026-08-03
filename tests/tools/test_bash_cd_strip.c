@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: MIT */
+#include <stddef.h>
+
 #include "harness.h"
 #include "tools/bash_cd_strip.h"
 

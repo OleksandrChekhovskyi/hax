@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: MIT */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "harness.h"
+#include "provider.h"
 #include "providers/openai_events.h"
 
 #define MAX_EVENTS 16
@@ -91,6 +93,7 @@ static void cap_reset(struct cap_state *s)
     memset(s, 0, sizeof(*s));
 }
 
+/* NOLINTBEGIN(bugprone-macro-parentheses): the arguments name declared variables */
 #define WITH_STATE(cap, st)                                                                        \
     struct cap_state cap = {0};                                                                    \
     struct openai_events st;                                                                       \
@@ -101,6 +104,7 @@ static void cap_reset(struct cap_state *s)
         openai_events_free(&st);                                                                   \
         cap_reset(&cap);                                                                           \
     } while (0)
+/* NOLINTEND(bugprone-macro-parentheses) */
 
 /* ---------- helpers ---------- */
 

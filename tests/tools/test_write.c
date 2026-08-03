@@ -1,11 +1,9 @@
 /* SPDX-License-Identifier: MIT */
-#include <errno.h>
 #include <jansson.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 
 #include "harness.h"
 #include "tool.h"

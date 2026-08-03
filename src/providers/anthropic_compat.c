@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: MIT */
-#include "anthropic_compat.h"
+#include "providers/anthropic_compat.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 
-#include "anthropic.h"
 #include "config.h"
+#include "provider.h"
 #include "util.h"
+#include "providers/anthropic.h"
 
 struct provider *anthropic_compat_provider_new(const char *name)
 {

@@ -5,8 +5,7 @@
 #include <jansson.h>
 #include <stddef.h>
 
-/*
- * Process-wide configuration, owned by the foreground thread. Settings resolve in this order:
+/* Process-wide configuration, owned by the foreground thread. Settings resolve in this order:
  *
  *   run override -> resumed conversation -> environment -> state.json -> config.json -> default
  *
@@ -14,8 +13,7 @@
  * docs/configuration.md for user-facing file formats and resolution behavior.
  *
  * Returned strings and JSON nodes are borrowed. Copy values that must survive a config mutation or
- * environment change, and resolve all values before starting a background job.
- */
+ * environment change, and resolve all values before starting a background job. */
 
 /* Stops resolution at the current tier. Resolves to the registry default, or NULL when the
  * consumer owns the default. */
@@ -176,8 +174,8 @@ int config_value_valid(const struct config_setting *setting, const char *value);
  * string settings. */
 void config_value_hint(const struct config_setting *setting, char *buffer, size_t size);
 
-/* Return the allocated canonical enum choice matching `value`, or NULL for non-enums or no match.
- */
+/* Return the allocated canonical enum choice matching `value`, or NULL for non-enums or no
+ * match. */
 char *config_value_canonical(const struct config_setting *setting, const char *value);
 
 #endif /* HAX_CONFIG_H */

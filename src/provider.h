@@ -128,8 +128,8 @@ struct context {
 /* Usage reported for one response. Negative values mean unreported. `cached_tokens` and
  * `cache_write_tokens` are normally subsets of `input_tokens`, but providers may report overlapping
  * cache reads and writes; consumers must not assume those categories subtract cleanly. The 1-hour
- * count is a subset of cache writes. `cost` is a provider-reported USD charge, never an estimate.
- */
+ * count is a subset of cache writes. `cost` is a provider-reported USD charge, never an
+ * estimate. */
 struct stream_usage {
     long input_tokens;
     long output_tokens;

@@ -1,11 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 #include "tools/path_preprocess.h"
 
+#include <jansson.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <unistd.h>
-
-#include <jansson.h>
 
 #include "system/path.h"
 

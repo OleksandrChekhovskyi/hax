@@ -5,6 +5,8 @@
 
 #include "harness.h"
 #include "model_meta.h"
+#include "provider.h"
+#include "util.h"
 #include "providers/openai.h"
 
 /* Find the first message with the given role in a built messages array. */

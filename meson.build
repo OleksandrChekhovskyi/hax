@@ -24,8 +24,11 @@ add_project_arguments(
     language: 'c',
 )
 
-libcurl = dependency('libcurl')
-jansson = dependency('jansson')
+# include_type system turns the dependencies' -I flags into -isystem so
+# clang-tidy does not report findings inside third-party headers (Homebrew
+# installs them outside the default system include path).
+libcurl = dependency('libcurl', include_type: 'system')
+jansson = dependency('jansson', include_type: 'system')
 threads = dependency('threads')
 
 # Production sources, grouped by subdirectory and sorted within each group.

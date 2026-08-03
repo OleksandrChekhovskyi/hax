@@ -7,14 +7,18 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "util.h"
 #include "agent.h"
+#include "agent_core.h"
+#include "agent_usage.h"
 #include "catalog.h"
 #include "config.h"
 #include "file_mention.h"
+#include "provider.h"
 #include "select.h"
 #include "session.h"
 #include "session_picker.h"
+#include "util.h"
+#include "render/disp.h"
 #include "render/render_ctx.h"
 #include "terminal/ansi.h"
 #include "terminal/clipboard.h"
@@ -571,7 +575,9 @@ static void run_tasks(const struct command_call *call)
         return;
     }
 
-    char (*statuses)[40] = xmalloc(task_count * sizeof(*statuses));
+    struct task_status {
+        char text[40];
+    } *statuses = xmalloc(task_count * sizeof(*statuses));
     int terminal_width = display_width();
     int id_width = 4;
     int status_width = 0;
@@ -588,13 +594,13 @@ static void run_tasks(const struct command_call *call)
         else
             snprintf(state_label, sizeof(state_label), "exit %d", tasks[i].exit_code);
         format_duration(elapsed_label, sizeof(elapsed_label), tasks[i].elapsed_ms);
-        snprintf(statuses[i], sizeof(statuses[i]), "%s · %s", state_label, elapsed_label);
-        int status_cells = (int)display_cells(statuses[i]);
+        snprintf(statuses[i].text, sizeof(statuses[i].text), "%s · %s", state_label, elapsed_label);
+        int status_cells = (int)display_cells(statuses[i].text);
         if (status_cells > status_width)
             status_width = status_cells;
     }
     for (size_t i = 0; i < task_count; i++) {
-        int status_padding = status_width - (int)display_cells(statuses[i]);
+        int status_padding = status_width - (int)display_cells(statuses[i].text);
         int fixed_width = 2 + id_width + 2 + status_width + 2;
         int command_width = terminal_width - fixed_width - 1;
         if (command_width < 8)
@@ -603,7 +609,7 @@ static void run_tasks(const struct command_call *call)
         char *command = truncate_for_display(flattened, (size_t)command_width);
         free(flattened);
         printf("  " ANSI_BOLD "%-*s" ANSI_BOLD_OFF "  %s%*s  " ANSI_DIM "%s" ANSI_RESET "\n",
-               id_width, tasks[i].id, statuses[i], status_padding, "", command);
+               id_width, tasks[i].id, statuses[i].text, status_padding, "", command);
         free(command);
     }
     free(statuses);

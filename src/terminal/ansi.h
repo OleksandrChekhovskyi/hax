@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_ANSI_H
-#define HAX_ANSI_H
+#ifndef HAX_TERMINAL_ANSI_H
+#define HAX_TERMINAL_ANSI_H
 
 /* ANSI/SGR escape sequences as string literals, so adjacent-string
  * concatenation works at compile time (e.g. `"\r" ANSI_ERASE_LINE`).
@@ -62,4 +62,4 @@
 #define ANSI_CURSOR_HIDE "\x1b[?25l"
 #define ANSI_CURSOR_SHOW "\x1b[?25h"
 
-#endif /* HAX_ANSI_H */
+#endif /* HAX_TERMINAL_ANSI_H */

@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "harness.h"
+#include "provider.h"
 #include "providers/codex_events.h"
 
 #define MAX_CAPTURED_EVENTS 16

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include <sched.h>
+#include <stddef.h>
 
 #include "harness.h"
 #include "system/bg_job.h"

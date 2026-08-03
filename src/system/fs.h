@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_FS_H
-#define HAX_FS_H
+#ifndef HAX_SYSTEM_FS_H
+#define HAX_SYSTEM_FS_H
 
 #include <stddef.h>
 
@@ -26,4 +26,4 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
  * ignored so lookup cannot select a program from the process's current directory. */
 char *fs_which(const char *name);
 
-#endif /* HAX_FS_H */
+#endif /* HAX_SYSTEM_FS_H */

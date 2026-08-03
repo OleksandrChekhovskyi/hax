@@ -4,8 +4,6 @@
  * the catalog will eventually be, so the picker follows has_more/last_id —
  * and the interesting cases are what happens when a server answers that
  * loop badly, which no live backend will reproduce on demand. */
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -13,12 +11,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 
 #include "config.h"
 #include "harness.h"
-#include "provider.h"
 #include "model_meta.h"
+#include "provider.h"
+#include "util.h"
 #include "providers/anthropic.h"
 #include "providers/registry.h"
 

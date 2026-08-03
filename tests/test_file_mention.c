@@ -2,11 +2,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "harness.h"
 #include "file_mention.h"
+#include "harness.h"
+#include "util.h"
 #include "system/path.h"
 #include "terminal/input_core.h"
-#include "util.h"
 
 static void test_fzf_cmd_shape(void)
 {

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_CODEX_H
-#define HAX_CODEX_H
+#ifndef HAX_PROVIDERS_CODEX_H
+#define HAX_PROVIDERS_CODEX_H
 
 #include <jansson.h>
 
@@ -29,4 +29,4 @@ json_t *codex_build_input_items(const struct item *items, size_t n_items, const 
 
 extern const struct provider_factory PROVIDER_CODEX;
 
-#endif /* HAX_CODEX_H */
+#endif /* HAX_PROVIDERS_CODEX_H */

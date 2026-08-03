@@ -1,15 +1,16 @@
 /* SPDX-License-Identifier: MIT */
 #include "session_picker.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "session.h"
+#include "util.h"
 #include "terminal/picker.h"
 #include "terminal/ui.h"
-#include "util.h"
 
 /* Search farther than the visible row so filters can match later prompt text. */
 #define SESSION_LABEL_CELLS 512

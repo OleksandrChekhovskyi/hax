@@ -1,12 +1,11 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_UTF8_SANITIZE_H
-#define HAX_UTF8_SANITIZE_H
+#ifndef HAX_TEXT_UTF8_SANITIZE_H
+#define HAX_TEXT_UTF8_SANITIZE_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-/*
- * Stateful UTF-8 sanitizer for chunked input. Replaces every malformed
+/* Stateful UTF-8 sanitizer for chunked input. Replaces every malformed
  * byte sequence with U+FFFD (the Unicode replacement character, encoded
  * as the three-byte sequence 0xEF 0xBF 0xBD) so the output is always
  * valid UTF-8.
@@ -29,8 +28,7 @@
  * so a single 1-byte feed can complete a 4-byte invalid sequence and
  * emit four U+FFFDs (12 bytes) plus replacements for whatever else
  * arrives. Use UTF8_SANITIZE_OUT_MAX(n) for the per-feed bound and
- * UTF8_SANITIZE_FLUSH_MAX for flush. Both are tight upper bounds.
- */
+ * UTF8_SANITIZE_FLUSH_MAX for flush. Both are tight upper bounds. */
 #define UTF8_SANITIZE_OUT_MAX(n) ((n) * 3 + 9)
 #define UTF8_SANITIZE_FLUSH_MAX  9
 struct utf8_sanitize {
@@ -64,4 +62,4 @@ size_t utf8_sanitize_flush(struct utf8_sanitize *s, char *out);
  * utf8_sanitize_init + feed + flush, with the buffer right-sized. */
 char *sanitize_utf8(const char *data, size_t len);
 
-#endif /* HAX_UTF8_SANITIZE_H */
+#endif /* HAX_TEXT_UTF8_SANITIZE_H */

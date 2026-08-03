@@ -1,5 +1,18 @@
 /* SPDX-License-Identifier: MIT */
+#include <signal.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "harness.h"
+#include "tool.h"
+#include "util.h"
+#include "tools/bash_process.h"
 #include "tools/task_helpers.h"
+#include "tools/task_registry.h"
 
 static void test_background_fast_command_returns_sync(void)
 {

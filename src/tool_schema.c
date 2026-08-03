@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #include "tool_schema.h"
 
+#include <jansson.h>
+#include <stddef.h>
+
 #include "provider.h"
 
 json_t *tool_schema_build(const struct tool_def *def)

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_OPENAI_H
-#define HAX_OPENAI_H
+#ifndef HAX_PROVIDERS_OPENAI_H
+#define HAX_PROVIDERS_OPENAI_H
 
 #include <jansson.h>
 
@@ -210,4 +210,4 @@ struct openai_cache_plan openai_plan_cache(const struct provider *p, const char 
 
 extern const struct provider_factory PROVIDER_OPENAI;
 
-#endif /* HAX_OPENAI_H */
+#endif /* HAX_PROVIDERS_OPENAI_H */

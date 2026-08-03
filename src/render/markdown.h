@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_MARKDOWN_H
-#define HAX_MARKDOWN_H
+#ifndef HAX_RENDER_MARKDOWN_H
+#define HAX_RENDER_MARKDOWN_H
 
 #include <stddef.h>
 
@@ -46,4 +46,4 @@ void md_set_styled(struct md_renderer *m, int on);
 /* True while a GFM table is buffered for whole-table layout and no rows are emitted. */
 int md_in_table(const struct md_renderer *m);
 
-#endif /* HAX_MARKDOWN_H */
+#endif /* HAX_RENDER_MARKDOWN_H */

@@ -9,7 +9,7 @@ headers.
 ```sh
 make                                      # build (quiet; sets up build/ on first run)
 make tests                                # build + all tests
-make lint                                 # clang-format check
+make lint                                 # clang-format + style script + clang-tidy
 scripts/check.sh test <name>              # build + one test
 ```
 
@@ -19,10 +19,10 @@ meson invocations to keep output small. The verbose equivalents (`meson compile 
 `meson test -C build --print-errorlogs`) remain available for per-test timings or full
 build logs.
 
-`make lint` runs `clang-format --dry-run --Werror` over C sources/headers in `src/` and
-`tests/`. Run `clang-format -i` on any C source/header you touch before reporting done.
-Style is enforced by `.clang-format`: LLVM base, Linux braces, 4-space indent, spaces not
-tabs, 100-column limit.
+`make lint` is the single "is the code clean" gate: clang-format, the project style checks
+in `scripts/lint_style.py`, and clang-tidy. Failures say what to fix; the conventions they
+enforce are documented where they live (`.clang-format`, `.clang-tidy`, the script's
+docstring). Run `clang-format -i` on any C source/header you touch before reporting done.
 
 Sanitizer builds for sharper failures: set `BUILD_DIR=build-asan` (ASan/UBSan,
 `-Db_sanitize=address,undefined`) or `BUILD_DIR=build-tsan` (ThreadSanitizer,

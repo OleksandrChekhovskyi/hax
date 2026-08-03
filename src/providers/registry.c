@@ -1,10 +1,13 @@
 /* SPDX-License-Identifier: MIT */
+#include "providers/registry.h"
+
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
-#include "providers/config_provider.h"
-#include "providers/registry.h"
+#include "provider.h"
 #include "util.h"
+#include "providers/config_provider.h"
 
 /* User-facing factories precede internal ones and remain in autoselect priority order. */
 // clang-format off

@@ -5,13 +5,14 @@
 #include <string.h>
 
 #include "agent_core.h"
-#include "model_meta.h"
 #include "config.h"
+#include "model_meta.h"
 #include "provider.h"
 #include "session.h"
 #include "transcript.h"
 #include "turn.h"
 #include "util.h"
+#include "transport/http.h"
 
 /* Structured-checkpoint template. Mirrors the shape proven out by the
  * reference agents (opencode/pi): fixed sections, terse bullets, preserve

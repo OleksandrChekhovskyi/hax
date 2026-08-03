@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_PICKER_CORE_H
-#define HAX_PICKER_CORE_H
+#ifndef HAX_TERMINAL_PICKER_CORE_H
+#define HAX_TERMINAL_PICKER_CORE_H
 
 #include <stddef.h>
 
@@ -54,4 +54,4 @@ void picker_core_select_last(struct picker_core *core);
 /* Selects and centers `item_index` if it is present in `matches`. */
 void picker_core_select_item(struct picker_core *core, size_t item_index);
 
-#endif /* HAX_PICKER_CORE_H */
+#endif /* HAX_TERMINAL_PICKER_CORE_H */

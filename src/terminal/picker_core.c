@@ -3,6 +3,8 @@
 
 #include <string.h>
 
+#include "util.h"
+#include "terminal/picker.h"
 #include "text/utf8.h"
 
 int picker_core_text_cells(const char *text)

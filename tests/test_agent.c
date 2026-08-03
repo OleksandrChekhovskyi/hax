@@ -1,5 +1,4 @@
 /* SPDX-License-Identifier: MIT */
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,13 +7,15 @@
 
 #include "agent.h"
 #include "agent_core.h"
-#include "model_meta.h"
+#include "agent_usage.h"
 #include "config.h"
+#include "effort.h"
 #include "harness.h"
+#include "model_meta.h"
 #include "provider.h"
 #include "session.h"
-#include "render/render_ctx.h"
 #include "util.h"
+#include "render/render_ctx.h"
 
 /* Run `body` with captured stdout, restore stdout, and return owned output. */
 static char *capture_stdout(void (*body)(void *), void *user)

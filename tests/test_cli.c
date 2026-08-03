@@ -5,6 +5,7 @@
 
 #include "cli.h"
 #include "harness.h"
+#include "provider.h"
 #include "session.h"
 #include "util.h"
 

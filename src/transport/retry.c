@@ -2,12 +2,12 @@
 #include "transport/retry.h"
 
 #include <jansson.h>
-#include <stdlib.h>
 #include <strings.h>
 #include <time.h>
 
 #include "config.h"
 #include "util.h"
+#include "transport/http.h"
 
 /* Defaults (in the config registry) tuned for an interactive CLI:
  * prefer a slightly slower successful reply over a fast clean failure.

@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "harness.h"
+#include "provider.h"
 #include "providers/anthropic.h"
 
 /* Nth message in the built array. */

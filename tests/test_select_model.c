@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 #include <stdlib.h>
 
-#include "harness.h"
 #include "catalog.h"
+#include "harness.h"
 #include "provider.h"
 #include "select.h"
 

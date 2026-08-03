@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_HTTP_H
-#define HAX_HTTP_H
+#ifndef HAX_TRANSPORT_HTTP_H
+#define HAX_TRANSPORT_HTTP_H
 
 #include <stddef.h>
 
@@ -69,4 +69,4 @@ int http_get(const char *url, const char *const *headers, long timeout_s, long m
 int http_post_json(const char *url, const char *const *headers, const char *body, size_t body_len,
                    long timeout_s, long max_bytes, http_tick_cb tick, void *tick_user, char **out);
 
-#endif /* HAX_HTTP_H */
+#endif /* HAX_TRANSPORT_HTTP_H */

@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h> /* strcasecmp — POSIX puts it here, not in <string.h> */
+#include <strings.h>
 #include <unistd.h>
 
 #include "config.h"

@@ -1,11 +1,10 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_CTRL_STRIP_H
-#define HAX_CTRL_STRIP_H
+#ifndef HAX_RENDER_CTRL_STRIP_H
+#define HAX_RENDER_CTRL_STRIP_H
 
 #include <stddef.h>
 
-/*
- * Stateful sanitizer for terminal control bytes in tool output.
+/* Stateful sanitizer for terminal control bytes in tool output.
  *
  * Strips two kinds of hazard:
  *
@@ -38,8 +37,7 @@
  * calls are reassembled across the state held in `struct ctrl_strip`.
  * Output is never longer than input, so callers can size out buffers to
  * the input length. ctrl_strip_dup() is the one-shot convenience over a
- * NUL-terminated string.
- */
+ * NUL-terminated string. */
 struct ctrl_strip {
     int state;
 };
@@ -57,4 +55,4 @@ size_t ctrl_strip_feed(struct ctrl_strip *s, const char *in, size_t n, char *out
  * embedded-NUL case really only applies to ctrl_strip_feed callers. */
 char *ctrl_strip_dup(const char *s);
 
-#endif /* HAX_CTRL_STRIP_H */
+#endif /* HAX_RENDER_CTRL_STRIP_H */

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 
 #include "config.h"
+#include "provider.h"
 #include "tool.h"
 #include "util.h"
 #include "tools/task_registry.h"

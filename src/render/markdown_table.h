@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_MARKDOWN_TABLE_H
-#define HAX_MARKDOWN_TABLE_H
+#ifndef HAX_RENDER_MARKDOWN_TABLE_H
+#define HAX_RENDER_MARKDOWN_TABLE_H
 
 #include <stddef.h>
 
@@ -68,4 +68,4 @@ int md_table_bail_partial(struct md_table *t, const struct md_table_context *ctx
 /* Resolve a deferred header or final row, then render any table still collecting at EOF. */
 void md_table_finish(struct md_table *t, const struct md_table_context *ctx, struct buf *tail);
 
-#endif /* HAX_MARKDOWN_TABLE_H */
+#endif /* HAX_RENDER_MARKDOWN_TABLE_H */

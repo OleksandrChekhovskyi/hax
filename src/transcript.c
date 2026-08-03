@@ -2,6 +2,7 @@
 #include "transcript.h"
 
 #include <jansson.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 

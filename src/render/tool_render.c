@@ -6,12 +6,14 @@
 #include <string.h>
 
 #include "util.h"
+#include "render/ctrl_strip.h"
 #include "render/diff_color.h"
 #include "render/disp.h"
 #include "render/spinner.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
 #include "text/utf8.h"
+#include "text/utf8_sanitize.h"
 
 /* Head-only preview (file-content tools — read top-down). */
 #define DISP_HEAD_ONLY_LINES 8

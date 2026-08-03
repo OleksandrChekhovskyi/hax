@@ -1,15 +1,14 @@
 /* SPDX-License-Identifier: MIT */
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#include "harness.h"
-#include "util.h"
-#include "tool.h"
-#include "provider.h"
 #include "agent_dispatch.h"
+#include "harness.h"
+#include "provider.h"
+#include "tool.h"
+#include "util.h"
 #include "render/markdown.h"
 #include "render/render_ctx.h"
 #include "render/spinner.h"

@@ -4,6 +4,7 @@
 
 #include "agent_core.h"
 #include "harness.h"
+#include "provider.h"
 #include "tool.h"
 #include "turn.h"
 #include "util.h"

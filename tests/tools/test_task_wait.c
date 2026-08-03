@@ -1,5 +1,16 @@
 /* SPDX-License-Identifier: MIT */
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "harness.h"
+#include "tool.h"
+#include "util.h"
 #include "tools/task_helpers.h"
+#include "tools/task_registry.h"
 
 static void test_wait_streams_output_live(void)
 {

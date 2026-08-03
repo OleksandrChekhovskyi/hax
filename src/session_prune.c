@@ -3,16 +3,18 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 #include <sys/file.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 #include "config.h"
 #include "session.h"
-#include "system/bg_job.h"
 #include "util.h"
+#include "system/bg_job.h"
 
 #define SESSION_PRUNE_INTERVAL_S (24 * 60 * 60)
 

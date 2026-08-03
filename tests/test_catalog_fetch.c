@@ -1,8 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* Each fetch scenario runs in a child because catalog_prefetch is process-wide and runs once. */
-#include <arpa/inet.h>
 #include <errno.h>
-#include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -11,6 +9,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -293,6 +292,9 @@ static void scenario_stale_snapshot_warns(void)
 
 static void run_scenario(const char *name, void (*scenario)(void))
 {
+    /* The include cleaner knows no direct glibc provider for pid_t here; its
+     * typedef hides behind the ignored bits/ headers. */
+    // NOLINTNEXTLINE(misc-include-cleaner)
     pid_t pid = fork();
     if (pid == 0) {
         scenario();

@@ -5,13 +5,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "agent_core.h" /* INTERRUPT_MARKER */
+#include "agent_core.h"
 #include "agent_dispatch.h"
 #include "agent_tool.h"
 #include "provider.h"
 #include "tool.h"
 #include "util.h"
+#include "render/disp.h"
 #include "render/markdown.h"
+#include "render/render_ctx.h"
 #include "render/tool_render.h"
 #include "terminal/ansi.h"
 #include "terminal/input.h"

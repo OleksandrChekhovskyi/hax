@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "harness.h"
+#include "provider.h"
 #include "turn.h"
 
 static void feed_text(struct turn *t, const char *text)

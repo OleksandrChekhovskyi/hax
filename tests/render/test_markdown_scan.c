@@ -81,8 +81,8 @@ static void test_blockquote_and_pipe_lines(void)
 
 static void test_final_lines(void)
 {
-    /* EOF resolves ambiguous prefixes literally while retaining markers already known to be valid.
-     */
+    /* EOF resolves ambiguous prefixes literally while retaining markers already known to be
+     * valid. */
     expect_line("", 1, (struct expected_line){MD_LINE_TEXT, 0, 0, 0, 1, 0});
     expect_line("  ", 1, (struct expected_line){MD_LINE_TEXT, 2, 0, 0, 1, 0});
     expect_line("#", 1, (struct expected_line){MD_LINE_TEXT, 0, 0, 0, 1, 0});

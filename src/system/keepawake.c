@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: MIT */
 #include "system/keepawake.h"
 
-#include "config.h"
-#include "system/spawn.h"
-
 #include <signal.h>
 #include <unistd.h>
+
+#include "config.h"
+#include "system/spawn.h"
 
 #ifdef __APPLE__
 #include <stdio.h>

@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -10,10 +11,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <limits.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 
 #include "config.h"
+#include "tool.h"
 #include "util.h"
 #include "system/bg_job.h"
 #include "terminal/interrupt.h"

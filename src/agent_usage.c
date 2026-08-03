@@ -5,9 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "util.h"
 #include "catalog.h"
 #include "model_meta.h"
+#include "provider.h"
+#include "util.h"
 
 struct spend_record {
     struct stream_usage usage;

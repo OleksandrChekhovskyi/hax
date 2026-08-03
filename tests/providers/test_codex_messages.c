@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "harness.h"
+#include "provider.h"
 #include "providers/codex.h"
 
 static const char *item_type(json_t *item)

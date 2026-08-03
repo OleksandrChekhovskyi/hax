@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_BG_JOB_H
-#define HAX_BG_JOB_H
+#ifndef HAX_SYSTEM_BG_JOB_H
+#define HAX_SYSTEM_BG_JOB_H
 
 struct bg_job;
 
@@ -24,4 +24,4 @@ int bg_job_cancel_tick(void *job);
  * joined exactly once, before any caller-owned state the worker may access is destroyed. */
 void bg_job_join(struct bg_job *job);
 
-#endif /* HAX_BG_JOB_H */
+#endif /* HAX_SYSTEM_BG_JOB_H */

@@ -4,10 +4,12 @@
  * never touch the parent's dirs. Both children exit via exit(), not
  * _exit(), because the contract under test lives in an atexit handler. */
 #include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-#include <unistd.h>
 
 #include "harness.h"
 

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include <stdlib.h>
+#include <string.h>
 
 #include "harness.h"
 #include "providers/llamacpp.h"

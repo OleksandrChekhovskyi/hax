@@ -4,10 +4,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "anthropic.h"
 #include "config.h"
-#include "openai.h"
+#include "provider.h"
 #include "util.h"
+#include "providers/anthropic.h"
+#include "providers/openai.h"
 
 /* A built-in recipe: the default field values for a well-known provider,
  * overridable key-by-key by a matching providers.<name> config block. The

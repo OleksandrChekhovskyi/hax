@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "openai.h"
+#include "providers/openai.h"
 
 #include <jansson.h>
 #include <stdio.h>
@@ -7,11 +7,13 @@
 #include <string.h>
 #include <strings.h>
 
+#include "catalog.h"
 #include "config.h"
 #include "model_meta.h"
-#include "openai_events.h"
+#include "provider.h"
 #include "tool_schema.h"
 #include "util.h"
+#include "providers/openai_events.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 #include "transport/retry.h"
@@ -270,8 +272,7 @@ json_t *openai_build_messages(const char *system_prompt, const struct item *item
  *
  *     {"role": "user", "content": [
  *       {"type": "text", "text": "...",
- *        "cache_control": {"type": "ephemeral", "ttl": "1h"}}]}
- */
+ *        "cache_control": {"type": "ephemeral", "ttl": "1h"}}]} */
 static json_t *make_cache_control(const char *ttl)
 {
     json_t *cc = json_pack("{s:s}", "type", "ephemeral");

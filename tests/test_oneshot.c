@@ -4,11 +4,13 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "agent_core.h"
 #include "config.h"
 #include "harness.h"
 #include "oneshot.h"
 #include "provider.h"
 #include "util.h"
+#include "transport/http.h"
 
 struct captured_run {
     int result;

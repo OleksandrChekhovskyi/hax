@@ -2,7 +2,6 @@
 #include <stdlib.h>
 
 #include "harness.h"
-#include "util.h"
 #include "system/path.h"
 
 /* ---------- path_join ---------- */

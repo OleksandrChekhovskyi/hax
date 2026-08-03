@@ -4,8 +4,7 @@
 
 #include <stddef.h>
 
-/*
- * Ctrl-V paste policy for the REPL prompt, registered with the editor
+/* Ctrl-V paste policy for the REPL prompt, registered with the editor
  * via input_set_paste_hook. A clipboard image is persisted to a tracked
  * temp file (system/tempfiles.h) and handed back as a
  * "[pasted image: <path>] " marker — the model fetches the pixels with
@@ -14,8 +13,7 @@
  * clipboard's text so the binding never feels dead.
  *
  * Returns a malloc'd string to insert at the cursor, or NULL to insert
- * nothing (empty clipboard, no helper available).
- */
+ * nothing (empty clipboard, no helper available). */
 char *paste_image_capture(void);
 
 /* CRLF/CR -> LF and NUL-strip, in place; returns the new length.

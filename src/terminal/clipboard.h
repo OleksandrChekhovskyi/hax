@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_CLIPBOARD_H
-#define HAX_CLIPBOARD_H
+#ifndef HAX_TERMINAL_CLIPBOARD_H
+#define HAX_TERMINAL_CLIPBOARD_H
 
 #include <stddef.h>
 
@@ -9,8 +9,7 @@
  * paste-empty result was a successful copy. */
 #define CLIPBOARD_OSC52_MAX_BYTES 100000
 
-/*
- * Copy a chunk of text to the user's clipboard.
+/* Copy a chunk of text to the user's clipboard.
  *
  * Strategy:
  *  - Inside an SSH session (SSH_TTY/SSH_CONNECTION set) the host's
@@ -23,12 +22,10 @@
  *
  * Returns 0 on success. On failure, returns -1 and writes a short
  * human-readable reason to *err (statically allocated; do not free).
- * `err` may be NULL if the caller doesn't care.
- */
+ * `err` may be NULL if the caller doesn't care. */
 int clipboard_copy(const char *text, size_t len, const char **err);
 
-/*
- * Build the OSC 52 escape sequence for `text`. When `tmux_wrap` is
+/* Build the OSC 52 escape sequence for `text`. When `tmux_wrap` is
  * non-zero, wrap the inner sequence in a DCS passthrough envelope so
  * tmux forwards it to the outer terminal.
  *
@@ -37,8 +34,7 @@ int clipboard_copy(const char *text, size_t len, const char **err);
  * gets the byte length excluding the NUL. Caller frees.
  *
  * Exposed so unit tests can verify the framing without driving real
- * clipboard I/O; `clipboard_copy` calls it internally.
- */
+ * clipboard I/O; `clipboard_copy` calls it internally. */
 char *clipboard_osc52_sequence(const char *text, size_t len, int tmux_wrap, size_t *out_len);
 
 /* Budget for one whole paste operation. Reading runs while the editor
@@ -51,8 +47,7 @@ char *clipboard_osc52_sequence(const char *text, size_t len, int tmux_wrap, size
  * on a large screenshot). */
 #define CLIPBOARD_PASTE_TIMEOUT_MS 5000
 
-/*
- * Read an image from the user's clipboard: wl-paste (Wayland), xclip
+/* Read an image from the user's clipboard: wl-paste (Wayland), xclip
  * (X11), then osascript (macOS) — each helper that isn't installed or
  * has no image on offer fails fast and falls through. Returns malloc'd
  * raw image bytes with *out_len set, or NULL when no helper produced
@@ -65,17 +60,14 @@ char *clipboard_osc52_sequence(const char *text, size_t len, int tmux_wrap, size
  *
  * No OSC 52 analog exists for reading, so inside an SSH session this
  * reads the remote host's clipboard — usually empty on a headless box,
- * which surfaces as NULL rather than an error.
- */
+ * which surfaces as NULL rather than an error. */
 char *clipboard_paste_image(size_t *out_len, long deadline_ms);
 
-/*
- * Text sibling of clipboard_paste_image: pbpaste / wl-paste / xclip /
+/* Text sibling of clipboard_paste_image: pbpaste / wl-paste / xclip /
  * xsel, under the same deadline contract. Returns malloc'd
  * NUL-terminated bytes (*out_len excludes the NUL) or NULL. Raw
  * clipboard content — callers normalize line endings / strip NULs as
- * their context needs.
- */
+ * their context needs. */
 char *clipboard_paste_text(size_t *out_len, long deadline_ms);
 
-#endif /* HAX_CLIPBOARD_H */
+#endif /* HAX_TERMINAL_CLIPBOARD_H */

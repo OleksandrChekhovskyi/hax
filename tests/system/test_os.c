@@ -6,8 +6,8 @@
 #include <unistd.h>
 
 #include "harness.h"
-#include "system/os.h"
 #include "util.h"
+#include "system/os.h"
 
 static char *write_release(const char *content)
 {

@@ -6,7 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/wait.h>
+#include <sys/types.h>
+/* The wait macros are provided by <sys/wait.h> per POSIX; glibc also leaks
+ * them through <stdlib.h>, so the include cleaner cannot attribute them. */
+#include <sys/wait.h> // IWYU pragma: keep
 
 #include "util.h"
 #include "system/tempfiles.h"

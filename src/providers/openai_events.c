@@ -1,10 +1,11 @@
 /* SPDX-License-Identifier: MIT */
-#include "openai_events.h"
+#include "providers/openai_events.h"
 
 #include <jansson.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "provider.h"
 #include "util.h"
 
 void openai_events_init(struct openai_events *s, stream_cb cb, void *user)

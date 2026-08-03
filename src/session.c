@@ -5,6 +5,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <jansson.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,9 +15,10 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 
-#include "util.h"
 #include "config.h"
+#include "provider.h"
 #include "session_prune.h"
+#include "util.h"
 #include "system/fs.h"
 #include "system/git.h"
 

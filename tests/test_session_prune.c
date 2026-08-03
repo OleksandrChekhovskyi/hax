@@ -3,11 +3,12 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "harness.h"
+#include "provider.h"
 #include "session.h"
 #include "session_prune.h"
 #include "util.h"

@@ -4,15 +4,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "agent_core.h"
 #include "agent_tool.h"
 #include "agent_usage.h"
 #include "compact.h"
 #include "model_meta.h"
+#include "provider.h"
 #include "session.h"
+#include "tool.h"
 #include "transcript.h"
+#include "turn.h"
 #include "util.h"
 #include "system/keepawake.h"
 #include "tools/task_registry.h"
+#include "transport/http.h"
 
 struct loop_turn_sink {
     struct agent_loop_turn *loop_turn;

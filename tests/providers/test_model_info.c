@@ -1,7 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 #include <jansson.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
+#include "effort.h"
 #include "harness.h"
 #include "provider.h"
 #include "providers/anthropic.h"
@@ -13,8 +16,7 @@
  * These fixtures are trimmed from real responses. The invariant every case
  * shares: a field the entry doesn't carry stays at its unknown sentinel, so
  * model_meta falls back to the catalog instead of resolving a made-up
- * answer. Resolution between the two tiers is tested in test_model_meta.c.
- */
+ * answer. Resolution between the two tiers is tested in test_model_meta.c. */
 
 static json_t *parse(const char *json)
 {
@@ -26,12 +28,14 @@ static json_t *parse(const char *json)
 }
 
 /* Run `fn` over a fixture into a freshly initialized model_info. */
+/* NOLINTBEGIN(bugprone-macro-parentheses): `m` names a declared variable */
 #define WITH_ENTRY(json, fn, m)                                                                    \
     struct model_info m;                                                                           \
     model_info_init(&m);                                                                           \
     json_t *m##_j = parse(json);                                                                   \
     if (m##_j)                                                                                     \
         fn(m##_j, &m);
+/* NOLINTEND(bugprone-macro-parentheses) */
 
 /* ---------------- openrouter ---------------- */
 

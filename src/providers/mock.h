@@ -4,8 +4,7 @@
 
 #include "provider.h"
 
-/*
- * Mock provider for exercising the rendering / dispatch pipeline without
+/* Mock provider for exercising the rendering / dispatch pipeline without
  * a real LLM. Activated with HAX_PROVIDER=mock.
  *
  * Two modes, picked at construction time:
@@ -18,8 +17,7 @@
  *      latest user message and emits a heuristic response: a backtick-
  *      quoted command becomes a bash (or read) tool call, anything else
  *      is echoed back. Lets you smoke-test the rendering with simple
- *      free-text instructions like "run `ls -la`".
- */
+ *      free-text instructions like "run `ls -la`". */
 
 struct provider *mock_provider_new(const char *name);
 

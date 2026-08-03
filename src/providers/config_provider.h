@@ -6,8 +6,7 @@
 
 #include "provider.h"
 
-/*
- * Providers defined by data rather than code.
+/* Providers defined by data rather than code.
  *
  * A config-defined provider is a named `providers.<name>` block in
  * config.json (the file/runtime-override lane — there is no per-provider env
@@ -23,8 +22,7 @@
  *
  * The registry (registry.c) merges these dynamic factories with the
  * compiled-in ones: a built-in factory name wins, config/recipe providers
- * add new selectable names.
- */
+ * add new selectable names. */
 
 /* The dynamic factory set: the union of recipe names and config.json
  * `providers.*` names (deduplicated; a config block matching a recipe name

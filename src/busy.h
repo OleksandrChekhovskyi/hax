@@ -2,14 +2,12 @@
 #ifndef HAX_BUSY_H
 #define HAX_BUSY_H
 
-/*
- * Foreground busy window: one spinner plus an armed Esc watcher around a
+/* Foreground busy window: one spinner plus an armed Esc watcher around a
  * blocking network fetch on the REPL foreground path (the /model catalog
  * fetch, /usage). Thread busy_tick into the fetch as its http_tick_cb so
  * Esc aborts the transfer; busy_end reports whether that happened, so the
  * caller can treat cancellation as "never mind" instead of a failure.
- * Both parts are no-ops on a non-TTY, so scripted runs are unaffected.
- */
+ * Both parts are no-ops on a non-TTY, so scripted runs are unaffected. */
 
 struct busy;
 

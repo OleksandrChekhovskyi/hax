@@ -1,10 +1,11 @@
 /* SPDX-License-Identifier: MIT */
-#include "codex_events.h"
+#include "providers/codex_events.h"
 
 #include <jansson.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "provider.h"
 #include "util.h"
 
 struct codex_tool_call {

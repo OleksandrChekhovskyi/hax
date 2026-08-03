@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: MIT */
-#include "git.h"
+#include "system/git.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-#include "spawn.h"
 #include "util.h"
+#include "system/spawn.h"
 
 /* The probe runs before the first request goes out, so a git that can't answer about the working
  * directory promptly — a contended lock, a stalled network mount — loses its label rather than

@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "codex.h"
+#include "providers/codex.h"
 
 #include <jansson.h>
 #include <stdio.h>
@@ -8,16 +8,18 @@
 #include <time.h>
 
 #include "busy.h"
-#include "codex_events.h"
 #include "config.h"
+#include "effort.h"
 #include "model_meta.h"
+#include "provider.h"
+#include "tool_schema.h"
 #include "util.h"
+#include "providers/codex_events.h"
 #include "render/progress.h"
 #include "system/path.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
 #include "text/base64.h"
-#include "tool_schema.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 #include "transport/retry.h"

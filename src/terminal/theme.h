@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_THEME_H
-#define HAX_THEME_H
+#ifndef HAX_TERMINAL_THEME_H
+#define HAX_TERMINAL_THEME_H
 
 /* Semantic color roles, resolved to concrete SGR sequences by the active
  * theme preset. Call sites name the meaning (accent, error, ...) and the
@@ -93,4 +93,4 @@ const char *theme_tint_name(void);
  * no tint (ansi, off), where the caller shows plain rows instead. */
 const char *theme_tint_open(const char *name);
 
-#endif /* HAX_THEME_H */
+#endif /* HAX_TERMINAL_THEME_H */

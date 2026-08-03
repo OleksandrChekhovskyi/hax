@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: MIT */
-#include "openai_compat.h"
+#include "providers/openai_compat.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 
 #include "config.h"
-#include "openai.h"
+#include "provider.h"
 #include "util.h"
+#include "providers/openai.h"
 
 struct provider *openai_compat_provider_new(const char *name)
 {

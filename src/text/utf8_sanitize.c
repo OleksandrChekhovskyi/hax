@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "text/utf8_sanitize.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 

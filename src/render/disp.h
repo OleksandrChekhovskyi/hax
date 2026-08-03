@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_DISP_H
-#define HAX_DISP_H
+#ifndef HAX_RENDER_DISP_H
+#define HAX_RENDER_DISP_H
 
 #include <stddef.h>
 #include <stdio.h>
@@ -113,4 +113,4 @@ void disp_tool_strip_solo(struct disp *d);
 void disp_tool_strip_close(struct disp *d);
 void disp_tool_strip_close_solo(struct disp *d);
 
-#endif /* HAX_DISP_H */
+#endif /* HAX_RENDER_DISP_H */

@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #include "cli.h"
 
-#include <getopt.h>
+/* getopt_long and struct option live in glibc's bits/getopt_ext.h, which the
+ * include cleaner is told to ignore, so it cannot see this header being used. */
+#include <getopt.h> // IWYU pragma: keep
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,11 +11,11 @@
 
 #include "session.h"
 #include "session_picker.h"
+#include "util.h"
 #include "terminal/ansi.h"
 #include "terminal/interrupt.h"
 #include "terminal/theme.h"
 #include "tools/bash_env.h"
-#include "util.h"
 
 static const struct help_option {
     const char *flags;

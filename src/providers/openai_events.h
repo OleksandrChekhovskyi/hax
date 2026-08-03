@@ -1,14 +1,13 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_OPENAI_EVENTS_H
-#define HAX_OPENAI_EVENTS_H
+#ifndef HAX_PROVIDERS_OPENAI_EVENTS_H
+#define HAX_PROVIDERS_OPENAI_EVENTS_H
 
 #include <stddef.h>
 
 #include "provider.h"
 #include "util.h"
 
-/*
- * Parses OpenAI Chat Completions streaming chunks and translates them into
+/* Parses OpenAI Chat Completions streaming chunks and translates them into
  * provider-agnostic stream_event callbacks. Tool calls are streamed as a
  * per-choice array keyed by `index`; we track per-index state so we can emit
  * EV_TOOL_CALL_START exactly once (when both id and name are known) and
@@ -16,8 +15,7 @@
  *
  * Only the modern `tool_calls` shape is handled — the legacy pre-2023
  * `function_call` / `finish_reason: "function_call"` format is out of scope,
- * since every current OpenAI-compatible backend we target emits `tool_calls`.
- */
+ * since every current OpenAI-compatible backend we target emits `tool_calls`. */
 
 struct openai_tool_track {
     int index;
@@ -85,4 +83,4 @@ void openai_events_feed(struct openai_events *s, const char *data);
  * produced. Call once the SSE transport closes cleanly. */
 void openai_events_finalize(struct openai_events *s);
 
-#endif /* HAX_OPENAI_EVENTS_H */
+#endif /* HAX_PROVIDERS_OPENAI_EVENTS_H */

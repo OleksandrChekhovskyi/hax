@@ -13,6 +13,7 @@
 #include "compact.h"
 #include "config.h"
 #include "model_meta.h"
+#include "provider.h"
 #include "session.h"
 #include "transcript.h"
 #include "util.h"

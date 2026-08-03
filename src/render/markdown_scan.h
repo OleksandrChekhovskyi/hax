@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_MARKDOWN_SCAN_H
-#define HAX_MARKDOWN_SCAN_H
+#ifndef HAX_RENDER_MARKDOWN_SCAN_H
+#define HAX_RENDER_MARKDOWN_SCAN_H
 
 #include <stddef.h>
 
@@ -32,4 +32,4 @@ struct md_line_info {
 /* final resolves ambiguous prefixes against EOF instead of requesting more input. */
 struct md_line_info md_scan_line(const char *line, size_t length, int final);
 
-#endif /* HAX_MARKDOWN_SCAN_H */
+#endif /* HAX_RENDER_MARKDOWN_SCAN_H */

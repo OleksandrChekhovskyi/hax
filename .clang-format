@@ -7,7 +7,22 @@ AlignConsecutiveMacros: true
 AllowShortFunctionsOnASingleLine: None
 AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
-SortIncludes: false
-IncludeBlocks: Preserve
+# Include order: own header, blank line, <system>, blank line, then project
+# includes. Within each block, plain headers sort before subdirectory ones.
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<[^/]+>$'
+    Priority: 1
+    SortPriority: 1
+  - Regex: '^<.+/'
+    Priority: 1
+    SortPriority: 2
+  - Regex: '^"[^/]+"$'
+    Priority: 2
+    SortPriority: 3
+  - Regex: '^".+/'
+    Priority: 2
+    SortPriority: 4
 SpaceBeforeParens: ControlStatements
 PointerAlignment: Right

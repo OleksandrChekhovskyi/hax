@@ -6,6 +6,8 @@
 #include <string.h>
 
 #include "agent_core.h"
+#include "provider.h"
+#include "tool.h"
 #include "util.h"
 #include "render/ctrl_strip.h"
 

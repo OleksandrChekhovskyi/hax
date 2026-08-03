@@ -11,12 +11,12 @@
 #include <sys/ioctl.h>
 
 #include "util.h"
-#include "text/utf8.h"
 #include "terminal/ansi.h"
 #include "terminal/input_core.h"
 #include "terminal/picker_core.h"
 #include "terminal/theme.h"
 #include "terminal/ui.h"
+#include "text/utf8.h"
 
 /* Terminal key sequences arrive as a burst; a lone Escape means cancel. */
 #define ESC_TIMEOUT_MS 50

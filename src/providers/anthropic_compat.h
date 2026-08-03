@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_ANTHROPIC_COMPAT_H
-#define HAX_ANTHROPIC_COMPAT_H
+#ifndef HAX_PROVIDERS_ANTHROPIC_COMPAT_H
+#define HAX_PROVIDERS_ANTHROPIC_COMPAT_H
 
 #include "provider.h"
 
@@ -23,4 +23,4 @@ struct provider *anthropic_compat_provider_new(const char *name);
 
 extern const struct provider_factory PROVIDER_ANTHROPIC_COMPAT;
 
-#endif /* HAX_ANTHROPIC_COMPAT_H */
+#endif /* HAX_PROVIDERS_ANTHROPIC_COMPAT_H */

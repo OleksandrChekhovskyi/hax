@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_GIT_H
-#define HAX_GIT_H
+#ifndef HAX_SYSTEM_GIT_H
+#define HAX_SYSTEM_GIT_H
 
 /* Repository position at a point in time. Recorded with a session so a conversation whose opening
  * prompt is generic ("review the last commit") stays identifiable later. */
@@ -15,4 +15,4 @@ struct git_state {
 void git_state_probe(struct git_state *out);
 void git_state_free(struct git_state *state);
 
-#endif /* HAX_GIT_H */
+#endif /* HAX_SYSTEM_GIT_H */

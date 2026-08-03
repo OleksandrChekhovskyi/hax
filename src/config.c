@@ -3,6 +3,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <jansson.h>
 #include <libgen.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,8 +11,6 @@
 #include <strings.h>
 #include <unistd.h>
 #include <sys/stat.h>
-
-#include <jansson.h>
 
 #include "util.h"
 #include "system/fs.h"

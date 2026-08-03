@@ -7,6 +7,7 @@
 #include "catalog.h"
 #include "harness.h"
 #include "model_meta.h"
+#include "provider.h"
 #include "util.h"
 
 static const struct provider CATALOG_PROVIDER = {.catalog_id = "prov"};

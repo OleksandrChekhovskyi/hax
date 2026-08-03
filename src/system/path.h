@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_PATH_H
-#define HAX_PATH_H
+#ifndef HAX_SYSTEM_PATH_H
+#define HAX_SYSTEM_PATH_H
 
 /* Filesystem path manipulation. All return malloc'd strings; caller frees.
  * No filesystem I/O — these are textual transforms (no realpath, no
@@ -44,4 +44,4 @@ char *collapse_home(const char *path);
  * NULL/non-absolute inputs return NULL. */
 char *path_relativize(const char *path, const char *cwd);
 
-#endif /* HAX_PATH_H */
+#endif /* HAX_SYSTEM_PATH_H */

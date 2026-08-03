@@ -2,7 +2,7 @@
 #ifndef HAX_COMPACT_H
 #define HAX_COMPACT_H
 
-#include "provider.h" /* stream_cb, http_tick_cb */
+#include "provider.h"
 
 struct agent_session;
 struct session_log;

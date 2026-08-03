@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "openrouter.h"
+#include "providers/openrouter.h"
 
 #include <jansson.h>
 #include <stdio.h>
@@ -7,10 +7,13 @@
 #include <string.h>
 
 #include "busy.h"
+#include "catalog.h"
 #include "config.h"
+#include "effort.h"
 #include "model_meta.h"
-#include "openai.h"
+#include "provider.h"
 #include "util.h"
+#include "providers/openai.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
 #include "transport/http.h"

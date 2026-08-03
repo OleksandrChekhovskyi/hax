@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_RETRY_H
-#define HAX_RETRY_H
+#ifndef HAX_TRANSPORT_RETRY_H
+#define HAX_TRANSPORT_RETRY_H
 
 #include "transport/http.h"
 
@@ -61,4 +61,4 @@ long retry_delay_ms(const struct retry_policy *pol, int attempt);
  * where there's no cancellation source. */
 int retry_sleep_with_tick(long ms, http_tick_cb tick, void *user);
 
-#endif /* HAX_RETRY_H */
+#endif /* HAX_TRANSPORT_RETRY_H */

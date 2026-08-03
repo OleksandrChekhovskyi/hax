@@ -1,14 +1,13 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_ANTHROPIC_EVENTS_H
-#define HAX_ANTHROPIC_EVENTS_H
+#ifndef HAX_PROVIDERS_ANTHROPIC_EVENTS_H
+#define HAX_PROVIDERS_ANTHROPIC_EVENTS_H
 
 #include <stddef.h>
 
 #include "provider.h"
 #include "util.h"
 
-/*
- * Parses Anthropic Messages API streaming events and translates them into
+/* Parses Anthropic Messages API streaming events and translates them into
  * provider-agnostic stream_event callbacks. The Messages stream is a sequence
  * of named SSE events (message_start, content_block_start/delta/stop,
  * message_delta, message_stop, ping, error); each `data:` payload is JSON
@@ -22,8 +21,7 @@
  *
  * Usage is split across the stream: input/cache counts land in message_start,
  * the final output count in message_delta. We hold both until message_stop
- * fires EV_DONE.
- */
+ * fires EV_DONE. */
 
 enum anthropic_block_kind {
     ANTHROPIC_BLK_TEXT = 0,
@@ -75,4 +73,4 @@ void anthropic_events_feed(struct anthropic_events *s, const char *event_name, c
  * produced. Call once the SSE transport closes cleanly. */
 void anthropic_events_finalize(struct anthropic_events *s);
 
-#endif /* HAX_ANTHROPIC_EVENTS_H */
+#endif /* HAX_PROVIDERS_ANTHROPIC_EVENTS_H */

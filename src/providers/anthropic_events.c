@@ -1,10 +1,11 @@
 /* SPDX-License-Identifier: MIT */
-#include "anthropic_events.h"
+#include "providers/anthropic_events.h"
 
 #include <jansson.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "provider.h"
 #include "util.h"
 
 void anthropic_events_init(struct anthropic_events *s, stream_cb cb, void *user)

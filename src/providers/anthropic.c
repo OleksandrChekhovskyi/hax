@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "anthropic.h"
+#include "providers/anthropic.h"
 
 #include <jansson.h>
 #include <stdio.h>
@@ -7,11 +7,13 @@
 #include <string.h>
 #include <strings.h>
 
-#include "anthropic_events.h"
 #include "config.h"
+#include "effort.h"
 #include "model_meta.h"
+#include "provider.h"
 #include "tool_schema.h"
 #include "util.h"
+#include "providers/anthropic_events.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 #include "transport/retry.h"

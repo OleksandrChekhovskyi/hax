@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "terminal/vt_resolve.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_SPINNER_H
-#define HAX_SPINNER_H
+#ifndef HAX_RENDER_SPINNER_H
+#define HAX_RENDER_SPINNER_H
 
 /* A single-line indicator animated by a background thread. All entry
  * points are idempotent and safe on non-TTY stdout (no thread, line
@@ -114,4 +114,4 @@ void spinner_set_timer(struct spinner *s, long start_ms);
  * synced with the spinner's animation. */
 const char *spinner_glyph_now(void);
 
-#endif /* HAX_SPINNER_H */
+#endif /* HAX_RENDER_SPINNER_H */

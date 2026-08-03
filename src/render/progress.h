@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_PROGRESS_H
-#define HAX_PROGRESS_H
+#ifndef HAX_RENDER_PROGRESS_H
+#define HAX_RENDER_PROGRESS_H
 
 /* Render a single-line progress bar to stdout (no trailing newline).
  *
@@ -12,4 +12,4 @@
  * status output that should recede behind conversation text. */
 void progress_bar_print(double frac, int width);
 
-#endif /* HAX_PROGRESS_H */
+#endif /* HAX_RENDER_PROGRESS_H */

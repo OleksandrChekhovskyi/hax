@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "mock.h"
+#include "providers/mock.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -14,9 +14,9 @@
 #include "model_meta.h"
 #include "provider.h"
 #include "util.h"
+#include "transport/http.h"
 
-/*
- * Mock provider for testing the rendering pipeline without a real LLM.
+/* Mock provider for testing the rendering pipeline without a real LLM.
  *
  * Two modes:
  *
@@ -80,8 +80,7 @@
  *       - Anything else → echo the message back as plain text.
  *     Designed so `HAX_PROVIDER=mock hax` works out of the box: the
  *     user types "run `ls -la`" and gets a real bash tool dispatch
- *     they can watch render in the preview.
- */
+ *     they can watch render in the preview. */
 
 #define TEXT_CHUNK_BYTES 16
 

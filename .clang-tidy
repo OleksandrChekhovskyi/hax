@@ -1,0 +1,74 @@
+# Families are enabled wholesale and individual checks opted out, so new
+# checks from toolchain upgrades surface for triage instead of staying off.
+#
+# Excluded because the codebase deliberately uses what they flag:
+#   bugprone-assignment-in-if-condition   kernel-style `if ((x = f()))`
+#   bugprone-branch-clone                 parallel branches kept for readability
+#   bugprone-command-processor            shelling out is hax's job
+#   bugprone-suspicious-missing-comma     ANSI escape string concatenation in themes
+#   bugprone-unchecked-string-to-number   atoi/fscanf on test-controlled data
+#   bugprone-unsafe-functions             rewind() etc. on test temp files
+#   misc-misleading-bidirectional         flags even hex-escaped U+202E test fixtures
+#   misc-no-recursion                     markdown/JSON walkers recurse by design
+#   misc-use-internal-linkage             tests define extern mocks to override linking
+#
+# Excluded as noise for this codebase (high count, no real defects found):
+#   bugprone-easily-swappable-parameters
+#   bugprone-implicit-widening-of-multiplication-result
+#   bugprone-multi-level-implicit-pointer-conversion
+#   bugprone-narrowing-conversions
+#   bugprone-not-null-terminated-result
+#   bugprone-switch-missing-default-case
+#
+# clang-analyzer-* is left to scan-build runs; too slow for the lint gate.
+#
+# misc-include-cleaner wants every file to include what it uses directly. The
+# rare include it cannot attribute gets `// IWYU pragma: keep` or a scoped
+# NOLINT, always with a comment saying why. No `IWYU pragma: export` umbrellas:
+# the tree stays clean for Debian stable's LLVM through current, and older
+# include cleaners ignore that pragma.
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-assignment-in-if-condition,
+  -bugprone-branch-clone,
+  -bugprone-command-processor,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-multi-level-implicit-pointer-conversion,
+  -bugprone-narrowing-conversions,
+  -bugprone-not-null-terminated-result,
+  -bugprone-suspicious-missing-comma,
+  -bugprone-switch-missing-default-case,
+  -bugprone-unchecked-string-to-number-conversion,
+  -bugprone-unsafe-functions,
+  misc-*,
+  -misc-misleading-bidirectional,
+  -misc-no-recursion,
+  -misc-use-internal-linkage,
+  performance-*,
+  readability-duplicate-include,
+  readability-misleading-indentation
+WarningsAsErrors: '*'
+CheckOptions:
+  # Unanchored regexes matched against include spellings. Which header
+  # declares a libc symbol is a libc implementation detail, so each libc's
+  # internals (glibc first, then Apple) are exempt and attribution lands on
+  # the public POSIX headers we include. strings.h, sys/types.h, and
+  # sys/file.h are exempt because Apple declares their symbols in internals,
+  # which would flag the public include as unused. musl is a build/test
+  # platform, not a lint one: it redefines NULL in every public header,
+  # making attribution there include-order noise.
+  misc-include-cleaner.IgnoreHeaders: >
+    bits/.*;
+    asm-generic/.*;
+    linux/.*;
+    features\.h;
+    sys/poll\.h;
+    (^|/)_[^/]+\.h$;
+    machine/.*;
+    sys/syslimits\.h;
+    sys/(errno|fcntl|signal|unistd|dirent|ttycom)\.h;
+    (^|/)strings\.h$;
+    sys/types\.h$;
+    sys/file\.h$

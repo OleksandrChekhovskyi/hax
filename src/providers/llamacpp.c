@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "llamacpp.h"
+#include "providers/llamacpp.h"
 
 #include <jansson.h>
 #include <stdio.h>
@@ -7,11 +7,13 @@
 #include <string.h>
 #include <strings.h>
 #include <curl/curl.h>
+#include <curl/urlapi.h>
 
 #include "config.h"
 #include "model_meta.h"
-#include "openai.h"
+#include "provider.h"
 #include "util.h"
+#include "providers/openai.h"
 #include "transport/http.h"
 
 /* The model reconcile runs synchronously at startup, because HAX_MODEL must

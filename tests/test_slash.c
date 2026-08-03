@@ -6,7 +6,9 @@
 
 #include "agent.h"
 #include "agent_core.h"
+#include "agent_usage.h"
 #include "harness.h"
+#include "provider.h"
 #include "slash.h"
 #include "tool.h"
 #include "util.h"

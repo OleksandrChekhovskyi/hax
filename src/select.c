@@ -2,18 +2,20 @@
 #include "select.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
-#include "util.h"
 #include "agent.h"
 #include "agent_core.h"
 #include "busy.h"
 #include "catalog.h"
 #include "config.h"
+#include "effort.h"
 #include "model_meta.h"
 #include "provider.h"
+#include "util.h"
 #include "providers/registry.h"
 #include "render/render_ctx.h"
 #include "system/bg_job.h"

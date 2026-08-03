@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_LLAMACPP_H
-#define HAX_LLAMACPP_H
+#ifndef HAX_PROVIDERS_LLAMACPP_H
+#define HAX_PROVIDERS_LLAMACPP_H
 
 #include "provider.h"
 
@@ -66,4 +66,4 @@ char *llamacpp_props_url(const char *base_url, const char *model);
 
 extern const struct provider_factory PROVIDER_LLAMACPP;
 
-#endif /* HAX_LLAMACPP_H */
+#endif /* HAX_PROVIDERS_LLAMACPP_H */

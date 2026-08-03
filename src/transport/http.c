@@ -9,6 +9,9 @@
 #include <strings.h>
 #include <time.h>
 #include <curl/curl.h>
+#include <curl/easy.h>
+#include <curl/system.h>
+#include <curl/typecheck-gcc.h>
 
 #include "trace.h"
 #include "util.h"

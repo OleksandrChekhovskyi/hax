@@ -2,14 +2,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "agent_core.h"
 #include "compact.h"
 #include "config.h"
 #include "harness.h"
+#include "provider.h"
 #include "session.h"
 #include "util.h"
+#include "transport/http.h"
 
 /* compact_over_threshold is the pure trigger predicate; everything else
  * (compact_should_auto, agent_compact) layers config + I/O on top of it. */

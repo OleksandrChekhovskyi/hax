@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_PICKER_H
-#define HAX_PICKER_H
+#ifndef HAX_TERMINAL_PICKER_H
+#define HAX_TERMINAL_PICKER_H
 
 #include <stddef.h>
 
@@ -31,4 +31,4 @@ struct picker_opts {
  * duration of the call. */
 long picker_run(const struct picker_opts *options);
 
-#endif /* HAX_PICKER_H */
+#endif /* HAX_TERMINAL_PICKER_H */

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "catalog.h"
 
+#include <jansson.h>
 #include <libgen.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -10,9 +11,8 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
-#include <jansson.h>
-
 #include "config.h"
+#include "effort.h"
 #include "util.h"
 #include "system/bg_job.h"
 #include "system/fs.h"

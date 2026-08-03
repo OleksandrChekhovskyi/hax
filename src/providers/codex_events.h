@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_CODEX_EVENTS_H
-#define HAX_CODEX_EVENTS_H
+#ifndef HAX_PROVIDERS_CODEX_EVENTS_H
+#define HAX_PROVIDERS_CODEX_EVENTS_H
 
 #include <stddef.h>
 
@@ -28,4 +28,4 @@ void codex_events_feed(struct codex_events *events, const char *data);
 /* Emit EV_ERROR if the transport closes before a terminal response event. */
 void codex_events_finalize(struct codex_events *events);
 
-#endif /* HAX_CODEX_EVENTS_H */
+#endif /* HAX_PROVIDERS_CODEX_EVENTS_H */

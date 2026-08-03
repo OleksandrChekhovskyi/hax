@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: MIT */
+#include <stdlib.h>
 #include <string.h>
 
 #include "harness.h"
 #include "util.h"
+#include "terminal/picker.h"
 #include "terminal/picker_core.h"
 
 static void test_empty_query_matches_all(void)

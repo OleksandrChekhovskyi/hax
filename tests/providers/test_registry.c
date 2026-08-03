@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "harness.h"
+#include "provider.h"
 #include "providers/registry.h"
 
 /* Position of `name` in provider_all() (the autoselect-priority order), or -1

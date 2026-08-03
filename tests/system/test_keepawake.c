@@ -5,12 +5,13 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 
 #include "config.h"
 #include "harness.h"
-#include "system/keepawake.h"
 #include "util.h"
+#include "system/keepawake.h"
 
 static void expect_no_children(void)
 {

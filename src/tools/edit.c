@@ -1,9 +1,11 @@
 /* SPDX-License-Identifier: MIT */
 #include <errno.h>
 #include <jansson.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
+#include "provider.h"
 #include "tool.h"
 #include "util.h"
 #include "system/fs.h"

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_ANTHROPIC_H
-#define HAX_ANTHROPIC_H
+#ifndef HAX_PROVIDERS_ANTHROPIC_H
+#define HAX_PROVIDERS_ANTHROPIC_H
 
 #include <jansson.h>
 
@@ -110,4 +110,4 @@ int anthropic_max_tokens(struct provider *p, const char *model);
 
 extern const struct provider_factory PROVIDER_ANTHROPIC;
 
-#endif /* HAX_ANTHROPIC_H */
+#endif /* HAX_PROVIDERS_ANTHROPIC_H */

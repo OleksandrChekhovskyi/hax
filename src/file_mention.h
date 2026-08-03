@@ -4,8 +4,7 @@
 
 struct input_modal_completer;
 
-/*
- * Interactive file picking for `@` mentions at the prompt.
+/* Interactive file picking for `@` mentions at the prompt.
  *
  * file_mention_pick runs fzf over candidates from `git ls-files`
  * (tracked + untracked, gitignore-respecting) or a pruned `find`
@@ -17,8 +16,7 @@ struct input_modal_completer;
  * (warns). fzf is required; without it a one-line notice is printed.
  *
  * Call with the terminal cooked: fzf owns the tty. The line editor's
- * modal-completion handoff guarantees this (input_set_modal_completer).
- */
+ * modal-completion handoff guarantees this (input_set_modal_completer). */
 char *file_mention_pick(const char *query);
 
 /* 1 when fzf is on $PATH. Lets /help dim the shortcut row. */

@@ -3,6 +3,8 @@
 
 #include <string.h>
 
+#include "util.h"
+
 void sse_parser_init(struct sse_parser *p, sse_cb cb, void *user)
 {
     memset(p, 0, sizeof(*p));

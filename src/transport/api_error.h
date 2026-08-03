@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_API_ERROR_H
-#define HAX_API_ERROR_H
+#ifndef HAX_TRANSPORT_API_ERROR_H
+#define HAX_TRANSPORT_API_ERROR_H
 
 /* Format an HTTP error body into a concise human-readable message
  * suitable for the EV_ERROR surface. Two sources, in order of
@@ -40,4 +40,4 @@ char *format_api_error(long status, const char *body);
  * NULL `name` falls back to "provider". Heap-owned; caller frees. */
 char *format_models_error(const char *name, const char *base_url, int has_key, long status);
 
-#endif /* HAX_API_ERROR_H */
+#endif /* HAX_TRANSPORT_API_ERROR_H */

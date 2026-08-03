@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_VT_RESOLVE_H
-#define HAX_VT_RESOLVE_H
+#ifndef HAX_TERMINAL_VT_RESOLVE_H
+#define HAX_TERMINAL_VT_RESOLVE_H
 
 #include <stddef.h>
 #include <stdio.h>
@@ -46,4 +46,4 @@
  * Pure formatting: no isatty, no popen, caller owns the sink. */
 void vt_resolve(const char *bytes, size_t n, FILE *out);
 
-#endif /* HAX_VT_RESOLVE_H */
+#endif /* HAX_TERMINAL_VT_RESOLVE_H */

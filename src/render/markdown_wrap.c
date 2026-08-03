@@ -4,8 +4,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "util.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
+#include "text/utf8.h"
 
 /* Content cells granted past the indent only on a doomed continuation row
  * (indent_cells >= wrap_width). */
