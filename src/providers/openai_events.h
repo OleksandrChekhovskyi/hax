@@ -7,80 +7,45 @@
 #include "provider.h"
 #include "util.h"
 
-/* Parses OpenAI Chat Completions streaming chunks and translates them into
- * provider-agnostic stream_event callbacks. Tool calls are streamed as a
- * per-choice array keyed by `index`; we track per-index state so we can emit
- * EV_TOOL_CALL_START exactly once (when both id and name are known) and
- * EV_TOOL_CALL_END on finish_reason.
- *
- * Only the modern `tool_calls` shape is handled — the legacy pre-2023
- * `function_call` / `finish_reason: "function_call"` format is out of scope,
- * since every current OpenAI-compatible backend we target emits `tool_calls`. */
-
-struct openai_tool_track {
+/* Stateful translator from Chat Completions SSE payloads to stream events. Only the modern
+ * tool_calls shape is supported; legacy function_call deltas are ignored. */
+struct openai_tool_call {
     int index;
     char *id;
     char *name;
-    /* Argument bytes that arrived before EV_TOOL_CALL_START could be
-     * emitted (i.e. before both id and name were known). Flushed as a
-     * single DELTA the moment START fires. */
-    struct buf pending_args;
-    int start_emitted; /* EV_TOOL_CALL_START already sent */
-    int ended;         /* EV_TOOL_CALL_END already sent */
+    struct buf arguments_before_start;
+    int started;
+    int finished;
 };
 
 struct openai_events {
-    stream_cb cb;
-    void *user;
+    stream_cb callback;
+    void *callback_user;
 
-    struct openai_tool_track *tools;
-    size_t n_tools;
-    size_t cap_tools;
+    struct openai_tool_call *tool_calls;
+    size_t n_tool_calls;
+    size_t tool_call_capacity;
 
-    /* finish_reason arrives one chunk before the optional usage chunk and
-     * before [DONE], so the terminal event has to be deferred to bundle
-     * usage with it — EV_DONE and the truncation EV_ERROR alike (truncated
-     * responses are billed too).
-     * saw_finish: a terminal finish_reason was received; the clean reason
-     * is saved in finish_reason, a truncating one ("length"/
-     * "content_filter") as the ready-built error message in
-     * deferred_error.
-     * pending_usage: harvested from any chunk that carries `usage` (the
-     * trailing chunk under stream_options.include_usage; may be -1/-1/-1
-     * if the backend never sends one). */
-    int saw_finish;
+    /* The terminal event waits for [DONE] so a trailing usage chunk can be included. */
+    int finish_received;
     char *finish_reason;
-    char *deferred_error;
-    struct stream_usage pending_usage;
+    char *finish_error;
+    struct stream_usage usage;
+    int terminal_emitted;
 
-    int terminated; /* any terminal event (EV_DONE or EV_ERROR) emitted */
-
-    /* When set, surface top-level `prompt_progress` chunks (llama.cpp's
-     * return_progress=true) as EV_PROGRESS. Off by default — real OpenAI
-     * and most compat backends never send the field, but a stray match
-     * would still parse, so keep emission opt-in. */
     int emit_progress;
-
-    /* Borrowed (preset-owned, static) hint appended to the "length"
-     * truncation error to make a backend-specific cause actionable — e.g.
-     * ollama's num_ctx default being too small for the prompt. NULL = none. */
-    const char *length_hint;
-
-    /* This request carried 1h-TTL cache breakpoints, so its cache writes
-     * bill at the 1h rate. The response reports one undifferentiated
-     * `cache_write_tokens`, so only the sender knows which rate applies —
-     * hence the flag rather than a wire field. */
+    const char *length_hint; /* borrowed; appended to "length" errors */
     int cache_write_1h;
 };
 
-void openai_events_init(struct openai_events *s, stream_cb cb, void *user);
-void openai_events_free(struct openai_events *s);
+void openai_events_init(struct openai_events *parser, stream_cb callback, void *callback_user);
+void openai_events_free(struct openai_events *parser);
 
-/* Feed one SSE `data:` payload (the JSON chunk, or "[DONE]"). */
-void openai_events_feed(struct openai_events *s, const char *data);
+/* Feed one SSE data payload: a JSON chunk or "[DONE]". Payloads after a terminal event are
+ * ignored. */
+void openai_events_feed(struct openai_events *parser, const char *data);
 
-/* Emit EV_ERROR("stream ended before completion") if no terminal event was
- * produced. Call once the SSE transport closes cleanly. */
-void openai_events_finalize(struct openai_events *s);
+/* Finish a cleanly closed transport; emit an error if no terminal state was received. */
+void openai_events_finalize(struct openai_events *parser);
 
 #endif /* HAX_PROVIDERS_OPENAI_EVENTS_H */

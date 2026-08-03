@@ -7,9 +7,9 @@
 #include "provider.h"
 #include "providers/openai_events.h"
 
-#define MAX_EVENTS 16
+#define MAX_CAPTURED_EVENTS 16
 
-struct captured_ev {
+struct captured_event {
     enum stream_event_kind kind;
     char *text;
     char *id;
@@ -18,662 +18,601 @@ struct captured_ev {
     char *message;
     int http_status;
     struct stream_usage usage;
-    long processed, total, cache;
+    long progress_processed;
+    long progress_total;
+    long progress_cached;
 };
 
-struct cap_state {
-    struct captured_ev events[MAX_EVENTS];
-    size_t n;
+struct capture_state {
+    struct captured_event events[MAX_CAPTURED_EVENTS];
+    size_t n_events;
 };
 
-static int cap_cb(const struct stream_event *ev, void *user)
+static int capture_event(const struct stream_event *event, void *user)
 {
-    struct cap_state *s = user;
-    if (s->n >= MAX_EVENTS) {
+    struct capture_state *capture = user;
+    if (capture->n_events >= MAX_CAPTURED_EVENTS) {
         FAIL("%s", "too many events captured");
         return 0;
     }
-    struct captured_ev *c = &s->events[s->n++];
-    memset(c, 0, sizeof(*c));
-    c->kind = ev->kind;
-    switch (ev->kind) {
+    struct captured_event *captured = &capture->events[capture->n_events++];
+    memset(captured, 0, sizeof(*captured));
+    captured->kind = event->kind;
+    switch (event->kind) {
     case EV_TEXT_DELTA:
-        c->text = strdup(ev->u.text_delta.text);
+        captured->text = strdup(event->u.text_delta.text);
         break;
     case EV_TOOL_CALL_START:
-        c->id = strdup(ev->u.tool_call_start.id);
-        c->name = strdup(ev->u.tool_call_start.name);
+        captured->id = strdup(event->u.tool_call_start.id);
+        captured->name = strdup(event->u.tool_call_start.name);
         break;
     case EV_TOOL_CALL_DELTA:
-        c->id = strdup(ev->u.tool_call_delta.id);
-        c->args_delta = strdup(ev->u.tool_call_delta.args_delta);
+        captured->id = strdup(event->u.tool_call_delta.id);
+        captured->args_delta = strdup(event->u.tool_call_delta.args_delta);
         break;
     case EV_TOOL_CALL_END:
-        c->id = strdup(ev->u.tool_call_end.id);
+        captured->id = strdup(event->u.tool_call_end.id);
         break;
     case EV_REASONING_ITEM:
-        /* OpenAI Chat Completions doesn't emit reasoning items. */
         break;
     case EV_REASONING_DELTA:
-        c->text = strdup(ev->u.reasoning_delta.text ? ev->u.reasoning_delta.text : "");
+        captured->text = strdup(event->u.reasoning_delta.text ? event->u.reasoning_delta.text : "");
         break;
     case EV_RETRY:
-        /* Provider-emitted UX signal — not produced by openai_events. */
         break;
     case EV_PROGRESS:
-        c->processed = ev->u.progress.processed;
-        c->total = ev->u.progress.total;
-        c->cache = ev->u.progress.cache;
+        captured->progress_processed = event->u.progress.processed;
+        captured->progress_total = event->u.progress.total;
+        captured->progress_cached = event->u.progress.cache;
         break;
     case EV_DONE:
-        c->message = strdup(ev->u.done.stop_reason ? ev->u.done.stop_reason : "");
-        c->usage = ev->u.done.usage;
+        captured->message = strdup(event->u.done.stop_reason ? event->u.done.stop_reason : "");
+        captured->usage = event->u.done.usage;
         break;
     case EV_ERROR:
-        c->message = strdup(ev->u.error.message ? ev->u.error.message : "");
-        c->http_status = ev->u.error.http_status;
-        if (ev->u.error.usage)
-            c->usage = *ev->u.error.usage;
+        captured->message = strdup(event->u.error.message ? event->u.error.message : "");
+        captured->http_status = event->u.error.http_status;
+        if (event->u.error.usage)
+            captured->usage = *event->u.error.usage;
         else
-            c->usage = (struct stream_usage){-1, -1, -1, -1, -1, -1};
+            captured->usage = (struct stream_usage){-1, -1, -1, -1, -1, -1};
         break;
     }
     return 0;
 }
 
-static void cap_reset(struct cap_state *s)
+static void reset_capture(struct capture_state *capture)
 {
-    for (size_t i = 0; i < s->n; i++) {
-        free(s->events[i].text);
-        free(s->events[i].id);
-        free(s->events[i].name);
-        free(s->events[i].args_delta);
-        free(s->events[i].message);
+    for (size_t i = 0; i < capture->n_events; i++) {
+        free(capture->events[i].text);
+        free(capture->events[i].id);
+        free(capture->events[i].name);
+        free(capture->events[i].args_delta);
+        free(capture->events[i].message);
     }
-    memset(s, 0, sizeof(*s));
+    memset(capture, 0, sizeof(*capture));
 }
 
 /* NOLINTBEGIN(bugprone-macro-parentheses): the arguments name declared variables */
-#define WITH_STATE(cap, st)                                                                        \
-    struct cap_state cap = {0};                                                                    \
-    struct openai_events st;                                                                       \
-    openai_events_init(&st, cap_cb, &cap)
+#define EVENTS_FIXTURE(capture, parser)                                                            \
+    struct capture_state capture = {0};                                                            \
+    struct openai_events parser;                                                                   \
+    openai_events_init(&parser, capture_event, &capture)
 
-#define TEARDOWN(cap, st)                                                                          \
+#define EVENTS_FIXTURE_FREE(capture, parser)                                                       \
     do {                                                                                           \
-        openai_events_free(&st);                                                                   \
-        cap_reset(&cap);                                                                           \
+        openai_events_free(&parser);                                                               \
+        reset_capture(&capture);                                                                   \
     } while (0)
 /* NOLINTEND(bugprone-macro-parentheses) */
 
-/* ---------- helpers ---------- */
-
-/* Compact chunk builders — real chunks have id/object/created/model too, but
- * the parser ignores those. */
-static void feed_content(struct openai_events *s, const char *text)
+static void feed_content(struct openai_events *parser, const char *text)
 {
-    char buf[512];
-    snprintf(buf, sizeof(buf), "{\"choices\":[{\"delta\":{\"content\":\"%s\"}}]}", text);
-    openai_events_feed(s, buf);
+    char data[512];
+    snprintf(data, sizeof(data), "{\"choices\":[{\"delta\":{\"content\":\"%s\"}}]}", text);
+    openai_events_feed(parser, data);
 }
 
-static void feed_finish(struct openai_events *s, const char *reason)
+static void feed_finish(struct openai_events *parser, const char *reason)
 {
-    char buf[512];
-    snprintf(buf, sizeof(buf), "{\"choices\":[{\"delta\":{},\"finish_reason\":\"%s\"}]}", reason);
-    openai_events_feed(s, buf);
+    char data[512];
+    snprintf(data, sizeof(data), "{\"choices\":[{\"delta\":{},\"finish_reason\":\"%s\"}]}", reason);
+    openai_events_feed(parser, data);
 }
-
-/* ---------- text ---------- */
 
 static void test_text_delta(void)
 {
-    WITH_STATE(cap, st);
-    feed_content(&st, "Hello");
-    EXPECT(cap.n == 1);
-    EXPECT(cap.events[0].kind == EV_TEXT_DELTA);
-    EXPECT_STR_EQ(cap.events[0].text, "Hello");
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    feed_content(&parser, "Hello");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_TEXT_DELTA);
+    EXPECT_STR_EQ(capture.events[0].text, "Hello");
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_empty_content_ignored(void)
 {
-    WITH_STATE(cap, st);
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"content\":\"\"}}]}");
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"content\":null}}]}");
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}");
-    EXPECT(cap.n == 0);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":\"\"}}]}");
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":null}}]}");
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}");
+    EXPECT(capture.n_events == 0);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
-
-/* ---------- reasoning ---------- */
 
 static void test_reasoning_delta_openrouter(void)
 {
-    /* OpenRouter normalizes the field name to `reasoning`. */
-    WITH_STATE(cap, st);
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"reasoning\":\"Hmm\"}}]}");
-    EXPECT(cap.n == 1);
-    EXPECT(cap.events[0].kind == EV_REASONING_DELTA);
-    EXPECT_STR_EQ(cap.events[0].text, "Hmm");
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":\"Hmm\"}}]}");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_REASONING_DELTA);
+    EXPECT_STR_EQ(capture.events[0].text, "Hmm");
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_reasoning_delta_llamacpp(void)
 {
-    /* llama.cpp / DeepSeek emit `reasoning_content` (also kept as a
-     * compat alias by OpenRouter). */
-    WITH_STATE(cap, st);
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"reasoning_content\":\"Let\"}}]}");
-    EXPECT(cap.n == 1);
-    EXPECT(cap.events[0].kind == EV_REASONING_DELTA);
-    EXPECT_STR_EQ(cap.events[0].text, "Let");
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_content\":\"Let\"}}]}");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_REASONING_DELTA);
+    EXPECT_STR_EQ(capture.events[0].text, "Let");
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_reasoning_then_content(void)
 {
-    /* Realistic order: a few reasoning chunks, then visible content. The
-     * reasoning chunks should not interfere with the text-delta path. */
-    WITH_STATE(cap, st);
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"reasoning\":\"Think\"}}]}");
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"reasoning\":\"ing\"}}]}");
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}");
-    EXPECT(cap.n == 3);
-    EXPECT(cap.events[0].kind == EV_REASONING_DELTA);
-    EXPECT(cap.events[1].kind == EV_REASONING_DELTA);
-    EXPECT(cap.events[2].kind == EV_TEXT_DELTA);
-    EXPECT_STR_EQ(cap.events[2].text, "Answer");
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":\"Think\"}}]}");
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":\"ing\"}}]}");
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}");
+    EXPECT(capture.n_events == 3);
+    EXPECT(capture.events[0].kind == EV_REASONING_DELTA);
+    EXPECT(capture.events[1].kind == EV_REASONING_DELTA);
+    EXPECT(capture.events[2].kind == EV_TEXT_DELTA);
+    EXPECT_STR_EQ(capture.events[2].text, "Answer");
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_empty_reasoning_ignored(void)
 {
-    /* Mirrors test_empty_content_ignored — empty/null deltas don't fire. */
-    WITH_STATE(cap, st);
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"reasoning\":\"\"}}]}");
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"reasoning\":null}}]}");
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"reasoning_content\":\"\"}}]}");
-    EXPECT(cap.n == 0);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":\"\"}}]}");
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":null}}]}");
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_content\":\"\"}}]}");
+    EXPECT(capture.n_events == 0);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
-
-/* ---------- tool calls ---------- */
 
 static void test_tool_call_lifecycle(void)
 {
-    WITH_STATE(cap, st);
-    /* First tool_call delta carries id + name. */
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                            "\"index\":0,\"id\":\"call_1\",\"type\":\"function\","
-                            "\"function\":{\"name\":\"bash\",\"arguments\":\"\"}}]}}]}");
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                            "\"index\":0,\"function\":{\"arguments\":\"{\\\"cmd\\\":\"}}]}}]}");
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                            "\"index\":0,\"function\":{\"arguments\":\"\\\"ls\\\"}\"}}]}}]}");
-    feed_finish(&st, "tool_calls");
-    /* EV_DONE is deferred until [DONE] (or the trailing usage chunk under
-     * stream_options.include_usage) so the agent gets a single terminal
-     * event with usage attached. */
-    openai_events_feed(&st, "[DONE]");
+    EVENTS_FIXTURE(capture, parser);
 
-    EXPECT(cap.n == 5);
-    EXPECT(cap.events[0].kind == EV_TOOL_CALL_START);
-    EXPECT_STR_EQ(cap.events[0].id, "call_1");
-    EXPECT_STR_EQ(cap.events[0].name, "bash");
-    EXPECT(cap.events[1].kind == EV_TOOL_CALL_DELTA);
-    EXPECT_STR_EQ(cap.events[1].id, "call_1");
-    EXPECT_STR_EQ(cap.events[1].args_delta, "{\"cmd\":");
-    EXPECT(cap.events[2].kind == EV_TOOL_CALL_DELTA);
-    EXPECT_STR_EQ(cap.events[2].args_delta, "\"ls\"}");
-    EXPECT(cap.events[3].kind == EV_TOOL_CALL_END);
-    EXPECT_STR_EQ(cap.events[3].id, "call_1");
-    EXPECT(cap.events[4].kind == EV_DONE);
-    TEARDOWN(cap, st);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                                "\"index\":0,\"id\":\"call_1\",\"type\":\"function\","
+                                "\"function\":{\"name\":\"bash\",\"arguments\":\"\"}}]}}]}");
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                                "\"index\":0,\"function\":{\"arguments\":\"{\\\"cmd\\\":\"}}]}}]}");
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                                "\"index\":0,\"function\":{\"arguments\":\"\\\"ls\\\"}\"}}]}}]}");
+    feed_finish(&parser, "tool_calls");
+
+    openai_events_feed(&parser, "[DONE]");
+
+    EXPECT(capture.n_events == 5);
+    EXPECT(capture.events[0].kind == EV_TOOL_CALL_START);
+    EXPECT_STR_EQ(capture.events[0].id, "call_1");
+    EXPECT_STR_EQ(capture.events[0].name, "bash");
+    EXPECT(capture.events[1].kind == EV_TOOL_CALL_DELTA);
+    EXPECT_STR_EQ(capture.events[1].id, "call_1");
+    EXPECT_STR_EQ(capture.events[1].args_delta, "{\"cmd\":");
+    EXPECT(capture.events[2].kind == EV_TOOL_CALL_DELTA);
+    EXPECT_STR_EQ(capture.events[2].args_delta, "\"ls\"}");
+    EXPECT(capture.events[3].kind == EV_TOOL_CALL_END);
+    EXPECT_STR_EQ(capture.events[3].id, "call_1");
+    EXPECT(capture.events[4].kind == EV_DONE);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_tool_call_id_and_name_across_deltas(void)
 {
-    /* Spec-ambiguous corner: id arrives first, name arrives on the next
-     * delta. No EV_TOOL_CALL_START should fire until both are known. */
-    WITH_STATE(cap, st);
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                            "\"index\":0,\"id\":\"c1\"}]}}]}");
-    EXPECT(cap.n == 0);
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                            "\"index\":0,\"function\":{\"name\":\"bash\"}}]}}]}");
-    EXPECT(cap.n == 1);
-    EXPECT(cap.events[0].kind == EV_TOOL_CALL_START);
-    EXPECT_STR_EQ(cap.events[0].id, "c1");
-    EXPECT_STR_EQ(cap.events[0].name, "bash");
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                                "\"index\":0,\"id\":\"c1\"}]}}]}");
+    EXPECT(capture.n_events == 0);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                                "\"index\":0,\"function\":{\"name\":\"bash\"}}]}}]}");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_TOOL_CALL_START);
+    EXPECT_STR_EQ(capture.events[0].id, "c1");
+    EXPECT_STR_EQ(capture.events[0].name, "bash");
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_tool_call_args_before_metadata_buffered(void)
 {
-    /* Some backends stagger metadata: args arrive before name is known.
-     * Early args must be buffered and flushed as a DELTA once START fires,
-     * so the downstream turn layer sees the complete JSON. */
-    WITH_STATE(cap, st);
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                            "\"index\":0,\"id\":\"c1\","
-                            "\"function\":{\"arguments\":\"{\\\"cmd\\\":\"}}]}}]}");
-    EXPECT(cap.n == 0); /* no START yet — name unknown */
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                            "\"index\":0,\"function\":{\"name\":\"bash\","
-                            "\"arguments\":\"\\\"ls\\\"}\"}}]}}]}");
-    EXPECT(cap.n == 3);
-    EXPECT(cap.events[0].kind == EV_TOOL_CALL_START);
-    EXPECT_STR_EQ(cap.events[0].id, "c1");
-    EXPECT_STR_EQ(cap.events[0].name, "bash");
-    EXPECT(cap.events[1].kind == EV_TOOL_CALL_DELTA);
-    EXPECT_STR_EQ(cap.events[1].args_delta, "{\"cmd\":"); /* flushed buffer */
-    EXPECT(cap.events[2].kind == EV_TOOL_CALL_DELTA);
-    EXPECT_STR_EQ(cap.events[2].args_delta, "\"ls\"}"); /* this chunk's args */
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                                "\"index\":0,\"id\":\"c1\","
+                                "\"function\":{\"arguments\":\"{\\\"cmd\\\":\"}}]}}]}");
+    EXPECT(capture.n_events == 0);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                                "\"index\":0,\"function\":{\"name\":\"bash\","
+                                "\"arguments\":\"\\\"ls\\\"}\"}}]}}]}");
+    EXPECT(capture.n_events == 3);
+    EXPECT(capture.events[0].kind == EV_TOOL_CALL_START);
+    EXPECT_STR_EQ(capture.events[0].id, "c1");
+    EXPECT_STR_EQ(capture.events[0].name, "bash");
+    EXPECT(capture.events[1].kind == EV_TOOL_CALL_DELTA);
+    EXPECT_STR_EQ(capture.events[1].args_delta, "{\"cmd\":");
+    EXPECT(capture.events[2].kind == EV_TOOL_CALL_DELTA);
+    EXPECT_STR_EQ(capture.events[2].args_delta, "\"ls\"}");
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_parallel_tool_calls(void)
 {
-    WITH_STATE(cap, st);
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"tool_calls\":["
-                            "{\"index\":0,\"id\":\"a\",\"function\":{\"name\":\"x\"}},"
-                            "{\"index\":1,\"id\":\"b\",\"function\":{\"name\":\"y\"}}"
-                            "]}}]}");
-    feed_finish(&st, "tool_calls");
-    openai_events_feed(&st, "[DONE]");
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":["
+                                "{\"index\":0,\"id\":\"a\",\"function\":{\"name\":\"x\"}},"
+                                "{\"index\":1,\"id\":\"b\",\"function\":{\"name\":\"y\"}}"
+                                "]}}]}");
+    feed_finish(&parser, "tool_calls");
+    openai_events_feed(&parser, "[DONE]");
 
-    EXPECT(cap.n == 5);
-    EXPECT(cap.events[0].kind == EV_TOOL_CALL_START);
-    EXPECT_STR_EQ(cap.events[0].id, "a");
-    EXPECT(cap.events[1].kind == EV_TOOL_CALL_START);
-    EXPECT_STR_EQ(cap.events[1].id, "b");
-    EXPECT(cap.events[2].kind == EV_TOOL_CALL_END);
-    EXPECT(cap.events[3].kind == EV_TOOL_CALL_END);
-    /* Order of END events should match track insertion order. */
-    EXPECT_STR_EQ(cap.events[2].id, "a");
-    EXPECT_STR_EQ(cap.events[3].id, "b");
-    EXPECT(cap.events[4].kind == EV_DONE);
-    TEARDOWN(cap, st);
+    EXPECT(capture.n_events == 5);
+    EXPECT(capture.events[0].kind == EV_TOOL_CALL_START);
+    EXPECT_STR_EQ(capture.events[0].id, "a");
+    EXPECT(capture.events[1].kind == EV_TOOL_CALL_START);
+    EXPECT_STR_EQ(capture.events[1].id, "b");
+    EXPECT(capture.events[2].kind == EV_TOOL_CALL_END);
+    EXPECT(capture.events[3].kind == EV_TOOL_CALL_END);
+
+    EXPECT_STR_EQ(capture.events[2].id, "a");
+    EXPECT_STR_EQ(capture.events[3].id, "b");
+    EXPECT(capture.events[4].kind == EV_DONE);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_tool_call_without_id_synthesizes(void)
 {
-    /* Some compat backends omit `id` entirely. Synthesize `call_<index>`
-     * so the call still dispatches — the id is a round-trip token the
-     * server echoes back in the tool response, any unique string works. */
-    WITH_STATE(cap, st);
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                            "\"index\":0,\"function\":{\"name\":\"bash\","
-                            "\"arguments\":\"{}\"}}]}}]}");
-    feed_finish(&st, "tool_calls");
-    openai_events_feed(&st, "[DONE]");
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                                "\"index\":0,\"function\":{\"name\":\"bash\","
+                                "\"arguments\":\"{}\"}}]}}]}");
+    feed_finish(&parser, "tool_calls");
+    openai_events_feed(&parser, "[DONE]");
 
-    EXPECT(cap.n == 4);
-    EXPECT(cap.events[0].kind == EV_TOOL_CALL_START);
-    EXPECT_STR_EQ(cap.events[0].id, "call_0");
-    EXPECT_STR_EQ(cap.events[0].name, "bash");
-    EXPECT(cap.events[1].kind == EV_TOOL_CALL_DELTA);
-    EXPECT_STR_EQ(cap.events[1].id, "call_0");
-    EXPECT_STR_EQ(cap.events[1].args_delta, "{}");
-    EXPECT(cap.events[2].kind == EV_TOOL_CALL_END);
-    EXPECT_STR_EQ(cap.events[2].id, "call_0");
-    EXPECT(cap.events[3].kind == EV_DONE);
-    TEARDOWN(cap, st);
+    EXPECT(capture.n_events == 4);
+    EXPECT(capture.events[0].kind == EV_TOOL_CALL_START);
+    EXPECT_STR_EQ(capture.events[0].id, "call_0");
+    EXPECT_STR_EQ(capture.events[0].name, "bash");
+    EXPECT(capture.events[1].kind == EV_TOOL_CALL_DELTA);
+    EXPECT_STR_EQ(capture.events[1].id, "call_0");
+    EXPECT_STR_EQ(capture.events[1].args_delta, "{}");
+    EXPECT(capture.events[2].kind == EV_TOOL_CALL_END);
+    EXPECT_STR_EQ(capture.events[2].id, "call_0");
+    EXPECT(capture.events[3].kind == EV_DONE);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_tool_call_delta_without_index_defaults_to_zero(void)
 {
-    /* Some compat servers omit `index` when streaming a single tool call.
-     * Default to 0 so the tool is still dispatched. */
-    WITH_STATE(cap, st);
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                            "\"id\":\"x\",\"function\":{\"name\":\"y\"}}]}}]}");
-    EXPECT(cap.n == 1);
-    EXPECT(cap.events[0].kind == EV_TOOL_CALL_START);
-    EXPECT_STR_EQ(cap.events[0].id, "x");
-    EXPECT_STR_EQ(cap.events[0].name, "y");
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                                "\"id\":\"x\",\"function\":{\"name\":\"y\"}}]}}]}");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_TOOL_CALL_START);
+    EXPECT_STR_EQ(capture.events[0].id, "x");
+    EXPECT_STR_EQ(capture.events[0].name, "y");
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
-
-/* ---------- finish_reason & termination ---------- */
 
 static void test_finish_reason_stop_defers_done_until_sentinel(void)
 {
-    /* finish_reason alone doesn't terminate — usage may still arrive on a
-     * trailing chunk under stream_options.include_usage. EV_DONE fires when
-     * [DONE] (or stream close) confirms there's nothing more coming. */
-    WITH_STATE(cap, st);
-    feed_finish(&st, "stop");
-    EXPECT(cap.n == 0);
-    EXPECT(st.terminated == 0);
-    openai_events_feed(&st, "[DONE]");
-    EXPECT(cap.n == 1);
-    EXPECT(cap.events[0].kind == EV_DONE);
-    EXPECT_STR_EQ(cap.events[0].message, "stop");
-    EXPECT(st.terminated == 1);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "stop");
+    EXPECT(capture.n_events == 0);
+    EXPECT(parser.terminal_emitted == 0);
+    openai_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_DONE);
+    EXPECT_STR_EQ(capture.events[0].message, "stop");
+    EXPECT(parser.terminal_emitted == 1);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_finish_reason_tool_calls_emits_done(void)
 {
-    WITH_STATE(cap, st);
-    feed_finish(&st, "tool_calls");
-    openai_events_feed(&st, "[DONE]");
-    EXPECT(cap.n == 1);
-    EXPECT(cap.events[0].kind == EV_DONE);
-    EXPECT_STR_EQ(cap.events[0].message, "tool_calls");
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "tool_calls");
+    openai_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_DONE);
+    EXPECT_STR_EQ(capture.events[0].message, "tool_calls");
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_finish_reason_length_emits_error(void)
 {
-    /* The truncation error defers like EV_DONE: the trailing usage chunk
-     * arrives after finish_reason, and a truncated response bills like a
-     * complete one, so the error must wait for and carry that usage. */
-    WITH_STATE(cap, st);
-    feed_finish(&st, "length");
-    EXPECT(cap.n == 0);
-    EXPECT(st.terminated == 0);
-    openai_events_feed(&st, "{\"choices\":[],\"usage\":{"
-                            "\"prompt_tokens\":1234,\"completion_tokens\":56}}");
-    openai_events_feed(&st, "[DONE]");
-    EXPECT(cap.n == 1);
-    EXPECT(cap.events[0].kind == EV_ERROR);
-    EXPECT(strstr(cap.events[0].message, "length") != NULL);
-    EXPECT(cap.events[0].usage.input_tokens == 1234);
-    EXPECT(cap.events[0].usage.output_tokens == 56);
-    EXPECT(st.terminated == 1);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "length");
+    EXPECT(capture.n_events == 0);
+    EXPECT(parser.terminal_emitted == 0);
+    openai_events_feed(&parser, "{\"choices\":[],\"usage\":{"
+                                "\"prompt_tokens\":1234,\"completion_tokens\":56}}");
+    openai_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_ERROR);
+    EXPECT(strstr(capture.events[0].message, "length") != NULL);
+    EXPECT(capture.events[0].usage.input_tokens == 1234);
+    EXPECT(capture.events[0].usage.output_tokens == 56);
+    EXPECT(parser.terminal_emitted == 1);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_finish_reason_length_error_on_close_without_sentinel(void)
 {
-    /* Backends that close the stream after finish_reason without [DONE]
-     * still surface the deferred truncation error at finalize. */
-    WITH_STATE(cap, st);
-    feed_finish(&st, "length");
-    EXPECT(cap.n == 0);
-    openai_events_finalize(&st);
-    EXPECT(cap.n == 1);
-    EXPECT(cap.events[0].kind == EV_ERROR);
-    EXPECT(strstr(cap.events[0].message, "length") != NULL);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "length");
+    EXPECT(capture.n_events == 0);
+    openai_events_finalize(&parser);
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_ERROR);
+    EXPECT(strstr(capture.events[0].message, "length") != NULL);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_finish_reason_content_filter_emits_error(void)
 {
-    WITH_STATE(cap, st);
-    feed_finish(&st, "content_filter");
-    EXPECT(cap.n == 0);
-    openai_events_feed(&st, "[DONE]");
-    EXPECT(cap.n == 1);
-    EXPECT(cap.events[0].kind == EV_ERROR);
-    EXPECT(strstr(cap.events[0].message, "content_filter") != NULL);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "content_filter");
+    EXPECT(capture.n_events == 0);
+    openai_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_ERROR);
+    EXPECT(strstr(capture.events[0].message, "content_filter") != NULL);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_done_sentinel(void)
 {
-    WITH_STATE(cap, st);
-    openai_events_feed(&st, "[DONE]");
-    EXPECT(cap.n == 1);
-    EXPECT(cap.events[0].kind == EV_DONE);
-    EXPECT(st.terminated == 1);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_DONE);
+    EXPECT(parser.terminal_emitted == 1);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_double_termination_gated(void)
 {
-    WITH_STATE(cap, st);
-    feed_finish(&st, "stop");
-    feed_finish(&st, "stop");
-    openai_events_feed(&st, "[DONE]");
-    openai_events_feed(&st, "[DONE]");
-    EXPECT(cap.n == 1);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "stop");
+    feed_finish(&parser, "stop");
+    openai_events_feed(&parser, "[DONE]");
+    openai_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 1);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+static void test_events_after_terminal_ignored(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "[DONE]");
+    feed_content(&parser, "late");
+    openai_events_feed(&parser, "{\"error\":{\"message\":\"late\"}}");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_DONE);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_error_object_emits_error(void)
 {
-    WITH_STATE(cap, st);
-    openai_events_feed(&st, "{\"error\":{\"message\":\"Rate limit exceeded\",\"code\":429}}");
-    EXPECT(cap.n == 1);
-    EXPECT(cap.events[0].kind == EV_ERROR);
-    EXPECT_STR_EQ(cap.events[0].message, "Rate limit exceeded");
-    EXPECT(st.terminated == 1);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"error\":{\"message\":\"Rate limit exceeded\",\"code\":429}}");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_ERROR);
+    EXPECT_STR_EQ(capture.events[0].message, "Rate limit exceeded");
+    EXPECT(parser.terminal_emitted == 1);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
-
-/* ---------- malformed input ---------- */
 
 static void test_unparseable_json_ignored(void)
 {
-    WITH_STATE(cap, st);
-    openai_events_feed(&st, "not json");
-    openai_events_feed(&st, "");
-    openai_events_feed(&st, NULL);
-    EXPECT(cap.n == 0);
-    EXPECT(st.terminated == 0);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "not json");
+    openai_events_feed(&parser, "");
+    openai_events_feed(&parser, NULL);
+    EXPECT(capture.n_events == 0);
+    EXPECT(parser.terminal_emitted == 0);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_missing_choices_ignored(void)
 {
-    WITH_STATE(cap, st);
-    openai_events_feed(&st, "{\"foo\":\"bar\"}");
-    openai_events_feed(&st, "{\"choices\":[]}");
-    EXPECT(cap.n == 0);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"foo\":\"bar\"}");
+    openai_events_feed(&parser, "{\"choices\":[]}");
+    EXPECT(capture.n_events == 0);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
-
-/* ---------- finalize ---------- */
 
 static void test_finalize_without_terminal_emits_error(void)
 {
-    WITH_STATE(cap, st);
-    feed_content(&st, "hi");
-    openai_events_finalize(&st);
-    EXPECT(cap.n == 2);
-    EXPECT(cap.events[0].kind == EV_TEXT_DELTA);
-    EXPECT(cap.events[1].kind == EV_ERROR);
-    EXPECT(strstr(cap.events[1].message, "stream ended") != NULL);
-    EXPECT(st.terminated == 1);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    feed_content(&parser, "hi");
+    openai_events_finalize(&parser);
+    EXPECT(capture.n_events == 2);
+    EXPECT(capture.events[0].kind == EV_TEXT_DELTA);
+    EXPECT(capture.events[1].kind == EV_ERROR);
+    EXPECT(strstr(capture.events[1].message, "stream ended") != NULL);
+    EXPECT(parser.terminal_emitted == 1);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_finalize_after_done_no_extra_event(void)
 {
-    WITH_STATE(cap, st);
-    feed_finish(&st, "stop");
-    openai_events_feed(&st, "[DONE]");
-    openai_events_finalize(&st);
-    EXPECT(cap.n == 1);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "stop");
+    openai_events_feed(&parser, "[DONE]");
+    openai_events_finalize(&parser);
+    EXPECT(capture.n_events == 1);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_finalize_after_finish_without_sentinel_emits_done(void)
 {
-    /* Some backends close the SSE stream without ever sending [DONE]. If
-     * finish_reason was seen, finalize must still surface EV_DONE — not
-     * EV_ERROR — so the agent doesn't discard a complete response. */
-    WITH_STATE(cap, st);
-    feed_finish(&st, "stop");
-    openai_events_finalize(&st);
-    EXPECT(cap.n == 1);
-    EXPECT(cap.events[0].kind == EV_DONE);
-    EXPECT_STR_EQ(cap.events[0].message, "stop");
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "stop");
+    openai_events_finalize(&parser);
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_DONE);
+    EXPECT_STR_EQ(capture.events[0].message, "stop");
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
-
-/* ---------- usage ---------- */
 
 static void test_usage_default_unknown(void)
 {
-    /* Backends that don't honor stream_options.include_usage just send
-     * finish_reason then [DONE]. EV_DONE.usage stays at -1/-1/-1 so the
-     * agent knows it's unreported. */
-    WITH_STATE(cap, st);
-    feed_finish(&st, "stop");
-    openai_events_feed(&st, "[DONE]");
-    EXPECT(cap.events[0].kind == EV_DONE);
-    EXPECT(cap.events[0].usage.input_tokens == -1);
-    EXPECT(cap.events[0].usage.output_tokens == -1);
-    EXPECT(cap.events[0].usage.cached_tokens == -1);
-    EXPECT(cap.events[0].usage.cost < 0);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "stop");
+    openai_events_feed(&parser, "[DONE]");
+    EXPECT(capture.events[0].kind == EV_DONE);
+    EXPECT(capture.events[0].usage.input_tokens == -1);
+    EXPECT(capture.events[0].usage.output_tokens == -1);
+    EXPECT(capture.events[0].usage.cached_tokens == -1);
+    EXPECT(capture.events[0].usage.cost < 0);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_usage_captured_from_trailing_chunk(void)
 {
-    /* OpenAI shape under stream_options.include_usage: trailing chunk has
-     * empty choices and a usage object with prompt_tokens / completion_tokens
-     * / prompt_tokens_details.cached_tokens. */
-    WITH_STATE(cap, st);
-    feed_finish(&st, "stop");
-    openai_events_feed(&st, "{\"choices\":[],\"usage\":{"
-                            "\"prompt_tokens\":1234,\"completion_tokens\":56,"
-                            "\"prompt_tokens_details\":{\"cached_tokens\":1000}}}");
-    openai_events_feed(&st, "[DONE]");
-    EXPECT(cap.n == 1);
-    EXPECT(cap.events[0].kind == EV_DONE);
-    EXPECT(cap.events[0].usage.input_tokens == 1234);
-    EXPECT(cap.events[0].usage.output_tokens == 56);
-    EXPECT(cap.events[0].usage.cached_tokens == 1000);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "stop");
+    openai_events_feed(&parser, "{\"choices\":[],\"usage\":{"
+                                "\"prompt_tokens\":1234,\"completion_tokens\":56,"
+                                "\"prompt_tokens_details\":{\"cached_tokens\":1000}}}");
+    openai_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_DONE);
+    EXPECT(capture.events[0].usage.input_tokens == 1234);
+    EXPECT(capture.events[0].usage.output_tokens == 56);
+    EXPECT(capture.events[0].usage.cached_tokens == 1000);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_usage_without_cached_details(void)
 {
-    /* Many compat backends omit prompt_tokens_details — cached stays unknown. */
-    WITH_STATE(cap, st);
-    feed_finish(&st, "stop");
-    openai_events_feed(&st, "{\"choices\":[],\"usage\":{"
-                            "\"prompt_tokens\":10,\"completion_tokens\":20}}");
-    openai_events_feed(&st, "[DONE]");
-    EXPECT(cap.events[0].usage.input_tokens == 10);
-    EXPECT(cap.events[0].usage.output_tokens == 20);
-    EXPECT(cap.events[0].usage.cached_tokens == -1);
-    EXPECT(cap.events[0].usage.cost < 0); /* no cost field ⇒ unreported */
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "stop");
+    openai_events_feed(&parser, "{\"choices\":[],\"usage\":{"
+                                "\"prompt_tokens\":10,\"completion_tokens\":20}}");
+    openai_events_feed(&parser, "[DONE]");
+    EXPECT(capture.events[0].usage.input_tokens == 10);
+    EXPECT(capture.events[0].usage.output_tokens == 20);
+    EXPECT(capture.events[0].usage.cached_tokens == -1);
+    EXPECT(capture.events[0].usage.cost < 0);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_usage_cost_captured(void)
 {
-    /* OpenRouter shape under `usage: {include: true}`: the trailing usage
-     * chunk additionally carries `cost` in USD as a plain number. */
-    WITH_STATE(cap, st);
-    feed_finish(&st, "stop");
-    openai_events_feed(&st, "{\"choices\":[],\"usage\":{"
-                            "\"prompt_tokens\":10,\"completion_tokens\":20,"
-                            "\"cost\":0.0123}}");
-    openai_events_feed(&st, "[DONE]");
-    EXPECT(cap.events[0].kind == EV_DONE);
-    EXPECT(cap.events[0].usage.cost > 0.0122 && cap.events[0].usage.cost < 0.0124);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "stop");
+    openai_events_feed(&parser, "{\"choices\":[],\"usage\":{"
+                                "\"prompt_tokens\":10,\"completion_tokens\":20,"
+                                "\"cost\":0.0123}}");
+    openai_events_feed(&parser, "[DONE]");
+    EXPECT(capture.events[0].kind == EV_DONE);
+    EXPECT(capture.events[0].usage.cost > 0.0122 && capture.events[0].usage.cost < 0.0124);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
-/* Verbatim from an OpenRouter response (anthropic/claude-sonnet-4.5,
- * cold prefix): the write side is reported alongside the read side. */
 static void test_usage_cache_write_captured(void)
 {
-    WITH_STATE(cap, st);
-    feed_finish(&st, "stop");
-    openai_events_feed(&st, "{\"choices\":[],\"usage\":{"
-                            "\"prompt_tokens\":2810,\"completion_tokens\":4,"
-                            "\"cost\":0.01059525,"
-                            "\"prompt_tokens_details\":{\"cached_tokens\":0,"
-                            "\"cache_write_tokens\":2807}}}");
-    openai_events_feed(&st, "[DONE]");
-    EXPECT(cap.events[0].usage.input_tokens == 2810);
-    EXPECT(cap.events[0].usage.cached_tokens == 0);
-    EXPECT(cap.events[0].usage.cache_write_tokens == 2807);
-    /* The wire says nothing about TTL, and this request didn't claim one. */
-    EXPECT(cap.events[0].usage.cache_write_1h_tokens == -1);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "stop");
+    openai_events_feed(&parser, "{\"choices\":[],\"usage\":{"
+                                "\"prompt_tokens\":2810,\"completion_tokens\":4,"
+                                "\"cost\":0.01059525,"
+                                "\"prompt_tokens_details\":{\"cached_tokens\":0,"
+                                "\"cache_write_tokens\":2807}}}");
+    openai_events_feed(&parser, "[DONE]");
+    EXPECT(capture.events[0].usage.input_tokens == 2810);
+    EXPECT(capture.events[0].usage.cached_tokens == 0);
+    EXPECT(capture.events[0].usage.cache_write_tokens == 2807);
+
+    EXPECT(capture.events[0].usage.cache_write_1h_tokens == -1);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_usage_cache_write_1h_attributed_from_request(void)
 {
-    /* The response reports one undifferentiated write count, so the
-     * sender's TTL decides which rate the whole of it billed at. */
-    WITH_STATE(cap, st);
-    st.cache_write_1h = 1;
-    feed_finish(&st, "stop");
-    openai_events_feed(&st, "{\"choices\":[],\"usage\":{"
-                            "\"prompt_tokens\":2816,\"completion_tokens\":4,"
-                            "\"prompt_tokens_details\":{\"cache_write_tokens\":2813}}}");
-    openai_events_feed(&st, "[DONE]");
-    EXPECT(cap.events[0].usage.cache_write_tokens == 2813);
-    EXPECT(cap.events[0].usage.cache_write_1h_tokens == 2813);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    parser.cache_write_1h = 1;
+    feed_finish(&parser, "stop");
+    openai_events_feed(&parser, "{\"choices\":[],\"usage\":{"
+                                "\"prompt_tokens\":2816,\"completion_tokens\":4,"
+                                "\"prompt_tokens_details\":{\"cache_write_tokens\":2813}}}");
+    openai_events_feed(&parser, "[DONE]");
+    EXPECT(capture.events[0].usage.cache_write_tokens == 2813);
+    EXPECT(capture.events[0].usage.cache_write_1h_tokens == 2813);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_usage_cache_write_1h_needs_a_write(void)
 {
-    /* A cache *read* turn under the same 1h setting writes nothing, so
-     * nothing may be attributed to the 1h rate. */
-    WITH_STATE(cap, st);
-    st.cache_write_1h = 1;
-    feed_finish(&st, "stop");
-    openai_events_feed(&st, "{\"choices\":[],\"usage\":{"
-                            "\"prompt_tokens\":2810,\"completion_tokens\":4,"
-                            "\"prompt_tokens_details\":{\"cached_tokens\":2807}}}");
-    openai_events_feed(&st, "[DONE]");
-    EXPECT(cap.events[0].usage.cached_tokens == 2807);
-    EXPECT(cap.events[0].usage.cache_write_tokens == -1);
-    EXPECT(cap.events[0].usage.cache_write_1h_tokens == -1);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    parser.cache_write_1h = 1;
+    feed_finish(&parser, "stop");
+    openai_events_feed(&parser, "{\"choices\":[],\"usage\":{"
+                                "\"prompt_tokens\":2810,\"completion_tokens\":4,"
+                                "\"prompt_tokens_details\":{\"cached_tokens\":2807}}}");
+    openai_events_feed(&parser, "[DONE]");
+    EXPECT(capture.events[0].usage.cached_tokens == 2807);
+    EXPECT(capture.events[0].usage.cache_write_tokens == -1);
+    EXPECT(capture.events[0].usage.cache_write_1h_tokens == -1);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
-
-/* ---------- prompt progress (llama.cpp return_progress) ---------- */
 
 static void test_progress_ignored_when_flag_off(void)
 {
-    /* Default state: emit_progress is 0, so prompt_progress chunks are
-     * silently dropped even if they reach the parser. Guards against
-     * stray fields from unrelated backends triggering spurious events. */
-    WITH_STATE(cap, st);
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":{}}],"
-                            "\"prompt_progress\":{\"total\":100,\"cache\":0,"
-                            "\"processed\":50,\"time_ms\":42}}");
-    EXPECT(cap.n == 0);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{}}],"
+                                "\"prompt_progress\":{\"total\":100,\"cache\":0,"
+                                "\"processed\":50,\"time_ms\":42}}");
+    EXPECT(capture.n_events == 0);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_progress_emitted_when_flag_on(void)
 {
-    /* Wire shape llama-server attaches to each prefill chunk under
-     * return_progress=true. The delta is role-only / content-null so
-     * no text event fires alongside. */
-    WITH_STATE(cap, st);
-    st.emit_progress = 1;
-    openai_events_feed(&st, "{\"choices\":[{\"delta\":"
-                            "{\"role\":\"assistant\",\"content\":null}}],"
-                            "\"prompt_progress\":{\"total\":1000,\"cache\":200,"
-                            "\"processed\":600,\"time_ms\":123}}");
-    EXPECT(cap.n == 1);
-    EXPECT(cap.events[0].kind == EV_PROGRESS);
-    EXPECT(cap.events[0].total == 1000);
-    EXPECT(cap.events[0].cache == 200);
-    EXPECT(cap.events[0].processed == 600);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    parser.emit_progress = 1;
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":"
+                                "{\"role\":\"assistant\",\"content\":null}}],"
+                                "\"prompt_progress\":{\"total\":1000,\"cache\":200,"
+                                "\"processed\":600,\"time_ms\":123}}");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_PROGRESS);
+    EXPECT(capture.events[0].progress_total == 1000);
+    EXPECT(capture.events[0].progress_cached == 200);
+    EXPECT(capture.events[0].progress_processed == 600);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 static void test_progress_missing_fields_default_zero(void)
 {
-    /* Partially-populated objects should parse without aborting — missing
-     * integers default to zero so the agent's div-by-zero guard kicks in. */
-    WITH_STATE(cap, st);
-    st.emit_progress = 1;
-    openai_events_feed(&st, "{\"choices\":[],"
-                            "\"prompt_progress\":{\"processed\":50}}");
-    EXPECT(cap.n == 1);
-    EXPECT(cap.events[0].kind == EV_PROGRESS);
-    EXPECT(cap.events[0].processed == 50);
-    EXPECT(cap.events[0].total == 0);
-    EXPECT(cap.events[0].cache == 0);
-    TEARDOWN(cap, st);
+    EVENTS_FIXTURE(capture, parser);
+    parser.emit_progress = 1;
+    openai_events_feed(&parser, "{\"choices\":[],"
+                                "\"prompt_progress\":{\"processed\":50}}");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_PROGRESS);
+    EXPECT(capture.events[0].progress_processed == 50);
+    EXPECT(capture.events[0].progress_total == 0);
+    EXPECT(capture.events[0].progress_cached == 0);
+    EVENTS_FIXTURE_FREE(capture, parser);
 }
 
 int main(void)
@@ -697,6 +636,7 @@ int main(void)
     test_finish_reason_content_filter_emits_error();
     test_done_sentinel();
     test_double_termination_gated();
+    test_events_after_terminal_ignored();
     test_error_object_emits_error();
     test_unparseable_json_ignored();
     test_missing_choices_ignored();

@@ -1,13 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 #include <jansson.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "harness.h"
-#include "model_meta.h"
 #include "provider.h"
-#include "util.h"
-#include "providers/openai.h"
+#include "providers/openai_messages.h"
 
 /* Find the first message with the given role in a built messages array. */
 static json_t *find_role(json_t *msgs, const char *role)
@@ -199,46 +196,6 @@ static void test_reasoning_skipped_on_provenance_mismatch(void)
     json_decref(msgs);
 }
 
-/* A preset that declares an effort ladder surfaces it via list_efforts; one
- * that doesn't reports zero (the /effort picker then skips the step). Both
- * have list_models wired regardless. No network: construction only sets
- * fields, and we never call list_models. */
-static void test_list_efforts_wiring(void)
-{
-    unsetenv("HAX_OPENAI_BASE_URL"); /* use the preset default below */
-
-    struct openai_preset with = {
-        .display_name = "withefforts",
-        .default_base_url = "http://example.invalid/v1",
-        .efforts = OPENAI_EFFORT_LADDER,
-        .n_efforts = OPENAI_EFFORT_LADDER_N,
-    };
-    struct provider *p = openai_provider_new_preset(&with);
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(p->list_models != NULL);
-        EXPECT(p->list_efforts != NULL);
-        const char *const *out = NULL;
-        size_t n = p->list_efforts(p, &out);
-        EXPECT(n == OPENAI_EFFORT_LADDER_N);
-        EXPECT(out != NULL && strcmp(out[0], "none") == 0);
-        EXPECT(strcmp(out[n - 1], "max") == 0);
-        p->destroy(p);
-    }
-
-    struct openai_preset without = {
-        .display_name = "noefforts",
-        .default_base_url = "http://example.invalid/v1",
-    };
-    struct provider *q = openai_provider_new_preset(&without);
-    EXPECT(q != NULL);
-    if (q) {
-        const char *const *out = NULL;
-        EXPECT(q->list_efforts(q, &out) == 0); /* none → 0, picker skips */
-        q->destroy(q);
-    }
-}
-
 /* A tool result carrying an image part: the `tool` message keeps string
  * content, and the part follows as a separate user message with an
  * image_url data-URL block — placed after the whole run of consecutive
@@ -385,80 +342,77 @@ static void test_cache_breakpoint_system_only(void)
     json_decref(msgs);
 }
 
-static void store_report(struct provider *p, struct model_info *m)
+static json_t *encode_reasoning(enum openai_reasoning_format format, const char *effort)
 {
-    model_meta_store(p, m);
-    model_info_clear(m);
+    json_t *body = json_object();
+    openai_apply_reasoning(body, format, effort);
+    return body;
 }
 
-/* Both caching decisions come from the model's rates, because a router
- * forwards cache_control to backends whose caching works nothing like
- * Anthropic's. Getting either wrong is silent: money, not an error. */
-static void test_cache_plan_follows_the_model_rates(void)
+static void test_reasoning_format_parse(void)
 {
-    struct provider p = {0};
-    struct model_info m;
+    EXPECT(openai_reasoning_format_parse("flat", OPENAI_REASONING_NESTED) == OPENAI_REASONING_FLAT);
+    EXPECT(openai_reasoning_format_parse("NESTED", OPENAI_REASONING_FLAT) ==
+           OPENAI_REASONING_NESTED);
+    EXPECT(openai_reasoning_format_parse(NULL, OPENAI_REASONING_NESTED) == OPENAI_REASONING_NESTED);
+    EXPECT(openai_reasoning_format_parse("", OPENAI_REASONING_FLAT) == OPENAI_REASONING_FLAT);
+    EXPECT(openai_reasoning_format_parse("invalid", OPENAI_REASONING_NESTED) ==
+           OPENAI_REASONING_NESTED);
+}
 
-    /* Anthropic-shaped: writes replace input processing (1.25x), and a
-     * quoted 1h rate means the 1h premium is real. */
-    model_info_init(&m);
-    m.id = xstrdup("anthropic-ish");
-    m.cost_input = 3;
-    m.cost_output = 15;
-    m.cost_cache_write = 3.75;
-    m.cost_cache_write_1h = 6;
-    store_report(&p, &m);
-    struct openai_cache_plan plan = openai_plan_cache(&p, "anthropic-ish", OPENAI_CACHE_AUTO, "1h");
-    EXPECT(plan.send_breakpoints == 1);
-    EXPECT(plan.writes_bill_1h == 1);
-    /* A 5m request on the same model bills writes at the ordinary rate. */
-    plan = openai_plan_cache(&p, "anthropic-ish", OPENAI_CACHE_AUTO, "5m");
-    EXPECT(plan.send_breakpoints == 1 && plan.writes_bill_1h == 0);
-    /* Caching switched off sends nothing, whatever the TTL says. */
-    plan = openai_plan_cache(&p, "anthropic-ish", OPENAI_CACHE_OFF, "1h");
-    EXPECT(plan.send_breakpoints == 0 && plan.writes_bill_1h == 0);
+static void test_reasoning_effort_unset_omitted(void)
+{
+    const char *empties[] = {NULL, ""};
+    for (size_t i = 0; i < 2; i++) {
+        json_t *flat = encode_reasoning(OPENAI_REASONING_FLAT, empties[i]);
+        json_t *nested = encode_reasoning(OPENAI_REASONING_NESTED, empties[i]);
+        EXPECT(json_object_size(flat) == 0);
+        EXPECT(json_object_size(nested) == 0);
+        json_decref(flat);
+        json_decref(nested);
+    }
+}
 
-    /* OpenAI-shaped: writes replace input, but no 1h rate exists to bill
-     * at — pricing those as 1h would use the 2x-input fallback and
-     * overstate the dearest category by half again. */
-    model_info_init(&m);
-    m.id = xstrdup("openai-ish");
-    m.cost_input = 1;
-    m.cost_output = 6;
-    m.cost_cache_write = 1.25;
-    store_report(&p, &m);
-    plan = openai_plan_cache(&p, "openai-ish", OPENAI_CACHE_AUTO, "1h");
-    EXPECT(plan.send_breakpoints == 1 && plan.writes_bill_1h == 0);
+static void test_reasoning_effort_flat(void)
+{
+    json_t *body = encode_reasoning(OPENAI_REASONING_FLAT, "high");
+    EXPECT(json_object_get(body, "reasoning") == NULL);
+    EXPECT_STR_EQ(json_string_value(json_object_get(body, "reasoning_effort")), "high");
+    json_decref(body);
 
-    /* Gemini-shaped: the write rate is a surcharge far below input, so an
-     * explicit cache is charged on top of input billed in full — asking
-     * for one costs more than not caching. */
-    model_info_init(&m);
-    m.id = xstrdup("gemini-ish");
-    m.cost_input = 2;
-    m.cost_output = 12;
-    m.cost_cache_read = 0.2;
-    m.cost_cache_write = 0.375;
-    store_report(&p, &m);
-    plan = openai_plan_cache(&p, "gemini-ish", OPENAI_CACHE_AUTO, "1h");
-    EXPECT(plan.send_breakpoints == 0 && plan.writes_bill_1h == 0);
-    /* But the judgement is only the default's: an explicit `cache = on`
-     * is the user overriding it, which the config contract promises. */
-    plan = openai_plan_cache(&p, "gemini-ish", OPENAI_CACHE_ON, "1h");
-    EXPECT(plan.send_breakpoints == 1);
-    /* Still no 1h premium — it quotes no 1h rate to bill at. */
-    EXPECT(plan.writes_bill_1h == 0);
+    body = encode_reasoning(OPENAI_REASONING_FLAT, "none");
+    EXPECT_STR_EQ(json_string_value(json_object_get(body, "reasoning_effort")), "none");
+    json_decref(body);
+}
 
-    /* Nothing known: send breakpoints (the common case is a model that
-     * benefits) but never invent the 1h premium. */
-    plan = openai_plan_cache(&p, "unknown", OPENAI_CACHE_AUTO, "1h");
-    EXPECT(plan.send_breakpoints == 1 && plan.writes_bill_1h == 0);
-    model_meta_release(&p);
+static void test_reasoning_effort_nested(void)
+{
+    json_t *body = encode_reasoning(OPENAI_REASONING_NESTED, "high");
+    EXPECT(json_object_get(body, "reasoning_effort") == NULL);
+    json_t *reasoning = json_object_get(body, "reasoning");
+    EXPECT(json_is_object(reasoning));
+    EXPECT(json_is_true(json_object_get(reasoning, "enabled")));
+    EXPECT_STR_EQ(json_string_value(json_object_get(reasoning, "effort")), "high");
+    json_decref(body);
+}
+
+static void test_reasoning_effort_nested_none_disables(void)
+{
+    json_t *body = encode_reasoning(OPENAI_REASONING_NESTED, "none");
+    json_t *reasoning = json_object_get(body, "reasoning");
+    EXPECT(json_is_object(reasoning));
+    EXPECT(json_is_false(json_object_get(reasoning, "enabled")));
+    EXPECT(json_object_get(reasoning, "effort") == NULL);
+    json_decref(body);
 }
 
 int main(void)
 {
-    test_cache_plan_follows_the_model_rates();
+    test_reasoning_format_parse();
+    test_reasoning_effort_unset_omitted();
+    test_reasoning_effort_flat();
+    test_reasoning_effort_nested();
+    test_reasoning_effort_nested_none_disables();
     test_cache_breakpoints_system_and_tail();
     test_cache_breakpoint_lands_on_tool_result();
     test_cache_breakpoint_skips_contentless_assistant();
@@ -470,7 +424,6 @@ int main(void)
     test_reasoning_only_turn();
     test_reasoning_only_field_null_emits_nothing();
     test_reasoning_skipped_on_provenance_mismatch();
-    test_list_efforts_wiring();
     test_tool_result_image_followup();
     T_REPORT();
 }

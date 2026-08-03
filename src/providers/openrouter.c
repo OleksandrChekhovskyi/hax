@@ -14,6 +14,7 @@
 #include "provider.h"
 #include "util.h"
 #include "providers/openai.h"
+#include "providers/openai_messages.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
 #include "transport/http.h"
@@ -446,12 +447,12 @@ struct provider *openrouter_provider_new(const char *name)
         .request_cost = 1,
         /* Anthropic models here cache only on request, and OpenRouter
          * passes the marker through to them. */
-        .send_cache_control_default = 1,
+        .cache_auto_default = 1,
         .extra_headers = headers,
         /* The shared builder sends this object only when effort is set:
          * NULL keeps the provider default and "none" disables reasoning.
          * show_reasoning remains an independent display-only setting. */
-        .reasoning_format = REASONING_NESTED,
+        .reasoning_format = OPENAI_REASONING_NESTED,
         /* Safe as a vocabulary: OpenRouter maps an unsupported level to the
          * nearest rather than rejecting it. What each model actually takes
          * comes from openrouter_parse_efforts. */

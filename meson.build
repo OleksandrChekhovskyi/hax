@@ -78,6 +78,7 @@ sources = files(
     'src/providers/openai.c',
     'src/providers/openai_compat.c',
     'src/providers/openai_events.c',
+    'src/providers/openai_messages.c',
     'src/providers/openrouter.c',
     'src/providers/registry.c',
 

@@ -2,7 +2,6 @@
 #include "providers/openai.h"
 
 #include <jansson.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -14,22 +13,14 @@
 #include "tool_schema.h"
 #include "util.h"
 #include "providers/openai_events.h"
+#include "providers/openai_messages.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 #include "transport/retry.h"
 
-/* Short timeouts for the runtime pickers: the availability probe must keep
- * /provider fast even when a server hangs (the 2s connect timeout in
- * http_get bounds the unreachable case); the model-list fetch tolerates a
- * larger catalog (OpenRouter's is hundreds of entries). */
-#define AVAIL_PROBE_TIMEOUT_S 2
-#define MODEL_LIST_TIMEOUT_S  10
+#define AVAILABILITY_TIMEOUT_S 2
+#define MODEL_LIST_TIMEOUT_S   10
 
-/* The family's whole `reasoning.effort` vocabulary, cheapest first. Every
- * preset built on this adapter starts here and is narrowed per model by
- * whatever describes it (model_meta.h) — which for a backend with no probe
- * and no catalog entry is nothing, so a level missing here is one no such
- * backend can ever offer. "max" arrived with the gpt-5.6 family. */
 const char *const OPENAI_EFFORT_LADDER[] = {"none", "minimal", "low", "medium",
                                             "high", "xhigh",   "max"};
 const size_t OPENAI_EFFORT_LADDER_N =
@@ -37,316 +28,34 @@ const size_t OPENAI_EFFORT_LADDER_N =
 
 struct openai {
     struct provider base;
-    char *base_url;    /* e.g. "http://127.0.0.1:8000/v1" (no trailing slash) */
-    char *api_key;     /* may be NULL for unauthenticated local servers */
-    char *name_buf;    /* backing storage for base.name (heap-owned) */
-    char *catalog_buf; /* backing storage for base.catalog_id; NULL = opted out */
-    char *endpoint;    /* base_url + "/chat/completions" */
-    char *session_id;  /* sent as prompt_cache_key when send_cache_key is set */
+    char *base_url;
+    char *api_key;
+    char *name;
+    char *catalog_id;
+    char *endpoint;
+    char *session_id;
     int send_cache_key;
     int emit_progress;
     int request_cost;
     enum openai_cache_mode cache_mode;
-    char *cache_ttl;                 /* "5m" / "1h"; owned, "" = provider default */
-    const char *length_hint;         /* borrowed; appended to "length" truncation errors */
-    char *roundtrip_reasoning_field; /* NULL = don't round-trip reasoning */
-    enum reasoning_format reasoning_format;
-    const char *const *efforts; /* borrowed effort ladder for /effort; NULL = none */
+    char *cache_ttl;
+    char *reasoning_field;
+    enum openai_reasoning_format reasoning_format;
+    char **extra_headers;
+
+    const char *length_hint;    /* borrowed for the provider lifetime */
+    const char *const *efforts; /* borrowed for the provider lifetime */
     size_t n_efforts;
-    void (*parse_model)(const json_t *entry, struct model_info *out); /* preset hook; may be NULL */
-    char **extra_headers; /* NULL-terminated, each element heap-owned; NULL = none */
+    void (*parse_model)(const json_t *entry, struct model_info *out);
 };
 
-/* ---------- request body construction ---------- */
-
-static json_t *build_tool_call(const struct item *it)
-{
-    return json_pack("{s:s, s:s, s:{s:s, s:s}}", "id", it->call_id ? it->call_id : "", "type",
-                     "function", "function", "name", it->tool_name ? it->tool_name : "",
-                     "arguments", it->tool_arguments_json ? it->tool_arguments_json : "{}");
-}
-
-/* Emit one consolidated assistant message for a run of consecutive
- * ITEM_REASONING + ITEM_ASSISTANT_MESSAGE + ITEM_TOOL_CALL items. OpenAI
- * accepts a single assistant message with both `content` and `tool_calls`;
- * some compat servers reject bare tool_call-only messages without that
- * wrapper.
- *
- * When `reasoning_field` is set, any captured reasoning text in the run is
- * attached under that key (e.g. "reasoning_content" for llama.cpp) so
- * interleaved-thinking models see their own prior CoT — see openai.h. Only
- * ITEM_REASONING.reasoning_text is round-tripped here; Codex's structured
- * reasoning_json travels its own provider and never reaches this path.
- *
- * A reasoning item is replayed only when its provenance stamp matches the
- * live `cur_provider`/`cur_model` — otherwise CoT produced by Codex, or by a
- * different llama.cpp model earlier in the same conversation, would be fed to
- * a backend/model that never wrote it. Unstamped items (NULL provider/model)
- * are conservatively skipped; for resumed pre-stamp files session_load has
- * already backfilled the stamp from the header.
- *
- * Lossy corner: if a turn produced text → tool_call → text, both text
- * fragments are concatenated into one `content` — Chat Completions has
- * no way to interleave text with tool_calls within a message. Splitting
- * the trailing text into a post-tool-result message would imply it was
- * said after observing the result, which is more misleading. */
-static size_t emit_assistant_group(json_t *arr, const struct item *items, size_t i, size_t n,
-                                   const char *reasoning_field, const char *cur_provider,
-                                   const char *cur_model)
-{
-    struct buf text;
-    struct buf reasoning;
-    buf_init(&text);
-    buf_init(&reasoning);
-    json_t *tool_calls = NULL;
-
-    while (i < n && (items[i].kind == ITEM_ASSISTANT_MESSAGE || items[i].kind == ITEM_TOOL_CALL ||
-                     items[i].kind == ITEM_REASONING)) {
-        if (items[i].kind == ITEM_ASSISTANT_MESSAGE) {
-            if (items[i].text)
-                buf_append_str(&text, items[i].text);
-        } else if (items[i].kind == ITEM_REASONING) {
-            int stamp_ok = items[i].provider && items[i].model && cur_provider && cur_model &&
-                           strcmp(items[i].provider, cur_provider) == 0 &&
-                           strcmp(items[i].model, cur_model) == 0;
-            if (stamp_ok && items[i].reasoning_text && *items[i].reasoning_text) {
-                if (reasoning.len > 0)
-                    buf_append_str(&reasoning, "\n");
-                buf_append_str(&reasoning, items[i].reasoning_text);
-            }
-        } else {
-            if (!tool_calls)
-                tool_calls = json_array();
-            json_array_append_new(tool_calls, build_tool_call(&items[i]));
-        }
-        i++;
-    }
-
-    int emit_reasoning = reasoning_field && reasoning.len > 0;
-
-    /* Skip an assistant message with nothing to say — no text, no tool
-     * calls, and no reasoning being replayed. Happens for a reasoning-only
-     * turn when replay is disabled (reasoning_field NULL: HAX_REASONING_
-     * ROUNDTRIP=off, or a compat backend that streams CoT but doesn't opt
-     * into replay). Emitting {"role":"assistant","content":null} there
-     * poisons the next request and some backends reject it. */
-    if (text.len == 0 && !tool_calls && !emit_reasoning) {
-        buf_free(&text);
-        buf_free(&reasoning);
-        return i;
-    }
-
-    json_t *msg = json_object();
-    json_object_set_new(msg, "role", json_string("assistant"));
-    if (text.len > 0)
-        json_object_set_new(msg, "content", json_string(text.data));
-    else
-        json_object_set_new(msg, "content", json_null());
-    if (tool_calls)
-        json_object_set_new(msg, "tool_calls", tool_calls);
-    if (emit_reasoning)
-        json_object_set_new(msg, reasoning_field, json_string(reasoning.data));
-    json_array_append_new(arr, msg);
-
-    buf_free(&text);
-    buf_free(&reasoning);
-    return i;
-}
-
-/* Chat Completions' `tool` role only accepts string content, so image
- * parts can't ride inside the result message itself. The whole run of
- * consecutive tool results is emitted first (strict backends validate
- * their adjacency after a parallel-call turn), then one trailing user
- * message carries every part as an image_url data-URL block. Without
- * image support each part degrades to a text placeholder appended to
- * its tool message instead. */
-static size_t emit_tool_results(json_t *arr, const struct item *items, size_t i, size_t n,
-                                int image_input)
-{
-    size_t first = i;
-    for (; i < n && items[i].kind == ITEM_TOOL_RESULT; i++) {
-        const struct item *it = &items[i];
-        if (it->n_images > 0 && image_input == 0) {
-            struct buf b;
-            buf_init(&b);
-            if (it->output)
-                buf_append_str(&b, it->output);
-            for (size_t k = 0; k < it->n_images; k++) {
-                char *ph = item_image_placeholder(&it->images[k]);
-                if (b.len > 0)
-                    buf_append_str(&b, "\n");
-                buf_append_str(&b, ph);
-                free(ph);
-            }
-            json_array_append_new(arr, json_pack("{s:s, s:s, s:s}", "role", "tool", "tool_call_id",
-                                                 it->call_id ? it->call_id : "", "content",
-                                                 b.data ? b.data : ""));
-            buf_free(&b);
-        } else {
-            json_array_append_new(arr, json_pack("{s:s, s:s, s:s}", "role", "tool", "tool_call_id",
-                                                 it->call_id ? it->call_id : "", "content",
-                                                 it->output ? it->output : ""));
-        }
-    }
-    if (image_input == 0)
-        return i;
-    json_t *parts = NULL;
-    for (size_t j = first; j < i; j++) {
-        const struct item *it = &items[j];
-        for (size_t k = 0; k < it->n_images; k++) {
-            const struct item_image *img = &it->images[k];
-            if (!parts) {
-                parts = json_array();
-                json_array_append_new(parts,
-                                      json_pack("{s:s, s:s}", "type", "text", "text",
-                                                "Image(s) from the preceding tool result(s):"));
-            }
-            char *url = xasprintf("data:%s;base64,%s", img->mime ? img->mime : "image/png",
-                                  img->data_b64 ? img->data_b64 : "");
-            json_array_append_new(
-                parts, json_pack("{s:s, s:{s:s}}", "type", "image_url", "image_url", "url", url));
-            free(url);
-        }
-    }
-    if (parts)
-        json_array_append_new(arr, json_pack("{s:s, s:o}", "role", "user", "content", parts));
-    return i;
-}
-
-json_t *openai_build_messages(const char *system_prompt, const struct item *items, size_t n,
-                              const char *reasoning_field, const char *cur_provider,
-                              const char *cur_model, int image_input)
-{
-    json_t *arr = json_array();
-
-    if (system_prompt && *system_prompt) {
-        json_array_append_new(arr,
-                              json_pack("{s:s, s:s}", "role", "system", "content", system_prompt));
-    }
-
-    size_t i = 0;
-    while (i < n) {
-        switch (items[i].kind) {
-        case ITEM_USER_MESSAGE:
-            json_array_append_new(arr, json_pack("{s:s, s:s}", "role", "user", "content",
-                                                 items[i].text ? items[i].text : ""));
-            i++;
-            break;
-        case ITEM_ASSISTANT_MESSAGE:
-        case ITEM_TOOL_CALL:
-            i = emit_assistant_group(arr, items, i, n, reasoning_field, cur_provider, cur_model);
-            break;
-        case ITEM_TOOL_RESULT:
-            i = emit_tool_results(arr, items, i, n, image_input);
-            break;
-        case ITEM_REASONING:
-            /* Text reasoning begins an assistant group so it can ride along
-             * as reasoning_content (gated by reasoning_field). Codex's
-             * structured blob has no Chat Completions representation — skip. */
-            if (items[i].reasoning_text)
-                i = emit_assistant_group(arr, items, i, n, reasoning_field, cur_provider,
-                                         cur_model);
-            else
-                i++;
-            break;
-        case ITEM_TURN_BOUNDARY:
-        case ITEM_TURN_USAGE:
-            /* Agent-side markers for the transcript renderer; nothing to
-             * translate. emit_assistant_group's while clause already
-             * stops at these kinds, so they cleanly end an assistant
-             * group too. */
-            i++;
-            break;
-        }
-    }
-
-    return arr;
-}
-
-/* ---------- prompt cache breakpoints ---------- */
-
-/* Anthropic models cache only what a request marks, and the routers
- * fronting them pass the marker through the OpenAI-shaped body — on a
- * content *part*, a Chat Completions message having no block list of its
- * own:
- *
- *     {"role": "user", "content": [
- *       {"type": "text", "text": "...",
- *        "cache_control": {"type": "ephemeral", "ttl": "1h"}}]} */
-static json_t *make_cache_control(const char *ttl)
-{
-    json_t *cc = json_pack("{s:s}", "type", "ephemeral");
-    if (ttl && strcasecmp(ttl, "1h") == 0)
-        json_object_set_new(cc, "ttl", json_string("1h"));
-    return cc;
-}
-
-/* Mark `msg`'s last content part, promoting plain string content to the
- * one-part array form. Returns 0 when the message has no part to hang the
- * marker on — an assistant turn of nothing but tool calls has
- * `content: null`. */
-static int attach_cache_control(json_t *msg, const char *ttl)
-{
-    json_t *content = json_object_get(msg, "content");
-    if (json_is_string(content)) {
-        json_t *part = json_pack("{s:s, s:O}", "type", "text", "text", content);
-        json_object_set_new(part, "cache_control", make_cache_control(ttl));
-        json_t *arr = json_array();
-        json_array_append_new(arr, part);
-        json_object_set_new(msg, "content", arr);
-        return 1;
-    }
-    if (json_is_array(content) && json_array_size(content) > 0) {
-        json_t *last = json_array_get(content, json_array_size(content) - 1);
-        json_object_set_new(last, "cache_control", make_cache_control(ttl));
-        return 1;
-    }
-    return 0;
-}
-
-/* Two breakpoints, well under Anthropic's cap of 4: the system prompt
- * (the prefix every turn shares) and the conversation tail (so each
- * request caches what the next one re-sends). Mirrors the native
- * Anthropic adapter minus its per-tool breakpoint, which Chat Completions
- * has no object to carry.
- *
- * The tail walks backward past messages that can't hold a marker instead
- * of stopping: a tool-calling turn ends on a `tool` result, and giving up
- * there would leave every tool result — the bulk of an agentic prefix —
- * uncached. */
-void openai_apply_cache_breakpoints(json_t *messages, const char *ttl)
-{
-    size_t n = json_array_size(messages);
-    if (n == 0)
-        return;
-    json_t *first = json_array_get(messages, 0);
-    const char *role = json_string_value(json_object_get(first, "role"));
-    size_t tail_floor = 0;
-    if (role && strcmp(role, "system") == 0 && attach_cache_control(first, ttl))
-        tail_floor = 1; /* already marked — don't spend the second one on it */
-    for (size_t i = n; i-- > tail_floor;) {
-        if (attach_cache_control(json_array_get(messages, i), ttl))
-            return;
-    }
-}
-
-/* What this request should do about prompt caching for `model`, from the
- * one thing that describes its cache economics — its rates.
- *
- * Both answers hinge on facts a router hides: it forwards `cache_control`
- * to backends whose caching works nothing like Anthropic's. Where a write
- * is a surcharge on top of full input processing (Gemini), an explicit
- * cache only adds cost, so AUTO declines to ask for one — while an
- * explicit ON still gets what it asked for. And asking for a 1h TTL means
- * nothing on a backend with no TTL concept: those still report writes,
- * billed at their ordinary rate, so only a quoted 1h rate justifies
- * pricing writes at the 1h premium. */
-struct openai_cache_plan openai_plan_cache(const struct provider *p, const char *model,
+/* AUTO sends explicit cache markers only when writes replace ordinary input processing. */
+struct openai_cache_plan openai_plan_cache(const struct provider *provider, const char *model,
                                            enum openai_cache_mode mode, const char *ttl)
 {
     struct openai_cache_plan plan = {0};
     struct catalog_entry rates;
-    model_meta_rates(p, model, &rates);
+    model_meta_rates(provider, model, &rates);
     plan.send_breakpoints = mode == OPENAI_CACHE_ON || (mode == OPENAI_CACHE_AUTO &&
                                                         catalog_cache_write_replaces_input(&rates));
     plan.writes_bill_1h = plan.send_breakpoints && ttl && strcasecmp(ttl, "1h") == 0 &&
@@ -354,403 +63,336 @@ struct openai_cache_plan openai_plan_cache(const struct provider *p, const char 
     return plan;
 }
 
-static json_t *build_tools(const struct tool_def *tools, size_t n)
+static json_t *build_tools(const struct tool_def *tools, size_t n_tools)
 {
-    json_t *arr = json_array();
-    for (size_t i = 0; i < n; i++) {
-        json_t *params = tool_schema_build(&tools[i]);
-        json_array_append_new(arr, json_pack("{s:s, s:{s:s, s:s, s:o}}", "type", "function",
-                                             "function", "name", tools[i].name, "description",
-                                             tools[i].description, "parameters", params));
+    json_t *tool_list = json_array();
+    for (size_t i = 0; i < n_tools; i++) {
+        json_t *parameters = tool_schema_build(&tools[i]);
+        json_array_append_new(tool_list, json_pack("{s:s, s:{s:s, s:s, s:o}}", "type", "function",
+                                                   "function", "name", tools[i].name, "description",
+                                                   tools[i].description, "parameters", parameters));
     }
-    return arr;
+    return tool_list;
 }
 
-enum reasoning_format reasoning_format_parse(const char *s, enum reasoning_format fallback)
+static char *build_request_body(const struct openai *openai, const struct context *context,
+                                const char *model, const struct openai_cache_plan *cache)
 {
-    if (!s || !*s)
-        return fallback;
-    if (strcasecmp(s, "flat") == 0)
-        return REASONING_FLAT;
-    if (strcasecmp(s, "nested") == 0)
-        return REASONING_NESTED;
-    hax_warn("unknown reasoning format %s (expected 'flat' or 'nested') — using default", s);
-    return fallback;
-}
+    json_t *messages = openai_build_messages(context->system_prompt, context->items,
+                                             context->n_items, openai->reasoning_field,
+                                             openai->base.name, model, context->image_input);
+    if (cache->send_breakpoints)
+        openai_apply_cache_breakpoints(messages, openai->cache_ttl);
 
-void openai_apply_reasoning(json_t *body, enum reasoning_format fmt, const char *effort)
-{
-    /* Empty counts as unset (the "empty omits effort" contract): both dialects
-     * then omit the field, leaving the provider's own default. */
-    if (!effort || !*effort)
-        return;
-    switch (fmt) {
-    case REASONING_FLAT:
-        json_object_set_new(body, "reasoning_effort", json_string(effort));
-        break;
-    case REASONING_NESTED: {
-        /* Nested `reasoning` object. `enabled` is the explicit on/off gate some
-         * routers need to (de)activate reasoning: "none" sends enabled:false to
-         * disable, any real effort sends enabled:true and passes the level
-         * through. */
-        int on = strcmp(effort, "none") != 0;
-        json_t *r = json_pack("{s:b}", "enabled", on);
-        if (on)
-            json_object_set_new(r, "effort", json_string(effort));
-        json_object_set_new(body, "reasoning", r);
-        break;
-    }
-    }
-}
-
-static char *build_body(const struct context *ctx, const char *provider, const char *model,
-                        const char *cache_key, enum reasoning_format reasoning, int return_progress,
-                        int request_cost, const char *reasoning_field, int cache,
-                        const char *cache_ttl)
-{
-    /* Omit `tool_choice` and `parallel_tool_calls`: their defaults ("auto"
-     * and true respectively) are exactly what we want, so explicitly setting
-     * them would be redundant. The agent loop already handles multiple
-     * tool_calls per turn when the model emits them.
-     *
-     * `stream_options.include_usage` is sent unconditionally — it asks the
-     * server to emit a trailing usage chunk so we can show per-turn token
-     * counts. Reference clients send it without per-call gating: opencode
-     * always-on for streaming, pi-mono default-true via per-model compat
-     * flag. Modern OpenAI-compatible backends (vLLM, llama.cpp server,
-     * Ollama, oMLX, hosted providers) all accept it. If we ever hit a
-     * backend that 400s on the unknown field, gating goes here. */
-    json_t *messages = openai_build_messages(ctx->system_prompt, ctx->items, ctx->n_items,
-                                             reasoning_field, provider, model, ctx->image_input);
-    if (cache)
-        openai_apply_cache_breakpoints(messages, cache_ttl);
-
+    /* Usage is requested on every stream so terminal events can report token counts. */
     json_t *body = json_pack("{s:s, s:b, s:o, s:{s:b}}", "model", model, "stream", 1, "messages",
                              messages, "stream_options", "include_usage", 1);
 
-    if (ctx->n_tools > 0)
-        json_object_set_new(body, "tools", build_tools(ctx->tools, ctx->n_tools));
-
-    if (cache_key)
-        json_object_set_new(body, "prompt_cache_key", json_string(cache_key));
-
-    /* llama.cpp extension: asks the server to inject prompt_progress
-     * objects into the stream during prefill. Other OpenAI-compatible
-     * backends ignore the unknown field, so we can send it whenever the
-     * preset opts in without per-backend gating beyond that. */
-    if (return_progress)
+    if (context->n_tools > 0)
+        json_object_set_new(body, "tools", build_tools(context->tools, context->n_tools));
+    if (openai->send_cache_key)
+        json_object_set_new(body, "prompt_cache_key", json_string(openai->session_id));
+    if (openai->emit_progress)
         json_object_set_new(body, "return_progress", json_true());
-
-    /* OpenRouter extension: opt into usage accounting so the trailing
-     * usage chunk includes this response's `cost` (USD). */
-    if (request_cost)
+    if (openai->request_cost)
         json_object_set_new(body, "usage", json_pack("{s:b}", "include", 1));
 
-    openai_apply_reasoning(body, reasoning, ctx->effort);
+    openai_apply_reasoning(body, openai->reasoning_format, context->effort);
 
-    char *s = json_dumps(body, JSON_COMPACT);
+    char *json = json_dumps(body, JSON_COMPACT);
     json_decref(body);
-    return s;
+    return json;
 }
 
-/* ---------- SSE glue ---------- */
-
-static int on_sse(const char *event_name, const char *data, void *user)
+static const char **build_request_headers(const struct openai *openai, char **authorization)
 {
-    (void)event_name; /* Chat Completions streams are unnamed `data:` events */
+    size_t n_extra_headers = 0;
+    for (char **header = openai->extra_headers; header && *header; header++)
+        n_extra_headers++;
+
+    *authorization =
+        openai->api_key ? xasprintf("Authorization: Bearer %s", openai->api_key) : NULL;
+    const char **headers = xmalloc(sizeof(*headers) * (n_extra_headers + 4));
+    size_t n_headers = 0;
+    if (*authorization)
+        headers[n_headers++] = *authorization;
+    headers[n_headers++] = "Accept: text/event-stream";
+    headers[n_headers++] = "Content-Type: application/json";
+    for (char **header = openai->extra_headers; header && *header; header++)
+        headers[n_headers++] = *header;
+    headers[n_headers] = NULL;
+    return headers;
+}
+
+static int handle_sse_data(const char *event_name, const char *data, void *user)
+{
+    (void)event_name;
     openai_events_feed(user, data);
     return 0;
 }
 
-/* ---------- provider interface ---------- */
-
-static int openai_stream(struct provider *p, const struct context *ctx, const char *model,
-                         stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
+static int openai_stream(struct provider *provider, const struct context *context,
+                         const char *model, stream_cb callback, void *callback_user,
+                         http_tick_cb tick, void *tick_user)
 {
-    struct openai *o = (struct openai *)p;
+    struct openai *openai = (struct openai *)provider;
 
-    /* Cache planning requires the startup probe's final rates. */
-    model_meta_wait(p);
-    struct openai_cache_plan cache = openai_plan_cache(p, model, o->cache_mode, o->cache_ttl);
+    /* Cache planning depends on rates populated by the startup metadata probe. */
+    model_meta_wait(provider);
+    struct openai_cache_plan cache =
+        openai_plan_cache(provider, model, openai->cache_mode, openai->cache_ttl);
 
-    char *body = build_body(ctx, p->name, model, o->send_cache_key ? o->session_id : NULL,
-                            o->reasoning_format, o->emit_progress, o->request_cost,
-                            o->roundtrip_reasoning_field, cache.send_breakpoints, o->cache_ttl);
+    char *body = build_request_body(openai, context, model, &cache);
     if (!body)
         return -1;
+
     size_t body_len = strlen(body);
+    char *authorization;
+    const char **headers = build_request_headers(openai, &authorization);
+    struct retry_policy policy = retry_policy_default();
+    struct http_response response;
+    struct openai_events parser;
+    int result = -1;
 
-    char *auth_hdr = o->api_key ? xasprintf("Authorization: Bearer %s", o->api_key) : NULL;
+    /* Each retry needs fresh parser state; request bytes remain safe to resend unchanged. */
+    for (int attempt = 0; attempt < policy.max_attempts; attempt++) {
+        memset(&response, 0, sizeof(response));
+        openai_events_init(&parser, callback, callback_user);
+        parser.emit_progress = openai->emit_progress;
+        parser.length_hint = openai->length_hint;
+        parser.cache_write_1h = cache.writes_bill_1h;
 
-    /* Assemble headers: optional Authorization, the two fixed Accept/
-     * Content-Type lines, and any preset-supplied extras (e.g. OpenRouter's
-     * X-Title). Built dynamically because the extras count is variable. */
-    size_t n_extra = 0;
-    for (char **h = o->extra_headers; h && *h; h++)
-        n_extra++;
-    const char **headers = xmalloc(sizeof(*headers) * (n_extra + 4));
-    size_t hi = 0;
-    if (auth_hdr)
-        headers[hi++] = auth_hdr;
-    headers[hi++] = "Accept: text/event-stream";
-    headers[hi++] = "Content-Type: application/json";
-    for (char **h = o->extra_headers; h && *h; h++)
-        headers[hi++] = *h;
-    headers[hi] = NULL;
-
-    struct retry_policy pol = retry_policy_default();
-    struct http_response resp;
-    struct openai_events ev;
-    int rc = -1;
-
-    /* Auto-retry on transient transport / 5xx / 429 errors. We re-init the
-     * events parser each attempt so a partial parser state from a 5xx body
-     * (which isn't SSE-shaped anyway) doesn't leak into the next try. The
-     * request body and headers are immutable — same call_id, same prompt
-     * cache key — so resending them is safe. */
-    int attempt;
-    for (attempt = 0; attempt < pol.max_attempts; attempt++) {
-        memset(&resp, 0, sizeof(resp));
-        openai_events_init(&ev, cb, user);
-        ev.emit_progress = o->emit_progress;
-        ev.length_hint = o->length_hint;
-        ev.cache_write_1h = cache.writes_bill_1h;
-        rc = http_sse_post(o->endpoint, headers, body, body_len, pol.idle_timeout_s, on_sse, &ev,
-                           tick, tick_user, &resp);
-
-        if (resp.cancelled)
+        result = http_sse_post(openai->endpoint, headers, body, body_len, policy.idle_timeout_s,
+                               handle_sse_data, &parser, tick, tick_user, &response);
+        if (response.cancelled ||
+            !retry_should_attempt(result, response.status, response.error_body) ||
+            attempt + 1 >= policy.max_attempts) {
             break;
-        if (!retry_should_attempt(rc, resp.status, resp.error_body))
-            break;
-        if (attempt + 1 >= pol.max_attempts)
-            break;
+        }
 
-        long delay = resp.retry_after_ms > 0 ? resp.retry_after_ms : retry_delay_ms(&pol, attempt);
-        struct stream_event re = {
+        long delay_ms = response.retry_after_ms > 0 ? response.retry_after_ms
+                                                    : retry_delay_ms(&policy, attempt);
+        struct stream_event retry = {
             .kind = EV_RETRY,
-            .u.retry = {.attempt = attempt + 1,
-                        .max_attempts = pol.max_attempts,
-                        .delay_ms = delay,
-                        .http_status = (int)resp.status},
+            .u.retry =
+                {
+                    .attempt = attempt + 1,
+                    .max_attempts = policy.max_attempts,
+                    .delay_ms = delay_ms,
+                    .http_status = (int)response.status,
+                },
         };
-        cb(&re, user);
+        callback(&retry, callback_user);
 
-        free(resp.error_body);
-        resp.error_body = NULL;
-        openai_events_free(&ev);
+        free(response.error_body);
+        response.error_body = NULL;
+        openai_events_free(&parser);
 
-        if (retry_sleep_with_tick(delay, tick, tick_user)) {
-            /* Cancelled mid-backoff — synthesize the cancelled flag so
-             * the post-loop branch below treats this like a user abort. */
-            resp.cancelled = 1;
-            memset(&ev, 0, sizeof(ev));
+        if (retry_sleep_with_tick(delay_ms, tick, tick_user)) {
+            response.cancelled = 1;
+            memset(&parser, 0, sizeof(parser));
             break;
         }
     }
 
-    free(headers);
-
-    if (resp.cancelled) {
-        /* User-initiated abort — agent layer handles the partial state
-         * and the "[interrupted]" notice. Don't surface as EV_ERROR. */
-    } else if (rc != 0 || resp.status < 200 || resp.status >= 300) {
-        char *msg = format_api_error(resp.status, resp.error_body);
-        struct stream_event e = {
-            .kind = EV_ERROR,
-            .u.error = {.message = msg, .http_status = (int)resp.status},
-        };
-        cb(&e, user);
-        free(msg);
-    } else {
-        openai_events_finalize(&ev);
+    if (!response.cancelled) {
+        if (result != 0 || response.status < 200 || response.status >= 300) {
+            char *message = format_api_error(response.status, response.error_body);
+            struct stream_event error = {
+                .kind = EV_ERROR,
+                .u.error = {.message = message, .http_status = (int)response.status},
+            };
+            callback(&error, callback_user);
+            free(message);
+        } else {
+            openai_events_finalize(&parser);
+        }
     }
 
-    free(resp.error_body);
-    free(auth_hdr);
+    free(response.error_body);
+    openai_events_free(&parser);
+    free(headers);
+    free(authorization);
     free(body);
-    openai_events_free(&ev);
-    return rc;
+    return result;
 }
 
-static void openai_destroy(struct provider *p)
+static void openai_destroy(struct provider *provider)
 {
-    struct openai *o = (struct openai *)p;
-    model_meta_release(p);
-    free(o->base_url);
-    free(o->api_key);
-    free(o->name_buf);
-    free(o->catalog_buf);
-    free(o->endpoint);
-    free(o->session_id);
-    free(o->cache_ttl);
-    free(o->roundtrip_reasoning_field);
-    string_array_free(o->extra_headers);
-    free(o);
+    struct openai *openai = (struct openai *)provider;
+    model_meta_release(provider);
+    free(openai->base_url);
+    free(openai->api_key);
+    free(openai->name);
+    free(openai->catalog_id);
+    free(openai->endpoint);
+    free(openai->session_id);
+    free(openai->cache_ttl);
+    free(openai->reasoning_field);
+    string_array_free(openai->extra_headers);
+    free(openai);
 }
 
-/* Duplicate a NULL-terminated array of header strings. Returns NULL when
- * the input is NULL or empty (no headers); otherwise a heap-owned array
- * with each element xstrdup'd, terminated by a NULL slot. */
-static char **dup_headers(const char *const *src)
+static char **duplicate_headers(const char *const *headers)
 {
-    if (!src || !*src)
+    if (!headers || !*headers)
         return NULL;
-    size_t n = 0;
-    for (const char *const *p = src; *p; p++)
-        n++;
-    char **out = xmalloc(sizeof(*out) * (n + 1));
-    for (size_t i = 0; i < n; i++)
-        out[i] = xstrdup(src[i]);
-    out[n] = NULL;
-    return out;
+
+    size_t n_headers = 0;
+    while (headers[n_headers])
+        n_headers++;
+
+    char **copy = xmalloc(sizeof(*copy) * (n_headers + 1));
+    for (size_t i = 0; i < n_headers; i++)
+        copy[i] = xstrdup(headers[i]);
+    copy[n_headers] = NULL;
+    return copy;
 }
 
-/* Build the config key for one preset-resolved leaf. A config-defined
- * provider (preset->config_prefix = "providers.<name>") reads its own
- * subtree; the compiled-in shims (prefix NULL) read the shared global
- * "openai.*" namespace. Caller frees. */
-static char *preset_key(const char *prefix, const char *leaf)
+static char *make_config_key(const char *prefix, const char *leaf)
 {
     return xasprintf("%s.%s", prefix ? prefix : "openai", leaf);
 }
 
-/* Resolve <prefix>.cache into the three states openai_plan_cache needs.
- * An explicit on/off is the user overriding the per-model judgement, so
- * it has to survive the read — "auto", unset, and an unparseable value
- * all leave the preset's default, where that judgement still applies.
- * config_bool_or hides the difference (it answers with `def` for anything
- * it can't parse), so ask it twice: agreeing answers mean it parsed a
- * real boolean. */
-static enum openai_cache_mode resolve_cache_mode(const char *prefix, int preset_default)
+static const char *preset_config(const char *prefix, const char *leaf)
 {
-    char *k = preset_key(prefix, "cache");
-    int as_off = config_bool_or(k, 0), as_on = config_bool_or(k, 1);
-    free(k);
-    if (as_off == as_on)
-        return as_on ? OPENAI_CACHE_ON : OPENAI_CACHE_OFF;
-    return preset_default ? OPENAI_CACHE_AUTO : OPENAI_CACHE_OFF;
+    char *key = make_config_key(prefix, leaf);
+    const char *value = config_str(key);
+    free(key);
+    return value;
 }
 
-/* Resolve the reasoning round-trip field. The <prefix>.reasoning_roundtrip
- * setting (HAX_REASONING_ROUNDTRIP for the global namespace), when set,
- * overrides the preset default: "off"/"0"/empty disables; "on"/"1" selects the
- * canonical "reasoning_content"; any other value is used verbatim as the field
- * name (e.g. "reasoning" for routers that key on that). Returns heap-owned or
- * NULL (disabled). */
-static char *resolve_roundtrip_field(const char *prefix, const char *preset_default)
+static int preset_bool(const char *prefix, const char *leaf, int fallback)
 {
-    char *k = preset_key(prefix, "reasoning_roundtrip");
-    const char *env = config_str(k);
-    free(k);
-    const char *chosen = preset_default;
-    if (env) {
-        if (!*env || strcmp(env, "off") == 0 || strcmp(env, "0") == 0)
-            chosen = NULL;
-        else if (strcmp(env, "on") == 0 || strcmp(env, "1") == 0)
-            chosen = "reasoning_content";
+    char *key = make_config_key(prefix, leaf);
+    int value = config_bool_or(key, fallback);
+    free(key);
+    return value;
+}
+
+static enum openai_cache_mode resolve_cache_mode(const char *prefix, int automatic)
+{
+    char *key = make_config_key(prefix, "cache");
+
+    /* Different fallbacks distinguish a parsed boolean from auto, unset, or invalid input. */
+    int with_false_fallback = config_bool_or(key, 0);
+    int with_true_fallback = config_bool_or(key, 1);
+    free(key);
+
+    if (with_false_fallback == with_true_fallback)
+        return with_true_fallback ? OPENAI_CACHE_ON : OPENAI_CACHE_OFF;
+    return automatic ? OPENAI_CACHE_AUTO : OPENAI_CACHE_OFF;
+}
+
+static char *resolve_reasoning_field(const char *prefix, const char *preset_default)
+{
+    const char *configured = preset_config(prefix, "reasoning_roundtrip");
+    const char *field = preset_default;
+    if (configured) {
+        if (!*configured || strcmp(configured, "off") == 0 || strcmp(configured, "0") == 0)
+            field = NULL;
+        else if (strcmp(configured, "on") == 0 || strcmp(configured, "1") == 0)
+            field = "reasoning_content";
         else
-            chosen = env;
+            field = configured;
     }
-    return chosen ? xstrdup(chosen) : NULL;
+    return field ? xstrdup(field) : NULL;
 }
 
-/* ---------- runtime pickers (model / effort) ---------- */
-
-/* GET <base_url>/models and collect the `data[].id` slugs. The OpenAI
- * /v1/models shape is shared across the whole compat family — real OpenAI,
- * llama.cpp, ollama, OpenRouter — so this one parser serves every shim.
- * Anything past the id is a per-backend extension, delegated to the
- * preset's parse_model hook (see openai.h); real OpenAI's response carries
- * nothing else, so it leaves every entry at the unknown sentinels. */
-static int openai_list_models(struct provider *p, struct model_info **models, size_t *n, char **err,
-                              http_tick_cb tick, void *tick_user)
+static int openai_list_models(struct provider *provider, struct model_info **models,
+                              size_t *n_models, char **error, http_tick_cb tick, void *tick_user)
 {
-    struct openai *o = (struct openai *)p;
+    struct openai *openai = (struct openai *)provider;
     *models = NULL;
-    *n = 0;
-    char *url = xasprintf("%s/models", o->base_url);
-    char *auth = o->api_key ? xasprintf("Authorization: Bearer %s", o->api_key) : NULL;
-    const char *headers[] = {auth, NULL};
-    char *body = NULL;
+    *n_models = 0;
+
+    char *url = xasprintf("%s/models", openai->base_url);
+    char *authorization =
+        openai->api_key ? xasprintf("Authorization: Bearer %s", openai->api_key) : NULL;
+    const char *headers[] = {authorization, NULL};
+    char *response_body = NULL;
     long status = 0;
-    int rc = http_get(url, auth ? headers : NULL, MODEL_LIST_TIMEOUT_S, 0, tick, tick_user, &body,
-                      &status);
-    free(auth);
+    int result = http_get(url, authorization ? headers : NULL, MODEL_LIST_TIMEOUT_S, 0, tick,
+                          tick_user, &response_body, &status);
+    free(authorization);
     free(url);
-    if (rc != 0) {
-        *err = format_models_error(p->name, o->base_url, o->api_key != NULL, status);
-        free(body);
+
+    if (result != 0) {
+        *error =
+            format_models_error(provider->name, openai->base_url, openai->api_key != NULL, status);
+        free(response_body);
         return -1;
     }
-    json_t *root = json_loads(body, 0, NULL);
-    free(body);
+
+    json_t *root = json_loads(response_body, 0, NULL);
+    free(response_body);
+    const char *provider_name = provider->name ? provider->name : "provider";
     if (!root) {
-        *err = xasprintf("%s /models response is not valid JSON", p->name ? p->name : "provider");
+        *error = xasprintf("%s /models response is not valid JSON", provider_name);
         return -1;
     }
-    /* An empty "data" array — or ollama's "data": null when nothing is
-     * pulled — is a reachable server with a legitimately empty catalog:
-     * report zero models so the caller says "no models available". Any
-     * other non-array shape (missing field, object, a 200 error payload
-     * like {"message":...}) is a malformed catalog, not an empty one. */
+
     json_t *data = json_object_get(root, "data");
+    /* Ollama reports data:null when the server is reachable but has no models. */
     if (json_is_null(data) || (json_is_array(data) && json_array_size(data) == 0)) {
         json_decref(root);
         return 0;
     }
-    const char *name = p->name ? p->name : "provider";
     if (!json_is_array(data)) {
         json_decref(root);
-        *err = xasprintf("%s /models response has no model list", name);
+        *error = xasprintf("%s /models response has no model list", provider_name);
         return -1;
     }
-    size_t cnt = json_array_size(data);
-    struct model_info *out = xmalloc(cnt * sizeof(*out));
-    size_t k = 0;
-    for (size_t i = 0; i < cnt; i++) {
+
+    size_t n_entries = json_array_size(data);
+    struct model_info *available = xmalloc(n_entries * sizeof(*available));
+    size_t n_available = 0;
+    for (size_t i = 0; i < n_entries; i++) {
         json_t *entry = json_array_get(data, i);
-        json_t *id = json_object_get(entry, "id");
-        if (!json_is_string(id) || !*json_string_value(id))
+        const char *model_id = json_string_value(json_object_get(entry, "id"));
+        if (!model_id || !*model_id)
             continue;
-        model_info_init(&out[k]);
-        out[k].id = xstrdup(json_string_value(id));
-        if (o->parse_model)
-            o->parse_model(entry, &out[k]);
-        k++;
+
+        model_info_init(&available[n_available]);
+        available[n_available].id = xstrdup(model_id);
+        if (openai->parse_model)
+            openai->parse_model(entry, &available[n_available]);
+        n_available++;
     }
     json_decref(root);
-    /* Entries existed but none carried a usable id — malformed, not empty. */
-    if (k == 0) {
-        free(out);
-        *err = xasprintf("%s /models response contains no usable model ids", name);
+
+    if (n_available == 0) {
+        free(available);
+        *error = xasprintf("%s /models response contains no usable model ids", provider_name);
         return -1;
     }
-    *models = out;
-    *n = k;
+
+    *models = available;
+    *n_models = n_available;
     return 0;
 }
 
-static size_t openai_list_efforts(struct provider *p, const char *const **out)
+static size_t openai_list_efforts(struct provider *provider, const char *const **efforts)
 {
-    struct openai *o = (struct openai *)p;
-    if (!o->efforts || o->n_efforts == 0)
+    struct openai *openai = (struct openai *)provider;
+    if (!openai->efforts || openai->n_efforts == 0)
         return 0;
-    *out = o->efforts;
-    return o->n_efforts;
+    *efforts = openai->efforts;
+    return openai->n_efforts;
 }
 
-int openai_key_available(const char *api_key_env, const char *miss_reason, const char **reason)
+int openai_key_available(const char *api_key_env, const char *missing_reason, const char **reason)
 {
     const char *key = config_str("openai.api_key");
     if (key && *key)
         return 1;
     if (api_key_env) {
-        const char *e = getenv(api_key_env);
-        if (e && *e)
+        key = getenv(api_key_env);
+        if (key && *key)
             return 1;
     }
     if (reason)
-        *reason = miss_reason ? miss_reason : "no API key";
+        *reason = missing_reason ? missing_reason : "no API key";
     return 0;
 }
 
@@ -760,7 +402,7 @@ void openai_prepare_base_url_availability(const char *base_url, const char *api_
     out->available = 0;
     out->reason = "server not reachable";
     out->url = xasprintf("%s/models", base_url);
-    out->timeout_s = AVAIL_PROBE_TIMEOUT_S;
+    out->timeout_s = AVAILABILITY_TIMEOUT_S;
     if (api_key && *api_key) {
         out->headers = xcalloc(2, sizeof(*out->headers));
         out->headers[0] = xasprintf("Authorization: Bearer %s", api_key);
@@ -770,117 +412,93 @@ void openai_prepare_base_url_availability(const char *base_url, const char *api_
 static void openai_prepare_availability(const char *name, struct provider_availability *out)
 {
     (void)name;
-    /* Fixed endpoint (api.openai.com), so selectability is just "is a key
-     * configured" — HAX_OPENAI_BASE_URL no longer affects it (the preset
-     * locks the base URL and ignores the override). */
     const char *reason = NULL;
     out->available = openai_key_available("OPENAI_API_KEY", "OPENAI_API_KEY not set", &reason);
     out->reason = reason;
 }
 
-struct provider *openai_provider_new_preset(const struct openai_preset *preset)
+static char *resolve_base_url(const struct openai_preset *preset)
 {
-    struct openai_preset zero = {0};
-    if (!preset)
-        preset = &zero;
-
-    /* HAX_OPENAI_BASE_URL beats the preset default — unless the preset locks
-     * its base URL (openai, openrouter: fixed endpoints), in which case the
-     * shared override is ignored so a value left set for another backend can't
-     * redirect them. One of them must resolve to a non-empty value; if neither
-     * does, the calling preset is misconfigured (a programmer error inside
-     * hax) — fail loudly so we don't silently default to api.openai.com under
-     * a different preset's display name. */
-    char *base_key = preset_key(preset->config_prefix, "base_url");
-    const char *base_cfg = config_str(base_key);
-    free(base_key);
-    const char *base =
-        (!preset->lock_base_url && base_cfg && *base_cfg) ? base_cfg : preset->default_base_url;
-    if (!base || !*base) {
+    const char *configured =
+        preset->lock_base_url ? NULL : preset_config(preset->config_prefix, "base_url");
+    const char *base_url = configured && *configured ? configured : preset->default_base_url;
+    if (!base_url || !*base_url) {
         hax_err("internal: openai preset has no base URL");
         return NULL;
     }
-    char *base_url = dup_trim_trailing_slash(base);
+    return dup_trim_trailing_slash(base_url);
+}
 
-    /* Key resolution: <prefix>.api_key (HAX_OPENAI_API_KEY for the global
-     * namespace) → preset->api_key_env (e.g. OPENAI_API_KEY for the openai
-     * preset, OPENROUTER_API_KEY for openrouter, or a config-defined
-     * provider's declared key var). The openai-compatible preset deliberately
-     * leaves api_key_env unset so a globally configured OPENAI_API_KEY doesn't
-     * leak to a custom endpoint. */
-    char *key_key = preset_key(preset->config_prefix, "api_key");
-    const char *key = config_str(key_key);
-    free(key_key);
-    if ((!key || !*key) && preset->api_key_env)
-        key = getenv(preset->api_key_env);
+static const char *resolve_api_key(const struct openai_preset *preset)
+{
+    const char *api_key = preset_config(preset->config_prefix, "api_key");
+    if ((!api_key || !*api_key) && preset->api_key_env)
+        api_key = getenv(preset->api_key_env);
+    return api_key;
+}
 
-    /* Display name: a config-defined provider (config_prefix set) takes its
-     * banner from preset->display_name only — the already-resolved
-     * providers.<name>.display_name overlaid on its recipe — so a stray
-     * global HAX_PROVIDER_NAME can't rename it. The shared shims read the
-     * global provider_name override. */
+static const char *resolve_display_name(const struct openai_preset *preset)
+{
     const char *name = preset->config_prefix ? NULL : config_str("provider_name");
-    if (!name || !*name)
-        name = (preset->display_name && *preset->display_name) ? preset->display_name : "openai";
+    if (name && *name)
+        return name;
+    if (preset->display_name && *preset->display_name)
+        return preset->display_name;
+    return "openai";
+}
 
-    /* prompt_cache_key is an OpenAI-specific affinity hint for prefix-cache
-     * routing — but some local servers (notably vLLM) reject unknown JSON
-     * fields, hence the per-preset default. <prefix>.send_cache_key
-     * (HAX_OPENAI_SEND_CACHE_KEY globally) overrides it in either direction
-     * via the shared bool grammar (an explicit false/0/off must not read as
-     * "set → on"). */
-    char *cache_key_key = preset_key(preset->config_prefix, "send_cache_key");
-    int send_cache_key = config_bool_or(cache_key_key, preset->send_cache_key_default);
-    free(cache_key_key);
+struct provider *openai_provider_new_preset(const struct openai_preset *preset)
+{
+    const struct openai_preset empty = {0};
+    if (!preset)
+        preset = &empty;
 
-    struct openai *o = xcalloc(1, sizeof(*o));
-    o->base_url = base_url;
-    o->api_key = (key && *key) ? xstrdup(key) : NULL;
-    o->name_buf = xstrdup(name);
-    o->endpoint = xasprintf("%s/chat/completions", o->base_url);
-    o->send_cache_key = send_cache_key;
-    o->emit_progress = preset->emit_progress;
-    char *cost_key = preset_key(preset->config_prefix, "request_cost");
-    o->request_cost = config_bool_or(cost_key, preset->request_cost);
-    free(cost_key);
-    o->cache_mode = resolve_cache_mode(preset->config_prefix, preset->send_cache_control_default);
-    char *ttl_key = preset_key(preset->config_prefix, "cache_ttl");
-    const char *ttl = config_str(ttl_key);
-    o->cache_ttl = xstrdup(ttl ? ttl : "");
-    free(ttl_key);
-    o->length_hint = preset->length_hint;
-    o->roundtrip_reasoning_field =
-        resolve_roundtrip_field(preset->config_prefix, preset->roundtrip_reasoning_field);
-    o->reasoning_format = preset->reasoning_format;
-    o->efforts = preset->efforts;
-    o->n_efforts = preset->n_efforts;
-    o->parse_model = preset->parse_model;
-    o->extra_headers = dup_headers(preset->extra_headers);
-    char uuid[37];
-    gen_uuid_v4(uuid);
-    o->session_id = xstrdup(uuid);
-    o->base.name = o->name_buf;
-    /* Owned: a preset's catalog_id may be a config-tier string, which does not
-     * survive a mid-session write of config.json, while this is read on every
-     * cost lookup for the provider's whole life. */
-    o->catalog_buf = preset->catalog_id ? xstrdup(preset->catalog_id) : NULL;
-    o->base.catalog_id = o->catalog_buf;
-    o->base.stream = openai_stream;
-    o->base.list_models = openai_list_models;
-    o->base.list_efforts = openai_list_efforts;
-    o->base.destroy = openai_destroy;
-    return &o->base;
+    char *base_url = resolve_base_url(preset);
+    if (!base_url)
+        return NULL;
+
+    struct openai *openai = xcalloc(1, sizeof(*openai));
+    openai->base_url = base_url;
+    const char *api_key = resolve_api_key(preset);
+    openai->api_key = api_key && *api_key ? xstrdup(api_key) : NULL;
+    openai->name = xstrdup(resolve_display_name(preset));
+    openai->catalog_id = preset->catalog_id ? xstrdup(preset->catalog_id) : NULL;
+    openai->endpoint = xasprintf("%s/chat/completions", openai->base_url);
+
+    openai->send_cache_key =
+        preset_bool(preset->config_prefix, "send_cache_key", preset->send_cache_key_default);
+    openai->emit_progress = preset->emit_progress;
+    openai->request_cost = preset_bool(preset->config_prefix, "request_cost", preset->request_cost);
+    openai->cache_mode = resolve_cache_mode(preset->config_prefix, preset->cache_auto_default);
+    const char *cache_ttl = preset_config(preset->config_prefix, "cache_ttl");
+    openai->cache_ttl = xstrdup(cache_ttl ? cache_ttl : "");
+    openai->reasoning_field =
+        resolve_reasoning_field(preset->config_prefix, preset->reasoning_replay_field);
+    openai->reasoning_format = preset->reasoning_format;
+    openai->extra_headers = duplicate_headers(preset->extra_headers);
+
+    openai->length_hint = preset->length_hint;
+    openai->efforts = preset->efforts;
+    openai->n_efforts = preset->n_efforts;
+    openai->parse_model = preset->parse_model;
+
+    char session_id[37];
+    gen_uuid_v4(session_id);
+    openai->session_id = xstrdup(session_id);
+
+    openai->base.name = openai->name;
+    openai->base.catalog_id = openai->catalog_id;
+    openai->base.stream = openai_stream;
+    openai->base.list_models = openai_list_models;
+    openai->base.list_efforts = openai_list_efforts;
+    openai->base.destroy = openai_destroy;
+    return &openai->base;
 }
 
 struct provider *openai_provider_new(const char *name)
 {
     (void)name;
-    /* Real OpenAI: api.openai.com is fixed. HAX_OPENAI_BASE_URL is ignored
-     * (lock_base_url) rather than honored — a custom endpoint belongs on the
-     * dedicated "openai-compatible" preset, which keeps OpenAI's policies
-     * (OPENAI_API_KEY pickup, prompt_cache_key on) from reaching a third-party
-     * host. Ignoring rather than rejecting means a base URL left set for
-     * another backend doesn't block selecting openai. */
+    /* Lock the host so OPENAI_API_KEY and OpenAI-specific defaults cannot reach a custom URL. */
     struct openai_preset preset = {
         .display_name = "openai",
         .default_base_url = "https://api.openai.com/v1",
@@ -891,13 +509,10 @@ struct provider *openai_provider_new(const char *name)
         .efforts = OPENAI_EFFORT_LADDER,
         .n_efforts = OPENAI_EFFORT_LADDER_N,
     };
-    struct provider *p = openai_provider_new_preset(&preset);
-    if (p) {
-        /* /v1/models interleaves snapshots, fine-tunes, and aliases in no
-         * useful order — alphabetize the picker. */
-        p->sort_models = 1;
-    }
-    return p;
+    struct provider *provider = openai_provider_new_preset(&preset);
+    if (provider)
+        provider->sort_models = 1;
+    return provider;
 }
 
 const struct provider_factory PROVIDER_OPENAI = {

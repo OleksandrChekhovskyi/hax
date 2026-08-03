@@ -8,396 +8,380 @@
 #include "provider.h"
 #include "util.h"
 
-void openai_events_init(struct openai_events *s, stream_cb cb, void *user)
+void openai_events_init(struct openai_events *parser, stream_cb callback, void *callback_user)
 {
-    memset(s, 0, sizeof(*s));
-    s->cb = cb;
-    s->user = user;
-    s->pending_usage.input_tokens = -1;
-    s->pending_usage.output_tokens = -1;
-    s->pending_usage.cached_tokens = -1;
-    s->pending_usage.cache_write_tokens = -1;
-    s->pending_usage.cache_write_1h_tokens = -1;
-    s->pending_usage.cost = -1;
+    memset(parser, 0, sizeof(*parser));
+    parser->callback = callback;
+    parser->callback_user = callback_user;
+    parser->usage.input_tokens = -1;
+    parser->usage.output_tokens = -1;
+    parser->usage.cached_tokens = -1;
+    parser->usage.cache_write_tokens = -1;
+    parser->usage.cache_write_1h_tokens = -1;
+    parser->usage.cost = -1;
 }
 
-void openai_events_free(struct openai_events *s)
+void openai_events_free(struct openai_events *parser)
 {
-    for (size_t i = 0; i < s->n_tools; i++) {
-        free(s->tools[i].id);
-        free(s->tools[i].name);
-        buf_free(&s->tools[i].pending_args);
+    for (size_t i = 0; i < parser->n_tool_calls; i++) {
+        free(parser->tool_calls[i].id);
+        free(parser->tool_calls[i].name);
+        buf_free(&parser->tool_calls[i].arguments_before_start);
     }
-    free(s->tools);
-    s->tools = NULL;
-    s->n_tools = s->cap_tools = 0;
-    free(s->finish_reason);
-    s->finish_reason = NULL;
-    free(s->deferred_error);
-    s->deferred_error = NULL;
+    free(parser->tool_calls);
+    parser->tool_calls = NULL;
+    parser->n_tool_calls = parser->tool_call_capacity = 0;
+
+    free(parser->finish_reason);
+    parser->finish_reason = NULL;
+    free(parser->finish_error);
+    parser->finish_error = NULL;
 }
 
-static struct openai_tool_track *track_find(struct openai_events *s, int index)
+static struct openai_tool_call *find_tool_call(struct openai_events *parser, int index)
 {
-    for (size_t i = 0; i < s->n_tools; i++) {
-        if (s->tools[i].index == index)
-            return &s->tools[i];
+    for (size_t i = 0; i < parser->n_tool_calls; i++) {
+        if (parser->tool_calls[i].index == index)
+            return &parser->tool_calls[i];
     }
     return NULL;
 }
 
-static struct openai_tool_track *track_get_or_add(struct openai_events *s, int index)
+static struct openai_tool_call *get_tool_call(struct openai_events *parser, int index)
 {
-    struct openai_tool_track *t = track_find(s, index);
-    if (t)
-        return t;
-    if (s->n_tools == s->cap_tools) {
-        size_t cap = s->cap_tools ? s->cap_tools * 2 : 4;
-        s->tools = xrealloc(s->tools, cap * sizeof(*s->tools));
-        s->cap_tools = cap;
+    struct openai_tool_call *call = find_tool_call(parser, index);
+    if (call)
+        return call;
+
+    if (parser->n_tool_calls == parser->tool_call_capacity) {
+        size_t capacity = parser->tool_call_capacity ? parser->tool_call_capacity * 2 : 4;
+        parser->tool_calls = xrealloc(parser->tool_calls, capacity * sizeof(*parser->tool_calls));
+        parser->tool_call_capacity = capacity;
     }
-    t = &s->tools[s->n_tools++];
-    memset(t, 0, sizeof(*t));
-    t->index = index;
-    return t;
+
+    call = &parser->tool_calls[parser->n_tool_calls++];
+    memset(call, 0, sizeof(*call));
+    call->index = index;
+    return call;
 }
 
-static int emit(struct openai_events *s, const struct stream_event *ev)
+static void emit_event(struct openai_events *parser, const struct stream_event *event)
 {
-    return s->cb(ev, s->user);
+    parser->callback(event, parser->callback_user);
 }
 
-/* Emit EV_TOOL_CALL_START for a track once the name is known and we haven't
- * emitted yet. OpenAI typically delivers id + name on the first tool_call
- * delta, but some compat backends stagger them and some omit `id` entirely;
- * synthesize `call_<index>` in that case so the call still dispatches (the
- * id is just a round-trip token the server echoes back as tool_call_id). If
- * argument bytes arrived before the metadata, flush them as a single DELTA
- * right after START so the downstream turn layer sees the whole args string. */
-static void maybe_emit_start(struct openai_events *s, struct openai_tool_track *t)
+static void start_tool_call(struct openai_events *parser, struct openai_tool_call *call)
 {
-    if (t->start_emitted || !t->name)
+    if (call->started || !call->name)
         return;
-    if (!t->id)
-        t->id = xasprintf("call_%d", t->index);
-    struct stream_event ev = {
+
+    /* Some compatible servers omit ids; the id only needs to survive the result round trip. */
+    if (!call->id)
+        call->id = xasprintf("call_%d", call->index);
+
+    struct stream_event start = {
         .kind = EV_TOOL_CALL_START,
-        .u.tool_call_start = {.id = t->id, .name = t->name},
+        .u.tool_call_start = {.id = call->id, .name = call->name},
     };
-    emit(s, &ev);
-    t->start_emitted = 1;
-    if (t->pending_args.len > 0) {
-        struct stream_event dev = {
+    emit_event(parser, &start);
+    call->started = 1;
+
+    if (call->arguments_before_start.len > 0) {
+        struct stream_event arguments = {
             .kind = EV_TOOL_CALL_DELTA,
-            .u.tool_call_delta = {.id = t->id, .args_delta = t->pending_args.data},
+            .u.tool_call_delta =
+                {
+                    .id = call->id,
+                    .args_delta = call->arguments_before_start.data,
+                },
         };
-        emit(s, &dev);
-        buf_reset(&t->pending_args);
+        emit_event(parser, &arguments);
+        buf_reset(&call->arguments_before_start);
     }
 }
 
-static void handle_text_delta(struct openai_events *s, const char *text)
+static void handle_text_delta(struct openai_events *parser, const char *text)
 {
     if (!text || !*text)
         return;
-    struct stream_event ev = {
+
+    struct stream_event event = {
         .kind = EV_TEXT_DELTA,
         .u.text_delta = {.text = text},
     };
-    emit(s, &ev);
+    emit_event(parser, &event);
 }
 
-static void handle_tool_call_delta(struct openai_events *s, json_t *tc)
+static void handle_reasoning_delta(struct openai_events *parser, json_t *delta)
 {
-    /* `index` is required per OpenAI spec, but some compat servers omit it
-     * when streaming a single tool call. Default to 0 so we still dispatch
-     * the call (multi-parallel-without-index is pathological and rare). */
-    json_t *jindex = json_object_get(tc, "index");
-    int index = json_is_integer(jindex) ? (int)json_integer_value(jindex) : 0;
-    struct openai_tool_track *t = track_get_or_add(s, index);
+    const char *text = json_string_value(json_object_get(delta, "reasoning"));
+    if (!text)
+        text = json_string_value(json_object_get(delta, "reasoning_content"));
+    if (!text || !*text)
+        return;
 
-    const char *id = json_string_value(json_object_get(tc, "id"));
-    if (id && !t->id)
-        t->id = xstrdup(id);
+    struct stream_event event = {
+        .kind = EV_REASONING_DELTA,
+        .u.reasoning_delta = {.text = text},
+    };
+    emit_event(parser, &event);
+}
 
-    json_t *fn = json_object_get(tc, "function");
-    const char *name = fn ? json_string_value(json_object_get(fn, "name")) : NULL;
-    if (name && !t->name)
-        t->name = xstrdup(name);
+static void handle_tool_call_delta(struct openai_events *parser, json_t *delta)
+{
+    /* The specification requires index, but single-call compatible streams often omit it. */
+    json_t *index_value = json_object_get(delta, "index");
+    int index = json_is_integer(index_value) ? (int)json_integer_value(index_value) : 0;
+    struct openai_tool_call *call = get_tool_call(parser, index);
 
-    maybe_emit_start(s, t);
+    const char *id = json_string_value(json_object_get(delta, "id"));
+    if (id && !call->id)
+        call->id = xstrdup(id);
 
-    const char *args = fn ? json_string_value(json_object_get(fn, "arguments")) : NULL;
-    if (args && *args) {
-        if (t->start_emitted) {
-            struct stream_event ev = {
-                .kind = EV_TOOL_CALL_DELTA,
-                .u.tool_call_delta = {.id = t->id, .args_delta = args},
-            };
-            emit(s, &ev);
-        } else {
-            /* Metadata hasn't fully arrived yet — buffer for later. */
-            buf_append_str(&t->pending_args, args);
-        }
+    json_t *function = json_object_get(delta, "function");
+    const char *name = json_string_value(json_object_get(function, "name"));
+    if (name && !call->name)
+        call->name = xstrdup(name);
+
+    start_tool_call(parser, call);
+
+    const char *arguments = json_string_value(json_object_get(function, "arguments"));
+    if (!arguments || !*arguments)
+        return;
+    if (!call->started) {
+        buf_append_str(&call->arguments_before_start, arguments);
+        return;
     }
+
+    struct stream_event event = {
+        .kind = EV_TOOL_CALL_DELTA,
+        .u.tool_call_delta = {.id = call->id, .args_delta = arguments},
+    };
+    emit_event(parser, &event);
 }
 
-static void end_all_tool_calls(struct openai_events *s)
+static void finish_tool_calls(struct openai_events *parser)
 {
-    for (size_t i = 0; i < s->n_tools; i++) {
-        struct openai_tool_track *t = &s->tools[i];
-        if (!t->start_emitted || t->ended)
+    for (size_t i = 0; i < parser->n_tool_calls; i++) {
+        struct openai_tool_call *call = &parser->tool_calls[i];
+        if (!call->started || call->finished)
             continue;
-        struct stream_event ev = {
+
+        struct stream_event event = {
             .kind = EV_TOOL_CALL_END,
-            .u.tool_call_end = {.id = t->id},
+            .u.tool_call_end = {.id = call->id},
         };
-        emit(s, &ev);
-        t->ended = 1;
+        emit_event(parser, &event);
+        call->finished = 1;
     }
 }
 
-/* Capture usage from any chunk that carries it. With
- * stream_options.include_usage, OpenAI sends one trailing chunk with empty
- * `choices` and a populated `usage` just before [DONE]; we keep the values
- * around until the deferred EV_DONE fires. cached_tokens lives in
- * prompt_tokens_details — absent on most compat backends, hence the -1
- * "unknown" default. */
-static void capture_usage(struct openai_events *s, json_t *root)
+static void capture_usage(struct openai_events *parser, json_t *root)
 {
     json_t *usage = json_object_get(root, "usage");
     if (!json_is_object(usage))
         return;
 
-    json_t *v = json_object_get(usage, "prompt_tokens");
-    if (json_is_integer(v))
-        s->pending_usage.input_tokens = (long)json_integer_value(v);
-    v = json_object_get(usage, "completion_tokens");
-    if (json_is_integer(v))
-        s->pending_usage.output_tokens = (long)json_integer_value(v);
+    json_t *value = json_object_get(usage, "prompt_tokens");
+    if (json_is_integer(value))
+        parser->usage.input_tokens = (long)json_integer_value(value);
+
+    value = json_object_get(usage, "completion_tokens");
+    if (json_is_integer(value))
+        parser->usage.output_tokens = (long)json_integer_value(value);
 
     json_t *details = json_object_get(usage, "prompt_tokens_details");
     if (json_is_object(details)) {
-        v = json_object_get(details, "cached_tokens");
-        if (json_is_integer(v))
-            s->pending_usage.cached_tokens = (long)json_integer_value(v);
-        /* OpenRouter also reports the write side, billed at a premium
-         * (1.25x input for Anthropic, 2x at a 1h TTL) — leaving it folded
-         * into the uncached remainder would price it as the cheapest
-         * category instead of the dearest. */
-        v = json_object_get(details, "cache_write_tokens");
-        if (json_is_integer(v)) {
-            s->pending_usage.cache_write_tokens = (long)json_integer_value(v);
-            if (s->cache_write_1h)
-                s->pending_usage.cache_write_1h_tokens = s->pending_usage.cache_write_tokens;
+        value = json_object_get(details, "cached_tokens");
+        if (json_is_integer(value))
+            parser->usage.cached_tokens = (long)json_integer_value(value);
+
+        value = json_object_get(details, "cache_write_tokens");
+        if (json_is_integer(value)) {
+            parser->usage.cache_write_tokens = (long)json_integer_value(value);
+            /* The response does not identify the TTL; only the request does. */
+            if (parser->cache_write_1h)
+                parser->usage.cache_write_1h_tokens = parser->usage.cache_write_tokens;
         }
     }
 
-    /* OpenRouter convention: with `usage: {include: true}` in the request,
-     * the trailing usage chunk carries `cost` (USD). Harvested wherever it
-     * appears so compat backends following the same convention work too. */
-    v = json_object_get(usage, "cost");
-    if (json_is_number(v) && json_number_value(v) >= 0)
-        s->pending_usage.cost = json_number_value(v);
+    value = json_object_get(usage, "cost");
+    if (json_is_number(value) && json_number_value(value) >= 0)
+        parser->usage.cost = json_number_value(value);
 }
 
-/* llama.cpp's return_progress:true attaches a top-level `prompt_progress`
- * to each streamed chunk during prefill, alongside `choices`:
- *   "prompt_progress": {"total":N, "cache":N, "processed":N, "time_ms":N}
- * Emit EV_PROGRESS so the agent can surface "processing N%" on the
- * spinner. Gated by emit_progress so backends that don't speak this
- * extension never see synthesized events. `time_ms` is parsed by
- * llama-server but ignored here — the spinner shows percentage only. */
-static void capture_progress(struct openai_events *s, json_t *root)
+static void handle_progress(struct openai_events *parser, json_t *root)
 {
-    if (!s->emit_progress)
+    if (!parser->emit_progress)
         return;
-    json_t *pp = json_object_get(root, "prompt_progress");
-    if (!json_is_object(pp))
+
+    json_t *progress = json_object_get(root, "prompt_progress");
+    if (!json_is_object(progress))
         return;
-    struct stream_event ev = {
+
+    struct stream_event event = {
         .kind = EV_PROGRESS,
         .u.progress = {0},
     };
-    json_t *v = json_object_get(pp, "processed");
-    if (json_is_integer(v))
-        ev.u.progress.processed = (long)json_integer_value(v);
-    v = json_object_get(pp, "total");
-    if (json_is_integer(v))
-        ev.u.progress.total = (long)json_integer_value(v);
-    v = json_object_get(pp, "cache");
-    if (json_is_integer(v))
-        ev.u.progress.cache = (long)json_integer_value(v);
-    emit(s, &ev);
+    json_t *value = json_object_get(progress, "processed");
+    if (json_is_integer(value))
+        event.u.progress.processed = (long)json_integer_value(value);
+    value = json_object_get(progress, "total");
+    if (json_is_integer(value))
+        event.u.progress.total = (long)json_integer_value(value);
+    value = json_object_get(progress, "cache");
+    if (json_is_integer(value))
+        event.u.progress.cache = (long)json_integer_value(value);
+    emit_event(parser, &event);
 }
 
-/* Emit the terminal event the earlier finish_reason deferred: the
- * truncation error when one was recorded, the clean EV_DONE otherwise.
- * Either way pending_usage rides along — truncated responses bill like
- * complete ones. */
-static void emit_deferred_terminal(struct openai_events *s)
+static void emit_terminal_event(struct openai_events *parser)
 {
-    if (s->deferred_error) {
-        struct stream_event ev = {
+    if (parser->finish_error) {
+        struct stream_event event = {
             .kind = EV_ERROR,
-            .u.error = {.message = s->deferred_error, .http_status = 0, .usage = &s->pending_usage},
-        };
-        emit(s, &ev);
-        return;
-    }
-    struct stream_event ev = {
-        .kind = EV_DONE,
-        .u.done = {.stop_reason = s->finish_reason ? s->finish_reason : "stop",
-                   .usage = s->pending_usage},
-    };
-    emit(s, &ev);
-}
-
-/* finish_reason semantics:
- *   "stop" / "tool_calls" → EV_DONE (deferred; see below)
- *   "length" / "content_filter" → EV_ERROR (truncated). The agent
- *      preserves any text streamed before the truncation, tagged with
- *      [interrupted], so a "continue" follow-up turn carries it.
- * Everything else is treated as unknown and maps to EV_DONE to avoid hanging.
- *
- * The terminal event is deferred because under stream_options.include_usage
- * the usage chunk arrives one event AFTER finish_reason. We end tool calls
- * now (the response is logically complete) but hold off on EV_DONE — or the
- * truncation EV_ERROR, which must carry that usage too — until [DONE] or
- * the SSE transport closes, whichever sees the usage chunk first. */
-static void handle_finish_reason(struct openai_events *s, const char *reason)
-{
-    if (s->terminated || s->saw_finish)
-        return;
-
-    end_all_tool_calls(s);
-    s->saw_finish = 1;
-
-    if (reason && (strcmp(reason, "length") == 0 || strcmp(reason, "content_filter") == 0)) {
-        /* Append the preset's hint only for "length": it explains a context/
-         * output-cap truncation (the actionable ollama num_ctx case), which
-         * doesn't apply to a content_filter stop. */
-        s->deferred_error = (strcmp(reason, "length") == 0 && s->length_hint)
-                                ? xasprintf("response incomplete: length — %s", s->length_hint)
-                                : xasprintf("response incomplete: %s", reason);
-        return;
-    }
-
-    s->finish_reason = xstrdup(reason ? reason : "stop");
-}
-
-static void handle_done_sentinel(struct openai_events *s)
-{
-    if (s->terminated)
-        return;
-    end_all_tool_calls(s);
-    s->terminated = 1;
-    emit_deferred_terminal(s);
-}
-
-/* Some backends surface errors as `{"error":{"message":"...","code":...}}`
- * inside the SSE stream rather than via HTTP status. */
-static void handle_error_object(struct openai_events *s, json_t *err)
-{
-    if (s->terminated)
-        return;
-    s->terminated = 1;
-    const char *m = json_string_value(json_object_get(err, "message"));
-    struct stream_event ev = {
-        .kind = EV_ERROR,
-        .u.error = {.message = m ? m : "provider error",
+            .u.error =
+                {
+                    .message = parser->finish_error,
                     .http_status = 0,
-                    .usage = &s->pending_usage},
+                    .usage = &parser->usage,
+                },
+        };
+        emit_event(parser, &event);
+        return;
+    }
+
+    struct stream_event event = {
+        .kind = EV_DONE,
+        .u.done =
+            {
+                .stop_reason = parser->finish_reason ? parser->finish_reason : "stop",
+                .usage = parser->usage,
+            },
     };
-    emit(s, &ev);
+    emit_event(parser, &event);
 }
 
-void openai_events_feed(struct openai_events *s, const char *data)
+static void handle_finish_reason(struct openai_events *parser, const char *reason)
 {
-    if (!data || !*data)
+    if (parser->terminal_emitted || parser->finish_received)
         return;
-    if (strcmp(data, "[DONE]") == 0) {
-        handle_done_sentinel(s);
+
+    finish_tool_calls(parser);
+    parser->finish_received = 1;
+
+    int truncated =
+        reason && (strcmp(reason, "length") == 0 || strcmp(reason, "content_filter") == 0);
+    if (!truncated) {
+        parser->finish_reason = xstrdup(reason ? reason : "stop");
         return;
     }
 
-    json_error_t jerr;
-    json_t *root = json_loads(data, 0, &jerr);
-    if (!root)
+    if (strcmp(reason, "length") == 0 && parser->length_hint)
+        parser->finish_error = xasprintf("response incomplete: length — %s", parser->length_hint);
+    else
+        parser->finish_error = xasprintf("response incomplete: %s", reason);
+}
+
+static void handle_done(struct openai_events *parser)
+{
+    if (parser->terminal_emitted)
         return;
 
-    json_t *err = json_object_get(root, "error");
-    if (json_is_object(err)) {
-        handle_error_object(s, err);
-        json_decref(root);
-        return;
-    }
+    finish_tool_calls(parser);
+    parser->terminal_emitted = 1;
+    emit_terminal_event(parser);
+}
 
-    /* Trailing chunks with stream_options.include_usage carry an empty
-     * choices array plus the usage object — capture before the early-out. */
-    capture_usage(s, root);
-    /* Same goes for llama.cpp's mid-stream prefill progress chunks. */
-    capture_progress(s, root);
-
-    json_t *choices = json_object_get(root, "choices");
-    if (!json_is_array(choices) || json_array_size(choices) == 0) {
-        json_decref(root);
+static void handle_error(struct openai_events *parser, json_t *error)
+{
+    if (parser->terminal_emitted)
         return;
-    }
-    json_t *choice = json_array_get(choices, 0);
+
+    parser->terminal_emitted = 1;
+    const char *message = json_string_value(json_object_get(error, "message"));
+    struct stream_event event = {
+        .kind = EV_ERROR,
+        .u.error =
+            {
+                .message = message ? message : "provider error",
+                .http_status = 0,
+                .usage = &parser->usage,
+            },
+    };
+    emit_event(parser, &event);
+}
+
+static void handle_choice_delta(struct openai_events *parser, json_t *choice)
+{
     json_t *delta = json_object_get(choice, "delta");
-
     if (json_is_object(delta)) {
-        /* Reasoning deltas: OpenRouter normalizes to `reasoning`,
-         * llama.cpp/DeepSeek emit `reasoning_content` (kept as a compat
-         * alias by OpenRouter too). We surface both so the agent can
-         * flip the spinner to "thinking..." while CoT is streaming. */
-        const char *r = json_string_value(json_object_get(delta, "reasoning"));
-        if (!r)
-            r = json_string_value(json_object_get(delta, "reasoning_content"));
-        if (r && *r) {
-            struct stream_event ev = {
-                .kind = EV_REASONING_DELTA,
-                .u.reasoning_delta = {.text = r},
-            };
-            emit(s, &ev);
-        }
-
-        const char *text = json_string_value(json_object_get(delta, "content"));
-        handle_text_delta(s, text);
+        handle_reasoning_delta(parser, delta);
+        handle_text_delta(parser, json_string_value(json_object_get(delta, "content")));
 
         json_t *tool_calls = json_object_get(delta, "tool_calls");
         if (json_is_array(tool_calls)) {
-            size_t i, n = json_array_size(tool_calls);
-            for (i = 0; i < n; i++)
-                handle_tool_call_delta(s, json_array_get(tool_calls, i));
+            size_t n_tool_calls = json_array_size(tool_calls);
+            for (size_t i = 0; i < n_tool_calls; i++)
+                handle_tool_call_delta(parser, json_array_get(tool_calls, i));
         }
     }
 
-    json_t *finish = json_object_get(choice, "finish_reason");
-    if (json_is_string(finish))
-        handle_finish_reason(s, json_string_value(finish));
+    const char *finish_reason = json_string_value(json_object_get(choice, "finish_reason"));
+    if (finish_reason)
+        handle_finish_reason(parser, finish_reason);
+}
+
+void openai_events_feed(struct openai_events *parser, const char *data)
+{
+    if (parser->terminal_emitted || !data || !*data)
+        return;
+    if (strcmp(data, "[DONE]") == 0) {
+        handle_done(parser);
+        return;
+    }
+
+    json_t *root = json_loads(data, 0, NULL);
+    if (!root)
+        return;
+
+    json_t *error = json_object_get(root, "error");
+    if (json_is_object(error)) {
+        handle_error(parser, error);
+        json_decref(root);
+        return;
+    }
+
+    /* Usage and progress chunks may have no choices. */
+    capture_usage(parser, root);
+    handle_progress(parser, root);
+
+    json_t *choices = json_object_get(root, "choices");
+    if (json_is_array(choices) && json_array_size(choices) > 0)
+        handle_choice_delta(parser, json_array_get(choices, 0));
 
     json_decref(root);
 }
 
-void openai_events_finalize(struct openai_events *s)
+void openai_events_finalize(struct openai_events *parser)
 {
-    if (s->terminated)
+    if (parser->terminal_emitted)
         return;
-    s->terminated = 1;
-    /* Some backends close the SSE stream after finish_reason without ever
-     * sending [DONE] — emit the deferred terminal event now so the agent
-     * doesn't mistake a clean close for a truncated stream. */
-    if (s->saw_finish) {
-        emit_deferred_terminal(s);
+
+    parser->terminal_emitted = 1;
+    if (parser->finish_received) {
+        emit_terminal_event(parser);
         return;
     }
-    struct stream_event ev = {
+
+    struct stream_event event = {
         .kind = EV_ERROR,
-        .u.error = {.message = "stream ended before completion",
-                    .http_status = 0,
-                    .usage = &s->pending_usage},
+        .u.error =
+            {
+                .message = "stream ended before completion",
+                .http_status = 0,
+                .usage = &parser->usage,
+            },
     };
-    emit(s, &ev);
+    emit_event(parser, &event);
 }

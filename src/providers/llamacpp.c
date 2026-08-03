@@ -311,7 +311,7 @@ struct provider *llamacpp_provider_new(const char *name)
          * channel unless their prior reasoning is fed back. Round-trip it
          * as reasoning_content (the field llama-server ingests). Disable
          * with HAX_REASONING_ROUNDTRIP=off. */
-        .roundtrip_reasoning_field = "reasoning_content",
+        .reasoning_replay_field = "reasoning_content",
         /* If the server's context (-c / --ctx-size) is full, the reply
          * truncates to "length"; unlike ollama there's no per-request knob,
          * so the fix is a larger -c at launch. */

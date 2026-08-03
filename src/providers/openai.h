@@ -5,207 +5,63 @@
 #include <jansson.h>
 
 #include "provider.h"
+#include "providers/openai_messages.h"
 
-/* Real OpenAI Chat Completions: locked to https://api.openai.com/v1. Reads:
- *   HAX_OPENAI_API_KEY   — preferred; falls back to OPENAI_API_KEY
- *   HAX_PROVIDER_NAME    — optional display name (defaults to "openai")
- *
- * Rejects HAX_OPENAI_BASE_URL — for custom OpenAI-compatible endpoints, use
- * the openai-compatible preset (openai_compat.h) instead, which keeps
- * OPENAI_API_KEY and prompt_cache_key scoped to the real-OpenAI host.
- *
- * `name` is the provider_factory name, unused here (the real-OpenAI factory
- * serves exactly one provider). Returns NULL on failure (prints cause to
- * stderr). */
+/* Construct the api.openai.com provider. `name` is unused. */
 struct provider *openai_provider_new(const char *name);
 
-/* Reasoning-parameter wire format. Add a value and build_body() arm for new
- * shapes. Both forms are omitted when effort is unset.
- *   REASONING_FLAT:   `reasoning_effort: <effort>` (the OpenAI default)
- *   REASONING_NESTED: `reasoning: {enabled: true, effort: <effort>}`; "none"
- *                     sends `{enabled: false}` to disable. */
-enum reasoning_format {
-    REASONING_FLAT = 0,
-    REASONING_NESTED,
-};
-
-/* Parse "flat" / "nested" into the matching enum value. `fallback` is
- * returned when `s` is NULL/empty so callers can write
- *   .reasoning_format = reasoning_format_parse(config_str("openai...."), REASONING_FLAT)
- * without an extra NULL check. An unrecognized non-empty value also
- * falls back, with a one-line stderr warning so a typo doesn't pass
- * silently. */
-enum reasoning_format reasoning_format_parse(const char *s, enum reasoning_format fallback);
-
-/* Encode the reasoning-effort request field into `body` for `fmt` (see enum
- * reasoning_format for the wire shapes). A NULL/empty effort omits the field
- * entirely, leaving the provider's own default; otherwise the level is
- * requested, with "none" disabling. Exposed so the encoding can be unit-tested
- * without an HTTP round-trip. */
-void openai_apply_reasoning(json_t *body, enum reasoning_format fmt, const char *effort);
-
-/* Preset configuration consumed by openai_provider_new_preset(). All fields
- * are optional except `default_base_url` (or HAX_OPENAI_BASE_URL must be
- * set). Used by the thin shim providers (openai-compatible, llama.cpp,
- * openrouter, …) that all speak the same Chat Completions translation but
- * want different defaults, auth fallbacks, and request headers. */
+/* Configuration shared by providers using the Chat Completions protocol. */
 struct openai_preset {
-    /* Display name when HAX_PROVIDER_NAME is unset. NULL → "openai". */
-    const char *display_name;
-    /* Default base URL when HAX_OPENAI_BASE_URL is unset. NULL is allowed
-     * only when the preset requires HAX_OPENAI_BASE_URL (the constructor
-     * fails if neither resolves to a non-empty URL). */
-    const char *default_base_url;
-    /* Optional second env var consulted for the API key, after
-     * HAX_OPENAI_API_KEY. Each preset declares which global it picks up
-     * (OPENAI_API_KEY for openai, OPENROUTER_API_KEY for openrouter, …);
-     * unset for openai-compatible so a global OPENAI_API_KEY isn't
-     * forwarded to an unrelated third-party endpoint. NULL → none. */
-    const char *api_key_env;
-    /* Whether to send prompt_cache_key by default. 0 = off (local servers,
-     * generic compat backends), 1 = on (real OpenAI, OpenRouter, other
-     * hosted compat backends with prefix caching).
-     * HAX_OPENAI_SEND_CACHE_KEY=<anything> forces on. */
+    const char *display_name;     /* defaults to "openai" */
+    const char *default_base_url; /* required when base_url is locked or not configured */
+    const char *api_key_env;      /* fallback after the configured API key */
+    const char *config_prefix;    /* NULL uses the global openai.* namespace */
+    const char *catalog_id;       /* copied; NULL disables catalog metadata */
+    int lock_base_url;            /* ignore configured base_url */
+
     int send_cache_key_default;
-    /* Optional extra request headers, NULL-terminated array of
-     * "Name: value" strings. Copied at construction; the preset does not
-     * need to keep them alive afterwards. NULL → none. */
-    const char *const *extra_headers;
-    /* Wire format for reasoning parameters — see enum reasoning_format
-     * above. Zero-initialized presets get REASONING_FLAT, the common
-     * case for OpenAI Chat Completions and OpenAI-compatible backends. */
-    enum reasoning_format reasoning_format;
-    /* Ask the backend for mid-stream prefill progress. Sends
-     * `return_progress: true` in the request body (a llama.cpp
-     * extension) and tells the events parser to surface the resulting
-     * top-level `prompt_progress` chunks as EV_PROGRESS. Other backends
-     * ignore the unknown request field; leave this 0 unless the
-     * preset's target server is known to emit prompt_progress. */
-    int emit_progress;
-    /* Ask the backend for usage accounting. Sends `usage: {include: true}`
-     * in the request body (an OpenRouter extension) so the trailing usage
-     * chunk carries the response's `cost` in USD. Gated per preset: the
-     * field name is generic enough that an unknown-field-rejecting backend
-     * (vLLM) could 400 on it. */
-    int request_cost;
-    /* Emit prompt cache_control breakpoints by default. On for routers
-     * fronting Anthropic models, which cache only what a request marks;
-     * off elsewhere, where backends cache on their own and a strict one
-     * could 400 on the unknown content field. <prefix>.cache overrides. */
-    int send_cache_control_default;
-    /* When non-NULL, captured reasoning text (ITEM_REASONING.reasoning_text)
-     * is round-tripped back to the server under this field name on each
-     * assistant message — "reasoning_content" for llama.cpp. Required for
-     * interleaved-thinking models (Qwen3): without their prior reasoning in
-     * the prompt they degrade and leak tool calls into the reasoning
-     * channel. NULL = don't send (real OpenAI exposes no such field).
-     * HAX_REASONING_ROUNDTRIP overrides this per-run (off / on / <field>). */
-    const char *roundtrip_reasoning_field;
-    /* Reasoning-effort wire values this backend accepts, surfaced by the
-     * provider's list_efforts for the /effort picker. Borrowed (typically
-     * OPENAI_EFFORT_LADDER, a static array) — not copied, so it must outlive
-     * the provider. NULL / 0 means "no categorical effort" (local servers
-     * whose thinking is a token budget): the picker then skips the step. */
+    int cache_auto_default; /* AUTO when set, otherwise OFF */
+    int emit_progress;      /* request and parse llama.cpp prompt_progress */
+    int request_cost;       /* request OpenRouter usage cost */
+    enum openai_reasoning_format reasoning_format;
+    const char *reasoning_replay_field; /* copied; NULL disables replay */
+    const char *const *extra_headers;   /* NULL-terminated; copied */
+
+    /* Borrowed for the provider lifetime. NULL/0 disables the effort picker. */
     const char *const *efforts;
     size_t n_efforts;
-    /* Appended to the "response incomplete: length" error when a stream is
-     * truncated with finish_reason "length", to make a backend-specific
-     * cause actionable. The canonical case is a local server whose context
-     * window is too small for the prompt (ollama's num_ctx default, a small
-     * llama.cpp -c): the generic "length" tells the user nothing they can
-     * act on. Borrowed static string; NULL = no hint (hosted backends, where
-     * "length" means the model's own max-output cap). */
-    const char *length_hint;
-    /* The base URL is fixed to default_base_url: ignore the shared
-     * HAX_OPENAI_BASE_URL override (which belongs to the bring-your-own-URL
-     * presets — openai-compatible, llama.cpp, ollama). Set by openai and
-     * openrouter, whose endpoints aren't configurable, so a base URL left set
-     * for another backend can't redirect them (or block their selection). */
-    int lock_base_url;
-    /* Config namespace for the settings this constructor resolves itself
-     * (base_url, api_key, send_cache_key, reasoning_roundtrip). NULL — the
-     * compiled-in shims — reads the shared global "openai.*" keys (and the
-     * global provider_name for the banner): the env/ad-hoc single-provider
-     * lane. A config-defined provider sets this to "providers.<name>", so each
-     * named provider reads its own self-contained subtree and a stray
-     * HAX_OPENAI_* in the environment can't bleed into it. */
-    const char *config_prefix;
-    /* Model-catalog identity, copied to provider->catalog_id (see
-     * provider.h). Borrowed — a static literal or a config-tier string
-     * outliving the provider. NULL = no catalog presence. */
-    const char *catalog_id;
-    /* Optional per-entry metadata parser for the /model picker. The shared
-     * list_models reads `id` out of each `data[]` element (all the base
-     * OpenAI shape carries) and then hands the element here so a preset can
-     * fill the rest of `out` from its own extensions — OpenRouter's
-     * pricing/limits/modalities block being the one that exists today.
-     * `out` arrives model_info_init'd with `id` already set; the hook only
-     * adds what it can read and must leave unknown fields at their
-     * sentinels. NULL = no extensions, ids only. */
+    const char *length_hint; /* borrowed for the provider lifetime */
+
+    /* `out` is initialized and already owns the entry's id. */
     void (*parse_model)(const json_t *entry, struct model_info *out);
 };
 
-/* The shared "OpenAI-style" reasoning-effort ladder, low→high:
- * none, minimal, low, medium, high, xhigh. OpenAI, OpenRouter, and the
- * generic compat preset all accept this vocabulary (OpenRouter maps an
- * unsupported level to the nearest one; real OpenAI may reject a level a
- * given model doesn't support). Presets point .efforts at this. */
+/* Shared effort vocabulary, ordered from cheapest to most expensive. */
 extern const char *const OPENAI_EFFORT_LADDER[];
 extern const size_t OPENAI_EFFORT_LADDER_N;
 
-/* Build an OpenAI-compatible provider configured by `preset`. NULL preset
- * is equivalent to a zero-initialized one (which will fail unless
- * HAX_OPENAI_BASE_URL is set). Returns NULL on failure. */
+/* Preset strings need only remain valid during construction unless marked borrowed above. */
 struct provider *openai_provider_new_preset(const struct openai_preset *preset);
 
-/* Shared provider-picker preparation helpers. The key check is immediate;
- * the base-URL helper builds an owned GET <base_url>/models request for the
- * picker to execute after all config reads have finished. */
-int openai_key_available(const char *api_key_env, const char *miss_reason, const char **reason);
+int openai_key_available(const char *api_key_env, const char *missing_reason, const char **reason);
+
+/* Populate an owned GET <base_url>/models availability request. */
 void openai_prepare_base_url_availability(const char *base_url, const char *api_key,
                                           struct provider_availability *out);
 
-/* Translate flat conversation items into the Chat Completions `messages`
- * array. Exposed (rather than static) so the round-trip serialization —
- * notably reasoning_content attachment — can be unit-tested without an HTTP
- * round-trip. `reasoning_field` NULL means don't emit reasoning. When it is
- * set, a reasoning item's text is replayed only if its provenance stamp
- * matches `cur_provider`/`cur_model` (both must be non-NULL and equal), so a
- * mid-conversation provider or model switch never feeds stale CoT to the new
- * backend. `image_input` is the context flag: 1/-1 emit tool-result image
- * parts as a follow-up user message with image_url blocks (the `tool` role
- * only takes strings), 0 degrades them to text placeholders. Returns a new
- * jansson array the caller must json_decref. */
-json_t *openai_build_messages(const char *system_prompt, const struct item *items, size_t n,
-                              const char *reasoning_field, const char *cur_provider,
-                              const char *cur_model, int image_input);
-
-/* Mark `messages` (in place) with prompt cache breakpoints — the system
- * prompt and the conversation tail. `ttl` is "5m" or "1h"; anything else
- * leaves the provider default (5m). Exposed for unit tests: a breakpoint
- * on the wrong message costs money silently rather than failing. */
-void openai_apply_cache_breakpoints(json_t *messages, const char *ttl);
-
-/* What the user asked for, before the per-model judgement. AUTO is the
- * preset's own default and defers to whether caching pays on this model;
- * ON is an explicit <prefix>.cache=on, which the config contract says
- * forces the breakpoints out regardless. */
 enum openai_cache_mode {
     OPENAI_CACHE_OFF,
     OPENAI_CACHE_AUTO,
     OPENAI_CACHE_ON,
 };
 
-/* Prompt-caching decisions for one request, derived from `mode` and
- * `model`'s rates (see openai_plan_cache). Exposed for unit tests: each
- * is a silent money bug when wrong — breakpoints sent to a backend that
- * charges a surcharge for them, or writes priced at a 1h premium that
- * never applied. */
 struct openai_cache_plan {
     int send_breakpoints;
     int writes_bill_1h;
 };
-struct openai_cache_plan openai_plan_cache(const struct provider *p, const char *model,
+
+/* Derive request and billing behavior from the selected model's cache rates. */
+struct openai_cache_plan openai_plan_cache(const struct provider *provider, const char *model,
                                            enum openai_cache_mode mode, const char *ttl);
 
 extern const struct provider_factory PROVIDER_OPENAI;

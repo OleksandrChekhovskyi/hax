@@ -50,9 +50,9 @@ test_sources = [
     'providers/test_config_provider.c',
     'providers/test_llamacpp.c',
     'providers/test_model_info.c',
+    'providers/test_openai.c',
     'providers/test_openai_events.c',
     'providers/test_openai_messages.c',
-    'providers/test_openai_reasoning.c',
     'providers/test_registry.c',
 
     'render/test_ctrl_strip.c',

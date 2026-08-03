@@ -9,6 +9,7 @@
 #include "util.h"
 #include "providers/anthropic.h"
 #include "providers/openai.h"
+#include "providers/openai_messages.h"
 
 /* A built-in recipe: the default field values for a well-known provider,
  * overridable key-by-key by a matching providers.<name> config block. The
@@ -90,15 +91,9 @@ static const char *resolve(const char *name, const char *leaf, const char *recip
     return v ? v : recipe_val;
 }
 
-/* Catalog identity for provider->catalog_id. An explicit
- * providers.<name>.catalog_id wins, read verbatim so "" is an explicit
- * opt-out; a recipe's curated value (or curated absence) is final; a pure
- * config-defined provider defaults to its own name, so a block named after
- * a models.dev id (deepseek, groq, …) gets cost/limit metadata with zero
- * extra keys — also the shape a config generator would emit. The result is
- * borrowed for the duration of construction only — a config-tier string does
- * not outlive a mid-session write of the file — so a provider that keeps it
- * copies it (see catalog_buf in openai.c / anthropic.c). */
+/* An explicit catalog_id wins, including an empty opt-out. Recipes keep their curated identity
+ * or absence; other providers default to their configured name. The result is borrowed only until
+ * construction returns because a config write may invalidate it. */
 static const char *resolve_catalog_id(const char *name, const struct provider_recipe *r)
 {
     char *k = xasprintf("providers.%s.catalog_id", name);
@@ -190,7 +185,7 @@ static struct provider *config_provider_new(const char *name)
         .default_base_url = base,
         .api_key_env = resolve(name, "api_key_env", r ? r->api_key_env : NULL),
         .send_cache_key_default = r ? r->send_cache_key : 0,
-        .reasoning_format = reasoning_format_parse(rf, REASONING_FLAT),
+        .reasoning_format = openai_reasoning_format_parse(rf, OPENAI_REASONING_FLAT),
         .efforts = with_efforts ? OPENAI_EFFORT_LADDER : NULL,
         .n_efforts = with_efforts ? OPENAI_EFFORT_LADDER_N : 0,
         .length_hint = r ? r->length_hint : NULL,
