@@ -26,6 +26,7 @@
 ## Build
 
 Requires a C compiler, `libcurl`, `jansson`, `meson`, `ninja`, and `pkg-config`.
+Run `scripts/install_deps.sh` to install them, or install by hand:
 
 ```sh
 # Debian/Ubuntu
@@ -47,14 +48,15 @@ meson compile -C build
 The examples below use `hax` as if it is on `PATH`; after a source build, use `./build/hax`
 or install it with `meson install -C build`.
 
-For development, `make lint` additionally needs `clang-format`, `clang-tidy`, and Python 3:
+For development, `make lint` additionally needs `clang-format` and `clang-tidy`
+(`scripts/install_deps.sh lint` covers these too):
 
 ```sh
 # Debian/Ubuntu
-sudo apt install clang-format clang-tidy python3
+sudo apt install clang-format clang-tidy
 
 # Arch Linux
-sudo pacman -S --needed clang python
+sudo pacman -S --needed clang
 
 # macOS (Homebrew)
 brew install llvm

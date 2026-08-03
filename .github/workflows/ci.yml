@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [master, devel]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    # --init gives container jobs a reaping PID 1: the task tests assert that
+    # killed orphans disappear, but GitHub runs steps beside a pause process
+    # that never reaps, so the zombies would outlive the assertions.
+    container:
+      image: ${{ matrix.container }}
+      options: --init
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # `lint` runs where the toolchain pins the range .clang-tidy promises
+        # to stay clean for ("Debian stable's LLVM through current"): Debian
+        # stable is the old end, Arch the new end, and macOS covers Homebrew's
+        # LLVM. Alpine's musl LLVM adds a fourth variant with no coverage
+        # benefit, so it does not lint.
+        include:
+          - name: ubuntu
+            os: ubuntu-26.04
+          - name: ubuntu-asan
+            os: ubuntu-26.04
+            build_dir: build-asan
+          - name: ubuntu-tsan
+            os: ubuntu-26.04
+            build_dir: build-tsan
+          - name: ubuntu-arm64
+            os: ubuntu-26.04-arm
+          - name: debian
+            os: ubuntu-latest
+            container: debian:stable
+            lint: true
+          - name: arch
+            os: ubuntu-latest
+            container: archlinux:latest
+            lint: true
+          - name: alpine
+            os: ubuntu-latest
+            container: alpine:latest
+          - name: macos
+            os: macos-latest
+            lint: true
+    env:
+      BUILD_DIR: ${{ matrix.build_dir || 'build' }}
+      # Marks the job's system as disposable: install_deps.sh may sync-and-upgrade
+      # it wholesale. True only for the container entries, never for runner hosts.
+      HAX_DEPS_UPGRADE: ${{ matrix.container && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install dependencies
+        run: scripts/install_deps.sh ${{ matrix.lint && 'lint' || '' }}
+      - name: Build and test
+        run: make tests
+      - name: Lint
+        if: ${{ matrix.lint }}
+        run: make lint
