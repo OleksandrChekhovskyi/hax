@@ -1,19 +1,16 @@
 /* SPDX-License-Identifier: MIT */
 #include <jansson.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "harness.h"
 #include "providers/codex.h"
 
-static const char *type_of(json_t *o)
+static const char *item_type(json_t *item)
 {
-    return json_string_value(json_object_get(o, "type"));
+    return json_string_value(json_object_get(item, "type"));
 }
 
-/* The flat item kinds map to Responses input entries: messages carry a
- * content array, function_call/_output are flat, boundaries are dropped. */
-static void test_codex_basic_shapes(void)
+static void test_input_item_shapes(void)
 {
     struct item items[] = {
         {.kind = ITEM_USER_MESSAGE, .text = "hi"},
@@ -25,93 +22,96 @@ static void test_codex_basic_shapes(void)
         {.kind = ITEM_TURN_BOUNDARY},
         {.kind = ITEM_TOOL_RESULT, .call_id = "c1", .output = "out"},
     };
-    json_t *in = codex_build_input_items(items, 5, "codex", "o3", -1);
-    EXPECT(json_array_size(in) == 4); /* boundary dropped */
+    json_t *input = codex_build_input_items(items, 5, "codex", "o3", -1);
+    EXPECT(json_array_size(input) == 4);
 
-    json_t *u = json_array_get(in, 0);
-    EXPECT_STR_EQ(type_of(u), "message");
-    EXPECT_STR_EQ(json_string_value(json_object_get(u, "role")), "user");
-    json_t *uc = json_array_get(json_object_get(u, "content"), 0);
-    EXPECT_STR_EQ(type_of(uc), "input_text");
-    EXPECT_STR_EQ(json_string_value(json_object_get(uc, "text")), "hi");
+    json_t *user_message = json_array_get(input, 0);
+    EXPECT_STR_EQ(item_type(user_message), "message");
+    EXPECT_STR_EQ(json_string_value(json_object_get(user_message, "role")), "user");
+    json_t *user_content = json_array_get(json_object_get(user_message, "content"), 0);
+    EXPECT_STR_EQ(item_type(user_content), "input_text");
+    EXPECT_STR_EQ(json_string_value(json_object_get(user_content, "text")), "hi");
 
-    json_t *a = json_array_get(in, 1);
-    EXPECT_STR_EQ(json_string_value(json_object_get(a, "role")), "assistant");
-    EXPECT_STR_EQ(type_of(json_array_get(json_object_get(a, "content"), 0)), "output_text");
+    json_t *assistant_message = json_array_get(input, 1);
+    EXPECT_STR_EQ(json_string_value(json_object_get(assistant_message, "role")), "assistant");
+    json_t *assistant_content = json_array_get(json_object_get(assistant_message, "content"), 0);
+    EXPECT_STR_EQ(item_type(assistant_content), "output_text");
 
-    json_t *fc = json_array_get(in, 2);
-    EXPECT_STR_EQ(type_of(fc), "function_call");
-    EXPECT_STR_EQ(json_string_value(json_object_get(fc, "call_id")), "c1");
+    json_t *tool_call = json_array_get(input, 2);
+    EXPECT_STR_EQ(item_type(tool_call), "function_call");
+    EXPECT_STR_EQ(json_string_value(json_object_get(tool_call, "call_id")), "c1");
 
-    json_t *fo = json_array_get(in, 3);
-    EXPECT_STR_EQ(type_of(fo), "function_call_output");
-    /* Plain (imageless) result: output is a string. */
-    EXPECT(json_is_string(json_object_get(fo, "output")));
-    EXPECT_STR_EQ(json_string_value(json_object_get(fo, "output")), "out");
-    json_decref(in);
+    json_t *tool_result = json_array_get(input, 3);
+    EXPECT_STR_EQ(item_type(tool_result), "function_call_output");
+    EXPECT(json_is_string(json_object_get(tool_result, "output")));
+    EXPECT_STR_EQ(json_string_value(json_object_get(tool_result, "output")), "out");
+    json_decref(input);
 }
 
-/* A tool_result with an image: output becomes an array of content items —
- * input_text for the note, input_image (base64 data URL) for the image, or
- * an input_text placeholder when the model has no image input. */
-static void test_codex_tool_result_image(void)
+static void test_tool_result_image(void)
 {
-    struct item_image imgs[] = {{.mime = "image/png", .data_b64 = "QUJD", .width = 4, .height = 2}};
-    struct item items[] = {{.kind = ITEM_TOOL_RESULT,
-                            .call_id = "c9",
-                            .output = "note",
-                            .images = imgs,
-                            .n_images = 1}};
+    struct item_image images[] = {
+        {.mime = "image/png", .data_b64 = "QUJD", .width = 4, .height = 2},
+    };
+    struct item items[] = {
+        {.kind = ITEM_TOOL_RESULT,
+         .call_id = "c9",
+         .output = "note",
+         .images = images,
+         .n_images = 1},
+    };
 
-    json_t *in = codex_build_input_items(items, 1, "codex", "o3", 1);
-    json_t *out = json_object_get(json_array_get(in, 0), "output");
-    EXPECT(json_is_array(out));
-    EXPECT_STR_EQ(type_of(json_array_get(out, 0)), "input_text");
-    json_t *img = json_array_get(out, 1);
-    EXPECT_STR_EQ(type_of(img), "input_image");
-    EXPECT_STR_EQ(json_string_value(json_object_get(img, "image_url")),
+    json_t *input = codex_build_input_items(items, 1, "codex", "o3", 1);
+    json_t *output = json_object_get(json_array_get(input, 0), "output");
+    EXPECT(json_is_array(output));
+    EXPECT_STR_EQ(item_type(json_array_get(output, 0)), "input_text");
+    json_t *image = json_array_get(output, 1);
+    EXPECT_STR_EQ(item_type(image), "input_image");
+    EXPECT_STR_EQ(json_string_value(json_object_get(image, "image_url")),
                   "data:image/png;base64,QUJD");
-    json_decref(in);
+    json_decref(input);
 
-    /* image_input == 0: the image becomes a text placeholder. */
-    in = codex_build_input_items(items, 1, "codex", "o3", 0);
-    out = json_object_get(json_array_get(in, 0), "output");
-    json_t *ph = json_array_get(out, 1);
-    EXPECT_STR_EQ(type_of(ph), "input_text");
-    EXPECT(strstr(json_string_value(json_object_get(ph, "text")), "[image:") != NULL);
-    json_decref(in);
+    input = codex_build_input_items(items, 1, "codex", "o3", 0);
+    output = json_object_get(json_array_get(input, 0), "output");
+    json_t *placeholder = json_array_get(output, 1);
+    EXPECT_STR_EQ(item_type(placeholder), "input_text");
+    EXPECT(strstr(json_string_value(json_object_get(placeholder, "text")), "[image:") != NULL);
+    json_decref(input);
 }
 
-/* Encrypted reasoning blobs replay only when their provenance stamp matches
- * the request's provider+model — a switch must not feed the backend CoT it
- * never signed. */
-static void test_codex_reasoning_stamp(void)
+static void test_reasoning_provenance(void)
 {
     struct item items[] = {
         {.kind = ITEM_REASONING,
-         .reasoning_json = "{\"type\":\"reasoning\",\"id\":\"r1\"}",
+         .reasoning_json =
+             "{\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"abc==\"}",
          .provider = "codex",
          .model = "o3"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "done"},
     };
-    /* Matching stamp: the blob replays ahead of the assistant message. */
-    json_t *in = codex_build_input_items(items, 2, "codex", "o3", -1);
-    EXPECT(json_array_size(in) == 2);
-    EXPECT_STR_EQ(type_of(json_array_get(in, 0)), "reasoning");
-    json_decref(in);
 
-    /* Model switched (o3 -> o4): the stale blob is dropped, leaving only the
-     * assistant message. */
-    in = codex_build_input_items(items, 2, "codex", "o4", -1);
-    EXPECT(json_array_size(in) == 1);
-    EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(in, 0), "role")), "assistant");
-    json_decref(in);
+    json_t *input = codex_build_input_items(items, 2, "codex", "o3", -1);
+    EXPECT(json_array_size(input) == 2);
+    EXPECT_STR_EQ(item_type(json_array_get(input, 0)), "reasoning");
+    json_decref(input);
+
+    input = codex_build_input_items(items, 2, "codex", "o4", -1);
+    EXPECT(json_array_size(input) == 1);
+    EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(input, 0), "role")),
+                  "assistant");
+    json_decref(input);
+
+    input = codex_build_input_items(items, 2, "openai", "o3", -1);
+    EXPECT(json_array_size(input) == 1);
+    EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(input, 0), "role")),
+                  "assistant");
+    json_decref(input);
 }
 
 int main(void)
 {
-    test_codex_basic_shapes();
-    test_codex_tool_result_image();
-    test_codex_reasoning_stamp();
+    test_input_item_shapes();
+    test_tool_result_image();
+    test_reasoning_provenance();
     T_REPORT();
 }

@@ -7,331 +7,306 @@
 
 #include "util.h"
 
-void codex_events_init(struct codex_events *s, stream_cb cb, void *user)
+struct codex_tool_call {
+    char *item_id;
+    char *call_id;
+};
+
+static void init_usage(struct stream_usage *usage)
 {
-    memset(s, 0, sizeof(*s));
-    s->cb = cb;
-    s->user = user;
+    *usage = (struct stream_usage){
+        .input_tokens = -1,
+        .output_tokens = -1,
+        .cached_tokens = -1,
+        .cache_write_tokens = -1,
+        .cache_write_1h_tokens = -1,
+        .cost = -1,
+    };
 }
 
-void codex_events_free(struct codex_events *s)
+void codex_events_init(struct codex_events *events, stream_cb callback, void *callback_user)
 {
-    for (size_t i = 0; i < s->n_tools; i++) {
-        free(s->tools[i].item_id);
-        free(s->tools[i].call_id);
-        free(s->tools[i].name);
+    memset(events, 0, sizeof(*events));
+    events->callback = callback;
+    events->callback_user = callback_user;
+}
+
+void codex_events_free(struct codex_events *events)
+{
+    for (size_t i = 0; i < events->tool_call_count; i++) {
+        free(events->tool_calls[i].item_id);
+        free(events->tool_calls[i].call_id);
     }
-    free(s->tools);
-    s->tools = NULL;
-    s->n_tools = s->cap_tools = 0;
+    free(events->tool_calls);
+    events->tool_calls = NULL;
+    events->tool_call_count = 0;
+    events->tool_call_capacity = 0;
 }
 
-static struct codex_tool_track *track_find(struct codex_events *s, const char *item_id)
+static void emit_event(struct codex_events *events, const struct stream_event *event)
+{
+    events->callback(event, events->callback_user);
+}
+
+static struct codex_tool_call *find_tool_call(struct codex_events *events, const char *item_id)
 {
     if (!item_id)
         return NULL;
-    for (size_t i = 0; i < s->n_tools; i++) {
-        if (s->tools[i].item_id && strcmp(s->tools[i].item_id, item_id) == 0)
-            return &s->tools[i];
+
+    for (size_t i = 0; i < events->tool_call_count; i++) {
+        if (strcmp(events->tool_calls[i].item_id, item_id) == 0)
+            return &events->tool_calls[i];
     }
     return NULL;
 }
 
-static struct codex_tool_track *track_add(struct codex_events *s, const char *item_id,
-                                          const char *call_id, const char *name)
+static void add_tool_call(struct codex_events *events, const char *item_id, const char *call_id)
 {
-    if (s->n_tools == s->cap_tools) {
-        size_t cap = s->cap_tools ? s->cap_tools * 2 : 4;
-        s->tools = xrealloc(s->tools, cap * sizeof(*s->tools));
-        s->cap_tools = cap;
+    if (events->tool_call_count == events->tool_call_capacity) {
+        size_t capacity = events->tool_call_capacity ? events->tool_call_capacity * 2 : 4;
+        events->tool_calls = xrealloc(events->tool_calls, capacity * sizeof(*events->tool_calls));
+        events->tool_call_capacity = capacity;
     }
-    struct codex_tool_track *t = &s->tools[s->n_tools++];
-    t->item_id = xstrdup(item_id);
-    t->call_id = xstrdup(call_id);
-    t->name = xstrdup(name);
-    return t;
+
+    struct codex_tool_call *tool_call = &events->tool_calls[events->tool_call_count++];
+    tool_call->item_id = xstrdup(item_id);
+    tool_call->call_id = xstrdup(call_id);
 }
 
-static int emit(struct codex_events *s, const struct stream_event *ev)
-{
-    return s->cb(ev, s->user);
-}
-
-static void handle_output_item_added(struct codex_events *s, json_t *root)
+static void handle_output_item_added(struct codex_events *events, json_t *root)
 {
     json_t *item = json_object_get(root, "item");
-    if (!item)
+    const char *type = json_string_value(json_object_get(item, "type"));
+    if (!type || strcmp(type, "function_call") != 0)
         return;
+
+    const char *item_id = json_string_value(json_object_get(item, "id"));
+    const char *call_id = json_string_value(json_object_get(item, "call_id"));
+    const char *name = json_string_value(json_object_get(item, "name"));
+    if (!item_id || !call_id || !name)
+        return;
+
+    add_tool_call(events, item_id, call_id);
+    struct stream_event event = {
+        .kind = EV_TOOL_CALL_START,
+        .u.tool_call_start = {.id = call_id, .name = name},
+    };
+    emit_event(events, &event);
+}
+
+static void handle_tool_call_done(struct codex_events *events, json_t *item)
+{
+    const char *item_id = json_string_value(json_object_get(item, "id"));
+    struct codex_tool_call *tool_call = find_tool_call(events, item_id);
+    if (!tool_call)
+        return;
+
+    struct stream_event event = {
+        .kind = EV_TOOL_CALL_END,
+        .u.tool_call_end = {.id = tool_call->call_id},
+    };
+    emit_event(events, &event);
+}
+
+static void handle_reasoning_item_done(struct codex_events *events, json_t *item)
+{
+    json_t *encrypted_content = json_object_get(item, "encrypted_content");
+    if (!encrypted_content || json_is_null(encrypted_content))
+        return;
+
+    /* Output item IDs and unknown output fields are not valid when replaying a reasoning item as
+     * Responses API input, so copy only the accepted input fields. */
+    json_t *input_item = json_object();
+    json_object_set_new(input_item, "type", json_string("reasoning"));
+    json_t *summary = json_object_get(item, "summary");
+    if (summary)
+        json_object_set(input_item, "summary", summary);
+    else
+        json_object_set_new(input_item, "summary", json_array());
+    json_object_set(input_item, "encrypted_content", encrypted_content);
+
+    char *json = json_dumps(input_item, JSON_COMPACT);
+    json_decref(input_item);
+    if (!json)
+        return;
+
+    struct stream_event event = {
+        .kind = EV_REASONING_ITEM,
+        .u.reasoning_item = {.json = json},
+    };
+    emit_event(events, &event);
+    free(json);
+}
+
+static void handle_output_item_done(struct codex_events *events, json_t *root)
+{
+    json_t *item = json_object_get(root, "item");
     const char *type = json_string_value(json_object_get(item, "type"));
     if (!type)
         return;
 
-    if (strcmp(type, "function_call") == 0) {
-        const char *item_id = json_string_value(json_object_get(item, "id"));
-        const char *call_id = json_string_value(json_object_get(item, "call_id"));
-        const char *name = json_string_value(json_object_get(item, "name"));
-        if (!item_id || !call_id || !name)
-            return;
-        track_add(s, item_id, call_id, name);
-
-        struct stream_event ev = {
-            .kind = EV_TOOL_CALL_START,
-            .u.tool_call_start = {.id = call_id, .name = name},
-        };
-        emit(s, &ev);
-    }
-    /* "message" items need no start event; text deltas imply open. */
+    if (strcmp(type, "function_call") == 0)
+        handle_tool_call_done(events, item);
+    else if (strcmp(type, "reasoning") == 0)
+        handle_reasoning_item_done(events, item);
 }
 
-static void handle_output_item_done(struct codex_events *s, json_t *root)
-{
-    json_t *item = json_object_get(root, "item");
-    if (!item)
-        return;
-    const char *type = json_string_value(json_object_get(item, "type"));
-    if (!type)
-        return;
-
-    if (strcmp(type, "function_call") == 0) {
-        const char *item_id = json_string_value(json_object_get(item, "id"));
-        struct codex_tool_track *t = track_find(s, item_id);
-        if (!t)
-            return;
-        struct stream_event ev = {
-            .kind = EV_TOOL_CALL_END,
-            .u.tool_call_end = {.id = t->call_id},
-        };
-        emit(s, &ev);
-        return;
-    }
-
-    if (strcmp(type, "reasoning") == 0) {
-        /* Skip if encrypted_content is missing or null — without it the
-         * item is useless for round-trip (we never see the plaintext),
-         * and sending bare summary back would be noise. Shouldn't happen
-         * when we ask for it via `include`, but the server may emit
-         * empty reasoning items in some edge cases. */
-        json_t *enc = json_object_get(item, "encrypted_content");
-        if (!enc || json_is_null(enc))
-            return;
-
-        /* Whitelist the fields valid as Responses API *input* items.
-         * Matches codex-rs's serde annotations on ResponseItem::Reasoning:
-         * `id` is skip_serializing (it identifies the *output* item, not
-         * an input one), `content` is skipped when it doesn't carry
-         * reasoning_text (always our case — we ask for encrypted_content
-         * instead). Whitelisting also future-proofs us against new output
-         * fields the server may add: anything we don't know about stays
-         * out of the next request. */
-        json_t *clean = json_object();
-        json_object_set_new(clean, "type", json_string("reasoning"));
-        json_t *summary = json_object_get(item, "summary");
-        if (summary)
-            json_object_set(clean, "summary", summary);
-        else
-            json_object_set_new(clean, "summary", json_array());
-        json_object_set(clean, "encrypted_content", enc);
-
-        char *json = json_dumps(clean, JSON_COMPACT);
-        json_decref(clean);
-        if (!json)
-            return;
-        struct stream_event ev = {
-            .kind = EV_REASONING_ITEM,
-            .u.reasoning_item = {.json = json},
-        };
-        emit(s, &ev);
-        free(json);
-    }
-}
-
-static void handle_text_delta(struct codex_events *s, json_t *root)
+static void handle_text_delta(struct codex_events *events, json_t *root)
 {
     const char *delta = json_string_value(json_object_get(root, "delta"));
     if (!delta)
         return;
-    struct stream_event ev = {
+
+    struct stream_event event = {
         .kind = EV_TEXT_DELTA,
         .u.text_delta = {.text = delta},
     };
-    emit(s, &ev);
+    emit_event(events, &event);
 }
 
-static void handle_args_delta(struct codex_events *s, json_t *root)
+static void handle_reasoning_delta(struct codex_events *events, json_t *root)
+{
+    const char *delta = json_string_value(json_object_get(root, "delta"));
+    if (!delta || !*delta)
+        return;
+
+    struct stream_event event = {
+        .kind = EV_REASONING_DELTA,
+        .u.reasoning_delta = {.text = delta},
+    };
+    emit_event(events, &event);
+}
+
+static void handle_tool_call_delta(struct codex_events *events, json_t *root)
 {
     const char *item_id = json_string_value(json_object_get(root, "item_id"));
     const char *delta = json_string_value(json_object_get(root, "delta"));
     if (!item_id || !delta)
         return;
-    struct codex_tool_track *t = track_find(s, item_id);
-    if (!t)
+
+    struct codex_tool_call *tool_call = find_tool_call(events, item_id);
+    if (!tool_call)
         return;
-    struct stream_event ev = {
+
+    struct stream_event event = {
         .kind = EV_TOOL_CALL_DELTA,
-        .u.tool_call_delta = {.id = t->call_id, .args_delta = delta},
+        .u.tool_call_delta = {.id = tool_call->call_id, .args_delta = delta},
     };
-    emit(s, &ev);
+    emit_event(events, &event);
 }
 
-static void parse_usage(json_t *root, struct stream_usage *out);
-
-static void handle_failed(struct codex_events *s, json_t *root)
+/* Codex reports usage on terminal events under response.usage. A missing cached-token field is
+ * unknown rather than a known cache miss. */
+static void parse_usage(json_t *root, struct stream_usage *usage)
 {
-    if (s->terminated)
+    init_usage(usage);
+
+    json_t *response = root ? json_object_get(root, "response") : NULL;
+    json_t *response_usage = json_object_get(response, "usage");
+    if (!json_is_object(response_usage))
         return;
-    s->terminated = 1;
-    const char *msg = "response.failed";
-    json_t *resp = json_object_get(root, "response");
-    if (resp) {
-        json_t *err = json_object_get(resp, "error");
-        if (err) {
-            const char *m = json_string_value(json_object_get(err, "message"));
-            if (m)
-                msg = m;
-        }
-    }
-    struct stream_usage u;
-    parse_usage(root, &u);
-    struct stream_event ev = {
+
+    json_t *value = json_object_get(response_usage, "input_tokens");
+    if (json_is_integer(value))
+        usage->input_tokens = (long)json_integer_value(value);
+
+    value = json_object_get(response_usage, "output_tokens");
+    if (json_is_integer(value))
+        usage->output_tokens = (long)json_integer_value(value);
+
+    json_t *details = json_object_get(response_usage, "input_tokens_details");
+    value = json_object_get(details, "cached_tokens");
+    if (json_is_integer(value))
+        usage->cached_tokens = (long)json_integer_value(value);
+}
+
+static void emit_terminal_error(struct codex_events *events, const char *message, json_t *root)
+{
+    if (events->terminal_emitted)
+        return;
+
+    events->terminal_emitted = 1;
+    struct stream_usage usage;
+    parse_usage(root, &usage);
+    struct stream_event event = {
         .kind = EV_ERROR,
-        .u.error = {.message = msg, .http_status = 0, .usage = &u},
+        .u.error = {.message = message, .http_status = 0, .usage = &usage},
     };
-    emit(s, &ev);
+    emit_event(events, &event);
 }
 
-/* response.incomplete fires when the backend truncates (hit max_output_tokens,
- * content filter, etc.). Surface as an error so the agent discards the partial
- * turn instead of committing it to history — but keep the usage the event
- * carries: a truncated response bills like a complete one. */
-static void handle_incomplete(struct codex_events *s, json_t *root)
+static void handle_failed(struct codex_events *events, json_t *root)
 {
-    if (s->terminated)
-        return;
-    s->terminated = 1;
-    const char *reason = NULL;
-    json_t *resp = json_object_get(root, "response");
-    json_t *details = resp ? json_object_get(resp, "incomplete_details") : NULL;
-    if (details)
-        reason = json_string_value(json_object_get(details, "reason"));
-    char *msg = xasprintf("response incomplete: %s", reason ? reason : "unknown");
-    struct stream_usage u;
-    parse_usage(root, &u);
-    struct stream_event ev = {
-        .kind = EV_ERROR,
-        .u.error = {.message = msg, .http_status = 0, .usage = &u},
-    };
-    emit(s, &ev);
-    free(msg);
+    json_t *response = json_object_get(root, "response");
+    json_t *error = json_object_get(response, "error");
+    const char *message = json_string_value(json_object_get(error, "message"));
+    emit_terminal_error(events, message ? message : "response.failed", root);
 }
 
-/* Codex carries usage on the final response.completed event (and on
- * response.incomplete / response.failed) under response.usage. cached_tokens
- * lives in input_tokens_details — when absent we leave it at -1 ("unknown"),
- * which is distinct from 0 ("known to be no cache hit"). */
-static void parse_usage(json_t *root, struct stream_usage *out)
+static void handle_incomplete(struct codex_events *events, json_t *root)
 {
-    out->input_tokens = -1;
-    out->output_tokens = -1;
-    out->cached_tokens = -1;
-    out->cache_write_tokens = -1;
-    out->cache_write_1h_tokens = -1;
-    out->cost = -1;
-
-    json_t *resp = json_object_get(root, "response");
-    json_t *usage = resp ? json_object_get(resp, "usage") : NULL;
-    if (!json_is_object(usage))
-        return;
-
-    json_t *v = json_object_get(usage, "input_tokens");
-    if (json_is_integer(v))
-        out->input_tokens = (long)json_integer_value(v);
-    v = json_object_get(usage, "output_tokens");
-    if (json_is_integer(v))
-        out->output_tokens = (long)json_integer_value(v);
-
-    json_t *details = json_object_get(usage, "input_tokens_details");
-    if (json_is_object(details)) {
-        v = json_object_get(details, "cached_tokens");
-        if (json_is_integer(v))
-            out->cached_tokens = (long)json_integer_value(v);
-    }
+    json_t *response = json_object_get(root, "response");
+    json_t *details = json_object_get(response, "incomplete_details");
+    const char *reason = json_string_value(json_object_get(details, "reason"));
+    char *message = xasprintf("response incomplete: %s", reason ? reason : "unknown");
+    emit_terminal_error(events, message, root);
+    free(message);
 }
 
-static void handle_completed(struct codex_events *s, json_t *root)
+static void handle_completed(struct codex_events *events, json_t *root)
 {
-    if (s->terminated)
+    if (events->terminal_emitted)
         return;
-    s->terminated = 1;
-    struct stream_event ev = {
+
+    events->terminal_emitted = 1;
+    struct stream_event event = {
         .kind = EV_DONE,
         .u.done = {.stop_reason = "completed"},
     };
-    if (root)
-        parse_usage(root, &ev.u.done.usage);
-    else
-        ev.u.done.usage = (struct stream_usage){-1, -1, -1, -1, -1, -1};
-    emit(s, &ev);
+    parse_usage(root, &event.u.done.usage);
+    emit_event(events, &event);
 }
 
-void codex_events_feed(struct codex_events *s, const char *data)
+void codex_events_feed(struct codex_events *events, const char *data)
 {
     if (!data || !*data)
         return;
     if (strcmp(data, "[DONE]") == 0) {
-        handle_completed(s, NULL);
+        handle_completed(events, NULL);
         return;
     }
 
-    json_error_t err;
-    json_t *root = json_loads(data, 0, &err);
+    json_t *root = json_loads(data, 0, NULL);
     if (!root)
-        return; /* skip unparseable */
+        return;
 
     const char *type = json_string_value(json_object_get(root, "type"));
-    if (!type) {
-        json_decref(root);
-        return;
-    }
+    if (!type)
+        goto out;
 
     if (strcmp(type, "response.output_item.added") == 0)
-        handle_output_item_added(s, root);
+        handle_output_item_added(events, root);
     else if (strcmp(type, "response.output_item.done") == 0)
-        handle_output_item_done(s, root);
+        handle_output_item_done(events, root);
     else if (strcmp(type, "response.output_text.delta") == 0)
-        handle_text_delta(s, root);
+        handle_text_delta(events, root);
     else if (strcmp(type, "response.reasoning_summary_text.delta") == 0 ||
-             strcmp(type, "response.reasoning_text.delta") == 0) {
-        /* Visible reasoning is retained for display alongside the final opaque round-trip item.
-         * Empty deltas carry neither display content nor a useful activity signal. */
-        const char *delta = json_string_value(json_object_get(root, "delta"));
-        if (delta && *delta) {
-            struct stream_event ev = {
-                .kind = EV_REASONING_DELTA,
-                .u.reasoning_delta = {.text = delta},
-            };
-            emit(s, &ev);
-        }
-    } else if (strcmp(type, "response.function_call_arguments.delta") == 0)
-        handle_args_delta(s, root);
+             strcmp(type, "response.reasoning_text.delta") == 0)
+        handle_reasoning_delta(events, root);
+    else if (strcmp(type, "response.function_call_arguments.delta") == 0)
+        handle_tool_call_delta(events, root);
     else if (strcmp(type, "response.completed") == 0 || strcmp(type, "response.done") == 0)
-        handle_completed(s, root);
+        handle_completed(events, root);
     else if (strcmp(type, "response.incomplete") == 0)
-        handle_incomplete(s, root);
+        handle_incomplete(events, root);
     else if (strcmp(type, "response.failed") == 0)
-        handle_failed(s, root);
-    /* all other event types are ignored for v1 */
+        handle_failed(events, root);
 
+out:
     json_decref(root);
 }
 
-void codex_events_finalize(struct codex_events *s)
+void codex_events_finalize(struct codex_events *events)
 {
-    if (s->terminated)
-        return;
-    s->terminated = 1;
-    struct stream_event ev = {
-        .kind = EV_ERROR,
-        .u.error = {.message = "stream ended before completion", .http_status = 0},
-    };
-    emit(s, &ev);
+    emit_terminal_error(events, "stream ended before completion", NULL);
 }

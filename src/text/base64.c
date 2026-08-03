@@ -2,6 +2,7 @@
 #include "text/base64.h"
 
 #include <stdint.h>
+#include <stdlib.h>
 
 #include "util.h"
 
@@ -36,4 +37,74 @@ char *base64_encode(const void *data, size_t len, size_t *out_len)
     if (out_len)
         *out_len = o;
     return buf;
+}
+
+static int base64url_value(unsigned char byte)
+{
+    if (byte >= 'A' && byte <= 'Z')
+        return byte - 'A';
+    if (byte >= 'a' && byte <= 'z')
+        return byte - 'a' + 26;
+    if (byte >= '0' && byte <= '9')
+        return byte - '0' + 52;
+    if (byte == '-')
+        return 62;
+    if (byte == '_')
+        return 63;
+    return -1;
+}
+
+unsigned char *base64url_decode(const char *encoded, size_t encoded_len, size_t *out_len)
+{
+    size_t payload_len = encoded_len;
+    while (payload_len > 0 && encoded[payload_len - 1] == '=')
+        payload_len--;
+
+    size_t padding = encoded_len - payload_len;
+    size_t remainder = payload_len % 4;
+    if (padding > 2 || remainder == 1 ||
+        (padding > 0 && (encoded_len % 4 != 0 || padding != 4 - remainder)))
+        return NULL;
+
+    size_t decoded_len = payload_len / 4 * 3 + (remainder ? remainder - 1 : 0);
+    unsigned char *decoded = xmalloc(decoded_len + 1);
+    size_t input_offset = 0;
+    size_t output_offset = 0;
+
+    while (input_offset + 4 <= payload_len) {
+        int values[4];
+        for (size_t i = 0; i < 4; i++) {
+            values[i] = base64url_value((unsigned char)encoded[input_offset + i]);
+            if (values[i] < 0)
+                goto malformed;
+        }
+        decoded[output_offset++] = (unsigned char)((values[0] << 2) | (values[1] >> 4));
+        decoded[output_offset++] = (unsigned char)((values[1] << 4) | (values[2] >> 2));
+        decoded[output_offset++] = (unsigned char)((values[2] << 6) | values[3]);
+        input_offset += 4;
+    }
+
+    if (remainder > 0) {
+        int first = base64url_value((unsigned char)encoded[input_offset]);
+        int second = base64url_value((unsigned char)encoded[input_offset + 1]);
+        if (first < 0 || second < 0 || (remainder == 2 && (second & 0x0f) != 0))
+            goto malformed;
+        decoded[output_offset++] = (unsigned char)((first << 2) | (second >> 4));
+
+        if (remainder == 3) {
+            int third = base64url_value((unsigned char)encoded[input_offset + 2]);
+            if (third < 0 || (third & 0x03) != 0)
+                goto malformed;
+            decoded[output_offset++] = (unsigned char)((second << 4) | (third >> 2));
+        }
+    }
+
+    decoded[output_offset] = '\0';
+    if (out_len)
+        *out_len = output_offset;
+    return decoded;
+
+malformed:
+    free(decoded);
+    return NULL;
 }

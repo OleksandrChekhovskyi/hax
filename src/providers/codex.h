@@ -6,38 +6,25 @@
 
 #include "provider.h"
 
-/* Reads ~/.codex/auth.json (tokens.access_token + tokens.account_id).
- * Returns NULL on failure (prints cause to stderr). */
+/* Create a provider from ~/.codex/auth.json, or report an error and return NULL. */
 struct provider *codex_provider_new(const char *name);
 
-/* Diagnostic for a failed codex model-catalog fetch, keyed by HTTP status
- * (0 = never reached). Exposed for unit tests. Heap-owned; caller frees. */
-char *codex_models_error(long status);
+/* Return an allocated diagnostic for a failed model-catalog request. A zero status means that no
+ * HTTP response was received. */
+char *codex_model_catalog_error(long http_status);
 
-/* Fill `out` from one entry of the Codex model catalog: served context
- * window, image input, and the catalog's one-line description. `out` must
- * be model_info_init'd with `id` already set; unreported fields keep their
- * unknown sentinels. Pure — exposed for unit tests. */
-void codex_parse_model(const json_t *entry, struct model_info *out);
+/* Read one catalog entry into an initialized model_info. Newly reported pointer fields are owned by
+ * the model. */
+void codex_parse_model(const json_t *entry, struct model_info *model);
 
-/* Whether the catalog marks this entry `visibility: "hide"` — an internal
- * model the /model picker should not offer. Exposed for unit tests. */
-int codex_model_hidden(const json_t *entry);
+int codex_model_is_hidden(const json_t *entry);
 
-/* Translate the entry's supported_reasoning_levels into the effort values
- * the API accepts for it — a UI ladder in the catalog, so this drops a level
- * the wire rejects and adds one it takes but never lists (see the
- * definition). Called by codex_parse_model; separate for unit tests. */
-void codex_parse_efforts(const json_t *entry, struct effort_set *out);
+/* Read the wire-compatible reasoning levels reported by one Codex catalog entry. */
+void codex_parse_model_efforts(const json_t *entry, struct effort_set *efforts);
 
-/* Translate flat conversation items into the Responses API `input` array.
- * Exposed for unit testing the round-trip without an HTTP call: user/
- * assistant messages, function_call / function_call_output, reasoning-blob
- * replay (gated on the provenance stamp matching provider/model), and
- * tool-result image parts (input_image data URLs, or input_text
- * placeholders when image_input is 0). Returns a new jansson array; caller
- * json_decref. */
-json_t *codex_build_input_items(const struct item *items, size_t n, const char *provider,
+/* Return a new Responses API input array for the flat conversation items. Opaque reasoning is
+ * included only when its provider and model match the request. */
+json_t *codex_build_input_items(const struct item *items, size_t n_items, const char *provider,
                                 const char *model, int image_input);
 
 extern const struct provider_factory PROVIDER_CODEX;

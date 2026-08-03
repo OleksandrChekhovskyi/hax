@@ -164,98 +164,81 @@ static int efforts_are(const struct effort_set *s, const char *const *want)
 
 /* ---------------- codex ---------------- */
 
-static void test_codex_serves_context_window(void)
+static void test_codex_model_capabilities(void)
 {
-    /* context_window is what requests actually get; max_context_window is the
-     * ceiling. They differ, and the context-% display uses the former — so
-     * the picker must too, or the two contradict each other. */
     WITH_ENTRY("{\"slug\":\"gpt-5.4\",\"context_window\":272000,"
                "\"max_context_window\":1000000,"
                "\"input_modalities\":[\"text\",\"image\"],"
                "\"description\":\"Strong model for everyday coding.\","
                "\"visibility\":\"list\"}",
-               codex_parse_model, m);
-    EXPECT(m.context == 272000);
-    EXPECT(m.image_input == PROVIDER_CAP_YES);
-    EXPECT_STR_EQ(m.description, "Strong model for everyday coding.");
-    EXPECT(!codex_model_hidden(m_j));
-    json_decref(m_j);
-    free(m.description);
+               codex_parse_model, model);
+    EXPECT(model.context == 272000);
+    EXPECT(model.image_input == PROVIDER_CAP_YES);
+    EXPECT_STR_EQ(model.description, "Strong model for everyday coding.");
+    EXPECT(!codex_model_is_hidden(model_j));
+    json_decref(model_j);
+    free(model.description);
 }
 
 static void test_codex_context_fallback(void)
 {
-    WITH_ENTRY("{\"slug\":\"x\",\"max_context_window\":400000}", codex_parse_model, m);
-    EXPECT(m.context == 400000);
-    json_decref(m_j);
+    WITH_ENTRY("{\"slug\":\"x\",\"max_context_window\":400000}", codex_parse_model, model);
+    EXPECT(model.context == 400000);
+    json_decref(model_j);
 }
 
-static void test_codex_hidden(void)
+static void test_codex_hidden_models(void)
 {
-    /* The internal approval-review model: present in the catalog, never a
-     * choice a user should be offered. */
-    json_t *j = parse("{\"slug\":\"codex-auto-review\",\"visibility\":\"hide\"}");
-    EXPECT(codex_model_hidden(j));
-    json_decref(j);
+    json_t *hidden = parse("{\"slug\":\"codex-auto-review\",\"visibility\":\"hide\"}");
+    EXPECT(codex_model_is_hidden(hidden));
+    json_decref(hidden);
 
-    /* No visibility field at all is not hidden. */
-    json_t *k = parse("{\"slug\":\"x\"}");
-    EXPECT(!codex_model_hidden(k));
-    json_decref(k);
+    json_t *visible = parse("{\"slug\":\"x\"}");
+    EXPECT(!codex_model_is_hidden(visible));
+    json_decref(visible);
 }
 
-/* The catalog's ladder is the official UI's, not the wire's: it carries
- * "ultra", which /responses rejects, and omits "none", which every codex
- * model accepts. This is the case that keeps both corrections honest. */
-static void test_codex_efforts_ui_ladder_to_wire(void)
+static void test_codex_effort_ladder_normalized(void)
 {
-    struct effort_set s = {0};
-    json_t *j = parse("{\"slug\":\"gpt-5.6-sol\",\"supported_reasoning_levels\":["
-                      "{\"effort\":\"low\",\"description\":\"Fast responses\"},"
-                      "{\"effort\":\"medium\",\"description\":\"Balances speed\"},"
-                      "{\"effort\":\"high\",\"description\":\"Greater depth\"},"
-                      "{\"effort\":\"xhigh\",\"description\":\"Extra high\"},"
-                      "{\"effort\":\"max\",\"description\":\"Maximum depth\"},"
-                      "{\"effort\":\"ultra\",\"description\":\"With delegation\"}]}");
-    codex_parse_efforts(j, &s);
-    static const char *const want[] = {"none", "low", "medium", "high", "xhigh", "max", NULL};
-    EXPECT(efforts_are(&s, want));
-    EXPECT(!effort_set_has(&s, "ultra"));
-    EXPECT(!effort_set_has(&s, "minimal")); /* refused by every codex model */
-    json_decref(j);
+    struct effort_set efforts = {0};
+    json_t *entry = parse("{\"slug\":\"gpt-5.6-sol\",\"supported_reasoning_levels\":["
+                          "{\"effort\":\"low\",\"description\":\"Fast responses\"},"
+                          "{\"effort\":\"medium\",\"description\":\"Balances speed\"},"
+                          "{\"effort\":\"high\",\"description\":\"Greater depth\"},"
+                          "{\"effort\":\"xhigh\",\"description\":\"Extra high\"},"
+                          "{\"effort\":\"max\",\"description\":\"Maximum depth\"},"
+                          "{\"effort\":\"ultra\",\"description\":\"With delegation\"}]}");
+    codex_parse_model_efforts(entry, &efforts);
+    static const char *const expected[] = {"none", "low", "medium", "high", "xhigh", "max", NULL};
+    EXPECT(efforts_are(&efforts, expected));
+    EXPECT(!effort_set_has(&efforts, "ultra"));
+    EXPECT(!effort_set_has(&efforts, "minimal"));
+    json_decref(entry);
 }
 
-static void test_codex_efforts_older_model(void)
+static void test_codex_bare_effort_levels(void)
 {
-    /* gpt-5.5 and older reject "max"; the narrowed ladder is what keeps it
-     * off them now that the static ladder offers it. */
-    struct effort_set s = {0};
-    json_t *j = parse("{\"supported_reasoning_levels\":[{\"effort\":\"low\"},"
-                      "{\"effort\":\"medium\"},{\"effort\":\"high\"},{\"effort\":\"xhigh\"}]}");
-    codex_parse_efforts(j, &s);
-    static const char *const want[] = {"none", "low", "medium", "high", "xhigh", NULL};
-    EXPECT(efforts_are(&s, want));
-    json_decref(j);
+    struct effort_set efforts = {0};
+    json_t *entry = parse("{\"supported_reasoning_levels\":[\"low\",\"medium\",\"high\"]}");
+    codex_parse_model_efforts(entry, &efforts);
+    static const char *const expected[] = {"none", "low", "medium", "high", NULL};
+    EXPECT(efforts_are(&efforts, expected));
+    json_decref(entry);
 }
 
-static void test_codex_efforts_absent(void)
+static void test_codex_effort_metadata_states(void)
 {
-    /* No field: unknown, not empty — the catalog tier and then the static
-     * ladder still get their turn. */
-    struct effort_set s = {0};
-    json_t *j = parse("{\"slug\":\"x\",\"context_window\":272000}");
-    codex_parse_efforts(j, &s);
-    EXPECT(!s.known && s.count == 0);
-    json_decref(j);
+    struct effort_set absent = {0};
+    json_t *without_levels = parse("{\"slug\":\"x\",\"context_window\":272000}");
+    codex_parse_model_efforts(without_levels, &absent);
+    EXPECT(!absent.known && absent.count == 0);
+    json_decref(without_levels);
 
-    /* Present but empty is the opposite answer: every level denied, so not
-     * even the "none" this parser otherwise adds. Neither the catalog nor
-     * the static ladder may override it. */
-    struct effort_set e = {0};
-    json_t *k = parse("{\"slug\":\"x\",\"supported_reasoning_levels\":[]}");
-    codex_parse_efforts(k, &e);
-    EXPECT(e.known && e.count == 0);
-    json_decref(k);
+    struct effort_set empty = {0};
+    json_t *with_empty_levels = parse("{\"slug\":\"x\",\"supported_reasoning_levels\":[]}");
+    codex_parse_model_efforts(with_empty_levels, &empty);
+    EXPECT(empty.known && empty.count == 0);
+    json_decref(with_empty_levels);
 }
 
 /* ---------------- anthropic ---------------- */
@@ -451,12 +434,12 @@ int main(void)
     test_openrouter_free_vs_variable();
     test_openrouter_no_tools();
     test_openrouter_bare();
-    test_codex_serves_context_window();
+    test_codex_model_capabilities();
     test_codex_context_fallback();
-    test_codex_hidden();
-    test_codex_efforts_ui_ladder_to_wire();
-    test_codex_efforts_older_model();
-    test_codex_efforts_absent();
+    test_codex_hidden_models();
+    test_codex_effort_ladder_normalized();
+    test_codex_bare_effort_levels();
+    test_codex_effort_metadata_states();
     test_anthropic_capabilities();
     test_anthropic_capability_false();
     test_anthropic_compat_shape();

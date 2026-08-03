@@ -6,38 +6,26 @@
 
 #include "provider.h"
 
-/*
- * Parses Codex SSE event payloads and translates them into provider-agnostic
- * stream_event callbacks. Keeps per-stream state to map item_id → call_id
- * for tool-call deltas, and gates multiple terminal events (EV_DONE, EV_ERROR)
- * so a partial-then-complete race can't double-emit.
- */
+struct codex_tool_call;
 
-struct codex_tool_track {
-    char *item_id;
-    char *call_id;
-    char *name;
-};
-
+/* Stateful translation from Codex Responses SSE payloads to provider events. The parser maps
+ * output-item IDs to tool-call IDs and emits at most one terminal event. */
 struct codex_events {
-    stream_cb cb;
-    void *user;
-
-    struct codex_tool_track *tools;
-    size_t n_tools;
-    size_t cap_tools;
-
-    int terminated; /* any terminal event (EV_DONE or EV_ERROR) emitted */
+    stream_cb callback;
+    void *callback_user;
+    struct codex_tool_call *tool_calls;
+    size_t tool_call_count;
+    size_t tool_call_capacity;
+    int terminal_emitted;
 };
 
-void codex_events_init(struct codex_events *s, stream_cb cb, void *user);
-void codex_events_free(struct codex_events *s);
+void codex_events_init(struct codex_events *events, stream_cb callback, void *callback_user);
+void codex_events_free(struct codex_events *events);
 
-/* Feed one SSE `data:` payload (the JSON blob, or "[DONE]"). */
-void codex_events_feed(struct codex_events *s, const char *data);
+/* Parse one SSE data payload. Invalid and unrecognized payloads are ignored. */
+void codex_events_feed(struct codex_events *events, const char *data);
 
-/* Emit EV_ERROR("stream ended before completion") if no terminal event was
- * produced. Call once the SSE transport closes cleanly. */
-void codex_events_finalize(struct codex_events *s);
+/* Emit EV_ERROR if the transport closes before a terminal response event. */
+void codex_events_finalize(struct codex_events *events);
 
 #endif /* HAX_CODEX_EVENTS_H */

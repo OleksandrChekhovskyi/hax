@@ -4,46 +4,39 @@
 #include "harness.h"
 #include "providers/codex.h"
 
-/* codex_models_error keys the /model catalog-fetch diagnostic by HTTP
- * status. The 401 wording is a contract shared with the streaming and
- * /usage paths — a stale OAuth token must always point at re-running
- * `codex`, not at a generic connectivity guess. */
-
 static void test_token_expired(void)
 {
-    char *m = codex_models_error(401);
-    EXPECT_STR_EQ(m, "codex token expired — run `codex` once to refresh, then retry");
-    free(m);
+    char *message = codex_model_catalog_error(401);
+    EXPECT_STR_EQ(message, "codex token expired — run `codex` once to refresh, then retry");
+    free(message);
 }
 
-static void test_empty_2xx(void)
+static void test_empty_success_response(void)
 {
-    /* http_get fails a 2xx with an empty/truncated body — must not
-     * render as "failed (HTTP 200)". */
-    char *m = codex_models_error(200);
-    EXPECT_STR_EQ(m, "codex sent an empty or truncated model catalog response");
-    free(m);
+    char *message = codex_model_catalog_error(200);
+    EXPECT_STR_EQ(message, "codex sent an empty or truncated model catalog response");
+    free(message);
 }
 
-static void test_http_status(void)
+static void test_http_error(void)
 {
-    char *m = codex_models_error(503);
-    EXPECT_STR_EQ(m, "codex model catalog fetch failed (HTTP 503)");
-    free(m);
+    char *message = codex_model_catalog_error(503);
+    EXPECT_STR_EQ(message, "codex model catalog fetch failed (HTTP 503)");
+    free(message);
 }
 
 static void test_unreachable(void)
 {
-    char *m = codex_models_error(0);
-    EXPECT_STR_EQ(m, "could not reach chatgpt.com to list models — check your network");
-    free(m);
+    char *message = codex_model_catalog_error(0);
+    EXPECT_STR_EQ(message, "could not reach chatgpt.com to list models — check your network");
+    free(message);
 }
 
 int main(void)
 {
     test_token_expired();
-    test_empty_2xx();
-    test_http_status();
+    test_empty_success_response();
+    test_http_error();
     test_unreachable();
     T_REPORT();
 }

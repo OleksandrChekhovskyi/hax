@@ -11,41 +11,29 @@
 #include "codex_events.h"
 #include "config.h"
 #include "model_meta.h"
-#include "tool_schema.h"
 #include "util.h"
 #include "render/progress.h"
 #include "system/path.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
+#include "text/base64.h"
+#include "tool_schema.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 #include "transport/retry.h"
 
-#define CODEX_ENDPOINT        "https://chatgpt.com/backend-api/codex/responses"
-#define CODEX_USAGE_ENDPOINT  "https://chatgpt.com/backend-api/wham/usage"
-#define CODEX_MODELS_ENDPOINT "https://chatgpt.com/backend-api/codex/models"
+#define CODEX_RESPONSES_ENDPOINT "https://chatgpt.com/backend-api/codex/responses"
+#define CODEX_USAGE_ENDPOINT     "https://chatgpt.com/backend-api/wham/usage"
+#define CODEX_MODELS_ENDPOINT    "https://chatgpt.com/backend-api/codex/models"
 
-/* Generous enough for the catalog over a wonky link, short enough that a
- * dead probe doesn't block shutdown noticeably (the bg tick usually
- * aborts well before this fires anyway). */
-#define CODEX_PROBE_TIMEOUT_S 5
+#define CODEX_MODEL_TIMEOUT_SECONDS 5
+#define CODEX_USAGE_TIMEOUT_SECONDS 30
 
-/* Sent as the `client_version` query parameter on /models. The backend
- * filters out models whose minimal_client_version is newer than this
- * value; use a deliberately high synthetic version so metadata for
- * already-sendable models (for example gpt-5.5) is visible. */
-#define CODEX_PROBE_CLIENT_VERSION "999.0.0"
+/* The models endpoint hides entries requiring a newer client version. A high synthetic version
+ * exposes metadata for models that the responses endpoint already accepts. */
+#define CODEX_MODEL_CLIENT_VERSION "999.0.0"
 
-/* The backend routes some models by client identity: unless both the
- * originator header and the User-Agent product token identify the official
- * CLI, gpt-5.6-luna resolves to a nonexistent internal engine and
- * /responses returns 404 "Model not found" (openai/codex#31967; verified
- * empirically 2026-07 — each header alone is insufficient). Impersonate
- * codex_cli_rs: this provider rides its OAuth tokens anyway, so codex-rs
- * behavior is the only contract there is. hax identity rides in the UA's
- * trailing token, the slot codex-rs fills with terminal info. The UA
- * version is not currently checked (any string passes); a plausible pinned
- * one keeps the fingerprint ordinary. */
+/* Both identities are required for models that the backend routes only to the official CLI. */
 #define CODEX_ORIGINATOR "originator: codex_cli_rs"
 #define CODEX_USER_AGENT "User-Agent: codex_cli_rs/0.144.1 hax/0.1"
 
@@ -53,218 +41,144 @@ struct codex {
     struct provider base;
     char *access_token;
     char *account_id;
-    char *email; /* extracted from the id_token JWT — informational only (shown in
-                  * /usage). NULL when the auth.json had no id_token, or the JWT was
-                  * unparseable, or it didn't carry an "email" claim. */
+    char *account_email;
     char *default_model;
     char *default_effort;
-    char *session_id; /* sent as prompt_cache_key — stable for process lifetime
-                                             so the server can hit its prefix cache across turns */
+    char *session_id; /* stable prompt-cache and request-routing key */
 };
 
-/* ---------- Codex config (~/.codex/config.toml) ---------- */
-
-static const char *skip_inline_ws(const char *p, const char *end)
+static const char *skip_inline_whitespace(const char *cursor, const char *end)
 {
-    while (p < end && (*p == ' ' || *p == '\t'))
-        p++;
-    return p;
+    while (cursor < end && (*cursor == ' ' || *cursor == '\t'))
+        cursor++;
+    return cursor;
 }
 
-static int key_matches(const char *p, const char *end, const char *key)
+static int toml_key_matches(const char *cursor, const char *end, const char *key)
 {
-    size_t n = strlen(key);
-    if ((size_t)(end - p) < n || memcmp(p, key, n) != 0)
+    size_t key_len = strlen(key);
+    if ((size_t)(end - cursor) < key_len || memcmp(cursor, key, key_len) != 0)
         return 0;
-    p += n;
-    return p == end || *p == '=' || *p == ' ' || *p == '\t';
+
+    cursor += key_len;
+    return cursor == end || *cursor == '=' || *cursor == ' ' || *cursor == '\t';
 }
 
-static char *parse_toml_string(const char *p, const char *end)
+static char *parse_toml_string(const char *value, const char *end)
 {
-    if (p >= end || (*p != '"' && *p != '\''))
+    if (value >= end || (*value != '"' && *value != '\''))
         return NULL;
 
-    char quote = *p++;
-    struct buf b;
-    buf_init(&b);
+    char quote = *value++;
+    struct buf result;
+    buf_init(&result);
 
-    while (p < end) {
-        char c = *p++;
-        if (c == quote)
-            return buf_steal(&b);
+    while (value < end) {
+        char byte = *value++;
+        if (byte == quote)
+            return buf_steal(&result);
 
-        if (quote == '"' && c == '\\' && p < end) {
-            c = *p++;
-            switch (c) {
+        if (quote == '"' && byte == '\\' && value < end) {
+            byte = *value++;
+            switch (byte) {
             case 'b':
-                c = '\b';
+                byte = '\b';
                 break;
             case 't':
-                c = '\t';
+                byte = '\t';
                 break;
             case 'n':
-                c = '\n';
+                byte = '\n';
                 break;
             case 'f':
-                c = '\f';
+                byte = '\f';
                 break;
             case 'r':
-                c = '\r';
+                byte = '\r';
                 break;
             case '"':
             case '\\':
                 break;
             default:
-                /* Model names / effort values are ordinary ASCII strings.
-                 * For unsupported escapes, keep the escaped byte rather
-                 * than rejecting the whole config. */
+                /* Preserve unsupported escaped bytes instead of rejecting otherwise usable Codex
+                 * settings. */
                 break;
             }
         }
-        buf_append(&b, &c, 1);
+        buf_append(&result, &byte, 1);
     }
 
-    buf_free(&b);
+    buf_free(&result);
     return NULL;
 }
 
-static char *parse_top_level_toml_string_key(const char *contents, size_t len, const char *key)
+static char *parse_top_level_toml_string(const char *contents, size_t contents_len, const char *key)
 {
-    const char *p = contents;
-    const char *end = contents + len;
+    const char *cursor = contents;
+    const char *end = contents + contents_len;
 
-    while (p < end) {
-        const char *line_end = memchr(p, '\n', (size_t)(end - p));
+    while (cursor < end) {
+        const char *line_end = memchr(cursor, '\n', (size_t)(end - cursor));
         if (!line_end)
             line_end = end;
 
-        const char *q = skip_inline_ws(p, line_end);
-        if (q < line_end && *q == '[')
-            return NULL; /* subsequent assignments are inside a table */
-        if (q < line_end && *q != '#' && key_matches(q, line_end, key)) {
-            q += strlen(key);
-            q = skip_inline_ws(q, line_end);
-            if (q < line_end && *q == '=') {
-                q++;
-                q = skip_inline_ws(q, line_end);
-                return parse_toml_string(q, line_end);
+        const char *assignment = skip_inline_whitespace(cursor, line_end);
+        if (assignment < line_end && *assignment == '[')
+            return NULL;
+        if (assignment < line_end && *assignment != '#' &&
+            toml_key_matches(assignment, line_end, key)) {
+            assignment = skip_inline_whitespace(assignment + strlen(key), line_end);
+            if (assignment < line_end && *assignment == '=') {
+                assignment = skip_inline_whitespace(assignment + 1, line_end);
+                return parse_toml_string(assignment, line_end);
             }
         }
 
-        p = line_end < end ? line_end + 1 : end;
+        cursor = line_end < end ? line_end + 1 : end;
     }
 
     return NULL;
 }
 
-static void load_codex_settings(char **out_model, char **out_effort)
+static void load_codex_settings(char **model, char **effort)
 {
-    *out_model = NULL;
-    *out_effort = NULL;
+    *model = NULL;
+    *effort = NULL;
 
     char *path = expand_home("~/.codex/config.toml");
-    size_t len = 0;
-    char *contents = slurp_file(path, &len);
+    size_t contents_len = 0;
+    char *contents = slurp_file(path, &contents_len);
     free(path);
     if (!contents)
         return;
 
-    *out_model = parse_top_level_toml_string_key(contents, len, "model");
-    *out_effort = parse_top_level_toml_string_key(contents, len, "model_reasoning_effort");
+    *model = parse_top_level_toml_string(contents, contents_len, "model");
+    *effort = parse_top_level_toml_string(contents, contents_len, "model_reasoning_effort");
     free(contents);
 }
 
-/* ---------- JWT email extraction ---------- */
-
-/* Decode one base64 sextet. Returns 0..63 or -1 for non-alphabet bytes.
- * Caller is expected to have already mapped base64url ('-'/'_') onto
- * standard base64 ('+'/'/') and replaced missing pad with '='. */
-static int b64_value(unsigned char c)
-{
-    if (c >= 'A' && c <= 'Z')
-        return c - 'A';
-    if (c >= 'a' && c <= 'z')
-        return c - 'a' + 26;
-    if (c >= '0' && c <= '9')
-        return c - '0' + 52;
-    if (c == '+')
-        return 62;
-    if (c == '/')
-        return 63;
-    return -1;
-}
-
-/* Decode a base64url segment to a freshly-allocated NUL-terminated
- * string. NULL on malformed input. The caller treats the result as
- * UTF-8 text (it's the JWT JSON payload, which is always UTF-8). */
-static char *b64url_decode(const char *seg, size_t n)
-{
-    char *norm = xmalloc(n + 4);
-    size_t k = 0;
-    for (size_t i = 0; i < n; i++) {
-        char c = seg[i];
-        norm[k++] = (c == '-') ? '+' : (c == '_') ? '/' : c;
-    }
-    while (k % 4)
-        norm[k++] = '=';
-
-    unsigned char *out = xmalloc((k / 4) * 3 + 1);
-    size_t out_len = 0;
-    for (size_t i = 0; i < k; i += 4) {
-        int v[4];
-        for (int j = 0; j < 4; j++) {
-            unsigned char c = (unsigned char)norm[i + j];
-            if (c == '=') {
-                v[j] = 0;
-            } else {
-                int x = b64_value(c);
-                if (x < 0) {
-                    free(norm);
-                    free(out);
-                    return NULL;
-                }
-                v[j] = x;
-            }
-        }
-        out[out_len++] = (unsigned char)((v[0] << 2) | (v[1] >> 4));
-        if (norm[i + 2] != '=')
-            out[out_len++] = (unsigned char)((v[1] << 4) | (v[2] >> 2));
-        if (norm[i + 3] != '=')
-            out[out_len++] = (unsigned char)((v[2] << 6) | v[3]);
-    }
-    free(norm);
-    out[out_len] = '\0';
-    return (char *)out;
-}
-
-/* Extract the "email" claim from a JWT id_token. Best-effort: returns
- * NULL on any failure (malformed JWT, undecodable payload, no email
- * claim). The token is not validated — we trust ~/.codex/auth.json,
- * which `codex login` writes with restrictive perms; we just want a
- * human-readable label for the /usage header.
- *
- * Falls back to the namespaced "https://api.openai.com/profile" claim
- * when the top-level "email" is absent — matches codex-rs's parser
- * (login/src/token_data.rs:parse_chatgpt_jwt_claims). Tokens issued
- * via certain auth flows only carry the namespaced claim. */
-static char *jwt_extract_email(const char *jwt)
+/* This is an informational label, not authentication: the JWT from Codex's protected auth file is
+ * decoded but not verified. Some login flows put email only in the namespaced profile claim. */
+static char *extract_jwt_email(const char *jwt)
 {
     if (!jwt || !*jwt)
         return NULL;
-    const char *p1 = strchr(jwt, '.');
-    if (!p1)
+
+    const char *payload_start = strchr(jwt, '.');
+    if (!payload_start)
         return NULL;
-    const char *p2 = strchr(p1 + 1, '.');
-    if (!p2)
+    payload_start++;
+
+    const char *payload_end = strchr(payload_start, '.');
+    if (!payload_end)
         return NULL;
 
-    char *payload = b64url_decode(p1 + 1, (size_t)(p2 - (p1 + 1)));
+    unsigned char *payload =
+        base64url_decode(payload_start, (size_t)(payload_end - payload_start), NULL);
     if (!payload)
         return NULL;
 
-    json_error_t err;
-    json_t *root = json_loads(payload, 0, &err);
+    json_t *root = json_loads((char *)payload, 0, NULL);
     free(payload);
     if (!root)
         return NULL;
@@ -272,182 +186,165 @@ static char *jwt_extract_email(const char *jwt)
     const char *email = json_string_value(json_object_get(root, "email"));
     if (!email || !*email) {
         json_t *profile = json_object_get(root, "https://api.openai.com/profile");
-        if (json_is_object(profile))
-            email = json_string_value(json_object_get(profile, "email"));
+        email = json_string_value(json_object_get(profile, "email"));
     }
-    char *ret = (email && *email) ? xstrdup(email) : NULL;
+
+    char *result = email && *email ? xstrdup(email) : NULL;
     json_decref(root);
-    return ret;
+    return result;
 }
 
-/* ---------- request body construction ---------- */
-
-/* function_call_output.output for a result carrying images: the Responses
- * API accepts an array of content items in place of the plain string —
- * text as input_text, images as input_image with a base64 data URL (the
- * exact shape codex-rs sends). When the model lacks image input each part
- * degrades to an input_text placeholder instead. */
-static json_t *build_output_with_images(const struct item *it, int image_input)
+/* Responses accepts content parts instead of a string when a function result contains images. */
+static json_t *build_tool_output_parts(const struct item *item, int image_input)
 {
-    json_t *content = json_array();
-    if (it->output && *it->output)
-        json_array_append_new(content,
-                              json_pack("{s:s, s:s}", "type", "input_text", "text", it->output));
-    for (size_t k = 0; k < it->n_images; k++) {
-        const struct item_image *img = &it->images[k];
+    json_t *parts = json_array();
+    if (item->output && *item->output)
+        json_array_append_new(parts,
+                              json_pack("{s:s, s:s}", "type", "input_text", "text", item->output));
+
+    for (size_t i = 0; i < item->n_images; i++) {
+        const struct item_image *image = &item->images[i];
         if (image_input != 0) {
-            char *url = xasprintf("data:%s;base64,%s", img->mime ? img->mime : "image/png",
-                                  img->data_b64 ? img->data_b64 : "");
-            json_array_append_new(content,
+            char *url = xasprintf("data:%s;base64,%s", image->mime ? image->mime : "image/png",
+                                  image->data_b64 ? image->data_b64 : "");
+            json_array_append_new(parts,
                                   json_pack("{s:s, s:s}", "type", "input_image", "image_url", url));
             free(url);
         } else {
-            char *ph = item_image_placeholder(img);
-            json_array_append_new(content,
-                                  json_pack("{s:s, s:s}", "type", "input_text", "text", ph));
-            free(ph);
+            char *placeholder = item_image_placeholder(image);
+            json_array_append_new(
+                parts, json_pack("{s:s, s:s}", "type", "input_text", "text", placeholder));
+            free(placeholder);
         }
     }
-    return content;
+    return parts;
 }
 
-json_t *codex_build_input_items(const struct item *items, size_t n, const char *provider,
+static json_t *build_message(const char *role, const char *content_type, const char *text)
+{
+    json_t *content = json_array();
+    json_array_append_new(content,
+                          json_pack("{s:s, s:s}", "type", content_type, "text", text ? text : ""));
+    return json_pack("{s:s, s:s, s:o}", "type", "message", "role", role, "content", content);
+}
+
+static json_t *build_reasoning_input(const struct item *item, const char *provider,
+                                     const char *model)
+{
+    /* Encrypted reasoning is bound to its source model. Replaying it after a provider or model
+     * switch causes the backend to reject the request. */
+    if (!item->reasoning_json || !item->provider || !item->model || !provider || !model ||
+        strcmp(item->provider, provider) != 0 || strcmp(item->model, model) != 0)
+        return NULL;
+    return json_loads(item->reasoning_json, 0, NULL);
+}
+
+static json_t *build_input_item(const struct item *item, const char *provider, const char *model,
+                                int image_input)
+{
+    switch (item->kind) {
+    case ITEM_USER_MESSAGE:
+        return build_message("user", "input_text", item->text);
+    case ITEM_ASSISTANT_MESSAGE:
+        return build_message("assistant", "output_text", item->text);
+    case ITEM_TOOL_CALL:
+        return json_pack("{s:s, s:s, s:s, s:s}", "type", "function_call", "call_id",
+                         item->call_id ? item->call_id : "", "name",
+                         item->tool_name ? item->tool_name : "", "arguments",
+                         item->tool_arguments_json ? item->tool_arguments_json : "{}");
+    case ITEM_TOOL_RESULT:
+        if (item->n_images > 0)
+            return json_pack("{s:s, s:s, s:o}", "type", "function_call_output", "call_id",
+                             item->call_id ? item->call_id : "", "output",
+                             build_tool_output_parts(item, image_input));
+        return json_pack("{s:s, s:s, s:s}", "type", "function_call_output", "call_id",
+                         item->call_id ? item->call_id : "", "output",
+                         item->output ? item->output : "");
+    case ITEM_REASONING:
+        return build_reasoning_input(item, provider, model);
+    case ITEM_TURN_BOUNDARY:
+    case ITEM_TURN_USAGE:
+        return NULL;
+    }
+    return NULL;
+}
+
+json_t *codex_build_input_items(const struct item *items, size_t n_items, const char *provider,
                                 const char *model, int image_input)
 {
-    json_t *arr = json_array();
-    for (size_t i = 0; i < n; i++) {
-        const struct item *it = &items[i];
-        json_t *obj = NULL;
-
-        switch (it->kind) {
-        case ITEM_USER_MESSAGE: {
-            json_t *content = json_array();
-            json_array_append_new(content, json_pack("{s:s, s:s}", "type", "input_text", "text",
-                                                     it->text ? it->text : ""));
-            obj =
-                json_pack("{s:s, s:s, s:o}", "type", "message", "role", "user", "content", content);
-            break;
-        }
-        case ITEM_ASSISTANT_MESSAGE: {
-            json_t *content = json_array();
-            json_array_append_new(content, json_pack("{s:s, s:s}", "type", "output_text", "text",
-                                                     it->text ? it->text : ""));
-            obj = json_pack("{s:s, s:s, s:o}", "type", "message", "role", "assistant", "content",
-                            content);
-            break;
-        }
-        case ITEM_TOOL_CALL:
-            obj = json_pack("{s:s, s:s, s:s, s:s}", "type", "function_call", "call_id",
-                            it->call_id ? it->call_id : "", "name",
-                            it->tool_name ? it->tool_name : "", "arguments",
-                            it->tool_arguments_json ? it->tool_arguments_json : "{}");
-            break;
-        case ITEM_TOOL_RESULT:
-            if (it->n_images > 0)
-                obj = json_pack("{s:s, s:s, s:o}", "type", "function_call_output", "call_id",
-                                it->call_id ? it->call_id : "", "output",
-                                build_output_with_images(it, image_input));
-            else
-                obj = json_pack("{s:s, s:s, s:s}", "type", "function_call_output", "call_id",
-                                it->call_id ? it->call_id : "", "output",
-                                it->output ? it->output : "");
-            break;
-        case ITEM_REASONING:
-            /* The blob was already whitelisted to valid input fields when we
-             * received it (see codex_events.c). Replay it only when it was
-             * produced by the provider+model of this very request — the
-             * encrypted CoT is signed/bound to that model, so after a /model
-             * or /provider switch the older items (carrying the old stamp) are
-             * skipped rather than rejected by the backend. An unstamped item
-             * (very old record) is treated as not-ours and skipped. */
-            if (it->reasoning_json && it->provider && it->model && provider && model &&
-                strcmp(it->provider, provider) == 0 && strcmp(it->model, model) == 0) {
-                json_error_t jerr;
-                obj = json_loads(it->reasoning_json, 0, &jerr);
-            }
-            break;
-        case ITEM_TURN_BOUNDARY:
-        case ITEM_TURN_USAGE:
-            /* Agent-side markers for the transcript renderer; nothing to
-             * send over the wire. */
-            break;
-        }
-        if (obj)
-            json_array_append_new(arr, obj);
+    json_t *input = json_array();
+    for (size_t i = 0; i < n_items; i++) {
+        json_t *input_item = build_input_item(&items[i], provider, model, image_input);
+        if (input_item)
+            json_array_append_new(input, input_item);
     }
-    return arr;
+    return input;
 }
 
-static json_t *build_tools(const struct tool_def *tools, size_t n)
+static json_t *build_tools(const struct tool_def *tools, size_t n_tools)
 {
-    json_t *arr = json_array();
-    for (size_t i = 0; i < n; i++) {
-        json_t *params = tool_schema_build(&tools[i]);
-        json_array_append_new(arr, json_pack("{s:s, s:s, s:s, s:o}", "type", "function", "name",
-                                             tools[i].name, "description", tools[i].description,
-                                             "parameters", params));
+    json_t *definitions = json_array();
+    for (size_t i = 0; i < n_tools; i++) {
+        json_t *parameters = tool_schema_build(&tools[i]);
+        json_array_append_new(definitions,
+                              json_pack("{s:s, s:s, s:s, s:o}", "type", "function", "name",
+                                        tools[i].name, "description", tools[i].description,
+                                        "parameters", parameters));
     }
-    return arr;
+    return definitions;
 }
 
-static char *build_body(const struct context *ctx, const char *provider, const char *model,
-                        const char *cache_key)
+static char *build_request_body(const struct context *context, const char *provider,
+                                const char *model, const char *cache_key)
 {
     json_t *include = json_array();
     json_array_append_new(include, json_string("reasoning.encrypted_content"));
 
     json_t *body = json_pack(
         "{s:s, s:b, s:b, s:s, s:o, s:o, s:{s:s}, s:s, s:b, s:o}", "model", model, "store", 0,
-        "stream", 1, "instructions", ctx->system_prompt ? ctx->system_prompt : "", "input",
-        codex_build_input_items(ctx->items, ctx->n_items, provider, model, ctx->image_input),
+        "stream", 1, "instructions", context->system_prompt ? context->system_prompt : "", "input",
+        codex_build_input_items(context->items, context->n_items, provider, model,
+                                context->image_input),
         "include", include, "text", "verbosity", "low", "tool_choice", "auto",
-        "parallel_tool_calls", 1, "tools", build_tools(ctx->tools, ctx->n_tools));
+        "parallel_tool_calls", 1, "tools", build_tools(context->tools, context->n_tools));
 
     if (cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(cache_key));
-
-    if (ctx->effort)
+    if (context->effort)
         json_object_set_new(body, "reasoning",
-                            json_pack("{s:s, s:s}", "effort", ctx->effort, "summary", "auto"));
+                            json_pack("{s:s, s:s}", "effort", context->effort, "summary", "auto"));
 
-    char *s = json_dumps(body, JSON_COMPACT);
+    char *body_json = json_dumps(body, JSON_COMPACT);
     json_decref(body);
-    return s;
+    return body_json;
 }
 
-/* ---------- SSE glue ---------- */
-
-static int on_sse(const char *event_name, const char *data, void *user)
+static int handle_sse_payload(const char *event_name, const char *data, void *parser)
 {
-    (void)event_name; /* Codex mirrors the type in the data JSON */
-    codex_events_feed(user, data);
+    (void)event_name;
+    codex_events_feed(parser, data);
     return 0;
 }
 
-/* ---------- provider interface ---------- */
-
-static int codex_stream(struct provider *p, const struct context *ctx, const char *model,
-                        stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
+static int codex_stream(struct provider *provider, const struct context *context, const char *model,
+                        stream_cb callback, void *callback_user, http_tick_cb tick, void *tick_user)
 {
-    struct codex *c = (struct codex *)p;
+    struct codex *codex = (struct codex *)provider;
 
-    char *body = build_body(ctx, c->base.name, model, c->session_id);
+    char *body = build_request_body(context, codex->base.name, model, codex->session_id);
     if (!body)
         return -1;
     size_t body_len = strlen(body);
 
-    char *auth_hdr = xasprintf("Authorization: Bearer %s", c->access_token);
-    char *acct_hdr = xasprintf("chatgpt-account-id: %s", c->account_id);
-    /* Reuse the per-process UUID we already mint for prompt_cache_key.
-     * pi-mono sends both headers with the same value; codex-rs likewise.
-     * Used by the server for routing/dedup affinity. */
-    char *sess_hdr = xasprintf("session-id: %s", c->session_id);
-    char *reqid_hdr = xasprintf("x-client-request-id: %s", c->session_id);
+    char *authorization = xasprintf("Authorization: Bearer %s", codex->access_token);
+    char *account = xasprintf("chatgpt-account-id: %s", codex->account_id);
+    char *session = xasprintf("session-id: %s", codex->session_id);
+    char *request_id = xasprintf("x-client-request-id: %s", codex->session_id);
     const char *headers[] = {
-        auth_hdr,
-        acct_hdr,
-        sess_hdr,
-        reqid_hdr,
+        authorization,
+        account,
+        session,
+        request_id,
         CODEX_ORIGINATOR,
         CODEX_USER_AGENT,
         "OpenAI-Beta: responses=experimental",
@@ -456,310 +353,236 @@ static int codex_stream(struct provider *p, const struct context *ctx, const cha
         NULL,
     };
 
-    struct retry_policy pol = retry_policy_default();
-    struct http_response resp;
-    struct codex_events ev;
-    int rc = -1;
+    struct retry_policy retry_policy = retry_policy_default();
+    struct http_response response = {0};
+    struct codex_events events = {0};
+    int result = -1;
 
-    /* Auto-retry on transient transport / 5xx / 429 errors. Same approach
-     * as the openai provider — re-init the events parser per attempt and
-     * resend the immutable body. The 401 special case below is classified
-     * as non-retryable by retry_should_attempt (it's a 4xx other than
-     * 408/429), so token-expired errors still fall through to the friendly
-     * message on the first try. */
-    int attempt;
-    for (attempt = 0; attempt < pol.max_attempts; attempt++) {
-        memset(&resp, 0, sizeof(resp));
-        codex_events_init(&ev, cb, user);
-        rc = http_sse_post(CODEX_ENDPOINT, headers, body, body_len, pol.idle_timeout_s, on_sse, &ev,
-                           tick, tick_user, &resp);
+    for (int attempt = 0; attempt < retry_policy.max_attempts; attempt++) {
+        memset(&response, 0, sizeof(response));
+        codex_events_init(&events, callback, callback_user);
+        result = http_sse_post(CODEX_RESPONSES_ENDPOINT, headers, body, body_len,
+                               retry_policy.idle_timeout_s, handle_sse_payload, &events, tick,
+                               tick_user, &response);
 
-        if (resp.cancelled)
-            break;
-        if (!retry_should_attempt(rc, resp.status, resp.error_body))
-            break;
-        if (attempt + 1 >= pol.max_attempts)
+        if (response.cancelled ||
+            !retry_should_attempt(result, response.status, response.error_body) ||
+            attempt + 1 >= retry_policy.max_attempts)
             break;
 
-        long delay = resp.retry_after_ms > 0 ? resp.retry_after_ms : retry_delay_ms(&pol, attempt);
-        struct stream_event re = {
+        long delay_ms = response.retry_after_ms > 0 ? response.retry_after_ms
+                                                    : retry_delay_ms(&retry_policy, attempt);
+        struct stream_event retry_event = {
             .kind = EV_RETRY,
             .u.retry = {.attempt = attempt + 1,
-                        .max_attempts = pol.max_attempts,
-                        .delay_ms = delay,
-                        .http_status = (int)resp.status},
+                        .max_attempts = retry_policy.max_attempts,
+                        .delay_ms = delay_ms,
+                        .http_status = (int)response.status},
         };
-        cb(&re, user);
+        callback(&retry_event, callback_user);
 
-        free(resp.error_body);
-        resp.error_body = NULL;
-        codex_events_free(&ev);
-
-        if (retry_sleep_with_tick(delay, tick, tick_user)) {
-            resp.cancelled = 1;
-            memset(&ev, 0, sizeof(ev));
+        free(response.error_body);
+        response.error_body = NULL;
+        codex_events_free(&events);
+        if (retry_sleep_with_tick(delay_ms, tick, tick_user)) {
+            response.cancelled = 1;
             break;
         }
     }
 
-    if (resp.cancelled) {
-        /* User-initiated abort — agent layer handles the partial state
-         * and the "[interrupted]" notice. Don't surface as EV_ERROR. */
-    } else if (resp.status == 401) {
-        struct stream_event e = {
-            .kind = EV_ERROR,
-            .u.error = {.message = "codex token expired — run `codex` "
-                                   "once to refresh, then retry",
-                        .http_status = 401},
-        };
-        cb(&e, user);
-    } else if (rc != 0 || resp.status < 200 || resp.status >= 300) {
-        char *msg = format_api_error(resp.status, resp.error_body);
-        struct stream_event e = {
-            .kind = EV_ERROR,
-            .u.error = {.message = msg, .http_status = (int)resp.status},
-        };
-        cb(&e, user);
-        free(msg);
-    } else {
-        codex_events_finalize(&ev);
+    if (!response.cancelled) {
+        if (response.status == 401) {
+            struct stream_event error_event = {
+                .kind = EV_ERROR,
+                .u.error = {.message = "codex token expired — run `codex` "
+                                       "once to refresh, then retry",
+                            .http_status = 401},
+            };
+            callback(&error_event, callback_user);
+        } else if (result != 0 || response.status < 200 || response.status >= 300) {
+            char *message = format_api_error(response.status, response.error_body);
+            struct stream_event error_event = {
+                .kind = EV_ERROR,
+                .u.error = {.message = message, .http_status = (int)response.status},
+            };
+            callback(&error_event, callback_user);
+            free(message);
+        } else {
+            codex_events_finalize(&events);
+        }
     }
 
-    free(resp.error_body);
-    free(auth_hdr);
-    free(acct_hdr);
-    free(sess_hdr);
-    free(reqid_hdr);
+    free(response.error_body);
+    codex_events_free(&events);
+    free(authorization);
+    free(account);
+    free(session);
+    free(request_id);
     free(body);
-    codex_events_free(&ev);
-    return rc;
+    return result;
 }
 
-/* ---------- single-model metadata probe ---------- */
-
-/* Auth headers for /models: the pair /responses rides on, with originator +
- * UA mirroring the streaming path so the fetch looks like the same client to
- * server-side telemetry. Heap-owned, NULL-terminated. */
-static char **codex_meta_headers(const struct codex *c)
+static char **build_model_headers(const struct codex *codex)
 {
-    char **h = xcalloc(6, sizeof(*h));
-    h[0] = xasprintf("Authorization: Bearer %s", c->access_token);
-    h[1] = xasprintf("chatgpt-account-id: %s", c->account_id);
-    h[2] = xstrdup(CODEX_ORIGINATOR);
-    h[3] = xstrdup(CODEX_USER_AGENT);
-    h[4] = xstrdup("Accept: application/json");
-    h[5] = NULL;
-    return h;
+    char **headers = xcalloc(6, sizeof(*headers));
+    headers[0] = xasprintf("Authorization: Bearer %s", codex->access_token);
+    headers[1] = xasprintf("chatgpt-account-id: %s", codex->account_id);
+    headers[2] = xstrdup(CODEX_ORIGINATOR);
+    headers[3] = xstrdup(CODEX_USER_AGENT);
+    headers[4] = xstrdup("Accept: application/json");
+    return headers;
 }
 
-/* Find `model` in `{ "models": [ {"slug": ...}, ... ] }` and hand the entry
- * to the same parser the /model picker uses, so the picker and the
- * context-% display can't disagree about a window. */
-static void codex_parse_meta(const char *body, const char *model, struct model_info *out)
+static void parse_model_probe_response(const char *body, const char *model,
+                                       struct model_info *model_info)
 {
     json_t *root = json_loads(body, 0, NULL);
     if (!root)
         return;
+
     json_t *models = json_object_get(root, "models");
-    if (json_is_array(models)) {
-        size_t i;
-        json_t *entry;
-        json_array_foreach(models, i, entry)
-        {
-            const char *slug = json_string_value(json_object_get(entry, "slug"));
-            if (slug && strcmp(slug, model) == 0) {
-                codex_parse_model(entry, out);
-                break;
-            }
+    if (!json_is_array(models)) {
+        json_decref(root);
+        return;
+    }
+
+    size_t i;
+    json_t *entry;
+    json_array_foreach(models, i, entry)
+    {
+        const char *slug = json_string_value(json_object_get(entry, "slug"));
+        if (slug && strcmp(slug, model) == 0) {
+            codex_parse_model(entry, model_info);
+            break;
         }
     }
     json_decref(root);
 }
 
-static int codex_probe_model(struct provider *p, const char *model, struct model_probe *out)
+static int codex_probe_model(struct provider *provider, const char *model,
+                             struct model_probe *probe)
 {
-    struct codex *c = (struct codex *)p;
+    struct codex *codex = (struct codex *)provider;
     if (!model || !*model)
         return -1;
-    out->url = xasprintf("%s?client_version=%s", CODEX_MODELS_ENDPOINT, CODEX_PROBE_CLIENT_VERSION);
-    out->headers = codex_meta_headers(c);
-    out->timeout_s = CODEX_PROBE_TIMEOUT_S;
-    out->parse = codex_parse_meta;
+
+    probe->url =
+        xasprintf("%s?client_version=%s", CODEX_MODELS_ENDPOINT, CODEX_MODEL_CLIENT_VERSION);
+    probe->headers = build_model_headers(codex);
+    probe->timeout_s = CODEX_MODEL_TIMEOUT_SECONDS;
+    probe->parse = parse_model_probe_response;
     return 0;
 }
 
-/* ---------- /usage ---------- */
-
-/* Format the wall-clock time the window resets. If `reset_at` lands on
- * today (local time) we show only HH:MM since the date is implied;
- * anything further out picks up a short month-day prefix so a weekly
- * window's "resets Mon" is unambiguous. Output written into `out`,
- * NUL-terminated. */
-static void format_reset_time(char *out, size_t cap, time_t reset_at)
+static void format_reset_time(char *output, size_t output_size, time_t reset_at)
 {
     time_t now = time(NULL);
     struct tm reset_tm, now_tm;
     if (!localtime_r(&reset_at, &reset_tm) || !localtime_r(&now, &now_tm)) {
-        snprintf(out, cap, "?");
+        snprintf(output, output_size, "?");
         return;
     }
+
     int same_day = reset_tm.tm_year == now_tm.tm_year && reset_tm.tm_yday == now_tm.tm_yday;
     if (same_day)
-        strftime(out, cap, "%H:%M", &reset_tm);
+        strftime(output, output_size, "%H:%M", &reset_tm);
     else
-        /* %d is zero-padded (ISO C). %-d / %e both produce nicer "5"
-         * output — but %-d is a GNU extension that warns on stricter
-         * compilers, and %e space-pads ("May  5") which reads awkward
-         * in running text. "May 05" is the least-bad portable choice. */
-        strftime(out, cap, "%a %b %d, %H:%M", &reset_tm);
+        /* Zero-padded %d is preferable to the non-portable %-d. */
+        strftime(output, output_size, "%a %b %d, %H:%M", &reset_tm);
 }
 
-/* Visual layout constants. LABEL_W matches the longest label we emit
- * ("weekly"); BAR_W is the bar's cell count. ROW_INDENT is the column
- * the bar starts at — also the indent used for the wrapped "resets"
- * row on narrow terminals so it lines up under the bar. */
-#define USAGE_LABEL_W    6
-#define USAGE_BAR_W      20
-#define USAGE_ROW_INDENT (2 + USAGE_LABEL_W + 1) /* "  " + label + " " */
+#define USAGE_LABEL_WIDTH 6
+#define USAGE_BAR_WIDTH   20
+#define USAGE_BAR_COLUMN  (2 + USAGE_LABEL_WIDTH + 1)
 
-/* Derive a window's display label from its `limit_window_seconds`. The
- * Codex backend's two named slots (primary_window, secondary_window)
- * don't carry the human label themselves — the duration is what
- * distinguishes them, and the duration varies by plan. Common values
- * get a friendlier name ("weekly", "daily"); anything else falls back
- * to a generic Ns/Nm/Nh/Nd format so an unfamiliar bucket still
- * renders correctly. Output is bounded by USAGE_LABEL_W in the common
- * case; longer labels just push the row's bar slightly right, which
- * is preferable to a wrong-but-aligned hardcoded string. */
-static void format_window_label(char *out, size_t cap, int secs)
+static void format_window_label(char *output, size_t output_size, long window_seconds)
 {
-    if (secs <= 0)
-        snprintf(out, cap, "?");
-    else if (secs == 604800)
-        snprintf(out, cap, "weekly");
-    else if (secs == 86400)
-        snprintf(out, cap, "daily");
-    else if (secs < 60)
-        snprintf(out, cap, "%ds", secs);
-    else if (secs < 3600)
-        snprintf(out, cap, "%dm", secs / 60);
-    else if (secs < 86400)
-        snprintf(out, cap, "%dh", secs / 3600);
+    if (window_seconds <= 0)
+        snprintf(output, output_size, "?");
+    else if (window_seconds == 604800)
+        snprintf(output, output_size, "weekly");
+    else if (window_seconds == 86400)
+        snprintf(output, output_size, "daily");
+    else if (window_seconds < 60)
+        snprintf(output, output_size, "%lds", window_seconds);
+    else if (window_seconds < 3600)
+        snprintf(output, output_size, "%ldm", window_seconds / 60);
+    else if (window_seconds < 86400)
+        snprintf(output, output_size, "%ldh", window_seconds / 3600);
     else
-        snprintf(out, cap, "%dd", secs / 86400);
+        snprintf(output, output_size, "%ldd", window_seconds / 86400);
 }
 
-/* Render one labeled bar:
- *
- *   5h     ████████░░░░░░░░░░░   42% used · resets 18:42
- *
- * On terminals too narrow to fit the full row, the "· resets X" tail
- * reflows onto its own line indented under the bar:
- *
- *   weekly ████████░░░░░░░░░░░   42% used
- *          resets Mon Dec 15, 18:42
- *
- * The whole row renders dim — /usage is a meta status block, intended
- * to recede visually rather than compete with conversation text. The
- * label is derived from the response's `limit_window_seconds`, so the
- * row reads correctly across plans with different bucket durations
- * (Pro/Team have 5h+weekly today; other plans may differ). `win` is
- * the JSON window snapshot or NULL — when absent (e.g. plan with only
- * one window) the row is skipped silently. `slot` is the API's
- * positional name ("primary" / "secondary"), used only as a fallback
- * label when the data-derived one isn't available.
- *
- * Field types are validated: codex-rs declares used_percent / reset_at
- * as i32, but if the schema drifts (used_percent → float, reset_at →
- * string, fields renamed) we'd otherwise render convincing garbage
- * like "0% used · resets Jan 01, 1970". An unrecognized shape gets a
- * visible marker line instead. used_percent is read as a number
- * (integer or real) for forward-compat. */
-static void print_window(const char *slot, json_t *win)
+static void print_usage_window(const char *fallback_label, json_t *window)
 {
-    if (!win || json_is_null(win))
+    if (!window || json_is_null(window))
         return;
 
-    json_t *jup = json_object_get(win, "used_percent");
-    json_t *jra = json_object_get(win, "reset_at");
-    json_t *jlws = json_object_get(win, "limit_window_seconds");
-    if (!json_is_number(jup) || !json_is_number(jra)) {
-        printf("  " ANSI_DIM "%-*s (unrecognized window shape)" ANSI_RESET "\n", USAGE_LABEL_W,
-               slot);
+    json_t *used_percent = json_object_get(window, "used_percent");
+    json_t *reset_timestamp = json_object_get(window, "reset_at");
+    json_t *duration = json_object_get(window, "limit_window_seconds");
+    if (!json_is_number(used_percent) || !json_is_number(reset_timestamp)) {
+        printf("  " ANSI_DIM "%-*s (unrecognized window shape)" ANSI_RESET "\n", USAGE_LABEL_WIDTH,
+               fallback_label);
         return;
     }
 
-    char label[16];
-    if (json_is_number(jlws))
-        format_window_label(label, sizeof(label), (int)json_integer_value(jlws));
+    char label[32];
+    if (json_is_integer(duration))
+        format_window_label(label, sizeof(label), (long)json_integer_value(duration));
     else
-        snprintf(label, sizeof(label), "%s", slot);
+        snprintf(label, sizeof(label), "%s", fallback_label);
 
-    double used = json_number_value(jup);
+    double used = json_number_value(used_percent);
     if (used < 0)
         used = 0;
     if (used > 100)
         used = 100;
-    time_t reset_at = (time_t)json_number_value(jra);
 
-    char when[64];
-    format_reset_time(when, sizeof(when), reset_at);
+    char reset_time[64];
+    format_reset_time(reset_time, sizeof(reset_time), (time_t)json_number_value(reset_timestamp));
 
-    char pct_seg[32];
-    int pct_len = snprintf(pct_seg, sizeof(pct_seg), " %3d%% used", (int)(used + 0.5));
-    char tail_seg[96];
-    int tail_len = snprintf(tail_seg, sizeof(tail_seg), " · resets %s", when);
+    char percent_text[32];
+    int percent_width =
+        snprintf(percent_text, sizeof(percent_text), " %3d%% used", (int)(used + 0.5));
+    char reset_text[96];
+    int reset_width = snprintf(reset_text, sizeof(reset_text), " · resets %s", reset_time);
+    int row_width = USAGE_BAR_COLUMN + USAGE_BAR_WIDTH + percent_width + reset_width;
 
-    /* Probe column count and decide single-line vs reflow. The bar
-     * itself is BAR_W cells; the rest is plain ASCII so byte length
-     * equals visible width. */
-    int total = USAGE_ROW_INDENT + USAGE_BAR_W + pct_len + tail_len;
-    int reflow = total > display_width();
-
-    printf("  " ANSI_DIM "%-*s" ANSI_RESET " ", USAGE_LABEL_W, label);
-    progress_bar_print(used / 100.0, USAGE_BAR_W);
-    if (!reflow) {
-        printf(ANSI_DIM "%s%s" ANSI_RESET "\n", pct_seg, tail_seg);
+    printf("  " ANSI_DIM "%-*s" ANSI_RESET " ", USAGE_LABEL_WIDTH, label);
+    progress_bar_print(used / 100.0, USAGE_BAR_WIDTH);
+    if (row_width <= display_width()) {
+        printf(ANSI_DIM "%s%s" ANSI_RESET "\n", percent_text, reset_text);
     } else {
-        printf(ANSI_DIM "%s" ANSI_RESET "\n", pct_seg);
-        printf("%*s" ANSI_DIM "resets %s" ANSI_RESET "\n", USAGE_ROW_INDENT, "", when);
+        printf(ANSI_DIM "%s" ANSI_RESET "\n", percent_text);
+        printf("%*s" ANSI_DIM "resets %s" ANSI_RESET "\n", USAGE_BAR_COLUMN, "", reset_time);
     }
 }
 
-static int codex_query_usage(struct provider *p)
+static int codex_query_usage(struct provider *provider)
 {
-    struct codex *c = (struct codex *)p;
+    struct codex *codex = (struct codex *)provider;
 
-    char *auth_hdr = xasprintf("Authorization: Bearer %s", c->access_token);
-    char *acct_hdr = xasprintf("chatgpt-account-id: %s", c->account_id);
+    char *authorization = xasprintf("Authorization: Bearer %s", codex->access_token);
+    char *account = xasprintf("chatgpt-account-id: %s", codex->account_id);
     const char *headers[] = {
-        auth_hdr, acct_hdr, CODEX_ORIGINATOR, CODEX_USER_AGENT, "Accept: application/json", NULL,
+        authorization, account, CODEX_ORIGINATOR, CODEX_USER_AGENT, "Accept: application/json",
+        NULL,
     };
 
-    /* Single round-trip to chatgpt.com; usually <1s but can stretch on
-     * a flaky link, so run it under a busy window: spinner + Esc cancel
-     * (both no-ops on non-TTY stdout, so `hax -p '/usage'`-style scripted
-     * invocations stay clean). The slash dispatcher already emitted the
-     * leading blank-line gap, so the spinner draws in the row that the
-     * codex header will eventually occupy and the layout stays stable. */
-    struct busy *b = busy_begin("fetching usage...");
+    struct busy *busy = busy_begin("fetching usage...");
     char *body = NULL;
     long status = 0;
-    int rc = http_get(CODEX_USAGE_ENDPOINT, headers, 30, 0, busy_tick, NULL, &body, &status);
-    int cancelled = busy_end(b);
-    free(auth_hdr);
-    free(acct_hdr);
+    int result = http_get(CODEX_USAGE_ENDPOINT, headers, CODEX_USAGE_TIMEOUT_SECONDS, 0, busy_tick,
+                          NULL, &body, &status);
+    int cancelled = busy_end(busy);
+    free(authorization);
+    free(account);
     if (cancelled) {
-        /* User abandoned the wait — busy_end left the [interrupted]
-         * marker; not a failure, no diagnostic. */
         free(body);
         return -1;
     }
-    if (rc != 0 || !body) {
-        /* A 401 here is the same stale-OAuth-token condition the streaming
-         * path reports — match that friendly, actionable phrasing rather
-         * than the bare "failed to fetch" line, which gives the user
-         * nothing to act on. */
+    if (result != 0 || !body) {
         if (status == 401)
             ui_error("codex token expired — run `codex` once to refresh, then retry");
         else
@@ -768,38 +591,28 @@ static int codex_query_usage(struct provider *p)
         return -1;
     }
 
-    json_error_t jerr;
-    json_t *root = json_loads(body, 0, &jerr);
+    json_error_t error;
+    json_t *root = json_loads(body, 0, &error);
     free(body);
     if (!root) {
-        ui_error("usage response is not valid JSON: %s", jerr.text);
+        ui_error("usage response is not valid JSON: %s", error.text);
         return -1;
     }
 
     const char *plan = json_string_value(json_object_get(root, "plan_type"));
-    json_t *rl = json_object_get(root, "rate_limit");
+    json_t *rate_limit = json_object_get(root, "rate_limit");
 
     printf(ANSI_DIM "codex");
-    if (c->email)
-        printf(" · %s", c->email);
+    if (codex->account_email)
+        printf(" · %s", codex->account_email);
     if (plan && *plan)
         printf(" · %s", plan);
     printf(ANSI_RESET "\n");
 
-    if (rl && !json_is_null(rl)) {
-        print_window("primary", json_object_get(rl, "primary_window"));
-        print_window("secondary", json_object_get(rl, "secondary_window"));
+    if (rate_limit && !json_is_null(rate_limit)) {
+        print_usage_window("primary", json_object_get(rate_limit, "primary_window"));
+        print_usage_window("secondary", json_object_get(rate_limit, "secondary_window"));
     } else {
-        /* Plans where the active limiting bucket lives elsewhere in the
-         * payload (the response also carries `credits` for usage-based
-         * plans and `additional_rate_limits` for accounts with extra
-         * workspace/member buckets) currently fall through here even
-         * though there's quota data we could be rendering. Left as a
-         * known limitation until we have a concrete payload from one
-         * of those plans to design the layout against — guessing the
-         * shape from the codex-rs serializer alone is more likely to
-         * mis-render than to help. The honest "nothing rendered here"
-         * message is preferred over inventing a UX. */
         printf("  " ANSI_DIM "no rate-limit windows reported for this plan" ANSI_RESET "\n");
     }
 
@@ -807,194 +620,184 @@ static int codex_query_usage(struct provider *p)
     return 0;
 }
 
-/* ---------- runtime pickers (model / effort) ---------- */
-
-/* Every effort value this backend accepts — the vocabulary, not the offer:
- * "max" only works on the gpt-5.6 family, and model_meta narrows per model
- * from what codex_parse_efforts reads. The narrowing is load-bearing
- * because the server rejects an unsupported level outright (HTTP 400)
- * rather than clamping it to the nearest.
- *
- * "ultra" is deliberately absent: the API takes no such value. The official
- * client sends "max" and switches its own multi-agent policy to proactive
- * delegation, which hax has no tools for. */
+/* The provider-wide superset is narrowed by per-model catalog metadata before use. "ultra" is an
+ * official-client policy label, not a reasoning value accepted by the API. */
 static const char *const CODEX_EFFORTS[] = {"none", "low", "medium", "high", "xhigh", "max"};
 
-static size_t codex_list_efforts(struct provider *p, const char *const **out)
+static size_t codex_list_efforts(struct provider *provider, const char *const **efforts)
 {
-    (void)p;
-    *out = CODEX_EFFORTS;
+    (void)provider;
+    *efforts = CODEX_EFFORTS;
     return sizeof(CODEX_EFFORTS) / sizeof(CODEX_EFFORTS[0]);
 }
 
-/* A 401 is the stale-OAuth-token condition — same friendly phrasing as
- * the streaming and /usage paths; a 2xx that still failed means the body
- * was empty or the transfer died mid-body, not an HTTP error. */
-char *codex_models_error(long status)
+char *codex_model_catalog_error(long http_status)
 {
-    if (status == 401)
+    if (http_status == 401)
         return xstrdup("codex token expired — run `codex` once to refresh, then retry");
-    if (status >= 200 && status < 300)
+    if (http_status >= 200 && http_status < 300)
         return xstrdup("codex sent an empty or truncated model catalog response");
-    if (status != 0)
-        return xasprintf("codex model catalog fetch failed (HTTP %ld)", status);
+    if (http_status != 0)
+        return xasprintf("codex model catalog fetch failed (HTTP %ld)", http_status);
     return xstrdup("could not reach chatgpt.com to list models — check your network");
 }
 
-int codex_model_hidden(const json_t *entry)
+int codex_model_is_hidden(const json_t *entry)
 {
-    const char *vis = json_string_value(json_object_get(entry, "visibility"));
-    return vis && strcmp(vis, "hide") == 0;
+    const char *visibility = json_string_value(json_object_get(entry, "visibility"));
+    return visibility && strcmp(visibility, "hide") == 0;
 }
 
-void codex_parse_model(const json_t *entry, struct model_info *out)
+void codex_parse_model(const json_t *entry, struct model_info *model)
 {
-    /* context_window is what requests actually get; max_context_window is
-     * the model's theoretical ceiling, and they differ (gpt-5.4 serves 272k
-     * of a 1M maximum). */
-    json_t *ctx = json_object_get(entry, "context_window");
-    if (!json_is_integer(ctx) || json_integer_value(ctx) <= 0)
-        ctx = json_object_get(entry, "max_context_window");
-    if (json_is_integer(ctx) && json_integer_value(ctx) > 0)
-        out->context = (long)json_integer_value(ctx);
+    /* context_window is the served limit; max_context_window is only a fallback ceiling. */
+    json_t *context_window = json_object_get(entry, "context_window");
+    if (!json_is_integer(context_window) || json_integer_value(context_window) <= 0)
+        context_window = json_object_get(entry, "max_context_window");
+    if (json_is_integer(context_window) && json_integer_value(context_window) > 0)
+        model->context = (long)json_integer_value(context_window);
 
-    json_t *mods = json_object_get(entry, "input_modalities");
-    if (json_is_array(mods)) {
-        out->image_input = PROVIDER_CAP_NO;
-        for (size_t i = 0; i < json_array_size(mods); i++) {
-            const char *s = json_string_value(json_array_get(mods, i));
-            if (s && strcmp(s, "image") == 0)
-                out->image_input = PROVIDER_CAP_YES;
+    json_t *modalities = json_object_get(entry, "input_modalities");
+    if (json_is_array(modalities)) {
+        model->image_input = PROVIDER_CAP_NO;
+        for (size_t i = 0; i < json_array_size(modalities); i++) {
+            const char *modality = json_string_value(json_array_get(modalities, i));
+            if (modality && strcmp(modality, "image") == 0)
+                model->image_input = PROVIDER_CAP_YES;
         }
     }
 
-    const char *desc = json_string_value(json_object_get(entry, "description"));
-    if (desc && *desc)
-        out->description = xstrdup(desc);
+    const char *description = json_string_value(json_object_get(entry, "description"));
+    if (description && *description)
+        model->description = xstrdup(description);
 
-    codex_parse_efforts(entry, &out->efforts);
+    codex_parse_model_efforts(entry, &model->efforts);
 }
 
-/* Translate `supported_reasoning_levels` — [{effort, description}, …] — into
- * the values /responses accepts for this model. The field is the ladder the
- * official UI shows, so it needs two corrections: drop "ultra", which is
- * not a wire value (see CODEX_EFFORTS), and add "none", which every model
- * here accepts but the official picker doesn't offer. An entry without the
- * field leaves the set unknown, so the lower tiers still answer — an empty
- * list is the opposite, a model denying every level. */
-void codex_parse_efforts(const json_t *entry, struct effort_set *out)
+/* The catalog describes the official UI ladder: it omits accepted value "none" and may include
+ * policy label "ultra", which the wire rejects. An absent ladder is unknown; an empty one denies
+ * every effort. */
+void codex_parse_model_efforts(const json_t *entry, struct effort_set *efforts)
 {
     json_t *levels = json_object_get(entry, "supported_reasoning_levels");
     if (!json_is_array(levels))
         return;
-    out->known = 1;
-    if (json_array_size(levels) == 0)
-        return; /* denied every level, so not even "none" applies */
 
-    effort_set_add(out, "none");
+    efforts->known = 1;
+    if (json_array_size(levels) == 0)
+        return;
+
+    effort_set_add(efforts, "none");
     for (size_t i = 0; i < json_array_size(levels); i++) {
-        json_t *lvl = json_array_get(levels, i);
-        /* Tolerate a bare string in place of the {effort, description}
-         * object: the field is presentation data on the vendor's side and
-         * has no schema guarantee we rely on. */
-        const char *e = json_is_string(lvl) ? json_string_value(lvl)
-                                            : json_string_value(json_object_get(lvl, "effort"));
-        if (e && strcmp(e, "ultra") != 0)
-            effort_set_add(out, e);
+        json_t *level = json_array_get(levels, i);
+        /* Accept the bare-string variant used by older catalog responses. */
+        const char *effort = json_is_string(level)
+                                 ? json_string_value(level)
+                                 : json_string_value(json_object_get(level, "effort"));
+        if (effort && strcmp(effort, "ultra") != 0)
+            effort_set_add(efforts, effort);
     }
 }
 
-/* Fetch the catalog and collect `models[].slug` — the same endpoint and
- * shape codex_parse_meta walks for the single-model probe. The high
- * synthetic client_version keeps already-sendable models visible.
- *
- * Entries the catalog marks `visibility: "hide"` are dropped: they are
- * internal models the Codex UI never offers (the automatic approval-review
- * one), not choices for a user at a /model prompt. */
-static int codex_list_models(struct provider *p, struct model_info **models_out, size_t *n,
-                             char **err, http_tick_cb tick, void *tick_user)
+static int codex_list_models(struct provider *provider, struct model_info **models_out,
+                             size_t *model_count, char **error, http_tick_cb tick, void *tick_user)
 {
-    struct codex *c = (struct codex *)p;
+    struct codex *codex = (struct codex *)provider;
     *models_out = NULL;
-    *n = 0;
+    *model_count = 0;
+
     char *url =
-        xasprintf("%s?client_version=%s", CODEX_MODELS_ENDPOINT, CODEX_PROBE_CLIENT_VERSION);
-    char *auth = xasprintf("Authorization: Bearer %s", c->access_token);
-    char *acct = xasprintf("chatgpt-account-id: %s", c->account_id);
-    const char *headers[] = {
-        auth, acct, CODEX_ORIGINATOR, CODEX_USER_AGENT, "Accept: application/json", NULL};
+        xasprintf("%s?client_version=%s", CODEX_MODELS_ENDPOINT, CODEX_MODEL_CLIENT_VERSION);
+    char **headers = build_model_headers(codex);
     char *body = NULL;
-    long status = 0;
-    int rc = http_get(url, headers, CODEX_PROBE_TIMEOUT_S, 0, tick, tick_user, &body, &status);
-    free(auth);
-    free(acct);
+    long http_status = 0;
+    int result = http_get(url, (const char *const *)headers, CODEX_MODEL_TIMEOUT_SECONDS, 0, tick,
+                          tick_user, &body, &http_status);
+    string_array_free(headers);
     free(url);
-    if (rc != 0) {
-        *err = codex_models_error(status);
+    if (result != 0) {
+        *error = codex_model_catalog_error(http_status);
         free(body);
         return -1;
     }
+
     json_t *root = json_loads(body, 0, NULL);
     free(body);
     if (!root) {
-        *err = xstrdup("codex model catalog response is not valid JSON");
+        *error = xstrdup("codex model catalog response is not valid JSON");
         return -1;
     }
+
     json_t *models = json_object_get(root, "models");
     if (!json_is_array(models)) {
         json_decref(root);
-        *err = xstrdup("codex model catalog response has no model list");
+        *error = xstrdup("codex model catalog response has no model list");
         return -1;
     }
-    size_t cnt = json_array_size(models);
-    struct model_info *out = cnt ? xmalloc(cnt * sizeof(*out)) : NULL;
-    size_t k = 0, with_slug = 0;
-    for (size_t i = 0; i < cnt; i++) {
+
+    size_t entry_count = json_array_size(models);
+    struct model_info *listed_models =
+        entry_count ? xmalloc(entry_count * sizeof(*listed_models)) : NULL;
+    size_t listed_count = 0;
+    size_t slug_count = 0;
+    for (size_t i = 0; i < entry_count; i++) {
         json_t *entry = json_array_get(models, i);
-        json_t *slug = json_object_get(entry, "slug");
-        if (!json_is_string(slug) || !*json_string_value(slug))
+        const char *slug = json_string_value(json_object_get(entry, "slug"));
+        if (!slug || !*slug)
             continue;
-        with_slug++;
-        if (codex_model_hidden(entry))
+
+        slug_count++;
+        if (codex_model_is_hidden(entry))
             continue;
-        model_info_init(&out[k]);
-        out[k].id = xstrdup(json_string_value(slug));
-        codex_parse_model(entry, &out[k]);
-        k++;
+
+        model_info_init(&listed_models[listed_count]);
+        listed_models[listed_count].id = xstrdup(slug);
+        codex_parse_model(entry, &listed_models[listed_count]);
+        listed_count++;
     }
     json_decref(root);
-    /* Entries existed but none carried a slug — malformed, not empty. A
-     * catalog whose every entry is hidden is empty, not malformed, so this
-     * counts slugs seen rather than models kept. */
-    if (cnt > 0 && with_slug == 0) {
-        free(out);
-        *err = xstrdup("codex model catalog response contains no usable model slugs");
+
+    /* A catalog containing only hidden models is valid; one with entries but no slugs is not. */
+    if (entry_count > 0 && slug_count == 0) {
+        free(listed_models);
+        *error = xstrdup("codex model catalog response contains no usable model slugs");
         return -1;
     }
-    *models_out = out;
-    *n = k;
+
+    *models_out = listed_models;
+    *model_count = listed_count;
     return 0;
 }
 
-static void codex_destroy(struct provider *p)
+static void codex_destroy(struct provider *provider)
 {
-    struct codex *c = (struct codex *)p;
-    model_meta_release(p);
-    free(c->access_token);
-    free(c->account_id);
-    free(c->email);
-    free(c->default_model);
-    free(c->default_effort);
-    free(c->session_id);
-    free(c);
+    struct codex *codex = (struct codex *)provider;
+    model_meta_release(provider);
+    free(codex->access_token);
+    free(codex->account_id);
+    free(codex->account_email);
+    free(codex->default_model);
+    free(codex->default_effort);
+    free(codex->session_id);
+    free(codex);
+}
+
+static int get_auth_tokens(json_t *root, const char **access_token, const char **account_id,
+                           const char **id_token)
+{
+    json_t *tokens = json_object_get(root, "tokens");
+    *access_token = json_string_value(json_object_get(tokens, "access_token"));
+    *account_id = json_string_value(json_object_get(tokens, "account_id"));
+    if (id_token)
+        *id_token = json_string_value(json_object_get(tokens, "id_token"));
+    return *access_token && **access_token && *account_id && **account_id;
 }
 
 struct provider *codex_provider_new(const char *name)
 {
     (void)name;
     char *path = expand_home("~/.codex/auth.json");
-    size_t len = 0;
-    char *contents = slurp_file(path, &len);
+    char *contents = slurp_file(path, NULL);
     if (!contents) {
         hax_err("cannot read %s — is the codex CLI installed and logged in?", path);
         free(path);
@@ -1002,73 +805,66 @@ struct provider *codex_provider_new(const char *name)
     }
     free(path);
 
-    json_error_t err;
-    json_t *root = json_loads(contents, 0, &err);
+    json_error_t error;
+    json_t *root = json_loads(contents, 0, &error);
     free(contents);
     if (!root) {
-        hax_err("~/.codex/auth.json is not valid JSON: %s", err.text);
+        hax_err("~/.codex/auth.json is not valid JSON: %s", error.text);
         return NULL;
     }
 
-    json_t *tokens = json_object_get(root, "tokens");
-    const char *access = tokens ? json_string_value(json_object_get(tokens, "access_token")) : NULL;
-    const char *account = tokens ? json_string_value(json_object_get(tokens, "account_id")) : NULL;
-    const char *id_token = tokens ? json_string_value(json_object_get(tokens, "id_token")) : NULL;
-    if (!access || !account) {
+    const char *access_token;
+    const char *account_id;
+    const char *id_token;
+    if (!get_auth_tokens(root, &access_token, &account_id, &id_token)) {
         hax_err("auth.json missing tokens.access_token or tokens.account_id");
         json_decref(root);
         return NULL;
     }
 
-    char *cfg_model = NULL;
-    char *cfg_effort = NULL;
-    load_codex_settings(&cfg_model, &cfg_effort);
-    if (cfg_model && !*cfg_model) {
-        free(cfg_model);
-        cfg_model = NULL;
+    char *default_model = NULL;
+    char *default_effort = NULL;
+    load_codex_settings(&default_model, &default_effort);
+    if (default_model && !*default_model) {
+        free(default_model);
+        default_model = NULL;
     }
-    if (cfg_effort && !*cfg_effort) {
-        free(cfg_effort);
-        cfg_effort = NULL;
+    if (default_effort && !*default_effort) {
+        free(default_effort);
+        default_effort = NULL;
     }
 
-    struct codex *c = xcalloc(1, sizeof(*c));
-    c->default_model = cfg_model ? cfg_model : xstrdup("gpt-5.3-codex");
-    c->default_effort = cfg_effort;
-    c->base.name = "codex";
-    /* Codex serves OpenAI models under a subscription — no reported cost,
-     * so the catalog supplies API-equivalent rates for the "~$" estimate. */
-    c->base.catalog_id = "openai";
-    c->base.default_model = c->default_model;
-    c->base.default_effort = c->default_effort;
-    c->base.stream = codex_stream;
-    c->base.query_usage = codex_query_usage;
-    c->base.list_models = codex_list_models;
-    c->base.list_efforts = codex_list_efforts;
-    c->base.probe_model = codex_probe_model;
-    c->base.destroy = codex_destroy;
-    c->access_token = xstrdup(access);
-    c->account_id = xstrdup(account);
-    c->email = jwt_extract_email(id_token); /* may be NULL — fine */
-    char uuid[37];
-    gen_uuid_v4(uuid);
-    c->session_id = xstrdup(uuid);
+    struct codex *codex = xcalloc(1, sizeof(*codex));
+    codex->access_token = xstrdup(access_token);
+    codex->account_id = xstrdup(account_id);
+    codex->account_email = extract_jwt_email(id_token);
+    codex->default_model = default_model ? default_model : xstrdup("gpt-5.3-codex");
+    codex->default_effort = default_effort;
+    char session_id[37];
+    gen_uuid_v4(session_id);
+    codex->session_id = xstrdup(session_id);
+
+    codex->base.name = "codex";
+    /* Subscription responses report no cost, so estimate against equivalent OpenAI API rates. */
+    codex->base.catalog_id = "openai";
+    codex->base.default_model = codex->default_model;
+    codex->base.default_effort = codex->default_effort;
+    codex->base.stream = codex_stream;
+    codex->base.query_usage = codex_query_usage;
+    codex->base.list_models = codex_list_models;
+    codex->base.list_efforts = codex_list_efforts;
+    codex->base.probe_model = codex_probe_model;
+    codex->base.destroy = codex_destroy;
 
     json_decref(root);
-    /* Metadata for whichever model this run resolves to (HAX_MODEL wins,
-     * per agent.c's resolver, else the codex default), fetched in the
-     * background so the context percentage and effort ladder are live from
-     * the first prompt without delaying it. Failure — expired token,
-     * network blip, an unknown slug — leaves the lower tiers to answer. */
-    const char *cfg_m = config_str("model");
-    model_meta_refresh(&c->base, (cfg_m && *cfg_m) ? cfg_m : c->default_model);
-    return &c->base;
+    const char *configured_model = config_str("model");
+    model_meta_refresh(&codex->base, (configured_model && *configured_model)
+                                         ? configured_model
+                                         : codex->default_model);
+    return &codex->base;
 }
 
-/* Usable iff ~/.codex/auth.json parses and carries both tokens we need —
- * the cheap, file-only precondition the constructor checks, without the
- * network probe it then spawns. */
-static int codex_available_now(const char *name, const char **reason)
+static int codex_auth_available(const char *name, const char **reason)
 {
     (void)name;
     char *path = expand_home("~/.codex/auth.json");
@@ -1077,14 +873,15 @@ static int codex_available_now(const char *name, const char **reason)
             *reason = "no home directory";
         return 0;
     }
-    size_t len = 0;
-    char *contents = slurp_file(path, &len);
+
+    char *contents = slurp_file(path, NULL);
     free(path);
     if (!contents) {
         if (reason)
             *reason = "codex CLI not logged in";
         return 0;
     }
+
     json_t *root = json_loads(contents, 0, NULL);
     free(contents);
     if (!root) {
@@ -1092,21 +889,21 @@ static int codex_available_now(const char *name, const char **reason)
             *reason = "auth.json not valid JSON";
         return 0;
     }
-    json_t *tokens = json_object_get(root, "tokens");
-    const char *access = tokens ? json_string_value(json_object_get(tokens, "access_token")) : NULL;
-    const char *account = tokens ? json_string_value(json_object_get(tokens, "account_id")) : NULL;
-    int ok = access && *access && account && *account;
+
+    const char *access_token;
+    const char *account_id;
+    int available = get_auth_tokens(root, &access_token, &account_id, NULL);
     json_decref(root);
-    if (!ok && reason)
+    if (!available && reason)
         *reason = "codex CLI not logged in";
-    return ok;
+    return available;
 }
 
-static void codex_prepare_availability(const char *name, struct provider_availability *out)
+static void codex_prepare_availability(const char *name, struct provider_availability *availability)
 {
     const char *reason = NULL;
-    out->available = codex_available_now(name, &reason);
-    out->reason = reason;
+    availability->available = codex_auth_available(name, &reason);
+    availability->reason = reason;
 }
 
 const struct provider_factory PROVIDER_CODEX = {
