@@ -323,8 +323,12 @@ static void test_runaway_output_killed_without_polling(void)
     close(fd);
 
     /* The producer is the shell's child, not the shell: once killed it is reaped by init
-     * (the shell itself would linger as a zombie until a registry poll reaps it). */
-    char *cmd = xasprintf("yes & echo $! > %s; wait", path);
+     * (the shell itself would linger as a zombie until a registry poll reaps it). The gate
+     * holds the flood until after detach: an ungated producer races the yield window
+     * against the drainer reaching the output limit, and on a fast machine the limit can
+     * win, completing the call synchronously with no task to wait on. */
+    char *gate = gate_create();
+    char *cmd = xasprintf("{ read -r _ <%s; exec yes; } & echo $! > %s; wait", gate, path);
     char *args = xasprintf("{\"command\":\"%s\",\"background\":true}", cmd);
     char *out = TOOL_BASH.run(args, NULL);
     free(args);
@@ -342,6 +346,9 @@ static void test_runaway_output_killed_without_polling(void)
     }
     unlink(path);
     EXPECT(pid > 0);
+
+    gate_release(gate);
+    free(gate);
     /* The drainer must stop the producer at the output limit on its own; nothing here calls
      * into the registry until the process is already gone. */
     EXPECT(process_is_gone(pid));

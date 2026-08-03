@@ -18,17 +18,12 @@
 #include "tools/task_registry.h"
 
 /* Producers must outlive the yield window (to detach) and initial output must land inside it
- * (to be captured). Sanitizer fork interceptors add spawn latency, so keep the proven wide
- * values there and run tight everywhere else. */
-#if defined(T_TSAN) || defined(T_ASAN)
+ * (to be captured). The margins must absorb spawn latency on the slowest environments that
+ * run the suite — sanitizer interceptors, CI virtual machines — and cost little wall time,
+ * so the same wide values run everywhere. */
 #define TEST_YIELD "50ms"
 #define TEST_PAUSE "0.3"
 #define TEST_GRACE "1s"
-#else
-#define TEST_YIELD "30ms"
-#define TEST_PAUSE "0.05"
-#define TEST_GRACE "150ms"
-#endif
 
 static char *call_bash_background(const char *escaped_command)
 {
