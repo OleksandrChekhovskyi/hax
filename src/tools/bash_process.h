@@ -6,12 +6,13 @@
 
 #include "tool.h"
 
-/* Run the command and return owned model-facing output, optionally streaming display bytes. When
- * background is set, the command detaches into a task after the configured yield window instead
- * of the timeout. `name` (pre-validated by task_name_error, or NULL) becomes the task id if the
- * command detaches. */
+/* Run the command and return owned model-facing output, streaming display bytes through `ctx`
+ * (NULL disables display). When background is set, the command detaches into a task after the
+ * configured yield window instead of the timeout. `name` (pre-validated by task_name_error, or
+ * NULL) becomes the task id if the command detaches. A model-only annotation ending the output
+ * is reported via ctx->output_hidden_tail. */
 char *bash_run_command(const char *command, long timeout_ms, int background, const char *name,
-                       tool_display_fn display, void *display_data);
+                       struct tool_run_ctx *ctx);
 
 /* Signal the command's process group, falling back to the pid when the group is not yet (or no
  * longer) alive. The pid must be unreaped. */

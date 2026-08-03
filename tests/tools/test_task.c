@@ -7,18 +7,21 @@ static void test_background_fast_command_returns_sync(void)
     EXPECT_STR_EQ(out, "hi\n\n[finished during launch; no task created]");
     free(out);
 
-    /* The requested name is reported dead so the model does not wait on it, and stays free. */
+    /* The requested name is reported dead so the model does not wait on it, and stays free.
+     * The note is a model-only tail: the display ends with the command's own output. */
+    const char *footer = "\n[finished during launch; task quick not created]";
     for (int round = 0; round < 2; round++) {
         struct display_capture capture = {0};
         buf_init(&capture.buf);
         struct tool_run_ctx ctx = {.display = append_display, .display_data = &capture};
         out =
             TOOL_BASH.run("{\"command\":\"echo hi\",\"background\":true,\"name\":\"quick\"}", &ctx);
-        EXPECT(strstr(out, "[finished during launch; task quick not created]") != NULL);
+        size_t out_len = strlen(out), footer_len = strlen(footer);
+        EXPECT(out_len > footer_len && strcmp(out + out_len - footer_len, footer) == 0);
+        EXPECT(ctx.output_hidden_tail == footer_len);
         free(out);
-        EXPECT(capture.buf.data != NULL &&
-               strstr(capture.buf.data, "[finished during launch; task quick not created]") !=
-                   NULL);
+        EXPECT(capture.buf.data != NULL);
+        EXPECT_STR_EQ(capture.buf.data, "hi\n");
         buf_free(&capture.buf);
     }
 }

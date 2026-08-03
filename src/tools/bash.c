@@ -90,8 +90,7 @@ static char *run_bash(const char *args_json, struct tool_run_ctx *ctx)
         return error;
     }
 
-    char *result = bash_run_command(command, timeout_ms, background, name,
-                                    ctx ? ctx->display : NULL, ctx ? ctx->display_data : NULL);
+    char *result = bash_run_command(command, timeout_ms, background, name, ctx);
     json_decref(arguments);
     return result;
 }

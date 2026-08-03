@@ -56,6 +56,7 @@ static int items_equal(const struct item *a, const struct item *b)
            nullable_strings_equal(a->tool_name, b->tool_name) &&
            nullable_strings_equal(a->tool_arguments_json, b->tool_arguments_json) &&
            nullable_strings_equal(a->output, b->output) &&
+           a->output_hidden_tail == b->output_hidden_tail &&
            nullable_strings_equal(a->reasoning_json, b->reasoning_json) &&
            nullable_strings_equal(a->reasoning_text, b->reasoning_text) && a->origin == b->origin &&
            turn_usage_equal(a->usage, b->usage) && item_images_equal(a, b);
@@ -153,6 +154,10 @@ static struct item CONVERSATION[] = {
      .call_id = (char *)"c4",
      .output = (char *)"error: tool calls are disabled in this session",
      .origin = ITEM_ORIGIN_REFUSED},
+    {.kind = ITEM_TOOL_RESULT,
+     .call_id = (char *)"c5",
+     .output = (char *)"hi\n\n[finished during launch; no task created]",
+     .output_hidden_tail = sizeof("\n[finished during launch; no task created]") - 1},
 };
 #define CONVERSATION_COUNT (sizeof(CONVERSATION) / sizeof(CONVERSATION[0]))
 

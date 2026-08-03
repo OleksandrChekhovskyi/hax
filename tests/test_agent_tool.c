@@ -141,6 +141,7 @@ static void test_result_moves_run_context(void)
         .result_images = make_image(8),
         .n_result_images = 1,
         .output_summarizes_display = 1,
+        .output_hidden_tail = 4,
     };
 
     struct item result = agent_tool_result_make(&call, "summary", &ctx);
@@ -148,6 +149,7 @@ static void test_result_moves_run_context(void)
     EXPECT(result.images != NULL);
     EXPECT(result.n_images == 1);
     EXPECT(result.origin == ITEM_ORIGIN_SUMMARIZED);
+    EXPECT(result.output_hidden_tail == 4);
     EXPECT(ctx.result_images == NULL);
     EXPECT(ctx.n_result_images == 0);
     item_free(&result);
@@ -180,6 +182,8 @@ static void test_image_budget_drops_new_image(void)
     EXPECT(result.images == NULL);
     EXPECT(strstr(result.output, "not attached") != NULL);
     EXPECT(strstr(result.output, "Read image x.png") != NULL);
+    /* The note is a model-only tail: exactly the bytes appended after the original output. */
+    EXPECT(result.output_hidden_tail == strlen(result.output) - strlen("Read image x.png"));
     EXPECT(history[0].n_images == 1 && history[1].n_images == 1);
     item_free(&result);
     item_free(&history[0]);

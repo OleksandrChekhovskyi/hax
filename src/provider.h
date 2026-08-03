@@ -58,6 +58,9 @@ struct item {
     char *tool_arguments_json;
     /* TOOL_RESULT: */
     char *output;
+    /* TOOL_RESULT: length of a trailing model-only annotation in `output`; user-facing
+     * rendering omits it. */
+    size_t output_hidden_tail;
     /* TOOL_RESULT: owned image parts attached alongside `output`. */
     struct item_image *images;
     size_t n_images;

@@ -3,20 +3,22 @@
 #   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/tasks.txt build/hax
 #
 # Run from the repository root and type one message. Timing assumes the default
-# three-second background yield; HAX_BASH_BACKGROUND_YIELD=500ms gives a faster
+# five-second background yield; HAX_BASH_BACKGROUND_YIELD=500ms gives a faster
 # run. Named task IDs must be unused, and the first unnamed task must be `t3`.
 
 # Turn 1: a background request that finishes during the yield stays synchronous.
-text A backgrounded command that finishes quickly returns synchronously — no task.
-tool bash {"command":"echo quick result","background":true}
+# The launch note naming the never-created task is a model-only tail — the display
+# shows an ordinary call (HAX_TRANSCRIPT captures the note).
+text A backgrounded command that finishes quickly returns synchronously — no task. The launch note saying so goes to the model only; below, this looks like a plain call.
+tool bash {"command":"echo quick result","background":true,"name":"quick"}
 end-turn
 
 # Turns 2–3: launch two paced producers in parallel.
 text Launching two long jobs in parallel; each detaches as a task at the yield window.
-tool bash {"command":"scripts/stream_demo.py slow --prefix tests --delay 0.4 --count 18","background":true,"name":"tests"}
+tool bash {"command":"scripts/stream_demo.py slow --prefix tests --delay 0.4 --count 30","background":true,"name":"tests"}
 end-turn
 
-tool bash {"command":"scripts/stream_demo.py slow --prefix lint --delay 0.5 --count 20","background":true,"name":"lint"}
+tool bash {"command":"scripts/stream_demo.py slow --prefix lint --delay 0.5 --count 30","background":true,"name":"lint"}
 end-turn
 
 # Turn 4: stream `lint` until the other task finishes and interrupts the wait.
@@ -46,7 +48,7 @@ end-turn
 
 # Turn 9: launch a task that completes after control returns to the user.
 text Finally, launching a job I will not wait for.
-tool bash {"command":"sleep 4; echo background answer 42","background":true,"name":"oracle"}
+tool bash {"command":"sleep 7; echo background answer 42","background":true,"name":"oracle"}
 end-turn
 
 # Turn 10: end the chain while `oracle` is running.

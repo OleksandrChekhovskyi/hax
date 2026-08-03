@@ -398,7 +398,11 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *render,
         } else {
             if (tool_has_diff_output(tool) && strncmp(output, "--- ", 4) == 0)
                 renderer.mode = R_DIFF;
-            tool_render_feed(&renderer, output, strlen(output));
+            /* A hidden tail is model-only even when the tool never streamed. */
+            size_t visible_len = strlen(output);
+            if (run_ctx.output_hidden_tail <= visible_len)
+                visible_len -= run_ctx.output_hidden_tail;
+            tool_render_feed(&renderer, output, visible_len);
         }
     }
     tool_render_finalize(&renderer);

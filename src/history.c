@@ -127,6 +127,9 @@ static void render_result_preview(struct render_ctx *render, const struct item *
     char *reconstructed = summarized_preview_body(call, result, &reconstructed_len);
     const char *body = reconstructed ? reconstructed : output;
     size_t body_len = reconstructed ? reconstructed_len : (output ? strlen(output) : 0);
+    /* A hidden tail was never displayed live, so the replay drops it too. */
+    if (!reconstructed && result->output_hidden_tail <= body_len)
+        body_len -= result->output_hidden_tail;
     if (!body || body_len == 0) {
         if (reconstructed)
             render_tool_solo_marker(render, output);

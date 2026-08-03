@@ -51,6 +51,7 @@ struct item agent_tool_result_make(const struct item *call, const char *output,
         ctx->n_result_images = 0;
         if (ctx->output_summarizes_display)
             result.origin = ITEM_ORIGIN_SUMMARIZED;
+        result.output_hidden_tail = ctx->output_hidden_tail;
     }
     return result;
 }
@@ -86,9 +87,13 @@ void agent_tool_result_enforce_image_budget(const struct item *history, size_t n
     else
         snprintf(limit_description, sizeof(limit_description), "is at its image budget (~%zu MB)",
                  (size_t)IMAGE_REQUEST_BASE64_BUDGET_BYTES / (1024 * 1024));
+    size_t body_len = result->output ? strlen(result->output) : 0;
     char *note = xasprintf("%s\n\n[image not attached: this conversation %s. Ask the user to "
                            "/compact (summarizes and frees it) or /new.]",
                            result->output ? result->output : "", limit_description);
     free(result->output);
     result->output = note;
+    /* Appended after the tool displayed its bytes, so the note is model-only; it extends any
+     * hidden tail already ending the output. */
+    result->output_hidden_tail += strlen(note) - body_len;
 }

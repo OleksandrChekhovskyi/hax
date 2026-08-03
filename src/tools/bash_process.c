@@ -213,8 +213,10 @@ static char *adopt_running_command(const struct shell_process *process, const ch
 }
 
 char *bash_run_command(const char *command, long timeout_ms, int background, const char *name,
-                       tool_display_fn display, void *display_data)
+                       struct tool_run_ctx *ctx)
 {
+    tool_display_fn display = ctx ? ctx->display : NULL;
+    void *display_data = ctx ? ctx->display_data : NULL;
     int tasks_enabled = !config_bool("no_tasks");
     if (!tasks_enabled)
         background = 0;
@@ -373,7 +375,8 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
     }
 
     /* A background request that completed inside the yield window never created a task; name
-     * the handle the model might otherwise wait on. */
+     * the handle the model might otherwise wait on. The note is model-only: the user never saw
+     * the background request, so their view reads as an ordinary synchronous call. */
     char task_footer[96] = "";
     if (background && stop_reason == BASH_STOP_NONE) {
         if (name)
@@ -386,17 +389,16 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
 
     /* Status suffixes report the deadline that was actually armed: the background yield for
      * background runs, the timeout otherwise (transition_ms covers both). */
-    if (display) {
+    if (display)
         display_suffix(display, display_data, bash_output_size(output), binary, displayed_body,
                        stop_reason, transition_ms, wait_status);
-        if (*task_footer)
-            display(task_footer, strlen(task_footer), display_data);
-    }
     char *result = bash_output_finish(output, binary, stop_reason, transition_ms, wait_status);
     if (*task_footer) {
         char *with_footer = xasprintf("%s%s", result, task_footer);
         free(result);
         result = with_footer;
+        if (ctx)
+            ctx->output_hidden_tail = strlen(task_footer);
     }
     bash_output_destroy(output);
     return result;

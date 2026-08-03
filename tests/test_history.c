@@ -130,6 +130,21 @@ static void test_full_shows_tool_output(void)
     free(out);
 }
 
+/* A model-only tail (a background launch note, an image-budget note) was
+ * never displayed live, so the replay must not resurface it. */
+static void test_hidden_tail_stays_hidden(void)
+{
+    size_t n;
+    struct item *items = sample_turn(&n);
+    items[2].output = (char *)"COUNT_OUTPUT_164\n"
+                              "\n[finished during launch; no task created]";
+    items[2].output_hidden_tail = strlen("\n[finished during launch; no task created]");
+    char *out = render(HISTORY_FULL, items, n, 0);
+    EXPECT(strstr(out, "COUNT_OUTPUT_164") != NULL);
+    EXPECT(strstr(out, "finished during launch") == NULL);
+    free(out);
+}
+
 /* A collapsed call showed no output live, so it must not gain any here —
  * `read` is collapsed preview, and its result can be a whole file. */
 static void test_full_keeps_collapsed_calls_quiet(void)
@@ -960,6 +975,7 @@ int main(void)
     locale_init_utf8();
     test_brief_omits_tool_output();
     test_full_shows_tool_output();
+    test_hidden_tail_stays_hidden();
     test_full_keeps_collapsed_calls_quiet();
     test_collapsed_cluster_spans_turns_tightly();
     test_brief_names_verbose_tool_args();

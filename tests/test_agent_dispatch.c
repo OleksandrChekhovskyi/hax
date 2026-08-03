@@ -33,14 +33,30 @@ static const struct tool TOOL_MODE_PROBE = {
     .display = {.preview_mode = TOOL_PREVIEW_HEAD_TAIL, .select_preview = select_head},
 };
 
+/* A tool that returns a hidden tail without ever streaming display bytes. */
+static char *run_tail_probe(const char *args_json, struct tool_run_ctx *ctx)
+{
+    (void)args_json;
+    ctx->output_hidden_tail = strlen("\n[model-only note]");
+    return xstrdup("body-line\n[model-only note]");
+}
+
+static const struct tool TOOL_TAIL_PROBE = {
+    .def = {.name = "tail-probe"},
+    .run = run_tail_probe,
+    .display = {.preview_mode = TOOL_PREVIEW_HEAD_TAIL},
+};
+
 /* agent_find_tool lives in agent_core.c alongside the full tool table; stub it
- * so this test links only its two tools and the render stack. */
+ * so this test links only its own tools and the render stack. */
 const struct tool *agent_find_tool(const char *name)
 {
     if (strcmp(name, "write") == 0)
         return &TOOL_WRITE;
     if (strcmp(name, "mode-probe") == 0)
         return &TOOL_MODE_PROBE;
+    if (strcmp(name, "tail-probe") == 0)
+        return &TOOL_TAIL_PROBE;
     return NULL;
 }
 
@@ -212,6 +228,33 @@ static void test_selector_overrides_non_collapsed_mode(void)
     item_free(&call);
 }
 
+/* The verbose fallback renders the returned output when the tool never
+ * streamed; it must honor the hidden-tail contract locally rather than
+ * rely on every tail-producing tool also having called display. */
+static void test_hidden_tail_not_displayed_by_fallback(void)
+{
+    struct item call = {
+        .kind = ITEM_TOOL_CALL,
+        .call_id = xstrdup("call-tail"),
+        .tool_name = xstrdup("tail-probe"),
+        .tool_arguments_json = xstrdup("{}"),
+    };
+    struct render_ctx render = {.state = RS_IDLE, .spinner = spinner_new(NULL)};
+
+    cap_reset();
+    struct item result = dispatch_tool_call(&render, &call, -1);
+    const char *cap = cap_read();
+
+    EXPECT(strstr(cap, "body-line") != NULL);
+    EXPECT(strstr(cap, "model-only note") == NULL);
+    /* The model-facing result keeps the tail and its length. */
+    EXPECT(result.output && strstr(result.output, "model-only note") != NULL);
+    EXPECT(result.output_hidden_tail == strlen("\n[model-only note]"));
+    item_free(&result);
+    spinner_free(render.spinner);
+    item_free(&call);
+}
+
 int main(void)
 {
     cap_init();
@@ -219,5 +262,6 @@ int main(void)
     test_control_only_content_summary_row_displayed();
     test_visible_content_shows_preview_not_summary();
     test_selector_overrides_non_collapsed_mode();
+    test_hidden_tail_not_displayed_by_fallback();
     T_REPORT();
 }

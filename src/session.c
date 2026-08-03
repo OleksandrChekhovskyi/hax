@@ -196,6 +196,9 @@ json_t *item_to_json(const struct item *item)
     json_set_optional_string(object, "tool_name", item->tool_name);
     json_set_optional_string(object, "arguments", item->tool_arguments_json);
     json_set_optional_string(object, "output", item->output);
+    if (item->output_hidden_tail)
+        json_object_set_new(object, "output_hidden_tail",
+                            json_integer((json_int_t)item->output_hidden_tail));
     json_set_optional_string(object, "reasoning_json", item->reasoning_json);
     json_set_optional_string(object, "reasoning_text", item->reasoning_text);
     json_set_optional_string(object, "provider", item->provider);
@@ -241,6 +244,9 @@ int item_from_json(const json_t *object, struct item *out)
     out->tool_name = json_dup_string(object, "tool_name");
     out->tool_arguments_json = json_dup_string(object, "arguments");
     out->output = json_dup_string(object, "output");
+    json_t *hidden_tail = json_object_get(object, "output_hidden_tail");
+    if (json_is_integer(hidden_tail) && json_integer_value(hidden_tail) > 0)
+        out->output_hidden_tail = (size_t)json_integer_value(hidden_tail);
     out->reasoning_json = json_dup_string(object, "reasoning_json");
     out->reasoning_text = json_dup_string(object, "reasoning_text");
     out->provider = json_dup_string(object, "provider");
