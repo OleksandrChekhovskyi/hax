@@ -4,7 +4,7 @@
 
 #include "harness.h"
 #include "provider.h"
-#include "providers/codex.h"
+#include "providers/codex_messages.h"
 
 static const char *item_type(json_t *item)
 {

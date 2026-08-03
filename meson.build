@@ -73,6 +73,7 @@ sources = files(
     'src/providers/anthropic_messages.c',
     'src/providers/codex.c',
     'src/providers/codex_events.c',
+    'src/providers/codex_messages.c',
     'src/providers/config_provider.c',
     'src/providers/llamacpp.c',
     'src/providers/mock.c',

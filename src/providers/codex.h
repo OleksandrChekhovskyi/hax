@@ -22,11 +22,6 @@ int codex_model_is_hidden(const json_t *entry);
 /* Read the wire-compatible reasoning levels reported by one Codex catalog entry. */
 void codex_parse_model_efforts(const json_t *entry, struct effort_set *efforts);
 
-/* Return a new Responses API input array for the flat conversation items. Opaque reasoning is
- * included only when its provider and model match the request. */
-json_t *codex_build_input_items(const struct item *items, size_t n_items, const char *provider,
-                                const char *model, int image_input);
-
 extern const struct provider_factory PROVIDER_CODEX;
 
 #endif /* HAX_PROVIDERS_CODEX_H */
