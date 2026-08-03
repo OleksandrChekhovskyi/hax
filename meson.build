@@ -168,7 +168,7 @@ hax_dep = declare_dependency(
     ],
 )
 
-executable('hax',
+hax_exe = executable('hax',
     'src/main.c',
     dependencies: [hax_dep],
     install: true,

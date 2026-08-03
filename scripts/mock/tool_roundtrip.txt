@@ -1,0 +1,11 @@
+# One bash tool call, then a closing turn. The command writes out.txt
+# into the current working directory.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/tool_roundtrip.txt build/hax -p go
+
+text Running a command
+tool bash {"command":"echo marker42 > out.txt"}
+end-turn
+
+text Tool finished.
+end-turn

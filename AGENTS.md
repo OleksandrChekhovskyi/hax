@@ -8,7 +8,7 @@ headers.
 
 ```sh
 make                                      # build (quiet; sets up build/ on first run)
-make tests                                # build + all tests
+make tests                                # build + all tests (unit + e2e)
 make lint                                 # clang-format + style script + clang-tidy
 scripts/check.sh test <name>...           # build + selected tests (one or more names)
 ```
@@ -39,6 +39,11 @@ at process exit; raw `mkdtemp` in tests fails `make lint`.
 To add a test, append its source to `test_sources` in `tests/meson.build`, grouped to mirror
 the production `sources` list. Test names are path-derived: `tools/test_read.c` becomes
 `tools/read`, and `test_util.c` becomes `util`.
+
+End-to-end scenarios follow the same conventions in Python: standalone scripts under
+`tests/e2e/`, registered in `e2e_scenarios` in `tests/meson.build`. They run the built binary
+hermetically against mock scripts from `scripts/mock/` via `tests/e2e/harness.py`; its
+docstrings are the how-to.
 
 Useful manual/debug knobs:
 

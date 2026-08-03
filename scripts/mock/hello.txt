@@ -1,0 +1,6 @@
+# Minimal one-turn script: a single text response.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/hello.txt build/hax -p hi
+
+text Hello from mock
+end-turn

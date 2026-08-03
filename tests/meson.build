@@ -112,3 +112,23 @@ foreach src : test_sources
     )
     test(name, exe)
 endforeach
+
+# End-to-end scenarios: Python scripts under e2e/ that drive the built binary
+# through the mock provider (see e2e/harness.py). Naming mirrors the C tests:
+# e2e/test_oneshot_text.py registers as e2e/oneshot_text, so the name prefix
+# selects the group (`meson test 'e2e/*'`).
+e2e_scenarios = [
+    'oneshot_text',
+    'oneshot_tool',
+]
+
+python = find_program('python3')
+foreach name : e2e_scenarios
+    test('e2e' / name,
+        python,
+        args: [files('e2e/test_' + name + '.py')],
+        env: {'HAX_BIN': hax_exe.full_path()},
+        depends: hax_exe,
+        timeout: 60,
+    )
+endforeach
