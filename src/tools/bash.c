@@ -61,7 +61,8 @@ static char *run_bash(const char *args_json, struct tool_run_ctx *ctx)
     }
 
     /* Validate before the command runs, so a bad name is a side-effect-free retry. With tasks
-     * disabled the name is inert and ignored. */
+     * disabled the name is inert and ignored. Models routinely send every declared field, so an
+     * empty name means unnamed rather than forcing a retry. */
     const char *name = NULL;
     json_t *name_value = json_object_get(arguments, "name");
     if (name_value && !json_is_null(name_value) && !config_bool("no_tasks")) {
@@ -70,10 +71,14 @@ static char *run_bash(const char *args_json, struct tool_run_ctx *ctx)
             return xstrdup("'name' must be a string");
         }
         name = json_string_value(name_value);
-        char *name_error = task_name_error(name);
-        if (name_error) {
-            json_decref(arguments);
-            return name_error;
+        if (!*name) {
+            name = NULL;
+        } else {
+            char *name_error = task_name_error(name);
+            if (name_error) {
+                json_decref(arguments);
+                return name_error;
+            }
         }
     }
 

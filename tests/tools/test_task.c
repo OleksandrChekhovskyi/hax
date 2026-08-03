@@ -53,9 +53,12 @@ static void test_background_detaches_and_wait_collects(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
     char *gate = gate_create();
-    char *cmd = xasprintf("echo start; read -r _ <%s; echo done", gate);
-    char *out = call_bash_background(cmd);
-    free(cmd);
+    /* The empty name means unnamed: the detached task still gets an automatic id. */
+    char *args = xasprintf("{\"command\":\"echo start; read -r _ <%s; echo done\","
+                           "\"background\":true,\"name\":\"\"}",
+                           gate);
+    char *out = TOOL_BASH.run(args, NULL);
+    free(args);
     EXPECT(strstr(out, "[detached as task t") != NULL);
     /* The yield window captured the initial output. */
     EXPECT(strstr(out, "start") != NULL);
@@ -554,7 +557,6 @@ static void test_task_name_validation(void)
         const char *name_json;
         const char *expected_error;
     } cases[] = {
-        {"\"\"", "'name' must not be empty"},
         {"\"has space\"", "letters, digits"},
         {"\"caf\\u00e9\"", "letters, digits"},
         {"\"t7\"", "automatic task id"},
@@ -578,6 +580,16 @@ static void test_task_name_validation(void)
                               NULL);
     EXPECT(strstr(out, "ran") != NULL);
     EXPECT(strstr(out, "too long") == NULL);
+    free(out);
+
+    /* An empty name means unnamed, not an error: models routinely send every declared field. */
+    out = TOOL_BASH.run("{\"command\":\"echo ran\",\"background\":false,\"name\":\"\"}", NULL);
+    EXPECT(strstr(out, "ran") != NULL);
+    EXPECT(strstr(out, "task") == NULL);
+    free(out);
+    out = TOOL_BASH.run("{\"command\":\"echo ran\",\"background\":true,\"name\":\"\"}", NULL);
+    EXPECT(strstr(out, "ran") != NULL);
+    EXPECT(strstr(out, "no task created") != NULL);
     free(out);
 }
 
