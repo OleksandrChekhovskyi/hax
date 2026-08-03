@@ -14,14 +14,13 @@
 #include "provider.h"
 #include "tool_schema.h"
 #include "util.h"
+#include "providers/codex_auth.h"
 #include "providers/codex_events.h"
 #include "providers/codex_messages.h"
 #include "providers/codex_settings.h"
 #include "render/progress.h"
-#include "system/path.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
-#include "text/base64.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 #include "transport/retry.h"
@@ -50,43 +49,6 @@ struct codex {
     char *default_effort;
     char *session_id; /* stable prompt-cache and request-routing key */
 };
-
-/* This is an informational label, not authentication: the JWT from Codex's protected auth file is
- * decoded but not verified. Some login flows put email only in the namespaced profile claim. */
-static char *extract_jwt_email(const char *jwt)
-{
-    if (!jwt || !*jwt)
-        return NULL;
-
-    const char *payload_start = strchr(jwt, '.');
-    if (!payload_start)
-        return NULL;
-    payload_start++;
-
-    const char *payload_end = strchr(payload_start, '.');
-    if (!payload_end)
-        return NULL;
-
-    unsigned char *payload =
-        base64url_decode(payload_start, (size_t)(payload_end - payload_start), NULL);
-    if (!payload)
-        return NULL;
-
-    json_t *root = json_loads((char *)payload, 0, NULL);
-    free(payload);
-    if (!root)
-        return NULL;
-
-    const char *email = json_string_value(json_object_get(root, "email"));
-    if (!email || !*email) {
-        json_t *profile = json_object_get(root, "https://api.openai.com/profile");
-        email = json_string_value(json_object_get(profile, "email"));
-    }
-
-    char *result = email && *email ? xstrdup(email) : NULL;
-    json_decref(root);
-    return result;
-}
 
 static json_t *build_tools(const struct tool_def *tools, size_t n_tools)
 {
@@ -589,54 +551,38 @@ static void codex_destroy(struct provider *provider)
     free(codex);
 }
 
-static int get_auth_tokens(json_t *root, const char **access_token, const char **account_id,
-                           const char **id_token)
-{
-    json_t *tokens = json_object_get(root, "tokens");
-    *access_token = json_string_value(json_object_get(tokens, "access_token"));
-    *account_id = json_string_value(json_object_get(tokens, "account_id"));
-    if (id_token)
-        *id_token = json_string_value(json_object_get(tokens, "id_token"));
-    return *access_token && **access_token && *account_id && **account_id;
-}
-
 struct provider *codex_provider_new(const char *name)
 {
     (void)name;
-    char *path = expand_home("~/.codex/auth.json");
-    char *contents = slurp_file(path, NULL);
-    if (!contents) {
-        hax_err("cannot read %s — is the codex CLI installed and logged in?", path);
-        free(path);
+    struct codex_auth auth;
+    char *detail = NULL;
+    enum codex_auth_status status = codex_auth_load(&auth, &detail);
+    switch (status) {
+    case CODEX_AUTH_OK:
+        break;
+    case CODEX_AUTH_NO_FILE:
+        hax_err("cannot read %s — is the codex CLI installed and logged in?", detail);
+        free(detail);
         return NULL;
-    }
-    free(path);
-
-    json_error_t error;
-    json_t *root = json_loads(contents, 0, &error);
-    free(contents);
-    if (!root) {
-        hax_err("~/.codex/auth.json is not valid JSON: %s", error.text);
+    case CODEX_AUTH_BAD_JSON:
+        hax_err("~/.codex/auth.json is not valid JSON: %s", detail);
+        free(detail);
         return NULL;
-    }
-
-    const char *access_token;
-    const char *account_id;
-    const char *id_token;
-    if (!get_auth_tokens(root, &access_token, &account_id, &id_token)) {
+    case CODEX_AUTH_NO_TOKENS:
         hax_err("auth.json missing tokens.access_token or tokens.account_id");
-        json_decref(root);
+        free(detail);
         return NULL;
     }
+    free(detail);
 
     char *default_model = NULL;
     char *default_effort = NULL;
     codex_load_settings(&default_model, &default_effort);
 
     struct codex *codex = xcalloc(1, sizeof(*codex));
-    codex->access_token = xstrdup(access_token);
-    codex->account_id = xstrdup(account_id);
-    codex->account_email = extract_jwt_email(id_token);
+    codex->access_token = auth.access_token;
+    codex->account_id = auth.account_id;
+    codex->account_email = auth.email;
     codex->default_model = default_model ? default_model : xstrdup("gpt-5.3-codex");
     codex->default_effort = default_effort;
     char session_id[37];
@@ -655,7 +601,6 @@ struct provider *codex_provider_new(const char *name)
     codex->base.probe_model = codex_probe_model;
     codex->base.destroy = codex_destroy;
 
-    json_decref(root);
     const char *configured_model = config_str("model");
     model_meta_refresh(&codex->base, (configured_model && *configured_model)
                                          ? configured_model
@@ -663,46 +608,15 @@ struct provider *codex_provider_new(const char *name)
     return &codex->base;
 }
 
-static int codex_auth_available(const char *name, const char **reason)
-{
-    (void)name;
-    char *path = expand_home("~/.codex/auth.json");
-    if (!path) {
-        if (reason)
-            *reason = "no home directory";
-        return 0;
-    }
-
-    char *contents = slurp_file(path, NULL);
-    free(path);
-    if (!contents) {
-        if (reason)
-            *reason = "codex CLI not logged in";
-        return 0;
-    }
-
-    json_t *root = json_loads(contents, 0, NULL);
-    free(contents);
-    if (!root) {
-        if (reason)
-            *reason = "auth.json not valid JSON";
-        return 0;
-    }
-
-    const char *access_token;
-    const char *account_id;
-    int available = get_auth_tokens(root, &access_token, &account_id, NULL);
-    json_decref(root);
-    if (!available && reason)
-        *reason = "codex CLI not logged in";
-    return available;
-}
-
 static void codex_prepare_availability(const char *name, struct provider_availability *availability)
 {
-    const char *reason = NULL;
-    availability->available = codex_auth_available(name, &reason);
-    availability->reason = reason;
+    (void)name;
+    struct codex_auth auth;
+    enum codex_auth_status status = codex_auth_load(&auth, NULL);
+    codex_auth_release(&auth);
+
+    availability->available = status == CODEX_AUTH_OK;
+    availability->reason = codex_auth_status_reason(status);
 }
 
 const struct provider_factory PROVIDER_CODEX = {
