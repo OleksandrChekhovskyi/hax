@@ -1,6 +1,6 @@
 # Build/test/lint entry points for humans, editors (nvim :make), and coding
 # agents. Delegates to scripts/check.sh, which keeps successful output compact
-# and lets failures pass through untouched.
+# and keeps failure output focused on diagnostics.
 
 BUILD_DIR ?= build
 
