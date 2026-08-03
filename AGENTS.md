@@ -10,7 +10,7 @@ headers.
 make                                      # build (quiet; sets up build/ on first run)
 make tests                                # build + all tests
 make lint                                 # clang-format + style script + clang-tidy
-scripts/check.sh test <name>              # build + one test
+scripts/check.sh test <name>...           # build + selected tests (one or more names)
 ```
 
 `Makefile` delegates to `scripts/check.sh`, which keeps successful output to a compact
