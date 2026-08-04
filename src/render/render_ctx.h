@@ -81,6 +81,7 @@ struct render_ctx {
      * so the tick aborts it and the pause lands immediately instead of
      * after a full extra turn. Reset per provider turn. */
     int stream_content_seen;
+    int text_started;
 
     /* Whether reasoning deltas are rendered or only drive the spinner. */
     int show_reasoning;
@@ -114,18 +115,11 @@ void render_open_block(struct render_ctx *r);
  * goes quiet. */
 void render_text_chunk(struct render_ctx *r, const char *s, size_t n);
 
-/* Render a chunk of assistant answer text into RS_TEXT: peek-strip leading
- * newlines on the first chunk of the block (disp tracks "first" via
- * saw_text, which the caller clears per stream/item) so a provider's
- * trailing-NL convention doesn't open a stray blank line above the answer,
- * then transition to RS_TEXT and feed the rest. A chunk that is all leading
- * newlines collapses to nothing (no transition — the spinner stays up).
- * Shared by the live text-delta handler and resume replay so both strip
- * identically. */
-void render_text_delta(struct render_ctx *r, const char *s, size_t n);
+/* Render assistant text, ignoring leading line endings until the first visible text delta. */
+void render_text_delta(struct render_ctx *r, const char *bytes, size_t len);
 
 /* Show the labeled "composing..." line spinner for an in-progress table
- * buffer: flush any held newline so it lands on a fresh row below the
+ * buffer: commit any pending newline so it lands on a fresh row below the
  * preceding block, then raise SPINNER_LINE. Idempotent via
  * r->table_composing. Called from the stream tick (slow table) and
  * re-issued by render_text_chunk across the silent row-buffering deltas. */

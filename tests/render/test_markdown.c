@@ -882,8 +882,7 @@ static void test_reset_clears_state(void)
 
 static void test_emit_kind_separates_content_and_sgr(void)
 {
-    /* Downstream display bookkeeping counts visible bytes and held newlines;
-     * labeling SGR as content would corrupt those counts. */
+    /* Labeling SGR as content would corrupt downstream visible-byte and newline state. */
     struct kind_capture c = {0};
     buf_init(&c.text);
     buf_init(&c.raw);

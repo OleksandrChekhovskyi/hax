@@ -271,12 +271,12 @@ enum slash_result slash_dispatch(const char *line, struct agent_state *state)
     };
     command->handler(&call);
     if (command->display == COMMAND_DISPLAY_RAW)
-        disp->trail = 1;
+        disp_sync_external_line(disp);
     free(parsed.name);
     return SLASH_HANDLED;
 
 raw_output:
-    disp->trail = 1;
+    disp_sync_external_line(disp);
     free(parsed.name);
     return result;
 }
@@ -306,7 +306,7 @@ static void run_resume(const struct command_call *call)
     /* An opened picker erases back to the separator row. Without one, a raw note ends one row
      * below it and the display state must follow. */
     if (!picker_opened)
-        call->state->render->disp.trail = 1;
+        disp_sync_external_line(&call->state->render->disp);
     if (!path)
         return;
     agent_resume_session(call->state, path);
@@ -379,7 +379,7 @@ static void run_history_action(const struct command_call *call, enum history_act
         if (action == HISTORY_FORK && *end == '\0' && turns_back == 0) {
             if (session->n_items == 0) {
                 ui_note("nothing to fork yet");
-                state->render->disp.trail = 1;
+                disp_sync_external_line(&state->render->disp);
                 return;
             }
             agent_fork(state, turn_count);
@@ -391,14 +391,14 @@ static void run_history_action(const struct command_call *call, enum history_act
             else
                 ui_error("/%s takes a number of turns between %ld and %zu", verb,
                          minimum_turns_back, turn_count);
-            state->render->disp.trail = 1;
+            disp_sync_external_line(&state->render->disp);
             return;
         }
         turn_index = (long)turn_count - turns_back;
     } else {
         if (turn_count == 0) {
             ui_note("nothing to %s yet", verb);
-            state->render->disp.trail = 1;
+            disp_sync_external_line(&state->render->disp);
             return;
         }
         turn_index = choose_history_turn(session, turn_count, action);
@@ -408,7 +408,7 @@ static void run_history_action(const struct command_call *call, enum history_act
              * picker and no way to choose — point at the argument form. */
             if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
                 ui_note("/%s needs a number of turns when not interactive", verb);
-                state->render->disp.trail = 1;
+                disp_sync_external_line(&state->render->disp);
             }
             return;
         }

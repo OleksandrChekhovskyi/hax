@@ -202,7 +202,7 @@ static void test_dispatch_not_a_command(void)
 static void test_dispatch_unknown(void)
 {
     struct render_ctx r = {0};
-    r.disp.trail = 1; /* models the cursor one line below the echoed command */
+    r.disp.committed_newlines = 1; /* models the cursor one line below the echoed command */
     struct agent_state state = {.render = &r};
     struct dispatch_call c = {.line = "/nonesuch", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
@@ -261,7 +261,7 @@ static void test_dispatch_bare_slash_falls_through(void)
 static void test_dispatch_bad_usage(void)
 {
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_state state = {.render = &r};
     struct dispatch_call c = {.line = "/help foo", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
@@ -275,7 +275,7 @@ static void test_dispatch_bad_usage(void)
 static void test_help_lists_commands_and_shortcuts(void)
 {
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_state state = {.render = &r};
     struct dispatch_call c = {.line = "/help", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
@@ -296,7 +296,7 @@ static void test_help_lists_commands_and_shortcuts(void)
 static void test_session_prints_totals(void)
 {
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_state state = {.render = &r};
     state.stats.user_turns = 3;
     state.stats.requests = 7;
@@ -343,7 +343,7 @@ static void test_session_prints_totals(void)
 static void test_session_hides_unreported_rows(void)
 {
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_state state = {.render = &r};
     struct dispatch_call c = {.line = "/session", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
@@ -360,7 +360,7 @@ static void test_session_hides_unreported_rows(void)
 static void test_session_marks_estimated_spend(void)
 {
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_state state = {.render = &r};
     struct stream_usage paid = {-1, -1, -1, -1, -1, 0.030};
     agent_spend_account(&state.stats.spend, &paid, NULL, NULL);
@@ -396,7 +396,7 @@ static void test_new_clears_session_without_switching_preset(void)
     EXPECT(s.n_items > 0);
     stub_preset_name = NULL;
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_state state = {.session = &s, .render = &r};
     struct dispatch_call c = {.line = "/new", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
@@ -415,7 +415,7 @@ static void test_clear_alias_runs_new(void)
     EXPECT(s.n_items > 0);
 
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_state state = {.session = &s, .render = &r};
     struct dispatch_call c = {.line = "/clear", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
@@ -436,7 +436,7 @@ static void test_new_with_preset_switches_then_clears(void)
     stub_preset_name = NULL;
     stub_preset_announce = -1;
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_state state = {.session = &s, .render = &r};
     struct dispatch_call c = {.line = "/new work", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
@@ -457,7 +457,7 @@ static void test_new_keeps_conversation_when_preset_fails(void)
 
     stub_preset_rc = -1;
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_state state = {.session = &s, .render = &r};
     struct dispatch_call c = {.line = "/new nwo", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
@@ -477,7 +477,7 @@ static void test_clear_alias_takes_preset_too(void)
     stub_preset_rc = 0;
     stub_preset_name = NULL;
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_state state = {.session = &s, .render = &r};
     struct dispatch_call c = {.line = "/clear work", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
@@ -492,7 +492,7 @@ static void test_clear_alias_takes_preset_too(void)
 static void test_preset_save_routes_whole_argument(void)
 {
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_state state = {.render = &r};
 
     stub_preset_save_argument = NULL;
@@ -516,7 +516,7 @@ static void test_preset_save_routes_whole_argument(void)
 static void test_dispatch_trims_trailing_whitespace(void)
 {
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_state state = {.render = &r};
     struct dispatch_call c = {.line = "/help   ", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
@@ -524,48 +524,48 @@ static void test_dispatch_trims_trailing_whitespace(void)
     free(out);
 }
 
-static void test_resume_cancelled_picker_keeps_trail(void)
+static void test_resume_cancelled_picker_keeps_newline_state(void)
 {
     /* Cancellation erases an opened picker back to the separator row. */
     stub_picker_shown = 1;
     stub_picker_path = NULL;
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_state state = {.render = &r};
     struct dispatch_call c = {.line = "/resume", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
-    EXPECT(r.disp.trail == 2);
+    EXPECT(r.disp.committed_newlines == 2);
     free(out);
 }
 
-static void test_resume_selected_session_keeps_trail(void)
+static void test_resume_selected_session_keeps_newline_state(void)
 {
     /* Selection also erases the picker before replay begins. */
     stub_picker_shown = 1;
     stub_picker_path = "/tmp/some-session.jsonl";
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_state state = {.render = &r};
     struct dispatch_call c = {.line = "/resume", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
-    EXPECT(r.disp.trail == 2);
+    EXPECT(r.disp.committed_newlines == 2);
     free(out);
 }
 
-static void test_resume_no_picker_repairs_trail(void)
+static void test_resume_no_picker_repairs_newline_state(void)
 {
     /* Without a picker, its raw note leaves the cursor below the separator row. */
     stub_picker_shown = 0;
     stub_picker_path = NULL;
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_state state = {.render = &r};
     struct dispatch_call c = {.line = "/resume", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
-    EXPECT(r.disp.trail == 1);
+    EXPECT(r.disp.committed_newlines == 1);
     free(out);
 }
 
@@ -574,7 +574,7 @@ static void test_resume_no_picker_repairs_trail(void)
 static void test_undo_fork_empty_conversation(void)
 {
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_session s = {0};
     struct agent_state state = {.session = &s, .render = &r};
 
@@ -599,7 +599,7 @@ static void test_compaction_seed_history_rules(void)
                                            .text = xstrdup("seed"),
                                            .origin = ITEM_ORIGIN_COMPACT_SEED});
     struct render_ctx r = {0};
-    r.disp.trail = 1;
+    r.disp.committed_newlines = 1;
     struct agent_state state = {.session = &s, .render = &r};
 
     struct dispatch_call cf = {.line = "/fork 0", .state = &state};
@@ -648,9 +648,9 @@ int main(void)
     test_clear_alias_takes_preset_too();
     test_preset_save_routes_whole_argument();
     test_dispatch_trims_trailing_whitespace();
-    test_resume_cancelled_picker_keeps_trail();
-    test_resume_selected_session_keeps_trail();
-    test_resume_no_picker_repairs_trail();
+    test_resume_cancelled_picker_keeps_newline_state();
+    test_resume_selected_session_keeps_newline_state();
+    test_resume_no_picker_repairs_newline_state();
     test_undo_fork_empty_conversation();
     test_compaction_seed_history_rules();
     T_REPORT();

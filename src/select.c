@@ -17,6 +17,7 @@
 #include "provider.h"
 #include "util.h"
 #include "providers/registry.h"
+#include "render/disp.h"
 #include "render/render_ctx.h"
 #include "system/bg_job.h"
 #include "terminal/picker.h"
@@ -346,7 +347,7 @@ static struct model_pick_result choose_model(struct agent_state *state, struct p
     /* Missing enumeration, fetch failure, and an empty catalog need different diagnostics. */
     if (!provider->list_models) {
         ui_note("%s can't list models — set one with HAX_MODEL or in config", provider_name);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         return result;
     }
     /* Model enumeration can block, so expose progress and cancellation before the picker opens. */
@@ -358,7 +359,7 @@ static struct model_pick_result choose_model(struct agent_state *state, struct p
         /* Discard a result that races cancellation; busy_end already rendered interruption. */
         model_info_free(models, model_count);
         free(error);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         result.status = PICK_CANCELLED;
         return result;
     }
@@ -368,7 +369,7 @@ static struct model_pick_result choose_model(struct agent_state *state, struct p
             ui_error("%s", error);
         else
             ui_error("failed to list models for %s", provider_name);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         result.status = PICK_FAILED;
         free(error);
         model_info_free(models, model_count);
@@ -377,7 +378,7 @@ static struct model_pick_result choose_model(struct agent_state *state, struct p
     if (model_count == 0) {
         /* An empty catalog has no provider-independent remedy. */
         ui_note("%s has no models available", provider_name);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         result.status = PICK_FAILED;
         model_info_free(models, model_count);
         return result;
@@ -413,7 +414,7 @@ static struct value_pick_result choose_effort(struct agent_state *state, struct 
             else
                 ui_note("the %s provider doesn't expose reasoning-effort levels",
                         provider->name ? provider->name : "?");
-            state->render->disp.trail = 1;
+            disp_sync_external_line(&state->render->disp);
         }
         return result;
     }
@@ -472,7 +473,7 @@ static void persist_selection(struct agent_state *state, const char *provider_id
         if (!warned) {
             warned = 1;
             ui_note("couldn't save to state.json — this choice applies to this run only");
-            state->render->disp.trail = 1;
+            disp_sync_external_line(&state->render->disp);
         }
     }
 }
@@ -487,10 +488,8 @@ static char *current_provider_id(const struct provider *provider)
 /* Raw constructor diagnostics bypass disp; synchronize its trailing-row state afterward. */
 static void sync_constructor_diagnostics(struct agent_state *state, unsigned long before)
 {
-    if (hax_diag_sequence() != before) {
-        state->render->disp.held = 0;
-        state->render->disp.trail = 1;
-    }
+    if (hax_diag_sequence() != before)
+        disp_sync_external_line(&state->render->disp);
 }
 
 /* ---------- public flows ---------- */
@@ -500,7 +499,7 @@ void select_effort(struct agent_state *state)
     struct provider *provider = state->provider;
     if (!provider) {
         ui_note("no provider selected — use /provider to choose one first");
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         return;
     }
 
@@ -546,7 +545,7 @@ void select_model(struct agent_state *state)
     struct provider *provider = state->provider;
     if (!provider) {
         ui_note("no provider selected — use /provider to choose one first");
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         return;
     }
     /* The candidate metadata needed by effort selection temporarily displaces the live model's;
@@ -667,7 +666,7 @@ void select_provider(struct agent_state *state)
         if (!factory_available(factory, &unavailable_reason)) {
             ui_note("%s is unavailable — %s", factory->name,
                     unavailable_reason ? unavailable_reason : "unavailable");
-            state->render->disp.trail = 1;
+            disp_sync_external_line(&state->render->disp);
             free(current_id);
             return;
         }
@@ -691,7 +690,7 @@ void select_provider(struct agent_state *state)
     sync_constructor_diagnostics(state, diagnostics_before);
     if (!candidate) {
         config_snapshot_restore(snapshot);
-        state->render->disp.trail = 1; /* the factory printed a raw error line */
+        disp_sync_external_line(&state->render->disp); /* the factory printed a raw error line */
         free(current_id);
         return;
     }
@@ -704,7 +703,7 @@ void select_provider(struct agent_state *state)
         if (model_pick.status != PICK_CANCELLED) {
             ui_note("staying on %s — no model chosen for %s", current_id ? current_id : "?",
                     factory->name);
-            state->render->disp.trail = 1;
+            disp_sync_external_line(&state->render->disp);
         }
         candidate->destroy(candidate);
         config_snapshot_restore(snapshot);
@@ -806,7 +805,7 @@ int select_preset(struct agent_state *state, const char *name, int announce)
         if (preset_count == 0) {
             ui_note("no presets defined in config.json — use /preset-save to save the current "
                     "selection");
-            state->render->disp.trail = 1;
+            disp_sync_external_line(&state->render->disp);
             goto out;
         }
         selected_name = choose_preset_name(names, preset_count);
@@ -822,7 +821,7 @@ int select_preset(struct agent_state *state, const char *name, int announce)
         ui_error("%s", error ? error : "preset failed to apply");
         free(error);
         config_snapshot_restore(snapshot);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         goto out;
     }
 
@@ -833,7 +832,7 @@ int select_preset(struct agent_state *state, const char *name, int announce)
     if (!factory) {
         ui_error("preset '%s': unknown provider '%s'", name, provider_id);
         config_snapshot_restore(snapshot);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         goto out;
     }
     unsigned long diagnostics_before = hax_diag_sequence();
@@ -842,7 +841,7 @@ int select_preset(struct agent_state *state, const char *name, int announce)
     if (!candidate) {
         /* The constructor already diagnosed the failure. */
         config_snapshot_restore(snapshot);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         goto out;
     }
 
@@ -854,7 +853,7 @@ int select_preset(struct agent_state *state, const char *name, int announce)
                  factory->name);
         candidate->destroy(candidate);
         config_snapshot_restore(snapshot);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         goto out;
     }
 
@@ -862,7 +861,7 @@ int select_preset(struct agent_state *state, const char *name, int announce)
     if (agent_apply_settings(state, candidate, announce) != 0) {
         candidate->destroy(candidate);
         config_snapshot_restore(snapshot);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         goto out;
     }
     config_snapshot_free(snapshot);
@@ -873,7 +872,7 @@ int select_preset(struct agent_state *state, const char *name, int announce)
         if (!warned) {
             warned = 1;
             ui_note("couldn't save to state.json — this preset applies to this run only");
-            state->render->disp.trail = 1;
+            disp_sync_external_line(&state->render->disp);
         }
     }
     result = 0;
@@ -995,13 +994,13 @@ void select_preset_save(struct agent_state *state, const char *argument)
     struct provider *provider = state->provider;
     if (!provider) {
         ui_note("no provider selected — use /provider to choose one first");
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         return;
     }
     /* A model-less preset could resolve differently from the live session. */
     if (!state->session->model || !*state->session->model) {
         ui_note("no model resolved yet — use /model to pick one first");
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         return;
     }
     /* Missing names return to editable input rather than failing. */
@@ -1009,7 +1008,7 @@ void select_preset_save(struct agent_state *state, const char *argument)
         ui_note("name it: /preset-save <name> [tint]");
         free(state->pending_preseed);
         state->pending_preseed = xstrdup("/preset-save ");
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         return;
     }
 
@@ -1029,21 +1028,21 @@ void select_preset_save(struct agent_state *state, const char *argument)
         ui_error("'%s' can't be a preset name — use letters, digits, '.', '-' or '_', starting "
                  "with a letter or digit",
                  name);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         goto out;
     }
     const struct config_setting *tint_setting = config_setting_find("tint");
     if (tint_argument && !config_value_valid(tint_setting, tint_argument)) {
         ui_error("unknown tint '%s' (expected %s)", tint_argument,
                  tint_setting ? tint_setting->choices : "");
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         goto out;
     }
 
     int preset_exists = config_preset_exists(name);
     if (preset_exists && !confirm_overwrite(name)) {
         ui_note("left preset '%s' unchanged", name);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         goto out;
     }
 
@@ -1073,11 +1072,11 @@ void select_preset_save(struct agent_state *state, const char *argument)
     if (config_preset_save(name, &definition, &error) != 0) {
         ui_error("%s", error ? error : "couldn't save the preset");
         free(error);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         goto out;
     }
     ui_note("%s preset '%s' in config.json", preset_exists ? "updated" : "saved", name);
-    state->render->disp.trail = 1;
+    disp_sync_external_line(&state->render->disp);
 
     /* Enter the saved stance so its name and tint become active and persistent. */
     select_preset(state, name, 1);
@@ -1122,7 +1121,7 @@ void select_restore_session(struct agent_state *state, const char *provider_id, 
         0) {
         /* A missing preset does not prevent restoring its recorded provider and model. */
         ui_note("%s — resuming without it", error ? error : "preset failed to apply");
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         free(error);
     }
 
@@ -1139,7 +1138,7 @@ void select_restore_session(struct agent_state *state, const char *provider_id, 
         /* Do not silently move restored history to another backend. */
         ui_note("couldn't restore %s — staying on %s (use /provider to switch)",
                 display_provider_id, current_id ? current_id : "no provider");
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         config_snapshot_restore(snapshot);
         free(current_id);
         return;
@@ -1150,7 +1149,7 @@ void select_restore_session(struct agent_state *state, const char *provider_id, 
         !(candidate->default_model && *candidate->default_model)) {
         ui_note("couldn't restore %s — no model resolves for it; staying on %s",
                 display_provider_id, current_id ? current_id : "no provider");
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         candidate->destroy(candidate);
         config_snapshot_restore(snapshot);
         free(current_id);
@@ -1159,7 +1158,7 @@ void select_restore_session(struct agent_state *state, const char *provider_id, 
     if (agent_apply_settings(state, candidate, 1) != 0) {
         candidate->destroy(candidate);
         config_snapshot_restore(snapshot);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         free(current_id);
         return;
     }
@@ -1220,7 +1219,7 @@ static void note_current_setting(struct agent_state *state, const struct config_
 {
     ui_note("%s = %s (%s%s)", setting->key, setting_display_value(setting),
             config_source(setting->key), setting_value_invalid(setting) ? ", invalid" : "");
-    state->render->disp.trail = 1;
+    disp_sync_external_line(&state->render->disp);
 }
 
 /* Keep slash-command knowledge out of the config layer. */
@@ -1348,7 +1347,7 @@ static void select_config_argument(struct agent_state *state, const char *argume
     size_t key_length = (size_t)(separator - argument);
     if (key_length >= sizeof(key)) {
         ui_error("unknown setting '%.*s'", (int)key_length, argument);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         return;
     }
     memcpy(key, argument, key_length);
@@ -1360,7 +1359,7 @@ static void select_config_argument(struct agent_state *state, const char *argume
     const struct config_setting *setting = config_setting_find(key);
     if (!setting) {
         ui_error("unknown setting '%s' — /config lists them", key);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         return;
     }
     if (!value) {
@@ -1377,7 +1376,7 @@ static void select_config_argument(struct agent_state *state, const char *argume
         else
             ui_error("'%s' can't be changed at runtime — set %s or config.json and restart", key,
                      setting->env_var);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         return;
     }
     if (strcmp(value, "default") == 0) {
@@ -1388,7 +1387,7 @@ static void select_config_argument(struct agent_state *state, const char *argume
         char hint[64];
         config_value_hint(setting, hint, sizeof(hint));
         ui_error("invalid value '%s' for %s (expected: %s, or default)", value, key, hint);
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         return;
     }
     /* Store the canonical spelling so a case-sensitive consumer matches. */

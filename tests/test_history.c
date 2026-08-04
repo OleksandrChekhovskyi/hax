@@ -31,10 +31,11 @@ static char *render(enum history_detail detail, const struct item *items, size_t
         perror("open_memstream");
         exit(1);
     }
-    struct render_ctx render = {.disp = {.out = mem, .trail = 2}, .show_reasoning = reasoning};
+    struct render_ctx render = {.disp = {.sink = mem, .committed_newlines = 2},
+                                .show_reasoning = reasoning};
     history_render(&render, detail, items, n, 0);
     render_transition(&render, RS_IDLE);
-    disp_emit_held(&render.disp);
+    disp_commit_newlines(&render.disp);
     fclose(mem);
 
     char *out = NULL;
@@ -660,10 +661,10 @@ static char *render_from(enum history_detail detail, const struct item *items, s
         perror("open_memstream");
         exit(1);
     }
-    struct render_ctx render = {.disp = {.out = mem, .trail = 2}};
+    struct render_ctx render = {.disp = {.sink = mem, .committed_newlines = 2}};
     history_render(&render, detail, items, n, start);
     render_transition(&render, RS_IDLE);
-    disp_emit_held(&render.disp);
+    disp_commit_newlines(&render.disp);
     fclose(mem);
 
     char *out = NULL;

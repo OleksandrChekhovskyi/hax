@@ -41,7 +41,7 @@ void render_transition(struct render_ctx *r, enum render_state to)
     case RS_REASONING:
         if (r->md)
             md_flush(r->md);
-        disp_raw(&r->disp, ANSI_RESET);
+        disp_write_ansi(&r->disp, ANSI_RESET);
         disp_putc(&r->disp, '\n');
         break;
     case RS_TEXT:
@@ -83,7 +83,7 @@ void render_transition(struct render_ctx *r, enum render_state to)
     case RS_REASONING:
         spinner_hide(r->spinner);
         disp_block_separator(&r->disp);
-        disp_raw(&r->disp, ANSI_DIM ANSI_ITALIC);
+        disp_write_ansi(&r->disp, ANSI_DIM ANSI_ITALIC);
         /* Suppress md's inline SGR so the dim+italic span above is
          * the only active style; wrap and block structure still run. */
         if (r->md)
@@ -92,7 +92,7 @@ void render_transition(struct render_ctx *r, enum render_state to)
     case RS_TEXT:
         spinner_hide(r->spinner);
         disp_block_separator(&r->disp);
-        r->disp.saw_text = 1;
+        r->text_started = 1;
         if (r->md)
             md_set_styled(r->md, 1);
         break;
@@ -163,10 +163,10 @@ void render_table_spinner_show(struct render_ctx *r)
      * would close it and leave the rest of the block unstyled. */
     if (r->state != RS_TEXT)
         return;
-    /* Drain held newlines so the \r + erase-line lands on a fresh row
+    /* Commit pending newlines so the \r + erase-line lands on a fresh row
      * instead of wiping prior text. Immediate label set — this path
      * already did its own settling via the table stall clock. */
-    disp_emit_held(&r->disp);
+    disp_commit_newlines(&r->disp);
     spinner_set_label(r->spinner, "composing", "composing...");
     spinner_show(r->spinner);
     r->table_composing = 1;
@@ -206,13 +206,18 @@ void render_text_chunk(struct render_ctx *r, const char *s, size_t n)
     }
 }
 
-void render_text_delta(struct render_ctx *r, const char *s, size_t n)
+void render_text_delta(struct render_ctx *r, const char *bytes, size_t len)
 {
-    disp_first_delta_strip(&r->disp, &s, &n);
-    if (n == 0)
+    if (!r->text_started) {
+        while (len > 0 && (*bytes == '\n' || *bytes == '\r')) {
+            bytes++;
+            len--;
+        }
+    }
+    if (len == 0)
         return;
     render_transition(r, RS_TEXT);
-    render_text_chunk(r, s, n);
+    render_text_chunk(r, bytes, len);
 }
 
 void update_retry_label(struct render_ctx *r)

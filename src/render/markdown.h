@@ -13,7 +13,7 @@
  * Call md_flush at end of turn and md_reset before the next turn. */
 
 /* is_raw distinguishes zero-width ANSI escapes from visible content. Consumers must not let raw
- * bytes alter held-newline or other display-width bookkeeping. */
+ * bytes alter pending-newline or other display-width bookkeeping. */
 typedef void (*md_emit_fn)(const char *bytes, size_t n, int is_raw, void *user);
 
 struct md_renderer;

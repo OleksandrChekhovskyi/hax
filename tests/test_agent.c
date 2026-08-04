@@ -83,7 +83,7 @@ static void fixture_init(struct fixture *f)
 
     /* Model the dispatcher's state at the point select.c calls apply:
      * the leading-gap separator has run, cursor on a blank line. */
-    f->render.disp.trail = 2;
+    f->render.disp.committed_newlines = 2;
     f->state.session = &f->session;
     f->state.provider = &f->provider;
     f->state.render = &f->render;
@@ -124,10 +124,8 @@ static void test_apply_settings_empty_reprints_banner(void)
     EXPECT(strstr(out, "prov-x · model-a") != NULL);
     EXPECT(strstr(out, "ctrl-d quit") != NULL);
     EXPECT(strstr(out, "switched to") == NULL);
-    /* The banner bypasses disp, so the branch must resync the trail to
-     * the fresh line its raw output ended on — otherwise the pre-prompt
-     * separator would trust the stale pre-banner value. */
-    EXPECT(f.render.disp.trail == 1);
+    /* The banner bypasses disp, so the branch must record its committed newline. */
+    EXPECT(f.render.disp.committed_newlines == 1);
 
     free(out);
     fixture_free(&f);
@@ -144,10 +142,9 @@ static void test_apply_settings_nonempty_prints_marker(void)
     EXPECT(f.result == 0);
     EXPECT(strstr(out, "switched to prov-x · model-a") != NULL);
     EXPECT(strstr(out, "ctrl-d quit") == NULL);
-    /* The marker drives disp itself, so its trailing newline is held
-     * (deferred), not committed — no manual trail resync involved. */
-    EXPECT(f.render.disp.trail == 0);
-    EXPECT(f.render.disp.held == 1);
+    /* The marker uses disp, so its trailing newline remains pending. */
+    EXPECT(f.render.disp.committed_newlines == 0);
+    EXPECT(f.render.disp.pending_newlines == 1);
 
     free(out);
     fixture_free(&f);
@@ -177,8 +174,8 @@ static void test_apply_settings_quiet_prints_nothing(void)
     EXPECT_STR_EQ(out, "");
     /* Silence is about output, not effect. */
     EXPECT_STR_EQ(f.session.model, "model-b");
-    EXPECT(f.render.disp.trail == 2);
-    EXPECT(f.render.disp.held == 0);
+    EXPECT(f.render.disp.committed_newlines == 2);
+    EXPECT(f.render.disp.pending_newlines == 0);
 
     free(out);
     fixture_free(&f);

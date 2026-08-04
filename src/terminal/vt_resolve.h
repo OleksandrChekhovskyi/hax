@@ -14,7 +14,7 @@
  * The live display pipeline paints with the cursor: the markdown wrapper
  * retro-wraps a mid-word overflow by walking back and erasing (CSI nD +
  * CSI K, see markdown_wrap.c), the tool preview closes a block by
- * overprinting its leading glyph (\r + glyph, see disp_tool_strip_close),
+ * overprinting its leading glyph (\r + glyph, see tool_render.c),
  * and the user-message echo ends every row with erase-line + \r\n. Those
  * bytes are correct on a terminal and garbage in a file or a pager, which
  * has no cursor to move.

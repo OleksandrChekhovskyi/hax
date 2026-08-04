@@ -11,6 +11,8 @@
 struct disp;
 struct spinner;
 
+#define TOOL_RENDER_GUTTER_COLS 2
+
 /* Preview policy for sanitized tool output. */
 enum tool_render_mode {
     TOOL_RENDER_DIFF,      /* uncapped, line-colored unified diff */
@@ -65,6 +67,9 @@ void tool_render_feed(struct tool_render *render, const char *bytes, size_t len)
 
 /* Flush buffered input and close the preview. Repeated calls have no effect. */
 void tool_render_finalize(struct tool_render *render);
+
+/* Write the gutter prefix for standalone one-line tool output. */
+void tool_render_write_marker_gutter(struct disp *disp);
 
 /* Tool display callback; data must point to an initialized struct tool_render. */
 void tool_render_emit(const char *bytes, size_t len, void *data);

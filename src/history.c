@@ -25,8 +25,7 @@ static void render_user_message(struct render_ctx *render, const char *text)
     input_render_user_message_to(disp_sink(&render->disp), text ? text : "",
                                  text ? strlen(text) : 0, input_display_cols());
     /* The input renderer bypasses disp and finishes at column zero. */
-    render->disp.trail = 1;
-    render->disp.held = 0;
+    disp_sync_external_line(&render->disp);
 }
 
 static void render_stored_text(struct render_ctx *render, enum render_state state, const char *text)
@@ -38,7 +37,7 @@ static void render_stored_text(struct render_ctx *render, enum render_state stat
         render_transition(render, RS_IDLE);
         if (render->md)
             md_reset(render->md, md_cols());
-        render->disp.saw_text = 0;
+        render->text_started = 0;
     }
     if (state == RS_TEXT) {
         render_text_delta(render, text, strlen(text));
@@ -48,14 +47,13 @@ static void render_stored_text(struct render_ctx *render, enum render_state stat
     }
 }
 
-/* The marker text is visible content, so disp_write, not disp_raw: clearing the
- * trail is what makes the next block's separator emit its blank line. */
+/* Visible marker text must reset committed_newlines before the next block separator. */
 static void render_dim_marker(struct render_ctx *render, const char *text)
 {
     render_open_block(render);
-    disp_raw(&render->disp, ANSI_DIM);
+    disp_write_ansi(&render->disp, ANSI_DIM);
     disp_write(&render->disp, text, strlen(text));
-    disp_raw(&render->disp, ANSI_RESET);
+    disp_write_ansi(&render->disp, ANSI_RESET);
     disp_putc(&render->disp, '\n');
     disp_flush(&render->disp);
 }

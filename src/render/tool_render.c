@@ -17,6 +17,11 @@
 
 #define TAIL_RING_CAPACITY 1500
 
+static const char GUTTER_FIRST[] = "\xE2\x94\x8C";  /* ┌ */
+static const char GUTTER_BODY[] = "\xE2\x94\x82";   /* │ */
+static const char GUTTER_LAST[] = "\xE2\x94\x94";   /* └ */
+static const char GUTTER_MARKER[] = "\xE2\x80\xBA"; /* › */
+
 struct preview_limits {
     int head_lines;
     size_t head_bytes;
@@ -47,9 +52,9 @@ static const struct preview_limits *preview_limits_for_mode(enum tool_render_mod
 static size_t row_content_budget(void)
 {
     int width = display_width();
-    if (width <= DISP_TOOL_STRIP_COLS + 5)
+    if (width <= TOOL_RENDER_GUTTER_COLS + 5)
         return 1;
-    return (size_t)(width - DISP_TOOL_STRIP_COLS - 1);
+    return (size_t)(width - TOOL_RENDER_GUTTER_COLS - 1);
 }
 
 void tool_render_init(struct tool_render *render, struct disp *disp, struct spinner *spinner,
@@ -99,30 +104,34 @@ static int line_is_blank(const char *bytes, size_t len)
     return 1;
 }
 
-static void emit_gutter_strip(struct disp *disp, const char *glyph_utf8)
+static void write_gutter(struct disp *disp, const char *glyph)
 {
-    char strip[48];
-    int strip_len = snprintf(strip, sizeof(strip), "%s%s " ANSI_RESET, theme_open(THEME_CHROME_DIM),
-                             glyph_utf8);
-    disp_write(disp, strip, (size_t)strip_len);
+    disp_commit_newlines(disp);
+    disp_write_ansi(disp, theme_open(THEME_CHROME_DIM));
+    disp_write(disp, glyph, strlen(glyph));
+    disp_putc(disp, ' ');
+    disp_write_ansi(disp, ANSI_RESET);
 }
 
-static void emit_first_strip(struct disp *disp)
+void tool_render_write_marker_gutter(struct disp *disp)
 {
-    emit_gutter_strip(disp, "\xE2\x94\x8C"); /* ┌ U+250C */
+    write_gutter(disp, GUTTER_MARKER);
 }
 
-static void emit_body_strip(struct disp *disp)
+static void write_next_row_gutter(struct tool_render *render)
 {
-    emit_gutter_strip(disp, "\xE2\x94\x82"); /* │ U+2502 */
+    write_gutter(render->disp, render->rows_emitted == 0 ? GUTTER_FIRST : GUTTER_BODY);
 }
 
-static void emit_strip_for_next_row(struct tool_render *render)
+/* The final newline remains pending, so a carriage return can replace the row's first cell. */
+static void overprint_final_gutter(struct disp *disp, const char *glyph)
 {
-    if (render->rows_emitted == 0)
-        emit_first_strip(render->disp);
-    else
-        emit_body_strip(render->disp);
+    FILE *sink = disp_sink(disp);
+    fputc('\r', sink);
+    fputs(theme_open(THEME_CHROME_DIM), sink);
+    fputs(glyph, sink);
+    fputs(ANSI_RESET, sink);
+    fflush(sink);
 }
 
 static char *truncate_slice(const char *bytes, size_t len)
@@ -138,7 +147,7 @@ static char *truncate_slice(const char *bytes, size_t len)
 /* Spinner drawing bypasses disp, so release a pending newline before handing it the row. */
 static void paint_status(struct tool_render *render)
 {
-    disp_emit_held(render->disp);
+    disp_commit_newlines(render->disp);
     const char *content = render->status_line.data ? render->status_line.data : "";
     if (!render->status_visible) {
         spinner_show_tool_status(render->spinner, content);
@@ -154,12 +163,12 @@ static void commit_status(struct tool_render *render)
     if (!render->status_visible)
         return;
     spinner_hide(render->spinner);
-    emit_strip_for_next_row(render);
-    disp_raw(render->disp, ANSI_DIM);
+    write_next_row_gutter(render);
+    disp_write_ansi(render->disp, ANSI_DIM);
     char *truncated = truncate_for_display(render->status_line.data, row_content_budget());
     disp_write(render->disp, truncated, strlen(truncated));
     free(truncated);
-    disp_raw(render->disp, ANSI_RESET);
+    disp_write_ansi(render->disp, ANSI_RESET);
     disp_putc(render->disp, '\n');
     disp_flush(render->disp);
     render->rows_emitted++;
@@ -171,12 +180,12 @@ static void commit_status(struct tool_render *render)
 static void replace_status_with_marker(struct tool_render *render, const char *marker)
 {
     spinner_hide(render->spinner);
-    emit_strip_for_next_row(render);
-    disp_raw(render->disp, ANSI_DIM);
+    write_next_row_gutter(render);
+    disp_write_ansi(render->disp, ANSI_DIM);
     char *truncated = truncate_for_display(marker, row_content_budget());
     disp_write(render->disp, truncated, strlen(truncated));
     free(truncated);
-    disp_raw(render->disp, ANSI_RESET);
+    disp_write_ansi(render->disp, ANSI_RESET);
     disp_putc(render->disp, '\n');
     disp_flush(render->disp);
     render->rows_emitted++;
@@ -194,12 +203,12 @@ static void drop_status(struct tool_render *render)
 
 static void emit_row(struct tool_render *render, const char *content, size_t len)
 {
-    emit_strip_for_next_row(render);
-    disp_raw(render->disp, ANSI_DIM);
+    write_next_row_gutter(render);
+    disp_write_ansi(render->disp, ANSI_DIM);
     char *truncated = truncate_slice(content, len);
     disp_write(render->disp, truncated, strlen(truncated));
     free(truncated);
-    disp_raw(render->disp, ANSI_RESET);
+    disp_write_ansi(render->disp, ANSI_RESET);
     disp_putc(render->disp, '\n');
     render->rows_emitted++;
     render->block_open = 1;
@@ -291,12 +300,12 @@ static void emit_diff_line(struct tool_render *render, const char *line, size_t 
         return;
     if (!render->block_open)
         spinner_hide(render->spinner);
-    emit_strip_for_next_row(render);
-    disp_raw(render->disp, diff_line_color(line, len, render->diff_hunk_started));
+    write_next_row_gutter(render);
+    disp_write_ansi(render->disp, diff_line_color(line, len, render->diff_hunk_started));
     char *truncated = truncate_slice(line, len);
     disp_write(render->disp, truncated, strlen(truncated));
     free(truncated);
-    disp_raw(render->disp, ANSI_RESET);
+    disp_write_ansi(render->disp, ANSI_RESET);
     disp_putc(render->disp, '\n');
     render->rows_emitted++;
     render->block_open = 1;
@@ -549,11 +558,10 @@ void tool_render_finalize(struct tool_render *render)
     else
         finalize_capped_preview(render);
 
-    /* The held newline lets the close glyph replace the final row's opening strip. */
     if (render->rows_emitted >= 2)
-        disp_tool_strip_close(render->disp);
+        overprint_final_gutter(render->disp, GUTTER_LAST);
     else if (render->rows_emitted == 1)
-        disp_tool_strip_close_solo(render->disp);
+        overprint_final_gutter(render->disp, GUTTER_MARKER);
     disp_flush(render->disp);
     render->block_open = 0;
 }

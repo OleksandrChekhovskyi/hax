@@ -78,8 +78,7 @@ static void stats_count_tool_call(struct session_stats *stats, const char *tool_
  * tables. */
 #define TABLE_IDLE_TIMEOUT_MS 1500
 
-/* Raw ANSI must bypass disp bookkeeping; otherwise an escape after a buffered newline commits
- * it and leaks an extra blank line at the next block separator. */
+/* ANSI must bypass disp bookkeeping or it commits a pending newline before the next separator. */
 static void md_emit_to_disp(const char *bytes, size_t byte_count, int is_raw, void *user)
 {
     struct disp *disp = user;
@@ -154,7 +153,7 @@ static void display_stats_line(struct render_ctx *render, const struct provider 
 
     struct disp *disp = &render->disp;
     render_open_block(render);
-    disp_raw(disp, ANSI_DIM);
+    disp_write_ansi(disp, ANSI_DIM);
 
     /* Segment bytes equal columns; the separator occupies three display columns. */
     int width = display_width();
@@ -173,7 +172,7 @@ static void display_stats_line(struct render_ctx *render, const struct provider 
         disp_printf(disp, "%s", segments[i]);
         column += segment_width;
     }
-    disp_raw(disp, ANSI_RESET);
+    disp_write_ansi(disp, ANSI_RESET);
     disp_putc(disp, '\n');
     disp_flush(disp);
 }
@@ -296,9 +295,9 @@ static int render_on_event(const struct stream_event *event, void *user)
     case EV_ERROR:
         /* Closing the render state flushes partial text before the error line. */
         render_open_block(render);
-        disp_raw(disp, theme_open(THEME_ERROR));
+        disp_write_ansi(disp, theme_open(THEME_ERROR));
         disp_printf(disp, "[error: %s]", event->u.error.message);
-        disp_raw(disp, ANSI_RESET);
+        disp_write_ansi(disp, ANSI_RESET);
         disp_putc(disp, '\n');
         disp_flush(disp);
         break;
@@ -385,7 +384,7 @@ static void show_history_cb(void *user)
     FILE *memory_stream = open_memstream(&output, &output_len);
     if (!memory_stream)
         return;
-    render.disp.out = memory_stream;
+    render.disp.sink = memory_stream;
     if (markdown_enabled())
         render.md = md_new(md_emit_to_disp, &render.disp, md_cols());
 
@@ -401,20 +400,20 @@ static void show_history_cb(void *user)
         fprintf(memory_stream, "%s " ANSI_DIM "conversation history" ANSI_BOLD_OFF "\n",
                 banner_bar(bar, sizeof(bar)));
     /* Direct banner writes leave one committed newline outside disp's bookkeeping. */
-    render.disp.trail = 1;
+    disp_sync_external_line(&render.disp);
 
     if (session->n_items == 0) {
         render_open_block(&render);
-        disp_raw(&render.disp, ANSI_DIM);
+        disp_write_ansi(&render.disp, ANSI_DIM);
         disp_printf(&render.disp, "(nothing in this conversation yet)");
-        disp_raw(&render.disp, ANSI_RESET);
+        disp_write_ansi(&render.disp, ANSI_RESET);
         disp_putc(&render.disp, '\n');
     } else {
         history_render(&render, HISTORY_FULL, session->items, session->n_items, 0);
     }
     /* Flush the final Markdown tail before resolving terminal output. */
     render_transition(&render, RS_IDLE);
-    disp_emit_held(&render.disp);
+    disp_commit_newlines(&render.disp);
     md_free(render.md);
     fclose(memory_stream);
 
@@ -527,7 +526,7 @@ int agent_apply_settings(struct agent_state *state, struct provider *provider, i
     if (session->n_items == 0) {
         render_open_block(state->render);
         agent_print_banner(provider, session);
-        state->render->disp.trail = 1; /* banner bypasses disp */
+        disp_sync_external_line(&state->render->disp); /* banner bypasses disp */
         fflush(stdout);
         return 0;
     }
@@ -545,9 +544,9 @@ int agent_apply_settings(struct agent_state *state, struct provider *provider, i
     free(stance);
 
     render_open_block(state->render);
-    disp_raw(&state->render->disp, ANSI_DIM);
+    disp_write_ansi(&state->render->disp, ANSI_DIM);
     disp_printf(&state->render->disp, "%s", label);
-    disp_raw(&state->render->disp, ANSI_RESET);
+    disp_write_ansi(&state->render->disp, ANSI_RESET);
     disp_putc(&state->render->disp, '\n');
     disp_flush(&state->render->disp);
     free(label);
@@ -599,13 +598,13 @@ static void render_resume_hint(struct render_ctx *render, enum agent_resume_reas
     default:
         return;
     }
-    disp_raw(&render->disp, ANSI_DIM);
+    disp_write_ansi(&render->disp, ANSI_DIM);
     disp_printf(&render->disp, "[%s — %s]", status, action);
-    disp_raw(&render->disp, ANSI_RESET);
+    disp_write_ansi(&render->disp, ANSI_RESET);
     disp_putc(&render->disp, '\n');
     disp_putc(&render->disp, '\n'); /* one blank line between hint and prompt */
     /* Commit newlines before the editor erases and repaints the prompt row. */
-    disp_emit_held(&render->disp);
+    disp_commit_newlines(&render->disp);
     disp_flush(&render->disp);
 }
 
@@ -640,17 +639,14 @@ static void replay_user_turn(struct render_ctx *render, const struct agent_sessi
         }
     }
 
-    /* Direct banner/picker writes leave held stale; trail already records the newline count. */
-    render->disp.held = 0;
-
     render_open_block(render);
-    disp_raw(&render->disp, ANSI_DIM);
+    disp_write_ansi(&render->disp, ANSI_DIM);
     if (earlier_count > 0)
         disp_printf(&render->disp, "── %s · %zu earlier message%s · ctrl-o for full history ──",
                     heading, earlier_count, earlier_count == 1 ? "" : "s");
     else
         disp_printf(&render->disp, "── %s · ctrl-o for full history ──", heading);
-    disp_raw(&render->disp, ANSI_RESET);
+    disp_write_ansi(&render->disp, ANSI_RESET);
     disp_putc(&render->disp, '\n');
 
     if (anchor_found)
@@ -658,9 +654,9 @@ static void replay_user_turn(struct render_ctx *render, const struct agent_sessi
 
     /* Markdown may leave its final row open; terminate it before returning to the prompt. */
     render_transition(render, RS_IDLE);
-    if (render->disp.trail == 0 && render->disp.held == 0)
+    if (render->disp.committed_newlines == 0 && render->disp.pending_newlines == 0)
         disp_putc(&render->disp, '\n');
-    disp_emit_held(&render->disp);
+    disp_commit_newlines(&render->disp);
     disp_flush(&render->disp);
 }
 
@@ -677,8 +673,8 @@ void agent_resume_session(struct agent_state *state, const char *path)
         free(loaded_items);
         session_meta_free(&metadata);
         ui_error("could not read session");
-        /* Replace the picker's stale trail count with the error line's committed newline. */
-        state->render->disp.trail = 1;
+        /* Replace the picker's stale newline count with the error line's committed newline. */
+        disp_sync_external_line(&state->render->disp);
         return;
     }
 
@@ -807,7 +803,7 @@ void agent_undo(struct agent_state *state, size_t turn_index)
      * truncating memory too would later append onto that stale branch. */
     if (session_log_truncate(state->session_log, turn_index, cut_index) != 0) {
         ui_error("could not truncate the session file; conversation left unchanged");
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         return;
     }
 
@@ -833,7 +829,7 @@ void agent_fork(struct agent_state *state, size_t turn_index)
     /* Without a materialized log, fork cannot preserve the original branch. */
     if (!session_log_materialized(state->session_log)) {
         ui_error("/fork needs session recording (it is disabled or unavailable)");
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         return;
     }
 
@@ -841,7 +837,7 @@ void agent_fork(struct agent_state *state, size_t turn_index)
     char *new_path = NULL;
     if (session_fork_file(source_path, turn_index, &new_path) != 0) {
         ui_error("could not create fork");
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         return;
     }
     /* Open the new logger before closing the old one so failure is atomic. It starts with copied
@@ -856,7 +852,7 @@ void agent_fork(struct agent_state *state, size_t turn_index)
         unlink(new_path);
         free(new_path);
         ui_error("could not open the fork session file; conversation left unchanged");
-        state->render->disp.trail = 1;
+        disp_sync_external_line(&state->render->disp);
         return;
     }
     session_log_set_meta(new_session_log, agent_provider_log_name(state->provider), session->model,
@@ -913,9 +909,9 @@ static void compact_notice(struct render_ctx *render, const char *format, ...)
     vsnprintf(message, sizeof(message), format, args);
     va_end(args);
     render_open_block(render);
-    disp_raw(&render->disp, ANSI_DIM);
+    disp_write_ansi(&render->disp, ANSI_DIM);
     disp_printf(&render->disp, "── %s ──", message);
-    disp_raw(&render->disp, ANSI_RESET);
+    disp_write_ansi(&render->disp, ANSI_RESET);
     disp_putc(&render->disp, '\n');
     disp_flush(&render->disp);
 }
@@ -1046,7 +1042,7 @@ static void repl_loop_turn_begin(void *user)
     render_stream_begin(render);
     if (render->md)
         md_reset(render->md, md_cols());
-    render->disp.saw_text = 0;
+    render->text_started = 0;
     render->stream_content_seen = 0;
 }
 
@@ -1118,9 +1114,9 @@ static void repl_loop_task_note(const char *text, void *user)
     spinner_hide(render->spinner);
     render_transition(render, RS_IDLE);
     render_open_block(render);
-    disp_raw(&render->disp, ANSI_DIM);
+    disp_write_ansi(&render->disp, ANSI_DIM);
     disp_write(&render->disp, text, strlen(text));
-    disp_raw(&render->disp, ANSI_RESET);
+    disp_write_ansi(&render->disp, ANSI_RESET);
     disp_putc(&render->disp, '\n');
     disp_flush(&render->disp);
 }
@@ -1210,7 +1206,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
     agent_print_banner(current_provider, &session);
     /* The embedded disp outlives its Markdown callback; spinner and Markdown handles are owned
      * by this frame. */
-    struct render_ctx render = {.disp = {.out = stdout, .trail = 1},
+    struct render_ctx render = {.disp = {.sink = stdout, .committed_newlines = 1},
                                 .show_reasoning = reasoning_visible()};
     render.spinner = spinner_new("working...");
     render.md = markdown_enabled() ? md_new(md_emit_to_disp, &render.disp, md_cols()) : NULL;
@@ -1283,7 +1279,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         }
 
         /* Slash handlers may override this when they drive the display themselves. */
-        render.disp.trail = 1;
+        disp_sync_external_line(&render.disp);
         if (handle_slash_input(input, &state, line)) {
             current_provider = state.provider;
             free(line);
@@ -1294,10 +1290,10 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
 
         /* Provider absence takes precedence over a possibly configured model. */
         if (!current_provider) {
-            /* ui_note bypasses disp, so restore its one-newline trail state. */
+            /* ui_note bypasses disp, so record its committed newline. */
             disp_block_separator(&render.disp);
             ui_note("no provider selected — use /provider to choose one, then resend");
-            render.disp.trail = 1;
+            disp_sync_external_line(&render.disp);
             free(line);
             continue;
         }
@@ -1306,7 +1302,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         if (!session.model || !*session.model) {
             disp_block_separator(&render.disp);
             ui_note("no model selected — use /model (or /provider) to choose one, then resend");
-            render.disp.trail = 1;
+            disp_sync_external_line(&render.disp);
             free(line);
             continue;
         }
@@ -1340,7 +1336,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             continued = 1;
         free(line);
         /* input_readline left the cursor at column 0 of a fresh row. */
-        render.disp.trail = 1;
+        disp_sync_external_line(&render.disp);
 
         /* A background metadata probe may refine effort before the first request; announce the
          * value that will actually be sent. */
@@ -1350,7 +1346,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             ui_note("effort %s → %s · %s", previous_effort ? previous_effort : "(unset)",
                     session.effort ? session.effort : "(unset)",
                     session.model_label ? session.model_label : "?");
-            render.disp.trail = 1;
+            disp_sync_external_line(&render.disp);
         }
         free(previous_effort);
         /* Stage the final pre-request selection; an already-written header is unaffected. */
@@ -1368,7 +1364,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
                 disp_block_separator(&render.disp);
                 ui_note("model catalog last refreshed %ld days ago — cost estimates may be stale",
                         stale_days);
-                render.disp.trail = 1;
+                disp_sync_external_line(&render.disp);
             }
         }
 
@@ -1429,9 +1425,9 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         if (user_turn_complete && user_pressed_escape) {
             /* Confirm an Esc that arrived after the last pause point. */
             render_open_block(&render);
-            disp_raw(&render.disp, ANSI_DIM);
+            disp_write_ansi(&render.disp, ANSI_DIM);
             disp_printf(&render.disp, "[finished before pause]");
-            disp_raw(&render.disp, ANSI_RESET);
+            disp_write_ansi(&render.disp, ANSI_RESET);
             disp_putc(&render.disp, '\n');
             disp_flush(&render.disp);
         }

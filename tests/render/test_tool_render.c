@@ -111,7 +111,7 @@ static void test_partial_trailing_line_committed(void)
     const char *out = capture_read();
     EXPECT(strstr(out, "no newline") != NULL);
     EXPECT(strstr(out, STRIP_FIRST ANSI_DIM "no newline" ANSI_RESET STRIP_CLOSE_SOLO) != NULL);
-    EXPECT(d.held == 1);
+    EXPECT(d.pending_newlines == 1);
 }
 
 static void test_status_paints_with_spinner_glyph(void)
@@ -125,7 +125,7 @@ static void test_status_paints_with_spinner_glyph(void)
     const char *mid = capture_read();
     EXPECT(strstr(mid, SPINNER_BRAILLE_PREFIX) != NULL);
     EXPECT(strstr(mid, "live") != NULL);
-    EXPECT(d.held == 0);
+    EXPECT(d.pending_newlines == 0);
     tool_render_finalize(&r);
     tool_render_free(&r);
     spinner_free(sp);

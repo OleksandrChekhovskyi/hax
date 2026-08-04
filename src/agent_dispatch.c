@@ -107,9 +107,9 @@ static void write_tool_header(struct disp *disp, const struct item *call)
     int tag_cells = tool_tag_cells(name);
 
     disp_block_separator(disp);
-    disp_raw(disp, theme_open(THEME_CHROME));
+    disp_write_ansi(disp, theme_open(THEME_CHROME));
     disp_printf(disp, "[%s]", name);
-    disp_raw(disp, ANSI_RESET);
+    disp_write_ansi(disp, ANSI_RESET);
 
     if (argument) {
         char *extra = display_extra(tool, call->tool_arguments_json, terminal_width);
@@ -128,14 +128,14 @@ static void write_tool_header(struct disp *disp, const struct item *call)
         free(flattened);
 
         disp_putc(disp, ' ');
-        disp_raw(disp, ANSI_BOLD);
+        disp_write_ansi(disp, ANSI_BOLD);
         disp_write(disp, layout, strlen(layout));
-        disp_raw(disp, ANSI_RESET);
+        disp_write_ansi(disp, ANSI_RESET);
         free(layout);
         if (extra && *extra) {
-            disp_raw(disp, ANSI_DIM);
+            disp_write_ansi(disp, ANSI_DIM);
             disp_write(disp, extra, strlen(extra));
-            disp_raw(disp, ANSI_RESET);
+            disp_write_ansi(disp, ANSI_RESET);
         }
         free(extra);
     } else if (call->tool_arguments_json && *call->tool_arguments_json) {
@@ -147,16 +147,16 @@ static void write_tool_header(struct disp *disp, const struct item *call)
         free(flattened);
 
         disp_putc(disp, ' ');
-        disp_raw(disp, ANSI_DIM);
+        disp_write_ansi(disp, ANSI_DIM);
         disp_write(disp, trimmed, strlen(trimmed));
-        disp_raw(disp, ANSI_RESET);
+        disp_write_ansi(disp, ANSI_RESET);
         free(trimmed);
     }
     free(argument);
 
     disp_putc(disp, '\n');
     /* Commit the newline before the spinner or output can overprint it. */
-    disp_emit_held(disp);
+    disp_commit_newlines(disp);
     disp_flush(disp);
 }
 
@@ -166,29 +166,29 @@ static int write_collapsed_header(struct disp *disp, const struct item *call, co
     const char *name = tool_name(call);
     int cells = tool_tag_cells(name);
 
-    disp_raw(disp, theme_open(THEME_CHROME_DIM));
+    disp_write_ansi(disp, theme_open(THEME_CHROME_DIM));
     disp_printf(disp, "[%s]", name);
     /* The theme closer may clear intensity, so restore dim for the argument. */
-    disp_raw(disp, theme_close(THEME_CHROME_DIM));
-    disp_raw(disp, ANSI_DIM);
+    disp_write_ansi(disp, theme_close(THEME_CHROME_DIM));
+    disp_write_ansi(disp, ANSI_DIM);
     disp_putc(disp, ' ');
     if (argument && *argument) {
         disp_write(disp, argument, strlen(argument));
         cells += (int)display_cells(argument);
     }
-    disp_raw(disp, ANSI_RESET);
-    disp_emit_held(disp);
+    disp_write_ansi(disp, ANSI_RESET);
+    disp_commit_newlines(disp);
     disp_flush(disp);
     return cells;
 }
 
 static int append_collapsed_argument(struct disp *disp, const char *argument)
 {
-    disp_raw(disp, ANSI_DIM);
+    disp_write_ansi(disp, ANSI_DIM);
     disp_write(disp, ", ", 2);
     disp_write(disp, argument, strlen(argument));
-    disp_raw(disp, ANSI_RESET);
-    disp_emit_held(disp);
+    disp_write_ansi(disp, ANSI_RESET);
+    disp_commit_newlines(disp);
     disp_flush(disp);
     return 2 + (int)display_cells(argument);
 }
@@ -251,10 +251,10 @@ static struct item dispatch_without_run(struct render_ctx *render, const struct 
 {
     struct disp *disp = &render->disp;
     write_undispatched_header(disp, call);
-    disp_tool_strip_solo(disp);
-    disp_raw(disp, ANSI_DIM);
-    disp_raw(disp, marker);
-    disp_raw(disp, ANSI_RESET);
+    tool_render_write_marker_gutter(disp);
+    disp_write_ansi(disp, ANSI_DIM);
+    disp_write(disp, marker, strlen(marker));
+    disp_write_ansi(disp, ANSI_RESET);
     disp_putc(disp, '\n');
     disp_flush(disp);
 
@@ -277,7 +277,7 @@ struct item dispatch_tool_refused(struct render_ctx *render, const struct item *
 static void close_collapsed_line(struct disp *disp)
 {
     disp_putc(disp, '\n');
-    disp_emit_held(disp);
+    disp_commit_newlines(disp);
 }
 
 /* cluster_last_tool borrows the registry-static name because item-owned names may be released. */
@@ -354,9 +354,9 @@ void render_tool_solo_marker(struct render_ctx *render, const char *text)
 {
     struct disp *disp = &render->disp;
     spinner_hide(render->spinner);
-    disp_tool_strip_solo(disp);
-    disp_raw(disp, ANSI_DIM);
-    int available_cells = display_width() - 2; /* "› " */
+    tool_render_write_marker_gutter(disp);
+    disp_write_ansi(disp, ANSI_DIM);
+    int available_cells = display_width() - TOOL_RENDER_GUTTER_COLS;
     if (available_cells < MIN_DISPLAY_CELLS)
         available_cells = MIN_DISPLAY_CELLS;
     char *flattened = flatten_for_display(text);
@@ -364,7 +364,7 @@ void render_tool_solo_marker(struct render_ctx *render, const char *text)
     free(flattened);
     disp_write(disp, line, strlen(line));
     free(line);
-    disp_raw(disp, ANSI_RESET);
+    disp_write_ansi(disp, ANSI_RESET);
     disp_putc(disp, '\n');
     disp_flush(disp);
 }

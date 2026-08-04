@@ -2,300 +2,285 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "harness.h"
 #include "render/disp.h"
 
-/* disp_* writes to stdout; tests redirect stdout to a tmp file via
- * freopen and read it back. The file is unlinked after open so it's
- * cleaned up on process exit, and ftruncate+rewind reset between tests
- * without re-opening. */
+struct capture {
+    struct disp disp;
+    FILE *stream;
+    char *bytes;
+    size_t len;
+};
 
-static char captured[65536];
-
-static void cap_init(void)
+static int capture_init(struct capture *capture, size_t committed_newlines)
 {
-    char path[64];
-    snprintf(path, sizeof(path), "/tmp/haxdisp.%d.out", (int)getpid());
-    if (!freopen(path, "w+", stdout)) {
-        perror("freopen");
-        exit(1);
-    }
-    unlink(path);
+    memset(capture, 0, sizeof(*capture));
+    capture->stream = open_memstream(&capture->bytes, &capture->len);
+    EXPECT(capture->stream != NULL);
+    if (!capture->stream)
+        return 0;
+    capture->disp.sink = capture->stream;
+    capture->disp.committed_newlines = committed_newlines;
+    return 1;
 }
 
-static void cap_reset(void)
+static const char *capture_read(struct capture *capture)
 {
-    fflush(stdout);
-    if (ftruncate(fileno(stdout), 0) != 0) {
-        perror("ftruncate");
-        exit(1);
-    }
-    rewind(stdout);
+    disp_flush(&capture->disp);
+    return capture->bytes ? capture->bytes : "";
 }
 
-static const char *cap_read(void)
+static void capture_free(struct capture *capture)
 {
-    fflush(stdout);
-    fseek(stdout, 0, SEEK_SET);
-    size_t n = fread(captured, 1, sizeof(captured) - 1, stdout);
-    captured[n] = 0;
-    return captured;
+    fclose(capture->stream);
+    free(capture->bytes);
 }
 
-/* ---------- putc / write defer trailing newlines ---------- */
-
-static void test_putc_commits_chars(void)
+static void test_putc_writes_visible_bytes(void)
 {
-    cap_reset();
-    struct disp d = {0};
-    disp_putc(&d, 'h');
-    disp_putc(&d, 'i');
-    EXPECT_STR_EQ(cap_read(), "hi");
-    EXPECT(d.trail == 0);
-    EXPECT(d.held == 0);
-}
-
-static void test_putc_holds_trailing_newlines(void)
-{
-    cap_reset();
-    struct disp d = {0};
-    disp_putc(&d, 'a');
-    disp_putc(&d, '\n');
-    disp_putc(&d, '\n');
-    /* Newlines were buffered, only 'a' on stdout so far. */
-    EXPECT_STR_EQ(cap_read(), "a");
-    EXPECT(d.held == 2);
-    /* emit_held drains them. */
-    cap_reset();
-    disp_emit_held(&d);
-    EXPECT_STR_EQ(cap_read(), "\n\n");
-    EXPECT(d.held == 0);
-    EXPECT(d.trail == 2);
-}
-
-static void test_putc_non_nl_after_held_commits(void)
-{
-    cap_reset();
-    struct disp d = {0};
-    disp_putc(&d, 'a');
-    disp_putc(&d, '\n');
-    disp_putc(&d, 'b');
-    /* 'b' commits the held \n before writing itself. */
-    EXPECT_STR_EQ(cap_read(), "a\nb");
-}
-
-static void test_write_holds_trailing_newlines(void)
-{
-    cap_reset();
-    struct disp d = {0};
-    disp_write(&d, "hi\n\n", 4);
-    EXPECT_STR_EQ(cap_read(), "hi");
-    EXPECT(d.held == 2);
-}
-
-static void test_write_strips_crlf_tail(void)
-{
-    cap_reset();
-    struct disp d = {0};
-    /* CRLF tail is fully deferred; only \n increments held, the \r is
-     * absorbed and never emitted. */
-    disp_write(&d, "hi\r\n", 4);
-    EXPECT_STR_EQ(cap_read(), "hi");
-    EXPECT(d.held == 1);
-    cap_reset();
-    disp_emit_held(&d);
-    EXPECT_STR_EQ(cap_read(), "\n");
-}
-
-static void test_write_empty_is_noop(void)
-{
-    cap_reset();
-    struct disp d = {0};
-    disp_write(&d, "", 0);
-    EXPECT_STR_EQ(cap_read(), "");
-    EXPECT(d.held == 0);
-    EXPECT(d.trail == 0);
-}
-
-/* ---------- block separator caps held newlines ---------- */
-
-static void test_block_separator_from_clean_state(void)
-{
-    cap_reset();
-    struct disp d = {0};
-    /* trail=0, held=0 → emit two newlines. */
-    disp_block_separator(&d);
-    EXPECT_STR_EQ(cap_read(), "\n\n");
-    EXPECT(d.trail == 2);
-    EXPECT(d.held == 0);
-}
-
-static void test_block_separator_drops_excess_held(void)
-{
-    cap_reset();
-    struct disp d = {0};
-    for (int i = 0; i < 5; i++)
-        disp_putc(&d, '\n');
-    /* held=5; separator commits 2 (need = 2 - trail), drops the rest. */
-    disp_block_separator(&d);
-    EXPECT_STR_EQ(cap_read(), "\n\n");
-    EXPECT(d.held == 0);
-    EXPECT(d.trail == 2);
-}
-
-static void test_block_separator_preserves_committed_trail(void)
-{
-    cap_reset();
-    struct disp d = {.trail = 2};
-    /* Already at one blank line — separator emits nothing. */
-    disp_block_separator(&d);
-    EXPECT_STR_EQ(cap_read(), "");
-    EXPECT(d.trail == 2);
-}
-
-/* ---------- printf goes through write ---------- */
-
-static void test_printf_basic(void)
-{
-    cap_reset();
-    struct disp d = {0};
-    disp_printf(&d, "n=%d s=%s", 42, "hi");
-    EXPECT_STR_EQ(cap_read(), "n=42 s=hi");
-}
-
-static void test_printf_holds_trailing_newline(void)
-{
-    cap_reset();
-    struct disp d = {0};
-    disp_printf(&d, "%s\n", "row");
-    EXPECT_STR_EQ(cap_read(), "row");
-    EXPECT(d.held == 1);
-}
-
-/* ---------- first_delta_strip drops leading newlines only ---------- */
-
-static void test_first_delta_strip_drops_leading_newlines(void)
-{
-    struct disp d = {.saw_text = 0};
-    const char *s = "\n\n\thello";
-    size_t n = strlen(s);
-    disp_first_delta_strip(&d, &s, &n);
-    EXPECT(n == 6);
-    EXPECT(strncmp(s, "\thello", 6) == 0);
-}
-
-static void test_first_delta_strip_drops_cr_too(void)
-{
-    struct disp d = {.saw_text = 0};
-    const char *s = "\r\n\rhello";
-    size_t n = strlen(s);
-    disp_first_delta_strip(&d, &s, &n);
-    EXPECT(n == 5);
-    EXPECT(strncmp(s, "hello", 5) == 0);
-}
-
-static void test_first_delta_strip_noop_when_saw_text(void)
-{
-    struct disp d = {.saw_text = 1};
-    const char *orig = "\n\nhello";
-    const char *s = orig;
-    size_t n = strlen(s);
-    disp_first_delta_strip(&d, &s, &n);
-    EXPECT(s == orig);
-    EXPECT(n == 7);
-}
-
-/* ---------- the output sink ---------- */
-
-/* An explicit sink takes every kind of write — content, escapes, held
- * newlines, separators — and stdout sees none of it. This is what lets the
- * live pipeline render into a pager or a memory stream. */
-static void test_explicit_sink_takes_all_writes(void)
-{
-    cap_reset();
-    char *buf = NULL;
-    size_t len = 0;
-    FILE *mem = open_memstream(&buf, &len);
-    EXPECT(mem != NULL);
-    if (!mem)
+    struct capture capture;
+    if (!capture_init(&capture, 0))
         return;
 
-    struct disp d = {.out = mem, .trail = 2};
-    disp_raw(&d, "\x1b[1m");
-    disp_printf(&d, "body");
-    disp_putc(&d, '\n');
-    disp_emit_held(&d);
-    disp_block_separator(&d);
-    disp_flush(&d);
-    fclose(mem);
+    disp_putc(&capture.disp, 'h');
+    disp_putc(&capture.disp, 'i');
 
-    EXPECT_STR_EQ(buf, "\x1b[1mbody\n\n");
-    EXPECT_STR_EQ(cap_read(), ""); /* nothing leaked to stdout */
-    free(buf);
+    EXPECT_STR_EQ(capture_read(&capture), "hi");
+    EXPECT(capture.disp.committed_newlines == 0);
+    EXPECT(capture.disp.pending_newlines == 0);
+    capture_free(&capture);
 }
 
-/* A zero-initialized disp writes to stdout. Load-bearing: callers that
- * never touch `out` (the live REPL, tests constructing `struct disp {0}`)
- * depend on NULL meaning stdout, so this can't become "must be set". */
-static void test_null_sink_means_stdout(void)
+static void test_putc_defers_trailing_newlines(void)
 {
-    cap_reset();
-    struct disp d = {0};
-    EXPECT(disp_sink(&d) == stdout);
-    disp_write(&d, "to stdout", 9);
-    EXPECT_STR_EQ(cap_read(), "to stdout");
-}
-
-/* Held/trail bookkeeping lives on the disp, not on the sink, so two disps
- * over different sinks don't interfere. */
-static void test_sinks_keep_separate_bookkeeping(void)
-{
-    cap_reset();
-    char *buf = NULL;
-    size_t len = 0;
-    FILE *mem = open_memstream(&buf, &len);
-    EXPECT(mem != NULL);
-    if (!mem)
+    struct capture capture;
+    if (!capture_init(&capture, 0))
         return;
 
-    struct disp to_mem = {.out = mem};
-    struct disp to_out = {0};
-    disp_write(&to_mem, "a\n", 2); /* newline held, not committed */
-    disp_write(&to_out, "b", 1);
-    EXPECT(to_mem.held == 1 && to_mem.trail == 0);
-    EXPECT(to_out.held == 0 && to_out.trail == 0);
-    disp_emit_held(&to_mem);
-    disp_flush(&to_mem);
-    fclose(mem);
+    disp_putc(&capture.disp, 'a');
+    disp_putc(&capture.disp, '\n');
+    disp_putc(&capture.disp, '\n');
 
-    EXPECT_STR_EQ(buf, "a\n");
-    EXPECT_STR_EQ(cap_read(), "b");
-    free(buf);
+    EXPECT_STR_EQ(capture_read(&capture), "a");
+    EXPECT(capture.disp.pending_newlines == 2);
+
+    disp_commit_newlines(&capture.disp);
+    EXPECT_STR_EQ(capture_read(&capture), "a\n\n");
+    EXPECT(capture.disp.pending_newlines == 0);
+    EXPECT(capture.disp.committed_newlines == 2);
+    capture_free(&capture);
+}
+
+static void test_visible_byte_commits_pending_newlines(void)
+{
+    struct capture capture;
+    if (!capture_init(&capture, 0))
+        return;
+
+    disp_write(&capture.disp, "a\n", 2);
+    disp_putc(&capture.disp, 'b');
+
+    EXPECT_STR_EQ(capture_read(&capture), "a\nb");
+    EXPECT(capture.disp.committed_newlines == 0);
+    EXPECT(capture.disp.pending_newlines == 0);
+    capture_free(&capture);
+}
+
+static void test_write_defers_trailing_newlines(void)
+{
+    struct capture capture;
+    if (!capture_init(&capture, 0))
+        return;
+
+    disp_write(&capture.disp, "hi\n\n", 4);
+
+    EXPECT_STR_EQ(capture_read(&capture), "hi");
+    EXPECT(capture.disp.pending_newlines == 2);
+    capture_free(&capture);
+}
+
+static void test_write_normalizes_trailing_crlf(void)
+{
+    struct capture capture;
+    if (!capture_init(&capture, 0))
+        return;
+
+    disp_write(&capture.disp, "hi\r\n", 4);
+    disp_commit_newlines(&capture.disp);
+
+    EXPECT_STR_EQ(capture_read(&capture), "hi\n");
+    capture_free(&capture);
+}
+
+static void test_write_preserves_trailing_carriage_return(void)
+{
+    struct capture capture;
+    if (!capture_init(&capture, 0))
+        return;
+
+    disp_write(&capture.disp, "hi\r", 3);
+
+    EXPECT_STR_EQ(capture_read(&capture), "hi\r");
+    EXPECT(capture.disp.pending_newlines == 0);
+    capture_free(&capture);
+}
+
+static void test_putc_carriage_return_preserves_newline_state(void)
+{
+    struct capture capture;
+    if (!capture_init(&capture, 0))
+        return;
+
+    disp_write(&capture.disp, "row\n", 4);
+    disp_putc(&capture.disp, '\r');
+    disp_block_separator(&capture.disp);
+
+    EXPECT_STR_EQ(capture_read(&capture), "row\n\r\n");
+    EXPECT(capture.disp.committed_newlines == 2);
+    EXPECT(capture.disp.pending_newlines == 0);
+    capture_free(&capture);
+}
+
+static void test_write_carriage_return_preserves_newline_state(void)
+{
+    struct capture capture;
+    if (!capture_init(&capture, 0))
+        return;
+
+    disp_write(&capture.disp, "row\n\r", 5);
+    disp_block_separator(&capture.disp);
+
+    EXPECT_STR_EQ(capture_read(&capture), "row\n\r\n");
+    EXPECT(capture.disp.committed_newlines == 2);
+    EXPECT(capture.disp.pending_newlines == 0);
+    capture_free(&capture);
+}
+
+static void test_empty_write_is_noop(void)
+{
+    struct capture capture;
+    if (!capture_init(&capture, 1))
+        return;
+
+    disp_write(&capture.disp, "", 0);
+
+    EXPECT_STR_EQ(capture_read(&capture), "");
+    EXPECT(capture.disp.committed_newlines == 1);
+    EXPECT(capture.disp.pending_newlines == 0);
+    capture_free(&capture);
+}
+
+static void test_block_separator_starts_with_blank_line(void)
+{
+    struct capture capture;
+    if (!capture_init(&capture, 0))
+        return;
+
+    disp_block_separator(&capture.disp);
+
+    EXPECT_STR_EQ(capture_read(&capture), "\n\n");
+    EXPECT(capture.disp.committed_newlines == 2);
+    EXPECT(capture.disp.pending_newlines == 0);
+    capture_free(&capture);
+}
+
+static void test_block_separator_collapses_pending_newlines(void)
+{
+    struct capture capture;
+    if (!capture_init(&capture, 0))
+        return;
+
+    disp_write(&capture.disp, "\n\n\n\n\n", 5);
+    disp_block_separator(&capture.disp);
+
+    EXPECT_STR_EQ(capture_read(&capture), "\n\n");
+    EXPECT(capture.disp.committed_newlines == 2);
+    EXPECT(capture.disp.pending_newlines == 0);
+    capture_free(&capture);
+}
+
+static void test_block_separator_preserves_existing_blank_line(void)
+{
+    struct capture capture;
+    if (!capture_init(&capture, 2))
+        return;
+
+    disp_block_separator(&capture.disp);
+
+    EXPECT_STR_EQ(capture_read(&capture), "");
+    EXPECT(capture.disp.committed_newlines == 2);
+    capture_free(&capture);
+}
+
+static void test_printf_uses_display_newline_handling(void)
+{
+    struct capture capture;
+    if (!capture_init(&capture, 0))
+        return;
+
+    disp_printf(&capture.disp, "n=%d %s\n", 42, "rows");
+
+    EXPECT_STR_EQ(capture_read(&capture), "n=42 rows");
+    EXPECT(capture.disp.pending_newlines == 1);
+    capture_free(&capture);
+}
+
+static void test_ansi_write_does_not_commit_pending_newline(void)
+{
+    struct capture capture;
+    if (!capture_init(&capture, 0))
+        return;
+
+    disp_write(&capture.disp, "body\n", 5);
+    disp_write_ansi(&capture.disp, "\x1b[1m");
+
+    EXPECT_STR_EQ(capture_read(&capture), "body\x1b[1m");
+    EXPECT(capture.disp.pending_newlines == 1);
+    capture_free(&capture);
+}
+
+static void test_external_line_resynchronizes_separator(void)
+{
+    struct capture capture;
+    if (!capture_init(&capture, 0))
+        return;
+
+    capture.disp.pending_newlines = 3;
+    fputs("external\n", capture.stream);
+    disp_sync_external_line(&capture.disp);
+    disp_block_separator(&capture.disp);
+
+    EXPECT_STR_EQ(capture_read(&capture), "external\n\n");
+    EXPECT(capture.disp.committed_newlines == 2);
+    EXPECT(capture.disp.pending_newlines == 0);
+    capture_free(&capture);
+}
+
+static void test_null_sink_selects_stdout(void)
+{
+    struct disp disp = {0};
+    EXPECT(disp_sink(&disp) == stdout);
 }
 
 int main(void)
 {
-    cap_init();
-
-    test_putc_commits_chars();
-    test_putc_holds_trailing_newlines();
-    test_putc_non_nl_after_held_commits();
-    test_write_holds_trailing_newlines();
-    test_write_strips_crlf_tail();
-    test_write_empty_is_noop();
-    test_block_separator_from_clean_state();
-    test_block_separator_drops_excess_held();
-    test_block_separator_preserves_committed_trail();
-    test_printf_basic();
-    test_printf_holds_trailing_newline();
-    test_first_delta_strip_drops_leading_newlines();
-    test_first_delta_strip_drops_cr_too();
-    test_first_delta_strip_noop_when_saw_text();
-    test_explicit_sink_takes_all_writes();
-    test_null_sink_means_stdout();
-    test_sinks_keep_separate_bookkeeping();
+    test_putc_writes_visible_bytes();
+    test_putc_defers_trailing_newlines();
+    test_visible_byte_commits_pending_newlines();
+    test_write_defers_trailing_newlines();
+    test_write_normalizes_trailing_crlf();
+    test_write_preserves_trailing_carriage_return();
+    test_putc_carriage_return_preserves_newline_state();
+    test_write_carriage_return_preserves_newline_state();
+    test_empty_write_is_noop();
+    test_block_separator_starts_with_blank_line();
+    test_block_separator_collapses_pending_newlines();
+    test_block_separator_preserves_existing_blank_line();
+    test_printf_uses_display_newline_handling();
+    test_ansi_write_does_not_commit_pending_newline();
+    test_external_line_resynchronizes_separator();
+    test_null_sink_selects_stdout();
 
     T_REPORT();
 }

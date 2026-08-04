@@ -60,8 +60,7 @@ static void test_erase_keeps_style_runs(void)
     free(out);
 }
 
-/* disp_tool_strip_close's shape: overprint the row's leading glyph with
- * the closing one, leaving the rest of the row untouched. */
+/* Tool gutters close by overprinting the leading glyph without changing the rest of the row. */
 static void test_carriage_return_overprints_first_cell(void)
 {
     char *out = resolve("| body\r+\n");
