@@ -354,7 +354,9 @@ static struct item dispatch_tool_call_collapsed(struct render_ctx *render,
 void render_tool_solo_marker(struct render_ctx *render, const char *text)
 {
     struct disp *disp = &render->disp;
-    spinner_hide(render->spinner);
+    /* Replacing the spinner (or a live placeholder row) with the marker is a swap, so it
+     * cannot render as blank-and-repaint. */
+    spinner_swap_begin(render->spinner);
     tool_render_write_marker_gutter(disp);
     disp_write_ansi(disp, ANSI_DIM);
     int available_cells = display_width() - TOOL_RENDER_GUTTER_COLS;
@@ -367,6 +369,7 @@ void render_tool_solo_marker(struct render_ctx *render, const char *text)
     free(line);
     disp_write_ansi(disp, ANSI_RESET);
     disp_putc(disp, '\n');
+    spinner_swap_end(render->spinner);
     disp_flush(disp);
 }
 
@@ -382,13 +385,15 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *render,
     write_tool_header(disp, call);
     /* A deferred "running" label could surface after the tool-status row releases the spinner. */
     spinner_set_label(spinner, "working", "working...");
-    spinner_park(spinner, 0);
 
     /* Diff mode is selected from the completed output so errors remain plain previews. */
     enum tool_render_mode mode =
         preview_mode == TOOL_PREVIEW_HEAD_TAIL ? TOOL_RENDER_HEAD_TAIL : TOOL_RENDER_HEAD;
     struct tool_render renderer;
     tool_render_init(&renderer, disp, spinner, mode);
+    /* An empty live row instead of a parked "working..." label: the indicator sits in the block
+     * and the first output line replaces it in place, so a fast tool never blinks a label. */
+    tool_render_begin_live(&renderer);
     struct tool_run_ctx run_ctx = {
         .display = tool_render_emit,
         .display_data = &renderer,

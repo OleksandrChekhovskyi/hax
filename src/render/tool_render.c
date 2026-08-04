@@ -35,11 +35,13 @@ static const struct preview_limits HEAD_PREVIEW_LIMITS = {
     .head_bytes = 3000,
 };
 
+#define TAIL_PREVIEW_LINES 4
+
 /* Command failures commonly end with their most useful context. */
 static const struct preview_limits HEAD_TAIL_PREVIEW_LIMITS = {
     .head_lines = 4,
     .head_bytes = 1500,
-    .tail_lines = 4,
+    .tail_lines = TAIL_PREVIEW_LINES,
 };
 
 static const struct preview_limits *preview_limits_for_mode(enum tool_render_mode mode)
@@ -120,6 +122,16 @@ void tool_render_write_marker_gutter(struct disp *disp)
     write_gutter(disp, GUTTER_MARKER);
 }
 
+/* The one definition of a preview row's look; settled rows and live spinner rows share it. */
+static void compose_row(struct buf *out, const char *gutter_glyph, const char *content)
+{
+    buf_append_str(out, theme_open(THEME_CHROME_DIM));
+    buf_append_str(out, gutter_glyph);
+    buf_append_str(out, " " ANSI_RESET ANSI_DIM);
+    buf_append_str(out, content);
+    buf_append_str(out, ANSI_RESET);
+}
+
 static void write_next_row_gutter(struct tool_render *render)
 {
     write_gutter(render->disp, render->rows_emitted == 0 ? GUTTER_FIRST : GUTTER_BODY);
@@ -146,74 +158,106 @@ static char *truncate_slice(const char *bytes, size_t len)
     return truncated;
 }
 
-/* Spinner drawing bypasses disp, so release a pending newline before handing it the row. */
+/* Live rows must also fit the physical terminal; a wrapped row breaks the spinner's row
+ * accounting. */
+static size_t live_row_budget(void)
+{
+    int width = term_width();
+    if (width <= TOOL_RENDER_GUTTER_COLS + 5)
+        return 1;
+    size_t terminal_budget = (size_t)(width - TOOL_RENDER_GUTTER_COLS - 1);
+    size_t display_budget = row_content_budget();
+    return terminal_budget < display_budget ? terminal_budget : display_budget;
+}
+
+/* Spinner drawing bypasses disp, so release a pending newline before handing it the view. The
+ * spinner overprints its glyph on the last row's gutter. */
+static void paint_live_rows(struct tool_render *render, const char *const *contents, int count)
+{
+    struct buf styled[1 + TAIL_PREVIEW_LINES];
+    struct spinner_row rows[1 + TAIL_PREVIEW_LINES];
+    size_t budget = live_row_budget();
+
+    for (int row = 0; row < count; row++) {
+        char *clipped = truncate_for_display(contents[row], budget);
+        buf_init(&styled[row]);
+        compose_row(&styled[row], GUTTER_BODY, clipped);
+        rows[row].bytes = styled[row].data;
+        rows[row].cells = TOOL_RENDER_GUTTER_COLS + (int)display_cells(clipped);
+        free(clipped);
+    }
+
+    disp_commit_newlines(render->disp);
+    spinner_set_tool_status_view(render->spinner, rows, count);
+    for (int row = 0; row < count; row++)
+        buf_free(&styled[row]);
+    render->status_visible = 1;
+}
+
 static void paint_status(struct tool_render *render)
 {
-    disp_commit_newlines(render->disp);
     const char *content = render->status_line.data ? render->status_line.data : "";
-    if (!render->status_visible) {
-        spinner_show_tool_status(render->spinner, content);
-        render->status_visible = 1;
-    } else {
-        spinner_set_tool_status_content(render->spinner, content);
-    }
+    paint_live_rows(render, &content, 1);
+    render->status_placeholder = 0;
     render->block_open = 1;
 }
 
+void tool_render_begin_live(struct tool_render *render)
+{
+    if (!render->spinner)
+        return;
+    const char *placeholder = "";
+    paint_live_rows(render, &placeholder, 1);
+    render->status_placeholder = 1;
+}
+
+static void emit_row(struct tool_render *render, const char *content, size_t len)
+{
+    char *truncated = truncate_slice(content, len);
+    struct buf row;
+    buf_init(&row);
+    compose_row(&row, render->rows_emitted == 0 ? GUTTER_FIRST : GUTTER_BODY, truncated);
+    free(truncated);
+    disp_commit_newlines(render->disp);
+    disp_write(render->disp, row.data, row.len);
+    buf_free(&row);
+    disp_putc(render->disp, '\n');
+    render->rows_emitted++;
+    render->block_open = 1;
+}
+
+/* Erasing the live status and committing its settled row spans two writers; the swap bracket
+ * makes them render as one frame, not blank-and-repaint. */
 static void commit_status(struct tool_render *render)
 {
     if (!render->status_visible)
         return;
-    spinner_hide(render->spinner);
-    write_next_row_gutter(render);
-    disp_write_ansi(render->disp, ANSI_DIM);
-    char *truncated = truncate_for_display(render->status_line.data, row_content_budget());
-    disp_write(render->disp, truncated, strlen(truncated));
-    free(truncated);
-    disp_write_ansi(render->disp, ANSI_RESET);
-    disp_putc(render->disp, '\n');
+    spinner_swap_begin(render->spinner);
+    emit_row(render, render->status_line.data ? render->status_line.data : "",
+             render->status_line.len);
+    spinner_swap_end(render->spinner);
     disp_flush(render->disp);
-    render->rows_emitted++;
     render->head_lines_emitted++;
     render->head_bytes_emitted += render->status_line.len + 1;
     render->status_visible = 0;
 }
 
+/* Part of the finalize swap: the bracket opened with the erase closes at the end of finalize,
+ * after the tail rows. */
 static void replace_status_with_marker(struct tool_render *render, const char *marker)
 {
-    spinner_hide(render->spinner);
-    write_next_row_gutter(render);
-    disp_write_ansi(render->disp, ANSI_DIM);
-    char *truncated = truncate_for_display(marker, row_content_budget());
-    disp_write(render->disp, truncated, strlen(truncated));
-    free(truncated);
-    disp_write_ansi(render->disp, ANSI_RESET);
-    disp_putc(render->disp, '\n');
+    spinner_swap_begin(render->spinner);
+    emit_row(render, marker, strlen(marker));
     disp_flush(render->disp);
-    render->rows_emitted++;
     render->status_visible = 0;
-    render->block_open = 1;
 }
 
 static void drop_status(struct tool_render *render)
 {
     if (!render->status_visible)
         return;
-    spinner_hide(render->spinner);
+    spinner_swap_begin(render->spinner);
     render->status_visible = 0;
-}
-
-static void emit_row(struct tool_render *render, const char *content, size_t len)
-{
-    write_next_row_gutter(render);
-    disp_write_ansi(render->disp, ANSI_DIM);
-    char *truncated = truncate_slice(content, len);
-    disp_write(render->disp, truncated, strlen(truncated));
-    free(truncated);
-    disp_write_ansi(render->disp, ANSI_RESET);
-    disp_putc(render->disp, '\n');
-    render->rows_emitted++;
-    render->block_open = 1;
 }
 
 static void push_tail_byte(struct tool_render *render, char byte)
@@ -256,26 +300,39 @@ static void mark_head_complete(struct tool_render *render)
     render->suppressed_tail_bytes += render->line_tail_bytes;
 }
 
+static void paint_live_tail(struct tool_render *render, const char *bytes, size_t len);
+
 static void process_line(struct tool_render *render, const char *bytes, size_t len, int is_blank)
 {
     if (is_blank) {
-        if (!render->head_complete && status_reaches_head_limit(render)) {
+        if (!render->head_complete && !render->status_placeholder &&
+            status_reaches_head_limit(render)) {
             commit_status(render);
             mark_head_complete(render);
         }
         return;
     }
 
-    if (render->status_visible && !render->head_complete) {
+    /* The placeholder is replaced in place by the first line, never committed as a row. */
+    if (render->status_visible && !render->status_placeholder && !render->head_complete) {
         commit_status(render);
         if (head_limit_reached(render))
             mark_head_complete(render);
     }
 
+    /* status_line always holds the newest completed line: the pending head row before the cap,
+     * the newest tail line after it (whose start the byte-bounded tail ring may have lost). */
     char *truncated = truncate_slice(bytes, len);
     buf_reset(&render->status_line);
     buf_append(&render->status_line, truncated, strlen(truncated));
     free(truncated);
+
+    if (render->head_complete && render->mode == TOOL_RENDER_HEAD_TAIL && render->spinner) {
+        render->suppressed_lines++;
+        paint_live_tail(render, bytes, len);
+        return;
+    }
+
     paint_status(render);
     if (render->head_complete)
         render->suppressed_lines++;
@@ -300,8 +357,14 @@ static void emit_diff_line(struct tool_render *render, const char *line, size_t 
     /* The tool-call header already identifies the file. */
     if (!render->diff_hunk_started && diff_is_file_header(line, len))
         return;
-    if (!render->block_open)
-        spinner_hide(render->spinner);
+    /* Replacing the spinner (or the live placeholder) with the first row is a swap, so it
+     * cannot render as blank-and-repaint. */
+    int opening = !render->block_open;
+    if (opening) {
+        spinner_swap_begin(render->spinner);
+        render->status_visible = 0;
+        render->status_placeholder = 0;
+    }
     write_next_row_gutter(render);
     disp_write_ansi(render->disp, diff_line_color(line, len, render->diff_hunk_started));
     char *truncated = truncate_slice(line, len);
@@ -309,6 +372,8 @@ static void emit_diff_line(struct tool_render *render, const char *line, size_t 
     free(truncated);
     disp_write_ansi(render->disp, ANSI_RESET);
     disp_putc(render->disp, '\n');
+    if (opening)
+        spinner_swap_end(render->spinner);
     render->rows_emitted++;
     render->block_open = 1;
     /* Inside a hunk, content resembling a file header must still be classified by its prefix. */
@@ -475,40 +540,88 @@ static void build_tail_view(const struct tool_render *render, struct tail_view *
     view->elided_lines = elided_line_count > 0 ? elided_line_count : 0;
 }
 
-static void emit_tail_rows(struct tool_render *render, const char *bytes, size_t len)
+/* The head/tail preview shape shared by the settled rendering and the live spinner view: the
+ * elision marker (empty when nothing is elided) and the newest non-blank tail lines, truncated
+ * for display. */
+struct tail_preview {
+    char marker[96];
+    char *rows[TAIL_PREVIEW_LINES];
+    int row_count;
+};
+
+/* newest_bytes (from the line buffer) replaces the view's last line, which the byte-bounded tail
+ * ring may have clipped to a long line's ending. */
+static void build_tail_preview(const struct tool_render *render, const char *newest_bytes,
+                               size_t newest_len, struct tail_preview *preview)
 {
-    struct buf tail_line;
-    buf_init(&tail_line);
-    for (size_t i = 0; i < len; i++) {
-        char byte = bytes[i];
-        if (byte == '\n') {
-            const char *line_content = tail_line.data ? tail_line.data : "";
-            if (!line_is_blank(line_content, tail_line.len))
-                emit_row(render, line_content, tail_line.len);
-            buf_reset(&tail_line);
-        } else {
-            buf_append(&tail_line, &byte, 1);
-        }
+    struct tail_view view;
+    build_tail_view(render, &view);
+
+    preview->marker[0] = '\0';
+    if (view.elided_lines > 0)
+        snprintf(preview->marker, sizeof(preview->marker), "... (%d more line%s) ...",
+                 view.elided_lines, view.elided_lines == 1 ? "" : "s");
+
+    preview->row_count = 0;
+    size_t line_start = 0;
+    for (size_t i = 0; i <= view.len; i++) {
+        if (i < view.len && view.bytes[i] != '\n')
+            continue;
+        if (i > line_start && !line_is_blank(view.bytes + line_start, i - line_start) &&
+            preview->row_count < TAIL_PREVIEW_LINES)
+            preview->rows[preview->row_count++] =
+                truncate_slice(view.bytes + line_start, i - line_start);
+        line_start = i + 1;
     }
-    if (tail_line.len > 0 && !line_is_blank(tail_line.data, tail_line.len))
-        emit_row(render, tail_line.data, tail_line.len);
-    buf_free(&tail_line);
+
+    if (newest_bytes && preview->row_count > 0) {
+        free(preview->rows[preview->row_count - 1]);
+        preview->rows[preview->row_count - 1] = truncate_slice(newest_bytes, newest_len);
+    }
+}
+
+static void tail_preview_free(struct tail_preview *preview)
+{
+    for (int row = 0; row < preview->row_count; row++)
+        free(preview->rows[row]);
+}
+
+/* Live preview repainted in place by the spinner while output streams. */
+static void paint_live_tail(struct tool_render *render, const char *bytes, size_t len)
+{
+    struct tail_preview preview;
+    build_tail_preview(render, bytes, len, &preview);
+
+    if (preview.row_count > 0) {
+        const char *contents[1 + TAIL_PREVIEW_LINES];
+        int count = 0;
+        if (preview.marker[0])
+            contents[count++] = preview.marker;
+        for (int row = 0; row < preview.row_count; row++)
+            contents[count++] = preview.rows[row];
+        paint_live_rows(render, contents, count);
+        render->status_placeholder = 0;
+        render->block_open = 1;
+    }
+    tail_preview_free(&preview);
 }
 
 static void finalize_head_tail(struct tool_render *render)
 {
-    struct tail_view view;
-    build_tail_view(render, &view);
-    if (view.elided_lines > 0) {
-        char marker[96];
-        snprintf(marker, sizeof(marker), "... (%d more line%s) ...", view.elided_lines,
-                 view.elided_lines == 1 ? "" : "s");
-        replace_status_with_marker(render, marker);
-    } else {
+    /* The settled tail must show the same newest line the live view showed, not the ring's
+     * clipped ending of a long line. */
+    const char *newest = render->suppressed_lines > 0 ? render->status_line.data : NULL;
+    size_t newest_len = newest ? render->status_line.len : 0;
+
+    struct tail_preview preview;
+    build_tail_preview(render, newest, newest_len, &preview);
+    if (preview.marker[0])
+        replace_status_with_marker(render, preview.marker);
+    else
         drop_status(render);
-    }
-    if (view.len > 0)
-        emit_tail_rows(render, view.bytes, view.len);
+    for (int row = 0; row < preview.row_count; row++)
+        emit_row(render, preview.rows[row], strlen(preview.rows[row]));
+    tail_preview_free(&preview);
 }
 
 static void finalize_capped_preview(struct tool_render *render)
@@ -555,8 +668,10 @@ void tool_render_finalize(struct tool_render *render)
         return;
     }
 
+    /* The swap begins atomically with the spinner's erase; its bracket closes only after the
+     * settled rows and the gutter overprint. */
     if (render->mode == TOOL_RENDER_DIFF)
-        spinner_hide(render->spinner);
+        spinner_swap_begin(render->spinner);
     else
         finalize_capped_preview(render);
 
@@ -564,6 +679,7 @@ void tool_render_finalize(struct tool_render *render)
         overprint_final_gutter(render->disp, GUTTER_LAST);
     else if (render->rows_emitted == 1)
         overprint_final_gutter(render->disp, GUTTER_MARKER);
+    spinner_swap_end(render->spinner);
     disp_flush(render->disp);
     render->block_open = 0;
 }

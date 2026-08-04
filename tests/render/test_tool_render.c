@@ -7,7 +7,6 @@
 #include "harness.h"
 #include "util.h"
 #include "render/disp.h"
-#include "render/spinner.h"
 #include "render/tool_render.h"
 #include "terminal/ansi.h"
 
@@ -15,8 +14,6 @@
 #define STRIP_BODY       ANSI_DIM ANSI_CYAN "\xE2\x94\x82 " ANSI_RESET
 #define STRIP_CLOSE      "\r" ANSI_DIM ANSI_CYAN "\xE2\x94\x94" ANSI_RESET
 #define STRIP_CLOSE_SOLO "\r" ANSI_DIM ANSI_CYAN "\xE2\x80\xBA" ANSI_RESET
-
-#define SPINNER_BRAILLE_PREFIX "\xE2\xA0"
 
 static char capture_buf[131072];
 
@@ -55,13 +52,11 @@ static const char *render_one(enum tool_render_mode mode, const char *bytes, siz
 {
     capture_reset();
     struct disp d = {0};
-    struct spinner *sp = spinner_new(NULL);
     struct tool_render r;
-    tool_render_init(&r, &d, sp, mode);
+    tool_render_init(&r, &d, NULL, mode);
     tool_render_feed(&r, bytes, n);
     tool_render_finalize(&r);
     tool_render_free(&r);
-    spinner_free(sp);
     return capture_read();
 }
 
@@ -101,52 +96,46 @@ static void test_partial_trailing_line_committed(void)
 {
     capture_reset();
     struct disp d = {0};
-    struct spinner *sp = spinner_new(NULL);
     struct tool_render r;
-    tool_render_init(&r, &d, sp, TOOL_RENDER_HEAD);
+    tool_render_init(&r, &d, NULL, TOOL_RENDER_HEAD);
     tool_render_feed(&r, "no newline", 10);
     tool_render_finalize(&r);
     tool_render_free(&r);
-    spinner_free(sp);
     const char *out = capture_read();
     EXPECT(strstr(out, "no newline") != NULL);
     EXPECT(strstr(out, STRIP_FIRST ANSI_DIM "no newline" ANSI_RESET STRIP_CLOSE_SOLO) != NULL);
     EXPECT(d.pending_newlines == 1);
 }
 
-static void test_status_paints_with_spinner_glyph(void)
+static void test_completed_line_held_silently_without_spinner(void)
 {
     capture_reset();
     struct disp d = {0};
-    struct spinner *sp = spinner_new(NULL);
     struct tool_render r;
-    tool_render_init(&r, &d, sp, TOOL_RENDER_HEAD);
+    tool_render_init(&r, &d, NULL, TOOL_RENDER_HEAD);
     tool_render_feed(&r, "live\n", 5);
-    const char *mid = capture_read();
-    EXPECT(strstr(mid, SPINNER_BRAILLE_PREFIX) != NULL);
-    EXPECT(strstr(mid, "live") != NULL);
+    EXPECT_STR_EQ(capture_read(), "");
     EXPECT(d.pending_newlines == 0);
     tool_render_finalize(&r);
+    EXPECT(strstr(capture_read(), "live") != NULL);
     tool_render_free(&r);
-    spinner_free(sp);
 }
 
-static void test_streaming_repaints_then_commits_prior(void)
+static void test_next_line_commits_prior_line(void)
 {
     capture_reset();
     struct disp d = {0};
-    struct spinner *sp = spinner_new(NULL);
     struct tool_render r;
-    tool_render_init(&r, &d, sp, TOOL_RENDER_HEAD);
+    tool_render_init(&r, &d, NULL, TOOL_RENDER_HEAD);
     tool_render_feed(&r, "one\n", 4);
     tool_render_feed(&r, "two\n", 4);
+    /* The second line commits the first and is itself held until finalize. */
     const char *mid = capture_read();
-    EXPECT(strstr(mid, "one") != NULL);
-    EXPECT(strstr(mid, "two") != NULL);
     EXPECT(strstr(mid, STRIP_FIRST ANSI_DIM "one") != NULL);
+    EXPECT(strstr(mid, "two") == NULL);
     tool_render_finalize(&r);
+    EXPECT(strstr(capture_read(), "two") != NULL);
     tool_render_free(&r);
-    spinner_free(sp);
 }
 
 static void test_blank_lines_elided_between_content(void)
@@ -256,9 +245,8 @@ static void test_long_unbroken_input_buffer_bounded(void)
 {
     capture_reset();
     struct disp d = {0};
-    struct spinner *sp = spinner_new(NULL);
     struct tool_render r;
-    tool_render_init(&r, &d, sp, TOOL_RENDER_HEAD);
+    tool_render_init(&r, &d, NULL, TOOL_RENDER_HEAD);
     char *buf = malloc(65536);
     memset(buf, 'X', 65536);
     tool_render_feed(&r, buf, 65536);
@@ -267,7 +255,6 @@ static void test_long_unbroken_input_buffer_bounded(void)
     tool_render_finalize(&r);
     EXPECT(strstr(capture_read(), "XXX") != NULL);
     tool_render_free(&r);
-    spinner_free(sp);
 }
 
 static void test_diff_colors_added_and_removed(void)
@@ -381,30 +368,60 @@ static void test_emit_callback_sets_flag(void)
 {
     capture_reset();
     struct disp d = {0};
-    struct spinner *sp = spinner_new(NULL);
     struct tool_render r;
-    tool_render_init(&r, &d, sp, TOOL_RENDER_HEAD);
+    tool_render_init(&r, &d, NULL, TOOL_RENDER_HEAD);
     EXPECT(r.display_was_called == 0);
     tool_render_emit("x", 1, &r);
     EXPECT(r.display_was_called == 1);
     struct tool_render r2;
-    tool_render_init(&r2, &d, sp, TOOL_RENDER_HEAD);
+    tool_render_init(&r2, &d, NULL, TOOL_RENDER_HEAD);
     tool_render_emit("", 0, &r2);
     EXPECT(r2.display_was_called == 1);
     tool_render_finalize(&r);
     tool_render_free(&r);
     tool_render_finalize(&r2);
     tool_render_free(&r2);
-    spinner_free(sp);
+}
+
+static void test_begin_live_without_output_leaves_no_rows(void)
+{
+    capture_reset();
+    struct disp d = {0};
+    struct tool_render r;
+    tool_render_init(&r, &d, NULL, TOOL_RENDER_HEAD_TAIL);
+    tool_render_begin_live(&r);
+    tool_render_finalize(&r);
+    tool_render_free(&r);
+    const char *out = capture_read();
+    EXPECT(strstr(out, STRIP_FIRST) == NULL);
+    EXPECT(strstr(out, STRIP_CLOSE) == NULL);
+    EXPECT(strstr(out, STRIP_CLOSE_SOLO) == NULL);
+    EXPECT(r.rows_emitted == 0);
+}
+
+static void test_begin_live_without_spinner_matches_plain_render(void)
+{
+    capture_reset();
+    struct disp d = {0};
+    struct tool_render r;
+    tool_render_init(&r, &d, NULL, TOOL_RENDER_HEAD_TAIL);
+    tool_render_begin_live(&r);
+    tool_render_feed(&r, "first\nsecond\n", 13);
+    tool_render_finalize(&r);
+    tool_render_free(&r);
+    const char *out = capture_read();
+    /* Without a spinner there is no placeholder row; the block matches a plain render. */
+    EXPECT(strstr(out, STRIP_FIRST ANSI_DIM "first") != NULL);
+    EXPECT(strstr(out, STRIP_BODY ANSI_DIM "second" ANSI_RESET STRIP_CLOSE) != NULL);
+    EXPECT(r.rows_emitted == 2);
 }
 
 static void test_finalize_is_idempotent(void)
 {
     capture_reset();
     struct disp d = {0};
-    struct spinner *sp = spinner_new(NULL);
     struct tool_render r;
-    tool_render_init(&r, &d, sp, TOOL_RENDER_HEAD);
+    tool_render_init(&r, &d, NULL, TOOL_RENDER_HEAD);
     tool_render_feed(&r, "x\n", 2);
     tool_render_finalize(&r);
     size_t after_first = strlen(capture_read());
@@ -412,7 +429,6 @@ static void test_finalize_is_idempotent(void)
     size_t after_second = strlen(capture_read());
     EXPECT(after_first == after_second);
     tool_render_free(&r);
-    spinner_free(sp);
 }
 
 static void test_head_tail_blank_only_suppression_no_phantom_marker(void)
@@ -578,8 +594,8 @@ int main(void)
     test_head_only_under_cap_shows_all_lines();
     test_single_line_uses_solo_close();
     test_partial_trailing_line_committed();
-    test_status_paints_with_spinner_glyph();
-    test_streaming_repaints_then_commits_prior();
+    test_completed_line_held_silently_without_spinner();
+    test_next_line_commits_prior_line();
     test_blank_lines_elided_between_content();
     test_whitespace_only_lines_elided();
     test_indented_content_preserved();
@@ -601,6 +617,8 @@ int main(void)
     test_diff_inter_hunk_separator_stays_dim();
     test_ctrl_bytes_dropped_before_render();
     test_emit_callback_sets_flag();
+    test_begin_live_without_output_leaves_no_rows();
+    test_begin_live_without_spinner_matches_plain_render();
     test_finalize_is_idempotent();
     test_blank_lines_after_cap_dont_emit_phantom_footer();
     test_head_tail_blank_only_suppression_no_phantom_marker();

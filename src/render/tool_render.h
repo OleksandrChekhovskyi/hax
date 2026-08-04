@@ -22,7 +22,8 @@ enum tool_render_mode {
 
 /* Streaming renderer for user-visible tool output. Feed accepts arbitrary chunk boundaries and
  * removes terminal controls, malformed UTF-8, and dangerous codepoints. Head previews omit blank
- * lines; diff previews preserve them. The spinner may be NULL for non-live rendering. */
+ * lines; diff previews preserve them. The spinner is NULL on non-TTY stdout, which selects plain
+ * non-live rendering: completed rows only, no repaints. */
 struct tool_render {
     struct disp *disp;
     struct spinner *spinner;
@@ -38,6 +39,8 @@ struct tool_render {
 
     struct buf status_line;
     int status_visible;
+    /* The live row is the empty placeholder, not committed content. */
+    int status_placeholder;
     int block_open;
 
     int rows_emitted;
@@ -63,6 +66,12 @@ void tool_render_free(struct tool_render *render);
 
 /* Change policy before feeding any bytes. */
 void tool_render_set_mode(struct tool_render *render, enum tool_render_mode mode);
+
+/* Show an empty live preview row — an animated gutter awaiting content — so a running tool is
+ * visible before its first output line, which replaces the row in place. A block that never
+ * produces output erases the row again. No-op without a spinner. */
+void tool_render_begin_live(struct tool_render *render);
+
 void tool_render_feed(struct tool_render *render, const char *bytes, size_t len);
 
 /* Flush buffered input and close the preview. Repeated calls have no effect. */

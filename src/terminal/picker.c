@@ -721,9 +721,10 @@ long picker_run(const struct picker_opts *options)
         int current_terminal_cols, current_terminal_rows;
         get_terminal_size(&current_terminal_cols, &current_terminal_rows);
         int climb = reflow_climb(&picker, current_terminal_cols, current_terminal_rows);
+        fputs(ANSI_SYNC_BEGIN, stdout);
         if (climb > 0)
             printf(ANSI_CSI "%dA", climb);
-        fputs("\r" ANSI_ERASE_BELOW, stdout);
+        fputs("\r" ANSI_ERASE_BELOW ANSI_SYNC_END, stdout);
     }
     fputs(ANSI_CURSOR_SHOW, stdout);
     fflush(stdout);
