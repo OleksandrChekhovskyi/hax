@@ -384,7 +384,8 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *render,
     spinner_park(spinner, 0);
 
     /* Diff mode is selected from the completed output so errors remain plain previews. */
-    enum render_mode mode = preview_mode == TOOL_PREVIEW_HEAD_TAIL ? R_HEAD_TAIL : R_HEAD_ONLY;
+    enum tool_render_mode mode =
+        preview_mode == TOOL_PREVIEW_HEAD_TAIL ? TOOL_RENDER_HEAD_TAIL : TOOL_RENDER_HEAD;
     struct tool_render renderer;
     tool_render_init(&renderer, disp, spinner, mode);
     struct tool_run_ctx run_ctx = {
@@ -394,12 +395,12 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *render,
     };
     char *output = agent_tool_call_run(prepared, &run_ctx);
 
-    if (output && !renderer.display_called) {
+    if (output && !renderer.display_was_called) {
         if (tool_has_diff_output(tool) && !*output) {
             render_tool_solo_marker(render, "(no changes)");
         } else {
             if (tool_has_diff_output(tool) && strncmp(output, "--- ", 4) == 0)
-                renderer.mode = R_DIFF;
+                tool_render_set_mode(&renderer, TOOL_RENDER_DIFF);
             /* A hidden tail is model-only even when the tool never streamed. */
             size_t visible_len = strlen(output);
             if (run_ctx.output_hidden_tail <= visible_len)
@@ -411,7 +412,7 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *render,
     spinner_hide(spinner);
 
     /* Use actual rendered rows: control stripping can erase otherwise non-empty display bytes. */
-    if (tool_has_diff_output(tool) && renderer.display_called && renderer.rows_emitted == 0 &&
+    if (tool_has_diff_output(tool) && renderer.display_was_called && renderer.rows_emitted == 0 &&
         output && *output)
         render_tool_solo_marker(render, output);
 

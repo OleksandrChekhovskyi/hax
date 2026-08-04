@@ -141,11 +141,12 @@ static void render_result_preview(struct render_ctx *render, const struct item *
         return;
     }
 
-    enum render_mode mode = preview_mode == TOOL_PREVIEW_HEAD_TAIL ? R_HEAD_TAIL : R_HEAD_ONLY;
+    enum tool_render_mode mode =
+        preview_mode == TOOL_PREVIEW_HEAD_TAIL ? TOOL_RENDER_HEAD_TAIL : TOOL_RENDER_HEAD;
     struct tool_render renderer;
     tool_render_init(&renderer, &render->disp, NULL, mode);
     if (is_diff_output && !reconstructed && strncmp(body, "--- ", 4) == 0)
-        renderer.mode = R_DIFF;
+        tool_render_set_mode(&renderer, TOOL_RENDER_DIFF);
     tool_render_feed(&renderer, body, body_len);
     tool_render_finalize(&renderer);
     /* Control stripping can leave reconstructed display bytes with no visible rows. */

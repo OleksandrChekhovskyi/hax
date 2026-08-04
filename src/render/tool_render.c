@@ -15,372 +15,264 @@
 #include "text/utf8.h"
 #include "text/utf8_sanitize.h"
 
-/* Head-only preview (file-content tools — read top-down). */
-#define DISP_HEAD_ONLY_LINES 8
-#define DISP_HEAD_ONLY_BYTES 3000
+#define TAIL_RING_CAPACITY 1500
 
-/* Head + tail preview (command-output tools — errors land at the
- * bottom). Whichever side hits its line or byte cap first stops. */
-#define DISP_HT_HEAD_LINES 4
-#define DISP_HT_TAIL_LINES 4
-#define DISP_HT_HEAD_BYTES 1500
-#define DISP_HT_TAIL_BYTES 1500
+struct preview_limits {
+    int head_lines;
+    size_t head_bytes;
+    int tail_lines;
+};
 
-static int head_lines_cap(const struct tool_render *r)
+static const struct preview_limits HEAD_PREVIEW_LIMITS = {
+    .head_lines = 8,
+    .head_bytes = 3000,
+};
+
+/* Command failures commonly end with their most useful context. */
+static const struct preview_limits HEAD_TAIL_PREVIEW_LIMITS = {
+    .head_lines = 4,
+    .head_bytes = 1500,
+    .tail_lines = 4,
+};
+
+static const struct preview_limits *preview_limits_for_mode(enum tool_render_mode mode)
 {
-    return r->mode == R_HEAD_TAIL ? DISP_HT_HEAD_LINES : DISP_HEAD_ONLY_LINES;
+    return mode == TOOL_RENDER_HEAD_TAIL ? &HEAD_TAIL_PREVIEW_LIMITS : &HEAD_PREVIEW_LIMITS;
 }
 
-static size_t head_bytes_cap(const struct tool_render *r)
-{
-    return r->mode == R_HEAD_TAIL ? DISP_HT_HEAD_BYTES : DISP_HEAD_ONLY_BYTES;
-}
-
-/* Hard cap on the in-progress line buffer. Past this the buffer stops
- * growing — the renderer only ever displays the first content_budget
- * cells of a line anyway (the rest is truncated by truncate_for_display),
- * and the tail ring is itself bounded at DISP_HT_TAIL_BYTES. The
- * accurate-byte-count counter (line_total_bytes) keeps the footer's
- * "(N more bytes)" wording correct even past the cap. */
+/* Only the beginning of a line can reach the display; the tail ring is bounded separately. */
 #define LINE_BUF_CAP 4096
 
-/* Cell budget for one row's content. Subtracts the gutter strip width
- * (DISP_TOOL_STRIP_COLS) plus a one-cell right margin — the margin
- * keeps the cursor strictly under terminal width even when a row fills
- * the budget exactly, avoiding the "phantom space" auto-wrap that some
- * terminals do at col == width. */
-static size_t content_budget(void)
+/* Filling the final terminal column can trigger deferred autowrap on the next write. */
+static size_t row_content_budget(void)
 {
-    int w = display_width();
-    if (w <= DISP_TOOL_STRIP_COLS + 5)
+    int width = display_width();
+    if (width <= DISP_TOOL_STRIP_COLS + 5)
         return 1;
-    return (size_t)(w - DISP_TOOL_STRIP_COLS - 1);
+    return (size_t)(width - DISP_TOOL_STRIP_COLS - 1);
 }
 
-void tool_render_init(struct tool_render *r, struct disp *d, struct spinner *sp,
-                      enum render_mode mode)
+void tool_render_init(struct tool_render *render, struct disp *disp, struct spinner *spinner,
+                      enum tool_render_mode mode)
 {
-    memset(r, 0, sizeof(*r));
-    r->disp = d;
-    r->spinner = sp;
-    ctrl_strip_init(&r->strip);
-    utf8_sanitize_init(&r->utf8);
-    r->mode = mode;
-    if (r->mode == R_HEAD_TAIL)
-        r->tail = xmalloc(DISP_HT_TAIL_BYTES);
-    buf_init(&r->line);
-    buf_init(&r->status_content);
-    buf_init(&r->diff_line);
+    memset(render, 0, sizeof(*render));
+    render->disp = disp;
+    render->spinner = spinner;
+    ctrl_strip_init(&render->strip);
+    utf8_sanitize_init(&render->utf8);
+    render->mode = mode;
+    if (mode == TOOL_RENDER_HEAD_TAIL)
+        render->tail = xmalloc(TAIL_RING_CAPACITY);
+    buf_init(&render->line);
+    buf_init(&render->status_line);
+    buf_init(&render->diff_line);
 }
 
-void tool_render_free(struct tool_render *r)
+void tool_render_free(struct tool_render *render)
 {
-    free(r->tail);
-    buf_free(&r->line);
-    buf_free(&r->status_content);
-    buf_free(&r->diff_line);
+    free(render->tail);
+    buf_free(&render->line);
+    buf_free(&render->status_line);
+    buf_free(&render->diff_line);
 }
 
-/* True when the line is empty or contains only ASCII space/tab — the
- * elision policy for the live preview. The model still sees the raw
- * bytes via the tool's return string, so the elision is purely
- * visual. Used by the tail-replay path which doesn't have the live
- * line_saw_non_ws flag handy. */
+void tool_render_set_mode(struct tool_render *render, enum tool_render_mode mode)
+{
+    if (render->mode == mode)
+        return;
+    if (mode == TOOL_RENDER_HEAD_TAIL) {
+        render->tail = xmalloc(TAIL_RING_CAPACITY);
+    } else if (render->mode == TOOL_RENDER_HEAD_TAIL) {
+        free(render->tail);
+        render->tail = NULL;
+    }
+    render->mode = mode;
+}
+
 static int line_is_blank(const char *bytes, size_t len)
 {
     for (size_t i = 0; i < len; i++) {
-        char c = bytes[i];
-        if (c != ' ' && c != '\t')
+        char byte = bytes[i];
+        if (byte != ' ' && byte != '\t')
             return 0;
     }
     return 1;
 }
 
-/* ---- Status / row painting ---- */
-
-/* Strip glyphs in quiet chrome: spinner (one cell, dynamic) for the
- * live status row, "┌" for the first permanent row, "│" for body rows,
- * marker rows, and post-status replacements. Each is followed by one
- * space to give content breathing room from the gutter. Composed per
- * call because the style comes from the active theme. */
-static void emit_gutter_strip(struct disp *d, const char *glyph_utf8)
+static void emit_gutter_strip(struct disp *disp, const char *glyph_utf8)
 {
     char strip[48];
-    int n = snprintf(strip, sizeof(strip), "%s%s " ANSI_RESET, theme_open(THEME_CHROME_DIM),
-                     glyph_utf8);
-    disp_write(d, strip, (size_t)n);
+    int strip_len = snprintf(strip, sizeof(strip), "%s%s " ANSI_RESET, theme_open(THEME_CHROME_DIM),
+                             glyph_utf8);
+    disp_write(disp, strip, (size_t)strip_len);
 }
 
-static void emit_first_strip(struct disp *d)
+static void emit_first_strip(struct disp *disp)
 {
-    emit_gutter_strip(d, "\xE2\x94\x8C"); /* ┌ U+250C */
+    emit_gutter_strip(disp, "\xE2\x94\x8C"); /* ┌ U+250C */
 }
 
-static void emit_body_strip(struct disp *d)
+static void emit_body_strip(struct disp *disp)
 {
-    emit_gutter_strip(d, "\xE2\x94\x82"); /* │ U+2502 */
+    emit_gutter_strip(disp, "\xE2\x94\x82"); /* │ U+2502 */
 }
 
-/* Emit the appropriate strip for the row about to be written. The
- * choice depends on whether any permanent row has been committed yet
- * — the very first emits "┌", subsequent ones "│". */
-static void emit_strip_for_next_row(struct tool_render *r)
+static void emit_strip_for_next_row(struct tool_render *render)
 {
-    if (r->rows_emitted == 0)
-        emit_first_strip(r->disp);
+    if (render->rows_emitted == 0)
+        emit_first_strip(render->disp);
     else
-        emit_body_strip(r->disp);
+        emit_body_strip(render->disp);
 }
 
-/* Truncate `s` to fit within `cap` cells, codepoint-aware. Returns a
- * heap-allocated NUL-terminated string the caller frees. */
-static char *truncate_line(const char *s, size_t cap)
+static char *truncate_slice(const char *bytes, size_t len)
 {
-    return truncate_for_display(s ? s : "", cap);
+    char *copy = xmalloc(len + 1);
+    memcpy(copy, bytes, len);
+    copy[len] = '\0';
+    char *truncated = truncate_for_display(copy, row_content_budget());
+    free(copy);
+    return truncated;
 }
 
-/* Hand the current status_content to the spinner, which owns the live
- * row's painting (tick-rate animation on TTY, synchronous per-update
- * draws otherwise). Flushes any held \n first — the spinner's draw
- * bypasses disp's tracking, so without the flush the new status would
- * overprint the row just committed. The first paint's show also
- * unwinds dispatch's parked spinner, landing the status row directly
- * under the header. */
-static void status_paint(struct tool_render *r)
+/* Spinner drawing bypasses disp, so release a pending newline before handing it the row. */
+static void paint_status(struct tool_render *render)
 {
-    disp_emit_held(r->disp);
-    const char *content = r->status_content.data ? r->status_content.data : "";
-    if (!r->status_painted) {
-        spinner_show_tool_status(r->spinner, content);
-        r->status_painted = 1;
+    disp_emit_held(render->disp);
+    const char *content = render->status_line.data ? render->status_line.data : "";
+    if (!render->status_visible) {
+        spinner_show_tool_status(render->spinner, content);
+        render->status_visible = 1;
     } else {
-        spinner_set_tool_status_content(r->spinner, content);
+        spinner_set_tool_status_content(render->spinner, content);
     }
-    r->started = 1;
+    render->block_open = 1;
 }
 
-/* Convert the live status row into a permanent committed row: hide
- * the spinner (which erases the status row), emit "┌"/"│" strip +
- * status content + \n through disp. The held \n stays held — the
- * next status_paint flushes it via disp_emit_held; or if this is the
- * final commit at finalize, the held \n stays so the close-glyph
- * overprint can land on this row's strip. */
-static void status_commit(struct tool_render *r)
+static void commit_status(struct tool_render *render)
 {
-    if (!r->status_painted)
+    if (!render->status_visible)
         return;
-    spinner_hide(r->spinner);
-    emit_strip_for_next_row(r);
-    disp_raw(r->disp, ANSI_DIM);
-    char *trimmed = truncate_line(r->status_content.data, content_budget());
-    disp_write(r->disp, trimmed, strlen(trimmed));
-    free(trimmed);
-    disp_raw(r->disp, ANSI_RESET);
-    disp_putc(r->disp, '\n');
-    disp_flush(r->disp);
-    r->rows_emitted++;
-    r->lines_emitted++;
-    r->bytes_emitted += r->status_content.len + 1;
-    r->status_painted = 0;
+    spinner_hide(render->spinner);
+    emit_strip_for_next_row(render);
+    disp_raw(render->disp, ANSI_DIM);
+    char *truncated = truncate_for_display(render->status_line.data, row_content_budget());
+    disp_write(render->disp, truncated, strlen(truncated));
+    free(truncated);
+    disp_raw(render->disp, ANSI_RESET);
+    disp_putc(render->disp, '\n');
+    disp_flush(render->disp);
+    render->rows_emitted++;
+    render->head_lines_emitted++;
+    render->head_bytes_emitted += render->status_line.len + 1;
+    render->status_visible = 0;
 }
 
-/* Replace the status row with a marker row (e.g., footer or elision):
- * hide the spinner, then emit strip + marker text + held \n. Held \n
- * stays held so the close-glyph overprint at finalize can land on
- * this row's strip without an intervening blank line. */
-static void status_replace_with_marker(struct tool_render *r, const char *marker)
+static void replace_status_with_marker(struct tool_render *render, const char *marker)
 {
-    spinner_hide(r->spinner);
-    emit_strip_for_next_row(r);
-    disp_raw(r->disp, ANSI_DIM);
-    char *trimmed = truncate_line(marker, content_budget());
-    disp_write(r->disp, trimmed, strlen(trimmed));
-    free(trimmed);
-    disp_raw(r->disp, ANSI_RESET);
-    disp_putc(r->disp, '\n');
-    disp_flush(r->disp);
-    r->rows_emitted++;
-    r->status_painted = 0;
-    r->started = 1;
+    spinner_hide(render->spinner);
+    emit_strip_for_next_row(render);
+    disp_raw(render->disp, ANSI_DIM);
+    char *truncated = truncate_for_display(marker, row_content_budget());
+    disp_write(render->disp, truncated, strlen(truncated));
+    free(truncated);
+    disp_raw(render->disp, ANSI_RESET);
+    disp_putc(render->disp, '\n');
+    disp_flush(render->disp);
+    render->rows_emitted++;
+    render->status_visible = 0;
+    render->block_open = 1;
 }
 
-/* Drop the live status row without emitting anything new in its place:
- * hide the spinner (which erases its current paint), cursor lands at
- * col 0 of the cleared row. Subsequent strip emits land on this row,
- * so the cleared status becomes the next permanent row's slot. Used
- * at finalize when the tail-fits-inline path is about to replay tail
- * rows that would duplicate / supersede the status content. */
-static void status_drop(struct tool_render *r)
+static void drop_status(struct tool_render *render)
 {
-    if (!r->status_painted)
+    if (!render->status_visible)
         return;
-    spinner_hide(r->spinner);
-    r->status_painted = 0;
+    spinner_hide(render->spinner);
+    render->status_visible = 0;
 }
 
-/* Emit a freshly-built permanent row with the given content. Used by
- * tail replay at finalize. Truncation drops the right end (keeping the
- * line start) — same direction as head rows and live streaming, so a
- * reader scanning the block left-to-right always sees consistent line
- * starts. Held \n stays held so the close-glyph overprint can land on
- * the last row. */
-static void emit_permanent_row(struct tool_render *r, const char *content, size_t len)
+static void emit_row(struct tool_render *render, const char *content, size_t len)
 {
-    emit_strip_for_next_row(r);
-    disp_raw(r->disp, ANSI_DIM);
-    /* truncate_for_display takes NUL-terminated input — copy into a
-     * temporary buffer since `content` is a slice. */
-    char *tmp = xmalloc(len + 1);
-    memcpy(tmp, content, len);
-    tmp[len] = 0;
-    char *trimmed = truncate_for_display(tmp, content_budget());
-    free(tmp);
-    disp_write(r->disp, trimmed, strlen(trimmed));
-    free(trimmed);
-    disp_raw(r->disp, ANSI_RESET);
-    disp_putc(r->disp, '\n');
-    r->rows_emitted++;
-    r->started = 1;
+    emit_strip_for_next_row(render);
+    disp_raw(render->disp, ANSI_DIM);
+    char *truncated = truncate_slice(content, len);
+    disp_write(render->disp, truncated, strlen(truncated));
+    free(truncated);
+    disp_raw(render->disp, ANSI_RESET);
+    disp_putc(render->disp, '\n');
+    render->rows_emitted++;
+    render->block_open = 1;
 }
 
-/* ---- Suppression / tail ring ---- */
-
-static void tail_push_byte(struct tool_render *r, char ch)
+static void push_tail_byte(struct tool_render *render, char byte)
 {
-    if (r->mode != R_HEAD_TAIL)
+    if (render->mode != TOOL_RENDER_HEAD_TAIL)
         return;
-    r->tail[r->tail_pos++] = ch;
-    if (r->tail_pos == DISP_HT_TAIL_BYTES) {
-        r->tail_pos = 0;
-        r->tail_wrapped = 1;
+    render->tail[render->tail_write_pos++] = byte;
+    if (render->tail_write_pos == TAIL_RING_CAPACITY) {
+        render->tail_write_pos = 0;
+        render->tail_full = 1;
     }
-    /* Track display-byte counts for the suppression slice math.
-     * line_display_bytes resets at \n boundaries; suppressed_display_
-     * bytes accumulates for the lifetime of the block. The head_full
-     * gate undercounts the cap-tripping line — process_line
-     * compensates retroactively at the transition. */
-    r->line_display_bytes++;
-    if (r->head_full)
-        r->suppressed_display_bytes++;
+    render->line_tail_bytes++;
+    if (render->head_complete)
+        render->suppressed_tail_bytes++;
 }
 
-/* Account one suppressed line for the elision marker / footer line
- * count. Blank lines are silently elided everywhere (head, tail, pre-
- * cap), so they don't appear in this counter either — passing
- * blank=1 is a no-op. An unterminated trailing line counts as one
- * line when it's non-blank.
- *
- * The actual byte-level work (ring push, suppressed_display_bytes
- * bookkeeping) happens inline in tool_render_feed via tail_push_byte;
- * suppress_account only handles the user-facing line counter. */
-static void suppress_account(struct tool_render *r, int blank)
+static int head_limit_reached(const struct tool_render *render)
 {
-    if (blank)
-        return;
-    r->suppressed_lines += 1;
+    const struct preview_limits *limits = preview_limits_for_mode(render->mode);
+    return (size_t)render->head_lines_emitted >= (size_t)limits->head_lines ||
+           render->head_bytes_emitted >= limits->head_bytes;
 }
 
-/* ---- Per-line classification (HEAD_ONLY / HEAD_TAIL) ---- */
-
-/* True when the head cap has been reached after the most recent
- * commit — drives the head_full transition so subsequent lines
- * (blank or otherwise) get routed through suppression. */
-static int head_at_cap(const struct tool_render *r)
+/* The live status is not included in head counters until it is committed. */
+static int status_reaches_head_limit(const struct tool_render *render)
 {
-    return (size_t)r->lines_emitted >= (size_t)head_lines_cap(r) ||
-           r->bytes_emitted >= head_bytes_cap(r);
-}
-
-/* True when committing the currently painted status would put the
- * committed row count at or past the head cap. Used by the blank-
- * line path to decide whether to commit the visible status now (so
- * the line content survives) and start counting subsequent input as
- * suppression — without this, blanks arriving when the visual head
- * is "full but not yet committed" would silently bypass the cap. */
-static int status_commit_would_fill_head(const struct tool_render *r)
-{
-    if (!r->status_painted)
+    if (!render->status_visible)
         return 0;
-    size_t post_lines = (size_t)r->lines_emitted + 1;
-    size_t post_bytes = r->bytes_emitted + r->status_content.len + 1;
-    return post_lines >= (size_t)head_lines_cap(r) || post_bytes >= head_bytes_cap(r);
+    const struct preview_limits *limits = preview_limits_for_mode(render->mode);
+    size_t head_lines_after_commit = (size_t)render->head_lines_emitted + 1;
+    size_t head_bytes_after_commit = render->head_bytes_emitted + render->status_line.len + 1;
+    return head_lines_after_commit >= (size_t)limits->head_lines ||
+           head_bytes_after_commit >= limits->head_bytes;
 }
 
-/* Process one logical line. `bytes`/`len` is the cap-truncated line
- * buffer (may be missing a tail past LINE_BUF_CAP); blank says
- * whether any non-ws codepoint was seen; has_terminator distinguishes
- * normal feed-loop calls (1) from the trailing-partial drain at
- * finalize (0). The total-byte parameter is no longer needed since
- * the marker text is line-only. */
-static void process_line(struct tool_render *r, const char *bytes, size_t len, int blank,
-                         int has_terminator)
+static void mark_head_complete(struct tool_render *render)
 {
-    (void)has_terminator;
-    if (blank) {
-        /* Blank lines are silently elided from the preview at every
-         * level — head, tail, and the suppression counters. The only
-         * thing they do past the cap is contribute their byte to the
-         * tail ring (already handled via tail_push_byte) so the ring
-         * slice math stays consistent. The "visual head full but not
-         * yet committed" case still needs handling here: when a blank
-         * arrives with the painted status sitting on the cap row,
-         * commit the status now and transition to head_full so any
-         * subsequent non-blank content lands in suppression. */
-        if (!r->head_full && status_commit_would_fill_head(r)) {
-            status_commit(r);
-            r->head_full = 1;
-            /* The blank line's bytes were pushed to the ring before
-             * head_full flipped, so they were never credited to
-             * suppressed_display_bytes by tail_push_byte. Compensate
-             * now so build_tail_view's slice math accounts for them. */
-            r->suppressed_display_bytes += r->line_display_bytes;
+    render->head_complete = 1;
+    /* The current line entered the ring before the renderer discovered that the head was full. */
+    render->suppressed_tail_bytes += render->line_tail_bytes;
+}
+
+static void process_line(struct tool_render *render, const char *bytes, size_t len, int is_blank)
+{
+    if (is_blank) {
+        if (!render->head_complete && status_reaches_head_limit(render)) {
+            commit_status(render);
+            mark_head_complete(render);
         }
         return;
     }
-    /* Non-blank line. Pre-cap: commit the previous status as a
-     * permanent row before showing the new one. After commit, check
-     * whether the row counters tripped the cap — if so, this new line
-     * goes into suppression too. */
-    if (r->status_painted && !r->head_full) {
-        status_commit(r);
-        if (head_at_cap(r)) {
-            r->head_full = 1;
-            /* Cap-tripping line's bytes are already in the ring but
-             * weren't counted under head_full=0; credit them now. */
-            r->suppressed_display_bytes += r->line_display_bytes;
-        }
+
+    if (render->status_visible && !render->head_complete) {
+        commit_status(render);
+        if (head_limit_reached(render))
+            mark_head_complete(render);
     }
-    /* Truncate the line to one row's worth of cells before storing —
-     * the status_content buffer doesn't need to keep more than what
-     * one repaint will display, and the truncation marker (if any) is
-     * baked in by truncate_for_display. */
-    char *tmp = xmalloc(len + 1);
-    memcpy(tmp, bytes, len);
-    tmp[len] = 0;
-    char *trimmed = truncate_line(tmp, content_budget());
-    free(tmp);
-    buf_reset(&r->status_content);
-    buf_append(&r->status_content, trimmed, strlen(trimmed));
-    free(trimmed);
-    status_paint(r);
-    /* Once head is full, every non-blank line also feeds the
-     * suppression line counter — the status row floats above whatever
-     * the tool emits, while finalize uses the tail ring to compose
-     * the actual visible aftermath. The ring itself is filled inline
-     * by tool_render_feed regardless of LINE_BUF_CAP. */
-    if (r->head_full)
-        suppress_account(r, /* blank */ 0);
+
+    char *truncated = truncate_slice(bytes, len);
+    buf_reset(&render->status_line);
+    buf_append(&render->status_line, truncated, strlen(truncated));
+    free(truncated);
+    paint_status(render);
+    if (render->head_complete)
+        render->suppressed_lines++;
 }
 
-/* ---- Diff mode (line-buffered, per-line colored, hunk-aware) ---- */
-
-/* Per-line diff coloring: everything but the actual changed lines is
- * dimmed, matching the rest of the tool preview (head/tail rows are
- * all ANSI_DIM). Classification lives in render/diff_color.c, shared
- * with the transcript renderer (which maps the kinds differently). */
-static const char *diff_line_color(const char *line, size_t len, int in_hunk)
+static const char *diff_line_color(const char *line, size_t len, int hunk_started)
 {
-    switch (diff_line_classify(line, len, in_hunk)) {
+    switch (diff_line_classify(line, len, hunk_started)) {
     case DIFF_LINE_ADD:
         return theme_open(THEME_ADD);
     case DIFF_LINE_REMOVE:
@@ -392,416 +284,283 @@ static const char *diff_line_color(const char *line, size_t len, int in_hunk)
     return ANSI_DIM;
 }
 
-static void emit_diff_line(struct tool_render *r, const char *line, size_t len)
+static void emit_diff_line(struct tool_render *render, const char *line, size_t len)
 {
-    /* Drop the file-header lines from display: the tool-call header row
-     * above already names the file, so "--- a/x" / "+++ b/x" are pure
-     * duplication (and read as "a//abs/path" for absolute paths). The
-     * full header stays in the tool result the model receives — this is
-     * display-only elision, like the head/tail capping elsewhere. */
-    if (!r->diff_in_hunk && diff_is_file_header(line, len))
+    /* The tool-call header already identifies the file. */
+    if (!render->diff_hunk_started && diff_is_file_header(line, len))
         return;
-    /* First diff row: hide dispatch's parked spinner (the hide
-     * returns the cursor to the fresh row under the header) so it
-     * doesn't fight the row paint. The renderer never brings it back
-     * during R_DIFF, so once off it stays off. */
-    if (!r->started)
-        spinner_hide(r->spinner);
-    emit_strip_for_next_row(r);
-    /* Every diff line gets a color: the add/remove roles for the changed
-     * lines, dim for everything else (context, headers, markers). */
-    disp_raw(r->disp, diff_line_color(line, len, r->diff_in_hunk));
-    char *trimmed = truncate_line(line, content_budget());
-    disp_write(r->disp, trimmed, strlen(trimmed));
-    free(trimmed);
-    disp_raw(r->disp, ANSI_RESET);
-    disp_putc(r->disp, '\n');
-    r->rows_emitted++;
-    r->started = 1;
-    /* The first "@@" header opens the hunk body; everything after is
-     * classified by its +/-/space prefix (single-file diffs only ever
-     * have one header block up top, so the latch never needs resetting). */
+    if (!render->block_open)
+        spinner_hide(render->spinner);
+    emit_strip_for_next_row(render);
+    disp_raw(render->disp, diff_line_color(line, len, render->diff_hunk_started));
+    char *truncated = truncate_slice(line, len);
+    disp_write(render->disp, truncated, strlen(truncated));
+    free(truncated);
+    disp_raw(render->disp, ANSI_RESET);
+    disp_putc(render->disp, '\n');
+    render->rows_emitted++;
+    render->block_open = 1;
+    /* Inside a hunk, content resembling a file header must still be classified by its prefix. */
     if (len >= 2 && memcmp(line, "@@", 2) == 0)
-        r->diff_in_hunk = 1;
+        render->diff_hunk_started = 1;
 }
 
-static void emit_byte_diff(struct tool_render *r, char ch)
+static void feed_diff_byte(struct tool_render *render, char byte)
 {
-    if (ch == '\n') {
-        emit_diff_line(r, r->diff_line.data ? r->diff_line.data : "", r->diff_line.len);
-        buf_reset(&r->diff_line);
-    } else if (ch == '\t') {
-        /* Match the head/tail path: expand \t to 4 spaces so the row
-         * width passed to truncate_for_display matches what the
-         * terminal renders. */
-        buf_append(&r->diff_line, "    ", 4);
+    if (byte == '\n') {
+        emit_diff_line(render, render->diff_line.data ? render->diff_line.data : "",
+                       render->diff_line.len);
+        buf_reset(&render->diff_line);
+    } else if (byte == '\t') {
+        buf_append(&render->diff_line, "    ", 4);
     } else {
-        buf_append(&r->diff_line, &ch, 1);
+        buf_append(&render->diff_line, &byte, 1);
     }
 }
 
-/* ---- Public feed/finalize ---- */
-
-void tool_render_feed(struct tool_render *r, const char *bytes, size_t n)
+static void reset_line(struct tool_render *render)
 {
-    if (n == 0)
+    buf_reset(&render->line);
+    render->line_tail_bytes = 0;
+    render->line_has_non_whitespace = 0;
+}
+
+void tool_render_feed(struct tool_render *render, const char *bytes, size_t len)
+{
+    if (len == 0)
         return;
-    /* Two-stage sanitize: ctrl_strip drops C0/escape sequences (never
-     * expands, so n bytes in → ≤ n bytes out). utf8_sanitize then
-     * replaces malformed bytes with U+FFFD (worst case 3x expansion),
-     * holding partial multi-byte sequences across chunks so a codepoint
-     * split at a display-chunk boundary isn't double-replaced. */
-    char stack_strip[4096];
-    char *clean = n <= sizeof(stack_strip) ? stack_strip : xmalloc(n);
-    size_t cn = ctrl_strip_feed(&r->strip, bytes, n, clean);
 
-    char stack_utf8[UTF8_SANITIZE_OUT_MAX(4096)];
-    size_t need = UTF8_SANITIZE_OUT_MAX(cn);
-    char *out = need <= sizeof(stack_utf8) ? stack_utf8 : xmalloc(need);
-    size_t on = utf8_sanitize_feed(&r->utf8, clean, cn, out);
+    char stack_stripped[4096];
+    char *stripped = len <= sizeof(stack_stripped) ? stack_stripped : xmalloc(len);
+    size_t stripped_len = ctrl_strip_feed(&render->strip, bytes, len, stripped);
 
-    if (r->mode == R_DIFF) {
-        for (size_t i = 0; i < on; i++)
-            emit_byte_diff(r, out[i]);
+    char stack_sanitized[UTF8_SANITIZE_OUT_MAX(4096)];
+    size_t sanitized_cap = UTF8_SANITIZE_OUT_MAX(stripped_len);
+    char *sanitized =
+        sanitized_cap <= sizeof(stack_sanitized) ? stack_sanitized : xmalloc(sanitized_cap);
+    size_t sanitized_len = utf8_sanitize_feed(&render->utf8, stripped, stripped_len, sanitized);
+
+    if (render->mode == TOOL_RENDER_DIFF) {
+        for (size_t i = 0; i < sanitized_len; i++)
+            feed_diff_byte(render, sanitized[i]);
     } else {
-        size_t i = 0;
-        while (i < on) {
-            char c = out[i];
-            if (c == '\n') {
-                /* Push the line-terminating \n to the tail ring
-                 * before process_line. The ring captures every byte
-                 * (head bytes get overwritten by tail bytes once the
-                 * ring fills); build_tail_view at finalize extracts
-                 * just the suppressed-portion slice using
-                 * suppressed_bytes as the length. tail_push_byte is a
-                 * no-op for non-HEAD_TAIL modes. */
-                tail_push_byte(r, '\n');
-                process_line(r, r->line.data ? r->line.data : "", r->line.len, !r->line_saw_non_ws,
-                             /* has_terminator */ 1);
-                buf_reset(&r->line);
-                r->line_total_bytes = 0;
-                r->line_display_bytes = 0;
-                r->line_saw_non_ws = 0;
-                i++;
+        size_t offset = 0;
+        while (offset < sanitized_len) {
+            char byte = sanitized[offset];
+            if (byte == '\n') {
+                push_tail_byte(render, '\n');
+                process_line(render, render->line.data ? render->line.data : "", render->line.len,
+                             !render->line_has_non_whitespace);
+                reset_line(render);
+                offset++;
                 continue;
             }
-            /* Tab is the one C0 control ctrl_strip preserves. Expand
-             * to a fixed 4 spaces before it hits the line buffer or
-             * tail ring: a raw \t reaching the terminal expands to the
-             * next column-multiple-of-8 tab stop, which doesn't match
-             * the 1-cell width truncate_for_display assumes (wcwidth
-             * returns -1 for tab), so the rendered row blows past
-             * content_budget and wraps out of the gutter. Spaces are
-             * whitespace for elision purposes, same as the tab they
-             * replace, so line_saw_non_ws is correctly left alone. */
-            if (c == '\t') {
-                static const char TAB_AS[] = "    ";
-                size_t tw = sizeof(TAB_AS) - 1;
-                if (r->line.len + tw <= LINE_BUF_CAP)
-                    buf_append(&r->line, TAB_AS, tw);
-                for (size_t k = 0; k < tw; k++)
-                    tail_push_byte(r, TAB_AS[k]);
-                r->line_total_bytes++;
-                i++;
+
+            /* Terminal tab stops do not match the width calculation used for truncation. */
+            if (byte == '\t') {
+                static const char TAB_SPACES[] = "    ";
+                size_t tab_len = sizeof(TAB_SPACES) - 1;
+                if (render->line.len + tab_len <= LINE_BUF_CAP)
+                    buf_append(&render->line, TAB_SPACES, tab_len);
+                for (size_t i = 0; i < tab_len; i++)
+                    push_tail_byte(render, TAB_SPACES[i]);
+                offset++;
                 continue;
             }
-            /* Walk by codepoint so dangerous ones (Trojan Source bidi
-             * overrides, stray format chars, etc.) can be substituted
-             * with "?" before they reach the terminal. utf8_sanitize
-             * already replaced malformed sequences with U+FFFD, so
-             * cells < 0 here means a well-formed codepoint that
-             * wcwidth / codepoint_is_dangerous flagged. */
-            size_t consumed = 0;
-            int cells = utf8_codepoint_cells(out, on, i, &consumed);
-            if (consumed == 0)
-                consumed = 1;
-            const char *append_bytes;
-            size_t append_len;
-            int is_substituted = (cells < 0);
-            if (is_substituted) {
-                append_bytes = "?";
-                append_len = 1;
-            } else {
-                append_bytes = out + i;
-                append_len = consumed;
+
+            size_t codepoint_len = 0;
+            int cells = utf8_codepoint_cells(sanitized, sanitized_len, offset, &codepoint_len);
+            if (codepoint_len == 0)
+                codepoint_len = 1;
+
+            const char *display_bytes = sanitized + offset;
+            size_t display_len = codepoint_len;
+            int substituted = cells < 0;
+            if (substituted) {
+                display_bytes = "?";
+                display_len = 1;
             }
-            /* Append only when the whole codepoint fits within the
-             * line buffer cap — never split a multi-byte sequence. */
-            if (r->line.len + append_len <= LINE_BUF_CAP)
-                buf_append(&r->line, append_bytes, append_len);
-            /* Push the (possibly substituted) bytes into the tail
-             * ring unconditionally. The ring is sized for the visual
-             * tail; head bytes that land here early get overwritten
-             * by suppressed tail bytes once the ring fills. At
-             * finalize, build_tail_view uses suppressed_bytes to
-             * extract just the suppressed slice from the ring's
-             * recent end. */
-            for (size_t k = 0; k < append_len; k++)
-                tail_push_byte(r, append_bytes[k]);
-            /* line_total_bytes tracks the original byte count for the
-             * suppression footer; substitution doesn't change it. */
-            r->line_total_bytes += consumed;
-            /* Substituted "?" is non-ws; ASCII space stays whitespace.
-             * Multi-byte codepoints have a leading byte ≥ 0xC0 which
-             * trivially fails the space/tab check. */
-            if (is_substituted || (out[i] != ' ' && out[i] != '\t'))
-                r->line_saw_non_ws = 1;
-            i += consumed;
+
+            /* Never split a multibyte codepoint at the line-buffer limit. */
+            if (render->line.len + display_len <= LINE_BUF_CAP)
+                buf_append(&render->line, display_bytes, display_len);
+            for (size_t i = 0; i < display_len; i++)
+                push_tail_byte(render, display_bytes[i]);
+            if (substituted || sanitized[offset] != ' ')
+                render->line_has_non_whitespace = 1;
+            offset += codepoint_len;
         }
     }
 
-    if (out != stack_utf8)
-        free(out);
-    if (clean != stack_strip)
-        free(clean);
-    disp_flush(r->disp);
+    if (sanitized != stack_sanitized)
+        free(sanitized);
+    if (stripped != stack_stripped)
+        free(stripped);
+    disp_flush(render->disp);
 }
 
-/* Walk the tail ring contiguously into a linear buffer, back-walking
- * to keep at most DISP_HT_TAIL_LINES non-blank lines, and return the
- * resulting span plus the count of non-blank suppressed lines that
- * fell before the kept span (the "elided middle"). */
 struct tail_view {
-    char buf[DISP_HT_TAIL_BYTES];
-    size_t kept;
-    int mid_lines;
+    char bytes[TAIL_RING_CAPACITY];
+    size_t len;
+    int elided_lines;
 };
 
-static void build_tail_view(const struct tool_render *r, struct tail_view *v)
+static void build_tail_view(const struct tool_render *render, struct tail_view *view)
 {
-    /* Linearize the ring: oldest byte first, newest last. */
-    size_t linear_len = r->tail_wrapped ? DISP_HT_TAIL_BYTES : r->tail_pos;
-    size_t oldest = r->tail_wrapped ? r->tail_pos : 0;
-    char linear[DISP_HT_TAIL_BYTES];
-    for (size_t k = 0; k < linear_len; k++)
-        linear[k] = r->tail[(oldest + k) % DISP_HT_TAIL_BYTES];
+    size_t ring_len = render->tail_full ? TAIL_RING_CAPACITY : render->tail_write_pos;
+    size_t oldest_pos = render->tail_full ? render->tail_write_pos : 0;
+    char linearized[TAIL_RING_CAPACITY];
+    for (size_t i = 0; i < ring_len; i++)
+        linearized[i] = render->tail[(oldest_pos + i) % TAIL_RING_CAPACITY];
 
-    /* Extract just the suppressed slice from the ring's recent end.
-     * The ring captures every byte the renderer sees (head + tail);
-     * for short inputs head bytes still occupy the ring's start, but
-     * suppressed_display_bytes tells us exactly how many of the most-
-     * recent bytes are suppressed display content. Using
-     * suppressed_bytes (original input byte count) here would over-
-     * extend the slice into preceding head bytes when dangerous
-     * codepoints were substituted (3-byte U+202E becomes 1-byte "?"
-     * in the ring, but suppressed_bytes credits the original 3). */
-    size_t suppressed_in_ring =
-        r->suppressed_display_bytes < linear_len ? r->suppressed_display_bytes : linear_len;
-    char *tail_only = linear + (linear_len - suppressed_in_ring);
+    /* The ring also contains head bytes; the suppressed display-byte count selects its suffix. */
+    size_t suppressed_len =
+        render->suppressed_tail_bytes < ring_len ? render->suppressed_tail_bytes : ring_len;
+    const char *suppressed_bytes = linearized + ring_len - suppressed_len;
 
-    /* Back-walk through the suppressed slice to keep at most
-     * DISP_HT_TAIL_LINES *non-blank* lines. Counting raw \n
-     * boundaries here would let blank lines consume the tail-line
-     * cap (emit_tail_rows elides them), leaving fewer visible rows
-     * than the cap promises and inconsistent with the head's blank-
-     * line elision. Cross blanks for free until we've counted enough
-     * non-blank lines. */
-    size_t tail_start = suppressed_in_ring;
-    if (tail_start > 0 && tail_only[tail_start - 1] == '\n')
-        tail_start--;
-    /* cur_line_end tracks the end of the line we're scanning back
-     * through right now (the line starting at tail_start). */
-    size_t cur_line_end = tail_start;
-    int kept_visible = 0;
-    while (tail_start > 0) {
-        tail_start--;
-        if (tail_only[tail_start] == '\n') {
-            size_t line_start = tail_start + 1;
-            if (cur_line_end > line_start &&
-                !line_is_blank(tail_only + line_start, cur_line_end - line_start)) {
-                if (++kept_visible == DISP_HT_TAIL_LINES) {
-                    tail_start = line_start;
-                    break;
-                }
-            }
-            cur_line_end = tail_start;
+    /* Blank lines do not consume visible tail slots. */
+    size_t view_start = suppressed_len;
+    if (view_start > 0 && suppressed_bytes[view_start - 1] == '\n')
+        view_start--;
+    size_t current_line_end = view_start;
+    int visible_line_count = 0;
+    int tail_line_limit = preview_limits_for_mode(render->mode)->tail_lines;
+    while (view_start > 0) {
+        view_start--;
+        if (suppressed_bytes[view_start] != '\n')
+            continue;
+        size_t candidate_line_start = view_start + 1;
+        if (current_line_end > candidate_line_start &&
+            !line_is_blank(suppressed_bytes + candidate_line_start,
+                           current_line_end - candidate_line_start) &&
+            ++visible_line_count == tail_line_limit) {
+            view_start = candidate_line_start;
+            break;
         }
+        current_line_end = view_start;
     }
-    /* If the slice begins mid-codepoint (the ring wrapped inside a
-     * multi-byte sequence and the back-walk didn't find enough line
-     * breaks to land on a \n boundary), advance past leading UTF-8
-     * continuation bytes so emit_tail_rows starts on a valid lead
-     * byte. The orphan partial codepoint effectively joins the
-     * elided middle — a stray 0x80–0xBF byte reaching the terminal
-     * would render as garbage. */
-    while (tail_start < suppressed_in_ring &&
-           ((unsigned char)tail_only[tail_start] & 0xC0) == 0x80) {
-        tail_start++;
-    }
-    size_t kept = suppressed_in_ring - tail_start;
-    /* Count non-blank lines in the kept span — those are what the
-     * user sees rendered. Blank lines in the span are dropped by
-     * emit_tail_rows, so they belong to the elided portion for
-     * marker-counting purposes. */
-    int mid_lines = r->suppressed_lines;
-    size_t span_line_start = tail_start;
-    for (size_t k = tail_start; k < suppressed_in_ring; k++) {
-        if (tail_only[k] == '\n') {
-            if (k > span_line_start &&
-                !line_is_blank(tail_only + span_line_start, k - span_line_start))
-                mid_lines--;
-            span_line_start = k + 1;
-        }
-    }
-    if (span_line_start < suppressed_in_ring &&
-        !line_is_blank(tail_only + span_line_start, suppressed_in_ring - span_line_start))
-        mid_lines--;
-    if (mid_lines < 0)
-        mid_lines = 0;
 
-    memcpy(v->buf, tail_only + tail_start, kept);
-    v->kept = kept;
-    v->mid_lines = mid_lines;
+    /* A wrapped byte ring can begin in the middle of a UTF-8 codepoint. */
+    while (view_start < suppressed_len &&
+           ((unsigned char)suppressed_bytes[view_start] & 0xC0) == 0x80)
+        view_start++;
+
+    size_t view_len = suppressed_len - view_start;
+    int elided_line_count = render->suppressed_lines;
+    size_t line_start = view_start;
+    for (size_t i = view_start; i < suppressed_len; i++) {
+        if (suppressed_bytes[i] != '\n')
+            continue;
+        if (i > line_start && !line_is_blank(suppressed_bytes + line_start, i - line_start))
+            elided_line_count--;
+        line_start = i + 1;
+    }
+    if (line_start < suppressed_len &&
+        !line_is_blank(suppressed_bytes + line_start, suppressed_len - line_start))
+        elided_line_count--;
+
+    memcpy(view->bytes, suppressed_bytes + view_start, view_len);
+    view->len = view_len;
+    view->elided_lines = elided_line_count > 0 ? elided_line_count : 0;
 }
 
-/* Emit kept tail bytes as permanent rows, eliding empty / ws-only
- * lines on the way through (matching the live-path policy). */
-static void emit_tail_rows(struct tool_render *r, const char *bytes, size_t len)
+static void emit_tail_rows(struct tool_render *render, const char *bytes, size_t len)
 {
-    struct buf line;
-    buf_init(&line);
+    struct buf tail_line;
+    buf_init(&tail_line);
     for (size_t i = 0; i < len; i++) {
-        char c = bytes[i];
-        if (c == '\n') {
-            const char *p = line.data ? line.data : "";
-            if (!line_is_blank(p, line.len))
-                emit_permanent_row(r, p, line.len);
-            buf_reset(&line);
+        char byte = bytes[i];
+        if (byte == '\n') {
+            const char *line_content = tail_line.data ? tail_line.data : "";
+            if (!line_is_blank(line_content, tail_line.len))
+                emit_row(render, line_content, tail_line.len);
+            buf_reset(&tail_line);
         } else {
-            buf_append(&line, &c, 1);
+            buf_append(&tail_line, &byte, 1);
         }
     }
-    /* Trailing partial line: render if non-blank. */
-    if (line.len > 0) {
-        const char *p = line.data;
-        if (!line_is_blank(p, line.len))
-            emit_permanent_row(r, p, line.len);
-    }
-    buf_free(&line);
+    if (tail_line.len > 0 && !line_is_blank(tail_line.data, tail_line.len))
+        emit_row(render, tail_line.data, tail_line.len);
+    buf_free(&tail_line);
 }
 
-void tool_render_finalize(struct tool_render *r)
+static void finalize_head_tail(struct tool_render *render)
 {
-    /* Flush any in-progress UTF-8 sequence as U+FFFD. */
-    char tail[UTF8_SANITIZE_FLUSH_MAX];
-    size_t tn = utf8_sanitize_flush(&r->utf8, tail);
-    if (tn > 0)
-        tool_render_feed(r, tail, tn);
-
-    /* Drain any in-progress line that didn't end in \n. */
-    if (r->mode == R_DIFF) {
-        if (r->diff_line.len > 0) {
-            emit_diff_line(r, r->diff_line.data, r->diff_line.len);
-            buf_reset(&r->diff_line);
-        }
-    } else if (r->line_total_bytes > 0) {
-        /* Trailing partial line (no \n). has_terminator=0 so
-         * the trailing partial counts as one line (if non-blank) via
-         * the same suppress_account path used by terminated lines —
-         * has_terminator=0 just signals "no synthesized \n in the
-         * ring," not a different counting policy. */
-        process_line(r, r->line.data ? r->line.data : "", r->line.len, !r->line_saw_non_ws,
-                     /* has_terminator */ 0);
-        buf_reset(&r->line);
-        r->line_total_bytes = 0;
-        r->line_display_bytes = 0;
-        r->line_saw_non_ws = 0;
+    struct tail_view view;
+    build_tail_view(render, &view);
+    if (view.elided_lines > 0) {
+        char marker[96];
+        snprintf(marker, sizeof(marker), "... (%d more line%s) ...", view.elided_lines,
+                 view.elided_lines == 1 ? "" : "s");
+        replace_status_with_marker(render, marker);
+    } else {
+        drop_status(render);
     }
+    if (view.len > 0)
+        emit_tail_rows(render, view.bytes, view.len);
+}
 
-    if (!r->started) {
-        /* Make sure the spinner isn't lingering even when nothing
-         * visible was emitted (e.g., the tool emitted only blank
-         * lines). */
-        spinner_hide(r->spinner);
+static void finalize_capped_preview(struct tool_render *render)
+{
+    if (!render->head_complete) {
+        commit_status(render);
+        return;
+    }
+    if (render->mode == TOOL_RENDER_HEAD_TAIL) {
+        finalize_head_tail(render);
+        return;
+    }
+    if (render->suppressed_lines > 0) {
+        char marker[96];
+        snprintf(marker, sizeof(marker), "... (%d more line%s)", render->suppressed_lines,
+                 render->suppressed_lines == 1 ? "" : "s");
+        replace_status_with_marker(render, marker);
+    }
+}
+
+static void flush_pending_input(struct tool_render *render)
+{
+    char utf8_tail[UTF8_SANITIZE_FLUSH_MAX];
+    size_t utf8_tail_len = utf8_sanitize_flush(&render->utf8, utf8_tail);
+    if (utf8_tail_len > 0)
+        tool_render_feed(render, utf8_tail, utf8_tail_len);
+
+    if (render->mode == TOOL_RENDER_DIFF) {
+        if (render->diff_line.len > 0) {
+            emit_diff_line(render, render->diff_line.data, render->diff_line.len);
+            buf_reset(&render->diff_line);
+        }
+    } else if (render->line.len > 0) {
+        process_line(render, render->line.data, render->line.len, !render->line_has_non_whitespace);
+        reset_line(render);
+    }
+}
+
+void tool_render_finalize(struct tool_render *render)
+{
+    flush_pending_input(render);
+    if (!render->block_open) {
+        spinner_hide(render->spinner);
         return;
     }
 
-    /* Reach here with status_painted possibly still 1; the branches
-     * below close the block by hiding the spinner via status_commit /
-     * status_replace_with_marker / status_drop. R_DIFF has no status
-     * row, so we hide explicitly. */
-    if (r->mode == R_DIFF) {
-        spinner_hide(r->spinner);
-    }
+    if (render->mode == TOOL_RENDER_DIFF)
+        spinner_hide(render->spinner);
+    else
+        finalize_capped_preview(render);
 
-    if (r->mode != R_DIFF) {
-        /* Two finalize states need handling: status_painted=1 (the
-         * common case — last non-blank line is showing as the live
-         * status) and status_painted=0 with head_full=1 (the eager-
-         * commit-on-blank path: the cap was tripped by a blank line
-         * arriving on the cap row, status was committed and the
-         * spinner cleared, but suppression has data to summarize).
-         * status_replace_with_marker handles both — when status isn't
-         * painted, spinner_hide is a no-op and the marker just lands
-         * on a fresh row after the prior commit's held \n flushes. */
-        if (r->status_painted && !r->head_full) {
-            /* Under-cap, no suppression — commit the status as the
-             * final permanent row. */
-            status_commit(r);
-        } else if (r->head_full) {
-            if (r->mode == R_HEAD_ONLY) {
-                /* Marker counts only renderable (non-blank) lines —
-                 * blank lines are silently elided everywhere, so
-                 * counting them in the footer would be misleading
-                 * ("1 more line" pointing at content the user wasn't
-                 * going to see anyway). Skip the marker entirely
-                 * when there's nothing user-meaningful to report
-                 * (e.g., commit-on-blank with no non-blank lines
-                 * past the cap). */
-                if (r->suppressed_lines > 0) {
-                    char marker[96];
-                    snprintf(marker, sizeof(marker), "... (%d more line%s)", r->suppressed_lines,
-                             r->suppressed_lines == 1 ? "" : "s");
-                    status_replace_with_marker(r, marker);
-                }
-            } else { /* R_HEAD_TAIL */
-                struct tail_view v;
-                build_tail_view(r, &v);
-                /* Marker fires only when the tail view actually
-                 * elided something user-visible (a non-blank line we
-                 * would have rendered if not for the cap). */
-                if (v.mid_lines > 0) {
-                    char marker[96];
-                    snprintf(marker, sizeof(marker), "... (%d more line%s) ...", v.mid_lines,
-                             v.mid_lines == 1 ? "" : "s");
-                    status_replace_with_marker(r, marker);
-                    if (v.kept > 0)
-                        emit_tail_rows(r, v.buf, v.kept);
-                } else {
-                    /* Tail fits inline — drop any live status and
-                     * replay the tail rows in its place. The replay
-                     * covers the same content the status was hinting
-                     * at, plus any earlier suppressed lines that fit. */
-                    status_drop(r);
-                    if (v.kept > 0)
-                        emit_tail_rows(r, v.buf, v.kept);
-                }
-            }
-        }
-    }
-
-    /* Overprint the most recently emitted strip with the close glyph.
-     * "└" for multi-row blocks, "›" for a block that ended up with
-     * only one row — promotes the leading "┌" to a self-contained
-     * chevron. */
-    if (r->rows_emitted >= 2)
-        disp_tool_strip_close(r->disp);
-    else if (r->rows_emitted == 1)
-        disp_tool_strip_close_solo(r->disp);
-
-    disp_flush(r->disp);
-
-    /* Make finalize idempotent: clear started so a second call
-     * short-circuits at the early-return above instead of re-emitting
-     * the close glyph (which would overprint whatever the cursor now
-     * points at). rows_emitted stays — callers may still inspect it
-     * after finalize for accounting. */
-    r->started = 0;
+    /* The held newline lets the close glyph replace the final row's opening strip. */
+    if (render->rows_emitted >= 2)
+        disp_tool_strip_close(render->disp);
+    else if (render->rows_emitted == 1)
+        disp_tool_strip_close_solo(render->disp);
+    disp_flush(render->disp);
+    render->block_open = 0;
 }
 
-void tool_render_emit(const char *bytes, size_t n, void *data)
+void tool_render_emit(const char *bytes, size_t len, void *data)
 {
-    struct tool_render *r = data;
-    r->display_called = 1;
-    tool_render_feed(r, bytes, n);
+    struct tool_render *render = data;
+    render->display_was_called = 1;
+    tool_render_feed(render, bytes, len);
 }
