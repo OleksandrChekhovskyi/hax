@@ -121,6 +121,27 @@ int bash_process_exit_seen(pid_t pid, int *exit_seen)
     return result;
 }
 
+/* Generous: a loaded machine may schedule the exiting shell late, and the stall lands only on
+ * the rare command that closes its output and keeps running. */
+#define EOF_EXIT_OBSERVE_MS 1000
+/* Short: a background yield's fast-exit check delays the launch report. */
+#define YIELD_EXIT_OBSERVE_MS 200
+
+/* Wait up to `timeout_ms` for the shell's exit to become observable, probing with WNOWAIT so
+ * the zombie keeps the process group signalable. Returns -1 when the wait itself fails. */
+static int observe_shell_exit(pid_t pid, int *exit_seen, long timeout_ms)
+{
+    long deadline = deadline_after(monotonic_ms(), timeout_ms);
+    while (!*exit_seen) {
+        if (bash_process_exit_seen(pid, exit_seen) < 0 && errno != EINTR)
+            return -1;
+        if (*exit_seen || monotonic_ms() >= deadline)
+            break;
+        poll(NULL, 0, 10);
+    }
+    return 0;
+}
+
 static int poll_timeout_ms(long deadline)
 {
     const int default_poll_ms = 10;
@@ -323,7 +344,12 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
             /* A backgrounded command's descendants may outlive the pipe on purpose. */
             if (background && stop_reason == BASH_STOP_NONE)
                 break;
-            /* EOF cannot yield more cleanup output, so no grace period remains useful. */
+            /* EOF cannot yield more cleanup output, so no grace period remains useful. But a
+             * clean exit closes the pipe before it is waitable (coreutils fcloses stdout in an
+             * atexit handler); a kill in that window would rewrite the exit status to SIGKILL,
+             * so let a finishing shell's exit land first. */
+            if (stop_reason == BASH_STOP_NONE)
+                observe_shell_exit(process.pid, &shell_exited, EOF_EXIT_OBSERVE_MS);
             bash_signal_process_tree(process.pid, SIGKILL);
             break;
         }
@@ -344,17 +370,8 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
      * and return a plain synchronous result; a survivor (a daemon that closed its output)
      * detaches as a task instead. */
     if (background && stop_reason == BASH_STOP_NONE) {
-        int observe_failed = 0;
-        long observe_deadline = deadline_after(monotonic_ms(), 200);
-        while (!shell_exited) {
-            if (bash_process_exit_seen(process.pid, &shell_exited) < 0 && errno != EINTR) {
-                observe_failed = 1;
-                break;
-            }
-            if (shell_exited || monotonic_ms() >= observe_deadline)
-                break;
-            poll(NULL, 0, 10);
-        }
+        int observe_failed =
+            observe_shell_exit(process.pid, &shell_exited, YIELD_EXIT_OBSERVE_MS) < 0;
         if (!shell_exited && !observe_failed) {
             char *adopted =
                 adopt_running_command(&process, command, name, output, binary, background,

@@ -102,6 +102,14 @@ static void test_bash_stdin_detached(void)
     free(out);
 }
 
+static void test_bash_clean_exit_after_closing_output(void)
+{
+    /* Pipe EOF arrives while the shell still runs; the exit must not be reported as a kill. */
+    char *out = call_bash("exec >&- 2>&-; sleep 0.05");
+    EXPECT_STR_EQ(out, "(no output)");
+    free(out);
+}
+
 static void test_bash_dev_tty_does_not_hang(void)
 {
     /* The child has no controlling terminal, so direct /dev/tty reads must fail promptly. */
@@ -897,6 +905,7 @@ int main(void)
     test_bash_signal();
     test_bash_no_output();
     test_bash_stdin_detached();
+    test_bash_clean_exit_after_closing_output();
     test_bash_dev_tty_does_not_hang();
     test_bash_background_job_does_not_hang();
     test_bash_foreground_infinite_writer_caps();
