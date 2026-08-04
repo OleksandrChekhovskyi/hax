@@ -20,6 +20,7 @@
 #include "system/bg_job.h"
 #include "terminal/interrupt.h"
 #include "text/utf8_sanitize.h"
+#include "text/width.h"
 #include "tools/bash_output.h"
 #include "tools/bash_process.h"
 

@@ -21,6 +21,7 @@
 #include "util.h"
 #include "system/fs.h"
 #include "system/git.h"
+#include "text/width.h"
 
 /* struct stat's sub-second mtime field is spelled differently across
  * platforms. Used to break ties between sessions created in the same

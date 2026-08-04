@@ -23,6 +23,7 @@
 #include "terminal/ansi.h"
 #include "terminal/input_core.h"
 #include "terminal/theme.h"
+#include "terminal/width.h"
 #include "text/utf8.h"
 #include "text/utf8_sanitize.h"
 
@@ -512,11 +513,10 @@ static int handle_resize(struct input *in)
                                ? (in->top_indicator_width + new_columns - 1) / new_columns
                                : 1;
         }
-        for (int row = first_row; row < layout.cursor_row && row < widths.count; row++) {
-            int physical_rows =
-                widths.values[row] > 0 ? (widths.values[row] + new_columns - 1) / new_columns : 1;
-            cursor_climb += physical_rows;
-        }
+        int last_row = layout.cursor_row < widths.count ? layout.cursor_row : widths.count;
+        if (last_row > first_row)
+            cursor_climb +=
+                reflow_physical_rows(widths.values + first_row, last_row - first_row, new_columns);
         cursor_climb += layout.cursor_col / new_columns;
         free(widths.values);
 

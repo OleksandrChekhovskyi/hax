@@ -21,6 +21,7 @@
 #include "render/progress.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
+#include "terminal/width.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 #include "transport/retry.h"

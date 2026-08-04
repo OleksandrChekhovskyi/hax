@@ -96,40 +96,6 @@ void format_context(char *out, size_t out_size, long context_tokens, long contex
 /* Write a lowercase UUIDv4 (36 bytes plus the NUL terminator). Aborts on entropy failure. */
 void gen_uuid_v4(char out[37]);
 
-/* Physical terminal width on stdout, or 120 when unavailable. */
-int term_width(void);
-
-#define DISPLAY_WIDTH_CAP 100
-
-/* Width used for content layout. "auto" clamps the terminal width to [20, DISPLAY_WIDTH_CAP],
- * "terminal" removes the upper bound, and an integer >= 20 selects an exact width. */
-int display_width(void);
-
-/* The following helpers require locale_init_utf8() for accurate non-ASCII widths. */
-
-/* Return the visual cell width of a NUL-terminated UTF-8 string. NULL has width zero. */
-size_t display_cells(const char *str);
-
-/* Return a newly allocated string fitting within max_cells. Truncated strings end in "..." when at
- * least four cells are available. NULL is treated as an empty string. */
-char *truncate_for_display(const char *str, size_t max_cells);
-
-/* Choose a UTF-8 byte boundary for one row of at most max_cells. Word breaks consume one separating
- * ASCII space: the return value ends the current row and next_offset starts the next. If no word
- * break fits, the function uses a codepoint boundary. max_cells must be positive. */
-size_t wrap_break_pos(const char *str, size_t length, size_t max_cells, size_t *next_offset);
-
-/* Reflow a string to at most max_rows. first_row_cells and other_row_cells are row budgets;
- * last_row_reserve leaves room for a caller-owned suffix. Rows are joined by '\n', and overflow is
- * marked with "..." when space permits. Returns an allocated string; NULL input becomes empty. */
-char *reflow_for_display(const char *str, int first_row_cells, int other_row_cells, int max_rows,
-                         int last_row_reserve);
-
-/* Prepare untrusted UTF-8 for one-line display: collapse ASCII whitespace, replace malformed or
- * direction-changing codepoints, and bound combining-mark runs. Returns an allocated string; NULL
- * input becomes empty. Requires UTF-8 LC_CTYPE initialization for accurate width classification. */
-char *flatten_for_display(const char *str);
-
 /* Replace each line suffix beyond max_line_bytes with an elision marker while preserving newline
  * structure. Returns a newly allocated NUL-terminated buffer and stores its length in out_len. */
 char *cap_line_lengths(const char *data, size_t length, size_t max_line_bytes, size_t *out_len);

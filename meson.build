@@ -118,10 +118,12 @@ sources = files(
     'src/terminal/theme.c',
     'src/terminal/ui.c',
     'src/terminal/vt_resolve.c',
+    'src/terminal/width.c',
 
     'src/text/base64.c',
     'src/text/utf8.c',
     'src/text/utf8_sanitize.c',
+    'src/text/width.c',
 
     'src/tools/bash.c',
     'src/tools/bash_cd_strip.c',

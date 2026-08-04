@@ -12,8 +12,10 @@
 #include "render/spinner.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
+#include "terminal/width.h"
 #include "text/utf8.h"
 #include "text/utf8_sanitize.h"
+#include "text/width.h"
 
 #define TAIL_RING_CAPACITY 1500
 

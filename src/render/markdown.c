@@ -10,6 +10,7 @@
 #include "render/markdown_wrap.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
+#include "terminal/width.h"
 
 /* Inline markers are short, but a split fence info line can grow indefinitely on malformed
  * input. Keep a bounded lookahead tail and emit excess bytes literally. */

@@ -17,6 +17,8 @@
 #include "render/tool_render.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
+#include "terminal/width.h"
+#include "text/width.h"
 
 #define HEADER_EXTRA_MAX_CELLS 20
 #define MIN_DISPLAY_CELLS      8

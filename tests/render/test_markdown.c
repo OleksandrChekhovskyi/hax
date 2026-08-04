@@ -7,6 +7,7 @@
 #include "util.h"
 #include "render/markdown.h"
 #include "terminal/ansi.h"
+#include "terminal/width.h"
 
 /* Building blocks for expected-output strings. The SGR macros alias the
  * canonical ANSI_* sequences (single source of truth in terminal/ansi.h);

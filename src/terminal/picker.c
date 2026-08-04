@@ -16,7 +16,9 @@
 #include "terminal/picker_core.h"
 #include "terminal/theme.h"
 #include "terminal/ui.h"
+#include "terminal/width.h"
 #include "text/utf8.h"
+#include "text/width.h"
 
 /* Terminal key sequences arrive as a burst; a lone Escape means cancel. */
 #define ESC_TIMEOUT_MS 50
@@ -507,12 +509,7 @@ static int reflow_climb(const struct picker *picker, int terminal_cols, int term
     int recorded_rows = picker->previous_row_count < PICKER_FRAME_ROWS_MAX
                             ? picker->previous_row_count
                             : PICKER_FRAME_ROWS_MAX;
-    int physical_rows = 0;
-    for (int row = 0; row < recorded_rows; row++) {
-        int width = picker->previous_row_widths[row];
-        physical_rows += width > 0 ? (width + terminal_cols - 1) / terminal_cols : 1;
-    }
-    int climb = physical_rows - 1;
+    int climb = reflow_physical_rows(picker->previous_row_widths, recorded_rows, terminal_cols) - 1;
     /* Climbing beyond the screen top would start the repaint on the wrong row. */
     if (terminal_rows > 0 && climb > terminal_rows - 1)
         climb = terminal_rows - 1;

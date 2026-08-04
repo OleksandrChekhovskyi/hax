@@ -25,6 +25,8 @@
 #include "terminal/picker.h"
 #include "terminal/theme.h"
 #include "terminal/ui.h"
+#include "terminal/width.h"
+#include "text/width.h"
 #include "tools/task_registry.h"
 
 /* Managed handlers leave disp bookkeeping accurate; raw handlers end on an untracked newline. */

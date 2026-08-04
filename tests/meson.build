@@ -86,10 +86,12 @@ test_sources = [
     'terminal/test_picker_core.c',
     'terminal/test_theme.c',
     'terminal/test_vt_resolve.c',
+    'terminal/test_width.c',
 
     'text/test_base64.c',
     'text/test_utf8.c',
     'text/test_utf8_sanitize.c',
+    'text/test_width.c',
 
     'tools/test_bash.c',
     'tools/test_bash_cd_strip.c',

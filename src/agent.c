@@ -39,6 +39,7 @@
 #include "terminal/theme.h"
 #include "terminal/ui.h"
 #include "terminal/vt_resolve.h"
+#include "terminal/width.h"
 #include "tools/bash_process.h"
 #include "tools/task_registry.h"
 

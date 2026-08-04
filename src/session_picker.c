@@ -11,6 +11,7 @@
 #include "util.h"
 #include "terminal/picker.h"
 #include "terminal/ui.h"
+#include "text/width.h"
 
 /* Search farther than the visible row so filters can match later prompt text. */
 #define SESSION_LABEL_CELLS 512

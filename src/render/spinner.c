@@ -12,6 +12,8 @@
 #include "util.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
+#include "terminal/width.h"
+#include "text/width.h"
 
 #define FRAME_INTERVAL_MS 80
 #define LABEL_SETTLE_MS   2000
