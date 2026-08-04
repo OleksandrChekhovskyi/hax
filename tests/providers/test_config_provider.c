@@ -34,8 +34,12 @@ int main(void)
      * cached. */
     EXPECT(config_load("{"
                        "  \"providers\": {"
-                       "    \"myllm\": {\"base_url\": \"http://127.0.0.1:9000/v1\","
+                       "    \"myllm\": {\"base_url\": \"http://127.0.0.1:9000/v1/\","
                        "               \"display_name\": \"My LLM\"},"
+                       "    \"keyed\": {\"base_url\": \"http://127.0.0.1:9004/v1\","
+                       "               \"api_key_env\": \"HAX_TEST_KEYED_KEY\"},"
+                       "    \"inline\": {\"base_url\": \"http://127.0.0.1:9005/v1\","
+                       "               \"api_key\": \"sk-inline\"},"
                        "    \"bad\":   {\"api\": \"soap-1.2\","
                        "               \"base_url\": \"http://x/v1\"},"
                        "    \"claudish\": {\"api\": \"anthropic-messages\","
@@ -55,7 +59,7 @@ int main(void)
      * provider layer's job, below). */
     char **names = NULL;
     size_t nk = config_object_keys("providers", &names);
-    EXPECT(nk == 7);
+    EXPECT(nk == 9);
     for (size_t i = 0; i < nk; i++)
         free(names[i]);
     free(names);
@@ -93,50 +97,70 @@ int main(void)
     /* Construction of an openai-completions provider succeeds offline (no
      * probe) and takes its banner from the resolved display_name. A generic
      * config provider offers the advisory effort ladder. */
-    const struct provider_factory *f = provider_find("myllm");
-    /* Availability captures an owned request before a worker is spawned. */
+    const struct provider_factory *myllm_factory = provider_find("myllm");
+    /* Availability captures an owned request before a worker is spawned; the
+     * configured trailing slash is trimmed before "/models" is appended. */
     struct provider_availability probe = {0};
-    f->prepare_availability(f->name, &probe);
+    myllm_factory->prepare_availability(myllm_factory->name, &probe);
     EXPECT_STR_EQ(probe.url, "http://127.0.0.1:9000/v1/models");
     config_set_override("providers.myllm.base_url", "http://changed/v1");
     EXPECT_STR_EQ(probe.url, "http://127.0.0.1:9000/v1/models");
     config_set_override("providers.myllm.base_url", NULL);
     provider_availability_clear(&probe);
 
-    struct provider *p = f->new(f->name);
-    EXPECT(p != NULL);
-    if (p) {
-        const char *const *eff = NULL;
-        EXPECT_STR_EQ(p->name, "My LLM");
-        EXPECT(p->list_efforts && p->list_efforts(p, &eff) > 0);
-        EXPECT(p->sort_models == 0); /* sort_models unset → catalog order */
+    /* A keyed provider's availability is its key resolving — no probe request:
+     * unavailable while the declared env var is unset, available once set. */
+    const struct provider_factory *keyed_factory = provider_find("keyed");
+    unsetenv("HAX_TEST_KEYED_KEY");
+    struct provider_availability keyed = {0};
+    keyed_factory->prepare_availability(keyed_factory->name, &keyed);
+    EXPECT(!keyed.available);
+    EXPECT_STR_EQ(keyed.reason, "API key not set");
+    EXPECT(keyed.url == NULL);
+    setenv("HAX_TEST_KEYED_KEY", "sk-keyed", 1);
+    keyed_factory->prepare_availability(keyed_factory->name, &keyed);
+    EXPECT(keyed.available);
+    EXPECT(keyed.url == NULL);
+    unsetenv("HAX_TEST_KEYED_KEY");
+
+    /* An inline api_key keys the provider all by itself. */
+    const struct provider_factory *inline_factory = provider_find("inline");
+    struct provider_availability inline_avail = {0};
+    inline_factory->prepare_availability(inline_factory->name, &inline_avail);
+    EXPECT(inline_avail.available);
+    EXPECT(inline_avail.url == NULL);
+
+    struct provider *myllm = myllm_factory->new(myllm_factory->name);
+    EXPECT(myllm != NULL);
+    if (myllm) {
+        const char *const *efforts = NULL;
+        EXPECT_STR_EQ(myllm->name, "My LLM");
+        EXPECT(myllm->list_efforts && myllm->list_efforts(myllm, &efforts) > 0);
+        EXPECT(myllm->sort_models == 0); /* sort_models unset → catalog order */
         /* catalog_id defaults to the provider's own name. */
-        EXPECT_STR_EQ(p->catalog_id, "myllm");
-        p->destroy(p);
+        EXPECT_STR_EQ(myllm->catalog_id, "myllm");
+        myllm->destroy(myllm);
     }
 
     /* An explicit empty catalog_id opts out of catalog lookups. */
-    const struct provider_factory *nf = provider_find("nocat");
-    struct provider *np = nf->new(nf->name);
-    EXPECT(np != NULL);
-    if (np) {
-        EXPECT(np->catalog_id == NULL);
-        np->destroy(np);
+    const struct provider_factory *nocat_factory = provider_find("nocat");
+    struct provider *nocat = nocat_factory->new(nocat_factory->name);
+    EXPECT(nocat != NULL);
+    if (nocat) {
+        EXPECT(nocat->catalog_id == NULL);
+        nocat->destroy(nocat);
     }
 
-    /* The ollama recipe opts out of the effort ladder (a local server has no
-     * categorical effort), so /effort skips it rather than persist an unusable
-     * value. */
-    const struct provider_factory *of = provider_find("ollama");
-    struct provider *op = of->new(of->name);
-    EXPECT(op != NULL);
-    if (op) {
-        const char *const *eff = NULL;
-        EXPECT(op->list_efforts(op, &eff) == 0);
-        /* A recipe's curated catalog_id absence is final — no name fallback:
-         * local ollama models aren't the hosted ones the catalog describes. */
-        EXPECT(op->catalog_id == NULL);
-        op->destroy(op);
+    /* The ollama recipe opts out of the effort ladder, and its curated
+     * catalog_id absence is final — no fallback to the provider name. */
+    const struct provider_factory *ollama_factory = provider_find("ollama");
+    struct provider *ollama = ollama_factory->new(ollama_factory->name);
+    EXPECT(ollama != NULL);
+    if (ollama) {
+        const char *const *efforts = NULL;
+        EXPECT(ollama->list_efforts(ollama, &efforts) == 0);
+        EXPECT(ollama->catalog_id == NULL);
+        ollama->destroy(ollama);
     }
 
     const struct provider_factory *anthropic_factory = provider_find("claudish");
@@ -157,9 +181,9 @@ int main(void)
     }
 
     /* An unsupported dialect is a construction failure, not a crash. */
-    const struct provider_factory *fb = provider_find("bad");
-    EXPECT(fb != NULL);
-    EXPECT(fb->new(fb->name) == NULL);
+    const struct provider_factory *bad_factory = provider_find("bad");
+    EXPECT(bad_factory != NULL);
+    EXPECT(bad_factory->new(bad_factory->name) == NULL);
 
     config_free();
     T_REPORT();
