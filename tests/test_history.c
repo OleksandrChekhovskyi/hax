@@ -34,7 +34,7 @@ static char *render(enum history_detail detail, const struct item *items, size_t
     struct render_ctx render = {.disp = {.sink = mem, .committed_newlines = 2},
                                 .show_reasoning = reasoning};
     history_render(&render, detail, items, n, 0);
-    render_transition(&render, RS_IDLE);
+    render_set_mode(&render, RENDER_IDLE);
     disp_commit_newlines(&render.disp);
     fclose(mem);
 
@@ -172,10 +172,6 @@ static void test_full_keeps_collapsed_calls_quiet(void)
     free(out);
 }
 
-/* Quiet exploration lines abbreviate and stack the way they did live, and
- * the run survives turn boundaries: the cluster deliberately outlives a
- * stream boundary (render_ctx.h), so breaking it per turn would space out
- * breadcrumbs the screen kept together and split a coalesced read line. */
 static void test_collapsed_cluster_spans_turns_tightly(void)
 {
     struct item items[5] = {0};
@@ -238,10 +234,6 @@ static void test_continue_marker_is_not_echoed(void)
     free(typed);
 }
 
-/* A reasoning item closes the open block live before any of its content
- * arrives (EV_REASONING_ITEM → render_stream_seam), so the break has to
- * happen here even when nothing about the reasoning is drawn — hidden by
- * setting, or opaque reasoning that carries only provider JSON. */
 static void test_undrawn_reasoning_still_breaks_text(void)
 {
     struct item items[3] = {0};
@@ -663,7 +655,7 @@ static char *render_from(enum history_detail detail, const struct item *items, s
     }
     struct render_ctx render = {.disp = {.sink = mem, .committed_newlines = 2}};
     history_render(&render, detail, items, n, start);
-    render_transition(&render, RS_IDLE);
+    render_set_mode(&render, RENDER_IDLE);
     disp_commit_newlines(&render.disp);
     fclose(mem);
 

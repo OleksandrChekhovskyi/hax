@@ -9,125 +9,68 @@
 struct spinner;
 struct md_renderer;
 
-/* What visual mode is currently "open" on the terminal — each state
- * owns specific bytes (SGR runs, cursor position, in-flight spinner
- * variant) that must be unwound before drawing anything else.
- *
- *   RS_IDLE      Nothing open: cursor at column 0, no SGR active.
- *   RS_WAITING   The agent is busy but no content block is open; owns the
- *                full-size line spinner in its own block.
- *   RS_REASONING Dim+italic CoT span open. Only reached when
- *                HAX_SHOW_REASONING is on; otherwise reasoning drives
- *                the spinner label only.
- *   RS_TEXT      Markdown answer stream open; md owns inline SGR.
- *   RS_CLUSTER   In-progress run of "quiet" tool calls (read/grep
- *                exploration). Coalesces consecutive `read`s onto one
- *                line and keeps a parked spinner below the cluster
- *                across gaps. Survives stream() boundaries; the other
- *                states are reset per-stream. */
-enum render_state {
-    RS_IDLE,
-    RS_WAITING,
-    RS_REASONING,
-    RS_TEXT,
-    RS_CLUSTER,
+enum render_mode {
+    RENDER_IDLE = 0,
+    RENDER_WAITING,
+    RENDER_REASONING,
+    RENDER_TEXT,
+    RENDER_TOOL_CLUSTER, /* collapsed tool calls; persists across stream boundaries */
 };
 
-/* All rendering state. Threaded through call sites as a single
- * pointer; stack-allocated in agent_run with spinner/md as opaque
- * handles owned (and freed) there. */
+/* Live terminal rendering state. The context does not own spinner or md. */
 struct render_ctx {
-    enum render_state state;
-
+    enum render_mode mode;
     struct disp disp;
     struct spinner *spinner;
-    struct md_renderer *md; /* NULL when markdown is disabled */
+    struct md_renderer *md; /* NULL disables Markdown rendering */
 
-    /* RS_CLUSTER sub-state. cluster_last_tool == NULL means "cluster
-     * just entered, no header painted yet". cluster_line_open: the
-     * current quiet line still awaits its terminating \n (emitted by
-     * the transition close-half). cluster_line_used is the line's
-     * exact cell count — cells, not bytes, because it doubles as the
-     * parked spinner's cursor-restore column. */
-    const char *cluster_last_tool;
-    int cluster_line_open;
-    int cluster_line_used;
+    struct {
+        const char *last_tool; /* borrowed registry-static name */
+        int line_open;
+        int line_cells; /* also the parked spinner's cursor-restore column */
+    } cluster;
 
-    /* Stall clock for the table-composing spinner: ms of the most
-     * recent live delta, 0 when unarmed. Only consulted while md is
-     * buffering a table — pauses in ordinary streaming text
-     * deliberately surface nothing (the text is its own progress
-     * indicator). */
-    long last_text_at;
+    struct {
+        long started_at_ms; /* 0 when no buffered table is being timed */
+        int spinner_visible;
+    } table;
 
-    /* Table-composing spinner is up ("composing..." on its own row
-     * while md buffers a GFM table and emits nothing).
-     * render_text_chunk hides it before each md_feed so a finalizing
-     * grid never races the spinner row, and re-shows if still
-     * buffering; render_transition clears it on any real state
-     * change. */
-    int table_composing;
+    struct {
+        long deadline_ms; /* 0 when no retry is pending */
+        int next_attempt;
+        int max_attempts;
+    } retry;
 
-    /* Retry countdown — the tick repaints the spinner label from
-     * these so the seconds visibly shrink during the backoff sleep.
-     * retry_deadline_at == 0 means no retry pending. */
-    long retry_deadline_at;
-    int retry_attempt;
-    int retry_max;
+    struct {
+        int content_seen; /* the current stream has content a pause must preserve */
+        int answer_started;
+    } stream;
 
-    /* The current stream has produced content (text, reasoning, or a
-     * tool call) — the gate for soft-interrupt stream cancellation: a
-     * request still prefilling has produced nothing a pause could lose,
-     * so the tick aborts it and the pause lands immediately instead of
-     * after a full extra turn. Reset per provider turn. */
-    int stream_content_seen;
-    int text_started;
-
-    /* Whether reasoning deltas are rendered or only drive the spinner. */
     int show_reasoning;
 };
 
-/* Move the live render state to `to`: close whatever is currently
- * open (SGR reset, md tail flush, state-owned spinner hidden), then
- * open the target (block separator, fresh SGR, canonical label). */
-void render_transition(struct render_ctx *r, enum render_state to);
+/* Close the current mode and enter target, releasing its cursor and style state. */
+void render_set_mode(struct render_ctx *render, enum render_mode target);
 
-/* A streamed item boundary means the prior visible content block is done,
- * but the provider is still active. Keep silent clusters intact so they can
- * coalesce with the tool call that will be classified during dispatch. */
-void render_stream_seam(struct render_ctx *r);
+/* End the current streamed item and show the waiting indicator. Tool clusters remain open. */
+void render_stream_boundary(struct render_ctx *render);
 
-/* Pre-stream housekeeping: arm fresh stall/retry bookkeeping for the
- * new provider call, then show the busy "working..." spinner — unless
- * we're continuing a cluster, whose parked spinner is the alive
- * indicator across the gap. */
-void render_stream_begin(struct render_ctx *r);
+/* Reset per-stream state and Markdown, then enter waiting unless a tool cluster remains open. */
+void render_stream_begin(struct render_ctx *render);
 
-/* Return to a clean idle line and open a fresh visual block — for
- * out-of-band rendering (error line, usage stats, interrupt marker)
- * that should land separated from prior content. */
-void render_open_block(struct render_ctx *r);
+/* Close the current mode and separate the next out-of-band visual block. */
+void render_open_block(struct render_ctx *render);
 
-/* Write a chunk of model-produced text into the currently-open content
- * stream (RS_TEXT or RS_REASONING). Routes through md when enabled,
- * falls through to disp otherwise; keeps the table-stall clock fresh
- * so the tick can surface the composing spinner if a table buffer
- * goes quiet. */
-void render_text_chunk(struct render_ctx *r, const char *s, size_t n);
+/* Write model text in the current text or reasoning mode. */
+void render_write_text(struct render_ctx *render, const char *bytes, size_t len);
 
-/* Render assistant text, ignoring leading line endings until the first visible text delta. */
-void render_text_delta(struct render_ctx *r, const char *bytes, size_t len);
+/* Render assistant text, ignoring initial line endings until visible text arrives. */
+void render_text_delta(struct render_ctx *render, const char *bytes, size_t len);
 
-/* Show the labeled "composing..." line spinner for an in-progress table
- * buffer: commit any pending newline so it lands on a fresh row below the
- * preceding block, then raise SPINNER_LINE. Idempotent via
- * r->table_composing. Called from the stream tick (slow table) and
- * re-issued by render_text_chunk across the silent row-buffering deltas. */
-void render_table_spinner_show(struct render_ctx *r);
+/* Show the delayed spinner for a buffered table. No-op outside text mode. */
+void render_show_table_spinner(struct render_ctx *render);
 
-/* Paint the spinner with the retry countdown label. Called on EV_RETRY
- * (so the user sees the new state immediately) and from the stream tick
- * (so the seconds count visibly decreases during the backoff sleep). */
-void update_retry_label(struct render_ctx *r);
+/* Repaint the retry spinner label from the current retry state. */
+void render_update_retry_label(struct render_ctx *render);
 
 #endif /* HAX_RENDER_RENDER_CTX_H */

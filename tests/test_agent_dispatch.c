@@ -59,24 +59,36 @@ const struct tool *agent_find_tool(const char *name)
     return NULL;
 }
 
-/* render_ctx references the markdown sink, but every md_* call is guarded
- * by `render.md != NULL` and we run with md == NULL — stub these so we don't
- * have to link markdown.c. None are ever invoked. */
+/* These stubs are not called because the fixtures leave render.md NULL. */
+int md_cols(void)
+{
+    return 0;
+}
+
+void md_reset(struct md_renderer *m, int wrap_width)
+{
+    (void)m;
+    (void)wrap_width;
+}
+
 void md_feed(struct md_renderer *m, const char *s, size_t n)
 {
     (void)m;
     (void)s;
     (void)n;
 }
+
 void md_flush(struct md_renderer *m)
 {
     (void)m;
 }
+
 void md_set_styled(struct md_renderer *m, int on)
 {
     (void)m;
     (void)on;
 }
+
 int md_in_table(const struct md_renderer *m)
 {
     (void)m;
@@ -134,7 +146,7 @@ static const char *run_write(const char *path, const char *content_json, struct 
 
     cap_reset();
     struct render_ctx render = {0};
-    render.state = RS_IDLE;
+    render.mode = RENDER_IDLE;
     render.spinner = spinner_new(NULL);
     *out = dispatch_tool_call(&render, &call, -1);
     const char *cap = cap_read();
@@ -214,7 +226,7 @@ static void test_selector_overrides_non_collapsed_mode(void)
         .tool_name = xstrdup("mode-probe"),
         .tool_arguments_json = xstrdup("{}"),
     };
-    struct render_ctx render = {.state = RS_IDLE, .spinner = spinner_new(NULL)};
+    struct render_ctx render = {.mode = RENDER_IDLE, .spinner = spinner_new(NULL)};
 
     cap_reset();
     struct item result = dispatch_tool_call(&render, &call, -1);
@@ -238,7 +250,7 @@ static void test_hidden_tail_not_displayed_by_fallback(void)
         .tool_name = xstrdup("tail-probe"),
         .tool_arguments_json = xstrdup("{}"),
     };
-    struct render_ctx render = {.state = RS_IDLE, .spinner = spinner_new(NULL)};
+    struct render_ctx render = {.mode = RENDER_IDLE, .spinner = spinner_new(NULL)};
 
     cap_reset();
     struct item result = dispatch_tool_call(&render, &call, -1);

@@ -9,206 +9,170 @@
 #include "render/spinner.h"
 #include "terminal/ansi.h"
 
-/* Move the live render state to `to`: close whatever is currently
- * open (SGR reset, md tail flush, state-owned spinner hidden), then
- * open the target (block separator, fresh SGR, canonical label).
- *
- * Spinner ordering invariant: the owning state's spinner is hidden in
- * its close-half, before any newline/separator writes — a parked
- * spinner's hide restores the cursor to the content position, and
- * writing first would strand the restore target. */
-void render_transition(struct render_ctx *r, enum render_state to)
+static int hide_table_spinner(struct render_ctx *render)
 {
-    if (r->state == to)
-        return;
+    if (!render->table.spinner_visible)
+        return 0;
+    spinner_hide(render->spinner);
+    render->table.spinner_visible = 0;
+    return 1;
+}
 
-    /* A real state change while a table was still buffering (e.g. the
-     * stream ended mid-table and the close-half md_flush is about to
-     * finalize the grid): hide the composing spinner first so the grid
-     * doesn't render into its row. Same-state RS_TEXT transitions during
-     * buffering returned above — render_text_chunk owns the spinner there. */
-    if (r->table_composing) {
-        spinner_hide(r->spinner);
-        r->table_composing = 0;
-    }
-
-    switch (r->state) {
-    case RS_IDLE:
+static void close_mode(struct render_ctx *render)
+{
+    switch (render->mode) {
+    case RENDER_IDLE:
         break;
-    case RS_WAITING:
-        spinner_hide(r->spinner);
+    case RENDER_WAITING:
+        spinner_hide(render->spinner);
         break;
-    case RS_REASONING:
-        if (r->md)
-            md_flush(r->md);
-        disp_write_ansi(&r->disp, ANSI_RESET);
-        disp_putc(&r->disp, '\n');
+    case RENDER_REASONING:
+        if (render->md)
+            md_flush(render->md);
+        disp_write_ansi(&render->disp, ANSI_RESET);
+        disp_putc(&render->disp, '\n');
         break;
-    case RS_TEXT:
-        if (r->md)
-            md_flush(r->md);
+    case RENDER_TEXT:
+        if (render->md)
+            md_flush(render->md);
         break;
-    case RS_CLUSTER:
-        /* Hide restores the cursor to the cluster's own position; a
-         * still-open coalescing read line then needs its terminating
-         * \n (bash quiet lines committed theirs when written). */
-        spinner_hide(r->spinner);
-        if (r->cluster_line_open)
-            disp_putc(&r->disp, '\n');
-        disp_flush(&r->disp);
-        r->cluster_last_tool = NULL;
-        r->cluster_line_open = 0;
-        r->cluster_line_used = 0;
+    case RENDER_TOOL_CLUSTER:
+        /* Hide first because a parked spinner restores the cluster cursor position. */
+        spinner_hide(render->spinner);
+        if (render->cluster.line_open)
+            disp_putc(&render->disp, '\n');
+        disp_flush(&render->disp);
+        render->cluster.last_tool = NULL;
+        render->cluster.line_open = 0;
+        render->cluster.line_cells = 0;
         break;
     }
+}
 
-    /* Label rule: whichever path makes the spinner visible states its
-     * own ground truth with an immediate set — the WAITING and CLUSTER
-     * opens here, dispatch's parks, the table/compact paths. That
-     * bounds staleness at state changes (a settled label from a prior
-     * state can't re-debut on a later wait) and can't flicker, since
-     * the row is drawn fresh. States that keep the spinner hidden
-     * (TEXT, REASONING) set nothing — a label that can't render is a
-     * dead store. Deferred requests are for same-state churn only
-     * (item seams, compose batches). */
-    switch (to) {
-    case RS_IDLE:
-        /* Out-of-band block writers own separator placement. */
+static void open_mode(struct render_ctx *render, enum render_mode mode)
+{
+    switch (mode) {
+    case RENDER_IDLE:
         break;
-    case RS_WAITING:
-        disp_block_separator(&r->disp);
-        spinner_set_label(r->spinner, "working", "working...");
-        spinner_show(r->spinner);
+    case RENDER_WAITING:
+        disp_block_separator(&render->disp);
+        spinner_set_label(render->spinner, "working", "working...");
+        spinner_show(render->spinner);
         break;
-    case RS_REASONING:
-        spinner_hide(r->spinner);
-        disp_block_separator(&r->disp);
-        disp_write_ansi(&r->disp, ANSI_DIM ANSI_ITALIC);
-        /* Suppress md's inline SGR so the dim+italic span above is
-         * the only active style; wrap and block structure still run. */
-        if (r->md)
-            md_set_styled(r->md, 0);
+    case RENDER_REASONING:
+        spinner_hide(render->spinner);
+        disp_block_separator(&render->disp);
+        disp_write_ansi(&render->disp, ANSI_DIM ANSI_ITALIC);
+        /* Markdown styling would override the surrounding reasoning style. */
+        if (render->md)
+            md_set_styled(render->md, 0);
         break;
-    case RS_TEXT:
-        spinner_hide(r->spinner);
-        disp_block_separator(&r->disp);
-        r->text_started = 1;
-        if (r->md)
-            md_set_styled(r->md, 1);
+    case RENDER_TEXT:
+        spinner_hide(render->spinner);
+        disp_block_separator(&render->disp);
+        render->stream.answer_started = 1;
+        if (render->md)
+            md_set_styled(render->md, 1);
         break;
-    case RS_CLUSTER:
-        spinner_hide(r->spinner);
-        disp_block_separator(&r->disp);
-        /* Displayed on the parked row until a run:<tool> request
-         * settles — must not inherit a stale composing label. */
-        spinner_set_label(r->spinner, "working", "working...");
+    case RENDER_TOOL_CLUSTER:
+        spinner_hide(render->spinner);
+        disp_block_separator(&render->disp);
+        /* The parked row must not inherit a label from the previous mode. */
+        spinner_set_label(render->spinner, "working", "working...");
         break;
     }
-
-    r->state = to;
 }
 
-/* Return to the busy full-size spinner between visible content blocks.
- * This closes text/reasoning state (flushing md tails and SGR) and
- * resets the table-stall clock so it can't fire against a block that
- * is already closed. */
-static void render_stream_wait(struct render_ctx *r)
+void render_set_mode(struct render_ctx *render, enum render_mode target)
 {
-    r->last_text_at = 0;
-    render_transition(r, RS_WAITING);
-    /* Same-state transitions are no-ops; still request the neutral
-     * label and ensure the spinner is up. A request, not an immediate
-     * set — seams fire between every streamed item, and an instant
-     * reset would flicker against the labels surrounding events
-     * request. */
-    spinner_request_label(r->spinner, "working", "working...");
-    spinner_show(r->spinner);
+    if (render->mode == target)
+        return;
+
+    /* Closing Markdown may render into the composing spinner's row. */
+    hide_table_spinner(render);
+    close_mode(render);
+    open_mode(render, target);
+    render->mode = target;
 }
 
-void render_stream_seam(struct render_ctx *r)
+static void render_wait_for_stream(struct render_ctx *render)
 {
-    if (r->state == RS_CLUSTER) {
-        spinner_request_label(r->spinner, "working", "working...");
+    render->table.started_at_ms = 0;
+    render_set_mode(render, RENDER_WAITING);
+    /* Deferred labels prevent rapid item boundaries from flickering. */
+    spinner_request_label(render->spinner, "working", "working...");
+    spinner_show(render->spinner);
+}
+
+void render_stream_boundary(struct render_ctx *render)
+{
+    if (render->mode == RENDER_TOOL_CLUSTER) {
+        spinner_request_label(render->spinner, "working", "working...");
         return;
     }
-    render_stream_wait(r);
+    render_wait_for_stream(render);
 }
 
-void render_stream_begin(struct render_ctx *r)
+void render_stream_begin(struct render_ctx *render)
 {
-    r->last_text_at = 0;
-    r->retry_deadline_at = 0;
-    if (r->state == RS_CLUSTER)
+    render->table.started_at_ms = 0;
+    render->retry.deadline_ms = 0;
+    render->retry.next_attempt = 0;
+    render->retry.max_attempts = 0;
+    render->stream.content_seen = 0;
+    render->stream.answer_started = 0;
+
+    if (render->mode != RENDER_TOOL_CLUSTER)
+        render_wait_for_stream(render);
+    if (render->md)
+        md_reset(render->md, md_cols());
+}
+
+void render_open_block(struct render_ctx *render)
+{
+    render_set_mode(render, RENDER_IDLE);
+    /* Tool-status rows are spinner-owned but are not represented by render_mode. */
+    spinner_hide(render->spinner);
+    disp_block_separator(&render->disp);
+}
+
+void render_show_table_spinner(struct render_ctx *render)
+{
+    if (render->table.spinner_visible || render->mode != RENDER_TEXT)
         return;
-    render_stream_wait(r);
+
+    /* The spinner's erase-line sequence must land below already-rendered text. */
+    disp_commit_newlines(&render->disp);
+    spinner_set_label(render->spinner, "composing", "composing...");
+    spinner_show(render->spinner);
+    render->table.spinner_visible = 1;
 }
 
-void render_open_block(struct render_ctx *r)
+void render_write_text(struct render_ctx *render, const char *bytes, size_t len)
 {
-    render_transition(r, RS_IDLE);
-    /* Belt-and-braces: RS_WAITING owns the busy spinner and is closed
-     * by the transition above, but hide explicitly so callers that enter
-     * with an out-of-band spinner row never draw into a line that a later
-     * erase would wipe. */
-    spinner_hide(r->spinner);
-    disp_block_separator(&r->disp);
-}
+    /* A feed may complete the table and render into the spinner's row. */
+    int spinner_was_visible = hide_table_spinner(render);
+    int was_in_table = render->md && md_in_table(render->md);
 
-void render_table_spinner_show(struct render_ctx *r)
-{
-    if (r->table_composing)
-        return;
-    /* Only over the answer stream: RS_REASONING's dim+italic span is
-     * emitted once on entry, and the spinner's trailing ANSI_RESET
-     * would close it and leave the rest of the block unstyled. */
-    if (r->state != RS_TEXT)
-        return;
-    /* Commit pending newlines so the \r + erase-line lands on a fresh row
-     * instead of wiping prior text. Immediate label set — this path
-     * already did its own settling via the table stall clock. */
-    disp_commit_newlines(&r->disp);
-    spinner_set_label(r->spinner, "composing", "composing...");
-    spinner_show(r->spinner);
-    r->table_composing = 1;
-}
-
-void render_text_chunk(struct render_ctx *r, const char *s, size_t n)
-{
-    /* The table-composing spinner sits on its own row. Hide it before
-     * feeding: this delta may finalize the table (md_feed emits the grid,
-     * which must not race the spinner row) or buffer another row. */
-    int had_spinner = r->table_composing;
-    if (had_spinner) {
-        spinner_hide(r->spinner);
-        r->table_composing = 0;
-    }
-    int was_in_table = r->md && md_in_table(r->md);
-    if (r->md)
-        md_feed(r->md, s, n);
+    if (render->md)
+        md_feed(render->md, bytes, len);
     else
-        disp_write(&r->disp, s, n);
-    disp_flush(&r->disp);
-    if (r->md && md_in_table(r->md)) {
-        /* Still buffering: nothing more shows until the grid lays out,
-         * so leave the stall clock pinned and let the tick surface the
-         * spinner past the threshold. The delta that *enters* the
-         * table restarts the clock — its freshly rendered prose (or
-         * the table's start) is the right zero point; a stale
-         * last_text_at from before a pause would trip the tick
-         * immediately. Re-show synchronously if we just hid one — a
-         * repaint, not a flicker. */
+        disp_write(&render->disp, bytes, len);
+    disp_flush(&render->disp);
+
+    if (render->md && md_in_table(render->md)) {
         if (!was_in_table)
-            r->last_text_at = monotonic_ms();
-        if (had_spinner)
-            render_table_spinner_show(r);
+            render->table.started_at_ms = monotonic_ms();
+        if (spinner_was_visible)
+            render_show_table_spinner(render);
     } else {
-        r->last_text_at = monotonic_ms();
+        render->table.started_at_ms = 0;
     }
 }
 
-void render_text_delta(struct render_ctx *r, const char *bytes, size_t len)
+void render_text_delta(struct render_ctx *render, const char *bytes, size_t len)
 {
-    if (!r->text_started) {
+    if (!render->stream.answer_started) {
         while (len > 0 && (*bytes == '\n' || *bytes == '\r')) {
             bytes++;
             len--;
@@ -216,22 +180,21 @@ void render_text_delta(struct render_ctx *r, const char *bytes, size_t len)
     }
     if (len == 0)
         return;
-    render_transition(r, RS_TEXT);
-    render_text_chunk(r, bytes, len);
+
+    render_set_mode(render, RENDER_TEXT);
+    render_write_text(render, bytes, len);
 }
 
-void update_retry_label(struct render_ctx *r)
+void render_update_retry_label(struct render_ctx *render)
 {
-    long remaining = r->retry_deadline_at - monotonic_ms();
-    /* Round up so the countdown shows "1s" through the final second
-     * instead of dropping to "0s" with time still on the clock. Floor
-     * at 1s when we're inside the last 100ms — saying "in 0s" reads as
-     * "stuck", and the actual flip to a fresh attempt is imminent. */
-    long secs = (remaining + 999) / 1000;
-    if (secs < 1)
-        secs = 1;
-    char buf[64];
-    snprintf(buf, sizeof(buf), "retrying in %lds (attempt %d/%d)...", secs, r->retry_attempt,
-             r->retry_max);
-    spinner_set_label(r->spinner, "retry", buf);
+    long remaining_ms = render->retry.deadline_ms - monotonic_ms();
+    /* Round up so the final second is displayed as 1s rather than 0s. */
+    long remaining_seconds = (remaining_ms + 999) / 1000;
+    if (remaining_seconds < 1)
+        remaining_seconds = 1;
+
+    char label[64];
+    snprintf(label, sizeof(label), "retrying in %lds (attempt %d/%d)...", remaining_seconds,
+             render->retry.next_attempt, render->retry.max_attempts);
+    spinner_set_label(render->spinner, "retry", label);
 }

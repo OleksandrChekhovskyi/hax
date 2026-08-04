@@ -28,22 +28,22 @@ static void render_user_message(struct render_ctx *render, const char *text)
     disp_sync_external_line(&render->disp);
 }
 
-static void render_stored_text(struct render_ctx *render, enum render_state state, const char *text)
+static void render_stored_text(struct render_ctx *render, enum render_mode mode, const char *text)
 {
     if (!text || !*text)
         return;
-    if (render->state != state) {
+    if (render->mode != mode) {
         /* Flush deferred markdown before resetting its state for a new block. */
-        render_transition(render, RS_IDLE);
+        render_set_mode(render, RENDER_IDLE);
         if (render->md)
             md_reset(render->md, md_cols());
-        render->text_started = 0;
+        render->stream.answer_started = 0;
     }
-    if (state == RS_TEXT) {
+    if (mode == RENDER_TEXT) {
         render_text_delta(render, text, strlen(text));
     } else {
-        render_transition(render, state);
-        render_text_chunk(render, text, strlen(text));
+        render_set_mode(render, mode);
+        render_write_text(render, text, strlen(text));
     }
 }
 
@@ -80,14 +80,14 @@ static void render_assistant(struct render_ctx *render, const struct item *item)
                 char *partial = xmalloc(partial_len + 1);
                 memcpy(partial, text, partial_len);
                 partial[partial_len] = '\0';
-                render_stored_text(render, RS_TEXT, partial);
+                render_stored_text(render, RENDER_TEXT, partial);
                 free(partial);
             }
             render_interrupt_marker(render);
             return;
         }
     }
-    render_stored_text(render, RS_TEXT, text);
+    render_stored_text(render, RENDER_TEXT, text);
 }
 
 /* Trust summarized provenance rather than output text, which tools may reproduce on failure.
@@ -191,14 +191,14 @@ static void render_tool_call(struct render_ctx *render, enum history_detail deta
     const char *marker = undispatched_marker(result);
     enum tool_preview_mode preview_mode = tool_call_preview_mode(call);
     if (marker) {
-        render_transition(render, RS_IDLE);
+        render_set_mode(render, RENDER_IDLE);
         render_tool_call_header(render, call);
         render_tool_solo_marker(render, marker);
     } else if (detail == HISTORY_BRIEF || preview_mode == TOOL_PREVIEW_COLLAPSED) {
-        render_transition(render, RS_CLUSTER);
+        render_set_mode(render, RENDER_TOOL_CLUSTER);
         render_collapsed_tool_call(render, call);
     } else {
-        render_transition(render, RS_IDLE);
+        render_set_mode(render, RENDER_IDLE);
         render_tool_call_header(render, call);
         if (result)
             render_result_preview(render, call, result, preview_mode);
@@ -226,7 +226,7 @@ static void render_streamed_range(struct render_ctx *render, const struct item *
             continue;
         /* A positional gap contains a tool call, which closed the live streamed block. */
         if (previous_idx != to && item_idx != previous_idx + 1)
-            render_transition(render, RS_IDLE);
+            render_set_mode(render, RENDER_IDLE);
         previous_idx = item_idx;
 
         switch (item->kind) {
@@ -244,9 +244,9 @@ static void render_streamed_range(struct render_ctx *render, const struct item *
         case ITEM_REASONING:
             /* Hidden and opaque reasoning still create a stream seam. */
             if (render->show_reasoning && item->reasoning_text && *item->reasoning_text)
-                render_stored_text(render, RS_REASONING, item->reasoning_text);
-            else if (render->state != RS_CLUSTER)
-                render_transition(render, RS_IDLE);
+                render_stored_text(render, RENDER_REASONING, item->reasoning_text);
+            else if (render->mode != RENDER_TOOL_CLUSTER)
+                render_set_mode(render, RENDER_IDLE);
             break;
         case ITEM_TOOL_CALL:
         case ITEM_TOOL_RESULT:
@@ -286,8 +286,8 @@ void history_render(struct render_ctx *render, enum history_detail detail, const
             continue;
         render_turn(render, detail, items, turn_start, item_idx);
         /* Markdown streams reset between turns; collapsed clusters intentionally span them. */
-        if (render->state != RS_CLUSTER)
-            render_transition(render, RS_IDLE);
+        if (render->mode != RENDER_TOOL_CLUSTER)
+            render_set_mode(render, RENDER_IDLE);
         turn_start = item_idx + 1;
     }
     render_turn(render, detail, items, turn_start, n_items);

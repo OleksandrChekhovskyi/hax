@@ -76,7 +76,7 @@ static void stats_count_tool_call(struct session_stats *stats, const char *tool_
 
 /* Tables buffer invisibly until layout completes; delay the spinner to avoid flicker on fast
  * tables. */
-#define TABLE_IDLE_TIMEOUT_MS 1500
+#define TABLE_SPINNER_DELAY_MS 1500
 
 /* ANSI must bypass disp bookkeeping or it commits a pending newline before the next separator. */
 static void md_emit_to_disp(const char *bytes, size_t byte_count, int is_raw, void *user)
@@ -187,17 +187,16 @@ static int agent_stream_tick(void *user)
         spinner_set_label(render->spinner, "pausing", "pausing... (esc again to interrupt)");
         /* Before first content, cancel immediately; the loop maps the empty turn to a resumable
          * pause. */
-        if (!render->stream_content_seen)
+        if (!render->stream.content_seen)
             return 1;
     }
     /* Retry countdown owns the label while the model is not streaming. */
-    if (render->retry_deadline_at) {
-        update_retry_label(render);
+    if (render->retry.deadline_ms) {
+        render_update_retry_label(render);
     } else if (render->md && md_in_table(render->md)) {
-        /* Tick must surface a stalled table because no delta arrives to refresh its label. */
-        if (!render->table_composing && render->last_text_at &&
-            monotonic_ms() - render->last_text_at >= TABLE_IDLE_TIMEOUT_MS)
-            render_table_spinner_show(render);
+        if (!render->table.spinner_visible && render->table.started_at_ms &&
+            monotonic_ms() - render->table.started_at_ms >= TABLE_SPINNER_DELAY_MS)
+            render_show_table_spinner(render);
     }
     return interrupt_requested();
 }
@@ -207,19 +206,19 @@ static int render_on_event(const struct stream_event *event, void *user)
     struct render_ctx *render = user;
     struct disp *disp = &render->disp;
 
-    /* Stream completion closes the table-stall timing window. */
+    /* Stream completion closes the buffered-table timing window. */
     if (event->kind == EV_DONE || event->kind == EV_ERROR)
-        render->last_text_at = 0;
+        render->table.started_at_ms = 0;
     /* The first post-retry event returns label control to normal rendering. */
-    if (event->kind != EV_RETRY && render->retry_deadline_at) {
-        render->retry_deadline_at = 0;
+    if (event->kind != EV_RETRY && render->retry.deadline_ms) {
+        render->retry.deadline_ms = 0;
         spinner_set_label(render->spinner, "working", "working...");
     }
 
     /* Once output exists, a soft pause must preserve it by waiting for a turn seam. */
     if (event->kind == EV_TEXT_DELTA || event->kind == EV_REASONING_DELTA ||
         event->kind == EV_REASONING_ITEM || event->kind == EV_TOOL_CALL_START)
-        render->stream_content_seen = 1;
+        render->stream.content_seen = 1;
 
     switch (event->kind) {
     case EV_TEXT_DELTA:
@@ -229,7 +228,7 @@ static int render_on_event(const struct stream_event *event, void *user)
         /* Tool arguments are invisible until dispatch. Supported providers stream calls
          * sequentially; a shared key prevents label flicker across a batch. */
         const char *tool_name = event->u.tool_call_start.name;
-        render_stream_seam(render);
+        render_stream_boundary(render);
         if (tool_name && *tool_name) {
             char label[64];
             snprintf(label, sizeof(label), "[%s] composing...", tool_name);
@@ -238,7 +237,7 @@ static int render_on_event(const struct stream_event *event, void *user)
         break;
     }
     case EV_REASONING_ITEM:
-        render_stream_seam(render);
+        render_stream_boundary(render);
         break;
     case EV_TOOL_CALL_END:
         /* Clear the composing label after args; settling hides normal dispatch latency. */
@@ -254,16 +253,15 @@ static int render_on_event(const struct stream_event *event, void *user)
         const char *reasoning_text = event->u.reasoning_delta.text;
         if (!render->show_reasoning || !reasoning_text || !*reasoning_text)
             break;
-        render_transition(render, RS_REASONING);
-        render_text_chunk(render, reasoning_text, strlen(reasoning_text));
+        render_set_mode(render, RENDER_REASONING);
+        render_write_text(render, reasoning_text, strlen(reasoning_text));
         break;
     }
     case EV_RETRY: {
-        /* Store the next-attempt deadline so ticks can repaint the countdown immediately. */
-        render->retry_deadline_at = monotonic_ms() + event->u.retry.delay_ms;
-        render->retry_attempt = event->u.retry.attempt + 1;
-        render->retry_max = event->u.retry.max_attempts;
-        update_retry_label(render);
+        render->retry.deadline_ms = monotonic_ms() + event->u.retry.delay_ms;
+        render->retry.next_attempt = event->u.retry.attempt + 1;
+        render->retry.max_attempts = event->u.retry.max_attempts;
+        render_update_retry_label(render);
         break;
     }
     case EV_PROGRESS: {
@@ -412,7 +410,7 @@ static void show_history_cb(void *user)
         history_render(&render, HISTORY_FULL, session->items, session->n_items, 0);
     }
     /* Flush the final Markdown tail before resolving terminal output. */
-    render_transition(&render, RS_IDLE);
+    render_set_mode(&render, RENDER_IDLE);
     disp_commit_newlines(&render.disp);
     md_free(render.md);
     fclose(memory_stream);
@@ -653,7 +651,7 @@ static void replay_user_turn(struct render_ctx *render, const struct agent_sessi
         history_render(render, HISTORY_BRIEF, session->items, session->n_items, anchor_index);
 
     /* Markdown may leave its final row open; terminate it before returning to the prompt. */
-    render_transition(render, RS_IDLE);
+    render_set_mode(render, RENDER_IDLE);
     if (render->disp.committed_newlines == 0 && render->disp.pending_newlines == 0)
         disp_putc(&render->disp, '\n');
     disp_commit_newlines(&render->disp);
@@ -938,7 +936,7 @@ int agent_compact(struct agent_state *state, const char *instructions, int autom
         return 0;
     }
 
-    render_transition(render, RS_IDLE);
+    render_set_mode(render, RENDER_IDLE);
 
     /* compact_run owns the transaction; this layer supplies UI, cancellation, and accounting. */
     render_stream_begin(render);
@@ -972,7 +970,7 @@ int agent_compact(struct agent_state *state, const char *instructions, int autom
      * the authoritative request count separately from usage observation. */
     state->stats.requests += result.attempts;
     interrupt_disarm();
-    render_transition(render, RS_IDLE);
+    render_set_mode(render, RENDER_IDLE);
 
     int compacted = result.outcome == COMPACT_COMPLETE;
     /* The snapshot describes the window the seed replaced; retaining it could immediately
@@ -1038,12 +1036,7 @@ static int repl_loop_tick(void *user)
 static void repl_loop_turn_begin(void *user)
 {
     struct repl_loop_ctx *ctx = user;
-    struct render_ctx *render = ctx->state->render;
-    render_stream_begin(render);
-    if (render->md)
-        md_reset(render->md, md_cols());
-    render->text_started = 0;
-    render->stream_content_seen = 0;
+    render_stream_begin(ctx->state->render);
 }
 
 static void repl_loop_turn_end(const struct agent_loop_turn *loop_turn, void *user)
@@ -1086,11 +1079,11 @@ static struct item repl_loop_tool_call(const struct item *call, enum agent_loop_
     struct repl_loop_ctx *ctx = user;
     struct render_ctx *render = ctx->state->render;
     if (action == AGENT_LOOP_TOOL_REFUSE) {
-        render_transition(render, RS_IDLE);
+        render_set_mode(render, RENDER_IDLE);
         return dispatch_tool_refused(render, call);
     }
     if (action == AGENT_LOOP_TOOL_SKIP) {
-        render_transition(render, RS_IDLE);
+        render_set_mode(render, RENDER_IDLE);
         return dispatch_tool_skipped(render, call);
     }
     return dispatch_tool_call(render, call, image_input);
@@ -1112,7 +1105,7 @@ static void repl_loop_task_note(const char *text, void *user)
     struct repl_loop_ctx *ctx = user;
     struct render_ctx *render = ctx->state->render;
     spinner_hide(render->spinner);
-    render_transition(render, RS_IDLE);
+    render_set_mode(render, RENDER_IDLE);
     render_open_block(render);
     disp_write_ansi(&render->disp, ANSI_DIM);
     disp_write(&render->disp, text, strlen(text));
@@ -1418,7 +1411,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         spinner_set_timer(render.spinner, 0);
 
         /* Close active rendering before post-turn output can emit terminal control sequences. */
-        render_transition(&render, RS_IDLE);
+        render_set_mode(&render, RENDER_IDLE);
 
         /* History and the resume hint already expose interruptions; another live marker duplicates
          * them. */

@@ -280,41 +280,40 @@ static void close_collapsed_line(struct disp *disp)
     disp_commit_newlines(disp);
 }
 
-/* cluster_last_tool borrows the registry-static name because item-owned names may be released. */
 static void write_cluster_line(struct render_ctx *render, const struct item *call)
 {
     struct disp *disp = &render->disp;
     const struct tool *tool = call->tool_name ? agent_find_tool(call->tool_name) : NULL;
     int terminal_width = display_width();
     int is_read = call->tool_name && strcmp(call->tool_name, "read") == 0;
-    int can_coalesce = render->cluster_line_open && render->cluster_last_tool &&
-                       strcmp(render->cluster_last_tool, "read") == 0 && is_read;
+    int can_coalesce = render->cluster.line_open && render->cluster.last_tool &&
+                       strcmp(render->cluster.last_tool, "read") == 0 && is_read;
 
     if (can_coalesce) {
         char *argument = collapsed_argument(tool, call);
         int appended_cells = 2 + (int)display_cells(argument);
-        if (render->cluster_line_used + appended_cells > terminal_width - 1) {
+        if (render->cluster.line_cells + appended_cells > terminal_width - 1) {
             close_collapsed_line(disp);
             char *trimmed = truncate_collapsed_argument(tool, call, tool_tag_cells(tool_name(call)),
                                                         terminal_width);
-            render->cluster_line_used = write_collapsed_header(disp, call, trimmed);
+            render->cluster.line_cells = write_collapsed_header(disp, call, trimmed);
             free(trimmed);
         } else {
-            render->cluster_line_used += append_collapsed_argument(disp, argument);
+            render->cluster.line_cells += append_collapsed_argument(disp, argument);
         }
         free(argument);
     } else {
-        if (render->cluster_line_open)
+        if (render->cluster.line_open)
             close_collapsed_line(disp);
         char *trimmed = truncate_collapsed_argument(tool, call, tool_tag_cells(tool_name(call)),
                                                     terminal_width);
-        render->cluster_line_used = write_collapsed_header(disp, call, trimmed);
+        render->cluster.line_cells = write_collapsed_header(disp, call, trimmed);
         free(trimmed);
         if (!is_read)
             close_collapsed_line(disp);
     }
-    render->cluster_line_open = is_read;
-    render->cluster_last_tool = tool ? tool->def.name : NULL;
+    render->cluster.line_open = is_read;
+    render->cluster.last_tool = tool ? tool->def.name : NULL;
 }
 
 void render_collapsed_tool_call(struct render_ctx *render, const struct item *call)
@@ -339,7 +338,7 @@ static struct item dispatch_tool_call_collapsed(struct render_ctx *render,
     snprintf(label, sizeof(label), "[%s] running...", call->tool_name);
     snprintf(request_key, sizeof(request_key), "run:%s", call->tool_name);
     spinner_request_label(spinner, request_key, label);
-    spinner_park(spinner, is_read ? render->cluster_line_used : 0);
+    spinner_park(spinner, is_read ? render->cluster.line_cells : 0);
 
     struct tool_run_ctx run_ctx = {.image_input = image_input};
     char *output = agent_tool_call_run(prepared, &run_ctx);
@@ -428,7 +427,8 @@ struct item dispatch_tool_call(struct render_ctx *render, const struct item *cal
     agent_tool_call_init(&prepared, call);
 
     enum tool_preview_mode preview_mode = tool_call_preview_mode(&prepared.effective);
-    render_transition(render, preview_mode == TOOL_PREVIEW_COLLAPSED ? RS_CLUSTER : RS_IDLE);
+    render_set_mode(render,
+                    preview_mode == TOOL_PREVIEW_COLLAPSED ? RENDER_TOOL_CLUSTER : RENDER_IDLE);
     struct item result =
         preview_mode == TOOL_PREVIEW_COLLAPSED
             ? dispatch_tool_call_collapsed(render, &prepared, image_input)
