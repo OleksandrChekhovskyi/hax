@@ -16,201 +16,127 @@
 #include "util.h"
 #include "transport/http.h"
 
-/* Mock provider for testing the rendering pipeline without a real LLM.
- *
- * Two modes:
- *
- *  1. Scripted — when HAX_MOCK_SCRIPT points to a file, the mock plays
- *     one turn of directives per stream() call, in file order:
- *
- *       # comments start with '#'
- *       text Looking at this codebase
- *       delay 100
- *       tool bash {"command":"ls -la"}
- *       end-turn
- *
- *       text Reading the main file
- *       tool read {"path":"src/main.c"}
- *       end-turn
- *
- *       text All done.
- *       end-turn
- *
- *     Directives:
- *       text <message>           One text delta with the rest of the line.
- *                                Decodes \n, \t, \\ so a single delta can
- *                                span multiple lines (used by the markdown
- *                                wrap fixtures in scripts/mock/layout.txt).
- *       reasoning <message>      One reasoning/chain-of-thought delta.
- *                                Same auto-chunking and \-escape decoding
- *                                as `text`. Renders only when HAX_SHOW_
- *                                REASONING is set; otherwise the agent
- *                                consumes it as a spinner-label-only
- *                                signal, matching real providers.
- *       space                    One single-space text delta. Use between
- *                                consecutive `text` directives that should
- *                                read as joined prose; without it, two
- *                                `text` lines emit back-to-back deltas with
- *                                no separator (same shape real providers
- *                                produce token-aligned).
- *       tool <name> <json>       One tool call. Args is a single-line JSON object.
- *       delay <ms>               Sleep before the next emission and between
- *                                auto-streamed text chunks.
- *       usage in=N out=M [cached=K] [cache_write=W] [cache_write_1h=H] [cost=D]
- *                                Set usage on the upcoming done event (cost is a decimal
- *                                USD amount).
- *       end-turn                 Finalize the current turn (emits EV_DONE).
- *       (blank or # line)        Ignored.
- *
- *     In both `text` and `tool` directives, "{{CWD}}" expands to the
- *     process working directory at emit time (see expand_cwd). Lets a
- *     checked-in script reference paths under cwd — whose absolute root
- *     is machine-specific — to exercise path relativization and
- *     cd-stripping (see scripts/mock/diff.txt).
- *
- *     Long text is auto-streamed in TEXT_CHUNK_BYTES-sized deltas with
- *     `delay` between chunks, so the live preview shows incremental
- *     progress. delay 0 (default) is burst-mode for fast tests.
- *
- *  2. Interactive — when HAX_MOCK_SCRIPT is unset, the mock parses the
- *     latest user message and emits a heuristic response:
- *       - Backtick-quoted text → bash tool call (or read, if the
- *         message starts with "read").
- *       - After a tool result, a brief acknowledgment.
- *       - Anything else → echo the message back as plain text.
- *     Designed so `HAX_PROVIDER=mock hax` works out of the box: the
- *     user types "run `ls -la`" and gets a real bash tool dispatch
- *     they can watch render in the preview. */
-
 #define TEXT_CHUNK_BYTES 16
 
 struct mock_provider {
     struct provider base;
-    /* NULL → interactive mode. Non-NULL → path to a script file. The
-     * path is captured at construction time; subsequent edits to the
-     * file are picked up because we re-open it on every stream() call. */
-    char *script_path;
-    /* Index of the next turn to play in scripted mode. Each completed
-     * stream() call increments this; on script exhaustion we fall
-     * through to a friendly "no more turns" message. */
-    int next_turn;
+    char *script_path; /* owned; NULL selects interactive mode */
+    size_t next_script_turn;
 };
 
-/* Sleep up to `ms` milliseconds, calling `tick` every 50ms so a long
- * scripted delay doesn't pin the REPL and the agent's tick-driven
- * windows (retry countdown, table stall) fire through the mock the
- * same way they would through libcurl's progress callback. Returns 1
- * if the tick signals cancel, 0 on full sleep or non-positive `ms`.
- * Real providers reach this path through libcurl's progress callback;
- * the mock has no HTTP so it polls. */
-static int mock_tick(http_tick_cb tick, void *tick_user)
+enum script_result {
+    SCRIPT_TURN_COMPLETE,
+    SCRIPT_EXHAUSTED,
+    SCRIPT_ABORTED,
+};
+
+enum delta_kind {
+    DELTA_TEXT,
+    DELTA_REASONING,
+};
+
+static int poll_tick(http_tick_cb tick, void *tick_user)
 {
     return tick ? tick(tick_user) : 0;
 }
 
+/* Sleep `ms` milliseconds, polling `tick` at least once and every 50ms.
+ * Real providers stay cancellable through libcurl's progress callback;
+ * the mock has no HTTP, so it polls. Returns nonzero when the tick
+ * signals cancellation. */
 static int msleep(long ms, http_tick_cb tick, void *tick_user)
 {
     while (ms > 0) {
-        if (mock_tick(tick, tick_user))
+        if (poll_tick(tick, tick_user))
             return 1;
         long step = ms < 50 ? ms : 50;
         struct timespec ts = {step / 1000, (step % 1000) * 1000000L};
         nanosleep(&ts, NULL);
         ms -= step;
     }
-    return mock_tick(tick, tick_user);
+    return poll_tick(tick, tick_user);
 }
 
-/* Auto-stream `s` as multiple deltas of up to TEXT_CHUNK_BYTES bytes,
- * sleeping `delay_ms` between chunks. The chunked emission is what
- * gives the live preview something to repaint when delay > 0; with
- * delay == 0 the deltas still arrive separately but back-to-back.
- * `reasoning` selects EV_REASONING_DELTA over EV_TEXT_DELTA; the body
- * is otherwise identical.
- *
- * Chunks are walked back to a UTF-8 codepoint boundary so a multibyte
- * character (em-dash, emoji, …) never straddles two deltas. Real
- * providers send token-aligned deltas which are already UTF-8-complete;
- * a naive byte-window split would diverge from that shape and could
- * corrupt any per-delta rendering that assumes complete codepoints. */
-static int emit_chunked(stream_cb cb, void *user, const char *s, long delay_ms, http_tick_cb tick,
-                        void *tick_user, int reasoning)
+/* Keep each delta UTF-8-complete because renderers may process deltas independently. */
+static int emit_chunked(stream_cb callback, void *callback_user, const char *text, long delay_ms,
+                        http_tick_cb tick, void *tick_user, enum delta_kind kind)
 {
-    size_t n = strlen(s);
-    if (n == 0)
-        return 0;
-    char buf[TEXT_CHUNK_BYTES + 1];
-    size_t i = 0;
-    while (i < n) {
-        if (mock_tick(tick, tick_user))
+    size_t length = strlen(text);
+    char chunk[TEXT_CHUNK_BYTES + 1];
+    size_t offset = 0;
+
+    while (offset < length) {
+        if (poll_tick(tick, tick_user))
             return 1;
-        size_t take = (n - i) < TEXT_CHUNK_BYTES ? (n - i) : TEXT_CHUNK_BYTES;
-        /* Walk back into the chunk while the proposed cut byte is a
-         * UTF-8 continuation (10xxxxxx). Don't cross past the start
-         * of the chunk — a single oversized codepoint just emits as-
-         * is, no worse than the original byte-sized split would have
-         * been, and keeps progress monotone. */
-        if (i + take < n) {
-            while (take > 0 && (s[i + take] & 0xC0) == 0x80)
-                take--;
-            if (take == 0)
-                take = (n - i) < TEXT_CHUNK_BYTES ? (n - i) : TEXT_CHUNK_BYTES;
+
+        size_t chunk_len = length - offset < TEXT_CHUNK_BYTES ? length - offset : TEXT_CHUNK_BYTES;
+        if (offset + chunk_len < length) {
+            while (chunk_len > 0 && ((unsigned char)text[offset + chunk_len] & 0xC0) == 0x80)
+                chunk_len--;
+            /* A full window of continuation bytes is already malformed; preserve progress. */
+            if (chunk_len == 0)
+                chunk_len = length - offset < TEXT_CHUNK_BYTES ? length - offset : TEXT_CHUNK_BYTES;
         }
-        memcpy(buf, s + i, take);
-        buf[take] = '\0';
-        struct stream_event ev =
-            reasoning ? (struct stream_event){.kind = EV_REASONING_DELTA,
-                                              .u.reasoning_delta = {.text = buf}}
-                      : (struct stream_event){.kind = EV_TEXT_DELTA, .u.text_delta = {.text = buf}};
-        int rc = cb(&ev, user);
+
+        memcpy(chunk, text + offset, chunk_len);
+        chunk[chunk_len] = '\0';
+        struct stream_event event;
+        if (kind == DELTA_REASONING)
+            event = (struct stream_event){.kind = EV_REASONING_DELTA,
+                                          .u.reasoning_delta = {.text = chunk}};
+        else
+            event = (struct stream_event){.kind = EV_TEXT_DELTA, .u.text_delta = {.text = chunk}};
+        int rc = callback(&event, callback_user);
         if (rc)
             return rc;
-        i += take;
-        if (i < n) {
-            if (msleep(delay_ms, tick, tick_user))
-                return 1;
-        }
+
+        offset += chunk_len;
+        if (offset < length && msleep(delay_ms, tick, tick_user))
+            return 1;
     }
     return 0;
 }
 
-static int emit_text_chunked(stream_cb cb, void *user, const char *s, long delay_ms,
-                             http_tick_cb tick, void *tick_user)
+static int emit_text_chunked(stream_cb callback, void *callback_user, const char *text,
+                             long delay_ms, http_tick_cb tick, void *tick_user)
 {
-    return emit_chunked(cb, user, s, delay_ms, tick, tick_user, 0);
+    return emit_chunked(callback, callback_user, text, delay_ms, tick, tick_user, DELTA_TEXT);
 }
 
-static int emit_tool_call(stream_cb cb, void *user, const char *name, const char *args_json,
-                          long delay_ms, http_tick_cb tick, void *tick_user)
+static int emit_tool_call(stream_cb callback, void *callback_user, const char *name,
+                          const char *args_json, long delay_ms, http_tick_cb tick, void *tick_user)
 {
     char id[37];
     gen_uuid_v4(id);
 
     struct stream_event start = {.kind = EV_TOOL_CALL_START,
                                  .u.tool_call_start = {.id = id, .name = name}};
-    if (cb(&start, user))
-        return -1;
-    /* Pause between the start (name known) and the args delta so the
-     * agent's named "[tool] composing..." spinner is observable, the
-     * way a real provider streaming a large args JSON would expose it. */
+    int rc = callback(&start, callback_user);
+    if (rc)
+        return rc;
+
+    /* Expose the composing state that real providers produce while streaming arguments. */
     if (msleep(delay_ms, tick, tick_user))
         return -1;
+
     struct stream_event delta = {.kind = EV_TOOL_CALL_DELTA,
                                  .u.tool_call_delta = {.id = id, .args_delta = args_json}};
-    if (cb(&delta, user))
-        return -1;
+    rc = callback(&delta, callback_user);
+    if (rc)
+        return rc;
+
     struct stream_event end = {.kind = EV_TOOL_CALL_END, .u.tool_call_end = {.id = id}};
-    return cb(&end, user);
+    return callback(&end, callback_user);
 }
 
-static int emit_done(stream_cb cb, void *user, struct stream_usage usage)
+static int emit_done(stream_cb callback, void *callback_user, struct stream_usage usage)
 {
-    struct stream_event ev = {.kind = EV_DONE,
-                              .u.done = {.stop_reason = "end_turn", .usage = usage}};
-    return cb(&ev, user);
+    struct stream_event event = {.kind = EV_DONE,
+                                 .u.done = {.stop_reason = "end_turn", .usage = usage}};
+    return callback(&event, callback_user);
 }
 
-static struct stream_usage empty_usage(void)
+static struct stream_usage unreported_usage(void)
 {
     return (struct stream_usage){.input_tokens = -1,
                                  .output_tokens = -1,
@@ -220,76 +146,73 @@ static struct stream_usage empty_usage(void)
                                  .cost = -1};
 }
 
-/* ---- Script parsing ----------------------------------------------- */
+/* Scripted mode */
 
-/* Replace every "{{CWD}}" in `s` with the process working directory.
- * A checked-in script can't hardcode an absolute path under cwd — the
- * root is machine-specific — yet both path relativization (in the file
- * tools) and cd-stripping (in the bash tool) only fire against the real
- * cwd. This lets a script emit e.g. {"path":"{{CWD}}/x"} and exercise
- * those paths from any directory. Returns a malloc'd string (caller
- * frees); on no match or getcwd failure, a plain copy. */
-static char *expand_cwd(const char *s)
+/* {{CWD}} lets checked-in fixtures exercise normalization against the actual working directory. */
+static char *expand_cwd(const char *text)
 {
-    static const char tok[] = "{{CWD}}";
-    const size_t toklen = sizeof(tok) - 1;
-    if (!strstr(s, tok))
-        return xstrdup(s);
+    static const char token[] = "{{CWD}}";
+    const size_t token_len = sizeof(token) - 1;
+    if (!strstr(text, token))
+        return xstrdup(text);
+
     char cwd[PATH_MAX];
     if (!getcwd(cwd, sizeof(cwd)))
-        return xstrdup(s);
-    struct buf out;
-    buf_init(&out);
-    for (const char *p = s; *p;) {
-        if (strncmp(p, tok, toklen) == 0) {
-            buf_append_str(&out, cwd);
-            p += toklen;
+        return xstrdup(text);
+
+    struct buf expanded;
+    buf_init(&expanded);
+    for (const char *cursor = text; *cursor;) {
+        if (strncmp(cursor, token, token_len) == 0) {
+            buf_append_str(&expanded, cwd);
+            cursor += token_len;
         } else {
-            buf_append(&out, p, 1);
-            p++;
+            buf_append(&expanded, cursor, 1);
+            cursor++;
         }
     }
-    char *res = xstrdup(out.data ? out.data : "");
-    buf_free(&out);
-    return res;
+    return buf_steal(&expanded);
 }
 
-static const char *skip_ws(const char *s)
+static const char *skip_ws(const char *text)
 {
-    while (*s == ' ' || *s == '\t')
-        s++;
-    return s;
+    while (*text == ' ' || *text == '\t')
+        text++;
+    return text;
 }
 
-static int line_is_blank_or_comment(const char *s)
+static int line_is_blank_or_comment(const char *line)
 {
-    s = skip_ws(s);
-    return *s == '\0' || *s == '#';
+    line = skip_ws(line);
+    return *line == '\0' || *line == '#';
 }
 
-/* Match `prefix` at the start of `s` with a word boundary after it
- * (whitespace or end-of-string). On match, *rest points at the first
- * non-whitespace character past the prefix. */
-static int starts_with(const char *s, const char *prefix, const char **rest)
+static int match_directive(const char *line, const char *name, const char **argument)
 {
-    size_t n = strlen(prefix);
-    if (strncmp(s, prefix, n) != 0)
+    size_t name_len = strlen(name);
+    if (strncmp(line, name, name_len) != 0)
         return 0;
-    if (s[n] != ' ' && s[n] != '\t' && s[n] != '\0')
+    if (line[name_len] != ' ' && line[name_len] != '\t' && line[name_len] != '\0')
         return 0;
-    if (rest)
-        *rest = skip_ws(s + n);
+    if (argument)
+        *argument = skip_ws(line + name_len);
     return 1;
 }
 
-static long parse_long(const char *s, long fallback)
+static long parse_long_or(const char *text, long fallback)
 {
     char *end;
     errno = 0;
-    long v = strtol(s, &end, 10);
-    if (errno || end == s)
+    long value = strtol(text, &end, 10);
+    if (errno || end == text || (*end && *end != ' ' && *end != '\t'))
         return fallback;
-    return v;
+    return value;
+}
+
+static int usage_key_is(const char *start, const char *end, const char *name)
+{
+    size_t name_len = strlen(name);
+    return (size_t)(end - start) == name_len && strncmp(start, name, name_len) == 0;
 }
 
 static void strip_eol(char *line)
@@ -301,440 +224,418 @@ static void strip_eol(char *line)
     }
 }
 
-/* Parse a "key=N key=N..." usage spec. Unknown keys are silently
- * ignored so the directive can grow without breaking older scripts. */
-static struct stream_usage parse_usage(const char *s)
+/* Unknown usage keys are ignored so scripts remain compatible as accounting grows. */
+static struct stream_usage parse_usage(const char *spec)
 {
-    struct stream_usage u = empty_usage();
-    while (*s) {
-        s = skip_ws(s);
-        if (!*s)
+    struct stream_usage usage = unreported_usage();
+    while (*spec) {
+        spec = skip_ws(spec);
+        if (!*spec)
             break;
-        const char *eq = strchr(s, '=');
-        if (!eq)
-            break;
-        long v = parse_long(eq + 1, -1);
-        if (strncmp(s, "in=", 3) == 0 || strncmp(s, "input=", 6) == 0)
-            u.input_tokens = v;
-        else if (strncmp(s, "out=", 4) == 0 || strncmp(s, "output=", 7) == 0)
-            u.output_tokens = v;
-        else if (strncmp(s, "cached=", 7) == 0)
-            u.cached_tokens = v;
-        else if (strncmp(s, "cache_write=", 12) == 0)
-            u.cache_write_tokens = v;
-        else if (strncmp(s, "cache_write_1h=", 15) == 0)
-            u.cache_write_1h_tokens = v;
-        else if (strncmp(s, "cost=", 5) == 0)
-            u.cost = strtod(eq + 1, NULL);
-        /* Skip past this token. */
-        const char *p = eq + 1;
-        while (*p && *p != ' ' && *p != '\t')
-            p++;
-        s = p;
+
+        const char *token_end = spec;
+        while (*token_end && *token_end != ' ' && *token_end != '\t')
+            token_end++;
+
+        const char *separator = memchr(spec, '=', (size_t)(token_end - spec));
+        if (!separator) {
+            spec = token_end;
+            continue;
+        }
+
+        long value = parse_long_or(separator + 1, -1);
+        if (usage_key_is(spec, separator, "in") || usage_key_is(spec, separator, "input"))
+            usage.input_tokens = value;
+        else if (usage_key_is(spec, separator, "out") || usage_key_is(spec, separator, "output"))
+            usage.output_tokens = value;
+        else if (usage_key_is(spec, separator, "cached"))
+            usage.cached_tokens = value;
+        else if (usage_key_is(spec, separator, "cache_write"))
+            usage.cache_write_tokens = value;
+        else if (usage_key_is(spec, separator, "cache_write_1h"))
+            usage.cache_write_1h_tokens = value;
+        else if (usage_key_is(spec, separator, "cost")) {
+            char *end;
+            errno = 0;
+            double cost = strtod(separator + 1, &end);
+            if (!errno && end == token_end)
+                usage.cost = cost;
+        }
+        spec = token_end;
     }
-    return u;
+    return usage;
 }
 
-/* Read directives from `f` up to and including the next end-turn (or
- * EOF), emitting events as we go. Returns 0 on clean turn, non-zero on
- * tick cancellation — with NO terminal event, matching a real provider
- * whose transport was aborted mid-stream — or -2 if EOF was hit with no
- * directives in this turn (caller should treat as "exhausted"). */
-static int play_one_turn(FILE *f, stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
+/* Unknown escapes remain literal so fixture paths and JSON are not silently changed. */
+static char *decode_escapes(const char *text)
+{
+    char *decoded = xmalloc(strlen(text) + 1);
+    char *output = decoded;
+    while (*text) {
+        if (text[0] == '\\' && text[1] == 'n') {
+            *output++ = '\n';
+            text += 2;
+        } else if (text[0] == '\\' && text[1] == 't') {
+            *output++ = '\t';
+            text += 2;
+        } else if (text[0] == '\\' && text[1] == '\\') {
+            *output++ = '\\';
+            text += 2;
+        } else {
+            *output++ = *text++;
+        }
+    }
+    *output = '\0';
+    return decoded;
+}
+
+static int emit_script_text(const char *text, enum delta_kind kind, long delay_ms,
+                            stream_cb callback, void *callback_user, http_tick_cb tick,
+                            void *tick_user)
+{
+    if (msleep(delay_ms, tick, tick_user))
+        return -1;
+
+    char *decoded = decode_escapes(text);
+    char *expanded = expand_cwd(decoded);
+    free(decoded);
+    int rc = emit_chunked(callback, callback_user, expanded, delay_ms, tick, tick_user, kind);
+    free(expanded);
+    return rc;
+}
+
+static int emit_script_tool(const char *spec, const char *line, long delay_ms, stream_cb callback,
+                            void *callback_user, http_tick_cb tick, void *tick_user)
+{
+    const char *name_end = strpbrk(spec, " \t");
+    const char *args_json = name_end ? skip_ws(name_end) : NULL;
+    if (!name_end || !*args_json) {
+        fprintf(stderr, "hax mock: 'tool' needs name and JSON args: %s\n", line);
+        return 0;
+    }
+
+    size_t name_len = (size_t)(name_end - spec);
+    char *name = xmalloc(name_len + 1);
+    memcpy(name, spec, name_len);
+    name[name_len] = '\0';
+    char *expanded_args = expand_cwd(args_json);
+
+    int rc = msleep(delay_ms, tick, tick_user);
+    if (!rc)
+        rc =
+            emit_tool_call(callback, callback_user, name, expanded_args, delay_ms, tick, tick_user);
+
+    free(expanded_args);
+    free(name);
+    return rc;
+}
+
+static enum script_result finish_script_turn(stream_cb callback, void *callback_user,
+                                             struct stream_usage usage)
+{
+    return emit_done(callback, callback_user, usage) ? SCRIPT_ABORTED : SCRIPT_TURN_COMPLETE;
+}
+
+static enum script_result play_script_turn(FILE *script, stream_cb callback, void *callback_user,
+                                           http_tick_cb tick, void *tick_user)
 {
     char line[8192];
     long delay_ms = 0;
-    struct stream_usage usage = empty_usage();
+    struct stream_usage usage = unreported_usage();
     int saw_directive = 0;
 
-    while (fgets(line, sizeof line, f)) {
-        /* Poll the tick between directives so a long script can be cut
-         * short the way a real transport abort would cut a stream. */
-        if (mock_tick(tick, tick_user))
-            return 1;
+    while (fgets(line, sizeof(line), script)) {
+        if (poll_tick(tick, tick_user))
+            return SCRIPT_ABORTED;
 
         strip_eol(line);
         if (line_is_blank_or_comment(line))
             continue;
 
-        const char *body = skip_ws(line);
-        const char *rest;
-
-        if (starts_with(body, "end-turn", NULL))
-            return emit_done(cb, user, usage);
+        const char *directive = skip_ws(line);
+        const char *argument;
+        if (match_directive(directive, "end-turn", NULL))
+            return finish_script_turn(callback, callback_user, usage);
 
         saw_directive = 1;
+        int rc = 0;
+        if (match_directive(directive, "delay", &argument)) {
+            delay_ms = parse_long_or(argument, 0);
+            if (delay_ms < 0)
+                delay_ms = 0;
+        } else if (match_directive(directive, "text", &argument)) {
+            rc = emit_script_text(argument, DELTA_TEXT, delay_ms, callback, callback_user, tick,
+                                  tick_user);
+        } else if (match_directive(directive, "reasoning", &argument)) {
+            rc = emit_script_text(argument, DELTA_REASONING, delay_ms, callback, callback_user,
+                                  tick, tick_user);
+        } else if (match_directive(directive, "space", NULL)) {
+            if (msleep(delay_ms, tick, tick_user))
+                rc = -1;
+            else {
+                struct stream_event event = {.kind = EV_TEXT_DELTA, .u.text_delta = {.text = " "}};
+                rc = callback(&event, callback_user);
+            }
+        } else if (match_directive(directive, "tool", &argument)) {
+            rc = emit_script_tool(argument, line, delay_ms, callback, callback_user, tick,
+                                  tick_user);
+        } else if (match_directive(directive, "usage", &argument)) {
+            usage = parse_usage(argument);
+        } else {
+            fprintf(stderr, "hax mock: unknown directive: %s\n", line);
+        }
 
-        if (starts_with(body, "delay", &rest)) {
-            delay_ms = parse_long(rest, 0);
-            continue;
-        }
-        if (starts_with(body, "text", &rest) || starts_with(body, "reasoning", &rest)) {
-            int reasoning = body[0] == 'r';
-            if (msleep(delay_ms, tick, tick_user))
-                return 1;
-            /* Decode minimal C-style escapes (\n, \t, \\) so script
-             * lines can embed real newlines without breaking the
-             * line-per-directive parser. Anything else passes
-             * through; an unrecognized \X is emitted as the literal
-             * two bytes so existing scripts that happen to contain a
-             * backslash aren't silently mangled. */
-            size_t rlen = strlen(rest);
-            char *decoded = xmalloc(rlen + 1);
-            size_t di = 0;
-            for (size_t si = 0; si < rlen; si++) {
-                if (rest[si] == '\\' && si + 1 < rlen) {
-                    char e = rest[si + 1];
-                    if (e == 'n') {
-                        decoded[di++] = '\n';
-                        si++;
-                        continue;
-                    }
-                    if (e == 't') {
-                        decoded[di++] = '\t';
-                        si++;
-                        continue;
-                    }
-                    if (e == '\\') {
-                        decoded[di++] = '\\';
-                        si++;
-                        continue;
-                    }
-                }
-                decoded[di++] = rest[si];
-            }
-            decoded[di] = '\0';
-            char *expanded = expand_cwd(decoded);
-            free(decoded);
-            int rc = emit_chunked(cb, user, expanded, delay_ms, tick, tick_user, reasoning);
-            free(expanded);
-            if (rc)
-                return rc;
-            continue;
-        }
-        if (starts_with(body, "space", NULL)) {
-            /* Honor delay_ms before emission, matching `text` / `tool`
-             * — `space` is a one-byte text delta, not exempt from the
-             * configured pacing. Lets a script use `delay X / space`
-             * to model "wait X then emit space" (e.g. a token-aligned
-             * space delta arriving after a long pause). */
-            if (msleep(delay_ms, tick, tick_user))
-                return 1;
-            struct stream_event sp = {.kind = EV_TEXT_DELTA, .u.text_delta = {.text = " "}};
-            int rc = cb(&sp, user);
-            if (rc)
-                return rc;
-            continue;
-        }
-        if (starts_with(body, "tool", &rest)) {
-            /* "tool <name> <json>" — split off the name at the first
-             * whitespace, the rest is the JSON args blob (passed
-             * through verbatim). Accept both space and tab so the
-             * boundary matches the rest of the parser's whitespace
-             * handling. */
-            const char *space = strpbrk(rest, " \t");
-            if (!space || !*(space + 1)) {
-                fprintf(stderr, "hax mock: 'tool' needs name and JSON args: %s\n", line);
-                continue;
-            }
-            size_t name_len = (size_t)(space - rest);
-            char *name = xmalloc(name_len + 1);
-            memcpy(name, rest, name_len);
-            name[name_len] = '\0';
-            char *args = expand_cwd(skip_ws(space));
-            if (msleep(delay_ms, tick, tick_user)) {
-                free(args);
-                free(name);
-                return 1;
-            }
-            int rc = emit_tool_call(cb, user, name, args, delay_ms, tick, tick_user);
-            free(args);
-            free(name);
-            if (rc)
-                return rc;
-            continue;
-        }
-        if (starts_with(body, "usage", &rest)) {
-            usage = parse_usage(rest);
-            continue;
-        }
-        fprintf(stderr, "hax mock: unknown directive: %s\n", line);
+        if (rc)
+            return SCRIPT_ABORTED;
     }
 
-    /* EOF without explicit end-turn: treat any directives we saw as a
-     * final turn, and an empty tail as "script is exhausted". */
-    if (saw_directive)
-        return emit_done(cb, user, usage);
-    return -2;
+    if (!saw_directive)
+        return SCRIPT_EXHAUSTED;
+    return finish_script_turn(callback, callback_user, usage);
 }
 
-/* Forward `f` past `target` end-turns so the caller can play turn N. */
-static int skip_to_turn(FILE *f, int target)
+static int skip_script_turns(FILE *script, size_t count)
 {
     char line[8192];
-    int skipped = 0;
-    while (skipped < target && fgets(line, sizeof line, f)) {
+    size_t skipped = 0;
+    while (skipped < count && fgets(line, sizeof(line), script)) {
         strip_eol(line);
-        if (starts_with(skip_ws(line), "end-turn", NULL))
+        if (match_directive(skip_ws(line), "end-turn", NULL))
             skipped++;
     }
-    return skipped;
+    return skipped == count ? 0 : -1;
 }
 
-/* ---- Interactive mode --------------------------------------------- */
+/* Interactive mode */
 
-static const struct item *last_of_kind(const struct context *ctx, enum item_kind kind)
+static const struct item *last_of_kind(const struct context *context, enum item_kind kind)
 {
-    for (size_t i = ctx->n_items; i > 0; i--) {
-        if (ctx->items[i - 1].kind == kind)
-            return &ctx->items[i - 1];
+    for (size_t i = context->n_items; i > 0; i--) {
+        if (context->items[i - 1].kind == kind)
+            return &context->items[i - 1];
     }
     return NULL;
 }
 
-/* Return the last item that's actually content — skipping the inert
- * ITEM_TURN_BOUNDARY/ITEM_TURN_USAGE markers the agent inserts around
- * round-trips, so the heuristic sees the real most-recent thing the user
- * or a tool produced. */
-static const struct item *last_item(const struct context *ctx)
+static const struct item *last_content_item(const struct context *context)
 {
-    for (size_t i = ctx->n_items; i > 0; i--) {
-        enum item_kind k = ctx->items[i - 1].kind;
-        if (k != ITEM_TURN_BOUNDARY && k != ITEM_TURN_USAGE)
-            return &ctx->items[i - 1];
+    for (size_t i = context->n_items; i > 0; i--) {
+        enum item_kind kind = context->items[i - 1].kind;
+        if (kind != ITEM_TURN_BOUNDARY && kind != ITEM_TURN_USAGE)
+            return &context->items[i - 1];
     }
     return NULL;
 }
 
-/* Extract text between the first pair of backticks. Returns malloc'd
- * or NULL when no balanced pair is present. */
-static char *extract_backticks(const char *s)
+/* Return allocated text between the first balanced pair, or NULL. */
+static char *extract_backtick_text(const char *text)
 {
-    const char *open = strchr(s, '`');
+    const char *open = strchr(text, '`');
     if (!open)
         return NULL;
     const char *close = strchr(open + 1, '`');
     if (!close)
         return NULL;
-    size_t n = (size_t)(close - open - 1);
-    char *out = xmalloc(n + 1);
-    memcpy(out, open + 1, n);
-    out[n] = '\0';
-    return out;
+
+    size_t length = (size_t)(close - open - 1);
+    char *quoted = xmalloc(length + 1);
+    memcpy(quoted, open + 1, length);
+    quoted[length] = '\0';
+    return quoted;
 }
 
-/* Crude case-insensitive "starts with one of the verbs" check. Used to
- * route a backtick-quoted argument to the right tool. */
-static int starts_with_verb_ci(const char *s, const char *verb)
+static int message_starts_with(const char *message, const char *verb)
 {
-    size_t n = strlen(verb);
-    s = skip_ws(s);
-    if (strncasecmp(s, verb, n) != 0)
+    size_t verb_len = strlen(verb);
+    message = skip_ws(message);
+    if (strncasecmp(message, verb, verb_len) != 0)
         return 0;
-    /* Verb must be followed by a word boundary so "reader" doesn't
-     * match "read". */
-    return s[n] == ' ' || s[n] == '\t' || s[n] == '`' || s[n] == '\0';
+    return message[verb_len] == ' ' || message[verb_len] == '\t' || message[verb_len] == '`' ||
+           message[verb_len] == '\0';
 }
 
-/* JSON-escape `s` into `out`. `out` must hold at least 6*strlen(s)+1
- * bytes — every byte may expand to a 6-char `\uXXXX` form for control
- * bytes outside the named escapes. Non-ASCII (>= 0x80) passes through
- * untouched, since the input is already UTF-8 and JSON allows raw
- * UTF-8 inside strings. */
-static void json_escape(const char *s, char *out)
+static int context_has_tool(const struct context *context, const char *name)
+{
+    for (size_t i = 0; i < context->n_tools; i++) {
+        if (strcmp(context->tools[i].name, name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static char *escape_json_string(const char *text)
 {
     static const char hex[] = "0123456789abcdef";
-    char *o = out;
-    for (; *s; s++) {
-        unsigned char c = (unsigned char)*s;
-        switch (c) {
+    struct buf escaped;
+    buf_init(&escaped);
+
+    for (; *text; text++) {
+        unsigned char byte = (unsigned char)*text;
+        const char *replacement = NULL;
+        switch (byte) {
         case '"':
-            *o++ = '\\';
-            *o++ = '"';
+            replacement = "\\\"";
             break;
         case '\\':
-            *o++ = '\\';
-            *o++ = '\\';
+            replacement = "\\\\";
             break;
         case '\n':
-            *o++ = '\\';
-            *o++ = 'n';
+            replacement = "\\n";
             break;
         case '\r':
-            *o++ = '\\';
-            *o++ = 'r';
+            replacement = "\\r";
             break;
         case '\t':
-            *o++ = '\\';
-            *o++ = 't';
+            replacement = "\\t";
             break;
         case '\b':
-            *o++ = '\\';
-            *o++ = 'b';
+            replacement = "\\b";
             break;
         case '\f':
-            *o++ = '\\';
-            *o++ = 'f';
+            replacement = "\\f";
             break;
         default:
-            if (c < 0x20) {
-                /* All other C0 controls must be escaped per RFC 8259
-                 * §7 — emitting them raw would produce invalid JSON
-                 * that jansson rejects on the agent side. */
-                *o++ = '\\';
-                *o++ = 'u';
-                *o++ = '0';
-                *o++ = '0';
-                *o++ = hex[(c >> 4) & 0xF];
-                *o++ = hex[c & 0xF];
-            } else {
-                *o++ = (char)c;
-            }
             break;
         }
+        if (replacement) {
+            buf_append_str(&escaped, replacement);
+        } else if (byte < 0x20) {
+            /* RFC 8259 requires all remaining C0 controls to use a Unicode escape. */
+            char unicode_escape[] = {'\\', 'u', '0', '0', hex[byte >> 4], hex[byte & 0xF]};
+            buf_append(&escaped, unicode_escape, sizeof(unicode_escape));
+        } else {
+            buf_append(&escaped, &byte, 1);
+        }
     }
-    *o = '\0';
+    return buf_steal(&escaped);
 }
 
-static int interactive_response(const struct context *ctx, stream_cb cb, void *user,
-                                http_tick_cb tick, void *tick_user)
+static int interactive_response(const struct context *context, stream_cb callback,
+                                void *callback_user, http_tick_cb tick, void *tick_user)
 {
-    const struct item *last = last_item(ctx);
+    const struct item *last = last_content_item(context);
     if (!last)
-        return emit_done(cb, user, empty_usage());
+        return emit_done(callback, callback_user, unreported_usage());
 
-    /* Just got a tool result back — keep things terse and end the turn
-     * so the user can decide what to do next. */
     if (last->kind == ITEM_TOOL_RESULT) {
-        int rc = emit_text_chunked(cb, user, "Tool finished — awaiting next instruction.", 0, tick,
-                                   tick_user);
+        int rc =
+            emit_text_chunked(callback, callback_user, "Tool finished — awaiting next instruction.",
+                              0, tick, tick_user);
         if (rc)
             return rc;
-        return emit_done(cb, user, empty_usage());
+        return emit_done(callback, callback_user, unreported_usage());
     }
 
-    const struct item *u = last_of_kind(ctx, ITEM_USER_MESSAGE);
-    if (!u || !u->text || !*u->text) {
-        int rc = emit_text_chunked(cb, user, "Hello.", 0, tick, tick_user);
+    const struct item *user_message = last_of_kind(context, ITEM_USER_MESSAGE);
+    if (!user_message || !user_message->text || !*user_message->text) {
+        int rc = emit_text_chunked(callback, callback_user, "Hello.", 0, tick, tick_user);
         if (rc)
             return rc;
-        return emit_done(cb, user, empty_usage());
+        return emit_done(callback, callback_user, unreported_usage());
     }
 
-    /* The backtick → tool-call shortcut is only useful when tools are
-     * actually advertised. Under `--raw` (ctx->n_tools == 0) the agent
-     * would refuse to execute anyway, so a tool call would just bounce
-     * back as an error — fall through to the echo path so smoke tests
-     * of the barebones-chat mode behave predictably. */
-    char *quoted = extract_backticks(u->text);
-    if (quoted && ctx->n_tools > 0) {
-        const char *tool_name = "bash";
-        const char *arg_key = "command";
-        if (starts_with_verb_ci(u->text, "read")) {
-            tool_name = "read";
-            arg_key = "path";
-        }
-        /* json_escape can expand a control byte to 6 chars (\uXXXX). */
-        char *escaped = xmalloc(strlen(quoted) * 6 + 1);
-        json_escape(quoted, escaped);
-        char *args = xasprintf("{\"%s\":\"%s\"}", arg_key, escaped);
-        int rc = emit_text_chunked(cb, user, "Sure, on it.", 0, tick, tick_user);
+    const char *tool_name = message_starts_with(user_message->text, "read") ? "read" : "bash";
+    const char *argument_key = strcmp(tool_name, "read") == 0 ? "path" : "command";
+    char *quoted = extract_backtick_text(user_message->text);
+
+    /* Raw mode and restricted tool sets must not receive calls the agent will reject. */
+    if (quoted && context_has_tool(context, tool_name)) {
+        char *escaped = escape_json_string(quoted);
+        char *args_json = xasprintf("{\"%s\":\"%s\"}", argument_key, escaped);
+        int rc = emit_text_chunked(callback, callback_user, "Sure, on it.", 0, tick, tick_user);
         if (!rc)
-            rc = emit_tool_call(cb, user, tool_name, args, 0, tick, tick_user);
-        free(args);
+            rc = emit_tool_call(callback, callback_user, tool_name, args_json, 0, tick, tick_user);
+        free(args_json);
         free(escaped);
         free(quoted);
         if (rc)
             return rc;
-        return emit_done(cb, user, empty_usage());
+        return emit_done(callback, callback_user, unreported_usage());
     }
-    free(quoted); /* NULL-safe; covers both the no-backticks and --raw paths */
+    free(quoted);
 
-    /* Echo the message back so the user sees something was received.
-     * Useful when smoke-testing assistant-text rendering. */
-    char *echo = xasprintf("You said: %s", u->text);
-    int rc = emit_text_chunked(cb, user, echo, 0, tick, tick_user);
+    char *echo = xasprintf("You said: %s", user_message->text);
+    int rc = emit_text_chunked(callback, callback_user, echo, 0, tick, tick_user);
     free(echo);
     if (rc)
         return rc;
-    return emit_done(cb, user, empty_usage());
+    return emit_done(callback, callback_user, unreported_usage());
 }
 
-/* ---- Provider entry points ---------------------------------------- */
+/* Provider interface */
 
-static int mock_stream(struct provider *p, const struct context *ctx, const char *model,
-                       stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
+static int emit_script_exhausted(stream_cb callback, void *callback_user, http_tick_cb tick,
+                                 void *tick_user)
+{
+    int rc = emit_text_chunked(callback, callback_user, "Script exhausted — no more turns.", 0,
+                               tick, tick_user);
+    if (rc)
+        return rc;
+    return emit_done(callback, callback_user, unreported_usage());
+}
+
+static int mock_stream(struct provider *provider, const struct context *context, const char *model,
+                       stream_cb callback, void *callback_user, http_tick_cb tick, void *tick_user)
 {
     (void)model;
-    struct mock_provider *m = (struct mock_provider *)p;
+    struct mock_provider *mock = (struct mock_provider *)provider;
 
-    if (!m->script_path)
-        return interactive_response(ctx, cb, user, tick, tick_user);
+    if (!mock->script_path)
+        return interactive_response(context, callback, callback_user, tick, tick_user);
 
-    FILE *f = fopen(m->script_path, "r");
-    if (!f) {
-        char *msg = xasprintf("mock: cannot open '%s': %s", m->script_path, strerror(errno));
-        struct stream_event ev = {.kind = EV_ERROR, .u.error = {.message = msg, .http_status = 0}};
-        cb(&ev, user);
-        free(msg);
+    FILE *script = fopen(mock->script_path, "r");
+    if (!script) {
+        char *message = xasprintf("mock: cannot open '%s': %s", mock->script_path, strerror(errno));
+        struct stream_event event = {.kind = EV_ERROR,
+                                     .u.error = {.message = message, .http_status = 0}};
+        callback(&event, callback_user);
+        free(message);
         return -1;
     }
 
-    int skipped = skip_to_turn(f, m->next_turn);
-    if (skipped < m->next_turn) {
-        fclose(f);
-        /* Propagate cancellation without EV_DONE, like a scripted turn:
-         * even the exhausted-script notice must not report a pre-empted
-         * stream as a completed one. */
-        int rc =
-            emit_text_chunked(cb, user, "Script exhausted — no more turns.", 0, tick, tick_user);
-        if (rc)
-            return rc;
-        return emit_done(cb, user, empty_usage());
+    if (skip_script_turns(script, mock->next_script_turn)) {
+        fclose(script);
+        return emit_script_exhausted(callback, callback_user, tick, tick_user);
     }
 
-    int rc = play_one_turn(f, cb, user, tick, tick_user);
-    fclose(f);
+    enum script_result result = play_script_turn(script, callback, callback_user, tick, tick_user);
+    fclose(script);
 
-    if (rc == -2) {
-        rc = emit_text_chunked(cb, user, "Script exhausted — no more turns.", 0, tick, tick_user);
-        if (rc)
-            return rc;
-        return emit_done(cb, user, empty_usage());
-    }
-    if (rc == 0)
-        m->next_turn++;
-    return rc;
+    if (result == SCRIPT_EXHAUSTED)
+        return emit_script_exhausted(callback, callback_user, tick, tick_user);
+    if (result == SCRIPT_ABORTED)
+        return -1;
+
+    mock->next_script_turn++;
+    return 0;
 }
 
-static void mock_destroy(struct provider *p)
+static void mock_destroy(struct provider *provider)
 {
-    struct mock_provider *m = (struct mock_provider *)p;
-    model_meta_release(p);
-    free(m->script_path);
-    free(m);
+    struct mock_provider *mock = (struct mock_provider *)provider;
+    model_meta_release(provider);
+    free(mock->script_path);
+    free(mock);
 }
 
 struct provider *mock_provider_new(const char *name)
 {
     (void)name;
-    struct mock_provider *m = xcalloc(1, sizeof(*m));
-    m->base.name = "mock";
-    m->base.default_model = "mock-model";
-    m->base.stream = mock_stream;
-    m->base.destroy = mock_destroy;
+    struct mock_provider *mock = xcalloc(1, sizeof(*mock));
+    mock->base.name = "mock";
+    mock->base.default_model = "mock-model";
+    mock->base.stream = mock_stream;
+    mock->base.destroy = mock_destroy;
 
     const char *script = config_str("mock.script");
     if (script && *script)
-        m->script_path = xstrdup(script);
+        mock->script_path = xstrdup(script);
 
-    return &m->base;
+    return &mock->base;
 }
 
 const struct provider_factory PROVIDER_MOCK = {
     .name = "mock",
     .new = mock_provider_new,
-    /* Dev/testing backend: opt in explicitly with HAX_PROVIDER=mock. Kept
-     * out of the /provider picker, auto-selection, and the supported list. */
     .internal = 1,
 };

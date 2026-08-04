@@ -51,6 +51,7 @@ test_sources = [
     'providers/test_codex_settings.c',
     'providers/test_config_provider.c',
     'providers/test_llamacpp.c',
+    'providers/test_mock.c',
     'providers/test_model_info.c',
     'providers/test_openai.c',
     'providers/test_openai_events.c',

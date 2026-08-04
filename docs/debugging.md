@@ -47,8 +47,8 @@ HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/demo.txt hax
 Without a script, it parses the latest user message heuristically. For example, typing
 ``run `ls -la` `` can trigger a real `bash` tool call.
 
-With `HAX_MOCK_SCRIPT`, each provider `stream()` call consumes one scripted turn. The script
-DSL supports:
+With `HAX_MOCK_SCRIPT`, each provider `stream()` call consumes one scripted turn. Blank lines
+and lines whose first non-whitespace character is `#` are ignored. The directives are:
 
 ```text
 text <message>
@@ -60,9 +60,14 @@ usage in=N out=M [cached=K] [cache_write=W] [cache_write_1h=H] [cost=D]
 end-turn
 ```
 
-`reasoning` emits a chain-of-thought delta (rendered only with `HAX_SHOW_REASONING=1`), and
-`space` joins consecutive `text` directives with a single-space delta. Blank lines and `#`
-comments are ignored. The full DSL reference lives at the top of `src/providers/mock.c`.
+`text` and `reasoning` decode `\\n`, `\\t`, and `\\\\`, then stream the result in small deltas;
+`reasoning` is displayed only with `HAX_SHOW_REASONING=1`. `space` emits one single-space text
+delta. `delay` sets the pacing for later text, reasoning, space, and tool emissions; zero restores
+burst mode. `tool` takes a name and a single-line JSON object. `usage` sets the accounting on the
+turn's final event, and `end-turn` completes the turn. A final turn may end at EOF.
+
+`{{CWD}}` in text or tool arguments expands to the process working directory, allowing checked-in
+fixtures to exercise path normalization without hard-coding a machine-specific path.
 
 Mock-provider fixtures live under `scripts/mock/`:
 
