@@ -6,47 +6,23 @@
 
 #include "provider.h"
 
-/* OpenRouter preset over the OpenAI-compatible Chat Completions API. Locked
- * to https://openrouter.ai/api/v1 — HAX_OPENAI_BASE_URL is rejected so the
- * OPENROUTER_API_KEY fallback and the attribution headers can never be sent
- * to an unrelated host. For custom OpenAI-compatible endpoints, use the
- * openai-compatible preset (openai_compat.h) instead.
- *
- * Reads config from env:
- *   HAX_OPENAI_API_KEY       — preferred; falls back to OPENROUTER_API_KEY
- *   HAX_OPENROUTER_REFERER   — HTTP-Referer, OpenRouter's app identifier for
- *                              attribution; defaults to the project URL, an
- *                              empty value disables attribution
- *   HAX_OPENROUTER_TITLE     — X-Title, the display name for the app page
- *                              (defaults to "hax"; empty omits it)
- *
- * prompt_cache_key is sent by default since OpenRouter routes some upstream
- * providers (Anthropic, OpenAI) that honor prefix-cache hints. */
+/* Construct the OpenRouter preset. The base URL is fixed to openrouter.ai and `name` is unused. */
 struct provider *openrouter_provider_new(const char *name);
 
-/* Fill `out` from one OpenRouter `/models` `data[]` element: context window,
- * image input, tool support, per-Mtok rates (input, cached input, output),
- * and the description's lead line. Wired in as the preset's
- * parse_model hook (openai.h), so `out` arrives model_info_init'd with `id`
- * already set and every field this can't read stays at its unknown
- * sentinel. Pure — exposed separately from the HTTP path so the catalog
- * shape can be unit-tested against a fixture. */
-void openrouter_parse_model(const json_t *entry, struct model_info *out);
+/* Parse one OpenRouter /models entry into initialized `info`. Newly allocated fields are owned by
+ * `info`; unreported fields retain their unknown values. */
+void openrouter_parse_model(const json_t *entry, struct model_info *info);
 
-/* Read the entry's `reasoning` block into the effort levels the model
- * accepts. Taken verbatim (OpenRouter normalizes upstream vocabularies
- * itself); an entry with no such block reports "no categorical effort".
- * Called by openrouter_parse_model; separate for unit tests. */
-void openrouter_parse_efforts(const json_t *entry, struct effort_set *out);
+/* Parse categorical reasoning levels from one OpenRouter /models entry. An absent level list leaves
+ * `efforts` unknown unless the entry explicitly excludes reasoning parameters. */
+void openrouter_parse_efforts(const json_t *entry, struct effort_set *efforts);
 
-/* Pull `model`'s entry out of a `{"data": [...]}` catalog page and parse it.
- * Exposed for unit tests: the exact-id match is the whole point, because the
- * ?q= query the probe uses is a substring search. */
-void openrouter_parse_meta(const char *body, const char *model, struct model_info *out);
+/* Parse the exact `model` from a filtered /models response into initialized `info`. */
+void openrouter_parse_model_probe_response(const char *body, const char *model,
+                                           struct model_info *info);
 
-/* Describe the single-model metadata fetch (provider.h probe_model). `p` is
- * unused, so tests may pass NULL. Fills *out with heap-owned url/headers. */
-int openrouter_probe_model(struct provider *p, const char *model, struct model_probe *out);
+/* Prepare an owned, filtered metadata request. `provider` is unused. */
+int openrouter_probe_model(struct provider *provider, const char *model, struct model_probe *probe);
 
 extern const struct provider_factory PROVIDER_OPENROUTER;
 
