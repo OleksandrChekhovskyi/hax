@@ -5,6 +5,9 @@
 #include "harness.h"
 #include "providers/llamacpp.h"
 
+static const char MODELS_RESPONSE[] =
+    "{\"data\": [{\"id\": 7}, {}, {\"id\": \"served-a\"}, {\"id\": \"served-b\"}]}";
+
 static void expect_label(const char *model, const char *expected)
 {
     char *label = llamacpp_model_label(NULL, model);
@@ -35,63 +38,73 @@ static void test_model_warning(void)
     free(warning);
 }
 
-static void test_reconcile_model(void)
+static void test_reconcile_unconfigured_model(void)
 {
-    static const char BODY[] = "{\"data\": [{\"id\": \"served-a\"}, {\"id\": \"served-b\"}]}";
-    char *adopt = (char *)"sentinel";
+    char *replacement = (char *)"sentinel";
+    EXPECT(llamacpp_reconcile_model(MODELS_RESPONSE, NULL, &replacement) == 0);
+    EXPECT_STR_EQ(replacement, "served-a");
+    free(replacement);
 
-    /* Nothing configured → adopt the first served entry. */
-    EXPECT(llamacpp_reconcile_model(BODY, NULL, &adopt) == 0);
-    EXPECT_STR_EQ(adopt, "served-a");
-    free(adopt);
-    EXPECT(llamacpp_reconcile_model(BODY, "", &adopt) == 0);
-    EXPECT_STR_EQ(adopt, "served-a");
-    free(adopt);
-
-    /* A configured model the server actually serves is kept — an explicit
-     * --model / preset / state pick must not be replaced (even when it isn't
-     * the first entry). */
-    EXPECT(llamacpp_reconcile_model(BODY, "served-b", &adopt) == 0);
-    EXPECT(adopt == NULL);
-
-    /* A configured model absent from the live list is replaced (the server
-     * answers with what it serves regardless); probe_model warns. */
-    EXPECT(llamacpp_reconcile_model(BODY, "stale-model", &adopt) == 0);
-    EXPECT_STR_EQ(adopt, "served-a");
-    free(adopt);
-
-    /* Unusable bodies / empty lists resolve nothing. */
-    EXPECT(llamacpp_reconcile_model("{\"data\": []}", "m", &adopt) == -1);
-    EXPECT(adopt == NULL);
-    EXPECT(llamacpp_reconcile_model("not json", "m", &adopt) == -1);
-    EXPECT(adopt == NULL);
+    EXPECT(llamacpp_reconcile_model(MODELS_RESPONSE, "", &replacement) == 0);
+    EXPECT_STR_EQ(replacement, "served-a");
+    free(replacement);
 }
 
-static void test_props_url(void)
+static void test_reconcile_served_model(void)
 {
-    /* No model → bare /props on the same scheme/host/port, /v1 dropped. */
-    char *u = llamacpp_props_url("http://127.0.0.1:18080/v1", NULL);
-    EXPECT_STR_EQ(u, "http://127.0.0.1:18080/props");
-    free(u);
-    u = llamacpp_props_url("http://127.0.0.1:18080/v1", "");
-    EXPECT_STR_EQ(u, "http://127.0.0.1:18080/props");
-    free(u);
+    char *replacement = (char *)"sentinel";
+    EXPECT(llamacpp_reconcile_model(MODELS_RESPONSE, "served-b", &replacement) == 0);
+    EXPECT(replacement == NULL);
+}
 
-    /* A gguf path model id is URL-encoded into the query: slashes → %2F,
-     * spaces → + (query form-encoding), so the probe reaches a valid,
-     * model-scoped URL. Percent-escape hex digits may vary in case by
-     * libcurl version. */
-    u = llamacpp_props_url("http://127.0.0.1:18080/v1", "/models/Qwen 3.gguf");
-    EXPECT(strcmp(u, "http://127.0.0.1:18080/props?model=%2Fmodels%2FQwen+3.gguf") == 0 ||
-           strcmp(u, "http://127.0.0.1:18080/props?model=%2fmodels%2fQwen+3.gguf") == 0);
-    free(u);
+static void test_reconcile_unserved_model(void)
+{
+    char *replacement = (char *)"sentinel";
+    EXPECT(llamacpp_reconcile_model(MODELS_RESPONSE, "stale-model", &replacement) == 0);
+    EXPECT_STR_EQ(replacement, "served-a");
+    free(replacement);
+}
+
+static void test_reconcile_unusable_response(void)
+{
+    char *replacement = (char *)"sentinel";
+    EXPECT(llamacpp_reconcile_model("{\"data\": []}", "model", &replacement) == -1);
+    EXPECT(replacement == NULL);
+
+    replacement = (char *)"sentinel";
+    EXPECT(llamacpp_reconcile_model("not json", "model", &replacement) == -1);
+    EXPECT(replacement == NULL);
+}
+
+static void test_unscoped_props_url(void)
+{
+    char *url = llamacpp_props_url("http://127.0.0.1:18080/v1", NULL);
+    EXPECT_STR_EQ(url, "http://127.0.0.1:18080/props");
+    free(url);
+
+    url = llamacpp_props_url("http://127.0.0.1:18080/v1", "");
+    EXPECT_STR_EQ(url, "http://127.0.0.1:18080/props");
+    free(url);
+}
+
+static void test_model_scoped_props_url(void)
+{
+    char *url = llamacpp_props_url("http://127.0.0.1:18080/v1", "/models/Qwen 3.gguf");
+    /* libcurl versions differ in the case of percent-escape hex digits. */
+    EXPECT(strcmp(url, "http://127.0.0.1:18080/props?model=%2Fmodels%2FQwen+3.gguf") == 0 ||
+           strcmp(url, "http://127.0.0.1:18080/props?model=%2fmodels%2fQwen+3.gguf") == 0);
+    free(url);
 }
 
 int main(void)
 {
     test_model_label();
     test_model_warning();
-    test_reconcile_model();
-    test_props_url();
+    test_reconcile_unconfigured_model();
+    test_reconcile_served_model();
+    test_reconcile_unserved_model();
+    test_reconcile_unusable_response();
+    test_unscoped_props_url();
+    test_model_scoped_props_url();
     T_REPORT();
 }

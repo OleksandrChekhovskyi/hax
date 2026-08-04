@@ -16,115 +16,104 @@
 #include "providers/openai.h"
 #include "transport/http.h"
 
-/* The model reconcile runs synchronously at startup, because HAX_MODEL must
- * be resolved before the first request body is built; the metadata fetch is
- * async, so a slow /props doesn't delay the first prompt. Both stay short so
- * a missing or slow server fails cleanly. */
-#define MODEL_PROBE_TIMEOUT_S 2
-#define META_PROBE_TIMEOUT_S  5
+#define MODEL_LIST_TIMEOUT_S     2
+#define MODEL_METADATA_TIMEOUT_S 5
 
-/* Build a sibling URL with the same scheme/host/port as `base` but a
- * different path. Used to reach llama-server's `/props` (rooted, not under
- * `/v1`). Returns a heap-owned string or NULL on failure. */
-static char *swap_path(const char *base, const char *new_path)
+static char *default_base_url(void)
 {
-    CURLU *u = curl_url();
-    if (!u)
-        return NULL;
-    char *out = NULL;
-    if (curl_url_set(u, CURLUPART_URL, base, 0) == CURLUE_OK &&
-        curl_url_set(u, CURLUPART_PATH, new_path, 0) == CURLUE_OK) {
-        char *built = NULL;
-        if (curl_url_get(u, CURLUPART_URL, &built, 0) == CURLUE_OK) {
-            out = xstrdup(built);
-            curl_free(built);
-        }
-    }
-    curl_url_cleanup(u);
-    return out;
+    return xasprintf("http://127.0.0.1:%d/v1", config_int("llamacpp.port"));
 }
 
-/* Resolve the base URL the openai constructor will actually use: an explicit
- * HAX_OPENAI_BASE_URL if set, else the llamacpp.port default. Trailing slash
- * normalized so the probe and stream() paths match. Caller frees. */
 static char *resolve_base_url(void)
 {
-    char *default_url = xasprintf("http://127.0.0.1:%d/v1", config_int("llamacpp.port"));
-    const char *base_env = config_str("openai.base_url");
-    char *resolved = dup_trim_trailing_slash((base_env && *base_env) ? base_env : default_url);
+    char *default_url = default_base_url();
+    const char *configured_url = config_str_nonempty("openai.base_url");
+    char *base_url = dup_trim_trailing_slash(configured_url ? configured_url : default_url);
     free(default_url);
-    return resolved;
+    return base_url;
 }
 
-/* Build the /props probe URL, scoped to `model` with a `?model=` query when
- * one is given. Router-mode llama-server loads several models on demand, so
- * /props must name which one; the param is ignored (harmless) in the common
- * single-model case. `model` (which may contain '/' or spaces) is URL-
- * encoded. Caller frees. */
+static char *replace_url_path(const char *url, const char *path)
+{
+    CURLU *parsed_url = curl_url();
+    if (!parsed_url)
+        return NULL;
+
+    char *result = NULL;
+    if (curl_url_set(parsed_url, CURLUPART_URL, url, 0) == CURLUE_OK &&
+        curl_url_set(parsed_url, CURLUPART_PATH, path, 0) == CURLUE_OK) {
+        char *curl_url_string = NULL;
+        if (curl_url_get(parsed_url, CURLUPART_URL, &curl_url_string, 0) == CURLUE_OK) {
+            result = xstrdup(curl_url_string);
+            curl_free(curl_url_string);
+        }
+    }
+    curl_url_cleanup(parsed_url);
+    return result;
+}
+
 char *llamacpp_props_url(const char *base_url, const char *model)
 {
-    char *url = swap_path(base_url, "/props");
+    char *url = replace_url_path(base_url, "/props");
     if (!url || !model || !*model)
         return url;
 
-    CURLU *u = curl_url();
-    if (!u)
+    CURLU *parsed_url = curl_url();
+    if (!parsed_url)
         return url;
+
     char *query = xasprintf("model=%s", model);
-    char *out = url;
-    if (curl_url_set(u, CURLUPART_URL, url, 0) == CURLUE_OK &&
-        curl_url_set(u, CURLUPART_QUERY, query, CURLU_APPENDQUERY | CURLU_URLENCODE) == CURLUE_OK) {
-        char *built = NULL;
-        if (curl_url_get(u, CURLUPART_URL, &built, 0) == CURLUE_OK) {
-            out = xstrdup(built);
-            curl_free(built);
+    char *result = url;
+    if (curl_url_set(parsed_url, CURLUPART_URL, url, 0) == CURLUE_OK &&
+        curl_url_set(parsed_url, CURLUPART_QUERY, query, CURLU_APPENDQUERY | CURLU_URLENCODE) ==
+            CURLUE_OK) {
+        char *curl_url_string = NULL;
+        if (curl_url_get(parsed_url, CURLUPART_URL, &curl_url_string, 0) == CURLUE_OK) {
+            result = xstrdup(curl_url_string);
+            curl_free(curl_url_string);
             free(url);
         }
     }
     free(query);
-    curl_url_cleanup(u);
-    return out;
+    curl_url_cleanup(parsed_url);
+    return result;
 }
 
-/* The pure reconcile decision behind reconcile_model, split out for tests
- * (no HTTP): parse a /v1/models body and decide against `cur`. Returns 0 when
- * the list names at least one model — a resolvable state — with *adopt set
- * to a malloc'd replacement (the first served entry) when `cur` is unset or
- * absent from the list, or NULL when the configured model is served and
- * kept. Returns -1 (adopt untouched) for an unusable body or empty list. */
-int llamacpp_reconcile_model(const char *body, const char *cur, char **adopt)
+int llamacpp_reconcile_model(const char *body, const char *configured_model, char **replacement)
 {
-    *adopt = NULL;
+    *replacement = NULL;
     json_t *root = json_loads(body, 0, NULL);
-    json_t *data = root ? json_object_get(root, "data") : NULL;
-    const char *first = NULL;
-    int present = 0;
-    if (json_is_array(data)) {
-        size_t n = json_array_size(data);
-        for (size_t i = 0; i < n; i++) {
-            json_t *id = json_object_get(json_array_get(data, i), "id");
-            if (!json_is_string(id))
+    json_t *models = root ? json_object_get(root, "data") : NULL;
+    const char *first_served_model = NULL;
+    int configured_model_is_served = 0;
+
+    if (json_is_array(models)) {
+        size_t model_count = json_array_size(models);
+        for (size_t i = 0; i < model_count; i++) {
+            const char *served_model =
+                json_string_value(json_object_get(json_array_get(models, i), "id"));
+            if (!served_model)
                 continue;
-            const char *s = json_string_value(id);
-            if (!first)
-                first = s;
-            if (cur && *cur && strcmp(s, cur) == 0)
-                present = 1;
+            if (!first_served_model)
+                first_served_model = served_model;
+            if (configured_model && *configured_model &&
+                strcmp(served_model, configured_model) == 0)
+                configured_model_is_served = 1;
         }
     }
-    int rc = first ? 0 : -1;
-    /* Unset or stale (not in the live list) → adopt what's served; a
-     * still-valid configured model is left untouched. */
-    if (first && (!cur || !*cur || !present))
-        *adopt = xstrdup(first);
+
+    int result = first_served_model ? 0 : -1;
+    if (first_served_model &&
+        (!configured_model || !*configured_model || !configured_model_is_served))
+        *replacement = xstrdup(first_served_model);
     json_decref(root);
-    return rc;
+    return result;
 }
 
-char *llamacpp_model_warning(const char *configured, const char *served)
+char *llamacpp_model_warning(const char *configured_model, const char *served_model)
 {
-    char *configured_label = llamacpp_model_label(NULL, configured);
-    char *served_label = llamacpp_model_label(NULL, served);
+    char *configured_label = llamacpp_model_label(NULL, configured_model);
+    char *served_label = llamacpp_model_label(NULL, served_model);
     char *warning;
     if (strcmp(configured_label, served_label) == 0)
         warning = xasprintf("llama.cpp: configured model is not served — using '%s'", served_label);
@@ -136,164 +125,129 @@ char *llamacpp_model_warning(const char *configured, const char *served)
     return warning;
 }
 
-/* Resolve the model to send, treating llama-server's catalog as live server
- * state rather than a user preference. The served model depends on how the
- * server was started — a single model, or (router mode) several loaded on
- * demand — and a value stored in config/state.json can be stale: the server
- * may have been restarted with a different model since. So reconcile against
- * the live /v1/models: keep the configured model only if the server is
- * actually serving it; otherwise adopt what it serves (the first entry — the
- * sole model in single-model mode, or the first router model). The effective
- * value is set as a run override (config tier), so it wins for this run
- * without rewriting a persisted choice that may become valid again.
- *
- * Returns 0 when a model could be resolved (reconciled, or an explicit one
- * trusted while the server is briefly unreachable). Returns -1 only when the
- * server is unreachable AND nothing is configured — a strong "is it running?"
- * signal the caller surfaces instead of a downstream "HAX_MODEL is required".
- * *discovered reports whether the value came off the server rather than from
- * the user (provider.model_discovered). */
-static int reconcile_model(const char *base_url, const char *api_key, int *discovered)
+/* Server-discovered models are run overrides because llama-server may serve a different model on
+ * the next launch. An explicit model is retained while the server is unreachable so the request can
+ * report the underlying connection error. */
+static int reconcile_configured_model(const char *base_url, const char *api_key,
+                                      int *model_discovered)
 {
-    *discovered = 0;
+    *model_discovered = 0;
     char *url = xasprintf("%s/models", base_url);
-    char *auth = api_key ? xasprintf("Authorization: Bearer %s", api_key) : NULL;
-    const char *headers[] = {auth, NULL};
+    char *authorization = api_key ? xasprintf("Authorization: Bearer %s", api_key) : NULL;
+    const char *headers[] = {authorization, NULL};
     char *body = NULL;
-    int reached = http_get(url, auth ? headers : NULL, MODEL_PROBE_TIMEOUT_S, 0, NULL, NULL, &body,
-                           NULL) == 0;
+    int request_succeeded = http_get(url, authorization ? headers : NULL, MODEL_LIST_TIMEOUT_S, 0,
+                                     NULL, NULL, &body, NULL) == 0;
 
-    const char *cur = config_str("model");
-    int rc = -1;
-    if (reached) {
-        char *adopt = NULL;
-        if (llamacpp_reconcile_model(body, cur, &adopt) == 0) {
-            if (adopt) {
-                /* Replacing an explicit value is announced; unset means
-                 * ordinary auto-discovery and stays silent. */
-                if (cur && *cur) {
-                    char *warning = llamacpp_model_warning(cur, adopt);
+    const char *configured_model = config_str("model");
+    int result = -1;
+    if (request_succeeded) {
+        char *replacement = NULL;
+        if (llamacpp_reconcile_model(body, configured_model, &replacement) == 0) {
+            if (replacement) {
+                if (configured_model && *configured_model) {
+                    char *warning = llamacpp_model_warning(configured_model, replacement);
                     hax_warn("%s", warning);
                     free(warning);
                 }
-                config_set_override("model", adopt);
-                free(adopt);
-                *discovered = 1;
+                config_set_override("model", replacement);
+                free(replacement);
+                *model_discovered = 1;
             }
-            rc = 0;
+            result = 0;
         }
-    } else if (cur && *cur) {
-        /* Unreachable but a model is explicitly configured: trust it and let
-         * the first stream surface the real connection error, rather than
-         * failing construction (which would drop the user out of the REPL). */
-        rc = 0;
+    } else if (configured_model && *configured_model) {
+        result = 0;
     }
 
     free(body);
-    free(auth);
+    free(authorization);
     free(url);
-    return rc;
+    return result;
 }
 
-/* /props describes the model this server instance actually has loaded:
- * `default_generation_settings.n_ctx` is the live context window (the only
- * cross-version-stable way to learn it from llama-server), and
- * `modalities.vision` is authoritative for image input — vision needs an
- * mmproj projector loaded here, which no external catalog can know. Both
- * absent on older servers, which leaves them unknown.
- *
- * `model` is unused: /props reports on whichever model the URL selected. */
-static void llamacpp_parse_meta(const char *body, const char *model, struct model_info *out)
+/* default_generation_settings.n_ctx is llama-server's stable runtime context-window field. Vision
+ * support depends on the loaded mmproj projector and cannot come from a model catalog. Older
+ * servers omit these fields, leaving the capabilities unknown. */
+static void parse_props(const char *body, const char *model, struct model_info *model_info)
 {
     (void)model;
     json_t *root = json_loads(body, 0, NULL);
     if (!root)
         return;
+
     json_t *settings = json_object_get(root, "default_generation_settings");
-    json_t *n_ctx = settings ? json_object_get(settings, "n_ctx") : NULL;
-    if (json_is_integer(n_ctx) && json_integer_value(n_ctx) > 0)
-        out->context = (long)json_integer_value(n_ctx);
+    json_t *context = settings ? json_object_get(settings, "n_ctx") : NULL;
+    if (json_is_integer(context) && json_integer_value(context) > 0)
+        model_info->context = (long)json_integer_value(context);
 
     json_t *modalities = json_object_get(root, "modalities");
     json_t *vision = modalities ? json_object_get(modalities, "vision") : NULL;
     if (json_is_boolean(vision))
-        out->image_input = json_is_true(vision) ? PROVIDER_CAP_YES : PROVIDER_CAP_NO;
+        model_info->image_input = json_is_true(vision) ? PROVIDER_CAP_YES : PROVIDER_CAP_NO;
     json_decref(root);
 }
 
-char *llamacpp_model_label(struct provider *p, const char *model)
+char *llamacpp_model_label(struct provider *provider, const char *model)
 {
-    (void)p;
-    size_t len = strlen(model);
-    if (len <= 5 || strcasecmp(model + len - 5, ".gguf") != 0)
+    static const char GGUF_EXTENSION[] = ".gguf";
+    (void)provider;
+
+    size_t model_length = strlen(model);
+    size_t extension_length = sizeof(GGUF_EXTENSION) - 1;
+    if (model_length <= extension_length ||
+        strcasecmp(model + model_length - extension_length, GGUF_EXTENSION) != 0)
         return xstrdup(model);
 
-    const char *base = strrchr(model, '/');
+    const char *filename = strrchr(model, '/');
     const char *backslash = strrchr(model, '\\');
-    if (!base || (backslash && backslash > base))
-        base = backslash;
-    base = base ? base + 1 : model;
+    if (!filename || (backslash && backslash > filename))
+        filename = backslash;
+    filename = filename ? filename + 1 : model;
 
-    size_t stem_len = (size_t)(model + len - 5 - base);
-    if (stem_len == 0)
+    size_t stem_length = (size_t)(model + model_length - extension_length - filename);
+    if (stem_length == 0)
         return xstrdup(model);
-    char *label = xmalloc(stem_len + 1);
-    memcpy(label, base, stem_len);
-    label[stem_len] = '\0';
+    char *label = xmalloc(stem_length + 1);
+    memcpy(label, filename, stem_length);
+    label[stem_length] = '\0';
     return label;
 }
 
-/* Router mode serves several models, differing in window and vision
- * capability, so /props is keyed by the selected model — hence a fresh
- * fetch at every switch. */
-static int llamacpp_probe_model(struct provider *p, const char *model, struct model_probe *out)
+static int llamacpp_probe_model(struct provider *provider, const char *model,
+                                struct model_probe *probe)
 {
-    (void)p;
-    char *base = resolve_base_url();
-    char *url = llamacpp_props_url(base, model);
-    free(base);
-    if (!url)
+    (void)provider;
+    char *base_url = resolve_base_url();
+    probe->url = llamacpp_props_url(base_url, model);
+    free(base_url);
+    if (!probe->url)
         return -1;
-    out->url = url;
-    const char *key = config_str("openai.api_key");
-    if (key && *key) {
-        out->headers = xcalloc(2, sizeof(*out->headers));
-        out->headers[0] = xasprintf("Authorization: Bearer %s", key);
-        out->headers[1] = NULL;
+
+    const char *api_key = config_str_nonempty("openai.api_key");
+    if (api_key) {
+        probe->headers = xcalloc(2, sizeof(*probe->headers));
+        probe->headers[0] = xasprintf("Authorization: Bearer %s", api_key);
     }
-    out->timeout_s = META_PROBE_TIMEOUT_S;
-    out->parse = llamacpp_parse_meta;
+    probe->timeout_s = MODEL_METADATA_TIMEOUT_S;
+    probe->parse = parse_props;
     return 0;
 }
 
 struct provider *llamacpp_provider_new(const char *name)
 {
     (void)name;
-    /* The "8080" default lives in the config registry, so it's defined in
-     * one place. */
-    char *default_url = xasprintf("http://127.0.0.1:%d/v1", config_int("llamacpp.port"));
-
-    /* Probe whichever URL the openai constructor will actually use, so a
-     * user-supplied HAX_OPENAI_BASE_URL still benefits from auto-discovery.
-     * Normalize the trailing slash up-front so the probe and the eventual
-     * stream() target produce identical paths. */
-    const char *base_env = config_str("openai.base_url");
-    char *resolved = dup_trim_trailing_slash((base_env && *base_env) ? base_env : default_url);
-    /* llama-server can be started with --api-key, in which case HAX_OPENAI_API_KEY
-     * carries the matching token. Forward it to the probes too — otherwise an
-     * authenticated server returns 401 on /v1/models and provider construction
-     * fails even though the eventual chat request would have been authorized. */
-    const char *key = config_str("openai.api_key");
-    if (key && !*key)
-        key = NULL;
-    int discovered = 0;
-    if (reconcile_model(resolved, key, &discovered) != 0) {
+    char *default_url = default_base_url();
+    char *base_url = resolve_base_url();
+    const char *api_key = config_str_nonempty("openai.api_key");
+    int model_discovered = 0;
+    if (reconcile_configured_model(base_url, api_key, &model_discovered) != 0) {
         hax_err("llama.cpp: failed to auto-discover model from %s/models\n"
                 "hax: is llama-server running? "
                 "(set HAX_MODEL to skip probing, or adjust HAX_LLAMACPP_PORT / "
                 "HAX_OPENAI_BASE_URL)",
-                resolved);
-        free(resolved);
+                base_url);
+        free(base_url);
         free(default_url);
         return NULL;
     }
@@ -302,49 +256,34 @@ struct provider *llamacpp_provider_new(const char *name)
         .display_name = "llama.cpp",
         .default_base_url = default_url,
         .send_cache_key_default = 0,
-        /* llama-server attaches `prompt_progress` to each prefill chunk
-         * when this is set — the only provider we target today that
-         * exposes server-side progress. */
         .emit_progress = 1,
-        /* Qwen3 and other interleaved-thinking models served by
-         * llama-server degrade and leak tool calls into the reasoning
-         * channel unless their prior reasoning is fed back. Round-trip it
-         * as reasoning_content (the field llama-server ingests). Disable
-         * with HAX_REASONING_ROUNDTRIP=off. */
+        /* Interleaved-thinking models can leak tool calls into reasoning unless prior reasoning is
+         * returned through llama-server's reasoning_content field. */
         .reasoning_replay_field = "reasoning_content",
-        /* If the server's context (-c / --ctx-size) is full, the reply
-         * truncates to "length"; unlike ollama there's no per-request knob,
-         * so the fix is a larger -c at launch. */
+        /* llama-server has no per-request context-size control. */
         .length_hint = "llama-server's context is full — restart it with a larger "
                        "-c / --ctx-size",
     };
-    struct provider *p = openai_provider_new_preset(&preset);
-    if (p) {
-        p->model_label = llamacpp_model_label;
-        p->probe_model = llamacpp_probe_model;
-        p->model_discovered = discovered;
-        /* The metadata fetch runs in the background: an older llama-server
-         * without /props, or a proxy that doesn't expose it, just means the
-         * percentage display is hidden — not a reason to refuse to start
-         * (or to delay the first prompt). Reads the model the constructor
-         * just reconciled into the override tier. */
-        model_meta_refresh(p, config_str("model"));
+    struct provider *provider = openai_provider_new_preset(&preset);
+    if (provider) {
+        provider->model_label = llamacpp_model_label;
+        provider->probe_model = llamacpp_probe_model;
+        provider->model_discovered = model_discovered;
+        model_meta_refresh(provider, config_str("model"));
     }
-    free(resolved);
+    free(base_url);
     free(default_url);
-    return p;
+    return provider;
 }
 
-/* Availability is "is llama-server up": a bounded GET on the same /models
- * the model probe uses. Resolves the base URL exactly as the constructor
- * does so the probe targets the server the user would actually reach. */
-static void llamacpp_prepare_availability(const char *name, struct provider_availability *out)
+static void llamacpp_prepare_availability(const char *name,
+                                          struct provider_availability *availability)
 {
     (void)name;
-    char *resolved = resolve_base_url();
-    const char *key = config_str("openai.api_key");
-    openai_prepare_base_url_availability(resolved, (key && *key) ? key : NULL, out);
-    free(resolved);
+    char *base_url = resolve_base_url();
+    openai_prepare_base_url_availability(base_url, config_str_nonempty("openai.api_key"),
+                                         availability);
+    free(base_url);
 }
 
 const struct provider_factory PROVIDER_LLAMACPP = {
