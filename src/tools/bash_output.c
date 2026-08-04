@@ -14,6 +14,7 @@
 #include "util.h"
 #include "system/tempfiles.h"
 #include "text/utf8_sanitize.h"
+#include "tools/output_cap.h"
 
 /* Spill must precede the hard drain limit so killed producers are reported as truncated. */
 #define BASH_OUTPUT_MEMORY_CAP_MAX (BASH_OUTPUT_DRAIN_LIMIT - 64L * 1024)

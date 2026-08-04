@@ -17,6 +17,7 @@
 #include "text/base64.h"
 #include "text/utf8_sanitize.h"
 #include "tools/image_sniff.h"
+#include "tools/output_cap.h"
 #include "tools/path_preprocess.h"
 
 /* Raw ceiling for an attached image: 3/4 of the 5 MB base64 cap that is

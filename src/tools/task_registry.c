@@ -23,6 +23,7 @@
 #include "text/width.h"
 #include "tools/bash_output.h"
 #include "tools/bash_process.h"
+#include "tools/output_cap.h"
 
 #define TASK_POLL_INTERVAL_MS   20
 #define TASK_COMMAND_HEAD_CELLS 60

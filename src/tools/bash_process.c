@@ -21,6 +21,7 @@
 #include "tools/bash_env.h"
 #include "tools/bash_output.h"
 #include "tools/bash_shell.h"
+#include "tools/output_cap.h"
 #include "tools/task_registry.h"
 
 struct shell_process {

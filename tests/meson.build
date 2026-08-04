@@ -98,6 +98,7 @@ test_sources = [
     'tools/test_bash_classify.c',
     'tools/test_edit.c',
     'tools/test_image_sniff.c',
+    'tools/test_output_cap.c',
     'tools/test_read.c',
     'tools/test_task.c',
     'tools/test_task_wait.c',

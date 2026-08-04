@@ -10,6 +10,7 @@
 #include "util.h"
 #include "system/fs.h"
 #include "system/path.h"
+#include "tools/output_cap.h"
 #include "tools/path_preprocess.h"
 
 #define EDIT_READ_CAP (4 * 1024 * 1024)

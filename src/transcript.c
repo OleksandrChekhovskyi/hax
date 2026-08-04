@@ -13,6 +13,7 @@
 #include "render/diff_color.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
+#include "tools/output_cap.h"
 
 #define TRANSCRIPT_WIDTH_COLUMNS 60
 
