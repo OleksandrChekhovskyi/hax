@@ -570,15 +570,6 @@ static void test_dangerous_codepoint_substituted(void)
     EXPECT(strchr(out, '?') != NULL);
 }
 
-static void test_spinner_glyph_now_returns_braille_frame(void)
-{
-    const char *g = spinner_glyph_now();
-    EXPECT(g != NULL);
-    EXPECT(g[0] == (char)0xE2);
-    EXPECT(g[1] == (char)0xA0);
-    EXPECT(g[3] == 0);
-}
-
 int main(void)
 {
     capture_init();
@@ -621,6 +612,5 @@ int main(void)
     test_head_tail_substituted_tail_no_bogus_marker();
     test_head_tail_dangerous_codepoint_no_bogus_tail_row();
     test_dangerous_codepoint_substituted();
-    test_spinner_glyph_now_returns_braille_frame();
     T_REPORT();
 }

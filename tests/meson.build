@@ -64,6 +64,7 @@ test_sources = [
     'render/test_markdown_scan.c',
     'render/test_markdown_table.c',
     'render/test_markdown_wrap.c',
+    'render/test_spinner.c',
     'render/test_tool_render.c',
 
     'system/test_bg_job.c',
