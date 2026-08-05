@@ -217,7 +217,7 @@ static const struct config_setting REGISTRY[] = {
      .keep_empty = 1,
      .description = "X-Title header for OpenRouter attribution (empty disables)"},
     {.key = "openrouter.referer", .env_var = "HAX_OPENROUTER_REFERER",
-     .default_value = "https://github.com/OleksandrChekhovskyi/hax", .keep_empty = 1,
+     .default_value = "https://usehax.dev", .keep_empty = 1,
      .description = "HTTP-Referer header for OpenRouter attribution (empty disables)"},
     {.key = "mock.script", .env_var = "HAX_MOCK_SCRIPT",
      .description = "Path to a mock-provider script (mock provider only)"},
