@@ -207,21 +207,16 @@ static void test_bash_timeout_escalates_to_sigkill(void)
 
 static void test_bash_timeout_grace_allows_cleanup(void)
 {
-    /* Retry with wider startup windows until the child installs its trap; an armed trap must flush
-     * cleanup output during the grace period. */
-    static const char *const timeouts[] = {"100ms", "400ms", "1600ms"};
+    /* An armed trap must flush cleanup output during the grace period. "armed" prints only
+     * after the trap is installed, so holding the timeout on it orders SIGTERM after both. */
+    setenv("HAX_BASH_TIMEOUT", "50ms", 1);
     setenv("HAX_BASH_TIMEOUT_GRACE", "500ms", 1);
-    char *out = NULL;
-    for (size_t i = 0; i < sizeof(timeouts) / sizeof(*timeouts); i++) {
-        setenv("HAX_BASH_TIMEOUT", timeouts[i], 1);
-        free(out);
-        out = call_bash("trap 'sleep 0.05; echo cleaned; exit' TERM; echo armed; sleep 30");
-        if (strstr(out, "cleaned") != NULL || strstr(out, "armed") != NULL)
-            break;
-    }
+    setenv("HAX_BASH_TRANSITION_MIN_BYTES", "6", 1); /* "armed\n" */
+    char *out = call_bash("trap 'sleep 0.05; echo cleaned; exit' TERM; echo armed; sleep 30");
     EXPECT(strstr(out, "cleaned") != NULL);
     EXPECT(strstr(out, "[timed out") != NULL);
     free(out);
+    unsetenv("HAX_BASH_TRANSITION_MIN_BYTES");
     unsetenv("HAX_BASH_TIMEOUT");
     unsetenv("HAX_BASH_TIMEOUT_GRACE");
 }
@@ -257,15 +252,12 @@ static void test_bash_timeout_no_grace_short_timeout(void)
 
 static void test_bash_timeout_grace_no_escape_via_pipe_close(void)
 {
-#ifdef T_TSAN
-    /* TSan's fork interceptors add hundreds of ms of spawn latency —
-     * no fixed pre-SIGTERM window is reliably wide enough. */
-    T_SKIP("spawn latency under TSan breaks the timing window");
-#endif
     /* The descendant closes the output pipe during its TERM handler; its recorded process group
-     * must still be gone when the grace period expires. */
+     * must still be gone when the grace period expires. "armed" prints only after the pgid write
+     * and the trap, so holding the timeout on it orders SIGTERM after both. */
     setenv("HAX_BASH_TIMEOUT", "80ms", 1);
     setenv("HAX_BASH_TIMEOUT_GRACE", "20ms", 1);
+    setenv("HAX_BASH_TRANSITION_MIN_BYTES", "6", 1); /* "armed\n" */
 
     char path[] = "/tmp/hax-test-pgid-XXXXXX";
     int fd = mkstemp(path);
@@ -274,7 +266,7 @@ static void test_bash_timeout_grace_no_escape_via_pipe_close(void)
 
     char *cmd = xasprintf("(echo $$ > %s; "
                           "trap 'exec >/dev/null 2>&1; while :; do :; done' TERM; "
-                          "sleep 30) & wait",
+                          "echo armed; sleep 30) & wait",
                           path);
     char *args = xasprintf("{\"command\":\"%s\"}", cmd);
     char *out = TOOL_BASH.run(args, NULL);
@@ -307,6 +299,7 @@ static void test_bash_timeout_grace_no_escape_via_pipe_close(void)
         kill(-pgid, SIGKILL);
     EXPECT(!alive);
 
+    unsetenv("HAX_BASH_TRANSITION_MIN_BYTES");
     unsetenv("HAX_BASH_TIMEOUT");
     unsetenv("HAX_BASH_TIMEOUT_GRACE");
 }

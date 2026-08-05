@@ -206,6 +206,7 @@ static void test_killed_output_stays_collectable(void)
 static void test_binary_markers_reach_display(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
+    setenv("HAX_BASH_TRANSITION_MIN_BYTES", "3", 1); /* 'A\0B' */
     char *gate = gate_create();
     /* Binary output is never streamed, so the suppression marker itself must be shown. */
     char *args = xasprintf("{\"command\":\"printf 'A\\\\000B'; read -r _ <%s; printf 'C\\\\000D'\","
@@ -249,14 +250,17 @@ static void test_binary_markers_reach_display(void)
            strstr(wait_capture.buf.data, "finished (exit 0)") != NULL);
     buf_free(&wait_capture.buf);
     free(id);
+    unsetenv("HAX_BASH_TRANSITION_MIN_BYTES");
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }
 
 static void test_binary_marker_shown_after_streamed_text_at_launch(void)
 {
-    /* The wide yield leaves room for the pause that keeps the text and the NUL in separate
-     * chunks, so the text streams (and would have swallowed the marker) before binary hits. */
-    setenv("HAX_BASH_BACKGROUND_YIELD", TEST_GRACE, 1);
+    /* The pause keeps the text and the NUL in separate chunks, so the text streams (and would
+     * have swallowed the marker) before binary hits; the held transition keeps both inside
+     * the launch window. */
+    setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
+    setenv("HAX_BASH_TRANSITION_MIN_BYTES", "11", 1); /* "visible\n" + 'A\0B' */
     char *gate = gate_create();
     char *cmd = xasprintf("{\"command\":\"echo visible; sleep " TEST_PAUSE
                           "; printf 'A\\\\000B'; read -r _ <%s\",\"background\":true}",
@@ -279,6 +283,7 @@ static void test_binary_marker_shown_after_streamed_text_at_launch(void)
     free(gate);
     free(wait_for_id(id, 5));
     free(id);
+    unsetenv("HAX_BASH_TRANSITION_MIN_BYTES");
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }
 
@@ -337,13 +342,7 @@ static void test_runaway_output_killed_without_polling(void)
     EXPECT(id != NULL);
     free(out);
 
-    int pid = -1;
-    FILE *f = fopen(path, "r");
-    if (f) {
-        if (fscanf(f, "%d", &pid) != 1)
-            pid = -1;
-        fclose(f);
-    }
+    int pid = await_pid_file(path);
     unlink(path);
     EXPECT(pid > 0);
 

@@ -17,10 +17,9 @@
 #include "tools/bash_process.h"
 #include "tools/task_registry.h"
 
-/* Producers must outlive the yield window (to detach) and initial output must land inside it
- * (to be captured). The margins must absorb spawn latency on the slowest environments that
- * run the suite — sanitizer interceptors, CI virtual machines — and cost little wall time,
- * so the same wide values run everywhere. */
+/* Producers must outlive the yield window to detach. Tests that also need initial output
+ * captured before the transition hold it open with HAX_BASH_TRANSITION_MIN_BYTES instead of
+ * betting a widened window against spawn latency. */
 #define TEST_YIELD "50ms"
 #define TEST_PAUSE "0.3"
 #define TEST_GRACE "1s"
@@ -85,6 +84,27 @@ static int process_is_gone(int pid)
     }
     kill(pid, SIGKILL);
     return 0;
+}
+
+/* Wait for a command to write its pid into `path` (bounded), so the test cannot act on the
+ * process tree before it reached that point. Returns the pid, or -1. */
+static int await_pid_file(const char *path)
+{
+    time_t start = time(NULL);
+    while (time(NULL) - start < 10) {
+        int pid = -1;
+        FILE *f = fopen(path, "r");
+        if (f) {
+            if (fscanf(f, "%d", &pid) != 1)
+                pid = -1;
+            fclose(f);
+        }
+        if (pid > 0)
+            return pid;
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = 5 * 1000000L};
+        nanosleep(&ts, NULL);
+    }
+    return -1;
 }
 
 /* A fifo the task blocks on with `read -r _ <gate`: it holds the task alive across the yield

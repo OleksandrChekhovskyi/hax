@@ -52,6 +52,7 @@ static void test_background_fast_failure_returns_sync(void)
 static void test_background_detaches_and_wait_collects(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
+    setenv("HAX_BASH_TRANSITION_MIN_BYTES", "6", 1); /* "start\n" */
     char *gate = gate_create();
     /* The empty name means unnamed: the detached task still gets an automatic id. */
     char *args = xasprintf("{\"command\":\"echo start; read -r _ <%s; echo done\","
@@ -83,12 +84,14 @@ static void test_background_detaches_and_wait_collects(void)
     EXPECT(strstr(out, "no such task") != NULL);
     free(out);
     free(id);
+    unsetenv("HAX_BASH_TRANSITION_MIN_BYTES");
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }
 
 static void test_timeout_detaches_instead_of_killing(void)
 {
     setenv("HAX_BASH_TIMEOUT", TEST_YIELD, 1);
+    setenv("HAX_BASH_TRANSITION_MIN_BYTES", "6", 1); /* "early\n" */
     char *gate = gate_create();
     char *args = xasprintf("{\"command\":\"echo early; read -r _ <%s; echo late\"}", gate);
     char *out = TOOL_BASH.run(args, NULL);
@@ -108,6 +111,7 @@ static void test_timeout_detaches_instead_of_killing(void)
     free(out);
     free(id);
     free(gate);
+    unsetenv("HAX_BASH_TRANSITION_MIN_BYTES");
     unsetenv("HAX_BASH_TIMEOUT");
 }
 
@@ -128,6 +132,11 @@ static void test_kill_stops_process_tree(void)
     EXPECT(id != NULL);
     free(out);
 
+    /* The kill must not beat the shell to its pid write. */
+    int pid = await_pid_file(path);
+    unlink(path);
+    EXPECT(pid > 0);
+
     out = kill_id(id);
     /* One status line; a task that never wrote anything reads "no output". */
     EXPECT(strstr(out, "killed (signal ") != NULL);
@@ -135,15 +144,6 @@ static void test_kill_stops_process_tree(void)
     free(out);
     free(id);
 
-    int pid = -1;
-    FILE *f = fopen(path, "r");
-    if (f) {
-        if (fscanf(f, "%d", &pid) != 1)
-            pid = -1;
-        fclose(f);
-    }
-    unlink(path);
-    EXPECT(pid > 0);
     /* ESRCH on Linux or EPERM on Darwin means the process is gone. */
     int alive = kill(pid, 0) == 0;
     if (alive)
@@ -155,6 +155,7 @@ static void test_kill_stops_process_tree(void)
 static void test_background_orphans_killed_at_yield(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
+    setenv("HAX_BASH_TRANSITION_MIN_BYTES", "2", 1); /* the pid line */
     /* The shell exits at once while the orphan inherits the pipe and holds it open, so the
      * yield deadline fires with nothing adoptable. */
     char *out = call_bash_background("sleep 30 & echo $!");
@@ -165,6 +166,7 @@ static void test_background_orphans_killed_at_yield(void)
     EXPECT(pid > 0);
     EXPECT(process_is_gone(pid));
     free(out);
+    unsetenv("HAX_BASH_TRANSITION_MIN_BYTES");
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }
 
@@ -300,6 +302,7 @@ static void test_exit_note_covers_uncollected_tasks(void)
 static void test_kill_escalates_past_term_exiting_shell(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
+    setenv("HAX_BASH_TRANSITION_MIN_BYTES", "2", 1); /* the pid line */
     /* SIGTERM ends the shell at once while the child ignores it (SIG_IGN survives the exec);
      * only the SIGKILL escalation after the grace can end the child, and it must fire
      * although the shell is gone. */
@@ -315,6 +318,7 @@ static void test_kill_escalates_past_term_exiting_shell(void)
     free(out);
     EXPECT(process_is_gone(child_pid));
     free(id);
+    unsetenv("HAX_BASH_TRANSITION_MIN_BYTES");
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }
 
@@ -329,14 +333,19 @@ static void test_kill_grace_covers_redirected_cleanup(void)
 
     /* The shell dies on SIGTERM at once (pipe EOF included: the child's output is
      * redirected), yet the child's TERM cleanup must still get the grace window. */
+    char *ready = xasprintf("%s/ready", t_tempdir());
     char *cmd = xasprintf("sh -c 'trap \\\"sleep " TEST_PAUSE "; echo bye > %s\\\" TERM; "
-                          "sleep 30' >/dev/null 2>&1 & wait",
-                          path);
+                          "echo $$ > %s; sleep 30' >/dev/null 2>&1 & wait",
+                          path, ready);
     char *out = call_bash_background(cmd);
     free(cmd);
     char *id = extract_task_id(out);
     EXPECT(id != NULL);
     free(out);
+
+    /* The kill must not beat the child to installing its trap. */
+    EXPECT(await_pid_file(ready) > 0);
+    free(ready);
 
     out = kill_id(id ? id : "?");
     EXPECT(strstr(out, "killed (signal ") != NULL);
@@ -408,18 +417,14 @@ static void test_shutdown_kills_running_tasks(void)
     free(cmd);
     free(out);
 
+    /* The shutdown must not beat the shell to its pid write. */
+    int pid = await_pid_file(path);
+    unlink(path);
+    EXPECT(pid > 0);
+
     task_registry_shutdown();
     EXPECT(task_running_count() == 0);
 
-    int pid = -1;
-    FILE *f = fopen(path, "r");
-    if (f) {
-        if (fscanf(f, "%d", &pid) != 1)
-            pid = -1;
-        fclose(f);
-    }
-    unlink(path);
-    EXPECT(pid > 0);
     int alive = kill(pid, 0) == 0;
     if (alive)
         kill(pid, SIGKILL);
@@ -432,6 +437,7 @@ static void test_shutdown_kills_running_tasks(void)
 static void test_fatal_hook_kills_task_groups(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
+    setenv("HAX_BASH_TRANSITION_MIN_BYTES", "2", 1); /* the pid line */
     /* Probe a group member rather than the shell: the killed shell stays an unreaped zombie
      * (still answering kill(pid, 0)) until the registry polls it. */
     char *out = call_bash_background("sleep 30 & echo $!; wait");
@@ -446,6 +452,7 @@ static void test_fatal_hook_kills_task_groups(void)
     EXPECT(process_is_gone(pid));
     free(wait_for_id(id, 5));
     free(id);
+    unsetenv("HAX_BASH_TRANSITION_MIN_BYTES");
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }
 

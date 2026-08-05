@@ -128,6 +128,18 @@ int bash_process_exit_seen(pid_t pid, int *exit_seen)
 /* Short: a background yield's fast-exit check delays the launch report. */
 #define YIELD_EXIT_OBSERVE_MS 200
 
+/* Test seam: suites shrink the yield/timeout below process-spawn latency, which turns
+ * "initial output was captured before the transition" into a race. Holding the transition
+ * until the expected bytes arrive keeps such tests event-driven; the cap bounds a command
+ * that never produces them. Env-only on purpose — not a user tunable. */
+#define TRANSITION_HOLD_CAP_MS 10000
+
+static size_t transition_min_bytes(void)
+{
+    const char *value = getenv("HAX_BASH_TRANSITION_MIN_BYTES");
+    return value ? (size_t)strtoul(value, NULL, 10) : 0;
+}
+
 /* Wait up to `timeout_ms` for the shell's exit to become observable, probing with WNOWAIT so
  * the zombie keeps the process group signalable. Returns -1 when the wait itself fails. */
 static int observe_shell_exit(pid_t pid, int *exit_seen, long timeout_ms)
@@ -257,6 +269,8 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
                     : timeout_ms > 0 ? deadline_after(started_ms, timeout_ms)
                                      : 0;
     long grace_ms = config_duration_ms("bash.timeout_grace");
+    size_t hold_min_bytes = transition_min_bytes();
+    long hold_cap = hold_min_bytes ? deadline_after(started_ms, TRANSITION_HOLD_CAP_MS) : 0;
     long grace_deadline = 0;
     enum bash_stop_reason stop_reason = BASH_STOP_NONE;
     int shell_exited = 0;
@@ -268,6 +282,11 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
 
     for (;;) {
         long now_ms = monotonic_ms();
+
+        /* A held transition stretches toward the cap until the expected bytes arrive. */
+        long transition_deadline = deadline;
+        if (deadline > 0 && bash_output_size(output) < hold_min_bytes && hold_cap > deadline)
+            transition_deadline = hold_cap;
 
         /* Probe before the deadline check so adoption never takes a shell that has already
          * exited. WNOWAIT keeps the pid reserved until all process-tree signaling is done. */
@@ -294,7 +313,8 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
             if (grace_deadline == 0)
                 break;
         }
-        if (stop_reason == BASH_STOP_NONE && deadline > 0 && now_ms >= deadline) {
+        if (stop_reason == BASH_STOP_NONE && transition_deadline > 0 &&
+            now_ms >= transition_deadline) {
             /* Adoption needs a live shell: the registry watches and kills the task through
              * it. Once it has exited, only orphans hold the pipe, and they must not outlive
              * the call untracked. */
@@ -324,7 +344,7 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
             break;
         }
 
-        long active_deadline = stop_reason == BASH_STOP_NONE ? deadline : grace_deadline;
+        long active_deadline = stop_reason == BASH_STOP_NONE ? transition_deadline : grace_deadline;
         struct pollfd poll_fd = {.fd = process.output_fd, .events = POLLIN};
         int poll_result = poll(&poll_fd, 1, poll_timeout_ms(active_deadline));
         if (poll_result < 0) {
