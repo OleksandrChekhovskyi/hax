@@ -106,6 +106,8 @@ order, and the setting reference.
 
 ## More docs
 
+- [docs/philosophy.md](./docs/philosophy.md) — design approach, and why some conventional
+  agent features are deliberately absent.
 - [docs/debugging.md](./docs/debugging.md) — trace/transcript logs, mock provider, and demo scripts.
 
 ## License
