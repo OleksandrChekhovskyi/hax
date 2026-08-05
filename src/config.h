@@ -60,6 +60,13 @@ long config_duration_ms(const char *key);
 /* Parse a boolean setting, using `default_value` when it is unset or invalid. */
 int config_bool_or(const char *key, int default_value);
 
+/* Expand a non-NULL system_prompt/system_prompt_append value into malloc'd prompt text. A
+ * leading '@' names a text file: `~` expands to $HOME and relative paths resolve against the
+ * hax config directory. File contents are UTF-8 sanitized and trailing newlines are trimmed.
+ * Other values are copied verbatim. Returns NULL when the file is unreadable or oversized,
+ * storing an allocated message in `*error` when non-NULL. */
+char *config_prompt_expand(const char *value, char **error);
+
 enum config_tier {
     CONFIG_TIER_RUN = 0,
     CONFIG_TIER_CONVERSATION,
@@ -125,6 +132,7 @@ struct config_preset {
     const char *model;
     const char *effort;
     const char *system_prompt;
+    const char *system_prompt_append;
 };
 
 /* Save a validated preset to config.json, replacing the same name and preserving other loaded

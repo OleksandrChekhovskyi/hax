@@ -616,6 +616,7 @@ static void test_registry_introspection(void)
     }
 
     EXPECT(config_setting_find("system_prompt")->keep_empty);
+    EXPECT(config_setting_find("system_prompt_append")->keep_empty);
     EXPECT(config_setting_find("effort")->keep_empty);
     EXPECT(!config_setting_find("theme")->keep_empty);
     EXPECT(!config_setting_find("sort_models")->keep_empty);
@@ -1277,6 +1278,93 @@ static void test_preset_apply_errors(void)
     EXPECT(config_str("model") == NULL);
 }
 
+static void test_preset_prompt_append(void)
+{
+    clear_env();
+    EXPECT(config_load("{\"system_prompt_append\": \"global extra\", \"presets\": {"
+                       "\"terse\": {\"provider\": \"mock\", \"system_prompt_append\": "
+                       "\"be terse\"},"
+                       "\"plain\": {\"provider\": \"mock\"},"
+                       "\"mute\": {\"provider\": \"mock\", \"system_prompt_append\": \"\"}}}") ==
+           0);
+
+    char *err = NULL;
+    EXPECT(config_preset_apply("terse", CONFIG_TIER_RUN, &err) == 0);
+    EXPECT_STR_EQ(config_str("system_prompt_append"), "be terse");
+
+    /* A preset without the member exposes normal resolution again. */
+    EXPECT(config_preset_apply("plain", CONFIG_TIER_RUN, &err) == 0);
+    EXPECT_STR_EQ(config_str("system_prompt_append"), "global extra");
+
+    /* An explicit empty member silences the config-file amendment. */
+    EXPECT(config_preset_apply("mute", CONFIG_TIER_RUN, &err) == 0);
+    const char *append = config_str("system_prompt_append");
+    EXPECT(append != NULL && *append == '\0');
+
+    /* Leaving the stance restores normal resolution. */
+    config_preset_exit(CONFIG_TIER_RUN);
+    EXPECT_STR_EQ(config_str("system_prompt_append"), "global extra");
+
+    config_set_override("preset", NULL);
+    config_set_override("provider", NULL);
+    config_set_override("model", NULL);
+    config_set_override("effort", NULL);
+    EXPECT(config_load(NULL) == 0);
+}
+
+static void test_preset_prompt_file_validation(void)
+{
+    clear_env();
+    EXPECT(config_load("{\"presets\": {"
+                       "\"broken\": {\"provider\": \"mock\","
+                       "\"system_prompt\": \"@/nonexistent/prompt.md\"},"
+                       "\"broken2\": {\"provider\": \"mock\","
+                       "\"system_prompt_append\": \"@/nonexistent/other.md\"}}}") == 0);
+
+    /* All-or-nothing: an unreadable @file fails apply before anything lands. */
+    char *err = NULL;
+    EXPECT(config_preset_apply("broken", CONFIG_TIER_RUN, &err) == -1);
+    EXPECT(err != NULL && strstr(err, "prompt file") != NULL);
+    free(err);
+    EXPECT(config_str("provider") == NULL);
+
+    /* Enumeration skips both, but warns only about the defect no failed apply already put in
+     * front of the user. Order-sensitive: this must be the first enumeration since
+     * config_free — later ones never warn at all. */
+    unsigned long diag_before = hax_diag_sequence();
+    char **names = NULL;
+    EXPECT(config_preset_names(&names) == 0);
+    free(names);
+    EXPECT(hax_diag_sequence() == diag_before + 1);
+
+    EXPECT(config_load(NULL) == 0);
+}
+
+static void test_prompt_expand(void)
+{
+    char *err = NULL;
+    char *text = config_prompt_expand("plain text", &err);
+    EXPECT_STR_EQ(text, "plain text");
+    EXPECT(err == NULL);
+    free(text);
+
+    char *dir = t_tempdir();
+    char path[4096];
+    snprintf(path, sizeof path, "%s/prompt.md", dir);
+    write_file(path, "from a file\n\n");
+    char value[4096];
+    snprintf(value, sizeof value, "@%s", path);
+    text = config_prompt_expand(value, &err);
+    EXPECT_STR_EQ(text, "from a file");
+    EXPECT(err == NULL);
+    free(text);
+
+    text = config_prompt_expand("@/nonexistent/prompt.md", &err);
+    EXPECT(text == NULL);
+    EXPECT(err != NULL && strstr(err, "/nonexistent/prompt.md") != NULL);
+    free(err);
+}
+
 static void test_preset_enumeration(void)
 {
     clear_env();
@@ -1395,7 +1483,8 @@ static void test_preset_save(void)
                                 .model = "m",
                                 .effort = "high",
                                 .tint = "rose",
-                                .description = "saved from the session"};
+                                .description = "saved from the session",
+                                .system_prompt_append = "be terse"};
     char *err = NULL;
     EXPECT(config_preset_save("scout", &def, &err) == 0);
     EXPECT(err == NULL);
@@ -1412,6 +1501,7 @@ static void test_preset_save(void)
     EXPECT_STR_EQ(config_preset_description("scout"), "saved from the session");
     EXPECT(config_preset_apply("scout", CONFIG_TIER_RUN, &err) == 0);
     EXPECT(err == NULL);
+    EXPECT_STR_EQ(config_str("system_prompt_append"), "be terse");
     config_preset_exit(CONFIG_TIER_RUN);
     config_set_override("preset", NULL);
     config_set_override("provider", NULL);
@@ -1994,6 +2084,9 @@ int main(void)
     test_conversation_tier();
     test_restore_conversation();
     test_preset_apply_errors();
+    test_preset_prompt_append();
+    test_preset_prompt_file_validation();
+    test_prompt_expand();
     test_preset_enumeration();
     test_preset_dotted_name();
     test_preset_name_valid();

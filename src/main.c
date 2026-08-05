@@ -123,7 +123,7 @@ static int apply_run_selection(const struct cli_options *options)
                 free(error);
                 return -1;
             }
-            hax_warn("%s", message);
+            hax_warn("%s — starting without it", message);
             free(error);
             config_set_override("preset", "");
         }

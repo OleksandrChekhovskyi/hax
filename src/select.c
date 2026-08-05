@@ -963,17 +963,17 @@ static int confirm_overwrite(const char *name)
     return selected_index == 1;
 }
 
-/* Save only a system prompt that normal resolution would not reproduce; copying config/default
+/* Save only a prompt value that normal resolution would not reproduce; copying config/default
  * values would become stale. */
-static const char *capture_system_prompt(void)
+static const char *capture_prompt_setting(const char *key)
 {
-    const char *system_prompt = config_str("system_prompt");
-    if (!system_prompt)
+    const char *value = config_str(key);
+    if (!value)
         return NULL;
-    const char *source = config_source("system_prompt");
+    const char *source = config_source(key);
     if (strcmp(source, "config") == 0 || strcmp(source, "default") == 0)
         return NULL;
-    return system_prompt;
+    return value;
 }
 
 static const char *preset_save_initial_tint(const char *name, int preset_exists)
@@ -1063,7 +1063,8 @@ void select_preset_save(struct agent_state *state, const char *argument)
         /* Omit discovered server state so applying the preset re-discovers the model. */
         .model = provider->model_discovered ? NULL : state->session->model,
         .effort = state->session->effort,
-        .system_prompt = capture_system_prompt(),
+        .system_prompt = capture_prompt_setting("system_prompt"),
+        .system_prompt_append = capture_prompt_setting("system_prompt_append"),
         .tint = tint,
         /* Preserve the existing description on re-save. */
         .description = preset_exists ? config_preset_description(name) : NULL,

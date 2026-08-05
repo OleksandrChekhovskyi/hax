@@ -14,6 +14,8 @@
 
 #include "util.h"
 #include "system/fs.h"
+#include "system/path.h"
+#include "text/utf8_sanitize.h"
 
 /* Canonical keys, env bindings, defaults, and /config metadata. Row order is
  * user-visible. Runtime settings must be read live or refreshed after edits;
@@ -31,7 +33,10 @@ static const struct config_setting REGISTRY[] = {
     {.key = "effort", .env_var = "HAX_EFFORT", .keep_empty = 1,
      .description = "Reasoning effort (provider-specific); empty omits it"},
     {.key = "system_prompt", .env_var = "HAX_SYSTEM_PROMPT", .keep_empty = 1,
-     .description = "Override the built-in system prompt; empty sends no system message"},
+     .description = "Replace the built-in base prompt (context sections still follow); @path "
+                    "reads a file; (none) sends no system message at all"},
+    {.key = "system_prompt_append", .env_var = "HAX_SYSTEM_PROMPT_APPEND", .keep_empty = 1,
+     .description = "Text appended after the base system prompt; @path reads a file"},
     {.key = "no_env", .env_var = "HAX_NO_ENV", .choices = CONFIG_CHOICES_BOOL,
      .description = "Skip the Environment section in the system prompt"},
     {.key = "no_agents_md", .env_var = "HAX_NO_AGENTS_MD", .choices = CONFIG_CHOICES_BOOL,
@@ -251,6 +256,11 @@ struct config_store {
     json_t *run;
     /* Prevent writes from replacing config.json content that was never loaded. */
     int file_unusable;
+    /* Preset names whose defect a failed apply already surfaced, so enumeration does not
+     * repeat the same message; the once-per-configuration latch for its other warnings. */
+    char **reported_presets;
+    size_t n_reported_presets;
+    int preset_warnings_emitted;
 };
 
 static struct config_store store;
@@ -348,6 +358,9 @@ void config_init(void)
     load_tier_file(&store.state, xdg_hax_state_path("state.json"), "state");
 }
 
+/* Defined below with the other preset internals. */
+static void free_reported_presets(void);
+
 void config_free(void)
 {
     store.file_unusable = 0;
@@ -358,6 +371,8 @@ void config_free(void)
     config_clear_conversation();
     json_decref(store.run);
     store.run = NULL;
+    free_reported_presets();
+    store.preset_warnings_emitted = 0;
 }
 
 /* Flat dotted keys take precedence over their nested spelling. */
@@ -620,6 +635,59 @@ int config_bool_or(const char *key, int default_value)
     return value < 0 ? !!default_value : value;
 }
 
+/* A prompt file larger than this is almost certainly a mistake; refusing it beats silently
+ * cutting instructions mid-sentence. */
+#define PROMPT_FILE_CAP (64u * 1024u)
+
+char *config_prompt_expand(const char *value, char **error)
+{
+    if (error)
+        *error = NULL;
+    if (value[0] != '@')
+        return xstrdup(value);
+
+    const char *spec = value + 1;
+    char *path;
+    if (spec[0] == '~')
+        path = expand_home(spec);
+    else if (spec[0] == '/')
+        path = xstrdup(spec);
+    else
+        path = xdg_hax_config_path(spec);
+    if (!path) {
+        if (error)
+            *error = xasprintf("couldn't resolve prompt file '%s'", spec);
+        return NULL;
+    }
+
+    size_t len = 0;
+    int truncated = 0;
+    char *content = slurp_file_capped(path, PROMPT_FILE_CAP, &len, &truncated);
+    if (!content) {
+        if (error)
+            *error = xasprintf("couldn't read prompt file %s", path);
+        free(path);
+        return NULL;
+    }
+    if (truncated) {
+        if (error)
+            *error = xasprintf("prompt file %s exceeds %u bytes", path, PROMPT_FILE_CAP);
+        free(content);
+        free(path);
+        return NULL;
+    }
+    free(path);
+
+    /* User-authored bytes headed for provider JSON: strip NULs and invalid UTF-8 before the
+     * value can be spliced into a request. */
+    char *clean = sanitize_utf8(content, len);
+    free(content);
+    size_t n = strlen(clean);
+    while (n > 0 && (clean[n - 1] == '\n' || clean[n - 1] == '\r'))
+        clean[--n] = '\0';
+    return clean;
+}
+
 static int kind_value_valid(const struct config_setting *setting, const char *value)
 {
     switch (setting->kind) {
@@ -806,8 +874,8 @@ void config_preset_exit(enum config_tier tier)
 {
     /* The name is shadowed with the empty sentinel rather than deleted, so a
      * lower-tier name can't resurface as a stance that isn't applied; the
-     * system prompt is dropped outright, since "" would mean "send no system
-     * message" instead of "resolve one normally".
+     * prompt keys are dropped outright, since "" would mean "replace with
+     * nothing" instead of "resolve one normally".
      *
      * The stance's tint needs no undoing: it was never written here, and
      * clearing the "tint" key would take an explicit /config tint down with
@@ -816,15 +884,18 @@ void config_preset_exit(enum config_tier tier)
     if (tier == CONFIG_TIER_RUN) {
         config_set_override("preset", "");
         config_set_override("system_prompt", NULL);
+        config_set_override("system_prompt_append", NULL);
         /* A stance restored from the resumed conversation sits *below* those
          * overrides, where deleting the run value would expose it again. The
          * run has made its own selection, so that stance is over. */
         config_set_conversation("preset", NULL);
         config_set_conversation("system_prompt", NULL);
+        config_set_conversation("system_prompt_append", NULL);
         return;
     }
     config_set_conversation("preset", "");
     config_set_conversation("system_prompt", NULL);
+    config_set_conversation("system_prompt_append", NULL);
 }
 
 int config_restore_selection(enum config_tier tier, const char *provider, const char *model,
@@ -1065,7 +1136,7 @@ static const json_t *preset_node(const char *name)
 /* Construction- and startup-bound settings cannot be honored by a mid-session preset. Tint is
  * read from the active preset instead of copied into a tier because /config can override it. */
 static const char *const PRESET_SETTING_KEYS[] = {
-    "provider", "model", "effort", "system_prompt", "tint",
+    "provider", "model", "effort", "system_prompt", "system_prompt_append", "tint",
 };
 
 static int preset_key_allowed(const char *key)
@@ -1090,8 +1161,8 @@ static int preset_validate(const json_t *preset, const char *name, char **error)
         if (!preset_key_allowed(member_name)) {
             if (error)
                 *error = xasprintf(
-                    "preset '%s': '%s' is not presettable (allowed: provider, model, "
-                    "effort, system_prompt, tint); endpoint settings belong in a "
+                    "preset '%s': '%s' is not presettable (allowed: provider, model, effort, "
+                    "system_prompt, system_prompt_append, tint); endpoint settings belong in a "
                     "providers.<name> block, context/recording in the --bare/--no-session flags",
                     name, member_name);
             return -1;
@@ -1118,12 +1189,59 @@ static int preset_validate(const json_t *preset, const char *name, char **error)
                                tint_setting ? tint_setting->choices : "");
         return -1;
     }
+
+    /* @file prompts are probed here so an advertised preset cannot fail on apply. */
+    static const char *const prompt_keys[] = {"system_prompt", "system_prompt_append"};
+    for (size_t i = 0; i < sizeof(prompt_keys) / sizeof(*prompt_keys); i++) {
+        const char *value = json_string_value(json_object_get((json_t *)preset, prompt_keys[i]));
+        if (!value || value[0] != '@')
+            continue;
+        char *expand_error = NULL;
+        char *text = config_prompt_expand(value, &expand_error);
+        if (!text) {
+            if (error)
+                *error = xasprintf("preset '%s': %s", name,
+                                   expand_error ? expand_error : "unreadable prompt file");
+            free(expand_error);
+            return -1;
+        }
+        free(text);
+    }
     return 0;
 }
 
 static const char *preset_member_string(const json_t *preset, const char *member)
 {
     return json_string_value(json_object_get((json_t *)preset, member));
+}
+
+static int preset_defect_reported(const char *name)
+{
+    for (size_t i = 0; i < store.n_reported_presets; i++) {
+        if (strcmp(store.reported_presets[i], name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* A failed apply returns the defect to its caller, and every caller surfaces it; recording
+ * the name here keeps the enumeration warning from repeating the same message. */
+static void report_preset_defect(const char *name)
+{
+    if (preset_defect_reported(name))
+        return;
+    store.reported_presets = xrealloc(store.reported_presets, (store.n_reported_presets + 1) *
+                                                                  sizeof(*store.reported_presets));
+    store.reported_presets[store.n_reported_presets++] = xstrdup(name);
+}
+
+static void free_reported_presets(void)
+{
+    for (size_t i = 0; i < store.n_reported_presets; i++)
+        free(store.reported_presets[i]);
+    free(store.reported_presets);
+    store.reported_presets = NULL;
+    store.n_reported_presets = 0;
 }
 
 int config_preset_apply(const char *name, enum config_tier tier, char **error)
@@ -1136,10 +1254,13 @@ int config_preset_apply(const char *name, enum config_tier tier, char **error)
         if (error)
             *error = xasprintf("unknown preset '%s' (define a presets.%s block in config.json)",
                                name, name);
+        report_preset_defect(name);
         return -1;
     }
-    if (preset_validate(preset, name, error) != 0)
+    if (preset_validate(preset, name, error) != 0) {
+        report_preset_defect(name);
         return -1;
+    }
 
     const char *model = preset_member_string(preset, "model");
     const char *effort = preset_member_string(preset, "effort");
@@ -1150,6 +1271,8 @@ int config_preset_apply(const char *name, enum config_tier tier, char **error)
     set_writable_tier(tier, "model", model ? model : CONFIG_VALUE_DEFAULT);
     set_writable_tier(tier, "effort", effort ? effort : CONFIG_VALUE_DEFAULT);
     set_writable_tier(tier, "system_prompt", preset_member_string(preset, "system_prompt"));
+    set_writable_tier(tier, "system_prompt_append",
+                      preset_member_string(preset, "system_prompt_append"));
     set_writable_tier(tier, "tint", NULL);
     set_writable_tier(tier, "preset", name);
     return 0;
@@ -1268,9 +1391,13 @@ int config_preset_save(const char *name, const struct config_preset *definition,
         const char *key;
         const char *value;
     } members[] = {
-        {"description", definition->description}, {"tint", definition->tint},
-        {"provider", definition->provider},       {"model", definition->model},
-        {"effort", definition->effort},           {"system_prompt", definition->system_prompt},
+        {"description", definition->description},
+        {"tint", definition->tint},
+        {"provider", definition->provider},
+        {"model", definition->model},
+        {"effort", definition->effort},
+        {"system_prompt", definition->system_prompt},
+        {"system_prompt_append", definition->system_prompt_append},
     };
     for (size_t i = 0; i < sizeof(members) / sizeof(*members); i++) {
         if (members[i].value)
@@ -1336,8 +1463,6 @@ out:
 
 size_t config_preset_names(char ***out)
 {
-    /* Invalid user-authored definitions warn once because this runs on every prompt rebuild. */
-    static int warnings_emitted;
     char **names = NULL;
     size_t count = config_object_keys("presets", &names);
     size_t valid_count = 0;
@@ -1345,12 +1470,14 @@ size_t config_preset_names(char ***out)
     for (size_t i = 0; i < count; i++) {
         const json_t *preset = preset_node(names[i]);
         char *error = NULL;
-        if (preset && preset_validate(preset, names[i], warnings_emitted ? NULL : &error) == 0) {
+        /* This runs on every prompt rebuild, so invalid definitions warn only once. */
+        int quiet = store.preset_warnings_emitted || preset_defect_reported(names[i]);
+        if (preset && preset_validate(preset, names[i], quiet ? NULL : &error) == 0) {
             names[valid_count++] = names[i];
             continue;
         }
 
-        if (!warnings_emitted) {
+        if (!quiet) {
             if (error)
                 hax_warn("%s — ignoring it", error);
             else if (!preset)
@@ -1362,7 +1489,7 @@ size_t config_preset_names(char ***out)
         free(names[i]);
     }
 
-    warnings_emitted = 1;
+    store.preset_warnings_emitted = 1;
     *out = names;
     return valid_count;
 }

@@ -219,7 +219,8 @@ static int append_agents_md(struct buf *b, const char *path, const char *display
     if (!*seen_header) {
         if (b->len > 0)
             buf_append_str(b, "\n");
-        buf_append_str(b, "# Project Context\n");
+        buf_append_str(b, "# Project Context\n\n"
+                          "Project guidance below overrides the assistant defaults above.\n");
         *seen_header = 1;
     }
     buf_append_str(b, "\n## ");

@@ -125,7 +125,7 @@ in `config.json` — or save the selection you are already running as one with `
       "provider": "codex",
       "model": "gpt-5.6-sol",
       "effort": "high",
-      "system_prompt": "You are a meticulous code reviewer. ..."
+      "system_prompt_append": "@prompts/review.md"
     },
     "scout": {
       "description": "fast, cheap exploration",
@@ -144,8 +144,15 @@ Semantics:
   (llama.cpp discovers the served model), shadowing any env/state/config value — the same
   rule a `/provider` switch uses, so a stale `HAX_MODEL` can't leak into a different backend.
   Explicit `--model`/`--effort` flags still win over the preset.
-- `system_prompt` is optional. Omitted, normal resolution applies — your configured prompt,
-  or the built-in one.
+- `system_prompt` is optional and replaces the base prompt (only the base: the Environment,
+  project-context, and task/subagent sections still follow it). Omitted, normal resolution
+  applies — your configured prompt, or the built-in one.
+- `system_prompt_append` is optional text added after the base prompt: give a preset a
+  persona or extra rules without maintaining a fork of the built-in prompt. Prefer it over
+  `system_prompt` when you only want to add something.
+- Both accept `@path` values that read the text from a file: relative paths resolve against
+  the hax config directory, `@~/…` and absolute paths work as written. A preset naming an
+  unreadable file fails validation, like any other invalid member.
 - `tint` is optional: the persona's identity tint (`teal`, `violet`, `rose`, `sage` — see the
   `tint` setting above), which colors the model's headings, code, the `[name]` stance in the
   banner, and the preset's own row in the `/preset` picker. Omitted, your own `tint` setting
@@ -183,14 +190,15 @@ clearing its name and system prompt. `--preset` and `HAX_PRESET` apply per-run a
 nothing.
 
 Explicit per-run input beats the persisted stance as a whole: when any selection flag or
-selection env var (`HAX_PROVIDER`, `HAX_MODEL`, `HAX_EFFORT`, `HAX_SYSTEM_PROMPT`)
-is set, a preset coming from `state.json` or a config-file `preset` default is skipped
-entirely — presets apply whole or not at all, never blended with other input. A preset named
-explicitly for the run (`--preset`, `HAX_PRESET`) still
-applies, and still shadows selection env vars per the flags → preset → env order;
-`HAX_PRESET=` (empty) disables any preset for the run. A persisted name whose definition has
-since been renamed or deleted warns at startup and is skipped; a failing explicit `--preset`
-is an error.
+selection env var (`HAX_PROVIDER`, `HAX_MODEL`, `HAX_EFFORT`, `HAX_SYSTEM_PROMPT`) is set, a
+preset coming from `state.json` or a config-file `preset` default is skipped entirely —
+presets apply whole or not at all, never blended with other input.
+(`HAX_SYSTEM_PROMPT_APPEND` is not a selection env var: an amendment composes with the
+stance, though a preset's own `system_prompt_append` still wins.) A preset named explicitly
+for the run (`--preset`, `HAX_PRESET`) still applies, and still shadows selection env vars
+per the flags → preset → env order; `HAX_PRESET=` (empty) disables any preset for the run. A
+persisted name whose definition has since been renamed or deleted warns at startup and is
+skipped; a failing explicit `--preset` is an error.
 
 Resuming restores the preset the conversation was running under. Naming a preset for the run
 (`--preset`, `HAX_PRESET=name`) replaces it; naming a provider, model, or effort instead
@@ -213,8 +221,9 @@ What it captures:
 - the provider, model, and effort in effect — minus a model the backend picked for itself,
   which is left out so the preset re-discovers one ([llama.cpp](providers.md#llamacpp))
 - the tint given as the second word, or chosen from the list that opens without one
-- the system prompt, only when omitting it wouldn't bring the same one back: a stance's or
-  `HAX_SYSTEM_PROMPT`'s, not one already in `config.json`
+- the system prompt and appended text, each only when omitting it wouldn't bring the same one
+  back: a stance's or `HAX_SYSTEM_PROMPT`/`HAX_SYSTEM_PROMPT_APPEND`'s, not one already in
+  `config.json`
 
 Re-saving an existing name keeps its `description` and asks before replacing the rest. Writing
 a description, or anything else a block can hold, is what editing `config.json` is for.
@@ -242,8 +251,13 @@ variable. `/config` marks settings that can be changed mid-session.
   auto-fill it.
 - `effort` / `HAX_EFFORT` — provider-specific reasoning effort. Empty
   string forces omission.
-- `system_prompt` / `HAX_SYSTEM_PROMPT` — override the base system prompt. Empty string sends
-  no system message.
+- `system_prompt` / `HAX_SYSTEM_PROMPT` — replace the built-in base prompt; `@path` reads it
+  from a file (relative to the config directory, `~` expands). The Environment,
+  project-context, and task/subagent sections still follow — remove those with the `no_*`
+  settings below. Empty clears just the base; the literal `(none)` sends no system message
+  at all.
+- `system_prompt_append` / `HAX_SYSTEM_PROMPT_APPEND` — text appended after the base prompt;
+  `@path` works here too. Composes with an active preset instead of suppressing it.
 - `provider_name` / `HAX_PROVIDER_NAME` — override the banner display name for compiled-in
   providers.
 - `no_env` / `HAX_NO_ENV` — skip the Environment section.

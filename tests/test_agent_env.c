@@ -548,6 +548,7 @@ static void test_agents_md_walks_to_git_root_farthest_first(void)
             EXPECT(m < n);
         }
         EXPECT(contains(p, "# Project Context"));
+        EXPECT(contains(p, "Project guidance below overrides the assistant defaults above."));
         EXPECT(contains(p, "## "));
         free(p);
     }

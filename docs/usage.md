@@ -293,14 +293,17 @@ round-trips, turning the pause into a periodic check-in.
 
 Unless `--raw` is used, hax sends:
 
-1. the built-in system prompt, or `HAX_SYSTEM_PROMPT` if set;
+1. the built-in system prompt (or your `system_prompt` replacement), plus any
+   `system_prompt_append` text;
 2. an Environment section with working/home directories, operating system, command shell,
    model, Git root, and command preferences;
 3. discovered `AGENTS.md` files and skill descriptions; and
 4. tool schemas for `read`, `edit`, `write`, and `bash`.
 
-`HAX_SYSTEM_PROMPT=""` omits only the system message; tools still remain available. `--raw`
-omits the system prompt, Environment section, AGENTS.md/skills, and tools.
+Replacing or emptying the system prompt affects only item 1; the other sections still follow
+(see the `no_*` settings in [configuration.md](./configuration.md)). `HAX_SYSTEM_PROMPT="(none)"`
+omits the whole system message while tools remain available. `--raw` omits the system prompt,
+Environment section, AGENTS.md/skills, and tools.
 
 AGENTS.md discovery loads the global file first:
 

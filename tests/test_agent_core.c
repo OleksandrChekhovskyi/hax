@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -74,12 +75,108 @@ static void test_build_system_prompt_raw(void)
     unsetenv("HAX_SYSTEM_PROMPT");
 }
 
+static const char *const SUFFIX_TOGGLES[] = {"HAX_NO_ENV", "HAX_NO_AGENTS_MD", "HAX_NO_SKILLS",
+                                             "HAX_NO_SUBAGENTS", "HAX_NO_TASKS"};
+
+static void suffix_sections_off(void)
+{
+    for (size_t i = 0; i < sizeof(SUFFIX_TOGGLES) / sizeof(*SUFFIX_TOGGLES); i++)
+        setenv(SUFFIX_TOGGLES[i], "1", 1);
+}
+
+static void suffix_sections_default(void)
+{
+    for (size_t i = 0; i < sizeof(SUFFIX_TOGGLES) / sizeof(*SUFFIX_TOGGLES); i++)
+        unsetenv(SUFFIX_TOGGLES[i]);
+}
+
 static void test_build_system_prompt_explicit_empty(void)
 {
+    /* "" empties the base prompt but keeps the context sections. */
     setenv("HAX_SYSTEM_PROMPT", "", 1);
+    suffix_sections_off();
+    char *out = build_test_system_prompt(0);
+    EXPECT(out == NULL);
+
+    unsetenv("HAX_NO_ENV");
+    out = build_test_system_prompt(0);
+    EXPECT(out != NULL);
+    if (out)
+        EXPECT(strncmp(out, "# Environment", 13) == 0);
+    free(out);
+
+    unsetenv("HAX_SYSTEM_PROMPT");
+    suffix_sections_default();
+}
+
+static void test_build_system_prompt_none_sentinel(void)
+{
+    /* "(none)" suppresses the whole message, context sections included. */
+    setenv("HAX_SYSTEM_PROMPT", "(none)", 1);
+    setenv("HAX_SYSTEM_PROMPT_APPEND", "ignored", 1);
+    suffix_sections_default();
     char *out = build_test_system_prompt(0);
     EXPECT(out == NULL);
     unsetenv("HAX_SYSTEM_PROMPT");
+    unsetenv("HAX_SYSTEM_PROMPT_APPEND");
+}
+
+static void test_build_system_prompt_append(void)
+{
+    setenv("HAX_SYSTEM_PROMPT", "BASE", 1);
+    setenv("HAX_SYSTEM_PROMPT_APPEND", "EXTRA", 1);
+    suffix_sections_off();
+    char *out = build_test_system_prompt(0);
+    EXPECT(out != NULL);
+    if (out)
+        EXPECT_STR_EQ(out, "BASE\n\nEXTRA");
+    free(out);
+
+    /* An empty base leaves the amendment as the whole prompt. */
+    setenv("HAX_SYSTEM_PROMPT", "", 1);
+    out = build_test_system_prompt(0);
+    EXPECT(out != NULL);
+    if (out)
+        EXPECT_STR_EQ(out, "EXTRA");
+    free(out);
+
+    unsetenv("HAX_SYSTEM_PROMPT");
+    unsetenv("HAX_SYSTEM_PROMPT_APPEND");
+    suffix_sections_default();
+}
+
+static void test_build_system_prompt_from_file(void)
+{
+    char *dir = t_tempdir();
+    char path[4096];
+    snprintf(path, sizeof path, "%s/prompt.md", dir);
+    FILE *fp = fopen(path, "w");
+    EXPECT(fp != NULL);
+    if (fp) {
+        fputs("file prompt\n\n", fp);
+        fclose(fp);
+    }
+
+    char value[4096];
+    snprintf(value, sizeof value, "@%s", path);
+    setenv("HAX_SYSTEM_PROMPT", value, 1);
+    suffix_sections_off();
+    char *out = build_test_system_prompt(0);
+    EXPECT(out != NULL);
+    if (out)
+        EXPECT_STR_EQ(out, "file prompt");
+    free(out);
+
+    /* An unreadable @file falls back to the built-in prompt instead of failing the session. */
+    setenv("HAX_SYSTEM_PROMPT", "@/nonexistent/prompt.md", 1);
+    out = build_test_system_prompt(0);
+    EXPECT(out != NULL);
+    if (out)
+        EXPECT(strncmp(out, "You are hax", 11) == 0);
+    free(out);
+
+    unsetenv("HAX_SYSTEM_PROMPT");
+    suffix_sections_default();
 }
 
 static void test_build_system_prompt_custom_no_suffix(void)
@@ -498,6 +595,9 @@ int main(void)
     test_find_tool();
     test_build_system_prompt_raw();
     test_build_system_prompt_explicit_empty();
+    test_build_system_prompt_none_sentinel();
+    test_build_system_prompt_append();
+    test_build_system_prompt_from_file();
     test_build_system_prompt_custom_no_suffix();
     test_build_system_prompt_default_no_suffix();
     test_build_system_prompt_with_suffix();

@@ -33,8 +33,6 @@ static const char DEFAULT_SYSTEM_PROMPT[] =
     "need a value you can't obtain. To ask, end your turn with one targeted "
     "question and a recommended default.\n"
     "\n"
-    "Project guidance in any AGENTS.md block below overrides these defaults.\n"
-    "\n"
     "When changing code:\n"
     "- Make the smallest correct change that fits the existing style.\n"
     "- Fix root causes, not symptoms. Don't fix unrelated bugs unless asked.\n"
@@ -104,24 +102,63 @@ static char *resolve_effort(const struct provider *provider, const char *model)
     return (default_effort && *default_effort) ? xstrdup(default_effort) : NULL;
 }
 
+/* Expand a configured prompt value, falling back so the session still comes up when an @file
+ * has gone missing. NULL `value` selects `fallback`; NULL `fallback` means skip on failure. */
+static char *resolve_prompt(const char *value, const char *fallback)
+{
+    if (!value)
+        value = fallback;
+    if (!value)
+        return NULL;
+
+    char *error = NULL;
+    char *text = config_prompt_expand(value, &error);
+    if (!text) {
+        hax_warn("%s — %s", error ? error : "couldn't expand prompt value",
+                 fallback ? "using the built-in prompt" : "skipping");
+        free(error);
+        return fallback ? xstrdup(fallback) : NULL;
+    }
+    return text;
+}
+
+static void append_prompt_part(struct buf *b, const char *part)
+{
+    if (!part || !*part)
+        return;
+    if (b->len > 0)
+        buf_append_str(b, "\n\n");
+    buf_append_str(b, part);
+}
+
 static char *build_system_prompt(const char *model_label, int raw)
 {
     if (raw)
         return NULL;
 
-    const char *base_prompt = config_str("system_prompt");
-    if (!base_prompt)
-        base_prompt = DEFAULT_SYSTEM_PROMPT;
-    if (!*base_prompt)
+    /* "(none)" opts out of the system message entirely; "" empties only the base prompt. */
+    const char *base_value = config_str("system_prompt");
+    if (base_value && strcmp(base_value, "(none)") == 0)
         return NULL;
 
+    char *base = resolve_prompt(base_value, DEFAULT_SYSTEM_PROMPT);
+    char *append = resolve_prompt(config_str("system_prompt_append"), NULL);
     char *suffix = agent_env_build_suffix(model_label);
-    if (!suffix)
-        return xstrdup(base_prompt);
 
-    char *system_prompt = xasprintf("%s\n\n%s", base_prompt, suffix);
+    struct buf b;
+    buf_init(&b);
+    append_prompt_part(&b, base);
+    append_prompt_part(&b, append);
+    append_prompt_part(&b, suffix);
+    free(base);
+    free(append);
     free(suffix);
-    return system_prompt;
+
+    if (b.len == 0) {
+        buf_free(&b);
+        return NULL;
+    }
+    return buf_steal(&b);
 }
 
 static char *resolve_model_label(struct provider *provider, const char *model)
