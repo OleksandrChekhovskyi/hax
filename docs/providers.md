@@ -78,6 +78,11 @@ API-key lookup order:
 OpenAI has no built-in model default in hax, so set `HAX_MODEL` or choose one with `/model`.
 Prompt-cache keys are sent by default; disable with `HAX_OPENAI_SEND_CACHE_KEY=0`.
 
+Requests go to `/v1/responses`. Recent reasoning models reject function tools combined with a
+reasoning effort on `/v1/chat/completions`, and only the Responses API returns the encrypted
+reasoning that lets a model carry its chain of thought across the tool calls of one turn.
+`HAX_OPENAI_API=chat` forces the older protocol.
+
 ## OpenAI-compatible
 
 `HAX_PROVIDER=openai-compatible` targets any endpoint with an OpenAI Chat Completions-style
@@ -228,8 +233,8 @@ remaining allowance.
 
 ## Custom providers
 
-Any static OpenAI Chat Completions or Anthropic Messages endpoint can be added under the
-`providers` object in `~/.config/hax/config.json`:
+Any static OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages endpoint can be
+added under the `providers` object in `~/.config/hax/config.json`:
 
 ```json
 {
@@ -252,7 +257,7 @@ Recognized common keys:
 
 - `base_url` — required unless supplied by a built-in recipe such as `ollama`.
 - `display_name` — banner label.
-- `api` — `openai-completions` (default) or `anthropic-messages`.
+- `api` — `openai-completions` (default), `openai-responses`, or `anthropic-messages`.
 - `api_key` — literal token. Prefer `api_key_env` for real secrets.
 - `api_key_env` — environment variable holding the token.
 - `sort_models` — sort the `/model` picker alphabetically instead of the server's catalog
@@ -268,6 +273,8 @@ Recognized common keys:
 
 OpenAI-style custom providers also recognize `reasoning_format` (`flat` or `nested`),
 `reasoning_roundtrip`, `send_cache_key`, `request_cost`, `cache`, and `cache_ttl`.
+`reasoning_format` and `reasoning_roundtrip` apply to `openai-completions` only; the
+Responses protocol has one reasoning shape and replays encrypted reasoning instead.
 Anthropic-style custom providers
 recognize the Anthropic settings from [configuration.md](./configuration.md): `max_tokens`,
 `thinking_mode`, `thinking_budget`, `cache`, `cache_ttl`, and `version`.

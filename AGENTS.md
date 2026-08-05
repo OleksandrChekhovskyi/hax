@@ -100,6 +100,11 @@ Layer boundaries and the rules that keep them:
 - Protocol-compatible providers should reuse the shared family translation via presets
   (`src/providers/openai.c` or `src/providers/anthropic.c`) where possible. Purely static
   endpoints should be config-defined providers rather than new C shims.
+- `src/providers/openai.c` serves both OpenAI request protocols, selected per preset by
+  `enum openai_wire`: Chat Completions (`openai_{events,messages}.c`) and Responses
+  (`responses_{events,messages}.c`, shared with `codex.c`). First-party OpenAI speaks Responses
+  because recent reasoning models reject function tools with a reasoning effort on the older
+  endpoint, and only Responses returns replayable encrypted reasoning.
 - `src/tool.h` defines the tool seam. Each tool lives under `src/tools/`, exports exactly one
   `const struct tool`, and returns freshly allocated output from `run(args_json, ctx)`; tool
   errors are output the model can recover from, not NULL returns.

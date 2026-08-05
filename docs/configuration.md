@@ -403,6 +403,10 @@ These settings apply to built-in OpenAI-family presets: `openai`, `openai-compat
 - `openai.base_url` / `HAX_OPENAI_BASE_URL` — required for `openai-compatible`; overrides
   `llama.cpp`; ignored by `openai` and `openrouter`.
 - `openai.api_key` / `HAX_OPENAI_API_KEY` — bearer token for OpenAI-family presets.
+- `openai.api` / `HAX_OPENAI_API` — request protocol: `responses` or `chat` (Chat Completions).
+  Default `responses` for `openai`, `chat` everywhere else. OpenAI's recent reasoning models
+  reject function tools combined with a reasoning effort on Chat Completions, so first-party
+  OpenAI speaks Responses; most compatible endpoints implement only Chat Completions.
 - `openai.reasoning_format` / `HAX_OPENAI_REASONING_FORMAT` — `flat` or `nested`; mainly for
   `openai-compatible`. Default `flat`.
 - `openai.reasoning_roundtrip` / `HAX_REASONING_ROUNDTRIP` — replay reasoning text on later

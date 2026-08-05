@@ -12,12 +12,11 @@
 #include "effort.h"
 #include "model_meta.h"
 #include "provider.h"
-#include "tool_schema.h"
 #include "util.h"
 #include "providers/codex_auth.h"
-#include "providers/codex_events.h"
-#include "providers/codex_messages.h"
 #include "providers/codex_settings.h"
+#include "providers/responses_events.h"
+#include "providers/responses_messages.h"
 #include "render/progress.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
@@ -76,38 +75,13 @@ static void reload_auth_if_stale(struct codex *codex)
     codex->auth_stale = 0;
 }
 
-static json_t *build_tools(const struct tool_def *tools, size_t n_tools)
-{
-    json_t *definitions = json_array();
-    for (size_t i = 0; i < n_tools; i++) {
-        json_t *parameters = tool_schema_build(&tools[i]);
-        json_array_append_new(definitions,
-                              json_pack("{s:s, s:s, s:s, s:o}", "type", "function", "name",
-                                        tools[i].name, "description", tools[i].description,
-                                        "parameters", parameters));
-    }
-    return definitions;
-}
-
 static char *build_request_body(const struct context *context, const char *provider,
                                 const char *model, const char *cache_key)
 {
-    json_t *include = json_array();
-    json_array_append_new(include, json_string("reasoning.encrypted_content"));
-
-    json_t *body = json_pack(
-        "{s:s, s:b, s:b, s:s, s:o, s:o, s:{s:s}, s:s, s:b, s:o}", "model", model, "store", 0,
-        "stream", 1, "instructions", context->system_prompt ? context->system_prompt : "", "input",
-        codex_build_input_items(context->items, context->n_items, provider, model,
-                                context->image_input),
-        "include", include, "text", "verbosity", "low", "tool_choice", "auto",
-        "parallel_tool_calls", 1, "tools", build_tools(context->tools, context->n_tools));
-
+    json_t *body = responses_build_body(context, provider, model);
+    json_object_set_new(body, "text", json_pack("{s:s}", "verbosity", "low"));
     if (cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(cache_key));
-    if (context->effort)
-        json_object_set_new(body, "reasoning",
-                            json_pack("{s:s, s:s}", "effort", context->effort, "summary", "auto"));
 
     char *body_json = json_dumps(body, JSON_COMPACT);
     json_decref(body);
@@ -117,7 +91,7 @@ static char *build_request_body(const struct context *context, const char *provi
 static int handle_sse_payload(const char *event_name, const char *data, void *parser)
 {
     (void)event_name;
-    codex_events_feed(parser, data);
+    responses_events_feed(parser, data);
     return 0;
 }
 
@@ -151,12 +125,12 @@ static int codex_stream(struct provider *provider, const struct context *context
 
     struct retry_policy retry_policy = retry_policy_default();
     struct http_response response = {0};
-    struct codex_events events = {0};
+    struct responses_events events = {0};
     int result = -1;
 
     for (int attempt = 0; attempt < retry_policy.max_attempts; attempt++) {
         memset(&response, 0, sizeof(response));
-        codex_events_init(&events, callback, callback_user);
+        responses_events_init(&events, callback, callback_user);
         result = http_sse_post(CODEX_RESPONSES_ENDPOINT, headers, body, body_len,
                                retry_policy.idle_timeout_s, handle_sse_payload, &events, tick,
                                tick_user, &response);
@@ -179,7 +153,7 @@ static int codex_stream(struct provider *provider, const struct context *context
 
         free(response.error_body);
         response.error_body = NULL;
-        codex_events_free(&events);
+        responses_events_free(&events);
         if (retry_sleep_with_tick(delay_ms, tick, tick_user)) {
             response.cancelled = 1;
             break;
@@ -203,12 +177,12 @@ static int codex_stream(struct provider *provider, const struct context *context
             callback(&error_event, callback_user);
             free(message);
         } else {
-            codex_events_finalize(&events);
+            responses_events_finalize(&events);
         }
     }
 
     free(response.error_body);
-    codex_events_free(&events);
+    responses_events_free(&events);
     free(authorization);
     free(account);
     free(session);

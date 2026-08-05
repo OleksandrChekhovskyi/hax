@@ -4,7 +4,7 @@
 
 #include "harness.h"
 #include "provider.h"
-#include "providers/codex_events.h"
+#include "providers/responses_events.h"
 
 #define MAX_CAPTURED_EVENTS 16
 
@@ -95,18 +95,18 @@ static void event_capture_free(struct event_capture *capture)
 
 struct event_fixture {
     struct event_capture capture;
-    struct codex_events parser;
+    struct responses_events parser;
 };
 
 static void fixture_init(struct event_fixture *fixture)
 {
     memset(fixture, 0, sizeof(*fixture));
-    codex_events_init(&fixture->parser, capture_event, &fixture->capture);
+    responses_events_init(&fixture->parser, capture_event, &fixture->capture);
 }
 
 static void fixture_free(struct event_fixture *fixture)
 {
-    codex_events_free(&fixture->parser);
+    responses_events_free(&fixture->parser);
     event_capture_free(&fixture->capture);
 }
 
@@ -114,11 +114,27 @@ static void test_text_delta(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser,
-                      "{\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}");
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_TEXT_DELTA);
     EXPECT_STR_EQ(fixture.capture.events[0].text, "Hello");
+    fixture_free(&fixture);
+}
+
+/* A refusal reaches the user as the assistant's answer; ignoring it would complete the response
+ * with no text at all. */
+static void test_refusal_delta_is_text(void)
+{
+    struct event_fixture fixture;
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.refusal.delta\",\"delta\":\"I can't help\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
+    EXPECT(fixture.capture.count == 2);
+    EXPECT(fixture.capture.events[0].kind == EV_TEXT_DELTA);
+    EXPECT_STR_EQ(fixture.capture.events[0].text, "I can't help");
+    EXPECT(fixture.capture.events[1].kind == EV_DONE);
     fixture_free(&fixture);
 }
 
@@ -126,16 +142,16 @@ static void test_tool_call_lifecycle(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser,
-                      "{\"type\":\"response.output_item.added\",\"item\":"
-                      "{\"type\":\"function_call\",\"id\":\"i1\",\"call_id\":\"c1\","
-                      "\"name\":\"bash\"}}");
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.function_call_arguments.delta\","
-                                       "\"item_id\":\"i1\",\"delta\":\"chunk1\"}");
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.function_call_arguments.delta\","
-                                       "\"item_id\":\"i1\",\"delta\":\"chunk2\"}");
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.output_item.done\",\"item\":"
-                                       "{\"type\":\"function_call\",\"id\":\"i1\"}}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.output_item.added\",\"item\":"
+                          "{\"type\":\"function_call\",\"id\":\"i1\",\"call_id\":\"c1\","
+                          "\"name\":\"bash\"}}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.function_call_arguments.delta\","
+                                           "\"item_id\":\"i1\",\"delta\":\"chunk1\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.function_call_arguments.delta\","
+                                           "\"item_id\":\"i1\",\"delta\":\"chunk2\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.output_item.done\",\"item\":"
+                                           "{\"type\":\"function_call\",\"id\":\"i1\"}}");
     EXPECT(fixture.capture.count == 4);
     EXPECT(fixture.capture.events[0].kind == EV_TOOL_CALL_START);
     EXPECT_STR_EQ(fixture.capture.events[0].id, "c1");
@@ -154,8 +170,8 @@ static void test_unknown_tool_call_delta_ignored(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.function_call_arguments.delta\","
-                                       "\"item_id\":\"nope\",\"delta\":\"x\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.function_call_arguments.delta\","
+                                           "\"item_id\":\"nope\",\"delta\":\"x\"}");
     EXPECT(fixture.capture.count == 0);
     fixture_free(&fixture);
 }
@@ -164,7 +180,7 @@ static void test_completed_emits_done(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_DONE);
     fixture_free(&fixture);
@@ -174,7 +190,7 @@ static void test_done_sentinel(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "[DONE]");
+    responses_events_feed(&fixture.parser, "[DONE]");
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_DONE);
     fixture_free(&fixture);
@@ -184,10 +200,11 @@ static void test_incomplete_with_reason(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.incomplete\",\"response\":"
-                                       "{\"incomplete_details\":{\"reason\":\"max_output_tokens\"},"
-                                       "\"usage\":{\"input_tokens\":500,\"output_tokens\":80,"
-                                       "\"input_tokens_details\":{\"cached_tokens\":300}}}}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.incomplete\",\"response\":"
+                          "{\"incomplete_details\":{\"reason\":\"max_output_tokens\"},"
+                          "\"usage\":{\"input_tokens\":500,\"output_tokens\":80,"
+                          "\"input_tokens_details\":{\"cached_tokens\":300}}}}");
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_ERROR);
     EXPECT(strstr(fixture.capture.events[0].message, "max_output_tokens") != NULL);
@@ -201,7 +218,7 @@ static void test_incomplete_without_reason(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.incomplete\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.incomplete\"}");
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_ERROR);
     EXPECT(strstr(fixture.capture.events[0].message, "unknown") != NULL);
@@ -212,8 +229,8 @@ static void test_failed_with_message(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.failed\",\"response\":"
-                                       "{\"error\":{\"message\":\"Bad Request\"}}}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.failed\",\"response\":"
+                                           "{\"error\":{\"message\":\"Bad Request\"}}}");
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_ERROR);
     EXPECT_STR_EQ(fixture.capture.events[0].message, "Bad Request");
@@ -224,10 +241,43 @@ static void test_failed_without_message_uses_fallback(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.failed\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.failed\"}");
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_ERROR);
     EXPECT_STR_EQ(fixture.capture.events[0].message, "response.failed");
+    fixture_free(&fixture);
+}
+
+/* A bare `error` event replaces the terminal response event rather than preceding one, so
+ * swallowing it would leave the stream reported only as truncated. */
+static void test_stream_error_event(void)
+{
+    struct event_fixture fixture;
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"error\",\"code\":\"rate_limit_exceeded\","
+                          "\"message\":\"Rate limit reached\",\"sequence_number\":3}");
+    EXPECT(fixture.capture.count == 1);
+    EXPECT(fixture.capture.events[0].kind == EV_ERROR);
+    EXPECT_STR_EQ(fixture.capture.events[0].message, "Rate limit reached");
+    responses_events_finalize(&fixture.parser);
+    EXPECT(fixture.capture.count == 1);
+    fixture_free(&fixture);
+}
+
+static void test_stream_error_falls_back_to_code(void)
+{
+    struct event_fixture fixture;
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser, "{\"type\":\"error\",\"code\":\"server_error\"}");
+    EXPECT(fixture.capture.count == 1);
+    EXPECT_STR_EQ(fixture.capture.events[0].message, "server_error");
+    fixture_free(&fixture);
+
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser, "{\"type\":\"error\"}");
+    EXPECT(fixture.capture.count == 1);
+    EXPECT_STR_EQ(fixture.capture.events[0].message, "provider error");
     fixture_free(&fixture);
 }
 
@@ -235,8 +285,8 @@ static void test_duplicate_completion_ignored(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
     EXPECT(fixture.capture.count == 1);
     fixture_free(&fixture);
 }
@@ -245,8 +295,8 @@ static void test_failure_after_completion_ignored(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.failed\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.failed\"}");
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_DONE);
     fixture_free(&fixture);
@@ -256,8 +306,8 @@ static void test_completion_after_failure_ignored(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.failed\"}");
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.failed\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_ERROR);
     fixture_free(&fixture);
@@ -267,9 +317,9 @@ static void test_unparseable_json_ignored(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "not json");
-    codex_events_feed(&fixture.parser, "");
-    codex_events_feed(&fixture.parser, NULL);
+    responses_events_feed(&fixture.parser, "not json");
+    responses_events_feed(&fixture.parser, "");
+    responses_events_feed(&fixture.parser, NULL);
     EXPECT(fixture.capture.count == 0);
     fixture_free(&fixture);
 }
@@ -278,7 +328,7 @@ static void test_missing_type_ignored(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"foo\":\"bar\"}");
+    responses_events_feed(&fixture.parser, "{\"foo\":\"bar\"}");
     EXPECT(fixture.capture.count == 0);
     fixture_free(&fixture);
 }
@@ -287,8 +337,8 @@ static void test_non_tool_output_item_ignored(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.output_item.added\",\"item\":"
-                                       "{\"type\":\"message\",\"id\":\"m1\"}}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.output_item.added\",\"item\":"
+                                           "{\"type\":\"message\",\"id\":\"m1\"}}");
     EXPECT(fixture.capture.count == 0);
     fixture_free(&fixture);
 }
@@ -297,8 +347,8 @@ static void test_incomplete_tool_call_ignored(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.output_item.added\",\"item\":"
-                                       "{\"type\":\"function_call\",\"id\":\"i1\"}}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.output_item.added\",\"item\":"
+                                           "{\"type\":\"function_call\",\"id\":\"i1\"}}");
     EXPECT(fixture.capture.count == 0);
     fixture_free(&fixture);
 }
@@ -307,9 +357,9 @@ static void test_reasoning_item_emitted(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.output_item.done\",\"item\":"
-                                       "{\"type\":\"reasoning\",\"id\":\"rs_1\","
-                                       "\"summary\":[],\"encrypted_content\":\"abc==\"}}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.output_item.done\",\"item\":"
+                                           "{\"type\":\"reasoning\",\"id\":\"rs_1\","
+                                           "\"summary\":[],\"encrypted_content\":\"abc==\"}}");
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_REASONING_ITEM);
     EXPECT(strstr(fixture.capture.events[0].text, "\"type\":\"reasoning\"") != NULL);
@@ -322,11 +372,11 @@ static void test_reasoning_item_strips_unknown_fields(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.output_item.done\",\"item\":"
-                                       "{\"type\":\"reasoning\",\"id\":\"rs_1\","
-                                       "\"status\":\"completed\",\"content\":[],"
-                                       "\"summary\":[],\"encrypted_content\":\"abc==\","
-                                       "\"future_field\":\"xyz\"}}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.output_item.done\",\"item\":"
+                                           "{\"type\":\"reasoning\",\"id\":\"rs_1\","
+                                           "\"status\":\"completed\",\"content\":[],"
+                                           "\"summary\":[],\"encrypted_content\":\"abc==\","
+                                           "\"future_field\":\"xyz\"}}");
     EXPECT(fixture.capture.count == 1);
     EXPECT(strstr(fixture.capture.events[0].text, "\"status\"") == NULL);
     EXPECT(strstr(fixture.capture.events[0].text, "\"content\"") == NULL);
@@ -339,8 +389,9 @@ static void test_reasoning_without_encrypted_content_ignored(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.output_item.done\",\"item\":"
-                                       "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[]}}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.output_item.done\",\"item\":"
+                          "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[]}}");
     EXPECT(fixture.capture.count == 0);
     fixture_free(&fixture);
 }
@@ -349,9 +400,9 @@ static void test_reasoning_with_null_encrypted_content_ignored(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.output_item.done\",\"item\":"
-                                       "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[],"
-                                       "\"encrypted_content\":null}}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.output_item.done\",\"item\":"
+                                           "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[],"
+                                           "\"encrypted_content\":null}}");
     EXPECT(fixture.capture.count == 0);
     fixture_free(&fixture);
 }
@@ -360,8 +411,8 @@ static void test_reasoning_summary_delta(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.reasoning_summary_text.delta\","
-                                       "\"delta\":\"Let's see\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.reasoning_summary_text.delta\","
+                                           "\"delta\":\"Let's see\"}");
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_REASONING_DELTA);
     EXPECT_STR_EQ(fixture.capture.events[0].text, "Let's see");
@@ -372,8 +423,8 @@ static void test_reasoning_text_delta(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.reasoning_text.delta\","
-                                       "\"delta\":\"thinking\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.reasoning_text.delta\","
+                                           "\"delta\":\"thinking\"}");
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_REASONING_DELTA);
     EXPECT_STR_EQ(fixture.capture.events[0].text, "thinking");
@@ -384,9 +435,9 @@ static void test_empty_reasoning_delta_ignored(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.reasoning_summary_text.delta\","
-                                       "\"delta\":\"\"}");
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.reasoning_text.delta\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.reasoning_summary_text.delta\","
+                                           "\"delta\":\"\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.reasoning_text.delta\"}");
     EXPECT(fixture.capture.count == 0);
     fixture_free(&fixture);
 }
@@ -395,7 +446,7 @@ static void test_usage_default_unknown(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
     EXPECT(fixture.capture.events[0].kind == EV_DONE);
     EXPECT(fixture.capture.events[0].usage.input_tokens == -1);
     EXPECT(fixture.capture.events[0].usage.output_tokens == -1);
@@ -407,9 +458,9 @@ static void test_completed_usage(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.completed\",\"response\":{"
-                                       "\"usage\":{\"input_tokens\":2048,\"output_tokens\":128,"
-                                       "\"input_tokens_details\":{\"cached_tokens\":1024}}}}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.completed\",\"response\":{"
+                                           "\"usage\":{\"input_tokens\":2048,\"output_tokens\":128,"
+                                           "\"input_tokens_details\":{\"cached_tokens\":1024}}}}");
     EXPECT(fixture.capture.events[0].kind == EV_DONE);
     EXPECT(fixture.capture.events[0].usage.input_tokens == 2048);
     EXPECT(fixture.capture.events[0].usage.output_tokens == 128);
@@ -421,7 +472,7 @@ static void test_done_sentinel_usage_unknown(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "[DONE]");
+    responses_events_feed(&fixture.parser, "[DONE]");
     EXPECT(fixture.capture.events[0].kind == EV_DONE);
     EXPECT(fixture.capture.events[0].usage.input_tokens == -1);
     fixture_free(&fixture);
@@ -431,9 +482,9 @@ static void test_finalize_without_terminal_emits_error(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser,
-                      "{\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}");
-    codex_events_finalize(&fixture.parser);
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}");
+    responses_events_finalize(&fixture.parser);
     EXPECT(fixture.capture.count == 2);
     EXPECT(fixture.capture.events[0].kind == EV_TEXT_DELTA);
     EXPECT(fixture.capture.events[1].kind == EV_ERROR);
@@ -445,8 +496,8 @@ static void test_finalize_after_completion_is_noop(void)
 {
     struct event_fixture fixture;
     fixture_init(&fixture);
-    codex_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
-    codex_events_finalize(&fixture.parser);
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
+    responses_events_finalize(&fixture.parser);
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_DONE);
     fixture_free(&fixture);
@@ -455,6 +506,7 @@ static void test_finalize_after_completion_is_noop(void)
 int main(void)
 {
     test_text_delta();
+    test_refusal_delta_is_text();
     test_tool_call_lifecycle();
     test_unknown_tool_call_delta_ignored();
     test_completed_emits_done();
@@ -463,6 +515,8 @@ int main(void)
     test_incomplete_without_reason();
     test_failed_with_message();
     test_failed_without_message_uses_fallback();
+    test_stream_error_event();
+    test_stream_error_falls_back_to_code();
     test_duplicate_completion_ignored();
     test_failure_after_completion_ignored();
     test_completion_after_failure_ignored();

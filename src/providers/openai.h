@@ -10,7 +10,20 @@
 /* Construct the api.openai.com provider. `name` is unused. */
 struct provider *openai_provider_new(const char *name);
 
-/* Configuration shared by providers using the Chat Completions protocol. */
+/* OpenAI serves two request protocols under one base URL. Recent reasoning models reject function
+ * tools combined with a reasoning effort on Chat Completions, so first-party OpenAI speaks
+ * Responses; compatible third parties implement Chat Completions only. */
+enum openai_wire {
+    OPENAI_WIRE_CHAT = 0,  /* POST <base_url>/chat/completions */
+    OPENAI_WIRE_RESPONSES, /* POST <base_url>/responses */
+};
+
+/* Accepts both the short names used by openai.api ("chat", "responses") and the config-provider
+ * dialect names ("openai-completions", "openai-responses"), which name the same two protocols.
+ * NULL, empty, and unknown values return `fallback`; unknown values also warn. */
+enum openai_wire openai_wire_parse(const char *value, enum openai_wire fallback);
+
+/* Configuration shared by providers in the OpenAI family. */
 struct openai_preset {
     const char *display_name;     /* defaults to "openai" */
     const char *default_base_url; /* required when base_url is locked or not configured */
@@ -18,6 +31,7 @@ struct openai_preset {
     const char *config_prefix;    /* NULL uses the global openai.* namespace */
     const char *catalog_id;       /* copied; NULL disables catalog metadata */
     int lock_base_url;            /* ignore configured base_url */
+    enum openai_wire wire;        /* request protocol; overridable by <prefix>.api */
 
     int send_cache_key_default;
     int cache_auto_default; /* AUTO when set, otherwise OFF */

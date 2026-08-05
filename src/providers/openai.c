@@ -14,6 +14,8 @@
 #include "util.h"
 #include "providers/openai_events.h"
 #include "providers/openai_messages.h"
+#include "providers/responses_events.h"
+#include "providers/responses_messages.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 #include "transport/retry.h"
@@ -41,6 +43,7 @@ struct openai {
     char *cache_ttl;
     char *reasoning_field;
     enum openai_reasoning_format reasoning_format;
+    enum openai_wire wire;
     char **extra_headers;
 
     const char *length_hint;    /* borrowed for the provider lifetime */
@@ -63,7 +66,7 @@ struct openai_cache_plan openai_plan_cache(const struct provider *provider, cons
     return plan;
 }
 
-static json_t *build_tools(const struct tool_def *tools, size_t n_tools)
+static json_t *build_chat_tools(const struct tool_def *tools, size_t n_tools)
 {
     json_t *tool_list = json_array();
     for (size_t i = 0; i < n_tools; i++) {
@@ -75,8 +78,8 @@ static json_t *build_tools(const struct tool_def *tools, size_t n_tools)
     return tool_list;
 }
 
-static char *build_request_body(const struct openai *openai, const struct context *context,
-                                const char *model, const struct openai_cache_plan *cache)
+static char *build_chat_body(const struct openai *openai, const struct context *context,
+                             const char *model, const struct openai_cache_plan *cache)
 {
     json_t *messages = openai_build_messages(context->system_prompt, context->items,
                                              context->n_items, openai->reasoning_field,
@@ -89,7 +92,7 @@ static char *build_request_body(const struct openai *openai, const struct contex
                              messages, "stream_options", "include_usage", 1);
 
     if (context->n_tools > 0)
-        json_object_set_new(body, "tools", build_tools(context->tools, context->n_tools));
+        json_object_set_new(body, "tools", build_chat_tools(context->tools, context->n_tools));
     if (openai->send_cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(openai->session_id));
     if (openai->emit_progress)
@@ -102,6 +105,59 @@ static char *build_request_body(const struct openai *openai, const struct contex
     char *json = json_dumps(body, JSON_COMPACT);
     json_decref(body);
     return json;
+}
+
+static char *build_responses_body(const struct openai *openai, const struct context *context,
+                                  const char *model)
+{
+    json_t *body = responses_build_body(context, openai->base.name, model);
+    if (openai->send_cache_key)
+        json_object_set_new(body, "prompt_cache_key", json_string(openai->session_id));
+
+    char *json = json_dumps(body, JSON_COMPACT);
+    json_decref(body);
+    return json;
+}
+
+/* One parser per wire, behind a common interface so the retry loop stays protocol-agnostic. */
+struct openai_parser {
+    enum openai_wire wire;
+    union {
+        struct openai_events chat;
+        struct responses_events responses;
+    } u;
+};
+
+static void parser_init(struct openai_parser *parser, const struct openai *openai,
+                        const struct openai_cache_plan *cache, stream_cb callback,
+                        void *callback_user)
+{
+    parser->wire = openai->wire;
+    if (parser->wire == OPENAI_WIRE_RESPONSES) {
+        responses_events_init(&parser->u.responses, callback, callback_user);
+        return;
+    }
+
+    openai_events_init(&parser->u.chat, callback, callback_user);
+    parser->u.chat.emit_progress = openai->emit_progress;
+    parser->u.chat.length_hint = openai->length_hint;
+    parser->u.chat.cache_write_1h = cache->writes_bill_1h;
+}
+
+static void parser_finalize(struct openai_parser *parser)
+{
+    if (parser->wire == OPENAI_WIRE_RESPONSES)
+        responses_events_finalize(&parser->u.responses);
+    else
+        openai_events_finalize(&parser->u.chat);
+}
+
+static void parser_free(struct openai_parser *parser)
+{
+    if (parser->wire == OPENAI_WIRE_RESPONSES)
+        responses_events_free(&parser->u.responses);
+    else
+        openai_events_free(&parser->u.chat);
 }
 
 static const char **build_request_headers(const struct openai *openai, char **authorization)
@@ -127,7 +183,11 @@ static const char **build_request_headers(const struct openai *openai, char **au
 static int handle_sse_data(const char *event_name, const char *data, void *user)
 {
     (void)event_name;
-    openai_events_feed(user, data);
+    struct openai_parser *parser = user;
+    if (parser->wire == OPENAI_WIRE_RESPONSES)
+        responses_events_feed(&parser->u.responses, data);
+    else
+        openai_events_feed(&parser->u.chat, data);
     return 0;
 }
 
@@ -142,7 +202,9 @@ static int openai_stream(struct provider *provider, const struct context *contex
     struct openai_cache_plan cache =
         openai_plan_cache(provider, model, openai->cache_mode, openai->cache_ttl);
 
-    char *body = build_request_body(openai, context, model, &cache);
+    char *body = openai->wire == OPENAI_WIRE_RESPONSES
+                     ? build_responses_body(openai, context, model)
+                     : build_chat_body(openai, context, model, &cache);
     if (!body)
         return -1;
 
@@ -151,16 +213,13 @@ static int openai_stream(struct provider *provider, const struct context *contex
     const char **headers = build_request_headers(openai, &authorization);
     struct retry_policy policy = retry_policy_default();
     struct http_response response;
-    struct openai_events parser;
+    struct openai_parser parser;
     int result = -1;
 
     /* Each retry needs fresh parser state; request bytes remain safe to resend unchanged. */
     for (int attempt = 0; attempt < policy.max_attempts; attempt++) {
         memset(&response, 0, sizeof(response));
-        openai_events_init(&parser, callback, callback_user);
-        parser.emit_progress = openai->emit_progress;
-        parser.length_hint = openai->length_hint;
-        parser.cache_write_1h = cache.writes_bill_1h;
+        parser_init(&parser, openai, &cache, callback, callback_user);
 
         result = http_sse_post(openai->endpoint, headers, body, body_len, policy.idle_timeout_s,
                                handle_sse_data, &parser, tick, tick_user, &response);
@@ -186,11 +245,11 @@ static int openai_stream(struct provider *provider, const struct context *contex
 
         free(response.error_body);
         response.error_body = NULL;
-        openai_events_free(&parser);
+        parser_free(&parser);
 
         if (retry_sleep_with_tick(delay_ms, tick, tick_user)) {
             response.cancelled = 1;
-            memset(&parser, 0, sizeof(parser));
+            parser_init(&parser, openai, &cache, callback, callback_user);
             break;
         }
     }
@@ -205,12 +264,12 @@ static int openai_stream(struct provider *provider, const struct context *contex
             callback(&error, callback_user);
             free(message);
         } else {
-            openai_events_finalize(&parser);
+            parser_finalize(&parser);
         }
     }
 
     free(response.error_body);
-    openai_events_free(&parser);
+    parser_free(&parser);
     free(headers);
     free(authorization);
     free(body);
@@ -247,6 +306,19 @@ static char **duplicate_headers(const char *const *headers)
         copy[i] = xstrdup(headers[i]);
     copy[n_headers] = NULL;
     return copy;
+}
+
+enum openai_wire openai_wire_parse(const char *value, enum openai_wire fallback)
+{
+    if (!value || !*value)
+        return fallback;
+    if (strcasecmp(value, "chat") == 0 || strcasecmp(value, "openai-completions") == 0)
+        return OPENAI_WIRE_CHAT;
+    if (strcasecmp(value, "responses") == 0 || strcasecmp(value, "openai-responses") == 0)
+        return OPENAI_WIRE_RESPONSES;
+
+    hax_warn("unknown api %s (expected 'chat' or 'responses') — using default", value);
+    return fallback;
 }
 
 static char *make_config_key(const char *prefix, const char *leaf)
@@ -463,7 +535,10 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
     openai->api_key = api_key && *api_key ? xstrdup(api_key) : NULL;
     openai->name = xstrdup(resolve_display_name(preset));
     openai->catalog_id = preset->catalog_id ? xstrdup(preset->catalog_id) : NULL;
-    openai->endpoint = xasprintf("%s/chat/completions", openai->base_url);
+    openai->wire = openai_wire_parse(preset_config(preset->config_prefix, "api"), preset->wire);
+    openai->endpoint =
+        xasprintf("%s/%s", openai->base_url,
+                  openai->wire == OPENAI_WIRE_RESPONSES ? "responses" : "chat/completions");
 
     openai->send_cache_key =
         preset_bool(preset->config_prefix, "send_cache_key", preset->send_cache_key_default);
@@ -505,6 +580,7 @@ struct provider *openai_provider_new(const char *name)
         .api_key_env = "OPENAI_API_KEY",
         .send_cache_key_default = 1,
         .lock_base_url = 1,
+        .wire = OPENAI_WIRE_RESPONSES,
         .catalog_id = "openai",
         .efforts = OPENAI_EFFORT_LADDER,
         .n_efforts = OPENAI_EFFORT_LADDER_N,

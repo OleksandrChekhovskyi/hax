@@ -44,6 +44,18 @@ static void test_list_efforts_wiring(void)
     }
 }
 
+static void test_wire_parse(void)
+{
+    EXPECT(openai_wire_parse("responses", OPENAI_WIRE_CHAT) == OPENAI_WIRE_RESPONSES);
+    EXPECT(openai_wire_parse("chat", OPENAI_WIRE_RESPONSES) == OPENAI_WIRE_CHAT);
+    /* The config-provider dialect names must resolve to the same two protocols. */
+    EXPECT(openai_wire_parse("openai-completions", OPENAI_WIRE_RESPONSES) == OPENAI_WIRE_CHAT);
+    EXPECT(openai_wire_parse("openai-responses", OPENAI_WIRE_CHAT) == OPENAI_WIRE_RESPONSES);
+    EXPECT(openai_wire_parse(NULL, OPENAI_WIRE_RESPONSES) == OPENAI_WIRE_RESPONSES);
+    EXPECT(openai_wire_parse("", OPENAI_WIRE_RESPONSES) == OPENAI_WIRE_RESPONSES);
+    EXPECT(openai_wire_parse("grpc", OPENAI_WIRE_CHAT) == OPENAI_WIRE_CHAT);
+}
+
 static void store_model(struct provider *provider, struct model_info *model)
 {
     model_meta_store(provider, model);
@@ -115,6 +127,7 @@ static void test_cache_plan_follows_model_rates(void)
 int main(void)
 {
     test_list_efforts_wiring();
+    test_wire_parse();
     test_cache_plan_follows_model_rates();
     T_REPORT();
 }

@@ -42,6 +42,8 @@ int main(void)
                        "               \"api_key\": \"sk-inline\"},"
                        "    \"bad\":   {\"api\": \"soap-1.2\","
                        "               \"base_url\": \"http://x/v1\"},"
+                       "    \"respprov\": {\"api\": \"openai-responses\","
+                       "               \"base_url\": \"http://127.0.0.1:9006/v1\"},"
                        "    \"claudish\": {\"api\": \"anthropic-messages\","
                        "               \"base_url\": \"http://127.0.0.1:18080/v1\","
                        "               \"sort_models\": \"on\","
@@ -59,7 +61,7 @@ int main(void)
      * provider layer's job, below). */
     char **names = NULL;
     size_t nk = config_object_keys("providers", &names);
-    EXPECT(nk == 9);
+    EXPECT(nk == 10);
     for (size_t i = 0; i < nk; i++)
         free(names[i]);
     free(names);
@@ -179,6 +181,14 @@ int main(void)
         config_set_override("providers.claudish.thinking_mode", NULL);
         anthropic->destroy(anthropic);
     }
+
+    /* The Responses dialect is a supported api value, not an unknown one. */
+    const struct provider_factory *resp_factory = provider_find("respprov");
+    EXPECT(resp_factory != NULL);
+    struct provider *respprov = resp_factory->new(resp_factory->name);
+    EXPECT(respprov != NULL);
+    if (respprov)
+        respprov->destroy(respprov);
 
     /* An unsupported dialect is a construction failure, not a crash. */
     const struct provider_factory *bad_factory = provider_find("bad");

@@ -20,7 +20,8 @@
 struct provider_recipe {
     const char *name;             /* selectable id (HAX_PROVIDER value) */
     const char *display_name;     /* banner label; NULL → name */
-    const char *api;              /* dialect: openai-completions | anthropic-messages */
+    const char *api;              /* dialect: openai-completions | openai-responses |
+                                     anthropic-messages */
     const char *base_url;         /* default endpoint */
     const char *api_key_env;      /* env var holding the key; NULL → local/no key */
     const char *reasoning_format; /* "flat"/"nested"; NULL → flat */
@@ -120,9 +121,10 @@ static struct provider *config_provider_new(const char *name)
     if (!api)
         api = "openai-completions";
     int is_anthropic = strcmp(api, "anthropic-messages") == 0;
-    if (!is_anthropic && strcmp(api, "openai-completions") != 0) {
+    if (!is_anthropic && strcmp(api, "openai-completions") != 0 &&
+        strcmp(api, "openai-responses") != 0) {
         hax_err("provider '%s': unsupported api '%s' "
-                "(supported: openai-completions, anthropic-messages)",
+                "(supported: openai-completions, openai-responses, anthropic-messages)",
                 name, api);
         return NULL;
     }
@@ -165,6 +167,7 @@ static struct provider *config_provider_new(const char *name)
             .display_name = display,
             .default_base_url = base,
             .api_key_env = api_key_env,
+            .wire = openai_wire_parse(api, OPENAI_WIRE_CHAT),
             .send_cache_key_default = r->send_cache_key,
             .reasoning_format = openai_reasoning_format_parse(rf, OPENAI_REASONING_FLAT),
             .efforts = with_efforts ? OPENAI_EFFORT_LADDER : NULL,

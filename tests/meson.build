@@ -46,8 +46,6 @@ test_sources = [
     'providers/test_anthropic_models.c',
     'providers/test_codex.c',
     'providers/test_codex_auth.c',
-    'providers/test_codex_events.c',
-    'providers/test_codex_messages.c',
     'providers/test_codex_settings.c',
     'providers/test_config_provider.c',
     'providers/test_llamacpp.c',
@@ -57,6 +55,8 @@ test_sources = [
     'providers/test_openai_events.c',
     'providers/test_openai_messages.c',
     'providers/test_registry.c',
+    'providers/test_responses_events.c',
+    'providers/test_responses_messages.c',
 
     'render/test_ctrl_strip.c',
     'render/test_diff_color.c',
