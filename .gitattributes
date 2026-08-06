@@ -1,1 +1,12 @@
 * text=auto eol=lf
+
+# Development-only files, kept out of `meson dist` tarballs. Anything the
+# archive needs in order to build or check itself stays out of this list.
+.gitattributes export-ignore
+.gitignore export-ignore
+.editorconfig export-ignore
+AGENTS.md export-ignore
+CLAUDE.md export-ignore
+compile_commands.json export-ignore
+scripts/ci_wait.py export-ignore
+scripts/land.py export-ignore
