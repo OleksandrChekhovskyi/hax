@@ -4,233 +4,433 @@
 #include <stdint.h>
 #include <string.h>
 
-static long be32(const unsigned char *p)
+enum jpeg_marker {
+    JPEG_STUFFED_BYTE = 0x00,
+    JPEG_TEM = 0x01,
+    JPEG_SOF_MIN = 0xc0,
+    JPEG_DHT = 0xc4,
+    JPEG_JPG = 0xc8,
+    JPEG_DAC = 0xcc,
+    JPEG_SOF_MAX = 0xcf,
+    JPEG_RST_MIN = 0xd0,
+    JPEG_RST_MAX = 0xd7,
+    JPEG_SOI = 0xd8,
+    JPEG_EOI = 0xd9,
+    JPEG_SOS = 0xda,
+    JPEG_MARKER_PREFIX = 0xff,
+};
+
+enum gif_block_type {
+    GIF_EXTENSION = 0x21,
+    GIF_IMAGE_DESCRIPTOR = 0x2c,
+    GIF_TRAILER = 0x3b,
+};
+
+enum gif_flag {
+    GIF_COLOR_TABLE_SIZE_MASK = 0x07,
+    GIF_COLOR_TABLE_FLAG = 0x80,
+};
+
+static uint16_t read_be16(const unsigned char *data)
 {
-    return ((long)p[0] << 24) | ((long)p[1] << 16) | ((long)p[2] << 8) | p[3];
+    return ((uint16_t)data[0] << 8) | data[1];
 }
 
-static long be16(const unsigned char *p)
+static uint32_t read_be32(const unsigned char *data)
 {
-    return ((long)p[0] << 8) | p[1];
+    return ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) | ((uint32_t)data[2] << 8) |
+           data[3];
 }
 
-static long le16(const unsigned char *p)
+static uint16_t read_le16(const unsigned char *data)
 {
-    return ((long)p[1] << 8) | p[0];
+    return ((uint16_t)data[1] << 8) | data[0];
 }
 
-static long le24(const unsigned char *p)
+static uint32_t read_le24(const unsigned char *data)
 {
-    return ((long)p[2] << 16) | ((long)p[1] << 8) | p[0];
+    return ((uint32_t)data[2] << 16) | ((uint32_t)data[1] << 8) | data[0];
 }
 
-/* Walk the JPEG marker chain to the first SOFn frame header, which
- * carries the dimensions. Entropy-coded data only follows SOS, and the
- * frame header precedes it in every baseline/progressive file, so the
- * walk stays cheap even on large files. */
-static void jpeg_dimensions(const unsigned char *p, size_t n, struct image_info *out)
+static uint32_t read_le32(const unsigned char *data)
 {
-    size_t i = 2;
-    while (i + 4 <= n) {
-        if (p[i] != 0xff) /* not a marker — corrupt chain; give up */
+    return ((uint32_t)data[3] << 24) | ((uint32_t)data[2] << 16) | ((uint32_t)data[1] << 8) |
+           data[0];
+}
+
+static int jpeg_marker_is_standalone(unsigned char marker)
+{
+    return marker == JPEG_TEM || (marker >= JPEG_RST_MIN && marker <= JPEG_RST_MAX);
+}
+
+static int jpeg_marker_is_sof(unsigned char marker)
+{
+    return marker >= JPEG_SOF_MIN && marker <= JPEG_SOF_MAX && marker != JPEG_DHT &&
+           marker != JPEG_JPG && marker != JPEG_DAC;
+}
+
+static void read_jpeg_dimensions(const unsigned char *data, size_t data_len,
+                                 struct image_info *info)
+{
+    size_t offset = 2;
+
+    while (offset < data_len) {
+        if (data[offset++] != JPEG_MARKER_PREFIX)
             return;
-        unsigned char m = p[i + 1];
-        if (m == 0xff) { /* fill byte */
-            i++;
+        while (offset < data_len && data[offset] == JPEG_MARKER_PREFIX)
+            offset++;
+        if (offset >= data_len)
+            return;
+
+        unsigned char marker = data[offset++];
+        if (marker == JPEG_STUFFED_BYTE || marker == JPEG_EOI || marker == JPEG_SOS)
+            return;
+        if (jpeg_marker_is_standalone(marker))
             continue;
-        }
-        /* Standalone markers without a length field. */
-        if (m == 0x01 || (m >= 0xd0 && m <= 0xd7)) {
-            i += 2;
-            continue;
-        }
-        if (m == 0xd9 || m == 0xda) /* EOI / SOS: no frame header seen */
+        if (data_len - offset < 2)
             return;
-        size_t len = (size_t)be16(p + i + 2);
-        if (len < 2)
+
+        size_t segment_len = read_be16(data + offset);
+        if (segment_len < 2 || segment_len > data_len - offset)
             return;
-        /* SOF0..SOF15 minus the non-frame members of the range (DHT,
-         * JPG, DAC). Payload: precision u8, height u16, width u16. */
-        if (m >= 0xc0 && m <= 0xcf && m != 0xc4 && m != 0xc8 && m != 0xcc) {
-            if (i + 9 <= n) {
-                out->height = be16(p + i + 5);
-                out->width = be16(p + i + 7);
+        if (jpeg_marker_is_sof(marker)) {
+            if (segment_len >= 7) {
+                info->height = read_be16(data + offset + 3);
+                info->width = read_be16(data + offset + 5);
             }
             return;
         }
-        i += 2 + len;
+        offset += segment_len;
     }
 }
 
-/* True if the JPEG's marker chain terminates in an EOI after its final
- * scan. Walking length-delimited segments (rather than scanning for FF D9
- * anywhere) skips APPn metadata wholesale, so an EXIF/MPF thumbnail's own
- * embedded EOI is never mistaken for the main image's — a scan truncated
- * after SOF stays flagged incomplete. No decoding: only marker framing. */
-static int jpeg_complete(const unsigned char *p, size_t n)
+static int jpeg_is_complete(const unsigned char *data, size_t data_len)
 {
-    size_t i = 2;
-    while (i + 1 < n) {
-        if (p[i] != 0xff) { /* not at a marker; stray byte between segments */
-            i++;
+    size_t offset = 2;
+    int saw_scan = 0;
+
+    while (offset < data_len) {
+        if (data[offset++] != JPEG_MARKER_PREFIX)
+            return 0;
+        while (offset < data_len && data[offset] == JPEG_MARKER_PREFIX)
+            offset++;
+        if (offset >= data_len)
+            return 0;
+
+        unsigned char marker = data[offset++];
+        if (marker == JPEG_STUFFED_BYTE)
+            return 0;
+        if (marker == JPEG_EOI)
+            return saw_scan;
+        if (jpeg_marker_is_standalone(marker))
             continue;
-        }
-        unsigned char m = p[i + 1];
-        if (m == 0xff) { /* fill byte */
-            i++;
+        if (data_len - offset < 2)
+            return 0;
+
+        size_t segment_len = read_be16(data + offset);
+        if (segment_len < 2 || segment_len > data_len - offset)
+            return 0;
+        offset += segment_len;
+        if (marker != JPEG_SOS)
             continue;
+
+        saw_scan = 1;
+        /* Entropy data uses FF 00 byte stuffing and permits restart markers. */
+        while (offset + 1 < data_len) {
+            if (data[offset] != JPEG_MARKER_PREFIX) {
+                offset++;
+                continue;
+            }
+            unsigned char escaped = data[offset + 1];
+            if (escaped == JPEG_STUFFED_BYTE ||
+                (escaped >= JPEG_RST_MIN && escaped <= JPEG_RST_MAX)) {
+                offset += 2;
+                continue;
+            }
+            if (escaped == JPEG_MARKER_PREFIX) {
+                offset++;
+                continue;
+            }
+            break;
         }
-        if (m == 0xd9) /* EOI: the chain terminated */
+    }
+    return 0;
+}
+
+static int png_is_complete(const unsigned char *data, size_t data_len)
+{
+    size_t offset = 8;
+    int saw_ihdr = 0;
+    int saw_image_data = 0;
+
+    while (offset <= data_len) {
+        size_t remaining = data_len - offset;
+        if (remaining < 12)
+            return 0;
+
+        size_t chunk_data_len = read_be32(data + offset);
+        if (chunk_data_len > remaining - 12)
+            return 0;
+
+        const unsigned char *chunk_type = data + offset + 4;
+        if (!saw_ihdr) {
+            if (memcmp(chunk_type, "IHDR", 4) != 0 || chunk_data_len != 13)
+                return 0;
+            saw_ihdr = 1;
+        } else if (memcmp(chunk_type, "IDAT", 4) == 0) {
+            saw_image_data = 1;
+        } else if (memcmp(chunk_type, "IEND", 4) == 0) {
+            return chunk_data_len == 0 && saw_image_data;
+        }
+        offset += 12 + chunk_data_len;
+    }
+    return 0;
+}
+
+static int skip_gif_sub_blocks(const unsigned char *data, size_t data_len, size_t *offset,
+                               int *saw_data)
+{
+    while (*offset < data_len) {
+        size_t block_len = data[(*offset)++];
+        if (block_len == 0)
             return 1;
-        if (m == 0x01 || (m >= 0xd0 && m <= 0xd7)) { /* standalone, no length */
-            i += 2;
-            continue;
-        }
-        if (i + 4 > n)
+        if (block_len > data_len - *offset)
             return 0;
-        size_t len = (size_t)be16(p + i + 2);
-        if (len < 2)
-            return 0;
-        i += 2 + len; /* skip the length-delimited segment header/payload */
-        if (m == 0xda) {
-            /* SOS: entropy-coded data follows with no length. Scan past
-             * byte-stuffing (FF 00) and restart markers to the next real
-             * marker, then resume the walk (EOI, or another scan). */
-            while (i + 1 < n) {
-                if (p[i] != 0xff) {
-                    i++;
-                    continue;
-                }
-                unsigned char e = p[i + 1];
-                if (e == 0x00 || (e >= 0xd0 && e <= 0xd7) || e == 0xff) {
-                    i += (e == 0xff) ? 1 : 2;
-                    continue;
-                }
-                break;
-            }
-        }
+        if (saw_data)
+            *saw_data = 1;
+        *offset += block_len;
     }
     return 0;
 }
 
-/* Walk the PNG chunk chain, requiring both an IDAT (pixel data) and a
- * terminating IEND. A signature + IHDR + IEND with no IDAT is a structurally
- * invalid file a decoder rejects; catching it here keeps such a payload out
- * of history. CRCs are not verified — that would be decoding, and corrupt
- * data can only be caught by the decoder itself. */
-static int png_complete(const unsigned char *p, size_t n)
+static int gif_is_complete(const unsigned char *data, size_t data_len)
 {
-    size_t i = 8; /* past the 8-byte signature */
-    int saw_idat = 0;
-    while (i + 8 <= n) { /* room for a chunk's length + type */
-        size_t len = (size_t)be32(p + i);
-        const unsigned char *type = p + i + 4;
-        if (memcmp(type, "IDAT", 4) == 0)
-            saw_idat = 1;
-        else if (memcmp(type, "IEND", 4) == 0)
-            return saw_idat;
-        if (i + 12 > n || len > n - (i + 12)) /* data + CRC run past the buffer */
-            return 0;
-        i += 12 + len; /* 4 len + 4 type + len data + 4 CRC */
-    }
-    return 0;
-}
-
-/* True if the GIF block stream contains an image descriptor (0x2C) — the
- * marker introducing pixel data. A header + trailer with no image passes the
- * dimension and trailer checks but is not a displayable image. Skips the
- * global color table and any extension blocks to reach the descriptor. */
-static int gif_has_image(const unsigned char *p, size_t n)
-{
-    if (n < 13)
+    if (data_len < 13)
         return 0;
-    size_t i = 13; /* past signature (6) + logical screen descriptor (7) */
-    if (p[10] & 0x80)
-        i += (size_t)3 << ((p[10] & 0x07) + 1); /* global color table */
-    while (i < n) {
-        if (p[i] == 0x2c) /* image descriptor: pixel data follows */
-            return 1;
-        if (p[i] == 0x3b) /* trailer: end of stream, no image */
+
+    size_t offset = 13;
+    if (data[10] & GIF_COLOR_TABLE_FLAG) {
+        size_t color_table_len = (size_t)3 << ((data[10] & GIF_COLOR_TABLE_SIZE_MASK) + 1);
+        if (color_table_len > data_len - offset)
             return 0;
-        if (p[i] != 0x21) /* neither image, trailer, nor extension → malformed */
+        offset += color_table_len;
+    }
+
+    int saw_image = 0;
+    while (offset < data_len) {
+        unsigned char block_type = data[offset];
+        if (block_type == GIF_TRAILER)
+            return saw_image && offset + 1 == data_len;
+        if (block_type == GIF_EXTENSION) {
+            if (data_len - offset < 2)
+                return 0;
+            offset += 2;
+            if (!skip_gif_sub_blocks(data, data_len, &offset, NULL))
+                return 0;
+            continue;
+        }
+        if (block_type != GIF_IMAGE_DESCRIPTOR || data_len - offset < 10)
             return 0;
-        i += 2; /* extension introducer + label */
-        while (i < n && p[i])
-            i += 1 + p[i]; /* length-prefixed sub-block */
-        i += 1;            /* block terminator (0x00) */
+
+        unsigned char flags = data[offset + 9];
+        offset += 10;
+        if (flags & GIF_COLOR_TABLE_FLAG) {
+            size_t color_table_len = (size_t)3 << ((flags & GIF_COLOR_TABLE_SIZE_MASK) + 1);
+            if (color_table_len > data_len - offset)
+                return 0;
+            offset += color_table_len;
+        }
+        if (offset >= data_len)
+            return 0;
+        offset++; /* LZW minimum code size */
+
+        int saw_compressed_data = 0;
+        if (!skip_gif_sub_blocks(data, data_len, &offset, &saw_compressed_data) ||
+            !saw_compressed_data)
+            return 0;
+        saw_image = 1;
     }
     return 0;
 }
 
-int image_sniff(const void *buf, size_t n, struct image_info *out)
+static int next_webp_chunk(const unsigned char *data, size_t data_len, size_t *offset,
+                           const unsigned char **chunk_type, const unsigned char **chunk_data,
+                           size_t *chunk_data_len)
 {
-    const unsigned char *p = buf;
-    out->mime = NULL;
-    out->width = 0;
-    out->height = 0;
-    out->complete = 0;
+    if (*offset > data_len || data_len - *offset < 8)
+        return 0;
 
-    static const unsigned char PNG_SIG[8] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
-    if (n >= 8 && memcmp(p, PNG_SIG, 8) == 0) {
-        out->mime = "image/png";
-        /* IHDR is mandated first: 8 sig + 4 len + "IHDR", then w/h. */
-        if (n >= 24 && memcmp(p + 12, "IHDR", 4) == 0) {
-            out->width = be32(p + 16);
-            out->height = be32(p + 20);
+    size_t chunk_offset = *offset;
+    size_t payload_len = read_le32(data + chunk_offset + 4);
+    if (payload_len > data_len - chunk_offset - 8)
+        return 0;
+
+    size_t next_offset = chunk_offset + 8 + payload_len;
+    if (payload_len & 1) {
+        if (next_offset >= data_len)
+            return 0;
+        next_offset++;
+    }
+
+    *chunk_type = data + chunk_offset;
+    *chunk_data = data + chunk_offset + 8;
+    *chunk_data_len = payload_len;
+    *offset = next_offset;
+    return 1;
+}
+
+static int webp_lossy_payload_is_valid(const unsigned char *data, size_t data_len)
+{
+    return data_len >= 10 && data[3] == 0x9d && data[4] == 0x01 && data[5] == 0x2a;
+}
+
+static int webp_lossless_payload_is_valid(const unsigned char *data, size_t data_len)
+{
+    return data_len >= 5 && data[0] == 0x2f;
+}
+
+static int webp_animation_frame_is_complete(const unsigned char *data, size_t data_len)
+{
+    if (data_len < 16)
+        return 0;
+
+    size_t offset = 16;
+    int saw_image_data = 0;
+    while (offset < data_len) {
+        const unsigned char *chunk_type;
+        const unsigned char *chunk_data;
+        size_t chunk_data_len;
+        if (!next_webp_chunk(data, data_len, &offset, &chunk_type, &chunk_data, &chunk_data_len))
+            return 0;
+
+        if (memcmp(chunk_type, "VP8 ", 4) == 0) {
+            if (!webp_lossy_payload_is_valid(chunk_data, chunk_data_len))
+                return 0;
+            saw_image_data = 1;
+        } else if (memcmp(chunk_type, "VP8L", 4) == 0) {
+            if (!webp_lossless_payload_is_valid(chunk_data, chunk_data_len))
+                return 0;
+            saw_image_data = 1;
         }
-        out->complete = png_complete(p, n);
-        return 1;
     }
+    return saw_image_data;
+}
 
-    if (n >= 6 && (memcmp(p, "GIF87a", 6) == 0 || memcmp(p, "GIF89a", 6) == 0)) {
-        out->mime = "image/gif";
-        if (n >= 10) {
-            out->width = le16(p + 6);
-            out->height = le16(p + 8);
+static int webp_is_complete(const unsigned char *data, size_t data_len)
+{
+    size_t riff_data_len = read_le32(data + 4);
+    if (riff_data_len < 4 || riff_data_len > data_len - 8)
+        return 0;
+
+    size_t chunks_len = riff_data_len - 4;
+    size_t offset = 0;
+    int saw_image_data = 0;
+    while (offset < chunks_len) {
+        const unsigned char *chunk_type;
+        const unsigned char *chunk_data;
+        size_t chunk_data_len;
+        if (!next_webp_chunk(data + 12, chunks_len, &offset, &chunk_type, &chunk_data,
+                             &chunk_data_len))
+            return 0;
+
+        if (memcmp(chunk_type, "VP8 ", 4) == 0) {
+            if (!webp_lossy_payload_is_valid(chunk_data, chunk_data_len))
+                return 0;
+            saw_image_data = 1;
+        } else if (memcmp(chunk_type, "VP8L", 4) == 0) {
+            if (!webp_lossless_payload_is_valid(chunk_data, chunk_data_len))
+                return 0;
+            saw_image_data = 1;
+        } else if (memcmp(chunk_type, "ANMF", 4) == 0) {
+            if (!webp_animation_frame_is_complete(chunk_data, chunk_data_len))
+                return 0;
+            saw_image_data = 1;
         }
-        /* Trailer byte present AND an actual image descriptor in the stream. */
-        out->complete = n >= 10 && p[n - 1] == 0x3b && gif_has_image(p, n);
+    }
+    return saw_image_data;
+}
+
+static void inspect_png(const unsigned char *data, size_t data_len, struct image_info *info)
+{
+    info->mime = "image/png";
+    if (data_len >= 24 && read_be32(data + 8) == 13 && memcmp(data + 12, "IHDR", 4) == 0) {
+        info->width = read_be32(data + 16);
+        info->height = read_be32(data + 20);
+    }
+    info->complete = png_is_complete(data, data_len);
+}
+
+static void inspect_gif(const unsigned char *data, size_t data_len, struct image_info *info)
+{
+    info->mime = "image/gif";
+    if (data_len >= 10) {
+        info->width = read_le16(data + 6);
+        info->height = read_le16(data + 8);
+    }
+    info->complete = gif_is_complete(data, data_len);
+}
+
+static void inspect_jpeg(const unsigned char *data, size_t data_len, struct image_info *info)
+{
+    info->mime = "image/jpeg";
+    read_jpeg_dimensions(data, data_len, info);
+    info->complete = jpeg_is_complete(data, data_len);
+}
+
+static void inspect_webp(const unsigned char *data, size_t data_len, struct image_info *info)
+{
+    info->mime = "image/webp";
+    info->complete = webp_is_complete(data, data_len);
+
+    if (data_len < 20)
+        return;
+    const unsigned char *chunk_type = data + 12;
+    size_t chunk_data_len = read_le32(data + 16);
+    const unsigned char *chunk_data = data + 20;
+    size_t available_chunk_data_len = data_len - 20;
+
+    if (memcmp(chunk_type, "VP8 ", 4) == 0 && available_chunk_data_len >= chunk_data_len &&
+        webp_lossy_payload_is_valid(chunk_data, chunk_data_len)) {
+        /* Lossy frames put 14-bit dimensions after the three-byte sync code. */
+        info->width = read_le16(chunk_data + 6) & 0x3fff;
+        info->height = read_le16(chunk_data + 8) & 0x3fff;
+    } else if (memcmp(chunk_type, "VP8L", 4) == 0 && available_chunk_data_len >= chunk_data_len &&
+               webp_lossless_payload_is_valid(chunk_data, chunk_data_len)) {
+        /* Lossless frames pack 14-bit (dimension - 1) values. */
+        uint32_t dimensions = read_le32(chunk_data + 1);
+        info->width = (long)(dimensions & 0x3fff) + 1;
+        info->height = (long)((dimensions >> 14) & 0x3fff) + 1;
+    } else if (memcmp(chunk_type, "VP8X", 4) == 0 && chunk_data_len >= 10 &&
+               available_chunk_data_len >= 10) {
+        /* The extended header stores 24-bit (dimension - 1) canvas values. */
+        info->width = read_le24(chunk_data + 4) + 1;
+        info->height = read_le24(chunk_data + 7) + 1;
+    }
+}
+
+int image_sniff(const void *buf, size_t buf_len, struct image_info *info)
+{
+    static const unsigned char PNG_SIGNATURE[] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
+    const unsigned char *data = buf;
+
+    *info = (struct image_info){0};
+    if (buf_len >= sizeof(PNG_SIGNATURE) &&
+        memcmp(data, PNG_SIGNATURE, sizeof(PNG_SIGNATURE)) == 0) {
+        inspect_png(data, buf_len, info);
         return 1;
     }
-
-    if (n >= 3 && p[0] == 0xff && p[1] == 0xd8 && p[2] == 0xff) {
-        out->mime = "image/jpeg";
-        jpeg_dimensions(p, n, out);
-        out->complete = jpeg_complete(p, n);
+    if (buf_len >= 6 && (memcmp(data, "GIF87a", 6) == 0 || memcmp(data, "GIF89a", 6) == 0)) {
+        inspect_gif(data, buf_len, info);
         return 1;
     }
-
-    if (n >= 12 && memcmp(p, "RIFF", 4) == 0 && memcmp(p + 8, "WEBP", 4) == 0) {
-        out->mime = "image/webp";
-        /* RIFF size (bytes 4..7, LE) counts everything after it; if that
-         * plus the 8-byte header outruns the buffer, the file is truncated. */
-        out->complete = (size_t)((uint32_t)p[4] | ((uint32_t)p[5] << 8) | ((uint32_t)p[6] << 16) |
-                                 ((uint32_t)p[7] << 24)) +
-                            8 <=
-                        n;
-        const unsigned char *c = p + 12; /* first chunk header */
-        const unsigned char *q = p + 20; /* first chunk payload */
-        if (n >= 30 && memcmp(c, "VP8 ", 4) == 0) {
-            /* Lossy: 3-byte frame tag, sync code, then 14-bit dims. */
-            if (q[3] == 0x9d && q[4] == 0x01 && q[5] == 0x2a) {
-                out->width = le16(q + 6) & 0x3fff;
-                out->height = le16(q + 8) & 0x3fff;
-            }
-        } else if (n >= 25 && memcmp(c, "VP8L", 4) == 0) {
-            /* Lossless: signature byte then 14+14 bits of (dim - 1). */
-            if (q[0] == 0x2f) {
-                uint32_t bits = (uint32_t)q[1] | ((uint32_t)q[2] << 8) | ((uint32_t)q[3] << 16) |
-                                ((uint32_t)q[4] << 24);
-                out->width = (long)(bits & 0x3fff) + 1;
-                out->height = (long)((bits >> 14) & 0x3fff) + 1;
-            }
-        } else if (n >= 30 && memcmp(c, "VP8X", 4) == 0) {
-            /* Extended: flags u8, reserved x3, then 24-bit (dim - 1). */
-            out->width = le24(q + 4) + 1;
-            out->height = le24(q + 7) + 1;
-        }
+    if (buf_len >= 3 && data[0] == JPEG_MARKER_PREFIX && data[1] == JPEG_SOI &&
+        data[2] == JPEG_MARKER_PREFIX) {
+        inspect_jpeg(data, buf_len, info);
         return 1;
     }
-
+    if (buf_len >= 12 && memcmp(data, "RIFF", 4) == 0 && memcmp(data + 8, "WEBP", 4) == 0) {
+        inspect_webp(data, buf_len, info);
+        return 1;
+    }
     return 0;
 }
