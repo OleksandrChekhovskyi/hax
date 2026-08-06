@@ -16,12 +16,8 @@
 #include "render/render_ctx.h"
 #include "terminal/vt_resolve.h"
 
-/* Render `items` at `detail` and return the settled rows — the bytes go
- * through a memory stream (disp's sink) and then vt_resolve, which is how
- * the paged view produces its output. Markdown stays off (render.md == NULL) so
- * assistant text lands verbatim and assertions don't depend on the wrap
- * engine; the spinner stays off the way it does for any non-live render.
- * Caller frees. */
+/* Render through the paged-history sink and resolver. Markdown stays disabled so assertions do
+ * not depend on wrapping. Caller frees. */
 static char *render(enum history_detail detail, const struct item *items, size_t n, int reasoning)
 {
     char *raw = NULL;

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "terminal/vt_resolve.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,393 +9,397 @@
 #include "util.h"
 #include "text/utf8.h"
 
-/* One run of bytes in the current row. `width` is the run's cell count:
- * 0 marks a zero-width run (SGR, any passed-through escape), which
- * occupies no column but must survive in place so styling and terminal
- * state stay attached to the text they wrapped. Consecutive glyphs
- * appended at the end of a row coalesce into one run, so an ordinary row
- * costs a couple of allocations rather than one per character. */
-struct seg {
-    char *b;
-    size_t len;
-    int width;
+enum segment_kind {
+    SEGMENT_GLYPHS,
+    SEGMENT_CONTROL,
 };
 
-struct row {
-    struct seg *v;
-    size_t n, cap;
-    size_t cur; /* cursor column, 0..cols */
+struct row_segment {
+    enum segment_kind kind;
+    char *bytes;
+    size_t byte_len;
+    size_t cell_width;
 };
 
-/* Ceiling on a cursor column, and on a CSI numeric parameter before it is
- * clamped to that. A cursor parked past the end of the row materializes as
- * padding when the next glyph lands, so an unbounded column is unbounded
- * work — and these bytes are not all ours: assistant text reaches the
- * terminal (and this transform) with escapes intact, so `ESC[2147483647C`
- * is a thing a model can say. Wider than any real terminal, so nothing we
- * emit ourselves is affected. */
-#define VT_MAX_COL   4096
-#define VT_PARAM_MAX 1000000
+struct terminal_row {
+    struct row_segment *segments;
+    size_t count;
+    size_t capacity;
+    size_t cursor_col;
+};
 
-static void row_free(struct row *r)
+enum escape_kind {
+    ESCAPE_OTHER,
+    ESCAPE_CSI,
+};
+
+struct escape_sequence {
+    enum escape_kind kind;
+    size_t byte_len;
+    char final;
+    int first_param;
+    bool has_first_param;
+};
+
+/* Cursor-forward input may come from untrusted model text and materialize as padding. */
+#define VT_MAX_CURSOR_COL 4096
+#define VT_MAX_CSI_PARAM  1000000
+
+static void row_reset(struct terminal_row *row)
 {
-    for (size_t i = 0; i < r->n; i++)
-        free(r->v[i].b);
-    free(r->v);
-    r->v = NULL;
-    r->n = r->cap = 0;
-    r->cur = 0;
+    for (size_t i = 0; i < row->count; i++)
+        free(row->segments[i].bytes);
+    row->count = 0;
+    row->cursor_col = 0;
 }
 
-static void row_reset(struct row *r)
+static void row_free(struct terminal_row *row)
 {
-    for (size_t i = 0; i < r->n; i++)
-        free(r->v[i].b);
-    r->n = 0;
-    r->cur = 0;
+    row_reset(row);
+    free(row->segments);
+    row->segments = NULL;
+    row->capacity = 0;
 }
 
-static struct seg *row_insert(struct row *r, size_t at, const char *b, size_t len, int width)
+static void row_insert(struct terminal_row *row, size_t index, enum segment_kind kind,
+                       const char *bytes, size_t byte_len, size_t cell_width)
 {
-    if (r->n == r->cap) {
-        r->cap = r->cap ? r->cap * 2 : 16;
-        r->v = xrealloc(r->v, r->cap * sizeof(*r->v));
+    if (row->count == row->capacity) {
+        row->capacity = row->capacity ? row->capacity * 2 : 16;
+        row->segments = xrealloc(row->segments, row->capacity * sizeof(*row->segments));
     }
-    if (at < r->n)
-        memmove(&r->v[at + 1], &r->v[at], (r->n - at) * sizeof(*r->v));
-    r->v[at].b = xmalloc(len);
-    memcpy(r->v[at].b, b, len);
-    r->v[at].len = len;
-    r->v[at].width = width;
-    r->n++;
-    return &r->v[at];
+    if (index < row->count) {
+        memmove(&row->segments[index + 1], &row->segments[index],
+                (row->count - index) * sizeof(*row->segments));
+    }
+    row->segments[index].kind = kind;
+    row->segments[index].bytes = xmalloc(byte_len);
+    memcpy(row->segments[index].bytes, bytes, byte_len);
+    row->segments[index].byte_len = byte_len;
+    row->segments[index].cell_width = cell_width;
+    row->count++;
 }
 
-static size_t row_cols(const struct row *r)
+static void segment_append(struct row_segment *segment, const char *bytes, size_t byte_len,
+                           size_t cell_width)
 {
-    size_t cols = 0;
-    for (size_t i = 0; i < r->n; i++)
-        cols += (size_t)r->v[i].width;
-    return cols;
+    segment->bytes = xrealloc(segment->bytes, segment->byte_len + byte_len);
+    memcpy(segment->bytes + segment->byte_len, bytes, byte_len);
+    segment->byte_len += byte_len;
+    segment->cell_width += cell_width;
 }
 
-/* Byte offset inside `s` of the cell boundary at or before column `col`,
- * counted from the run's start, for splitting a coalesced glyph run.
- * *cols_before receives the columns actually skipped, which is less than
- * `col` when `col` lands inside a double-width glyph: the cut goes *before*
- * that glyph, never through it. A cursor addressed into the second half of
- * a wide cell therefore owns the whole cell, which is what a terminal does
- * — half a glyph is not something it can show. */
-static size_t byte_at_col(const char *s, size_t len, size_t col, size_t *cols_before)
+static size_t row_width(const struct terminal_row *row)
 {
-    size_t i = 0, c = 0;
-    while (i < len && c < col) {
+    size_t width = 0;
+    for (size_t i = 0; i < row->count; i++)
+        width += row->segments[i].cell_width;
+    return width;
+}
+
+/* Return the byte boundary at or before col, keeping combining marks with their base glyph. */
+static size_t segment_offset_at_col(const struct row_segment *segment, size_t col,
+                                    size_t *cols_before)
+{
+    size_t offset = 0;
+    size_t current_col = 0;
+    while (offset < segment->byte_len) {
         size_t consumed = 1;
-        int w = utf8_codepoint_cells(s, len, i, &consumed);
-        if (w < 0)
-            w = 1;
-        if (c + (size_t)w > col)
-            break; /* col lands inside this glyph */
-        c += (size_t)w;
-        i += consumed ? consumed : 1;
+        int glyph_width =
+            utf8_codepoint_cells(segment->bytes, segment->byte_len, offset, &consumed);
+        if (glyph_width < 0)
+            glyph_width = 1;
+        if (glyph_width > 0 && (current_col >= col || current_col + (size_t)glyph_width > col))
+            break;
+        current_col += (size_t)glyph_width;
+        offset += consumed ? consumed : 1;
     }
-    *cols_before = c;
-    return i;
+    *cols_before = current_col;
+    return offset;
 }
 
-/* Index of the run holding column `col`, splitting a coalesced run when the
- * column falls inside it. Zero-width runs sitting at that column stay to
- * the left of the returned index, so an SGR run written at the cursor lands
- * before the glyph it styles. Returns r->n when `col` is at or past the end
- * of the row. */
-static size_t row_split(struct row *r, size_t col)
+/* Split at a cell boundary and return the segment to its right. Control sequences at the
+ * boundary remain on the left so they still precede the glyph they style. */
+static size_t row_split_at_col(struct terminal_row *row, size_t col)
 {
-    size_t c = 0;
-    for (size_t i = 0; i < r->n; i++) {
-        if (r->v[i].width == 0)
+    size_t current_col = 0;
+    for (size_t i = 0; i < row->count; i++) {
+        struct row_segment *segment = &row->segments[i];
+        if (segment->cell_width == 0) {
+            if (segment->kind == SEGMENT_GLYPHS && current_col == col)
+                return i;
             continue;
-        if (c == col)
+        }
+        if (current_col == col)
             return i;
-        if (c + (size_t)r->v[i].width > col) {
-            /* Split run i at the cell boundary at or before `col`. */
-            struct seg *s = &r->v[i];
-            size_t head_cols = 0;
-            size_t off = byte_at_col(s->b, s->len, col - c, &head_cols);
-            if (off == 0)
-                return i; /* col lands in this run's first cell */
-            size_t tail_len = s->len - off;
-            int head_w = (int)head_cols;
-            int tail_w = s->width - head_w;
-            char *tail = xmalloc(tail_len ? tail_len : 1);
-            memcpy(tail, s->b + off, tail_len);
-            s->len = off;
-            s->width = head_w;
-            row_insert(r, i + 1, tail, tail_len, tail_w);
+        if (current_col + segment->cell_width > col) {
+            size_t head_width = 0;
+            size_t offset = segment_offset_at_col(segment, col - current_col, &head_width);
+            if (offset == 0)
+                return i;
+
+            size_t tail_len = segment->byte_len - offset;
+            size_t tail_width = segment->cell_width - head_width;
+            char *tail = xmalloc(tail_len);
+            memcpy(tail, segment->bytes + offset, tail_len);
+            segment->byte_len = offset;
+            segment->cell_width = head_width;
+            row_insert(row, i + 1, SEGMENT_GLYPHS, tail, tail_len, tail_width);
             free(tail);
             return i + 1;
         }
-        c += (size_t)r->v[i].width;
+        current_col += segment->cell_width;
     }
-    return r->n;
+    return row->count;
 }
 
-/* Write a glyph of `width` cells at the cursor. Past the end of the row
- * it appends (coalescing onto a trailing glyph run); inside the row it
- * replaces the columns it covers, which is how the tool block's closing
- * "\r └" overprint lands on the leading strip glyph without disturbing
- * the rest of the row. */
-static void row_put(struct row *r, const char *b, size_t len, int width)
+static size_t row_zero_width_insert_index(struct terminal_row *row)
 {
-    size_t cols = row_cols(r);
-    if (r->cur >= cols) {
-        /* Pad a cursor parked past the end (CSI nC) with spaces — as one
-         * run, not one per cell: the column is clamped (VT_MAX_COL) but
-         * still far larger than anything we emit, and a run of spaces
-         * splits and erases exactly like a coalesced glyph run would. */
-        if (r->cur > cols) {
-            size_t pad = r->cur - cols;
-            char *sp = xmalloc(pad);
-            memset(sp, ' ', pad);
-            row_insert(r, r->n, sp, pad, (int)pad);
-            free(sp);
-        }
-        if (r->n > 0 && r->v[r->n - 1].width > 0) {
-            struct seg *s = &r->v[r->n - 1];
-            s->b = xrealloc(s->b, s->len + len);
-            memcpy(s->b + s->len, b, len);
-            s->len += len;
-            s->width += width;
-        } else {
-            row_insert(r, r->n, b, len, width);
-        }
-        r->cur += (size_t)width;
-        return;
-    }
-    size_t start = row_split(r, r->cur);
-    size_t end = row_split(r, r->cur + (size_t)width);
-    /* Drop the covered glyph runs, keeping any zero-width run among them
-     * so styling that was already in effect survives the overwrite. */
-    size_t w = start;
+    if (row->cursor_col >= row_width(row))
+        return row->count;
+
+    size_t index = row_split_at_col(row, row->cursor_col);
+    while (index < row->count && row->segments[index].cell_width == 0)
+        index++;
+    return index;
+}
+
+/* Remove visible segments in [start, end), preserving terminal state in that range. */
+static size_t row_remove_glyphs(struct terminal_row *row, size_t start, size_t end)
+{
+    size_t kept_end = start;
     for (size_t i = start; i < end; i++) {
-        if (r->v[i].width == 0)
-            r->v[w++] = r->v[i];
+        if (row->segments[i].kind == SEGMENT_CONTROL)
+            row->segments[kept_end++] = row->segments[i];
         else
-            free(r->v[i].b);
+            free(row->segments[i].bytes);
     }
-    if (w != end) {
-        memmove(&r->v[w], &r->v[end], (r->n - end) * sizeof(*r->v));
-        r->n -= end - w;
+    if (kept_end != end) {
+        memmove(&row->segments[kept_end], &row->segments[end],
+                (row->count - end) * sizeof(*row->segments));
+        row->count -= end - kept_end;
     }
-    row_insert(r, start, b, len, width);
-    r->cur += (size_t)width;
+    return kept_end;
 }
 
-/* Zero-width escape run (SGR, unmodeled sequence): insert at the cursor so
- * it keeps its position relative to the glyphs around it. */
-static void row_put_raw(struct row *r, const char *b, size_t len)
+static void row_pad_to_cursor(struct terminal_row *row, size_t width)
 {
-    size_t at = (r->cur >= row_cols(r)) ? r->n : row_split(r, r->cur);
-    row_insert(r, at, b, len, 0);
-}
-
-/* Zero-width *content* — a combining mark — rides the glyph it follows, so
- * it is appended to that glyph's run rather than stored as its own
- * zero-width run. That keeps it inseparable from its base cell: an erase or
- * overwrite that takes the base must take the mark with it, or the row
- * would end up carrying an orphan accent. (Zero-width escapes are the
- * opposite case — they are terminal state and deliberately survive an
- * erase, which is why the two go in through different paths.) */
-static void row_put_combining(struct row *r, const char *b, size_t len)
-{
-    if (r->cur >= row_cols(r) && r->n > 0 && r->v[r->n - 1].width > 0) {
-        struct seg *s = &r->v[r->n - 1];
-        s->b = xrealloc(s->b, s->len + len);
-        memcpy(s->b + s->len, b, len);
-        s->len += len;
-        return;
-    }
-    /* No glyph to ride (row start, or the cursor was moved back into the
-     * row): keep it in place as its own run. */
-    row_put_raw(r, b, len);
-}
-
-/* Erase cells: CSI 0K (the only form hax emits) from the cursor to the end
- * of the row, CSI 1K from the row start through the cursor's own cell, CSI
- * 2K the whole row. None of the three move the cursor — a glyph written
- * afterwards lands at the same column it would have. Zero-width runs are
- * retained (appended after the surviving glyphs): on a real terminal an
- * erase clears cells but not the pending SGR state, and the markdown
- * wrapper's retro-wrap relies on that — it re-emits only the style deltas
- * it thinks are missing after erasing.
- *
- * 0K and 2K clear everything from `from` to the row's end, so dropping
- * those runs is enough: the next write pads back out to the cursor. 1K can
- * leave content to its right, which has to keep its columns, so its span
- * becomes spaces instead. */
-static void row_erase(struct row *r, int param)
-{
-    size_t cols = row_cols(r);
-    size_t from = (param == 1 || param == 2) ? 0 : r->cur;
-    size_t to = param == 1 ? r->cur + 1 : cols;
-    if (to > cols)
-        to = cols;
-    if (from >= to)
+    if (row->cursor_col <= width)
         return;
 
-    size_t start = row_split(r, from);
-    size_t end = row_split(r, to);
-    size_t w = start;
-    for (size_t i = start; i < end; i++) {
-        if (r->v[i].width == 0)
-            r->v[w++] = r->v[i];
+    size_t padding_len = row->cursor_col - width;
+    char *padding = xmalloc(padding_len);
+    memset(padding, ' ', padding_len);
+    row_insert(row, row->count, SEGMENT_GLYPHS, padding, padding_len, padding_len);
+    free(padding);
+}
+
+static void row_write_glyph(struct terminal_row *row, const char *bytes, size_t byte_len,
+                            size_t cell_width)
+{
+    size_t width = row_width(row);
+    if (row->cursor_col >= width) {
+        row_pad_to_cursor(row, width);
+        if (row->count > 0 && row->segments[row->count - 1].cell_width > 0)
+            segment_append(&row->segments[row->count - 1], bytes, byte_len, cell_width);
         else
-            free(r->v[i].b);
-    }
-    if (w != end) {
-        memmove(&r->v[w], &r->v[end], (r->n - end) * sizeof(*r->v));
-        r->n -= end - w;
-    }
-    if (param != 1)
+            row_insert(row, row->count, SEGMENT_GLYPHS, bytes, byte_len, cell_width);
+        row->cursor_col += cell_width;
         return;
-    /* Blank the cleared span only when a glyph survives to its right; at the
-     * row's end there is nothing to hold in place and spaces would just be
-     * trailing whitespace the terminal doesn't show either. */
-    for (size_t i = w; i < r->n; i++) {
-        if (r->v[i].width > 0) {
-            size_t pad = to - from;
-            char *sp = xmalloc(pad);
-            memset(sp, ' ', pad);
-            row_insert(r, w, sp, pad, (int)pad);
-            free(sp);
+    }
+
+    size_t start = row_split_at_col(row, row->cursor_col);
+    size_t end = row_split_at_col(row, row->cursor_col + cell_width);
+    row_remove_glyphs(row, start, end);
+    row_insert(row, start, SEGMENT_GLYPHS, bytes, byte_len, cell_width);
+    row->cursor_col += cell_width;
+}
+
+static void row_write_control(struct terminal_row *row, const char *bytes, size_t byte_len)
+{
+    row_insert(row, row_zero_width_insert_index(row), SEGMENT_CONTROL, bytes, byte_len, 0);
+}
+
+/* Combining marks belong to their base glyph; unlike terminal state, they must not survive its
+ * erasure. A mark without an adjacent base remains in place as zero-width content. */
+static void row_write_combining(struct terminal_row *row, const char *bytes, size_t byte_len)
+{
+    size_t width = row_width(row);
+    if (row->cursor_col == width && row->count > 0 &&
+        row->segments[row->count - 1].kind == SEGMENT_GLYPHS &&
+        row->segments[row->count - 1].cell_width > 0) {
+        segment_append(&row->segments[row->count - 1], bytes, byte_len, 0);
+        return;
+    }
+
+    row_insert(row, row_zero_width_insert_index(row), SEGMENT_GLYPHS, bytes, byte_len, 0);
+}
+
+static void row_erase_line(struct terminal_row *row, int mode)
+{
+    size_t width = row_width(row);
+    size_t from_col = (mode == 1 || mode == 2) ? 0 : row->cursor_col;
+    size_t to_col = mode == 1 ? row->cursor_col + 1 : width;
+    if (to_col > width)
+        to_col = width;
+    if (from_col >= to_col)
+        return;
+
+    size_t start = row_split_at_col(row, from_col);
+    size_t end = row_split_at_col(row, to_col);
+    size_t kept_end = row_remove_glyphs(row, start, end);
+    if (mode != 1)
+        return;
+
+    /* Erase-to-cursor needs spaces only when visible content remains to its right. */
+    for (size_t i = kept_end; i < row->count; i++) {
+        if (row->segments[i].cell_width > 0) {
+            size_t padding_len = to_col - from_col;
+            char *padding = xmalloc(padding_len);
+            memset(padding, ' ', padding_len);
+            row_insert(row, kept_end, SEGMENT_GLYPHS, padding, padding_len, padding_len);
+            free(padding);
             return;
         }
     }
 }
 
-static void row_commit(struct row *r, FILE *out)
+static void row_commit(struct terminal_row *row, FILE *out)
 {
-    for (size_t i = 0; i < r->n; i++)
-        fwrite(r->v[i].b, 1, r->v[i].len, out);
+    for (size_t i = 0; i < row->count; i++)
+        fwrite(row->segments[i].bytes, 1, row->segments[i].byte_len, out);
     fputc('\n', out);
-    row_reset(r);
+    row_reset(row);
 }
 
-/* Byte length of the escape sequence starting at bytes[i] (which is
- * ESC), and its CSI final byte + first numeric parameter when it is a
- * CSI. `final` is 0 for anything that isn't a CSI. Unterminated
- * sequences consume the rest of the buffer. */
-static size_t esc_len(const char *bytes, size_t n, size_t i, char *final, int *param,
-                      int *has_param)
+static void parse_csi(const char *bytes, size_t len, struct escape_sequence *escape)
 {
-    *final = 0;
-    *param = 0;
-    *has_param = 0;
-    size_t j = i + 1;
-    if (j >= n)
-        return n - i;
-    if (bytes[j] == '[') {
-        j++;
-        int val = 0, seen = 0;
-        while (j < n) {
-            unsigned char c = (unsigned char)bytes[j];
-            if (c >= '0' && c <= '9') {
-                /* Saturate rather than overflow: the bytes can carry a
-                 * model's raw escape (nothing strips ESC out of assistant
-                 * text), and `val * 10` on a long digit run is undefined
-                 * behavior. Any value this large is clamped by the caller
-                 * anyway. */
-                if (val < VT_PARAM_MAX)
-                    val = val * 10 + (c - '0');
-                seen = 1;
-                j++;
-                continue;
+    bool reading_first = true;
+    size_t index = 2;
+    while (index < len) {
+        unsigned char byte = (unsigned char)bytes[index];
+        if (byte >= '0' && byte <= '9') {
+            if (reading_first) {
+                int digit = byte - '0';
+                if (escape->first_param > (VT_MAX_CSI_PARAM - digit) / 10)
+                    escape->first_param = VT_MAX_CSI_PARAM;
+                else
+                    escape->first_param = escape->first_param * 10 + digit;
+                escape->has_first_param = true;
             }
-            if (c == ';' || c == '?' || c == ':') {
-                /* Only the first parameter is ever consulted. */
-                j++;
-                continue;
-            }
-            if (c >= 0x40 && c <= 0x7e) {
-                *final = (char)c;
-                *param = val;
-                *has_param = seen;
-                return j + 1 - i;
-            }
-            j++;
+            index++;
+            continue;
         }
-        return n - i;
-    }
-    if (bytes[j] == ']') {
-        /* OSC: terminated by BEL or ST (ESC \). */
-        j++;
-        while (j < n) {
-            if (bytes[j] == '\a')
-                return j + 1 - i;
-            if (bytes[j] == 0x1b && j + 1 < n && bytes[j + 1] == '\\')
-                return j + 2 - i;
-            j++;
+        if (byte == ';' || byte == ':') {
+            reading_first = false;
+            index++;
+            continue;
         }
-        return n - i;
+        if (byte == '?') {
+            index++;
+            continue;
+        }
+        if (byte >= 0x40 && byte <= 0x7e) {
+            escape->kind = ESCAPE_CSI;
+            escape->final = (char)byte;
+            escape->byte_len = ++index;
+            return;
+        }
+        index++;
     }
-    return 2; /* ESC + one byte */
 }
 
-void vt_resolve(const char *bytes, size_t n, FILE *out)
+/* Unterminated sequences consume the remaining input so their payload is not rendered twice. */
+static struct escape_sequence parse_escape(const char *bytes, size_t len)
 {
-    struct row r = {0};
-    size_t i = 0;
-    while (i < n) {
-        char c = bytes[i];
-        if (c == '\n') {
-            row_commit(&r, out);
-            i++;
-            continue;
-        }
-        if (c == '\r') {
-            r.cur = 0;
-            i++;
-            continue;
-        }
-        if (c == 0x1b) {
-            char final;
-            int param, has_param;
-            size_t len = esc_len(bytes, n, i, &final, &param, &has_param);
-            switch (final) {
-            case 'D': {
-                size_t back = has_param && param > 0 ? (size_t)param : 1;
-                r.cur = r.cur > back ? r.cur - back : 0;
-                break;
+    struct escape_sequence escape = {.byte_len = len};
+    if (len < 2)
+        return escape;
+
+    if (bytes[1] == '[') {
+        parse_csi(bytes, len, &escape);
+        return escape;
+    }
+    if (bytes[1] == ']') {
+        for (size_t i = 2; i < len; i++) {
+            if (bytes[i] == '\a') {
+                escape.byte_len = i + 1;
+                return escape;
             }
-            case 'C':
-                r.cur += has_param && param > 0 ? (size_t)param : 1;
-                if (r.cur > VT_MAX_COL)
-                    r.cur = VT_MAX_COL;
-                break;
-            case 'K':
-                row_erase(&r, has_param ? param : 0);
-                break;
-            default:
-                row_put_raw(&r, bytes + i, len);
-                break;
+            if (bytes[i] == 0x1b && i + 1 < len && bytes[i + 1] == '\\') {
+                escape.byte_len = i + 2;
+                return escape;
             }
-            i += len;
+        }
+        return escape;
+    }
+
+    escape.byte_len = 2;
+    return escape;
+}
+
+void vt_resolve(const char *bytes, size_t len, FILE *out)
+{
+    struct terminal_row row = {0};
+    size_t offset = 0;
+    while (offset < len) {
+        char byte = bytes[offset];
+        if (byte == '\n') {
+            row_commit(&row, out);
+            offset++;
             continue;
         }
+        if (byte == '\r') {
+            row.cursor_col = 0;
+            offset++;
+            continue;
+        }
+        if (byte == 0x1b) {
+            struct escape_sequence escape = parse_escape(bytes + offset, len - offset);
+            if (escape.kind == ESCAPE_CSI) {
+                switch (escape.final) {
+                case 'D': {
+                    size_t distance = escape.has_first_param && escape.first_param > 0
+                                          ? (size_t)escape.first_param
+                                          : 1;
+                    row.cursor_col = row.cursor_col > distance ? row.cursor_col - distance : 0;
+                    break;
+                }
+                case 'C':
+                    row.cursor_col += escape.has_first_param && escape.first_param > 0
+                                          ? (size_t)escape.first_param
+                                          : 1;
+                    if (row.cursor_col > VT_MAX_CURSOR_COL)
+                        row.cursor_col = VT_MAX_CURSOR_COL;
+                    break;
+                case 'K':
+                    row_erase_line(&row, escape.has_first_param ? escape.first_param : 0);
+                    break;
+                default:
+                    row_write_control(&row, bytes + offset, escape.byte_len);
+                    break;
+                }
+            } else {
+                row_write_control(&row, bytes + offset, escape.byte_len);
+            }
+            offset += escape.byte_len;
+            continue;
+        }
+
         size_t consumed = 1;
-        int w = utf8_codepoint_cells(bytes, n, i, &consumed);
+        int glyph_width = utf8_codepoint_cells(bytes, len, offset, &consumed);
         if (consumed == 0)
             consumed = 1;
-        if (w < 0)
-            w = 1;
-        if (w == 0)
-            row_put_combining(&r, bytes + i, consumed);
+        if (glyph_width < 0)
+            glyph_width = 1;
+        if (glyph_width == 0)
+            row_write_combining(&row, bytes + offset, consumed);
         else
-            row_put(&r, bytes + i, consumed, w);
-        i += consumed;
+            row_write_glyph(&row, bytes + offset, consumed, (size_t)glyph_width);
+        offset += consumed;
     }
-    /* A trailing partial row still holds content the terminal would be
-     * showing; terminate it so the sink ends on a whole line. */
-    if (r.n > 0)
-        row_commit(&r, out);
-    row_free(&r);
+
+    if (row.count > 0)
+        row_commit(&row, out);
+    row_free(&row);
 }
