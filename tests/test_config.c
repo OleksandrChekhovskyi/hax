@@ -1348,16 +1348,15 @@ static void test_prompt_expand(void)
     EXPECT(err == NULL);
     free(text);
 
-    char *dir = t_tempdir();
-    char path[4096];
-    snprintf(path, sizeof path, "%s/prompt.md", dir);
+    char *path = xasprintf("%s/prompt.md", t_tempdir());
     write_file(path, "from a file\n\n");
-    char value[4096];
-    snprintf(value, sizeof value, "@%s", path);
+    char *value = xasprintf("@%s", path);
     text = config_prompt_expand(value, &err);
     EXPECT_STR_EQ(text, "from a file");
     EXPECT(err == NULL);
     free(text);
+    free(value);
+    free(path);
 
     text = config_prompt_expand("@/nonexistent/prompt.md", &err);
     EXPECT(text == NULL);

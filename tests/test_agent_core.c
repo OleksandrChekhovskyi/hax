@@ -147,9 +147,7 @@ static void test_build_system_prompt_append(void)
 
 static void test_build_system_prompt_from_file(void)
 {
-    char *dir = t_tempdir();
-    char path[4096];
-    snprintf(path, sizeof path, "%s/prompt.md", dir);
+    char *path = xasprintf("%s/prompt.md", t_tempdir());
     FILE *fp = fopen(path, "w");
     EXPECT(fp != NULL);
     if (fp) {
@@ -157,9 +155,11 @@ static void test_build_system_prompt_from_file(void)
         fclose(fp);
     }
 
-    char value[4096];
-    snprintf(value, sizeof value, "@%s", path);
+    char *value = xasprintf("@%s", path);
     setenv("HAX_SYSTEM_PROMPT", value, 1);
+    free(value);
+    free(path);
+
     suffix_sections_off();
     char *out = build_test_system_prompt(0);
     EXPECT(out != NULL);
