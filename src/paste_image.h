@@ -4,28 +4,17 @@
 
 #include <stddef.h>
 
-/* Ctrl-V paste policy for the REPL prompt, registered with the editor
- * via input_set_paste_hook. A clipboard image is persisted to a tracked
- * temp file (system/tempfiles.h) and handed back as a
- * "[pasted image: <path>] " marker — the model fetches the pixels with
- * the `read` tool, which owns validation, size budgets, and
- * text-only-model fallbacks. With no image on offer, falls back to the
- * clipboard's text so the binding never feels dead.
- *
- * Returns a malloc'd string to insert at the cursor, or NULL to insert
- * nothing (empty clipboard, no helper available). */
+/* Capture the clipboard for insertion at the REPL cursor. A valid image is persisted to a tracked
+ * temporary file and returned as a "[pasted image: <path>] " marker; otherwise clipboard text is
+ * returned. The caller owns the returned string. Return NULL when neither form is available. */
 char *paste_image_capture(void);
 
-/* CRLF/CR -> LF and NUL-strip, in place; returns the new length.
- * Matches the editor's bracketed-paste normalization so hook-pasted
- * text and terminal-pasted text agree. Exposed for unit tests. */
-size_t paste_image_normalize_text(char *s, size_t n);
+/* Normalize CRLF and lone CR to LF and remove NUL bytes in place. Return the new length. */
+size_t paste_image_normalize_text(char *text, size_t text_len);
 
-/* When `text` consists entirely of file:// URIs (one per line — the
- * shape a file-manager "copy" or a drag-and-drop pastes), return a
- * malloc'd replacement with each URI percent-decoded to a plain path,
- * wrapped in a pasted-image marker when the file sniffs as an image.
- * Returns NULL when the text isn't a URI list. Exposed for unit tests. */
+/* Convert a newline-separated list of local file:// URIs to paths. Paths with recognized image
+ * extensions become pasted-image markers without accessing the filesystem. Return an allocated
+ * replacement, or NULL when `text` is not a non-empty URI list. */
 char *paste_image_uris_to_paths(const char *text);
 
 #endif /* HAX_PASTE_IMAGE_H */

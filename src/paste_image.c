@@ -12,51 +12,47 @@
 #include "terminal/clipboard.h"
 #include "tools/image_sniff.h"
 
-size_t paste_image_normalize_text(char *s, size_t n)
+size_t paste_image_normalize_text(char *text, size_t text_len)
 {
-    size_t w = 0;
-    for (size_t i = 0; i < n; i++) {
-        char c = s[i];
-        if (c == '\0')
+    size_t write_offset = 0;
+    for (size_t i = 0; i < text_len; i++) {
+        char byte = text[i];
+        if (byte == '\0')
             continue;
-        if (c == '\r') {
-            if (i + 1 < n && s[i + 1] == '\n')
-                continue; /* CRLF: the LF that follows survives */
-            c = '\n';     /* lone CR */
+        if (byte == '\r') {
+            if (i + 1 < text_len && text[i + 1] == '\n')
+                continue;
+            byte = '\n';
         }
-        s[w++] = c;
+        text[write_offset++] = byte;
     }
-    s[w] = '\0';
-    return w;
+    text[write_offset] = '\0';
+    return write_offset;
 }
 
-/* File extension for a sniffed mime type — cosmetic (read sniffs by
- * content), but a path ending in .png reads better in the prompt and
- * gives the model an honest hint. */
-static const char *ext_for_mime(const char *mime)
+/* The read tool verifies content; the extension only hints at the already-sniffed data's type. */
+static const char *extension_for_mime_type(const char *mime_type)
 {
-    if (strcmp(mime, "image/png") == 0)
+    if (strcmp(mime_type, "image/png") == 0)
         return ".png";
-    if (strcmp(mime, "image/jpeg") == 0)
+    if (strcmp(mime_type, "image/jpeg") == 0)
         return ".jpg";
-    if (strcmp(mime, "image/gif") == 0)
+    if (strcmp(mime_type, "image/gif") == 0)
         return ".gif";
-    if (strcmp(mime, "image/webp") == 0)
+    if (strcmp(mime_type, "image/webp") == 0)
         return ".webp";
     return "";
 }
 
-/* Persist clipboard image bytes to a tracked temp file and format the
- * prompt marker. Returns NULL when the bytes couldn't be persisted. */
-static char *persist_image(const char *bytes, size_t n, const char *mime)
+static char *persist_clipboard_image(const char *image, size_t image_len, const char *mime_type)
 {
     char *path = NULL;
-    int fd = tempfile_create("paste-", ext_for_mime(mime), &path);
+    int fd = tempfile_create("paste-", extension_for_mime_type(mime_type), &path);
     if (fd < 0)
         return NULL;
-    int wr = write_all(fd, bytes, n);
+    int write_status = write_all(fd, image, image_len);
     close(fd);
-    if (wr < 0) {
+    if (write_status < 0) {
         unlink(path);
         tempfile_untrack(path);
         free(path);
@@ -68,151 +64,136 @@ static char *persist_image(const char *bytes, size_t n, const char *mime)
     return marker;
 }
 
-static int hex_digit(char c)
+static int hex_digit_value(char digit)
 {
-    if (c >= '0' && c <= '9')
-        return c - '0';
-    if (c >= 'a' && c <= 'f')
-        return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F')
-        return c - 'A' + 10;
+    if (digit >= '0' && digit <= '9')
+        return digit - '0';
+    if (digit >= 'a' && digit <= 'f')
+        return digit - 'a' + 10;
+    if (digit >= 'A' && digit <= 'F')
+        return digit - 'A' + 10;
     return -1;
 }
 
-/* Decode one file:// URI into a malloc'd filesystem path, or NULL when
- * `s` isn't one. Accepts an empty or "localhost" authority; a real
- * remote host is not a local path. Malformed %-escapes are kept
- * verbatim rather than rejecting the whole paste, but a decoded %00 is
- * rejected: an embedded NUL would silently truncate the path under the
- * strlen-based consumers downstream. */
-static char *uri_to_path(const char *s, size_t n)
+/* Accept only local file URIs. Keep malformed escapes verbatim, but reject decoded NULs because
+ * downstream filesystem APIs would silently truncate the path. */
+static char *file_uri_to_path(const char *uri, size_t uri_len)
 {
     static const char SCHEME[] = "file://";
-    if (n < sizeof(SCHEME) - 1 || strncmp(s, SCHEME, sizeof(SCHEME) - 1) != 0)
+    if (uri_len < sizeof(SCHEME) - 1 || strncmp(uri, SCHEME, sizeof(SCHEME) - 1) != 0)
         return NULL;
-    const char *p = s + sizeof(SCHEME) - 1;
-    const char *end = s + n;
-    if (p < end && *p != '/') {
-        const char *slash = memchr(p, '/', (size_t)(end - p));
-        if (!slash || (size_t)(slash - p) != 9 || strncmp(p, "localhost", 9) != 0)
+    const char *cursor = uri + sizeof(SCHEME) - 1;
+    const char *end = uri + uri_len;
+    if (cursor < end && *cursor != '/') {
+        const char *slash = memchr(cursor, '/', (size_t)(end - cursor));
+        if (!slash || (size_t)(slash - cursor) != 9 || strncmp(cursor, "localhost", 9) != 0)
             return NULL;
-        p = slash;
+        cursor = slash;
     }
-    if (p >= end || *p != '/')
+    if (cursor >= end || *cursor != '/')
         return NULL;
 
-    struct buf out;
-    buf_init(&out);
-    while (p < end) {
-        char c = *p;
-        int hi, lo;
-        if (c == '%' && p + 2 < end && (hi = hex_digit(p[1])) >= 0 && (lo = hex_digit(p[2])) >= 0) {
-            c = (char)((hi << 4) | lo);
-            if (c == '\0') {
-                buf_free(&out);
+    struct buf path;
+    buf_init(&path);
+    while (cursor < end) {
+        char byte = *cursor;
+        int high, low;
+        if (byte == '%' && cursor + 2 < end && (high = hex_digit_value(cursor[1])) >= 0 &&
+            (low = hex_digit_value(cursor[2])) >= 0) {
+            byte = (char)((high << 4) | low);
+            if (byte == '\0') {
+                buf_free(&path);
                 return NULL;
             }
-            p += 3;
+            cursor += 3;
         } else {
-            p++;
+            cursor++;
         }
-        buf_append(&out, &c, 1);
+        buf_append(&path, &byte, 1);
     }
-    return buf_steal(&out);
+    return buf_steal(&path);
 }
 
-/* Extension-only image guess for the "[pasted image: …]" marker — a
- * cosmetic hint, so we deliberately don't open the file: a URI can name
- * a FIFO or a path on a stalled NFS/FUSE mount, and any stat/open would
- * block the raw-mode editor where Ctrl-C is only a queued byte. The read
- * tool sniffs by content and stays authoritative if the extension lies. */
-static int file_is_image(const char *path)
+/* Avoid filesystem access in the raw-mode editor: a URI may name a FIFO or stalled mount. */
+static int path_has_image_extension(const char *path)
 {
-    const char *dot = strrchr(path, '.');
-    if (!dot)
+    const char *extension = strrchr(path, '.');
+    if (!extension)
         return 0;
-    static const char *const EXTS[] = {".png", ".jpg", ".jpeg", ".gif", ".webp"};
-    for (size_t i = 0; i < sizeof(EXTS) / sizeof(EXTS[0]); i++)
-        if (strcasecmp(dot, EXTS[i]) == 0)
+    static const char *const IMAGE_EXTENSIONS[] = {".png", ".jpg", ".jpeg", ".gif", ".webp"};
+    for (size_t i = 0; i < sizeof(IMAGE_EXTENSIONS) / sizeof(IMAGE_EXTENSIONS[0]); i++)
+        if (strcasecmp(extension, IMAGE_EXTENSIONS[i]) == 0)
             return 1;
     return 0;
 }
 
 char *paste_image_uris_to_paths(const char *text)
 {
-    struct buf out;
-    buf_init(&out);
-    int converted = 0;
-    const char *p = text;
-    while (*p) {
-        const char *nl = strchr(p, '\n');
-        size_t n = nl ? (size_t)(nl - p) : strlen(p);
-        if (n > 0) {
-            char *path = uri_to_path(p, n);
+    struct buf output;
+    buf_init(&output);
+    size_t converted_lines = 0;
+    const char *line = text;
+    while (*line) {
+        const char *newline = strchr(line, '\n');
+        size_t line_len = newline ? (size_t)(newline - line) : strlen(line);
+        if (line_len > 0) {
+            char *path = file_uri_to_path(line, line_len);
             if (!path) {
-                buf_free(&out);
-                return NULL; /* one non-URI line: not a file-manager paste */
+                buf_free(&output);
+                return NULL;
             }
-            if (converted)
-                buf_append(&out, "\n", 1);
-            if (file_is_image(path)) {
+            if (converted_lines)
+                buf_append(&output, "\n", 1);
+            if (path_has_image_extension(path)) {
                 char *marker = xasprintf("[pasted image: %s]", path);
-                buf_append_str(&out, marker);
+                buf_append_str(&output, marker);
                 free(marker);
             } else {
-                buf_append_str(&out, path);
+                buf_append_str(&output, path);
             }
             free(path);
-            converted = 1;
+            converted_lines++;
         }
-        if (!nl)
+        if (!newline)
             break;
-        p = nl + 1;
+        line = newline + 1;
     }
-    if (!converted) {
-        buf_free(&out);
+    if (!converted_lines) {
+        buf_free(&output);
         return NULL;
     }
-    buf_append(&out, " ", 1);
-    return buf_steal(&out);
+    buf_append(&output, " ", 1);
+    return buf_steal(&output);
 }
 
 char *paste_image_capture(void)
 {
-    /* One deadline for the whole operation — the image attempt and the
-     * text fallback share it, so stalled helpers can't stack delays. */
-    long deadline = monotonic_ms() + CLIPBOARD_PASTE_TIMEOUT_MS;
-    size_t n = 0;
-    char *bytes = clipboard_paste_image(&n, deadline);
-    if (bytes) {
-        /* Require a known signature and complete structure — the same
-         * bar the read tool applies before shipping to a provider. */
+    long deadline_ms = monotonic_ms() + CLIPBOARD_PASTE_TIMEOUT_MS;
+    size_t image_len;
+    char *image = clipboard_paste_image(&image_len, deadline_ms);
+    if (image) {
         struct image_info info;
         char *marker = NULL;
-        if (image_sniff(bytes, n, &info) && info.complete)
-            marker = persist_image(bytes, n, info.mime);
-        free(bytes);
+        if (image_sniff(image, image_len, &info) && info.complete)
+            marker = persist_clipboard_image(image, image_len, info.mime);
+        free(image);
         if (marker)
             return marker;
-        /* No usable image — garbage bytes, or persistence failed on an
-         * unusable $TMPDIR — so fall through to the clipboard's text
-         * rather than making the paste a no-op. */
     }
 
-    size_t tn = 0;
-    char *text = clipboard_paste_text(&tn, deadline);
+    size_t text_len;
+    char *text = clipboard_paste_text(&text_len, deadline_ms);
     if (!text)
         return NULL;
-    if (paste_image_normalize_text(text, tn) == 0) {
+    if (paste_image_normalize_text(text, text_len) == 0) {
         free(text);
         return NULL;
     }
-    /* A file-manager "copy" or a drag-and-drop pastes file:// URIs;
-     * convert to plain paths the model can read. */
-    char *conv = paste_image_uris_to_paths(text);
-    if (conv) {
+
+    char *converted_uris = paste_image_uris_to_paths(text);
+    if (converted_uris) {
         free(text);
-        return conv;
+        return converted_uris;
     }
     return text;
 }

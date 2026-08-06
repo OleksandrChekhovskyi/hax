@@ -2,64 +2,48 @@
 #ifndef HAX_TERMINAL_ANSI_H
 #define HAX_TERMINAL_ANSI_H
 
-/* ANSI/SGR escape sequences as string literals, so adjacent-string
- * concatenation works at compile time (e.g. `"\r" ANSI_ERASE_LINE`).
- *
- * Two flavors of closer:
- *  - ANSI_RESET (`0m`) clears every attribute — use when we don't care
- *    what was open.
- *  - Per-attribute closers (`22m`, `23m`, `39m`) leave the others intact,
- *    so e.g. a heading's bold survives an inline-code color span.
- *
- * Note: SGR 22 is "normal intensity" — it closes BOTH bold and dim, so
- * ANSI_BOLD_OFF is the right closer for either. */
+/* String-literal terminal controls, suitable for compile-time concatenation. */
+#define ANSI_ESC               "\x1b"
+#define ANSI_BEL               "\x07"
+#define ANSI_STRING_TERMINATOR ANSI_ESC "\\"
+#define ANSI_CSI               ANSI_ESC "["
 
-#define ANSI_CSI   "\x1b["
-#define ANSI_RESET "\x1b[0m"
+/* The extra ESC before the inner sequence is tmux's quoting convention. These wrappers support an
+ * inner sequence whose only ESC is its leading byte. */
+#define ANSI_TMUX_PASSTHROUGH_BEGIN ANSI_ESC "Ptmux;" ANSI_ESC
+#define ANSI_TMUX_PASSTHROUGH_END   ANSI_STRING_TERMINATOR
 
-#define ANSI_BOLD       "\x1b[1m"
-#define ANSI_DIM        "\x1b[2m"
-#define ANSI_ITALIC     "\x1b[3m"
-#define ANSI_BOLD_OFF   "\x1b[22m" /* also closes dim — same SGR */
-#define ANSI_ITALIC_OFF "\x1b[23m"
+/* ANSI_RESET clears all SGR state. SGR 22 restores normal intensity, closing bold and dim. */
+#define ANSI_RESET      ANSI_CSI "0m"
+#define ANSI_BOLD       ANSI_CSI "1m"
+#define ANSI_DIM        ANSI_CSI "2m"
+#define ANSI_ITALIC     ANSI_CSI "3m"
+#define ANSI_BOLD_OFF   ANSI_CSI "22m"
+#define ANSI_ITALIC_OFF ANSI_CSI "23m"
 
-/* The 16-color palette entries below are the raw vocabulary for
- * terminal/theme.c's "ansi" preset (and for tests). Production code
- * should color through the semantic roles in terminal/theme.h; direct
- * use here is for attributes (bold/dim/italic) and control sequences. */
-#define ANSI_RED            "\x1b[31m"
-#define ANSI_GREEN          "\x1b[32m"
-#define ANSI_YELLOW         "\x1b[33m"
-#define ANSI_CYAN           "\x1b[36m"
-#define ANSI_BRIGHT_MAGENTA "\x1b[95m"
-#define ANSI_FG_DEFAULT     "\x1b[39m"
+/* Production rendering should normally use semantic theme roles instead of raw palette colors. */
+#define ANSI_RED            ANSI_CSI "31m"
+#define ANSI_GREEN          ANSI_CSI "32m"
+#define ANSI_YELLOW         ANSI_CSI "33m"
+#define ANSI_CYAN           ANSI_CSI "36m"
+#define ANSI_BRIGHT_MAGENTA ANSI_CSI "95m"
+#define ANSI_FG_DEFAULT     ANSI_CSI "39m"
 
-#define ANSI_ERASE_LINE   "\x1b[K"
-#define ANSI_ERASE_SCREEN "\x1b[2J"
-#define ANSI_CURSOR_HOME  "\x1b[H"
+#define ANSI_ERASE_LINE   ANSI_CSI "K"  /* cursor through line end (EL 0) */
+#define ANSI_ERASE_BELOW  ANSI_CSI "J"  /* cursor through screen end (ED 0) */
+#define ANSI_ERASE_SCREEN ANSI_CSI "2J" /* entire screen (ED 2) */
+#define ANSI_CURSOR_HOME  ANSI_CSI "H"
 
-/* Erase from the cursor to the end of the screen (ED 0). */
-#define ANSI_ERASE_BELOW "\x1b[J"
+#define ANSI_BRACKETED_PASTE_ENABLE  ANSI_CSI "?2004h"
+#define ANSI_BRACKETED_PASTE_DISABLE ANSI_CSI "?2004l"
 
-#define ANSI_BRACKETED_PASTE_ENABLE  "\x1b[?2004h"
-#define ANSI_BRACKETED_PASTE_DISABLE "\x1b[?2004l"
+/* DEC mode 2026 presents output between BEGIN and END as one frame. Unsupported terminals ignore
+ * it; tty restoration must emit END in case output was interrupted mid-frame. */
+#define ANSI_SYNC_BEGIN ANSI_CSI "?2026h"
+#define ANSI_SYNC_END   ANSI_CSI "?2026l"
 
-/* DEC private mode 2026 — synchronized output. Between BEGIN and END the
- * terminal buffers everything we write and presents it as one atomic
- * frame, so a multi-row prompt repaint can't show an intermediate blank
- * (erased-but-not-yet-redrawn) state. Terminals that don't implement the
- * mode ignore the unknown private mode harmlessly. The prompt editor
- * wraps each full-area repaint in this pair; interrupt.c's tty restore
- * also emits END so a paint interrupted mid-frame can't leave the
- * terminal stuck with updates suspended. */
-#define ANSI_SYNC_BEGIN "\x1b[?2026h"
-#define ANSI_SYNC_END   "\x1b[?2026l"
-
-/* DECTCEM cursor visibility. Hidden during model streaming and tool
- * dispatch so the only "we're alive" indicator is the spinner glyph;
- * shown only for the duration of the input prompt. Restoration on
- * exit and fatal signals is owned by interrupt.c. */
-#define ANSI_CURSOR_HIDE "\x1b[?25l"
-#define ANSI_CURSOR_SHOW "\x1b[?25h"
+/* DECTCEM cursor visibility; tty restoration must always emit SHOW. */
+#define ANSI_CURSOR_HIDE ANSI_CSI "?25l"
+#define ANSI_CURSOR_SHOW ANSI_CSI "?25h"
 
 #endif /* HAX_TERMINAL_ANSI_H */

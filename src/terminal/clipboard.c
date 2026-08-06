@@ -16,78 +16,45 @@
 /* path_join is __APPLE__-only here, invisible to the Linux lint pass. */
 #include "system/path.h" // IWYU pragma: keep
 #include "system/spawn.h"
+#include "terminal/ansi.h"
 #include "text/base64.h"
 
-/* Read-side caps. A clipboard image is a screenshot or a copied picture
- * — tens of MB at the very most; a runaway helper (or a copied 4GB
- * file posing as image/png) shouldn't OOM the REPL. Text matches the
- * editor's own bracketed-paste insert cap (1 MiB). */
+/* Cap untrusted helper output before it reaches the editor or image decoder. */
 #define CLIPBOARD_IMAGE_MAX_BYTES (64u << 20)
 #define CLIPBOARD_TEXT_MAX_BYTES  (1u << 20)
+#define CLIPBOARD_TYPES_MAX_BYTES (64u << 10)
 
-char *clipboard_osc52_sequence(const char *text, size_t len, int tmux_wrap, size_t *out_len)
+#define OSC52_PREFIX      ANSI_ESC "]52;c;"
+#define OSC52_SUFFIX      ANSI_BEL
+#define TMUX_OSC52_PREFIX ANSI_TMUX_PASSTHROUGH_BEGIN OSC52_PREFIX
+#define TMUX_OSC52_SUFFIX OSC52_SUFFIX ANSI_TMUX_PASSTHROUGH_END
+
+char *clipboard_osc52_sequence(const char *text, size_t text_len, int tmux_wrap, size_t *out_len)
 {
-    if (len > CLIPBOARD_OSC52_MAX_BYTES)
+    if (text_len > CLIPBOARD_OSC52_MAX_BYTES)
         return NULL;
 
-    size_t b64_len = 0;
-    char *b64 = base64_encode(text, len, &b64_len);
+    size_t encoded_len;
+    char *encoded = base64_encode(text, text_len, &encoded_len);
+    const char *prefix = tmux_wrap ? TMUX_OSC52_PREFIX : OSC52_PREFIX;
+    const char *suffix = tmux_wrap ? TMUX_OSC52_SUFFIX : OSC52_SUFFIX;
+    size_t prefix_len = strlen(prefix);
+    size_t suffix_len = strlen(suffix);
+    size_t sequence_len = prefix_len + encoded_len + suffix_len;
+    char *sequence = xmalloc(sequence_len + 1);
 
-    /* Inner OSC 52 form: ESC ] 5 2 ; c ; <b64> BEL  (7 fixed bytes + b64).
-     * tmux passthrough wraps it as ESC P t m u x ; <inner-with-doubled-ESC> ESC \,
-     * and the inner form contains exactly one ESC, so doubling it adds one byte. */
-    char *out;
-    size_t out_n;
-    if (tmux_wrap) {
-        out_n = 7 /* ESC P t m u x ; */ + 1 /* extra ESC for the doubled inner ESC */
-                + 7 /* ESC ] 5 2 ; c ; */ + b64_len + 1 /* BEL */ + 2 /* ESC \ */;
-        out = xmalloc(out_n + 1);
-        size_t p = 0;
-        out[p++] = 0x1b;
-        out[p++] = 'P';
-        out[p++] = 't';
-        out[p++] = 'm';
-        out[p++] = 'u';
-        out[p++] = 'x';
-        out[p++] = ';';
-        out[p++] = 0x1b; /* doubled ESC of the inner sequence */
-        out[p++] = 0x1b;
-        out[p++] = ']';
-        out[p++] = '5';
-        out[p++] = '2';
-        out[p++] = ';';
-        out[p++] = 'c';
-        out[p++] = ';';
-        memcpy(out + p, b64, b64_len);
-        p += b64_len;
-        out[p++] = 0x07;
-        out[p++] = 0x1b;
-        out[p++] = '\\';
-        out[p] = '\0';
-    } else {
-        out_n = 7 + b64_len + 1;
-        out = xmalloc(out_n + 1);
-        size_t p = 0;
-        out[p++] = 0x1b;
-        out[p++] = ']';
-        out[p++] = '5';
-        out[p++] = '2';
-        out[p++] = ';';
-        out[p++] = 'c';
-        out[p++] = ';';
-        memcpy(out + p, b64, b64_len);
-        p += b64_len;
-        out[p++] = 0x07;
-        out[p] = '\0';
-    }
-    free(b64);
+    memcpy(sequence, prefix, prefix_len);
+    memcpy(sequence + prefix_len, encoded, encoded_len);
+    memcpy(sequence + prefix_len + encoded_len, suffix, suffix_len + 1);
+    free(encoded);
+
     if (out_len)
-        *out_len = out_n;
-    return out;
+        *out_len = sequence_len;
+    return sequence;
 }
 
-/* Use argv-based exec so probing PATH does not require shell interpretation. */
-static int run_copy_helper(const char *const *argv, const char *text, size_t len)
+/* Use argv-based exec so probing PATH never invokes a shell. */
+static int run_copy_helper(const char *const *argv, const char *text, size_t text_len)
 {
     int pipe_fds[2];
     if (pipe(pipe_fds) < 0)
@@ -105,9 +72,11 @@ static int run_copy_helper(const char *const *argv, const char *text, size_t len
     }
     if (pid == 0) {
         close(pipe_fds[1]);
-        if (dup2(pipe_fds[0], STDIN_FILENO) < 0)
-            _exit(127);
-        close(pipe_fds[0]);
+        if (pipe_fds[0] != STDIN_FILENO) {
+            if (dup2(pipe_fds[0], STDIN_FILENO) < 0)
+                _exit(127);
+            close(pipe_fds[0]);
+        }
 
         int null_fd = open("/dev/null", O_WRONLY);
         if (null_fd >= 0) {
@@ -122,7 +91,7 @@ static int run_copy_helper(const char *const *argv, const char *text, size_t len
     }
 
     close(pipe_fds[0]);
-    int write_status = write_all(pipe_fds[1], text, len);
+    int write_status = write_all(pipe_fds[1], text, text_len);
     close(pipe_fds[1]);
     int status = spawn_wait_child(pid);
     spawn_parent_restore_signals(&signals);
@@ -131,73 +100,61 @@ static int run_copy_helper(const char *const *argv, const char *text, size_t len
     return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
 }
 
-static int try_native(const char *text, size_t len)
+static int copy_with_native_helper(const char *text, size_t text_len)
 {
-    /* macOS: pbcopy is the only game in town. On Linux this exec just
-     * fails with ENOENT and we fall through — cheaper than gating on
-     * uname or compile-time platform macros. */
+    /* pbcopy is also available on some non-macOS systems, so probe PATH everywhere. */
     {
         const char *argv[] = {"pbcopy", NULL};
-        if (run_copy_helper(argv, text, len) == 0)
+        if (run_copy_helper(argv, text, text_len) == 0)
             return 0;
     }
-    /* Wayland: try wl-copy first when WAYLAND_DISPLAY is set. xclip /
-     * xsel may "work" via XWayland but write to a clipboard the user
-     * can't paste from in Wayland-native apps, so order matters. We
-     * only try wl-copy when WAYLAND_DISPLAY is set — without it the
-     * tool can't connect to a compositor and would always fail. */
+    /* Prefer the Wayland clipboard over the potentially stale XWayland selection. */
     if (getenv("WAYLAND_DISPLAY")) {
         const char *argv[] = {"wl-copy", NULL};
-        if (run_copy_helper(argv, text, len) == 0)
+        if (run_copy_helper(argv, text, text_len) == 0)
             return 0;
     }
     {
         const char *argv[] = {"xclip", "-selection", "clipboard", NULL};
-        if (run_copy_helper(argv, text, len) == 0)
+        if (run_copy_helper(argv, text, text_len) == 0)
             return 0;
     }
     {
         const char *argv[] = {"xsel", "-b", "-i", NULL};
-        if (run_copy_helper(argv, text, len) == 0)
+        if (run_copy_helper(argv, text, text_len) == 0)
             return 0;
     }
     return -1;
 }
 
-static int write_osc52(const char *text, size_t len)
+static int copy_with_osc52(const char *text, size_t text_len)
 {
-    int tmux_wrap = (getenv("TMUX") != NULL);
-    size_t seq_len = 0;
-    char *seq = clipboard_osc52_sequence(text, len, tmux_wrap, &seq_len);
-    if (!seq)
+    int tmux_wrap = getenv("TMUX") != NULL;
+    size_t sequence_len;
+    char *sequence = clipboard_osc52_sequence(text, text_len, tmux_wrap, &sequence_len);
+    if (!sequence)
         return -1;
 
-    /* Prefer /dev/tty so a redirected stdout can't swallow the escape
-     * sequence (and so the user doesn't see a wall of base64 if stdout
-     * isn't a TTY for some reason). */
+    /* Write to the terminal even when stdout is redirected. */
     int fd = open("/dev/tty", O_WRONLY | O_NOCTTY);
-    int opened = (fd >= 0);
-    if (!opened)
+    int owns_fd = fd >= 0;
+    if (!owns_fd)
         fd = STDOUT_FILENO;
-    int rc = write_all(fd, seq, seq_len);
-    if (opened)
+    int result = write_all(fd, sequence, sequence_len);
+    if (owns_fd)
         close(fd);
-    free(seq);
-    return rc;
+    free(sequence);
+    return result;
 }
 
-static int is_ssh(void)
+static int is_ssh_session(void)
 {
     return getenv("SSH_TTY") != NULL || getenv("SSH_CONNECTION") != NULL;
 }
 
-/* Read-direction capture under the shared paste deadline — the only
- * way this file runs a helper whose output it consumes. An expired
- * deadline skips the helper outright, so one stall can't stack with
- * the fallback chain's later attempts (see CLIPBOARD_PASTE_TIMEOUT_MS
- * in clipboard.h). */
-static char *paste_capture(const char *const *argv, size_t max_bytes, long deadline_ms,
-                           size_t *out_len)
+/* Every helper consumes the same absolute deadline. */
+static char *capture_helper_output(const char *const *argv, size_t max_bytes, long deadline_ms,
+                                   size_t *out_len)
 {
     long remaining_ms = deadline_ms - monotonic_ms();
     if (remaining_ms <= 0)
@@ -206,227 +163,199 @@ static char *paste_capture(const char *const *argv, size_t max_bytes, long deadl
     return spawn_capture_stdout(argv, max_bytes, timeout_ms, out_len);
 }
 
-/* macOS clipboard image via osascript — no extra install needed
- * (pbpaste is text-only). AppleScript can't stream binary to stdout,
- * so the script writes the clipboard's PNG rendition to a scratch file.
- * The scratch is consumed before return, so it is deliberately not in
- * the tracked-tempfile registry. macOS-only: on Linux osascript would
- * just ENOENT, so gating spares a pointless scratch file + failed exec
- * on every fall-through paste. */
 #ifdef __APPLE__
-static char *paste_image_osascript(size_t *out_len, long deadline_ms)
+/* AppleScript writes binary clipboard data through a file rather than stdout. */
+static char *paste_image_with_osascript(size_t *out_len, long deadline_ms)
 {
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp)
-        tmp = "/tmp";
-    char *path = path_join(tmp, "hax-clip-XXXXXX");
+    const char *temp_dir = getenv("TMPDIR");
+    if (!temp_dir || !*temp_dir)
+        temp_dir = "/tmp";
+    char *path = path_join(temp_dir, "hax-clip-XXXXXX");
     int fd = mkstemp(path);
     if (fd < 0) {
         free(path);
         return NULL;
     }
 
-    /* Escape for an AppleScript string literal ("\" and "\""). */
-    struct buf esc;
-    buf_init(&esc);
-    for (const char *c = path; *c; c++) {
-        if (*c == '\\' || *c == '"')
-            buf_append(&esc, "\\", 1);
-        buf_append(&esc, c, 1);
+    /* Escape backslashes and double quotes for an AppleScript string literal. */
+    struct buf escaped;
+    buf_init(&escaped);
+    for (const char *cursor = path; *cursor; cursor++) {
+        if (*cursor == '\\' || *cursor == '"')
+            buf_append(&escaped, "\\", 1);
+        buf_append(&escaped, cursor, 1);
     }
-    char *esc_path = buf_steal(&esc);
-    /* \xc2\xab / \xc2\xbb are the UTF-8 guillemets in the raw-class
-     * syntax for the PNG clipboard flavor. */
+    char *escaped_path = buf_steal(&escaped);
+    /* The UTF-8 guillemets delimit AppleScript's raw PNG class name. */
     char *script = xasprintf("set f to open for access POSIX file \"%s\" with write permission\n"
                              "write (the clipboard as \xc2\xab"
                              "class PNGf\xc2\xbb) to f\n"
                              "close access f",
-                             esc_path);
-    free(esc_path);
+                             escaped_path);
+    free(escaped_path);
 
     const char *argv[] = {"osascript", "-e", script, NULL};
-    size_t junk = 0;
-    char *out = paste_capture(argv, CLIPBOARD_IMAGE_MAX_BYTES, deadline_ms, &junk);
-    free(out); /* osascript's stdout is script chatter, not the image */
+    size_t ignored_len;
+    char *helper_output =
+        capture_helper_output(argv, CLIPBOARD_IMAGE_MAX_BYTES, deadline_ms, &ignored_len);
+    free(helper_output);
     free(script);
 
-    /* Empty scratch file = script failed (no image on the clipboard,
-     * or no osascript on this platform). */
-    char *data = NULL;
-    struct stat st;
-    if (fstat(fd, &st) == 0 && st.st_size > 0 && (size_t)st.st_size <= CLIPBOARD_IMAGE_MAX_BYTES) {
-        size_t n = (size_t)st.st_size;
-        data = xmalloc(n);
-        ssize_t got = 0;
-        size_t off = 0;
-        while (off < n && (got = pread(fd, data + off, n - off, (off_t)off)) > 0)
-            off += (size_t)got;
-        if (off != n) {
-            free(data);
-            data = NULL;
+    char *image = NULL;
+    struct stat status;
+    if (fstat(fd, &status) == 0 && status.st_size > 0 &&
+        (size_t)status.st_size <= CLIPBOARD_IMAGE_MAX_BYTES) {
+        size_t image_len = (size_t)status.st_size;
+        image = xmalloc(image_len);
+        ssize_t bytes_read = 0;
+        size_t offset = 0;
+        while (offset < image_len &&
+               (bytes_read = pread(fd, image + offset, image_len - offset, (off_t)offset)) > 0) {
+            offset += (size_t)bytes_read;
+        }
+        if (offset != image_len) {
+            free(image);
+            image = NULL;
         } else {
-            *out_len = n;
+            *out_len = image_len;
         }
     }
     close(fd);
     unlink(path);
     free(path);
-    return data;
+    return image;
 }
 #else
-/* Wayland/X11 image negotiation. On macOS the native pasteboard
- * (osascript above) is authoritative, so these aren't compiled. */
 
-/* Pick the best image type from a newline-separated offer listing
- * (wl-paste --list-types / xclip TARGETS): image/png when available,
- * else the first type the image path supports. Returns a static string
- * or NULL when nothing usable is on offer. */
-static const char *pick_image_type(const char *types)
+/* Return the most preferred supported MIME type, borrowed from a static table. */
+static const char *pick_image_mime_type(const char *offered_types)
 {
-    static const char *const SUPPORTED[] = {"image/png", "image/jpeg", "image/gif", "image/webp"};
-    const char *best = NULL;
-    size_t best_rank = sizeof(SUPPORTED) / sizeof(SUPPORTED[0]);
-    const char *p = types;
-    while (*p) {
-        const char *nl = strchr(p, '\n');
-        size_t n = nl ? (size_t)(nl - p) : strlen(p);
-        for (size_t i = 0; i < best_rank; i++) {
-            if (n == strlen(SUPPORTED[i]) && strncmp(p, SUPPORTED[i], n) == 0) {
-                best = SUPPORTED[i];
-                best_rank = i;
+    static const char *const SUPPORTED_TYPES[] = {"image/png", "image/jpeg", "image/gif",
+                                                  "image/webp"};
+    const char *selected_type = NULL;
+    size_t selected_rank = sizeof(SUPPORTED_TYPES) / sizeof(SUPPORTED_TYPES[0]);
+    const char *line = offered_types;
+
+    while (*line) {
+        const char *newline = strchr(line, '\n');
+        size_t line_len = newline ? (size_t)(newline - line) : strlen(line);
+        for (size_t rank = 0; rank < selected_rank; rank++) {
+            const char *supported_type = SUPPORTED_TYPES[rank];
+            if (line_len == strlen(supported_type) &&
+                strncmp(line, supported_type, line_len) == 0) {
+                selected_type = supported_type;
+                selected_rank = rank;
                 break;
             }
         }
-        if (!nl)
+        if (!newline)
             break;
-        p = nl + 1;
+        line = newline + 1;
     }
-    return best;
+    return selected_type;
 }
 
-/* List the clipboard's offered types via `lister`, pick a supported
- * image type, and fetch it by substituting the type for the TYPE
- * placeholder in `fetcher`. Never requests an unpinned type: helpers
- * asked for "whatever you have" can serve raw image bytes as text.
- * *listed is set once the lister produces an offer listing, so the
- * caller can tell "this backend answered: no image" (authoritative)
- * from "this backend is unavailable" (try the next one). */
-static char *paste_image_negotiated(const char *const *lister, const char *const *fetcher,
-                                    size_t *out_len, int *listed, long deadline_ms)
+/* `listing_succeeded` distinguishes an authoritative no-image result from an unavailable helper. */
+static const char *list_image_mime_type(const char *const *argv, int *listing_succeeded,
+                                        long deadline_ms)
 {
-    size_t tn = 0;
-    char *types = paste_capture(lister, 65536, deadline_ms, &tn);
-    if (!types)
-        return NULL;
-    *listed = 1;
-    const char *t = pick_image_type(types);
-    free(types);
-    if (!t)
+    size_t listing_len;
+    char *listing =
+        capture_helper_output(argv, CLIPBOARD_TYPES_MAX_BYTES, deadline_ms, &listing_len);
+    if (!listing)
         return NULL;
 
-    const char *argv[8];
-    size_t i = 0;
-    for (; fetcher[i] && i < 7; i++)
-        argv[i] = strcmp(fetcher[i], "TYPE") == 0 ? t : fetcher[i];
-    argv[i] = NULL;
-    return paste_capture(argv, CLIPBOARD_IMAGE_MAX_BYTES, deadline_ms, out_len);
+    if (listing_succeeded)
+        *listing_succeeded = 1;
+    const char *mime_type = pick_image_mime_type(listing);
+    free(listing);
+    return mime_type;
 }
 #endif /* __APPLE__ */
 
 char *clipboard_paste_image(size_t *out_len, long deadline_ms)
 {
 #ifdef __APPLE__
-    /* Native pasteboard first, matching pbcopy/pbpaste priority: an
-     * XQuartz X11 selection is a separate surface, so consulting xclip
-     * here could shadow the real clipboard's image with stale X11
-     * content once its listing became authoritative. */
-    return paste_image_osascript(out_len, deadline_ms);
+    return paste_image_with_osascript(out_len, deadline_ms);
 #else
-    /* Wayland first when the compositor is reachable, same ordering
-     * rationale as try_native: under XWayland both may answer, but the
-     * Wayland clipboard is the one the user actually copied into. */
+    /* Prefer the Wayland clipboard over the potentially stale XWayland selection. */
     if (getenv("WAYLAND_DISPLAY")) {
-        const char *lister[] = {"wl-paste", "--list-types", NULL};
-        const char *fetcher[] = {"wl-paste", "-t", "TYPE", NULL};
-        int listed = 0;
-        char *out = paste_image_negotiated(lister, fetcher, out_len, &listed, deadline_ms);
-        /* A successful listing is authoritative even when it offers no
-         * image: under XWayland the X11 clipboard is a different,
-         * possibly stale selection, and falling through would risk
-         * pasting an unrelated old image (or stalling on a broken X11
-         * owner) while valid Wayland text waits in the text fallback. */
-        if (out || listed)
-            return out;
+        const char *list_argv[] = {"wl-paste", "--list-types", NULL};
+        int listing_succeeded = 0;
+        const char *mime_type = list_image_mime_type(list_argv, &listing_succeeded, deadline_ms);
+        if (mime_type) {
+            const char *read_argv[] = {"wl-paste", "-t", mime_type, NULL};
+            return capture_helper_output(read_argv, CLIPBOARD_IMAGE_MAX_BYTES, deadline_ms,
+                                         out_len);
+        }
+        if (listing_succeeded)
+            return NULL;
     }
-    {
-        const char *lister[] = {"xclip", "-selection", "clipboard", "-t", "TARGETS", "-o", NULL};
-        const char *fetcher[] = {"xclip", "-selection", "clipboard", "-t", "TYPE", "-o", NULL};
-        int listed = 0;
-        char *out = paste_image_negotiated(lister, fetcher, out_len, &listed, deadline_ms);
-        if (out || listed)
-            return out;
-    }
-    return NULL;
+
+    const char *list_argv[] = {"xclip", "-selection", "clipboard", "-t", "TARGETS", "-o", NULL};
+    const char *mime_type = list_image_mime_type(list_argv, NULL, deadline_ms);
+    if (!mime_type)
+        return NULL;
+    const char *read_argv[] = {"xclip", "-selection", "clipboard", "-t", mime_type, "-o", NULL};
+    return capture_helper_output(read_argv, CLIPBOARD_IMAGE_MAX_BYTES, deadline_ms, out_len);
 #endif
 }
 
 char *clipboard_paste_text(size_t *out_len, long deadline_ms)
 {
-    /* Same helper order as try_native's copy direction. */
     {
         const char *argv[] = {"pbpaste", NULL};
-        char *out = paste_capture(argv, CLIPBOARD_TEXT_MAX_BYTES, deadline_ms, out_len);
-        if (out)
-            return out;
+        char *text = capture_helper_output(argv, CLIPBOARD_TEXT_MAX_BYTES, deadline_ms, out_len);
+        if (text)
+            return text;
     }
     if (getenv("WAYLAND_DISPLAY")) {
-        const char *lister[] = {"wl-paste", "--list-types", NULL};
-        size_t tn = 0;
-        char *types = paste_capture(lister, 65536, deadline_ms, &tn);
-        if (types) {
-            free(types);
-            /* Wayland answered, so it is the clipboard authority —
-             * same rationale as clipboard_paste_image: falling through
-             * to xclip/xsel could serve stale XWayland content. Pin
-             * the type: bare wl-paste auto-picks from the offer list
-             * and would emit raw image bytes when no text is on offer;
-             * "text" is wl-paste's documented any-text alias. */
-            const char *argv[] = {"wl-paste", "-n", "-t", "text", NULL};
-            return paste_capture(argv, CLIPBOARD_TEXT_MAX_BYTES, deadline_ms, out_len);
+        /* A responding Wayland clipboard is authoritative over the XWayland selection. */
+        const char *list_argv[] = {"wl-paste", "--list-types", NULL};
+        size_t listing_len;
+        char *listing =
+            capture_helper_output(list_argv, CLIPBOARD_TYPES_MAX_BYTES, deadline_ms, &listing_len);
+        if (listing) {
+            free(listing);
+            /* Pin the documented any-text alias; untyped wl-paste may select raw image bytes. */
+            const char *read_argv[] = {"wl-paste", "-n", "-t", "text", NULL};
+            return capture_helper_output(read_argv, CLIPBOARD_TEXT_MAX_BYTES, deadline_ms, out_len);
         }
     }
     {
         const char *argv[] = {"xclip", "-selection", "clipboard", "-o", NULL};
-        char *out = paste_capture(argv, CLIPBOARD_TEXT_MAX_BYTES, deadline_ms, out_len);
-        if (out)
-            return out;
+        char *text = capture_helper_output(argv, CLIPBOARD_TEXT_MAX_BYTES, deadline_ms, out_len);
+        if (text)
+            return text;
     }
     {
         const char *argv[] = {"xsel", "-b", "-o", NULL};
-        char *out = paste_capture(argv, CLIPBOARD_TEXT_MAX_BYTES, deadline_ms, out_len);
-        if (out)
-            return out;
+        char *text = capture_helper_output(argv, CLIPBOARD_TEXT_MAX_BYTES, deadline_ms, out_len);
+        if (text)
+            return text;
     }
     return NULL;
 }
 
-int clipboard_copy(const char *text, size_t len, const char **err)
+int clipboard_copy(const char *text, size_t text_len, const char **error)
 {
-    if (is_ssh()) {
-        if (write_osc52(text, len) == 0)
+    if (is_ssh_session()) {
+        if (copy_with_osc52(text, text_len) == 0)
             return 0;
-        if (err) {
-            *err = (len > CLIPBOARD_OSC52_MAX_BYTES) ? "response too large for OSC 52 over SSH"
-                                                     : "terminal did not accept OSC 52 sequence";
+        if (error) {
+            *error = text_len > CLIPBOARD_OSC52_MAX_BYTES
+                         ? "response too large for OSC 52 over SSH"
+                         : "terminal did not accept OSC 52 sequence";
         }
         return -1;
     }
-    if (try_native(text, len) == 0)
+    if (copy_with_native_helper(text, text_len) == 0)
         return 0;
-    if (write_osc52(text, len) == 0)
+    if (copy_with_osc52(text, text_len) == 0)
         return 0;
-    if (err)
-        *err = "no clipboard helper available "
-               "(install pbcopy / wl-copy / xclip / xsel, or use a terminal that supports OSC 52)";
+    if (error)
+        *error =
+            "no clipboard helper available "
+            "(install pbcopy / wl-copy / xclip / xsel, or use a terminal that supports OSC 52)";
     return -1;
 }

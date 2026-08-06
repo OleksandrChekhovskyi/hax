@@ -10,56 +10,45 @@
 #include "util.h"
 #include "system/tempfiles.h"
 
-static void check(const char *in, size_t n, const char *want)
+static void expect_normalized_text(const char *input, size_t input_len, const char *expected)
 {
-    char *s = xmalloc(n + 1);
-    memcpy(s, in, n);
-    s[n] = '\0';
-    size_t got = paste_image_normalize_text(s, n);
-    EXPECT(got == strlen(want));
-    EXPECT_STR_EQ(s, want);
-    free(s);
+    char *text = xmalloc(input_len + 1);
+    memcpy(text, input, input_len);
+    text[input_len] = '\0';
+    size_t normalized_len = paste_image_normalize_text(text, input_len);
+    EXPECT(normalized_len == strlen(expected));
+    EXPECT_STR_EQ(text, expected);
+    free(text);
 }
 
 static void test_normalize_crlf(void)
 {
-    check("a\r\nb\r\n", 6, "a\nb\n");
+    expect_normalized_text("a\r\nb\r\n", 6, "a\nb\n");
 }
 
 static void test_normalize_lone_cr(void)
 {
-    check("a\rb", 3, "a\nb");
-    check("\r", 1, "\n");
+    expect_normalized_text("a\rb", 3, "a\nb");
+    expect_normalized_text("\r", 1, "\n");
 }
 
 static void test_normalize_strips_nuls(void)
 {
-    check("a\0b", 3, "ab");
+    expect_normalized_text("a\0b", 3, "ab");
 }
 
 static void test_normalize_plain_passthrough(void)
 {
-    check("hello\nworld", 11, "hello\nworld");
-    check("", 0, "");
+    expect_normalized_text("hello\nworld", 11, "hello\nworld");
+    expect_normalized_text("", 0, "");
 }
 
 static void test_normalize_mixed(void)
 {
-    /* CRLF, lone CR, and NUL in one buffer. */
-    check("x\r\n\0y\rz", 7, "x\ny\nz");
+    expect_normalized_text("x\r\n\0y\rz", 7, "x\ny\nz");
 }
 
-/* ---- end-to-end capture via fake clipboard helpers ----
- *
- * paste_image_capture shells out to wl-paste/xclip/xsel/pbpaste/
- * osascript; a directory of fake helpers prepended to PATH makes the
- * flow deterministic with no real clipboard (see install_fake_helpers
- * for the fake's contract). osascript's invocation matches neither the
- * listing nor the fetch shape and exits 1, exercising its "scratch
- * file stayed empty" failure path. */
-
-/* Same decodable 2x3 RGB PNG fixture as tools/test_read.c — the sniff
- * in paste_image_capture requires a complete container. */
+/* A complete 2x3 RGB PNG accepted by image_sniff(). */
 static const unsigned char TINY_PNG[] = {
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03, 0x08, 0x02, 0x00, 0x00, 0x00, 0x36, 0x88, 0x49,
@@ -79,17 +68,8 @@ static void write_file(const char *path, const void *data, size_t n, mode_t mode
     chmod(path, mode);
 }
 
-/* The fake advertises $FAKE_IMG_MIME in its type listing (plus
- * text/plain when $FAKE_TEXT is set), serves $FAKE_IMG_FILE only when
- * that exact type is requested — a pinned-type request for anything
- * else fails like the real helpers — and serves $FAKE_TEXT for text
- * requests. When invoked as xclip/xsel with $FAKE_X11_IMG_MIME or
- * $FAKE_X11_TEXT set, those override the Wayland content, simulating
- * the divergent stale X11 clipboard XWayland exposes next to the live
- * Wayland selection. As osascript (-e <script>) it plays the macOS-only
- * path: extract the scratch path the production AppleScript opens and
- * deliver $FAKE_IMG_FILE there, so the osascript backend is exercised
- * when clipboard.c is compiled under __APPLE__. */
+/* Image fetches must request FAKE_IMG_MIME exactly. FAKE_X11_* overrides the default clipboard for
+ * X11 helpers, and the osascript form copies FAKE_IMG_FILE to its script's scratch path. */
 static void install_fake_helpers(const char *dir)
 {
     static const char SCRIPT[] =
@@ -159,18 +139,15 @@ static void test_capture_image_to_marker(void)
     char *marker = paste_image_capture();
     EXPECT(marker != NULL);
     if (marker) {
-        /* Trailing space so the user can keep typing. */
         EXPECT(marker[strlen(marker) - 1] == ' ');
         char *path = marker_path(marker);
         EXPECT(path != NULL);
         if (path) {
-            /* Container dir + readable name + sniffed extension. */
             EXPECT(strstr(path, "/hax-") != NULL);
             EXPECT(strstr(path, "/paste-") != NULL);
             EXPECT(strlen(path) > 4 && strcmp(path + strlen(path) - 4, ".png") == 0);
             struct stat st;
             EXPECT(stat(path, &st) == 0 && (size_t)st.st_size == sizeof(TINY_PNG));
-            /* The tracked-registry flush must reclaim it. */
             tempfiles_cleanup();
             EXPECT(stat(path, &st) < 0);
             free(path);
@@ -182,8 +159,6 @@ static void test_capture_image_to_marker(void)
 
 static void test_capture_garbage_image_falls_back_to_text(void)
 {
-    /* Helper "succeeds" but the bytes aren't a complete image (bare PNG
-     * signature): sniff refuses, text fallback wins, CRLF normalized. */
     char *img = xasprintf("%s/garbage.png", t_tempdir());
     write_file(img, TINY_PNG, 16, 0644);
     setenv("FAKE_IMG_FILE", img, 1);
@@ -209,11 +184,6 @@ static void test_capture_empty_clipboard_returns_null(void)
 
 static void test_capture_negotiates_non_png_type(void)
 {
-    /* A clipboard offering only image/gif (no PNG rendition, no text)
-     * must still paste: the offer listing drives the requested type,
-     * and the marker gets the sniffed extension. Before type
-     * negotiation this fell through to the unpinned text fallback,
-     * which could serve the raw image bytes as "text". */
     static const unsigned char TINY_GIF[] = {
         0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00,
         0x00, 0xff, 0xff, 0xff, 0x21, 0xf9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00,
@@ -242,13 +212,10 @@ static void test_capture_negotiates_non_png_type(void)
 
 static void test_capture_persist_failure_falls_back_to_text(void)
 {
-    /* The image sniffs clean but can't be persisted (container creation
-     * fails under a nonexistent $TMPDIR); the paste must fall back to the
-     * clipboard's text rather than becoming a no-op. */
-    const char *cur = getenv("TMPDIR");
-    char *saved = cur ? xstrdup(cur) : NULL;
+    const char *current_tmpdir = getenv("TMPDIR");
+    char *saved_tmpdir = current_tmpdir ? xstrdup(current_tmpdir) : NULL;
 
-    char *img = xasprintf("%s/clip.png", t_tempdir()); /* create before breaking TMPDIR */
+    char *img = xasprintf("%s/clip.png", t_tempdir());
     write_file(img, TINY_PNG, sizeof(TINY_PNG), 0644);
     setenv("FAKE_IMG_FILE", img, 1);
     setenv("FAKE_IMG_MIME", "image/png", 1);
@@ -262,9 +229,9 @@ static void test_capture_persist_failure_falls_back_to_text(void)
         free(out);
     }
 
-    if (saved) {
-        setenv("TMPDIR", saved, 1);
-        free(saved);
+    if (saved_tmpdir) {
+        setenv("TMPDIR", saved_tmpdir, 1);
+        free(saved_tmpdir);
     } else {
         unsetenv("TMPDIR");
     }
@@ -272,11 +239,8 @@ static void test_capture_persist_failure_falls_back_to_text(void)
     free(img);
 }
 
-static void test_capture_wayland_no_image_is_authoritative(void)
+static void test_capture_wayland_prevents_x11_image_fallback(void)
 {
-    /* The Wayland listing succeeds and offers text only, while the
-     * (stale) X11 clipboard still offers an image. The Wayland verdict
-     * must win: paste the current text, never fetch the old X11 image. */
     char *img = xasprintf("%s/stale.png", t_tempdir());
     write_file(img, TINY_PNG, sizeof(TINY_PNG), 0644);
     unsetenv("FAKE_IMG_MIME");
@@ -297,12 +261,8 @@ static void test_capture_wayland_no_image_is_authoritative(void)
     free(img);
 }
 
-static void test_capture_wayland_authority_covers_text(void)
+static void test_capture_wayland_prevents_x11_text_fallback(void)
 {
-    /* The Wayland clipboard offers only an unsupported image type and
-     * no text; the stale X11 clipboard still holds text. The Wayland
-     * verdict must carry through the text fallback too: paste nothing
-     * rather than unrelated X11 content. */
     setenv("FAKE_IMG_MIME", "image/bmp", 1);
     unsetenv("FAKE_IMG_FILE");
     unsetenv("FAKE_TEXT");
@@ -313,8 +273,6 @@ static void test_capture_wayland_authority_covers_text(void)
     unsetenv("FAKE_X11_TEXT");
     unsetenv("FAKE_IMG_MIME");
 }
-
-/* ---- file:// URI conversion (Dolphin/Nautilus copy, drag-and-drop) ---- */
 
 static void test_uris_plain_file(void)
 {
@@ -336,12 +294,8 @@ static void test_uris_percent_decode_and_localhost(void)
     }
 }
 
-static void test_uris_image_gets_marker(void)
+static void test_uris_image_extension_gets_marker_without_file_access(void)
 {
-    /* The marker is driven by extension alone — no file access — so a
-     * path that doesn't exist still gets marked (case-insensitively).
-     * This is what keeps the raw-mode editor off a stalled NFS/FUSE
-     * path or a writer-less FIFO named like an image. */
     char *out = paste_image_uris_to_paths("file:///no/such/dir/pic.PNG");
     EXPECT(out != NULL);
     if (out) {
@@ -362,10 +316,7 @@ static void test_uris_multiple_lines(void)
 
 static void test_uris_fifo_is_not_opened(void)
 {
-    /* Regression guard against reintroducing file I/O: a writer-less
-     * FIFO with an image extension exercises the marker branch, which
-     * must classify by extension without opening the file — an fopen
-     * here would block forever and the test would hang (timeout). */
+    /* Opening this writer-less FIFO would hang the test. */
     char *fifo = xasprintf("%s/pipe.png", t_tempdir());
     EXPECT(mkfifo(fifo, 0600) == 0);
     char *uri = xasprintf("file://%s", fifo);
@@ -389,8 +340,6 @@ static void test_uris_reject_non_uri_text(void)
     EXPECT(paste_image_uris_to_paths("file://remotehost/share/x") == NULL);
     EXPECT(paste_image_uris_to_paths("file://") == NULL);
     EXPECT(paste_image_uris_to_paths("") == NULL);
-    /* A decoded %00 would truncate the path via strlen downstream —
-     * reject rather than convert. */
     EXPECT(paste_image_uris_to_paths("file:///tmp/a%00.png") == NULL);
 }
 
@@ -402,7 +351,6 @@ int main(void)
     test_normalize_plain_passthrough();
     test_normalize_mixed();
 
-    /* Fake-helper PATH + private TMPDIR for the capture tests. */
     char *helpers = t_tempdir();
     install_fake_helpers(helpers);
     char *path_env = xasprintf("%s:%s", helpers, getenv("PATH"));
@@ -416,12 +364,12 @@ int main(void)
     test_capture_empty_clipboard_returns_null();
     test_capture_negotiates_non_png_type();
     test_capture_persist_failure_falls_back_to_text();
-    test_capture_wayland_no_image_is_authoritative();
-    test_capture_wayland_authority_covers_text();
+    test_capture_wayland_prevents_x11_image_fallback();
+    test_capture_wayland_prevents_x11_text_fallback();
 
     test_uris_plain_file();
     test_uris_percent_decode_and_localhost();
-    test_uris_image_gets_marker();
+    test_uris_image_extension_gets_marker_without_file_access();
     test_uris_multiple_lines();
     test_uris_fifo_is_not_opened();
     test_uris_reject_non_uri_text();
