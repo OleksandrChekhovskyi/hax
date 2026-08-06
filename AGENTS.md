@@ -13,24 +13,31 @@ make lint                                 # clang-format + style script + clang-
 scripts/check.sh test <name>...           # build + selected tests (one or more names)
 ```
 
-`Makefile` delegates to `scripts/check.sh`, which keeps successful output to a compact
-confirmation and shows full compiler/test output only on failure — prefer these over raw
-meson invocations to keep output small. The verbose equivalents (`meson compile -C build`,
-`meson test -C build --print-errorlogs`) remain available for per-test timings or full
-build logs.
+`Makefile` delegates to `scripts/check.sh`, which drops routine runner progress but relays
+compiler and test diagnostics whether or not the phase succeeds, so a clean run is just a
+compact confirmation — prefer these over raw meson invocations to keep output small. The
+verbose equivalents (`meson compile -C build`, `meson test -C build --print-errorlogs`)
+remain available for per-test timings or full build logs.
 
 `make lint` is the single "is the code clean" gate: clang-format, the project style checks
 in `scripts/lint_style.py`, and clang-tidy. Failures say what to fix; the conventions they
 enforce are documented where they live (`.clang-format`, `.clang-tidy`, the script's
 docstring). Run `clang-format -i` on any C source/header you touch before reporting done.
 
-Sanitizer builds for sharper failures: set `BUILD_DIR=build-asan` (ASan/UBSan,
-`-Db_sanitize=address,undefined`) or `BUILD_DIR=build-tsan` (ThreadSanitizer,
-`-Db_sanitize=thread`); both are set up automatically when missing:
+`BUILD_DIR` selects the build directory; these presets are set up on first use. Any other
+name needs `meson setup <dir> <options>` first.
+
+| `BUILD_DIR` | Meson options | For |
+| --- | --- | --- |
+| `build` (default) | `debugoptimized` from `meson.build` | everyday build, test, lint |
+| `build-asan` | `-Db_sanitize=address,undefined` | memory errors, undefined behavior |
+| `build-tsan` | `-Db_sanitize=thread` | data races |
+| `build-release` | `--buildtype=release` | extra inlining warnings; run before a release |
 
 ```sh
 BUILD_DIR=build-asan make tests
 BUILD_DIR=build-tsan scripts/check.sh test <name>
+BUILD_DIR=build-release make
 ```
 
 Tests are plain C binaries using `tests/harness.h` (`EXPECT`, `EXPECT_STR_EQ`, `T_SKIP`,

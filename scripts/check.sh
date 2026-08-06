@@ -1,6 +1,7 @@
 #!/bin/sh
-# Build, test, and lint wrapper. Successful phases emit compact confirmations; failures emit
-# diagnostics without routine runner output.
+# Build, test, and lint wrapper. Diagnostics are relayed whether or not a phase succeeds — a
+# warning that does not fail the build is still worth seeing — while routine runner progress is
+# dropped, so a clean phase emits only its compact confirmation.
 # Usage: [BUILD_DIR=dir] scripts/check.sh build|lint
 #        [BUILD_DIR=dir] scripts/check.sh test [name...]
 
@@ -41,18 +42,22 @@ llvm_tool() {
 
 # Meson forces colored diagnostics, while compilers report paths relative to the build directory.
 # Strip ANSI codes and rebase in-repo paths so editor quickfix parsers resolve them from the root.
-# Samurai lacks Ninja's --quiet, so Ninja progress gets a shared marker that is removed here.
+# Samurai lacks Ninja's --quiet, so Ninja progress gets a shared marker that is removed here,
+# along with the start and nothing-to-do lines both runners emit — their wording differs.
 relay_log() {
     esc=$(printf '\033')
+    noise="s|$esc\[[0-9;]*[mK]||g
+/^HAX_NINJA_STATUS /d
+/^ninja: [Ee]ntering directory /d
+/^ninja: no work to do/d
+/^ninja: nothing to do/d"
     case $BUILD_DIR in
     /* | ../*)
-        sed -e "s|$esc\[[0-9;]*[mK]||g" \
-            -e '/^HAX_NINJA_STATUS /d' "$captured_log"
+        sed -e "$noise" "$captured_log"
         ;;
     *)
         up_prefix=$(printf '%s/' "$BUILD_DIR" | sed 's|[^/][^/]*|..|g')
-        sed -e "s|$esc\[[0-9;]*[mK]||g" \
-            -e '/^HAX_NINJA_STATUS /d' \
+        sed -e "$noise" \
             -e "s|^$(printf '%s' "$up_prefix" | sed 's|\.|\\.|g')||" "$captured_log"
         ;;
     esac
@@ -95,6 +100,9 @@ setup_build_dir() {
     build-asan)
         set -- -Db_sanitize=address,undefined
         ;;
+    build-release)
+        set -- --buildtype=release
+        ;;
     build-tsan)
         set -- -Db_sanitize=thread
         ;;
@@ -113,6 +121,7 @@ setup_build_dir() {
 build_project() {
     setup_build_dir
     run_captured env NINJA_STATUS='HAX_NINJA_STATUS ' ninja -C "$BUILD_DIR"
+    relay_log
     drop_captured
     printf "build OK%s\n" "$build_suffix"
 }
