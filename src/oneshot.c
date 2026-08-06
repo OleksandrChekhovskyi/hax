@@ -51,9 +51,9 @@ static int compact_context(struct oneshot_state *state)
     struct compact_params params = {
         .session = &state->session,
         .provider = state->provider,
-        .slog = state->session_log,
-        .tlog = state->transcript,
-        .hooks = {.user = state, .observe = account_compaction_event},
+        .session_log = state->session_log,
+        .transcript_log = state->transcript,
+        .hooks = {.user = state, .on_event = account_compaction_event},
     };
     struct compact_result result;
 

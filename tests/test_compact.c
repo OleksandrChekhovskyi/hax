@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,23 +13,22 @@
 #include "util.h"
 #include "transport/http.h"
 
-/* compact_over_threshold is the pure trigger predicate; everything else
- * (compact_should_auto, agent_compact) layers config + I/O on top of it. */
 static void test_over_threshold(void)
 {
-    /* Unknown window (limit <= 0) or unreported ctx never triggers. */
     EXPECT(!compact_over_threshold(100, 0, 85));
     EXPECT(!compact_over_threshold(100, -1, 85));
     EXPECT(!compact_over_threshold(-1, 1000, 85));
+    EXPECT(!compact_over_threshold(100, 1000, 0));
+    EXPECT(!compact_over_threshold(100, 1000, 101));
 
-    /* Below / at / above the percentage boundary. */
     EXPECT(!compact_over_threshold(8499, 10000, 85));
     EXPECT(compact_over_threshold(8500, 10000, 85));
     EXPECT(compact_over_threshold(9999, 10000, 85));
-
-    /* 100% threshold only fires when fully at the window. */
     EXPECT(!compact_over_threshold(9999, 10000, 100));
     EXPECT(compact_over_threshold(10000, 10000, 100));
+
+    EXPECT(!compact_over_threshold(LONG_MAX - 1, LONG_MAX, 100));
+    EXPECT(compact_over_threshold(LONG_MAX, LONG_MAX, 100));
 }
 
 static void test_should_auto(void)
@@ -53,25 +53,37 @@ static void test_should_auto(void)
     EXPECT(compact_should_auto(8500, 10000));
 }
 
-enum transaction_script {
-    TRANSACTION_SUCCESS,
-    TRANSACTION_RETRY,
-    TRANSACTION_ERROR,
-    TRANSACTION_NO_SUMMARY,
+enum mock_script {
+    MOCK_SUCCESS,
+    MOCK_RETRY_ONCE,
+    MOCK_ALWAYS_TOOL_CALL,
+    MOCK_ERROR,
+    MOCK_NO_SUMMARY,
+    MOCK_INCOMPLETE,
 };
 
-static enum transaction_script transaction_script;
-static int transaction_turn;
-static int transaction_cancel;
-static int transaction_events;
-static size_t transaction_request_items;
+struct mock_state {
+    enum mock_script script;
+    int stream_calls;
+    int cancel_requested;
+    int observed_events;
+    size_t last_request_items;
+};
 
-static void transaction_emit(stream_cb cb, void *user, struct stream_event event)
+static struct mock_state mock;
+
+static void reset_mock(enum mock_script script)
+{
+    memset(&mock, 0, sizeof(mock));
+    mock.script = script;
+}
+
+static void emit_event(stream_cb cb, void *user, struct stream_event event)
 {
     cb(&event, user);
 }
 
-static void transaction_emit_done(stream_cb cb, void *user, long input_tokens)
+static void emit_done(stream_cb cb, void *user, long input_tokens)
 {
     struct stream_usage usage = {.input_tokens = input_tokens,
                                  .output_tokens = 10,
@@ -79,74 +91,78 @@ static void transaction_emit_done(stream_cb cb, void *user, long input_tokens)
                                  .cache_write_tokens = -1,
                                  .cache_write_1h_tokens = -1,
                                  .cost = -1};
-    transaction_emit(cb, user, (struct stream_event){.kind = EV_DONE, .u.done = {.usage = usage}});
+    emit_event(cb, user, (struct stream_event){.kind = EV_DONE, .u.done = {.usage = usage}});
 }
 
-static int transaction_stream(struct provider *provider, const struct context *ctx,
-                              const char *model, stream_cb cb, void *user, http_tick_cb tick,
-                              void *tick_user)
+static int mock_stream(struct provider *provider, const struct context *ctx, const char *model,
+                       stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
 {
     (void)provider;
     (void)model;
     (void)tick;
     (void)tick_user;
     EXPECT(ctx != NULL);
-    transaction_request_items = ctx->n_items;
-    transaction_turn++;
+    mock.last_request_items = ctx->n_items;
+    mock.stream_calls++;
 
-    if (transaction_script == TRANSACTION_RETRY && transaction_turn == 1) {
-        transaction_emit(cb, user,
-                         (struct stream_event){.kind = EV_TOOL_CALL_START,
-                                               .u.tool_call_start = {.id = "c1", .name = "read"}});
-        transaction_emit(
-            cb, user,
-            (struct stream_event){.kind = EV_TOOL_CALL_DELTA,
-                                  .u.tool_call_delta = {.id = "c1", .args_delta = "{}"}});
-        transaction_emit(
+    if ((mock.script == MOCK_RETRY_ONCE && mock.stream_calls == 1) ||
+        mock.script == MOCK_ALWAYS_TOOL_CALL) {
+        emit_event(cb, user,
+                   (struct stream_event){.kind = EV_TEXT_DELTA,
+                                         .u.text_delta = {.text = "I'll inspect the files"}});
+        emit_event(cb, user,
+                   (struct stream_event){.kind = EV_TOOL_CALL_START,
+                                         .u.tool_call_start = {.id = "c1", .name = "read"}});
+        emit_event(cb, user,
+                   (struct stream_event){.kind = EV_TOOL_CALL_DELTA,
+                                         .u.tool_call_delta = {.id = "c1", .args_delta = "{}"}});
+        emit_event(
             cb, user,
             (struct stream_event){.kind = EV_TOOL_CALL_END, .u.tool_call_end = {.id = "c1"}});
-        transaction_emit_done(cb, user, 100);
+        emit_done(cb, user, 100);
         return 0;
     }
-    if (transaction_script == TRANSACTION_ERROR) {
+    if (mock.script == MOCK_ERROR) {
         static const struct stream_usage usage = {.input_tokens = 150,
                                                   .output_tokens = 5,
                                                   .cached_tokens = -1,
                                                   .cache_write_tokens = -1,
                                                   .cache_write_1h_tokens = -1,
                                                   .cost = -1};
-        transaction_emit(
+        emit_event(
             cb, user,
             (struct stream_event){.kind = EV_TEXT_DELTA, .u.text_delta = {.text = "partial"}});
-        transaction_emit(
+        emit_event(
             cb, user,
             (struct stream_event){.kind = EV_ERROR,
                                   .u.error = {.message = "summary failed", .usage = &usage}});
         return 0;
     }
-    if (transaction_script != TRANSACTION_NO_SUMMARY)
-        transaction_emit(cb, user,
-                         (struct stream_event){.kind = EV_TEXT_DELTA,
-                                               .u.text_delta = {.text = "## Goal\n- continue"}});
-    transaction_emit_done(cb, user, transaction_turn == 1 ? 100 : 200);
+    if (mock.script != MOCK_NO_SUMMARY)
+        emit_event(cb, user,
+                   (struct stream_event){.kind = EV_TEXT_DELTA,
+                                         .u.text_delta = {.text = "## Goal\n- continue"}});
+    if (mock.script == MOCK_INCOMPLETE)
+        return 0;
+    emit_done(cb, user, mock.stream_calls == 1 ? 100 : 200);
     return 0;
 }
 
-static int transaction_observe(const struct stream_event *event, void *user)
+static int observe_event(const struct stream_event *event, void *user)
 {
     (void)event;
     (void)user;
-    transaction_events++;
+    mock.observed_events++;
     return 0;
 }
 
-static int transaction_cancelled(void *user)
+static int is_cancelled(void *user)
 {
     (void)user;
-    return transaction_cancel;
+    return mock.cancel_requested;
 }
 
-static void transaction_session_init(struct agent_session *session)
+static void init_session(struct agent_session *session)
 {
     memset(session, 0, sizeof(*session));
     session->model = xstrdup("model");
@@ -155,17 +171,18 @@ static void transaction_session_init(struct agent_session *session)
                          (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup("old history")});
 }
 
-static struct compact_result transaction_run(struct agent_session *session,
-                                             struct provider *provider, struct session_log *slog)
+static struct compact_result run_compaction(struct agent_session *session,
+                                            struct provider *provider,
+                                            struct session_log *session_log)
 {
     struct compact_params params = {
         .session = session,
         .provider = provider,
-        .slog = slog,
+        .session_log = session_log,
         .hooks =
             {
-                .observe = transaction_observe,
-                .cancelled = transaction_cancelled,
+                .on_event = observe_event,
+                .is_cancelled = is_cancelled,
             },
     };
     struct compact_result result;
@@ -173,20 +190,17 @@ static struct compact_result transaction_run(struct agent_session *session,
     return result;
 }
 
-static void test_transaction_applies_summary(void)
+static void test_applies_summary(void)
 {
     struct agent_session session;
-    transaction_session_init(&session);
-    struct provider provider = {.name = "test", .stream = transaction_stream};
-    transaction_script = TRANSACTION_SUCCESS;
-    transaction_turn = 0;
-    transaction_cancel = 0;
-    transaction_events = 0;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
 
-    struct compact_result result = transaction_run(&session, &provider, NULL);
+    struct compact_result result = run_compaction(&session, &provider, NULL);
     EXPECT(result.outcome == COMPACT_COMPLETE);
     EXPECT(result.attempts == 1);
-    EXPECT(transaction_events == 2);
+    EXPECT(mock.observed_events == 2);
     /* The summarized history stays; the seed and its usage footer are appended after it. */
     EXPECT(session.n_items == 4);
     EXPECT_STR_EQ(session.items[0].text, "old history");
@@ -209,25 +223,23 @@ static void test_transaction_applies_summary(void)
 }
 
 /* A second pass summarizes only the window the first one left. */
-static void test_transaction_compacts_twice(void)
+static void test_compacts_twice(void)
 {
     struct agent_session session;
-    transaction_session_init(&session);
-    struct provider provider = {.name = "test", .stream = transaction_stream};
-    transaction_script = TRANSACTION_SUCCESS;
-    transaction_turn = 0;
-    transaction_cancel = 0;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
 
-    struct compact_result first = transaction_run(&session, &provider, NULL);
+    struct compact_result first = run_compaction(&session, &provider, NULL);
     EXPECT(first.outcome == COMPACT_COMPLETE);
     /* One history item plus the summarization prompt. */
-    EXPECT(transaction_request_items == 2);
+    EXPECT(mock.last_request_items == 2);
     compact_result_destroy(&first);
 
-    struct compact_result second = transaction_run(&session, &provider, NULL);
+    struct compact_result second = run_compaction(&session, &provider, NULL);
     EXPECT(second.outcome == COMPACT_COMPLETE);
     /* The first seed and its footer plus the prompt — the summarized prefix is not re-read. */
-    EXPECT(transaction_request_items == 3);
+    EXPECT(mock.last_request_items == 3);
     EXPECT(session.n_items == 7);
     EXPECT_STR_EQ(session.items[0].text, "old history");
     EXPECT(session.items[2].origin == ITEM_ORIGIN_COMPACT_SEED);
@@ -255,23 +267,21 @@ static void free_items(struct item *items, size_t n_items)
 
 /* Compaction continues the session file it was given, so one compacted conversation stays one
  * entry in the picker instead of a chain of them. */
-static void test_transaction_keeps_one_session(void)
+static void test_keeps_one_session(void)
 {
     struct agent_session session;
-    transaction_session_init(&session);
-    struct provider provider = {.name = "test", .stream = transaction_stream};
-    struct session_log *slog = session_log_open("test", "model", NULL, NULL, NULL);
-    EXPECT(slog != NULL);
-    session_log_append(slog, session.items, session.n_items);
-    char *path = xstrdup(session_log_path(slog));
-    transaction_script = TRANSACTION_RETRY;
-    transaction_turn = 0;
-    transaction_cancel = 0;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    struct session_log *session_log = session_log_open("test", "model", NULL, NULL, NULL);
+    EXPECT(session_log != NULL);
+    session_log_append(session_log, session.items, session.n_items);
+    char *path = xstrdup(session_log_path(session_log));
+    reset_mock(MOCK_RETRY_ONCE);
 
-    struct compact_result result = transaction_run(&session, &provider, slog);
+    struct compact_result result = run_compaction(&session, &provider, session_log);
     EXPECT(result.outcome == COMPACT_COMPLETE);
     EXPECT(result.attempts == 2);
-    EXPECT_STR_EQ(path, session_log_path(slog));
+    EXPECT_STR_EQ(path, session_log_path(session_log));
 
     /* The rejected attempt's footer belongs to the summarized prefix; only the accepted
      * attempt's footer follows the seed. */
@@ -293,7 +303,28 @@ static void test_transaction_keeps_one_session(void)
     free_items(recorded, n_recorded);
     free(path);
     compact_result_destroy(&result);
-    session_log_close(slog);
+    session_log_close(session_log);
+    agent_session_free(&session);
+}
+
+static void test_tool_call_retries_are_bounded(void)
+{
+    struct agent_session session;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_ALWAYS_TOOL_CALL);
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_NO_SUMMARY);
+    EXPECT(result.attempts == 4);
+    EXPECT(mock.stream_calls == 4);
+    EXPECT(mock.last_request_items == 11);
+    EXPECT(session.n_items == 5);
+    EXPECT_STR_EQ(session.items[0].text, "old history");
+    for (size_t i = 1; i < session.n_items; i++)
+        EXPECT(session.items[i].kind == ITEM_TURN_USAGE);
+
+    compact_result_destroy(&result);
     agent_session_free(&session);
 }
 
@@ -301,20 +332,18 @@ static void test_transaction_keeps_one_session(void)
 static void test_resumed_session_floors_at_seed(void)
 {
     struct agent_session session;
-    transaction_session_init(&session);
-    struct provider provider = {.name = "test", .stream = transaction_stream};
-    struct session_log *slog = session_log_open("test", "model", NULL, NULL, NULL);
-    EXPECT(slog != NULL);
-    session_log_append(slog, session.items, session.n_items);
-    char *path = xstrdup(session_log_path(slog));
-    transaction_script = TRANSACTION_SUCCESS;
-    transaction_turn = 0;
-    transaction_cancel = 0;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    struct session_log *session_log = session_log_open("test", "model", NULL, NULL, NULL);
+    EXPECT(session_log != NULL);
+    session_log_append(session_log, session.items, session.n_items);
+    char *path = xstrdup(session_log_path(session_log));
+    reset_mock(MOCK_SUCCESS);
 
-    struct compact_result result = transaction_run(&session, &provider, slog);
+    struct compact_result result = run_compaction(&session, &provider, session_log);
     EXPECT(result.outcome == COMPACT_COMPLETE);
     compact_result_destroy(&result);
-    session_log_close(slog);
+    session_log_close(session_log);
     agent_session_free(&session);
 
     struct agent_session resumed;
@@ -332,16 +361,14 @@ static void test_resumed_session_floors_at_seed(void)
     agent_session_free(&resumed);
 }
 
-static void test_transaction_preserves_failure(void)
+static void test_preserves_failure(void)
 {
     struct agent_session session;
-    transaction_session_init(&session);
-    struct provider provider = {.name = "test", .stream = transaction_stream};
-    transaction_script = TRANSACTION_ERROR;
-    transaction_turn = 0;
-    transaction_cancel = 0;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_ERROR);
 
-    struct compact_result result = transaction_run(&session, &provider, NULL);
+    struct compact_result result = run_compaction(&session, &provider, NULL);
     EXPECT(result.outcome == COMPACT_PROVIDER_ERROR);
     EXPECT_STR_EQ(result.error_message, "summary failed");
     /* Partial summary text never enters history; billed failure usage does. */
@@ -354,16 +381,14 @@ static void test_transaction_preserves_failure(void)
     agent_session_free(&session);
 }
 
-static void test_transaction_rejects_empty_summary(void)
+static void test_rejects_empty_summary(void)
 {
     struct agent_session session;
-    transaction_session_init(&session);
-    struct provider provider = {.name = "test", .stream = transaction_stream};
-    transaction_script = TRANSACTION_NO_SUMMARY;
-    transaction_turn = 0;
-    transaction_cancel = 0;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_NO_SUMMARY);
 
-    struct compact_result result = transaction_run(&session, &provider, NULL);
+    struct compact_result result = run_compaction(&session, &provider, NULL);
     EXPECT(result.outcome == COMPACT_NO_SUMMARY);
     /* A clean but empty response is still a completed, billed attempt; it gets
      * a footer without replacing usable history. */
@@ -375,16 +400,31 @@ static void test_transaction_rejects_empty_summary(void)
     agent_session_free(&session);
 }
 
-static void test_transaction_discards_cancelled_summary(void)
+static void test_rejects_incomplete_response(void)
 {
     struct agent_session session;
-    transaction_session_init(&session);
-    struct provider provider = {.name = "test", .stream = transaction_stream};
-    transaction_script = TRANSACTION_SUCCESS;
-    transaction_turn = 0;
-    transaction_cancel = 1;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_INCOMPLETE);
 
-    struct compact_result result = transaction_run(&session, &provider, NULL);
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_NO_SUMMARY);
+    EXPECT(session.n_items == 1);
+    EXPECT_STR_EQ(session.items[0].text, "old history");
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_discards_cancelled_summary(void)
+{
+    struct agent_session session;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+    mock.cancel_requested = 1;
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
     EXPECT(result.outcome == COMPACT_CANCELLED);
     /* A late cancel wins over a complete summary: old history survives and
      * the completed attempt still receives its footer. */
@@ -402,12 +442,14 @@ int main(void)
     unsetenv("HAX_NO_SESSION");
     test_over_threshold();
     test_should_auto();
-    test_transaction_applies_summary();
-    test_transaction_compacts_twice();
-    test_transaction_keeps_one_session();
+    test_applies_summary();
+    test_compacts_twice();
+    test_keeps_one_session();
+    test_tool_call_retries_are_bounded();
     test_resumed_session_floors_at_seed();
-    test_transaction_preserves_failure();
-    test_transaction_rejects_empty_summary();
-    test_transaction_discards_cancelled_summary();
+    test_preserves_failure();
+    test_rejects_empty_summary();
+    test_rejects_incomplete_response();
+    test_discards_cancelled_summary();
     T_REPORT();
 }

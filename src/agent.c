@@ -862,7 +862,6 @@ void agent_fork(struct agent_state *state, size_t turn_index)
     reshape_after_cut(state, cut_index, turn_index, "forked");
 }
 
-/* Compaction usage contributes to session totals; compact_run owns history assembly. */
 struct compact_event_ctx {
     struct session_stats *stats;
     struct render_ctx *render;
@@ -938,7 +937,6 @@ int agent_compact(struct agent_state *state, const char *instructions, int autom
 
     render_set_mode(render, RENDER_IDLE);
 
-    /* compact_run owns the transaction; this layer supplies UI, cancellation, and accounting. */
     render_stream_begin(render);
     spinner_set_label(render->spinner, "compacting", "compacting...");
     struct compact_event_ctx event_ctx = {
@@ -950,15 +948,15 @@ int agent_compact(struct agent_state *state, const char *instructions, int autom
     struct compact_params params = {
         .session = session,
         .provider = provider,
-        .slog = state->session_log,
-        .tlog = state->transcript,
+        .session_log = state->session_log,
+        .transcript_log = state->transcript,
         .instructions = instructions,
         .hooks =
             {
                 .user = &event_ctx,
-                .observe = compact_on_event,
+                .on_event = compact_on_event,
                 .tick = compact_tick,
-                .cancelled = compact_cancelled,
+                .is_cancelled = compact_cancelled,
             },
     };
 
