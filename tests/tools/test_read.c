@@ -593,6 +593,10 @@ static void test_read_display_extra(void)
     out = TOOL_READ.display.format_extra("{\"path\":\"x\",\"offset\":3,\"limit\":0}");
     EXPECT_STR_EQ(out, ":3-");
     free(out);
+
+    out = TOOL_READ.display.format_extra("{\"path\":\"x.PNG\",\"offset\":1,\"limit\":1}");
+    EXPECT(out == NULL);
+    free(out);
 }
 
 /* A genuinely decodable 2x3 RGB PNG (IHDR + IDAT + IEND); `magick identify`

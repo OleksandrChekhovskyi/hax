@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <sys/stat.h>
 
@@ -472,6 +473,18 @@ out:
     return result;
 }
 
+static int path_has_image_extension(const char *path)
+{
+    const char *extension = path ? strrchr(path, '.') : NULL;
+    if (!extension)
+        return 0;
+    static const char *const extensions[] = {".png", ".jpg", ".jpeg", ".gif", ".webp"};
+    for (size_t i = 0; i < sizeof(extensions) / sizeof(extensions[0]); i++)
+        if (strcasecmp(extension, extensions[i]) == 0)
+            return 1;
+    return 0;
+}
+
 static char *format_line_range(const char *args_json)
 {
     if (!args_json)
@@ -485,7 +498,9 @@ static char *format_line_range(const char *args_json)
     json_t *offset_json = json_object_get(root, "offset");
     json_t *limit_json = json_object_get(root, "limit");
     char *range = NULL;
-    if (offset_json || limit_json) {
+    int has_range = offset_json || limit_json;
+    const char *path = json_string_value(json_object_get(root, "path"));
+    if (has_range && !path_has_image_extension(path)) {
         long offset = json_is_integer(offset_json) ? (long)json_integer_value(offset_json) : 1;
         if (json_is_integer(limit_json)) {
             long limit = (long)json_integer_value(limit_json);
