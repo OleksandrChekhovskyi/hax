@@ -21,16 +21,16 @@ enum tool_render_mode {
 };
 
 /* Streaming renderer for user-visible tool output. Feed accepts arbitrary chunk boundaries and
- * removes terminal controls, malformed UTF-8, and dangerous codepoints. Head previews omit blank
- * lines; diff previews preserve them. The spinner is NULL on non-TTY stdout, which selects plain
- * non-live rendering: completed rows only, no repaints. */
+ * removes terminal controls, malformed UTF-8, and unsafe format codepoints. Head previews omit
+ * blank lines; diff previews preserve them. The spinner is NULL on non-TTY stdout, which selects
+ * plain non-live rendering: completed rows only, no repaints. */
 struct tool_render {
     struct disp *disp;
     struct spinner *spinner;
     enum tool_render_mode mode;
 
     struct ctrl_strip strip;
-    struct utf8_sanitize utf8;
+    struct utf8_sanitizer sanitizer;
     int display_was_called;
 
     struct buf line;

@@ -2,229 +2,223 @@
 #include "text/utf8.h"
 
 #include <stdint.h>
-#include <string.h>
 #include <wchar.h>
 
-int utf8_seq_len(unsigned char c)
+static int byte_is_continuation(unsigned char byte)
 {
-    if (c < 0x80)
-        return 1;
-    if ((c & 0xE0) == 0xC0)
-        return 2;
-    if ((c & 0xF0) == 0xE0)
-        return 3;
-    if ((c & 0xF8) == 0xF0)
-        return 4;
-    return 1; /* continuation byte or malformed leader */
+    return (byte & 0xC0) == 0x80;
 }
 
-int utf8_seq_valid(const char *s, int n)
+size_t utf8_sequence_length(unsigned char byte)
 {
-    const unsigned char *u = (const unsigned char *)s;
-    if (n < 1 || n > 4)
-        return 0;
-    /* Leader byte must match the claimed length: a continuation byte
-     * (0x80-0xBF) or a leader for a different length must reject
-     * outright. Without this gate, callers passing arbitrary (s, n)
-     * could "validate" e.g. "\xBF\xBF" as a 2-byte sequence even
-     * though 0xBF is never a leader. */
-    if (utf8_seq_len(u[0]) != n)
-        return 0;
-    if (n == 1)
-        return u[0] < 0x80;
-    uint32_t cp;
-    if (n == 2)
-        cp = u[0] & 0x1F;
-    else if (n == 3)
-        cp = u[0] & 0x0F;
-    else
-        cp = u[0] & 0x07;
-    for (int k = 1; k < n; k++) {
-        if ((u[k] & 0xC0) != 0x80)
-            return 0;
-        cp = (cp << 6) | (u[k] & 0x3F);
-    }
-    /* Reject overlongs: each length has a minimum codepoint. */
-    if (n == 2 && cp < 0x80)
-        return 0;
-    if (n == 3 && cp < 0x800)
-        return 0;
-    if (n == 4 && cp < 0x10000)
-        return 0;
-    if (cp >= 0xD800 && cp <= 0xDFFF)
-        return 0;
-    if (cp > 0x10FFFF)
-        return 0;
+    if (byte < 0x80)
+        return 1;
+    if (byte >= 0xC2 && byte <= 0xDF)
+        return 2;
+    if (byte >= 0xE0 && byte <= 0xEF)
+        return 3;
+    if (byte >= 0xF0 && byte <= 0xF4)
+        return 4;
     return 1;
 }
 
-size_t utf8_next(const char *s, size_t len, size_t i)
+int utf8_sequence_is_valid(const char *bytes, size_t length)
 {
-    if (i >= len)
-        return len;
-    int n = utf8_seq_len((unsigned char)s[i]);
-    if ((size_t)n > len - i)
-        return i + 1;
-    if (!utf8_seq_valid(s + i, n))
-        return i + 1;
-    return i + n;
-}
-
-size_t utf8_prev(const char *s, size_t i)
-{
-    if (i == 0)
+    const unsigned char *input = (const unsigned char *)bytes;
+    if (length < 1 || length > 4 || utf8_sequence_length(input[0]) != length)
         return 0;
-    /* Walk back over up to 3 continuation bytes. */
-    size_t j = i - 1;
-    int conts = 0;
-    while (j > 0 && ((unsigned char)s[j] & 0xC0) == 0x80 && conts < 3) {
-        j--;
-        conts++;
+    if (length == 1)
+        return input[0] < 0x80;
+
+    uint32_t codepoint;
+    if (length == 2)
+        codepoint = input[0] & 0x1F;
+    else if (length == 3)
+        codepoint = input[0] & 0x0F;
+    else
+        codepoint = input[0] & 0x07;
+
+    for (size_t i = 1; i < length; i++) {
+        if (!byte_is_continuation(input[i]))
+            return 0;
+        codepoint = (codepoint << 6) | (input[i] & 0x3F);
     }
-    unsigned char lead = (unsigned char)s[j];
-    if ((lead & 0xC0) == 0x80)
-        return i - 1;
-    if (conts == 0)
-        return j;
-    if (utf8_seq_len(lead) != conts + 1)
-        return i - 1;
-    if (!utf8_seq_valid(s + j, conts + 1))
-        return i - 1;
-    return j;
+
+    static const uint32_t minimum_codepoint[] = {0, 0, 0x80, 0x800, 0x10000};
+    if (codepoint < minimum_codepoint[length])
+        return 0;
+    if (codepoint >= 0xD800 && codepoint <= 0xDFFF)
+        return 0;
+    return codepoint <= 0x10FFFF;
 }
 
-/* Codepoints that are technically printable per wcwidth (returning 0
- * or 1 depending on libc) but that we always want to substitute, since
- * they can rearrange or hide content in the rendered terminal output.
- * Covers the Trojan Source bidi vectors and the common
- * Default_Ignorable_Code_Point invisibles. Variation selectors
- * (U+FE00..FE0F) are intentionally kept since they're needed for
- * emoji presentation. Substituting ZWJ does break emoji ZWJ sequences
- * during edit; we accept that — the buffer keeps the original bytes
- * and the model receives the unmodified content. */
-static int codepoint_is_dangerous(wchar_t wc)
+int utf8_is_valid(const char *bytes, size_t length)
 {
-    if (wc == 0x00AD) /* soft hyphen */
+    size_t offset = 0;
+    while (offset < length) {
+        size_t sequence_len = utf8_sequence_length((unsigned char)bytes[offset]);
+        if (sequence_len > length - offset || !utf8_sequence_is_valid(bytes + offset, sequence_len))
+            return 0;
+        offset += sequence_len;
+    }
+    return 1;
+}
+
+size_t utf8_next(const char *bytes, size_t length, size_t offset)
+{
+    if (offset >= length)
+        return length;
+
+    size_t sequence_len = utf8_sequence_length((unsigned char)bytes[offset]);
+    if (sequence_len > length - offset || !utf8_sequence_is_valid(bytes + offset, sequence_len))
+        return offset + 1;
+    return offset + sequence_len;
+}
+
+size_t utf8_prev(const char *bytes, size_t offset)
+{
+    if (offset == 0)
+        return 0;
+
+    size_t candidate = offset - 1;
+    size_t continuation_count = 0;
+    while (candidate > 0 && byte_is_continuation((unsigned char)bytes[candidate]) &&
+           continuation_count < 3) {
+        candidate--;
+        continuation_count++;
+    }
+
+    unsigned char leader = (unsigned char)bytes[candidate];
+    if (byte_is_continuation(leader))
+        return offset - 1;
+    if (continuation_count == 0)
+        return candidate;
+
+    size_t sequence_len = continuation_count + 1;
+    if (utf8_sequence_length(leader) != sequence_len ||
+        !utf8_sequence_is_valid(bytes + candidate, sequence_len))
+        return offset - 1;
+    return candidate;
+}
+
+/* Terminal format controls can hide or reorder content even when libc assigns them zero width.
+ * Variation selectors remain available for emoji presentation, though substituting ZWJ can break
+ * joined emoji sequences. */
+static int codepoint_requires_substitution(wchar_t codepoint)
+{
+    if (codepoint == 0x00AD) /* soft hyphen */
         return 1;
-    if (wc == 0x034F) /* combining grapheme joiner */
+    if (codepoint == 0x034F) /* combining grapheme joiner */
         return 1;
-    if (wc == 0x061C) /* arabic letter mark (bidi) */
+    if (codepoint == 0x061C) /* Arabic letter mark */
         return 1;
-    if (wc == 0x115F || wc == 0x1160) /* Hangul choseong / jungseong filler */
+    if (codepoint == 0x115F || codepoint == 0x1160) /* Hangul fillers */
         return 1;
-    if (wc == 0x180E) /* Mongolian vowel separator */
+    if (codepoint == 0x180E) /* Mongolian vowel separator */
         return 1;
-    if (wc >= 0x200B && wc <= 0x200F) /* ZWSP, ZWNJ, ZWJ, LRM, RLM */
+    if (codepoint >= 0x200B && codepoint <= 0x200F) /* ZWSP, ZWNJ, ZWJ, LRM, RLM */
         return 1;
-    if (wc >= 0x202A && wc <= 0x202E) /* bidi overrides (Trojan Source) */
+    if (codepoint >= 0x2028 && codepoint <= 0x2029) /* line and paragraph separators */
         return 1;
-    if (wc == 0x2028 || wc == 0x2029) /* line / paragraph separators */
+    if (codepoint >= 0x202A && codepoint <= 0x202E) /* bidi overrides */
         return 1;
-    if (wc >= 0x2060 && wc <= 0x206F) /* word joiner, invisible math, isolates, deprecated */
+    if (codepoint >= 0x2060 && codepoint <= 0x206F) /* joiners, isolates, deprecated controls */
         return 1;
-    if (wc == 0x3164) /* Hangul filler */
+    if (codepoint == 0x3164) /* Hangul filler */
         return 1;
-    if (wc == 0xFEFF) /* BOM / ZWNBSP */
+    if (codepoint == 0xFEFF) /* BOM / ZWNBSP */
         return 1;
-    if (wc == 0xFFA0) /* halfwidth Hangul filler */
+    if (codepoint == 0xFFA0) /* halfwidth Hangul filler */
         return 1;
-    if (wc >= 0xFFF9 && wc <= 0xFFFB) /* interlinear annotation marks */
+    if (codepoint >= 0xFFF9 && codepoint <= 0xFFFB) /* interlinear annotation marks */
         return 1;
-    if (wc >= 0xE0000 && wc <= 0xE007F) /* language tag characters */
+    if (codepoint >= 0xE0000 && codepoint <= 0xE007F) /* language tags */
         return 1;
     return 0;
 }
 
-int utf8_codepoint_cells(const char *s, size_t len, size_t i, size_t *consumed)
+int utf8_codepoint_cells(const char *bytes, size_t length, size_t offset, size_t *codepoint_len)
 {
-    if (i >= len) {
-        *consumed = 0;
+    if (offset >= length) {
+        *codepoint_len = 0;
         return 0;
     }
-    wchar_t wc;
-    mbstate_t ps;
-    memset(&ps, 0, sizeof(ps));
-    size_t r = mbrtowc(&wc, s + i, len - i, &ps);
-    if (r == (size_t)-1 || r == (size_t)-2 || r == 0) {
-        /* Malformed UTF-8 or embedded NUL — caller substitutes. */
-        *consumed = 1;
+
+    wchar_t codepoint;
+    mbstate_t state = {0};
+    size_t decoded_len = mbrtowc(&codepoint, bytes + offset, length - offset, &state);
+    if (decoded_len == (size_t)-1 || decoded_len == (size_t)-2 || decoded_len == 0) {
+        *codepoint_len = 1;
         return -1;
     }
-    *consumed = r;
-    if (codepoint_is_dangerous(wc))
+
+    *codepoint_len = decoded_len;
+    if (codepoint_requires_substitution(codepoint))
         return -1;
-    return wcwidth(wc); /* -1 covers C0/C1 controls, DEL, format chars */
+    return wcwidth(codepoint);
 }
 
-void utf8_stream_reset(struct utf8_stream *s)
+void utf8_cell_stream_reset(struct utf8_cell_stream *stream)
 {
-    s->have = 0;
+    stream->pending_len = 0;
 }
 
-/* Helper: cell width of a complete sequence in s->buf, with the
- * "1 cell per malformed/control" substitution that the streaming
- * contract advertises. */
-static int stream_cells(const struct utf8_stream *s)
+static int pending_display_cells(const struct utf8_cell_stream *stream)
 {
-    size_t consumed;
-    int w = utf8_codepoint_cells((const char *)s->buf, s->have, 0, &consumed);
-    return w < 0 ? 1 : w;
+    size_t codepoint_len;
+    int cells =
+        utf8_codepoint_cells((const char *)stream->pending, stream->pending_len, 0, &codepoint_len);
+    return cells < 0 ? 1 : cells;
 }
 
-int utf8_stream_byte(struct utf8_stream *s, unsigned char c, const char **out, size_t *out_n,
-                     int *out_cells)
+int utf8_cell_stream_feed(struct utf8_cell_stream *stream, unsigned char byte, const char **bytes,
+                          size_t *length, int *cells)
 {
-    if (s->have == 0) {
-        s->buf[0] = c;
-        s->have = 1;
-        int n = utf8_seq_len(c);
-        if (n == 1) {
-            /* ASCII or lone leader/continuation — emit immediately.
-             * stream_cells handles the "control byte → 1 cell"
-             * substitution via utf8_codepoint_cells. */
-            *out = (const char *)s->buf;
-            *out_n = 1;
-            *out_cells = stream_cells(s);
-            s->have = 0;
-            return 1;
-        }
-        return 0;
-    }
-    /* Mid-sequence. Continuation bytes have prefix 10xxxxxx. */
-    if ((c & 0xC0) != 0x80) {
-        /* Malformed: dump buffered bytes plus the offender as one
-         * opaque run. No recovery — see header note. */
-        s->buf[s->have++] = c;
-        *out = (const char *)s->buf;
-        *out_n = s->have;
-        *out_cells = (int)s->have;
-        s->have = 0;
+    if (stream->pending_len == 0) {
+        stream->pending[0] = byte;
+        stream->pending_len = 1;
+        if (utf8_sequence_length(byte) > 1)
+            return 0;
+
+        *bytes = (const char *)stream->pending;
+        *length = 1;
+        *cells = pending_display_cells(stream);
+        stream->pending_len = 0;
         return 1;
     }
-    s->buf[s->have++] = c;
-    int need = utf8_seq_len(s->buf[0]);
-    if ((int)s->have < need)
+
+    if (!byte_is_continuation(byte)) {
+        stream->pending[stream->pending_len++] = byte;
+        *bytes = (const char *)stream->pending;
+        *length = stream->pending_len;
+        *cells = (int)stream->pending_len;
+        stream->pending_len = 0;
+        return 1;
+    }
+
+    stream->pending[stream->pending_len++] = byte;
+    size_t sequence_len = utf8_sequence_length(stream->pending[0]);
+    if (stream->pending_len < sequence_len)
         return 0;
-    /* Sequence complete — validate the strict form (overlongs,
-     * surrogates, codepoints > U+10FFFF). On invalid, surface as a
-     * malformed run with one cell per byte; on valid, measure cells. */
-    *out = (const char *)s->buf;
-    *out_n = s->have;
-    if (!utf8_seq_valid((const char *)s->buf, need))
-        *out_cells = (int)s->have;
-    else
-        *out_cells = stream_cells(s);
-    s->have = 0;
+
+    *bytes = (const char *)stream->pending;
+    *length = stream->pending_len;
+    *cells = utf8_sequence_is_valid((const char *)stream->pending, sequence_len)
+                 ? pending_display_cells(stream)
+                 : (int)stream->pending_len;
+    stream->pending_len = 0;
     return 1;
 }
 
-int utf8_stream_flush(struct utf8_stream *s, const char **out, size_t *out_n, int *out_cells)
+int utf8_cell_stream_flush(struct utf8_cell_stream *stream, const char **bytes, size_t *length,
+                           int *cells)
 {
-    if (s->have == 0)
+    if (stream->pending_len == 0)
         return 0;
-    *out = (const char *)s->buf;
-    *out_n = s->have;
-    *out_cells = (int)s->have;
-    s->have = 0;
+
+    *bytes = (const char *)stream->pending;
+    *length = stream->pending_len;
+    *cells = (int)stream->pending_len;
+    stream->pending_len = 0;
     return 1;
 }

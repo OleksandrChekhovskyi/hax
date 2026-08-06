@@ -11,9 +11,8 @@
  * immediately while the current row is shadowed for retroactive word wrapping.
  * The parser supplies semantic style state and selects wrapped or verbatim output. */
 struct md_wrap {
-    /* row_meta tags content (0) and raw bytes (1); cp_stream provides cells. */
     int width;
-    struct utf8_stream cp_stream;
+    struct utf8_cell_stream cell_stream;
     struct buf row_buf;
     struct buf row_meta;
     int col; /* visible cells; raw escapes are zero-width */

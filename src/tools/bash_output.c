@@ -162,7 +162,7 @@ void bash_output_append_sanitized(struct buf *body, const char *data, size_t len
 {
     size_t capped_len = 0;
     char *capped = cap_line_lengths(data ? data : "", len, OUTPUT_CAP_LINE_WIDTH, &capped_len);
-    char *sanitized = sanitize_utf8(capped, capped_len);
+    char *sanitized = utf8_sanitize(capped, capped_len);
     free(capped);
     buf_append_str(body, sanitized);
     free(sanitized);
@@ -357,7 +357,7 @@ static void append_run_suffix(struct buf *out, size_t total_bytes, int binary, i
 /* Takes ownership of `marker`; POSIX temp-file paths are not guaranteed to be UTF-8. */
 static void append_sanitized_marker(struct buf *body, char *marker)
 {
-    char *clean = sanitize_utf8(marker, strlen(marker));
+    char *clean = utf8_sanitize(marker, strlen(marker));
     free(marker);
     buf_append_str(body, clean);
     free(clean);

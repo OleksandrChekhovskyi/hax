@@ -28,7 +28,7 @@ void md_wrap_row_reset(struct md_wrap *w)
 void md_wrap_reset(struct md_wrap *w, int width)
 {
     w->width = width;
-    utf8_stream_reset(&w->cp_stream);
+    utf8_cell_stream_reset(&w->cell_stream);
     md_wrap_row_reset(w);
     w->pending_wrap = 0;
     w->snap_in_bold = 0;
@@ -301,12 +301,12 @@ static void wrap_consume_codepoint(struct md_wrap *w, const struct md_wrap_conte
 }
 
 /* Drain partial UTF-8 before a newline or raw run to preserve byte order. */
-static void wrap_drain_cp_stream(struct md_wrap *w, const struct md_wrap_context *ctx)
+static void wrap_drain_cell_stream(struct md_wrap *w, const struct md_wrap_context *ctx)
 {
     const char *out;
     size_t out_n;
     int cells;
-    if (utf8_stream_flush(&w->cp_stream, &out, &out_n, &cells))
+    if (utf8_cell_stream_flush(&w->cell_stream, &out, &out_n, &cells))
         wrap_consume_codepoint(w, ctx, out, out_n, cells);
 }
 
@@ -325,14 +325,14 @@ static void emit_text_chunk(struct md_wrap *w, const struct md_wrap_context *ctx
     for (size_t i = 0; i < n; i++) {
         unsigned char b = (unsigned char)s[i];
         if (b == '\n') {
-            wrap_drain_cp_stream(w, ctx);
+            wrap_drain_cell_stream(w, ctx);
             wrap_hard_newline(w, ctx);
             continue;
         }
         const char *out;
         size_t out_n;
         int cells;
-        if (utf8_stream_byte(&w->cp_stream, b, &out, &out_n, &cells))
+        if (utf8_cell_stream_feed(&w->cell_stream, b, &out, &out_n, &cells))
             wrap_consume_codepoint(w, ctx, out, out_n, cells);
     }
 }
@@ -363,11 +363,11 @@ void md_wrap_emit_raw(struct md_wrap *w, const struct md_wrap_context *ctx, cons
 {
     if (w->width <= 0 || verbatim) {
         if (w->width > 0)
-            wrap_drain_cp_stream(w, ctx);
+            wrap_drain_cell_stream(w, ctx);
         ctx->emit(s, n, 1, ctx->user);
         return;
     }
-    wrap_drain_cp_stream(w, ctx);
+    wrap_drain_cell_stream(w, ctx);
     wrap_append(w, ctx, s, n, 1);
 }
 
@@ -375,6 +375,6 @@ void md_wrap_flush(struct md_wrap *w, const struct md_wrap_context *ctx)
 {
     if (w->width <= 0)
         return;
-    wrap_drain_cp_stream(w, ctx);
+    wrap_drain_cell_stream(w, ctx);
     wrap_flush_all(w);
 }

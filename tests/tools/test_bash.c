@@ -538,7 +538,7 @@ static void test_bash_invalid_utf8_tmpdir_falls_back(void)
     char *out = call_bash("seq 1 20000");
     EXPECT(strstr(out, "[output truncated") != NULL);
     /* No raw 0xff in the result — both the validator (rejecting the
-     * env) and sanitize_utf8 (defense in depth) help here. */
+     * env) and utf8_sanitize (defense in depth) help here. */
     EXPECT(strchr(out, (char)0xff) == NULL);
     /* The advertised path must point at a real file under the /tmp
      * fallback: extract it, stat it, confirm it exists. */

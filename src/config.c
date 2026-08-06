@@ -678,9 +678,8 @@ char *config_prompt_expand(const char *value, char **error)
     }
     free(path);
 
-    /* User-authored bytes headed for provider JSON: strip NULs and invalid UTF-8 before the
-     * value can be spliced into a request. */
-    char *clean = sanitize_utf8(content, len);
+    /* Provider JSON requires NUL-free, valid UTF-8. */
+    char *clean = utf8_sanitize(content, len);
     free(content);
     size_t n = strlen(clean);
     while (n > 0 && (clean[n - 1] == '\n' || clean[n - 1] == '\r'))

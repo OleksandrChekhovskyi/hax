@@ -382,7 +382,7 @@ static char *format_text_result(struct read_result *read_result, long offset, si
                                     OUTPUT_CAP_LINE_WIDTH, &capped_len);
     free(read_result->content);
 
-    char *content = sanitize_utf8(capped, capped_len);
+    char *content = utf8_sanitize(capped, capped_len);
     free(capped);
 
     if (read_result->truncation == READ_TRUNCATED_BYTES) {

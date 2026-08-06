@@ -66,7 +66,7 @@ char *make_unified_diff(const char *a, size_t a_len, const char *b, size_t b_len
         /* -a forces text mode so a stray NUL byte doesn't trip diff(1)
          * into "Binary files X and Y differ" — that would leave the
          * file modified but the tool result un-renderable as a diff.
-         * Embedded NULs are then mopped up by sanitize_utf8 below.
+         * Embedded NULs are then mopped up by utf8_sanitize below.
          *
          * No --label here: it's a GNU/BSD extension and absent from
          * POSIX, busybox, etc. Since this path is now load-bearing for
@@ -147,7 +147,7 @@ char *make_unified_diff(const char *a, size_t a_len, const char *b, size_t b_len
      * propagate into the tool result and break jansson encoding on the
      * next turn. Replacing invalid sequences with U+FFFD here keeps the
      * line structure intact (only byte counts change). */
-    char *clean = sanitize_utf8(out.data, out.len);
+    char *clean = utf8_sanitize(out.data, out.len);
     buf_free(&out);
     return clean;
 

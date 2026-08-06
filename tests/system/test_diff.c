@@ -60,7 +60,7 @@ static void test_diff_with_nul_bytes(void)
     /* Without -a, diff(1) would say "Binary files X and Y differ" for
      * any file containing a NUL — leaving the tool with a non-renderable
      * result. With -a it produces a regular unified diff, and the NULs
-     * are subsequently scrubbed to U+FFFD by sanitize_utf8. */
+     * are subsequently scrubbed to U+FFFD by utf8_sanitize. */
     char old_buf[] = {'a', '\0', 'b', '\n'};
     const char *new_buf = "abc\n";
     char *out = make_unified_diff(old_buf, sizeof(old_buf), new_buf, 4, "a/f", "b/f");

@@ -96,16 +96,16 @@ static void append_environment_section(struct buf *b, const char *model)
 
     /* Collapse paths before sanitizing so `~` still maps to the displayed home. */
     char *cwd_display = path_collapse_home(cwd);
-    char *cwd_clean = sanitize_utf8(cwd_display, strlen(cwd_display));
+    char *cwd_clean = utf8_sanitize(cwd_display, strlen(cwd_display));
     free(cwd_display);
-    char *home_clean = (home && *home) ? sanitize_utf8(home, strlen(home)) : NULL;
-    char *os_clean = sanitize_utf8(os, strlen(os));
-    char *shell_clean = sanitize_utf8(shell, strlen(shell));
-    char *model_clean = (model && *model) ? sanitize_utf8(model, strlen(model)) : NULL;
+    char *home_clean = (home && *home) ? utf8_sanitize(home, strlen(home)) : NULL;
+    char *os_clean = utf8_sanitize(os, strlen(os));
+    char *shell_clean = utf8_sanitize(shell, strlen(shell));
+    char *model_clean = (model && *model) ? utf8_sanitize(model, strlen(model)) : NULL;
     char *root_clean = NULL;
     if (project_root) {
         char *root_display = path_collapse_home(project_root);
-        root_clean = sanitize_utf8(root_display, strlen(root_display));
+        root_clean = utf8_sanitize(root_display, strlen(root_display));
         free(root_display);
     }
 
@@ -210,11 +210,11 @@ static int append_agents_md(struct buf *b, const char *path, const char *display
      * which on Linux can also carry arbitrary bytes. Both would break
      * provider JSON (NUL truncates strlen, Jansson rejects non-UTF-8) —
      * sanitize both before splicing into the prompt. */
-    char *clean = sanitize_utf8(content, n);
+    char *clean = utf8_sanitize(content, n);
     free(content);
     size_t clean_len = strlen(clean);
     const char *header_src = display_path ? display_path : path;
-    char *path_clean = sanitize_utf8(header_src, strlen(header_src));
+    char *path_clean = utf8_sanitize(header_src, strlen(header_src));
 
     if (!*seen_header) {
         if (b->len > 0)
@@ -344,10 +344,8 @@ static char *parse_skill_description(const char *content, size_t len)
             size_t n = (size_t)(vend - v);
             if (n > SKILL_DESCRIPTION_MAX)
                 n = SKILL_DESCRIPTION_MAX;
-            /* sanitize_utf8 strips NULs and replaces invalid sequences with
-             * U+FFFD, so the description is safe to splice into the prompt
-             * JSON regardless of what the file contains. */
-            return sanitize_utf8(v, n);
+            /* Provider JSON requires NUL-free, valid UTF-8. */
+            return utf8_sanitize(v, n);
         }
         p = line_end + 1;
     }
@@ -394,7 +392,7 @@ static void collect_skills(struct skill_entry **out, size_t *n, size_t *cap, con
          * Linux. Sanitize the dir name up front so dedup, sort, and prompt
          * emission all see the same clean identifier; sanitize the path
          * after we've read the file so opendir/stat still see raw bytes. */
-        char *dir_clean = sanitize_utf8(ent->d_name, strlen(ent->d_name));
+        char *dir_clean = utf8_sanitize(ent->d_name, strlen(ent->d_name));
 
         int already = 0;
         for (size_t i = 0; i < *n; i++) {
@@ -427,7 +425,7 @@ static void collect_skills(struct skill_entry **out, size_t *n, size_t *cap, con
         /* skill_md is absolute (callers pass absolute roots — see header).
          * Collapse $HOME → `~` for compactness; otherwise leave as-is. */
         char *display = path_collapse_home(skill_md);
-        char *path_clean = sanitize_utf8(display, strlen(display));
+        char *path_clean = utf8_sanitize(display, strlen(display));
         free(display);
         free(skill_md);
 
@@ -580,11 +578,11 @@ static void append_subagents(struct buf *b)
         }
         /* Names and descriptions are user-authored config — sanitize
          * like every other prompt splice. */
-        char *name_clean = sanitize_utf8(names[i], strlen(names[i]));
+        char *name_clean = utf8_sanitize(names[i], strlen(names[i]));
         const char *desc = config_preset_description(names[i]);
         char *line;
         if (desc && *desc) {
-            char *desc_clean = sanitize_utf8(desc, strlen(desc));
+            char *desc_clean = utf8_sanitize(desc, strlen(desc));
             line = xasprintf("- %s: %s\n", name_clean, desc_clean);
             free(desc_clean);
         } else {

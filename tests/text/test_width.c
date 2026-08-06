@@ -86,7 +86,7 @@ static void test_display_cells(void)
 
 static void test_flatten_preserves_high_bytes(void)
 {
-    /* UTF-8 bytes (>= 0x80) for non-dangerous codepoints pass through. */
+    /* Printable UTF-8 passes through. */
     char *out = flatten_for_display("café\nlatte");
     EXPECT_STR_EQ(out, "café latte");
     free(out);

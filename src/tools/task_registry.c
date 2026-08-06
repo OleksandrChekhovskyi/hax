@@ -370,7 +370,7 @@ static void append_status_phrase(struct buf *out, struct task *t)
 
 static void append_sanitized_path(struct buf *out, const char *path)
 {
-    char *clean = sanitize_utf8(path ? path : "?", strlen(path ? path : "?"));
+    char *clean = utf8_sanitize(path ? path : "?", strlen(path ? path : "?"));
     buf_append_str(out, clean);
     free(clean);
 }
@@ -572,7 +572,7 @@ static size_t resolve_targets(const char *const *ids, size_t n_ids, struct task 
             } else if (!duplicate) {
                 buf_append_str(errors, "no such task: ");
                 char *clean =
-                    sanitize_utf8(ids[i] ? ids[i] : "(null)", strlen(ids[i] ? ids[i] : "(null)"));
+                    utf8_sanitize(ids[i] ? ids[i] : "(null)", strlen(ids[i] ? ids[i] : "(null)"));
                 char *flat = flatten_for_display(clean);
                 free(clean);
                 char *head = truncate_for_display(flat, TASK_COMMAND_HEAD_CELLS);
@@ -634,7 +634,7 @@ char *task_wait_stream(const char *id, long timeout_ms, tool_display_fn display,
     task_poll_all();
     struct task *t = id && *id ? task_find(id) : NULL;
     if (!t) {
-        char *clean = sanitize_utf8(id ? id : "(none)", strlen(id ? id : "(none)"));
+        char *clean = utf8_sanitize(id ? id : "(none)", strlen(id ? id : "(none)"));
         char *flat = flatten_for_display(clean);
         free(clean);
         char *head = truncate_for_display(flat, TASK_COMMAND_HEAD_CELLS);

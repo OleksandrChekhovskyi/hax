@@ -649,10 +649,10 @@ static enum picker_input_result process_input_byte(struct picker_core *core, uns
     if (byte < 0x20)
         return PICKER_INPUT_CONTINUE;
 
-    int sequence_len = utf8_seq_len(byte);
+    size_t sequence_len = utf8_sequence_length(byte);
     char bytes[4] = {(char)byte};
-    int bytes_read = 1;
-    for (int i = 1; i < sequence_len; i++) {
+    size_t bytes_read = 1;
+    for (size_t i = 1; i < sequence_len; i++) {
         unsigned char continuation;
         if (read_byte_timeout(&continuation, ESC_TIMEOUT_MS) <= 0)
             break;

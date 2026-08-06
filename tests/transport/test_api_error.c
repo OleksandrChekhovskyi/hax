@@ -165,14 +165,7 @@ static void test_sse_framed_with_comments(void)
 
 static int valid_utf8(const char *text)
 {
-    size_t len = strlen(text);
-    for (size_t offset = 0; offset < len;) {
-        int sequence_len = utf8_seq_len((unsigned char)text[offset]);
-        if ((size_t)sequence_len > len - offset || !utf8_seq_valid(text + offset, sequence_len))
-            return 0;
-        offset += (size_t)sequence_len;
-    }
-    return 1;
+    return utf8_is_valid(text, strlen(text));
 }
 
 static void test_sse_skips_empty_event_then_extracts(void)

@@ -565,7 +565,7 @@ static void test_head_tail_substituted_tail_no_bogus_marker(void)
     free(in);
 }
 
-static void test_head_tail_dangerous_codepoint_no_bogus_tail_row(void)
+static void test_head_tail_unsafe_codepoint_no_bogus_tail_row(void)
 {
     const char *in = "head0\nhead1\nhead2\nhead3\n\xE2\x80\xAE\n";
     const char *out = render_one(TOOL_RENDER_HEAD_TAIL, in, strlen(in));
@@ -575,7 +575,7 @@ static void test_head_tail_dangerous_codepoint_no_bogus_tail_row(void)
     EXPECT(strstr(out, STRIP_BODY ANSI_DIM "3" ANSI_RESET) == NULL);
 }
 
-static void test_dangerous_codepoint_substituted(void)
+static void test_unsafe_codepoint_substituted(void)
 {
     const char *in = "ab\xE2\x80\xAE"
                      "cd\n";
@@ -628,7 +628,7 @@ int main(void)
     test_head_tail_blanks_in_tail_dont_eat_visible_count();
     test_post_cap_lines_dont_flood_non_tty_output();
     test_head_tail_substituted_tail_no_bogus_marker();
-    test_head_tail_dangerous_codepoint_no_bogus_tail_row();
-    test_dangerous_codepoint_substituted();
+    test_head_tail_unsafe_codepoint_no_bogus_tail_row();
+    test_unsafe_codepoint_substituted();
     T_REPORT();
 }

@@ -667,7 +667,7 @@ static void test_agents_md_invalid_bytes_sanitized(void)
     sb_init(&s);
     /* AGENTS.md with an embedded NUL and an invalid UTF-8 byte. The raw
      * bytes would truncate the prompt under strlen and Jansson would
-     * reject the request as non-UTF-8 — sanitize_utf8 must replace both
+     * reject the request as non-UTF-8 — utf8_sanitize must replace both
      * with U+FFFD before they enter the buffer. */
     char *git = xasprintf("%s/.git", s.root);
     mkdir(git, 0755);

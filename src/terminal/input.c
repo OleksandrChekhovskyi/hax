@@ -962,10 +962,10 @@ static enum history_search_outcome search_history(struct input *in)
             goto done;
         }
         if (key >= 0x20) {
-            int sequence_len = utf8_seq_len(key);
+            size_t sequence_len = utf8_sequence_length(key);
             char bytes[4] = {(char)key};
-            int bytes_read = 1;
-            for (int i = 1; i < sequence_len; i++) {
+            size_t bytes_read = 1;
+            for (size_t i = 1; i < sequence_len; i++) {
                 unsigned char byte;
                 if (read_byte_timeout(&byte, ESC_TIMEOUT_MS) <= 0)
                     break;
@@ -1004,7 +1004,7 @@ done:
 
 static char *read_line_canonical(size_t *out_len)
 {
-    /* Byte-wise reads preserve embedded NULs until sanitize_utf8 can replace them. */
+    /* Byte-wise reads preserve embedded NULs until utf8_sanitize can replace them. */
     struct buf b;
     buf_init(&b);
     for (;;) {
@@ -1278,7 +1278,7 @@ char *input_readline(struct input *in, const char *prompt)
         char *raw = read_line_canonical(&n);
         if (!raw)
             return NULL;
-        char *clean = sanitize_utf8(raw, n);
+        char *clean = utf8_sanitize(raw, n);
         free(raw);
         return clean;
     }
@@ -1424,17 +1424,16 @@ char *input_readline(struct input *in, const char *prompt)
             if (c >= 0x20) {
                 /* Time out malformed leaders because raw mode would consume Ctrl-C/D as
                  * continuation bytes. Partial sequences render as a substitute glyph. */
-                int seq = utf8_seq_len(c);
-                char bytes[4];
-                bytes[0] = (char)c;
-                int got = 1;
-                for (int i = 1; i < seq; i++) {
-                    unsigned char b;
-                    if (read_byte_timeout(&b, ESC_TIMEOUT_MS) <= 0)
+                size_t sequence_len = utf8_sequence_length(c);
+                char bytes[4] = {(char)c};
+                size_t bytes_read = 1;
+                for (size_t i = 1; i < sequence_len; i++) {
+                    unsigned char byte;
+                    if (read_byte_timeout(&byte, ESC_TIMEOUT_MS) <= 0)
                         break;
-                    bytes[got++] = (char)b;
+                    bytes[bytes_read++] = (char)byte;
                 }
-                input_core_insert(in, bytes, got);
+                input_core_insert(in, bytes, bytes_read);
             } else {
                 /* Built-in editing keys take precedence over application bindings. */
                 run_modal_key(in, c);
@@ -1462,5 +1461,5 @@ char *input_readline(struct input *in, const char *prompt)
     if (eof && in->len == 0)
         return NULL;
     /* Jansson rejects malformed UTF-8, so normalize external input before returning it. */
-    return sanitize_utf8(in->buf, in->len);
+    return utf8_sanitize(in->buf, in->len);
 }

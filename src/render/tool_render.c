@@ -68,7 +68,7 @@ void tool_render_init(struct tool_render *render, struct disp *disp, struct spin
     render->disp = disp;
     render->spinner = spinner;
     ctrl_strip_init(&render->strip);
-    utf8_sanitize_init(&render->utf8);
+    utf8_sanitizer_init(&render->sanitizer);
     render->mode = mode;
     if (mode == TOOL_RENDER_HEAD_TAIL)
         render->tail = xmalloc(TAIL_RING_CAPACITY);
@@ -410,11 +410,12 @@ void tool_render_feed(struct tool_render *render, const char *bytes, size_t len)
     char *stripped = len <= sizeof(stack_stripped) ? stack_stripped : xmalloc(len);
     size_t stripped_len = ctrl_strip_feed(&render->strip, bytes, len, stripped);
 
-    char stack_sanitized[UTF8_SANITIZE_OUT_MAX(4096)];
-    size_t sanitized_cap = UTF8_SANITIZE_OUT_MAX(stripped_len);
+    char stack_sanitized[UTF8_SANITIZE_FEED_MAX(4096)];
+    size_t sanitized_cap = UTF8_SANITIZE_FEED_MAX(stripped_len);
     char *sanitized =
         sanitized_cap <= sizeof(stack_sanitized) ? stack_sanitized : xmalloc(sanitized_cap);
-    size_t sanitized_len = utf8_sanitize_feed(&render->utf8, stripped, stripped_len, sanitized);
+    size_t sanitized_len =
+        utf8_sanitizer_feed(&render->sanitizer, stripped, stripped_len, sanitized);
 
     if (render->mode == TOOL_RENDER_DIFF) {
         for (size_t i = 0; i < sanitized_len; i++)
@@ -644,10 +645,10 @@ static void finalize_capped_preview(struct tool_render *render)
 
 static void flush_pending_input(struct tool_render *render)
 {
-    char utf8_tail[UTF8_SANITIZE_FLUSH_MAX];
-    size_t utf8_tail_len = utf8_sanitize_flush(&render->utf8, utf8_tail);
-    if (utf8_tail_len > 0)
-        tool_render_feed(render, utf8_tail, utf8_tail_len);
+    char sanitized_tail[UTF8_SANITIZE_FLUSH_MAX];
+    size_t sanitized_tail_len = utf8_sanitizer_flush(&render->sanitizer, sanitized_tail);
+    if (sanitized_tail_len > 0)
+        tool_render_feed(render, sanitized_tail, sanitized_tail_len);
 
     if (render->mode == TOOL_RENDER_DIFF) {
         if (render->diff_line.len > 0) {
