@@ -43,7 +43,7 @@ static char *run(const char *args_json, struct tool_run_ctx *ctx)
         goto out;
     }
 
-    path = expand_home(raw_path);
+    path = path_expand_home(raw_path);
     const char *content = json_string_value(content_json);
     size_t content_len = json_string_length(content_json);
 

@@ -649,7 +649,7 @@ char *config_prompt_expand(const char *value, char **error)
     const char *spec = value + 1;
     char *path;
     if (spec[0] == '~')
-        path = expand_home(spec);
+        path = path_expand_home(spec);
     else if (spec[0] == '/')
         path = xstrdup(spec);
     else

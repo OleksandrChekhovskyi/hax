@@ -79,7 +79,7 @@ static void test_fzf_cmd_rooted(void)
     free(cmd);
 
     /* ~/ → $HOME before quoting (mirror the builder) */
-    char *expanded = expand_home("~/src/");
+    char *expanded = path_expand_home("~/src/");
     char *quoted = shell_single_quote(expanded);
     char *want = xasprintf("cd %s 2>/dev/null", quoted);
     cmd = file_mention_fzf_cmd("~/src/fil");

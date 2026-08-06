@@ -428,7 +428,7 @@ static char *run(const char *args_json, struct tool_run_ctx *ctx)
     if (result)
         goto out;
 
-    path = expand_home(raw_path);
+    path = path_expand_home(raw_path);
     struct stat st;
     if (stat(path, &st) < 0) {
         result = xasprintf("error reading %s: %s", path, strerror(errno));

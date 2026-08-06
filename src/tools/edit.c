@@ -106,7 +106,7 @@ static char *run(const char *args_json, struct tool_run_ctx *ctx)
         goto out;
     }
 
-    path = expand_home(raw_path);
+    path = path_expand_home(raw_path);
 
     /* Avoid blocking on FIFOs and replacing special files with regular files. */
     struct stat st;

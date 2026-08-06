@@ -99,6 +99,7 @@ test_sources = [
     'tools/test_edit.c',
     'tools/test_image_sniff.c',
     'tools/test_output_cap.c',
+    'tools/test_path_preprocess.c',
     'tools/test_read.c',
     'tools/test_task.c',
     'tools/test_task_wait.c',

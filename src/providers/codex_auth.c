@@ -68,7 +68,7 @@ enum codex_auth_status codex_auth_load(struct codex_auth *auth, char **detail)
     if (detail)
         *detail = NULL;
 
-    char *path = expand_home(CODEX_AUTH_PATH);
+    char *path = path_expand_home(CODEX_AUTH_PATH);
     char *contents = slurp_file(path, NULL);
     if (!contents) {
         if (detail)

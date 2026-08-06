@@ -25,8 +25,8 @@ struct sandbox {
 static void sb_init(struct sandbox *s)
 {
     s->prev_cwd = getcwd(NULL, 0);
-    /* t_tempdir hands back a canonical path, so this compares byte-for-byte
-     * against a later getcwd (collapse_home, HOME-prefix matching). */
+    /* t_tempdir hands back a canonical path, so this compares byte-for-byte against a later getcwd
+     * when collapsing the home prefix. */
     s->root = xstrdup(t_tempdir());
     /* Point HOME and XDG_CONFIG_HOME at the sandbox so global AGENTS.md
      * lookups don't escape it. Tests that want a global file create it

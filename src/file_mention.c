@@ -107,8 +107,8 @@ char *file_mention_fzf_cmd(const char *query)
     char *q = shell_single_quote(filter);
     char *cmd;
     if (root) {
-        /* expand_home before quoting — single quotes kill tilde expand */
-        char *expanded = expand_home(root);
+        /* Expand home before quoting — single quotes disable shell tilde expansion. */
+        char *expanded = path_expand_home(root);
         char *r = shell_single_quote(expanded);
         /* Silent cd: bad prefix → empty picker, not "No such file". */
         cmd = xasprintf("{ cd %s 2>/dev/null && { " CANDIDATES_CMD "; }; }" FZF_TAIL, r, q);
@@ -194,10 +194,10 @@ char *file_mention_pick(const char *query)
         return NULL;
     }
     char *out = run_fzf(query);
-    /* Validate the pick (stale index entry, deleted mid-pick), not each
-     * candidate. expand_home first so a rejoined `~/…` still resolves. */
+    /* Validate the pick (stale index entry, deleted mid-pick), not each candidate. Expand home
+     * first so a rejoined `~/…` still resolves. */
     if (out) {
-        char *check = expand_home(out);
+        char *check = path_expand_home(out);
         if (ensure_regular_file(check) != 0) {
             hax_warn("cannot mention '%s': %s", out, strerror(errno));
             free(out);

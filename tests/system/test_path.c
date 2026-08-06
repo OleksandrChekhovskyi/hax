@@ -4,307 +4,306 @@
 #include "harness.h"
 #include "system/path.h"
 
-/* ---------- path_join ---------- */
-
 static void test_path_join_simple(void)
 {
-    char *out = path_join("/tmp", "foo");
-    EXPECT_STR_EQ(out, "/tmp/foo");
-    free(out);
+    char *joined = path_join("/tmp", "foo");
+    EXPECT_STR_EQ(joined, "/tmp/foo");
+    free(joined);
 }
 
 static void test_path_join_strips_trailing_slash(void)
 {
-    /* Original motivating bug: macOS $TMPDIR ends in '/' and naive
-     * concat produces "//hax-bash-XXXXXX". */
-    char *out = path_join("/var/folders/abc/T/", "hax-bash-XXXXXX");
-    EXPECT_STR_EQ(out, "/var/folders/abc/T/hax-bash-XXXXXX");
-    free(out);
+    char *joined = path_join("/var/folders/abc/T/", "hax-bash-XXXXXX");
+    EXPECT_STR_EQ(joined, "/var/folders/abc/T/hax-bash-XXXXXX");
+    free(joined);
 }
 
 static void test_path_join_strips_multiple_trailing_slashes(void)
 {
-    char *out = path_join("/tmp///", "foo");
-    EXPECT_STR_EQ(out, "/tmp/foo");
-    free(out);
+    char *joined = path_join("/tmp///", "foo");
+    EXPECT_STR_EQ(joined, "/tmp/foo");
+    free(joined);
 }
 
-static void test_path_join_strips_leading_slash_on_rel(void)
+static void test_path_join_strips_leading_slash_from_suffix(void)
 {
-    /* `rel` arriving with a leading '/' (rare, but defensive) shouldn't
-     * produce "//" in the join either. */
-    char *out = path_join("/tmp", "/foo");
-    EXPECT_STR_EQ(out, "/tmp/foo");
-    free(out);
+    char *joined = path_join("/tmp", "/foo");
+    EXPECT_STR_EQ(joined, "/tmp/foo");
+    free(joined);
 }
 
 static void test_path_join_root_base(void)
 {
-    /* base=="/" must not be stripped to empty — joining with "etc"
-     * needs to give "/etc", not "etc" or "//etc". */
-    char *out = path_join("/", "etc");
-    EXPECT_STR_EQ(out, "/etc");
-    free(out);
+    char *joined = path_join("/", "etc");
+    EXPECT_STR_EQ(joined, "/etc");
+    free(joined);
 }
 
-static void test_path_join_root_base_with_leading_slash_rel(void)
+static void test_path_join_root_with_leading_slash_suffix(void)
 {
-    char *out = path_join("/", "/etc");
-    EXPECT_STR_EQ(out, "/etc");
-    free(out);
+    char *joined = path_join("/", "/etc");
+    EXPECT_STR_EQ(joined, "/etc");
+    free(joined);
 }
 
 static void test_path_join_relative_base(void)
 {
-    char *out = path_join("subdir", "file.txt");
-    EXPECT_STR_EQ(out, "subdir/file.txt");
-    free(out);
+    char *joined = path_join("subdir", "file.txt");
+    EXPECT_STR_EQ(joined, "subdir/file.txt");
+    free(joined);
 }
 
 static void test_path_join_dot_base(void)
 {
-    char *out = path_join(".", "file.txt");
-    EXPECT_STR_EQ(out, "./file.txt");
-    free(out);
+    char *joined = path_join(".", "file.txt");
+    EXPECT_STR_EQ(joined, "./file.txt");
+    free(joined);
 }
 
 static void test_path_join_empty_base(void)
 {
-    /* No current call site passes an empty base, but pin the behavior
-     * so a future regression is loud rather than silent. blen==0 hits
-     * neither the trailing-slash strip (guarded by blen>1) nor the
-     * root special-case, so it falls through to "%.*s/%s" with .*==0,
-     * yielding "/rel". */
-    char *out = path_join("", "foo");
-    EXPECT_STR_EQ(out, "/foo");
-    free(out);
+    char *joined = path_join("", "foo");
+    EXPECT_STR_EQ(joined, "/foo");
+    free(joined);
 }
 
-static void test_path_join_empty_rel(void)
+static void test_path_join_empty_suffix(void)
 {
-    /* Symmetric: pin the empty-rel behavior. */
-    char *out = path_join("/tmp", "");
-    EXPECT_STR_EQ(out, "/tmp/");
-    free(out);
+    char *joined = path_join("/tmp", "");
+    EXPECT_STR_EQ(joined, "/tmp/");
+    free(joined);
 }
 
-/* ---------- expand_home ---------- */
-
-static void test_expand_home_null(void)
+static void test_path_expand_home_null(void)
 {
-    EXPECT(expand_home(NULL) == NULL);
+    EXPECT(path_expand_home(NULL) == NULL);
 }
 
-static void test_expand_home_no_tilde(void)
+static void test_path_expand_home_copies_path_without_tilde(void)
 {
     setenv("HOME", "/tmp/fake", 1);
-    char *p = expand_home("/absolute/path");
-    EXPECT_STR_EQ(p, "/absolute/path");
-    free(p);
+    char *expanded = path_expand_home("/absolute/path");
+    EXPECT_STR_EQ(expanded, "/absolute/path");
+    free(expanded);
 }
 
-static void test_expand_home_tilde_only(void)
+static void test_path_expand_home_bare_tilde(void)
 {
     setenv("HOME", "/tmp/fake", 1);
-    char *p = expand_home("~");
-    EXPECT_STR_EQ(p, "/tmp/fake");
-    free(p);
+    char *expanded = path_expand_home("~");
+    EXPECT_STR_EQ(expanded, "/tmp/fake");
+    free(expanded);
 }
 
-static void test_expand_home_tilde_slash(void)
+static void test_path_expand_home_tilde_prefix(void)
 {
     setenv("HOME", "/tmp/fake", 1);
-    char *p = expand_home("~/sub/file");
-    EXPECT_STR_EQ(p, "/tmp/fake/sub/file");
-    free(p);
+    char *expanded = path_expand_home("~/sub/file");
+    EXPECT_STR_EQ(expanded, "/tmp/fake/sub/file");
+    free(expanded);
 }
 
-static void test_expand_home_no_home_env(void)
+static void test_path_expand_home_avoids_duplicate_separator(void)
 {
-    unsetenv("HOME");
-    char *p = expand_home("~/foo");
-    EXPECT_STR_EQ(p, "~/foo");
-    free(p);
+    setenv("HOME", "/tmp/fake/", 1);
+    char *expanded = path_expand_home("~/sub/file");
+    EXPECT_STR_EQ(expanded, "/tmp/fake/sub/file");
+    free(expanded);
 }
 
-static void test_expand_home_empty_home_env(void)
+static void test_path_expand_home_root(void)
 {
-    /* HOME set but empty must not produce a "/foo"-style path. Same fallback
-     * as unset HOME: leave the tilde in place so the caller's open() error
-     * tells the user the path is wrong rather than silently rooting at /. */
-    setenv("HOME", "", 1);
-    char *p = expand_home("~/foo");
-    EXPECT_STR_EQ(p, "~/foo");
-    free(p);
-}
-
-static void test_expand_home_tilde_user_left_alone(void)
-{
-    /* `~user/...` would need getpwnam — out of scope. Pass through unchanged
-     * so the caller's open() surfaces the same "no such file" the user would
-     * see in any non-shell context. */
-    setenv("HOME", "/tmp/fake", 1);
-    char *p = expand_home("~root/etc");
-    EXPECT_STR_EQ(p, "~root/etc");
-    free(p);
-}
-
-/* ---------- collapse_home ---------- */
-
-static void test_collapse_home_null(void)
-{
-    EXPECT(collapse_home(NULL) == NULL);
-}
-
-static void test_collapse_home_substitutes_prefix(void)
-{
-    setenv("HOME", "/Users/alice", 1);
-    char *p = collapse_home("/Users/alice/source/hax");
-    EXPECT_STR_EQ(p, "~/source/hax");
-    free(p);
-}
-
-static void test_collapse_home_exact_match(void)
-{
-    setenv("HOME", "/Users/alice", 1);
-    char *p = collapse_home("/Users/alice");
-    EXPECT_STR_EQ(p, "~");
-    free(p);
-}
-
-static void test_collapse_home_no_match_returns_input(void)
-{
-    setenv("HOME", "/Users/alice", 1);
-    char *p = collapse_home("/etc/hosts");
-    EXPECT_STR_EQ(p, "/etc/hosts");
-    free(p);
-}
-
-static void test_collapse_home_partial_component_not_a_match(void)
-{
-    /* $HOME=/Users/alice must not match "/Users/alice2/..." — the substring
-     * is a prefix at the byte level but not at the path-component level.
-     * Without the boundary check, "alice2" would silently render as
-     * "~2/..." which would mislead the user about where the file lives. */
-    setenv("HOME", "/Users/alice", 1);
-    char *p = collapse_home("/Users/alice2/x");
-    EXPECT_STR_EQ(p, "/Users/alice2/x");
-    free(p);
-}
-
-static void test_collapse_home_trailing_slash_in_home(void)
-{
-    /* $HOME with a trailing slash (rare, but possible if user-set) still
-     * matches a path that doesn't have one. */
-    setenv("HOME", "/Users/alice/", 1);
-    char *p = collapse_home("/Users/alice/foo");
-    EXPECT_STR_EQ(p, "~/foo");
-    free(p);
-}
-
-static void test_collapse_home_no_home_env(void)
-{
-    unsetenv("HOME");
-    char *p = collapse_home("/Users/alice/foo");
-    EXPECT_STR_EQ(p, "/Users/alice/foo");
-    free(p);
-}
-
-static void test_collapse_home_root_home(void)
-{
-    /* HOME=="/" is degenerate but possible (containers, daemons). The
-     * trailing-slash strip is guarded by hlen > 1, so root is preserved
-     * and any absolute path collapses to `~/...`. */
     setenv("HOME", "/", 1);
-    char *p = collapse_home("/etc/hosts");
-    EXPECT_STR_EQ(p, "~/etc/hosts");
-    free(p);
+    char *expanded = path_expand_home("~/etc/hosts");
+    EXPECT_STR_EQ(expanded, "/etc/hosts");
+    free(expanded);
 }
 
-/* ---------- path_relativize ---------- */
-
-static void test_relativize_under_cwd(void)
+static void test_path_expand_home_without_home(void)
 {
-    char *p = path_relativize("/home/u/proj/src/x.c", "/home/u/proj");
-    EXPECT_STR_EQ(p, "src/x.c");
-    free(p);
+    unsetenv("HOME");
+    char *expanded = path_expand_home("~/foo");
+    EXPECT_STR_EQ(expanded, "~/foo");
+    free(expanded);
 }
 
-static void test_relativize_direct_child(void)
+static void test_path_expand_home_with_empty_home(void)
 {
-    char *p = path_relativize("/home/u/proj/calc.py", "/home/u/proj");
-    EXPECT_STR_EQ(p, "calc.py");
-    free(p);
+    setenv("HOME", "", 1);
+    char *expanded = path_expand_home("~/foo");
+    EXPECT_STR_EQ(expanded, "~/foo");
+    free(expanded);
 }
 
-static void test_relativize_equal_to_cwd_is_null(void)
+static void test_path_expand_home_leaves_named_home_unchanged(void)
+{
+    setenv("HOME", "/tmp/fake", 1);
+    char *expanded = path_expand_home("~root/etc");
+    EXPECT_STR_EQ(expanded, "~root/etc");
+    free(expanded);
+}
+
+static void test_path_collapse_home_null(void)
+{
+    EXPECT(path_collapse_home(NULL) == NULL);
+}
+
+static void test_path_collapse_home_prefix(void)
+{
+    setenv("HOME", "/Users/alice", 1);
+    char *collapsed = path_collapse_home("/Users/alice/source/hax");
+    EXPECT_STR_EQ(collapsed, "~/source/hax");
+    free(collapsed);
+}
+
+static void test_path_collapse_home_exact_match(void)
+{
+    setenv("HOME", "/Users/alice", 1);
+    char *collapsed = path_collapse_home("/Users/alice");
+    EXPECT_STR_EQ(collapsed, "~");
+    free(collapsed);
+}
+
+static void test_path_collapse_home_copies_unrelated_path(void)
+{
+    setenv("HOME", "/Users/alice", 1);
+    char *collapsed = path_collapse_home("/etc/hosts");
+    EXPECT_STR_EQ(collapsed, "/etc/hosts");
+    free(collapsed);
+}
+
+static void test_path_collapse_home_requires_component_boundary(void)
+{
+    setenv("HOME", "/Users/alice", 1);
+    char *collapsed = path_collapse_home("/Users/alice2/x");
+    EXPECT_STR_EQ(collapsed, "/Users/alice2/x");
+    free(collapsed);
+}
+
+static void test_path_collapse_home_ignores_trailing_home_slash(void)
+{
+    setenv("HOME", "/Users/alice/", 1);
+    char *collapsed = path_collapse_home("/Users/alice/foo");
+    EXPECT_STR_EQ(collapsed, "~/foo");
+    free(collapsed);
+}
+
+static void test_path_collapse_home_without_home(void)
+{
+    unsetenv("HOME");
+    char *collapsed = path_collapse_home("/Users/alice/foo");
+    EXPECT_STR_EQ(collapsed, "/Users/alice/foo");
+    free(collapsed);
+}
+
+static void test_path_collapse_home_with_empty_home(void)
+{
+    setenv("HOME", "", 1);
+    char *collapsed = path_collapse_home("/Users/alice/foo");
+    EXPECT_STR_EQ(collapsed, "/Users/alice/foo");
+    free(collapsed);
+}
+
+static void test_path_collapse_root_home(void)
+{
+    setenv("HOME", "/", 1);
+    char *collapsed = path_collapse_home("/etc/hosts");
+    EXPECT_STR_EQ(collapsed, "~/etc/hosts");
+    free(collapsed);
+}
+
+static void test_path_collapse_root_home_exact_match(void)
+{
+    setenv("HOME", "/", 1);
+    char *collapsed = path_collapse_home("/");
+    EXPECT_STR_EQ(collapsed, "~");
+    free(collapsed);
+}
+
+static void test_path_relativize_descendant(void)
+{
+    char *relative = path_relativize("/home/u/proj/src/x.c", "/home/u/proj");
+    EXPECT_STR_EQ(relative, "src/x.c");
+    free(relative);
+}
+
+static void test_path_relativize_direct_child(void)
+{
+    char *relative = path_relativize("/home/u/proj/calc.py", "/home/u/proj");
+    EXPECT_STR_EQ(relative, "calc.py");
+    free(relative);
+}
+
+static void test_path_relativize_rejects_cwd(void)
 {
     EXPECT(path_relativize("/home/u/proj", "/home/u/proj") == NULL);
 }
 
-static void test_relativize_outside_cwd_is_null(void)
+static void test_path_relativize_rejects_unrelated_path(void)
 {
     EXPECT(path_relativize("/etc/hosts", "/home/u/proj") == NULL);
 }
 
-static void test_relativize_partial_component_is_null(void)
+static void test_path_relativize_requires_component_boundary(void)
 {
-    /* "/home/u/proj2" must not match cwd "/home/u/proj" — byte prefix
-     * but not a path-component boundary. */
     EXPECT(path_relativize("/home/u/proj2/x", "/home/u/proj") == NULL);
 }
 
-static void test_relativize_relative_input_is_null(void)
+static void test_path_relativize_rejects_relative_path(void)
 {
     EXPECT(path_relativize("src/x.c", "/home/u/proj") == NULL);
 }
 
-static void test_relativize_trailing_slash_cwd(void)
+static void test_path_relativize_rejects_relative_cwd(void)
 {
-    char *p = path_relativize("/home/u/proj/x.c", "/home/u/proj/");
-    EXPECT_STR_EQ(p, "x.c");
-    free(p);
+    EXPECT(path_relativize("/home/u/proj/x.c", "home/u/proj") == NULL);
 }
 
-static void test_relativize_root_cwd(void)
+static void test_path_relativize_ignores_trailing_cwd_slash(void)
 {
-    char *p = path_relativize("/etc/hosts", "/");
-    EXPECT_STR_EQ(p, "etc/hosts");
-    free(p);
+    char *relative = path_relativize("/home/u/proj/x.c", "/home/u/proj/");
+    EXPECT_STR_EQ(relative, "x.c");
+    free(relative);
 }
 
-static void test_relativize_root_cwd_root_path_is_null(void)
+static void test_path_relativize_from_root(void)
+{
+    char *relative = path_relativize("/etc/hosts", "/");
+    EXPECT_STR_EQ(relative, "etc/hosts");
+    free(relative);
+}
+
+static void test_path_relativize_rejects_root_from_root(void)
 {
     EXPECT(path_relativize("/", "/") == NULL);
 }
 
-static void test_relativize_null_inputs(void)
+static void test_path_relativize_rejects_null_inputs(void)
 {
     EXPECT(path_relativize(NULL, "/home") == NULL);
     EXPECT(path_relativize("/home/x", NULL) == NULL);
 }
 
-static void test_relativize_dotdot_escaping_is_null(void)
+static void test_path_relativize_rejects_escaping_parent_component(void)
 {
-    /* "/repo/../outside/file" resolves outside cwd; relativizing it to
-     * "../outside/file" would leak an outside-cwd target in as a relative
-     * path. Bail instead. */
     EXPECT(path_relativize("/repo/../outside/file", "/repo") == NULL);
 }
 
-static void test_relativize_dotdot_under_cwd_is_null(void)
+static void test_path_relativize_rejects_non_escaping_parent_component(void)
 {
-    /* Even a ".." that stays under cwd is left alone — we don't normalize
-     * dot segments, and "a/../b" would make an ugly "a/a/../b" label. */
     EXPECT(path_relativize("/repo/a/../b/file", "/repo") == NULL);
 }
 
-static void test_relativize_dotdot_in_name_still_relativizes(void)
+static void test_path_relativize_rejects_trailing_parent_component(void)
 {
-    /* ".." inside a filename (not a standalone component) is fine. */
-    char *p = path_relativize("/repo/a..b/file", "/repo");
-    EXPECT_STR_EQ(p, "a..b/file");
-    free(p);
+    EXPECT(path_relativize("/repo/sub/..", "/repo") == NULL);
+}
+
+static void test_path_relativize_accepts_dots_within_component(void)
+{
+    char *relative = path_relativize("/repo/a..b/file", "/repo");
+    EXPECT_STR_EQ(relative, "a..b/file");
+    free(relative);
 }
 
 int main(void)
@@ -312,44 +311,50 @@ int main(void)
     test_path_join_simple();
     test_path_join_strips_trailing_slash();
     test_path_join_strips_multiple_trailing_slashes();
-    test_path_join_strips_leading_slash_on_rel();
+    test_path_join_strips_leading_slash_from_suffix();
     test_path_join_root_base();
-    test_path_join_root_base_with_leading_slash_rel();
+    test_path_join_root_with_leading_slash_suffix();
     test_path_join_relative_base();
     test_path_join_dot_base();
     test_path_join_empty_base();
-    test_path_join_empty_rel();
+    test_path_join_empty_suffix();
 
-    test_expand_home_null();
-    test_expand_home_no_tilde();
-    test_expand_home_tilde_only();
-    test_expand_home_tilde_slash();
-    test_expand_home_no_home_env();
-    test_expand_home_empty_home_env();
-    test_expand_home_tilde_user_left_alone();
+    test_path_expand_home_null();
+    test_path_expand_home_copies_path_without_tilde();
+    test_path_expand_home_bare_tilde();
+    test_path_expand_home_tilde_prefix();
+    test_path_expand_home_avoids_duplicate_separator();
+    test_path_expand_home_root();
+    test_path_expand_home_without_home();
+    test_path_expand_home_with_empty_home();
+    test_path_expand_home_leaves_named_home_unchanged();
 
-    test_collapse_home_null();
-    test_collapse_home_substitutes_prefix();
-    test_collapse_home_exact_match();
-    test_collapse_home_no_match_returns_input();
-    test_collapse_home_partial_component_not_a_match();
-    test_collapse_home_trailing_slash_in_home();
-    test_collapse_home_no_home_env();
-    test_collapse_home_root_home();
+    test_path_collapse_home_null();
+    test_path_collapse_home_prefix();
+    test_path_collapse_home_exact_match();
+    test_path_collapse_home_copies_unrelated_path();
+    test_path_collapse_home_requires_component_boundary();
+    test_path_collapse_home_ignores_trailing_home_slash();
+    test_path_collapse_home_without_home();
+    test_path_collapse_home_with_empty_home();
+    test_path_collapse_root_home();
+    test_path_collapse_root_home_exact_match();
 
-    test_relativize_under_cwd();
-    test_relativize_direct_child();
-    test_relativize_equal_to_cwd_is_null();
-    test_relativize_outside_cwd_is_null();
-    test_relativize_partial_component_is_null();
-    test_relativize_relative_input_is_null();
-    test_relativize_trailing_slash_cwd();
-    test_relativize_root_cwd();
-    test_relativize_root_cwd_root_path_is_null();
-    test_relativize_null_inputs();
-    test_relativize_dotdot_escaping_is_null();
-    test_relativize_dotdot_under_cwd_is_null();
-    test_relativize_dotdot_in_name_still_relativizes();
+    test_path_relativize_descendant();
+    test_path_relativize_direct_child();
+    test_path_relativize_rejects_cwd();
+    test_path_relativize_rejects_unrelated_path();
+    test_path_relativize_requires_component_boundary();
+    test_path_relativize_rejects_relative_path();
+    test_path_relativize_rejects_relative_cwd();
+    test_path_relativize_ignores_trailing_cwd_slash();
+    test_path_relativize_from_root();
+    test_path_relativize_rejects_root_from_root();
+    test_path_relativize_rejects_null_inputs();
+    test_path_relativize_rejects_escaping_parent_component();
+    test_path_relativize_rejects_non_escaping_parent_component();
+    test_path_relativize_rejects_trailing_parent_component();
+    test_path_relativize_accepts_dots_within_component();
 
     T_REPORT();
 }

@@ -95,7 +95,7 @@ static void append_environment_section(struct buf *b, const char *model)
     char *project_root = find_project_root(cwd);
 
     /* Collapse paths before sanitizing so `~` still maps to the displayed home. */
-    char *cwd_display = collapse_home(cwd);
+    char *cwd_display = path_collapse_home(cwd);
     char *cwd_clean = sanitize_utf8(cwd_display, strlen(cwd_display));
     free(cwd_display);
     char *home_clean = (home && *home) ? sanitize_utf8(home, strlen(home)) : NULL;
@@ -104,7 +104,7 @@ static void append_environment_section(struct buf *b, const char *model)
     char *model_clean = (model && *model) ? sanitize_utf8(model, strlen(model)) : NULL;
     char *root_clean = NULL;
     if (project_root) {
-        char *root_display = collapse_home(project_root);
+        char *root_display = path_collapse_home(project_root);
         root_clean = sanitize_utf8(root_display, strlen(root_display));
         free(root_display);
     }
@@ -249,7 +249,7 @@ static void append_project_agents_md(struct buf *b, int *seen_header)
          * considered, to avoid pulling in unrelated AGENTS.md files when
          * hax is run outside any repo. */
         char *candidate = xasprintf("%s/AGENTS.md", cwd);
-        char *display = collapse_home(candidate);
+        char *display = path_collapse_home(candidate);
         append_agents_md(b, candidate, display, seen_header);
         free(display);
         free(candidate);
@@ -270,7 +270,7 @@ static void append_project_agents_md(struct buf *b, int *seen_header)
     snprintf(dir, sizeof(dir), "%s", cwd);
     for (int i = 0; i < AGENTS_MD_MAX_LEVELS; i++) {
         paths[n] = path_join(dir, "AGENTS.md");
-        display_paths[n] = collapse_home(paths[n]);
+        display_paths[n] = path_collapse_home(paths[n]);
         n++;
 
         if (strcmp(dir, root) == 0)
@@ -426,7 +426,7 @@ static void collect_skills(struct skill_entry **out, size_t *n, size_t *cap, con
 
         /* skill_md is absolute (callers pass absolute roots — see header).
          * Collapse $HOME → `~` for compactness; otherwise leave as-is. */
-        char *display = collapse_home(skill_md);
+        char *display = path_collapse_home(skill_md);
         char *path_clean = sanitize_utf8(display, strlen(display));
         free(display);
         free(skill_md);
@@ -631,7 +631,7 @@ char *agent_env_build_suffix(const char *model)
         int seen_header = 0;
         char *global = xdg_hax_config_path("AGENTS.md");
         if (global) {
-            char *display = collapse_home(global);
+            char *display = path_collapse_home(global);
             append_agents_md(&b, global, display, &seen_header);
             free(display);
             free(global);
