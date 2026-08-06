@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#include <libgen.h>
+#include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -8,213 +9,303 @@
 #include "harness.h"
 #include "system/tempfiles.h"
 
-static void test_create_tracks_and_cleanup_unlinks(void)
+static int path_is_under(const char *path, const char *dir)
 {
-    char *dir = t_tempdir();
-    setenv("TMPDIR", dir, 1);
+    size_t path_len = strlen(path);
+    size_t dir_len = strlen(dir);
+    return path_len > dir_len && strncmp(path, dir, dir_len) == 0 && path[dir_len] == '/';
+}
 
-    char *a = NULL;
-    char *b = NULL;
-    int fda = tempfile_create("t-", "", &a);
-    int fdb = tempfile_create("t-", ".png", &b);
-    EXPECT(fda >= 0 && a != NULL);
-    EXPECT(fdb >= 0 && b != NULL);
-    EXPECT(strcmp(a, b) != 0);
+static char *parent_dir(const char *path)
+{
+    char *parent = strdup(path);
+    char *separator = strrchr(parent, '/');
+    if (separator)
+        *separator = '\0';
+    return parent;
+}
 
-    /* Layout: <TMPDIR>/hax-XXXXXX/<prefix><seq><suffix>, container 0700,
-     * entries 0600. */
-    EXPECT(strncmp(a, dir, strlen(dir)) == 0);
-    EXPECT(strstr(a, "/hax-") != NULL);
-    EXPECT(strstr(a, "/t-") != NULL);
-    EXPECT(strstr(b, ".png") != NULL && strcmp(b + strlen(b) - 4, ".png") == 0);
+static void test_create_tracks_files_and_cleanup_removes_them(void)
+{
+    char *tmpdir = t_tempdir();
+    setenv("TMPDIR", tmpdir, 1);
+
+    char *plain_path = NULL;
+    char *image_path = NULL;
+    int plain_fd = tempfile_create("t-", "", &plain_path);
+    int image_fd = tempfile_create("t-", ".png", &image_path);
+    EXPECT(plain_fd >= 0 && plain_path != NULL);
+    EXPECT(image_fd >= 0 && image_path != NULL);
+    EXPECT(strcmp(plain_path, image_path) != 0);
+    EXPECT(path_is_under(plain_path, tmpdir));
+    EXPECT(strstr(plain_path, "/hax-") != NULL);
+    EXPECT(strstr(plain_path, "/t-") != NULL);
+    EXPECT(strlen(image_path) >= 4 && strcmp(image_path + strlen(image_path) - 4, ".png") == 0);
+
+    char *plain_dir = parent_dir(plain_path);
+    char *image_dir = parent_dir(image_path);
+    EXPECT_STR_EQ(plain_dir, image_dir);
 
     struct stat st;
-    char *acopy = strdup(a);
-    EXPECT(stat(dirname(acopy), &st) == 0 && (st.st_mode & 0777) == 0700);
-    free(acopy);
-    EXPECT(stat(a, &st) == 0 && (st.st_mode & 0777) == 0600);
-    EXPECT(write(fda, "x", 1) == 1);
-    close(fda);
-    close(fdb);
-
-    /* Both files share one container dir; cleanup removes it too. */
-    char *bcopy = strdup(b);
-    char *container = strdup(dirname(bcopy));
-    free(bcopy);
-    EXPECT(strncmp(a, container, strlen(container)) == 0);
+    EXPECT(stat(plain_dir, &st) == 0 && (st.st_mode & 0777) == 0700);
+    EXPECT(stat(plain_path, &st) == 0 && (st.st_mode & 0777) == 0600);
+    EXPECT(write(plain_fd, "x", 1) == 1);
+    close(plain_fd);
+    close(image_fd);
 
     tempfiles_cleanup();
-    EXPECT(stat(a, &st) < 0);
-    EXPECT(stat(b, &st) < 0);
-    EXPECT(stat(container, &st) < 0);
-    free(container);
-    free(a);
-    free(b);
+    EXPECT(stat(plain_path, &st) < 0);
+    EXPECT(stat(image_path, &st) < 0);
+    EXPECT(stat(plain_dir, &st) < 0);
+
+    free(plain_dir);
+    free(image_dir);
+    free(plain_path);
+    free(image_path);
     unsetenv("TMPDIR");
 }
 
-static void test_untrack_survives_cleanup(void)
+static void test_untracked_file_survives_cleanup(void)
 {
-    char *dir = t_tempdir();
-    setenv("TMPDIR", dir, 1);
+    char *tmpdir = t_tempdir();
+    setenv("TMPDIR", tmpdir, 1);
 
-    char *keep = NULL;
-    char *drop = NULL;
-    int fdk = tempfile_create("t-", "", &keep);
-    int fdd = tempfile_create("t-", "", &drop);
-    EXPECT(fdk >= 0 && fdd >= 0);
-    close(fdk);
-    close(fdd);
+    char *kept_path = NULL;
+    char *removed_path = NULL;
+    int kept_fd = tempfile_create("t-", "", &kept_path);
+    int removed_fd = tempfile_create("t-", "", &removed_path);
+    EXPECT(kept_fd >= 0 && removed_fd >= 0);
+    close(kept_fd);
+    close(removed_fd);
 
-    tempfile_untrack(keep);
+    tempfile_untrack(kept_path);
     tempfiles_cleanup();
 
     struct stat st;
-    EXPECT(stat(keep, &st) == 0); /* untracked: registry no longer owns it */
-    EXPECT(stat(drop, &st) < 0);
-    unlink(keep);
-    free(keep);
-    free(drop);
+    EXPECT(stat(kept_path, &st) == 0);
+    EXPECT(stat(removed_path, &st) < 0);
+
+    unlink(kept_path);
+    tempfiles_cleanup();
+    free(kept_path);
+    free(removed_path);
     unsetenv("TMPDIR");
 }
 
-static void test_untrack_unknown_path_is_noop(void)
+static void test_untracking_unknown_path_is_noop(void)
 {
     tempfile_untrack("/nonexistent/not-tracked");
-    tempfiles_cleanup(); /* no tracked entries: must not crash */
+    tempfiles_cleanup();
 }
 
-static void test_tmpdir_change_starts_fresh_dir(void)
+static void test_tmpdir_change_uses_new_directory(void)
 {
-    char *first = t_tempdir();
-    char *second = t_tempdir();
+    char *first_tmpdir = t_tempdir();
+    char *second_tmpdir = t_tempdir();
 
-    setenv("TMPDIR", first, 1);
-    char *a = NULL;
-    int fda = tempfile_create("t-", "", &a);
-    EXPECT(fda >= 0);
-    close(fda);
-    EXPECT(strncmp(a, first, strlen(first)) == 0);
+    setenv("TMPDIR", first_tmpdir, 1);
+    char *first_path = NULL;
+    int first_fd = tempfile_create("t-", "", &first_path);
+    EXPECT(first_fd >= 0);
+    close(first_fd);
+    EXPECT(path_is_under(first_path, first_tmpdir));
 
-    setenv("TMPDIR", second, 1);
-    char *b = NULL;
-    int fdb = tempfile_create("t-", "", &b);
-    EXPECT(fdb >= 0);
-    close(fdb);
-    EXPECT(strncmp(b, second, strlen(second)) == 0);
+    setenv("TMPDIR", second_tmpdir, 1);
+    char *second_path = NULL;
+    int second_fd = tempfile_create("t-", "", &second_path);
+    EXPECT(second_fd >= 0);
+    close(second_fd);
+    EXPECT(path_is_under(second_path, second_tmpdir));
 
-    /* Cleanup still reclaims both files — tracking is by full path —
-     * and reaps the superseded container directory, not just the
-     * current one. */
-    char *acopy = strdup(a);
-    char *old_container = strdup(dirname(acopy));
-    free(acopy);
+    char *first_container = parent_dir(first_path);
     tempfiles_cleanup();
+
     struct stat st;
-    EXPECT(stat(a, &st) < 0);
-    EXPECT(stat(b, &st) < 0);
-    EXPECT(stat(old_container, &st) < 0);
-    free(old_container);
-    free(a);
-    free(b);
+    EXPECT(stat(first_path, &st) < 0);
+    EXPECT(stat(second_path, &st) < 0);
+    EXPECT(stat(first_container, &st) < 0);
+
+    free(first_container);
+    free(first_path);
+    free(second_path);
     unsetenv("TMPDIR");
 }
 
-static void test_externally_removed_dir_recovers(void)
+static void test_cleanup_retries_retired_nonempty_directory(void)
 {
-    char *dir = t_tempdir();
-    setenv("TMPDIR", dir, 1);
+    char *first_tmpdir = t_tempdir();
+    char *second_tmpdir = t_tempdir();
 
-    char *a = NULL;
-    int fda = tempfile_create("t-", "", &a);
-    EXPECT(fda >= 0);
-    close(fda);
+    setenv("TMPDIR", first_tmpdir, 1);
+    char *kept_path = NULL;
+    int kept_fd = tempfile_create("t-", "", &kept_path);
+    EXPECT(kept_fd >= 0);
+    close(kept_fd);
+    tempfile_untrack(kept_path);
+    char *first_container = parent_dir(kept_path);
 
-    /* Simulate a tmp reaper: the container vanishes underneath us. The
-     * cleanup's rmdir then fails with ENOENT, which must drop the
-     * cached handle — a kept stale handle would make every later
-     * create fail until process exit. */
-    char *acopy = strdup(a);
-    char *container = strdup(dirname(acopy));
-    free(acopy);
-    unlink(a);
-    EXPECT(rmdir(container) == 0);
+    setenv("TMPDIR", second_tmpdir, 1);
+    char *removed_path = NULL;
+    int removed_fd = tempfile_create("t-", "", &removed_path);
+    EXPECT(removed_fd >= 0);
+    close(removed_fd);
+
     tempfiles_cleanup();
 
-    char *b = NULL;
-    int fdb = tempfile_create("t-", "", &b);
-    EXPECT(fdb >= 0 && b != NULL);
-    if (fdb >= 0) {
-        struct stat st;
-        EXPECT(stat(b, &st) == 0);
-        EXPECT(strncmp(b, container, strlen(container)) != 0); /* fresh dir */
-        close(fdb);
+    struct stat st;
+    EXPECT(stat(kept_path, &st) == 0);
+    EXPECT(stat(first_container, &st) == 0);
+    EXPECT(stat(removed_path, &st) < 0);
+
+    unlink(kept_path);
+    tempfiles_cleanup();
+    EXPECT(stat(first_container, &st) < 0);
+
+    free(first_container);
+    free(kept_path);
+    free(removed_path);
+    unsetenv("TMPDIR");
+}
+
+static void test_cleanup_forgets_externally_removed_directory(void)
+{
+    char *tmpdir = t_tempdir();
+    setenv("TMPDIR", tmpdir, 1);
+
+    char *first_path = NULL;
+    int first_fd = tempfile_create("t-", "", &first_path);
+    EXPECT(first_fd >= 0);
+    close(first_fd);
+
+    char *removed_container = parent_dir(first_path);
+    unlink(first_path);
+    EXPECT(rmdir(removed_container) == 0);
+    tempfiles_cleanup();
+
+    char *second_path = NULL;
+    int second_fd = tempfile_create("t-", "", &second_path);
+    EXPECT(second_fd >= 0 && second_path != NULL);
+    if (second_fd >= 0) {
+        char *second_container = parent_dir(second_path);
+        EXPECT(strcmp(second_container, removed_container) != 0);
+        free(second_container);
+        close(second_fd);
     }
+
     tempfiles_cleanup();
-    free(a);
-    free(b);
-    free(container);
+    free(first_path);
+    free(second_path);
+    free(removed_container);
     unsetenv("TMPDIR");
 }
 
-static void test_reaped_dir_recovers_on_create(void)
+static void test_create_recovers_from_externally_removed_directory(void)
 {
-    char *dir = t_tempdir();
-    setenv("TMPDIR", dir, 1);
+    char *tmpdir = t_tempdir();
+    setenv("TMPDIR", tmpdir, 1);
 
-    char *a = NULL;
-    int fda = tempfile_create("t-", "", &a);
-    EXPECT(fda >= 0);
-    close(fda);
+    char *first_path = NULL;
+    int first_fd = tempfile_create("t-", "", &first_path);
+    EXPECT(first_fd >= 0);
+    close(first_fd);
 
-    /* Reap between creates, with no cleanup in between: the very next
-     * create must detect ENOENT, drop the cached handle, and land in a
-     * fresh container instead of failing until the next flush. */
-    char *acopy = strdup(a);
-    char *container = strdup(dirname(acopy));
-    free(acopy);
-    unlink(a);
-    EXPECT(rmdir(container) == 0);
+    char *removed_container = parent_dir(first_path);
+    unlink(first_path);
+    EXPECT(rmdir(removed_container) == 0);
 
-    char *b = NULL;
-    int fdb = tempfile_create("t-", "", &b);
-    EXPECT(fdb >= 0 && b != NULL);
-    if (fdb >= 0) {
-        struct stat st;
-        EXPECT(stat(b, &st) == 0);
-        EXPECT(strncmp(b, container, strlen(container)) != 0);
-        close(fdb);
+    char *second_path = NULL;
+    int second_fd = tempfile_create("t-", "", &second_path);
+    EXPECT(second_fd >= 0 && second_path != NULL);
+    if (second_fd >= 0) {
+        char *second_container = parent_dir(second_path);
+        EXPECT(strcmp(second_container, removed_container) != 0);
+        free(second_container);
+        close(second_fd);
     }
+
     tempfiles_cleanup();
-    free(a);
-    free(b);
-    free(container);
+    free(first_path);
+    free(second_path);
+    free(removed_container);
     unsetenv("TMPDIR");
 }
 
-static void test_invalid_utf8_tmpdir_falls_back(void)
+static void test_invalid_utf8_tmpdir_falls_back_to_tmp(void)
 {
-    /* A $TMPDIR with a raw non-UTF-8 byte must not end up in the path the
-     * model sees; creation falls back to /tmp. */
     setenv("TMPDIR", "/tmp/\xff-bogus", 1);
+
     char *path = NULL;
     int fd = tempfile_create("t-", "", &path);
     EXPECT(fd >= 0 && path != NULL);
     EXPECT(strncmp(path, "/tmp/hax-", 9) == 0);
     close(fd);
+
     tempfiles_cleanup();
     free(path);
     unsetenv("TMPDIR");
 }
 
+static void test_invalid_name_fragments_are_rejected(void)
+{
+    char sentinel;
+    char *path = &sentinel;
+    errno = 0;
+    EXPECT(tempfile_create(NULL, "", &path) == -1);
+    EXPECT(path == NULL);
+    EXPECT(errno == EINVAL);
+
+    path = &sentinel;
+    errno = 0;
+    EXPECT(tempfile_create("t-", NULL, &path) == -1);
+    EXPECT(path == NULL);
+    EXPECT(errno == EINVAL);
+
+    path = &sentinel;
+    errno = 0;
+    EXPECT(tempfile_create("../escape-", "", &path) == -1);
+    EXPECT(path == NULL);
+    EXPECT(errno == EINVAL);
+
+    path = &sentinel;
+    errno = 0;
+    EXPECT(tempfile_create("t-", "/suffix", &path) == -1);
+    EXPECT(path == NULL);
+    EXPECT(errno == EINVAL);
+
+    path = &sentinel;
+    errno = 0;
+    EXPECT(tempfile_create("\xff-invalid-", "", &path) == -1);
+    EXPECT(path == NULL);
+    EXPECT(errno == EINVAL);
+}
+
+static void test_create_reports_tmpdir_error(void)
+{
+    char missing_tmpdir[512];
+    snprintf(missing_tmpdir, sizeof(missing_tmpdir), "%s/missing", t_tempdir());
+    setenv("TMPDIR", missing_tmpdir, 1);
+
+    char sentinel;
+    char *path = &sentinel;
+    errno = 0;
+    EXPECT(tempfile_create("t-", "", &path) == -1);
+    EXPECT(path == NULL);
+    EXPECT(errno == ENOENT);
+
+    unsetenv("TMPDIR");
+}
+
 int main(void)
 {
-    test_create_tracks_and_cleanup_unlinks();
-    test_untrack_survives_cleanup();
-    test_untrack_unknown_path_is_noop();
-    test_tmpdir_change_starts_fresh_dir();
-    test_externally_removed_dir_recovers();
-    test_reaped_dir_recovers_on_create();
-    test_invalid_utf8_tmpdir_falls_back();
+    test_create_tracks_files_and_cleanup_removes_them();
+    test_untracked_file_survives_cleanup();
+    test_untracking_unknown_path_is_noop();
+    test_tmpdir_change_uses_new_directory();
+    test_cleanup_retries_retired_nonempty_directory();
+    test_cleanup_forgets_externally_removed_directory();
+    test_create_recovers_from_externally_removed_directory();
+    test_invalid_utf8_tmpdir_falls_back_to_tmp();
+    test_invalid_name_fragments_are_rejected();
+    test_create_reports_tmpdir_error();
     T_REPORT();
 }

@@ -686,6 +686,7 @@ void agent_resume_session(struct agent_state *state, const char *path)
     select_restore_session(state, metadata.provider, metadata.model, metadata.effort,
                            metadata.preset);
 
+    /* Keep tracked temporary files when replacing history; resumable branches may share paths. */
     for (size_t i = 0; i < session->n_items; i++)
         item_free(&session->items[i]);
     free(session->items);
@@ -708,8 +709,6 @@ void agent_resume_session(struct agent_state *state, const char *path)
                          session->n_tools);
     transcript_log_append(state->transcript, session->items, session->n_items);
 
-    /* Loaded history may still reference tracked temporary files, including files shared by fork
-     * prefixes. */
     clear_resume_state(state);
     replay_user_turn(state->render, session, "resumed");
 }
