@@ -4,31 +4,20 @@
 
 struct input_modal_completer;
 
-/* Interactive file picking for `@` mentions at the prompt.
- *
- * file_mention_pick runs fzf over candidates from `git ls-files`
- * (tracked + untracked, gitignore-respecting) or a pruned `find`
- * outside a repo, with `query` seeding the filter. Absolute / `~/…` /
- * `../…` tokens start the walk at that prefix (selection rejoined under
- * it); in-tree paths stay cwd-relative so a mistyped directory still
- * filters the project list. Returns a malloc'd path, or NULL on cancel /
- * failure — including a selection that is no longer a regular file
- * (warns). fzf is required; without it a one-line notice is printed.
- *
- * Call with the terminal cooked: fzf owns the tty. The line editor's
- * modal-completion handoff guarantees this (input_set_modal_completer). */
-char *file_mention_pick(const char *query);
+/* Open fzf with `query_text` as its initial filter. Absolute, home-relative, and parent-relative
+ * queries search from their directory prefix; other queries search the current directory. The
+ * terminal must be in cooked mode. Return an allocated regular-file path, or NULL on cancellation
+ * or failure. A NULL query is equivalent to an empty query. */
+char *file_mention_pick(const char *query_text);
 
-/* 1 when fzf is on $PATH. Lets /help dim the shortcut row. */
+/* Return whether fzf is currently available on PATH. */
 int file_mention_available(void);
 
-/* `@` policy as the editor's modal Tab completer. match triggers on a
- * token that *starts* with '@' (cursor after it; empty query ok); the
- * replaced span is '@' through the cursor. pick strips the '@' and
- * calls file_mention_pick. */
+/* Match tokens beginning with `@` at the buffer start or after whitespace, replacing from `@`
+ * through the cursor. */
 extern const struct input_modal_completer file_mention_completer;
 
-/* sh -c pipeline builder, exposed for tests. Returns malloc'd. */
-char *file_mention_fzf_cmd(const char *query);
+/* Return an allocated /bin/sh command for the given query; NULL is equivalent to an empty query. */
+char *file_mention_build_fzf_command(const char *query_text);
 
 #endif /* HAX_FILE_MENTION_H */

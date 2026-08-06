@@ -6,8 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-/* The wait macros are provided by <sys/wait.h> per POSIX; glibc also leaks
- * them through <stdlib.h>, so the include cleaner cannot attribute them. */
+/* POSIX declares the wait macros here; some libc headers also expose them indirectly. */
 #include <sys/wait.h> // IWYU pragma: keep
 
 #include "util.h"
@@ -16,225 +15,220 @@
 #include "system/spawn.h"
 #include "terminal/input_core.h"
 
-/* Candidate enumeration relative to a root directory (cwd by default).
- * `git ls-files` covers tracked plus untracked-but-not-ignored files
- * under the root; outside a repo it exits non-zero and the pruned
- * `find` takes over (its "./" prefix is stripped from the returned
- * selection in run_fzf).
- *
- * NUL-delimited end-to-end (-z / -print0, paired with fzf --read0
- * --print0): on line output git C-quotes any path with non-ASCII bytes
- * (core.quotePath), so e.g. café.txt would round-trip as the literal
- * text "caf\303\251.txt" — raw NUL-terminated records carry every
- * byte, newlines in filenames included.
- *
- * Deliberately a straight pipe into fzf: fzf reads stdin asynchronously
- * (keyboard/UI go via /dev/tty) and is interactive from the first line,
- * so even a slow walk of a huge tree never blocks the picker — do not
- * "optimize" this into collect-then-launch, which would introduce the
- * very stall it appears to avoid. */
-#define CANDIDATES_CMD                                                                             \
+/* NUL records preserve non-ASCII paths that git line mode would quote and filenames containing
+ * newlines. Keep candidates streaming: fzf reads stdin asynchronously while using /dev/tty. */
+#define FILE_CANDIDATES_COMMAND                                                                    \
     "git ls-files -z --cached --others --exclude-standard 2>/dev/null"                             \
     " || find . \\( -name .git -o -name node_modules \\) -prune -o -type f -print0 2>/dev/null"
 
-/* Shared fzf invocation tacked onto the candidates producer. `%%` is a
- * literal % for --height; the final %s is the shell-quoted filter. */
-#define FZF_TAIL " | fzf --read0 --print0 --height=~40%% --layout=reverse --scheme=path --query=%s"
+/* `%%` is a literal percent in the xasprintf format. */
+#define FZF_COMMAND_SUFFIX                                                                         \
+    " | fzf --read0 --print0 --height=~40%% --layout=reverse --scheme=path --query=%s"
 
-/* Longest selection record accepted back from fzf. Paths beyond this
- * are pathological; a record that long is skipped rather than truncated
- * so a wrong (cut-off) path can never be picked. */
-#define PICK_RECORD_MAX 4096
+/* Includes the terminating NUL; longer selections are rejected rather than truncated. */
+#define FZF_SELECTION_CAPACITY 4096
 
-/* Probed fresh on every call — a stat-walk of $PATH costs microseconds,
- * and not caching means installing fzf mid-session just starts working
- * (and un-dims the /help row) without a restart. */
-static int have_fzf(void)
+struct picker_query {
+    char *root;
+    char *filter;
+};
+
+enum record_result {
+    RECORD_END,
+    RECORD_COMPLETE,
+    RECORD_TOO_LONG,
+};
+
+static int fzf_available(void)
 {
-    char *p = fs_which("fzf");
-    if (!p)
+    char *path = fs_which("fzf");
+
+    if (!path)
         return 0;
-    free(p);
+    free(path);
     return 1;
 }
 
-/* Absolute / `~/…` / `../…` can't match cwd candidates — relocate.
- * A bare `/` mid-token is not enough (keeps typos like `mispted/x`
- * filterable against the project list). */
-static int query_leaves_cwd(const char *q)
+static int query_uses_external_root(const char *query)
 {
-    if (!q || !*q)
+    if (!query || !*query)
         return 0;
-    if (q[0] == '/')
+    if (query[0] == '/')
         return 1;
-    if (q[0] == '~' && (q[1] == '\0' || q[1] == '/'))
+    if (query[0] == '~' && (query[1] == '\0' || query[1] == '/'))
         return 1;
-    if (q[0] == '.' && q[1] == '.' && (q[2] == '\0' || q[2] == '/'))
-        return 1;
-    return 0;
+    return query[0] == '.' && query[1] == '.' && (query[2] == '\0' || query[2] == '/');
 }
 
-/* External query → root (through last '/') + filter suffix; bare `~` /
- * `..` become `~/` / `../`. Otherwise root is NULL and filter is query. */
-static void split_query(const char *query, char **root_out, char **filter_out)
+static struct picker_query parse_picker_query(const char *text)
 {
-    if (!query)
-        query = "";
-    if (!query_leaves_cwd(query)) {
-        *root_out = NULL;
-        *filter_out = xstrdup(query);
-        return;
+    struct picker_query query = {0};
+
+    if (!text)
+        text = "";
+    if (!query_uses_external_root(text)) {
+        query.filter = xstrdup(text);
+        return query;
     }
-    const char *slash = strrchr(query, '/');
+
+    const char *slash = strrchr(text, '/');
     if (!slash) {
-        *root_out = xasprintf("%s/", query);
-        *filter_out = xstrdup("");
-        return;
+        query.root = xasprintf("%s/", text);
+        query.filter = xstrdup("");
+        return query;
     }
-    size_t rlen = (size_t)(slash - query + 1); /* include the slash */
-    char *root = xmalloc(rlen + 1);
-    memcpy(root, query, rlen);
-    root[rlen] = '\0';
-    *root_out = root;
-    *filter_out = xstrdup(slash + 1);
+
+    size_t root_len = (size_t)(slash - text + 1);
+    query.root = xmalloc(root_len + 1);
+    memcpy(query.root, text, root_len);
+    query.root[root_len] = '\0';
+    query.filter = xstrdup(slash + 1);
+    return query;
 }
 
-char *file_mention_fzf_cmd(const char *query)
+static char *build_fzf_command(const struct picker_query *query)
 {
-    char *root = NULL, *filter = NULL;
-    split_query(query, &root, &filter);
+    char *quoted_filter = shell_single_quote(query->filter);
+    char *command;
 
-    char *q = shell_single_quote(filter);
-    char *cmd;
-    if (root) {
-        /* Expand home before quoting — single quotes disable shell tilde expansion. */
-        char *expanded = path_expand_home(root);
-        char *r = shell_single_quote(expanded);
-        /* Silent cd: bad prefix → empty picker, not "No such file". */
-        cmd = xasprintf("{ cd %s 2>/dev/null && { " CANDIDATES_CMD "; }; }" FZF_TAIL, r, q);
-        free(r);
-        free(expanded);
+    if (query->root) {
+        /* Shell quoting suppresses tilde expansion, so expand it before quoting. */
+        char *expanded_root = path_expand_home(query->root);
+        char *quoted_root = shell_single_quote(expanded_root);
+
+        command = xasprintf("{ cd %s 2>/dev/null && { " FILE_CANDIDATES_COMMAND
+                            "; }; }" FZF_COMMAND_SUFFIX,
+                            quoted_root, quoted_filter);
+        free(quoted_root);
+        free(expanded_root);
     } else {
-        /* --height keeps fzf inline; it draws on /dev/tty, stdout is the
-         * selection. */
-        cmd = xasprintf("{ " CANDIDATES_CMD "; }" FZF_TAIL, q);
+        command = xasprintf("{ " FILE_CANDIDATES_COMMAND "; }" FZF_COMMAND_SUFFIX, quoted_filter);
     }
-    free(q);
-    free(root);
-    free(filter);
-    return cmd;
+
+    free(quoted_filter);
+    return command;
 }
 
-/* Read one NUL-terminated record from `f` into `buf`, returning 1, or
- * 0 on EOF with nothing read. A record exceeding the buffer is dropped
- * — returned as 1 with an empty buf, never truncated, so a cut-off
- * path can't be picked. A final unterminated record (EOF before NUL)
- * still counts, in case an fzf variant omits the trailing NUL. */
-static int read_record(FILE *f, char *buf, size_t cap)
+char *file_mention_build_fzf_command(const char *query_text)
 {
-    size_t n = 0;
-    int overflow = 0;
+    struct picker_query query = parse_picker_query(query_text);
+    char *command = build_fzf_command(&query);
+
+    free(query.root);
+    free(query.filter);
+    return command;
+}
+
+/* Accept EOF after bytes as a complete record; fzf variants may omit the trailing NUL. */
+static enum record_result read_record(FILE *stream, char *record, size_t capacity)
+{
+    size_t len = 0;
+    int too_long = 0;
+
     for (;;) {
-        int c = fgetc(f);
-        if (c == EOF && n == 0 && !overflow)
-            return 0;
-        if (c == EOF || c == '\0') {
-            buf[overflow ? 0 : n] = '\0';
-            return 1;
+        int byte = fgetc(stream);
+
+        if (byte == EOF && len == 0 && !too_long)
+            return RECORD_END;
+        if (byte == EOF || byte == '\0') {
+            if (too_long)
+                return RECORD_TOO_LONG;
+            record[len] = '\0';
+            return RECORD_COMPLETE;
         }
-        if (n + 1 < cap)
-            buf[n++] = (char)c;
+        if (len + 1 < capacity)
+            record[len++] = (char)byte;
         else
-            overflow = 1;
+            too_long = 1;
     }
 }
 
-static char *run_fzf(const char *query)
+static char *pick_with_fzf(const char *query_text)
 {
-    /* Same split as fzf_cmd; kept for rejoin, not threaded into the cmd
-     * string, so the builder stays a pure sh -c payload. */
-    char *root = NULL, *filter = NULL;
-    split_query(query, &root, &filter);
-    free(filter);
-
-    char *cmd = file_mention_fzf_cmd(query);
-    /* Unlike popen(), the spawn pipe gives fzf default terminal-signal handling. */
+    struct picker_query query = parse_picker_query(query_text);
+    char *command = build_fzf_command(&query);
+    char *picked_path = NULL;
     struct spawn_pipe pipe;
-    char *selection = NULL;
-    if (spawn_pipe_open_read(&pipe, cmd) == 0) {
-        char record[PICK_RECORD_MAX];
-        if (read_record(pipe.stream, record, sizeof(record)) && *record) {
-            /* find(1) emits "./path"; strip to match git ls-files form. */
-            const char *path = (record[0] == '.' && record[1] == '/') ? record + 2 : record;
-            if (*path)
-                selection = root ? xasprintf("%s%s", root, path) : xstrdup(path);
+
+    if (spawn_pipe_open_read(&pipe, command) == 0) {
+        char record[FZF_SELECTION_CAPACITY];
+
+        if (read_record(pipe.stream, record, sizeof(record)) == RECORD_COMPLETE) {
+            const char *relative_path = strncmp(record, "./", 2) == 0 ? record + 2 : record;
+
+            if (*relative_path)
+                picked_path =
+                    query.root ? path_join(query.root, relative_path) : xstrdup(relative_path);
         }
+
         int status = spawn_pipe_close(&pipe);
-        if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) {
-            free(selection);
-            selection = NULL;
+        if (status < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            free(picked_path);
+            picked_path = NULL;
         }
     }
-    free(cmd);
-    free(root);
-    return selection;
+
+    free(command);
+    free(query.root);
+    free(query.filter);
+    return picked_path;
 }
 
 int file_mention_available(void)
 {
-    return have_fzf();
+    return fzf_available();
 }
 
-char *file_mention_pick(const char *query)
+char *file_mention_pick(const char *query_text)
 {
-    if (!have_fzf()) {
-        /* Deliberately no install command — package managers vary too
-         * much for a one-liner to be right everywhere. */
+    if (!fzf_available()) {
         hax_warn("@file completion needs fzf installed");
         return NULL;
     }
-    char *out = run_fzf(query);
-    /* Validate the pick (stale index entry, deleted mid-pick), not each candidate. Expand home
-     * first so a rejoined `~/…` still resolves. */
-    if (out) {
-        char *check = path_expand_home(out);
-        if (ensure_regular_file(check) != 0) {
-            hax_warn("cannot mention '%s': %s", out, strerror(errno));
-            free(out);
-            out = NULL;
-        }
-        free(check);
+
+    char *path = pick_with_fzf(query_text);
+    if (!path)
+        return NULL;
+
+    /* The selection may refer to a stale git entry or a file deleted while fzf was open. */
+    char *expanded_path = path_expand_home(path);
+    if (ensure_regular_file(expanded_path) != 0) {
+        hax_warn("cannot mention '%s': %s", path, strerror(errno));
+        free(expanded_path);
+        free(path);
+        return NULL;
     }
-    return out;
+
+    free(expanded_path);
+    return path;
 }
 
-/* match phase: locate an `@`-starting token containing the cursor —
- * see the contract on file_mention_completer in the header. Pure, so
- * the editor can probe it before touching the screen. */
-static int match_at_token(const char *buf, size_t len, size_t cursor, size_t *start, size_t *end,
-                          void *user)
+static int match_file_mention(const char *buffer, size_t buffer_len, size_t cursor, size_t *start,
+                              size_t *end, void *user)
 {
     (void)user;
-    if (cursor == 0 || cursor > len)
+
+    if (cursor == 0 || cursor > buffer_len)
         return 0;
-    size_t s = cursor;
-    while (s > 0 && !isspace((unsigned char)buf[s - 1]))
-        s--;
-    if (s >= cursor || buf[s] != '@')
+
+    size_t token_start = cursor;
+    while (token_start > 0 && !isspace((unsigned char)buffer[token_start - 1]))
+        token_start--;
+    if (token_start >= cursor || buffer[token_start] != '@')
         return 0;
-    *start = s;
+
+    *start = token_start;
     *end = cursor;
     return 1;
 }
 
-/* pick phase: the token starts with '@' by construction of match. */
-static char *pick_at_token(const char *token, void *user)
+static char *pick_file_mention(const char *mention, void *user)
 {
     (void)user;
-    return file_mention_pick(token + 1);
+    return file_mention_pick(mention + 1);
 }
 
 const struct input_modal_completer file_mention_completer = {
-    .match = match_at_token,
-    .pick = pick_at_token,
+    .match = match_file_mention,
+    .pick = pick_file_mention,
 };

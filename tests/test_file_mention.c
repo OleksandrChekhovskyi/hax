@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: MIT */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "file_mention.h"
 #include "harness.h"
@@ -8,182 +10,233 @@
 #include "system/path.h"
 #include "terminal/input_core.h"
 
-static void test_fzf_cmd_shape(void)
+static void write_file(const char *path, const char *contents, mode_t mode)
 {
-    char *cmd = file_mention_fzf_cmd("src");
-    /* candidate sources: git first, pruned find as the non-repo fallback */
-    EXPECT(strstr(cmd, "git ls-files -z --cached --others --exclude-standard") != NULL);
-    EXPECT(strstr(cmd, "|| find .") != NULL);
-    EXPECT(strstr(cmd, "-name .git") != NULL);
-    /* NUL-delimited end-to-end: -z/-print0 producers, --read0/--print0
-     * on fzf — line records would C-quote non-ASCII paths (git
-     * core.quotePath) and can't carry newlines in filenames. */
-    EXPECT(strstr(cmd, "-print0") != NULL);
-    EXPECT(strstr(cmd, "--read0 --print0") != NULL);
-    /* candidates are grouped so fzf sees both branches of the `||` */
-    EXPECT(strncmp(cmd, "{ ", 2) == 0);
-    EXPECT(strstr(cmd, "; } | fzf ") != NULL);
-    EXPECT(strstr(cmd, "--query='src'") != NULL);
-    /* no path prefix → no cd; walk stays cwd-relative */
-    EXPECT(strstr(cmd, "cd ") == NULL);
-    free(cmd);
+    FILE *file = fopen(path, "wb");
+
+    EXPECT(file != NULL);
+    if (!file)
+        return;
+    EXPECT(fputs(contents, file) != EOF);
+    EXPECT(fclose(file) == 0);
+    EXPECT(chmod(path, mode) == 0);
 }
 
-static void test_fzf_cmd_query_quoting(void)
+static void test_command_candidate_sources(void)
 {
-    /* shell metacharacters ride inside single quotes */
-    char *cmd = file_mention_fzf_cmd("a b$(x)");
-    EXPECT(strstr(cmd, "--query='a b$(x)'") != NULL);
-    free(cmd);
+    char *command = file_mention_build_fzf_command("src");
 
-    /* embedded single quote uses the '\'' splice */
-    cmd = file_mention_fzf_cmd("it's");
-    EXPECT(strstr(cmd, "--query='it'\\''s'") != NULL);
-    free(cmd);
-
-    /* empty and NULL queries still produce a well-formed flag */
-    cmd = file_mention_fzf_cmd("");
-    EXPECT(strstr(cmd, "--query=''") != NULL);
-    free(cmd);
-    cmd = file_mention_fzf_cmd(NULL);
-    EXPECT(strstr(cmd, "--query=''") != NULL);
-    free(cmd);
+    EXPECT(strstr(command, "git ls-files -z --cached --others --exclude-standard") != NULL);
+    EXPECT(strstr(command, "|| find .") != NULL);
+    EXPECT(strstr(command, "-name .git") != NULL);
+    EXPECT(strncmp(command, "{ ", 2) == 0);
+    EXPECT(strstr(command, "; } | fzf ") != NULL);
+    EXPECT(strstr(command, "--query='src'") != NULL);
+    EXPECT(strstr(command, "cd ") == NULL);
+    free(command);
 }
 
-static void test_fzf_cmd_rooted(void)
+static void test_command_uses_nul_records(void)
 {
-    /* external tokens: cd to prefix-through-last-slash, filter = suffix */
-    char *cmd = file_mention_fzf_cmd("../");
-    EXPECT(strstr(cmd, "cd '../' 2>/dev/null") != NULL);
-    EXPECT(strstr(cmd, "--query=''") != NULL);
-    free(cmd);
+    char *command = file_mention_build_fzf_command("");
 
-    cmd = file_mention_fzf_cmd("../foo");
-    EXPECT(strstr(cmd, "cd '../' 2>/dev/null") != NULL);
-    EXPECT(strstr(cmd, "--query='foo'") != NULL);
-    free(cmd);
-
-    cmd = file_mention_fzf_cmd(".."); /* bare → trailing slash for rejoin */
-    EXPECT(strstr(cmd, "cd '../' 2>/dev/null") != NULL);
-    EXPECT(strstr(cmd, "--query=''") != NULL);
-    free(cmd);
-
-    cmd = file_mention_fzf_cmd("../../lib/x");
-    EXPECT(strstr(cmd, "cd '../../lib/' 2>/dev/null") != NULL);
-    EXPECT(strstr(cmd, "--query='x'") != NULL);
-    free(cmd);
-
-    cmd = file_mention_fzf_cmd("/tmp/x");
-    EXPECT(strstr(cmd, "cd '/tmp/' 2>/dev/null") != NULL);
-    EXPECT(strstr(cmd, "--query='x'") != NULL);
-    free(cmd);
-
-    /* ~/ → $HOME before quoting (mirror the builder) */
-    char *expanded = path_expand_home("~/src/");
-    char *quoted = shell_single_quote(expanded);
-    char *want = xasprintf("cd %s 2>/dev/null", quoted);
-    cmd = file_mention_fzf_cmd("~/src/fil");
-    EXPECT(strstr(cmd, want) != NULL);
-    EXPECT(strstr(cmd, "cd '~") == NULL);
-    EXPECT(strstr(cmd, "--query='fil'") != NULL);
-    free(cmd);
-    free(want);
-    free(quoted);
-    free(expanded);
-
-    cmd = file_mention_fzf_cmd("../a b$(x)");
-    EXPECT(strstr(cmd, "cd '../' 2>/dev/null") != NULL);
-    EXPECT(strstr(cmd, "--query='a b$(x)'") != NULL);
-    free(cmd);
+    EXPECT(strstr(command, "git ls-files -z") != NULL);
+    EXPECT(strstr(command, "-print0") != NULL);
+    EXPECT(strstr(command, "--read0 --print0") != NULL);
+    free(command);
 }
 
-static void test_fzf_cmd_in_tree_keeps_cwd(void)
+static void test_command_quotes_query(void)
 {
-    /* in-tree/typos/./ / ~user stay cwd-relative with the full query */
-    char *cmd = file_mention_fzf_cmd("src/tools/ba");
-    EXPECT(strstr(cmd, "cd ") == NULL);
-    EXPECT(strstr(cmd, "--query='src/tools/ba'") != NULL);
-    free(cmd);
+    char *command = file_mention_build_fzf_command("a b$(x)");
 
-    cmd = file_mention_fzf_cmd("mispted/file");
-    EXPECT(strstr(cmd, "cd ") == NULL);
-    EXPECT(strstr(cmd, "--query='mispted/file'") != NULL);
-    free(cmd);
+    EXPECT(strstr(command, "--query='a b$(x)'") != NULL);
+    free(command);
 
-    cmd = file_mention_fzf_cmd("./src/x");
-    EXPECT(strstr(cmd, "cd ") == NULL);
-    EXPECT(strstr(cmd, "--query='./src/x'") != NULL);
-    free(cmd);
+    command = file_mention_build_fzf_command("it's");
+    EXPECT(strstr(command, "--query='it'\\''s'") != NULL);
+    free(command);
 
-    cmd = file_mention_fzf_cmd("~other/x");
-    EXPECT(strstr(cmd, "cd ") == NULL);
-    EXPECT(strstr(cmd, "--query='~other/x'") != NULL);
-    free(cmd);
+    command = file_mention_build_fzf_command("");
+    EXPECT(strstr(command, "--query=''") != NULL);
+    free(command);
+
+    command = file_mention_build_fzf_command(NULL);
+    EXPECT(strstr(command, "--query=''") != NULL);
+    free(command);
 }
 
-/* The completer's pure match phase (its pick phase needs a tty + fzf,
- * so only the trigger policy is covered here). */
-static int match(const char *buf, size_t len, size_t cursor, size_t *start, size_t *end)
+static void test_command_parent_and_absolute_queries(void)
 {
-    return file_mention_completer.match(buf, len, cursor, start, end, file_mention_completer.user);
+    char *command = file_mention_build_fzf_command("../");
+
+    EXPECT(strstr(command, "cd '../' 2>/dev/null") != NULL);
+    EXPECT(strstr(command, "--query=''") != NULL);
+    free(command);
+
+    command = file_mention_build_fzf_command("../foo");
+    EXPECT(strstr(command, "cd '../' 2>/dev/null") != NULL);
+    EXPECT(strstr(command, "--query='foo'") != NULL);
+    free(command);
+
+    command = file_mention_build_fzf_command("..");
+    EXPECT(strstr(command, "cd '../' 2>/dev/null") != NULL);
+    EXPECT(strstr(command, "--query=''") != NULL);
+    free(command);
+
+    command = file_mention_build_fzf_command("../../lib/x");
+    EXPECT(strstr(command, "cd '../../lib/' 2>/dev/null") != NULL);
+    EXPECT(strstr(command, "--query='x'") != NULL);
+    free(command);
+
+    command = file_mention_build_fzf_command("/tmp/x");
+    EXPECT(strstr(command, "cd '/tmp/' 2>/dev/null") != NULL);
+    EXPECT(strstr(command, "--query='x'") != NULL);
+    free(command);
+
+    command = file_mention_build_fzf_command("../a b$(x)");
+    EXPECT(strstr(command, "cd '../' 2>/dev/null") != NULL);
+    EXPECT(strstr(command, "--query='a b$(x)'") != NULL);
+    free(command);
+
+    command = file_mention_build_fzf_command("../a b$(x)/file");
+    EXPECT(strstr(command, "cd '../a b$(x)/' 2>/dev/null") != NULL);
+    EXPECT(strstr(command, "--query='file'") != NULL);
+    free(command);
 }
 
-static void test_match_triggers(void)
+static void test_command_expands_home_root(void)
 {
-    size_t start = 999, end = 999;
+    char *expanded_root = path_expand_home("~/src/");
+    char *quoted_root = shell_single_quote(expanded_root);
+    char *expected_cd = xasprintf("cd %s 2>/dev/null", quoted_root);
+    char *command = file_mention_build_fzf_command("~/src/fil");
 
-    /* token at buffer start, cursor at end; span covers '@' → cursor */
-    EXPECT(match("@foo", 4, 4, &start, &end) == 1);
+    EXPECT(strstr(command, expected_cd) != NULL);
+    EXPECT(strstr(command, "cd '~") == NULL);
+    EXPECT(strstr(command, "--query='fil'") != NULL);
+
+    free(command);
+    free(expected_cd);
+    free(quoted_root);
+    free(expanded_root);
+}
+
+static void test_command_keeps_project_queries_in_cwd(void)
+{
+    char *command = file_mention_build_fzf_command("src/tools/ba");
+
+    EXPECT(strstr(command, "cd ") == NULL);
+    EXPECT(strstr(command, "--query='src/tools/ba'") != NULL);
+    free(command);
+
+    command = file_mention_build_fzf_command("mispted/file");
+    EXPECT(strstr(command, "cd ") == NULL);
+    EXPECT(strstr(command, "--query='mispted/file'") != NULL);
+    free(command);
+
+    command = file_mention_build_fzf_command("./src/x");
+    EXPECT(strstr(command, "cd ") == NULL);
+    EXPECT(strstr(command, "--query='./src/x'") != NULL);
+    free(command);
+
+    command = file_mention_build_fzf_command("~other/x");
+    EXPECT(strstr(command, "cd ") == NULL);
+    EXPECT(strstr(command, "--query='~other/x'") != NULL);
+    free(command);
+}
+
+static void test_pick_reads_and_rejoins_nul_record(void)
+{
+    static const char FZF_SCRIPT[] = "#!/bin/sh\n"
+                                     "printf '%s\\000' \"$HAX_TEST_FZF_SELECTION\"\n";
+    char *dir = t_tempdir();
+    char *fzf_path = xasprintf("%s/fzf", dir);
+    char *picked_file = xasprintf("%s/picked\nfile.txt", dir);
+    char *query = xasprintf("%s/", dir);
+    const char *path_env = getenv("PATH");
+    char *saved_path = path_env ? xstrdup(path_env) : NULL;
+
+    write_file(fzf_path, FZF_SCRIPT, 0755);
+    write_file(picked_file, "contents", 0644);
+    setenv("PATH", dir, 1);
+    setenv("HAX_TEST_FZF_SELECTION", "./picked\nfile.txt", 1);
+
+    EXPECT(file_mention_available() == 1);
+    char *picked = file_mention_pick(query);
+    EXPECT(picked != NULL);
+    if (picked)
+        EXPECT_STR_EQ(picked, picked_file);
+
+    free(picked);
+    unsetenv("HAX_TEST_FZF_SELECTION");
+    if (saved_path) {
+        setenv("PATH", saved_path, 1);
+        free(saved_path);
+    } else {
+        unsetenv("PATH");
+    }
+    free(query);
+    free(picked_file);
+    free(fzf_path);
+}
+
+static int match_mention(const char *buffer, size_t len, size_t cursor, size_t *start, size_t *end)
+{
+    return file_mention_completer.match(buffer, len, cursor, start, end,
+                                        file_mention_completer.user);
+}
+
+static void test_completer_matches_mentions(void)
+{
+    size_t start = 999;
+    size_t end = 999;
+
+    EXPECT(match_mention("@foo", 4, 4, &start, &end) == 1);
     EXPECT(start == 0);
     EXPECT(end == 4);
 
-    /* token after a space */
-    EXPECT(match("see @src/m", 10, 10, &start, &end) == 1);
+    EXPECT(match_mention("see @src/m", 10, 10, &start, &end) == 1);
     EXPECT(start == 4);
     EXPECT(end == 10);
 
-    /* token after a newline */
-    EXPECT(match("x\n@foo", 6, 6, &start, &end) == 1);
+    EXPECT(match_mention("x\n@foo", 6, 6, &start, &end) == 1);
     EXPECT(start == 2);
+    EXPECT(end == 6);
 
-    /* cursor mid-token: span ends at the cursor, tail preserved */
-    EXPECT(match("@src/m x", 8, 4, &start, &end) == 1);
+    EXPECT(match_mention("@src/m x", 8, 4, &start, &end) == 1);
     EXPECT(start == 0);
     EXPECT(end == 4);
 
-    /* bare '@' with cursor right after: empty query still triggers */
-    EXPECT(match("@", 1, 1, &start, &end) == 1);
+    EXPECT(match_mention("@", 1, 1, &start, &end) == 1);
     EXPECT(start == 0);
     EXPECT(end == 1);
 }
 
-static void test_match_rejects(void)
+static void test_completer_rejects_non_mentions(void)
 {
-    size_t start, end;
+    size_t start;
+    size_t end;
 
-    /* '@' mid-word (emails, decorators) doesn't start the token */
-    EXPECT(match("foo@bar", 7, 7, &start, &end) == 0);
-
-    /* cursor at or before the '@' */
-    EXPECT(match("@foo", 4, 0, &start, &end) == 0);
-    EXPECT(match("a @b", 4, 2, &start, &end) == 0);
-
-    /* no '@' token under the cursor at all */
-    EXPECT(match("hello", 5, 5, &start, &end) == 0);
-    EXPECT(match("", 0, 0, &start, &end) == 0);
-    EXPECT(match("@a c", 4, 4, &start, &end) == 0);
-
-    /* out-of-range cursor */
-    EXPECT(match("@a", 2, 3, &start, &end) == 0);
+    EXPECT(match_mention("foo@bar", 7, 7, &start, &end) == 0);
+    EXPECT(match_mention("@foo", 4, 0, &start, &end) == 0);
+    EXPECT(match_mention("a @b", 4, 2, &start, &end) == 0);
+    EXPECT(match_mention("hello", 5, 5, &start, &end) == 0);
+    EXPECT(match_mention("", 0, 0, &start, &end) == 0);
+    EXPECT(match_mention("@a c", 4, 4, &start, &end) == 0);
+    EXPECT(match_mention("@a", 2, 3, &start, &end) == 0);
 }
 
 int main(void)
 {
-    test_fzf_cmd_shape();
-    test_fzf_cmd_query_quoting();
-    test_fzf_cmd_rooted();
-    test_fzf_cmd_in_tree_keeps_cwd();
-    test_match_triggers();
-    test_match_rejects();
+    test_command_candidate_sources();
+    test_command_uses_nul_records();
+    test_command_quotes_query();
+    test_command_parent_and_absolute_queries();
+    test_command_expands_home_root();
+    test_command_keeps_project_queries_in_cwd();
+    test_pick_reads_and_rejoins_nul_record();
+    test_completer_matches_mentions();
+    test_completer_rejects_non_mentions();
     T_REPORT();
 }
