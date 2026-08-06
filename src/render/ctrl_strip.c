@@ -5,161 +5,162 @@
 
 #include "util.h"
 
-/* State machine. Names mirror the ECMA-48 categories so the transitions
- * read against the spec rather than against ad-hoc abbreviations. */
 enum {
-    S_NORMAL = 0,
-    S_ESC,       /* saw ESC; next byte selects sequence kind          */
-    S_CSI,       /* ESC [ — params/intermediates until final 0x40-7E  */
-    S_OSC,       /* ESC ] — until BEL or ST (ESC \)                   */
-    S_OSC_ESC,   /* OSC saw ESC, expecting \ to complete ST           */
-    S_STR,       /* ESC P/^/_ (DCS/PM/APC) — until ST                 */
-    S_STR_ESC,   /* STR saw ESC, expecting \ to complete ST           */
-    S_ESC_INTER, /* ESC followed by an intermediate; awaiting final   */
+    ASCII_BEL = 0x07,
+    ASCII_CAN = 0x18,
+    ASCII_SUB = 0x1a,
+    ASCII_ESC = 0x1b,
+    ASCII_DEL = 0x7f,
 };
 
-/* Bytes that pass through S_NORMAL untouched: printables (>= 0x20, also
- * includes the high half 0x80-0xFF which is UTF-8 territory), plus HT
- * (0x09) and LF (0x0A). Everything else in the C0 range and DEL (0x7F)
- * is dropped. ESC (0x1B) is handled by the state-transition arm
- * separately, so it never reaches this predicate. */
-static int is_passthrough(unsigned char c)
+static int is_text_byte(unsigned char byte)
 {
-    if (c == '\t' || c == '\n')
-        return 1;
-    if (c < 0x20)
-        return 0;
-    if (c == 0x7f)
-        return 0;
-    return 1;
+    return byte == '\t' || byte == '\n' || (byte >= 0x20 && byte != ASCII_DEL);
 }
 
-/* Bytes that abort an in-flight escape sequence (CSI/OSC/DCS/PM/APC/...).
- * CAN (0x18) and SUB (0x1A) are explicitly defined as cancel by ECMA-48
- * §5.3 and observed in xterm. LF is included pragmatically: a malformed
- * or truncated escape would otherwise swallow arbitrary text up to the
- * next final byte (catastrophic for log-style streaming output where
- * the next final byte may be many lines away). On abort we reconsume
- * the byte under S_NORMAL so a real LF still emits as LF, while CAN /
- * SUB get dropped as ordinary C0 controls. */
-static int is_abort(unsigned char c)
+static int cancels_sequence(unsigned char byte)
 {
-    return c == 0x0a || c == 0x18 || c == 0x1a;
+    /* CAN and SUB are ECMA-48 cancellation bytes. LF also bounds malformed sequences in streamed,
+     * line-oriented output. */
+    return byte == '\n' || byte == ASCII_CAN || byte == ASCII_SUB;
 }
 
-void ctrl_strip_init(struct ctrl_strip *s)
+static int is_escape_intermediate(unsigned char byte)
 {
-    s->state = S_NORMAL;
+    return byte >= 0x20 && byte <= 0x2f;
 }
 
-size_t ctrl_strip_feed(struct ctrl_strip *s, const char *in, size_t n, char *out)
+static int is_escape_final(unsigned char byte)
 {
-    size_t o = 0;
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)in[i];
-        switch (s->state) {
-        case S_NORMAL:
-            if (c == 0x1b)
-                s->state = S_ESC;
-            else if (is_passthrough(c))
-                out[o++] = (char)c;
-            /* else: silently drop a stray C0 control or DEL */
-            break;
-        case S_ESC:
-            if (c == '[') {
-                s->state = S_CSI;
-            } else if (c == ']') {
-                s->state = S_OSC;
-            } else if (c == 'P' || c == '^' || c == '_') {
-                s->state = S_STR;
-            } else if (c >= 0x20 && c <= 0x2f) {
-                s->state = S_ESC_INTER;
-            } else if (c >= 0x30 && c <= 0x7e) {
-                /* Single-byte ESC sequence (ESC c, ESC =, ESC 7, …). */
-                s->state = S_NORMAL;
-            } else {
-                /* Malformed — drop the ESC and reconsume the byte under
-                 * the normal-state rules so real text isn't swallowed. */
-                s->state = S_NORMAL;
-                i--;
-            }
-            break;
-        case S_CSI:
-            /* params (0x30-0x3F) and intermediates (0x20-0x2F) absorbed
-             * until the final byte (0x40-0x7E). LF/CAN/SUB cancel the
-             * sequence so a malformed or truncated CSI can't swallow
-             * arbitrary downstream text. */
-            if (is_abort(c)) {
-                s->state = S_NORMAL;
-                i--;
-            } else if (c >= 0x40 && c <= 0x7e) {
-                s->state = S_NORMAL;
-            }
-            break;
-        case S_OSC:
-            if (is_abort(c)) {
-                s->state = S_NORMAL;
-                i--;
-            } else if (c == 0x07) {
-                s->state = S_NORMAL; /* BEL terminator */
-            } else if (c == 0x1b) {
-                s->state = S_OSC_ESC; /* possible ST */
-            }
-            break;
-        case S_OSC_ESC:
-            if (c == '\\') {
-                s->state = S_NORMAL;
-            } else if (is_abort(c)) {
-                s->state = S_NORMAL;
-                i--;
-            } else {
-                /* Not a real ST — fall back to OSC and reconsume this
-                 * byte so an embedded ESC followed by content keeps the
-                 * string alive. */
-                s->state = S_OSC;
-                i--;
-            }
-            break;
-        case S_STR:
-            if (is_abort(c)) {
-                s->state = S_NORMAL;
-                i--;
-            } else if (c == 0x1b) {
-                s->state = S_STR_ESC;
-            }
-            break;
-        case S_STR_ESC:
-            if (c == '\\') {
-                s->state = S_NORMAL;
-            } else if (is_abort(c)) {
-                s->state = S_NORMAL;
-                i--;
-            } else {
-                s->state = S_STR;
-                i--;
-            }
-            break;
-        case S_ESC_INTER:
-            if (is_abort(c)) {
-                s->state = S_NORMAL;
-                i--;
-            } else if (c >= 0x30 && c <= 0x7e) {
-                s->state = S_NORMAL;
-            }
-            /* else stay — additional intermediate bytes are legal */
-            break;
+    return byte >= 0x30 && byte <= 0x7e;
+}
+
+static int is_csi_final(unsigned char byte)
+{
+    return byte >= 0x40 && byte <= 0x7e;
+}
+
+enum byte_action {
+    BYTE_CONSUME,
+    BYTE_EMIT,
+    BYTE_REPROCESS,
+};
+
+static enum byte_action ctrl_strip_step(struct ctrl_strip *strip, unsigned char byte)
+{
+    switch (strip->state) {
+    case CTRL_STRIP_TEXT:
+        if (byte == ASCII_ESC)
+            strip->state = CTRL_STRIP_ESCAPE;
+        else if (is_text_byte(byte))
+            return BYTE_EMIT;
+        return BYTE_CONSUME;
+    case CTRL_STRIP_ESCAPE:
+        if (byte == '[') {
+            strip->state = CTRL_STRIP_CSI;
+        } else if (byte == ']') {
+            strip->state = CTRL_STRIP_OSC;
+        } else if (byte == 'P' || byte == '^' || byte == '_') {
+            strip->state = CTRL_STRIP_CONTROL_STRING;
+        } else if (is_escape_intermediate(byte)) {
+            strip->state = CTRL_STRIP_ESCAPE_INTERMEDIATE;
+        } else if (is_escape_final(byte)) {
+            strip->state = CTRL_STRIP_TEXT;
+        } else {
+            strip->state = CTRL_STRIP_TEXT;
+            return BYTE_REPROCESS;
         }
+        return BYTE_CONSUME;
+    case CTRL_STRIP_CSI:
+        if (cancels_sequence(byte)) {
+            strip->state = CTRL_STRIP_TEXT;
+            return BYTE_REPROCESS;
+        }
+        if (is_csi_final(byte))
+            strip->state = CTRL_STRIP_TEXT;
+        return BYTE_CONSUME;
+    case CTRL_STRIP_OSC:
+        if (cancels_sequence(byte)) {
+            strip->state = CTRL_STRIP_TEXT;
+            return BYTE_REPROCESS;
+        }
+        if (byte == ASCII_BEL)
+            strip->state = CTRL_STRIP_TEXT;
+        else if (byte == ASCII_ESC)
+            strip->state = CTRL_STRIP_OSC_ESCAPE;
+        return BYTE_CONSUME;
+    case CTRL_STRIP_OSC_ESCAPE:
+        if (byte == '\\') {
+            strip->state = CTRL_STRIP_TEXT;
+            return BYTE_CONSUME;
+        }
+        if (cancels_sequence(byte))
+            strip->state = CTRL_STRIP_TEXT;
+        else
+            strip->state = CTRL_STRIP_OSC;
+        return BYTE_REPROCESS;
+    case CTRL_STRIP_CONTROL_STRING:
+        if (cancels_sequence(byte)) {
+            strip->state = CTRL_STRIP_TEXT;
+            return BYTE_REPROCESS;
+        }
+        if (byte == ASCII_ESC)
+            strip->state = CTRL_STRIP_CONTROL_STRING_ESCAPE;
+        return BYTE_CONSUME;
+    case CTRL_STRIP_CONTROL_STRING_ESCAPE:
+        if (byte == '\\') {
+            strip->state = CTRL_STRIP_TEXT;
+            return BYTE_CONSUME;
+        }
+        if (cancels_sequence(byte))
+            strip->state = CTRL_STRIP_TEXT;
+        else
+            strip->state = CTRL_STRIP_CONTROL_STRING;
+        return BYTE_REPROCESS;
+    case CTRL_STRIP_ESCAPE_INTERMEDIATE:
+        if (cancels_sequence(byte)) {
+            strip->state = CTRL_STRIP_TEXT;
+            return BYTE_REPROCESS;
+        }
+        if (is_escape_final(byte))
+            strip->state = CTRL_STRIP_TEXT;
+        return BYTE_CONSUME;
     }
-    return o;
+
+    return BYTE_CONSUME;
 }
 
-char *ctrl_strip_dup(const char *s)
+void ctrl_strip_init(struct ctrl_strip *strip)
 {
-    size_t n = strlen(s);
-    char *out = xmalloc(n + 1);
-    struct ctrl_strip st;
-    ctrl_strip_init(&st);
-    size_t w = ctrl_strip_feed(&st, s, n, out);
-    out[w] = '\0';
-    return out;
+    strip->state = CTRL_STRIP_TEXT;
+}
+
+size_t ctrl_strip_feed(struct ctrl_strip *strip, const char *input, size_t input_len, char *output)
+{
+    size_t output_len = 0;
+
+    for (size_t input_offset = 0; input_offset < input_len; input_offset++) {
+        unsigned char byte = (unsigned char)input[input_offset];
+        enum byte_action action;
+
+        do {
+            action = ctrl_strip_step(strip, byte);
+        } while (action == BYTE_REPROCESS);
+        if (action == BYTE_EMIT)
+            output[output_len++] = (char)byte;
+    }
+
+    return output_len;
+}
+
+char *ctrl_strip_dup(const char *input)
+{
+    size_t input_len = strlen(input);
+    char *output = xmalloc(input_len + 1);
+    struct ctrl_strip strip;
+
+    ctrl_strip_init(&strip);
+    size_t output_len = ctrl_strip_feed(&strip, input, input_len, output);
+    output[output_len] = '\0';
+    return output;
 }

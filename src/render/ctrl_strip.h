@@ -4,55 +4,32 @@
 
 #include <stddef.h>
 
-/* Stateful sanitizer for terminal control bytes in tool output.
+/* Stateful sanitizer for untrusted terminal output. It removes 7-bit ECMA-48 escape sequences and
+ * C0 controls other than HT and LF. DEL is also removed; bytes at or above 0x80 are preserved to
+ * avoid corrupting UTF-8. LF, CAN, and SUB cancel an incomplete escape sequence.
  *
- * Strips two kinds of hazard:
- *
- *   1. ANSI/ECMA-48 escape sequences:
- *      - CSI       (ESC [ ... final 0x40-0x7E), e.g. SGR colors "\x1b[31m"
- *      - OSC       (ESC ] ... BEL or ESC \), e.g. window titles
- *      - DCS/PM/APC (ESC P/^/_ ... ST)
- *      - Two-byte intermediate escapes (ESC <0x20-0x2F> <0x30-0x7E>)
- *      - Single-byte escapes (ESC <0x30-0x7E>)
- *
- *   2. Stray C0 control bytes that survive outside an escape:
- *      every byte in 0x00-0x1F is dropped *except* HT (\t) and LF (\n).
- *      DEL (0x7F) is dropped too. This catches FF (clear-screen on some
- *      terminals), VT (cursor jumps), SO/SI (alternate-charset shifts
- *      that leave the terminal stuck in line-drawing mode), bare CR
- *      (progress-bar overwrites — \r\n still yields \n because only the
- *      \r is dropped), BS, BEL, NUL, and the rest.
- *
- * 8-bit C1 controls (0x80-0x9F) are intentionally left alone because in
- * a UTF-8 stream those bytes are continuation bytes of multi-byte
- * characters; stripping them would corrupt valid UTF-8.
- *
- * In-flight escape sequences are aborted (and the cancelling byte
- * reconsumed) on LF, CAN (0x18), or SUB (0x1A). This bounds the damage
- * from a malformed or truncated escape — without it, an unterminated
- * "ESC [" would swallow arbitrary downstream text up to the next byte
- * in 0x40-0x7E, which can be many lines away in log-style output.
- *
- * Designed for chunked input — escape sequences split across feed()
- * calls are reassembled across the state held in `struct ctrl_strip`.
- * Output is never longer than input, so callers can size out buffers to
- * the input length. ctrl_strip_dup() is the one-shot convenience over a
- * NUL-terminated string. */
-struct ctrl_strip {
-    int state;
+ * State carries across feed calls, and output is never longer than input. */
+enum ctrl_strip_state {
+    CTRL_STRIP_TEXT,
+    CTRL_STRIP_ESCAPE,
+    CTRL_STRIP_CSI,
+    CTRL_STRIP_OSC,
+    CTRL_STRIP_OSC_ESCAPE,
+    CTRL_STRIP_CONTROL_STRING,
+    CTRL_STRIP_CONTROL_STRING_ESCAPE,
+    CTRL_STRIP_ESCAPE_INTERMEDIATE,
 };
 
-void ctrl_strip_init(struct ctrl_strip *s);
+struct ctrl_strip {
+    enum ctrl_strip_state state;
+};
 
-/* Feed n bytes of input; write at most n bytes of sanitized output to out
- * (which must not alias in). Returns the number of bytes written. */
-size_t ctrl_strip_feed(struct ctrl_strip *s, const char *in, size_t n, char *out);
+void ctrl_strip_init(struct ctrl_strip *strip);
 
-/* Sanitize a NUL-terminated string. Returns a freshly-allocated NUL-
- * terminated copy with control sequences removed. Caller frees. Note
- * that NUL bytes embedded in the input are dropped, but if you have a
- * NUL-terminated input string the terminator already bounds it, so the
- * embedded-NUL case really only applies to ctrl_strip_feed callers. */
-char *ctrl_strip_dup(const char *s);
+/* Write sanitized input to a non-overlapping output buffer. Returns the number of bytes written. */
+size_t ctrl_strip_feed(struct ctrl_strip *strip, const char *input, size_t input_len, char *output);
+
+/* Return a newly allocated, sanitized copy of a NUL-terminated string. Caller frees it. */
+char *ctrl_strip_dup(const char *input);
 
 #endif /* HAX_RENDER_CTRL_STRIP_H */

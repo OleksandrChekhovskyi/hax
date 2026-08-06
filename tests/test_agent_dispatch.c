@@ -159,22 +159,15 @@ static const char *run_write(const char *path, const char *content_json, struct 
     return cap;
 }
 
-/* The regression this guards: a new-file write whose streamed content
- * preview renders zero rows (blank or control-only content) must fall
- * back to showing the "created ..." summary as the block body, not a bare
- * [write] header. Asserting only the return string (as the write unit test
- * does) would not catch removal of that dispatch-level fallback, since the
- * fallback is what puts the summary on screen. */
 static void test_blank_content_summary_row_displayed(void)
 {
     char *dir = t_tempdir();
     char *path = xasprintf("%s/blank.py", dir);
     struct item out;
 
-    const char *cap = run_write(path, "\\n   \\n", &out); /* only blank lines */
+    const char *cap = run_write(path, "\\n   \\n", &out);
     EXPECT(strstr(cap, "created") != NULL);
     EXPECT(strstr(cap, "blank.py") != NULL);
-    /* The model still receives the summary regardless of display. */
     EXPECT(out.output && strstr(out.output, "created") != NULL);
 
     item_free(&out);
@@ -183,15 +176,11 @@ static void test_blank_content_summary_row_displayed(void)
 
 static void test_control_only_content_summary_row_displayed(void)
 {
-    /* The case a byte-class predicate would miss: ctrl_strip removes a
-     * lone bell (and would swallow an ANSI escape with its trailing
-     * bytes), leaving zero rows. The fallback keys off the actual row
-     * count, so it still surfaces the summary. */
     char *dir = t_tempdir();
     char *path = xasprintf("%s/bell.py", dir);
     struct item out;
 
-    const char *cap = run_write(path, "\\u0007", &out); /* single bell byte */
+    const char *cap = run_write(path, "\\u0007", &out);
     EXPECT(strstr(cap, "created") != NULL);
     EXPECT(strstr(cap, "bell.py") != NULL);
 
@@ -201,9 +190,6 @@ static void test_control_only_content_summary_row_displayed(void)
 
 static void test_visible_content_shows_preview_not_summary(void)
 {
-    /* Contrast: content that renders rows shows the preview, and the
-     * fallback must NOT fire — the "created ..." summary goes only to the
-     * model, not the display. */
     char *dir = t_tempdir();
     char *path = xasprintf("%s/real.py", dir);
     struct item out;
@@ -211,7 +197,6 @@ static void test_visible_content_shows_preview_not_summary(void)
     const char *cap = run_write(path, "hello world", &out);
     EXPECT(strstr(cap, "hello world") != NULL);
     EXPECT(strstr(cap, "created") == NULL);
-    /* Model side still gets the terse summary, not the echoed content. */
     EXPECT(out.output && strstr(out.output, "created") != NULL);
 
     item_free(&out);
