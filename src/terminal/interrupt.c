@@ -9,507 +9,444 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
-#define ESC_TIMEOUT_MS 50
+#include "terminal/ansi.h"
 
-struct watcher {
+#define ESCAPE_TIMEOUT_MS       50
+#define ESCAPE_POLL_INTERVAL_MS 5
+
+struct interrupt_watcher {
     pthread_t thread;
-    pthread_mutex_t mu;
-    pthread_cond_t cv;
-    int armed;       /* protected by mu */
-    int paused;      /* protected by mu — 1 while watcher is in outer cond_wait */
-    int wake_pipe_r; /* read end watched alongside stdin */
-    int wake_pipe_w; /* write end pinged on disarm to break the watcher's poll */
-    atomic_int requested;
-    /* Soft-pause stage: latched by the first confirmed bare Esc of an
-     * armed window; the next one escalates to `requested`. Hard implies
-     * soft — the escalation passes through it. */
-    atomic_int soft;
-    /* 1 while the classifier is in IC_PENDING_ESC — \x1b seen, awaiting
-     * the follow-up byte that decides CSI/SS3 vs bare Esc. Used by
-     * interrupt_settle to let agent decisions wait out the window
-     * before acting. Lockless atomic — written only by the watcher
-     * thread, read by anyone. */
-    atomic_int pending;
+    pthread_mutex_t mutex;
+    pthread_cond_t state_changed;
+    int armed;
+    int idle;
+    int wake_read_fd;
+    int wake_write_fd;
+    atomic_int pause_requested;
+    atomic_int abort_requested;
+    atomic_int escape_pending;
+    int initialized;
     int started;
-
-    /* Captured at interrupt_init() — the canonical baseline restored by
-     * atexit and signal handlers. Not modified during arm/disarm. */
     struct termios saved_termios;
-    int saved_termios_valid;
-    int raw_mode_active; /* tracks whether termios currently differs from saved */
-    /* Set in interrupt_init() when both stdin and stdout are TTYs.
-     * Independent of saved_termios_valid: cursor/paste-off restoration
-     * needs only a TTY stdout, not a captured termios baseline, so a
-     * tcgetattr() failure mustn't suppress those bytes on exit. Same
-     * gate (`isatty(stdin) && isatty(stdout)`) that agent.c's
-     * cursor_supported() uses to decide whether to hide the cursor —
-     * the two must stay aligned or the parent shell can inherit a
-     * hidden-cursor state. */
-    int stdout_is_tty;
+    volatile sig_atomic_t saved_termios_valid;
+    volatile sig_atomic_t raw_mode_active;
+    volatile sig_atomic_t interactive_terminal;
 };
 
-/* Single global instance — there's one tty and one process. Static handlers
- * (atexit, signal) reach it without plumbing. */
-static struct watcher W;
+/* Exit and signal handlers require process-wide terminal state. */
+static struct interrupt_watcher watcher = {
+    .wake_read_fd = -1,
+    .wake_write_fd = -1,
+};
 
-/* ---------- classifier ---------- */
-
-void interrupt_classifier_init(struct interrupt_classifier *c)
+void interrupt_classifier_init(struct interrupt_classifier *classifier)
 {
-    c->state = IC_IDLE;
+    classifier->state = INTERRUPT_CLASSIFIER_IDLE;
 }
 
-int interrupt_classifier_feed(struct interrupt_classifier *c, unsigned char byte)
+int interrupt_classifier_feed(struct interrupt_classifier *classifier, unsigned char byte)
 {
-    switch (c->state) {
-    case IC_IDLE:
+    switch (classifier->state) {
+    case INTERRUPT_CLASSIFIER_IDLE:
         if (byte == 0x1b)
-            c->state = IC_PENDING_ESC;
+            classifier->state = INTERRUPT_CLASSIFIER_ESCAPE_PENDING;
         return 0;
-    case IC_PENDING_ESC:
-        /* '[' or 'O' confirm a CSI / SS3 escape sequence — consume bytes
-         * silently until the sequence ends. Anything else means the prior
-         * \x1b was a bare Esc: fire for it now and re-classify the
-         * current byte. The Esc-Esc case in particular must fire (so a
-         * user mashing Esc isn't swallowed when the second arrives
-         * within the timeout window). */
+    case INTERRUPT_CLASSIFIER_ESCAPE_PENDING:
         if (byte == '[') {
-            c->state = IC_CSI;
+            classifier->state = INTERRUPT_CLASSIFIER_CSI;
             return 0;
         }
         if (byte == 'O') {
-            c->state = IC_SS3;
+            classifier->state = INTERRUPT_CLASSIFIER_SS3;
             return 0;
         }
-        c->state = (byte == 0x1b) ? IC_PENDING_ESC : IC_IDLE;
+        /* The previous Esc was bare; classify a second Esc as a new candidate. */
+        classifier->state =
+            byte == 0x1b ? INTERRUPT_CLASSIFIER_ESCAPE_PENDING : INTERRUPT_CLASSIFIER_IDLE;
         return 1;
-    case IC_CSI:
-        /* CSI parameter / intermediate bytes are 0x20-0x3F; final byte
-         * is 0x40-0x7E. Anything else (NUL, control char, high bit set)
-         * aborts the sequence — defensive against truncated input. */
-        if (byte >= 0x40 && byte <= 0x7E)
-            c->state = IC_IDLE;
-        else if (byte < 0x20 || byte > 0x7E)
-            c->state = IC_IDLE;
+    case INTERRUPT_CLASSIFIER_CSI:
+        /* CSI final bytes are 0x40-0x7e; control and non-ASCII bytes invalidate the sequence. */
+        if ((byte >= 0x40 && byte <= 0x7e) || byte < 0x20 || byte > 0x7e)
+            classifier->state = INTERRUPT_CLASSIFIER_IDLE;
         return 0;
-    case IC_SS3:
-        /* SS3 is \x1bO followed by exactly one byte. */
-        c->state = IC_IDLE;
+    case INTERRUPT_CLASSIFIER_SS3:
+        classifier->state = INTERRUPT_CLASSIFIER_IDLE;
         return 0;
     }
     return 0;
 }
 
-int interrupt_classifier_timeout(struct interrupt_classifier *c)
+int interrupt_classifier_timeout(struct interrupt_classifier *classifier)
 {
-    if (c->state == IC_PENDING_ESC) {
-        c->state = IC_IDLE;
-        return 1;
-    }
-    return 0;
+    if (classifier->state != INTERRUPT_CLASSIFIER_ESCAPE_PENDING)
+        return 0;
+    classifier->state = INTERRUPT_CLASSIFIER_IDLE;
+    return 1;
 }
 
-/* ---------- tty mode helpers ---------- */
-
-static void enter_raw_mode(void)
+static int enter_raw_mode(void)
 {
-    if (!W.saved_termios_valid || W.raw_mode_active)
-        return;
-    struct termios raw = W.saved_termios;
-    /* Non-canonical (byte-at-a-time), no echo. Leave ISIG enabled so
-     * Ctrl-C still raises SIGINT — our interrupt key is Esc, not C-c. */
+    if (!watcher.saved_termios_valid)
+        return -1;
+    if (watcher.raw_mode_active)
+        return 0;
+
+    struct termios raw = watcher.saved_termios;
+    /* ISIG remains enabled so Ctrl-C continues to raise SIGINT. */
     raw.c_lflag &= (tcflag_t) ~(ICANON | ECHO);
     raw.c_cc[VMIN] = 0;
     raw.c_cc[VTIME] = 0;
-    /* Set the flag BEFORE tcsetattr so a signal arriving mid-call still
-     * triggers restore_tty_only(). If tcsetattr fails, the tty is still
-     * canonical and a redundant restore is a harmless no-op; we then
-     * clear the flag below. The reverse ordering had a window where
-     * SIGINT could leave the terminal stuck in raw mode. */
-    W.raw_mode_active = 1;
-    if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0)
-        W.raw_mode_active = 0;
+
+    /* Publish the changed state first so a signal during tcsetattr still restores the terminal. */
+    watcher.raw_mode_active = 1;
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) {
+        watcher.raw_mode_active = 0;
+        return -1;
+    }
+    return 0;
 }
 
 static void leave_raw_mode(void)
 {
-    if (!W.saved_termios_valid || !W.raw_mode_active)
+    if (!watcher.saved_termios_valid || !watcher.raw_mode_active)
         return;
-    tcsetattr(STDIN_FILENO, TCSANOW, &W.saved_termios);
-    W.raw_mode_active = 0;
+    tcsetattr(STDIN_FILENO, TCSANOW, &watcher.saved_termios);
+    watcher.raw_mode_active = 0;
 }
 
-/* One confirmed bare Esc: first press pauses (soft), a repeat aborts
- * (hard). atomic_exchange makes the two-press escalation race-free even
- * against a concurrent interrupt_clear between the presses. */
-static void latch_request(void)
+static void latch_pause_or_abort(void)
 {
-    if (atomic_exchange(&W.soft, 1))
-        atomic_store(&W.requested, 1);
+    if (atomic_exchange(&watcher.pause_requested, 1))
+        atomic_store(&watcher.abort_requested, 1);
 }
 
-/* ---------- watcher thread ---------- */
+enum input_event {
+    INPUT_ERROR = -1,
+    INPUT_TIMEOUT,
+    INPUT_STDIN,
+    INPUT_WAKE,
+};
 
-/* Returns 0 on timeout, >0 on data, -1 on error (errno set). Sets *src
- * to 0 if stdin became readable, 1 if the wake pipe did. When both are
- * ready, the wake pipe wins — disarm must take priority over stdin so
- * we don't consume bytes the user typed for the upcoming readline. */
-static int wait_input(int timeout_ms, int *src)
+static enum input_event wait_for_input(int timeout_ms)
 {
-    struct pollfd pfds[2] = {
+    struct pollfd fds[] = {
         {.fd = STDIN_FILENO, .events = POLLIN},
-        {.fd = W.wake_pipe_r, .events = POLLIN},
+        {.fd = watcher.wake_read_fd, .events = POLLIN},
     };
-    int pr = poll(pfds, 2, timeout_ms);
-    if (pr <= 0)
-        return pr;
-    if (pfds[1].revents & POLLIN) {
-        *src = 1;
-        return 1;
-    }
-    if (pfds[0].revents & POLLIN) {
-        *src = 0;
-        return 1;
-    }
-    /* POLLHUP / POLLERR — treat as wake so we re-evaluate state. */
-    *src = 1;
-    return 1;
+    int result = poll(fds, 2, timeout_ms);
+    if (result < 0)
+        return INPUT_ERROR;
+    if (result == 0)
+        return INPUT_TIMEOUT;
+    /* Disarming takes precedence so the watcher cannot steal input from the next prompt. */
+    if (fds[1].revents)
+        return INPUT_WAKE;
+    if (fds[0].revents & POLLIN)
+        return INPUT_STDIN;
+    errno = EIO;
+    return INPUT_ERROR;
 }
 
 static void drain_wake_pipe(void)
 {
-    char buf[64];
-    while (read(W.wake_pipe_r, buf, sizeof(buf)) > 0)
-        /* drain */;
+    char bytes[64];
+    while (read(watcher.wake_read_fd, bytes, sizeof(bytes)) > 0)
+        continue;
 }
 
-static void *watcher_thread(void *arg)
+static int watcher_is_armed(void)
 {
-    (void)arg;
+    pthread_mutex_lock(&watcher.mutex);
+    int armed = watcher.armed;
+    pthread_mutex_unlock(&watcher.mutex);
+    return armed;
+}
 
-    /* Block all signals on this thread so SIGINT/SIGTERM/etc. land on the
-     * main thread — same convention the spinner uses. */
-    sigset_t mask;
-    sigfillset(&mask);
-    pthread_sigmask(SIG_SETMASK, &mask, NULL);
+static void wait_until_armed(void)
+{
+    pthread_mutex_lock(&watcher.mutex);
+    watcher.idle = 1;
+    pthread_cond_broadcast(&watcher.state_changed);
+    while (!watcher.armed)
+        pthread_cond_wait(&watcher.state_changed, &watcher.mutex);
+    watcher.idle = 0;
+    pthread_mutex_unlock(&watcher.mutex);
+}
 
-    struct interrupt_classifier ic;
-    interrupt_classifier_init(&ic);
+static void wait_until_disarmed(void)
+{
+    pthread_mutex_lock(&watcher.mutex);
+    while (watcher.armed)
+        pthread_cond_wait(&watcher.state_changed, &watcher.mutex);
+    pthread_mutex_unlock(&watcher.mutex);
+}
 
-    /* Runs until the process exits — there's no clean shutdown path; the
-     * thread is reaped when _exit() tears down the address space. */
+static void watch_armed_input(void)
+{
+    struct interrupt_classifier classifier;
+    interrupt_classifier_init(&classifier);
+    atomic_store(&watcher.escape_pending, 0);
+
     for (;;) {
-        pthread_mutex_lock(&W.mu);
-        /* Mark paused and broadcast so any disarm waiting for the
-         * acknowledgement can wake. The cv is shared with the arm
-         * notification, so cond_wait's spurious-wakeup loop is on
-         * `armed`, not `paused`. */
-        W.paused = 1;
-        pthread_cond_broadcast(&W.cv);
-        while (!W.armed)
-            pthread_cond_wait(&W.cv, &W.mu);
-        W.paused = 0;
-        pthread_mutex_unlock(&W.mu);
-
-        /* Reset classifier on each (re-)arm so a stale PENDING_ESC from
-         * a previous arm window can't fire spuriously. Pending mirrors
-         * the classifier's IC_PENDING_ESC state and must be cleared in
-         * lockstep. */
-        interrupt_classifier_init(&ic);
-        atomic_store(&W.pending, 0);
-
-        for (;;) {
-            int timeout = (ic.state == IC_PENDING_ESC) ? ESC_TIMEOUT_MS : -1;
-            int src = 0;
-            int pr = wait_input(timeout, &src);
-            if (pr < 0) {
-                if (errno == EINTR)
-                    continue;
-                break;
-            }
-            if (pr == 0) {
-                /* Timeout while a \x1b was pending — confirmed bare Esc. */
-                if (interrupt_classifier_timeout(&ic))
-                    latch_request();
-                atomic_store(&W.pending, ic.state == IC_PENDING_ESC);
+        int timeout_ms =
+            classifier.state == INTERRUPT_CLASSIFIER_ESCAPE_PENDING ? ESCAPE_TIMEOUT_MS : -1;
+        enum input_event event = wait_for_input(timeout_ms);
+        if (event == INPUT_ERROR) {
+            if (errno == EINTR)
                 continue;
-            }
-            if (src == 1) {
-                /* Wake pipe — disarm fired. Drain and re-check armed. */
-                drain_wake_pipe();
-                pthread_mutex_lock(&W.mu);
-                int still_armed = W.armed;
-                pthread_mutex_unlock(&W.mu);
-                if (!still_armed)
-                    break;
-                continue;
-            }
-            /* Stdin readable. Re-check armed before reading: poll might
-             * have returned with stdin ready before the wake byte made
-             * it into the pipe, and reading here would steal a byte the
-             * user already typed for the upcoming readline. */
-            pthread_mutex_lock(&W.mu);
-            int still_armed = W.armed;
-            pthread_mutex_unlock(&W.mu);
-            if (!still_armed)
-                break;
-            unsigned char buf[64];
-            ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
-            if (n < 0) {
-                if (errno == EINTR)
-                    continue;
-                break;
-            }
-            if (n == 0)
-                break; /* EOF on stdin — stop watching */
-            for (ssize_t i = 0; i < n; i++) {
-                if (interrupt_classifier_feed(&ic, buf[i]))
-                    latch_request();
-            }
-            atomic_store(&W.pending, ic.state == IC_PENDING_ESC);
+            wait_until_disarmed();
+            return;
         }
+        if (event == INPUT_TIMEOUT) {
+            if (interrupt_classifier_timeout(&classifier))
+                latch_pause_or_abort();
+            atomic_store(&watcher.escape_pending,
+                         classifier.state == INTERRUPT_CLASSIFIER_ESCAPE_PENDING);
+            continue;
+        }
+        if (event == INPUT_WAKE) {
+            drain_wake_pipe();
+            if (!watcher_is_armed())
+                return;
+            continue;
+        }
+
+        /* Read only after rechecking ownership; disarm may race poll's stdin result. */
+        if (!watcher_is_armed())
+            return;
+        unsigned char bytes[64];
+        ssize_t bytes_read = read(STDIN_FILENO, bytes, sizeof(bytes));
+        if (bytes_read < 0) {
+            if (errno == EINTR)
+                continue;
+            wait_until_disarmed();
+            return;
+        }
+        if (bytes_read == 0) {
+            wait_until_disarmed();
+            return;
+        }
+        for (ssize_t i = 0; i < bytes_read; i++) {
+            if (interrupt_classifier_feed(&classifier, bytes[i]))
+                latch_pause_or_abort();
+        }
+        atomic_store(&watcher.escape_pending,
+                     classifier.state == INTERRUPT_CLASSIFIER_ESCAPE_PENDING);
+    }
+}
+
+static void *watcher_thread(void *unused)
+{
+    (void)unused;
+
+    /* Keep process signals on the main thread, which owns terminal rendering and cleanup. */
+    sigset_t signals;
+    sigfillset(&signals);
+    pthread_sigmask(SIG_SETMASK, &signals, NULL);
+
+    for (;;) {
+        wait_until_armed();
+        watch_armed_input();
     }
     return NULL;
 }
 
-/* ---------- restoration on exit / signal ---------- */
-
-static void restore_tty_only(void)
+static void restore_terminal(void)
 {
-    /* Best-effort restoration of the canonical baseline. Used by
-     * atexit and the signal handler — both terminal paths (the signal
-     * handler re-raises with SIG_DFL right after this), so the bytes
-     * we write are the last bytes the tty sees from us; interleaving
-     * with a concurrent paint() in input.c is fine because the process
-     * is about to die and stdio buffers don't matter. Must be
-     * async-signal-safe in the signal case: tcsetattr and write(2) are
-     * in the POSIX async-safe list.
-     *
-     * Termios and DEC mode restoration are independent failure domains:
-     * tcgetattr() at init may have failed (saved_termios_valid==0)
-     * while stdout is still a TTY, so we must emit paste-off + cursor-
-     * show even when the termios path is skipped. Restoring an
-     * already-canonical tty is a harmless no-op; same for DECTCEM. */
-    if (W.saved_termios_valid) {
-        tcsetattr(STDIN_FILENO, TCSANOW, &W.saved_termios);
-        W.raw_mode_active = 0;
+    /* Fatal-signal cleanup must remain allocation-free and avoid stdio. */
+    if (watcher.saved_termios_valid) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &watcher.saved_termios);
+        watcher.raw_mode_active = 0;
     }
-    if (W.stdout_is_tty) {
-        /* Bracketed-paste off so it doesn't leak to the parent shell,
-         * cursor-show to reverse agent.c's cursor_hide() in case the
-         * process dies mid-stream (SIGINT, abort, crash). End synchronized
-         * output (DEC 2026) too: a paint() interrupted between SYNC_BEGIN
-         * and SYNC_END would otherwise leave the terminal suspending
-         * updates indefinitely. */
-        static const char restore_seq[] = "\x1b[?2004l\x1b[?25h\x1b[?2026l";
-        (void)!write(STDOUT_FILENO, restore_seq, sizeof(restore_seq) - 1);
+    if (watcher.interactive_terminal) {
+        static const char restore_sequence[] =
+            ANSI_BRACKETED_PASTE_DISABLE ANSI_CURSOR_SHOW ANSI_SYNC_END;
+        (void)!write(STDOUT_FILENO, restore_sequence, sizeof(restore_sequence) - 1);
     }
-}
-
-static void atexit_handler(void)
-{
-    restore_tty_only();
 }
 
 static void (*volatile fatal_signal_hook)(void);
 
-void interrupt_set_fatal_hook(void (*hook)(void))
+void interrupt_set_fatal_signal_hook(void (*hook)(void))
 {
     fatal_signal_hook = hook;
 }
 
-static void signal_restore_and_reraise(int sig)
+static void restore_and_reraise_signal(int signal_number)
 {
     if (fatal_signal_hook)
         fatal_signal_hook();
-    restore_tty_only();
-    /* Re-raise with default disposition so the parent shell sees the
-     * expected exit signal (e.g. 130 for SIGINT). signal() back to
-     * SIG_DFL is async-signal-safe. */
-    signal(sig, SIG_DFL);
-    raise(sig);
+    restore_terminal();
+    signal(signal_number, SIG_DFL);
+    raise(signal_number);
 }
 
-void interrupt_install_signal_handlers(void)
+void interrupt_install_fatal_signal_handlers(void)
 {
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = signal_restore_and_reraise;
-    sigemptyset(&sa.sa_mask);
-    int sigs[] = {SIGINT, SIGTERM, SIGHUP, SIGQUIT};
-    for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++)
-        sigaction(sigs[i], &sa, NULL);
+    struct sigaction action = {0};
+    action.sa_handler = restore_and_reraise_signal;
+    sigemptyset(&action.sa_mask);
+
+    const int signals[] = {SIGINT, SIGTERM, SIGHUP, SIGQUIT};
+    for (size_t i = 0; i < sizeof(signals) / sizeof(signals[0]); i++)
+        sigaction(signals[i], &action, NULL);
 }
 
-/* ---------- public API ---------- */
+static int create_wake_pipe(void)
+{
+    int fds[2];
+    /* pipe2 is unavailable on macOS; set CLOEXEC explicitly to keep watcher fds internal. */
+    if (pipe(fds) < 0)
+        return -1;
+    if (fcntl(fds[0], F_SETFD, FD_CLOEXEC) < 0 || fcntl(fds[1], F_SETFD, FD_CLOEXEC) < 0)
+        goto fail;
+
+    int flags = fcntl(fds[0], F_GETFL, 0);
+    if (flags < 0 || fcntl(fds[0], F_SETFL, flags | O_NONBLOCK) < 0)
+        goto fail;
+
+    watcher.wake_read_fd = fds[0];
+    watcher.wake_write_fd = fds[1];
+    return 0;
+
+fail:
+    close(fds[0]);
+    close(fds[1]);
+    return -1;
+}
 
 void interrupt_init(void)
 {
-    if (W.started)
+    if (watcher.initialized)
         return;
-
-    pthread_mutex_init(&W.mu, NULL);
-    pthread_cond_init(&W.cv, NULL);
-    atomic_store(&W.requested, 0);
-    atomic_store(&W.soft, 0);
+    watcher.initialized = 1;
 
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
         return;
 
-    /* Install cleanup handlers immediately once we know we're on a TTY
-     * — before any can-fail step below. If tcgetattr/pipe/pthread_create
-     * fail and we bail, restore_tty_only() must still run on exit to
-     * undo any cursor-hide / paste-on emitted by agent.c during the
-     * doomed-but-still-interactive prompt loop. */
-    W.stdout_is_tty = 1;
-    atexit(atexit_handler);
-    interrupt_install_signal_handlers();
+    /* Install restoration before later initialization steps can fail. */
+    watcher.interactive_terminal = 1;
+    atexit(restore_terminal);
+    interrupt_install_fatal_signal_handlers();
 
-    if (tcgetattr(STDIN_FILENO, &W.saved_termios) == 0)
-        W.saved_termios_valid = 1;
-
-    int fds[2];
-    if (pipe(fds) < 0)
+    if (tcgetattr(STDIN_FILENO, &watcher.saved_termios) < 0)
         return;
-    /* Close-on-exec on both ends so forked tools (notably bash) don't
-     * inherit our internal pipe — a child holding the read end could
-     * race the watcher for the disarm wake byte, and write access from
-     * a misbehaving descendant could spuriously wake the watcher.
-     * pipe2(O_CLOEXEC) isn't portable to macOS, so set it via fcntl. */
-    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
-    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
-    /* Non-blocking so drain_wake_pipe never blocks if multiple writes
-     * coalesced. The write side stays blocking — writes are 1 byte. */
-    int fl = fcntl(fds[0], F_GETFL, 0);
-    if (fl >= 0)
-        fcntl(fds[0], F_SETFL, fl | O_NONBLOCK);
-    W.wake_pipe_r = fds[0];
-    W.wake_pipe_w = fds[1];
+    watcher.saved_termios_valid = 1;
 
-    if (pthread_create(&W.thread, NULL, watcher_thread, NULL) != 0) {
-        close(W.wake_pipe_r);
-        close(W.wake_pipe_w);
-        W.wake_pipe_r = W.wake_pipe_w = -1;
+    if (pthread_mutex_init(&watcher.mutex, NULL) != 0)
         return;
-    }
-    W.started = 1;
+    if (pthread_cond_init(&watcher.state_changed, NULL) != 0)
+        goto destroy_mutex;
+    if (create_wake_pipe() < 0)
+        goto destroy_condition;
+    if (pthread_create(&watcher.thread, NULL, watcher_thread, NULL) != 0)
+        goto close_pipe;
+
+    watcher.started = 1;
+    return;
+
+close_pipe:
+    close(watcher.wake_read_fd);
+    close(watcher.wake_write_fd);
+    watcher.wake_read_fd = -1;
+    watcher.wake_write_fd = -1;
+destroy_condition:
+    pthread_cond_destroy(&watcher.state_changed);
+destroy_mutex:
+    pthread_mutex_destroy(&watcher.mutex);
 }
 
 static void wake_watcher(void)
 {
-    if (W.wake_pipe_w < 0)
-        return;
-    char b = 0;
-    /* EAGAIN/EINTR ignored — even one already-pending byte is enough to
-     * wake poll. */
-    (void)write(W.wake_pipe_w, &b, 1);
+    char byte = 0;
+    ssize_t result;
+    do {
+        result = write(watcher.wake_write_fd, &byte, 1);
+    } while (result < 0 && errno == EINTR);
 }
 
 void interrupt_arm(void)
 {
-    if (!W.started)
+    if (!watcher.started)
         return;
-    pthread_mutex_lock(&W.mu);
-    int was_armed = W.armed;
-    if (!was_armed) {
-        enter_raw_mode();
-        W.armed = 1;
-        /* Broadcast so the watcher's outer cond_wait wakes. The cv is
-         * shared with the disarm-wait-for-paused path, but disarm only
-         * waits while watcher is in the inner loop, never concurrently
-         * with arm — broadcast is harmless either way. */
-        pthread_cond_broadcast(&W.cv);
+
+    pthread_mutex_lock(&watcher.mutex);
+    if (!watcher.armed && enter_raw_mode() == 0) {
+        watcher.armed = 1;
+        pthread_cond_broadcast(&watcher.state_changed);
     }
-    pthread_mutex_unlock(&W.mu);
+    pthread_mutex_unlock(&watcher.mutex);
 }
 
 void interrupt_disarm(void)
 {
-    if (!W.started)
+    if (!watcher.started)
         return;
-    pthread_mutex_lock(&W.mu);
-    int was_armed = W.armed;
-    if (was_armed)
-        W.armed = 0;
-    pthread_mutex_unlock(&W.mu);
+
+    pthread_mutex_lock(&watcher.mutex);
+    int was_armed = watcher.armed;
+    watcher.armed = 0;
+    pthread_cond_broadcast(&watcher.state_changed);
+    pthread_mutex_unlock(&watcher.mutex);
     if (!was_armed)
         return;
 
     wake_watcher();
 
-    /* Wait for the watcher to acknowledge it has stopped reading stdin.
-     * Without this we could leave_raw_mode while it's still in poll/read
-     * (next read would block on the canonical-mode line buffer), or it
-     * could consume bytes the user typed for the upcoming readline. */
-    pthread_mutex_lock(&W.mu);
-    while (!W.paused)
-        pthread_cond_wait(&W.cv, &W.mu);
+    /* Restoring canonical mode before the watcher stops could block its next read indefinitely. */
+    pthread_mutex_lock(&watcher.mutex);
+    while (!watcher.idle)
+        pthread_cond_wait(&watcher.state_changed, &watcher.mutex);
     leave_raw_mode();
-    pthread_mutex_unlock(&W.mu);
+    pthread_mutex_unlock(&watcher.mutex);
 
-    /* Discard any input bytes that landed in the kernel buffer during the
-     * armed window — including the Esc itself and any partial CSI tail
-     * — so they don't reappear in the next readline call. */
     tcflush(STDIN_FILENO, TCIFLUSH);
 }
 
-int interrupt_requested(void)
+int interrupt_pause_requested(void)
 {
-    if (!W.started)
-        return 0;
-    return atomic_load(&W.requested);
+    return atomic_load(&watcher.pause_requested);
 }
 
-int interrupt_soft_requested(void)
+int interrupt_abort_requested(void)
 {
-    if (!W.started)
-        return 0;
-    return atomic_load(&W.soft);
+    return atomic_load(&watcher.abort_requested);
 }
 
-/* Zero-timeout poll on stdin — true if there are bytes the watcher
- * hasn't read yet. Multiple concurrent pollers are fine on POSIX; we
- * never read from this fd, only ask the kernel about its readiness. */
-static int stdin_has_pending(void)
+static int stdin_has_pending_input(void)
 {
-    struct pollfd p = {.fd = STDIN_FILENO, .events = POLLIN};
-    int rc = poll(&p, 1, 0);
-    return rc > 0 && (p.revents & POLLIN);
+    struct pollfd stdin_poll = {.fd = STDIN_FILENO, .events = POLLIN};
+    int result = poll(&stdin_poll, 1, 0);
+    return result > 0 && (stdin_poll.revents & POLLIN);
 }
 
-void interrupt_settle(void)
+void interrupt_resolve_pending_escape(void)
 {
-    if (!W.started)
+    if (!watcher.started)
         return;
-    /* Up to ESC_TIMEOUT_MS plus slack to absorb three boundary cases:
-     *   1. Bytes queued in the tty but not yet read by the watcher
-     *      (stdin_has_pending) — the byte arrived just as we got here
-     *      and the watcher hasn't been scheduled to read() it.
-     *   2. \x1b already classified as PENDING_ESC, awaiting follow-up
-     *      or timeout (W.pending).
-     *   3. Bare Esc just confirmed and latched (W.requested).
-     * Polled in 5ms steps — the work is a syscall plus a few atomic
-     * loads, and avoids cv-coordination cost on the watcher's hot
-     * path. Returns as soon as everything has settled. */
-    int budget_ms = ESC_TIMEOUT_MS + 10;
-    while (budget_ms > 0) {
-        if (atomic_load(&W.requested))
+
+    /* Account for input queued before the watcher publishes its classifier state. */
+    int remaining_ms = ESCAPE_TIMEOUT_MS + 2 * ESCAPE_POLL_INTERVAL_MS;
+    const struct timespec interval = {
+        .tv_sec = 0,
+        .tv_nsec = ESCAPE_POLL_INTERVAL_MS * 1000000L,
+    };
+    while (remaining_ms > 0) {
+        if (atomic_load(&watcher.abort_requested))
             return;
-        if (!atomic_load(&W.pending) && !stdin_has_pending())
+        if (!atomic_load(&watcher.escape_pending) && !stdin_has_pending_input())
             return;
-        struct timespec ts = {.tv_sec = 0, .tv_nsec = 5000000L};
-        nanosleep(&ts, NULL);
-        budget_ms -= 5;
+        nanosleep(&interval, NULL);
+        remaining_ms -= ESCAPE_POLL_INTERVAL_MS;
     }
 }
 
-void interrupt_clear(void)
+void interrupt_clear_requests(void)
 {
-    atomic_store(&W.requested, 0);
-    atomic_store(&W.soft, 0);
+    atomic_store(&watcher.abort_requested, 0);
+    atomic_store(&watcher.pause_requested, 0);
 }

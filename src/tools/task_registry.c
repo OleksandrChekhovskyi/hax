@@ -665,7 +665,7 @@ char *task_wait_stream(const char *id, long timeout_ms, tool_display_fn display,
             stop = WAIT_OTHER_DONE;
             break;
         }
-        if (interrupt_requested()) {
+        if (interrupt_abort_requested()) {
             stop = WAIT_INTERRUPTED;
             break;
         }

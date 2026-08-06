@@ -255,8 +255,8 @@ int oneshot_run(struct provider *provider, const char *prompt, const struct hax_
     };
 
     /* Headless mode still needs fatal signals to terminate its spawned process groups. */
-    interrupt_install_signal_handlers();
-    interrupt_set_fatal_hook(bash_shell_pgids_kill);
+    interrupt_install_fatal_signal_handlers();
+    interrupt_set_fatal_signal_hook(bash_shell_pgids_kill);
 
     /* Effort must reflect the completed startup probe before session initialization. */
     model_meta_wait(provider);

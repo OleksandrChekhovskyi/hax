@@ -183,8 +183,8 @@ static void display_stats_line(struct render_ctx *render, const struct provider 
 static int agent_stream_tick(void *user)
 {
     struct render_ctx *render = user;
-    /* Confirm a soft pause immediately; the idempotent update also overrides pending labels. */
-    if (interrupt_soft_requested() && !interrupt_requested()) {
+    /* Confirm a pause immediately; the idempotent update also overrides pending labels. */
+    if (interrupt_pause_requested() && !interrupt_abort_requested()) {
         spinner_set_label(render->spinner, "pausing", "pausing... (esc again to interrupt)");
         /* Before first content, cancel immediately; the loop maps the empty turn to a resumable
          * pause. */
@@ -199,7 +199,7 @@ static int agent_stream_tick(void *user)
             monotonic_ms() - render->table.started_at_ms >= TABLE_SPINNER_DELAY_MS)
             render_show_table_spinner(render);
     }
-    return interrupt_requested();
+    return interrupt_abort_requested();
 }
 
 static int render_on_event(const struct stream_event *event, void *user)
@@ -216,7 +216,7 @@ static int render_on_event(const struct stream_event *event, void *user)
         spinner_set_label(render->spinner, "working", "working...");
     }
 
-    /* Once output exists, a soft pause must preserve it by waiting for a turn seam. */
+    /* Once output exists, a pause must preserve it by waiting for a turn seam. */
     if (event->kind == EV_TEXT_DELTA || event->kind == EV_REASONING_DELTA ||
         event->kind == EV_REASONING_ITEM || event->kind == EV_TOOL_CALL_START)
         render->stream.content_seen = 1;
@@ -889,14 +889,14 @@ static int compact_on_event(const struct stream_event *event, void *user)
 static int compact_tick(void *user)
 {
     struct compact_event_ctx *ctx = user;
-    return agent_stream_tick(ctx->render) || interrupt_soft_requested();
+    return agent_stream_tick(ctx->render) || interrupt_pause_requested();
 }
 
 static int compact_cancelled(void *user)
 {
     (void)user;
-    interrupt_settle();
-    return interrupt_requested() || interrupt_soft_requested();
+    interrupt_resolve_pending_escape();
+    return interrupt_abort_requested() || interrupt_pause_requested();
 }
 
 static void compact_notice(struct render_ctx *render, const char *format, ...)
@@ -962,7 +962,7 @@ int agent_compact(struct agent_state *state, const char *instructions, int autom
             },
     };
 
-    interrupt_clear();
+    interrupt_clear_requests();
     interrupt_arm();
     struct compact_result result;
     compact_run(&params, &result);
@@ -1059,10 +1059,10 @@ static void repl_loop_turn_end(const struct agent_loop_turn *loop_turn, void *us
 static int repl_loop_checkpoint(void *user)
 {
     (void)user;
-    interrupt_settle();
-    if (interrupt_requested())
+    interrupt_resolve_pending_escape();
+    if (interrupt_abort_requested())
         return AGENT_LOOP_SIG_ABORT;
-    if (interrupt_soft_requested())
+    if (interrupt_pause_requested())
         return AGENT_LOOP_SIG_PAUSE;
     return AGENT_LOOP_SIG_NONE;
 }
@@ -1094,8 +1094,8 @@ static void repl_loop_compact(void *user)
     struct repl_loop_ctx *ctx = user;
     agent_compact(ctx->state, NULL, 1);
     /* Preserve cancellation for the loop checkpoint; otherwise re-arm after compaction. */
-    if (!interrupt_requested() && !interrupt_soft_requested()) {
-        interrupt_clear();
+    if (!interrupt_abort_requested() && !interrupt_pause_requested()) {
+        interrupt_clear_requests();
         interrupt_arm();
     }
 }
@@ -1244,7 +1244,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         transcript_log_append(transcript, session.items, session.n_items);
     /* Capture terminal state before raw input; non-TTY initialization is a no-op. */
     interrupt_init();
-    interrupt_set_fatal_hook(bash_shell_pgids_kill);
+    interrupt_set_fatal_signal_hook(bash_shell_pgids_kill);
 
     char prompt_buffer[64];
 
@@ -1307,7 +1307,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             compacted = agent_compact(&state, NULL, 1);
             /* A newly latched interrupt belongs to compaction and cancels the whole send; retain
              * the debt for the next attempt. */
-            if (interrupt_requested() || interrupt_soft_requested()) {
+            if (interrupt_abort_requested() || interrupt_pause_requested()) {
                 free(line);
                 continue;
             }
@@ -1372,7 +1372,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         spinner_set_timer(render.spinner, user_turn_start_ms);
 
         /* Clear stale editor interrupts before arming first-Esc pause and second-Esc abort. */
-        interrupt_clear();
+        interrupt_clear_requests();
         interrupt_arm();
         /* A positive max_turns pauses at a clean seam; zero means unlimited. */
         int max_turns = config_int("max_turns");
@@ -1407,7 +1407,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         agent_loop_result_destroy(&loop_result);
         interrupt_disarm();
         /* Snapshot Esc before auto-compaction clears the interrupt latch. */
-        int user_pressed_escape = interrupt_soft_requested();
+        int user_pressed_escape = interrupt_pause_requested();
         spinner_set_timer(render.spinner, 0);
 
         /* Close active rendering before post-turn output can emit terminal control sequences. */
@@ -1437,7 +1437,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
                                user_turn_ms, &state.stats);
 
         /* Auto-compact only completed, Esc-free turns. Clean pauses defer compaction until the
-         * next send; errors and hard interrupts retain partial history for retry or explicit
+         * next send; errors and aborts retain partial history for retry or explicit
          * compaction. */
         if (compact_should_auto(user_turn_context_tokens,
                                 model_meta_context(current_provider, session.model))) {

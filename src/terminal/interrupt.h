@@ -2,108 +2,53 @@
 #ifndef HAX_TERMINAL_INTERRUPT_H
 #define HAX_TERMINAL_INTERRUPT_H
 
-/* Esc-key interrupt watcher.
- *
- * Owns a background thread that, while *armed*, reads bytes from stdin in
- * non-canonical mode and sets latched flags when the user presses bare Esc.
- * Bare Esc is distinguished from CSI/SS3 escape sequences (arrow keys, F-keys,
- * etc.) via a short follow-up timeout — \x1b followed by another byte within
- * ESC_TIMEOUT_MS is the start of an escape sequence and is consumed silently;
- * \x1b alone is the user wanting to interrupt.
- *
- * Two-stage escalation: the first bare Esc in an armed window latches the
- * *soft* flag (a pause request — let in-flight work finish, stop at the
- * next clean boundary); a second bare Esc escalates to the *hard* flag
- * (abort now). Hard implies soft. interrupt_clear() resets both.
- *
- * Lifecycle:
- *   interrupt_init() once at startup.
- *   <user enters prompt — disarmed; the line editor owns the tty>
- *   interrupt_arm() — raw mode on, watcher reading.
- *   <stream and tools run, periodically check interrupt_requested() /
- *    interrupt_soft_requested()>
- *   interrupt_disarm() — canonical mode restored, watcher paused, stdin drained.
- *   <next prompt>
- *
- * Tty safety: at init we capture the current termios as the canonical
- * baseline and register atexit + signal handlers (SIGINT/SIGTERM/SIGHUP/
- * SIGQUIT) that always restore that baseline — even on a panic mid-arm. The
- * baseline is what was in effect when interrupt_init ran, before the line
- * editor's first prompt; the editor's own termios save/restore around each
- * input_readline() call is unaffected.
- *
- * No-tty mode: when stdin or stdout isn't a tty, all entry points become
- * no-ops — there's no Esc to detect on a piped stdin, and putting a
- * non-tty stdin into raw mode is a no-op anyway. interrupt_requested()
- * always returns 0 in that case. */
-
+/* Initialize bare-Esc detection and terminal restoration. Detection is available only when stdin
+ * and stdout are TTYs; otherwise the watcher API is inert and request queries return false. */
 void interrupt_init(void);
 
-/* Install just the fatal-signal handlers (SIGINT/SIGTERM/SIGHUP/SIGQUIT: hook,
- * tty restore, re-raise) without the tty machinery — for non-tty frontends
- * where interrupt_init() would bail before installing them. interrupt_init()
- * includes this. */
-void interrupt_install_signal_handlers(void);
+/* Install fatal-signal handlers without starting the TTY watcher. The handlers invoke the optional
+ * hook, restore terminal state, and re-raise the signal with its default disposition. */
+void interrupt_install_fatal_signal_handlers(void);
 
-/* Register a hook the fatal-signal handlers run before re-raising, e.g. to
- * kill processes that must not outlive hax. Must be async-signal-safe. */
-void interrupt_set_fatal_hook(void (*hook)(void));
+/* The hook runs from a signal handler and must be async-signal-safe. */
+void interrupt_set_fatal_signal_hook(void (*hook)(void));
 
-/* Begin listening for Esc. Idempotent — safe to call when already armed. */
+/* Start bare-Esc detection. The first Esc requests a pause and the second requests an immediate
+ * abort. Arming is idempotent and does not clear requests left by an earlier cycle. */
 void interrupt_arm(void);
 
-/* Stop listening, restore canonical termios, drain pending stdin so any
- * leftover bytes the user typed during the armed window don't leak into
- * the next readline(). Idempotent. */
+/* Stop detection, wait until the watcher no longer owns stdin, restore terminal mode, and discard
+ * input received while armed. Disarming is idempotent. */
 void interrupt_disarm(void);
 
-/* Latched hard-abort flag — the second Esc of an armed window. Stays set
- * until interrupt_clear(). Safe to call from any thread. */
-int interrupt_requested(void);
+/* Requests remain latched until interrupt_clear_requests(). Abort implies pause. These queries are
+ * safe from any thread. */
+int interrupt_pause_requested(void);
+int interrupt_abort_requested(void);
+void interrupt_clear_requests(void);
 
-/* Latched soft-pause flag — the first Esc of an armed window. Also set
- * whenever the hard flag is (the escalation passes through it). Stays
- * set until interrupt_clear(). Safe to call from any thread. */
-int interrupt_soft_requested(void);
+/* Wait briefly for a recently received Esc to be classified. Call before an irreversible decision
+ * based on the request flags, such as starting a tool or sending another model request. */
+void interrupt_resolve_pending_escape(void);
 
-/* Block briefly while the classifier is mid-decision on a \x1b — i.e.
- * waiting for the CSI/SS3 follow-up byte or the timeout that confirms a
- * bare Esc. Returns once the flag is latched or the pending state
- * resolves, with a small upper bound. Call before any decision that
- * acts on interrupt_requested() and would be hard to undo (running
- * side-effecting tools, sending another model request). */
-void interrupt_settle(void);
-
-/* Clear both latched flags. Call before each new arm cycle. */
-void interrupt_clear(void);
-
-/* ---------- pure-logic byte classifier (exposed for testing) ----------
- *
- * State machine that consumes input bytes one at a time and decides whether
- * a bare Esc has been confirmed. The watcher loop drives this with real
- * stdin bytes plus a timeout signal; tests can drive it with synthetic
- * sequences and never touch a tty. */
-
-enum interrupt_state {
-    IC_IDLE,
-    IC_PENDING_ESC, /* saw \x1b, awaiting follow-up byte or timeout */
-    IC_CSI,         /* inside \x1b[ ... <final byte 0x40-0x7E> */
-    IC_SS3,         /* inside \x1bO <one byte> */
+/* Byte classifier exposed so its terminal-independent behavior can be tested directly. */
+enum interrupt_classifier_state {
+    INTERRUPT_CLASSIFIER_IDLE,
+    INTERRUPT_CLASSIFIER_ESCAPE_PENDING,
+    INTERRUPT_CLASSIFIER_CSI,
+    INTERRUPT_CLASSIFIER_SS3,
 };
 
 struct interrupt_classifier {
-    enum interrupt_state state;
+    enum interrupt_classifier_state state;
 };
 
-void interrupt_classifier_init(struct interrupt_classifier *c);
+void interrupt_classifier_init(struct interrupt_classifier *classifier);
 
-/* Feed one input byte. Returns 1 if a bare-Esc has just been confirmed
- * (caller should latch the abort flag); 0 otherwise. */
-int interrupt_classifier_feed(struct interrupt_classifier *c, unsigned char byte);
+/* Return true when this byte confirms that the preceding Esc was bare. */
+int interrupt_classifier_feed(struct interrupt_classifier *classifier, unsigned char byte);
 
-/* Signal that the post-\x1b follow-up window has elapsed with no further
- * bytes. Returns 1 if this confirms a bare Esc (i.e. we were in
- * PENDING_ESC); 0 otherwise. */
-int interrupt_classifier_timeout(struct interrupt_classifier *c);
+/* Return true when the timeout confirms a pending Esc was bare. */
+int interrupt_classifier_timeout(struct interrupt_classifier *classifier);
 
 #endif /* HAX_TERMINAL_INTERRUPT_H */

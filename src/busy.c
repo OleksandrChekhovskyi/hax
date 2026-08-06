@@ -19,7 +19,7 @@ struct busy *busy_begin(const char *label)
     struct busy *b = xmalloc(sizeof(*b));
     b->sp = spinner_new(label);
     spinner_show(b->sp);
-    interrupt_clear();
+    interrupt_clear_requests();
     interrupt_arm();
     return b;
 }
@@ -27,16 +27,13 @@ struct busy *busy_begin(const char *label)
 int busy_tick(void *user)
 {
     (void)user;
-    return interrupt_requested();
+    return interrupt_abort_requested();
 }
 
-/* Same settle → read → disarm sequence as the agent's streaming paths:
- * settle first so a just-typed \x1b that is still being classified
- * doesn't slip past the read. */
 int busy_end(struct busy *b)
 {
-    interrupt_settle();
-    int cancelled = interrupt_requested();
+    interrupt_resolve_pending_escape();
+    int cancelled = interrupt_abort_requested();
     interrupt_disarm();
     spinner_hide(b->sp);
     spinner_free(b->sp);

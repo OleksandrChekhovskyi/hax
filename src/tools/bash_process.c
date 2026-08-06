@@ -301,7 +301,7 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
         }
 
         /* User interruption wins if it coincides with the timeout. */
-        if (stop_reason == BASH_STOP_NONE && interrupt_requested()) {
+        if (stop_reason == BASH_STOP_NONE && interrupt_abort_requested()) {
             stop_reason = BASH_STOP_INTERRUPT;
             if (shell_exited) {
                 /* Background suppressed the shell-exit kill; orphans die on the way out. */
