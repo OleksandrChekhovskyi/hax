@@ -430,8 +430,8 @@ static int fetch_models_page(const struct anthropic *anthropic, const char *afte
     free(url);
 
     if (result != 0) {
-        *error = format_models_error(anthropic->base.name, anthropic->base_url,
-                                     anthropic->api_key != NULL, status);
+        *error = format_model_list_error(anthropic->base.name, anthropic->base_url,
+                                         anthropic->api_key != NULL, status);
         free(response_body);
         return -1;
     }

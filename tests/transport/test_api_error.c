@@ -4,59 +4,55 @@
 #include <string.h>
 
 #include "harness.h"
+#include "text/utf8.h"
 #include "transport/api_error.h"
 
 static void test_empty_body(void)
 {
-    char *m = format_api_error(500, NULL);
-    EXPECT_STR_EQ(m, "HTTP 500");
-    free(m);
+    char *message = format_api_error(500, NULL);
+    EXPECT_STR_EQ(message, "HTTP 500");
+    free(message);
 
-    m = format_api_error(503, "");
-    EXPECT_STR_EQ(m, "HTTP 503");
-    free(m);
+    message = format_api_error(503, "");
+    EXPECT_STR_EQ(message, "HTTP 503");
+    free(message);
 }
 
 static void test_no_status_no_body(void)
 {
-    char *m = format_api_error(0, NULL);
-    EXPECT_STR_EQ(m, "request failed");
-    free(m);
+    char *message = format_api_error(0, NULL);
+    EXPECT_STR_EQ(message, "request failed");
+    free(message);
 }
 
 static void test_openai_style_json(void)
 {
-    /* OpenAI-style nested error object — the most common shape. */
-    char *m = format_api_error(429, "{\"error\":{\"message\":\"Rate limit exceeded\","
-                                    "\"type\":\"rate_limit_error\"}}");
-    EXPECT_STR_EQ(m, "HTTP 429: Rate limit exceeded");
-    free(m);
+    char *message = format_api_error(429, "{\"error\":{\"message\":\"Rate limit exceeded\","
+                                          "\"type\":\"rate_limit_error\"}}");
+    EXPECT_STR_EQ(message, "HTTP 429: Rate limit exceeded");
+    free(message);
 }
 
 static void test_simple_string_error(void)
 {
-    char *m = format_api_error(500, "{\"error\":\"upstream timeout\"}");
-    EXPECT_STR_EQ(m, "HTTP 500: upstream timeout");
-    free(m);
+    char *message = format_api_error(500, "{\"error\":\"upstream timeout\"}");
+    EXPECT_STR_EQ(message, "HTTP 500: upstream timeout");
+    free(message);
 }
 
 static void test_top_level_message(void)
 {
-    char *m = format_api_error(400, "{\"message\":\"Invalid model\"}");
-    EXPECT_STR_EQ(m, "HTTP 400: Invalid model");
-    free(m);
+    char *message = format_api_error(400, "{\"message\":\"Invalid model\"}");
+    EXPECT_STR_EQ(message, "HTTP 400: Invalid model");
+    free(message);
 }
 
 static void test_json_no_recognized_field(void)
 {
-    /* JSON parses but has none of the known keys → fall back to
-     * cleaned plain text (the raw JSON) with status prefix. */
-    char *m = format_api_error(500, "{\"foo\":\"bar\"}");
-    /* Plain-text path: HTML stripping is no-op here, whitespace
-     * collapse leaves it as-is. */
-    EXPECT(strstr(m, "HTTP 500") != NULL);
-    EXPECT(strstr(m, "foo") != NULL);
-    free(m);
+    char *message = format_api_error(500, "{\"foo\":\"bar\"}");
+    EXPECT(strstr(message, "HTTP 500") != NULL);
+    EXPECT(strstr(message, "foo") != NULL);
+    free(message);
 }
 
 static void test_html_body_stripped(void)
@@ -65,358 +61,266 @@ static void test_html_body_stripped(void)
         "<!DOCTYPE HTML>\n<html lang=\"en\">\n  <head>\n    <title>Error</title>\n  </head>\n"
         "  <body>\n    <h1>Error response</h1>\n    <p>Error code: 500</p>\n"
         "    <p>Message: Internal Server Error.</p>\n  </body>\n</html>\n";
-    char *m = format_api_error(500, html);
-    /* No tags should survive. */
-    EXPECT(strchr(m, '<') == NULL);
-    EXPECT(strchr(m, '>') == NULL);
-    /* The textual content should be visible somewhere. */
-    EXPECT(strstr(m, "Error response") != NULL);
-    EXPECT(strstr(m, "Internal Server Error") != NULL);
-    /* Status prefix present. */
-    EXPECT(strstr(m, "HTTP 500") != NULL);
-    free(m);
+    char *message = format_api_error(500, html);
+    EXPECT(strchr(message, '<') == NULL);
+    EXPECT(strchr(message, '>') == NULL);
+    EXPECT(strstr(message, "Error response") != NULL);
+    EXPECT(strstr(message, "Internal Server Error") != NULL);
+    EXPECT(strstr(message, "HTTP 500") != NULL);
+    free(message);
 }
 
 static void test_long_message_truncated(void)
 {
-    /* Build a JSON payload with a 500-char message — should be truncated
-     * with "..." at the end. */
-    struct {
-        char buf[1024];
-    } x;
-    char *p = x.buf;
-    p += sprintf(p, "{\"error\":{\"message\":\"");
+    char body[1024];
+    char *cursor = body;
+    cursor += sprintf(cursor, "{\"error\":{\"message\":\"");
     for (int i = 0; i < 500; i++)
-        *p++ = 'A';
-    sprintf(p, "\"}}");
-    char *m = format_api_error(500, x.buf);
-    EXPECT(strstr(m, "...") != NULL);
-    /* Total output should be much shorter than the input. */
-    EXPECT(strlen(m) < 300);
-    free(m);
+        *cursor++ = 'A';
+    sprintf(cursor, "\"}}");
+    char *message = format_api_error(500, body);
+    EXPECT(strstr(message, "...") != NULL);
+    EXPECT(strlen(message) < 300);
+    free(message);
 }
 
 static void test_transport_error_no_status(void)
 {
-    /* status=0 means libcurl error (DNS, connect refused, etc.) — the
-     * provider passes the libcurl message as the body. No HTTP prefix
-     * since there was no HTTP exchange. */
-    char *m = format_api_error(0, "libcurl: Couldn't connect to server");
-    EXPECT_STR_EQ(m, "libcurl: Couldn't connect to server");
-    free(m);
+    char *message = format_api_error(0, "libcurl: Couldn't connect to server");
+    EXPECT_STR_EQ(message, "libcurl: Couldn't connect to server");
+    free(message);
 }
 
 static void test_html_with_style_and_script(void)
 {
-    /* Real Python http.server 5xx pages embed CSS in a <style> block;
-     * many CDN/proxy pages also embed JS. Both should be stripped
-     * along with the tags so only the human-readable text remains. */
     const char *html = "<html><head><style>:root { color: red; --x: 1px; }</style>"
                        "<script>alert('x');</script></head>"
                        "<body><h1>Service Unavailable</h1>"
                        "<p>Please try again.</p></body></html>";
-    char *m = format_api_error(503, html);
-    EXPECT(strstr(m, "Service Unavailable") != NULL);
-    EXPECT(strstr(m, "Please try again") != NULL);
-    /* CSS / JS bytes must NOT leak through. */
-    EXPECT(strstr(m, "color") == NULL);
-    EXPECT(strstr(m, "--x") == NULL);
-    EXPECT(strstr(m, "alert") == NULL);
-    free(m);
+    char *message = format_api_error(503, html);
+    EXPECT(strstr(message, "Service Unavailable") != NULL);
+    EXPECT(strstr(message, "Please try again") != NULL);
+    EXPECT(strstr(message, "color") == NULL);
+    EXPECT(strstr(message, "--x") == NULL);
+    EXPECT(strstr(message, "alert") == NULL);
+    free(message);
 }
 
 static void test_sse_framed_json(void)
 {
-    /* Some backends pack errors as SSE-shaped data even on non-2xx
-     * responses. http.c suppresses SSE event delivery for non-2xx
-     * but the captured err_body still has the framing — strip it
-     * here so the structured message is extracted. */
-    char *m = format_api_error(503, "data: {\"error\":{\"message\":\"upstream rate limit\"}}\n\n");
-    EXPECT_STR_EQ(m, "HTTP 503: upstream rate limit");
-    free(m);
+    char *message =
+        format_api_error(503, "data: {\"error\":{\"message\":\"upstream rate limit\"}}\n\n");
+    EXPECT_STR_EQ(message, "HTTP 503: upstream rate limit");
+    free(message);
 }
 
 static void test_sse_framed_top_level_message(void)
 {
-    char *m = format_api_error(500, "data: {\"message\":\"boom\"}\n\n");
-    EXPECT_STR_EQ(m, "HTTP 500: boom");
-    free(m);
+    char *message = format_api_error(500, "data: {\"message\":\"boom\"}\n\n");
+    EXPECT_STR_EQ(message, "HTTP 500: boom");
+    free(message);
 }
 
 static void test_sse_framed_with_crlf(void)
 {
-    /* CRLF line endings: trailing \r should be trimmed too. */
-    char *m = format_api_error(503, "data: {\"error\":\"slow down\"}\r\n\r\n");
-    EXPECT_STR_EQ(m, "HTTP 503: slow down");
-    free(m);
+    char *message = format_api_error(503, "data: {\"error\":\"slow down\"}\r\n\r\n");
+    EXPECT_STR_EQ(message, "HTTP 503: slow down");
+    free(message);
 }
 
 static void test_sse_framed_malformed_json(void)
 {
-    /* Unwrap successful but payload isn't JSON → plain-text path
-     * should display the unwrapped payload, NOT the original body
-     * with the `data:` prefix still attached. */
-    char *m = format_api_error(500, "data: not json here\n\n");
-    EXPECT_STR_EQ(m, "HTTP 500: not json here");
-    /* The `data:` prefix must not survive into the displayed message. */
-    EXPECT(strstr(m, "data:") == NULL);
-    free(m);
+    char *message = format_api_error(500, "data: not json here\n\n");
+    EXPECT_STR_EQ(message, "HTTP 500: not json here");
+    EXPECT(strstr(message, "data:") == NULL);
+    free(message);
 }
 
 static void test_sse_framed_with_event_name(void)
 {
-    /* `event: error` precedes `data:` — the SSE parser pairs them up
-     * automatically. Without using the parser, a naive prefix-strip
-     * would fail to find `data:` at the start. */
-    char *m = format_api_error(503, "event: error\n"
-                                    "data: {\"error\":{\"message\":\"overloaded\"}}\n\n");
-    EXPECT_STR_EQ(m, "HTTP 503: overloaded");
-    free(m);
+    char *message = format_api_error(503, "event: error\n"
+                                          "data: {\"error\":{\"message\":\"overloaded\"}}\n\n");
+    EXPECT_STR_EQ(message, "HTTP 503: overloaded");
+    free(message);
 }
 
 static void test_sse_framed_multiline_data(void)
 {
-    /* Per the SSE spec, multiple `data:` lines in one event are
-     * concatenated with '\n'. The parser handles this; the joined
-     * result here is valid JSON (newlines inside top-level whitespace
-     * are fine for jansson). */
-    char *m = format_api_error(500, "data: {\n"
-                                    "data:   \"error\": \"slow down\"\n"
-                                    "data: }\n\n");
-    EXPECT_STR_EQ(m, "HTTP 500: slow down");
-    free(m);
+    char *message = format_api_error(500, "data: {\n"
+                                          "data:   \"error\": \"slow down\"\n"
+                                          "data: }\n\n");
+    EXPECT_STR_EQ(message, "HTTP 500: slow down");
+    free(message);
 }
 
 static void test_sse_framed_with_comments(void)
 {
-    /* `:` lines are SSE comments — keep-alive pings, etc. — and must
-     * be ignored without disrupting the event extraction. */
-    char *m = format_api_error(503, ": keep-alive\n"
-                                    "event: error\n"
-                                    ": another comment\n"
-                                    "data: {\"error\":\"throttled\"}\n\n");
-    EXPECT_STR_EQ(m, "HTTP 503: throttled");
-    free(m);
+    char *message = format_api_error(503, ": keep-alive\n"
+                                          "event: error\n"
+                                          ": another comment\n"
+                                          "data: {\"error\":\"throttled\"}\n\n");
+    EXPECT_STR_EQ(message, "HTTP 503: throttled");
+    free(message);
 }
 
-/* Walk `s` and verify every byte sequence is a well-formed UTF-8
- * codepoint: 0xxxxxxx, 110xxxxx + 1×10xxxxxx, 1110xxxx + 2×10xxxxxx,
- * 11110xxx + 3×10xxxxxx. Returns 1 on success, 0 on any malformed
- * sequence. */
-static int valid_utf8(const char *s)
+static int valid_utf8(const char *text)
 {
-    for (const char *q = s; *q;) {
-        unsigned char c = (unsigned char)*q;
-        int extra;
-        if (c < 0x80)
-            extra = 0;
-        else if ((c & 0xE0) == 0xC0)
-            extra = 1;
-        else if ((c & 0xF0) == 0xE0)
-            extra = 2;
-        else if ((c & 0xF8) == 0xF0)
-            extra = 3;
-        else
+    size_t len = strlen(text);
+    for (size_t offset = 0; offset < len;) {
+        int sequence_len = utf8_seq_len((unsigned char)text[offset]);
+        if ((size_t)sequence_len > len - offset || !utf8_seq_valid(text + offset, sequence_len))
             return 0;
-        q++;
-        for (int i = 0; i < extra; i++) {
-            if (((unsigned char)*q & 0xC0) != 0x80)
-                return 0;
-            q++;
-        }
+        offset += (size_t)sequence_len;
     }
     return 1;
 }
 
 static void test_sse_skips_empty_event_then_extracts(void)
 {
-    /* A non-2xx body with a keep-alive `event: ping` (no data)
-     * before the actual error event. The unwrap callback must
-     * skip empty-data events and keep looking — returning 1 on
-     * the first event regardless would lose the real message. */
-    char *m = format_api_error(503, "event: ping\n\n"
-                                    "event: error\n"
-                                    "data: {\"error\":\"boom\"}\n\n");
-    EXPECT_STR_EQ(m, "HTTP 503: boom");
-    free(m);
+    char *message = format_api_error(503, "event: ping\n\n"
+                                          "event: error\n"
+                                          "data: {\"error\":\"boom\"}\n\n");
+    EXPECT_STR_EQ(message, "HTTP 503: boom");
+    free(message);
 }
 
 static void test_sse_skips_data_ping_then_extracts(void)
 {
-    /* Some providers send data-bearing keep-alives before the error
-     * event. Don't stop on the first non-empty data payload unless it
-     * actually looks like an error. */
-    char *m = format_api_error(503, "event: ping\n"
-                                    "data: {\"type\":\"ping\"}\n\n"
-                                    "event: error\n"
-                                    "data: {\"error\":{\"message\":\"slow down\"}}\n\n");
-    EXPECT_STR_EQ(m, "HTTP 503: slow down");
-    free(m);
+    char *message = format_api_error(503, "event: ping\n"
+                                          "data: {\"type\":\"ping\"}\n\n"
+                                          "event: error\n"
+                                          "data: {\"error\":{\"message\":\"slow down\"}}\n\n");
+    EXPECT_STR_EQ(message, "HTTP 503: slow down");
+    free(message);
 }
 
 static void test_truncate_at_utf8_boundary(void)
 {
-    /* Build a JSON message where the truncation point lands inside
-     * a 2-byte codepoint (é = 0xC3 0xA9). Naive byte truncation
-     * would emit a lone 0xC3 + "..." → invalid UTF-8 in the
-     * terminal. The cut should rewind to before the multi-byte
-     * sequence and produce well-formed output. */
+    /* Put the 200-byte cutoff inside é. */
     char body[1024];
-    char *p = body;
-    p += sprintf(p, "{\"error\":\"");
-    /* 199 ASCII bytes — pushes the cut into the next codepoint. */
+    char *cursor = body;
+    cursor += sprintf(cursor, "{\"error\":\"");
     for (int i = 0; i < 199; i++)
-        *p++ = 'A';
-    *p++ = (char)0xC3; /* é leader */
-    *p++ = (char)0xA9; /* é continuation */
-    p += sprintf(p, " more text\"}");
-    char *m = format_api_error(500, body);
-    EXPECT(valid_utf8(m));
-    /* The "..." marker should be present (body is longer than the cap). */
-    EXPECT(strstr(m, "...") != NULL);
-    free(m);
+        *cursor++ = 'A';
+    *cursor++ = (char)0xC3; /* é leader */
+    *cursor++ = (char)0xA9; /* é continuation */
+    sprintf(cursor, " more text\"}");
+    char *message = format_api_error(500, body);
+    EXPECT(valid_utf8(message));
+    EXPECT(strstr(message, "...") != NULL);
+    free(message);
 }
 
 static void test_truncate_at_4byte_codepoint_boundary(void)
 {
-    /* Same idea as above but with a 4-byte codepoint (😀 = U+1F600,
-     * UTF-8 0xF0 0x9F 0x98 0x80). The cut lands deep inside the
-     * sequence (2 continuation bytes back from a leader); a single
-     * utf8_prev call may not be enough — verify the loop
-     * converges. */
+    /* Put the 200-byte cutoff inside a four-byte codepoint. */
     char body[1024];
-    char *p = body;
-    p += sprintf(p, "{\"error\":\"");
+    char *cursor = body;
+    cursor += sprintf(cursor, "{\"error\":\"");
     for (int i = 0; i < 198; i++)
-        *p++ = 'A';
-    *p++ = (char)0xF0; /* 😀 leader */
-    *p++ = (char)0x9F;
-    *p++ = (char)0x98;
-    *p++ = (char)0x80;
-    p += sprintf(p, " trailing\"}");
-    char *m = format_api_error(500, body);
-    EXPECT(valid_utf8(m));
-    free(m);
+        *cursor++ = 'A';
+    *cursor++ = (char)0xF0; /* 😀 leader */
+    *cursor++ = (char)0x9F;
+    *cursor++ = (char)0x98;
+    *cursor++ = (char)0x80;
+    sprintf(cursor, " trailing\"}");
+    char *message = format_api_error(500, body);
+    EXPECT(valid_utf8(message));
+    free(message);
 }
 
 static void test_sse_only_event_no_data(void)
 {
-    /* `event: error` with no `data:` field — parser emits an event
-     * with empty data. Our unwrap skips empty-data events and returns
-     * NULL, so format_api_error falls through to plain-text on the
-     * original body. */
-    char *m = format_api_error(500, "event: error\n\n");
-    /* The original body becomes the cleaned plain-text. */
-    EXPECT(strstr(m, "HTTP 500") != NULL);
-    EXPECT(strstr(m, "event") != NULL);
-    free(m);
+    char *message = format_api_error(500, "event: error\n\n");
+    EXPECT(strstr(message, "HTTP 500") != NULL);
+    EXPECT(strstr(message, "event") != NULL);
+    free(message);
 }
 
 static void test_plain_text_with_angle_brackets(void)
 {
-    /* Plain-text error messages can legitimately contain `<` and `>`
-     * as comparison operators or placeholder syntax — they must not
-     * be treated as HTML tags and stripped. Without the looks-like-tag
-     * gate, `<= 4096` would have everything from `<` onward swallowed
-     * (no `>` ever closes the implied tag), losing the actual numeric
-     * limit. */
-    char *m = format_api_error(400, "max_tokens must be <= 4096");
-    EXPECT_STR_EQ(m, "HTTP 400: max_tokens must be <= 4096");
-    free(m);
+    char *message = format_api_error(400, "max_tokens must be <= 4096");
+    EXPECT_STR_EQ(message, "HTTP 400: max_tokens must be <= 4096");
+    free(message);
 
-    m = format_api_error(400, "value < 5 and value > 0");
-    EXPECT_STR_EQ(m, "HTTP 400: value < 5 and value > 0");
-    free(m);
+    message = format_api_error(400, "value < 5 and value > 0");
+    EXPECT_STR_EQ(message, "HTTP 400: value < 5 and value > 0");
+    free(message);
 
-    m = format_api_error(400, "expected <number>, got <string>");
-    /* `<number>` and `<string>` start with letters, so they DO get
-     * treated as tags and stripped. That's the intentional tradeoff —
-     * angle-bracketed identifiers are ambiguous (could be HTML, could
-     * be placeholder syntax) and we err on the HTML side. The
-     * surrounding text survives. */
-    EXPECT_STR_EQ(m, "HTTP 400: expected , got");
-    free(m);
+    message = format_api_error(400, "expected <number>, got <string>");
+    /* Letter-prefixed angle brackets are intentionally treated as tags. */
+    EXPECT_STR_EQ(message, "HTTP 400: expected , got");
+    free(message);
 }
 
 static void test_short_html_like_bodies(void)
 {
-    /* Bodies that look like the start of an HTML tag but are
-     * truncated. The HTML stripper's tag_starts() helper must not
-     * read past the NUL terminator. ASan would surface any
-     * out-of-bounds read here. */
     const char *cases[] = {
         "<",  "<s",  "<sc",     "<scr", "<scri", "<scrip", "<script", "<style", "<style>partial",
         "</", "</s", "</style", "<!",   "<!--",  NULL,
     };
     for (size_t i = 0; cases[i]; i++) {
-        char *m = format_api_error(500, cases[i]);
-        EXPECT(m != NULL);
-        EXPECT(strstr(m, "HTTP 500") != NULL);
-        free(m);
+        char *message = format_api_error(500, cases[i]);
+        EXPECT(message != NULL);
+        EXPECT(strstr(message, "HTTP 500") != NULL);
+        free(message);
     }
 }
 
 static void test_html_only_no_text(void)
 {
-    /* All-tags input → cleaned to empty → status-only output. */
-    char *m = format_api_error(502, "<html><head></head><body></body></html>");
-    EXPECT_STR_EQ(m, "HTTP 502");
-    free(m);
+    char *message = format_api_error(502, "<html><head></head><body></body></html>");
+    EXPECT_STR_EQ(message, "HTTP 502");
+    free(message);
 }
 
 static void test_multiline_collapsed(void)
 {
-    /* Newlines and tabs collapse to single spaces. */
-    char *m = format_api_error(500, "line1\n\n\nline2\t\ttabbed");
-    EXPECT_STR_EQ(m, "HTTP 500: line1 line2 tabbed");
-    free(m);
+    char *message = format_api_error(500, "line1\n\n\nline2\t\ttabbed");
+    EXPECT_STR_EQ(message, "HTTP 500: line1 line2 tabbed");
+    free(message);
 }
 
-/* ---------- format_models_error ---------- */
-
-static void test_models_error_key_rejected(void)
+static void test_model_list_error_key_rejected(void)
 {
-    char *m = format_models_error("openai", "https://api.openai.com/v1", 1, 401);
-    EXPECT_STR_EQ(m, "openai rejected the API key (HTTP 401) — check it and retry");
-    free(m);
+    char *message = format_model_list_error("openai", "https://api.openai.com/v1", 1, 401);
+    EXPECT_STR_EQ(message, "openai rejected the API key (HTTP 401) — check it and retry");
+    free(message);
 }
 
-static void test_models_error_key_missing(void)
+static void test_model_list_error_key_missing(void)
 {
-    char *m = format_models_error("anthropic", "https://api.anthropic.com/v1", 0, 403);
-    EXPECT_STR_EQ(m, "anthropic requires an API key (HTTP 403) — none is configured");
-    free(m);
+    char *message = format_model_list_error("anthropic", "https://api.anthropic.com/v1", 0, 403);
+    EXPECT_STR_EQ(message, "anthropic requires an API key (HTTP 403) — none is configured");
+    free(message);
 }
 
-static void test_models_error_empty_2xx(void)
+static void test_model_list_error_empty_2xx(void)
 {
-    /* http_get fails a 2xx whose body is empty/truncated — not an HTTP
-     * error, must not render as "failed (HTTP 200)". */
-    char *m = format_models_error("llama.cpp", "http://127.0.0.1:8080/v1", 0, 200);
-    EXPECT_STR_EQ(m, "llama.cpp sent an empty or truncated /models response");
-    free(m);
+    char *message = format_model_list_error("llama.cpp", "http://127.0.0.1:8080/v1", 0, 200);
+    EXPECT_STR_EQ(message, "llama.cpp sent an empty or truncated /models response");
+    free(message);
 }
 
-static void test_models_error_http_status(void)
+static void test_model_list_error_http_status(void)
 {
-    char *m = format_models_error("openrouter", "https://openrouter.ai/api/v1", 1, 500);
-    EXPECT_STR_EQ(m, "listing openrouter models failed (HTTP 500)");
-    free(m);
+    char *message = format_model_list_error("openrouter", "https://openrouter.ai/api/v1", 1, 500);
+    EXPECT_STR_EQ(message, "listing openrouter models failed (HTTP 500)");
+    free(message);
 }
 
-static void test_models_error_unreachable(void)
+static void test_model_list_error_unreachable(void)
 {
-    /* No status: never reached — the URL is the diagnosis. */
-    char *m = format_models_error("llama.cpp", "http://127.0.0.1:8080/v1", 0, 0);
-    EXPECT_STR_EQ(m, "could not reach llama.cpp at http://127.0.0.1:8080/v1");
-    free(m);
+    char *message = format_model_list_error("llama.cpp", "http://127.0.0.1:8080/v1", 0, 0);
+    EXPECT_STR_EQ(message, "could not reach llama.cpp at http://127.0.0.1:8080/v1");
+    free(message);
 }
 
-static void test_models_error_null_name(void)
+static void test_model_list_error_null_name(void)
 {
-    char *m = format_models_error(NULL, "http://x", 0, 500);
-    EXPECT_STR_EQ(m, "listing provider models failed (HTTP 500)");
-    free(m);
+    char *message = format_model_list_error(NULL, "http://x", 0, 500);
+    EXPECT_STR_EQ(message, "listing provider models failed (HTTP 500)");
+    free(message);
 }
 
 int main(void)
@@ -447,11 +351,11 @@ int main(void)
     test_transport_error_no_status();
     test_html_only_no_text();
     test_multiline_collapsed();
-    test_models_error_key_rejected();
-    test_models_error_key_missing();
-    test_models_error_empty_2xx();
-    test_models_error_http_status();
-    test_models_error_unreachable();
-    test_models_error_null_name();
+    test_model_list_error_key_rejected();
+    test_model_list_error_key_missing();
+    test_model_list_error_empty_2xx();
+    test_model_list_error_http_status();
+    test_model_list_error_unreachable();
+    test_model_list_error_null_name();
     T_REPORT();
 }

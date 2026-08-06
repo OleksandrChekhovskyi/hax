@@ -2,6 +2,7 @@
 #include "transport/retry.h"
 
 #include <jansson.h>
+#include <limits.h>
 #include <strings.h>
 #include <time.h>
 
@@ -9,187 +10,127 @@
 #include "util.h"
 #include "transport/http.h"
 
-/* Defaults (in the config registry) tuned for an interactive CLI:
- * prefer a slightly slower successful reply over a fast clean failure.
- * With 4 retries and 1s base, the cumulative wait across a flaky window
- * is ~15s (1+2+4+8s, before jitter), which rides out a typical provider
- * deploy / rate-limit cooldown / brief 5xx spike. The final per-
- * attempt delay (8s) is the "go get coffee" range without crossing
- * into "is hax frozen?" territory. The max-delay cap at 30s applies
- * when users override http.retry_base upward. */
-#define MAX_DELAY_MS 30000
+#define MAX_DELAY_MS   30000
+#define SLEEP_SLICE_MS 100
 
-struct retry_policy retry_policy_default(void)
-{
-    /* The knob counts additional retries; the policy's max_attempts is
-     * total tries including the first, so add one. The registry bounds it to
-     * 100 (an out-of-range value reads as the registry default), so no clamp
-     * is needed here. */
-    int n = config_int("http.max_retries");
-
-    /* "0 disables" is not part of this knob's grammar: a zero base would
-     * make every delay zero and hammer an already-struggling server. The
-     * registry bounds it to > 0, so a non-positive value already reads as
-     * the registry default. */
-    long base = config_duration_ms("http.retry_base");
-    long idle_ms = config_duration_ms("http.idle_timeout");
-
-    struct retry_policy p = {
-        .max_attempts = n + 1,
-        .base_delay_ms = base,
-        .max_delay_ms = MAX_DELAY_MS,
-        /* libcurl accepts whole seconds; round up so a sub-second value does
-         * not become 0, which means disabled. */
-        .idle_timeout_s = idle_ms / 1000 + (idle_ms % 1000 ? 1 : 0),
-    };
-    return p;
-}
-
-/* Markers that turn a 429 from "transient rate cap" into "terminal usage
- * cap" — we hit our subscription/quota ceiling and retrying won't help
- * until the user's window resets. Matched case-insensitively against
- * the JSON `error.type` or `error.code` field.
- *
- *   usage_limit_reached / usage_not_included
- *     — Codex subscription window (`api_bridge.rs:80-100` in codex-rs).
- *   insufficient_quota / quota_exceeded
- *     — OpenAI hard quota and account-level caps; also what opencode's
- *       executor matches on (`packages/llm/src/route/executor.ts:242`).
- *
- * Deliberately NOT listed: `rate_limit_exceeded` (per-minute TPM/RPM
- * limit, transient — retrying after the server's Retry-After is the
- * intended behavior). */
 static const char *const TERMINAL_429_CODES[] = {
     "usage_limit_reached", "usage_not_included", "insufficient_quota", "quota_exceeded", NULL,
 };
 
-static int is_terminal_429_marker(const char *s)
+struct retry_policy retry_policy_default(void)
 {
-    if (!s)
+    int additional_retries = config_int("http.max_retries");
+    long base_delay_ms = config_duration_ms("http.retry_base");
+    long idle_timeout_ms = config_duration_ms("http.idle_timeout");
+
+    struct retry_policy policy = {
+        .max_attempts = additional_retries + 1,
+        .base_delay_ms = base_delay_ms,
+        .max_delay_ms = MAX_DELAY_MS,
+        /* libcurl accepts whole seconds; preserve a configured sub-second timeout. */
+        .idle_timeout_s = idle_timeout_ms / 1000 + (idle_timeout_ms % 1000 ? 1 : 0),
+    };
+    return policy;
+}
+
+static int is_terminal_429_code(const char *code)
+{
+    if (!code)
         return 0;
-    for (const char *const *p = TERMINAL_429_CODES; *p; p++) {
-        if (strcasecmp(s, *p) == 0)
+
+    for (const char *const *terminal = TERMINAL_429_CODES; *terminal; terminal++) {
+        if (strcasecmp(code, *terminal) == 0)
             return 1;
     }
     return 0;
 }
 
-/* Inspect a 429 response body for the terminal-usage markers above. The
- * body is the raw payload from the server — usually JSON, but may be
- * HTML or empty when a proxy intervenes; jansson rejects those and we
- * return 0 (= keep the default "retry 429" behaviour). */
-static int body_marks_terminal_429(const char *body)
+static int has_terminal_429_error(const char *body)
 {
     if (!body || !*body)
         return 0;
+
     json_t *root = json_loads(body, 0, NULL);
     if (!root)
         return 0;
+
     int terminal = 0;
-    json_t *err = json_object_get(root, "error");
-    if (json_is_object(err)) {
-        json_t *t = json_object_get(err, "type");
-        if (json_is_string(t) && is_terminal_429_marker(json_string_value(t)))
-            terminal = 1;
+    json_t *error = json_object_get(root, "error");
+    if (json_is_object(error)) {
+        json_t *type = json_object_get(error, "type");
+        terminal = json_is_string(type) && is_terminal_429_code(json_string_value(type));
         if (!terminal) {
-            json_t *c = json_object_get(err, "code");
-            if (json_is_string(c) && is_terminal_429_marker(json_string_value(c)))
-                terminal = 1;
+            json_t *code = json_object_get(error, "code");
+            terminal = json_is_string(code) && is_terminal_429_code(json_string_value(code));
         }
     }
     json_decref(root);
     return terminal;
 }
 
-int retry_should_attempt(int rc, long status, const char *body)
+int retry_should_attempt(int result, long status, const char *body)
 {
-    /* Success — caller doesn't retry, but be defensive. */
-    if (rc == 0 && status >= 200 && status < 300)
+    if (result == 0 && status >= 200 && status < 300)
         return 0;
-    /* No status reported = libcurl never got a response line: DNS lookup
-     * failed, connect refused/reset, write/recv error during the request
-     * phase, etc. All of these are safe to retry. */
     if (status == 0)
         return 1;
-    /* 2xx + rc != 0 means we got headers and started streaming, then the
-     * connection broke. Some events have already fired through the
-     * caller's stream_cb; replaying would duplicate them. The reference
-     * implementations handle this case with explicit state replay; we
-     * don't, so leave it as a hard failure for now. */
     if (status >= 200 && status < 300)
         return 0;
-    /* Transient server-side errors. 408 (request timeout), 429 (rate
-     * limit), 5xx (server overload, gateway issues). For 429 we peek
-     * at the JSON body: a `usage_limit_reached` / `insufficient_quota`
-     * marker means our subscription window is exhausted and the only
-     * remedy is waiting hours for the reset — burning the retry budget
-     * would just delay the user-visible error. */
     if (status == 408)
         return 1;
     if (status == 429)
-        return body_marks_terminal_429(body) ? 0 : 1;
-    if (status >= 500 && status <= 599)
-        return 1;
-    /* 4xx other than the above are permanent for our purposes — auth,
-     * bad request, model not found. The caller surfaces them as-is so
-     * the user can act on them. */
-    return 0;
+        return !has_terminal_429_error(body);
+    return status >= 500 && status <= 599;
 }
 
-long retry_delay_ms(const struct retry_policy *pol, int attempt)
+long retry_delay_ms(const struct retry_policy *policy, int attempt)
 {
+    if (policy->base_delay_ms <= 0 || policy->max_delay_ms <= 0)
+        return 0;
     if (attempt < 0)
         attempt = 0;
-    /* Clamp the shift so the doubling doesn't overflow on a configured
-     * runaway max_attempts. 30 doublings is already past any sensible
-     * max_delay_ms cap. */
-    int shift = attempt > 30 ? 30 : attempt;
-    long raw = pol->base_delay_ms;
-    for (int i = 0; i < shift; i++) {
-        if (raw > pol->max_delay_ms)
-            break;
-        raw <<= 1;
-    }
-    if (raw < pol->base_delay_ms)
-        raw = pol->base_delay_ms;
-    if (raw > pol->max_delay_ms)
-        raw = pol->max_delay_ms;
 
-    /* Jitter +/-25% from monotonic time. Avoids pulling in <stdlib.h>'s
-     * rand() (would need seeding) and stays deterministic-enough for
-     * a single-user CLI — we just want adjacent retries to land at
-     * slightly different millisecond offsets. Re-clamp after applying
-     * jitter so the +25% upper end never pushes us past max_delay_ms. */
-    long j = monotonic_ms() % 51; /* 0..50 */
-    long out = raw * (75 + j) / 100;
-    if (out < 0)
-        out = pol->base_delay_ms;
-    if (out > pol->max_delay_ms)
-        out = pol->max_delay_ms;
-    return out;
+    long delay_ms = policy->base_delay_ms;
+    if (delay_ms > policy->max_delay_ms)
+        delay_ms = policy->max_delay_ms;
+    for (int i = 0; i < attempt; i++) {
+        if (delay_ms > policy->max_delay_ms / 2) {
+            delay_ms = policy->max_delay_ms;
+            break;
+        }
+        delay_ms *= 2;
+    }
+
+    long jitter_percent = 75 + monotonic_ms() % 51;
+    if (delay_ms > LONG_MAX / jitter_percent)
+        delay_ms = policy->max_delay_ms;
+    else
+        delay_ms = delay_ms * jitter_percent / 100;
+    if (delay_ms > policy->max_delay_ms)
+        delay_ms = policy->max_delay_ms;
+    return delay_ms;
 }
 
-int retry_sleep_with_tick(long ms, http_tick_cb tick, void *user)
+int retry_sleep_with_tick(long delay_ms, http_tick_cb tick, void *user)
 {
-    if (ms <= 0)
+    if (delay_ms <= 0)
         return tick && tick(user);
-    long deadline = monotonic_ms() + ms;
+
+    long deadline = monotonic_ms() + delay_ms;
     while (1) {
         if (tick && tick(user))
             return 1;
-        long now = monotonic_ms();
-        if (now >= deadline)
+
+        long remaining_ms = deadline - monotonic_ms();
+        if (remaining_ms <= 0)
             return 0;
-        long left = deadline - now;
-        /* 100 ms slices: short enough that a user Esc shows up promptly
-         * via the next tick poll, long enough that the loop overhead
-         * stays negligible compared to the actual wait. */
-        if (left > 100)
-            left = 100;
-        struct timespec ts = {
-            .tv_sec = left / 1000,
-            .tv_nsec = (left % 1000) * 1000000L,
+        if (remaining_ms > SLEEP_SLICE_MS)
+            remaining_ms = SLEEP_SLICE_MS;
+
+        struct timespec duration = {
+            .tv_sec = remaining_ms / 1000,
+            .tv_nsec = (remaining_ms % 1000) * 1000000L,
         };
-        nanosleep(&ts, NULL);
+        nanosleep(&duration, NULL);
     }
 }

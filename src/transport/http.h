@@ -8,64 +8,30 @@
 
 struct http_response {
     long status;
-    char *error_body;    /* non-null on non-2xx or transport error; caller frees */
-    long retry_after_ms; /* parsed Retry-After header, 0 when absent/unparseable */
-    int cancelled;       /* 1 when transfer was aborted by tick returning non-zero */
+    char *error_body;    /* heap-owned; NULL on success or cancellation */
+    long retry_after_ms; /* 0 when Retry-After is absent or invalid */
+    int cancelled;
 };
 
-/* Periodic side-channel callback. Called from libcurl's progress hook
- * (~1Hz, fires even when the server is silent) and on every received
- * chunk. Returning non-zero aborts the in-flight transfer promptly.
- * Side effects are allowed — the agent uses this slot to do wall-clock
- * idle detection ("model went quiet mid-text, surface a spinner")
- * alongside the cancel check. NULL = no tick (no cancel, no idle). */
+/* Called during transfer progress and after each received chunk. Returning non-zero aborts. */
 typedef int (*http_tick_cb)(void *user);
 
-/* headers: NULL-terminated array of "Key: Value" strings. `idle_timeout_s`
- * is the already-resolved low-speed timeout; 0 disables it. */
+/* `headers` is a NULL-terminated array and may be NULL. `idle_timeout_s == 0` disables the
+ * low-speed timeout. The response is initialized on every call; the caller owns `error_body`.
+ * Returns 0 when the transfer completes, including non-2xx responses, and -1 otherwise. */
 int http_sse_post(const char *url, const char *const *headers, const char *body, size_t body_len,
                   long idle_timeout_s, sse_cb cb, void *user, http_tick_cb tick, void *tick_user,
-                  struct http_response *resp);
+                  struct http_response *response);
 
-/* Synchronous GET into a freshly-allocated NUL-terminated buffer. Used for
- * small JSON probes (e.g. /v1/models, /props) where streaming is overkill.
- *
- * Returns 0 on 2xx with *out set to a heap-owned response body (caller
- * frees). Returns -1 on any failure — transport, non-2xx, empty body — with
- * *out=NULL; the caller decides whether to surface or ignore the failure.
- *
- * `headers` is an optional NULL-terminated array of "Key: Value" strings,
- * may be NULL. `timeout_s` is the total request timeout in seconds; pass 0
- * to disable. Connect timeout is fixed at a short value so an unreachable
- * host fails fast.
- *
- * `max_bytes` bounds the response body: the transfer is aborted (and the
- * call fails) as soon as the body would exceed it, so an oversized
- * response can't balloon memory for the whole timeout window. 0 = no
- * bound — fine for provider endpoints whose payloads are known-small;
- * set it when the URL is user-configurable (the catalog fetch).
- *
- * `tick` is an optional side-channel hook (same shape as for
- * http_sse_post). Background probes pass `bg_job_cancel_tick` with their job
- * pointer so shutdown can abort an in-flight transfer in well under a
- * second instead of waiting out the timeout. NULL = no tick.
- *
- * `status_out` is an optional slot for the HTTP response code (0 when the
- * request never got a response, e.g. a transport error). It is filled on
- * both success and failure, letting callers distinguish a 401 from a
- * network blip even though the return code collapses all failures to -1.
- * NULL = caller doesn't need the status. */
+/* Synchronous GET into a heap-owned NUL-terminated buffer. `headers` is a NULL-terminated array and
+ * may be NULL. Returns 0 on a non-empty 2xx response; otherwise returns -1 and sets `*out` to NULL.
+ * `timeout_s == 0` and `max_bytes == 0` disable their respective limits. `status_out`, when
+ * non-NULL, receives 0 if no HTTP response was received. */
 int http_get(const char *url, const char *const *headers, long timeout_s, long max_bytes,
              http_tick_cb tick, void *tick_user, char **out, long *status_out);
 
-/* Synchronous POST of a JSON body into a freshly-allocated NUL-terminated
- * buffer. Identical contract to http_get otherwise (timeouts, tick, return
- * codes, *out ownership). `body` is treated as opaque bytes — the caller
- * is responsible for the JSON encoding — and a `Content-Type: application/json`
- * header is appended automatically (callers should not duplicate it in
- * `headers`). NULL/empty body sends a zero-length POST. Used for small
- * probe endpoints that take a JSON request (ollama's POST /api/show, …)
- * rather than encoding the query in the URL. */
+/* Synchronous JSON POST with the same response, timeout, and size contracts as http_get.
+ * Content-Type is added automatically. A NULL body sends an empty POST. */
 int http_post_json(const char *url, const char *const *headers, const char *body, size_t body_len,
                    long timeout_s, long max_bytes, http_tick_cb tick, void *tick_user, char **out);
 
