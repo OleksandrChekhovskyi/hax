@@ -21,6 +21,9 @@
 #define ANSI_BOLD_OFF   ANSI_CSI "22m"
 #define ANSI_ITALIC_OFF ANSI_CSI "23m"
 
+#define ANSI_UNDERLINE     ANSI_CSI "4m"
+#define ANSI_UNDERLINE_OFF ANSI_CSI "24m"
+
 /* Production rendering should normally use semantic theme roles instead of raw palette colors. */
 #define ANSI_RED            ANSI_CSI "31m"
 #define ANSI_GREEN          ANSI_CSI "32m"

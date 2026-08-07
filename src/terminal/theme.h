@@ -12,6 +12,7 @@ enum theme_role {
     THEME_CODE_INLINE, /* Markdown inline code */
     THEME_CODE_BLOCK,  /* Markdown fenced code */
     THEME_HEADING,     /* Markdown headings; may include bold */
+    THEME_LINK,        /* Markdown bare URLs; includes underline */
     THEME_ADD,         /* added diff lines */
     THEME_REMOVE,      /* removed diff lines */
     THEME_OK,          /* positive status */

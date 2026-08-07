@@ -154,12 +154,12 @@ Semantics:
   the hax config directory, `@~/…` and absolute paths work as written. A preset naming an
   unreadable file fails validation, like any other invalid member.
 - `tint` is optional: the persona's identity tint (`teal`, `violet`, `rose`, `sage` — see the
-  `tint` setting above), which colors the model's headings, code, the `[name]` stance in the
-  banner, and the preset's own row in the `/preset` picker. Omitted, your own `tint` setting
-  applies. Unlike the other members it is never written as an override — it is read back off
-  the active stance — so a `/config tint` you set afterwards outranks it, and survives the
-  `/model`, `/provider`, or `/effort` pick that ends the stance. An unknown tint fails
-  validation, like any other invalid member.
+  `tint` setting above), which colors the model's headings, code, links, the `[name]` stance
+  in the banner, and the preset's own row in the `/preset` picker. Omitted, your own `tint`
+  setting applies. Unlike the other members it is never written as an override — it is read
+  back off the active stance — so a `/config tint` you set afterwards outranks it, and
+  survives the `/model`, `/provider`, or `/effort` pick that ends the stance. An unknown tint
+  fails validation, like any other invalid member.
 - Applying a preset writes the whole selection, so presets replace each other rather than
   compose: switching from a preset that set a system prompt to one that doesn't restores the
   regular prompt.
@@ -294,12 +294,13 @@ variable. `/config` marks settings that can be changed mid-session.
   `COLORFGBG` environment variable reports a light background. Terminals rarely advertise
   their background, so on a light scheme you typically want to set `light` explicitly.
 - `tint` / `HAX_TINT` — identity tint: `teal` (default), `violet`, `rose`, or `sage`. Recolors
-  the model's voice — headings, inline code, fence bodies, and the active preset's `[name]`
-  in the banner — so two terminals running different personas are distinguishable at a
-  glance. hax's own chrome, the prompt marker, and the diff/status colors keep their fixed
-  meanings under every tint. Presets can carry one (see [Presets](#presets)), which wins over
-  this setting until you change it with `/config tint`; the `dark` and `light` themes apply
-  tints, while `ansi` and `off` ignore them and defer to the terminal's own scheme.
+  the model's voice — headings, inline code, fence bodies, underlined links, and the active
+  preset's `[name]` in the banner — so two terminals running different personas are
+  distinguishable at a glance. hax's own chrome, the prompt marker, and the diff/status
+  colors keep their fixed meanings under every tint. Presets can carry one (see
+  [Presets](#presets)), which wins over this setting until you change it with `/config tint`;
+  the `dark` and `light` themes apply tints, while `ansi` and `off` ignore them and defer to
+  the terminal's own scheme.
 
 `HAX_CONTEXT_LIMIT` overrides provider auto-detection. Current auto-detection exists for
 Codex, llama.cpp, and OpenRouter; `openai`, `anthropic`, and custom providers with a

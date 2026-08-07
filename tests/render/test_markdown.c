@@ -20,6 +20,8 @@
 #define ITAL_OFF ANSI_ITALIC_OFF                 /* \x1b[23m */
 #define CODE     ANSI_CYAN                       /* \x1b[36m — inline code span */
 #define CODE_OFF ANSI_FG_DEFAULT                 /* \x1b[39m */
+#define LNK      ANSI_UNDERLINE                  /* \x1b[4m — bare URL (ansi theme) */
+#define LNK_OFF  ANSI_UNDERLINE_OFF              /* \x1b[24m */
 #define ERASE    ANSI_ERASE_LINE                 /* \x1b[K */
 #define CUB(n)   "\x1b[" #n "D"                  /* cursor back n columns (retro-wrap) */
 #define BUL      DIM "\xe2\x80\xa2 " OFF         /* dim "• " bullet */
@@ -2575,8 +2577,172 @@ static void test_table_reflow_value_keeps_bold_across_wrap(void)
     const char *in = "| K | V |\n|---|---|\n| k | **alpha beta**gammazz delta |";
     char *got = render_wrap(in, 18);
     char *vis = interpret_terminal(got, 0);
-    EXPECT(strstr(vis, BLD "beta" OFF) != NULL);
+    /* Bold is restored ahead of the continuation indent, whose cells it cannot mark. */
+    EXPECT(strstr(vis, BLD "  beta" OFF) != NULL);
     free(vis);
+    free(got);
+}
+
+/* ---------- bare URL links ---------- */
+
+static void test_link_bare_url_styled(void)
+{
+    char *got = render_one("see https://example.com now");
+    EXPECT_STR_EQ(got, "see " LNK "https://example.com" LNK_OFF " now");
+    free(got);
+}
+
+static void test_link_http_scheme(void)
+{
+    char *got = render_one("http://example.org");
+    EXPECT_STR_EQ(got, LNK "http://example.org" LNK_OFF);
+    free(got);
+}
+
+static void test_link_ends_at_eof(void)
+{
+    char *got = render_one("go https://example.com");
+    EXPECT_STR_EQ(got, "go " LNK "https://example.com" LNK_OFF);
+    free(got);
+}
+
+static void test_link_trailing_punctuation_stays_prose(void)
+{
+    char *got = render_one("read https://example.com/docs.");
+    EXPECT_STR_EQ(got, "read " LNK "https://example.com/docs" LNK_OFF ".");
+    free(got);
+}
+
+static void test_link_balanced_paren_kept_wrapping_paren_trimmed(void)
+{
+    char *got = render_one("(https://en.wikipedia.org/wiki/Foo_(bar))");
+    EXPECT_STR_EQ(got, "(" LNK "https://en.wikipedia.org/wiki/Foo_(bar)" LNK_OFF ")");
+    free(got);
+}
+
+static void test_link_scheme_case_insensitive(void)
+{
+    char *got = render_one("see HTTPS://EXAMPLE.COM/Path or Http://x.org");
+    EXPECT_STR_EQ(got,
+                  "see " LNK "HTTPS://EXAMPLE.COM/Path" LNK_OFF " or " LNK "Http://x.org" LNK_OFF);
+    free(got);
+}
+
+static void test_link_balanced_brackets_kept_wrapping_brackets_trimmed(void)
+{
+    char *got = render_one("[https://example.com] then https://x.com/a[0] then http://[::1]:8/x");
+    EXPECT_STR_EQ(got, "[" LNK "https://example.com" LNK_OFF "] then " LNK
+                       "https://x.com/a[0]" LNK_OFF " then " LNK "http://[::1]:8/x" LNK_OFF);
+    free(got);
+}
+
+static void test_link_balanced_braces_kept_wrapping_braces_trimmed(void)
+{
+    char *got = render_one("{https://example.com} vs https://api.example.com/users/{id}");
+    EXPECT_STR_EQ(got, "{" LNK "https://example.com" LNK_OFF "} vs " LNK
+                       "https://api.example.com/users/{id}" LNK_OFF);
+    free(got);
+}
+
+static void test_link_stops_at_backtick(void)
+{
+    char *got = render_one("https://example.com`code`");
+    EXPECT_STR_EQ(got, LNK "https://example.com" LNK_OFF CODE "code" CODE_OFF);
+    free(got);
+}
+
+static void test_link_underscores_are_not_emphasis(void)
+{
+    char *got = render_one("https://x.com/a_b_c ok");
+    EXPECT_STR_EQ(got, LNK "https://x.com/a_b_c" LNK_OFF " ok");
+    free(got);
+}
+
+static void test_link_inside_bold(void)
+{
+    char *got = render_one("**see https://x.com**");
+    EXPECT_STR_EQ(got, BLD "see " LNK "https://x.com" LNK_OFF OFF);
+    free(got);
+}
+
+static void test_link_scheme_only_stays_prose(void)
+{
+    char *got = render_one("https:// and http:// alone");
+    EXPECT_STR_EQ(got, "https:// and http:// alone");
+    free(got);
+}
+
+static void test_link_markdown_syntax_left_literal(void)
+{
+    char *got = render_one("[docs](https://x.com) <https://y.org>");
+    EXPECT_STR_EQ(got, "[docs](" LNK "https://x.com" LNK_OFF ") <" LNK "https://y.org" LNK_OFF ">");
+    free(got);
+}
+
+static void test_link_after_em_dash(void)
+{
+    char *got = render_one("docs\xe2\x80\x94https://x.com");
+    EXPECT_STR_EQ(got, "docs " EMD " " LNK "https://x.com" LNK_OFF);
+    free(got);
+}
+
+static void test_link_in_heading(void)
+{
+    char *got = render_one("# See https://x.com\nrest");
+    EXPECT_STR_EQ(got, BLD "See " LNK "https://x.com" LNK_OFF OFF "\nrest");
+    free(got);
+}
+
+static void test_link_in_table_cell(void)
+{
+    char *got = render_one("| a | b |\n|---|---|\n| https://x.com | y |\n");
+    EXPECT(got && strstr(got, LNK "https://x.com" LNK_OFF) != NULL);
+    free(got);
+}
+
+static void test_link_feed_split_invariant(void)
+{
+    const char *in = "go https://example.com/x yes";
+    const char *want = "go " LNK "https://example.com/x" LNK_OFF " yes";
+    char *split = render_split(in, 0, 6);
+    EXPECT_STR_EQ(split, want);
+    free(split);
+    char *bytewise = render_bytewise(in, 0);
+    EXPECT_STR_EQ(bytewise, want);
+    free(bytewise);
+}
+
+static void test_link_wrap_break_reopens_link(void)
+{
+    /* The retro-wrap must close the eagerly opened underline before the fresh
+     * row and replay the opener with the word. */
+    char *got = render_width("word https://example.com", 12);
+    EXPECT_STR_EQ(got, "word " LNK "https:/" CUB(8) ERASE "\n" LNK_OFF LNK
+                                                          "https://example.com" LNK_OFF);
+    free(got);
+}
+
+static void test_link_pending_wrap_indent_not_underlined(void)
+{
+    /* An edge wrap committed mid-link must suspend the underline across the
+     * newline and hanging indent. */
+    char *got = render_width("- word https://x.com", 6);
+    EXPECT_STR_EQ(got, BUL "word" LNK LNK_OFF "\n  " LNK "https://x.com" LNK_OFF);
+    free(got);
+}
+
+static void test_link_unstyled_mode_no_escapes(void)
+{
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 0);
+    md_set_styled(m, 0);
+    const char *in = "see https://example.com.";
+    md_feed(m, in, strlen(in));
+    md_flush(m);
+    md_free(m);
+    char *got = buf_steal(&out);
+    EXPECT_STR_EQ(got, "see https://example.com.");
     free(got);
 }
 
@@ -3055,6 +3221,28 @@ int main(void)
     test_table_oversized_header_passes_through();
     test_table_eof_over_cap_row_passes_through();
     test_table_reflow_value_keeps_bold_across_wrap();
+
+    test_link_bare_url_styled();
+    test_link_http_scheme();
+    test_link_ends_at_eof();
+    test_link_trailing_punctuation_stays_prose();
+    test_link_balanced_paren_kept_wrapping_paren_trimmed();
+    test_link_scheme_case_insensitive();
+    test_link_balanced_brackets_kept_wrapping_brackets_trimmed();
+    test_link_balanced_braces_kept_wrapping_braces_trimmed();
+    test_link_stops_at_backtick();
+    test_link_underscores_are_not_emphasis();
+    test_link_inside_bold();
+    test_link_scheme_only_stays_prose();
+    test_link_markdown_syntax_left_literal();
+    test_link_after_em_dash();
+    test_link_in_heading();
+    test_link_in_table_cell();
+    test_link_feed_split_invariant();
+    test_link_wrap_break_reopens_link();
+    test_link_pending_wrap_indent_not_underlined();
+    test_link_unstyled_mode_no_escapes();
+
     test_dinkus_renders_three_dots();
     test_dinkus_shrinks_on_narrow_width();
 

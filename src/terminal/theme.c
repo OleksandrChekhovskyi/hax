@@ -28,6 +28,9 @@ struct theme_preset {
 
 /* Indexed colors remain compatible with terminals that do not support truecolor SGR. */
 #define FG256(n) "\x1b[38;5;" #n "m"
+/* Single combined sequences so table-cell replay can recognize a link by one escape. */
+#define LINK256(n)  ANSI_CSI "4;38;5;" #n "m"
+#define LINK256_OFF ANSI_CSI "24;39m"
 #define ROLE_STYLE(open_sequence, close_sequence)                                                  \
     {.open = (open_sequence), .close = (close_sequence)}
 #define COLOR_STYLE(open_sequence) ROLE_STYLE(open_sequence, ANSI_FG_DEFAULT)
@@ -46,6 +49,8 @@ static const struct theme_preset THEME_PRESETS[] = {
             [THEME_CODE_INLINE] = COLOR_STYLE(ANSI_CYAN),
             [THEME_CODE_BLOCK]  = ROLE_STYLE(ANSI_DIM, ANSI_BOLD_OFF),
             [THEME_HEADING]     = ROLE_STYLE(ANSI_BOLD, ANSI_BOLD_OFF),
+            /* Dim would share SGR 22 with bold; underline alone marks links here. */
+            [THEME_LINK]        = ROLE_STYLE(ANSI_UNDERLINE, ANSI_UNDERLINE_OFF),
             [THEME_ADD]         = COLOR_STYLE(ANSI_GREEN),
             [THEME_REMOVE]      = COLOR_STYLE(ANSI_RED),
             [THEME_OK]          = COLOR_STYLE(ANSI_GREEN),
@@ -64,6 +69,7 @@ static const struct theme_preset THEME_PRESETS[] = {
             [THEME_CODE_INLINE] = COLOR_STYLE(FG256(38)),
             [THEME_CODE_BLOCK]  = COLOR_STYLE(FG256(31)),
             [THEME_HEADING]     = ROLE_STYLE(ANSI_BOLD FG256(38), ANSI_BOLD_OFF ANSI_FG_DEFAULT),
+            [THEME_LINK]        = ROLE_STYLE(LINK256(31), LINK256_OFF),
             [THEME_ADD]         = COLOR_STYLE(FG256(34)),
             [THEME_REMOVE]      = COLOR_STYLE(FG256(160)),
             [THEME_OK]          = COLOR_STYLE(FG256(28)),
@@ -82,6 +88,7 @@ static const struct theme_preset THEME_PRESETS[] = {
             [THEME_CODE_INLINE] = COLOR_STYLE(FG256(31)),
             [THEME_CODE_BLOCK]  = COLOR_STYLE(FG256(38)),
             [THEME_HEADING]     = ROLE_STYLE(ANSI_BOLD FG256(31), ANSI_BOLD_OFF ANSI_FG_DEFAULT),
+            [THEME_LINK]        = ROLE_STYLE(LINK256(38), LINK256_OFF),
             [THEME_ADD]         = COLOR_STYLE(FG256(28)),
             [THEME_REMOVE]      = COLOR_STYLE(FG256(124)),
             [THEME_OK]          = COLOR_STYLE(FG256(28)),
@@ -95,6 +102,7 @@ static const struct theme_preset THEME_PRESETS[] = {
             [THEME_CHROME_DIM] = ROLE_STYLE(ANSI_DIM, ANSI_BOLD_OFF),
             [THEME_CODE_BLOCK] = ROLE_STYLE(ANSI_DIM, ANSI_BOLD_OFF),
             [THEME_HEADING]    = ROLE_STYLE(ANSI_BOLD, ANSI_BOLD_OFF),
+            [THEME_LINK]       = ROLE_STYLE(ANSI_UNDERLINE, ANSI_UNDERLINE_OFF),
         },
     },
 };
@@ -116,12 +124,14 @@ static const struct tint TINTS[] = {
             [THEME_CODE_INLINE] = FG256(140),
             [THEME_CODE_BLOCK]  = FG256(97),
             [THEME_HEADING]     = ANSI_BOLD FG256(140),
+            [THEME_LINK]        = LINK256(97),
         },
         .light_opens = {
             [THEME_STANCE]      = FG256(97),
             [THEME_CODE_INLINE] = FG256(97),
             [THEME_CODE_BLOCK]  = FG256(140),
             [THEME_HEADING]     = ANSI_BOLD FG256(97),
+            [THEME_LINK]        = LINK256(140),
         },
     },
     {
@@ -131,12 +141,14 @@ static const struct tint TINTS[] = {
             [THEME_CODE_INLINE] = FG256(168),
             [THEME_CODE_BLOCK]  = FG256(132),
             [THEME_HEADING]     = ANSI_BOLD FG256(168),
+            [THEME_LINK]        = LINK256(132),
         },
         .light_opens = {
             [THEME_STANCE]      = FG256(132),
             [THEME_CODE_INLINE] = FG256(132),
             [THEME_CODE_BLOCK]  = FG256(168),
             [THEME_HEADING]     = ANSI_BOLD FG256(132),
+            [THEME_LINK]        = LINK256(168),
         },
     },
     {
@@ -146,12 +158,14 @@ static const struct tint TINTS[] = {
             [THEME_CODE_INLINE] = FG256(114),
             [THEME_CODE_BLOCK]  = FG256(71),
             [THEME_HEADING]     = ANSI_BOLD FG256(114),
+            [THEME_LINK]        = LINK256(71),
         },
         .light_opens = {
             [THEME_STANCE]      = FG256(71),
             [THEME_CODE_INLINE] = FG256(71),
             [THEME_CODE_BLOCK]  = FG256(114),
             [THEME_HEADING]     = ANSI_BOLD FG256(71),
+            [THEME_LINK]        = LINK256(114),
         },
     },
 };

@@ -9,7 +9,7 @@
 #include "terminal/theme.h"
 
 static const enum theme_role TINTED_ROLES[] = {THEME_STANCE, THEME_CODE_INLINE, THEME_CODE_BLOCK,
-                                               THEME_HEADING};
+                                               THEME_HEADING, THEME_LINK};
 static const enum theme_role FIXED_ROLES[] = {THEME_ACCENT, THEME_CHROME, THEME_CHROME_DIM,
                                               THEME_ADD,    THEME_REMOVE, THEME_OK,
                                               THEME_ERROR,  THEME_WARN};
@@ -37,6 +37,8 @@ static void test_default_is_ansi(void)
     EXPECT_STR_EQ(theme_close(THEME_CODE_BLOCK), ANSI_BOLD_OFF);
     EXPECT_STR_EQ(theme_open(THEME_HEADING), ANSI_BOLD);
     EXPECT_STR_EQ(theme_close(THEME_HEADING), ANSI_BOLD_OFF);
+    EXPECT_STR_EQ(theme_open(THEME_LINK), ANSI_UNDERLINE);
+    EXPECT_STR_EQ(theme_close(THEME_LINK), ANSI_UNDERLINE_OFF);
     EXPECT_STR_EQ(theme_open(THEME_ADD), ANSI_GREEN);
     EXPECT_STR_EQ(theme_open(THEME_REMOVE), ANSI_RED);
     EXPECT_STR_EQ(theme_open(THEME_ERROR), ANSI_RED);
@@ -57,6 +59,11 @@ static void test_indexed_themes(void)
     EXPECT(strstr(theme_close(THEME_HEADING), ANSI_FG_DEFAULT) != NULL);
     EXPECT(strstr(theme_open(THEME_CODE_BLOCK), "38;5;") != NULL);
     EXPECT_STR_EQ(theme_close(THEME_CODE_BLOCK), ANSI_FG_DEFAULT);
+    /* Link open and close are single sequences so table replay can match them whole. */
+    EXPECT(strstr(theme_open(THEME_LINK), "4;38;5;") != NULL);
+    EXPECT(strstr(theme_open(THEME_LINK), "m\x1b") == NULL);
+    EXPECT(strstr(theme_close(THEME_LINK), "24") != NULL);
+    EXPECT(strstr(theme_close(THEME_LINK), "m\x1b") == NULL);
     expect_all_roles_defined();
 
     EXPECT(theme_set("light") == 0);
@@ -70,7 +77,8 @@ static void test_off_theme_preserves_attributes(void)
 {
     EXPECT(theme_set("off") == 0);
     for (int role = 0; role < THEME_ROLE_COUNT; role++) {
-        if (role == THEME_HEADING || role == THEME_CODE_BLOCK || role == THEME_CHROME_DIM)
+        if (role == THEME_HEADING || role == THEME_CODE_BLOCK || role == THEME_CHROME_DIM ||
+            role == THEME_LINK)
             continue;
         EXPECT_STR_EQ(theme_open((enum theme_role)role), "");
         EXPECT_STR_EQ(theme_close((enum theme_role)role), "");
@@ -81,6 +89,8 @@ static void test_off_theme_preserves_attributes(void)
     EXPECT_STR_EQ(theme_close(THEME_CODE_BLOCK), ANSI_BOLD_OFF);
     EXPECT_STR_EQ(theme_open(THEME_CHROME_DIM), ANSI_DIM);
     EXPECT_STR_EQ(theme_close(THEME_CHROME_DIM), ANSI_BOLD_OFF);
+    EXPECT_STR_EQ(theme_open(THEME_LINK), ANSI_UNDERLINE);
+    EXPECT_STR_EQ(theme_close(THEME_LINK), ANSI_UNDERLINE_OFF);
 }
 
 static void test_theme_set_validation(void)

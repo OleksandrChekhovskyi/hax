@@ -38,6 +38,7 @@ struct md_wrap {
     int snap_in_bold;
     int snap_in_italic;
     int snap_in_inline_code;
+    int snap_in_link;
 };
 
 /* Refreshed before each operation so retro-wrap can restore semantic styles. */
@@ -48,6 +49,7 @@ struct md_wrap_context {
     int in_bold;
     int in_italic;
     int in_inline_code;
+    int in_link;
 };
 
 /* Reset for a new stream while retaining allocated buffers. */

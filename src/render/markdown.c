@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "util.h"
 #include "render/markdown_scan.h"
@@ -51,6 +52,7 @@ struct md_renderer {
     int in_inline_code;
     int in_bold;
     int in_italic;
+    int in_link;
 
     /* Disables SGR output without disabling style-state tracking. */
     int styled;
@@ -102,6 +104,7 @@ static struct md_wrap_context wrap_context(const struct md_renderer *m)
         .in_bold = m->in_bold,
         .in_italic = m->in_italic,
         .in_inline_code = m->in_inline_code,
+        .in_link = m->in_link,
     };
 }
 
@@ -188,6 +191,21 @@ static void close_inline_code(struct md_renderer *m)
         emit_raw(m, theme_open(THEME_HEADING));
 }
 
+static void open_link(struct md_renderer *m)
+{
+    emit_raw(m, theme_open(THEME_LINK));
+    m->in_link = 1;
+}
+
+static void close_link(struct md_renderer *m)
+{
+    emit_raw(m, theme_close(THEME_LINK));
+    m->in_link = 0;
+    /* The link closer resets foreground, so restore a colored heading theme. */
+    if (m->in_heading && strcmp(theme_open(THEME_HEADING), ANSI_BOLD) != 0)
+        emit_raw(m, theme_open(THEME_HEADING));
+}
+
 static void open_code_fence(struct md_renderer *m)
 {
     /* Set first so the opening escape bypasses the wrapper's reflow buffer. */
@@ -250,6 +268,8 @@ static void table_replay_raw(void *user, const char *s, size_t n)
         size_t len = q - p;
         const char *code_on = theme_open(THEME_CODE_INLINE);
         const char *code_off = theme_close(THEME_CODE_INLINE);
+        const char *link_on = theme_open(THEME_LINK);
+        const char *link_off = theme_close(THEME_LINK);
         if (len == strlen(ANSI_BOLD) && !memcmp(s + p, ANSI_BOLD, len))
             m->in_bold = 1;
         else if (len == strlen(ANSI_BOLD_OFF) && !memcmp(s + p, ANSI_BOLD_OFF, len))
@@ -262,6 +282,10 @@ static void table_replay_raw(void *user, const char *s, size_t n)
             m->in_inline_code = 1;
         else if (len == strlen(code_off) && !memcmp(s + p, code_off, len))
             m->in_inline_code = 0;
+        else if (len == strlen(link_on) && !memcmp(s + p, link_on, len))
+            m->in_link = 1;
+        else if (len == strlen(link_off) && !memcmp(s + p, link_off, len))
+            m->in_link = 0;
         p = q;
     }
     table_emit_raw(m, s, n);
@@ -656,6 +680,67 @@ static int can_open_emphasis(char left, char right)
     return !is_alnum(left) && !is_space(right);
 }
 
+/* Return the scheme length at s, 0 when absent, or -1 when more input could still complete one.
+ * Schemes are case-insensitive; the URL renders as written. */
+static int link_scheme_length(const char *s, size_t n, int final)
+{
+    static const char *const SCHEMES[] = {"https://", "http://"};
+    int incomplete = 0;
+    for (size_t k = 0; k < sizeof(SCHEMES) / sizeof(SCHEMES[0]); k++) {
+        size_t len = strlen(SCHEMES[k]);
+        if (n >= len) {
+            if (strncasecmp(s, SCHEMES[k], len) == 0)
+                return (int)len;
+        } else if (strncasecmp(s, SCHEMES[k], n) == 0) {
+            incomplete = 1;
+        }
+    }
+    return (incomplete && !final) ? -1 : 0;
+}
+
+static char bracket_opener(char closer)
+{
+    switch (closer) {
+    case ')':
+        return '(';
+    case ']':
+        return '[';
+    case '}':
+        return '{';
+    }
+    return 0;
+}
+
+/* Trim trailing punctuation that conventionally binds to prose rather than the URL. A close
+ * bracket stays only while the URL still contains an unmatched opener, so parenthesized path
+ * segments, IPv6 hosts, and query arrays survive but a wrapping bracket does not. */
+static size_t link_trim_end(const char *s, size_t start, size_t end)
+{
+    while (end > start) {
+        char c = s[end - 1];
+        if (strchr(".,;:!?*_'\"", c)) {
+            end--;
+            continue;
+        }
+        char opener = bracket_opener(c);
+        if (opener) {
+            int depth = 0;
+            for (size_t k = start; k < end - 1; k++) {
+                if (s[k] == opener)
+                    depth++;
+                else if (s[k] == c)
+                    depth--;
+            }
+            if (depth <= 0) {
+                end--;
+                continue;
+            }
+        }
+        break;
+    }
+    return end;
+}
+
 static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t *i, int final)
 {
     char c = w->data[*i];
@@ -865,11 +950,53 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
         }
     }
 
+    /* Style a bare URL as one token: consuming it here keeps emphasis parsing away from its
+     * underscores and stars, and the wrapper receives an unbreakable word. */
+    if (c == 'h' || c == 'H') {
+        char left = *i > 0 ? w->data[*i - 1] : m->prev_byte;
+        if (!is_alnum(left)) {
+            int scheme = link_scheme_length(w->data + *i, remaining, final);
+            if (scheme < 0)
+                return STEP_DEFER;
+            if (scheme > 0) {
+                size_t url_end = *i + (size_t)scheme;
+                /* A backtick is never a legal unencoded URL byte; ending there lets an abutting
+                 * inline-code span open normally. */
+                while (url_end < w->len && !is_space(w->data[url_end]) && w->data[url_end] != '<' &&
+                       w->data[url_end] != '>' && w->data[url_end] != '`')
+                    url_end++;
+                if (url_end >= w->len && !final)
+                    return STEP_DEFER;
+                size_t scheme_end = *i + (size_t)scheme;
+                size_t stop = link_trim_end(w->data, scheme_end, url_end);
+                if (stop == scheme_end) {
+                    /* A scheme with no authority is prose; trimmed bytes reprocess normally. */
+                    emit_text(m, w->data + *i, scheme_end - *i);
+                    *i = scheme_end;
+                    return STEP_ADVANCED;
+                }
+                /* Resolve an owed dash space before the underline opens. */
+                if (m->pending_dash_space) {
+                    m->pending_dash_space = 0;
+                    emit_text(m, " ", 1);
+                }
+                open_link(m);
+                emit_text(m, w->data + *i, stop - *i);
+                close_link(m);
+                *i = stop;
+                return STEP_ADVANCED;
+            }
+        }
+    }
+
     /* Coalesce plain text so the wrapper receives words rather than individual bytes. */
     size_t end = *i + 1;
     while (end < w->len) {
         char d = w->data[end];
         if (d == '\n' || d == '`' || d == '*' || d == '_' || d == GLYPH_EM_DASH[0])
+            break;
+        /* A word-starting 'h' may open a URL; let the link handler judge it. */
+        if ((d == 'h' || d == 'H') && !is_alnum(w->data[end - 1]))
             break;
         end++;
     }
@@ -915,6 +1042,7 @@ void md_reset(struct md_renderer *m, int wrap_width)
     m->in_inline_code = 0;
     m->in_bold = 0;
     m->in_italic = 0;
+    m->in_link = 0;
     m->styled = 1;
     m->cur_line_is_block = 0;
     m->at_blank = 1;
@@ -1039,6 +1167,8 @@ void md_flush(struct md_renderer *m)
     md_process(m, NULL, 0, 1);
 
     /* Never leave terminal styling open at EOF. */
+    if (m->in_link)
+        close_link(m);
     if (m->in_inline_code)
         close_inline_code(m);
     if (m->in_code_fence)

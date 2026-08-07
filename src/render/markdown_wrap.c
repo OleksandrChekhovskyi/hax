@@ -34,6 +34,7 @@ void md_wrap_reset(struct md_wrap *w, int width)
     w->snap_in_bold = 0;
     w->snap_in_italic = 0;
     w->snap_in_inline_code = 0;
+    w->snap_in_link = 0;
 }
 
 void md_wrap_free(struct md_wrap *w)
@@ -51,8 +52,15 @@ void md_wrap_commit_pending(struct md_wrap *w, const struct md_wrap_context *ctx
     if (!w->pending_wrap)
         return;
     w->pending_wrap = 0;
+    /* A link opener may have passed through raw while the wrap was pending; its underline is
+     * visible on blank cells, so suspend it around the newline and indent. */
+    int suspend_link = ctx->styled && ctx->in_link;
+    if (suspend_link)
+        ctx->emit(theme_close(THEME_LINK), strlen(theme_close(THEME_LINK)), 1, ctx->user);
     ctx->emit("\n", 1, 0, ctx->user);
     wrap_emit_indent(ctx, w->indent_cells);
+    if (suspend_link)
+        ctx->emit(theme_open(THEME_LINK), strlen(theme_open(THEME_LINK)), 1, ctx->user);
     buf_reset(&w->row_buf);
     buf_reset(&w->row_meta);
     w->col = w->indent_cells;
@@ -62,6 +70,7 @@ void md_wrap_commit_pending(struct md_wrap *w, const struct md_wrap_context *ctx
     w->snap_in_bold = 0;
     w->snap_in_italic = 0;
     w->snap_in_inline_code = 0;
+    w->snap_in_link = 0;
 }
 
 /* Emit eagerly while shadowing the row and byte kinds for retroactive replay.
@@ -190,9 +199,9 @@ static void wrap_break(struct md_wrap *w, const struct md_wrap_context *ctx)
         ctx->emit(ANSI_ERASE_LINE, sizeof(ANSI_ERASE_LINE) - 1, 1, ctx->user);
     }
     ctx->emit("\n", 1, 0, ctx->user);
-    wrap_emit_indent(ctx, w->indent_cells);
-    /* Eager post-break SGRs changed terminal state; restore the snapshot before
-     * replay. In unstyled mode, emitting a closer would clobber the caller. */
+    /* Eager post-break SGRs changed terminal state; restore the snapshot before replay, and
+     * before the indent so an open underline cannot paint its blank cells. In unstyled mode,
+     * emitting a closer would clobber the caller. */
     if (ctx->styled) {
         if (ctx->in_bold != w->snap_in_bold) {
             const char *e = w->snap_in_bold ? ANSI_BOLD : ANSI_BOLD_OFF;
@@ -207,7 +216,12 @@ static void wrap_break(struct md_wrap *w, const struct md_wrap_context *ctx)
                                                    : theme_close(THEME_CODE_INLINE);
             ctx->emit(e, strlen(e), 1, ctx->user);
         }
+        if (ctx->in_link != w->snap_in_link) {
+            const char *e = w->snap_in_link ? theme_open(THEME_LINK) : theme_close(THEME_LINK);
+            ctx->emit(e, strlen(e), 1, ctx->user);
+        }
     }
+    wrap_emit_indent(ctx, w->indent_cells);
     /* Skip the break-space and replay content with interleaved escapes. */
     size_t shift = (size_t)w->last_break_byte + 1;
     if (shift > w->row_buf.len)
@@ -294,6 +308,7 @@ static void wrap_consume_codepoint(struct md_wrap *w, const struct md_wrap_conte
             w->snap_in_bold = ctx->in_bold;
             w->snap_in_italic = ctx->in_italic;
             w->snap_in_inline_code = ctx->in_inline_code;
+            w->snap_in_link = ctx->in_link;
         }
     } else {
         w->row_has_content = 1;
