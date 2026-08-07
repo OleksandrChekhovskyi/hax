@@ -3,8 +3,9 @@
 
 Usage: scripts/ci_wait.py [-t seconds] [-b branch] [ref]
 
-A green run prints one line; a red one prints the failing jobs and the tail of
-their logs. The exit status carries the whole result, so callers never have to
+A green run prints one line, plus any compiler warnings it built through; a red
+one prints the failing jobs and the tail of their logs. Warnings are reported,
+never fatal: the exit status carries the whole result, so callers never have to
 parse the output:
 
 - 0 green
@@ -44,14 +45,21 @@ DISCOVERY_SECONDS: Final = 90.0
 DEFAULT_TIMEOUT_SECONDS: Final = 1800
 LOG_TAIL_LINES: Final = 40
 RUN_LIST_LIMIT: Final = 30
+WARNING_REPORT_LIMIT: Final = 12
 # A wait may span half an hour; transient gh or network trouble must not end it.
 MAX_QUERY_FAILURES: Final = 3
 
-# --log-failed prefixes every line with the job name, the step name, and a timestamp, and renders
-# escape sequences in caret notation, as two literal characters rather than an ESC byte. Failing
-# job names are reported separately, so drop the prefix rather than spend the width on it.
-LOG_PREFIX_RE: Final = re.compile(r"^[^\t]*\t[^\t]*\t\ufeff?(?:\d{4}-\d\d-\d\dT[\d:.]+Z )?")
+# gh's log output prefixes every line with the job name, the step name, and a timestamp, and
+# renders escape sequences in caret notation, as two literal characters rather than an ESC byte.
+LOG_LINE_RE: Final = re.compile(
+    r"^(?P<job>[^\t]*)\t[^\t]*\t\ufeff?(?:\d{4}-\d\d-\d\dT[\d:.]+Z )?(?P<text>.*)$"
+)
 CARET_ESCAPE_RE: Final = re.compile(r"\^\[\[[0-9;]*[mK]")
+
+# A compiler diagnostic, recognised by its source position: the word alone would drag in the
+# package-manager and checkout chatter that fills a green run's logs. The cost is that
+# positionless linker and driver warnings go unreported until they turn into failures.
+WARNING_RE: Final = re.compile(r"^(?P<where>\S+:\d+(?::\d+)?): warning: (?P<text>.+)$")
 
 
 class Exit(enum.IntEnum):
@@ -149,27 +157,47 @@ class Progress:
     """Status output for a wait that may last half an hour.
 
     A terminal gets a status line redrawn in place; anything else gets one line per state change,
-    keeping a long wait down to a few lines of scrollback or agent context.
+    keeping a long wait down to a few lines of scrollback or agent context. The elapsed figure the
+    status line carries is the wait's own clock, so the deadlines are measured against it too.
+
+    Redrawn status is left unterminated, so the line is owned for a scope: however the wait ends,
+    Ctrl-C included, it is erased on exit before a report or a shell prompt can land mid-line.
     """
 
     def __init__(self, label: str) -> None:
         self.label = label
         self.interactive = sys.stdout.isatty()
         self.last_status: str | None = None
+        self.line_pending = False
+        self.started = time.monotonic()
 
-    def show(self, status: str, elapsed: float, detail: str = "") -> None:
+    def __enter__(self) -> Progress:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.clear()
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+    def show(self, status: str, detail: str = "") -> None:
         if self.interactive:
             line = f"CI {self.label} · {status}"
             if detail:
                 line += f" · {detail}"
-            print(f"\r\033[K{line} · {format_elapsed(elapsed)}", end="", flush=True)
+            print(f"\r\033[K{line} · {format_elapsed(self.elapsed)}", end="", flush=True)
+            self.line_pending = True
         elif status != self.last_status:
             print(f"CI {self.label}: {status}", flush=True)
         self.last_status = status
 
     def clear(self) -> None:
-        if self.interactive:
+        if self.line_pending:
+            # Erasing the line takes the terminal's own "^C" echo with it, leaving the cursor
+            # where a prompt can start; a newline would keep both.
             print("\r\033[K", end="", flush=True)
+            self.line_pending = False
 
 
 class Gh:
@@ -261,6 +289,21 @@ def view_run(gh: Gh, run_id: str) -> Snapshot | None:
     )
 
 
+class LogLine(NamedTuple):
+    job: str
+    text: str
+
+
+def parse_log(log: str) -> list[LogLine]:
+    """Split gh log output into the job each line came from and the line the job printed."""
+    lines: list[LogLine] = []
+    for raw in log.splitlines():
+        match = LOG_LINE_RE.match(raw)
+        job, text = (match.group("job"), match.group("text")) if match else ("", raw)
+        lines.append(LogLine(job, CARET_ESCAPE_RE.sub("", text)))
+    return lines
+
+
 def report_failure(gh: Gh, run_id: str) -> None:
     data = gh.json("run", "view", run_id, "-R", gh.repo.spec, "--json", "jobs")
     if isinstance(data, dict):
@@ -275,10 +318,47 @@ def report_failure(gh: Gh, run_id: str) -> None:
     log = gh.run("run", "view", run_id, "-R", gh.repo.spec, "--log-failed")
     if not log:
         return
-    tail = log.splitlines()[-LOG_TAIL_LINES:]
+    # The failing jobs are named above; a per-line prefix would only spend width.
+    tail = parse_log(log)[-LOG_TAIL_LINES:]
     print(f"--- last {LOG_TAIL_LINES} log lines ---", file=sys.stderr)
     for line in tail:
-        print(CARET_ESCAPE_RE.sub("", LOG_PREFIX_RE.sub("", line)), file=sys.stderr)
+        print(line.text, file=sys.stderr)
+
+
+def collect_warnings(log: str) -> dict[str, list[str]]:
+    """Compiler warnings in the log, each mapped to the jobs that emitted it.
+
+    A warning in shared code repeats across the matrix, so the jobs are gathered per warning
+    rather than the warnings reported once per job.
+    """
+    warnings: dict[str, list[str]] = {}
+    for line in parse_log(log):
+        match = WARNING_RE.match(line.text)
+        if not match:
+            continue
+        jobs = warnings.setdefault(f"{match.group('where')}: {match.group('text')}", [])
+        if line.job and line.job not in jobs:
+            jobs.append(line.job)
+    return warnings
+
+
+def report_warnings(gh: Gh, run_id: str) -> None:
+    """Note the warnings a green run compiled through, which nothing else would report."""
+    log = gh.run("run", "view", run_id, "-R", gh.repo.spec, "--log")
+    if not log:
+        return
+    warnings = collect_warnings(log)
+    if not warnings:
+        return
+    count = len(warnings)
+    header = paint(f"! {count} warning{'' if count == 1 else 's'}", ANSI_YELLOW, sys.stderr)
+    print(header, file=sys.stderr)
+    for warning, jobs in list(warnings.items())[:WARNING_REPORT_LIMIT]:
+        print(f"  {warning}", file=sys.stderr)
+        if jobs:
+            print(f"    in {', '.join(sorted(jobs))}", file=sys.stderr)
+    if count > WARNING_REPORT_LIMIT:
+        print(f"  ... and {count - WARNING_REPORT_LIMIT} more", file=sys.stderr)
 
 
 def whole_seconds(value: str) -> int:
@@ -310,6 +390,72 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def discover_run(
+    gh: Gh, progress: Progress, sha: str, short_sha: str, branch: str | None, deadline: float
+) -> str | Exit:
+    """Poll until the forge registers a run for the commit.
+
+    Returns the run id, or the status the whole wait ends on when no run is coming.
+    """
+    asked_whether_pushed = False
+    while True:
+        run_id = find_run_id(gh, sha, branch)
+        if run_id is not None:
+            return run_id
+
+        # A commit the forge has never seen can never gather a run, so spending the discovery
+        # window on one only delays the answer. Ask once, on the first miss.
+        if not asked_whether_pushed:
+            asked_whether_pushed = True
+            if commit_pushed(sha, gh.repo) is False:
+                progress.clear()
+                print(f"error: {short_sha} is not on the remote; push it first", file=sys.stderr)
+                return Exit.NO_RUN
+
+        if progress.elapsed >= deadline:
+            progress.clear()
+            branch_note = f" on {branch}" if branch else ""
+            prefix = paint("error:", ANSI_RED, sys.stderr)
+            print(f"{prefix} no CI run for {short_sha}{branch_note}", file=sys.stderr)
+            if repo_is_fork(gh):
+                print(
+                    "a pull request's checks run in the upstream repository, not this fork; "
+                    "try: gh pr checks",
+                    file=sys.stderr,
+                )
+            return Exit.NO_RUN
+
+        progress.show("no run yet")
+        time.sleep(POLL_SECONDS)
+
+
+def await_completion(
+    gh: Gh, progress: Progress, run_id: str, short_sha: str, timeout: float
+) -> Snapshot | Exit:
+    """Poll the run until it completes.
+
+    Returns the completed snapshot, or the status the whole wait ends on when the timeout
+    overtakes the run.
+    """
+    while True:
+        snapshot = view_run(gh, run_id)
+        if snapshot is None:
+            time.sleep(POLL_SECONDS)
+            continue
+        if snapshot.status == "completed":
+            return snapshot
+
+        status = "running" if snapshot.status == "in_progress" else snapshot.status
+        progress.show(status, f"{snapshot.jobs_done}/{snapshot.jobs_total} jobs")
+        if progress.elapsed >= timeout:
+            progress.clear()
+            verdict = paint(f"! CI {short_sha}: still running", ANSI_YELLOW, sys.stderr)
+            waited = format_elapsed(progress.elapsed)
+            print(f"{verdict} after {waited} · {snapshot.url}", file=sys.stderr)
+            return Exit.TIMEOUT
+        time.sleep(POLL_SECONDS)
+
+
 def wait_for_run(sha: str, branch: str | None, timeout: float, repo: Repo) -> Exit:
     """Wait for the run covering the commit and report its outcome to the terminal.
 
@@ -318,73 +464,26 @@ def wait_for_run(sha: str, branch: str | None, timeout: float, repo: Repo) -> Ex
     resolve the repository from.
     """
     short_sha = git("rev-parse", "--short", sha) or sha[:7]
-    branch_note = f" on {branch}" if branch else ""
 
-    progress = Progress(short_sha)
-    gh = Gh(progress, repo)
-    started = time.monotonic()
-    discovery_deadline = min(DISCOVERY_SECONDS, timeout)
-    run_id: str | None = None
-    asked_whether_pushed = False
+    with Progress(short_sha) as progress:
+        gh = Gh(progress, repo)
+        run_id = discover_run(
+            gh, progress, sha, short_sha, branch, min(DISCOVERY_SECONDS, timeout)
+        )
+        if isinstance(run_id, Exit):
+            return run_id
+        snapshot = await_completion(gh, progress, run_id, short_sha, timeout)
+        if isinstance(snapshot, Exit):
+            return snapshot
+        elapsed = progress.elapsed
 
-    while True:
-        elapsed = time.monotonic() - started
-
-        if run_id is None:
-            run_id = find_run_id(gh, sha, branch)
-            if run_id is None:
-                # A commit the forge has never seen can never gather a run, so spending the
-                # discovery window on one only delays the answer. Ask once, on the first miss.
-                if not asked_whether_pushed:
-                    asked_whether_pushed = True
-                    if commit_pushed(sha, repo) is False:
-                        progress.clear()
-                        print(
-                            f"error: {short_sha} is not on the remote; push it first",
-                            file=sys.stderr,
-                        )
-                        return Exit.NO_RUN
-                if elapsed >= discovery_deadline:
-                    progress.clear()
-                    prefix = paint("error:", ANSI_RED, sys.stderr)
-                    print(f"{prefix} no CI run for {short_sha}{branch_note}", file=sys.stderr)
-                    if repo_is_fork(gh):
-                        print(
-                            "a pull request's checks run in the upstream repository, not this "
-                            "fork; try: gh pr checks",
-                            file=sys.stderr,
-                        )
-                    return Exit.NO_RUN
-                progress.show("no run yet", elapsed)
-                time.sleep(POLL_SECONDS)
-                continue
-
-        snapshot = view_run(gh, run_id)
-        if snapshot is None:
-            time.sleep(POLL_SECONDS)
-            continue
-        if snapshot.status == "completed":
-            break
-
-        status = "running" if snapshot.status == "in_progress" else snapshot.status
-        progress.show(status, elapsed, f"{snapshot.jobs_done}/{snapshot.jobs_total} jobs")
-        if elapsed >= timeout:
-            progress.clear()
-            verdict = paint(f"! CI {short_sha}: still running", ANSI_YELLOW, sys.stderr)
-            print(
-                f"{verdict} after {format_elapsed(elapsed)} · {snapshot.url}",
-                file=sys.stderr,
-            )
-            return Exit.TIMEOUT
-        time.sleep(POLL_SECONDS)
-
-    progress.clear()
     if snapshot.conclusion == "success":
         verdict = paint("✓ CI green", ANSI_GREEN, sys.stdout)
         print(
             f"{verdict}: {short_sha} · {snapshot.jobs_total} jobs · "
             f"waited {format_elapsed(elapsed)}"
         )
+        report_warnings(gh, run_id)
         return Exit.GREEN
     if snapshot.conclusion == "cancelled":
         verdict = paint(f"! CI {short_sha}: cancelled", ANSI_YELLOW, sys.stderr)
