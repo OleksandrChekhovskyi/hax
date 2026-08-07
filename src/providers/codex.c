@@ -13,6 +13,7 @@
 #include "model_meta.h"
 #include "provider.h"
 #include "util.h"
+#include "version.h"
 #include "providers/codex_auth.h"
 #include "providers/codex_settings.h"
 #include "providers/responses_events.h"
@@ -38,7 +39,7 @@
 
 /* Both identities are required for models that the backend routes only to the official CLI. */
 #define CODEX_ORIGINATOR "originator: codex_cli_rs"
-#define CODEX_USER_AGENT "User-Agent: codex_cli_rs/0.144.1 hax/0.1"
+#define CODEX_USER_AGENT "User-Agent: codex_cli_rs/0.144.1 hax/" HAX_VERSION
 
 /* Only the codex CLI can refresh the token; hax re-reads auth.json on the next request. */
 #define CODEX_TOKEN_EXPIRED "codex token expired — run `codex` once to refresh, then retry"

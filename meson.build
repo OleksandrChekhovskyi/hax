@@ -31,6 +31,16 @@ libcurl = dependency('libcurl', include_type: 'system')
 jansson = dependency('jansson', include_type: 'system')
 threads = dependency('threads')
 
+# The version baked into the binary. `--always` keeps pre-tag checkouts
+# building (bare commit hash); the fallback covers builds without git, such as
+# dist tarballs, where it must match the tag scheme's leading "v".
+version_h = vcs_tag(
+    command: ['git', 'describe', '--tags', '--always', '--dirty=+'],
+    input: 'src/version.h.in',
+    output: 'version.h',
+    fallback: 'v' + meson.project_version(),
+)
+
 # Production sources, grouped by subdirectory and sorted within each group.
 # `main.c` is deliberately excluded: it lives only in the `hax` executable so
 # that test binaries (which bring their own `main`) can link the same objects
@@ -156,6 +166,7 @@ sources = files(
 # build hax` stays unambiguous.
 hax_lib = static_library('hax_lib',
     sources,
+    version_h,
     dependencies: [libcurl, jansson, threads],
 )
 

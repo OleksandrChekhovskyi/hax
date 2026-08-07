@@ -1,0 +1,10 @@
+/* SPDX-License-Identifier: MIT */
+#ifndef HAX_VERSION_H
+#define HAX_VERSION_H
+
+/* Filled in by meson's vcs_tag() at build time: `git describe` output in a
+ * checkout (exact tag on releases, tag-distance-hash on dev builds, "+" when
+ * dirty), the project version when building without git. */
+#define HAX_VERSION "@VCS_TAG@"
+
+#endif

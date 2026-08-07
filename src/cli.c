@@ -12,6 +12,7 @@
 #include "session.h"
 #include "session_picker.h"
 #include "util.h"
+#include "version.h"
 #include "terminal/ansi.h"
 #include "terminal/interrupt.h"
 #include "terminal/theme.h"
@@ -44,6 +45,7 @@ static const struct help_option {
     {"--preset=NAME", "Apply the named preset — a presets.NAME selection from the config\n"
                       "file. Explicit selection flags win over the preset's values."},
     {"-h, --help", "Show this help and exit."},
+    {"-v, --version", "Show version and exit."},
 };
 
 void cli_print_help(void)
@@ -53,9 +55,10 @@ void cli_print_help(void)
     const char *bold = output_is_tty ? ANSI_BOLD : "";
     const char *reset = output_is_tty ? ANSI_RESET : "";
 
+    printf("%shax %s%s — a minimalist coding assistant in your terminal\n\n", bold, HAX_VERSION,
+           reset);
     printf("%susage:%s hax [OPTIONS] [PROMPT...]\n\n", bold, reset);
-    printf("A minimalist coding assistant in your terminal.\n\n"
-           "With no arguments, runs an interactive REPL.\n\n");
+    printf("With no arguments, runs an interactive REPL.\n\n");
     printf("%soptions%s\n", bold, reset);
 
     size_t flag_width = 0;
@@ -113,6 +116,7 @@ enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *optio
     };
     static const struct option long_options[] = {
         {"help", no_argument, NULL, 'h'},
+        {"version", no_argument, NULL, 'v'},
         {"print", no_argument, NULL, 'p'},
         {"continue", no_argument, NULL, 'c'},
         {"resume", optional_argument, NULL, OPT_RESUME},
@@ -132,10 +136,13 @@ enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *optio
     int saw_continue = 0;
     int saw_resume = 0;
     int option;
-    while ((option = getopt_long(argc, argv, "hpc", long_options, NULL)) != -1) {
+    while ((option = getopt_long(argc, argv, "hpcv", long_options, NULL)) != -1) {
         switch (option) {
         case 'h':
             cli_print_help();
+            return CLI_PARSE_EXIT;
+        case 'v':
+            printf("hax %s\n", HAX_VERSION);
             return CLI_PARSE_EXIT;
         case 'p':
             options->one_shot = 1;

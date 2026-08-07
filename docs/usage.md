@@ -26,6 +26,7 @@ Options:
 | `--effort=LEVEL` | Select reasoning effort for this run. Same precedence as `--provider`. |
 | `--preset=NAME` | Apply the `presets.NAME` selection from config (see [configuration.md](./configuration.md)). Explicit flags above still win. |
 | `-h`, `--help` | Show CLI help. |
+| `-v`, `--version` | Show version and exit. |
 
 In `-p` mode, positional arguments are joined with spaces. If no positional arguments are
 present and stdin is not a terminal, stdin becomes the prompt. A bare `-p` on a terminal is an

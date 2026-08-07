@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # Full history so `git describe` (baked into the binary via version.h)
+      # sees the tag; a shallow checkout has no tags.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Check tag matches project version
+        run: |
+          grep -Fq "version: '${GITHUB_REF_NAME#v}'," meson.build
+      - name: Install dependencies
+        run: scripts/install_deps.sh
+      # `meson dist` archives the sources, then builds and runs the test suite
+      # against the unpacked tarball — the artifact is validated as shipped.
+      - name: Build and test source tarball
+        run: |
+          meson setup build
+          meson dist -C build
+      - name: Extract release notes
+        run: scripts/release_notes.py "${GITHUB_REF_NAME#v}" > notes.md
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --title "hax $GITHUB_REF_NAME" \
+              --notes-file notes.md build/meson-dist/*

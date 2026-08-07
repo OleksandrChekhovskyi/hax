@@ -19,6 +19,7 @@
 #include "provider.h"
 #include "session_prune.h"
 #include "util.h"
+#include "version.h"
 #include "system/fs.h"
 #include "system/git.h"
 #include "text/width.h"
@@ -606,6 +607,7 @@ static int write_header(struct session_log *log)
     json_t *header = json_object();
     json_object_set_new(header, "type", json_string("session"));
     json_object_set_new(header, "version", json_integer(SESSION_FORMAT_VERSION));
+    json_object_set_new(header, "hax_version", json_string(HAX_VERSION));
     json_set_optional_string(header, "id", log->id);
     json_set_optional_string(header, "timestamp", log->timestamp);
     json_set_optional_string(header, "cwd", log->cwd);

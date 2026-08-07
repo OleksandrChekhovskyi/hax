@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "cli.h"
 #include "harness.h"
@@ -84,6 +85,35 @@ static void test_parse_rejects_missing_values_and_interactive_prompt(void)
 
     char *interactive_prompt[] = {"hax", "hello", NULL};
     EXPECT(cli_parse(2, interactive_prompt, &options) == CLI_PARSE_ERROR);
+}
+
+static void test_parse_version_prints_and_exits(void)
+{
+    const char *flags[] = {"--version", "-v"};
+    for (size_t i = 0; i < sizeof(flags) / sizeof(*flags); i++) {
+        fflush(stdout);
+        int saved = dup(STDOUT_FILENO);
+        EXPECT(saved >= 0);
+        FILE *tmp = tmpfile();
+        EXPECT(tmp != NULL);
+        EXPECT(dup2(fileno(tmp), STDOUT_FILENO) >= 0);
+
+        char *argv[] = {"hax", (char *)flags[i], NULL};
+        struct cli_options options;
+        enum cli_parse_result result = cli_parse(2, argv, &options);
+
+        fflush(stdout);
+        EXPECT(dup2(saved, STDOUT_FILENO) >= 0);
+        close(saved);
+        EXPECT(result == CLI_PARSE_EXIT);
+
+        EXPECT(fseek(tmp, 0, SEEK_SET) == 0);
+        char line[256] = "";
+        EXPECT(fgets(line, sizeof(line), tmp) != NULL);
+        fclose(tmp);
+        EXPECT(strncmp(line, "hax ", 4) == 0);
+        EXPECT(strlen(line) > 5 && line[strlen(line) - 1] == '\n');
+    }
 }
 
 static FILE *prompt_stream(const char *text)
@@ -245,6 +275,7 @@ int main(void)
     test_parse_resume_modes();
     test_parse_rejects_incompatible_resume_options();
     test_parse_rejects_missing_values_and_interactive_prompt();
+    test_parse_version_prints_and_exits();
     test_read_prompt_from_stream();
     test_read_prompt_rejects_missing_or_empty_input();
     test_resolve_missing_session();

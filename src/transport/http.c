@@ -14,9 +14,12 @@
 
 #include "trace.h"
 #include "util.h"
+#include "version.h"
 #include "transport/sse.h"
 
 #define ERROR_BODY_MAX_BYTES 4096
+/* Default identity; a User-Agent entry in the caller's headers overrides it. */
+#define HTTP_USER_AGENT "hax/" HAX_VERSION
 /* Bound server-requested waits so an interactive request remains responsive. */
 #define RETRY_AFTER_MAX_MS (2L * 60L * 1000L)
 
@@ -232,6 +235,7 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, HTTP_USER_AGENT);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body_len);
@@ -336,6 +340,7 @@ static int buffered_request(const char *url, const char *const *headers, const c
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, HTTP_USER_AGENT);
     if (header_list)
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
     if (body) {
