@@ -731,6 +731,45 @@ static void test_read_image_malformed_not_attached(void)
     refuse_incomplete(TINY_PNG, sizeof(TINY_PNG) - 12);
 }
 
+static void expect_collapsed_path(const char *path, const char *expected)
+{
+    char *shown = TOOL_READ.display.collapse_argument(path);
+    EXPECT_STR_EQ(shown, expected);
+    free(shown);
+}
+
+static void test_read_collapse_ordinary_names_stay_basenames(void)
+{
+    expect_collapsed_path("src/render/markdown.c", "markdown.c");
+    expect_collapsed_path("agent.c", "agent.c");
+    expect_collapsed_path("/home/user/project/src/Turn.c", "Turn.c");
+    expect_collapsed_path(NULL, "?");
+    expect_collapsed_path("", "?");
+    expect_collapsed_path("src/", "src/");
+}
+
+static void test_read_collapse_generic_names_keep_parent(void)
+{
+    expect_collapsed_path("skills/commit-helper/SKILL.md", ".../commit-helper/SKILL.md");
+    expect_collapsed_path("docs/guides/README.md", ".../guides/README.md");
+    expect_collapsed_path("subprojects/jansson/meson.build", ".../jansson/meson.build");
+    expect_collapsed_path("a/pkg/__init__.py", ".../pkg/__init__.py");
+    expect_collapsed_path("src/components/Button/index.tsx", ".../Button/index.tsx");
+    expect_collapsed_path("project/cmd/serve/main.go", ".../serve/main.go");
+    expect_collapsed_path("app/src/main/AndroidManifest.xml", ".../main/AndroidManifest.xml");
+    expect_collapsed_path("deep/tree/gnumakefile", ".../tree/gnumakefile");
+    expect_collapsed_path("services/api/.env", ".../api/.env");
+    expect_collapsed_path("/home/user/.claude/skills/commit/SKILL.md", ".../commit/SKILL.md");
+}
+
+static void test_read_collapse_short_paths_shown_whole(void)
+{
+    expect_collapsed_path("tests/meson.build", "tests/meson.build");
+    expect_collapsed_path("README.md", "README.md");
+    expect_collapsed_path("/etc/Makefile", "/etc/Makefile");
+    expect_collapsed_path("a//SKILL.md", "SKILL.md");
+}
+
 int main(void)
 {
     /* The byte cap is the env-tunable knob; pin it to 256K so the tests
@@ -764,6 +803,9 @@ int main(void)
     test_read_past_eof_counts_trailing_line_in_skip_mode();
     test_read_refuses_special_file();
     test_read_display_extra();
+    test_read_collapse_ordinary_names_stay_basenames();
+    test_read_collapse_generic_names_keep_parent();
+    test_read_collapse_short_paths_shown_whole();
     test_read_image_attached();
     test_read_image_model_without_vision();
     test_read_image_oversize_quotes_path();

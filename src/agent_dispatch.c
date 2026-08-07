@@ -33,17 +33,6 @@ static int tool_tag_cells(const char *name)
     return (int)display_cells(name) + 3; /* "[name] " */
 }
 
-/* Trailing slashes retain the full path because their basename is empty. */
-static const char *basename_view(const char *path)
-{
-    if (!path || !*path)
-        return "?";
-    const char *slash = strrchr(path, '/');
-    if (!slash || slash[1] == '\0')
-        return path;
-    return slash + 1;
-}
-
 enum tool_preview_mode tool_call_preview_mode(const struct item *call)
 {
     const struct tool *tool = call && call->tool_name ? agent_find_tool(call->tool_name) : NULL;
@@ -195,17 +184,18 @@ static int append_collapsed_argument(struct disp *disp, const char *argument)
     return 2 + (int)display_cells(argument);
 }
 
-/* Collapsed rows are single-line; read paths use basenames so coalesced calls scan as a list. */
+/* Collapsed rows are single-line; tools may rewrite the argument so coalesced calls scan
+ * as a list. */
 static char *collapsed_argument(const struct tool *tool, const struct item *call)
 {
     if (!tool || !tool->display.arg_name || !call->tool_arguments_json)
         return xstrdup("");
 
     char *argument = display_argument(tool, call->tool_arguments_json);
-    if (strcmp(tool->def.name, "read") == 0) {
-        char *basename = xstrdup(basename_view(argument));
+    if (tool->display.collapse_argument) {
+        char *collapsed = tool->display.collapse_argument(argument);
         free(argument);
-        argument = basename;
+        argument = collapsed;
     }
     if (!argument)
         return xstrdup("");

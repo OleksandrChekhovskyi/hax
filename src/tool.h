@@ -49,6 +49,9 @@ struct tool_display {
     char *(*format_extra)(const char *args_json);
     /* Optional per-call override of preview_mode. */
     enum tool_preview_mode (*select_preview)(const char *args_json);
+    /* Optional allocated rewrite of the displayed argument for collapsed rows; `argument` is
+     * the resolved display argument (NULL when the call had none). The caller frees it. */
+    char *(*collapse_argument)(const char *argument);
 };
 
 struct tool {

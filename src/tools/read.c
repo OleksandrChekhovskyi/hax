@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <jansson.h>
@@ -519,6 +520,86 @@ static char *format_line_range(const char *args_json)
     return range;
 }
 
+/* Trailing slashes retain the full path because their basename is empty. */
+static const char *basename_view(const char *path)
+{
+    if (!path || !*path)
+        return "?";
+    const char *slash = strrchr(path, '/');
+    if (!slash || slash[1] == '\0')
+        return path;
+    return slash + 1;
+}
+
+/* Filenames that recur across directories by convention, so the basename alone does not
+ * identify the file. All-uppercase stems (README, LICENSE, SKILL, ...) and the stems "index"
+ * and "main" are matched by rule rather than listed. */
+/* clang-format off */
+static const char *const GENERIC_BASENAMES[] = {
+    "AndroidManifest.xml", "build.gradle", "build.gradle.kts", "build.rs", "build.zig",
+    "Cargo.toml", "Chart.yaml", "CMakeLists.txt", "compose.yaml", "compose.yml",
+    "composer.json", "configure.ac", "conftest.py", "default.nix", "docker-compose.yaml",
+    "docker-compose.yml", "Dockerfile", "flake.nix", "Gemfile", "GNUmakefile", "go.mod",
+    "go.sum", "__init__.py", "Jenkinsfile", "justfile", "Kbuild", "Kconfig",
+    "kustomization.yaml", "lib.rs", "__main__.py", "Makefile", "manifest.json", "meson.build",
+    "mix.exs", "mod.rs", "outputs.tf", "Package.swift", "package.json", "Podfile", "pom.xml",
+    "project.pbxproj", "pyproject.toml", "Rakefile", "requirements.txt", "settings.gradle",
+    "settings.gradle.kts", "setup.py", "shell.nix", "tsconfig.json", "values.yaml",
+    "variables.tf", "versions.tf",
+};
+/* clang-format on */
+
+static int stem_is_all_caps(const char *name)
+{
+    int has_upper = 0;
+    for (const char *c = name; *c && *c != '.'; c++) {
+        if (islower((unsigned char)*c))
+            return 0;
+        if (isupper((unsigned char)*c))
+            has_upper = 1;
+    }
+    return has_upper;
+}
+
+static int stem_equals(const char *name, const char *stem)
+{
+    size_t stem_len = strlen(stem);
+    return strncasecmp(name, stem, stem_len) == 0 &&
+           (name[stem_len] == '\0' || name[stem_len] == '.');
+}
+
+static int basename_is_generic(const char *name)
+{
+    if (name[0] == '.' || stem_is_all_caps(name) || stem_equals(name, "index") ||
+        stem_equals(name, "main"))
+        return 1;
+    for (size_t i = 0; i < sizeof(GENERIC_BASENAMES) / sizeof(GENERIC_BASENAMES[0]); i++)
+        if (strcasecmp(name, GENERIC_BASENAMES[i]) == 0)
+            return 1;
+    return 0;
+}
+
+/* Collapsed rows show the basename alone, except for convention names whose identity lives
+ * in the directory: those keep one parent component. */
+static char *collapse_path(const char *path)
+{
+    const char *base = basename_view(path);
+    if (base == path || !basename_is_generic(base))
+        return xstrdup(base);
+
+    const char *slash = base - 1;
+    const char *parent = slash;
+    while (parent > path && parent[-1] != '/')
+        parent--;
+    if (parent == slash)
+        return xstrdup(base);
+
+    /* An untouched or root-anchored prefix is complete; anything shorter was elided. */
+    if (parent == path || (parent == path + 1 && path[0] == '/'))
+        return xstrdup(path);
+    return xasprintf(".../%s", parent);
+}
+
 static const char READ_DESCRIPTION[] =
     "Read a file from disk and return its contents in `cat -n` style: each line is prefixed with "
     "its 1-indexed line number, a " READ_LINE_DELIM " arrow, then the line's content. The prefix "
@@ -549,5 +630,6 @@ const struct tool TOOL_READ = {
     .preprocess_args = tool_relativize_path_args,
     .display = {.arg_name = "path",
                 .format_extra = format_line_range,
-                .preview_mode = TOOL_PREVIEW_COLLAPSED},
+                .preview_mode = TOOL_PREVIEW_COLLAPSED,
+                .collapse_argument = collapse_path},
 };
