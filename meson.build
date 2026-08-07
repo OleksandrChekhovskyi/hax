@@ -110,7 +110,6 @@ sources = files(
     'src/render/tool_render.c',
 
     'src/system/bg_job.c',
-    'src/system/diff.c',
     'src/system/fs.c',
     'src/system/git.c',
     'src/system/keepawake.c',
@@ -132,6 +131,7 @@ sources = files(
     'src/terminal/width.c',
 
     'src/text/base64.c',
+    'src/text/diff.c',
     'src/text/utf8.c',
     'src/text/utf8_sanitize.c',
     'src/text/width.c',

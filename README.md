@@ -33,8 +33,7 @@ Run `scripts/install_deps.sh` to install them, or install by hand:
 sudo apt install build-essential libcurl4-openssl-dev libjansson-dev meson ninja-build pkg-config
 
 # Arch Linux
-sudo pacman -S --needed gcc curl jansson meson ninja pkgconf diffutils
-# diffutils is a runtime dependency (hax shells out to diff for edit/write output)
+sudo pacman -S --needed gcc curl jansson meson ninja pkgconf
 
 # macOS (Homebrew)
 brew install jansson meson ninja pkg-config

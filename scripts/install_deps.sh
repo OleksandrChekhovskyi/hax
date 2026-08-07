@@ -56,7 +56,7 @@ case "$ID ${ID_LIKE:-}" in
         ${lint:+clang-format clang-tidy}
     ;;
 *arch*)
-    arch_pkgs="gcc make curl jansson meson ninja pkgconf diffutils python ${lint:+clang}"
+    arch_pkgs="gcc make curl jansson meson ninja pkgconf python ${lint:+clang}"
     # Disposable containers need the full sync-and-upgrade (a bare -Sy install risks a
     # partial upgrade), but only on explicit opt-in from the CI workflow: `CI` alone also
     # describes self-hosted runners on real machines. Elsewhere only the listed packages
@@ -78,7 +78,7 @@ case "$ID ${ID_LIKE:-}" in
         exit 1
     fi
     as_root apk add --no-cache \
-        build-base meson samurai curl-dev jansson-dev python3 diffutils
+        build-base meson samurai curl-dev jansson-dev python3
     ;;
 *)
     printf "error: unsupported platform '%s'; see README.md for dependencies\n" "$ID" >&2

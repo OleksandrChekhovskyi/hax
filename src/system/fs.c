@@ -12,8 +12,8 @@
 #include <sys/stat.h>
 
 #include "util.h"
-#include "system/diff.h"
 #include "system/path.h"
+#include "text/diff.h"
 
 int fs_mkdir_p(const char *path)
 {
@@ -171,7 +171,7 @@ static int inspect_write_target(const char *path, struct write_target *target, c
 }
 
 static char *make_write_diff(const char *path, const char *old_content, size_t old_content_len,
-                             const char *content, size_t content_len, int existed, char **error)
+                             const char *content, size_t content_len, int existed)
 {
     int absolute_path = path[0] == '/';
     char *old_label = !existed        ? xstrdup("/dev/null")
@@ -180,10 +180,6 @@ static char *make_write_diff(const char *path, const char *old_content, size_t o
     char *new_label = absolute_path ? xstrdup(path) : xasprintf("b/%s", path);
     char *diff = make_unified_diff(existed ? old_content : "", existed ? old_content_len : 0,
                                    content, content_len, old_label, new_label);
-    if (!diff) {
-        *error = xstrdup("diff(1) failed");
-        goto out;
-    }
 
     /* An empty new file still needs a visible creation result. */
     if (!existed && !*diff) {
@@ -191,7 +187,6 @@ static char *make_write_diff(const char *path, const char *old_content, size_t o
         diff = xasprintf("--- /dev/null\n+++ %s\n", new_label);
     }
 
-out:
     free(old_label);
     free(new_label);
     return diff;
@@ -262,9 +257,7 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
         goto out;
 
     diff = make_write_diff(path, target.old_content, target.old_content_len, content, content_len,
-                           target.existed, error);
-    if (!diff)
-        goto out;
+                           target.existed);
 
     /* Preserve inode identity, metadata, and hard links when the content is unchanged. */
     if (target.existed && !*diff)

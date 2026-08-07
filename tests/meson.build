@@ -71,7 +71,6 @@ test_sources = [
     'render/test_tool_render.c',
 
     'system/test_bg_job.c',
-    'system/test_diff.c',
     'system/test_fs.c',
     'system/test_git.c',
     'system/test_keepawake.c',
@@ -90,6 +89,7 @@ test_sources = [
     'terminal/test_width.c',
 
     'text/test_base64.c',
+    'text/test_diff.c',
     'text/test_utf8.c',
     'text/test_utf8_sanitize.c',
     'text/test_width.c',
