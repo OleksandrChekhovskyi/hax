@@ -19,6 +19,7 @@
 #include "util.h"
 #include "providers/registry.h"
 #include "terminal/theme.h"
+#include "transport/ca.h"
 
 /* Bounds unattended agent loops when an interrupt cannot reliably reach a pipeline. */
 #define ONESHOT_MAX_TURNS 100
@@ -201,6 +202,8 @@ int main(int argc, char **argv)
         hax_err("curl_global_init failed");
         goto cleanup_config;
     }
+    ca_init();
+
     if (apply_run_selection(&options) != 0)
         goto cleanup_curl;
 

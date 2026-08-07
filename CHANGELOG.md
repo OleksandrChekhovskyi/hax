@@ -7,6 +7,13 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- The system TLS certificate store is located automatically (override with the standard
+  `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, or `SSL_CERT_DIR` environment variable), so HTTPS works
+  even when the binary was built for a different distribution. Certificate errors on systems
+  with no CA store now say how to fix them.
+
 ### Changed
 
 - Unified diffs for write/edit results are computed by an in-tree diff implementation instead

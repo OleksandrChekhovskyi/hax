@@ -154,6 +154,7 @@ sources = files(
     'src/tools/write.c',
 
     'src/transport/api_error.c',
+    'src/transport/ca.c',
     'src/transport/http.c',
     'src/transport/retry.c',
     'src/transport/sse.c',

@@ -410,6 +410,10 @@ The model can request `timeout_seconds` on a bash call, bounded by `bash.timeout
 - `http.idle_timeout` / `HAX_HTTP_IDLE_TIMEOUT` — streaming silence before giving up; `0`
   disables. Default `10m`.
 
+The system TLS certificate store is located automatically, so HTTPS works even when the binary
+was built for a different distribution; set the standard `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, or
+`SSL_CERT_DIR` environment variable to override it.
+
 ### OpenAI-family providers
 
 These settings apply to built-in OpenAI-family presets: `openai`, `openai-compatible`,

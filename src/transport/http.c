@@ -15,6 +15,7 @@
 #include "trace.h"
 #include "util.h"
 #include "version.h"
+#include "transport/ca.h"
 #include "transport/sse.h"
 
 #define ERROR_BODY_MAX_BYTES 4096
@@ -47,6 +48,15 @@ struct traced_sse_callback {
     sse_cb callback;
     void *user;
 };
+
+static char *curl_error_body(CURLcode result)
+{
+    const char *hint = ca_verify_hint(result);
+
+    if (hint)
+        return xasprintf("libcurl: %s (%s)", curl_easy_strerror(result), hint);
+    return xasprintf("libcurl: %s", curl_easy_strerror(result));
+}
 
 static int poll_transfer(struct transfer_tick *tick)
 {
@@ -233,6 +243,8 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
     else
         sse_parser_init(&state.parser, callback, user);
 
+    ca_apply(curl);
+
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, HTTP_USER_AGENT);
@@ -276,7 +288,7 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
     if (state.tick.cancelled) {
         response->cancelled = 1;
     } else if (result != CURLE_OK) {
-        response->error_body = xasprintf("libcurl: %s", curl_easy_strerror(result));
+        response->error_body = curl_error_body(result);
     } else if (status < 200 || status >= 300) {
         response->error_body =
             state.error_body.data ? buf_steal(&state.error_body) : xstrdup("(no response body)");
@@ -338,6 +350,8 @@ static int buffered_request(const char *url, const char *const *headers, const c
         .tick = {.callback = tick, .user = tick_user},
     };
 
+    ca_apply(curl);
+
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, HTTP_USER_AGENT);
@@ -377,8 +391,10 @@ static int buffered_request(const char *url, const char *const *headers, const c
     int failed = result != CURLE_OK || status < 200 || status >= 300 || !state.body.data;
     char *error_body = NULL;
     if (failed) {
+        /* Buffered callers only see -1; surface the certificate advice out of band. */
+        ca_warn_verify_failure(result);
         if (result != CURLE_OK)
-            error_body = xasprintf("libcurl: %s", curl_easy_strerror(result));
+            error_body = curl_error_body(result);
         else if (state.body.data)
             error_body = xstrdup(state.body.data);
     }

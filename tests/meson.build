@@ -107,6 +107,7 @@ test_sources = [
     'tools/test_write.c',
 
     'transport/test_api_error.c',
+    'transport/test_ca.c',
     'transport/test_http.c',
     'transport/test_retry.c',
     'transport/test_sse.c',
