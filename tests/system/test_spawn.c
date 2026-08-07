@@ -26,12 +26,13 @@ static char *slurp(const char *path)
     FILE *f = fopen(path, "rb");
     if (!f)
         return NULL;
-    fseek(f, 0, SEEK_END);
+    EXPECT(fseek(f, 0, SEEK_END) == 0);
     long file_size = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    EXPECT(file_size >= 0);
+    EXPECT(fseek(f, 0, SEEK_SET) == 0);
     char *content = malloc((size_t)file_size + 1);
-    fread(content, 1, (size_t)file_size, f);
-    content[file_size] = '\0';
+    size_t got = fread(content, 1, (size_t)file_size, f);
+    content[got] = '\0';
     fclose(f);
     return content;
 }
