@@ -280,8 +280,9 @@ variable. `/config` marks settings that can be changed mid-session.
 - `context_limit` / `HAX_CONTEXT_LIMIT` — manual context-window size for percentage display
   and auto-compaction.
 - `display_width` / `HAX_DISPLAY_WIDTH` — content width. Default `auto` follows the terminal
-  width but caps it at 100 columns; `terminal` removes that upper cap. Both retain a 20-column
-  floor. An integer of at least 20 sets an exact width, independently of terminal size.
+  through 110 columns, then caps content at 100; the tolerance avoids a narrow unused margin.
+  `terminal` removes the upper cap. Both retain a 20-column floor. An integer of at least 20 sets
+  an exact width, independently of terminal size.
 - `notify` / `HAX_NOTIFY` — desktop notification style: `auto`, `bel`, `osc9`, or `off`. Default
   `auto` detects from the terminal.
 - `theme` / `HAX_THEME` — color theme: `auto`, `dark`, `light`, `ansi`, or `off`. Default

@@ -63,7 +63,8 @@ static const struct config_setting REGISTRY[] = {
      .description = "Manual context-window size for the % display; overrides auto-detect",
      .kind = CONFIG_KIND_SIZE, .editable = 1},
     {.key = "display_width", .env_var = "HAX_DISPLAY_WIDTH", .default_value = "auto",
-     .description = "Content width: auto caps at 100, terminal removes the cap, or set columns",
+     .description = "Content width: auto uses full width through 110 columns and 100 beyond that; "
+                    "terminal always uses full width; a number sets an exact width",
      .choices = "auto|terminal", .example = "100", .kind = CONFIG_KIND_INT, .min = 20,
      .editable = 1},
     {.key = "notify", .env_var = "HAX_NOTIFY", .default_value = "auto",

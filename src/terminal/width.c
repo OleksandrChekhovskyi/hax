@@ -15,6 +15,14 @@ int term_width(void)
     return 120;
 }
 
+int auto_display_width(int terminal_width)
+{
+    int width = terminal_width;
+    if (width > DISPLAY_WIDTH_CAP + DISPLAY_WIDTH_TOLERANCE)
+        width = DISPLAY_WIDTH_CAP;
+    return width < 20 ? 20 : width;
+}
+
 int display_width(void)
 {
     const char *mode = config_str("display_width");
@@ -23,8 +31,8 @@ int display_width(void)
         return configured_width;
 
     int width = term_width();
-    if ((!mode || strcasecmp(mode, "terminal") != 0) && width > DISPLAY_WIDTH_CAP)
-        width = DISPLAY_WIDTH_CAP;
+    if (!mode || strcasecmp(mode, "terminal") != 0)
+        return auto_display_width(width);
     return width < 20 ? 20 : width;
 }
 
