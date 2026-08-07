@@ -44,6 +44,7 @@ sources = files(
     'src/agent_loop.c',
     'src/agent_tool.c',
     'src/agent_usage.c',
+    'src/banner.c',
     'src/busy.c',
     'src/catalog.c',
     'src/cli.c',

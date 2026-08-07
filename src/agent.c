@@ -12,6 +12,7 @@
 #include "agent_dispatch.h"
 #include "agent_loop.h"
 #include "agent_usage.h"
+#include "banner.h"
 #include "catalog.h"
 #include "compact.h"
 #include "config.h"
@@ -328,10 +329,6 @@ static void cursor_hide(void)
     fflush(stdout);
 }
 
-static const char *banner_bar(char *buffer, size_t size);
-static void print_banner_identity(FILE *out, const struct provider *provider,
-                                  const struct agent_session *session);
-
 /* Default to `less -R` so the pager interprets ANSI color. */
 static int view_pager_open(struct spawn_pipe *pipe)
 {
@@ -387,17 +384,18 @@ static void show_history_cb(void *user)
     if (markdown_enabled())
         render.md = md_new(md_emit_to_disp, &render.disp, md_cols());
 
-    print_banner_identity(memory_stream, state->provider, session);
+    banner_identity(memory_stream, state->provider, session);
     /* Pager progress is byte-based, so include the prompt count when nonzero. */
-    char bar[32];
     size_t prompts = agent_user_turn_count(session);
-    if (prompts > 0)
-        fprintf(memory_stream,
-                "%s " ANSI_DIM "conversation history · %zu prompt%s" ANSI_BOLD_OFF "\n",
-                banner_bar(bar, sizeof(bar)), prompts, prompts == 1 ? "" : "s");
-    else
-        fprintf(memory_stream, "%s " ANSI_DIM "conversation history" ANSI_BOLD_OFF "\n",
-                banner_bar(bar, sizeof(bar)));
+    struct banner_writer header;
+    banner_open(&header, memory_stream);
+    banner_put(&header, "", ANSI_DIM, ANSI_BOLD_OFF, "conversation history");
+    if (prompts > 0) {
+        char count[32];
+        snprintf(count, sizeof(count), "%zu prompt%s", prompts, prompts == 1 ? "" : "s");
+        banner_put(&header, " · ", ANSI_DIM, ANSI_BOLD_OFF, count);
+    }
+    banner_close(&header);
     /* Direct banner writes leave one committed newline outside disp's bookkeeping. */
     disp_sync_external_line(&render.disp);
 
@@ -422,60 +420,6 @@ static void show_history_cb(void *user)
         spawn_pipe_close(&pager);
     }
     free(output);
-}
-
-static const char *banner_bar(char *buffer, size_t size)
-{
-    snprintf(buffer, size, "%s▌%s", theme_open(THEME_CHROME), theme_close(THEME_CHROME));
-    return buffer;
-}
-
-/* The identity row is shared with paged history; the REPL-only key tips are not. */
-static void print_banner_identity(FILE *out, const struct provider *provider,
-                                  const struct agent_session *session)
-{
-    char bar[32];
-    banner_bar(bar, sizeof(bar));
-    /* A preset may change the system prompt, so its stance must remain visible. SGR 22 exempts
-     * the tinted token from the surrounding dim run; ANSI_DIM resumes it afterward. */
-    const char *preset = config_str("preset");
-    char *stance = (preset && *preset)
-                       ? xasprintf(ANSI_BOLD_OFF "%s[%s]%s" ANSI_DIM " ", theme_open(THEME_STANCE),
-                                   preset, theme_close(THEME_STANCE))
-                       : xstrdup("");
-    if (!provider) {
-        fprintf(out,
-                "%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM
-                "%s› no provider — use /provider" ANSI_BOLD_OFF "\n",
-                bar, stance);
-        free(stance);
-        return;
-    }
-    const char *provider_name = provider->name ? provider->name : "?";
-    const char *model_label = session->model_label ? session->model_label : session->model;
-    if (!session->model || !*session->model)
-        fprintf(out,
-                "%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM
-                "%s› %s · no model — use /model" ANSI_BOLD_OFF "\n",
-                bar, stance, provider_name);
-    else if (session->effort)
-        fprintf(out,
-                "%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "%s› %s · %s · %s" ANSI_BOLD_OFF
-                "\n",
-                bar, stance, provider_name, model_label, session->effort);
-    else
-        fprintf(out,
-                "%s " ANSI_BOLD "hax" ANSI_BOLD_OFF " " ANSI_DIM "%s› %s · %s" ANSI_BOLD_OFF "\n",
-                bar, stance, provider_name, model_label);
-    free(stance);
-}
-
-void agent_print_banner(const struct provider *provider, const struct agent_session *session)
-{
-    print_banner_identity(stdout, provider, session);
-    char bar[32];
-    printf("%s " ANSI_DIM "ctrl-d quit · try /help" ANSI_BOLD_OFF "\n",
-           banner_bar(bar, sizeof(bar)));
 }
 
 int agent_apply_settings(struct agent_state *state, struct provider *provider, int announce)
@@ -524,7 +468,7 @@ int agent_apply_settings(struct agent_state *state, struct provider *provider, i
     /* Replace a stale startup banner; mid-conversation a banner would imply a reset. */
     if (session->n_items == 0) {
         render_open_block(state->render);
-        agent_print_banner(provider, session);
+        banner_print(provider, session);
         disp_sync_external_line(&state->render->disp); /* banner bypasses disp */
         fflush(stdout);
         return 0;
@@ -572,7 +516,7 @@ void agent_new_conversation(struct agent_state *state)
     tempfiles_cleanup();
     agent_spend_free(&state->stats.spend);
     memset(&state->stats, 0, sizeof(state->stats));
-    agent_print_banner(state->provider, state->session);
+    banner_print(state->provider, state->session);
 }
 
 /* Redraw with every prompt so slash-command output cannot hide the empty-send meaning. */
@@ -1194,7 +1138,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
     }
 
     putchar('\n');
-    agent_print_banner(current_provider, &session);
+    banner_print(current_provider, &session);
     /* The embedded disp outlives its Markdown callback; spinner and Markdown handles are owned
      * by this frame. */
     struct render_ctx render = {.disp = {.sink = stdout, .committed_newlines = 1},

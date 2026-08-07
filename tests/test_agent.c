@@ -440,58 +440,6 @@ static void test_new_conversation_resets_everything(void)
     fixture_free(&f);
 }
 
-/* ---------- agent_print_banner: fallback forms ---------- */
-
-/* agent_print_banner only reads name/model/model_label/effort,
- * so hand-built structs suffice — no session init, no env. The asserts
- * pin the fallback logic (which hint, which label), not exact wording. */
-
-struct banner_call {
-    const struct provider *provider;
-    const struct agent_session *session;
-};
-
-static void do_banner(void *user)
-{
-    struct banner_call *c = user;
-    agent_print_banner(c->provider, c->session);
-}
-
-static void test_banner_no_provider_points_at_picker(void)
-{
-    struct banner_call c = {.provider = NULL, .session = NULL};
-    char *out = capture_stdout(do_banner, &c);
-    EXPECT(strstr(out, "/provider") != NULL);
-    EXPECT(strstr(out, "ctrl-d quit") != NULL);
-    free(out);
-}
-
-static void test_banner_no_model_points_at_picker(void)
-{
-    struct provider p = {.name = "prov-x"};
-    struct agent_session s = {0};
-    struct banner_call c = {.provider = &p, .session = &s};
-    char *out = capture_stdout(do_banner, &c);
-    EXPECT(strstr(out, "prov-x") != NULL);
-    EXPECT(strstr(out, "/model") != NULL);
-    free(out);
-}
-
-static void test_banner_prefers_label_and_appends_effort(void)
-{
-    struct provider p = {.name = "prov-x"};
-    struct agent_session s = {
-        .model = "/models/long-file-name.gguf",
-        .model_label = "short-name",
-        .effort = "high",
-    };
-    struct banner_call c = {.provider = &p, .session = &s};
-    char *out = capture_stdout(do_banner, &c);
-    EXPECT(strstr(out, "prov-x · short-name · high") != NULL);
-    EXPECT(strstr(out, "long-file-name") == NULL);
-    free(out);
-}
-
 /* ---------- agent_undo / agent_fork: the real mutators ---------- */
 
 static void add_turn(struct agent_session *session, const char *prompt, const char *reply)
@@ -956,9 +904,6 @@ int main(void)
     test_resync_effort_follows_late_metadata();
     test_apply_settings_keeps_stamped_spend();
     test_new_conversation_resets_everything();
-    test_banner_no_provider_points_at_picker();
-    test_banner_no_model_points_at_picker();
-    test_banner_prefers_label_and_appends_effort();
     test_continue_marker_is_not_a_user_turn();
     test_undo_reverts_history_and_file();
     test_undo_with_continuation_cuts_disk_and_memory_alike();

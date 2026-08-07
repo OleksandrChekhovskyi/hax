@@ -27,11 +27,6 @@ const struct tool TOOL_WRITE = {.def = {.name = "write"}, .run = stub_run};
 const struct tool TOOL_EDIT = {.def = {.name = "edit"}, .run = stub_run};
 
 /* Link-only agent stubs retain the session effects asserted below. */
-void agent_print_banner(const struct provider *provider, const struct agent_session *session)
-{
-    (void)provider;
-    (void)session;
-}
 void agent_new_conversation(struct agent_state *state)
 {
     agent_session_reset(state->session);
@@ -291,6 +286,61 @@ static void test_help_lists_commands_and_shortcuts(void)
     free(out);
 }
 
+/* /help and /session content is ASCII, so plain byte length measures row width. */
+static char *strip_sgr(const char *s)
+{
+    char *out = xmalloc(strlen(s) + 1);
+    size_t n = 0;
+    while (*s) {
+        if (*s == '\x1b' && s[1] == '[') {
+            s += 2;
+            while (*s && !(*s >= '@' && *s <= '~'))
+                s++;
+            if (*s)
+                s++;
+            continue;
+        }
+        out[n++] = *s++;
+    }
+    out[n] = '\0';
+    return out;
+}
+
+static void expect_rows_fit(const char *out, size_t max_cells)
+{
+    const char *row = out;
+    while (*row) {
+        const char *end = strchr(row, '\n');
+        size_t row_len = end ? (size_t)(end - row) : strlen(row);
+        if (row_len > max_cells)
+            FAIL("row exceeds %zu cells: %.*s", max_cells, (int)row_len, row);
+        if (!end)
+            break;
+        row = end + 1;
+    }
+}
+
+static void test_help_wraps_to_narrow_width(void)
+{
+    struct render_ctx r = {0};
+    r.disp.committed_newlines = 1;
+    struct agent_state state = {.render = &r};
+    struct dispatch_call c = {.line = "/help", .state = &state};
+
+    setenv("HAX_DISPLAY_WIDTH", "30", 1);
+    char *raw = capture_stdout(do_dispatch, &c);
+    unsetenv("HAX_DISPLAY_WIDTH");
+    EXPECT(c.result == SLASH_HANDLED);
+
+    char *out = strip_sgr(raw);
+    free(raw);
+    expect_rows_fit(out, 30);
+    /* The longest summaries survive the stacked narrow layout intact. */
+    EXPECT(strstr(out, "shift-enter") != NULL);
+    EXPECT(strstr(out, "configured to send") != NULL);
+    free(out);
+}
+
 /* ---------- /session ---------- */
 
 static void test_session_prints_totals(void)
@@ -377,6 +427,34 @@ static void test_session_marks_estimated_spend(void)
     EXPECT(strstr(out, "~$0.030") != NULL);
     free(out);
     agent_spend_free(&state.stats.spend);
+}
+
+static void test_session_wraps_to_narrow_width(void)
+{
+    struct render_ctx r = {0};
+    r.disp.committed_newlines = 1;
+    struct agent_state state = {.render = &r};
+    state.stats.user_turns = 3;
+    state.stats.requests = 7;
+    state.stats.input_tokens = 5530;
+    state.stats.output_tokens = 412;
+    state.stats.cached_tokens = 2048;
+    state.stats.cache_write_tokens = 1024;
+    state.stats.uncached_input_tokens = 5530 - 2048 - 1024;
+    struct dispatch_call c = {.line = "/session", .state = &state};
+
+    setenv("HAX_DISPLAY_WIDTH", "30", 1);
+    char *raw = capture_stdout(do_dispatch, &c);
+    unsetenv("HAX_DISPLAY_WIDTH");
+    EXPECT(c.result == SLASH_HANDLED);
+
+    char *out = strip_sgr(raw);
+    free(raw);
+    expect_rows_fit(out, 30);
+    /* The token row wraps at segment spaces rather than truncating. */
+    EXPECT(strstr(out, "tokens total") != NULL);
+    EXPECT(strstr(out, "out 412") != NULL);
+    free(out);
 }
 
 /* ---------- /new and its alias /clear ---------- */
@@ -631,6 +709,9 @@ static void test_compaction_seed_history_rules(void)
 
 int main(void)
 {
+    /* Row-layout assertions depend on the width; the variable leaks in from any hax parent. */
+    unsetenv("HAX_DISPLAY_WIDTH");
+
     test_dispatch_not_a_command();
     test_dispatch_unknown();
     test_dispatch_path_falls_through();
@@ -638,9 +719,11 @@ int main(void)
     test_dispatch_bare_slash_falls_through();
     test_dispatch_bad_usage();
     test_help_lists_commands_and_shortcuts();
+    test_help_wraps_to_narrow_width();
     test_session_prints_totals();
     test_session_hides_unreported_rows();
     test_session_marks_estimated_spend();
+    test_session_wraps_to_narrow_width();
     test_new_clears_session_without_switching_preset();
     test_clear_alias_runs_new();
     test_new_with_preset_switches_then_clears();

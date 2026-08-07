@@ -368,6 +368,71 @@ static void test_wrap_break_oversized_first_codepoint(void)
     EXPECT(resume == 4); /* hard-break, no space consumed */
 }
 
+/* ---------- wrap_row_bytes ---------- */
+
+static void test_wrap_row_fits(void)
+{
+    /* Whole string on one row: no separator to consume. */
+    size_t separator = 999;
+    size_t row = wrap_row_bytes("hello", 10, &separator);
+    EXPECT(row == 5);
+    EXPECT(separator == 0);
+}
+
+static void test_wrap_row_word_break(void)
+{
+    /* Break at the space; the separator is the space itself. */
+    size_t separator = 0;
+    size_t row = wrap_row_bytes("hello world", 10, &separator);
+    EXPECT(row == 5);
+    EXPECT(separator == 1);
+}
+
+static void test_wrap_row_hard_break(void)
+{
+    /* No space in the window: hard break consumes nothing. */
+    size_t separator = 999;
+    size_t row = wrap_row_bytes("helloworld", 6, &separator);
+    EXPECT(row == 6);
+    EXPECT(separator == 0);
+}
+
+static void test_wrap_row_newline_ends_row(void)
+{
+    /* An embedded newline ends the row early and is consumed. */
+    size_t separator = 0;
+    size_t row = wrap_row_bytes("hi\nthere", 10, &separator);
+    EXPECT(row == 2);
+    EXPECT(separator == 1);
+}
+
+static void test_wrap_row_empty_paragraph(void)
+{
+    /* A leading newline yields an empty row while still advancing. */
+    size_t separator = 0;
+    size_t row = wrap_row_bytes("\nrest", 10, &separator);
+    EXPECT(row == 0);
+    EXPECT(separator == 1);
+}
+
+static void test_wrap_row_iterates_to_end(void)
+{
+    /* Advancing by row + separator visits every row and terminates. */
+    const char *text = "one two\nthree";
+    const char *expected[] = {"one", "two", "three"};
+    size_t n = 0;
+    while (*text) {
+        size_t separator;
+        size_t row = wrap_row_bytes(text, 5, &separator);
+        EXPECT(n < 3);
+        EXPECT(row == strlen(expected[n]));
+        EXPECT(strncmp(text, expected[n], row) == 0);
+        text += row + separator;
+        n++;
+    }
+    EXPECT(n == 3);
+}
+
 /* ---------- reflow_for_display ---------- */
 
 static void test_reflow_no_wrap_needed(void)
@@ -601,6 +666,13 @@ int main(void)
     test_wrap_break_multibyte_aware();
     test_wrap_break_keeps_combining_with_base();
     test_wrap_break_oversized_first_codepoint();
+
+    test_wrap_row_fits();
+    test_wrap_row_word_break();
+    test_wrap_row_hard_break();
+    test_wrap_row_newline_ends_row();
+    test_wrap_row_empty_paragraph();
+    test_wrap_row_iterates_to_end();
 
     test_reflow_no_wrap_needed();
     test_reflow_wraps_at_word();

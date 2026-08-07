@@ -502,10 +502,60 @@ static void run_copy(const struct command_call *call)
 /* ---------- task and session status ---------- */
 
 #define SESSION_LABEL_WIDTH 14
+/* Below this value budget the label column is dropped and values stack under their labels. */
+#define ROW_VALUE_MIN_CELLS 20
+#define ROW_STACKED_INDENT  4
+
+static void pad_spaces(int n)
+{
+    for (int i = 0; i < n; i++)
+        fputc(' ', stdout);
+}
+
+/* Print `text` word-wrapped at `columns` with continuation rows padded to `indent`; the cursor
+ * already sits at `indent`. Embedded newlines force row breaks. Styling wraps each row so runs
+ * never span physical lines. */
+static void print_wrapped_rows(const char *text, int indent, int columns, const char *style_open,
+                               const char *style_close)
+{
+    int budget = columns - indent;
+    if (budget < 1)
+        budget = 1;
+    int first = 1;
+    while (*text || first) {
+        size_t separator_bytes = 0;
+        size_t row_bytes = *text ? wrap_row_bytes(text, (size_t)budget, &separator_bytes) : 0;
+        if (!first)
+            pad_spaces(indent);
+        if (*style_open)
+            fputs(style_open, stdout);
+        fwrite(text, 1, row_bytes, stdout);
+        if (*style_open)
+            fputs(style_close, stdout);
+        fputc('\n', stdout);
+        text += row_bytes + separator_bytes;
+        first = 0;
+    }
+}
+
+/* Indent of value rows; also decides between the aligned label column and stacked layout. */
+static int session_value_indent(int columns)
+{
+    int value_column = 2 + SESSION_LABEL_WIDTH;
+    return columns - value_column >= ROW_VALUE_MIN_CELLS ? value_column : ROW_STACKED_INDENT;
+}
 
 static void print_session_row(const char *label, const char *value)
 {
-    printf("  " ANSI_DIM "%-*s%s" ANSI_RESET "\n", SESSION_LABEL_WIDTH, label, value);
+    int columns = display_width();
+    int indent = session_value_indent(columns);
+    if (indent == ROW_STACKED_INDENT) {
+        printf("  " ANSI_DIM "%s" ANSI_RESET "\n", label);
+        pad_spaces(indent);
+    } else {
+        printf("  " ANSI_DIM "%-*s" ANSI_RESET, SESSION_LABEL_WIDTH, label);
+    }
+    print_wrapped_rows(value, indent, columns, ANSI_DIM, ANSI_RESET);
 }
 
 /* Unknown and negligible cost estimates are omitted. The returned length may exceed the buffer. */
@@ -644,6 +694,15 @@ static void run_session(const struct command_call *call)
         snprintf(row, sizeof(row), "%s · %s · %s", provider_name, model, effort);
     else
         snprintf(row, sizeof(row), "%s · %s", provider_name, model);
+    /* When the identity overflows its row, break after the provider rather than between model
+     * and effort; a hard newline in the value forces the row break. */
+    int columns = display_width();
+    if ((int)display_cells(row) > columns - session_value_indent(columns)) {
+        if (effort && *effort)
+            snprintf(row, sizeof(row), "%s\n%s · %s", provider_name, model, effort);
+        else
+            snprintf(row, sizeof(row), "%s\n%s", provider_name, model);
+    }
     print_session_row("provider", row);
 
     snprintf(row, sizeof(row), "%ld", stats->user_turns);
@@ -723,27 +782,33 @@ static void run_usage(const struct command_call *call)
 
 /* ---------- /help ---------- */
 
-static void pad_spaces(int n)
+/* Labels are ASCII, so byte length equals cell width. */
+static void print_help_row(const char *label, const char *label_color, const char *summary,
+                           int dimmed, int description_column, int columns)
 {
-    for (int i = 0; i < n; i++)
-        fputc(' ', stdout);
+    fputs("  ", stdout);
+    fputs(label_color, stdout);
+    fputs(label, stdout);
+    fputs(ANSI_RESET, stdout);
+    const char *style_open = dimmed ? ANSI_DIM : "";
+    int summary_column = 2 + description_column;
+    if (columns - summary_column >= ROW_VALUE_MIN_CELLS) {
+        pad_spaces(description_column - (int)strlen(label));
+        print_wrapped_rows(summary, summary_column, columns, style_open, ANSI_RESET);
+    } else {
+        fputc('\n', stdout);
+        pad_spaces(ROW_STACKED_INDENT);
+        print_wrapped_rows(summary, ROW_STACKED_INDENT, columns, style_open, ANSI_RESET);
+    }
 }
 
 static void print_command_row(const char *name, const char *summary, int dimmed,
-                              int description_column)
+                              int description_column, int columns)
 {
-    fputs("  ", stdout);
-    fputs(theme_open(dimmed ? THEME_CHROME_DIM : THEME_CHROME), stdout);
-    int name_width = 1 + (int)strlen(name);
-    printf("/%s", name);
-    fputs(ANSI_RESET, stdout);
-    pad_spaces(description_column - name_width);
-    if (dimmed)
-        fputs(ANSI_DIM, stdout);
-    fputs(summary, stdout);
-    if (dimmed)
-        fputs(ANSI_RESET, stdout);
-    fputc('\n', stdout);
+    char *label = xasprintf("/%s", name);
+    print_help_row(label, theme_open(dimmed ? THEME_CHROME_DIM : THEME_CHROME), summary, dimmed,
+                   description_column, columns);
+    free(label);
 }
 
 static void run_help(const struct command_call *call)
@@ -767,13 +832,14 @@ static void run_help(const struct command_call *call)
             label_width = shortcut_width;
     }
     int description_column = (int)label_width + 2;
+    int columns = display_width();
 
     fputs(ANSI_BOLD "commands" ANSI_RESET "\n", stdout);
     for (size_t i = 0; i < N_COMMANDS; i++) {
-        print_command_row(COMMANDS[i].name, COMMANDS[i].summary, 0, description_column);
+        print_command_row(COMMANDS[i].name, COMMANDS[i].summary, 0, description_column, columns);
         if (COMMANDS[i].alias) {
             char *summary = xasprintf("alias for /%s", COMMANDS[i].name);
-            print_command_row(COMMANDS[i].alias, summary, 1, description_column);
+            print_command_row(COMMANDS[i].alias, summary, 1, description_column, columns);
             free(summary);
         }
     }
@@ -782,20 +848,15 @@ static void run_help(const struct command_call *call)
     fputs(ANSI_BOLD "shortcuts" ANSI_RESET "\n", stdout);
     for (size_t i = 0; i < N_SHORTCUTS; i++) {
         int available = !SHORTCUTS[i].available || SHORTCUTS[i].available();
-        fputs("  ", stdout);
-        fputs(theme_open(available ? THEME_CHROME : THEME_CHROME_DIM), stdout);
-        fputs(SHORTCUTS[i].key, stdout);
-        fputs(ANSI_RESET, stdout);
-        pad_spaces(description_column - (int)strlen(SHORTCUTS[i].key));
+        const char *label_color = theme_open(available ? THEME_CHROME : THEME_CHROME_DIM);
         if (available) {
-            fputs(SHORTCUTS[i].description, stdout);
+            print_help_row(SHORTCUTS[i].key, label_color, SHORTCUTS[i].description, 0,
+                           description_column, columns);
         } else {
-            fputs(ANSI_DIM, stdout);
-            fputs(SHORTCUTS[i].description, stdout);
-            fputc(' ', stdout);
-            fputs(SHORTCUTS[i].unavailable_note, stdout);
-            fputs(ANSI_RESET, stdout);
+            char *summary =
+                xasprintf("%s %s", SHORTCUTS[i].description, SHORTCUTS[i].unavailable_note);
+            print_help_row(SHORTCUTS[i].key, label_color, summary, 1, description_column, columns);
+            free(summary);
         }
-        fputc('\n', stdout);
     }
 }

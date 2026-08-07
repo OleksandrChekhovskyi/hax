@@ -62,9 +62,6 @@ struct agent_state {
  * The caller retains ownership of the provider left in *provider_io on return. */
 int agent_run(struct provider **provider_io, const struct hax_opts *options);
 
-/* Print the startup identity and key-tip rows; the caller supplies any leading gap. */
-void agent_print_banner(const struct provider *provider, const struct agent_session *session);
-
 /* Reset conversation history, logs, tracked temporary files, and per-conversation statistics. */
 void agent_new_conversation(struct agent_state *state);
 

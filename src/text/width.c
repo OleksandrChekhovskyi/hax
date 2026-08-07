@@ -135,6 +135,19 @@ size_t wrap_break_pos(const char *str, size_t length, size_t max_cells, size_t *
     return row_end;
 }
 
+size_t wrap_row_bytes(const char *str, size_t max_cells, size_t *separator_bytes)
+{
+    size_t length = strlen(str);
+    size_t paragraph_len = strcspn(str, "\n");
+    size_t next_offset;
+    size_t row_bytes = wrap_break_pos(str, paragraph_len, max_cells, &next_offset);
+    /* A row ending at the paragraph consumes the newline that ended it. */
+    if (next_offset == paragraph_len && paragraph_len < length)
+        next_offset++;
+    *separator_bytes = next_offset - row_bytes;
+    return row_bytes;
+}
+
 char *reflow_for_display(const char *str, int first_row_cells, int other_row_cells, int max_rows,
                          int last_row_reserve)
 {

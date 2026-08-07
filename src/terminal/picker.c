@@ -174,19 +174,6 @@ static void append_clipped_text(struct buf *output, const char *text, int max_ce
         buf_append_str(output, use_utf8 ? "\xe2\x80\xa6" : ".");
 }
 
-/* Returns the source bytes to render and the separator bytes to discard. */
-static size_t wrapped_line_bytes(const char *text, int max_cells, size_t *separator_bytes)
-{
-    size_t text_len = strlen(text);
-    size_t paragraph_len = strcspn(text, "\n");
-    size_t next_offset;
-    size_t line_len = wrap_break_pos(text, paragraph_len, (size_t)max_cells, &next_offset);
-    if (next_offset == paragraph_len && paragraph_len < text_len)
-        next_offset++;
-    *separator_bytes = next_offset - line_len;
-    return line_len;
-}
-
 static int wrapped_line_count(const char *text, int width, int max_lines)
 {
     if (!text || !text[0])
@@ -195,7 +182,7 @@ static int wrapped_line_count(const char *text, int width, int max_lines)
     int lines = 0;
     while (*text && lines < max_lines) {
         size_t separator_bytes;
-        size_t line_bytes = wrapped_line_bytes(text, width, &separator_bytes);
+        size_t line_bytes = wrap_row_bytes(text, (size_t)width, &separator_bytes);
         text += line_bytes + separator_bytes;
         lines++;
     }
@@ -407,7 +394,7 @@ static void render_title(struct frame *frame, const char *title, int line_count)
             append_clipped_text(&frame->row, remaining, frame->width, frame->use_utf8);
         } else {
             size_t separator_bytes;
-            size_t line_bytes = wrapped_line_bytes(remaining, frame->width, &separator_bytes);
+            size_t line_bytes = wrap_row_bytes(remaining, (size_t)frame->width, &separator_bytes);
             picker_core_append_sanitized(&frame->row, remaining, line_bytes);
             remaining += line_bytes + separator_bytes;
         }
@@ -449,7 +436,7 @@ static void render_footer(struct frame *frame, const struct picker *picker,
                 append_clipped_text(&frame->row, remaining, text_cells, frame->use_utf8);
             } else {
                 size_t separator_bytes;
-                size_t line_bytes = wrapped_line_bytes(remaining, text_cells, &separator_bytes);
+                size_t line_bytes = wrap_row_bytes(remaining, (size_t)text_cells, &separator_bytes);
                 picker_core_append_sanitized(&frame->row, remaining, line_bytes);
                 remaining += line_bytes + separator_bytes;
             }
