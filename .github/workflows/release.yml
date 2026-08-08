@@ -8,8 +8,49 @@ permissions:
   contents: write
 
 jobs:
+  # Fully static musl binaries, one per architecture, built and tested natively
+  # on the runner host through build_static.sh's podman dispatch. Not a
+  # job-level Alpine container: the runner rejects JavaScript actions in musl
+  # containers on anything but x64, so that layout cannot check out on arm64.
+  static:
+    name: static (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-26.04
+            arch: x86_64
+          - os: ubuntu-26.04-arm
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check tag matches project version
+        run: |
+          grep -Fq "version: '${GITHUB_REF_NAME#v}'," meson.build
+      # Built from a git-less snapshot so version.h takes the vcs_tag fallback:
+      # exactly the declared project version, pinned to the tag by the check
+      # above. The shallow checkout's `git describe` would be a bare hash.
+      - name: Build and test static binary
+        run: |
+          mkdir snapshot
+          git archive HEAD | tar -x -C snapshot
+          snapshot/scripts/build_static.sh
+      # The binary ships under its canonical name inside an arch-tagged tarball:
+      # hax spawns subagents by invoking `hax`, so it must land in PATH as that.
+      - name: Package
+        run: |
+          tar -C "snapshot/build-static-$(uname -m)" -czf \
+              "hax-${GITHUB_REF_NAME#v}-linux-${{ matrix.arch }}.tar.gz" hax
+      - uses: actions/upload-artifact@v4
+        with:
+          name: static-${{ matrix.arch }}
+          path: hax-*.tar.gz
+          if-no-files-found: error
+
   release:
     runs-on: ubuntu-latest
+    needs: static
     timeout-minutes: 30
     steps:
       # Full history so `git describe` (baked into the binary via version.h)
@@ -28,6 +69,14 @@ jobs:
         run: |
           meson setup build
           meson dist -C build
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Collect artifacts and checksums
+        run: |
+          cp build/meson-dist/*.tar.xz artifacts/
+          (cd artifacts && sha256sum -- *.tar.* > SHA256SUMS)
       - name: Extract release notes
         run: scripts/release_notes.py "${GITHUB_REF_NAME#v}" > notes.md
       - name: Publish GitHub release
@@ -35,4 +84,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" --title "hax $GITHUB_REF_NAME" \
-              --notes-file notes.md build/meson-dist/*
+              --notes-file notes.md artifacts/*

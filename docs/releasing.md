@@ -1,9 +1,12 @@
 # Releasing
 
-Releases are tag-driven: pushing a `v*` tag publishes a GitHub release with the source tarball
-and the matching `CHANGELOG.md` section as notes (`.github/workflows/release.yml`). The version
-baked into the binary comes from `git describe`, so tagged builds report the tag, dev builds
-report tag + distance + commit, and a `+` suffix marks a dirty tree.
+Releases are tag-driven: pushing a `v*` tag publishes a GitHub release with the source tarball,
+fully static Linux binaries for x86_64 and aarch64 (`scripts/build_static.sh`, each tarball
+containing the binary under its canonical name `hax`), and a `SHA256SUMS` file, with the
+matching `CHANGELOG.md` section as notes (`.github/workflows/release.yml`). Release binaries
+build from a plain source snapshot and stamp exactly the declared project version, which the
+workflow checks against the tag; dev builds stamp `git describe` — tag + distance + commit,
+with a `+` suffix marking a dirty tree.
 
 Versions follow [Semantic Versioning](https://semver.org/): `vMAJOR.MINOR.PATCH`, with
 `-rc.N` pre-release suffixes when a release candidate is warranted.
@@ -21,7 +24,8 @@ To cut a release:
    ```
 
 The tag push runs the full CI matrix and, in parallel, the release workflow: it verifies the
-tag matches the meson version, builds and tests the dist tarball, and publishes the release.
+tag matches the meson version, builds and tests the static binaries and the dist tarball, and
+publishes the release.
 Publishing is the workflow's last step, so a failed run leaves nothing external behind — for a
 transient failure (a flaked test), just re-run the job from the Actions UI. Only when the fix
 needs new commits must the tag be deleted and re-created on the fixed commit. If the publish

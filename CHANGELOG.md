@@ -9,6 +9,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- Releases now include fully static Linux binaries for x86_64 and aarch64 with a `SHA256SUMS`
+  file. Each tarball contains the binary as `hax`, ready to extract into `PATH`; it runs on any
+  distribution with no dependencies.
 - The system TLS certificate store is located automatically (override with the standard
   `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, or `SSL_CERT_DIR` environment variable), so HTTPS works
   even when the binary was built for a different distribution. Certificate errors on systems
