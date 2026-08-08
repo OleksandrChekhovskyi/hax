@@ -24,7 +24,7 @@ jobs:
           - os: ubuntu-26.04-arm
             arch: aarch64
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Check tag matches project version
         run: |
           grep -Fq "version: '${GITHUB_REF_NAME#v}'," meson.build
@@ -42,7 +42,7 @@ jobs:
         run: |
           tar -C "snapshot/build-static-$(uname -m)" -czf \
               "hax-${GITHUB_REF_NAME#v}-linux-${{ matrix.arch }}.tar.gz" hax
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: static-${{ matrix.arch }}
           path: hax-*.tar.gz
@@ -55,7 +55,7 @@ jobs:
     steps:
       # Full history so `git describe` (baked into the binary via version.h)
       # sees the tag; a shallow checkout has no tags.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Check tag matches project version
@@ -69,7 +69,7 @@ jobs:
         run: |
           meson setup build
           meson dist -C build
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true

@@ -58,7 +58,7 @@ jobs:
       # it wholesale. True only for the container entries, never for runner hosts.
       HAX_DEPS_UPGRADE: ${{ matrix.container && '1' || '' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install dependencies
         run: scripts/install_deps.sh ${{ matrix.lint && 'lint' || '' }}
       - name: Build and test
