@@ -7,6 +7,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-08
+
 ### Added
 
 - Releases now include fully static Linux binaries for x86_64 and aarch64 with a `SHA256SUMS`
