@@ -207,12 +207,21 @@ static void test_bash_timeout_escalates_to_sigkill(void)
 
 static void test_bash_timeout_grace_allows_cleanup(void)
 {
+#if (defined(T_ASAN) || defined(T_TSAN)) && defined(__APPLE__)
+    /* Reproducible with a sanitized parent and a plain pipe alone, no hax code involved. */
+    T_SKIP("bash sporadically drops its TERM trap when spawned from a sanitized macOS parent");
+#endif
     /* An armed trap must flush cleanup output during the grace period. "armed" prints only
-     * after the trap is installed, so holding the timeout on it orders SIGTERM after both. */
+     * after the trap is installed and only from the exec'd foreground child: a TERM landing
+     * in that child's fork-to-exec window is consumed by the inherited trap disposition,
+     * leaving a TERM-proof sleep the shell then defers the trap to for its full length.
+     * The trap's exit ends the run at pipe EOF, so the grace never elapses on the happy path;
+     * it only needs to outlast the trap's pause. */
     setenv("HAX_BASH_TIMEOUT", "50ms", 1);
     setenv("HAX_BASH_TIMEOUT_GRACE", "500ms", 1);
     setenv("HAX_BASH_TRANSITION_MIN_BYTES", "6", 1); /* "armed\n" */
-    char *out = call_bash("trap 'sleep 0.05; echo cleaned; exit' TERM; echo armed; sleep 30");
+    char *out =
+        call_bash("trap 'sleep 0.05; echo cleaned; exit' TERM; sh -c 'echo armed; exec sleep 30'");
     EXPECT(strstr(out, "cleaned") != NULL);
     EXPECT(strstr(out, "[timed out") != NULL);
     free(out);
@@ -285,9 +294,11 @@ static void test_bash_timeout_grace_no_escape_via_pipe_close(void)
     unlink(path);
     EXPECT(pgid > 0);
 
-    /* ESRCH on Linux or EPERM on Darwin means the group is gone; clean up before failing. */
+    /* ESRCH on Linux or EPERM on Darwin means the group is gone; clean up before failing.
+     * The killed group lingers as an unreaped zombie until init collects it, which a loaded
+     * machine may delay well past the kill itself. */
     int alive = 1;
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < 2000; i++) {
         if (kill(-pgid, 0) < 0 && (errno == ESRCH || errno == EPERM)) {
             alive = 0;
             break;

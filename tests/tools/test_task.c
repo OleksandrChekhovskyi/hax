@@ -145,7 +145,7 @@ static void test_kill_stops_process_tree(void)
     free(id);
 
     /* ESRCH on Linux or EPERM on Darwin means the process is gone. */
-    int alive = kill(pid, 0) == 0;
+    int alive = pid > 0 && kill(pid, 0) == 0;
     if (alive)
         kill(pid, SIGKILL);
     EXPECT(!alive);
@@ -335,7 +335,7 @@ static void test_kill_grace_covers_redirected_cleanup(void)
      * redirected), yet the child's TERM cleanup must still get the grace window. */
     char *ready = xasprintf("%s/ready", t_tempdir());
     char *cmd = xasprintf("sh -c 'trap \\\"sleep " TEST_PAUSE "; echo bye > %s\\\" TERM; "
-                          "echo $$ > %s; sleep 30' >/dev/null 2>&1 & wait",
+                          "sh -c \\\"echo $$ > %s; exec sleep 30\\\"' >/dev/null 2>&1 & wait",
                           path, ready);
     char *out = call_bash_background(cmd);
     free(cmd);
@@ -343,7 +343,9 @@ static void test_kill_grace_covers_redirected_cleanup(void)
     EXPECT(id != NULL);
     free(out);
 
-    /* The kill must not beat the child to installing its trap. */
+    /* The kill must not beat the trapping shell to installing its trap, nor land in its
+     * sleep's fork-to-exec window where the inherited trap disposition would consume the
+     * TERM; the ready write comes from the exec'd inner shell, past both. */
     EXPECT(await_pid_file(ready) > 0);
     free(ready);
 
@@ -425,7 +427,7 @@ static void test_shutdown_kills_running_tasks(void)
     task_registry_shutdown();
     EXPECT(task_running_count() == 0);
 
-    int alive = kill(pid, 0) == 0;
+    int alive = pid > 0 && kill(pid, 0) == 0;
     if (alive)
         kill(pid, SIGKILL);
     EXPECT(!alive);
@@ -487,10 +489,12 @@ static void test_running_task_cap_enforced(void)
     free(gate);
     free(wait_for_id(id, 5));
     free(id);
+    setenv("HAX_BASH_TRANSITION_MIN_BYTES", "6", 1); /* "again\n" */
     out = call_bash_background("echo again");
     EXPECT(strstr(out, "again") != NULL);
     EXPECT(strstr(out, "too many running tasks") == NULL);
     free(out);
+    unsetenv("HAX_BASH_TRANSITION_MIN_BYTES");
     unsetenv("HAX_TASK_MAX_RUNNING");
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }

@@ -75,6 +75,10 @@ static char *kill_id(const char *id)
  * delivered and the orphan to be reaped. */
 static int process_is_gone(int pid)
 {
+    /* kill(0, sig) and kill(-1, sig) target the caller's process group and every signalable
+     * process; a pid from a failed extraction must fail the check, not probe those. */
+    if (pid <= 0)
+        return 0;
     time_t start = time(NULL);
     while (time(NULL) - start < 10) {
         if (kill(pid, 0) < 0)

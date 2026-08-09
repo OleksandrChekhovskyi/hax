@@ -155,6 +155,21 @@ static int observe_shell_exit(pid_t pid, int *exit_seen, long timeout_ms)
     return 0;
 }
 
+/* An exiting shell closes its pipe end before its exit becomes waitable, so once the exit is
+ * observed a readable pipe carries the shell's final output or EOF, not orphan chatter; it must
+ * be read before survivors can be ruled orphans. Bounded so an orphan streaming into the
+ * inherited pipe cannot stall the transition indefinitely. */
+static int exited_pipe_flush_pending(int output_fd, long *flush_deadline)
+{
+    long now_ms = monotonic_ms();
+    if (!*flush_deadline)
+        *flush_deadline = deadline_after(now_ms, YIELD_EXIT_OBSERVE_MS);
+    if (now_ms >= *flush_deadline)
+        return 0;
+    struct pollfd poll_fd = {.fd = output_fd, .events = POLLIN};
+    return poll(&poll_fd, 1, 0) > 0;
+}
+
 static int poll_timeout_ms(long deadline)
 {
     const int default_poll_ms = 10;
@@ -272,6 +287,7 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
     size_t hold_min_bytes = transition_min_bytes();
     long hold_cap = hold_min_bytes ? deadline_after(started_ms, TRANSITION_HOLD_CAP_MS) : 0;
     long grace_deadline = 0;
+    long exit_flush_deadline = 0;
     enum bash_stop_reason stop_reason = BASH_STOP_NONE;
     int shell_exited = 0;
     int wait_status = 0;
@@ -315,29 +331,38 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
         }
         if (stop_reason == BASH_STOP_NONE && transition_deadline > 0 &&
             now_ms >= transition_deadline) {
-            /* Adoption needs a live shell: the registry watches and kills the task through
-             * it. Once it has exited, only orphans hold the pipe, and they must not outlive
-             * the call untracked. */
-            if (tasks_enabled && !shell_exited) {
-                char *adopted =
-                    adopt_running_command(&process, command, name, output, binary, background,
-                                          started_ms, 0, display, display_data, displayed_body);
-                if (adopted) {
-                    bash_output_destroy(output);
-                    return adopted;
+            /* A held transition releases on the arrival of bytes an exiting shell wrote
+             * moments before its exit becomes waitable; let the exit land so the
+             * adopt-vs-orphan choice below reflects the shell's state, not that race. */
+            if (background && hold_min_bytes && !shell_exited)
+                observe_shell_exit(process.pid, &shell_exited, YIELD_EXIT_OBSERVE_MS);
+            int flush_pending = background && shell_exited &&
+                                exited_pipe_flush_pending(process.output_fd, &exit_flush_deadline);
+            if (!flush_pending) {
+                /* Adoption needs a live shell: the registry watches and kills the task
+                 * through it. Once it has exited, only orphans hold the pipe, and they must
+                 * not outlive the call untracked. */
+                if (tasks_enabled && !shell_exited) {
+                    char *adopted =
+                        adopt_running_command(&process, command, name, output, binary, background,
+                                              started_ms, 0, display, display_data, displayed_body);
+                    if (adopted) {
+                        bash_output_destroy(output);
+                        return adopted;
+                    }
                 }
-            }
-            stop_reason = BASH_STOP_TIMEOUT;
-            if (shell_exited) {
-                if (background) {
-                    stop_reason = BASH_STOP_ORPHANED;
-                    bash_signal_process_tree(process.pid, SIGKILL);
+                stop_reason = BASH_STOP_TIMEOUT;
+                if (shell_exited) {
+                    if (background) {
+                        stop_reason = BASH_STOP_ORPHANED;
+                        bash_signal_process_tree(process.pid, SIGKILL);
+                    }
+                    break;
                 }
-                break;
+                grace_deadline = start_shutdown(process.pid, now_ms, grace_ms);
+                if (grace_deadline == 0)
+                    break;
             }
-            grace_deadline = start_shutdown(process.pid, now_ms, grace_ms);
-            if (grace_deadline == 0)
-                break;
         }
         if (stop_reason != BASH_STOP_NONE && grace_deadline > 0 && now_ms >= grace_deadline) {
             bash_signal_process_tree(process.pid, SIGKILL);
