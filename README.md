@@ -23,43 +23,44 @@
 - **Automation-friendly** — interactive REPL and `-p` one-shot mode, with clean stdout for
   scripts/agents and resume hints on stderr.
 
-## Build
+## Install
 
-Requires a C compiler, `libcurl`, `jansson`, `meson`, `ninja`, and `pkg-config`.
-Run `scripts/install_deps.sh` to install them, or install by hand:
+hax runs on Linux and macOS; on Windows, use it under
+[WSL](https://learn.microsoft.com/en-us/windows/wsl/).
 
-```sh
-# Debian/Ubuntu
-sudo apt install build-essential libcurl4-openssl-dev libjansson-dev meson ninja-build pkg-config
-
-# Arch Linux
-sudo pacman -S --needed gcc curl jansson meson ninja pkgconf
-
-# macOS (Homebrew)
-brew install jansson meson ninja pkg-config
-# libcurl ships with macOS
-
-meson setup build
-meson compile -C build
-# The binary is now available at ./build/hax
-```
-
-The examples below use `hax` as if it is on `PATH`; after a source build, use `./build/hax`
-or install it with `meson install -C build`.
-
-For development, `make lint` additionally needs `clang-format` and `clang-tidy`
-(`scripts/install_deps.sh lint` covers these too):
+With [Homebrew](https://brew.sh) (macOS or Linux):
 
 ```sh
-# Debian/Ubuntu
-sudo apt install clang-format clang-tidy
-
-# Arch Linux
-sudo pacman -S --needed clang
-
-# macOS (Homebrew)
-brew install llvm
+brew install oleksandrchekhovskyi/hax/hax
 ```
+
+On Linux, download the prebuilt static binary for your architecture (x86_64 or aarch64) from the
+[latest release](https://github.com/OleksandrChekhovskyi/hax/releases/latest), then unpack the
+`hax` binary into any directory on your `PATH`.
+
+### From source
+
+Building from source gives a binary linked against your system's shared libraries instead of
+a static one:
+
+```sh
+git clone https://github.com/OleksandrChekhovskyi/hax.git
+cd hax
+scripts/install_deps.sh   # Debian/Ubuntu, Fedora, Arch, openSUSE, Alpine, macOS
+make                      # the binary is now at ./build/hax
+make install              # optional; may prompt for sudo
+```
+
+`scripts/install_deps.sh` installs the build dependencies — a C compiler, `libcurl`,
+`jansson`, `meson`, `ninja`, and `pkg-config` — plus `fzf`, which hax uses for `@file`
+completion when available; pass `ci` to skip such extras. On other platforms, install those
+packages by hand and run `make`.
+
+For hacking on hax, `make symlink` links the freshly built binary into `~/.local/bin` so it
+stays on `PATH` across rebuilds, and `make lint` additionally needs `clang-format` and
+`clang-tidy` (`scripts/install_deps.sh lint` installs them).
+
+The examples below use `hax` as if it is on `PATH`; after a plain build, use `./build/hax`.
 
 ## Quick start
 

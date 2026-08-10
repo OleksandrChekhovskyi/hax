@@ -1,34 +1,39 @@
 #!/bin/sh
-# Install the build/test dependencies for the current platform; `lint` additionally
-# installs the lint toolchain (clang-format, clang-tidy). Serves developers and CI
-# alike: package managers prompt as usual on a tty and run unattended without one.
-# Usage: scripts/install_deps.sh [lint]
+# Install the dependencies for building hax on the current platform. The default serves users
+# building from source: the build/test dependencies plus optional tools hax uses when available
+# (fzf, for @file completion). `ci` restricts it to the build/test dependencies; `lint`
+# additionally installs the lint toolchain (clang-format, clang-tidy). Package managers prompt
+# as usual on a tty and run unattended without one.
+# Usage: scripts/install_deps.sh [ci] [lint]
 
 set -eu
 
 usage() {
-    printf '%s\n' 'usage: scripts/install_deps.sh [lint]' >&2
+    printf '%s\n' 'usage: scripts/install_deps.sh [ci] [lint]' >&2
     exit 2
 }
 
-[ $# -le 1 ] || usage
-
+extras=1
 lint=
-case ${1:-} in
-lint)
-    lint=1
-    ;;
-'') ;;
-*)
-    usage
-    ;;
-esac
+for arg; do
+    case $arg in
+    ci)
+        extras=
+        ;;
+    lint)
+        lint=1
+        ;;
+    *)
+        usage
+        ;;
+    esac
+done
 
 if [ -t 0 ]; then
-    apt_yes=
+    assume_yes=
     noconfirm=
 else
-    apt_yes=-y
+    assume_yes=-y
     noconfirm=--noconfirm
 fi
 
@@ -41,7 +46,7 @@ as_root() {
 }
 
 if [ "$(uname)" = Darwin ]; then
-    brew install jansson meson ninja pkg-config ${lint:+llvm}
+    brew install jansson meson ninja pkg-config ${extras:+fzf} ${lint:+llvm}
     exit 0
 fi
 
@@ -50,13 +55,30 @@ fi
 case "$ID ${ID_LIKE:-}" in
 *debian* | *ubuntu*)
     as_root apt-get update
-    as_root apt-get install $apt_yes --no-install-recommends \
+    as_root apt-get install $assume_yes --no-install-recommends \
         build-essential libcurl4-openssl-dev libjansson-dev \
-        meson ninja-build pkg-config python3 \
+        meson ninja-build pkg-config python3 ${extras:+fzf} \
         ${lint:+clang-format clang-tidy}
     ;;
+*fedora* | *rhel* | *centos*)
+    as_root dnf install $assume_yes gcc make libcurl-devel jansson-devel \
+        meson ninja-build pkgconf-pkg-config python3 ${lint:+clang-tools-extra} || {
+        printf '%s\n' 'hint: RHEL-family systems may need the CRB and EPEL repositories enabled' >&2
+        exit 1
+    }
+    # fzf lives in EPEL on RHEL-family distributions, and dnf fails whole
+    # transactions on unknown names; an extra must not cost the required set.
+    if [ -n "$extras" ]; then
+        as_root dnf install $assume_yes fzf ||
+            printf '%s\n' 'warning: fzf unavailable (EPEL not enabled?); skipping' >&2
+    fi
+    ;;
+*suse*)
+    as_root zypper install $assume_yes gcc make libcurl-devel libjansson-devel \
+        meson ninja pkgconf-pkg-config python3 ${extras:+fzf} ${lint:+clang-tools}
+    ;;
 *arch*)
-    arch_pkgs="gcc make curl jansson meson ninja pkgconf python ${lint:+clang}"
+    arch_pkgs="gcc make curl jansson meson ninja pkgconf python ${extras:+fzf} ${lint:+clang}"
     # Disposable containers need the full sync-and-upgrade (a bare -Sy install risks a
     # partial upgrade), but only on explicit opt-in from the CI workflow: `CI` alone also
     # describes self-hosted runners on real machines. Elsewhere only the listed packages
@@ -78,7 +100,7 @@ case "$ID ${ID_LIKE:-}" in
         exit 1
     fi
     as_root apk add --no-cache \
-        build-base meson samurai curl-dev jansson-dev python3
+        build-base meson samurai curl-dev jansson-dev python3 ${extras:+fzf}
     ;;
 *)
     printf "error: unsupported platform '%s'; see README.md for dependencies\n" "$ID" >&2

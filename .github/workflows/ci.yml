@@ -60,7 +60,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install dependencies
-        run: scripts/install_deps.sh ${{ matrix.lint && 'lint' || '' }}
+        run: scripts/install_deps.sh ci ${{ matrix.lint && 'lint' || '' }}
       - name: Build and test
         run: make tests
       - name: Lint

@@ -62,7 +62,7 @@ jobs:
         run: |
           grep -Fq "version: '${GITHUB_REF_NAME#v}'," meson.build
       - name: Install dependencies
-        run: scripts/install_deps.sh
+        run: scripts/install_deps.sh ci
       # `meson dist` archives the sources, then builds and runs the test suite
       # against the unpacked tarball — the artifact is validated as shipped.
       - name: Build and test source tarball
@@ -79,9 +79,54 @@ jobs:
           (cd artifacts && sha256sum -- *.tar.* > SHA256SUMS)
       - name: Extract release notes
         run: scripts/release_notes.py "${GITHUB_REF_NAME#v}" > notes.md
+      # Prerelease tags must not become `releases/latest`, which the README's
+      # install instructions and the tap formula bumps resolve.
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          case "$GITHUB_REF_NAME" in *-*) prerelease=true ;; *) prerelease=false ;; esac
           gh release create "$GITHUB_REF_NAME" --title "hax $GITHUB_REF_NAME" \
-              --notes-file notes.md artifacts/*
+              --prerelease="$prerelease" --notes-file notes.md artifacts/*
+
+  # Points the Homebrew tap's formula at the release just published. Needs
+  # HOMEBREW_TAP_TOKEN, a PAT with push access to the tap repository; the
+  # default workflow token only reaches this repository.
+  homebrew:
+    runs-on: ubuntu-latest
+    needs: release
+    # Homebrew has no prerelease channel: the formula tracks one version, so a
+    # prerelease bump would replace the stable install for every brew user.
+    if: ${{ !contains(github.ref_name, '-') }}
+    timeout-minutes: 10
+    steps:
+      - name: Bump tap formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          test -n "$GH_TOKEN" || { echo 'HOMEBREW_TAP_TOKEN is not set' >&2; exit 1; }
+          version=${GITHUB_REF_NAME#v}
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/hax-$version.tar.xz"
+          curl -fsSLo hax.tar.xz "$url"
+          sha256=$(sha256sum hax.tar.xz | cut -d' ' -f1)
+          git clone --depth 1 \
+              "https://x-access-token:$GH_TOKEN@github.com/OleksandrChekhovskyi/homebrew-hax.git" tap
+          cd tap
+          # Refuse downgrades, so re-running an old release's failed bump after
+          # a newer release has shipped cannot roll the formula back.
+          current=$(sed -n 's/^  url .*hax-\(.*\)\.tar\.xz.*/\1/p' Formula/hax.rb)
+          if [ "$(printf '%s\n' "$current" "$version" | sort -V | tail -1)" != "$version" ]; then
+              echo "tap already at $current, newer than $version; refusing downgrade" >&2
+              exit 1
+          fi
+          # A bottle block, if present, holds checksums of the previous
+          # version's bottles; drop it until bottles are rebuilt.
+          sed -i \
+              -e "s|^  url .*|  url \"$url\"|" \
+              -e "s|^  sha256 .*|  sha256 \"$sha256\"|" \
+              -e '/^  bottle do$/,/^  end$/d' \
+              Formula/hax.rb
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -am "hax $version"
+          git push
