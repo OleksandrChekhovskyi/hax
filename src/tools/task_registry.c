@@ -916,4 +916,7 @@ void task_registry_shutdown(void)
         }
         task_free(t);
     }
+    /* Ids read as conversation-scoped, so a conversation started after a shutdown counts from
+     * t1 again. */
+    next_task_number = 1;
 }

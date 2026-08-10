@@ -541,17 +541,34 @@ static void clear_resume_state(struct agent_state *state)
     state->compaction_deferred = 0;
 }
 
+/* Interactive front for agent_finalize_tasks: announce the stop before the kill. */
+static void finalize_tasks(struct agent_state *state)
+{
+    size_t running_tasks = task_running_count();
+    if (running_tasks > 0) {
+        ui_note("stopping %zu running background task%s", running_tasks,
+                running_tasks == 1 ? "" : "s");
+        disp_sync_external_line(&state->render->disp);
+    }
+    agent_finalize_tasks(state->session, state->transcript, state->session_log);
+}
+
 void agent_new_conversation(struct agent_state *state)
 {
+    finalize_tasks(state);
     clear_resume_state(state);
     agent_session_reset(state->session);
     transcript_log_reset(state->transcript, state->session->system_prompt, state->session->tools,
                          state->session->n_tools);
     session_log_reset(state->session_log);
-    /* Old-turn temporary files are unreachable after history is reset. */
+    /* Old-turn temporary files are unreachable after history is reset. Must follow the task
+     * shutdown: unlinking a live task's advertised spool would leave its log path dangling. */
     tempfiles_cleanup();
     agent_spend_free(&state->stats.spend);
     memset(&state->stats, 0, sizeof(state->stats));
+    /* finalize_tasks' stop note consumed the dispatcher's separator; restore the blank line
+     * before the banner (a no-op when nothing was printed). */
+    disp_block_separator(&state->render->disp);
     banner_print(state->provider, state->session);
 }
 
@@ -656,6 +673,9 @@ void agent_resume_session(struct agent_state *state, const char *path)
         disp_sync_external_line(&state->render->disp);
         return;
     }
+
+    /* Resolve tasks into the conversation being left while its logs still record it. */
+    finalize_tasks(state);
 
     /* Close the prior log before restoring settings so it cannot record the switch. */
     session_log_close(state->session_log);
@@ -1325,7 +1345,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
                              session.model, session.model_label, session.effort,
                              config_str("preset"));
         /* Persist the prompt before entering a provider call that may hang or be interrupted. */
-        agent_loop_flush_logs(transcript, state.session_log, session.items, session.n_items);
+        agent_flush_logs(transcript, state.session_log, session.items, session.n_items);
 
         /* Start the one-per-run catalog refresh while the model generates; warn only when stale
          * data may distort estimates. */
@@ -1432,23 +1452,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             notify_attention();
     }
 
-    size_t running_tasks = task_running_count();
-    if (running_tasks > 0)
-        ui_note("stopping %zu running background task%s", running_tasks,
-                running_tasks == 1 ? "" : "s");
-    /* Resolve every uncollected task in the record — final status for finished ones,
-     * killed-at-exit for the rest — so a resumed session never dangles on a
-     * "[detached as task ...]" report or advertises output this exit destroys. */
-    char *exit_note = task_exit_note();
-    if (exit_note) {
-        agent_session_append(&session, (struct item){
-                                           .kind = ITEM_USER_MESSAGE,
-                                           .text = exit_note,
-                                           .origin = ITEM_ORIGIN_TASK_NOTE,
-                                       });
-        agent_loop_flush_logs(transcript, state.session_log, session.items, session.n_items);
-    }
-    task_registry_shutdown();
+    finalize_tasks(&state);
 
     const char *resume_hint = session_log_resume_hint(state.session_log);
     if (resume_hint)

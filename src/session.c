@@ -716,6 +716,12 @@ void session_log_set_meta(struct session_log *log, const char *provider, const c
         log->selection_pending = 1;
 }
 
+void session_log_discard_selection(struct session_log *log)
+{
+    if (log)
+        log->selection_pending = 0;
+}
+
 void session_log_reset(struct session_log *log)
 {
     if (!log)

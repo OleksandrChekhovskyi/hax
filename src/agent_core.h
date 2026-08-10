@@ -7,6 +7,12 @@
 #include "provider.h"
 #include "tool.h"
 
+/* State and conversation-record bookkeeping shared by the interactive and one-shot frontends:
+ * the canonical flat item log (struct agent_session) with its views and mutators, and the
+ * helpers that keep the record consistent with its logs and background tasks. Anything here
+ * must behave identically in both frontends and needs no live provider stream — provider
+ * round-trips belong in agent_loop, presentation in the frontends. */
+
 /* Synthetic history content used to keep interrupted or refused tool turns well formed. */
 #define INTERRUPT_MARKER "[interrupted]"
 #define REFUSED_RESULT   "error: tool calls are disabled in this session"
@@ -101,5 +107,20 @@ struct agent_absorb_result {
 
 /* Transfer completed turn items into the session. The caller still owns and resets `turn`. */
 struct agent_absorb_result agent_session_absorb(struct agent_session *session, struct turn *turn);
+
+struct transcript_log;
+struct session_log;
+
+/* Record items both logs have not seen yet; NULL-safe on either log. */
+void agent_flush_logs(struct transcript_log *tlog, struct session_log *slog,
+                      const struct item *items, size_t n_items);
+
+/* Resolve every uncollected background task into the conversation record — final status for
+ * finished ones, killed-at-exit for the rest — flush the logs, and kill whatever still runs.
+ * Tasks belong to the conversation that started them: call this before its record is replaced
+ * or closed, so it never dangles on a "[detached as task ...]" report or advertises output the
+ * shutdown destroys, and no completion is announced into an unrelated conversation. */
+void agent_finalize_tasks(struct agent_session *session, struct transcript_log *tlog,
+                          struct session_log *slog);
 
 #endif /* HAX_AGENT_CORE_H */

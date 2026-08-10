@@ -14,6 +14,13 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   give the task a last window to finish on its own. Stopping a task and collecting its output
   no longer takes two model round trips.
 
+### Fixed
+
+- `/new` and `/resume` now stop running background tasks and record each task's final state in
+  the conversation being left, as quitting always did. Completed work no longer announces
+  itself into a conversation that never started it, and task ids restart at `t1` with each
+  fresh conversation.
+
 ## [0.2.0] - 2026-08-08
 
 ### Added

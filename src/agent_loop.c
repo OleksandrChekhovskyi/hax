@@ -10,7 +10,6 @@
 #include "compact.h"
 #include "model_meta.h"
 #include "provider.h"
-#include "session.h"
 #include "tool.h"
 #include "transcript.h"
 #include "turn.h"
@@ -72,7 +71,11 @@ void agent_loop_turn_destroy(struct agent_loop_turn *loop_turn)
     loop_turn->error_message = NULL;
 }
 
-int agent_loop_turn_has_state(const struct agent_loop_turn *loop_turn)
+/* True when the turn's stream produced anything at all — finished items, open text/reasoning,
+ * or a pending tool call. Abort repair appends items exactly when this holds (plus the
+ * always-marked user-cancel case), so the loop also uses it to decide whether a follow-up
+ * turn's boundary is owed. */
+static int agent_loop_turn_has_state(const struct agent_loop_turn *loop_turn)
 {
     const struct turn *assembly = &loop_turn->assembly;
     return assembly->has_text || assembly->has_reasoning || assembly->n_pending_calls > 0 ||
@@ -133,13 +136,6 @@ struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *se
         .items_from = items_from,
         .items_to = items_to,
     };
-}
-
-void agent_loop_flush_logs(struct transcript_log *tlog, struct session_log *slog,
-                           const struct item *items, size_t n_items)
-{
-    transcript_log_append(tlog, items, n_items);
-    session_log_append(slog, items, n_items);
 }
 
 static int loop_checkpoint(const struct agent_loop_hooks *hooks)
@@ -205,8 +201,7 @@ static void loop_add_usage(const struct agent_loop_params *params,
 
 static void loop_flush(const struct agent_loop_params *params)
 {
-    agent_loop_flush_logs(params->tlog, params->slog, params->session->items,
-                          params->session->n_items);
+    agent_flush_logs(params->tlog, params->slog, params->session->items, params->session->n_items);
 }
 
 static void loop_run_active(const struct agent_loop_params *params,

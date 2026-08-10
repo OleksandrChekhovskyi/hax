@@ -5,6 +5,10 @@
 #include "tool.h"
 #include "render/render_ctx.h"
 
+/* Tool-call execution fused with its interactive presentation: dispatch_* run, refuse, or skip
+ * a model call while rendering its tool block live; the render_* halves are also used alone to
+ * replay recorded calls. */
+
 /* Render and run a tool call. The returned ITEM_TOOL_RESULT owns its fields. */
 struct item dispatch_tool_call(struct render_ctx *render, const struct item *call, int image_input);
 

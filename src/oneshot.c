@@ -20,7 +20,6 @@
 #include "terminal/ansi.h"
 #include "terminal/interrupt.h"
 #include "tools/bash_process.h"
-#include "tools/task_registry.h"
 
 struct oneshot_state {
     struct provider *provider;
@@ -185,20 +184,6 @@ static int handle_loop_result(const struct oneshot_state *state,
     return 1;
 }
 
-static void finalize_tasks(struct oneshot_state *state)
-{
-    /* Record the terminal state before shutdown destroys uncollected task output. */
-    char *exit_note = task_exit_note();
-    if (exit_note) {
-        agent_session_append(&state->session, (struct item){
-                                                  .kind = ITEM_USER_MESSAGE,
-                                                  .text = exit_note,
-                                                  .origin = ITEM_ORIGIN_TASK_NOTE,
-                                              });
-    }
-    task_registry_shutdown();
-}
-
 static void print_stats_line(const struct oneshot_state *state, double spend, int spend_approx,
                              int tty)
 {
@@ -281,8 +266,8 @@ int oneshot_run(struct provider *provider, const char *prompt, const struct hax_
 
     agent_session_add_user(&state.session, prompt);
     /* Persist the triggering prompt before entering a provider call that may not return. */
-    agent_loop_flush_logs(state.transcript, state.session_log, state.session.items,
-                          state.session.n_items);
+    agent_flush_logs(state.transcript, state.session_log, state.session.items,
+                     state.session.n_items);
     print_start_banner(&state, options);
 
     state.started_ms = monotonic_ms();
@@ -312,9 +297,7 @@ int oneshot_run(struct provider *provider, const char *prompt, const struct hax_
     int result = handle_loop_result(&state, &loop_result, max_turns);
     agent_loop_result_destroy(&loop_result);
 
-    finalize_tasks(&state);
-    agent_loop_flush_logs(state.transcript, state.session_log, state.session.items,
-                          state.session.n_items);
+    agent_finalize_tasks(&state.session, state.transcript, state.session_log);
     print_exit_notes(&state);
     oneshot_state_destroy(&state);
     return result;

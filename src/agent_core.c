@@ -10,11 +10,14 @@
 #include "effort.h"
 #include "model_meta.h"
 #include "provider.h"
+#include "session.h"
 #include "tool.h"
+#include "transcript.h"
 #include "turn.h"
 #include "util.h"
 #include "providers/registry.h"
 #include "tools/bash_env.h"
+#include "tools/task_registry.h"
 
 /* Dynamic environment and project guidance are appended by build_system_prompt. */
 static const char DEFAULT_SYSTEM_PROMPT[] =
@@ -404,4 +407,29 @@ struct agent_absorb_result agent_session_absorb(struct agent_session *session, s
     }
     free(items);
     return result;
+}
+
+void agent_flush_logs(struct transcript_log *tlog, struct session_log *slog,
+                      const struct item *items, size_t n_items)
+{
+    transcript_log_append(tlog, items, n_items);
+    session_log_append(slog, items, n_items);
+}
+
+void agent_finalize_tasks(struct agent_session *session, struct transcript_log *tlog,
+                          struct session_log *slog)
+{
+    /* Record the terminal state before the shutdown destroys uncollected output. */
+    char *exit_note = task_exit_note();
+    if (exit_note)
+        agent_session_append(session, (struct item){
+                                          .kind = ITEM_USER_MESSAGE,
+                                          .text = exit_note,
+                                          .origin = ITEM_ORIGIN_TASK_NOTE,
+                                      });
+    /* The note is bookkeeping, not a turn: it must not commit a staged selection (such as a
+     * `/new <preset>` meant for the next conversation) into the record being left. */
+    session_log_discard_selection(slog);
+    agent_flush_logs(tlog, slog, session->items, session->n_items);
+    task_registry_shutdown();
 }

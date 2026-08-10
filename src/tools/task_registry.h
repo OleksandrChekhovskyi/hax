@@ -87,7 +87,9 @@ size_t task_list(struct task_info **rows_out);
 
 size_t task_running_count(void);
 
-/* Kill every remaining process tree, join drainers, and free all state. Idempotent. */
+/* Kill every remaining process tree, join drainers, and free all state; automatic id
+ * numbering restarts at t1. Idempotent. Called at process exit and whenever the conversation
+ * that started the tasks is left, so tasks outlive neither. */
 void task_registry_shutdown(void);
 
 #endif /* HAX_TOOLS_TASK_REGISTRY_H */

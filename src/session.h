@@ -61,6 +61,11 @@ void session_log_append(struct session_log *log, const struct item *items, size_
 void session_log_set_meta(struct session_log *log, const char *provider, const char *model,
                           const char *model_label, const char *effort, const char *preset);
 
+/* Drop a staged, unwritten selection record so the next append does not commit it. For a log
+ * about to be closed or reset: a synthetic conversation-ending append must not record a
+ * selection no turn has used. */
+void session_log_discard_selection(struct session_log *log);
+
 /* Closes the current file and prepares a lazily materialized session with a fresh identity. */
 void session_log_reset(struct session_log *log);
 void session_log_close(struct session_log *log);

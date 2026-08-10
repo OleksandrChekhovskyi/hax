@@ -8,6 +8,12 @@
 #include "provider.h"
 #include "turn.h"
 
+/* Continuation engine shared by the frontends: drive one user turn through provider
+ * round-trips — stream a response, absorb it into the session, dispatch the requested tools,
+ * repeat until the model stops calling tools — including abort repair and finished-task notes
+ * at turn seams. Presentation and cancellation come in through hooks; record bookkeeping that
+ * stands alone without a stream belongs in agent_core. */
+
 /* One provider stream() call and the state assembled from its events. */
 struct agent_loop_turn {
     struct turn assembly;
@@ -39,12 +45,6 @@ struct agent_abort_outcome {
     size_t items_to;
 };
 
-/* True when the turn's stream produced anything at all — finished items,
- * open text/reasoning, or a pending tool call. Abort repair appends items
- * exactly when this holds (plus the always-marked user-cancel case), so the
- * loop uses it to decide whether a follow-up turn's boundary is owed. */
-int agent_loop_turn_has_state(const struct agent_loop_turn *loop_turn);
-
 /* Preserve partial output from an aborted turn and keep history well formed:
  * tag partial text, absorb completed items, synthesize results for calls that
  * were never run, and add a standalone marker when the abort policy requires
@@ -56,9 +56,6 @@ struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *se
 
 struct transcript_log;
 struct session_log;
-
-void agent_loop_flush_logs(struct transcript_log *tlog, struct session_log *slog,
-                           const struct item *items, size_t n_items);
 
 enum agent_loop_tool_action {
     AGENT_LOOP_TOOL_RUN,

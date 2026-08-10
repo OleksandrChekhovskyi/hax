@@ -62,11 +62,13 @@ struct agent_state {
  * The caller retains ownership of the provider left in *provider_io on return. */
 int agent_run(struct provider **provider_io, const struct hax_opts *options);
 
-/* Reset conversation history, logs, tracked temporary files, and per-conversation statistics. */
+/* Reset conversation history, logs, tracked temporary files, and per-conversation statistics.
+ * Background tasks are resolved in the outgoing record and stopped. */
 void agent_new_conversation(struct agent_state *state);
 
-/* Replace the live conversation with `path` and continue recording there. A load failure is
- * reported and leaves the current conversation unchanged. */
+/* Replace the live conversation with `path` and continue recording there, resolving and
+ * stopping the current conversation's background tasks. A load failure is reported and leaves
+ * the current conversation unchanged, its tasks still running. */
 void agent_resume_session(struct agent_state *state, const char *path);
 
 /* Count typed user prompts; synthetic compaction and continuation messages are excluded. */

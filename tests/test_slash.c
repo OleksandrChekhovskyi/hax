@@ -37,17 +37,6 @@ double agent_session_spend(const struct session_stats *stats, int *estimated)
 }
 
 /* Scriptable picker state distinguishes cancellation from an unavailable picker. */
-struct session_log;
-const char *session_log_path(const struct session_log *log)
-{
-    (void)log;
-    return NULL;
-}
-const char *session_log_resume_hint(const struct session_log *log)
-{
-    (void)log;
-    return NULL;
-}
 static int stub_picker_shown = 0;
 static const char *stub_picker_path = NULL;
 char *session_picker_run(const char *cwd, const char *exclude_path, int *shown)

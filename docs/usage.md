@@ -332,8 +332,10 @@ is busy elsewhere, a one-line note is delivered with the model's next request, s
 polling. A task tracks the shell itself, so processes that detach from it (a trailing `&`) are
 killed when the shell exits rather than left running untracked.
 
-Tasks belong to the hax process: `/tasks` lists and stops them, quitting or dying by a signal
-stops the running ones, and in `-p` mode any task nobody waited on is killed once the final
+Tasks belong to the conversation that started them: `/tasks` lists and stops them, and leaving
+that conversation — `/new`, `/resume`, or quitting — stops the running ones and records each
+task's final state in the session file being left behind. Dying by a signal kills the running
+tasks too, but records nothing. In `-p` mode any task nobody waited on is killed once the final
 answer is printed.
 
 `no_tasks` / `HAX_NO_TASKS=1` disables the whole mechanism, restoring kill-at-timeout bash.

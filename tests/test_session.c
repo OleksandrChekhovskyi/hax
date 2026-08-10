@@ -700,6 +700,30 @@ static void test_selection_metadata_tracks_productive_switches(void)
     free(path);
 }
 
+static void test_discarded_selection_stays_out_of_log(void)
+{
+    use_fresh_session_state();
+    struct session_log *log = session_log_open("pa", "ma", NULL, NULL, NULL);
+    EXPECT(log != NULL);
+    char *path = xstrdup(session_log_path(log));
+    session_log_append(log, UNDO_CONVERSATION, 3);
+
+    /* A selection staged for the next conversation (a `/new <preset>`) must not ride a
+     * synthetic conversation-ending append into this record. */
+    session_log_set_meta(log, "pb", "mb", NULL, NULL, "next");
+    session_log_discard_selection(log);
+    session_log_append(log, UNDO_CONVERSATION, 6);
+    session_log_close(log);
+
+    struct session_meta meta;
+    EXPECT(session_read_meta(path, &meta) == 0);
+    EXPECT_STR_EQ(meta.provider, "pa");
+    EXPECT_STR_EQ(meta.model, "ma");
+    EXPECT(meta.preset == NULL);
+    session_meta_free(&meta);
+    free(path);
+}
+
 static void test_truncate_restates_live_selection(void)
 {
     use_fresh_session_state();
@@ -844,6 +868,7 @@ int main(void)
     test_truncate_all_turns();
     test_fork_copies_prefix_without_touching_source();
     test_selection_metadata_tracks_productive_switches();
+    test_discarded_selection_stays_out_of_log();
     test_truncate_restates_live_selection();
     test_read_meta_failure_initializes_output();
     test_session_readers_reject_fifo();

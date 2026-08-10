@@ -7,7 +7,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "agent_core.h"
 #include "harness.h"
+#include "provider.h"
 #include "tool.h"
 #include "util.h"
 #include "tools/bash_process.h"
@@ -420,6 +422,49 @@ static void test_shutdown_kills_running_tasks(void)
     if (alive)
         kill(pid, SIGKILL);
     EXPECT(!alive);
+
+    /* Numbering restarts with the emptied registry: the next conversation counts from t1. */
+    char *gate = gate_create();
+    cmd = xasprintf("read -r _ <%s", gate);
+    out = call_bash_background(cmd);
+    free(cmd);
+    EXPECT(strstr(out, "[detached as task t1]") != NULL);
+    free(out);
+    gate_release(gate);
+    free(gate);
+    free(wait_for_id("t1", 5));
+    unsetenv("HAX_BASH_BACKGROUND_YIELD");
+}
+
+static void test_finalize_tasks_resolves_record(void)
+{
+    setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
+    char *out = call_bash_background("sleep 30");
+    char *id = extract_task_id(out);
+    EXPECT(id != NULL);
+    free(out);
+
+    /* NULL logs are valid; only the in-memory record is asserted here. */
+    struct agent_session session = {0};
+    agent_finalize_tasks(&session, NULL, NULL);
+    EXPECT(session.n_items == 1);
+    if (session.n_items == 1 && id) {
+        EXPECT(session.items[0].kind == ITEM_USER_MESSAGE);
+        EXPECT(session.items[0].origin == ITEM_ORIGIN_TASK_NOTE);
+        char *expected = xasprintf("[task %s killed at exit]", id);
+        EXPECT_STR_EQ(session.items[0].text, expected);
+        free(expected);
+    }
+    EXPECT(task_running_count() == 0);
+
+    /* Nothing left to resolve: a repeated finalize appends no note. */
+    agent_finalize_tasks(&session, NULL, NULL);
+    EXPECT(session.n_items == 1);
+
+    for (size_t i = 0; i < session.n_items; i++)
+        item_free(&session.items[i]);
+    free(session.items);
+    free(id);
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }
 
@@ -607,6 +652,7 @@ int main(void)
     test_kill_grace_covers_redirected_cleanup();
     test_task_list_snapshots_running_task();
     test_shutdown_kills_running_tasks();
+    test_finalize_tasks_resolves_record();
     test_fatal_hook_kills_task_groups();
     test_running_task_cap_enforced();
     test_no_tasks_disables_background_and_tools();
