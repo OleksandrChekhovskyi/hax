@@ -16,34 +16,40 @@
 #include "terminal/ansi.h"
 #include "terminal/interrupt.h"
 #include "terminal/theme.h"
+#include "terminal/ui.h"
+#include "terminal/width.h"
+#include "text/width.h"
 #include "tools/bash_env.h"
 
 static const struct help_option {
     const char *flags;
     const char *description;
 } HELP_OPTIONS[] = {
-    {"-p, --print", "Non-interactive mode. Runs the prompt to completion and prints the final\n"
-                    "assistant message to stdout. The prompt comes from PROMPT positional\n"
-                    "arguments (joined with spaces) when given, otherwise from stdin if stdin\n"
-                    "is not a terminal."},
+    {"-p, --print",
+     "Non-interactive mode. Runs the prompt to completion and prints the final assistant "
+     "message to stdout. The prompt comes from PROMPT positional arguments (joined with "
+     "spaces) when given, otherwise from stdin if stdin is not a terminal."},
     {"-c, --continue", "Resume the most recent conversation in this directory."},
-    {"--resume[=ID]", "Resume a past conversation in this directory. With no ID, pick one from\n"
-                      "an interactive list; with a session ID, resume it directly — the ID form\n"
-                      "also works with -p."},
-    {"--no-session", "Don't record this conversation: nothing to resume afterwards, and\n"
-                     "the prompts you type aren't added to Ctrl-R recall. Earlier\n"
-                     "sessions and prompts stay readable."},
-    {"--raw", "Send only the prompt text — no system prompt, no Environment section,\n"
-              "no AGENTS.md, no skills, and no tools. Useful as a barebones chat\n"
-              "interface."},
-    {"--bare", "Run without project and delegation context — no AGENTS.md, skills, or\n"
-               "subagents section. The Environment section, tools, and base system prompt\n"
-               "remain (unlike --raw)."},
+    {"--resume[=ID]",
+     "Resume a past conversation in this directory. With no ID, pick one from an interactive "
+     "list; with a session ID, resume it directly — the ID form also works with -p. Resuming "
+     "restores the provider, model, effort, and preset the conversation was last using; the "
+     "selection flags override them."},
+    {"--no-session",
+     "Don't record this conversation: nothing to resume afterwards, and the prompts you type "
+     "aren't added to Ctrl-R recall. Earlier sessions and prompts stay readable."},
+    {"--raw",
+     "Send only the prompt text — no system prompt, no Environment section, no AGENTS.md, no "
+     "skills, and no tools. Useful as a barebones chat interface."},
+    {"--bare",
+     "Run without project and delegation context — no AGENTS.md, skills, or subagents "
+     "section. The Environment section, tools, and base system prompt remain (unlike --raw)."},
     {"--provider=NAME", "Select the backend for this run."},
     {"--model=ID", "Select the model for this run."},
     {"--effort=LEVEL", "Select the reasoning effort for this run."},
-    {"--preset=NAME", "Apply the named preset — a presets.NAME selection from the config\n"
-                      "file. Explicit selection flags win over the preset's values."},
+    {"--preset=NAME",
+     "Apply the named preset — a presets.NAME selection from the config file. Explicit "
+     "selection flags win over the preset's values."},
     {"-h, --help", "Show this help and exit."},
     {"-v, --version", "Show version and exit."},
 };
@@ -54,11 +60,24 @@ void cli_print_help(void)
     const char *chrome = output_is_tty ? theme_open(THEME_CHROME) : "";
     const char *bold = output_is_tty ? ANSI_BOLD : "";
     const char *reset = output_is_tty ? ANSI_RESET : "";
+    int columns = display_width();
 
-    printf("%shax %s%s — a minimalist coding assistant in your terminal\n\n", bold, HAX_VERSION,
-           reset);
-    printf("%susage:%s hax [OPTIONS] [PROMPT...]\n\n", bold, reset);
-    printf("With no arguments, runs an interactive REPL.\n\n");
+    const char *tagline = "a minimalist coding assistant in your terminal";
+    int name_cells = (int)strlen("hax ") + (int)strlen(HAX_VERSION);
+    if (name_cells + 3 + (int)display_cells(tagline) <= columns) {
+        printf("%shax %s%s — %s\n", bold, HAX_VERSION, reset, tagline);
+    } else {
+        printf("%shax %s%s\n", bold, HAX_VERSION, reset);
+        ui_wrapped_rows(tagline, 0, columns, "");
+    }
+    fputc('\n', stdout);
+
+    printf("%susage:%s ", bold, reset);
+    ui_wrapped_rows("hax [OPTIONS] [PROMPT...]", (int)strlen("usage: "), columns, "");
+    fputc('\n', stdout);
+
+    ui_wrapped_rows("With no arguments, runs an interactive REPL.", 0, columns, "");
+    fputc('\n', stdout);
     printf("%soptions%s\n", bold, reset);
 
     size_t flag_width = 0;
@@ -67,26 +86,15 @@ void cli_print_help(void)
         if (width > flag_width)
             flag_width = width;
     }
-    for (size_t i = 0; i < sizeof(HELP_OPTIONS) / sizeof(*HELP_OPTIONS); i++) {
-        const struct help_option *option = &HELP_OPTIONS[i];
-        printf("  %s%s%s%*s", chrome, option->flags, reset,
-               (int)(flag_width - strlen(option->flags) + 2), "");
-        for (const char *line = option->description; *line;) {
-            const char *line_end = strchr(line, '\n');
-            size_t line_length = line_end ? (size_t)(line_end - line) : strlen(line);
-            if (line != option->description)
-                printf("%*s", (int)(flag_width + 4), "");
-            printf("%.*s\n", (int)line_length, line);
-            line += line_length + (line_end != NULL);
-        }
-    }
+    for (size_t i = 0; i < sizeof(HELP_OPTIONS) / sizeof(*HELP_OPTIONS); i++)
+        ui_label_row(HELP_OPTIONS[i].flags, chrome, HELP_OPTIONS[i].description, "",
+                     (int)flag_width + 4, columns);
 
-    printf("\nThe selection flags (--provider, --model, --effort, --preset) apply to this run\n"
-           "only and take priority over every other source. Resuming a conversation restores\n"
-           "the provider, model, effort, and preset it was last using, which the flags\n"
-           "override. Persistent configuration is via environment variables (HAX_PROVIDER,\n"
-           "HAX_MODEL, and the rest), saved runtime picks, then ~/.config/hax/config.json —\n"
-           "in that order. See README.md.\n");
+    fputc('\n', stdout);
+    ui_wrapped_rows("The selection flags (--provider, --model, --effort, --preset) apply to "
+                    "this run only and take priority over every other source. Configuration "
+                    "and precedence are covered in README.md.",
+                    0, columns, "");
 }
 
 static const char *empty_selection_flag(const struct cli_selection *selection)

@@ -2,7 +2,8 @@
 #ifndef HAX_TERMINAL_WIDTH_H
 #define HAX_TERMINAL_WIDTH_H
 
-/* Physical terminal width on stdout, or 120 when unavailable. */
+/* Physical terminal width on stdout, or 100 (matching DISPLAY_WIDTH_CAP) when stdout is not a
+ * terminal or the size query fails. */
 int term_width(void);
 
 #define DISPLAY_WIDTH_CAP       100

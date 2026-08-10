@@ -12,7 +12,7 @@ int term_width(void)
     struct winsize ws;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
         return ws.ws_col;
-    return 120;
+    return 100;
 }
 
 int auto_display_width(int terminal_width)

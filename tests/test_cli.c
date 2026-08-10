@@ -9,6 +9,7 @@
 #include "provider.h"
 #include "session.h"
 #include "util.h"
+#include "text/width.h"
 
 static void test_parse_selection_and_prompt_arguments(void)
 {
@@ -114,6 +115,70 @@ static void test_parse_version_prints_and_exits(void)
         EXPECT(strncmp(line, "hax ", 4) == 0);
         EXPECT(strlen(line) > 5 && line[strlen(line) - 1] == '\n');
     }
+}
+
+static char *capture_help_output(void)
+{
+    fflush(stdout);
+    int saved = dup(STDOUT_FILENO);
+    EXPECT(saved >= 0);
+    FILE *tmp = tmpfile();
+    EXPECT(tmp != NULL);
+    EXPECT(dup2(fileno(tmp), STDOUT_FILENO) >= 0);
+
+    char *argv[] = {"hax", "--help", NULL};
+    struct cli_options options;
+    enum cli_parse_result result = cli_parse(2, argv, &options);
+
+    fflush(stdout);
+    EXPECT(dup2(saved, STDOUT_FILENO) >= 0);
+    close(saved);
+    EXPECT(result == CLI_PARSE_EXIT);
+
+    EXPECT(fseek(tmp, 0, SEEK_END) == 0);
+    long size = ftell(tmp);
+    EXPECT(size > 0);
+    EXPECT(fseek(tmp, 0, SEEK_SET) == 0);
+    char *out = xmalloc((size_t)size + 1);
+    EXPECT(fread(out, 1, (size_t)size, tmp) == (size_t)size);
+    out[size] = '\0';
+    fclose(tmp);
+    return out;
+}
+
+static void expect_help_rows_fit(const char *out, size_t max_cells)
+{
+    const char *row = out;
+    while (row && *row) {
+        const char *end = strchr(row, '\n');
+        size_t row_bytes = end ? (size_t)(end - row) : strlen(row);
+        char *copy = xmalloc(row_bytes + 1);
+        memcpy(copy, row, row_bytes);
+        copy[row_bytes] = '\0';
+        if (display_cells(copy) > max_cells)
+            FAIL("row exceeds %zu cells: %s", max_cells, copy);
+        free(copy);
+        row = end ? end + 1 : NULL;
+    }
+}
+
+static void test_help_wraps_to_display_width(void)
+{
+    setenv("HAX_DISPLAY_WIDTH", "60", 1);
+    char *out = capture_help_output();
+    EXPECT(strstr(out, "usage:") != NULL);
+    EXPECT(strstr(out, "--resume[=ID]") != NULL);
+    EXPECT(strstr(out, "README.md") != NULL);
+    expect_help_rows_fit(out, 60);
+    free(out);
+
+    /* Narrow widths drop the flag column and stack descriptions under their flags. */
+    setenv("HAX_DISPLAY_WIDTH", "30", 1);
+    out = capture_help_output();
+    unsetenv("HAX_DISPLAY_WIDTH");
+    expect_help_rows_fit(out, 30);
+    EXPECT(strstr(out, "barebones chat") != NULL);
+    free(out);
 }
 
 static FILE *prompt_stream(const char *text)
@@ -271,11 +336,13 @@ static void test_subagent_depth_validation(void)
 
 int main(void)
 {
+    locale_init_utf8();
     test_parse_selection_and_prompt_arguments();
     test_parse_resume_modes();
     test_parse_rejects_incompatible_resume_options();
     test_parse_rejects_missing_values_and_interactive_prompt();
     test_parse_version_prints_and_exits();
+    test_help_wraps_to_display_width();
     test_read_prompt_from_stream();
     test_read_prompt_rejects_missing_or_empty_input();
     test_resolve_missing_session();

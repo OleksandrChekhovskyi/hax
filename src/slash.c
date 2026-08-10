@@ -502,60 +502,17 @@ static void run_copy(const struct command_call *call)
 /* ---------- task and session status ---------- */
 
 #define SESSION_LABEL_WIDTH 14
-/* Below this value budget the label column is dropped and values stack under their labels. */
-#define ROW_VALUE_MIN_CELLS 20
-#define ROW_STACKED_INDENT  4
-
-static void pad_spaces(int n)
-{
-    for (int i = 0; i < n; i++)
-        fputc(' ', stdout);
-}
-
-/* Print `text` word-wrapped at `columns` with continuation rows padded to `indent`; the cursor
- * already sits at `indent`. Embedded newlines force row breaks. Styling wraps each row so runs
- * never span physical lines. */
-static void print_wrapped_rows(const char *text, int indent, int columns, const char *style_open,
-                               const char *style_close)
-{
-    int budget = columns - indent;
-    if (budget < 1)
-        budget = 1;
-    int first = 1;
-    while (*text || first) {
-        size_t separator_bytes = 0;
-        size_t row_bytes = *text ? wrap_row_bytes(text, (size_t)budget, &separator_bytes) : 0;
-        if (!first)
-            pad_spaces(indent);
-        if (*style_open)
-            fputs(style_open, stdout);
-        fwrite(text, 1, row_bytes, stdout);
-        if (*style_open)
-            fputs(style_close, stdout);
-        fputc('\n', stdout);
-        text += row_bytes + separator_bytes;
-        first = 0;
-    }
-}
 
 /* Indent of value rows; also decides between the aligned label column and stacked layout. */
 static int session_value_indent(int columns)
 {
     int value_column = 2 + SESSION_LABEL_WIDTH;
-    return columns - value_column >= ROW_VALUE_MIN_CELLS ? value_column : ROW_STACKED_INDENT;
+    return columns - value_column >= UI_ROW_MIN_TEXT_CELLS ? value_column : UI_ROW_STACKED_INDENT;
 }
 
 static void print_session_row(const char *label, const char *value)
 {
-    int columns = display_width();
-    int indent = session_value_indent(columns);
-    if (indent == ROW_STACKED_INDENT) {
-        printf("  " ANSI_DIM "%s" ANSI_RESET "\n", label);
-        pad_spaces(indent);
-    } else {
-        printf("  " ANSI_DIM "%-*s" ANSI_RESET, SESSION_LABEL_WIDTH, label);
-    }
-    print_wrapped_rows(value, indent, columns, ANSI_DIM, ANSI_RESET);
+    ui_label_row(label, ANSI_DIM, value, ANSI_DIM, 2 + SESSION_LABEL_WIDTH, display_width());
 }
 
 /* Unknown and negligible cost estimates are omitted. The returned length may exceed the buffer. */
@@ -782,24 +739,11 @@ static void run_usage(const struct command_call *call)
 
 /* ---------- /help ---------- */
 
-/* Labels are ASCII, so byte length equals cell width. */
 static void print_help_row(const char *label, const char *label_color, const char *summary,
                            int dimmed, int description_column, int columns)
 {
-    fputs("  ", stdout);
-    fputs(label_color, stdout);
-    fputs(label, stdout);
-    fputs(ANSI_RESET, stdout);
-    const char *style_open = dimmed ? ANSI_DIM : "";
-    int summary_column = 2 + description_column;
-    if (columns - summary_column >= ROW_VALUE_MIN_CELLS) {
-        pad_spaces(description_column - (int)strlen(label));
-        print_wrapped_rows(summary, summary_column, columns, style_open, ANSI_RESET);
-    } else {
-        fputc('\n', stdout);
-        pad_spaces(ROW_STACKED_INDENT);
-        print_wrapped_rows(summary, ROW_STACKED_INDENT, columns, style_open, ANSI_RESET);
-    }
+    ui_label_row(label, label_color, summary, dimmed ? ANSI_DIM : "", 2 + description_column,
+                 columns);
 }
 
 static void print_command_row(const char *name, const char *summary, int dimmed,
