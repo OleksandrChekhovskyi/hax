@@ -23,6 +23,7 @@
 #include "terminal/ansi.h"
 #include "terminal/input_core.h"
 #include "terminal/theme.h"
+#include "terminal/ui.h"
 #include "terminal/width.h"
 #include "text/utf8.h"
 #include "text/utf8_sanitize.h"
@@ -629,11 +630,48 @@ static void erase_edit_area(struct input *in)
 
 /* ---------------- $EDITOR escape ---------------- */
 
+/* Probe candidates because minimal installs ship few or no editors; `editor` is Debian's
+ * alternatives name. A broken $VISUAL/$EDITOR is an error, not a fallback trigger — silently
+ * substituting would hide it. Returns NULL after reporting why. */
+static const char *resolve_editor(void)
+{
+    static const char *const FALLBACKS[] = {"editor", "nano", "vim", "vi"};
+
+    const char *source = "$VISUAL";
+    const char *configured = getenv("VISUAL");
+    if (!configured || !*configured) {
+        source = "$EDITOR";
+        configured = getenv("EDITOR");
+    }
+    if (configured && *configured) {
+        if (fs_shell_head_resolves(configured))
+            return configured;
+        ui_error("%s (%s) not found — fix it, or unset it to use a fallback", source, configured);
+        return NULL;
+    }
+    for (size_t i = 0; i < sizeof(FALLBACKS) / sizeof(FALLBACKS[0]); i++) {
+        char *found = fs_which(FALLBACKS[i]);
+        if (found) {
+            free(found);
+            return FALLBACKS[i];
+        }
+    }
+    ui_error("no editor found — install one or set $EDITOR");
+    return NULL;
+}
+
 static void open_editor(struct input *in)
 {
     /* Alternate-screen editors restore the cursor to this cleared position. */
     erase_edit_area(in);
     disable_raw_mode(in);
+
+    const char *editor = resolve_editor();
+    if (!editor) {
+        /* No disp in modal context; restore the block gap before the repainted prompt. */
+        putchar('\n');
+        goto reenter;
+    }
 
     char path[] = "/tmp/hax-edit-XXXXXX";
     int fd = mkstemp(path);
@@ -646,13 +684,8 @@ static void open_editor(struct input *in)
     }
     close(fd);
 
-    const char *editor = getenv("VISUAL");
-    if (!editor || !*editor)
-        editor = getenv("EDITOR");
-    if (!editor || !*editor)
-        editor = "vi";
-
-    /* The mkstemp path is shell-safe; VISUAL/EDITOR is trusted user configuration. */
+    /* The mkstemp path is shell-safe; VISUAL/EDITOR is trusted user configuration and the
+     * probed fallbacks are bare command names. */
     char *cmd = xasprintf("%s '%s'", editor, path);
     int status = spawn_shell_wait(cmd);
     free(cmd);

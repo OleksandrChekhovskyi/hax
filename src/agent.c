@@ -31,6 +31,7 @@
 #include "render/markdown.h"
 #include "render/render_ctx.h"
 #include "render/spinner.h"
+#include "system/fs.h"
 #include "system/spawn.h"
 #include "system/tempfiles.h"
 #include "terminal/ansi.h"
@@ -329,12 +330,47 @@ static void cursor_hide(void)
     fflush(stdout);
 }
 
-/* Default to `less -R` so the pager interprets ANSI color. */
+/* Prefer `less -R` so the pager renders ANSI color; fall back to `more` (passes SGR through)
+ * since minimal installs often lack less. A broken $PAGER is an error, not a fallback trigger —
+ * silently substituting would hide it. Returns NULL after reporting why. */
+static const char *resolve_pager(void)
+{
+    static const struct {
+        const char *name;
+        const char *command;
+    } FALLBACKS[] = {
+        {"less", "less -R"},
+        {"more", "more"},
+    };
+
+    const char *configured = getenv("PAGER");
+    if (configured && *configured) {
+        if (fs_shell_head_resolves(configured))
+            return configured;
+        ui_error("$PAGER (%s) not found — fix it, or unset it to use a fallback", configured);
+        return NULL;
+    }
+    for (size_t i = 0; i < sizeof(FALLBACKS) / sizeof(FALLBACKS[0]); i++) {
+        char *found = fs_which(FALLBACKS[i].name);
+        if (found) {
+            free(found);
+            return FALLBACKS[i].command;
+        }
+    }
+    ui_error("no pager found — install less or set $PAGER");
+    return NULL;
+}
+
+/* Probe before forking: `sh -c` on a missing pager exits 127 only after hax has already written
+ * the content into a dead pipe. */
 static int view_pager_open(struct spawn_pipe *pipe)
 {
-    const char *pager = getenv("PAGER");
-    if (!pager || !*pager)
-        pager = "less -R";
+    const char *pager = resolve_pager();
+    if (!pager) {
+        /* No disp in modal context; restore the block gap before the repainted prompt. */
+        putchar('\n');
+        return -1;
+    }
     /* Keep pager signals in the child; early pager exit must become EPIPE, not terminate hax. */
     return spawn_pipe_open_write(pipe, pager);
 }

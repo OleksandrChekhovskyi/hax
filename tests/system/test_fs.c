@@ -153,6 +153,33 @@ static void test_which_skips_non_executable(void)
     free(file_path);
 }
 
+static void test_shell_head_resolves_plain_command(void)
+{
+    EXPECT(fs_shell_head_resolves("sh"));
+    EXPECT(fs_shell_head_resolves("sh -c 'exit 0'"));
+    EXPECT(fs_shell_head_resolves("  sh  "));
+    EXPECT(fs_shell_head_resolves("/bin/sh -l"));
+}
+
+static void test_shell_head_resolves_missing_command(void)
+{
+    EXPECT(!fs_shell_head_resolves("hax-definitely-not-a-real-binary"));
+    EXPECT(!fs_shell_head_resolves("hax-definitely-not-a-real-binary -R"));
+    EXPECT(!fs_shell_head_resolves(NULL));
+    EXPECT(!fs_shell_head_resolves(""));
+    EXPECT(!fs_shell_head_resolves("   "));
+}
+
+static void test_shell_head_resolves_trusts_shell_syntax(void)
+{
+    /* Only syntax in the head defers to the shell; arguments never do. */
+    EXPECT(fs_shell_head_resolves("FOO=1 hax-definitely-not-a-real-binary"));
+    EXPECT(fs_shell_head_resolves("~/bin/hax-definitely-not-a-real-binary"));
+    EXPECT(fs_shell_head_resolves("$MY_PAGER --flag"));
+    EXPECT(fs_shell_head_resolves("'quoted command'"));
+    EXPECT(!fs_shell_head_resolves("hax-definitely-not-a-real-binary '$arg'"));
+}
+
 static void test_resolve_link_target_regular_file(void)
 {
     const char *dir = t_tempdir();
@@ -323,6 +350,10 @@ int main(void)
     test_which_skips_directory_match();
     test_which_slash_directory_is_null();
     test_which_skips_non_executable();
+
+    test_shell_head_resolves_plain_command();
+    test_shell_head_resolves_missing_command();
+    test_shell_head_resolves_trusts_shell_syntax();
 
     test_resolve_link_target_regular_file();
     test_resolve_link_target_missing_file();

@@ -329,3 +329,26 @@ char *fs_which(const char *name)
         entry = separator + 1;
     }
 }
+
+int fs_shell_head_resolves(const char *shell_cmd)
+{
+    if (!shell_cmd)
+        return 0;
+    shell_cmd += strspn(shell_cmd, " \t");
+    size_t head_len = strcspn(shell_cmd, " \t");
+    if (head_len == 0)
+        return 0;
+    /* Quoting, expansion, assignments, redirection, or globs in the head defeat a plain PATH
+     * lookup, so assume the shell can start such a command. */
+    if (strcspn(shell_cmd, "\"'`\\$;|&<>()=~*?[#") < head_len)
+        return 1;
+
+    char *head = xmalloc(head_len + 1);
+    memcpy(head, shell_cmd, head_len);
+    head[head_len] = '\0';
+    char *path = fs_which(head);
+    int resolves = path != NULL;
+    free(path);
+    free(head);
+    return resolves;
+}

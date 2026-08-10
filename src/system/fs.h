@@ -26,4 +26,9 @@ char *fs_write_with_diff(const char *path, const char *content, size_t content_l
  * ignored so lookup cannot select a program from the process's current directory. */
 char *fs_which(const char *name);
 
+/* Best-effort check that a trusted `sh -c` command line can start: resolve its first
+ * whitespace-delimited word like fs_which(). Return 1 when it resolves, or when the first word
+ * contains shell syntax only the shell can evaluate; 0 otherwise. */
+int fs_shell_head_resolves(const char *shell_cmd);
+
 #endif /* HAX_SYSTEM_FS_H */
