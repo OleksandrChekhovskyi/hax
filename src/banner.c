@@ -116,7 +116,7 @@ void banner_identity(FILE *out, const struct provider *provider,
     const char *model_label = session->model_label ? session->model_label : session->model;
     char *tail;
     if (!session->model || !*session->model)
-        tail = xstrdup("no model — use /model");
+        tail = xstrdup("no model — use /model (or /provider)");
     else if (session->effort)
         tail = xasprintf("%s · %s", model_label, session->effort);
     else

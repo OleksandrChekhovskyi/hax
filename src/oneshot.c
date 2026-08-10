@@ -262,7 +262,7 @@ int oneshot_run(struct provider *provider, const char *prompt, const struct hax_
     model_meta_wait(provider);
     agent_session_init(&state.session, provider, options);
     if (!state.session.model || !*state.session.model) {
-        hax_err("HAX_MODEL is required for provider '%s' (no default)",
+        hax_err("no model selected for provider '%s' — pass --model or set HAX_MODEL",
                 provider->name ? provider->name : "?");
         oneshot_state_destroy(&state);
         return 1;

@@ -281,7 +281,9 @@ struct model_meta; /* model_meta.h; opaque provider-owned storage */
 
 struct provider {
     const char *name;
-    const char *default_model; /* NULL when no safe default exists */
+    /* NULL when no safe default exists. Only values derived from live state (server discovery, a
+     * companion tool's config) qualify; compiled-in model names go stale in shipped binaries. */
+    const char *default_model;
     /* Return an allocated display label, or NULL to use the wire id unchanged. */
     char *(*model_label)(struct provider *provider, const char *model);
     const char *default_effort; /* NULL omits reasoning effort */

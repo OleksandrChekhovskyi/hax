@@ -50,8 +50,8 @@ HAX_PROVIDER=codex hax
 
 If startup says the Codex CLI is not logged in, run the official `codex` CLI once to refresh
 its auth file. Hax reads `model` and `model_reasoning_effort` from `~/.codex/config.toml` as
-provider defaults. If no model is configured there or in hax config, the current built-in
-fallback is `gpt-5.3-codex`.
+provider defaults. If no model is configured there or in hax config, set `HAX_MODEL` or
+choose one with `/model`.
 
 Codex supports `/usage`. It also probes ChatGPT's model catalog in the background to discover
 the selected model's context window for the percentage display; `HAX_CONTEXT_LIMIT` overrides
@@ -115,8 +115,8 @@ API-key lookup order:
 1. `HAX_ANTHROPIC_API_KEY`
 2. `ANTHROPIC_API_KEY`
 
-The real Anthropic preset has a built-in default model, but setting `HAX_MODEL` is still
-recommended if you want a specific model. Its default thinking mode is `adaptive`, so
+Anthropic has no built-in model default in hax, so set `HAX_MODEL` or choose one with
+`/model`. Its default thinking mode is `adaptive`, so
 `/effort` offers `low`, `medium`, `high`, `xhigh`, and `max`.
 Prompt cache-control breakpoints are sent by default; disable with `HAX_ANTHROPIC_CACHE=0`.
 

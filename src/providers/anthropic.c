@@ -19,7 +19,6 @@
 #include "transport/retry.h"
 
 #define ANTHROPIC_DEFAULT_VERSION    "2023-06-01"
-#define ANTHROPIC_DEFAULT_MODEL      "claude-opus-4-8"
 #define ANTHROPIC_DEFAULT_MAX_TOKENS 32000
 
 /* Bound foreground pagination if a server keeps returning advancing cursors. */
@@ -607,7 +606,6 @@ struct provider *anthropic_provider_new_preset(const struct anthropic_preset *pr
 
     anthropic->base.name = anthropic->name;
     anthropic->base.catalog_id = anthropic->catalog_id;
-    anthropic->base.default_model = preset->lock_base_url ? ANTHROPIC_DEFAULT_MODEL : NULL;
     anthropic->base.stream = anthropic_stream;
     anthropic->base.list_models = anthropic_list_models;
     anthropic->base.list_efforts = anthropic_list_efforts;
@@ -615,9 +613,8 @@ struct provider *anthropic_provider_new_preset(const struct anthropic_preset *pr
     anthropic->base.destroy = anthropic_destroy;
 
     const char *configured_model = config_str("model");
-    const char *model =
-        configured_model && *configured_model ? configured_model : anthropic->base.default_model;
-    model_meta_refresh(&anthropic->base, model);
+    model_meta_refresh(&anthropic->base,
+                       configured_model && *configured_model ? configured_model : NULL);
     return &anthropic->base;
 }
 

@@ -50,6 +50,7 @@ struct codex {
     /* Set when a request is rejected as unauthenticated, so the next one re-reads auth.json and
      * picks up a token the codex CLI refreshed meanwhile. */
     int auth_stale;
+    /* Mirrored from ~/.codex/config.toml; NULL when it names none. */
     char *default_model;
     char *default_effort;
     char *session_id; /* stable prompt-cache and request-routing key */
@@ -587,7 +588,7 @@ struct provider *codex_provider_new(const char *name)
 
     struct codex *codex = xcalloc(1, sizeof(*codex));
     codex->auth = auth;
-    codex->default_model = default_model ? default_model : xstrdup("gpt-5.3-codex");
+    codex->default_model = default_model;
     codex->default_effort = default_effort;
     char session_id[37];
     gen_uuid_v4(session_id);

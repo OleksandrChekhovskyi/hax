@@ -146,7 +146,7 @@ static void test_missing_model_is_diagnostic(void)
     struct captured_run run = capture_run(&provider, "hello");
     EXPECT(run.result == 1);
     EXPECT_STR_EQ(run.out, "");
-    EXPECT(strstr(run.err, "HAX_MODEL is required") != NULL);
+    EXPECT(strstr(run.err, "pass --model or set HAX_MODEL") != NULL);
     captured_run_free(&run);
 }
 

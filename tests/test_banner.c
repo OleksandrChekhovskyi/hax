@@ -95,7 +95,19 @@ static void test_identity_no_model(void)
     struct provider provider = {.name = "mock"};
     struct agent_session session = {0};
     char *out = identity_rows(&provider, &session);
-    EXPECT_STR_EQ(out, "▌ hax › mock · no model — use /model\n");
+    EXPECT_STR_EQ(out, "▌ hax › mock · no model — use /model (or /provider)\n");
+    free(out);
+}
+
+static void test_identity_no_model_wraps_on_narrow_terminal(void)
+{
+    setenv("HAX_DISPLAY_WIDTH", "30", 1);
+    struct provider provider = {.name = "mock"};
+    struct agent_session session = {0};
+    char *out = identity_rows(&provider, &session);
+    EXPECT_STR_EQ(out, "▌ hax › mock\n"
+                       "▌   no model — use /model (or\n"
+                       "▌   /provider)\n");
     free(out);
 }
 
@@ -164,6 +176,7 @@ int main(void)
     test_identity_wraps_oversized_model();
     test_identity_no_provider();
     test_identity_no_model();
+    test_identity_no_model_wraps_on_narrow_terminal();
     test_identity_shows_preset_stance();
     test_identity_prefers_model_label();
     test_print_adds_key_tips();
