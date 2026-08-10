@@ -394,7 +394,7 @@ See [debugging.md](./debugging.md) for trace and transcript details.
 - `bash.shell` / `HAX_BASH_SHELL` — shell the bash tool execs, as a `$PATH` name or a path.
   Default: `bash` when available, otherwise `sh`.
 - `task.wait_timeout` / `HAX_TASK_WAIT_TIMEOUT` — default `task_wait` timeout when the model
-  omits one. Default `10m`.
+  omits one; a `kill` request with no timeout kills immediately instead. Default `10m`.
 - `task.max_running` / `HAX_TASK_MAX_RUNNING` — maximum concurrently running background tasks:
   further `background: true` requests are refused up front, and a timed-out command is killed
   instead of detaching. Default `32`.

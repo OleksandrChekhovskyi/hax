@@ -63,10 +63,11 @@ static char *wait_for_id(const char *id, int timeout_seconds)
     return out;
 }
 
+/* Immediate kill-and-collect: task_wait with `kill` and no timeout. */
 static char *kill_id(const char *id)
 {
-    char *args = xasprintf("{\"ids\":[\"%s\"]}", id);
-    char *out = TOOL_TASK_KILL.run(args, NULL);
+    char *args = xasprintf("{\"id\":\"%s\",\"kill\":true}", id);
+    char *out = TOOL_TASK_WAIT.run(args, NULL);
     free(args);
     return out;
 }

@@ -47,13 +47,11 @@ char *task_report_output(const char *id, char **marker_out);
  * capped undelivered output plus a bracketed status footer. Ends when the task finishes, when
  * any unannounced task finishes (so its note rides this round trip), on timeout, or on Esc; a
  * wait on an already-finished task returns its remaining output immediately and forgets it.
- * Never returns NULL. */
-char *task_wait_stream(const char *id, long timeout_ms, tool_display_fn display,
-                       void *display_data);
-
-/* Stop the named tasks: SIGTERM, the bash grace window, then SIGKILL. Reports one status line
- * per task; undelivered output stays collectable via task_wait_stream. Never returns NULL. */
-char *task_kill_report(const char *const *ids, size_t n_ids);
+ * With kill_on_timeout, an elapsed timeout instead stops the task (SIGTERM, the bash grace
+ * window, then SIGKILL) and the wait runs on until the exit is observed; once the kill is
+ * signalled, foreign completions no longer end the wait early. Never returns NULL. */
+char *task_wait_stream(const char *id, long timeout_ms, int kill_on_timeout,
+                       tool_display_fn display, void *display_data);
 
 /* User-driven stop that does not consume the model-facing report: the next collected note still
  * delivers each task's final state. NULL/empty ids stops every live task. Returns the number of

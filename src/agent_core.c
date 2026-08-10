@@ -52,7 +52,7 @@ static const char DEFAULT_SYSTEM_PROMPT[] =
     "severity honestly; no flattery. Empty findings is a valid result.";
 
 static const struct tool *const TOOLS[] = {
-    &TOOL_READ, &TOOL_EDIT, &TOOL_WRITE, &TOOL_BASH, &TOOL_TASK_WAIT, &TOOL_TASK_KILL,
+    &TOOL_READ, &TOOL_EDIT, &TOOL_WRITE, &TOOL_BASH, &TOOL_TASK_WAIT,
 };
 static const size_t N_TOOLS = sizeof(TOOLS) / sizeof(TOOLS[0]);
 

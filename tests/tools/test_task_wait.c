@@ -64,6 +64,14 @@ static void test_wait_times_out_on_running_task(void)
     EXPECT(strstr(out, "; no new output") != NULL);
     free(out);
 
+    /* An explicit 0 is a non-blocking check, not an argument error. */
+    char *args = xasprintf("{\"id\":\"%s\",\"timeout_seconds\":0}", id);
+    out = TOOL_TASK_WAIT.run(args, NULL);
+    free(args);
+    EXPECT(strstr(out, "still running (") != NULL);
+    EXPECT(strstr(out, "— wait timed out]") != NULL);
+    free(out);
+
     out = kill_id(id);
     EXPECT(strstr(out, "killed (signal ") != NULL);
     free(out);
@@ -152,7 +160,7 @@ static void test_note_with_no_output_is_collected_outright(void)
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }
 
-static void test_killed_output_stays_collectable(void)
+static void test_kill_delivers_pending_output(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
     char *first_gate = gate_create();
@@ -183,23 +191,138 @@ static void test_killed_output_stays_collectable(void)
     }
     EXPECT(has_output);
 
+    /* One call: the kill, the pending output, and the final status. */
     out = kill_id(id);
-    EXPECT(strstr(out, "killed (signal ") != NULL);
-    EXPECT(strstr(out, " output]") != NULL);
-    EXPECT(strstr(out, "pending-output") == NULL);
-    free(out);
-
-    /* The kill announced the task, but its output waits until a wait collects it. */
-    out = wait_for_id(id, 1);
     EXPECT(strstr(out, "pending-output") != NULL);
     EXPECT(strstr(out, "killed (signal ") != NULL);
     free(out);
 
+    /* Kill-and-collect forgets the task. */
     out = wait_for_id(id, 1);
     EXPECT(strstr(out, "no such task") != NULL);
     free(out);
     free(id);
     free(last_gate);
+    unsetenv("HAX_BASH_BACKGROUND_YIELD");
+}
+
+static void test_kill_fires_at_wait_deadline(void)
+{
+    setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
+    char *out = call_bash_background("sleep 30");
+    char *id = extract_task_id(out);
+    EXPECT(id != NULL);
+    free(out);
+
+    char *args = xasprintf("{\"id\":\"%s\",\"timeout_seconds\":1,\"kill\":true}", id);
+    out = TOOL_TASK_WAIT.run(args, NULL);
+    free(args);
+    EXPECT(strstr(out, "killed (signal ") != NULL);
+    EXPECT(strstr(out, "wait timed out") == NULL);
+    free(out);
+    free(id);
+    unsetenv("HAX_BASH_BACKGROUND_YIELD");
+}
+
+static void test_kill_spares_task_finishing_within_timeout(void)
+{
+    setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
+    char *gate = gate_create();
+    char *cmd = xasprintf("read -r _ <%s; echo done-first", gate);
+    char *out = call_bash_background(cmd);
+    free(cmd);
+    char *id = extract_task_id(out);
+    EXPECT(id != NULL);
+    free(out);
+
+    gate_release(gate);
+    free(gate);
+    char *args = xasprintf("{\"id\":\"%s\",\"timeout_seconds\":30,\"kill\":true}", id);
+    out = TOOL_TASK_WAIT.run(args, NULL);
+    free(args);
+    EXPECT(strstr(out, "done-first") != NULL);
+    EXPECT(strstr(out, "finished (exit 0)") != NULL);
+    EXPECT(strstr(out, "killed") == NULL);
+    free(out);
+    free(id);
+    unsetenv("HAX_BASH_BACKGROUND_YIELD");
+}
+
+static void test_kill_now_beats_pending_foreign_completion(void)
+{
+    setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
+    char *out = call_bash_background("sleep 30");
+    char *slow_id = extract_task_id(out);
+    EXPECT(slow_id != NULL);
+    free(out);
+    char *gate = gate_create();
+    char *cmd = xasprintf("read -r _ <%s; echo quick-done", gate);
+    out = call_bash_background(cmd);
+    free(cmd);
+    char *quick_id = extract_task_id(out);
+    EXPECT(quick_id != NULL);
+    free(out);
+
+    gate_release(gate);
+    free(gate);
+    int quick_done = 0;
+    time_t start = time(NULL);
+    while (!quick_done && time(NULL) - start < 10) {
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = 20 * 1000000L};
+        nanosleep(&ts, NULL);
+        struct task_info *rows = NULL;
+        size_t n = task_list(&rows);
+        for (size_t i = 0; i < n; i++)
+            if (quick_id && strcmp(rows[i].id, quick_id) == 0 && !rows[i].running)
+                quick_done = 1;
+        free(rows);
+    }
+    EXPECT(quick_done);
+
+    /* An immediate kill must fire, not yield to the pending foreign completion. */
+    out = kill_id(slow_id);
+    EXPECT(strstr(out, "killed (signal ") != NULL);
+    EXPECT(strstr(out, "another task finished") == NULL);
+    free(out);
+
+    free(wait_for_id(quick_id, 1));
+    free(slow_id);
+    free(quick_id);
+    unsetenv("HAX_BASH_BACKGROUND_YIELD");
+}
+
+static void test_foreign_completion_ends_kill_wait_without_killing(void)
+{
+    setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
+    char *out = call_bash_background("sleep 30");
+    char *slow_id = extract_task_id(out);
+    EXPECT(slow_id != NULL);
+    free(out);
+    char *gate = gate_create();
+    char *cmd = xasprintf("read -r _ <%s; echo quick-done", gate);
+    out = call_bash_background(cmd);
+    free(cmd);
+    char *quick_id = extract_task_id(out);
+    EXPECT(quick_id != NULL);
+    free(out);
+
+    gate_release(gate);
+    free(gate);
+    /* The kill was armed for the 30s deadline, so the early return must not kill. */
+    char *args = xasprintf("{\"id\":\"%s\",\"timeout_seconds\":30,\"kill\":true}", slow_id);
+    out = TOOL_TASK_WAIT.run(args, NULL);
+    free(args);
+    EXPECT(strstr(out, "still running (") != NULL);
+    EXPECT(strstr(out, "; not killed") != NULL);
+    EXPECT(strstr(out, "— another task finished") != NULL);
+    free(out);
+
+    out = kill_id(slow_id);
+    EXPECT(strstr(out, "killed (signal ") != NULL);
+    free(out);
+    free(wait_for_id(quick_id, 1));
+    free(slow_id);
+    free(quick_id);
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }
 
@@ -370,8 +493,12 @@ static void test_wait_missing_or_unknown_id(void)
     EXPECT(strstr(out, "no such task: t999") != NULL);
     free(out);
 
-    out = TOOL_TASK_WAIT.run("{\"id\":\"t1\",\"timeout_seconds\":0}", NULL);
-    EXPECT(strstr(out, "'timeout_seconds' must be an integer >= 1") != NULL);
+    out = TOOL_TASK_WAIT.run("{\"id\":\"t1\",\"timeout_seconds\":-1}", NULL);
+    EXPECT(strstr(out, "'timeout_seconds' must be an integer >= 0") != NULL);
+    free(out);
+
+    out = TOOL_TASK_WAIT.run("{\"id\":\"t1\",\"kill\":\"yes\"}", NULL);
+    EXPECT(strstr(out, "'kill' must be a boolean") != NULL);
     free(out);
 }
 
@@ -448,14 +575,18 @@ static void test_large_collection_keeps_head_and_tail(void)
 
 int main(void)
 {
-    /* Kill reports wait out the full SIGTERM grace, so the default 2s would dominate the
+    /* Kill waits sit out the full SIGTERM grace, so the default 2s would dominate the
      * suite; tests needing a real grace window override and restore this. */
     setenv("HAX_BASH_TIMEOUT_GRACE", TEST_YIELD, 1);
     test_wait_streams_output_live();
     test_wait_times_out_on_running_task();
     test_wait_returns_early_when_other_task_finishes();
     test_note_with_no_output_is_collected_outright();
-    test_killed_output_stays_collectable();
+    test_kill_delivers_pending_output();
+    test_kill_fires_at_wait_deadline();
+    test_kill_spares_task_finishing_within_timeout();
+    test_kill_now_beats_pending_foreign_completion();
+    test_foreign_completion_ends_kill_wait_without_killing();
     test_binary_markers_reach_display();
     test_binary_marker_shown_after_streamed_text_at_launch();
     test_binary_marker_shown_after_streamed_text_in_wait();

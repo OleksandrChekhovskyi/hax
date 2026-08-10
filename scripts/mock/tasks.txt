@@ -41,9 +41,9 @@ text A foreground command that outlives its timeout detaches instead of dying.
 tool bash {"command":"echo long build; sleep 60; echo never printed","timeout_seconds":1}
 end-turn
 
-# Turn 8: stop the detached command.
+# Turn 8: stop the detached command; the kill also collects its final output.
 text That build is doomed; stopping it.
-tool task_kill {"ids":["t3"]}
+tool task_wait {"id":"t3","kill":true}
 end-turn
 
 # Turn 9: launch a task that completes after control returns to the user.

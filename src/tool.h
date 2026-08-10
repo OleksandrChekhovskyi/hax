@@ -74,6 +74,5 @@ extern const struct tool TOOL_EDIT;
 extern const struct tool TOOL_WRITE;
 extern const struct tool TOOL_BASH;
 extern const struct tool TOOL_TASK_WAIT;
-extern const struct tool TOOL_TASK_KILL;
 
 #endif /* HAX_TOOL_H */

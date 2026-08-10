@@ -7,6 +7,13 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Changed
+
+- The `task_kill` tool is merged into `task_wait`: a `kill` argument stops the background task
+  and returns its final output in the same call — immediately, or after `timeout_seconds` to
+  give the task a last window to finish on its own. Stopping a task and collecting its output
+  no longer takes two model round trips.
+
 ## [0.2.0] - 2026-08-08
 
 ### Added

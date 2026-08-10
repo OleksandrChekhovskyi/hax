@@ -116,10 +116,10 @@ Layer boundaries and the rules that keep them:
   `const struct tool`, and returns freshly allocated output from `run(args_json, ctx)`; tool
   errors are output the model can recover from, not NULL returns.
 - `src/tools/task_registry.{c,h}` owns background tasks: bash commands detach into tasks at
-  their timeout or on an explicit `background` request, `task_wait`/`task_kill` are the
-  model-facing controls, and the agent loop injects finished-task notes as user items before
-  each request. Both frontends call `task_registry_shutdown()` on exit; `no_tasks` disables
-  the whole mechanism (bash reverts to kill-on-timeout).
+  their timeout or on an explicit `background` request, `task_wait` is the sole model-facing
+  control, and the agent loop injects finished-task notes as user items before each request.
+  Both frontends call `task_registry_shutdown()` on exit; `no_tasks` disables the whole
+  mechanism (bash reverts to kill-on-timeout).
 - `src/transport/sse.{c,h}` and `src/transport/http.{c,h}` are the transport boundaries.
   Streaming code uses the shared tick callback for cancellation/idle handling.
 - `src/config.{c,h}` is the configuration access layer. Declare user-facing tunables in the

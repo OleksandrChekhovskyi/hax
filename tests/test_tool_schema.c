@@ -44,7 +44,7 @@ static void test_array_param_emits_item_type(void)
     static const struct tool_param params[] = {
         {.name = "ids", .type = "array", .item_type = "string", .required = 1},
     };
-    struct tool_def def = {.name = "task_kill", .params = params, .n_params = 1};
+    struct tool_def def = {.name = "batch", .params = params, .n_params = 1};
     json_t *schema = tool_schema_build(&def);
 
     json_t *ids = json_object_get(json_object_get(schema, "properties"), "ids");

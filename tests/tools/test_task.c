@@ -138,9 +138,9 @@ static void test_kill_stops_process_tree(void)
     EXPECT(pid > 0);
 
     out = kill_id(id);
-    /* One status line; a task that never wrote anything reads "no output". */
+    /* One status footer; a task that never wrote anything reads "no new output". */
     EXPECT(strstr(out, "killed (signal ") != NULL);
-    EXPECT(strstr(out, "; no output]") != NULL);
+    EXPECT(strstr(out, "; no new output]") != NULL);
     free(out);
     free(id);
 
@@ -364,17 +364,6 @@ static void test_kill_grace_covers_redirected_cleanup(void)
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }
 
-static void test_kill_requires_ids(void)
-{
-    char *out = TOOL_TASK_KILL.run("{}", NULL);
-    EXPECT(strstr(out, "'ids' must be an array") != NULL);
-    free(out);
-
-    out = TOOL_TASK_KILL.run("{\"ids\":[]}", NULL);
-    EXPECT(strstr(out, "task_kill requires task ids") != NULL);
-    free(out);
-}
-
 static void test_task_list_snapshots_running_task(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
@@ -510,13 +499,8 @@ static void test_no_tasks_disables_background_and_tools(void)
     EXPECT(strstr(out, "background tasks are disabled") != NULL);
     free(out);
 
-    out = TOOL_TASK_KILL.run("{\"ids\":[\"t1\"]}", NULL);
-    EXPECT(strstr(out, "background tasks are disabled") != NULL);
-    free(out);
-
     EXPECT(TOOL_BASH.advertise() != &TOOL_BASH.def);
     EXPECT(TOOL_TASK_WAIT.advertise() == NULL);
-    EXPECT(TOOL_TASK_KILL.advertise() == NULL);
     unsetenv("HAX_NO_TASKS");
 
     EXPECT(TOOL_BASH.advertise() == &TOOL_BASH.def);
@@ -606,7 +590,7 @@ static void test_task_name_validation(void)
 
 int main(void)
 {
-    /* Kill reports wait out the full SIGTERM grace, so the default 2s would dominate the
+    /* Kill waits sit out the full SIGTERM grace, so the default 2s would dominate the
      * suite; tests needing a real grace window override and restore this. */
     setenv("HAX_BASH_TIMEOUT_GRACE", TEST_YIELD, 1);
     test_background_fast_command_returns_sync();
@@ -621,7 +605,6 @@ int main(void)
     test_exit_note_covers_uncollected_tasks();
     test_kill_escalates_past_term_exiting_shell();
     test_kill_grace_covers_redirected_cleanup();
-    test_kill_requires_ids();
     test_task_list_snapshots_running_task();
     test_shutdown_kills_running_tasks();
     test_fatal_hook_kills_task_groups();

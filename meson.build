@@ -148,7 +148,6 @@ sources = files(
     'src/tools/output_cap.c',
     'src/tools/path_preprocess.c',
     'src/tools/read.c',
-    'src/tools/task_kill.c',
     'src/tools/task_registry.c',
     'src/tools/task_wait.c',
     'src/tools/write.c',

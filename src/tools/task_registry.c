@@ -493,15 +493,13 @@ static int collect_new_output(struct task *t, struct buf *body, struct buf *mark
 /* One announce-only line: "[task t2 finished (exit 0) after 3m; 2.1K output]". The size lets
  * the model skip collecting empty results; a finished task with nothing left to deliver is
  * collected outright. */
-static void append_status_note(struct buf *out, struct task *t, int task_prefix)
+static void append_status_note(struct buf *out, struct task *t)
 {
     struct task_shared_snapshot snap;
     task_snapshot(t, &snap);
     size_t pending = snap.total_bytes - t->delivered_bytes;
 
-    buf_append_str(out, "[");
-    if (task_prefix)
-        buf_append_str(out, "task ");
+    buf_append_str(out, "[task ");
     buf_append_str(out, t->id);
     buf_append_str(out, " ");
     append_status_phrase(out, t);
@@ -543,10 +541,9 @@ char *task_report_output(const char *id, char **marker_out)
     return buf_steal(&body);
 }
 
-/* Resolve requested ids into `targets`, appending per-id errors for unknown ones. With no ids,
+/* Resolve requested ids into `targets`, skipping unknown ids and duplicates. With no ids,
  * every live task is a target. Returns the target count. */
-static size_t resolve_targets(const char *const *ids, size_t n_ids, struct task ***targets_out,
-                              struct buf *errors)
+static size_t resolve_targets(const char *const *ids, size_t n_ids, struct task ***targets_out)
 {
     size_t count = 0;
     struct task **targets;
@@ -563,24 +560,14 @@ static size_t resolve_targets(const char *const *ids, size_t n_ids, struct task 
         targets = xmalloc(n_ids * sizeof(*targets));
         for (size_t i = 0; i < n_ids; i++) {
             struct task *t = ids[i] ? task_find(ids[i]) : NULL;
+            if (!t)
+                continue;
             int duplicate = 0;
             for (size_t j = 0; j < count; j++)
                 if (targets[j] == t)
                     duplicate = 1;
-            if (t && !duplicate) {
+            if (!duplicate)
                 targets[count++] = t;
-            } else if (!duplicate) {
-                buf_append_str(errors, "no such task: ");
-                char *clean =
-                    utf8_sanitize(ids[i] ? ids[i] : "(null)", strlen(ids[i] ? ids[i] : "(null)"));
-                char *flat = flatten_for_display(clean);
-                free(clean);
-                char *head = truncate_for_display(flat, TASK_COMMAND_HEAD_CELLS);
-                free(flat);
-                buf_append_str(errors, head);
-                free(head);
-                buf_append_str(errors, "\n");
-            }
         }
     }
     *targets_out = targets;
@@ -597,6 +584,19 @@ static long deadline_after(long now_ms, long duration_ms)
     if (duration_ms < 0)
         duration_ms = 0;
     return duration_ms > LONG_MAX - now_ms ? LONG_MAX : now_ms + duration_ms;
+}
+
+/* SIGTERM with the bash grace window armed (task_poll escalates to SIGKILL at the deadline),
+ * or SIGKILL outright when the grace is zero. */
+static void signal_task_stop(struct task *t, long now)
+{
+    long grace_ms = config_duration_ms("bash.timeout_grace");
+    if (grace_ms > 0) {
+        bash_signal_process_tree(t->pid, SIGTERM);
+        t->kill_deadline_ms = deadline_after(now, grace_ms);
+    } else {
+        bash_signal_process_tree(t->pid, SIGKILL);
+    }
 }
 
 /* Forward the not-yet-displayed spooled bytes to the live display, exactly like a foreground
@@ -629,7 +629,8 @@ enum wait_stop {
     WAIT_INTERRUPTED,
 };
 
-char *task_wait_stream(const char *id, long timeout_ms, tool_display_fn display, void *display_data)
+char *task_wait_stream(const char *id, long timeout_ms, int kill_on_timeout,
+                       tool_display_fn display, void *display_data)
 {
     task_poll_all();
     struct task *t = id && *id ? task_find(id) : NULL;
@@ -645,6 +646,7 @@ char *task_wait_stream(const char *id, long timeout_ms, tool_display_fn display,
     }
 
     long deadline = deadline_after(monotonic_ms(), timeout_ms);
+    int kill_sent = 0;
     size_t display_cursor = t->delivered_bytes;
     int displayed_body = 0;
     enum wait_stop stop = WAIT_TARGET_DONE;
@@ -657,20 +659,33 @@ char *task_wait_stream(const char *id, long timeout_ms, tool_display_fn display,
         stream_new_spool(t, &snap, display, display_data, &display_cursor, &displayed_body);
         if (t->done)
             break;
+        /* The deadline outranks foreign completions: a kill request must fire even when a
+         * pending completion could otherwise end the wait first. */
+        long now = monotonic_ms();
+        if (now >= deadline) {
+            if (kill_on_timeout && !kill_sent) {
+                signal_task_stop(t, now);
+                kill_sent = 1;
+                /* Extend the wait so the escalation and exit are observed here, not by a
+                 * registry call minutes later. */
+                deadline = deadline_after(t->kill_deadline_ms ? t->kill_deadline_ms : now,
+                                          TASK_KILL_MARGIN_MS);
+                continue;
+            }
+            stop = WAIT_TIMED_OUT;
+            break;
+        }
         int other_finished = 0;
         for (struct task *other = tasks; other; other = other->next)
             if (other != t && other->done && !other->notified)
                 other_finished = 1;
-        if (other_finished) {
+        /* A signalled kill commits this wait to observing the exit. */
+        if (other_finished && !kill_sent) {
             stop = WAIT_OTHER_DONE;
             break;
         }
         if (interrupt_abort_requested()) {
             stop = WAIT_INTERRUPTED;
-            break;
-        }
-        if (monotonic_ms() >= deadline) {
-            stop = WAIT_TIMED_OUT;
             break;
         }
         sleep_poll_interval();
@@ -717,10 +732,12 @@ char *task_wait_stream(const char *id, long timeout_ms, tool_display_fn display,
     buf_append_str(&footer, t->id);
     buf_append_str(&footer, " ");
     append_status_phrase(&footer, t);
+    if (kill_on_timeout && stop == WAIT_OTHER_DONE)
+        buf_append_str(&footer, "; not killed");
     if (!has_body)
         buf_append_str(&footer, "; no new output");
     if (stop == WAIT_TIMED_OUT)
-        buf_append_str(&footer, " — wait timed out");
+        buf_append_str(&footer, kill_sent ? " — did not exit after SIGKILL" : " — wait timed out");
     else if (stop == WAIT_INTERRUPTED)
         buf_append_str(&footer, " — wait interrupted");
     else if (stop == WAIT_OTHER_DONE)
@@ -749,22 +766,17 @@ char *task_wait_stream(const char *id, long timeout_ms, tool_display_fn display,
  * task_poll when the grace deadline lapses. Returns the number of tasks signalled. */
 static size_t stop_targets(struct task **targets, size_t n_targets)
 {
-    long grace_ms = config_duration_ms("bash.timeout_grace");
     long now = monotonic_ms();
     size_t signalled = 0;
     for (size_t i = 0; i < n_targets; i++) {
         struct task *t = targets[i];
         if (t->done)
             continue;
-        if (grace_ms > 0) {
-            bash_signal_process_tree(t->pid, SIGTERM);
-            t->kill_deadline_ms = deadline_after(now, grace_ms);
-        } else {
-            bash_signal_process_tree(t->pid, SIGKILL);
-        }
+        signal_task_stop(t, now);
         signalled++;
     }
 
+    long grace_ms = config_duration_ms("bash.timeout_grace");
     long deadline = deadline_after(deadline_after(now, grace_ms), TASK_KILL_MARGIN_MS);
     while (signalled > 0 && monotonic_ms() < deadline) {
         size_t still_running = 0;
@@ -783,42 +795,11 @@ static size_t stop_targets(struct task **targets, size_t n_targets)
 size_t task_stop(const char *const *ids, size_t n_ids)
 {
     task_poll_all();
-    struct buf discarded_errors;
-    buf_init(&discarded_errors);
     struct task **targets = NULL;
-    size_t n_targets = resolve_targets(ids, n_ids, &targets, &discarded_errors);
+    size_t n_targets = resolve_targets(ids, n_ids, &targets);
     size_t stopped = stop_targets(targets, n_targets);
     free(targets);
-    buf_free(&discarded_errors);
     return stopped;
-}
-
-char *task_kill_report(const char *const *ids, size_t n_ids)
-{
-    struct buf out;
-    buf_init(&out);
-    /* Killing is destructive, so an empty list is an error, never "kill everything". */
-    if (n_ids == 0) {
-        buf_append_str(&out, "task_kill requires task ids, e.g. [\"t1\"]");
-        return buf_steal(&out);
-    }
-    task_poll_all();
-
-    struct task **targets = NULL;
-    size_t n_targets = resolve_targets(ids, n_ids, &targets, &out);
-
-    stop_targets(targets, n_targets);
-
-    for (size_t i = 0; i < n_targets; i++) {
-        if (out.len > 0)
-            buf_append_str(&out, "\n");
-        append_status_note(&out, targets[i], 0);
-        if (!targets[i]->done)
-            buf_append_str(&out, "\n[did not exit after SIGKILL]");
-    }
-    free(targets);
-    task_sweep();
-    return buf_steal(&out);
 }
 
 char *task_collect_notes(void)
@@ -831,7 +812,7 @@ char *task_collect_notes(void)
             continue;
         if (out.len > 0)
             buf_append_str(&out, "\n");
-        append_status_note(&out, t, 1);
+        append_status_note(&out, t);
     }
     task_sweep();
     if (out.len == 0)

@@ -526,9 +526,11 @@ static const char TASKS_PROMPT[] =
     "\n"
     "A bash command that outlives its timeout, or is launched with `background: true`, "
     "continues as a background task. Wait on the task whose result you need next with "
-    "task_wait — it streams that task's output and returns it. Completions of other tasks are "
+    "task_wait — it returns that task's output and status. Completions of other tasks are "
     "announced automatically as one-line notes (with the pending output size); collect an "
-    "announced task with task_wait when you want its output. Never sleep or poll in a loop. "
+    "announced task with task_wait when you want its output. Stop a task with task_wait's "
+    "`kill` flag, which also returns its final output. Never pass time with sleep or a "
+    "polling loop; give task_wait a timeout instead. "
     "Tasks do not survive the hax process: in a one-shot (-p) run, tasks nobody waited on are "
     "killed once the final answer is produced. The user manages tasks with /tasks.\n";
 

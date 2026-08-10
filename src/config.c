@@ -143,7 +143,8 @@ static const struct config_setting REGISTRY[] = {
     {.key = "bash.shell", .env_var = "HAX_BASH_SHELL",
      .description = "Shell for the bash tool, a $PATH name or path (default: bash, else sh)"},
     {.key = "task.wait_timeout", .env_var = "HAX_TASK_WAIT_TIMEOUT", .default_value = "10m",
-     .description = "Default task_wait timeout when the model omits one",
+     .description = "Default task_wait timeout when the model omits one (kill waits default "
+                    "to immediate)",
      .kind = CONFIG_KIND_DURATION, .editable = 1},
     {.key = "task.max_running", .env_var = "HAX_TASK_MAX_RUNNING", .default_value = "32",
      .description = "Maximum concurrently running background tasks",
