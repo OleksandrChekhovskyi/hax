@@ -96,11 +96,11 @@ hax links only what it genuinely needs: libcurl for HTTPS, jansson for JSON, pla
 A dependency is a permanent tax on every build, port, and audit, so the default answer to "just
 add a library" is no. One format serves both config and the wire because a JSON parser is
 linked anyway — TOML or YAML would mean a second parser for a marginal gain in comfort.
-Terminal handling is in-tree rather than ncurses. And where a separate program already does the
-job well, hax runs it instead of linking it — `diff` for edit output, `fzf` for the `@` file
-picker, `$EDITOR` and `$PAGER` where they fit — the same out-of-process composition the rest of
-the design leans on. What does get linked must be in Debian main and either ship with macOS or
-be one `brew install` away, and must not be GPL.
+Terminal handling and unified-diff generation are in-tree rather than ncurses or a diff library.
+Where a separate program already does the job well, hax runs it instead of linking it — `fzf` for
+the `@` file picker, and `$EDITOR` and `$PAGER` where they fit — the same out-of-process
+composition the rest of the design leans on. What does get linked must be in Debian main and
+either ship with macOS or be one `brew install` away, and must not be GPL.
 
 ## The bar for new features
 

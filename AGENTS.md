@@ -82,70 +82,57 @@ hax is a single-binary REPL:
 
 `input → build context → provider streams events → assemble turn → dispatch tools → loop`
 
-The stable seams are `src/provider.h` and `src/tool.h`.
+The stable extension seams are `src/provider.h` and `src/tool.h`.
 
 Terminology:
 
-- A **turn** is one provider `stream()` round-trip producing one assistant response and
-  optional tool calls.
+- A **turn** is one provider `stream()` round-trip producing one assistant response and optional
+  tool calls.
 - A **user turn** is one user prompt plus every spawned turn until the model stops requesting
   tools.
 - `ITEM_TURN_BOUNDARY` separates consecutive turns inside one user turn.
 
-Layer boundaries and the rules that keep them:
+Core boundaries:
 
-- `src/agent_core.{c,h}` and `src/agent_loop.{c,h}` contain behavior shared by the interactive
-  (`src/agent.c`) and one-shot (`src/oneshot.c`) frontends. Keep frontend-specific I/O and
-  rendering out of the shared layers.
-- `src/turn.{c,h}` is a pure state machine: consume `struct stream_event`, emit
-  `struct item`. Keep I/O out of it.
-- `src/provider.h` defines the flat conversation view (`struct context` / `struct item`) and
-  the provider streaming interface. Provider adapters translate native APIs/SSE into
-  `struct stream_event`; provider-specific JSON should not leak into the agent.
-- `src/providers/registry.{c,h}` owns provider discovery: each compiled-in provider exports one
-  `const struct provider_factory PROVIDER_<NAME>`, and `BUILTINS[]` order is autoselect priority.
-- Protocol-compatible providers should reuse the shared family translation via presets
-  (`src/providers/openai.c` or `src/providers/anthropic.c`) where possible. Purely static
-  endpoints should be config-defined providers rather than new C shims.
-- `src/providers/openai.c` serves both OpenAI request protocols, selected per preset by
-  `enum openai_wire`: Chat Completions (`openai_{events,messages}.c`) and Responses
-  (`responses_{events,messages}.c`, shared with `codex.c`). First-party OpenAI speaks Responses
-  because recent reasoning models reject function tools with a reasoning effort on the older
-  endpoint, and only Responses returns replayable encrypted reasoning.
-- `src/tool.h` defines the tool seam. Each tool lives under `src/tools/`, exports exactly one
-  `const struct tool`, and returns freshly allocated output from `run(args_json, ctx)`; tool
-  errors are output the model can recover from, not NULL returns.
-- `src/tools/task_registry.{c,h}` owns background tasks: bash commands detach into tasks at
-  their timeout or on an explicit `background` request, `task_wait` is the sole model-facing
-  control, and the agent loop injects finished-task notes as user items before each request.
-  Both frontends call `task_registry_shutdown()` on exit; `no_tasks` disables the whole
-  mechanism (bash reverts to kill-on-timeout).
-- `src/transport/sse.{c,h}` and `src/transport/http.{c,h}` are the transport boundaries.
-  Streaming code uses the shared tick callback for cancellation/idle handling.
-- `src/config.{c,h}` is the configuration access layer. Declare user-facing tunables in the
-  config registry and read them by canonical key; reserve direct `getenv` calls for process
-  environment facts or deliberately env-only secrets.
-- `src/model_meta.{c,h}` is the per-model metadata access layer (window, output cap,
-  modalities, effort levels). Consumers ask it, never a tier directly; every provider
-  `destroy()` must call `model_meta_release`.
-- `src/catalog.{c,h}` is the models.dev tier underneath it; providers opt in by setting
-  `provider->catalog_id`. Cost *estimation* lives in the agent layer (`agent_session_spend`),
-  never in provider adapters.
-- `src/terminal/ansi.h` centralizes ANSI escape sequences; do not inline raw escape literals.
-  Colors go through the semantic roles in `src/terminal/theme.{c,h}` (presets resolved from the
-  `theme` config key at startup); bold/dim/italic attributes stay direct `ANSI_*`.
-- `src/render/disp.{c,h}` owns where display bytes go: every renderer writes through a
-  `struct disp` and its sink, never `stdout` directly. Cursor-addressed output (markdown
-  retro-wrap, tool-block overprints) is settled by `src/terminal/vt_resolve.{c,h}` before it
-  can go anywhere but a terminal. `src/transcript.{c,h}` is what the model saw,
-  `src/history.{c,h}` what the user saw — keep them distinct.
+- The canonical conversation state is the flat, provider-independent `struct item` log owned by
+  `struct agent_session`. Compaction appends a summary seed without deleting prior history; build
+  model-visible windows with `agent_session_context()` rather than slicing the raw log.
+- Provider adapters own native API protocols and wire JSON; shared transport owns HTTP/SSE
+  mechanics. Adapters serialize `struct context` and emit provider-independent
+  `struct stream_event`; agent behavior must not depend on native response shapes.
+- `src/turn.{c,h}` is a pure state machine from borrowed stream events to owned conversation items.
+  Keep I/O and presentation out of it.
+- Behavior shared by the interactive and one-shot frontends belongs below `src/agent.c` and
+  `src/oneshot.c`, primarily in `agent_core` and `agent_loop`. Frontends supply presentation and
+  cancellation through hooks rather than duplicating the continuation loop.
+- Declare user-facing settings in the config registry and consume them by canonical key. Direct
+  environment reads are for startup/bootstrap decisions, conventional process environment, or
+  deliberately environment-only secrets.
+- Process-wide config and live provider state are foreground-thread state. Resolve config and
+  prepare owned worker inputs before spawning background work. Use `system/bg_job` for ordinary
+  cooperative jobs, and join every worker before destroying state it may access or tearing down
+  global libcurl state.
+- `model_meta` is the resolved view for live provider/model capability decisions; `catalog` is its
+  lower-level metadata and pricing source. Cost estimation belongs in `agent_usage`, not provider
+  adapters.
+- `transcript` renders the model-facing conversation, `history` reconstructs the user-facing
+  display, and `session` is structured resumable persistence. Do not substitute one representation
+  for another.
+- Interactive conversation rendering flows through `render_ctx` and `disp`; live indicators are
+  explicit direct-terminal owners. Use `terminal/ansi.h` for fixed controls and semantic `theme`
+  roles for colors. Settle cursor-addressed output with `vt_resolve` before writing it to a pager,
+  file, or other non-terminal sink.
 
-When adding a compiled-in provider: add the source under `src/providers/`, list it in
-`meson.build`, declare its factory in `registry.h`, and insert it into `BUILTINS[]` in
-`registry.c` at the right priority.
+Extension workflows:
 
-When adapter event translation is non-trivial, split pure translation into
-`<provider>_events.{c,h}` so it can be unit-tested without HTTP.
+- Reuse the OpenAI or Anthropic protocol families through presets when wire-compatible. Prefer a
+  config-defined provider for a static endpoint variant rather than a new C shim.
+- A compiled-in provider needs its source in `meson.build`, a factory declaration in
+  `providers/registry.h`, and a `BUILTINS[]` entry at the intended autoselect priority.
+- A compiled-in tool needs its source in `meson.build`, an exported `const struct tool` declaration
+  in `tool.h`, and an entry in `agent_core.c`'s `TOOLS[]`.
+- Keep protocol translation and terminal-independent state machines pure and separately testable;
+  do not require HTTP or a TTY to test parsing and state transitions.
 
 ## Code style and conventions
 
@@ -159,14 +146,11 @@ When adapter event translation is non-trivial, split pure translation into
   acquisition order.
 - Always release owned resources on success and all early exits: `json_decref` jansson roots,
   `curl_easy_cleanup` handles, `free` buffers, etc.
-- `input_readline()` returns malloc'd memory; the caller owns it.
 - Avoid non-portable kernel idioms: no `likely()`/`unlikely()`, `BUG_ON`, `ERR_PTR`, or
   `kmalloc`. Use `<stdint.h>` types and plain negative-int returns plus `errno`.
 - Markdown is hard-wrapped around 100 columns, same as code.
-- Follow [`docs/code-style.md`](docs/code-style.md): prefer precise names, types, and structure over
-  explanatory comments.
-- Comments document only durable contracts, constraints, or non-obvious rationale. Do not narrate
-  code, preserve change history or reviewer discussion, or inventory current implementation details.
+- Before changing code in any language, read [`docs/code-style.md`](docs/code-style.md) and apply
+  its general naming, structure, and comment principles using that language's conventions.
 
 ## Git conventions
 
@@ -186,10 +170,7 @@ Commit messages follow these patterns:
 
 ## Dependencies
 
-Current dependencies are pinned in `meson.build`: libcurl (HTTPS/SSE), jansson (JSON), and
-Meson's platform threads dependency. Line editing is in-tree (`src/terminal/input.c`).
-
-Every dependency must be in Debian main and either ship with macOS or be available via a
-single `brew install`. Do not add GPL libraries.
-
-Intentionally out of scope: ncurses, TOML/YAML config, direct OpenSSL linking, glib, libxdiff.
+Dependencies are declared in `meson.build`. Keep the footprint small; before adding one, read
+[`docs/philosophy.md`](docs/philosophy.md#small-dependency-footprint). Every new dependency must be
+in Debian main and either ship with macOS or be available via a single `brew install`. Do not add
+GPL libraries.
