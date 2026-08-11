@@ -11,17 +11,32 @@
 
 ## Key features
 
-- **Lightweight by design** — a single native C binary with a small dependency set.
-  Uses very small amount of memory (just a few MBs) - so more RAM is left for your local LLMs.
-- **High quality presentation** — streaming Markdown formatting, and streaming output of
-  bash tool invocations, reflowed and/or truncated for display in the terminal. Only redraws
-  the current streaming line or the input area, native terminal scrollback is preserved.
+- **Lightweight by design** — A single native C binary with a small dependency set.
+  Starts instantly, and uses very small amount of memory (just a few MBs) - so more RAM is left
+  for your local LLMs.
+- **Local models are first-class** — Start `llama-server -m [model].gguf`, then
+  `hax --provider llama.cpp`, and hax auto-discovers the model and runtime capabilities.
+  No custom provider config block needed for the default setup.
+- **Respects your terminal** — Streaming Markdown and live tool output, reflowed for display
+  in the terminal. Only redraws the current streaming line or the input area, native scrollback
+  is preserved. Does not take over or mess with your terminal.
 - **Inspectable** — See exactly what was sent to the model and what it replied in a usable
   transcript view (Ctrl+T). Optionally collect a detailed wire protocol trace.
 - **Use any provider/model** — Supports OpenAI (+compatible), Anthropic (+compatible),
   Codex (via ChatGPT subscription), OpenRouter, llama.cpp, etc.
-- **Automation-friendly** — interactive REPL and `-p` one-shot mode, with clean stdout for
-  scripts/agents and resume hints on stderr.
+- **Well-behaved Unix tool** — XDG paths, clean stdout in `-p` one-shot mode with resume hints on
+  stderr, plain-text config and session files, composition via subprocesses instead of plugins.
+
+## Target audience
+
+Developers who live in the terminal, run local models, audit what their tools do, package
+software for distros, or run agents where resources are scarce. If you want MCP marketplaces, a
+plugin runtime, IDE panels, or per-command permission prompts, other agents build exactly that —
+hax deliberately doesn't, and [docs/philosophy.md](./docs/philosophy.md) explains each omission
+and the pattern that covers the need.
+
+If "fancy new AI tech in an old-school minimalist package" sounds like your vibe, you might
+like this.
 
 ## Install
 
@@ -104,8 +119,6 @@ order, and the setting reference.
 
 ## More docs
 
-- [docs/philosophy.md](./docs/philosophy.md) — design approach, and why some conventional
-  agent features are deliberately absent.
 - [docs/debugging.md](./docs/debugging.md) — trace/transcript logs, mock provider, and demo scripts.
 
 ## License
