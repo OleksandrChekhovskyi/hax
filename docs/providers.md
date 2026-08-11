@@ -1,92 +1,168 @@
 # Providers
 
-Select a provider with `HAX_PROVIDER`, the `provider` key in config, or `/provider` in the
-REPL. Runtime selections are saved to `state.json` so they stick across runs without editing
-`config.json`.
+Start hax interactively and use `/provider` for the easiest setup: unavailable entries include a
+reason, and choosing a provider continues into model and reasoning-effort pickers when supported.
+Selections are remembered in `state.json`.
 
-## Selection and auto-selection
+For one run, use CLI flags or environment variables:
 
-Built-in providers, in auto-selection and picker order:
+```sh
+hax --provider=openrouter --model=anthropic/claude-sonnet-5
+HAX_PROVIDER=llama.cpp hax
+```
 
-1. `codex`
-2. `openai-compatible`
-3. `anthropic-compatible`
-4. `llama.cpp`
-5. `openai`
-6. `anthropic`
-7. `openrouter`
+CLI flags are preferable in scripts because they are explicit and override saved state. Keep API
+keys in environment variables rather than command arguments or `config.json`.
 
-Config-defined providers, including the built-in `ollama` recipe, are listed after those.
-`mock` is intentionally hidden from auto-selection and `/provider`, but still works with
-`HAX_PROVIDER=mock`.
+## Choosing a provider
 
-If a provider is explicitly configured and cannot start, the interactive REPL opens without a
-provider and points you at `/provider`; in `-p` mode the failure is fatal because there is no
-picker. Cold start with no configured provider tries available providers in the order above,
-in both modes. `-p` always prints a one-line `provider · model [· effort]` banner to stderr —
-marked `(auto-selected)` when the provider was inferred rather than explicitly configured —
-so the backend that answered is visible even in pipelines.
+| Provider id | Best fit | Required setup |
+| --- | --- | --- |
+| `codex` | Existing ChatGPT/Codex subscription | Log in with the official `codex` CLI. |
+| `openai` | Direct OpenAI API | `OPENAI_API_KEY`; choose a model. |
+| `anthropic` | Direct Anthropic API | `ANTHROPIC_API_KEY`; choose a model. |
+| `openrouter` | Many vendors through one API | `OPENROUTER_API_KEY`; choose a model. |
+| `llama.cpp` | Local `llama-server` | Start the server; model is normally discovered. |
+| `ollama` | Local Ollama models | Start `ollama serve`; choose a pulled model. |
+| `openai-compatible` | OpenAI Chat Completions-compatible endpoint | Base URL; usually choose a model. |
+| `anthropic-compatible` | Anthropic Messages-compatible proxy/server | Base URL; usually choose a model. |
 
-`/provider` shows unavailable providers dimmed with a reason. After picking a provider it also
-walks through model and reasoning-effort selection when those are available.
+With no configured provider, hax tries available providers in this order: Codex,
+OpenAI-compatible, Anthropic-compatible, llama.cpp, OpenAI, Anthropic, OpenRouter, then
+config-defined providers such as Ollama. Auto-selection is convenient interactively; configure or
+pass the provider in automation so a newly available backend cannot change a script's behavior.
 
-## Model and effort selection
-
-`HAX_MODEL` or the `model` config key sets the model. Providers with no default model require
-one in `-p` mode; interactively, `/model` can pick one if the provider exposes a model list.
-
-`HAX_EFFORT` or `/effort` sets a provider-specific effort value. The picker only
-offers effort levels when the current provider exposes a ladder. If the value is not accepted
-by the current provider's ladder, hax falls back to that provider's default.
+If an explicitly selected provider cannot start, the REPL opens without one and directs you to
+`/provider`; one-shot mode exits with an error. A one-shot banner on stderr identifies the provider,
+model, effort, and whether selection was automatic.
 
 ## Codex
 
-`HAX_PROVIDER=codex` uses the ChatGPT/Codex backend and reuses the OAuth token stored by the
-official `codex` CLI in `~/.codex/auth.json`.
+`codex` uses the ChatGPT Codex backend and the OAuth credentials written by the official Codex CLI:
 
 ```sh
-HAX_PROVIDER=codex hax
+codex                         # log in or refresh credentials
+hax --provider=codex
 ```
 
-If startup says the Codex CLI is not logged in, run the official `codex` CLI once to refresh
-its auth file. Hax reads `model` and `model_reasoning_effort` from `~/.codex/config.toml` as
-provider defaults. If no model is configured there or in hax config, set `HAX_MODEL` or
-choose one with `/model`.
+hax reads `model` and `model_reasoning_effort` from `~/.codex/config.toml` as provider defaults. If
+none is configured, choose a model with `/model` or pass `--model`.
 
-Codex supports `/usage`. It also probes ChatGPT's model catalog in the background to discover
-the selected model's context window for the percentage display; `HAX_CONTEXT_LIMIT` overrides
-that.
+`/usage` shows subscription windows reported by ChatGPT. Codex does not report monetary cost per
+response, so any `~$` amount is an API-equivalent estimate from model metadata, not a charge against
+the subscription.
 
-Codex is subscription-based and reports no per-response cost, so the stats line shows an
-estimated API-equivalent spend (`~$0.042`) priced from OpenAI's published rates via the model
-catalog — see the model catalog section in [configuration.md](./configuration.md).
+If authentication expires, run the official `codex` CLI again; hax cannot refresh that token itself.
 
 ## OpenAI
 
-`HAX_PROVIDER=openai` uses `https://api.openai.com/v1` and ignores `HAX_OPENAI_BASE_URL`.
-This keeps an OpenAI API key from being sent to a third-party endpoint by accident.
-
 ```sh
-HAX_PROVIDER=openai HAX_MODEL=<model> OPENAI_API_KEY=... hax
+export OPENAI_API_KEY=...
+hax --provider=openai
 ```
 
-API-key lookup order:
+OpenAI has no fixed model default. Choose one with `/model`, set `model` in config, or pass
+`--model`. hax uses `https://api.openai.com/v1` and deliberately ignores `openai.base_url`, preventing
+a first-party key from being sent to a third-party endpoint by accident.
 
-1. `HAX_OPENAI_API_KEY`
-2. `OPENAI_API_KEY`
+Credential order is `HAX_OPENAI_API_KEY`, then `OPENAI_API_KEY`. Requests use the Responses API by
+default, which is the best fit for current reasoning models and tool calls. Set `openai.api` to
+`chat` only for a specific compatibility need.
 
-OpenAI has no built-in model default in hax, so set `HAX_MODEL` or choose one with `/model`.
-Prompt-cache keys are sent by default; disable with `HAX_OPENAI_SEND_CACHE_KEY=0`.
+## Anthropic
 
-Requests go to `/v1/responses`. Recent reasoning models reject function tools combined with a
-reasoning effort on `/v1/chat/completions`, and only the Responses API returns the encrypted
-reasoning that lets a model carry its chain of thought across the tool calls of one turn.
-`HAX_OPENAI_API=chat` forces the older protocol.
+```sh
+export ANTHROPIC_API_KEY=...
+hax --provider=anthropic
+```
 
-## OpenAI-compatible
+Choose a model with `/model`, config, or `--model`. hax uses `https://api.anthropic.com/v1` and
+ignores `anthropic.base_url` for the first-party provider. Credential order is
+`HAX_ANTHROPIC_API_KEY`, then `ANTHROPIC_API_KEY`.
 
-`HAX_PROVIDER=openai-compatible` targets any endpoint with an OpenAI Chat Completions-style
-`/v1/chat/completions` API. `HAX_OPENAI_BASE_URL` is required.
+First-party Anthropic defaults to adaptive thinking, so `/effort` offers the effort levels exposed by
+hax. Prompt caching is enabled by default. The output-token limit follows model metadata when
+available and otherwise falls back to 32000; override it with `anthropic.max_tokens` if a proxy or
+older model needs a smaller value.
+
+## OpenRouter
+
+```sh
+export OPENROUTER_API_KEY=...
+hax --provider=openrouter --model=anthropic/claude-sonnet-5
+```
+
+OpenRouter has no fixed model default. `/model` lists its catalog, and `/effort` requests reasoning on
+models that expose it. Credential order is `HAX_OPENAI_API_KEY`, then `OPENROUTER_API_KEY`.
+
+OpenRouter reports per-response cost, which hax uses in turn stats and `/session`; `/usage` shows API
+key spend and available credits. Model metadata also supplies context limits and image/tool
+capabilities when available.
+
+hax sends its project URL and title for OpenRouter app attribution by default. Set
+`openrouter.referer` or `openrouter.title` to an empty string to omit those headers.
+
+Before sending proprietary code, review the selected endpoint's retention/training policy and your
+OpenRouter privacy settings. Free and paid models have separate training controls, and a free model
+should not be assumed private. Enable the account-level training opt-out or zero-data-retention
+routing when your work requires it.
+
+## llama.cpp
+
+`llama.cpp` is a convenience configuration for a local `llama-server` at
+`http://127.0.0.1:8080/v1`:
+
+```sh
+llama-server -m /path/to/model.gguf -c 32768
+hax --provider=llama.cpp
+```
+
+Use `HAX_LLAMACPP_PORT=9090` for another local port, or `HAX_OPENAI_BASE_URL` for a complete URL. If
+the server uses `--api-key`, set `HAX_OPENAI_API_KEY`.
+
+At startup, hax queries `/v1/models`. It adopts the first served model when none was explicitly
+chosen and re-discovers it on later launches. If several models are served, use `/model` or
+`--model` to avoid ambiguity. An explicit `HAX_MODEL` skips startup discovery and lets the first
+request report connection/model errors.
+
+hax probes llama.cpp for context and image capability when possible. Start the server with a context
+large enough for an agent session; the llama.cpp default is often too small once system instructions,
+project context, tool results, and the desired output are combined.
+
+## Ollama
+
+Ollama is a shipped custom-provider recipe for `http://127.0.0.1:11434/v1`:
+
+```sh
+ollama serve
+hax --provider=ollama --model=qwen3:8b
+```
+
+Choose a pulled model explicitly. hax does not guess which model you intend from Ollama's list, and
+one-shot mode requires a model.
+
+Ollama's runtime context defaults can be small for coding-agent prompts. Set a larger
+`OLLAMA_CONTEXT_LENGTH` before starting `ollama serve` (or raise `num_ctx` on the model), and set
+`context_limit` to the same value if you want hax's percentage display. A too-small context commonly
+appears as a response ending with `length`.
+
+Override the endpoint in `config.json`:
+
+```json
+{
+  "providers": {
+    "ollama": {
+      "base_url": "http://127.0.0.1:11500/v1"
+    }
+  }
+}
+```
+
+## Compatible built-ins
+
+### OpenAI-compatible
+
+Use this for an endpoint implementing OpenAI Chat Completions:
 
 ```sh
 HAX_PROVIDER=openai-compatible \
@@ -96,43 +172,14 @@ HAX_MODEL=Qwen3-30B \
 hax
 ```
 
-This preset does not fall back to `OPENAI_API_KEY`; use `HAX_OPENAI_API_KEY` if the endpoint
-needs a bearer token. Prompt-cache keys are off by default. `HAX_OPENAI_REASONING_FORMAT`
-selects how effort is encoded: `flat` for `reasoning_effort` or `nested` for
-`reasoning: {"effort": ...}`.
+`HAX_OPENAI_BASE_URL` is required. If authentication is needed, use `HAX_OPENAI_API_KEY`; hax does
+not fall back to `OPENAI_API_KEY` for compatible endpoints. The default request protocol is Chat
+Completions. Set `openai.reasoning_format` to `nested` only when the server expects
+`reasoning: {"effort": ...}` instead of a flat `reasoning_effort` field.
 
-## Anthropic
+### Anthropic-compatible
 
-`HAX_PROVIDER=anthropic` uses `https://api.anthropic.com/v1` and ignores
-`HAX_ANTHROPIC_BASE_URL`.
-
-```sh
-HAX_PROVIDER=anthropic ANTHROPIC_API_KEY=... hax
-```
-
-API-key lookup order:
-
-1. `HAX_ANTHROPIC_API_KEY`
-2. `ANTHROPIC_API_KEY`
-
-Anthropic has no built-in model default in hax, so set `HAX_MODEL` or choose one with
-`/model`. Its default thinking mode is `adaptive`, so
-`/effort` offers `low`, `medium`, `high`, `xhigh`, and `max`.
-Prompt cache-control breakpoints are sent by default; disable with `HAX_ANTHROPIC_CACHE=0`.
-
-Useful knobs:
-
-- `HAX_ANTHROPIC_MAX_TOKENS` — max output tokens, including thinking and text. Default
-  `32000`.
-- `HAX_ANTHROPIC_THINKING_MODE` — `adaptive`, `budget`, or `off`.
-- `HAX_ANTHROPIC_THINKING_BUDGET` — budget-mode thinking tokens.
-- `HAX_ANTHROPIC_CACHE_TTL` — cache TTL, `5m` or `1h`; default `1h`.
-- `HAX_ANTHROPIC_VERSION` — `anthropic-version` header; default `2023-06-01`.
-
-## Anthropic-compatible
-
-`HAX_PROVIDER=anthropic-compatible` targets an Anthropic Messages-style `/v1/messages`
-endpoint. `HAX_ANTHROPIC_BASE_URL` is required.
+Use this for an endpoint implementing Anthropic Messages:
 
 ```sh
 HAX_PROVIDER=anthropic-compatible \
@@ -141,100 +188,17 @@ HAX_MODEL=local-model \
 hax
 ```
 
-This preset does not fall back to `ANTHROPIC_API_KEY`; use `HAX_ANTHROPIC_API_KEY` if the
-endpoint needs an `x-api-key` token. It defaults to budget thinking, tolerates empty thinking
-signatures used by some compat servers, and leaves cache-control off by default. Opt into
-cache-control with `HAX_ANTHROPIC_CACHE=1`.
+`HAX_ANTHROPIC_BASE_URL` is required. Use `HAX_ANTHROPIC_API_KEY` when authentication is needed; hax
+does not fall back to `ANTHROPIC_API_KEY`. Compatible endpoints default to budget thinking and leave
+explicit prompt-cache controls off for broader compatibility.
 
-## llama.cpp
-
-`HAX_PROVIDER=llama.cpp` is a convenience preset for local `llama-server`. It defaults to
-`http://127.0.0.1:8080/v1`.
-
-```sh
-HAX_PROVIDER=llama.cpp hax
-HAX_PROVIDER=llama.cpp HAX_LLAMACPP_PORT=9090 hax
-```
-
-`HAX_OPENAI_BASE_URL` overrides the URL entirely. If `llama-server` was started with
-`--api-key`, set `HAX_OPENAI_API_KEY`; the key is used for discovery probes as well as chat
-requests.
-
-At startup hax reconciles the configured model against `/v1/models`. If the configured model
-is served, it keeps it; otherwise it adopts the first served model. If the server is
-unreachable and no model is configured, startup fails with the URL it tried. If `HAX_MODEL` is
-set, hax trusts it and lets the first request surface any connection error.
-
-A model hax adopted on its own is not a choice, so nothing records it: `/provider`, `/model`,
-and `/preset-save` store "use the server's model" and each launch re-discovers. A model you
-named (`HAX_MODEL`, config) or picked from a multi-model list is recorded as itself.
-
-The context-window percentage is probed from `/props` in the background. If `/props` is slow
-or unavailable, only absolute token counts are shown. For long prompts, start llama-server
-with a large enough `-c` / `--ctx-size`.
-
-## ollama
-
-`ollama` is a shipped config-provider recipe using ollama's OpenAI-compatible endpoint. It is
-selected like any other provider:
-
-```sh
-HAX_PROVIDER=ollama HAX_MODEL=qwen3:8b hax
-```
-
-Default URL: `http://127.0.0.1:11434/v1`. Override it in `config.json`:
-
-```json
-{ "providers": { "ollama": { "base_url": "http://127.0.0.1:11500/v1" } } }
-```
-
-A model is required in one-shot mode. Set `HAX_MODEL` or `model` in config, or choose one
-with `/model` interactively. Hax does not guess from `ollama list` because the OpenAI
-endpoint's model catalog is a pulled-model list, not necessarily the model you intend to run.
-
-Hax does not auto-detect ollama's runtime context window. Set `HAX_CONTEXT_LIMIT` to your
-`OLLAMA_CONTEXT_LENGTH` if you want the percentage display. Ollama's default context is often
-small for an agent prompt; if responses truncate with `length`, restart `ollama serve` with a
-larger `OLLAMA_CONTEXT_LENGTH` or raise `num_ctx` on the model.
-
-## OpenRouter
-
-`HAX_PROVIDER=openrouter` uses `https://openrouter.ai/api/v1` and ignores
-`HAX_OPENAI_BASE_URL`.
-
-```sh
-HAX_PROVIDER=openrouter \
-HAX_MODEL=anthropic/claude-sonnet-4.6 \
-OPENROUTER_API_KEY=... \
-hax
-```
-
-API-key lookup order:
-
-1. `HAX_OPENAI_API_KEY`
-2. `OPENROUTER_API_KEY`
-
-OpenRouter has no built-in model default in hax. For app attribution on OpenRouter's
-dashboards, hax sends `HTTP-Referer` (the app identifier, defaulting to the hax project URL),
-`X-Title: hax`, and `X-OpenRouter-Categories: cli-agent` by default. Override the referer and
-title with `HAX_OPENROUTER_REFERER` and `HAX_OPENROUTER_TITLE`; set the referer to an empty
-string to disable attribution entirely.
-
-For the context percentage, hax probes
-`/api/v1/models/<model>/endpoints` and uses the largest returned `context_length`.
-Reasoning is requested when a reasoning effort is selected (`/effort` or `HAX_EFFORT`), which
-wakes chain-of-thought on models that gate it; `HAX_SHOW_REASONING=1` only controls whether the
-resulting deltas are shown live.
-
-OpenRouter reports per-response cost, which feeds the spend figure on the stats line and in
-`/session`. OpenRouter also supports `/usage`, showing the API key's total spend, the account's
-remaining prepaid credits, and — when the key carries a per-key spending cap — the cap and its
-remaining allowance.
+For a static endpoint you use regularly, prefer a named custom provider instead of repeatedly
+exporting the generic base URL.
 
 ## Custom providers
 
-Any static OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages endpoint can be
-added under the `providers` object in `~/.config/hax/config.json`:
+Add any static OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages endpoint under
+`providers` in `config.json`:
 
 ```json
 {
@@ -243,59 +207,51 @@ added under the `providers` object in `~/.config/hax/config.json`:
       "base_url": "https://api.groq.com/openai/v1",
       "api_key_env": "GROQ_API_KEY"
     },
-    "my-anthropic-proxy": {
+    "company-proxy": {
+      "display_name": "Company proxy",
       "api": "anthropic-messages",
-      "base_url": "https://example.test/v1",
-      "api_key_env": "MY_PROXY_KEY",
-      "display_name": "Anthropic proxy"
+      "base_url": "https://llm.example.com/v1",
+      "api_key_env": "COMPANY_LLM_KEY",
+      "catalog_id": "anthropic"
     }
   }
 }
 ```
 
-Recognized common keys:
+Common fields:
 
-- `base_url` — required unless supplied by a built-in recipe such as `ollama`.
-- `display_name` — banner label.
-- `api` — `openai-completions` (default), `openai-responses`, or `anthropic-messages`.
-- `api_key` — literal token. Prefer `api_key_env` for real secrets.
-- `api_key_env` — environment variable holding the token.
-- `sort_models` — sort the `/model` picker alphabetically instead of the server's catalog
-  order. Default off.
-- `catalog_id` — the provider's key in the model catalog (its models.dev id), enabling the
-  estimated spend figure and the context-window fallback for its models. Defaults to the
-  provider's own name, so a provider named after its models.dev id (`deepseek`, `groq`, …)
-  gets metadata with no extra keys; set it when the names differ (a proxy for a known
-  provider), or to an empty string to disable catalog lookups. Recipe-seeded providers
-  (`ollama`) follow their recipe instead — a local server's models aren't the hosted ones
-  the catalog describes. See the model catalog section in
-  [configuration.md](./configuration.md).
+| Field | Purpose |
+| --- | --- |
+| `base_url` | Required endpoint root, unless a shipped recipe supplies one. |
+| `display_name` | Human-readable banner name. |
+| `api` | `openai-completions` (default), `openai-responses`, or `anthropic-messages`. |
+| `api_key_env` | Name of the environment variable holding the key; recommended. |
+| `api_key` | Literal key; avoid for real secrets. |
+| `sort_models` | Alphabetize this provider's model picker. |
+| `catalog_id` | Provider id in models.dev for cost/context metadata; empty disables lookup. |
 
-OpenAI-style custom providers also recognize `reasoning_format` (`flat` or `nested`),
-`reasoning_roundtrip`, `send_cache_key`, `request_cost`, `cache`, and `cache_ttl`.
-`reasoning_format` and `reasoning_roundtrip` apply to `openai-completions` only; the
-Responses protocol has one reasoning shape and replays encrypted reasoning instead.
-Anthropic-style custom providers
-recognize the Anthropic settings from [configuration.md](./configuration.md): `max_tokens`,
-`thinking_mode`, `thinking_budget`, `cache`, `cache_ttl`, and `version`.
+A custom provider named after its models.dev id (for example `groq`) uses that identity by default.
+Use `catalog_id` when a proxy name differs from the underlying provider. Do not map local models to a
+hosted provider merely because names look similar: prices and context limits may differ.
 
-Custom providers read only their own `providers.<name>` block. Global `HAX_OPENAI_*` or
-`HAX_ANTHROPIC_*` variables do not bleed into them, except for the explicit environment
-variable named by `api_key_env`.
+For `openai-completions`, advanced fields are `reasoning_format`, `reasoning_roundtrip`,
+`send_cache_key`, `request_cost`, `cache`, and `cache_ttl`. `openai-responses` accepts
+`send_cache_key`; its reasoning format and encrypted round-trip are fixed by the protocol.
+Anthropic-style blocks accept `max_tokens`, `thinking_mode`, `thinking_budget`, `cache`, `cache_ttl`,
+and `version`. Leave advanced fields unset unless the endpoint documents them.
 
-Provider names cannot contain `.` because dots separate config-key path components. A custom
-provider with the same name as a built-in is ignored in favor of the built-in.
+Custom providers read only their own block. Global `HAX_OPENAI_*` and `HAX_ANTHROPIC_*` settings do
+not bleed into them; only the variable named by `api_key_env` is read. Provider names cannot contain
+`.` and cannot override a compiled-in provider.
 
-## Mock
+## Mock provider
 
-`HAX_PROVIDER=mock` is an in-process provider for local testing. It needs no network, API key,
-or model.
+`mock` is a development backend with no network or model. It is hidden from auto-selection and the
+provider picker but can be selected explicitly:
 
 ```sh
 HAX_PROVIDER=mock hax
 HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/demo.txt hax
 ```
 
-With `HAX_MOCK_SCRIPT`, the mock provider plays a small line-based script. Without a script,
-it uses simple heuristics: for example, a backtick-quoted command can trigger the real `bash`
-tool so rendering and dispatch paths can be exercised without an LLM.
+See [Troubleshooting and development diagnostics](./debugging.md#mock-provider) for its script format.

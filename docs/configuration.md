@@ -1,342 +1,270 @@
 # Configuration
 
-Hax has one registry for user-facing settings. Each setting has a canonical config key and,
-when applicable, an environment variable.
+Configuration is optional: the interactive pickers work without a file and remember provider/model
+choices. Add `config.json` for stable defaults, custom providers, presets, or behavior changes.
 
-## Files and precedence
+## Files and resolution
 
-Paths use XDG defaults:
+hax follows the XDG Base Directory specification. The table shows the paths used when the
+corresponding `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, or `XDG_CACHE_HOME` variable is unset.
 
-| Purpose | Path |
+| Purpose | Default path |
 | --- | --- |
-| Config file | `${XDG_CONFIG_HOME:-$HOME/.config}/hax/config.json` |
-| Runtime selection state | `${XDG_STATE_HOME:-$HOME/.local/state}/hax/state.json` |
-| Sessions | `${XDG_STATE_HOME:-$HOME/.local/state}/hax/sessions/` |
+| User configuration | `~/.config/hax/config.json` |
+| Remembered interactive selections | `~/.local/state/hax/state.json` |
+| Sessions and prompt history | `~/.local/state/hax/` |
+| Model metadata cache | `~/.cache/hax/catalog.json` |
 
-Resolution order:
+`config.json` expresses durable, user-owned intent. It is suitable for a dotfiles repository or a
+symlink from one, provided secrets remain in environment variables. `state.json` is machine-local
+convenience state written by hax when you use the interactive selectors; do not edit or version it.
+Keeping them separate lets interactive `/provider` and `/model` choices persist without rewriting
+your portable configuration.
+
+For an ordinary setting, the first defined value wins:
 
 ```text
-run override → resumed conversation → environment → state.json → config.json → default
+current-process override → resumed conversation → environment → state.json → config.json → default
 ```
 
-`/provider`, `/model`, and `/effort` create run overrides for the current process and
-persist them to `state.json`. On the next launch, an explicit environment variable still wins
-over that state.
+The resumed-conversation tier applies to provider, model, effort, and preset. This ensures `hax -c`
+continues on the backend that previously handled the session even when your current default changed.
+Explicit CLI selection flags still override it.
 
-The *resumed conversation* tier is the provider, model, effort, and preset that the session
-you resumed (`-c`, `--resume`, `/resume`) was last running under. It outranks your
-environment and everything persisted, so resuming continues a conversation where it left
-off; the selection flags still win. See
-[what resuming restores](usage.md#what-resuming-restores).
+Sources behave as follows:
 
-`/config` lists every setting with its resolved value, source, and description. Bright rows
-are editable as run-scoped overrides; dimmed rows report how to change them. Use
-`/config <key> default` to clear an override. Provider, model, effort, and preset changes remain
-under their dedicated commands.
+- `--provider`, `--model`, `--effort`, and `--preset` apply only to this process and do not persist.
+  A preset is applied first, then explicit selection flags are layered over it.
+- `/provider`, `/model`, `/effort`, and `/preset` affect the current process and save the selection in
+  `state.json` for later runs.
+- `HAX_*` environment variables are useful for per-shell and automated runs. They override saved
+  interactive choices.
+- `config.json` should hold durable defaults, provider definitions, and presets. Do not edit
+  `state.json` by hand.
 
-API keys are shown only as `set` or `unset`. `/config` reflects hax's `HAX_*` settings, not
-provider fallbacks (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`), so a
-fallback-only key may appear unset even when authentication works.
+A preset is a complete stance rather than a bag of partial defaults. Explicit provider/model/effort
+input exits or suppresses a lower-priority preset instead of silently mixing with it. Select a preset
+explicitly when that is what you want.
 
-The CLI selection flags and presets also land in the run-override tier, applied in this
-order: a preset first, then explicit `--provider` / `--model` / `--effort` flags on top. So
-for a single run the effective order is: flags → preset → resumed conversation → environment
-→ `state.json` → `config.json`. The flags and startup presets (`--preset`, `HAX_PRESET`)
-persist nothing; the interactive `/preset` persists the preset's *name* to `state.json` like
-the other selectors (see [Presets](#presets)).
+In the REPL, `/config` shows each registered setting's resolved value, source, and description. It
+also identifies settings that can be changed for the running process:
+
+```text
+/config                         # pick a setting
+/config theme light             # set a process override
+/config compact.threshold 75
+/config theme default           # clear the process override
+```
+
+Provider, model, effort, and preset use their dedicated commands. API keys are displayed only as set
+or unset. `/config` reports hax's own key setting, so a provider fallback such as `OPENAI_API_KEY` may
+authenticate successfully while `openai.api_key` appears unset.
 
 ## Config file format
 
-`config.json` is plain JSON: no comments or trailing commas. Dotted keys are written as nested
-objects, though flat dotted keys are also accepted.
+`config.json` is plain JSON without comments or trailing commas. Dotted keys are normally represented
+as nested objects:
+
+```json
+{
+  "provider": "openrouter",
+  "model": "anthropic/claude-sonnet-5",
+  "theme": "dark",
+  "compact": {
+    "threshold": 80
+  }
+}
+```
+
+Flat dotted keys such as `"compact.threshold": 80` are also accepted for scalar settings. Keep
+structured values such as `providers`, `presets`, and `catalog.models` nested for clarity.
+
+Scalar strings, numbers, and booleans are accepted. Booleans recognize `1/0`, `true/false`,
+`yes/no`, and `on/off`, case-insensitively. Durations accept seconds or `ms`, `s`, `m`, and `h`
+suffixes. Sizes accept plain bytes or `k` and `m` suffixes using 1024-base units. Invalid typed
+values use the setting's default; `/config` rejects invalid runtime values with an error.
+
+Keep secrets in environment variables where possible:
+
+```sh
+export OPENAI_API_KEY=...
+export ANTHROPIC_API_KEY=...
+export OPENROUTER_API_KEY=...
+```
+
+For a custom provider, use `api_key_env` to name its credential variable rather than putting the
+credential itself in JSON.
+
+## Common configurations
+
+### Local OpenAI-compatible server
 
 ```json
 {
   "provider": "openai-compatible",
   "provider_name": "vLLM",
   "model": "Qwen3-30B",
-  "effort": "medium",
   "openai": {
     "base_url": "http://127.0.0.1:8000/v1"
   }
 }
 ```
 
-Scalar values may be strings or JSON numbers/booleans; hax normalizes scalar leaves to
-strings internally.
-
-Boolean settings accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitive.
-Invalid typed values fall back to the setting default rather than silently changing behavior.
-
-Duration settings accept bare seconds or a suffix: `ms`, `s`, `m`, `h`. Size settings accept a
-plain number or `k`/`m` suffixes using 1024-base units.
-
-## Common examples
-
-OpenAI-compatible local server:
-
-```json
-{
-  "provider": "openai-compatible",
-  "model": "Qwen3-30B",
-  "provider_name": "vLLM",
-  "openai": { "base_url": "http://127.0.0.1:8000/v1" }
-}
-```
-
-Ollama on a non-default port:
+### Ollama on a different port
 
 ```json
 {
   "provider": "ollama",
   "model": "qwen3:8b",
   "providers": {
-    "ollama": { "base_url": "http://127.0.0.1:11500/v1" }
+    "ollama": {
+      "base_url": "http://127.0.0.1:11500/v1"
+    }
   }
 }
 ```
 
-Custom provider with a key in the environment:
+### Light terminal theme with restrained notifications
 
 ```json
 {
-  "providers": {
-    "groq": {
-      "base_url": "https://api.groq.com/openai/v1",
-      "api_key_env": "GROQ_API_KEY"
-    }
-  }
+  "theme": "light",
+  "notify": "off",
+  "display_width": 100
 }
 ```
 
 ## Presets
 
-A preset is a named, complete selection: which provider to talk to, and optionally which
-model, reasoning effort, system prompt, and identity color. Define them under `presets.<name>`
-in `config.json` — or save the selection you are already running as one with `/preset-save`
-(see [Saving one from the session](#saving-one-from-the-session)):
+A preset is first of all a name for a favorite provider/model/effort selection — useful when you
+regularly switch between a daily model, a cheaper alternative, and a stronger model for difficult
+work. A preset can also become a role by adding a description, system-prompt instructions, and a
+visual tint.
+
+The easiest way to save a favorite is to select it with `/provider`, `/model`, and `/effort`, then run
+`/preset-save <name>`. Edit `config.json` when you want to add role-specific fields:
 
 ```json
 {
   "presets": {
+    "daily": {
+      "description": "favorite everyday model",
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-v4-flash-0731",
+      "tint": "teal"
+    },
     "review": {
-      "description": "thorough code review on a strong model",
-      "tint": "rose",
+      "description": "thorough code review",
       "provider": "codex",
       "model": "gpt-5.6-sol",
       "effort": "high",
-      "system_prompt_append": "@prompts/review.md"
-    },
-    "scout": {
-      "description": "fast, cheap exploration",
-      "tint": "sage",
-      "provider": "openrouter",
-      "model": "qwen/qwen3-coder:free"
+      "system_prompt_append": "@prompts/review.md",
+      "tint": "rose"
     }
   }
 }
 ```
 
-Semantics:
+Model availability, pricing, and data policies change; treat these IDs as examples and prefer choices
+shown by your `/model` picker. Apply a preset with `--preset daily`, `HAX_PRESET=review`,
+`/preset review`, or `/new review`. `/preset` offers a picker when no name is given. The active preset
+appears in the banner and `/session`.
 
-- `provider` is required; it anchors the selection.
-- `model` and `effort` are optional. Omitted, the provider's own default applies
-  (llama.cpp discovers the served model), shadowing any env/state/config value — the same
-  rule a `/provider` switch uses, so a stale `HAX_MODEL` can't leak into a different backend.
-  Explicit `--model`/`--effort` flags still win over the preset.
-- `system_prompt` is optional and replaces the base prompt (only the base: the Environment,
-  project-context, and task/subagent sections still follow it). Omitted, normal resolution
-  applies — your configured prompt, or the built-in one.
-- `system_prompt_append` is optional text added after the base prompt: give a preset a
-  persona or extra rules without maintaining a fork of the built-in prompt. Prefer it over
-  `system_prompt` when you only want to add something.
-- Both accept `@path` values that read the text from a file: relative paths resolve against
-  the hax config directory, `@~/…` and absolute paths work as written. A preset naming an
-  unreadable file fails validation, like any other invalid member.
-- `tint` is optional: the persona's identity tint (`teal`, `violet`, `rose`, `sage` — see the
-  `tint` setting above), which colors the model's headings, code, links, the `[name]` stance
-  in the banner, and the preset's own row in the `/preset` picker. Omitted, your own `tint`
-  setting applies. Unlike the other members it is never written as an override — it is read
-  back off the active stance — so a `/config tint` you set afterwards outranks it, and
-  survives the `/model`, `/provider`, or `/effort` pick that ends the stance. An unknown tint
-  fails validation, like any other invalid member.
-- Applying a preset writes the whole selection, so presets replace each other rather than
-  compose: switching from a preset that set a system prompt to one that doesn't restores the
-  regular prompt.
-- `description` is reserved metadata, shown by the `/preset` picker and listed in the system
-  prompt's subagents section so the model knows which preset fits which delegated task.
-- A definition must be an object: nested under `presets` as above, or a single flat
-  `"presets.<name>": {...}` key. Fully-flat leaf spellings (`"presets.<name>.provider": ...`)
-  are not assembled into a preset — the same exception to the flat-key grammar that other
-  structured blocks (like `catalog.models`) carry.
-- Nothing else is presettable, deliberately: a preset must be fully honored whenever it is
-  applied, including mid-session via `/preset`, and only these per-request keys qualify
-  (`tint` too — it takes effect on the next thing drawn).
-  Endpoint and credential settings are bound at provider construction — define a custom
-  `providers.<name>` block and point the preset's `provider` at it. Project-context stripping
-  and session recording are startup-bound — use the `--bare` / `--no-session` flags.
-- Application is all-or-nothing: an invalid member is an error and nothing is applied.
+Preset fields:
 
-Select a preset with `--preset <name>`, the `HAX_PRESET` env var (or a `preset` config key),
-or `/preset` in the REPL. The active preset shows dim in the banner — `hax [review] › …` —
-which matters because a preset may have swapped the system prompt; `/session` lists it too,
-and Ctrl-T shows the exact prompt in effect.
+| Field | Meaning |
+| --- | --- |
+| `provider` | Required provider id. |
+| `model` | Optional model id; omitted means the provider's own default/discovery. |
+| `effort` | Optional provider-specific reasoning effort. |
+| `system_prompt` | Replace the built-in base prompt. Prefer appending unless replacement is required. |
+| `system_prompt_append` | Add role-specific instructions after the base prompt. |
+| `tint` | `teal`, `violet`, `rose`, or `sage`. |
+| `description` | Human-readable purpose, also shown to the model when delegation is available. |
 
-`/preset` persists like the other selectors, but by *name* (a `preset` key in `state.json`,
-machine-local like the rest): the next launch re-applies the then-current definition, so
-editing the preset in `config.json` changes what you get. An explicit `/provider`, `/model`,
-or `/effort` pick exits the preset — the committed selection replaces the whole stance,
-clearing its name and system prompt. `--preset` and `HAX_PRESET` apply per-run and persist
-nothing.
+`system_prompt` and `system_prompt_append` accept `@path`; relative paths resolve from the hax config
+directory, while absolute paths and `@~/...` work directly. Prefer `system_prompt_append` so updates
+to hax's built-in safety and workflow guidance are retained.
 
-Explicit per-run input beats the persisted stance as a whole: when any selection flag or
-selection env var (`HAX_PROVIDER`, `HAX_MODEL`, `HAX_EFFORT`, `HAX_SYSTEM_PROMPT`) is set, a
-preset coming from `state.json` or a config-file `preset` default is skipped entirely —
-presets apply whole or not at all, never blended with other input.
-(`HAX_SYSTEM_PROMPT_APPEND` is not a selection env var: an amendment composes with the
-stance, though a preset's own `system_prompt_append` still wins.) A preset named explicitly
-for the run (`--preset`, `HAX_PRESET`) still applies, and still shadows selection env vars
-per the flags → preset → env order; `HAX_PRESET=` (empty) disables any preset for the run. A
-persisted name whose definition has since been renamed or deleted warns at startup and is
-skipped; a failing explicit `--preset` is an error.
+A preset replaces the previous preset as a whole. Explicitly choosing a provider, model, or effort
+leaves the active preset. Endpoint and credential settings are not preset fields; define those on a
+custom provider and point the preset to it.
 
-Resuming restores the preset the conversation was running under. Naming a preset for the run
-(`--preset`, `HAX_PRESET=name`) replaces it; naming a provider, model, or effort instead
-exits it, exactly as an explicit pick exits a live stance. `--preset` is also the way past a
-conversation whose preset has since been deleted, otherwise an error in `-p` and a warning
-interactively.
-
-### Saving one from the session
-
-`/preset-save <name> [tint]` writes what the session is running as `presets.<name>` and
-switches into it, so the banner names the stance and the next launch starts there. It is the
-only command that writes `config.json`, and it rewrites the file from the configuration hax
-loaded at startup: your other keys are kept, hand-formatting is normalized, and an edit you make
-to the file while hax is running is overwritten — the same way that edit has no effect on the
-running session. A file hax couldn't parse is never rewritten, so a broken config is safe from
-it.
-
-What it captures:
-
-- the provider, model, and effort in effect — minus a model the backend picked for itself,
-  which is left out so the preset re-discovers one ([llama.cpp](providers.md#llamacpp))
-- the tint given as the second word, or chosen from the list that opens without one
-- the system prompt and appended text, each only when omitting it wouldn't bring the same one
-  back: a stance's or `HAX_SYSTEM_PROMPT`/`HAX_SYSTEM_PROMPT_APPEND`'s, not one already in
-  `config.json`
-
-Re-saving an existing name keeps its `description` and asks before replacing the rest. Writing
-a description, or anything else a block can hold, is what editing `config.json` is for.
-
-Earlier `/provider`/`/model`/`/effort` picks stay in `state.json` underneath a persisted
-preset. They are fully shadowed while the preset is active (it writes the whole selection),
-and come back into effect whenever the stance is skipped — a one-off `HAX_PRESET=` run, an
-explicit selection env var, or a stale name — so disabling a preset falls back to your last
-explicit selection, not to auto-selection.
+`/preset-save <name> [tint]` writes the current selection to `config.json` as a preset and activates
+it. The command preserves other loaded keys but normalizes JSON formatting. Because it rewrites
+the configuration loaded at startup, do not edit the file concurrently in another window. Existing
+preset names require confirmation before replacement; their description is retained.
 
 ## Setting reference
 
-The list below mirrors `src/config.c`; each bullet starts with the canonical key and environment
-variable. `/config` marks settings that can be changed mid-session.
+The tables below cover persistent and environment configuration. `/config` is the best source for
+the current binary's resolved values and whether a setting is runtime-tunable. `—` means unset or
+provider-dependent.
 
-### Selection and prompt
+### Selection and context
 
-- `preset` / `HAX_PRESET` — preset to apply at startup, as if passed via `--preset`. An
-  explicit empty value disables a config-file default.
-- `provider` / `HAX_PROVIDER` — backend id. Built-ins are `codex`, `openai`,
-  `openai-compatible`, `anthropic`, `anthropic-compatible`, `llama.cpp`, `ollama`,
-  `openrouter`, and `mock`. When unset, startup auto-selects: the built-in default (`codex`)
-  first, then the first available provider in priority order.
-- `model` / `HAX_MODEL` — model id. Required when the provider has no default and cannot
-  auto-fill it.
-- `effort` / `HAX_EFFORT` — provider-specific reasoning effort. Empty
-  string forces omission.
-- `system_prompt` / `HAX_SYSTEM_PROMPT` — replace the built-in base prompt; `@path` reads it
-  from a file (relative to the config directory, `~` expands). The Environment,
-  project-context, and task/subagent sections still follow — remove those with the `no_*`
-  settings below. Empty clears just the base; the literal `(none)` sends no system message
-  at all.
-- `system_prompt_append` / `HAX_SYSTEM_PROMPT_APPEND` — text appended after the base prompt;
-  `@path` works here too. Composes with an active preset instead of suppressing it.
-- `provider_name` / `HAX_PROVIDER_NAME` — override the banner display name for compiled-in
-  providers.
-- `no_env` / `HAX_NO_ENV` — skip the Environment section.
-- `no_agents_md` / `HAX_NO_AGENTS_MD` — skip AGENTS.md discovery.
-- `no_skills` / `HAX_NO_SKILLS` — skip the skills listing.
-- `no_subagents` / `HAX_NO_SUBAGENTS` — skip the subagents section (see
-  [usage.md](./usage.md)).
-- `no_tasks` / `HAX_NO_TASKS` — disable background tasks entirely: bash reverts to
-  kill-at-timeout and the task tools are not offered (see [usage.md](./usage.md)).
+| Config key | Environment | Default | Purpose |
+| --- | --- | --- | --- |
+| `preset` | `HAX_PRESET` | — | Startup preset; an empty environment value disables a config default. |
+| `provider` | `HAX_PROVIDER` | auto | Provider id. |
+| `model` | `HAX_MODEL` | — | Provider-specific model id. |
+| `effort` | `HAX_EFFORT` | — | Provider-specific reasoning effort; empty omits it. |
+| `system_prompt` | `HAX_SYSTEM_PROMPT` | built in | Replace the base prompt; `@path` reads a file; `(none)` removes the entire system message. |
+| `system_prompt_append` | `HAX_SYSTEM_PROMPT_APPEND` | — | Append text or an `@path` file to the base prompt. |
+| `no_env` | `HAX_NO_ENV` | off | Omit the Environment section. |
+| `no_agents_md` | `HAX_NO_AGENTS_MD` | off | Omit discovered `AGENTS.md` files. |
+| `no_skills` | `HAX_NO_SKILLS` | off | Omit skill descriptions. |
+| `no_subagents` | `HAX_NO_SUBAGENTS` | off | Omit delegation guidance. |
+| `no_tasks` | `HAX_NO_TASKS` | off | Disable managed background tasks. |
 
-### Display
+`(none)` for `system_prompt` is stronger than an empty string: it sends no system message at all.
+`--raw` is usually clearer when the goal is a prompt-only chat with no tools or context.
 
-- `markdown` / `HAX_MARKDOWN` — render Markdown on TTY output; piped output is raw. Default
-  `1`.
-- `show_reasoning` / `HAX_SHOW_REASONING` — show reasoning deltas live; changeable
-  mid-session. Controls display of reasoning, never whether the model reasons.
-- `sort_models` / `HAX_SORT_MODELS` — `on` forces the `/model` picker alphabetical, `off` keeps
-  the server's catalog order, for every provider. Default `auto`: each provider picks its own
-  default — alphabetical for `openai` and `openrouter`, catalog order elsewhere.
-- `context_limit` / `HAX_CONTEXT_LIMIT` — manual context-window size for percentage display
-  and auto-compaction.
-- `display_width` / `HAX_DISPLAY_WIDTH` — content width. Default `auto` follows the terminal
-  through 110 columns, then caps content at 100; the tolerance avoids a narrow unused margin.
-  `terminal` removes the upper cap. Both retain a 20-column floor. An integer of at least 20 sets
-  an exact width, independently of terminal size.
-- `notify` / `HAX_NOTIFY` — desktop notification style: `auto`, `bel`, `osc9`, or `off`. Default
-  `auto` detects from the terminal.
-- `theme` / `HAX_THEME` — color theme: `auto`, `dark`, `light`, `ansi`, or `off`. Default
-  `auto`. `dark` and `light` are fixed 256-color palettes tuned for the respective
-  background; `ansi` uses only the classic 16-color SGRs, so colors follow the terminal's
-  own scheme (the right choice for carefully themed terminals); `off` disables colors while
-  keeping bold/dim/italic. `auto` picks `off` when `NO_COLOR` is set (or the terminal is
-  dumb), `ansi` without 256-color support, and otherwise `dark` — or `light` when a
-  `COLORFGBG` environment variable reports a light background. Terminals rarely advertise
-  their background, so on a light scheme you typically want to set `light` explicitly.
-- `tint` / `HAX_TINT` — identity tint: `teal` (default), `violet`, `rose`, or `sage`. Recolors
-  the model's voice — headings, inline code, fence bodies, underlined links, and the active
-  preset's `[name]` in the banner — so two terminals running different personas are
-  distinguishable at a glance. hax's own chrome, the prompt marker, and the diff/status
-  colors keep their fixed meanings under every tint. Presets can carry one (see
-  [Presets](#presets)), which wins over this setting until you change it with `/config tint`;
-  the `dark` and `light` themes apply tints, while `ansi` and `off` ignore them and defer to
-  the terminal's own scheme.
+### Display and behavior
 
-`HAX_CONTEXT_LIMIT` overrides provider auto-detection. Current auto-detection exists for
-Codex, llama.cpp, and OpenRouter; `openai`, `anthropic`, and custom providers with a
-catalog identity (`catalog_id`, defaulting to the provider's name — see
-[providers.md](./providers.md)) fall back to the model catalog's per-model window (see
-below). Other providers show absolute token counts unless a manual limit is set.
+| Config key | Environment | Default | Purpose |
+| --- | --- | --- | --- |
+| `markdown` | `HAX_MARKDOWN` | on | Render Markdown on terminal output; piped output remains raw. |
+| `show_reasoning` | `HAX_SHOW_REASONING` | off | Display reasoning emitted by the provider; does not enable reasoning. |
+| `sort_models` | `HAX_SORT_MODELS` | `auto` | Alphabetize model picker (`on`), keep server order (`off`), or use provider default. |
+| `context_limit` | `HAX_CONTEXT_LIMIT` | auto | Override the model context-window size used for display and compaction. |
+| `display_width` | `HAX_DISPLAY_WIDTH` | `auto` | `auto`, `terminal`, or an exact width of at least 20 columns. |
+| `notify` | `HAX_NOTIFY` | `auto` | Completion notification: `auto`, `bel`, `osc9`, or `off`. |
+| `theme` | `HAX_THEME` | `auto` | `auto`, `dark`, `light`, `ansi`, or `off`. |
+| `tint` | `HAX_TINT` | `teal` | Model-output tint: `teal`, `violet`, `rose`, or `sage`. |
+| `keep_awake` | `HAX_KEEP_AWAKE` | on | Best-effort idle-sleep inhibition while a turn runs. |
+| `compact.auto` | `HAX_COMPACT_AUTO` | on | Automatically summarize history near the context limit. |
+| `compact.threshold` | `HAX_COMPACT_THRESHOLD` | `85` | Context percentage that triggers automatic compaction. |
+| `max_turns` | `HAX_MAX_TURNS` | `0` | Interactive model round-trips before a pause; `0` is unlimited. |
 
-### Model catalog
+`theme=auto` respects `NO_COLOR`, terminal color support, and `COLORFGBG` when available. Terminals
+rarely report a light background reliably, so set `light` explicitly if auto detection is wrong.
+`theme=ansi` uses the terminal's own 16-color palette; identity tints apply only to dark/light themes.
 
-hax uses a per-model metadata catalog — cost rates and window limits — to estimate spend for
-providers that don't report per-response cost (the `~$` figure on the stats line) and to fill
-in unknown context windows. Metadata resolves from two tiers: a `models` block in the config
-file, then a cached snapshot of [models.dev](https://models.dev/api.json).
+### Recording and model metadata
 
-- `catalog.url` / `HAX_CATALOG_URL` — catalog endpoint, in the models.dev `api.json` shape.
-  Empty disables fetching entirely. Default `https://models.dev/api.json`.
-- `catalog.refresh` / `HAX_CATALOG_REFRESH` — re-fetch the cached snapshot when older than
-  this; `0` disables fetching. Default `24h`.
+| Config key | Environment | Default | Purpose |
+| --- | --- | --- | --- |
+| `no_session` | `HAX_NO_SESSION` | `auto` | Skip new sessions and prompt-history writes; auto skips the mock provider. |
+| `session_retention_days` | `HAX_SESSION_RETENTION_DAYS` | `30` | Remove inactive sessions after N days; `0` keeps them. |
+| `transcript` | `HAX_TRANSCRIPT` | — | Mirror the Ctrl-T transcript to a file. |
+| `trace` | `HAX_TRACE` | — | Write an HTTP/SSE diagnostic trace. |
+| `catalog.url` | `HAX_CATALOG_URL` | models.dev | Metadata catalog URL; empty disables fetching. |
+| `catalog.refresh` | `HAX_CATALOG_REFRESH` | `24h` | Refresh age; `0` disables fetching. |
 
-The snapshot is cached at `$XDG_CACHE_HOME/hax/catalog.json` (`~/.cache/hax/catalog.json`) and
-fetched in the background, at most once per run, only when a session actually streams on a
-catalog-mapped provider. A stale cache keeps serving; fetch failures are silent — but when the
-snapshot hasn't refreshed for over 30 days (endpoint unreachable, response rejected), hax
-prints a one-line warning that estimates may be stale. With fetching disabled, an existing
-cache file — or a hand-placed one — is still read, and no staleness warning is issued.
+hax uses model metadata for context limits, image capability, and estimated spend. It caches
+[models.dev](https://models.dev/api.json) data and refreshes it in the background only when needed.
+A stale cache remains usable. Set `catalog.url` empty or `catalog.refresh` to `0` to prevent network
+refreshes; an existing cache may still be read.
 
-The `catalog.models` block declares or overrides per-model metadata, keyed by catalog
-provider id then model id, with the models.dev field names (costs are USD per million
-tokens):
+Per-model overrides can be placed under `catalog.models`, with costs in USD per million tokens:
 
 ```json
 {
   "catalog": {
     "models": {
       "openai": {
-        "gpt-5.3-codex": {
+        "example-model": {
           "cost": {"input": 1.25, "output": 10, "cache_read": 0.125},
           "limit": {"context": 400000, "output": 128000}
         }
@@ -346,161 +274,78 @@ tokens):
 }
 ```
 
-Config fields win field-by-field; the cached catalog fills whatever the block leaves unset.
-Estimates use reported token counts only and skip what they can't price, so treat the `~$`
-figure as an approximation — cross-check against the provider's own accounting (`/usage`)
-where it matters.
+Configured fields override cached fields individually. A `~` on displayed spend means the result is
+estimated from token counts and this metadata; check provider billing for authoritative costs.
 
-### Behavior
+### Tools and transport
 
-- `keep_awake` / `HAX_KEEP_AWAKE` — best-effort idle sleep inhibition while a turn is
-  running. Default `1`.
-- `compact.auto` / `HAX_COMPACT_AUTO` — auto-summarize history near the context window.
-  Default `1`.
-- `compact.threshold` / `HAX_COMPACT_THRESHOLD` — auto-compaction trigger percentage, `1`–`100`.
-  Default `85`; an out-of-range value falls back to it.
-- `max_turns` / `HAX_MAX_TURNS` — interactive only: pause the agent loop for confirmation
-  after this many model round-trips within one user turn (Enter resumes). Unset or `0`
-  means unlimited.
+| Config key | Environment | Default | Purpose |
+| --- | --- | --- | --- |
+| `image_input` | `HAX_IMAGE_INPUT` | `auto` | Auto-detect image support, or force it `on`/`off`. |
+| `tool_output_cap` | `HAX_TOOL_OUTPUT_CAP` | `50k` | Maximum tool-output bytes retained for the model. |
+| `bash.timeout` | `HAX_BASH_TIMEOUT` | `2m` | Default command timeout before detaching; `0` disables. |
+| `bash.timeout_max` | `HAX_BASH_TIMEOUT_MAX` | `30m` | Maximum timeout a model may request; `0` removes the cap. |
+| `bash.timeout_grace` | `HAX_BASH_TIMEOUT_GRACE` | `2s` | SIGTERM-to-SIGKILL grace period. |
+| `bash.background_yield` | `HAX_BASH_BACKGROUND_YIELD` | `5s` | Initial output window before explicit backgrounding detaches. |
+| `bash.shell` | `HAX_BASH_SHELL` | bash/sh | Shell executable used by the bash tool. |
+| `task.wait_timeout` | `HAX_TASK_WAIT_TIMEOUT` | `10m` | Default wait for a background task. |
+| `task.max_running` | `HAX_TASK_MAX_RUNNING` | `32` | Maximum concurrent background tasks, up to 64. |
+| `http.max_retries` | `HAX_HTTP_MAX_RETRIES` | `4` | Additional retries for transient HTTP failures. |
+| `http.retry_base` | `HAX_HTTP_RETRY_BASE` | `1s` | Initial retry backoff. |
+| `http.idle_timeout` | `HAX_HTTP_IDLE_TIMEOUT` | `10m` | Streaming silence before failure; `0` disables. |
 
-### Recording and observability
+When `no_tasks` is on, reaching `bash.timeout` kills the command instead of detaching it. Standard
+`CURL_CA_BUNDLE`, `SSL_CERT_FILE`, and `SSL_CERT_DIR` variables can override TLS certificate lookup.
 
-- `no_session` / `HAX_NO_SESSION` — `on` keeps the run off disk: no session file (so nothing
-  to resume) and no new prompts in Ctrl-R recall. Both stores stay *readable* — `--resume`
-  opens the session you point it at and earlier prompts still recall; this run just adds to
-  neither. Default `auto`: record for real
-  providers, skip for the `mock` dev backend. `--no-session` is the same switch for one run.
-- `session_retention_days` / `HAX_SESSION_RETENTION_DAYS` — delete sessions after this many
-  inactive days. Selecting a session to resume refreshes its activity time. Default `30`; `0`
-  disables pruning. Expired sessions are omitted from resume lists immediately, while a
-  throttled background sweep reclaims them from every project directory.
-- `transcript` / `HAX_TRANSCRIPT` — file path for a plain-text transcript mirror; empty disables.
-- `trace` / `HAX_TRACE` — file path for HTTP/SSE trace output; empty disables.
+### OpenAI-family settings
 
-See [debugging.md](./debugging.md) for trace and transcript details.
+These global settings apply to built-in `openai`, `openai-compatible`, `llama.cpp`, and `openrouter`
+where relevant. Custom providers use equivalent fields inside their own `providers.<name>` block.
 
-### Tools
+| Config key | Environment | Default | Purpose |
+| --- | --- | --- | --- |
+| `openai.base_url` | `HAX_OPENAI_BASE_URL` | — | Endpoint for `openai-compatible`; also overrides llama.cpp. |
+| `openai.api_key` | `HAX_OPENAI_API_KEY` | — | Bearer token. |
+| `openai.api` | `HAX_OPENAI_API` | provider | `responses` or `chat`. |
+| `openai.reasoning_format` | `HAX_OPENAI_REASONING_FORMAT` | `flat` | Compatible API effort shape: `flat` or `nested`. |
+| `openai.reasoning_roundtrip` | `HAX_REASONING_ROUNDTRIP` | provider | Replay reasoning text: `off`, `on`, or a field name. |
+| `openai.send_cache_key` | `HAX_OPENAI_SEND_CACHE_KEY` | `auto` | Send a stable prompt-cache key. |
+| `openai.request_cost` | `HAX_OPENAI_REQUEST_COST` | `auto` | Request provider-specific per-response cost data. |
+| `openai.cache` | `HAX_OPENAI_CACHE` | `auto` | Send explicit prompt-cache breakpoints. |
+| `openai.cache_ttl` | `HAX_OPENAI_CACHE_TTL` | `1h` | Cache TTL: `5m` or `1h`. |
+| `provider_name` | `HAX_PROVIDER_NAME` | — | Override a built-in provider's banner name. |
 
-- `tool_output_cap` / `HAX_TOOL_OUTPUT_CAP` — max bytes of tool output sent back to the
-  model. Default `50k`.
-- `bash.timeout` / `HAX_BASH_TIMEOUT` — default bash-tool timeout, at which the command
-  detaches into a background task (kills when `no_tasks` is set); `0` disables. Default `2m`.
-- `bash.timeout_max` / `HAX_BASH_TIMEOUT_MAX` — maximum timeout the model may request per
-  bash call; `0` disables the cap. Default `30m`.
-- `bash.timeout_grace` / `HAX_BASH_TIMEOUT_GRACE` — grace period between SIGTERM and SIGKILL;
-  `0` skips the grace period, `5m` is the ceiling. Default `2s`.
-- `bash.background_yield` / `HAX_BASH_BACKGROUND_YIELD` — initial-output window before an
-  explicitly backgrounded command detaches into a task. Default `5s`.
-- `bash.shell` / `HAX_BASH_SHELL` — shell the bash tool execs, as a `$PATH` name or a path.
-  Default: `bash` when available, otherwise `sh`.
-- `task.wait_timeout` / `HAX_TASK_WAIT_TIMEOUT` — default `task_wait` timeout when the model
-  omits one; a `kill` request with no timeout kills immediately instead. Default `10m`.
-- `task.max_running` / `HAX_TASK_MAX_RUNNING` — maximum concurrently running background tasks:
-  further `background: true` requests are refused up front, and a timed-out command is killed
-  instead of detaching. Default `32`.
+OpenAI defaults to the Responses API; compatible endpoints default to Chat Completions. Leave cache
+and cost controls on `auto` unless the endpoint documents support — the correct behavior varies by
+provider and model.
 
-The model can request `timeout_seconds` on a bash call, bounded by `bash.timeout_max`.
+Credential fallbacks after `HAX_OPENAI_API_KEY` are `OPENAI_API_KEY` for OpenAI and
+`OPENROUTER_API_KEY` for OpenRouter. OpenAI-compatible and llama.cpp do not inherit
+`OPENAI_API_KEY`, preventing an unrelated key from being sent to a custom endpoint.
 
-### HTTP transport
+### Anthropic-family settings
 
-- `http.max_retries` / `HAX_HTTP_MAX_RETRIES` — additional retries for transient HTTP
-  failures, up to `100`. Default `4`.
-- `http.retry_base` / `HAX_HTTP_RETRY_BASE` — initial retry backoff; later retries double with
-  jitter. Default `1s`.
-- `http.idle_timeout` / `HAX_HTTP_IDLE_TIMEOUT` — streaming silence before giving up; `0`
-  disables. Default `10m`.
+| Config key | Environment | Default | Purpose |
+| --- | --- | --- | --- |
+| `anthropic.base_url` | `HAX_ANTHROPIC_BASE_URL` | — | Endpoint for `anthropic-compatible`. |
+| `anthropic.api_key` | `HAX_ANTHROPIC_API_KEY` | — | `x-api-key` token. |
+| `anthropic.max_tokens` | `HAX_ANTHROPIC_MAX_TOKENS` | model cap | Maximum output including thinking; clamped to known model limits. |
+| `anthropic.thinking_mode` | `HAX_ANTHROPIC_THINKING_MODE` | provider | `adaptive`, `budget`, or `off`. |
+| `anthropic.thinking_budget` | `HAX_ANTHROPIC_THINKING_BUDGET` | max minus 1 | Budget-mode thinking tokens. |
+| `anthropic.cache` | `HAX_ANTHROPIC_CACHE` | `auto` | Send prompt-cache breakpoints. |
+| `anthropic.cache_ttl` | `HAX_ANTHROPIC_CACHE_TTL` | `1h` | Cache TTL: `5m` or `1h`. |
+| `anthropic.version` | `HAX_ANTHROPIC_VERSION` | `2023-06-01` | API version header. |
 
-The system TLS certificate store is located automatically, so HTTPS works even when the binary
-was built for a different distribution; set the standard `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, or
-`SSL_CERT_DIR` environment variable to override it.
+First-party Anthropic falls back to `ANTHROPIC_API_KEY`; compatible endpoints do not. When model
+metadata has no output limit, `anthropic.max_tokens` falls back internally to 32000.
 
-### OpenAI-family providers
+### Provider-specific and development settings
 
-These settings apply to built-in OpenAI-family presets: `openai`, `openai-compatible`,
-`llama.cpp`, and `openrouter`. They do not apply to config-defined custom providers such as
-`ollama`, which read their own `providers.<name>` block.
+| Config key | Environment | Default | Purpose |
+| --- | --- | --- | --- |
+| `llamacpp.port` | `HAX_LLAMACPP_PORT` | `8080` | llama-server port when no base URL is set. |
+| `openrouter.title` | `HAX_OPENROUTER_TITLE` | `hax` | OpenRouter attribution title; empty disables. |
+| `openrouter.referer` | `HAX_OPENROUTER_REFERER` | `https://usehax.dev` | OpenRouter attribution URL; empty disables. |
+| `mock.script` | `HAX_MOCK_SCRIPT` | — | Mock-provider script path. |
 
-- `openai.base_url` / `HAX_OPENAI_BASE_URL` — required for `openai-compatible`; overrides
-  `llama.cpp`; ignored by `openai` and `openrouter`.
-- `openai.api_key` / `HAX_OPENAI_API_KEY` — bearer token for OpenAI-family presets.
-- `openai.api` / `HAX_OPENAI_API` — request protocol: `responses` or `chat` (Chat Completions).
-  Default `responses` for `openai`, `chat` everywhere else. OpenAI's recent reasoning models
-  reject function tools combined with a reasoning effort on Chat Completions, so first-party
-  OpenAI speaks Responses; most compatible endpoints implement only Chat Completions.
-- `openai.reasoning_format` / `HAX_OPENAI_REASONING_FORMAT` — `flat` or `nested`; mainly for
-  `openai-compatible`. Default `flat`.
-- `openai.reasoning_roundtrip` / `HAX_REASONING_ROUNDTRIP` — replay reasoning text on later
-  turns: `off`, `on`, or a field name. Default is provider-specific.
-- `openai.send_cache_key` / `HAX_OPENAI_SEND_CACHE_KEY` — `auto`, `on`, or `off`: `on`/`off`
-  force sending (or suppressing) a stable `prompt_cache_key`, while `auto` uses the provider
-  default. Because `auto` is a real value, setting it at a higher tier (env, `/config`)
-  shadows a lower-tier `on`/`off` and restores the provider default.
-- `openai.request_cost` / `HAX_OPENAI_REQUEST_COST` — `auto`, `on`, or `off`: `on`/`off` force
-  sending (or not) `usage: {include: true}` so the backend reports per-response cost (an
-  OpenRouter extension); `auto` uses the provider default (on for `openrouter`, off elsewhere).
-- `openai.cache` / `HAX_OPENAI_CACHE` — `auto`, `on`, or `off`: `on`/`off` force sending (or
-  suppressing) prompt `cache_control` breakpoints; `auto` uses the provider default (on for
-  `openrouter`, off elsewhere). Anthropic models cache only what a request marks, and a
-  router fronting them passes the marker through — without it, an agentic session re-sends
-  its whole prefix at full input rate every turn.
-  Breakpoints are skipped per model where they would cost rather than save: a backend whose
-  cache-write rate sits *below* its input rate (Google's, a storage surcharge) bills an
-  explicit cache on top of input charged in full, so caching there is a net loss. Forcing
-  `on` overrides that judgement for every model the provider serves.
-- `openai.cache_ttl` / `HAX_OPENAI_CACHE_TTL` — cache TTL, `5m` or `1h`. Default `1h`, which
-  suits an interactive agent's pauses; 1h writes bill at roughly double the 5m rate, so a
-  session of short bursts may prefer `5m`. Only models that quote a 1h rate are billed (and
-  priced) as such — elsewhere the router forwards the marker to a backend with no TTL
-  concept, which writes at its ordinary rate.
-
-API-key fallbacks:
-
-- `openai`: `OPENAI_API_KEY` after `HAX_OPENAI_API_KEY`.
-- `openrouter`: `OPENROUTER_API_KEY` after `HAX_OPENAI_API_KEY`.
-- `openai-compatible`: no `OPENAI_API_KEY` fallback.
-- `llama.cpp`: uses only `HAX_OPENAI_API_KEY` if its server requires auth.
-
-### Anthropic-family providers
-
-These settings apply to `anthropic` and `anthropic-compatible`. Config-defined Anthropic
-providers use the same leaf names under `providers.<name>`.
-
-- `anthropic.base_url` / `HAX_ANTHROPIC_BASE_URL` — required for `anthropic-compatible`;
-  ignored by real `anthropic`.
-- `anthropic.api_key` / `HAX_ANTHROPIC_API_KEY` — `x-api-key` token for Anthropic-family
-  providers.
-- `anthropic.max_tokens` / `HAX_ANTHROPIC_MAX_TOKENS` — max output tokens, including thinking
-  and text. Unset follows the model's own ceiling (128k on the current flagships), falling back
-  to `32000` for a model nothing describes; a configured value is clamped to that ceiling.
-- `anthropic.thinking_mode` / `HAX_ANTHROPIC_THINKING_MODE` — `adaptive`, `budget`, or `off`.
-  Default is provider-specific.
-- `anthropic.thinking_budget` / `HAX_ANTHROPIC_THINKING_BUDGET` — budget-mode thinking tokens.
-  Default is `max_tokens - 1`.
-- `anthropic.cache` / `HAX_ANTHROPIC_CACHE` — `auto`, `on`, or `off`: `on`/`off` force sending
-  (or suppressing) prompt cache-control breakpoints, while `auto` uses the provider default.
-- `anthropic.cache_ttl` / `HAX_ANTHROPIC_CACHE_TTL` — cache TTL. Default `1h`; accepted
-  values are provider/API dependent (`5m` or `1h`).
-- `anthropic.version` / `HAX_ANTHROPIC_VERSION` — `anthropic-version` request header. Default
-  `2023-06-01`.
-
-API-key fallbacks:
-
-- `anthropic`: `ANTHROPIC_API_KEY` after `HAX_ANTHROPIC_API_KEY`.
-- `anthropic-compatible`: no `ANTHROPIC_API_KEY` fallback.
-
-### Per-provider settings
-
-- `llamacpp.port` / `HAX_LLAMACPP_PORT` — port for local `llama-server` when
-  `openai.base_url` is unset. Default `8080`.
-- `openrouter.title` / `HAX_OPENROUTER_TITLE` — `X-Title` attribution header for OpenRouter.
-  Default `hax`; empty omits it.
-- `openrouter.referer` / `HAX_OPENROUTER_REFERER` — `HTTP-Referer` header, OpenRouter's app
-  identifier for attribution. Defaults to the hax project URL; empty disables attribution.
-- `mock.script` / `HAX_MOCK_SCRIPT` — mock-provider script path.
-
-## Custom provider blocks
-
-Custom provider blocks live under `providers` in `config.json`; see
-[providers.md](providers.md#custom-providers). Provider blocks intentionally do not read the
-global OpenAI/Anthropic environment variables. Use `api_key_env` inside the block to name the
-secret variable for that provider.
+Custom provider blocks are documented in [providers.md](./providers.md#custom-providers).

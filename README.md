@@ -53,16 +53,32 @@ make install              # optional; may prompt for sudo
 
 `scripts/install_deps.sh` installs the build dependencies — a C compiler, `libcurl`,
 `jansson`, `meson`, `ninja`, and `pkg-config` — plus `fzf`, which hax uses for `@file`
-completion when available; pass `ci` to skip such extras. On other platforms, install those
-packages by hand and run `make`.
+completion when available. On other platforms, install those packages by hand and run `make`.
 
 For hacking on hax, `make symlink` links the freshly built binary into `~/.local/bin` so it
-stays on `PATH` across rebuilds, and `make lint` additionally needs `clang-format` and
+stays on `PATH` across rebuilds. `make lint` additionally needs `clang-format` and
 `clang-tidy` (`scripts/install_deps.sh lint` installs them).
 
 The examples below use `hax` as if it is on `PATH`; after a plain build, use `./build/hax`.
 
+## Connect a provider
+
+The easiest first run is interactive: start `hax`, then use `/provider` to see available providers
+and choose a model. hax remembers interactive provider, model, and effort selections.
+
+| Provider | Setup |
+| --- | --- |
+| `codex` | Log in with the official `codex` CLI. |
+| `openai` | Set `OPENAI_API_KEY`. |
+| `anthropic` | Set `ANTHROPIC_API_KEY`. |
+| `openrouter` | Set `OPENROUTER_API_KEY`. |
+| `llama.cpp` | Run `llama-server`. |
+| `ollama` | Run `ollama serve`. |
+| Compatible or custom endpoint | See [docs/providers.md](./docs/providers.md). |
+
 ## Quick start
+
+Run hax from the project directory you want it to work in:
 
 ```sh
 hax                         # interactive REPL
@@ -75,24 +91,6 @@ hax --resume=ID -p "next"   # resume a specific session in one-shot mode
 
 Run `hax --help` for CLI usage. In the REPL, type `/help` for slash commands and shortcuts.
 See [docs/usage.md](./docs/usage.md) for more detailed usage documentation.
-
-## Providers
-
-Select a provider with `HAX_PROVIDER` env var, `~/.config/hax/config.json`, or the interactive
-`/provider` picker.
-
-| Provider | Typical setup |
-| --- | --- |
-| `codex` | Log in with the official `codex` CLI. |
-| `openai` | Set `OPENAI_API_KEY`. |
-| `openai-compatible` | Set `HAX_OPENAI_BASE_URL`. |
-| `anthropic` | Set `ANTHROPIC_API_KEY`. |
-| `anthropic-compatible` | Set `HAX_ANTHROPIC_BASE_URL`. |
-| `openrouter` | Set `OPENROUTER_API_KEY`. |
-| `llama.cpp` | Run `llama-server`. |
-| `ollama` | Run `ollama serve`. |
-
-See [docs/providers.md](./docs/providers.md) for provider-specific behavior and custom providers.
 
 ## Configuration
 
