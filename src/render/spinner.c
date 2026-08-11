@@ -324,10 +324,12 @@ static void show_locked(struct spinner *spinner, enum spinner_mode mode, int par
 }
 
 /* A first appearance from hidden waits out a grace period on the animation thread, so a label
- * whose wait ends quickly never blinks. Transitions from a visible mode stay immediate. */
+ * whose wait ends quickly never blinks. Transitions from a visible mode stay immediate, and so
+ * does a show inside an open swap bracket: there the erase and this repaint land in one
+ * synchronized frame, while deferring would end the bracket with the indicator erased. */
 static void request_label_show_locked(struct spinner *spinner, int parked_rows, int origin_col)
 {
-    if (spinner->mode != SPINNER_HIDDEN) {
+    if (spinner->mode != SPINNER_HIDDEN || spinner->swap_open) {
         show_locked(spinner, SPINNER_LABEL, parked_rows, origin_col);
         return;
     }

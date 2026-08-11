@@ -45,8 +45,9 @@ void spinner_hide(struct spinner *spinner);
 
 /* Hide as spinner_hide(), but begin DEC 2026 synchronized output atomically with the erase and
  * leave the bracket open for the caller's replacement writes. Pair with spinner_swap_end();
- * brackets do not nest, so until then the caller may only write replacement output — no other
- * spinner operation, no other bracket. */
+ * brackets do not nest. Until then the caller may only write replacement output and optionally
+ * re-show the spinner as the final act: a show inside the bracket paints immediately, without
+ * the first-appearance grace, so the indicator survives the swap without blinking. */
 void spinner_swap_begin(struct spinner *spinner);
 
 /* End the swap's synchronized output. Emits nothing when no swap is open. */

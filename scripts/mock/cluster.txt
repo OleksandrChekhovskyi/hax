@@ -1,0 +1,83 @@
+# Silent tool-call cluster fixture for parked-spinner behavior.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/cluster.txt build/hax
+#
+# Calls inside one turn dispatch back-to-back once the turn's stream ends, so
+# only one call per turn plus a `delay` reproduces provider latency between
+# dispatches. During each delay the parked "working..." must stay visible; a
+# dispatch extends the cluster without the indicator disappearing first.
+#
+# The bash commands must stay exploration-classified (bash_command_is_exploration)
+# or the call silently leaves the collapsed cluster path and tests the wrong
+# renderer.
+
+# Turns 1-4: one silent read per turn, coalescing onto one line. This is the
+# flicker regression scenario: the spinner may appear once after the cluster
+# opens, then never blink while the line extends.
+text Reading a few files first.
+delay 700
+tool read {"path":"src/render/spinner.h"}
+usage in=200 out=14
+end-turn
+
+delay 700
+tool read {"path":"src/render/spinner.c"}
+usage in=240 out=14
+end-turn
+
+delay 700
+tool read {"path":"src/render/render_ctx.c"}
+usage in=280 out=14
+end-turn
+
+delay 700
+tool read {"path":"src/agent_dispatch.c"}
+usage in=320 out=14
+end-turn
+
+# Turn 5: a batch of reads in one turn — back-to-back dispatches that overflow
+# the line and reopen a fresh one. No spinner is expected mid-batch; the line
+# just extends, and the parked label returns after the last read.
+text Now a batch in one turn.
+tool read {"path":"src/tool.h"}
+tool read {"path":"src/provider.h"}
+tool read {"path":"src/agent_core.h"}
+tool read {"path":"src/render/disp.h"}
+tool read {"path":"src/render/markdown.h"}
+tool read {"path":"src/terminal/ansi.h"}
+tool read {"path":"src/terminal/theme.h"}
+usage in=400 out=48
+end-turn
+
+# Turns 6-7: silent bash calls each take a closed line of their own and park
+# the spinner at column zero — the non-coalescing variant of the same swap.
+delay 700
+tool bash {"command":"ls src/render"}
+usage in=440 out=14
+end-turn
+
+delay 700
+tool bash {"command":"grep -c include src/agent.c"}
+usage in=480 out=16
+end-turn
+
+# Turn 8: a mixed cluster in one turn — the open read line closes for the bash
+# line, and the next read starts a fresh line.
+text Mixing reads and quiet commands.
+tool read {"path":"src/util.h"}
+tool bash {"command":"ls scripts/mock"}
+tool read {"path":"src/config.h"}
+usage in=540 out=32
+end-turn
+
+# Turn 9: a longer quiet command. If it outlives the label hysteresis (~2s,
+# environment-dependent), the parked label settles to "[bash] running..."
+# without the spinner ever hiding.
+delay 700
+tool bash {"command":"find /usr -name '*.no-such-suffix' 2>/dev/null"}
+usage in=580 out=20
+end-turn
+
+text Done — every silent call should have extended the cluster without the spinner blinking.
+usage in=620 out=22
+end-turn

@@ -320,8 +320,9 @@ static struct item dispatch_tool_call_collapsed(struct render_ctx *render,
     struct spinner *spinner = render->spinner;
     int is_read = strcmp(call->tool_name, "read") == 0;
 
-    /* Hiding restores the cursor to an open read line before coalescing. */
-    spinner_hide(spinner);
+    /* The swap keeps the indicator continuous: the erase that restores the cursor to an open
+     * read line, the appended cluster text, and the reparked spinner land as one frame. */
+    spinner_swap_begin(spinner);
     write_cluster_line(render, call);
 
     /* Preserve the open line's cursor column for the next read. */
@@ -331,6 +332,7 @@ static struct item dispatch_tool_call_collapsed(struct render_ctx *render,
     snprintf(request_key, sizeof(request_key), "run:%s", call->tool_name);
     spinner_request_label(spinner, request_key, label);
     spinner_park(spinner, is_read ? render->cluster.line_cells : 0);
+    spinner_swap_end(spinner);
 
     struct tool_run_ctx run_ctx = {.image_input = image_input};
     char *output = agent_tool_call_run(prepared, &run_ctx);
