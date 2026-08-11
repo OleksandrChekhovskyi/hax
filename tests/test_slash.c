@@ -387,12 +387,33 @@ static void test_session_hides_unreported_rows(void)
     struct dispatch_call c = {.line = "/session", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
-    EXPECT(strstr(out, "user turns") != NULL);
-    EXPECT(strstr(out, "requests") != NULL);
-    EXPECT(strstr(out, "time worked") != NULL);
+    /* Identity rows stay; zero-activity and unknown measurements are omitted. */
+    EXPECT(strstr(out, "not recorded") != NULL);
+    EXPECT(strstr(out, "provider") != NULL);
+    EXPECT(strstr(out, "user turns") == NULL);
+    EXPECT(strstr(out, "requests") == NULL);
+    EXPECT(strstr(out, "time worked") == NULL);
     EXPECT(strstr(out, "tool calls") == NULL);
+    EXPECT(strstr(out, "context") == NULL);
     EXPECT(strstr(out, "tokens") == NULL);
     EXPECT(strstr(out, "$") == NULL);
+    free(out);
+}
+
+static void test_session_shows_window_before_first_request(void)
+{
+    struct render_ctx r = {0};
+    r.disp.committed_newlines = 1;
+    struct agent_state state = {.render = &r};
+    struct dispatch_call c = {.line = "/session", .state = &state};
+
+    setenv("HAX_CONTEXT_LIMIT", "262144", 1);
+    char *out = capture_stdout(do_dispatch, &c);
+    unsetenv("HAX_CONTEXT_LIMIT");
+    EXPECT(c.result == SLASH_HANDLED);
+    EXPECT(strstr(out, "context") != NULL);
+    EXPECT(strstr(out, "? / 256k") != NULL);
+    EXPECT(strstr(out, "%") == NULL);
     free(out);
 }
 
@@ -698,8 +719,10 @@ static void test_compaction_seed_history_rules(void)
 
 int main(void)
 {
-    /* Row-layout assertions depend on the width; the variable leaks in from any hax parent. */
+    /* Row-layout and row-presence assertions depend on these; the variables leak in from any
+     * hax parent or user environment. */
     unsetenv("HAX_DISPLAY_WIDTH");
+    unsetenv("HAX_CONTEXT_LIMIT");
 
     test_dispatch_not_a_command();
     test_dispatch_unknown();
@@ -711,6 +734,7 @@ int main(void)
     test_help_wraps_to_narrow_width();
     test_session_prints_totals();
     test_session_hides_unreported_rows();
+    test_session_shows_window_before_first_request();
     test_session_marks_estimated_spend();
     test_session_wraps_to_narrow_width();
     test_new_clears_session_without_switching_preset();

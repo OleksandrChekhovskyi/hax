@@ -88,7 +88,8 @@ void format_duration(char *out, size_t out_size, long duration_ms);
 void format_duration_steady(char *out, size_t out_size, long duration_ms);
 /* Use more decimal places for sub-dollar values; non-positive values produce "$0.00". */
 void format_cost(char *out, size_t out_size, double usd);
-/* Include the usage percentage when context_limit is positive. */
+/* Include the usage percentage when context_limit is positive; negative context_tokens means
+ * unknown usage ("? / 256k", no percentage). */
 void format_context(char *out, size_t out_size, long context_tokens, long context_limit);
 
 #define COST_DISPLAY_MIN 0.00005

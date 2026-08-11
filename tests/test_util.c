@@ -493,6 +493,10 @@ static void test_format_context_with_and_without_limit(void)
     EXPECT_STR_EQ(buf, "8.9k");
     format_context(buf, sizeof(buf), 300000, 262144); /* stale window metadata reports over 100% */
     EXPECT_STR_EQ(buf, "293k / 256k (114%)");
+    format_context(buf, sizeof(buf), -1, 262144); /* known window, no usage reported yet */
+    EXPECT_STR_EQ(buf, "? / 256k");
+    format_context(buf, sizeof(buf), -1, 0); /* nothing known */
+    EXPECT_STR_EQ(buf, "?");
 }
 
 static void test_format_cost_precision(void)

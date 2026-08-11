@@ -13,6 +13,7 @@
 #include "catalog.h"
 #include "config.h"
 #include "file_mention.h"
+#include "model_meta.h"
 #include "provider.h"
 #include "select.h"
 #include "session.h"
@@ -662,11 +663,15 @@ static void run_session(const struct command_call *call)
     }
     print_session_row("provider", row);
 
-    snprintf(row, sizeof(row), "%ld", stats->user_turns);
-    print_session_row("user turns", row);
+    if (stats->user_turns > 0) {
+        snprintf(row, sizeof(row), "%ld", stats->user_turns);
+        print_session_row("user turns", row);
+    }
 
-    snprintf(row, sizeof(row), "%ld", stats->requests);
-    print_session_row("requests", row);
+    if (stats->requests > 0) {
+        snprintf(row, sizeof(row), "%ld", stats->requests);
+        print_session_row("requests", row);
+    }
 
     if (stats->tool_calls > 0) {
         int row_length = snprintf(row, sizeof(row), "%ld", stats->tool_calls);
@@ -679,13 +684,24 @@ static void run_session(const struct command_call *call)
         print_session_row("tool calls", row);
     }
 
-    format_duration(formatted, sizeof(formatted), stats->worked_ms);
-    print_session_row("time worked", formatted);
+    if (stats->worked_ms > 0) {
+        format_duration(formatted, sizeof(formatted), stats->worked_ms);
+        print_session_row("time worked", formatted);
+    }
 
-    /* Context is the latest request's window use; token totals accumulate across requests. */
+    /* Context is the latest request's window use. Until a request reports usage — a fresh
+     * session, or a compaction or history cut invalidated the snapshot — usage is unknown
+     * rather than zero, but the resolved window is still worth showing. */
     if (stats->latest_context_tokens > 0) {
         format_context(row, sizeof(row), stats->latest_context_tokens, stats->context_limit);
         print_session_row("context", row);
+    } else {
+        long window =
+            model_meta_context(state->provider, state->session ? state->session->model : NULL);
+        if (window > 0) {
+            format_context(row, sizeof(row), -1, window);
+            print_session_row("context", row);
+        }
     }
 
     /* Category costs are rate estimates even when the provider reported an exact total charge. */
