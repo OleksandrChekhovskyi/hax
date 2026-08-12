@@ -49,6 +49,13 @@ With [Homebrew](https://brew.sh) (macOS or Linux):
 brew install oleksandrchekhovskyi/hax/hax
 ```
 
+With [Nix](https://nixos.org) (flakes enabled):
+
+```sh
+nix run github:OleksandrChekhovskyi/hax -- --help   # fetch, build, and run in one step
+nix profile add github:OleksandrChekhovskyi/hax     # install `hax` into your Nix profile
+```
+
 On Linux, download the prebuilt static binary for your architecture (x86_64 or aarch64) from the
 [latest release](https://github.com/OleksandrChekhovskyi/hax/releases/latest), then unpack the
 `hax` binary into any directory on your `PATH`.
