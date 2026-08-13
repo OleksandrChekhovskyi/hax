@@ -1,12 +1,14 @@
 * text=auto eol=lf
 
-# Development-only files, kept out of `meson dist` tarballs. Anything the
-# archive needs in order to build or check itself stays out of this list.
+# Development-only files, kept out of `meson dist` tarballs. Anything the archive
+# needs in order to build or check itself stays out of this list: the release workflow
+# unpacks scripts/build_static.sh from the archive, scripts/mock/ backs the e2e tests
+# that run against the tarball, and check.sh drives `make` and `make lint` from it.
 .gitattributes export-ignore
 .gitignore export-ignore
 .editorconfig export-ignore
+.github export-ignore
 AGENTS.md export-ignore
 CLAUDE.md export-ignore
 compile_commands.json export-ignore
-scripts/ci_wait.py export-ignore
-scripts/land.py export-ignore
+scripts/maint export-ignore

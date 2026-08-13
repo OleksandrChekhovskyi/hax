@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fast-forward master onto the current branch once its CI run is green.
 
-Usage: scripts/land.py [-t seconds] [-y]
+Usage: scripts/maint/land.py [-t seconds] [-y]
 
 The branch is never switched, and the remote moves before the local ref: a rejected push
 leaves the local one untouched, whereas the reverse order would need a manual rollback.

@@ -1,0 +1,4 @@
+# Pinned so the release workflow does not trust whatever answers an ssh-keyscan at push
+# time. Fingerprint SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4, as published on
+# https://aur.archlinux.org/ and in the 2020 AUR migration news post.
+aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN

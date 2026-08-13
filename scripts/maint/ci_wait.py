@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Wait for the GitHub Actions run covering a commit and report its outcome.
 
-Usage: scripts/ci_wait.py [-t seconds] [-b branch] [ref]
+Usage: scripts/maint/ci_wait.py [-t seconds] [-b branch] [ref]
 
 A green run prints one line, plus any compiler warnings it built through; a red
 one prints the failing jobs and the tail of their logs. Warnings are reported,

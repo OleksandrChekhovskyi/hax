@@ -49,9 +49,11 @@ With [Homebrew](https://brew.sh) (macOS or Linux):
 brew install oleksandrchekhovskyi/hax/hax
 ```
 
-On Linux, download the prebuilt static binary for your architecture (x86_64 or aarch64) from the
-[latest release](https://github.com/OleksandrChekhovskyi/hax/releases/latest), then unpack the
-`hax` binary into any directory on your `PATH`.
+On Arch Linux, hax is in the [AUR](https://aur.archlinux.org/packages/hax) as `hax`.
+
+On any Linux distribution, download the prebuilt static binary for your architecture (x86_64 or
+aarch64) from the [latest release](https://github.com/OleksandrChekhovskyi/hax/releases/latest),
+then unpack the `hax` binary into any directory on your `PATH`.
 
 ### From source
 
