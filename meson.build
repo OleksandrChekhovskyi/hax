@@ -31,11 +31,25 @@ libcurl = dependency('libcurl', include_type: 'system')
 jansson = dependency('jansson', include_type: 'system')
 threads = dependency('threads')
 
+fs = import('fs')
+
 # The version baked into the binary. `--always` keeps pre-tag checkouts
 # building (bare commit hash); the fallback covers builds without git, such as
 # dist tarballs, where it must match the tag scheme's leading "v".
+#
+# Describe only against our own repository: otherwise git walks up and describes
+# whatever encloses an extracted tarball. vcs_tag falls back when the command
+# fails, not when it succeeds against the wrong repository, so a missing
+# repository has to select the fallback by failing. Test existence rather than
+# is_dir(): `.git` is a file in a worktree or submodule.
+if fs.exists('.git')
+    describe = ['git', 'describe', '--tags', '--always', '--dirty=+']
+else
+    describe = ['false']
+endif
+
 version_h = vcs_tag(
-    command: ['git', 'describe', '--tags', '--always', '--dirty=+'],
+    command: describe,
     input: 'src/version.h.in',
     output: 'version.h',
     fallback: 'v' + meson.project_version(),
