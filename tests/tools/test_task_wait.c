@@ -242,7 +242,10 @@ static void test_kill_spares_task_finishing_within_timeout(void)
     free(args);
     EXPECT(strstr(out, "done-first") != NULL);
     EXPECT(strstr(out, "finished (exit 0)") != NULL);
-    EXPECT(strstr(out, "killed") == NULL);
+    /* Match the status phrase, not a bare "killed": the footer can also carry an orphan-sweep
+     * note containing the word. This command runs only builtins and so orphans nothing — that
+     * note appears when the drainer has yet to observe EOF as the shell's exit is seen. */
+    EXPECT(strstr(out, "killed (signal ") == NULL);
     free(out);
     free(id);
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
