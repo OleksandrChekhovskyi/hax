@@ -7,6 +7,23 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- FreeBSD and OpenBSD are supported, and CI builds and tests them on every change alongside Linux
+  and macOS. Both build from source, and `scripts/install_deps.sh` installs their dependencies.
+- On Arch Linux, hax is available in the AUR as `hax`, refreshed automatically by each stable
+  release.
+
+### Fixed
+
+- The transcript and history views (Ctrl-T, Ctrl-O) no longer show literal `ESC[1m` escapes or
+  garbled non-ASCII, and the `$EDITOR` buffer and the `@file` picker keep non-ASCII intact. A plain
+  `PAGER=less`, or a system with no locale configured, previously broke them. hax also warns at
+  startup now when no UTF-8 locale is available at all.
+- `hax --version` no longer reports the version of an unrelated repository. A release tarball ships
+  no `.git`, so building one inside another checkout — an AUR packaging clone, say — stamped that
+  repository's commit hash into the binary.
+
 ## [0.3.0] - 2026-08-12
 
 ### Added

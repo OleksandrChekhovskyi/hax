@@ -14,6 +14,12 @@ struct spawn_signal_state {
 /* Run `shell_cmd` via /bin/sh and return its waitpid status, or -1 on error. */
 int spawn_shell_wait(const char *shell_cmd);
 
+/* Prepare a trusted `sh -c` command for a child that must decode what hax renders, by supplying an
+ * LC_CTYPE the environment does not. Takes ownership and returns an allocated command, or the
+ * original where the environment already suffices. Not for tool commands, whose locale is the
+ * user's to pin. */
+char *spawn_shell_cmd_force_utf8(char *shell_cmd);
+
 /* Run `argv` directly, with stdin and stderr redirected to /dev/null, and capture stdout.
  * Return malloc'd output of 1..max_bytes on a zero exit status, or NULL on error, timeout,
  * overflow, or empty output. `argv`, argv[0], and out_len must be non-NULL and timeout_ms must be

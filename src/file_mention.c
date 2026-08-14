@@ -146,7 +146,9 @@ static enum record_result read_record(FILE *stream, char *record, size_t capacit
 static char *pick_with_fzf(const char *query_text)
 {
     struct picker_query query = parse_picker_query(query_text);
-    char *command = build_fzf_command(&query);
+    /* Paths are bytes hax renders and reads back, and fzf draws them in a full-screen UI of its
+     * own, so a non-ASCII name has to survive the round trip intact. */
+    char *command = spawn_shell_cmd_force_utf8(build_fzf_command(&query));
     char *picked_path = NULL;
     struct spawn_pipe pipe;
 

@@ -6,6 +6,7 @@
 #include "harness.h"
 #include "provider.h"
 #include "transcript.h"
+#include "util.h"
 #include "terminal/ansi.h"
 
 static char *render_to_string(const char *system_prompt, const struct item *items, size_t n_items)
@@ -62,6 +63,20 @@ static size_t count_occurrences(const char *text, const char *substring)
     for (const char *match = text; (match = strstr(match, substring)); match += strlen(substring))
         count++;
     return count;
+}
+
+/* Must run before main() initializes the locale, because that is the only state deciding the
+ * spelling and every platform the tests run on offers a UTF-8 locale to switch to. */
+static void test_banner_degrades_to_ascii_without_utf8(void)
+{
+    char *out = render_to_string(NULL, NULL, 0);
+    EXPECT(contains(out, "TRANSCRIPT"));
+
+    EXPECT(contains(out, "+--"));
+    EXPECT(contains(out, "|"));
+    EXPECT(!contains(out, "┏"));
+    EXPECT(!contains(out, "━"));
+    free(out);
 }
 
 static void test_banner_box(void)
@@ -564,6 +579,12 @@ static void test_opaque_reasoning_shows_id_without_payload(void)
 
 int main(void)
 {
+    test_banner_degrades_to_ascii_without_utf8();
+
+    /* The rules and box drawing asserted below are the UTF-8 spelling, which the renderer emits
+     * only when an LC_CTYPE to decode them is available. */
+    locale_init_utf8();
+
     test_banner_box();
     test_turn_rules_count_boundary_markers();
     test_parallel_calls_render_paired_with_results();

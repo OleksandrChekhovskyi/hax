@@ -10,6 +10,7 @@
 #include <sys/wait.h> // IWYU pragma: keep
 
 #include "harness.h"
+#include "util.h"
 #include "system/spawn.h"
 
 static const char *tmpdir;
@@ -349,9 +350,100 @@ static void test_die_with_parent_alive_does_not_exit(void)
     EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 7);
 }
 
+static void test_force_utf8_leaves_a_capable_environment_alone(void)
+{
+    unsetenv("LC_ALL");
+    setenv("LC_CTYPE", "C", 1);
+    locale_init_utf8();
+    if (!locale_have_utf8())
+        T_SKIP("no UTF-8 locale to switch to");
+
+    char *cmd = spawn_shell_cmd_force_utf8(xstrdup("less -R"));
+    EXPECT_STR_EQ(cmd, "less -R");
+    free(cmd);
+}
+
+/* A pinned LC_ALL outranks the published LC_CTYPE, leaving the command itself to carry one. */
+static void test_force_utf8_overrides_a_pinned_lc_all(void)
+{
+    setenv("LC_ALL", "C", 1);
+    locale_init_utf8();
+    if (!locale_have_utf8())
+        T_SKIP("no UTF-8 locale to switch to");
+
+    char *cmd = spawn_shell_cmd_force_utf8(xstrdup("less -R"));
+    EXPECT(strstr(cmd, "LC_CTYPE=") != NULL);
+    EXPECT(strstr(cmd, " less -R") != NULL);
+    free(cmd);
+}
+
+/* Reads the locale back out of a real child, the string it was spelled into saying nothing about
+ * whether a shell accepts it. What the child reports is its environment rather than its charset,
+ * because locale(1) is not POSIX and busybox omits it. */
+static char *force_utf8_child_locale(const char *command)
+{
+    char *cmd = spawn_shell_cmd_force_utf8(xstrdup(command));
+    struct spawn_pipe pipe;
+    if (spawn_pipe_open_read(&pipe, cmd) != 0) {
+        free(cmd);
+        return NULL;
+    }
+    char line[128] = {0};
+    char *reported = fgets(line, sizeof(line), pipe.stream) ? xstrdup(line) : NULL;
+    spawn_pipe_close(&pipe);
+    free(cmd);
+    if (reported)
+        reported[strcspn(reported, "\n")] = '\0';
+    return reported;
+}
+
+/* Emptying LC_ALL is what lets LC_CTYPE apply, so the child should report the charset, no LC_ALL,
+ * and a collation still at the pinned value rather than one re-derived from LANG. */
+static void expect_child_locale(const char *command)
+{
+    const char *override = locale_child_ctype_override();
+    if (!override)
+        T_SKIP("no UTF-8 locale to switch to");
+    char *want = xasprintf("%s||C", override);
+
+    char *got = force_utf8_child_locale(command);
+    EXPECT(got != NULL);
+    if (got)
+        EXPECT_STR_EQ(got, want);
+    free(got);
+    free(want);
+}
+
+#define LOCALE_PROBE "printf '%s|%s|%s\\n' \"$LC_CTYPE\" \"$LC_ALL\" \"$LC_COLLATE\""
+
+static void test_force_utf8_reaches_the_child(void)
+{
+    setenv("LANG", "de_DE.UTF-8", 1);
+    setenv("LC_ALL", "C", 1);
+    locale_init_utf8();
+
+    expect_child_locale(LOCALE_PROBE);
+}
+
+/* The file picker passes a brace group, and `sh` rejects an assignment prefix before one — so the
+ * override has to survive command shapes other than a simple command. */
+static void test_force_utf8_accepts_a_compound_command(void)
+{
+    setenv("LANG", "de_DE.UTF-8", 1);
+    setenv("LC_ALL", "C", 1);
+    locale_init_utf8();
+
+    expect_child_locale("{ " LOCALE_PROBE "; } | cat");
+}
+
 int main(void)
 {
     tmpdir = t_tempdir();
+
+    test_force_utf8_leaves_a_capable_environment_alone();
+    test_force_utf8_overrides_a_pinned_lc_all();
+    test_force_utf8_reaches_the_child();
+    test_force_utf8_accepts_a_compound_command();
 
     test_shell_zero_exit();
     test_shell_nonzero_exit();

@@ -180,6 +180,29 @@ static void test_shell_head_resolves_trusts_shell_syntax(void)
     EXPECT(!fs_shell_head_resolves("hax-definitely-not-a-real-binary '$arg'"));
 }
 
+static void test_shell_head_extracts_the_command_word(void)
+{
+    char *head = fs_shell_head("less -R");
+    EXPECT_STR_EQ(head, "less");
+    free(head);
+
+    head = fs_shell_head("  /usr/bin/less  ");
+    EXPECT_STR_EQ(head, "/usr/bin/less");
+    free(head);
+}
+
+static void test_shell_head_declines_what_only_a_shell_can_read(void)
+{
+    /* Callers inspect the name, so a head that changes under expansion yields nothing rather than
+     * a word that misidentifies the program. */
+    EXPECT(fs_shell_head("$MY_PAGER --flag") == NULL);
+    EXPECT(fs_shell_head("FOO=1 less") == NULL);
+    EXPECT(fs_shell_head("'quoted command'") == NULL);
+    EXPECT(fs_shell_head(NULL) == NULL);
+    EXPECT(fs_shell_head("") == NULL);
+    EXPECT(fs_shell_head("   ") == NULL);
+}
+
 static void test_resolve_link_target_regular_file(void)
 {
     const char *dir = t_tempdir();
@@ -354,6 +377,8 @@ int main(void)
     test_shell_head_resolves_plain_command();
     test_shell_head_resolves_missing_command();
     test_shell_head_resolves_trusts_shell_syntax();
+    test_shell_head_extracts_the_command_word();
+    test_shell_head_declines_what_only_a_shell_can_read();
 
     test_resolve_link_target_regular_file();
     test_resolve_link_target_missing_file();

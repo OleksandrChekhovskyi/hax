@@ -27,9 +27,17 @@ static const char *ansi(const struct transcript_renderer *renderer, const char *
     return renderer->mode == TRANSCRIPT_RENDER_ANSI ? sequence : "";
 }
 
+/* Decoration is the part hax can give up when the system offers no UTF-8 locale at all. The
+ * conversation body cannot be, so the pager is handed a charset rather than trusted to have one. */
+static const char *glyph(const char *utf8, const char *ascii)
+{
+    return locale_have_utf8() ? utf8 : ascii;
+}
+
 static void render_section_rule(const struct transcript_renderer *renderer, const char *label)
 {
-    fprintf(renderer->out, "%s── %s ──%s\n", ansi(renderer, ANSI_DIM), label,
+    const char *rule = glyph("──", "--");
+    fprintf(renderer->out, "%s%s %s %s%s\n", ansi(renderer, ANSI_DIM), rule, label, rule,
             ansi(renderer, ANSI_RESET));
 }
 
@@ -50,27 +58,27 @@ static void render_banner(const struct transcript_renderer *renderer)
 
     fputs(ansi(renderer, ANSI_BOLD), out);
     fputs(ansi(renderer, theme_open(THEME_CHROME)), out);
-    fputs("┏", out);
-    repeat_glyph(out, "━", inner_width);
-    fputs("┓", out);
+    fputs(glyph("┏", "+"), out);
+    repeat_glyph(out, glyph("━", "-"), inner_width);
+    fputs(glyph("┓", "+"), out);
     fputs(ansi(renderer, ANSI_RESET), out);
     fputc('\n', out);
 
     fputs(ansi(renderer, ANSI_BOLD), out);
     fputs(ansi(renderer, theme_open(THEME_CHROME)), out);
-    fputs("┃", out);
+    fputs(glyph("┃", "|"), out);
     repeat_glyph(out, " ", left_padding);
     fputs(label, out);
     repeat_glyph(out, " ", right_padding);
-    fputs("┃", out);
+    fputs(glyph("┃", "|"), out);
     fputs(ansi(renderer, ANSI_RESET), out);
     fputc('\n', out);
 
     fputs(ansi(renderer, ANSI_BOLD), out);
     fputs(ansi(renderer, theme_open(THEME_CHROME)), out);
-    fputs("┗", out);
-    repeat_glyph(out, "━", inner_width);
-    fputs("┛", out);
+    fputs(glyph("┗", "+"), out);
+    repeat_glyph(out, glyph("━", "-"), inner_width);
+    fputs(glyph("┛", "+"), out);
     fputs(ansi(renderer, ANSI_RESET), out);
     fputs("\n\n", out);
 }
@@ -88,9 +96,9 @@ static void render_turn_rule(const struct transcript_renderer *renderer, int tur
 
     fputs(ansi(renderer, ANSI_BOLD), out);
     fputs(ansi(renderer, theme_open(THEME_CHROME)), out);
-    repeat_glyph(out, "─", left_width);
+    repeat_glyph(out, glyph("─", "-"), left_width);
     fputs(label, out);
-    repeat_glyph(out, "─", right_width);
+    repeat_glyph(out, glyph("─", "-"), right_width);
     fputs(ansi(renderer, ANSI_RESET), out);
     fputs("\n\n", out);
 }
@@ -357,7 +365,7 @@ static void render_reasoning(const struct transcript_renderer *renderer, const s
 static void render_usage_separator(FILE *out, int *is_first)
 {
     if (!*is_first)
-        fputs(" · ", out);
+        fputs(glyph(" · ", " | "), out);
     *is_first = 0;
 }
 

@@ -686,7 +686,9 @@ static void open_editor(struct input *in)
 
     /* The mkstemp path is shell-safe; VISUAL/EDITOR is trusted user configuration and the
      * probed fallbacks are bare command names. */
-    char *cmd = xasprintf("%s '%s'", editor, path);
+    /* The buffer handed over is whatever the user typed or pasted, and comes back the same way, so
+     * the editor has to agree with hax about the encoding or it will rewrite the text. */
+    char *cmd = spawn_shell_cmd_force_utf8(xasprintf("%s '%s'", editor, path));
     int status = spawn_shell_wait(cmd);
     free(cmd);
 

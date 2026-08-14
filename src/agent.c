@@ -330,31 +330,43 @@ static void cursor_hide(void)
     fflush(stdout);
 }
 
-/* Prefer `less -R` so the pager renders ANSI color; fall back to `more` (passes SGR through)
- * since minimal installs often lack less. A broken $PAGER is an error, not a fallback trigger —
- * silently substituting would hide it. Returns NULL after reporting why. */
-static const char *resolve_pager(void)
+/* Without -R, less prints SGR as the literal text "ESC[1m", and a $PAGER naming it routinely omits
+ * the option. It goes directly after the command word: appending would hand it to the last stage
+ * of a pipeline, or place it past a `--`. Repeating the user's own -R is harmless. */
+static char *pager_with_color(const char *command)
 {
-    static const struct {
-        const char *name;
-        const char *command;
-    } FALLBACKS[] = {
-        {"less", "less -R"},
-        {"more", "more"},
-    };
+    char *head = fs_shell_head(command);
+    if (!head)
+        return xstrdup(command);
+    const char *name = strrchr(head, '/');
+    name = name ? name + 1 : head;
+    size_t head_end = strspn(command, " \t") + strlen(head);
+    char *colored = strcmp(name, "less") == 0
+                        ? xasprintf("%.*s -R%s", (int)head_end, command, command + head_end)
+                        : xstrdup(command);
+    free(head);
+    return colored;
+}
+
+/* Fall back to `more` (passes SGR through) since minimal installs often lack less. A broken $PAGER
+ * is an error, not a fallback trigger — silently substituting would hide it. Returns an allocated
+ * command, or NULL after reporting why. */
+static char *resolve_pager(void)
+{
+    static const char *const FALLBACKS[] = {"less", "more"};
 
     const char *configured = getenv("PAGER");
     if (configured && *configured) {
         if (fs_shell_head_resolves(configured))
-            return configured;
+            return pager_with_color(configured);
         ui_error("$PAGER (%s) not found — fix it, or unset it to use a fallback", configured);
         return NULL;
     }
     for (size_t i = 0; i < sizeof(FALLBACKS) / sizeof(FALLBACKS[0]); i++) {
-        char *found = fs_which(FALLBACKS[i].name);
+        char *found = fs_which(FALLBACKS[i]);
         if (found) {
             free(found);
-            return FALLBACKS[i].command;
+            return pager_with_color(FALLBACKS[i]);
         }
     }
     ui_error("no pager found — install less or set $PAGER");
@@ -365,14 +377,19 @@ static const char *resolve_pager(void)
  * the content into a dead pipe. */
 static int view_pager_open(struct spawn_pipe *pipe)
 {
-    const char *pager = resolve_pager();
+    char *pager = resolve_pager();
     if (!pager) {
         /* No disp in modal context; restore the block gap before the repainted prompt. */
         putchar('\n');
         return -1;
     }
+    /* The conversation is arbitrary UTF-8: a pager that cannot decode it escapes the body itself,
+     * not merely the decorations around it. */
+    pager = spawn_shell_cmd_force_utf8(pager);
     /* Keep pager signals in the child; early pager exit must become EPIPE, not terminate hax. */
-    return spawn_pipe_open_write(pipe, pager);
+    int rc = spawn_pipe_open_write(pipe, pager);
+    free(pager);
+    return rc;
 }
 
 static char *capture_paste(void *user)
