@@ -10,7 +10,11 @@
 #include <unistd.h>
 #include <sys/file.h>
 #include <sys/stat.h>
-
+#ifndef HAX_FILE_LOCK_H
+#define HAX_FILE_LOCK_H
+#include <fcntl.h>
+#endif
+#include <unistd.h>
 #include "config.h"
 #include "session.h"
 #include "util.h"

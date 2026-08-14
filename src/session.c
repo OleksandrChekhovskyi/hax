@@ -14,7 +14,10 @@
 #include <unistd.h>
 #include <sys/file.h>
 #include <sys/stat.h>
-
+#ifndef HAX_FILE_LOCK_H
+#define HAX_FILE_LOCK_H
+#include <fcntl.h>
+#endif
 #include "config.h"
 #include "provider.h"
 #include "session_prune.h"
@@ -24,6 +27,8 @@
 #include "system/git.h"
 #include "text/width.h"
 
+#include <fcntl.h>
+#include <unistd.h>
 /* struct stat's sub-second mtime field is spelled differently across
  * platforms. Used to break ties between sessions created in the same
  * second so --continue / the picker reliably pick the most recent. */

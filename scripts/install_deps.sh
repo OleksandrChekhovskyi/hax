@@ -40,13 +40,23 @@ fi
 as_root() {
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
-    else
+    elif command -v doas >/dev/null 2>&1; then
+        doas "$@"
+    elif command -v sudo >/dev/null 2>&1; then
         sudo "$@"
+    else
+        echo "error: need root, doas, or sudo" >&2
+        return 1
     fi
 }
 
 if [ "$(uname)" = Darwin ]; then
     brew install jansson meson ninja pkg-config ${extras:+fzf} ${lint:+llvm}
+    exit 0
+fi
+
+if [ "$(uname)" = FreeBSD ]; then
+    as_root pkg install jansson meson ninja
     exit 0
 fi
 

@@ -8,7 +8,11 @@ project('hax', 'c',
     ],
 )
 
-add_project_arguments(
+host_system = host_machine.system()
+feature_test_args = []
+
+if host_system == 'linux'
+    feature_test_args += [
     '-D_POSIX_C_SOURCE=200809L',
     # _XOPEN_SOURCE=700 is SUSv4 (POSIX 2008 + XSI). Needed on glibc to
     # expose realpath() — _POSIX_C_SOURCE alone doesn't gate it through.
@@ -19,6 +23,21 @@ add_project_arguments(
     # of ours (e.g. `src/util.h` would collide with macOS's `<util.h>`
     # under -I). The `tests/` entry serves the same purpose for
     # `harness.h` and friends.
+    ]
+elif host_system == 'darwin'
+    feature_test_args += [
+        '-D_DARWIN_C_SOURCE',
+    ]
+endif
+
+add_project_arguments(feature_test_args, language: 'c')
+
+# Project headers go through -iquote, not -I, so `#include <foo.h>`
+# always reaches a system header rather than shadowing it with one
+# of ours (e.g. `src/util.h` would collide with macOS's `<util.h>`
+# under -I). The `tests/` entry serves the same purpose for
+# `harness.h` and friends.
+add_project_arguments(
     '-iquote', meson.project_source_root() / 'src',
     '-iquote', meson.project_source_root() / 'tests',
     language: 'c',
@@ -184,6 +203,17 @@ hax_lib = static_library('hax_lib',
     dependencies: [libcurl, jansson, threads],
 )
 
+libcurl = dependency('libcurl', include_type: 'system')
+jansson = dependency('jansson', include_type: 'system')
+threads = dependency('threads')
+
+cc = meson.get_compiler('c')
+
+math_deps = []
+if host_machine.system() != 'darwin'
+    math_deps += cc.find_library('m')
+endif
+
 # Wrap the library as a dependency so consumers inherit both the link against
 # `hax_lib` and the include dirs / compile flags of libcurl / jansson / threads
 # — their own translation units (`main.c`, each test) include <jansson.h> etc.
@@ -198,7 +228,7 @@ hax_dep = declare_dependency(
         libcurl.partial_dependency(compile_args: true, includes: true),
         jansson.partial_dependency(compile_args: true, includes: true),
         threads.partial_dependency(compile_args: true, includes: true),
-    ],
+    ] + math_deps,
 )
 
 hax_exe = executable('hax',
