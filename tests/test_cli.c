@@ -1,8 +1,11 @@
 /* SPDX-License-Identifier: MIT */
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "cli.h"
 #include "harness.h"
@@ -284,6 +287,12 @@ static void test_resolve_session_by_latest_id_and_prefix(void)
         free(second_path);
         return;
     }
+
+    /* Back-date the first session rather than trusting two rapid writes to land on distinct
+     * timestamps: OpenBSD stamps both with the same mtime, which leaves "latest" undefined and
+     * tests the filesystem's clock resolution instead of the resolution logic. */
+    struct timespec stamps[2] = {{.tv_nsec = UTIME_OMIT}, {.tv_sec = time(NULL) - 60}};
+    EXPECT(utimensat(AT_FDCWD, first_path, stamps, 0) == 0);
 
     struct cli_options options = {.resume_mode = CLI_RESUME_LATEST, .one_shot = 1};
     char *resolved = NULL;

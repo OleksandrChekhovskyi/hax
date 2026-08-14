@@ -8,11 +8,22 @@ project('hax', 'c',
     ],
 )
 
+# glibc hides POSIX 2008 interfaces until asked for them, while the BSD libcs
+# expose POSIX by default and read these macros as a request to *hide* their
+# own extensions — which takes flock(2)'s LOCK_* constants with them. Asking
+# only where the request is needed keeps both families happy.
+#
+# _XOPEN_SOURCE=700 is SUSv4 (POSIX 2008 + XSI), needed on glibc to expose
+# realpath() — _POSIX_C_SOURCE alone doesn't gate it through.
+if host_machine.system() == 'linux'
+    add_project_arguments(
+        '-D_POSIX_C_SOURCE=200809L',
+        '-D_XOPEN_SOURCE=700',
+        language: 'c',
+    )
+endif
+
 add_project_arguments(
-    '-D_POSIX_C_SOURCE=200809L',
-    # _XOPEN_SOURCE=700 is SUSv4 (POSIX 2008 + XSI). Needed on glibc to
-    # expose realpath() — _POSIX_C_SOURCE alone doesn't gate it through.
-    '-D_XOPEN_SOURCE=700',
     '-D_DARWIN_C_SOURCE',
     # Project headers go through -iquote, not -I, so `#include <foo.h>`
     # always reaches a system header rather than shadowing it with one
@@ -30,6 +41,11 @@ add_project_arguments(
 libcurl = dependency('libcurl', include_type: 'system')
 jansson = dependency('jansson', include_type: 'system')
 threads = dependency('threads')
+
+# FreeBSD resolves isfinite() to a libm symbol rather than a compiler builtin,
+# so the math library has to be linked explicitly there. Optional because
+# platforms that fold the math functions into libc ship no separate library.
+libm = meson.get_compiler('c').find_library('m', required: false)
 
 fs = import('fs')
 
@@ -181,7 +197,7 @@ sources = files(
 hax_lib = static_library('hax_lib',
     sources,
     version_h,
-    dependencies: [libcurl, jansson, threads],
+    dependencies: [libcurl, jansson, threads, libm],
 )
 
 # Wrap the library as a dependency so consumers inherit both the link against

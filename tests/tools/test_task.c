@@ -125,7 +125,10 @@ static void test_kill_stops_process_tree(void)
     EXPECT(fd >= 0);
     close(fd);
 
-    char *cmd = xasprintf("echo $$ > %s; sleep 30", path);
+    /* The shell's own stderr is discarded so that only the task's output counts towards the footer
+     * below: OpenBSD's ksh announces "Terminated" when a foreground job dies of a signal, where
+     * dash and FreeBSD's sh stay silent. */
+    char *cmd = xasprintf("echo $$ > %s; exec 2>/dev/null; sleep 30", path);
     char *args = xasprintf("{\"command\":\"%s\",\"background\":true}", cmd);
     char *out = TOOL_BASH.run(args, NULL);
     free(args);

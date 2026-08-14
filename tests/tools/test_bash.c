@@ -24,6 +24,16 @@ static char *call_bash(const char *escaped_command)
     return out;
 }
 
+/* Runs a command emitting one line of `bytes` 'x' characters, with no trailing newline. A printf
+ * field width keeps the generator POSIX: `head -c` is a GNU/BSD extension that OpenBSD lacks. */
+static char *call_bash_long_line(size_t bytes)
+{
+    char *command = xasprintf("printf '%%%zus' '' | tr ' ' x", bytes);
+    char *out = call_bash(command);
+    free(command);
+    return out;
+}
+
 struct display_capture {
     struct buf buf;
 };
@@ -594,7 +604,7 @@ static void test_bash_drain_clamps_oversized_byte_cap(void)
     /* The spill threshold must remain below the hard drain limit even with an oversized configured
      * cap. */
     setenv("HAX_TOOL_OUTPUT_CAP", "32m", 1);
-    char *out = call_bash("yes x | tr -d '\\n' | head -c 17000000");
+    char *out = call_bash_long_line(17000000);
     EXPECT(strstr(out, "[output truncated") != NULL);
     EXPECT(strstr(out, "saved to ") != NULL);
     free(out);
@@ -628,7 +638,7 @@ static void test_bash_short_output_no_elision(void)
 
 static void test_bash_caps_long_line(void)
 {
-    char *out = call_bash("head -c 5000 /dev/zero | tr '\\\\0' x");
+    char *out = call_bash_long_line(5000);
     EXPECT(strstr(out, "bytes elided") != NULL);
     EXPECT(strlen(out) < 2500);
     free(out);
@@ -882,7 +892,7 @@ static void test_bash_streamed_history_truncated(void)
      * the saved-output marker. */
     struct display_capture display_output = {0};
     buf_init(&display_output.buf);
-    char *out = call_bash_streamed("yes hi | head -c 150000", &display_output);
+    char *out = call_bash_streamed("yes hi | head -n 50000", &display_output);
     EXPECT(strstr(out, "[output truncated") != NULL);
     EXPECT(strstr(out, "saved to ") != NULL);
     EXPECT(strlen(out) < 100 * 1024);

@@ -1291,7 +1291,10 @@ static int compare_session_mtime_desc(const void *left_pointer, const void *righ
         return left->mtime < right->mtime ? 1 : -1;
     if (left->mtime_nsec != right->mtime_nsec)
         return left->mtime_nsec < right->mtime_nsec ? 1 : -1;
-    return 0;
+    /* Sessions written within one timestamp tick carry no recorded order, and not every filesystem
+     * records a sub-second one: OpenBSD stamps rapid writes with an identical mtime. Order them by
+     * path so listings and --continue stay reproducible rather than left to an unstable sort. */
+    return strcmp(right->path, left->path);
 }
 
 static int has_jsonl_extension(const char *name)

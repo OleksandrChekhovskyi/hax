@@ -152,8 +152,11 @@ static void test_pipe_read_child_sigint_default(void)
     struct spawn_pipe pipe;
     EXPECT(spawn_pipe_open_read(&pipe, "kill -INT $$; exit 0") == 0);
     int status = spawn_pipe_close(&pipe);
-    EXPECT(WIFSIGNALED(status));
-    EXPECT(WTERMSIG(status) == SIGINT);
+    /* What matters is that the child did not inherit SIG_IGN: reaching the trailing `exit 0` would
+     * mean the signal was ignored. Which of the other two outcomes occurs is the shell's choice —
+     * OpenBSD's ksh reports 128+SIGINT where dash and bash re-raise it. */
+    EXPECT((WIFSIGNALED(status) && WTERMSIG(status) == SIGINT) ||
+           (WIFEXITED(status) && WEXITSTATUS(status) == 128 + SIGINT));
 }
 
 static void test_pipe_read_early_close_kills_writer(void)

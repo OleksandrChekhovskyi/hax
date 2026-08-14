@@ -142,10 +142,11 @@ Mention a file as ordinary prompt text, for example `@src/main.c`. With `fzf` in
 tracked and untracked-but-not-ignored files. `@../`, `@~/`, and absolute prefixes search from the
 named directory. Selecting a file inserts its path; the model reads it only if needed.
 
-Ctrl-V copies a clipboard image to a temporary file and inserts its path. On Linux this requires
-`wl-paste` (Wayland) or `xclip` (X11); macOS works without an extra utility. If no image is present,
-Ctrl-V pastes text. Image understanding also depends on the selected model/provider; hax detects
-support when metadata is available, and `image_input` can override detection.
+Ctrl-V copies a clipboard image to a temporary file and inserts its path. On Linux and the BSDs
+this requires `wl-paste` (Wayland) or `xclip` (X11); macOS works without an extra utility. If no
+image is present, Ctrl-V pastes text. Image understanding also depends on the selected
+model/provider; hax detects support when metadata is available, and `image_input` can override
+detection.
 
 ## Sessions and history
 

@@ -40,8 +40,8 @@ like this.
 
 ## Install
 
-hax runs on Linux and macOS; on Windows, use it under
-[WSL](https://learn.microsoft.com/en-us/windows/wsl/).
+hax runs on Linux, macOS, FreeBSD, and OpenBSD; on Windows, use it under
+[WSL](https://learn.microsoft.com/en-us/windows/wsl/). The BSDs build from source only.
 
 With [Homebrew](https://brew.sh) (macOS or Linux):
 
@@ -63,7 +63,7 @@ a static one:
 ```sh
 git clone https://github.com/OleksandrChekhovskyi/hax.git
 cd hax
-scripts/install_deps.sh   # Debian/Ubuntu, Fedora, Arch, openSUSE, Alpine, macOS
+scripts/install_deps.sh   # Debian/Ubuntu, Fedora, Arch, openSUSE, Alpine, macOS, FreeBSD, OpenBSD
 make                      # the binary is now at ./build/hax
 make install              # optional; may prompt for sudo
 ```

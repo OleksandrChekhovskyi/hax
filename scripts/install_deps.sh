@@ -40,15 +40,51 @@ fi
 as_root() {
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
-    else
+    elif command -v sudo >/dev/null 2>&1; then
         sudo "$@"
+    elif command -v doas >/dev/null 2>&1; then
+        # OpenBSD ships doas in base and has no sudo unless it is installed.
+        doas "$@"
+    else
+        printf '%s\n' 'error: need root; install sudo or doas, or run as root' >&2
+        exit 1
     fi
 }
 
-if [ "$(uname)" = Darwin ]; then
+# The lint toolchain is wired up only where CI exercises the clang-tidy range
+# .clang-tidy promises to stay clean for. Elsewhere, refuse rather than install
+# a version whose findings the project does not treat as failures.
+reject_lint() {
+    if [ -n "$lint" ]; then
+        printf 'error: the lint toolchain is not supported on %s (see .clang-tidy)\n' "$1" >&2
+        exit 1
+    fi
+}
+
+# The BSDs are selected by uname rather than os-release: OpenBSD ships no
+# such file, and reaching the sourcing below would abort the script outright.
+case "$(uname)" in
+Darwin)
     brew install jansson meson ninja pkg-config ${extras:+fzf} ${lint:+llvm}
     exit 0
-fi
+    ;;
+FreeBSD)
+    reject_lint FreeBSD
+    # clang and make come from the base system, and pkgconf provides
+    # pkg-config. python3 is explicit because meson depends on a versioned
+    # python package that need not provide the unversioned command.
+    as_root pkg install $assume_yes curl jansson meson ninja pkgconf \
+        python3 ${extras:+fzf}
+    exit 0
+    ;;
+OpenBSD)
+    reject_lint OpenBSD
+    # clang, make and pkg-config all come from the base system here, and meson
+    # brings a python3 that the e2e tests can use.
+    as_root pkg_add -I curl jansson meson ninja ${extras:+fzf}
+    exit 0
+    ;;
+esac
 
 . /etc/os-release
 
@@ -95,10 +131,7 @@ case "$ID ${ID_LIKE:-}" in
     fi
     ;;
 *alpine*)
-    if [ -n "$lint" ]; then
-        printf '%s\n' 'error: the lint toolchain is not supported on Alpine (see .clang-tidy)' >&2
-        exit 1
-    fi
+    reject_lint Alpine
     as_root apk add --no-cache \
         build-base meson samurai curl-dev jansson-dev python3 ${extras:+fzf}
     ;;

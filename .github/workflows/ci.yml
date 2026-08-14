@@ -66,3 +66,35 @@ jobs:
       - name: Lint
         if: ${{ matrix.lint }}
         run: make lint
+
+  # GitHub has no BSD runners, so these boot a QEMU guest on a Linux runner and
+  # take longer than the container jobs above. They cannot join that matrix: the
+  # whole body has to run inside the VM, which the `cpa.sh` shell arranges.
+  bsd:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: freebsd
+            operating_system: freebsd
+            version: '15.1'
+          - name: openbsd
+            operating_system: openbsd
+            version: '7.9'
+    defaults:
+      run:
+        shell: cpa.sh {0}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start VM
+        uses: cross-platform-actions/action@v1.4.0
+        with:
+          operating_system: ${{ matrix.operating_system }}
+          version: ${{ matrix.version }}
+      - name: Install dependencies
+        run: scripts/install_deps.sh ci
+      - name: Build and test
+        run: make tests

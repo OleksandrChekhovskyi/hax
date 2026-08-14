@@ -521,7 +521,7 @@ static void test_detached_log_holds_full_output(void)
     for (size_t i = 0; i < n; i++) {
         if (id && strcmp(rows[i].id, id) == 0 && rows[i].spool_path &&
             strlen(rows[i].spool_path) < sizeof(log_path))
-            strcpy(log_path, rows[i].spool_path);
+            snprintf(log_path, sizeof(log_path), "%s", rows[i].spool_path);
     }
     free(rows);
     EXPECT(*log_path != '\0');
