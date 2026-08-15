@@ -15,6 +15,8 @@
 
 struct model_meta {
     struct bg_job *probe_job;
+    char *probe_model;     /* owned; model the active probe targets */
+    long probe_started_ms; /* monotonic; anchors the shared model_meta_wait_ms budget */
     struct model_info reported;
 };
 
@@ -41,6 +43,8 @@ static void cancel_probe(struct model_meta *meta)
     bg_job_cancel(meta->probe_job);
     bg_job_join(meta->probe_job);
     meta->probe_job = NULL;
+    free(meta->probe_model);
+    meta->probe_model = NULL;
 }
 
 void model_meta_release(struct provider *provider)
@@ -70,6 +74,37 @@ static void probe_task_free(struct probe_task *task)
     free(task);
 }
 
+/* Fill fields `report` leaves unknown from `retained`. Newly parsed values win. */
+static void report_fill_unknown(struct model_info *report, const struct model_info *retained)
+{
+    if (report->context <= 0)
+        report->context = retained->context;
+    if (report->max_output <= 0)
+        report->max_output = retained->max_output;
+    if (report->image_input == PROVIDER_CAP_UNKNOWN)
+        report->image_input = retained->image_input;
+    if (report->tools == PROVIDER_CAP_UNKNOWN)
+        report->tools = retained->tools;
+    if (report->cost_input < 0)
+        report->cost_input = retained->cost_input;
+    if (report->cost_cache_read < 0)
+        report->cost_cache_read = retained->cost_cache_read;
+    if (report->cost_output < 0)
+        report->cost_output = retained->cost_output;
+    if (report->cost_cache_write < 0)
+        report->cost_cache_write = retained->cost_cache_write;
+    if (report->cost_cache_write_1h < 0)
+        report->cost_cache_write_1h = retained->cost_cache_write_1h;
+    if (report->n_tiers == 0) {
+        memcpy(report->tiers, retained->tiers, sizeof(report->tiers));
+        report->n_tiers = retained->n_tiers;
+    }
+    if (!report->efforts.known)
+        report->efforts = retained->efforts;
+    if (!report->description && retained->description)
+        report->description = xstrdup(retained->description);
+}
+
 static void probe_worker(struct bg_job *job, void *arg)
 {
     struct probe_task *task = arg;
@@ -89,8 +124,12 @@ static void probe_worker(struct bg_job *job, void *arg)
         task->request.parse(body, task->model_id, &report);
 
         pthread_mutex_lock(&report_lock);
-        /* A cancelled probe must not overwrite a newer selection after parsing. */
+        /* A cancelled probe must not overwrite a newer selection after parsing. A retained
+         * same-model report fills what the probe could not learn; an absent report is zeroed
+         * state, not knowledge, and must not be merged from. */
         if (!task->target->reported.id || strcmp(task->target->reported.id, task->model_id) == 0) {
+            if (task->target->reported.id)
+                report_fill_unknown(&report, &task->target->reported);
             clear_report_locked(task->target);
             model_info_copy(&task->target->reported, &report);
         }
@@ -108,15 +147,30 @@ void model_meta_refresh(struct provider *provider, const char *model)
         return;
 
     struct model_meta *meta = get_or_create_meta(provider);
+    /* Reap a finished probe so it cannot pass for a live one below. */
+    if (meta->probe_job && bg_job_wait_ms(meta->probe_job, 0))
+        model_meta_wait(provider);
+
     pthread_mutex_lock(&report_lock);
-    int already_reported = meta->reported.id && model && strcmp(meta->reported.id, model) == 0;
+    /* A model-list report may lack the context window; a probe can still learn it. */
+    int report_complete = meta->reported.context > 0 || !provider->probe_model;
+    int already_reported =
+        meta->reported.id && model && strcmp(meta->reported.id, model) == 0 && report_complete;
     pthread_mutex_unlock(&report_lock);
     if (already_reported)
         return;
 
+    /* A live probe for this model is already doing this refresh's work — and cancelling it would
+     * abort a router warm-up mid-load. */
+    if (meta->probe_job && meta->probe_model && model && strcmp(meta->probe_model, model) == 0)
+        return;
+
     cancel_probe(meta);
     pthread_mutex_lock(&report_lock);
-    clear_report_locked(meta);
+    /* Retain a same-model partial report so its fields survive a slow or failed probe. */
+    int same_model = meta->reported.id && model && strcmp(meta->reported.id, model) == 0;
+    if (!same_model)
+        clear_report_locked(meta);
     pthread_mutex_unlock(&report_lock);
 
     if (!provider->probe_model || !model || !*model)
@@ -132,8 +186,11 @@ void model_meta_refresh(struct provider *provider, const char *model)
     task->target = meta;
     task->model_id = xstrdup(model);
     task->request = request;
+    meta->probe_started_ms = monotonic_ms();
     meta->probe_job = bg_job_spawn(probe_worker, task);
-    if (!meta->probe_job)
+    if (meta->probe_job)
+        meta->probe_model = xstrdup(model);
+    else
         probe_task_free(task);
 }
 
@@ -143,6 +200,19 @@ void model_meta_wait(struct provider *provider)
         return;
     bg_job_join(provider->meta->probe_job);
     provider->meta->probe_job = NULL;
+    free(provider->meta->probe_model);
+    provider->meta->probe_model = NULL;
+}
+
+void model_meta_wait_ms(struct provider *provider, long timeout_ms)
+{
+    if (!provider || !provider->meta || !provider->meta->probe_job)
+        return;
+    /* The budget is anchored at probe start so stacked callers on one request path do not each
+     * wait the full amount for a slow probe. */
+    long remaining_ms = timeout_ms - (monotonic_ms() - provider->meta->probe_started_ms);
+    if (bg_job_wait_ms(provider->meta->probe_job, remaining_ms > 0 ? remaining_ms : 0))
+        model_meta_wait(provider);
 }
 
 static int model_info_has_details(const struct model_info *info)
@@ -159,10 +229,24 @@ void model_meta_store(struct provider *provider, const struct model_info *info)
         return;
 
     struct model_meta *meta = get_or_create_meta(provider);
-    cancel_probe(meta);
     pthread_mutex_lock(&report_lock);
+    int same_report = meta->reported.id && strcmp(meta->reported.id, info->id) == 0;
+    pthread_mutex_unlock(&report_lock);
+    /* A same-model store refines the report and leaves an active probe (a router warm-up, say)
+     * running to merge its result later; a different model invalidates both. */
+    int same_probe = meta->probe_model && strcmp(meta->probe_model, info->id) == 0;
+    if (!same_report && !same_probe)
+        cancel_probe(meta);
+
+    struct model_info merged;
+    model_info_copy(&merged, info);
+    pthread_mutex_lock(&report_lock);
+    /* Recheck under the lock: a kept probe may have published since the check above. An absent
+     * or foreign report is zeroed state, not knowledge; merge only from a match. */
+    if (meta->reported.id && strcmp(meta->reported.id, info->id) == 0)
+        report_fill_unknown(&merged, &meta->reported);
     clear_report_locked(meta);
-    model_info_copy(&meta->reported, info);
+    meta->reported = merged; /* ownership moves; merged must not be cleared */
     pthread_mutex_unlock(&report_lock);
 }
 

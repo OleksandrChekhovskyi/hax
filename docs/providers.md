@@ -120,10 +120,13 @@ hax --provider=llama.cpp
 Use `HAX_LLAMACPP_PORT=9090` for another local port, or `HAX_OPENAI_BASE_URL` for a complete URL. If
 the server uses `--api-key`, set `HAX_OPENAI_API_KEY`.
 
-At startup, hax queries `/v1/models`. It adopts the first served model when none was explicitly
-chosen and re-discovers it on later launches. If several models are served, use `/model` or
-`--model` to avoid ambiguity. An explicit `HAX_MODEL` skips startup discovery and lets the first
-request report connection/model errors.
+Both a classic single-model server and router mode (`llama-server` started without a model) work
+as expected: hax adopts the model automatically when the server leaves no ambiguity — the single
+served model, or a router's only running one — and otherwise starts without a model so `/model`
+picks from the server's catalog, which shows each model's load state. hax never makes the router
+load a model you didn't select; the first use of an idle model loads it, which can take a while.
+With `--no-models-autoload`, hax does not override the server: load models through llama.cpp's own
+tooling and pick a running one.
 
 hax probes llama.cpp for context and image capability when possible. Start the server with a context
 large enough for an agent session; the llama.cpp default is often too small once system instructions,

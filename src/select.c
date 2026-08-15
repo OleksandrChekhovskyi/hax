@@ -587,6 +587,9 @@ void select_model(struct agent_state *state)
         provider->model_discovered = model_discovered;
         config_snapshot_free(snapshot);
         persist_selection(state, provider_id, model_pick.model, effort, model_discovered);
+        /* Re-selecting the unchanged model must retry a failed metadata probe; settings apply
+         * skips the refresh because the model did not change. */
+        model_meta_refresh(provider, model_pick.model);
     }
     free(provider_id);
     free(model_pick.model);

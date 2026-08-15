@@ -20,6 +20,10 @@ int bg_job_cancel_requested(const struct bg_job *job);
 /* Adapt bg_job_cancel_requested to callback APIs that accept a void pointer. */
 int bg_job_cancel_tick(void *job);
 
+/* Wait up to `timeout_ms` for the worker to finish. Returns 1 when it finished (a NULL job counts)
+ * and 0 on timeout. Does not reap the job; bg_job_join is still required. */
+int bg_job_wait_ms(struct bg_job *job, long timeout_ms);
+
 /* Wait for the worker, then free the job. A NULL job is allowed. Every successful spawn must be
  * joined exactly once, before any caller-owned state the worker may access is destroyed. */
 void bg_job_join(struct bg_job *job);

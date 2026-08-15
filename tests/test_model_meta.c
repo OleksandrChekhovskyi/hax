@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/stat.h>
 
 #include "catalog.h"
@@ -323,6 +324,129 @@ static void test_id_only_report_is_ignored(void)
     model_meta_release(&p);
 }
 
+static int probe_calls;
+
+static void parse_nothing(const char *body, const char *model, struct model_info *info)
+{
+    (void)body;
+    (void)model;
+    (void)info;
+}
+
+static int counting_probe(struct provider *provider, const char *model, struct model_probe *probe)
+{
+    (void)provider;
+    (void)model;
+    probe_calls++;
+    /* Refused immediately; the probe result does not matter, only that it was attempted. */
+    probe->url = xstrdup("http://127.0.0.1:1/props");
+    probe->timeout_s = 1;
+    probe->parse = parse_nothing;
+    return 0;
+}
+
+static void store_report(struct provider *provider, const char *model, long context,
+                         enum provider_cap image_input)
+{
+    struct model_info info;
+    model_info_init(&info);
+    info.id = xstrdup(model);
+    info.context = context;
+    info.image_input = image_input;
+    model_meta_store(provider, &info);
+    model_info_clear(&info);
+}
+
+/* A same-model store keeps previously known fields; a different model replaces the report. */
+static void test_same_model_store_merges(void)
+{
+    unsetenv("HAX_IMAGE_INPUT");
+    unsetenv("HAX_CONTEXT_LIMIT");
+    struct provider p = make_provider("llama.cpp", list_no_efforts);
+    store_report(&p, "m", 32000, PROVIDER_CAP_YES);
+    store_report(&p, "m", 4096, PROVIDER_CAP_UNKNOWN);
+    EXPECT(model_meta_context(&p, "m") == 4096);
+    EXPECT(model_meta_image_input(&p, "m") == 1);
+
+    store_report(&p, "other", 8192, PROVIDER_CAP_UNKNOWN);
+    EXPECT(model_meta_context(&p, "m") == 0);
+    EXPECT(model_meta_image_input(&p, "other") == -1);
+    model_meta_release(&p);
+
+    static const char *const reported[] = {"low", NULL};
+    struct provider q = make_provider("openrouter", list_provider_efforts);
+    store_efforts(&q, "m", reported);
+    store_report(&q, "m", 4096, PROVIDER_CAP_UNKNOWN);
+    struct effort_set levels;
+    model_meta_efforts(&q, "m", &levels);
+    EXPECT(levels.count == 1);
+    EXPECT(model_meta_context(&q, "m") == 4096);
+    model_meta_release(&q);
+}
+
+/* Refreshing an unchanged model retries a failed probe once the finished job is reaped, instead
+ * of mistaking the completed job for a live warm-up. */
+static void test_refresh_retries_after_failed_probe(void)
+{
+    struct provider p = make_provider("llama.cpp", list_no_efforts);
+    p.probe_model = counting_probe;
+    probe_calls = 0;
+    store_report(&p, "m", 0, PROVIDER_CAP_NO);
+    model_meta_refresh(&p, "m");
+    EXPECT(probe_calls == 1);
+
+    /* The refused-connection probe fails within milliseconds; poll until a refresh reaps the
+     * finished job and retries. The bound only matters on a pathologically slow machine. */
+    const struct timespec poll_interval = {.tv_nsec = 1000000};
+    for (int i = 0; i < 5000 && probe_calls < 2; i++) {
+        model_meta_refresh(&p, "m");
+        nanosleep(&poll_interval, NULL);
+    }
+    EXPECT(probe_calls == 2);
+    model_meta_wait(&p);
+    model_meta_release(&p);
+}
+
+/* Storing while a probe is in flight and the report is still empty must not merge from the
+ * zeroed report, which would turn unknown pricing into a known $0. */
+static void test_store_during_probe_keeps_costs_unknown(void)
+{
+    struct provider p = make_provider("llama.cpp", list_no_efforts);
+    p.probe_model = counting_probe;
+    probe_calls = 0;
+    model_meta_refresh(&p, "m");
+
+    store_report(&p, "m", 4096, PROVIDER_CAP_UNKNOWN);
+    struct catalog_entry rates;
+    EXPECT(model_meta_rates(&p, "m", &rates) == 0);
+    EXPECT(rates.cost_input < 0 && rates.cost_output < 0);
+
+    model_meta_wait(&p);
+    model_meta_release(&p);
+}
+
+/* A list-derived report without a context window must not suppress the probe that learns it, and
+ * must survive the probe failing. */
+static void test_incomplete_report_still_probes(void)
+{
+    unsetenv("HAX_IMAGE_INPUT");
+    struct provider p = make_provider("llama.cpp", list_no_efforts);
+    p.probe_model = counting_probe;
+    probe_calls = 0;
+
+    store_report(&p, "qwen3", 0, PROVIDER_CAP_NO);
+    model_meta_refresh(&p, "qwen3");
+    model_meta_wait(&p);
+    EXPECT(probe_calls == 1);
+    EXPECT(model_meta_image_input(&p, "qwen3") == 0);
+
+    store_report(&p, "qwen3", 32768, PROVIDER_CAP_NO);
+    model_meta_refresh(&p, "qwen3");
+    model_meta_wait(&p);
+    EXPECT(probe_calls == 1);
+    model_meta_release(&p);
+}
+
 static void test_provider_without_levels_stays_without_them(void)
 {
     static const char *const reported[] = {"low", "high", NULL};
@@ -375,6 +499,10 @@ int main(void)
     test_report_is_scoped_to_provider_and_model();
     test_snapshot_can_restore_report();
     test_id_only_report_is_ignored();
+    test_same_model_store_merges();
+    test_refresh_retries_after_failed_probe();
+    test_store_during_probe_keeps_costs_unknown();
+    test_incomplete_report_still_probes();
     test_provider_without_levels_stays_without_them();
     test_release_is_honored_by_every_provider();
     T_REPORT();

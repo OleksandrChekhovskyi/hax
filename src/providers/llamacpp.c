@@ -16,8 +16,9 @@
 #include "providers/openai.h"
 #include "transport/http.h"
 
-#define MODEL_LIST_TIMEOUT_S     2
-#define MODEL_METADATA_TIMEOUT_S 5
+#define MODEL_LIST_TIMEOUT_S 2
+/* A router autoloads the probed model before /props responds, so allow a full model load. */
+#define MODEL_METADATA_TIMEOUT_S 120
 
 static char *default_base_url(void)
 {
@@ -79,35 +80,80 @@ char *llamacpp_props_url(const char *base_url, const char *model)
     return result;
 }
 
-int llamacpp_reconcile_model(const char *body, const char *configured_model, char **replacement)
+static int entry_names_model(const json_t *entry, const char *model)
 {
-    *replacement = NULL;
+    const char *id = json_string_value(json_object_get(entry, "id"));
+    if (id && strcmp(id, model) == 0)
+        return 1;
+    json_t *aliases = json_object_get(entry, "aliases");
+    size_t alias_count = json_is_array(aliases) ? json_array_size(aliases) : 0;
+    for (size_t i = 0; i < alias_count; i++) {
+        const char *alias = json_string_value(json_array_get(aliases, i));
+        if (alias && strcmp(alias, model) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+int llamacpp_reconcile_model(const char *body, const char *configured_model,
+                             struct llamacpp_reconcile *decision)
+{
+    memset(decision, 0, sizeof(*decision));
     json_t *root = json_loads(body, 0, NULL);
     json_t *models = root ? json_object_get(root, "data") : NULL;
-    const char *first_served_model = NULL;
-    int configured_model_is_served = 0;
-
-    if (json_is_array(models)) {
-        size_t model_count = json_array_size(models);
-        for (size_t i = 0; i < model_count; i++) {
-            const char *served_model =
-                json_string_value(json_object_get(json_array_get(models, i), "id"));
-            if (!served_model)
-                continue;
-            if (!first_served_model)
-                first_served_model = served_model;
-            if (configured_model && *configured_model &&
-                strcmp(served_model, configured_model) == 0)
-                configured_model_is_served = 1;
-        }
+    if (!json_is_array(models)) {
+        json_decref(root);
+        return -1;
     }
 
-    int result = first_served_model ? 0 : -1;
-    if (first_served_model &&
-        (!configured_model || !*configured_model || !configured_model_is_served))
-        *replacement = xstrdup(first_served_model);
+    int configured = configured_model && *configured_model;
+    const char *first_model = NULL;
+    const char *running_model = NULL;
+    const char *configured_id = NULL;
+    size_t running_count = 0;
+    int router = 0;
+
+    size_t model_count = json_array_size(models);
+    for (size_t i = 0; i < model_count; i++) {
+        json_t *entry = json_array_get(models, i);
+        const char *served_model = json_string_value(json_object_get(entry, "id"));
+        if (!served_model)
+            continue;
+        if (!first_model)
+            first_model = served_model;
+        json_t *status = json_object_get(entry, "status");
+        if (json_is_object(status)) {
+            router = 1;
+            /* llama.cpp's running states: a loading model is committed and counts. */
+            const char *state = json_string_value(json_object_get(status, "value"));
+            if (state && (strcmp(state, "loaded") == 0 || strcmp(state, "loading") == 0 ||
+                          strcmp(state, "sleeping") == 0)) {
+                running_model = served_model;
+                running_count++;
+            }
+        }
+        if (configured && !configured_id && entry_names_model(entry, configured_model))
+            configured_id = served_model;
+    }
+
+    if (!first_model) {
+        decision->no_models = 1;
+    } else if (!configured) {
+        if (!router)
+            decision->replacement = xstrdup(first_model);
+        else if (running_count == 1)
+            decision->replacement = xstrdup(running_model);
+    } else if (!configured_id) {
+        if (router)
+            decision->clear_configured = 1;
+        else
+            decision->replacement = xstrdup(first_model);
+    } else if (strcmp(configured_id, configured_model) != 0) {
+        /* The picker and the session speak catalog ids, so normalize a configured alias. */
+        decision->canonical = xstrdup(configured_id);
+    }
     json_decref(root);
-    return result;
+    return 0;
 }
 
 char *llamacpp_model_warning(const char *configured_model, const char *served_model)
@@ -125,9 +171,9 @@ char *llamacpp_model_warning(const char *configured_model, const char *served_mo
     return warning;
 }
 
-/* Server-discovered models are run overrides because llama-server may serve a different model on
- * the next launch. An explicit model is retained while the server is unreachable so the request can
- * report the underlying connection error. */
+/* Server-discovered models are run overrides because the server may serve a different model on
+ * the next launch. An explicit model is retained while the server is unreachable so the request
+ * can report the underlying connection error. */
 static int reconcile_configured_model(const char *base_url, const char *api_key,
                                       int *model_discovered)
 {
@@ -140,23 +186,34 @@ static int reconcile_configured_model(const char *base_url, const char *api_key,
                                      NULL, NULL, &body, NULL) == 0;
 
     const char *configured_model = config_str("model");
+    int configured = configured_model && *configured_model;
     int result = -1;
-    if (request_succeeded) {
-        char *replacement = NULL;
-        if (llamacpp_reconcile_model(body, configured_model, &replacement) == 0) {
-            if (replacement) {
-                if (configured_model && *configured_model) {
-                    char *warning = llamacpp_model_warning(configured_model, replacement);
-                    hax_warn("%s", warning);
-                    free(warning);
-                }
-                config_set_override("model", replacement);
-                free(replacement);
-                *model_discovered = 1;
+    struct llamacpp_reconcile decision;
+    if (request_succeeded && llamacpp_reconcile_model(body, configured_model, &decision) == 0) {
+        if (decision.no_models) {
+            hax_warn("llama.cpp: no models available — start llama-server with -m, -hf, or "
+                     "--models-dir");
+            if (configured)
+                config_set_override("model", "");
+        } else if (decision.replacement) {
+            if (configured) {
+                char *warning = llamacpp_model_warning(configured_model, decision.replacement);
+                hax_warn("%s", warning);
+                free(warning);
             }
-            result = 0;
+            config_set_override("model", decision.replacement);
+            *model_discovered = 1;
+        } else if (decision.canonical) {
+            config_set_override("model", decision.canonical);
+        } else if (decision.clear_configured) {
+            hax_warn("llama.cpp: model '%s' is not in the router catalog — pick one with /model",
+                     configured_model);
+            config_set_override("model", "");
         }
-    } else if (configured_model && *configured_model) {
+        free(decision.canonical);
+        free(decision.replacement);
+        result = 0;
+    } else if (!request_succeeded && configured) {
         result = 0;
     }
 
@@ -186,6 +243,40 @@ static void parse_props(const char *body, const char *model, struct model_info *
     if (json_is_boolean(vision))
         model_info->image_input = json_is_true(vision) ? PROVIDER_CAP_YES : PROVIDER_CAP_NO;
     json_decref(root);
+}
+
+void llamacpp_parse_model(const json_t *entry, struct model_info *info)
+{
+    json_t *meta = json_object_get(entry, "meta");
+    json_t *context = meta ? json_object_get(meta, "n_ctx") : NULL;
+    if (json_is_integer(context) && json_integer_value(context) > 0)
+        info->context = (long)json_integer_value(context);
+
+    json_t *architecture = json_object_get(entry, "architecture");
+    json_t *modalities = architecture ? json_object_get(architecture, "input_modalities") : NULL;
+    if (json_is_array(modalities)) {
+        info->image_input = PROVIDER_CAP_NO;
+        size_t modality_count = json_array_size(modalities);
+        for (size_t i = 0; i < modality_count; i++) {
+            const char *modality = json_string_value(json_array_get(modalities, i));
+            if (modality && strcmp(modality, "image") == 0)
+                info->image_input = PROVIDER_CAP_YES;
+        }
+    }
+
+    /* Most router models sit unloaded; flag only the exceptions. A failed load reports as
+     * unloaded plus a failed marker and exit code. */
+    json_t *status = json_object_get(entry, "status");
+    const char *state = status ? json_string_value(json_object_get(status, "value")) : NULL;
+    if (status && json_is_true(json_object_get(status, "failed"))) {
+        json_t *exit_code = json_object_get(status, "exit_code");
+        info->description =
+            json_is_integer(exit_code)
+                ? xasprintf("failed (exit %lld)", (long long)json_integer_value(exit_code))
+                : xstrdup("failed");
+    } else if (state && strcmp(state, "unloaded") != 0) {
+        info->description = xstrdup(state);
+    }
 }
 
 char *llamacpp_model_label(struct provider *provider, const char *model)
@@ -263,6 +354,7 @@ struct provider *llamacpp_provider_new(const char *name)
         /* llama-server has no per-request context-size control. */
         .length_hint = "llama-server's context is full — restart it with a larger "
                        "-c / --ctx-size",
+        .parse_model = llamacpp_parse_model,
     };
     struct provider *provider = openai_provider_new_preset(&preset);
     if (provider) {

@@ -57,12 +57,27 @@ static void test_cancel_tick_observes_request(void)
     EXPECT(cancelled);
 }
 
+static void test_wait_times_out_then_finishes(void)
+{
+    int cancelled = 0;
+    struct bg_job *job = bg_job_spawn(wait_for_cancel, &cancelled);
+
+    EXPECT(job != NULL);
+    EXPECT(bg_job_wait_ms(job, 1) == 0);
+    bg_job_cancel(job);
+    EXPECT(bg_job_wait_ms(job, 60000) == 1);
+    EXPECT(bg_job_wait_ms(job, 0) == 1);
+    bg_job_join(job);
+    EXPECT(cancelled);
+}
+
 static void test_null_job_is_inactive(void)
 {
     bg_job_cancel(NULL);
     bg_job_join(NULL);
     EXPECT(!bg_job_cancel_requested(NULL));
     EXPECT(!bg_job_cancel_tick(NULL));
+    EXPECT(bg_job_wait_ms(NULL, 1) == 1);
 }
 
 int main(void)
@@ -70,6 +85,7 @@ int main(void)
     test_worker_runs();
     test_worker_observes_cancel_request();
     test_cancel_tick_observes_request();
+    test_wait_times_out_then_finishes();
     test_null_job_is_inactive();
     T_REPORT();
 }

@@ -16,15 +16,28 @@ struct provider;
  * destroy callbacks must call this before freeing the provider. */
 void model_meta_release(struct provider *provider);
 
-/* Clear stale metadata and asynchronously probe `model`. A stored report for the same model is
- * retained. Any previous probe is cancelled and joined first. NULL-safe. */
+/* Ensure fresh metadata for `model`: unless the stored report is complete or a probe for `model`
+ * is already running, cancel any previous probe and asynchronously probe `model`. A stored report
+ * for the same model is retained. NULL-safe. */
 void model_meta_refresh(struct provider *provider, const char *model);
 
 /* Wait for an active probe to finish without cancelling it. NULL-safe. */
 void model_meta_wait(struct provider *provider);
 
-/* Store a copy of provider-reported metadata, cancelling any active probe and replacing the
- * previous report. Reports without a model ID or any metadata fields are ignored. */
+/* Bounded model_meta_wait for callers that must stay responsive. `timeout_ms` is measured from
+ * probe start, not per call, so callers stacked on one request path share the budget. On timeout
+ * the probe keeps running in the background and its report lands whenever it completes.
+ * NULL-safe. */
+void model_meta_wait_ms(struct provider *provider, long timeout_ms);
+
+/* Covers metadata-endpoint probes; probes that also load a model (llama.cpp router autoload)
+ * exceed it and finish in the background. */
+#define MODEL_META_PROBE_WAIT_MS 5000
+
+/* Store a copy of provider-reported metadata. A same-model store keeps the previous report's
+ * fields that `info` leaves unknown and lets an active probe continue; a different model replaces
+ * the report and cancels the probe. Reports without a model ID or any metadata fields are
+ * ignored. */
 void model_meta_store(struct provider *provider, const struct model_info *info);
 
 /* Copy the stored report into initialized `out`. Returns 1 when a report exists and 0 otherwise.

@@ -9,6 +9,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- The llama.cpp provider understands llama-server's multi-model router mode. `/model` lists the
+  server's whole catalog with load state, context, and image capability; a configured model is
+  matched by id or alias; and hax never makes the router load a model you didn't select — picking
+  one warms it up in the background.
 - FreeBSD and OpenBSD are supported, and CI builds and tests them on every change alongside Linux
   and macOS. Both build from source, and `scripts/install_deps.sh` installs their dependencies.
 - On Arch Linux, hax is available in the AUR as `hax`, refreshed automatically by each stable

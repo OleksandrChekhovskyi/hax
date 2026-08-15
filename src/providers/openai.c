@@ -197,8 +197,10 @@ static int openai_stream(struct provider *provider, const struct context *contex
 {
     struct openai *openai = (struct openai *)provider;
 
-    /* Cache planning depends on rates populated by the startup metadata probe. */
-    model_meta_wait(provider);
+    /* Cache planning depends on rates populated by the startup metadata probe. Bounded: a
+     * router-autoload probe can take minutes, while rate-reporting probes answer quickly, and the
+     * request itself waits for the model to load anyway. */
+    model_meta_wait_ms(provider, MODEL_META_PROBE_WAIT_MS);
     struct openai_cache_plan cache =
         openai_plan_cache(provider, model, openai->cache_mode, openai->cache_ttl);
 

@@ -152,6 +152,11 @@ Extension workflows:
 - Before changing code in any language, read [`docs/code-style.md`](docs/code-style.md) and apply
   its general naming, structure, and comment principles using that language's conventions.
 
+## Changelog
+
+Record notable user-facing changes in `CHANGELOG.md` under `[Unreleased]` as part of the change
+itself, following the file's Keep a Changelog format.
+
 ## Git conventions
 
 Do not create commits or perform any other git history manipulation unless the user explicitly
