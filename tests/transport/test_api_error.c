@@ -74,10 +74,10 @@ static void test_long_message_truncated(void)
 {
     char body[1024];
     char *cursor = body;
-    cursor += sprintf(cursor, "{\"error\":{\"message\":\"");
+    cursor += snprintf(cursor, sizeof(body), "{\"error\":{\"message\":\"");
     for (int i = 0; i < 500; i++)
         *cursor++ = 'A';
-    sprintf(cursor, "\"}}");
+    snprintf(cursor, sizeof(body) - (size_t)(cursor - body), "\"}}");
     char *message = format_api_error(500, body);
     EXPECT(strstr(message, "...") != NULL);
     EXPECT(strlen(message) < 300);
@@ -192,12 +192,12 @@ static void test_truncate_at_utf8_boundary(void)
     /* Put the 200-byte cutoff inside é. */
     char body[1024];
     char *cursor = body;
-    cursor += sprintf(cursor, "{\"error\":\"");
+    cursor += snprintf(cursor, sizeof(body), "{\"error\":\"");
     for (int i = 0; i < 199; i++)
         *cursor++ = 'A';
     *cursor++ = (char)0xC3; /* é leader */
     *cursor++ = (char)0xA9; /* é continuation */
-    sprintf(cursor, " more text\"}");
+    snprintf(cursor, sizeof(body) - (size_t)(cursor - body), " more text\"}");
     char *message = format_api_error(500, body);
     EXPECT(valid_utf8(message));
     EXPECT(strstr(message, "...") != NULL);
@@ -209,14 +209,14 @@ static void test_truncate_at_4byte_codepoint_boundary(void)
     /* Put the 200-byte cutoff inside a four-byte codepoint. */
     char body[1024];
     char *cursor = body;
-    cursor += sprintf(cursor, "{\"error\":\"");
+    cursor += snprintf(cursor, sizeof(body), "{\"error\":\"");
     for (int i = 0; i < 198; i++)
         *cursor++ = 'A';
     *cursor++ = (char)0xF0; /* 😀 leader */
     *cursor++ = (char)0x9F;
     *cursor++ = (char)0x98;
     *cursor++ = (char)0x80;
-    sprintf(cursor, " trailing\"}");
+    snprintf(cursor, sizeof(body) - (size_t)(cursor - body), " trailing\"}");
     char *message = format_api_error(500, body);
     EXPECT(valid_utf8(message));
     free(message);
