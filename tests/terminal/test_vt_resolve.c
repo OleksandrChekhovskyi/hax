@@ -49,7 +49,7 @@ static void test_erase_keeps_style_runs(void)
 {
     char *out = resolve_rows("ab" ANSI_BOLD "cd"
                              "\x1b[2D" ANSI_ERASE_LINE "\n");
-    EXPECT_STR_EQ(out, "ab" ANSI_BOLD "\n");
+    EXPECT_STR_EQ(out, "ab" ANSI_BOLD ANSI_RESET "\n");
     free(out);
 }
 
@@ -163,7 +163,7 @@ static void test_erase_removes_combining_mark_without_base(void)
 static void test_zero_width_writes_keep_order_at_moved_cursor(void)
 {
     char *out = resolve_rows("a\r\xCC\x81\xCC\xA7" ANSI_RED "\n");
-    EXPECT_STR_EQ(out, "\xCC\x81\xCC\xA7" ANSI_RED "a\n");
+    EXPECT_STR_EQ(out, "\xCC\x81\xCC\xA7" ANSI_RED "a" ANSI_RESET "\n");
     free(out);
 }
 
@@ -199,6 +199,48 @@ static void test_multi_parameter_sgr_passes_through(void)
 {
     char *out = resolve_rows("\x1b[38;5;173mtinted\x1b[39m\n");
     EXPECT_STR_EQ(out, "\x1b[38;5;173mtinted\x1b[39m\n");
+    free(out);
+}
+
+/* Reasoning blocks open dim italic once for many rows; a pager resets SGR state at every line,
+ * so each settled row must reopen the carried styling itself. */
+static void test_styled_run_reopens_on_each_row(void)
+{
+    char *out = resolve_rows(ANSI_DIM ANSI_ITALIC "one\ntwo\nthree" ANSI_RESET "\nplain\n");
+    EXPECT_STR_EQ(out, ANSI_DIM ANSI_ITALIC "one" ANSI_RESET "\n"
+                                            "\x1b[2;3mtwo" ANSI_RESET "\n"
+                                            "\x1b[2;3mthree" ANSI_RESET "\nplain\n");
+    free(out);
+}
+
+static void test_extended_color_reopens_verbatim(void)
+{
+    char *out = resolve_rows("\x1b[38;5;173mone\ntwo\x1b[39m\n");
+    EXPECT_STR_EQ(out, "\x1b[38;5;173mone" ANSI_RESET "\n"
+                       "\x1b[38;5;173mtwo\x1b[39m\n");
+    free(out);
+}
+
+static void test_blank_row_inside_styled_run_stays_bare(void)
+{
+    char *out = resolve_rows(ANSI_BOLD "one\n\ntwo" ANSI_RESET "\n");
+    EXPECT_STR_EQ(out, ANSI_BOLD "one" ANSI_RESET "\n\n" ANSI_BOLD "two" ANSI_RESET "\n");
+    free(out);
+}
+
+static void test_selective_sgr_off_codes_stop_the_carry(void)
+{
+    char *out = resolve_rows(ANSI_BOLD ANSI_ITALIC "a" ANSI_BOLD_OFF "b\nc\n");
+    EXPECT_STR_EQ(out, ANSI_BOLD ANSI_ITALIC "a" ANSI_BOLD_OFF "b" ANSI_RESET "\n" ANSI_ITALIC
+                                             "c" ANSI_RESET "\n");
+    free(out);
+}
+
+/* xterm modifyOtherKeys also ends in 'm'; it must pass through without touching the carry. */
+static void test_private_final_m_sequence_is_not_tracked(void)
+{
+    char *out = resolve_rows(ANSI_BOLD "a\x1b[>4;2mb\nc" ANSI_RESET "\n");
+    EXPECT_STR_EQ(out, ANSI_BOLD "a\x1b[>4;2mb" ANSI_RESET "\n" ANSI_BOLD "c" ANSI_RESET "\n");
     free(out);
 }
 
@@ -260,6 +302,11 @@ int main(void)
     test_unterminated_escape_consumed();
     test_osc_passes_through_whole();
     test_multi_parameter_sgr_passes_through();
+    test_styled_run_reopens_on_each_row();
+    test_extended_color_reopens_verbatim();
+    test_blank_row_inside_styled_run_stays_bare();
+    test_selective_sgr_off_codes_stop_the_carry();
+    test_private_final_m_sequence_is_not_tracked();
     test_only_first_csi_parameter_controls_erase();
     test_empty_input();
     test_erase_whole_row();

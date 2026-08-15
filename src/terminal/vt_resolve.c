@@ -45,6 +45,198 @@ struct escape_sequence {
 #define VT_MAX_CURSOR_COL 4096
 #define VT_MAX_CSI_PARAM  1000000
 
+/* Active SGR attributes; fg/bg hold the raw parameter text that set them ("31", "38;5;173"). */
+struct sgr_state {
+    bool bold;
+    bool dim;
+    bool italic;
+    bool underline;
+    bool blink;
+    bool inverse;
+    bool hidden;
+    bool strike;
+    char fg[20];
+    char bg[20];
+};
+
+static bool sgr_is_default(const struct sgr_state *sgr)
+{
+    return !sgr->bold && !sgr->dim && !sgr->italic && !sgr->underline && !sgr->blink &&
+           !sgr->inverse && !sgr->hidden && !sgr->strike && !sgr->fg[0] && !sgr->bg[0];
+}
+
+static void sgr_emit(const struct sgr_state *sgr, FILE *out)
+{
+    const char *codes[10];
+    size_t count = 0;
+    if (sgr->bold)
+        codes[count++] = "1";
+    if (sgr->dim)
+        codes[count++] = "2";
+    if (sgr->italic)
+        codes[count++] = "3";
+    if (sgr->underline)
+        codes[count++] = "4";
+    if (sgr->blink)
+        codes[count++] = "5";
+    if (sgr->inverse)
+        codes[count++] = "7";
+    if (sgr->hidden)
+        codes[count++] = "8";
+    if (sgr->strike)
+        codes[count++] = "9";
+    if (sgr->fg[0])
+        codes[count++] = sgr->fg;
+    if (sgr->bg[0])
+        codes[count++] = sgr->bg;
+
+    fputs("\x1b[", out);
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0)
+            fputc(';', out);
+        fputs(codes[i], out);
+    }
+    fputc('m', out);
+}
+
+static size_t sgr_token_end(const char *params, size_t params_len, size_t start)
+{
+    while (start < params_len && params[start] != ';')
+        start++;
+    return start;
+}
+
+/* An empty token means 0 (reset) per ECMA-48; a non-numeric lead returns -1 (not SGR). */
+static int sgr_token_value(const char *token, size_t token_len)
+{
+    if (token_len > 0 && (token[0] < '0' || token[0] > '9'))
+        return -1;
+    int value = 0;
+    for (size_t i = 0; i < token_len && token[i] >= '0' && token[i] <= '9'; i++) {
+        value = value * 10 + (token[i] - '0');
+        if (value > 9999)
+            return 9999;
+    }
+    return value;
+}
+
+static void sgr_apply_code(struct sgr_state *sgr, int code)
+{
+    switch (code) {
+    case 0:
+        memset(sgr, 0, sizeof(*sgr));
+        break;
+    case 1:
+        sgr->bold = true;
+        break;
+    case 2:
+        sgr->dim = true;
+        break;
+    case 3:
+        sgr->italic = true;
+        break;
+    case 4:
+        sgr->underline = true;
+        break;
+    case 5:
+    case 6:
+        sgr->blink = true;
+        break;
+    case 7:
+        sgr->inverse = true;
+        break;
+    case 8:
+        sgr->hidden = true;
+        break;
+    case 9:
+        sgr->strike = true;
+        break;
+    case 22:
+        sgr->bold = false;
+        sgr->dim = false;
+        break;
+    case 23:
+        sgr->italic = false;
+        break;
+    case 24:
+        sgr->underline = false;
+        break;
+    case 25:
+        sgr->blink = false;
+        break;
+    case 27:
+        sgr->inverse = false;
+        break;
+    case 28:
+        sgr->hidden = false;
+        break;
+    case 29:
+        sgr->strike = false;
+        break;
+    case 39:
+        sgr->fg[0] = '\0';
+        break;
+    case 49:
+        sgr->bg[0] = '\0';
+        break;
+    default:
+        if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97))
+            snprintf(sgr->fg, sizeof(sgr->fg), "%d", code);
+        else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107))
+            snprintf(sgr->bg, sizeof(sgr->bg), "%d", code);
+        break;
+    }
+}
+
+/* Track the cumulative effect of one CSI m sequence. Extended colors keep their raw parameter
+ * span so a reopened row reproduces them verbatim; a color too long for its slot falls back to
+ * default rather than reopening truncated. Codes this model does not know pass through in place
+ * but do not carry across rows. */
+static void sgr_apply(struct sgr_state *sgr, const char *sequence, size_t sequence_len)
+{
+    const char *params = sequence + 2;
+    size_t params_len = sequence_len - 3;
+    /* A private-use prefix marks a non-SGR use of final 'm', such as xterm modifyOtherKeys. */
+    if (params_len > 0 &&
+        (params[0] == '<' || params[0] == '=' || params[0] == '>' || params[0] == '?'))
+        return;
+    size_t start = 0;
+    while (start <= params_len) {
+        size_t end = sgr_token_end(params, params_len, start);
+        int code = sgr_token_value(params + start, end - start);
+        const char *colon = memchr(params + start, ':', end - start);
+        if (code == 38 || code == 48) {
+            /* Semicolon payloads span tokens: 38;5;n or 38;2;r;g;b. Colon forms are one token. */
+            size_t span_end = end;
+            if (!colon) {
+                size_t kind_start = end + 1;
+                size_t kind_end = sgr_token_end(params, params_len, kind_start);
+                int kind = kind_start <= params_len
+                               ? sgr_token_value(params + kind_start, kind_end - kind_start)
+                               : 0;
+                int payload_tokens = kind == 5 ? 2 : kind == 2 ? 4 : 0;
+                for (int i = 0; i < payload_tokens && span_end < params_len; i++)
+                    span_end = sgr_token_end(params, params_len, span_end + 1);
+            }
+            char *slot = code == 38 ? sgr->fg : sgr->bg;
+            size_t span_len = span_end - start;
+            if (span_len < sizeof(sgr->fg)) {
+                memcpy(slot, params + start, span_len);
+                slot[span_len] = '\0';
+            } else {
+                slot[0] = '\0';
+            }
+            start = span_end + 1;
+            continue;
+        }
+        if (code == 4 && colon)
+            sgr->underline = colon[1] != '0';
+        else if (code >= 0)
+            sgr_apply_code(sgr, code);
+        start = end + 1;
+    }
+}
+
 static void row_reset(struct terminal_row *row)
 {
     for (size_t i = 0; i < row->count; i++)
@@ -264,12 +456,30 @@ static void row_erase_line(struct terminal_row *row, int mode)
     }
 }
 
-static void row_commit(struct terminal_row *row, FILE *out)
+static bool row_has_glyphs(const struct terminal_row *row)
 {
     for (size_t i = 0; i < row->count; i++)
+        if (row->segments[i].cell_width > 0)
+            return true;
+    return false;
+}
+
+/* Pagers reset SGR state at every line, so each committed row must be style-self-contained:
+ * reopen the styling carried in from earlier rows and close styling left open at the row end.
+ * carried advances to the state the next row starts in. */
+static void row_commit(struct terminal_row *row, struct sgr_state *carried,
+                       const struct sgr_state *current, FILE *out)
+{
+    bool restyle = row_has_glyphs(row);
+    if (restyle && !sgr_is_default(carried))
+        sgr_emit(carried, out);
+    for (size_t i = 0; i < row->count; i++)
         fwrite(row->segments[i].bytes, 1, row->segments[i].byte_len, out);
+    if (restyle && !sgr_is_default(current))
+        fputs("\x1b[0m", out);
     fputc('\n', out);
     row_reset(row);
+    *carried = *current;
 }
 
 static void parse_csi(const char *bytes, size_t len, struct escape_sequence *escape)
@@ -341,11 +551,13 @@ static struct escape_sequence parse_escape(const char *bytes, size_t len)
 void vt_resolve(const char *bytes, size_t len, FILE *out)
 {
     struct terminal_row row = {0};
+    struct sgr_state style = {0};
+    struct sgr_state carried = {0};
     size_t offset = 0;
     while (offset < len) {
         char byte = bytes[offset];
         if (byte == '\n') {
-            row_commit(&row, out);
+            row_commit(&row, &carried, &style, out);
             offset++;
             continue;
         }
@@ -375,6 +587,10 @@ void vt_resolve(const char *bytes, size_t len, FILE *out)
                 case 'K':
                     row_erase_line(&row, escape.has_first_param ? escape.first_param : 0);
                     break;
+                case 'm':
+                    sgr_apply(&style, bytes + offset, escape.byte_len);
+                    row_write_control(&row, bytes + offset, escape.byte_len);
+                    break;
                 default:
                     row_write_control(&row, bytes + offset, escape.byte_len);
                     break;
@@ -400,6 +616,6 @@ void vt_resolve(const char *bytes, size_t len, FILE *out)
     }
 
     if (row.count > 0)
-        row_commit(&row, out);
+        row_commit(&row, &carried, &style, out);
     row_free(&row);
 }

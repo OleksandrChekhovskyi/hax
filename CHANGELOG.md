@@ -20,6 +20,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- With `show_reasoning` on, the history view (Ctrl-O) no longer loses the dim italic reasoning
+  styling after the first line. `less` resets styling at every line, so the settled output now
+  reopens carried-over styling on each line; bold or italic spans wrapped across lines are
+  covered too.
 - The transcript and history views (Ctrl-T, Ctrl-O) no longer show literal `ESC[1m` escapes or
   garbled non-ASCII, and the `$EDITOR` buffer and the `@file` picker keep non-ASCII intact. A plain
   `PAGER=less`, or a system with no locale configured, previously broke them. hax also warns at
