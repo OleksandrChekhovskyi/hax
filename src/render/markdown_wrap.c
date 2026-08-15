@@ -106,13 +106,6 @@ static void wrap_flush_range(struct md_wrap *w, const struct md_wrap_context *ct
     }
 }
 
-/* The shadow is already emitted. Keep pending_wrap for the next byte or break. */
-static void wrap_flush_all(struct md_wrap *w)
-{
-    buf_reset(&w->row_buf);
-    buf_reset(&w->row_meta);
-}
-
 /* Derive continuation indent from leading spaces and an optional list marker.
  * SGR runs may surround the marker; leading spaces are capped at eight cells. */
 static int compute_indent_cells(const struct md_wrap *w)
@@ -242,14 +235,8 @@ static void wrap_break(struct md_wrap *w, const struct md_wrap_context *ctx)
 static void wrap_hard_newline(struct md_wrap *w, const struct md_wrap_context *ctx)
 {
     w->pending_wrap = 0;
-    wrap_flush_all(w);
     ctx->emit("\n", 1, 0, ctx->user);
-    w->col = 0;
-    w->last_break_byte = -1;
-    w->last_break_col = 0;
-    w->indent_cells = 0;
-    w->indent_locked = 0;
-    w->row_has_content = 0;
+    md_wrap_row_reset(w);
 }
 
 /* An overflowing edge-space is dropped and defers its newline. Mid-word
@@ -391,5 +378,8 @@ void md_wrap_flush(struct md_wrap *w, const struct md_wrap_context *ctx)
     if (w->width <= 0)
         return;
     wrap_drain_cell_stream(w, ctx);
-    wrap_flush_all(w);
+    /* The stream's last row is complete and the caller owns its newline, so a deferred edge
+     * wrap is resolved rather than carried into the next stream's first row. */
+    w->pending_wrap = 0;
+    md_wrap_row_reset(w);
 }

@@ -20,6 +20,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- OpenAI reasoning summaries no longer render their step titles glued together
+  ("...color string lengthInvestigating combining marks..."): the Responses providers now put
+  each summary part on its own line. Reasoning blocks after the first in a response also wrap
+  at the right column in the live view, and the history view (Ctrl-O) separates consecutive
+  reasoning blocks the way the live view does instead of running them into one paragraph.
 - With `show_reasoning` on, the history view (Ctrl-O) no longer loses the dim italic reasoning
   styling after the first line. `less` resets styling at every line, so the settled output now
   reopens carried-over styling on each line; bold or italic spans wrapped across lines are

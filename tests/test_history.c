@@ -254,6 +254,24 @@ static void test_undrawn_reasoning_still_breaks_text(void)
     free(opaque);
 }
 
+/* The live view renders each reasoning item as its own block; replay must
+ * not run them together into one paragraph. */
+static void test_consecutive_reasoning_items_are_separate_blocks(void)
+{
+    struct item items[2] = {0};
+    items[0].kind = ITEM_REASONING;
+    items[0].reasoning_text = (char *)"FIRST_THOUGHT";
+    items[1].kind = ITEM_REASONING;
+    items[1].reasoning_text = (char *)"SECOND_THOUGHT";
+
+    char *out = render(HISTORY_FULL, items, 2, 1);
+    char *plain = strip_sgr(out);
+    EXPECT(strstr(plain, "FIRST_THOUGHTSECOND_THOUGHT") == NULL);
+    EXPECT(strstr(plain, "FIRST_THOUGHT\n\nSECOND_THOUGHT") != NULL);
+    free(plain);
+    free(out);
+}
+
 /* Results are paired by call_id, not by adjacency: a parallel batch is
  * stored as (C1, C2, R1, R2) and each call must still get its own body. */
 static void test_batched_results_pair_by_id(void)
@@ -979,6 +997,7 @@ int main(void)
     test_post_dispatch_interrupt_marker_stays_below_tools();
     test_continue_marker_is_not_echoed();
     test_undrawn_reasoning_still_breaks_text();
+    test_consecutive_reasoning_items_are_separate_blocks();
     test_batched_results_pair_by_id();
     test_repeated_call_ids_do_not_pair_across_turns();
     test_orphan_call_renders_header();

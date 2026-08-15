@@ -70,7 +70,8 @@ void md_wrap_emit_raw(struct md_wrap *w, const struct md_wrap_context *ctx, cons
 
 /* Resolve an edge wrap before direct block output; a hard newline resolves it itself. */
 void md_wrap_commit_pending(struct md_wrap *w, const struct md_wrap_context *ctx);
-/* Drain partial UTF-8 and discard the emitted row shadow without adding a newline. */
+/* Drain partial UTF-8 and end the current row without adding a newline. The caller owns the
+ * line terminator; the next emit starts a fresh row. */
 void md_wrap_flush(struct md_wrap *w, const struct md_wrap_context *ctx);
 
 #endif /* HAX_RENDER_MARKDOWN_WRAP_H */

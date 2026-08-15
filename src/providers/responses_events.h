@@ -17,6 +17,11 @@ struct responses_events {
     size_t tool_call_count;
     size_t tool_call_capacity;
     int terminal_emitted;
+    /* Reasoning part last seen, for separators between parts of one item. Summary and content
+     * parts index independently, so the namespace is part of the identity. */
+    char *reasoning_item_id;
+    int reasoning_part_index;
+    int reasoning_part_is_content;
 };
 
 void responses_events_init(struct responses_events *events, stream_cb callback,

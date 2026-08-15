@@ -42,10 +42,26 @@ void responses_events_free(struct responses_events *events)
     events->tool_calls = NULL;
     events->tool_call_count = 0;
     events->tool_call_capacity = 0;
+    free(events->reasoning_item_id);
+    events->reasoning_item_id = NULL;
+}
+
+/* Events consumers close the reasoning block at; see turn_consume and the interactive renderer.
+ * Tool argument and end events are invisible there, leaving an open reasoning block open. */
+static int event_is_reasoning_seam(enum stream_event_kind kind)
+{
+    return kind == EV_TEXT_DELTA || kind == EV_TOOL_CALL_START || kind == EV_REASONING_ITEM ||
+           kind == EV_DONE || kind == EV_ERROR;
 }
 
 static void emit_event(struct responses_events *events, const struct stream_event *event)
 {
+    /* Part tracking must not survive a seam: a separator injected after one would open the
+     * next reasoning block with a stray blank line. */
+    if (event_is_reasoning_seam(event->kind)) {
+        free(events->reasoning_item_id);
+        events->reasoning_item_id = NULL;
+    }
     events->callback(event, events->callback_user);
 }
 
@@ -166,12 +182,52 @@ static void handle_text_delta(struct responses_events *events, json_t *root)
     emit_event(events, &event);
 }
 
+/* Reasoning summaries and raw reasoning stream as indexed parts with no separator on the wire,
+ * so adjacent parts would render glued together. A hard line break puts each part on its own
+ * line. Display-only: replay uses the opaque reasoning item, whose summary is copied verbatim,
+ * so injected bytes never reach the provider. */
+static void emit_reasoning_part_break(struct responses_events *events, json_t *root)
+{
+    const char *item_id = json_string_value(json_object_get(root, "item_id"));
+    json_t *index_value = json_object_get(root, "summary_index");
+    int is_content = 0;
+    if (!index_value) {
+        index_value = json_object_get(root, "content_index");
+        is_content = 1;
+    }
+    if (!item_id || !json_is_integer(index_value))
+        return;
+
+    int part_index = (int)json_integer_value(index_value);
+    int same_item = events->reasoning_item_id && strcmp(events->reasoning_item_id, item_id) == 0;
+    /* A tracked previous part means no EV_REASONING_ITEM sealed it, so an item change needs an
+     * injected boundary just like a part change: backends that return no encrypted content give
+     * consumers no other seam between consecutive reasoning items. */
+    int part_changed =
+        events->reasoning_item_id && (!same_item || part_index != events->reasoning_part_index ||
+                                      is_content != events->reasoning_part_is_content);
+    if (part_changed) {
+        struct stream_event event = {
+            .kind = EV_REASONING_DELTA,
+            .u.reasoning_delta = {.text = "  \n"},
+        };
+        emit_event(events, &event);
+    }
+    if (!same_item) {
+        free(events->reasoning_item_id);
+        events->reasoning_item_id = xstrdup(item_id);
+    }
+    events->reasoning_part_index = part_index;
+    events->reasoning_part_is_content = is_content;
+}
+
 static void handle_reasoning_delta(struct responses_events *events, json_t *root)
 {
     const char *delta = json_string_value(json_object_get(root, "delta"));
     if (!delta || !*delta)
         return;
 
+    emit_reasoning_part_break(events, root);
     struct stream_event event = {
         .kind = EV_REASONING_DELTA,
         .u.reasoning_delta = {.text = delta},

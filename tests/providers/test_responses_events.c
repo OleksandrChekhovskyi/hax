@@ -431,6 +431,179 @@ static void test_reasoning_text_delta(void)
     fixture_free(&fixture);
 }
 
+/* Summary parts stream with no separator on the wire; a hard line break between parts keeps
+ * each on its own display line. */
+static void test_reasoning_part_change_emits_break(void)
+{
+    struct event_fixture fixture;
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_summary_text.delta\","
+                          "\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\"**First**\"}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_summary_text.delta\","
+                          "\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\" phrase\"}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_summary_text.delta\","
+                          "\"item_id\":\"rs_1\",\"summary_index\":1,\"delta\":\"**Second**\"}");
+    EXPECT(fixture.capture.count == 4);
+    EXPECT_STR_EQ(fixture.capture.events[0].text, "**First**");
+    EXPECT_STR_EQ(fixture.capture.events[1].text, " phrase");
+    EXPECT(fixture.capture.events[2].kind == EV_REASONING_DELTA);
+    EXPECT_STR_EQ(fixture.capture.events[2].text, "  \n");
+    EXPECT_STR_EQ(fixture.capture.events[3].text, "**Second**");
+    fixture_free(&fixture);
+}
+
+static void test_reasoning_content_part_change_emits_break(void)
+{
+    struct event_fixture fixture;
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_text.delta\","
+                          "\"item_id\":\"rs_1\",\"content_index\":0,\"delta\":\"part one\"}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_text.delta\","
+                          "\"item_id\":\"rs_1\",\"content_index\":1,\"delta\":\"part two\"}");
+    EXPECT(fixture.capture.count == 3);
+    EXPECT_STR_EQ(fixture.capture.events[1].text, "  \n");
+    EXPECT_STR_EQ(fixture.capture.events[2].text, "part two");
+    fixture_free(&fixture);
+}
+
+/* Summary and content parts of one item index independently, so an equal index across the two
+ * namespaces is still a part change. */
+static void test_reasoning_break_between_summary_and_content(void)
+{
+    struct event_fixture fixture;
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_summary_text.delta\","
+                          "\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\"summary\"}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_text.delta\","
+                          "\"item_id\":\"rs_1\",\"content_index\":0,\"delta\":\"raw thought\"}");
+    EXPECT(fixture.capture.count == 3);
+    EXPECT_STR_EQ(fixture.capture.events[0].text, "summary");
+    EXPECT_STR_EQ(fixture.capture.events[1].text, "  \n");
+    EXPECT_STR_EQ(fixture.capture.events[2].text, "raw thought");
+    fixture_free(&fixture);
+}
+
+/* Backends that return no encrypted content complete reasoning items without an
+ * EV_REASONING_ITEM seam, so an item change needs an injected boundary too. Unidentified
+ * deltas cannot be attributed to a part and never inject one. */
+static void test_reasoning_break_on_unsealed_item_change(void)
+{
+    struct event_fixture fixture;
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_summary_text.delta\","
+                          "\"item_id\":\"rs_1\",\"summary_index\":2,\"delta\":\"tail of one\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.output_item.done\",\"item\":"
+                                           "{\"type\":\"reasoning\",\"id\":\"rs_1\","
+                                           "\"summary\":[{}]}}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_summary_text.delta\","
+                          "\"item_id\":\"rs_2\",\"summary_index\":0,\"delta\":\"head of two\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.reasoning_summary_text.delta\","
+                                           "\"summary_index\":5,\"delta\":\"no item id\"}");
+    EXPECT(fixture.capture.count == 4);
+    EXPECT_STR_EQ(fixture.capture.events[0].text, "tail of one");
+    EXPECT_STR_EQ(fixture.capture.events[1].text, "  \n");
+    EXPECT_STR_EQ(fixture.capture.events[2].text, "head of two");
+    EXPECT_STR_EQ(fixture.capture.events[3].text, "no item id");
+    fixture_free(&fixture);
+}
+
+/* Text and tool events also close the reasoning block downstream, so a reasoning item resumed
+ * after one must not get a separator on top of that seam. */
+static void test_reasoning_no_break_after_external_seam(void)
+{
+    struct event_fixture fixture;
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_summary_text.delta\","
+                          "\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\"one\"}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_summary_text.delta\","
+                          "\"item_id\":\"rs_2\",\"summary_index\":0,\"delta\":\"two\"}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.output_item.added\",\"item\":"
+                          "{\"type\":\"function_call\",\"id\":\"i1\",\"call_id\":\"c1\","
+                          "\"name\":\"bash\"}}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_summary_text.delta\","
+                          "\"item_id\":\"rs_3\",\"summary_index\":0,\"delta\":\"three\"}");
+    EXPECT(fixture.capture.count == 5);
+    EXPECT_STR_EQ(fixture.capture.events[0].text, "one");
+    EXPECT(fixture.capture.events[1].kind == EV_TEXT_DELTA);
+    EXPECT_STR_EQ(fixture.capture.events[2].text, "two");
+    EXPECT(fixture.capture.events[3].kind == EV_TOOL_CALL_START);
+    EXPECT_STR_EQ(fixture.capture.events[4].text, "three");
+    fixture_free(&fixture);
+}
+
+/* Tool argument and end events leave an open reasoning block open downstream, so part identity
+ * must survive them: a part change spanning one still needs its separator. */
+static void test_reasoning_break_survives_tool_delta_interleave(void)
+{
+    struct event_fixture fixture;
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.output_item.added\",\"item\":"
+                          "{\"type\":\"function_call\",\"id\":\"i1\",\"call_id\":\"c1\","
+                          "\"name\":\"bash\"}}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_summary_text.delta\","
+                          "\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\"alpha\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.function_call_arguments.delta\","
+                                           "\"item_id\":\"i1\",\"delta\":\"{}\"}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_summary_text.delta\","
+                          "\"item_id\":\"rs_1\",\"summary_index\":1,\"delta\":\"beta\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.output_item.done\",\"item\":"
+                                           "{\"type\":\"function_call\",\"id\":\"i1\"}}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_summary_text.delta\","
+                          "\"item_id\":\"rs_1\",\"summary_index\":2,\"delta\":\"gamma\"}");
+    EXPECT(fixture.capture.count == 8);
+    EXPECT(fixture.capture.events[0].kind == EV_TOOL_CALL_START);
+    EXPECT_STR_EQ(fixture.capture.events[1].text, "alpha");
+    EXPECT(fixture.capture.events[2].kind == EV_TOOL_CALL_DELTA);
+    EXPECT_STR_EQ(fixture.capture.events[3].text, "  \n");
+    EXPECT_STR_EQ(fixture.capture.events[4].text, "beta");
+    EXPECT(fixture.capture.events[5].kind == EV_TOOL_CALL_END);
+    EXPECT_STR_EQ(fixture.capture.events[6].text, "  \n");
+    EXPECT_STR_EQ(fixture.capture.events[7].text, "gamma");
+    fixture_free(&fixture);
+}
+
+/* When EV_REASONING_ITEM seals the item, that event is the boundary; injecting a separator too
+ * would put a stray blank first line on the next item's block. */
+static void test_reasoning_no_break_after_item_event(void)
+{
+    struct event_fixture fixture;
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_summary_text.delta\","
+                          "\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\"tail of one\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.output_item.done\",\"item\":"
+                                           "{\"type\":\"reasoning\",\"id\":\"rs_1\","
+                                           "\"summary\":[{}],\"encrypted_content\":\"abc==\"}}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.reasoning_summary_text.delta\","
+                          "\"item_id\":\"rs_2\",\"summary_index\":0,\"delta\":\"head of two\"}");
+    EXPECT(fixture.capture.count == 3);
+    EXPECT_STR_EQ(fixture.capture.events[0].text, "tail of one");
+    EXPECT(fixture.capture.events[1].kind == EV_REASONING_ITEM);
+    EXPECT(fixture.capture.events[2].kind == EV_REASONING_DELTA);
+    EXPECT_STR_EQ(fixture.capture.events[2].text, "head of two");
+    fixture_free(&fixture);
+}
+
 static void test_empty_reasoning_delta_ignored(void)
 {
     struct event_fixture fixture;
@@ -530,6 +703,13 @@ int main(void)
     test_reasoning_with_null_encrypted_content_ignored();
     test_reasoning_summary_delta();
     test_reasoning_text_delta();
+    test_reasoning_part_change_emits_break();
+    test_reasoning_content_part_change_emits_break();
+    test_reasoning_break_between_summary_and_content();
+    test_reasoning_break_on_unsealed_item_change();
+    test_reasoning_no_break_after_external_seam();
+    test_reasoning_break_survives_tool_delta_interleave();
+    test_reasoning_no_break_after_item_event();
     test_empty_reasoning_delta_ignored();
     test_usage_default_unknown();
     test_completed_usage();

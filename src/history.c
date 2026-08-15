@@ -243,10 +243,14 @@ static void render_streamed_range(struct render_ctx *render, const struct item *
             break;
         case ITEM_REASONING:
             /* Hidden and opaque reasoning still create a stream seam. */
-            if (render->show_reasoning && item->reasoning_text && *item->reasoning_text)
+            if (render->show_reasoning && item->reasoning_text && *item->reasoning_text) {
+                /* Consecutive reasoning items render as separate blocks, as in the live view. */
+                if (render->mode == RENDER_REASONING)
+                    render_set_mode(render, RENDER_IDLE);
                 render_stored_text(render, RENDER_REASONING, item->reasoning_text);
-            else if (render->mode != RENDER_TOOL_CLUSTER)
+            } else if (render->mode != RENDER_TOOL_CLUSTER) {
                 render_set_mode(render, RENDER_IDLE);
+            }
             break;
         case ITEM_TOOL_CALL:
         case ITEM_TOOL_RESULT:

@@ -1362,6 +1362,25 @@ static void test_hard_break_trailing_spaces_split_across_feeds(void)
     free(s);
 }
 
+static void test_hard_break_separates_unstyled_bold_phrases(void)
+{
+    /* The shape the Responses providers stream for reasoning summaries: bold phrases joined by
+     * injected hard breaks, rendered unstyled. With the bold markers consumed invisibly, the
+     * break is the only boundary keeping the phrases off one run-on line. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 80);
+    md_set_styled(m, 0);
+    md_feed(m, "**First phrase**", strlen("**First phrase**"));
+    md_feed(m, "  \n", strlen("  \n"));
+    md_feed(m, "**Second phrase**", strlen("**Second phrase**"));
+    md_flush(m);
+    md_free(m);
+    char *s = buf_steal(&out);
+    EXPECT_STR_EQ(s, "First phrase  \nSecond phrase");
+    free(s);
+}
+
 static void test_soft_break_single_trailing_space(void)
 {
     /* A single trailing space is below the hard-break threshold, so the
@@ -3136,6 +3155,7 @@ int main(void)
     test_hard_break_trailing_two_spaces();
     test_hard_break_trailing_two_spaces_after_code_span();
     test_hard_break_trailing_spaces_split_across_feeds();
+    test_hard_break_separates_unstyled_bold_phrases();
     test_soft_break_single_trailing_space();
     test_hard_break_carries_emphasis();
     test_trailing_spaces_before_delimiter_soft_join();

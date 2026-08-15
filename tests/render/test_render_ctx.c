@@ -102,6 +102,29 @@ static void test_closing_reasoning_resets_style(void)
     fixture_destroy(&fixture);
 }
 
+/* Closing a reasoning block writes its newline outside the markdown wrapper. A later reasoning
+ * block in the same stream must wrap from column 0, not the previous block's end column. */
+static void test_reasoning_reopened_wraps_from_column_zero(void)
+{
+    struct fixture fixture;
+    if (!fixture_init(&fixture))
+        return;
+    fixture_enable_markdown(&fixture);
+
+    const char *first = "0123456789 0123456789 0123456789";
+    render_set_mode(&fixture.render, RENDER_REASONING);
+    render_write_text(&fixture.render, first, strlen(first));
+    render_set_mode(&fixture.render, RENDER_IDLE);
+
+    const char *second = "abcdefghij klmnopqrst";
+    render_set_mode(&fixture.render, RENDER_REASONING);
+    render_write_text(&fixture.render, second, strlen(second));
+    render_set_mode(&fixture.render, RENDER_IDLE);
+
+    EXPECT(strstr(fixture_output(&fixture), second) != NULL);
+    fixture_destroy(&fixture);
+}
+
 static void test_table_spinner_tracks_buffered_table(void)
 {
     struct fixture fixture;
@@ -200,6 +223,7 @@ int main(void)
     test_text_delta_ignores_initial_line_endings();
     test_text_delta_preserves_line_endings_after_text_starts();
     test_closing_reasoning_resets_style();
+    test_reasoning_reopened_wraps_from_column_zero();
     test_table_spinner_tracks_buffered_table();
     test_stream_begin_resets_per_stream_state();
     test_stream_begin_preserves_tool_cluster();
