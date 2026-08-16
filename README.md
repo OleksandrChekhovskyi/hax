@@ -122,6 +122,7 @@ order, and the setting reference.
 ## More docs
 
 - [docs/debugging.md](./docs/debugging.md) — trace/transcript logs, mock provider, and demo scripts.
+- [CONTRIBUTING.md](./CONTRIBUTING.md) — how to propose, prepare, and submit a change.
 
 ## License
 
