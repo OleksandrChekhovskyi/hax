@@ -42,6 +42,8 @@ struct anthropic {
     char *endpoint;
     char *version;
     char *config_prefix;
+    char **extra_headers;
+    json_t *extra_body;
     const char *cache_ttl; /* canonical static "5m"/"1h" from provider_cache_ttl */
     enum anthropic_thinking_mode default_thinking_mode;
     int allow_empty_signature;
@@ -185,10 +187,35 @@ static char *build_request_body(struct anthropic *anthropic, const struct contex
         attach_cache_to_last_message(messages, cache_ttl);
 
     apply_thinking(body, anthropic, context, max_tokens);
+    provider_extra_body_apply(body, anthropic->extra_body);
 
     char *json = json_dumps(body, JSON_COMPACT);
     json_decref(body);
     return json;
+}
+
+/* Owned NULL-terminated request headers; free with string_array_free. Streaming requests add
+ * the SSE Accept and the JSON Content-Type. */
+static char **build_request_headers(const struct anthropic *anthropic, int streaming)
+{
+    char *api_key_header =
+        anthropic->api_key ? xasprintf("x-api-key: %s", anthropic->api_key) : NULL;
+    char *version_header = xasprintf("anthropic-version: %s", anthropic->version);
+    const char *fixed[5];
+    size_t n_fixed = 0;
+    if (api_key_header)
+        fixed[n_fixed++] = api_key_header;
+    fixed[n_fixed++] = version_header;
+    if (streaming) {
+        fixed[n_fixed++] = "Accept: text/event-stream";
+        fixed[n_fixed++] = "Content-Type: application/json";
+    }
+    fixed[n_fixed] = NULL;
+
+    char **headers = string_array_concat(fixed, (const char *const *)anthropic->extra_headers);
+    free(api_key_header);
+    free(version_header);
+    return headers;
 }
 
 static int handle_sse_data(const char *event_name, const char *data, void *user)
@@ -208,12 +235,7 @@ static int anthropic_stream(struct provider *provider, const struct context *con
         return -1;
 
     size_t body_len = strlen(body);
-    char *api_key_header =
-        anthropic->api_key ? xasprintf("x-api-key: %s", anthropic->api_key) : NULL;
-    char *version_header = xasprintf("anthropic-version: %s", anthropic->version);
-    const char *headers[] = {api_key_header, version_header, "Accept: text/event-stream",
-                             "Content-Type: application/json", NULL};
-    const char **request_headers = api_key_header ? headers : &headers[1];
+    char **request_headers = build_request_headers(anthropic, 1);
 
     struct retry_policy policy = retry_policy_default();
     struct http_response response;
@@ -224,9 +246,9 @@ static int anthropic_stream(struct provider *provider, const struct context *con
     for (int attempt = 0; attempt < policy.max_attempts; attempt++) {
         memset(&response, 0, sizeof(response));
         anthropic_events_init(&parser, callback, callback_user);
-        result = http_sse_post(anthropic->endpoint, request_headers, body, body_len,
-                               policy.idle_timeout_s, handle_sse_data, &parser, tick, tick_user,
-                               &response);
+        result = http_sse_post(anthropic->endpoint, (const char *const *)request_headers, body,
+                               body_len, policy.idle_timeout_s, handle_sse_data, &parser, tick,
+                               tick_user, &response);
 
         if (response.cancelled ||
             !retry_should_attempt(result, response.status, response.error_body) ||
@@ -275,8 +297,7 @@ static int anthropic_stream(struct provider *provider, const struct context *con
 
     free(response.error_body);
     anthropic_events_free(&parser);
-    free(api_key_header);
-    free(version_header);
+    string_array_free(request_headers);
     free(body);
     return result;
 }
@@ -357,12 +378,7 @@ static int anthropic_probe_model(struct provider *provider, const char *model,
         return -1;
 
     probe->url = xasprintf("%s/models?limit=%d", anthropic->base_url, ANTHROPIC_MODEL_PAGE_SIZE);
-    probe->headers = xcalloc(3, sizeof(*probe->headers));
-    size_t n_headers = 0;
-    if (anthropic->api_key)
-        probe->headers[n_headers++] = xasprintf("x-api-key: %s", anthropic->api_key);
-    probe->headers[n_headers++] = xasprintf("anthropic-version: %s", anthropic->version);
-    probe->headers[n_headers] = NULL;
+    probe->headers = build_request_headers(anthropic, 0);
     probe->timeout_s = MODEL_PROBE_TIMEOUT_S;
     probe->parse = parse_model_probe_response;
     return 0;
@@ -390,18 +406,13 @@ static int fetch_models_page(const struct anthropic *anthropic, const char *afte
         after_id ? xasprintf("%s/models?limit=%d&after_id=%s", anthropic->base_url,
                              ANTHROPIC_MODEL_PAGE_SIZE, after_id)
                  : xasprintf("%s/models?limit=%d", anthropic->base_url, ANTHROPIC_MODEL_PAGE_SIZE);
-    char *api_key_header =
-        anthropic->api_key ? xasprintf("x-api-key: %s", anthropic->api_key) : NULL;
-    char *version_header = xasprintf("anthropic-version: %s", anthropic->version);
-    const char *headers[] = {api_key_header, version_header, NULL};
-    const char **request_headers = api_key_header ? headers : &headers[1];
+    char **request_headers = build_request_headers(anthropic, 0);
 
     char *response_body = NULL;
     long status = 0;
-    int result = http_get(url, request_headers, MODEL_LIST_TIMEOUT_S, 0, tick, tick_user,
-                          &response_body, &status);
-    free(api_key_header);
-    free(version_header);
+    int result = http_get(url, (const char *const *)request_headers, MODEL_LIST_TIMEOUT_S, 0, tick,
+                          tick_user, &response_body, &status);
+    string_array_free(request_headers);
     free(url);
 
     if (result != 0) {
@@ -523,6 +534,8 @@ static void anthropic_destroy(struct provider *provider)
     free(anthropic->endpoint);
     free(anthropic->version);
     free(anthropic->config_prefix);
+    string_array_free(anthropic->extra_headers);
+    json_decref(anthropic->extra_body);
     free(anthropic);
 }
 
@@ -576,6 +589,8 @@ struct provider *anthropic_provider_new_preset(const struct anthropic_preset *pr
     const char *version = config_scoped_str(preset->config_prefix, "version");
     anthropic->version = xstrdup(version && *version ? version : ANTHROPIC_DEFAULT_VERSION);
     anthropic->config_prefix = preset->config_prefix ? xstrdup(preset->config_prefix) : NULL;
+    anthropic->extra_headers = provider_extra_headers(preset->config_prefix);
+    anthropic->extra_body = provider_extra_body(preset->config_prefix);
     anthropic->cache_ttl = provider_cache_ttl(preset->config_prefix);
     anthropic->default_thinking_mode = preset->default_thinking_mode;
     anthropic->allow_empty_signature = preset->allow_empty_signature;

@@ -2,6 +2,7 @@
 #ifndef HAX_PROVIDERS_CONFIG_PROVIDER_H
 #define HAX_PROVIDERS_CONFIG_PROVIDER_H
 
+#include <jansson.h>
 #include <stddef.h>
 
 #include "provider.h"
@@ -59,11 +60,30 @@ void provider_warn_unused_openai_fields(const char *name, enum openai_wire defau
                                         const char *const *extra);
 
 /* Resolve the provider's credential: inline <prefix>.api_key, else the named environment
- * variable. Borrowed; NULL when both are absent or empty. */
+ * variable. An inline "$NAME" value reads the environment variable NAME instead, keeping the
+ * secret out of the config file ("$$" escapes a literal '$'); unresolved indirection falls
+ * through to api_key_env. Borrowed; NULL when nothing resolves. */
 const char *provider_api_key(const char *config_prefix, const char *api_key_env);
 
 /* Resolve <prefix>.cache_ttl to a canonical static "5m" or "1h", warning on any other value.
  * Defaults to 1h, which suits an interactive agent's pauses better than the API's 5m. */
 const char *provider_cache_ttl(const char *config_prefix);
+
+/* Resolve <prefix>.extra_body: an owned object of raw JSON members a provider merges into each
+ * request body it builds, or NULL. Protocol-owned members (model, messages, tools, ...) are
+ * dropped with a warning, as is a non-object value. */
+json_t *provider_extra_body(const char *config_prefix);
+
+/* Merge extra-body members into `body` (NULL `extra_body` is a no-op). A member overrides the
+ * built field of the same name, recursing where both sides are objects so a nested member
+ * extends rather than replaces a built block. Merged values are shared with `extra_body`, so
+ * the caller must not mutate `body` afterwards. */
+void provider_extra_body_apply(json_t *body, const json_t *extra_body);
+
+/* Resolve <prefix>.extra_headers, an object of header name/value members, into an owned
+ * NULL-terminated array of "Name: value" strings for every request to the provider, or NULL.
+ * A "$NAME" value reads the environment variable NAME, like an inline api_key. Invalid names
+ * and values are dropped with a warning. */
+char **provider_extra_headers(const char *config_prefix);
 
 #endif /* HAX_PROVIDERS_CONFIG_PROVIDER_H */

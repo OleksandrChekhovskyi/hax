@@ -159,6 +159,26 @@ void string_array_free(char **strings)
     free(strings);
 }
 
+char **string_array_concat(const char *const *first, const char *const *second)
+{
+    size_t n_strings = 0;
+    for (const char *const *string = first; string && *string; string++)
+        n_strings++;
+    for (const char *const *string = second; string && *string; string++)
+        n_strings++;
+    if (n_strings == 0)
+        return NULL;
+
+    char **combined = xmalloc(sizeof(*combined) * (n_strings + 1));
+    size_t n = 0;
+    for (const char *const *string = first; string && *string; string++)
+        combined[n++] = xstrdup(*string);
+    for (const char *const *string = second; string && *string; string++)
+        combined[n++] = xstrdup(*string);
+    combined[n] = NULL;
+    return combined;
+}
+
 char *xvasprintf(const char *format, va_list args)
 {
     va_list copy;

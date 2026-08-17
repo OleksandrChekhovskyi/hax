@@ -33,6 +33,10 @@ char *xvasprintf(const char *format, va_list args)
 /* Free a NULL-terminated array and its strings. NULL-safe. */
 void string_array_free(char **strings);
 
+/* Owned concatenation of two NULL-terminated string arrays (either may be NULL), or NULL when
+ * the result would be empty. Free with string_array_free. */
+char **string_array_concat(const char *const *first, const char *const *second);
+
 /* Return a newly allocated shell-safe, single-quoted copy. NULL becomes empty. */
 char *shell_single_quote(const char *str);
 

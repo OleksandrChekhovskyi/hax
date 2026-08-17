@@ -39,7 +39,7 @@ void catalog_entry_init(struct catalog_entry *entry)
     entry->image_input = CATALOG_SUPPORT_UNKNOWN;
 }
 
-/* Config normalization stringifies scalars, while the snapshot retains JSON numbers. */
+/* Values arrive as JSON numbers (snapshot, typed config) or as strings a user wrote. */
 static double member_rate(json_t *object, const char *name)
 {
     json_t *value = json_object_get(object, name);

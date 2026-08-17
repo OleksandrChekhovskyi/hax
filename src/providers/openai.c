@@ -46,6 +46,7 @@ struct openai {
     enum openai_reasoning_format reasoning_format;
     enum openai_wire wire;
     char **extra_headers;
+    json_t *extra_body;
 
     const char *length_hint;    /* borrowed for the provider lifetime */
     const char *const *efforts; /* borrowed for the provider lifetime */
@@ -102,6 +103,7 @@ static char *build_chat_body(const struct openai *openai, const struct context *
         json_object_set_new(body, "usage", json_pack("{s:b}", "include", 1));
 
     openai_apply_reasoning(body, openai->reasoning_format, context->effort);
+    provider_extra_body_apply(body, openai->extra_body);
 
     char *json = json_dumps(body, JSON_COMPACT);
     json_decref(body);
@@ -114,6 +116,7 @@ static char *build_responses_body(const struct openai *openai, const struct cont
     json_t *body = responses_build_body(context, provider_stable_id(&openai->base), model);
     if (openai->send_cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(openai->session_id));
+    provider_extra_body_apply(body, openai->extra_body);
 
     char *json = json_dumps(body, JSON_COMPACT);
     json_decref(body);
@@ -161,23 +164,21 @@ static void parser_free(struct openai_parser *parser)
         openai_events_free(&parser->u.chat);
 }
 
-static const char **build_request_headers(const struct openai *openai, char **authorization)
+/* Owned NULL-terminated stream-request headers; free with string_array_free. */
+static char **build_request_headers(const struct openai *openai)
 {
-    size_t n_extra_headers = 0;
-    for (char **header = openai->extra_headers; header && *header; header++)
-        n_extra_headers++;
-
-    *authorization =
+    char *authorization =
         openai->api_key ? xasprintf("Authorization: Bearer %s", openai->api_key) : NULL;
-    const char **headers = xmalloc(sizeof(*headers) * (n_extra_headers + 4));
-    size_t n_headers = 0;
-    if (*authorization)
-        headers[n_headers++] = *authorization;
-    headers[n_headers++] = "Accept: text/event-stream";
-    headers[n_headers++] = "Content-Type: application/json";
-    for (char **header = openai->extra_headers; header && *header; header++)
-        headers[n_headers++] = *header;
-    headers[n_headers] = NULL;
+    const char *fixed[4];
+    size_t n_fixed = 0;
+    if (authorization)
+        fixed[n_fixed++] = authorization;
+    fixed[n_fixed++] = "Accept: text/event-stream";
+    fixed[n_fixed++] = "Content-Type: application/json";
+    fixed[n_fixed] = NULL;
+
+    char **headers = string_array_concat(fixed, (const char *const *)openai->extra_headers);
+    free(authorization);
     return headers;
 }
 
@@ -212,8 +213,7 @@ static int openai_stream(struct provider *provider, const struct context *contex
         return -1;
 
     size_t body_len = strlen(body);
-    char *authorization;
-    const char **headers = build_request_headers(openai, &authorization);
+    char **headers = build_request_headers(openai);
     struct retry_policy policy = retry_policy_default();
     struct http_response response;
     struct openai_parser parser;
@@ -224,8 +224,9 @@ static int openai_stream(struct provider *provider, const struct context *contex
         memset(&response, 0, sizeof(response));
         parser_init(&parser, openai, &cache, callback, callback_user);
 
-        result = http_sse_post(openai->endpoint, headers, body, body_len, policy.idle_timeout_s,
-                               handle_sse_data, &parser, tick, tick_user, &response);
+        result = http_sse_post(openai->endpoint, (const char *const *)headers, body, body_len,
+                               policy.idle_timeout_s, handle_sse_data, &parser, tick, tick_user,
+                               &response);
         if (response.cancelled ||
             !retry_should_attempt(result, response.status, response.error_body) ||
             attempt + 1 >= policy.max_attempts) {
@@ -273,8 +274,7 @@ static int openai_stream(struct provider *provider, const struct context *contex
 
     free(response.error_body);
     parser_free(&parser);
-    free(headers);
-    free(authorization);
+    string_array_free(headers);
     free(body);
     return result;
 }
@@ -292,23 +292,8 @@ static void openai_destroy(struct provider *provider)
     free(openai->cache_ttl);
     free(openai->reasoning_field);
     string_array_free(openai->extra_headers);
+    json_decref(openai->extra_body);
     free(openai);
-}
-
-static char **duplicate_headers(const char *const *headers)
-{
-    if (!headers || !*headers)
-        return NULL;
-
-    size_t n_headers = 0;
-    while (headers[n_headers])
-        n_headers++;
-
-    char **copy = xmalloc(sizeof(*copy) * (n_headers + 1));
-    for (size_t i = 0; i < n_headers; i++)
-        copy[i] = xstrdup(headers[i]);
-    copy[n_headers] = NULL;
-    return copy;
 }
 
 enum openai_wire openai_wire_parse(const char *value, enum openai_wire fallback)
@@ -360,12 +345,15 @@ static int openai_list_models(struct provider *provider, struct model_info **mod
     char *url = xasprintf("%s/models", openai->base_url);
     char *authorization =
         openai->api_key ? xasprintf("Authorization: Bearer %s", openai->api_key) : NULL;
-    const char *headers[] = {authorization, NULL};
+    const char *fixed[] = {authorization, NULL}; /* {NULL, NULL} counts as empty */
+    char **headers = string_array_concat(fixed, (const char *const *)openai->extra_headers);
+    free(authorization);
+
     char *response_body = NULL;
     long status = 0;
-    int result = http_get(url, authorization ? headers : NULL, MODEL_LIST_TIMEOUT_S, 0, tick,
+    int result = http_get(url, (const char *const *)headers, MODEL_LIST_TIMEOUT_S, 0, tick,
                           tick_user, &response_body, &status);
-    free(authorization);
+    string_array_free(headers);
     free(url);
 
     if (result != 0) {
@@ -433,16 +421,18 @@ static size_t openai_list_efforts(struct provider *provider, const char *const *
 }
 
 void openai_prepare_base_url_availability(const char *base_url, const char *api_key,
+                                          char *const *extra_headers,
                                           struct provider_availability *out)
 {
     out->available = 0;
     out->reason = "server not reachable";
     out->url = xasprintf("%s/models", base_url);
     out->timeout_s = AVAILABILITY_TIMEOUT_S;
-    if (api_key && *api_key) {
-        out->headers = xcalloc(2, sizeof(*out->headers));
-        out->headers[0] = xasprintf("Authorization: Bearer %s", api_key);
-    }
+    char *authorization =
+        api_key && *api_key ? xasprintf("Authorization: Bearer %s", api_key) : NULL;
+    const char *fixed[] = {authorization, NULL};
+    out->headers = string_array_concat(fixed, (const char *const *)extra_headers);
+    free(authorization);
 }
 
 static void openai_prepare_availability(const char *id, struct provider_availability *out)
@@ -514,7 +504,12 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
         resolve_reasoning_field(preset->config_prefix, preset->reasoning_replay_field);
     openai->reasoning_format = openai_reasoning_format_parse(
         config_scoped_str(preset->config_prefix, "reasoning_format"), preset->reasoning_format);
-    openai->extra_headers = duplicate_headers(preset->extra_headers);
+    /* Preset headers first, then config-declared ones; both reach every request. */
+    char **config_headers = provider_extra_headers(preset->config_prefix);
+    openai->extra_headers =
+        string_array_concat(preset->extra_headers, (const char *const *)config_headers);
+    string_array_free(config_headers);
+    openai->extra_body = provider_extra_body(preset->config_prefix);
 
     openai->length_hint = preset->length_hint;
     openai->efforts = preset->efforts;

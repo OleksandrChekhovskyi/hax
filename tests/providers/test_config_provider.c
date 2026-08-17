@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include <jansson.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -62,6 +63,122 @@ static void test_cache_ttl_resolution(void)
     config_set_override("providers.ttltest.cache_ttl", NULL);
 }
 
+/* extra_body survives config-load scalar normalization with its JSON types intact, drops
+ * protocol-owned members with one warning each, and merges over a built body recursively. */
+static void test_extra_body(void)
+{
+    unsigned long diagnostics_before = hax_diag_sequence();
+    json_t *extra = provider_extra_body("providers.extras");
+    /* Reserved 'model', 'n', 'system', and 'include' warn and drop. */
+    EXPECT(hax_diag_sequence() == diagnostics_before + 4);
+    EXPECT(extra != NULL);
+    if (!extra)
+        return;
+
+    EXPECT(json_object_get(extra, "model") == NULL);
+    EXPECT(json_object_get(extra, "n") == NULL);
+    EXPECT(json_object_get(extra, "system") == NULL);
+    EXPECT(json_object_get(extra, "include") == NULL);
+    EXPECT(json_is_real(json_object_get(extra, "temperature")));
+    EXPECT(json_real_value(json_object_get(extra, "temperature")) == 0.25);
+    EXPECT(json_is_integer(json_object_get(extra, "top_logprobs")));
+    json_t *routing = json_object_get(extra, "provider");
+    EXPECT(json_is_false(json_object_get(routing, "allow_fallbacks")));
+    EXPECT(json_is_array(json_object_get(routing, "order")));
+
+    /* A member overrides the built field; an object member extends a built object; members
+     * the extra body never mentions survive. */
+    json_t *body = json_pack("{s:s, s:f, s:{s:s}}", "model", "m", "temperature", 1.0, "provider",
+                             "sort", "price");
+    provider_extra_body_apply(body, extra);
+    EXPECT_STR_EQ(json_string_value(json_object_get(body, "model")), "m");
+    EXPECT(json_real_value(json_object_get(body, "temperature")) == 0.25);
+    json_t *merged = json_object_get(body, "provider");
+    EXPECT_STR_EQ(json_string_value(json_object_get(merged, "sort")), "price");
+    EXPECT(json_is_array(json_object_get(merged, "order")));
+    json_decref(body);
+    json_decref(extra);
+
+    /* The flat-dotted spelling is exempt from normalization too. */
+    json_t *flat = provider_extra_body("providers.flatprov");
+    EXPECT(flat != NULL);
+    if (flat) {
+        EXPECT(json_is_real(json_object_get(flat, "top_p")));
+        json_decref(flat);
+    }
+
+    /* Raw types are a property of the structured read: the same numeric scalar read as a
+     * string setting coerces like any other value. */
+    EXPECT_STR_EQ(config_str("extra_body.stray"), "5");
+
+    /* A non-object value warns and resolves to nothing; absence stays silent. */
+    diagnostics_before = hax_diag_sequence();
+    EXPECT(provider_extra_body("providers.keyed") == NULL);
+    EXPECT(hax_diag_sequence() == diagnostics_before + 1);
+    EXPECT(provider_extra_body("providers.myllm") == NULL);
+    EXPECT(provider_extra_body(NULL) == NULL);
+    EXPECT(hax_diag_sequence() == diagnostics_before + 1);
+}
+
+/* extra_headers become "Name: value" strings; a "$NAME" value reads the environment. A
+ * non-token name (space, separator), a non-string value, an unset variable, an empty value
+ * (curl would suppress the header instead of sending it empty), and a control character
+ * (literal, DEL, or smuggled through a variable) each warn and drop. */
+static void test_extra_headers(void)
+{
+    setenv("HAX_TEST_HEADER", "from-env", 1);
+    setenv("HAX_TEST_EVIL_HEADER", "a\r\nX-Smuggled: gotcha", 1);
+    unsetenv("HAX_TEST_UNSET_HEADER");
+
+    unsigned long diagnostics_before = hax_diag_sequence();
+    char **headers = provider_extra_headers("providers.extras");
+    EXPECT(hax_diag_sequence() == diagnostics_before + 9);
+    EXPECT(headers != NULL);
+    if (!headers)
+        return;
+
+    size_t n_headers = 0;
+    int saw_config = 0, saw_env = 0, saw_dollar = 0;
+    for (char **header = headers; *header; header++) {
+        n_headers++;
+        if (strcmp(*header, "X-Portkey-Config: pc-1") == 0)
+            saw_config = 1;
+        if (strcmp(*header, "X-From-Env: from-env") == 0)
+            saw_env = 1;
+        if (strcmp(*header, "X-Dollar: $plain") == 0)
+            saw_dollar = 1;
+    }
+    EXPECT(n_headers == 3);
+    EXPECT(saw_config && saw_env && saw_dollar);
+    string_array_free(headers);
+
+    EXPECT(provider_extra_headers("providers.myllm") == NULL);
+    EXPECT(provider_extra_headers(NULL) == NULL);
+    unsetenv("HAX_TEST_HEADER");
+    unsetenv("HAX_TEST_EVIL_HEADER");
+}
+
+/* An inline api_key accepts the same "$NAME" indirection, falling through to api_key_env
+ * when the variable is unset; "$$" escapes a literal leading dollar. */
+static void test_api_key_env_escape(void)
+{
+    unsetenv("HAX_TEST_DOLLAR_KEY");
+    config_set_override("providers.dollartest.api_key", "$HAX_TEST_DOLLAR_KEY");
+    EXPECT(provider_api_key("providers.dollartest", NULL) == NULL);
+
+    setenv("HAX_TEST_FALLBACK_KEY", "sk-fallback", 1);
+    EXPECT_STR_EQ(provider_api_key("providers.dollartest", "HAX_TEST_FALLBACK_KEY"), "sk-fallback");
+    setenv("HAX_TEST_DOLLAR_KEY", "sk-dollar", 1);
+    EXPECT_STR_EQ(provider_api_key("providers.dollartest", "HAX_TEST_FALLBACK_KEY"), "sk-dollar");
+
+    config_set_override("providers.dollartest.api_key", "$$literal");
+    EXPECT_STR_EQ(provider_api_key("providers.dollartest", NULL), "$literal");
+
+    config_set_override("providers.dollartest.api_key", NULL);
+    unsetenv("HAX_TEST_DOLLAR_KEY");
+    unsetenv("HAX_TEST_FALLBACK_KEY");
+}
+
 /* Whether `name` appears in provider_all() (the selectable set). */
 static int selectable(const char *name)
 {
@@ -72,6 +189,63 @@ static int selectable(const char *name)
             return 1;
     return 0;
 }
+
+/* The config under test: custom providers in the nested object form, one in the flat-dotted
+ * form config.c also accepts ("flatprov") to prove a flat-defined provider is enumerable and
+ * not just readable, an override of the shipped ollama recipe, and the extra_body /
+ * extra_headers fixtures the tests above read. */
+static const char CONFIG_JSON[] =
+    "{"
+    "  \"providers\": {"
+    "    \"myllm\": {\"base_url\": \"http://127.0.0.1:9000/v1/\", \"display_name\": \"My LLM\"},"
+    "    \"extras\": {"
+    "      \"base_url\": \"http://127.0.0.1:9009/v1\","
+    "      \"extra_body\": {"
+    "        \"temperature\": 0.25,"
+    "        \"top_logprobs\": 3,"
+    "        \"model\": \"reserved\","
+    "        \"n\": 2,"
+    "        \"system\": \"reserved\","
+    "        \"include\": [\"b\", \"a\"],"
+    "        \"provider\": {\"order\": [\"baseten\"], \"allow_fallbacks\": false}"
+    "      },"
+    "      \"extra_headers\": {"
+    "        \"X-Portkey-Config\": \"pc-1\","
+    "        \"X-From-Env\": \"$HAX_TEST_HEADER\","
+    "        \"X-Dollar\": \"$$plain\","
+    "        \"X-Unset\": \"$HAX_TEST_UNSET_HEADER\","
+    "        \"X-Evil\": \"$HAX_TEST_EVIL_HEADER\","
+    "        \"X-Num\": 7,"
+    "        \"Bad Name\": \"x\","
+    "        \"X@Host\": \"x\","
+    "        \"X-Ctl\": \"a\\nb\","
+    "        \"X-Del\": \"a\\u007Fb\","
+    "        \"X-Empty\": \"\","
+    "        \"X-Obj\": {\"no\": 1}"
+    "      }"
+    "    },"
+    "    \"keyed\": {\"base_url\": \"http://127.0.0.1:9004/v1\","
+    "               \"api_key_env\": \"HAX_TEST_KEYED_KEY\"},"
+    "    \"inline\": {\"base_url\": \"http://127.0.0.1:9005/v1\", \"api_key\": \"sk-inline\"},"
+    "    \"bad\": {\"api\": \"soap-1.2\", \"base_url\": \"http://x/v1\"},"
+    "    \"respprov\": {\"api\": \"Responses\", \"base_url\": \"http://127.0.0.1:9006/v1\"},"
+    "    \"claudish\": {\"api\": \"anthropic-messages\","
+    "                  \"base_url\": \"http://127.0.0.1:18080/v1\","
+    "                  \"sort_models\": \"on\","
+    "                  \"catalog_id\": \"anthropic\"},"
+    "    \"nocat\": {\"base_url\": \"http://127.0.0.1:9003/v1\", \"catalog_id\": \"\"},"
+    "    \"ollama\": {\"base_url\": \"http://gpu:1234/v1/\","
+    "                 \"extra_headers\": {\"X-Local\": \"ok\"}},"
+    "    \"warny\": {\"base_url\": \"http://127.0.0.1:9008/v1\","
+    "               \"resoning_format\": \"nested\","
+    "               \"thinking_mode\": \"budget\"},"
+    "    \"my.llm\": {\"base_url\": \"http://127.0.0.1:9002/v1\"}"
+    "  },"
+    "  \"providers.flatprov.base_url\": \"http://127.0.0.1:9001/v1\","
+    "  \"providers.flatprov.extra_body\": {\"top_p\": 0.9},"
+    "  \"providers.keyed.extra_body\": \"not an object\","
+    "  \"extra_body\": {\"stray\": 5}"
+    "}";
 
 int main(void)
 {
@@ -86,45 +260,16 @@ int main(void)
     unsetenv("HAX_ANTHROPIC_BASE_URL");
     unsetenv("HAX_OPENAI_DISPLAY_NAME");
 
-    /* A config.json with custom OpenAI-compatible providers plus an override
-     * of the shipped ollama recipe. Nested object form for most, and one in
-     * the flat-dotted form config.c also accepts ("flatprov"), to prove a
-     * flat-defined provider is enumerable, not just readable. Loaded BEFORE
-     * any registry call, since the dynamic-provider set is built once and
+    /* Loaded BEFORE any registry call, since the dynamic-provider set is built once and
      * cached. */
-    EXPECT(config_load("{"
-                       "  \"providers\": {"
-                       "    \"myllm\": {\"base_url\": \"http://127.0.0.1:9000/v1/\","
-                       "               \"display_name\": \"My LLM\"},"
-                       "    \"keyed\": {\"base_url\": \"http://127.0.0.1:9004/v1\","
-                       "               \"api_key_env\": \"HAX_TEST_KEYED_KEY\"},"
-                       "    \"inline\": {\"base_url\": \"http://127.0.0.1:9005/v1\","
-                       "               \"api_key\": \"sk-inline\"},"
-                       "    \"bad\":   {\"api\": \"soap-1.2\","
-                       "               \"base_url\": \"http://x/v1\"},"
-                       "    \"respprov\": {\"api\": \"Responses\","
-                       "               \"base_url\": \"http://127.0.0.1:9006/v1\"},"
-                       "    \"claudish\": {\"api\": \"anthropic-messages\","
-                       "               \"base_url\": \"http://127.0.0.1:18080/v1\","
-                       "               \"sort_models\": \"on\","
-                       "               \"catalog_id\": \"anthropic\"},"
-                       "    \"nocat\": {\"base_url\": \"http://127.0.0.1:9003/v1\","
-                       "               \"catalog_id\": \"\"},"
-                       "    \"ollama\": {\"base_url\": \"http://gpu:1234/v1/\"},"
-                       "    \"warny\": {\"base_url\": \"http://127.0.0.1:9008/v1\","
-                       "               \"resoning_format\": \"nested\","
-                       "               \"thinking_mode\": \"budget\"},"
-                       "    \"my.llm\": {\"base_url\": \"http://127.0.0.1:9002/v1\"}"
-                       "  },"
-                       "  \"providers.flatprov.base_url\": \"http://127.0.0.1:9001/v1\""
-                       "}") == 0);
+    EXPECT(config_load(CONFIG_JSON) == 0);
 
     /* config_object_keys is a faithful enumerator: it returns every member
      * name across both forms, including the dotted one (filtering is the
      * provider layer's job, below). */
     char **names = NULL;
     size_t nk = config_object_keys("providers", &names);
-    EXPECT(nk == 11);
+    EXPECT(nk == 12);
     for (size_t i = 0; i < nk; i++)
         free(names[i]);
     free(names);
@@ -173,10 +318,13 @@ int main(void)
 
     /* The ollama recipe opts into a reachability probe. It captures an owned request before a
      * worker is spawned; the configured trailing slash is trimmed before "/models" is
-     * appended. */
+     * appended, and configured extra_headers ride along. */
     const struct provider_factory *probe_factory = provider_find("ollama");
     probe_factory->prepare_availability(probe_factory->id, &probe);
     EXPECT_STR_EQ(probe.url, "http://gpu:1234/v1/models");
+    EXPECT(probe.headers != NULL);
+    if (probe.headers)
+        EXPECT_STR_EQ(probe.headers[0], "X-Local: ok");
     config_set_override("providers.ollama.base_url", "http://changed/v1");
     EXPECT_STR_EQ(probe.url, "http://gpu:1234/v1/models");
     config_set_override("providers.ollama.base_url", NULL);
@@ -330,6 +478,9 @@ int main(void)
 
     expect_registry_projects_provider_fields();
     test_cache_ttl_resolution();
+    test_extra_body();
+    test_extra_headers();
+    test_api_key_env_escape();
 
     config_free();
     T_REPORT();

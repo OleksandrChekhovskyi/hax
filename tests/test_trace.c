@@ -8,9 +8,10 @@
 #include "trace.h"
 #include "util.h"
 
-/* HAX_TRACE must never write a credential to disk. The dump redacts a fixed
- * set of auth header names (Authorization, x-api-key, api-key) case-
- * insensitively, while passing non-secret headers through verbatim. */
+/* HAX_TRACE must never write a credential to disk. Two exact rules: the protocol auth headers
+ * (Authorization, x-api-key, api-key) are redacted by case-insensitive name, and a value
+ * registered via trace_register_secret — every $VAR-resolved header value and API key — is
+ * redacted under any header name. Other headers pass through verbatim. */
 static void test_credential_headers_redacted(void)
 {
     /* Worker-side trace calls are inert until the foreground initializes the
@@ -28,11 +29,18 @@ static void test_credential_headers_redacted(void)
     trace_init();
     EXPECT(trace_enabled());
 
+    trace_register_secret("PORTKEYSECRET");
+    trace_register_secret(NULL); /* ignored, not a crash */
+    trace_register_secret("");
+
     const char *headers[] = {
-        "x-api-key: sk-ant-SECRETVALUE",      /* Anthropic */
-        "Authorization: Bearer BEARERSECRET", /* OpenAI/Codex */
-        "API-Key: AZURESECRET",               /* Azure, mixed case */
-        "anthropic-version: 2023-06-01",      /* non-secret */
+        "x-api-key: sk-ant-SECRETVALUE",           /* Anthropic */
+        "Authorization: Bearer BEARERSECRET",      /* OpenAI/Codex */
+        "API-Key: AZURESECRET",                    /* Azure, mixed case */
+        "x-portkey-api-key: PORTKEYSECRET",        /* registered ($VAR-resolved) value */
+        "X-Custom: prefix PORTKEYSECRET embedded", /* registered value inside a larger value */
+        "X-Unregistered: LITERALVALUE",            /* literal config value: not recognized */
+        "anthropic-version: 2023-06-01",           /* non-secret */
         "Content-Type: application/json",
         NULL,
     };
@@ -46,11 +54,15 @@ static void test_credential_headers_redacted(void)
         EXPECT(strstr(contents, "sk-ant-SECRETVALUE") == NULL);
         EXPECT(strstr(contents, "BEARERSECRET") == NULL);
         EXPECT(strstr(contents, "AZURESECRET") == NULL);
+        EXPECT(strstr(contents, "PORTKEYSECRET") == NULL);
         /* The header names survive, with redacted values. */
         EXPECT(strstr(contents, "x-api-key: <redacted>") != NULL);
         EXPECT(strstr(contents, "Authorization: <redacted>") != NULL);
         EXPECT(strstr(contents, "API-Key: <redacted>") != NULL);
-        /* Non-secret headers pass through verbatim. */
+        EXPECT(strstr(contents, "x-portkey-api-key: <redacted>") != NULL);
+        EXPECT(strstr(contents, "X-Custom: <redacted>") != NULL);
+        /* Unregistered literals and non-secret headers pass through verbatim. */
+        EXPECT(strstr(contents, "X-Unregistered: LITERALVALUE") != NULL);
         EXPECT(strstr(contents, "anthropic-version: 2023-06-01") != NULL);
         free(contents);
     }

@@ -58,8 +58,10 @@ extern const size_t OPENAI_EFFORT_LADDER_N;
 /* Preset strings need only remain valid during construction unless marked borrowed above. */
 struct provider *openai_provider_new_preset(const struct openai_preset *preset);
 
-/* Populate an owned GET <base_url>/models availability request. */
+/* Populate an owned GET <base_url>/models availability request. `extra_headers` (may be NULL)
+ * are copied after the Authorization header. */
 void openai_prepare_base_url_availability(const char *base_url, const char *api_key,
+                                          char *const *extra_headers,
                                           struct provider_availability *out);
 
 enum openai_cache_mode {

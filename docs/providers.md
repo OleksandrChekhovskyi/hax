@@ -238,9 +238,11 @@ Common fields:
 | `display_name` | Human-readable banner name. |
 | `api` | `openai-completions` (default), `openai-responses`, or `anthropic-messages`. |
 | `api_key_env` | Name of the environment variable holding the key; recommended. |
-| `api_key` | Literal key; avoid for real secrets. |
+| `api_key` | Literal key, or `$VAR` to read an environment variable. |
 | `sort_models` | Alphabetize this provider's model picker. |
 | `catalog_id` | Provider id in models.dev for cost/context metadata; empty disables lookup. |
+| `extra_body` | Raw JSON members merged into every request body ([below](#request-passthrough)). |
+| `extra_headers` | HTTP headers sent on every request ([below](#request-passthrough)). |
 
 A custom provider named after its models.dev id (for example `groq`) uses that identity by default.
 Use `catalog_id` when a proxy name differs from the underlying provider. Do not map local models to a
@@ -257,6 +259,52 @@ Every provider reads only its own block. The `HAX_OPENAI_*` and `HAX_ANTHROPIC_*
 to the shipped `openai-compatible` / `anthropic-compatible` blocks and do not bleed into others;
 for a custom provider, only the variable named by `api_key_env` is read. Provider names cannot
 contain `.` and cannot override a compiled-in provider.
+
+### Request passthrough
+
+`extra_body` and `extra_headers` pass provider-specific request features through without dedicated
+hax support. They work in every provider's block, compiled-in (`providers.openrouter`,
+`providers.codex`) or custom, and are read from the config file only — no environment aliases, no
+`/config` override.
+
+`extra_body` is a JSON object merged into every request body after the fields hax builds: a member
+overrides the built field of the same name, and an object member extends a built object instead of
+replacing it. Values are sent verbatim with their JSON types, so write `false`, not `"false"`.
+Members hax itself owns — the model and conversation, the system prompt, the tool list, the
+streaming setup — are ignored with a warning naming the member.
+
+`extra_headers` is an object of header names and non-empty string values added to every request to
+the provider. A value of `$VAR` reads the environment variable `VAR`, keeping a credential out of
+the config file, like an inline `api_key: "$VAR"`; `$$` escapes a literal leading `$`. A header
+whose variable is unset is dropped with a warning.
+
+```json
+{
+  "providers": {
+    "openrouter": {
+      "extra_body": {
+        "provider": { "order": ["baseten"], "allow_fallbacks": false }
+      }
+    },
+    "gateway": {
+      "base_url": "https://gateway.example.com/v1",
+      "api_key_env": "GATEWAY_API_KEY",
+      "extra_body": { "service_tier": "priority" },
+      "extra_headers": {
+        "x-gateway-project": "hax",
+        "x-gateway-key": "$GATEWAY_EXTRA_KEY"
+      }
+    }
+  }
+}
+```
+
+Prefer a dedicated field when one exists — `api_key`/`api_key_env` for the credential, `version`
+for `anthropic-version`, the OpenRouter `title`/`referer` settings for its attribution headers —
+because hax cannot reason about a value injected behind its back: an `extra_body` that changes
+between runs can also defeat prompt caching. `HAX_TRACE` redacts API keys and `$VAR`-resolved
+values wherever they appear, but cannot recognize a credential written literally into a header
+value — one more reason to prefer `$VAR`.
 
 ## Mock provider
 

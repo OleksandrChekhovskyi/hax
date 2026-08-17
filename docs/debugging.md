@@ -8,7 +8,10 @@ Set `HAX_TRACE` to capture HTTP requests, response statuses, and SSE events:
 HAX_TRACE=/tmp/hax-trace.md hax
 ```
 
-The trace is plain Markdown-like text and is truncated at startup. Authorization is redacted.
+The trace is plain Markdown-like text and is truncated at startup. Credentials are redacted:
+the standard auth headers by name, plus API keys and `$VAR`-resolved header values wherever
+they appear.
+
 Entries include elapsed-time tags so pauses between streamed chunks are visible. `HAX_TRACE`
 records HTTP transport traffic, including provider requests, metadata probes, catalog refreshes,
 and account-usage queries. It is silent for a mock-only run because no network is used.

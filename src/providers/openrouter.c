@@ -228,10 +228,12 @@ int openrouter_probe_model(struct provider *provider, const char *model, struct 
     free(encoded_model);
 
     const char *api_key = openrouter_api_key();
-    if (api_key) {
-        probe->headers = xcalloc(2, sizeof(*probe->headers));
-        probe->headers[0] = xasprintf("Authorization: Bearer %s", api_key);
-    }
+    char *authorization = api_key ? xasprintf("Authorization: Bearer %s", api_key) : NULL;
+    const char *fixed[] = {authorization, NULL};
+    char **extra_headers = provider_extra_headers("providers.openrouter");
+    probe->headers = string_array_concat(fixed, (const char *const *)extra_headers);
+    string_array_free(extra_headers);
+    free(authorization);
     probe->timeout_s = MODEL_PROBE_TIMEOUT_S;
     probe->parse = openrouter_parse_model_probe_response;
     return 0;
@@ -308,20 +310,24 @@ static int openrouter_query_usage(struct provider *provider)
     }
 
     char *authorization = xasprintf("Authorization: Bearer %s", api_key);
-    const char *headers[] = {authorization, "Accept: application/json", NULL};
+    const char *fixed[] = {authorization, "Accept: application/json", NULL};
+    char **extra_headers = provider_extra_headers("providers.openrouter");
+    char **headers = string_array_concat(fixed, (const char *const *)extra_headers);
+    string_array_free(extra_headers);
+    free(authorization);
     char *key_body = NULL, *credits_body = NULL;
     json_t *root = NULL;
     int result = -1;
     long status = 0;
 
     struct busy *busy = busy_begin("fetching usage...");
-    int request_result = http_get(OPENROUTER_KEY_ENDPOINT, headers, USAGE_TIMEOUT_S, 0, busy_tick,
-                                  NULL, &key_body, &status);
+    int request_result = http_get(OPENROUTER_KEY_ENDPOINT, (const char *const *)headers,
+                                  USAGE_TIMEOUT_S, 0, busy_tick, NULL, &key_body, &status);
     if (request_result == 0 && key_body)
-        http_get(OPENROUTER_CREDITS_ENDPOINT, headers, USAGE_TIMEOUT_S, 0, busy_tick, NULL,
-                 &credits_body, NULL);
+        http_get(OPENROUTER_CREDITS_ENDPOINT, (const char *const *)headers, USAGE_TIMEOUT_S, 0,
+                 busy_tick, NULL, &credits_body, NULL);
     int cancelled = busy_end(busy);
-    free(authorization);
+    string_array_free(headers);
 
     if (cancelled)
         goto out;

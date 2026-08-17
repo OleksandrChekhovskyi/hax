@@ -56,6 +56,8 @@ struct codex {
     char *default_model;
     char *default_effort;
     char *session_id; /* stable prompt-cache and request-routing key */
+    char **extra_headers;
+    json_t *extra_body;
 };
 
 /* Clearing the mark only once a different token is adopted keeps callers that cannot re-mark from
@@ -80,12 +82,13 @@ static void reload_auth_if_stale(struct codex *codex)
 }
 
 static char *build_request_body(const struct context *context, const char *provider,
-                                const char *model, const char *cache_key)
+                                const char *model, const char *cache_key, const json_t *extra_body)
 {
     json_t *body = responses_build_body(context, provider, model);
     json_object_set_new(body, "text", json_pack("{s:s}", "verbosity", "low"));
     if (cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(cache_key));
+    provider_extra_body_apply(body, extra_body);
 
     char *body_json = json_dumps(body, JSON_COMPACT);
     json_decref(body);
@@ -105,8 +108,8 @@ static int codex_stream(struct provider *provider, const struct context *context
     struct codex *codex = (struct codex *)provider;
     reload_auth_if_stale(codex);
 
-    char *body =
-        build_request_body(context, provider_stable_id(&codex->base), model, codex->session_id);
+    char *body = build_request_body(context, provider_stable_id(&codex->base), model,
+                                    codex->session_id, codex->extra_body);
     if (!body)
         return -1;
     size_t body_len = strlen(body);
@@ -115,7 +118,7 @@ static int codex_stream(struct provider *provider, const struct context *context
     char *account = xasprintf("chatgpt-account-id: %s", codex->auth.account_id);
     char *session = xasprintf("session-id: %s", codex->session_id);
     char *request_id = xasprintf("x-client-request-id: %s", codex->session_id);
-    const char *headers[] = {
+    const char *fixed[] = {
         authorization,
         account,
         session,
@@ -127,6 +130,11 @@ static int codex_stream(struct provider *provider, const struct context *context
         "Content-Type: application/json",
         NULL,
     };
+    char **headers = string_array_concat(fixed, (const char *const *)codex->extra_headers);
+    free(authorization);
+    free(account);
+    free(session);
+    free(request_id);
 
     struct retry_policy retry_policy = retry_policy_default();
     struct http_response response = {0};
@@ -136,9 +144,9 @@ static int codex_stream(struct provider *provider, const struct context *context
     for (int attempt = 0; attempt < retry_policy.max_attempts; attempt++) {
         memset(&response, 0, sizeof(response));
         responses_events_init(&events, callback, callback_user);
-        result = http_sse_post(CODEX_RESPONSES_ENDPOINT, headers, body, body_len,
-                               retry_policy.idle_timeout_s, handle_sse_payload, &events, tick,
-                               tick_user, &response);
+        result = http_sse_post(CODEX_RESPONSES_ENDPOINT, (const char *const *)headers, body,
+                               body_len, retry_policy.idle_timeout_s, handle_sse_payload, &events,
+                               tick, tick_user, &response);
 
         if (response.cancelled ||
             !retry_should_attempt(result, response.status, response.error_body) ||
@@ -188,22 +196,23 @@ static int codex_stream(struct provider *provider, const struct context *context
 
     free(response.error_body);
     responses_events_free(&events);
-    free(authorization);
-    free(account);
-    free(session);
-    free(request_id);
+    string_array_free(headers);
     free(body);
     return result;
 }
 
+/* Owned NULL-terminated headers for the JSON (non-stream) endpoints. */
 static char **build_model_headers(const struct codex *codex)
 {
-    char **headers = xcalloc(6, sizeof(*headers));
-    headers[0] = xasprintf("Authorization: Bearer %s", codex->auth.access_token);
-    headers[1] = xasprintf("chatgpt-account-id: %s", codex->auth.account_id);
-    headers[2] = xstrdup(CODEX_ORIGINATOR);
-    headers[3] = xstrdup(CODEX_USER_AGENT);
-    headers[4] = xstrdup("Accept: application/json");
+    char *authorization = xasprintf("Authorization: Bearer %s", codex->auth.access_token);
+    char *account = xasprintf("chatgpt-account-id: %s", codex->auth.account_id);
+    const char *fixed[] = {
+        authorization, account, CODEX_ORIGINATOR, CODEX_USER_AGENT, "Accept: application/json",
+        NULL,
+    };
+    char **headers = string_array_concat(fixed, (const char *const *)codex->extra_headers);
+    free(authorization);
+    free(account);
     return headers;
 }
 
@@ -339,21 +348,15 @@ static int codex_query_usage(struct provider *provider)
     struct codex *codex = (struct codex *)provider;
     reload_auth_if_stale(codex);
 
-    char *authorization = xasprintf("Authorization: Bearer %s", codex->auth.access_token);
-    char *account = xasprintf("chatgpt-account-id: %s", codex->auth.account_id);
-    const char *headers[] = {
-        authorization, account, CODEX_ORIGINATOR, CODEX_USER_AGENT, "Accept: application/json",
-        NULL,
-    };
+    char **headers = build_model_headers(codex);
 
     struct busy *busy = busy_begin("fetching usage...");
     char *body = NULL;
     long status = 0;
-    int result = http_get(CODEX_USAGE_ENDPOINT, headers, CODEX_USAGE_TIMEOUT_SECONDS, 0, busy_tick,
-                          NULL, &body, &status);
+    int result = http_get(CODEX_USAGE_ENDPOINT, (const char *const *)headers,
+                          CODEX_USAGE_TIMEOUT_SECONDS, 0, busy_tick, NULL, &body, &status);
     int cancelled = busy_end(busy);
-    free(authorization);
-    free(account);
+    string_array_free(headers);
     if (cancelled) {
         free(body);
         return -1;
@@ -559,12 +562,14 @@ static void codex_destroy(struct provider *provider)
     free(codex->default_model);
     free(codex->default_effort);
     free(codex->session_id);
+    string_array_free(codex->extra_headers);
+    json_decref(codex->extra_body);
     free(codex);
 }
 
 struct provider *codex_provider_new(const char *id)
 {
-    static const char *const EXTRA_FIELDS[] = {"display_name", NULL};
+    static const char *const EXTRA_FIELDS[] = {"display_name", "extra_body", "extra_headers", NULL};
     provider_warn_unused_fields(id, id, 0, EXTRA_FIELDS);
     struct codex_auth auth;
     char *detail = NULL;
@@ -598,6 +603,8 @@ struct provider *codex_provider_new(const char *id)
     char session_id[37];
     gen_uuid_v4(session_id);
     codex->session_id = xstrdup(session_id);
+    codex->extra_headers = provider_extra_headers("providers.codex");
+    codex->extra_body = provider_extra_body("providers.codex");
 
     const char *display_name = config_scoped_str("providers.codex", "display_name");
     codex->name = xstrdup(display_name && *display_name ? display_name : "codex");

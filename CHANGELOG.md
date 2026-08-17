@@ -26,9 +26,16 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - Keyless config-defined providers count a configured `base_url` as available instead of probing
   `/models`, which a generic endpoint may not serve; the ollama recipe still probes its local
   server.
+- hax-written `config.json` updates (`/config`, preset save) no longer rewrite numbers and
+  booleans elsewhere in the file as strings.
 
 ### Added
 
+- Every provider block accepts `extra_body` and `extra_headers`: raw JSON members merged into
+  each request body (OpenRouter routing preferences, service tiers, sampling knobs) and extra
+  HTTP headers on every request (gateway credentials, attribution). A `$VAR` header value or
+  inline `api_key` reads the environment variable instead, and `HAX_TRACE` redacts such values
+  wherever they appear. See [docs/providers.md](docs/providers.md#request-passthrough).
 - The llama.cpp provider understands llama-server's multi-model router mode. `/model` lists the
   server's whole catalog with load state, context, and image capability; a configured model is
   matched by id or alias; and hax never makes the router load a model you didn't select — picking

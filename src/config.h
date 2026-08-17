@@ -20,8 +20,9 @@
 #define CONFIG_VALUE_DEFAULT "(default)"
 
 /* Load a JSON object into the config-file or state tier, replacing its previous contents. NULL,
- * empty, and whitespace-only input clear the tier. Scalar leaves are normalized to strings.
- * Returns 0 on success, -1 for malformed JSON or a non-object root. */
+ * empty, and whitespace-only input clear the tier. The tier keeps the document verbatim:
+ * structured reads see the original JSON types, while string reads coerce scalar numbers and
+ * booleans. Returns 0 on success, -1 for malformed JSON or a non-object root. */
 int config_load(const char *text);
 int config_load_state(const char *text);
 
@@ -41,8 +42,8 @@ const char *config_str_below_run(const char *key);
 /* Return the registry default, or NULL for an unknown or dynamically defaulted setting. */
 const char *config_default(const char *key);
 
-/* Return a structured block from the state tier, then the config-file tier. The first tier that
- * defines the block wins; blocks are not merged. */
+/* Return a structured block from the state tier, then the config-file tier, verbatim with its
+ * original JSON types. The first tier that defines the block wins; blocks are not merged. */
 const json_t *config_json_node(const char *key);
 
 /* Merge the immediate member names at `key` across the config-file and state tiers. `out` receives

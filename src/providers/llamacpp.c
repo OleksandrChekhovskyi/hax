@@ -181,10 +181,15 @@ static int reconcile_configured_model(const char *base_url, const char *api_key,
     *model_discovered = 0;
     char *url = xasprintf("%s/models", base_url);
     char *authorization = api_key ? xasprintf("Authorization: Bearer %s", api_key) : NULL;
-    const char *headers[] = {authorization, NULL};
+    const char *fixed[] = {authorization, NULL};
+    char **extra_headers = provider_extra_headers("providers.llamacpp");
+    char **headers = string_array_concat(fixed, (const char *const *)extra_headers);
+    string_array_free(extra_headers);
+    free(authorization);
     char *body = NULL;
-    int request_succeeded = http_get(url, authorization ? headers : NULL, MODEL_LIST_TIMEOUT_S, 0,
+    int request_succeeded = http_get(url, (const char *const *)headers, MODEL_LIST_TIMEOUT_S, 0,
                                      NULL, NULL, &body, NULL) == 0;
+    string_array_free(headers);
 
     const char *configured_model = config_str("model");
     int configured = configured_model && *configured_model;
@@ -219,7 +224,6 @@ static int reconcile_configured_model(const char *base_url, const char *api_key,
     }
 
     free(body);
-    free(authorization);
     free(url);
     return result;
 }
@@ -317,10 +321,12 @@ static int llamacpp_probe_model(struct provider *provider, const char *model,
         return -1;
 
     const char *api_key = provider_api_key("providers.llamacpp", NULL);
-    if (api_key) {
-        probe->headers = xcalloc(2, sizeof(*probe->headers));
-        probe->headers[0] = xasprintf("Authorization: Bearer %s", api_key);
-    }
+    char *authorization = api_key ? xasprintf("Authorization: Bearer %s", api_key) : NULL;
+    const char *fixed[] = {authorization, NULL};
+    char **extra_headers = provider_extra_headers("providers.llamacpp");
+    probe->headers = string_array_concat(fixed, (const char *const *)extra_headers);
+    string_array_free(extra_headers);
+    free(authorization);
     probe->timeout_s = MODEL_METADATA_TIMEOUT_S;
     probe->parse = parse_props;
     return 0;
@@ -376,8 +382,10 @@ static void llamacpp_prepare_availability(const char *id,
 {
     (void)id;
     char *base_url = resolve_base_url();
+    char **extra_headers = provider_extra_headers("providers.llamacpp");
     openai_prepare_base_url_availability(base_url, provider_api_key("providers.llamacpp", NULL),
-                                         availability);
+                                         extra_headers, availability);
+    string_array_free(extra_headers);
     free(base_url);
 }
 

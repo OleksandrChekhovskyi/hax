@@ -267,6 +267,12 @@ const struct config_setting *config_setting_find(const char *key)
     return find_setting(key);
 }
 
+/* A string view of a numeric or boolean scalar, materialized on first string read. */
+struct scalar_string {
+    const json_t *node;
+    char *text;
+};
+
 struct config_store {
     json_t *file;
     json_t *state;
@@ -274,6 +280,13 @@ struct config_store {
     json_t *run;
     /* Prevent writes from replacing config.json content that was never loaded. */
     int file_unusable;
+    /* Tiers are kept verbatim, so string reads coerce numbers and booleans here on first use:
+     * config_str callers borrow until the next config mutation, so a transient buffer would
+     * not do. Keyed by node; cleared whenever a file/state tier is replaced, which frees the
+     * nodes (a recycled allocation must not resurrect a stale entry). */
+    struct scalar_string *scalar_strings;
+    size_t n_scalar_strings;
+    size_t scalar_strings_capacity;
     /* Preset names whose defect a failed apply already surfaced, so enumeration does not
      * repeat the same message; the once-per-configuration latch for its other warnings. */
     char **reported_presets;
@@ -285,32 +298,53 @@ static struct config_store store;
 
 #define CONFIG_MAX_BYTES (1024 * 1024)
 
-static void normalize_scalars(json_t *object)
+static void scalar_cache_clear(void)
 {
-    const char *key;
-    json_t *value;
-    void *iter;
+    for (size_t i = 0; i < store.n_scalar_strings; i++)
+        free(store.scalar_strings[i].text);
+    free(store.scalar_strings);
+    store.scalar_strings = NULL;
+    store.n_scalar_strings = 0;
+    store.scalar_strings_capacity = 0;
+}
 
-    json_object_foreach_safe(object, iter, key, value)
-    {
-        if (json_is_object(value)) {
-            normalize_scalars(value);
-        } else if (json_is_integer(value)) {
-            char buffer[32];
-            snprintf(buffer, sizeof buffer, "%lld", (long long)json_integer_value(value));
-            json_object_set_new(object, key, json_string(buffer));
-        } else if (json_is_real(value)) {
-            char buffer[32];
-            snprintf(buffer, sizeof buffer, "%g", json_real_value(value));
-            json_object_set_new(object, key, json_string(buffer));
-        } else if (json_is_boolean(value)) {
-            json_object_set_new(object, key, json_string(json_is_true(value) ? "1" : "0"));
-        }
+/* Read a JSON value as a string setting, coercing a number or boolean; other types are
+ * not string-readable and return NULL. */
+static const char *scalar_as_string(const json_t *value)
+{
+    if (!value || json_is_string(value))
+        return json_string_value(value);
+    if (!json_is_number(value) && !json_is_boolean(value))
+        return NULL;
+
+    for (size_t i = 0; i < store.n_scalar_strings; i++) {
+        if (store.scalar_strings[i].node == value)
+            return store.scalar_strings[i].text;
     }
+
+    char buffer[32];
+    if (json_is_integer(value))
+        snprintf(buffer, sizeof buffer, "%lld", (long long)json_integer_value(value));
+    else if (json_is_real(value))
+        snprintf(buffer, sizeof buffer, "%g", json_real_value(value));
+    else
+        snprintf(buffer, sizeof buffer, "%s", json_is_true(value) ? "1" : "0");
+
+    if (store.n_scalar_strings == store.scalar_strings_capacity) {
+        store.scalar_strings_capacity =
+            store.scalar_strings_capacity ? store.scalar_strings_capacity * 2 : 8;
+        store.scalar_strings = xrealloc(store.scalar_strings, store.scalar_strings_capacity *
+                                                                  sizeof(*store.scalar_strings));
+    }
+    struct scalar_string *entry = &store.scalar_strings[store.n_scalar_strings++];
+    entry->node = value;
+    entry->text = xstrdup(buffer);
+    return entry->text;
 }
 
 static int load_tier(json_t **tier, const char *text)
 {
+    scalar_cache_clear();
     json_decref(*tier);
     *tier = NULL;
 
@@ -325,7 +359,6 @@ static int load_tier(json_t **tier, const char *text)
         return -1;
     }
 
-    normalize_scalars(root);
     *tier = root;
     return 0;
 }
@@ -382,6 +415,7 @@ static void free_reported_presets(void);
 void config_free(void)
 {
     store.file_unusable = 0;
+    scalar_cache_clear();
     json_decref(store.file);
     store.file = NULL;
     json_decref(store.state);
@@ -426,7 +460,7 @@ static json_t *object_get_dotted(json_t *root, const char *key)
 
 static const char *object_get_string(json_t *root, const char *key)
 {
-    return json_string_value(object_get_dotted(root, key));
+    return scalar_as_string(object_get_dotted(root, key));
 }
 
 static void add_object_key(char ***keys, size_t *count, size_t *capacity, const char *key,
@@ -1116,6 +1150,7 @@ static int persist_tier(json_t **tier, char *path, const char *key, const char *
         return -1;
     }
 
+    scalar_cache_clear();
     json_decref(*tier);
     *tier = updated;
     return 0;
@@ -1164,6 +1199,7 @@ int config_persist_selection(const char *provider, const char *model, const char
         return -1;
     }
 
+    scalar_cache_clear();
     json_decref(store.state);
     store.state = updated;
     return 0;
@@ -1204,6 +1240,11 @@ static int preset_key_allowed(const char *key)
     return 0;
 }
 
+static const char *preset_member_string(const json_t *preset, const char *member)
+{
+    return scalar_as_string(json_object_get((json_t *)preset, member));
+}
+
 /* Apply and enumeration share validation so every advertised preset is appliable. */
 static int preset_validate(const json_t *preset, const char *name, char **error)
 {
@@ -1221,14 +1262,14 @@ static int preset_validate(const json_t *preset, const char *name, char **error)
                     name, member_name);
             return -1;
         }
-        if (!json_is_string(member)) {
+        if (!scalar_as_string(member)) {
             if (error)
                 *error = xasprintf("preset '%s': '%s' must be a scalar", name, member_name);
             return -1;
         }
     }
 
-    const char *provider = json_string_value(json_object_get((json_t *)preset, "provider"));
+    const char *provider = preset_member_string(preset, "provider");
     if (!provider || !*provider) {
         if (error)
             *error = xasprintf("preset '%s' must name a provider", name);
@@ -1236,7 +1277,7 @@ static int preset_validate(const json_t *preset, const char *name, char **error)
     }
 
     const struct config_setting *tint_setting = find_setting("tint");
-    const char *tint = json_string_value(json_object_get((json_t *)preset, "tint"));
+    const char *tint = preset_member_string(preset, "tint");
     if (tint && !config_value_valid(tint_setting, tint)) {
         if (error)
             *error = xasprintf("preset '%s': unknown tint '%s' (expected %s)", name, tint,
@@ -1247,7 +1288,7 @@ static int preset_validate(const json_t *preset, const char *name, char **error)
     /* @file prompts are probed here so an advertised preset cannot fail on apply. */
     static const char *const prompt_keys[] = {"system_prompt", "system_prompt_append"};
     for (size_t i = 0; i < sizeof(prompt_keys) / sizeof(*prompt_keys); i++) {
-        const char *value = json_string_value(json_object_get((json_t *)preset, prompt_keys[i]));
+        const char *value = preset_member_string(preset, prompt_keys[i]);
         if (!value || value[0] != '@')
             continue;
         char *expand_error = NULL;
@@ -1262,11 +1303,6 @@ static int preset_validate(const json_t *preset, const char *name, char **error)
         free(text);
     }
     return 0;
-}
-
-static const char *preset_member_string(const json_t *preset, const char *member)
-{
-    return json_string_value(json_object_get((json_t *)preset, member));
 }
 
 static int preset_defect_reported(const char *name)
@@ -1501,6 +1537,7 @@ int config_preset_save(const char *name, const struct config_preset *definition,
         goto out;
     }
 
+    scalar_cache_clear();
     json_decref(store.file);
     store.file = updated;
     updated = NULL;

@@ -15,11 +15,10 @@ static pthread_mutex_t trace_mu = PTHREAD_MUTEX_INITIALIZER;
 static FILE *trace_fp;
 static int trace_init_done;
 
-/* Wall-clock-since-first-entry plus delta-from-prior-entry, both in ms.
- * Lets readers spot pauses (e.g. model going quiet between SSE chunks)
- * without inferring from per-provider `created` fields that may or may
- * not update per chunk. Anchored on the first trace_* call rather than
- * process start so a `cat` of the file always starts at +0.000s. */
+/* Wall-clock-since-first-entry plus delta-from-prior-entry, both in ms. Lets readers spot
+ * pauses (a model going quiet between SSE chunks) without inferring from per-provider
+ * `created` fields that may or may not update per chunk. Anchored on the first trace_* call
+ * rather than process start so a `cat` of the file always starts at +0.000s. */
 static int trace_have_start;
 static long trace_start_ms;
 static long trace_last_ms;
@@ -84,8 +83,8 @@ int trace_enabled(void)
     return enabled;
 }
 
-/* CommonMark: a fenced block must use a backtick run strictly longer than any
- * run inside its content. Default to 3, escalate if needed. */
+/* CommonMark: a fenced block must use a backtick run strictly longer than any run inside its
+ * content. Default to 3, escalate if needed. */
 static size_t fence_len_for(const char *s, size_t n)
 {
     size_t max_run = 0, cur = 0;
@@ -120,9 +119,8 @@ static void emit_fenced(FILE *fp, const char *lang, const char *content, size_t 
     fputc('\n', fp);
 }
 
-/* Pretty-print a JSON payload inside a ```json fence. Falls back to ```text
- * with the raw bytes when parsing fails — keeps the trace useful even when
- * the server hands us garbage. */
+/* Falls back to a raw ```text fence when JSON parsing fails, so the trace stays useful when
+ * the server sends garbage. */
 static void emit_json_or_text(FILE *fp, const char *json, size_t len)
 {
     json_error_t err;
@@ -139,23 +137,50 @@ static void emit_json_or_text(FILE *fp, const char *json, size_t len)
     json_decref(root);
 }
 
+/* Registered credential values, guarded by trace_mu; deliberately never freed. */
+static char **trace_secrets;
+static size_t trace_n_secrets;
+static size_t trace_secrets_capacity;
+
+void trace_register_secret(const char *value)
+{
+    if (!value || !*value)
+        return;
+    pthread_mutex_lock(&trace_mu);
+    for (size_t i = 0; i < trace_n_secrets; i++) {
+        if (strcmp(trace_secrets[i], value) == 0)
+            goto out_unlock;
+    }
+    if (trace_n_secrets == trace_secrets_capacity) {
+        trace_secrets_capacity = trace_secrets_capacity ? trace_secrets_capacity * 2 : 8;
+        trace_secrets = xrealloc(trace_secrets, trace_secrets_capacity * sizeof(*trace_secrets));
+    }
+    trace_secrets[trace_n_secrets++] = xstrdup(value);
+out_unlock:
+    pthread_mutex_unlock(&trace_mu);
+}
+
 static int header_name_is(const char *header, const char *name)
 {
     size_t n = strlen(name);
     return strncasecmp(header, name, n) == 0 && header[n] == ':';
 }
 
-/* Request-header names whose values are credentials and must never hit the
- * trace file. Matched case-insensitively (header_name_is). Authorization
- * covers Bearer tokens (OpenAI, Codex, OpenRouter); x-api-key is Anthropic's
- * scheme; api-key is Azure OpenAI's. Add new auth header names here. */
+/* Header names hax itself fills with credentials (api-key is Azure's spelling). */
 static const char *const SENSITIVE_HEADERS[] = {"Authorization", "x-api-key", "api-key"};
 
-static int header_is_sensitive(const char *header)
+/* Caller must hold trace_mu. A registered credential matches anywhere in the line, since it
+ * may sit under any header name or inside a larger value such as "Bearer <token>". */
+static int header_is_sensitive_locked(const char *header)
 {
-    for (size_t i = 0; i < sizeof(SENSITIVE_HEADERS) / sizeof(SENSITIVE_HEADERS[0]); i++)
+    for (size_t i = 0; i < sizeof(SENSITIVE_HEADERS) / sizeof(*SENSITIVE_HEADERS); i++) {
         if (header_name_is(header, SENSITIVE_HEADERS[i]))
             return 1;
+    }
+    for (size_t i = 0; i < trace_n_secrets; i++) {
+        if (strstr(header, trace_secrets[i]))
+            return 1;
+    }
     return 0;
 }
 
@@ -174,8 +199,8 @@ void trace_request(const char *method, const char *url, const char *const *heade
     struct buf hb;
     buf_init(&hb);
     for (const char *const *h = headers; h && *h; h++) {
-        if (header_is_sensitive(*h)) {
-            const char *colon = strchr(*h, ':');
+        const char *colon = strchr(*h, ':');
+        if (colon && header_is_sensitive_locked(*h)) {
             buf_append(&hb, *h, colon - *h);
             buf_append_str(&hb, ": <redacted>\n");
         } else {
