@@ -6,8 +6,8 @@
 
 #include "provider.h"
 
-/* Construct the OpenRouter preset. The base URL is fixed to openrouter.ai and `name` is unused. */
-struct provider *openrouter_provider_new(const char *name);
+/* Construct the OpenRouter preset; the base URL is fixed to openrouter.ai. */
+struct provider *openrouter_provider_new(const char *id);
 
 /* Parse one OpenRouter /models entry into initialized `info`. Newly allocated fields are owned by
  * `info`; unreported fields retain their unknown values. */

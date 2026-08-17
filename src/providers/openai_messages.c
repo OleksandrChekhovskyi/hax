@@ -16,12 +16,6 @@ static json_t *build_tool_call(const struct item *item)
                      "arguments", item->tool_arguments_json ? item->tool_arguments_json : "{}");
 }
 
-static int reasoning_matches(const struct item *item, const char *provider, const char *model)
-{
-    return item->provider && item->model && provider && model &&
-           strcmp(item->provider, provider) == 0 && strcmp(item->model, model) == 0;
-}
-
 /* Chat Completions cannot preserve text/tool-call interleaving within an assistant message. */
 static size_t append_assistant_message(json_t *messages, const struct item *items, size_t index,
                                        size_t n_items, const char *reasoning_field,
@@ -43,8 +37,8 @@ static size_t append_assistant_message(json_t *messages, const struct item *item
                 buf_append_str(&text, item->text);
             break;
         case ITEM_REASONING:
-            if (reasoning_matches(item, current_provider, current_model) && item->reasoning_text &&
-                *item->reasoning_text) {
+            if (provider_provenance_matches(item, current_provider, current_model) &&
+                item->reasoning_text && *item->reasoning_text) {
                 if (reasoning.len > 0)
                     buf_append_str(&reasoning, "\n");
                 buf_append_str(&reasoning, item->reasoning_text);

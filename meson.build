@@ -109,7 +109,6 @@ sources = files(
     'src/util.c',
 
     'src/providers/anthropic.c',
-    'src/providers/anthropic_compat.c',
     'src/providers/anthropic_events.c',
     'src/providers/anthropic_messages.c',
     'src/providers/codex.c',
@@ -119,7 +118,6 @@ sources = files(
     'src/providers/llamacpp.c',
     'src/providers/mock.c',
     'src/providers/openai.c',
-    'src/providers/openai_compat.c',
     'src/providers/openai_events.c',
     'src/providers/openai_messages.c',
     'src/providers/openrouter.c',

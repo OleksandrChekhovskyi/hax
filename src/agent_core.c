@@ -176,8 +176,8 @@ const char *agent_provider_id(const struct provider *provider)
 {
     const char *id = config_str("provider");
     if (id && *id)
-        return id;
-    return provider ? provider->name : NULL;
+        return provider_canonical_id(id);
+    return provider ? provider_stable_id(provider) : NULL;
 }
 
 const char *agent_provider_log_name(const struct provider *provider)
@@ -209,7 +209,7 @@ void agent_session_init(struct agent_session *session, struct provider *provider
         model = provider->default_model;
     session->model = model ? xstrdup(model) : NULL;
     session->model_label = resolve_model_label(provider, session->model);
-    session->provider_name = provider ? provider->name : NULL;
+    session->provider_id = provider ? provider_stable_id(provider) : NULL;
 
     /* An empty system prompt suppresses only that message; raw mode also suppresses tools. */
     session->raw_mode = opts->raw;
@@ -244,7 +244,7 @@ int agent_session_reconfigure(struct agent_session *session, struct provider *pr
     free(session->model_label);
     session->model = new_model;
     session->model_label = new_model_label;
-    session->provider_name = provider->name;
+    session->provider_id = provider_stable_id(provider);
     /* The Environment section embeds the selected model. */
     free(session->system_prompt);
     session->system_prompt = build_system_prompt(session->model_label, session->raw_mode);
@@ -385,7 +385,7 @@ void agent_session_add_turn_usage(struct agent_session *session, const struct pr
         session, (struct item){
                      .kind = ITEM_TURN_USAGE,
                      .usage = turn_usage,
-                     .provider = session->provider_name ? xstrdup(session->provider_name) : NULL,
+                     .provider = session->provider_id ? xstrdup(session->provider_id) : NULL,
                      .model = session->model && *session->model ? xstrdup(session->model) : NULL,
                  });
 }
@@ -402,7 +402,7 @@ struct agent_absorb_result agent_session_absorb(struct agent_session *session, s
         /* Reasoning can be model-bound. Display identity also distinguishes custom endpoints
          * that share one provider factory. */
         if (items[i].kind == ITEM_REASONING) {
-            items[i].provider = session->provider_name ? xstrdup(session->provider_name) : NULL;
+            items[i].provider = session->provider_id ? xstrdup(session->provider_id) : NULL;
             items[i].model = session->model ? xstrdup(session->model) : NULL;
         }
         agent_session_append(session, items[i]);

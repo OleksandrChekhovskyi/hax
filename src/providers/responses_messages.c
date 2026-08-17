@@ -48,8 +48,7 @@ static json_t *build_reasoning_input(const struct item *item, const char *provid
 {
     /* Encrypted reasoning is bound to its source model. Replaying it after a provider or model
      * switch causes the backend to reject the request. */
-    if (!item->reasoning_json || !item->provider || !item->model || !provider || !model ||
-        strcmp(item->provider, provider) != 0 || strcmp(item->model, model) != 0)
+    if (!item->reasoning_json || !provider_provenance_matches(item, provider, model))
         return NULL;
     return json_loads(item->reasoning_json, 0, NULL);
 }

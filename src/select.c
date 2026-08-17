@@ -43,7 +43,7 @@ static void prepare_availability(const struct provider_factory *factory,
     memset(probe, 0, sizeof(*probe));
     probe->available = 1; /* no hook means immediately available */
     if (factory->prepare_availability)
-        factory->prepare_availability(factory->name, probe);
+        factory->prepare_availability(factory->id, probe);
 }
 
 /* The worker receives a complete owned request. In particular, provider
@@ -118,10 +118,10 @@ struct provider *provider_autoselect(void)
     /* Avoid parallel probe setup when the inexpensive default succeeds. */
     const struct provider_factory *default_factory = provider_default();
     if (default_factory && factory_available(default_factory, NULL)) {
-        struct provider *provider = default_factory->new(default_factory->name);
+        struct provider *provider = default_factory->new(default_factory->id);
         if (provider) {
             /* Expose the inferred provider to later selectors without persisting it. */
-            config_set_override("provider", default_factory->name);
+            config_set_override("provider", default_factory->id);
             return provider;
         }
     }
@@ -137,9 +137,9 @@ struct provider *provider_autoselect(void)
         if (factories[i] == default_factory || !availability[i].available)
             continue;
         /* Availability can change between probe and construction; continue on failure. */
-        provider = factories[i]->new(factories[i]->name);
+        provider = factories[i]->new(factories[i]->id);
         if (provider)
-            config_set_override("provider", factories[i]->name);
+            config_set_override("provider", factories[i]->id);
     }
     free(availability);
     return provider;
@@ -596,11 +596,11 @@ void select_model(struct agent_state *state)
     free(effort_pick.value);
 }
 
-static int compare_factory_names(const void *left, const void *right)
+static int compare_factory_labels(const void *left, const void *right)
 {
     const struct provider_factory *const *left_factory = left;
     const struct provider_factory *const *right_factory = right;
-    return strcmp((*left_factory)->name, (*right_factory)->name);
+    return strcmp(provider_display_name(*left_factory), provider_display_name(*right_factory));
 }
 
 struct provider_pick_result {
@@ -613,10 +613,10 @@ static struct provider_pick_result choose_provider_factory(const char *current_p
     size_t factory_count = 0;
     const struct provider_factory *const *registered_factories = provider_all(&factory_count);
 
-    /* Picker order is alphabetical; registry order remains autoselect priority. */
+    /* Picker order is alphabetical by display label; registry order remains autoselect priority. */
     const struct provider_factory **factories = xmalloc(factory_count * sizeof(*factories));
     memcpy(factories, registered_factories, factory_count * sizeof(*factories));
-    qsort(factories, factory_count, sizeof(*factories), compare_factory_names);
+    qsort(factories, factory_count, sizeof(*factories), compare_factory_labels);
 
     /* Pre-picker work uses bounded timeouts; cancellation starts at the picker. */
     struct availability_result *availability = xcalloc(factory_count, sizeof(*availability));
@@ -624,13 +624,19 @@ static struct provider_pick_result choose_provider_factory(const char *current_p
 
     /* Keep unavailable rows selectable because probe results are advisory and may become stale. */
     struct picker_item *items = xcalloc(factory_count, sizeof(*items));
+    char **descriptions = xcalloc(factory_count, sizeof(*descriptions));
     size_t initial = 0;
     for (size_t i = 0; i < factory_count; i++) {
-        items[i].label = factories[i]->name;
-        items[i].dim = !availability[i].available;
+        const char *label = provider_display_name(factories[i]);
+        items[i].label = label;
         items[i].detail = availability[i].reason;
+        items[i].dim = !availability[i].available;
+        /* A renamed row keeps its selectable id discoverable below the list. */
+        if (strcmp(label, factories[i]->id) != 0)
+            descriptions[i] = xasprintf("id: %s", factories[i]->id);
+        items[i].description = descriptions[i];
         items[i].current =
-            current_provider_id && strcmp(factories[i]->name, current_provider_id) == 0;
+            current_provider_id && strcmp(factories[i]->id, current_provider_id) == 0;
         if (items[i].current)
             initial = i;
     }
@@ -647,6 +653,9 @@ static struct provider_pick_result choose_provider_factory(const char *current_p
         result.factory = factories[selected_index];
         result.probe_available = availability[selected_index].available;
     }
+    for (size_t i = 0; i < factory_count; i++)
+        free(descriptions[i]);
+    free(descriptions);
     free(items);
     free(availability);
     free(factories);
@@ -667,7 +676,7 @@ void select_provider(struct agent_state *state)
     if (!provider_pick.probe_available && factory->prepare_availability) {
         const char *unavailable_reason = NULL;
         if (!factory_available(factory, &unavailable_reason)) {
-            ui_note("%s is unavailable — %s", factory->name,
+            ui_note("%s is unavailable — %s", provider_display_name(factory),
                     unavailable_reason ? unavailable_reason : "unavailable");
             disp_sync_external_line(&state->render->disp);
             free(current_id);
@@ -676,7 +685,7 @@ void select_provider(struct agent_state *state)
     }
 
     /* Re-picking the live provider avoids rebuilding it and continues to model selection. */
-    if (current_id && strcmp(factory->name, current_id) == 0) {
+    if (current_id && strcmp(factory->id, current_id) == 0) {
         free(current_id);
         select_model(state);
         return;
@@ -685,11 +694,11 @@ void select_provider(struct agent_state *state)
     /* Construct under a snapshotted prospective selection. Default sentinels prevent the old
      * backend's model and effort from influencing value-dependent constructors. */
     struct config_snapshot *snapshot = config_snapshot_take();
-    config_set_override("provider", factory->name);
+    config_set_override("provider", factory->id);
     config_set_override("model", CONFIG_VALUE_DEFAULT);
     config_set_override("effort", CONFIG_VALUE_DEFAULT);
     unsigned long diagnostics_before = hax_diag_sequence();
-    struct provider *candidate = factory->new(factory->name);
+    struct provider *candidate = factory->new(factory->id);
     sync_constructor_diagnostics(state, diagnostics_before);
     if (!candidate) {
         config_snapshot_restore(snapshot);
@@ -705,7 +714,7 @@ void select_provider(struct agent_state *state)
     if (!model_pick.model && (model_pick.status != PICK_NONE || !has_default_model)) {
         if (model_pick.status != PICK_CANCELLED) {
             ui_note("staying on %s — no model chosen for %s", current_id ? current_id : "?",
-                    factory->name);
+                    factory->id);
             disp_sync_external_line(&state->render->disp);
         }
         candidate->destroy(candidate);
@@ -728,7 +737,7 @@ void select_provider(struct agent_state *state)
     int model_discovered = model_pick.explicit_choice ? 0 : candidate->model_discovered;
     const char *model_override = model_pick.model ? model_pick.model : CONFIG_VALUE_DEFAULT;
     const char *effort_override = effort_pick.value ? effort_pick.value : CONFIG_VALUE_DEFAULT;
-    apply_selection_overrides(factory->name, model_override, effort_override);
+    apply_selection_overrides(factory->id, model_override, effort_override);
 
     if (agent_apply_settings(state, candidate, 1) != 0) {
         candidate->destroy(candidate); /* ownership transfers only on success */
@@ -740,7 +749,7 @@ void select_provider(struct agent_state *state)
     }
     candidate->model_discovered = model_discovered;
     config_snapshot_free(snapshot);
-    persist_selection(state, factory->name, model_override, effort_override, model_discovered);
+    persist_selection(state, factory->id, model_override, effort_override, model_discovered);
 
     free(current_id);
     free(model_pick.model);
@@ -839,7 +848,7 @@ int select_preset(struct agent_state *state, const char *name, int announce)
         goto out;
     }
     unsigned long diagnostics_before = hax_diag_sequence();
-    struct provider *candidate = factory->new(factory->name);
+    struct provider *candidate = factory->new(factory->id);
     sync_constructor_diagnostics(state, diagnostics_before);
     if (!candidate) {
         /* The constructor already diagnosed the failure. */
@@ -853,7 +862,7 @@ int select_preset(struct agent_state *state, const char *name, int announce)
     const char *model = config_str("model");
     if ((!model || !*model) && !(candidate->default_model && *candidate->default_model)) {
         ui_error("preset '%s': no model resolves for provider '%s' — name one in the preset", name,
-                 factory->name);
+                 factory->id);
         candidate->destroy(candidate);
         config_snapshot_restore(snapshot);
         disp_sync_external_line(&state->render->disp);
@@ -1106,6 +1115,9 @@ void select_restore_session(struct agent_state *state, const char *provider_id, 
     /* A provider-less recording leaves the live provider unchanged. */
     if (!provider_id || !*provider_id || strcmp(provider_id, "none") == 0)
         return;
+    /* Older sessions may record a former id spelling; compare and restore by identity so an
+     * unchanged selection is not needlessly reconstructed. */
+    provider_id = provider_canonical_id(provider_id);
 
     struct provider *live_provider = state->provider;
     char *current_id = current_provider_id(live_provider);
@@ -1132,9 +1144,9 @@ void select_restore_session(struct agent_state *state, const char *provider_id, 
     /* Reconstruct even the same provider id so value-dependent setup runs under restored values. */
     const char *restored_provider_id = config_str("provider");
     const struct provider_factory *factory = provider_find(restored_provider_id);
-    const char *display_provider_id = factory ? factory->name : restored_provider_id;
+    const char *display_provider_id = factory ? factory->id : restored_provider_id;
     unsigned long diagnostics_before = hax_diag_sequence();
-    struct provider *candidate = factory ? factory->new(factory->name) : NULL;
+    struct provider *candidate = factory ? factory->new(factory->id) : NULL;
     sync_constructor_diagnostics(state, diagnostics_before);
     if (!candidate) {
         if (!factory)
@@ -1406,11 +1418,22 @@ static const struct config_setting *choose_config_setting(void)
     size_t setting_count = 0;
     const struct config_setting *settings = config_settings(&setting_count);
 
-    struct picker_item *items = xcalloc(setting_count, sizeof(*items));
-    char **details = xmalloc(setting_count * sizeof(*details));
-    char **descriptions = xcalloc(setting_count, sizeof(*descriptions));
+    /* Provider blocks are definition data owned by /provider and config.json; their registered
+     * keys exist only to bind environment variables (registration also makes a key queryable
+     * here by name, which is why the api_key rows are marked secret). Field semantics live in
+     * the provider constructors. */
+    const struct config_setting **shown = xmalloc(setting_count * sizeof(*shown));
+    size_t shown_count = 0;
     for (size_t i = 0; i < setting_count; i++) {
-        const struct config_setting *setting = &settings[i];
+        if (strncmp(settings[i].key, "providers.", strlen("providers.")) != 0)
+            shown[shown_count++] = &settings[i];
+    }
+
+    struct picker_item *items = xcalloc(shown_count, sizeof(*items));
+    char **details = xmalloc(shown_count * sizeof(*details));
+    char **descriptions = xcalloc(shown_count, sizeof(*descriptions));
+    for (size_t i = 0; i < shown_count; i++) {
+        const struct config_setting *setting = shown[i];
         details[i] =
             xasprintf("%s (%s%s)", setting_display_value(setting), config_source(setting->key),
                       setting_value_invalid(setting) ? ", invalid" : "");
@@ -1431,17 +1454,19 @@ static const struct config_setting *choose_config_setting(void)
         items[i].dim = !setting->editable;
     }
     struct picker_opts options = {
-        .title = "configuration", .items = items, .item_count = setting_count, .initial_index = 0};
+        .title = "configuration", .items = items, .item_count = shown_count, .initial_index = 0};
     long selected_index = picker_run(&options);
     free(items);
-    for (size_t i = 0; i < setting_count; i++) {
+    for (size_t i = 0; i < shown_count; i++) {
         free(details[i]);
         free(descriptions[i]);
     }
     free(details);
     free(descriptions);
 
-    return selected_index >= 0 ? &settings[selected_index] : NULL;
+    const struct config_setting *choice = selected_index >= 0 ? shown[selected_index] : NULL;
+    free(shown);
+    return choice;
 }
 
 void select_config(struct agent_state *state, const char *argument)

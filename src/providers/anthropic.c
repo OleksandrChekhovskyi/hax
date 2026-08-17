@@ -14,6 +14,7 @@
 #include "util.h"
 #include "providers/anthropic_events.h"
 #include "providers/anthropic_messages.h"
+#include "providers/config_provider.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 #include "transport/retry.h"
@@ -41,39 +42,11 @@ struct anthropic {
     char *endpoint;
     char *version;
     char *config_prefix;
+    const char *cache_ttl; /* canonical static "5m"/"1h" from provider_cache_ttl */
     enum anthropic_thinking_mode default_thinking_mode;
     int allow_empty_signature;
     int cache_default;
 };
-
-static char *make_config_key(const char *prefix, const char *leaf)
-{
-    return xasprintf("%s.%s", prefix ? prefix : "anthropic", leaf);
-}
-
-static const char *preset_config(const char *prefix, const char *leaf)
-{
-    char *key = make_config_key(prefix, leaf);
-    const char *value = config_str(key);
-    free(key);
-    return value;
-}
-
-static int preset_bool(const char *prefix, const char *leaf, int fallback)
-{
-    char *key = make_config_key(prefix, leaf);
-    int value = config_bool_or(key, fallback);
-    free(key);
-    return value;
-}
-
-static int preset_int(const char *prefix, const char *leaf)
-{
-    char *key = make_config_key(prefix, leaf);
-    int value = config_int(key);
-    free(key);
-    return value;
-}
 
 static json_t *build_cache_control(const char *ttl)
 {
@@ -119,7 +92,7 @@ static void attach_cache_to_last_message(json_t *messages, const char *ttl)
 
 static enum anthropic_thinking_mode resolve_thinking_mode(const struct anthropic *anthropic)
 {
-    const char *configured = preset_config(anthropic->config_prefix, "thinking_mode");
+    const char *configured = config_scoped_str(anthropic->config_prefix, "thinking_mode");
     if (!configured || !*configured)
         return anthropic->default_thinking_mode;
     if (strcasecmp(configured, "adaptive") == 0)
@@ -129,8 +102,7 @@ static enum anthropic_thinking_mode resolve_thinking_mode(const struct anthropic
     if (strcasecmp(configured, "off") == 0)
         return ANTHROPIC_THINKING_OFF;
 
-    hax_warn("unknown anthropic.thinking_mode '%s' (adaptive/budget/off) — using default",
-             configured);
+    hax_warn("unknown thinking_mode '%s' (adaptive/budget/off) — using default", configured);
     return anthropic->default_thinking_mode;
 }
 
@@ -155,7 +127,7 @@ static void apply_thinking(json_t *body, const struct anthropic *anthropic,
     /* Anthropic requires 1 <= budget_tokens < max_tokens. */
     if (max_tokens < 2)
         return;
-    int budget_tokens = preset_int(anthropic->config_prefix, "thinking_budget");
+    int budget_tokens = config_scoped_int(anthropic->config_prefix, "thinking_budget");
     if (budget_tokens <= 0 || budget_tokens >= max_tokens)
         budget_tokens = max_tokens - 1;
     json_object_set_new(body, "thinking",
@@ -165,10 +137,14 @@ static void apply_thinking(json_t *body, const struct anthropic *anthropic,
 int anthropic_max_tokens(struct provider *provider, const char *model)
 {
     struct anthropic *anthropic = (struct anthropic *)provider;
-    char *key = make_config_key(anthropic->config_prefix, "max_tokens");
-    int configured = config_int(key);
-    int user_set = strcmp(config_source(key), "default") != 0;
-    free(key);
+    int configured = 0;
+    int user_set = 0;
+    if (anthropic->config_prefix) {
+        char *key = xasprintf("%s.max_tokens", anthropic->config_prefix);
+        configured = config_int(key);
+        user_set = strcmp(config_source(key), "default") != 0;
+        free(key);
+    }
 
     long model_limit = model_meta_max_output(provider, model);
     if (user_set && configured > 0)
@@ -182,12 +158,12 @@ static char *build_request_body(struct anthropic *anthropic, const struct contex
                                 const char *model)
 {
     int max_tokens = anthropic_max_tokens(&anthropic->base, model);
-    int cache = preset_bool(anthropic->config_prefix, "cache", anthropic->cache_default);
-    const char *cache_ttl = preset_config(anthropic->config_prefix, "cache_ttl");
+    int cache = config_scoped_bool_or(anthropic->config_prefix, "cache", anthropic->cache_default);
+    const char *cache_ttl = anthropic->cache_ttl;
 
-    json_t *messages =
-        anthropic_build_messages(context->items, context->n_items, anthropic->base.name, model,
-                                 anthropic->allow_empty_signature, context->image_input);
+    json_t *messages = anthropic_build_messages(
+        context->items, context->n_items, provider_stable_id(&anthropic->base), model,
+        anthropic->allow_empty_signature, context->image_input);
     json_t *body = json_pack("{s:s, s:i, s:b, s:o}", "model", model, "max_tokens", max_tokens,
                              "stream", 1, "messages", messages);
 
@@ -552,8 +528,16 @@ static void anthropic_destroy(struct provider *provider)
 
 static char *resolve_base_url(const struct anthropic_preset *preset)
 {
-    const char *configured =
-        preset->lock_base_url ? NULL : preset_config(preset->config_prefix, "base_url");
+    const char *configured = config_scoped_str(preset->config_prefix, "base_url");
+    if (preset->pin_base_url) {
+        /* Silently accepting the key would fake a redirect the pin just refused. */
+        if (configured && *configured) {
+            hax_warn("provider '%s': base_url is pinned to %s — use a custom provider for "
+                     "another endpoint",
+                     preset->display_name, preset->default_base_url);
+        }
+        configured = NULL;
+    }
     const char *base_url = configured && *configured ? configured : preset->default_base_url;
     if (!base_url || !*base_url) {
         hax_err("internal: anthropic preset has no base URL");
@@ -562,19 +546,11 @@ static char *resolve_base_url(const struct anthropic_preset *preset)
     return dup_trim_trailing_slash(base_url);
 }
 
-static const char *resolve_api_key(const struct anthropic_preset *preset)
-{
-    const char *api_key = preset_config(preset->config_prefix, "api_key");
-    if ((!api_key || !*api_key) && preset->api_key_env)
-        api_key = getenv(preset->api_key_env);
-    return api_key;
-}
-
 static const char *resolve_display_name(const struct anthropic_preset *preset)
 {
-    const char *name = preset->config_prefix ? NULL : config_str("provider_name");
-    if (name && *name)
-        return name;
+    const char *configured = config_scoped_str(preset->config_prefix, "display_name");
+    if (configured && *configured)
+        return configured;
     if (preset->display_name && *preset->display_name)
         return preset->display_name;
     return "anthropic";
@@ -592,14 +568,15 @@ struct provider *anthropic_provider_new_preset(const struct anthropic_preset *pr
 
     struct anthropic *anthropic = xcalloc(1, sizeof(*anthropic));
     anthropic->base_url = base_url;
-    const char *api_key = resolve_api_key(preset);
-    anthropic->api_key = api_key && *api_key ? xstrdup(api_key) : NULL;
+    const char *api_key = provider_api_key(preset->config_prefix, preset->api_key_env);
+    anthropic->api_key = api_key ? xstrdup(api_key) : NULL;
     anthropic->name = xstrdup(resolve_display_name(preset));
     anthropic->catalog_id = preset->catalog_id ? xstrdup(preset->catalog_id) : NULL;
     anthropic->endpoint = xasprintf("%s/messages", anthropic->base_url);
-    const char *version = preset_config(preset->config_prefix, "version");
+    const char *version = config_scoped_str(preset->config_prefix, "version");
     anthropic->version = xstrdup(version && *version ? version : ANTHROPIC_DEFAULT_VERSION);
     anthropic->config_prefix = preset->config_prefix ? xstrdup(preset->config_prefix) : NULL;
+    anthropic->cache_ttl = provider_cache_ttl(preset->config_prefix);
     anthropic->default_thinking_mode = preset->default_thinking_mode;
     anthropic->allow_empty_signature = preset->allow_empty_signature;
     anthropic->cache_default = preset->send_cache_control_default;
@@ -618,47 +595,37 @@ struct provider *anthropic_provider_new_preset(const struct anthropic_preset *pr
     return &anthropic->base;
 }
 
-struct provider *anthropic_provider_new(const char *name)
+struct provider *anthropic_provider_new(const char *id)
 {
-    (void)name;
+    provider_warn_unused_fields(id, "anthropic-messages", PROVIDER_FIELD_ANTHROPIC, NULL);
+    /* Tweaks resolve from the provider's own block; the pinned endpoint keeps ANTHROPIC_API_KEY
+     * from being redirected to a custom URL. */
     struct anthropic_preset preset = {
         .display_name = "anthropic",
         .default_base_url = "https://api.anthropic.com/v1",
         .api_key_env = "ANTHROPIC_API_KEY",
-        .lock_base_url = 1,
+        .config_prefix = "providers.anthropic",
+        .pin_base_url = 1,
         .default_thinking_mode = ANTHROPIC_THINKING_ADAPTIVE,
         .allow_empty_signature = 0,
         .send_cache_control_default = 1,
         .catalog_id = "anthropic",
     };
-    return anthropic_provider_new_preset(&preset);
+    struct provider *provider = anthropic_provider_new_preset(&preset);
+    if (provider)
+        provider->id = id;
+    return provider;
 }
 
-static int anthropic_key_available(const char *api_key_env, const char **reason)
+static void anthropic_prepare_availability(const char *id, struct provider_availability *out)
 {
-    const char *key = config_str("anthropic.api_key");
-    if (key && *key)
-        return 1;
-    if (api_key_env) {
-        const char *e = getenv(api_key_env);
-        if (e && *e)
-            return 1;
-    }
-    if (reason)
-        *reason = "ANTHROPIC_API_KEY not set";
-    return 0;
-}
-
-static void anthropic_prepare_availability(const char *name, struct provider_availability *out)
-{
-    (void)name;
-    const char *reason = NULL;
-    out->available = anthropic_key_available("ANTHROPIC_API_KEY", &reason);
-    out->reason = reason;
+    (void)id;
+    out->available = provider_api_key("providers.anthropic", "ANTHROPIC_API_KEY") != NULL;
+    out->reason = out->available ? NULL : "ANTHROPIC_API_KEY not set";
 }
 
 const struct provider_factory PROVIDER_ANTHROPIC = {
-    .name = "anthropic",
+    .id = "anthropic",
     .new = anthropic_provider_new,
     .prepare_availability = anthropic_prepare_availability,
 };

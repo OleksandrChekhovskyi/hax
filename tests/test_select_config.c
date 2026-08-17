@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "agent.h"
+#include "agent_core.h"
 #include "config.h"
 #include "harness.h"
 #include "model_meta.h"
@@ -145,7 +146,7 @@ static void test_readonly_paths(void)
     free(out);
 
     /* One without falls back to its env var. */
-    out = run(state, "openai.base_url http://x");
+    out = run(state, "providers.openai-compatible.base_url http://x");
     EXPECT(strstr(out, "HAX_OPENAI_BASE_URL") != NULL);
     free(out);
 }
@@ -384,6 +385,26 @@ static void test_model_apply_failure_restores_selection(void)
     model_meta_release(&provider);
 }
 
+/* Resuming a session recorded under a former provider id with an otherwise unchanged
+ * selection takes the fast path: no reconstruction, no diagnostics, no run override. */
+static void test_restore_session_former_id_fast_path(void)
+{
+    reset();
+    struct agent_state *state = fresh_state();
+    struct provider live = {.name = "llama.cpp", .id = "llamacpp"};
+    struct agent_session session = {0};
+    session.model = xstrdup("m1");
+    state->provider = &live;
+    state->session = &session;
+
+    unsigned long diagnostics_before = hax_diag_sequence();
+    select_restore_session(state, "llama.cpp", "m1", NULL, NULL);
+    EXPECT(g_apply_calls == 0);
+    EXPECT(hax_diag_sequence() == diagnostics_before);
+    EXPECT_STR_EQ(config_source("provider"), "default");
+    free(session.model);
+}
+
 int main(void)
 {
     test_unknown_setting();
@@ -398,5 +419,6 @@ int main(void)
     test_effort_apply_failure_restores_overrides();
     test_effort_persists_after_reconfiguration();
     test_model_apply_failure_restores_selection();
+    test_restore_session_former_id_fast_path();
     T_REPORT();
 }

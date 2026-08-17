@@ -39,12 +39,13 @@ const char *agent_provider_log_name(const struct provider *provider);
 int agent_recording_enabled(const struct provider *provider);
 
 /* State shared by the interactive and one-shot frontends. String and vector fields are owned
- * except for provider_name, which remains valid only while the producing provider is alive. */
+ * except for provider_id, which remains valid only while the producing provider is alive. */
 struct agent_session {
     char *model;       /* exact model id; NULL/empty when unresolved */
     char *model_label; /* display/environment label; NULL when model is NULL */
     char *effort;      /* NULL omits reasoning effort */
-    const char *provider_name;
+    /* Stable id stamped into reasoning provenance; never the configurable display name. */
+    const char *provider_id;
     char *system_prompt;
     struct tool_def *tools;
     size_t n_tools;

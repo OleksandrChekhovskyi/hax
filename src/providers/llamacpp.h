@@ -7,7 +7,7 @@
 #include "provider.h"
 
 /* Construct the llama-server preset. */
-struct provider *llamacpp_provider_new(const char *name);
+struct provider *llamacpp_provider_new(const char *id);
 
 /* Decision derived from a /v1/models response. A classic single-model server reports what it
  * serves, so an unavailable configured model is substituted. A router catalog (entries carrying a

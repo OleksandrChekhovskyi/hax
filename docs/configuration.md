@@ -57,8 +57,10 @@ also identifies settings that can be changed for the running process:
 ```
 
 Provider, model, effort, and preset use their dedicated commands. API keys are displayed only as set
-or unset. `/config` reports hax's own key setting, so a provider fallback such as `OPENAI_API_KEY` may
-authenticate successfully while `openai.api_key` appears unset.
+or unset. `/config` tracks only hax's own settings, so a first-party credential variable such as
+`OPENAI_API_KEY` authenticates without appearing there. Provider blocks (`providers.<id>.*`) are not
+listed either — configure providers via `/provider`, environment variables, or `config.json` — but a
+specific key can still be queried by name, e.g. `/config providers.openai-compatible.base_url`.
 
 ## Config file format
 
@@ -102,10 +104,12 @@ credential itself in JSON.
 ```json
 {
   "provider": "openai-compatible",
-  "provider_name": "vLLM",
   "model": "Qwen3-30B",
-  "openai": {
-    "base_url": "http://127.0.0.1:8000/v1"
+  "providers": {
+    "openai-compatible": {
+      "display_name": "vLLM",
+      "base_url": "http://127.0.0.1:8000/v1"
+    }
   }
 }
 ```
@@ -297,55 +301,63 @@ estimated from token counts and this metadata; check provider billing for author
 When `no_tasks` is on, reaching `bash.timeout` kills the command instead of detaching it. Standard
 `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, and `SSL_CERT_DIR` variables can override TLS certificate lookup.
 
-### OpenAI-family settings
+### Provider settings
 
-These global settings apply to built-in `openai`, `openai-compatible`, `llama.cpp`, and `openrouter`
-where relevant. Custom providers use equivalent fields inside their own `providers.<name>` block.
+Every provider reads settings only from its own `providers.<id>` block; nothing bleeds between
+providers. For the first-party providers the endpoint and credential variable (`OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`) are pinned — `base_url` in their blocks is ignored, so
+no setting can redirect a first-party key. Their other advanced fields (the same ones
+[custom providers](./providers.md#custom-providers) accept) are honored but rarely needed; a
+different endpoint is a custom provider, not a tweak. Codex reads only `display_name` from its
+block; everything else comes from the `codex` CLI login.
 
-| Config key | Environment | Default | Purpose |
-| --- | --- | --- | --- |
-| `openai.base_url` | `HAX_OPENAI_BASE_URL` | — | Endpoint for `openai-compatible`; also overrides llama.cpp. |
-| `openai.api_key` | `HAX_OPENAI_API_KEY` | — | Bearer token. |
-| `openai.api` | `HAX_OPENAI_API` | provider | `responses` or `chat`. |
-| `openai.reasoning_format` | `HAX_OPENAI_REASONING_FORMAT` | `flat` | Compatible API effort shape: `flat` or `nested`. |
-| `openai.reasoning_roundtrip` | `HAX_REASONING_ROUNDTRIP` | provider | Replay reasoning text: `off`, `on`, or a field name. |
-| `openai.send_cache_key` | `HAX_OPENAI_SEND_CACHE_KEY` | `auto` | Send a stable prompt-cache key. |
-| `openai.request_cost` | `HAX_OPENAI_REQUEST_COST` | `auto` | Request provider-specific per-response cost data. |
-| `openai.cache` | `HAX_OPENAI_CACHE` | `auto` | Send explicit prompt-cache breakpoints. |
-| `openai.cache_ttl` | `HAX_OPENAI_CACHE_TTL` | `1h` | Cache TTL: `5m` or `1h`. |
-| `provider_name` | `HAX_PROVIDER_NAME` | — | Override a built-in provider's banner name. |
+The shipped `openai-compatible` and `anthropic-compatible` providers are configured the same way —
+through their own `providers.<name>` blocks — and additionally bind environment variables to those
+keys so a one-off endpoint needs no config file.
 
-OpenAI defaults to the Responses API; compatible endpoints default to Chat Completions. Leave cache
-and cost controls on `auto` unless the endpoint documents support — the correct behavior varies by
-provider and model.
-
-Credential fallbacks after `HAX_OPENAI_API_KEY` are `OPENAI_API_KEY` for OpenAI and
-`OPENROUTER_API_KEY` for OpenRouter. OpenAI-compatible and llama.cpp do not inherit
-`OPENAI_API_KEY`, preventing an unrelated key from being sent to a custom endpoint.
-
-### Anthropic-family settings
+Keys in the `providers.openai-compatible` block:
 
 | Config key | Environment | Default | Purpose |
 | --- | --- | --- | --- |
-| `anthropic.base_url` | `HAX_ANTHROPIC_BASE_URL` | — | Endpoint for `anthropic-compatible`. |
-| `anthropic.api_key` | `HAX_ANTHROPIC_API_KEY` | — | `x-api-key` token. |
-| `anthropic.max_tokens` | `HAX_ANTHROPIC_MAX_TOKENS` | model cap | Maximum output including thinking; clamped to known model limits. |
-| `anthropic.thinking_mode` | `HAX_ANTHROPIC_THINKING_MODE` | provider | `adaptive`, `budget`, or `off`. |
-| `anthropic.thinking_budget` | `HAX_ANTHROPIC_THINKING_BUDGET` | max minus 1 | Budget-mode thinking tokens. |
-| `anthropic.cache` | `HAX_ANTHROPIC_CACHE` | `auto` | Send prompt-cache breakpoints. |
-| `anthropic.cache_ttl` | `HAX_ANTHROPIC_CACHE_TTL` | `1h` | Cache TTL: `5m` or `1h`. |
-| `anthropic.version` | `HAX_ANTHROPIC_VERSION` | `2023-06-01` | API version header. |
+| `base_url` | `HAX_OPENAI_BASE_URL` | — | Endpoint; required. |
+| `api_key` | `HAX_OPENAI_API_KEY` | — | Bearer token. Does not inherit `OPENAI_API_KEY`. |
+| `display_name` | `HAX_OPENAI_DISPLAY_NAME` | — | Banner and picker name. |
+| `api` | `HAX_OPENAI_API` | `chat` | `chat` (Chat Completions) or `responses`. |
+| `reasoning_format` | `HAX_OPENAI_REASONING_FORMAT` | `flat` | Effort request shape: `flat` or `nested`. |
+| `reasoning_roundtrip` | `HAX_REASONING_ROUNDTRIP` | provider | Replay reasoning text: `off`, `on`, or a field name. |
+| `send_cache_key` | `HAX_OPENAI_SEND_CACHE_KEY` | `auto` | Send a stable prompt-cache key. |
+| `request_cost` | `HAX_OPENAI_REQUEST_COST` | `auto` | Request provider-specific per-response cost data. |
+| `cache` | `HAX_OPENAI_CACHE` | `auto` | Send explicit prompt-cache breakpoints. |
+| `cache_ttl` | `HAX_OPENAI_CACHE_TTL` | `1h` | Cache TTL: `5m` or `1h`. |
 
-First-party Anthropic falls back to `ANTHROPIC_API_KEY`; compatible endpoints do not. When model
-metadata has no output limit, `anthropic.max_tokens` falls back internally to 32000.
+Leave cache and cost controls on `auto` unless the endpoint documents support — the correct
+behavior varies by provider and model.
+
+Keys in the `providers.anthropic-compatible` block:
+
+| Config key | Environment | Default | Purpose |
+| --- | --- | --- | --- |
+| `base_url` | `HAX_ANTHROPIC_BASE_URL` | — | Endpoint; required. |
+| `api_key` | `HAX_ANTHROPIC_API_KEY` | — | `x-api-key` token. Does not inherit `ANTHROPIC_API_KEY`. |
+| `display_name` | `HAX_ANTHROPIC_DISPLAY_NAME` | — | Banner and picker name. |
+| `max_tokens` | `HAX_ANTHROPIC_MAX_TOKENS` | model cap | Maximum output including thinking; clamped to known model limits. |
+| `thinking_mode` | `HAX_ANTHROPIC_THINKING_MODE` | `budget` | `adaptive`, `budget`, or `off`. |
+| `thinking_budget` | `HAX_ANTHROPIC_THINKING_BUDGET` | max minus 1 | Budget-mode thinking tokens. |
+| `cache` | `HAX_ANTHROPIC_CACHE` | `auto` | Send prompt-cache breakpoints. |
+| `cache_ttl` | `HAX_ANTHROPIC_CACHE_TTL` | `1h` | Cache TTL: `5m` or `1h`. |
+| `version` | `HAX_ANTHROPIC_VERSION` | `2023-06-01` | API version header. |
+
+When model metadata has no output limit, `max_tokens` falls back internally to 32000.
 
 ### Provider-specific and development settings
 
 | Config key | Environment | Default | Purpose |
 | --- | --- | --- | --- |
-| `llamacpp.port` | `HAX_LLAMACPP_PORT` | `8080` | llama-server port when no base URL is set. |
-| `openrouter.title` | `HAX_OPENROUTER_TITLE` | `hax` | OpenRouter attribution title; empty disables. |
-| `openrouter.referer` | `HAX_OPENROUTER_REFERER` | `https://usehax.dev` | OpenRouter attribution URL; empty disables. |
-| `mock.script` | `HAX_MOCK_SCRIPT` | — | Mock-provider script path. |
+| `providers.llamacpp.base_url` | `HAX_LLAMACPP_BASE_URL` | — | Full llama-server URL; overrides the port. |
+| `providers.llamacpp.api_key` | `HAX_LLAMACPP_API_KEY` | — | Bearer token when llama-server uses `--api-key`. |
+| `providers.llamacpp.port` | `HAX_LLAMACPP_PORT` | `8080` | llama-server port when no base URL is set. |
+| `providers.openrouter.title` | `HAX_OPENROUTER_TITLE` | `hax` | OpenRouter attribution title; empty disables. |
+| `providers.openrouter.referer` | `HAX_OPENROUTER_REFERER` | `https://usehax.dev` | OpenRouter attribution URL; empty disables. |
+| `providers.mock.script` | `HAX_MOCK_SCRIPT` | — | Mock-provider script path. |
 
 Custom provider blocks are documented in [providers.md](./providers.md#custom-providers).

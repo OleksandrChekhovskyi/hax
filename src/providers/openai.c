@@ -12,6 +12,7 @@
 #include "provider.h"
 #include "tool_schema.h"
 #include "util.h"
+#include "providers/config_provider.h"
 #include "providers/openai_events.h"
 #include "providers/openai_messages.h"
 #include "providers/responses_events.h"
@@ -81,9 +82,9 @@ static json_t *build_chat_tools(const struct tool_def *tools, size_t n_tools)
 static char *build_chat_body(const struct openai *openai, const struct context *context,
                              const char *model, const struct openai_cache_plan *cache)
 {
-    json_t *messages = openai_build_messages(context->system_prompt, context->items,
-                                             context->n_items, openai->reasoning_field,
-                                             openai->base.name, model, context->image_input);
+    json_t *messages = openai_build_messages(
+        context->system_prompt, context->items, context->n_items, openai->reasoning_field,
+        provider_stable_id(&openai->base), model, context->image_input);
     if (cache->send_breakpoints)
         openai_apply_cache_breakpoints(messages, openai->cache_ttl);
 
@@ -110,7 +111,7 @@ static char *build_chat_body(const struct openai *openai, const struct context *
 static char *build_responses_body(const struct openai *openai, const struct context *context,
                                   const char *model)
 {
-    json_t *body = responses_build_body(context, openai->base.name, model);
+    json_t *body = responses_build_body(context, provider_stable_id(&openai->base), model);
     if (openai->send_cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(openai->session_id));
 
@@ -323,35 +324,11 @@ enum openai_wire openai_wire_parse(const char *value, enum openai_wire fallback)
     return fallback;
 }
 
-static char *make_config_key(const char *prefix, const char *leaf)
-{
-    return xasprintf("%s.%s", prefix ? prefix : "openai", leaf);
-}
-
-static const char *preset_config(const char *prefix, const char *leaf)
-{
-    char *key = make_config_key(prefix, leaf);
-    const char *value = config_str(key);
-    free(key);
-    return value;
-}
-
-static int preset_bool(const char *prefix, const char *leaf, int fallback)
-{
-    char *key = make_config_key(prefix, leaf);
-    int value = config_bool_or(key, fallback);
-    free(key);
-    return value;
-}
-
 static enum openai_cache_mode resolve_cache_mode(const char *prefix, int automatic)
 {
-    char *key = make_config_key(prefix, "cache");
-
     /* Different fallbacks distinguish a parsed boolean from auto, unset, or invalid input. */
-    int with_false_fallback = config_bool_or(key, 0);
-    int with_true_fallback = config_bool_or(key, 1);
-    free(key);
+    int with_false_fallback = config_scoped_bool_or(prefix, "cache", 0);
+    int with_true_fallback = config_scoped_bool_or(prefix, "cache", 1);
 
     if (with_false_fallback == with_true_fallback)
         return with_true_fallback ? OPENAI_CACHE_ON : OPENAI_CACHE_OFF;
@@ -360,7 +337,7 @@ static enum openai_cache_mode resolve_cache_mode(const char *prefix, int automat
 
 static char *resolve_reasoning_field(const char *prefix, const char *preset_default)
 {
-    const char *configured = preset_config(prefix, "reasoning_roundtrip");
+    const char *configured = config_scoped_str(prefix, "reasoning_roundtrip");
     const char *field = preset_default;
     if (configured) {
         if (!*configured || strcmp(configured, "off") == 0 || strcmp(configured, "0") == 0)
@@ -455,21 +432,6 @@ static size_t openai_list_efforts(struct provider *provider, const char *const *
     return openai->n_efforts;
 }
 
-int openai_key_available(const char *api_key_env, const char *missing_reason, const char **reason)
-{
-    const char *key = config_str("openai.api_key");
-    if (key && *key)
-        return 1;
-    if (api_key_env) {
-        key = getenv(api_key_env);
-        if (key && *key)
-            return 1;
-    }
-    if (reason)
-        *reason = missing_reason ? missing_reason : "no API key";
-    return 0;
-}
-
 void openai_prepare_base_url_availability(const char *base_url, const char *api_key,
                                           struct provider_availability *out)
 {
@@ -483,18 +445,25 @@ void openai_prepare_base_url_availability(const char *base_url, const char *api_
     }
 }
 
-static void openai_prepare_availability(const char *name, struct provider_availability *out)
+static void openai_prepare_availability(const char *id, struct provider_availability *out)
 {
-    (void)name;
-    const char *reason = NULL;
-    out->available = openai_key_available("OPENAI_API_KEY", "OPENAI_API_KEY not set", &reason);
-    out->reason = reason;
+    (void)id;
+    out->available = provider_api_key("providers.openai", "OPENAI_API_KEY") != NULL;
+    out->reason = out->available ? NULL : "OPENAI_API_KEY not set";
 }
 
 static char *resolve_base_url(const struct openai_preset *preset)
 {
-    const char *configured =
-        preset->lock_base_url ? NULL : preset_config(preset->config_prefix, "base_url");
+    const char *configured = config_scoped_str(preset->config_prefix, "base_url");
+    if (preset->pin_base_url) {
+        /* Silently accepting the key would fake a redirect the pin just refused. */
+        if (configured && *configured) {
+            hax_warn("provider '%s': base_url is pinned to %s — use a custom provider for "
+                     "another endpoint",
+                     preset->display_name, preset->default_base_url);
+        }
+        configured = NULL;
+    }
     const char *base_url = configured && *configured ? configured : preset->default_base_url;
     if (!base_url || !*base_url) {
         hax_err("internal: openai preset has no base URL");
@@ -503,19 +472,11 @@ static char *resolve_base_url(const struct openai_preset *preset)
     return dup_trim_trailing_slash(base_url);
 }
 
-static const char *resolve_api_key(const struct openai_preset *preset)
-{
-    const char *api_key = preset_config(preset->config_prefix, "api_key");
-    if ((!api_key || !*api_key) && preset->api_key_env)
-        api_key = getenv(preset->api_key_env);
-    return api_key;
-}
-
 static const char *resolve_display_name(const struct openai_preset *preset)
 {
-    const char *name = preset->config_prefix ? NULL : config_str("provider_name");
-    if (name && *name)
-        return name;
+    const char *configured = config_scoped_str(preset->config_prefix, "display_name");
+    if (configured && *configured)
+        return configured;
     if (preset->display_name && *preset->display_name)
         return preset->display_name;
     return "openai";
@@ -533,25 +494,26 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
 
     struct openai *openai = xcalloc(1, sizeof(*openai));
     openai->base_url = base_url;
-    const char *api_key = resolve_api_key(preset);
-    openai->api_key = api_key && *api_key ? xstrdup(api_key) : NULL;
+    const char *api_key = provider_api_key(preset->config_prefix, preset->api_key_env);
+    openai->api_key = api_key ? xstrdup(api_key) : NULL;
     openai->name = xstrdup(resolve_display_name(preset));
     openai->catalog_id = preset->catalog_id ? xstrdup(preset->catalog_id) : NULL;
-    openai->wire = openai_wire_parse(preset_config(preset->config_prefix, "api"), preset->wire);
+    openai->wire = openai_wire_parse(config_scoped_str(preset->config_prefix, "api"), preset->wire);
     openai->endpoint =
         xasprintf("%s/%s", openai->base_url,
                   openai->wire == OPENAI_WIRE_RESPONSES ? "responses" : "chat/completions");
 
-    openai->send_cache_key =
-        preset_bool(preset->config_prefix, "send_cache_key", preset->send_cache_key_default);
+    openai->send_cache_key = config_scoped_bool_or(preset->config_prefix, "send_cache_key",
+                                                   preset->send_cache_key_default);
     openai->emit_progress = preset->emit_progress;
-    openai->request_cost = preset_bool(preset->config_prefix, "request_cost", preset->request_cost);
+    openai->request_cost =
+        config_scoped_bool_or(preset->config_prefix, "request_cost", preset->request_cost);
     openai->cache_mode = resolve_cache_mode(preset->config_prefix, preset->cache_auto_default);
-    const char *cache_ttl = preset_config(preset->config_prefix, "cache_ttl");
-    openai->cache_ttl = xstrdup(cache_ttl ? cache_ttl : "");
+    openai->cache_ttl = xstrdup(provider_cache_ttl(preset->config_prefix));
     openai->reasoning_field =
         resolve_reasoning_field(preset->config_prefix, preset->reasoning_replay_field);
-    openai->reasoning_format = preset->reasoning_format;
+    openai->reasoning_format = openai_reasoning_format_parse(
+        config_scoped_str(preset->config_prefix, "reasoning_format"), preset->reasoning_format);
     openai->extra_headers = duplicate_headers(preset->extra_headers);
 
     openai->length_hint = preset->length_hint;
@@ -572,29 +534,33 @@ struct provider *openai_provider_new_preset(const struct openai_preset *preset)
     return &openai->base;
 }
 
-struct provider *openai_provider_new(const char *name)
+struct provider *openai_provider_new(const char *id)
 {
-    (void)name;
-    /* Lock the host so OPENAI_API_KEY and OpenAI-specific defaults cannot reach a custom URL. */
+    provider_warn_unused_openai_fields(id, OPENAI_WIRE_RESPONSES, NULL);
+    /* Tweaks resolve from the provider's own block; the pinned endpoint keeps OPENAI_API_KEY
+     * from being redirected to a custom URL. */
     struct openai_preset preset = {
         .display_name = "openai",
         .default_base_url = "https://api.openai.com/v1",
         .api_key_env = "OPENAI_API_KEY",
+        .config_prefix = "providers.openai",
+        .pin_base_url = 1,
         .send_cache_key_default = 1,
-        .lock_base_url = 1,
         .wire = OPENAI_WIRE_RESPONSES,
         .catalog_id = "openai",
         .efforts = OPENAI_EFFORT_LADDER,
         .n_efforts = OPENAI_EFFORT_LADDER_N,
     };
     struct provider *provider = openai_provider_new_preset(&preset);
-    if (provider)
+    if (provider) {
+        provider->id = id;
         provider->sort_models = 1;
+    }
     return provider;
 }
 
 const struct provider_factory PROVIDER_OPENAI = {
-    .name = "openai",
+    .id = "openai",
     .new = openai_provider_new,
     .prepare_availability = openai_prepare_availability,
 };

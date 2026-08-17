@@ -16,6 +16,7 @@
 #include "version.h"
 #include "providers/codex_auth.h"
 #include "providers/codex_settings.h"
+#include "providers/config_provider.h"
 #include "providers/responses_events.h"
 #include "providers/responses_messages.h"
 #include "render/progress.h"
@@ -50,6 +51,7 @@ struct codex {
     /* Set when a request is rejected as unauthenticated, so the next one re-reads auth.json and
      * picks up a token the codex CLI refreshed meanwhile. */
     int auth_stale;
+    char *name;
     /* Mirrored from ~/.codex/config.toml; NULL when it names none. */
     char *default_model;
     char *default_effort;
@@ -103,7 +105,8 @@ static int codex_stream(struct provider *provider, const struct context *context
     struct codex *codex = (struct codex *)provider;
     reload_auth_if_stale(codex);
 
-    char *body = build_request_body(context, codex->base.name, model, codex->session_id);
+    char *body =
+        build_request_body(context, provider_stable_id(&codex->base), model, codex->session_id);
     if (!body)
         return -1;
     size_t body_len = strlen(body);
@@ -552,15 +555,17 @@ static void codex_destroy(struct provider *provider)
     struct codex *codex = (struct codex *)provider;
     model_meta_release(provider);
     codex_auth_release(&codex->auth);
+    free(codex->name);
     free(codex->default_model);
     free(codex->default_effort);
     free(codex->session_id);
     free(codex);
 }
 
-struct provider *codex_provider_new(const char *name)
+struct provider *codex_provider_new(const char *id)
 {
-    (void)name;
+    static const char *const EXTRA_FIELDS[] = {"display_name", NULL};
+    provider_warn_unused_fields(id, id, 0, EXTRA_FIELDS);
     struct codex_auth auth;
     char *detail = NULL;
     enum codex_auth_status status = codex_auth_load(&auth, &detail);
@@ -594,7 +599,10 @@ struct provider *codex_provider_new(const char *name)
     gen_uuid_v4(session_id);
     codex->session_id = xstrdup(session_id);
 
-    codex->base.name = "codex";
+    const char *display_name = config_scoped_str("providers.codex", "display_name");
+    codex->name = xstrdup(display_name && *display_name ? display_name : "codex");
+    codex->base.name = codex->name;
+    codex->base.id = id;
     /* Subscription responses report no cost, so estimate against equivalent OpenAI API rates. */
     codex->base.catalog_id = "openai";
     codex->base.default_model = codex->default_model;
@@ -613,9 +621,9 @@ struct provider *codex_provider_new(const char *name)
     return &codex->base;
 }
 
-static void codex_prepare_availability(const char *name, struct provider_availability *availability)
+static void codex_prepare_availability(const char *id, struct provider_availability *availability)
 {
-    (void)name;
+    (void)id;
     struct codex_auth auth;
     enum codex_auth_status status = codex_auth_load(&auth, NULL);
     codex_auth_release(&auth);
@@ -625,7 +633,7 @@ static void codex_prepare_availability(const char *name, struct provider_availab
 }
 
 const struct provider_factory PROVIDER_CODEX = {
-    .name = "codex",
+    .id = "codex",
     .new = codex_provider_new,
     .prepare_availability = codex_prepare_availability,
 };

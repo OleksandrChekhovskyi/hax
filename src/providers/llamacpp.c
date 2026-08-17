@@ -13,6 +13,7 @@
 #include "model_meta.h"
 #include "provider.h"
 #include "util.h"
+#include "providers/config_provider.h"
 #include "providers/openai.h"
 #include "transport/http.h"
 
@@ -22,13 +23,13 @@
 
 static char *default_base_url(void)
 {
-    return xasprintf("http://127.0.0.1:%d/v1", config_int("llamacpp.port"));
+    return xasprintf("http://127.0.0.1:%d/v1", config_int("providers.llamacpp.port"));
 }
 
 static char *resolve_base_url(void)
 {
     char *default_url = default_base_url();
-    const char *configured_url = config_str_nonempty("openai.base_url");
+    const char *configured_url = config_str_nonempty("providers.llamacpp.base_url");
     char *base_url = dup_trim_trailing_slash(configured_url ? configured_url : default_url);
     free(default_url);
     return base_url;
@@ -315,7 +316,7 @@ static int llamacpp_probe_model(struct provider *provider, const char *model,
     if (!probe->url)
         return -1;
 
-    const char *api_key = config_str_nonempty("openai.api_key");
+    const char *api_key = provider_api_key("providers.llamacpp", NULL);
     if (api_key) {
         probe->headers = xcalloc(2, sizeof(*probe->headers));
         probe->headers[0] = xasprintf("Authorization: Bearer %s", api_key);
@@ -325,18 +326,18 @@ static int llamacpp_probe_model(struct provider *provider, const char *model,
     return 0;
 }
 
-struct provider *llamacpp_provider_new(const char *name)
+struct provider *llamacpp_provider_new(const char *id)
 {
-    (void)name;
+    provider_warn_unused_openai_fields(id, OPENAI_WIRE_CHAT, NULL);
     char *default_url = default_base_url();
     char *base_url = resolve_base_url();
-    const char *api_key = config_str_nonempty("openai.api_key");
+    const char *api_key = provider_api_key("providers.llamacpp", NULL);
     int model_discovered = 0;
     if (reconcile_configured_model(base_url, api_key, &model_discovered) != 0) {
         hax_err("llama.cpp: failed to auto-discover model from %s/models\n"
                 "hax: is llama-server running? "
                 "(set HAX_MODEL to skip probing, or adjust HAX_LLAMACPP_PORT / "
-                "HAX_OPENAI_BASE_URL)",
+                "HAX_LLAMACPP_BASE_URL)",
                 base_url);
         free(base_url);
         free(default_url);
@@ -346,6 +347,7 @@ struct provider *llamacpp_provider_new(const char *name)
     struct openai_preset preset = {
         .display_name = "llama.cpp",
         .default_base_url = default_url,
+        .config_prefix = "providers.llamacpp",
         .send_cache_key_default = 0,
         .emit_progress = 1,
         /* Interleaved-thinking models can leak tool calls into reasoning unless prior reasoning is
@@ -358,6 +360,7 @@ struct provider *llamacpp_provider_new(const char *name)
     };
     struct provider *provider = openai_provider_new_preset(&preset);
     if (provider) {
+        provider->id = id;
         provider->model_label = llamacpp_model_label;
         provider->probe_model = llamacpp_probe_model;
         provider->model_discovered = model_discovered;
@@ -368,18 +371,21 @@ struct provider *llamacpp_provider_new(const char *name)
     return provider;
 }
 
-static void llamacpp_prepare_availability(const char *name,
+static void llamacpp_prepare_availability(const char *id,
                                           struct provider_availability *availability)
 {
-    (void)name;
+    (void)id;
     char *base_url = resolve_base_url();
-    openai_prepare_base_url_availability(base_url, config_str_nonempty("openai.api_key"),
+    openai_prepare_base_url_availability(base_url, provider_api_key("providers.llamacpp", NULL),
                                          availability);
     free(base_url);
 }
 
 const struct provider_factory PROVIDER_LLAMACPP = {
-    .name = "llama.cpp",
+    /* Dot-free so the id names its providers.llamacpp config block ('.' is the key path
+     * separator); the banner and picker keep the upstream spelling. */
+    .id = "llamacpp",
+    .display_name = "llama.cpp",
     .new = llamacpp_provider_new,
     .prepare_availability = llamacpp_prepare_availability,
 };

@@ -7,8 +7,8 @@
 #include "provider.h"
 #include "providers/openai_messages.h"
 
-/* Construct the api.openai.com provider. `name` is unused. */
-struct provider *openai_provider_new(const char *name);
+/* Construct the api.openai.com provider; `id` becomes its stable identity. */
+struct provider *openai_provider_new(const char *id);
 
 /* OpenAI serves two request protocols under one base URL. Recent reasoning models reject function
  * tools combined with a reasoning effort on Chat Completions, so first-party OpenAI speaks
@@ -26,11 +26,12 @@ enum openai_wire openai_wire_parse(const char *value, enum openai_wire fallback)
 /* Configuration shared by providers in the OpenAI family. */
 struct openai_preset {
     const char *display_name;     /* defaults to "openai" */
-    const char *default_base_url; /* required when base_url is locked or not configured */
+    const char *default_base_url; /* required when <prefix>.base_url does not resolve */
     const char *api_key_env;      /* fallback after the configured API key */
-    const char *config_prefix;    /* NULL uses the global openai.* namespace */
+    const char *config_prefix;    /* config namespace; NULL reads no user configuration */
+    int pin_base_url;             /* ignore <prefix>.base_url: a first-party key must not
+                                     follow a configured URL to another host */
     const char *catalog_id;       /* copied; NULL disables catalog metadata */
-    int lock_base_url;            /* ignore configured base_url */
     enum openai_wire wire;        /* request protocol; overridable by <prefix>.api */
 
     int send_cache_key_default;
@@ -56,8 +57,6 @@ extern const size_t OPENAI_EFFORT_LADDER_N;
 
 /* Preset strings need only remain valid during construction unless marked borrowed above. */
 struct provider *openai_provider_new_preset(const struct openai_preset *preset);
-
-int openai_key_available(const char *api_key_env, const char *missing_reason, const char **reason);
 
 /* Populate an owned GET <base_url>/models availability request. */
 void openai_prepare_base_url_availability(const char *base_url, const char *api_key,

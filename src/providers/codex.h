@@ -7,7 +7,7 @@
 #include "provider.h"
 
 /* Create a provider from ~/.codex/auth.json, or report an error and return NULL. */
-struct provider *codex_provider_new(const char *name);
+struct provider *codex_provider_new(const char *id);
 
 /* Return an allocated diagnostic for a failed model-catalog request. A zero status means that no
  * HTTP response was received. */

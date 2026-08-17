@@ -5,7 +5,62 @@
 #include "config.h"
 #include "harness.h"
 #include "provider.h"
+#include "util.h"
+#include "providers/config_provider.h"
 #include "providers/registry.h"
+
+/* The env-alias rows registered in config.c for the shipped -compatible blocks must project
+ * the provider field inventory: same leaves, same dialect, same secrecy. */
+static void expect_registry_projects_provider_fields(void)
+{
+    static const struct {
+        const char *prefix;
+        unsigned dialect;
+    } BLOCKS[] = {
+        {.prefix = "providers.openai-compatible.", .dialect = PROVIDER_FIELD_OPENAI},
+        {.prefix = "providers.anthropic-compatible.", .dialect = PROVIDER_FIELD_ANTHROPIC},
+    };
+
+    size_t n_fields = 0;
+    const struct provider_field *fields = provider_fields(&n_fields);
+    size_t n_settings = 0;
+    const struct config_setting *settings = config_settings(&n_settings);
+
+    for (size_t i = 0; i < n_settings; i++) {
+        for (size_t b = 0; b < 2; b++) {
+            size_t prefix_length = strlen(BLOCKS[b].prefix);
+            if (strncmp(settings[i].key, BLOCKS[b].prefix, prefix_length) != 0)
+                continue;
+
+            const char *leaf = settings[i].key + prefix_length;
+            const struct provider_field *field = NULL;
+            for (size_t f = 0; f < n_fields; f++) {
+                if (strcmp(fields[f].leaf, leaf) == 0)
+                    field = &fields[f];
+            }
+            EXPECT(field != NULL);
+            if (field) {
+                EXPECT(field->dialects & BLOCKS[b].dialect);
+                EXPECT(field->secret == settings[i].secret);
+            }
+        }
+    }
+}
+
+static void test_cache_ttl_resolution(void)
+{
+    /* No config namespace, unset, and empty all take the interactive-agent default. */
+    EXPECT_STR_EQ(provider_cache_ttl(NULL), "1h");
+    EXPECT_STR_EQ(provider_cache_ttl("providers.ttltest"), "1h");
+
+    config_set_override("providers.ttltest.cache_ttl", "5m");
+    EXPECT_STR_EQ(provider_cache_ttl("providers.ttltest"), "5m");
+    config_set_override("providers.ttltest.cache_ttl", "1H"); /* canonicalized */
+    EXPECT_STR_EQ(provider_cache_ttl("providers.ttltest"), "1h");
+    config_set_override("providers.ttltest.cache_ttl", "2h"); /* warns; falls back */
+    EXPECT_STR_EQ(provider_cache_ttl("providers.ttltest"), "1h");
+    config_set_override("providers.ttltest.cache_ttl", NULL);
+}
 
 /* Whether `name` appears in provider_all() (the selectable set). */
 static int selectable(const char *name)
@@ -13,7 +68,7 @@ static int selectable(const char *name)
     size_t n;
     const struct provider_factory *const *all = provider_all(&n);
     for (size_t i = 0; i < n; i++)
-        if (strcmp(all[i]->name, name) == 0)
+        if (strcmp(all[i]->id, name) == 0)
             return 1;
     return 0;
 }
@@ -23,8 +78,13 @@ int main(void)
     /* Constructing a provider starts a metadata probe for the configured
      * model, and this file mutates config while one could be in flight. The
      * providers here name no model of their own, so an ambient HAX_MODEL is
-     * the only way one arrives — drop it. */
+     * the only way one arrives — drop it. The compat env aliases would
+     * configure the shipped -compatible recipes tested below. */
     unsetenv("HAX_MODEL");
+    unsetenv("HAX_OPENAI_BASE_URL");
+    unsetenv("HAX_OPENAI_API_KEY");
+    unsetenv("HAX_ANTHROPIC_BASE_URL");
+    unsetenv("HAX_OPENAI_DISPLAY_NAME");
 
     /* A config.json with custom OpenAI-compatible providers plus an override
      * of the shipped ollama recipe. Nested object form for most, and one in
@@ -42,7 +102,7 @@ int main(void)
                        "               \"api_key\": \"sk-inline\"},"
                        "    \"bad\":   {\"api\": \"soap-1.2\","
                        "               \"base_url\": \"http://x/v1\"},"
-                       "    \"respprov\": {\"api\": \"openai-responses\","
+                       "    \"respprov\": {\"api\": \"Responses\","
                        "               \"base_url\": \"http://127.0.0.1:9006/v1\"},"
                        "    \"claudish\": {\"api\": \"anthropic-messages\","
                        "               \"base_url\": \"http://127.0.0.1:18080/v1\","
@@ -50,7 +110,10 @@ int main(void)
                        "               \"catalog_id\": \"anthropic\"},"
                        "    \"nocat\": {\"base_url\": \"http://127.0.0.1:9003/v1\","
                        "               \"catalog_id\": \"\"},"
-                       "    \"ollama\": {\"base_url\": \"http://gpu:1234/v1\"},"
+                       "    \"ollama\": {\"base_url\": \"http://gpu:1234/v1/\"},"
+                       "    \"warny\": {\"base_url\": \"http://127.0.0.1:9008/v1\","
+                       "               \"resoning_format\": \"nested\","
+                       "               \"thinking_mode\": \"budget\"},"
                        "    \"my.llm\": {\"base_url\": \"http://127.0.0.1:9002/v1\"}"
                        "  },"
                        "  \"providers.flatprov.base_url\": \"http://127.0.0.1:9001/v1\""
@@ -61,7 +124,7 @@ int main(void)
      * provider layer's job, below). */
     char **names = NULL;
     size_t nk = config_object_keys("providers", &names);
-    EXPECT(nk == 10);
+    EXPECT(nk == 11);
     for (size_t i = 0; i < nk; i++)
         free(names[i]);
     free(names);
@@ -92,7 +155,7 @@ int main(void)
     const struct provider_factory *const *all = provider_all(&n);
     int ollama_count = 0;
     for (size_t i = 0; i < n; i++)
-        if (strcmp(all[i]->name, "ollama") == 0)
+        if (strcmp(all[i]->id, "ollama") == 0)
             ollama_count++;
     EXPECT(ollama_count == 1);
 
@@ -100,14 +163,23 @@ int main(void)
      * probe) and takes its banner from the resolved display_name. A generic
      * config provider offers the advisory effort ladder. */
     const struct provider_factory *myllm_factory = provider_find("myllm");
-    /* Availability captures an owned request before a worker is spawned; the
-     * configured trailing slash is trimmed before "/models" is appended. */
+    /* A keyless custom provider counts its configured base_url as availability: a generic
+     * endpoint may not serve the /models route a probe would need. */
     struct provider_availability probe = {0};
-    myllm_factory->prepare_availability(myllm_factory->name, &probe);
-    EXPECT_STR_EQ(probe.url, "http://127.0.0.1:9000/v1/models");
-    config_set_override("providers.myllm.base_url", "http://changed/v1");
-    EXPECT_STR_EQ(probe.url, "http://127.0.0.1:9000/v1/models");
-    config_set_override("providers.myllm.base_url", NULL);
+    myllm_factory->prepare_availability(myllm_factory->id, &probe);
+    EXPECT(probe.available);
+    EXPECT(probe.url == NULL);
+    provider_availability_clear(&probe);
+
+    /* The ollama recipe opts into a reachability probe. It captures an owned request before a
+     * worker is spawned; the configured trailing slash is trimmed before "/models" is
+     * appended. */
+    const struct provider_factory *probe_factory = provider_find("ollama");
+    probe_factory->prepare_availability(probe_factory->id, &probe);
+    EXPECT_STR_EQ(probe.url, "http://gpu:1234/v1/models");
+    config_set_override("providers.ollama.base_url", "http://changed/v1");
+    EXPECT_STR_EQ(probe.url, "http://gpu:1234/v1/models");
+    config_set_override("providers.ollama.base_url", NULL);
     provider_availability_clear(&probe);
 
     /* A keyed provider's availability is its key resolving — no probe request:
@@ -115,12 +187,12 @@ int main(void)
     const struct provider_factory *keyed_factory = provider_find("keyed");
     unsetenv("HAX_TEST_KEYED_KEY");
     struct provider_availability keyed = {0};
-    keyed_factory->prepare_availability(keyed_factory->name, &keyed);
+    keyed_factory->prepare_availability(keyed_factory->id, &keyed);
     EXPECT(!keyed.available);
     EXPECT_STR_EQ(keyed.reason, "API key not set");
     EXPECT(keyed.url == NULL);
     setenv("HAX_TEST_KEYED_KEY", "sk-keyed", 1);
-    keyed_factory->prepare_availability(keyed_factory->name, &keyed);
+    keyed_factory->prepare_availability(keyed_factory->id, &keyed);
     EXPECT(keyed.available);
     EXPECT(keyed.url == NULL);
     unsetenv("HAX_TEST_KEYED_KEY");
@@ -128,11 +200,11 @@ int main(void)
     /* An inline api_key keys the provider all by itself. */
     const struct provider_factory *inline_factory = provider_find("inline");
     struct provider_availability inline_avail = {0};
-    inline_factory->prepare_availability(inline_factory->name, &inline_avail);
+    inline_factory->prepare_availability(inline_factory->id, &inline_avail);
     EXPECT(inline_avail.available);
     EXPECT(inline_avail.url == NULL);
 
-    struct provider *myllm = myllm_factory->new(myllm_factory->name);
+    struct provider *myllm = myllm_factory->new(myllm_factory->id);
     EXPECT(myllm != NULL);
     if (myllm) {
         const char *const *efforts = NULL;
@@ -146,7 +218,7 @@ int main(void)
 
     /* An explicit empty catalog_id opts out of catalog lookups. */
     const struct provider_factory *nocat_factory = provider_find("nocat");
-    struct provider *nocat = nocat_factory->new(nocat_factory->name);
+    struct provider *nocat = nocat_factory->new(nocat_factory->id);
     EXPECT(nocat != NULL);
     if (nocat) {
         EXPECT(nocat->catalog_id == NULL);
@@ -156,7 +228,7 @@ int main(void)
     /* The ollama recipe opts out of the effort ladder, and its curated
      * catalog_id absence is final — no fallback to the provider name. */
     const struct provider_factory *ollama_factory = provider_find("ollama");
-    struct provider *ollama = ollama_factory->new(ollama_factory->name);
+    struct provider *ollama = ollama_factory->new(ollama_factory->id);
     EXPECT(ollama != NULL);
     if (ollama) {
         const char *const *efforts = NULL;
@@ -168,7 +240,7 @@ int main(void)
     const struct provider_factory *anthropic_factory = provider_find("claudish");
     EXPECT(anthropic_factory != NULL);
     EXPECT(selectable("claudish"));
-    struct provider *anthropic = anthropic_factory->new(anthropic_factory->name);
+    struct provider *anthropic = anthropic_factory->new(anthropic_factory->id);
     EXPECT(anthropic != NULL);
     if (anthropic) {
         const char *const *efforts = NULL;
@@ -185,7 +257,7 @@ int main(void)
     /* The Responses dialect is a supported api value, not an unknown one. */
     const struct provider_factory *resp_factory = provider_find("respprov");
     EXPECT(resp_factory != NULL);
-    struct provider *respprov = resp_factory->new(resp_factory->name);
+    struct provider *respprov = resp_factory->new(resp_factory->id);
     EXPECT(respprov != NULL);
     if (respprov)
         respprov->destroy(respprov);
@@ -193,7 +265,71 @@ int main(void)
     /* An unsupported dialect is a construction failure, not a crash. */
     const struct provider_factory *bad_factory = provider_find("bad");
     EXPECT(bad_factory != NULL);
-    EXPECT(bad_factory->new(bad_factory->name) == NULL);
+    EXPECT(bad_factory->new(bad_factory->id) == NULL);
+
+    /* A misspelled or wrong-dialect field warns (one diagnostic each) but never blocks
+     * construction, so a config written for a newer hax still runs. */
+    const struct provider_factory *warny_factory = provider_find("warny");
+    EXPECT(warny_factory != NULL);
+    unsigned long diagnostics_before = hax_diag_sequence();
+    struct provider *warny = warny_factory->new(warny_factory->id);
+    EXPECT(hax_diag_sequence() == diagnostics_before + 2);
+    EXPECT(warny != NULL);
+    if (warny)
+        warny->destroy(warny);
+
+    /* A clean block constructs without diagnostics. */
+    const struct provider_factory *clean_factory = provider_find("respprov");
+    diagnostics_before = hax_diag_sequence();
+    struct provider *clean = clean_factory->new(clean_factory->id);
+    EXPECT(hax_diag_sequence() == diagnostics_before);
+    EXPECT(clean != NULL);
+    if (clean)
+        clean->destroy(clean);
+
+    /* The shipped -compatible recipes have no default base_url: unavailable
+     * (with a pointer at their env alias) and unconstructable until the user
+     * supplies one. */
+    const struct provider_factory *compat = provider_find("openai-compatible");
+    EXPECT(compat != NULL);
+    EXPECT(selectable("openai-compatible"));
+    EXPECT(selectable("anthropic-compatible"));
+    struct provider_availability compat_avail = {0};
+    compat->prepare_availability(compat->id, &compat_avail);
+    EXPECT(!compat_avail.available);
+    EXPECT_STR_EQ(compat_avail.reason, "HAX_OPENAI_BASE_URL not set");
+    EXPECT(compat->new(compat->id) == NULL);
+
+    /* With a base_url the recipe is available without probing — the endpoint may serve only
+     * its completion route. An api_key (here via its env alias) keys it, and display_name
+     * (env alias HAX_OPENAI_DISPLAY_NAME) labels the banner. No catalog identity: an
+     * arbitrary endpoint's models are not a hosted vendor's. */
+    setenv("HAX_OPENAI_BASE_URL", "http://127.0.0.1:9007/v1/", 1);
+    compat->prepare_availability(compat->id, &compat_avail);
+    EXPECT(compat_avail.available);
+    EXPECT(compat_avail.url == NULL);
+    provider_availability_clear(&compat_avail);
+
+    setenv("HAX_OPENAI_API_KEY", "sk-compat", 1);
+    compat->prepare_availability(compat->id, &compat_avail);
+    EXPECT(compat_avail.available);
+    EXPECT(compat_avail.url == NULL);
+
+    setenv("HAX_OPENAI_DISPLAY_NAME", "vLLM", 1);
+    struct provider *compat_provider = compat->new(compat->id);
+    EXPECT(compat_provider != NULL);
+    if (compat_provider) {
+        EXPECT_STR_EQ(compat_provider->name, "vLLM");
+        EXPECT_STR_EQ(compat_provider->id, "openai-compatible");
+        EXPECT(compat_provider->catalog_id == NULL);
+        compat_provider->destroy(compat_provider);
+    }
+    unsetenv("HAX_OPENAI_DISPLAY_NAME");
+    unsetenv("HAX_OPENAI_API_KEY");
+    unsetenv("HAX_OPENAI_BASE_URL");
+
+    expect_registry_projects_provider_fields();
+    test_cache_ttl_resolution();
 
     config_free();
     T_REPORT();

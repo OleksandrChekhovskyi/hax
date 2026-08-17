@@ -48,11 +48,12 @@ static void test_nested_and_flat(void)
 {
     clear_env();
     /* Nested objects are the friendly form. */
-    EXPECT(config_load("{\"openai\": {\"base_url\": \"nested\"}}") == 0);
-    EXPECT_STR_EQ(config_str("openai.base_url"), "nested");
+    EXPECT(config_load("{\"providers\": {\"openai-compatible\": {\"base_url\": \"nested\"}}}") ==
+           0);
+    EXPECT_STR_EQ(config_str("providers.openai-compatible.base_url"), "nested");
     /* A flat dotted key is accepted too. */
-    EXPECT(config_load("{\"openai.base_url\": \"flat\"}") == 0);
-    EXPECT_STR_EQ(config_str("openai.base_url"), "flat");
+    EXPECT(config_load("{\"providers.openai-compatible.base_url\": \"flat\"}") == 0);
+    EXPECT_STR_EQ(config_str("providers.openai-compatible.base_url"), "flat");
 }
 
 static void test_scalar_normalization(void)
@@ -89,13 +90,13 @@ static void test_registry_default(void)
     clear_env();
     config_load(NULL);
     /* llamacpp.port has a fixed default in the registry. */
-    EXPECT_STR_EQ(config_str("llamacpp.port"), "8080");
+    EXPECT_STR_EQ(config_str("providers.llamacpp.port"), "8080");
     /* File overrides the default. */
-    EXPECT(config_load("{\"llamacpp\": {\"port\": \"9090\"}}") == 0);
-    EXPECT_STR_EQ(config_str("llamacpp.port"), "9090");
+    EXPECT(config_load("{\"providers\": {\"llamacpp\": {\"port\": \"9090\"}}}") == 0);
+    EXPECT_STR_EQ(config_str("providers.llamacpp.port"), "9090");
     /* Env overrides both. */
     setenv("HAX_LLAMACPP_PORT", "7070", 1);
-    EXPECT_STR_EQ(config_str("llamacpp.port"), "7070");
+    EXPECT_STR_EQ(config_str("providers.llamacpp.port"), "7070");
     unsetenv("HAX_LLAMACPP_PORT");
 }
 
@@ -139,18 +140,18 @@ static void test_default_on_unset_and_invalid(void)
     /* config_bool_or carries the caller's (per-preset) default through
      * unset, empty, and unrecognized values; a recognized value wins
      * either way. */
-    EXPECT(config_load("{\"openai\": {\"send_cache_key\": \"maybe\"}}") == 0);
-    EXPECT(config_bool_or("openai.send_cache_key", 1) == 1);
-    EXPECT(config_bool_or("openai.send_cache_key", 0) == 0);
-    EXPECT(config_load("{\"openai\": {\"send_cache_key\": \"off\"}}") == 0);
-    EXPECT(config_bool_or("openai.send_cache_key", 1) == 0);
+    EXPECT(config_load("{\"providers.openai-compatible.send_cache_key\": \"maybe\"}") == 0);
+    EXPECT(config_bool_or("providers.openai-compatible.send_cache_key", 1) == 1);
+    EXPECT(config_bool_or("providers.openai-compatible.send_cache_key", 0) == 0);
+    EXPECT(config_load("{\"providers.openai-compatible.send_cache_key\": \"off\"}") == 0);
+    EXPECT(config_bool_or("providers.openai-compatible.send_cache_key", 1) == 0);
     EXPECT(config_load(NULL) == 0);
-    EXPECT(config_bool_or("openai.send_cache_key", 1) == 1); /* unset → def */
+    EXPECT(config_bool_or("providers.openai-compatible.send_cache_key", 1) == 1); /* unset → def */
     /* No registry default → type-zero, as before. */
     EXPECT(config_load("{\"context_limit\": \"nope\"}") == 0);
     EXPECT(config_size("context_limit") == 0);
     /* config_default exposes the registry default tier directly. */
-    EXPECT_STR_EQ(config_default("llamacpp.port"), "8080");
+    EXPECT_STR_EQ(config_default("providers.llamacpp.port"), "8080");
     EXPECT(config_default("model") == NULL);
     EXPECT(config_default("no.such.key") == NULL);
 
@@ -194,23 +195,23 @@ static void test_empty_means_unset(void)
     /* For config_str_nonempty and the typed getters, an empty value is
      * "unset at this tier": a stray HAX_FOO= falls through to the file
      * tier rather than shadowing it (or reading as a blank port). */
-    EXPECT(config_load("{\"llamacpp\": {\"port\": \"9090\"}, \"bash\": {\"timeout\": \"5s\"},"
+    EXPECT(config_load("{\"providers.llamacpp.port\": \"9090\", \"bash\": {\"timeout\": \"5s\"},"
                        " \"show_reasoning\": true}") == 0);
     setenv("HAX_LLAMACPP_PORT", "", 1);
     setenv("HAX_BASH_TIMEOUT", "", 1);
     setenv("HAX_SHOW_REASONING", "", 1);
-    EXPECT_STR_EQ(config_str_nonempty("llamacpp.port"), "9090");
+    EXPECT_STR_EQ(config_str_nonempty("providers.llamacpp.port"), "9090");
     EXPECT(config_duration_ms("bash.timeout") == 5 * 1000);
     EXPECT(config_bool("show_reasoning") == 1);
     /* With no file value either, the registry default applies. */
     EXPECT(config_load(NULL) == 0);
-    EXPECT_STR_EQ(config_str_nonempty("llamacpp.port"), "8080");
+    EXPECT_STR_EQ(config_str_nonempty("providers.llamacpp.port"), "8080");
     EXPECT(config_duration_ms("bash.timeout") == 120 * 1000);
     EXPECT(config_bool("show_reasoning") == 0);
     /* config_str applies the same policy now: an empty tier is skipped for a
      * setting where "" has no meaning, so the port reads its default rather
      * than a blank string. */
-    EXPECT_STR_EQ(config_str("llamacpp.port"), "8080");
+    EXPECT_STR_EQ(config_str("providers.llamacpp.port"), "8080");
     /* A setting that documents a meaning for empty keeps it verbatim. */
     setenv("HAX_SYSTEM_PROMPT", "", 1);
     const char *sp = config_str("system_prompt");
@@ -257,6 +258,32 @@ static void test_state_tier_ordering(void)
     EXPECT(config_load_state(NULL) == 0);
     EXPECT_STR_EQ(config_str("model"), "from-file");
     config_load(NULL);
+}
+
+/* A selection saved under a former provider id keeps its model/effort binding and survives
+ * re-persisting under the canonical id. */
+static void test_provider_binding_canonical_ids(void)
+{
+    clear_env();
+
+    EXPECT(config_load(NULL) == 0);
+    EXPECT(config_load_state("{\"provider\": \"llama.cpp\", \"model\": \"old-model\"}") == 0);
+    setenv("HAX_PROVIDER", "llamacpp", 1);
+    EXPECT_STR_EQ(config_str("model"), "old-model");
+    unsetenv("HAX_PROVIDER");
+
+    char *dir = t_tempdir();
+    if (dir) {
+        setenv("XDG_STATE_HOME", dir, 1);
+        /* Selecting the canonical id is not a provider change: the saved model is kept
+         * instead of being reset to the new provider's default. */
+        EXPECT(config_persist_selection("llamacpp", NULL, NULL) == 0);
+        EXPECT_STR_EQ(config_str("provider"), "llamacpp");
+        EXPECT_STR_EQ(config_str("model"), "old-model");
+        unsetenv("XDG_STATE_HOME");
+    }
+
+    EXPECT(config_load_state(NULL) == 0);
 }
 
 static void test_provider_binding(void)
@@ -411,15 +438,15 @@ static void test_default_sentinel(void)
      * instead of NULL — same shadowing of lower tiers, one definition of
      * the default. */
     setenv("HAX_LLAMACPP_PORT", "9999", 1);
-    EXPECT_STR_EQ(config_str("llamacpp.port"), "9999");
-    config_set_override("llamacpp.port", CONFIG_VALUE_DEFAULT);
-    EXPECT_STR_EQ(config_str("llamacpp.port"), "8080");
+    EXPECT_STR_EQ(config_str("providers.llamacpp.port"), "9999");
+    config_set_override("providers.llamacpp.port", CONFIG_VALUE_DEFAULT);
+    EXPECT_STR_EQ(config_str("providers.llamacpp.port"), "8080");
     /* An empty override on this key is "unset" (a port has no meaning for
      * ""), so it falls through to the env value instead of reading blank —
      * distinct from the sentinel above, which lands on the default. */
-    config_set_override("llamacpp.port", "");
-    EXPECT_STR_EQ(config_str("llamacpp.port"), "9999");
-    config_set_override("llamacpp.port", NULL);
+    config_set_override("providers.llamacpp.port", "");
+    EXPECT_STR_EQ(config_str("providers.llamacpp.port"), "9999");
+    config_set_override("providers.llamacpp.port", NULL);
     unsetenv("HAX_LLAMACPP_PORT");
 
     /* A setting that documents a meaning for empty reads it back verbatim. */
@@ -491,11 +518,11 @@ static void test_persist_roundtrip(void)
 
     /* Persist a flat and a nested key, then reload from disk. */
     EXPECT(config_persist("model", "saved-model") == 0);
-    EXPECT(config_persist("openai.base_url", "saved-url") == 0);
+    EXPECT(config_persist("providers.openai-compatible.base_url", "saved-url") == 0);
     config_load(NULL); /* drop the in-memory file tier */
     config_init();     /* read it back from disk */
     EXPECT_STR_EQ(config_str("model"), "saved-model");
-    EXPECT_STR_EQ(config_str("openai.base_url"), "saved-url");
+    EXPECT_STR_EQ(config_str("providers.openai-compatible.base_url"), "saved-url");
 
     /* The file may hold API keys: it must be private (0600), and stay
      * private no matter what mode a stale temp file might have had. */
@@ -559,22 +586,22 @@ static void test_persist_flat_key(void)
     snprintf(cfgdir, sizeof cfgdir, "%s/hax", dir);
     EXPECT(mkdir(cfgdir, 0700) == 0);
     snprintf(cfgpath, sizeof cfgpath, "%s/config.json", cfgdir);
-    write_file(cfgpath, "{\"openai.base_url\": \"old\"}");
+    write_file(cfgpath, "{\"providers.openai-compatible.base_url\": \"old\"}");
     config_init();
-    EXPECT(config_persist("openai.base_url", "new") == 0);
-    EXPECT_STR_EQ(config_str("openai.base_url"), "new");
+    EXPECT(config_persist("providers.openai-compatible.base_url", "new") == 0);
+    EXPECT_STR_EQ(config_str("providers.openai-compatible.base_url"), "new");
     config_load(NULL);
     config_init(); /* the rewritten file reads back the new value too */
-    EXPECT_STR_EQ(config_str("openai.base_url"), "new");
+    EXPECT_STR_EQ(config_str("providers.openai-compatible.base_url"), "new");
 
     /* Deleting a key written in flat form must actually delete it. */
-    write_file(cfgpath, "{\"openai.base_url\": \"old\"}");
+    write_file(cfgpath, "{\"providers.openai-compatible.base_url\": \"old\"}");
     config_init();
-    EXPECT(config_persist("openai.base_url", NULL) == 0);
-    EXPECT(config_str("openai.base_url") == NULL);
+    EXPECT(config_persist("providers.openai-compatible.base_url", NULL) == 0);
+    EXPECT(config_str("providers.openai-compatible.base_url") == NULL);
     config_load(NULL);
     config_init();
-    EXPECT(config_str("openai.base_url") == NULL);
+    EXPECT(config_str("providers.openai-compatible.base_url") == NULL);
 
     unsetenv("XDG_CONFIG_HOME");
     unsetenv("XDG_STATE_HOME");
@@ -624,9 +651,10 @@ static void test_registry_introspection(void)
     EXPECT(show_reasoning != NULL && show_reasoning->editable);
     EXPECT_STR_EQ(show_reasoning->choices, CONFIG_CHOICES_BOOL);
     EXPECT(config_setting_find("nonesuch") == NULL);
-    EXPECT(config_setting_find("openai.base_url") != NULL);
-    EXPECT(!config_setting_find("openai.base_url")->editable);
-    const struct config_setting *api_key = config_setting_find("openai.api_key");
+    EXPECT(config_setting_find("providers.openai-compatible.base_url") != NULL);
+    EXPECT(!config_setting_find("providers.openai-compatible.base_url")->editable);
+    const struct config_setting *api_key =
+        config_setting_find("providers.openai-compatible.api_key");
     EXPECT(api_key != NULL && api_key->secret);
     EXPECT(!config_setting_find("markdown")->secret);
 }
@@ -639,7 +667,7 @@ static void test_source_reports_winning_tier(void)
 
     /* Unset and registry-defaulted settings both report "default". */
     EXPECT_STR_EQ(config_source("show_reasoning"), "default");
-    EXPECT_STR_EQ(config_source("llamacpp.port"), "default");
+    EXPECT_STR_EQ(config_source("providers.llamacpp.port"), "default");
 
     EXPECT(config_load("{\"show_reasoning\": \"1\"}") == 0);
     EXPECT_STR_EQ(config_source("show_reasoning"), "config");
@@ -794,14 +822,16 @@ static void test_bounded_and_scaled_value_validation(void)
     EXPECT(config_value_valid(retry_base, "1s"));
     EXPECT(!config_value_valid(retry_base, "0"));
 
-    const struct config_setting *max_tokens = config_setting_find("anthropic.max_tokens");
+    const struct config_setting *max_tokens =
+        config_setting_find("providers.anthropic-compatible.max_tokens");
     EXPECT(max_tokens && !max_tokens->editable && max_tokens->kind == CONFIG_KIND_INT &&
            max_tokens->min == 1);
     EXPECT(config_value_valid(max_tokens, "32000"));
     EXPECT(!config_value_valid(max_tokens, "lots"));
     EXPECT(!config_value_valid(max_tokens, "0"));
 
-    const struct config_setting *thinking_budget = config_setting_find("anthropic.thinking_budget");
+    const struct config_setting *thinking_budget =
+        config_setting_find("providers.anthropic-compatible.thinking_budget");
     EXPECT(thinking_budget && thinking_budget->kind == CONFIG_KIND_INT &&
            thinking_budget->min == 1 && thinking_budget->default_value == NULL);
     EXPECT(config_value_valid(thinking_budget, "1000"));
@@ -868,9 +898,12 @@ static void test_sort_models_auto(void)
     EXPECT(config_value_valid(sort_models, "true"));
     EXPECT(config_value_valid(sort_models, "off"));
     EXPECT(!config_value_valid(sort_models, "banana"));
-    EXPECT_STR_EQ(config_setting_find("openai.send_cache_key")->choices, CONFIG_CHOICES_TRISTATE);
-    EXPECT_STR_EQ(config_setting_find("openai.request_cost")->choices, CONFIG_CHOICES_TRISTATE);
-    EXPECT_STR_EQ(config_setting_find("anthropic.cache")->choices, CONFIG_CHOICES_TRISTATE);
+    EXPECT_STR_EQ(config_setting_find("providers.openai-compatible.send_cache_key")->choices,
+                  CONFIG_CHOICES_TRISTATE);
+    EXPECT_STR_EQ(config_setting_find("providers.openai-compatible.request_cost")->choices,
+                  CONFIG_CHOICES_TRISTATE);
+    EXPECT_STR_EQ(config_setting_find("providers.anthropic-compatible.cache")->choices,
+                  CONFIG_CHOICES_TRISTATE);
 }
 
 static void test_empty_policy(void)
@@ -897,7 +930,7 @@ static void test_empty_policy(void)
     /* Settings that document a meaning for empty keep it: the empty env wins
      * and is reported there, matching what the consumer reads. */
     EXPECT(config_load("{\"system_prompt\": \"from file\", \"effort\": \"high\","
-                       " \"openrouter\": {\"referer\": \"https://x\"},"
+                       " \"providers\": {\"openrouter\": {\"referer\": \"https://x\"}},"
                        " \"transcript\": \"/tmp/transcript\", \"trace\": \"/tmp/trace\"}") == 0);
     setenv("HAX_SYSTEM_PROMPT", "", 1);
     setenv("HAX_EFFORT", "", 1);
@@ -909,9 +942,9 @@ static void test_empty_policy(void)
     EXPECT_STR_EQ(config_source("system_prompt"), "env");
     const char *ef = config_str("effort");
     EXPECT(ef && !*ef);
-    const char *rf = config_str("openrouter.referer");
+    const char *rf = config_str("providers.openrouter.referer");
     EXPECT(rf && !*rf);
-    EXPECT_STR_EQ(config_source("openrouter.referer"), "env");
+    EXPECT_STR_EQ(config_source("providers.openrouter.referer"), "env");
     const char *transcript = config_str("transcript");
     EXPECT(transcript && !*transcript);
     EXPECT_STR_EQ(config_source("transcript"), "env");
@@ -1226,7 +1259,8 @@ static void test_preset_apply_errors(void)
 {
     clear_env();
     EXPECT(config_load("{\"presets\": {"
-                       "\"endpoint\": {\"provider\": \"mock\", \"openai.base_url\": \"u\"},"
+                       "\"endpoint\": {\"provider\": \"mock\", "
+                       "\"providers.openai-compatible.base_url\": \"u\"},"
                        "\"nonscalar\": {\"provider\": \"mock\", \"model\": {\"id\": \"x\"}},"
                        "\"badd\": {\"provider\": \"mock\", \"description\": {\"text\": \"x\"}},"
                        "\"badtint\": {\"provider\": \"mock\", \"tint\": \"chartreuse\"},"
@@ -1246,7 +1280,7 @@ static void test_preset_apply_errors(void)
     EXPECT(err != NULL && strstr(err, "not presettable") != NULL);
     free(err);
     EXPECT(config_str("provider") == NULL);
-    EXPECT(config_str("openai.base_url") == NULL);
+    EXPECT(config_str("providers.openai-compatible.base_url") == NULL);
 
     /* Non-scalar member. */
     err = NULL;
@@ -2073,6 +2107,7 @@ int main(void)
     test_override_beats_env();
     test_state_tier_ordering();
     test_provider_binding();
+    test_provider_binding_canonical_ids();
     test_default_sentinel();
     test_persist_state_roundtrip();
     test_persist_selection();

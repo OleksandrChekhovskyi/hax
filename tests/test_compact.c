@@ -166,7 +166,7 @@ static void init_session(struct agent_session *session)
 {
     memset(session, 0, sizeof(*session));
     session->model = xstrdup("model");
-    session->provider_name = "test";
+    session->provider_id = "test";
     agent_session_append(session,
                          (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup("old history")});
 }

@@ -618,16 +618,16 @@ static void mock_destroy(struct provider *provider)
     free(mock);
 }
 
-struct provider *mock_provider_new(const char *name)
+struct provider *mock_provider_new(const char *id)
 {
-    (void)name;
     struct mock_provider *mock = xcalloc(1, sizeof(*mock));
     mock->base.name = "mock";
+    mock->base.id = id;
     mock->base.default_model = "mock-model";
     mock->base.stream = mock_stream;
     mock->base.destroy = mock_destroy;
 
-    const char *script = config_str("mock.script");
+    const char *script = config_str("providers.mock.script");
     if (script && *script)
         mock->script_path = xstrdup(script);
 
@@ -635,7 +635,7 @@ struct provider *mock_provider_new(const char *name)
 }
 
 const struct provider_factory PROVIDER_MOCK = {
-    .name = "mock",
+    .id = "mock",
     .new = mock_provider_new,
     .internal = 1,
 };

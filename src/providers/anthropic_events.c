@@ -292,8 +292,8 @@ static void handle_message_stop(struct anthropic_events *parser)
 
     const char *reason = parser->stop_reason;
     if (reason && strcmp(reason, "max_tokens") == 0) {
-        emit_terminal_error(parser, "response incomplete: max_tokens — raise "
-                                    "anthropic.max_tokens or lower the effort level");
+        emit_terminal_error(parser, "response incomplete: max_tokens — raise the provider's "
+                                    "max_tokens or lower the effort level");
         return;
     }
     /* pause_turn requires replaying server-side tool state, which hax does not drive. */

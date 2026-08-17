@@ -104,7 +104,7 @@ static int list_models_from_server(struct test_server *server, int n_responses, 
 
     const struct provider_factory *factory = provider_find("anthropic-compatible");
     EXPECT(factory != NULL);
-    struct provider *provider = factory ? factory->new(factory->name) : NULL;
+    struct provider *provider = factory ? factory->new(factory->id) : NULL;
     EXPECT(provider != NULL);
 
     size_t n_models = 0;
@@ -221,7 +221,7 @@ static void test_background_probe_publishes_metadata(void)
 
     const struct provider_factory *factory = provider_find("anthropic-compatible");
     EXPECT(factory != NULL);
-    struct provider *provider = factory ? factory->new(factory->name) : NULL;
+    struct provider *provider = factory ? factory->new(factory->id) : NULL;
     EXPECT(provider != NULL);
     if (provider) {
         model_meta_wait(provider);
@@ -246,13 +246,13 @@ static void test_max_tokens_uses_model_limit(void)
 {
     unsetenv("HAX_ANTHROPIC_MAX_TOKENS");
 
-    EXPECT(config_str("anthropic.max_tokens") == NULL);
-    EXPECT(config_int("anthropic.max_tokens") == 0);
+    EXPECT(config_str("providers.anthropic-compatible.max_tokens") == NULL);
+    EXPECT(config_int("providers.anthropic-compatible.max_tokens") == 0);
 
     setenv("HAX_ANTHROPIC_BASE_URL", "http://127.0.0.1:1", 1);
     const struct provider_factory *factory = provider_find("anthropic-compatible");
     EXPECT(factory != NULL);
-    struct provider *provider = factory ? factory->new(factory->name) : NULL;
+    struct provider *provider = factory ? factory->new(factory->id) : NULL;
     EXPECT(provider != NULL);
     if (!provider)
         return;
@@ -273,12 +273,36 @@ static void test_max_tokens_uses_model_limit(void)
     provider->destroy(provider);
 }
 
+/* First-party identity is pinned: providers.anthropic.base_url is ignored, while tweak fields
+ * such as max_tokens resolve from that same block. */
+static void test_first_party_pins_endpoint(void)
+{
+    config_set_override("providers.anthropic.base_url", "http://127.0.0.1:1");
+    config_set_override("providers.anthropic.max_tokens", "1234");
+
+    struct provider *provider = PROVIDER_ANTHROPIC.new("anthropic");
+    EXPECT(provider != NULL);
+    if (provider) {
+        struct model_probe probe = {0};
+        EXPECT(provider->probe_model(provider, "claude-x", &probe) == 0);
+        EXPECT(probe.url != NULL &&
+               strncmp(probe.url, "https://api.anthropic.com/v1/models", 35) == 0);
+        model_probe_clear(&probe);
+        EXPECT(anthropic_max_tokens(provider, "claude-x") == 1234);
+        provider->destroy(provider);
+    }
+
+    config_set_override("providers.anthropic.max_tokens", NULL);
+    config_set_override("providers.anthropic.base_url", NULL);
+}
+
 int main(void)
 {
     setenv("HAX_ANTHROPIC_API_KEY", "test-key", 1);
 
     /* Keep constructor probes from racing the model-list fixture for its canned response. */
     unsetenv("HAX_MODEL");
+    test_first_party_pins_endpoint();
     test_max_tokens_uses_model_limit();
     test_background_probe_publishes_metadata();
     test_follows_cursor();

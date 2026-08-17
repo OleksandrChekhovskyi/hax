@@ -12,12 +12,6 @@ static json_t *build_text_block(const char *text)
     return json_pack("{s:s, s:s}", "type", "text", "text", text ? text : "");
 }
 
-static int reasoning_matches(const struct item *item, const char *provider, const char *model)
-{
-    return item->provider && item->model && provider && model &&
-           strcmp(item->provider, provider) == 0 && strcmp(item->model, model) == 0;
-}
-
 static void append_reasoning_block(json_t *content, const struct item *item,
                                    int allow_empty_signature)
 {
@@ -71,7 +65,7 @@ static size_t append_assistant_message(json_t *messages, const struct item *item
                 json_array_append_new(content, build_text_block(item->text));
             break;
         case ITEM_REASONING:
-            if (reasoning_matches(item, current_provider, current_model))
+            if (provider_provenance_matches(item, current_provider, current_model))
                 append_reasoning_block(content, item, allow_empty_signature);
             break;
         case ITEM_TOOL_CALL:

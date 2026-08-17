@@ -4,8 +4,9 @@
 
 #include "provider.h"
 
-/* Construct the mock provider. `name` is unused; mock.script is captured at construction. */
-struct provider *mock_provider_new(const char *name);
+/* Construct the mock provider; providers.mock.script is captured at
+ * construction. */
+struct provider *mock_provider_new(const char *id);
 
 extern const struct provider_factory PROVIDER_MOCK;
 

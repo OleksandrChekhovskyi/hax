@@ -281,6 +281,9 @@ struct model_meta; /* model_meta.h; opaque provider-owned storage */
 
 struct provider {
     const char *name;
+    /* Stable selectable id (the factory name). Reasoning provenance and replay matching must use
+     * this, never `name`: display labels can change or collide across providers. */
+    const char *id;
     /* NULL when no safe default exists. Only values derived from live state (server discovery, a
      * companion tool's config) qualify; compiled-in model names go stale in shipped binaries. */
     const char *default_model;
@@ -330,14 +333,28 @@ struct provider_availability {
 /* Release owned request fields and leave `availability` zeroed. NULL-safe. */
 void provider_availability_clear(struct provider_availability *availability);
 
+/* Map a former provider id to its current one so saved sessions and scripts keep resolving;
+ * unrecognized names (including NULL) pass through unchanged. */
+const char *provider_canonical_id(const char *name);
+
+/* Provenance identity: the stable id, or the display name for bare providers without one. */
+const char *provider_stable_id(const struct provider *provider);
+
+/* Whether an item's recorded provenance names this provider/model pair. Sessions written by
+ * earlier versions may carry a former provider id, so both sides are canonicalized. */
+int provider_provenance_matches(const struct item *item, const char *provider, const char *model);
+
 /* Static provider descriptor registered by src/providers/registry.c. */
 struct provider_factory {
-    const char *name; /* HAX_PROVIDER value, e.g. "codex", "llama.cpp" */
-    /* `name` allows one constructor to serve multiple config-defined provider identities. */
-    struct provider *(*new)(const char *name);
+    const char *id; /* HAX_PROVIDER value, e.g. "codex", "llamacpp"; provider->id carries it */
+    /* Default display label when providers.<id>.display_name is not set; NULL → id. */
+    const char *display_name;
+    /* `id` allows one constructor to serve multiple config-defined provider identities; it
+     * outlives the provider, so constructors borrow it into provider->id. */
+    struct provider *(*new)(const char *id);
     /* Prepare an immediate verdict or an owned GET request on the foreground thread. `reason` must
      * be static. NULL means immediately available. */
-    void (*prepare_availability)(const char *name, struct provider_availability *availability);
+    void (*prepare_availability)(const char *id, struct provider_availability *availability);
     /* Hidden from enumeration and automatic selection, but still resolvable explicitly by name. */
     int internal;
 };

@@ -434,7 +434,7 @@ static void test_session_init_missing_provider(void)
     struct agent_session s;
     agent_session_init(&s, NULL, &opts);
     EXPECT(s.model == NULL);
-    EXPECT(s.provider_name == NULL);
+    EXPECT(s.provider_id == NULL);
     EXPECT(s.effort == NULL);
     agent_session_free(&s);
 

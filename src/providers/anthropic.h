@@ -16,11 +16,12 @@ enum anthropic_thinking_mode {
 /* Configuration shared by providers using the Messages API. */
 struct anthropic_preset {
     const char *display_name;     /* defaults to "anthropic" */
-    const char *default_base_url; /* required when base_url is locked or not configured */
+    const char *default_base_url; /* required when <prefix>.base_url does not resolve */
     const char *api_key_env;      /* fallback after the configured API key */
-    const char *config_prefix;    /* NULL uses the global anthropic.* namespace */
+    const char *config_prefix;    /* config namespace; NULL reads no user configuration */
+    int pin_base_url;             /* ignore <prefix>.base_url: a first-party key must not
+                                     follow a configured URL to another host */
     const char *catalog_id;       /* copied; NULL disables catalog metadata */
-    int lock_base_url;            /* ignore configured base_url */
 
     enum anthropic_thinking_mode default_thinking_mode;
     int allow_empty_signature;      /* preserve unsigned thinking blocks on compat backends */
@@ -30,8 +31,8 @@ struct anthropic_preset {
 /* Preset strings need only remain valid during construction. */
 struct provider *anthropic_provider_new_preset(const struct anthropic_preset *preset);
 
-/* Construct the api.anthropic.com provider. `name` is unused. */
-struct provider *anthropic_provider_new(const char *name);
+/* Construct the api.anthropic.com provider; `id` becomes its stable identity. */
+struct provider *anthropic_provider_new(const char *id);
 
 /* Adaptive-thinking effort values ordered from cheapest to most expensive. */
 extern const char *const ANTHROPIC_EFFORT_LADDER[];

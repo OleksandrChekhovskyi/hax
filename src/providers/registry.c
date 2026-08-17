@@ -3,8 +3,10 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "config.h"
 #include "provider.h"
 #include "util.h"
 #include "providers/config_provider.h"
@@ -13,8 +15,6 @@
 // clang-format off
 static const struct provider_factory *const BUILTINS[] = {
     &PROVIDER_CODEX,
-    &PROVIDER_OPENAI_COMPAT,
-    &PROVIDER_ANTHROPIC_COMPAT,
     &PROVIDER_LLAMACPP,
     &PROVIDER_OPENAI,
     &PROVIDER_ANTHROPIC,
@@ -27,7 +27,7 @@ static const struct provider_factory *const BUILTINS[] = {
 static int is_builtin(const char *name)
 {
     for (size_t i = 0; i < N_BUILTINS; i++)
-        if (strcmp(name, BUILTINS[i]->name) == 0)
+        if (strcmp(name, BUILTINS[i]->id) == 0)
             return 1;
     return 0;
 }
@@ -36,15 +36,26 @@ const struct provider_factory *provider_find(const char *name)
 {
     if (!name)
         return NULL;
+    name = provider_canonical_id(name);
     for (size_t i = 0; i < N_BUILTINS; i++)
-        if (strcmp(name, BUILTINS[i]->name) == 0)
+        if (strcmp(name, BUILTINS[i]->id) == 0)
             return BUILTINS[i];
     size_t n;
     const struct provider_factory *const *cfg = config_providers(&n);
     for (size_t i = 0; i < n; i++)
-        if (strcmp(name, cfg[i]->name) == 0)
+        if (strcmp(name, cfg[i]->id) == 0)
             return cfg[i];
     return NULL;
+}
+
+const char *provider_display_name(const struct provider_factory *factory)
+{
+    char *key = xasprintf("providers.%s.display_name", factory->id);
+    const char *configured = config_str_nonempty(key);
+    free(key);
+    if (configured)
+        return configured;
+    return factory->display_name ? factory->display_name : factory->id;
 }
 
 void provider_list_names(FILE *out)
@@ -52,7 +63,7 @@ void provider_list_names(FILE *out)
     size_t factory_count;
     const struct provider_factory *const *factories = provider_all(&factory_count);
     for (size_t i = 0; i < factory_count; i++)
-        fprintf(out, "%s%s", i ? " " : "", factories[i]->name);
+        fprintf(out, "%s%s", i ? " " : "", factories[i]->id);
 }
 
 const struct provider_factory *const *provider_all(size_t *out_count)
@@ -69,7 +80,7 @@ const struct provider_factory *const *provider_all(size_t *out_count)
             if (!BUILTINS[i]->internal)
                 factories[factory_count++] = BUILTINS[i];
         for (size_t i = 0; i < config_count; i++)
-            if (!is_builtin(config_factories[i]->name))
+            if (!is_builtin(config_factories[i]->id))
                 factories[factory_count++] = config_factories[i];
         initialized = 1;
     }

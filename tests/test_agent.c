@@ -247,7 +247,7 @@ static void test_apply_settings_failed_provider_change_keeps_old(void)
     EXPECT(f.result == -1);
     EXPECT(f.state.provider == &f.provider);
     EXPECT(provider_destroy_calls == 0);
-    EXPECT_STR_EQ(f.session.provider_name, "prov-x");
+    EXPECT_STR_EQ(f.session.provider_id, "prov-x");
     EXPECT(out[0] == '\0');
 
     free(out);
@@ -792,15 +792,14 @@ static void test_fork_records_live_selection(void)
 
 /* Session metadata is read back by a resume and handed to provider_find, so
  * it has to carry the resolvable provider id — not the display name, which
- * HAX_PROVIDER_NAME (and config-defined providers) can set to something that
- * resolves to nothing. */
+ * a configured display_name can set to something that resolves to nothing. */
 static void test_session_records_provider_id(void)
 {
     set_state_dir();
     struct fixture f;
     fixture_init(&f); /* clears the env, so pin the id after it */
     setenv("HAX_PROVIDER", "prov-id", 1);
-    f.provider.name = "Display Name"; /* what a provider_name override leaves behind */
+    f.provider.name = "Display Name"; /* what a display_name override leaves behind */
     add_turn(&f.session, "first", "r1");
 
     f.state.session_log =

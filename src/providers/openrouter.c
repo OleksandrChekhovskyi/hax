@@ -15,6 +15,7 @@
 #include "model_meta.h"
 #include "provider.h"
 #include "util.h"
+#include "providers/config_provider.h"
 #include "providers/openai.h"
 #include "providers/openai_messages.h"
 #include "terminal/ansi.h"
@@ -31,10 +32,7 @@
 
 static const char *openrouter_api_key(void)
 {
-    const char *key = config_str("openai.api_key");
-    if (!key || !*key)
-        key = getenv("OPENROUTER_API_KEY");
-    return (key && *key) ? key : NULL;
+    return provider_api_key("providers.openrouter", "OPENROUTER_API_KEY");
 }
 
 /* A missing or malformed capability list is unknown, not unsupported. */
@@ -359,11 +357,11 @@ out:
     return result;
 }
 
-struct provider *openrouter_provider_new(const char *name)
+struct provider *openrouter_provider_new(const char *id)
 {
-    (void)name;
-    const char *title = config_str("openrouter.title");
-    const char *referer = config_str("openrouter.referer");
+    provider_warn_unused_openai_fields(id, OPENAI_WIRE_CHAT, NULL);
+    const char *title = config_str("providers.openrouter.title");
+    const char *referer = config_str("providers.openrouter.referer");
 
     char *title_header = (title && *title) ? xasprintf("X-Title: %s", title) : NULL;
     char *referer_header = (referer && *referer) ? xasprintf("HTTP-Referer: %s", referer) : NULL;
@@ -383,8 +381,9 @@ struct provider *openrouter_provider_new(const char *name)
         .display_name = "openrouter",
         .default_base_url = OPENROUTER_BASE_URL,
         .api_key_env = "OPENROUTER_API_KEY",
-        /* Keep API keys and attribution headers pinned to openrouter.ai. */
-        .lock_base_url = 1,
+        /* Keep the key and attribution headers pinned to openrouter.ai. */
+        .config_prefix = "providers.openrouter",
+        .pin_base_url = 1,
         .send_cache_key_default = 1,
         /* OpenRouter requires explicit cache markers for routed Anthropic models. */
         .cache_auto_default = 1,
@@ -399,6 +398,7 @@ struct provider *openrouter_provider_new(const char *name)
     free(title_header);
     free(referer_header);
     if (provider) {
+        provider->id = id;
         provider->probe_model = openrouter_probe_model;
         provider->query_usage = openrouter_query_usage;
         provider->sort_models = 1;
@@ -407,18 +407,16 @@ struct provider *openrouter_provider_new(const char *name)
     return provider;
 }
 
-static void openrouter_prepare_availability(const char *name,
+static void openrouter_prepare_availability(const char *id,
                                             struct provider_availability *availability)
 {
-    (void)name;
-    const char *reason = NULL;
-    availability->available =
-        openai_key_available("OPENROUTER_API_KEY", "OPENROUTER_API_KEY not set", &reason);
-    availability->reason = reason;
+    (void)id;
+    availability->available = openrouter_api_key() != NULL;
+    availability->reason = availability->available ? NULL : "OPENROUTER_API_KEY not set";
 }
 
 const struct provider_factory PROVIDER_OPENROUTER = {
-    .name = "openrouter",
+    .id = "openrouter",
     .new = openrouter_provider_new,
     .prepare_availability = openrouter_prepare_availability,
 };

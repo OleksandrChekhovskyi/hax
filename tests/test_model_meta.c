@@ -469,7 +469,7 @@ static void test_release_is_honored_by_every_provider(void)
         const struct provider_factory *factory =
             (i < factory_count) ? factories[i] : provider_find("mock");
         EXPECT(factory != NULL);
-        struct provider *provider = factory ? factory->new(factory->name) : NULL;
+        struct provider *provider = factory ? factory->new(factory->id) : NULL;
         if (!provider)
             continue;
         providers_created++;

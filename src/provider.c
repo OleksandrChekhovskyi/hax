@@ -119,6 +119,27 @@ void model_probe_clear(struct model_probe *probe)
     memset(probe, 0, sizeof(*probe));
 }
 
+const char *provider_canonical_id(const char *name)
+{
+    /* Former id of the llamacpp provider ('.' clashes with the config key path separator). */
+    if (name && strcmp(name, "llama.cpp") == 0)
+        return "llamacpp";
+    return name;
+}
+
+const char *provider_stable_id(const struct provider *provider)
+{
+    return provider->id && *provider->id ? provider->id : provider->name;
+}
+
+int provider_provenance_matches(const struct item *item, const char *provider, const char *model)
+{
+    if (!item->provider || !item->model || !provider || !model)
+        return 0;
+    return strcmp(provider_canonical_id(item->provider), provider_canonical_id(provider)) == 0 &&
+           strcmp(item->model, model) == 0;
+}
+
 void provider_availability_clear(struct provider_availability *availability)
 {
     if (!availability)

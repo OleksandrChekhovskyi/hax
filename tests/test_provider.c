@@ -125,6 +125,30 @@ static void test_request_cleanup(void)
     provider_availability_clear(NULL);
 }
 
+static void test_provenance_matching(void)
+{
+    /* The former llamacpp id maps to the current one; everything else passes through. */
+    EXPECT_STR_EQ(provider_canonical_id("llama.cpp"), "llamacpp");
+    EXPECT_STR_EQ(provider_canonical_id("openai"), "openai");
+    EXPECT(provider_canonical_id(NULL) == NULL);
+
+    struct item item = {.kind = ITEM_REASONING, .provider = "llamacpp", .model = "m1"};
+    EXPECT(provider_provenance_matches(&item, "llamacpp", "m1"));
+    EXPECT(!provider_provenance_matches(&item, "llamacpp", "m2"));
+    EXPECT(!provider_provenance_matches(&item, "openai", "m1"));
+
+    /* A session written before the llamacpp rename replays its reasoning after resume. */
+    item.provider = "llama.cpp";
+    EXPECT(provider_provenance_matches(&item, "llamacpp", "m1"));
+
+    /* Display-name provenance from older renamed setups never matches a stable id. */
+    item.provider = "vLLM";
+    EXPECT(!provider_provenance_matches(&item, "openai-compatible", "m1"));
+
+    item.provider = NULL;
+    EXPECT(!provider_provenance_matches(&item, "llamacpp", "m1"));
+}
+
 int main(void)
 {
     test_item_image_totals();
@@ -132,5 +156,6 @@ int main(void)
     test_item_free();
     test_model_info_lifecycle();
     test_request_cleanup();
+    test_provenance_matching();
     T_REPORT();
 }

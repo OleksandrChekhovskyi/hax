@@ -5,6 +5,7 @@
 #include <stddef.h>
 
 #include "provider.h"
+#include "providers/openai.h"
 
 /* Providers defined by data rather than code.
  *
@@ -21,5 +22,48 @@
  * receives the count. Names are not filtered against the compiled-in factories; the
  * registry does that when merging. */
 const struct provider_factory *const *config_providers(size_t *n);
+
+/* Field vocabulary of a providers.<name> block. The inventory is declarative only: value
+ * acceptance lives in the dialect constructors, and the env-alias rows in config.c project a
+ * subset of it (a unit test keeps them in sync). Construction warns about block members
+ * outside the provider's dialect. */
+enum provider_field_dialect {
+    PROVIDER_FIELD_OPENAI_CHAT = 1 << 0,      /* openai-completions */
+    PROVIDER_FIELD_OPENAI_RESPONSES = 1 << 1, /* openai-responses */
+    PROVIDER_FIELD_ANTHROPIC = 1 << 2,        /* anthropic-messages */
+    /* Resolved by the config-provider machinery itself; compiled-in providers ignore it. */
+    PROVIDER_FIELD_CONFIG_DEFINED = 1 << 3,
+};
+#define PROVIDER_FIELD_OPENAI (PROVIDER_FIELD_OPENAI_CHAT | PROVIDER_FIELD_OPENAI_RESPONSES)
+
+struct provider_field {
+    const char *leaf;
+    unsigned dialects;   /* mask of enum provider_field_dialect */
+    unsigned secret : 1; /* value must never be displayed */
+};
+
+/* The full inventory; *n receives its length. */
+const struct provider_field *provider_fields(size_t *n);
+
+/* Warn about providers.<name> block members the provider does not consume. A member is consumed
+ * when its inventory dialect intersects `dialects`, when it is a registered per-provider setting
+ * (a compiled-in module knob such as providers.llamacpp.port), or when the NULL-terminated
+ * `extra` allowlist (may be NULL) names it. `api_label` names the accepting category in the
+ * message. Warnings never fail construction, so a config written for a newer hax still runs. */
+void provider_warn_unused_fields(const char *name, const char *api_label, unsigned dialects,
+                                 const char *const *extra);
+
+/* OpenAI-family variant: resolves providers.<name>.api against `default_wire` and derives the
+ * dialect mask and label from the result. */
+void provider_warn_unused_openai_fields(const char *name, enum openai_wire default_wire,
+                                        const char *const *extra);
+
+/* Resolve the provider's credential: inline <prefix>.api_key, else the named environment
+ * variable. Borrowed; NULL when both are absent or empty. */
+const char *provider_api_key(const char *config_prefix, const char *api_key_env);
+
+/* Resolve <prefix>.cache_ttl to a canonical static "5m" or "1h", warning on any other value.
+ * Defaults to 1h, which suits an interactive agent's pauses better than the API's 5m. */
+const char *provider_cache_ttl(const char *config_prefix);
 
 #endif /* HAX_PROVIDERS_CONFIG_PROVIDER_H */

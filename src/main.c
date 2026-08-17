@@ -37,7 +37,7 @@ static struct provider *select_initial_provider(int one_shot, int *autoselected)
             provider_list_names(stderr);
             fprintf(stderr, ")\n");
         } else {
-            provider = factory->new(factory->name);
+            provider = factory->new(factory->id);
         }
         if (!provider && restored)
             hax_warn("'%s' is what this session was using — pass --provider/--model to "

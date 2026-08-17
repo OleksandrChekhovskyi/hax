@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "provider.h"
 #include "util.h"
 #include "system/fs.h"
 #include "system/path.h"
@@ -27,7 +28,7 @@ static const struct config_setting REGISTRY[] = {
      .description = "Preset from presets.<name> to apply at startup; empty disables"},
     {.key = "provider", .env_var = "HAX_PROVIDER", .keep_empty = 1,
      .description = "Backend: codex, openai, openai-compatible, anthropic, anthropic-compatible, "
-                    "llama.cpp, ollama, openrouter, mock"},
+                    "llamacpp, ollama, openrouter, mock"},
     {.key = "model", .env_var = "HAX_MODEL", .keep_empty = 1,
      .description = "Model id (provider-specific; some auto-fill or require it)"},
     {.key = "effort", .env_var = "HAX_EFFORT", .keep_empty = 1,
@@ -161,72 +162,87 @@ static const struct config_setting REGISTRY[] = {
      .description = "Silence on a streaming response before giving up; 0 disables",
      .kind = CONFIG_KIND_DURATION, .editable = 1},
 
-    /* openai family (shared by the preset-based providers) */
-    {.key = "openai.base_url", .env_var = "HAX_OPENAI_BASE_URL",
-     .description = "Base URL for the OpenAI-compatible endpoint"},
-    {.key = "openai.api_key", .env_var = "HAX_OPENAI_API_KEY", .secret = 1,
-     .description = "Bearer token for OpenAI-family providers"},
-    {.key = "openai.api", .env_var = "HAX_OPENAI_API",
-     .description = "Request protocol: responses or chat (Chat Completions)",
-     .choices = "responses|chat"},
-    {.key = "openai.reasoning_format", .env_var = "HAX_OPENAI_REASONING_FORMAT",
+    /* openai-compatible (the shipped generic-endpoint recipe; the env vars are aliases into
+     * its providers.* block so a compatible endpoint stays one-shot configurable) */
+    {.key = "providers.openai-compatible.base_url", .env_var = "HAX_OPENAI_BASE_URL",
+     .description = "Base URL of the OpenAI-compatible endpoint"},
+    {.key = "providers.openai-compatible.api_key", .env_var = "HAX_OPENAI_API_KEY", .secret = 1,
+     .description = "Bearer token for the OpenAI-compatible endpoint"},
+    {.key = "providers.openai-compatible.display_name", .env_var = "HAX_OPENAI_DISPLAY_NAME",
+     .description = "Display name for the provider in the banner and picker"},
+    {.key = "providers.openai-compatible.api", .env_var = "HAX_OPENAI_API",
+     .description = "Request protocol: chat (Chat Completions) or responses",
+     .choices = "chat|responses"},
+    {.key = "providers.openai-compatible.reasoning_format",
+     .env_var = "HAX_OPENAI_REASONING_FORMAT",
      .description = "Reasoning request dialect: flat or nested", .choices = "flat|nested"},
-    {.key = "openai.reasoning_roundtrip", .env_var = "HAX_REASONING_ROUNDTRIP", .keep_empty = 1,
+    {.key = "providers.openai-compatible.reasoning_roundtrip",
+     .env_var = "HAX_REASONING_ROUNDTRIP", .keep_empty = 1,
      .description = "Replay reasoning text to the model (off/on, or a field name)"},
-    {.key = "openai.send_cache_key", .env_var = "HAX_OPENAI_SEND_CACHE_KEY",
+    {.key = "providers.openai-compatible.send_cache_key", .env_var = "HAX_OPENAI_SEND_CACHE_KEY",
      .choices = CONFIG_CHOICES_TRISTATE,
      .description = "Send a stable prompt_cache_key (prefix-cache hint); auto uses the provider "
                     "default"},
-    {.key = "openai.request_cost", .env_var = "HAX_OPENAI_REQUEST_COST",
+    {.key = "providers.openai-compatible.request_cost", .env_var = "HAX_OPENAI_REQUEST_COST",
      .choices = CONFIG_CHOICES_TRISTATE,
      .description = "Request usage accounting (`usage: {include: true}`) for per-response cost; "
                     "auto uses the provider default"},
-    {.key = "openai.cache", .env_var = "HAX_OPENAI_CACHE",
+    {.key = "providers.openai-compatible.cache", .env_var = "HAX_OPENAI_CACHE",
      .choices = CONFIG_CHOICES_TRISTATE,
      .description = "Send prompt cache_control breakpoints (routers fronting Anthropic models, "
                     "which cache only on request); auto uses the provider default"},
-    {.key = "openai.cache_ttl", .env_var = "HAX_OPENAI_CACHE_TTL", .default_value = "1h",
-     .description = "Cache breakpoint TTL: 5m or 1h (1h suits an interactive agent's pauses)",
+    {.key = "providers.openai-compatible.cache_ttl", .env_var = "HAX_OPENAI_CACHE_TTL",
+     .description = "Cache breakpoint TTL: 5m or 1h (default 1h, suiting an interactive agent's "
+                    "pauses)",
      .choices = "5m|1h"},
-    {.key = "provider_name", .env_var = "HAX_PROVIDER_NAME",
-     .description = "Display name for the provider in the banner"},
 
-    /* anthropic family (shared by the anthropic + anthropic-compatible providers) */
-    {.key = "anthropic.base_url", .env_var = "HAX_ANTHROPIC_BASE_URL",
-     .description = "Base URL for an Anthropic-compatible /v1 endpoint (anthropic-compatible)"},
-    {.key = "anthropic.api_key", .env_var = "HAX_ANTHROPIC_API_KEY", .secret = 1,
-     .description = "x-api-key token for Anthropic-family providers"},
+    /* anthropic-compatible (same scheme for the generic Messages recipe) */
+    {.key = "providers.anthropic-compatible.base_url", .env_var = "HAX_ANTHROPIC_BASE_URL",
+     .description = "Base URL of the Anthropic-compatible /v1 endpoint"},
+    {.key = "providers.anthropic-compatible.api_key", .env_var = "HAX_ANTHROPIC_API_KEY",
+     .secret = 1,
+     .description = "x-api-key token for the Anthropic-compatible endpoint"},
+    {.key = "providers.anthropic-compatible.display_name", .env_var = "HAX_ANTHROPIC_DISPLAY_NAME",
+     .description = "Display name for the provider in the banner and picker"},
     /* Unset follows model metadata; a registry default would make /config report a value the
      * request does not necessarily use. */
-    {.key = "anthropic.max_tokens", .env_var = "HAX_ANTHROPIC_MAX_TOKENS",
+    {.key = "providers.anthropic-compatible.max_tokens", .env_var = "HAX_ANTHROPIC_MAX_TOKENS",
      .description = "Max output tokens (thinking + text) per response; unset follows the model's "
                     "own cap",
      .kind = CONFIG_KIND_INT, .min = 1},
-    {.key = "anthropic.thinking_mode", .env_var = "HAX_ANTHROPIC_THINKING_MODE",
-     .description = "Thinking mode: adaptive, budget, or off (default depends on the provider)",
+    {.key = "providers.anthropic-compatible.thinking_mode",
+     .env_var = "HAX_ANTHROPIC_THINKING_MODE",
+     .description = "Thinking mode: adaptive, budget, or off",
      .choices = "adaptive|budget|off"},
-    {.key = "anthropic.thinking_budget", .env_var = "HAX_ANTHROPIC_THINKING_BUDGET",
+    {.key = "providers.anthropic-compatible.thinking_budget",
+     .env_var = "HAX_ANTHROPIC_THINKING_BUDGET",
      .description = "Budget-mode thinking tokens (default: max_tokens - 1)",
      .kind = CONFIG_KIND_INT, .min = 1},
-    {.key = "anthropic.cache", .env_var = "HAX_ANTHROPIC_CACHE", .choices = CONFIG_CHOICES_TRISTATE,
+    {.key = "providers.anthropic-compatible.cache", .env_var = "HAX_ANTHROPIC_CACHE",
+     .choices = CONFIG_CHOICES_TRISTATE,
      .description = "Send prompt cache_control breakpoints; auto uses the provider default"},
-    {.key = "anthropic.cache_ttl", .env_var = "HAX_ANTHROPIC_CACHE_TTL", .default_value = "1h",
-     .description = "Cache breakpoint TTL: 5m or 1h (1h suits an interactive agent's pauses)",
+    {.key = "providers.anthropic-compatible.cache_ttl", .env_var = "HAX_ANTHROPIC_CACHE_TTL",
+     .description = "Cache breakpoint TTL: 5m or 1h (default 1h, suiting an interactive agent's "
+                    "pauses)",
      .choices = "5m|1h"},
-    {.key = "anthropic.version", .env_var = "HAX_ANTHROPIC_VERSION", .default_value = "2023-06-01",
-     .description = "anthropic-version request header value"},
+    {.key = "providers.anthropic-compatible.version", .env_var = "HAX_ANTHROPIC_VERSION",
+     .description = "anthropic-version request header value (default: 2023-06-01)"},
 
     /* per-provider */
-    {.key = "llamacpp.port", .env_var = "HAX_LLAMACPP_PORT", .default_value = "8080",
-     .description = "Port for the local llama-server (when openai.base_url is unset)",
+    {.key = "providers.llamacpp.base_url", .env_var = "HAX_LLAMACPP_BASE_URL",
+     .description = "Full llama-server base URL; overrides the port setting"},
+    {.key = "providers.llamacpp.api_key", .env_var = "HAX_LLAMACPP_API_KEY", .secret = 1,
+     .description = "Bearer token when llama-server runs with --api-key"},
+    {.key = "providers.llamacpp.port", .env_var = "HAX_LLAMACPP_PORT", .default_value = "8080",
+     .description = "Port for the local llama-server (when base_url is unset)",
      .kind = CONFIG_KIND_INT, .min = 1, .max = 65535},
-    {.key = "openrouter.title", .env_var = "HAX_OPENROUTER_TITLE", .default_value = "hax",
-     .keep_empty = 1,
+    {.key = "providers.openrouter.title", .env_var = "HAX_OPENROUTER_TITLE",
+     .default_value = "hax", .keep_empty = 1,
      .description = "X-Title header for OpenRouter attribution (empty disables)"},
-    {.key = "openrouter.referer", .env_var = "HAX_OPENROUTER_REFERER",
+    {.key = "providers.openrouter.referer", .env_var = "HAX_OPENROUTER_REFERER",
      .default_value = "https://usehax.dev", .keep_empty = 1,
      .description = "HTTP-Referer header for OpenRouter attribution (empty disables)"},
-    {.key = "mock.script", .env_var = "HAX_MOCK_SCRIPT",
+    {.key = "providers.mock.script", .env_var = "HAX_MOCK_SCRIPT",
      .description = "Path to a mock-provider script (mock provider only)"},
 };
 // clang-format on
@@ -463,6 +479,12 @@ static void collect_object_keys(json_t *tier, const char *key, char ***keys, siz
 
 static const char *resolve(const char *key, int skip_empty);
 
+/* Saved selections may predate a provider-id rename; compare identities, not spellings. */
+static int provider_id_equals(const char *left, const char *right)
+{
+    return strcmp(provider_canonical_id(left), provider_canonical_id(right)) == 0;
+}
+
 /* A model or effort stored beside a provider applies only while that provider is active. */
 static int provider_binding_allows(json_t *tier, const char *key)
 {
@@ -474,7 +496,8 @@ static int provider_binding_allows(json_t *tier, const char *key)
         return 1;
 
     const char *active_provider = resolve("provider", 0);
-    return active_provider && *active_provider && strcmp(active_provider, bound_provider) == 0;
+    return active_provider && *active_provider &&
+           provider_id_equals(active_provider, bound_provider);
 }
 
 static int value_present(const char *value, int skip_empty)
@@ -635,6 +658,36 @@ int config_bool_or(const char *key, int default_value)
 {
     int value = parse_bool(resolve(key, 1));
     return value < 0 ? !!default_value : value;
+}
+
+const char *config_scoped_str(const char *prefix, const char *leaf)
+{
+    if (!prefix)
+        return NULL;
+    char *key = xasprintf("%s.%s", prefix, leaf);
+    const char *value = config_str(key);
+    free(key);
+    return value;
+}
+
+int config_scoped_bool_or(const char *prefix, const char *leaf, int fallback)
+{
+    if (!prefix)
+        return fallback;
+    char *key = xasprintf("%s.%s", prefix, leaf);
+    int value = config_bool_or(key, fallback);
+    free(key);
+    return value;
+}
+
+int config_scoped_int(const char *prefix, const char *leaf)
+{
+    if (!prefix)
+        return 0;
+    char *key = xasprintf("%s.%s", prefix, leaf);
+    int value = config_int(key);
+    free(key);
+    return value;
 }
 
 /* A prompt file larger than this is almost certainly a mistake; refusing it beats silently
@@ -1094,7 +1147,7 @@ int config_persist_selection(const char *provider, const char *model, const char
     }
 
     const char *previous_provider = object_get_string(store.state, "provider");
-    int provider_changed = !previous_provider || strcmp(previous_provider, provider) != 0;
+    int provider_changed = !previous_provider || !provider_id_equals(previous_provider, provider);
 
     /* A selection replaces the preset stance that would otherwise reapply on launch. */
     json_object_del(updated, "preset");
