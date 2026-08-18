@@ -548,6 +548,62 @@ static struct stream_usage reported_usage(void)
     };
 }
 
+/* Labels that merely repeat the wire id would bloat every session file for no reader benefit. */
+static void test_turn_usage_provenance_omits_redundant_labels(void)
+{
+    struct agent_session session = {.provider_id = "llamacpp",
+                                    .model = xstrdup("/models/qwen3.gguf"),
+                                    .model_label = xstrdup("/models/qwen3.gguf")};
+    struct provider provider = {.name = "llamacpp"};
+    struct stream_usage usage = reported_usage();
+    struct stream_response response = {.model = "/models/qwen3.gguf", .route = NULL};
+    agent_session_add_turn_usage(&session, &provider, &usage, 1000, &response);
+
+    const struct turn_provenance *provenance = &session.items[0].usage->provenance;
+    EXPECT(!provenance->provider_label);
+    EXPECT(!provenance->model_label);
+    EXPECT(!provenance->effort);
+    EXPECT(!provenance->served_model);
+    agent_session_free(&session);
+}
+
+static void test_turn_usage_provenance_records_distinct_identity(void)
+{
+    struct agent_session session = {.provider_id = "llamacpp",
+                                    .model = xstrdup("/models/qwen3.gguf"),
+                                    .model_label = xstrdup("qwen3"),
+                                    .effort = xstrdup("high")};
+    struct provider provider = {.name = "llama.cpp"};
+    struct stream_usage usage = reported_usage();
+    struct stream_response response = {
+        .id = "gen-abc", .model = "deepseek/deepseek-v4", .route = "Wafer"};
+    agent_session_add_turn_usage(&session, &provider, &usage, 1000, &response);
+
+    const struct turn_provenance *provenance = &session.items[0].usage->provenance;
+    EXPECT_STR_EQ(provenance->provider_label, "llama.cpp");
+    EXPECT_STR_EQ(provenance->model_label, "qwen3");
+    EXPECT_STR_EQ(provenance->effort, "high");
+    EXPECT_STR_EQ(provenance->served_model, "deepseek/deepseek-v4");
+    EXPECT_STR_EQ(provenance->route, "Wafer");
+    EXPECT_STR_EQ(provenance->response_id, "gen-abc");
+    agent_session_free(&session);
+}
+
+/* Compaction footers stand in for no single stream. */
+static void test_turn_usage_provenance_without_response(void)
+{
+    struct agent_session session = {.provider_id = "openrouter", .model = xstrdup("m1")};
+    struct provider provider = {.name = "openrouter"};
+    struct stream_usage usage = reported_usage();
+    agent_session_add_turn_usage(&session, &provider, &usage, 1000, NULL);
+
+    const struct turn_provenance *provenance = &session.items[0].usage->provenance;
+    EXPECT(!provenance->served_model);
+    EXPECT(!provenance->route);
+    EXPECT(!provenance->response_id);
+    agent_session_free(&session);
+}
+
 static void test_mark_interrupt_skips_marked_result(void)
 {
     struct agent_session session = {0};
@@ -556,7 +612,7 @@ static void test_mark_interrupt_skips_marked_result(void)
                                        .call_id = xstrdup("c1"),
                                        .output = xstrdup("partial output\n" INTERRUPT_MARKER)});
     struct stream_usage usage = reported_usage();
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
 
     size_t before = session.n_items;
     agent_session_mark_interrupt(&session);
@@ -571,7 +627,7 @@ static void test_mark_interrupt_marks_clean_result(void)
                                                  .call_id = xstrdup("c2"),
                                                  .output = xstrdup("clean result")});
     struct stream_usage usage = reported_usage();
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
     agent_session_mark_interrupt(&session);
 
     EXPECT(session.n_items == 3);
@@ -611,6 +667,9 @@ int main(void)
     test_session_absorb_no_tool_call();
     test_session_absorb_with_tool_call();
     test_session_context_snapshot();
+    test_turn_usage_provenance_omits_redundant_labels();
+    test_turn_usage_provenance_records_distinct_identity();
+    test_turn_usage_provenance_without_response();
     test_mark_interrupt_skips_marked_result();
     test_mark_interrupt_marks_clean_result();
     test_mark_interrupt_empty_session();

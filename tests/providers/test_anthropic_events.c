@@ -17,6 +17,8 @@ struct captured_event {
     char *args_delta;
     char *json;
     char *message;
+    char *response_id;
+    char *served_model;
     struct stream_usage usage;
 };
 
@@ -63,6 +65,10 @@ static int capture_event(const struct stream_event *event, void *user)
     case EV_DONE:
         captured->message = strdup(event->u.done.stop_reason ? event->u.done.stop_reason : "");
         captured->usage = event->u.done.usage;
+        if (event->u.done.response.id)
+            captured->response_id = strdup(event->u.done.response.id);
+        if (event->u.done.response.model)
+            captured->served_model = strdup(event->u.done.response.model);
         break;
     case EV_ERROR:
         captured->message = strdup(event->u.error.message ? event->u.error.message : "");
@@ -82,6 +88,8 @@ static void reset_capture(struct capture_state *capture)
         free(capture->events[i].args_delta);
         free(capture->events[i].json);
         free(capture->events[i].message);
+        free(capture->events[i].response_id);
+        free(capture->events[i].served_model);
     }
     memset(capture, 0, sizeof(*capture));
 }
@@ -208,6 +216,19 @@ static void test_tool_use_lifecycle(void)
     EXPECT_STR_EQ(capture.events[2].args_delta, "\"ls\"}");
     EXPECT(capture.events[3].kind == EV_TOOL_CALL_END);
     EXPECT_STR_EQ(capture.events[3].id, "toolu_1");
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* message_start names the dated snapshot an alias resolved to. */
+static void test_response_identity_from_message_start(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    FEED(parser, "{\"type\":\"message_start\",\"message\":{\"id\":\"msg_017a\","
+                 "\"model\":\"claude-sonnet-4-5-20250929\",\"usage\":{\"input_tokens\":10}}}");
+    FEED(parser, "{\"type\":\"message_stop\"}");
+    EXPECT(capture.events[0].kind == EV_DONE);
+    EXPECT_STR_EQ(capture.events[0].response_id, "msg_017a");
+    EXPECT_STR_EQ(capture.events[0].served_model, "claude-sonnet-4-5-20250929");
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
@@ -362,5 +383,6 @@ int main(void)
     test_finalize_without_terminal_emits_error();
     test_finalize_after_done_no_extra();
     test_events_after_terminal_are_ignored();
+    test_response_identity_from_message_start();
     T_REPORT();
 }

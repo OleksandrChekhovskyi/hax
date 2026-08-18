@@ -117,6 +117,12 @@ static json_t *turn_usage_to_json(const struct turn_usage *usage)
     json_set_nonnegative_real(object, "cost_total", usage->cost_total);
     if (usage->cost_estimated)
         json_object_set_new(object, "cost_estimated", json_true());
+    json_set_optional_string(object, "provider_label", usage->provenance.provider_label);
+    json_set_optional_string(object, "model_label", usage->provenance.model_label);
+    json_set_optional_string(object, "effort", usage->provenance.effort);
+    json_set_optional_string(object, "served_model", usage->provenance.served_model);
+    json_set_optional_string(object, "route", usage->provenance.route);
+    json_set_optional_string(object, "response_id", usage->provenance.response_id);
     return object;
 }
 
@@ -130,6 +136,12 @@ static double json_get_real_or_negative(const json_t *object, const char *key)
 {
     json_t *value = json_object_get(object, key);
     return json_is_number(value) ? json_number_value(value) : -1;
+}
+
+static char *json_dup_string(const json_t *object, const char *key)
+{
+    const char *value = json_string_value(json_object_get(object, key));
+    return value ? xstrdup(value) : NULL;
 }
 
 static struct turn_usage *turn_usage_from_json(const json_t *object)
@@ -158,6 +170,12 @@ static struct turn_usage *turn_usage_from_json(const json_t *object)
     usage->cost_output = json_get_real_or_negative(object, "cost_out");
     usage->cost_total = json_get_real_or_negative(object, "cost_total");
     usage->cost_estimated = json_is_true(json_object_get(object, "cost_estimated"));
+    usage->provenance.provider_label = json_dup_string(object, "provider_label");
+    usage->provenance.model_label = json_dup_string(object, "model_label");
+    usage->provenance.effort = json_dup_string(object, "effort");
+    usage->provenance.served_model = json_dup_string(object, "served_model");
+    usage->provenance.route = json_dup_string(object, "route");
+    usage->provenance.response_id = json_dup_string(object, "response_id");
     return usage;
 }
 
@@ -226,12 +244,6 @@ json_t *item_to_json(const struct item *item)
         json_object_set_new(object, "images", images);
     }
     return object;
-}
-
-static char *json_dup_string(const json_t *object, const char *key)
-{
-    const char *value = json_string_value(json_object_get(object, key));
-    return value ? xstrdup(value) : NULL;
 }
 
 int item_from_json(const json_t *object, struct item *out)

@@ -29,6 +29,19 @@ tool results, and reasoning items where present. The file is truncated at startu
 `/new`, then appended as the conversation grows. It is useful when debugging prompt/context
 behavior rather than raw HTTP.
 
+Each turn ends with its usage line and, below it, what served the response:
+
+```
+1s · $0.0003 · in 1.8k ~$0.0003 · out 2
+openrouter · openrouter/auto · high → deepseek/deepseek-v4 via Wafer
+```
+
+Provider, model, and reasoning effort are the values that turn ran under, spelled as the startup
+banner spells them, so a `/model` or `/effort` switch is visible where it happened — an effort
+change also explains a cache read dropping to zero on the line above. After the arrow is what
+served the request: the model the response named when it differs from the one asked for, such as
+an alias resolving to a dated snapshot, and the upstream endpoint a provider routed to.
+
 ## Ctrl-T transcript view
 
 In the REPL, press Ctrl-T to open the current transcript in `$PAGER`. This is an in-memory view

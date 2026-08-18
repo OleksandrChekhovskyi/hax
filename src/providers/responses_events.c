@@ -44,6 +44,10 @@ void responses_events_free(struct responses_events *events)
     events->tool_call_capacity = 0;
     free(events->reasoning_item_id);
     events->reasoning_item_id = NULL;
+    free(events->response_id);
+    events->response_id = NULL;
+    free(events->served_model);
+    events->served_model = NULL;
 }
 
 /* Events consumers close the reasoning block at; see turn_consume and the interactive renderer.
@@ -253,6 +257,25 @@ static void handle_tool_call_delta(struct responses_events *events, json_t *root
     emit_event(events, &event);
 }
 
+static void capture_response(struct responses_events *events, json_t *root)
+{
+    json_t *response = root ? json_object_get(root, "response") : NULL;
+    if (!json_is_object(response))
+        return;
+
+    const char *id = json_string_value(json_object_get(response, "id"));
+    if (id && *id && !events->response_id)
+        events->response_id = xstrdup(id);
+    const char *model = json_string_value(json_object_get(response, "model"));
+    if (model && *model && !events->served_model)
+        events->served_model = xstrdup(model);
+}
+
+static struct stream_response response_of(const struct responses_events *events)
+{
+    return (struct stream_response){.id = events->response_id, .model = events->served_model};
+}
+
 /* Usage arrives on terminal events under response.usage. A missing cached-token field is
  * unknown rather than a known cache miss. */
 static void parse_usage(json_t *root, struct stream_usage *usage)
@@ -286,9 +309,10 @@ static void emit_terminal_error(struct responses_events *events, const char *mes
     events->terminal_emitted = 1;
     struct stream_usage usage;
     parse_usage(root, &usage);
+    struct stream_response response = response_of(events);
     struct stream_event event = {
         .kind = EV_ERROR,
-        .u.error = {.message = message, .http_status = 0, .usage = &usage},
+        .u.error = {.message = message, .http_status = 0, .usage = &usage, .response = &response},
     };
     emit_event(events, &event);
 }
@@ -330,7 +354,7 @@ static void handle_completed(struct responses_events *events, json_t *root)
     events->terminal_emitted = 1;
     struct stream_event event = {
         .kind = EV_DONE,
-        .u.done = {.stop_reason = "completed"},
+        .u.done = {.stop_reason = "completed", .response = response_of(events)},
     };
     parse_usage(root, &event.u.done.usage);
     emit_event(events, &event);
@@ -352,6 +376,8 @@ void responses_events_feed(struct responses_events *events, const char *data)
     const char *type = json_string_value(json_object_get(root, "type"));
     if (!type)
         goto out;
+
+    capture_response(events, root);
 
     if (strcmp(type, "response.output_item.added") == 0)
         handle_output_item_added(events, root);

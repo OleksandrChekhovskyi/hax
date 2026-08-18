@@ -192,6 +192,7 @@ struct turn_usage *agent_turn_usage_new(const struct stream_usage *usage, long e
     turn_usage->cost_total = usage->cost;
     turn_usage->cost_estimated = 0;
     turn_usage->uncached_input_tokens = default_uncached_input(usage);
+    turn_usage->provenance = (struct turn_provenance){0};
 
     /* Without token counts, zero-valued categories would imply a decomposition we do not know. */
     if (usage->input_tokens < 0 && usage->output_tokens < 0)

@@ -15,6 +15,8 @@ struct captured_event {
     char *name;
     char *args_delta;
     char *message;
+    char *response_id;
+    char *served_model;
     int http_status;
     struct stream_usage usage;
 };
@@ -61,6 +63,10 @@ static int capture_event(const struct stream_event *event, void *callback_user)
     case EV_DONE:
         captured->message = strdup(event->u.done.stop_reason ? event->u.done.stop_reason : "");
         captured->usage = event->u.done.usage;
+        if (event->u.done.response.id)
+            captured->response_id = strdup(event->u.done.response.id);
+        if (event->u.done.response.model)
+            captured->served_model = strdup(event->u.done.response.model);
         break;
     case EV_ERROR:
         captured->message = strdup(event->u.error.message ? event->u.error.message : "");
@@ -89,6 +95,8 @@ static void event_capture_free(struct event_capture *capture)
         free(capture->events[i].name);
         free(capture->events[i].args_delta);
         free(capture->events[i].message);
+        free(capture->events[i].response_id);
+        free(capture->events[i].served_model);
     }
     memset(capture, 0, sizeof(*capture));
 }
@@ -183,6 +191,21 @@ static void test_completed_emits_done(void)
     responses_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_DONE);
+    fixture_free(&fixture);
+}
+
+/* An early event supplies the identity even when the terminal payload omits it. */
+static void test_response_identity_from_earlier_event(void)
+{
+    struct event_fixture fixture;
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.created\",\"response\":{"
+                          "\"id\":\"resp_123\",\"model\":\"gpt-5.1-2025-11-13\"}}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.completed\"}");
+    EXPECT(fixture.capture.events[0].kind == EV_DONE);
+    EXPECT_STR_EQ(fixture.capture.events[0].response_id, "resp_123");
+    EXPECT_STR_EQ(fixture.capture.events[0].served_model, "gpt-5.1-2025-11-13");
     fixture_free(&fixture);
 }
 
@@ -716,5 +739,6 @@ int main(void)
     test_done_sentinel_usage_unknown();
     test_finalize_without_terminal_emits_error();
     test_finalize_after_completion_is_noop();
+    test_response_identity_from_earlier_event();
     T_REPORT();
 }

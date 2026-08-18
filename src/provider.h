@@ -139,6 +139,28 @@ struct stream_usage {
     double cost;
 };
 
+/* Identity of the response behind one turn, as the provider reported it. Borrowed for the
+ * callback; NULL means unreported. */
+struct stream_response {
+    const char *id;
+    const char *model; /* may resolve an alias or a router's choice */
+    const char *route; /* upstream endpoint a gateway selected */
+};
+
+/* Display identity for one ITEM_TURN_USAGE record. Labels are stored rather than resolved when
+ * rendering because a model label is a provider-instance convention. */
+struct turn_provenance {
+    /* NULL when the item's wire provider/model already reads the same. */
+    char *provider_label;
+    char *model_label;
+    /* Wire effort sent with the request; kept per turn because it changes how the model answers
+     * and can invalidate the prompt cache. */
+    char *effort;
+    char *served_model; /* NULL unless the response named a model other than the request's */
+    char *route;
+    char *response_id; /* recorded for correlation; not rendered */
+};
+
 /* Accounting payload stored in an ITEM_TURN_USAGE record. Costs are USD; negative values are
  * unknown. Category costs are always estimates. The total prefers an exact provider-reported cost,
  * with `cost_estimated` indicating when it is an estimate instead. */
@@ -152,7 +174,11 @@ struct turn_usage {
     double cost_output;
     double cost_total;
     int cost_estimated;
+    struct turn_provenance provenance;
 };
+
+/* Release `usage` and every field it owns. NULL-safe. */
+void turn_usage_free(struct turn_usage *usage);
 
 /* Events emitted by a provider's stream(). Pointer payloads are borrowed and remain valid only for
  * the callback invocation. */
@@ -207,6 +233,7 @@ struct stream_event {
         struct {
             const char *stop_reason;
             struct stream_usage usage;
+            struct stream_response response; /* zeroed when nothing was identified */
         } done;
         struct {
             const char *message;
@@ -216,6 +243,9 @@ struct stream_event {
              * complete ones, so translators that captured usage attach
              * it here and the agent accounts it exactly as EV_DONE's. */
             const struct stream_usage *usage;
+            /* Identity captured before the failure, or NULL; a retained
+             * footer owes the same attribution as EV_DONE's. */
+            const struct stream_response *response;
         } error;
     } u;
 };

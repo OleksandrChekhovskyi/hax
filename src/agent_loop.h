@@ -18,6 +18,10 @@
 struct agent_loop_turn {
     struct turn assembly;
     struct stream_usage usage;
+    /* Owned copy of the terminal event's stream_response, whose strings are only borrowed. */
+    char *response_id;
+    char *served_model;
+    char *route;
     char *error_message;
     long elapsed_ms;
 };

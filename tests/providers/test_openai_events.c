@@ -18,10 +18,18 @@ struct captured_event {
     char *message;
     int http_status;
     struct stream_usage usage;
+    char *response_id;
+    char *served_model;
+    char *route;
     long progress_processed;
     long progress_total;
     long progress_cached;
 };
+
+static char *dup_or_null(const char *value)
+{
+    return value ? strdup(value) : NULL;
+}
 
 struct capture_state {
     struct captured_event events[MAX_CAPTURED_EVENTS];
@@ -68,6 +76,9 @@ static int capture_event(const struct stream_event *event, void *user)
     case EV_DONE:
         captured->message = strdup(event->u.done.stop_reason ? event->u.done.stop_reason : "");
         captured->usage = event->u.done.usage;
+        captured->response_id = dup_or_null(event->u.done.response.id);
+        captured->served_model = dup_or_null(event->u.done.response.model);
+        captured->route = dup_or_null(event->u.done.response.route);
         break;
     case EV_ERROR:
         captured->message = strdup(event->u.error.message ? event->u.error.message : "");
@@ -76,6 +87,11 @@ static int capture_event(const struct stream_event *event, void *user)
             captured->usage = *event->u.error.usage;
         else
             captured->usage = (struct stream_usage){-1, -1, -1, -1, -1, -1};
+        if (event->u.error.response) {
+            captured->response_id = dup_or_null(event->u.error.response->id);
+            captured->served_model = dup_or_null(event->u.error.response->model);
+            captured->route = dup_or_null(event->u.error.response->route);
+        }
         break;
     }
     return 0;
@@ -89,6 +105,9 @@ static void reset_capture(struct capture_state *capture)
         free(capture->events[i].name);
         free(capture->events[i].args_delta);
         free(capture->events[i].message);
+        free(capture->events[i].response_id);
+        free(capture->events[i].served_model);
+        free(capture->events[i].route);
     }
     memset(capture, 0, sizeof(*capture));
 }
@@ -528,6 +547,63 @@ static void test_usage_cost_captured(void)
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
+/* OpenRouter repeats id, model and the upstream endpoint on every chunk. */
+static void test_response_identity_captured_from_chunks(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"id\":\"gen-abc\",\"model\":\"deepseek/deepseek-v4\","
+                                "\"provider\":\"Wafer\",\"choices\":[{\"delta\":"
+                                "{\"content\":\"hi\"}}]}");
+    feed_finish(&parser, "stop");
+    openai_events_feed(&parser, "[DONE]");
+    EXPECT(capture.events[1].kind == EV_DONE);
+    EXPECT_STR_EQ(capture.events[1].response_id, "gen-abc");
+    EXPECT_STR_EQ(capture.events[1].served_model, "deepseek/deepseek-v4");
+    EXPECT_STR_EQ(capture.events[1].route, "Wafer");
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+static void test_response_identity_absent_without_fields(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "stop");
+    openai_events_feed(&parser, "[DONE]");
+    EXPECT(capture.events[0].kind == EV_DONE);
+    EXPECT(!capture.events[0].response_id);
+    EXPECT(!capture.events[0].served_model);
+    EXPECT(!capture.events[0].route);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* The synthesized error is the only event left to carry what the first chunk identified. */
+static void test_response_identity_survives_finalize_without_terminal(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"id\":\"gen-cut\",\"model\":\"openai/gpt-4o-mini\","
+                                "\"provider\":\"OpenAI\",\"choices\":[{\"delta\":"
+                                "{\"content\":\"par\"}}]}");
+    openai_events_finalize(&parser);
+    EXPECT(capture.events[1].kind == EV_ERROR);
+    EXPECT_STR_EQ(capture.events[1].response_id, "gen-cut");
+    EXPECT_STR_EQ(capture.events[1].served_model, "openai/gpt-4o-mini");
+    EXPECT_STR_EQ(capture.events[1].route, "OpenAI");
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* A truncated response still leaves a usage footer, which owes the same attribution. */
+static void test_response_identity_survives_truncation_error(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"id\":\"gen-xyz\",\"model\":\"openai/gpt-4o-mini\","
+                                "\"provider\":\"OpenAI\",\"choices\":[{\"delta\":{},"
+                                "\"finish_reason\":\"length\"}]}");
+    openai_events_feed(&parser, "[DONE]");
+    EXPECT(capture.events[0].kind == EV_ERROR);
+    EXPECT_STR_EQ(capture.events[0].response_id, "gen-xyz");
+    EXPECT_STR_EQ(capture.events[0].route, "OpenAI");
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
 static void test_usage_cache_write_captured(void)
 {
     EVENTS_FIXTURE(capture, parser);
@@ -647,6 +723,10 @@ int main(void)
     test_usage_captured_from_trailing_chunk();
     test_usage_without_cached_details();
     test_usage_cost_captured();
+    test_response_identity_captured_from_chunks();
+    test_response_identity_absent_without_fields();
+    test_response_identity_survives_finalize_without_terminal();
+    test_response_identity_survives_truncation_error();
     test_usage_cache_write_captured();
     test_usage_cache_write_1h_attributed_from_request();
     test_usage_cache_write_1h_needs_a_write();

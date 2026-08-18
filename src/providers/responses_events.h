@@ -17,6 +17,9 @@ struct responses_events {
     size_t tool_call_count;
     size_t tool_call_capacity;
     int terminal_emitted;
+    /* Identity of the response object, repeated on every event that carries one. */
+    char *response_id;
+    char *served_model;
     /* Reasoning part last seen, for separators between parts of one item. Summary and content
      * parts index independently, so the namespace is part of the identity. */
     char *reasoning_item_id;

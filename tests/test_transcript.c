@@ -552,6 +552,97 @@ static void test_usage_without_rates_has_bare_counts(void)
     free(out);
 }
 
+static char *render_provenance(struct turn_usage *usage, const char *provider, const char *model)
+{
+    struct item items[] = {
+        {.kind = ITEM_TURN_BOUNDARY},
+        {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"answer"},
+        {.kind = ITEM_TURN_USAGE,
+         .usage = usage,
+         .provider = (char *)provider,
+         .model = (char *)model},
+    };
+    return render_to_string(NULL, items, sizeof(items) / sizeof(items[0]));
+}
+
+static void test_provenance_falls_back_to_wire_identity(void)
+{
+    struct turn_usage usage = exact_usage();
+    char *out = render_provenance(&usage, "openrouter", "anthropic/claude-sonnet-5");
+    EXPECT(contains(out, ANSI_DIM "openrouter · anthropic/claude-sonnet-5" ANSI_RESET));
+    EXPECT(!contains(out, "→"));
+    EXPECT(!contains(out, " via "));
+    free(out);
+}
+
+static void test_provenance_prefers_display_labels(void)
+{
+    struct turn_usage usage = exact_usage();
+    usage.provenance.provider_label = (char *)"llama.cpp";
+    usage.provenance.model_label = (char *)"qwen3-30b-a3b";
+    char *out = render_provenance(&usage, "llamacpp", "/models/qwen3-30b-a3b.gguf");
+    EXPECT(contains(out, "llama.cpp · qwen3-30b-a3b"));
+    EXPECT(!contains(out, ".gguf"));
+    free(out);
+}
+
+static void test_provenance_reports_effort_with_the_model(void)
+{
+    struct turn_usage usage = exact_usage();
+    usage.provenance.effort = (char *)"high";
+    char *out = render_provenance(&usage, "anthropic", "claude-sonnet-5");
+    EXPECT(contains(out, "anthropic · claude-sonnet-5 · high"));
+    free(out);
+}
+
+/* Without the arrow the route would trail the effort level and read as part of it. */
+static void test_provenance_arrows_route_after_effort(void)
+{
+    struct turn_usage usage = exact_usage();
+    usage.provenance.effort = (char *)"low";
+    usage.provenance.route = (char *)"OpenAI";
+    char *out = render_provenance(&usage, "openrouter", "openai/gpt-5-mini");
+    EXPECT(contains(out, "openrouter · openai/gpt-5-mini · low → OpenAI"));
+    free(out);
+}
+
+static void test_provenance_omits_effort_when_unset(void)
+{
+    struct turn_usage usage = exact_usage();
+    char *out = render_provenance(&usage, "anthropic", "claude-sonnet-5");
+    EXPECT(contains(out, ANSI_DIM "anthropic · claude-sonnet-5" ANSI_RESET));
+    free(out);
+}
+
+static void test_provenance_reports_route_and_served_model(void)
+{
+    struct turn_usage usage = exact_usage();
+    usage.provenance.served_model = (char *)"deepseek/deepseek-v4";
+    usage.provenance.route = (char *)"Wafer";
+    char *out = render_provenance(&usage, "openrouter", "openrouter/auto");
+    EXPECT(contains(out, "openrouter · openrouter/auto → deepseek/deepseek-v4 via Wafer"));
+    free(out);
+}
+
+/* The response id is recorded for post-hoc correlation, not shown alongside the conversation. */
+static void test_provenance_omits_response_id(void)
+{
+    struct turn_usage usage = exact_usage();
+    usage.provenance.response_id = (char *)"gen-1787062607-yRVup";
+    char *out = render_provenance(&usage, "openrouter", "openai/gpt-4o-mini");
+    EXPECT(!contains(out, "gen-1787062607"));
+    free(out);
+}
+
+static void test_provenance_omitted_without_identity(void)
+{
+    struct turn_usage usage = exact_usage();
+    char *out = render_provenance(&usage, NULL, NULL);
+    /* Nothing follows the accounting line: it closes the turn directly. */
+    EXPECT(contains(out, "out 50 ~$0.0002" ANSI_RESET "\n\n"));
+    free(out);
+}
+
 static void test_reasoning_text_has_section_and_dimmed_lines(void)
 {
     struct item items[] = {{
@@ -614,5 +705,13 @@ int main(void)
     test_overlapping_cache_usage_uses_precomputed_uncached_count();
     test_tiny_usage_cost_is_omitted();
     test_usage_without_rates_has_bare_counts();
+    test_provenance_falls_back_to_wire_identity();
+    test_provenance_prefers_display_labels();
+    test_provenance_reports_effort_with_the_model();
+    test_provenance_arrows_route_after_effort();
+    test_provenance_omits_effort_when_unset();
+    test_provenance_reports_route_and_served_model();
+    test_provenance_omits_response_id();
+    test_provenance_omitted_without_identity();
     T_REPORT();
 }

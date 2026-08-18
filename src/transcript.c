@@ -383,6 +383,41 @@ static void render_token_usage(FILE *out, int *is_first, const char *label, long
     }
 }
 
+/* Debugging detail rather than the transcript's subject, so it stays dim and below the numbers. */
+static void render_turn_provenance(const struct transcript_renderer *renderer,
+                                   const struct item *item)
+{
+    const struct turn_provenance *provenance = &item->usage->provenance;
+    const char *provider = provenance->provider_label ? provenance->provider_label : item->provider;
+    const char *model = provenance->model_label ? provenance->model_label : item->model;
+    if ((!provider || !*provider) && (!model || !*model))
+        return;
+
+    FILE *out = renderer->out;
+    fputs(ansi(renderer, ANSI_DIM), out);
+    /* Spelled as the banner spells it, so the same triple is recognizable in both. */
+    if (provider && *provider)
+        fputs(provider, out);
+    if (model && *model) {
+        if (provider && *provider)
+            fputs(glyph(" · ", " | "), out);
+        fputs(model, out);
+        if (provenance->effort)
+            fprintf(out, "%s%s", glyph(" · ", " | "), provenance->effort);
+    }
+
+    /* The arrow introduces the response side unconditionally: a bare "via" trailing the effort
+     * level would read as part of it. */
+    if (provenance->served_model || provenance->route) {
+        fputs(glyph(" → ", " -> "), out);
+        fputs(provenance->served_model ? provenance->served_model : provenance->route, out);
+        if (provenance->served_model && provenance->route)
+            fprintf(out, " via %s", provenance->route);
+    }
+    fputs(ansi(renderer, ANSI_RESET), out);
+    fputc('\n', out);
+}
+
 static void render_turn_usage(const struct transcript_renderer *renderer,
                               const struct turn_usage *turn_usage)
 {
@@ -493,6 +528,7 @@ void transcript_render_items(FILE *out, enum transcript_render_mode mode, const 
             if (!item->usage)
                 continue;
             render_turn_usage(&renderer, item->usage);
+            render_turn_provenance(&renderer, item);
             break;
         }
         fputc('\n', out);

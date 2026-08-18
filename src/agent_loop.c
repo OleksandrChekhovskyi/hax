@@ -24,6 +24,29 @@ struct loop_turn_sink {
     void *observer_user;
 };
 
+static void capture_response(struct agent_loop_turn *loop_turn,
+                             const struct stream_response *response)
+{
+    if (!response)
+        return;
+    if (!loop_turn->response_id && response->id)
+        loop_turn->response_id = xstrdup(response->id);
+    if (!loop_turn->served_model && response->model)
+        loop_turn->served_model = xstrdup(response->model);
+    if (!loop_turn->route && response->route)
+        loop_turn->route = xstrdup(response->route);
+}
+
+/* Borrowed view of the identity captured above, for the turn's usage footer. */
+static struct stream_response turn_response(const struct agent_loop_turn *loop_turn)
+{
+    return (struct stream_response){
+        .id = loop_turn->response_id,
+        .model = loop_turn->served_model,
+        .route = loop_turn->route,
+    };
+}
+
 static int loop_turn_on_event(const struct stream_event *ev, void *user)
 {
     struct loop_turn_sink *sink = user;
@@ -31,11 +54,13 @@ static int loop_turn_on_event(const struct stream_event *ev, void *user)
 
     if (ev->kind == EV_DONE) {
         loop_turn->usage = ev->u.done.usage;
+        capture_response(loop_turn, &ev->u.done.response);
     } else if (ev->kind == EV_ERROR) {
         if (!loop_turn->error_message && ev->u.error.message)
             loop_turn->error_message = xstrdup(ev->u.error.message);
         if (ev->u.error.usage)
             loop_turn->usage = *ev->u.error.usage;
+        capture_response(loop_turn, ev->u.error.response);
     }
 
     if (sink->observer)
@@ -69,6 +94,12 @@ void agent_loop_turn_destroy(struct agent_loop_turn *loop_turn)
     turn_reset(&loop_turn->assembly);
     free(loop_turn->error_message);
     loop_turn->error_message = NULL;
+    free(loop_turn->response_id);
+    loop_turn->response_id = NULL;
+    free(loop_turn->served_model);
+    loop_turn->served_model = NULL;
+    free(loop_turn->route);
+    loop_turn->route = NULL;
 }
 
 /* True when the turn's stream produced anything at all — finished items, open text/reasoning,
@@ -194,9 +225,11 @@ static void loop_observe_tools(const struct agent_loop_params *params, size_t fr
 static void loop_add_usage(const struct agent_loop_params *params,
                            const struct agent_loop_turn *loop_turn, int aborted)
 {
-    if (!aborted || agent_usage_is_reported(&loop_turn->usage))
+    if (!aborted || agent_usage_is_reported(&loop_turn->usage)) {
+        struct stream_response response = turn_response(loop_turn);
         agent_session_add_turn_usage(params->session, params->provider, &loop_turn->usage,
-                                     loop_turn->elapsed_ms);
+                                     loop_turn->elapsed_ms, &response);
+    }
 }
 
 static void loop_flush(const struct agent_loop_params *params)

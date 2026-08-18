@@ -36,6 +36,39 @@ void openai_events_free(struct openai_events *parser)
     parser->finish_reason = NULL;
     free(parser->finish_error);
     parser->finish_error = NULL;
+    free(parser->response_id);
+    parser->response_id = NULL;
+    free(parser->served_model);
+    parser->served_model = NULL;
+    free(parser->route);
+    parser->route = NULL;
+}
+
+static void capture_first_string(char **field, const json_t *root, const char *key)
+{
+    if (*field)
+        return;
+    const char *value = json_string_value(json_object_get(root, key));
+    if (value && *value)
+        *field = xstrdup(value);
+}
+
+/* `provider` is OpenRouter's name for the upstream endpoint it routed to; plain OpenAI-compatible
+ * servers omit it. */
+static void capture_response(struct openai_events *parser, json_t *root)
+{
+    capture_first_string(&parser->response_id, root, "id");
+    capture_first_string(&parser->served_model, root, "model");
+    capture_first_string(&parser->route, root, "provider");
+}
+
+static struct stream_response response_of(const struct openai_events *parser)
+{
+    return (struct stream_response){
+        .id = parser->response_id,
+        .model = parser->served_model,
+        .route = parser->route,
+    };
 }
 
 static struct openai_tool_call *find_tool_call(struct openai_events *parser, int index)
@@ -237,6 +270,7 @@ static void handle_progress(struct openai_events *parser, json_t *root)
 
 static void emit_terminal_event(struct openai_events *parser)
 {
+    struct stream_response response = response_of(parser);
     if (parser->finish_error) {
         struct stream_event event = {
             .kind = EV_ERROR,
@@ -245,6 +279,7 @@ static void emit_terminal_event(struct openai_events *parser)
                     .message = parser->finish_error,
                     .http_status = 0,
                     .usage = &parser->usage,
+                    .response = &response,
                 },
         };
         emit_event(parser, &event);
@@ -257,6 +292,7 @@ static void emit_terminal_event(struct openai_events *parser)
             {
                 .stop_reason = parser->finish_reason ? parser->finish_reason : "stop",
                 .usage = parser->usage,
+                .response = response,
             },
     };
     emit_event(parser, &event);
@@ -300,6 +336,7 @@ static void handle_error(struct openai_events *parser, json_t *error)
 
     parser->terminal_emitted = 1;
     const char *message = json_string_value(json_object_get(error, "message"));
+    struct stream_response response = response_of(parser);
     struct stream_event event = {
         .kind = EV_ERROR,
         .u.error =
@@ -307,6 +344,7 @@ static void handle_error(struct openai_events *parser, json_t *error)
                 .message = message ? message : "provider error",
                 .http_status = 0,
                 .usage = &parser->usage,
+                .response = &response,
             },
     };
     emit_event(parser, &event);
@@ -353,6 +391,7 @@ void openai_events_feed(struct openai_events *parser, const char *data)
     }
 
     /* Usage and progress chunks may have no choices. */
+    capture_response(parser, root);
     capture_usage(parser, root);
     handle_progress(parser, root);
 
@@ -374,6 +413,7 @@ void openai_events_finalize(struct openai_events *parser)
         return;
     }
 
+    struct stream_response response = response_of(parser);
     struct stream_event event = {
         .kind = EV_ERROR,
         .u.error =
@@ -381,6 +421,7 @@ void openai_events_finalize(struct openai_events *parser)
                 .message = "stream ended before completion",
                 .http_status = 0,
                 .usage = &parser->usage,
+                .response = &response,
             },
     };
     emit_event(parser, &event);

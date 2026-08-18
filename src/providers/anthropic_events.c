@@ -35,11 +35,20 @@ void anthropic_events_free(struct anthropic_events *parser)
     parser->n_blocks = parser->block_capacity = 0;
     free(parser->stop_reason);
     parser->stop_reason = NULL;
+    free(parser->response_id);
+    parser->response_id = NULL;
+    free(parser->served_model);
+    parser->served_model = NULL;
 }
 
 static int emit(struct anthropic_events *parser, const struct stream_event *event)
 {
     return parser->callback(event, parser->callback_user);
+}
+
+static struct stream_response response_of(const struct anthropic_events *parser)
+{
+    return (struct stream_response){.id = parser->response_id, .model = parser->served_model};
 }
 
 static struct anthropic_content_block *find_block(struct anthropic_events *parser, int index)
@@ -261,6 +270,12 @@ static void capture_usage(struct anthropic_events *parser, json_t *usage)
 static void handle_message_start(struct anthropic_events *parser, json_t *root)
 {
     json_t *message = json_object_get(root, "message");
+    const char *id = json_string_value(json_object_get(message, "id"));
+    if (id && *id && !parser->response_id)
+        parser->response_id = xstrdup(id);
+    const char *model = json_string_value(json_object_get(message, "model"));
+    if (model && *model && !parser->served_model)
+        parser->served_model = xstrdup(model);
     capture_usage(parser, json_object_get(message, "usage"));
 }
 
@@ -278,9 +293,13 @@ static void handle_message_delta(struct anthropic_events *parser, json_t *root)
 static void emit_terminal_error(struct anthropic_events *parser, const char *message)
 {
     parser->terminal_emitted = 1;
+    struct stream_response response = response_of(parser);
     struct stream_event event = {
         .kind = EV_ERROR,
-        .u.error = {.message = message, .http_status = 0, .usage = &parser->usage},
+        .u.error = {.message = message,
+                    .http_status = 0,
+                    .usage = &parser->usage,
+                    .response = &response},
     };
     emit(parser, &event);
 }
@@ -305,7 +324,9 @@ static void handle_message_stop(struct anthropic_events *parser)
     parser->terminal_emitted = 1;
     struct stream_event event = {
         .kind = EV_DONE,
-        .u.done = {.stop_reason = reason ? reason : "end_turn", .usage = parser->usage},
+        .u.done = {.stop_reason = reason ? reason : "end_turn",
+                   .usage = parser->usage,
+                   .response = response_of(parser)},
     };
     emit(parser, &event);
 }

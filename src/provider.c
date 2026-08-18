@@ -73,8 +73,21 @@ void item_free(struct item *item)
     free(item->reasoning_text);
     free(item->provider);
     free(item->model);
-    free(item->usage);
+    turn_usage_free(item->usage);
     memset(item, 0, sizeof(*item));
+}
+
+void turn_usage_free(struct turn_usage *usage)
+{
+    if (!usage)
+        return;
+    free(usage->provenance.provider_label);
+    free(usage->provenance.model_label);
+    free(usage->provenance.effort);
+    free(usage->provenance.served_model);
+    free(usage->provenance.route);
+    free(usage->provenance.response_id);
+    free(usage);
 }
 
 void model_info_init(struct model_info *info)

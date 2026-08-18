@@ -35,6 +35,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   approve a code on the printed `auth.openai.com` page and hax keeps the token refreshed from
   then on. `/logout` removes the login. Credentials from the codex CLI keep working (read-only)
   when no hax-managed login exists. See [docs/providers.md](docs/providers.md#codex).
+- The transcript names what served each turn below its usage line: provider, model and reasoning
+  effort as they were for that turn, the model the response reported when it differs from the
+  request, and OpenRouter's upstream endpoint.
 - `HAX_TRACE` redacts credentials inside request and error bodies, not just headers.
 - Every provider block accepts `extra_body` and `extra_headers`: raw JSON members merged into
   each request body (OpenRouter routing preferences, service tiers, sampling knobs) and extra

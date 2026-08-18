@@ -43,7 +43,13 @@ static int turn_usage_equal(const struct turn_usage *a, const struct turn_usage 
            a->cost_input == b->cost_input && a->cost_cache_read == b->cost_cache_read &&
            a->cost_cache_write == b->cost_cache_write && a->cost_output == b->cost_output &&
            a->cost_total == b->cost_total && a->cost_estimated == b->cost_estimated &&
-           a->uncached_input_tokens == b->uncached_input_tokens;
+           a->uncached_input_tokens == b->uncached_input_tokens &&
+           nullable_strings_equal(a->provenance.provider_label, b->provenance.provider_label) &&
+           nullable_strings_equal(a->provenance.model_label, b->provenance.model_label) &&
+           nullable_strings_equal(a->provenance.effort, b->provenance.effort) &&
+           nullable_strings_equal(a->provenance.served_model, b->provenance.served_model) &&
+           nullable_strings_equal(a->provenance.route, b->provenance.route) &&
+           nullable_strings_equal(a->provenance.response_id, b->provenance.response_id);
 }
 
 static int item_images_equal(const struct item *a, const struct item *b)
@@ -108,6 +114,12 @@ static struct turn_usage ESTIMATED_USAGE = {
     .cost_output = 0.084,
     .cost_total = 0.188,
     .cost_estimated = 1,
+    .provenance = {.provider_label = (char *)"llama.cpp",
+                   .model_label = (char *)"qwen3-30b-a3b",
+                   .effort = (char *)"high",
+                   .served_model = (char *)"deepseek/deepseek-v4",
+                   .route = (char *)"Wafer",
+                   .response_id = (char *)"gen-abc"},
 };
 static struct turn_usage EXACT_USAGE = {
     .usage = {.input_tokens = 1000,

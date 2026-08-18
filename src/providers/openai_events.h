@@ -31,6 +31,11 @@ struct openai_events {
     char *finish_reason;
     char *finish_error;
     struct stream_usage usage;
+    /* Chunk-reported identity, first non-empty value winning: a stream serves one response, and
+     * OpenRouter repeats these on every chunk. */
+    char *response_id;
+    char *served_model;
+    char *route;
     int terminal_emitted;
 
     int emit_progress;

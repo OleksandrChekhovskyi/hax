@@ -103,6 +103,10 @@ static char *build_summary_seed(const char *summary)
 struct compact_attempt {
     struct stream_usage usage;
     long elapsed_ms;
+    /* Owned; the terminal event's stream_response only borrows its strings. */
+    char *response_id;
+    char *served_model;
+    char *route;
 };
 
 struct compact_attempt_log {
@@ -132,32 +136,49 @@ static void attempt_log_init(struct compact_attempt_log *log)
     log->attempt_started_ms = monotonic_ms();
 }
 
-static void attempt_log_record(struct compact_attempt_log *log, const struct stream_usage *usage)
+static void attempt_log_record(struct compact_attempt_log *log, const struct stream_usage *usage,
+                               const struct stream_response *response)
 {
     long now_ms = monotonic_ms();
     if (log->count < COMPACT_MAX_ATTEMPTS) {
         struct compact_attempt *attempt = &log->attempts[log->count++];
         attempt->usage = *usage;
         attempt->elapsed_ms = now_ms - log->attempt_started_ms;
+        attempt->response_id = response && response->id ? xstrdup(response->id) : NULL;
+        attempt->served_model = response && response->model ? xstrdup(response->model) : NULL;
+        attempt->route = response && response->route ? xstrdup(response->route) : NULL;
     }
     log->attempt_started_ms = now_ms;
+}
+
+static void attempt_log_free(struct compact_attempt_log *log)
+{
+    for (size_t i = 0; i < log->count; i++) {
+        free(log->attempts[i].response_id);
+        free(log->attempts[i].served_model);
+        free(log->attempts[i].route);
+    }
+    log->count = 0;
 }
 
 static int compact_sink_on_event(const struct stream_event *event, void *user)
 {
     struct compact_sink *sink = user;
     const struct stream_usage *usage = NULL;
+    const struct stream_response *response = NULL;
 
     if (event->kind == EV_DONE) {
         usage = &event->u.done.usage;
+        response = &event->u.done.response;
     } else if (event->kind == EV_ERROR) {
         if (!sink->error_message)
             sink->error_message =
                 xstrdup(event->u.error.message ? event->u.error.message : "stream failed");
         usage = event->u.error.usage;
+        response = event->u.error.response;
     }
     if (usage)
-        attempt_log_record(&sink->attempt_log, usage);
+        attempt_log_record(&sink->attempt_log, usage, response);
     if (sink->hooks->on_event)
         sink->hooks->on_event(event, sink->hooks->user);
     turn_consume(&sink->turn, event);
@@ -313,9 +334,15 @@ static void flush_compaction_logs(const struct compact_params *params)
 static void append_attempt_usage(const struct compact_params *params,
                                  const struct compact_attempt_log *log, size_t first, size_t end)
 {
-    for (size_t i = first; i < end; i++)
+    for (size_t i = first; i < end; i++) {
+        struct stream_response response = {
+            .id = log->attempts[i].response_id,
+            .model = log->attempts[i].served_model,
+            .route = log->attempts[i].route,
+        };
         agent_session_add_turn_usage(params->session, params->provider, &log->attempts[i].usage,
-                                     log->attempts[i].elapsed_ms);
+                                     log->attempts[i].elapsed_ms, &response);
+    }
 }
 
 void compact_run(const struct compact_params *params, struct compact_result *result)
@@ -354,6 +381,7 @@ void compact_run(const struct compact_params *params, struct compact_result *res
 
     if (!summary || !*summary) {
         append_attempt_usage(params, &sink.attempt_log, 0, sink.attempt_log.count);
+        attempt_log_free(&sink.attempt_log);
         flush_compaction_logs(params);
         free(summary);
         if (cancelled)
@@ -371,6 +399,7 @@ void compact_run(const struct compact_params *params, struct compact_result *res
     append_summary_seed(params->session, summary);
     free(summary);
     append_attempt_usage(params, &sink.attempt_log, accepted_usage_index, sink.attempt_log.count);
+    attempt_log_free(&sink.attempt_log);
     flush_compaction_logs(params);
     result->outcome = COMPACT_COMPLETE;
 }

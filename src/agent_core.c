@@ -374,13 +374,39 @@ void agent_session_mark_interrupt(struct agent_session *session)
                                   });
 }
 
+/* An ordinary session then stores nothing extra, while a renamed provider or a gguf path still
+ * reads as the banner showed it. */
+static char *label_if_distinct(const char *label, const char *wire_id)
+{
+    if (!label || !*label || (wire_id && strcmp(label, wire_id) == 0))
+        return NULL;
+    return xstrdup(label);
+}
+
+static void fill_provenance(struct turn_provenance *provenance, struct agent_session *session,
+                            const struct provider *provider, const struct stream_response *response)
+{
+    provenance->provider_label =
+        label_if_distinct(provider ? provider->name : NULL, session->provider_id);
+    provenance->model_label = label_if_distinct(session->model_label, session->model);
+    provenance->effort = session->effort && *session->effort ? xstrdup(session->effort) : NULL;
+    if (!response)
+        return;
+
+    provenance->served_model = label_if_distinct(response->model, session->model);
+    provenance->route = response->route ? xstrdup(response->route) : NULL;
+    provenance->response_id = response->id ? xstrdup(response->id) : NULL;
+}
+
 void agent_session_add_turn_usage(struct agent_session *session, const struct provider *provider,
-                                  const struct stream_usage *usage, long elapsed_ms)
+                                  const struct stream_usage *usage, long elapsed_ms,
+                                  const struct stream_response *response)
 {
     struct turn_usage *turn_usage =
         agent_turn_usage_new(usage, elapsed_ms, provider, session->model);
     if (!turn_usage)
         return;
+    fill_provenance(&turn_usage->provenance, session, provider, response);
     agent_session_append(
         session, (struct item){
                      .kind = ITEM_TURN_USAGE,

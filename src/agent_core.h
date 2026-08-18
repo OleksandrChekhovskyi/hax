@@ -92,9 +92,11 @@ void agent_session_add_continuation(struct agent_session *session);
 /* Append a boundary between provider round-trips in one user turn. */
 void agent_session_add_boundary(struct agent_session *session);
 
-/* Append an owned usage footer for one provider round-trip. */
+/* Append an owned usage footer for one provider round-trip. `response` is the identity the
+ * provider reported for it, or NULL when the footer stands in for no single stream. */
 void agent_session_add_turn_usage(struct agent_session *session, const struct provider *provider,
-                                  const struct stream_usage *usage, long elapsed_ms);
+                                  const struct stream_usage *usage, long elapsed_ms,
+                                  const struct stream_response *response);
 
 /* Add an interrupt marker unless the latest content is an already-marked tool result. */
 void agent_session_mark_interrupt(struct agent_session *session);

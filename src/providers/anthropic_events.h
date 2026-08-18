@@ -38,6 +38,9 @@ struct anthropic_events {
 
     /* Input/cache usage arrives at message_start and output usage at message_delta. */
     struct stream_usage usage;
+    /* Identity arrives with message_start; the model resolves an alias to a dated snapshot. */
+    char *response_id;
+    char *served_model;
     char *stop_reason;
     int terminal_emitted;
 };

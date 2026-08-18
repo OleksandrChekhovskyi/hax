@@ -106,6 +106,9 @@ OpenRouter reports per-response cost, which hax uses in turn stats and `/session
 key spend and available credits. Model metadata also supplies context limits and image/tool
 capabilities when available.
 
+The [transcript](debugging.md#transcript-log) reports the upstream endpoint OpenRouter routed each
+response to, which is how to confirm that `extra_body` routing preferences took effect.
+
 hax sends its project URL and title for OpenRouter app attribution by default. Set
 `providers.openrouter.referer` or `providers.openrouter.title` to an empty string to omit those
 headers.
