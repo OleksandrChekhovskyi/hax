@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "cred_store.h"
 #include "harness.h"
 #include "util.h"
 #include "providers/codex_auth.h"
@@ -153,7 +154,8 @@ static void test_rejected_load_zeroes_output(void)
     codex_auth_release(&auth);
 }
 
-/* Point HOME at a scratch directory so the loader reads a file the test controls. */
+/* Point HOME at a scratch directory so the loader reads a file the test controls. The hax
+ * credential store lookup must also resolve under the scratch home, not the developer's. */
 static char *auth_home(void)
 {
     char *home = t_tempdir();
@@ -161,6 +163,7 @@ static char *auth_home(void)
     EXPECT(mkdir(codex_dir, 0700) == 0);
     free(codex_dir);
     setenv("HOME", home, 1);
+    unsetenv("XDG_STATE_HOME");
     return home;
 }
 
@@ -288,11 +291,91 @@ static void test_equal_handles_zeroed(void)
     EXPECT(!codex_auth_equal(&partial, &loaded));
 }
 
+static void test_jwt_exp(void)
+{
+    char *jwt = make_jwt("{\"exp\":1755500000}");
+    EXPECT(codex_jwt_exp(jwt) == 1755500000);
+    free(jwt);
+
+    jwt = make_jwt("{}");
+    EXPECT(codex_jwt_exp(jwt) == 0);
+    free(jwt);
+
+    jwt = make_jwt("{\"exp\":\"soon\"}");
+    EXPECT(codex_jwt_exp(jwt) == 0);
+    free(jwt);
+
+    EXPECT(codex_jwt_exp(NULL) == 0);
+    EXPECT(codex_jwt_exp("not-a-jwt") == 0);
+}
+
+static void test_jwt_account_id(void)
+{
+    char *jwt = make_jwt("{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"acc-42\"}}");
+    char *account_id = codex_jwt_account_id(jwt);
+    EXPECT_STR_EQ(account_id, "acc-42");
+    free(account_id);
+    free(jwt);
+
+    jwt = make_jwt("{\"https://api.openai.com/auth\":{}}");
+    EXPECT(codex_jwt_account_id(jwt) == NULL);
+    free(jwt);
+
+    jwt = make_jwt("{}");
+    EXPECT(codex_jwt_account_id(jwt) == NULL);
+    free(jwt);
+}
+
+static void test_store_entry_read(void)
+{
+    json_t *entry = json_pack("{s:s, s:s, s:s}", "access_token", "at", "refresh_token", "rt",
+                              "account_id", "acc");
+    struct codex_auth auth;
+    EXPECT(codex_auth_from_store_entry(entry, &auth) == CODEX_AUTH_OK);
+    EXPECT_STR_EQ(auth.access_token, "at");
+    EXPECT_STR_EQ(auth.refresh_token, "rt");
+    EXPECT_STR_EQ(auth.account_id, "acc");
+    EXPECT(auth.source == CODEX_AUTH_SOURCE_HAX);
+    codex_auth_release(&auth);
+
+    /* Without a refresh token the entry cannot sustain hax-managed rotation. */
+    json_object_del(entry, "refresh_token");
+    EXPECT(codex_auth_from_store_entry(entry, &auth) == CODEX_AUTH_NO_TOKENS);
+    EXPECT(auth.access_token == NULL);
+    json_decref(entry);
+}
+
+/* A hax-owned login outranks borrowed codex CLI credentials, and removing it falls back. */
+static void test_load_prefers_hax_store(void)
+{
+    char *home = auth_home();
+    write_auth(home, "{\"tokens\":{\"access_token\":\"cli-at\",\"account_id\":\"cli-acc\"}}");
+
+    json_t *entry = json_pack("{s:s, s:s, s:s}", "access_token", "hax-at", "refresh_token",
+                              "hax-rt", "account_id", "hax-acc");
+    EXPECT(cred_store_set("codex", entry) == 0);
+    json_decref(entry);
+
+    struct codex_auth auth;
+    EXPECT(codex_auth_load(&auth, NULL) == CODEX_AUTH_OK);
+    EXPECT(auth.source == CODEX_AUTH_SOURCE_HAX);
+    EXPECT_STR_EQ(auth.access_token, "hax-at");
+    EXPECT_STR_EQ(auth.refresh_token, "hax-rt");
+    codex_auth_release(&auth);
+
+    EXPECT(cred_store_delete("codex") == 1);
+    EXPECT(codex_auth_load(&auth, NULL) == CODEX_AUTH_OK);
+    EXPECT(auth.source == CODEX_AUTH_SOURCE_CODEX_CLI);
+    EXPECT_STR_EQ(auth.access_token, "cli-at");
+    EXPECT(auth.refresh_token == NULL);
+    codex_auth_release(&auth);
+}
+
 static void test_status_reasons(void)
 {
     EXPECT(codex_auth_status_reason(CODEX_AUTH_OK) == NULL);
-    EXPECT_STR_EQ(codex_auth_status_reason(CODEX_AUTH_NO_FILE), "codex CLI not logged in");
-    EXPECT_STR_EQ(codex_auth_status_reason(CODEX_AUTH_NO_TOKENS), "codex CLI not logged in");
+    EXPECT_STR_EQ(codex_auth_status_reason(CODEX_AUTH_NO_FILE), "not logged in (use /login)");
+    EXPECT_STR_EQ(codex_auth_status_reason(CODEX_AUTH_NO_TOKENS), "not logged in (use /login)");
     EXPECT_STR_EQ(codex_auth_status_reason(CODEX_AUTH_BAD_JSON), "auth.json not valid JSON");
 }
 
@@ -316,6 +399,10 @@ int main(void)
     test_equal_compares_both_header_values();
     test_equal_ignores_email();
     test_equal_handles_zeroed();
+    test_jwt_exp();
+    test_jwt_account_id();
+    test_store_entry_read();
+    test_load_prefers_hax_store();
     test_status_reasons();
     T_REPORT();
 }

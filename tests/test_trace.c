@@ -66,6 +66,39 @@ static void test_credential_headers_redacted(void)
         EXPECT(strstr(contents, "anthropic-version: 2023-06-01") != NULL);
         free(contents);
     }
+
+    /* Registered values are also replaced inside request and error bodies, where OAuth token
+     * requests carry them as JSON values rather than headers. */
+    static const char token_body[] =
+        "{\"grant_type\":\"refresh_token\",\"refresh_token\":\"PORTKEYSECRET\"}";
+    trace_request("POST", "https://auth.example.com/oauth/token", NULL, token_body,
+                  sizeof(token_body) - 1);
+    trace_response_status(400, "{\"error\":\"bad token PORTKEYSECRET\"}");
+
+    contents = slurp_file(path, &len);
+    EXPECT(contents != NULL);
+    if (contents) {
+        EXPECT(strstr(contents, "PORTKEYSECRET") == NULL);
+        EXPECT(strstr(contents, "\"refresh_token\": \"<redacted>\"") != NULL);
+        EXPECT(strstr(contents, "bad token <redacted>") != NULL);
+        free(contents);
+    }
+
+    /* A secret that extends an earlier-registered one must be redacted whole, not left with the
+     * unshared tail exposed. */
+    trace_register_secret("ROTATED");
+    trace_register_secret("ROTATEDLONGER");
+    static const char overlap_body[] = "{\"token\":\"ROTATEDLONGER\"}";
+    trace_request("POST", "https://auth.example.com/oauth/token", NULL, overlap_body,
+                  sizeof(overlap_body) - 1);
+
+    contents = slurp_file(path, &len);
+    EXPECT(contents != NULL);
+    if (contents) {
+        EXPECT(strstr(contents, "LONGER") == NULL);
+        EXPECT(strstr(contents, "\"token\": \"<redacted>\"") != NULL);
+        free(contents);
+    }
     unlink(path);
 }
 

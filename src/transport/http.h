@@ -35,4 +35,13 @@ int http_get(const char *url, const char *const *headers, long timeout_s, long m
 int http_post_json(const char *url, const char *const *headers, const char *body, size_t body_len,
                    long timeout_s, long max_bytes, http_tick_cb tick, void *tick_user, char **out);
 
+/* Synchronous POST with a caller-supplied Content-Type value; NULL adds no Content-Type header.
+ * Unlike http_post_json, a completed exchange returns 0 for every HTTP status: `*out` receives the
+ * response body (NULL when empty) and `*status_out` the status, so callers can classify
+ * protocol-level error payloads. Returns -1 only on transport failure or cancellation, with
+ * `*status_out` set to 0. */
+int http_post(const char *url, const char *const *headers, const char *content_type,
+              const char *body, size_t body_len, long timeout_s, long max_bytes, http_tick_cb tick,
+              void *tick_user, char **out, long *status_out);
+
 #endif /* HAX_TRANSPORT_HTTP_H */

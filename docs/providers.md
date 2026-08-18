@@ -18,7 +18,7 @@ keys in environment variables rather than command arguments or `config.json`.
 
 | Provider id | Best fit | Required setup |
 | --- | --- | --- |
-| `codex` | Existing ChatGPT/Codex subscription | Log in with the official `codex` CLI. |
+| `codex` | Existing ChatGPT/Codex subscription | Run `/login`. |
 | `openai` | Direct OpenAI API | `OPENAI_API_KEY`; choose a model. |
 | `anthropic` | Direct Anthropic API | `ANTHROPIC_API_KEY`; choose a model. |
 | `openrouter` | Many vendors through one API | `OPENROUTER_API_KEY`; choose a model. |
@@ -39,12 +39,21 @@ model, effort, and whether selection was automatic.
 
 ## Codex
 
-`codex` uses the ChatGPT Codex backend and the OAuth credentials written by the official Codex CLI:
+`codex` uses the ChatGPT Codex backend with a ChatGPT subscription login. Run `/login`, open the
+printed `auth.openai.com` page in a browser on any device — the code is copied to the clipboard —
+and approve. hax stores the tokens in `~/.local/state/hax/auth.json` and refreshes them
+automatically; the codex CLI is not needed. `/logout` removes the login.
+
+Alternatively, hax picks up credentials written by the official codex CLI:
 
 ```sh
 codex                         # log in or refresh credentials
 hax --provider=codex
 ```
+
+CLI credentials are borrowed read-only: hax never modifies `~/.codex/auth.json` and never refreshes
+its token, so when it expires, rerun `codex` — or `/login` once to switch to a hax-managed login,
+which takes precedence whenever both exist.
 
 hax reads `model` and `model_reasoning_effort` from `~/.codex/config.toml` as provider defaults. If
 none is configured, choose a model with `/model` or pass `--model`.
@@ -52,8 +61,6 @@ none is configured, choose a model with `/model` or pass `--model`.
 `/usage` shows subscription windows reported by ChatGPT. Codex does not report monetary cost per
 response, so any `~$` amount is an API-equivalent estimate from model metadata, not a charge against
 the subscription.
-
-If authentication expires, run the official `codex` CLI again; hax cannot refresh that token itself.
 
 ## OpenAI
 

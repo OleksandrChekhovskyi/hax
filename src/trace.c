@@ -160,6 +160,62 @@ out_unlock:
     pthread_mutex_unlock(&trace_mu);
 }
 
+static const void *find_bytes(const char *haystack, size_t haystack_len, const char *needle,
+                              size_t needle_len)
+{
+    if (needle_len == 0 || haystack_len < needle_len)
+        return NULL;
+    for (size_t i = 0; i + needle_len <= haystack_len; i++) {
+        if (haystack[i] == needle[0] && memcmp(haystack + i, needle, needle_len) == 0)
+            return haystack + i;
+    }
+    return NULL;
+}
+
+/* Caller must hold trace_mu. Returns an allocated copy of `text` with every registered credential
+ * value replaced, or NULL when none occurs. OAuth-style bodies carry credentials as JSON values,
+ * where header-line redaction cannot see them. */
+static char *redact_secrets_locked(const char *text, size_t len, size_t *out_len)
+{
+    struct buf redacted;
+    buf_init(&redacted);
+    size_t position = 0;
+    while (position < len) {
+        const char *match = NULL;
+        size_t match_len = 0;
+        for (size_t i = 0; i < trace_n_secrets; i++) {
+            size_t secret_len = strlen(trace_secrets[i]);
+            const char *found =
+                find_bytes(text + position, len - position, trace_secrets[i], secret_len);
+            /* At equal positions the longest secret wins, or a registered prefix of another
+             * secret would leave the tail of the longer one exposed. */
+            if (found && (!match || found < match || (found == match && secret_len > match_len))) {
+                match = found;
+                match_len = secret_len;
+            }
+        }
+        if (!match)
+            break;
+        buf_append(&redacted, text + position, (size_t)(match - (text + position)));
+        buf_append_str(&redacted, "<redacted>");
+        position = (size_t)(match - text) + match_len;
+    }
+    if (!redacted.data)
+        return NULL;
+    buf_append(&redacted, text + position, len - position);
+    *out_len = redacted.len;
+    return buf_steal(&redacted);
+}
+
+/* Caller must hold trace_mu. */
+static void emit_body_redacted(FILE *fp, const char *body, size_t len)
+{
+    size_t redacted_len = 0;
+    char *redacted = redact_secrets_locked(body, len, &redacted_len);
+    emit_json_or_text(fp, redacted ? redacted : body, redacted ? redacted_len : len);
+    free(redacted);
+}
+
 static int header_name_is(const char *header, const char *name)
 {
     size_t n = strlen(name);
@@ -213,7 +269,7 @@ void trace_request(const char *method, const char *url, const char *const *heade
     buf_free(&hb);
 
     if (body && body_len)
-        emit_json_or_text(fp, body, body_len);
+        emit_body_redacted(fp, body, body_len);
 
 out_unlock:
     pthread_mutex_unlock(&trace_mu);
@@ -231,7 +287,7 @@ void trace_response_status(long status, const char *error_body)
     fprintf(fp, "\n**HTTP %ld**  (%s)\n", status, ts);
     if (error_body && *error_body) {
         fputc('\n', fp);
-        emit_json_or_text(fp, error_body, strlen(error_body));
+        emit_body_redacted(fp, error_body, strlen(error_body));
     }
 
 out_unlock:

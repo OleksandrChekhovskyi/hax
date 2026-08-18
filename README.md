@@ -85,7 +85,7 @@ and choose a model. hax remembers interactive provider, model, and effort select
 
 | Provider | Setup |
 | --- | --- |
-| `codex` | Log in with the official `codex` CLI. |
+| `codex` | Run `/login` inside hax. |
 | `openai` | Set `OPENAI_API_KEY`. |
 | `anthropic` | Set `ANTHROPIC_API_KEY`. |
 | `openrouter` | Set `OPENROUTER_API_KEY`. |

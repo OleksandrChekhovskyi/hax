@@ -14,9 +14,10 @@ void trace_init(void);
 
 int trace_enabled(void);
 
-/* Register a credential value: any traced request header containing it is redacted, in
- * addition to the fixed protocol auth headers (Authorization, x-api-key, api-key). Copies the
- * value; safe before trace_init and from any thread; NULL and empty values are ignored. */
+/* Register a credential value: any traced request header containing it is redacted, and any
+ * occurrence inside a traced request or error body is replaced, in addition to the fixed
+ * protocol auth headers (Authorization, x-api-key, api-key). Copies the value; safe before
+ * trace_init and from any thread; NULL and empty values are ignored. */
 void trace_register_secret(const char *value);
 
 /* Emit a banner + headers (credentials redacted; see trace_register_secret) + pretty-printed

@@ -13,6 +13,7 @@
 #include "catalog.h"
 #include "config.h"
 #include "file_mention.h"
+#include "login.h"
 #include "model_meta.h"
 #include "provider.h"
 #include "select.h"
@@ -77,6 +78,8 @@ static void run_copy(const struct command_call *call);
 static void run_session(const struct command_call *call);
 static void run_tasks(const struct command_call *call);
 static void run_usage(const struct command_call *call);
+static void run_login(const struct command_call *call);
+static void run_logout(const struct command_call *call);
 static void run_help(const struct command_call *call);
 
 /* Registry order is also /help order. */
@@ -175,6 +178,20 @@ static const struct slash_command COMMANDS[] = {
         .name = "usage",
         .summary = "show provider account usage",
         .handler = run_usage,
+    },
+    {
+        .name = "login",
+        .summary = "log in to a provider account, managed by hax (optional: provider)",
+        .accepts_argument = 1,
+        .display = COMMAND_DISPLAY_MANAGED,
+        .handler = run_login,
+    },
+    {
+        .name = "logout",
+        .summary = "log out and remove a hax-managed login (optional: provider)",
+        .accepts_argument = 1,
+        .display = COMMAND_DISPLAY_MANAGED,
+        .handler = run_logout,
     },
     {
         .name = "help",
@@ -751,6 +768,18 @@ static void run_usage(const struct command_call *call)
         return;
     }
     provider->query_usage(provider);
+}
+
+/* ---------- /login, /logout ---------- */
+
+static void run_login(const struct command_call *call)
+{
+    login_command(call->state, call->argument);
+}
+
+static void run_logout(const struct command_call *call)
+{
+    logout_command(call->state, call->argument);
 }
 
 /* ---------- /help ---------- */

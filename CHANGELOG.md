@@ -31,6 +31,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- `/login` signs in to ChatGPT for the codex provider, so the codex CLI is no longer needed:
+  approve a code on the printed `auth.openai.com` page and hax keeps the token refreshed from
+  then on. `/logout` removes the login. Credentials from the codex CLI keep working (read-only)
+  when no hax-managed login exists. See [docs/providers.md](docs/providers.md#codex).
+- `HAX_TRACE` redacts credentials inside request and error bodies, not just headers.
 - Every provider block accepts `extra_body` and `extra_headers`: raw JSON members merged into
   each request body (OpenRouter routing preferences, service tiers, sampling knobs) and extra
   HTTP headers on every request (gateway credentials, attribution). A `$VAR` header value or

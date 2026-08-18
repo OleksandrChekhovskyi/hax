@@ -10,28 +10,28 @@
 
 static void test_token_expired(void)
 {
-    char *message = codex_model_catalog_error(401);
-    EXPECT_STR_EQ(message, "codex token expired — run `codex` once to refresh, then retry");
+    char *message = codex_model_catalog_error(401, "codex login expired — run /login again");
+    EXPECT_STR_EQ(message, "codex login expired — run /login again");
     free(message);
 }
 
 static void test_empty_success_response(void)
 {
-    char *message = codex_model_catalog_error(200);
+    char *message = codex_model_catalog_error(200, "expired");
     EXPECT_STR_EQ(message, "codex sent an empty or truncated model catalog response");
     free(message);
 }
 
 static void test_http_error(void)
 {
-    char *message = codex_model_catalog_error(503);
+    char *message = codex_model_catalog_error(503, "expired");
     EXPECT_STR_EQ(message, "codex model catalog fetch failed (HTTP 503)");
     free(message);
 }
 
 static void test_unreachable(void)
 {
-    char *message = codex_model_catalog_error(0);
+    char *message = codex_model_catalog_error(0, "expired");
     EXPECT_STR_EQ(message, "could not reach chatgpt.com to list models — check your network");
     free(message);
 }
@@ -55,6 +55,8 @@ static void test_display_name_from_own_block(void)
     fclose(auth_file);
 
     setenv("HOME", home, 1);
+    /* Keep the developer's own hax credential store out of the constructor's auth lookup. */
+    unsetenv("XDG_STATE_HOME");
     unsetenv("HAX_MODEL");
 
     struct provider *codex = codex_provider_new("codex");

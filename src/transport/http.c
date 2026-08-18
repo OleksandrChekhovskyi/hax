@@ -326,9 +326,13 @@ static int poll_buffered_transfer(void *user, curl_off_t download_total, curl_of
     return poll_transfer(&state->tick);
 }
 
-static int buffered_request(const char *url, const char *const *headers, const char *body,
-                            size_t body_len, long timeout_s, long max_bytes, http_tick_cb tick,
-                            void *tick_user, char **out, long *status_out)
+/* `content_type` is a complete "Content-Type: ..." header line or NULL. With `any_status` set, a
+ * completed transfer succeeds regardless of HTTP status and `*out` may be NULL for an empty body;
+ * otherwise success requires a non-empty 2xx response. */
+static int buffered_request(const char *url, const char *const *headers, const char *content_type,
+                            const char *body, size_t body_len, long timeout_s, long max_bytes,
+                            http_tick_cb tick, void *tick_user, int any_status, char **out,
+                            long *status_out)
 {
     *out = NULL;
     if (status_out)
@@ -338,7 +342,6 @@ static int buffered_request(const char *url, const char *const *headers, const c
     if (!curl)
         return -1;
 
-    const char *content_type = body ? "Content-Type: application/json" : NULL;
     struct curl_slist *header_list = NULL;
     if (build_header_list(headers, content_type, &header_list) != 0) {
         curl_easy_cleanup(curl);
@@ -388,15 +391,15 @@ static int buffered_request(const char *url, const char *const *headers, const c
     curl_slist_free_all(header_list);
     curl_easy_cleanup(curl);
 
-    int failed = result != CURLE_OK || status < 200 || status >= 300 || !state.body.data;
+    int http_failed = status < 200 || status >= 300;
+    int failed = result != CURLE_OK || (!any_status && (http_failed || !state.body.data));
     char *error_body = NULL;
-    if (failed) {
+    if (result != CURLE_OK) {
         /* Buffered callers only see -1; surface the certificate advice out of band. */
         ca_warn_verify_failure(result);
-        if (result != CURLE_OK)
-            error_body = curl_error_body(result);
-        else if (state.body.data)
-            error_body = xstrdup(state.body.data);
+        error_body = curl_error_body(result);
+    } else if (http_failed && state.body.data) {
+        error_body = xstrdup(state.body.data);
     }
     trace_response_status(status, error_body);
     free(error_body);
@@ -405,20 +408,37 @@ static int buffered_request(const char *url, const char *const *headers, const c
         buf_free(&state.body);
         return -1;
     }
-    *out = buf_steal(&state.body);
+    *out = state.body.data ? buf_steal(&state.body) : NULL;
+    buf_free(&state.body);
     return 0;
 }
 
 int http_get(const char *url, const char *const *headers, long timeout_s, long max_bytes,
              http_tick_cb tick, void *tick_user, char **out, long *status_out)
 {
-    return buffered_request(url, headers, NULL, 0, timeout_s, max_bytes, tick, tick_user, out,
-                            status_out);
+    return buffered_request(url, headers, NULL, NULL, 0, timeout_s, max_bytes, tick, tick_user, 0,
+                            out, status_out);
 }
 
 int http_post_json(const char *url, const char *const *headers, const char *body, size_t body_len,
                    long timeout_s, long max_bytes, http_tick_cb tick, void *tick_user, char **out)
 {
-    return buffered_request(url, headers, body ? body : "", body ? body_len : 0, timeout_s,
-                            max_bytes, tick, tick_user, out, NULL);
+    return buffered_request(url, headers, "Content-Type: application/json", body ? body : "",
+                            body ? body_len : 0, timeout_s, max_bytes, tick, tick_user, 0, out,
+                            NULL);
+}
+
+int http_post(const char *url, const char *const *headers, const char *content_type,
+              const char *body, size_t body_len, long timeout_s, long max_bytes, http_tick_cb tick,
+              void *tick_user, char **out, long *status_out)
+{
+    char *content_type_header = content_type ? xasprintf("Content-Type: %s", content_type) : NULL;
+    long status = 0;
+    int result =
+        buffered_request(url, headers, content_type_header, body ? body : "", body ? body_len : 0,
+                         timeout_s, max_bytes, tick, tick_user, 1, out, &status);
+    free(content_type_header);
+    if (status_out)
+        *status_out = result == 0 ? status : 0;
+    return result;
 }

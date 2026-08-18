@@ -76,6 +76,8 @@ Type `/help` for the authoritative live list.
 | `/tasks [kill <id>... \| kill all]` | List or stop background tasks. |
 | `/session` | Show session selection and local usage totals. |
 | `/usage` | Query provider account/subscription usage when supported. |
+| `/login [provider]` | Log in to a provider account with a hax-managed token (ChatGPT/codex). |
+| `/logout [provider]` | Revoke and remove a hax-managed login. |
 
 Prefer `/fork` when trying an alternative: the original session stays intact. `/undo` rewrites both
 memory and the session file and has no redo.

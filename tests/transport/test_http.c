@@ -291,11 +291,71 @@ static void test_sse_cancellation(void)
     free(response.error_body);
 }
 
+/* OAuth endpoints report state through non-2xx JSON, so http_post must surface the status and
+ * body instead of collapsing them into -1 like the other buffered helpers. */
+static void test_post_exposes_error_status(void)
+{
+    static const char request_body[] = "grant_type=authorization_code&code=abc";
+    struct test_server server = {
+        .response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 18\r\nConnection: close\r\n\r\n"
+                    "{\"error\":\"denied\"}",
+        .request_body_len = sizeof(request_body) - 1,
+    };
+    pthread_t thread;
+    int port = start_server(&server, &thread);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+
+    char url[64];
+    make_url(url, sizeof(url), port);
+    char *body = NULL;
+    long status = 0;
+    int result = http_post(url, NULL, "application/x-www-form-urlencoded", request_body,
+                           sizeof(request_body) - 1, 2, 0, NULL, NULL, &body, &status);
+    stop_server(&server, thread);
+
+    EXPECT(result == 0);
+    EXPECT(status == 403);
+    EXPECT(body != NULL);
+    if (body)
+        EXPECT(strstr(body, "denied") != NULL);
+    EXPECT(strstr(server.request, "Content-Type: application/x-www-form-urlencoded\r\n") != NULL);
+    EXPECT(strstr(server.request, "\r\n\r\ngrant_type=authorization_code&code=abc") != NULL);
+    free(body);
+}
+
+static void test_post_empty_body_is_null(void)
+{
+    struct test_server server = {
+        .response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    };
+    pthread_t thread;
+    int port = start_server(&server, &thread);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+
+    char url[64];
+    make_url(url, sizeof(url), port);
+    char *body = NULL;
+    long status = 0;
+    int result = http_post(url, NULL, NULL, NULL, 0, 2, 0, NULL, NULL, &body, &status);
+    stop_server(&server, thread);
+
+    EXPECT(result == 0);
+    EXPECT(status == 204);
+    EXPECT(body == NULL);
+    free(body);
+}
+
 int main(void)
 {
     signal(SIGPIPE, SIG_IGN);
     test_get_response();
     test_json_post();
+    test_post_exposes_error_status();
+    test_post_empty_body_is_null();
     test_response_size_limit();
     test_sse_success();
     test_sse_error_response();

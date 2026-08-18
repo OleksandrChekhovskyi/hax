@@ -10,8 +10,14 @@
 struct provider *codex_provider_new(const char *id);
 
 /* Return an allocated diagnostic for a failed model-catalog request. A zero status means that no
- * HTTP response was received. */
-char *codex_model_catalog_error(long http_status);
+ * HTTP response was received; a 401 reports `token_expired`, whose wording depends on the
+ * credential source. */
+char *codex_model_catalog_error(long http_status, const char *token_expired);
+
+/* Re-resolve a live codex provider's credentials after /login or /logout. When none remain the
+ * auth is cleared and subsequent requests report "not logged in" rather than reusing the removed
+ * token. */
+void codex_provider_reload_auth(struct provider *provider);
 
 /* Read one catalog entry into an initialized model_info. Newly reported pointer fields are owned by
  * the model. */
