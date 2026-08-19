@@ -112,7 +112,7 @@ static void test_request_cleanup(void)
 
     struct provider_availability availability = {
         .available = 1,
-        .reason = "available",
+        .reason = xstrdup("out of coffee"),
         .url = xstrdup("https://example.test"),
         .headers = make_headers(),
         .timeout_s = 5,

@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 #include "provider.h"
+#include "util.h"
 #include "providers/config_provider.h"
 #include "providers/http_provider.h"
 #include "providers/openai_messages.h"
@@ -38,7 +39,7 @@ static void openai_prepare_availability(const char *id, struct provider_availabi
 {
     (void)id;
     out->available = provider_api_key("providers.openai", "OPENAI_API_KEY") != NULL;
-    out->reason = out->available ? NULL : "OPENAI_API_KEY not set";
+    out->reason = out->available ? NULL : xstrdup("OPENAI_API_KEY not set");
 }
 
 const struct provider_factory PROVIDER_OPENAI = {

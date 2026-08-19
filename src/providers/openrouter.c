@@ -419,7 +419,7 @@ static void openrouter_prepare_availability(const char *id,
 {
     (void)id;
     availability->available = openrouter_api_key() != NULL;
-    availability->reason = availability->available ? NULL : "OPENROUTER_API_KEY not set";
+    availability->reason = availability->available ? NULL : xstrdup("OPENROUTER_API_KEY not set");
 }
 
 const struct provider_factory PROVIDER_OPENROUTER = {

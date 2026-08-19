@@ -805,7 +805,8 @@ static void codex_prepare_availability(const char *id, struct provider_availabil
     codex_auth_release(&auth);
 
     availability->available = status == CODEX_AUTH_OK;
-    availability->reason = codex_auth_status_reason(status);
+    const char *reason = codex_auth_status_reason(status);
+    availability->reason = reason ? xstrdup(reason) : NULL;
 }
 
 const struct provider_factory PROVIDER_CODEX = {

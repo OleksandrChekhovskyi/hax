@@ -526,6 +526,65 @@ static void test_prefetch_disabled_is_noop(void)
     unsetenv("HAX_CATALOG_URL");
 }
 
+/* The models.dev SDK selector maps to the wire dialect a gateway model speaks, the per-model
+ * override winning over the provider-wide default. */
+static void test_wire_api_hints(void)
+{
+    write_cache_fixture("{\"zen-hint\": {\"npm\": \"@ai-sdk/openai-compatible\", \"models\": {"
+                        "\"basic\": {\"cost\": {\"input\": 1, \"output\": 2}},"
+                        "\"claude-x\": {\"provider\": {\"npm\": \"@ai-sdk/anthropic\"}},"
+                        "\"gpt-x\": {\"provider\": {\"npm\": \"@ai-sdk/openai\"}},"
+                        "\"gem-x\": {\"provider\": {\"npm\": \"@ai-sdk/google\"}}}}}");
+
+    struct catalog_entry entry;
+    EXPECT(catalog_lookup("zen-hint", "basic", &entry) == 0);
+    EXPECT_STR_EQ(entry.api, "openai-completions");
+    /* A hint alone counts as metadata, or merging would drop it for uncosted models. */
+    EXPECT(catalog_lookup("zen-hint", "claude-x", &entry) == 0);
+    EXPECT_STR_EQ(entry.api, "anthropic-messages");
+    EXPECT(catalog_lookup("zen-hint", "gpt-x", &entry) == 0);
+    EXPECT_STR_EQ(entry.api, "openai-responses");
+    EXPECT(catalog_lookup("zen-hint", "gem-x", &entry) == 0);
+    EXPECT_STR_EQ(entry.api, "unsupported");
+    catalog_lookup("zen-hint", "absent", &entry);
+    EXPECT(entry.api == NULL);
+
+    write_cache_fixture(CACHE_FIXTURE); /* later tests re-parse the shared snapshot */
+}
+
+/* catalog.models can pin a model's api like any other catalog field, normalized to the
+ * canonical dialect names; and a config entry complete in every other field still merges the
+ * cache-only api hint instead of silently defaulting the wire. */
+static void test_config_api_override(void)
+{
+    write_cache_fixture("{\"zen-api\": {\"npm\": \"@ai-sdk/openai-compatible\", \"models\": {"
+                        "\"pinned\": {\"provider\": {\"npm\": \"@ai-sdk/anthropic\"}},"
+                        "\"priced\": {\"provider\": {\"npm\": \"@ai-sdk/anthropic\"}}}}}");
+    EXPECT(config_load("{\"catalog\": {\"models\": {\"zen-api\": {"
+                       "  \"pinned\": {\"api\": \"OpenAI-Responses\"},"
+                       "  \"typo\": {\"api\": \"anthropic-mesages\"},"
+                       "  \"priced\": {\"cost\": {\"input\": 1, \"output\": 2,"
+                       "                         \"cache_read\": 0, \"cache_write\": 0},"
+                       "              \"limit\": {\"context\": \"200k\", \"output\": \"64k\"},"
+                       "              \"modalities\": {\"input\": [\"text\", \"image\"]},"
+                       "              \"reasoning\": false}"
+                       "}}}}") == 0);
+
+    struct catalog_entry entry;
+    EXPECT(catalog_lookup("zen-api", "pinned", &entry) == 0);
+    EXPECT_STR_EQ(entry.api, "openai-responses");
+    EXPECT(catalog_lookup("zen-api", "typo", &entry) == 0);
+    EXPECT_STR_EQ(entry.api, "unsupported");
+    /* A config entry complete in every field it can express still merges the cache-only api
+     * hint instead of silently defaulting the wire. */
+    EXPECT(catalog_lookup("zen-api", "priced", &entry) == 0);
+    EXPECT(entry.cost_input == 1);
+    EXPECT_STR_EQ(entry.api, "anthropic-messages");
+
+    config_load(NULL);
+    write_cache_fixture(CACHE_FIXTURE);
+}
+
 static void test_memoization_and_shutdown_clear(void)
 {
     /* Snapshot answers remain memoized until shutdown. This test runs last because it replaces the
@@ -561,6 +620,8 @@ int main(void)
     test_tier_only_entry();
     test_extract_member();
     test_prefetch_disabled_is_noop();
+    test_wire_api_hints();
+    test_config_api_override();
     test_memoization_and_shutdown_clear();
 
     catalog_shutdown();

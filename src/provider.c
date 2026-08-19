@@ -157,6 +157,7 @@ void provider_availability_clear(struct provider_availability *availability)
 {
     if (!availability)
         return;
+    free(availability->reason);
     free(availability->url);
     string_array_free(availability->headers);
     memset(availability, 0, sizeof(*availability));

@@ -125,6 +125,7 @@ sources = files(
     'src/providers/openai_events.c',
     'src/providers/openai_messages.c',
     'src/providers/openrouter.c',
+    'src/providers/recipes.c',
     'src/providers/registry.c',
     'src/providers/responses_events.c',
     'src/providers/responses_messages.c',

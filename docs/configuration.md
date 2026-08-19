@@ -278,7 +278,9 @@ Per-model overrides can be placed under `catalog.models`, with costs in USD per 
 }
 ```
 
-Configured fields override cached fields individually. A `~` on displayed spend means the result is
+Configured fields override cached fields individually. An `api` member (`openai-completions`,
+`openai-responses`, or `anthropic-messages`) pins one model's protocol on a mixed-protocol
+gateway; the provider-level `model_apis` field is the glob-based form. A `~` on displayed spend means the result is
 estimated from token counts and this metadata; check provider billing for authoritative costs.
 
 ### Tools and transport
@@ -342,7 +344,7 @@ Keys in the `providers.anthropic-compatible` block:
 | `api_key` | `HAX_ANTHROPIC_API_KEY` | — | `x-api-key` token. Does not inherit `ANTHROPIC_API_KEY`. |
 | `display_name` | `HAX_ANTHROPIC_DISPLAY_NAME` | — | Banner and picker name. |
 | `max_tokens` | `HAX_ANTHROPIC_MAX_TOKENS` | model cap | Maximum output including thinking; clamped to known model limits. |
-| `thinking_mode` | `HAX_ANTHROPIC_THINKING_MODE` | `budget` | `adaptive`, `budget`, or `off`. |
+| `thinking_mode` | `HAX_ANTHROPIC_THINKING_MODE` | `budget` | `adaptive`, `budget`, or `off`. When unset, selecting an effort switches to adaptive. |
 | `thinking_budget` | `HAX_ANTHROPIC_THINKING_BUDGET` | max minus 1 | Budget-mode thinking tokens. |
 | `cache` | `HAX_ANTHROPIC_CACHE` | `auto` | Send prompt-cache breakpoints. |
 | `cache_ttl` | `HAX_ANTHROPIC_CACHE_TTL` | `1h` | Cache TTL: `5m` or `1h`. |

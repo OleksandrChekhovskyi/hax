@@ -36,6 +36,22 @@ static void test_internal_providers_hidden(void)
     EXPECT(provider_find("mock") != NULL);
 }
 
+static void test_gateway_recipes_registered(void)
+{
+    EXPECT(provider_find("opencode-zen") != NULL);
+    EXPECT(provider_find("opencode-go") != NULL);
+    EXPECT(idx_of("opencode-zen") > idx_of("openrouter")); /* recipes rank after built-ins */
+
+    /* The picker names the exact variable to set, like the compiled-in providers. */
+    unsetenv("OPENCODE_API_KEY");
+    const struct provider_factory *zen = provider_find("opencode-zen");
+    struct provider_availability availability = {0};
+    zen->prepare_availability(zen->id, &availability);
+    EXPECT(!availability.available);
+    EXPECT_STR_EQ(availability.reason, "OPENCODE_API_KEY not set");
+    provider_availability_clear(&availability);
+}
+
 /* Autoselect-priority ordering: the compiled-in factories come first, in
  * BUILTINS order. Config-defined providers — the shipped -compatible and
  * ollama recipes, then custom blocks — are appended after every built-in,
@@ -77,6 +93,7 @@ int main(void)
 {
     test_default_is_highest_priority();
     test_internal_providers_hidden();
+    test_gateway_recipes_registered();
     test_autoselect_order();
     test_former_id_canonicalized();
     test_display_name_resolution();

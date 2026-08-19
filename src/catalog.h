@@ -45,6 +45,11 @@ struct catalog_entry {
 
     enum catalog_support image_input;
 
+    /* Canonical dialect name of the wire the model's endpoint speaks (e.g.
+     * "anthropic-messages"), "unsupported" for SDK selectors hax does not implement, or NULL
+     * when the snapshot reports none. Static storage; mixed-protocol gateways consult it. */
+    const char *api;
+
     /* `known` distinguishes an unsupported effort ladder from absent metadata. */
     struct effort_set efforts;
 
@@ -100,6 +105,10 @@ double catalog_price(const struct catalog_entry *entry, long input_tokens, long 
  * process does work. Returns the stale snapshot's age in days once it exceeds the warning
  * threshold, otherwise 0. Fetch failures leave the existing snapshot untouched. */
 long catalog_prefetch(void);
+
+/* Wait up to `max_wait_ms` for a background refresh to land, leaving a slower fetch running for
+ * later callers. No-op when no refresh is running. */
+void catalog_wait(long max_wait_ms);
 
 /* Give short-lived runs up to `max_wait_ms` to finish a background refresh, then cancel and join
  * it. No-op when no refresh is running. */

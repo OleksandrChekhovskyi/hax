@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "providers/http_provider.h"
 
+#include <fnmatch.h>
 #include <jansson.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,17 +25,26 @@
 #define MESSAGES_DEFAULT_VERSION    "2023-06-01"
 #define MESSAGES_DEFAULT_MAX_TOKENS 32000
 
+/* One <prefix>.model_apis member: models matching the glob speak `wire`. */
+struct wire_rule {
+    char *pattern;
+    const struct wire *wire;
+};
+
 struct http_provider {
     struct provider base;
     char *base_url;
     char *api_key;
     char *name;
     char *catalog_id;
-    char *endpoint;
+    char *endpoint; /* for the default wire; other wires derive theirs per request */
     char *config_prefix;
     char *session_id;
-    const struct wire *wire;
-    char *version; /* anthropic-version; set only on the Messages wire */
+    const struct wire *wire; /* default; wire_rules and catalog hints override per model */
+    struct wire_rule *wire_rules;
+    size_t n_wire_rules;
+    int catalog_wires;
+    char *version; /* anthropic-version; sent on Messages requests */
     int send_cache_key;
     int emit_progress;
     int request_cost;
@@ -54,19 +64,23 @@ struct http_provider {
     void (*parse_model)(const json_t *entry, struct model_info *out);
 };
 
-static enum anthropic_thinking_mode resolve_thinking_mode(const struct http_provider *provider)
+static enum anthropic_thinking_mode resolve_thinking_mode(const struct http_provider *provider,
+                                                          const char *effort)
 {
     const char *configured = config_scoped_str(provider->config_prefix, "thinking_mode");
-    if (!configured || !*configured)
-        return provider->default_thinking_mode;
-    if (strcasecmp(configured, "adaptive") == 0)
+    if (configured && *configured) {
+        if (strcasecmp(configured, "adaptive") == 0)
+            return ANTHROPIC_THINKING_ADAPTIVE;
+        if (strcasecmp(configured, "budget") == 0)
+            return ANTHROPIC_THINKING_BUDGET;
+        if (strcasecmp(configured, "off") == 0)
+            return ANTHROPIC_THINKING_OFF;
+        hax_warn("unknown thinking_mode '%s' (adaptive/budget/off) — using default", configured);
+    }
+    /* An effort reaches a request only when the model's metadata accepts it, and on Messages
+     * efforts steer adaptive thinking; a compat-safe budget default must not drop it. */
+    if (effort && *effort)
         return ANTHROPIC_THINKING_ADAPTIVE;
-    if (strcasecmp(configured, "budget") == 0)
-        return ANTHROPIC_THINKING_BUDGET;
-    if (strcasecmp(configured, "off") == 0)
-        return ANTHROPIC_THINKING_OFF;
-
-    hax_warn("unknown thinking_mode '%s' (adaptive/budget/off) — using default", configured);
     return provider->default_thinking_mode;
 }
 
@@ -93,11 +107,12 @@ int http_provider_max_tokens(struct provider *base, const char *model)
 /* Owned NULL-terminated headers; free with string_array_free. The auth scheme follows the wire:
  * Bearer for the OpenAI family, x-api-key plus the version header for Messages. Streaming
  * requests add the SSE Accept and the JSON Content-Type. */
-static char **build_headers(const struct http_provider *provider, int streaming)
+static char **build_headers(const struct http_provider *provider, const struct wire *wire,
+                            int streaming)
 {
     char *auth = NULL;
     char *version = NULL;
-    if (provider->wire == &WIRE_ANTHROPIC_MESSAGES) {
+    if (wire == &WIRE_ANTHROPIC_MESSAGES) {
         if (provider->api_key)
             auth = xasprintf("x-api-key: %s", provider->api_key);
         version = xasprintf("anthropic-version: %s", provider->version);
@@ -125,13 +140,15 @@ static char **build_headers(const struct http_provider *provider, int streaming)
 
 struct http_stream {
     const struct http_provider *provider;
+    const struct wire *wire; /* resolved for this request's model */
     struct openai_cache_plan cache;
     union wire_events events;
 };
 
 static char **stream_build_headers(void *ctx)
 {
-    return build_headers(((struct http_stream *)ctx)->provider, 1);
+    struct http_stream *stream = ctx;
+    return build_headers(stream->provider, stream->wire, 1);
 }
 
 static void stream_parser_init(void *ctx, stream_cb callback, void *callback_user)
@@ -142,26 +159,54 @@ static void stream_parser_init(void *ctx, stream_cb callback, void *callback_use
         .length_hint = stream->provider->length_hint,
         .cache_write_1h = stream->cache.writes_bill_1h,
     };
-    stream->provider->wire->events_init(&stream->events, callback, callback_user, &opts);
+    stream->wire->events_init(&stream->events, callback, callback_user, &opts);
 }
 
 static int handle_sse_data(const char *event_name, const char *data, void *user)
 {
     struct http_stream *stream = user;
-    stream->provider->wire->events_feed(&stream->events, event_name, data);
+    stream->wire->events_feed(&stream->events, event_name, data);
     return 0;
 }
 
 static void stream_parser_finalize(void *ctx)
 {
     struct http_stream *stream = ctx;
-    stream->provider->wire->events_finalize(&stream->events);
+    stream->wire->events_finalize(&stream->events);
 }
 
 static void stream_parser_free(void *ctx)
 {
     struct http_stream *stream = ctx;
-    stream->provider->wire->events_free(&stream->events);
+    stream->wire->events_free(&stream->events);
+}
+
+/* How long a request may wait on the in-flight snapshot fetch for its wire hint. */
+#define WIRE_HINT_FETCH_WAIT_MS 5000
+
+/* The wire `model` speaks: the first matching model_apis rule, else the catalog hint when the
+ * preset opted in, else the provider default. NULL means the catalog knows the model needs a
+ * protocol hax does not implement; the caller reports it instead of guessing. */
+static const struct wire *resolve_model_wire(struct http_provider *provider, const char *model)
+{
+    for (size_t i = 0; i < provider->n_wire_rules; i++)
+        if (fnmatch(provider->wire_rules[i].pattern, model, 0) == 0)
+            return provider->wire_rules[i].wire;
+
+    if (provider->catalog_wires && provider->catalog_id) {
+        struct catalog_entry entry;
+        catalog_lookup(provider->catalog_id, model, &entry);
+        if (!entry.api) {
+            /* A fresh install may still be fetching the snapshot, and guessing here would
+             * speak the wrong protocol to the model: wait, bounded, and look again. A fetch
+             * outliving the wait keeps running so later requests can route by it. */
+            catalog_wait(WIRE_HINT_FETCH_WAIT_MS);
+            catalog_lookup(provider->catalog_id, model, &entry);
+        }
+        if (entry.api)
+            return wire_find(entry.api);
+    }
+    return provider->wire;
 }
 
 static int http_provider_stream(struct provider *base, const struct context *context,
@@ -169,17 +214,26 @@ static int http_provider_stream(struct provider *base, const struct context *con
                                 http_tick_cb tick, void *tick_user)
 {
     struct http_provider *provider = (struct http_provider *)base;
-    struct http_stream stream = {.provider = provider};
+    const struct wire *wire = resolve_model_wire(provider, model);
+    if (!wire) {
+        char *message = xasprintf("model %s needs a protocol hax does not support", model);
+        struct stream_event error = {.kind = EV_ERROR, .u.error = {.message = message}};
+        callback(&error, callback_user);
+        free(message);
+        return -1;
+    }
+
+    struct http_stream stream = {.provider = provider, .wire = wire};
     struct wire_body_opts opts = {
         .extra_body = provider->extra_body,
         .cache_ttl = provider->cache_ttl,
     };
 
-    if (provider->wire == &WIRE_ANTHROPIC_MESSAGES) {
+    if (wire == &WIRE_ANTHROPIC_MESSAGES) {
         opts.cache_markers =
             config_scoped_bool_or(provider->config_prefix, "cache", provider->cache_default);
         opts.max_tokens = http_provider_max_tokens(base, model);
-        opts.thinking_mode = resolve_thinking_mode(provider);
+        opts.thinking_mode = resolve_thinking_mode(provider, context->effort);
         opts.thinking_budget = config_scoped_int(provider->config_prefix, "thinking_budget");
         opts.show_reasoning = config_bool("show_reasoning");
         opts.allow_empty_signature = provider->allow_empty_signature;
@@ -199,12 +253,14 @@ static int http_provider_stream(struct provider *base, const struct context *con
         opts.request_cost = provider->request_cost;
     }
 
-    char *body = wire_build_body(provider->wire, context, provider_stable_id(base), model, &opts);
+    char *body = wire_build_body(wire, context, provider_stable_id(base), model, &opts);
     if (!body)
         return -1;
 
+    char *endpoint =
+        wire == provider->wire ? NULL : xasprintf("%s%s", provider->base_url, wire->path);
     struct stream_retry request = {
-        .endpoint = provider->endpoint,
+        .endpoint = endpoint ? endpoint : provider->endpoint,
         .body = body,
         .body_len = strlen(body),
         .ctx = &stream,
@@ -215,6 +271,7 @@ static int http_provider_stream(struct provider *base, const struct context *con
         .parser_free = stream_parser_free,
     };
     int result = stream_retry_run(&request, callback, callback_user, tick, tick_user);
+    free(endpoint);
     free(body);
     return result;
 }
@@ -223,6 +280,9 @@ static void http_provider_destroy(struct provider *base)
 {
     struct http_provider *provider = (struct http_provider *)base;
     model_meta_release(base);
+    for (size_t i = 0; i < provider->n_wire_rules; i++)
+        free(provider->wire_rules[i].pattern);
+    free(provider->wire_rules);
     free(provider->base_url);
     free(provider->api_key);
     free(provider->name);
@@ -249,6 +309,10 @@ static const struct wire *resolve_wire(const struct http_provider_preset *preset
 
     const char *api = config_scoped_str(preset->config_prefix, "api");
     if (!api || !*api)
+        return fallback;
+    /* "catalog" declares per-model routing (config_provider wires it up); there is no fixed
+     * wire to pick here, so the preset default covers the unmapped models. */
+    if (strcasecmp(api, "catalog") == 0)
         return fallback;
 
     const struct wire *wire = wire_find(api);
@@ -294,7 +358,7 @@ static int http_provider_list_models(struct provider *base, struct model_info **
     *n_models = 0;
 
     char *url = xasprintf("%s/models", provider->base_url);
-    char **headers = build_headers(provider, 0);
+    char **headers = build_headers(provider, provider->wire, 0);
 
     char *response_body = NULL;
     long status = 0;
@@ -363,10 +427,16 @@ static size_t http_provider_list_efforts(struct provider *base, const char *cons
     struct http_provider *provider = (struct http_provider *)base;
     if (!provider->efforts || provider->n_efforts == 0)
         return 0;
-    /* Messages effort levels steer adaptive thinking only; other modes take none. */
-    if (provider->wire == &WIRE_ANTHROPIC_MESSAGES &&
-        resolve_thinking_mode(provider) != ANTHROPIC_THINKING_ADAPTIVE)
-        return 0;
+    /* Messages effort levels steer adaptive thinking; only an explicit budget/off pin rules
+     * that out — an unconfigured default upgrades per request when an effort is chosen, and
+     * an unrecognized value falls back to that default at request time. Only a pure Messages
+     * provider hides the ladder: on a mixed one, models routed to other wires still take it. */
+    if (provider->wire == &WIRE_ANTHROPIC_MESSAGES && !provider->n_wire_rules &&
+        !provider->catalog_wires) {
+        const char *mode = config_scoped_str(provider->config_prefix, "thinking_mode");
+        if (mode && (strcasecmp(mode, "budget") == 0 || strcasecmp(mode, "off") == 0))
+            return 0;
+    }
     *efforts = provider->efforts;
     return provider->n_efforts;
 }
@@ -383,7 +453,8 @@ int http_provider_has_api_key(const struct provider *provider)
 
 char **http_provider_metadata_headers(const struct provider *provider)
 {
-    return build_headers((const struct http_provider *)provider, 0);
+    const struct http_provider *hp = (const struct http_provider *)provider;
+    return build_headers(hp, hp->wire, 0);
 }
 
 void http_provider_prepare_base_url_availability(const char *base_url, const char *api_key,
@@ -391,7 +462,7 @@ void http_provider_prepare_base_url_availability(const char *base_url, const cha
                                                  struct provider_availability *out)
 {
     out->available = 0;
-    out->reason = "server not reachable";
+    out->reason = xstrdup("server not reachable");
     out->url = xasprintf("%s/models", base_url);
     out->timeout_s = 2;
     char *authorization =
@@ -419,6 +490,38 @@ static char *resolve_base_url(const struct http_provider_preset *preset)
         return NULL;
     }
     return dup_trim_trailing_slash(base_url);
+}
+
+/* Parse <prefix>.model_apis — glob patterns mapped to dialect names, first match winning in
+ * written order — into owned rules, dropping invalid members with a warning. */
+static void resolve_wire_rules(struct http_provider *provider, const char *prefix)
+{
+    if (!prefix)
+        return;
+    char *key = xasprintf("%s.model_apis", prefix);
+    const json_t *node = config_json_node(key);
+    if (node && !json_is_object(node))
+        hax_warn("%s must be a JSON object of pattern/dialect members — ignoring it", key);
+    if (json_is_object(node)) {
+        provider->wire_rules =
+            xcalloc(json_object_size((json_t *)node), sizeof(*provider->wire_rules));
+        const char *pattern;
+        json_t *value;
+        json_object_foreach((json_t *)node, pattern, value)
+        {
+            const struct wire *wire = wire_find(json_string_value(value));
+            if (!wire) {
+                hax_warn("%s: '%s' needs a dialect value (openai-completions, openai-responses, "
+                         "anthropic-messages) — ignoring it",
+                         key, pattern);
+                continue;
+            }
+            provider->wire_rules[provider->n_wire_rules].pattern = xstrdup(pattern);
+            provider->wire_rules[provider->n_wire_rules].wire = wire;
+            provider->n_wire_rules++;
+        }
+    }
+    free(key);
 }
 
 static const char *resolve_display_name(const struct http_provider_preset *preset)
@@ -450,10 +553,11 @@ struct provider *http_provider_new_preset(const struct http_provider_preset *pre
     provider->config_prefix = preset->config_prefix ? xstrdup(preset->config_prefix) : NULL;
     provider->wire = resolve_wire(preset);
     provider->endpoint = xasprintf("%s%s", provider->base_url, provider->wire->path);
-    if (provider->wire == &WIRE_ANTHROPIC_MESSAGES) {
-        const char *version = config_scoped_str(preset->config_prefix, "version");
-        provider->version = xstrdup(version && *version ? version : MESSAGES_DEFAULT_VERSION);
-    }
+    resolve_wire_rules(provider, preset->config_prefix);
+    provider->catalog_wires = preset->catalog_wires;
+    /* Resolved regardless of the default wire: per-model rules can route to Messages. */
+    const char *version = config_scoped_str(preset->config_prefix, "version");
+    provider->version = xstrdup(version && *version ? version : MESSAGES_DEFAULT_VERSION);
 
     provider->send_cache_key = config_scoped_bool_or(preset->config_prefix, "send_cache_key",
                                                      preset->send_cache_key_default);

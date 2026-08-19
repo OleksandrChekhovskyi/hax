@@ -11,6 +11,7 @@
 struct responses_tool_call {
     char *item_id;
     char *call_id;
+    int saw_args_delta;
 };
 
 static void init_usage(struct stream_usage *usage)
@@ -93,6 +94,7 @@ static void add_tool_call(struct responses_events *events, const char *item_id, 
     struct responses_tool_call *tool_call = &events->tool_calls[events->tool_call_count++];
     tool_call->item_id = xstrdup(item_id);
     tool_call->call_id = xstrdup(call_id);
+    tool_call->saw_args_delta = 0;
 }
 
 static void handle_output_item_added(struct responses_events *events, json_t *root)
@@ -122,6 +124,17 @@ static void handle_tool_call_done(struct responses_events *events, json_t *item)
     struct responses_tool_call *tool_call = find_tool_call(events, item_id);
     if (!tool_call)
         return;
+
+    /* Some backends (OpenCode's Grok, for one) skip argument delta events and deliver the
+     * complete arguments only on the item itself. */
+    const char *arguments = json_string_value(json_object_get(item, "arguments"));
+    if (!tool_call->saw_args_delta && arguments && *arguments) {
+        struct stream_event delta_event = {
+            .kind = EV_TOOL_CALL_DELTA,
+            .u.tool_call_delta = {.id = tool_call->call_id, .args_delta = arguments},
+        };
+        emit_event(events, &delta_event);
+    }
 
     struct stream_event event = {
         .kind = EV_TOOL_CALL_END,
@@ -243,13 +256,16 @@ static void handle_tool_call_delta(struct responses_events *events, json_t *root
 {
     const char *item_id = json_string_value(json_object_get(root, "item_id"));
     const char *delta = json_string_value(json_object_get(root, "delta"));
-    if (!item_id || !delta)
+    /* An empty delta carries nothing and must not count as streamed arguments, or it would
+     * defeat the completed-item fallback in handle_tool_call_done. */
+    if (!item_id || !delta || !*delta)
         return;
 
     struct responses_tool_call *tool_call = find_tool_call(events, item_id);
     if (!tool_call)
         return;
 
+    tool_call->saw_args_delta = 1;
     struct stream_event event = {
         .kind = EV_TOOL_CALL_DELTA,
         .u.tool_call_delta = {.id = tool_call->call_id, .args_delta = delta},

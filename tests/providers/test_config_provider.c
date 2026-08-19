@@ -239,6 +239,15 @@ static const char CONFIG_JSON[] =
     "    \"warny\": {\"base_url\": \"http://127.0.0.1:9008/v1\","
     "               \"resoning_format\": \"nested\","
     "               \"thinking_mode\": \"budget\"},"
+    "    \"mixed\": {\"base_url\": \"http://127.0.0.1:9009/v1\","
+    "               \"model_apis\": {\"claude-*\": \"anthropic-messages\"},"
+    "               \"thinking_mode\": \"budget\","
+    "               \"reasoning_format\": \"nested\"},"
+    "    \"catgw\": {\"base_url\": \"http://127.0.0.1:9010/v1\","
+    "               \"api\": \"catalog\","
+    "               \"catalog_id\": \"opencode\","
+    "               \"thinking_mode\": \"budget\","
+    "               \"reasoning_format\": \"nested\"},"
     "    \"my.llm\": {\"base_url\": \"http://127.0.0.1:9002/v1\"}"
     "  },"
     "  \"providers.flatprov.base_url\": \"http://127.0.0.1:9001/v1\","
@@ -269,7 +278,7 @@ int main(void)
      * provider layer's job, below). */
     char **names = NULL;
     size_t nk = config_object_keys("providers", &names);
-    EXPECT(nk == 12);
+    EXPECT(nk == 14);
     for (size_t i = 0; i < nk; i++)
         free(names[i]);
     free(names);
@@ -337,8 +346,9 @@ int main(void)
     struct provider_availability keyed = {0};
     keyed_factory->prepare_availability(keyed_factory->id, &keyed);
     EXPECT(!keyed.available);
-    EXPECT_STR_EQ(keyed.reason, "API key not set");
+    EXPECT_STR_EQ(keyed.reason, "HAX_TEST_KEYED_KEY not set");
     EXPECT(keyed.url == NULL);
+    provider_availability_clear(&keyed);
     setenv("HAX_TEST_KEYED_KEY", "sk-keyed", 1);
     keyed_factory->prepare_availability(keyed_factory->id, &keyed);
     EXPECT(keyed.available);
@@ -395,7 +405,11 @@ int main(void)
         EXPECT_STR_EQ(anthropic->name, "claudish");
         EXPECT_STR_EQ(anthropic->catalog_id, "anthropic");
         EXPECT(anthropic->sort_models == 1);
-        EXPECT(anthropic->list_efforts && anthropic->list_efforts(anthropic, &efforts) == 0);
+        /* The unconfigured budget default upgrades to adaptive per request when an effort is
+         * chosen, so the ladder stays selectable; an explicit budget pin hides it. */
+        EXPECT(anthropic->list_efforts && anthropic->list_efforts(anthropic, &efforts) == 5);
+        config_set_override("providers.claudish.thinking_mode", "budget");
+        EXPECT(anthropic->list_efforts(anthropic, &efforts) == 0);
         config_set_override("providers.claudish.thinking_mode", "adaptive");
         EXPECT(anthropic->list_efforts(anthropic, &efforts) == 5);
         config_set_override("providers.claudish.thinking_mode", NULL);
@@ -434,6 +448,28 @@ int main(void)
     EXPECT(clean != NULL);
     if (clean)
         clean->destroy(clean);
+
+    /* model_apis makes a chat provider a mixed-protocol gateway, so fields from every dialect
+     * are live and must not draw "not used" warnings. */
+    const struct provider_factory *mixed_factory = provider_find("mixed");
+    EXPECT(mixed_factory != NULL);
+    diagnostics_before = hax_diag_sequence();
+    struct provider *mixed = mixed_factory->new(mixed_factory->id);
+    EXPECT(hax_diag_sequence() == diagnostics_before);
+    EXPECT(mixed != NULL);
+    if (mixed)
+        mixed->destroy(mixed);
+
+    /* api "catalog" is the rule-free gateway opt-in: routing comes from catalog hints alone,
+     * and it too must construct with every dialect's fields and no diagnostics. */
+    const struct provider_factory *catgw_factory = provider_find("catgw");
+    EXPECT(catgw_factory != NULL);
+    diagnostics_before = hax_diag_sequence();
+    struct provider *catgw = catgw_factory->new(catgw_factory->id);
+    EXPECT(hax_diag_sequence() == diagnostics_before);
+    EXPECT(catgw != NULL);
+    if (catgw)
+        catgw->destroy(catgw);
 
     /* The shipped -compatible recipes have no default base_url: unavailable
      * (with a pointer at their env alias) and unconstructable until the user

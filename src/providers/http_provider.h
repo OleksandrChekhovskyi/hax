@@ -22,9 +22,13 @@ struct http_provider_preset {
     int pin_base_url;             /* ignore <prefix>.base_url: a first-party key must not
                                      follow a configured URL to another host */
     const char *catalog_id;       /* copied; NULL disables catalog metadata */
-    /* Request protocol; NULL means Chat Completions. An OpenAI-family choice may be overridden
-     * by <prefix>.api; the Messages wire is pinned because its knobs differ. */
+    /* Default request protocol; NULL means Chat Completions. An OpenAI-family choice may be
+     * overridden by <prefix>.api; the Messages wire is pinned because its knobs differ. */
     const struct wire *wire;
+    /* Resolve each model's wire from the catalog api hint: for gateways serving models over
+     * different protocols behind one base URL. <prefix>.model_apis rules take precedence and
+     * work without this flag; unmatched models fall back to the default wire. */
+    int catalog_wires;
 
     /* Chat Completions / Responses policy. */
     int send_cache_key_default;

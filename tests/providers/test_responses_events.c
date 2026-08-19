@@ -174,6 +174,75 @@ static void test_tool_call_lifecycle(void)
     fixture_free(&fixture);
 }
 
+/* Some backends skip argument delta events and carry the complete arguments only on the item
+ * (grok via OpenCode Go); the done item must supply them or the call dispatches empty. */
+static void test_tool_call_arguments_only_on_done_item(void)
+{
+    struct event_fixture fixture;
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.output_item.added\",\"item\":"
+                          "{\"type\":\"function_call\",\"id\":\"i1\",\"call_id\":\"c1\","
+                          "\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.output_item.done\",\"item\":"
+                          "{\"type\":\"function_call\",\"id\":\"i1\",\"call_id\":\"c1\","
+                          "\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}");
+    EXPECT(fixture.capture.count == 3);
+    EXPECT(fixture.capture.events[0].kind == EV_TOOL_CALL_START);
+    EXPECT(fixture.capture.events[1].kind == EV_TOOL_CALL_DELTA);
+    EXPECT_STR_EQ(fixture.capture.events[1].id, "c1");
+    EXPECT_STR_EQ(fixture.capture.events[1].args_delta, "{\"command\":\"ls\"}");
+    EXPECT(fixture.capture.events[2].kind == EV_TOOL_CALL_END);
+    fixture_free(&fixture);
+}
+
+/* An empty delta carries no argument bytes: it must not count as streamed arguments and
+ * suppress the completed-item fallback. */
+static void test_tool_call_empty_delta_keeps_fallback(void)
+{
+    struct event_fixture fixture;
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.output_item.added\",\"item\":"
+                          "{\"type\":\"function_call\",\"id\":\"i1\",\"call_id\":\"c1\","
+                          "\"name\":\"bash\"}}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.function_call_arguments.delta\","
+                                           "\"item_id\":\"i1\",\"delta\":\"\"}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.output_item.done\",\"item\":"
+                                           "{\"type\":\"function_call\",\"id\":\"i1\","
+                                           "\"call_id\":\"c1\",\"name\":\"bash\","
+                                           "\"arguments\":\"{}\"}}");
+    EXPECT(fixture.capture.count == 3);
+    EXPECT(fixture.capture.events[1].kind == EV_TOOL_CALL_DELTA);
+    EXPECT_STR_EQ(fixture.capture.events[1].args_delta, "{}");
+    EXPECT(fixture.capture.events[2].kind == EV_TOOL_CALL_END);
+    fixture_free(&fixture);
+}
+
+/* When deltas did stream, the full copy on the done item is their concatenation and must not
+ * be appended a second time. */
+static void test_tool_call_done_arguments_not_duplicated(void)
+{
+    struct event_fixture fixture;
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.output_item.added\",\"item\":"
+                          "{\"type\":\"function_call\",\"id\":\"i1\",\"call_id\":\"c1\","
+                          "\"name\":\"bash\"}}");
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.function_call_arguments.delta\","
+                                           "\"item_id\":\"i1\",\"delta\":\"{}\"}");
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.output_item.done\",\"item\":"
+                          "{\"type\":\"function_call\",\"id\":\"i1\",\"call_id\":\"c1\","
+                          "\"name\":\"bash\",\"arguments\":\"{}\"}}");
+    EXPECT(fixture.capture.count == 3);
+    EXPECT(fixture.capture.events[1].kind == EV_TOOL_CALL_DELTA);
+    EXPECT_STR_EQ(fixture.capture.events[1].args_delta, "{}");
+    EXPECT(fixture.capture.events[2].kind == EV_TOOL_CALL_END);
+    fixture_free(&fixture);
+}
+
 static void test_unknown_tool_call_delta_ignored(void)
 {
     struct event_fixture fixture;
@@ -704,6 +773,9 @@ int main(void)
     test_text_delta();
     test_refusal_delta_is_text();
     test_tool_call_lifecycle();
+    test_tool_call_arguments_only_on_done_item();
+    test_tool_call_empty_delta_keeps_fallback();
+    test_tool_call_done_arguments_not_duplicated();
     test_unknown_tool_call_delta_ignored();
     test_completed_emits_done();
     test_done_sentinel();

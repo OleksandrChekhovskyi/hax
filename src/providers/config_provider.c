@@ -15,71 +15,8 @@
 #include "providers/anthropic_messages.h"
 #include "providers/http_provider.h"
 #include "providers/openai_messages.h"
+#include "providers/recipes.h"
 #include "providers/wire.h"
-
-/* A built-in recipe: the default field values for a well-known provider, overridable
- * key-by-key by a matching providers.<name> config block. The shipped set is deliberately
- * small and slow-moving — only providers fully described by static endpoint metadata (no
- * auth/transport code), since hax discovers models live via /v1/models rather than shipping
- * a catalog. Borrowed static strings throughout; the recipe table outlives every provider
- * built from it. */
-struct provider_recipe {
-    const char *id;               /* selectable HAX_PROVIDER value */
-    const char *display_name;     /* banner label; NULL → name */
-    const char *api;              /* dialect: openai-completions | openai-responses |
-                                     anthropic-messages */
-    const char *base_url;         /* default endpoint; NULL → the user must configure one */
-    const char *api_key_env;      /* env var holding the key; NULL → local/no key */
-    const char *reasoning_format; /* "flat"/"nested"; NULL → flat */
-    const char *catalog_id;       /* models.dev key (catalog.h); in a recipe, NULL is a
-                                     curated absence — no fallback to `name` */
-    int send_cache_key;           /* prompt_cache_key default (0/1) */
-    const char *length_hint;      /* appended to a "length"-truncation error */
-    int no_efforts;               /* offer no effort levels, so /effort skips the provider */
-    /* Probe <base_url>/models reachability when keyless. Only for curated local recipes where
-     * "not running" is the common failure and /models is known to exist; a generic endpoint may
-     * not serve /models at all, so configuration is the default availability check. */
-    int probe;
-    const char *unconfigured_reason; /* availability reason without a base_url; NULL →
-                                        "no base_url" */
-};
-
-// clang-format off
-static const struct provider_recipe RECIPES[] = {
-    /* The generic -compatible endpoints are recipes with no default base_url: unavailable
-     * until the user supplies one, through the registered HAX_* env aliases or their
-     * providers.<name> block. */
-    {
-        .id = "openai-compatible",
-        .api = "openai-completions",
-        .unconfigured_reason = "HAX_OPENAI_BASE_URL not set",
-    },
-    {
-        .id = "anthropic-compatible",
-        .api = "anthropic-messages",
-        .unconfigured_reason = "HAX_ANTHROPIC_BASE_URL not set",
-    },
-    {
-        .id = "ollama",
-        .api = "openai-completions",
-        .base_url = "http://127.0.0.1:11434/v1",
-        /* ollama caps the runtime context at OLLAMA_CONTEXT_LENGTH (4096 by default) and
-         * ignores a per-request num_ctx on its OpenAI endpoint, so hax can't widen it — a
-         * prompt near that size truncates the reply to "length". Point the user at the only
-         * real fix. */
-        .length_hint = "ollama's context window may be too small for the prompt — "
-                       "restart `ollama serve` with a larger OLLAMA_CONTEXT_LENGTH "
-                       "(e.g. 16384), or raise num_ctx on the model",
-        /* ollama's thinking is a per-model toggle/budget, not a categorical effort, and its
-         * local models aren't the hosted ones the catalog describes: no effort ladder, no
-         * catalog_id. */
-        .no_efforts = 1,
-        /* A local daemon that reliably serves /models: worth dimming in /provider when down. */
-        .probe = 1,
-    },
-};
-// clang-format on
-#define N_RECIPES (sizeof(RECIPES) / sizeof(RECIPES[0]))
 
 #define FIELD_ANY (PROVIDER_FIELD_OPENAI | PROVIDER_FIELD_ANTHROPIC)
 /* Responses fixes its reasoning shape and round-trip on the wire and never sends explicit cache
@@ -97,6 +34,7 @@ static const struct provider_field PROVIDER_FIELDS[] = {
     {.leaf = "display_name",        .dialects = FIELD_ANY},
     {.leaf = "catalog_id",          .dialects = PROVIDER_FIELD_CONFIG_DEFINED},
     {.leaf = "sort_models",         .dialects = PROVIDER_FIELD_CONFIG_DEFINED},
+    {.leaf = "model_apis",          .dialects = FIELD_ANY},
     {.leaf = "cache",               .dialects = FIELD_CACHE_MARKERS},
     {.leaf = "cache_ttl",           .dialects = FIELD_CACHE_MARKERS},
     {.leaf = "send_cache_key",      .dialects = PROVIDER_FIELD_OPENAI},
@@ -320,12 +258,31 @@ static int module_key_registered(const char *name, const char *leaf)
     return registered;
 }
 
+static const char *cfg(const char *name, const char *leaf);
+
+/* A model_apis block or api "catalog" — configured or from the recipe — makes the provider a
+ * mixed-protocol gateway: models may land on any wire, so every dialect's fields are live. */
+static int provider_routes_wires(const char *name)
+{
+    char *key = xasprintf("providers.%s.model_apis", name);
+    const json_t *rules = config_json_node(key);
+    free(key);
+    if (json_is_object(rules) && json_object_size((json_t *)rules) > 0)
+        return 1;
+    const char *api = cfg(name, "api");
+    if (!api)
+        api = provider_recipe_find(name)->api;
+    return api && strcasecmp(api, "catalog") == 0;
+}
+
 /* A silently ignored member hides a typo or a dialect mix-up. */
 void provider_warn_unused_fields(const char *name, const struct wire *wire, unsigned extra_dialects,
                                  const char *const *extra)
 {
     const char *api_label = wire ? wire->id : name;
     unsigned dialects = (wire ? provider_wire_dialects(wire) : 0) | extra_dialects;
+    if (provider_routes_wires(name))
+        dialects |= FIELD_ANY;
     char *key = xasprintf("providers.%s", name);
     char **members = NULL;
     size_t n_members = config_object_keys(key, &members);
@@ -365,18 +322,6 @@ void provider_warn_unused_wire_fields(const char *name, const struct wire *defau
             wire = default_wire;
     }
     provider_warn_unused_fields(name, wire, 0, extra);
-}
-
-/* Stands in for a missing recipe so field lookups need no NULL checks; the NULL `id`
- * still marks the recipe's absence where it matters (resolve_catalog_id). */
-static const struct provider_recipe NO_RECIPE = {0};
-
-static const struct provider_recipe *recipe_find(const char *name)
-{
-    for (size_t i = 0; i < N_RECIPES; i++)
-        if (strcmp(RECIPES[i].id, name) == 0)
-            return &RECIPES[i];
-    return &NO_RECIPE;
 }
 
 /* Resolve providers.<name>.<leaf> from config (override → file/state; the named lane has no
@@ -430,15 +375,22 @@ static struct provider *apply_base_config(const char *name, struct provider *p)
  * via config_prefix. */
 static struct provider *config_provider_new(const char *name)
 {
-    const struct provider_recipe *r = recipe_find(name);
+    const struct provider_recipe *r = provider_recipe_find(name);
 
     const char *api = resolve(name, "api", r->api);
     if (!api)
         api = "openai-completions";
-    const struct wire *wire = wire_find(api);
+    const struct wire *wire;
+    if (strcasecmp(api, "catalog") == 0) {
+        /* Per-model routing from catalog hints; models the catalog leaves unmapped use Chat
+         * Completions, like the shipped gateway recipes. */
+        wire = &WIRE_OPENAI_CHAT;
+    } else {
+        wire = wire_find(api);
+    }
     if (!wire) {
         hax_err("provider '%s': unsupported api '%s' "
-                "(supported: openai-completions, openai-responses, anthropic-messages)",
+                "(supported: openai-completions, openai-responses, anthropic-messages, catalog)",
                 name, api);
         return NULL;
     }
@@ -482,7 +434,15 @@ static struct provider *config_provider_new(const char *name)
         .length_hint = r->length_hint,
         .config_prefix = cfg_prefix,
         .catalog_id = resolve_catalog_id(name, r),
+        /* model_apis or api "catalog" declares a mixed-protocol gateway, so catalog hints apply
+         * there; a single-protocol provider keeps its explicit api regardless of catalog
+         * metadata. */
+        .catalog_wires = provider_routes_wires(name),
     };
+    if (strcasecmp(api, "catalog") == 0 && !preset.catalog_id)
+        hax_warn("provider '%s': api \"catalog\" routes by catalog metadata, but catalog_id "
+                 "is empty",
+                 name);
 
     struct provider *p;
     if (wire == &WIRE_ANTHROPIC_MESSAGES) {
@@ -491,6 +451,11 @@ static struct provider *config_provider_new(const char *name)
         preset.allow_empty_signature = 1;
         p = anthropic_provider_new_preset(&preset);
     } else {
+        /* A gateway's Messages-wire models get the same compat-safe defaults. */
+        if (provider_routes_wires(name)) {
+            preset.default_thinking_mode = ANTHROPIC_THINKING_BUDGET;
+            preset.allow_empty_signature = 1;
+        }
         p = http_provider_new_preset(&preset);
     }
     free(cfg_prefix);
@@ -504,12 +469,12 @@ static struct provider *config_provider_new(const char *name)
 static void config_provider_prepare_availability(const char *name,
                                                  struct provider_availability *out)
 {
-    const struct provider_recipe *r = recipe_find(name);
+    const struct provider_recipe *r = provider_recipe_find(name);
 
     const char *base = resolve(name, "base_url", r->base_url);
     if (!base) {
         out->available = 0;
-        out->reason = r->unconfigured_reason ? r->unconfigured_reason : "no base_url";
+        out->reason = xstrdup(r->unconfigured_reason ? r->unconfigured_reason : "no base_url");
         return;
     }
 
@@ -520,7 +485,11 @@ static void config_provider_prepare_availability(const char *name,
         const char *api_key = provider_api_key(prefix, key_env);
         free(prefix);
         out->available = api_key != NULL;
-        out->reason = out->available ? NULL : "API key not set";
+        if (!out->available) {
+            /* Name the exact variable or key to set, like the compiled-in providers do. */
+            out->reason = key_env ? xasprintf("%s not set", key_env)
+                                  : xasprintf("providers.%s.api_key not set", name);
+        }
         return;
     }
 
@@ -546,7 +515,7 @@ static struct provider_factory *make_factory(const char *name)
 {
     struct provider_factory *f = xcalloc(1, sizeof(*f));
     f->id = xstrdup(name); /* process-lifetime; the registry never frees these */
-    f->display_name = recipe_find(name)->display_name;
+    f->display_name = provider_recipe_find(name)->display_name;
     f->new = config_provider_new;
     f->prepare_availability = config_provider_prepare_availability;
     return f;
@@ -560,18 +529,20 @@ const struct provider_factory *const *config_providers(size_t *n)
     if (!built) {
         char **names = NULL;
         size_t n_cfg = config_object_keys("providers", &names);
-        factories = xcalloc(N_RECIPES + n_cfg, sizeof(*factories));
+        size_t n_recipes;
+        const struct provider_recipe *recipes = provider_recipes(&n_recipes);
+        factories = xcalloc(n_recipes + n_cfg, sizeof(*factories));
         /* Recipes first, in shipped order; then config-only names. A config block matching a
          * recipe name overlays that recipe at construction — it is not a second factory. */
-        for (size_t i = 0; i < N_RECIPES; i++)
-            factories[count++] = make_factory(RECIPES[i].id);
+        for (size_t i = 0; i < n_recipes; i++)
+            factories[count++] = make_factory(recipes[i].id);
         for (size_t i = 0; i < n_cfg; i++) {
             /* '.' is the config key path separator, so a dotted name could never resolve
              * its providers.<name>.* fields; reject it rather than offer a provider that
              * cannot construct. */
             if (strchr(names[i], '.'))
                 hax_warn("ignoring custom provider '%s': name cannot contain '.'", names[i]);
-            else if (!recipe_find(names[i])->id)
+            else if (!provider_recipe_find(names[i])->id)
                 factories[count++] = make_factory(names[i]);
             free(names[i]);
         }

@@ -29,7 +29,7 @@
 
 struct availability_result {
     int available;
-    const char *reason; /* static provider reason */
+    char *reason; /* owned; NULL when available */
 };
 
 struct availability_job_ctx {
@@ -57,13 +57,16 @@ static void availability_worker(struct bg_job *job, void *arg)
                              ctx->probe.timeout_s, 0, NULL, NULL, &body, NULL) == 0;
     free(body);
     ctx->result->available = available;
-    ctx->result->reason =
-        available ? NULL : (ctx->probe.reason ? ctx->probe.reason : "unavailable");
+    if (!available) {
+        ctx->result->reason = ctx->probe.reason ? ctx->probe.reason : xstrdup("unavailable");
+        ctx->probe.reason = NULL;
+    }
     provider_availability_clear(&ctx->probe);
     free(ctx);
 }
 
-static int factory_available(const struct provider_factory *factory, const char **reason)
+/* When unavailable and `reason` is non-NULL, `*reason` receives an owned explanation. */
+static int factory_available(const struct provider_factory *factory, char **reason)
 {
     struct provider_availability probe;
     prepare_availability(factory, &probe);
@@ -74,8 +77,13 @@ static int factory_available(const struct provider_factory *factory, const char 
                              NULL, NULL, &body, NULL) == 0;
         free(body);
     }
-    if (reason)
-        *reason = available ? NULL : (probe.reason ? probe.reason : "unavailable");
+    if (reason) {
+        *reason = NULL;
+        if (!available) {
+            *reason = probe.reason ? probe.reason : xstrdup("unavailable");
+            probe.reason = NULL;
+        }
+    }
     provider_availability_clear(&probe);
     return available;
 }
@@ -92,9 +100,10 @@ static void probe_availability(const struct provider_factory *const *factories, 
         prepare_availability(factories[i], &ctx->probe);
         if (!ctx->probe.url) {
             results[i].available = ctx->probe.available;
-            results[i].reason = results[i].available
-                                    ? NULL
-                                    : (ctx->probe.reason ? ctx->probe.reason : "unavailable");
+            if (!results[i].available) {
+                results[i].reason = ctx->probe.reason ? ctx->probe.reason : xstrdup("unavailable");
+                ctx->probe.reason = NULL;
+            }
             provider_availability_clear(&ctx->probe);
             free(ctx);
             continue;
@@ -141,6 +150,8 @@ struct provider *provider_autoselect(void)
         if (provider)
             config_set_override("provider", factories[i]->id);
     }
+    for (size_t i = 0; i < factory_count; i++)
+        free(availability[i].reason);
     free(availability);
     return provider;
 }
@@ -653,8 +664,10 @@ static struct provider_pick_result choose_provider_factory(const char *current_p
         result.factory = factories[selected_index];
         result.probe_available = availability[selected_index].available;
     }
-    for (size_t i = 0; i < factory_count; i++)
+    for (size_t i = 0; i < factory_count; i++) {
         free(descriptions[i]);
+        free(availability[i].reason);
+    }
     free(descriptions);
     free(items);
     free(availability);
@@ -674,14 +687,16 @@ void select_provider(struct agent_state *state)
 
     /* Recheck an unavailable row at commit because the advisory probe may be stale. */
     if (!provider_pick.probe_available && factory->prepare_availability) {
-        const char *unavailable_reason = NULL;
+        char *unavailable_reason = NULL;
         if (!factory_available(factory, &unavailable_reason)) {
             ui_note("%s is unavailable — %s", provider_display_name(factory),
                     unavailable_reason ? unavailable_reason : "unavailable");
             disp_sync_external_line(&state->render->disp);
+            free(unavailable_reason);
             free(current_id);
             return;
         }
+        free(unavailable_reason);
     }
 
     /* Re-picking the live provider avoids rebuilding it and continues to model selection. */

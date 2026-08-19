@@ -23,7 +23,7 @@
 - **Inspectable** — See exactly what was sent to the model and what it replied in a usable
   transcript view (Ctrl+T). Optionally collect a detailed wire protocol trace.
 - **Use any provider/model** — Supports OpenAI (+compatible), Anthropic (+compatible),
-  Codex (via ChatGPT subscription), OpenRouter, llama.cpp, etc.
+  Codex (via ChatGPT subscription), OpenRouter, OpenCode Zen/Go, llama.cpp, etc.
 - **Well-behaved Unix tool** — XDG paths, clean stdout in `-p` one-shot mode with resume hints on
   stderr, plain-text config and session files, composition via subprocesses instead of plugins.
 
@@ -89,6 +89,7 @@ and choose a model. hax remembers interactive provider, model, and effort select
 | `openai` | Set `OPENAI_API_KEY`. |
 | `anthropic` | Set `ANTHROPIC_API_KEY`. |
 | `openrouter` | Set `OPENROUTER_API_KEY`. |
+| `opencode-zen` / `opencode-go` | Set `OPENCODE_API_KEY`. |
 | `llama.cpp` | Run `llama-server`. |
 | `ollama` | Run `ollama serve`. |
 | Compatible or custom endpoint | See [docs/providers.md](./docs/providers.md). |

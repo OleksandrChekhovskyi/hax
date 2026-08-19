@@ -7,30 +7,14 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
-### Changed
-
-- **Breaking:** every provider now reads settings only from its own `providers.<id>` config block,
-  so a key or quirk configured for one endpoint can no longer leak into another. Per-provider
-  config keys and some environment variables moved or changed scope in the process; if you
-  configure providers beyond their API-key variables, revisit your setup against
-  [docs/providers.md](docs/providers.md) and
-  [docs/configuration.md](docs/configuration.md#provider-settings). Auto-selection now also tries
-  the generic -compatible providers after every compiled-in one.
-- The `/provider` picker shows display names — `llama.cpp`, a configured `display_name` — and
-  notes the selectable provider id below the list when it differs from the highlighted label.
-- `/config` no longer lists `providers.*` keys: providers are configured through `/provider`,
-  environment variables, and `config.json`. A specific key can still be queried by name.
-- A `providers.<name>` block member that hax does not recognize, or that the provider does not
-  use — including Chat Completions-only fields on a Responses endpoint, and typos in a
-  compiled-in provider's block — now warns at construction instead of being silently ignored.
-- Keyless config-defined providers count a configured `base_url` as available instead of probing
-  `/models`, which a generic endpoint may not serve; the ollama recipe still probes its local
-  server.
-- hax-written `config.json` updates (`/config`, preset save) no longer rewrite numbers and
-  booleans elsewhere in the file as strings.
-
 ### Added
 
+- OpenCode Zen and Go providers (`opencode-zen`, `opencode-go`): set `OPENCODE_API_KEY` and pick
+  a model — hax speaks each model's API automatically. See
+  [docs/providers.md](docs/providers.md#opencode-zen-and-go).
+- Custom providers can serve several protocols behind one URL: `api: "catalog"` routes each model
+  by the model catalog, and `model_apis` maps model-id globs to APIs explicitly. See
+  [docs/providers.md](docs/providers.md#custom-providers).
 - `/login` signs in to ChatGPT for the codex provider, so the codex CLI is no longer needed:
   approve a code on the printed `auth.openai.com` page and hax keeps the token refreshed from
   then on. `/logout` removes the login. Credentials from the codex CLI keep working (read-only)
@@ -53,8 +37,36 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - On Arch Linux, hax is available in the AUR as `hax`, refreshed automatically by each stable
   release.
 
+### Changed
+
+- **Breaking:** every provider now reads settings only from its own `providers.<id>` config block,
+  so a key or quirk configured for one endpoint can no longer leak into another. Per-provider
+  config keys and some environment variables moved or changed scope in the process; if you
+  configure providers beyond their API-key variables, revisit your setup against
+  [docs/providers.md](docs/providers.md) and
+  [docs/configuration.md](docs/configuration.md#provider-settings). Auto-selection now also tries
+  the generic -compatible providers after every compiled-in one.
+- The `/provider` picker shows display names — `llama.cpp`, a configured `display_name` — and
+  notes the selectable provider id below the list when it differs from the highlighted label.
+- `/config` no longer lists `providers.*` keys: providers are configured through `/provider`,
+  environment variables, and `config.json`. A specific key can still be queried by name.
+- A `providers.<name>` block member that hax does not recognize, or that the provider does not
+  use — including Chat Completions-only fields on a Responses endpoint, and typos in a
+  compiled-in provider's block — now warns at construction instead of being silently ignored.
+- Selecting a reasoning effort now takes effect on Anthropic-protocol models of custom endpoints
+  and gateways, by switching the request to adaptive thinking; previously it was silently
+  ignored there. An explicit `thinking_mode` setting still wins.
+- Keyless config-defined providers count a configured `base_url` as available instead of probing
+  `/models`, which a generic endpoint may not serve; the ollama recipe still probes its local
+  server.
+- hax-written `config.json` updates (`/config`, preset save) no longer rewrite numbers and
+  booleans elsewhere in the file as strings.
+
 ### Fixed
 
+- Tool calls from backends that deliver the arguments only with the completed call instead of
+  streaming them (Grok via OpenCode Go) no longer run with empty arguments and derail the
+  conversation.
 - Custom providers that enable prompt caching now default the cache-breakpoint TTL to 1h like the
   built-in providers, instead of falling back to the API's 5m. A `cache_ttl` value other than
   `5m`/`1h` now warns and uses the default instead of silently behaving as 5m.

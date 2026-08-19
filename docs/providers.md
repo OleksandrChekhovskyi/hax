@@ -118,6 +118,24 @@ OpenRouter privacy settings. Free and paid models have separate training control
 should not be assumed private. Enable the account-level training opt-out or zero-data-retention
 routing when your work requires it.
 
+## OpenCode Zen and Go
+
+[OpenCode Zen](https://opencode.ai/docs/zen/) (pay-as-you-go) and
+[OpenCode Go](https://opencode.ai/docs/go/) (subscription) share one key:
+
+```sh
+export OPENCODE_API_KEY=...
+hax --provider=opencode-zen --model=kimi-k2.7-code
+```
+
+The gateway serves each model over its own API — Chat Completions, Responses, or Messages — and
+hax picks the right one per model. A model newer than the cached model catalog may need a
+`model_apis` rule ([below](#custom-providers)) until the catalog refreshes, and Gemini models use
+a protocol hax does not speak. Config fields from every dialect apply, each to the models
+speaking it: `thinking_mode` affects the Claude models, `reasoning_format` the Chat Completions
+ones. Pinning `thinking_mode` to `budget` or `off` also means a selected effort steers only the
+non-Claude models, since those modes take none.
+
 ## llama.cpp
 
 `llamacpp` is a convenience configuration for a local `llama-server` at
@@ -246,7 +264,8 @@ Common fields:
 | --- | --- |
 | `base_url` | Required endpoint root, unless a shipped recipe supplies one. |
 | `display_name` | Human-readable banner name. |
-| `api` | `openai-completions` (default), `openai-responses`, or `anthropic-messages`. |
+| `api` | `openai-completions` (default), `openai-responses`, `anthropic-messages`, or `catalog`. |
+| `model_apis` | Model-id globs mapped to `api` dialects; the first match sets that model's protocol. |
 | `api_key_env` | Name of the environment variable holding the key; recommended. |
 | `api_key` | Literal key, or `$VAR` to read an environment variable. |
 | `sort_models` | Alphabetize this provider's model picker. |
@@ -257,6 +276,12 @@ Common fields:
 A custom provider named after its models.dev id (for example `groq`) uses that identity by default.
 Use `catalog_id` when a proxy name differs from the underlying provider. Do not map local models to a
 hosted provider merely because names look similar: prices and context limits may differ.
+
+`api: "catalog"` declares a mixed-protocol gateway the model catalog already describes: each model
+routes by the catalog's per-model API — how the shipped OpenCode recipes work — and models the
+catalog leaves unmapped use Chat Completions. `model_apis` rules also switch a provider into this
+mode and take precedence over catalog hints; either form makes every dialect's config fields apply,
+each to the models speaking it.
 
 For `openai-completions`, advanced fields are `reasoning_format`, `reasoning_roundtrip`,
 `send_cache_key`, `request_cost`, `cache`, and `cache_ttl`. `openai-responses` accepts

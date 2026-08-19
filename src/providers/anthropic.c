@@ -280,7 +280,7 @@ static void anthropic_prepare_availability(const char *id, struct provider_avail
 {
     (void)id;
     out->available = provider_api_key("providers.anthropic", "ANTHROPIC_API_KEY") != NULL;
-    out->reason = out->available ? NULL : "ANTHROPIC_API_KEY not set";
+    out->reason = out->available ? NULL : xstrdup("ANTHROPIC_API_KEY not set");
 }
 
 const struct provider_factory PROVIDER_ANTHROPIC = {

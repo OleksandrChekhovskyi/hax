@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -129,11 +130,27 @@ static void fill_efforts(struct catalog_entry *entry, json_t *model_object)
     entry->efforts.known = 1;
 }
 
+/* Normalize a declared dialect to its canonical static-storage name; an unknown name marks the
+ * model unsupported rather than being guessed at, matching npm_dialect. */
+static const char *canonical_api(const char *api)
+{
+    static const char *const DIALECTS[] = {"openai-completions", "openai-responses",
+                                           "anthropic-messages"};
+    for (size_t i = 0; i < sizeof(DIALECTS) / sizeof(DIALECTS[0]); i++)
+        if (strcasecmp(api, DIALECTS[i]) == 0)
+            return DIALECTS[i];
+    return "unsupported";
+}
+
 /* Preserve known fields so higher-priority sources win field by field. */
 static void fill_entry(struct catalog_entry *entry, json_t *model_object)
 {
     if (!json_is_object(model_object))
         return;
+    /* An explicit api member — a catalog.models override — beats the SDK-derived hint. */
+    const char *api = json_string_value(json_object_get(model_object, "api"));
+    if (api && !entry->api)
+        entry->api = canonical_api(api);
     json_t *cost = json_object_get(model_object, "cost");
     if (json_is_object(cost)) {
         if (entry->cost_input < 0)
@@ -173,15 +190,6 @@ static void fill_entry(struct catalog_entry *entry, json_t *model_object)
     }
 }
 
-static int entry_is_complete(const struct catalog_entry *entry)
-{
-    /* An undeclared tier list must fall through to the cache to avoid accidental flat pricing. */
-    return entry->cost_input >= 0 && entry->cost_output >= 0 && entry->cost_cache_read >= 0 &&
-           entry->cost_cache_write >= 0 && entry->context_window > 0 && entry->max_output > 0 &&
-           entry->image_input != CATALOG_SUPPORT_UNKNOWN && entry->tiers_declared &&
-           entry->efforts.known;
-}
-
 static int entry_has_metadata(const struct catalog_entry *entry)
 {
     /* A tier-only entry can still price requests above its threshold. */
@@ -189,7 +197,7 @@ static int entry_has_metadata(const struct catalog_entry *entry)
            entry->cost_cache_write >= 0 || entry->cost_cache_write_1h >= 0 ||
            entry->context_window > 0 || entry->max_output > 0 ||
            entry->image_input != CATALOG_SUPPORT_UNKNOWN || entry->n_tiers > 0 ||
-           entry->efforts.known;
+           entry->efforts.known || entry->api != NULL;
 }
 
 static void merge_entry(struct catalog_entry *dst, const struct catalog_entry *src)
@@ -220,6 +228,8 @@ static void merge_entry(struct catalog_entry *dst, const struct catalog_entry *s
      * on any one model. */
     if (!dst->efforts.known)
         dst->efforts = src->efforts;
+    if (!dst->api)
+        dst->api = src->api;
 }
 
 /* ---------------- top-level member extraction ---------------- */
@@ -423,11 +433,42 @@ static json_t *cache_provider_slice(const char *provider_id)
     return provider;
 }
 
+/* Map a models.dev SDK selector to the wire dialect it implies. Unknown selectors mark the
+ * model unsupported rather than defaulting, so a gateway model needing an unimplemented
+ * protocol fails cleanly instead of being spoken to on the wrong wire. */
+static const char *npm_dialect(const char *npm)
+{
+    if (!npm)
+        return NULL;
+    if (strcmp(npm, "@ai-sdk/openai-compatible") == 0)
+        return "openai-completions";
+    if (strcmp(npm, "@ai-sdk/openai") == 0)
+        return "openai-responses";
+    if (strcmp(npm, "@ai-sdk/anthropic") == 0)
+        return "anthropic-messages";
+    return "unsupported";
+}
+
+static void fill_api(struct catalog_entry *entry, const json_t *provider, json_t *model_object)
+{
+    if (entry->api || !json_is_object(model_object))
+        return;
+    /* A per-model selector overrides the provider-wide one. */
+    json_t *override = json_object_get(model_object, "provider");
+    const char *npm = json_string_value(json_object_get(override, "npm"));
+    if (!npm)
+        npm = json_string_value(json_object_get((json_t *)provider, "npm"));
+    entry->api = npm_dialect(npm);
+}
+
 static void fill_from_slice(const json_t *provider, const char *model, struct catalog_entry *entry)
 {
     json_t *models = provider ? json_object_get(provider, "models") : NULL;
-    if (json_is_object(models))
-        fill_entry(entry, json_object_get(models, model));
+    if (json_is_object(models)) {
+        json_t *model_object = json_object_get(models, model);
+        fill_entry(entry, model_object);
+        fill_api(entry, provider, model_object);
+    }
 }
 
 static void fill_from_cache(const char *provider_id, const char *model, struct catalog_entry *entry)
@@ -540,9 +581,11 @@ static int resolve_entry(const char *provider_id, const char *model,
     catalog_entry_init(out);
     if (!provider_id || !*provider_id || !model || !*model)
         return 0;
+    /* Always consult the cache: some fields (the SDK-derived api hint) exist only there, and
+     * merging fills gaps without disturbing configured values. */
     fill_from_config(provider_id, model, out);
     struct catalog_entry cached;
-    if (!entry_is_complete(out) && cache && cache->fill(cache, model, &cached))
+    if (cache && cache->fill(cache, model, &cached))
         merge_entry(out, &cached);
     return entry_has_metadata(out);
 }
@@ -771,7 +814,7 @@ long catalog_prefetch(void)
     return stale_days;
 }
 
-void catalog_drain(long max_wait_ms)
+void catalog_wait(long max_wait_ms)
 {
     if (!g_fetch_job)
         return;
@@ -780,6 +823,13 @@ void catalog_drain(long max_wait_ms)
         struct timespec delay = {0, 20 * 1000 * 1000};
         nanosleep(&delay, NULL);
     }
+}
+
+void catalog_drain(long max_wait_ms)
+{
+    if (!g_fetch_job)
+        return;
+    catalog_wait(max_wait_ms);
     if (!atomic_load(&g_fetch_done))
         bg_job_cancel(g_fetch_job);
     bg_job_join(g_fetch_job);

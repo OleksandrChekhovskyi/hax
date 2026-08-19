@@ -354,7 +354,7 @@ struct provider {
  * otherwise the owned GET request may be passed safely to a worker. */
 struct provider_availability {
     int available;
-    const char *reason; /* static unavailable reason; NULL when available */
+    char *reason; /* owned unavailable reason; NULL when available */
     char *url;
     char **headers; /* owned, NULL-terminated; NULL = none */
     long timeout_s;
