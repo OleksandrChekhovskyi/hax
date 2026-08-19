@@ -738,7 +738,7 @@ static void codex_destroy(struct provider *provider)
 struct provider *codex_provider_new(const char *id)
 {
     static const char *const EXTRA_FIELDS[] = {"display_name", "extra_body", "extra_headers", NULL};
-    provider_warn_unused_fields(id, id, 0, EXTRA_FIELDS);
+    provider_warn_unused_fields(id, NULL, 0, EXTRA_FIELDS);
     struct codex_auth auth;
     char *detail = NULL;
     enum codex_auth_status status = codex_auth_load(&auth, &detail);

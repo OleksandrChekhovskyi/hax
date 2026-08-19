@@ -10,6 +10,10 @@
 #include "tool_schema.h"
 #include "providers/wire.h"
 
+const char *const ANTHROPIC_EFFORT_LADDER[] = {"low", "medium", "high", "xhigh", "max"};
+const size_t ANTHROPIC_EFFORT_LADDER_N =
+    sizeof(ANTHROPIC_EFFORT_LADDER) / sizeof(ANTHROPIC_EFFORT_LADDER[0]);
+
 static json_t *build_text_block(const char *text)
 {
     return json_pack("{s:s, s:s}", "type", "text", "text", text ? text : "");

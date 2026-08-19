@@ -16,8 +16,9 @@
 #include "provider.h"
 #include "util.h"
 #include "providers/config_provider.h"
-#include "providers/openai.h"
+#include "providers/http_provider.h"
 #include "providers/openai_messages.h"
+#include "providers/wire.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
 #include "transport/http.h"
@@ -365,7 +366,7 @@ out:
 
 struct provider *openrouter_provider_new(const char *id)
 {
-    provider_warn_unused_openai_fields(id, OPENAI_WIRE_CHAT, NULL);
+    provider_warn_unused_wire_fields(id, &WIRE_OPENAI_CHAT, NULL);
     const char *title = config_str("providers.openrouter.title");
     const char *referer = config_str("providers.openrouter.referer");
 
@@ -383,7 +384,7 @@ struct provider *openrouter_provider_new(const char *id)
     }
     headers[n_headers] = NULL;
 
-    struct openai_preset preset = {
+    struct http_provider_preset preset = {
         .display_name = "openrouter",
         .default_base_url = OPENROUTER_BASE_URL,
         .api_key_env = "OPENROUTER_API_KEY",
@@ -400,7 +401,7 @@ struct provider *openrouter_provider_new(const char *id)
         .n_efforts = OPENAI_EFFORT_LADDER_N,
         .parse_model = openrouter_parse_model,
     };
-    struct provider *provider = openai_provider_new_preset(&preset);
+    struct provider *provider = http_provider_new_preset(&preset);
     free(title_header);
     free(referer_header);
     if (provider) {

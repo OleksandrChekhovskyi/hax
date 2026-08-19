@@ -13,8 +13,9 @@
 #include "util.h"
 #include "providers/anthropic.h"
 #include "providers/anthropic_messages.h"
-#include "providers/openai.h"
+#include "providers/http_provider.h"
 #include "providers/openai_messages.h"
+#include "providers/wire.h"
 
 /* A built-in recipe: the default field values for a well-known provider, overridable
  * key-by-key by a matching providers.<name> config block. The shipped set is deliberately
@@ -116,6 +117,15 @@ const struct provider_field *provider_fields(size_t *n)
 {
     *n = N_PROVIDER_FIELDS;
     return PROVIDER_FIELDS;
+}
+
+static unsigned provider_wire_dialects(const struct wire *wire)
+{
+    if (wire == &WIRE_ANTHROPIC_MESSAGES)
+        return PROVIDER_FIELD_ANTHROPIC;
+    if (wire == &WIRE_OPENAI_RESPONSES)
+        return PROVIDER_FIELD_OPENAI_RESPONSES;
+    return PROVIDER_FIELD_OPENAI_CHAT;
 }
 
 static const struct provider_field *field_find(const char *leaf)
@@ -311,9 +321,11 @@ static int module_key_registered(const char *name, const char *leaf)
 }
 
 /* A silently ignored member hides a typo or a dialect mix-up. */
-void provider_warn_unused_fields(const char *name, const char *api_label, unsigned dialects,
+void provider_warn_unused_fields(const char *name, const struct wire *wire, unsigned extra_dialects,
                                  const char *const *extra)
 {
+    const char *api_label = wire ? wire->id : name;
+    unsigned dialects = (wire ? provider_wire_dialects(wire) : 0) | extra_dialects;
     char *key = xasprintf("providers.%s", name);
     char **members = NULL;
     size_t n_members = config_object_keys(key, &members);
@@ -341,17 +353,18 @@ void provider_warn_unused_fields(const char *name, const char *api_label, unsign
     free(members);
 }
 
-void provider_warn_unused_openai_fields(const char *name, enum openai_wire default_wire,
-                                        const char *const *extra)
+void provider_warn_unused_wire_fields(const char *name, const struct wire *default_wire,
+                                      const char *const *extra)
 {
-    char *key = xasprintf("providers.%s.api", name);
-    enum openai_wire wire = openai_wire_parse(config_str(key), default_wire);
-    free(key);
-    if (wire == OPENAI_WIRE_RESPONSES)
-        provider_warn_unused_fields(name, "openai-responses", PROVIDER_FIELD_OPENAI_RESPONSES,
-                                    extra);
-    else
-        provider_warn_unused_fields(name, "openai-completions", PROVIDER_FIELD_OPENAI_CHAT, extra);
+    const struct wire *wire = default_wire;
+    if (default_wire != &WIRE_ANTHROPIC_MESSAGES) {
+        char *key = xasprintf("providers.%s.api", name);
+        wire = wire_find(config_str(key));
+        free(key);
+        if (!wire || wire == &WIRE_ANTHROPIC_MESSAGES)
+            wire = default_wire;
+    }
+    provider_warn_unused_fields(name, wire, 0, extra);
 }
 
 /* Stands in for a missing recipe so field lookups need no NULL checks; the NULL `id`
@@ -411,10 +424,10 @@ static struct provider *apply_base_config(const char *name, struct provider *p)
     return p;
 }
 
-/* Build the provider for config id `name` (the factory's own name). The dialect
- * (providers.<name>.api, else the recipe's, else openai-completions) picks the preset
- * constructor; every other field resolves as config overlaid on the recipe, and the preset
- * reads its dialect-specific keys from the same subtree via config_prefix. */
+/* Build the provider for config id `name` (the factory's own name). The api field —
+ * config, else recipe, else openai-completions — picks the wire; every other field resolves
+ * as config overlaid on the recipe, with dialect-specific keys read from the same subtree
+ * via config_prefix. */
 static struct provider *config_provider_new(const char *name)
 {
     const struct provider_recipe *r = recipe_find(name);
@@ -422,24 +435,14 @@ static struct provider *config_provider_new(const char *name)
     const char *api = resolve(name, "api", r->api);
     if (!api)
         api = "openai-completions";
-    /* Case-insensitive like openai_wire_parse and the registry choices it feeds. "chat" and
-     * "responses" are the short spellings HAX_OPENAI_API documents. */
-    int is_anthropic = strcasecmp(api, "anthropic-messages") == 0;
-    if (!is_anthropic && strcasecmp(api, "openai-completions") != 0 &&
-        strcasecmp(api, "chat") != 0 && strcasecmp(api, "openai-responses") != 0 &&
-        strcasecmp(api, "responses") != 0) {
+    const struct wire *wire = wire_find(api);
+    if (!wire) {
         hax_err("provider '%s': unsupported api '%s' "
                 "(supported: openai-completions, openai-responses, anthropic-messages)",
                 name, api);
         return NULL;
     }
-    unsigned dialect = PROVIDER_FIELD_ANTHROPIC;
-    if (!is_anthropic) {
-        dialect = openai_wire_parse(api, OPENAI_WIRE_CHAT) == OPENAI_WIRE_RESPONSES
-                      ? PROVIDER_FIELD_OPENAI_RESPONSES
-                      : PROVIDER_FIELD_OPENAI_CHAT;
-    }
-    provider_warn_unused_fields(name, api, dialect | PROVIDER_FIELD_CONFIG_DEFINED, NULL);
+    provider_warn_unused_fields(name, wire, PROVIDER_FIELD_CONFIG_DEFINED, NULL);
 
     const char *base = resolve(name, "base_url", r->base_url);
     if (!base) {
@@ -461,42 +464,34 @@ static struct provider *config_provider_new(const char *name)
 
     /* Provider constructors copy any prefix-backed state before this buffer is freed. */
     char *cfg_prefix = xasprintf("providers.%s", name);
+    /* Efforts are advisory for a generic endpoint, so they default on; recipes opt out
+     * backends with no categorical effort, and the Messages constructor swaps in its ladder. */
+    int with_efforts = !r->no_efforts;
+    struct http_provider_preset preset = {
+        .display_name = display,
+        .default_base_url = base,
+        .api_key_env = api_key_env,
+        .wire = wire,
+        .send_cache_key_default = r->send_cache_key,
+        /* The recipe supplies only the default; the preset overlays <prefix>.reasoning_format
+         * like every other quirk field. */
+        .reasoning_format =
+            openai_reasoning_format_parse(r->reasoning_format, OPENAI_REASONING_FLAT),
+        .efforts = with_efforts ? OPENAI_EFFORT_LADDER : NULL,
+        .n_efforts = with_efforts ? OPENAI_EFFORT_LADDER_N : 0,
+        .length_hint = r->length_hint,
+        .config_prefix = cfg_prefix,
+        .catalog_id = resolve_catalog_id(name, r),
+    };
+
     struct provider *p;
-    if (is_anthropic) {
+    if (wire == &WIRE_ANTHROPIC_MESSAGES) {
         /* Generic endpoints default to compat-safe thinking and caching behavior. */
-        struct anthropic_preset preset = {
-            .display_name = display,
-            .default_base_url = base,
-            .api_key_env = api_key_env,
-            .default_thinking_mode = ANTHROPIC_THINKING_BUDGET,
-            .allow_empty_signature = 1,
-            .send_cache_control_default = 0,
-            .config_prefix = cfg_prefix,
-            .catalog_id = resolve_catalog_id(name, r),
-        };
+        preset.default_thinking_mode = ANTHROPIC_THINKING_BUDGET;
+        preset.allow_empty_signature = 1;
         p = anthropic_provider_new_preset(&preset);
     } else {
-        /* The OpenAI effort ladder is advisory for a generic compat endpoint (the user
-         * picked the URL), so it defaults on; a recipe opts out for a backend with no
-         * categorical effort. */
-        int with_efforts = !r->no_efforts;
-        struct openai_preset preset = {
-            .display_name = display,
-            .default_base_url = base,
-            .api_key_env = api_key_env,
-            .wire = openai_wire_parse(api, OPENAI_WIRE_CHAT),
-            .send_cache_key_default = r->send_cache_key,
-            /* The recipe supplies only the default; the preset overlays <prefix>.reasoning_format
-             * like every other quirk field. */
-            .reasoning_format =
-                openai_reasoning_format_parse(r->reasoning_format, OPENAI_REASONING_FLAT),
-            .efforts = with_efforts ? OPENAI_EFFORT_LADDER : NULL,
-            .n_efforts = with_efforts ? OPENAI_EFFORT_LADDER_N : 0,
-            .length_hint = r->length_hint,
-            .config_prefix = cfg_prefix,
-            .catalog_id = resolve_catalog_id(name, r),
-        };
-        p = openai_provider_new_preset(&preset);
+        p = http_provider_new_preset(&preset);
     }
     free(cfg_prefix);
     return apply_base_config(name, p);
@@ -536,13 +531,12 @@ static void config_provider_prepare_availability(const char *name,
         return;
     }
 
-    /* Trim the trailing slash the constructor also trims, so the probe targets the same
-     * "<base>/models" the running provider would — a base_url ending in "/" must not probe
-     * "//models" and make a reachable server look disabled. */
+    /* Trim the trailing slash like the constructor: a base_url ending in "/" must probe
+     * "<base>/models", not "//models", or a reachable server looks disabled. */
     char *probe_url = dup_trim_trailing_slash(base);
     char *prefix = xasprintf("providers.%s", name);
     char **extra_headers = provider_extra_headers(prefix);
-    openai_prepare_base_url_availability(probe_url, NULL, extra_headers, out);
+    http_provider_prepare_base_url_availability(probe_url, NULL, extra_headers, out);
     string_array_free(extra_headers);
     free(prefix);
     free(probe_url);

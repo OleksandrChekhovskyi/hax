@@ -6,10 +6,28 @@
 #include <string.h>
 #include <strings.h>
 
+#include "catalog.h"
 #include "provider.h"
 #include "tool_schema.h"
 #include "util.h"
 #include "providers/wire.h"
+
+const char *const OPENAI_EFFORT_LADDER[] = {"none", "minimal", "low", "medium",
+                                            "high", "xhigh",   "max"};
+const size_t OPENAI_EFFORT_LADDER_N =
+    sizeof(OPENAI_EFFORT_LADDER) / sizeof(OPENAI_EFFORT_LADDER[0]);
+
+/* AUTO sends explicit cache markers only when writes replace ordinary input processing. */
+struct openai_cache_plan openai_plan_cache(const struct catalog_entry *rates,
+                                           enum openai_cache_mode mode, const char *ttl)
+{
+    struct openai_cache_plan plan = {0};
+    plan.send_breakpoints = mode == OPENAI_CACHE_ON || (mode == OPENAI_CACHE_AUTO &&
+                                                        catalog_cache_write_replaces_input(rates));
+    plan.writes_bill_1h = plan.send_breakpoints && ttl && strcasecmp(ttl, "1h") == 0 &&
+                          rates->cost_cache_write_1h >= 0;
+    return plan;
+}
 
 static json_t *build_tool_call(const struct item *item)
 {

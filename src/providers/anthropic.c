@@ -4,7 +4,6 @@
 #include <jansson.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 #include "config.h"
 #include "effort.h"
@@ -13,13 +12,10 @@
 #include "util.h"
 #include "providers/anthropic_messages.h"
 #include "providers/config_provider.h"
-#include "providers/stream_retry.h"
+#include "providers/http_provider.h"
 #include "providers/wire.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
-
-#define ANTHROPIC_DEFAULT_VERSION    "2023-06-01"
-#define ANTHROPIC_DEFAULT_MAX_TOKENS 32000
 
 /* Bound foreground pagination if a server keeps returning advancing cursors. */
 #define ANTHROPIC_MODEL_PAGE_SIZE  1000
@@ -27,165 +23,6 @@
 
 #define MODEL_LIST_TIMEOUT_S  10
 #define MODEL_PROBE_TIMEOUT_S 5
-
-const char *const ANTHROPIC_EFFORT_LADDER[] = {"low", "medium", "high", "xhigh", "max"};
-const size_t ANTHROPIC_EFFORT_LADDER_N =
-    sizeof(ANTHROPIC_EFFORT_LADDER) / sizeof(ANTHROPIC_EFFORT_LADDER[0]);
-
-struct anthropic {
-    struct provider base;
-    char *base_url;
-    char *api_key;
-    char *name;
-    char *catalog_id;
-    char *endpoint;
-    char *version;
-    char *config_prefix;
-    char **extra_headers;
-    json_t *extra_body;
-    const char *cache_ttl; /* canonical static "5m"/"1h" from provider_cache_ttl */
-    enum anthropic_thinking_mode default_thinking_mode;
-    int allow_empty_signature;
-    int cache_default;
-};
-
-static enum anthropic_thinking_mode resolve_thinking_mode(const struct anthropic *anthropic)
-{
-    const char *configured = config_scoped_str(anthropic->config_prefix, "thinking_mode");
-    if (!configured || !*configured)
-        return anthropic->default_thinking_mode;
-    if (strcasecmp(configured, "adaptive") == 0)
-        return ANTHROPIC_THINKING_ADAPTIVE;
-    if (strcasecmp(configured, "budget") == 0)
-        return ANTHROPIC_THINKING_BUDGET;
-    if (strcasecmp(configured, "off") == 0)
-        return ANTHROPIC_THINKING_OFF;
-
-    hax_warn("unknown thinking_mode '%s' (adaptive/budget/off) — using default", configured);
-    return anthropic->default_thinking_mode;
-}
-
-int anthropic_max_tokens(struct provider *provider, const char *model)
-{
-    struct anthropic *anthropic = (struct anthropic *)provider;
-    int configured = 0;
-    int user_set = 0;
-    if (anthropic->config_prefix) {
-        char *key = xasprintf("%s.max_tokens", anthropic->config_prefix);
-        configured = config_int(key);
-        user_set = strcmp(config_source(key), "default") != 0;
-        free(key);
-    }
-
-    long model_limit = model_meta_max_output(provider, model);
-    if (user_set && configured > 0)
-        return model_limit > 0 && configured > model_limit ? (int)model_limit : configured;
-    if (model_limit > 0)
-        return (int)model_limit;
-    return configured > 0 ? configured : ANTHROPIC_DEFAULT_MAX_TOKENS;
-}
-
-static char *build_request_body(struct anthropic *anthropic, const struct context *context,
-                                const char *model)
-{
-    struct wire_body_opts opts = {
-        .extra_body = anthropic->extra_body,
-        .cache_markers =
-            config_scoped_bool_or(anthropic->config_prefix, "cache", anthropic->cache_default),
-        .cache_ttl = anthropic->cache_ttl,
-        .max_tokens = anthropic_max_tokens(&anthropic->base, model),
-        .thinking_mode = resolve_thinking_mode(anthropic),
-        .thinking_budget = config_scoped_int(anthropic->config_prefix, "thinking_budget"),
-        .show_reasoning = config_bool("show_reasoning"),
-        .allow_empty_signature = anthropic->allow_empty_signature,
-    };
-    return wire_build_body(&WIRE_ANTHROPIC_MESSAGES, context, provider_stable_id(&anthropic->base),
-                           model, &opts);
-}
-
-/* Owned NULL-terminated request headers; free with string_array_free. Streaming requests add
- * the SSE Accept and the JSON Content-Type. */
-static char **build_request_headers(const struct anthropic *anthropic, int streaming)
-{
-    char *api_key_header =
-        anthropic->api_key ? xasprintf("x-api-key: %s", anthropic->api_key) : NULL;
-    char *version_header = xasprintf("anthropic-version: %s", anthropic->version);
-    const char *fixed[5];
-    size_t n_fixed = 0;
-    if (api_key_header)
-        fixed[n_fixed++] = api_key_header;
-    fixed[n_fixed++] = version_header;
-    if (streaming) {
-        fixed[n_fixed++] = "Accept: text/event-stream";
-        fixed[n_fixed++] = "Content-Type: application/json";
-    }
-    fixed[n_fixed] = NULL;
-
-    char **headers = string_array_concat(fixed, (const char *const *)anthropic->extra_headers);
-    free(api_key_header);
-    free(version_header);
-    return headers;
-}
-
-struct anthropic_stream {
-    const struct anthropic *anthropic;
-    union wire_events events;
-};
-
-static char **stream_build_headers(void *ctx)
-{
-    return build_request_headers(((struct anthropic_stream *)ctx)->anthropic, 1);
-}
-
-static void stream_parser_init(void *ctx, stream_cb callback, void *callback_user)
-{
-    WIRE_ANTHROPIC_MESSAGES.events_init(&((struct anthropic_stream *)ctx)->events, callback,
-                                        callback_user, NULL);
-}
-
-static int handle_sse_data(const char *event_name, const char *data, void *user)
-{
-    WIRE_ANTHROPIC_MESSAGES.events_feed(&((struct anthropic_stream *)user)->events, event_name,
-                                        data);
-    return 0;
-}
-
-static void stream_parser_finalize(void *ctx)
-{
-    WIRE_ANTHROPIC_MESSAGES.events_finalize(&((struct anthropic_stream *)ctx)->events);
-}
-
-static void stream_parser_free(void *ctx)
-{
-    WIRE_ANTHROPIC_MESSAGES.events_free(&((struct anthropic_stream *)ctx)->events);
-}
-
-static int anthropic_stream(struct provider *provider, const struct context *context,
-                            const char *model, stream_cb callback, void *callback_user,
-                            http_tick_cb tick, void *tick_user)
-{
-    struct anthropic *anthropic = (struct anthropic *)provider;
-
-    char *body = build_request_body(anthropic, context, model);
-    if (!body)
-        return -1;
-
-    struct anthropic_stream stream = {.anthropic = anthropic};
-    struct stream_retry request = {
-        .endpoint = anthropic->endpoint,
-        .body = body,
-        .body_len = strlen(body),
-        .ctx = &stream,
-        .build_headers = stream_build_headers,
-        .parser_init = stream_parser_init,
-        .parser_feed = handle_sse_data,
-        .parser_finalize = stream_parser_finalize,
-        .parser_free = stream_parser_free,
-    };
-    int result = stream_retry_run(&request, callback, callback_user, tick, tick_user);
-    free(body);
-    return result;
-}
 
 static void parse_model_efforts(json_t *effort, struct effort_set *out)
 {
@@ -258,12 +95,12 @@ static void parse_model_probe_response(const char *response_body, const char *mo
 static int anthropic_probe_model(struct provider *provider, const char *model,
                                  struct model_probe *probe)
 {
-    struct anthropic *anthropic = (struct anthropic *)provider;
     if (!model || !*model)
         return -1;
 
-    probe->url = xasprintf("%s/models?limit=%d", anthropic->base_url, ANTHROPIC_MODEL_PAGE_SIZE);
-    probe->headers = build_request_headers(anthropic, 0);
+    probe->url = xasprintf("%s/models?limit=%d", http_provider_base_url(provider),
+                           ANTHROPIC_MODEL_PAGE_SIZE);
+    probe->headers = http_provider_metadata_headers(provider);
     probe->timeout_s = MODEL_PROBE_TIMEOUT_S;
     probe->parse = parse_model_probe_response;
     return 0;
@@ -284,14 +121,14 @@ static int cursor_is_safe(const char *cursor)
 }
 
 /* On success, `page` owns the parsed response. */
-static int fetch_models_page(const struct anthropic *anthropic, const char *after_id,
-                             http_tick_cb tick, void *tick_user, json_t **page, char **error)
+static int fetch_models_page(struct provider *provider, const char *after_id, http_tick_cb tick,
+                             void *tick_user, json_t **page, char **error)
 {
-    char *url =
-        after_id ? xasprintf("%s/models?limit=%d&after_id=%s", anthropic->base_url,
-                             ANTHROPIC_MODEL_PAGE_SIZE, after_id)
-                 : xasprintf("%s/models?limit=%d", anthropic->base_url, ANTHROPIC_MODEL_PAGE_SIZE);
-    char **request_headers = build_request_headers(anthropic, 0);
+    const char *base_url = http_provider_base_url(provider);
+    char *url = after_id ? xasprintf("%s/models?limit=%d&after_id=%s", base_url,
+                                     ANTHROPIC_MODEL_PAGE_SIZE, after_id)
+                         : xasprintf("%s/models?limit=%d", base_url, ANTHROPIC_MODEL_PAGE_SIZE);
+    char **request_headers = http_provider_metadata_headers(provider);
 
     char *response_body = NULL;
     long status = 0;
@@ -301,8 +138,8 @@ static int fetch_models_page(const struct anthropic *anthropic, const char *afte
     free(url);
 
     if (result != 0) {
-        *error = format_model_list_error(anthropic->base.name, anthropic->base_url,
-                                         anthropic->api_key != NULL, status);
+        *error = format_model_list_error(provider->name, base_url,
+                                         http_provider_has_api_key(provider), status);
         free(response_body);
         return -1;
     }
@@ -310,7 +147,7 @@ static int fetch_models_page(const struct anthropic *anthropic, const char *afte
     *page = json_loads(response_body, 0, NULL);
     free(response_body);
     if (!*page) {
-        const char *provider_name = anthropic->base.name ? anthropic->base.name : "provider";
+        const char *provider_name = provider->name ? provider->name : "provider";
         *error = xasprintf("%s /models response is not valid JSON", provider_name);
         return -1;
     }
@@ -342,7 +179,6 @@ static void append_models(json_t *data, struct model_info **models, size_t *n_mo
 static int anthropic_list_models(struct provider *provider, struct model_info **models,
                                  size_t *n_models, char **error, http_tick_cb tick, void *tick_user)
 {
-    struct anthropic *anthropic = (struct anthropic *)provider;
     *models = NULL;
     *n_models = 0;
 
@@ -354,7 +190,7 @@ static int anthropic_list_models(struct provider *provider, struct model_info **
 
     for (int page_number = 0; page_number < ANTHROPIC_MODEL_PAGE_LIMIT; page_number++) {
         json_t *page = NULL;
-        if (fetch_models_page(anthropic, after_id, tick, tick_user, &page, error) != 0)
+        if (fetch_models_page(provider, after_id, tick, tick_user, &page, error) != 0)
             goto fail;
 
         json_t *data = json_object_get(page, "data");
@@ -399,108 +235,31 @@ fail:
     return -1;
 }
 
-static size_t anthropic_list_efforts(struct provider *provider, const char *const **efforts)
+struct provider *anthropic_provider_new_preset(const struct http_provider_preset *preset)
 {
-    struct anthropic *anthropic = (struct anthropic *)provider;
-    if (resolve_thinking_mode(anthropic) != ANTHROPIC_THINKING_ADAPTIVE)
-        return 0;
-    *efforts = ANTHROPIC_EFFORT_LADDER;
-    return ANTHROPIC_EFFORT_LADDER_N;
-}
+    const struct http_provider_preset empty = {0};
+    struct http_provider_preset messages = preset ? *preset : empty;
+    messages.wire = &WIRE_ANTHROPIC_MESSAGES;
+    messages.efforts = ANTHROPIC_EFFORT_LADDER;
+    messages.n_efforts = ANTHROPIC_EFFORT_LADDER_N;
 
-static void anthropic_destroy(struct provider *provider)
-{
-    struct anthropic *anthropic = (struct anthropic *)provider;
-    model_meta_release(provider);
-    free(anthropic->base_url);
-    free(anthropic->api_key);
-    free(anthropic->name);
-    free(anthropic->catalog_id);
-    free(anthropic->endpoint);
-    free(anthropic->version);
-    free(anthropic->config_prefix);
-    string_array_free(anthropic->extra_headers);
-    json_decref(anthropic->extra_body);
-    free(anthropic);
-}
-
-static char *resolve_base_url(const struct anthropic_preset *preset)
-{
-    const char *configured = config_scoped_str(preset->config_prefix, "base_url");
-    if (preset->pin_base_url) {
-        /* Silently accepting the key would fake a redirect the pin just refused. */
-        if (configured && *configured) {
-            hax_warn("provider '%s': base_url is pinned to %s — use a custom provider for "
-                     "another endpoint",
-                     preset->display_name, preset->default_base_url);
-        }
-        configured = NULL;
-    }
-    const char *base_url = configured && *configured ? configured : preset->default_base_url;
-    if (!base_url || !*base_url) {
-        hax_err("internal: anthropic preset has no base URL");
+    struct provider *provider = http_provider_new_preset(&messages);
+    if (!provider)
         return NULL;
-    }
-    return dup_trim_trailing_slash(base_url);
-}
-
-static const char *resolve_display_name(const struct anthropic_preset *preset)
-{
-    const char *configured = config_scoped_str(preset->config_prefix, "display_name");
-    if (configured && *configured)
-        return configured;
-    if (preset->display_name && *preset->display_name)
-        return preset->display_name;
-    return "anthropic";
-}
-
-struct provider *anthropic_provider_new_preset(const struct anthropic_preset *preset)
-{
-    const struct anthropic_preset empty = {0};
-    if (!preset)
-        preset = &empty;
-
-    char *base_url = resolve_base_url(preset);
-    if (!base_url)
-        return NULL;
-
-    struct anthropic *anthropic = xcalloc(1, sizeof(*anthropic));
-    anthropic->base_url = base_url;
-    const char *api_key = provider_api_key(preset->config_prefix, preset->api_key_env);
-    anthropic->api_key = api_key ? xstrdup(api_key) : NULL;
-    anthropic->name = xstrdup(resolve_display_name(preset));
-    anthropic->catalog_id = preset->catalog_id ? xstrdup(preset->catalog_id) : NULL;
-    anthropic->endpoint = xasprintf("%s%s", anthropic->base_url, WIRE_ANTHROPIC_MESSAGES.path);
-    const char *version = config_scoped_str(preset->config_prefix, "version");
-    anthropic->version = xstrdup(version && *version ? version : ANTHROPIC_DEFAULT_VERSION);
-    anthropic->config_prefix = preset->config_prefix ? xstrdup(preset->config_prefix) : NULL;
-    anthropic->extra_headers = provider_extra_headers(preset->config_prefix);
-    anthropic->extra_body = provider_extra_body(preset->config_prefix);
-    anthropic->cache_ttl = provider_cache_ttl(preset->config_prefix);
-    anthropic->default_thinking_mode = preset->default_thinking_mode;
-    anthropic->allow_empty_signature = preset->allow_empty_signature;
-    anthropic->cache_default = preset->send_cache_control_default;
-
-    anthropic->base.name = anthropic->name;
-    anthropic->base.catalog_id = anthropic->catalog_id;
-    anthropic->base.stream = anthropic_stream;
-    anthropic->base.list_models = anthropic_list_models;
-    anthropic->base.list_efforts = anthropic_list_efforts;
-    anthropic->base.probe_model = anthropic_probe_model;
-    anthropic->base.destroy = anthropic_destroy;
+    provider->list_models = anthropic_list_models;
+    provider->probe_model = anthropic_probe_model;
 
     const char *configured_model = config_str("model");
-    model_meta_refresh(&anthropic->base,
-                       configured_model && *configured_model ? configured_model : NULL);
-    return &anthropic->base;
+    model_meta_refresh(provider, configured_model && *configured_model ? configured_model : NULL);
+    return provider;
 }
 
 struct provider *anthropic_provider_new(const char *id)
 {
-    provider_warn_unused_fields(id, "anthropic-messages", PROVIDER_FIELD_ANTHROPIC, NULL);
+    provider_warn_unused_wire_fields(id, &WIRE_ANTHROPIC_MESSAGES, NULL);
     /* Tweaks resolve from the provider's own block; the pinned endpoint keeps ANTHROPIC_API_KEY
      * from being redirected to a custom URL. */
-    struct anthropic_preset preset = {
+    struct http_provider_preset preset = {
         .display_name = "anthropic",
         .default_base_url = "https://api.anthropic.com/v1",
         .api_key_env = "ANTHROPIC_API_KEY",

@@ -52,6 +52,7 @@ struct wire_body_opts {
 };
 
 struct wire {
+    const char *id;   /* canonical dialect name accepted by `api` config fields */
     const char *path; /* request path appended to the provider base URL */
     /* Compose one request minus the extra_body passthrough; wire_build_body finishes it. */
     json_t *(*build_body)(const struct context *context, const char *provider_id, const char *model,
@@ -69,6 +70,10 @@ struct wire {
 extern const struct wire WIRE_OPENAI_CHAT;      /* OpenAI Chat Completions */
 extern const struct wire WIRE_OPENAI_RESPONSES; /* OpenAI Responses */
 extern const struct wire WIRE_ANTHROPIC_MESSAGES;
+
+/* Resolve an `api` dialect name — canonical spellings plus the short "chat" and "responses" —
+ * to its wire, case-insensitively. NULL and unknown names return NULL. */
+const struct wire *wire_find(const char *api);
 
 /* Serialize one request: the wire's body plus the extra_body passthrough, merged last so it can
  * override protocol defaults. Returns owned compact JSON; the caller frees it. */

@@ -15,6 +15,7 @@
 #include "provider.h"
 #include "util.h"
 #include "providers/anthropic.h"
+#include "providers/http_provider.h"
 #include "providers/registry.h"
 
 #define MAX_PAGES 4
@@ -257,18 +258,18 @@ static void test_max_tokens_uses_model_limit(void)
     if (!provider)
         return;
 
-    EXPECT(anthropic_max_tokens(provider, "unknown-model") == 32000);
+    EXPECT(http_provider_max_tokens(provider, "unknown-model") == 32000);
 
     store_output_cap(provider, "claude-opus-5", 128000);
-    EXPECT(anthropic_max_tokens(provider, "claude-opus-5") == 128000);
+    EXPECT(http_provider_max_tokens(provider, "claude-opus-5") == 128000);
 
     setenv("HAX_ANTHROPIC_MAX_TOKENS", "8000", 1);
-    EXPECT(anthropic_max_tokens(provider, "claude-opus-5") == 8000);
+    EXPECT(http_provider_max_tokens(provider, "claude-opus-5") == 8000);
 
     setenv("HAX_ANTHROPIC_MAX_TOKENS", "200000", 1);
-    EXPECT(anthropic_max_tokens(provider, "claude-opus-5") == 128000);
+    EXPECT(http_provider_max_tokens(provider, "claude-opus-5") == 128000);
 
-    EXPECT(anthropic_max_tokens(provider, "unknown-model") == 200000);
+    EXPECT(http_provider_max_tokens(provider, "unknown-model") == 200000);
     unsetenv("HAX_ANTHROPIC_MAX_TOKENS");
     provider->destroy(provider);
 }
@@ -288,7 +289,7 @@ static void test_first_party_pins_endpoint(void)
         EXPECT(probe.url != NULL &&
                strncmp(probe.url, "https://api.anthropic.com/v1/models", 35) == 0);
         model_probe_clear(&probe);
-        EXPECT(anthropic_max_tokens(provider, "claude-x") == 1234);
+        EXPECT(http_provider_max_tokens(provider, "claude-x") == 1234);
         provider->destroy(provider);
     }
 

@@ -13,6 +13,10 @@ enum anthropic_thinking_mode {
     ANTHROPIC_THINKING_OFF,
 };
 
+/* Adaptive-thinking effort values, ordered from cheapest to most expensive. */
+extern const char *const ANTHROPIC_EFFORT_LADDER[];
+extern const size_t ANTHROPIC_EFFORT_LADDER_N;
+
 /* Translate transcript items into a newly allocated Messages API array. Opaque reasoning is
  * replayed only when its provider/model stamp matches the current request. Empty thinking
  * signatures become text unless `allow_empty_signature` is set. Tool-result images become image

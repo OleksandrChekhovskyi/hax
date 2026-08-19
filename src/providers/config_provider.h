@@ -6,16 +6,15 @@
 #include <stddef.h>
 
 #include "provider.h"
-#include "providers/openai.h"
+#include "providers/wire.h"
 
 /* Providers defined by data rather than code.
  *
  * A config-defined provider is a named `providers.<name>` block in config.json, optionally
- * seeded by a built-in recipe of defaults (see RECIPES in config_provider.c — e.g. "ollama").
- * Each speaks one dialect — "openai-completions" or "anthropic-messages" — and resolves its
- * settings from its own subtree overlaid on the recipe. The API key is the one value read
- * from the environment, via a recipe- or config-declared api_key_env: a secret belongs in
- * the environment, not the config file. */
+ * seeded by a built-in recipe of defaults (RECIPES in config_provider.c). It speaks one wire
+ * dialect and resolves its settings from its own subtree overlaid on the recipe. The API key
+ * is the one value read from the environment, via a recipe- or config-declared api_key_env:
+ * a secret belongs in the environment, not the config file. */
 
 /* The dynamic factory set: the union of recipe names and config.json `providers.*` names,
  * deduplicated — a config block matching a recipe name overlays that recipe rather than
@@ -26,8 +25,7 @@ const struct provider_factory *const *config_providers(size_t *n);
 
 /* Field vocabulary of a providers.<name> block. The inventory is declarative only: value
  * acceptance lives in the dialect constructors, and the env-alias rows in config.c project a
- * subset of it (a unit test keeps them in sync). Construction warns about block members
- * outside the provider's dialect. */
+ * subset of it (a unit test keeps them in sync). */
 enum provider_field_dialect {
     PROVIDER_FIELD_OPENAI_CHAT = 1 << 0,      /* openai-completions */
     PROVIDER_FIELD_OPENAI_RESPONSES = 1 << 1, /* openai-responses */
@@ -46,18 +44,18 @@ struct provider_field {
 /* The full inventory; *n receives its length. */
 const struct provider_field *provider_fields(size_t *n);
 
-/* Warn about providers.<name> block members the provider does not consume. A member is consumed
- * when its inventory dialect intersects `dialects`, when it is a registered per-provider setting
- * (a compiled-in module knob such as providers.llamacpp.port), or when the NULL-terminated
- * `extra` allowlist (may be NULL) names it. `api_label` names the accepting category in the
- * message. Warnings never fail construction, so a config written for a newer hax still runs. */
-void provider_warn_unused_fields(const char *name, const char *api_label, unsigned dialects,
+/* Warn about providers.<name> members nothing consumes. A member is consumed by `wire`'s
+ * dialect fields (NULL: none), by `extra_dialects`, by being a registered per-provider
+ * setting, or by the NULL-terminated `extra` allowlist (may be NULL). Warnings never fail
+ * construction, so a config written for a newer hax still runs. */
+void provider_warn_unused_fields(const char *name, const struct wire *wire, unsigned extra_dialects,
                                  const char *const *extra);
 
-/* OpenAI-family variant: resolves providers.<name>.api against `default_wire` and derives the
- * dialect mask and label from the result. */
-void provider_warn_unused_openai_fields(const char *name, enum openai_wire default_wire,
-                                        const char *const *extra);
+/* Wire-preset variant: resolves providers.<name>.api the way construction does — moving an
+ * OpenAI-family `default_wire` between the two OpenAI protocols, never across families — and
+ * warns against the resulting dialect. Construction owns warning about the value itself. */
+void provider_warn_unused_wire_fields(const char *name, const struct wire *default_wire,
+                                      const char *const *extra);
 
 /* Resolve the provider's credential: inline <prefix>.api_key, else the named environment
  * variable. An inline "$NAME" value reads the environment variable NAME instead, keeping the

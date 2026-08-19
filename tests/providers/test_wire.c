@@ -38,11 +38,26 @@ static void expect_text_delta(const struct wire *wire, const char *event_name, c
     wire->events_free(&events);
 }
 
-static void test_paths(void)
+static void test_identity(void)
 {
+    EXPECT_STR_EQ(WIRE_OPENAI_CHAT.id, "openai-completions");
+    EXPECT_STR_EQ(WIRE_OPENAI_RESPONSES.id, "openai-responses");
+    EXPECT_STR_EQ(WIRE_ANTHROPIC_MESSAGES.id, "anthropic-messages");
     EXPECT_STR_EQ(WIRE_OPENAI_CHAT.path, "/chat/completions");
     EXPECT_STR_EQ(WIRE_OPENAI_RESPONSES.path, "/responses");
     EXPECT_STR_EQ(WIRE_ANTHROPIC_MESSAGES.path, "/messages");
+}
+
+static void test_find(void)
+{
+    EXPECT(wire_find("openai-completions") == &WIRE_OPENAI_CHAT);
+    EXPECT(wire_find("chat") == &WIRE_OPENAI_CHAT);
+    EXPECT(wire_find("openai-responses") == &WIRE_OPENAI_RESPONSES);
+    EXPECT(wire_find("Responses") == &WIRE_OPENAI_RESPONSES);
+    EXPECT(wire_find("anthropic-messages") == &WIRE_ANTHROPIC_MESSAGES);
+    EXPECT(wire_find("grpc") == NULL);
+    EXPECT(wire_find("") == NULL);
+    EXPECT(wire_find(NULL) == NULL);
 }
 
 static void test_event_dispatch(void)
@@ -115,7 +130,8 @@ static void test_finish_applies_extra_body(void)
 
 int main(void)
 {
-    test_paths();
+    test_identity();
+    test_find();
     test_event_dispatch();
     test_chat_opts_plumbing();
     test_build_body_table();

@@ -2,6 +2,8 @@
 #include "providers/wire.h"
 
 #include <jansson.h>
+#include <stddef.h>
+#include <strings.h>
 
 #include "provider.h"
 #include "providers/anthropic_events.h"
@@ -50,6 +52,7 @@ static void chat_free(union wire_events *events)
 }
 
 const struct wire WIRE_OPENAI_CHAT = {
+    .id = "openai-completions",
     .path = "/chat/completions",
     .build_body = openai_build_body,
     .events_init = chat_init,
@@ -82,6 +85,7 @@ static void responses_free(union wire_events *events)
 }
 
 const struct wire WIRE_OPENAI_RESPONSES = {
+    .id = "openai-responses",
     .path = "/responses",
     .build_body = responses_build_body,
     .events_init = responses_init,
@@ -113,6 +117,7 @@ static void messages_free(union wire_events *events)
 }
 
 const struct wire WIRE_ANTHROPIC_MESSAGES = {
+    .id = "anthropic-messages",
     .path = "/messages",
     .build_body = anthropic_build_body,
     .events_init = messages_init,
@@ -120,3 +125,20 @@ const struct wire WIRE_ANTHROPIC_MESSAGES = {
     .events_finalize = messages_finalize,
     .events_free = messages_free,
 };
+
+const struct wire *wire_find(const char *api)
+{
+    static const struct wire *const WIRES[] = {&WIRE_OPENAI_CHAT, &WIRE_OPENAI_RESPONSES,
+                                               &WIRE_ANTHROPIC_MESSAGES};
+    if (!api)
+        return NULL;
+    for (size_t i = 0; i < sizeof(WIRES) / sizeof(WIRES[0]); i++)
+        if (strcasecmp(api, WIRES[i]->id) == 0)
+            return WIRES[i];
+    /* The short spellings HAX_OPENAI_API documents. */
+    if (strcasecmp(api, "chat") == 0)
+        return &WIRE_OPENAI_CHAT;
+    if (strcasecmp(api, "responses") == 0)
+        return &WIRE_OPENAI_RESPONSES;
+    return NULL;
+}

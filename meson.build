@@ -118,6 +118,7 @@ sources = files(
     'src/providers/codex_login.c',
     'src/providers/codex_settings.c',
     'src/providers/config_provider.c',
+    'src/providers/http_provider.c',
     'src/providers/llamacpp.c',
     'src/providers/mock.c',
     'src/providers/openai.c',

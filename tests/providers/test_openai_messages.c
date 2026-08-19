@@ -2,6 +2,7 @@
 #include <jansson.h>
 #include <string.h>
 
+#include "catalog.h"
 #include "harness.h"
 #include "provider.h"
 #include "providers/openai_messages.h"
@@ -452,6 +453,61 @@ static void test_build_body_composition(void)
     json_decref(body);
 }
 
+static void test_cache_plan_follows_model_rates(void)
+{
+    struct catalog_entry rates;
+
+    /* Anthropic-style rates: writes replace input processing, and a 1h rate is quoted. */
+    catalog_entry_init(&rates);
+    rates.cost_input = 3;
+    rates.cost_output = 15;
+    rates.cost_cache_write = 3.75;
+    rates.cost_cache_write_1h = 6;
+
+    struct openai_cache_plan plan = openai_plan_cache(&rates, OPENAI_CACHE_AUTO, "1h");
+    EXPECT(plan.send_breakpoints == 1);
+    EXPECT(plan.writes_bill_1h == 1);
+
+    plan = openai_plan_cache(&rates, OPENAI_CACHE_AUTO, "5m");
+    EXPECT(plan.send_breakpoints == 1);
+    EXPECT(plan.writes_bill_1h == 0);
+
+    plan = openai_plan_cache(&rates, OPENAI_CACHE_OFF, "1h");
+    EXPECT(plan.send_breakpoints == 0);
+    EXPECT(plan.writes_bill_1h == 0);
+
+    /* A write rate without a quoted 1h rate must not use the 1h billing fallback. */
+    catalog_entry_init(&rates);
+    rates.cost_input = 1;
+    rates.cost_output = 6;
+    rates.cost_cache_write = 1.25;
+
+    plan = openai_plan_cache(&rates, OPENAI_CACHE_AUTO, "1h");
+    EXPECT(plan.send_breakpoints == 1);
+    EXPECT(plan.writes_bill_1h == 0);
+
+    /* A cache-write surcharge does not replace input processing, so AUTO declines it. */
+    catalog_entry_init(&rates);
+    rates.cost_input = 2;
+    rates.cost_output = 12;
+    rates.cost_cache_read = 0.2;
+    rates.cost_cache_write = 0.375;
+
+    plan = openai_plan_cache(&rates, OPENAI_CACHE_AUTO, "1h");
+    EXPECT(plan.send_breakpoints == 0);
+    EXPECT(plan.writes_bill_1h == 0);
+
+    plan = openai_plan_cache(&rates, OPENAI_CACHE_ON, "1h");
+    EXPECT(plan.send_breakpoints == 1);
+    EXPECT(plan.writes_bill_1h == 0);
+
+    /* Unknown rates use the more common replacement policy, so AUTO opts in. */
+    catalog_entry_init(&rates);
+    plan = openai_plan_cache(&rates, OPENAI_CACHE_AUTO, "1h");
+    EXPECT(plan.send_breakpoints == 1);
+    EXPECT(plan.writes_bill_1h == 0);
+}
+
 static void test_build_body_minimal_opts(void)
 {
     struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
@@ -487,6 +543,7 @@ int main(void)
     test_reasoning_only_field_null_emits_nothing();
     test_reasoning_skipped_on_provenance_mismatch();
     test_tool_result_image_followup();
+    test_cache_plan_follows_model_rates();
     test_build_body_composition();
     test_build_body_minimal_opts();
     T_REPORT();

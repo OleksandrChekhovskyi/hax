@@ -11,6 +11,27 @@ enum openai_reasoning_format {
     OPENAI_REASONING_NESTED,   /* reasoning: {enabled: bool, effort?: <effort>} */
 };
 
+/* Accepted effort values, ordered from cheapest to most expensive. */
+extern const char *const OPENAI_EFFORT_LADDER[];
+extern const size_t OPENAI_EFFORT_LADDER_N;
+
+enum openai_cache_mode {
+    OPENAI_CACHE_OFF,
+    OPENAI_CACHE_AUTO,
+    OPENAI_CACHE_ON,
+};
+
+struct openai_cache_plan {
+    int send_breakpoints;
+    int writes_bill_1h;
+};
+
+struct catalog_entry; /* catalog.h */
+
+/* Derive Chat Completions cache-marker and billing behavior from the model's cache rates. */
+struct openai_cache_plan openai_plan_cache(const struct catalog_entry *rates,
+                                           enum openai_cache_mode mode, const char *ttl);
+
 /* NULL, empty, and unknown values return `fallback`; unknown values also warn. */
 enum openai_reasoning_format openai_reasoning_format_parse(const char *value,
                                                            enum openai_reasoning_format fallback);

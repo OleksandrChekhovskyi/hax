@@ -14,7 +14,8 @@
 #include "provider.h"
 #include "util.h"
 #include "providers/config_provider.h"
-#include "providers/openai.h"
+#include "providers/http_provider.h"
+#include "providers/wire.h"
 #include "transport/http.h"
 
 #define MODEL_LIST_TIMEOUT_S 2
@@ -334,7 +335,7 @@ static int llamacpp_probe_model(struct provider *provider, const char *model,
 
 struct provider *llamacpp_provider_new(const char *id)
 {
-    provider_warn_unused_openai_fields(id, OPENAI_WIRE_CHAT, NULL);
+    provider_warn_unused_wire_fields(id, &WIRE_OPENAI_CHAT, NULL);
     char *default_url = default_base_url();
     char *base_url = resolve_base_url();
     const char *api_key = provider_api_key("providers.llamacpp", NULL);
@@ -350,7 +351,7 @@ struct provider *llamacpp_provider_new(const char *id)
         return NULL;
     }
 
-    struct openai_preset preset = {
+    struct http_provider_preset preset = {
         .display_name = "llama.cpp",
         .default_base_url = default_url,
         .config_prefix = "providers.llamacpp",
@@ -364,7 +365,7 @@ struct provider *llamacpp_provider_new(const char *id)
                        "-c / --ctx-size",
         .parse_model = llamacpp_parse_model,
     };
-    struct provider *provider = openai_provider_new_preset(&preset);
+    struct provider *provider = http_provider_new_preset(&preset);
     if (provider) {
         provider->id = id;
         provider->model_label = llamacpp_model_label;
@@ -383,8 +384,8 @@ static void llamacpp_prepare_availability(const char *id,
     (void)id;
     char *base_url = resolve_base_url();
     char **extra_headers = provider_extra_headers("providers.llamacpp");
-    openai_prepare_base_url_availability(base_url, provider_api_key("providers.llamacpp", NULL),
-                                         extra_headers, availability);
+    http_provider_prepare_base_url_availability(
+        base_url, provider_api_key("providers.llamacpp", NULL), extra_headers, availability);
     string_array_free(extra_headers);
     free(base_url);
 }
