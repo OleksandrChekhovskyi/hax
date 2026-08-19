@@ -15,9 +15,9 @@
 #include "providers/anthropic_events.h"
 #include "providers/anthropic_messages.h"
 #include "providers/config_provider.h"
+#include "providers/stream_retry.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
-#include "transport/retry.h"
 
 #define ANTHROPIC_DEFAULT_VERSION    "2023-06-01"
 #define ANTHROPIC_DEFAULT_MAX_TOKENS 32000
@@ -218,10 +218,35 @@ static char **build_request_headers(const struct anthropic *anthropic, int strea
     return headers;
 }
 
+struct anthropic_stream {
+    const struct anthropic *anthropic;
+    struct anthropic_events parser;
+};
+
+static char **stream_build_headers(void *ctx)
+{
+    return build_request_headers(((struct anthropic_stream *)ctx)->anthropic, 1);
+}
+
+static void stream_parser_init(void *ctx, stream_cb callback, void *callback_user)
+{
+    anthropic_events_init(&((struct anthropic_stream *)ctx)->parser, callback, callback_user);
+}
+
 static int handle_sse_data(const char *event_name, const char *data, void *user)
 {
-    anthropic_events_feed(user, event_name, data);
+    anthropic_events_feed(&((struct anthropic_stream *)user)->parser, event_name, data);
     return 0;
+}
+
+static void stream_parser_finalize(void *ctx)
+{
+    anthropic_events_finalize(&((struct anthropic_stream *)ctx)->parser);
+}
+
+static void stream_parser_free(void *ctx)
+{
+    anthropic_events_free(&((struct anthropic_stream *)ctx)->parser);
 }
 
 static int anthropic_stream(struct provider *provider, const struct context *context,
@@ -234,70 +259,19 @@ static int anthropic_stream(struct provider *provider, const struct context *con
     if (!body)
         return -1;
 
-    size_t body_len = strlen(body);
-    char **request_headers = build_request_headers(anthropic, 1);
-
-    struct retry_policy policy = retry_policy_default();
-    struct http_response response;
-    struct anthropic_events parser;
-    int result = -1;
-
-    /* Each retry needs fresh parser state; request bytes are safe to resend unchanged. */
-    for (int attempt = 0; attempt < policy.max_attempts; attempt++) {
-        memset(&response, 0, sizeof(response));
-        anthropic_events_init(&parser, callback, callback_user);
-        result = http_sse_post(anthropic->endpoint, (const char *const *)request_headers, body,
-                               body_len, policy.idle_timeout_s, handle_sse_data, &parser, tick,
-                               tick_user, &response);
-
-        if (response.cancelled ||
-            !retry_should_attempt(result, response.status, response.error_body) ||
-            attempt + 1 >= policy.max_attempts) {
-            break;
-        }
-
-        long delay_ms = response.retry_after_ms > 0 ? response.retry_after_ms
-                                                    : retry_delay_ms(&policy, attempt);
-        struct stream_event retry = {
-            .kind = EV_RETRY,
-            .u.retry =
-                {
-                    .attempt = attempt + 1,
-                    .max_attempts = policy.max_attempts,
-                    .delay_ms = delay_ms,
-                    .http_status = (int)response.status,
-                },
-        };
-        callback(&retry, callback_user);
-
-        free(response.error_body);
-        response.error_body = NULL;
-        anthropic_events_free(&parser);
-
-        if (retry_sleep_with_tick(delay_ms, tick, tick_user)) {
-            response.cancelled = 1;
-            memset(&parser, 0, sizeof(parser));
-            break;
-        }
-    }
-
-    if (!response.cancelled) {
-        if (result != 0 || response.status < 200 || response.status >= 300) {
-            char *message = format_api_error(response.status, response.error_body);
-            struct stream_event error = {
-                .kind = EV_ERROR,
-                .u.error = {.message = message, .http_status = (int)response.status},
-            };
-            callback(&error, callback_user);
-            free(message);
-        } else {
-            anthropic_events_finalize(&parser);
-        }
-    }
-
-    free(response.error_body);
-    anthropic_events_free(&parser);
-    string_array_free(request_headers);
+    struct anthropic_stream stream = {.anthropic = anthropic};
+    struct stream_retry request = {
+        .endpoint = anthropic->endpoint,
+        .body = body,
+        .body_len = strlen(body),
+        .ctx = &stream,
+        .build_headers = stream_build_headers,
+        .parser_init = stream_parser_init,
+        .parser_feed = handle_sse_data,
+        .parser_finalize = stream_parser_finalize,
+        .parser_free = stream_parser_free,
+    };
+    int result = stream_retry_run(&request, callback, callback_user, tick, tick_user);
     free(body);
     return result;
 }

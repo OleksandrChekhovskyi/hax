@@ -17,9 +17,9 @@
 #include "providers/openai_messages.h"
 #include "providers/responses_events.h"
 #include "providers/responses_messages.h"
+#include "providers/stream_retry.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
-#include "transport/retry.h"
 
 #define AVAILABILITY_TIMEOUT_S 2
 #define MODEL_LIST_TIMEOUT_S   10
@@ -123,7 +123,7 @@ static char *build_responses_body(const struct openai *openai, const struct cont
     return json;
 }
 
-/* One parser per wire, behind a common interface so the retry loop stays protocol-agnostic. */
+/* One parser per wire, behind a common interface so the stream loop stays protocol-agnostic. */
 struct openai_parser {
     enum openai_wire wire;
     union {
@@ -132,32 +132,41 @@ struct openai_parser {
     } u;
 };
 
-static void parser_init(struct openai_parser *parser, const struct openai *openai,
-                        const struct openai_cache_plan *cache, stream_cb callback,
-                        void *callback_user)
+struct openai_stream {
+    const struct openai *openai;
+    struct openai_cache_plan cache;
+    struct openai_parser parser;
+};
+
+static void stream_parser_init(void *ctx, stream_cb callback, void *callback_user)
 {
-    parser->wire = openai->wire;
+    struct openai_stream *stream = ctx;
+    struct openai_parser *parser = &stream->parser;
+
+    parser->wire = stream->openai->wire;
     if (parser->wire == OPENAI_WIRE_RESPONSES) {
         responses_events_init(&parser->u.responses, callback, callback_user);
         return;
     }
 
     openai_events_init(&parser->u.chat, callback, callback_user);
-    parser->u.chat.emit_progress = openai->emit_progress;
-    parser->u.chat.length_hint = openai->length_hint;
-    parser->u.chat.cache_write_1h = cache->writes_bill_1h;
+    parser->u.chat.emit_progress = stream->openai->emit_progress;
+    parser->u.chat.length_hint = stream->openai->length_hint;
+    parser->u.chat.cache_write_1h = stream->cache.writes_bill_1h;
 }
 
-static void parser_finalize(struct openai_parser *parser)
+static void stream_parser_finalize(void *ctx)
 {
+    struct openai_parser *parser = &((struct openai_stream *)ctx)->parser;
     if (parser->wire == OPENAI_WIRE_RESPONSES)
         responses_events_finalize(&parser->u.responses);
     else
         openai_events_finalize(&parser->u.chat);
 }
 
-static void parser_free(struct openai_parser *parser)
+static void stream_parser_free(void *ctx)
 {
+    struct openai_parser *parser = &((struct openai_stream *)ctx)->parser;
     if (parser->wire == OPENAI_WIRE_RESPONSES)
         responses_events_free(&parser->u.responses);
     else
@@ -165,8 +174,9 @@ static void parser_free(struct openai_parser *parser)
 }
 
 /* Owned NULL-terminated stream-request headers; free with string_array_free. */
-static char **build_request_headers(const struct openai *openai)
+static char **stream_build_headers(void *ctx)
 {
+    const struct openai *openai = ((struct openai_stream *)ctx)->openai;
     char *authorization =
         openai->api_key ? xasprintf("Authorization: Bearer %s", openai->api_key) : NULL;
     const char *fixed[4];
@@ -185,7 +195,7 @@ static char **build_request_headers(const struct openai *openai)
 static int handle_sse_data(const char *event_name, const char *data, void *user)
 {
     (void)event_name;
-    struct openai_parser *parser = user;
+    struct openai_parser *parser = &((struct openai_stream *)user)->parser;
     if (parser->wire == OPENAI_WIRE_RESPONSES)
         responses_events_feed(&parser->u.responses, data);
     else
@@ -203,78 +213,29 @@ static int openai_stream(struct provider *provider, const struct context *contex
      * router-autoload probe can take minutes, while rate-reporting probes answer quickly, and the
      * request itself waits for the model to load anyway. */
     model_meta_wait_ms(provider, MODEL_META_PROBE_WAIT_MS);
-    struct openai_cache_plan cache =
-        openai_plan_cache(provider, model, openai->cache_mode, openai->cache_ttl);
+    struct openai_stream stream = {
+        .openai = openai,
+        .cache = openai_plan_cache(provider, model, openai->cache_mode, openai->cache_ttl),
+    };
 
     char *body = openai->wire == OPENAI_WIRE_RESPONSES
                      ? build_responses_body(openai, context, model)
-                     : build_chat_body(openai, context, model, &cache);
+                     : build_chat_body(openai, context, model, &stream.cache);
     if (!body)
         return -1;
 
-    size_t body_len = strlen(body);
-    char **headers = build_request_headers(openai);
-    struct retry_policy policy = retry_policy_default();
-    struct http_response response;
-    struct openai_parser parser;
-    int result = -1;
-
-    /* Each retry needs fresh parser state; request bytes remain safe to resend unchanged. */
-    for (int attempt = 0; attempt < policy.max_attempts; attempt++) {
-        memset(&response, 0, sizeof(response));
-        parser_init(&parser, openai, &cache, callback, callback_user);
-
-        result = http_sse_post(openai->endpoint, (const char *const *)headers, body, body_len,
-                               policy.idle_timeout_s, handle_sse_data, &parser, tick, tick_user,
-                               &response);
-        if (response.cancelled ||
-            !retry_should_attempt(result, response.status, response.error_body) ||
-            attempt + 1 >= policy.max_attempts) {
-            break;
-        }
-
-        long delay_ms = response.retry_after_ms > 0 ? response.retry_after_ms
-                                                    : retry_delay_ms(&policy, attempt);
-        struct stream_event retry = {
-            .kind = EV_RETRY,
-            .u.retry =
-                {
-                    .attempt = attempt + 1,
-                    .max_attempts = policy.max_attempts,
-                    .delay_ms = delay_ms,
-                    .http_status = (int)response.status,
-                },
-        };
-        callback(&retry, callback_user);
-
-        free(response.error_body);
-        response.error_body = NULL;
-        parser_free(&parser);
-
-        if (retry_sleep_with_tick(delay_ms, tick, tick_user)) {
-            response.cancelled = 1;
-            parser_init(&parser, openai, &cache, callback, callback_user);
-            break;
-        }
-    }
-
-    if (!response.cancelled) {
-        if (result != 0 || response.status < 200 || response.status >= 300) {
-            char *message = format_api_error(response.status, response.error_body);
-            struct stream_event error = {
-                .kind = EV_ERROR,
-                .u.error = {.message = message, .http_status = (int)response.status},
-            };
-            callback(&error, callback_user);
-            free(message);
-        } else {
-            parser_finalize(&parser);
-        }
-    }
-
-    free(response.error_body);
-    parser_free(&parser);
-    string_array_free(headers);
+    struct stream_retry request = {
+        .endpoint = openai->endpoint,
+        .body = body,
+        .body_len = strlen(body),
+        .ctx = &stream,
+        .build_headers = stream_build_headers,
+        .parser_init = stream_parser_init,
+        .parser_feed = handle_sse_data,
+        .parser_finalize = stream_parser_finalize,
+        .parser_free = stream_parser_free,
+    };
+    int result = stream_retry_run(&request, callback, callback_user, tick, tick_user);
     free(body);
     return result;
 }

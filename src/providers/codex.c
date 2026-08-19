@@ -20,13 +20,12 @@
 #include "providers/config_provider.h"
 #include "providers/responses_events.h"
 #include "providers/responses_messages.h"
+#include "providers/stream_retry.h"
 #include "render/progress.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
 #include "terminal/width.h"
-#include "transport/api_error.h"
 #include "transport/http.h"
-#include "transport/retry.h"
 
 #define CODEX_RESPONSES_ENDPOINT "https://chatgpt.com/backend-api/codex/responses"
 #define CODEX_USAGE_ENDPOINT     "https://chatgpt.com/backend-api/wham/usage"
@@ -206,13 +205,6 @@ static char *build_request_body(const struct context *context, const char *provi
     return body_json;
 }
 
-static int handle_sse_payload(const char *event_name, const char *data, void *parser)
-{
-    (void)event_name;
-    responses_events_feed(parser, data);
-    return 0;
-}
-
 static char **build_stream_headers(const struct codex *codex)
 {
     char *authorization = xasprintf("Authorization: Bearer %s", codex->auth.access_token);
@@ -239,6 +231,58 @@ static char **build_stream_headers(const struct codex *codex)
     return headers;
 }
 
+struct codex_stream {
+    struct codex *codex;
+    struct responses_events events;
+    int auth_retried;
+};
+
+/* Tokens can rotate between attempts, so the auth headers are rebuilt for each. */
+static char **stream_build_headers(void *ctx)
+{
+    return build_stream_headers(((struct codex_stream *)ctx)->codex);
+}
+
+static void stream_parser_init(void *ctx, stream_cb callback, void *callback_user)
+{
+    responses_events_init(&((struct codex_stream *)ctx)->events, callback, callback_user);
+}
+
+static int handle_sse_payload(const char *event_name, const char *data, void *user)
+{
+    (void)event_name;
+    responses_events_feed(&((struct codex_stream *)user)->events, data);
+    return 0;
+}
+
+static void stream_parser_finalize(void *ctx)
+{
+    responses_events_finalize(&((struct codex_stream *)ctx)->events);
+}
+
+static void stream_parser_free(void *ctx)
+{
+    responses_events_free(&((struct codex_stream *)ctx)->events);
+}
+
+/* One in-place retry after a 401: adopt or refresh the rotated hax-owned token. */
+static int stream_recover(void *ctx, long http_status, http_tick_cb tick, void *tick_user)
+{
+    struct codex_stream *stream = ctx;
+    return http_status == 401 &&
+           recover_unauthorized(stream->codex, &stream->auth_retried, tick, tick_user);
+}
+
+static char *stream_error_message(void *ctx, long http_status, const char *error_body)
+{
+    (void)error_body;
+    if (http_status != 401)
+        return NULL;
+    struct codex *codex = ((struct codex_stream *)ctx)->codex;
+    note_unauthorized(codex);
+    return xstrdup(token_expired_message(codex));
+}
+
 static int codex_stream(struct provider *provider, const struct context *context, const char *model,
                         stream_cb callback, void *callback_user, http_tick_cb tick, void *tick_user)
 {
@@ -263,82 +307,22 @@ static int codex_stream(struct provider *provider, const struct context *context
                                     codex->session_id, codex->extra_body);
     if (!body)
         return -1;
-    size_t body_len = strlen(body);
 
-    struct retry_policy retry_policy = retry_policy_default();
-    struct http_response response = {0};
-    struct responses_events events = {0};
-    int result = -1;
-    int auth_retried = 0;
-
-    for (int attempt = 0; attempt < retry_policy.max_attempts; attempt++) {
-        memset(&response, 0, sizeof(response));
-        responses_events_init(&events, callback, callback_user);
-        /* Tokens can rotate between attempts, so the auth headers are rebuilt for each. */
-        char **headers = build_stream_headers(codex);
-        result = http_sse_post(CODEX_RESPONSES_ENDPOINT, (const char *const *)headers, body,
-                               body_len, retry_policy.idle_timeout_s, handle_sse_payload, &events,
-                               tick, tick_user, &response);
-        string_array_free(headers);
-
-        /* One in-place retry after a 401: adopt or refresh the rotated hax-owned token. */
-        if (!response.cancelled && response.status == 401 &&
-            recover_unauthorized(codex, &auth_retried, tick, tick_user)) {
-            free(response.error_body);
-            response.error_body = NULL;
-            responses_events_free(&events);
-            attempt--;
-            continue;
-        }
-
-        if (response.cancelled ||
-            !retry_should_attempt(result, response.status, response.error_body) ||
-            attempt + 1 >= retry_policy.max_attempts)
-            break;
-
-        long delay_ms = response.retry_after_ms > 0 ? response.retry_after_ms
-                                                    : retry_delay_ms(&retry_policy, attempt);
-        struct stream_event retry_event = {
-            .kind = EV_RETRY,
-            .u.retry = {.attempt = attempt + 1,
-                        .max_attempts = retry_policy.max_attempts,
-                        .delay_ms = delay_ms,
-                        .http_status = (int)response.status},
-        };
-        callback(&retry_event, callback_user);
-
-        free(response.error_body);
-        response.error_body = NULL;
-        responses_events_free(&events);
-        if (retry_sleep_with_tick(delay_ms, tick, tick_user)) {
-            response.cancelled = 1;
-            break;
-        }
-    }
-
-    if (!response.cancelled) {
-        if (response.status == 401) {
-            note_unauthorized(codex);
-            struct stream_event error_event = {
-                .kind = EV_ERROR,
-                .u.error = {.message = token_expired_message(codex), .http_status = 401},
-            };
-            callback(&error_event, callback_user);
-        } else if (result != 0 || response.status < 200 || response.status >= 300) {
-            char *message = format_api_error(response.status, response.error_body);
-            struct stream_event error_event = {
-                .kind = EV_ERROR,
-                .u.error = {.message = message, .http_status = (int)response.status},
-            };
-            callback(&error_event, callback_user);
-            free(message);
-        } else {
-            responses_events_finalize(&events);
-        }
-    }
-
-    free(response.error_body);
-    responses_events_free(&events);
+    struct codex_stream stream = {.codex = codex};
+    struct stream_retry request = {
+        .endpoint = CODEX_RESPONSES_ENDPOINT,
+        .body = body,
+        .body_len = strlen(body),
+        .ctx = &stream,
+        .build_headers = stream_build_headers,
+        .parser_init = stream_parser_init,
+        .parser_feed = handle_sse_payload,
+        .parser_finalize = stream_parser_finalize,
+        .parser_free = stream_parser_free,
+        .recover = stream_recover,
+        .error_message = stream_error_message,
+    };
+    int result = stream_retry_run(&request, callback, callback_user, tick, tick_user);
     free(body);
     return result;
 }
