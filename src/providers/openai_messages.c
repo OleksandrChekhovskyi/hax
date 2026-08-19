@@ -7,7 +7,9 @@
 #include <strings.h>
 
 #include "provider.h"
+#include "tool_schema.h"
 #include "util.h"
+#include "providers/wire.h"
 
 static json_t *build_tool_call(const struct item *item)
 {
@@ -267,4 +269,42 @@ void openai_apply_reasoning(json_t *body, enum openai_reasoning_format format, c
         break;
     }
     }
+}
+
+static json_t *build_tools(const struct tool_def *tools, size_t n_tools)
+{
+    json_t *tool_list = json_array();
+    for (size_t i = 0; i < n_tools; i++) {
+        json_t *parameters = tool_schema_build(&tools[i]);
+        json_array_append_new(tool_list, json_pack("{s:s, s:{s:s, s:s, s:o}}", "type", "function",
+                                                   "function", "name", tools[i].name, "description",
+                                                   tools[i].description, "parameters", parameters));
+    }
+    return tool_list;
+}
+
+json_t *openai_build_body(const struct context *context, const char *provider_id, const char *model,
+                          const struct wire_body_opts *opts)
+{
+    json_t *messages =
+        openai_build_messages(context->system_prompt, context->items, context->n_items,
+                              opts->reasoning_field, provider_id, model, context->image_input);
+    if (opts->cache_markers)
+        openai_apply_cache_breakpoints(messages, opts->cache_ttl);
+
+    /* Usage is requested on every stream so terminal events can report token counts. */
+    json_t *body = json_pack("{s:s, s:b, s:o, s:{s:b}}", "model", model, "stream", 1, "messages",
+                             messages, "stream_options", "include_usage", 1);
+
+    if (context->n_tools > 0)
+        json_object_set_new(body, "tools", build_tools(context->tools, context->n_tools));
+    if (opts->session_cache_key)
+        json_object_set_new(body, "prompt_cache_key", json_string(opts->session_cache_key));
+    if (opts->emit_progress)
+        json_object_set_new(body, "return_progress", json_true());
+    if (opts->request_cost)
+        json_object_set_new(body, "usage", json_pack("{s:b}", "include", 1));
+
+    openai_apply_reasoning(body, opts->reasoning_format, context->effort);
+    return body;
 }

@@ -6,6 +6,7 @@
 #include "harness.h"
 #include "provider.h"
 #include "providers/anthropic_messages.h"
+#include "providers/wire.h"
 
 static json_t *message_at(json_t *messages, size_t i)
 {
@@ -215,6 +216,124 @@ static void test_tool_result_image(void)
     json_decref(messages);
 }
 
+static const struct item BODY_ITEMS[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
+
+static const struct tool_def BODY_TOOLS[] = {{.name = "read", .description = "read a file"}};
+
+static const struct context BODY_CONTEXT = {
+    .system_prompt = "be brief",
+    .items = BODY_ITEMS,
+    .n_items = 1,
+    .tools = BODY_TOOLS,
+    .n_tools = 1,
+    .effort = "high",
+    .image_input = 1,
+};
+
+static void test_build_body_budget_thinking(void)
+{
+    struct wire_body_opts opts = {
+        .cache_markers = 1,
+        .cache_ttl = "1h",
+        .max_tokens = 1000,
+        .thinking_mode = ANTHROPIC_THINKING_BUDGET,
+        .thinking_budget = 200,
+    };
+    json_t *body = anthropic_build_body(&BODY_CONTEXT, "prov", "model-1", &opts);
+
+    EXPECT_STR_EQ(json_string_value(json_object_get(body, "model")), "model-1");
+    EXPECT(json_integer_value(json_object_get(body, "max_tokens")) == 1000);
+    EXPECT(json_object_get(body, "stream") == json_true());
+    json_t *thinking = json_object_get(body, "thinking");
+    EXPECT_STR_EQ(json_string_value(json_object_get(thinking, "type")), "enabled");
+    EXPECT(json_integer_value(json_object_get(thinking, "budget_tokens")) == 200);
+
+    /* Cache markers land on the system block, the last tool, and the conversation tail. */
+    json_t *system_block = json_array_get(json_object_get(body, "system"), 0);
+    EXPECT_STR_EQ(json_string_value(json_object_get(system_block, "text")), "be brief");
+    json_t *system_cache = json_object_get(system_block, "cache_control");
+    EXPECT_STR_EQ(json_string_value(json_object_get(system_cache, "ttl")), "1h");
+    json_t *tool = json_array_get(json_object_get(body, "tools"), 0);
+    EXPECT(json_is_object(json_object_get(tool, "input_schema")));
+    EXPECT(json_is_object(json_object_get(tool, "cache_control")));
+    json_t *messages = json_object_get(body, "messages");
+    json_t *last = json_array_get(messages, json_array_size(messages) - 1);
+    json_t *content = json_object_get(last, "content");
+    json_t *block = json_array_get(content, json_array_size(content) - 1);
+    EXPECT(json_is_object(json_object_get(block, "cache_control")));
+
+    json_decref(body);
+}
+
+static void test_build_body_budget_clamped(void)
+{
+    struct wire_body_opts opts = {
+        .max_tokens = 100,
+        .thinking_mode = ANTHROPIC_THINKING_BUDGET,
+    };
+
+    /* An unset budget claims everything below the output cap. */
+    json_t *body = anthropic_build_body(&BODY_CONTEXT, "prov", "model-1", &opts);
+    json_t *thinking = json_object_get(body, "thinking");
+    EXPECT(json_integer_value(json_object_get(thinking, "budget_tokens")) == 99);
+    json_decref(body);
+
+    /* A budget at or above max_tokens violates the API bound and clamps the same way. */
+    opts.thinking_budget = 100;
+    body = anthropic_build_body(&BODY_CONTEXT, "prov", "model-1", &opts);
+    thinking = json_object_get(body, "thinking");
+    EXPECT(json_integer_value(json_object_get(thinking, "budget_tokens")) == 99);
+    json_decref(body);
+
+    /* No room for budget_tokens >= 1 below max_tokens: thinking is omitted entirely. */
+    opts.max_tokens = 1;
+    body = anthropic_build_body(&BODY_CONTEXT, "prov", "model-1", &opts);
+    EXPECT(json_object_get(body, "thinking") == NULL);
+    json_decref(body);
+}
+
+static void test_build_body_adaptive_thinking(void)
+{
+    struct wire_body_opts opts = {
+        .max_tokens = 1000,
+        .thinking_mode = ANTHROPIC_THINKING_ADAPTIVE,
+        .show_reasoning = 1,
+    };
+    json_t *body = anthropic_build_body(&BODY_CONTEXT, "prov", "model-1", &opts);
+
+    json_t *thinking = json_object_get(body, "thinking");
+    EXPECT_STR_EQ(json_string_value(json_object_get(thinking, "type")), "adaptive");
+    EXPECT_STR_EQ(json_string_value(json_object_get(thinking, "display")), "summarized");
+    json_t *output_config = json_object_get(body, "output_config");
+    EXPECT_STR_EQ(json_string_value(json_object_get(output_config, "effort")), "high");
+    /* No cache markers requested: the system block stays unannotated. */
+    json_t *system_block = json_array_get(json_object_get(body, "system"), 0);
+    EXPECT(json_object_get(system_block, "cache_control") == NULL);
+    json_decref(body);
+
+    /* Hidden reasoning omits the display, and no effort choice means no output_config. */
+    struct context context = BODY_CONTEXT;
+    context.effort = NULL;
+    opts.show_reasoning = 0;
+    body = anthropic_build_body(&context, "prov", "model-1", &opts);
+    thinking = json_object_get(body, "thinking");
+    EXPECT_STR_EQ(json_string_value(json_object_get(thinking, "display")), "omitted");
+    EXPECT(json_object_get(body, "output_config") == NULL);
+    json_decref(body);
+}
+
+static void test_build_body_thinking_off(void)
+{
+    struct wire_body_opts opts = {
+        .max_tokens = 1000,
+        .thinking_mode = ANTHROPIC_THINKING_OFF,
+    };
+    json_t *body = anthropic_build_body(&BODY_CONTEXT, "prov", "model-1", &opts);
+    EXPECT(json_object_get(body, "thinking") == NULL);
+    EXPECT(json_object_get(body, "output_config") == NULL);
+    json_decref(body);
+}
+
 int main(void)
 {
     test_user_message();
@@ -225,5 +344,9 @@ int main(void)
     test_redacted_thinking_replayed();
     test_tool_call_bad_args_empty_object();
     test_tool_result_image();
+    test_build_body_budget_thinking();
+    test_build_body_budget_clamped();
+    test_build_body_adaptive_thinking();
+    test_build_body_thinking_off();
     T_REPORT();
 }

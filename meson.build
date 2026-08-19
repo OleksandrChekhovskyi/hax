@@ -128,6 +128,7 @@ sources = files(
     'src/providers/responses_events.c',
     'src/providers/responses_messages.c',
     'src/providers/stream_retry.c',
+    'src/providers/wire.c',
 
     'src/render/ctrl_strip.c',
     'src/render/diff_color.c',

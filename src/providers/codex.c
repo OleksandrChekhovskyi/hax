@@ -194,7 +194,7 @@ static void note_unauthorized(struct codex *codex)
 static char *build_request_body(const struct context *context, const char *provider,
                                 const char *model, const char *cache_key, const json_t *extra_body)
 {
-    json_t *body = responses_build_body(context, provider, model);
+    json_t *body = responses_build_body(context, provider, model, NULL);
     json_object_set_new(body, "text", json_pack("{s:s}", "verbosity", "low"));
     if (cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(cache_key));

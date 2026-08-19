@@ -5,6 +5,7 @@
 #include "harness.h"
 #include "provider.h"
 #include "providers/openai_messages.h"
+#include "providers/wire.h"
 
 /* Find the first message with the given role in a built messages array. */
 static json_t *find_role(json_t *msgs, const char *role)
@@ -406,6 +407,67 @@ static void test_reasoning_effort_nested_none_disables(void)
     json_decref(body);
 }
 
+static void test_build_body_composition(void)
+{
+    struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
+    struct tool_def tools[] = {{.name = "read", .description = "read a file"}};
+    struct context context = {
+        .system_prompt = "be brief",
+        .items = items,
+        .n_items = 1,
+        .tools = tools,
+        .n_tools = 1,
+        .effort = "high",
+        .image_input = 1,
+    };
+    struct wire_body_opts opts = {
+        .cache_markers = 1,
+        .cache_ttl = "1h",
+        .session_cache_key = "sess-1",
+        .reasoning_format = OPENAI_REASONING_FLAT,
+        .emit_progress = 1,
+        .request_cost = 1,
+    };
+
+    json_t *body = openai_build_body(&context, "prov", "model-1", &opts);
+    EXPECT_STR_EQ(json_string_value(json_object_get(body, "model")), "model-1");
+    EXPECT(json_object_get(body, "stream") == json_true());
+    EXPECT(json_is_true(json_object_get(json_object_get(body, "stream_options"), "include_usage")));
+
+    /* Chat Completions nests function schemas, unlike the flat Responses declaration. */
+    json_t *tool = json_array_get(json_object_get(body, "tools"), 0);
+    EXPECT_STR_EQ(json_string_value(json_object_get(json_object_get(tool, "function"), "name")),
+                  "read");
+
+    EXPECT_STR_EQ(json_string_value(json_object_get(body, "prompt_cache_key")), "sess-1");
+    EXPECT(json_object_get(body, "return_progress") == json_true());
+    EXPECT(json_is_true(json_object_get(json_object_get(body, "usage"), "include")));
+    EXPECT_STR_EQ(json_string_value(json_object_get(body, "reasoning_effort")), "high");
+
+    /* The system prompt leads the messages array and carries a cache breakpoint. */
+    json_t *first = json_array_get(json_object_get(body, "messages"), 0);
+    EXPECT_STR_EQ(json_string_value(json_object_get(first, "role")), "system");
+    EXPECT(breakpoint_of(first) != NULL);
+
+    json_decref(body);
+}
+
+static void test_build_body_minimal_opts(void)
+{
+    struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
+    struct context context = {.items = items, .n_items = 1, .image_input = 1};
+    struct wire_body_opts opts = {0};
+
+    json_t *body = openai_build_body(&context, "prov", "model-1", &opts);
+    EXPECT(json_object_get(body, "tools") == NULL);
+    EXPECT(json_object_get(body, "prompt_cache_key") == NULL);
+    EXPECT(json_object_get(body, "return_progress") == NULL);
+    EXPECT(json_object_get(body, "usage") == NULL);
+    EXPECT(json_object_get(body, "reasoning_effort") == NULL);
+    EXPECT(count_breakpoints(json_object_get(body, "messages")) == 0);
+    json_decref(body);
+}
+
 int main(void)
 {
     test_reasoning_format_parse();
@@ -425,5 +487,7 @@ int main(void)
     test_reasoning_only_field_null_emits_nothing();
     test_reasoning_skipped_on_provenance_mismatch();
     test_tool_result_image_followup();
+    test_build_body_composition();
+    test_build_body_minimal_opts();
     T_REPORT();
 }

@@ -5,6 +5,7 @@
 #include "harness.h"
 #include "provider.h"
 #include "providers/responses_messages.h"
+#include "providers/wire.h"
 
 static const char *item_type(json_t *item)
 {
@@ -123,7 +124,7 @@ static void test_body_shape(void)
         .image_input = -1,
     };
 
-    json_t *body = responses_build_body(&context, "openai", "gpt-5");
+    json_t *body = responses_build_body(&context, "openai", "gpt-5", NULL);
     EXPECT_STR_EQ(json_string_value(json_object_get(body, "model")), "gpt-5");
     EXPECT(json_object_get(body, "stream") == json_true());
     EXPECT(json_object_get(body, "store") == json_false());
@@ -152,7 +153,7 @@ static void test_body_reasoning_variants(void)
 
     /* An unset effort picks no level but still reasons, so its encrypted output must be
      * requested — otherwise a store:false turn has nothing to replay across its tool calls. */
-    json_t *body = responses_build_body(&context, "openai", "gpt-5");
+    json_t *body = responses_build_body(&context, "openai", "gpt-5", NULL);
     EXPECT(json_object_get(body, "reasoning") == NULL);
     EXPECT_STR_EQ(json_string_value(json_array_get(json_object_get(body, "include"), 0)),
                   "reasoning.encrypted_content");
@@ -161,18 +162,33 @@ static void test_body_reasoning_variants(void)
 
     /* An empty effort is the same absence of a choice, not a request to disable reasoning. */
     context.effort = "";
-    body = responses_build_body(&context, "openai", "gpt-5");
+    body = responses_build_body(&context, "openai", "gpt-5", NULL);
     EXPECT(json_object_get(body, "reasoning") == NULL);
     EXPECT(json_array_size(json_object_get(body, "include")) == 1);
     json_decref(body);
 
     /* Only an explicit "none" rules reasoning out, leaving nothing to replay. */
     context.effort = "none";
-    body = responses_build_body(&context, "openai", "gpt-5");
+    body = responses_build_body(&context, "openai", "gpt-5", NULL);
     json_t *reasoning = json_object_get(body, "reasoning");
     EXPECT_STR_EQ(json_string_value(json_object_get(reasoning, "effort")), "none");
     EXPECT(json_object_get(reasoning, "summary") == NULL);
     EXPECT(json_object_get(body, "include") == NULL);
+    json_decref(body);
+}
+
+static void test_body_session_cache_key(void)
+{
+    struct context context = {.system_prompt = "sys", .image_input = -1};
+
+    struct wire_body_opts opts = {.session_cache_key = "sess-2"};
+    json_t *body = responses_build_body(&context, "openai", "gpt-5", &opts);
+    EXPECT_STR_EQ(json_string_value(json_object_get(body, "prompt_cache_key")), "sess-2");
+    json_decref(body);
+
+    /* NULL opts serve callers that layer their own routing fields. */
+    body = responses_build_body(&context, "openai", "gpt-5", NULL);
+    EXPECT(json_object_get(body, "prompt_cache_key") == NULL);
     json_decref(body);
 }
 
@@ -183,5 +199,6 @@ int main(void)
     test_reasoning_provenance();
     test_body_shape();
     test_body_reasoning_variants();
+    test_body_session_cache_key();
     T_REPORT();
 }

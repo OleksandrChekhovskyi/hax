@@ -61,6 +61,7 @@ test_sources = [
     'providers/test_responses_events.c',
     'providers/test_responses_messages.c',
     'providers/test_stream_retry.c',
+    'providers/test_wire.c',
 
     'render/test_ctrl_strip.c',
     'render/test_diff_color.c',

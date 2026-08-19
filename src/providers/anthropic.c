@@ -10,12 +10,11 @@
 #include "effort.h"
 #include "model_meta.h"
 #include "provider.h"
-#include "tool_schema.h"
 #include "util.h"
-#include "providers/anthropic_events.h"
 #include "providers/anthropic_messages.h"
 #include "providers/config_provider.h"
 #include "providers/stream_retry.h"
+#include "providers/wire.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 
@@ -50,48 +49,6 @@ struct anthropic {
     int cache_default;
 };
 
-static json_t *build_cache_control(const char *ttl)
-{
-    json_t *cache_control = json_pack("{s:s}", "type", "ephemeral");
-    if (ttl && strcasecmp(ttl, "1h") == 0)
-        json_object_set_new(cache_control, "ttl", json_string("1h"));
-    return cache_control;
-}
-
-static json_t *build_tools(const struct tool_def *tools, size_t n_tools, int cache_last,
-                           const char *ttl)
-{
-    json_t *tool_list = json_array();
-    for (size_t i = 0; i < n_tools; i++) {
-        json_t *schema = tool_schema_build(&tools[i]);
-        json_t *tool = json_pack("{s:s, s:s, s:o}", "name", tools[i].name, "description",
-                                 tools[i].description, "input_schema", schema);
-        if (cache_last && i == n_tools - 1)
-            json_object_set_new(tool, "cache_control", build_cache_control(ttl));
-        json_array_append_new(tool_list, tool);
-    }
-    return tool_list;
-}
-
-static void attach_cache_to_last_message(json_t *messages, const char *ttl)
-{
-    size_t n_messages = json_array_size(messages);
-    if (n_messages == 0)
-        return;
-
-    json_t *message = json_array_get(messages, n_messages - 1);
-    json_t *content = json_object_get(message, "content");
-    if (!json_is_array(content) || json_array_size(content) == 0)
-        return;
-
-    json_t *block = json_array_get(content, json_array_size(content) - 1);
-    const char *type = json_string_value(json_object_get(block, "type"));
-    /* Anthropic rejects cache_control on thinking blocks. */
-    if (type && (strcmp(type, "thinking") == 0 || strcmp(type, "redacted_thinking") == 0))
-        return;
-    json_object_set_new(block, "cache_control", build_cache_control(ttl));
-}
-
 static enum anthropic_thinking_mode resolve_thinking_mode(const struct anthropic *anthropic)
 {
     const char *configured = config_scoped_str(anthropic->config_prefix, "thinking_mode");
@@ -106,34 +63,6 @@ static enum anthropic_thinking_mode resolve_thinking_mode(const struct anthropic
 
     hax_warn("unknown thinking_mode '%s' (adaptive/budget/off) — using default", configured);
     return anthropic->default_thinking_mode;
-}
-
-static void apply_thinking(json_t *body, const struct anthropic *anthropic,
-                           const struct context *context, int max_tokens)
-{
-    enum anthropic_thinking_mode mode = resolve_thinking_mode(anthropic);
-    if (mode == ANTHROPIC_THINKING_OFF)
-        return;
-
-    if (mode == ANTHROPIC_THINKING_ADAPTIVE) {
-        const char *display = config_bool("show_reasoning") ? "summarized" : "omitted";
-        json_object_set_new(body, "thinking",
-                            json_pack("{s:s, s:s}", "type", "adaptive", "display", display));
-        if (context->effort && *context->effort) {
-            json_object_set_new(body, "output_config",
-                                json_pack("{s:s}", "effort", context->effort));
-        }
-        return;
-    }
-
-    /* Anthropic requires 1 <= budget_tokens < max_tokens. */
-    if (max_tokens < 2)
-        return;
-    int budget_tokens = config_scoped_int(anthropic->config_prefix, "thinking_budget");
-    if (budget_tokens <= 0 || budget_tokens >= max_tokens)
-        budget_tokens = max_tokens - 1;
-    json_object_set_new(body, "thinking",
-                        json_pack("{s:s, s:i}", "type", "enabled", "budget_tokens", budget_tokens));
 }
 
 int anthropic_max_tokens(struct provider *provider, const char *model)
@@ -159,39 +88,19 @@ int anthropic_max_tokens(struct provider *provider, const char *model)
 static char *build_request_body(struct anthropic *anthropic, const struct context *context,
                                 const char *model)
 {
-    int max_tokens = anthropic_max_tokens(&anthropic->base, model);
-    int cache = config_scoped_bool_or(anthropic->config_prefix, "cache", anthropic->cache_default);
-    const char *cache_ttl = anthropic->cache_ttl;
-
-    json_t *messages = anthropic_build_messages(
-        context->items, context->n_items, provider_stable_id(&anthropic->base), model,
-        anthropic->allow_empty_signature, context->image_input);
-    json_t *body = json_pack("{s:s, s:i, s:b, s:o}", "model", model, "max_tokens", max_tokens,
-                             "stream", 1, "messages", messages);
-
-    if (context->system_prompt && *context->system_prompt) {
-        json_t *system_block =
-            json_pack("{s:s, s:s}", "type", "text", "text", context->system_prompt);
-        if (cache)
-            json_object_set_new(system_block, "cache_control", build_cache_control(cache_ttl));
-        json_t *system = json_array();
-        json_array_append_new(system, system_block);
-        json_object_set_new(body, "system", system);
-    }
-
-    if (context->n_tools > 0) {
-        json_object_set_new(body, "tools",
-                            build_tools(context->tools, context->n_tools, cache, cache_ttl));
-    }
-    if (cache)
-        attach_cache_to_last_message(messages, cache_ttl);
-
-    apply_thinking(body, anthropic, context, max_tokens);
-    provider_extra_body_apply(body, anthropic->extra_body);
-
-    char *json = json_dumps(body, JSON_COMPACT);
-    json_decref(body);
-    return json;
+    struct wire_body_opts opts = {
+        .extra_body = anthropic->extra_body,
+        .cache_markers =
+            config_scoped_bool_or(anthropic->config_prefix, "cache", anthropic->cache_default),
+        .cache_ttl = anthropic->cache_ttl,
+        .max_tokens = anthropic_max_tokens(&anthropic->base, model),
+        .thinking_mode = resolve_thinking_mode(anthropic),
+        .thinking_budget = config_scoped_int(anthropic->config_prefix, "thinking_budget"),
+        .show_reasoning = config_bool("show_reasoning"),
+        .allow_empty_signature = anthropic->allow_empty_signature,
+    };
+    return wire_build_body(&WIRE_ANTHROPIC_MESSAGES, context, provider_stable_id(&anthropic->base),
+                           model, &opts);
 }
 
 /* Owned NULL-terminated request headers; free with string_array_free. Streaming requests add
@@ -220,7 +129,7 @@ static char **build_request_headers(const struct anthropic *anthropic, int strea
 
 struct anthropic_stream {
     const struct anthropic *anthropic;
-    struct anthropic_events parser;
+    union wire_events events;
 };
 
 static char **stream_build_headers(void *ctx)
@@ -230,23 +139,25 @@ static char **stream_build_headers(void *ctx)
 
 static void stream_parser_init(void *ctx, stream_cb callback, void *callback_user)
 {
-    anthropic_events_init(&((struct anthropic_stream *)ctx)->parser, callback, callback_user);
+    WIRE_ANTHROPIC_MESSAGES.events_init(&((struct anthropic_stream *)ctx)->events, callback,
+                                        callback_user, NULL);
 }
 
 static int handle_sse_data(const char *event_name, const char *data, void *user)
 {
-    anthropic_events_feed(&((struct anthropic_stream *)user)->parser, event_name, data);
+    WIRE_ANTHROPIC_MESSAGES.events_feed(&((struct anthropic_stream *)user)->events, event_name,
+                                        data);
     return 0;
 }
 
 static void stream_parser_finalize(void *ctx)
 {
-    anthropic_events_finalize(&((struct anthropic_stream *)ctx)->parser);
+    WIRE_ANTHROPIC_MESSAGES.events_finalize(&((struct anthropic_stream *)ctx)->events);
 }
 
 static void stream_parser_free(void *ctx)
 {
-    anthropic_events_free(&((struct anthropic_stream *)ctx)->parser);
+    WIRE_ANTHROPIC_MESSAGES.events_free(&((struct anthropic_stream *)ctx)->events);
 }
 
 static int anthropic_stream(struct provider *provider, const struct context *context,
@@ -559,7 +470,7 @@ struct provider *anthropic_provider_new_preset(const struct anthropic_preset *pr
     anthropic->api_key = api_key ? xstrdup(api_key) : NULL;
     anthropic->name = xstrdup(resolve_display_name(preset));
     anthropic->catalog_id = preset->catalog_id ? xstrdup(preset->catalog_id) : NULL;
-    anthropic->endpoint = xasprintf("%s/messages", anthropic->base_url);
+    anthropic->endpoint = xasprintf("%s%s", anthropic->base_url, WIRE_ANTHROPIC_MESSAGES.path);
     const char *version = config_scoped_str(preset->config_prefix, "version");
     anthropic->version = xstrdup(version && *version ? version : ANTHROPIC_DEFAULT_VERSION);
     anthropic->config_prefix = preset->config_prefix ? xstrdup(preset->config_prefix) : NULL;

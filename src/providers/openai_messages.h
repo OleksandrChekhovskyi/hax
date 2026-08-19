@@ -31,4 +31,11 @@ json_t *openai_build_messages(const char *system_prompt, const struct item *item
  * encoded explicitly; other values leave the backend default. */
 void openai_apply_cache_breakpoints(json_t *messages, const char *ttl);
 
+struct wire_body_opts; /* wire.h */
+
+/* Assemble the full Chat Completions request except the extra_body passthrough, which the wire
+ * layer merges last. The caller must json_decref the result. */
+json_t *openai_build_body(const struct context *context, const char *provider_id, const char *model,
+                          const struct wire_body_opts *opts);
+
 #endif /* HAX_PROVIDERS_OPENAI_MESSAGES_H */

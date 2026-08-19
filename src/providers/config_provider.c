@@ -12,6 +12,7 @@
 #include "trace.h"
 #include "util.h"
 #include "providers/anthropic.h"
+#include "providers/anthropic_messages.h"
 #include "providers/openai.h"
 #include "providers/openai_messages.h"
 

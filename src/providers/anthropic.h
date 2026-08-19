@@ -5,13 +5,7 @@
 #include <jansson.h>
 
 #include "provider.h"
-
-/* Adaptive thinking uses output_config.effort; budget thinking uses a token count. */
-enum anthropic_thinking_mode {
-    ANTHROPIC_THINKING_ADAPTIVE = 0,
-    ANTHROPIC_THINKING_BUDGET,
-    ANTHROPIC_THINKING_OFF,
-};
+#include "providers/anthropic_messages.h"
 
 /* Configuration shared by providers using the Messages API. */
 struct anthropic_preset {

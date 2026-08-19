@@ -8,6 +8,7 @@
 #include "provider.h"
 #include "tool_schema.h"
 #include "util.h"
+#include "providers/wire.h"
 
 /* Responses accepts content parts instead of a string when a function result contains images. */
 static json_t *build_tool_output_parts(const struct item *item, int image_input)
@@ -131,7 +132,8 @@ static void apply_reasoning(json_t *body, const char *effort)
     json_object_set_new(body, "reasoning", reasoning);
 }
 
-json_t *responses_build_body(const struct context *context, const char *provider, const char *model)
+json_t *responses_build_body(const struct context *context, const char *provider, const char *model,
+                             const struct wire_body_opts *opts)
 {
     json_t *input = responses_build_input_items(context->items, context->n_items, provider, model,
                                                 context->image_input);
@@ -145,5 +147,7 @@ json_t *responses_build_body(const struct context *context, const char *provider
         json_object_set_new(body, "parallel_tool_calls", json_true());
     }
     apply_reasoning(body, context->effort);
+    if (opts && opts->session_cache_key)
+        json_object_set_new(body, "prompt_cache_key", json_string(opts->session_cache_key));
     return body;
 }

@@ -17,12 +17,14 @@ json_t *responses_build_input_items(const struct item *items, size_t n_items, co
  * a "function" object as in Chat Completions. The caller must json_decref it. */
 json_t *responses_build_tools(const struct tool_def *tools, size_t n_tools);
 
+struct wire_body_opts; /* wire.h */
+
 /* Assemble the protocol-level Responses request: model, stream, store, instructions, input, tools,
  * and the reasoning block. Reasoning is requested with encrypted content so the model can carry a
  * chain of thought across the tool calls of one turn, which the backend returns only for an
- * unstored response. Callers add their own auth-, routing-, and vendor-specific fields, and must
- * json_decref the result. */
-json_t *responses_build_body(const struct context *context, const char *provider,
-                             const char *model);
+ * unstored response. `opts` may be NULL; it contributes the prompt_cache_key. Callers add their
+ * own auth-, routing-, and vendor-specific fields, and must json_decref the result. */
+json_t *responses_build_body(const struct context *context, const char *provider, const char *model,
+                             const struct wire_body_opts *opts);
 
 #endif /* HAX_PROVIDERS_RESPONSES_MESSAGES_H */
