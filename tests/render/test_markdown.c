@@ -2518,11 +2518,12 @@ static void test_table_oversized_complete_row_passes_through(void)
 {
     /* A complete row rejected by table collection must fall through the parser without loss. */
     size_t big = 70000; /* > TABLE_MAX_BYTES (64 KiB) */
-    char *in = xmalloc(big + 64);
-    int p = snprintf(in, big + 64, "| H |\n|---|\n| ");
+    size_t cap = big + 64;
+    char *in = xmalloc(cap);
+    int p = snprintf(in, cap, "| H |\n|---|\n| ");
     memset(in + p, 'a', big);
     p += (int)big;
-    p += snprintf(in + p, 64, " |\n");
+    p += snprintf(in + p, cap - (size_t)p, " |\n");
 
     struct buf out;
     buf_init(&out);
@@ -2542,11 +2543,12 @@ static void test_table_oversized_header_passes_through(void)
 {
     /* A header rejected by the table probe must remain ordinary parser output. */
     size_t big = 70000; /* > TABLE_MAX_BYTES (64 KiB) */
-    char *in = xmalloc(big + 64);
-    int p = snprintf(in, big + 64, "| ");
+    size_t cap = big + 64;
+    char *in = xmalloc(cap);
+    int p = snprintf(in, cap, "| ");
     memset(in + p, 'H', big);
     p += (int)big;
-    p += snprintf(in + p, 64, " |\n|---|\n| x |\n");
+    p += snprintf(in + p, cap - (size_t)p, " |\n|---|\n| x |\n");
 
     struct buf out;
     buf_init(&out);
@@ -2567,14 +2569,15 @@ static void test_table_eof_over_cap_row_passes_through(void)
     /* A final row left in the tail by table finish must still be emitted at flush. */
     size_t row = 60000;
     size_t last = 10000;
-    char *in = xmalloc(row + last + 64);
-    int p = snprintf(in, 64, "| H |\n|---|\n| ");
+    size_t cap = row + last + 64;
+    char *in = xmalloc(cap);
+    int p = snprintf(in, cap, "| H |\n|---|\n| ");
     memset(in + p, 'a', row);
     p += (int)row;
-    p += snprintf(in + p, 16, " |\n| ");
+    p += snprintf(in + p, cap - (size_t)p, " |\n| ");
     memset(in + p, 'b', last);
     p += (int)last;
-    p += snprintf(in + p, 16, " |");
+    p += snprintf(in + p, cap - (size_t)p, " |");
 
     struct buf out;
     buf_init(&out);

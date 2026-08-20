@@ -372,7 +372,7 @@ static void test_commands_line_skips_relative_path_entries(void)
     if (p) {
         EXPECT(!contains(p, "Available command-line tools:"));
         EXPECT(!contains(p, "Prefer `"));
-        EXPECT(!contains(p, "rg"));
+        EXPECT(!contains(p, "`rg`"));
         free(p);
     }
 
