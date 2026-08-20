@@ -552,6 +552,58 @@ static void test_wire_api_hints(void)
     write_cache_fixture(CACHE_FIXTURE); /* later tests re-parse the shared snapshot */
 }
 
+/* The `interleaved` hint names the member an assistant turn's reasoning replays under. Only
+ * the plain-string members are usable; `reasoning_details` is an array shape hax cannot fill
+ * with text, so it must read as "no replay" rather than as a field name. */
+static void test_interleaved_hints(void)
+{
+    write_cache_fixture("{\"zen-think\": {\"npm\": \"@ai-sdk/openai-compatible\", \"models\": {"
+                        "\"content\": {\"interleaved\": {\"field\": \"reasoning_content\"}},"
+                        "\"plain\": {\"interleaved\": {\"field\": \"Reasoning\"}},"
+                        "\"bare\": {\"interleaved\": \"reasoning_content\"},"
+                        "\"details\": {\"interleaved\": {\"field\": \"reasoning_details\"}},"
+                        "\"toggle\": {\"interleaved\": true},"
+                        "\"off\": {\"interleaved\": false},"
+                        "\"quiet\": {\"cost\": {\"input\": 1, \"output\": 2}}}}}");
+
+    struct catalog_entry entry;
+    EXPECT(catalog_lookup("zen-think", "content", &entry) == 0);
+    EXPECT_STR_EQ(entry.interleaved_field, "reasoning_content");
+    EXPECT(catalog_lookup("zen-think", "plain", &entry) == 0);
+    EXPECT_STR_EQ(entry.interleaved_field, "reasoning");
+    EXPECT(catalog_lookup("zen-think", "bare", &entry) == 0);
+    EXPECT_STR_EQ(entry.interleaved_field, "reasoning_content");
+
+    catalog_lookup("zen-think", "details", &entry);
+    EXPECT(entry.interleaved_field == NULL);
+    catalog_lookup("zen-think", "toggle", &entry);
+    EXPECT(entry.interleaved_field == NULL);
+    catalog_lookup("zen-think", "off", &entry);
+    EXPECT(entry.interleaved_field == NULL);
+    EXPECT(catalog_lookup("zen-think", "quiet", &entry) == 0);
+    EXPECT(entry.interleaved_field == NULL);
+
+    /* catalog.models can pin the member for a model the snapshot says nothing about, and can
+     * disable replay for one model the snapshot describes wrongly without the snapshot's hint
+     * merging back underneath. */
+    EXPECT(config_load("{\"catalog\": {\"models\": {\"zen-think\": {"
+                       "  \"quiet\": {\"interleaved\": {\"field\": \"reasoning_content\"}},"
+                       "  \"content\": {\"interleaved\": false}}}}}") == 0);
+    catalog_shutdown();
+    EXPECT(catalog_lookup("zen-think", "quiet", &entry) == 0);
+    EXPECT_STR_EQ(entry.interleaved_field, "reasoning_content");
+    EXPECT(catalog_lookup("zen-think", "content", &entry) == 0);
+    EXPECT(entry.interleaved_field == NULL);
+    EXPECT(config_load(NULL) == 0);
+    catalog_shutdown();
+
+    /* Without the override the snapshot's hint stands. */
+    EXPECT(catalog_lookup("zen-think", "content", &entry) == 0);
+    EXPECT_STR_EQ(entry.interleaved_field, "reasoning_content");
+
+    write_cache_fixture(CACHE_FIXTURE); /* later tests re-parse the shared snapshot */
+}
+
 /* catalog.models can pin a model's api like any other catalog field, normalized to the
  * canonical dialect names; and a config entry complete in every other field still merges the
  * cache-only api hint instead of silently defaulting the wire. */
@@ -621,6 +673,7 @@ int main(void)
     test_extract_member();
     test_prefetch_disabled_is_noop();
     test_wire_api_hints();
+    test_interleaved_hints();
     test_config_api_override();
     test_memoization_and_shutdown_clear();
 

@@ -327,7 +327,7 @@ Keys in the `providers.openai-compatible` block:
 | `display_name` | `HAX_OPENAI_DISPLAY_NAME` | — | Banner and picker name. |
 | `api` | `HAX_OPENAI_API` | `chat` | `chat` (Chat Completions) or `responses`. |
 | `reasoning_format` | `HAX_OPENAI_REASONING_FORMAT` | `flat` | Effort request shape: `flat` or `nested`. |
-| `reasoning_roundtrip` | `HAX_REASONING_ROUNDTRIP` | provider | Replay reasoning text: `off`, `on`, or a field name. |
+| `reasoning_roundtrip` | `HAX_REASONING_ROUNDTRIP` | `auto` | Replay reasoning text: `off`, `on`, or a field name. |
 | `send_cache_key` | `HAX_OPENAI_SEND_CACHE_KEY` | `auto` | Send a stable prompt-cache key. |
 | `request_cost` | `HAX_OPENAI_REQUEST_COST` | `auto` | Request provider-specific per-response cost data. |
 | `cache` | `HAX_OPENAI_CACHE` | `auto` | Send explicit prompt-cache breakpoints. |

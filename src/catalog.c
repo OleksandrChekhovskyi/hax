@@ -130,6 +130,33 @@ static void fill_efforts(struct catalog_entry *entry, json_t *model_object)
     entry->efforts.known = 1;
 }
 
+/* The hint is spelled `interleaved: {"field": ...}`, or as a bare field name. Only plain-string
+ * members are named here: typed `reasoning_details` blocks replay from what the stream reported
+ * rather than from catalog metadata, and reasoning text under that name would not parse.
+ *
+ * `*declared` reports a definite answer that a lower-priority source may not revise: a member this
+ * function resolved, or `false` turning replay off. A hint that only asserts interleaving without
+ * naming a member says nothing actionable, and so leaves the question open. */
+static const char *canonical_interleaved_field(const json_t *interleaved, int *declared)
+{
+    static const char *const FIELDS[] = {"reasoning", "reasoning_content"};
+    if (json_is_false(interleaved)) {
+        *declared = 1;
+        return NULL;
+    }
+    const char *field = json_string_value(interleaved);
+    if (!field)
+        field = json_string_value(json_object_get(interleaved, "field"));
+    if (!field)
+        return NULL;
+    for (size_t i = 0; i < sizeof(FIELDS) / sizeof(FIELDS[0]); i++)
+        if (strcasecmp(field, FIELDS[i]) == 0) {
+            *declared = 1;
+            return FIELDS[i];
+        }
+    return NULL;
+}
+
 /* Normalize a declared dialect to its canonical static-storage name; an unknown name marks the
  * model unsupported rather than being guessed at, matching npm_dialect. */
 static const char *canonical_api(const char *api)
@@ -173,6 +200,10 @@ static void fill_entry(struct catalog_entry *entry, json_t *model_object)
             entry->max_output = member_tokens(limit, "output");
     }
     fill_efforts(entry, model_object);
+    if (!entry->interleaved_declared) {
+        entry->interleaved_field = canonical_interleaved_field(
+            json_object_get(model_object, "interleaved"), &entry->interleaved_declared);
+    }
     if (entry->image_input == CATALOG_SUPPORT_UNKNOWN) {
         json_t *modalities = json_object_get(model_object, "modalities");
         json_t *inputs = json_is_object(modalities) ? json_object_get(modalities, "input") : NULL;
@@ -197,7 +228,7 @@ static int entry_has_metadata(const struct catalog_entry *entry)
            entry->cost_cache_write >= 0 || entry->cost_cache_write_1h >= 0 ||
            entry->context_window > 0 || entry->max_output > 0 ||
            entry->image_input != CATALOG_SUPPORT_UNKNOWN || entry->n_tiers > 0 ||
-           entry->efforts.known || entry->api != NULL;
+           entry->efforts.known || entry->api != NULL || entry->interleaved_declared;
 }
 
 static void merge_entry(struct catalog_entry *dst, const struct catalog_entry *src)
@@ -230,6 +261,10 @@ static void merge_entry(struct catalog_entry *dst, const struct catalog_entry *s
         dst->efforts = src->efforts;
     if (!dst->api)
         dst->api = src->api;
+    if (!dst->interleaved_declared) {
+        dst->interleaved_field = src->interleaved_field;
+        dst->interleaved_declared = src->interleaved_declared;
+    }
 }
 
 /* ---------------- top-level member extraction ---------------- */

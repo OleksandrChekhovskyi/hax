@@ -2,6 +2,7 @@
 #ifndef HAX_PROVIDERS_OPENAI_EVENTS_H
 #define HAX_PROVIDERS_OPENAI_EVENTS_H
 
+#include <jansson.h>
 #include <stddef.h>
 
 #include "provider.h"
@@ -25,6 +26,9 @@ struct openai_events {
     struct openai_tool_call *tool_calls;
     size_t n_tool_calls;
     size_t tool_call_capacity;
+
+    /* Typed reasoning blocks collected since the last seam, awaiting an EV_REASONING_ITEM. */
+    json_t *reasoning_details;
 
     /* The terminal event waits for [DONE] so a trailing usage chunk can be included. */
     int finish_received;

@@ -88,9 +88,9 @@ static void test_reasoning_custom_field_name(void)
     json_decref(msgs);
 }
 
-/* Codex-style reasoning (reasoning_json, no reasoning_text) is skipped and
- * never produces a reasoning_content field, regardless of the field setting. */
-static void test_codex_reasoning_json_skipped(void)
+/* Another wire's opaque reasoning encoding (an unstamped Responses item) never reaches a Chat
+ * Completions message, in either the text member or the typed sequence. */
+static void test_codex_reasoning_json_ignored(void)
 {
     struct item items[] = {
         {.kind = ITEM_REASONING, .reasoning_json = "{\"id\":\"r1\"}"},
@@ -98,13 +98,73 @@ static void test_codex_reasoning_json_skipped(void)
     };
     json_t *msgs = openai_build_messages(NULL, items, 2, "reasoning_content", "codex", "o3", -1);
 
-    /* The reasoning_json item is its own (skipped) entry; the assistant
-     * message stands alone with no reasoning attached. */
     json_t *a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
     EXPECT(json_object_get(a, "reasoning_content") == NULL);
+    EXPECT(json_object_get(a, "reasoning_details") == NULL);
     EXPECT_STR_EQ(json_string_value(json_object_get(a, "content")), "Done.");
 
+    json_decref(msgs);
+}
+
+/* Typed reasoning blocks are opaque replay state the backend requires back verbatim, so they
+ * round-trip independently of the text member — including when the model exposed no plaintext
+ * at all, and across the several items one assistant message may span. */
+static void test_reasoning_details_round_trip(void)
+{
+    struct item items[] = {
+        {.kind = ITEM_REASONING,
+         .reasoning_json = "[{\"type\":\"reasoning.encrypted\",\"data\":\"aa\"}]",
+         .provider = "openrouter",
+         .model = "m1"},
+        {.kind = ITEM_TOOL_CALL,
+         .call_id = "c1",
+         .tool_name = "read",
+         .tool_arguments_json = "{\"path\":\"x\"}"},
+        {.kind = ITEM_REASONING,
+         .reasoning_json = "[{\"type\":\"reasoning.encrypted\",\"data\":\"bb\"}]",
+         .provider = "openrouter",
+         .model = "m1"},
+        {.kind = ITEM_ASSISTANT_MESSAGE, .text = "Done."},
+    };
+    json_t *msgs = openai_build_messages(NULL, items, 4, NULL, "openrouter", "m1", -1);
+
+    EXPECT(json_array_size(msgs) == 1);
+    json_t *a = find_role(msgs, "assistant");
+    EXPECT(a != NULL);
+    json_t *details = json_object_get(a, "reasoning_details");
+    EXPECT(json_array_size(details) == 2);
+    EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(details, 0), "data")), "aa");
+    EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(details, 1), "data")), "bb");
+    EXPECT_STR_EQ(json_string_value(json_object_get(a, "content")), "Done.");
+
+    json_decref(msgs);
+}
+
+/* The typed sequence carries the same reasoning as the plain member, so only one of them is
+ * sent; and reasoning from another provider or model is replayed by neither. */
+static void test_reasoning_details_supersede_text(void)
+{
+    struct item items[] = {
+        {.kind = ITEM_REASONING,
+         .reasoning_text = "thinking",
+         .reasoning_json = "[{\"type\":\"reasoning.text\",\"text\":\"thinking\"}]",
+         .provider = "openrouter",
+         .model = "m1"},
+        {.kind = ITEM_ASSISTANT_MESSAGE, .text = "Done."},
+    };
+    json_t *msgs = openai_build_messages(NULL, items, 2, "reasoning", "openrouter", "m1", -1);
+    json_t *a = find_role(msgs, "assistant");
+    EXPECT(a != NULL);
+    EXPECT(json_array_size(json_object_get(a, "reasoning_details")) == 1);
+    EXPECT(json_object_get(a, "reasoning") == NULL);
+    json_decref(msgs);
+
+    msgs = openai_build_messages(NULL, items, 2, "reasoning", "openrouter", "m2", -1);
+    a = find_role(msgs, "assistant");
+    EXPECT(a != NULL);
+    EXPECT(json_object_get(a, "reasoning_details") == NULL);
+    EXPECT(json_object_get(a, "reasoning") == NULL);
     json_decref(msgs);
 }
 
@@ -538,7 +598,9 @@ int main(void)
     test_reasoning_attached_when_field_set();
     test_reasoning_omitted_when_field_null();
     test_reasoning_custom_field_name();
-    test_codex_reasoning_json_skipped();
+    test_codex_reasoning_json_ignored();
+    test_reasoning_details_round_trip();
+    test_reasoning_details_supersede_text();
     test_reasoning_only_turn();
     test_reasoning_only_field_null_emits_nothing();
     test_reasoning_skipped_on_provenance_mismatch();

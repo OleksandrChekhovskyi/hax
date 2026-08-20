@@ -53,6 +53,13 @@ struct catalog_entry {
     /* `known` distinguishes an unsupported effort ladder from absent metadata. */
     struct effort_set efforts;
 
+    /* Chat Completions member that must carry an assistant turn's own reasoning back to the
+     * model: interleaved-thinking models stop reasoning once it is missing from their history.
+     * Static storage, "reasoning" or "reasoning_content"; NULL when the model needs no replay
+     * or round-trips typed blocks instead. */
+    const char *interleaved_field;
+    int interleaved_declared; /* Distinguishes an absent hint from one declared off. */
+
     /* A declared list replaces the lower-priority list rather than merging with it. */
     struct catalog_tier tiers[CATALOG_TIERS_MAX];
     int n_tiers;

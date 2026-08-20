@@ -42,6 +42,8 @@ void openai_events_free(struct openai_events *parser)
     parser->served_model = NULL;
     free(parser->route);
     parser->route = NULL;
+    json_decref(parser->reasoning_details);
+    parser->reasoning_details = NULL;
 }
 
 static void capture_first_string(char **field, const json_t *root, const char *key)
@@ -158,6 +160,91 @@ static void handle_reasoning_delta(struct openai_events *parser, json_t *delta)
         .u.reasoning_delta = {.text = text},
     };
     emit_event(parser, &event);
+}
+
+static int is_reasoning_text(const json_t *detail)
+{
+    const char *type = json_string_value(json_object_get(detail, "type"));
+    return type && strcmp(type, "reasoning.text") == 0;
+}
+
+/* Absent, null and empty all mean the fragment did not carry the member. */
+static int has_member(const json_t *detail, const char *name)
+{
+    json_t *value = json_object_get(detail, name);
+    const char *text = json_string_value(value);
+    return value && !json_is_null(value) && (!text || *text);
+}
+
+/* A streamed block is chunked across fragments and closed by one carrying only its signature, a
+ * shape no non-streamed response returns. Rejoining adjacent text restores that response's single
+ * block, keeping the signature with the text it signs; replaying the fragments instead leaves the
+ * signature on an empty block, which costs tokens and fails validation once a member is edited.
+ * Only text chunks this way, so blocks of any other type stay whole and separate. */
+static int join_reasoning_text(json_t *block, json_t *detail)
+{
+    if (!is_reasoning_text(block) || !is_reasoning_text(detail))
+        return 0;
+
+    const char *tail = json_string_value(json_object_get(detail, "text"));
+    if (tail && *tail) {
+        const char *head = json_string_value(json_object_get(block, "text"));
+        char *joined = xasprintf("%s%s", head ? head : "", tail);
+        json_object_set_new(block, "text", json_string(joined));
+        free(joined);
+    }
+    static const char *const CLOSING[] = {"signature", "format"};
+    for (size_t i = 0; i < sizeof(CLOSING) / sizeof(CLOSING[0]); i++)
+        if (has_member(detail, CLOSING[i]) && !has_member(block, CLOSING[i]))
+            json_object_set(block, CLOSING[i], json_object_get(detail, CLOSING[i]));
+    return 1;
+}
+
+/* Reasoning arrives as an ordered sequence of typed blocks that the backend requires back
+ * unchanged and in order, so blocks are neither reordered nor dropped here. */
+static void collect_reasoning_details(struct openai_events *parser, json_t *delta)
+{
+    json_t *details = json_object_get(delta, "reasoning_details");
+    if (!json_is_array(details))
+        return;
+
+    if (!parser->reasoning_details)
+        parser->reasoning_details = json_array();
+    size_t index;
+    json_t *detail;
+    json_array_foreach(details, index, detail)
+    {
+        if (!json_is_object(detail))
+            continue;
+        size_t collected = json_array_size(parser->reasoning_details);
+        json_t *last =
+            collected > 0 ? json_array_get(parser->reasoning_details, collected - 1) : NULL;
+        if (!last || !join_reasoning_text(last, detail))
+            json_array_append_new(parser->reasoning_details, json_deep_copy(detail));
+    }
+}
+
+/* Chat Completions marks no end of reasoning, so the collected sequence is sealed at the first
+ * seam that follows it: content, a tool call, or the end of the stream. */
+static void flush_reasoning_details(struct openai_events *parser)
+{
+    if (!parser->reasoning_details)
+        return;
+
+    char *json = json_array_size(parser->reasoning_details) > 0
+                     ? json_dumps(parser->reasoning_details, JSON_COMPACT)
+                     : NULL;
+    json_decref(parser->reasoning_details);
+    parser->reasoning_details = NULL;
+    if (!json)
+        return;
+
+    struct stream_event event = {
+        .kind = EV_REASONING_ITEM,
+        .u.reasoning_item = {.json = json},
+    };
+    emit_event(parser, &event);
+    free(json);
 }
 
 static void handle_tool_call_delta(struct openai_events *parser, json_t *delta)
@@ -303,6 +390,7 @@ static void handle_finish_reason(struct openai_events *parser, const char *reaso
     if (parser->terminal_emitted || parser->finish_received)
         return;
 
+    flush_reasoning_details(parser);
     finish_tool_calls(parser);
     parser->finish_received = 1;
 
@@ -324,6 +412,7 @@ static void handle_done(struct openai_events *parser)
     if (parser->terminal_emitted)
         return;
 
+    flush_reasoning_details(parser);
     finish_tool_calls(parser);
     parser->terminal_emitted = 1;
     emit_terminal_event(parser);
@@ -354,10 +443,16 @@ static void handle_choice_delta(struct openai_events *parser, json_t *choice)
 {
     json_t *delta = json_object_get(choice, "delta");
     if (json_is_object(delta)) {
+        collect_reasoning_details(parser, delta);
         handle_reasoning_delta(parser, delta);
-        handle_text_delta(parser, json_string_value(json_object_get(delta, "content")));
 
+        const char *content = json_string_value(json_object_get(delta, "content"));
         json_t *tool_calls = json_object_get(delta, "tool_calls");
+        if ((content && *content) || json_is_array(tool_calls))
+            flush_reasoning_details(parser);
+
+        handle_text_delta(parser, content);
+
         if (json_is_array(tool_calls)) {
             size_t n_tool_calls = json_array_size(tool_calls);
             for (size_t i = 0; i < n_tool_calls; i++)

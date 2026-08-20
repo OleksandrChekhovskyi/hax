@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include <jansson.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,6 +63,7 @@ static int capture_event(const struct stream_event *event, void *user)
         captured->id = strdup(event->u.tool_call_end.id);
         break;
     case EV_REASONING_ITEM:
+        captured->text = strdup(event->u.reasoning_item.json);
         break;
     case EV_REASONING_DELTA:
         captured->text = strdup(event->u.reasoning_delta.text ? event->u.reasoning_delta.text : "");
@@ -200,6 +202,126 @@ static void test_empty_reasoning_ignored(void)
     openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":null}}]}");
     openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_content\":\"\"}}]}");
     EXPECT(capture.n_events == 0);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* Blocks accumulate in arrival order and seal at the first seam after them, before the content
+ * that ended the reasoning. */
+static void test_reasoning_details_sealed_at_content(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
+                                "[{\"type\":\"reasoning.encrypted\",\"data\":\"aa\"}]}}]}");
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":\"Think\","
+                                "\"reasoning_details\":"
+                                "[{\"type\":\"reasoning.text\",\"text\":\"Think\"}]}}]}");
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}");
+
+    EXPECT(capture.n_events == 3);
+    EXPECT(capture.events[0].kind == EV_REASONING_DELTA);
+    EXPECT(capture.events[1].kind == EV_REASONING_ITEM);
+    EXPECT_STR_EQ(capture.events[1].text, "[{\"type\":\"reasoning.encrypted\",\"data\":\"aa\"},"
+                                          "{\"type\":\"reasoning.text\",\"text\":\"Think\"}]");
+    EXPECT(capture.events[2].kind == EV_TEXT_DELTA);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+static void test_reasoning_details_sealed_at_finish(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
+                                "[{\"type\":\"reasoning.encrypted\",\"data\":\"aa\"}]}}]}");
+    feed_finish(&parser, "stop");
+    openai_events_feed(&parser, "[DONE]");
+
+    EXPECT(capture.n_events == 2);
+    EXPECT(capture.events[0].kind == EV_REASONING_ITEM);
+    EXPECT_STR_EQ(capture.events[0].text, "[{\"type\":\"reasoning.encrypted\",\"data\":\"aa\"}]");
+    EXPECT(capture.events[1].kind == EV_DONE);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* A block streamed one token at a time, then closed by a signature-only fragment, replays as the
+ * single signed block a non-streamed response returns. */
+static void test_reasoning_text_fragments_rejoined(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
+                                "[{\"type\":\"reasoning.text\",\"text\":\"Think\","
+                                "\"format\":\"anthropic-claude-v1\",\"index\":0}]}}]}");
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
+                                "[{\"type\":\"reasoning.text\",\"text\":\"ing\",\"index\":0}]}}]}");
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
+                                "[{\"type\":\"reasoning.text\",\"signature\":\"sig\","
+                                "\"index\":0}]}}]}");
+    feed_finish(&parser, "stop");
+
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_REASONING_ITEM);
+    json_t *details = json_loads(capture.events[0].text, 0, NULL);
+    EXPECT(json_array_size(details) == 1);
+    json_t *block = json_array_get(details, 0);
+    EXPECT_STR_EQ(json_string_value(json_object_get(block, "text")), "Thinking");
+    EXPECT_STR_EQ(json_string_value(json_object_get(block, "signature")), "sig");
+    EXPECT_STR_EQ(json_string_value(json_object_get(block, "format")), "anthropic-claude-v1");
+    json_decref(details);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* Only text chunks across fragments; consecutive blocks of any other type are whole already, and
+ * one of them separates the text blocks around it. */
+static void test_reasoning_details_join_text_only(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
+                                "[{\"type\":\"reasoning.text\",\"text\":\"one\"},"
+                                "{\"type\":\"reasoning.encrypted\",\"data\":\"aa\"},"
+                                "{\"type\":\"reasoning.encrypted\",\"data\":\"bb\"},"
+                                "{\"type\":\"reasoning.text\",\"text\":\"two\"}]}}]}");
+    feed_finish(&parser, "stop");
+
+    EXPECT(capture.n_events == 1);
+    json_t *details = json_loads(capture.events[0].text, 0, NULL);
+    EXPECT(json_array_size(details) == 4);
+    EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(details, 0), "text")), "one");
+    EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(details, 1), "data")), "aa");
+    EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(details, 2), "data")), "bb");
+    EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(details, 3), "text")), "two");
+    json_decref(details);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* The opening fragment's signature is the block's; a later one does not overwrite it. */
+static void test_reasoning_text_keeps_first_signature(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
+                                "[{\"type\":\"reasoning.text\",\"text\":\"a\","
+                                "\"signature\":\"first\"},"
+                                "{\"type\":\"reasoning.text\",\"text\":\"b\","
+                                "\"signature\":\"second\"}]}}]}");
+    feed_finish(&parser, "stop");
+
+    json_t *details = json_loads(capture.events[0].text, 0, NULL);
+    EXPECT(json_array_size(details) == 1);
+    EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(details, 0), "text")), "ab");
+    EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(details, 0), "signature")),
+                  "first");
+    json_decref(details);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* An endpoint that reports no typed blocks must not gain an empty reasoning item. */
+static void test_reasoning_details_absent_or_malformed(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":[]}}]}");
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":\"nope\"}}]}");
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":[\"nope\"]}}]}");
+    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}");
+
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_TEXT_DELTA);
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
@@ -698,6 +820,12 @@ int main(void)
     test_reasoning_delta_openrouter();
     test_reasoning_delta_llamacpp();
     test_reasoning_then_content();
+    test_reasoning_details_sealed_at_content();
+    test_reasoning_details_sealed_at_finish();
+    test_reasoning_text_fragments_rejoined();
+    test_reasoning_details_join_text_only();
+    test_reasoning_text_keeps_first_signature();
+    test_reasoning_details_absent_or_malformed();
     test_empty_reasoning_ignored();
     test_tool_call_lifecycle();
     test_tool_call_id_and_name_across_deltas();

@@ -284,8 +284,11 @@ mode and take precedence over catalog hints; either form makes every dialect's c
 each to the models speaking it.
 
 For `openai-completions`, advanced fields are `reasoning_format`, `reasoning_roundtrip`,
-`send_cache_key`, `request_cost`, `cache`, and `cache_ttl`. `openai-responses` accepts
-`send_cache_key`; its reasoning format and encrypted round-trip are fixed by the protocol.
+`send_cache_key`, `request_cost`, `cache`, and `cache_ttl`; reasoning replay is automatic per
+model, so `reasoning_roundtrip` is only for an endpoint the catalog describes wrongly.
+`openai-responses` accepts `send_cache_key`; its reasoning format and encrypted round-trip are
+fixed by the protocol.
+
 Anthropic-style blocks accept `max_tokens`, `thinking_mode`, `thinking_budget`, `cache`, `cache_ttl`,
 and `version`. Leave advanced fields unset unless the endpoint documents them. Selecting a provider
 warns about block members hax does not recognize or that its `api` dialect does not use.

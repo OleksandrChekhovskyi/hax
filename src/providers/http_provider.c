@@ -51,6 +51,7 @@ struct http_provider {
     enum openai_cache_mode cache_mode;
     char *cache_ttl;
     char *reasoning_field;
+    int reasoning_field_pinned; /* configured explicitly; no catalog hint may override it */
     enum openai_reasoning_format reasoning_format;
     enum anthropic_thinking_mode default_thinking_mode;
     int allow_empty_signature;
@@ -209,6 +210,20 @@ static const struct wire *resolve_model_wire(struct http_provider *provider, con
     return provider->wire;
 }
 
+/* The member `model`'s reasoning replays under: an explicit reasoning_roundtrip pins one for
+ * every model, else the catalog's per-model hint, else the preset default. The result is
+ * borrowed from static storage or from the provider, so it outlives the request. */
+static const char *resolve_model_reasoning_field(const struct http_provider *provider,
+                                                 const char *model)
+{
+    if (provider->reasoning_field_pinned || !provider->catalog_id)
+        return provider->reasoning_field;
+
+    struct catalog_entry entry;
+    catalog_lookup(provider->catalog_id, model, &entry);
+    return entry.interleaved_field ? entry.interleaved_field : provider->reasoning_field;
+}
+
 static int http_provider_stream(struct provider *base, const struct context *context,
                                 const char *model, stream_cb callback, void *callback_user,
                                 http_tick_cb tick, void *tick_user)
@@ -247,7 +262,7 @@ static int http_provider_stream(struct provider *base, const struct context *con
         stream.cache = openai_plan_cache(&rates, provider->cache_mode, provider->cache_ttl);
         opts.cache_markers = stream.cache.send_breakpoints;
         opts.session_cache_key = provider->send_cache_key ? provider->session_id : NULL;
-        opts.reasoning_field = provider->reasoning_field;
+        opts.reasoning_field = resolve_model_reasoning_field(provider, model);
         opts.reasoning_format = provider->reasoning_format;
         opts.emit_progress = provider->emit_progress;
         opts.request_cost = provider->request_cost;
@@ -334,10 +349,18 @@ static enum openai_cache_mode resolve_cache_mode(const char *prefix, int automat
     return automatic ? OPENAI_CACHE_AUTO : OPENAI_CACHE_OFF;
 }
 
-static char *resolve_reasoning_field(const char *prefix, const char *preset_default)
+/* `*pinned` reports an explicit setting, including an "off" that must survive a catalog hint.
+ * "auto" asks for the default resolution, like the other tri-state settings, rather than naming
+ * a member; anything else is a member name. */
+static char *resolve_configured_reasoning_field(const char *prefix, const char *preset_default,
+                                                int *pinned)
 {
     const char *configured = config_scoped_str(prefix, "reasoning_roundtrip");
+    if (configured && strcmp(configured, "auto") == 0)
+        configured = NULL;
+
     const char *field = preset_default;
+    *pinned = configured != NULL;
     if (configured) {
         if (!*configured || strcmp(configured, "off") == 0 || strcmp(configured, "0") == 0)
             field = NULL;
@@ -566,8 +589,8 @@ struct provider *http_provider_new_preset(const struct http_provider_preset *pre
         config_scoped_bool_or(preset->config_prefix, "request_cost", preset->request_cost);
     provider->cache_mode = resolve_cache_mode(preset->config_prefix, preset->cache_auto_default);
     provider->cache_ttl = xstrdup(provider_cache_ttl(preset->config_prefix));
-    provider->reasoning_field =
-        resolve_reasoning_field(preset->config_prefix, preset->reasoning_replay_field);
+    provider->reasoning_field = resolve_configured_reasoning_field(
+        preset->config_prefix, preset->reasoning_replay_field, &provider->reasoning_field_pinned);
     provider->reasoning_format = openai_reasoning_format_parse(
         config_scoped_str(preset->config_prefix, "reasoning_format"), preset->reasoning_format);
     provider->default_thinking_mode = preset->default_thinking_mode;

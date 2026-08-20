@@ -36,6 +36,28 @@ static json_t *build_tool_call(const struct item *item)
                      "arguments", item->tool_arguments_json ? item->tool_arguments_json : "{}");
 }
 
+/* Typed reasoning blocks must reach the model unchanged and in their original order, so the
+ * items of one assistant message concatenate rather than replace. A blob of any other shape
+ * belongs to another wire's encoding and is left alone. */
+static void collect_reasoning_details(json_t **details, const char *reasoning_json)
+{
+    if (!reasoning_json)
+        return;
+
+    json_t *parsed = json_loads(reasoning_json, 0, NULL);
+    if (!json_is_array(parsed)) {
+        json_decref(parsed);
+        return;
+    }
+
+    if (!*details)
+        *details = json_array();
+    size_t index;
+    json_t *detail;
+    json_array_foreach(parsed, index, detail) json_array_append(*details, detail);
+    json_decref(parsed);
+}
+
 /* Chat Completions cannot preserve text/tool-call interleaving within an assistant message. */
 static size_t append_assistant_message(json_t *messages, const struct item *items, size_t index,
                                        size_t n_items, const char *reasoning_field,
@@ -46,6 +68,7 @@ static size_t append_assistant_message(json_t *messages, const struct item *item
     buf_init(&text);
     buf_init(&reasoning);
     json_t *tool_calls = NULL;
+    json_t *details = NULL;
 
     while (index < n_items &&
            (items[index].kind == ITEM_ASSISTANT_MESSAGE || items[index].kind == ITEM_TOOL_CALL ||
@@ -57,12 +80,14 @@ static size_t append_assistant_message(json_t *messages, const struct item *item
                 buf_append_str(&text, item->text);
             break;
         case ITEM_REASONING:
-            if (provider_provenance_matches(item, current_provider, current_model) &&
-                item->reasoning_text && *item->reasoning_text) {
+            if (!provider_provenance_matches(item, current_provider, current_model))
+                break;
+            if (item->reasoning_text && *item->reasoning_text) {
                 if (reasoning.len > 0)
                     buf_append_str(&reasoning, "\n");
                 buf_append_str(&reasoning, item->reasoning_text);
             }
+            collect_reasoning_details(&details, item->reasoning_json);
             break;
         case ITEM_TOOL_CALL:
             if (!tool_calls)
@@ -74,8 +99,10 @@ static size_t append_assistant_message(json_t *messages, const struct item *item
         }
     }
 
-    int include_reasoning = reasoning_field && reasoning.len > 0;
-    if (text.len == 0 && !tool_calls && !include_reasoning)
+    /* The typed sequence is the richer encoding of the same reasoning: sending the plain member
+     * alongside it would duplicate the content. */
+    int include_reasoning = reasoning_field && reasoning.len > 0 && !details;
+    if (text.len == 0 && !tool_calls && !include_reasoning && !details)
         goto out;
 
     json_t *message = json_object();
@@ -83,7 +110,9 @@ static size_t append_assistant_message(json_t *messages, const struct item *item
     json_object_set_new(message, "content", text.len > 0 ? json_string(text.data) : json_null());
     if (tool_calls)
         json_object_set_new(message, "tool_calls", tool_calls);
-    if (include_reasoning)
+    if (details)
+        json_object_set_new(message, "reasoning_details", details);
+    else if (include_reasoning)
         json_object_set_new(message, reasoning_field, json_string(reasoning.data));
     json_array_append_new(messages, message);
 
@@ -193,7 +222,7 @@ json_t *openai_build_messages(const char *system_prompt, const struct item *item
             index = append_tool_results(messages, items, index, n_items, image_input);
             break;
         case ITEM_REASONING:
-            if (items[index].reasoning_text) {
+            if (items[index].reasoning_text || items[index].reasoning_json) {
                 index = append_assistant_message(messages, items, index, n_items, reasoning_field,
                                                  current_provider, current_model);
             } else {

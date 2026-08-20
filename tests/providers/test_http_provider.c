@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 
+#include "catalog.h"
 #include "config.h"
 #include "harness.h"
 #include "provider.h"
@@ -254,7 +255,8 @@ static void write_catalog_fixture(void)
         FAIL("fopen %s: %s", path, strerror(errno));
     fputs("{\"zen-test\": {\"npm\": \"@ai-sdk/openai-compatible\", \"models\": {"
           "\"claude-hint\": {\"provider\": {\"npm\": \"@ai-sdk/anthropic\"}},"
-          "\"gemini-hint\": {\"provider\": {\"npm\": \"@ai-sdk/google\"}}}}}",
+          "\"gemini-hint\": {\"provider\": {\"npm\": \"@ai-sdk/google\"}},"
+          "\"think-hint\": {\"interleaved\": {\"field\": \"reasoning_content\"}}}}}",
           f);
     fclose(f);
 }
@@ -339,6 +341,91 @@ static void test_model_wire_routing(void)
     EXPECT(config_load(NULL) == 0);
 }
 
+static void stream_one_reasoned_turn(struct provider *provider, char *model, struct error_log *log)
+{
+    struct item items[] = {
+        {.kind = ITEM_USER_MESSAGE, .text = "hello"},
+        {.kind = ITEM_REASONING, .reasoning_text = "thought", .provider = "zen", .model = model},
+        {.kind = ITEM_ASSISTANT_MESSAGE, .text = "hi"},
+    };
+    struct context context = {.items = items, .n_items = 3};
+    provider->stream(provider, &context, model, log_error, log, NULL, NULL);
+}
+
+/* The catalog names the member per model; reasoning_roundtrip pins one for every model instead,
+ * including an "off" the hint must not resurrect and an "auto" that asks for the hint back. */
+static void test_interleaved_reasoning_replay(void)
+{
+    write_catalog_fixture();
+    catalog_shutdown(); /* drop lookups memoized against an earlier fixture */
+    struct wire_server server = {
+        .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+        .n_requests = 5,
+    };
+    pthread_t thread;
+    int port = start_server(&server, &thread);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+
+    char base_url[64];
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
+    struct http_provider_preset preset = {
+        .display_name = "zen",
+        .default_base_url = base_url,
+        .config_prefix = "providers.zen",
+        .catalog_id = "zen-test",
+    };
+    struct error_log log = {0};
+
+    struct provider *provider = http_provider_new_preset(&preset);
+    EXPECT(provider != NULL);
+    if (provider) {
+        stream_one_reasoned_turn(provider, "think-hint", &log);
+        stream_one_reasoned_turn(provider, "plain", &log);
+        provider->destroy(provider);
+    }
+
+    EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_roundtrip\": \"reasoning\"}}}") ==
+           0);
+    provider = http_provider_new_preset(&preset);
+    EXPECT(provider != NULL);
+    if (provider) {
+        stream_one_reasoned_turn(provider, "think-hint", &log);
+        provider->destroy(provider);
+    }
+
+    EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_roundtrip\": \"off\"}}}") == 0);
+    provider = http_provider_new_preset(&preset);
+    EXPECT(provider != NULL);
+    if (provider) {
+        stream_one_reasoned_turn(provider, "think-hint", &log);
+        provider->destroy(provider);
+    }
+
+    EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_roundtrip\": \"auto\"}}}") == 0);
+    provider = http_provider_new_preset(&preset);
+    EXPECT(provider != NULL);
+    if (provider) {
+        stream_one_reasoned_turn(provider, "think-hint", &log);
+        provider->destroy(provider);
+    }
+
+    pthread_join(thread, NULL);
+    close(server.listener_fd);
+    EXPECT(atomic_load(&server.served) == 5);
+
+    EXPECT(strstr(server.requests[0], "\"reasoning_content\":\"thought\"") != NULL);
+    EXPECT(strstr(server.requests[1], "thought") == NULL);
+    EXPECT(strstr(server.requests[2], "\"reasoning\":\"thought\"") != NULL);
+    EXPECT(strstr(server.requests[3], "thought") == NULL);
+    /* "auto" names the default resolution, not a member called "auto". */
+    EXPECT(strstr(server.requests[4], "\"reasoning_content\":\"thought\"") != NULL);
+    EXPECT(strstr(server.requests[4], "\"auto\"") == NULL);
+
+    EXPECT(config_load(NULL) == 0);
+}
+
 /* A catalog hint naming an unimplemented protocol fails cleanly before any request. */
 static void test_unsupported_protocol_reported(void)
 {
@@ -369,6 +456,7 @@ int main(void)
     test_messages_efforts_follow_thinking_mode();
     test_api_override_stays_in_family();
     test_model_wire_routing();
+    test_interleaved_reasoning_replay();
     test_unsupported_protocol_reported();
     T_REPORT();
 }

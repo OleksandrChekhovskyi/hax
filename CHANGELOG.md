@@ -64,6 +64,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- Models that need to see their own earlier reasoning (Kimi K3, GLM, DeepSeek and MiniMax on the
+  OpenCode providers) no longer stop reasoning after the first turn of a conversation.
+- Summarized and encrypted reasoning from OpenAI, Gemini, Kimi and MiniMax models on OpenRouter
+  survives across turns instead of being dropped after the turn that produced it.
 - Tool calls from backends that deliver the arguments only with the completed call instead of
   streaming them (Grok via OpenCode Go) no longer run with empty arguments and derail the
   conversation.
