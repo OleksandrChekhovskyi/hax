@@ -230,7 +230,7 @@ provider-dependent.
 | --- | --- | --- | --- |
 | `markdown` | `HAX_MARKDOWN` | on | Render Markdown on terminal output; piped output remains raw. |
 | `show_reasoning` | `HAX_SHOW_REASONING` | off | Display reasoning emitted by the provider; does not enable reasoning. |
-| `sort_models` | `HAX_SORT_MODELS` | `auto` | Alphabetize model picker (`on`), keep server order (`off`), or use provider default. |
+| `sort_models` | `HAX_SORT_MODELS` | `auto` | Sort model picker newest-first (`on`), keep server order (`off`), or use provider default (sorted unless the provider opts out). |
 | `context_limit` | `HAX_CONTEXT_LIMIT` | auto | Override the model context-window size used for display and compaction. |
 | `display_width` | `HAX_DISPLAY_WIDTH` | `auto` | `auto`, `terminal`, or an exact width of at least 20 columns. |
 | `notify` | `HAX_NOTIFY` | `auto` | Completion notification: `auto`, `bel`, `osc9`, or `off`. |

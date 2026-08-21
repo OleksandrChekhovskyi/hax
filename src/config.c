@@ -58,7 +58,7 @@ static const struct config_setting REGISTRY[] = {
      .description = "Show reasoning/CoT deltas live (default off)",
      .choices = CONFIG_CHOICES_BOOL, .editable = 1},
     {.key = "sort_models", .env_var = "HAX_SORT_MODELS", .default_value = "auto",
-     .description = "Sort the /model picker alphabetically; auto uses the provider's own default",
+     .description = "Sort the /model picker newest-first; auto uses the provider's own default",
      .choices = CONFIG_CHOICES_TRISTATE, .editable = 1},
     {.key = "context_limit", .env_var = "HAX_CONTEXT_LIMIT",
      .description = "Manual context-window size for the % display; overrides auto-detect",

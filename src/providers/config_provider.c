@@ -364,7 +364,7 @@ static struct provider *apply_base_config(const char *name, struct provider *p)
     /* `name` is the factory's id, which the registry keeps alive for the process. */
     p->id = name;
     char *key = xasprintf("providers.%s.sort_models", name);
-    p->sort_models = config_bool_or(key, 0);
+    p->keep_model_order = !config_bool_or(key, 1);
     free(key);
     return p;
 }

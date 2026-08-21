@@ -408,7 +408,6 @@ struct provider *openrouter_provider_new(const char *id)
         provider->id = id;
         provider->probe_model = openrouter_probe_model;
         provider->query_usage = openrouter_query_usage;
-        provider->sort_models = 1;
         model_meta_refresh(provider, config_str("model"));
     }
     return provider;

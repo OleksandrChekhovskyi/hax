@@ -268,7 +268,7 @@ Common fields:
 | `model_apis` | Model-id globs mapped to `api` dialects; the first match sets that model's protocol. |
 | `api_key_env` | Name of the environment variable holding the key; recommended. |
 | `api_key` | Literal key, or `$VAR` to read an environment variable. |
-| `sort_models` | Alphabetize this provider's model picker. |
+| `sort_models` | Sort this provider's model picker newest-first (default); `off` keeps server order. |
 | `catalog_id` | Provider id in models.dev for cost/context metadata; empty disables lookup. |
 | `extra_body` | Raw JSON members merged into every request body ([below](#request-passthrough)). |
 | `extra_headers` | HTTP headers sent on every request ([below](#request-passthrough)). |

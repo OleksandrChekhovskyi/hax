@@ -231,7 +231,7 @@ static const char CONFIG_JSON[] =
     "    \"respprov\": {\"api\": \"Responses\", \"base_url\": \"http://127.0.0.1:9006/v1\"},"
     "    \"claudish\": {\"api\": \"anthropic-messages\","
     "                  \"base_url\": \"http://127.0.0.1:18080/v1\","
-    "                  \"sort_models\": \"on\","
+    "                  \"sort_models\": \"off\","
     "                  \"catalog_id\": \"anthropic\"},"
     "    \"nocat\": {\"base_url\": \"http://127.0.0.1:9003/v1\", \"catalog_id\": \"\"},"
     "    \"ollama\": {\"base_url\": \"http://gpu:1234/v1/\","
@@ -368,7 +368,7 @@ int main(void)
         const char *const *efforts = NULL;
         EXPECT_STR_EQ(myllm->name, "My LLM");
         EXPECT(myllm->list_efforts && myllm->list_efforts(myllm, &efforts) > 0);
-        EXPECT(myllm->sort_models == 0); /* sort_models unset → catalog order */
+        EXPECT(myllm->keep_model_order == 0); /* sort_models unset → sorted picker */
         /* catalog_id defaults to the provider's own name. */
         EXPECT_STR_EQ(myllm->catalog_id, "myllm");
         myllm->destroy(myllm);
@@ -404,7 +404,7 @@ int main(void)
         const char *const *efforts = NULL;
         EXPECT_STR_EQ(anthropic->name, "claudish");
         EXPECT_STR_EQ(anthropic->catalog_id, "anthropic");
-        EXPECT(anthropic->sort_models == 1);
+        EXPECT(anthropic->keep_model_order == 1); /* sort_models off → server order */
         /* The unconfigured budget default upgrades to adaptive per request when an effort is
          * chosen, so the ladder stays selectable; an explicit budget pin hides it. */
         EXPECT(anthropic->list_efforts && anthropic->list_efforts(anthropic, &efforts) == 5);

@@ -28,6 +28,7 @@ test_sources = [
     'test_file_mention.c',
     'test_history.c',
     'test_model_meta.c',
+    'test_model_sort.c',
     'test_harness.c',
     'test_oneshot.c',
     'test_paste_image.c',

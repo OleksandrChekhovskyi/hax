@@ -322,8 +322,9 @@ struct provider {
     const char *default_effort; /* NULL omits reasoning effort */
     /* The active model was detected from transient server state and must not be persisted. */
     int model_discovered;
-    /* Default model-picker ordering; user configuration may override it. */
-    int sort_models;
+    /* Keep the picker in server order instead of the default version-aware sort; user
+     * configuration may override either way. */
+    int keep_model_order;
     /* models.dev provider key used for metadata fallback. NULL opts out. A dynamically resolved key
      * must be owned by the provider because configuration storage may be replaced at runtime. */
     const char *catalog_id;

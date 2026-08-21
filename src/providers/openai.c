@@ -28,10 +28,8 @@ struct provider *openai_provider_new(const char *id)
         .n_efforts = OPENAI_EFFORT_LADDER_N,
     };
     struct provider *provider = http_provider_new_preset(&preset);
-    if (provider) {
+    if (provider)
         provider->id = id;
-        provider->sort_models = 1;
-    }
     return provider;
 }
 

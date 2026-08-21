@@ -39,6 +39,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- The `/model` picker sorts every provider's list by default with a version-aware order: model
+  families group alphabetically, newer versions come first (`gpt-5.6` before `gpt-5`, whether
+  versions are dotted or dashed), and a base model precedes its dated snapshots and named
+  variants. Previously only some providers sorted, and purely alphabetically. `sort_models off`
+  (global or per provider) restores server order.
 - **Breaking:** every provider now reads settings only from its own `providers.<id>` config block,
   so a key or quirk configured for one endpoint can no longer leak into another. Per-provider
   config keys and some environment variables moved or changed scope in the process; if you

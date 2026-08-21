@@ -96,6 +96,7 @@ sources = files(
     'src/history.c',
     'src/login.c',
     'src/model_meta.c',
+    'src/model_sort.c',
     'src/oneshot.c',
     'src/paste_image.c',
     'src/provider.c',

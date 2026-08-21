@@ -14,6 +14,7 @@
 #include "config.h"
 #include "effort.h"
 #include "model_meta.h"
+#include "model_sort.h"
 #include "provider.h"
 #include "util.h"
 #include "providers/registry.h"
@@ -167,7 +168,7 @@ static int compare_model_info(const void *left, const void *right)
 {
     const struct model_info *left_model = left;
     const struct model_info *right_model = right;
-    return strcmp(left_model->id, right_model->id);
+    return model_id_order(left_model->id, right_model->id);
 }
 
 /* ---------- /model picker gutter ---------- */
@@ -294,7 +295,7 @@ static struct model_pick_result pick_model_from_list(struct provider *provider,
                                                      struct model_info *models, size_t model_count,
                                                      const char *current_model)
 {
-    if (config_bool_or("sort_models", provider->sort_models))
+    if (config_bool_or("sort_models", !provider->keep_model_order))
         qsort(models, model_count, sizeof(*models), compare_model_info);
 
     /* Batch catalog lookup avoids loading the snapshot once per model. */
