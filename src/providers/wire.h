@@ -5,10 +5,10 @@
 #include <jansson.h>
 
 #include "provider.h"
+#include "providers/anthropic_body.h"
 #include "providers/anthropic_events.h"
-#include "providers/anthropic_messages.h"
-#include "providers/openai_events.h"
-#include "providers/openai_messages.h"
+#include "providers/chat_body.h"
+#include "providers/chat_events.h"
 #include "providers/responses_events.h"
 
 /* A wire dialect: the request path a protocol serves under a provider's base URL, the request
@@ -18,9 +18,9 @@
 
 /* Parser state for one streaming response; the selected wire defines the active member. */
 union wire_events {
-    struct openai_events chat;
+    struct chat_events chat;
     struct responses_events responses;
-    struct anthropic_events messages;
+    struct anthropic_events anthropic;
 };
 
 /* Per-stream translator knobs. Wires without a matching field ignore them. */
@@ -33,17 +33,17 @@ struct wire_events_opts {
 /* Per-request body options. Wires read only the fields their dialect defines. */
 struct wire_body_opts {
     const json_t *extra_body; /* user passthrough, merged over the finished body */
-    /* chat + messages: send explicit cache markers with this ttl */
+    /* chat + anthropic: send explicit cache markers with this ttl */
     int cache_markers;
     const char *cache_ttl;
     /* chat + responses: prompt_cache_key; NULL omits it */
     const char *session_cache_key;
     /* chat */
     const char *reasoning_field; /* replay reasoning under this member; NULL disables */
-    enum openai_reasoning_format reasoning_format;
+    enum chat_reasoning_format reasoning_format;
     int emit_progress; /* request llama.cpp prompt_progress */
     int request_cost;  /* request OpenRouter usage cost */
-    /* messages */
+    /* anthropic */
     int max_tokens;
     enum anthropic_thinking_mode thinking_mode;
     int thinking_budget;       /* tokens; out-of-range values fall back to max_tokens - 1 */

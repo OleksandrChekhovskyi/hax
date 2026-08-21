@@ -12,9 +12,9 @@
 #include "model_meta.h"
 #include "provider.h"
 #include "util.h"
-#include "providers/anthropic_messages.h"
+#include "providers/anthropic_body.h"
+#include "providers/chat_body.h"
 #include "providers/config_provider.h"
-#include "providers/openai_messages.h"
 #include "providers/stream_retry.h"
 #include "providers/wire.h"
 #include "transport/api_error.h"
@@ -48,11 +48,11 @@ struct http_provider {
     int send_cache_key;
     int emit_progress;
     int request_cost;
-    enum openai_cache_mode cache_mode;
+    enum chat_cache_mode cache_mode;
     char *cache_ttl;
     char *reasoning_field;
     int reasoning_field_pinned; /* configured explicitly; no catalog hint may override it */
-    enum openai_reasoning_format reasoning_format;
+    enum chat_reasoning_format reasoning_format;
     enum anthropic_thinking_mode default_thinking_mode;
     int allow_empty_signature;
     int cache_default; /* Messages cache_control default; chat uses cache_mode */
@@ -142,7 +142,7 @@ static char **build_headers(const struct http_provider *provider, const struct w
 struct http_stream {
     const struct http_provider *provider;
     const struct wire *wire; /* resolved for this request's model */
-    struct openai_cache_plan cache;
+    struct chat_cache_plan cache;
     union wire_events events;
 };
 
@@ -273,7 +273,7 @@ static int http_provider_stream(struct provider *base, const struct context *con
         model_meta_wait_ms(base, MODEL_META_PROBE_WAIT_MS);
         struct catalog_entry rates;
         model_meta_rates(base, model, &rates);
-        stream.cache = openai_plan_cache(&rates, provider->cache_mode, provider->cache_ttl);
+        stream.cache = chat_plan_cache(&rates, provider->cache_mode, provider->cache_ttl);
         opts.cache_markers = stream.cache.send_breakpoints;
         opts.session_cache_key = provider->send_cache_key ? provider->session_id : NULL;
         opts.reasoning_field = resolve_model_reasoning_field(provider, model);
@@ -354,15 +354,15 @@ static const struct wire *resolve_wire(const struct http_provider_preset *preset
     return wire;
 }
 
-static enum openai_cache_mode resolve_cache_mode(const char *prefix, int automatic)
+static enum chat_cache_mode resolve_cache_mode(const char *prefix, int automatic)
 {
     /* Different fallbacks distinguish a parsed boolean from auto, unset, or invalid input. */
     int with_false_fallback = config_scoped_bool_or(prefix, "cache", 0);
     int with_true_fallback = config_scoped_bool_or(prefix, "cache", 1);
 
     if (with_false_fallback == with_true_fallback)
-        return with_true_fallback ? OPENAI_CACHE_ON : OPENAI_CACHE_OFF;
-    return automatic ? OPENAI_CACHE_AUTO : OPENAI_CACHE_OFF;
+        return with_true_fallback ? CHAT_CACHE_ON : CHAT_CACHE_OFF;
+    return automatic ? CHAT_CACHE_AUTO : CHAT_CACHE_OFF;
 }
 
 /* `*pinned` reports an explicit setting, including an "off" that must survive a catalog hint.
@@ -607,7 +607,7 @@ struct provider *http_provider_new_preset(const struct http_provider_preset *pre
     provider->cache_ttl = xstrdup(provider_cache_ttl(preset->config_prefix));
     provider->reasoning_field = resolve_configured_reasoning_field(
         preset->config_prefix, preset->reasoning_replay_field, &provider->reasoning_field_pinned);
-    provider->reasoning_format = openai_reasoning_format_parse(
+    provider->reasoning_format = chat_reasoning_format_parse(
         config_scoped_str(preset->config_prefix, "reasoning_format"), preset->reasoning_format);
     provider->default_thinking_mode = preset->default_thinking_mode;
     provider->allow_empty_signature = preset->allow_empty_signature;

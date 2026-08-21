@@ -15,9 +15,10 @@
 #include "model_meta.h"
 #include "provider.h"
 #include "util.h"
+#include "providers/chat_body.h"
 #include "providers/config_provider.h"
 #include "providers/http_provider.h"
-#include "providers/openai_messages.h"
+#include "providers/openai_common.h"
 #include "providers/wire.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
@@ -395,7 +396,7 @@ struct provider *openrouter_provider_new(const char *id)
         /* OpenRouter requires explicit cache markers for routed Anthropic models. */
         .cache_auto_default = 1,
         .request_cost = 1,
-        .reasoning_format = OPENAI_REASONING_NESTED,
+        .reasoning_format = CHAT_REASONING_NESTED,
         .extra_headers = headers,
         .efforts = OPENAI_EFFORT_LADDER,
         .n_efforts = OPENAI_EFFORT_LADDER_N,

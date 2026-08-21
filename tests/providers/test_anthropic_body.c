@@ -5,7 +5,7 @@
 
 #include "harness.h"
 #include "provider.h"
-#include "providers/anthropic_messages.h"
+#include "providers/anthropic_body.h"
 #include "providers/wire.h"
 
 static json_t *message_at(json_t *messages, size_t i)

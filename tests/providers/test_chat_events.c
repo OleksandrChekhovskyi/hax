@@ -6,7 +6,7 @@
 
 #include "harness.h"
 #include "provider.h"
-#include "providers/openai_events.h"
+#include "providers/chat_events.h"
 
 #define MAX_CAPTURED_EVENTS 16
 
@@ -117,28 +117,28 @@ static void reset_capture(struct capture_state *capture)
 /* NOLINTBEGIN(bugprone-macro-parentheses): the arguments name declared variables */
 #define EVENTS_FIXTURE(capture, parser)                                                            \
     struct capture_state capture = {0};                                                            \
-    struct openai_events parser;                                                                   \
-    openai_events_init(&parser, capture_event, &capture)
+    struct chat_events parser;                                                                     \
+    chat_events_init(&parser, capture_event, &capture)
 
 #define EVENTS_FIXTURE_FREE(capture, parser)                                                       \
     do {                                                                                           \
-        openai_events_free(&parser);                                                               \
+        chat_events_free(&parser);                                                                 \
         reset_capture(&capture);                                                                   \
     } while (0)
 /* NOLINTEND(bugprone-macro-parentheses) */
 
-static void feed_content(struct openai_events *parser, const char *text)
+static void feed_content(struct chat_events *parser, const char *text)
 {
     char data[512];
     snprintf(data, sizeof(data), "{\"choices\":[{\"delta\":{\"content\":\"%s\"}}]}", text);
-    openai_events_feed(parser, data);
+    chat_events_feed(parser, data);
 }
 
-static void feed_finish(struct openai_events *parser, const char *reason)
+static void feed_finish(struct chat_events *parser, const char *reason)
 {
     char data[512];
     snprintf(data, sizeof(data), "{\"choices\":[{\"delta\":{},\"finish_reason\":\"%s\"}]}", reason);
-    openai_events_feed(parser, data);
+    chat_events_feed(parser, data);
 }
 
 static void test_text_delta(void)
@@ -154,9 +154,9 @@ static void test_text_delta(void)
 static void test_empty_content_ignored(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":\"\"}}]}");
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":null}}]}");
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":\"\"}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":null}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}");
     EXPECT(capture.n_events == 0);
     EVENTS_FIXTURE_FREE(capture, parser);
 }
@@ -164,7 +164,7 @@ static void test_empty_content_ignored(void)
 static void test_reasoning_delta_openrouter(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":\"Hmm\"}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":\"Hmm\"}}]}");
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_REASONING_DELTA);
     EXPECT_STR_EQ(capture.events[0].text, "Hmm");
@@ -174,7 +174,7 @@ static void test_reasoning_delta_openrouter(void)
 static void test_reasoning_delta_llamacpp(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_content\":\"Let\"}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_content\":\"Let\"}}]}");
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_REASONING_DELTA);
     EXPECT_STR_EQ(capture.events[0].text, "Let");
@@ -184,9 +184,9 @@ static void test_reasoning_delta_llamacpp(void)
 static void test_reasoning_then_content(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":\"Think\"}}]}");
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":\"ing\"}}]}");
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":\"Think\"}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":\"ing\"}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}");
     EXPECT(capture.n_events == 3);
     EXPECT(capture.events[0].kind == EV_REASONING_DELTA);
     EXPECT(capture.events[1].kind == EV_REASONING_DELTA);
@@ -198,9 +198,9 @@ static void test_reasoning_then_content(void)
 static void test_empty_reasoning_ignored(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":\"\"}}]}");
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":null}}]}");
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_content\":\"\"}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":\"\"}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":null}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_content\":\"\"}}]}");
     EXPECT(capture.n_events == 0);
     EVENTS_FIXTURE_FREE(capture, parser);
 }
@@ -210,12 +210,12 @@ static void test_empty_reasoning_ignored(void)
 static void test_reasoning_details_sealed_at_content(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
-                                "[{\"type\":\"reasoning.encrypted\",\"data\":\"aa\"}]}}]}");
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":\"Think\","
-                                "\"reasoning_details\":"
-                                "[{\"type\":\"reasoning.text\",\"text\":\"Think\"}]}}]}");
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
+                              "[{\"type\":\"reasoning.encrypted\",\"data\":\"aa\"}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning\":\"Think\","
+                              "\"reasoning_details\":"
+                              "[{\"type\":\"reasoning.text\",\"text\":\"Think\"}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}");
 
     EXPECT(capture.n_events == 3);
     EXPECT(capture.events[0].kind == EV_REASONING_DELTA);
@@ -229,10 +229,10 @@ static void test_reasoning_details_sealed_at_content(void)
 static void test_reasoning_details_sealed_at_finish(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
-                                "[{\"type\":\"reasoning.encrypted\",\"data\":\"aa\"}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
+                              "[{\"type\":\"reasoning.encrypted\",\"data\":\"aa\"}]}}]}");
     feed_finish(&parser, "stop");
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "[DONE]");
 
     EXPECT(capture.n_events == 2);
     EXPECT(capture.events[0].kind == EV_REASONING_ITEM);
@@ -246,14 +246,14 @@ static void test_reasoning_details_sealed_at_finish(void)
 static void test_reasoning_text_fragments_rejoined(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
-                                "[{\"type\":\"reasoning.text\",\"text\":\"Think\","
-                                "\"format\":\"anthropic-claude-v1\",\"index\":0}]}}]}");
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
-                                "[{\"type\":\"reasoning.text\",\"text\":\"ing\",\"index\":0}]}}]}");
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
-                                "[{\"type\":\"reasoning.text\",\"signature\":\"sig\","
-                                "\"index\":0}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
+                              "[{\"type\":\"reasoning.text\",\"text\":\"Think\","
+                              "\"format\":\"anthropic-claude-v1\",\"index\":0}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
+                              "[{\"type\":\"reasoning.text\",\"text\":\"ing\",\"index\":0}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
+                              "[{\"type\":\"reasoning.text\",\"signature\":\"sig\","
+                              "\"index\":0}]}}]}");
     feed_finish(&parser, "stop");
 
     EXPECT(capture.n_events == 1);
@@ -273,11 +273,11 @@ static void test_reasoning_text_fragments_rejoined(void)
 static void test_reasoning_details_join_text_only(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
-                                "[{\"type\":\"reasoning.text\",\"text\":\"one\"},"
-                                "{\"type\":\"reasoning.encrypted\",\"data\":\"aa\"},"
-                                "{\"type\":\"reasoning.encrypted\",\"data\":\"bb\"},"
-                                "{\"type\":\"reasoning.text\",\"text\":\"two\"}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
+                              "[{\"type\":\"reasoning.text\",\"text\":\"one\"},"
+                              "{\"type\":\"reasoning.encrypted\",\"data\":\"aa\"},"
+                              "{\"type\":\"reasoning.encrypted\",\"data\":\"bb\"},"
+                              "{\"type\":\"reasoning.text\",\"text\":\"two\"}]}}]}");
     feed_finish(&parser, "stop");
 
     EXPECT(capture.n_events == 1);
@@ -295,11 +295,11 @@ static void test_reasoning_details_join_text_only(void)
 static void test_reasoning_text_keeps_first_signature(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
-                                "[{\"type\":\"reasoning.text\",\"text\":\"a\","
-                                "\"signature\":\"first\"},"
-                                "{\"type\":\"reasoning.text\",\"text\":\"b\","
-                                "\"signature\":\"second\"}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":"
+                              "[{\"type\":\"reasoning.text\",\"text\":\"a\","
+                              "\"signature\":\"first\"},"
+                              "{\"type\":\"reasoning.text\",\"text\":\"b\","
+                              "\"signature\":\"second\"}]}}]}");
     feed_finish(&parser, "stop");
 
     json_t *details = json_loads(capture.events[0].text, 0, NULL);
@@ -315,10 +315,10 @@ static void test_reasoning_text_keeps_first_signature(void)
 static void test_reasoning_details_absent_or_malformed(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":[]}}]}");
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":\"nope\"}}]}");
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":[\"nope\"]}}]}");
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":[]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":\"nope\"}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"reasoning_details\":[\"nope\"]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}");
 
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_TEXT_DELTA);
@@ -329,16 +329,16 @@ static void test_tool_call_lifecycle(void)
 {
     EVENTS_FIXTURE(capture, parser);
 
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                                "\"index\":0,\"id\":\"call_1\",\"type\":\"function\","
-                                "\"function\":{\"name\":\"bash\",\"arguments\":\"\"}}]}}]}");
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                                "\"index\":0,\"function\":{\"arguments\":\"{\\\"cmd\\\":\"}}]}}]}");
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                                "\"index\":0,\"function\":{\"arguments\":\"\\\"ls\\\"}\"}}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                              "\"index\":0,\"id\":\"call_1\",\"type\":\"function\","
+                              "\"function\":{\"name\":\"bash\",\"arguments\":\"\"}}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                              "\"index\":0,\"function\":{\"arguments\":\"{\\\"cmd\\\":\"}}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                              "\"index\":0,\"function\":{\"arguments\":\"\\\"ls\\\"}\"}}]}}]}");
     feed_finish(&parser, "tool_calls");
 
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "[DONE]");
 
     EXPECT(capture.n_events == 5);
     EXPECT(capture.events[0].kind == EV_TOOL_CALL_START);
@@ -358,11 +358,11 @@ static void test_tool_call_lifecycle(void)
 static void test_tool_call_id_and_name_across_deltas(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                                "\"index\":0,\"id\":\"c1\"}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                              "\"index\":0,\"id\":\"c1\"}]}}]}");
     EXPECT(capture.n_events == 0);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                                "\"index\":0,\"function\":{\"name\":\"bash\"}}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                              "\"index\":0,\"function\":{\"name\":\"bash\"}}]}}]}");
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_TOOL_CALL_START);
     EXPECT_STR_EQ(capture.events[0].id, "c1");
@@ -373,13 +373,13 @@ static void test_tool_call_id_and_name_across_deltas(void)
 static void test_tool_call_args_before_metadata_buffered(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                                "\"index\":0,\"id\":\"c1\","
-                                "\"function\":{\"arguments\":\"{\\\"cmd\\\":\"}}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                              "\"index\":0,\"id\":\"c1\","
+                              "\"function\":{\"arguments\":\"{\\\"cmd\\\":\"}}]}}]}");
     EXPECT(capture.n_events == 0);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                                "\"index\":0,\"function\":{\"name\":\"bash\","
-                                "\"arguments\":\"\\\"ls\\\"}\"}}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                              "\"index\":0,\"function\":{\"name\":\"bash\","
+                              "\"arguments\":\"\\\"ls\\\"}\"}}]}}]}");
     EXPECT(capture.n_events == 3);
     EXPECT(capture.events[0].kind == EV_TOOL_CALL_START);
     EXPECT_STR_EQ(capture.events[0].id, "c1");
@@ -394,12 +394,12 @@ static void test_tool_call_args_before_metadata_buffered(void)
 static void test_parallel_tool_calls(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":["
-                                "{\"index\":0,\"id\":\"a\",\"function\":{\"name\":\"x\"}},"
-                                "{\"index\":1,\"id\":\"b\",\"function\":{\"name\":\"y\"}}"
-                                "]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":["
+                              "{\"index\":0,\"id\":\"a\",\"function\":{\"name\":\"x\"}},"
+                              "{\"index\":1,\"id\":\"b\",\"function\":{\"name\":\"y\"}}"
+                              "]}}]}");
     feed_finish(&parser, "tool_calls");
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "[DONE]");
 
     EXPECT(capture.n_events == 5);
     EXPECT(capture.events[0].kind == EV_TOOL_CALL_START);
@@ -418,11 +418,11 @@ static void test_parallel_tool_calls(void)
 static void test_tool_call_without_id_synthesizes(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                                "\"index\":0,\"function\":{\"name\":\"bash\","
-                                "\"arguments\":\"{}\"}}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                              "\"index\":0,\"function\":{\"name\":\"bash\","
+                              "\"arguments\":\"{}\"}}]}}]}");
     feed_finish(&parser, "tool_calls");
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "[DONE]");
 
     EXPECT(capture.n_events == 4);
     EXPECT(capture.events[0].kind == EV_TOOL_CALL_START);
@@ -440,8 +440,8 @@ static void test_tool_call_without_id_synthesizes(void)
 static void test_tool_call_delta_without_index_defaults_to_zero(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                                "\"id\":\"x\",\"function\":{\"name\":\"y\"}}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                              "\"id\":\"x\",\"function\":{\"name\":\"y\"}}]}}]}");
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_TOOL_CALL_START);
     EXPECT_STR_EQ(capture.events[0].id, "x");
@@ -455,7 +455,7 @@ static void test_finish_reason_stop_defers_done_until_sentinel(void)
     feed_finish(&parser, "stop");
     EXPECT(capture.n_events == 0);
     EXPECT(parser.terminal_emitted == 0);
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "[DONE]");
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_DONE);
     EXPECT_STR_EQ(capture.events[0].message, "stop");
@@ -467,7 +467,7 @@ static void test_finish_reason_tool_calls_emits_done(void)
 {
     EVENTS_FIXTURE(capture, parser);
     feed_finish(&parser, "tool_calls");
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "[DONE]");
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_DONE);
     EXPECT_STR_EQ(capture.events[0].message, "tool_calls");
@@ -480,9 +480,9 @@ static void test_finish_reason_length_emits_error(void)
     feed_finish(&parser, "length");
     EXPECT(capture.n_events == 0);
     EXPECT(parser.terminal_emitted == 0);
-    openai_events_feed(&parser, "{\"choices\":[],\"usage\":{"
-                                "\"prompt_tokens\":1234,\"completion_tokens\":56}}");
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "{\"choices\":[],\"usage\":{"
+                              "\"prompt_tokens\":1234,\"completion_tokens\":56}}");
+    chat_events_feed(&parser, "[DONE]");
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT(strstr(capture.events[0].message, "length") != NULL);
@@ -497,7 +497,7 @@ static void test_finish_reason_length_error_on_close_without_sentinel(void)
     EVENTS_FIXTURE(capture, parser);
     feed_finish(&parser, "length");
     EXPECT(capture.n_events == 0);
-    openai_events_finalize(&parser);
+    chat_events_finalize(&parser);
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT(strstr(capture.events[0].message, "length") != NULL);
@@ -509,7 +509,7 @@ static void test_finish_reason_content_filter_emits_error(void)
     EVENTS_FIXTURE(capture, parser);
     feed_finish(&parser, "content_filter");
     EXPECT(capture.n_events == 0);
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "[DONE]");
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT(strstr(capture.events[0].message, "content_filter") != NULL);
@@ -519,7 +519,7 @@ static void test_finish_reason_content_filter_emits_error(void)
 static void test_done_sentinel(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "[DONE]");
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_DONE);
     EXPECT(parser.terminal_emitted == 1);
@@ -531,8 +531,8 @@ static void test_double_termination_gated(void)
     EVENTS_FIXTURE(capture, parser);
     feed_finish(&parser, "stop");
     feed_finish(&parser, "stop");
-    openai_events_feed(&parser, "[DONE]");
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "[DONE]");
     EXPECT(capture.n_events == 1);
     EVENTS_FIXTURE_FREE(capture, parser);
 }
@@ -540,9 +540,9 @@ static void test_double_termination_gated(void)
 static void test_events_after_terminal_ignored(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "[DONE]");
     feed_content(&parser, "late");
-    openai_events_feed(&parser, "{\"error\":{\"message\":\"late\"}}");
+    chat_events_feed(&parser, "{\"error\":{\"message\":\"late\"}}");
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_DONE);
     EVENTS_FIXTURE_FREE(capture, parser);
@@ -551,7 +551,7 @@ static void test_events_after_terminal_ignored(void)
 static void test_error_object_emits_error(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"error\":{\"message\":\"Rate limit exceeded\",\"code\":429}}");
+    chat_events_feed(&parser, "{\"error\":{\"message\":\"Rate limit exceeded\",\"code\":429}}");
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT_STR_EQ(capture.events[0].message, "Rate limit exceeded");
@@ -562,9 +562,9 @@ static void test_error_object_emits_error(void)
 static void test_unparseable_json_ignored(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "not json");
-    openai_events_feed(&parser, "");
-    openai_events_feed(&parser, NULL);
+    chat_events_feed(&parser, "not json");
+    chat_events_feed(&parser, "");
+    chat_events_feed(&parser, NULL);
     EXPECT(capture.n_events == 0);
     EXPECT(parser.terminal_emitted == 0);
     EVENTS_FIXTURE_FREE(capture, parser);
@@ -573,8 +573,8 @@ static void test_unparseable_json_ignored(void)
 static void test_missing_choices_ignored(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"foo\":\"bar\"}");
-    openai_events_feed(&parser, "{\"choices\":[]}");
+    chat_events_feed(&parser, "{\"foo\":\"bar\"}");
+    chat_events_feed(&parser, "{\"choices\":[]}");
     EXPECT(capture.n_events == 0);
     EVENTS_FIXTURE_FREE(capture, parser);
 }
@@ -583,7 +583,7 @@ static void test_finalize_without_terminal_emits_error(void)
 {
     EVENTS_FIXTURE(capture, parser);
     feed_content(&parser, "hi");
-    openai_events_finalize(&parser);
+    chat_events_finalize(&parser);
     EXPECT(capture.n_events == 2);
     EXPECT(capture.events[0].kind == EV_TEXT_DELTA);
     EXPECT(capture.events[1].kind == EV_ERROR);
@@ -596,8 +596,8 @@ static void test_finalize_after_done_no_extra_event(void)
 {
     EVENTS_FIXTURE(capture, parser);
     feed_finish(&parser, "stop");
-    openai_events_feed(&parser, "[DONE]");
-    openai_events_finalize(&parser);
+    chat_events_feed(&parser, "[DONE]");
+    chat_events_finalize(&parser);
     EXPECT(capture.n_events == 1);
     EVENTS_FIXTURE_FREE(capture, parser);
 }
@@ -606,7 +606,7 @@ static void test_finalize_after_finish_without_sentinel_emits_done(void)
 {
     EVENTS_FIXTURE(capture, parser);
     feed_finish(&parser, "stop");
-    openai_events_finalize(&parser);
+    chat_events_finalize(&parser);
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_DONE);
     EXPECT_STR_EQ(capture.events[0].message, "stop");
@@ -617,7 +617,7 @@ static void test_usage_default_unknown(void)
 {
     EVENTS_FIXTURE(capture, parser);
     feed_finish(&parser, "stop");
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "[DONE]");
     EXPECT(capture.events[0].kind == EV_DONE);
     EXPECT(capture.events[0].usage.input_tokens == -1);
     EXPECT(capture.events[0].usage.output_tokens == -1);
@@ -630,10 +630,10 @@ static void test_usage_captured_from_trailing_chunk(void)
 {
     EVENTS_FIXTURE(capture, parser);
     feed_finish(&parser, "stop");
-    openai_events_feed(&parser, "{\"choices\":[],\"usage\":{"
-                                "\"prompt_tokens\":1234,\"completion_tokens\":56,"
-                                "\"prompt_tokens_details\":{\"cached_tokens\":1000}}}");
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "{\"choices\":[],\"usage\":{"
+                              "\"prompt_tokens\":1234,\"completion_tokens\":56,"
+                              "\"prompt_tokens_details\":{\"cached_tokens\":1000}}}");
+    chat_events_feed(&parser, "[DONE]");
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_DONE);
     EXPECT(capture.events[0].usage.input_tokens == 1234);
@@ -646,9 +646,9 @@ static void test_usage_without_cached_details(void)
 {
     EVENTS_FIXTURE(capture, parser);
     feed_finish(&parser, "stop");
-    openai_events_feed(&parser, "{\"choices\":[],\"usage\":{"
-                                "\"prompt_tokens\":10,\"completion_tokens\":20}}");
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "{\"choices\":[],\"usage\":{"
+                              "\"prompt_tokens\":10,\"completion_tokens\":20}}");
+    chat_events_feed(&parser, "[DONE]");
     EXPECT(capture.events[0].usage.input_tokens == 10);
     EXPECT(capture.events[0].usage.output_tokens == 20);
     EXPECT(capture.events[0].usage.cached_tokens == -1);
@@ -660,10 +660,10 @@ static void test_usage_cost_captured(void)
 {
     EVENTS_FIXTURE(capture, parser);
     feed_finish(&parser, "stop");
-    openai_events_feed(&parser, "{\"choices\":[],\"usage\":{"
-                                "\"prompt_tokens\":10,\"completion_tokens\":20,"
-                                "\"cost\":0.0123}}");
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "{\"choices\":[],\"usage\":{"
+                              "\"prompt_tokens\":10,\"completion_tokens\":20,"
+                              "\"cost\":0.0123}}");
+    chat_events_feed(&parser, "[DONE]");
     EXPECT(capture.events[0].kind == EV_DONE);
     EXPECT(capture.events[0].usage.cost > 0.0122 && capture.events[0].usage.cost < 0.0124);
     EVENTS_FIXTURE_FREE(capture, parser);
@@ -673,11 +673,11 @@ static void test_usage_cost_captured(void)
 static void test_response_identity_captured_from_chunks(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"id\":\"gen-abc\",\"model\":\"deepseek/deepseek-v4\","
-                                "\"provider\":\"Wafer\",\"choices\":[{\"delta\":"
-                                "{\"content\":\"hi\"}}]}");
+    chat_events_feed(&parser, "{\"id\":\"gen-abc\",\"model\":\"deepseek/deepseek-v4\","
+                              "\"provider\":\"Wafer\",\"choices\":[{\"delta\":"
+                              "{\"content\":\"hi\"}}]}");
     feed_finish(&parser, "stop");
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "[DONE]");
     EXPECT(capture.events[1].kind == EV_DONE);
     EXPECT_STR_EQ(capture.events[1].response_id, "gen-abc");
     EXPECT_STR_EQ(capture.events[1].served_model, "deepseek/deepseek-v4");
@@ -689,7 +689,7 @@ static void test_response_identity_absent_without_fields(void)
 {
     EVENTS_FIXTURE(capture, parser);
     feed_finish(&parser, "stop");
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "[DONE]");
     EXPECT(capture.events[0].kind == EV_DONE);
     EXPECT(!capture.events[0].response_id);
     EXPECT(!capture.events[0].served_model);
@@ -701,10 +701,10 @@ static void test_response_identity_absent_without_fields(void)
 static void test_response_identity_survives_finalize_without_terminal(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"id\":\"gen-cut\",\"model\":\"openai/gpt-4o-mini\","
-                                "\"provider\":\"OpenAI\",\"choices\":[{\"delta\":"
-                                "{\"content\":\"par\"}}]}");
-    openai_events_finalize(&parser);
+    chat_events_feed(&parser, "{\"id\":\"gen-cut\",\"model\":\"openai/gpt-4o-mini\","
+                              "\"provider\":\"OpenAI\",\"choices\":[{\"delta\":"
+                              "{\"content\":\"par\"}}]}");
+    chat_events_finalize(&parser);
     EXPECT(capture.events[1].kind == EV_ERROR);
     EXPECT_STR_EQ(capture.events[1].response_id, "gen-cut");
     EXPECT_STR_EQ(capture.events[1].served_model, "openai/gpt-4o-mini");
@@ -716,10 +716,10 @@ static void test_response_identity_survives_finalize_without_terminal(void)
 static void test_response_identity_survives_truncation_error(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"id\":\"gen-xyz\",\"model\":\"openai/gpt-4o-mini\","
-                                "\"provider\":\"OpenAI\",\"choices\":[{\"delta\":{},"
-                                "\"finish_reason\":\"length\"}]}");
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "{\"id\":\"gen-xyz\",\"model\":\"openai/gpt-4o-mini\","
+                              "\"provider\":\"OpenAI\",\"choices\":[{\"delta\":{},"
+                              "\"finish_reason\":\"length\"}]}");
+    chat_events_feed(&parser, "[DONE]");
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT_STR_EQ(capture.events[0].response_id, "gen-xyz");
     EXPECT_STR_EQ(capture.events[0].route, "OpenAI");
@@ -730,12 +730,12 @@ static void test_usage_cache_write_captured(void)
 {
     EVENTS_FIXTURE(capture, parser);
     feed_finish(&parser, "stop");
-    openai_events_feed(&parser, "{\"choices\":[],\"usage\":{"
-                                "\"prompt_tokens\":2810,\"completion_tokens\":4,"
-                                "\"cost\":0.01059525,"
-                                "\"prompt_tokens_details\":{\"cached_tokens\":0,"
-                                "\"cache_write_tokens\":2807}}}");
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "{\"choices\":[],\"usage\":{"
+                              "\"prompt_tokens\":2810,\"completion_tokens\":4,"
+                              "\"cost\":0.01059525,"
+                              "\"prompt_tokens_details\":{\"cached_tokens\":0,"
+                              "\"cache_write_tokens\":2807}}}");
+    chat_events_feed(&parser, "[DONE]");
     EXPECT(capture.events[0].usage.input_tokens == 2810);
     EXPECT(capture.events[0].usage.cached_tokens == 0);
     EXPECT(capture.events[0].usage.cache_write_tokens == 2807);
@@ -749,10 +749,10 @@ static void test_usage_cache_write_1h_attributed_from_request(void)
     EVENTS_FIXTURE(capture, parser);
     parser.cache_write_1h = 1;
     feed_finish(&parser, "stop");
-    openai_events_feed(&parser, "{\"choices\":[],\"usage\":{"
-                                "\"prompt_tokens\":2816,\"completion_tokens\":4,"
-                                "\"prompt_tokens_details\":{\"cache_write_tokens\":2813}}}");
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "{\"choices\":[],\"usage\":{"
+                              "\"prompt_tokens\":2816,\"completion_tokens\":4,"
+                              "\"prompt_tokens_details\":{\"cache_write_tokens\":2813}}}");
+    chat_events_feed(&parser, "[DONE]");
     EXPECT(capture.events[0].usage.cache_write_tokens == 2813);
     EXPECT(capture.events[0].usage.cache_write_1h_tokens == 2813);
     EVENTS_FIXTURE_FREE(capture, parser);
@@ -763,10 +763,10 @@ static void test_usage_cache_write_1h_needs_a_write(void)
     EVENTS_FIXTURE(capture, parser);
     parser.cache_write_1h = 1;
     feed_finish(&parser, "stop");
-    openai_events_feed(&parser, "{\"choices\":[],\"usage\":{"
-                                "\"prompt_tokens\":2810,\"completion_tokens\":4,"
-                                "\"prompt_tokens_details\":{\"cached_tokens\":2807}}}");
-    openai_events_feed(&parser, "[DONE]");
+    chat_events_feed(&parser, "{\"choices\":[],\"usage\":{"
+                              "\"prompt_tokens\":2810,\"completion_tokens\":4,"
+                              "\"prompt_tokens_details\":{\"cached_tokens\":2807}}}");
+    chat_events_feed(&parser, "[DONE]");
     EXPECT(capture.events[0].usage.cached_tokens == 2807);
     EXPECT(capture.events[0].usage.cache_write_tokens == -1);
     EXPECT(capture.events[0].usage.cache_write_1h_tokens == -1);
@@ -776,9 +776,9 @@ static void test_usage_cache_write_1h_needs_a_write(void)
 static void test_progress_ignored_when_flag_off(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":{}}],"
-                                "\"prompt_progress\":{\"total\":100,\"cache\":0,"
-                                "\"processed\":50,\"time_ms\":42}}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{}}],"
+                              "\"prompt_progress\":{\"total\":100,\"cache\":0,"
+                              "\"processed\":50,\"time_ms\":42}}");
     EXPECT(capture.n_events == 0);
     EVENTS_FIXTURE_FREE(capture, parser);
 }
@@ -787,10 +787,10 @@ static void test_progress_emitted_when_flag_on(void)
 {
     EVENTS_FIXTURE(capture, parser);
     parser.emit_progress = 1;
-    openai_events_feed(&parser, "{\"choices\":[{\"delta\":"
-                                "{\"role\":\"assistant\",\"content\":null}}],"
-                                "\"prompt_progress\":{\"total\":1000,\"cache\":200,"
-                                "\"processed\":600,\"time_ms\":123}}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":"
+                              "{\"role\":\"assistant\",\"content\":null}}],"
+                              "\"prompt_progress\":{\"total\":1000,\"cache\":200,"
+                              "\"processed\":600,\"time_ms\":123}}");
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_PROGRESS);
     EXPECT(capture.events[0].progress_total == 1000);
@@ -803,8 +803,8 @@ static void test_progress_missing_fields_default_zero(void)
 {
     EVENTS_FIXTURE(capture, parser);
     parser.emit_progress = 1;
-    openai_events_feed(&parser, "{\"choices\":[],"
-                                "\"prompt_progress\":{\"processed\":50}}");
+    chat_events_feed(&parser, "{\"choices\":[],"
+                              "\"prompt_progress\":{\"processed\":50}}");
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_PROGRESS);
     EXPECT(capture.events[0].progress_processed == 50);

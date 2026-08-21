@@ -7,7 +7,7 @@
 #include "util.h"
 #include "providers/config_provider.h"
 #include "providers/http_provider.h"
-#include "providers/openai_messages.h"
+#include "providers/openai_common.h"
 #include "providers/wire.h"
 
 struct provider *openai_provider_new(const char *id)

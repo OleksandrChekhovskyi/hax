@@ -6,13 +6,13 @@
 #include <strings.h>
 
 #include "provider.h"
+#include "providers/anthropic_body.h"
 #include "providers/anthropic_events.h"
-#include "providers/anthropic_messages.h"
+#include "providers/chat_body.h"
+#include "providers/chat_events.h"
 #include "providers/config_provider.h"
-#include "providers/openai_events.h"
-#include "providers/openai_messages.h"
+#include "providers/responses_body.h"
 #include "providers/responses_events.h"
-#include "providers/responses_messages.h"
 
 char *wire_build_body(const struct wire *wire, const struct context *context,
                       const char *provider_id, const char *model, const struct wire_body_opts *opts)
@@ -27,7 +27,7 @@ char *wire_build_body(const struct wire *wire, const struct context *context,
 static void chat_init(union wire_events *events, stream_cb callback, void *callback_user,
                       const struct wire_events_opts *opts)
 {
-    openai_events_init(&events->chat, callback, callback_user);
+    chat_events_init(&events->chat, callback, callback_user);
     if (opts) {
         events->chat.emit_progress = opts->emit_progress;
         events->chat.length_hint = opts->length_hint;
@@ -38,17 +38,17 @@ static void chat_init(union wire_events *events, stream_cb callback, void *callb
 static void chat_feed(union wire_events *events, const char *event_name, const char *data)
 {
     (void)event_name;
-    openai_events_feed(&events->chat, data);
+    chat_events_feed(&events->chat, data);
 }
 
 static void chat_finalize(union wire_events *events)
 {
-    openai_events_finalize(&events->chat);
+    chat_events_finalize(&events->chat);
 }
 
 static void chat_free(union wire_events *events)
 {
-    openai_events_free(&events->chat);
+    chat_events_free(&events->chat);
 }
 
 static int chat_complete(const union wire_events *events)
@@ -65,7 +65,7 @@ static const struct stream_usage *chat_usage(const union wire_events *events)
 const struct wire WIRE_OPENAI_CHAT = {
     .id = "openai-completions",
     .path = "/chat/completions",
-    .build_body = openai_build_body,
+    .build_body = chat_build_body,
     .events_init = chat_init,
     .events_feed = chat_feed,
     .events_finalize = chat_finalize,
@@ -113,48 +113,48 @@ const struct wire WIRE_OPENAI_RESPONSES = {
     .events_complete = responses_complete,
 };
 
-static void messages_init(union wire_events *events, stream_cb callback, void *callback_user,
-                          const struct wire_events_opts *opts)
+static void anthropic_init(union wire_events *events, stream_cb callback, void *callback_user,
+                           const struct wire_events_opts *opts)
 {
     (void)opts;
-    anthropic_events_init(&events->messages, callback, callback_user);
+    anthropic_events_init(&events->anthropic, callback, callback_user);
 }
 
-static void messages_feed(union wire_events *events, const char *event_name, const char *data)
+static void anthropic_feed(union wire_events *events, const char *event_name, const char *data)
 {
-    anthropic_events_feed(&events->messages, event_name, data);
+    anthropic_events_feed(&events->anthropic, event_name, data);
 }
 
-static void messages_finalize(union wire_events *events)
+static void anthropic_finalize(union wire_events *events)
 {
-    anthropic_events_finalize(&events->messages);
+    anthropic_events_finalize(&events->anthropic);
 }
 
-static void messages_free(union wire_events *events)
+static void anthropic_free(union wire_events *events)
 {
-    anthropic_events_free(&events->messages);
+    anthropic_events_free(&events->anthropic);
 }
 
-static int messages_complete(const union wire_events *events)
+static int anthropic_complete(const union wire_events *events)
 {
-    return events->messages.terminal_emitted;
+    return events->anthropic.terminal_emitted;
 }
 
-static const struct stream_usage *messages_usage(const union wire_events *events)
+static const struct stream_usage *anthropic_usage(const union wire_events *events)
 {
-    return &events->messages.usage;
+    return &events->anthropic.usage;
 }
 
 const struct wire WIRE_ANTHROPIC_MESSAGES = {
     .id = "anthropic-messages",
     .path = "/messages",
     .build_body = anthropic_build_body,
-    .events_init = messages_init,
-    .events_feed = messages_feed,
-    .events_finalize = messages_finalize,
-    .events_free = messages_free,
-    .events_complete = messages_complete,
-    .events_usage = messages_usage,
+    .events_init = anthropic_init,
+    .events_feed = anthropic_feed,
+    .events_finalize = anthropic_finalize,
+    .events_free = anthropic_free,
+    .events_complete = anthropic_complete,
+    .events_usage = anthropic_usage,
 };
 
 const struct wire *wire_find(const char *api)

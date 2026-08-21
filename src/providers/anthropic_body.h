@@ -1,10 +1,12 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_PROVIDERS_ANTHROPIC_MESSAGES_H
-#define HAX_PROVIDERS_ANTHROPIC_MESSAGES_H
+#ifndef HAX_PROVIDERS_ANTHROPIC_BODY_H
+#define HAX_PROVIDERS_ANTHROPIC_BODY_H
 
 #include <jansson.h>
 
 #include "provider.h"
+
+/* Request-body construction for the Anthropic Messages dialect. */
 
 /* Adaptive thinking uses output_config.effort; budget thinking uses a token count. */
 enum anthropic_thinking_mode {
@@ -33,4 +35,4 @@ struct wire_body_opts; /* wire.h */
 json_t *anthropic_build_body(const struct context *context, const char *provider_id,
                              const char *model, const struct wire_body_opts *opts);
 
-#endif /* HAX_PROVIDERS_ANTHROPIC_MESSAGES_H */
+#endif /* HAX_PROVIDERS_ANTHROPIC_BODY_H */

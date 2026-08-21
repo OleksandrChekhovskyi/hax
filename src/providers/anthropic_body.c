@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "providers/anthropic_messages.h"
+#include "providers/anthropic_body.h"
 
 #include <jansson.h>
 #include <stdlib.h>

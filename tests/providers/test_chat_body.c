@@ -5,7 +5,7 @@
 #include "catalog.h"
 #include "harness.h"
 #include "provider.h"
-#include "providers/openai_messages.h"
+#include "providers/chat_body.h"
 #include "providers/wire.h"
 
 /* Find the first message with the given role in a built messages array. */
@@ -37,8 +37,7 @@ static void test_reasoning_attached_when_field_set(void)
          .tool_name = "read",
          .tool_arguments_json = "{\"path\":\"x\"}"},
     };
-    json_t *msgs =
-        openai_build_messages(NULL, items, 3, "reasoning_content", "llama.cpp", "m1", -1);
+    json_t *msgs = chat_build_messages(NULL, items, 3, "reasoning_content", "llama.cpp", "m1", -1);
 
     EXPECT(json_array_size(msgs) == 1);
     json_t *a = find_role(msgs, "assistant");
@@ -61,7 +60,7 @@ static void test_reasoning_omitted_when_field_null(void)
          .model = "m1"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "Hello."},
     };
-    json_t *msgs = openai_build_messages(NULL, items, 2, NULL, "llama.cpp", "m1", -1);
+    json_t *msgs = chat_build_messages(NULL, items, 2, NULL, "llama.cpp", "m1", -1);
 
     json_t *a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
@@ -78,7 +77,7 @@ static void test_reasoning_custom_field_name(void)
         {.kind = ITEM_REASONING, .reasoning_text = "cot", .provider = "llama.cpp", .model = "m1"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "Hi."},
     };
-    json_t *msgs = openai_build_messages(NULL, items, 2, "reasoning", "llama.cpp", "m1", -1);
+    json_t *msgs = chat_build_messages(NULL, items, 2, "reasoning", "llama.cpp", "m1", -1);
 
     json_t *a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
@@ -96,7 +95,7 @@ static void test_codex_reasoning_json_ignored(void)
         {.kind = ITEM_REASONING, .reasoning_json = "{\"id\":\"r1\"}"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "Done."},
     };
-    json_t *msgs = openai_build_messages(NULL, items, 2, "reasoning_content", "codex", "o3", -1);
+    json_t *msgs = chat_build_messages(NULL, items, 2, "reasoning_content", "codex", "o3", -1);
 
     json_t *a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
@@ -127,7 +126,7 @@ static void test_reasoning_details_round_trip(void)
          .model = "m1"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "Done."},
     };
-    json_t *msgs = openai_build_messages(NULL, items, 4, NULL, "openrouter", "m1", -1);
+    json_t *msgs = chat_build_messages(NULL, items, 4, NULL, "openrouter", "m1", -1);
 
     EXPECT(json_array_size(msgs) == 1);
     json_t *a = find_role(msgs, "assistant");
@@ -153,14 +152,14 @@ static void test_reasoning_details_supersede_text(void)
          .model = "m1"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "Done."},
     };
-    json_t *msgs = openai_build_messages(NULL, items, 2, "reasoning", "openrouter", "m1", -1);
+    json_t *msgs = chat_build_messages(NULL, items, 2, "reasoning", "openrouter", "m1", -1);
     json_t *a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
     EXPECT(json_array_size(json_object_get(a, "reasoning_details")) == 1);
     EXPECT(json_object_get(a, "reasoning") == NULL);
     json_decref(msgs);
 
-    msgs = openai_build_messages(NULL, items, 2, "reasoning", "openrouter", "m2", -1);
+    msgs = chat_build_messages(NULL, items, 2, "reasoning", "openrouter", "m2", -1);
     a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
     EXPECT(json_object_get(a, "reasoning_details") == NULL);
@@ -178,8 +177,7 @@ static void test_reasoning_only_turn(void)
          .provider = "llama.cpp",
          .model = "m1"},
     };
-    json_t *msgs =
-        openai_build_messages(NULL, items, 1, "reasoning_content", "llama.cpp", "m1", -1);
+    json_t *msgs = chat_build_messages(NULL, items, 1, "reasoning_content", "llama.cpp", "m1", -1);
 
     json_t *a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
@@ -200,7 +198,7 @@ static void test_reasoning_only_field_null_emits_nothing(void)
         {.kind = ITEM_USER_MESSAGE, .text = "hi"},
         {.kind = ITEM_REASONING, .reasoning_text = "leaked cot, replay off"},
     };
-    json_t *msgs = openai_build_messages(NULL, items, 2, NULL, "llama.cpp", "m1", -1);
+    json_t *msgs = chat_build_messages(NULL, items, 2, NULL, "llama.cpp", "m1", -1);
 
     EXPECT(json_array_size(msgs) == 1); /* just the user message */
     EXPECT(find_role(msgs, "assistant") == NULL);
@@ -221,7 +219,7 @@ static void test_reasoning_skipped_on_provenance_mismatch(void)
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "From codex."},
     };
     json_t *msgs =
-        openai_build_messages(NULL, provider_switch, 2, "reasoning_content", "llama.cpp", "m1", -1);
+        chat_build_messages(NULL, provider_switch, 2, "reasoning_content", "llama.cpp", "m1", -1);
     json_t *a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
     EXPECT(json_object_get(a, "reasoning_content") == NULL); /* stale CoT dropped */
@@ -237,7 +235,7 @@ static void test_reasoning_skipped_on_provenance_mismatch(void)
          .model = "m0"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "Older model."},
     };
-    msgs = openai_build_messages(NULL, model_switch, 2, "reasoning_content", "llama.cpp", "m1", -1);
+    msgs = chat_build_messages(NULL, model_switch, 2, "reasoning_content", "llama.cpp", "m1", -1);
     a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
     EXPECT(json_object_get(a, "reasoning_content") == NULL);
@@ -250,7 +248,7 @@ static void test_reasoning_skipped_on_provenance_mismatch(void)
         {.kind = ITEM_REASONING, .reasoning_text = "no stamp"},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "Unstamped."},
     };
-    msgs = openai_build_messages(NULL, unstamped, 2, "reasoning_content", "llama.cpp", "m1", -1);
+    msgs = chat_build_messages(NULL, unstamped, 2, "reasoning_content", "llama.cpp", "m1", -1);
     a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
     EXPECT(json_object_get(a, "reasoning_content") == NULL);
@@ -275,7 +273,7 @@ static void test_tool_result_image_followup(void)
          .n_images = 1},
         {.kind = ITEM_TOOL_RESULT, .call_id = "c2", .output = "file1"},
     };
-    json_t *msgs = openai_build_messages(NULL, items, 2, NULL, "llama.cpp", "m1", 1);
+    json_t *msgs = chat_build_messages(NULL, items, 2, NULL, "llama.cpp", "m1", 1);
 
     /* tool, tool, then the image user message — nothing interleaved. */
     EXPECT(json_array_size(msgs) == 3);
@@ -297,7 +295,7 @@ static void test_tool_result_image_followup(void)
 
     /* image_input == 0: no follow-up message; the placeholder is appended
      * to the tool message's string content instead. */
-    msgs = openai_build_messages(NULL, items, 2, NULL, "llama.cpp", "m1", 0);
+    msgs = chat_build_messages(NULL, items, 2, NULL, "llama.cpp", "m1", 0);
     EXPECT(json_array_size(msgs) == 2);
     const char *content = json_string_value(json_object_get(json_array_get(msgs, 0), "content"));
     EXPECT(content && strstr(content, "Read image x.png") != NULL);
@@ -333,8 +331,8 @@ static void test_cache_breakpoints_system_and_tail(void)
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"reply"},
         {.kind = ITEM_USER_MESSAGE, .text = (char *)"second"},
     };
-    json_t *msgs = openai_build_messages("sys", items, 3, NULL, "openrouter", "m", -1);
-    openai_apply_cache_breakpoints(msgs, "1h");
+    json_t *msgs = chat_build_messages("sys", items, 3, NULL, "openrouter", "m", -1);
+    chat_apply_cache_breakpoints(msgs, "1h");
 
     /* Exactly two: the stable prefix and the rolling tail. */
     EXPECT(count_breakpoints(msgs) == 2);
@@ -362,8 +360,8 @@ static void test_cache_breakpoint_lands_on_tool_result(void)
         {.kind = ITEM_TOOL_CALL, .call_id = (char *)"c1", .tool_name = (char *)"bash"},
         {.kind = ITEM_TOOL_RESULT, .call_id = (char *)"c1", .output = (char *)"output"},
     };
-    json_t *msgs = openai_build_messages(NULL, items, 3, NULL, "openrouter", "m", -1);
-    openai_apply_cache_breakpoints(msgs, "5m");
+    json_t *msgs = chat_build_messages(NULL, items, 3, NULL, "openrouter", "m", -1);
+    chat_apply_cache_breakpoints(msgs, "5m");
     json_t *last = json_array_get(msgs, json_array_size(msgs) - 1);
     EXPECT_STR_EQ(json_string_value(json_object_get(last, "role")), "tool");
     EXPECT(breakpoint_of(last) != NULL);
@@ -383,10 +381,10 @@ static void test_cache_breakpoint_skips_contentless_assistant(void)
         {.kind = ITEM_USER_MESSAGE, .text = (char *)"go"},
         {.kind = ITEM_TOOL_CALL, .call_id = (char *)"c1", .tool_name = (char *)"bash"},
     };
-    json_t *msgs = openai_build_messages(NULL, items, 2, NULL, "openrouter", "m", -1);
+    json_t *msgs = chat_build_messages(NULL, items, 2, NULL, "openrouter", "m", -1);
     json_t *last = json_array_get(msgs, json_array_size(msgs) - 1);
     EXPECT(json_is_null(json_object_get(last, "content")));
-    openai_apply_cache_breakpoints(msgs, "1h");
+    chat_apply_cache_breakpoints(msgs, "1h");
     EXPECT(breakpoint_of(last) == NULL);
     EXPECT(breakpoint_of(json_array_get(msgs, 0)) != NULL); /* the user message */
     EXPECT(count_breakpoints(msgs) == 1);
@@ -397,37 +395,35 @@ static void test_cache_breakpoint_system_only(void)
 {
     /* Nothing but a system prompt: it takes the breakpoint once, and the
      * tail pass must not double-mark it. */
-    json_t *msgs = openai_build_messages("sys", NULL, 0, NULL, "openrouter", "m", -1);
-    openai_apply_cache_breakpoints(msgs, "1h");
+    json_t *msgs = chat_build_messages("sys", NULL, 0, NULL, "openrouter", "m", -1);
+    chat_apply_cache_breakpoints(msgs, "1h");
     EXPECT(json_array_size(msgs) == 1);
     EXPECT(count_breakpoints(msgs) == 1);
     json_decref(msgs);
 }
 
-static json_t *encode_reasoning(enum openai_reasoning_format format, const char *effort)
+static json_t *encode_reasoning(enum chat_reasoning_format format, const char *effort)
 {
     json_t *body = json_object();
-    openai_apply_reasoning(body, format, effort);
+    chat_apply_reasoning(body, format, effort);
     return body;
 }
 
 static void test_reasoning_format_parse(void)
 {
-    EXPECT(openai_reasoning_format_parse("flat", OPENAI_REASONING_NESTED) == OPENAI_REASONING_FLAT);
-    EXPECT(openai_reasoning_format_parse("NESTED", OPENAI_REASONING_FLAT) ==
-           OPENAI_REASONING_NESTED);
-    EXPECT(openai_reasoning_format_parse(NULL, OPENAI_REASONING_NESTED) == OPENAI_REASONING_NESTED);
-    EXPECT(openai_reasoning_format_parse("", OPENAI_REASONING_FLAT) == OPENAI_REASONING_FLAT);
-    EXPECT(openai_reasoning_format_parse("invalid", OPENAI_REASONING_NESTED) ==
-           OPENAI_REASONING_NESTED);
+    EXPECT(chat_reasoning_format_parse("flat", CHAT_REASONING_NESTED) == CHAT_REASONING_FLAT);
+    EXPECT(chat_reasoning_format_parse("NESTED", CHAT_REASONING_FLAT) == CHAT_REASONING_NESTED);
+    EXPECT(chat_reasoning_format_parse(NULL, CHAT_REASONING_NESTED) == CHAT_REASONING_NESTED);
+    EXPECT(chat_reasoning_format_parse("", CHAT_REASONING_FLAT) == CHAT_REASONING_FLAT);
+    EXPECT(chat_reasoning_format_parse("invalid", CHAT_REASONING_NESTED) == CHAT_REASONING_NESTED);
 }
 
 static void test_reasoning_effort_unset_omitted(void)
 {
     const char *empties[] = {NULL, ""};
     for (size_t i = 0; i < 2; i++) {
-        json_t *flat = encode_reasoning(OPENAI_REASONING_FLAT, empties[i]);
-        json_t *nested = encode_reasoning(OPENAI_REASONING_NESTED, empties[i]);
+        json_t *flat = encode_reasoning(CHAT_REASONING_FLAT, empties[i]);
+        json_t *nested = encode_reasoning(CHAT_REASONING_NESTED, empties[i]);
         EXPECT(json_object_size(flat) == 0);
         EXPECT(json_object_size(nested) == 0);
         json_decref(flat);
@@ -437,19 +433,19 @@ static void test_reasoning_effort_unset_omitted(void)
 
 static void test_reasoning_effort_flat(void)
 {
-    json_t *body = encode_reasoning(OPENAI_REASONING_FLAT, "high");
+    json_t *body = encode_reasoning(CHAT_REASONING_FLAT, "high");
     EXPECT(json_object_get(body, "reasoning") == NULL);
     EXPECT_STR_EQ(json_string_value(json_object_get(body, "reasoning_effort")), "high");
     json_decref(body);
 
-    body = encode_reasoning(OPENAI_REASONING_FLAT, "none");
+    body = encode_reasoning(CHAT_REASONING_FLAT, "none");
     EXPECT_STR_EQ(json_string_value(json_object_get(body, "reasoning_effort")), "none");
     json_decref(body);
 }
 
 static void test_reasoning_effort_nested(void)
 {
-    json_t *body = encode_reasoning(OPENAI_REASONING_NESTED, "high");
+    json_t *body = encode_reasoning(CHAT_REASONING_NESTED, "high");
     EXPECT(json_object_get(body, "reasoning_effort") == NULL);
     json_t *reasoning = json_object_get(body, "reasoning");
     EXPECT(json_is_object(reasoning));
@@ -460,7 +456,7 @@ static void test_reasoning_effort_nested(void)
 
 static void test_reasoning_effort_nested_none_disables(void)
 {
-    json_t *body = encode_reasoning(OPENAI_REASONING_NESTED, "none");
+    json_t *body = encode_reasoning(CHAT_REASONING_NESTED, "none");
     json_t *reasoning = json_object_get(body, "reasoning");
     EXPECT(json_is_object(reasoning));
     EXPECT(json_is_false(json_object_get(reasoning, "enabled")));
@@ -485,12 +481,12 @@ static void test_build_body_composition(void)
         .cache_markers = 1,
         .cache_ttl = "1h",
         .session_cache_key = "sess-1",
-        .reasoning_format = OPENAI_REASONING_FLAT,
+        .reasoning_format = CHAT_REASONING_FLAT,
         .emit_progress = 1,
         .request_cost = 1,
     };
 
-    json_t *body = openai_build_body(&context, "prov", "model-1", &opts);
+    json_t *body = chat_build_body(&context, "prov", "model-1", &opts);
     EXPECT_STR_EQ(json_string_value(json_object_get(body, "model")), "model-1");
     EXPECT(json_object_get(body, "stream") == json_true());
     EXPECT(json_is_true(json_object_get(json_object_get(body, "stream_options"), "include_usage")));
@@ -524,15 +520,15 @@ static void test_cache_plan_follows_model_rates(void)
     rates.cost_cache_write = 3.75;
     rates.cost_cache_write_1h = 6;
 
-    struct openai_cache_plan plan = openai_plan_cache(&rates, OPENAI_CACHE_AUTO, "1h");
+    struct chat_cache_plan plan = chat_plan_cache(&rates, CHAT_CACHE_AUTO, "1h");
     EXPECT(plan.send_breakpoints == 1);
     EXPECT(plan.writes_bill_1h == 1);
 
-    plan = openai_plan_cache(&rates, OPENAI_CACHE_AUTO, "5m");
+    plan = chat_plan_cache(&rates, CHAT_CACHE_AUTO, "5m");
     EXPECT(plan.send_breakpoints == 1);
     EXPECT(plan.writes_bill_1h == 0);
 
-    plan = openai_plan_cache(&rates, OPENAI_CACHE_OFF, "1h");
+    plan = chat_plan_cache(&rates, CHAT_CACHE_OFF, "1h");
     EXPECT(plan.send_breakpoints == 0);
     EXPECT(plan.writes_bill_1h == 0);
 
@@ -542,7 +538,7 @@ static void test_cache_plan_follows_model_rates(void)
     rates.cost_output = 6;
     rates.cost_cache_write = 1.25;
 
-    plan = openai_plan_cache(&rates, OPENAI_CACHE_AUTO, "1h");
+    plan = chat_plan_cache(&rates, CHAT_CACHE_AUTO, "1h");
     EXPECT(plan.send_breakpoints == 1);
     EXPECT(plan.writes_bill_1h == 0);
 
@@ -553,17 +549,17 @@ static void test_cache_plan_follows_model_rates(void)
     rates.cost_cache_read = 0.2;
     rates.cost_cache_write = 0.375;
 
-    plan = openai_plan_cache(&rates, OPENAI_CACHE_AUTO, "1h");
+    plan = chat_plan_cache(&rates, CHAT_CACHE_AUTO, "1h");
     EXPECT(plan.send_breakpoints == 0);
     EXPECT(plan.writes_bill_1h == 0);
 
-    plan = openai_plan_cache(&rates, OPENAI_CACHE_ON, "1h");
+    plan = chat_plan_cache(&rates, CHAT_CACHE_ON, "1h");
     EXPECT(plan.send_breakpoints == 1);
     EXPECT(plan.writes_bill_1h == 0);
 
     /* Unknown rates use the more common replacement policy, so AUTO opts in. */
     catalog_entry_init(&rates);
-    plan = openai_plan_cache(&rates, OPENAI_CACHE_AUTO, "1h");
+    plan = chat_plan_cache(&rates, CHAT_CACHE_AUTO, "1h");
     EXPECT(plan.send_breakpoints == 1);
     EXPECT(plan.writes_bill_1h == 0);
 }
@@ -574,7 +570,7 @@ static void test_build_body_minimal_opts(void)
     struct context context = {.items = items, .n_items = 1, .image_input = 1};
     struct wire_body_opts opts = {0};
 
-    json_t *body = openai_build_body(&context, "prov", "model-1", &opts);
+    json_t *body = chat_build_body(&context, "prov", "model-1", &opts);
     EXPECT(json_object_get(body, "tools") == NULL);
     EXPECT(json_object_get(body, "prompt_cache_key") == NULL);
     EXPECT(json_object_get(body, "return_progress") == NULL);

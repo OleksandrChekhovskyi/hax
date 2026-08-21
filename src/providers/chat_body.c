@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "providers/openai_messages.h"
+#include "providers/chat_body.h"
 
 #include <jansson.h>
 #include <stdlib.h>
@@ -12,18 +12,13 @@
 #include "util.h"
 #include "providers/wire.h"
 
-const char *const OPENAI_EFFORT_LADDER[] = {"none", "minimal", "low", "medium",
-                                            "high", "xhigh",   "max"};
-const size_t OPENAI_EFFORT_LADDER_N =
-    sizeof(OPENAI_EFFORT_LADDER) / sizeof(OPENAI_EFFORT_LADDER[0]);
-
 /* AUTO sends explicit cache markers only when writes replace ordinary input processing. */
-struct openai_cache_plan openai_plan_cache(const struct catalog_entry *rates,
-                                           enum openai_cache_mode mode, const char *ttl)
+struct chat_cache_plan chat_plan_cache(const struct catalog_entry *rates, enum chat_cache_mode mode,
+                                       const char *ttl)
 {
-    struct openai_cache_plan plan = {0};
-    plan.send_breakpoints = mode == OPENAI_CACHE_ON || (mode == OPENAI_CACHE_AUTO &&
-                                                        catalog_cache_write_replaces_input(rates));
+    struct chat_cache_plan plan = {0};
+    plan.send_breakpoints = mode == CHAT_CACHE_ON ||
+                            (mode == CHAT_CACHE_AUTO && catalog_cache_write_replaces_input(rates));
     plan.writes_bill_1h = plan.send_breakpoints && ttl && strcasecmp(ttl, "1h") == 0 &&
                           rates->cost_cache_write_1h >= 0;
     return plan;
@@ -195,9 +190,9 @@ static size_t append_tool_results(json_t *messages, const struct item *items, si
     return index;
 }
 
-json_t *openai_build_messages(const char *system_prompt, const struct item *items, size_t n_items,
-                              const char *reasoning_field, const char *current_provider,
-                              const char *current_model, int image_input)
+json_t *chat_build_messages(const char *system_prompt, const struct item *items, size_t n_items,
+                            const char *reasoning_field, const char *current_provider,
+                            const char *current_model, int image_input)
 {
     json_t *messages = json_array();
     if (system_prompt && *system_prompt) {
@@ -265,7 +260,7 @@ static int attach_cache_control(json_t *message, const char *ttl)
     return 1;
 }
 
-void openai_apply_cache_breakpoints(json_t *messages, const char *ttl)
+void chat_apply_cache_breakpoints(json_t *messages, const char *ttl)
 {
     size_t n_messages = json_array_size(messages);
     if (n_messages == 0)
@@ -284,30 +279,30 @@ void openai_apply_cache_breakpoints(json_t *messages, const char *ttl)
     }
 }
 
-enum openai_reasoning_format openai_reasoning_format_parse(const char *value,
-                                                           enum openai_reasoning_format fallback)
+enum chat_reasoning_format chat_reasoning_format_parse(const char *value,
+                                                       enum chat_reasoning_format fallback)
 {
     if (!value || !*value)
         return fallback;
     if (strcasecmp(value, "flat") == 0)
-        return OPENAI_REASONING_FLAT;
+        return CHAT_REASONING_FLAT;
     if (strcasecmp(value, "nested") == 0)
-        return OPENAI_REASONING_NESTED;
+        return CHAT_REASONING_NESTED;
 
     hax_warn("unknown reasoning format %s (expected 'flat' or 'nested') — using default", value);
     return fallback;
 }
 
-void openai_apply_reasoning(json_t *body, enum openai_reasoning_format format, const char *effort)
+void chat_apply_reasoning(json_t *body, enum chat_reasoning_format format, const char *effort)
 {
     if (!effort || !*effort)
         return;
 
     switch (format) {
-    case OPENAI_REASONING_FLAT:
+    case CHAT_REASONING_FLAT:
         json_object_set_new(body, "reasoning_effort", json_string(effort));
         break;
-    case OPENAI_REASONING_NESTED: {
+    case CHAT_REASONING_NESTED: {
         int enabled = strcmp(effort, "none") != 0;
         json_t *reasoning = json_pack("{s:b}", "enabled", enabled);
         if (enabled)
@@ -330,14 +325,14 @@ static json_t *build_tools(const struct tool_def *tools, size_t n_tools)
     return tool_list;
 }
 
-json_t *openai_build_body(const struct context *context, const char *provider_id, const char *model,
-                          const struct wire_body_opts *opts)
+json_t *chat_build_body(const struct context *context, const char *provider_id, const char *model,
+                        const struct wire_body_opts *opts)
 {
     json_t *messages =
-        openai_build_messages(context->system_prompt, context->items, context->n_items,
-                              opts->reasoning_field, provider_id, model, context->image_input);
+        chat_build_messages(context->system_prompt, context->items, context->n_items,
+                            opts->reasoning_field, provider_id, model, context->image_input);
     if (opts->cache_markers)
-        openai_apply_cache_breakpoints(messages, opts->cache_ttl);
+        chat_apply_cache_breakpoints(messages, opts->cache_ttl);
 
     /* Usage is requested on every stream so terminal events can report token counts. */
     json_t *body = json_pack("{s:s, s:b, s:o, s:{s:b}}", "model", model, "stream", 1, "messages",
@@ -352,6 +347,6 @@ json_t *openai_build_body(const struct context *context, const char *provider_id
     if (opts->request_cost)
         json_object_set_new(body, "usage", json_pack("{s:b}", "include", 1));
 
-    openai_apply_reasoning(body, opts->reasoning_format, context->effort);
+    chat_apply_reasoning(body, opts->reasoning_format, context->effort);
     return body;
 }

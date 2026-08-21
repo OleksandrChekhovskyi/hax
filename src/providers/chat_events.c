@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "providers/openai_events.h"
+#include "providers/chat_events.h"
 
 #include <jansson.h>
 #include <stdlib.h>
@@ -8,7 +8,7 @@
 #include "provider.h"
 #include "util.h"
 
-void openai_events_init(struct openai_events *parser, stream_cb callback, void *callback_user)
+void chat_events_init(struct chat_events *parser, stream_cb callback, void *callback_user)
 {
     memset(parser, 0, sizeof(*parser));
     parser->callback = callback;
@@ -21,7 +21,7 @@ void openai_events_init(struct openai_events *parser, stream_cb callback, void *
     parser->usage.cost = -1;
 }
 
-void openai_events_free(struct openai_events *parser)
+void chat_events_free(struct chat_events *parser)
 {
     for (size_t i = 0; i < parser->n_tool_calls; i++) {
         free(parser->tool_calls[i].id);
@@ -57,14 +57,14 @@ static void capture_first_string(char **field, const json_t *root, const char *k
 
 /* `provider` is OpenRouter's name for the upstream endpoint it routed to; plain OpenAI-compatible
  * servers omit it. */
-static void capture_response(struct openai_events *parser, json_t *root)
+static void capture_response(struct chat_events *parser, json_t *root)
 {
     capture_first_string(&parser->response_id, root, "id");
     capture_first_string(&parser->served_model, root, "model");
     capture_first_string(&parser->route, root, "provider");
 }
 
-static struct stream_response response_of(const struct openai_events *parser)
+static struct stream_response response_of(const struct chat_events *parser)
 {
     return (struct stream_response){
         .id = parser->response_id,
@@ -73,7 +73,7 @@ static struct stream_response response_of(const struct openai_events *parser)
     };
 }
 
-static struct openai_tool_call *find_tool_call(struct openai_events *parser, int index)
+static struct chat_tool_call *find_tool_call(struct chat_events *parser, int index)
 {
     for (size_t i = 0; i < parser->n_tool_calls; i++) {
         if (parser->tool_calls[i].index == index)
@@ -82,9 +82,9 @@ static struct openai_tool_call *find_tool_call(struct openai_events *parser, int
     return NULL;
 }
 
-static struct openai_tool_call *get_tool_call(struct openai_events *parser, int index)
+static struct chat_tool_call *get_tool_call(struct chat_events *parser, int index)
 {
-    struct openai_tool_call *call = find_tool_call(parser, index);
+    struct chat_tool_call *call = find_tool_call(parser, index);
     if (call)
         return call;
 
@@ -100,12 +100,12 @@ static struct openai_tool_call *get_tool_call(struct openai_events *parser, int 
     return call;
 }
 
-static void emit_event(struct openai_events *parser, const struct stream_event *event)
+static void emit_event(struct chat_events *parser, const struct stream_event *event)
 {
     parser->callback(event, parser->callback_user);
 }
 
-static void start_tool_call(struct openai_events *parser, struct openai_tool_call *call)
+static void start_tool_call(struct chat_events *parser, struct chat_tool_call *call)
 {
     if (call->started || !call->name)
         return;
@@ -135,7 +135,7 @@ static void start_tool_call(struct openai_events *parser, struct openai_tool_cal
     }
 }
 
-static void handle_text_delta(struct openai_events *parser, const char *text)
+static void handle_text_delta(struct chat_events *parser, const char *text)
 {
     if (!text || !*text)
         return;
@@ -147,7 +147,7 @@ static void handle_text_delta(struct openai_events *parser, const char *text)
     emit_event(parser, &event);
 }
 
-static void handle_reasoning_delta(struct openai_events *parser, json_t *delta)
+static void handle_reasoning_delta(struct chat_events *parser, json_t *delta)
 {
     const char *text = json_string_value(json_object_get(delta, "reasoning"));
     if (!text)
@@ -202,7 +202,7 @@ static int join_reasoning_text(json_t *block, json_t *detail)
 
 /* Reasoning arrives as an ordered sequence of typed blocks that the backend requires back
  * unchanged and in order, so blocks are neither reordered nor dropped here. */
-static void collect_reasoning_details(struct openai_events *parser, json_t *delta)
+static void collect_reasoning_details(struct chat_events *parser, json_t *delta)
 {
     json_t *details = json_object_get(delta, "reasoning_details");
     if (!json_is_array(details))
@@ -226,7 +226,7 @@ static void collect_reasoning_details(struct openai_events *parser, json_t *delt
 
 /* Chat Completions marks no end of reasoning, so the collected sequence is sealed at the first
  * seam that follows it: content, a tool call, or the end of the stream. */
-static void flush_reasoning_details(struct openai_events *parser)
+static void flush_reasoning_details(struct chat_events *parser)
 {
     if (!parser->reasoning_details)
         return;
@@ -247,12 +247,12 @@ static void flush_reasoning_details(struct openai_events *parser)
     free(json);
 }
 
-static void handle_tool_call_delta(struct openai_events *parser, json_t *delta)
+static void handle_tool_call_delta(struct chat_events *parser, json_t *delta)
 {
     /* The specification requires index, but single-call compatible streams often omit it. */
     json_t *index_value = json_object_get(delta, "index");
     int index = json_is_integer(index_value) ? (int)json_integer_value(index_value) : 0;
-    struct openai_tool_call *call = get_tool_call(parser, index);
+    struct chat_tool_call *call = get_tool_call(parser, index);
 
     const char *id = json_string_value(json_object_get(delta, "id"));
     if (id && !call->id)
@@ -280,10 +280,10 @@ static void handle_tool_call_delta(struct openai_events *parser, json_t *delta)
     emit_event(parser, &event);
 }
 
-static void finish_tool_calls(struct openai_events *parser)
+static void finish_tool_calls(struct chat_events *parser)
 {
     for (size_t i = 0; i < parser->n_tool_calls; i++) {
-        struct openai_tool_call *call = &parser->tool_calls[i];
+        struct chat_tool_call *call = &parser->tool_calls[i];
         if (!call->started || call->finished)
             continue;
 
@@ -296,7 +296,7 @@ static void finish_tool_calls(struct openai_events *parser)
     }
 }
 
-static void capture_usage(struct openai_events *parser, json_t *root)
+static void capture_usage(struct chat_events *parser, json_t *root)
 {
     json_t *usage = json_object_get(root, "usage");
     if (!json_is_object(usage))
@@ -330,7 +330,7 @@ static void capture_usage(struct openai_events *parser, json_t *root)
         parser->usage.cost = json_number_value(value);
 }
 
-static void handle_progress(struct openai_events *parser, json_t *root)
+static void handle_progress(struct chat_events *parser, json_t *root)
 {
     if (!parser->emit_progress)
         return;
@@ -355,7 +355,7 @@ static void handle_progress(struct openai_events *parser, json_t *root)
     emit_event(parser, &event);
 }
 
-static void emit_terminal_event(struct openai_events *parser)
+static void emit_terminal_event(struct chat_events *parser)
 {
     struct stream_response response = response_of(parser);
     if (parser->finish_error) {
@@ -385,7 +385,7 @@ static void emit_terminal_event(struct openai_events *parser)
     emit_event(parser, &event);
 }
 
-static void handle_finish_reason(struct openai_events *parser, const char *reason)
+static void handle_finish_reason(struct chat_events *parser, const char *reason)
 {
     if (parser->terminal_emitted || parser->finish_received)
         return;
@@ -407,7 +407,7 @@ static void handle_finish_reason(struct openai_events *parser, const char *reaso
         parser->finish_error = xasprintf("response incomplete: %s", reason);
 }
 
-static void handle_done(struct openai_events *parser)
+static void handle_done(struct chat_events *parser)
 {
     if (parser->terminal_emitted)
         return;
@@ -418,7 +418,7 @@ static void handle_done(struct openai_events *parser)
     emit_terminal_event(parser);
 }
 
-static void handle_error(struct openai_events *parser, json_t *error)
+static void handle_error(struct chat_events *parser, json_t *error)
 {
     if (parser->terminal_emitted)
         return;
@@ -439,7 +439,7 @@ static void handle_error(struct openai_events *parser, json_t *error)
     emit_event(parser, &event);
 }
 
-static void handle_choice_delta(struct openai_events *parser, json_t *choice)
+static void handle_choice_delta(struct chat_events *parser, json_t *choice)
 {
     json_t *delta = json_object_get(choice, "delta");
     if (json_is_object(delta)) {
@@ -465,7 +465,7 @@ static void handle_choice_delta(struct openai_events *parser, json_t *choice)
         handle_finish_reason(parser, finish_reason);
 }
 
-void openai_events_feed(struct openai_events *parser, const char *data)
+void chat_events_feed(struct chat_events *parser, const char *data)
 {
     if (parser->terminal_emitted || !data || !*data)
         return;
@@ -497,7 +497,7 @@ void openai_events_feed(struct openai_events *parser, const char *data)
     json_decref(root);
 }
 
-void openai_events_finalize(struct openai_events *parser)
+void chat_events_finalize(struct chat_events *parser)
 {
     if (parser->terminal_emitted)
         return;

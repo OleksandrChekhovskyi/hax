@@ -12,9 +12,10 @@
 #include "trace.h"
 #include "util.h"
 #include "providers/anthropic.h"
-#include "providers/anthropic_messages.h"
+#include "providers/anthropic_body.h"
+#include "providers/chat_body.h"
 #include "providers/http_provider.h"
-#include "providers/openai_messages.h"
+#include "providers/openai_common.h"
 #include "providers/recipes.h"
 #include "providers/wire.h"
 
@@ -427,8 +428,7 @@ static struct provider *config_provider_new(const char *name)
         .send_cache_key_default = r->send_cache_key,
         /* The recipe supplies only the default; the preset overlays <prefix>.reasoning_format
          * like every other quirk field. */
-        .reasoning_format =
-            openai_reasoning_format_parse(r->reasoning_format, OPENAI_REASONING_FLAT),
+        .reasoning_format = chat_reasoning_format_parse(r->reasoning_format, CHAT_REASONING_FLAT),
         .efforts = with_efforts ? OPENAI_EFFORT_LADDER : NULL,
         .n_efforts = with_efforts ? OPENAI_EFFORT_LADDER_N : 0,
         .length_hint = r->length_hint,

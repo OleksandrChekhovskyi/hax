@@ -5,9 +5,9 @@
 
 #include "harness.h"
 #include "provider.h"
-#include "providers/anthropic_messages.h"
-#include "providers/openai_messages.h"
-#include "providers/responses_messages.h"
+#include "providers/anthropic_body.h"
+#include "providers/chat_body.h"
+#include "providers/responses_body.h"
 #include "providers/wire.h"
 
 struct capture {
@@ -141,7 +141,7 @@ static void test_events_usage_table(void)
  * table only pairs those builders with paths and parsers. */
 static void test_build_body_table(void)
 {
-    EXPECT(WIRE_OPENAI_CHAT.build_body == openai_build_body);
+    EXPECT(WIRE_OPENAI_CHAT.build_body == chat_build_body);
     EXPECT(WIRE_OPENAI_RESPONSES.build_body == responses_build_body);
     EXPECT(WIRE_ANTHROPIC_MESSAGES.build_body == anthropic_build_body);
 }

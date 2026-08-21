@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "providers/responses_messages.h"
+#include "providers/responses_body.h"
 
 #include <jansson.h>
 #include <stdlib.h>

@@ -4,7 +4,7 @@
 
 #include "harness.h"
 #include "provider.h"
-#include "providers/responses_messages.h"
+#include "providers/responses_body.h"
 #include "providers/wire.h"
 
 static const char *item_type(json_t *item)

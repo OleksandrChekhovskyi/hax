@@ -1,10 +1,12 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_PROVIDERS_RESPONSES_MESSAGES_H
-#define HAX_PROVIDERS_RESPONSES_MESSAGES_H
+#ifndef HAX_PROVIDERS_RESPONSES_BODY_H
+#define HAX_PROVIDERS_RESPONSES_BODY_H
 
 #include <jansson.h>
 
 #include "provider.h"
+
+/* Request-body construction for the OpenAI Responses dialect. */
 
 /* Translate transcript items into a newly allocated Responses API input array. Encrypted reasoning
  * is replayed only when its provider/model stamp matches the current request. Tool-result images
@@ -27,4 +29,4 @@ struct wire_body_opts; /* wire.h */
 json_t *responses_build_body(const struct context *context, const char *provider, const char *model,
                              const struct wire_body_opts *opts);
 
-#endif /* HAX_PROVIDERS_RESPONSES_MESSAGES_H */
+#endif /* HAX_PROVIDERS_RESPONSES_BODY_H */

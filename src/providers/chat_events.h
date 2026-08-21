@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_PROVIDERS_OPENAI_EVENTS_H
-#define HAX_PROVIDERS_OPENAI_EVENTS_H
+#ifndef HAX_PROVIDERS_CHAT_EVENTS_H
+#define HAX_PROVIDERS_CHAT_EVENTS_H
 
 #include <jansson.h>
 #include <stddef.h>
@@ -10,7 +10,7 @@
 
 /* Stateful translator from Chat Completions SSE payloads to stream events. Only the modern
  * tool_calls shape is supported; legacy function_call deltas are ignored. */
-struct openai_tool_call {
+struct chat_tool_call {
     int index;
     char *id;
     char *name;
@@ -19,11 +19,11 @@ struct openai_tool_call {
     int finished;
 };
 
-struct openai_events {
+struct chat_events {
     stream_cb callback;
     void *callback_user;
 
-    struct openai_tool_call *tool_calls;
+    struct chat_tool_call *tool_calls;
     size_t n_tool_calls;
     size_t tool_call_capacity;
 
@@ -47,14 +47,14 @@ struct openai_events {
     int cache_write_1h;
 };
 
-void openai_events_init(struct openai_events *parser, stream_cb callback, void *callback_user);
-void openai_events_free(struct openai_events *parser);
+void chat_events_init(struct chat_events *parser, stream_cb callback, void *callback_user);
+void chat_events_free(struct chat_events *parser);
 
 /* Feed one SSE data payload: a JSON chunk or "[DONE]". Payloads after a terminal event are
  * ignored. */
-void openai_events_feed(struct openai_events *parser, const char *data);
+void chat_events_feed(struct chat_events *parser, const char *data);
 
 /* Finish a cleanly closed transport; emit an error if no terminal state was received. */
-void openai_events_finalize(struct openai_events *parser);
+void chat_events_finalize(struct chat_events *parser);
 
-#endif /* HAX_PROVIDERS_OPENAI_EVENTS_H */
+#endif /* HAX_PROVIDERS_CHAT_EVENTS_H */

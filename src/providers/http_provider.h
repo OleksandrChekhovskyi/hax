@@ -5,8 +5,8 @@
 #include <jansson.h>
 
 #include "provider.h"
-#include "providers/anthropic_messages.h"
-#include "providers/openai_messages.h"
+#include "providers/anthropic_body.h"
+#include "providers/chat_body.h"
 #include "providers/wire.h"
 
 /* Generic streaming-HTTP provider: endpoint, credential, and configuration resolution, request
@@ -35,7 +35,7 @@ struct http_provider_preset {
     int cache_auto_default; /* AUTO when set, otherwise OFF */
     int emit_progress;      /* request and parse llama.cpp prompt_progress */
     int request_cost;       /* request OpenRouter usage cost */
-    enum openai_reasoning_format reasoning_format;
+    enum chat_reasoning_format reasoning_format;
     const char *reasoning_replay_field; /* copied; NULL disables replay */
 
     /* Messages policy. */

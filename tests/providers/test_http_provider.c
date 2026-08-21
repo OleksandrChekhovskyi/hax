@@ -17,9 +17,9 @@
 #include "harness.h"
 #include "provider.h"
 #include "util.h"
-#include "providers/anthropic_messages.h"
+#include "providers/anthropic_body.h"
 #include "providers/http_provider.h"
-#include "providers/openai_messages.h"
+#include "providers/openai_common.h"
 #include "providers/wire.h"
 
 static void test_list_efforts_wiring(void)
