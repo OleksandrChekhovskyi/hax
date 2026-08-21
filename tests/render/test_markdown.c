@@ -277,8 +277,10 @@ static void test_heading_h3(void)
 
 static void test_heading_then_paragraph(void)
 {
+    /* The renderer supplies the blank line between a heading and the
+     * content that follows, whether or not the source has one. */
     char *got = render_one("## Tech\nDetails");
-    EXPECT_STR_EQ(got, BLD "Tech" OFF "\nDetails");
+    EXPECT_STR_EQ(got, BLD "Tech" OFF "\n\nDetails");
     free(got);
 }
 
@@ -287,6 +289,68 @@ static void test_hash_no_space_is_text(void)
     /* `#define` is not a heading — needs a space after the hashes. */
     char *got = render_one("#define X");
     EXPECT_STR_EQ(got, "#define X");
+    free(got);
+}
+
+static void test_heading_h4_to_h6(void)
+{
+    /* Models use the deeper heading levels for subsections; all six
+     * CommonMark levels render, seven or more hashes stay literal. */
+    char *got = render_one("#### Missing tests (advisory)\n");
+    EXPECT_STR_EQ(got, BLD "Missing tests (advisory)" OFF "\n");
+    free(got);
+    got = render_one("##### Level five\n");
+    EXPECT_STR_EQ(got, BLD "Level five" OFF "\n");
+    free(got);
+    got = render_one("###### Level six\n");
+    EXPECT_STR_EQ(got, BLD "Level six" OFF "\n");
+    free(got);
+    got = render_one("####### not a heading\n");
+    EXPECT_STR_EQ(got, "####### not a heading\n");
+    free(got);
+}
+
+static void test_split_heading_h4(void)
+{
+    /* `#### ` arrives across feeds. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 0);
+    md_feed(m, "###", 3);
+    md_feed(m, "# title\n", 8);
+    md_flush(m);
+    md_free(m);
+    char *s = buf_steal(&out);
+    EXPECT_STR_EQ(s, BLD "title" OFF "\n");
+    free(s);
+}
+
+static void test_heading_blank_separation(void)
+{
+    /* A heading owes a blank line to whatever follows. Models emit that
+     * blank inconsistently, so the renderer supplies it when missing… */
+    char *got = render_one("#### Missing tests (advisory)\n- one\n");
+    EXPECT_STR_EQ(got, BLD "Missing tests (advisory)" OFF "\n\n" BUL "one\n");
+    free(got);
+
+    /* …and does not double it when the source already has one. */
+    got = render_one("#### Missing tests (advisory)\n\n- one\n");
+    EXPECT_STR_EQ(got, BLD "Missing tests (advisory)" OFF "\n\n" BUL "one\n");
+    free(got);
+
+    /* A heading at EOF takes no trailing blank. */
+    got = render_one("## End\n");
+    EXPECT_STR_EQ(got, BLD "End" OFF "\n");
+    free(got);
+
+    /* Consecutive headings get the supplied blank between them. */
+    got = render_one("## One\n## Two\n");
+    EXPECT_STR_EQ(got, BLD "One" OFF "\n\n" BLD "Two" OFF "\n");
+    free(got);
+
+    /* The owed blank survives a feed boundary. */
+    got = render_split("## Head\nbody", 0, 8);
+    EXPECT_STR_EQ(got, BLD "Head" OFF "\n\nbody");
     free(got);
 }
 
@@ -739,6 +803,8 @@ static void test_feed_partition_invariance(void)
     } cases[] = {
         {"plain **bold** and _italic_ with `code`", 0},
         {"first line\nsecond line\n\n  - **item**\n\n## Heading\n", 0},
+        {"#### Section\n- one\n- two\n", 0},
+        {"## Head\n\nbody text\n", 0},
         {"````markdown\n```c\nx = 1;\n```\n````\n", 0},
         {"| Name | Note |\n|---|---|\n| one | **two** |\n", 40},
         {"- alpha **bravo charlie** delta echo foxtrot", 16},
@@ -1582,7 +1648,7 @@ static void test_hard_break_indented_heading(void)
     /* `  ## sub` is still a heading. The leading spaces are dropped
      * (CommonMark equivalence) so the heading renders as bold. */
     char *got = render_one("preamble\n  ## sub\nbody");
-    EXPECT_STR_EQ(got, "preamble\n" BLD "sub" OFF "\nbody");
+    EXPECT_STR_EQ(got, "preamble\n" BLD "sub" OFF "\n\nbody");
     free(got);
 }
 
@@ -1634,7 +1700,7 @@ static void test_line_start_indented_heading(void)
      * per CommonMark. step_line_start must normalize, not just the
      * soft-break path. */
     char *got = render_one("  ## h\nbody");
-    EXPECT_STR_EQ(got, BLD "h" OFF "\nbody");
+    EXPECT_STR_EQ(got, BLD "h" OFF "\n\nbody");
     free(got);
 }
 
@@ -2711,7 +2777,7 @@ static void test_link_after_em_dash(void)
 static void test_link_in_heading(void)
 {
     char *got = render_one("# See https://x.com\nrest");
-    EXPECT_STR_EQ(got, BLD "See " LNK "https://x.com" LNK_OFF OFF "\nrest");
+    EXPECT_STR_EQ(got, BLD "See " LNK "https://x.com" LNK_OFF OFF "\n\nrest");
     free(got);
 }
 
@@ -3055,6 +3121,9 @@ int main(void)
     test_heading_h3();
     test_heading_then_paragraph();
     test_hash_no_space_is_text();
+    test_heading_h4_to_h6();
+    test_split_heading_h4();
+    test_heading_blank_separation();
 
     test_code_fence();
     test_code_fence_tab_expanded_to_four_spaces();

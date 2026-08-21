@@ -60,6 +60,10 @@ struct md_renderer {
     /* Block-isolated lines force a hard trailing newline instead of joining with prose. */
     int cur_line_is_block;
 
+    /* A closed heading owes a blank line to the content that follows. Models emit the
+     * separating blank inconsistently, so the renderer supplies it when missing. */
+    int pending_heading_blank;
+
     /* Collapses prose blank-line runs; fence and table interiors bypass it. */
     int at_blank;
 
@@ -521,6 +525,8 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
 
     /* Stay at line start so blank-line runs collapse instead of soft-joining. */
     if (c == '\n') {
+        /* A source blank line already separates the heading from what follows. */
+        m->pending_heading_blank = 0;
         if (!m->at_blank) {
             emit_text(m, "\n", 1);
             m->at_blank = 1;
@@ -531,6 +537,12 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
         return STEP_ADVANCED;
     }
     m->at_blank = 0;
+
+    /* Pay the heading's blank-line debt before this line's first output. */
+    if (m->pending_heading_blank) {
+        m->pending_heading_blank = 0;
+        emit_text(m, "\n", 1);
+    }
 
     if (c == '`') {
         /* Wider fences may contain shorter backtick runs. */
@@ -554,19 +566,19 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
         }
     }
 
+    /* All six CommonMark heading levels; seven or more hashes stay literal. The cap stops
+     * the count at six so a seventh hash disproves the heading without another lookahead. */
     if (c == '#') {
         size_t h = 0;
-        while (h < 4 && *i + h < w->len && w->data[*i + h] == '#')
+        while (h < 6 && *i + h < w->len && w->data[*i + h] == '#')
             h++;
-        if (h < 4) {
-            if (*i + h >= w->len)
-                return STEP_DEFER;
-            if (w->data[*i + h] == ' ' && h >= 1 && h <= 3) {
-                open_heading(m);
-                *i += h + 1;
-                m->at_line_start = 0;
-                return STEP_ADVANCED;
-            }
+        if (*i + h >= w->len)
+            return STEP_DEFER;
+        if (w->data[*i + h] == ' ' && h >= 1) {
+            open_heading(m);
+            *i += h + 1;
+            m->at_line_start = 0;
+            return STEP_ADVANCED;
         }
     }
 
@@ -759,6 +771,7 @@ static enum step_result step_inline(struct md_renderer *m, struct buf *w, size_t
         if (m->in_heading) {
             close_heading(m);
             emit_text(m, "\n", 1);
+            m->pending_heading_blank = 1;
             m->at_line_start = 1;
             m->cur_line_is_block = 0;
             (*i)++;
@@ -1045,6 +1058,7 @@ void md_reset(struct md_renderer *m, int wrap_width)
     m->in_link = 0;
     m->styled = 1;
     m->cur_line_is_block = 0;
+    m->pending_heading_blank = 0;
     m->at_blank = 1;
     m->skip_pad = 0;
     md_wrap_reset(&m->wrap, wrap_width);

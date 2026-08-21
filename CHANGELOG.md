@@ -70,6 +70,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- Markdown headings render properly at every level, including the deeper `####` and beyond that
+  models use for subsections, and are always followed by a blank line.
 - A response stream that dies mid-generation is retried automatically instead of failing the
   turn with `[provider error — enter to retry]`; anything already rendered is closed with a dim
   `[unexpected end]` marker and the retry re-streams from scratch.
