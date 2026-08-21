@@ -136,6 +136,10 @@ speaking it: `thinking_mode` affects the Claude models, `reasoning_format` the C
 ones. Pinning `thinking_mode` to `budget` or `off` also means a selected effort steers only the
 non-Claude models, since those modes take none.
 
+On `opencode-go`, `/usage` shows the subscription's rate-limit windows (rolling, weekly,
+monthly). Zen exposes no balance or usage API yet, so `/usage` is unavailable there; check the
+OpenCode dashboard instead.
+
 ## llama.cpp
 
 `llamacpp` is a convenience configuration for a local `llama-server` at

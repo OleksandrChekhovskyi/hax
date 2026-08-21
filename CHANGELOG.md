@@ -10,7 +10,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 ### Added
 
 - OpenCode Zen and Go providers (`opencode-zen`, `opencode-go`): set `OPENCODE_API_KEY` and pick
-  a model — hax speaks each model's API automatically. See
+  a model — hax speaks each model's API automatically. On `opencode-go`, `/usage` shows the
+  subscription's rate-limit windows. See
   [docs/providers.md](docs/providers.md#opencode-zen-and-go).
 - Custom providers can serve several protocols behind one URL: `api: "catalog"` routes each model
   by the model catalog, and `model_apis` maps model-id globs to APIs explicitly. See

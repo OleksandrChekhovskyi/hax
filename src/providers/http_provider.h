@@ -61,6 +61,8 @@ struct provider *http_provider_new_preset(const struct http_provider_preset *pre
 /* Accessors for preset modules implementing their own metadata callbacks. */
 const char *http_provider_base_url(const struct provider *provider);
 int http_provider_has_api_key(const struct provider *provider);
+/* The resolved key, or NULL; borrowed for the provider's lifetime. */
+const char *http_provider_api_key(const struct provider *provider);
 /* Owned NULL-terminated auth headers for JSON metadata requests, including the version header
  * on the Messages wire; free with string_array_free. */
 char **http_provider_metadata_headers(const struct provider *provider);

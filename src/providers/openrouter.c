@@ -20,6 +20,7 @@
 #include "providers/http_provider.h"
 #include "providers/openai_common.h"
 #include "providers/wire.h"
+#include "render/ctrl_strip.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
 #include "transport/http.h"
@@ -247,9 +248,13 @@ static void print_key_usage(const json_t *data)
 {
     const char *label = json_string_value(json_object_get(data, "label"));
     printf(ANSI_DIM "openrouter");
-    /* Default labels contain a masked API key, which should not enter scrollback. */
-    if (label && *label && strncmp(label, "sk-", 3) != 0)
-        printf(" · %s", label);
+    /* Default labels contain a masked API key, which should not enter scrollback; a custom
+     * label is server text, so keep terminal controls out of it. */
+    if (label && *label && strncmp(label, "sk-", 3) != 0) {
+        char *safe_label = ctrl_strip_line_dup(label);
+        printf(" · %s", safe_label);
+        free(safe_label);
+    }
     if (json_is_true(json_object_get(data, "is_free_tier")))
         printf(" · free tier");
     printf(ANSI_RESET "\n");

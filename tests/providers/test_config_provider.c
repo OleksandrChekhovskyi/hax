@@ -8,6 +8,7 @@
 #include "provider.h"
 #include "util.h"
 #include "providers/config_provider.h"
+#include "providers/opencode.h"
 #include "providers/registry.h"
 
 /* The env-alias rows registered in config.c for the shipped -compatible blocks must project
@@ -394,6 +395,42 @@ int main(void)
         EXPECT(ollama->catalog_id == NULL);
         ollama->destroy(ollama);
     }
+
+    /* The opencode-go recipe carries the /usage hook onto its provider; the Zen sibling has
+     * none, so /usage stays unsupported there. */
+    const struct provider_factory *go_factory = provider_find("opencode-go");
+    EXPECT(go_factory != NULL);
+    struct provider *go = go_factory->new(go_factory->id);
+    EXPECT(go != NULL);
+    if (go) {
+        EXPECT(go->query_usage == opencode_go_query_usage);
+        go->destroy(go);
+    }
+    const struct provider_factory *zen_factory = provider_find("opencode-zen");
+    EXPECT(zen_factory != NULL);
+    struct provider *zen = zen_factory->new(zen_factory->id);
+    EXPECT(zen != NULL);
+    if (zen) {
+        EXPECT(zen->query_usage == NULL);
+        zen->destroy(zen);
+    }
+
+    /* Usage auth stays Bearer even when an api override routes the gateway's models through
+     * the Messages dialect, whose model requests authenticate with x-api-key. */
+    setenv("OPENCODE_API_KEY", "oc-test-key", 1);
+    config_set_override("providers.opencode-go.api", "anthropic-messages");
+    struct provider *go_messages = go_factory->new(go_factory->id);
+    EXPECT(go_messages != NULL);
+    if (go_messages) {
+        char **usage_headers = opencode_usage_headers(go_messages);
+        EXPECT(usage_headers && usage_headers[0]);
+        if (usage_headers && usage_headers[0])
+            EXPECT_STR_EQ(usage_headers[0], "Authorization: Bearer oc-test-key");
+        string_array_free(usage_headers);
+        go_messages->destroy(go_messages);
+    }
+    config_set_override("providers.opencode-go.api", NULL);
+    unsetenv("OPENCODE_API_KEY");
 
     const struct provider_factory *anthropic_factory = provider_find("claudish");
     EXPECT(anthropic_factory != NULL);

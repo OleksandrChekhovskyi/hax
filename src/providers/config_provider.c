@@ -459,6 +459,8 @@ static struct provider *config_provider_new(const char *name)
         p = http_provider_new_preset(&preset);
     }
     free(cfg_prefix);
+    if (p && r->query_usage)
+        p->query_usage = r->query_usage;
     return apply_base_config(name, p);
 }
 

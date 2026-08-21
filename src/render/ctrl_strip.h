@@ -32,4 +32,8 @@ size_t ctrl_strip_feed(struct ctrl_strip *strip, const char *input, size_t input
 /* Return a newly allocated, sanitized copy of a NUL-terminated string. Caller frees it. */
 char *ctrl_strip_dup(const char *input);
 
+/* ctrl_strip_dup for single-line contexts: HT and LF become spaces, so an untrusted value
+ * cannot break the line it is embedded in. Caller frees the copy. */
+char *ctrl_strip_line_dup(const char *input);
+
 #endif /* HAX_RENDER_CTRL_STRIP_H */

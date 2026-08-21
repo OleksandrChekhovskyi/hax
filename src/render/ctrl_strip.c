@@ -164,3 +164,12 @@ char *ctrl_strip_dup(const char *input)
     output[output_len] = '\0';
     return output;
 }
+
+char *ctrl_strip_line_dup(const char *input)
+{
+    char *output = ctrl_strip_dup(input);
+    for (char *c = output; *c; c++)
+        if (*c == '\n' || *c == '\t')
+            *c = ' ';
+    return output;
+}

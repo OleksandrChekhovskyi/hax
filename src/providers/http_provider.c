@@ -490,6 +490,11 @@ int http_provider_has_api_key(const struct provider *provider)
     return ((const struct http_provider *)provider)->api_key != NULL;
 }
 
+const char *http_provider_api_key(const struct provider *provider)
+{
+    return ((const struct http_provider *)provider)->api_key;
+}
+
 char **http_provider_metadata_headers(const struct provider *provider)
 {
     const struct http_provider *hp = (const struct http_provider *)provider;

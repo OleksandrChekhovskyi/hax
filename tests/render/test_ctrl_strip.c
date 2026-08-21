@@ -266,6 +266,13 @@ static void test_dup_helper(void)
     free(got);
 }
 
+static void test_line_dup_helper(void)
+{
+    char *got = ctrl_strip_line_dup("\x1b[31mlimited\x1b[0m\nfake\terror");
+    EXPECT_STR_EQ(got, "limited fake error");
+    free(got);
+}
+
 int main(void)
 {
     test_passthrough();
@@ -293,5 +300,6 @@ int main(void)
     test_lf_cancels_control_string_after_escape();
     test_incomplete_escape_removed();
     test_dup_helper();
+    test_line_dup_helper();
     T_REPORT();
 }

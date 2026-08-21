@@ -59,6 +59,7 @@ test_sources = [
     'providers/test_mock.c',
     'providers/test_model_info.c',
     'providers/test_openai.c',
+    'providers/test_opencode.c',
     'providers/test_registry.c',
     'providers/test_responses_body.c',
     'providers/test_responses_events.c',

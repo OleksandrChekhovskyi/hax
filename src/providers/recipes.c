@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "providers/opencode.h"
+
 // clang-format off
 static const struct provider_recipe RECIPES[] = {
     /* The generic -compatible endpoints are recipes with no default base_url: unavailable
@@ -34,6 +36,7 @@ static const struct provider_recipe RECIPES[] = {
         .base_url = "https://opencode.ai/zen/go/v1",
         .api_key_env = "OPENCODE_API_KEY",
         .catalog_id = "opencode-go",
+        .query_usage = opencode_go_query_usage,
     },
     {
         .id = "ollama",

@@ -21,10 +21,10 @@
 #include "providers/responses_body.h"
 #include "providers/responses_events.h"
 #include "providers/stream_retry.h"
-#include "render/progress.h"
+#include "providers/usage_render.h"
+#include "render/ctrl_strip.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
-#include "terminal/width.h"
 #include "transport/http.h"
 
 #define CODEX_RESPONSES_ENDPOINT "https://chatgpt.com/backend-api/codex/responses"
@@ -398,27 +398,6 @@ static int codex_probe_model(struct provider *provider, const char *model,
     return 0;
 }
 
-static void format_reset_time(char *output, size_t output_size, time_t reset_at)
-{
-    time_t now = time(NULL);
-    struct tm reset_tm, now_tm;
-    if (!localtime_r(&reset_at, &reset_tm) || !localtime_r(&now, &now_tm)) {
-        snprintf(output, output_size, "?");
-        return;
-    }
-
-    int same_day = reset_tm.tm_year == now_tm.tm_year && reset_tm.tm_yday == now_tm.tm_yday;
-    if (same_day)
-        strftime(output, output_size, "%H:%M", &reset_tm);
-    else
-        /* Zero-padded %d is preferable to the non-portable %-d. */
-        strftime(output, output_size, "%a %b %d, %H:%M", &reset_tm);
-}
-
-#define USAGE_LABEL_WIDTH 6
-#define USAGE_BAR_WIDTH   20
-#define USAGE_BAR_COLUMN  (2 + USAGE_LABEL_WIDTH + 1)
-
 static void format_window_label(char *output, size_t output_size, long window_seconds)
 {
     if (window_seconds <= 0)
@@ -457,30 +436,12 @@ static void print_usage_window(const char *fallback_label, json_t *window)
     else
         snprintf(label, sizeof(label), "%s", fallback_label);
 
-    double used = json_number_value(used_percent);
-    if (used < 0)
-        used = 0;
-    if (used > 100)
-        used = 100;
-
-    char reset_time[64];
-    format_reset_time(reset_time, sizeof(reset_time), (time_t)json_number_value(reset_timestamp));
-
-    char percent_text[32];
-    int percent_width =
-        snprintf(percent_text, sizeof(percent_text), " %3d%% used", (int)(used + 0.5));
-    char reset_text[96];
-    int reset_width = snprintf(reset_text, sizeof(reset_text), " · resets %s", reset_time);
-    int row_width = USAGE_BAR_COLUMN + USAGE_BAR_WIDTH + percent_width + reset_width;
-
-    printf("  " ANSI_DIM "%-*s" ANSI_RESET " ", USAGE_LABEL_WIDTH, label);
-    progress_bar_print(used / 100.0, USAGE_BAR_WIDTH);
-    if (row_width <= display_width()) {
-        printf(ANSI_DIM "%s%s" ANSI_RESET "\n", percent_text, reset_text);
-    } else {
-        printf(ANSI_DIM "%s" ANSI_RESET "\n", percent_text);
-        printf("%*s" ANSI_DIM "resets %s" ANSI_RESET "\n", USAGE_BAR_COLUMN, "", reset_time);
-    }
+    struct usage_window row = {
+        .label = label,
+        .used_percent = json_number_value(used_percent),
+        .reset_at = (time_t)json_number_value(reset_timestamp),
+    };
+    usage_window_print(&row);
 }
 
 static int codex_query_usage(struct provider *provider)
@@ -534,10 +495,18 @@ static int codex_query_usage(struct provider *provider)
     json_t *rate_limit = json_object_get(root, "rate_limit");
 
     printf(ANSI_DIM "codex");
-    if (codex->auth.email)
-        printf(" · %s", codex->auth.email);
-    if (plan && *plan)
-        printf(" · %s", plan);
+    /* Email and plan arrive from the server (token claims and usage response); keep terminal
+     * controls out of them. */
+    if (codex->auth.email) {
+        char *email = ctrl_strip_line_dup(codex->auth.email);
+        printf(" · %s", email);
+        free(email);
+    }
+    if (plan && *plan) {
+        char *safe_plan = ctrl_strip_line_dup(plan);
+        printf(" · %s", safe_plan);
+        free(safe_plan);
+    }
     printf(ANSI_RESET "\n");
 
     if (rate_limit && !json_is_null(rate_limit)) {

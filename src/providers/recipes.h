@@ -4,6 +4,8 @@
 
 #include <stddef.h>
 
+struct provider;
+
 /* A built-in recipe: the default field values for a well-known provider, overridable
  * key-by-key by a matching providers.<name> config block. The shipped set is deliberately
  * small and slow-moving — only providers fully described by static endpoint metadata (no
@@ -29,6 +31,8 @@ struct provider_recipe {
     int probe;
     const char *unconfigured_reason; /* availability reason without a base_url; NULL →
                                         "no base_url" */
+    /* /usage backend copied onto the constructed provider; NULL leaves /usage unsupported. */
+    int (*query_usage)(struct provider *provider);
 };
 
 /* The shipped table, in /provider display order; *n receives its length. */
