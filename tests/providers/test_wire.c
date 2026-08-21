@@ -95,6 +95,48 @@ static void test_chat_opts_plumbing(void)
     WIRE_OPENAI_CHAT.events_free(&events);
 }
 
+static void test_events_complete(void)
+{
+    struct capture capture = {0};
+    union wire_events events;
+
+    WIRE_OPENAI_CHAT.events_init(&events, on_event, &capture, NULL);
+    WIRE_OPENAI_CHAT.events_feed(&events, NULL,
+                                 "{\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}");
+    EXPECT(!WIRE_OPENAI_CHAT.events_complete(&events));
+    /* A finish chunk marks the stream terminal even before [DONE] arrives. */
+    WIRE_OPENAI_CHAT.events_feed(&events, NULL,
+                                 "{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}");
+    EXPECT(WIRE_OPENAI_CHAT.events_complete(&events));
+    WIRE_OPENAI_CHAT.events_free(&events);
+
+    WIRE_OPENAI_RESPONSES.events_init(&events, on_event, &capture, NULL);
+    WIRE_OPENAI_RESPONSES.events_feed(&events, NULL,
+                                      "{\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}");
+    EXPECT(!WIRE_OPENAI_RESPONSES.events_complete(&events));
+    WIRE_OPENAI_RESPONSES.events_feed(&events, NULL,
+                                      "{\"type\":\"response.completed\",\"response\":{}}");
+    EXPECT(WIRE_OPENAI_RESPONSES.events_complete(&events));
+    WIRE_OPENAI_RESPONSES.events_free(&events);
+
+    WIRE_ANTHROPIC_MESSAGES.events_init(&events, on_event, &capture, NULL);
+    WIRE_ANTHROPIC_MESSAGES.events_feed(&events, "content_block_delta",
+                                        "{\"type\":\"content_block_delta\",\"index\":0,"
+                                        "\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}");
+    EXPECT(!WIRE_ANTHROPIC_MESSAGES.events_complete(&events));
+    WIRE_ANTHROPIC_MESSAGES.events_feed(&events, "message_stop", "{\"type\":\"message_stop\"}");
+    EXPECT(WIRE_ANTHROPIC_MESSAGES.events_complete(&events));
+    WIRE_ANTHROPIC_MESSAGES.events_free(&events);
+}
+
+static void test_events_usage_table(void)
+{
+    EXPECT(WIRE_OPENAI_CHAT.events_usage != NULL);
+    EXPECT(WIRE_ANTHROPIC_MESSAGES.events_usage != NULL);
+    /* Responses reports usage only with its terminal event; nothing to expose mid-stream. */
+    EXPECT(WIRE_OPENAI_RESPONSES.events_usage == NULL);
+}
+
 /* Body composition is tested with each dialect's builder in its *_messages suite; the wire
  * table only pairs those builders with paths and parsers. */
 static void test_build_body_table(void)
@@ -134,6 +176,8 @@ int main(void)
     test_find();
     test_event_dispatch();
     test_chat_opts_plumbing();
+    test_events_complete();
+    test_events_usage_table();
     test_build_body_table();
     test_finish_applies_extra_body();
     T_REPORT();

@@ -265,6 +265,11 @@ static void stream_parser_free(void *ctx)
     responses_events_free(&((struct codex_stream *)ctx)->events);
 }
 
+static int stream_parser_complete(void *ctx)
+{
+    return ((struct codex_stream *)ctx)->events.terminal_emitted;
+}
+
 /* One in-place retry after a 401: adopt or refresh the rotated hax-owned token. */
 static int stream_recover(void *ctx, long http_status, http_tick_cb tick, void *tick_user)
 {
@@ -319,6 +324,7 @@ static int codex_stream(struct provider *provider, const struct context *context
         .parser_feed = handle_sse_payload,
         .parser_finalize = stream_parser_finalize,
         .parser_free = stream_parser_free,
+        .parser_complete = stream_parser_complete,
         .recover = stream_recover,
         .error_message = stream_error_message,
     };

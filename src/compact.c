@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "agent_core.h"
+#include "agent_usage.h"
 #include "config.h"
 #include "model_meta.h"
 #include "provider.h"
@@ -113,6 +114,8 @@ struct compact_attempt_log {
     struct compact_attempt attempts[COMPACT_MAX_ATTEMPTS];
     size_t count;
     long attempt_started_ms;
+    /* Usage banked by mid-stream retries, folded into the next terminal entry. */
+    struct stream_usage pending_retry;
 };
 
 struct compact_sink {
@@ -134,6 +137,7 @@ static void attempt_log_init(struct compact_attempt_log *log)
 {
     log->count = 0;
     log->attempt_started_ms = monotonic_ms();
+    log->pending_retry = (struct stream_usage){-1, -1, -1, -1, -1, -1};
 }
 
 static void attempt_log_record(struct compact_attempt_log *log, const struct stream_usage *usage,
@@ -143,12 +147,25 @@ static void attempt_log_record(struct compact_attempt_log *log, const struct str
     if (log->count < COMPACT_MAX_ATTEMPTS) {
         struct compact_attempt *attempt = &log->attempts[log->count++];
         attempt->usage = *usage;
+        agent_usage_add(&attempt->usage, &log->pending_retry);
         attempt->elapsed_ms = now_ms - log->attempt_started_ms;
         attempt->response_id = response && response->id ? xstrdup(response->id) : NULL;
         attempt->served_model = response && response->model ? xstrdup(response->model) : NULL;
         attempt->route = response && response->route ? xstrdup(response->route) : NULL;
     }
+    log->pending_retry = (struct stream_usage){-1, -1, -1, -1, -1, -1};
     log->attempt_started_ms = now_ms;
+}
+
+/* A stream cancelled mid-retry banks usage but never reaches a terminal event; record it as
+ * its own entry so persisted usage matches what the live accounting hooks already billed. */
+static void attempt_log_flush(struct compact_attempt_log *log)
+{
+    if (!agent_usage_is_reported(&log->pending_retry))
+        return;
+    struct stream_usage usage = log->pending_retry;
+    log->pending_retry = (struct stream_usage){-1, -1, -1, -1, -1, -1};
+    attempt_log_record(log, &usage, NULL);
 }
 
 static void attempt_log_free(struct compact_attempt_log *log)
@@ -176,6 +193,8 @@ static int compact_sink_on_event(const struct stream_event *event, void *user)
                 xstrdup(event->u.error.message ? event->u.error.message : "stream failed");
         usage = event->u.error.usage;
         response = event->u.error.response;
+    } else if (event->kind == EV_RETRY && event->u.retry.usage) {
+        agent_usage_add(&sink->attempt_log.pending_retry, event->u.retry.usage);
     }
     if (usage)
         attempt_log_record(&sink->attempt_log, usage, response);
@@ -378,6 +397,7 @@ void compact_run(const struct compact_params *params, struct compact_result *res
     }
     turn_reset(&sink.turn);
     result->error_message = sink.error_message;
+    attempt_log_flush(&sink.attempt_log);
 
     if (!summary || !*summary) {
         append_attempt_usage(params, &sink.attempt_log, 0, sink.attempt_log.count);

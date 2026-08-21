@@ -60,6 +60,8 @@ enum mock_script {
     MOCK_ERROR,
     MOCK_NO_SUMMARY,
     MOCK_INCOMPLETE,
+    MOCK_STREAM_RETRY,
+    MOCK_STREAM_RETRY_INCOMPLETE,
 };
 
 struct mock_state {
@@ -78,20 +80,54 @@ static void reset_mock(enum mock_script script)
     mock.script = script;
 }
 
-static void emit_event(stream_cb cb, void *user, struct stream_event event)
+static struct stream_usage usage_tokens(long input, long output)
 {
-    cb(&event, user);
+    return (struct stream_usage){
+        .input_tokens = input,
+        .output_tokens = output,
+        .cached_tokens = -1,
+        .cache_write_tokens = -1,
+        .cache_write_1h_tokens = -1,
+        .cost = -1,
+    };
+}
+
+static void emit_text(stream_cb cb, void *user, const char *text)
+{
+    struct stream_event ev = {.kind = EV_TEXT_DELTA, .u.text_delta = {.text = text}};
+    cb(&ev, user);
 }
 
 static void emit_done(stream_cb cb, void *user, long input_tokens)
 {
-    struct stream_usage usage = {.input_tokens = input_tokens,
-                                 .output_tokens = 10,
-                                 .cached_tokens = -1,
-                                 .cache_write_tokens = -1,
-                                 .cache_write_1h_tokens = -1,
-                                 .cost = -1};
-    emit_event(cb, user, (struct stream_event){.kind = EV_DONE, .u.done = {.usage = usage}});
+    struct stream_event ev = {.kind = EV_DONE, .u.done = {.usage = usage_tokens(input_tokens, 10)}};
+    cb(&ev, user);
+}
+
+static void emit_error(stream_cb cb, void *user, const char *message,
+                       const struct stream_usage *usage)
+{
+    struct stream_event ev = {.kind = EV_ERROR, .u.error = {.message = message, .usage = usage}};
+    cb(&ev, user);
+}
+
+static void emit_retry(stream_cb cb, void *user, const struct stream_usage *usage)
+{
+    struct stream_event ev = {.kind = EV_RETRY,
+                              .u.retry = {.attempt = 1, .max_attempts = 5, .usage = usage}};
+    cb(&ev, user);
+}
+
+static void emit_tool_call(stream_cb cb, void *user)
+{
+    struct stream_event start = {.kind = EV_TOOL_CALL_START,
+                                 .u.tool_call_start = {.id = "c1", .name = "read"}};
+    struct stream_event delta = {.kind = EV_TOOL_CALL_DELTA,
+                                 .u.tool_call_delta = {.id = "c1", .args_delta = "{}"}};
+    struct stream_event end = {.kind = EV_TOOL_CALL_END, .u.tool_call_end = {.id = "c1"}};
+    cb(&start, user);
+    cb(&delta, user);
+    cb(&end, user);
 }
 
 static int mock_stream(struct provider *provider, const struct context *ctx, const char *model,
@@ -107,41 +143,26 @@ static int mock_stream(struct provider *provider, const struct context *ctx, con
 
     if ((mock.script == MOCK_RETRY_ONCE && mock.stream_calls == 1) ||
         mock.script == MOCK_ALWAYS_TOOL_CALL) {
-        emit_event(cb, user,
-                   (struct stream_event){.kind = EV_TEXT_DELTA,
-                                         .u.text_delta = {.text = "I'll inspect the files"}});
-        emit_event(cb, user,
-                   (struct stream_event){.kind = EV_TOOL_CALL_START,
-                                         .u.tool_call_start = {.id = "c1", .name = "read"}});
-        emit_event(cb, user,
-                   (struct stream_event){.kind = EV_TOOL_CALL_DELTA,
-                                         .u.tool_call_delta = {.id = "c1", .args_delta = "{}"}});
-        emit_event(
-            cb, user,
-            (struct stream_event){.kind = EV_TOOL_CALL_END, .u.tool_call_end = {.id = "c1"}});
+        emit_text(cb, user, "I'll inspect the files");
+        emit_tool_call(cb, user);
         emit_done(cb, user, 100);
         return 0;
     }
     if (mock.script == MOCK_ERROR) {
-        static const struct stream_usage usage = {.input_tokens = 150,
-                                                  .output_tokens = 5,
-                                                  .cached_tokens = -1,
-                                                  .cache_write_tokens = -1,
-                                                  .cache_write_1h_tokens = -1,
-                                                  .cost = -1};
-        emit_event(
-            cb, user,
-            (struct stream_event){.kind = EV_TEXT_DELTA, .u.text_delta = {.text = "partial"}});
-        emit_event(
-            cb, user,
-            (struct stream_event){.kind = EV_ERROR,
-                                  .u.error = {.message = "summary failed", .usage = &usage}});
+        struct stream_usage usage = usage_tokens(150, 5);
+        emit_text(cb, user, "partial");
+        emit_error(cb, user, "summary failed", &usage);
         return 0;
     }
+    if (mock.script == MOCK_STREAM_RETRY || mock.script == MOCK_STREAM_RETRY_INCOMPLETE) {
+        struct stream_usage retry_usage = usage_tokens(50, -1);
+        emit_retry(cb, user, &retry_usage);
+        /* A pause cancelling the redo leaves the banked usage with no terminal event. */
+        if (mock.script == MOCK_STREAM_RETRY_INCOMPLETE)
+            return 0;
+    }
     if (mock.script != MOCK_NO_SUMMARY)
-        emit_event(cb, user,
-                   (struct stream_event){.kind = EV_TEXT_DELTA,
-                                         .u.text_delta = {.text = "## Goal\n- continue"}});
+        emit_text(cb, user, "## Goal\n- continue");
     if (mock.script == MOCK_INCOMPLETE)
         return 0;
     emit_done(cb, user, mock.stream_calls == 1 ? 100 : 200);
@@ -217,6 +238,43 @@ static void test_applies_summary(void)
     EXPECT(window.n_items == 2);
     EXPECT(window.items[0].origin == ITEM_ORIGIN_COMPACT_SEED);
     EXPECT(window.items[1].kind == ITEM_TURN_USAGE);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_retried_attempt_usage_is_billed(void)
+{
+    struct agent_session session;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_STREAM_RETRY);
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    /* The dead attempt's banked usage folds into the accepted attempt's footer, so the
+     * persisted record matches what the live accounting hooks billed. */
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    EXPECT(session.n_items == 4);
+    EXPECT(session.items[3].kind == ITEM_TURN_USAGE);
+    EXPECT(session.items[3].usage->usage.input_tokens == 150);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_cancelled_retry_usage_is_billed(void)
+{
+    struct agent_session session;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_STREAM_RETRY_INCOMPLETE);
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    /* No terminal event ever arrived, but the banked usage still gets a footer. */
+    EXPECT(result.outcome == COMPACT_NO_SUMMARY);
+    EXPECT(session.n_items == 2);
+    EXPECT(session.items[1].kind == ITEM_TURN_USAGE);
+    EXPECT(session.items[1].usage->usage.input_tokens == 50);
 
     compact_result_destroy(&result);
     agent_session_free(&session);
@@ -443,6 +501,8 @@ int main(void)
     test_over_threshold();
     test_should_auto();
     test_applies_summary();
+    test_retried_attempt_usage_is_billed();
+    test_cancelled_retry_usage_is_billed();
     test_compacts_twice();
     test_keeps_one_session();
     test_tool_call_retries_are_bounded();

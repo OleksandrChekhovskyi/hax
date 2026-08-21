@@ -69,6 +69,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- A response stream that dies mid-generation is retried automatically instead of failing the
+  turn with `[provider error — enter to retry]`; anything already rendered is closed with a dim
+  `[unexpected end]` marker and the retry re-streams from scratch.
+- Retrying after a provider error no longer feeds the failed turn's truncated reasoning back to
+  the model, which could derail it into garbage output after repeated failures.
 - Models that need to see their own earlier reasoning (Kimi K3, GLM, DeepSeek and MiniMax on the
   OpenCode providers) no longer stop reasoning after the first turn of a conversation.
 - Summarized and encrypted reasoning from OpenAI, Gemini, Kimi and MiniMax models on OpenRouter

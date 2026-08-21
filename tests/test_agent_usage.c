@@ -287,6 +287,53 @@ static void test_turn_usage_without_rates(void)
     free(turn_usage);
 }
 
+static void test_usage_add_keeps_unreported_sentinels(void)
+{
+    struct stream_usage sum = usage(-1, -1, -1, -1);
+    struct stream_usage extra = usage(40, -1, 5, -1);
+    agent_usage_add(&sum, &extra);
+    EXPECT(sum.input_tokens == 40);
+    EXPECT(sum.output_tokens == -1);
+    EXPECT(sum.cached_tokens == 5);
+    EXPECT(sum.cost < 0);
+
+    agent_usage_add(&sum, &extra);
+    EXPECT(sum.input_tokens == 80);
+}
+
+static void test_usage_add_drops_cost_over_unpriced_tokens(void)
+{
+    /* Token-only extra: the exact cost no longer covers the aggregate's tokens. */
+    struct stream_usage sum = usage(100, 20, -1, 0.5);
+    agent_usage_add(&sum, &(struct stream_usage){.input_tokens = 40,
+                                                 .output_tokens = -1,
+                                                 .cached_tokens = -1,
+                                                 .cache_write_tokens = -1,
+                                                 .cache_write_1h_tokens = -1,
+                                                 .cost = -1});
+    EXPECT(sum.input_tokens == 140);
+    EXPECT(sum.cost < 0);
+
+    /* Both sides priced: charges sum and stay exact. */
+    sum = usage(100, 20, -1, 0.5);
+    struct stream_usage priced = usage(40, 5, -1, 0.25);
+    agent_usage_add(&sum, &priced);
+    EXPECT(sum.input_tokens == 140);
+    EXPECT(sum.cost == 0.75);
+
+    /* A no-op merge cannot invalidate a priced side. */
+    struct stream_usage empty = usage(-1, -1, -1, -1);
+    agent_usage_add(&sum, &empty);
+    EXPECT(sum.cost == 0.75);
+
+    /* A charge merged over unpriced tokens is equally uncoverable. */
+    sum = usage(80, 10, -1, -1);
+    struct stream_usage cost_only = usage(-1, -1, -1, 0.25);
+    agent_usage_add(&sum, &cost_only);
+    EXPECT(sum.input_tokens == 80);
+    EXPECT(sum.cost < 0);
+}
+
 int main(void)
 {
     install_catalog();
@@ -303,5 +350,7 @@ int main(void)
     test_turn_usage_with_cost_but_no_tokens();
     test_turn_usage_with_estimated_cost();
     test_turn_usage_without_rates();
+    test_usage_add_keeps_unreported_sentinels();
+    test_usage_add_drops_cost_over_unpriced_tokens();
     T_REPORT();
 }

@@ -100,6 +100,21 @@ void turn_flush_reasoning(struct turn *turn)
     flush_reasoning(turn);
 }
 
+void turn_keep_text(struct turn *turn)
+{
+    buf_free(&turn->reasoning);
+    turn->has_reasoning = 0;
+
+    size_t kept = 0;
+    for (size_t i = 0; i < turn->n_items; i++) {
+        if (turn->items[i].kind == ITEM_ASSISTANT_MESSAGE)
+            turn->items[kept++] = turn->items[i];
+        else
+            item_free(&turn->items[i]);
+    }
+    turn->n_items = kept;
+}
+
 static struct pending_tool_call *find_pending_call(struct turn *turn, const char *id)
 {
     if (!id)
@@ -194,6 +209,9 @@ void turn_consume(struct turn *turn, const struct stream_event *event)
         turn->has_reasoning = 0;
         break;
     case EV_RETRY:
+        /* The attempt died mid-stream; the retry re-streams the whole response. */
+        turn_reset(turn);
+        break;
     case EV_PROGRESS:
         break;
     case EV_DONE:

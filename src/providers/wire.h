@@ -65,6 +65,12 @@ struct wire {
     /* Finish a cleanly closed transport; emits an error if no terminal state was received. */
     void (*events_finalize)(union wire_events *events);
     void (*events_free)(union wire_events *events);
+    /* Non-zero once a terminal state was received; a transport that closes without one died
+     * mid-stream. */
+    int (*events_complete)(const union wire_events *events);
+    /* Borrowed usage captured so far, or NULL when the dialect only reports usage with its
+     * terminal event. */
+    const struct stream_usage *(*events_usage)(const union wire_events *events);
 };
 
 extern const struct wire WIRE_OPENAI_CHAT;      /* OpenAI Chat Completions */

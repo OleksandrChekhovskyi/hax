@@ -40,6 +40,8 @@ static int account_compaction_event(const struct stream_event *event, void *user
         usage = &event->u.done.usage;
     else if (event->kind == EV_ERROR)
         usage = event->u.error.usage;
+    else if (event->kind == EV_RETRY)
+        usage = event->u.retry.usage;
     if (usage)
         agent_spend_account(&state->spend, usage, state->provider, state->session.model);
     return 0;
@@ -65,7 +67,10 @@ static int compact_context(struct oneshot_state *state)
 static void account_turn(const struct agent_loop_turn *turn, void *user)
 {
     struct oneshot_state *state = user;
+    /* Retried attempts are separate spend records: merging could void an exact terminal
+     * charge over their unpriced tokens. */
     agent_spend_account(&state->spend, &turn->usage, state->provider, state->session.model);
+    agent_spend_account(&state->spend, &turn->retry_usage, state->provider, state->session.model);
 }
 
 static void auto_compact(void *user)

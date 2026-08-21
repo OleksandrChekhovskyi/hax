@@ -39,8 +39,14 @@ int stream_retry_run(const struct stream_retry *request, stream_cb callback, voi
             continue;
         }
 
+        /* A 2xx stream that ends without a terminal state died mid-generation. Nothing
+         * irreversible happened — tools only run after a completed turn — so the request
+         * is retried like any transient failure. */
+        int died_midstream = response.status >= 200 && response.status < 300 &&
+                             request->parser_complete && !request->parser_complete(request->ctx);
         if (response.cancelled ||
-            !retry_should_attempt(result, response.status, response.error_body) ||
+            (!died_midstream &&
+             !retry_should_attempt(result, response.status, response.error_body)) ||
             attempt + 1 >= policy.max_attempts) {
             break;
         }
@@ -55,6 +61,7 @@ int stream_retry_run(const struct stream_retry *request, stream_cb callback, voi
                     .max_attempts = policy.max_attempts,
                     .delay_ms = delay_ms,
                     .http_status = (int)response.status,
+                    .usage = request->parser_usage ? request->parser_usage(request->ctx) : NULL,
                 },
         };
         callback(&retry, callback_user);
@@ -71,21 +78,35 @@ int stream_retry_run(const struct stream_retry *request, stream_cb callback, voi
     }
 
     if (!response.cancelled) {
-        if (result != 0 || response.status < 200 || response.status >= 300) {
+        int status_2xx = response.status >= 200 && response.status < 300;
+        int incomplete = request->parser_complete && !request->parser_complete(request->ctx);
+        if (status_2xx && (result == 0 || !incomplete)) {
+            /* A terminal-state response is complete even when the transport fails during
+             * close (a reset between the finish chunk and [DONE], say): finalize emits
+             * the pending terminal event, or nothing when one was already emitted. An
+             * incomplete clean close finalizes into the parser's own terminal error. */
+            request->parser_finalize(request->ctx);
+        } else {
             char *message =
                 request->error_message
                     ? request->error_message(request->ctx, response.status, response.error_body)
                     : NULL;
             if (!message)
                 message = format_api_error(response.status, response.error_body);
+            /* A transport failure mid-stream can strand usage the parser captured; attach
+             * it like the parsers' own terminal errors do. A non-2xx response never fed
+             * the parser, so there is nothing to strand. */
+            const struct stream_usage *stranded_usage = NULL;
+            if (status_2xx && incomplete && request->parser_usage)
+                stranded_usage = request->parser_usage(request->ctx);
             struct stream_event error = {
                 .kind = EV_ERROR,
-                .u.error = {.message = message, .http_status = (int)response.status},
+                .u.error = {.message = message,
+                            .http_status = (int)response.status,
+                            .usage = stranded_usage},
             };
             callback(&error, callback_user);
             free(message);
-        } else {
-            request->parser_finalize(request->ctx);
         }
     }
 

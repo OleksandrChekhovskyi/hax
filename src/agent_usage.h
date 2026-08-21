@@ -51,6 +51,11 @@ long agent_usage_uncached_input(const struct stream_usage *usage, const struct p
 /* Return true when the response reports tokens or cost. */
 int agent_usage_is_reported(const struct stream_usage *usage);
 
+/* Add `extra` into `sum` field by field, leaving fields neither side reports unreported. The
+ * exact cost survives only when it covers every merged token: a side reporting tokens without
+ * cost drops the aggregate to the estimated path. */
+void agent_usage_add(struct stream_usage *sum, const struct stream_usage *extra);
+
 /* Build an owned transcript footer payload. Returns NULL when neither usage nor duration was
  * reported. The total uses reported cost when available; category costs are always estimates. */
 struct turn_usage *agent_turn_usage_new(const struct stream_usage *usage, long elapsed_ms,

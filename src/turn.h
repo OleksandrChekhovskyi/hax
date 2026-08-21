@@ -49,6 +49,11 @@ void turn_flush_text(struct turn *turn, const char *suffix);
 /* Commit buffered reasoning as an ITEM_REASONING. */
 void turn_flush_reasoning(struct turn *turn);
 
+/* Discard everything but assistant text: buffered and assembled reasoning, and assembled tool
+ * calls. Provider-error repair keeps only what the user saw — replaying truncated reasoning or
+ * calls that never ran misleads the model on the retry. */
+void turn_keep_text(struct turn *turn);
+
 /* Transfer the assembled item vector to the caller. `out_count` may be NULL. */
 struct item *turn_take_items(struct turn *turn, size_t *out_count);
 

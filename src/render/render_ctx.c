@@ -121,9 +121,28 @@ void render_stream_begin(struct render_ctx *render)
     render->retry.max_attempts = 0;
     render->stream.content_seen = 0;
     render->stream.answer_started = 0;
+    render->stream.output_rendered = 0;
 
     if (render->mode != RENDER_TOOL_CLUSTER)
         render_wait_for_stream(render);
+    if (render->md)
+        md_reset(render->md, md_cols());
+}
+
+void render_stream_retry(struct render_ctx *render)
+{
+    if (render->stream.output_rendered) {
+        render_open_block(render);
+        disp_write_ansi(&render->disp, ANSI_DIM);
+        disp_printf(&render->disp, "[unexpected end]");
+        disp_write_ansi(&render->disp, ANSI_RESET);
+        disp_putc(&render->disp, '\n');
+        render_set_mode(render, RENDER_WAITING);
+    }
+    render->table.started_at_ms = 0;
+    render->stream.content_seen = 0;
+    render->stream.answer_started = 0;
+    render->stream.output_rendered = 0;
     if (render->md)
         md_reset(render->md, md_cols());
 }
@@ -150,6 +169,7 @@ void render_show_table_spinner(struct render_ctx *render)
 
 void render_write_text(struct render_ctx *render, const char *bytes, size_t len)
 {
+    render->stream.output_rendered = 1;
     /* A feed may complete the table and render into the spinner's row. */
     int spinner_was_visible = hide_table_spinner(render);
     int was_in_table = render->md && md_in_table(render->md);

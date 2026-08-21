@@ -18,6 +18,9 @@
 struct agent_loop_turn {
     struct turn assembly;
     struct stream_usage usage;
+    /* Summed usage of attempts that died mid-stream and were retried. Kept apart from `usage`
+     * so input + output still measures the terminal attempt's context window. */
+    struct stream_usage retry_usage;
     /* Owned copy of the terminal event's stream_response, whose strings are only borrowed. */
     char *response_id;
     char *served_model;
@@ -35,6 +38,9 @@ void agent_loop_turn_run(struct agent_loop_turn *loop_turn, struct agent_session
                          http_tick_cb tick, void *tick_user);
 void agent_loop_turn_destroy(struct agent_loop_turn *loop_turn);
 
+/* Billable usage for the whole turn: the terminal attempt plus retried attempts. */
+struct stream_usage agent_loop_turn_usage_total(const struct agent_loop_turn *loop_turn);
+
 enum agent_abort_reason {
     AGENT_ABORT_PROVIDER_ERROR,
     AGENT_ABORT_USER_CANCEL,
@@ -49,11 +55,12 @@ struct agent_abort_outcome {
     size_t items_to;
 };
 
-/* Preserve partial output from an aborted turn and keep history well formed:
- * tag partial text, absorb completed items, synthesize results for calls that
- * were never run, and add a standalone marker when the abort policy requires
- * one. A provider error with no streamed state adds nothing; user cancellation
- * always leaves an explicit marker. */
+/* Preserve partial output from an aborted turn and keep history well formed.
+ * User cancellation absorbs everything the stream produced — tagged partial
+ * text, synthesized results for calls that never ran — and always leaves an
+ * explicit marker. A provider error keeps only assistant text (marked
+ * interrupted): truncated reasoning and calls that never ran are discarded so
+ * a retry re-issues the same request, and with no text kept it adds nothing. */
 struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *session,
                                                         struct agent_loop_turn *loop_turn,
                                                         enum agent_abort_reason reason);
@@ -122,8 +129,8 @@ struct agent_loop_result {
     size_t final_items_from;
     size_t final_items_to;
     /* Abort repair left interrupt markers in history (always for a user
-     * cancel; for a provider error only when the stream had produced
-     * state). A frontend resuming such a run must speak for the user —
+     * cancel; for a provider error only when partial assistant text was
+     * kept). A frontend resuming such a run must speak for the user —
      * history ends mid-story otherwise — where a marker-free stop resumes
      * silently. */
     int abort_marker_placed;

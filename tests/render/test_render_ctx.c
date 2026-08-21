@@ -200,6 +200,39 @@ static void test_stream_begin_preserves_tool_cluster(void)
     fixture_destroy(&fixture);
 }
 
+static void test_stream_retry_marks_rendered_output(void)
+{
+    struct fixture fixture;
+    if (!fixture_init(&fixture))
+        return;
+
+    render_text_delta(&fixture.render, "partial", strlen("partial"));
+    EXPECT(fixture.render.stream.output_rendered);
+    render_stream_retry(&fixture.render);
+
+    EXPECT(strstr(fixture_output(&fixture), "[unexpected end]") != NULL);
+    EXPECT(fixture.render.mode == RENDER_WAITING);
+    EXPECT(!fixture.render.stream.content_seen);
+    EXPECT(!fixture.render.stream.answer_started);
+    EXPECT(!fixture.render.stream.output_rendered);
+    fixture_destroy(&fixture);
+}
+
+static void test_stream_retry_silent_without_output(void)
+{
+    struct fixture fixture;
+    if (!fixture_init(&fixture))
+        return;
+
+    fixture.render.stream.content_seen = 1;
+    render_stream_retry(&fixture.render);
+
+    EXPECT_STR_EQ(fixture_output(&fixture), "");
+    EXPECT(fixture.render.mode == RENDER_IDLE);
+    EXPECT(!fixture.render.stream.content_seen);
+    fixture_destroy(&fixture);
+}
+
 static void test_closing_tool_cluster_resets_substate(void)
 {
     struct fixture fixture;
@@ -227,6 +260,8 @@ int main(void)
     test_table_spinner_tracks_buffered_table();
     test_stream_begin_resets_per_stream_state();
     test_stream_begin_preserves_tool_cluster();
+    test_stream_retry_marks_rendered_output();
+    test_stream_retry_silent_without_output();
     test_closing_tool_cluster_resets_substate();
 
     T_REPORT();

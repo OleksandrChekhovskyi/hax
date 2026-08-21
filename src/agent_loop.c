@@ -61,6 +61,8 @@ static int loop_turn_on_event(const struct stream_event *ev, void *user)
         if (ev->u.error.usage)
             loop_turn->usage = *ev->u.error.usage;
         capture_response(loop_turn, ev->u.error.response);
+    } else if (ev->kind == EV_RETRY && ev->u.retry.usage) {
+        agent_usage_add(&loop_turn->retry_usage, ev->u.retry.usage);
     }
 
     if (sink->observer)
@@ -76,6 +78,7 @@ void agent_loop_turn_run(struct agent_loop_turn *loop_turn, struct agent_session
     memset(loop_turn, 0, sizeof(*loop_turn));
     turn_init(&loop_turn->assembly);
     loop_turn->usage = (struct stream_usage){-1, -1, -1, -1, -1, -1};
+    loop_turn->retry_usage = (struct stream_usage){-1, -1, -1, -1, -1, -1};
 
     struct loop_turn_sink sink = {
         .loop_turn = loop_turn,
@@ -87,6 +90,13 @@ void agent_loop_turn_run(struct agent_loop_turn *loop_turn, struct agent_session
     long started_ms = monotonic_ms();
     provider->stream(provider, &ctx, session->model, loop_turn_on_event, &sink, tick, tick_user);
     loop_turn->elapsed_ms = monotonic_ms() - started_ms;
+}
+
+struct stream_usage agent_loop_turn_usage_total(const struct agent_loop_turn *loop_turn)
+{
+    struct stream_usage total = loop_turn->usage;
+    agent_usage_add(&total, &loop_turn->retry_usage);
+    return total;
 }
 
 void agent_loop_turn_destroy(struct agent_loop_turn *loop_turn)
@@ -103,14 +113,21 @@ void agent_loop_turn_destroy(struct agent_loop_turn *loop_turn)
 }
 
 /* True when the turn's stream produced anything at all — finished items, open text/reasoning,
- * or a pending tool call. Abort repair appends items exactly when this holds (plus the
- * always-marked user-cancel case), so the loop also uses it to decide whether a follow-up
- * turn's boundary is owed. */
+ * or a pending tool call. */
 static int agent_loop_turn_has_state(const struct agent_loop_turn *loop_turn)
 {
     const struct turn *assembly = &loop_turn->assembly;
     return assembly->has_text || assembly->has_reasoning || assembly->n_pending_calls > 0 ||
            assembly->n_items > 0;
+}
+
+/* True when the assembly holds assistant text — flushed items or the open buffer. */
+static int assembly_has_text(const struct turn *assembly)
+{
+    for (size_t i = 0; i < assembly->n_items; i++)
+        if (assembly->items[i].kind == ITEM_ASSISTANT_MESSAGE)
+            return 1;
+    return assembly->has_text;
 }
 
 struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *session,
@@ -119,6 +136,12 @@ struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *se
 {
     struct turn *assembly = &loop_turn->assembly;
     int had_state = agent_loop_turn_has_state(loop_turn);
+    /* A provider error replays only assistant text: truncated reasoning re-sent as finished
+     * state derails models, and a call that never ran would need a fabricated result. With
+     * both dropped, a retry re-issues the same request. */
+    if (reason == AGENT_ABORT_PROVIDER_ERROR)
+        turn_keep_text(assembly);
+    int kept_text = assembly_has_text(assembly);
     int had_partial_text = assembly->has_text;
     turn_flush_reasoning(assembly);
     turn_flush_text(assembly, had_partial_text ? "\n" INTERRUPT_MARKER : NULL);
@@ -152,12 +175,28 @@ struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *se
         marker_placed = 1;
     }
 
-    if (!marker_placed && (reason == AGENT_ABORT_USER_CANCEL || had_state)) {
-        agent_session_append(session, (struct item){
-                                          .kind = ITEM_ASSISTANT_MESSAGE,
-                                          .text = xstrdup(INTERRUPT_MARKER),
-                                          .origin = ITEM_ORIGIN_INTERRUPTED,
-                                      });
+    if (!marker_placed && (reason == AGENT_ABORT_USER_CANCEL || kept_text)) {
+        struct item *last_text = NULL;
+        for (size_t i = items_to; i-- > items_from;) {
+            if (session->items[i].kind == ITEM_ASSISTANT_MESSAGE) {
+                last_text = &session->items[i];
+                break;
+            }
+        }
+        if (last_text && last_text->text) {
+            /* Chat serialization joins adjacent assistant items without a separator, so a
+             * standalone marker would glue onto the text it interrupts. */
+            char *marked = xasprintf("%s\n%s", last_text->text, INTERRUPT_MARKER);
+            free(last_text->text);
+            last_text->text = marked;
+            last_text->origin = ITEM_ORIGIN_INTERRUPTED;
+        } else {
+            agent_session_append(session, (struct item){
+                                              .kind = ITEM_ASSISTANT_MESSAGE,
+                                              .text = xstrdup(INTERRUPT_MARKER),
+                                              .origin = ITEM_ORIGIN_INTERRUPTED,
+                                          });
+        }
         marker_placed = 1;
     }
 
@@ -225,9 +264,10 @@ static void loop_observe_tools(const struct agent_loop_params *params, size_t fr
 static void loop_add_usage(const struct agent_loop_params *params,
                            const struct agent_loop_turn *loop_turn, int aborted)
 {
-    if (!aborted || agent_usage_is_reported(&loop_turn->usage)) {
+    struct stream_usage usage = agent_loop_turn_usage_total(loop_turn);
+    if (!aborted || agent_usage_is_reported(&usage)) {
         struct stream_response response = turn_response(loop_turn);
-        agent_session_add_turn_usage(params->session, params->provider, &loop_turn->usage,
+        agent_session_add_turn_usage(params->session, params->provider, &usage,
                                      loop_turn->elapsed_ms, &response);
     }
 }
@@ -295,16 +335,13 @@ static void loop_run_active(const struct agent_loop_params *params,
         }
 
         if (loop_turn.assembly.state == TURN_FAILED) {
-            /* Provider failure wins over a simultaneous frontend cancel. It
-             * supplies the diagnostic, while abort repair preserves any
-             * partial output and closes completed tool calls. Repair appends
-             * items only when the stream produced state, but an EV_ERROR can
-             * also carry billable usage without content — its retained
-             * footer owes the boundary too, or it would read as part of the
-             * preceding turn. Only a no-state, no-usage failure leaves
-             * history (and the owed boundary) untouched. */
-            if (owes_boundary && (agent_loop_turn_has_state(&loop_turn) ||
-                                  agent_usage_is_reported(&loop_turn.usage)))
+            /* Provider failure wins over a simultaneous frontend cancel: it supplies the
+             * diagnostic. The boundary is owed exactly when something lands after it — the
+             * partial text repair keeps and/or a billable-usage footer — so it neither dangles
+             * empty nor lets the footer read as part of the preceding turn. */
+            struct stream_usage failed_usage = agent_loop_turn_usage_total(&loop_turn);
+            if (owes_boundary &&
+                (assembly_has_text(&loop_turn.assembly) || agent_usage_is_reported(&failed_usage)))
                 agent_session_add_boundary(session);
             struct agent_abort_outcome abort =
                 agent_loop_turn_absorb_abort(session, &loop_turn, AGENT_ABORT_PROVIDER_ERROR);
@@ -347,14 +384,14 @@ static void loop_run_active(const struct agent_loop_params *params,
         if (sig == AGENT_LOOP_SIG_PAUSE)
             pause_pending = 1;
 
-        /* A pre-empted request — the pause-cancelling tick aborted the stream
-         * before any content, so no EV_DONE and nothing assembled. It leaves
-         * no trace: no boundary, no footer, outcome PAUSED. Every other turn
-         * leaves items and/or a footer (even a legitimately empty completed
-         * response gets its duration footer), so its boundary is owed. */
+        /* A pre-empted request — the pause-cancelling tick aborted the stream before any
+         * content, so no terminal event and nothing assembled — leaves no trace; the resume
+         * re-sends it. Anything a turn does leave (items, a footer — even just banked usage
+         * from a pause landing mid-retry) owes the boundary. */
         int paused_empty = pause_pending && loop_turn.assembly.state == TURN_STREAMING &&
                            loop_turn.assembly.n_items == 0;
-        if (owes_boundary && !paused_empty)
+        struct stream_usage banked_usage = agent_loop_turn_usage_total(&loop_turn);
+        if (owes_boundary && (!paused_empty || agent_usage_is_reported(&banked_usage)))
             agent_session_add_boundary(session);
         struct agent_absorb_result absorbed = agent_session_absorb(session, &loop_turn.assembly);
         /* Freeze the streamed slice before appending results: tool results must

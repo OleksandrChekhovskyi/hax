@@ -176,6 +176,39 @@ int agent_usage_is_reported(const struct stream_usage *usage)
     return usage->input_tokens >= 0 || usage->output_tokens >= 0 || usage->cost >= 0;
 }
 
+static long add_reported(long sum, long extra)
+{
+    if (extra < 0)
+        return sum;
+    return (sum < 0 ? 0 : sum) + extra;
+}
+
+static int has_unpriced_tokens(const struct stream_usage *usage)
+{
+    return usage->cost < 0 && (usage->input_tokens >= 0 || usage->output_tokens >= 0);
+}
+
+void agent_usage_add(struct stream_usage *sum, const struct stream_usage *extra)
+{
+    /* Evaluate before the token fields merge below. */
+    int unpriced = has_unpriced_tokens(sum) || has_unpriced_tokens(extra);
+
+    sum->input_tokens = add_reported(sum->input_tokens, extra->input_tokens);
+    sum->output_tokens = add_reported(sum->output_tokens, extra->output_tokens);
+    sum->cached_tokens = add_reported(sum->cached_tokens, extra->cached_tokens);
+    sum->cache_write_tokens = add_reported(sum->cache_write_tokens, extra->cache_write_tokens);
+    sum->cache_write_1h_tokens =
+        add_reported(sum->cache_write_1h_tokens, extra->cache_write_1h_tokens);
+
+    /* An exact cost must cover every token it is summed with; tokens reported without cost
+     * make the aggregate unpriceable, so it falls back to the estimated path instead of
+     * underreporting an "exact" charge. */
+    if (unpriced)
+        sum->cost = -1;
+    else if (extra->cost >= 0)
+        sum->cost = (sum->cost < 0 ? 0 : sum->cost) + extra->cost;
+}
+
 struct turn_usage *agent_turn_usage_new(const struct stream_usage *usage, long elapsed_ms,
                                         const struct provider *provider, const char *model)
 {

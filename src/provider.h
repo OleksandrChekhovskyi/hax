@@ -224,6 +224,10 @@ struct stream_event {
             int max_attempts; /* total attempts the provider will make */
             long delay_ms;    /* about to sleep this long before retrying */
             int http_status;  /* 0 = transport error, otherwise HTTP code */
+            /* Usage the failed attempt reported before dying, or NULL. A retried
+             * attempt is billed like a completed one, so consumers add it to the
+             * turn's accounted total. */
+            const struct stream_usage *usage;
         } retry;
         struct {
             long processed; /* tokens prefilled so far this turn */

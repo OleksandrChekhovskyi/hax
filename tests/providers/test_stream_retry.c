@@ -22,6 +22,21 @@
     "HTTP/1.1 200 OK\r\nContent-Length: 28\r\nConnection: close\r\n\r\n"                           \
     "event: message\ndata: hello\n\n"
 
+/* Like SSE_OK plus the payload a completion-tracking fake accepts as terminal. */
+#define SSE_TERMINAL                                                                               \
+    "HTTP/1.1 200 OK\r\nContent-Length: 40\r\nConnection: close\r\n\r\n"                           \
+    "event: message\ndata: hello\n\ndata: done\n\n"
+
+/* The body falls short of its declared length: a 2xx stream cut by a transport error. */
+#define SSE_TRUNCATED                                                                              \
+    "HTTP/1.1 200 OK\r\nContent-Length: 999\r\nConnection: close\r\n\r\n"                          \
+    "event: message\ndata: hello\n\n"
+
+/* The terminal payload arrives, then the framing falls short of the declared length. */
+#define SSE_TERMINAL_TRUNCATED                                                                     \
+    "HTTP/1.1 200 OK\r\nContent-Length: 999\r\nConnection: close\r\n\r\n"                          \
+    "event: message\ndata: hello\n\ndata: done\n\n"
+
 /* Serves the scripted responses to sequential connections; every response must close the
  * connection so the next attempt reconnects. */
 struct test_server {
@@ -107,7 +122,9 @@ static void stop_server(struct test_server *server, pthread_t thread)
     close(server->listener_fd);
 }
 
-/* Fake protocol: parser lifecycle counters plus one text event per SSE data payload. */
+/* Fake protocol: parser lifecycle counters plus one text event per SSE data payload. With
+ * track_completion set, only a "done" payload marks the stream terminal, and captured usage
+ * is exposed for EV_RETRY. */
 struct fake_stream {
     stream_cb callback;
     void *callback_user;
@@ -119,6 +136,9 @@ struct fake_stream {
     int recover_grants; /* remaining 401 recoveries the hook reports as handled */
     int recover_calls;
     const char *custom_error; /* non-NULL: error_message answers 401 with a copy */
+    int track_completion;
+    int complete;
+    struct stream_usage usage;
 };
 
 static char **fake_build_headers(void *ctx)
@@ -139,15 +159,32 @@ static void fake_parser_init(void *ctx, stream_cb callback, void *callback_user)
     fake->callback_user = callback_user;
     fake->inits++;
     fake->live = 1;
+    fake->complete = 0;
 }
 
 static int fake_parser_feed(const char *event_name, const char *data, void *user)
 {
     (void)event_name;
     struct fake_stream *fake = user;
+    if (strcmp(data, "done") == 0) {
+        fake->complete = 1;
+        return 0;
+    }
     struct stream_event event = {.kind = EV_TEXT_DELTA, .u.text_delta = {.text = data}};
     fake->callback(&event, fake->callback_user);
     return 0;
+}
+
+static int fake_parser_complete(void *ctx)
+{
+    struct fake_stream *fake = ctx;
+    return !fake->track_completion || fake->complete;
+}
+
+static const struct stream_usage *fake_parser_usage(void *ctx)
+{
+    struct fake_stream *fake = ctx;
+    return fake->track_completion ? &fake->usage : NULL;
 }
 
 static void fake_parser_finalize(void *ctx)
@@ -194,6 +231,8 @@ struct event_log {
     int n_error;
     int n_done;
     int retry_status;
+    long retry_usage_input;
+    long error_usage_input;
     int error_status;
     char text[128];
     char error_message[256];
@@ -210,10 +249,14 @@ static int log_event(const struct stream_event *event, void *user)
     case EV_RETRY:
         log->n_retry++;
         log->retry_status = event->u.retry.http_status;
+        if (event->u.retry.usage && event->u.retry.usage->input_tokens > 0)
+            log->retry_usage_input += event->u.retry.usage->input_tokens;
         break;
     case EV_ERROR:
         log->n_error++;
         log->error_status = event->u.error.http_status;
+        if (event->u.error.usage)
+            log->error_usage_input = event->u.error.usage->input_tokens;
         snprintf(log->error_message, sizeof(log->error_message), "%s", event->u.error.message);
         break;
     case EV_DONE:
@@ -247,6 +290,8 @@ static int run_scripted(const char *const *responses, size_t n_responses, struct
         .parser_feed = fake_parser_feed,
         .parser_finalize = fake_parser_finalize,
         .parser_free = fake_parser_free,
+        .parser_complete = fake_parser_complete,
+        .parser_usage = fake_parser_usage,
         .recover = fake_recover,
         .error_message = fake_error_message,
     };
@@ -362,6 +407,98 @@ static void test_recover_redoes_attempt(void)
     EXPECT(fake.frees == 2);
 }
 
+/* A completion-tracking fake whose parser reports `input_tokens` (nothing when negative). */
+static struct fake_stream fake_tracking(long input_tokens)
+{
+    struct fake_stream fake = {.track_completion = 1};
+    fake.usage = (struct stream_usage){
+        .input_tokens = input_tokens,
+        .output_tokens = -1,
+        .cached_tokens = -1,
+        .cache_write_tokens = -1,
+        .cache_write_1h_tokens = -1,
+        .cost = -1,
+    };
+    return fake;
+}
+
+/* A 2xx stream that closes without a terminal state died mid-generation: retried like a
+ * transient failure, with the dead attempt's usage carried on EV_RETRY. */
+static void test_midstream_death_retried(void)
+{
+    const char *responses[] = {SSE_OK, SSE_TERMINAL};
+    struct fake_stream fake = fake_tracking(7);
+    struct event_log log = {0};
+    int result = run_scripted(responses, 2, &fake, &log);
+
+    EXPECT(result == 0);
+    EXPECT(log.n_retry == 1);
+    EXPECT(log.retry_status == 200);
+    EXPECT(log.retry_usage_input == 7);
+    EXPECT(log.n_error == 0);
+    EXPECT(log.n_done == 1);
+    EXPECT(fake.inits == 2);
+    EXPECT(fake.finalizes == 1);
+    EXPECT(fake.frees == 2);
+}
+
+static void test_midstream_death_budget_exhausted(void)
+{
+    const char *responses[] = {SSE_OK, SSE_OK};
+    setenv("HAX_HTTP_MAX_RETRIES", "1", 1);
+    struct fake_stream fake = fake_tracking(-1);
+    struct event_log log = {0};
+    int result = run_scripted(responses, 2, &fake, &log);
+    unsetenv("HAX_HTTP_MAX_RETRIES");
+
+    /* The exhausted attempt still finalizes — the path where real parsers emit
+     * the terminal "stream ended before completion" error. */
+    EXPECT(result == 0);
+    EXPECT(log.n_retry == 1);
+    EXPECT(log.retry_usage_input == 0);
+    EXPECT(fake.finalizes == 1);
+    EXPECT(fake.inits == 2);
+    EXPECT(fake.frees == 2);
+}
+
+/* A transport error on the final 2xx attempt still delivers the parser's captured usage. */
+static void test_transport_error_keeps_captured_usage(void)
+{
+    const char *responses[] = {SSE_TRUNCATED};
+    setenv("HAX_HTTP_MAX_RETRIES", "0", 1);
+    struct fake_stream fake = fake_tracking(7);
+    struct event_log log = {0};
+    int result = run_scripted(responses, 1, &fake, &log);
+    unsetenv("HAX_HTTP_MAX_RETRIES");
+
+    EXPECT(result != 0);
+    EXPECT(log.n_retry == 0);
+    EXPECT(log.n_error == 1);
+    EXPECT(log.error_status == 200);
+    EXPECT(log.error_usage_input == 7);
+    EXPECT(fake.finalizes == 0);
+    EXPECT(fake.frees == 1);
+}
+
+/* A transport error after the terminal state does not fail the response: it finalizes like
+ * a clean close, so its terminal event (and usage) is delivered exactly once. */
+static void test_transport_error_after_terminal_finalizes(void)
+{
+    const char *responses[] = {SSE_TERMINAL_TRUNCATED};
+    setenv("HAX_HTTP_MAX_RETRIES", "0", 1);
+    struct fake_stream fake = fake_tracking(7);
+    struct event_log log = {0};
+    int result = run_scripted(responses, 1, &fake, &log);
+    unsetenv("HAX_HTTP_MAX_RETRIES");
+
+    EXPECT(result != 0);
+    EXPECT(log.n_retry == 0);
+    EXPECT(log.n_error == 0);
+    EXPECT(log.n_done == 1);
+    EXPECT(fake.finalizes == 1);
+    EXPECT(fake.frees == 1);
+}
+
 static void test_error_message_hook(void)
 {
     const char *responses[] = {
@@ -387,6 +524,10 @@ int main(void)
     test_non_retryable_error();
     test_retry_budget_exhausted();
     test_recover_redoes_attempt();
+    test_midstream_death_retried();
+    test_midstream_death_budget_exhausted();
+    test_transport_error_keeps_captured_usage();
+    test_transport_error_after_terminal_finalizes();
     test_error_message_hook();
     unsetenv("HAX_HTTP_RETRY_BASE");
     T_REPORT();

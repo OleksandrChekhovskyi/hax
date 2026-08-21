@@ -182,6 +182,20 @@ static void stream_parser_free(void *ctx)
     stream->wire->events_free(&stream->events);
 }
 
+static int stream_parser_complete(void *ctx)
+{
+    struct http_stream *stream = ctx;
+    return stream->wire->events_complete(&stream->events);
+}
+
+static const struct stream_usage *stream_parser_usage(void *ctx)
+{
+    struct http_stream *stream = ctx;
+    if (!stream->wire->events_usage)
+        return NULL;
+    return stream->wire->events_usage(&stream->events);
+}
+
 /* How long a request may wait on the in-flight snapshot fetch for its wire hint. */
 #define WIRE_HINT_FETCH_WAIT_MS 5000
 
@@ -284,6 +298,8 @@ static int http_provider_stream(struct provider *base, const struct context *con
         .parser_feed = handle_sse_data,
         .parser_finalize = stream_parser_finalize,
         .parser_free = stream_parser_free,
+        .parser_complete = stream_parser_complete,
+        .parser_usage = stream_parser_usage,
     };
     int result = stream_retry_run(&request, callback, callback_user, tick, tick_user);
     free(endpoint);

@@ -261,6 +261,9 @@ static int render_on_event(const struct stream_event *event, void *user)
         break;
     }
     case EV_RETRY: {
+        /* A mid-stream retry abandons any partially rendered output; the next attempt
+         * re-streams the whole response. */
+        render_stream_retry(render);
         render->retry.deadline_ms = monotonic_ms() + event->u.retry.delay_ms;
         render->retry.next_attempt = event->u.retry.attempt + 1;
         render->retry.max_attempts = event->u.retry.max_attempts;
@@ -894,6 +897,8 @@ static int compact_on_event(const struct stream_event *event, void *user)
         usage = &event->u.done.usage;
     else if (event->kind == EV_ERROR)
         usage = event->u.error.usage;
+    else if (event->kind == EV_RETRY)
+        usage = event->u.retry.usage;
     if (!usage)
         return 0;
 
@@ -1068,7 +1073,10 @@ static void repl_loop_turn_end(const struct agent_loop_turn *loop_turn, void *us
         stats->latest_context_tokens = usage->input_tokens + usage->output_tokens;
         stats->context_limit = model_meta_context(provider, session->model);
     }
+    /* Retried attempts are separate spend records: merging could void an exact terminal
+     * charge over their unpriced tokens. The context snapshot above stays terminal-only. */
     stats_account_usage(stats, usage, provider, session->model);
+    stats_account_usage(stats, &loop_turn->retry_usage, provider, session->model);
 }
 
 static int repl_loop_checkpoint(void *user)

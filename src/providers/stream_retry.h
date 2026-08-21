@@ -26,6 +26,13 @@ struct stream_retry {
     void (*parser_finalize)(void *ctx);
     /* Release parser state; called between attempts and once on exit. */
     void (*parser_free)(void *ctx);
+    /* Optional. Return non-zero once the stream reached a terminal state (a finish or an
+     * in-band error). A 2xx attempt that ends without one died mid-stream and is retried
+     * as transient; NULL treats every 2xx attempt as terminal. */
+    int (*parser_complete)(void *ctx);
+    /* Optional. Borrowed usage the parser captured so far, or NULL; attached to EV_RETRY
+     * so attempts that die before their terminal event still get accounted. */
+    const struct stream_usage *(*parser_usage)(void *ctx);
     /* Optional. Runs after every non-cancelled attempt; return non-zero to redo the attempt
      * immediately without consuming a retry. The hook must bound its own recoveries or the
      * loop never terminates. */

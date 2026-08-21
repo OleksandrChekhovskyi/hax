@@ -20,14 +20,67 @@ enum script_mode {
     SCRIPT_PARTIAL_ERROR,
     SCRIPT_PRESTREAM_ERROR,
     SCRIPT_TOOL_ERROR,
+    SCRIPT_REASONING_ERROR,
+    SCRIPT_RETRY_THEN_COMPLETE,
 };
 
 static enum script_mode script;
 static int observer_events;
 
-static int emit_event(stream_cb cb, void *user, struct stream_event ev)
+static struct stream_usage usage_tokens(long input, long output)
 {
-    return cb(&ev, user);
+    return (struct stream_usage){
+        .input_tokens = input,
+        .output_tokens = output,
+        .cached_tokens = -1,
+        .cache_write_tokens = -1,
+        .cache_write_1h_tokens = -1,
+        .cost = -1,
+    };
+}
+
+static void emit_text(stream_cb cb, void *user, const char *text)
+{
+    struct stream_event ev = {.kind = EV_TEXT_DELTA, .u.text_delta = {.text = text}};
+    cb(&ev, user);
+}
+
+static void emit_reasoning(stream_cb cb, void *user, const char *text)
+{
+    struct stream_event ev = {.kind = EV_REASONING_DELTA, .u.reasoning_delta = {.text = text}};
+    cb(&ev, user);
+}
+
+static void emit_retry(stream_cb cb, void *user, const struct stream_usage *usage)
+{
+    struct stream_event ev = {.kind = EV_RETRY,
+                              .u.retry = {.attempt = 1, .max_attempts = 5, .usage = usage}};
+    cb(&ev, user);
+}
+
+static void emit_done(stream_cb cb, void *user, struct stream_usage usage)
+{
+    struct stream_event ev = {.kind = EV_DONE, .u.done = {.usage = usage}};
+    cb(&ev, user);
+}
+
+static void emit_error(stream_cb cb, void *user, const char *message,
+                       const struct stream_usage *usage)
+{
+    struct stream_event ev = {.kind = EV_ERROR, .u.error = {.message = message, .usage = usage}};
+    cb(&ev, user);
+}
+
+static void emit_tool_call(stream_cb cb, void *user, const char *id)
+{
+    struct stream_event start = {.kind = EV_TOOL_CALL_START,
+                                 .u.tool_call_start = {.id = id, .name = "read"}};
+    struct stream_event delta = {.kind = EV_TOOL_CALL_DELTA,
+                                 .u.tool_call_delta = {.id = id, .args_delta = "{}"}};
+    struct stream_event end = {.kind = EV_TOOL_CALL_END, .u.tool_call_end = {.id = id}};
+    cb(&start, user);
+    cb(&delta, user);
+    cb(&end, user);
 }
 
 static int scripted_stream(struct provider *p, const struct context *ctx, const char *model,
@@ -40,46 +93,34 @@ static int scripted_stream(struct provider *p, const struct context *ctx, const 
     EXPECT(ctx != NULL);
 
     if (script == SCRIPT_PRESTREAM_ERROR) {
-        emit_event(cb, user,
-                   (struct stream_event){.kind = EV_ERROR,
-                                         .u.error = {.message = "failed before output"}});
+        emit_error(cb, user, "failed before output", NULL);
         return 0;
     }
 
-    emit_event(cb, user,
-               (struct stream_event){
-                   .kind = EV_TEXT_DELTA,
-                   .u.text_delta = {.text = script == SCRIPT_TOOL_ERROR ? "before" : "partial"}});
-    if (script == SCRIPT_TOOL_ERROR) {
-        emit_event(cb, user,
-                   (struct stream_event){.kind = EV_TOOL_CALL_START,
-                                         .u.tool_call_start = {.id = "c1", .name = "read"}});
-        emit_event(cb, user,
-                   (struct stream_event){.kind = EV_TOOL_CALL_DELTA,
-                                         .u.tool_call_delta = {.id = "c1", .args_delta = "{}"}});
-        emit_event(
-            cb, user,
-            (struct stream_event){.kind = EV_TOOL_CALL_END, .u.tool_call_end = {.id = "c1"}});
+    if (script == SCRIPT_REASONING_ERROR) {
+        emit_reasoning(cb, user, "half a thought");
+        emit_error(cb, user, "stream ended before completion", NULL);
+        return 0;
     }
 
+    if (script == SCRIPT_RETRY_THEN_COMPLETE) {
+        struct stream_usage retry_usage = usage_tokens(40, -1);
+        emit_reasoning(cb, user, "doomed attempt");
+        emit_retry(cb, user, &retry_usage);
+        emit_text(cb, user, "partial");
+        emit_done(cb, user, usage_tokens(100, 20));
+        return 0;
+    }
+
+    emit_text(cb, user, script == SCRIPT_TOOL_ERROR ? "before" : "partial");
+    if (script == SCRIPT_TOOL_ERROR)
+        emit_tool_call(cb, user, "c1");
+
     if (script == SCRIPT_COMPLETE) {
-        struct stream_usage usage = {.input_tokens = 100,
-                                     .output_tokens = 20,
-                                     .cached_tokens = -1,
-                                     .cache_write_tokens = -1,
-                                     .cache_write_1h_tokens = -1,
-                                     .cost = -1};
-        emit_event(cb, user, (struct stream_event){.kind = EV_DONE, .u.done = {.usage = usage}});
+        emit_done(cb, user, usage_tokens(100, 20));
     } else {
-        static const struct stream_usage usage = {.input_tokens = 100,
-                                                  .output_tokens = 20,
-                                                  .cached_tokens = -1,
-                                                  .cache_write_tokens = -1,
-                                                  .cache_write_1h_tokens = -1,
-                                                  .cost = -1};
-        emit_event(cb, user,
-                   (struct stream_event){.kind = EV_ERROR,
-                                         .u.error = {.message = "stream failed", .usage = &usage}});
+        struct stream_usage usage = usage_tokens(100, 20);
+        emit_error(cb, user, "stream failed", &usage);
     }
     return 0;
 }
@@ -174,7 +215,32 @@ static void test_prestream_error_adds_no_marker(void)
     agent_session_free(&session);
 }
 
-static void test_aborted_tool_call_gets_result(void)
+static void test_cancelled_tool_call_gets_result(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    struct provider provider = {.name = "test", .stream = scripted_stream};
+    struct agent_loop_turn loop_turn;
+    script = SCRIPT_TOOL_ERROR;
+
+    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
+    struct agent_abort_outcome out =
+        agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_USER_CANCEL);
+    /* A user cancel keeps the whole streamed turn, and providers require
+     * call/result pairing on the next request. */
+    EXPECT(out.items_from == 0 && out.items_to == 2);
+    EXPECT(session.n_items == 3);
+    EXPECT(session.items[0].kind == ITEM_ASSISTANT_MESSAGE);
+    EXPECT(session.items[1].kind == ITEM_TOOL_CALL);
+    EXPECT(session.items[2].kind == ITEM_TOOL_RESULT);
+    EXPECT_STR_EQ(session.items[2].call_id, "c1");
+    EXPECT_STR_EQ(session.items[2].output, INTERRUPT_MARKER);
+
+    agent_loop_turn_destroy(&loop_turn);
+    agent_session_free(&session);
+}
+
+static void test_provider_error_drops_tool_call(void)
 {
     struct agent_session session;
     session_init(&session);
@@ -185,15 +251,64 @@ static void test_aborted_tool_call_gets_result(void)
     agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
     struct agent_abort_outcome out =
         agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_PROVIDER_ERROR);
-    /* Providers require call/result pairing on the next request, even though
-     * this call was assembled immediately before the stream failed. */
-    EXPECT(out.items_from == 0 && out.items_to == 2);
-    EXPECT(session.n_items == 3);
+    /* The call never ran, so replaying it would need a fabricated result;
+     * dropping it lets the retry re-issue the same request. The streamed
+     * text stays, marked as cut in place — a standalone marker item would
+     * serialize glued onto the text on the chat wire. */
+    EXPECT(out.marker_placed);
+    EXPECT(session.n_items == 1);
     EXPECT(session.items[0].kind == ITEM_ASSISTANT_MESSAGE);
-    EXPECT(session.items[1].kind == ITEM_TOOL_CALL);
-    EXPECT(session.items[2].kind == ITEM_TOOL_RESULT);
-    EXPECT_STR_EQ(session.items[2].call_id, "c1");
-    EXPECT_STR_EQ(session.items[2].output, INTERRUPT_MARKER);
+    EXPECT_STR_EQ(session.items[0].text, "before\n" INTERRUPT_MARKER);
+    EXPECT(session.items[0].origin == ITEM_ORIGIN_INTERRUPTED);
+
+    agent_loop_turn_destroy(&loop_turn);
+    agent_session_free(&session);
+}
+
+static void test_provider_error_drops_reasoning(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    struct provider provider = {.name = "test", .stream = scripted_stream};
+    struct agent_loop_turn loop_turn;
+    script = SCRIPT_REASONING_ERROR;
+
+    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
+    struct agent_abort_outcome out =
+        agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_PROVIDER_ERROR);
+    /* Truncated reasoning re-sent as finished state derails models. With no
+     * text to keep, history stays untouched and marker-free, so a retry
+     * re-issues the identical request. */
+    EXPECT(out.had_state);
+    EXPECT(!out.marker_placed);
+    EXPECT(session.n_items == 0);
+
+    agent_loop_turn_destroy(&loop_turn);
+    agent_session_free(&session);
+}
+
+static void test_retry_usage_accumulates(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    struct provider provider = {.name = "test", .stream = scripted_stream};
+    struct agent_loop_turn loop_turn;
+    script = SCRIPT_RETRY_THEN_COMPLETE;
+
+    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
+    /* The retried attempt's tokens are billed but must not skew the context
+     * measurement, which reflects only the terminal attempt. */
+    EXPECT(loop_turn.assembly.state == TURN_DONE);
+    EXPECT(loop_turn.usage.input_tokens == 100);
+    EXPECT(loop_turn.usage.output_tokens == 20);
+    struct stream_usage total = agent_loop_turn_usage_total(&loop_turn);
+    EXPECT(total.input_tokens == 140);
+    EXPECT(total.output_tokens == 20);
+
+    struct agent_absorb_result absorbed = agent_session_absorb(&session, &loop_turn.assembly);
+    EXPECT(absorbed.items_from == 0);
+    EXPECT(session.n_items == 1);
+    EXPECT_STR_EQ(session.items[0].text, "partial");
 
     agent_loop_turn_destroy(&loop_turn);
     agent_session_free(&session);
@@ -223,18 +338,6 @@ static void test_empty_cancel_adds_marker(void)
 static int chain_turn;
 static int chain_two_tools;
 
-static void emit_tool_call(stream_cb cb, void *user, const char *id)
-{
-    emit_event(cb, user,
-               (struct stream_event){.kind = EV_TOOL_CALL_START,
-                                     .u.tool_call_start = {.id = id, .name = "read"}});
-    emit_event(cb, user,
-               (struct stream_event){.kind = EV_TOOL_CALL_DELTA,
-                                     .u.tool_call_delta = {.id = id, .args_delta = "{}"}});
-    emit_event(cb, user,
-               (struct stream_event){.kind = EV_TOOL_CALL_END, .u.tool_call_end = {.id = id}});
-}
-
 static int chain_stream(struct provider *p, const struct context *ctx, const char *model,
                         stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
 {
@@ -250,17 +353,9 @@ static int chain_stream(struct provider *p, const struct context *ctx, const cha
         if (chain_two_tools)
             emit_tool_call(cb, user, "c2");
     } else {
-        emit_event(
-            cb, user,
-            (struct stream_event){.kind = EV_TEXT_DELTA, .u.text_delta = {.text = "finished"}});
+        emit_text(cb, user, "finished");
     }
-    struct stream_usage usage = {.input_tokens = 10 * chain_turn,
-                                 .output_tokens = 2,
-                                 .cached_tokens = -1,
-                                 .cache_write_tokens = -1,
-                                 .cache_write_1h_tokens = -1,
-                                 .cost = -1};
-    emit_event(cb, user, (struct stream_event){.kind = EV_DONE, .u.done = {.usage = usage}});
+    emit_done(cb, user, usage_tokens(10 * chain_turn, 2));
     return 0;
 }
 
@@ -639,13 +734,7 @@ static int chain_then_silent_stream(struct provider *p, const struct context *ct
     if (chain_turn > 1)
         return 0;
     emit_tool_call(cb, user, "c1");
-    struct stream_usage usage = {.input_tokens = 10,
-                                 .output_tokens = 2,
-                                 .cached_tokens = -1,
-                                 .cache_write_tokens = -1,
-                                 .cache_write_1h_tokens = -1,
-                                 .cost = -1};
-    emit_event(cb, user, (struct stream_event){.kind = EV_DONE, .u.done = {.usage = usage}});
+    emit_done(cb, user, usage_tokens(10, 2));
     return 0;
 }
 
@@ -719,6 +808,51 @@ static void test_loop_continued_preempted_run_leaves_no_boundary(void)
     agent_session_free(&session);
 }
 
+/* Turn 1 emits a tool call and completes; turn 2's attempt dies with banked retry
+ * usage and the pause cancels the redo — no terminal event, nothing assembled. */
+static int chain_then_retry_paused_stream(struct provider *p, const struct context *ctx,
+                                          const char *model, stream_cb cb, void *user,
+                                          http_tick_cb tick, void *tick_user)
+{
+    (void)p;
+    (void)model;
+    (void)tick;
+    (void)tick_user;
+    EXPECT(ctx != NULL);
+    chain_turn++;
+    if (chain_turn == 1) {
+        emit_tool_call(cb, user, "c1");
+        emit_done(cb, user, usage_tokens(10, 2));
+        return 0;
+    }
+    struct stream_usage retry_usage = usage_tokens(40, -1);
+    emit_retry(cb, user, &retry_usage);
+    return 0;
+}
+
+static void test_loop_paused_retry_usage_keeps_boundary(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    session_enable_tools(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = chain_then_retry_paused_stream};
+    struct loop_test_ctx ctx = {.pause_at = 4};
+    chain_turn = 0;
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
+    /* The pre-empted follow-up assembled nothing, but its dead attempt banked billable
+     * usage: that footer is retained and owes its boundary, or it would read as part of
+     * turn 1. */
+    EXPECT(result.outcome == AGENT_LOOP_PAUSED);
+    EXPECT(session.items[session.n_items - 1].kind == ITEM_TURN_USAGE);
+    EXPECT(session.items[session.n_items - 1].usage->usage.input_tokens == 40);
+    EXPECT(session.items[session.n_items - 2].kind == ITEM_TURN_BOUNDARY);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
 /* Turn 1 emits a tool call; turn 2 completes successfully with no content
  * (EV_DONE only, usage reported) — an empty but real round-trip. */
 static int chain_then_empty_done_stream(struct provider *p, const struct context *ctx,
@@ -733,13 +867,7 @@ static int chain_then_empty_done_stream(struct provider *p, const struct context
     chain_turn++;
     if (chain_turn == 1)
         emit_tool_call(cb, user, "c1");
-    struct stream_usage usage = {.input_tokens = 10 * chain_turn,
-                                 .output_tokens = 2,
-                                 .cached_tokens = -1,
-                                 .cache_write_tokens = -1,
-                                 .cache_write_1h_tokens = -1,
-                                 .cost = -1};
-    emit_event(cb, user, (struct stream_event){.kind = EV_DONE, .u.done = {.usage = usage}});
+    emit_done(cb, user, usage_tokens(10 * chain_turn, 2));
     return 0;
 }
 
@@ -839,24 +967,11 @@ static int chain_then_error_usage_stream(struct provider *p, const struct contex
     chain_turn++;
     if (chain_turn == 1) {
         emit_tool_call(cb, user, "c1");
-        struct stream_usage usage = {.input_tokens = 10,
-                                     .output_tokens = 2,
-                                     .cached_tokens = -1,
-                                     .cache_write_tokens = -1,
-                                     .cache_write_1h_tokens = -1,
-                                     .cost = -1};
-        emit_event(cb, user, (struct stream_event){.kind = EV_DONE, .u.done = {.usage = usage}});
+        emit_done(cb, user, usage_tokens(10, 2));
         return 0;
     }
-    static const struct stream_usage usage = {.input_tokens = 20,
-                                              .output_tokens = 0,
-                                              .cached_tokens = -1,
-                                              .cache_write_tokens = -1,
-                                              .cache_write_1h_tokens = -1,
-                                              .cost = -1};
-    emit_event(
-        cb, user,
-        (struct stream_event){.kind = EV_ERROR, .u.error = {.message = "boom", .usage = &usage}});
+    struct stream_usage usage = usage_tokens(20, 0);
+    emit_error(cb, user, "boom", &usage);
     return 0;
 }
 
@@ -1040,7 +1155,10 @@ int main(void)
     test_loop_turn_collects_success();
     test_partial_error_is_preserved();
     test_prestream_error_adds_no_marker();
-    test_aborted_tool_call_gets_result();
+    test_cancelled_tool_call_gets_result();
+    test_provider_error_drops_tool_call();
+    test_provider_error_drops_reasoning();
+    test_retry_usage_accumulates();
     test_empty_cancel_adds_marker();
     test_loop_runs_tool_chain();
     test_loop_enforces_max_turns();
@@ -1050,6 +1168,7 @@ int main(void)
     test_loop_pause_runs_whole_batch();
     test_loop_pause_preempts_empty_turn();
     test_loop_pause_preempts_follow_up_leaves_no_boundary();
+    test_loop_paused_retry_usage_keeps_boundary();
     test_loop_continued_run_owes_boundary();
     test_loop_continued_preempted_run_leaves_no_boundary();
     test_loop_empty_completion_keeps_boundary();

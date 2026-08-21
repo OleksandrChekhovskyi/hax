@@ -44,6 +44,7 @@ struct render_ctx {
     struct {
         int content_seen; /* the current stream has content a pause must preserve */
         int answer_started;
+        int output_rendered; /* the current attempt wrote text or reasoning to the terminal */
     } stream;
 
     int show_reasoning;
@@ -57,6 +58,10 @@ void render_stream_boundary(struct render_ctx *render);
 
 /* Reset per-stream state and Markdown, then enter waiting unless a tool cluster remains open. */
 void render_stream_begin(struct render_ctx *render);
+
+/* Settle a partially rendered attempt before a mid-stream retry: mark the cut where output was
+ * already visible, then reset per-stream state so the retried attempt renders fresh. */
+void render_stream_retry(struct render_ctx *render);
 
 /* Close the current mode and separate the next out-of-band visual block. */
 void render_open_block(struct render_ctx *render);

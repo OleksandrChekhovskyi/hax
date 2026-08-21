@@ -51,6 +51,17 @@ static void chat_free(union wire_events *events)
     openai_events_free(&events->chat);
 }
 
+static int chat_complete(const union wire_events *events)
+{
+    /* finish_received covers a stream cut between the finish chunk and [DONE]. */
+    return events->chat.terminal_emitted || events->chat.finish_received;
+}
+
+static const struct stream_usage *chat_usage(const union wire_events *events)
+{
+    return &events->chat.usage;
+}
+
 const struct wire WIRE_OPENAI_CHAT = {
     .id = "openai-completions",
     .path = "/chat/completions",
@@ -59,6 +70,8 @@ const struct wire WIRE_OPENAI_CHAT = {
     .events_feed = chat_feed,
     .events_finalize = chat_finalize,
     .events_free = chat_free,
+    .events_complete = chat_complete,
+    .events_usage = chat_usage,
 };
 
 static void responses_init(union wire_events *events, stream_cb callback, void *callback_user,
@@ -84,6 +97,11 @@ static void responses_free(union wire_events *events)
     responses_events_free(&events->responses);
 }
 
+static int responses_complete(const union wire_events *events)
+{
+    return events->responses.terminal_emitted;
+}
+
 const struct wire WIRE_OPENAI_RESPONSES = {
     .id = "openai-responses",
     .path = "/responses",
@@ -92,6 +110,7 @@ const struct wire WIRE_OPENAI_RESPONSES = {
     .events_feed = responses_feed,
     .events_finalize = responses_finalize,
     .events_free = responses_free,
+    .events_complete = responses_complete,
 };
 
 static void messages_init(union wire_events *events, stream_cb callback, void *callback_user,
@@ -116,6 +135,16 @@ static void messages_free(union wire_events *events)
     anthropic_events_free(&events->messages);
 }
 
+static int messages_complete(const union wire_events *events)
+{
+    return events->messages.terminal_emitted;
+}
+
+static const struct stream_usage *messages_usage(const union wire_events *events)
+{
+    return &events->messages.usage;
+}
+
 const struct wire WIRE_ANTHROPIC_MESSAGES = {
     .id = "anthropic-messages",
     .path = "/messages",
@@ -124,6 +153,8 @@ const struct wire WIRE_ANTHROPIC_MESSAGES = {
     .events_feed = messages_feed,
     .events_finalize = messages_finalize,
     .events_free = messages_free,
+    .events_complete = messages_complete,
+    .events_usage = messages_usage,
 };
 
 const struct wire *wire_find(const char *api)

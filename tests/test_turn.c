@@ -377,6 +377,70 @@ static void test_error_with_completed_tool_call_preserved(void)
     turn_reset(&t);
 }
 
+static void test_retry_discards_partial_attempt(void)
+{
+    /* A mid-stream retry re-streams the whole response, so nothing from the
+     * failed attempt may survive into the next one's assembly. */
+    struct turn t;
+    turn_init(&t);
+    feed_reasoning(&t, "half a thought");
+    feed_text(&t, "half an answer");
+    feed_tool_start(&t, "c1", "read");
+    struct stream_event retry = {.kind = EV_RETRY, .u.retry = {.attempt = 1, .max_attempts = 5}};
+    turn_consume(&t, &retry);
+
+    EXPECT(t.n_items == 0);
+    EXPECT(t.has_text == 0);
+    EXPECT(t.has_reasoning == 0);
+    EXPECT(t.n_pending_calls == 0);
+    EXPECT(t.state == TURN_STREAMING);
+
+    feed_text(&t, "the full answer");
+    feed_done(&t);
+    EXPECT(t.n_items == 1);
+    EXPECT_STR_EQ(t.items[0].text, "the full answer");
+    turn_reset(&t);
+}
+
+static void test_keep_text_drops_reasoning_and_calls(void)
+{
+    struct turn t;
+    turn_init(&t);
+    feed_reasoning(&t, "thought one");
+    struct stream_event item = {.kind = EV_REASONING_ITEM,
+                                .u.reasoning_item = {.json = "{\"type\":\"reasoning\"}"}};
+    turn_consume(&t, &item);
+    feed_text(&t, "first part ");
+    feed_tool_start(&t, "c1", "read");
+    feed_tool_delta(&t, "c1", "{\"path\":\"x\"}");
+    feed_tool_end(&t, "c1");
+    feed_reasoning(&t, "more thinking");
+    feed_error(&t, "stream dropped");
+
+    turn_keep_text(&t);
+    EXPECT(t.n_items == 1);
+    EXPECT(t.items[0].kind == ITEM_ASSISTANT_MESSAGE);
+    EXPECT_STR_EQ(t.items[0].text, "first part ");
+    EXPECT(t.has_reasoning == 0);
+    turn_flush_reasoning(&t);
+    EXPECT(t.n_items == 1);
+    turn_reset(&t);
+}
+
+static void test_keep_text_preserves_open_buffer(void)
+{
+    struct turn t;
+    turn_init(&t);
+    feed_reasoning(&t, "thinking");
+    feed_text(&t, "partial answer");
+    feed_error(&t, "stream dropped");
+
+    turn_keep_text(&t);
+    EXPECT(t.has_text == 1);
+    EXPECT_STR_EQ(t.text.data, "partial answer");
+    turn_reset(&t);
+}
+
 static void test_take_items_zeros_vector(void)
 {
     struct turn t;
@@ -448,6 +512,9 @@ int main(void)
     test_error_then_flush_with_marker();
     test_error_after_text_flushed_by_tool_call_start();
     test_error_with_completed_tool_call_preserved();
+    test_retry_discards_partial_attempt();
+    test_keep_text_drops_reasoning_and_calls();
+    test_keep_text_preserves_open_buffer();
     test_take_items_zeros_vector();
     test_reset_after_take_is_noop_for_items();
     test_reset_before_done_frees_partial_state();
