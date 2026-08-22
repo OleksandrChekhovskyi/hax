@@ -7,6 +7,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-22
+
 ### Added
 
 - OpenCode Zen and Go providers (`opencode-zen`, `opencode-go`): set `OPENCODE_API_KEY`, choose a
