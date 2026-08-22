@@ -152,7 +152,7 @@ detection.
 
 ## Sessions and history
 
-Non-empty conversations are recorded as append-only JSONL under:
+Non-empty conversations are recorded as JSONL session files under:
 
 ```text
 ~/.local/state/hax/sessions/<encoded-cwd>/
@@ -185,9 +185,11 @@ and hax returns to a prompt at the next model-turn boundary. At that prompt:
 - type a message to add new direction before the next model request; or
 - use commands such as `/model`, `/compact`, or `/session` before continuing.
 
-Esc again requests an immediate interrupt. hax marks partial history so the conversation remains
-resumable. `max_turns` provides the same kind of periodic check-in after a configured number of
-model round-trips.
+Esc again requests an immediate interrupt. Answer text already shown and completed tool activity
+remain visible, but unfinished reasoning is discarded so it cannot confuse the next request. If the
+model had not yet produced answer text or a tool call, the conversation is left unchanged; press
+Enter on an empty line to retry. `max_turns` provides the same kind of periodic check-in after a
+configured number of model round-trips.
 
 ## Background tasks and delegation
 
@@ -200,9 +202,10 @@ Set `no_tasks` to disable this behavior and make command timeouts kill the comma
 and concurrency settings are in [configuration](./configuration.md#tools-and-transport).
 
 When explicitly asked to use subagents, hax can run additional `hax -p` processes as background
-tasks. They inherit the current provider/model/effort by default; a named preset can give one a
-different role. Keep delegation for independent work that benefits from parallel context—ordinary
-small tasks are faster and cheaper in one conversation.
+tasks. They inherit the current provider/model/effort by default. Presets with a `description` are
+advertised to the model as named roles; favorite-only presets remain private picker shortcuts. Keep
+delegation for independent work that benefits from parallel context — ordinary small tasks are
+faster and cheaper in one conversation.
 
 ## Context, compaction, and usage
 

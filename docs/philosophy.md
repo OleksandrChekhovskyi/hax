@@ -17,8 +17,8 @@ subprocesses.** There is no embedded scripting runtime, no plugin ABI, no extens
 What you can already shape without touching C:
 
 - Providers and endpoints as config blocks — see [providers.md](./providers.md).
-- Presets: named bundles of provider/model/effort/system-prompt, which double as subagent
-  roles — see [configuration.md](./configuration.md).
+- Presets: named bundles of provider/model/effort/system-prompt; presets with descriptions can
+  also serve as subagent roles — see [configuration.md](./configuration.md).
 - System prompt base and append, inline or from a file (`@path`).
 - Project instructions via the `AGENTS.md` hierarchy, and skills via `SKILL.md` directories —
   see [usage.md](./usage.md).

@@ -141,10 +141,10 @@ For one-shot `-p`, provider construction failures are fatal.
 
 Common checks:
 
-- Codex: `~/.codex/auth.json` must exist and contain `tokens.access_token` and
-  `tokens.account_id`.
-- OpenAI/OpenRouter/Anthropic: make sure the expected API key environment variable is visible
-  to the `hax` process.
+- Codex: run `/login`. If you instead borrow the official codex CLI login, make sure
+  `~/.codex/auth.json` exists and refresh it by running `codex` again when it expires.
+- OpenAI/OpenRouter/Anthropic/OpenCode: make sure the expected API key environment variable is
+  visible to the `hax` process.
 - `openai-compatible` and `anthropic-compatible`: set the corresponding base URL.
 - llama.cpp/ollama: make sure the local server is reachable and the model is configured or
   discoverable.

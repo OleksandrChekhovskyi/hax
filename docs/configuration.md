@@ -59,8 +59,9 @@ also identifies settings that can be changed for the running process:
 Provider, model, effort, and preset use their dedicated commands. API keys are displayed only as set
 or unset. `/config` tracks only hax's own settings, so a first-party credential variable such as
 `OPENAI_API_KEY` authenticates without appearing there. Provider blocks (`providers.<id>.*`) are not
-listed either — configure providers via `/provider`, environment variables, or `config.json` — but a
-specific key can still be queried by name, e.g. `/config providers.openai-compatible.base_url`.
+listed either: select a provider with `/provider`, and define its settings through environment
+variables or `config.json`. A specific registered key can still be queried by name, for example
+`/config providers.openai-compatible.base_url`.
 
 ## Config file format
 
@@ -279,10 +280,10 @@ Per-model overrides can be placed under `catalog.models`, with costs in USD per 
 }
 ```
 
-Configured fields override cached fields individually. An `api` member (`openai-completions`,
-`openai-responses`, or `anthropic-messages`) pins one model's protocol on a mixed-protocol
-gateway; the provider-level `model_apis` field is the glob-based form. A `~` on displayed spend means the result is
-estimated from token counts and this metadata; check provider billing for authoritative costs.
+Configured fields override cached fields individually. Model API overrides for mixed gateways are
+covered under [Custom providers](./providers.md#custom-providers). A `~` on displayed spend means the
+result is estimated from token counts and this metadata; check provider billing for authoritative
+costs.
 
 ### Tools and transport
 

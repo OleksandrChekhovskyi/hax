@@ -27,8 +27,7 @@ static const struct config_setting REGISTRY[] = {
     {.key = "preset", .env_var = "HAX_PRESET", .keep_empty = 1,
      .description = "Preset from presets.<name> to apply at startup; empty disables"},
     {.key = "provider", .env_var = "HAX_PROVIDER", .keep_empty = 1,
-     .description = "Backend: codex, openai, openai-compatible, anthropic, anthropic-compatible, "
-                    "llamacpp, ollama, openrouter, mock"},
+     .description = "Provider id; /provider shows the available choices"},
     {.key = "model", .env_var = "HAX_MODEL", .keep_empty = 1,
      .description = "Model id (provider-specific; some auto-fill or require it)"},
     {.key = "effort", .env_var = "HAX_EFFORT", .keep_empty = 1,

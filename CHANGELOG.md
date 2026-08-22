@@ -9,108 +9,63 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
-- OpenCode Zen and Go providers (`opencode-zen`, `opencode-go`): set `OPENCODE_API_KEY` and pick
-  a model — hax speaks each model's API automatically. On `opencode-go`, `/usage` shows the
-  subscription's rate-limit windows. See
+- OpenCode Zen and Go providers (`opencode-zen`, `opencode-go`): set `OPENCODE_API_KEY`, choose a
+  model, and hax selects the API it needs. `/usage` shows OpenCode Go's subscription limits. See
   [docs/providers.md](docs/providers.md#opencode-zen-and-go).
-- Custom providers can serve several protocols behind one URL: `api: "catalog"` routes each model
-  by the model catalog, and `model_apis` maps model-id globs to APIs explicitly. See
+- `/login` signs in to ChatGPT for the codex provider and keeps the token refreshed, so the codex
+  CLI is no longer required. Existing codex CLI credentials remain a read-only fallback. See
+  [docs/providers.md](docs/providers.md#codex).
+- llama.cpp multi-model router support: `/model` shows the server catalog and load state, selecting
+  an idle model warms it in the background, and hax never loads a model you did not select.
+- Custom gateways can route different models through their required APIs. Provider blocks also
+  accept `extra_body` and `extra_headers` for documented gateway features such as routing rules,
+  service tiers, and additional credentials. See
   [docs/providers.md](docs/providers.md#custom-providers).
-- `/login` signs in to ChatGPT for the codex provider, so the codex CLI is no longer needed:
-  approve a code on the printed `auth.openai.com` page and hax keeps the token refreshed from
-  then on. `/logout` removes the login. Credentials from the codex CLI keep working (read-only)
-  when no hax-managed login exists. See [docs/providers.md](docs/providers.md#codex).
-- The transcript names what served each turn below its usage line: provider, model and reasoning
-  effort as they were for that turn, the model the response reported when it differs from the
-  request, and OpenRouter's upstream endpoint.
-- `HAX_TRACE` redacts credentials inside request and error bodies, not just headers.
-- Every provider block accepts `extra_body` and `extra_headers`: raw JSON members merged into
-  each request body (OpenRouter routing preferences, service tiers, sampling knobs) and extra
-  HTTP headers on every request (gateway credentials, attribution). A `$VAR` header value or
-  inline `api_key` reads the environment variable instead, and `HAX_TRACE` redacts such values
-  wherever they appear. See [docs/providers.md](docs/providers.md#request-passthrough).
-- The llama.cpp provider understands llama-server's multi-model router mode. `/model` lists the
-  server's whole catalog with load state, context, and image capability; a configured model is
-  matched by id or alias; and hax never makes the router load a model you didn't select — picking
-  one warms it up in the background.
-- FreeBSD and OpenBSD are supported, and CI builds and tests them on every change alongside Linux
-  and macOS. Both build from source, and `scripts/install_deps.sh` installs their dependencies.
-- On Arch Linux, hax is available in the AUR as `hax`, refreshed automatically by each stable
-  release.
+- The transcript records the provider, model, and reasoning effort used for each turn, plus a
+  different model or OpenRouter endpoint reported by the response.
+- FreeBSD and OpenBSD can now build from source, and Arch Linux users can install the `hax` AUR
+  package. Stable releases update both the AUR package and Homebrew tap automatically.
 
 ### Changed
 
-- Only presets with a `description` are advertised to the model as subagent delegation targets.
-  A bare favorite selection was previously listed by name alone, which tempted models into
-  delegating to it unprompted based on nothing but the name; a description is now the opt-in
-  that turns a preset into a model-visible role.
-- Truncated thinking is never replayed to the next request — whether the turn was interrupted
-  (Esc Esc) or failed with a provider error — since replaying it was shown to derail models into
-  garbage output. An interrupt that caught the model before any answer text or tool call now also
-  leaves the conversation exactly as it was, so a follow-up prompt steers cleanly and an empty
-  send re-asks the question; previously it left an `[interrupted]` stub the model saw as a prior
-  failed answer.
-- The `/model` picker sorts every provider's list by default with a version-aware order: model
-  families group alphabetically, newer versions come first (`gpt-5.6` before `gpt-5`, whether
-  versions are dotted or dashed), and a base model precedes its dated snapshots and named
-  variants. Previously only some providers sorted, and purely alphabetically. `sort_models off`
-  (global or per provider) restores server order.
-- **Breaking:** every provider now reads settings only from its own `providers.<id>` config block,
-  so a key or quirk configured for one endpoint can no longer leak into another. Per-provider
-  config keys and some environment variables moved or changed scope in the process; if you
-  configure providers beyond their API-key variables, revisit your setup against
-  [docs/providers.md](docs/providers.md) and
-  [docs/configuration.md](docs/configuration.md#provider-settings). Auto-selection now also tries
-  the generic -compatible providers after every compiled-in one.
-- The `/provider` picker shows display names — `llama.cpp`, a configured `display_name` — and
-  notes the selectable provider id below the list when it differs from the highlighted label.
-- `/config` no longer lists `providers.*` keys: providers are configured through `/provider`,
-  environment variables, and `config.json`. A specific key can still be queried by name.
-- A `providers.<name>` block member that hax does not recognize, or that the provider does not
-  use — including Chat Completions-only fields on a Responses endpoint, and typos in a
-  compiled-in provider's block — now warns at construction instead of being silently ignored.
-- Selecting a reasoning effort now takes effect on Anthropic-protocol models of custom endpoints
-  and gateways, by switching the request to adaptive thinking; previously it was silently
-  ignored there. An explicit `thinking_mode` setting still wins.
-- Keyless config-defined providers count a configured `base_url` as available instead of probing
-  `/models`, which a generic endpoint may not serve; the ollama recipe still probes its local
-  server.
-- hax-written `config.json` updates (`/config`, preset save) no longer rewrite numbers and
-  booleans elsewhere in the file as strings.
+- **Breaking:** provider settings now belong to `providers.<id>` blocks and no longer leak between
+  endpoints. Several keys and environment variables changed scope; users with advanced provider
+  configuration should revisit [docs/providers.md](docs/providers.md) and
+  [docs/configuration.md](docs/configuration.md#provider-settings). llama.cpp settings now live under
+  the dot-free `providers.llamacpp` config block; the user-facing `llama.cpp` selection remains
+  accepted. Auto-selection tries the built-in providers before compatible and custom providers.
+- `/model` now uses a version-aware order by default: model families stay together and newer
+  versions appear first. Set `sort_models` to `off` to preserve server order.
+- Only presets with a `description` are offered to the model as subagent roles. Favorite-only
+  presets remain user shortcuts instead of inviting unrequested delegation based on a name alone.
+- `/provider` shows human-readable display names while keeping the selectable id visible. Unknown
+  or inapplicable provider settings now warn instead of being silently ignored, and `/config` keeps
+  provider settings out of its general picker.
+- Reasoning effort now applies to Anthropic-compatible models on custom gateways unless an explicit
+  `thinking_mode` overrides it.
+- Config updates made by hax preserve JSON numbers and booleans instead of rewriting them as
+  strings.
 
 ### Fixed
 
-- Markdown headings render properly at every level, including the deeper `####` and beyond that
-  models use for subsections, and are always followed by a blank line.
-- A response stream that dies mid-generation is retried automatically instead of failing the
-  turn with `[provider error — enter to retry]`; anything already rendered is closed with a dim
-  `[unexpected end]` marker and the retry re-streams from scratch.
-- Models that need to see their own earlier reasoning (Kimi K3, GLM, DeepSeek and MiniMax on the
-  OpenCode providers) no longer stop reasoning after the first turn of a conversation.
-- Summarized and encrypted reasoning from OpenAI, Gemini, Kimi and MiniMax models on OpenRouter
-  survives across turns instead of being dropped after the turn that produced it.
-- Tool calls from backends that deliver the arguments only with the completed call instead of
-  streaming them (Grok via OpenCode Go) no longer run with empty arguments and derail the
-  conversation.
-- Custom providers that enable prompt caching now default the cache-breakpoint TTL to 1h like the
-  built-in providers, instead of falling back to the API's 5m. A `cache_ttl` value other than
-  `5m`/`1h` now warns and uses the default instead of silently behaving as 5m.
-- OpenAI reasoning summaries no longer render their step titles glued together
-  ("...color string lengthInvestigating combining marks..."): the Responses providers now put
-  each summary part on its own line. Reasoning blocks after the first in a response also wrap
-  at the right column in the live view, and the history view (Ctrl-O) separates consecutive
-  reasoning blocks the way the live view does instead of running them into one paragraph.
-- With `show_reasoning` on, the history view (Ctrl-O) no longer loses the dim italic reasoning
-  styling after the first line. `less` resets styling at every line, so the settled output now
-  reopens carried-over styling on each line; bold or italic spans wrapped across lines are
-  covered too.
-- The transcript and history views (Ctrl-T, Ctrl-O) no longer show literal `ESC[1m` escapes or
-  garbled non-ASCII, and the `$EDITOR` buffer and the `@file` picker keep non-ASCII intact. A plain
-  `PAGER=less`, or a system with no locale configured, previously broke them. hax also warns at
-  startup now when no UTF-8 locale is available at all.
-- `hax --version` no longer reports the version of an unrelated repository. A release tarball ships
-  no `.git`, so building one inside another checkout — an AUR packaging clone, say — stamped that
-  repository's commit hash into the binary.
+- Interrupted and failed responses no longer carry unfinished reasoning into the next request. An
+  interrupt before any answer text or tool call leaves the conversation unchanged, while a stream
+  that ends unexpectedly is retried automatically from a clean attempt.
+- Reasoning now continues correctly across turns for affected Kimi, GLM, DeepSeek, and MiniMax
+  models on OpenCode, and OpenAI, Gemini, Kimi, and MiniMax models on OpenRouter.
+- Completed tool calls whose arguments arrive all at once, including Grok on OpenCode Go, no longer
+  run with empty arguments.
+- Markdown headings, multi-part reasoning summaries, wrapped styling, and consecutive reasoning
+  blocks render consistently in both the live and history views.
+- Transcript, history, editor, and file-picker views preserve non-ASCII text and no longer expose
+  terminal escape sequences when used with a plain pager or without a configured locale.
+- HTTP traces redact credentials found in request and error bodies, including values loaded from
+  environment variables for provider headers.
+- Keyless custom providers with a configured URL are selectable even when they do not expose a
+  model-list endpoint.
+- Custom prompt caching defaults to the same 1h TTL as built-in providers; invalid `cache_ttl`
+  values now warn and fall back safely.
+- Release-tarball builds no longer pick up the version of an unrelated enclosing Git repository.
 
 ## [0.3.0] - 2026-08-12
 

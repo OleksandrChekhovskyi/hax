@@ -12,18 +12,17 @@
 ## Key features
 
 - **Lightweight by design** — A single native C binary with a small dependency set.
-  Starts instantly, and uses very small amount of memory (just a few MBs) - so more RAM is left
-  for your local LLMs.
+  Starts instantly and uses only a few MB of memory, leaving more RAM for local models.
 - **Local models are first-class** — Start `llama-server -m [model].gguf`, then
   `hax --provider llama.cpp`, and hax auto-discovers the model and runtime capabilities.
-  No custom provider config block needed for the default setup.
+  No custom provider config block is needed for the default setup.
 - **Respects your terminal** — Streaming Markdown and live tool output, reflowed for display
   in the terminal. Only redraws the current streaming line or the input area, native scrollback
   is preserved. Does not take over or mess with your terminal.
 - **Inspectable** — See exactly what was sent to the model and what it replied in a usable
   transcript view (Ctrl+T). Optionally collect a detailed wire protocol trace.
-- **Use any provider/model** — Supports OpenAI (+compatible), Anthropic (+compatible),
-  Codex (via ChatGPT subscription), OpenRouter, OpenCode Zen/Go, llama.cpp, etc.
+- **Broad provider support** — OpenAI (+compatible), Anthropic (+compatible), Codex (via a ChatGPT
+  subscription), OpenRouter, OpenCode Zen/Go, llama.cpp, and custom endpoints.
 - **Well-behaved Unix tool** — XDG paths, clean stdout in `-p` one-shot mode with resume hints on
   stderr, plain-text config and session files, composition via subprocesses instead of plugins.
 
@@ -112,13 +111,13 @@ See [docs/usage.md](./docs/usage.md) for more detailed usage documentation.
 
 ## Configuration
 
-Every registered setting has a canonical config key and, when applicable, an `HAX_*`
-environment variable. Runtime selections made with `/provider`, `/model`, and `/effort` are
-stored separately from your config file. The more explicit the input, the higher it wins: a
-CLI flag beats an environment variable, which beats anything saved.
+Configuration is optional. Interactive selections are remembered separately from your config file;
+CLI flags apply only to the current run, and environment variables are useful for shells and
+scripts. Resumed conversations restore their own provider, model, effort, and preset unless a
+CLI selection flag overrides them.
 
-See [docs/configuration.md](./docs/configuration.md) for the file format, the full resolution
-order, and the setting reference.
+See [docs/configuration.md](./docs/configuration.md) for the file format, resolution order, presets,
+and the setting reference.
 
 ## More docs
 

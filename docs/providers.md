@@ -8,7 +8,7 @@ For one run, use CLI flags or environment variables:
 
 ```sh
 hax --provider=openrouter --model=anthropic/claude-sonnet-5
-HAX_PROVIDER=llamacpp hax
+HAX_PROVIDER=llama.cpp hax
 ```
 
 CLI flags are preferable in scripts because they are explicit and override saved state. Keep API
@@ -22,16 +22,17 @@ keys in environment variables rather than command arguments or `config.json`.
 | `openai` | Direct OpenAI API | `OPENAI_API_KEY`; choose a model. |
 | `anthropic` | Direct Anthropic API | `ANTHROPIC_API_KEY`; choose a model. |
 | `openrouter` | Many vendors through one API | `OPENROUTER_API_KEY`; choose a model. |
-| `llamacpp` | Local `llama-server` | Start the server; model is normally discovered. |
+| `opencode-zen` | Curated pay-as-you-go models | `OPENCODE_API_KEY`; choose a model. |
+| `opencode-go` | OpenCode's model subscription | `OPENCODE_API_KEY`; choose a model. |
+| `llama.cpp` | Local `llama-server` | Start the server; model is normally discovered. |
 | `ollama` | Local Ollama models | Start `ollama serve`; choose a pulled model. |
 | `openai-compatible` | OpenAI Chat Completions-compatible endpoint | Base URL; usually choose a model. |
 | `anthropic-compatible` | Anthropic Messages-compatible proxy/server | Base URL; usually choose a model. |
 
-With no configured provider, hax tries available providers in this order: Codex, llama.cpp,
-OpenAI, Anthropic, OpenRouter, then config-defined providers — OpenAI-compatible,
-Anthropic-compatible, Ollama, and custom entries. Auto-selection is convenient interactively;
-configure or pass the provider in automation so a newly available backend cannot change a script's
-behavior.
+When no provider is selected, hax tries the built-in providers first — Codex, llama.cpp, OpenAI,
+Anthropic, then OpenRouter — followed by the shipped compatible, OpenCode, and Ollama recipes and
+any user-defined providers. Auto-selection is convenient interactively; pass a provider explicitly
+in automation so a newly available backend cannot change a script's behavior.
 
 If an explicitly selected provider cannot start, the REPL opens without one and directs you to
 `/provider`; one-shot mode exits with an error. A one-shot banner on stderr identifies the provider,
@@ -40,9 +41,9 @@ model, effort, and whether selection was automatic.
 ## Codex
 
 `codex` uses the ChatGPT Codex backend with a ChatGPT subscription login. Run `/login`, open the
-printed `auth.openai.com` page in a browser on any device — the code is copied to the clipboard —
-and approve. hax stores the tokens in `~/.local/state/hax/auth.json` and refreshes them
-automatically; the codex CLI is not needed. `/logout` removes the login.
+printed `auth.openai.com` page in a browser on any device, and approve the code. hax copies the code
+when a clipboard is available, stores the tokens in `~/.local/state/hax/auth.json`, and refreshes
+them automatically; the codex CLI is not needed. `/logout` removes the login.
 
 Alternatively, hax picks up credentials written by the official codex CLI:
 
@@ -128,38 +129,35 @@ export OPENCODE_API_KEY=...
 hax --provider=opencode-zen --model=kimi-k2.7-code
 ```
 
-The gateway serves each model over its own API — Chat Completions, Responses, or Messages — and
-hax picks the right one per model. A model newer than the cached model catalog may need a
-`model_apis` rule ([below](#custom-providers)) until the catalog refreshes, and Gemini models use
-a protocol hax does not speak. Config fields from every dialect apply, each to the models
-speaking it: `thinking_mode` affects the Claude models, `reasoning_format` the Chat Completions
-ones. Pinning `thinking_mode` to `budget` or `off` also means a selected effort steers only the
-non-Claude models, since those modes take none.
+Use `/model` to choose a model; hax automatically uses the API required by each supported model.
+Gemini entries are not supported because their API is not implemented. If a newly added model is not
+yet described by the model catalog, see the `model_apis` override under
+[Custom providers](#custom-providers).
 
-On `opencode-go`, `/usage` shows the subscription's rate-limit windows (rolling, weekly,
-monthly). Zen exposes no balance or usage API yet, so `/usage` is unavailable there; check the
-OpenCode dashboard instead.
+On `opencode-go`, `/usage` shows the subscription's rolling, weekly, and monthly limits. Zen does
+not expose usage through its API, so check the OpenCode dashboard instead.
 
 ## llama.cpp
 
-`llamacpp` is a convenience configuration for a local `llama-server` at
-`http://127.0.0.1:8080/v1` (the pre-0.4 id `llama.cpp` still selects it):
+`llama.cpp` selects the convenience provider for a local `llama-server` at
+`http://127.0.0.1:8080/v1`:
 
 ```sh
 llama-server -m /path/to/model.gguf -c 32768
-hax --provider=llamacpp
+hax --provider=llama.cpp
 ```
+
+Its config block is named `providers.llamacpp` because dots separate config path components.
 
 Use `HAX_LLAMACPP_PORT=9090` for another local port, or `HAX_LLAMACPP_BASE_URL` for a complete URL.
 If the server uses `--api-key`, set `HAX_LLAMACPP_API_KEY`.
 
-Both a classic single-model server and router mode (`llama-server` started without a model) work
-as expected: hax adopts the model automatically when the server leaves no ambiguity — the single
-served model, or a router's only running one — and otherwise starts without a model so `/model`
-picks from the server's catalog, which shows each model's load state. hax never makes the router
-load a model you didn't select; the first use of an idle model loads it, which can take a while.
-With `--no-models-autoload`, hax does not override the server: load models through llama.cpp's own
-tooling and pick a running one.
+Both a classic single-model server and router mode (`llama-server` started without a model) work.
+hax adopts the model automatically when the server leaves no ambiguity — the single served model,
+or a router's only running one — and otherwise starts without a model. `/model` then shows the
+server's catalog with load state, context size, and image capability. Selecting an idle model starts
+loading it in the background, which can take a while; hax never loads a model you did not select.
+With `--no-models-autoload`, load models through llama.cpp's own tooling and pick a running one.
 
 hax probes llama.cpp for context and image capability when possible. Start the server with a context
 large enough for an agent session; the llama.cpp default is often too small once system instructions,
