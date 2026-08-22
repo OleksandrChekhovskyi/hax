@@ -22,6 +22,10 @@ enum script_mode {
     SCRIPT_TOOL_ERROR,
     SCRIPT_REASONING_ERROR,
     SCRIPT_RETRY_THEN_COMPLETE,
+    /* Cancelled streams end without a terminal event. */
+    SCRIPT_REASONING_CANCELLED,
+    SCRIPT_REASONING_TEXT_CANCELLED,
+    SCRIPT_SEALED_REASONING_TOOL_CANCELLED,
 };
 
 static enum script_mode script;
@@ -48,6 +52,12 @@ static void emit_text(stream_cb cb, void *user, const char *text)
 static void emit_reasoning(stream_cb cb, void *user, const char *text)
 {
     struct stream_event ev = {.kind = EV_REASONING_DELTA, .u.reasoning_delta = {.text = text}};
+    cb(&ev, user);
+}
+
+static void emit_reasoning_item(stream_cb cb, void *user, const char *json)
+{
+    struct stream_event ev = {.kind = EV_REASONING_ITEM, .u.reasoning_item = {.json = json}};
     cb(&ev, user);
 }
 
@@ -100,6 +110,24 @@ static int scripted_stream(struct provider *p, const struct context *ctx, const 
     if (script == SCRIPT_REASONING_ERROR) {
         emit_reasoning(cb, user, "half a thought");
         emit_error(cb, user, "stream ended before completion", NULL);
+        return 0;
+    }
+
+    if (script == SCRIPT_REASONING_CANCELLED) {
+        emit_reasoning(cb, user, "half a thought");
+        return 0;
+    }
+
+    if (script == SCRIPT_REASONING_TEXT_CANCELLED) {
+        emit_reasoning(cb, user, "finished thought");
+        emit_text(cb, user, "partial");
+        emit_reasoning(cb, user, "half a thought");
+        return 0;
+    }
+
+    if (script == SCRIPT_SEALED_REASONING_TOOL_CANCELLED) {
+        emit_reasoning_item(cb, user, "{\"type\":\"reasoning\"}");
+        emit_tool_call(cb, user, "c1");
         return 0;
     }
 
@@ -184,7 +212,6 @@ static void test_partial_error_is_preserved(void)
         agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_PROVIDER_ERROR);
     /* Partial text is useful resumable state, but must be marked incomplete so
      * the next request does not treat it as a finished answer. */
-    EXPECT(out.had_state);
     EXPECT(out.marker_placed);
     EXPECT(out.items_from == 0 && out.items_to == 1);
     EXPECT(session.n_items == 1);
@@ -207,7 +234,6 @@ static void test_prestream_error_adds_no_marker(void)
         agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_PROVIDER_ERROR);
     /* A provider failure before any event must not fabricate assistant history;
      * retrying should see only the original prompt. */
-    EXPECT(!out.had_state);
     EXPECT(!out.marker_placed);
     EXPECT(session.n_items == 0);
 
@@ -279,9 +305,79 @@ static void test_provider_error_drops_reasoning(void)
     /* Truncated reasoning re-sent as finished state derails models. With no
      * text to keep, history stays untouched and marker-free, so a retry
      * re-issues the identical request. */
-    EXPECT(out.had_state);
     EXPECT(!out.marker_placed);
     EXPECT(session.n_items == 0);
+
+    agent_loop_turn_destroy(&loop_turn);
+    agent_session_free(&session);
+}
+
+static void test_cancel_of_thinking_only_turn_leaves_no_trace(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    struct provider provider = {.name = "test", .stream = scripted_stream};
+    struct agent_loop_turn loop_turn;
+    script = SCRIPT_REASONING_CANCELLED;
+
+    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
+    struct agent_abort_outcome out =
+        agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_USER_CANCEL);
+    /* A cancel that caught only truncated thinking evaporates like the
+     * provider-error repair: nothing worth replaying, so no marker either. */
+    EXPECT(!out.marker_placed);
+    EXPECT(session.n_items == 0);
+
+    agent_loop_turn_destroy(&loop_turn);
+    agent_session_free(&session);
+}
+
+static void test_cancel_keeps_text_but_drops_reasoning(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    struct provider provider = {.name = "test", .stream = scripted_stream};
+    struct agent_loop_turn loop_turn;
+    script = SCRIPT_REASONING_TEXT_CANCELLED;
+
+    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
+    struct agent_abort_outcome out =
+        agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_USER_CANCEL);
+    /* Partial text survives with its marker, and so does thinking the model
+     * moved past — a completed turn would keep it too. Only the open trailing
+     * thought is truncated, and must not reach history: the chat wire would
+     * replay it verbatim. */
+    EXPECT(out.marker_placed);
+    EXPECT(session.n_items == 2);
+    EXPECT(session.items[0].kind == ITEM_REASONING);
+    EXPECT_STR_EQ(session.items[0].reasoning_text, "finished thought");
+    EXPECT(session.items[1].kind == ITEM_ASSISTANT_MESSAGE);
+    EXPECT_STR_EQ(session.items[1].text, "partial\n" INTERRUPT_MARKER);
+
+    agent_loop_turn_destroy(&loop_turn);
+    agent_session_free(&session);
+}
+
+static void test_cancel_keeps_sealed_reasoning_with_tool_call(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    struct provider provider = {.name = "test", .stream = scripted_stream};
+    struct agent_loop_turn loop_turn;
+    script = SCRIPT_SEALED_REASONING_TOOL_CANCELLED;
+
+    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
+    struct agent_abort_outcome out =
+        agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_USER_CANCEL);
+    /* A completed call keeps the turn, and providers require the sealed
+     * reasoning item to accompany the replayed call. */
+    EXPECT(out.marker_placed);
+    EXPECT(session.n_items == 3);
+    EXPECT(session.items[0].kind == ITEM_REASONING);
+    EXPECT_STR_EQ(session.items[0].reasoning_json, "{\"type\":\"reasoning\"}");
+    EXPECT(session.items[1].kind == ITEM_TOOL_CALL);
+    EXPECT(session.items[2].kind == ITEM_TOOL_RESULT);
+    EXPECT_STR_EQ(session.items[2].output, INTERRUPT_MARKER);
 
     agent_loop_turn_destroy(&loop_turn);
     agent_session_free(&session);
@@ -314,7 +410,7 @@ static void test_retry_usage_accumulates(void)
     agent_session_free(&session);
 }
 
-static void test_empty_cancel_adds_marker(void)
+static void test_empty_cancel_leaves_no_trace(void)
 {
     struct agent_session session;
     session_init(&session);
@@ -324,12 +420,11 @@ static void test_empty_cancel_adds_marker(void)
 
     struct agent_abort_outcome out =
         agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_USER_CANCEL);
-    /* Unlike a pre-stream provider failure, an explicit user stop belongs in
-     * history even when no model bytes arrived. */
-    EXPECT(!out.had_state);
-    EXPECT(out.marker_placed);
-    EXPECT(session.n_items == 1);
-    EXPECT_STR_EQ(session.items[0].text, INTERRUPT_MARKER);
+    /* A cancel before any output evaporates like a pre-empting pause: history
+     * stays untouched and marker-free, so a resume re-sends the request. */
+    EXPECT(!out.marker_placed);
+    EXPECT(out.items_from == out.items_to);
+    EXPECT(session.n_items == 0);
 
     agent_loop_turn_destroy(&loop_turn);
     agent_session_free(&session);
@@ -853,6 +948,84 @@ static void test_loop_paused_retry_usage_keeps_boundary(void)
     agent_session_free(&session);
 }
 
+/* Turn 1 emits a tool call and completes; turn 2 streams only reasoning
+ * before the frontend tick cancels it — no terminal event. */
+static int chain_then_thinking_cancelled_stream(struct provider *p, const struct context *ctx,
+                                                const char *model, stream_cb cb, void *user,
+                                                http_tick_cb tick, void *tick_user)
+{
+    (void)p;
+    (void)model;
+    (void)tick;
+    (void)tick_user;
+    EXPECT(ctx != NULL);
+    chain_turn++;
+    if (chain_turn == 1) {
+        emit_tool_call(cb, user, "c1");
+        emit_done(cb, user, usage_tokens(10, 2));
+        return 0;
+    }
+    emit_reasoning(cb, user, "half a thought");
+    return 0;
+}
+
+static void test_loop_cancelled_thinking_turn_leaves_no_trace(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    session_enable_tools(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = chain_then_thinking_cancelled_stream};
+    /* Turn 1 checkpoints: post-stream, pre-c1, final. The cancel is first
+     * observed at turn 2's post-stream checkpoint. */
+    struct loop_test_ctx ctx = {.cancel_at = 4};
+    chain_turn = 0;
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
+    /* The interrupted thinking-only turn evaporates like a pre-empting pause:
+     * no dangling boundary, no marker, no reasoning item — history still ends
+     * at turn 1's seam, so an empty-send resume re-issues the request. */
+    EXPECT(result.outcome == AGENT_LOOP_INTERRUPTED);
+    EXPECT(!result.abort_marker_placed);
+    EXPECT(session.items[session.n_items - 1].kind == ITEM_TURN_USAGE);
+
+    int boundaries = 0;
+    for (size_t i = 0; i < session.n_items; i++) {
+        boundaries += session.items[i].kind == ITEM_TURN_BOUNDARY;
+        EXPECT(session.items[i].kind != ITEM_REASONING);
+        if (session.items[i].kind == ITEM_ASSISTANT_MESSAGE)
+            EXPECT(strcmp(session.items[i].text, INTERRUPT_MARKER) != 0);
+    }
+    EXPECT(boundaries == 1); /* only the user message's */
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_loop_cancelled_retry_usage_keeps_boundary(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    session_enable_tools(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = chain_then_retry_paused_stream};
+    struct loop_test_ctx ctx = {.cancel_at = 4};
+    chain_turn = 0;
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
+    /* The cancelled follow-up assembled nothing, but its dead attempt banked
+     * billable usage: that footer is retained and owes its boundary, or it
+     * would read as part of turn 1. */
+    EXPECT(result.outcome == AGENT_LOOP_INTERRUPTED);
+    EXPECT(!result.abort_marker_placed);
+    EXPECT(session.items[session.n_items - 1].kind == ITEM_TURN_USAGE);
+    EXPECT(session.items[session.n_items - 1].usage->usage.input_tokens == 40);
+    EXPECT(session.items[session.n_items - 2].kind == ITEM_TURN_BOUNDARY);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
 /* Turn 1 emits a tool call; turn 2 completes successfully with no content
  * (EV_DONE only, usage reported) — an empty but real round-trip. */
 static int chain_then_empty_done_stream(struct provider *p, const struct context *ctx,
@@ -1158,8 +1331,11 @@ int main(void)
     test_cancelled_tool_call_gets_result();
     test_provider_error_drops_tool_call();
     test_provider_error_drops_reasoning();
+    test_cancel_of_thinking_only_turn_leaves_no_trace();
+    test_cancel_keeps_text_but_drops_reasoning();
+    test_cancel_keeps_sealed_reasoning_with_tool_call();
     test_retry_usage_accumulates();
-    test_empty_cancel_adds_marker();
+    test_empty_cancel_leaves_no_trace();
     test_loop_runs_tool_chain();
     test_loop_enforces_max_turns();
     test_loop_cancels_tool_batch();
@@ -1169,6 +1345,8 @@ int main(void)
     test_loop_pause_preempts_empty_turn();
     test_loop_pause_preempts_follow_up_leaves_no_boundary();
     test_loop_paused_retry_usage_keeps_boundary();
+    test_loop_cancelled_thinking_turn_leaves_no_trace();
+    test_loop_cancelled_retry_usage_keeps_boundary();
     test_loop_continued_run_owes_boundary();
     test_loop_continued_preempted_run_leaves_no_boundary();
     test_loop_empty_completion_keeps_boundary();

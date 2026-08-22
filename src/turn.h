@@ -46,8 +46,8 @@ void turn_consume(struct turn *turn, const struct stream_event *event);
 /* Commit buffered assistant text, appending a non-empty suffix first when provided. */
 void turn_flush_text(struct turn *turn, const char *suffix);
 
-/* Commit buffered reasoning as an ITEM_REASONING. */
-void turn_flush_reasoning(struct turn *turn);
+/* Discard buffered reasoning that never sealed into an item. Assembled ITEM_REASONINGs stay. */
+void turn_discard_reasoning(struct turn *turn);
 
 /* Discard everything but assistant text: buffered and assembled reasoning, and assembled tool
  * calls. Provider-error repair keeps only what the user saw — replaying truncated reasoning or

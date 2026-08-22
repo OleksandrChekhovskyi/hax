@@ -282,28 +282,33 @@ static void test_reasoning_item_without_deltas(void)
     turn_reset(&t);
 }
 
-static void test_flush_reasoning_preserves_partial_on_abort(void)
+static void test_discard_reasoning_drops_open_buffer(void)
 {
     struct turn t;
     turn_init(&t);
-    feed_reasoning(&t, "partial reasoning before the drop");
+    feed_reasoning(&t, "partial reasoning before the stop");
     EXPECT(t.has_reasoning == 1);
-    EXPECT(t.n_items == 0);
 
-    turn_flush_reasoning(&t);
+    turn_discard_reasoning(&t);
     EXPECT(t.has_reasoning == 0);
-    EXPECT(t.n_items == 1);
-    EXPECT(t.items[0].kind == ITEM_REASONING);
-    EXPECT_STR_EQ(t.items[0].reasoning_text, "partial reasoning before the drop");
+    EXPECT(t.n_items == 0);
     turn_reset(&t);
 }
 
-static void test_flush_reasoning_noop_when_empty(void)
+static void test_discard_reasoning_keeps_sealed_items(void)
 {
     struct turn t;
     turn_init(&t);
-    turn_flush_reasoning(&t);
-    EXPECT(t.n_items == 0);
+    struct stream_event item = {.kind = EV_REASONING_ITEM,
+                                .u.reasoning_item = {.json = "{\"type\":\"reasoning\"}"}};
+    turn_consume(&t, &item);
+    feed_reasoning(&t, "unsealed follow-up thought");
+
+    turn_discard_reasoning(&t);
+    EXPECT(t.has_reasoning == 0);
+    EXPECT(t.n_items == 1);
+    EXPECT(t.items[0].kind == ITEM_REASONING);
+    EXPECT_STR_EQ(t.items[0].reasoning_json, "{\"type\":\"reasoning\"}");
     turn_reset(&t);
 }
 
@@ -422,8 +427,6 @@ static void test_keep_text_drops_reasoning_and_calls(void)
     EXPECT(t.items[0].kind == ITEM_ASSISTANT_MESSAGE);
     EXPECT_STR_EQ(t.items[0].text, "first part ");
     EXPECT(t.has_reasoning == 0);
-    turn_flush_reasoning(&t);
-    EXPECT(t.n_items == 1);
     turn_reset(&t);
 }
 
@@ -506,8 +509,8 @@ int main(void)
     test_reasoning_state_only_deltas_ignored();
     test_reasoning_item_carries_delta_text();
     test_reasoning_item_without_deltas();
-    test_flush_reasoning_preserves_partial_on_abort();
-    test_flush_reasoning_noop_when_empty();
+    test_discard_reasoning_drops_open_buffer();
+    test_discard_reasoning_keeps_sealed_items();
     test_error_is_terminal_and_preserves_text();
     test_error_then_flush_with_marker();
     test_error_after_text_flushed_by_tool_call_start();

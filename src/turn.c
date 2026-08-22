@@ -95,15 +95,15 @@ void turn_flush_text(struct turn *turn, const char *suffix)
     flush_text(turn);
 }
 
-void turn_flush_reasoning(struct turn *turn)
+void turn_discard_reasoning(struct turn *turn)
 {
-    flush_reasoning(turn);
+    buf_free(&turn->reasoning);
+    turn->has_reasoning = 0;
 }
 
 void turn_keep_text(struct turn *turn)
 {
-    buf_free(&turn->reasoning);
-    turn->has_reasoning = 0;
+    turn_discard_reasoning(turn);
 
     size_t kept = 0;
     for (size_t i = 0; i < turn->n_items; i++) {

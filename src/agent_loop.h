@@ -29,10 +29,9 @@ struct agent_loop_turn {
     long elapsed_ms;
 };
 
-/* Run one model turn. observer receives each event for optional
- * presentation (its return value is ignored); event assembly, terminal usage,
- * errors, and timing are always captured here. tick remains the provider's
- * optional wait-loop side channel. */
+/* Run one model turn. observer receives each event for optional presentation (its return value
+ * is ignored); event assembly, terminal usage, errors, and timing are always captured here. tick
+ * is the provider's optional wait-loop side channel. */
 void agent_loop_turn_run(struct agent_loop_turn *loop_turn, struct agent_session *session,
                          struct provider *provider, stream_cb observer, void *observer_user,
                          http_tick_cb tick, void *tick_user);
@@ -46,21 +45,18 @@ enum agent_abort_reason {
     AGENT_ABORT_USER_CANCEL,
 };
 
-/* Slice of original streamed items absorbed during abort repair. Synthesized
- * tool results and a possible standalone marker follow items_to. */
+/* Slice of original streamed items absorbed during abort repair. Synthesized tool results and a
+ * possible standalone marker follow items_to. */
 struct agent_abort_outcome {
-    int had_state;
     int marker_placed;
     size_t items_from;
     size_t items_to;
 };
 
-/* Preserve partial output from an aborted turn and keep history well formed.
- * User cancellation absorbs everything the stream produced — tagged partial
- * text, synthesized results for calls that never ran — and always leaves an
- * explicit marker. A provider error keeps only assistant text (marked
- * interrupted): truncated reasoning and calls that never ran are discarded so
- * a retry re-issues the same request, and with no text kept it adds nothing. */
+/* Repair an aborted turn into well-formed, marked history. Truncated reasoning is never kept:
+ * replayed as finished state it derails models. A user cancel absorbs everything else, but a turn
+ * keeping no text and no completed call leaves history untouched, as does a provider error, which
+ * keeps only assistant text — either way a retry re-issues the same request. */
 struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *session,
                                                         struct agent_loop_turn *loop_turn,
                                                         enum agent_abort_reason reason);
@@ -74,23 +70,21 @@ enum agent_loop_tool_action {
     AGENT_LOOP_TOOL_SKIP,
 };
 
-/* What the frontend's checkpoint hook asks of the loop. ABORT stops now:
- * remaining batch tools are skipped with interrupted results and the run
- * ends AGENT_LOOP_INTERRUPTED. PAUSE is the soft variant: in-flight work
- * (the streamed response, every tool in the batch) still completes, and
- * the run ends AGENT_LOOP_PAUSED at the turn seam with clean, fully
- * paired history — no marker — so the frontend can resume it verbatim. */
+/* What the frontend's checkpoint hook asks of the loop. ABORT stops now: remaining batch tools
+ * are skipped with interrupted results and the run ends AGENT_LOOP_INTERRUPTED. PAUSE is the soft
+ * variant: in-flight work (the streamed response, every tool in the batch) still completes, and
+ * the run ends AGENT_LOOP_PAUSED at the turn seam with clean, fully paired history — no marker —
+ * so the frontend can resume it verbatim. */
 enum agent_loop_signal {
     AGENT_LOOP_SIG_NONE = 0,
     AGENT_LOOP_SIG_PAUSE,
     AGENT_LOOP_SIG_ABORT,
 };
 
-/* Optional frontend behavior. checkpoint settles and samples cancellation,
- * returning an agent_loop_signal; tool_call must return the matching owned
- * result for the requested action. A NULL tool_call uses silent semantic
- * tool execution. compact performs the frontend's compaction transaction
- * when the shared threshold is reached. */
+/* Optional frontend behavior. checkpoint settles and samples cancellation, returning an
+ * agent_loop_signal; tool_call must return the matching owned result for the requested action,
+ * and when NULL the loop falls back to silent semantic tool execution; compact performs the
+ * frontend's compaction transaction when the shared threshold is reached. */
 struct agent_loop_hooks {
     void *user;
     stream_cb observe;
@@ -108,10 +102,9 @@ struct agent_loop_hooks {
     void (*task_note)(const char *text, void *user);
 };
 
-/* Every outcome except COMPLETE leaves an incomplete user turn behind.
- * PAUSED and MAX_TURNS stop at a clean turn seam (all calls paired, no
- * markers), so re-running the loop against the same history continues the
- * turn; INTERRUPTED and PROVIDER_ERROR ran abort repair first. */
+/* Every outcome except COMPLETE leaves an incomplete user turn behind. PAUSED and MAX_TURNS stop
+ * at a clean turn seam (all calls paired, no markers), so re-running the loop against the same
+ * history continues the turn; INTERRUPTED and PROVIDER_ERROR ran abort repair first. */
 enum agent_loop_outcome {
     AGENT_LOOP_COMPLETE,
     AGENT_LOOP_PROVIDER_ERROR,
@@ -124,15 +117,13 @@ struct agent_loop_result {
     enum agent_loop_outcome outcome;
     int turns;
     long last_context_tokens;
-    /* Streamed items absorbed from the final turn; synthesized repair and
-     * usage items are outside this half-open range. */
+    /* Streamed items absorbed from the final turn; synthesized repair and usage items are
+     * outside this half-open range. */
     size_t final_items_from;
     size_t final_items_to;
-    /* Abort repair left interrupt markers in history (always for a user
-     * cancel; for a provider error only when partial assistant text was
-     * kept). A frontend resuming such a run must speak for the user —
-     * history ends mid-story otherwise — where a marker-free stop resumes
-     * silently. */
+    /* Abort repair kept partial output, marked interrupted. A frontend resuming a marked run
+     * must speak for the user — history ends mid-story otherwise — where a marker-free stop
+     * resumes silently. */
     int abort_marker_placed;
     char *error_message;
 };
@@ -143,19 +134,16 @@ struct agent_loop_params {
     struct transcript_log *tlog;
     struct session_log *slog;
     int max_turns; /* < 0 means unlimited */
-    /* Resuming an incomplete user turn with no new user input: the first
-     * round-trip continues the previous seam rather than following a fresh
-     * user message, so it owes a turn boundary like a follow-up turn does
-     * (appended lazily, only once the turn leaves items — an eager one
-     * would dangle as an empty transcript turn if this request too is
-     * pre-empted or fails before output). */
+    /* Resuming an incomplete user turn with no new user input: the first round-trip continues
+     * the previous seam rather than following a fresh user message, so it owes a turn boundary
+     * like a follow-up turn does. */
     int continued;
     struct agent_loop_hooks hooks;
 };
 
-/* Continue an already-appended user message through provider turns and tool
- * calls until the model returns without a tool call or the run aborts. Holds
- * the idle-sleep inhibitor for the complete continuation run. */
+/* Continue an already-appended user message through provider turns and tool calls until the
+ * model returns without a tool call or the run aborts. Holds the idle-sleep inhibitor for the
+ * complete continuation run. */
 void agent_loop_run(const struct agent_loop_params *params, struct agent_loop_result *result);
 void agent_loop_result_destroy(struct agent_loop_result *result);
 

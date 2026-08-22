@@ -112,15 +112,6 @@ void agent_loop_turn_destroy(struct agent_loop_turn *loop_turn)
     loop_turn->route = NULL;
 }
 
-/* True when the turn's stream produced anything at all — finished items, open text/reasoning,
- * or a pending tool call. */
-static int agent_loop_turn_has_state(const struct agent_loop_turn *loop_turn)
-{
-    const struct turn *assembly = &loop_turn->assembly;
-    return assembly->has_text || assembly->has_reasoning || assembly->n_pending_calls > 0 ||
-           assembly->n_items > 0;
-}
-
 /* True when the assembly holds assistant text — flushed items or the open buffer. */
 static int assembly_has_text(const struct turn *assembly)
 {
@@ -130,20 +121,42 @@ static int assembly_has_text(const struct turn *assembly)
     return assembly->has_text;
 }
 
+/* True when user-cancel repair keeps anything: assistant text or a completed tool call.
+ * Reasoning never counts — repair discards the truncated buffer, and sealed reasoning without
+ * text or calls evaporates with the turn. */
+static int assembly_survives_cancel(const struct turn *assembly)
+{
+    for (size_t i = 0; i < assembly->n_items; i++)
+        if (assembly->items[i].kind == ITEM_ASSISTANT_MESSAGE ||
+            assembly->items[i].kind == ITEM_TOOL_CALL)
+            return 1;
+    return assembly->has_text;
+}
+
 struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *session,
                                                         struct agent_loop_turn *loop_turn,
                                                         enum agent_abort_reason reason)
 {
     struct turn *assembly = &loop_turn->assembly;
-    int had_state = agent_loop_turn_has_state(loop_turn);
-    /* A provider error replays only assistant text: truncated reasoning re-sent as finished
-     * state derails models, and a call that never ran would need a fabricated result. With
-     * both dropped, a retry re-issues the same request. */
-    if (reason == AGENT_ABORT_PROVIDER_ERROR)
+    /* Truncated reasoning re-sent as finished state derails models, so no repair replays it.
+     * A provider error keeps only assistant text: a call that never ran would also need a
+     * fabricated result, and with both dropped a retry re-issues the same request. */
+    if (reason == AGENT_ABORT_PROVIDER_ERROR) {
         turn_keep_text(assembly);
+    } else {
+        turn_discard_reasoning(assembly);
+        /* With nothing else streamed the turn evaporates — no items, no marker — as if the
+         * request was never sent, so an empty-send resume re-issues it verbatim. */
+        if (!assembly_survives_cancel(assembly)) {
+            turn_reset(assembly);
+            return (struct agent_abort_outcome){
+                .items_from = session->n_items,
+                .items_to = session->n_items,
+            };
+        }
+    }
     int kept_text = assembly_has_text(assembly);
     int had_partial_text = assembly->has_text;
-    turn_flush_reasoning(assembly);
     turn_flush_text(assembly, had_partial_text ? "\n" INTERRUPT_MARKER : NULL);
 
     struct agent_absorb_result absorbed = agent_session_absorb(session, assembly);
@@ -152,11 +165,10 @@ struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *se
     size_t items_from = absorbed.items_from;
     size_t items_to = session->n_items;
     if (had_partial_text) {
-        /* The "\n[interrupted]" turn_flush_text appended above is ours, not
-         * the model's. Stamp the item that carries it — the last assistant
-         * message absorbed — so display strips exactly what we added instead
-         * of recognizing it by content (a response can legitimately end on
-         * that line). */
+        /* The "\n[interrupted]" turn_flush_text appended above is ours, not the model's. Stamp
+         * the item that carries it — the last assistant message absorbed — so display strips
+         * exactly what we added instead of recognizing it by content (a response can
+         * legitimately end on that line). */
         for (size_t i = items_to; i-- > items_from;) {
             if (session->items[i].kind == ITEM_ASSISTANT_MESSAGE) {
                 session->items[i].origin = ITEM_ORIGIN_INTERRUPTED;
@@ -168,8 +180,8 @@ struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *se
         if (session->items[i].kind != ITEM_TOOL_CALL)
             continue;
         struct item closed = agent_tool_result_make(&session->items[i], INTERRUPT_MARKER, NULL);
-        /* The stream was cut before dispatch reached this call: it never ran,
-         * same as one Esc skipped mid-batch. */
+        /* The stream was cut before dispatch reached this call: it never ran, same as one Esc
+         * skipped mid-batch. */
         closed.origin = ITEM_ORIGIN_SKIPPED;
         agent_session_append(session, closed);
         marker_placed = 1;
@@ -201,7 +213,6 @@ struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *se
     }
 
     return (struct agent_abort_outcome){
-        .had_state = had_state,
         .marker_placed = marker_placed,
         .items_from = items_from,
         .items_to = items_to,
@@ -217,8 +228,8 @@ static struct item loop_run_tool(const struct agent_loop_params *params, const s
                                  enum agent_loop_tool_action action)
 {
     const struct agent_loop_hooks *hooks = &params->hooks;
-    /* Resolved per call, not per session: the answer can change under a
-     * runtime /model switch and when an async capability probe lands. */
+    /* Resolved per call, not per session: the answer can change under a runtime /model switch
+     * and when an async capability probe lands. */
     int image_input = model_meta_image_input(params->provider, params->session->model);
 
     struct item result;
@@ -242,11 +253,10 @@ static struct item loop_run_tool(const struct agent_loop_params *params, const s
         agent_tool_call_destroy(&prepared);
     }
 
-    /* Enforce the aggregate image budget at ingestion — the window excludes
-     * `result`, which the caller appends next. Dropping the just-read image
-     * (rather than degrading older ones at serialization) keeps prior
-     * requests byte-stable, so the provider prefix cache survives. The budget
-     * is what a request may carry, so a compacted-away image no longer counts. */
+    /* Enforce the aggregate image budget at ingestion — the window excludes `result`, which the
+     * caller appends next. Dropping the just-read image (rather than degrading older ones at
+     * serialization) keeps prior requests byte-stable, so the provider prefix cache survives.
+     * The budget is what a request may carry, so a compacted-away image no longer counts. */
     struct context window = agent_session_context(params->session);
     agent_tool_result_enforce_image_budget(window.items, window.n_items, &result);
     return result;
@@ -283,20 +293,19 @@ static void loop_run_active(const struct agent_loop_params *params,
     struct agent_session *session = params->session;
     const struct agent_loop_hooks *hooks = &params->hooks;
     memset(result, 0, sizeof(*result));
-    /* Falling out of the loop is the only max-turn path; every terminal
-     * provider/cancel outcome returns from its branch below. */
+    /* Falling out of the loop is the only max-turn path; every terminal provider/cancel outcome
+     * returns from its branch below. */
     result->outcome = AGENT_LOOP_MAX_TURNS;
     result->last_context_tokens = -1;
 
     for (int turn_n = 0; params->max_turns < 0 || turn_n < params->max_turns; turn_n++) {
-        /* The first boundary arrived with the user message — except on a
-         * continued run, whose first turn extends the previous seam.
-         * Follow-up turns owe their own. Either way it is appended lazily —
-         * just before this turn's items land in history — so a turn that
-         * leaves nothing behind (a pause pre-empting a still-prefilling
-         * request, a provider failure before any output) doesn't leave a
-         * dangling empty turn header in the transcript. Boundaries are
-         * inert to providers, so context built without one is unaffected. */
+        /* The first boundary arrived with the user message — except on a continued run, whose
+         * first turn extends the previous seam. Follow-up turns owe their own. Either way it is
+         * appended lazily — just before this turn's items land in history — so a turn that
+         * leaves nothing behind (a pause pre-empting a still-prefilling request, a provider
+         * failure before any output) doesn't leave a dangling empty turn header in the
+         * transcript. Boundaries are inert to providers, so context built without one is
+         * unaffected. */
         int owes_boundary = turn_n > 0 || params->continued;
 
         /* Deliver finished-task notes before building this turn's request, so the model hears
@@ -323,8 +332,8 @@ static void loop_run_active(const struct agent_loop_params *params,
         agent_loop_turn_run(&loop_turn, session, params->provider, hooks->observe, hooks->user,
                             hooks->tick, hooks->user);
         result->turns++;
-        /* Account the request before branching: errored and interrupted turns
-         * still reached the provider and may carry billable usage. */
+        /* Account the request before branching: errored and interrupted turns still reached the
+         * provider and may carry billable usage. */
         if (hooks->turn_end)
             hooks->turn_end(&loop_turn, hooks->user);
 
@@ -358,16 +367,18 @@ static void loop_run_active(const struct agent_loop_params *params,
             return;
         }
 
-        /* Sample cancellation after a clean stream but before absorption or
-         * dispatch, so a late Esc cannot launch tools or another turn. A
-         * pause request is only noted: the batch it precedes still runs in
-         * full, and the stop lands at this turn's seam. */
+        /* Sample cancellation after a clean stream but before absorption or dispatch, so a late
+         * Esc cannot launch tools or another turn. A pause request is only noted: the batch it
+         * precedes still runs in full, and the stop lands at this turn's seam. */
         int pause_pending = 0;
         int sig = loop_checkpoint(hooks);
         if (sig == AGENT_LOOP_SIG_ABORT) {
-            /* A user cancel always leaves a marker, so the boundary is
-             * always owed. */
-            if (owes_boundary)
+            /* The boundary is owed exactly when the cancel leaves something after it — repaired
+             * items with their marker, or a billable-usage footer. An evaporating turn (nothing
+             * but truncated thinking) leaves no trace at all. */
+            struct stream_usage cancelled_usage = agent_loop_turn_usage_total(&loop_turn);
+            if (owes_boundary && (assembly_survives_cancel(&loop_turn.assembly) ||
+                                  agent_usage_is_reported(&cancelled_usage)))
                 agent_session_add_boundary(session);
             struct agent_abort_outcome abort =
                 agent_loop_turn_absorb_abort(session, &loop_turn, AGENT_ABORT_USER_CANCEL);
@@ -394,19 +405,18 @@ static void loop_run_active(const struct agent_loop_params *params,
         if (owes_boundary && (!paused_empty || agent_usage_is_reported(&banked_usage)))
             agent_session_add_boundary(session);
         struct agent_absorb_result absorbed = agent_session_absorb(session, &loop_turn.assembly);
-        /* Freeze the streamed slice before appending results: tool results must
-         * never be mistaken for more calls, and frontends need the final turn
-         * range without its synthesized results or usage footer. */
+        /* Freeze the streamed slice before appending results: tool results must never be
+         * mistaken for more calls, and frontends need the final turn range without its
+         * synthesized results or usage footer. */
         size_t response_to = session->n_items;
         loop_observe_tools(params, absorbed.items_from, response_to);
         result->final_items_from = absorbed.items_from;
         result->final_items_to = response_to;
 
         if (!absorbed.had_tool_call) {
-            /* A tool-free response completes the user turn — unless the
-             * pause pre-empted the request (paused_empty above): an empty
-             * cancelled turn is nothing to complete, so pause here and let
-             * a resume re-send the request. */
+            /* A tool-free response completes the user turn — unless the pause pre-empted the
+             * request (paused_empty above): an empty cancelled turn is nothing to complete, so
+             * pause here and let a resume re-send the request. */
             loop_add_usage(params, &loop_turn, paused_empty);
             loop_flush(params);
             agent_loop_turn_destroy(&loop_turn);
@@ -414,10 +424,10 @@ static void loop_run_active(const struct agent_loop_params *params,
             return;
         }
 
-        /* Every streamed tool call gets exactly one result. Disabled tools are
-         * refused rather than executed; once cancellation is observed, the
-         * remaining batch is paired with interrupted results. A pause request
-         * never skips: the whole batch runs and the stop waits for the seam. */
+        /* Every streamed tool call gets exactly one result. Disabled tools are refused rather
+         * than executed; once cancellation is observed, the remaining batch is paired with
+         * interrupted results. A pause request never skips: the whole batch runs and the stop
+         * waits for the seam. */
         for (size_t i = absorbed.items_from; i < response_to; i++) {
             if (session->items[i].kind != ITEM_TOOL_CALL)
                 continue;
@@ -433,9 +443,9 @@ static void loop_run_active(const struct agent_loop_params *params,
             agent_session_append(session, tool_result);
         }
 
-        /* The final checkpoint catches cancellation raised by the last tool,
-         * when there is no next call to sample it. Place the marker before the
-         * footer so usage remains the turn's trailing item. */
+        /* The final checkpoint catches cancellation raised by the last tool, when there is no
+         * next call to sample it. Place the marker before the footer so usage remains the turn's
+         * trailing item. */
         sig = loop_checkpoint(hooks);
         if (sig == AGENT_LOOP_SIG_ABORT)
             agent_session_mark_interrupt(session);
@@ -451,21 +461,19 @@ static void loop_run_active(const struct agent_loop_params *params,
         if (sig == AGENT_LOOP_SIG_PAUSE)
             pause_pending = 1;
 
-        /* The seam is the pause point: calls, results, and footer are
-         * durable and no marker is owed — history reads as a finished
-         * provider turn a later run can continue verbatim. Deliberately
-         * before the compact seam: a pause returns control without
-         * launching new work, and an over-threshold seam is instead
-         * compacted by the run that continues it, before its first
-         * request (the frontend's re-entry path owns that check). */
+        /* The seam is the pause point: calls, results, and footer are durable and no marker is
+         * owed — history reads as a finished provider turn a later run can continue verbatim.
+         * Deliberately before the compact seam: a pause returns control without launching new
+         * work, and an over-threshold seam is instead compacted by the run that continues it,
+         * before its first request (the frontend's re-entry path owns that check). */
         if (pause_pending) {
             result->outcome = AGENT_LOOP_PAUSED;
             return;
         }
 
-        /* Compact only at a continuation seam, after calls/results/footer are
-         * durable and before the next boundary. Cancellation during the
-         * frontend transaction must stop continuation against old history. */
+        /* Compact only at a continuation seam, after calls/results/footer are durable and before
+         * the next boundary. Cancellation during the frontend transaction must stop continuation
+         * against old history. */
         if (compact_should_auto(turn_context,
                                 model_meta_context(params->provider, session->model)) &&
             hooks->compact) {
