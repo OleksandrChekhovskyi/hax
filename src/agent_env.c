@@ -493,8 +493,8 @@ static void append_skills(struct buf *b)
  * prompt, not in a dedicated tool. Deliberately conservative: spawning
  * costs real money and latency, so it happens on request, not initiative.
  * Only --preset is advertised (via the lead-in below, so a setup with no
- * presets never sees the flag): a preset's name and description are in the
- * prompt and its values are user-vetted, whereas --provider/--model/--effort
+ * advertisable presets never sees the flag): a preset's name and description are
+ * in the prompt and its values are user-vetted, whereas --provider/--model/--effort
  * would ask the model to guess identifiers it can't enumerate — users who
  * want a specific setup name those flags in AGENTS.md or a skill. */
 static const char SUBAGENTS_PROMPT[] =
@@ -541,8 +541,10 @@ static void append_tasks(struct buf *b)
     buf_append_str(b, TASKS_PROMPT);
 }
 
-/* Defined presets are listed with their descriptions so the model knows
- * what roles exist without guessing at names. */
+/* Only presets with a description are listed: the description is what lets
+ * the model delegate sensibly, and a bare favorite's name alone invites the
+ * model to project a role onto it. Writing a description is the user's
+ * opt-in to advertising the preset. */
 static void append_subagents(struct buf *b)
 {
     if (b->len > 0)
@@ -553,13 +555,20 @@ static void append_subagents(struct buf *b)
     size_t n = config_preset_names(&names);
     /* Render the entries into a scratch buffer first: the heading — which
      * is what advertises --preset — is emitted only when at least one
-     * usable preset survived the provider check below. An all-invalid set
-     * must not leave a bare heading inviting a guessed name. */
+     * usable preset survived the checks below. A set with nothing to
+     * advertise must not leave a bare heading inviting a guessed name. */
     struct buf list;
     buf_init(&list);
     if (n > 1)
         qsort(names, n, sizeof(*names), cmp_str);
     for (size_t i = 0; i < n; i++) {
+        /* A description-less preset is a favorite selection, not a role:
+         * advertising its bare name would only invite the model to guess
+         * a persona from it. Skipped silently — unlike the provider typo
+         * below this is a deliberate configuration, not a defect. */
+        const char *desc = config_preset_description(names[i]);
+        if (!desc || !*desc)
+            continue;
         /* A preset naming a provider the registry can't resolve (a typo;
          * availability is deliberately not checked — a stopped server or
          * missing key may recover) would fail on every invocation: never
@@ -581,17 +590,11 @@ static void append_subagents(struct buf *b)
         /* Names and descriptions are user-authored config — sanitize
          * like every other prompt splice. */
         char *name_clean = utf8_sanitize(names[i], strlen(names[i]));
-        const char *desc = config_preset_description(names[i]);
-        char *line;
-        if (desc && *desc) {
-            char *desc_clean = utf8_sanitize(desc, strlen(desc));
-            line = xasprintf("- %s: %s\n", name_clean, desc_clean);
-            free(desc_clean);
-        } else {
-            line = xasprintf("- %s\n", name_clean);
-        }
+        char *desc_clean = utf8_sanitize(desc, strlen(desc));
+        char *line = xasprintf("- %s: %s\n", name_clean, desc_clean);
         buf_append_str(&list, line);
         free(line);
+        free(desc_clean);
         free(name_clean);
     }
     if (list.len > 0) {

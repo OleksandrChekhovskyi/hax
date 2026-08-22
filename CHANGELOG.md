@@ -40,6 +40,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- Only presets with a `description` are advertised to the model as subagent delegation targets.
+  A bare favorite selection was previously listed by name alone, which tempted models into
+  delegating to it unprompted based on nothing but the name; a description is now the opt-in
+  that turns a preset into a model-visible role.
 - Truncated thinking is never replayed to the next request — whether the turn was interrupted
   (Esc Esc) or failed with a provider error — since replaying it was shown to derail models into
   garbage output. An interrupt that caught the model before any answer text or tool call now also

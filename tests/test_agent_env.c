@@ -979,30 +979,37 @@ static void test_subagents_section_and_presets(void)
     }
     unsetenv("HAX_NO_TASKS");
 
-    /* Defined presets are listed sorted, with descriptions when present,
-     * under a lead-in that names the flag. A preset naming a provider the
-     * registry can't resolve is never advertised to the model — it would
-     * fail on every invocation. */
+    /* Described presets are listed sorted under a lead-in that names the
+     * flag. A description-less preset is a favorite, not a role: its bare
+     * name is never advertised. A preset naming a provider the registry
+     * can't resolve is never advertised either — it would fail on every
+     * invocation. */
     EXPECT(config_load("{\"presets\": {"
                        "\"zeta\": {\"provider\": \"mock\", \"model\": \"m2\"},"
-                       "\"typo\": {\"provider\": \"does-not-exist\"},"
+                       "\"typo\": {\"provider\": \"does-not-exist\", "
+                       "\"description\": \"broken role\"},"
                        "\"review\": {\"provider\": \"mock\", "
-                       "\"description\": \"code review stance\"}}}") == 0);
+                       "\"description\": \"code review stance\"},"
+                       "\"alpha\": {\"provider\": \"mock\", "
+                       "\"description\": \"quick answers\"}}}") == 0);
     p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {
         EXPECT(contains(p, "Presets (select with `--preset <name>`):\n"
-                           "- review: code review stance\n- zeta\n"));
+                           "- alpha: quick answers\n- review: code review stance\n"));
+        EXPECT(!contains(p, "zeta"));
         EXPECT(!contains(p, "typo"));
         free(p);
     }
 
-    /* All presets invalid (unknown providers): the heading — the thing
-     * that advertises --preset — must not appear either, or the model
-     * would be invited to guess a name with no valid value to pass. */
+    /* Nothing advertisable (unknown providers, description-less favorites):
+     * the heading — the thing that advertises --preset — must not appear
+     * either, or the model would be invited to guess a name with no valid
+     * value to pass. */
     EXPECT(config_load("{\"presets\": {"
-                       "\"a\": {\"provider\": \"does-not-exist\"},"
-                       "\"b\": {\"provider\": \"also-missing\"}}}") == 0);
+                       "\"a\": {\"provider\": \"does-not-exist\", "
+                       "\"description\": \"broken\"},"
+                       "\"b\": {\"provider\": \"mock\"}}}") == 0);
     p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {

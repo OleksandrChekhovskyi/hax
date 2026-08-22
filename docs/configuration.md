@@ -143,7 +143,8 @@ credential itself in JSON.
 A preset is first of all a name for a favorite provider/model/effort selection — useful when you
 regularly switch between a daily model, a cheaper alternative, and a stronger model for difficult
 work. A preset can also become a role by adding a description, system-prompt instructions, and a
-visual tint.
+visual tint. Only presets with a description are advertised to the model for subagent delegation;
+a favorite that is just a name stays yours alone.
 
 The easiest way to save a favorite is to select it with `/provider`, `/model`, and `/effort`, then run
 `/preset-save <name>`. Edit `config.json` when you want to add role-specific fields:
@@ -184,7 +185,7 @@ Preset fields:
 | `system_prompt` | Replace the built-in base prompt. Prefer appending unless replacement is required. |
 | `system_prompt_append` | Add role-specific instructions after the base prompt. |
 | `tint` | `teal`, `violet`, `rose`, or `sage`. |
-| `description` | Human-readable purpose, also shown to the model when delegation is available. |
+| `description` | Human-readable purpose. Required for the preset to be offered to the model as a delegation target. |
 
 `system_prompt` and `system_prompt_append` accept `@path`; relative paths resolve from the hax config
 directory, while absolute paths and `@~/...` work directly. Prefer `system_prompt_append` so updates
