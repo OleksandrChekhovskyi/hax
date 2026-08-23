@@ -112,3 +112,44 @@ char *path_relativize(const char *path, const char *cwd)
         relative++;
     return *relative ? xstrdup(relative) : NULL;
 }
+
+static int ascii_drive_letter(char value)
+{
+    return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z');
+}
+
+char *path_normalize_windows(const char *path)
+{
+    if (!path)
+        return NULL;
+
+    const char *source = path;
+    int extended_unc = strncmp(source, "\\\\?\\UNC\\", 8) == 0;
+    if (extended_unc)
+        source += 8;
+    else if (strncmp(source, "\\\\?\\", 4) == 0)
+        source += 4;
+
+    struct buf normalized;
+    buf_init(&normalized);
+    if (extended_unc)
+        buf_append_str(&normalized, "//");
+    if (ascii_drive_letter(source[0]) && source[1] == ':' &&
+        (source[2] == '\0' || source[2] == '/' || source[2] == '\\')) {
+        char drive = source[0] >= 'A' && source[0] <= 'Z' ? source[0] - 'A' + 'a' : source[0];
+        buf_append_str(&normalized, "/");
+        buf_append(&normalized, &drive, 1);
+        source += 2;
+        if (*source && *source != '/' && *source != '\\')
+            buf_append_str(&normalized, "/");
+    } else if (!extended_unc && source[0] == '\\' && source[1] == '\\') {
+        buf_append_str(&normalized, "//");
+        source += 2;
+    }
+
+    for (; *source; source++) {
+        char value = *source == '\\' ? '/' : *source;
+        buf_append(&normalized, &value, 1);
+    }
+    return buf_steal(&normalized);
+}

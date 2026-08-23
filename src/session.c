@@ -27,7 +27,9 @@
 /* struct stat's sub-second mtime field is spelled differently across
  * platforms. Used to break ties between sessions created in the same
  * second so --continue / the picker reliably pick the most recent. */
-#if defined(__APPLE__)
+#if defined(_WIN32)
+#define ST_MTIME_NSEC(st) 0L
+#elif defined(__APPLE__)
 #define ST_MTIME_NSEC(st) ((long)(st).st_mtimespec.tv_nsec)
 #else
 #define ST_MTIME_NSEC(st) ((long)(st).st_mtim.tv_nsec)
@@ -558,7 +560,12 @@ static FILE *open_session_file(const char *path, enum session_file_mode mode)
     FILE *file = fdopen(fd, mode == SESSION_FILE_APPEND ? "a" : "w");
     if (!file)
         goto error;
+#ifdef _WIN32
+    /* UCRT rejects size-zero line buffering and does not implement line-buffered mode. */
+    setvbuf(file, NULL, _IONBF, 0);
+#else
     setvbuf(file, NULL, _IOLBF, 0);
+#endif
     return file;
 
 error:

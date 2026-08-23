@@ -5,8 +5,11 @@ project('hax', 'c',
         'c_std=c11',
         'warning_level=3',
         'buildtype=debugoptimized',
+        'b_vscrt=mt',
     ],
 )
+
+is_windows = host_machine.system() == 'windows'
 
 # glibc hides POSIX 2008 interfaces until asked for them, while the BSD libcs
 # expose POSIX by default and read these macros as a request to *hide* their
@@ -23,29 +26,118 @@ if host_machine.system() == 'linux'
     )
 endif
 
-add_project_arguments(
-    '-D_DARWIN_C_SOURCE',
-    # Project headers go through -iquote, not -I, so `#include <foo.h>`
-    # always reaches a system header rather than shadowing it with one
-    # of ours (e.g. `src/util.h` would collide with macOS's `<util.h>`
-    # under -I). The `tests/` entry serves the same purpose for
-    # `harness.h` and friends.
-    '-iquote', meson.project_source_root() / 'src',
-    '-iquote', meson.project_source_root() / 'tests',
-    language: 'c',
-)
+if is_windows
+    add_project_arguments(
+        '/utf-8',
+        '/D_CRT_SECURE_NO_WARNINGS',
+        language: 'c',
+    )
+    win32_includes = include_directories('src/system/win32_include', 'src', 'tests')
+    win32_compile_args = ['/FIhax_win32.h']
+else
+    add_project_arguments(
+        '-D_DARWIN_C_SOURCE',
+        # Project headers go through -iquote, not -I, so `#include <foo.h>`
+        # always reaches a system header rather than shadowing it with one
+        # of ours (e.g. `src/util.h` would collide with macOS's `<util.h>`
+        # under -I). The `tests/` entry serves the same purpose for
+        # `harness.h` and friends.
+        '-iquote', meson.project_source_root() / 'src',
+        '-iquote', meson.project_source_root() / 'tests',
+        language: 'c',
+    )
+    win32_includes = include_directories()
+    win32_compile_args = []
+endif
 
-# include_type system turns the dependencies' -I flags into -isystem so
-# clang-tidy does not report findings inside third-party headers (Homebrew
-# installs them outside the default system include path).
-libcurl = dependency('libcurl', include_type: 'system')
-jansson = dependency('jansson', include_type: 'system')
-threads = dependency('threads')
+# Windows always builds reviewed static wraps with Schannel. Keeping the options here makes an
+# upstream default change fail closed rather than silently adding a TLS or protocol dependency.
+if is_windows
+    curl_project = subproject('curl', default_options: [
+        'default_library=static',
+        'b_vscrt=mt',
+        'tool=disabled',
+        'tests=disabled',
+        'unittests=disabled',
+        'ssl=enabled',
+        'schannel=enabled',
+        'ssl-default-backend=schannel',
+        'openssl=disabled',
+        'secure-transport=disabled',
+        'http2=disabled',
+        'alt-svc=disabled',
+        'brotli=disabled',
+        'cookies=disabled',
+        'doh=disabled',
+        'form-api=disabled',
+        'gsasl=disabled',
+        'hsts=disabled',
+        'netrc=disabled',
+        'socketpair=disabled',
+        'unixsockets=disabled',
+        'websockets=disabled',
+        'zstd=disabled',
+        'psl=disabled',
+        'idn=disabled',
+        'libz=disabled',
+        'asynchdns-resolver=win32',
+        'aws=disabled',
+        'digest-auth=disabled',
+        'kerberos-auth=disabled',
+        'negotiate-auth=disabled',
+        'ntlm=disabled',
+        'dict=disabled',
+        'file=disabled',
+        'ftp=disabled',
+        'gopher=disabled',
+        'imap=disabled',
+        'ipfs=disabled',
+        'ldap=disabled',
+        'ldaps=disabled',
+        'mqtt=disabled',
+        'pop3=disabled',
+        'rtmp=disabled',
+        'rtsp=disabled',
+        'smb=disabled',
+        'smtp=disabled',
+        'telnet=disabled',
+        'tftp=disabled',
+        'ssh=disabled',
+    ])
+    libcurl = curl_project.get_variable('curl_dep')
+    jansson_project = subproject(
+        'jansson',
+        default_options: ['default_library=static', 'b_vscrt=mt'],
+    )
+    jansson = jansson_project.get_variable('jansson_dep')
+    threads = declare_dependency()
+else
+    # include_type system turns the dependencies' -I flags into -isystem so clang-tidy does not
+    # report findings inside third-party headers installed outside the compiler's system path.
+    libcurl = dependency('libcurl', include_type: 'system')
+    jansson = dependency('jansson', include_type: 'system')
+    threads = dependency('threads')
+endif
 
 # FreeBSD resolves isfinite() to a libm symbol rather than a compiler builtin,
 # so the math library has to be linked explicitly there. Optional because
 # platforms that fold the math functions into libc ship no separate library.
 libm = meson.get_compiler('c').find_library('m', required: false)
+if is_windows
+    win32_system = declare_dependency(
+        dependencies: [
+            meson.get_compiler('c').find_library('advapi32'),
+            meson.get_compiler('c').find_library('bcrypt'),
+            meson.get_compiler('c').find_library('ole32'),
+            meson.get_compiler('c').find_library('shell32'),
+            meson.get_compiler('c').find_library('user32'),
+        ],
+        compile_args: win32_compile_args,
+        include_directories: win32_includes,
+    )
+else
+    win32_system = declare_dependency()
+endif
 
 fs = import('fs')
 
@@ -103,7 +195,6 @@ sources = files(
     'src/select.c',
     'src/session.c',
     'src/session_picker.c',
-    'src/session_prune.c',
     'src/slash.c',
     'src/tool_schema.c',
     'src/trace.c',
@@ -154,10 +245,9 @@ sources = files(
     'src/system/keepawake.c',
     'src/system/os.c',
     'src/system/path.c',
-    'src/system/spawn.c',
     'src/system/tempfiles.c',
+    'src/system/win32.c',
 
-    'src/terminal/clipboard.c',
     'src/terminal/input.c',
     'src/terminal/input_core.c',
     'src/terminal/interrupt.c',
@@ -198,6 +288,21 @@ sources = files(
     'src/transport/sse.c',
 )
 
+if is_windows
+    sources += files(
+        'src/session_prune_win32.c',
+        'src/system/spawn_win32.c',
+        'src/terminal/clipboard_win32.c',
+        'src/terminal/windows.c',
+    )
+else
+    sources += files(
+        'src/session_prune.c',
+        'src/system/spawn.c',
+        'src/terminal/clipboard.c',
+    )
+endif
+
 # One archive shared by the executable and every test. Static-archive linking
 # is lazy: each consumer pulls only the objects it transitively references, so
 # tests get exactly the closure they need without hand-listing sources. The
@@ -206,7 +311,7 @@ sources = files(
 hax_lib = static_library('hax_lib',
     sources,
     version_h,
-    dependencies: [libcurl, jansson, threads, libm],
+    dependencies: [libcurl, jansson, threads, libm, win32_system],
 )
 
 # Wrap the library as a dependency so consumers inherit both the link against
@@ -223,6 +328,7 @@ hax_dep = declare_dependency(
         libcurl.partial_dependency(compile_args: true, includes: true),
         jansson.partial_dependency(compile_args: true, includes: true),
         threads.partial_dependency(compile_args: true, includes: true),
+        win32_system.partial_dependency(compile_args: true, includes: true),
     ],
 )
 
@@ -231,5 +337,13 @@ hax_exe = executable('hax',
     dependencies: [hax_dep],
     install: true,
 )
+
+if is_windows
+    install_data(
+        'LICENSE',
+        'THIRD_PARTY_NOTICES.md',
+        install_dir: get_option('datadir') / 'hax',
+    )
+endif
 
 subdir('tests')

@@ -18,6 +18,7 @@
 #include "transcript.h"
 #include "util.h"
 #include "providers/registry.h"
+#include "system/spawn.h"
 #include "terminal/theme.h"
 #include "transport/ca.h"
 
@@ -166,6 +167,9 @@ static void initialize_run_services(const char *resume_path)
 
 int main(int argc, char **argv)
 {
+#ifdef _WIN32
+    win32_process_init(&argc, &argv);
+#endif
     initialize_config();
 
     int result = 1;
@@ -181,6 +185,16 @@ int main(int argc, char **argv)
     }
     if (parse_result == CLI_PARSE_ERROR || cli_check_subagent_depth() != 0)
         goto cleanup_config;
+#ifdef _WIN32
+    const char *configured_bash = config_str("bash.shell");
+    if (configured_bash && *configured_bash)
+        setenv("HAX_BASH_SHELL", configured_bash, 1);
+    if (!spawn_win32_bash_available()) {
+        hax_err("Git for Windows Bash was not found or failed validation; install Git for Windows "
+                "or set HAX_BASH_SHELL");
+        goto cleanup_config;
+    }
+#endif
     if (cli_read_prompt(&options, argc, argv, stdin, isatty(fileno(stdin)), &prompt) != 0)
         goto cleanup_config;
 

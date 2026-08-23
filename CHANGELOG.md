@@ -7,6 +7,16 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- Native x64 Windows support statically links the MSVC C runtime, curl, and Jansson, uses Schannel
+  and Git for Windows Bash, preserves Unix-style paths for model-facing commands and file tools,
+  and ships optional PDB symbols for crash diagnosis.
+
+### Fixed
+
+- Windows no longer terminates when the first prompt materializes a session log.
+
 ## [0.4.0] - 2026-08-22
 
 ### Added

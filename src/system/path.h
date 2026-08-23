@@ -21,4 +21,8 @@ char *path_collapse_home(const char *path);
  * unrelated paths, equality, and paths containing a `..` component. */
 char *path_relativize(const char *path, const char *cwd);
 
+/* Normalize a Windows drive, UNC, or separator spelling to the canonical Git Bash-style UTF-8
+ * form. Relative paths remain relative. This is a lexical transform and accepts canonical input. */
+char *path_normalize_windows(const char *path);
+
 #endif /* HAX_SYSTEM_PATH_H */

@@ -1,0 +1,13 @@
+/* SPDX-License-Identifier: MIT */
+#ifndef HAX_WIN32_SCHED_H
+#define HAX_WIN32_SCHED_H
+
+#include <windows.h>
+
+static inline int sched_yield(void)
+{
+    Sleep(0);
+    return 0;
+}
+
+#endif /* HAX_WIN32_SCHED_H */

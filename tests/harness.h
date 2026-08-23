@@ -8,6 +8,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+#include "system/spawn.h"
+#endif
+
 /* Sanitizer detection, for tests that must widen or skip timing-sensitive
  * checks that sanitizer interceptors (notably fork) slow by orders of
  * magnitude. Clang reports via __has_feature, gcc via __SANITIZE_*__. */
@@ -95,7 +99,11 @@ static inline void t_tempdir_cleanup(void)
                      "/usr/bin/find '%s' -type d -exec /bin/chmod u+rwx {} \\; 2>/dev/null; "
                      "/bin/rm -rf '%s'",
                      t_tmpdirs[i], t_tmpdirs[i]);
+#ifdef _WIN32
+            if (spawn_shell_wait(cmd) != 0)
+#else
             if (system(cmd) != 0)
+#endif
                 fprintf(stderr, "t_tempdir: failed to remove %s\n", t_tmpdirs[i]);
         }
         /* Inherited copies are freed only here, at exit — mid-run they
@@ -127,7 +135,19 @@ static inline char *t_tempdir(void)
         t_tmpdir_owner = getpid();
         atexit(t_tempdir_cleanup);
     }
+#ifdef _WIN32
+    const char *temporary = getenv("TMPDIR");
+    if (!temporary || !*temporary)
+        temporary = getenv("TEMP");
+    if (!temporary || !*temporary)
+        temporary = ".";
+    size_t template_length = strlen(temporary) + strlen("/hax_test_XXXXXX") + 1;
+    char *dir = malloc(template_length);
+    if (dir)
+        snprintf(dir, template_length, "%s/hax_test_XXXXXX", temporary);
+#else
     char *dir = strdup("/tmp/hax_test_XXXXXX");
+#endif
     if (!dir || !mkdtemp(dir)) {
         fprintf(stderr, "t_tempdir: %s\n", strerror(errno));
         abort();

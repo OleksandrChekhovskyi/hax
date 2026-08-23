@@ -104,7 +104,7 @@ size_t utf8_prev(const char *bytes, size_t offset)
 /* Terminal format controls can hide or reorder content even when libc assigns them zero width.
  * Variation selectors remain available for emoji presentation, though substituting ZWJ can break
  * joined emoji sequences. */
-static int codepoint_requires_substitution(wchar_t codepoint)
+static int codepoint_requires_substitution(uint32_t codepoint)
 {
     if (codepoint == 0x00AD) /* soft hyphen */
         return 1;
@@ -137,6 +137,63 @@ static int codepoint_requires_substitution(wchar_t codepoint)
     return 0;
 }
 
+#ifdef _WIN32
+static int windows_codepoint_cells(uint32_t codepoint)
+{
+    if (codepoint == 0)
+        return 0;
+    if (codepoint < 0x20 || (codepoint >= 0x7f && codepoint < 0xa0))
+        return -1;
+    if ((codepoint >= 0x0300 && codepoint <= 0x036f) ||
+        (codepoint >= 0x1ab0 && codepoint <= 0x1aff) ||
+        (codepoint >= 0x1dc0 && codepoint <= 0x1dff) ||
+        (codepoint >= 0x20d0 && codepoint <= 0x20ff) ||
+        (codepoint >= 0xfe00 && codepoint <= 0xfe0f) ||
+        (codepoint >= 0xfe20 && codepoint <= 0xfe2f) ||
+        (codepoint >= 0xe0100 && codepoint <= 0xe01ef))
+        return 0;
+    if ((codepoint >= 0x1100 && codepoint <= 0x115f) ||
+        (codepoint >= 0x2329 && codepoint <= 0x232a) ||
+        (codepoint >= 0x2e80 && codepoint <= 0xa4cf) ||
+        (codepoint >= 0xac00 && codepoint <= 0xd7a3) ||
+        (codepoint >= 0xf900 && codepoint <= 0xfaff) ||
+        (codepoint >= 0xfe10 && codepoint <= 0xfe6f) ||
+        (codepoint >= 0xff00 && codepoint <= 0xff60) ||
+        (codepoint >= 0xffe0 && codepoint <= 0xffe6) ||
+        (codepoint >= 0x1f300 && codepoint <= 0x1faff) ||
+        (codepoint >= 0x20000 && codepoint <= 0x3fffd))
+        return 2;
+    return 1;
+}
+
+static int decode_utf8_scalar(const unsigned char *bytes, size_t available, uint32_t *codepoint,
+                              size_t *decoded_len)
+{
+    size_t length = utf8_sequence_length(bytes[0]);
+    if (length == 1) {
+        if (bytes[0] >= 0x80)
+            return -1;
+        *codepoint = bytes[0];
+        *decoded_len = 1;
+        return 0;
+    }
+    if (length > available)
+        return -1;
+    uint32_t value = bytes[0] & (0x7f >> length);
+    for (size_t i = 1; i < length; i++) {
+        if ((bytes[i] & 0xc0) != 0x80)
+            return -1;
+        value = (value << 6) | (bytes[i] & 0x3f);
+    }
+    uint32_t minimum = length == 2 ? 0x80 : length == 3 ? 0x800 : 0x10000;
+    if (value < minimum || value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff))
+        return -1;
+    *codepoint = value;
+    *decoded_len = length;
+    return 0;
+}
+#endif
+
 int utf8_codepoint_cells(const char *bytes, size_t length, size_t offset, size_t *codepoint_len)
 {
     if (offset >= length) {
@@ -144,18 +201,33 @@ int utf8_codepoint_cells(const char *bytes, size_t length, size_t offset, size_t
         return 0;
     }
 
-    wchar_t codepoint;
+#ifdef _WIN32
+    uint32_t codepoint;
+    size_t decoded_len;
+    if (decode_utf8_scalar((const unsigned char *)bytes + offset, length - offset, &codepoint,
+                           &decoded_len) != 0) {
+        *codepoint_len = 1;
+        return -1;
+    }
+#else
+    wchar_t decoded;
     mbstate_t state = {0};
-    size_t decoded_len = mbrtowc(&codepoint, bytes + offset, length - offset, &state);
+    size_t decoded_len = mbrtowc(&decoded, bytes + offset, length - offset, &state);
     if (decoded_len == (size_t)-1 || decoded_len == (size_t)-2 || decoded_len == 0) {
         *codepoint_len = 1;
         return -1;
     }
+    uint32_t codepoint = (uint32_t)decoded;
+#endif
 
     *codepoint_len = decoded_len;
     if (codepoint_requires_substitution(codepoint))
         return -1;
-    return wcwidth(codepoint);
+#ifdef _WIN32
+    return windows_codepoint_cells(codepoint);
+#else
+    return wcwidth((wchar_t)codepoint);
+#endif
 }
 
 void utf8_cell_stream_reset(struct utf8_cell_stream *stream)

@@ -306,6 +306,27 @@ static void test_path_relativize_accepts_dots_within_component(void)
     free(relative);
 }
 
+static void test_path_normalize_windows_drive(void)
+{
+    char *normalized = path_normalize_windows("C:\\Users\\alice\\repo");
+    EXPECT_STR_EQ(normalized, "/c/Users/alice/repo");
+    free(normalized);
+}
+
+static void test_path_normalize_windows_unc(void)
+{
+    char *normalized = path_normalize_windows("\\\\server\\share\\repo");
+    EXPECT_STR_EQ(normalized, "//server/share/repo");
+    free(normalized);
+}
+
+static void test_path_normalize_windows_relative(void)
+{
+    char *normalized = path_normalize_windows("src\\main.c");
+    EXPECT_STR_EQ(normalized, "src/main.c");
+    free(normalized);
+}
+
 int main(void)
 {
     test_path_join_simple();
@@ -355,6 +376,10 @@ int main(void)
     test_path_relativize_rejects_non_escaping_parent_component();
     test_path_relativize_rejects_trailing_parent_component();
     test_path_relativize_accepts_dots_within_component();
+
+    test_path_normalize_windows_drive();
+    test_path_normalize_windows_unc();
+    test_path_normalize_windows_relative();
 
     T_REPORT();
 }

@@ -6,9 +6,13 @@
 #include "config.h"
 #include "util.h"
 #include "system/fs.h"
+#include "system/spawn.h"
 
 char *bash_resolve_shell(void)
 {
+#ifdef _WIN32
+    return spawn_win32_bash_path();
+#else
     const char *configured_shell = config_str("bash.shell");
     if (configured_shell && *configured_shell) {
         char *shell_path = fs_which(configured_shell);
@@ -28,4 +32,5 @@ char *bash_resolve_shell(void)
     if (access("/bin/bash", X_OK) == 0)
         return xstrdup("/bin/bash");
     return xstrdup("/bin/sh");
+#endif
 }

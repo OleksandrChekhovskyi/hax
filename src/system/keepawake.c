@@ -107,14 +107,21 @@ void keepawake_acquire(void)
 {
     if (!config_bool_or("keep_awake", 1))
         return;
+#ifdef _WIN32
+    SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
+#else
     reap_dead_helper();
     if (helper_pid > 0)
         return;
     spawn_helper();
+#endif
 }
 
 void keepawake_release(void)
 {
+#ifdef _WIN32
+    SetThreadExecutionState(ES_CONTINUOUS);
+#else
     if (helper_pid <= 0)
         return;
     kill(helper_pid, SIGTERM);
@@ -122,4 +129,5 @@ void keepawake_release(void)
      * macOS) must not hang the turn boundary; escalate instead of waiting forever. */
     (void)spawn_wait_child_timeout(helper_pid, 500);
     helper_pid = 0;
+#endif
 }

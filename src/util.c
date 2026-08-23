@@ -27,12 +27,20 @@ void locale_init_utf8(void)
     locale_is_utf8 = 0;
     locale_children_are_utf8 = 0;
 
+#ifdef _WIN32
+    if (setlocale(LC_CTYPE, ".UTF8")) {
+        locale_is_utf8 = 1;
+        locale_children_are_utf8 = 1;
+        return;
+    }
+#else
     setlocale(LC_CTYPE, "");
     if (strcmp(nl_langinfo(CODESET), "UTF-8") == 0) {
         locale_is_utf8 = 1;
         locale_children_are_utf8 = 1;
         return;
     }
+#endif
     /* OpenBSD ships no default locale at all, yet renders UTF-8 whatever the locale claims. This
      * process needs one regardless of the environment: mbrtowc() decodes the model's text here, and
      * without it every multibyte character is measured as its separate bytes.
@@ -40,7 +48,16 @@ void locale_init_utf8(void)
      * The spellings are PEP 538's, there being no portable one: glibc and the BSDs answer to
      * C.UTF-8, macOS only to a bare UTF-8. A language-bearing name is the last resort, for systems
      * where only specific locales were generated. */
-    static const char *const CANDIDATES[] = {"C.UTF-8", "C.utf8", "UTF-8", "en_US.UTF-8"};
+    static const char *const CANDIDATES[] = {
+#ifdef _WIN32
+        ".UTF8",
+#else
+        "C.UTF-8",
+        "C.utf8",
+        "UTF-8",
+        "en_US.UTF-8",
+#endif
+    };
     const char *chosen = NULL;
     for (size_t i = 0; !chosen && i < sizeof(CANDIDATES) / sizeof(CANDIDATES[0]); i++)
         chosen = setlocale(LC_CTYPE, CANDIDATES[i]);
@@ -226,6 +243,12 @@ char *shell_single_quote(const char *str)
 void gen_uuid_v4(char out[37])
 {
     uint8_t bytes[16];
+#ifdef _WIN32
+    if (BCryptGenRandom(NULL, bytes, sizeof(bytes), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+        hax_err("BCryptGenRandom failed");
+        abort();
+    }
+#else
     int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         hax_err("open /dev/urandom: %s", strerror(errno));
@@ -248,6 +271,7 @@ void gen_uuid_v4(char out[37])
         bytes_read += (size_t)count;
     }
     close(fd);
+#endif
 
     bytes[6] = (bytes[6] & 0x0f) | 0x40; /* RFC 4122 version 4 */
     bytes[8] = (bytes[8] & 0x3f) | 0x80; /* RFC 4122 variant */

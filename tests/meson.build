@@ -19,7 +19,6 @@ test_sources = [
     'test_agent_usage.c',
     'test_banner.c',
     'test_catalog.c',
-    'test_catalog_fetch.c',
     'test_cli.c',
     'test_compact.c',
     'test_config.c',
@@ -29,7 +28,6 @@ test_sources = [
     'test_history.c',
     'test_model_meta.c',
     'test_model_sort.c',
-    'test_harness.c',
     'test_oneshot.c',
     'test_paste_image.c',
     'test_provider.c',
@@ -46,7 +44,6 @@ test_sources = [
 
     'providers/test_anthropic_body.c',
     'providers/test_anthropic_events.c',
-    'providers/test_anthropic_models.c',
     'providers/test_chat_body.c',
     'providers/test_chat_events.c',
     'providers/test_codex.c',
@@ -54,7 +51,6 @@ test_sources = [
     'providers/test_codex_login.c',
     'providers/test_codex_settings.c',
     'providers/test_config_provider.c',
-    'providers/test_http_provider.c',
     'providers/test_llamacpp.c',
     'providers/test_mock.c',
     'providers/test_model_info.c',
@@ -63,7 +59,6 @@ test_sources = [
     'providers/test_registry.c',
     'providers/test_responses_body.c',
     'providers/test_responses_events.c',
-    'providers/test_stream_retry.c',
     'providers/test_wire.c',
 
     'render/test_ctrl_strip.c',
@@ -83,7 +78,6 @@ test_sources = [
     'system/test_keepawake.c',
     'system/test_os.c',
     'system/test_path.c',
-    'system/test_spawn.c',
     'system/test_tempfiles.c',
 
     'terminal/test_clipboard.c',
@@ -115,13 +109,59 @@ test_sources = [
 
     'transport/test_api_error.c',
     'transport/test_ca.c',
-    'transport/test_http.c',
     'transport/test_retry.c',
     'transport/test_sse.c',
 ]
 
+# These fixtures are small POSIX socket servers. Windows exercises the same HTTP paths through
+# one-shot end-to-end tests instead of carrying a second test-server implementation.
+windows_incompatible_tests = [
+    'test_agent.c',
+    'test_agent_core.c',
+    'test_agent_env.c',
+    'test_agent_loop.c',
+    'test_cli.c',
+    'test_compact.c',
+    'test_config.c',
+    'test_cred_store.c',
+    'test_file_mention.c',
+    'test_paste_image.c',
+    'test_session.c',
+    'test_session_prune.c',
+    'test_trace.c',
+    'test_util.c',
+    'render/test_spinner.c',
+    'system/test_fs.c',
+    'system/test_git.c',
+    'system/test_os.c',
+    'system/test_tempfiles.c',
+    'tools/test_bash.c',
+    'tools/test_edit.c',
+    'tools/test_read.c',
+    'tools/test_task.c',
+    'tools/test_task_wait.c',
+    'tools/test_write.c',
+]
+
+if host_machine.system() == 'windows'
+    test_sources += ['system/test_windows.c']
+else
+    test_sources += [
+        'test_catalog_fetch.c',
+        'test_harness.c',
+        'system/test_spawn.c',
+        'providers/test_anthropic_models.c',
+        'providers/test_http_provider.c',
+        'providers/test_stream_retry.c',
+        'transport/test_http.c',
+    ]
+endif
+
 fs = import('fs')
 foreach src : test_sources
+    if host_machine.system() == 'windows' and src in windows_incompatible_tests
+        continue
+    endif
     stem = fs.stem(src).substring(5)  # drop the leading 'test_'
     parent = fs.parent(src)
     name = parent == '.' ? stem : parent / stem

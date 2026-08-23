@@ -39,8 +39,8 @@ like this.
 
 ## Install
 
-hax runs on Linux, macOS, FreeBSD, and OpenBSD; on Windows, use it under
-[WSL](https://learn.microsoft.com/en-us/windows/wsl/). The BSDs build from source only.
+hax runs on Linux, macOS, FreeBSD, OpenBSD, and native x64 Windows 10 or newer. The BSDs
+and Windows currently build from source only.
 
 With [Homebrew](https://brew.sh) (macOS or Linux):
 
@@ -70,6 +70,24 @@ make install              # optional; may prompt for sudo
 `scripts/install_deps.sh` installs the build dependencies — a C compiler, `libcurl`,
 `jansson`, `meson`, `ninja`, and `pkg-config` — plus `fzf`, which hax uses for `@file`
 completion when available. On other platforms, install those packages by hand and run `make`.
+
+On Windows, install Visual Studio 2022 or LLVM with the Windows SDK, Python, Meson, Ninja, and
+[Git for Windows](https://git-scm.com/download/win). From PowerShell:
+
+```powershell
+$env:CC = "clang-cl"  # omit this line to use cl.exe from a VS developer shell
+meson setup build-win
+meson compile -C build-win
+meson test -C build-win --print-errorlogs
+```
+
+Meson downloads the pinned static curl and Jansson wraps during the first setup. The resulting
+`build-win\hax.exe` statically links the MSVC C runtime, curl, and Jansson, and uses Schannel and
+Windows trust, so the executable itself can be copied and run without companion DLLs. Release
+archives also contain an optional `hax.pdb` for debugging; it is not required to run hax. Git for
+Windows supplies the Bash process used for model-generated commands. It can be launched from
+PowerShell, Windows Terminal, or Git Bash.
+Set `HAX_BASH_SHELL` only when automatic Git-for-Windows discovery cannot find the installation.
 
 For hacking on hax, `make symlink` links the freshly built binary into `~/.local/bin` so it
 stays on `PATH` across rebuilds. `make lint` additionally needs `clang-format` and

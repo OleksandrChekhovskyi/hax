@@ -67,6 +67,37 @@ jobs:
         if: ${{ matrix.lint }}
         run: make lint
 
+  windows:
+    name: windows
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - name: Install Meson and Ninja
+        run: python -m pip install meson ninja
+      - name: Build from clean wraps
+        env:
+          CC: clang-cl
+        run: |
+          meson setup build-win
+          meson compile -C build-win
+      - name: Test
+        run: meson test -C build-win --print-errorlogs
+      - name: Verify standalone native imports
+        shell: pwsh
+        run: |
+          $readobj = "$env:ProgramFiles\LLVM\bin\llvm-readobj.exe"
+          $imports = & $readobj --coff-imports build-win\hax.exe | Out-String
+          $imports | Write-Host
+          $forbidden = '(?i)(msys-2\.0|cygwin1|pthread|libcurl|jansson|vcruntime[^.]*|' +
+                       'msvcp[^.]*|ucrtbase|api-ms-win-crt-[^.]+)\.dll'
+          if ($imports -match $forbidden) {
+            throw 'hax.exe imports a forbidden compatibility, dependency, or C runtime DLL'
+          }
+
   # GitHub has no BSD runners, so these boot a QEMU guest on a Linux runner and
   # take longer than the container jobs above. They cannot join that matrix: the
   # whole body has to run inside the VM, which the `cpa.sh` shell arranges.

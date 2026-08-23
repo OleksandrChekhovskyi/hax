@@ -54,6 +54,17 @@ int spawn_wait_child_timeout(pid_t pid, int timeout_ms);
  * ECHILD counts as exited. */
 int spawn_reap_if_exited(pid_t pid);
 
+#ifdef _WIN32
+/* Windows Bash backend: the returned process is job-contained and remains registered until
+ * spawn_win32_waitpid reaps it. */
+int spawn_win32_bash_available(void);
+char *spawn_win32_bash_path(void);
+int spawn_win32_start_bash(const char *command, char *const envp[], pid_t *pid, int *output_fd);
+void spawn_win32_terminate(pid_t pid);
+int spawn_win32_exit_seen(pid_t pid, int *exit_seen);
+pid_t spawn_win32_waitpid(pid_t pid, int *status, int options);
+#endif
+
 struct spawn_pipe {
     FILE *stream;
     pid_t pid;

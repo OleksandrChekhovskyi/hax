@@ -303,9 +303,12 @@ char *fs_which(const char *name)
 {
     if (!name || !*name)
         return NULL;
-    if (strchr(name, '/'))
+    if (strchr(name, '/') || strchr(name, '\\'))
         return is_executable_file(name) ? xstrdup(name) : NULL;
 
+#ifdef _WIN32
+    return hax_search_path(name);
+#else
     const char *path_env = getenv("PATH");
     if (!path_env)
         return NULL;
@@ -328,6 +331,7 @@ char *fs_which(const char *name)
             return NULL;
         entry = separator + 1;
     }
+#endif
 }
 
 char *fs_shell_head(const char *shell_cmd)

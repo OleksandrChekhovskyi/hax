@@ -1,6 +1,7 @@
 # Native Windows support plan
 
-Status: design approved in principle; implementation has not started.
+Status: initial native x64 implementation landed; legacy mintty sizing and the manual terminal
+matrix remain release gates.
 
 ## Objective
 

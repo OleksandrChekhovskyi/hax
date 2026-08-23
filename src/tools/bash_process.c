@@ -34,13 +34,19 @@ static long deadline_after(long now_ms, long duration_ms)
     return duration_ms > LONG_MAX - now_ms ? LONG_MAX : now_ms + duration_ms;
 }
 
-/* The child creates its process group after fork, hence the fallback. */
 void bash_signal_process_tree(pid_t pid, int signal_number)
 {
+#ifdef _WIN32
+    (void)signal_number;
+    spawn_win32_terminate(pid);
+#else
+    /* The child creates its process group after fork, hence the fallback. */
     if (kill(-pid, signal_number) < 0 && errno == ESRCH)
         kill(pid, signal_number);
+#endif
 }
 
+#ifndef _WIN32
 /* This runs after fork in a multithreaded process; use only async-signal-safe calls. */
 static void exec_shell_child(const char *shell, const char *argv0, const char *command,
                              char *const envp[])
@@ -51,11 +57,20 @@ static void exec_shell_child(const char *shell, const char *argv0, const char *c
     execve(shell, argv, envp);
     _exit(127);
 }
+#endif
 
 static char *start_shell(const char *command, struct shell_process *process)
 {
-    /* Resolve everything before fork so the child can avoid allocator and environment locks. */
     char **envp = bash_build_child_env();
+#ifdef _WIN32
+    if (spawn_win32_start_bash(command, envp, &process->pid, &process->output_fd) != 0) {
+        char *error = xasprintf("starting Git Bash: %s", strerror(errno));
+        free(envp);
+        return error;
+    }
+    free(envp);
+#else
+    /* Resolve everything before fork so the child can avoid allocator and environment locks. */
     char *shell = bash_resolve_shell();
     const char *argv0 = strrchr(shell, '/');
     argv0 = argv0 ? argv0 + 1 : shell;
@@ -96,9 +111,10 @@ static char *start_shell(const char *command, struct shell_process *process)
     close(pipe_fds[1]);
     free(shell);
     free(envp);
-    bash_shell_pgid_publish(pid);
     process->pid = pid;
     process->output_fd = pipe_fds[0];
+#endif
+    bash_shell_pgid_publish(process->pid);
     return NULL;
 }
 
@@ -115,11 +131,15 @@ static long start_shutdown(pid_t pid, long now_ms, long grace_ms)
 
 int bash_process_exit_seen(pid_t pid, int *exit_seen)
 {
+#ifdef _WIN32
+    return spawn_win32_exit_seen(pid, exit_seen);
+#else
     siginfo_t info = {0};
     int result = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
     if (result == 0 && info.si_pid == pid)
         *exit_seen = 1;
     return result;
+#endif
 }
 
 /* Generous: a loaded machine may schedule the exiting shell late, and the stall lands only on
@@ -503,6 +523,6 @@ void bash_shell_pgids_kill(void)
     for (size_t i = 0; i < SHELL_PGID_TABLE_SIZE; i++) {
         pid_t pid = shell_pgids[i];
         if (pid > 0)
-            kill(-pid, SIGKILL);
+            bash_signal_process_tree(pid, SIGKILL);
     }
 }
