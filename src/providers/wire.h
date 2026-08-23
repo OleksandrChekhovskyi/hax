@@ -44,6 +44,7 @@ struct wire_body_opts {
     int emit_progress; /* request llama.cpp prompt_progress */
     int request_cost;  /* request OpenRouter usage cost */
     /* anthropic */
+    const char *anthropic_version; /* non-NULL: emit as a body field (Vertex raw endpoints) */
     int max_tokens;
     enum anthropic_thinking_mode thinking_mode;
     int thinking_budget;       /* tokens; out-of-range values fall back to max_tokens - 1 */

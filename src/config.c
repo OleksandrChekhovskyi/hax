@@ -227,6 +227,18 @@ static const struct config_setting REGISTRY[] = {
     {.key = "providers.anthropic-compatible.version", .env_var = "HAX_ANTHROPIC_VERSION",
      .description = "anthropic-version request header value (default: 2023-06-01)"},
 
+    /* vertex (Google's Anthropic Messages serving) */
+    {.key = "vertex.base_url", .env_var = "HAX_VERTEX_BASE_URL",
+     .description = "Complete Vertex `...:streamRawPredict` endpoint serving the Anthropic "
+                    "Messages protocol"},
+    {.key = "vertex.access_token", .env_var = "GOOGLE_OAUTH_ACCESS_TOKEN", .secret = 1,
+     .description = "Explicit Google OAuth2 access token for Vertex (instead of gcloud ADC)"},
+    {.key = "vertex.thinking_mode", .env_var = "HAX_VERTEX_THINKING_MODE",
+     .description = "Thinking mode: adaptive, budget, or off",
+     .choices = "adaptive|budget|off"},
+    {.key = "vertex.cache", .env_var = "HAX_VERTEX_CACHE", .choices = CONFIG_CHOICES_TRISTATE,
+     .description = "Send prompt cache_control breakpoints; auto uses the provider default"},
+
     /* per-provider */
     {.key = "providers.llamacpp.base_url", .env_var = "HAX_LLAMACPP_BASE_URL",
      .description = "Full llama-server base URL; overrides the port setting"},

@@ -15,6 +15,7 @@ extern const struct provider_factory PROVIDER_LLAMACPP;
 extern const struct provider_factory PROVIDER_MOCK;
 extern const struct provider_factory PROVIDER_OPENAI;
 extern const struct provider_factory PROVIDER_OPENROUTER;
+extern const struct provider_factory PROVIDER_VERTEX;
 
 /* Look up a built-in, recipe, or config-defined factory by name, accepting former ids. Built-in
  * names take precedence; returns NULL when no provider is registered. */

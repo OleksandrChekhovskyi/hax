@@ -267,6 +267,10 @@ json_t *anthropic_build_body(const struct context *context, const char *provider
     if (opts->cache_markers)
         attach_cache_to_last_message(messages, opts->cache_ttl);
 
+    if (opts->anthropic_version) {
+        json_object_set_new(body, "anthropic_version", json_string(opts->anthropic_version));
+        json_object_del(body, "model");
+    }
     apply_thinking(body, context, opts);
     return body;
 }

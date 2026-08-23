@@ -16,6 +16,7 @@
 #include "providers/chat_body.h"
 #include "providers/config_provider.h"
 #include "providers/stream_retry.h"
+#include "providers/vertex_auth.h"
 #include "providers/wire.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
@@ -56,6 +57,8 @@ struct http_provider {
     enum anthropic_thinking_mode default_thinking_mode;
     int allow_empty_signature;
     int cache_default; /* Messages cache_control default; chat uses cache_mode */
+    int raw_endpoint;  /* base_url is the complete stream endpoint; no wire path is appended */
+    const char *(*bearer_token)(const struct provider *provider); /* Messages; NULL → api_key */
     char **extra_headers;
     json_t *extra_body;
 
@@ -114,7 +117,10 @@ static char **build_headers(const struct http_provider *provider, const struct w
     char *auth = NULL;
     char *version = NULL;
     if (wire == &WIRE_ANTHROPIC_MESSAGES) {
-        if (provider->api_key)
+        const char *token = provider->bearer_token ? provider->bearer_token(&provider->base) : NULL;
+        if (token && *token)
+            auth = xasprintf("Authorization: Bearer %s", token);
+        else if (provider->api_key)
             auth = xasprintf("x-api-key: %s", provider->api_key);
         version = xasprintf("anthropic-version: %s", provider->version);
     } else if (provider->api_key) {
@@ -144,6 +150,7 @@ struct http_stream {
     const struct wire *wire; /* resolved for this request's model */
     struct chat_cache_plan cache;
     union wire_events events;
+    int auth_retried; /* one in-place retry after a rejected bearer token */
 };
 
 static char **stream_build_headers(void *ctx)
@@ -180,6 +187,24 @@ static void stream_parser_free(void *ctx)
 {
     struct http_stream *stream = ctx;
     stream->wire->events_free(&stream->events);
+}
+
+/* A 401 on a Bearer-authenticated request (Vertex): the cached token may be rejected (expired
+ * access token, rotated refresh). Drop it and retry once so the next build_headers re-resolves.
+ * Bounded to a single recovery per stream; a second 401 surfaces as an error rather than
+ * spinning on a bad credential. */
+static int stream_recover(void *ctx, long http_status, http_tick_cb tick, void *tick_user)
+{
+    struct http_stream *stream = ctx;
+    if (http_status != 401 || stream->auth_retried)
+        return 0;
+    if (!stream->provider->bearer_token)
+        return 0;
+    stream->auth_retried = 1;
+    vertex_auth_invalidate();
+    (void)tick;
+    (void)tick_user;
+    return 1;
 }
 
 static int stream_parser_complete(void *ctx)
@@ -266,6 +291,8 @@ static int http_provider_stream(struct provider *base, const struct context *con
         opts.thinking_budget = config_scoped_int(provider->config_prefix, "thinking_budget");
         opts.show_reasoning = config_bool("show_reasoning");
         opts.allow_empty_signature = provider->allow_empty_signature;
+        if (provider->raw_endpoint)
+            opts.anthropic_version = provider->version;
     } else {
         /* Cache planning depends on rates populated by the startup metadata probe. Bounded: a
          * router-autoload probe can take minutes, while rate-reporting probes answer quickly,
@@ -294,6 +321,7 @@ static int http_provider_stream(struct provider *base, const struct context *con
         .body_len = strlen(body),
         .ctx = &stream,
         .build_headers = stream_build_headers,
+        .recover = provider->bearer_token ? stream_recover : NULL,
         .parser_init = stream_parser_init,
         .parser_feed = handle_sse_data,
         .parser_finalize = stream_parser_finalize,
@@ -596,12 +624,19 @@ struct provider *http_provider_new_preset(const struct http_provider_preset *pre
     provider->catalog_id = preset->catalog_id ? xstrdup(preset->catalog_id) : NULL;
     provider->config_prefix = preset->config_prefix ? xstrdup(preset->config_prefix) : NULL;
     provider->wire = resolve_wire(preset);
-    provider->endpoint = xasprintf("%s%s", provider->base_url, provider->wire->path);
+    provider->raw_endpoint = preset->raw_endpoint;
+    provider->bearer_token = preset->bearer_token;
+    /* A raw endpoint (Vertex) names the complete stream URL; wire paths derive per request. */
+    provider->endpoint = preset->raw_endpoint
+                             ? xstrdup(provider->base_url)
+                             : xasprintf("%s%s", provider->base_url, provider->wire->path);
     resolve_wire_rules(provider, preset->config_prefix);
     provider->catalog_wires = preset->catalog_wires;
     /* Resolved regardless of the default wire: per-model rules can route to Messages. */
     const char *version = config_scoped_str(preset->config_prefix, "version");
-    provider->version = xstrdup(version && *version ? version : MESSAGES_DEFAULT_VERSION);
+    const char *fallback = preset->default_version ? preset->default_version
+                                                   : MESSAGES_DEFAULT_VERSION;
+    provider->version = xstrdup(version && *version ? version : fallback);
 
     provider->send_cache_key = config_scoped_bool_or(preset->config_prefix, "send_cache_key",
                                                      preset->send_cache_key_default);

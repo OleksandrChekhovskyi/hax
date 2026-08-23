@@ -42,6 +42,14 @@ struct http_provider_preset {
     enum anthropic_thinking_mode default_thinking_mode;
     int allow_empty_signature;      /* preserve unsigned thinking blocks on compat backends */
     int send_cache_control_default; /* overridable by the cache setting */
+    const char *default_version;    /* anthropic-version; NULL falls back to 2023-06-01 */
+
+    /* Vertex-style serving: base_url names a complete stream endpoint (a Google
+     * `...:streamRawPredict` URL) so no wire path is appended. */
+    int raw_endpoint;
+    /* Return the bearer token for a request; borrowed, may be NULL. Only consulted when the
+     * wire is Messages; NULL falls back to the configured API key behind a `Bearer ` header. */
+    const char *(*bearer_token)(const struct provider *provider);
 
     const char *const *extra_headers; /* NULL-terminated; copied */
 

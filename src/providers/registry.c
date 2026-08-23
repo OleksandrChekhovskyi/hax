@@ -19,6 +19,7 @@ static const struct provider_factory *const BUILTINS[] = {
     &PROVIDER_OPENAI,
     &PROVIDER_ANTHROPIC,
     &PROVIDER_OPENROUTER,
+    &PROVIDER_VERTEX,
     &PROVIDER_MOCK,
 };
 // clang-format on
