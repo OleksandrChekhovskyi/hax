@@ -154,8 +154,13 @@ static enum input_event wait_for_input(int timeout_ms)
 static void drain_wake_pipe(void)
 {
     char bytes[64];
-    while (read(watcher.wake_read_fd, bytes, sizeof(bytes)) > 0)
-        continue;
+    for (;;) {
+        struct pollfd wake = {.fd = watcher.wake_read_fd, .events = POLLIN};
+        if (poll(&wake, 1, 0) <= 0 || !(wake.revents & POLLIN))
+            return;
+        if (read(watcher.wake_read_fd, bytes, sizeof(bytes)) <= 0)
+            return;
+    }
 }
 
 static int watcher_is_armed(void)

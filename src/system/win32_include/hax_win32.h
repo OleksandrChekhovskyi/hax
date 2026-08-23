@@ -160,6 +160,7 @@ int hax_wcwidth(wchar_t codepoint);
 
 void win32_process_init(int *argc, char ***argv);
 void win32_terminal_acquire(void);
+void win32_terminal_leave_for_child(void);
 void win32_terminal_release(void);
 
 int hax_open(const char *path, int flags, ...);

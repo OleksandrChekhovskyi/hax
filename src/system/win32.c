@@ -242,6 +242,8 @@ struct console_state {
     DWORD output_mode;
     UINT input_code_page;
     UINT output_code_page;
+    int input_saved;
+    int output_saved;
     int input_changed;
     int output_changed;
 };
@@ -253,14 +255,21 @@ int hax_isatty(int fd)
     return terminal_windows_stream_kind(fd) != TERMINAL_STREAM_REDIRECTED;
 }
 
-void win32_terminal_release(void)
+void win32_terminal_leave_for_child(void)
 {
-    if (console_state.input_changed) {
+    if (console_state.input_saved) {
         SetConsoleMode(console_state.input, console_state.input_mode);
         SetConsoleCP(console_state.input_code_page);
         console_state.input_changed = 0;
     }
-    if (console_state.output_changed) {
+}
+
+void win32_terminal_release(void)
+{
+    /* Restore the immutable startup state even when another cleanup path already cleared the
+     * changed flags: termios teardown may subsequently have restored its saved VT mode. */
+    win32_terminal_leave_for_child();
+    if (console_state.output_saved) {
         SetConsoleMode(console_state.output, console_state.output_mode);
         SetConsoleOutputCP(console_state.output_code_page);
         console_state.output_changed = 0;
@@ -300,8 +309,6 @@ void win32_terminal_acquire(void)
 {
     DWORD mode;
     if (!console_state.output_changed && GetConsoleMode(console_state.output, &mode)) {
-        console_state.output_mode = mode;
-        console_state.output_code_page = GetConsoleOutputCP();
         DWORD vt_mode = mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT;
         if (SetConsoleMode(console_state.output, vt_mode)) {
             SetConsoleOutputCP(CP_UTF8);
@@ -309,10 +316,8 @@ void win32_terminal_acquire(void)
         }
     }
     if (!console_state.input_changed && GetConsoleMode(console_state.input, &mode)) {
-        console_state.input_mode = mode;
-        console_state.input_code_page = GetConsoleCP();
+        /* Preserve the caller's Quick Edit bit so selection and host scrollback keep working. */
         DWORD vt_mode = mode | ENABLE_VIRTUAL_TERMINAL_INPUT | ENABLE_EXTENDED_FLAGS;
-        vt_mode &= ~ENABLE_QUICK_EDIT_MODE;
         if (SetConsoleMode(console_state.input, vt_mode)) {
             SetConsoleCP(CP_UTF8);
             console_state.input_changed = 1;
@@ -376,6 +381,14 @@ void win32_process_init(int *argc, char ***argv)
 
     console_state.input = GetStdHandle(STD_INPUT_HANDLE);
     console_state.output = GetStdHandle(STD_OUTPUT_HANDLE);
+    console_state.input_saved =
+        GetConsoleMode(console_state.input, &console_state.input_mode) != FALSE;
+    if (console_state.input_saved)
+        console_state.input_code_page = GetConsoleCP();
+    console_state.output_saved =
+        GetConsoleMode(console_state.output, &console_state.output_mode) != FALSE;
+    if (console_state.output_saved)
+        console_state.output_code_page = GetConsoleOutputCP();
     win32_terminal_acquire();
     atexit(win32_terminal_release);
     SetConsoleCtrlHandler(console_control_handler, TRUE);
@@ -1416,7 +1429,6 @@ int tcsetattr(int fd, int action, const struct termios *attributes)
         terminal_windows_stream_kind(fd) == TERMINAL_STREAM_MSYS_PTY)
         return 0;
     DWORD mode = attributes->input_mode | ENABLE_VIRTUAL_TERMINAL_INPUT | ENABLE_EXTENDED_FLAGS;
-    mode &= ~ENABLE_QUICK_EDIT_MODE;
     if (attributes->c_lflag & ICANON)
         mode |= ENABLE_LINE_INPUT;
     else
@@ -1464,6 +1476,26 @@ int ioctl(int fd, int request, ...)
     return 0;
 }
 
+static int console_input_ready(HANDLE handle)
+{
+    for (int i = 0; i < 64; i++) {
+        INPUT_RECORD record;
+        DWORD count;
+        if (!PeekConsoleInputW(handle, &record, 1, &count) || count == 0)
+            return 0;
+        if (record.EventType == KEY_EVENT && record.Event.KeyEvent.bKeyDown) {
+            WORD key = record.Event.KeyEvent.wVirtualKeyCode;
+            if (record.Event.KeyEvent.uChar.UnicodeChar != L'\0' && key != VK_SHIFT &&
+                key != VK_CONTROL && key != VK_MENU && key != VK_CAPITAL && key != VK_NUMLOCK &&
+                key != VK_SCROLL)
+                return 1;
+        }
+        if (!ReadConsoleInputW(handle, &record, 1, &count))
+            return 0;
+    }
+    return 0;
+}
+
 int poll(struct pollfd *fds, nfds_t count, int timeout_ms)
 {
     if (!fds || count == 0) {
@@ -1487,8 +1519,14 @@ int poll(struct pollfd *fds, nfds_t count, int timeout_ms)
                         fds[i].revents = POLLHUP;
                     else if (available)
                         fds[i].revents = POLLIN;
-                } else if (WaitForSingleObject(handle, 0) == WAIT_OBJECT_0) {
-                    fds[i].revents = POLLIN;
+                } else {
+                    DWORD console_mode;
+                    if (GetConsoleMode(handle, &console_mode)) {
+                        if (console_input_ready(handle))
+                            fds[i].revents = POLLIN;
+                    } else if (WaitForSingleObject(handle, 0) == WAIT_OBJECT_0) {
+                        fds[i].revents = POLLIN;
+                    }
                 }
             } else if (fds[i].events & POLLOUT) {
                 fds[i].revents = POLLOUT;

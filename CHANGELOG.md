@@ -15,7 +15,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
-- Windows no longer terminates when the first prompt materializes a session log.
+- Windows no longer terminates when the first prompt materializes a session log. Provider errors
+  return to the retry prompt instead of hanging and restore the original console mode on exit.
+- Windows preserves Quick Edit selection and host scrolling while hax is running, and keeps VT
+  output enabled across child launches so cursor controls cannot leak around spinner updates.
 
 ## [0.4.0] - 2026-08-22
 

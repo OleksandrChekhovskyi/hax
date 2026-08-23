@@ -251,5 +251,8 @@ cleanup_config:
     config_free();
     free(prompt);
     free(resume_path);
+#ifdef _WIN32
+    win32_terminal_release();
+#endif
     return result;
 }

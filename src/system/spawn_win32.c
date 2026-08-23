@@ -222,7 +222,7 @@ static int start_process(const wchar_t *application, wchar_t *command_line, HAND
     }
 
     PROCESS_INFORMATION process_info;
-    win32_terminal_release();
+    win32_terminal_leave_for_child();
     BOOL created =
         CreateProcessW(application, command_line, NULL, NULL, TRUE,
                        CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
@@ -363,8 +363,8 @@ int spawn_win32_bash_available(void)
     wchar_t *bash = find_git_bash();
     if (!bash)
         return 0;
-    wchar_t *command_line = bash_command_line(
-        bash, "test -n \"$BASH_VERSION\" && cd /c && test \"$(pwd -W)\" = C:/");
+    wchar_t *command_line =
+        bash_command_line(bash, "test -n \"$BASH_VERSION\" && cd /c && test \"$(pwd -W)\" = C:/");
     struct child_start child;
     int started = command_line ? start_process(bash, command_line, GetStdHandle(STD_INPUT_HANDLE),
                                                GetStdHandle(STD_OUTPUT_HANDLE),
