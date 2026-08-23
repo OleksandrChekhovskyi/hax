@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "oneshot.h"
 
+#include <jansson.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +30,7 @@ struct oneshot_state {
     struct spend_totals spend;
     long started_ms;
     long context_tokens;
+    int json_events;
 };
 
 static int account_compaction_event(const struct stream_event *event, void *user)
@@ -64,6 +66,41 @@ static int compact_context(struct oneshot_state *state)
     return completed;
 }
 
+/* Emit one progress event as a JSON line on stdout. Ownership of `event` passes in;
+ * a write failure is silently ignored — progress is advisory, never fatal. */
+static void json_emit(json_t *event)
+{
+    char *line = json_dumps(event, JSON_COMPACT | JSON_ENSURE_ASCII);
+    if (line) {
+        fputs(line, stdout);
+        fputc('\n', stdout);
+        fflush(stdout);
+        free(line);
+    }
+    json_decref(event);
+}
+
+/* Attach usage fields to `object` under "usage"; unknown (-1) counts are omitted. */
+static void json_add_usage(json_t *object, const struct stream_usage *usage)
+{
+    json_t *u = json_object();
+    long total = 0;
+
+    if (usage->input_tokens >= 0) {
+        json_object_set_new(u, "input_tokens", json_integer(usage->input_tokens));
+        total += usage->input_tokens;
+    }
+    if (usage->output_tokens >= 0) {
+        json_object_set_new(u, "output_tokens", json_integer(usage->output_tokens));
+        total += usage->output_tokens;
+    }
+    if (usage->cached_tokens >= 0)
+        json_object_set_new(u, "cached_tokens", json_integer(usage->cached_tokens));
+    if (total > 0)
+        json_object_set_new(u, "totalTokens", json_integer(total));
+    json_object_set_new(object, "usage", u);
+}
+
 static void account_turn(const struct agent_loop_turn *turn, void *user)
 {
     struct oneshot_state *state = user;
@@ -71,6 +108,41 @@ static void account_turn(const struct agent_loop_turn *turn, void *user)
      * charge over their unpriced tokens. */
     agent_spend_account(&state->spend, &turn->usage, state->provider, state->session.model);
     agent_spend_account(&state->spend, &turn->retry_usage, state->provider, state->session.model);
+
+    if (!state->json_events)
+        return;
+    json_t *event = json_object();
+    json_object_set_new(event, "type", json_string("turn_end"));
+    if (turn->served_model)
+        json_object_set_new(event, "model", json_string(turn->served_model));
+    if (turn->elapsed_ms >= 0)
+        json_object_set_new(event, "elapsed_ms", json_integer(turn->elapsed_ms));
+    json_add_usage(event, &turn->usage);
+    json_emit(event);
+}
+
+static void oneshot_turn_begin(void *user)
+{
+    struct oneshot_state *state = user;
+
+    if (!state->json_events)
+        return;
+    json_emit(json_pack("{s:s}", "type", "turn_start"));
+}
+
+static void oneshot_tool_seen(const struct item *call, void *user)
+{
+    struct oneshot_state *state = user;
+
+    if (!state->json_events || !call->tool_name)
+        return;
+    /* Arguments ride as a string, not embedded JSON: a malformed argument blob must
+     * not corrupt the event line. */
+    json_t *event = json_pack("{s:s}", "type", "tool_use");
+    json_object_set_new(event, "name", json_string(call->tool_name));
+    if (call->tool_arguments_json)
+        json_object_set_new(event, "arguments", json_string(call->tool_arguments_json));
+    json_emit(event);
 }
 
 static void auto_compact(void *user)
@@ -167,23 +239,68 @@ static void print_assistant_messages(const struct item *items, size_t from, size
     }
 }
 
+/* Concatenate the final assistant messages the way the text path prints them,
+ * returning an owned string (possibly empty) for the result event. */
+static char *final_messages_text(const struct item *items, size_t from, size_t to)
+{
+    size_t cap = 0;
+
+    for (size_t i = from; i < to; i++) {
+        if (items[i].kind != ITEM_ASSISTANT_MESSAGE || !items[i].text || !*items[i].text)
+            continue;
+        cap += strlen(items[i].text) + 2;
+    }
+    char *text = xmalloc(cap + 1);
+    char *cursor = text;
+
+    for (size_t i = from; i < to; i++) {
+        if (items[i].kind != ITEM_ASSISTANT_MESSAGE || !items[i].text || !*items[i].text)
+            continue;
+        size_t len = strlen(items[i].text);
+        memcpy(cursor, items[i].text, len);
+        cursor += len;
+        if (items[i].text[len - 1] != '\n')
+            *cursor++ = '\n';
+    }
+    *cursor = '\0';
+    return text;
+}
+
 static int handle_loop_result(const struct oneshot_state *state,
                               const struct agent_loop_result *result, int max_turns)
 {
     switch (result->outcome) {
     case AGENT_LOOP_COMPLETE:
-        print_assistant_messages(state->session.items, result->final_items_from,
-                                 result->final_items_to);
+        if (state->json_events) {
+            char *text = final_messages_text(state->session.items, result->final_items_from,
+                                             result->final_items_to);
+            json_emit(json_pack("{s:s,s:s*}", "type", "result", "text", text));
+            free(text);
+        } else {
+            print_assistant_messages(state->session.items, result->final_items_from,
+                                     result->final_items_to);
+        }
         return 0;
     case AGENT_LOOP_PROVIDER_ERROR:
+        if (state->json_events)
+            json_emit(json_pack("{s:s,s:s*}", "type", "error", "message",
+                                result->error_message ? result->error_message : ""));
         hax_err("provider error: %s",
                 result->error_message ? result->error_message : "(no message)");
         return 1;
     case AGENT_LOOP_MAX_TURNS:
+        if (state->json_events) {
+            char *message = xasprintf("max turns (%d) exceeded", max_turns);
+
+            json_emit(json_pack("{s:s,s:s*}", "type", "error", "message", message));
+            free(message);
+        }
         hax_err("max turns (%d) exceeded; aborting", max_turns);
         return 1;
     case AGENT_LOOP_INTERRUPTED:
     case AGENT_LOOP_PAUSED:
+        if (state->json_events)
+            json_emit(json_pack("{s:s}", "type", "interrupted"));
         return 1;
     }
     return 1;
@@ -242,6 +359,7 @@ int oneshot_run(struct provider *provider, const char *prompt, const struct hax_
     struct oneshot_state state = {
         .provider = provider,
         .context_tokens = -1,
+        .json_events = options->json_events,
     };
 
     /* Headless mode still needs fatal signals to terminate its spawned process groups. */
@@ -292,7 +410,9 @@ int oneshot_run(struct provider *provider, const char *prompt, const struct hax_
         .hooks =
             {
                 .user = &state,
+                .turn_begin = oneshot_turn_begin,
                 .turn_end = account_turn,
+                .tool_seen = oneshot_tool_seen,
                 .compact = auto_compact,
             },
     };

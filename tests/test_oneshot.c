@@ -150,10 +150,52 @@ static void test_missing_model_is_diagnostic(void)
     captured_run_free(&run);
 }
 
+static struct provider provider_with_stream(struct provider *provider)
+{
+    memset(provider, 0, sizeof(*provider));
+    provider->name = "test-provider";
+    provider->default_model = "unused";
+    provider->stream = response_stream;
+    return *provider;
+}
+
+static void test_json_events_replace_plain_text(void)
+{
+    configure_test_run();
+    struct provider provider;
+
+    provider_with_stream(&provider);
+    fflush(stdout);
+    fflush(stderr);
+    int saved_stdout = dup(STDOUT_FILENO);
+    FILE *out = tmpfile();
+
+    EXPECT(saved_stdout >= 0 && out != NULL);
+    EXPECT(dup2(fileno(out), STDOUT_FILENO) >= 0);
+    struct hax_opts options = {.raw = 1, .json_events = 1};
+    int result = oneshot_run(&provider, "hello", &options, 4);
+    fflush(stdout);
+    EXPECT(dup2(saved_stdout, STDOUT_FILENO) >= 0);
+    close(saved_stdout);
+
+    EXPECT(result == 0);
+    char *text = read_stream(out);
+    fclose(out);
+
+    /* One turn, one result; the plain-text assistant message is absent. */
+    EXPECT(strstr(text, "{\"type\":\"turn_start\"}\n") != NULL);
+    EXPECT(strstr(text, "{\"type\":\"turn_end\"") != NULL);
+    EXPECT(strstr(text, "{\"type\":\"result\"") != NULL);
+    EXPECT(strstr(text, "\"text\":\"first\\nsecond\\n\"") != NULL);
+    EXPECT(strstr(text, "first\nsecond\n\n") == NULL);
+    free(text);
+}
+
 int main(void)
 {
     test_final_messages_are_pipeable();
     test_missing_model_is_diagnostic();
+    test_json_events_replace_plain_text();
     config_free();
     T_REPORT();
 }

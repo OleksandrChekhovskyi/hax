@@ -7,6 +7,12 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- `--json` with `-p`: progress events (turn start/end, tool calls, usage) as JSON
+  lines on stdout, with the final message as a `result` event; plain-text output is
+  replaced, diagnostics stay on stderr.
+
 ## [0.4.0] - 2026-08-22
 
 ### Added

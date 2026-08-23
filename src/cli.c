@@ -29,6 +29,9 @@ static const struct help_option {
      "Non-interactive mode. Runs the prompt to completion and prints the final assistant "
      "message to stdout. The prompt comes from PROMPT positional arguments (joined with "
      "spaces) when given, otherwise from stdin if stdin is not a terminal."},
+    {"--json",
+     "With -p: print progress events (turns, tool calls, usage) as JSON lines on stdout instead "
+     "of plain text; the final message arrives as a result event. Diagnostics stay on stderr."},
     {"-c, --continue", "Resume the most recent conversation in this directory."},
     {"--resume[=ID]",
      "Resume a past conversation in this directory. With no ID, pick one from an interactive "
@@ -121,6 +124,7 @@ enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *optio
         OPT_PRESET,
         OPT_BARE,
         OPT_NO_SESSION,
+        OPT_JSON,
     };
     static const struct option long_options[] = {
         {"help", no_argument, NULL, 'h'},
@@ -131,6 +135,7 @@ enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *optio
         {"no-session", no_argument, NULL, OPT_NO_SESSION},
         {"raw", no_argument, NULL, OPT_RAW},
         {"bare", no_argument, NULL, OPT_BARE},
+        {"json", no_argument, NULL, OPT_JSON},
         {"provider", required_argument, NULL, OPT_PROVIDER},
         {"model", required_argument, NULL, OPT_MODEL},
         {"effort", required_argument, NULL, OPT_EFFORT},
@@ -185,6 +190,9 @@ enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *optio
         case OPT_NO_SESSION:
             options->no_session = 1;
             break;
+        case OPT_JSON:
+            options->agent_options.json_events = 1;
+            break;
         case '?':
             fprintf(stderr, "Try 'hax --help' for usage.\n");
             return CLI_PARSE_ERROR;
@@ -209,6 +217,10 @@ enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *optio
     }
     if (options->one_shot && options->resume_mode == CLI_RESUME_SELECT && !options->resume_id) {
         hax_err("-p with --resume requires a session id (e.g. --resume=ID)");
+        return CLI_PARSE_ERROR;
+    }
+    if (options->agent_options.json_events && !options->one_shot) {
+        hax_err("--json requires -p / --print (interactive mode has no JSON event stream)");
         return CLI_PARSE_ERROR;
     }
     if (!options->one_shot && optind < argc) {

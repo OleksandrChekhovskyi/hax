@@ -139,6 +139,7 @@ endforeach
 e2e_scenarios = [
     'oneshot_text',
     'oneshot_tool',
+    'oneshot_json',
 ]
 
 python = find_program('python3')
