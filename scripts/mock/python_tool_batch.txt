@@ -1,0 +1,13 @@
+# Two calls to a host-registered tool in one batch, then a closing turn. When the first call
+# raises, the loop skips the rest of the batch, so this script is what makes the binding's
+# skipped-result behavior observable.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/python_tool_batch.txt build/hax -p go
+
+text Looking both of those up.
+tool lookup_order {"order_id":"4417"}
+tool lookup_order {"order_id":"4418"}
+end-turn
+
+text Done.
+end-turn

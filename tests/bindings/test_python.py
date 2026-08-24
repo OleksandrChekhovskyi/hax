@@ -7,6 +7,8 @@ the e2e scenarios.
 
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -34,6 +36,13 @@ os.environ["HOME"] = str(scratch)
 os.environ["HAX_KEEP_AWAKE"] = "0"
 for key in [k for k in os.environ if k.startswith("XDG_")]:
     del os.environ[key]
+
+# A sanitized libhax needs its runtime preloaded into this interpreter, which meson arranges
+# where it can. Where it cannot, say why rather than aborting on library order.
+_sanitizer_skip = os.environ.get("HAX_SANITIZER_SKIP")
+if _sanitizer_skip:
+    print(f"SKIP: {_sanitizer_skip}", file=sys.stderr)
+    sys.exit(77)
 
 # Meson builds the extension; HAX_EXTENSION_DIR points at the one under test.
 sys.path.insert(0, str(REPO_ROOT / "bindings" / "python"))
@@ -142,6 +151,143 @@ def test_database_example_enforces_read_only() -> None:
         connection.close()
 
 
+def test_skipped_calls_carry_hax_markers() -> None:
+    """A call the loop declines to dispatch must read the same here as from the C frontends."""
+    use_mock("python_tool_batch.txt")
+    with hax.Agent(provider="mock") as agent:
+
+        @agent.tool
+        def lookup_order(order_id):
+            raise ValueError("database is down")
+
+        try:
+            agent.send("orders 4417 and 4418?")
+        except ValueError:
+            pass
+
+        results = [i for i in agent.items if i["kind"] == "tool_result"]
+        expect(len(results) == 2, f"both calls in the batch are paired (got {len(results)})")
+        if len(results) == 2:
+            skipped = results[1]
+            expect(
+                skipped["output"] == "[interrupted]",
+                f"the skipped call uses hax's own marker (got {skipped['output']!r})",
+            )
+            expect(
+                skipped["origin"] == "skipped",
+                f"the skipped call is marked as skipped (got {skipped['origin']!r})",
+            )
+        ran = [i for i in agent.items if i["kind"] == "tool_result" and i["origin"] == ""]
+        expect(len(ran) == 1, f"only the dispatched call reads as ordinary output: {ran}")
+
+
+def test_malformed_arguments_are_recoverable() -> None:
+    """A model that gets the call wrong should be told, not have the turn ended under it."""
+    use_mock("python_tool_badargs.txt")
+    calls = []
+    with hax.Agent(provider="mock") as agent:
+
+        @agent.tool
+        def lookup_order(order_id):
+            calls.append(order_id)
+            return "two widgets"
+
+        reply = agent.send("order 4417?")
+        expect(calls == [], f"a call the tool cannot accept never reaches it (got {calls})")
+        outputs = [i["output"] for i in agent.items if i["kind"] == "tool_result"]
+        expect(len(outputs) == 3, f"every malformed call is still paired (got {outputs})")
+        expect(
+            all(o.startswith("error: ") for o in outputs),
+            f"each one comes back as a tool error (got {outputs})",
+        )
+        expect(bool(reply), "the turn runs to completion rather than raising")
+
+
+def test_structured_return_values_are_json() -> None:
+    """A dict must reach the model as JSON, not as a Python repr it cannot parse."""
+    use_mock("python_tool.txt")
+    with hax.Agent(provider="mock") as agent:
+
+        @agent.tool
+        def lookup_order(order_id):
+            return {"id": order_id, "items": ["widget", "widget"], "shipped": None}
+
+        agent.send("order 4417?")
+        outputs = [i["output"] for i in agent.items if i["kind"] == "tool_result"]
+        expect(
+            outputs == ['{"id": "4417", "items": ["widget", "widget"], "shipped": null}'],
+            f"a dict return value is serialized as JSON (got {outputs})",
+        )
+
+
+def test_cancel_from_another_thread_stops_the_turn() -> None:
+    """The GIL is released for the loop, so a second thread can reach cancel() mid-stream."""
+    use_mock("python_tool_cancel.txt")
+    with hax.Agent(provider="mock") as agent:
+        stopper = threading.Timer(0.4, agent.cancel)
+        stopper.start()
+        started = time.monotonic()
+        cancelled = False
+        try:
+            agent.send("tell me something slowly")
+        except hax.HaxCancelled:
+            cancelled = True
+        finally:
+            stopper.cancel()
+        elapsed = time.monotonic() - started
+
+        expect(cancelled, "cancel() from another thread raises HaxCancelled out of send()")
+        expect(elapsed < 8.0, f"the turn stops promptly rather than running out ({elapsed:.1f}s)")
+        kinds = [i["kind"] for i in agent.items]
+        expect(
+            kinds.count("tool_call") == kinds.count("tool_result"),
+            f"a cancelled turn leaves paired history: {kinds}",
+        )
+
+        # The latch is cleared per send(), so the conversation stays usable afterwards.
+        use_mock("hello.txt")
+        expect(bool(agent.send("still there?")), "a later send() runs normally after a cancel")
+
+
+def test_context_is_compacted_when_it_crosses_the_threshold() -> None:
+    """Without the compaction hook a long conversation just grows until the provider rejects it."""
+    use_mock("python_tool_compact.txt")
+    os.environ["HAX_CONTEXT_LIMIT"] = "1000"  # the scripted turn reports 950 tokens of context
+    try:
+        with hax.Agent(provider="mock") as agent:
+
+            @agent.tool
+            def lookup_order(order_id):
+                return "two widgets"
+
+            agent.send("tell me about widgets")
+            expect(agent.compactions == 1, f"the loop compacted once (got {agent.compactions})")
+            seeds = [i for i in agent.items if i["origin"] == "compact_seed"]
+            expect(len(seeds) == 1, f"a summary seed was appended (got {len(seeds)})")
+            expect(
+                all("widgets" in seed["text"] for seed in seeds),
+                f"the seed carries the scripted summary (got {seeds})",
+            )
+    finally:
+        del os.environ["HAX_CONTEXT_LIMIT"]
+
+
+def test_failed_construction_releases_hax() -> None:
+    """hax_init() refuses a second call, so a half-built Agent must not keep the process claimed."""
+    use_mock("hello.txt")
+    broke = False
+    try:
+        # Any exception after hax_init() and before the session exists takes this path; an
+        # unencodable prompt is the cheapest way to reach it.
+        hax.Agent(provider="mock", system_prompt="bad\udcff")
+    except UnicodeEncodeError:
+        broke = True
+    expect(broke, "an unencodable system prompt fails construction")
+
+    with hax.Agent(provider="mock") as agent:
+        expect(agent.model == "mock-model", "a later Agent still works after a failed one")
+
+
 def test_second_agent_is_refused() -> None:
     use_mock("hello.txt")
     with hax.Agent(provider="mock"):
@@ -171,6 +317,12 @@ test_plain_turn()
 test_host_tool_runs()
 test_builtin_tool_still_runs()
 test_host_exception_propagates_and_history_stays_paired()
+test_skipped_calls_carry_hax_markers()
+test_malformed_arguments_are_recoverable()
+test_structured_return_values_are_json()
+test_cancel_from_another_thread_stops_the_turn()
+test_context_is_compacted_when_it_crosses_the_threshold()
+test_failed_construction_releases_hax()
 test_database_example_enforces_read_only()
 test_second_agent_is_refused()
 test_unknown_provider_reports_a_diagnostic()

@@ -1,0 +1,11 @@
+# A slow response, so a host that cancels from another thread lands mid-stream rather than
+# racing the end of the turn. The second turn is never reached when the cancel arrives.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/python_tool_cancel.txt build/hax -p go
+
+delay 120
+text This answer arrives slowly enough that a cancel can interrupt it partway through.
+end-turn
+
+text This turn is only reached when nothing cancelled the first one.
+end-turn

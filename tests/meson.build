@@ -158,10 +158,48 @@ endforeach
 # and only an interpreter with cffi and headers can build. When that interpreter
 # was unavailable the extension is empty, so the test is not registered at all.
 if get_option('embed') and have_binding
+    binding_env = {'HAX_EXTENSION_DIR': meson.project_build_root() / 'bindings'}
+
+    # Unlike the C tests and the e2e scenarios, this one loads a sanitized libhax into an
+    # interpreter that is not itself instrumented, so the runtime arrives with the extension
+    # instead of first in the library list. ASan aborts on that before the first test runs;
+    # preloading the runtime puts it back in front. Leak detection stays off because CPython
+    # holds interpreter state until exit by design, so LSan would report the interpreter
+    # rather than hax; the C tests own leak coverage for the library.
+    sanitizers = get_option('b_sanitize')
+    if 'thread' in sanitizers or 'memory' in sanitizers
+        # Neither runtime works by preloading: both need the main program compiled with them,
+        # and this one is a stock interpreter. UBSan needs nothing, so it is not listed here.
+        binding_env += {'HAX_SANITIZER_SKIP':
+            'thread and memory sanitizers need an instrumented interpreter'}
+    elif 'address' in sanitizers
+        asan_runtime = ''
+        foreach candidate : ['libasan.so',
+                             'libclang_rt.asan-' + host_machine.cpu_family() + '.so',
+                             'libclang_rt.asan_osx_dynamic.dylib']
+            if asan_runtime == ''
+                # A name the toolchain cannot place comes back unchanged, not as a path.
+                probe = run_command(meson.get_compiler('c').cmd_array(),
+                    '-print-file-name=' + candidate, check: false).stdout().strip()
+                if probe != candidate and probe != '' and fs.exists(probe)
+                    asan_runtime = probe
+                endif
+            endif
+        endforeach
+        if asan_runtime == ''
+            # Aborting on library order tells the reader nothing; skip with the real reason.
+            binding_env += {'HAX_SANITIZER_SKIP':
+                'the AddressSanitizer runtime was not found, so it cannot be preloaded'}
+        else
+            preload = host_machine.system() == 'darwin' ? 'DYLD_INSERT_LIBRARIES' : 'LD_PRELOAD'
+            binding_env += {preload: asan_runtime, 'LSAN_OPTIONS': 'detect_leaks=0'}
+        endif
+    endif
+
     test('bindings/python',
         py_installation,
         args: [files('bindings/test_python.py')],
-        env: {'HAX_EXTENSION_DIR': meson.project_build_root() / 'bindings'},
+        env: binding_env,
         depends: binding_extension,
         timeout: 120,
     )

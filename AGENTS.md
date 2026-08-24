@@ -34,6 +34,7 @@ name needs `meson setup <dir> <options>` first.
 | `build-tsan` | `-Db_sanitize=thread` | data races |
 | `build-release` | `--buildtype=release` | extra inlining warnings; run before a release |
 | `build-embed` | `-Dembed=true` | also builds `libhax` and the Python binding |
+| `build-embed-asan` | `-Dembed=true -Db_sanitize=address,undefined` | the embedding path |
 
 ```sh
 BUILD_DIR=build-asan make tests

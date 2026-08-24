@@ -28,7 +28,12 @@ enum item_kind {
     ITEM_REASONING, ITEM_TURN_BOUNDARY, ITEM_TURN_USAGE
 };
 
-enum item_origin { ITEM_ORIGIN_NONE, ... };
+/* Partial, so a new provenance added upstream does not break the build; cffi resolves the
+   real values, and the binding reports an unnamed one as its integer. */
+enum item_origin {
+    ITEM_ORIGIN_NONE, ITEM_ORIGIN_COMPACT_SEED, ITEM_ORIGIN_CONTINUATION, ITEM_ORIGIN_INTERRUPTED,
+    ITEM_ORIGIN_SKIPPED, ITEM_ORIGIN_REFUSED, ITEM_ORIGIN_SUMMARIZED, ITEM_ORIGIN_TASK_NOTE, ...
+};
 
 struct item {
     enum item_kind kind;
@@ -52,6 +57,11 @@ struct tool_run_ctx {
 };
 
 /* --- agent_core.h --- */
+/* The result text the loop itself writes for a call it did not dispatch. Taken from the header
+   rather than repeated here, so the model sees one vocabulary whichever frontend answers. */
+static char * const INTERRUPT_MARKER;
+static char * const REFUSED_RESULT;
+
 struct hax_opts {
     int raw;
     const char *resume_path;
@@ -92,9 +102,11 @@ enum agent_loop_outcome {
 
 struct agent_loop_hooks {
     void *user;
+    int (*tick)(void *user);
     int (*checkpoint)(void *user);
     struct item (*tool_call)(const struct item *call, enum agent_loop_tool_action action,
                              int image_input, void *user);
+    void (*compact)(void *user);
     ...;
 };
 
@@ -119,8 +131,41 @@ struct agent_loop_params {
 void agent_loop_run(const struct agent_loop_params *params, struct agent_loop_result *result);
 void agent_loop_result_destroy(struct agent_loop_result *result);
 
+/* --- compact.h --- */
+enum compact_outcome { COMPACT_COMPLETE, ... };
+
+struct compact_hooks {
+    void *user;
+    int (*tick)(void *user);
+    int (*is_cancelled)(void *user);
+    ...;
+};
+
+struct compact_params {
+    struct agent_session *session;
+    struct provider *provider;
+    struct session_log *session_log;
+    struct transcript_log *transcript_log;
+    const char *instructions;
+    struct compact_hooks hooks;
+    ...;
+};
+
+struct compact_result {
+    enum compact_outcome outcome;
+    int attempts;
+    char *error_message;
+    ...;
+};
+
+void compact_run(const struct compact_params *params, struct compact_result *result);
+void compact_result_destroy(struct compact_result *result);
+
 /* --- system/cancel.h --- */
 void cancel_request_abort(void);
+void cancel_request_pause(void);
+int cancel_pause_requested(void);
+int cancel_abort_requested(void);
 void cancel_clear_requests(void);
 
 /* --- config.h --- */
@@ -159,6 +204,8 @@ const struct hax_abi *hax_abi(void);
 extern "Python" struct item hax_py_tool_call(const struct item *, enum agent_loop_tool_action,
                                              int, void *);
 extern "Python" int hax_py_checkpoint(void *);
+extern "Python" int hax_py_tick(void *);
+extern "Python" void hax_py_compact(void *);
 extern "Python" void hax_py_diag(enum hax_diag_level, const char *, void *);
 
 /* free() for the strings hax hands back. */
@@ -175,6 +222,7 @@ def configure() -> None:
         #include "agent_core.h"
         #include "agent_loop.h"
         #include "agent_tool.h"
+        #include "compact.h"
         #include "config.h"
         #include "hax_embed.h"
         #include "provider.h"

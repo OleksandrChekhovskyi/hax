@@ -16,12 +16,18 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   compiled against the real headers, so a drifting struct fails the build instead of misreading
   memory — including host-defined tools that the model calls alongside hax's own. Meson builds the
   extension alongside everything else. Configuration stays process-wide, so one agent per process.
-  See [bindings/python/README.md](bindings/python/README.md).
+  A turn is interruptible with `Agent.cancel()` from another thread, the context is compacted
+  automatically once it crosses the configured threshold, and history reports hax's own item
+  provenance so a call that never ran is distinguishable from one that did. See
+  [bindings/python/README.md](bindings/python/README.md).
 
 ### Changed
 
 - Cancellation state moved from the terminal's interrupt watcher into `system/cancel`, so the tool
   layer and an embedder can request and observe cancellation without a terminal.
+- [docs/embedding.md](docs/embedding.md) now states what a `tool_call` hook owes for a call the
+  loop declined to dispatch: the marker text and the `origin` that go with the requested action,
+  rather than whatever the host invents.
 
 ## [0.4.0] - 2026-08-22
 

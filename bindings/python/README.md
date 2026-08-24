@@ -95,18 +95,48 @@ becomes its description. A Python tool **shadows** a built-in of the same name, 
 host does not claim still runs hax's own tool — so `read`, `edit`, `write`, `bash`, and
 `task_wait` remain available alongside yours.
 
-Arguments arrive parsed from the model's JSON, by keyword. Return anything; it is stringified.
+Arguments arrive parsed from the model's JSON, by keyword. A `dict` or `list` return value is
+sent back as JSON so the model can parse it; anything else is stringified.
+
+A model that gets the call wrong — arguments that are not JSON, a JSON array where an object is
+required, an argument name your function does not take — gets a tool error describing the
+mistake and can correct it on the next turn. Your function is never called with arguments it
+cannot accept, so a `TypeError` out of `send()` is always from your own body.
 
 ### `agent.send(prompt) -> str`
 
 Runs one user turn to completion — every provider round-trip and tool call until the model stops
-calling tools — and returns the final assistant text. Blocking.
+calling tools — and returns the final assistant text. Blocking, and interruptible with `cancel()`
+from another thread.
+
+### `agent.cancel()`
+
+Asks a running `send()` to stop, which raises `HaxCancelled` in the thread that called it. Safe
+from any thread: the GIL is released for the duration of the loop, and hax's cancel flags are
+process-wide and atomic. A stopped turn leaves repaired, fully paired history, so the same Agent
+continues normally on the next `send()`. Cancelling with no turn running is latched and consumed
+by the next one.
+
+### `agent.compact() -> bool`
+
+Summarizes the conversation in place and reports whether a summary was appended. The loop calls
+this on its own once the context crosses hax's `compact.threshold`, so most callers never need
+it; it is here for a host that wants to compact at a moment of its own choosing.
+
+Compaction appends a summary seed rather than deleting anything, so `items` still shows every
+turn — what shrinks is the window the model sees. `compactions` counts how many have happened.
 
 ### `agent.items -> list[dict]`
 
-The conversation as plain dicts with `kind`, `text`, `call_id`, `tool_name`, `arguments`, and
-`output`. `kind` is one of `user`, `assistant`, `tool_call`, `tool_result`, `reasoning`,
-`boundary`, `usage`. Readable after `close()`.
+The conversation as plain dicts with `kind`, `origin`, `text`, `call_id`, `tool_name`,
+`arguments`, and `output`. `kind` is one of `user`, `assistant`, `tool_call`, `tool_result`,
+`reasoning`, `boundary`, `usage`. Readable after `close()`.
+
+`origin` is empty for an ordinary item and names hax's own provenance otherwise: `skipped` and
+`refused` for a call that never ran, `interrupted` for a response cut short, `compact_seed` for a
+summary, `continuation`, `summarized`, `task_note`. It is what separates a tool result hax wrote
+from one your tool returned, which no amount of reading `output` can tell you — a tool may
+legitimately return the same text.
 
 ### `agent.diagnostics -> list[str]`
 
@@ -115,7 +145,8 @@ them instead and attaches the most recent one to errors it raises.
 
 ## Errors
 
-`HaxError` is the base. `HaxProviderError` covers a failed or rejected provider stream.
+`HaxError` is the base. `HaxProviderError` covers a failed or rejected provider stream, and
+`HaxCancelled` a turn stopped by `cancel()`.
 
 An exception raised inside your tool propagates out of `send()` unchanged, with its original
 traceback. It cannot unwind through the C loop, so the binding stashes it, asks the loop to stop,
@@ -127,11 +158,12 @@ clean seam.
 - **One agent per process.** hax keeps configuration, provider selection, and diagnostics in
   process-wide state. Constructing a second `Agent` while one is live raises rather than letting
   two silently share one configuration.
-- **No streaming API yet.** `send()` blocks until the turn completes. The underlying loop does
-  expose a per-event hook; a callback API over it would be a small addition, a generator API a
-  larger one.
+- **No streaming API yet.** `send()` blocks until the turn completes, though `cancel()` can stop
+  it. The underlying loop does expose a per-event hook; a callback API over it would be a small
+  addition, a generator API a larger one.
 - **The GIL is released** around the loop and reacquired for each callback, so other Python
-  threads run during a provider round-trip.
+  threads run during a provider round-trip. That is what makes `cancel()` from another thread
+  work rather than deadlock.
 
 ## Layout
 

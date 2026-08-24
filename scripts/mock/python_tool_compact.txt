@@ -1,0 +1,17 @@
+# A tool-calling turn reporting enough context to cross the compaction threshold, the summary
+# the compaction request draws, then a closing turn. Auto-compaction happens at a seam inside a
+# user turn, so the first turn has to call a tool for the threshold to ever be consulted.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/python_tool_compact.txt \
+#       HAX_CONTEXT_LIMIT=1000 build/hax -p go
+
+text Let me look that up.
+tool lookup_order {"order_id":"4417"}
+usage in=900 out=50
+end-turn
+
+text The user asked about widgets and was told they ship in pairs.
+end-turn
+
+text Two widgets, shipping together.
+end-turn

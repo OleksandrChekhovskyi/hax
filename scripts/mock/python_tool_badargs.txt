@@ -1,0 +1,17 @@
+# A host tool called three ways the model can get wrong: arguments that are not JSON, a JSON
+# array where an object is required, and an argument name the tool does not take. Each is
+# recoverable, so the run reaches the closing turn.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/python_tool_badargs.txt build/hax -p go
+
+tool lookup_order not json at all
+end-turn
+
+tool lookup_order ["4417"]
+end-turn
+
+tool lookup_order {"orderId":"4417"}
+end-turn
+
+text I could not make that call work.
+end-turn

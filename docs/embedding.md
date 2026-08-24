@@ -60,6 +60,31 @@ and history that ends on an unpaired call is malformed for the next request. Lea
 NULL runs hax's own tools, and a hook that handles only the names it knows can fall back to them
 with `agent_tool_call_run()`.
 
+`action` says whether the call should run at all, and the hook owes the same answer the loop
+writes for itself when there is no hook. Only `AGENT_LOOP_TOOL_RUN` dispatches:
+
+| `action` | Result text | `origin` |
+| --- | --- | --- |
+| `AGENT_LOOP_TOOL_RUN` | whatever the tool returned | leave at `ITEM_ORIGIN_NONE` |
+| `AGENT_LOOP_TOOL_SKIP` | `INTERRUPT_MARKER` | `ITEM_ORIGIN_SKIPPED` |
+| `AGENT_LOOP_TOOL_REFUSE` | `REFUSED_RESULT` | `ITEM_ORIGIN_REFUSED` |
+
+```c
+if (action != AGENT_LOOP_TOOL_RUN) {
+    int skip = action == AGENT_LOOP_TOOL_SKIP;
+    struct item result =
+        agent_tool_result_make(call, skip ? INTERRUPT_MARKER : REFUSED_RESULT, NULL);
+    result.origin = skip ? ITEM_ORIGIN_SKIPPED : ITEM_ORIGIN_REFUSED;
+    return result;
+}
+```
+
+Both halves matter. The text is what the model reads, so an invented marker gives it a
+vocabulary that appears nowhere else in the conversation. `origin` is what everything else
+reads: `session` persists it, so a resumed conversation can still tell a call that never ran
+from one that ran and returned that text, and `history` renders the two differently. The action,
+not the presentation path, decides both.
+
 ## Cancellation
 
 `system/cancel.h` owns the latched pause and abort flags, independent of how they were requested.
