@@ -7,6 +7,7 @@
 #include "agent_core.h"
 #include "util.h"
 #include "render/spinner.h"
+#include "system/cancel.h"
 #include "terminal/ansi.h"
 #include "terminal/interrupt.h"
 
@@ -19,7 +20,7 @@ struct busy *busy_begin(const char *label)
     struct busy *b = xmalloc(sizeof(*b));
     b->sp = spinner_new(label);
     spinner_show(b->sp);
-    interrupt_clear_requests();
+    cancel_clear_requests();
     interrupt_arm();
     return b;
 }
@@ -27,13 +28,13 @@ struct busy *busy_begin(const char *label)
 int busy_tick(void *user)
 {
     (void)user;
-    return interrupt_abort_requested();
+    return cancel_abort_requested();
 }
 
 int busy_end(struct busy *b)
 {
     interrupt_resolve_pending_escape();
-    int cancelled = interrupt_abort_requested();
+    int cancelled = cancel_abort_requested();
     interrupt_disarm();
     spinner_hide(b->sp);
     spinner_free(b->sp);

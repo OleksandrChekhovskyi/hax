@@ -1,0 +1,11 @@
+# One call to a tool the embedding host registers, then a closing turn. Used by the Python
+# binding scenario; the tool name must not collide with a built-in or the host never sees it.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/python_tool.txt build/hax -p go
+
+text Looking that up.
+tool lookup_order {"order_id":"4417"}
+end-turn
+
+text Done.
+end-turn

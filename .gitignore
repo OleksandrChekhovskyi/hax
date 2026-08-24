@@ -10,3 +10,8 @@ __pycache__/
 
 # clang static-analyzer output
 *.plist
+
+# cffi build products and the uv environment for the Python binding
+/bindings/python/_hax_cffi*
+/bindings/python/*.o
+/.venv/

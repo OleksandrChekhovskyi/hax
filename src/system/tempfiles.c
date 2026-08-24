@@ -67,9 +67,16 @@ void tempfiles_cleanup(void)
         forget_active_dir();
 }
 
+static int atexit_enabled = 1;
+
+void tempfiles_set_atexit_enabled(int enabled)
+{
+    atexit_enabled = enabled;
+}
+
 static void track_file(const char *path)
 {
-    if (!cleanup_registered) {
+    if (atexit_enabled && !cleanup_registered) {
         atexit(tempfiles_cleanup);
         cleanup_registered = 1;
     }

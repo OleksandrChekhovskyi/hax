@@ -39,6 +39,13 @@ static void format_ts_locked(char *out, size_t cap)
              delta_ms % 1000);
 }
 
+static int atexit_enabled = 1;
+
+void trace_set_atexit_enabled(int enabled)
+{
+    atexit_enabled = enabled;
+}
+
 static void trace_close_atexit(void)
 {
     pthread_mutex_lock(&trace_mu);
@@ -47,6 +54,11 @@ static void trace_close_atexit(void)
         trace_fp = NULL;
     }
     pthread_mutex_unlock(&trace_mu);
+}
+
+void trace_close(void)
+{
+    trace_close_atexit();
 }
 
 static FILE *get_fp_locked(void)
@@ -69,7 +81,8 @@ void trace_init(void)
         goto out_unlock;
     }
     setvbuf(trace_fp, NULL, _IOLBF, 0);
-    atexit(trace_close_atexit);
+    if (atexit_enabled)
+        atexit(trace_close_atexit);
 
 out_unlock:
     pthread_mutex_unlock(&trace_mu);

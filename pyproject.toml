@@ -1,0 +1,25 @@
+[project]
+name = "hax"
+version = "0.1.0"
+description = "Python binding for hax, built on libhax through cffi"
+readme = "README.md"
+authors = [
+    { name = "Shakeeb Alireza", email = "shakfu@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "cffi>=2.1.1",
+]
+
+
+[tool.uv.build-backend]
+# src/ is the C source tree, so the Python package lives beside it rather than inside it.
+module-root = "bindings/python"
+module-name = "hax"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = []

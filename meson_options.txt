@@ -1,0 +1,2 @@
+option('embed', type: 'boolean', value: false,
+    description: 'Also build libhax, the shared library that foreign-function bindings load')

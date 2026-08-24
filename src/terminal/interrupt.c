@@ -13,6 +13,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "system/cancel.h"
 #include "terminal/ansi.h"
 
 #define ESCAPE_TIMEOUT_MS       50
@@ -26,8 +27,6 @@ struct interrupt_watcher {
     int idle;
     int wake_read_fd;
     int wake_write_fd;
-    atomic_int pause_requested;
-    atomic_int abort_requested;
     atomic_int escape_pending;
     int initialized;
     int started;
@@ -118,12 +117,6 @@ static void leave_raw_mode(void)
     watcher.raw_mode_active = 0;
 }
 
-static void latch_pause_or_abort(void)
-{
-    if (atomic_exchange(&watcher.pause_requested, 1))
-        atomic_store(&watcher.abort_requested, 1);
-}
-
 enum input_event {
     INPUT_ERROR = -1,
     INPUT_TIMEOUT,
@@ -203,7 +196,7 @@ static void watch_armed_input(void)
         }
         if (event == INPUT_TIMEOUT) {
             if (interrupt_classifier_timeout(&classifier))
-                latch_pause_or_abort();
+                cancel_request_pause();
             atomic_store(&watcher.escape_pending,
                          classifier.state == INTERRUPT_CLASSIFIER_ESCAPE_PENDING);
             continue;
@@ -232,7 +225,7 @@ static void watch_armed_input(void)
         }
         for (ssize_t i = 0; i < bytes_read; i++) {
             if (interrupt_classifier_feed(&classifier, bytes[i]))
-                latch_pause_or_abort();
+                cancel_request_pause();
         }
         atomic_store(&watcher.escape_pending,
                      classifier.state == INTERRUPT_CLASSIFIER_ESCAPE_PENDING);
@@ -407,16 +400,6 @@ void interrupt_disarm(void)
     tcflush(STDIN_FILENO, TCIFLUSH);
 }
 
-int interrupt_pause_requested(void)
-{
-    return atomic_load(&watcher.pause_requested);
-}
-
-int interrupt_abort_requested(void)
-{
-    return atomic_load(&watcher.abort_requested);
-}
-
 static int stdin_has_pending_input(void)
 {
     struct pollfd stdin_poll = {.fd = STDIN_FILENO, .events = POLLIN};
@@ -436,17 +419,11 @@ void interrupt_resolve_pending_escape(void)
         .tv_nsec = ESCAPE_POLL_INTERVAL_MS * 1000000L,
     };
     while (remaining_ms > 0) {
-        if (atomic_load(&watcher.abort_requested))
+        if (cancel_abort_requested())
             return;
         if (!atomic_load(&watcher.escape_pending) && !stdin_has_pending_input())
             return;
         nanosleep(&interval, NULL);
         remaining_ms -= ESCAPE_POLL_INTERVAL_MS;
     }
-}
-
-void interrupt_clear_requests(void)
-{
-    atomic_store(&watcher.abort_requested, 0);
-    atomic_store(&watcher.pause_requested, 0);
 }

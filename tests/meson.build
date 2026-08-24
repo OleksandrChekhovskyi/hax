@@ -26,6 +26,7 @@ test_sources = [
     'test_cred_store.c',
     'test_effort.c',
     'test_file_mention.c',
+    'test_hax_embed.c',
     'test_history.c',
     'test_model_meta.c',
     'test_model_sort.c',
@@ -78,6 +79,7 @@ test_sources = [
     'render/test_tool_render.c',
 
     'system/test_bg_job.c',
+    'system/test_cancel.c',
     'system/test_fs.c',
     'system/test_git.c',
     'system/test_keepawake.c',
@@ -151,3 +153,16 @@ foreach name : e2e_scenarios
         timeout: 60,
     )
 endforeach
+
+# Runs against the meson-built cffi extension, which only -Dembed=true produces
+# and only an interpreter with cffi and headers can build. When that interpreter
+# was unavailable the extension is empty, so the test is not registered at all.
+if get_option('embed') and have_binding
+    test('bindings/python',
+        py_installation,
+        args: [files('bindings/test_python.py')],
+        env: {'HAX_EXTENSION_DIR': meson.project_build_root() / 'bindings'},
+        depends: binding_extension,
+        timeout: 120,
+    )
+endif

@@ -48,6 +48,20 @@ __attribute__((format(printf, 1, 2))) void hax_warn(const char *format, ...);
 /* Monotonic count of completed hax_err() and hax_warn() writes. */
 unsigned long hax_diag_sequence(void);
 
+enum hax_diag_level {
+    HAX_DIAG_ERR,
+    HAX_DIAG_WARN,
+};
+
+/* Receive a formatted diagnostic instead of stderr: no `hax: ` prefix, no trailing newline, and
+ * `message` borrowed for the call. Installed by an embedder that turns diagnostics into its own
+ * errors; NULL restores the stderr default.
+ *
+ * hax_diag_sequence() still counts sink deliveries, so a caller can detect that something was
+ * reported without inspecting the text. */
+typedef void (*hax_diag_fn)(enum hax_diag_level level, const char *message, void *user);
+void hax_set_diag_sink(hax_diag_fn fn, void *user);
+
 /* Return 0 for a regular file, or -1 with errno set for any other path. */
 int ensure_regular_file(const char *path);
 

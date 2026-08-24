@@ -12,6 +12,13 @@
  * multiple times. */
 void trace_init(void);
 
+/* Close the trace log. Safe when no log is open, and safe to call more than once. */
+void trace_close(void);
+
+/* Disable the atexit handler trace_init() registers, making trace_close() the caller's
+ * responsibility. Call before trace_init(). */
+void trace_set_atexit_enabled(int enabled);
+
 int trace_enabled(void);
 
 /* Register a credential value: any traced request header containing it is redacted, and any

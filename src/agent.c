@@ -31,6 +31,7 @@
 #include "render/markdown.h"
 #include "render/render_ctx.h"
 #include "render/spinner.h"
+#include "system/cancel.h"
 #include "system/fs.h"
 #include "system/spawn.h"
 #include "system/tempfiles.h"
@@ -186,7 +187,7 @@ static int agent_stream_tick(void *user)
 {
     struct render_ctx *render = user;
     /* Confirm a pause immediately; the idempotent update also overrides pending labels. */
-    if (interrupt_pause_requested() && !interrupt_abort_requested()) {
+    if (cancel_pause_requested() && !cancel_abort_requested()) {
         spinner_set_label(render->spinner, "pausing", "pausing... (esc again to interrupt)");
         /* Before first content, cancel immediately; the loop maps the empty turn to a resumable
          * pause. */
@@ -201,7 +202,7 @@ static int agent_stream_tick(void *user)
             monotonic_ms() - render->table.started_at_ms >= TABLE_SPINNER_DELAY_MS)
             render_show_table_spinner(render);
     }
-    return interrupt_abort_requested();
+    return cancel_abort_requested();
 }
 
 static int render_on_event(const struct stream_event *event, void *user)
@@ -910,14 +911,14 @@ static int compact_on_event(const struct stream_event *event, void *user)
 static int compact_tick(void *user)
 {
     struct compact_event_ctx *ctx = user;
-    return agent_stream_tick(ctx->render) || interrupt_pause_requested();
+    return agent_stream_tick(ctx->render) || cancel_pause_requested();
 }
 
 static int compact_cancelled(void *user)
 {
     (void)user;
     interrupt_resolve_pending_escape();
-    return interrupt_abort_requested() || interrupt_pause_requested();
+    return cancel_abort_requested() || cancel_pause_requested();
 }
 
 static void compact_notice(struct render_ctx *render, const char *format, ...)
@@ -982,7 +983,7 @@ int agent_compact(struct agent_state *state, const char *instructions, int autom
             },
     };
 
-    interrupt_clear_requests();
+    cancel_clear_requests();
     interrupt_arm();
     struct compact_result result;
     compact_run(&params, &result);
@@ -1083,9 +1084,9 @@ static int repl_loop_checkpoint(void *user)
 {
     (void)user;
     interrupt_resolve_pending_escape();
-    if (interrupt_abort_requested())
+    if (cancel_abort_requested())
         return AGENT_LOOP_SIG_ABORT;
-    if (interrupt_pause_requested())
+    if (cancel_pause_requested())
         return AGENT_LOOP_SIG_PAUSE;
     return AGENT_LOOP_SIG_NONE;
 }
@@ -1117,8 +1118,8 @@ static void repl_loop_compact(void *user)
     struct repl_loop_ctx *ctx = user;
     agent_compact(ctx->state, NULL, 1);
     /* Preserve cancellation for the loop checkpoint; otherwise re-arm after compaction. */
-    if (!interrupt_abort_requested() && !interrupt_pause_requested()) {
-        interrupt_clear_requests();
+    if (!cancel_abort_requested() && !cancel_pause_requested()) {
+        cancel_clear_requests();
         interrupt_arm();
     }
 }
@@ -1330,7 +1331,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             compacted = agent_compact(&state, NULL, 1);
             /* A newly latched interrupt belongs to compaction and cancels the whole send; retain
              * the debt for the next attempt. */
-            if (interrupt_abort_requested() || interrupt_pause_requested()) {
+            if (cancel_abort_requested() || cancel_pause_requested()) {
                 free(line);
                 continue;
             }
@@ -1395,7 +1396,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         spinner_set_timer(render.spinner, user_turn_start_ms);
 
         /* Clear stale editor interrupts before arming first-Esc pause and second-Esc abort. */
-        interrupt_clear_requests();
+        cancel_clear_requests();
         interrupt_arm();
         /* A positive max_turns pauses at a clean seam; zero means unlimited. */
         int max_turns = config_int("max_turns");
@@ -1430,7 +1431,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         agent_loop_result_destroy(&loop_result);
         interrupt_disarm();
         /* Snapshot Esc before auto-compaction clears the interrupt latch. */
-        int user_pressed_escape = interrupt_pause_requested();
+        int user_pressed_escape = cancel_pause_requested();
         spinner_set_timer(render.spinner, 0);
 
         /* Close active rendering before post-turn output can emit terminal control sequences. */

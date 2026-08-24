@@ -122,6 +122,7 @@ and the setting reference.
 ## More docs
 
 - [docs/debugging.md](./docs/debugging.md) — trace/transcript logs, mock provider, and demo scripts.
+- [docs/embedding.md](./docs/embedding.md) — hosting hax in another program, and the Python binding.
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — how to propose, prepare, and submit a change.
 
 ## License

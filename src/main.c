@@ -3,23 +3,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <curl/curl.h>
 
 #include "agent.h"
-#include "catalog.h"
 #include "cli.h"
 #include "config.h"
+#include "hax_embed.h"
 #include "oneshot.h"
 #include "provider.h"
 #include "select.h"
 #include "session.h"
 #include "session_prune.h"
-#include "trace.h"
-#include "transcript.h"
 #include "util.h"
 #include "providers/registry.h"
 #include "terminal/theme.h"
-#include "transport/ca.h"
 
 /* Bounds unattended agent loops when an interrupt cannot reliably reach a pipeline. */
 #define ONESHOT_MAX_TURNS 100
@@ -147,26 +143,17 @@ static int apply_run_selection(const struct cli_options *options)
     return 0;
 }
 
-static void initialize_config(void)
-{
-    locale_init_utf8();
-
-    /* Config-load diagnostics can honor terminal color, but not a theme in an unreadable file. */
-    theme_set("auto");
-    config_init();
-    theme_init();
-}
-
-static void initialize_run_services(const char *resume_path)
-{
-    trace_init();
-    transcript_log_init();
-    session_prune_start(resume_path);
-}
-
 int main(int argc, char **argv)
 {
-    initialize_config();
+    /* main() owns the process, so it takes every ownership hax_init() offers. An embedder passes
+     * zeros here and keeps its own locale, libcurl, and exit handling. */
+    struct hax_embed_options embed = {
+        .own_locale = 1,
+        .own_curl_global = 1,
+        .own_atexit = 1,
+    };
+    if (hax_init(&embed) != 0)
+        return 1;
 
     int result = 1;
     char *prompt = NULL;
@@ -198,18 +185,12 @@ int main(int argc, char **argv)
         restore_resumed_selection(resume_path, options.one_shot, restore_preset) != 0)
         goto cleanup_config;
 
-    if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
-        hax_err("curl_global_init failed");
-        goto cleanup_config;
-    }
-    ca_init();
-
     if (apply_run_selection(&options) != 0)
-        goto cleanup_curl;
+        goto cleanup_config;
 
     /* A restored or newly applied preset may change the theme. */
     theme_init();
-    initialize_run_services(resume_path);
+    session_prune_start(resume_path);
 
     unsigned long diagnostics_before_provider = hax_diag_sequence();
     provider =
@@ -229,12 +210,8 @@ cleanup_provider:
     /* Providers must join background work before global libcurl teardown. */
     if (provider)
         provider->destroy(provider);
-cleanup_curl:
-    session_prune_shutdown();
-    catalog_shutdown();
-    curl_global_cleanup();
 cleanup_config:
-    config_free();
+    hax_shutdown();
     free(prompt);
     free(resume_path);
     return result;

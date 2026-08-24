@@ -33,6 +33,7 @@ name needs `meson setup <dir> <options>` first.
 | `build-asan` | `-Db_sanitize=address,undefined` | memory errors, undefined behavior |
 | `build-tsan` | `-Db_sanitize=thread` | data races |
 | `build-release` | `--buildtype=release` | extra inlining warnings; run before a release |
+| `build-embed` | `-Dembed=true` | also builds `libhax` and the Python binding |
 
 ```sh
 BUILD_DIR=build-asan make tests
@@ -118,6 +119,13 @@ Core boundaries:
 - `transcript` renders the model-facing conversation, `history` reconstructs the user-facing
   display, and `session` is structured resumable persistence. Do not substitute one representation
   for another.
+- Cancellation state lives in `system/cancel`, not in the terminal. The Esc watcher and an
+  embedder are both producers; anything sampling cancellation reads the latched flags rather than
+  depending on `terminal/interrupt`.
+- `hax_embed` is the seam for hosting hax inside another program: explicit lifecycle, a diagnostic
+  sink in place of stderr, and FFI-shaped adapters for hooks that return structs by value. Its
+  process-wide state means one embedded agent per process. See
+  [`docs/embedding.md`](docs/embedding.md).
 - Interactive conversation rendering flows through `render_ctx` and `disp`; live indicators are
   explicit direct-terminal owners. Use `terminal/ansi.h` for fixed controls and semantic `theme`
   roles for colors. Settle cursor-addressed output with `vt_resolve` before writing it to a pager,

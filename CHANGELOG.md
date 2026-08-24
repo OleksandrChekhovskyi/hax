@@ -7,6 +7,22 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- An embedding surface for programs that host hax rather than run it: `meson -Dembed=true` builds
+  `libhax`, and `hax_init()` / `hax_shutdown()` let a caller keep its own locale, libcurl, and exit
+  handling. Diagnostics can be routed to a callback instead of stderr. A Python binding over that
+  library lives in [bindings/python](bindings/python) — a cffi binding whose declarations are
+  compiled against the real headers, so a drifting struct fails the build instead of misreading
+  memory — including host-defined tools that the model calls alongside hax's own. Meson builds the
+  extension alongside everything else. Configuration stays process-wide, so one agent per process.
+  See [bindings/python/README.md](bindings/python/README.md).
+
+### Changed
+
+- Cancellation state moved from the terminal's interrupt watcher into `system/cancel`, so the tool
+  layer and an embedder can request and observe cancellation without a terminal.
+
 ## [0.4.0] - 2026-08-22
 
 ### Added

@@ -18,7 +18,7 @@
 #include "tool.h"
 #include "util.h"
 #include "system/bg_job.h"
-#include "terminal/interrupt.h"
+#include "system/cancel.h"
 #include "text/utf8_sanitize.h"
 #include "text/width.h"
 #include "tools/bash_output.h"
@@ -684,7 +684,7 @@ char *task_wait_stream(const char *id, long timeout_ms, int kill_on_timeout,
             stop = WAIT_OTHER_DONE;
             break;
         }
-        if (interrupt_abort_requested()) {
+        if (cancel_abort_requested()) {
             stop = WAIT_INTERRUPTED;
             break;
         }

@@ -93,6 +93,7 @@ sources = files(
     'src/cred_store.c',
     'src/effort.c',
     'src/file_mention.c',
+    'src/hax_embed.c',
     'src/history.c',
     'src/login.c',
     'src/model_meta.c',
@@ -149,6 +150,7 @@ sources = files(
     'src/render/tool_render.c',
 
     'src/system/bg_job.c',
+    'src/system/cancel.c',
     'src/system/fs.c',
     'src/system/git.c',
     'src/system/keepawake.c',
@@ -225,6 +227,30 @@ hax_dep = declare_dependency(
         threads.partial_dependency(compile_args: true, includes: true),
     ],
 )
+
+# Bindings in other languages load hax through a shared library rather than
+# linking the archive. It is opt-in because it doubles the link work for a
+# build that only wants the binary, and because a single-binary install is the
+# default shape of this project. `link_whole` reuses hax_lib's objects, which
+# meson already compiles position-independent (b_staticpic).
+hax_shared = []
+if get_option('embed')
+    hax_shared = library('hax',
+        link_whole: hax_lib,
+        dependencies: [libcurl, jansson, threads, libm],
+        version: meson.project_version(),
+        soversion: '0',
+        install: true,
+    )
+endif
+
+# Path used by both the binding extension and its test; the uv environment is
+# where cffi and the development headers normally live.
+venv_python = meson.project_source_root() / '.venv' / 'bin' / 'python'
+
+if get_option('embed')
+    subdir('bindings')
+endif
 
 hax_exe = executable('hax',
     'src/main.c',

@@ -1,0 +1,18 @@
+# Drives bindings/python/example_database.py: inspect the schema, run a join, answer. The third
+# turn attempts a write so the example's read-only guard is exercised rather than assumed.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/database_agent.txt \
+#       python3 bindings/python/example_database.py --provider mock
+
+text Let me look at the schema first.
+tool describe_schema {}
+end-turn
+
+tool run_query {"sql":"SELECT c.name, SUM(o.cents) AS total FROM customers c JOIN orders o ON o.customer_id = c.id GROUP BY c.id ORDER BY total DESC"}
+end-turn
+
+tool run_query {"sql":"DROP TABLE orders"}
+end-turn
+
+text Ada Lovelace spent the most, 458100 cents, on analytical engine parts and punch card stock.
+end-turn

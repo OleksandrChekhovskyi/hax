@@ -21,11 +21,8 @@ void interrupt_arm(void);
  * input received while armed. Disarming is idempotent. */
 void interrupt_disarm(void);
 
-/* Requests remain latched until interrupt_clear_requests(). Abort implies pause. These queries are
- * safe from any thread. */
-int interrupt_pause_requested(void);
-int interrupt_abort_requested(void);
-void interrupt_clear_requests(void);
+/* The watcher only requests cancellation; system/cancel.h owns the latched state and its
+ * queries. */
 
 /* Wait briefly for a recently received Esc to be classified. Call before an irreversible decision
  * based on the request flags, such as starting a tool or sending another model request. */

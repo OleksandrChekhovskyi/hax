@@ -21,4 +21,9 @@ void tempfile_untrack(const char *path);
  * retained by callers remain available and are retried by later cleanup calls. */
 void tempfiles_cleanup(void);
 
+/* Disable the atexit handler registered on first use, making tempfiles_cleanup() the caller's
+ * responsibility. An embedder that may be unloaded calls this before creating any temporary file:
+ * an atexit handler outliving its module runs against unmapped code. */
+void tempfiles_set_atexit_enabled(int enabled);
+
 #endif /* HAX_SYSTEM_TEMPFILES_H */

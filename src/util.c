@@ -86,8 +86,28 @@ unsigned long hax_diag_sequence(void)
     return atomic_load_explicit(&diagnostic_sequence, memory_order_relaxed);
 }
 
-static void emit_diagnostic(const char *color, const char *format, va_list args)
+static hax_diag_fn diag_sink;
+static void *diag_sink_user;
+
+void hax_set_diag_sink(hax_diag_fn fn, void *user)
 {
+    diag_sink = fn;
+    diag_sink_user = user;
+}
+
+static void emit_diagnostic(enum hax_diag_level level, const char *format, va_list args)
+{
+    if (diag_sink) {
+        char *message = xvasprintf(format, args);
+        if (message) {
+            diag_sink(level, message, diag_sink_user);
+            free(message);
+        }
+        atomic_fetch_add_explicit(&diagnostic_sequence, 1, memory_order_relaxed);
+        return;
+    }
+
+    const char *color = theme_open(level == HAX_DIAG_WARN ? THEME_WARN : THEME_ERROR);
     int styled = isatty(fileno(stderr)) && *color;
     if (styled)
         fputs(color, stderr);
@@ -104,7 +124,7 @@ void hax_err(const char *format, ...)
 {
     va_list args;
     va_start(args, format);
-    emit_diagnostic(theme_open(THEME_ERROR), format, args);
+    emit_diagnostic(HAX_DIAG_ERR, format, args);
     va_end(args);
 }
 
@@ -112,7 +132,7 @@ void hax_warn(const char *format, ...)
 {
     va_list args;
     va_start(args, format);
-    emit_diagnostic(theme_open(THEME_WARN), format, args);
+    emit_diagnostic(HAX_DIAG_WARN, format, args);
     va_end(args);
 }
 
