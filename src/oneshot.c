@@ -101,6 +101,34 @@ static void json_add_usage(json_t *object, const struct stream_usage *usage)
     json_object_set_new(object, "usage", u);
 }
 
+/* Append one assistant message, padded to end on a newline so consecutive messages
+ * concatenate the way the text path prints them. `message` is non-empty. */
+static void append_message_text(struct buf *text, const char *message)
+{
+    buf_append_str(text, message);
+    if (message[strlen(message) - 1] != '\n')
+        buf_append_str(text, "\n");
+}
+
+/* The turn's assistant text as one owned string: assembled messages plus, on a failed
+ * stream, the unflushed remainder (which repair would keep). Empty when the turn said
+ * nothing. */
+static char *turn_assistant_text(const struct agent_loop_turn *turn)
+{
+    const struct turn *assembly = &turn->assembly;
+    struct buf text = {0};
+
+    for (size_t i = 0; i < assembly->n_items; i++) {
+        const struct item *item = &assembly->items[i];
+        if (item->kind != ITEM_ASSISTANT_MESSAGE || !item->text || !*item->text)
+            continue;
+        append_message_text(&text, item->text);
+    }
+    if (assembly->has_text && assembly->text.data && *assembly->text.data)
+        append_message_text(&text, assembly->text.data);
+    return buf_steal(&text);
+}
+
 static void account_turn(const struct agent_loop_turn *turn, void *user)
 {
     struct oneshot_state *state = user;
@@ -117,6 +145,13 @@ static void account_turn(const struct agent_loop_turn *turn, void *user)
         json_object_set_new(event, "model", json_string(turn->served_model));
     if (turn->elapsed_ms >= 0)
         json_object_set_new(event, "elapsed_ms", json_integer(turn->elapsed_ms));
+    /* Narration rides on turn_end rather than as its own event: a separate
+     * assistant-text event would double-count turns in consumers that count any
+     * assistant message as a turn. */
+    char *text = turn_assistant_text(turn);
+    if (*text)
+        json_object_set_new(event, "text", json_string(text));
+    free(text);
     json_add_usage(event, &turn->usage);
     json_emit(event);
 }
@@ -243,27 +278,14 @@ static void print_assistant_messages(const struct item *items, size_t from, size
  * returning an owned string (possibly empty) for the result event. */
 static char *final_messages_text(const struct item *items, size_t from, size_t to)
 {
-    size_t cap = 0;
+    struct buf text = {0};
 
     for (size_t i = from; i < to; i++) {
         if (items[i].kind != ITEM_ASSISTANT_MESSAGE || !items[i].text || !*items[i].text)
             continue;
-        cap += strlen(items[i].text) + 2;
+        append_message_text(&text, items[i].text);
     }
-    char *text = xmalloc(cap + 1);
-    char *cursor = text;
-
-    for (size_t i = from; i < to; i++) {
-        if (items[i].kind != ITEM_ASSISTANT_MESSAGE || !items[i].text || !*items[i].text)
-            continue;
-        size_t len = strlen(items[i].text);
-        memcpy(cursor, items[i].text, len);
-        cursor += len;
-        if (items[i].text[len - 1] != '\n')
-            *cursor++ = '\n';
-    }
-    *cursor = '\0';
-    return text;
+    return buf_steal(&text);
 }
 
 static int handle_loop_result(const struct oneshot_state *state,

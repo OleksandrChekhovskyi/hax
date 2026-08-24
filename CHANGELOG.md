@@ -12,6 +12,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - `--json` with `-p`: progress events (turn start/end, tool calls, usage) as JSON
   lines on stdout, with the final message as a `result` event; plain-text output is
   replaced, diagnostics stay on stderr.
+- `turn_end` events carry the turn's assistant `text` (omitted when the turn said
+  nothing), so consumers can follow narration as a run unfolds.
 
 ## [0.4.0] - 2026-08-22
 

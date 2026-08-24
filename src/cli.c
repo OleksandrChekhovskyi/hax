@@ -30,8 +30,9 @@ static const struct help_option {
      "message to stdout. The prompt comes from PROMPT positional arguments (joined with "
      "spaces) when given, otherwise from stdin if stdin is not a terminal."},
     {"--json",
-     "With -p: print progress events (turns, tool calls, usage) as JSON lines on stdout instead "
-     "of plain text; the final message arrives as a result event. Diagnostics stay on stderr."},
+     "With -p: print progress events (turns, tool calls, usage, assistant text) as JSON lines "
+     "on stdout instead of plain text; the final message arrives as a result event. Diagnostics "
+     "stay on stderr."},
     {"-c, --continue", "Resume the most recent conversation in this directory."},
     {"--resume[=ID]",
      "Resume a past conversation in this directory. With no ID, pick one from an interactive "

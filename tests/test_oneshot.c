@@ -182,11 +182,12 @@ static void test_json_events_replace_plain_text(void)
     char *text = read_stream(out);
     fclose(out);
 
-    /* One turn, one result; the plain-text assistant message is absent. */
+    /* One turn, one result; the plain-text assistant message is absent. The turn's
+     * narration rides on turn_end (text directly before usage), not just result. */
     EXPECT(strstr(text, "{\"type\":\"turn_start\"}\n") != NULL);
     EXPECT(strstr(text, "{\"type\":\"turn_end\"") != NULL);
+    EXPECT(strstr(text, "\"text\":\"first\\nsecond\\n\",\"usage\"") != NULL);
     EXPECT(strstr(text, "{\"type\":\"result\"") != NULL);
-    EXPECT(strstr(text, "\"text\":\"first\\nsecond\\n\"") != NULL);
     EXPECT(strstr(text, "first\nsecond\n\n") == NULL);
     free(text);
 }
