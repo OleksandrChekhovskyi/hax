@@ -7,13 +7,14 @@
 #include "providers/codex_auth.h"
 #include "transport/http.h"
 
-/* ChatGPT login lifecycle for the codex provider, independent of the codex CLI: the OpenAI device
- * flow obtains tokens, the credential store persists them under "codex", and refresh keeps them
+/* ChatGPT login lifecycle for the codex provider, independent of the codex CLI: an OAuth flow
+ * obtains tokens, the credential store persists them under "codex", and refresh keeps them
  * rotating. Runs on the foreground thread. */
 
-/* Interactive device login: prints the verification URL and user code, copies the code to the
- * clipboard, and polls until the browser approval lands. Returns 0 on success (result printed),
- * 1 on user cancellation, -1 on failure (reported). */
+/* Interactive login. On a TTY, offers a choice between the browser flow (authorization code plus
+ * PKCE through a localhost redirect) and the device flow (a code approved on another device, so
+ * it works over ssh); a non-TTY runs the device flow directly. Returns 0 on success (result
+ * printed), 1 on user cancellation, -1 on failure (reported). */
 int codex_login_run(void);
 
 /* Remove the stored login, revoking the refresh token best-effort. Returns 1 when a login was
@@ -65,8 +66,15 @@ enum codex_poll_result {
 enum codex_poll_result codex_login_classify_poll(long http_status, const char *body,
                                                  char **authorization_code, char **code_verifier);
 
-/* Build the form-urlencoded authorization-code exchange body; all values percent-encoded. */
-char *codex_login_build_exchange_body(const char *authorization_code, const char *code_verifier);
+/* Build the form-urlencoded authorization-code exchange body; all values percent-encoded.
+ * `redirect_uri` must repeat the one the authorization was issued against. */
+char *codex_login_build_exchange_body(const char *authorization_code, const char *code_verifier,
+                                      const char *redirect_uri);
+
+/* Build the browser-flow authorization URL for a PKCE challenge, CSRF state, and localhost
+ * redirect URI. The caller frees. */
+char *codex_login_build_authorize_url(const char *code_challenge, const char *state,
+                                      const char *redirect_uri);
 
 /* Build a credential-store entry from an exchange response, which must carry id_token,
  * access_token, and refresh_token; the account id is decoded from the token claims. Returns the

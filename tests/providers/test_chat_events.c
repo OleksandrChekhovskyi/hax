@@ -134,11 +134,29 @@ static void feed_content(struct chat_events *parser, const char *text)
     chat_events_feed(parser, data);
 }
 
+static void feed_finish_native(struct chat_events *parser, const char *reason,
+                               const char *native_reason)
+{
+    char reason_json[64];
+    if (reason)
+        snprintf(reason_json, sizeof(reason_json), "\"%s\"", reason);
+    else
+        snprintf(reason_json, sizeof(reason_json), "null");
+    char data[512];
+    if (native_reason)
+        snprintf(data, sizeof(data),
+                 "{\"choices\":[{\"delta\":{},\"finish_reason\":%s,"
+                 "\"native_finish_reason\":\"%s\"}]}",
+                 reason_json, native_reason);
+    else
+        snprintf(data, sizeof(data), "{\"choices\":[{\"delta\":{},\"finish_reason\":%s}]}",
+                 reason_json);
+    chat_events_feed(parser, data);
+}
+
 static void feed_finish(struct chat_events *parser, const char *reason)
 {
-    char data[512];
-    snprintf(data, sizeof(data), "{\"choices\":[{\"delta\":{},\"finish_reason\":\"%s\"}]}", reason);
-    chat_events_feed(parser, data);
+    feed_finish_native(parser, reason, NULL);
 }
 
 static void test_text_delta(void)
@@ -516,6 +534,168 @@ static void test_finish_reason_content_filter_emits_error(void)
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
+static void test_native_finish_error_emits_error(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    /* OpenRouter's routed-provider failure shape: HTTP 200, empty content, stop + sentinel. */
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":\"\"},"
+                              "\"finish_reason\":\"stop\","
+                              "\"native_finish_reason\":\"network_error\"}]}");
+    EXPECT(capture.n_events == 0);
+    /* Withheld past [DONE]: the attempt reads as incomplete so the retry loop re-issues it. */
+    chat_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 0);
+    EXPECT(parser.terminal_emitted == 0);
+    chat_events_finalize(&parser);
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_ERROR);
+    EXPECT(strstr(capture.events[0].message, "network_error") != NULL);
+    EXPECT(parser.terminal_emitted == 1);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+static void test_native_finish_benign_passthrough_keeps_done(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish_native(&parser, "stop", "end_turn");
+    chat_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_DONE);
+    EXPECT_STR_EQ(capture.events[0].message, "stop");
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+static void test_native_finish_error_without_reason_emits_error(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish_native(&parser, NULL, "error");
+    chat_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 0);
+    chat_events_finalize(&parser);
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_ERROR);
+    EXPECT(strstr(capture.events[0].message, "error") != NULL);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+static void test_native_finish_benign_with_tool_calls_keeps_done(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish_native(&parser, "tool_calls", "end_turn");
+    chat_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_DONE);
+    EXPECT_STR_EQ(capture.events[0].message, "tool_calls");
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+static void test_finish_reason_error_emits_error(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "error");
+    chat_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 0);
+    chat_events_finalize(&parser);
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_ERROR);
+    EXPECT(strstr(capture.events[0].message, "error") != NULL);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* The retry loop's completeness probe: a transient failure reads as died mid-stream, [DONE]
+ * included, so the attempt is retried rather than kept. */
+static void test_transient_failure_reads_incomplete(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish_native(&parser, "stop", "network_error");
+    EXPECT(!chat_events_complete(&parser));
+    chat_events_feed(&parser, "[DONE]");
+    EXPECT(!chat_events_complete(&parser));
+    chat_events_finalize(&parser);
+    EXPECT(chat_events_complete(&parser));
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* Truncation is a kept terminal state, not a transient one: no retry re-issues it. */
+static void test_truncation_reads_complete(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "length");
+    EXPECT(chat_events_complete(&parser));
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* Some direct Chat Completions providers put "network_error" straight in finish_reason. */
+static void test_finish_reason_network_error_emits_error(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "network_error");
+    chat_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 0);
+    chat_events_finalize(&parser);
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_ERROR);
+    EXPECT(strstr(capture.events[0].message, "upstream error: network_error") != NULL);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+static void test_native_error_dominates_truncation(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish_native(&parser, "length", "network_error");
+    chat_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 0);
+    chat_events_finalize(&parser);
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_ERROR);
+    EXPECT(strstr(capture.events[0].message, "upstream error: network_error") != NULL);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+static void test_native_finish_benign_without_reason_is_not_a_finish(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish_native(&parser, NULL, "end_turn");
+    chat_events_finalize(&parser);
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_ERROR);
+    EXPECT(strstr(capture.events[0].message, "stream ended before completion") != NULL);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+static void test_native_finish_error_on_close_without_sentinel(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish_native(&parser, "stop", "network_error");
+    EXPECT(capture.n_events == 0);
+    chat_events_finalize(&parser);
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_ERROR);
+    EXPECT(strstr(capture.events[0].message, "network_error") != NULL);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* An upstream failure still leaves a usage footer, which owes the same attribution. */
+static void test_response_identity_survives_native_error(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    chat_events_feed(&parser, "{\"id\":\"gen-net\",\"model\":\"openai/gpt-4o-mini\","
+                              "\"provider\":\"OpenAI\",\"choices\":[{\"delta\":{},"
+                              "\"finish_reason\":\"stop\","
+                              "\"native_finish_reason\":\"network_error\"}]}");
+    chat_events_feed(&parser, "{\"choices\":[],\"usage\":{"
+                              "\"prompt_tokens\":1234,\"completion_tokens\":0}}");
+    chat_events_feed(&parser, "[DONE]");
+    chat_events_finalize(&parser);
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_ERROR);
+    EXPECT_STR_EQ(capture.events[0].response_id, "gen-net");
+    EXPECT_STR_EQ(capture.events[0].route, "OpenAI");
+    EXPECT(capture.events[0].usage.input_tokens == 1234);
+    EXPECT(capture.events[0].usage.output_tokens == 0);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
 static void test_done_sentinel(void)
 {
     EVENTS_FIXTURE(capture, parser);
@@ -838,6 +1018,18 @@ int main(void)
     test_finish_reason_length_emits_error();
     test_finish_reason_length_error_on_close_without_sentinel();
     test_finish_reason_content_filter_emits_error();
+    test_native_finish_error_emits_error();
+    test_native_finish_benign_passthrough_keeps_done();
+    test_native_finish_error_without_reason_emits_error();
+    test_native_finish_benign_with_tool_calls_keeps_done();
+    test_finish_reason_error_emits_error();
+    test_transient_failure_reads_incomplete();
+    test_truncation_reads_complete();
+    test_finish_reason_network_error_emits_error();
+    test_native_error_dominates_truncation();
+    test_native_finish_benign_without_reason_is_not_a_finish();
+    test_native_finish_error_on_close_without_sentinel();
+    test_response_identity_survives_native_error();
     test_done_sentinel();
     test_double_termination_gated();
     test_events_after_terminal_ignored();

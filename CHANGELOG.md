@@ -20,6 +20,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   automatically once it crosses the configured threshold, and history reports hax's own item
   provenance so a call that never ran is distinguishable from one that did. See
   [bindings/python/README.md](bindings/python/README.md).
+- `/login` for the codex provider now offers a browser flow (authorization code with PKCE through
+  a `localhost` redirect) alongside device login, for organizations that block the device flow.
+  Device login remains the ssh-friendly path. See [docs/providers.md](docs/providers.md#codex).
 
 ### Changed
 
@@ -28,6 +31,13 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - [docs/embedding.md](docs/embedding.md) now states what a `tool_call` hook owes for a call the
   loop declined to dispatch: the marker text and the `origin` that go with the requested action,
   rather than whatever the host invents.
+
+### Fixed
+
+- Chat Completions streams now detect upstream provider failures signaled through the finish
+  reason (including OpenRouter's `error` and `network_error` sentinels), retry them like other
+  transient failures, and surface an error once retries are exhausted. Previously such streams
+  rendered as empty successful responses.
 
 ## [0.4.0] - 2026-08-22
 

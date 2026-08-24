@@ -108,7 +108,8 @@ static void test_poll_pending_and_errors(void)
 
 static void test_exchange_body_encoding(void)
 {
-    char *body = codex_login_build_exchange_body("a c/d", "verif~123");
+    char *body = codex_login_build_exchange_body("a c/d", "verif~123",
+                                                 "https://auth.openai.com/deviceauth/callback");
     EXPECT(body != NULL);
     if (body) {
         EXPECT(strstr(body, "grant_type=authorization_code&code=a%20c%2Fd&") != NULL);
@@ -118,6 +119,27 @@ static void test_exchange_body_encoding(void)
         EXPECT(strstr(body, "&code_verifier=verif~123") != NULL);
         EXPECT(strstr(body, "&client_id=") != NULL);
         free(body);
+    }
+}
+
+static void test_authorize_url(void)
+{
+    char *url =
+        codex_login_build_authorize_url("chall+65", "st&te", "http://localhost:1455/auth/callback");
+    EXPECT(url != NULL);
+    if (url) {
+        EXPECT(strstr(url, "https://auth.openai.com/oauth/authorize?response_type=code"
+                           "&client_id=") == url);
+        EXPECT(strstr(url, "&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&") !=
+               NULL);
+        EXPECT(strstr(url, "&scope=openid%20profile%20email%20offline_access&") != NULL);
+        EXPECT(strstr(url, "&code_challenge=chall%2B65&") != NULL);
+        EXPECT(strstr(url, "&code_challenge_method=S256&") != NULL);
+        EXPECT(strstr(url, "&state=st%26te&") != NULL);
+        EXPECT(strstr(url, "&id_token_add_organizations=true") != NULL);
+        EXPECT(strstr(url, "&codex_cli_simplified_flow=true") != NULL);
+        EXPECT(strstr(url, "&originator=hax") != NULL);
+        free(url);
     }
 }
 
@@ -235,6 +257,7 @@ int main(void)
     test_poll_authorized();
     test_poll_pending_and_errors();
     test_exchange_body_encoding();
+    test_authorize_url();
     test_entry_from_exchange();
     test_entry_from_exchange_rejects_incomplete();
     test_apply_refresh_merges();

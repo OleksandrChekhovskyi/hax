@@ -79,6 +79,7 @@ test_sources = [
     'render/test_tool_render.c',
 
     'system/test_bg_job.c',
+    'system/test_browser.c',
     'system/test_cancel.c',
     'system/test_fs.c',
     'system/test_git.c',
@@ -99,6 +100,8 @@ test_sources = [
 
     'text/test_base64.c',
     'text/test_diff.c',
+    'text/test_sha256.c',
+    'text/test_urlencode.c',
     'text/test_utf8.c',
     'text/test_utf8_sanitize.c',
     'text/test_width.c',
@@ -118,6 +121,7 @@ test_sources = [
     'transport/test_api_error.c',
     'transport/test_ca.c',
     'transport/test_http.c',
+    'transport/test_oauth.c',
     'transport/test_retry.c',
     'transport/test_sse.c',
 ]

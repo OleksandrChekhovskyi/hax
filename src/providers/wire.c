@@ -53,8 +53,7 @@ static void chat_free(union wire_events *events)
 
 static int chat_complete(const union wire_events *events)
 {
-    /* finish_received covers a stream cut between the finish chunk and [DONE]. */
-    return events->chat.terminal_emitted || events->chat.finish_received;
+    return chat_events_complete(&events->chat);
 }
 
 static const struct stream_usage *chat_usage(const union wire_events *events)

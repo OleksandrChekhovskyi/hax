@@ -385,7 +385,16 @@ static void emit_terminal_event(struct chat_events *parser)
     emit_event(parser, &event);
 }
 
-static void handle_finish_reason(struct chat_events *parser, const char *reason)
+/* Upstream-failure sentinels: OpenRouter normalizes finish_reason to "error", some direct
+ * providers send "network_error", and OpenRouter's native_finish_reason — the raw upstream
+ * stop reason — can carry either while finish_reason stays a benign "stop". */
+static int finish_reason_is_error(const char *reason)
+{
+    return reason && (strcmp(reason, "network_error") == 0 || strcmp(reason, "error") == 0);
+}
+
+static void handle_finish_reason(struct chat_events *parser, const char *reason,
+                                 const char *native_reason)
 {
     if (parser->terminal_emitted || parser->finish_received)
         return;
@@ -394,22 +403,33 @@ static void handle_finish_reason(struct chat_events *parser, const char *reason)
     finish_tool_calls(parser);
     parser->finish_received = 1;
 
+    int upstream_error = finish_reason_is_error(native_reason) || finish_reason_is_error(reason);
     int truncated =
         reason && (strcmp(reason, "length") == 0 || strcmp(reason, "content_filter") == 0);
-    if (!truncated) {
+    if (!truncated && !upstream_error) {
         parser->finish_reason = xstrdup(reason ? reason : "stop");
         return;
     }
 
-    if (strcmp(reason, "length") == 0 && parser->length_hint)
+    if (upstream_error) {
+        parser->finish_error = xasprintf(
+            "upstream error: %s", finish_reason_is_error(native_reason) ? native_reason : reason);
+        parser->finish_transient = 1;
+    } else if (strcmp(reason, "length") == 0 && parser->length_hint) {
         parser->finish_error = xasprintf("response incomplete: length — %s", parser->length_hint);
-    else
+    } else {
         parser->finish_error = xasprintf("response incomplete: %s", reason);
+    }
 }
 
 static void handle_done(struct chat_events *parser)
 {
     if (parser->terminal_emitted)
+        return;
+
+    /* A transient failure is withheld here so the attempt reads as incomplete and the retry
+     * loop re-issues it; the exhausted last attempt finalizes into the pending error. */
+    if (parser->finish_transient)
         return;
 
     flush_reasoning_details(parser);
@@ -461,8 +481,10 @@ static void handle_choice_delta(struct chat_events *parser, json_t *choice)
     }
 
     const char *finish_reason = json_string_value(json_object_get(choice, "finish_reason"));
-    if (finish_reason)
-        handle_finish_reason(parser, finish_reason);
+    const char *native_reason = json_string_value(json_object_get(choice, "native_finish_reason"));
+    /* A benign native reason alone is not a finish. */
+    if (finish_reason || finish_reason_is_error(native_reason))
+        handle_finish_reason(parser, finish_reason, native_reason);
 }
 
 void chat_events_feed(struct chat_events *parser, const char *data)
@@ -495,6 +517,11 @@ void chat_events_feed(struct chat_events *parser, const char *data)
         handle_choice_delta(parser, json_array_get(choices, 0));
 
     json_decref(root);
+}
+
+int chat_events_complete(const struct chat_events *parser)
+{
+    return parser->terminal_emitted || (parser->finish_received && !parser->finish_transient);
 }
 
 void chat_events_finalize(struct chat_events *parser)

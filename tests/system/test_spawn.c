@@ -293,6 +293,32 @@ static void test_reap_live_child(void)
     (void)spawn_wait_child(pid);
 }
 
+/* The detached grandchild runs and is not this process's child, so only its side effect is
+ * observable — poll (bounded) for a file it publishes by rename, so a partial write is never
+ * read. */
+static void test_detached_runs_helper(void)
+{
+    const char *out_path = tmp_path("detached.txt");
+    char *command =
+        xasprintf("printf detached > '%s.tmp' && mv '%s.tmp' '%s'", out_path, out_path, out_path);
+    const char *argv[] = {"/bin/sh", "-c", command, NULL};
+    EXPECT(spawn_detached(argv) == 0);
+    free(command);
+
+    char *content = NULL;
+    for (int i = 0; i < 300 && !content; i++) {
+        content = slurp(out_path);
+        if (!content) {
+            struct timespec pause_ts = {.tv_nsec = 10 * 1000 * 1000};
+            nanosleep(&pause_ts, NULL);
+        }
+    }
+    EXPECT(content != NULL);
+    if (content)
+        EXPECT_STR_EQ(content, "detached");
+    free(content);
+}
+
 /* An exited child gets reaped. Poll (bounded) because the child may
  * not have been scheduled to exit the instant we return from fork. */
 static void test_reap_exited_child(void)
@@ -472,6 +498,8 @@ int main(void)
     test_capture_eof_then_hang_is_bounded();
 
     test_reap_non_child_is_exited();
+    test_detached_runs_helper();
+
     test_reap_live_child();
     test_reap_exited_child();
 
