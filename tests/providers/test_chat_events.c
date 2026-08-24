@@ -542,7 +542,11 @@ static void test_native_finish_error_emits_error(void)
                               "\"finish_reason\":\"stop\","
                               "\"native_finish_reason\":\"network_error\"}]}");
     EXPECT(capture.n_events == 0);
+    /* Withheld past [DONE]: the attempt reads as incomplete so the retry loop re-issues it. */
     chat_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 0);
+    EXPECT(parser.terminal_emitted == 0);
+    chat_events_finalize(&parser);
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT(strstr(capture.events[0].message, "network_error") != NULL);
@@ -566,6 +570,8 @@ static void test_native_finish_error_without_reason_emits_error(void)
     EVENTS_FIXTURE(capture, parser);
     feed_finish_native(&parser, NULL, "error");
     chat_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 0);
+    chat_events_finalize(&parser);
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT(strstr(capture.events[0].message, "error") != NULL);
@@ -588,9 +594,48 @@ static void test_finish_reason_error_emits_error(void)
     EVENTS_FIXTURE(capture, parser);
     feed_finish(&parser, "error");
     chat_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 0);
+    chat_events_finalize(&parser);
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT(strstr(capture.events[0].message, "error") != NULL);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* The retry loop's completeness probe: a transient failure reads as died mid-stream, [DONE]
+ * included, so the attempt is retried rather than kept. */
+static void test_transient_failure_reads_incomplete(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish_native(&parser, "stop", "network_error");
+    EXPECT(!chat_events_complete(&parser));
+    chat_events_feed(&parser, "[DONE]");
+    EXPECT(!chat_events_complete(&parser));
+    chat_events_finalize(&parser);
+    EXPECT(chat_events_complete(&parser));
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* Truncation is a kept terminal state, not a transient one: no retry re-issues it. */
+static void test_truncation_reads_complete(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "length");
+    EXPECT(chat_events_complete(&parser));
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* Some direct Chat Completions providers put "network_error" straight in finish_reason. */
+static void test_finish_reason_network_error_emits_error(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "network_error");
+    chat_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 0);
+    chat_events_finalize(&parser);
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_ERROR);
+    EXPECT(strstr(capture.events[0].message, "upstream error: network_error") != NULL);
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
@@ -599,6 +644,8 @@ static void test_native_error_dominates_truncation(void)
     EVENTS_FIXTURE(capture, parser);
     feed_finish_native(&parser, "length", "network_error");
     chat_events_feed(&parser, "[DONE]");
+    EXPECT(capture.n_events == 0);
+    chat_events_finalize(&parser);
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT(strstr(capture.events[0].message, "upstream error: network_error") != NULL);
@@ -639,6 +686,7 @@ static void test_response_identity_survives_native_error(void)
     chat_events_feed(&parser, "{\"choices\":[],\"usage\":{"
                               "\"prompt_tokens\":1234,\"completion_tokens\":0}}");
     chat_events_feed(&parser, "[DONE]");
+    chat_events_finalize(&parser);
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT_STR_EQ(capture.events[0].response_id, "gen-net");
@@ -975,6 +1023,9 @@ int main(void)
     test_native_finish_error_without_reason_emits_error();
     test_native_finish_benign_with_tool_calls_keeps_done();
     test_finish_reason_error_emits_error();
+    test_transient_failure_reads_incomplete();
+    test_truncation_reads_complete();
+    test_finish_reason_network_error_emits_error();
     test_native_error_dominates_truncation();
     test_native_finish_benign_without_reason_is_not_a_finish();
     test_native_finish_error_on_close_without_sentinel();

@@ -9,10 +9,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
-- Chat Completions streams now surface upstream failures reported via OpenRouter's
-  `native_finish_reason` (`network_error`, `error`) or the normalized finish reason `error` as
-  errors instead of rendering an empty response, and an upstream failure takes precedence over a
-  simultaneous truncation reason. Other native stop reasons still behave as normal completions.
+- Chat Completions streams now detect upstream provider failures signaled through the finish
+  reason (including OpenRouter's `error` and `network_error` sentinels), retry them like other
+  transient failures, and surface an error once retries are exhausted. Previously such streams
+  rendered as empty successful responses.
 
 ## [0.4.0] - 2026-08-22
 

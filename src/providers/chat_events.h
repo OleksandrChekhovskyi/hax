@@ -34,6 +34,9 @@ struct chat_events {
     int finish_received;
     char *finish_reason;
     char *finish_error;
+    /* finish_error holds a transient upstream failure: withheld past [DONE] so the stream reads
+     * as incomplete and is retried; emitted by finalize once the attempts are spent. */
+    int finish_transient;
     struct stream_usage usage;
     /* Chunk-reported identity, first non-empty value winning: a stream serves one response, and
      * OpenRouter repeats these on every chunk. */
@@ -53,6 +56,11 @@ void chat_events_free(struct chat_events *parser);
 /* Feed one SSE data payload: a JSON chunk or "[DONE]". Payloads after a terminal event are
  * ignored. */
 void chat_events_feed(struct chat_events *parser, const char *data);
+
+/* Whether the stream reached a terminal state worth keeping. A stream cut between the finish
+ * chunk and [DONE] counts; a transient upstream failure never does — the attempt reads as died
+ * mid-stream so the caller retries it. */
+int chat_events_complete(const struct chat_events *parser);
 
 /* Finish a cleanly closed transport; emit an error if no terminal state was received. */
 void chat_events_finalize(struct chat_events *parser);
