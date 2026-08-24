@@ -1,15 +1,15 @@
 /* SPDX-License-Identifier: MIT */
 #ifdef _WIN32
 
-#include "hax_win32.h"
+#include "system/win32_include/hax_win32.h"
 
 #undef access
 #undef chdir
 #undef chmod
+#undef fchmod
 #undef getcwd
 #undef getline
 #undef gmtime_r
-#undef kill
 #undef lstat
 #undef localtime_r
 #undef readlink
@@ -34,6 +34,7 @@
 #undef utimensat
 #undef wcwidth
 
+#include <aclapi.h>
 #include <bcrypt.h>
 #include <direct.h>
 #include <dirent.h>
@@ -606,9 +607,15 @@ static FILETIME timespec_to_filetime(const struct timespec *time_value)
 
 int futimens(int fd, const struct timespec times[2])
 {
-    HANDLE handle = (HANDLE)_get_osfhandle(fd);
-    if (handle == INVALID_HANDLE_VALUE) {
+    HANDLE source = (HANDLE)_get_osfhandle(fd);
+    if (source == INVALID_HANDLE_VALUE) {
         errno = EBADF;
+        return -1;
+    }
+    HANDLE handle = ReOpenFile(source, FILE_WRITE_ATTRIBUTES,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0);
+    if (handle == INVALID_HANDLE_VALUE) {
+        set_errno_from_win32(GetLastError());
         return -1;
     }
     FILETIME access_time;
@@ -630,11 +637,13 @@ int futimens(int fd, const struct timespec times[2])
             write_ptr = &write_time;
         }
     }
-    if (!SetFileTime(handle, NULL, access_ptr, write_ptr)) {
-        set_errno_from_win32(GetLastError());
-        return -1;
-    }
-    return 0;
+    BOOL updated = SetFileTime(handle, NULL, access_ptr, write_ptr);
+    DWORD error = updated ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(handle);
+    if (updated)
+        return 0;
+    set_errno_from_win32(error);
+    return -1;
 }
 
 int hax_utimensat(int directory_fd, const char *path, const struct timespec times[2], int flags)
@@ -659,12 +668,9 @@ int hax_pipe(int fds[2])
 
 int hax_fcntl(int fd, int command, ...)
 {
-    if (command == F_GETFL)
-        return 0;
-    if (command == F_SETFD || command == F_SETFL)
-        return 0;
     (void)fd;
-    errno = EINVAL;
+    (void)command;
+    errno = ENOTSUP;
     return -1;
 }
 
@@ -689,26 +695,163 @@ int hax_wcwidth(wchar_t codepoint)
     return 1;
 }
 
+static int restrict_handle_to_owner(HANDLE handle, int inherit)
+{
+    PSID owner = NULL;
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    DWORD result = GetSecurityInfo(handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, NULL,
+                                   NULL, NULL, &descriptor);
+    if (result != ERROR_SUCCESS) {
+        set_errno_from_win32(result);
+        return -1;
+    }
+
+    EXPLICIT_ACCESSW access = {0};
+    access.grfAccessPermissions = GENERIC_ALL;
+    access.grfAccessMode = SET_ACCESS;
+    access.grfInheritance = inherit ? SUB_CONTAINERS_AND_OBJECTS_INHERIT : NO_INHERITANCE;
+    access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    access.Trustee.TrusteeType = TRUSTEE_IS_USER;
+    access.Trustee.ptstrName = owner;
+    PACL acl = NULL;
+    result = SetEntriesInAclW(1, &access, NULL, &acl);
+    if (result == ERROR_SUCCESS)
+        result = SetSecurityInfo(handle, SE_FILE_OBJECT,
+                                 DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                 NULL, NULL, acl, NULL);
+    LocalFree(acl);
+    LocalFree(descriptor);
+    if (result == ERROR_SUCCESS)
+        return 0;
+    set_errno_from_win32(result);
+    return -1;
+}
+
+int hax_fchmod(int fd, mode_t mode)
+{
+    if (mode != 0600 && mode != 0700) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    HANDLE handle = (HANDLE)_get_osfhandle(fd);
+    if (handle == INVALID_HANDLE_VALUE) {
+        errno = EBADF;
+        return -1;
+    }
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(handle, &info)) {
+        set_errno_from_win32(GetLastError());
+        return -1;
+    }
+    return restrict_handle_to_owner(handle, info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static DWORD open_access(int flags)
+{
+    int access_mode = flags & (_O_RDONLY | _O_WRONLY | _O_RDWR);
+    DWORD access = access_mode == _O_WRONLY ? GENERIC_WRITE
+                   : access_mode == _O_RDWR ? GENERIC_READ | GENERIC_WRITE
+                                            : GENERIC_READ;
+    if (flags & O_APPEND) {
+        access &= ~GENERIC_WRITE;
+        access |= FILE_APPEND_DATA;
+    }
+    return access;
+}
+
+static DWORD open_creation(int flags)
+{
+    if (flags & O_CREAT)
+        return flags & O_EXCL ? CREATE_NEW : flags & O_TRUNC ? CREATE_ALWAYS : OPEN_ALWAYS;
+    return flags & O_TRUNC ? TRUNCATE_EXISTING : OPEN_EXISTING;
+}
+
 int hax_open(const char *path, int flags, ...)
 {
-    int mode = _S_IREAD | _S_IWRITE;
+    int mode = 0666;
     if (flags & O_CREAT) {
         va_list args;
         va_start(args, flags);
         mode = va_arg(args, int);
         va_end(args);
     }
+    if ((flags & O_CREAT) && !(mode & 0077) && mode != 0600 && mode != 0700) {
+        errno = ENOTSUP;
+        return -1;
+    }
     wchar_t *wide = path_to_wide(path);
     if (!wide)
         return -1;
-    int fd = _wopen(wide, flags | _O_BINARY | _O_NOINHERIT, mode);
+
+    DWORD attributes = flags & O_DIRECTORY ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL;
+    if (flags & O_NOFOLLOW)
+        attributes |= FILE_FLAG_OPEN_REPARSE_POINT;
+    DWORD desired_access = open_access(flags);
+    if ((flags & O_CREAT) && !(mode & 0077))
+        desired_access |= READ_CONTROL | WRITE_DAC;
+    HANDLE handle =
+        CreateFileW(wide, desired_access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    NULL, open_creation(flags), attributes, NULL);
     free(wide);
+    if (handle == INVALID_HANDLE_VALUE) {
+        set_errno_from_win32(GetLastError());
+        return -1;
+    }
+
+    FILE_ATTRIBUTE_TAG_INFO info;
+    if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &info, sizeof(info))) {
+        set_errno_from_win32(GetLastError());
+        CloseHandle(handle);
+        return -1;
+    }
+    if ((flags & O_NOFOLLOW) && (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        CloseHandle(handle);
+        errno = ELOOP;
+        return -1;
+    }
+    if ((flags & O_DIRECTORY) && !(info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        CloseHandle(handle);
+        errno = ENOTDIR;
+        return -1;
+    }
+    if ((flags & O_NONBLOCK) && GetFileType(handle) != FILE_TYPE_DISK) {
+        CloseHandle(handle);
+        errno = ENOTSUP;
+        return -1;
+    }
+    if ((flags & O_CREAT) && !(mode & 0077) && restrict_handle_to_owner(handle, 0) < 0) {
+        CloseHandle(handle);
+        return -1;
+    }
+
+    int crt_flags = flags & (_O_RDONLY | _O_WRONLY | _O_RDWR | _O_APPEND);
+    int fd = _open_osfhandle((intptr_t)handle, crt_flags | _O_BINARY | _O_NOINHERIT);
+    if (fd < 0)
+        CloseHandle(handle);
     return fd;
 }
 
 static char *binary_mode(const char *mode)
 {
-    return strchr(mode, 'b') ? _strdup(mode) : xasprintf("%sb", mode);
+    size_t length = strlen(mode);
+    char *binary = xmalloc(length + 2);
+    size_t out = 0;
+    int has_binary = 0;
+    size_t comma = length;
+    for (size_t i = 0; i < length; i++) {
+        if (mode[i] == ',') {
+            comma = i;
+            break;
+        }
+        if (mode[i] == 'e')
+            continue;
+        has_binary |= mode[i] == 'b';
+        binary[out++] = mode[i];
+    }
+    if (!has_binary)
+        binary[out++] = 'b';
+    memcpy(binary + out, mode + comma, length - comma + 1);
+    return binary;
 }
 
 FILE *hax_fopen(const char *path, const char *mode)
@@ -853,8 +996,31 @@ int hax_chdir(const char *path)
 
 int hax_chmod(const char *path, int mode)
 {
-    (void)mode;
-    return hax_access(path, F_OK);
+    if (mode != 0600 && mode != 0700) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    wchar_t *wide = path_to_wide(path);
+    if (!wide)
+        return -1;
+    HANDLE handle = CreateFileW(wide, READ_CONTROL | WRITE_DAC,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(wide);
+    if (handle == INVALID_HANDLE_VALUE) {
+        set_errno_from_win32(GetLastError());
+        return -1;
+    }
+    BY_HANDLE_FILE_INFORMATION info;
+    int result;
+    if (!GetFileInformationByHandle(handle, &info)) {
+        set_errno_from_win32(GetLastError());
+        result = -1;
+    } else {
+        result = restrict_handle_to_owner(handle, info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+    }
+    CloseHandle(handle);
+    return result;
 }
 
 char *hax_getcwd(char *buffer, int size)
@@ -1135,14 +1301,41 @@ char *hax_mkdtemp(char *path_template)
     return NULL;
 }
 
-int hax_pread(int fd, void *buffer, size_t count, off_t offset)
+ssize_t hax_pread(int fd, void *buffer, size_t count, off_t offset)
 {
-    __int64 original = _telli64(fd);
-    if (original < 0 || _lseeki64(fd, offset, SEEK_SET) < 0)
+    if (offset < 0) {
+        errno = EINVAL;
         return -1;
-    int result = _read(fd, buffer, count > INT_MAX ? INT_MAX : (unsigned int)count);
-    (void)_lseeki64(fd, original, SEEK_SET);
-    return result;
+    }
+    HANDLE source = (HANDLE)_get_osfhandle(fd);
+    if (source == INVALID_HANDLE_VALUE) {
+        errno = EBADF;
+        return -1;
+    }
+    HANDLE handle =
+        ReOpenFile(source, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                   FILE_FLAG_OVERLAPPED);
+    if (handle == INVALID_HANDLE_VALUE) {
+        set_errno_from_win32(GetLastError());
+        return -1;
+    }
+
+    OVERLAPPED operation = {0};
+    operation.Offset = (DWORD)((uint64_t)offset & UINT32_MAX);
+    operation.OffsetHigh = (DWORD)((uint64_t)offset >> 32);
+    DWORD bytes_read = 0;
+    DWORD requested = count > UINT32_MAX ? UINT32_MAX : (DWORD)count;
+    BOOL completed = ReadFile(handle, buffer, requested, &bytes_read, &operation);
+    if (!completed && GetLastError() == ERROR_IO_PENDING)
+        completed = GetOverlappedResult(handle, &operation, &bytes_read, TRUE);
+    DWORD error = completed ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(handle);
+    if (completed)
+        return (ssize_t)bytes_read;
+    if (error == ERROR_HANDLE_EOF)
+        return 0;
+    set_errno_from_win32(error);
+    return -1;
 }
 
 int flock(int fd, int operation)
@@ -1485,9 +1678,8 @@ static int console_input_ready(HANDLE handle)
             return 0;
         if (record.EventType == KEY_EVENT && record.Event.KeyEvent.bKeyDown) {
             WORD key = record.Event.KeyEvent.wVirtualKeyCode;
-            if (record.Event.KeyEvent.uChar.UnicodeChar != L'\0' && key != VK_SHIFT &&
-                key != VK_CONTROL && key != VK_MENU && key != VK_CAPITAL && key != VK_NUMLOCK &&
-                key != VK_SCROLL)
+            if (key != VK_SHIFT && key != VK_CONTROL && key != VK_MENU && key != VK_CAPITAL &&
+                key != VK_NUMLOCK && key != VK_SCROLL)
                 return 1;
         }
         if (!ReadConsoleInputW(handle, &record, 1, &count))
@@ -1539,48 +1731,6 @@ int poll(struct pollfd *fds, nfds_t count, int timeout_ms)
             return 0;
         Sleep(1);
     }
-}
-
-int hax_kill(pid_t pid, int signal_number)
-{
-    if (pid < 0)
-        pid = -pid;
-    HANDLE process = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
-    if (!process) {
-        set_errno_from_win32(GetLastError());
-        return -1;
-    }
-    BOOL terminated = TerminateProcess(process, signal_number ? 128 + signal_number : 1);
-    if (!terminated)
-        set_errno_from_win32(GetLastError());
-    CloseHandle(process);
-    return terminated ? 0 : -1;
-}
-
-pid_t spawn_win32_waitpid(pid_t pid, int *status, int options);
-
-pid_t waitpid(pid_t pid, int *status, int options)
-{
-    pid_t registered = spawn_win32_waitpid(pid, status, options);
-    if (registered >= 0 || errno != ECHILD)
-        return registered;
-    HANDLE process =
-        OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
-    if (!process) {
-        errno = ECHILD;
-        return -1;
-    }
-    DWORD wait = WaitForSingleObject(process, options & WNOHANG ? 0 : INFINITE);
-    if (wait == WAIT_TIMEOUT) {
-        CloseHandle(process);
-        return 0;
-    }
-    DWORD exit_code = 1;
-    GetExitCodeProcess(process, &exit_code);
-    CloseHandle(process);
-    if (status)
-        *status = exit_code < 256 ? (int)exit_code : 1;
-    return pid;
 }
 
 int uname(struct utsname *name)

@@ -304,24 +304,29 @@ void interrupt_install_fatal_signal_handlers(void)
 static int create_wake_pipe(void)
 {
     int fds[2];
-    /* pipe2 is unavailable on macOS; set CLOEXEC explicitly to keep watcher fds internal. */
+    /* Windows creates non-inheritable pipes and readiness-probes before each read; POSIX needs
+     * explicit CLOEXEC and nonblocking state to close the poll/read race. */
     if (pipe(fds) < 0)
         return -1;
+#ifndef _WIN32
     if (fcntl(fds[0], F_SETFD, FD_CLOEXEC) < 0 || fcntl(fds[1], F_SETFD, FD_CLOEXEC) < 0)
         goto fail;
 
     int flags = fcntl(fds[0], F_GETFL, 0);
     if (flags < 0 || fcntl(fds[0], F_SETFL, flags | O_NONBLOCK) < 0)
         goto fail;
+#endif
 
     watcher.wake_read_fd = fds[0];
     watcher.wake_write_fd = fds[1];
     return 0;
 
+#ifndef _WIN32
 fail:
     close(fds[0]);
     close(fds[1]);
     return -1;
+#endif
 }
 
 void interrupt_init(void)

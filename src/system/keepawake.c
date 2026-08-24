@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #endif
 
+#ifndef _WIN32
 /* Calls occur on the main thread at the user-turn boundary. */
 static pid_t helper_pid;
 
@@ -21,6 +22,7 @@ static void reap_dead_helper(void)
     if (helper_pid > 0 && spawn_reap_if_exited(helper_pid))
         helper_pid = 0;
 }
+#endif
 
 #if defined(__APPLE__) || defined(__linux__)
 static const char *resolve_executable(const char *const *candidates)
@@ -50,9 +52,9 @@ static int systemd_inhibit_supports_no_ask_password(const char *path)
 }
 #endif
 
+#if defined(__APPLE__) || defined(__linux__)
 static void spawn_helper(void)
 {
-#if defined(__APPLE__) || defined(__linux__)
     pid_t parent_pid = getpid();
     /* Resolve before fork; PATH lookup may allocate and deadlock after a multithreaded fork. */
 #ifdef __APPLE__
@@ -100,8 +102,8 @@ static void spawn_helper(void)
         _exit(127);
     }
     helper_pid = pid;
-#endif
 }
+#endif
 
 void keepawake_acquire(void)
 {

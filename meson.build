@@ -30,6 +30,7 @@ if is_windows
     add_project_arguments(
         '/utf-8',
         '/D_CRT_SECURE_NO_WARNINGS',
+        '/D_WIN32_WINNT=0x0a00',
         language: 'c',
     )
     win32_includes = include_directories('src/system/win32_include', 'src', 'tests')

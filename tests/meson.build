@@ -123,18 +123,12 @@ windows_incompatible_tests = [
     'test_cli.c',
     'test_compact.c',
     'test_config.c',
-    'test_cred_store.c',
     'test_file_mention.c',
     'test_paste_image.c',
-    'test_session.c',
-    'test_session_prune.c',
-    'test_trace.c',
     'test_util.c',
     'render/test_spinner.c',
     'system/test_fs.c',
     'system/test_git.c',
-    'system/test_os.c',
-    'system/test_tempfiles.c',
     'tools/test_bash.c',
     'tools/test_edit.c',
     'tools/test_read.c',
@@ -177,6 +171,7 @@ endforeach
 # e2e/test_oneshot_text.py registers as e2e/oneshot_text, so the name prefix
 # selects the group (`meson test 'e2e/*'`).
 e2e_scenarios = [
+    'logging',
     'oneshot_text',
     'oneshot_tool',
 ]

@@ -2,7 +2,6 @@
 #include "tools/bash_process.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
@@ -10,8 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/types.h>
-#include <sys/wait.h>
 
 #include "config.h"
 #include "tool.h"
@@ -25,7 +22,7 @@
 #include "tools/task_registry.h"
 
 struct shell_process {
-    pid_t pid;
+    struct spawn_process *process;
     int output_fd;
 };
 
@@ -34,112 +31,51 @@ static long deadline_after(long now_ms, long duration_ms)
     return duration_ms > LONG_MAX - now_ms ? LONG_MAX : now_ms + duration_ms;
 }
 
-void bash_signal_process_tree(pid_t pid, int signal_number)
+static void bash_signal_process_tree(struct spawn_process *process, int signal_number)
 {
-#ifdef _WIN32
-    (void)signal_number;
-    spawn_win32_terminate(pid);
-#else
-    /* The child creates its process group after fork, hence the fallback. */
-    if (kill(-pid, signal_number) < 0 && errno == ESRCH)
-        kill(pid, signal_number);
-#endif
+    spawn_process_terminate(process, signal_number);
 }
-
-#ifndef _WIN32
-/* This runs after fork in a multithreaded process; use only async-signal-safe calls. */
-static void exec_shell_child(const char *shell, const char *argv0, const char *command,
-                             char *const envp[])
-{
-    close(STDIN_FILENO);
-    (void)open("/dev/null", O_RDONLY);
-    char *const argv[] = {(char *)argv0, (char *)"-c", (char *)command, NULL};
-    execve(shell, argv, envp);
-    _exit(127);
-}
-#endif
 
 static char *start_shell(const char *command, struct shell_process *process)
 {
     char **envp = bash_build_child_env();
-#ifdef _WIN32
-    if (spawn_win32_start_bash(command, envp, &process->pid, &process->output_fd) != 0) {
-        char *error = xasprintf("starting Git Bash: %s", strerror(errno));
-        free(envp);
-        return error;
-    }
-    free(envp);
-#else
-    /* Resolve everything before fork so the child can avoid allocator and environment locks. */
-    char *shell = bash_resolve_shell();
-    const char *argv0 = strrchr(shell, '/');
+    char *shell = NULL;
+    const char *argv0 = NULL;
+#ifndef _WIN32
+    shell = bash_resolve_shell();
+    argv0 = strrchr(shell, '/');
     argv0 = argv0 ? argv0 + 1 : shell;
-
-    int pipe_fds[2];
-    if (pipe(pipe_fds) < 0) {
-        char *error = xasprintf("pipe: %s", strerror(errno));
-        free(shell);
-        free(envp);
-        return error;
-    }
-
-    pid_t parent_pid = getpid();
-    pid_t pid = fork();
-    if (pid < 0) {
-        char *error = xasprintf("fork: %s", strerror(errno));
-        close(pipe_fds[0]);
-        close(pipe_fds[1]);
-        free(shell);
-        free(envp);
-        return error;
-    }
-    if (pid == 0) {
-        close(pipe_fds[0]);
-        /* A separate session isolates descendants and removes access to the agent's terminal. */
-        setsid();
-        /* Backstop for a hax death no handler can see (SIGKILL, OOM): pdeathsig survives the
-         * execve, so an exec-optimized `bash -c` leader dies with hax even then. SIGKILL,
-         * not SIGTERM — a command that traps TERM must not outlive a dead hax either. */
-        spawn_child_die_with_parent(parent_pid, SIGKILL);
-        dup2(pipe_fds[1], STDOUT_FILENO);
-        dup2(pipe_fds[1], STDERR_FILENO);
-        if (pipe_fds[1] > STDERR_FILENO)
-            close(pipe_fds[1]);
-        exec_shell_child(shell, argv0, command, envp);
-    }
-
-    close(pipe_fds[1]);
+#endif
+    process->process = spawn_process_start_bash(shell, argv0, command, envp, &process->output_fd);
     free(shell);
     free(envp);
-    process->pid = pid;
-    process->output_fd = pipe_fds[0];
-#endif
-    bash_shell_pgid_publish(process->pid);
+    if (!process->process)
+        return xasprintf("starting Bash: %s", strerror(errno));
+    bash_live_process_publish(process->process);
     return NULL;
 }
 
 /* Return the grace deadline, or 0 when the process tree was killed immediately. */
-static long start_shutdown(pid_t pid, long now_ms, long grace_ms)
-{
-    if (grace_ms <= 0) {
-        bash_signal_process_tree(pid, SIGKILL);
-        return 0;
-    }
-    bash_signal_process_tree(pid, SIGTERM);
-    return deadline_after(now_ms, grace_ms);
-}
-
-int bash_process_exit_seen(pid_t pid, int *exit_seen)
+static long start_shutdown(struct spawn_process *process, long now_ms, long grace_ms)
 {
 #ifdef _WIN32
-    return spawn_win32_exit_seen(pid, exit_seen);
+    (void)now_ms;
+    (void)grace_ms;
+    bash_signal_process_tree(process, SIGKILL);
+    return 0;
 #else
-    siginfo_t info = {0};
-    int result = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
-    if (result == 0 && info.si_pid == pid)
-        *exit_seen = 1;
-    return result;
+    if (grace_ms <= 0) {
+        bash_signal_process_tree(process, SIGKILL);
+        return 0;
+    }
+    bash_signal_process_tree(process, SIGTERM);
+    return deadline_after(now_ms, grace_ms);
 #endif
+}
+
+static int bash_process_exit_seen(struct spawn_process *process, int *exit_seen)
+{
+    return spawn_process_exit_seen(process, exit_seen);
 }
 
 /* Generous: a loaded machine may schedule the exiting shell late, and the stall lands only on
@@ -160,13 +96,13 @@ static size_t transition_min_bytes(void)
     return value ? (size_t)strtoul(value, NULL, 10) : 0;
 }
 
-/* Wait up to `timeout_ms` for the shell's exit to become observable, probing with WNOWAIT so
- * the zombie keeps the process group signalable. Returns -1 when the wait itself fails. */
-static int observe_shell_exit(pid_t pid, int *exit_seen, long timeout_ms)
+/* Wait up to `timeout_ms` for the shell's exit to become observable without consuming the
+ * process object, so its tree remains terminable. Returns -1 when the wait itself fails. */
+static int observe_shell_exit(struct spawn_process *process, int *exit_seen, long timeout_ms)
 {
     long deadline = deadline_after(monotonic_ms(), timeout_ms);
     while (!*exit_seen) {
-        if (bash_process_exit_seen(pid, exit_seen) < 0 && errno != EINTR)
+        if (bash_process_exit_seen(process, exit_seen) < 0 && errno != EINTR)
             return -1;
         if (*exit_seen || monotonic_ms() >= deadline)
             break;
@@ -204,10 +140,10 @@ static int poll_timeout_ms(long deadline)
 
 static void display_suffix(tool_display_fn display, void *display_data, size_t total_bytes,
                            int binary, int displayed_body, enum bash_stop_reason reason,
-                           long timeout_ms, int wait_status)
+                           long timeout_ms, const struct spawn_status *status)
 {
-    char *suffix = bash_output_format_suffix(total_bytes, binary, displayed_body, reason,
-                                             timeout_ms, wait_status);
+    char *suffix =
+        bash_output_format_suffix(total_bytes, binary, displayed_body, reason, timeout_ms, status);
 
     /* A newline aborts any unterminated escape sequence before the binary marker's '['. */
     if (binary && displayed_body)
@@ -231,7 +167,7 @@ static char *adopt_running_command(const struct shell_process *process, const ch
     int spool_fd = bash_output_detach_file(output, &spool_path);
     if (spool_fd < 0)
         return NULL;
-    const char *id = task_adopt(process->pid, process->output_fd, command, name, started_ms,
+    const char *id = task_adopt(process->process, process->output_fd, command, name, started_ms,
                                 spool_fd, spool_path, bash_output_size(output), binary, pipe_eof);
     if (!id) {
         bash_output_reattach_file(output, spool_fd, spool_path);
@@ -310,7 +246,7 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
     long exit_flush_deadline = 0;
     enum bash_stop_reason stop_reason = BASH_STOP_NONE;
     int shell_exited = 0;
-    int wait_status = 0;
+    struct spawn_status status = {.end = SPAWN_END_FORCED};
     int binary = 0;
     int displayed_body = 0;
     struct bash_output *output = bash_output_create(output_cap_bytes());
@@ -325,13 +261,13 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
             transition_deadline = hold_cap;
 
         /* Probe before the deadline check so adoption never takes a shell that has already
-         * exited. WNOWAIT keeps the pid reserved until all process-tree signaling is done. */
+         * exited. The process object stays owned until all tree termination is done. */
         if (!shell_exited) {
-            int status_result = bash_process_exit_seen(process.pid, &shell_exited);
+            int status_result = bash_process_exit_seen(process.process, &shell_exited);
             /* Reaping stragglers on shell exit would defeat an explicit background request,
              * where lingering children are the point. */
             if (shell_exited && stop_reason == BASH_STOP_NONE && !background)
-                bash_signal_process_tree(process.pid, SIGKILL);
+                bash_signal_process_tree(process.process, SIGKILL);
             else if (status_result < 0 && errno != EINTR)
                 break;
         }
@@ -342,10 +278,10 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
             if (shell_exited) {
                 /* Background suppressed the shell-exit kill; orphans die on the way out. */
                 if (background)
-                    bash_signal_process_tree(process.pid, SIGKILL);
+                    bash_signal_process_tree(process.process, SIGKILL);
                 break;
             }
-            grace_deadline = start_shutdown(process.pid, now_ms, grace_ms);
+            grace_deadline = start_shutdown(process.process, now_ms, grace_ms);
             if (grace_deadline == 0)
                 break;
         }
@@ -355,7 +291,7 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
              * moments before its exit becomes waitable; let the exit land so the
              * adopt-vs-orphan choice below reflects the shell's state, not that race. */
             if (background && hold_min_bytes && !shell_exited)
-                observe_shell_exit(process.pid, &shell_exited, YIELD_EXIT_OBSERVE_MS);
+                observe_shell_exit(process.process, &shell_exited, YIELD_EXIT_OBSERVE_MS);
             int flush_pending = background && shell_exited &&
                                 exited_pipe_flush_pending(process.output_fd, &exit_flush_deadline);
             if (!flush_pending) {
@@ -375,17 +311,17 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
                 if (shell_exited) {
                     if (background) {
                         stop_reason = BASH_STOP_ORPHANED;
-                        bash_signal_process_tree(process.pid, SIGKILL);
+                        bash_signal_process_tree(process.process, SIGKILL);
                     }
                     break;
                 }
-                grace_deadline = start_shutdown(process.pid, now_ms, grace_ms);
+                grace_deadline = start_shutdown(process.process, now_ms, grace_ms);
                 if (grace_deadline == 0)
                     break;
             }
         }
         if (stop_reason != BASH_STOP_NONE && grace_deadline > 0 && now_ms >= grace_deadline) {
-            bash_signal_process_tree(process.pid, SIGKILL);
+            bash_signal_process_tree(process.process, SIGKILL);
             break;
         }
 
@@ -415,8 +351,8 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
              * atexit handler); a kill in that window would rewrite the exit status to SIGKILL,
              * so let a finishing shell's exit land first. */
             if (stop_reason == BASH_STOP_NONE)
-                observe_shell_exit(process.pid, &shell_exited, EOF_EXIT_OBSERVE_MS);
-            bash_signal_process_tree(process.pid, SIGKILL);
+                observe_shell_exit(process.process, &shell_exited, EOF_EXIT_OBSERVE_MS);
+            bash_signal_process_tree(process.process, SIGKILL);
             break;
         }
 
@@ -428,7 +364,7 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
         }
         bash_output_append(output, chunk, (size_t)bytes_read);
         if (bash_output_size(output) >= (size_t)BASH_OUTPUT_DRAIN_LIMIT) {
-            bash_signal_process_tree(process.pid, SIGKILL);
+            bash_signal_process_tree(process.process, SIGKILL);
             break;
         }
     }
@@ -437,7 +373,7 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
      * detaches as a task instead. */
     if (background && stop_reason == BASH_STOP_NONE) {
         int observe_failed =
-            observe_shell_exit(process.pid, &shell_exited, YIELD_EXIT_OBSERVE_MS) < 0;
+            observe_shell_exit(process.process, &shell_exited, YIELD_EXIT_OBSERVE_MS) < 0;
         if (!shell_exited && !observe_failed) {
             char *adopted =
                 adopt_running_command(&process, command, name, output, binary, background,
@@ -449,16 +385,14 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
         }
         /* An exited shell may leave orphans that redirected their output elsewhere; nothing
          * can track them, so kill the group while the unreaped zombie still reserves it. */
-        bash_signal_process_tree(process.pid, SIGKILL);
+        bash_signal_process_tree(process.process, SIGKILL);
     }
 
     close(process.output_fd);
 
-    bash_shell_pgid_retract(process.pid);
-    while (waitpid(process.pid, &wait_status, 0) < 0) {
-        if (errno != EINTR)
-            break;
-    }
+    bash_live_process_retract(process.process);
+    (void)spawn_process_wait(process.process, &status);
+    process.process = NULL;
 
     /* A background request that completed inside the yield window never created a task; name
      * the handle the model might otherwise wait on. The note is model-only: the user never saw
@@ -477,8 +411,8 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
      * background runs, the timeout otherwise (transition_ms covers both). */
     if (display)
         display_suffix(display, display_data, bash_output_size(output), binary, displayed_body,
-                       stop_reason, transition_ms, wait_status);
-    char *result = bash_output_finish(output, binary, stop_reason, transition_ms, wait_status);
+                       stop_reason, transition_ms, &status);
+    char *result = bash_output_finish(output, binary, stop_reason, transition_ms, &status);
     if (*task_footer) {
         char *with_footer = xasprintf("%s%s", result, task_footer);
         free(result);
@@ -492,27 +426,27 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
 
 /* Exceeds task.max_running's ceiling (64) plus the one foreground shell, so a free slot always
  * exists and publish cannot silently drop a shell. */
-#define SHELL_PGID_TABLE_SIZE 128
+#define LIVE_PROCESS_TABLE_SIZE 128
 
-/* Single-writer (the tool-dispatch thread); a fatal-signal handler may read concurrently, so
- * slots hold either zero or a pid whose process is still unreaped. */
-static volatile pid_t shell_pgids[SHELL_PGID_TABLE_SIZE];
+/* Single-writer (the tool-dispatch thread); fatal cleanup may read concurrently. Every pointer
+ * remains valid until it is retracted immediately before the consuming wait. */
+static struct spawn_process *volatile live_processes[LIVE_PROCESS_TABLE_SIZE];
 
-void bash_shell_pgid_publish(pid_t pid)
+void bash_live_process_publish(struct spawn_process *process)
 {
-    for (size_t i = 0; i < SHELL_PGID_TABLE_SIZE; i++) {
-        if (shell_pgids[i] == 0) {
-            shell_pgids[i] = pid;
+    for (size_t i = 0; i < LIVE_PROCESS_TABLE_SIZE; i++) {
+        if (!live_processes[i]) {
+            live_processes[i] = process;
             return;
         }
     }
 }
 
-void bash_shell_pgid_retract(pid_t pid)
+void bash_live_process_retract(struct spawn_process *process)
 {
-    for (size_t i = 0; i < SHELL_PGID_TABLE_SIZE; i++) {
-        if (shell_pgids[i] == pid) {
-            shell_pgids[i] = 0;
+    for (size_t i = 0; i < LIVE_PROCESS_TABLE_SIZE; i++) {
+        if (live_processes[i] == process) {
+            live_processes[i] = NULL;
             return;
         }
     }
@@ -520,9 +454,9 @@ void bash_shell_pgid_retract(pid_t pid)
 
 void bash_shell_pgids_kill(void)
 {
-    for (size_t i = 0; i < SHELL_PGID_TABLE_SIZE; i++) {
-        pid_t pid = shell_pgids[i];
-        if (pid > 0)
-            bash_signal_process_tree(pid, SIGKILL);
+    for (size_t i = 0; i < LIVE_PROCESS_TABLE_SIZE; i++) {
+        struct spawn_process *process = live_processes[i];
+        if (process)
+            bash_signal_process_tree(process, SIGKILL);
     }
 }

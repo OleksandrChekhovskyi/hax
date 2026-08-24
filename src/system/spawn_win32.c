@@ -15,15 +15,11 @@
 #include "system/path.h"
 #include "system/spawn.h"
 
-struct child_record {
-    pid_t pid;
+struct spawn_process {
     HANDLE process;
     HANDLE job;
-    struct child_record *next;
+    int forced;
 };
-
-static SRWLOCK child_lock = SRWLOCK_INIT;
-static struct child_record *children;
 
 static wchar_t *utf8_to_wide(const char *text)
 {
@@ -262,29 +258,13 @@ static int child_finish(struct child_start *child, DWORD timeout_ms, int termina
     return wait == WAIT_OBJECT_0 ? (int)(exit_code & 0xff) : -1;
 }
 
-static void child_publish(struct child_start *child)
+static struct spawn_process *process_from_child(struct child_start *child)
 {
-    struct child_record *record = xmalloc(sizeof(*record));
-    record->pid = (pid_t)child->process_info.dwProcessId;
-    record->process = child->process_info.hProcess;
-    record->job = child->job;
-    AcquireSRWLockExclusive(&child_lock);
-    record->next = children;
-    children = record;
-    ReleaseSRWLockExclusive(&child_lock);
-}
-
-static struct child_record *child_take(pid_t pid)
-{
-    AcquireSRWLockExclusive(&child_lock);
-    struct child_record **link = &children;
-    while (*link && (*link)->pid != pid)
-        link = &(*link)->next;
-    struct child_record *record = *link;
-    if (record)
-        *link = record->next;
-    ReleaseSRWLockExclusive(&child_lock);
-    return record;
+    struct spawn_process *process = xmalloc(sizeof(*process));
+    process->process = child->process_info.hProcess;
+    process->job = child->job;
+    process->forced = 0;
+    return process;
 }
 
 static int compare_env(const void *left, const void *right)
@@ -375,13 +355,17 @@ int spawn_win32_bash_available(void)
     return started == 0 && child_finish(&child, 3000, 1) == 0;
 }
 
-int spawn_win32_start_bash(const char *command, char *const envp[], pid_t *pid, int *output_fd)
+struct spawn_process *spawn_process_start_bash(const char *shell, const char *argv0,
+                                               const char *command, char *const envp[],
+                                               int *output_fd)
 {
+    (void)shell;
+    (void)argv0;
     SECURITY_ATTRIBUTES security = {.nLength = sizeof(security), .bInheritHandle = TRUE};
     HANDLE read_handle;
     HANDLE write_handle;
     if (!CreatePipe(&read_handle, &write_handle, &security, 0))
-        return -1;
+        return NULL;
     SetHandleInformation(read_handle, HANDLE_FLAG_INHERIT, 0);
     HANDLE null_handle =
         CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -402,110 +386,73 @@ int spawn_win32_start_bash(const char *command, char *const envp[], pid_t *pid, 
     if (started != 0) {
         CloseHandle(read_handle);
         errno = ENOENT;
-        return -1;
+        return NULL;
     }
 
-    int fd = _open_osfhandle((intptr_t)read_handle, _O_RDONLY | _O_BINARY);
+    int fd = _open_osfhandle((intptr_t)read_handle, _O_RDONLY | _O_BINARY | _O_NOINHERIT);
     if (fd < 0) {
         CloseHandle(read_handle);
         TerminateJobObject(child.job, 1);
         (void)child_finish(&child, INFINITE, 0);
-        return -1;
+        return NULL;
     }
-    child_publish(&child);
-    *pid = (pid_t)child.process_info.dwProcessId;
     *output_fd = fd;
-    return 0;
+    return process_from_child(&child);
 }
 
-void spawn_win32_terminate(pid_t pid)
+void spawn_process_terminate(struct spawn_process *process, int signal_number)
 {
-    AcquireSRWLockShared(&child_lock);
-    struct child_record *record = children;
-    while (record && record->pid != pid)
-        record = record->next;
-    if (record)
-        TerminateJobObject(record->job, 1);
-    ReleaseSRWLockShared(&child_lock);
+    (void)signal_number;
+    if (!process)
+        return;
+    int root_running = WaitForSingleObject(process->process, 0) == WAIT_TIMEOUT;
+    if (TerminateJobObject(process->job, 1) && root_running)
+        process->forced = 1;
 }
 
-int spawn_win32_exit_seen(pid_t pid, int *exit_seen)
+int spawn_process_exit_seen(struct spawn_process *process, int *exit_seen)
 {
-    AcquireSRWLockShared(&child_lock);
-    struct child_record *record = children;
-    while (record && record->pid != pid)
-        record = record->next;
-    if (!record) {
-        ReleaseSRWLockShared(&child_lock);
-        errno = ECHILD;
+    if (!process || !exit_seen) {
+        errno = EINVAL;
         return -1;
     }
-    if (WaitForSingleObject(record->process, 0) == WAIT_OBJECT_0)
+    DWORD wait = WaitForSingleObject(process->process, 0);
+    if (wait == WAIT_OBJECT_0) {
         *exit_seen = 1;
-    ReleaseSRWLockShared(&child_lock);
-    return 0;
-}
-
-pid_t spawn_win32_waitpid(pid_t pid, int *status, int options)
-{
-    AcquireSRWLockShared(&child_lock);
-    struct child_record *found = children;
-    while (found && found->pid != pid)
-        found = found->next;
-    if (!found) {
-        ReleaseSRWLockShared(&child_lock);
-        errno = ECHILD;
-        return -1;
+        return 0;
     }
-    DWORD wait = WaitForSingleObject(found->process, options & WNOHANG ? 0 : INFINITE);
-    ReleaseSRWLockShared(&child_lock);
     if (wait == WAIT_TIMEOUT)
         return 0;
-    if (wait != WAIT_OBJECT_0)
-        return -1;
+    errno = EIO;
+    return -1;
+}
 
-    struct child_record *record = child_take(pid);
-    if (!record) {
-        errno = ECHILD;
+int spawn_process_wait(struct spawn_process *process, struct spawn_status *status)
+{
+    if (!process || !status) {
+        errno = EINVAL;
         return -1;
     }
+    DWORD wait = WaitForSingleObject(process->process, INFINITE);
     DWORD exit_code = 1;
-    GetExitCodeProcess(record->process, &exit_code);
-    if (status)
-        *status = (int)(exit_code & 0xff);
-    CloseHandle(record->process);
-    CloseHandle(record->job);
-    free(record);
-    return pid;
+    if (wait == WAIT_OBJECT_0)
+        GetExitCodeProcess(process->process, &exit_code);
+    if (process->forced)
+        *status = (struct spawn_status){.end = SPAWN_END_FORCED};
+    else
+        *status = (struct spawn_status){.end = SPAWN_END_EXITED, .code = (int)(exit_code & 0xff)};
+    CloseHandle(process->process);
+    CloseHandle(process->job);
+    free(process);
+    if (wait == WAIT_OBJECT_0)
+        return 0;
+    errno = EIO;
+    return -1;
 }
 
 char *spawn_shell_cmd_force_utf8(char *shell_cmd)
 {
     return shell_cmd;
-}
-
-void spawn_parent_ignore_signals(struct spawn_signal_state *state)
-{
-    memset(state, 0, sizeof(*state));
-}
-
-void spawn_parent_restore_signals(const struct spawn_signal_state *state)
-{
-    (void)state;
-}
-
-void spawn_child_reset_signals(void)
-{
-}
-
-void spawn_child_redirect_stdio_to_null(void)
-{
-}
-
-void spawn_child_die_with_parent(pid_t parent_pid, int signal_number)
-{
-    (void)parent_pid;
-    (void)signal_number;
 }
 
 int spawn_shell_wait(const char *shell_cmd)
@@ -565,7 +512,7 @@ static int pipe_open(struct spawn_pipe *result, const char *shell_cmd, enum spaw
     }
 
     int flags = mode == SPAWN_PIPE_READ ? _O_RDONLY : _O_WRONLY;
-    int fd = _open_osfhandle((intptr_t)parent_handle, flags | _O_BINARY);
+    int fd = _open_osfhandle((intptr_t)parent_handle, flags | _O_BINARY | _O_NOINHERIT);
     FILE *stream = fd >= 0 ? _fdopen(fd, mode == SPAWN_PIPE_READ ? "rb" : "wb") : NULL;
     if (!stream) {
         if (fd >= 0)
@@ -576,9 +523,8 @@ static int pipe_open(struct spawn_pipe *result, const char *shell_cmd, enum spaw
         (void)child_finish(&child, INFINITE, 0);
         return -1;
     }
-    child_publish(&child);
     result->stream = stream;
-    result->pid = (pid_t)child.process_info.dwProcessId;
+    result->process = process_from_child(&child);
     return 0;
 }
 
@@ -598,46 +544,12 @@ int spawn_pipe_close(struct spawn_pipe *pipe)
         return 0;
     fclose(pipe->stream);
     pipe->stream = NULL;
-    struct child_record *record = child_take(pipe->pid);
-    pipe->pid = 0;
-    if (!record)
+    struct spawn_status status;
+    struct spawn_process *process = pipe->process;
+    pipe->process = NULL;
+    if (spawn_process_wait(process, &status) < 0)
         return -1;
-    struct child_start child = {.process_info = {.hProcess = record->process}, .job = record->job};
-    free(record);
-    return child_finish(&child, INFINITE, 0);
-}
-
-int spawn_wait_child(pid_t pid)
-{
-    struct child_record *record = child_take(pid);
-    if (!record)
-        return -1;
-    struct child_start child = {.process_info = {.hProcess = record->process}, .job = record->job};
-    free(record);
-    return child_finish(&child, INFINITE, 0);
-}
-
-int spawn_wait_child_timeout(pid_t pid, int timeout_ms)
-{
-    struct child_record *record = child_take(pid);
-    if (!record)
-        return -1;
-    struct child_start child = {.process_info = {.hProcess = record->process}, .job = record->job};
-    free(record);
-    return child_finish(&child, timeout_ms < 0 ? INFINITE : (DWORD)timeout_ms, 1);
-}
-
-int spawn_reap_if_exited(pid_t pid)
-{
-    AcquireSRWLockShared(&child_lock);
-    struct child_record *record = children;
-    while (record && record->pid != pid)
-        record = record->next;
-    int exited = record && WaitForSingleObject(record->process, 0) == WAIT_OBJECT_0;
-    ReleaseSRWLockShared(&child_lock);
-    if (exited)
-        (void)spawn_wait_child(pid);
-    return exited;
+    return status.end == SPAWN_END_EXITED ? status.code : 1;
 }
 
 char *spawn_capture_stdout(const char *const *argv, size_t max_bytes, int timeout_ms,

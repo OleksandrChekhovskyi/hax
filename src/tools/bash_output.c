@@ -7,9 +7,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
-/* The wait macros are provided by <sys/wait.h> per POSIX; glibc also leaks
- * them through <stdlib.h>, so the include cleaner cannot attribute them. */
-#include <sys/wait.h> // IWYU pragma: keep
 
 #include "util.h"
 #include "system/tempfiles.h"
@@ -300,7 +297,7 @@ int bash_read_tail_slice(int fd, off_t range_start, size_t range_bytes, size_t c
 }
 
 static void append_status(struct buf *out, enum bash_stop_reason reason, long timeout_ms,
-                          int wait_status)
+                          const struct spawn_status *status)
 {
     if (reason == BASH_STOP_INTERRUPT) {
         buf_append_str(out, "\n[interrupted]");
@@ -314,17 +311,16 @@ static void append_status(struct buf *out, enum bash_stop_reason reason, long ti
         buf_append_str(out, footer);
         return;
     }
-    if (WIFEXITED(wait_status)) {
-        int code = WEXITSTATUS(wait_status);
-        if (code != 0) {
-            char footer[64];
-            snprintf(footer, sizeof(footer), "\n[exit %d]", code);
-            buf_append_str(out, footer);
-        }
-    } else if (WIFSIGNALED(wait_status)) {
+    if (status->end == SPAWN_END_EXITED && status->code != 0) {
         char footer[64];
-        snprintf(footer, sizeof(footer), "\n[signal %d]", WTERMSIG(wait_status));
+        snprintf(footer, sizeof(footer), "\n[exit %d]", status->code);
         buf_append_str(out, footer);
+    } else if (status->end == SPAWN_END_SIGNALED) {
+        char footer[64];
+        snprintf(footer, sizeof(footer), "\n[signal %d]", status->code);
+        buf_append_str(out, footer);
+    } else if (status->end == SPAWN_END_FORCED && reason == BASH_STOP_NONE) {
+        buf_append_str(out, "\n[terminated]");
     }
     if (reason == BASH_STOP_ORPHANED) {
         char formatted_timeout[32];
@@ -339,7 +335,8 @@ static void append_status(struct buf *out, enum bash_stop_reason reason, long ti
 }
 
 static void append_run_suffix(struct buf *out, size_t total_bytes, int binary, int body_present,
-                              enum bash_stop_reason reason, long timeout_ms, int wait_status)
+                              enum bash_stop_reason reason, long timeout_ms,
+                              const struct spawn_status *status)
 {
     size_t before = out->len;
     if (binary) {
@@ -349,7 +346,7 @@ static void append_run_suffix(struct buf *out, size_t total_bytes, int binary, i
         snprintf(marker, sizeof(marker), "[binary output suppressed: %s]", total_size);
         buf_append_str(out, marker);
     }
-    append_status(out, reason, timeout_ms, wait_status);
+    append_status(out, reason, timeout_ms, status);
     if (out->len == before && !body_present)
         buf_append_str(out, "(no output)");
 }
@@ -509,22 +506,23 @@ void bash_output_reattach_file(struct bash_output *output, int fd, char *path)
 }
 
 char *bash_output_format_suffix(size_t total_bytes, int binary, int body_present,
-                                enum bash_stop_reason reason, long timeout_ms, int wait_status)
+                                enum bash_stop_reason reason, long timeout_ms,
+                                const struct spawn_status *status)
 {
     struct buf suffix;
     buf_init(&suffix);
-    append_run_suffix(&suffix, total_bytes, binary, body_present, reason, timeout_ms, wait_status);
+    append_run_suffix(&suffix, total_bytes, binary, body_present, reason, timeout_ms, status);
     return buf_steal(&suffix);
 }
 
 char *bash_output_finish(struct bash_output *output, int binary, enum bash_stop_reason reason,
-                         long timeout_ms, int wait_status)
+                         long timeout_ms, const struct spawn_status *status)
 {
     struct buf result;
     buf_init(&result);
     build_model_body(output, binary, &result);
     append_run_suffix(&result, output->total_bytes, binary, result.len > 0, reason, timeout_ms,
-                      wait_status);
+                      status);
     return buf_steal(&result);
 }
 

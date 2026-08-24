@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_WIN32_SYS_IOCTL_H
-#define HAX_WIN32_SYS_IOCTL_H
+#ifndef HAX_SYSTEM_WIN32_INCLUDE_SYS_IOCTL_H
+#define HAX_SYSTEM_WIN32_INCLUDE_SYS_IOCTL_H
 
 #define TIOCGWINSZ 1
 struct winsize {
@@ -11,4 +11,4 @@ struct winsize {
 };
 int ioctl(int fd, int request, ...);
 
-#endif /* HAX_WIN32_SYS_IOCTL_H */
+#endif /* HAX_SYSTEM_WIN32_INCLUDE_SYS_IOCTL_H */

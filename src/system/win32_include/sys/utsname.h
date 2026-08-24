@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_WIN32_SYS_UTSNAME_H
-#define HAX_WIN32_SYS_UTSNAME_H
+#ifndef HAX_SYSTEM_WIN32_INCLUDE_SYS_UTSNAME_H
+#define HAX_SYSTEM_WIN32_INCLUDE_SYS_UTSNAME_H
 
 struct utsname {
     char sysname[64];
@@ -11,4 +11,4 @@ struct utsname {
 };
 int uname(struct utsname *name);
 
-#endif /* HAX_WIN32_SYS_UTSNAME_H */
+#endif /* HAX_SYSTEM_WIN32_INCLUDE_SYS_UTSNAME_H */

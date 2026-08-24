@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_WIN32_PTHREAD_H
-#define HAX_WIN32_PTHREAD_H
+#ifndef HAX_SYSTEM_WIN32_INCLUDE_PTHREAD_H
+#define HAX_SYSTEM_WIN32_INCLUDE_PTHREAD_H
 
 #include <errno.h>
 #include <process.h>
@@ -135,4 +135,4 @@ static inline int pthread_sigmask(int how, const void *set, void *old_set)
     return 0;
 }
 
-#endif /* HAX_WIN32_PTHREAD_H */
+#endif /* HAX_SYSTEM_WIN32_INCLUDE_PTHREAD_H */

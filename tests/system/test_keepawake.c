@@ -15,10 +15,12 @@
 
 static void expect_no_children(void)
 {
+#ifndef _WIN32
     int status;
     errno = 0;
     pid_t child = waitpid(-1, &status, WNOHANG);
     EXPECT(child == -1 && errno == ECHILD);
+#endif
 }
 
 static void test_release_without_acquire(void)
@@ -51,6 +53,7 @@ static void test_disabled_is_noop(void)
     config_set_override("keep_awake", "1");
 }
 
+#ifndef _WIN32
 static void test_sleep_not_resolved_via_path(void)
 {
     char *dir = t_tempdir();
@@ -95,6 +98,7 @@ out:
     free(marker);
     free(fake_sleep);
 }
+#endif
 
 int main(void)
 {
@@ -103,6 +107,8 @@ int main(void)
     test_acquire_release_cycle();
     test_double_acquire();
     test_disabled_is_noop();
+#ifndef _WIN32
     test_sleep_not_resolved_via_path();
+#endif
     T_REPORT();
 }

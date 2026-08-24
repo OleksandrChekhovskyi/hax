@@ -56,7 +56,9 @@ static void test_store_mode_0600(void)
     if (path) {
         struct stat file_stat;
         EXPECT(stat(path, &file_stat) == 0);
+#ifndef _WIN32
         EXPECT((file_stat.st_mode & 0777) == 0600);
+#endif
         free(path);
     }
 }

@@ -1,10 +1,7 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_WIN32_COMPAT_H
-#define HAX_WIN32_COMPAT_H
+#ifndef HAX_SYSTEM_WIN32_INCLUDE_HAX_WIN32_H
+#define HAX_SYSTEM_WIN32_INCLUDE_HAX_WIN32_H
 
-#ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0a00
-#endif
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -27,7 +24,7 @@
 #include <time.h>
 #include <sys/stat.h>
 
-#include "unistd.h"
+#include "system/win32_include/unistd.h"
 
 #ifndef PATH_MAX
 #define PATH_MAX 32768
@@ -148,7 +145,6 @@ static inline int sigprocmask(int how, const sigset_t *set, sigset_t *old_set)
 
 int clock_gettime(int clock_id, struct timespec *time_value);
 int nanosleep(const struct timespec *request, struct timespec *remaining);
-int hax_kill(pid_t pid, int signal_number);
 ssize_t hax_getline(char **line, size_t *capacity, FILE *stream);
 struct tm *hax_gmtime_r(const time_t *time_value, struct tm *result);
 struct tm *hax_localtime_r(const time_t *time_value, struct tm *result);
@@ -197,7 +193,6 @@ char *hax_mkdtemp(char *path_template);
 #define chdir               hax_chdir
 #define chmod               hax_chmod
 #define getcwd              hax_getcwd
-#define kill                hax_kill
 #define raise               hax_raise
 #define getline             hax_getline
 #define gmtime_r            hax_gmtime_r
@@ -226,4 +221,4 @@ char *hax_mkdtemp(char *path_template);
 #define FD_CLOEXEC 1
 #endif
 
-#endif /* HAX_WIN32_COMPAT_H */
+#endif /* HAX_SYSTEM_WIN32_INCLUDE_HAX_WIN32_H */

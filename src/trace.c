@@ -68,7 +68,11 @@ void trace_init(void)
         hax_warn("HAX_TRACE: cannot open '%s' for writing", path);
         goto out_unlock;
     }
+#ifdef _WIN32
+    setvbuf(trace_fp, NULL, _IONBF, 0);
+#else
     setvbuf(trace_fp, NULL, _IOLBF, 0);
+#endif
     atexit(trace_close_atexit);
 
 out_unlock:

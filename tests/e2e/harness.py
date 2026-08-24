@@ -51,7 +51,9 @@ def hermetic_env(home: Path) -> dict[str, str]:
     return env
 
 
-def run_oneshot(prompt: str, mock_script: str) -> Result:
+def run_oneshot(
+    prompt: str, mock_script: str, env_overrides: dict[str, str] | None = None
+) -> Result:
     """Run `hax -p <prompt>` against scripts/mock/<mock_script> in a scratch cwd."""
     home = scratch_dir()
     workdir = home / "work"
@@ -59,6 +61,8 @@ def run_oneshot(prompt: str, mock_script: str) -> Result:
     env = hermetic_env(home)
     env["HAX_PROVIDER"] = "mock"
     env["HAX_MOCK_SCRIPT"] = str(REPO_ROOT / "scripts" / "mock" / mock_script)
+    if env_overrides:
+        env.update(env_overrides)
     # Resolve before the cwd switch so a relative HAX_BIN keeps meaning what
     # the caller wrote; decode as UTF-8 regardless of the host locale.
     binary = Path(os.environ.get("HAX_BIN", str(REPO_ROOT / "build" / "hax"))).resolve()

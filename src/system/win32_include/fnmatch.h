@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_WIN32_FNMATCH_H
-#define HAX_WIN32_FNMATCH_H
+#ifndef HAX_SYSTEM_WIN32_INCLUDE_FNMATCH_H
+#define HAX_SYSTEM_WIN32_INCLUDE_FNMATCH_H
 
 #define FNM_NOMATCH 1
 int fnmatch(const char *pattern, const char *text, int flags);
 
-#endif /* HAX_WIN32_FNMATCH_H */
+#endif /* HAX_SYSTEM_WIN32_INCLUDE_FNMATCH_H */

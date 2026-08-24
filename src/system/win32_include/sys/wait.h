@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_WIN32_SYS_WAIT_H
-#define HAX_WIN32_SYS_WAIT_H
+#ifndef HAX_SYSTEM_WIN32_INCLUDE_SYS_WAIT_H
+#define HAX_SYSTEM_WIN32_INCLUDE_SYS_WAIT_H
 
 #include <errno.h>
 #include <unistd.h>
@@ -11,6 +11,4 @@
 #define WIFSIGNALED(status) ((status) >= 256)
 #define WTERMSIG(status)    ((status) - 256)
 
-pid_t waitpid(pid_t pid, int *status, int options);
-
-#endif /* HAX_WIN32_SYS_WAIT_H */
+#endif /* HAX_SYSTEM_WIN32_INCLUDE_SYS_WAIT_H */

@@ -78,7 +78,7 @@ static int t_skips = 0;
 static char **t_tmpdirs;
 static size_t t_n_tmpdirs;
 static size_t t_tmpdir_first; /* first entry owned by this process */
-static pid_t t_tmpdir_owner;
+static int t_tmpdir_owner;
 
 static inline void t_tempdir_cleanup(void)
 {

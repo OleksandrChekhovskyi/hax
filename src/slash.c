@@ -616,6 +616,8 @@ static void run_tasks(const struct command_call *call)
         char elapsed_label[16];
         if (tasks[i].running)
             snprintf(state_label, sizeof(state_label), "running");
+        else if (tasks[i].forced)
+            snprintf(state_label, sizeof(state_label), "forced");
         else if (tasks[i].term_signal)
             snprintf(state_label, sizeof(state_label), "signal %d", tasks[i].term_signal);
         else

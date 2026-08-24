@@ -577,7 +577,11 @@ struct transcript_log *transcript_log_open(const char *system_prompt, const stru
     }
 
     /* Make completed lines immediately visible to readers such as tail -f. */
+#ifdef _WIN32
+    setvbuf(stream, NULL, _IONBF, 0);
+#else
     setvbuf(stream, NULL, _IOLBF, 0);
+#endif
     struct transcript_log *log = xmalloc(sizeof(*log));
     log->stream = stream;
     log->path = xstrdup(path);
@@ -612,7 +616,11 @@ void transcript_log_reset(struct transcript_log *log, const char *system_prompt,
 
     log->stream = stream;
     /* Stream buffering does not portably survive freopen. */
+#ifdef _WIN32
+    setvbuf(stream, NULL, _IONBF, 0);
+#else
     setvbuf(stream, NULL, _IOLBF, 0);
+#endif
     log->items_written = 0;
     log->turn_number = 0;
     transcript_render_header(stream, TRANSCRIPT_RENDER_PLAIN, system_prompt, tools, n_tools);

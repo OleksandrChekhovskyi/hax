@@ -338,7 +338,9 @@ static void test_session_file_permissions(void)
 
     struct stat st;
     EXPECT(stat(path, &st) == 0);
+#ifndef _WIN32
     EXPECT((st.st_mode & 0077) == 0);
+#endif
 
     free(path);
 }
@@ -767,6 +769,7 @@ static void test_read_meta_failure_initializes_output(void)
     EXPECT(meta.provider == NULL && meta.id == NULL);
 }
 
+#ifndef _WIN32
 static void test_session_readers_reject_fifo(void)
 {
     char *path = xasprintf("%s/session.jsonl", t_tempdir());
@@ -785,6 +788,7 @@ static void test_session_readers_reject_fifo(void)
     unlink(path);
     free(path);
 }
+#endif
 
 static void test_load_enforces_image_count_cap(void)
 {
@@ -883,7 +887,9 @@ int main(void)
     test_discarded_selection_stays_out_of_log();
     test_truncate_restates_live_selection();
     test_read_meta_failure_initializes_output();
+#ifndef _WIN32
     test_session_readers_reject_fifo();
+#endif
     test_load_enforces_image_count_cap();
     test_load_budgets_images_from_compaction_seed();
     T_REPORT();

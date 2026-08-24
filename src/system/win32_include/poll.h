@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_WIN32_POLL_H
-#define HAX_WIN32_POLL_H
+#ifndef HAX_SYSTEM_WIN32_INCLUDE_POLL_H
+#define HAX_SYSTEM_WIN32_INCLUDE_POLL_H
 
 #include <windows.h>
 
@@ -19,4 +19,4 @@ struct pollfd {
 typedef unsigned long nfds_t;
 int poll(struct pollfd *fds, nfds_t count, int timeout_ms);
 
-#endif /* HAX_WIN32_POLL_H */
+#endif /* HAX_SYSTEM_WIN32_INCLUDE_POLL_H */

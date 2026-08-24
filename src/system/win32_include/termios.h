@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_WIN32_TERMIOS_H
-#define HAX_WIN32_TERMIOS_H
+#ifndef HAX_SYSTEM_WIN32_INCLUDE_TERMIOS_H
+#define HAX_SYSTEM_WIN32_INCLUDE_TERMIOS_H
 
 #include <windows.h>
 
@@ -35,4 +35,4 @@ int tcgetattr(int fd, struct termios *attributes);
 int tcsetattr(int fd, int action, const struct termios *attributes);
 int tcflush(int fd, int queue);
 
-#endif /* HAX_WIN32_TERMIOS_H */
+#endif /* HAX_SYSTEM_WIN32_INCLUDE_TERMIOS_H */

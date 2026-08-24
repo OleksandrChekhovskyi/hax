@@ -19,6 +19,12 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   return to the retry prompt instead of hanging and restore the original console mode on exit.
 - Windows preserves Quick Edit selection and host scrolling while hax is running, and keeps VT
   output enabled across child launches so cursor controls cannot leak around spinner updates.
+- Windows trace and transcript files now open correctly, task output uses race-free positional
+  reads, and console polling preserves navigation and function keys.
+- Windows file opens now enforce no-follow, directory, nonblocking-device, non-inheritance, and
+  private-ACL guarantees instead of silently discarding POSIX flags and modes.
+- Windows Bash commands and background tasks now use opaque process objects with Job Object tree
+  termination and normalized exit states instead of a process-wide pid/wait-status registry.
 
 ## [0.4.0] - 2026-08-22
 

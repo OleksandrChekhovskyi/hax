@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <sys/types.h>
 
+#include "system/spawn.h"
+
 struct buf;
 
 #define BASH_OUTPUT_DRAIN_LIMIT (16L * 1024 * 1024)
@@ -34,11 +36,12 @@ void bash_output_reattach_file(struct bash_output *output, int fd, char *path);
 
 /* Return an owned sanitized result, including truncation and status markers. */
 char *bash_output_finish(struct bash_output *output, int binary, enum bash_stop_reason reason,
-                         long timeout_ms, int wait_status);
+                         long timeout_ms, const struct spawn_status *status);
 
 /* Return an owned status suffix for output already sent to the live display. */
 char *bash_output_format_suffix(size_t total_bytes, int binary, int body_present,
-                                enum bash_stop_reason reason, long timeout_ms, int wait_status);
+                                enum bash_stop_reason reason, long timeout_ms,
+                                const struct spawn_status *status);
 
 /* Compact human size: "12B", "1.2K", "40K", "1.5M". */
 void bash_format_byte_size(char *buf, size_t buf_size, size_t bytes);

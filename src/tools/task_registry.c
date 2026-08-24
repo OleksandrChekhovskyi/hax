@@ -11,13 +11,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/types.h>
-#include <sys/wait.h>
 
 #include "config.h"
 #include "tool.h"
 #include "util.h"
 #include "system/bg_job.h"
+#include "system/spawn.h"
 #include "terminal/interrupt.h"
 #include "text/utf8_sanitize.h"
 #include "text/width.h"
@@ -36,7 +35,7 @@ struct task {
     struct task *next;
     char id[TASK_NAME_MAX + 1];
     char *command;
-    pid_t pid;
+    struct spawn_process *process;
     int pipe_fd;  /* -1 once the drainer is joined */
     int spool_fd; /* -1 when the spool could not be created */
     char *spool_path;
@@ -55,9 +54,9 @@ struct task {
 
     /* Main thread only. */
     int exit_seen;      /* shell exit observed unreaped; the zombie keeps the group signalable */
-    int done;           /* shell reaped after pipe EOF; wait_status valid; no further signaling */
+    int done;           /* shell reaped after pipe EOF; status valid; no further termination */
     int orphans_killed; /* descendants outlived the shell holding the pipe and were killed */
-    int wait_status;
+    struct spawn_status status;
     long kill_deadline_ms; /* nonzero after SIGTERM until escalation */
     /* Completion is announced once (notified) but the task stays collectable until a wait
      * delivers its remaining output (collected); only then is it forgotten. */
@@ -134,7 +133,7 @@ static void task_drain(struct bg_job *job, void *arg)
         /* Stop a runaway producer here rather than on the main thread's next poll, which may
          * be minutes away. Safe: the reap is gated on the EOF this thread has not set yet. */
         if (just_overflowed)
-            bash_signal_process_tree(t->pid, SIGKILL);
+            spawn_process_terminate(t->process, SIGKILL);
 
         /* write(2) outside the lock: the fd is drainer-owned for writing, and readers use
          * pread. Failure and progress land back under the lock. */
@@ -157,8 +156,8 @@ static void task_drain(struct bg_job *job, void *arg)
 /* Advance main-thread state: observe a shell exit, escalate an expired SIGTERM, and finish the
  * task. The task is done only when the exited shell's pipe also hit EOF, so group members that
  * outlive the shell (a slow TERM handler's children, orphans of a raced adoption) stay watched
- * and killable. Never signals after the reap — the pid may be recycled; deferring the reap
- * until EOF is what keeps the group signalable that long. */
+ * and killable. Never terminates after the consuming wait; deferring that wait until EOF keeps
+ * the owned process tree addressable for this whole transition. */
 static void task_poll(struct task *t)
 {
     long now = monotonic_ms();
@@ -166,17 +165,17 @@ static void task_poll(struct task *t)
     task_snapshot(t, &snap);
 
     if (!t->exit_seen) {
-        if (bash_process_exit_seen(t->pid, &t->exit_seen) < 0 && errno == ECHILD)
+        if (spawn_process_exit_seen(t->process, &t->exit_seen) < 0 && errno == ECHILD)
             t->exit_seen = 1;
         /* Orphans holding the pipe past the shell's exit are killed, matching the launch
          * path's policy; an armed TERM grace defers to the escalation instead. */
         if (t->exit_seen && !snap.eof && !t->kill_deadline_ms) {
-            bash_signal_process_tree(t->pid, SIGKILL);
+            spawn_process_terminate(t->process, SIGKILL);
             t->orphans_killed = 1;
         }
     }
     if (!t->done && t->kill_deadline_ms && now >= t->kill_deadline_ms) {
-        bash_signal_process_tree(t->pid, SIGKILL);
+        spawn_process_terminate(t->process, SIGKILL);
         t->kill_deadline_ms = 0;
     }
     if (t->drainer && snap.eof) {
@@ -191,14 +190,12 @@ static void task_poll(struct task *t)
         if (t->kill_deadline_ms)
             return;
         /* Anything still in the group closed its output and is untrackable; kill it while
-         * the unreaped zombie still reserves the group. Usually a no-op on the zombie. */
-        bash_signal_process_tree(t->pid, SIGKILL);
-        bash_shell_pgid_retract(t->pid);
-        int status = 0;
-        pid_t reaped;
-        while ((reaped = waitpid(t->pid, &status, 0)) < 0 && errno == EINTR)
-            ;
-        t->wait_status = reaped == t->pid ? status : 0;
+         * the process object still owns the tree. Usually a no-op on the exited root. */
+        spawn_process_terminate(t->process, SIGKILL);
+        bash_live_process_retract(t->process);
+        if (spawn_process_wait(t->process, &t->status) < 0)
+            t->status = (struct spawn_status){.end = SPAWN_END_FORCED};
+        t->process = NULL;
         t->done = 1;
         /* The reap may run long after the exit (the next prompt, minutes later); the
          * drainer's EOF stamp is the closest observation of the real finish. */
@@ -291,9 +288,9 @@ char *task_name_error(const char *name)
     return NULL;
 }
 
-const char *task_adopt(pid_t pid, int pipe_fd, const char *command, const char *name,
-                       long started_ms, int spool_fd, char *spool_path, size_t spooled_bytes,
-                       int binary, int pipe_eof)
+const char *task_adopt(struct spawn_process *process, int pipe_fd, const char *command,
+                       const char *name, long started_ms, int spool_fd, char *spool_path,
+                       size_t spooled_bytes, int binary, int pipe_eof)
 {
     /* The cap also keeps the fatal-cleanup pgid table from ever filling. */
     if (task_running_count() >= (size_t)config_int("task.max_running"))
@@ -306,7 +303,7 @@ const char *task_adopt(pid_t pid, int pipe_fd, const char *command, const char *
         snprintf(t->id, sizeof(t->id), "t%d", next_task_number);
     next_task_number++;
     t->command = xstrdup(command ? command : "");
-    t->pid = pid;
+    t->process = process;
     t->pipe_fd = pipe_fd;
     t->spool_fd = spool_fd;
     t->spool_path = spool_path;
@@ -317,10 +314,13 @@ const char *task_adopt(pid_t pid, int pipe_fd, const char *command, const char *
     t->eof = pipe_eof;
     pthread_mutex_init(&t->lock, NULL);
 
-    /* Task descriptors outlive this tool call, so later commands must not inherit them. */
+#ifndef _WIN32
+    /* Task descriptors outlive this tool call, so later commands must not inherit them. Windows
+     * creates both descriptors non-inheritable. */
     fcntl(pipe_fd, F_SETFD, FD_CLOEXEC);
     if (spool_fd >= 0)
         fcntl(spool_fd, F_SETFD, FD_CLOEXEC);
+#endif
 
     if (pipe_eof) {
         close(pipe_fd);
@@ -357,12 +357,12 @@ static void append_status_phrase(struct buf *out, struct task *t)
     char phrase[64];
     if (!t->done)
         snprintf(phrase, sizeof(phrase), "still running (%s)", elapsed);
-    else if (WIFSIGNALED(t->wait_status))
-        snprintf(phrase, sizeof(phrase), "killed (signal %d) after %s", WTERMSIG(t->wait_status),
-                 elapsed);
+    else if (t->status.end == SPAWN_END_SIGNALED)
+        snprintf(phrase, sizeof(phrase), "killed (signal %d) after %s", t->status.code, elapsed);
+    else if (t->status.end == SPAWN_END_FORCED)
+        snprintf(phrase, sizeof(phrase), "killed (forced) after %s", elapsed);
     else
-        snprintf(phrase, sizeof(phrase), "finished (exit %d) after %s",
-                 WIFEXITED(t->wait_status) ? WEXITSTATUS(t->wait_status) : -1, elapsed);
+        snprintf(phrase, sizeof(phrase), "finished (exit %d) after %s", t->status.code, elapsed);
     buf_append_str(out, phrase);
     if (t->orphans_killed)
         buf_append_str(out, "; orphaned processes killed");
@@ -590,13 +590,18 @@ static long deadline_after(long now_ms, long duration_ms)
  * or SIGKILL outright when the grace is zero. */
 static void signal_task_stop(struct task *t, long now)
 {
+#ifdef _WIN32
+    (void)now;
+    spawn_process_terminate(t->process, SIGKILL);
+#else
     long grace_ms = config_duration_ms("bash.timeout_grace");
     if (grace_ms > 0) {
-        bash_signal_process_tree(t->pid, SIGTERM);
+        spawn_process_terminate(t->process, SIGTERM);
         t->kill_deadline_ms = deadline_after(now, grace_ms);
     } else {
-        bash_signal_process_tree(t->pid, SIGKILL);
+        spawn_process_terminate(t->process, SIGKILL);
     }
+#endif
 }
 
 /* Forward the not-yet-displayed spooled bytes to the live display, exactly like a foreground
@@ -838,8 +843,9 @@ size_t task_list(struct task_info **rows_out)
         rows[i].command = t->command;
         rows[i].spool_path = snap.spool_write_failed ? NULL : t->spool_path;
         rows[i].running = !t->done;
-        rows[i].exit_code = t->done && WIFEXITED(t->wait_status) ? WEXITSTATUS(t->wait_status) : 0;
-        rows[i].term_signal = t->done && WIFSIGNALED(t->wait_status) ? WTERMSIG(t->wait_status) : 0;
+        rows[i].exit_code = t->done && t->status.end == SPAWN_END_EXITED ? t->status.code : 0;
+        rows[i].term_signal = t->done && t->status.end == SPAWN_END_SIGNALED ? t->status.code : 0;
+        rows[i].forced = t->done && t->status.end == SPAWN_END_FORCED;
         rows[i].elapsed_ms = (t->done ? t->finished_ms : monotonic_ms()) - t->started_ms;
         rows[i].total_bytes = snap.total_bytes;
         i++;
@@ -900,18 +906,19 @@ void task_registry_shutdown(void)
     while (tasks) {
         struct task *t = tasks;
         tasks = t->next;
-        /* Stop the drainer — the only other thread that may signal — before the reap makes
-         * signaling this pid unsafe. */
+        /* Stop the drainer — the only other thread that may terminate — before consuming the
+         * process object. */
         if (t->drainer) {
             bg_job_cancel(t->drainer);
             bg_job_join(t->drainer);
             t->drainer = NULL;
         }
         if (!t->done) {
-            bash_signal_process_tree(t->pid, SIGKILL);
-            bash_shell_pgid_retract(t->pid);
-            while (waitpid(t->pid, &t->wait_status, 0) < 0 && errno == EINTR)
-                ;
+            spawn_process_terminate(t->process, SIGKILL);
+            bash_live_process_retract(t->process);
+            if (spawn_process_wait(t->process, &t->status) < 0)
+                t->status = (struct spawn_status){.end = SPAWN_END_FORCED};
+            t->process = NULL;
             t->done = 1;
         }
         task_free(t);

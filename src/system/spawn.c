@@ -109,6 +109,106 @@ void spawn_child_die_with_parent(pid_t parent_pid, int signal_number)
 #endif
 }
 
+struct spawn_process {
+    pid_t pid;
+};
+
+static void exec_bash_child(const char *shell, const char *argv0, const char *command,
+                            char *const envp[])
+{
+    close(STDIN_FILENO);
+    (void)open("/dev/null", O_RDONLY);
+    char *const argv[] = {(char *)argv0, (char *)"-c", (char *)command, NULL};
+    execve(shell, argv, envp);
+    _exit(127);
+}
+
+struct spawn_process *spawn_process_start_bash(const char *shell, const char *argv0,
+                                               const char *command, char *const envp[],
+                                               int *output_fd)
+{
+    if (!shell || !argv0 || !command || !output_fd) {
+        errno = EINVAL;
+        return NULL;
+    }
+    int pipe_fds[2];
+    if (pipe(pipe_fds) < 0)
+        return NULL;
+
+    pid_t parent_pid = getpid();
+    pid_t pid = fork();
+    if (pid < 0) {
+        int saved_errno = errno;
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        errno = saved_errno;
+        return NULL;
+    }
+    if (pid == 0) {
+        close(pipe_fds[0]);
+        setsid();
+        spawn_child_die_with_parent(parent_pid, SIGKILL);
+        dup2(pipe_fds[1], STDOUT_FILENO);
+        dup2(pipe_fds[1], STDERR_FILENO);
+        if (pipe_fds[1] > STDERR_FILENO)
+            close(pipe_fds[1]);
+        exec_bash_child(shell, argv0, command, envp);
+    }
+
+    close(pipe_fds[1]);
+    struct spawn_process *process = xmalloc(sizeof(*process));
+    process->pid = pid;
+    *output_fd = pipe_fds[0];
+    return process;
+}
+
+void spawn_process_terminate(struct spawn_process *process, int signal_number)
+{
+    if (!process)
+        return;
+    if (kill(-process->pid, signal_number) < 0 && errno == ESRCH)
+        kill(process->pid, signal_number);
+}
+
+int spawn_process_exit_seen(struct spawn_process *process, int *exit_seen)
+{
+    if (!process || !exit_seen) {
+        errno = EINVAL;
+        return -1;
+    }
+    siginfo_t info = {0};
+    int result = waitid(P_PID, (id_t)process->pid, &info, WEXITED | WNOHANG | WNOWAIT);
+    if (result == 0 && info.si_pid == process->pid)
+        *exit_seen = 1;
+    return result;
+}
+
+int spawn_process_wait(struct spawn_process *process, struct spawn_status *status)
+{
+    if (!process || !status) {
+        errno = EINVAL;
+        return -1;
+    }
+    int wait_status;
+    while (waitpid(process->pid, &wait_status, 0) < 0) {
+        if (errno != EINTR) {
+            int saved_errno = errno;
+            free(process);
+            errno = saved_errno;
+            return -1;
+        }
+    }
+    if (WIFEXITED(wait_status)) {
+        *status = (struct spawn_status){.end = SPAWN_END_EXITED, .code = WEXITSTATUS(wait_status)};
+    } else if (WIFSIGNALED(wait_status)) {
+        *status = (struct spawn_status){.end = SPAWN_END_SIGNALED, .code = WTERMSIG(wait_status)};
+    } else {
+        *status = (struct spawn_status){.end = SPAWN_END_FORCED};
+    }
+    free(process);
+    return 0;
+}
+
 int spawn_wait_child(pid_t pid)
 {
     int status;

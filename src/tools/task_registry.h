@@ -3,9 +3,10 @@
 #define HAX_TOOLS_TASK_REGISTRY_H
 
 #include <stddef.h>
-#include <sys/types.h>
 
 #include "tool.h"
+
+struct spawn_process;
 
 /* Process-local registry of background tasks: shell commands that outlived their foreground
  * window and keep running detached from the tool call that started them. Each task owns the
@@ -33,9 +34,9 @@ char *task_name_error(const char *name);
  * exited). Returns the registry-owned id after taking ownership of the process, pipe_fd,
  * spool_fd, and spool_path, or NULL when the drainer thread cannot start — the caller then
  * retains ownership of all of them and should fall back to killing the command. */
-const char *task_adopt(pid_t pid, int pipe_fd, const char *command, const char *name,
-                       long started_ms, int spool_fd, char *spool_path, size_t spooled_bytes,
-                       int binary, int pipe_eof);
+const char *task_adopt(struct spawn_process *process, int pipe_fd, const char *command,
+                       const char *name, long started_ms, int spool_fd, char *spool_path,
+                       size_t spooled_bytes, int binary, int pipe_eof);
 
 /* Return the bare output body produced since the last report (empty when there is none),
  * advancing the delivery cursor. *marker_out receives an owned withheld-content note (binary,
@@ -77,6 +78,7 @@ struct task_info {
     int running;
     int exit_code;   /* valid when !running and the command exited */
     int term_signal; /* signal that ended it; 0 otherwise */
+    int forced;      /* process tree was terminated by the platform backend */
     long elapsed_ms;
     size_t total_bytes;
 };

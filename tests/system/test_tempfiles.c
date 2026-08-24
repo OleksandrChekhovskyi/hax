@@ -47,8 +47,13 @@ static void test_create_tracks_files_and_cleanup_removes_them(void)
     EXPECT_STR_EQ(plain_dir, image_dir);
 
     struct stat st;
+#ifdef _WIN32
+    EXPECT(stat(plain_dir, &st) == 0);
+    EXPECT(stat(plain_path, &st) == 0);
+#else
     EXPECT(stat(plain_dir, &st) == 0 && (st.st_mode & 0777) == 0700);
     EXPECT(stat(plain_path, &st) == 0 && (st.st_mode & 0777) == 0600);
+#endif
     EXPECT(write(plain_fd, "x", 1) == 1);
     close(plain_fd);
     close(image_fd);

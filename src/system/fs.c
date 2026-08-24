@@ -164,9 +164,13 @@ static int inspect_write_target(const char *path, struct write_target *target, c
         return -1;
     }
 
+#ifdef _WIN32
+    target->mode = 0666;
+#else
     mode_t mask = umask(0);
     umask(mask);
     target->mode = 0666 & ~mask;
+#endif
     return 0;
 }
 
@@ -208,11 +212,16 @@ static char *stage_write(const char *parent, const char *content, size_t content
         goto error;
     }
 
-    /* write(2) may clear set-ID bits, so restore the destination mode afterward. */
+#ifndef _WIN32
+    /* write(2) may clear set-ID bits, so restore the destination mode afterward. Windows
+     * replacement files inherit ACLs instead of emulating POSIX mode bits. */
     if (fchmod(fd, mode) < 0) {
         *error = xasprintf("chmod %s: %s", temp_path, strerror(errno));
         goto error;
     }
+#else
+    (void)mode;
+#endif
     /* Surface delayed-allocation failures before replacing the destination. */
     if (fsync(fd) < 0) {
         *error = xasprintf("fsync %s: %s", temp_path, strerror(errno));

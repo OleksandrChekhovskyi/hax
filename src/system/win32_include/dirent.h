@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_WIN32_DIRENT_H
-#define HAX_WIN32_DIRENT_H
+#ifndef HAX_SYSTEM_WIN32_INCLUDE_DIRENT_H
+#define HAX_SYSTEM_WIN32_INCLUDE_DIRENT_H
 
 #include <stdint.h>
 #include <windows.h>
@@ -23,4 +23,4 @@ int closedir(DIR *directory);
 int dirfd(DIR *directory);
 DIR *fdopendir(int fd);
 
-#endif /* HAX_WIN32_DIRENT_H */
+#endif /* HAX_SYSTEM_WIN32_INCLUDE_DIRENT_H */
