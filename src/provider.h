@@ -379,19 +379,4 @@ const char *provider_stable_id(const struct provider *provider);
  * earlier versions may carry a former provider id, so both sides are canonicalized. */
 int provider_provenance_matches(const struct item *item, const char *provider, const char *model);
 
-/* Static provider descriptor registered by src/providers/registry.c. */
-struct provider_factory {
-    const char *id; /* HAX_PROVIDER value, e.g. "codex", "llamacpp"; provider->id carries it */
-    /* Default display label when providers.<id>.display_name is not set; NULL → id. */
-    const char *display_name;
-    /* `id` allows one constructor to serve multiple config-defined provider identities; it
-     * outlives the provider, so constructors borrow it into provider->id. */
-    struct provider *(*new)(const char *id);
-    /* Prepare an immediate verdict or an owned GET request on the foreground thread. `reason` must
-     * be static. NULL means immediately available. */
-    void (*prepare_availability)(const char *id, struct provider_availability *availability);
-    /* Hidden from enumeration and automatic selection, but still resolvable explicitly by name. */
-    int internal;
-};
-
 #endif /* HAX_PROVIDER_H */

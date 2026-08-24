@@ -6,22 +6,26 @@
 #include <stddef.h>
 
 #include "provider.h"
+#include "providers/registry.h"
 #include "providers/wire.h"
 
-/* Providers defined by data rather than code.
+/* Generic, data-driven provider construction.
  *
- * A config-defined provider is a named `providers.<name>` block in config.json, optionally
- * seeded by a built-in recipe of defaults (RECIPES in config_provider.c). It speaks one wire
- * dialect and resolves its settings from its own subtree overlaid on the recipe. The API key
- * is the one value read from the environment, via a recipe- or config-declared api_key_env:
+ * Every field of a provider_def resolves as the providers.<id> config block overlaid on the
+ * def's defaults, so one constructor serves shipped and user-defined providers alike. The API
+ * key is the one value read from the environment, via a def- or config-declared api_key_env:
  * a secret belongs in the environment, not the config file. */
 
-/* The dynamic factory set: the union of recipe names and config.json `providers.*` names,
- * deduplicated — a config block matching a recipe name overlays that recipe rather than
- * adding a second entry. Heap-built once on first call and cached for the process; *n
- * receives the count. Names are not filtered against the compiled-in factories; the
- * registry does that when merging. */
-const struct provider_factory *const *config_providers(size_t *n);
+/* Build the provider described by `def` from its config-overlaid data and capability hooks.
+ * Returns NULL after reporting a user-actionable error. Construct overrides bypass this;
+ * callers normally go through provider_construct in registry.h instead. */
+struct provider *provider_def_construct(const struct provider_def *def);
+
+/* Availability for the /provider picker. A keyed (cloud) provider — one with a declared
+ * api_key_env or an inline api_key — is selectable iff that key resolves, with no network
+ * probe (fast, and a 401 would be the only extra signal). A keyless one counts its configured
+ * base_url as availability, except for defs that opt into a reachability probe. */
+void provider_def_availability(const struct provider_def *def, struct provider_availability *out);
 
 /* Field vocabulary of a providers.<name> block. The inventory is declarative only: value
  * acceptance lives in the dialect constructors, and the env-alias rows in config.c project a
@@ -30,8 +34,9 @@ enum provider_field_dialect {
     PROVIDER_FIELD_OPENAI_CHAT = 1 << 0,      /* openai-completions */
     PROVIDER_FIELD_OPENAI_RESPONSES = 1 << 1, /* openai-responses */
     PROVIDER_FIELD_ANTHROPIC = 1 << 2,        /* anthropic-messages */
-    /* Resolved by the config-provider machinery itself; compiled-in providers ignore it. */
-    PROVIDER_FIELD_CONFIG_DEFINED = 1 << 3,
+    /* Consumed by the generic constructor only when the def is unpinned: a pinned provider's
+     * identity fields are fixed, so setting them must warn rather than silently do nothing. */
+    PROVIDER_FIELD_UNPINNED = 1 << 3,
 };
 #define PROVIDER_FIELD_OPENAI (PROVIDER_FIELD_OPENAI_CHAT | PROVIDER_FIELD_OPENAI_RESPONSES)
 

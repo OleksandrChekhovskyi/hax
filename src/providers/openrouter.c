@@ -12,14 +12,9 @@
 #include "catalog.h"
 #include "config.h"
 #include "effort.h"
-#include "model_meta.h"
 #include "provider.h"
 #include "util.h"
-#include "providers/chat_body.h"
 #include "providers/config_provider.h"
-#include "providers/http_provider.h"
-#include "providers/openai_common.h"
-#include "providers/wire.h"
 #include "render/ctrl_strip.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
@@ -307,7 +302,7 @@ out:
     json_decref(root);
 }
 
-static int openrouter_query_usage(struct provider *provider)
+int openrouter_query_usage(struct provider *provider)
 {
     (void)provider;
     const char *api_key = openrouter_api_key();
@@ -370,65 +365,27 @@ out:
     return result;
 }
 
-struct provider *openrouter_provider_new(const char *id)
+char **openrouter_static_headers(void)
 {
-    provider_warn_unused_wire_fields(id, &WIRE_OPENAI_CHAT, NULL);
     const char *title = config_str("providers.openrouter.title");
     const char *referer = config_str("providers.openrouter.referer");
 
     char *title_header = (title && *title) ? xasprintf("X-Title: %s", title) : NULL;
     char *referer_header = (referer && *referer) ? xasprintf("HTTP-Referer: %s", referer) : NULL;
 
-    const char *headers[4];
-    size_t n_headers = 0;
+    const char *fixed[4];
+    size_t n_fixed = 0;
     if (title_header)
-        headers[n_headers++] = title_header;
+        fixed[n_fixed++] = title_header;
     /* Categories refine app attribution and have no effect without a referer. */
     if (referer_header) {
-        headers[n_headers++] = referer_header;
-        headers[n_headers++] = "X-OpenRouter-Categories: cli-agent";
+        fixed[n_fixed++] = referer_header;
+        fixed[n_fixed++] = "X-OpenRouter-Categories: cli-agent";
     }
-    headers[n_headers] = NULL;
+    fixed[n_fixed] = NULL;
 
-    struct http_provider_preset preset = {
-        .display_name = "openrouter",
-        .default_base_url = OPENROUTER_BASE_URL,
-        .api_key_env = "OPENROUTER_API_KEY",
-        /* Keep the key and attribution headers pinned to openrouter.ai. */
-        .config_prefix = "providers.openrouter",
-        .pin_base_url = 1,
-        .send_cache_key_default = 1,
-        /* OpenRouter requires explicit cache markers for routed Anthropic models. */
-        .cache_auto_default = 1,
-        .request_cost = 1,
-        .reasoning_format = CHAT_REASONING_NESTED,
-        .extra_headers = headers,
-        .efforts = OPENAI_EFFORT_LADDER,
-        .n_efforts = OPENAI_EFFORT_LADDER_N,
-        .parse_model = openrouter_parse_model,
-    };
-    struct provider *provider = http_provider_new_preset(&preset);
+    char **headers = string_array_concat(fixed, NULL);
     free(title_header);
     free(referer_header);
-    if (provider) {
-        provider->id = id;
-        provider->probe_model = openrouter_probe_model;
-        provider->query_usage = openrouter_query_usage;
-        model_meta_refresh(provider, config_str("model"));
-    }
-    return provider;
+    return headers;
 }
-
-static void openrouter_prepare_availability(const char *id,
-                                            struct provider_availability *availability)
-{
-    (void)id;
-    availability->available = openrouter_api_key() != NULL;
-    availability->reason = availability->available ? NULL : xstrdup("OPENROUTER_API_KEY not set");
-}
-
-const struct provider_factory PROVIDER_OPENROUTER = {
-    .id = "openrouter",
-    .new = openrouter_provider_new,
-    .prepare_availability = openrouter_prepare_availability,
-};

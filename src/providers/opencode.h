@@ -9,7 +9,7 @@
 
 struct provider;
 
-/* OpenCode gateway extras beyond the shared recipes: the Go subscription reports rate-limit
+/* OpenCode gateway extras beyond the shared defs: the Go subscription reports rate-limit
  * windows on <base_url>/usage; Zen exposes no balance or usage API yet. */
 
 /* Fill up to `max` windows from a Go /usage response, one per well-formed entry of the `usage`
@@ -21,7 +21,7 @@ size_t opencode_usage_parse(json_t *root, struct usage_window *windows, size_t m
  * with string_array_free. */
 char **opencode_usage_headers(const struct provider *provider);
 
-/* /usage backend for the opencode-go recipe. */
+/* /usage backend for the opencode-go def. */
 int opencode_go_query_usage(struct provider *provider);
 
 #endif /* HAX_PROVIDERS_OPENCODE_H */

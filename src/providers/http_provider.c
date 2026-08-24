@@ -13,14 +13,13 @@
 #include "provider.h"
 #include "util.h"
 #include "providers/anthropic_body.h"
+#include "providers/anthropic_models.h"
 #include "providers/chat_body.h"
 #include "providers/config_provider.h"
+#include "providers/openai_models.h"
 #include "providers/stream_retry.h"
 #include "providers/wire.h"
-#include "transport/api_error.h"
 #include "transport/http.h"
-
-#define MODEL_LIST_TIMEOUT_S 10
 
 #define MESSAGES_DEFAULT_VERSION    "2023-06-01"
 #define MESSAGES_DEFAULT_MAX_TOKENS 32000
@@ -40,7 +39,8 @@ struct http_provider {
     char *endpoint; /* for the default wire; other wires derive theirs per request */
     char *config_prefix;
     char *session_id;
-    const struct wire *wire; /* default; wire_rules and catalog hints override per model */
+    const struct wire *wire;          /* default; wire_rules and catalog hints override per model */
+    const struct wire *metadata_wire; /* auth scheme for /models and probe requests */
     struct wire_rule *wire_rules;
     size_t n_wire_rules;
     int catalog_wires;
@@ -54,28 +54,29 @@ struct http_provider {
     int reasoning_field_pinned; /* configured explicitly; no catalog hint may override it */
     enum chat_reasoning_format reasoning_format;
     enum anthropic_thinking_mode default_thinking_mode;
-    int allow_empty_signature;
+    int strict_signatures;
     int cache_default; /* Messages cache_control default; chat uses cache_mode */
     char **extra_headers;
     json_t *extra_body;
 
     const char *length_hint;    /* borrowed for the provider lifetime */
-    const char *const *efforts; /* borrowed for the provider lifetime */
+    const char *const *efforts; /* borrowed, or aliases owned_efforts */
+    const char **owned_efforts; /* owned array of borrowed strings; NULL when not narrowed */
     size_t n_efforts;
-    void (*parse_model)(const json_t *entry, struct model_info *out);
+    http_parse_model_cb parse_model;
 };
 
 static enum anthropic_thinking_mode resolve_thinking_mode(const struct http_provider *provider,
                                                           const char *effort)
 {
+    /* Messages has no "none" effort value: it means no reasoning, which is thinking off. */
+    if (effort && strcmp(effort, "none") == 0)
+        return ANTHROPIC_THINKING_OFF;
     const char *configured = config_scoped_str(provider->config_prefix, "thinking_mode");
     if (configured && *configured) {
-        if (strcasecmp(configured, "adaptive") == 0)
-            return ANTHROPIC_THINKING_ADAPTIVE;
-        if (strcasecmp(configured, "budget") == 0)
-            return ANTHROPIC_THINKING_BUDGET;
-        if (strcasecmp(configured, "off") == 0)
-            return ANTHROPIC_THINKING_OFF;
+        int parsed = anthropic_thinking_mode_parse(configured);
+        if (parsed >= 0)
+            return (enum anthropic_thinking_mode)parsed;
         hax_warn("unknown thinking_mode '%s' (adaptive/budget/off) — using default", configured);
     }
     /* An effort reaches a request only when the model's metadata accepts it, and on Messages
@@ -265,7 +266,7 @@ static int http_provider_stream(struct provider *base, const struct context *con
         opts.thinking_mode = resolve_thinking_mode(provider, context->effort);
         opts.thinking_budget = config_scoped_int(provider->config_prefix, "thinking_budget");
         opts.show_reasoning = config_bool("show_reasoning");
-        opts.allow_empty_signature = provider->allow_empty_signature;
+        opts.allow_empty_signature = !provider->strict_signatures;
     } else {
         /* Cache planning depends on rates populated by the startup metadata probe. Bounded: a
          * router-autoload probe can take minutes, while rate-reporting probes answer quickly,
@@ -314,6 +315,7 @@ static void http_provider_destroy(struct provider *base)
     for (size_t i = 0; i < provider->n_wire_rules; i++)
         free(provider->wire_rules[i].pattern);
     free(provider->wire_rules);
+    free(provider->owned_efforts);
     free(provider->base_url);
     free(provider->api_key);
     free(provider->name);
@@ -329,16 +331,23 @@ static void http_provider_destroy(struct provider *base)
     free(provider);
 }
 
-/* The Messages wire is pinned: its knobs, auth scheme, and metadata protocol differ, so
- * <prefix>.api cannot move a provider across wire families, only between the two OpenAI
- * protocols. */
+/* A pinned endpoint's wire is fixed outright, and the Messages wire is fixed for everyone
+ * (its knobs, auth scheme, and metadata protocol differ), so <prefix>.api only moves an
+ * unpinned OpenAI-family preset between the two OpenAI protocols. */
 static const struct wire *resolve_wire(const struct http_provider_preset *preset)
 {
     const struct wire *fallback = preset->wire ? preset->wire : &WIRE_OPENAI_CHAT;
+    const char *api = config_scoped_str(preset->config_prefix, "api");
+    if (preset->pin_base_url) {
+        /* Silently accepting the value would fake a switch the pin just refused. */
+        if (api && *api)
+            hax_warn("provider '%s': api is pinned to %s — use model_apis for per-model "
+                     "protocols, or a custom provider",
+                     preset->display_name, fallback->id);
+        return fallback;
+    }
     if (fallback == &WIRE_ANTHROPIC_MESSAGES)
         return fallback;
-
-    const char *api = config_scoped_str(preset->config_prefix, "api");
     if (!api || !*api)
         return fallback;
     /* "catalog" declares per-model routing (config_provider wires it up); there is no fixed
@@ -354,7 +363,7 @@ static const struct wire *resolve_wire(const struct http_provider_preset *preset
     return wire;
 }
 
-static enum chat_cache_mode resolve_cache_mode(const char *prefix, int automatic)
+static enum chat_cache_mode resolve_cache_mode(const char *prefix, const char *preset_default)
 {
     /* Different fallbacks distinguish a parsed boolean from auto, unset, or invalid input. */
     int with_false_fallback = config_scoped_bool_or(prefix, "cache", 0);
@@ -362,7 +371,11 @@ static enum chat_cache_mode resolve_cache_mode(const char *prefix, int automatic
 
     if (with_false_fallback == with_true_fallback)
         return with_true_fallback ? CHAT_CACHE_ON : CHAT_CACHE_OFF;
-    return automatic ? CHAT_CACHE_AUTO : CHAT_CACHE_OFF;
+    if (preset_default && strcasecmp(preset_default, "auto") == 0)
+        return CHAT_CACHE_AUTO;
+    if (preset_default && strcasecmp(preset_default, "on") == 0)
+        return CHAT_CACHE_ON;
+    return CHAT_CACHE_OFF;
 }
 
 /* `*pinned` reports an explicit setting, including an "off" that must survive a catalog hint.
@@ -386,79 +399,6 @@ static char *resolve_configured_reasoning_field(const char *prefix, const char *
             field = configured;
     }
     return field ? xstrdup(field) : NULL;
-}
-
-static int http_provider_list_models(struct provider *base, struct model_info **models,
-                                     size_t *n_models, char **error, http_tick_cb tick,
-                                     void *tick_user)
-{
-    struct http_provider *provider = (struct http_provider *)base;
-    *models = NULL;
-    *n_models = 0;
-
-    char *url = xasprintf("%s/models", provider->base_url);
-    char **headers = build_headers(provider, provider->wire, 0);
-
-    char *response_body = NULL;
-    long status = 0;
-    int result = http_get(url, (const char *const *)headers, MODEL_LIST_TIMEOUT_S, 0, tick,
-                          tick_user, &response_body, &status);
-    string_array_free(headers);
-    free(url);
-
-    if (result != 0) {
-        *error = format_model_list_error(base->name, provider->base_url, provider->api_key != NULL,
-                                         status);
-        free(response_body);
-        return -1;
-    }
-
-    json_t *root = json_loads(response_body, 0, NULL);
-    free(response_body);
-    const char *provider_name = base->name ? base->name : "provider";
-    if (!root) {
-        *error = xasprintf("%s /models response is not valid JSON", provider_name);
-        return -1;
-    }
-
-    json_t *data = json_object_get(root, "data");
-    /* Ollama reports data:null when the server is reachable but has no models. */
-    if (json_is_null(data) || (json_is_array(data) && json_array_size(data) == 0)) {
-        json_decref(root);
-        return 0;
-    }
-    if (!json_is_array(data)) {
-        json_decref(root);
-        *error = xasprintf("%s /models response has no model list", provider_name);
-        return -1;
-    }
-
-    size_t n_entries = json_array_size(data);
-    struct model_info *available = xmalloc(n_entries * sizeof(*available));
-    size_t n_available = 0;
-    for (size_t i = 0; i < n_entries; i++) {
-        json_t *entry = json_array_get(data, i);
-        const char *model_id = json_string_value(json_object_get(entry, "id"));
-        if (!model_id || !*model_id)
-            continue;
-
-        model_info_init(&available[n_available]);
-        available[n_available].id = xstrdup(model_id);
-        if (provider->parse_model)
-            provider->parse_model(entry, &available[n_available]);
-        n_available++;
-    }
-    json_decref(root);
-
-    if (n_available == 0) {
-        free(available);
-        *error = xasprintf("%s /models response contains no usable model ids", provider_name);
-        return -1;
-    }
-
-    *models = available;
-    *n_models = n_available;
-    return 0;
 }
 
 static size_t http_provider_list_efforts(struct provider *base, const char *const **efforts)
@@ -498,7 +438,19 @@ const char *http_provider_api_key(const struct provider *provider)
 char **http_provider_metadata_headers(const struct provider *provider)
 {
     const struct http_provider *hp = (const struct http_provider *)provider;
-    return build_headers(hp, hp->wire, 0);
+    return build_headers(hp, hp->metadata_wire, 0);
+}
+
+enum http_metadata_api http_provider_metadata_api(const struct provider *provider)
+{
+    const struct http_provider *hp = (const struct http_provider *)provider;
+    return hp->metadata_wire == &WIRE_ANTHROPIC_MESSAGES ? HTTP_METADATA_ANTHROPIC
+                                                         : HTTP_METADATA_OPENAI;
+}
+
+http_parse_model_cb http_provider_parse_model(const struct provider *provider)
+{
+    return ((const struct http_provider *)provider)->parse_model;
 }
 
 void http_provider_prepare_base_url_availability(const char *base_url, const char *api_key,
@@ -568,6 +520,54 @@ static void resolve_wire_rules(struct http_provider *provider, const char *prefi
     free(key);
 }
 
+static char *resolve_catalog_id(const struct http_provider_preset *preset)
+{
+    const char *configured = NULL;
+    if (preset->config_prefix) {
+        char *key = xasprintf("%s.catalog_id", preset->config_prefix);
+        configured = config_str(key);
+        free(key);
+    }
+    /* An explicit value wins, including an empty opt-out; only silence takes the preset. */
+    const char *catalog_id = configured ? (*configured ? configured : NULL) : preset->catalog_id;
+    return catalog_id ? xstrdup(catalog_id) : NULL;
+}
+
+/* An unrecognized value falls back like the other tri-state settings rather than failing
+ * construction. */
+static enum http_metadata_api resolve_metadata_api(const struct http_provider_preset *preset)
+{
+    const char *configured = config_scoped_str(preset->config_prefix, "metadata_api");
+    if (!configured || !*configured || strcasecmp(configured, "auto") == 0)
+        return preset->metadata_api;
+    if (strcasecmp(configured, "openai") == 0)
+        return HTTP_METADATA_OPENAI;
+    if (strcasecmp(configured, "anthropic") == 0)
+        return HTTP_METADATA_ANTHROPIC;
+    hax_warn("unknown metadata_api '%s' (openai or anthropic) — using default", configured);
+    return preset->metadata_api;
+}
+
+/* A pure Messages provider offers only the efforts its dialect can express. A mixed provider
+ * keeps the full ladder for models routed to other wires; per-model metadata narrows the rest. */
+static void narrow_messages_efforts(struct http_provider *provider)
+{
+    if (provider->wire != &WIRE_ANTHROPIC_MESSAGES || provider->n_wire_rules > 0 ||
+        provider->catalog_wires || provider->n_efforts == 0)
+        return;
+
+    provider->owned_efforts = xcalloc(provider->n_efforts, sizeof(*provider->owned_efforts));
+    size_t n_kept = 0;
+    for (size_t i = 0; i < provider->n_efforts; i++) {
+        /* "none" stays offered: requests express it as thinking off. */
+        if (anthropic_effort_expressible(provider->efforts[i]) ||
+            strcmp(provider->efforts[i], "none") == 0)
+            provider->owned_efforts[n_kept++] = provider->efforts[i];
+    }
+    provider->efforts = provider->owned_efforts;
+    provider->n_efforts = n_kept;
+}
+
 static const char *resolve_display_name(const struct http_provider_preset *preset)
 {
     const char *configured = config_scoped_str(preset->config_prefix, "display_name");
@@ -593,12 +593,30 @@ struct provider *http_provider_new_preset(const struct http_provider_preset *pre
     const char *api_key = provider_api_key(preset->config_prefix, preset->api_key_env);
     provider->api_key = api_key ? xstrdup(api_key) : NULL;
     provider->name = xstrdup(resolve_display_name(preset));
-    provider->catalog_id = preset->catalog_id ? xstrdup(preset->catalog_id) : NULL;
+    provider->catalog_id = resolve_catalog_id(preset);
     provider->config_prefix = preset->config_prefix ? xstrdup(preset->config_prefix) : NULL;
     provider->wire = resolve_wire(preset);
     provider->endpoint = xasprintf("%s%s", provider->base_url, provider->wire->path);
+    enum http_metadata_api metadata_api = resolve_metadata_api(preset);
+    if (metadata_api == HTTP_METADATA_BY_WIRE) {
+        metadata_api = provider->wire == &WIRE_ANTHROPIC_MESSAGES ? HTTP_METADATA_ANTHROPIC
+                                                                  : HTTP_METADATA_OPENAI;
+    }
+    /* On the OpenAI side any OpenAI-family wire carries the same Bearer scheme; only a Messages
+     * default wire paired with OpenAI-shaped metadata needs the explicit Chat stand-in. */
+    if (metadata_api == HTTP_METADATA_ANTHROPIC)
+        provider->metadata_wire = &WIRE_ANTHROPIC_MESSAGES;
+    else if (provider->wire == &WIRE_ANTHROPIC_MESSAGES)
+        provider->metadata_wire = &WIRE_OPENAI_CHAT;
+    else
+        provider->metadata_wire = provider->wire;
     resolve_wire_rules(provider, preset->config_prefix);
     provider->catalog_wires = preset->catalog_wires;
+    /* Catalog routing with neither rules nor a catalog identity would silently send every model
+     * to the default wire. */
+    if (provider->catalog_wires && !provider->catalog_id && provider->n_wire_rules == 0)
+        hax_warn("provider '%s': models route by catalog metadata, but catalog_id is empty",
+                 provider->name);
     /* Resolved regardless of the default wire: per-model rules can route to Messages. */
     const char *version = config_scoped_str(preset->config_prefix, "version");
     provider->version = xstrdup(version && *version ? version : MESSAGES_DEFAULT_VERSION);
@@ -608,15 +626,18 @@ struct provider *http_provider_new_preset(const struct http_provider_preset *pre
     provider->emit_progress = preset->emit_progress;
     provider->request_cost =
         config_scoped_bool_or(preset->config_prefix, "request_cost", preset->request_cost);
-    provider->cache_mode = resolve_cache_mode(preset->config_prefix, preset->cache_auto_default);
+    provider->cache_mode = resolve_cache_mode(preset->config_prefix, preset->cache);
     provider->cache_ttl = xstrdup(provider_cache_ttl(preset->config_prefix));
     provider->reasoning_field = resolve_configured_reasoning_field(
         preset->config_prefix, preset->reasoning_replay_field, &provider->reasoning_field_pinned);
     provider->reasoning_format = chat_reasoning_format_parse(
         config_scoped_str(preset->config_prefix, "reasoning_format"), preset->reasoning_format);
-    provider->default_thinking_mode = preset->default_thinking_mode;
-    provider->allow_empty_signature = preset->allow_empty_signature;
-    provider->cache_default = preset->send_cache_control_default;
+    provider->cache_default = preset->cache && strcasecmp(preset->cache, "on") == 0;
+    int thinking_mode = anthropic_thinking_mode_parse(preset->thinking_mode);
+    provider->default_thinking_mode = thinking_mode >= 0
+                                          ? (enum anthropic_thinking_mode)thinking_mode
+                                          : ANTHROPIC_THINKING_BUDGET;
+    provider->strict_signatures = preset->strict_signatures;
     /* Preset headers first, then config-declared ones; both reach every request. */
     char **config_headers = provider_extra_headers(preset->config_prefix);
     provider->extra_headers =
@@ -627,6 +648,7 @@ struct provider *http_provider_new_preset(const struct http_provider_preset *pre
     provider->length_hint = preset->length_hint;
     provider->efforts = preset->efforts;
     provider->n_efforts = preset->n_efforts;
+    narrow_messages_efforts(provider);
     provider->parse_model = preset->parse_model;
 
     char session_id[37];
@@ -636,7 +658,12 @@ struct provider *http_provider_new_preset(const struct http_provider_preset *pre
     provider->base.name = provider->name;
     provider->base.catalog_id = provider->catalog_id;
     provider->base.stream = http_provider_stream;
-    provider->base.list_models = http_provider_list_models;
+    if (metadata_api == HTTP_METADATA_ANTHROPIC) {
+        provider->base.list_models = anthropic_list_models;
+        provider->base.probe_model = anthropic_probe_model;
+    } else {
+        provider->base.list_models = openai_list_models;
+    }
     provider->base.list_efforts = http_provider_list_efforts;
     provider->base.destroy = http_provider_destroy;
     return &provider->base;

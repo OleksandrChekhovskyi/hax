@@ -308,13 +308,14 @@ When `no_tasks` is on, reaching `bash.timeout` kills the command instead of deta
 ### Provider settings
 
 Every provider reads settings only from its own `providers.<id>` block; nothing bleeds between
-providers. For the first-party providers the endpoint and credential variable (`OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`) are pinned — `base_url` in their blocks is ignored, so
-no setting can redirect a first-party key. Their other advanced fields (the same ones
+providers. For the first-party providers the endpoint, protocol, and credential variable
+(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`) are pinned — `base_url` and `api`
+in their blocks warn and are ignored, so no setting can redirect a first-party key or change what
+it speaks. Their other advanced fields (the same ones
 [custom providers](./providers.md#custom-providers) accept) are honored but rarely needed; a
-different endpoint is a custom provider, not a tweak. Codex reads only `display_name` and the
-request-passthrough fields from its block; authentication comes from the ChatGPT login
-([`/login`](./providers.md#codex)).
+different endpoint is a custom provider, not a tweak. Codex reads `display_name`, `sort_models`,
+`catalog_id`, and the request-passthrough fields from its block; authentication comes from the
+ChatGPT login ([`/login`](./providers.md#codex)).
 
 The shipped `openai-compatible` and `anthropic-compatible` providers are configured the same way —
 through their own `providers.<name>` blocks — and additionally bind environment variables to those

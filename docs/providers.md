@@ -29,10 +29,11 @@ keys in environment variables rather than command arguments or `config.json`.
 | `openai-compatible` | OpenAI Chat Completions-compatible endpoint | Base URL; usually choose a model. |
 | `anthropic-compatible` | Anthropic Messages-compatible proxy/server | Base URL; usually choose a model. |
 
-When no provider is selected, hax tries the built-in providers first — Codex, llama.cpp, OpenAI,
-Anthropic, then OpenRouter — followed by the shipped compatible, OpenCode, and Ollama recipes and
-any user-defined providers. Auto-selection is convenient interactively; pass a provider explicitly
-in automation so a newly available backend cannot change a script's behavior.
+When no provider is selected, hax picks the first available one: the hosted providers (Codex,
+OpenAI, Anthropic, OpenRouter, OpenCode), then the local servers (llama.cpp, Ollama), then the
+generic compatible endpoints and any user-defined providers. Auto-selection is convenient
+interactively; pass a provider explicitly in automation so a newly available backend cannot change
+a script's behavior.
 
 If an explicitly selected provider cannot start, the REPL opens without one and directs you to
 `/provider`; one-shot mode exits with an error. A one-shot banner on stderr identifies the provider,
@@ -75,9 +76,10 @@ hax --provider=openai
 OpenAI has no fixed model default. Choose one with `/model`, set `model` in config, or pass
 `--model`. hax uses `https://api.openai.com/v1` with the Responses API — the best fit for current
 reasoning models and tool calls. Credentials come from `OPENAI_API_KEY`, and the endpoint is
-pinned: no setting can redirect the key elsewhere. A `providers.openai` config block accepts the
-same advanced fields as custom providers (minus `base_url`), though they are rarely needed; an
-OpenAI-shaped endpoint elsewhere belongs in a [custom provider](#custom-providers).
+pinned: no setting can redirect the key elsewhere or change the protocol. A `providers.openai`
+config block accepts the same advanced fields as custom providers (minus the pinned `base_url`
+and `api`), though they are rarely needed; an OpenAI-shaped endpoint elsewhere belongs in a
+[custom provider](#custom-providers).
 
 ## Anthropic
 
@@ -167,7 +169,7 @@ project context, tool results, and the desired output are combined.
 
 ## Ollama
 
-Ollama is a shipped custom-provider recipe for `http://127.0.0.1:11434/v1`:
+Ollama is a shipped custom provider preconfigured for `http://127.0.0.1:11434/v1`:
 
 ```sh
 ollama serve
@@ -196,11 +198,11 @@ Override the endpoint in `config.json`:
 
 ## Compatible built-ins
 
-`openai-compatible` and `anthropic-compatible` are shipped recipes for a generic endpoint you name
-at run time. They are ordinary [custom providers](#custom-providers) — configured through their own
-`providers.openai-compatible` / `providers.anthropic-compatible` blocks — whose keys additionally
-bind environment variables, so a one-off endpoint needs no config file. The variables affect only
-these two providers; the full key list is in
+`openai-compatible` and `anthropic-compatible` are shipped providers for a generic endpoint you
+name at run time. They are ordinary [custom providers](#custom-providers) — configured through
+their own `providers.openai-compatible` / `providers.anthropic-compatible` blocks — whose keys
+additionally bind environment variables, so a one-off endpoint needs no config file. The variables
+affect only these two providers; the full key list is in
 [configuration.md](./configuration.md#provider-settings).
 
 ### OpenAI-compatible
@@ -266,7 +268,7 @@ Common fields:
 
 | Field | Purpose |
 | --- | --- |
-| `base_url` | Required endpoint root, unless a shipped recipe supplies one. |
+| `base_url` | Required endpoint root, unless shipped defaults supply one. |
 | `display_name` | Human-readable banner name. |
 | `api` | `openai-completions` (default), `openai-responses`, `anthropic-messages`, or `catalog`. |
 | `model_apis` | Model-id globs mapped to `api` dialects; the first match sets that model's protocol. |
@@ -274,6 +276,7 @@ Common fields:
 | `api_key` | Literal key, or `$VAR` to read an environment variable. |
 | `sort_models` | Sort this provider's model picker newest-first (default); `off` keeps server order. |
 | `catalog_id` | Provider id in models.dev for cost/context metadata; empty disables lookup. |
+| `metadata_api` | `/models` dialect: `openai` (flat list) or `anthropic` (paginated); defaults to the request protocol's family. |
 | `extra_body` | Raw JSON members merged into every request body ([below](#request-passthrough)). |
 | `extra_headers` | HTTP headers sent on every request ([below](#request-passthrough)). |
 
@@ -282,10 +285,15 @@ Use `catalog_id` when a proxy name differs from the underlying provider. Do not 
 hosted provider merely because names look similar: prices and context limits may differ.
 
 `api: "catalog"` declares a mixed-protocol gateway the model catalog already describes: each model
-routes by the catalog's per-model API — how the shipped OpenCode recipes work — and models the
+routes by the catalog's per-model API — how the shipped OpenCode providers work — and models the
 catalog leaves unmapped use Chat Completions. `model_apis` rules also switch a provider into this
 mode and take precedence over catalog hints; either form makes every dialect's config fields apply,
 each to the models speaking it.
+
+`metadata_api` selects the `/models` shape and its auth scheme independently of the request
+protocol, since a proxy or gateway can pair either metadata side with either wire — an
+`anthropic-messages` endpoint behind an OpenAI-style `/v1/models`, say. It defaults to the family
+of the `api` protocol, so most providers never set it.
 
 For `openai-completions`, advanced fields are `reasoning_format`, `reasoning_roundtrip`,
 `send_cache_key`, `request_cost`, `cache`, and `cache_ttl`; reasoning replay is automatic per
@@ -300,7 +308,8 @@ warns about block members hax does not recognize or that its `api` dialect does 
 Every provider reads only its own block. The `HAX_OPENAI_*` and `HAX_ANTHROPIC_*` variables belong
 to the shipped `openai-compatible` / `anthropic-compatible` blocks and do not bleed into others;
 for a custom provider, only the variable named by `api_key_env` is read. Provider names cannot
-contain `.` and cannot override a compiled-in provider.
+contain `.`; a block named after a shipped provider configures that provider rather than
+replacing it.
 
 ### Request passthrough
 

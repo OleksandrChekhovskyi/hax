@@ -15,6 +15,7 @@
 #include "util.h"
 #include "providers/config_provider.h"
 #include "providers/http_provider.h"
+#include "providers/registry.h"
 #include "providers/wire.h"
 #include "transport/http.h"
 
@@ -333,9 +334,9 @@ static int llamacpp_probe_model(struct provider *provider, const char *model,
     return 0;
 }
 
-struct provider *llamacpp_provider_new(const char *id)
+struct provider *llamacpp_provider_new(const struct provider_def *def)
 {
-    provider_warn_unused_wire_fields(id, &WIRE_OPENAI_CHAT, NULL);
+    provider_warn_unused_wire_fields(def->id, &WIRE_OPENAI_CHAT, NULL);
     char *default_url = default_base_url();
     char *base_url = resolve_base_url();
     const char *api_key = provider_api_key("providers.llamacpp", NULL);
@@ -367,7 +368,7 @@ struct provider *llamacpp_provider_new(const char *id)
     };
     struct provider *provider = http_provider_new_preset(&preset);
     if (provider) {
-        provider->id = id;
+        provider->id = def->id;
         provider->model_label = llamacpp_model_label;
         provider->probe_model = llamacpp_probe_model;
         provider->model_discovered = model_discovered;
@@ -378,23 +379,14 @@ struct provider *llamacpp_provider_new(const char *id)
     return provider;
 }
 
-static void llamacpp_prepare_availability(const char *id,
-                                          struct provider_availability *availability)
+void llamacpp_prepare_availability(const struct provider_def *def,
+                                   struct provider_availability *out)
 {
-    (void)id;
+    (void)def;
     char *base_url = resolve_base_url();
     char **extra_headers = provider_extra_headers("providers.llamacpp");
     http_provider_prepare_base_url_availability(
-        base_url, provider_api_key("providers.llamacpp", NULL), extra_headers, availability);
+        base_url, provider_api_key("providers.llamacpp", NULL), extra_headers, out);
     string_array_free(extra_headers);
     free(base_url);
 }
-
-const struct provider_factory PROVIDER_LLAMACPP = {
-    /* Dot-free so the id names its providers.llamacpp config block ('.' is the key path
-     * separator); the banner and picker keep the upstream spelling. */
-    .id = "llamacpp",
-    .display_name = "llama.cpp",
-    .new = llamacpp_provider_new,
-    .prepare_availability = llamacpp_prepare_availability,
-};

@@ -8,15 +8,14 @@
 #include <strings.h>
 
 #include "config.h"
+#include "effort.h"
+#include "model_meta.h"
 #include "provider.h"
 #include "trace.h"
 #include "util.h"
-#include "providers/anthropic.h"
-#include "providers/anthropic_body.h"
 #include "providers/chat_body.h"
 #include "providers/http_provider.h"
-#include "providers/openai_common.h"
-#include "providers/recipes.h"
+#include "providers/registry.h"
 #include "providers/wire.h"
 
 #define FIELD_ANY (PROVIDER_FIELD_OPENAI | PROVIDER_FIELD_ANTHROPIC)
@@ -26,15 +25,16 @@
 
 // clang-format off
 static const struct provider_field PROVIDER_FIELDS[] = {
-    /* `api` picks a config-defined provider's dialect and an OpenAI-family provider's wire; the
-     * compiled-in anthropic provider has no wire choice, so it must warn there. */
-    {.leaf = "api",                 .dialects = PROVIDER_FIELD_OPENAI | PROVIDER_FIELD_CONFIG_DEFINED},
+    /* `api` is resolved for every def — pinned ones warn about it in resolve_wire rather than
+     * here, so the message can say the value is pinned instead of merely unused. */
+    {.leaf = "api",                 .dialects = FIELD_ANY},
     {.leaf = "base_url",            .dialects = FIELD_ANY},
     {.leaf = "api_key",             .dialects = FIELD_ANY, .secret = 1},
-    {.leaf = "api_key_env",         .dialects = PROVIDER_FIELD_CONFIG_DEFINED},
+    {.leaf = "api_key_env",         .dialects = PROVIDER_FIELD_UNPINNED},
     {.leaf = "display_name",        .dialects = FIELD_ANY},
-    {.leaf = "catalog_id",          .dialects = PROVIDER_FIELD_CONFIG_DEFINED},
-    {.leaf = "sort_models",         .dialects = PROVIDER_FIELD_CONFIG_DEFINED},
+    {.leaf = "catalog_id",          .dialects = FIELD_ANY},
+    {.leaf = "sort_models",         .dialects = FIELD_ANY},
+    {.leaf = "metadata_api",        .dialects = FIELD_ANY},
     {.leaf = "model_apis",          .dialects = FIELD_ANY},
     {.leaf = "cache",               .dialects = FIELD_CACHE_MARKERS},
     {.leaf = "cache_ttl",           .dialects = FIELD_CACHE_MARKERS},
@@ -261,7 +261,7 @@ static int module_key_registered(const char *name, const char *leaf)
 
 static const char *cfg(const char *name, const char *leaf);
 
-/* A model_apis block or api "catalog" — configured or from the recipe — makes the provider a
+/* A model_apis block or api "catalog" — configured or from the def — makes the provider a
  * mixed-protocol gateway: models may land on any wire, so every dialect's fields are live. */
 static int provider_routes_wires(const char *name)
 {
@@ -270,9 +270,10 @@ static int provider_routes_wires(const char *name)
     free(key);
     if (json_is_object(rules) && json_object_size((json_t *)rules) > 0)
         return 1;
-    const char *api = cfg(name, "api");
-    if (!api)
-        api = provider_recipe_find(name)->api;
+    const struct provider_def *def = provider_find(name);
+    const char *api = def && def->pinned ? def->api : cfg(name, "api");
+    if (!api && def)
+        api = def->api;
     return api && strcasecmp(api, "catalog") == 0;
 }
 
@@ -295,12 +296,12 @@ void provider_warn_unused_fields(const char *name, const struct wire *wire, unsi
         } else if (field) {
             if (field->dialects & dialects) {
                 ; /* consumed by this provider */
-            } else if (field->dialects & ~PROVIDER_FIELD_CONFIG_DEFINED) {
+            } else if (field->dialects & ~PROVIDER_FIELD_UNPINNED) {
                 /* The dialect wording wins whenever some wire does consume the field. */
                 hax_warn("provider '%s': field '%s' is not used by %s providers", name, members[i],
                          api_label);
             } else {
-                hax_warn("provider '%s': field '%s' applies only to config-defined providers", name,
+                hax_warn("provider '%s': field '%s' is not configurable for this provider", name,
                          members[i]);
             }
         } else if (!module_key_registered(name, members[i])) {
@@ -336,55 +337,46 @@ static const char *cfg(const char *name, const char *leaf)
     return v;
 }
 
-/* Config value, else recipe field, else NULL; never empty. */
-static const char *resolve(const char *name, const char *leaf, const char *recipe_val)
+/* Config value, else def field, else NULL; never empty. */
+static const char *resolve(const char *name, const char *leaf, const char *fallback)
 {
     const char *v = cfg(name, leaf);
-    return v ? v : recipe_val;
+    return v ? v : fallback;
 }
 
-/* An explicit catalog_id wins, including an empty opt-out. A recipe keeps its curated
- * identity or absence; a recipe-less provider defaults to its own name. The result is
- * borrowed only until construction returns because a config write may invalidate it. */
-static const char *resolve_catalog_id(const char *name, const struct provider_recipe *r)
+static enum http_metadata_api metadata_api_from_def(const struct provider_def *def)
 {
-    char *key = xasprintf("providers.%s.catalog_id", name);
-    const char *v = config_str(key);
-    free(key);
-    if (v)
-        return *v ? v : NULL;
-    return r->id ? r->catalog_id : name;
+    if (def->metadata_api && strcasecmp(def->metadata_api, "openai") == 0)
+        return HTTP_METADATA_OPENAI;
+    if (def->metadata_api && strcasecmp(def->metadata_api, "anthropic") == 0)
+        return HTTP_METADATA_ANTHROPIC;
+    return HTTP_METADATA_BY_WIRE;
 }
 
-/* Dialect-agnostic base-provider fields are resolved here, once, from the providers.<name>
- * subtree; dialect constructors resolve only keys specific to their wire format. */
-static struct provider *apply_base_config(const char *name, struct provider *p)
+/* The dialect the def's own metadata hooks were written against. */
+static enum http_metadata_api def_metadata_api(const struct provider_def *def,
+                                               const struct wire *wire)
 {
-    if (!p)
-        return NULL;
-    /* `name` is the factory's id, which the registry keeps alive for the process. */
-    p->id = name;
-    char *key = xasprintf("providers.%s.sort_models", name);
-    p->keep_model_order = !config_bool_or(key, 1);
-    free(key);
-    return p;
+    enum http_metadata_api api = metadata_api_from_def(def);
+    if (api == HTTP_METADATA_BY_WIRE) {
+        api = wire == &WIRE_ANTHROPIC_MESSAGES ? HTTP_METADATA_ANTHROPIC : HTTP_METADATA_OPENAI;
+    }
+    return api;
 }
 
-/* Build the provider for config id `name` (the factory's own name). The api field —
- * config, else recipe, else openai-completions — picks the wire; every other field resolves
- * as config overlaid on the recipe, with dialect-specific keys read from the same subtree
- * via config_prefix. */
-static struct provider *config_provider_new(const char *name)
+/* Build the provider for `def`. The api field — config (unless pinned), else def, else
+ * openai-completions — picks the wire; every other field resolves as config overlaid on the
+ * def, with dialect-specific keys read from the same subtree via config_prefix. */
+struct provider *provider_def_construct(const struct provider_def *def)
 {
-    const struct provider_recipe *r = provider_recipe_find(name);
-
-    const char *api = resolve(name, "api", r->api);
+    const char *name = def->id;
+    const char *api = def->pinned ? def->api : resolve(name, "api", def->api);
     if (!api)
         api = "openai-completions";
     const struct wire *wire;
     if (strcasecmp(api, "catalog") == 0) {
         /* Per-model routing from catalog hints; models the catalog leaves unmapped use Chat
-         * Completions, like the shipped gateway recipes. */
+         * Completions, like the shipped gateway defs. */
         wire = &WIRE_OPENAI_CHAT;
     } else {
         wire = wire_find(api);
@@ -395,9 +387,22 @@ static struct provider *config_provider_new(const char *name)
                 name, api);
         return NULL;
     }
-    provider_warn_unused_fields(name, wire, PROVIDER_FIELD_CONFIG_DEFINED, NULL);
+    /* The Anthropic metadata dialect consumes `version` for its /models headers even when no
+     * request wire would. */
+    static const char *const METADATA_FIELDS[] = {"version", NULL};
+    enum http_metadata_api metadata_api = def_metadata_api(def, wire);
+    const char *configured_metadata = cfg(name, "metadata_api");
+    if (configured_metadata && strcasecmp(configured_metadata, "openai") == 0)
+        metadata_api = HTTP_METADATA_OPENAI;
+    else if (configured_metadata && strcasecmp(configured_metadata, "anthropic") == 0)
+        metadata_api = HTTP_METADATA_ANTHROPIC;
 
-    const char *base = resolve(name, "base_url", r->base_url);
+    /* A pinned def's api is fixed (http_provider warns when config sets it); an unpinned
+     * def's wire already reflects config. */
+    provider_warn_unused_fields(name, wire, def->pinned ? 0 : PROVIDER_FIELD_UNPINNED,
+                                metadata_api == HTTP_METADATA_ANTHROPIC ? METADATA_FIELDS : NULL);
+
+    const char *base = def->pinned ? def->base_url : resolve(name, "base_url", def->base_url);
     if (!base) {
         char *key = xasprintf("providers.%s.base_url", name);
         const struct config_setting *setting = config_setting_find(key);
@@ -410,94 +415,93 @@ static struct provider *config_provider_new(const char *name)
         return NULL;
     }
 
-    const char *display = resolve(name, "display_name", r->display_name);
-    if (!display)
-        display = name;
-    const char *api_key_env = resolve(name, "api_key_env", r->api_key_env);
-
     /* Provider constructors copy any prefix-backed state before this buffer is freed. */
     char *cfg_prefix = xasprintf("providers.%s", name);
-    /* Efforts are advisory for a generic endpoint, so they default on; recipes opt out
-     * backends with no categorical effort, and the Messages constructor swaps in its ladder. */
-    int with_efforts = !r->no_efforts;
+    /* Efforts are advisory offers narrowed by per-model metadata, so they default on; defs opt
+     * out backends with no categorical effort. */
+    int with_efforts = !def->no_efforts;
     struct http_provider_preset preset = {
-        .display_name = display,
+        .display_name = def->display_name ? def->display_name : name,
         .default_base_url = base,
-        .api_key_env = api_key_env,
+        .api_key_env =
+            def->pinned ? def->api_key_env : resolve(name, "api_key_env", def->api_key_env),
         .wire = wire,
-        .send_cache_key_default = r->send_cache_key,
-        /* The recipe supplies only the default; the preset overlays <prefix>.reasoning_format
+        .pin_base_url = def->pinned,
+        .cache = def->cache,
+        .thinking_mode = def->thinking_mode,
+        .strict_signatures = def->strict_signatures,
+        .metadata_api = metadata_api_from_def(def),
+        .send_cache_key_default = def->send_cache_key,
+        .request_cost = def->request_cost,
+        /* The def supplies only the default; the preset overlays <prefix>.reasoning_format
          * like every other quirk field. */
-        .reasoning_format = chat_reasoning_format_parse(r->reasoning_format, CHAT_REASONING_FLAT),
-        .efforts = with_efforts ? OPENAI_EFFORT_LADDER : NULL,
-        .n_efforts = with_efforts ? OPENAI_EFFORT_LADDER_N : 0,
-        .length_hint = r->length_hint,
+        .reasoning_format = chat_reasoning_format_parse(def->reasoning_format, CHAT_REASONING_FLAT),
+        .efforts = with_efforts ? EFFORT_LADDER : NULL,
+        .n_efforts = with_efforts ? EFFORT_LADDER_N : 0,
+        .length_hint = def->length_hint,
         .config_prefix = cfg_prefix,
-        .catalog_id = resolve_catalog_id(name, r),
+        .catalog_id = def->catalog_id,
+        .parse_model = def->parse_model,
         /* model_apis or api "catalog" declares a mixed-protocol gateway, so catalog hints apply
          * there; a single-protocol provider keeps its explicit api regardless of catalog
          * metadata. */
         .catalog_wires = provider_routes_wires(name),
     };
-    if (strcasecmp(api, "catalog") == 0 && !preset.catalog_id)
-        hax_warn("provider '%s': api \"catalog\" routes by catalog metadata, but catalog_id "
-                 "is empty",
-                 name);
+    char **static_headers = def->static_headers ? def->static_headers() : NULL;
+    preset.extra_headers = (const char *const *)static_headers;
 
-    struct provider *p;
-    if (wire == &WIRE_ANTHROPIC_MESSAGES) {
-        /* Generic endpoints default to compat-safe thinking and caching behavior. */
-        preset.default_thinking_mode = ANTHROPIC_THINKING_BUDGET;
-        preset.allow_empty_signature = 1;
-        p = anthropic_provider_new_preset(&preset);
-    } else {
-        /* A gateway's Messages-wire models get the same compat-safe defaults. */
-        if (provider_routes_wires(name)) {
-            preset.default_thinking_mode = ANTHROPIC_THINKING_BUDGET;
-            preset.allow_empty_signature = 1;
-        }
-        p = http_provider_new_preset(&preset);
-    }
+    struct provider *p = http_provider_new_preset(&preset);
+    string_array_free(static_headers);
     free(cfg_prefix);
-    if (p && r->query_usage)
-        p->query_usage = r->query_usage;
-    return apply_base_config(name, p);
+    if (!p)
+        return NULL;
+
+    p->id = name;
+    /* Like parse_model (which only the def's own listing consults), the probe hook refines the
+     * def's metadata dialect: a configured metadata_api that moves the provider to another
+     * dialect must keep that dialect's probe, not a mixed pairing. */
+    if (def->probe_model && http_provider_metadata_api(p) == def_metadata_api(def, wire))
+        p->probe_model = def->probe_model;
+    if (def->query_usage)
+        p->query_usage = def->query_usage;
+    if (def->model_label)
+        p->model_label = def->model_label;
+
+    /* Harmless without a probe hook; with one, it warms metadata for the active model. */
+    const char *configured_model = config_str("model");
+    model_meta_refresh(p, configured_model && *configured_model ? configured_model : NULL);
+    return p;
 }
 
-/* Availability for the /provider picker. A keyed (cloud) provider — one with a declared
- * api_key_env or an inline api_key — is selectable iff that key resolves, with no network
- * probe (fast, and a 401 would be the only extra signal). A keyless one counts its configured
- * base_url as availability, except for recipes that opt into a reachability probe. */
-static void config_provider_prepare_availability(const char *name,
-                                                 struct provider_availability *out)
+void provider_def_availability(const struct provider_def *def, struct provider_availability *out)
 {
-    const struct provider_recipe *r = provider_recipe_find(name);
-
-    const char *base = resolve(name, "base_url", r->base_url);
+    const char *name = def->id;
+    const char *base = def->pinned ? def->base_url : resolve(name, "base_url", def->base_url);
     if (!base) {
         out->available = 0;
-        out->reason = xstrdup(r->unconfigured_reason ? r->unconfigured_reason : "no base_url");
+        out->reason = xstrdup(def->unconfigured_reason ? def->unconfigured_reason : "no base_url");
         return;
     }
 
     const char *inline_key = cfg(name, "api_key");
-    const char *key_env = resolve(name, "api_key_env", r->api_key_env);
+    const char *key_env =
+        def->pinned ? def->api_key_env : resolve(name, "api_key_env", def->api_key_env);
     if (inline_key || key_env) {
         char *prefix = xasprintf("providers.%s", name);
         const char *api_key = provider_api_key(prefix, key_env);
         free(prefix);
         out->available = api_key != NULL;
         if (!out->available) {
-            /* Name the exact variable or key to set, like the compiled-in providers do. */
+            /* Name the exact variable or key to set. */
             out->reason = key_env ? xasprintf("%s not set", key_env)
                                   : xasprintf("providers.%s.api_key not set", name);
         }
         return;
     }
 
-    /* Keyless without a probing recipe: configuration is the whole check, because a generic
+    /* Keyless without a probing def: configuration is the whole check, because a generic
      * endpoint may serve only its completion route and no /models. */
-    if (!r->probe) {
+    if (!def->probe) {
         out->available = 1;
         return;
     }
@@ -511,46 +515,4 @@ static void config_provider_prepare_availability(const char *name,
     string_array_free(extra_headers);
     free(prefix);
     free(probe_url);
-}
-
-static struct provider_factory *make_factory(const char *name)
-{
-    struct provider_factory *f = xcalloc(1, sizeof(*f));
-    f->id = xstrdup(name); /* process-lifetime; the registry never frees these */
-    f->display_name = provider_recipe_find(name)->display_name;
-    f->new = config_provider_new;
-    f->prepare_availability = config_provider_prepare_availability;
-    return f;
-}
-
-const struct provider_factory *const *config_providers(size_t *n)
-{
-    static const struct provider_factory **factories;
-    static size_t count;
-    static int built;
-    if (!built) {
-        char **names = NULL;
-        size_t n_cfg = config_object_keys("providers", &names);
-        size_t n_recipes;
-        const struct provider_recipe *recipes = provider_recipes(&n_recipes);
-        factories = xcalloc(n_recipes + n_cfg, sizeof(*factories));
-        /* Recipes first, in shipped order; then config-only names. A config block matching a
-         * recipe name overlays that recipe at construction — it is not a second factory. */
-        for (size_t i = 0; i < n_recipes; i++)
-            factories[count++] = make_factory(recipes[i].id);
-        for (size_t i = 0; i < n_cfg; i++) {
-            /* '.' is the config key path separator, so a dotted name could never resolve
-             * its providers.<name>.* fields; reject it rather than offer a provider that
-             * cannot construct. */
-            if (strchr(names[i], '.'))
-                hax_warn("ignoring custom provider '%s': name cannot contain '.'", names[i]);
-            else if (!provider_recipe_find(names[i])->id)
-                factories[count++] = make_factory(names[i]);
-            free(names[i]);
-        }
-        free(names);
-        built = 1;
-    }
-    *n = count;
-    return factories;
 }

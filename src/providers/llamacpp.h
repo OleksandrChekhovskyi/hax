@@ -6,8 +6,14 @@
 
 #include "provider.h"
 
-/* Construct the llama-server preset. */
-struct provider *llamacpp_provider_new(const char *id);
+struct provider_def; /* providers/registry.h */
+
+/* Construct the llama-server provider, reconciling the configured model against the server. */
+struct provider *llamacpp_provider_new(const struct provider_def *def);
+
+/* Availability probe against the resolved local base URL. */
+void llamacpp_prepare_availability(const struct provider_def *def,
+                                   struct provider_availability *out);
 
 /* Decision derived from a /v1/models response. A classic single-model server reports what it
  * serves, so an unavailable configured model is substituted. A router catalog (entries carrying a
@@ -40,7 +46,5 @@ char *llamacpp_model_label(struct provider *provider, const char *model);
 
 /* Return an allocated /props sibling URL, adding an encoded model query when nonempty. */
 char *llamacpp_props_url(const char *base_url, const char *model);
-
-extern const struct provider_factory PROVIDER_LLAMACPP;
 
 #endif /* HAX_PROVIDERS_LLAMACPP_H */

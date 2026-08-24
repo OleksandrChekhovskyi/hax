@@ -7,6 +7,7 @@
 #include "harness.h"
 #include "provider.h"
 #include "providers/codex.h"
+#include "providers/registry.h"
 
 static void test_token_expired(void)
 {
@@ -59,16 +60,35 @@ static void test_display_name_from_own_block(void)
     unsetenv("XDG_STATE_HOME");
     unsetenv("HAX_MODEL");
 
-    struct provider *codex = codex_provider_new("codex");
+    struct provider *codex = codex_provider_new(provider_find("codex"));
     EXPECT(codex != NULL);
     if (codex) {
         EXPECT_STR_EQ(codex->name, "codex");
+        /* Costs default to OpenAI-equivalent API rates. */
+        EXPECT_STR_EQ(codex->catalog_id, "openai");
         codex->destroy(codex);
     }
 
+    /* The block can rename the catalog identity or opt out of it entirely. */
+    config_set_override("providers.codex.catalog_id", "my-rates");
+    codex = codex_provider_new(provider_find("codex"));
+    EXPECT(codex != NULL);
+    if (codex) {
+        EXPECT_STR_EQ(codex->catalog_id, "my-rates");
+        codex->destroy(codex);
+    }
+    config_set_override("providers.codex.catalog_id", "");
+    codex = codex_provider_new(provider_find("codex"));
+    EXPECT(codex != NULL);
+    if (codex) {
+        EXPECT(codex->catalog_id == NULL);
+        codex->destroy(codex);
+    }
+    config_set_override("providers.codex.catalog_id", NULL);
+
     /* The provider's own block labels the banner; reasoning provenance keeps the stable id. */
     config_set_override("providers.codex.display_name", "Work ChatGPT");
-    codex = codex_provider_new("codex");
+    codex = codex_provider_new(provider_find("codex"));
     EXPECT(codex != NULL);
     if (codex) {
         EXPECT_STR_EQ(codex->name, "Work ChatGPT");

@@ -10,9 +10,23 @@
 #include "tool_schema.h"
 #include "providers/wire.h"
 
-const char *const ANTHROPIC_EFFORT_LADDER[] = {"low", "medium", "high", "xhigh", "max"};
-const size_t ANTHROPIC_EFFORT_LADDER_N =
-    sizeof(ANTHROPIC_EFFORT_LADDER) / sizeof(ANTHROPIC_EFFORT_LADDER[0]);
+int anthropic_thinking_mode_parse(const char *value)
+{
+    if (!value)
+        return -1;
+    if (strcasecmp(value, "adaptive") == 0)
+        return ANTHROPIC_THINKING_ADAPTIVE;
+    if (strcasecmp(value, "budget") == 0)
+        return ANTHROPIC_THINKING_BUDGET;
+    if (strcasecmp(value, "off") == 0)
+        return ANTHROPIC_THINKING_OFF;
+    return -1;
+}
+
+int anthropic_effort_expressible(const char *effort)
+{
+    return strcmp(effort, "none") != 0 && strcmp(effort, "minimal") != 0;
+}
 
 static json_t *build_text_block(const char *text)
 {
@@ -222,8 +236,11 @@ static void apply_thinking(json_t *body, const struct context *context,
         json_object_set_new(body, "thinking",
                             json_pack("{s:s, s:s}", "type", "adaptive", "display", display));
         if (context->effort && *context->effort) {
-            json_object_set_new(body, "output_config",
-                                json_pack("{s:s}", "effort", context->effort));
+            /* A below-floor effort ("minimal") can reach a Messages-routed model on a mixed
+             * provider; the wire cannot spell it, so send its Messages minimum instead. */
+            const char *effort =
+                anthropic_effort_expressible(context->effort) ? context->effort : "low";
+            json_object_set_new(body, "output_config", json_pack("{s:s}", "effort", effort));
         }
         return;
     }

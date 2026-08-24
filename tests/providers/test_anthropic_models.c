@@ -14,7 +14,6 @@
 #include "model_meta.h"
 #include "provider.h"
 #include "util.h"
-#include "providers/anthropic.h"
 #include "providers/http_provider.h"
 #include "providers/registry.h"
 
@@ -103,9 +102,9 @@ static int list_models_from_server(struct test_server *server, int n_responses, 
         return -1;
     }
 
-    const struct provider_factory *factory = provider_find("anthropic-compatible");
+    const struct provider_def *factory = provider_find("anthropic-compatible");
     EXPECT(factory != NULL);
-    struct provider *provider = factory ? factory->new(factory->id) : NULL;
+    struct provider *provider = factory ? provider_construct(factory) : NULL;
     EXPECT(provider != NULL);
 
     size_t n_models = 0;
@@ -220,9 +219,9 @@ static void test_background_probe_publishes_metadata(void)
         T_SKIP("cannot start a loopback server thread");
     }
 
-    const struct provider_factory *factory = provider_find("anthropic-compatible");
+    const struct provider_def *factory = provider_find("anthropic-compatible");
     EXPECT(factory != NULL);
-    struct provider *provider = factory ? factory->new(factory->id) : NULL;
+    struct provider *provider = factory ? provider_construct(factory) : NULL;
     EXPECT(provider != NULL);
     if (provider) {
         model_meta_wait(provider);
@@ -251,9 +250,9 @@ static void test_max_tokens_uses_model_limit(void)
     EXPECT(config_int("providers.anthropic-compatible.max_tokens") == 0);
 
     setenv("HAX_ANTHROPIC_BASE_URL", "http://127.0.0.1:1", 1);
-    const struct provider_factory *factory = provider_find("anthropic-compatible");
+    const struct provider_def *factory = provider_find("anthropic-compatible");
     EXPECT(factory != NULL);
-    struct provider *provider = factory ? factory->new(factory->id) : NULL;
+    struct provider *provider = factory ? provider_construct(factory) : NULL;
     EXPECT(provider != NULL);
     if (!provider)
         return;
@@ -281,7 +280,7 @@ static void test_first_party_pins_endpoint(void)
     config_set_override("providers.anthropic.base_url", "http://127.0.0.1:1");
     config_set_override("providers.anthropic.max_tokens", "1234");
 
-    struct provider *provider = PROVIDER_ANTHROPIC.new("anthropic");
+    struct provider *provider = provider_construct(provider_find("anthropic"));
     EXPECT(provider != NULL);
     if (provider) {
         struct model_probe probe = {0};

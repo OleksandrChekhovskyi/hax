@@ -54,8 +54,8 @@ static const struct login_method *find_method(const char *provider_id)
 
 static const char *method_label(const struct login_method *method)
 {
-    const struct provider_factory *factory = provider_find(method->provider_id);
-    return factory ? provider_display_name(factory) : method->provider_id;
+    const struct provider_def *def = provider_find(method->provider_id);
+    return def ? provider_display_name(def) : method->provider_id;
 }
 
 /* Pick among `methods`. Returns NULL on cancellation or non-tty. */

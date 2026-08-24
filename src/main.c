@@ -29,15 +29,15 @@ static struct provider *select_initial_provider(int one_shot, int *autoselected)
     const char *name = config_str("provider");
     if (name && *name) {
         int restored = strcmp(config_source("provider"), "conversation") == 0;
-        const struct provider_factory *factory = provider_find(name);
+        const struct provider_def *def = provider_find(name);
         struct provider *provider = NULL;
 
-        if (!factory) {
+        if (!def) {
             fprintf(stderr, "hax: unknown provider '%s' (supported: ", name);
             provider_list_names(stderr);
             fprintf(stderr, ")\n");
         } else {
-            provider = factory->new(factory->id);
+            provider = provider_construct(def);
         }
         if (!provider && restored)
             hax_warn("'%s' is what this session was using — pass --provider/--model to "

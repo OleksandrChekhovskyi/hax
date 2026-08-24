@@ -189,8 +189,8 @@ const char *agent_provider_log_name(const struct provider *provider)
 int agent_recording_enabled(const struct provider *provider)
 {
     const char *id = agent_provider_id(provider);
-    const struct provider_factory *factory = id ? provider_find(id) : NULL;
-    return !config_bool_or("no_session", factory && factory->internal);
+    const struct provider_def *def = id ? provider_find(id) : NULL;
+    return !config_bool_or("no_session", def && def->internal);
 }
 
 /* Keep subprocess inheritance synchronized at every settings-resolution point. */
@@ -426,7 +426,7 @@ struct agent_absorb_result agent_session_absorb(struct agent_session *session, s
         if (items[i].kind == ITEM_TOOL_CALL)
             result.had_tool_call = 1;
         /* Reasoning can be model-bound. Display identity also distinguishes custom endpoints
-         * that share one provider factory. */
+         * that share one constructor. */
         if (items[i].kind == ITEM_REASONING) {
             items[i].provider = session->provider_id ? xstrdup(session->provider_id) : NULL;
             items[i].model = session->model ? xstrdup(session->model) : NULL;

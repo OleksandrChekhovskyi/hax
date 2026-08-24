@@ -6,8 +6,13 @@
 
 #include "provider.h"
 
+struct provider_def; /* providers/registry.h */
+
 /* Create a provider from ~/.codex/auth.json, or report an error and return NULL. */
-struct provider *codex_provider_new(const char *id);
+struct provider *codex_provider_new(const struct provider_def *def);
+
+/* Available iff usable credentials exist on disk. */
+void codex_prepare_availability(const struct provider_def *def, struct provider_availability *out);
 
 /* Return an allocated diagnostic for a failed model-catalog request. A zero status means that no
  * HTTP response was received; a 401 reports `token_expired`, whose wording depends on the
@@ -27,7 +32,5 @@ int codex_model_is_hidden(const json_t *entry);
 
 /* Read the wire-compatible reasoning levels reported by one Codex catalog entry. */
 void codex_parse_model_efforts(const json_t *entry, struct effort_set *efforts);
-
-extern const struct provider_factory PROVIDER_CODEX;
 
 #endif /* HAX_PROVIDERS_CODEX_H */

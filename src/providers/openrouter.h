@@ -6,9 +6,6 @@
 
 #include "provider.h"
 
-/* Construct the OpenRouter preset; the base URL is fixed to openrouter.ai. */
-struct provider *openrouter_provider_new(const char *id);
-
 /* Parse one OpenRouter /models entry into initialized `info`. Newly allocated fields are owned by
  * `info`; unreported fields retain their unknown values. */
 void openrouter_parse_model(const json_t *entry, struct model_info *info);
@@ -24,6 +21,10 @@ void openrouter_parse_model_probe_response(const char *body, const char *model,
 /* Prepare an owned, filtered metadata request. `provider` is unused. */
 int openrouter_probe_model(struct provider *provider, const char *model, struct model_probe *probe);
 
-extern const struct provider_factory PROVIDER_OPENROUTER;
+/* /usage backend: API-key spend and account credits. */
+int openrouter_query_usage(struct provider *provider);
+
+/* Owned app-attribution headers from the providers.openrouter title/referer settings. */
+char **openrouter_static_headers(void);
 
 #endif /* HAX_PROVIDERS_OPENROUTER_H */

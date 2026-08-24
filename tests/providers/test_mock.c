@@ -8,7 +8,7 @@
 #include "harness.h"
 #include "provider.h"
 #include "util.h"
-#include "providers/mock.h"
+#include "providers/registry.h"
 
 struct stream_capture {
     struct buf text;
@@ -89,7 +89,7 @@ static char *write_script(const char *content)
 static struct provider *new_scripted_provider(const char *path)
 {
     setenv("HAX_MOCK_SCRIPT", path, 1);
-    struct provider *provider = mock_provider_new("mock");
+    struct provider *provider = provider_construct(provider_find("mock"));
     unsetenv("HAX_MOCK_SCRIPT");
     return provider;
 }
@@ -273,7 +273,7 @@ static void test_scripted_missing_file(void)
 static struct provider *new_interactive_provider(void)
 {
     unsetenv("HAX_MOCK_SCRIPT");
-    return mock_provider_new("mock");
+    return provider_construct(provider_find("mock"));
 }
 
 static void test_interactive_bash_call(void)

@@ -14,12 +14,11 @@
 
 #include "catalog.h"
 #include "config.h"
+#include "effort.h"
 #include "harness.h"
 #include "provider.h"
 #include "util.h"
-#include "providers/anthropic_body.h"
 #include "providers/http_provider.h"
-#include "providers/openai_common.h"
 #include "providers/wire.h"
 
 static void test_list_efforts_wiring(void)
@@ -27,8 +26,8 @@ static void test_list_efforts_wiring(void)
     struct http_provider_preset with_efforts = {
         .display_name = "with-efforts",
         .default_base_url = "http://example.invalid/v1",
-        .efforts = OPENAI_EFFORT_LADDER,
-        .n_efforts = OPENAI_EFFORT_LADDER_N,
+        .efforts = EFFORT_LADDER,
+        .n_efforts = EFFORT_LADDER_N,
     };
     struct provider *provider = http_provider_new_preset(&with_efforts);
     EXPECT(provider != NULL);
@@ -37,7 +36,7 @@ static void test_list_efforts_wiring(void)
         EXPECT(provider->list_efforts != NULL);
         const char *const *efforts = NULL;
         size_t n_efforts = provider->list_efforts(provider, &efforts);
-        EXPECT(n_efforts == OPENAI_EFFORT_LADDER_N);
+        EXPECT(n_efforts == EFFORT_LADDER_N);
         EXPECT(efforts != NULL && strcmp(efforts[0], "none") == 0);
         EXPECT(strcmp(efforts[n_efforts - 1], "max") == 0);
         provider->destroy(provider);
@@ -65,26 +64,28 @@ static void test_messages_efforts_follow_thinking_mode(void)
         .default_base_url = "http://example.invalid/v1",
         .config_prefix = "providers.x",
         .wire = &WIRE_ANTHROPIC_MESSAGES,
-        .default_thinking_mode = ANTHROPIC_THINKING_BUDGET,
-        .efforts = ANTHROPIC_EFFORT_LADDER,
-        .n_efforts = ANTHROPIC_EFFORT_LADDER_N,
+        .efforts = EFFORT_LADDER,
+        .n_efforts = EFFORT_LADDER_N,
     };
     struct provider *provider = http_provider_new_preset(&preset);
     EXPECT(provider != NULL);
     if (provider) {
+        /* A pure Messages provider drops "minimal" (no Messages meaning) but keeps "none"
+         * (thinking off). */
         const char *const *efforts = NULL;
-        EXPECT(provider->list_efforts(provider, &efforts) == ANTHROPIC_EFFORT_LADDER_N);
-        EXPECT(efforts != NULL && strcmp(efforts[0], "low") == 0);
+        EXPECT(provider->list_efforts(provider, &efforts) == EFFORT_LADDER_N - 1);
+        EXPECT(efforts != NULL && strcmp(efforts[0], "none") == 0);
+        EXPECT(strcmp(efforts[1], "low") == 0);
 
         EXPECT(config_load("{\"providers\": {\"x\": {\"thinking_mode\": \"budget\"}}}") == 0);
         EXPECT(provider->list_efforts(provider, &efforts) == 0);
 
         EXPECT(config_load("{\"providers\": {\"x\": {\"thinking_mode\": \"adaptive\"}}}") == 0);
-        EXPECT(provider->list_efforts(provider, &efforts) == ANTHROPIC_EFFORT_LADDER_N);
+        EXPECT(provider->list_efforts(provider, &efforts) == EFFORT_LADDER_N - 1);
 
         /* A typo is not a pin: requests fall back to the default, so the ladder stays. */
         EXPECT(config_load("{\"providers\": {\"x\": {\"thinking_mode\": \"bugdet\"}}}") == 0);
-        EXPECT(provider->list_efforts(provider, &efforts) == ANTHROPIC_EFFORT_LADDER_N);
+        EXPECT(provider->list_efforts(provider, &efforts) == EFFORT_LADDER_N - 1);
         EXPECT(config_load(NULL) == 0);
         provider->destroy(provider);
     }
@@ -97,7 +98,7 @@ static void test_messages_efforts_follow_thinking_mode(void)
     if (provider) {
         const char *const *efforts = NULL;
         EXPECT(config_load("{\"providers\": {\"x\": {\"thinking_mode\": \"budget\"}}}") == 0);
-        EXPECT(provider->list_efforts(provider, &efforts) == ANTHROPIC_EFFORT_LADDER_N);
+        EXPECT(provider->list_efforts(provider, &efforts) == EFFORT_LADDER_N);
         EXPECT(config_load(NULL) == 0);
         provider->destroy(provider);
     }
@@ -143,7 +144,43 @@ static void test_api_override_stays_in_family(void)
     EXPECT(config_load(NULL) == 0);
 }
 
-#define MAX_REQUESTS 6
+/* The /models dialect and its auth scheme follow metadata_api, not the request wire: a Messages
+ * endpoint can front an OpenAI-shaped catalog and vice versa. The version header marks the
+ * Anthropic side; the probe hook exists only there. */
+static void test_metadata_api_override(void)
+{
+    EXPECT(config_load("{\"providers\": {\"x\": {\"metadata_api\": \"openai\"}}}") == 0);
+    struct http_provider_preset preset = {
+        .display_name = "x",
+        .default_base_url = "http://example.invalid/v1",
+        .config_prefix = "providers.x",
+        .wire = &WIRE_ANTHROPIC_MESSAGES,
+    };
+    struct provider *provider = http_provider_new_preset(&preset);
+    EXPECT(provider != NULL);
+    if (provider) {
+        char **headers = http_provider_metadata_headers(provider);
+        EXPECT(!headers_have_version(headers));
+        EXPECT(provider->probe_model == NULL);
+        string_array_free(headers);
+        provider->destroy(provider);
+    }
+
+    EXPECT(config_load("{\"providers\": {\"x\": {\"metadata_api\": \"anthropic\"}}}") == 0);
+    preset.wire = &WIRE_OPENAI_CHAT;
+    provider = http_provider_new_preset(&preset);
+    EXPECT(provider != NULL);
+    if (provider) {
+        char **headers = http_provider_metadata_headers(provider);
+        EXPECT(headers_have_version(headers));
+        EXPECT(provider->probe_model != NULL);
+        string_array_free(headers);
+        provider->destroy(provider);
+    }
+    EXPECT(config_load(NULL) == 0);
+}
+
+#define MAX_REQUESTS 8
 
 /* Serves one canned response per sequential connection, capturing each request. */
 struct wire_server {
@@ -268,7 +305,7 @@ static void test_model_wire_routing(void)
     write_catalog_fixture();
     struct wire_server server = {
         .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
-        .n_requests = 6,
+        .n_requests = 7,
     };
     pthread_t thread;
     int port = start_server(&server, &thread);
@@ -289,8 +326,6 @@ static void test_model_wire_routing(void)
         .config_prefix = "providers.zen",
         .catalog_id = "zen-test",
         .catalog_wires = 1,
-        /* The gateway recipes' compat-safe Messages default. */
-        .default_thinking_mode = ANTHROPIC_THINKING_BUDGET,
     };
     struct provider *provider = http_provider_new_preset(&preset);
     EXPECT(provider != NULL);
@@ -308,9 +343,12 @@ static void test_model_wire_routing(void)
     provider->stream(provider, &context, "claude-hint", log_error, &log, NULL, NULL);
     context.effort = NULL;
     provider->stream(provider, &context, "cfg-pin", log_error, &log, NULL, NULL);
+    context.effort = "minimal";
+    provider->stream(provider, &context, "claude-rule-1", log_error, &log, NULL, NULL);
+    context.effort = NULL;
     pthread_join(thread, NULL);
     close(server.listener_fd);
-    EXPECT(atomic_load(&server.served) == 6);
+    EXPECT(atomic_load(&server.served) == 7);
 
     EXPECT(strncmp(server.requests[0], "POST /messages HTTP", 19) == 0);
     EXPECT(strstr(server.requests[0], "x-api-key: sk-test\r\n") != NULL);
@@ -336,9 +374,66 @@ static void test_model_wire_routing(void)
     /* A catalog.models api pin routes like a snapshot hint. */
     EXPECT(strncmp(server.requests[5], "POST /messages HTTP", 19) == 0);
 
-    EXPECT(log.n_errors == 6); /* every canned reply is a 400 */
+    /* "minimal" can reach a rule-routed Messages model on a mixed provider; the wire cannot
+     * spell it, so the request clamps to the Messages minimum instead. */
+    EXPECT(strncmp(server.requests[6], "POST /messages HTTP", 19) == 0);
+    EXPECT(strstr(server.requests[6], "\"adaptive\"") != NULL);
+    EXPECT(strstr(server.requests[6], "\"effort\":\"low\"") != NULL);
+    EXPECT(strstr(server.requests[6], "\"minimal\"") == NULL);
+
+    EXPECT(log.n_errors == 7); /* every canned reply is a 400 */
     provider->destroy(provider);
     EXPECT(config_load(NULL) == 0);
+}
+
+/* The def-declared Messages defaults reach the request: adaptive thinking (not a compat-safe
+ * budget) and prompt-cache markers on. Effort "none" has no Messages spelling, so it disables
+ * thinking instead of riding output_config. */
+static void test_messages_defaults_follow_preset(void)
+{
+    struct wire_server server = {
+        .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+        .n_requests = 2,
+    };
+    pthread_t thread;
+    int port = start_server(&server, &thread);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+
+    char base_url[64];
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
+    struct http_provider_preset preset = {
+        .display_name = "fp",
+        .default_base_url = base_url,
+        .config_prefix = "providers.fp",
+        .wire = &WIRE_ANTHROPIC_MESSAGES,
+        .cache = "on",
+        .thinking_mode = "adaptive",
+        .strict_signatures = 1,
+    };
+    struct provider *provider = http_provider_new_preset(&preset);
+    EXPECT(provider != NULL);
+    if (!provider)
+        return;
+
+    struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
+    struct context context = {.items = items, .n_items = 1, .image_input = 1};
+    struct error_log log = {0};
+    provider->stream(provider, &context, "claude-x", log_error, &log, NULL, NULL);
+    context.effort = "none";
+    provider->stream(provider, &context, "claude-x", log_error, &log, NULL, NULL);
+    pthread_join(thread, NULL);
+    close(server.listener_fd);
+    EXPECT(atomic_load(&server.served) == 2);
+
+    EXPECT(strstr(server.requests[0], "\"adaptive\"") != NULL);
+    EXPECT(strstr(server.requests[0], "\"budget_tokens\"") == NULL);
+    EXPECT(strstr(server.requests[0], "\"cache_control\"") != NULL);
+
+    EXPECT(strstr(server.requests[1], "\"thinking\"") == NULL);
+    EXPECT(strstr(server.requests[1], "\"output_config\"") == NULL);
+    provider->destroy(provider);
 }
 
 static void stream_one_reasoned_turn(struct provider *provider, char *model, struct error_log *log)
@@ -455,7 +550,9 @@ int main(void)
     test_list_efforts_wiring();
     test_messages_efforts_follow_thinking_mode();
     test_api_override_stays_in_family();
+    test_metadata_api_override();
     test_model_wire_routing();
+    test_messages_defaults_follow_preset();
     test_interleaved_reasoning_replay();
     test_unsupported_protocol_reported();
     T_REPORT();

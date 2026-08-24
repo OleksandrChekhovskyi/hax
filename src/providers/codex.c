@@ -67,6 +67,7 @@ struct codex {
     /* Account this provider was constructed for (or explicitly switched to); credentials for any
      * other account are never adopted implicitly, even after the live auth is cleared. */
     char *account_pin;
+    char *catalog_id; /* owned; configuration storage may be replaced at runtime */
     /* Reloading found credentials for a different account, so requests report that instead of
      * "not logged in". */
     int account_blocked;
@@ -701,6 +702,7 @@ static void codex_destroy(struct provider *provider)
     model_meta_release(provider);
     codex_auth_release(&codex->auth);
     free(codex->account_pin);
+    free(codex->catalog_id);
     free(codex->name);
     free(codex->default_model);
     free(codex->default_effort);
@@ -710,10 +712,11 @@ static void codex_destroy(struct provider *provider)
     free(codex);
 }
 
-struct provider *codex_provider_new(const char *id)
+struct provider *codex_provider_new(const struct provider_def *def)
 {
-    static const char *const EXTRA_FIELDS[] = {"display_name", "extra_body", "extra_headers", NULL};
-    provider_warn_unused_fields(id, NULL, 0, EXTRA_FIELDS);
+    static const char *const EXTRA_FIELDS[] = {"display_name", "sort_models",   "catalog_id",
+                                               "extra_body",   "extra_headers", NULL};
+    provider_warn_unused_fields(def->id, NULL, 0, EXTRA_FIELDS);
     struct codex_auth auth;
     char *detail = NULL;
     enum codex_auth_status status = codex_auth_load(&auth, &detail);
@@ -753,9 +756,14 @@ struct provider *codex_provider_new(const char *id)
     const char *display_name = config_scoped_str("providers.codex", "display_name");
     codex->name = xstrdup(display_name && *display_name ? display_name : "codex");
     codex->base.name = codex->name;
-    codex->base.id = id;
-    /* Subscription responses report no cost, so estimate against equivalent OpenAI API rates. */
-    codex->base.catalog_id = "openai";
+    codex->base.id = def->id;
+    /* Subscription responses report no cost, so estimate against equivalent OpenAI API rates
+     * unless the block names another catalog identity (an empty value opts out). */
+    const char *catalog_id = config_str("providers.codex.catalog_id");
+    if (!catalog_id)
+        catalog_id = "openai";
+    codex->catalog_id = *catalog_id ? xstrdup(catalog_id) : NULL;
+    codex->base.catalog_id = codex->catalog_id;
     codex->base.default_model = codex->default_model;
     codex->base.default_effort = codex->default_effort;
     codex->base.stream = codex_stream;
@@ -772,20 +780,14 @@ struct provider *codex_provider_new(const char *id)
     return &codex->base;
 }
 
-static void codex_prepare_availability(const char *id, struct provider_availability *availability)
+void codex_prepare_availability(const struct provider_def *def, struct provider_availability *out)
 {
-    (void)id;
+    (void)def;
     struct codex_auth auth;
     enum codex_auth_status status = codex_auth_load(&auth, NULL);
     codex_auth_release(&auth);
 
-    availability->available = status == CODEX_AUTH_OK;
+    out->available = status == CODEX_AUTH_OK;
     const char *reason = codex_auth_status_reason(status);
-    availability->reason = reason ? xstrdup(reason) : NULL;
+    out->reason = reason ? xstrdup(reason) : NULL;
 }
-
-const struct provider_factory PROVIDER_CODEX = {
-    .id = "codex",
-    .new = codex_provider_new,
-    .prepare_availability = codex_prepare_availability,
-};
