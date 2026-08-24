@@ -7,6 +7,13 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Fixed
+
+- Chat Completions streams now surface upstream failures reported via OpenRouter's
+  `native_finish_reason` (`network_error`, `error`) or the normalized finish reason `error` as
+  errors instead of rendering an empty response, and an upstream failure takes precedence over a
+  simultaneous truncation reason. Other native stop reasons still behave as normal completions.
+
 ## [0.4.0] - 2026-08-22
 
 ### Added

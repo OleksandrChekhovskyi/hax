@@ -385,7 +385,18 @@ static void emit_terminal_event(struct chat_events *parser)
     emit_event(parser, &event);
 }
 
-static void handle_finish_reason(struct chat_events *parser, const char *reason)
+/* OpenRouter reports the upstream's own stop reason beside finish_reason, and a routed provider
+ * failure arrives as HTTP 200 with empty content, finish_reason "stop", and one of these
+ * sentinels. Other passthrough values ("end_turn", "stop_sequence", ...) are normal stops.
+ * Failures can also arrive as the normalized finish_reason "error" with no native detail. */
+static int native_finish_is_error(const char *native_reason)
+{
+    return native_reason &&
+           (strcmp(native_reason, "network_error") == 0 || strcmp(native_reason, "error") == 0);
+}
+
+static void handle_finish_reason(struct chat_events *parser, const char *reason,
+                                 const char *native_reason)
 {
     if (parser->terminal_emitted || parser->finish_received)
         return;
@@ -394,14 +405,19 @@ static void handle_finish_reason(struct chat_events *parser, const char *reason)
     finish_tool_calls(parser);
     parser->finish_received = 1;
 
+    int upstream_error =
+        native_finish_is_error(native_reason) || (reason && strcmp(reason, "error") == 0);
     int truncated =
         reason && (strcmp(reason, "length") == 0 || strcmp(reason, "content_filter") == 0);
-    if (!truncated) {
+    if (!truncated && !upstream_error) {
         parser->finish_reason = xstrdup(reason ? reason : "stop");
         return;
     }
 
-    if (strcmp(reason, "length") == 0 && parser->length_hint)
+    if (upstream_error)
+        parser->finish_error =
+            xasprintf("upstream error: %s", native_reason ? native_reason : reason);
+    else if (strcmp(reason, "length") == 0 && parser->length_hint)
         parser->finish_error = xasprintf("response incomplete: length — %s", parser->length_hint);
     else
         parser->finish_error = xasprintf("response incomplete: %s", reason);
@@ -461,8 +477,10 @@ static void handle_choice_delta(struct chat_events *parser, json_t *choice)
     }
 
     const char *finish_reason = json_string_value(json_object_get(choice, "finish_reason"));
-    if (finish_reason)
-        handle_finish_reason(parser, finish_reason);
+    const char *native_reason = json_string_value(json_object_get(choice, "native_finish_reason"));
+    /* A benign native reason alone is not a finish. */
+    if (finish_reason || native_finish_is_error(native_reason))
+        handle_finish_reason(parser, finish_reason, native_reason);
 }
 
 void chat_events_feed(struct chat_events *parser, const char *data)
