@@ -105,6 +105,9 @@ void format_context(char *out, size_t out_size, long context_tokens, long contex
 
 #define COST_DISPLAY_MIN 0.00005
 
+/* Fill `out` with `len` bytes from the system entropy source. Aborts on entropy failure. */
+void random_bytes(void *out, size_t len);
+
 /* Write a lowercase UUIDv4 (36 bytes plus the NUL terminator). Aborts on entropy failure. */
 void gen_uuid_v4(char out[37]);
 

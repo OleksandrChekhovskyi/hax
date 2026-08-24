@@ -7,6 +7,12 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- `/login` for the codex provider now offers a browser flow (authorization code with PKCE through
+  a `localhost` redirect) alongside device login, for organizations that block the device flow.
+  Device login remains the ssh-friendly path. See [docs/providers.md](docs/providers.md#codex).
+
 ### Fixed
 
 - Chat Completions streams now detect upstream provider failures signaled through the finish

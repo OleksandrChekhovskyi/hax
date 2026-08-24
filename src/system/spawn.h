@@ -20,6 +20,12 @@ int spawn_shell_wait(const char *shell_cmd);
  * user's to pin. */
 char *spawn_shell_cmd_force_utf8(char *shell_cmd);
 
+/* Fire-and-forget: run `argv` directly, detached and with stdio redirected to /dev/null. The
+ * child is reparented to init, so it is never waited on or killed and may outlive the caller.
+ * Returns 0 when the detached child was spawned — which says nothing about the exec or the
+ * program succeeding — and -1 when forking failed. */
+int spawn_detached(const char *const *argv);
+
 /* Run `argv` directly, with stdin and stderr redirected to /dev/null, and capture stdout.
  * Return malloc'd output of 1..max_bytes on a zero exit status, or NULL on error, timeout,
  * overflow, or empty output. `argv`, argv[0], and out_len must be non-NULL and timeout_ms must be

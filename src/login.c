@@ -32,7 +32,7 @@ struct login_method {
 static const struct login_method METHODS[] = {
     {
         .provider_id = "codex",
-        .detail = "ChatGPT account (device login)",
+        .detail = "ChatGPT account (browser or device login)",
         .login = codex_login_run,
         .logout = codex_logout_run,
         .status = codex_login_status,

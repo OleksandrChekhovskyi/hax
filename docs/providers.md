@@ -40,10 +40,12 @@ model, effort, and whether selection was automatic.
 
 ## Codex
 
-`codex` uses the ChatGPT Codex backend with a ChatGPT subscription login. Run `/login`, open the
-printed `auth.openai.com` page in a browser on any device, and approve the code. hax copies the code
-when a clipboard is available, stores the tokens in `~/.local/state/hax/auth.json`, and refreshes
-them automatically; the codex CLI is not needed. `/logout` removes the login.
+`codex` uses the ChatGPT Codex backend with a ChatGPT subscription login. Run `/login` and pick a
+flow: **browser** opens `auth.openai.com` in this machine's browser and finishes through a
+`localhost` redirect (some organizations only permit this flow), while **device code** shows a code
+to approve in a browser on any device, so it also works over ssh. Either way hax stores the tokens
+in `~/.local/state/hax/auth.json` and refreshes them automatically; the codex CLI is not needed.
+`/logout` removes the login.
 
 Alternatively, hax picks up credentials written by the official codex CLI:
 

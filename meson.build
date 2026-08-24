@@ -149,6 +149,7 @@ sources = files(
     'src/render/tool_render.c',
 
     'src/system/bg_job.c',
+    'src/system/browser.c',
     'src/system/fs.c',
     'src/system/git.c',
     'src/system/keepawake.c',
@@ -171,6 +172,8 @@ sources = files(
 
     'src/text/base64.c',
     'src/text/diff.c',
+    'src/text/sha256.c',
+    'src/text/urlencode.c',
     'src/text/utf8.c',
     'src/text/utf8_sanitize.c',
     'src/text/width.c',
@@ -194,6 +197,7 @@ sources = files(
     'src/transport/api_error.c',
     'src/transport/ca.c',
     'src/transport/http.c',
+    'src/transport/oauth.c',
     'src/transport/retry.c',
     'src/transport/sse.c',
 )

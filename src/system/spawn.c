@@ -160,6 +160,27 @@ int spawn_shell_wait(const char *shell_cmd)
     return status;
 }
 
+int spawn_detached(const char *const *argv)
+{
+    struct spawn_signal_state signals;
+    spawn_parent_ignore_signals(&signals);
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Double-fork: the grandchild is reparented to init, so a child that stays alive
+         * indefinitely is never waited on, killed, or left as a zombie. */
+        pid_t grandchild = fork();
+        if (grandchild != 0)
+            _exit(grandchild < 0 ? 127 : 0);
+        spawn_child_redirect_stdio_to_null();
+        spawn_child_reset_signals();
+        execvp(argv[0], (char *const *)argv);
+        _exit(127);
+    }
+    int status = pid < 0 ? -1 : spawn_wait_child(pid);
+    spawn_parent_restore_signals(&signals);
+    return status >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+}
+
 enum spawn_pipe_mode {
     SPAWN_PIPE_READ,
     SPAWN_PIPE_WRITE,

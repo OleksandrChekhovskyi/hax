@@ -223,9 +223,8 @@ char *shell_single_quote(const char *str)
     return buf_steal(&quoted);
 }
 
-void gen_uuid_v4(char out[37])
+void random_bytes(void *out, size_t len)
 {
-    uint8_t bytes[16];
     int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         hax_err("open /dev/urandom: %s", strerror(errno));
@@ -233,8 +232,8 @@ void gen_uuid_v4(char out[37])
     }
 
     size_t bytes_read = 0;
-    while (bytes_read < sizeof(bytes)) {
-        ssize_t count = read(fd, bytes + bytes_read, sizeof(bytes) - bytes_read);
+    while (bytes_read < len) {
+        ssize_t count = read(fd, (char *)out + bytes_read, len - bytes_read);
         if (count < 0) {
             if (errno == EINTR)
                 continue;
@@ -248,6 +247,12 @@ void gen_uuid_v4(char out[37])
         bytes_read += (size_t)count;
     }
     close(fd);
+}
+
+void gen_uuid_v4(char out[37])
+{
+    uint8_t bytes[16];
+    random_bytes(bytes, sizeof(bytes));
 
     bytes[6] = (bytes[6] & 0x0f) | 0x40; /* RFC 4122 version 4 */
     bytes[8] = (bytes[8] & 0x3f) | 0x80; /* RFC 4122 variant */

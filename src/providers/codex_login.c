@@ -1,23 +1,27 @@
 /* SPDX-License-Identifier: MIT */
 #include "providers/codex_login.h"
 
-#include <ctype.h>
 #include <jansson.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "busy.h"
 #include "cred_store.h"
 #include "trace.h"
 #include "util.h"
 #include "providers/codex_auth.h"
+#include "system/browser.h"
 #include "terminal/ansi.h"
 #include "terminal/clipboard.h"
+#include "terminal/picker.h"
 #include "terminal/ui.h"
+#include "text/urlencode.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
+#include "transport/oauth.h"
 #include "transport/retry.h"
 
 /* The codex CLI's public OAuth client. The device flow is OpenAI's own API rather than RFC 8628:
@@ -25,6 +29,7 @@
  * then go through the ordinary authorization-code exchange. */
 #define CODEX_OAUTH_CLIENT_ID "app_EMoamEEZ73f0CkXaXp7hrann"
 
+#define CODEX_AUTHORIZE_ENDPOINT       "https://auth.openai.com/oauth/authorize"
 #define CODEX_TOKEN_ENDPOINT           "https://auth.openai.com/oauth/token"
 #define CODEX_REVOKE_ENDPOINT          "https://auth.openai.com/oauth/revoke"
 #define CODEX_DEVICE_USERCODE_ENDPOINT "https://auth.openai.com/api/accounts/deviceauth/usercode"
@@ -37,6 +42,11 @@
 
 /* The user code expires after 15 minutes; polling past that can never succeed. */
 #define CODEX_DEVICE_DEADLINE_MS (15L * 60L * 1000L)
+
+#define CODEX_BROWSER_CALLBACK_PATH "/auth/callback"
+#define CODEX_BROWSER_DEADLINE_MS   (10L * 60L * 1000L)
+/* The only loopback ports in the OAuth client's server-side redirect allow-list. */
+static const int CODEX_BROWSER_PORTS[] = {1455, 1457};
 
 #define CODEX_POLL_INTERVAL_DEFAULT_S 5
 #define CODEX_POLL_INTERVAL_MAX_S     60
@@ -135,33 +145,41 @@ enum codex_poll_result codex_login_classify_poll(long http_status, const char *b
     return result;
 }
 
-static void buf_append_form_value(struct buf *form, const char *value)
-{
-    for (const char *cursor = value; *cursor; cursor++) {
-        unsigned char c = (unsigned char)*cursor;
-        if (isalnum(c) || strchr("-._~", c)) {
-            buf_append(form, cursor, 1);
-        } else {
-            char escaped[4];
-            snprintf(escaped, sizeof(escaped), "%%%02X", c);
-            buf_append_str(form, escaped);
-        }
-    }
-}
-
-char *codex_login_build_exchange_body(const char *authorization_code, const char *code_verifier)
+char *codex_login_build_exchange_body(const char *authorization_code, const char *code_verifier,
+                                      const char *redirect_uri)
 {
     struct buf form;
     buf_init(&form);
     buf_append_str(&form, "grant_type=authorization_code&code=");
-    buf_append_form_value(&form, authorization_code);
+    url_encode_append(&form, authorization_code);
     buf_append_str(&form, "&redirect_uri=");
-    buf_append_form_value(&form, CODEX_DEVICE_REDIRECT_URI);
+    url_encode_append(&form, redirect_uri);
     buf_append_str(&form, "&client_id=");
-    buf_append_form_value(&form, CODEX_OAUTH_CLIENT_ID);
+    url_encode_append(&form, CODEX_OAUTH_CLIENT_ID);
     buf_append_str(&form, "&code_verifier=");
-    buf_append_form_value(&form, code_verifier);
+    url_encode_append(&form, code_verifier);
     return buf_steal(&form);
+}
+
+char *codex_login_build_authorize_url(const char *code_challenge, const char *state,
+                                      const char *redirect_uri)
+{
+    struct buf url;
+    buf_init(&url);
+    buf_append_str(&url, CODEX_AUTHORIZE_ENDPOINT
+                   "?response_type=code&client_id=" CODEX_OAUTH_CLIENT_ID "&redirect_uri=");
+    url_encode_append(&url, redirect_uri);
+    buf_append_str(&url, "&scope=");
+    url_encode_append(&url, "openid profile email offline_access");
+    buf_append_str(&url, "&code_challenge=");
+    url_encode_append(&url, code_challenge);
+    buf_append_str(&url, "&code_challenge_method=S256&state=");
+    url_encode_append(&url, state);
+    /* Both extra parameters mirror the codex CLI: organization claims land in the id_token, and
+     * the simplified flow selects the ChatGPT-subscription consent page. */
+    buf_append_str(&url, "&id_token_add_organizations=true&codex_cli_simplified_flow=true"
+                         "&originator=hax");
+    return buf_steal(&url);
 }
 
 json_t *codex_login_entry_from_exchange(const char *body)
@@ -555,20 +573,19 @@ static int poll_for_authorization(const struct codex_device_auth *device_auth,
 static void register_form_secret(const char *value)
 {
     trace_register_secret(value);
-    struct buf encoded;
-    buf_init(&encoded);
-    buf_append_form_value(&encoded, value);
-    char *encoded_value = buf_steal(&encoded);
+    char *encoded_value = url_encode(value);
     trace_register_secret(encoded_value);
     free(encoded_value);
 }
 
 static json_t *exchange_authorization_code(const char *authorization_code,
-                                           const char *code_verifier, int *cancelled)
+                                           const char *code_verifier, const char *redirect_uri,
+                                           int *cancelled)
 {
     register_form_secret(authorization_code);
     register_form_secret(code_verifier);
-    char *exchange_body = codex_login_build_exchange_body(authorization_code, code_verifier);
+    char *exchange_body =
+        codex_login_build_exchange_body(authorization_code, code_verifier, redirect_uri);
 
     struct busy *busy = busy_begin("completing login...");
     char *response = NULL;
@@ -642,7 +659,35 @@ static enum cred_store_verdict install_login_entry(json_t *entry, json_t **repla
     return CRED_STORE_WRITE;
 }
 
-int codex_login_run(void)
+/* Store `entry` (borrowed) as the codex login and report the outcome. Returns 0 on success, -1
+ * when the store cannot be written (reported, with the orphaned grant revoked). */
+static int install_login_and_report(json_t *entry)
+{
+    trace_register_secret(json_string_value(json_object_get(entry, "refresh_token")));
+    struct login_install_ctx install = {.replacement = entry};
+    if (cred_store_update("codex", install_login_entry, &install) != 1) {
+        char *path = cred_store_file_path();
+        ui_error("cannot write %s", path ? path : "the hax state directory");
+        free(path);
+        free(install.superseded);
+        /* The grant would otherwise stay active with its token stored nowhere. */
+        revoke_refresh_token(json_string_value(json_object_get(entry, "refresh_token")),
+                             "revoking unsaved login...");
+        return -1;
+    }
+    if (install.superseded) {
+        revoke_refresh_token(install.superseded, "revoking previous login...");
+        free(install.superseded);
+    }
+
+    char *email = codex_jwt_email(json_string_value(json_object_get(entry, "id_token")));
+    ui_note("logged in%s%s — hax now manages this token", email ? " as " : "", email ? email : "");
+    free(email);
+    return 0;
+}
+
+/* Returns like codex_login_run. */
+static int login_with_device_flow(void)
 {
     struct codex_device_auth device_auth;
     int result = request_usercode(&device_auth);
@@ -671,35 +716,110 @@ int codex_login_run(void)
         return result;
 
     int cancelled = 0;
-    json_t *entry = exchange_authorization_code(authorization_code, code_verifier, &cancelled);
+    json_t *entry = exchange_authorization_code(authorization_code, code_verifier,
+                                                CODEX_DEVICE_REDIRECT_URI, &cancelled);
     free(authorization_code);
     free(code_verifier);
     if (!entry)
         return cancelled ? 1 : -1;
 
-    trace_register_secret(json_string_value(json_object_get(entry, "refresh_token")));
-    struct login_install_ctx install = {.replacement = entry};
-    if (cred_store_update("codex", install_login_entry, &install) != 1) {
-        char *path = cred_store_file_path();
-        ui_error("cannot write %s", path ? path : "the hax state directory");
-        free(path);
-        free(install.superseded);
-        /* The grant would otherwise stay active with its token stored nowhere. */
-        revoke_refresh_token(json_string_value(json_object_get(entry, "refresh_token")),
-                             "revoking unsaved login...");
-        json_decref(entry);
+    int installed = install_login_and_report(entry);
+    json_decref(entry);
+    return installed;
+}
+
+/* Returns like codex_login_run. */
+static int login_with_browser_flow(void)
+{
+    int port = 0;
+    struct oauth_listener *listener = oauth_listener_open(
+        CODEX_BROWSER_PORTS, sizeof(CODEX_BROWSER_PORTS) / sizeof(CODEX_BROWSER_PORTS[0]), &port);
+    if (!listener) {
+        ui_error("cannot listen on localhost port 1455 or 1457 (already in use?) — close the "
+                 "conflicting program or use device login");
         return -1;
     }
-    if (install.superseded) {
-        revoke_refresh_token(install.superseded, "revoking previous login...");
-        free(install.superseded);
+
+    char *code_verifier = NULL;
+    char *code_challenge = NULL;
+    oauth_pkce_generate(&code_verifier, &code_challenge);
+    char *state = oauth_state_generate();
+    /* The allow-listed redirect URIs are registered against the name "localhost"; the listener
+     * covers both loopback address families behind it. */
+    char *redirect_uri = xasprintf("http://localhost:%d" CODEX_BROWSER_CALLBACK_PATH, port);
+    char *authorize_url = codex_login_build_authorize_url(code_challenge, state, redirect_uri);
+
+    browser_open_url(authorize_url);
+    const char *clipboard_error = NULL;
+    int copied = clipboard_copy(authorize_url, strlen(authorize_url), &clipboard_error) == 0;
+    /* Flush-left so the URL's soft-wrapped rows stay aligned and terminals rejoin them on copy;
+     * an indented hard wrap would corrupt the copied URL. The other lines stay short enough not
+     * to wrap on narrow terminals. */
+    printf("  approve the login in your browser, or open\n");
+    printf(ANSI_BOLD "%s" ANSI_BOLD_OFF "\n", authorize_url);
+    if (copied)
+        printf(ANSI_DIM "  (link copied to clipboard)" ANSI_RESET "\n");
+    /* A blank line keeps the eventual outcome from running into the instructions. */
+    putchar('\n');
+
+    char *authorization_code = NULL;
+    char *denial = NULL;
+    struct busy *busy = busy_begin("waiting for browser approval...");
+    enum oauth_redirect_result redirect = oauth_listener_wait(
+        listener, CODEX_BROWSER_CALLBACK_PATH, state, monotonic_ms() + CODEX_BROWSER_DEADLINE_MS,
+        busy_tick, NULL, &authorization_code, &denial);
+    int cancelled = busy_end(busy);
+    oauth_listener_close(listener);
+
+    int result = -1;
+    if (cancelled || redirect == OAUTH_REDIRECT_CANCELLED) {
+        result = 1;
+    } else if (redirect == OAUTH_REDIRECT_CODE) {
+        json_t *entry = exchange_authorization_code(authorization_code, code_verifier, redirect_uri,
+                                                    &cancelled);
+        if (entry) {
+            result = install_login_and_report(entry);
+            json_decref(entry);
+        } else {
+            result = cancelled ? 1 : -1;
+        }
+    } else if (redirect == OAUTH_REDIRECT_DENIED) {
+        ui_error("login was rejected: %s", denial);
+    } else if (redirect == OAUTH_REDIRECT_TIMEOUT) {
+        ui_error("login timed out — no browser approval arrived");
+    } else {
+        ui_error("the localhost login listener failed");
     }
 
-    char *email = codex_jwt_email(json_string_value(json_object_get(entry, "id_token")));
-    ui_note("logged in%s%s — hax now manages this token", email ? " as " : "", email ? email : "");
-    free(email);
-    json_decref(entry);
-    return 0;
+    free(denial);
+    free(authorization_code);
+    free(authorize_url);
+    free(redirect_uri);
+    free(state);
+    free(code_challenge);
+    free(code_verifier);
+    return result;
+}
+
+int codex_login_run(void)
+{
+    /* Without a TTY the flow picker cannot run, and only the device flow works unattended. */
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
+        return login_with_device_flow();
+
+    const struct picker_item items[] = {
+        {.label = "browser", .detail = "sign in at auth.openai.com on this machine"},
+        {.label = "device code", .detail = "enter a code shown here — works over ssh"},
+    };
+    struct picker_opts options = {
+        .title = "log in to ChatGPT with",
+        .items = items,
+        .item_count = sizeof(items) / sizeof(items[0]),
+    };
+    long selected = picker_run(&options);
+    if (selected < 0)
+        return 1;
+    return selected == 0 ? login_with_browser_flow() : login_with_device_flow();
 }
 
 int codex_logout_run(void)
