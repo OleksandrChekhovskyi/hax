@@ -14,7 +14,7 @@
 #include "effort.h"
 #include "provider.h"
 #include "util.h"
-#include "providers/config_provider.h"
+#include "providers/provider_config.h"
 #include "render/ctrl_strip.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"

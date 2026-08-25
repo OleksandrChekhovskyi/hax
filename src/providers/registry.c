@@ -7,12 +7,13 @@
 #include <string.h>
 
 #include "config.h"
+#include "model_meta.h"
 #include "provider.h"
 #include "util.h"
 #include "providers/codex.h"
 #include "providers/codex_auth.h"
 #include "providers/codex_settings.h"
-#include "providers/config_provider.h"
+#include "providers/http_provider.h"
 #include "providers/llamacpp.h"
 #include "providers/mock.h"
 #include "providers/opencode.h"
@@ -268,13 +269,18 @@ const struct provider_def *provider_default(void)
 
 struct provider *provider_construct(const struct provider_def *def)
 {
-    struct provider *provider = def->construct ? def->construct(def) : provider_def_construct(def);
+    struct provider *provider = def->construct ? def->construct(def) : http_provider_new(def);
     if (!provider)
         return NULL;
     /* Base config every provider honors, whichever constructor built it. */
     char *key = xasprintf("providers.%s.sort_models", def->id);
     provider->keep_model_order = !config_bool_or(key, 1);
     free(key);
+    /* Warm metadata for the model the provider will serve first; harmless without a probe
+     * hook. */
+    const char *configured_model = config_str("model");
+    model_meta_refresh(provider, configured_model && *configured_model ? configured_model
+                                                                       : provider->default_model);
     return provider;
 }
 
@@ -291,5 +297,5 @@ void provider_prepare_availability(const struct provider_def *def,
         out->available = 1;
         return;
     }
-    provider_def_availability(def, out);
+    http_provider_availability(def, out);
 }

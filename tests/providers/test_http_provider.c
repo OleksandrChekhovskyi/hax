@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: MIT */
 #include <errno.h>
-#include <jansson.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -20,18 +19,17 @@
 #include "provider.h"
 #include "util.h"
 #include "providers/http_provider.h"
-#include "providers/wire.h"
+#include "providers/registry.h"
 #include "transport/http.h"
 
+/* The full ladder is the default offer; no_efforts opts a def out entirely. */
 static void test_list_efforts_wiring(void)
 {
-    struct http_provider_preset with_efforts = {
-        .display_name = "with-efforts",
-        .default_base_url = "http://example.invalid/v1",
-        .efforts = EFFORT_LADDER,
-        .n_efforts = EFFORT_LADDER_N,
+    struct provider_def with_efforts = {
+        .id = "with-efforts",
+        .base_url = "http://example.invalid/v1",
     };
-    struct provider *provider = http_provider_new_preset(&with_efforts);
+    struct provider *provider = http_provider_new(&with_efforts);
     EXPECT(provider != NULL);
     if (provider) {
         EXPECT(provider->list_models != NULL);
@@ -44,11 +42,12 @@ static void test_list_efforts_wiring(void)
         provider->destroy(provider);
     }
 
-    struct http_provider_preset without_efforts = {
-        .display_name = "without-efforts",
-        .default_base_url = "http://example.invalid/v1",
+    struct provider_def without_efforts = {
+        .id = "without-efforts",
+        .base_url = "http://example.invalid/v1",
+        .no_efforts = 1,
     };
-    provider = http_provider_new_preset(&without_efforts);
+    provider = http_provider_new(&without_efforts);
     EXPECT(provider != NULL);
     if (provider) {
         const char *const *efforts = NULL;
@@ -61,15 +60,12 @@ static void test_list_efforts_wiring(void)
  * budget/off pin hides it: an unconfigured budget default upgrades when an effort is chosen. */
 static void test_messages_efforts_follow_thinking_mode(void)
 {
-    struct http_provider_preset preset = {
-        .display_name = "x",
-        .default_base_url = "http://example.invalid/v1",
-        .config_prefix = "providers.x",
-        .wire = &WIRE_ANTHROPIC_MESSAGES,
-        .efforts = EFFORT_LADDER,
-        .n_efforts = EFFORT_LADDER_N,
+    struct provider_def def = {
+        .id = "x",
+        .api = "anthropic-messages",
+        .base_url = "http://example.invalid/v1",
     };
-    struct provider *provider = http_provider_new_preset(&preset);
+    struct provider *provider = http_provider_new(&def);
     EXPECT(provider != NULL);
     if (provider) {
         /* A pure Messages provider drops "minimal" (no Messages meaning) but keeps "none"
@@ -92,18 +88,18 @@ static void test_messages_efforts_follow_thinking_mode(void)
         provider->destroy(provider);
     }
 
-    /* On a mixed provider a budget pin affects only the Messages models, so the ladder must
-     * survive for the models routed to other wires. */
-    preset.catalog_wires = 1;
-    provider = http_provider_new_preset(&preset);
+    /* On a mixed provider — a model_apis rule routes some models to another wire — a budget pin
+     * affects only the Messages models, so the ladder must survive for the routed ones. */
+    EXPECT(config_load("{\"providers\": {\"x\": {\"thinking_mode\": \"budget\","
+                       " \"model_apis\": {\"gpt-*\": \"openai-completions\"}}}}") == 0);
+    provider = http_provider_new(&def);
     EXPECT(provider != NULL);
     if (provider) {
         const char *const *efforts = NULL;
-        EXPECT(config_load("{\"providers\": {\"x\": {\"thinking_mode\": \"budget\"}}}") == 0);
         EXPECT(provider->list_efforts(provider, &efforts) == EFFORT_LADDER_N);
-        EXPECT(config_load(NULL) == 0);
         provider->destroy(provider);
     }
+    EXPECT(config_load(NULL) == 0);
 }
 
 static int headers_have_version(char **headers)
@@ -114,17 +110,33 @@ static int headers_have_version(char **headers)
     return 0;
 }
 
-/* The version header marks the Messages wire, so it observes which family a provider landed
- * on: <prefix>.api must not move a provider across wire families in either direction. */
-static void test_api_override_stays_in_family(void)
+/* providers.<id>.api overlays an unpinned def's dialect in either direction — a custom Messages
+ * endpoint is declared exactly this way — with the metadata auth scheme following the resolved
+ * wire (the version header marks the Messages side). An unsupported value fails construction
+ * rather than guessing a protocol. */
+static void test_api_override_moves_wire(void)
 {
-    EXPECT(config_load("{\"providers\": {\"x\": {\"api\": \"anthropic-messages\"}}}") == 0);
-    struct http_provider_preset preset = {
-        .display_name = "x",
-        .default_base_url = "http://example.invalid/v1",
-        .config_prefix = "providers.x",
+    struct provider_def def = {
+        .id = "x",
+        .base_url = "http://example.invalid/v1",
     };
-    struct provider *provider = http_provider_new_preset(&preset);
+    EXPECT(config_load("{\"providers\": {\"x\": {\"api\": \"anthropic-messages\"}}}") == 0);
+    struct provider *provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        char **headers = http_provider_metadata_headers(provider);
+        EXPECT(headers_have_version(headers));
+        string_array_free(headers);
+        provider->destroy(provider);
+    }
+
+    struct provider_def messages_def = {
+        .id = "x",
+        .api = "anthropic-messages",
+        .base_url = "http://example.invalid/v1",
+    };
+    EXPECT(config_load("{\"providers\": {\"x\": {\"api\": \"responses\"}}}") == 0);
+    provider = http_provider_new(&messages_def);
     EXPECT(provider != NULL);
     if (provider) {
         char **headers = http_provider_metadata_headers(provider);
@@ -133,16 +145,10 @@ static void test_api_override_stays_in_family(void)
         provider->destroy(provider);
     }
 
-    EXPECT(config_load("{\"providers\": {\"x\": {\"api\": \"responses\"}}}") == 0);
-    preset.wire = &WIRE_ANTHROPIC_MESSAGES;
-    provider = http_provider_new_preset(&preset);
-    EXPECT(provider != NULL);
-    if (provider) {
-        char **headers = http_provider_metadata_headers(provider);
-        EXPECT(headers_have_version(headers));
-        string_array_free(headers);
-        provider->destroy(provider);
-    }
+    EXPECT(config_load("{\"providers\": {\"x\": {\"api\": \"bogus\"}}}") == 0);
+    unsigned long diagnostics_before = hax_diag_sequence();
+    EXPECT(http_provider_new(&def) == NULL);
+    EXPECT(hax_diag_sequence() == diagnostics_before + 1);
     EXPECT(config_load(NULL) == 0);
 }
 
@@ -152,13 +158,12 @@ static void test_api_override_stays_in_family(void)
 static void test_metadata_api_override(void)
 {
     EXPECT(config_load("{\"providers\": {\"x\": {\"metadata_api\": \"openai\"}}}") == 0);
-    struct http_provider_preset preset = {
-        .display_name = "x",
-        .default_base_url = "http://example.invalid/v1",
-        .config_prefix = "providers.x",
-        .wire = &WIRE_ANTHROPIC_MESSAGES,
+    struct provider_def messages_def = {
+        .id = "x",
+        .api = "anthropic-messages",
+        .base_url = "http://example.invalid/v1",
     };
-    struct provider *provider = http_provider_new_preset(&preset);
+    struct provider *provider = http_provider_new(&messages_def);
     EXPECT(provider != NULL);
     if (provider) {
         char **headers = http_provider_metadata_headers(provider);
@@ -169,8 +174,11 @@ static void test_metadata_api_override(void)
     }
 
     EXPECT(config_load("{\"providers\": {\"x\": {\"metadata_api\": \"anthropic\"}}}") == 0);
-    preset.wire = &WIRE_OPENAI_CHAT;
-    provider = http_provider_new_preset(&preset);
+    struct provider_def chat_def = {
+        .id = "x",
+        .base_url = "http://example.invalid/v1",
+    };
+    provider = http_provider_new(&chat_def);
     EXPECT(provider != NULL);
     if (provider) {
         char **headers = http_provider_metadata_headers(provider);
@@ -325,14 +333,13 @@ static void test_model_wire_routing(void)
                        " \"cfg-pin\": {\"api\": \"anthropic-messages\"}}}}}") == 0);
     char base_url[64];
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
-    struct http_provider_preset preset = {
-        .display_name = "zen",
-        .default_base_url = base_url,
-        .config_prefix = "providers.zen",
+    struct provider_def def = {
+        .id = "zen",
+        .api = "catalog",
+        .base_url = base_url,
         .catalog_id = "zen-test",
-        .catalog_wires = 1,
     };
-    struct provider *provider = http_provider_new_preset(&preset);
+    struct provider *provider = http_provider_new(&def);
     EXPECT(provider != NULL);
     if (!provider)
         return;
@@ -394,7 +401,7 @@ static void test_model_wire_routing(void)
 /* The def-declared Messages defaults reach the request: adaptive thinking (not a compat-safe
  * budget) and prompt-cache markers on. Effort "none" has no Messages spelling, so it disables
  * thinking instead of riding output_config. */
-static void test_messages_defaults_follow_preset(void)
+static void test_messages_defaults_follow_def(void)
 {
     struct wire_server server = {
         .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
@@ -408,16 +415,15 @@ static void test_messages_defaults_follow_preset(void)
 
     char base_url[64];
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
-    struct http_provider_preset preset = {
-        .display_name = "fp",
-        .default_base_url = base_url,
-        .config_prefix = "providers.fp",
-        .wire = &WIRE_ANTHROPIC_MESSAGES,
+    struct provider_def def = {
+        .id = "fp",
+        .api = "anthropic-messages",
+        .base_url = base_url,
         .cache = "on",
         .thinking_mode = "adaptive",
         .strict_signatures = 1,
     };
-    struct provider *provider = http_provider_new_preset(&preset);
+    struct provider *provider = http_provider_new(&def);
     EXPECT(provider != NULL);
     if (!provider)
         return;
@@ -503,6 +509,17 @@ static const struct http_auth_ops FAKE_AUTH_OPS = {
     .destroy = fake_auth_destroy,
 };
 
+/* The state the next fake_auth_source hands out; the def hook takes no test-owned context. */
+static struct fake_auth *fake_auth_next;
+
+static int fake_auth_source(const struct provider_def *def, struct http_auth_source *out)
+{
+    (void)def;
+    out->ops = &FAKE_AUTH_OPS;
+    out->state = fake_auth_next;
+    return 0;
+}
+
 /* An auth source replaces the API key: prepare gates the stream, its headers authenticate every
  * attempt, a 401 gets one bounded recovery with rotated credentials, and a terminal 401 reports
  * the source's message. */
@@ -523,12 +540,13 @@ static void test_auth_source_stream(void)
     char base_url[64];
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
     struct fake_auth auth = {.can_recover = 1, .token_generation = 1};
-    struct http_provider_preset preset = {
-        .display_name = "fa",
-        .default_base_url = base_url,
-        .auth = {.ops = &FAKE_AUTH_OPS, .state = &auth},
+    fake_auth_next = &auth;
+    struct provider_def def = {
+        .id = "fa",
+        .base_url = base_url,
+        .auth_source = fake_auth_source,
     };
-    struct provider *provider = http_provider_new_preset(&preset);
+    struct provider *provider = http_provider_new(&def);
     EXPECT(provider != NULL);
     if (!provider)
         return;
@@ -563,12 +581,13 @@ static void test_auth_source_stream(void)
 static void test_auth_source_logged_out(void)
 {
     struct fake_auth auth = {.logged_out = 1};
-    struct http_provider_preset preset = {
-        .display_name = "fa",
-        .default_base_url = "http://127.0.0.1:1",
-        .auth = {.ops = &FAKE_AUTH_OPS, .state = &auth},
+    fake_auth_next = &auth;
+    struct provider_def def = {
+        .id = "fa",
+        .base_url = "http://127.0.0.1:1",
+        .auth_source = fake_auth_source,
     };
-    struct provider *provider = http_provider_new_preset(&preset);
+    struct provider *provider = http_provider_new(&def);
     EXPECT(provider != NULL);
     if (!provider)
         return;
@@ -583,9 +602,15 @@ static void test_auth_source_logged_out(void)
     provider->destroy(provider);
 }
 
-/* Preset-declared body members ride every request under the user's extra_body, and
+static void fake_load_defaults(char **default_model, char **default_effort)
+{
+    *default_model = xstrdup("companion-model");
+    *default_effort = xstrdup("high");
+}
+
+/* Def-declared body members ride every request under the user's extra_body, and
  * companion-tool defaults land on the provider. */
-static void test_preset_extra_body_and_defaults(void)
+static void test_def_extra_body_and_defaults(void)
 {
     struct wire_server server = {
         .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
@@ -599,20 +624,17 @@ static void test_preset_extra_body_and_defaults(void)
 
     char base_url[64];
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
-    json_t *extra_body = json_loads("{\"text\": {\"verbosity\": \"low\"}}", 0, NULL);
-    struct http_provider_preset preset = {
-        .display_name = "fx",
-        .default_base_url = base_url,
-        .config_prefix = "providers.fx",
-        .default_model = "companion-model",
-        .default_effort = "high",
-        .extra_body = extra_body,
+    struct provider_def def = {
+        .id = "fx",
+        .base_url = base_url,
+        .extra_body = "{\"text\": {\"verbosity\": \"low\"}}",
+        .load_defaults = fake_load_defaults,
     };
     struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
     struct context context = {.items = items, .n_items = 1, .image_input = 1};
     struct error_log log = {0};
 
-    struct provider *provider = http_provider_new_preset(&preset);
+    struct provider *provider = http_provider_new(&def);
     EXPECT(provider != NULL);
     if (provider) {
         EXPECT_STR_EQ(provider->default_model, "companion-model");
@@ -621,16 +643,15 @@ static void test_preset_extra_body_and_defaults(void)
         provider->destroy(provider);
     }
 
-    /* The user's member overrides the preset's. */
+    /* The user's member overrides the def's. */
     EXPECT(config_load("{\"providers\": {\"fx\": {\"extra_body\":"
                        " {\"text\": {\"verbosity\": \"high\"}}}}}") == 0);
-    provider = http_provider_new_preset(&preset);
+    provider = http_provider_new(&def);
     EXPECT(provider != NULL);
     if (provider) {
         provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
         provider->destroy(provider);
     }
-    json_decref(extra_body);
 
     pthread_join(thread, NULL);
     close(server.listener_fd);
@@ -670,15 +691,14 @@ static void test_interleaved_reasoning_replay(void)
 
     char base_url[64];
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
-    struct http_provider_preset preset = {
-        .display_name = "zen",
-        .default_base_url = base_url,
-        .config_prefix = "providers.zen",
+    struct provider_def def = {
+        .id = "zen",
+        .base_url = base_url,
         .catalog_id = "zen-test",
     };
     struct error_log log = {0};
 
-    struct provider *provider = http_provider_new_preset(&preset);
+    struct provider *provider = http_provider_new(&def);
     EXPECT(provider != NULL);
     if (provider) {
         stream_one_reasoned_turn(provider, "think-hint", &log);
@@ -688,7 +708,7 @@ static void test_interleaved_reasoning_replay(void)
 
     EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_roundtrip\": \"reasoning\"}}}") ==
            0);
-    provider = http_provider_new_preset(&preset);
+    provider = http_provider_new(&def);
     EXPECT(provider != NULL);
     if (provider) {
         stream_one_reasoned_turn(provider, "think-hint", &log);
@@ -696,7 +716,7 @@ static void test_interleaved_reasoning_replay(void)
     }
 
     EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_roundtrip\": \"off\"}}}") == 0);
-    provider = http_provider_new_preset(&preset);
+    provider = http_provider_new(&def);
     EXPECT(provider != NULL);
     if (provider) {
         stream_one_reasoned_turn(provider, "think-hint", &log);
@@ -704,7 +724,7 @@ static void test_interleaved_reasoning_replay(void)
     }
 
     EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_roundtrip\": \"auto\"}}}") == 0);
-    provider = http_provider_new_preset(&preset);
+    provider = http_provider_new(&def);
     EXPECT(provider != NULL);
     if (provider) {
         stream_one_reasoned_turn(provider, "think-hint", &log);
@@ -729,13 +749,13 @@ static void test_interleaved_reasoning_replay(void)
 /* A catalog hint naming an unimplemented protocol fails cleanly before any request. */
 static void test_unsupported_protocol_reported(void)
 {
-    struct http_provider_preset preset = {
-        .display_name = "zen",
-        .default_base_url = "http://127.0.0.1:1",
+    struct provider_def def = {
+        .id = "zen",
+        .api = "catalog",
+        .base_url = "http://127.0.0.1:1",
         .catalog_id = "zen-test",
-        .catalog_wires = 1,
     };
-    struct provider *provider = http_provider_new_preset(&preset);
+    struct provider *provider = http_provider_new(&def);
     EXPECT(provider != NULL);
     if (!provider)
         return;
@@ -754,13 +774,13 @@ int main(void)
     signal(SIGPIPE, SIG_IGN);
     test_list_efforts_wiring();
     test_messages_efforts_follow_thinking_mode();
-    test_api_override_stays_in_family();
+    test_api_override_moves_wire();
     test_metadata_api_override();
     test_model_wire_routing();
-    test_messages_defaults_follow_preset();
+    test_messages_defaults_follow_def();
     test_auth_source_stream();
     test_auth_source_logged_out();
-    test_preset_extra_body_and_defaults();
+    test_def_extra_body_and_defaults();
     test_interleaved_reasoning_replay();
     test_unsupported_protocol_reported();
     T_REPORT();

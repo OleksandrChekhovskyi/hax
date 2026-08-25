@@ -14,6 +14,7 @@
 #include "harness.h"
 #include "provider.h"
 #include "providers/http_provider.h"
+#include "providers/registry.h"
 
 struct test_server {
     int listener_fd;
@@ -93,14 +94,13 @@ static int list_from_server(const char *response, struct model_info **models, si
 
     char base_url[64];
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
-    struct http_provider_preset preset = {
-        .display_name = "flat",
-        .default_base_url = base_url,
-        .config_prefix = "providers.flat",
+    struct provider_def def = {
+        .id = "flat",
+        .base_url = base_url,
         .parse_model = parse_context_length,
     };
     config_set_override("providers.flat.api_key", "sk-flat");
-    struct provider *provider = http_provider_new_preset(&preset);
+    struct provider *provider = http_provider_new(&def);
     config_set_override("providers.flat.api_key", NULL);
     EXPECT(provider != NULL);
 
@@ -118,7 +118,7 @@ static int list_from_server(const char *response, struct model_info **models, si
     return result;
 }
 
-/* Usable ids are listed in server order, refined by the preset's parse hook; an id-less entry
+/* Usable ids are listed in server order, refined by the def's parse hook; an id-less entry
  * is skipped. */
 static void test_lists_flat_models(void)
 {

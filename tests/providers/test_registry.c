@@ -94,9 +94,8 @@ static void test_display_name_resolution(void)
     unsetenv("HAX_OPENAI_DISPLAY_NAME");
 }
 
-/* Capability hooks declared on a def reach the constructed provider — including the
- * preset-level /models entry parser the listing applies, not just the post-construction
- * vtable hooks. */
+/* Capability hooks declared on a def reach the constructed provider — including the /models
+ * entry parser the listing applies, not just the vtable hooks. */
 static void test_def_hooks_reach_provider(void)
 {
     unsetenv("HAX_MODEL");

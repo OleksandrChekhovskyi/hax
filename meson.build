@@ -39,7 +39,8 @@ add_project_arguments(
 # clang-tidy does not report findings inside third-party headers (Homebrew
 # installs them outside the default system include path).
 libcurl = dependency('libcurl', include_type: 'system')
-jansson = dependency('jansson', include_type: 'system')
+# >=2.13 for json_object_update_recursive.
+jansson = dependency('jansson', version: '>=2.13', include_type: 'system')
 threads = dependency('threads')
 
 # FreeBSD resolves isfinite() to a libm symbol rather than a compiler builtin,
@@ -120,7 +121,7 @@ sources = files(
     'src/providers/codex_auth.c',
     'src/providers/codex_login.c',
     'src/providers/codex_settings.c',
-    'src/providers/config_provider.c',
+    'src/providers/provider_config.c',
     'src/providers/http_provider.c',
     'src/providers/llamacpp.c',
     'src/providers/mock.c',

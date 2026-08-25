@@ -5,13 +5,12 @@
 #include <jansson.h>
 
 #include "provider.h"
-#include "providers/chat_body.h"
-#include "providers/wire.h"
+
+struct provider_def; /* providers/registry.h */
 
 /* Generic streaming-HTTP provider: endpoint, credential, and configuration resolution, request
- * policy, and stream mechanics for any wire dialect. Concrete providers are presets over this
- * core; modules with their own metadata protocol override the relevant provider callbacks after
- * construction, using the accessors below. */
+ * policy, and stream mechanics for any wire dialect. Every provider is built from its
+ * provider_def; hook modules implementing their own metadata protocol use the accessors below. */
 
 /* Per-entry /models refinement: fill capabilities and pricing from one listing entry. `out` is
  * initialized and already owns the entry's id. */
@@ -47,73 +46,19 @@ struct http_auth_source {
     void *state; /* owned by the source; released by ops->destroy */
 };
 
-/* The dialect of the provider's model-metadata side — the /models listing and probe, and the
- * auth scheme those requests use. A property of the endpoint, not of the per-model request
- * wire: a mixed-protocol gateway serves one catalog shape however each model is spoken to. */
-enum http_metadata_api {
-    HTTP_METADATA_BY_WIRE = 0, /* follow the default wire's family */
-    HTTP_METADATA_OPENAI,      /* flat {"data": [...]} list, Bearer auth */
-    HTTP_METADATA_ANTHROPIC,   /* cursor-paginated list, x-api-key + version auth */
-};
+/* Build the provider described by `def`: its data overlaid by the providers.<id> config block
+ * (registry.h), its capability hooks installed. NULL after reporting a user-actionable error;
+ * callers normally go through provider_construct instead. */
+struct provider *http_provider_new(const struct provider_def *def);
 
-struct http_provider_preset {
-    const char *display_name;     /* required */
-    const char *default_base_url; /* required when <prefix>.base_url does not resolve */
-    const char *api_key_env;      /* fallback after the configured API key */
-    /* Dynamic credential source; the provider takes ownership of its state. Zeroed
-     * authenticates with the resolved API key instead. */
-    struct http_auth_source auth;
-    /* Defaults mirrored from live companion-tool state; copied. NULL means none. */
-    const char *default_model;
-    const char *default_effort;
-    /* Endpoint-required body members, merged into every request under the user's
-     * <prefix>.extra_body; borrowed during construction. */
-    const json_t *extra_body;
-    const char *config_prefix; /* config namespace; NULL reads no user configuration */
-    int pin_base_url;          /* ignore <prefix>.base_url: a first-party key must not
-                                  follow a configured URL to another host */
-    const char *catalog_id;    /* default under <prefix>.catalog_id; copied; NULL disables
-                                  catalog metadata (an explicit empty config value opts out) */
-    /* Default request protocol; NULL means Chat Completions. <prefix>.api may move an unpinned
-     * OpenAI-family choice between the two OpenAI protocols; pinned endpoints and the Messages
-     * wire (whose knobs differ) are fixed. */
-    const struct wire *wire;
-    enum http_metadata_api metadata_api;
-    /* Resolve each model's wire from the catalog api hint: for gateways serving models over
-     * different protocols behind one base URL. <prefix>.model_apis rules take precedence and
-     * work without this flag; unmatched models fall back to the default wire. */
-    int catalog_wires;
+/* Availability for the /provider picker, from the same def and config resolution as
+ * construction. A keyed (cloud) def — one with a declared api_key_env or an inline api_key —
+ * is selectable iff that key resolves, with no network probe (fast, and a 401 would be the
+ * only extra signal). A keyless one counts its resolved base_url as availability, except for
+ * defs that opt into a GET <base>/models reachability probe. `out` need not be initialized. */
+void http_provider_availability(const struct provider_def *def, struct provider_availability *out);
 
-    /* Cache-marker default under <prefix>.cache: "auto" plans chat markers from model rates,
-     * "on" always sends them (the Messages side knows only on/off); NULL sends none. */
-    const char *cache;
-
-    /* Chat Completions / Responses policy. */
-    int send_cache_key_default;
-    int request_cost; /* request OpenRouter usage cost */
-    enum chat_reasoning_format reasoning_format;
-    const char *reasoning_replay_field; /* copied; NULL disables replay */
-
-    /* Messages policy. */
-    const char *thinking_mode; /* default mode under <prefix>.thinking_mode; NULL → budget */
-    int strict_signatures;     /* the endpoint validates thinking-block signatures, so unsigned
-                                  blocks are dropped rather than replayed and rejected */
-
-    const char *const *extra_headers; /* NULL-terminated; copied */
-
-    /* Borrowed for the provider lifetime. NULL/0 disables the effort picker. On the Messages
-     * wire the list is offered only while adaptive thinking is active. */
-    const char *const *efforts;
-    size_t n_efforts;
-    const char *length_hint; /* borrowed for the provider lifetime */
-
-    http_parse_model_cb parse_model;
-};
-
-/* Preset strings need only remain valid during construction unless marked borrowed above. */
-struct provider *http_provider_new_preset(const struct http_provider_preset *preset);
-
-/* Accessors for preset modules implementing their own metadata callbacks. */
+/* Accessors for hook modules implementing their own metadata callbacks. */
 const char *http_provider_base_url(const struct provider *provider);
 int http_provider_has_api_key(const struct provider *provider);
 /* The resolved key, or NULL; borrowed for the provider's lifetime. */
@@ -122,10 +67,8 @@ const char *http_provider_api_key(const struct provider *provider);
  * metadata dialect (x-api-key plus the version header on the Anthropic side); free with
  * string_array_free. */
 char **http_provider_metadata_headers(const struct provider *provider);
-/* The preset's per-entry /models refinement hook, or NULL. */
+/* The def's per-entry /models refinement hook, or NULL. */
 http_parse_model_cb http_provider_parse_model(const struct provider *provider);
-/* The metadata dialect the constructor resolved and installed. */
-enum http_metadata_api http_provider_metadata_api(const struct provider *provider);
 
 /* The provider's credential source; its ops member is NULL when the provider authenticates
  * with an API key instead. */

@@ -1,31 +1,14 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_PROVIDERS_CONFIG_PROVIDER_H
-#define HAX_PROVIDERS_CONFIG_PROVIDER_H
+#ifndef HAX_PROVIDERS_PROVIDER_CONFIG_H
+#define HAX_PROVIDERS_PROVIDER_CONFIG_H
 
 #include <jansson.h>
 #include <stddef.h>
 
-#include "provider.h"
-#include "providers/registry.h"
-#include "providers/wire.h"
-
-/* Generic, data-driven provider construction.
- *
- * Every field of a provider_def resolves as the providers.<id> config block overlaid on the
- * def's defaults, so one constructor serves shipped and user-defined providers alike. The API
- * key is the one value read from the environment, via a def- or config-declared api_key_env:
- * a secret belongs in the environment, not the config file. */
-
-/* Build the provider described by `def` from its config-overlaid data and capability hooks.
- * Returns NULL after reporting a user-actionable error. Construct overrides bypass this;
- * callers normally go through provider_construct in registry.h instead. */
-struct provider *provider_def_construct(const struct provider_def *def);
-
-/* Availability for the /provider picker. A keyed (cloud) provider — one with a declared
- * api_key_env or an inline api_key — is selectable iff that key resolves, with no network
- * probe (fast, and a 401 would be the only extra signal). A keyless one counts its configured
- * base_url as availability, except for defs that opt into a reachability probe. */
-void provider_def_availability(const struct provider_def *def, struct provider_availability *out);
+/* The providers.<name> config vocabulary: the field inventory, the unused-field lint, and
+ * per-field resolution helpers, shared by the generic constructor (http_provider_new) and the
+ * hook modules. The API key is the one value read from the environment, via a def- or
+ * config-declared api_key_env: a secret belongs in the environment, not the config file. */
 
 /* Field vocabulary of a providers.<name> block. The inventory is declarative only: value
  * acceptance lives in the dialect constructors, and the env-alias rows in config.c project a
@@ -59,11 +42,12 @@ struct provider_field {
 /* The full inventory; *n receives its length. */
 const struct provider_field *provider_fields(size_t *n);
 
-/* Warn about providers.<name> members nothing consumes. A member is consumed by `wire`'s
- * dialect fields (NULL: none), by `extra_classes`, by being a registered per-provider
- * setting, or by the NULL-terminated `extra` allowlist (may be NULL). Warnings never fail
- * construction, so a config written for a newer hax still runs. */
-void provider_warn_unused_fields(const char *name, const struct wire *wire, unsigned extra_classes,
+/* Warn about providers.<name> members nothing consumes. A member is consumed by being in
+ * `classes` — the resolved dialect's class plus the def traits the caller determined — by
+ * being a registered per-provider setting, or by the NULL-terminated `extra` allowlist (may
+ * be NULL). `api_label` names the dialect in the message. Warnings never fail construction,
+ * so a config written for a newer hax still runs. */
+void provider_warn_unused_fields(const char *name, const char *api_label, unsigned classes,
                                  const char *const *extra);
 
 /* Resolve the provider's credential: inline <prefix>.api_key, else the named environment
@@ -81,16 +65,10 @@ const char *provider_cache_ttl(const char *config_prefix);
  * dropped with a warning, as is a non-object value. */
 json_t *provider_extra_body(const char *config_prefix);
 
-/* Merge extra-body members into `body` (NULL `extra_body` is a no-op). A member overrides the
- * built field of the same name, recursing where both sides are objects so a nested member
- * extends rather than replaces a built block. Merged values are shared with `extra_body`, so
- * the caller must not mutate `body` afterwards. */
-void provider_extra_body_apply(json_t *body, const json_t *extra_body);
-
 /* Resolve <prefix>.extra_headers, an object of header name/value members, into an owned
  * NULL-terminated array of "Name: value" strings for every request to the provider, or NULL.
  * A "$NAME" value reads the environment variable NAME, like an inline api_key. Invalid names
  * and values are dropped with a warning. */
 char **provider_extra_headers(const char *config_prefix);
 
-#endif /* HAX_PROVIDERS_CONFIG_PROVIDER_H */
+#endif /* HAX_PROVIDERS_PROVIDER_CONFIG_H */

@@ -7,8 +7,8 @@
 #include "harness.h"
 #include "provider.h"
 #include "util.h"
-#include "providers/config_provider.h"
 #include "providers/opencode.h"
+#include "providers/provider_config.h"
 #include "providers/registry.h"
 
 /* The env-alias rows registered in config.c for the shipped -compatible blocks must project
@@ -67,8 +67,8 @@ static void test_cache_ttl_resolution(void)
     config_set_override("providers.ttltest.cache_ttl", NULL);
 }
 
-/* extra_body survives config-load scalar normalization with its JSON types intact, drops
- * protocol-owned members with one warning each, and merges over a built body recursively. */
+/* extra_body survives config-load scalar normalization with its JSON types intact and drops
+ * protocol-owned members with one warning each. */
 static void test_extra_body(void)
 {
     unsigned long diagnostics_before = hax_diag_sequence();
@@ -89,18 +89,6 @@ static void test_extra_body(void)
     json_t *routing = json_object_get(extra, "provider");
     EXPECT(json_is_false(json_object_get(routing, "allow_fallbacks")));
     EXPECT(json_is_array(json_object_get(routing, "order")));
-
-    /* A member overrides the built field; an object member extends a built object; members
-     * the extra body never mentions survive. */
-    json_t *body = json_pack("{s:s, s:f, s:{s:s}}", "model", "m", "temperature", 1.0, "provider",
-                             "sort", "price");
-    provider_extra_body_apply(body, extra);
-    EXPECT_STR_EQ(json_string_value(json_object_get(body, "model")), "m");
-    EXPECT(json_real_value(json_object_get(body, "temperature")) == 0.25);
-    json_t *merged = json_object_get(body, "provider");
-    EXPECT_STR_EQ(json_string_value(json_object_get(merged, "sort")), "price");
-    EXPECT(json_is_array(json_object_get(merged, "order")));
-    json_decref(body);
     json_decref(extra);
 
     /* The flat-dotted spelling is exempt from normalization too. */
