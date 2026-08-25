@@ -29,7 +29,7 @@ static const struct provider_field PROVIDER_FIELDS[] = {
      * here, so the message can say the value is pinned instead of merely unused. */
     {.leaf = "api",                 .dialects = FIELD_ANY},
     {.leaf = "base_url",            .dialects = FIELD_ANY},
-    {.leaf = "api_key",             .dialects = FIELD_ANY, .secret = 1},
+    {.leaf = "api_key",             .dialects = PROVIDER_FIELD_KEYED, .secret = 1},
     {.leaf = "api_key_env",         .dialects = PROVIDER_FIELD_UNPINNED},
     {.leaf = "display_name",        .dialects = FIELD_ANY},
     {.leaf = "catalog_id",          .dialects = FIELD_ANY},
@@ -296,7 +296,7 @@ void provider_warn_unused_fields(const char *name, const struct wire *wire, unsi
         } else if (field) {
             if (field->dialects & dialects) {
                 ; /* consumed by this provider */
-            } else if (field->dialects & ~PROVIDER_FIELD_UNPINNED) {
+            } else if (field->dialects & FIELD_ANY) {
                 /* The dialect wording wins whenever some wire does consume the field. */
                 hax_warn("provider '%s': field '%s' is not used by %s providers", name, members[i],
                          api_label);
@@ -323,7 +323,7 @@ void provider_warn_unused_wire_fields(const char *name, const struct wire *defau
         if (!wire || wire == &WIRE_ANTHROPIC_MESSAGES)
             wire = default_wire;
     }
-    provider_warn_unused_fields(name, wire, 0, extra);
+    provider_warn_unused_fields(name, wire, PROVIDER_FIELD_KEYED, extra);
 }
 
 /* Resolve providers.<name>.<leaf> from config (override → file/state; the named lane has no
@@ -398,8 +398,12 @@ struct provider *provider_def_construct(const struct provider_def *def)
         metadata_api = HTTP_METADATA_ANTHROPIC;
 
     /* A pinned def's api is fixed (http_provider warns when config sets it); an unpinned
-     * def's wire already reflects config. */
-    provider_warn_unused_fields(name, wire, def->pinned ? 0 : PROVIDER_FIELD_UNPINNED,
+     * def's wire already reflects config. Key fields are consumed only when a static key
+     * authenticates the provider. */
+    unsigned key_dialects = 0;
+    if (!def->auth_source)
+        key_dialects = PROVIDER_FIELD_KEYED | (def->pinned ? 0 : PROVIDER_FIELD_UNPINNED);
+    provider_warn_unused_fields(name, wire, key_dialects,
                                 metadata_api == HTTP_METADATA_ANTHROPIC ? METADATA_FIELDS : NULL);
 
     const char *base = def->pinned ? def->base_url : resolve(name, "base_url", def->base_url);
@@ -415,11 +419,23 @@ struct provider *provider_def_construct(const struct provider_def *def)
         return NULL;
     }
 
+    /* Credentials must exist before anything else is built: a logged-out provider fails
+     * construction with the hook's diagnostics, like a missing base_url. */
+    struct http_auth_source auth = {0};
+    if (def->auth_source && def->auth_source(def, &auth) != 0)
+        return NULL;
+
+    char *default_model = NULL;
+    char *default_effort = NULL;
+    if (def->load_defaults)
+        def->load_defaults(&default_model, &default_effort);
+
     /* Provider constructors copy any prefix-backed state before this buffer is freed. */
     char *cfg_prefix = xasprintf("providers.%s", name);
     /* Efforts are advisory offers narrowed by per-model metadata, so they default on; defs opt
      * out backends with no categorical effort. */
     int with_efforts = !def->no_efforts;
+    json_t *def_extra_body = def->extra_body ? json_loads(def->extra_body, 0, NULL) : NULL;
     struct http_provider_preset preset = {
         .display_name = def->display_name ? def->display_name : name,
         .default_base_url = base,
@@ -442,6 +458,10 @@ struct provider *provider_def_construct(const struct provider_def *def)
         .config_prefix = cfg_prefix,
         .catalog_id = def->catalog_id,
         .parse_model = def->parse_model,
+        .auth = auth,
+        .default_model = default_model,
+        .default_effort = default_effort,
+        .extra_body = def_extra_body,
         /* model_apis or api "catalog" declares a mixed-protocol gateway, so catalog hints apply
          * there; a single-protocol provider keeps its explicit api regardless of catalog
          * metadata. */
@@ -452,16 +472,23 @@ struct provider *provider_def_construct(const struct provider_def *def)
 
     struct provider *p = http_provider_new_preset(&preset);
     string_array_free(static_headers);
+    json_decref(def_extra_body);
+    free(default_model);
+    free(default_effort);
     free(cfg_prefix);
     if (!p)
         return NULL;
 
     p->id = name;
-    /* Like parse_model (which only the def's own listing consults), the probe hook refines the
-     * def's metadata dialect: a configured metadata_api that moves the provider to another
-     * dialect must keep that dialect's probe, not a mixed pairing. */
-    if (def->probe_model && http_provider_metadata_api(p) == def_metadata_api(def, wire))
-        p->probe_model = def->probe_model;
+    /* Like parse_model (which only the def's own listing consults), the probe and listing hooks
+     * refine the def's metadata dialect: a configured metadata_api that moves the provider to
+     * another dialect must keep that dialect's requests, not a mixed pairing. */
+    if (http_provider_metadata_api(p) == def_metadata_api(def, wire)) {
+        if (def->probe_model)
+            p->probe_model = def->probe_model;
+        if (def->list_models)
+            p->list_models = def->list_models;
+    }
     if (def->query_usage)
         p->query_usage = def->query_usage;
     if (def->model_label)
@@ -469,7 +496,8 @@ struct provider *provider_def_construct(const struct provider_def *def)
 
     /* Harmless without a probe hook; with one, it warms metadata for the active model. */
     const char *configured_model = config_str("model");
-    model_meta_refresh(p, configured_model && *configured_model ? configured_model : NULL);
+    model_meta_refresh(p,
+                       configured_model && *configured_model ? configured_model : p->default_model);
     return p;
 }
 

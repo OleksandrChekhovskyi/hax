@@ -37,6 +37,9 @@ enum provider_field_dialect {
     /* Consumed by the generic constructor only when the def is unpinned: a pinned provider's
      * identity fields are fixed, so setting them must warn rather than silently do nothing. */
     PROVIDER_FIELD_UNPINNED = 1 << 3,
+    /* Consumed only by providers that authenticate with a static API key; a def with an auth
+     * source manages its own credentials, so key fields must warn. */
+    PROVIDER_FIELD_KEYED = 1 << 4,
 };
 #define PROVIDER_FIELD_OPENAI (PROVIDER_FIELD_OPENAI_CHAT | PROVIDER_FIELD_OPENAI_RESPONSES)
 

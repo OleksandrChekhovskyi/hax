@@ -47,6 +47,31 @@ enum codex_auth_status codex_auth_from_store_entry(const json_t *entry, struct c
  * informational label and is ignored, so a reload that changes only it counts as unchanged. */
 int codex_auth_equal(const struct codex_auth *a, const struct codex_auth *b);
 
+struct provider_def;     /* providers/registry.h */
+struct http_auth_source; /* providers/http_provider.h */
+
+/* Per-provider credential session over the loaded auth: staleness reloads and forced refresh,
+ * account pinning across logins, and the user-facing messages for auth failures. Generic
+ * operations run through the returned ops; the accessors below cover what codex's own
+ * provider hooks need beyond them. */
+struct codex_auth_session;
+
+/* Auth-source hook for the codex def: open a session from the hax login or ~/.codex/auth.json
+ * as `out`'s state, or report why none is usable and return non-zero. */
+int codex_auth_source(const struct provider_def *def, struct http_auth_source *out);
+
+/* Re-resolve credentials after /login or /logout. When none remain the auth stays cleared so
+ * requests report "not logged in" rather than reusing a removed token; this explicit action is
+ * also what may re-pin the session to a different account. */
+void codex_auth_session_reload(struct codex_auth_session *session);
+
+/* Whether the current token expires within `margin_s` seconds. Only hax-owned tokens report
+ * expiry; borrowed CLI tokens never refresh here, so they never count as expiring. */
+int codex_auth_session_expiring(const struct codex_auth_session *session, long margin_s);
+
+/* Account email for display, or NULL; borrowed until the next credential change. */
+const char *codex_auth_session_email(const struct codex_auth_session *session);
+
 /* A short description suitable for the provider picker; NULL for CODEX_AUTH_OK. */
 const char *codex_auth_status_reason(enum codex_auth_status status);
 

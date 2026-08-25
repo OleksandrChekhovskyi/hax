@@ -17,6 +17,36 @@
  * initialized and already owns the entry's id. */
 typedef void (*http_parse_model_cb)(const json_t *entry, struct model_info *out);
 
+/* Ops of a dynamic credential source, for endpoints whose tokens rotate rather than sit in a
+ * config key. Every op receives the source's own `auth` state, and destroy releases it. All
+ * ops run on the foreground thread. */
+struct http_auth_ops {
+    /* Ensure usable credentials before an operation. With `allow_refresh` the source may renew
+     * them over the network, honoring `tick`; without it only local reloads are permitted, so
+     * callers that must not block simply fail on a stale token. Returns 0 when credentials
+     * exist, -1 when the provider is logged out. */
+    int (*prepare)(void *auth, int allow_refresh, http_tick_cb tick, void *tick_user);
+    /* Owned NULL-terminated credential headers, rebuilt per attempt because tokens rotate.
+     * `session_id` is the provider's stable per-process session key; `streaming` distinguishes
+     * the streaming completion request from metadata GETs. */
+    char **(*headers)(const void *auth, const char *session_id, int streaming);
+    /* One bounded recovery after an unauthorized response: renew or re-read credentials and
+     * return non-zero to retry with rebuilt headers. `retried` is the caller's per-operation
+     * guard; the op must set it. */
+    int (*recover)(void *auth, int *retried, http_tick_cb tick, void *tick_user);
+    /* Owned user-facing message for a terminal unauthorized failure, logged out or rejected.
+     * May record state so the next operation re-evaluates credentials. */
+    char *(*unauthorized_message)(void *auth);
+    void (*destroy)(void *auth);
+};
+
+/* A credential source: its ops and their state. A provider with a source resolves no API key —
+ * its requests authenticate through the source's headers. A zeroed value means no source. */
+struct http_auth_source {
+    const struct http_auth_ops *ops;
+    void *state; /* owned by the source; released by ops->destroy */
+};
+
 /* The dialect of the provider's model-metadata side — the /models listing and probe, and the
  * auth scheme those requests use. A property of the endpoint, not of the per-model request
  * wire: a mixed-protocol gateway serves one catalog shape however each model is spoken to. */
@@ -30,11 +60,20 @@ struct http_provider_preset {
     const char *display_name;     /* required */
     const char *default_base_url; /* required when <prefix>.base_url does not resolve */
     const char *api_key_env;      /* fallback after the configured API key */
-    const char *config_prefix;    /* config namespace; NULL reads no user configuration */
-    int pin_base_url;             /* ignore <prefix>.base_url: a first-party key must not
-                                     follow a configured URL to another host */
-    const char *catalog_id;       /* default under <prefix>.catalog_id; copied; NULL disables
-                                     catalog metadata (an explicit empty config value opts out) */
+    /* Dynamic credential source; the provider takes ownership of its state. Zeroed
+     * authenticates with the resolved API key instead. */
+    struct http_auth_source auth;
+    /* Defaults mirrored from live companion-tool state; copied. NULL means none. */
+    const char *default_model;
+    const char *default_effort;
+    /* Endpoint-required body members, merged into every request under the user's
+     * <prefix>.extra_body; borrowed during construction. */
+    const json_t *extra_body;
+    const char *config_prefix; /* config namespace; NULL reads no user configuration */
+    int pin_base_url;          /* ignore <prefix>.base_url: a first-party key must not
+                                  follow a configured URL to another host */
+    const char *catalog_id;    /* default under <prefix>.catalog_id; copied; NULL disables
+                                  catalog metadata (an explicit empty config value opts out) */
     /* Default request protocol; NULL means Chat Completions. <prefix>.api may move an unpinned
      * OpenAI-family choice between the two OpenAI protocols; pinned endpoints and the Messages
      * wire (whose knobs differ) are fixed. */
@@ -88,6 +127,13 @@ char **http_provider_metadata_headers(const struct provider *provider);
 http_parse_model_cb http_provider_parse_model(const struct provider *provider);
 /* The metadata dialect the constructor resolved and installed. */
 enum http_metadata_api http_provider_metadata_api(const struct provider *provider);
+
+/* The provider's credential source; its ops member is NULL when the provider authenticates
+ * with an API key instead. */
+const struct http_auth_source *http_provider_auth(const struct provider *provider);
+/* Note that a model-metadata probe could not run under stale credentials; the next stream
+ * that authenticates successfully relaunches it. */
+void http_provider_defer_probe(struct provider *provider);
 
 /* Output cap for one Messages request: <prefix>.max_tokens clamped to model metadata. */
 int http_provider_max_tokens(struct provider *provider, const char *model);

@@ -42,7 +42,10 @@ static void expect_registry_projects_provider_fields(void)
             }
             EXPECT(field != NULL);
             if (field) {
-                EXPECT(field->dialects & BLOCKS[b].dialect);
+                /* Key fields belong to the keyed class rather than a wire dialect; both
+                 * -compatible defs are keyed and unpinned, so their aliases still project. */
+                EXPECT(field->dialects &
+                       (BLOCKS[b].dialect | PROVIDER_FIELD_KEYED | PROVIDER_FIELD_UNPINNED));
                 EXPECT(field->secret == settings[i].secret);
             }
         }

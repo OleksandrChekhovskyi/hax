@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include <errno.h>
+#include <jansson.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -20,6 +21,7 @@
 #include "util.h"
 #include "providers/http_provider.h"
 #include "providers/wire.h"
+#include "transport/http.h"
 
 static void test_list_efforts_wiring(void)
 {
@@ -182,10 +184,12 @@ static void test_metadata_api_override(void)
 
 #define MAX_REQUESTS 8
 
-/* Serves one canned response per sequential connection, capturing each request. */
+/* Serves one canned response per sequential connection, capturing each request. A non-NULL
+ * responses[i] overrides the shared response for that connection. */
 struct wire_server {
     int listener_fd;
     const char *response;
+    const char *responses[MAX_REQUESTS];
     int n_requests;
     char requests[MAX_REQUESTS][8192];
     _Atomic int served;
@@ -223,10 +227,11 @@ static void *serve_requests(void *user)
                 break;
         }
 
-        size_t response_len = strlen(server->response);
+        const char *response = server->responses[i] ? server->responses[i] : server->response;
+        size_t response_len = strlen(response);
         size_t written = 0;
         while (written < response_len) {
-            ssize_t result = write(client_fd, server->response + written, response_len - written);
+            ssize_t result = write(client_fd, response + written, response_len - written);
             if (result <= 0)
                 break;
             written += (size_t)result;
@@ -436,6 +441,206 @@ static void test_messages_defaults_follow_preset(void)
     provider->destroy(provider);
 }
 
+struct fake_auth {
+    int logged_out;
+    int can_recover;
+    int prepared;
+    int token_generation;
+    int destroyed;
+};
+
+static int fake_auth_prepare(void *auth_state, int allow_refresh, http_tick_cb tick,
+                             void *tick_user)
+{
+    (void)allow_refresh;
+    (void)tick;
+    (void)tick_user;
+    struct fake_auth *auth = auth_state;
+    auth->prepared++;
+    return auth->logged_out ? -1 : 0;
+}
+
+static char **fake_auth_headers(const void *auth_state, const char *session_id, int streaming)
+{
+    const struct fake_auth *auth = auth_state;
+    char *bearer = xasprintf("Authorization: Bearer fake-%d", auth->token_generation);
+    char *session = xasprintf("x-fake-session: %s", session_id);
+    const char *fixed[] = {bearer, session, streaming ? "x-fake-stream: 1" : NULL, NULL};
+    char **headers = string_array_concat(fixed, NULL);
+    free(bearer);
+    free(session);
+    return headers;
+}
+
+static int fake_auth_recover(void *auth_state, int *retried, http_tick_cb tick, void *tick_user)
+{
+    (void)tick;
+    (void)tick_user;
+    struct fake_auth *auth = auth_state;
+    if (*retried || !auth->can_recover)
+        return 0;
+    *retried = 1;
+    auth->token_generation++;
+    return 1;
+}
+
+static char *fake_auth_unauthorized_message(void *auth_state)
+{
+    struct fake_auth *auth = auth_state;
+    return xstrdup(auth->logged_out ? "fake logged out" : "fake token expired");
+}
+
+static void fake_auth_destroy(void *auth_state)
+{
+    ((struct fake_auth *)auth_state)->destroyed++;
+}
+
+static const struct http_auth_ops FAKE_AUTH_OPS = {
+    .prepare = fake_auth_prepare,
+    .headers = fake_auth_headers,
+    .recover = fake_auth_recover,
+    .unauthorized_message = fake_auth_unauthorized_message,
+    .destroy = fake_auth_destroy,
+};
+
+/* An auth source replaces the API key: prepare gates the stream, its headers authenticate every
+ * attempt, a 401 gets one bounded recovery with rotated credentials, and a terminal 401 reports
+ * the source's message. */
+static void test_auth_source_stream(void)
+{
+    struct wire_server server = {
+        .response = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+        .n_requests = 3,
+    };
+    server.responses[1] =
+        "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno";
+    pthread_t thread;
+    int port = start_server(&server, &thread);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+
+    char base_url[64];
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
+    struct fake_auth auth = {.can_recover = 1, .token_generation = 1};
+    struct http_provider_preset preset = {
+        .display_name = "fa",
+        .default_base_url = base_url,
+        .auth = {.ops = &FAKE_AUTH_OPS, .state = &auth},
+    };
+    struct provider *provider = http_provider_new_preset(&preset);
+    EXPECT(provider != NULL);
+    if (!provider)
+        return;
+
+    struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
+    struct context context = {.items = items, .n_items = 1, .image_input = 1};
+    struct error_log log = {0};
+    provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
+    auth.can_recover = 0;
+    provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
+    pthread_join(thread, NULL);
+    close(server.listener_fd);
+    EXPECT(atomic_load(&server.served) == 3);
+
+    EXPECT(strstr(server.requests[0], "Authorization: Bearer fake-1\r\n") != NULL);
+    EXPECT(strstr(server.requests[0], "x-fake-stream: 1\r\n") != NULL);
+    /* The provider hands its session key to the source through the request facts. */
+    EXPECT(strstr(server.requests[0], "x-fake-session: ") != NULL);
+    /* The recovery rotated the token and the retry re-built its headers. */
+    EXPECT(strstr(server.requests[1], "Authorization: Bearer fake-2\r\n") != NULL);
+    EXPECT(strstr(server.requests[2], "Authorization: Bearer fake-2\r\n") != NULL);
+
+    EXPECT(auth.prepared == 2);
+    EXPECT(log.n_errors == 2);
+    EXPECT(strstr(log.message, "fake token expired") != NULL);
+
+    provider->destroy(provider);
+    EXPECT(auth.destroyed == 1);
+}
+
+/* A logged-out source fails the stream before any request, with its own message. */
+static void test_auth_source_logged_out(void)
+{
+    struct fake_auth auth = {.logged_out = 1};
+    struct http_provider_preset preset = {
+        .display_name = "fa",
+        .default_base_url = "http://127.0.0.1:1",
+        .auth = {.ops = &FAKE_AUTH_OPS, .state = &auth},
+    };
+    struct provider *provider = http_provider_new_preset(&preset);
+    EXPECT(provider != NULL);
+    if (!provider)
+        return;
+
+    struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
+    struct context context = {.items = items, .n_items = 1, .image_input = 1};
+    struct error_log log = {0};
+    EXPECT(provider->stream(provider, &context, "m", log_error, &log, NULL, NULL) == -1);
+    EXPECT(auth.prepared == 1);
+    EXPECT(log.n_errors == 1);
+    EXPECT(strstr(log.message, "fake logged out") != NULL);
+    provider->destroy(provider);
+}
+
+/* Preset-declared body members ride every request under the user's extra_body, and
+ * companion-tool defaults land on the provider. */
+static void test_preset_extra_body_and_defaults(void)
+{
+    struct wire_server server = {
+        .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+        .n_requests = 2,
+    };
+    pthread_t thread;
+    int port = start_server(&server, &thread);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+
+    char base_url[64];
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
+    json_t *extra_body = json_loads("{\"text\": {\"verbosity\": \"low\"}}", 0, NULL);
+    struct http_provider_preset preset = {
+        .display_name = "fx",
+        .default_base_url = base_url,
+        .config_prefix = "providers.fx",
+        .default_model = "companion-model",
+        .default_effort = "high",
+        .extra_body = extra_body,
+    };
+    struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
+    struct context context = {.items = items, .n_items = 1, .image_input = 1};
+    struct error_log log = {0};
+
+    struct provider *provider = http_provider_new_preset(&preset);
+    EXPECT(provider != NULL);
+    if (provider) {
+        EXPECT_STR_EQ(provider->default_model, "companion-model");
+        EXPECT_STR_EQ(provider->default_effort, "high");
+        provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
+        provider->destroy(provider);
+    }
+
+    /* The user's member overrides the preset's. */
+    EXPECT(config_load("{\"providers\": {\"fx\": {\"extra_body\":"
+                       " {\"text\": {\"verbosity\": \"high\"}}}}}") == 0);
+    provider = http_provider_new_preset(&preset);
+    EXPECT(provider != NULL);
+    if (provider) {
+        provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
+        provider->destroy(provider);
+    }
+    json_decref(extra_body);
+
+    pthread_join(thread, NULL);
+    close(server.listener_fd);
+    EXPECT(atomic_load(&server.served) == 2);
+    EXPECT(strstr(server.requests[0], "\"verbosity\":\"low\"") != NULL);
+    EXPECT(strstr(server.requests[1], "\"verbosity\":\"high\"") != NULL);
+    EXPECT(strstr(server.requests[1], "\"low\"") == NULL);
+    EXPECT(config_load(NULL) == 0);
+}
+
 static void stream_one_reasoned_turn(struct provider *provider, char *model, struct error_log *log)
 {
     struct item items[] = {
@@ -553,6 +758,9 @@ int main(void)
     test_metadata_api_override();
     test_model_wire_routing();
     test_messages_defaults_follow_preset();
+    test_auth_source_stream();
+    test_auth_source_logged_out();
+    test_preset_extra_body_and_defaults();
     test_interleaved_reasoning_replay();
     test_unsupported_protocol_reported();
     T_REPORT();

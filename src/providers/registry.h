@@ -7,6 +7,8 @@
 
 #include "provider.h"
 
+struct http_auth_source; /* providers/http_provider.h */
+
 /* Provider definitions.
  *
  * Every provider is described by one struct provider_def: default field values overridable
@@ -46,6 +48,9 @@ struct provider_def {
     int strict_signatures;
     const char *length_hint; /* appended to a "length"-truncation error */
     int no_efforts;          /* offer no effort levels, so /effort skips the provider */
+    /* JSON object of body members the endpoint requires on every request, merged under the
+     * user's providers.<id>.extra_body. NULL sends none. */
+    const char *extra_body;
     /* Probe <base_url>/models reachability when keyless. Only for curated local defs where
      * "not running" is the common failure and /models is known to exist; a generic endpoint may
      * not serve /models at all, so configuration is the default availability check. */
@@ -55,14 +60,23 @@ struct provider_def {
 
     /* Capability hooks the generic constructor installs on the built provider; NULL keeps the
      * generic behavior. A def with a construct override wires its provider itself instead.
-     * parse_model and probe_model refine the def's own metadata dialect and stand down when a
-     * configured metadata_api moves the provider to the other one. */
+     * parse_model, probe_model, and list_models refine the def's own metadata dialect and stand
+     * down when a configured metadata_api moves the provider to the other one. */
     void (*parse_model)(const json_t *entry, struct model_info *out); /* refine one /models entry */
     int (*probe_model)(struct provider *provider, const char *model, struct model_probe *probe);
+    int (*list_models)(struct provider *provider, struct model_info **models, size_t *n_models,
+                       char **error, http_tick_cb tick, void *tick_user);
     int (*query_usage)(struct provider *provider);
     char *(*model_label)(struct provider *provider, const char *model);
     /* Owned NULL-terminated headers resolved once at construction and sent on every request. */
     char **(*static_headers)(void);
+    /* Create the provider's dynamic credential source (http_provider.h), or return non-zero
+     * after reporting why no usable credentials exist, failing construction. A def with an
+     * auth source resolves no API key. */
+    int (*auth_source)(const struct provider_def *def, struct http_auth_source *out);
+    /* Resolve model/effort defaults mirrored from live companion-tool state into owned
+     * outputs; NULL leaves the provider without defaults. */
+    void (*load_defaults)(char **default_model, char **default_effort);
 
     /* Whole-provider overrides for providers the data path cannot express. */
     struct provider *(*construct)(const struct provider_def *def);

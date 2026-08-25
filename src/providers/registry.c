@@ -10,6 +10,8 @@
 #include "provider.h"
 #include "util.h"
 #include "providers/codex.h"
+#include "providers/codex_auth.h"
+#include "providers/codex_settings.h"
 #include "providers/config_provider.h"
 #include "providers/llamacpp.h"
 #include "providers/mock.h"
@@ -23,7 +25,22 @@
 static const struct provider_def DEFS[] = {
     {
         .id = "codex",
-        .construct = codex_provider_new,
+        .api = "openai-responses",
+        .base_url = "https://chatgpt.com/backend-api/codex",
+        .pinned = 1,
+        /* Subscription responses report no cost, so estimate against equivalent OpenAI API
+         * rates; providers.codex.catalog_id renames or opts out of that identity. */
+        .catalog_id = "openai",
+        .send_cache_key = 1,
+        /* The official client sends the catalog's per-model verbosity default, "low" for
+         * effectively every served model; hax sends it flat rather than plumbing the flag. */
+        .extra_body = "{\"text\": {\"verbosity\": \"low\"}}",
+        .probe_model = codex_probe_model,
+        .list_models = codex_list_models,
+        .query_usage = codex_query_usage,
+        .static_headers = codex_static_headers,
+        .auth_source = codex_auth_source,
+        .load_defaults = codex_load_settings,
         .prepare_availability = codex_prepare_availability,
     },
     {

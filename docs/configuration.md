@@ -313,9 +313,9 @@ providers. For the first-party providers the endpoint, protocol, and credential 
 in their blocks warn and are ignored, so no setting can redirect a first-party key or change what
 it speaks. Their other advanced fields (the same ones
 [custom providers](./providers.md#custom-providers) accept) are honored but rarely needed; a
-different endpoint is a custom provider, not a tweak. Codex reads `display_name`, `sort_models`,
-`catalog_id`, and the request-passthrough fields from its block; authentication comes from the
-ChatGPT login ([`/login`](./providers.md#codex)).
+different endpoint is a custom provider, not a tweak. Codex is pinned the same way, and its
+credentials come from the ChatGPT login ([`/login`](./providers.md#codex)) rather than a key, so
+`api_key` and `api_key_env` in its block warn and are ignored.
 
 The shipped `openai-compatible` and `anthropic-compatible` providers are configured the same way —
 through their own `providers.<name>` blocks — and additionally bind environment variables to those

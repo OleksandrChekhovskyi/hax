@@ -58,6 +58,11 @@ struct http_provider {
     int cache_default; /* Messages cache_control default; chat uses cache_mode */
     char **extra_headers;
     json_t *extra_body;
+    struct http_auth_source auth; /* zeroed ops: the api_key authenticates requests */
+    /* A probe skipped on stale credentials, relaunched after the next authenticated stream. */
+    int probe_deferred;
+    char *default_model;
+    char *default_effort;
 
     const char *length_hint;    /* borrowed for the provider lifetime */
     const char *const *efforts; /* borrowed, or aliases owned_efforts */
@@ -106,12 +111,32 @@ int http_provider_max_tokens(struct provider *base, const char *model)
     return configured > 0 ? configured : MESSAGES_DEFAULT_MAX_TOKENS;
 }
 
-/* Owned NULL-terminated headers; free with string_array_free. The auth scheme follows the wire:
- * Bearer for the OpenAI family, x-api-key plus the version header for Messages. Streaming
- * requests add the SSE Accept and the JSON Content-Type. */
+/* Owned NULL-terminated headers; free with string_array_free. Credentials come from the auth
+ * source when the provider has one, otherwise the auth scheme follows the wire: Bearer for the
+ * OpenAI family, x-api-key plus the version header for Messages. Streaming requests add the
+ * SSE Accept and the JSON Content-Type. */
 static char **build_headers(const struct http_provider *provider, const struct wire *wire,
                             int streaming)
 {
+    if (provider->auth.ops) {
+        char **credentials =
+            provider->auth.ops->headers(provider->auth.state, provider->session_id, streaming);
+        const char *fixed[3];
+        size_t n_fixed = 0;
+        if (streaming) {
+            fixed[n_fixed++] = "Accept: text/event-stream";
+            fixed[n_fixed++] = "Content-Type: application/json";
+        }
+        fixed[n_fixed] = NULL;
+        char **fixed_and_extra =
+            string_array_concat(fixed, (const char *const *)provider->extra_headers);
+        char **headers = string_array_concat((const char *const *)credentials,
+                                             (const char *const *)fixed_and_extra);
+        string_array_free(fixed_and_extra);
+        string_array_free(credentials);
+        return headers;
+    }
+
     char *auth = NULL;
     char *version = NULL;
     if (wire == &WIRE_ANTHROPIC_MESSAGES) {
@@ -141,10 +166,11 @@ static char **build_headers(const struct http_provider *provider, const struct w
 }
 
 struct http_stream {
-    const struct http_provider *provider;
+    struct http_provider *provider;
     const struct wire *wire; /* resolved for this request's model */
     struct chat_cache_plan cache;
     union wire_events events;
+    int auth_retried; /* per-stream guard for the auth source's unauthorized recovery */
 };
 
 static char **stream_build_headers(void *ctx)
@@ -195,6 +221,23 @@ static const struct stream_usage *stream_parser_usage(void *ctx)
     if (!stream->wire->events_usage)
         return NULL;
     return stream->wire->events_usage(&stream->events);
+}
+
+static int stream_auth_recover(void *ctx, long http_status, http_tick_cb tick, void *tick_user)
+{
+    struct http_stream *stream = ctx;
+    return http_status == 401 &&
+           stream->provider->auth.ops->recover(stream->provider->auth.state, &stream->auth_retried,
+                                               tick, tick_user);
+}
+
+static char *stream_auth_error_message(void *ctx, long http_status, const char *error_body)
+{
+    (void)error_body;
+    struct http_stream *stream = ctx;
+    if (http_status != 401)
+        return NULL;
+    return stream->provider->auth.ops->unauthorized_message(stream->provider->auth.state);
 }
 
 /* How long a request may wait on the in-flight snapshot fetch for its wire hint. */
@@ -253,6 +296,25 @@ static int http_provider_stream(struct provider *base, const struct context *con
         return -1;
     }
 
+    if (provider->auth.ops) {
+        if (provider->auth.ops->prepare(provider->auth.state, 1, tick, tick_user) != 0) {
+            char *message = provider->auth.ops->unauthorized_message(provider->auth.state);
+            struct stream_event error = {
+                .kind = EV_ERROR,
+                .u.error = {.message = message, .http_status = 401},
+            };
+            callback(&error, callback_user);
+            free(message);
+            return -1;
+        }
+        if (provider->probe_deferred) {
+            /* Non-blocking: relaunches the background metadata probe now that prepare had its
+             * refresh opportunity. Still-stale credentials just defer it again. */
+            provider->probe_deferred = 0;
+            model_meta_refresh(base, model);
+        }
+    }
+
     struct http_stream stream = {.provider = provider, .wire = wire};
     struct wire_body_opts opts = {
         .extra_body = provider->extra_body,
@@ -302,6 +364,10 @@ static int http_provider_stream(struct provider *base, const struct context *con
         .parser_complete = stream_parser_complete,
         .parser_usage = stream_parser_usage,
     };
+    if (provider->auth.ops) {
+        request.recover = stream_auth_recover;
+        request.error_message = stream_auth_error_message;
+    }
     int result = stream_retry_run(&request, callback, callback_user, tick, tick_user);
     free(endpoint);
     free(body);
@@ -312,6 +378,10 @@ static void http_provider_destroy(struct provider *base)
 {
     struct http_provider *provider = (struct http_provider *)base;
     model_meta_release(base);
+    if (provider->auth.ops)
+        provider->auth.ops->destroy(provider->auth.state);
+    free(provider->default_model);
+    free(provider->default_effort);
     for (size_t i = 0; i < provider->n_wire_rules; i++)
         free(provider->wire_rules[i].pattern);
     free(provider->wire_rules);
@@ -453,6 +523,16 @@ http_parse_model_cb http_provider_parse_model(const struct provider *provider)
     return ((const struct http_provider *)provider)->parse_model;
 }
 
+const struct http_auth_source *http_provider_auth(const struct provider *provider)
+{
+    return &((const struct http_provider *)provider)->auth;
+}
+
+void http_provider_defer_probe(struct provider *provider)
+{
+    ((struct http_provider *)provider)->probe_deferred = 1;
+}
+
 void http_provider_prepare_base_url_availability(const char *base_url, const char *api_key,
                                                  char *const *extra_headers,
                                                  struct provider_availability *out)
@@ -585,13 +665,20 @@ struct provider *http_provider_new_preset(const struct http_provider_preset *pre
         preset = &empty;
 
     char *base_url = resolve_base_url(preset);
-    if (!base_url)
+    if (!base_url) {
+        /* Ownership of the auth state transfers even on failure. */
+        if (preset->auth.ops)
+            preset->auth.ops->destroy(preset->auth.state);
         return NULL;
+    }
 
     struct http_provider *provider = xcalloc(1, sizeof(*provider));
     provider->base_url = base_url;
-    const char *api_key = provider_api_key(preset->config_prefix, preset->api_key_env);
-    provider->api_key = api_key ? xstrdup(api_key) : NULL;
+    provider->auth = preset->auth;
+    if (!provider->auth.ops) {
+        const char *api_key = provider_api_key(preset->config_prefix, preset->api_key_env);
+        provider->api_key = api_key ? xstrdup(api_key) : NULL;
+    }
     provider->name = xstrdup(resolve_display_name(preset));
     provider->catalog_id = resolve_catalog_id(preset);
     provider->config_prefix = preset->config_prefix ? xstrdup(preset->config_prefix) : NULL;
@@ -644,6 +731,13 @@ struct provider *http_provider_new_preset(const struct http_provider_preset *pre
         string_array_concat(preset->extra_headers, (const char *const *)config_headers);
     string_array_free(config_headers);
     provider->extra_body = provider_extra_body(preset->config_prefix);
+    if (preset->extra_body) {
+        /* The user's members merge over the preset's, so config can override endpoint defaults. */
+        json_t *merged = json_deep_copy(preset->extra_body);
+        provider_extra_body_apply(merged, provider->extra_body);
+        json_decref(provider->extra_body);
+        provider->extra_body = merged;
+    }
 
     provider->length_hint = preset->length_hint;
     provider->efforts = preset->efforts;
@@ -654,6 +748,11 @@ struct provider *http_provider_new_preset(const struct http_provider_preset *pre
     char session_id[37];
     gen_uuid_v4(session_id);
     provider->session_id = xstrdup(session_id);
+
+    provider->default_model = preset->default_model ? xstrdup(preset->default_model) : NULL;
+    provider->default_effort = preset->default_effort ? xstrdup(preset->default_effort) : NULL;
+    provider->base.default_model = provider->default_model;
+    provider->base.default_effort = provider->default_effort;
 
     provider->base.name = provider->name;
     provider->base.catalog_id = provider->catalog_id;
