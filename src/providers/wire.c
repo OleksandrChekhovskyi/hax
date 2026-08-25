@@ -29,7 +29,6 @@ static void chat_init(union wire_events *events, stream_cb callback, void *callb
 {
     chat_events_init(&events->chat, callback, callback_user);
     if (opts) {
-        events->chat.emit_progress = opts->emit_progress;
         events->chat.length_hint = opts->length_hint;
         events->chat.cache_write_1h = opts->cache_write_1h;
     }

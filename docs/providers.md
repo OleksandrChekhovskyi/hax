@@ -184,7 +184,7 @@ Ollama's runtime context defaults can be small for coding-agent prompts. Set a l
 `context_limit` to the same value if you want hax's percentage display. A too-small context commonly
 appears as a response ending with `length`.
 
-Override the endpoint in `config.json`:
+Override the endpoint in `config.json` — `port` for another local port, or a full `base_url`:
 
 ```json
 {

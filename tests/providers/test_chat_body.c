@@ -482,7 +482,6 @@ static void test_build_body_composition(void)
         .cache_ttl = "1h",
         .session_cache_key = "sess-1",
         .reasoning_format = CHAT_REASONING_FLAT,
-        .emit_progress = 1,
         .request_cost = 1,
     };
 
@@ -497,7 +496,6 @@ static void test_build_body_composition(void)
                   "read");
 
     EXPECT_STR_EQ(json_string_value(json_object_get(body, "prompt_cache_key")), "sess-1");
-    EXPECT(json_object_get(body, "return_progress") == json_true());
     EXPECT(json_is_true(json_object_get(json_object_get(body, "usage"), "include")));
     EXPECT_STR_EQ(json_string_value(json_object_get(body, "reasoning_effort")), "high");
 

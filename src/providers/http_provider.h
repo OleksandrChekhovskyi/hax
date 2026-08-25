@@ -90,8 +90,7 @@ struct http_provider_preset {
 
     /* Chat Completions / Responses policy. */
     int send_cache_key_default;
-    int emit_progress; /* request and parse llama.cpp prompt_progress */
-    int request_cost;  /* request OpenRouter usage cost */
+    int request_cost; /* request OpenRouter usage cost */
     enum chat_reasoning_format reasoning_format;
     const char *reasoning_replay_field; /* copied; NULL disables replay */
 

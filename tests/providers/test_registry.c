@@ -192,6 +192,50 @@ static void test_pinned_def_ignores_compat_config(void)
     unsetenv("HAX_OPENAI_API_KEY");
 }
 
+/* A local def's "{port}" base_url placeholder expands to the registered port setting: the
+ * shipped default without configuration, a configured port otherwise. */
+static void test_port_template(void)
+{
+    const struct provider_def *def = provider_find("ollama");
+    EXPECT(def != NULL);
+    if (!def)
+        return;
+
+    struct provider_availability availability = {0};
+    provider_prepare_availability(def, &availability);
+    EXPECT_STR_EQ(availability.url, "http://127.0.0.1:11434/v1/models");
+    provider_availability_clear(&availability);
+
+    config_set_override("providers.ollama.port", "18111");
+    provider_prepare_availability(def, &availability);
+    EXPECT_STR_EQ(availability.url, "http://127.0.0.1:18111/v1/models");
+    provider_availability_clear(&availability);
+
+    /* Malformed and out-of-range ports degrade to the def's default, never into the URL. */
+    config_set_override("providers.ollama.port", "notaport");
+    provider_prepare_availability(def, &availability);
+    EXPECT_STR_EQ(availability.url, "http://127.0.0.1:11434/v1/models");
+    provider_availability_clear(&availability);
+    config_set_override("providers.ollama.port", "70000");
+    provider_prepare_availability(def, &availability);
+    EXPECT_STR_EQ(availability.url, "http://127.0.0.1:11434/v1/models");
+    provider_availability_clear(&availability);
+    config_set_override("providers.ollama.port", NULL);
+
+    /* Construction expands the same way, and the port member is consumed by the templated
+     * def rather than warned about. */
+    EXPECT(config_load("{\"providers\": {\"ollama\": {\"port\": 18112}}}") == 0);
+    unsigned long diagnostics_before = hax_diag_sequence();
+    struct provider *ollama = provider_construct(def);
+    EXPECT(hax_diag_sequence() == diagnostics_before);
+    EXPECT(ollama != NULL);
+    if (ollama) {
+        EXPECT_STR_EQ(http_provider_base_url(ollama), "http://127.0.0.1:18112/v1");
+        ollama->destroy(ollama);
+    }
+    EXPECT(config_load(NULL) == 0);
+}
+
 int main(void)
 {
     test_default_is_highest_priority();
@@ -201,6 +245,7 @@ int main(void)
     test_former_id_canonicalized();
     test_display_name_resolution();
     test_def_hooks_reach_provider();
+    test_port_template();
     test_pinned_def_ignores_compat_config();
     T_REPORT();
 }

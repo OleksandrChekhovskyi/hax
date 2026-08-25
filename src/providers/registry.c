@@ -18,9 +18,9 @@
 #include "providers/opencode.h"
 #include "providers/openrouter.h"
 
-/* The shipped defs, user-facing ones first, in autoselect priority order. Most are pure data
- * built by the generic constructor; construct overrides exist only where construction itself
- * needs code (credential files, server discovery, no HTTP at all). */
+/* The shipped defs, user-facing ones first, in autoselect priority order. All are data plus
+ * capability hooks built by the generic constructor; only the scripted mock, which speaks no
+ * HTTP, constructs its own provider. */
 // clang-format off
 static const struct provider_def DEFS[] = {
     {
@@ -104,12 +104,28 @@ static const struct provider_def DEFS[] = {
          * path separator); the banner and picker keep the upstream spelling. */
         .id = "llamacpp",
         .display_name = "llama.cpp",
-        .construct = llamacpp_provider_new,
+        .base_url = "http://127.0.0.1:{port}/v1",
+        /* Interleaved-thinking models can leak tool calls into reasoning unless prior
+         * reasoning returns through llama-server's reasoning_content field. */
+        .reasoning_roundtrip = "reasoning_content",
+        /* Prompt-prefill progress for big local prompts; the parser always understands the
+         * reply, so only the request member needs declaring. */
+        .extra_body = "{\"return_progress\": true}",
+        /* llama-server has no per-request context-size control. */
+        .length_hint = "llama-server's context is full — restart it with a larger "
+                       "-c / --ctx-size",
+        /* Local reasoning is a per-model server toggle, not a categorical effort. */
+        .no_efforts = 1,
+        .parse_model = llamacpp_parse_model,
+        .probe_model = llamacpp_probe_model,
+        .model_label = llamacpp_model_label,
+        .discover = llamacpp_discover,
         .prepare_availability = llamacpp_prepare_availability,
     },
     {
         .id = "ollama",
-        .base_url = "http://127.0.0.1:11434/v1",
+        .base_url = "http://127.0.0.1:{port}/v1",
+        .port = 11434,
         /* ollama caps the runtime context at OLLAMA_CONTEXT_LENGTH (4096 by default) and
          * ignores a per-request num_ctx on its OpenAI endpoint, so hax can't widen it — a
          * prompt near that size truncates the reply to "length". Point the user at the only

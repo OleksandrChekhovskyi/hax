@@ -46,7 +46,6 @@ struct http_provider {
     int catalog_wires;
     char *version; /* anthropic-version; sent on Messages requests */
     int send_cache_key;
-    int emit_progress;
     int request_cost;
     enum chat_cache_mode cache_mode;
     char *cache_ttl;
@@ -183,7 +182,6 @@ static void stream_parser_init(void *ctx, stream_cb callback, void *callback_use
 {
     struct http_stream *stream = ctx;
     struct wire_events_opts opts = {
-        .emit_progress = stream->provider->emit_progress,
         .length_hint = stream->provider->length_hint,
         .cache_write_1h = stream->cache.writes_bill_1h,
     };
@@ -341,7 +339,6 @@ static int http_provider_stream(struct provider *base, const struct context *con
         opts.session_cache_key = provider->send_cache_key ? provider->session_id : NULL;
         opts.reasoning_field = resolve_model_reasoning_field(provider, model);
         opts.reasoning_format = provider->reasoning_format;
-        opts.emit_progress = provider->emit_progress;
         opts.request_cost = provider->request_cost;
     }
 
@@ -710,7 +707,6 @@ struct provider *http_provider_new_preset(const struct http_provider_preset *pre
 
     provider->send_cache_key = config_scoped_bool_or(preset->config_prefix, "send_cache_key",
                                                      preset->send_cache_key_default);
-    provider->emit_progress = preset->emit_progress;
     provider->request_cost =
         config_scoped_bool_or(preset->config_prefix, "request_cost", preset->request_cost);
     provider->cache_mode = resolve_cache_mode(preset->config_prefix, preset->cache);

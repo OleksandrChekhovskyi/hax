@@ -76,20 +76,17 @@ static void test_chat_opts_plumbing(void)
     struct capture capture = {0};
     union wire_events events;
     struct wire_events_opts opts = {
-        .emit_progress = 1,
         .length_hint = "grow the context",
         .cache_write_1h = 1,
     };
 
     WIRE_OPENAI_CHAT.events_init(&events, on_event, &capture, &opts);
-    EXPECT(events.chat.emit_progress == 1);
     EXPECT_STR_EQ(events.chat.length_hint, "grow the context");
     EXPECT(events.chat.cache_write_1h == 1);
     WIRE_OPENAI_CHAT.events_free(&events);
 
     /* NULL opts must leave the parser at its defaults. */
     WIRE_OPENAI_CHAT.events_init(&events, on_event, &capture, NULL);
-    EXPECT(events.chat.emit_progress == 0);
     EXPECT(events.chat.length_hint == NULL);
     EXPECT(events.chat.cache_write_1h == 0);
     WIRE_OPENAI_CHAT.events_free(&events);

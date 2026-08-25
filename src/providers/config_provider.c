@@ -3,6 +3,7 @@
 
 #include <ctype.h>
 #include <jansson.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -27,27 +28,28 @@
 static const struct provider_field PROVIDER_FIELDS[] = {
     /* `api` is resolved for every def — pinned ones warn about it in resolve_wire rather than
      * here, so the message can say the value is pinned instead of merely unused. */
-    {.leaf = "api",                 .dialects = FIELD_ANY},
-    {.leaf = "base_url",            .dialects = FIELD_ANY},
-    {.leaf = "api_key",             .dialects = PROVIDER_FIELD_KEYED, .secret = 1},
-    {.leaf = "api_key_env",         .dialects = PROVIDER_FIELD_UNPINNED},
-    {.leaf = "display_name",        .dialects = FIELD_ANY},
-    {.leaf = "catalog_id",          .dialects = FIELD_ANY},
-    {.leaf = "sort_models",         .dialects = FIELD_ANY},
-    {.leaf = "metadata_api",        .dialects = FIELD_ANY},
-    {.leaf = "model_apis",          .dialects = FIELD_ANY},
-    {.leaf = "cache",               .dialects = FIELD_CACHE_MARKERS},
-    {.leaf = "cache_ttl",           .dialects = FIELD_CACHE_MARKERS},
-    {.leaf = "send_cache_key",      .dialects = PROVIDER_FIELD_OPENAI},
-    {.leaf = "request_cost",        .dialects = PROVIDER_FIELD_OPENAI_CHAT},
-    {.leaf = "reasoning_format",    .dialects = PROVIDER_FIELD_OPENAI_CHAT},
-    {.leaf = "reasoning_roundtrip", .dialects = PROVIDER_FIELD_OPENAI_CHAT},
-    {.leaf = "max_tokens",          .dialects = PROVIDER_FIELD_ANTHROPIC},
-    {.leaf = "thinking_mode",       .dialects = PROVIDER_FIELD_ANTHROPIC},
-    {.leaf = "thinking_budget",     .dialects = PROVIDER_FIELD_ANTHROPIC},
-    {.leaf = "version",             .dialects = PROVIDER_FIELD_ANTHROPIC},
-    {.leaf = "extra_body",          .dialects = FIELD_ANY},
-    {.leaf = "extra_headers",       .dialects = FIELD_ANY, .secret = 1},
+    {.leaf = "api",                 .classes = FIELD_ANY},
+    {.leaf = "base_url",            .classes = FIELD_ANY},
+    {.leaf = "port",                .classes = PROVIDER_FIELD_PORT_TEMPLATED},
+    {.leaf = "api_key",             .classes = PROVIDER_FIELD_KEYED, .secret = 1},
+    {.leaf = "api_key_env",         .classes = PROVIDER_FIELD_UNPINNED},
+    {.leaf = "display_name",        .classes = FIELD_ANY},
+    {.leaf = "catalog_id",          .classes = FIELD_ANY},
+    {.leaf = "sort_models",         .classes = FIELD_ANY},
+    {.leaf = "metadata_api",        .classes = FIELD_ANY},
+    {.leaf = "model_apis",          .classes = FIELD_ANY},
+    {.leaf = "cache",               .classes = FIELD_CACHE_MARKERS},
+    {.leaf = "cache_ttl",           .classes = FIELD_CACHE_MARKERS},
+    {.leaf = "send_cache_key",      .classes = PROVIDER_FIELD_OPENAI},
+    {.leaf = "request_cost",        .classes = PROVIDER_FIELD_OPENAI_CHAT},
+    {.leaf = "reasoning_format",    .classes = PROVIDER_FIELD_OPENAI_CHAT},
+    {.leaf = "reasoning_roundtrip", .classes = PROVIDER_FIELD_OPENAI_CHAT},
+    {.leaf = "max_tokens",          .classes = PROVIDER_FIELD_ANTHROPIC},
+    {.leaf = "thinking_mode",       .classes = PROVIDER_FIELD_ANTHROPIC},
+    {.leaf = "thinking_budget",     .classes = PROVIDER_FIELD_ANTHROPIC},
+    {.leaf = "version",             .classes = PROVIDER_FIELD_ANTHROPIC},
+    {.leaf = "extra_body",          .classes = FIELD_ANY},
+    {.leaf = "extra_headers",       .classes = FIELD_ANY, .secret = 1},
 };
 // clang-format on
 #define N_PROVIDER_FIELDS (sizeof(PROVIDER_FIELDS) / sizeof(PROVIDER_FIELDS[0]))
@@ -58,7 +60,7 @@ const struct provider_field *provider_fields(size_t *n)
     return PROVIDER_FIELDS;
 }
 
-static unsigned provider_wire_dialects(const struct wire *wire)
+static unsigned provider_wire_class(const struct wire *wire)
 {
     if (wire == &WIRE_ANTHROPIC_MESSAGES)
         return PROVIDER_FIELD_ANTHROPIC;
@@ -278,13 +280,13 @@ static int provider_routes_wires(const char *name)
 }
 
 /* A silently ignored member hides a typo or a dialect mix-up. */
-void provider_warn_unused_fields(const char *name, const struct wire *wire, unsigned extra_dialects,
+void provider_warn_unused_fields(const char *name, const struct wire *wire, unsigned extra_classes,
                                  const char *const *extra)
 {
     const char *api_label = wire ? wire->id : name;
-    unsigned dialects = (wire ? provider_wire_dialects(wire) : 0) | extra_dialects;
+    unsigned classes = (wire ? provider_wire_class(wire) : 0) | extra_classes;
     if (provider_routes_wires(name))
-        dialects |= FIELD_ANY;
+        classes |= FIELD_ANY;
     char *key = xasprintf("providers.%s", name);
     char **members = NULL;
     size_t n_members = config_object_keys(key, &members);
@@ -294,9 +296,9 @@ void provider_warn_unused_fields(const char *name, const struct wire *wire, unsi
         if (string_list_has(extra, members[i])) {
             ; /* consumed by this provider */
         } else if (field) {
-            if (field->dialects & dialects) {
+            if (field->classes & classes) {
                 ; /* consumed by this provider */
-            } else if (field->dialects & FIELD_ANY) {
+            } else if (field->classes & FIELD_ANY) {
                 /* The dialect wording wins whenever some wire does consume the field. */
                 hax_warn("provider '%s': field '%s' is not used by %s providers", name, members[i],
                          api_label);
@@ -310,20 +312,6 @@ void provider_warn_unused_fields(const char *name, const struct wire *wire, unsi
         free(members[i]);
     }
     free(members);
-}
-
-void provider_warn_unused_wire_fields(const char *name, const struct wire *default_wire,
-                                      const char *const *extra)
-{
-    const struct wire *wire = default_wire;
-    if (default_wire != &WIRE_ANTHROPIC_MESSAGES) {
-        char *key = xasprintf("providers.%s.api", name);
-        wire = wire_find(config_str(key));
-        free(key);
-        if (!wire || wire == &WIRE_ANTHROPIC_MESSAGES)
-            wire = default_wire;
-    }
-    provider_warn_unused_fields(name, wire, PROVIDER_FIELD_KEYED, extra);
 }
 
 /* Resolve providers.<name>.<leaf> from config (override → file/state; the named lane has no
@@ -342,6 +330,29 @@ static const char *resolve(const char *name, const char *leaf, const char *fallb
 {
     const char *v = cfg(name, leaf);
     return v ? v : fallback;
+}
+
+/* Expand a "{port}" placeholder in a def's default base_url: providers.<name>.port, else the
+ * def's own port. Returns the owned expansion, or NULL when the URL carries no placeholder or
+ * no port resolves. */
+static char *expand_base_url(const struct provider_def *def)
+{
+    const char *url = def->base_url;
+    const char *placeholder = url ? strstr(url, "{port}") : NULL;
+    if (!placeholder)
+        return NULL;
+    /* The typed read parses and bounds-checks a registered setting (llamacpp), falling back to
+     * its registered default; the range guard covers unregistered ports, so a malformed value
+     * degrades to the def's default instead of a malformed URL. */
+    char *key = xasprintf("providers.%s.port", def->id);
+    int port = config_int(key);
+    free(key);
+    if (port < 1 || port > 65535)
+        port = def->port;
+    if (port < 1)
+        return NULL;
+    return xasprintf("%.*s%d%s", (int)(placeholder - url), url, port,
+                     placeholder + strlen("{port}"));
 }
 
 static enum http_metadata_api metadata_api_from_def(const struct provider_def *def)
@@ -399,14 +410,19 @@ struct provider *provider_def_construct(const struct provider_def *def)
 
     /* A pinned def's api is fixed (http_provider warns when config sets it); an unpinned
      * def's wire already reflects config. Key fields are consumed only when a static key
-     * authenticates the provider. */
-    unsigned key_dialects = 0;
+     * authenticates the provider; the port only when the def's base_url is port-templated. */
+    unsigned extra_classes = 0;
     if (!def->auth_source)
-        key_dialects = PROVIDER_FIELD_KEYED | (def->pinned ? 0 : PROVIDER_FIELD_UNPINNED);
-    provider_warn_unused_fields(name, wire, key_dialects,
+        extra_classes = PROVIDER_FIELD_KEYED | (def->pinned ? 0 : PROVIDER_FIELD_UNPINNED);
+    if (def->base_url && strstr(def->base_url, "{port}"))
+        extra_classes |= PROVIDER_FIELD_PORT_TEMPLATED;
+    provider_warn_unused_fields(name, wire, extra_classes,
                                 metadata_api == HTTP_METADATA_ANTHROPIC ? METADATA_FIELDS : NULL);
 
-    const char *base = def->pinned ? def->base_url : resolve(name, "base_url", def->base_url);
+    char *computed_base = def->pinned ? NULL : expand_base_url(def);
+    const char *base =
+        def->pinned ? def->base_url
+                    : resolve(name, "base_url", computed_base ? computed_base : def->base_url);
     if (!base) {
         char *key = xasprintf("providers.%s.base_url", name);
         const struct config_setting *setting = config_setting_find(key);
@@ -416,14 +432,29 @@ struct provider *provider_def_construct(const struct provider_def *def)
         else
             hax_err("provider '%s': no base_url (set %s in config.json)", name, key);
         free(key);
+        free(computed_base);
         return NULL;
+    }
+
+    int model_discovered = 0;
+    if (def->discover) {
+        /* The hook talks to the server, so hand it the trimmed URL requests will use. */
+        char *server_base = dup_trim_trailing_slash(base);
+        int failed = def->discover(server_base, &model_discovered) != 0;
+        free(server_base);
+        if (failed) {
+            free(computed_base);
+            return NULL;
+        }
     }
 
     /* Credentials must exist before anything else is built: a logged-out provider fails
      * construction with the hook's diagnostics, like a missing base_url. */
     struct http_auth_source auth = {0};
-    if (def->auth_source && def->auth_source(def, &auth) != 0)
+    if (def->auth_source && def->auth_source(def, &auth) != 0) {
+        free(computed_base);
         return NULL;
+    }
 
     char *default_model = NULL;
     char *default_effort = NULL;
@@ -449,6 +480,7 @@ struct provider *provider_def_construct(const struct provider_def *def)
         .metadata_api = metadata_api_from_def(def),
         .send_cache_key_default = def->send_cache_key,
         .request_cost = def->request_cost,
+        .reasoning_replay_field = def->reasoning_roundtrip,
         /* The def supplies only the default; the preset overlays <prefix>.reasoning_format
          * like every other quirk field. */
         .reasoning_format = chat_reasoning_format_parse(def->reasoning_format, CHAT_REASONING_FLAT),
@@ -476,10 +508,12 @@ struct provider *provider_def_construct(const struct provider_def *def)
     free(default_model);
     free(default_effort);
     free(cfg_prefix);
+    free(computed_base);
     if (!p)
         return NULL;
 
     p->id = name;
+    p->model_discovered = model_discovered;
     /* Like parse_model (which only the def's own listing consults), the probe and listing hooks
      * refine the def's metadata dialect: a configured metadata_api that moves the provider to
      * another dialect must keep that dialect's requests, not a mixed pairing. */
@@ -504,8 +538,12 @@ struct provider *provider_def_construct(const struct provider_def *def)
 void provider_def_availability(const struct provider_def *def, struct provider_availability *out)
 {
     const char *name = def->id;
-    const char *base = def->pinned ? def->base_url : resolve(name, "base_url", def->base_url);
+    char *computed_base = def->pinned ? NULL : expand_base_url(def);
+    const char *base =
+        def->pinned ? def->base_url
+                    : resolve(name, "base_url", computed_base ? computed_base : def->base_url);
     if (!base) {
+        free(computed_base);
         out->available = 0;
         out->reason = xstrdup(def->unconfigured_reason ? def->unconfigured_reason : "no base_url");
         return;
@@ -515,6 +553,7 @@ void provider_def_availability(const struct provider_def *def, struct provider_a
     const char *key_env =
         def->pinned ? def->api_key_env : resolve(name, "api_key_env", def->api_key_env);
     if (inline_key || key_env) {
+        free(computed_base);
         char *prefix = xasprintf("providers.%s", name);
         const char *api_key = provider_api_key(prefix, key_env);
         free(prefix);
@@ -530,6 +569,7 @@ void provider_def_availability(const struct provider_def *def, struct provider_a
     /* Keyless without a probing def: configuration is the whole check, because a generic
      * endpoint may serve only its completion route and no /models. */
     if (!def->probe) {
+        free(computed_base);
         out->available = 1;
         return;
     }
@@ -543,4 +583,5 @@ void provider_def_availability(const struct provider_def *def, struct provider_a
     string_array_free(extra_headers);
     free(prefix);
     free(probe_url);
+    free(computed_base);
 }

@@ -45,7 +45,6 @@ struct chat_events {
     char *route;
     int terminal_emitted;
 
-    int emit_progress;
     const char *length_hint; /* borrowed; appended to "length" errors */
     int cache_write_1h;
 };

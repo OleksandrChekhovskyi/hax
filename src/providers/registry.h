@@ -25,9 +25,13 @@ struct provider_def {
     int internal;
 
     /* Default field values, named after their providers.<id> config leaves. */
-    const char *api;      /* dialect: openai-completions (the default) | openai-responses |
-                             anthropic-messages, or catalog for per-model routing */
-    const char *base_url; /* NULL → the user must configure one */
+    const char *api; /* dialect: openai-completions (the default) | openai-responses |
+                        anthropic-messages, or catalog for per-model routing */
+    /* NULL → the user must configure one. A "{port}" placeholder expands to the resolved
+     * providers.<id>.port, for local servers addressed by port. A configured base_url is
+     * always used verbatim. */
+    const char *base_url;
+    int port; /* default for the "{port}" placeholder (0: none); providers.<id>.port overrides */
     /* First-party endpoint: configured base_url and api cannot rewire it, so its key is never
      * redirected to another host or protocol family. */
     int pinned;
@@ -42,6 +46,9 @@ struct provider_def {
     const char *cache;
     int request_cost;             /* chat: request provider-reported per-response cost */
     const char *reasoning_format; /* "flat"/"nested"; NULL → flat */
+    /* Chat default for the member prior reasoning replays under; NULL disables replay.
+     * providers.<id>.reasoning_roundtrip overrides either way. */
+    const char *reasoning_roundtrip;
     const char *thinking_mode; /* messages: "adaptive"/"budget"/"off"; NULL → compat-safe budget */
     /* The endpoint signs and validates thinking blocks like the first-party Messages API, so
      * unsigned blocks from other backends are dropped rather than replayed and rejected. */
@@ -77,6 +84,11 @@ struct provider_def {
     /* Resolve model/effort defaults mirrored from live companion-tool state into owned
      * outputs; NULL leaves the provider without defaults. */
     void (*load_defaults)(char **default_model, char **default_effort);
+    /* Reconcile live server state after endpoint resolution, before the provider is built: may
+     * adopt or correct the active model from the running server, with `model_discovered`
+     * marking a model read from transient server state that must not be persisted. Return
+     * non-zero after reporting why construction must fail. */
+    int (*discover)(const char *base_url, int *model_discovered);
 
     /* Whole-provider overrides for providers the data path cannot express. */
     struct provider *(*construct)(const struct provider_def *def);

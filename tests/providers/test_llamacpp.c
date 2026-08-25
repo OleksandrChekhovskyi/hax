@@ -3,9 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "config.h"
 #include "harness.h"
 #include "provider.h"
+#include "util.h"
+#include "providers/http_provider.h"
 #include "providers/llamacpp.h"
+#include "providers/registry.h"
 
 static const char MODELS_RESPONSE[] =
     "{\"data\": [{\"id\": 7}, {}, {\"id\": \"served-a\"}, {\"id\": \"served-b\"}]}";
@@ -229,6 +233,59 @@ static void test_model_scoped_props_url(void)
     free(url);
 }
 
+/* The def's endpoint derives from the registered port setting unless base_url overrides it. */
+static void test_default_base_url_follows_port(void)
+{
+    config_set_override("providers.llamacpp.port", "1");
+    config_set_override("model", "local.gguf"); /* keeps the unreachable server non-fatal */
+
+    struct provider *provider = provider_construct(provider_find("llamacpp"));
+    EXPECT(provider != NULL);
+    if (provider) {
+        EXPECT_STR_EQ(http_provider_base_url(provider), "http://127.0.0.1:1/v1");
+        provider->destroy(provider);
+    }
+
+    config_set_override("model", NULL);
+    config_set_override("providers.llamacpp.port", NULL);
+}
+
+/* The def constructs through the generic path: discovery keeps an explicitly configured model
+ * while the server is unreachable, the hooks land on the provider, and without a configured
+ * model an unreachable server fails construction with guidance. */
+static void test_def_construction(void)
+{
+    config_set_override("providers.llamacpp.base_url", "http://127.0.0.1:1/v1");
+    config_set_override("model", "local.gguf");
+
+    /* The def's endpoint-required body members must parse (return_progress rides extra_body). */
+    const struct provider_def *def = provider_find("llamacpp");
+    json_t *def_extra_body = def->extra_body ? json_loads(def->extra_body, 0, NULL) : NULL;
+    EXPECT(json_is_true(json_object_get(def_extra_body, "return_progress")));
+    json_decref(def_extra_body);
+
+    struct provider *provider = provider_construct(def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        EXPECT_STR_EQ(provider->name, "llama.cpp");
+        EXPECT_STR_EQ(provider->id, "llamacpp");
+        EXPECT(provider->probe_model == llamacpp_probe_model);
+        EXPECT(provider->model_label == llamacpp_model_label);
+        EXPECT(!provider->model_discovered);
+        const char *const *efforts = NULL;
+        EXPECT(provider->list_efforts(provider, &efforts) == 0);
+        provider->destroy(provider);
+    }
+
+    config_set_override("model", NULL);
+    unsetenv("HAX_MODEL");
+    unsigned long diagnostics_before = hax_diag_sequence();
+    EXPECT(provider_construct(provider_find("llamacpp")) == NULL);
+    EXPECT(hax_diag_sequence() == diagnostics_before + 1);
+
+    config_set_override("providers.llamacpp.base_url", NULL);
+}
+
 int main(void)
 {
     test_model_label();
@@ -246,5 +303,7 @@ int main(void)
     test_parse_model_single_mode();
     test_unscoped_props_url();
     test_model_scoped_props_url();
+    test_default_base_url_follows_port();
+    test_def_construction();
     T_REPORT();
 }

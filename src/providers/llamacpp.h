@@ -8,12 +8,20 @@
 
 struct provider_def; /* providers/registry.h */
 
-/* Construct the llama-server provider, reconciling the configured model against the server. */
-struct provider *llamacpp_provider_new(const struct provider_def *def);
+/* Hooks behind the llamacpp def: a local llama-server whose endpoint derives from a configured
+ * port and whose active model is discovered from the running server. */
+
+/* Discovery hook: reconcile the configured model against the running server, adopting or
+ * correcting it as a non-persisted override. Fails (reported) when the server is unreachable
+ * and no model is configured to fall back on. */
+int llamacpp_discover(const char *base_url, int *model_discovered);
 
 /* Availability probe against the resolved local base URL. */
 void llamacpp_prepare_availability(const struct provider_def *def,
                                    struct provider_availability *out);
+
+/* Single-model metadata from llama-server's /props endpoint. */
+int llamacpp_probe_model(struct provider *provider, const char *model, struct model_probe *probe);
 
 /* Decision derived from a /v1/models response. A classic single-model server reports what it
  * serves, so an unavailable configured model is substituted. A router catalog (entries carrying a

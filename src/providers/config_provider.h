@@ -29,23 +29,30 @@ void provider_def_availability(const struct provider_def *def, struct provider_a
 
 /* Field vocabulary of a providers.<name> block. The inventory is declarative only: value
  * acceptance lives in the dialect constructors, and the env-alias rows in config.c project a
- * subset of it (a unit test keeps them in sync). */
-enum provider_field_dialect {
+ * subset of it (a unit test keeps them in sync).
+ *
+ * Each class names the providers that consume a field: the wire dialects for protocol knobs,
+ * and def traits for fields tied to how the def authenticates or addresses its endpoint. */
+enum provider_field_class {
+    /* Wire dialects. */
     PROVIDER_FIELD_OPENAI_CHAT = 1 << 0,      /* openai-completions */
     PROVIDER_FIELD_OPENAI_RESPONSES = 1 << 1, /* openai-responses */
     PROVIDER_FIELD_ANTHROPIC = 1 << 2,        /* anthropic-messages */
-    /* Consumed by the generic constructor only when the def is unpinned: a pinned provider's
-     * identity fields are fixed, so setting them must warn rather than silently do nothing. */
+    /* Def traits, added by construction when the def qualifies. */
+    /* Unpinned defs: a pinned provider's identity fields are fixed, so setting them must warn
+     * rather than silently do nothing. */
     PROVIDER_FIELD_UNPINNED = 1 << 3,
-    /* Consumed only by providers that authenticate with a static API key; a def with an auth
-     * source manages its own credentials, so key fields must warn. */
+    /* Providers authenticating with a static API key; a def with an auth source manages its
+     * own credentials, so key fields must warn. */
     PROVIDER_FIELD_KEYED = 1 << 4,
+    /* Defs whose base_url carries a "{port}" placeholder. */
+    PROVIDER_FIELD_PORT_TEMPLATED = 1 << 5,
 };
 #define PROVIDER_FIELD_OPENAI (PROVIDER_FIELD_OPENAI_CHAT | PROVIDER_FIELD_OPENAI_RESPONSES)
 
 struct provider_field {
     const char *leaf;
-    unsigned dialects;   /* mask of enum provider_field_dialect */
+    unsigned classes;    /* mask of enum provider_field_class */
     unsigned secret : 1; /* value must never be displayed */
 };
 
@@ -53,17 +60,11 @@ struct provider_field {
 const struct provider_field *provider_fields(size_t *n);
 
 /* Warn about providers.<name> members nothing consumes. A member is consumed by `wire`'s
- * dialect fields (NULL: none), by `extra_dialects`, by being a registered per-provider
+ * dialect fields (NULL: none), by `extra_classes`, by being a registered per-provider
  * setting, or by the NULL-terminated `extra` allowlist (may be NULL). Warnings never fail
  * construction, so a config written for a newer hax still runs. */
-void provider_warn_unused_fields(const char *name, const struct wire *wire, unsigned extra_dialects,
+void provider_warn_unused_fields(const char *name, const struct wire *wire, unsigned extra_classes,
                                  const char *const *extra);
-
-/* Wire-preset variant: resolves providers.<name>.api the way construction does — moving an
- * OpenAI-family `default_wire` between the two OpenAI protocols, never across families — and
- * warns against the resulting dialect. Construction owns warning about the value itself. */
-void provider_warn_unused_wire_fields(const char *name, const struct wire *default_wire,
-                                      const char *const *extra);
 
 /* Resolve the provider's credential: inline <prefix>.api_key, else the named environment
  * variable. An inline "$NAME" value reads the environment variable NAME instead, keeping the

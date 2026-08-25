@@ -332,9 +332,6 @@ static void capture_usage(struct chat_events *parser, json_t *root)
 
 static void handle_progress(struct chat_events *parser, json_t *root)
 {
-    if (!parser->emit_progress)
-        return;
-
     json_t *progress = json_object_get(root, "prompt_progress");
     if (!json_is_object(progress))
         return;
