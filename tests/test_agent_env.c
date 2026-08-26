@@ -10,79 +10,56 @@
 #include "config.h"
 #include "harness.h"
 #include "util.h"
+#include "system/fs.h"
 
-/* Each test stages a fresh tmpdir tree (harness-cleaned at exit), chdirs into
- * it, runs agent_env_build_suffix(), then chdirs back. We also pin
- * HOME and XDG_CONFIG_HOME inside the sandbox so the developer's real
- * ~/.config/hax/AGENTS.md doesn't leak into test output, and clear the
- * HAX_NO_* knobs unless a test sets them deliberately. */
-
+/* HOME, XDG paths, cwd, and prompt feature flags are isolated from the developer's environment. */
 struct sandbox {
-    char *root;     /* resolved t_tempdir; everything else lives under this */
-    char *prev_cwd; /* cwd to restore on cleanup */
+    char *root;
+    char *previous_cwd;
 };
 
-static void sandbox_init(struct sandbox *s)
+static void sandbox_init(struct sandbox *sandbox)
 {
-    s->prev_cwd = getcwd(NULL, 0);
-    /* t_tempdir hands back a canonical path, so this compares byte-for-byte against a later getcwd
-     * when collapsing the home prefix. */
-    s->root = xstrdup(t_tempdir());
-    /* Point HOME and XDG_CONFIG_HOME at the sandbox so global AGENTS.md
-     * lookups don't escape it. Tests that want a global file create it
-     * under $HOME/.config/hax/AGENTS.md. */
-    setenv("HOME", s->root, 1);
+    sandbox->previous_cwd = getcwd(NULL, 0);
+    sandbox->root = xstrdup(t_tempdir());
+    setenv("HOME", sandbox->root, 1);
     unsetenv("XDG_CONFIG_HOME");
     unsetenv("HAX_NO_ENV");
     unsetenv("HAX_NO_AGENTS_MD");
     unsetenv("HAX_NO_SKILLS");
     setenv("HAX_BASH_SHELL", CONFIG_VALUE_DEFAULT, 1);
-    /* The subagents and tasks sections are static text present in every
-     * suffix, which would smear across every assertion below; suppress them
-     * by default and let the dedicated tests unset this deliberately. */
+
+    /* Most tests exercise one context source; delegation guidance is covered separately. */
     setenv("HAX_NO_SUBAGENTS", "1", 1);
     setenv("HAX_NO_TASKS", "1", 1);
 }
 
-static void sandbox_free(struct sandbox *s)
+static void sandbox_free(struct sandbox *sandbox)
 {
-    if (s->prev_cwd) {
-        if (chdir(s->prev_cwd) != 0)
-            FAIL("chdir(prev_cwd=%s): %s", s->prev_cwd, strerror(errno));
-        free(s->prev_cwd);
+    if (sandbox->previous_cwd) {
+        if (chdir(sandbox->previous_cwd) != 0)
+            FAIL("chdir(previous_cwd=%s): %s", sandbox->previous_cwd, strerror(errno));
+        free(sandbox->previous_cwd);
     }
-    free(s->root);
+    free(sandbox->root);
 }
 
-static void mkdirs(const char *path)
+static void write_file_bytes(const char *path, const void *data, size_t data_len)
 {
-    char *p = xstrdup(path);
-    for (char *c = p + 1; *c; c++) {
-        if (*c == '/') {
-            *c = '\0';
-            mkdir(p, 0755);
-            *c = '/';
-        }
-    }
-    mkdir(p, 0755);
-    free(p);
-}
-
-static void write_file_bytes(const char *path, const void *data, size_t len)
-{
-    char *dir = xstrdup(path);
-    char *slash = strrchr(dir, '/');
+    char *parent = xstrdup(path);
+    char *slash = strrchr(parent, '/');
     if (slash) {
         *slash = '\0';
-        mkdirs(dir);
+        if (fs_mkdir_p(parent) != 0)
+            FAIL("mkdir(%s): %s", parent, strerror(errno));
     }
-    free(dir);
+    free(parent);
     FILE *f = fopen(path, "w");
     if (!f) {
         FAIL("fopen(%s): %s", path, strerror(errno));
         return;
     }
-    if (len && fwrite(data, 1, len, f) != len)
+    if (data_len && fwrite(data, 1, data_len, f) != data_len)
         FAIL("short write to %s", path);
     fclose(f);
 }
@@ -92,61 +69,49 @@ static void write_file(const char *path, const char *content)
     write_file_bytes(path, content, strlen(content));
 }
 
-static int contains(const char *hay, const char *needle)
+static int contains(const char *haystack, const char *needle)
 {
-    return hay && strstr(hay, needle) != NULL;
+    return haystack && strstr(haystack, needle) != NULL;
 }
 
 /* ---------- sandbox-relative staging ---------- */
 
-/* The helpers below take paths relative to the sandbox root and keep the
- * allocation and its free inside, so a test body reads as staging steps rather
- * than string plumbing. An empty or "." path names the root itself. Use
- * sandbox_path directly only where an absolute string outlives the call, such as
- * $PATH and $HOME assignments. */
-
-static char *sandbox_path(struct sandbox *s, const char *rel)
+static char *sandbox_path(struct sandbox *sandbox, const char *relative_path)
 {
-    if (!rel || !*rel || strcmp(rel, ".") == 0)
-        return xstrdup(s->root);
-    return xasprintf("%s/%s", s->root, rel);
+    if (!relative_path || !*relative_path || strcmp(relative_path, ".") == 0)
+        return xstrdup(sandbox->root);
+    return xasprintf("%s/%s", sandbox->root, relative_path);
 }
 
-/* Create a directory and its parents. mkdirs ignores every mkdir error, so
- * confirm the result rather than letting a staging failure surface later as a
- * test that quietly checks nothing. */
-static void sandbox_mkdir(struct sandbox *s, const char *rel)
+static void sandbox_mkdir(struct sandbox *sandbox, const char *relative_path)
 {
-    char *dir = sandbox_path(s, rel);
-    mkdirs(dir);
-    struct stat st;
-    if (stat(dir, &st) != 0)
+    char *dir = sandbox_path(sandbox, relative_path);
+    if (fs_mkdir_p(dir) != 0)
         FAIL("mkdir(%s): %s", dir, strerror(errno));
-    else if (!S_ISDIR(st.st_mode))
-        FAIL("mkdir(%s): not a directory", dir);
     free(dir);
 }
 
-static void sandbox_write(struct sandbox *s, const char *rel, const char *content)
+static void sandbox_write(struct sandbox *sandbox, const char *relative_path, const char *content)
 {
-    char *path = sandbox_path(s, rel);
+    char *path = sandbox_path(sandbox, relative_path);
     write_file(path, content);
     free(path);
 }
 
-static void sandbox_write_bytes(struct sandbox *s, const char *rel, const void *data, size_t len)
+static void sandbox_write_bytes(struct sandbox *sandbox, const char *relative_path,
+                                const void *data, size_t data_len)
 {
-    char *path = sandbox_path(s, rel);
-    write_file_bytes(path, data, len);
+    char *path = sandbox_path(sandbox, relative_path);
+    write_file_bytes(path, data, data_len);
     free(path);
 }
 
-/* Stage a fake executable `name` in sandbox-relative directory `rel`, creating
- * it. Content is irrelevant — agent_env.c only checks access(X_OK). */
-static void sandbox_stage_command(struct sandbox *s, const char *rel, const char *name)
+/* fs_which() only needs the staged command to be a regular executable file. */
+static void sandbox_stage_command(struct sandbox *sandbox, const char *relative_dir,
+                                  const char *name)
 {
-    sandbox_mkdir(s, rel);
-    char *dir = sandbox_path(s, rel);
+    sandbox_mkdir(sandbox, relative_dir);
+    char *dir = sandbox_path(sandbox, relative_dir);
     char *path = xasprintf("%s/%s", dir, name);
     free(dir);
     write_file(path, "#!/bin/sh\n");
@@ -155,9 +120,9 @@ static void sandbox_stage_command(struct sandbox *s, const char *rel, const char
     free(path);
 }
 
-static int sandbox_chdir(struct sandbox *s, const char *rel)
+static int sandbox_chdir(struct sandbox *sandbox, const char *relative_path)
 {
-    char *dir = sandbox_path(s, rel);
+    char *dir = sandbox_path(sandbox, relative_path);
     int ok = chdir(dir) == 0;
     if (!ok)
         FAIL("chdir(%s): %s", dir, strerror(errno));
@@ -199,45 +164,45 @@ static void env_path_restore(char *saved)
 
 /* ---------- Environment section ---------- */
 
-static void test_agent_env_section_present_by_default(void)
+static void test_environment_present_by_default(void)
 {
     struct sandbox s;
     sandbox_init(&s);
     SANDBOX_CHDIR(&s, ".");
-    char *p = agent_env_build_suffix("claude-test-1");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "# Environment\n\n"));
-        EXPECT(contains(p, "- Working directory: ~\n"));
+    char *suffix = agent_env_build_suffix("claude-test-1");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "# Environment\n\n"));
+        EXPECT(contains(suffix, "- Working directory: ~\n"));
         char *home = xasprintf("- Home directory: %s\n", s.root);
-        EXPECT(contains(p, home));
+        EXPECT(contains(suffix, home));
         free(home);
-        EXPECT(contains(p, "- Operating system: "));
-        EXPECT(contains(p, "- Command shell: "));
-        EXPECT(contains(p, "- Model: claude-test-1\n"));
-        EXPECT(contains(p, "- Git repository: no\n"));
-        EXPECT(!contains(p, "<env>"));
-        free(p);
+        EXPECT(contains(suffix, "- Operating system: "));
+        EXPECT(contains(suffix, "- Command shell: "));
+        EXPECT(contains(suffix, "- Model: claude-test-1\n"));
+        EXPECT(contains(suffix, "- Git repository: no\n"));
+        EXPECT(!contains(suffix, "<env>"));
+        free(suffix);
     }
     sandbox_free(&s);
 }
 
-static void test_agent_env_section_git_root(void)
+static void test_environment_reports_git_root(void)
 {
     struct sandbox s;
     sandbox_init(&s);
     sandbox_mkdir(&s, ".git");
     SANDBOX_CHDIR(&s, ".");
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "- Git repository root: ~\n"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "- Git repository root: ~\n"));
+        free(suffix);
     }
     sandbox_free(&s);
 }
 
-static void test_agent_env_section_git_root_from_subdir(void)
+static void test_environment_finds_git_root_from_subdir(void)
 {
     struct sandbox s;
     sandbox_init(&s);
@@ -247,88 +212,88 @@ static void test_agent_env_section_git_root_from_subdir(void)
     sandbox_mkdir(&s, ".git");
     sandbox_mkdir(&s, "a/b");
     SANDBOX_CHDIR(&s, "a/b");
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "- Git repository root: ~\n"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "- Git repository root: ~\n"));
+        free(suffix);
     }
     sandbox_free(&s);
 }
 
-static void test_agent_env_section_omits_model_when_null(void)
+static void test_environment_omits_null_model(void)
 {
     struct sandbox s;
     sandbox_init(&s);
     SANDBOX_CHDIR(&s, ".");
-    char *p = agent_env_build_suffix(NULL);
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(!contains(p, "- Model:"));
-        free(p);
+    char *suffix = agent_env_build_suffix(NULL);
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(!contains(suffix, "- Model:"));
+        free(suffix);
     }
     sandbox_free(&s);
 }
 
-static void test_agent_env_section_omits_home_when_unset(void)
+static void test_environment_omits_unset_home(void)
 {
     struct sandbox s;
     sandbox_init(&s);
     SANDBOX_CHDIR(&s, ".");
     unsetenv("HOME");
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(!contains(p, "- Home directory:"));
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(!contains(suffix, "- Home directory:"));
         char *cwd = xasprintf("- Working directory: %s\n", s.root);
-        EXPECT(contains(p, cwd));
+        EXPECT(contains(suffix, cwd));
         free(cwd);
-        free(p);
+        free(suffix);
     }
     sandbox_free(&s);
 }
 
-static void test_agent_env_section_reports_command_shell(void)
+static void test_environment_reports_command_shell(void)
 {
     struct sandbox s;
     sandbox_init(&s);
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_BASH_SHELL", "/bin/sh", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "- Command shell: /bin/sh\n"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "- Command shell: /bin/sh\n"));
+        free(suffix);
     }
     sandbox_free(&s);
 }
 
-static void test_no_env_knob_disables_section(void)
+static void test_environment_can_be_disabled(void)
 {
     struct sandbox s;
     sandbox_init(&s);
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    /* No env, no AGENTS.md → NULL. */
-    EXPECT(p == NULL);
-    free(p);
-    unsetenv("HAX_NO_ENV");
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix == NULL);
+    free(suffix);
     sandbox_free(&s);
 }
 
-static void test_both_knobs_disable_returns_null(void)
+static void test_all_context_sections_can_be_disabled(void)
 {
     struct sandbox s;
     sandbox_init(&s);
+    sandbox_write(&s, "AGENTS.md", "project guidance\n");
+    sandbox_write(&s, ".agents/skills/example/SKILL.md", "---\ndescription: example\n---\n");
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
     setenv("HAX_NO_AGENTS_MD", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p == NULL);
-    free(p);
-    unsetenv("HAX_NO_ENV");
-    unsetenv("HAX_NO_AGENTS_MD");
+    setenv("HAX_NO_SKILLS", "1", 1);
+
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix == NULL);
+    free(suffix);
     sandbox_free(&s);
 }
 
@@ -345,12 +310,12 @@ static void test_commands_line_lists_present(void)
     char *saved = env_path_set(bin);
     free(bin);
 
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "Available command-line tools: `rg`, `jq`.\n"));
-        EXPECT(contains(p, "Prefer `rg` to `grep -r`.\n"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "Available command-line tools: `rg`, `jq`.\n"));
+        EXPECT(contains(suffix, "Prefer `rg` to `grep -r`.\n"));
+        free(suffix);
     }
 
     env_path_restore(saved);
@@ -368,12 +333,12 @@ static void test_commands_line_omitted_when_none(void)
     char *saved = env_path_set(empty_bin);
     free(empty_bin);
 
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(!contains(p, "Available command-line tools:"));
-        EXPECT(!contains(p, "Prefer `"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(!contains(suffix, "Available command-line tools:"));
+        EXPECT(!contains(suffix, "Prefer `"));
+        free(suffix);
     }
 
     env_path_restore(saved);
@@ -394,13 +359,13 @@ static void test_commands_line_skips_relative_path_entries(void)
     sandbox_stage_command(&s, ".", "rg");
     char *saved = env_path_set(".");
 
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(!contains(p, "Available command-line tools:"));
-        EXPECT(!contains(p, "Prefer `"));
-        EXPECT(!contains(p, "`rg`"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(!contains(suffix, "Available command-line tools:"));
+        EXPECT(!contains(suffix, "Prefer `"));
+        EXPECT(!contains(suffix, "`rg`"));
+        free(suffix);
     }
 
     env_path_restore(saved);
@@ -423,13 +388,13 @@ static void test_commands_line_ignores_directories(void)
     char *saved = env_path_set(bin);
     free(bin);
 
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "Available command-line tools: `jq`.\n"));
-        EXPECT(!contains(p, "Prefer `"));
-        EXPECT(!contains(p, "`rg`"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "Available command-line tools: `jq`.\n"));
+        EXPECT(!contains(suffix, "Prefer `"));
+        EXPECT(!contains(suffix, "`rg`"));
+        free(suffix);
     }
 
     env_path_restore(saved);
@@ -452,13 +417,14 @@ static void test_commands_line_preserves_canonical_order(void)
     char *saved = env_path_set(bin);
     free(bin);
 
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "Available command-line tools: `rg`, `fd`, `gh`, `python3`, `node`.\n"));
-        EXPECT(contains(p, "Prefer `rg` to `grep -r`, `fd` to `find`, `python3` to "
-                           "`python`.\n"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix,
+                        "Available command-line tools: `rg`, `fd`, `gh`, `python3`, `node`.\n"));
+        EXPECT(contains(suffix, "Prefer `rg` to `grep -r`, `fd` to `find`, `python3` to "
+                                "`python`.\n"));
+        free(suffix);
     }
 
     env_path_restore(saved);
@@ -478,11 +444,11 @@ static void test_agents_md_cwd_only_no_root_marker(void)
     sandbox_mkdir(&s, "sub/dir");
     SANDBOX_CHDIR(&s, "sub/dir");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
+    char *suffix = agent_env_build_suffix("m");
     /* Without .git anywhere, the parent file is ignored and there is no
      * cwd-level file → nothing to emit, suffix is NULL. */
-    EXPECT(p == NULL);
-    free(p);
+    EXPECT(suffix == NULL);
+    free(suffix);
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
 }
@@ -504,21 +470,21 @@ static void test_agents_md_walks_to_git_root_farthest_first(void)
     SANDBOX_CHDIR(&s, "a/b");
 
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        const char *o = strstr(p, "OUTER_MARKER");
-        const char *m = strstr(p, "MIDDLE_MARKER");
-        const char *n = strstr(p, "INNER_MARKER");
-        EXPECT(o && m && n);
-        if (o && m && n) {
-            EXPECT(o < m);
-            EXPECT(m < n);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        const char *outer = strstr(suffix, "OUTER_MARKER");
+        const char *middle = strstr(suffix, "MIDDLE_MARKER");
+        const char *inner = strstr(suffix, "INNER_MARKER");
+        EXPECT(outer && middle && inner);
+        if (outer && middle && inner) {
+            EXPECT(outer < middle);
+            EXPECT(middle < inner);
         }
-        EXPECT(contains(p, "# Project Context"));
-        EXPECT(contains(p, "Project guidance below overrides the assistant defaults above."));
-        EXPECT(contains(p, "## "));
-        free(p);
+        EXPECT(contains(suffix, "# Project Context"));
+        EXPECT(contains(suffix, "Project guidance below overrides the assistant defaults above."));
+        EXPECT(contains(suffix, "## "));
+        free(suffix);
     }
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
@@ -537,15 +503,15 @@ static void test_agents_md_global_first(void)
     SANDBOX_CHDIR(&s, "proj");
 
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        const char *g = strstr(p, "GLOBAL_MARKER");
-        const char *l = strstr(p, "LOCAL_MARKER");
-        EXPECT(g && l);
-        if (g && l)
-            EXPECT(g < l);
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        const char *global = strstr(suffix, "GLOBAL_MARKER");
+        const char *local = strstr(suffix, "LOCAL_MARKER");
+        EXPECT(global && local);
+        if (global && local)
+            EXPECT(global < local);
+        free(suffix);
     }
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
@@ -559,13 +525,13 @@ static void test_no_agents_md_knob_disables_walk(void)
     sandbox_write(&s, "AGENTS.md", "SHOULD_NOT_APPEAR\n");
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_AGENTS_MD", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(!contains(p, "SHOULD_NOT_APPEAR"));
-        EXPECT(!contains(p, "# Project Context"));
-        EXPECT(contains(p, "# Environment"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(!contains(suffix, "SHOULD_NOT_APPEAR"));
+        EXPECT(!contains(suffix, "# Project Context"));
+        EXPECT(contains(suffix, "# Environment"));
+        free(suffix);
     }
     unsetenv("HAX_NO_AGENTS_MD");
     sandbox_free(&s);
@@ -585,12 +551,12 @@ static void test_xdg_config_home_overrides_home(void)
 
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "XDG_GLOBAL"));
-        EXPECT(!contains(p, "HOME_GLOBAL"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "XDG_GLOBAL"));
+        EXPECT(!contains(suffix, "HOME_GLOBAL"));
+        free(suffix);
     }
     unsetenv("HAX_NO_ENV");
     unsetenv("XDG_CONFIG_HOME");
@@ -611,19 +577,19 @@ static void test_agents_md_invalid_bytes_sanitized(void)
     sandbox_write_bytes(&s, "AGENTS.md", dirty, sizeof(dirty) - 1);
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
         /* Both `before` (pre-NUL) and `after` (post-replacement) survive,
          * which proves the prompt didn't get truncated mid-file. */
-        EXPECT(contains(p, "before"));
-        EXPECT(contains(p, "middle"));
-        EXPECT(contains(p, "after"));
+        EXPECT(contains(suffix, "before"));
+        EXPECT(contains(suffix, "middle"));
+        EXPECT(contains(suffix, "after"));
         /* No raw NUL anywhere in the C string (strlen would already cut
          * the buffer at one) and no raw 0xFF byte. */
-        EXPECT(strlen(p) > strlen("before") + strlen("middle") + strlen("after"));
-        EXPECT(memchr(p, '\xFF', strlen(p)) == NULL);
-        free(p);
+        EXPECT(strlen(suffix) > strlen("before") + strlen("middle") + strlen("after"));
+        EXPECT(memchr(suffix, '\xFF', strlen(suffix)) == NULL);
+        free(suffix);
     }
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
@@ -637,10 +603,10 @@ static void test_skills_none(void)
     sandbox_init(&s);
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
+    char *suffix = agent_env_build_suffix("m");
     /* No AGENTS.md, no skills, env disabled → NULL. */
-    EXPECT(p == NULL);
-    free(p);
+    EXPECT(suffix == NULL);
+    free(suffix);
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
 }
@@ -657,18 +623,18 @@ static void test_skills_with_description_sorted(void)
                   "---\nname: alpha\ndescription: \"alpha does A\"\n---\nbody\n");
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "# Skills"));
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "# Skills"));
         /* sandbox_init pins HOME=sandbox root, so absolute project paths collapse
          * to `~/.agents/skills/...`. */
-        EXPECT(contains(p, "- alpha: alpha does A (~/.agents/skills/alpha/SKILL.md)"));
-        EXPECT(contains(p, "- zeta: zeta does Z (~/.agents/skills/zeta/SKILL.md)"));
-        const char *a = strstr(p, "- alpha");
-        const char *z = strstr(p, "- zeta");
-        EXPECT(a && z && a < z);
-        free(p);
+        EXPECT(contains(suffix, "- alpha: alpha does A (~/.agents/skills/alpha/SKILL.md)"));
+        EXPECT(contains(suffix, "- zeta: zeta does Z (~/.agents/skills/zeta/SKILL.md)"));
+        const char *alpha = strstr(suffix, "- alpha");
+        const char *zeta = strstr(suffix, "- zeta");
+        EXPECT(alpha && zeta && alpha < zeta);
+        free(suffix);
     }
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
@@ -686,13 +652,52 @@ static void test_skills_crlf_frontmatter(void)
     sandbox_write_bytes(&s, ".agents/skills/crlf/SKILL.md", body, sizeof(body) - 1);
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "- crlf: from crlf (~/.agents/skills/crlf/SKILL.md)"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "- crlf: from crlf (~/.agents/skills/crlf/SKILL.md)"));
+        free(suffix);
     }
     unsetenv("HAX_NO_ENV");
+    sandbox_free(&s);
+}
+
+static void test_skills_unterminated_frontmatter_omits_description(void)
+{
+    struct sandbox s;
+    sandbox_init(&s);
+    sandbox_write(&s, ".agents/skills/broken/SKILL.md", "---\ndescription: incomplete\n");
+    SANDBOX_CHDIR(&s, ".");
+    setenv("HAX_NO_ENV", "1", 1);
+
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "- broken (~/.agents/skills/broken/SKILL.md)"));
+        EXPECT(!contains(suffix, "- broken:"));
+        free(suffix);
+    }
+    sandbox_free(&s);
+}
+
+static void test_skills_block_description_falls_back_to_name(void)
+{
+    struct sandbox s;
+    sandbox_init(&s);
+    sandbox_write(&s, ".agents/skills/block/SKILL.md",
+                  "---\ndescription: |-\n  multiline description\n---\n");
+    sandbox_write(&s, ".agents/skills/literal/SKILL.md", "---\ndescription: \"|\"\n---\n");
+    SANDBOX_CHDIR(&s, ".");
+    setenv("HAX_NO_ENV", "1", 1);
+
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "- block (~/.agents/skills/block/SKILL.md)"));
+        EXPECT(!contains(suffix, "- block:"));
+        EXPECT(contains(suffix, "- literal: | (~/.agents/skills/literal/SKILL.md)"));
+        free(suffix);
+    }
     sandbox_free(&s);
 }
 
@@ -703,12 +708,12 @@ static void test_skills_no_frontmatter_falls_back_to_dir(void)
     sandbox_write(&s, ".agents/skills/raw/SKILL.md", "Just a body, no frontmatter at all.\n");
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "- raw (~/.agents/skills/raw/SKILL.md)"));
-        EXPECT(!contains(p, "raw:")); /* no description → no colon-and-text */
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "- raw (~/.agents/skills/raw/SKILL.md)"));
+        EXPECT(!contains(suffix, "raw:")); /* no description → no colon-and-text */
+        free(suffix);
     }
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
@@ -722,10 +727,10 @@ static void test_skills_dir_without_skill_md_skipped(void)
     sandbox_mkdir(&s, ".agents/skills/empty");
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
+    char *suffix = agent_env_build_suffix("m");
     /* Nothing valid → NULL. */
-    EXPECT(p == NULL);
-    free(p);
+    EXPECT(suffix == NULL);
+    free(suffix);
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
 }
@@ -738,13 +743,13 @@ static void test_skills_global_root(void)
     sandbox_write(&s, ".config/hax/skills/sample/SKILL.md", "---\ndescription: from global\n---\n");
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "- sample: from global"));
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "- sample: from global"));
         /* Global path is absolute, embedded under the sandbox root. */
-        EXPECT(contains(p, "/.config/hax/skills/sample/SKILL.md"));
-        free(p);
+        EXPECT(contains(suffix, "/.config/hax/skills/sample/SKILL.md"));
+        free(suffix);
     }
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
@@ -761,17 +766,17 @@ static void test_skills_project_shadows_global(void)
     sandbox_write(&s, "proj/.agents/skills/dup/SKILL.md", "---\ndescription: from project\n---\n");
     SANDBOX_CHDIR(&s, "proj");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "from project"));
-        EXPECT(!contains(p, "from global"));
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "from project"));
+        EXPECT(!contains(suffix, "from global"));
         /* And exactly one entry for `dup`. */
-        const char *first = strstr(p, "- dup");
+        const char *first = strstr(suffix, "- dup");
         EXPECT(first != NULL);
         if (first)
             EXPECT(strstr(first + 1, "- dup") == NULL);
-        free(p);
+        free(suffix);
     }
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
@@ -784,12 +789,12 @@ static void test_skills_disabled_by_no_skills(void)
     sandbox_write(&s, ".agents/skills/foo/SKILL.md", "---\ndescription: hidden\n---\n");
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_SKILLS", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL); /* Environment section still present */
-    if (p) {
-        EXPECT(!contains(p, "# Skills"));
-        EXPECT(!contains(p, "hidden"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL); /* Environment section still present */
+    if (suffix) {
+        EXPECT(!contains(suffix, "# Skills"));
+        EXPECT(!contains(suffix, "hidden"));
+        free(suffix);
     }
     unsetenv("HAX_NO_SKILLS");
     sandbox_free(&s);
@@ -806,11 +811,11 @@ static void test_skills_walk_up_to_project_root(void)
     sandbox_mkdir(&s, "proj/a/b");
     SANDBOX_CHDIR(&s, "proj/a/b");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "- rooted: from project root"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "- rooted: from project root"));
+        free(suffix);
     }
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
@@ -825,12 +830,12 @@ static void test_skills_nearer_dir_shadows_project_root(void)
     sandbox_write(&s, "proj/a/.agents/skills/dup/SKILL.md", "---\ndescription: from subdir\n---\n");
     SANDBOX_CHDIR(&s, "proj/a");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "from subdir"));
-        EXPECT(!contains(p, "from root"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "from subdir"));
+        EXPECT(!contains(suffix, "from root"));
+        free(suffix);
     }
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
@@ -847,9 +852,9 @@ static void test_skills_no_root_marker_stays_in_cwd(void)
     sandbox_mkdir(&s, "w/a");
     SANDBOX_CHDIR(&s, "w/a");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p == NULL);
-    free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix == NULL);
+    free(suffix);
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
 }
@@ -864,12 +869,12 @@ static void test_skills_shared_agents_root(void)
     sandbox_mkdir(&s, "proj/.git");
     SANDBOX_CHDIR(&s, "proj");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "- shared: from shared"));
-        EXPECT(contains(p, "~/.agents/skills/shared/SKILL.md"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "- shared: from shared"));
+        EXPECT(contains(suffix, "~/.agents/skills/shared/SKILL.md"));
+        free(suffix);
     }
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
@@ -885,12 +890,12 @@ static void test_skills_hax_global_shadows_shared(void)
     sandbox_mkdir(&s, "proj/.git");
     SANDBOX_CHDIR(&s, "proj");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "from hax global"));
-        EXPECT(!contains(p, "from shared"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "from hax global"));
+        EXPECT(!contains(suffix, "from shared"));
+        free(suffix);
     }
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
@@ -908,12 +913,12 @@ static void test_skills_hax_global_shadows_shared_at_home(void)
                   "---\ndescription: from hax global\n---\n");
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "from hax global"));
-        EXPECT(!contains(p, "from shared"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "from hax global"));
+        EXPECT(!contains(suffix, "from shared"));
+        free(suffix);
     }
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
@@ -946,12 +951,12 @@ static void test_skills_hax_global_shadows_shared_symlinked_home(void)
     free(link);
     SANDBOX_CHDIR(&s, "real");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "from hax global"));
-        EXPECT(!contains(p, "from shared"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "from hax global"));
+        EXPECT(!contains(suffix, "from shared"));
+        free(suffix);
     }
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
@@ -966,11 +971,11 @@ static void test_skills_shared_root_survives_at_home(void)
     sandbox_write(&s, ".agents/skills/only/SKILL.md", "---\ndescription: from shared\n---\n");
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "- only: from shared"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "- only: from shared"));
+        free(suffix);
     }
     unsetenv("HAX_NO_ENV");
     sandbox_free(&s);
@@ -986,13 +991,13 @@ static void test_skills_survive_no_agents_md(void)
     sandbox_write(&s, "AGENTS.md", "project rules\n");
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_AGENTS_MD", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(!contains(p, "project rules"));
-        EXPECT(contains(p, "# Skills"));
-        EXPECT(contains(p, "still here"));
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(!contains(suffix, "project rules"));
+        EXPECT(contains(suffix, "# Skills"));
+        EXPECT(contains(suffix, "still here"));
+        free(suffix);
     }
     unsetenv("HAX_NO_AGENTS_MD");
     sandbox_free(&s);
@@ -1000,7 +1005,7 @@ static void test_skills_survive_no_agents_md(void)
 
 /* ---------- subagents section ---------- */
 
-static void test_subagents_section_and_presets(void)
+static void test_subagents_follow_task_guidance(void)
 {
     struct sandbox s;
     sandbox_init(&s);
@@ -1008,44 +1013,48 @@ static void test_subagents_section_and_presets(void)
     unsetenv("HAX_NO_SUBAGENTS");
     unsetenv("HAX_NO_TASKS");
 
-    /* Present by default, with the conservative framing, and placed before
-     * the Environment section — it's hax-level instruction, not project
-     * context. The tasks section leads because subagent guidance builds on
-     * task_wait. With no presets defined, --preset isn't advertised at all. */
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "# Subagents"));
-        EXPECT(contains(p, "only when the user asks"));
-        EXPECT(contains(p, "task_wait"));
-        /* With no presets defined, --preset isn't advertised at all. */
-        EXPECT(!contains(p, "--preset"));
-        const char *tasks = strstr(p, "# Background tasks");
-        const char *sub = strstr(p, "# Subagents");
-        const char *env = strstr(p, "# Environment");
-        EXPECT(tasks && sub && env && tasks < sub && sub < env);
-        free(p);
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "# Subagents"));
+        EXPECT(contains(suffix, "only when the user asks"));
+        EXPECT(contains(suffix, "task_wait"));
+        EXPECT(!contains(suffix, "--preset"));
+        const char *background_tasks = strstr(suffix, "# Background tasks");
+        const char *subagents = strstr(suffix, "# Subagents");
+        const char *environment = strstr(suffix, "# Environment");
+        EXPECT(background_tasks && subagents && environment && background_tasks < subagents &&
+               subagents < environment);
+        free(suffix);
     }
+    sandbox_free(&s);
+}
 
-    /* With tasks disabled, the subagents section falls back to synchronous
-     * guidance and the tasks section disappears. */
-    setenv("HAX_NO_TASKS", "1", 1);
-    p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(!contains(p, "# Background tasks"));
-        EXPECT(contains(p, "# Subagents"));
-        EXPECT(contains(p, "timeout_seconds (e.g. 1800)"));
-        EXPECT(!contains(p, "task_wait"));
-        free(p);
+static void test_subagents_without_background_tasks(void)
+{
+    struct sandbox s;
+    sandbox_init(&s);
+    SANDBOX_CHDIR(&s, ".");
+    unsetenv("HAX_NO_SUBAGENTS");
+
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(!contains(suffix, "# Background tasks"));
+        EXPECT(contains(suffix, "# Subagents"));
+        EXPECT(contains(suffix, "timeout_seconds (e.g. 1800)"));
+        EXPECT(!contains(suffix, "task_wait"));
+        free(suffix);
     }
-    unsetenv("HAX_NO_TASKS");
+    sandbox_free(&s);
+}
 
-    /* Described presets are listed sorted under a lead-in that names the
-     * flag. A description-less preset is a favorite, not a role: its bare
-     * name is never advertised. A preset naming a provider the registry
-     * can't resolve is never advertised either — it would fail on every
-     * invocation. */
+static void test_subagent_presets_are_filtered_and_sorted(void)
+{
+    struct sandbox s;
+    sandbox_init(&s);
+    SANDBOX_CHDIR(&s, ".");
+    unsetenv("HAX_NO_SUBAGENTS");
     EXPECT(config_load("{\"presets\": {"
                        "\"zeta\": {\"provider\": \"mock\", \"model\": \"m2\"},"
                        "\"typo\": {\"provider\": \"does-not-exist\", "
@@ -1054,48 +1063,52 @@ static void test_subagents_section_and_presets(void)
                        "\"description\": \"code review stance\"},"
                        "\"alpha\": {\"provider\": \"mock\", "
                        "\"description\": \"quick answers\"}}}") == 0);
-    p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "Presets (select with `--preset <name>`):\n"
-                           "- alpha: quick answers\n- review: code review stance\n"));
-        EXPECT(!contains(p, "zeta"));
-        EXPECT(!contains(p, "typo"));
-        free(p);
-    }
 
-    /* Nothing advertisable (unknown providers, description-less favorites):
-     * the heading — the thing that advertises --preset — must not appear
-     * either, or the model would be invited to guess a name with no valid
-     * value to pass. */
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(contains(suffix, "Presets (select with `--preset <name>`):\n"
+                                "- alpha: quick answers\n- review: code review stance\n"));
+        EXPECT(!contains(suffix, "zeta"));
+        EXPECT(!contains(suffix, "typo"));
+        free(suffix);
+    }
+    config_load(NULL);
+    sandbox_free(&s);
+}
+
+static void test_subagent_preset_heading_requires_valid_role(void)
+{
+    struct sandbox s;
+    sandbox_init(&s);
+    SANDBOX_CHDIR(&s, ".");
+    unsetenv("HAX_NO_SUBAGENTS");
     EXPECT(config_load("{\"presets\": {"
                        "\"a\": {\"provider\": \"does-not-exist\", "
                        "\"description\": \"broken\"},"
                        "\"b\": {\"provider\": \"mock\"}}}") == 0);
-    p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(!contains(p, "Presets ("));
-        EXPECT(!contains(p, "--preset"));
-        free(p);
+
+    char *suffix = agent_env_build_suffix("m");
+    EXPECT(suffix != NULL);
+    if (suffix) {
+        EXPECT(!contains(suffix, "Presets ("));
+        EXPECT(!contains(suffix, "--preset"));
+        free(suffix);
     }
     config_load(NULL);
-
-    setenv("HAX_NO_SUBAGENTS", "1", 1);
-    setenv("HAX_NO_TASKS", "1", 1);
     sandbox_free(&s);
 }
 
 int main(void)
 {
-    test_agent_env_section_present_by_default();
-    test_agent_env_section_git_root();
-    test_agent_env_section_git_root_from_subdir();
-    test_agent_env_section_omits_model_when_null();
-    test_agent_env_section_omits_home_when_unset();
-    test_agent_env_section_reports_command_shell();
-    test_no_env_knob_disables_section();
-    test_both_knobs_disable_returns_null();
+    test_environment_present_by_default();
+    test_environment_reports_git_root();
+    test_environment_finds_git_root_from_subdir();
+    test_environment_omits_null_model();
+    test_environment_omits_unset_home();
+    test_environment_reports_command_shell();
+    test_environment_can_be_disabled();
+    test_all_context_sections_can_be_disabled();
 
     test_commands_line_lists_present();
     test_commands_line_omitted_when_none();
@@ -1113,6 +1126,8 @@ int main(void)
     test_skills_none();
     test_skills_with_description_sorted();
     test_skills_crlf_frontmatter();
+    test_skills_unterminated_frontmatter_omits_description();
+    test_skills_block_description_falls_back_to_name();
     test_skills_no_frontmatter_falls_back_to_dir();
     test_skills_dir_without_skill_md_skipped();
     test_skills_global_root();
@@ -1127,7 +1142,11 @@ int main(void)
     test_skills_shared_root_survives_at_home();
     test_skills_disabled_by_no_skills();
     test_skills_survive_no_agents_md();
-    test_subagents_section_and_presets();
+
+    test_subagents_follow_task_guidance();
+    test_subagents_without_background_tasks();
+    test_subagent_presets_are_filtered_and_sorted();
+    test_subagent_preset_heading_requires_valid_role();
 
     T_REPORT();
 }

@@ -33,6 +33,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- Skill discovery now ignores descriptions from unterminated YAML frontmatter or unsupported block
+  scalars instead of advertising incomplete metadata.
 - Chat Completions streams now detect upstream provider failures signaled through the finish
   reason (including OpenRouter's `error` and `network_error` sentinels), retry them like other
   transient failures, and surface an error once retries are exhausted. Previously such streams
