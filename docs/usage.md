@@ -129,9 +129,16 @@ hax loads a global `~/.config/hax/AGENTS.md` first. In a Git worktree, it
 then loads files from the repository root down to the current directory, allowing narrower rules to
 follow broader ones. Outside Git, it considers only `./AGENTS.md`.
 
-Skills are discovered at `.agents/skills/<name>/SKILL.md` in the project and
-`~/.config/hax/skills/<name>/SKILL.md` globally. A skill should explain when
-and how to use a CLI or repeatable workflow; project policy usually belongs in `AGENTS.md` instead.
+Skills are discovered at `<dir>/.agents/skills/<name>/SKILL.md`, searched in this order:
+
+1. the current directory, then each parent up to the repository root (outside Git, only the current
+   directory);
+2. `~/.config/hax/skills/`, for skills meant only for hax;
+3. `~/.agents/skills/`, the cross-agent location other tools install into and read from.
+
+The first match for a given skill name wins, so a nearer directory shadows a wider one. hax only
+reads `~/.agents/skills` and never writes to it. A skill should explain when and how to use a CLI
+or repeatable workflow; project policy usually belongs in `AGENTS.md` instead.
 
 Use `--bare` for a task that needs tools but should not receive project instructions, skills, or
 subagent guidance. Use `--raw` only when you want a plain model chat with no tools. Individual

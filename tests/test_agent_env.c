@@ -857,10 +857,16 @@ static void test_skills_project_shadows_global(void)
     char *gpath = xasprintf("%s/.config/hax/skills/dup/SKILL.md", s.root);
     write_file(gpath, "---\ndescription: from global\n---\n");
     free(gpath);
-    char *ppath = xasprintf("%s/.agents/skills/dup/SKILL.md", s.root);
+    /* The project lives below $HOME rather than at it: with cwd equal to $HOME
+     * the project root and `~/.agents/skills` would be the same directory, and
+     * this would no longer be a project-versus-global test. */
+    char *ppath = xasprintf("%s/proj/.agents/skills/dup/SKILL.md", s.root);
     write_file(ppath, "---\ndescription: from project\n---\n");
     free(ppath);
-    if (chdir(s.root) != 0) {
+    char *dir = xasprintf("%s/proj", s.root);
+    int ok = chdir(dir) == 0;
+    free(dir);
+    if (!ok) {
         sb_free(&s);
         return;
     }
@@ -901,6 +907,255 @@ static void test_skills_disabled_by_no_skills(void)
         free(p);
     }
     unsetenv("HAX_NO_SKILLS");
+    sb_free(&s);
+}
+
+static void test_skills_walk_up_to_project_root(void)
+{
+    struct sandbox s;
+    sb_init(&s);
+    /* .git at $root/proj; skills at the project root; cwd two levels deeper. */
+    char *git = xasprintf("%s/proj/.git", s.root);
+    mkdirs(git);
+    free(git);
+    char *rooted = xasprintf("%s/proj/.agents/skills/rooted/SKILL.md", s.root);
+    write_file(rooted, "---\ndescription: from project root\n---\n");
+    free(rooted);
+    char *inner = xasprintf("%s/proj/a/b", s.root);
+    mkdirs(inner);
+    int ok = chdir(inner) == 0;
+    free(inner);
+    if (!ok) {
+        sb_free(&s);
+        return;
+    }
+    setenv("HAX_NO_ENV", "1", 1);
+    char *p = agent_env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(contains(p, "- rooted: from project root"));
+        free(p);
+    }
+    unsetenv("HAX_NO_ENV");
+    sb_free(&s);
+}
+
+static void test_skills_nearer_dir_shadows_project_root(void)
+{
+    struct sandbox s;
+    sb_init(&s);
+    char *git = xasprintf("%s/proj/.git", s.root);
+    mkdirs(git);
+    free(git);
+    char *outer = xasprintf("%s/proj/.agents/skills/dup/SKILL.md", s.root);
+    write_file(outer, "---\ndescription: from root\n---\n");
+    free(outer);
+    char *inner = xasprintf("%s/proj/a/.agents/skills/dup/SKILL.md", s.root);
+    write_file(inner, "---\ndescription: from subdir\n---\n");
+    free(inner);
+    char *dir = xasprintf("%s/proj/a", s.root);
+    int ok = chdir(dir) == 0;
+    free(dir);
+    if (!ok) {
+        sb_free(&s);
+        return;
+    }
+    setenv("HAX_NO_ENV", "1", 1);
+    char *p = agent_env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(contains(p, "from subdir"));
+        EXPECT(!contains(p, "from root"));
+        free(p);
+    }
+    unsetenv("HAX_NO_ENV");
+    sb_free(&s);
+}
+
+static void test_skills_no_root_marker_stays_in_cwd(void)
+{
+    struct sandbox s;
+    sb_init(&s);
+    /* No .git anywhere: a parent's skills must not be pulled in. HOME is the
+     * sandbox root, so stage the parent skills one level below it to keep the
+     * `~/.agents/skills` root out of this. */
+    char *parent = xasprintf("%s/w/.agents/skills/stray/SKILL.md", s.root);
+    write_file(parent, "---\ndescription: from parent\n---\n");
+    free(parent);
+    char *inner = xasprintf("%s/w/a", s.root);
+    mkdirs(inner);
+    int ok = chdir(inner) == 0;
+    free(inner);
+    if (!ok) {
+        sb_free(&s);
+        return;
+    }
+    setenv("HAX_NO_ENV", "1", 1);
+    char *p = agent_env_build_suffix("m");
+    EXPECT(p == NULL);
+    free(p);
+    unsetenv("HAX_NO_ENV");
+    sb_free(&s);
+}
+
+static void test_skills_shared_agents_root(void)
+{
+    struct sandbox s;
+    sb_init(&s);
+    /* HOME is the sandbox root, so this is `~/.agents/skills`. cwd is a
+     * separate project root, so the upward walk stops before reaching it. */
+    char *shared = xasprintf("%s/.agents/skills/shared/SKILL.md", s.root);
+    write_file(shared, "---\ndescription: from shared\n---\n");
+    free(shared);
+    char *git = xasprintf("%s/proj/.git", s.root);
+    mkdirs(git);
+    free(git);
+    char *dir = xasprintf("%s/proj", s.root);
+    int ok = chdir(dir) == 0;
+    free(dir);
+    if (!ok) {
+        sb_free(&s);
+        return;
+    }
+    setenv("HAX_NO_ENV", "1", 1);
+    char *p = agent_env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(contains(p, "- shared: from shared"));
+        EXPECT(contains(p, "~/.agents/skills/shared/SKILL.md"));
+        free(p);
+    }
+    unsetenv("HAX_NO_ENV");
+    sb_free(&s);
+}
+
+/* With cwd at $HOME the project walk reaches `~/.agents/skills` itself. It must
+ * still rank below `~/.config/hax/skills`, so that standing in $HOME does not
+ * reorder two global roots. */
+static void test_skills_hax_global_shadows_shared_at_home(void)
+{
+    struct sandbox s;
+    sb_init(&s);
+    char *shared = xasprintf("%s/.agents/skills/dup/SKILL.md", s.root);
+    write_file(shared, "---\ndescription: from shared\n---\n");
+    free(shared);
+    char *hax = xasprintf("%s/.config/hax/skills/dup/SKILL.md", s.root);
+    write_file(hax, "---\ndescription: from hax global\n---\n");
+    free(hax);
+    if (chdir(s.root) != 0) {
+        sb_free(&s);
+        return;
+    }
+    setenv("HAX_NO_ENV", "1", 1);
+    char *p = agent_env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(contains(p, "from hax global"));
+        EXPECT(!contains(p, "from shared"));
+        free(p);
+    }
+    unsetenv("HAX_NO_ENV");
+    sb_free(&s);
+}
+
+/* $HOME reaching the sandbox through a symlink while getcwd() reports the
+ * physical path: the two spellings of `~/.agents/skills` must still be
+ * recognized as one directory, or the walk would collect it early and reorder
+ * the global roots again. */
+static void test_skills_hax_global_shadows_shared_symlinked_home(void)
+{
+    struct sandbox s;
+    sb_init(&s);
+    char *real = xasprintf("%s/real", s.root);
+    mkdirs(real);
+    char *link = xasprintf("%s/link", s.root);
+    if (symlink(real, link) != 0) {
+        free(link);
+        free(real);
+        sb_free(&s);
+        T_SKIP("symlink unsupported");
+    }
+    /* Both paths name the same directory; write through the physical one. */
+    char *shared = xasprintf("%s/.agents/skills/dup/SKILL.md", real);
+    write_file(shared, "---\ndescription: from shared\n---\n");
+    free(shared);
+    char *hax = xasprintf("%s/.config/hax/skills/dup/SKILL.md", real);
+    write_file(hax, "---\ndescription: from hax global\n---\n");
+    free(hax);
+
+    setenv("HOME", link, 1);
+    int ok = chdir(real) == 0;
+    free(link);
+    free(real);
+    if (!ok) {
+        sb_free(&s);
+        return;
+    }
+    setenv("HAX_NO_ENV", "1", 1);
+    char *p = agent_env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(contains(p, "from hax global"));
+        EXPECT(!contains(p, "from shared"));
+        free(p);
+    }
+    unsetenv("HAX_NO_ENV");
+    sb_free(&s);
+}
+
+/* The held-back shared root must still be collected: a skill that exists only
+ * in `~/.agents/skills` stays visible with cwd at $HOME. */
+static void test_skills_shared_root_survives_at_home(void)
+{
+    struct sandbox s;
+    sb_init(&s);
+    char *shared = xasprintf("%s/.agents/skills/only/SKILL.md", s.root);
+    write_file(shared, "---\ndescription: from shared\n---\n");
+    free(shared);
+    if (chdir(s.root) != 0) {
+        sb_free(&s);
+        return;
+    }
+    setenv("HAX_NO_ENV", "1", 1);
+    char *p = agent_env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(contains(p, "- only: from shared"));
+        free(p);
+    }
+    unsetenv("HAX_NO_ENV");
+    sb_free(&s);
+}
+
+static void test_skills_hax_global_shadows_shared(void)
+{
+    struct sandbox s;
+    sb_init(&s);
+    char *shared = xasprintf("%s/.agents/skills/dup/SKILL.md", s.root);
+    write_file(shared, "---\ndescription: from shared\n---\n");
+    free(shared);
+    char *hax = xasprintf("%s/.config/hax/skills/dup/SKILL.md", s.root);
+    write_file(hax, "---\ndescription: from hax global\n---\n");
+    free(hax);
+    char *git = xasprintf("%s/proj/.git", s.root);
+    mkdirs(git);
+    free(git);
+    char *dir = xasprintf("%s/proj", s.root);
+    int ok = chdir(dir) == 0;
+    free(dir);
+    if (!ok) {
+        sb_free(&s);
+        return;
+    }
+    setenv("HAX_NO_ENV", "1", 1);
+    char *p = agent_env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(contains(p, "from hax global"));
+        EXPECT(!contains(p, "from shared"));
+        free(p);
+    }
+    unsetenv("HAX_NO_ENV");
     sb_free(&s);
 }
 
@@ -1055,6 +1310,14 @@ int main(void)
     test_skills_dir_without_skill_md_skipped();
     test_skills_global_root();
     test_skills_project_shadows_global();
+    test_skills_walk_up_to_project_root();
+    test_skills_nearer_dir_shadows_project_root();
+    test_skills_no_root_marker_stays_in_cwd();
+    test_skills_shared_agents_root();
+    test_skills_hax_global_shadows_shared();
+    test_skills_hax_global_shadows_shared_at_home();
+    test_skills_hax_global_shadows_shared_symlinked_home();
+    test_skills_shared_root_survives_at_home();
     test_skills_disabled_by_no_skills();
     test_skills_survive_no_agents_md();
     test_subagents_section_and_presets();

@@ -21,6 +21,12 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- Skill discovery now follows the cross-agent `.agents/skills` convention: project skills are
+  collected from the current directory up to the repository root, as `AGENTS.md` already was, and
+  `~/.agents/skills` is read alongside `~/.config/hax/skills`. Skills installed globally by other
+  tools work in hax without being copied or symlinked, and running hax from a subdirectory no
+  longer hides skills defined at the project root. The nearest match for a name wins. See
+  [docs/usage.md](docs/usage.md#project-instructions-and-context).
 - The first-party `openai`, `anthropic`, and `openrouter` providers pin their protocol along
   with their endpoint: `providers.<id>.api` now warns instead of switching the wire. Use
   `model_apis` for per-model protocols, or a custom provider.

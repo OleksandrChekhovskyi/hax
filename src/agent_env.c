@@ -25,7 +25,7 @@
 
 /* Maximum directory levels walked upward from cwd. Bounds the cost of a
  * runaway walk on a deep tree without any project marker. */
-#define AGENTS_MD_MAX_LEVELS 64
+#define PROJECT_WALK_MAX_LEVELS 64
 
 /* Only the head of SKILL.md is read — we just need YAML frontmatter, never
  * the full skill body. Keep this comfortably above realistic frontmatter
@@ -56,29 +56,38 @@ static int have_command(const char *name)
     return 1;
 }
 
-/* Find the nearest Git root for Environment and AGENTS.md discovery. */
+/* Truncate `dir` in place to its parent. Returns 0 once there is nothing left
+ * to climb, so a walk that starts at the filesystem root still visits it. */
+static int climb_to_parent(char *dir)
+{
+    char *slash = strrchr(dir, '/');
+    if (!slash)
+        return 0;
+    if (slash == dir) {
+        /* "/foo" → "/"; "/" → done. */
+        if (dir[1] == '\0')
+            return 0;
+        dir[1] = '\0';
+        return 1;
+    }
+    *slash = '\0';
+    return 1;
+}
+
+/* Find the nearest Git root for Environment, AGENTS.md, and skill discovery. */
 static char *find_project_root(const char *cwd)
 {
     char dir[PATH_MAX];
     snprintf(dir, sizeof(dir), "%s", cwd);
-    for (int i = 0; i < AGENTS_MD_MAX_LEVELS; i++) {
+    for (int i = 0; i < PROJECT_WALK_MAX_LEVELS; i++) {
         char marker[PATH_MAX + 16];
         snprintf(marker, sizeof(marker), "%s/.git", dir);
         struct stat st;
         if (stat(marker, &st) == 0)
             return xstrdup(dir);
 
-        char *slash = strrchr(dir, '/');
-        if (!slash)
+        if (!climb_to_parent(dir))
             break;
-        if (slash == dir) {
-            /* "/foo" → "/"; "/" → done. */
-            if (dir[1] == '\0')
-                break;
-            dir[1] = '\0';
-        } else {
-            *slash = '\0';
-        }
     }
     return NULL;
 }
@@ -263,29 +272,20 @@ static void append_project_agents_md(struct buf *b, int *seen_header)
      * absolute form with $HOME collapsed to `~` — relative paths like
      * `../AGENTS.md` invite the model to rebase them on whatever it
      * thinks the base is (we've seen Qwen rebase onto $HOME). */
-    char *paths[AGENTS_MD_MAX_LEVELS];
-    char *display_paths[AGENTS_MD_MAX_LEVELS];
+    char *paths[PROJECT_WALK_MAX_LEVELS];
+    char *display_paths[PROJECT_WALK_MAX_LEVELS];
     int n = 0;
     char dir[PATH_MAX];
     snprintf(dir, sizeof(dir), "%s", cwd);
-    for (int i = 0; i < AGENTS_MD_MAX_LEVELS; i++) {
+    for (int i = 0; i < PROJECT_WALK_MAX_LEVELS; i++) {
         paths[n] = path_join(dir, "AGENTS.md");
         display_paths[n] = path_collapse_home(paths[n]);
         n++;
 
         if (strcmp(dir, root) == 0)
             break;
-
-        char *slash = strrchr(dir, '/');
-        if (!slash)
+        if (!climb_to_parent(dir))
             break;
-        if (slash == dir) {
-            if (dir[1] == '\0')
-                break;
-            dir[1] = '\0';
-        } else {
-            *slash = '\0';
-        }
     }
     free(root);
 
@@ -442,25 +442,76 @@ static void collect_skills(struct skill_entry **out, size_t *n, size_t *cap, con
     closedir(d);
 }
 
+/* Scan `.agents/skills` from cwd up to and including the project root, nearest
+ * first: collect_skills is first-wins, so a closer directory shadows a
+ * same-named skill higher up. Outside a project only cwd is considered, so a
+ * run outside any repo does not pull in unrelated skills. Roots are absolute
+ * so the displayed SKILL.md path is unambiguous; a relative `.agents/...`
+ * would be model-rebased onto $HOME or similar.
+ *
+ * `skip_root`, when non-NULL, is excluded from the walk so it keeps its own
+ * rank among the global roots. It is matched by device and inode rather than
+ * by path text: getcwd() reports the physical path while $HOME may reach the
+ * same directory through a symlink. A skip_root that cannot be stat'd is
+ * absent, so there is nothing for the walk to reach. */
+static void collect_project_skills(struct skill_entry **out, size_t *n, size_t *cap,
+                                   const char *skip_root)
+{
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd)))
+        return;
+
+    struct stat skip_st;
+    int have_skip = skip_root && stat(skip_root, &skip_st) == 0;
+
+    char *root = find_project_root(cwd);
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s", cwd);
+    for (int i = 0; i < PROJECT_WALK_MAX_LEVELS; i++) {
+        char *skills_dir = path_join(dir, ".agents/skills");
+        struct stat st;
+        int is_skip = have_skip && stat(skills_dir, &st) == 0 && st.st_dev == skip_st.st_dev &&
+                      st.st_ino == skip_st.st_ino;
+        if (!is_skip)
+            collect_skills(out, n, cap, skills_dir);
+        free(skills_dir);
+
+        if (!root || strcmp(dir, root) == 0)
+            break;
+        if (!climb_to_parent(dir))
+            break;
+    }
+    free(root);
+}
+
 static void append_skills(struct buf *b)
 {
     struct skill_entry *skills = NULL;
     size_t n = 0, cap = 0;
 
-    /* Project first so its entries shadow same-named global ones. The root
-     * is built absolute so the displayed SKILL.md path is unambiguous; a
-     * relative `.agents/...` would be model-rebased onto $HOME or similar. */
-    char cwd[PATH_MAX];
-    if (getcwd(cwd, sizeof(cwd))) {
-        char *project_root = path_join(cwd, ".agents/skills");
-        collect_skills(&skills, &n, &cap, project_root);
-        free(project_root);
-    }
+    /* `~/.agents/skills` is the cross-agent convention for user-installed
+     * skills — user-owned content hax only reads, like AGENTS.md, so hax's own
+     * files stay XDG-placed. */
+    const char *home = getenv("HOME");
+    char *shared = (home && *home) ? path_join(home, ".agents/skills") : NULL;
+
+    /* Project first so its entries shadow same-named global ones, but with the
+     * shared root held back: in a project rooted at or under $HOME the walk
+     * would otherwise reach it here, ahead of ~/.config/hax/skills, leaving the
+     * rank of two global roots to depend on cwd. */
+    collect_project_skills(&skills, &n, &cap, shared);
 
     char *global = xdg_hax_config_path("skills");
     if (global) {
         collect_skills(&skills, &n, &cap, global);
         free(global);
+    }
+
+    /* Ranked below the hax-specific directory: a skill deliberately placed
+     * there is meant to override the shared one. */
+    if (shared) {
+        collect_skills(&skills, &n, &cap, shared);
+        free(shared);
     }
 
     if (n == 0)
