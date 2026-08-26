@@ -22,7 +22,7 @@ struct sandbox {
     char *prev_cwd; /* cwd to restore on cleanup */
 };
 
-static void sb_init(struct sandbox *s)
+static void sandbox_init(struct sandbox *s)
 {
     s->prev_cwd = getcwd(NULL, 0);
     /* t_tempdir hands back a canonical path, so this compares byte-for-byte against a later getcwd
@@ -44,7 +44,7 @@ static void sb_init(struct sandbox *s)
     setenv("HAX_NO_TASKS", "1", 1);
 }
 
-static void sb_free(struct sandbox *s)
+static void sandbox_free(struct sandbox *s)
 {
     if (s->prev_cwd) {
         if (chdir(s->prev_cwd) != 0)
@@ -97,17 +97,113 @@ static int contains(const char *hay, const char *needle)
     return hay && strstr(hay, needle) != NULL;
 }
 
+/* ---------- sandbox-relative staging ---------- */
+
+/* The helpers below take paths relative to the sandbox root and keep the
+ * allocation and its free inside, so a test body reads as staging steps rather
+ * than string plumbing. An empty or "." path names the root itself. Use
+ * sandbox_path directly only where an absolute string outlives the call, such as
+ * $PATH and $HOME assignments. */
+
+static char *sandbox_path(struct sandbox *s, const char *rel)
+{
+    if (!rel || !*rel || strcmp(rel, ".") == 0)
+        return xstrdup(s->root);
+    return xasprintf("%s/%s", s->root, rel);
+}
+
+/* Create a directory and its parents. mkdirs ignores every mkdir error, so
+ * confirm the result rather than letting a staging failure surface later as a
+ * test that quietly checks nothing. */
+static void sandbox_mkdir(struct sandbox *s, const char *rel)
+{
+    char *dir = sandbox_path(s, rel);
+    mkdirs(dir);
+    struct stat st;
+    if (stat(dir, &st) != 0)
+        FAIL("mkdir(%s): %s", dir, strerror(errno));
+    else if (!S_ISDIR(st.st_mode))
+        FAIL("mkdir(%s): not a directory", dir);
+    free(dir);
+}
+
+static void sandbox_write(struct sandbox *s, const char *rel, const char *content)
+{
+    char *path = sandbox_path(s, rel);
+    write_file(path, content);
+    free(path);
+}
+
+static void sandbox_write_bytes(struct sandbox *s, const char *rel, const void *data, size_t len)
+{
+    char *path = sandbox_path(s, rel);
+    write_file_bytes(path, data, len);
+    free(path);
+}
+
+/* Stage a fake executable `name` in sandbox-relative directory `rel`, creating
+ * it. Content is irrelevant — agent_env.c only checks access(X_OK). */
+static void sandbox_stage_command(struct sandbox *s, const char *rel, const char *name)
+{
+    sandbox_mkdir(s, rel);
+    char *dir = sandbox_path(s, rel);
+    char *path = xasprintf("%s/%s", dir, name);
+    free(dir);
+    write_file(path, "#!/bin/sh\n");
+    if (chmod(path, 0755) != 0)
+        FAIL("chmod(%s): %s", path, strerror(errno));
+    free(path);
+}
+
+static int sandbox_chdir(struct sandbox *s, const char *rel)
+{
+    char *dir = sandbox_path(s, rel);
+    int ok = chdir(dir) == 0;
+    if (!ok)
+        FAIL("chdir(%s): %s", dir, strerror(errno));
+    free(dir);
+    return ok;
+}
+
+/* chdir into a sandbox-relative directory, or record the failure and leave the
+ * test. Returning silently would skip every assertion below while the suite
+ * still reported the test as passing. */
+#define SANDBOX_CHDIR(s, rel)                                                                      \
+    do {                                                                                           \
+        if (!sandbox_chdir((s), (rel))) {                                                          \
+            sandbox_free((s));                                                                     \
+            return;                                                                                \
+        }                                                                                          \
+    } while (0)
+
+/* Replace $PATH with a single directory, returning the previous value (NULL if
+ * it was unset) for env_path_restore. Command probing must see the sandbox
+ * only, or real /usr/bin tools would drift into the expected line. */
+static char *env_path_set(const char *dir)
+{
+    const char *prev = getenv("PATH");
+    char *saved = prev ? xstrdup(prev) : NULL;
+    setenv("PATH", dir, 1);
+    return saved;
+}
+
+static void env_path_restore(char *saved)
+{
+    if (saved) {
+        setenv("PATH", saved, 1);
+        free(saved);
+    } else {
+        unsetenv("PATH");
+    }
+}
+
 /* ---------- Environment section ---------- */
 
 static void test_agent_env_section_present_by_default(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    if (chdir(s.root) != 0) {
-        FAIL("chdir: %s", strerror(errno));
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    SANDBOX_CHDIR(&s, ".");
     char *p = agent_env_build_suffix("claude-test-1");
     EXPECT(p != NULL);
     if (p) {
@@ -123,83 +219,62 @@ static void test_agent_env_section_present_by_default(void)
         EXPECT(!contains(p, "<env>"));
         free(p);
     }
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_agent_env_section_git_root(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    char *git = xasprintf("%s/.git", s.root);
-    mkdir(git, 0755);
-    free(git);
-    if (chdir(s.root) != 0) {
-        FAIL("chdir: %s", strerror(errno));
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    sandbox_mkdir(&s, ".git");
+    SANDBOX_CHDIR(&s, ".");
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {
         EXPECT(contains(p, "- Git repository root: ~\n"));
         free(p);
     }
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_agent_env_section_git_root_from_subdir(void)
 {
     struct sandbox s;
-    sb_init(&s);
+    sandbox_init(&s);
     /* .git lives at the sandbox root; cwd is two levels deeper. The
      * Environment section should report that root using the same upward walk
      * as AGENTS.md. */
-    char *git = xasprintf("%s/.git", s.root);
-    mkdir(git, 0755);
-    free(git);
-    char *sub = xasprintf("%s/a/b", s.root);
-    mkdirs(sub);
-    if (chdir(sub) != 0) {
-        FAIL("chdir(%s): %s", sub, strerror(errno));
-        free(sub);
-        sb_free(&s);
-        return;
-    }
-    free(sub);
+    sandbox_mkdir(&s, ".git");
+    sandbox_mkdir(&s, "a/b");
+    SANDBOX_CHDIR(&s, "a/b");
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {
         EXPECT(contains(p, "- Git repository root: ~\n"));
         free(p);
     }
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_agent_env_section_omits_model_when_null(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    SANDBOX_CHDIR(&s, ".");
     char *p = agent_env_build_suffix(NULL);
     EXPECT(p != NULL);
     if (p) {
         EXPECT(!contains(p, "- Model:"));
         free(p);
     }
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_agent_env_section_omits_home_when_unset(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    SANDBOX_CHDIR(&s, ".");
     unsetenv("HOME");
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -210,17 +285,14 @@ static void test_agent_env_section_omits_home_when_unset(void)
         free(cwd);
         free(p);
     }
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_agent_env_section_reports_command_shell(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    SANDBOX_CHDIR(&s, ".");
     setenv("HAX_BASH_SHELL", "/bin/sh", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -228,34 +300,28 @@ static void test_agent_env_section_reports_command_shell(void)
         EXPECT(contains(p, "- Command shell: /bin/sh\n"));
         free(p);
     }
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_no_env_knob_disables_section(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     /* No env, no AGENTS.md → NULL. */
     EXPECT(p == NULL);
     free(p);
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_both_knobs_disable_returns_null(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
     setenv("HAX_NO_AGENTS_MD", "1", 1);
     char *p = agent_env_build_suffix("m");
@@ -263,39 +329,21 @@ static void test_both_knobs_disable_returns_null(void)
     free(p);
     unsetenv("HAX_NO_ENV");
     unsetenv("HAX_NO_AGENTS_MD");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 /* ---------- commands probe ---------- */
 
-/* Stage a fake executable named `name` under `dir` (creating `dir`).
- * Content is irrelevant — agent_env.c only checks access(X_OK). */
-static void stage_fake_command(const char *dir, const char *name)
-{
-    mkdirs(dir);
-    char *path = xasprintf("%s/%s", dir, name);
-    write_file(path, "#!/bin/sh\n");
-    if (chmod(path, 0755) != 0)
-        FAIL("chmod(%s): %s", path, strerror(errno));
-    free(path);
-}
-
 static void test_commands_line_lists_present(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
-    char *bin = xasprintf("%s/bin", s.root);
-    stage_fake_command(bin, "rg");
-    stage_fake_command(bin, "jq");
-    /* PATH = sandbox bin only. Real /usr/bin tools (gh, python3, etc.)
-     * are then deliberately invisible, pinning the expected line. */
-    char *prev_path = getenv("PATH");
-    char *saved = prev_path ? xstrdup(prev_path) : NULL;
-    setenv("PATH", bin, 1);
+    sandbox_init(&s);
+    SANDBOX_CHDIR(&s, ".");
+    sandbox_stage_command(&s, "bin", "rg");
+    sandbox_stage_command(&s, "bin", "jq");
+    char *bin = sandbox_path(&s, "bin");
+    char *saved = env_path_set(bin);
+    free(bin);
 
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -305,30 +353,20 @@ static void test_commands_line_lists_present(void)
         free(p);
     }
 
-    if (saved) {
-        setenv("PATH", saved, 1);
-        free(saved);
-    } else {
-        unsetenv("PATH");
-    }
-    free(bin);
-    sb_free(&s);
+    env_path_restore(saved);
+    sandbox_free(&s);
 }
 
 static void test_commands_line_omitted_when_none(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    SANDBOX_CHDIR(&s, ".");
     /* Empty (but valid) PATH dir → none of the probed commands present. */
-    char *empty_bin = xasprintf("%s/empty-bin", s.root);
-    mkdirs(empty_bin);
-    char *prev_path = getenv("PATH");
-    char *saved = prev_path ? xstrdup(prev_path) : NULL;
-    setenv("PATH", empty_bin, 1);
+    sandbox_mkdir(&s, "empty-bin");
+    char *empty_bin = sandbox_path(&s, "empty-bin");
+    char *saved = env_path_set(empty_bin);
+    free(empty_bin);
 
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -338,14 +376,8 @@ static void test_commands_line_omitted_when_none(void)
         free(p);
     }
 
-    if (saved) {
-        setenv("PATH", saved, 1);
-        free(saved);
-    } else {
-        unsetenv("PATH");
-    }
-    free(empty_bin);
-    sb_free(&s);
+    env_path_restore(saved);
+    sandbox_free(&s);
 }
 
 static void test_commands_line_skips_relative_path_entries(void)
@@ -356,16 +388,11 @@ static void test_commands_line_skips_relative_path_entries(void)
      * a repo-provided executable that shadows the host utility. Stage a
      * fake `rg` directly in cwd, set PATH=., expect it NOT to appear. */
     struct sandbox s;
-    sb_init(&s);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    SANDBOX_CHDIR(&s, ".");
     /* Drop the fake straight into cwd, no subdir — `.` resolves here. */
-    stage_fake_command(s.root, "rg");
-    char *prev_path = getenv("PATH");
-    char *saved = prev_path ? xstrdup(prev_path) : NULL;
-    setenv("PATH", ".", 1);
+    sandbox_stage_command(&s, ".", "rg");
+    char *saved = env_path_set(".");
 
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -376,13 +403,8 @@ static void test_commands_line_skips_relative_path_entries(void)
         free(p);
     }
 
-    if (saved) {
-        setenv("PATH", saved, 1);
-        free(saved);
-    } else {
-        unsetenv("PATH");
-    }
-    sb_free(&s);
+    env_path_restore(saved);
+    sandbox_free(&s);
 }
 
 static void test_commands_line_ignores_directories(void)
@@ -393,18 +415,13 @@ static void test_commands_line_ignores_directories(void)
      * real fake executable for an unrelated probed command, expect only
      * the real one to land in the line. */
     struct sandbox s;
-    sb_init(&s);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
-    char *bin = xasprintf("%s/bin", s.root);
-    char *rg_as_dir = xasprintf("%s/rg", bin);
-    mkdirs(rg_as_dir);
-    stage_fake_command(bin, "jq");
-    char *prev_path = getenv("PATH");
-    char *saved = prev_path ? xstrdup(prev_path) : NULL;
-    setenv("PATH", bin, 1);
+    sandbox_init(&s);
+    SANDBOX_CHDIR(&s, ".");
+    sandbox_mkdir(&s, "bin/rg");
+    sandbox_stage_command(&s, "bin", "jq");
+    char *bin = sandbox_path(&s, "bin");
+    char *saved = env_path_set(bin);
+    free(bin);
 
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -415,15 +432,8 @@ static void test_commands_line_ignores_directories(void)
         free(p);
     }
 
-    if (saved) {
-        setenv("PATH", saved, 1);
-        free(saved);
-    } else {
-        unsetenv("PATH");
-    }
-    free(rg_as_dir);
-    free(bin);
-    sb_free(&s);
+    env_path_restore(saved);
+    sandbox_free(&s);
 }
 
 static void test_commands_line_preserves_canonical_order(void)
@@ -431,20 +441,16 @@ static void test_commands_line_preserves_canonical_order(void)
     /* Probed list is rg, fd, jq, gh, python3, node — line should follow
      * that order regardless of which subset is present. */
     struct sandbox s;
-    sb_init(&s);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
-    char *bin = xasprintf("%s/bin", s.root);
-    stage_fake_command(bin, "node");
-    stage_fake_command(bin, "python3");
-    stage_fake_command(bin, "fd");
-    stage_fake_command(bin, "rg");
-    stage_fake_command(bin, "gh");
-    char *prev_path = getenv("PATH");
-    char *saved = prev_path ? xstrdup(prev_path) : NULL;
-    setenv("PATH", bin, 1);
+    sandbox_init(&s);
+    SANDBOX_CHDIR(&s, ".");
+    sandbox_stage_command(&s, "bin", "node");
+    sandbox_stage_command(&s, "bin", "python3");
+    sandbox_stage_command(&s, "bin", "fd");
+    sandbox_stage_command(&s, "bin", "rg");
+    sandbox_stage_command(&s, "bin", "gh");
+    char *bin = sandbox_path(&s, "bin");
+    char *saved = env_path_set(bin);
+    free(bin);
 
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -455,14 +461,8 @@ static void test_commands_line_preserves_canonical_order(void)
         free(p);
     }
 
-    if (saved) {
-        setenv("PATH", saved, 1);
-        free(saved);
-    } else {
-        unsetenv("PATH");
-    }
-    free(bin);
-    sb_free(&s);
+    env_path_restore(saved);
+    sandbox_free(&s);
 }
 
 /* ---------- AGENTS.md walk ---------- */
@@ -470,22 +470,13 @@ static void test_commands_line_preserves_canonical_order(void)
 static void test_agents_md_cwd_only_no_root_marker(void)
 {
     struct sandbox s;
-    sb_init(&s);
+    sandbox_init(&s);
     /* Place an AGENTS.md two levels above cwd, but no .git anywhere. We
      * expect the walk NOT to pick up the parent file — only cwd-level
      * (which is absent here) is considered. */
-    char *outer_md = xasprintf("%s/AGENTS.md", s.root);
-    write_file(outer_md, "# outer\nshould-not-appear\n");
-    free(outer_md);
-    char *inner = xasprintf("%s/sub/dir", s.root);
-    mkdirs(inner);
-    if (chdir(inner) != 0) {
-        FAIL("chdir(%s): %s", inner, strerror(errno));
-        free(inner);
-        sb_free(&s);
-        return;
-    }
-    free(inner);
+    sandbox_write(&s, "AGENTS.md", "# outer\nshould-not-appear\n");
+    sandbox_mkdir(&s, "sub/dir");
+    SANDBOX_CHDIR(&s, "sub/dir");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     /* Without .git anywhere, the parent file is ignored and there is no
@@ -493,47 +484,24 @@ static void test_agents_md_cwd_only_no_root_marker(void)
     EXPECT(p == NULL);
     free(p);
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_agents_md_walks_to_git_root_farthest_first(void)
 {
     struct sandbox s;
-    sb_init(&s);
+    sandbox_init(&s);
     /* Tree:
      *   $root/.git/
      *   $root/AGENTS.md           ← outer (project root)
      *   $root/a/AGENTS.md         ← middle
      *   $root/a/b/AGENTS.md       ← inner (cwd)
      * Expected emit order: outer, middle, inner — closest last. */
-    char *git = xasprintf("%s/.git", s.root);
-    mkdir(git, 0755);
-    free(git);
-
-    char *outer = xasprintf("%s/AGENTS.md", s.root);
-    write_file(outer, "OUTER_MARKER\n");
-    free(outer);
-
-    char *middle_dir = xasprintf("%s/a", s.root);
-    mkdirs(middle_dir);
-    char *middle = xasprintf("%s/AGENTS.md", middle_dir);
-    write_file(middle, "MIDDLE_MARKER\n");
-    free(middle);
-    free(middle_dir);
-
-    char *inner_dir = xasprintf("%s/a/b", s.root);
-    mkdirs(inner_dir);
-    char *inner = xasprintf("%s/AGENTS.md", inner_dir);
-    write_file(inner, "INNER_MARKER\n");
-    free(inner);
-
-    if (chdir(inner_dir) != 0) {
-        FAIL("chdir(%s): %s", inner_dir, strerror(errno));
-        free(inner_dir);
-        sb_free(&s);
-        return;
-    }
-    free(inner_dir);
+    sandbox_mkdir(&s, ".git");
+    sandbox_write(&s, "AGENTS.md", "OUTER_MARKER\n");
+    sandbox_write(&s, "a/AGENTS.md", "MIDDLE_MARKER\n");
+    sandbox_write(&s, "a/b/AGENTS.md", "INNER_MARKER\n");
+    SANDBOX_CHDIR(&s, "a/b");
 
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
@@ -553,34 +521,20 @@ static void test_agents_md_walks_to_git_root_farthest_first(void)
         free(p);
     }
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_agents_md_global_first(void)
 {
     struct sandbox s;
-    sb_init(&s);
+    sandbox_init(&s);
     /* HOME is sandboxed; create the global file there. */
-    char *global = xasprintf("%s/.config/hax/AGENTS.md", s.root);
-    write_file(global, "GLOBAL_MARKER\n");
-    free(global);
+    sandbox_write(&s, ".config/hax/AGENTS.md", "GLOBAL_MARKER\n");
 
     /* And a project-local file under a .git'd root. */
-    char *git = xasprintf("%s/proj/.git", s.root);
-    mkdirs(git);
-    free(git);
-    char *local = xasprintf("%s/proj/AGENTS.md", s.root);
-    write_file(local, "LOCAL_MARKER\n");
-    free(local);
-
-    char *cwd = xasprintf("%s/proj", s.root);
-    if (chdir(cwd) != 0) {
-        FAIL("chdir(%s): %s", cwd, strerror(errno));
-        free(cwd);
-        sb_free(&s);
-        return;
-    }
-    free(cwd);
+    sandbox_mkdir(&s, "proj/.git");
+    sandbox_write(&s, "proj/AGENTS.md", "LOCAL_MARKER\n");
+    SANDBOX_CHDIR(&s, "proj");
 
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
@@ -594,23 +548,16 @@ static void test_agents_md_global_first(void)
         free(p);
     }
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_no_agents_md_knob_disables_walk(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    char *git = xasprintf("%s/.git", s.root);
-    mkdir(git, 0755);
-    free(git);
-    char *md = xasprintf("%s/AGENTS.md", s.root);
-    write_file(md, "SHOULD_NOT_APPEAR\n");
-    free(md);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    sandbox_mkdir(&s, ".git");
+    sandbox_write(&s, "AGENTS.md", "SHOULD_NOT_APPEAR\n");
+    SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_AGENTS_MD", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -621,33 +568,22 @@ static void test_no_agents_md_knob_disables_walk(void)
         free(p);
     }
     unsetenv("HAX_NO_AGENTS_MD");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_xdg_config_home_overrides_home(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    /* Two candidate global locations: HOME-based one (via sb_init) and an
+    sandbox_init(&s);
+    /* Two candidate global locations: HOME-based one (via sandbox_init) and an
      * explicit XDG_CONFIG_HOME pointing elsewhere. The XDG one must win. */
-    char *home_global = xasprintf("%s/.config/hax/AGENTS.md", s.root);
-    write_file(home_global, "HOME_GLOBAL\n");
-    free(home_global);
-
-    char *xdg_dir = xasprintf("%s/xdg/hax", s.root);
-    mkdirs(xdg_dir);
-    char *xdg_md = xasprintf("%s/AGENTS.md", xdg_dir);
-    write_file(xdg_md, "XDG_GLOBAL\n");
-    free(xdg_md);
-    char *xdg_root = xasprintf("%s/xdg", s.root);
+    sandbox_write(&s, ".config/hax/AGENTS.md", "HOME_GLOBAL\n");
+    sandbox_write(&s, "xdg/hax/AGENTS.md", "XDG_GLOBAL\n");
+    char *xdg_root = sandbox_path(&s, "xdg");
     setenv("XDG_CONFIG_HOME", xdg_root, 1);
     free(xdg_root);
-    free(xdg_dir);
 
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -658,29 +594,22 @@ static void test_xdg_config_home_overrides_home(void)
     }
     unsetenv("HAX_NO_ENV");
     unsetenv("XDG_CONFIG_HOME");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_agents_md_invalid_bytes_sanitized(void)
 {
     struct sandbox s;
-    sb_init(&s);
+    sandbox_init(&s);
     /* AGENTS.md with an embedded NUL and an invalid UTF-8 byte. The raw
      * bytes would truncate the prompt under strlen and Jansson would
      * reject the request as non-UTF-8 — utf8_sanitize must replace both
      * with U+FFFD before they enter the buffer. */
-    char *git = xasprintf("%s/.git", s.root);
-    mkdir(git, 0755);
-    free(git);
-    char *md = xasprintf("%s/AGENTS.md", s.root);
+    sandbox_mkdir(&s, ".git");
     const char dirty[] = "before\0middle\xFF"
                          "after\n";
-    write_file_bytes(md, dirty, sizeof(dirty) - 1);
-    free(md);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_write_bytes(&s, "AGENTS.md", dirty, sizeof(dirty) - 1);
+    SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -697,7 +626,7 @@ static void test_agents_md_invalid_bytes_sanitized(void)
         free(p);
     }
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 /* ---------- skills ---------- */
@@ -705,43 +634,34 @@ static void test_agents_md_invalid_bytes_sanitized(void)
 static void test_skills_none(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     /* No AGENTS.md, no skills, env disabled → NULL. */
     EXPECT(p == NULL);
     free(p);
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_skills_with_description_sorted(void)
 {
     struct sandbox s;
-    sb_init(&s);
+    sandbox_init(&s);
     /* Two skills with frontmatter; verify sorted output and that the
      * description field is parsed and emitted. */
-    char *zskill = xasprintf("%s/.agents/skills/zeta/SKILL.md", s.root);
-    write_file(zskill, "---\nname: zeta\ndescription: zeta does Z\n---\n# Zeta\n\nbody\n");
-    free(zskill);
-    char *askill = xasprintf("%s/.agents/skills/alpha/SKILL.md", s.root);
-    write_file(askill, "---\nname: alpha\ndescription: \"alpha does A\"\n---\nbody\n");
-    free(askill);
-
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_write(&s, ".agents/skills/zeta/SKILL.md",
+                  "---\nname: zeta\ndescription: zeta does Z\n---\n# Zeta\n\nbody\n");
+    sandbox_write(&s, ".agents/skills/alpha/SKILL.md",
+                  "---\nname: alpha\ndescription: \"alpha does A\"\n---\nbody\n");
+    SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
     if (p) {
         EXPECT(contains(p, "# Skills"));
-        /* sb_init pins HOME=sandbox root, so absolute project paths collapse
+        /* sandbox_init pins HOME=sandbox root, so absolute project paths collapse
          * to `~/.agents/skills/...`. */
         EXPECT(contains(p, "- alpha: alpha does A (~/.agents/skills/alpha/SKILL.md)"));
         EXPECT(contains(p, "- zeta: zeta does Z (~/.agents/skills/zeta/SKILL.md)"));
@@ -751,25 +671,20 @@ static void test_skills_with_description_sorted(void)
         free(p);
     }
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_skills_crlf_frontmatter(void)
 {
     struct sandbox s;
-    sb_init(&s);
+    sandbox_init(&s);
     /* Files checked out on Windows-style line endings have CRLF
      * everywhere, including the opening `---` fence. The closer already
      * accepts \r — verify the opener does too, otherwise the description
      * silently goes missing for these files. */
-    char *path = xasprintf("%s/.agents/skills/crlf/SKILL.md", s.root);
     const char body[] = "---\r\ndescription: from crlf\r\n---\r\nbody\r\n";
-    write_file_bytes(path, body, sizeof(body) - 1);
-    free(path);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_write_bytes(&s, ".agents/skills/crlf/SKILL.md", body, sizeof(body) - 1);
+    SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -778,20 +693,15 @@ static void test_skills_crlf_frontmatter(void)
         free(p);
     }
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_skills_no_frontmatter_falls_back_to_dir(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    char *path = xasprintf("%s/.agents/skills/raw/SKILL.md", s.root);
-    write_file(path, "Just a body, no frontmatter at all.\n");
-    free(path);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    sandbox_write(&s, ".agents/skills/raw/SKILL.md", "Just a body, no frontmatter at all.\n");
+    SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -801,42 +711,32 @@ static void test_skills_no_frontmatter_falls_back_to_dir(void)
         free(p);
     }
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_skills_dir_without_skill_md_skipped(void)
 {
     struct sandbox s;
-    sb_init(&s);
+    sandbox_init(&s);
     /* Subdir exists but has no SKILL.md inside — must be skipped. */
-    char *dir = xasprintf("%s/.agents/skills/empty", s.root);
-    mkdirs(dir);
-    free(dir);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_mkdir(&s, ".agents/skills/empty");
+    SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     /* Nothing valid → NULL. */
     EXPECT(p == NULL);
     free(p);
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_skills_global_root(void)
 {
     struct sandbox s;
-    sb_init(&s);
+    sandbox_init(&s);
     /* Global skill via $HOME/.config/hax/skills (HOME is sandboxed). */
-    char *gpath = xasprintf("%s/.config/hax/skills/sample/SKILL.md", s.root);
-    write_file(gpath, "---\ndescription: from global\n---\n");
-    free(gpath);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_write(&s, ".config/hax/skills/sample/SKILL.md", "---\ndescription: from global\n---\n");
+    SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -847,29 +747,19 @@ static void test_skills_global_root(void)
         free(p);
     }
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_skills_project_shadows_global(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    char *gpath = xasprintf("%s/.config/hax/skills/dup/SKILL.md", s.root);
-    write_file(gpath, "---\ndescription: from global\n---\n");
-    free(gpath);
+    sandbox_init(&s);
+    sandbox_write(&s, ".config/hax/skills/dup/SKILL.md", "---\ndescription: from global\n---\n");
     /* The project lives below $HOME rather than at it: with cwd equal to $HOME
      * the project root and `~/.agents/skills` would be the same directory, and
      * this would no longer be a project-versus-global test. */
-    char *ppath = xasprintf("%s/proj/.agents/skills/dup/SKILL.md", s.root);
-    write_file(ppath, "---\ndescription: from project\n---\n");
-    free(ppath);
-    char *dir = xasprintf("%s/proj", s.root);
-    int ok = chdir(dir) == 0;
-    free(dir);
-    if (!ok) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_write(&s, "proj/.agents/skills/dup/SKILL.md", "---\ndescription: from project\n---\n");
+    SANDBOX_CHDIR(&s, "proj");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -884,20 +774,15 @@ static void test_skills_project_shadows_global(void)
         free(p);
     }
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_skills_disabled_by_no_skills(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    char *path = xasprintf("%s/.agents/skills/foo/SKILL.md", s.root);
-    write_file(path, "---\ndescription: hidden\n---\n");
-    free(path);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    sandbox_write(&s, ".agents/skills/foo/SKILL.md", "---\ndescription: hidden\n---\n");
+    SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_SKILLS", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL); /* Environment section still present */
@@ -907,28 +792,19 @@ static void test_skills_disabled_by_no_skills(void)
         free(p);
     }
     unsetenv("HAX_NO_SKILLS");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_skills_walk_up_to_project_root(void)
 {
     struct sandbox s;
-    sb_init(&s);
+    sandbox_init(&s);
     /* .git at $root/proj; skills at the project root; cwd two levels deeper. */
-    char *git = xasprintf("%s/proj/.git", s.root);
-    mkdirs(git);
-    free(git);
-    char *rooted = xasprintf("%s/proj/.agents/skills/rooted/SKILL.md", s.root);
-    write_file(rooted, "---\ndescription: from project root\n---\n");
-    free(rooted);
-    char *inner = xasprintf("%s/proj/a/b", s.root);
-    mkdirs(inner);
-    int ok = chdir(inner) == 0;
-    free(inner);
-    if (!ok) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_mkdir(&s, "proj/.git");
+    sandbox_write(&s, "proj/.agents/skills/rooted/SKILL.md",
+                  "---\ndescription: from project root\n---\n");
+    sandbox_mkdir(&s, "proj/a/b");
+    SANDBOX_CHDIR(&s, "proj/a/b");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -937,29 +813,17 @@ static void test_skills_walk_up_to_project_root(void)
         free(p);
     }
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_skills_nearer_dir_shadows_project_root(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    char *git = xasprintf("%s/proj/.git", s.root);
-    mkdirs(git);
-    free(git);
-    char *outer = xasprintf("%s/proj/.agents/skills/dup/SKILL.md", s.root);
-    write_file(outer, "---\ndescription: from root\n---\n");
-    free(outer);
-    char *inner = xasprintf("%s/proj/a/.agents/skills/dup/SKILL.md", s.root);
-    write_file(inner, "---\ndescription: from subdir\n---\n");
-    free(inner);
-    char *dir = xasprintf("%s/proj/a", s.root);
-    int ok = chdir(dir) == 0;
-    free(dir);
-    if (!ok) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    sandbox_mkdir(&s, "proj/.git");
+    sandbox_write(&s, "proj/.agents/skills/dup/SKILL.md", "---\ndescription: from root\n---\n");
+    sandbox_write(&s, "proj/a/.agents/skills/dup/SKILL.md", "---\ndescription: from subdir\n---\n");
+    SANDBOX_CHDIR(&s, "proj/a");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -969,54 +833,36 @@ static void test_skills_nearer_dir_shadows_project_root(void)
         free(p);
     }
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_skills_no_root_marker_stays_in_cwd(void)
 {
     struct sandbox s;
-    sb_init(&s);
+    sandbox_init(&s);
     /* No .git anywhere: a parent's skills must not be pulled in. HOME is the
      * sandbox root, so stage the parent skills one level below it to keep the
      * `~/.agents/skills` root out of this. */
-    char *parent = xasprintf("%s/w/.agents/skills/stray/SKILL.md", s.root);
-    write_file(parent, "---\ndescription: from parent\n---\n");
-    free(parent);
-    char *inner = xasprintf("%s/w/a", s.root);
-    mkdirs(inner);
-    int ok = chdir(inner) == 0;
-    free(inner);
-    if (!ok) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_write(&s, "w/.agents/skills/stray/SKILL.md", "---\ndescription: from parent\n---\n");
+    sandbox_mkdir(&s, "w/a");
+    SANDBOX_CHDIR(&s, "w/a");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p == NULL);
     free(p);
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_skills_shared_agents_root(void)
 {
     struct sandbox s;
-    sb_init(&s);
+    sandbox_init(&s);
     /* HOME is the sandbox root, so this is `~/.agents/skills`. cwd is a
      * separate project root, so the upward walk stops before reaching it. */
-    char *shared = xasprintf("%s/.agents/skills/shared/SKILL.md", s.root);
-    write_file(shared, "---\ndescription: from shared\n---\n");
-    free(shared);
-    char *git = xasprintf("%s/proj/.git", s.root);
-    mkdirs(git);
-    free(git);
-    char *dir = xasprintf("%s/proj", s.root);
-    int ok = chdir(dir) == 0;
-    free(dir);
-    if (!ok) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_write(&s, ".agents/skills/shared/SKILL.md", "---\ndescription: from shared\n---\n");
+    sandbox_mkdir(&s, "proj/.git");
+    SANDBOX_CHDIR(&s, "proj");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -1026,26 +872,18 @@ static void test_skills_shared_agents_root(void)
         free(p);
     }
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
-/* With cwd at $HOME the project walk reaches `~/.agents/skills` itself. It must
- * still rank below `~/.config/hax/skills`, so that standing in $HOME does not
- * reorder two global roots. */
-static void test_skills_hax_global_shadows_shared_at_home(void)
+static void test_skills_hax_global_shadows_shared(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    char *shared = xasprintf("%s/.agents/skills/dup/SKILL.md", s.root);
-    write_file(shared, "---\ndescription: from shared\n---\n");
-    free(shared);
-    char *hax = xasprintf("%s/.config/hax/skills/dup/SKILL.md", s.root);
-    write_file(hax, "---\ndescription: from hax global\n---\n");
-    free(hax);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    sandbox_write(&s, ".agents/skills/dup/SKILL.md", "---\ndescription: from shared\n---\n");
+    sandbox_write(&s, ".config/hax/skills/dup/SKILL.md",
+                  "---\ndescription: from hax global\n---\n");
+    sandbox_mkdir(&s, "proj/.git");
+    SANDBOX_CHDIR(&s, "proj");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -1055,7 +893,30 @@ static void test_skills_hax_global_shadows_shared_at_home(void)
         free(p);
     }
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
+}
+
+/* With cwd at $HOME the project walk reaches `~/.agents/skills` itself. It must
+ * still rank below `~/.config/hax/skills`, so that standing in $HOME does not
+ * reorder two global roots. */
+static void test_skills_hax_global_shadows_shared_at_home(void)
+{
+    struct sandbox s;
+    sandbox_init(&s);
+    sandbox_write(&s, ".agents/skills/dup/SKILL.md", "---\ndescription: from shared\n---\n");
+    sandbox_write(&s, ".config/hax/skills/dup/SKILL.md",
+                  "---\ndescription: from hax global\n---\n");
+    SANDBOX_CHDIR(&s, ".");
+    setenv("HAX_NO_ENV", "1", 1);
+    char *p = agent_env_build_suffix("m");
+    EXPECT(p != NULL);
+    if (p) {
+        EXPECT(contains(p, "from hax global"));
+        EXPECT(!contains(p, "from shared"));
+        free(p);
+    }
+    unsetenv("HAX_NO_ENV");
+    sandbox_free(&s);
 }
 
 /* $HOME reaching the sandbox through a symlink while getcwd() reports the
@@ -1065,32 +926,25 @@ static void test_skills_hax_global_shadows_shared_at_home(void)
 static void test_skills_hax_global_shadows_shared_symlinked_home(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    char *real = xasprintf("%s/real", s.root);
-    mkdirs(real);
-    char *link = xasprintf("%s/link", s.root);
-    if (symlink(real, link) != 0) {
+    sandbox_init(&s);
+    sandbox_mkdir(&s, "real");
+    char *real = sandbox_path(&s, "real");
+    char *link = sandbox_path(&s, "link");
+    int linked = symlink(real, link) == 0;
+    free(real);
+    if (!linked) {
         free(link);
-        free(real);
-        sb_free(&s);
+        sandbox_free(&s);
         T_SKIP("symlink unsupported");
     }
     /* Both paths name the same directory; write through the physical one. */
-    char *shared = xasprintf("%s/.agents/skills/dup/SKILL.md", real);
-    write_file(shared, "---\ndescription: from shared\n---\n");
-    free(shared);
-    char *hax = xasprintf("%s/.config/hax/skills/dup/SKILL.md", real);
-    write_file(hax, "---\ndescription: from hax global\n---\n");
-    free(hax);
+    sandbox_write(&s, "real/.agents/skills/dup/SKILL.md", "---\ndescription: from shared\n---\n");
+    sandbox_write(&s, "real/.config/hax/skills/dup/SKILL.md",
+                  "---\ndescription: from hax global\n---\n");
 
     setenv("HOME", link, 1);
-    int ok = chdir(real) == 0;
     free(link);
-    free(real);
-    if (!ok) {
-        sb_free(&s);
-        return;
-    }
+    SANDBOX_CHDIR(&s, "real");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -1100,7 +954,7 @@ static void test_skills_hax_global_shadows_shared_symlinked_home(void)
         free(p);
     }
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 /* The held-back shared root must still be collected: a skill that exists only
@@ -1108,14 +962,9 @@ static void test_skills_hax_global_shadows_shared_symlinked_home(void)
 static void test_skills_shared_root_survives_at_home(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    char *shared = xasprintf("%s/.agents/skills/only/SKILL.md", s.root);
-    write_file(shared, "---\ndescription: from shared\n---\n");
-    free(shared);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    sandbox_write(&s, ".agents/skills/only/SKILL.md", "---\ndescription: from shared\n---\n");
+    SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -1124,39 +973,7 @@ static void test_skills_shared_root_survives_at_home(void)
         free(p);
     }
     unsetenv("HAX_NO_ENV");
-    sb_free(&s);
-}
-
-static void test_skills_hax_global_shadows_shared(void)
-{
-    struct sandbox s;
-    sb_init(&s);
-    char *shared = xasprintf("%s/.agents/skills/dup/SKILL.md", s.root);
-    write_file(shared, "---\ndescription: from shared\n---\n");
-    free(shared);
-    char *hax = xasprintf("%s/.config/hax/skills/dup/SKILL.md", s.root);
-    write_file(hax, "---\ndescription: from hax global\n---\n");
-    free(hax);
-    char *git = xasprintf("%s/proj/.git", s.root);
-    mkdirs(git);
-    free(git);
-    char *dir = xasprintf("%s/proj", s.root);
-    int ok = chdir(dir) == 0;
-    free(dir);
-    if (!ok) {
-        sb_free(&s);
-        return;
-    }
-    setenv("HAX_NO_ENV", "1", 1);
-    char *p = agent_env_build_suffix("m");
-    EXPECT(p != NULL);
-    if (p) {
-        EXPECT(contains(p, "from hax global"));
-        EXPECT(!contains(p, "from shared"));
-        free(p);
-    }
-    unsetenv("HAX_NO_ENV");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 static void test_skills_survive_no_agents_md(void)
@@ -1164,17 +981,10 @@ static void test_skills_survive_no_agents_md(void)
     /* The gates are orthogonal: suppressing AGENTS.md must not take the
      * skills listing with it. */
     struct sandbox s;
-    sb_init(&s);
-    char *path = xasprintf("%s/.agents/skills/foo/SKILL.md", s.root);
-    write_file(path, "---\ndescription: still here\n---\n");
-    free(path);
-    char *md = xasprintf("%s/AGENTS.md", s.root);
-    write_file(md, "project rules\n");
-    free(md);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    sandbox_write(&s, ".agents/skills/foo/SKILL.md", "---\ndescription: still here\n---\n");
+    sandbox_write(&s, "AGENTS.md", "project rules\n");
+    SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_AGENTS_MD", "1", 1);
     char *p = agent_env_build_suffix("m");
     EXPECT(p != NULL);
@@ -1185,7 +995,7 @@ static void test_skills_survive_no_agents_md(void)
         free(p);
     }
     unsetenv("HAX_NO_AGENTS_MD");
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 /* ---------- subagents section ---------- */
@@ -1193,11 +1003,8 @@ static void test_skills_survive_no_agents_md(void)
 static void test_subagents_section_and_presets(void)
 {
     struct sandbox s;
-    sb_init(&s);
-    if (chdir(s.root) != 0) {
-        sb_free(&s);
-        return;
-    }
+    sandbox_init(&s);
+    SANDBOX_CHDIR(&s, ".");
     unsetenv("HAX_NO_SUBAGENTS");
     unsetenv("HAX_NO_TASKS");
 
@@ -1276,7 +1083,7 @@ static void test_subagents_section_and_presets(void)
 
     setenv("HAX_NO_SUBAGENTS", "1", 1);
     setenv("HAX_NO_TASKS", "1", 1);
-    sb_free(&s);
+    sandbox_free(&s);
 }
 
 int main(void)
