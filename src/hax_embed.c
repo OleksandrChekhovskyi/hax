@@ -85,20 +85,20 @@ struct provider *hax_provider_new(const char *name)
     if (!name || !*name)
         name = config_str("provider");
     if (!name || !*name) {
-        const struct provider_factory *fallback = provider_default();
+        const struct provider_def *fallback = provider_default();
         if (!fallback) {
             hax_err("no provider is available");
             return NULL;
         }
-        return fallback->new(fallback->id);
+        return provider_construct(fallback);
     }
 
-    const struct provider_factory *factory = provider_find(name);
-    if (!factory) {
+    const struct provider_def *def = provider_find(name);
+    if (!def) {
         hax_err("unknown provider '%s'", name);
         return NULL;
     }
-    return factory->new(factory->id);
+    return provider_construct(def);
 }
 
 void hax_provider_destroy(struct provider *provider)

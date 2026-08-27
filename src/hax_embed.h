@@ -38,9 +38,9 @@ void hax_shutdown(void);
 
 struct provider;
 
-/* Construct a provider by factory name, or by the configured `provider` setting when `name` is
+/* Construct a provider by registry id, or by the configured `provider` setting when `name` is
  * NULL or empty. Returns NULL after emitting a diagnostic. Keeping construction here spares a
- * binding from mirroring struct provider and struct provider_factory. */
+ * binding from mirroring struct provider and struct provider_def. */
 struct provider *hax_provider_new(const char *name);
 
 /* Destroy a provider obtained from hax_provider_new(). NULL-safe, and required before
