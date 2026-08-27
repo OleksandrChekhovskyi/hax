@@ -10,12 +10,11 @@
 #include <curl/urlapi.h>
 
 #include "config.h"
-#include "model_meta.h"
 #include "provider.h"
 #include "util.h"
-#include "providers/config_provider.h"
 #include "providers/http_provider.h"
-#include "providers/wire.h"
+#include "providers/provider_config.h"
+#include "providers/registry.h"
 #include "transport/http.h"
 
 #define MODEL_LIST_TIMEOUT_S 2
@@ -311,8 +310,7 @@ char *llamacpp_model_label(struct provider *provider, const char *model)
     return label;
 }
 
-static int llamacpp_probe_model(struct provider *provider, const char *model,
-                                struct model_probe *probe)
+int llamacpp_probe_model(struct provider *provider, const char *model, struct model_probe *probe)
 {
     (void)provider;
     char *base_url = resolve_base_url();
@@ -333,68 +331,28 @@ static int llamacpp_probe_model(struct provider *provider, const char *model,
     return 0;
 }
 
-struct provider *llamacpp_provider_new(const char *id)
+int llamacpp_discover(const char *base_url, int *model_discovered)
 {
-    provider_warn_unused_wire_fields(id, &WIRE_OPENAI_CHAT, NULL);
-    char *default_url = default_base_url();
-    char *base_url = resolve_base_url();
     const char *api_key = provider_api_key("providers.llamacpp", NULL);
-    int model_discovered = 0;
-    if (reconcile_configured_model(base_url, api_key, &model_discovered) != 0) {
+    if (reconcile_configured_model(base_url, api_key, model_discovered) != 0) {
         hax_err("llama.cpp: failed to auto-discover model from %s/models\n"
                 "hax: is llama-server running? "
                 "(set HAX_MODEL to skip probing, or adjust HAX_LLAMACPP_PORT / "
                 "HAX_LLAMACPP_BASE_URL)",
                 base_url);
-        free(base_url);
-        free(default_url);
-        return NULL;
+        return -1;
     }
-
-    struct http_provider_preset preset = {
-        .display_name = "llama.cpp",
-        .default_base_url = default_url,
-        .config_prefix = "providers.llamacpp",
-        .send_cache_key_default = 0,
-        .emit_progress = 1,
-        /* Interleaved-thinking models can leak tool calls into reasoning unless prior reasoning is
-         * returned through llama-server's reasoning_content field. */
-        .reasoning_replay_field = "reasoning_content",
-        /* llama-server has no per-request context-size control. */
-        .length_hint = "llama-server's context is full — restart it with a larger "
-                       "-c / --ctx-size",
-        .parse_model = llamacpp_parse_model,
-    };
-    struct provider *provider = http_provider_new_preset(&preset);
-    if (provider) {
-        provider->id = id;
-        provider->model_label = llamacpp_model_label;
-        provider->probe_model = llamacpp_probe_model;
-        provider->model_discovered = model_discovered;
-        model_meta_refresh(provider, config_str("model"));
-    }
-    free(base_url);
-    free(default_url);
-    return provider;
+    return 0;
 }
 
-static void llamacpp_prepare_availability(const char *id,
-                                          struct provider_availability *availability)
+void llamacpp_prepare_availability(const struct provider_def *def,
+                                   struct provider_availability *out)
 {
-    (void)id;
+    (void)def;
     char *base_url = resolve_base_url();
     char **extra_headers = provider_extra_headers("providers.llamacpp");
     http_provider_prepare_base_url_availability(
-        base_url, provider_api_key("providers.llamacpp", NULL), extra_headers, availability);
+        base_url, provider_api_key("providers.llamacpp", NULL), extra_headers, out);
     string_array_free(extra_headers);
     free(base_url);
 }
-
-const struct provider_factory PROVIDER_LLAMACPP = {
-    /* Dot-free so the id names its providers.llamacpp config block ('.' is the key path
-     * separator); the banner and picker keep the upstream spelling. */
-    .id = "llamacpp",
-    .display_name = "llama.cpp",
-    .new = llamacpp_provider_new,
-    .prepare_availability = llamacpp_prepare_availability,
-};

@@ -23,6 +23,24 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - `/login` for the codex provider now offers a browser flow (authorization code with PKCE through
   a `localhost` redirect) alongside device login, for organizations that block the device flow.
   Device login remains the ssh-friendly path. See [docs/providers.md](docs/providers.md#codex).
+- Provider blocks accept `metadata_api` to pick the `/models` dialect (`openai` or `anthropic`)
+  independently of the request protocol, for proxies that pair one with the other. Mixed-protocol
+  gateways now authenticate metadata requests correctly even when models are rerouted across
+  protocol families. See [docs/providers.md](docs/providers.md#custom-providers).
+- `sort_models` and `catalog_id` now work in every provider's config block, not only custom
+  ones; `providers.openai.sort_models`, for example, keeps the picker in server order.
+
+### Changed
+
+- Skill discovery now follows the cross-agent `.agents/skills` convention: project skills are
+  collected from the current directory up to the repository root, as `AGENTS.md` already was, and
+  `~/.agents/skills` is read alongside `~/.config/hax/skills`. Skills installed globally by other
+  tools work in hax without being copied or symlinked, and running hax from a subdirectory no
+  longer hides skills defined at the project root. The nearest match for a name wins. See
+  [docs/usage.md](docs/usage.md#project-instructions-and-context).
+- The first-party `openai`, `anthropic`, and `openrouter` providers pin their protocol along
+  with their endpoint: `providers.<id>.api` now warns instead of switching the wire. Use
+  `model_apis` for per-model protocols, or a custom provider.
 
 ### Changed
 
@@ -34,6 +52,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- Skill discovery now ignores descriptions from unterminated YAML frontmatter or unsupported block
+  scalars instead of advertising incomplete metadata.
 - Chat Completions streams now detect upstream provider failures signaled through the finish
   reason (including OpenRouter's `error` and `network_error` sentinels), retry them like other
   transient failures, and surface an error once retries are exhausted. Previously such streams

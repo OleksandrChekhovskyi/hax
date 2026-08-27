@@ -161,7 +161,7 @@ static const struct config_setting REGISTRY[] = {
      .description = "Silence on a streaming response before giving up; 0 disables",
      .kind = CONFIG_KIND_DURATION, .editable = 1},
 
-    /* openai-compatible (the shipped generic-endpoint recipe; the env vars are aliases into
+    /* openai-compatible (the shipped generic-endpoint provider; the env vars are aliases into
      * its providers.* block so a compatible endpoint stays one-shot configurable) */
     {.key = "providers.openai-compatible.base_url", .env_var = "HAX_OPENAI_BASE_URL",
      .description = "Base URL of the OpenAI-compatible endpoint"},
@@ -195,7 +195,7 @@ static const struct config_setting REGISTRY[] = {
                     "pauses)",
      .choices = "5m|1h"},
 
-    /* anthropic-compatible (same scheme for the generic Messages recipe) */
+    /* anthropic-compatible (same scheme for the generic Messages provider) */
     {.key = "providers.anthropic-compatible.base_url", .env_var = "HAX_ANTHROPIC_BASE_URL",
      .description = "Base URL of the Anthropic-compatible /v1 endpoint"},
     {.key = "providers.anthropic-compatible.api_key", .env_var = "HAX_ANTHROPIC_API_KEY",

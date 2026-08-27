@@ -461,15 +461,14 @@ static void test_provider_without_levels_stays_without_them(void)
 /* Exercise the metadata lifecycle through every provider destroy callback. */
 static void test_release_is_honored_by_every_provider(void)
 {
-    size_t factory_count = 0;
-    const struct provider_factory *const *factories = provider_all(&factory_count);
-    EXPECT(factory_count > 0);
+    size_t def_count = 0;
+    const struct provider_def *const *defs = provider_all(&def_count);
+    EXPECT(def_count > 0);
     int providers_created = 0;
-    for (size_t i = 0; i <= factory_count; i++) {
-        const struct provider_factory *factory =
-            (i < factory_count) ? factories[i] : provider_find("mock");
-        EXPECT(factory != NULL);
-        struct provider *provider = factory ? factory->new(factory->id) : NULL;
+    for (size_t i = 0; i <= def_count; i++) {
+        const struct provider_def *def = (i < def_count) ? defs[i] : provider_find("mock");
+        EXPECT(def != NULL);
+        struct provider *provider = def ? provider_construct(def) : NULL;
         if (!provider)
             continue;
         providers_created++;

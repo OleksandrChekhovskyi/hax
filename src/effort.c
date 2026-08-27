@@ -4,15 +4,15 @@
 #include <stdio.h>
 #include <string.h>
 
-static const char *const EFFORT_ORDER[] = {"none", "minimal", "low", "medium",
-                                           "high", "xhigh",   "max"};
+const char *const EFFORT_LADDER[] = {"none", "minimal", "low", "medium", "high", "xhigh", "max"};
+const size_t EFFORT_LADDER_N = sizeof(EFFORT_LADDER) / sizeof(EFFORT_LADDER[0]);
 
 static int effort_rank(const char *level)
 {
     if (!level)
         return -1;
-    for (size_t i = 0; i < sizeof(EFFORT_ORDER) / sizeof(EFFORT_ORDER[0]); i++)
-        if (strcmp(EFFORT_ORDER[i], level) == 0)
+    for (size_t i = 0; i < EFFORT_LADDER_N; i++)
+        if (strcmp(EFFORT_LADDER[i], level) == 0)
             return (int)i;
     return -1;
 }

@@ -25,7 +25,6 @@ union wire_events {
 
 /* Per-stream translator knobs. Wires without a matching field ignore them. */
 struct wire_events_opts {
-    int emit_progress;       /* chat: parse llama.cpp prompt_progress */
     const char *length_hint; /* chat: borrowed; appended to "length" errors */
     int cache_write_1h;      /* chat: bill cache writes at the 1-hour rate */
 };
@@ -41,8 +40,7 @@ struct wire_body_opts {
     /* chat */
     const char *reasoning_field; /* replay reasoning under this member; NULL disables */
     enum chat_reasoning_format reasoning_format;
-    int emit_progress; /* request llama.cpp prompt_progress */
-    int request_cost;  /* request OpenRouter usage cost */
+    int request_cost; /* request OpenRouter usage cost */
     /* anthropic */
     int max_tokens;
     enum anthropic_thinking_mode thinking_mode;

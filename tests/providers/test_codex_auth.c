@@ -9,6 +9,7 @@
 #include "harness.h"
 #include "util.h"
 #include "providers/codex_auth.h"
+#include "providers/http_provider.h"
 #include "text/base64.h"
 
 /* Build a JWT whose payload is `claims`; the header and signature are never inspected. */
@@ -371,6 +372,69 @@ static void test_load_prefers_hax_store(void)
     codex_auth_release(&auth);
 }
 
+static int headers_contain(char **headers, const char *needle)
+{
+    for (char **header = headers; header && *header; header++)
+        if (strstr(*header, needle))
+            return 1;
+    return 0;
+}
+
+/* The credential session behind the auth-source hook, over borrowed CLI credentials: prepare
+ * tracks the live login, headers carry the credentials plus the session routing, recovery
+ * declines (only the CLI can refresh its token), and a 401 marks the credentials stale so the
+ * next prepare adopts a token the CLI rewrote meanwhile. */
+static void test_auth_session(void)
+{
+    char *home = auth_home();
+    write_auth(home, "{\"tokens\":{\"access_token\":\"at\",\"account_id\":\"acc\"}}");
+
+    struct http_auth_source source = {0};
+    EXPECT(codex_auth_source(NULL, &source) == 0);
+    EXPECT(source.ops != NULL);
+    if (!source.ops)
+        return;
+
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == 0);
+    char **headers = source.ops->headers(source.state, "sess", 1);
+    EXPECT(headers_contain(headers, "Authorization: Bearer at"));
+    EXPECT(headers_contain(headers, "chatgpt-account-id: acc"));
+    EXPECT(headers_contain(headers, "session-id: sess"));
+    EXPECT(headers_contain(headers, "x-client-request-id: sess"));
+    string_array_free(headers);
+    /* Borrowed tokens never count as expiring: the probe path must not defer on them. */
+    EXPECT(!codex_auth_session_expiring(source.state, 1000000));
+
+    int retried = 0;
+    EXPECT(source.ops->recover(source.state, &retried, NULL, NULL) == 0);
+    char *message = source.ops->unauthorized_message(source.state);
+    EXPECT(strstr(message, "codex CLI token expired") != NULL);
+    free(message);
+
+    /* The 401 above marked the borrowed credentials stale; prepare re-reads auth.json. */
+    write_auth(home, "{\"tokens\":{\"access_token\":\"renewed\",\"account_id\":\"acc\"}}");
+    EXPECT(source.ops->prepare(source.state, 0, NULL, NULL) == 0);
+    headers = source.ops->headers(source.state, "sess", 0);
+    EXPECT(headers_contain(headers, "Authorization: Bearer renewed"));
+    string_array_free(headers);
+
+    /* /logout with nothing left behind: the session clears and requests report the state. */
+    char *path = xasprintf("%s/.codex/auth.json", home);
+    EXPECT(remove(path) == 0);
+    free(path);
+    codex_auth_session_reload(source.state);
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) != 0);
+    message = source.ops->unauthorized_message(source.state);
+    EXPECT(strstr(message, "not logged in") != NULL);
+    free(message);
+
+    /* A later login is adopted without rebuilding the provider. */
+    write_auth(home, "{\"tokens\":{\"access_token\":\"back\",\"account_id\":\"acc\"}}");
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == 0);
+
+    source.ops->destroy(source.state);
+}
+
 static void test_status_reasons(void)
 {
     EXPECT(codex_auth_status_reason(CODEX_AUTH_OK) == NULL);
@@ -403,6 +467,7 @@ int main(void)
     test_jwt_account_id();
     test_store_entry_read();
     test_load_prefers_hax_store();
+    test_auth_session();
     test_status_reasons();
     T_REPORT();
 }

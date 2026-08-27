@@ -18,72 +18,122 @@
 #include "text/utf8_sanitize.h"
 #include "tools/bash_shell.h"
 
-/* Per-file cap for AGENTS.md content. A single file larger than this is
- * almost certainly a mistake; truncating with a marker is more useful than
- * blowing up the prompt. */
-#define AGENTS_MD_FILE_CAP (64u * 1024u)
+/* Truncate oversized project instructions rather than letting one file dominate the prompt. */
+#define AGENTS_MD_MAX_BYTES (64u * 1024u)
 
-/* Maximum directory levels walked upward from cwd. Bounds the cost of a
- * runaway walk on a deep tree without any project marker. */
-#define AGENTS_MD_MAX_LEVELS 64
+/* Bound upward discovery even on an unusually deep tree without a project marker. */
+#define PROJECT_MAX_DEPTH 64
 
-/* Only the head of SKILL.md is read — we just need YAML frontmatter, never
- * the full skill body. Keep this comfortably above realistic frontmatter
- * sizes. */
-#define SKILL_FRONTMATTER_HEAD 8192
+/* Skill discovery needs only YAML metadata, never the full SKILL.md body. */
+#define SKILL_FRONTMATTER_MAX_BYTES 8192
 
-/* Spec limit for the description field; longer values are truncated. */
-#define SKILL_DESCRIPTION_MAX 1024
+/* Clamp descriptions to the skill metadata specification's limit. */
+#define SKILL_DESCRIPTION_MAX_BYTES 1024
 
-/* Probe project-agnostic tools only; project tooling is inferred from its files.
- * Replacement guidance is emitted only when `name` is available. */
-struct probed_cmd {
+/* Probe project-independent tools only; project tooling is inferred from project files. */
+struct command_probe {
     const char *name;
-    const char *replaces;
+    const char *replacement_for;
 };
-static const struct probed_cmd PROBED_COMMANDS[] = {
+
+static const struct command_probe COMMAND_PROBES[] = {
     {"rg", "grep -r"},     {"fd", "find"}, {"jq", NULL},     {"gh", NULL},
     {"python3", "python"}, {"node", NULL}, {"magick", NULL},
 };
-static const size_t N_PROBED_COMMANDS = sizeof(PROBED_COMMANDS) / sizeof(PROBED_COMMANDS[0]);
+static const size_t COMMAND_PROBE_COUNT = sizeof(COMMAND_PROBES) / sizeof(COMMAND_PROBES[0]);
 
-static int have_command(const char *name)
+static int command_is_available(const char *name)
 {
-    char *p = fs_which(name);
-    if (!p)
+    char *path = fs_which(name);
+    if (!path)
         return 0;
-    free(p);
+    free(path);
     return 1;
 }
 
-/* Find the nearest Git root for Environment and AGENTS.md discovery. */
+/* Replace absolute `dir` with its parent; return 0 at the root without changing it. */
+static int climb_to_parent(char *dir)
+{
+    char *slash = strrchr(dir, '/');
+    if (!slash)
+        return 0;
+    if (slash == dir) {
+        if (dir[1] == '\0')
+            return 0;
+        dir[1] = '\0';
+        return 1;
+    }
+    *slash = '\0';
+    return 1;
+}
+
 static char *find_project_root(const char *cwd)
 {
     char dir[PATH_MAX];
     snprintf(dir, sizeof(dir), "%s", cwd);
-    for (int i = 0; i < AGENTS_MD_MAX_LEVELS; i++) {
+    for (int depth = 0; depth < PROJECT_MAX_DEPTH; depth++) {
         char marker[PATH_MAX + 16];
         snprintf(marker, sizeof(marker), "%s/.git", dir);
-        struct stat st;
-        if (stat(marker, &st) == 0)
+        struct stat marker_stat;
+        if (stat(marker, &marker_stat) == 0)
             return xstrdup(dir);
 
-        char *slash = strrchr(dir, '/');
-        if (!slash)
+        if (!climb_to_parent(dir))
             break;
-        if (slash == dir) {
-            /* "/foo" → "/"; "/" → done. */
-            if (dir[1] == '\0')
-                break;
-            dir[1] = '\0';
-        } else {
-            *slash = '\0';
-        }
     }
     return NULL;
 }
 
-static void append_environment_section(struct buf *b, const char *model)
+static char *sanitize_display_path(const char *path)
+{
+    /* Collapse before sanitizing so the raw $HOME prefix can still match. */
+    char *display_path = path_collapse_home(path);
+    char *clean_path = utf8_sanitize(display_path, strlen(display_path));
+    free(display_path);
+    return clean_path;
+}
+
+static void append_environment_value(struct buf *prompt, const char *label, const char *value)
+{
+    char *line = xasprintf("- %s: %s\n", label, value);
+    buf_append_str(prompt, line);
+    free(line);
+}
+
+static void append_command_summary(struct buf *prompt)
+{
+    int available[sizeof(COMMAND_PROBES) / sizeof(COMMAND_PROBES[0])];
+    for (size_t i = 0; i < COMMAND_PROBE_COUNT; i++)
+        available[i] = command_is_available(COMMAND_PROBES[i].name);
+
+    int has_commands = 0;
+    for (size_t i = 0; i < COMMAND_PROBE_COUNT; i++) {
+        if (!available[i])
+            continue;
+        buf_append_str(prompt, has_commands ? ", `" : "\nAvailable command-line tools: `");
+        buf_append_str(prompt, COMMAND_PROBES[i].name);
+        buf_append_str(prompt, "`");
+        has_commands = 1;
+    }
+    if (has_commands)
+        buf_append_str(prompt, ".\n");
+
+    int has_replacements = 0;
+    for (size_t i = 0; i < COMMAND_PROBE_COUNT; i++) {
+        if (!available[i] || !COMMAND_PROBES[i].replacement_for)
+            continue;
+        buf_append_str(prompt, has_replacements ? ", " : "Prefer ");
+        char *guidance =
+            xasprintf("`%s` to `%s`", COMMAND_PROBES[i].name, COMMAND_PROBES[i].replacement_for);
+        buf_append_str(prompt, guidance);
+        free(guidance);
+        has_replacements = 1;
+    }
+    if (has_replacements)
+        buf_append_str(prompt, ".\n");
+}
+
+static void append_environment(struct buf *prompt, const char *model)
 {
     char cwd[PATH_MAX];
     if (!getcwd(cwd, sizeof(cwd)))
@@ -94,87 +144,28 @@ static void append_environment_section(struct buf *b, const char *model)
     char *os = os_description();
     char *project_root = find_project_root(cwd);
 
-    /* Collapse paths before sanitizing so `~` still maps to the displayed home. */
-    char *cwd_display = path_collapse_home(cwd);
-    char *cwd_clean = utf8_sanitize(cwd_display, strlen(cwd_display));
-    free(cwd_display);
+    char *cwd_clean = sanitize_display_path(cwd);
     char *home_clean = (home && *home) ? utf8_sanitize(home, strlen(home)) : NULL;
     char *os_clean = utf8_sanitize(os, strlen(os));
     char *shell_clean = utf8_sanitize(shell, strlen(shell));
     char *model_clean = (model && *model) ? utf8_sanitize(model, strlen(model)) : NULL;
-    char *root_clean = NULL;
-    if (project_root) {
-        char *root_display = path_collapse_home(project_root);
-        root_clean = utf8_sanitize(root_display, strlen(root_display));
-        free(root_display);
-    }
+    char *root_clean = project_root ? sanitize_display_path(project_root) : NULL;
 
-    if (b->len > 0)
-        buf_append_str(b, "\n");
-    buf_append_str(b, "# Environment\n\n");
-    char *line = xasprintf("- Working directory: %s\n", cwd_clean);
-    buf_append_str(b, line);
-    free(line);
-    if (home_clean) {
-        line = xasprintf("- Home directory: %s\n", home_clean);
-        buf_append_str(b, line);
-        free(line);
-    }
-    line = xasprintf("- Operating system: %s\n", os_clean);
-    buf_append_str(b, line);
-    free(line);
-    line = xasprintf("- Command shell: %s\n", shell_clean);
-    buf_append_str(b, line);
-    free(line);
-    if (model_clean) {
-        line = xasprintf("- Model: %s\n", model_clean);
-        buf_append_str(b, line);
-        free(line);
-    }
+    if (prompt->len > 0)
+        buf_append_str(prompt, "\n");
+    buf_append_str(prompt, "# Environment\n\n");
+    append_environment_value(prompt, "Working directory", cwd_clean);
+    if (home_clean)
+        append_environment_value(prompt, "Home directory", home_clean);
+    append_environment_value(prompt, "Operating system", os_clean);
+    append_environment_value(prompt, "Command shell", shell_clean);
+    if (model_clean)
+        append_environment_value(prompt, "Model", model_clean);
     if (root_clean)
-        line = xasprintf("- Git repository root: %s\n", root_clean);
+        append_environment_value(prompt, "Git repository root", root_clean);
     else
-        line = xstrdup("- Git repository: no\n");
-    buf_append_str(b, line);
-    free(line);
-
-    int available[sizeof(PROBED_COMMANDS) / sizeof(PROBED_COMMANDS[0])];
-    for (size_t i = 0; i < N_PROBED_COMMANDS; i++)
-        available[i] = have_command(PROBED_COMMANDS[i].name);
-
-    int any_cmd = 0;
-    for (size_t i = 0; i < N_PROBED_COMMANDS; i++) {
-        if (!available[i])
-            continue;
-        if (!any_cmd) {
-            buf_append_str(b, "\nAvailable command-line tools: ");
-            any_cmd = 1;
-        } else {
-            buf_append_str(b, ", ");
-        }
-        buf_append_str(b, "`");
-        buf_append_str(b, PROBED_COMMANDS[i].name);
-        buf_append_str(b, "`");
-    }
-    if (any_cmd)
-        buf_append_str(b, ".\n");
-
-    int any_replacement = 0;
-    for (size_t i = 0; i < N_PROBED_COMMANDS; i++) {
-        if (!PROBED_COMMANDS[i].replaces || !available[i])
-            continue;
-        if (!any_replacement) {
-            buf_append_str(b, "Prefer ");
-            any_replacement = 1;
-        } else {
-            buf_append_str(b, ", ");
-        }
-        line = xasprintf("`%s` to `%s`", PROBED_COMMANDS[i].name, PROBED_COMMANDS[i].replaces);
-        buf_append_str(b, line);
-        free(line);
-    }
-    if (any_replacement)
-        buf_append_str(b, ".\n");
+        buf_append_str(prompt, "- Git repository: no\n");
+    append_command_summary(prompt);
 
     free(cwd_clean);
     free(home_clean);
@@ -187,316 +178,305 @@ static void append_environment_section(struct buf *b, const char *model)
     free(project_root);
 }
 
-/* Append a single AGENTS.md file under a `## <display_path>` header.
- * `path` is the absolute filesystem path used to read the file;
- * `display_path` is what the model sees in the section header — a
- * `~`-collapsed absolute path so the model can re-read the file with
- * the same string it sees here. NULL display_path falls back to `path`.
- * Returns 1 if the file existed and was appended, 0 otherwise. The
- * first successful call also writes the `# Project Context` section
- * header (and a leading separator if the buffer already has Environment
- * content). */
-static int append_agents_md(struct buf *b, const char *path, const char *display_path,
-                            int *seen_header)
+static void append_agents_file(struct buf *prompt, const char *path, const char *display_path,
+                               int *has_project_context)
 {
-    size_t n = 0;
+    size_t content_len = 0;
     int truncated = 0;
-    char *content = slurp_file_capped(path, AGENTS_MD_FILE_CAP, &n, &truncated);
+    char *content = slurp_file_capped(path, AGENTS_MD_MAX_BYTES, &content_len, &truncated);
     if (!content)
-        return 0;
+        return;
 
-    /* AGENTS.md is user-authored and may contain embedded NULs or invalid
-     * UTF-8; the path itself comes from getcwd / $HOME / $XDG_CONFIG_HOME
-     * which on Linux can also carry arbitrary bytes. Both would break
-     * provider JSON (NUL truncates strlen, Jansson rejects non-UTF-8) —
-     * sanitize both before splicing into the prompt. */
-    char *clean = utf8_sanitize(content, n);
+    /* Provider JSON requires NUL-free UTF-8, but paths and file contents are arbitrary bytes. */
+    char *clean_content = utf8_sanitize(content, content_len);
     free(content);
-    size_t clean_len = strlen(clean);
-    const char *header_src = display_path ? display_path : path;
-    char *path_clean = utf8_sanitize(header_src, strlen(header_src));
+    size_t clean_len = strlen(clean_content);
+    const char *heading_path = display_path ? display_path : path;
+    char *clean_path = utf8_sanitize(heading_path, strlen(heading_path));
 
-    if (!*seen_header) {
-        if (b->len > 0)
-            buf_append_str(b, "\n");
-        buf_append_str(b, "# Project Context\n\n"
-                          "Project guidance below overrides the assistant defaults above.\n");
-        *seen_header = 1;
+    if (!*has_project_context) {
+        if (prompt->len > 0)
+            buf_append_str(prompt, "\n");
+        buf_append_str(prompt, "# Project Context\n\n"
+                               "Project guidance below overrides the assistant defaults above.\n");
+        *has_project_context = 1;
     }
-    buf_append_str(b, "\n## ");
-    buf_append_str(b, path_clean);
-    buf_append_str(b, "\n\n");
-    buf_append(b, clean, clean_len);
-    /* Ensure trailing newline before the next section header. */
-    if (clean_len == 0 || clean[clean_len - 1] != '\n')
-        buf_append_str(b, "\n");
+    buf_append_str(prompt, "\n## ");
+    buf_append_str(prompt, clean_path);
+    buf_append_str(prompt, "\n\n");
+    buf_append(prompt, clean_content, clean_len);
+    if (clean_len == 0 || clean_content[clean_len - 1] != '\n')
+        buf_append_str(prompt, "\n");
     if (truncated)
-        buf_append_str(b, "[truncated]\n");
-    free(clean);
-    free(path_clean);
-    return 1;
+        buf_append_str(prompt, "[truncated]\n");
+
+    free(clean_content);
+    free(clean_path);
 }
 
-static void append_project_agents_md(struct buf *b, int *seen_header)
+static void append_project_agents_files(struct buf *prompt, int *has_project_context)
 {
     char cwd[PATH_MAX];
     if (!getcwd(cwd, sizeof(cwd)))
         return;
 
-    char *root = find_project_root(cwd);
-    if (!root) {
-        /* No project marker — only the cwd-level file (if any) is
-         * considered, to avoid pulling in unrelated AGENTS.md files when
-         * hax is run outside any repo. */
-        char *candidate = xasprintf("%s/AGENTS.md", cwd);
-        char *display = path_collapse_home(candidate);
-        append_agents_md(b, candidate, display, seen_header);
-        free(display);
-        free(candidate);
+    char *project_root = find_project_root(cwd);
+    if (!project_root) {
+        /* Outside a repository, parent instructions may belong to an unrelated project. */
+        char *path = path_join(cwd, "AGENTS.md");
+        char *display_path = path_collapse_home(path);
+        append_agents_file(prompt, path, display_path, has_project_context);
+        free(display_path);
+        free(path);
         return;
     }
 
-    /* Collect every AGENTS.md from cwd up to and including the project
-     * root, then emit farthest-first so closer files take precedence.
-     * append_agents_md handles missing/non-regular paths via slurp_*'s
-     * own guard, so we don't pre-filter here. Display paths use the
-     * absolute form with $HOME collapsed to `~` — relative paths like
-     * `../AGENTS.md` invite the model to rebase them on whatever it
-     * thinks the base is (we've seen Qwen rebase onto $HOME). */
-    char *paths[AGENTS_MD_MAX_LEVELS];
-    char *display_paths[AGENTS_MD_MAX_LEVELS];
-    int n = 0;
+    /* Absolute headings remain reusable by the model; root-first order gives nearer files
+     * precedence. */
+    char *paths[PROJECT_MAX_DEPTH];
+    char *display_paths[PROJECT_MAX_DEPTH];
+    size_t path_count = 0;
     char dir[PATH_MAX];
     snprintf(dir, sizeof(dir), "%s", cwd);
-    for (int i = 0; i < AGENTS_MD_MAX_LEVELS; i++) {
-        paths[n] = path_join(dir, "AGENTS.md");
-        display_paths[n] = path_collapse_home(paths[n]);
-        n++;
+    for (int depth = 0; depth < PROJECT_MAX_DEPTH; depth++) {
+        paths[path_count] = path_join(dir, "AGENTS.md");
+        display_paths[path_count] = path_collapse_home(paths[path_count]);
+        path_count++;
 
-        if (strcmp(dir, root) == 0)
+        if (strcmp(dir, project_root) == 0 || !climb_to_parent(dir))
             break;
-
-        char *slash = strrchr(dir, '/');
-        if (!slash)
-            break;
-        if (slash == dir) {
-            if (dir[1] == '\0')
-                break;
-            dir[1] = '\0';
-        } else {
-            *slash = '\0';
-        }
     }
-    free(root);
+    free(project_root);
 
-    for (int i = n - 1; i >= 0; i--) {
-        append_agents_md(b, paths[i], display_paths[i], seen_header);
-        free(paths[i]);
-        free(display_paths[i]);
+    while (path_count > 0) {
+        size_t index = --path_count;
+        append_agents_file(prompt, paths[index], display_paths[index], has_project_context);
+        free(paths[index]);
+        free(display_paths[index]);
     }
 }
 
-/* Extract the `description:` value from YAML frontmatter at the head of
- * `content`. Frontmatter is delimited by `---` on its own line at the
- * start, terminated by a matching `---`. Only single-line scalar values
- * are supported (no `description: |` blocks); single- or double-quoted
- * values are unquoted; whitespace is trimmed. Returns a freshly-allocated
- * string clamped to SKILL_DESCRIPTION_MAX, or NULL if the field is absent
- * or the file lacks frontmatter. */
-static char *parse_skill_description(const char *content, size_t len)
+/* Parse one-line, optionally quoted YAML descriptions. Return metadata only after a closing fence
+ * confirms that the frontmatter is complete. */
+static char *parse_skill_description(const char *content, size_t content_len)
 {
-    /* Accept LF or CRLF after the opening fence — the closer below already
-     * tolerates an optional \r, so be symmetric. */
-    const char *p;
-    if (len >= 4 && memcmp(content, "---\n", 4) == 0)
-        p = content + 4;
-    else if (len >= 5 && memcmp(content, "---\r\n", 5) == 0)
-        p = content + 5;
+    const char *cursor;
+    if (content_len >= 4 && memcmp(content, "---\n", 4) == 0)
+        cursor = content + 4;
+    else if (content_len >= 5 && memcmp(content, "---\r\n", 5) == 0)
+        cursor = content + 5;
     else
         return NULL;
 
-    const char *end = content + len;
-    while (p < end) {
-        const char *line_end = memchr(p, '\n', end - p);
+    char *description = NULL;
+    const char *content_end = content + content_len;
+    while (cursor < content_end) {
+        const char *line_end = memchr(cursor, '\n', content_end - cursor);
         if (!line_end)
-            line_end = end;
-        size_t line_len = line_end - p;
+            line_end = content_end;
+        size_t line_len = line_end - cursor;
 
-        /* End-of-frontmatter marker. Accept `---` with optional CR. */
-        if ((line_len == 3 && memcmp(p, "---", 3) == 0) ||
-            (line_len == 4 && memcmp(p, "---\r", 4) == 0))
-            return NULL;
+        if ((line_len == 3 && memcmp(cursor, "---", 3) == 0) ||
+            (line_len == 4 && memcmp(cursor, "---\r", 4) == 0))
+            return description;
 
-        if (line_len > 12 && memcmp(p, "description:", 12) == 0) {
-            const char *v = p + 12;
-            const char *vend = line_end;
-            while (v < vend && (*v == ' ' || *v == '\t'))
-                v++;
-            while (vend > v && (vend[-1] == ' ' || vend[-1] == '\t' || vend[-1] == '\r'))
-                vend--;
-            if (vend - v >= 2 &&
-                ((*v == '"' && vend[-1] == '"') || (*v == '\'' && vend[-1] == '\''))) {
-                v++;
-                vend--;
+        if (!description && line_len > 12 && memcmp(cursor, "description:", 12) == 0) {
+            const char *value = cursor + 12;
+            const char *value_end = line_end;
+            while (value < value_end && (*value == ' ' || *value == '\t'))
+                value++;
+            while (value_end > value &&
+                   (value_end[-1] == ' ' || value_end[-1] == '\t' || value_end[-1] == '\r'))
+                value_end--;
+            int quoted = value_end - value >= 2 && ((*value == '"' && value_end[-1] == '"') ||
+                                                    (*value == '\'' && value_end[-1] == '\''));
+            if (quoted) {
+                value++;
+                value_end--;
             }
-            if (vend <= v)
-                return NULL;
-            size_t n = (size_t)(vend - v);
-            if (n > SKILL_DESCRIPTION_MAX)
-                n = SKILL_DESCRIPTION_MAX;
-            /* Provider JSON requires NUL-free, valid UTF-8. */
-            return utf8_sanitize(v, n);
+            size_t value_len = value_end > value ? (size_t)(value_end - value) : 0;
+            if (!quoted && value_len > 0 && (*value == '|' || *value == '>'))
+                value_len = 0;
+            if (value_len > SKILL_DESCRIPTION_MAX_BYTES)
+                value_len = SKILL_DESCRIPTION_MAX_BYTES;
+            if (value_len > 0)
+                description = utf8_sanitize(value, value_len);
         }
-        p = line_end + 1;
+        if (line_end == content_end)
+            break;
+        cursor = line_end + 1;
     }
+
+    free(description);
     return NULL;
 }
 
 struct skill_entry {
-    char *dir;          /* directory name, used as identifier */
-    char *display_path; /* path to SKILL.md as shown in the prompt */
-    char *description;  /* may be NULL */
+    char *name;
+    char *display_path;
+    char *description;
 };
 
-static int cmp_str(const void *a, const void *b)
+static int compare_skills(const void *a, const void *b)
 {
-    return strcmp(*(char *const *)a, *(char *const *)b);
+    const struct skill_entry *left = a;
+    const struct skill_entry *right = b;
+    return strcmp(left->name, right->name);
 }
 
-static int cmp_skill_entry(const void *a, const void *b)
+struct skill_list {
+    struct skill_entry *entries;
+    size_t count;
+    size_t capacity;
+};
+
+static int skill_list_contains(const struct skill_list *skills, const char *name)
 {
-    const struct skill_entry *sa = a;
-    const struct skill_entry *sb = b;
-    return strcmp(sa->dir, sb->dir);
+    for (size_t i = 0; i < skills->count; i++) {
+        if (strcmp(skills->entries[i].name, name) == 0)
+            return 1;
+    }
+    return 0;
 }
 
-/* Scan one root for skills. For each `<root>/<name>/SKILL.md` regular
- * file, append a fresh entry to *out (xrealloc'd as needed). Skips
- * dotfiles and entries already present in *out (so an earlier root takes
- * precedence over a later one — used to let project skills shadow
- * same-named global ones). The displayed path is what the model sees:
- * callers should pass an absolute root so the resulting `<root>/<name>/
- * SKILL.md` reads unambiguously (the project scan prepends cwd, and
- * $XDG/$HOME-based globals are absolute in any sane setup). */
-static void collect_skills(struct skill_entry **out, size_t *n, size_t *cap, const char *root)
+static void skill_list_add(struct skill_list *skills, struct skill_entry entry)
 {
-    DIR *d = opendir(root);
-    if (!d)
+    if (skills->count == skills->capacity) {
+        size_t capacity = skills->capacity ? skills->capacity * 2 : 8;
+        skills->entries = xrealloc(skills->entries, capacity * sizeof(*skills->entries));
+        skills->capacity = capacity;
+    }
+    skills->entries[skills->count++] = entry;
+}
+
+static void skill_list_free(struct skill_list *skills)
+{
+    for (size_t i = 0; i < skills->count; i++) {
+        free(skills->entries[i].name);
+        free(skills->entries[i].display_path);
+        free(skills->entries[i].description);
+    }
+    free(skills->entries);
+}
+
+/* Earlier roots win when duplicate skill names are found. */
+static void collect_skills(struct skill_list *skills, const char *root)
+{
+    DIR *dir = opendir(root);
+    if (!dir)
         return;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.')
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.')
             continue;
 
-        /* readdir bytes (and `root` from $HOME/$XDG) can be non-UTF-8 on
-         * Linux. Sanitize the dir name up front so dedup, sort, and prompt
-         * emission all see the same clean identifier; sanitize the path
-         * after we've read the file so opendir/stat still see raw bytes. */
-        char *dir_clean = utf8_sanitize(ent->d_name, strlen(ent->d_name));
-
-        int already = 0;
-        for (size_t i = 0; i < *n; i++) {
-            if (strcmp((*out)[i].dir, dir_clean) == 0) {
-                already = 1;
-                break;
-            }
-        }
-        if (already) {
-            free(dir_clean);
+        /* Keep raw filesystem bytes for I/O, but compare and display sanitized names. */
+        char *name = utf8_sanitize(entry->d_name, strlen(entry->d_name));
+        if (skill_list_contains(skills, name)) {
+            free(name);
             continue;
         }
 
-        char *skill_dir = path_join(root, ent->d_name);
-        char *skill_md = path_join(skill_dir, "SKILL.md");
+        char *skill_dir = path_join(root, entry->d_name);
+        char *skill_path = path_join(skill_dir, "SKILL.md");
         free(skill_dir);
-        size_t md_len = 0;
-        int truncated = 0;
-        char *md = slurp_file_capped(skill_md, SKILL_FRONTMATTER_HEAD, &md_len, &truncated);
-        if (!md) {
-            /* Missing, non-regular, or unreadable — slurp_* sets errno;
-             * we just skip the entry. */
-            free(dir_clean);
-            free(skill_md);
+        size_t frontmatter_len = 0;
+        char *frontmatter =
+            slurp_file_capped(skill_path, SKILL_FRONTMATTER_MAX_BYTES, &frontmatter_len, NULL);
+        if (!frontmatter) {
+            free(name);
+            free(skill_path);
             continue;
         }
-        char *desc = parse_skill_description(md, md_len);
-        free(md);
 
-        /* skill_md is absolute (callers pass absolute roots — see header).
-         * Collapse $HOME → `~` for compactness; otherwise leave as-is. */
-        char *display = path_collapse_home(skill_md);
-        char *path_clean = utf8_sanitize(display, strlen(display));
-        free(display);
-        free(skill_md);
-
-        if (*n == *cap) {
-            size_t c = *cap ? *cap * 2 : 8;
-            *out = xrealloc(*out, c * sizeof(**out));
-            *cap = c;
-        }
-        (*out)[*n].dir = dir_clean;
-        (*out)[*n].display_path = path_clean;
-        (*out)[*n].description = desc;
-        (*n)++;
+        struct skill_entry skill = {
+            .name = name,
+            .display_path = sanitize_display_path(skill_path),
+            .description = parse_skill_description(frontmatter, frontmatter_len),
+        };
+        skill_list_add(skills, skill);
+        free(frontmatter);
+        free(skill_path);
     }
-    closedir(d);
+    closedir(dir);
 }
 
-static void append_skills(struct buf *b)
+/* Walk nearest-first so closer project skills shadow ancestors; without a Git root, inspect only
+ * cwd. */
+static void collect_project_skills(struct skill_list *skills, const char *excluded_root)
 {
-    struct skill_entry *skills = NULL;
-    size_t n = 0, cap = 0;
-
-    /* Project first so its entries shadow same-named global ones. The root
-     * is built absolute so the displayed SKILL.md path is unambiguous; a
-     * relative `.agents/...` would be model-rebased onto $HOME or similar. */
     char cwd[PATH_MAX];
-    if (getcwd(cwd, sizeof(cwd))) {
-        char *project_root = path_join(cwd, ".agents/skills");
-        collect_skills(&skills, &n, &cap, project_root);
-        free(project_root);
-    }
-
-    char *global = xdg_hax_config_path("skills");
-    if (global) {
-        collect_skills(&skills, &n, &cap, global);
-        free(global);
-    }
-
-    if (n == 0)
+    if (!getcwd(cwd, sizeof(cwd)))
         return;
 
-    qsort(skills, n, sizeof(*skills), cmp_skill_entry);
+    /* Device and inode identify a symlinked $HOME root when getcwd() uses its physical path. */
+    struct stat excluded_stat;
+    int have_excluded_root = excluded_root && stat(excluded_root, &excluded_stat) == 0;
 
-    if (b->len > 0)
-        buf_append_str(b, "\n");
-    buf_append_str(b, "# Skills\n\n"
-                      "Read the corresponding SKILL.md when a task matches the description:\n\n");
-    for (size_t i = 0; i < n; i++) {
-        char *line;
-        if (skills[i].description)
-            line = xasprintf("- %s: %s (%s)\n", skills[i].dir, skills[i].description,
-                             skills[i].display_path);
-        else
-            line = xasprintf("- %s (%s)\n", skills[i].dir, skills[i].display_path);
-        buf_append_str(b, line);
-        free(line);
-        free(skills[i].dir);
-        free(skills[i].display_path);
-        free(skills[i].description);
+    char *project_root = find_project_root(cwd);
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s", cwd);
+    for (int depth = 0; depth < PROJECT_MAX_DEPTH; depth++) {
+        char *skills_dir = path_join(dir, ".agents/skills");
+        struct stat skills_stat;
+        int is_excluded = have_excluded_root && stat(skills_dir, &skills_stat) == 0 &&
+                          skills_stat.st_dev == excluded_stat.st_dev &&
+                          skills_stat.st_ino == excluded_stat.st_ino;
+        if (!is_excluded)
+            collect_skills(skills, skills_dir);
+        free(skills_dir);
+
+        if (!project_root || strcmp(dir, project_root) == 0 || !climb_to_parent(dir))
+            break;
     }
-    free(skills);
+    free(project_root);
 }
 
-/* Subagent invocation guidance. hax is its own subagent runner — the model
- * shells out to `hax -p` via the bash tool — so the mechanics live in the
- * prompt, not in a dedicated tool. Deliberately conservative: spawning
- * costs real money and latency, so it happens on request, not initiative.
- * Only --preset is advertised (via the lead-in below, so a setup with no
- * advertisable presets never sees the flag): a preset's name and description are
- * in the prompt and its values are user-vetted, whereas --provider/--model/--effort
- * would ask the model to guess identifiers it can't enumerate — users who
- * want a specific setup name those flags in AGENTS.md or a skill. */
+static void append_skills(struct buf *prompt)
+{
+    struct skill_list skills = {0};
+    const char *home = getenv("HOME");
+    char *shared_root = (home && *home) ? path_join(home, ".agents/skills") : NULL;
+
+    /* ~/.agents/skills is shared across agents. Hold it out of the project walk so cwd under $HOME
+     * cannot move it ahead of hax's XDG skill root. */
+    collect_project_skills(&skills, shared_root);
+
+    char *hax_root = xdg_hax_config_path("skills");
+    if (hax_root) {
+        collect_skills(&skills, hax_root);
+        free(hax_root);
+    }
+    if (shared_root) {
+        collect_skills(&skills, shared_root);
+        free(shared_root);
+    }
+
+    if (skills.count == 0)
+        return;
+
+    qsort(skills.entries, skills.count, sizeof(*skills.entries), compare_skills);
+    if (prompt->len > 0)
+        buf_append_str(prompt, "\n");
+    buf_append_str(prompt,
+                   "# Skills\n\n"
+                   "Read the corresponding SKILL.md when a task matches the description:\n\n");
+    for (size_t i = 0; i < skills.count; i++) {
+        const struct skill_entry *skill = &skills.entries[i];
+        char *line;
+        if (skill->description)
+            line =
+                xasprintf("- %s: %s (%s)\n", skill->name, skill->description, skill->display_path);
+        else
+            line = xasprintf("- %s (%s)\n", skill->name, skill->display_path);
+        buf_append_str(prompt, line);
+        free(line);
+    }
+    skill_list_free(&skills);
+}
+
+/* Presets are the only advertised selector because their names and roles are user-defined. */
 static const char SUBAGENTS_PROMPT[] =
     "# Subagents\n"
     "\n"
@@ -534,120 +514,110 @@ static const char TASKS_PROMPT[] =
     "Tasks do not survive the hax process: in a one-shot (-p) run, tasks nobody waited on are "
     "killed once the final answer is produced. The user manages tasks with /tasks.\n";
 
-static void append_tasks(struct buf *b)
+static void append_tasks(struct buf *prompt)
 {
-    if (b->len > 0)
-        buf_append_str(b, "\n");
-    buf_append_str(b, TASKS_PROMPT);
+    if (prompt->len > 0)
+        buf_append_str(prompt, "\n");
+    buf_append_str(prompt, TASKS_PROMPT);
 }
 
-/* Only presets with a description are listed: the description is what lets
- * the model delegate sensibly, and a bare favorite's name alone invites the
- * model to project a role onto it. Writing a description is the user's
- * opt-in to advertising the preset. */
-static void append_subagents(struct buf *b)
+static int compare_strings(const void *a, const void *b)
 {
-    if (b->len > 0)
-        buf_append_str(b, "\n");
-    buf_append_str(b, config_bool("no_tasks") ? SUBAGENTS_PROMPT_NO_TASKS : SUBAGENTS_PROMPT);
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
 
+static void append_subagent_presets(struct buf *prompt)
+{
     char **names = NULL;
-    size_t n = config_preset_names(&names);
-    /* Render the entries into a scratch buffer first: the heading — which
-     * is what advertises --preset — is emitted only when at least one
-     * usable preset survived the checks below. A set with nothing to
-     * advertise must not leave a bare heading inviting a guessed name. */
+    size_t name_count = config_preset_names(&names);
+    if (name_count > 1)
+        qsort(names, name_count, sizeof(*names), compare_strings);
+
+    /* Build the list first so an empty result does not advertise --preset without choices. */
     struct buf list;
     buf_init(&list);
-    if (n > 1)
-        qsort(names, n, sizeof(*names), cmp_str);
-    for (size_t i = 0; i < n; i++) {
-        /* A description-less preset is a favorite selection, not a role:
-         * advertising its bare name would only invite the model to guess
-         * a persona from it. Skipped silently — unlike the provider typo
-         * below this is a deliberate configuration, not a defect. */
-        const char *desc = config_preset_description(names[i]);
-        if (!desc || !*desc)
+    for (size_t i = 0; i < name_count; i++) {
+        /* Descriptions opt favorite presets into being advertised as delegation roles. */
+        const char *description = config_preset_description(names[i]);
+        if (!description || !*description)
             continue;
-        /* A preset naming a provider the registry can't resolve (a typo;
-         * availability is deliberately not checked — a stopped server or
-         * missing key may recover) would fail on every invocation: never
-         * recommend it to the model. Checked here, not in
-         * config_preset_names — provider resolution lives above the config
-         * layer. Warn once like the enumerator's own skips; the /preset
-         * picker shows the same defect dim instead. */
-        const char *prov = config_preset_provider(names[i]);
-        if (!prov || !provider_find(prov)) {
+
+        /* Reject registry errors, not transient provider unavailability that may recover. */
+        const char *provider = config_preset_provider(names[i]);
+        if (!provider || !provider_find(provider)) {
             static int warned;
             if (!warned) {
                 warned = 1;
-                hax_warn("preset '%s' names unknown provider '%s' — not advertised "
-                         "to the model",
-                         names[i], prov ? prov : "?");
+                hax_warn("preset '%s' names unknown provider '%s' — not advertised to the model",
+                         names[i], provider ? provider : "?");
             }
             continue;
         }
-        /* Names and descriptions are user-authored config — sanitize
-         * like every other prompt splice. */
-        char *name_clean = utf8_sanitize(names[i], strlen(names[i]));
-        char *desc_clean = utf8_sanitize(desc, strlen(desc));
-        char *line = xasprintf("- %s: %s\n", name_clean, desc_clean);
+
+        char *clean_name = utf8_sanitize(names[i], strlen(names[i]));
+        char *clean_description = utf8_sanitize(description, strlen(description));
+        char *line = xasprintf("- %s: %s\n", clean_name, clean_description);
         buf_append_str(&list, line);
         free(line);
-        free(desc_clean);
-        free(name_clean);
+        free(clean_description);
+        free(clean_name);
     }
     if (list.len > 0) {
-        buf_append_str(b, "\nPresets (select with `--preset <name>`):\n");
-        buf_append(b, list.data, list.len);
+        buf_append_str(prompt, "\nPresets (select with `--preset <name>`):\n");
+        buf_append(prompt, list.data, list.len);
     }
+
     buf_free(&list);
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < name_count; i++)
         free(names[i]);
     free(names);
 }
 
+static void append_subagents(struct buf *prompt, int tasks_enabled)
+{
+    if (prompt->len > 0)
+        buf_append_str(prompt, "\n");
+    buf_append_str(prompt, tasks_enabled ? SUBAGENTS_PROMPT : SUBAGENTS_PROMPT_NO_TASKS);
+    append_subagent_presets(prompt);
+}
+
 char *agent_env_build_suffix(const char *model)
 {
-    int do_env = !config_bool("no_env");
-    int do_agents = !config_bool("no_agents_md");
-    int do_skills = !config_bool("no_skills");
-    int do_subagents = !config_bool("no_subagents");
-    int do_tasks = !config_bool("no_tasks");
+    int environment_enabled = !config_bool("no_env");
+    int agents_md_enabled = !config_bool("no_agents_md");
+    int skills_enabled = !config_bool("no_skills");
+    int subagents_enabled = !config_bool("no_subagents");
+    int tasks_enabled = !config_bool("no_tasks");
 
-    struct buf b;
-    buf_init(&b);
+    struct buf prompt;
+    buf_init(&prompt);
 
-    /* hax-level instruction first, like the base prompt it follows, not
-     * project context — after the AGENTS.md sections it would read as part
-     * of them in the assembled prompt. Tasks precede subagents because the
-     * subagents section builds on task_wait. */
-    if (do_tasks)
-        append_tasks(&b);
-    if (do_subagents)
-        append_subagents(&b);
+    /* Keep hax guidance ahead of project context; subagent guidance relies on task guidance. */
+    if (tasks_enabled)
+        append_tasks(&prompt);
+    if (subagents_enabled)
+        append_subagents(&prompt, tasks_enabled);
+    if (environment_enabled)
+        append_environment(&prompt, model);
 
-    if (do_env)
-        append_environment_section(&b, model);
-
-    if (do_agents) {
-        int seen_header = 0;
-        char *global = xdg_hax_config_path("AGENTS.md");
-        if (global) {
-            char *display = path_collapse_home(global);
-            append_agents_md(&b, global, display, &seen_header);
-            free(display);
-            free(global);
+    if (agents_md_enabled) {
+        int has_project_context = 0;
+        char *global_path = xdg_hax_config_path("AGENTS.md");
+        if (global_path) {
+            char *display_path = path_collapse_home(global_path);
+            append_agents_file(&prompt, global_path, display_path, &has_project_context);
+            free(display_path);
+            free(global_path);
         }
-        append_project_agents_md(&b, &seen_header);
+        append_project_agents_files(&prompt, &has_project_context);
     }
 
-    if (do_skills)
-        append_skills(&b);
+    if (skills_enabled)
+        append_skills(&prompt);
 
-    if (b.len == 0) {
-        buf_free(&b);
+    if (prompt.len == 0) {
+        buf_free(&prompt);
         return NULL;
     }
-    return buf_steal(&b);
+    return buf_steal(&prompt);
 }

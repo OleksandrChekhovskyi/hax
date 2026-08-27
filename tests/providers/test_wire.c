@@ -76,20 +76,17 @@ static void test_chat_opts_plumbing(void)
     struct capture capture = {0};
     union wire_events events;
     struct wire_events_opts opts = {
-        .emit_progress = 1,
         .length_hint = "grow the context",
         .cache_write_1h = 1,
     };
 
     WIRE_OPENAI_CHAT.events_init(&events, on_event, &capture, &opts);
-    EXPECT(events.chat.emit_progress == 1);
     EXPECT_STR_EQ(events.chat.length_hint, "grow the context");
     EXPECT(events.chat.cache_write_1h == 1);
     WIRE_OPENAI_CHAT.events_free(&events);
 
     /* NULL opts must leave the parser at its defaults. */
     WIRE_OPENAI_CHAT.events_init(&events, on_event, &capture, NULL);
-    EXPECT(events.chat.emit_progress == 0);
     EXPECT(events.chat.length_hint == NULL);
     EXPECT(events.chat.cache_write_1h == 0);
     WIRE_OPENAI_CHAT.events_free(&events);
@@ -146,11 +143,14 @@ static void test_build_body_table(void)
     EXPECT(WIRE_ANTHROPIC_MESSAGES.build_body == anthropic_build_body);
 }
 
+/* Extra members land on the built body, and a nested member extends a built block — the
+ * stream_options object keeps its built include_usage — rather than replacing it. */
 static void test_finish_applies_extra_body(void)
 {
     struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
     struct context context = {.items = items, .n_items = 1, .image_input = 1};
-    json_t *extra = json_pack("{s:f}", "temperature", 0.5);
+    json_t *extra =
+        json_pack("{s:f, s:{s:b}}", "temperature", 0.5, "stream_options", "custom_flag", 1);
     struct wire_body_opts opts = {.extra_body = extra};
 
     char *serialized = wire_build_body(&WIRE_OPENAI_CHAT, &context, "prov", "model-1", &opts);
@@ -165,6 +165,9 @@ static void test_finish_applies_extra_body(void)
 
     EXPECT_STR_EQ(json_string_value(json_object_get(body, "model")), "model-1");
     EXPECT(json_real_value(json_object_get(body, "temperature")) == 0.5);
+    json_t *stream_options = json_object_get(body, "stream_options");
+    EXPECT(json_is_true(json_object_get(stream_options, "include_usage")));
+    EXPECT(json_is_true(json_object_get(stream_options, "custom_flag")));
 
     json_decref(body);
     json_decref(extra);

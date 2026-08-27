@@ -134,10 +134,12 @@ Core boundaries:
 
 Extension workflows:
 
-- Reuse the OpenAI or Anthropic protocol families through presets when wire-compatible. Prefer a
-  config-defined provider for a static endpoint variant rather than a new C shim.
-- A compiled-in provider needs its source in `meson.build`, a factory declaration in
-  `providers/registry.h`, and a `BUILTINS[]` entry at the intended autoselect priority.
+- Every provider is one `struct provider_def` (`providers/registry.h`): shipped defs live in
+  `registry.c`'s `DEFS[]` table at their autoselect priority, and config.json `providers.*`
+  blocks overlay shipped defs or add data-only ones. Prefer pure data; add capability hooks
+  (`parse_model`, `probe_model`, `query_usage`, ...) only for genuinely provider-specific
+  behavior, and a `construct` override only when construction itself needs code. Hook sources go
+  in `meson.build`; a user-visible endpoint variant should be config, not C.
 - A compiled-in tool needs its source in `meson.build`, an exported `const struct tool` declaration
   in `tool.h`, and an entry in `agent_core.c`'s `TOOLS[]`.
 - Keep protocol translation and terminal-independent state machines pure and separately testable;

@@ -246,7 +246,7 @@ static size_t test_list_efforts(struct provider *p, const char *const **out)
     return 2;
 }
 
-/* `no_session = auto` splits on provider_factory.internal, so these assert
+/* `no_session = auto` splits on provider_def.internal, so these assert
  * against the real registry: "mock" is the internal backend, "anthropic" a
  * user-facing one. HAX_PROVIDER is what agent_provider_id reads first, so it
  * — not p->name — decides when both are set. */

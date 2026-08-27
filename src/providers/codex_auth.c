@@ -7,8 +7,11 @@
 
 #include "cred_store.h"
 #include "util.h"
+#include "providers/codex_login.h"
+#include "providers/http_provider.h"
 #include "system/path.h"
 #include "text/base64.h"
+#include "transport/http.h"
 
 #define CODEX_CLI_AUTH_PATH "~/.codex/auth.json"
 
@@ -191,4 +194,229 @@ void codex_auth_release(struct codex_auth *auth)
     free(auth->email);
     free(auth->refresh_token);
     memset(auth, 0, sizeof(*auth));
+}
+
+/* Only the codex CLI can refresh a borrowed token; hax re-reads auth.json on the next request. */
+#define CODEX_TOKEN_EXPIRED_CLI    "codex CLI token expired — rerun `codex`, or use /login"
+#define CODEX_TOKEN_EXPIRED_HAX    "codex login expired — run /login again"
+#define CODEX_TOKEN_REFRESH_FAILED "could not refresh the codex login — retry, or run /login"
+/* The live auth was cleared by /logout and no fallback credentials have appeared since. */
+#define CODEX_NOT_LOGGED_IN "codex is not logged in — run /login"
+#define CODEX_ACCOUNT_CHANGED                                                                      \
+    "the codex login belongs to a different account — run /login or /provider to switch"
+
+struct codex_auth_session {
+    struct codex_auth auth;
+    /* Set when a request with borrowed credentials is rejected as unauthenticated, so the next one
+     * re-reads the codex CLI's auth.json and picks up a token it refreshed meanwhile. hax-owned
+     * credentials refresh through codex_login_ensure_fresh instead. */
+    int auth_stale;
+    /* The last forced recovery failed transiently, so its 401 advises a retry, not /login. */
+    int refresh_transient;
+    /* Account this session was constructed for (or explicitly switched to); credentials for any
+     * other account are never adopted implicitly, even after the live auth is cleared. */
+    char *account_pin;
+    /* Reloading found credentials for a different account, so requests report that instead of
+     * "not logged in". */
+    int account_blocked;
+};
+
+/* Clearing the mark only once a different token is adopted keeps callers that cannot re-mark from
+ * consuming it: model probes discard their HTTP status, so a probe's 401 is invisible here. */
+static void reload_auth_if_stale(struct codex_auth_session *session)
+{
+    if (!session->auth_stale)
+        return;
+
+    struct codex_auth refreshed;
+    if (codex_auth_load(&refreshed, NULL) != CODEX_AUTH_OK)
+        return;
+
+    if (codex_auth_equal(&session->auth, &refreshed)) {
+        codex_auth_release(&refreshed);
+        return;
+    }
+
+    codex_auth_release(&session->auth);
+    session->auth = refreshed;
+    session->auth_stale = 0;
+}
+
+static int codex_auth_prepare(void *auth, int allow_refresh, http_tick_cb tick, void *tick_user)
+{
+    struct codex_auth_session *session = auth;
+    if (!session->auth.access_token) {
+        /* /logout cleared the live auth; a later /login — possibly in another hax process — or a
+         * codex CLI login can restore it, but only for the pinned account: switching whose
+         * account a conversation is sent under takes an explicit /login or /provider action. */
+        codex_auth_load(&session->auth, NULL);
+        session->account_blocked = 0;
+        if (session->auth.access_token && session->account_pin && session->auth.account_id &&
+            strcmp(session->auth.account_id, session->account_pin) != 0) {
+            codex_auth_release(&session->auth);
+            session->account_blocked = 1;
+        }
+        return session->auth.access_token ? 0 : -1;
+    }
+
+    if (session->auth.source == CODEX_AUTH_SOURCE_HAX) {
+        /* A failed proactive refresh is not terminal here: the request's own 401 recovery
+         * reports it if the stale token really is rejected. */
+        if (allow_refresh)
+            codex_login_ensure_fresh(&session->auth, 0, tick, tick_user);
+    } else {
+        reload_auth_if_stale(session);
+    }
+    return 0;
+}
+
+static char **codex_auth_headers(const void *auth, const char *session_id, int streaming)
+{
+    const struct codex_auth_session *session = auth;
+    char *authorization = xasprintf("Authorization: Bearer %s", session->auth.access_token);
+    char *account = xasprintf("chatgpt-account-id: %s", session->auth.account_id);
+    char *session_header = NULL;
+    char *request_id = NULL;
+    const char *fixed[6];
+    size_t n_fixed = 0;
+    fixed[n_fixed++] = authorization;
+    fixed[n_fixed++] = account;
+    if (streaming) {
+        session_header = xasprintf("session-id: %s", session_id);
+        request_id = xasprintf("x-client-request-id: %s", session_id);
+        fixed[n_fixed++] = session_header;
+        fixed[n_fixed++] = request_id;
+        fixed[n_fixed++] = "OpenAI-Beta: responses=experimental";
+    } else {
+        fixed[n_fixed++] = "Accept: application/json";
+    }
+    fixed[n_fixed] = NULL;
+
+    char **headers = string_array_concat(fixed, NULL);
+    free(authorization);
+    free(account);
+    free(session_header);
+    free(request_id);
+    return headers;
+}
+
+/* One forced refresh per operation after a 401 on hax-owned credentials. Returns 1 when the
+ * request should be retried with rebuilt headers. */
+static int codex_auth_recover(void *auth, int *retried, http_tick_cb tick, void *tick_user)
+{
+    struct codex_auth_session *session = auth;
+    if (*retried || session->auth.source != CODEX_AUTH_SOURCE_HAX)
+        return 0;
+    *retried = 1;
+    session->refresh_transient = 0;
+    switch (codex_login_ensure_fresh(&session->auth, 1, tick, tick_user)) {
+    case CODEX_REFRESH_FRESH:
+        return 1;
+    case CODEX_REFRESH_TRANSIENT:
+        /* Credentials stay; the next attempt refreshes again. */
+        session->refresh_transient = 1;
+        return 0;
+    case CODEX_REFRESH_DEAD:
+        break;
+    }
+
+    /* The managed login is dead or was removed by a concurrent /logout. Retry with what the
+     * canonical load finds — possibly the codex CLI fallback — but never resend the failed
+     * request across an account boundary: credentials outside the pinned account are left for
+     * the user to adopt explicitly. Otherwise clear the live auth so later requests report the
+     * logged-out state rather than resending the dead token. */
+    struct codex_auth fallback;
+    if (codex_auth_load(&fallback, NULL) == CODEX_AUTH_OK &&
+        !codex_auth_equal(&fallback, &session->auth) && fallback.account_id &&
+        session->account_pin && strcmp(fallback.account_id, session->account_pin) == 0) {
+        codex_auth_release(&session->auth);
+        session->auth = fallback;
+        return 1;
+    }
+    codex_auth_release(&fallback);
+    codex_auth_release(&session->auth);
+    return 0;
+}
+
+static char *codex_auth_unauthorized_message(void *auth)
+{
+    struct codex_auth_session *session = auth;
+    if (!session->auth.access_token)
+        return xstrdup(session->account_blocked ? CODEX_ACCOUNT_CHANGED : CODEX_NOT_LOGGED_IN);
+    /* Record a request-level 401 so the next request re-evaluates borrowed credentials. */
+    if (session->auth.source == CODEX_AUTH_SOURCE_CODEX_CLI)
+        session->auth_stale = 1;
+    if (session->auth.source != CODEX_AUTH_SOURCE_HAX)
+        return xstrdup(CODEX_TOKEN_EXPIRED_CLI);
+    return xstrdup(session->refresh_transient ? CODEX_TOKEN_REFRESH_FAILED
+                                              : CODEX_TOKEN_EXPIRED_HAX);
+}
+
+static void codex_auth_destroy(void *auth)
+{
+    struct codex_auth_session *session = auth;
+    codex_auth_release(&session->auth);
+    free(session->account_pin);
+    free(session);
+}
+
+static const struct http_auth_ops CODEX_AUTH_OPS = {
+    .prepare = codex_auth_prepare,
+    .headers = codex_auth_headers,
+    .recover = codex_auth_recover,
+    .unauthorized_message = codex_auth_unauthorized_message,
+    .destroy = codex_auth_destroy,
+};
+
+int codex_auth_source(const struct provider_def *def, struct http_auth_source *out)
+{
+    (void)def;
+    struct codex_auth loaded;
+    char *detail = NULL;
+    enum codex_auth_status status = codex_auth_load(&loaded, &detail);
+    switch (status) {
+    case CODEX_AUTH_OK:
+        break;
+    case CODEX_AUTH_NO_FILE:
+        hax_err("no ChatGPT login found — run /login, or log in with the codex CLI (%s)", detail);
+        free(detail);
+        return -1;
+    case CODEX_AUTH_BAD_JSON:
+        hax_err("~/.codex/auth.json is not valid JSON: %s", detail);
+        free(detail);
+        return -1;
+    case CODEX_AUTH_NO_TOKENS:
+        hax_err("auth.json missing tokens.access_token or tokens.account_id");
+        free(detail);
+        return -1;
+    }
+    free(detail);
+
+    struct codex_auth_session *session = xcalloc(1, sizeof(*session));
+    session->auth = loaded;
+    session->account_pin = xstrdup(loaded.account_id);
+    out->ops = &CODEX_AUTH_OPS;
+    out->state = session;
+    return 0;
+}
+
+void codex_auth_session_reload(struct codex_auth_session *session)
+{
+    codex_auth_release(&session->auth);
+    codex_auth_load(&session->auth, NULL);
+    free(session->account_pin);
+    session->account_pin = xstrdup(session->auth.account_id);
+    session->account_blocked = 0;
+    session->auth_stale = 0;
+}
+
+int codex_auth_session_expiring(const struct codex_auth_session *session, long margin_s)
+{
+    return session->auth.source == CODEX_AUTH_SOURCE_HAX &&
+           codex_login_token_expiring(session->auth.access_token, margin_s);
+}
+
+const char *codex_auth_session_email(const struct codex_auth_session *session)
+{
+    return session->auth.email;
 }

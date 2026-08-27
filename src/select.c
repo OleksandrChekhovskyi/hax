@@ -38,15 +38,6 @@ struct availability_job_ctx {
     struct availability_result *result;
 };
 
-static void prepare_availability(const struct provider_factory *factory,
-                                 struct provider_availability *probe)
-{
-    memset(probe, 0, sizeof(*probe));
-    probe->available = 1; /* no hook means immediately available */
-    if (factory->prepare_availability)
-        factory->prepare_availability(factory->id, probe);
-}
-
 /* The worker receives a complete owned request. In particular, provider
  * hooks and config resolution have already run on the foreground thread. */
 static void availability_worker(struct bg_job *job, void *arg)
@@ -67,10 +58,10 @@ static void availability_worker(struct bg_job *job, void *arg)
 }
 
 /* When unavailable and `reason` is non-NULL, `*reason` receives an owned explanation. */
-static int factory_available(const struct provider_factory *factory, char **reason)
+static int def_available(const struct provider_def *def, char **reason)
 {
     struct provider_availability probe;
-    prepare_availability(factory, &probe);
+    provider_prepare_availability(def, &probe);
     int available = probe.available;
     if (probe.url) {
         char *body = NULL;
@@ -90,7 +81,7 @@ static int factory_available(const struct provider_factory *factory, char **reas
 }
 
 /* Resolve provider config on the foreground; only prepared network probes run concurrently. */
-static void probe_availability(const struct provider_factory *const *factories, size_t count,
+static void probe_availability(const struct provider_def *const *defs, size_t count,
                                struct availability_result *results)
 {
     struct bg_job **jobs = xcalloc(count, sizeof(*jobs));
@@ -98,7 +89,7 @@ static void probe_availability(const struct provider_factory *const *factories, 
         results[i].available = 1; /* default if a network worker cannot be spawned */
         results[i].reason = NULL;
         struct availability_job_ctx *ctx = xcalloc(1, sizeof(*ctx));
-        prepare_availability(factories[i], &ctx->probe);
+        provider_prepare_availability(defs[i], &ctx->probe);
         if (!ctx->probe.url) {
             results[i].available = ctx->probe.available;
             if (!results[i].available) {
@@ -126,32 +117,32 @@ static void probe_availability(const struct provider_factory *const *factories, 
 struct provider *provider_autoselect(void)
 {
     /* Avoid parallel probe setup when the inexpensive default succeeds. */
-    const struct provider_factory *default_factory = provider_default();
-    if (default_factory && factory_available(default_factory, NULL)) {
-        struct provider *provider = default_factory->new(default_factory->id);
+    const struct provider_def *default_def = provider_default();
+    if (default_def && def_available(default_def, NULL)) {
+        struct provider *provider = provider_construct(default_def);
         if (provider) {
             /* Expose the inferred provider to later selectors without persisting it. */
-            config_set_override("provider", default_factory->id);
+            config_set_override("provider", default_def->id);
             return provider;
         }
     }
 
     /* Probe the remaining providers concurrently, then construct in priority order. */
-    size_t factory_count = 0;
-    const struct provider_factory *const *factories = provider_all(&factory_count);
-    struct availability_result *availability = xcalloc(factory_count, sizeof(*availability));
-    probe_availability(factories, factory_count, availability);
+    size_t def_count = 0;
+    const struct provider_def *const *defs = provider_all(&def_count);
+    struct availability_result *availability = xcalloc(def_count, sizeof(*availability));
+    probe_availability(defs, def_count, availability);
 
     struct provider *provider = NULL;
-    for (size_t i = 0; i < factory_count && !provider; i++) {
-        if (factories[i] == default_factory || !availability[i].available)
+    for (size_t i = 0; i < def_count && !provider; i++) {
+        if (defs[i] == default_def || !availability[i].available)
             continue;
         /* Availability can change between probe and construction; continue on failure. */
-        provider = factories[i]->new(factories[i]->id);
+        provider = provider_construct(defs[i]);
         if (provider)
-            config_set_override("provider", factories[i]->id);
+            config_set_override("provider", defs[i]->id);
     }
-    for (size_t i = 0; i < factory_count; i++)
+    for (size_t i = 0; i < def_count; i++)
         free(availability[i].reason);
     free(availability);
     return provider;
@@ -608,89 +599,88 @@ void select_model(struct agent_state *state)
     free(effort_pick.value);
 }
 
-static int compare_factory_labels(const void *left, const void *right)
+static int compare_def_labels(const void *left, const void *right)
 {
-    const struct provider_factory *const *left_factory = left;
-    const struct provider_factory *const *right_factory = right;
+    const struct provider_def *const *left_factory = left;
+    const struct provider_def *const *right_factory = right;
     return strcmp(provider_display_name(*left_factory), provider_display_name(*right_factory));
 }
 
 struct provider_pick_result {
-    const struct provider_factory *factory;
+    const struct provider_def *def;
     int probe_available;
 };
 
-static struct provider_pick_result choose_provider_factory(const char *current_provider_id)
+static struct provider_pick_result choose_provider_def(const char *current_provider_id)
 {
-    size_t factory_count = 0;
-    const struct provider_factory *const *registered_factories = provider_all(&factory_count);
+    size_t def_count = 0;
+    const struct provider_def *const *registered_defs = provider_all(&def_count);
 
     /* Picker order is alphabetical by display label; registry order remains autoselect priority. */
-    const struct provider_factory **factories = xmalloc(factory_count * sizeof(*factories));
-    memcpy(factories, registered_factories, factory_count * sizeof(*factories));
-    qsort(factories, factory_count, sizeof(*factories), compare_factory_labels);
+    const struct provider_def **defs = xmalloc(def_count * sizeof(*defs));
+    memcpy(defs, registered_defs, def_count * sizeof(*defs));
+    qsort(defs, def_count, sizeof(*defs), compare_def_labels);
 
     /* Pre-picker work uses bounded timeouts; cancellation starts at the picker. */
-    struct availability_result *availability = xcalloc(factory_count, sizeof(*availability));
-    probe_availability(factories, factory_count, availability);
+    struct availability_result *availability = xcalloc(def_count, sizeof(*availability));
+    probe_availability(defs, def_count, availability);
 
     /* Keep unavailable rows selectable because probe results are advisory and may become stale. */
-    struct picker_item *items = xcalloc(factory_count, sizeof(*items));
-    char **descriptions = xcalloc(factory_count, sizeof(*descriptions));
+    struct picker_item *items = xcalloc(def_count, sizeof(*items));
+    char **descriptions = xcalloc(def_count, sizeof(*descriptions));
     size_t initial = 0;
-    for (size_t i = 0; i < factory_count; i++) {
-        const char *label = provider_display_name(factories[i]);
+    for (size_t i = 0; i < def_count; i++) {
+        const char *label = provider_display_name(defs[i]);
         items[i].label = label;
         items[i].detail = availability[i].reason;
         items[i].dim = !availability[i].available;
         /* A renamed row keeps its selectable id discoverable below the list. */
-        if (strcmp(label, factories[i]->id) != 0)
-            descriptions[i] = xasprintf("id: %s", factories[i]->id);
+        if (strcmp(label, defs[i]->id) != 0)
+            descriptions[i] = xasprintf("id: %s", defs[i]->id);
         items[i].description = descriptions[i];
-        items[i].current =
-            current_provider_id && strcmp(factories[i]->id, current_provider_id) == 0;
+        items[i].current = current_provider_id && strcmp(defs[i]->id, current_provider_id) == 0;
         if (items[i].current)
             initial = i;
     }
     struct picker_opts options = {
         .title = "select a provider",
         .items = items,
-        .item_count = factory_count,
+        .item_count = def_count,
         .initial_index = initial,
     };
     long selected_index = picker_run(&options);
 
     struct provider_pick_result result = {0};
     if (selected_index >= 0) {
-        result.factory = factories[selected_index];
+        result.def = defs[selected_index];
         result.probe_available = availability[selected_index].available;
     }
-    for (size_t i = 0; i < factory_count; i++) {
+    for (size_t i = 0; i < def_count; i++) {
         free(descriptions[i]);
         free(availability[i].reason);
     }
     free(descriptions);
     free(items);
     free(availability);
-    free(factories);
+    free(defs);
     return result;
 }
 
 void select_provider(struct agent_state *state)
 {
     char *current_id = state->provider ? current_provider_id(state->provider) : NULL;
-    struct provider_pick_result provider_pick = choose_provider_factory(current_id);
-    const struct provider_factory *factory = provider_pick.factory;
-    if (!factory) {
+    struct provider_pick_result provider_pick = choose_provider_def(current_id);
+    const struct provider_def *def = provider_pick.def;
+    if (!def) {
         free(current_id);
         return; /* cancelled / non-tty — leave disp as the dispatcher's separator */
     }
 
     /* Recheck an unavailable row at commit because the advisory probe may be stale. */
-    if (!provider_pick.probe_available && factory->prepare_availability) {
+    if (!provider_pick.probe_available) {
         char *unavailable_reason = NULL;
-        if (!factory_available(factory, &unavailable_reason)) {
-            ui_note("%s is unavailable — %s", provider_display_name(factory),
+        if (!def_available(def, &unavailable_reason)) {
+            ui_note("%s is unavailable — %s", provider_display_name(def),
                     unavailable_reason ? unavailable_reason : "unavailable");
             disp_sync_external_line(&state->render->disp);
             free(unavailable_reason);
@@ -701,7 +691,7 @@ void select_provider(struct agent_state *state)
     }
 
     /* Re-picking the live provider avoids rebuilding it and continues to model selection. */
-    if (current_id && strcmp(factory->id, current_id) == 0) {
+    if (current_id && strcmp(def->id, current_id) == 0) {
         free(current_id);
         select_model(state);
         return;
@@ -710,15 +700,15 @@ void select_provider(struct agent_state *state)
     /* Construct under a snapshotted prospective selection. Default sentinels prevent the old
      * backend's model and effort from influencing value-dependent constructors. */
     struct config_snapshot *snapshot = config_snapshot_take();
-    config_set_override("provider", factory->id);
+    config_set_override("provider", def->id);
     config_set_override("model", CONFIG_VALUE_DEFAULT);
     config_set_override("effort", CONFIG_VALUE_DEFAULT);
     unsigned long diagnostics_before = hax_diag_sequence();
-    struct provider *candidate = factory->new(factory->id);
+    struct provider *candidate = provider_construct(def);
     sync_constructor_diagnostics(state, diagnostics_before);
     if (!candidate) {
         config_snapshot_restore(snapshot);
-        disp_sync_external_line(&state->render->disp); /* the factory printed a raw error line */
+        disp_sync_external_line(&state->render->disp); /* the constructor printed an error line */
         free(current_id);
         return;
     }
@@ -730,7 +720,7 @@ void select_provider(struct agent_state *state)
     if (!model_pick.model && (model_pick.status != PICK_NONE || !has_default_model)) {
         if (model_pick.status != PICK_CANCELLED) {
             ui_note("staying on %s — no model chosen for %s", current_id ? current_id : "?",
-                    factory->id);
+                    def->id);
             disp_sync_external_line(&state->render->disp);
         }
         candidate->destroy(candidate);
@@ -753,7 +743,7 @@ void select_provider(struct agent_state *state)
     int model_discovered = model_pick.explicit_choice ? 0 : candidate->model_discovered;
     const char *model_override = model_pick.model ? model_pick.model : CONFIG_VALUE_DEFAULT;
     const char *effort_override = effort_pick.value ? effort_pick.value : CONFIG_VALUE_DEFAULT;
-    apply_selection_overrides(factory->id, model_override, effort_override);
+    apply_selection_overrides(def->id, model_override, effort_override);
 
     if (agent_apply_settings(state, candidate, 1) != 0) {
         candidate->destroy(candidate); /* ownership transfers only on success */
@@ -765,7 +755,7 @@ void select_provider(struct agent_state *state)
     }
     candidate->model_discovered = model_discovered;
     config_snapshot_free(snapshot);
-    persist_selection(state, factory->id, model_override, effort_override, model_discovered);
+    persist_selection(state, def->id, model_override, effort_override, model_discovered);
 
     free(current_id);
     free(model_pick.model);
@@ -856,15 +846,15 @@ int select_preset(struct agent_state *state, const char *name, int announce)
     /* Always construct under preset overrides, even for the live provider id; value-dependent
      * reconciliation occurs during construction. */
     const char *provider_id = config_str("provider");
-    const struct provider_factory *factory = provider_find(provider_id);
-    if (!factory) {
+    const struct provider_def *def = provider_find(provider_id);
+    if (!def) {
         ui_error("preset '%s': unknown provider '%s'", name, provider_id);
         config_snapshot_restore(snapshot);
         disp_sync_external_line(&state->render->disp);
         goto out;
     }
     unsigned long diagnostics_before = hax_diag_sequence();
-    struct provider *candidate = factory->new(factory->id);
+    struct provider *candidate = provider_construct(def);
     sync_constructor_diagnostics(state, diagnostics_before);
     if (!candidate) {
         /* The constructor already diagnosed the failure. */
@@ -878,7 +868,7 @@ int select_preset(struct agent_state *state, const char *name, int announce)
     const char *model = config_str("model");
     if ((!model || !*model) && !(candidate->default_model && *candidate->default_model)) {
         ui_error("preset '%s': no model resolves for provider '%s' — name one in the preset", name,
-                 factory->id);
+                 def->id);
         candidate->destroy(candidate);
         config_snapshot_restore(snapshot);
         disp_sync_external_line(&state->render->disp);
@@ -1159,13 +1149,13 @@ void select_restore_session(struct agent_state *state, const char *provider_id, 
 
     /* Reconstruct even the same provider id so value-dependent setup runs under restored values. */
     const char *restored_provider_id = config_str("provider");
-    const struct provider_factory *factory = provider_find(restored_provider_id);
-    const char *display_provider_id = factory ? factory->id : restored_provider_id;
+    const struct provider_def *def = provider_find(restored_provider_id);
+    const char *display_provider_id = def ? def->id : restored_provider_id;
     unsigned long diagnostics_before = hax_diag_sequence();
-    struct provider *candidate = factory ? factory->new(factory->id) : NULL;
+    struct provider *candidate = def ? provider_construct(def) : NULL;
     sync_constructor_diagnostics(state, diagnostics_before);
     if (!candidate) {
-        if (!factory)
+        if (!def)
             ui_error("session used unknown provider '%s'", display_provider_id);
         /* Do not silently move restored history to another backend. */
         ui_note("couldn't restore %s — staying on %s (use /provider to switch)",

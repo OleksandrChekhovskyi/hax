@@ -7,7 +7,7 @@
 #include "effort.h"
 #include "harness.h"
 #include "provider.h"
-#include "providers/anthropic.h"
+#include "providers/anthropic_models.h"
 #include "providers/codex.h"
 #include "providers/openrouter.h"
 

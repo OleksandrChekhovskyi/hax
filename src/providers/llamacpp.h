@@ -6,8 +6,22 @@
 
 #include "provider.h"
 
-/* Construct the llama-server preset. */
-struct provider *llamacpp_provider_new(const char *id);
+struct provider_def; /* providers/registry.h */
+
+/* Hooks behind the llamacpp def: a local llama-server whose endpoint derives from a configured
+ * port and whose active model is discovered from the running server. */
+
+/* Discovery hook: reconcile the configured model against the running server, adopting or
+ * correcting it as a non-persisted override. Fails (reported) when the server is unreachable
+ * and no model is configured to fall back on. */
+int llamacpp_discover(const char *base_url, int *model_discovered);
+
+/* Availability probe against the resolved local base URL. */
+void llamacpp_prepare_availability(const struct provider_def *def,
+                                   struct provider_availability *out);
+
+/* Single-model metadata from llama-server's /props endpoint. */
+int llamacpp_probe_model(struct provider *provider, const char *model, struct model_probe *probe);
 
 /* Decision derived from a /v1/models response. A classic single-model server reports what it
  * serves, so an unavailable configured model is substituted. A router catalog (entries carrying a
@@ -40,7 +54,5 @@ char *llamacpp_model_label(struct provider *provider, const char *model);
 
 /* Return an allocated /props sibling URL, adding an encoded model query when nonempty. */
 char *llamacpp_props_url(const char *base_url, const char *model);
-
-extern const struct provider_factory PROVIDER_LLAMACPP;
 
 #endif /* HAX_PROVIDERS_LLAMACPP_H */

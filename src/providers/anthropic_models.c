@@ -1,19 +1,14 @@
 /* SPDX-License-Identifier: MIT */
-#include "providers/anthropic.h"
+#include "providers/anthropic_models.h"
 
 #include <jansson.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "config.h"
 #include "effort.h"
-#include "model_meta.h"
 #include "provider.h"
 #include "util.h"
-#include "providers/anthropic_body.h"
-#include "providers/config_provider.h"
 #include "providers/http_provider.h"
-#include "providers/wire.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 
@@ -33,11 +28,11 @@ static void parse_model_efforts(json_t *effort, struct effort_set *out)
     if (!json_is_object(effort))
         return;
 
-    /* Preserve the picker order rather than the JSON object's member order. */
-    for (size_t i = 0; i < ANTHROPIC_EFFORT_LADDER_N; i++) {
-        json_t *level = json_object_get(effort, ANTHROPIC_EFFORT_LADDER[i]);
+    /* Preserve the ladder's picker order rather than the JSON object's member order. */
+    for (size_t i = 0; i < EFFORT_LADDER_N; i++) {
+        json_t *level = json_object_get(effort, EFFORT_LADDER[i]);
         if (json_is_object(level) && json_is_true(json_object_get(level, "supported")))
-            effort_set_add(out, ANTHROPIC_EFFORT_LADDER[i]);
+            effort_set_add(out, EFFORT_LADDER[i]);
     }
 
     const char *name;
@@ -92,8 +87,7 @@ static void parse_model_probe_response(const char *response_body, const char *mo
     json_decref(root);
 }
 
-static int anthropic_probe_model(struct provider *provider, const char *model,
-                                 struct model_probe *probe)
+int anthropic_probe_model(struct provider *provider, const char *model, struct model_probe *probe)
 {
     if (!model || !*model)
         return -1;
@@ -176,8 +170,8 @@ static void append_models(json_t *data, struct model_info **models, size_t *n_mo
     }
 }
 
-static int anthropic_list_models(struct provider *provider, struct model_info **models,
-                                 size_t *n_models, char **error, http_tick_cb tick, void *tick_user)
+int anthropic_list_models(struct provider *provider, struct model_info **models, size_t *n_models,
+                          char **error, http_tick_cb tick, void *tick_user)
 {
     *models = NULL;
     *n_models = 0;
@@ -234,57 +228,3 @@ fail:
     model_info_free(available, n_available);
     return -1;
 }
-
-struct provider *anthropic_provider_new_preset(const struct http_provider_preset *preset)
-{
-    const struct http_provider_preset empty = {0};
-    struct http_provider_preset messages = preset ? *preset : empty;
-    messages.wire = &WIRE_ANTHROPIC_MESSAGES;
-    messages.efforts = ANTHROPIC_EFFORT_LADDER;
-    messages.n_efforts = ANTHROPIC_EFFORT_LADDER_N;
-
-    struct provider *provider = http_provider_new_preset(&messages);
-    if (!provider)
-        return NULL;
-    provider->list_models = anthropic_list_models;
-    provider->probe_model = anthropic_probe_model;
-
-    const char *configured_model = config_str("model");
-    model_meta_refresh(provider, configured_model && *configured_model ? configured_model : NULL);
-    return provider;
-}
-
-struct provider *anthropic_provider_new(const char *id)
-{
-    provider_warn_unused_wire_fields(id, &WIRE_ANTHROPIC_MESSAGES, NULL);
-    /* Tweaks resolve from the provider's own block; the pinned endpoint keeps ANTHROPIC_API_KEY
-     * from being redirected to a custom URL. */
-    struct http_provider_preset preset = {
-        .display_name = "anthropic",
-        .default_base_url = "https://api.anthropic.com/v1",
-        .api_key_env = "ANTHROPIC_API_KEY",
-        .config_prefix = "providers.anthropic",
-        .pin_base_url = 1,
-        .default_thinking_mode = ANTHROPIC_THINKING_ADAPTIVE,
-        .allow_empty_signature = 0,
-        .send_cache_control_default = 1,
-        .catalog_id = "anthropic",
-    };
-    struct provider *provider = anthropic_provider_new_preset(&preset);
-    if (provider)
-        provider->id = id;
-    return provider;
-}
-
-static void anthropic_prepare_availability(const char *id, struct provider_availability *out)
-{
-    (void)id;
-    out->available = provider_api_key("providers.anthropic", "ANTHROPIC_API_KEY") != NULL;
-    out->reason = out->available ? NULL : xstrdup("ANTHROPIC_API_KEY not set");
-}
-
-const struct provider_factory PROVIDER_ANTHROPIC = {
-    .id = "anthropic",
-    .new = anthropic_provider_new,
-    .prepare_availability = anthropic_prepare_availability,
-};

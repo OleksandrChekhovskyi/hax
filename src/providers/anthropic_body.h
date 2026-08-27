@@ -15,9 +15,14 @@ enum anthropic_thinking_mode {
     ANTHROPIC_THINKING_OFF,
 };
 
-/* Adaptive-thinking effort values, ordered from cheapest to most expensive. */
-extern const char *const ANTHROPIC_EFFORT_LADDER[];
-extern const size_t ANTHROPIC_EFFORT_LADDER_N;
+/* Parse a thinking-mode name case-insensitively. Returns the mode, or -1 for NULL or an
+ * unrecognized value, so callers choose their own fallback and diagnostics. */
+int anthropic_thinking_mode_parse(const char *value);
+
+/* Whether output_config can carry `effort`: the Messages wire vocabulary starts at low, so
+ * "none" and "minimal" have no spelling. Requests express "none" as thinking off and clamp
+ * "minimal" to the low floor. */
+int anthropic_effort_expressible(const char *effort);
 
 /* Translate transcript items into a newly allocated Messages API array. Opaque reasoning is
  * replayed only when its provider/model stamp matches the current request. Empty thinking

@@ -16,6 +16,11 @@ struct effort_set {
     int known;
 };
 
+/* Every categorical effort value hax can send, lowest to highest. Providers offer this ladder
+ * and per-model metadata narrows it; a backend with its own vocabulary lists that instead. */
+extern const char *const EFFORT_LADDER[];
+extern const size_t EFFORT_LADDER_N;
+
 /* Add `level` unless it is duplicate, empty, too long, or beyond capacity. The set becomes known
  * even when the value is rejected. Returns 1 when stored and 0 otherwise. */
 int effort_set_add(struct effort_set *set, const char *level);

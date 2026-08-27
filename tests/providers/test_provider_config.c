@@ -7,8 +7,8 @@
 #include "harness.h"
 #include "provider.h"
 #include "util.h"
-#include "providers/config_provider.h"
 #include "providers/opencode.h"
+#include "providers/provider_config.h"
 #include "providers/registry.h"
 
 /* The env-alias rows registered in config.c for the shipped -compatible blocks must project
@@ -42,7 +42,10 @@ static void expect_registry_projects_provider_fields(void)
             }
             EXPECT(field != NULL);
             if (field) {
-                EXPECT(field->dialects & BLOCKS[b].dialect);
+                /* Key fields belong to the keyed class rather than a wire dialect; both
+                 * -compatible defs are keyed and unpinned, so their aliases still project. */
+                EXPECT(field->classes &
+                       (BLOCKS[b].dialect | PROVIDER_FIELD_KEYED | PROVIDER_FIELD_UNPINNED));
                 EXPECT(field->secret == settings[i].secret);
             }
         }
@@ -64,8 +67,8 @@ static void test_cache_ttl_resolution(void)
     config_set_override("providers.ttltest.cache_ttl", NULL);
 }
 
-/* extra_body survives config-load scalar normalization with its JSON types intact, drops
- * protocol-owned members with one warning each, and merges over a built body recursively. */
+/* extra_body survives config-load scalar normalization with its JSON types intact and drops
+ * protocol-owned members with one warning each. */
 static void test_extra_body(void)
 {
     unsigned long diagnostics_before = hax_diag_sequence();
@@ -86,18 +89,6 @@ static void test_extra_body(void)
     json_t *routing = json_object_get(extra, "provider");
     EXPECT(json_is_false(json_object_get(routing, "allow_fallbacks")));
     EXPECT(json_is_array(json_object_get(routing, "order")));
-
-    /* A member overrides the built field; an object member extends a built object; members
-     * the extra body never mentions survive. */
-    json_t *body = json_pack("{s:s, s:f, s:{s:s}}", "model", "m", "temperature", 1.0, "provider",
-                             "sort", "price");
-    provider_extra_body_apply(body, extra);
-    EXPECT_STR_EQ(json_string_value(json_object_get(body, "model")), "m");
-    EXPECT(json_real_value(json_object_get(body, "temperature")) == 0.25);
-    json_t *merged = json_object_get(body, "provider");
-    EXPECT_STR_EQ(json_string_value(json_object_get(merged, "sort")), "price");
-    EXPECT(json_is_array(json_object_get(merged, "order")));
-    json_decref(body);
     json_decref(extra);
 
     /* The flat-dotted spelling is exempt from normalization too. */
@@ -184,7 +175,7 @@ static void test_api_key_env_escape(void)
 static int selectable(const char *name)
 {
     size_t n;
-    const struct provider_factory *const *all = provider_all(&n);
+    const struct provider_def *const *all = provider_all(&n);
     for (size_t i = 0; i < n; i++)
         if (strcmp(all[i]->id, name) == 0)
             return 1;
@@ -193,7 +184,7 @@ static int selectable(const char *name)
 
 /* The config under test: custom providers in the nested object form, one in the flat-dotted
  * form config.c also accepts ("flatprov") to prove a flat-defined provider is enumerable and
- * not just readable, an override of the shipped ollama recipe, and the extra_body /
+ * not just readable, an override of the shipped ollama def, and the extra_body /
  * extra_headers fixtures the tests above read. */
 static const char CONFIG_JSON[] =
     "{"
@@ -249,6 +240,9 @@ static const char CONFIG_JSON[] =
     "               \"catalog_id\": \"opencode\","
     "               \"thinking_mode\": \"budget\","
     "               \"reasoning_format\": \"nested\"},"
+    "    \"metaproxy\": {\"base_url\": \"http://127.0.0.1:9011/v1\","
+    "                   \"metadata_api\": \"anthropic\","
+    "                   \"version\": \"2024-02-01\"},"
     "    \"my.llm\": {\"base_url\": \"http://127.0.0.1:9002/v1\"}"
     "  },"
     "  \"providers.flatprov.base_url\": \"http://127.0.0.1:9001/v1\","
@@ -263,7 +257,7 @@ int main(void)
      * model, and this file mutates config while one could be in flight. The
      * providers here name no model of their own, so an ambient HAX_MODEL is
      * the only way one arrives — drop it. The compat env aliases would
-     * configure the shipped -compatible recipes tested below. */
+     * configure the shipped -compatible defs tested below. */
     unsetenv("HAX_MODEL");
     unsetenv("HAX_OPENAI_BASE_URL");
     unsetenv("HAX_OPENAI_API_KEY");
@@ -279,7 +273,7 @@ int main(void)
      * provider layer's job, below). */
     char **names = NULL;
     size_t nk = config_object_keys("providers", &names);
-    EXPECT(nk == 14);
+    EXPECT(nk == 15);
     for (size_t i = 0; i < nk; i++)
         free(names[i]);
     free(names);
@@ -295,19 +289,19 @@ int main(void)
     EXPECT(!selectable("my.llm"));
 
     /* Config-defined providers resolve by name and show up as selectable,
-     * alongside the shipped recipe and the compiled-in factories. */
+     * alongside every shipped def. */
     EXPECT(provider_find("myllm") != NULL);
     EXPECT(selectable("myllm"));
-    EXPECT(provider_find("ollama") != NULL); /* recipe (overlaid by config) */
+    EXPECT(provider_find("ollama") != NULL); /* shipped def (overlaid by config) */
     EXPECT(selectable("ollama"));
     EXPECT(provider_find("codex") != NULL); /* still a compiled-in factory */
     EXPECT(provider_find("does-not-exist") == NULL);
 
-    /* The recipe name appears once, not twice, when a config block overlays
+    /* A shipped def's name appears once, not twice, when a config block overlays
      * it: provider_find returns a single factory and it isn't a duplicate of
      * any other. */
     size_t n;
-    const struct provider_factory *const *all = provider_all(&n);
+    const struct provider_def *const *all = provider_all(&n);
     int ollama_count = 0;
     for (size_t i = 0; i < n; i++)
         if (strcmp(all[i]->id, "ollama") == 0)
@@ -317,20 +311,20 @@ int main(void)
     /* Construction of an openai-completions provider succeeds offline (no
      * probe) and takes its banner from the resolved display_name. A generic
      * config provider offers the advisory effort ladder. */
-    const struct provider_factory *myllm_factory = provider_find("myllm");
+    const struct provider_def *myllm_factory = provider_find("myllm");
     /* A keyless custom provider counts its configured base_url as availability: a generic
      * endpoint may not serve the /models route a probe would need. */
     struct provider_availability probe = {0};
-    myllm_factory->prepare_availability(myllm_factory->id, &probe);
+    provider_prepare_availability(myllm_factory, &probe);
     EXPECT(probe.available);
     EXPECT(probe.url == NULL);
     provider_availability_clear(&probe);
 
-    /* The ollama recipe opts into a reachability probe. It captures an owned request before a
+    /* The ollama def opts into a reachability probe. It captures an owned request before a
      * worker is spawned; the configured trailing slash is trimmed before "/models" is
      * appended, and configured extra_headers ride along. */
-    const struct provider_factory *probe_factory = provider_find("ollama");
-    probe_factory->prepare_availability(probe_factory->id, &probe);
+    const struct provider_def *probe_factory = provider_find("ollama");
+    provider_prepare_availability(probe_factory, &probe);
     EXPECT_STR_EQ(probe.url, "http://gpu:1234/v1/models");
     EXPECT(probe.headers != NULL);
     if (probe.headers)
@@ -342,28 +336,28 @@ int main(void)
 
     /* A keyed provider's availability is its key resolving — no probe request:
      * unavailable while the declared env var is unset, available once set. */
-    const struct provider_factory *keyed_factory = provider_find("keyed");
+    const struct provider_def *keyed_factory = provider_find("keyed");
     unsetenv("HAX_TEST_KEYED_KEY");
     struct provider_availability keyed = {0};
-    keyed_factory->prepare_availability(keyed_factory->id, &keyed);
+    provider_prepare_availability(keyed_factory, &keyed);
     EXPECT(!keyed.available);
     EXPECT_STR_EQ(keyed.reason, "HAX_TEST_KEYED_KEY not set");
     EXPECT(keyed.url == NULL);
     provider_availability_clear(&keyed);
     setenv("HAX_TEST_KEYED_KEY", "sk-keyed", 1);
-    keyed_factory->prepare_availability(keyed_factory->id, &keyed);
+    provider_prepare_availability(keyed_factory, &keyed);
     EXPECT(keyed.available);
     EXPECT(keyed.url == NULL);
     unsetenv("HAX_TEST_KEYED_KEY");
 
     /* An inline api_key keys the provider all by itself. */
-    const struct provider_factory *inline_factory = provider_find("inline");
+    const struct provider_def *inline_factory = provider_find("inline");
     struct provider_availability inline_avail = {0};
-    inline_factory->prepare_availability(inline_factory->id, &inline_avail);
+    provider_prepare_availability(inline_factory, &inline_avail);
     EXPECT(inline_avail.available);
     EXPECT(inline_avail.url == NULL);
 
-    struct provider *myllm = myllm_factory->new(myllm_factory->id);
+    struct provider *myllm = provider_construct(myllm_factory);
     EXPECT(myllm != NULL);
     if (myllm) {
         const char *const *efforts = NULL;
@@ -376,18 +370,18 @@ int main(void)
     }
 
     /* An explicit empty catalog_id opts out of catalog lookups. */
-    const struct provider_factory *nocat_factory = provider_find("nocat");
-    struct provider *nocat = nocat_factory->new(nocat_factory->id);
+    const struct provider_def *nocat_factory = provider_find("nocat");
+    struct provider *nocat = provider_construct(nocat_factory);
     EXPECT(nocat != NULL);
     if (nocat) {
         EXPECT(nocat->catalog_id == NULL);
         nocat->destroy(nocat);
     }
 
-    /* The ollama recipe opts out of the effort ladder, and its curated
+    /* The ollama def opts out of the effort ladder, and its curated
      * catalog_id absence is final — no fallback to the provider name. */
-    const struct provider_factory *ollama_factory = provider_find("ollama");
-    struct provider *ollama = ollama_factory->new(ollama_factory->id);
+    const struct provider_def *ollama_factory = provider_find("ollama");
+    struct provider *ollama = provider_construct(ollama_factory);
     EXPECT(ollama != NULL);
     if (ollama) {
         const char *const *efforts = NULL;
@@ -396,19 +390,19 @@ int main(void)
         ollama->destroy(ollama);
     }
 
-    /* The opencode-go recipe carries the /usage hook onto its provider; the Zen sibling has
+    /* The opencode-go def carries the /usage hook onto its provider; the Zen sibling has
      * none, so /usage stays unsupported there. */
-    const struct provider_factory *go_factory = provider_find("opencode-go");
+    const struct provider_def *go_factory = provider_find("opencode-go");
     EXPECT(go_factory != NULL);
-    struct provider *go = go_factory->new(go_factory->id);
+    struct provider *go = provider_construct(go_factory);
     EXPECT(go != NULL);
     if (go) {
         EXPECT(go->query_usage == opencode_go_query_usage);
         go->destroy(go);
     }
-    const struct provider_factory *zen_factory = provider_find("opencode-zen");
+    const struct provider_def *zen_factory = provider_find("opencode-zen");
     EXPECT(zen_factory != NULL);
-    struct provider *zen = zen_factory->new(zen_factory->id);
+    struct provider *zen = provider_construct(zen_factory);
     EXPECT(zen != NULL);
     if (zen) {
         EXPECT(zen->query_usage == NULL);
@@ -419,7 +413,7 @@ int main(void)
      * the Messages dialect, whose model requests authenticate with x-api-key. */
     setenv("OPENCODE_API_KEY", "oc-test-key", 1);
     config_set_override("providers.opencode-go.api", "anthropic-messages");
-    struct provider *go_messages = go_factory->new(go_factory->id);
+    struct provider *go_messages = provider_construct(go_factory);
     EXPECT(go_messages != NULL);
     if (go_messages) {
         char **usage_headers = opencode_usage_headers(go_messages);
@@ -432,10 +426,10 @@ int main(void)
     config_set_override("providers.opencode-go.api", NULL);
     unsetenv("OPENCODE_API_KEY");
 
-    const struct provider_factory *anthropic_factory = provider_find("claudish");
+    const struct provider_def *anthropic_factory = provider_find("claudish");
     EXPECT(anthropic_factory != NULL);
     EXPECT(selectable("claudish"));
-    struct provider *anthropic = anthropic_factory->new(anthropic_factory->id);
+    struct provider *anthropic = provider_construct(anthropic_factory);
     EXPECT(anthropic != NULL);
     if (anthropic) {
         const char *const *efforts = NULL;
@@ -444,43 +438,43 @@ int main(void)
         EXPECT(anthropic->keep_model_order == 1); /* sort_models off → server order */
         /* The unconfigured budget default upgrades to adaptive per request when an effort is
          * chosen, so the ladder stays selectable; an explicit budget pin hides it. */
-        EXPECT(anthropic->list_efforts && anthropic->list_efforts(anthropic, &efforts) == 5);
+        EXPECT(anthropic->list_efforts && anthropic->list_efforts(anthropic, &efforts) == 6);
         config_set_override("providers.claudish.thinking_mode", "budget");
         EXPECT(anthropic->list_efforts(anthropic, &efforts) == 0);
         config_set_override("providers.claudish.thinking_mode", "adaptive");
-        EXPECT(anthropic->list_efforts(anthropic, &efforts) == 5);
+        EXPECT(anthropic->list_efforts(anthropic, &efforts) == 6);
         config_set_override("providers.claudish.thinking_mode", NULL);
         anthropic->destroy(anthropic);
     }
 
     /* The Responses dialect is a supported api value, not an unknown one. */
-    const struct provider_factory *resp_factory = provider_find("respprov");
+    const struct provider_def *resp_factory = provider_find("respprov");
     EXPECT(resp_factory != NULL);
-    struct provider *respprov = resp_factory->new(resp_factory->id);
+    struct provider *respprov = provider_construct(resp_factory);
     EXPECT(respprov != NULL);
     if (respprov)
         respprov->destroy(respprov);
 
     /* An unsupported dialect is a construction failure, not a crash. */
-    const struct provider_factory *bad_factory = provider_find("bad");
+    const struct provider_def *bad_factory = provider_find("bad");
     EXPECT(bad_factory != NULL);
-    EXPECT(bad_factory->new(bad_factory->id) == NULL);
+    EXPECT(provider_construct(bad_factory) == NULL);
 
     /* A misspelled or wrong-dialect field warns (one diagnostic each) but never blocks
      * construction, so a config written for a newer hax still runs. */
-    const struct provider_factory *warny_factory = provider_find("warny");
+    const struct provider_def *warny_factory = provider_find("warny");
     EXPECT(warny_factory != NULL);
     unsigned long diagnostics_before = hax_diag_sequence();
-    struct provider *warny = warny_factory->new(warny_factory->id);
+    struct provider *warny = provider_construct(warny_factory);
     EXPECT(hax_diag_sequence() == diagnostics_before + 2);
     EXPECT(warny != NULL);
     if (warny)
         warny->destroy(warny);
 
     /* A clean block constructs without diagnostics. */
-    const struct provider_factory *clean_factory = provider_find("respprov");
+    const struct provider_def *clean_factory = provider_find("respprov");
     diagnostics_before = hax_diag_sequence();
-    struct provider *clean = clean_factory->new(clean_factory->id);
+    struct provider *clean = provider_construct(clean_factory);
     EXPECT(hax_diag_sequence() == diagnostics_before);
     EXPECT(clean != NULL);
     if (clean)
@@ -488,56 +482,68 @@ int main(void)
 
     /* model_apis makes a chat provider a mixed-protocol gateway, so fields from every dialect
      * are live and must not draw "not used" warnings. */
-    const struct provider_factory *mixed_factory = provider_find("mixed");
+    const struct provider_def *mixed_factory = provider_find("mixed");
     EXPECT(mixed_factory != NULL);
     diagnostics_before = hax_diag_sequence();
-    struct provider *mixed = mixed_factory->new(mixed_factory->id);
+    struct provider *mixed = provider_construct(mixed_factory);
     EXPECT(hax_diag_sequence() == diagnostics_before);
     EXPECT(mixed != NULL);
     if (mixed)
         mixed->destroy(mixed);
 
+    /* An OpenAI-wire provider fronting an Anthropic-shaped /models legitimately consumes
+     * `version` for its metadata headers: no "unused field" warning. */
+    const struct provider_def *metaproxy_def = provider_find("metaproxy");
+    EXPECT(metaproxy_def != NULL);
+    diagnostics_before = hax_diag_sequence();
+    struct provider *metaproxy = provider_construct(metaproxy_def);
+    EXPECT(hax_diag_sequence() == diagnostics_before);
+    EXPECT(metaproxy != NULL);
+    if (metaproxy)
+        metaproxy->destroy(metaproxy);
+
     /* api "catalog" is the rule-free gateway opt-in: routing comes from catalog hints alone,
      * and it too must construct with every dialect's fields and no diagnostics. */
-    const struct provider_factory *catgw_factory = provider_find("catgw");
+    const struct provider_def *catgw_factory = provider_find("catgw");
     EXPECT(catgw_factory != NULL);
     diagnostics_before = hax_diag_sequence();
-    struct provider *catgw = catgw_factory->new(catgw_factory->id);
+    struct provider *catgw = provider_construct(catgw_factory);
     EXPECT(hax_diag_sequence() == diagnostics_before);
     EXPECT(catgw != NULL);
     if (catgw)
         catgw->destroy(catgw);
 
-    /* The shipped -compatible recipes have no default base_url: unavailable
+    /* The shipped -compatible defs have no default base_url: unavailable
      * (with a pointer at their env alias) and unconstructable until the user
      * supplies one. */
-    const struct provider_factory *compat = provider_find("openai-compatible");
+    const struct provider_def *compat = provider_find("openai-compatible");
     EXPECT(compat != NULL);
     EXPECT(selectable("openai-compatible"));
     EXPECT(selectable("anthropic-compatible"));
     struct provider_availability compat_avail = {0};
-    compat->prepare_availability(compat->id, &compat_avail);
+    provider_prepare_availability(compat, &compat_avail);
     EXPECT(!compat_avail.available);
     EXPECT_STR_EQ(compat_avail.reason, "HAX_OPENAI_BASE_URL not set");
-    EXPECT(compat->new(compat->id) == NULL);
+    provider_availability_clear(&compat_avail);
+    EXPECT(provider_construct(compat) == NULL);
 
-    /* With a base_url the recipe is available without probing — the endpoint may serve only
+    /* With a base_url the def is available without probing — the endpoint may serve only
      * its completion route. An api_key (here via its env alias) keys it, and display_name
      * (env alias HAX_OPENAI_DISPLAY_NAME) labels the banner. No catalog identity: an
      * arbitrary endpoint's models are not a hosted vendor's. */
     setenv("HAX_OPENAI_BASE_URL", "http://127.0.0.1:9007/v1/", 1);
-    compat->prepare_availability(compat->id, &compat_avail);
+    provider_prepare_availability(compat, &compat_avail);
     EXPECT(compat_avail.available);
     EXPECT(compat_avail.url == NULL);
     provider_availability_clear(&compat_avail);
 
     setenv("HAX_OPENAI_API_KEY", "sk-compat", 1);
-    compat->prepare_availability(compat->id, &compat_avail);
+    provider_prepare_availability(compat, &compat_avail);
     EXPECT(compat_avail.available);
     EXPECT(compat_avail.url == NULL);
 
     setenv("HAX_OPENAI_DISPLAY_NAME", "vLLM", 1);
-    struct provider *compat_provider = compat->new(compat->id);
+    struct provider *compat_provider = provider_construct(compat);
     EXPECT(compat_provider != NULL);
     if (compat_provider) {
         EXPECT_STR_EQ(compat_provider->name, "vLLM");

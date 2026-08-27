@@ -10,7 +10,6 @@
 #include "providers/anthropic_events.h"
 #include "providers/chat_body.h"
 #include "providers/chat_events.h"
-#include "providers/config_provider.h"
 #include "providers/responses_body.h"
 #include "providers/responses_events.h"
 
@@ -18,7 +17,10 @@ char *wire_build_body(const struct wire *wire, const struct context *context,
                       const char *provider_id, const char *model, const struct wire_body_opts *opts)
 {
     json_t *body = wire->build_body(context, provider_id, model, opts);
-    provider_extra_body_apply(body, opts->extra_body);
+    /* Extra members override built fields, recursing where both sides are objects so a nested
+     * member extends a built block rather than replacing it. */
+    if (opts->extra_body)
+        json_object_update_recursive(body, (json_t *)opts->extra_body);
     char *json = json_dumps(body, JSON_COMPACT);
     json_decref(body);
     return json;
@@ -29,7 +31,6 @@ static void chat_init(union wire_events *events, stream_cb callback, void *callb
 {
     chat_events_init(&events->chat, callback, callback_user);
     if (opts) {
-        events->chat.emit_progress = opts->emit_progress;
         events->chat.length_hint = opts->length_hint;
         events->chat.cache_write_1h = opts->cache_write_1h;
     }

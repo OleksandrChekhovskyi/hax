@@ -5,67 +5,77 @@
 #include <jansson.h>
 
 #include "provider.h"
-#include "providers/anthropic_body.h"
-#include "providers/chat_body.h"
-#include "providers/wire.h"
+
+struct provider_def; /* providers/registry.h */
 
 /* Generic streaming-HTTP provider: endpoint, credential, and configuration resolution, request
- * policy, and stream mechanics for any wire dialect. Concrete providers are presets over this
- * core; modules with their own metadata protocol override the relevant provider callbacks after
- * construction, using the accessors below. */
+ * policy, and stream mechanics for any wire dialect. Every provider is built from its
+ * provider_def; hook modules implementing their own metadata protocol use the accessors below. */
 
-struct http_provider_preset {
-    const char *display_name;     /* required */
-    const char *default_base_url; /* required when <prefix>.base_url does not resolve */
-    const char *api_key_env;      /* fallback after the configured API key */
-    const char *config_prefix;    /* config namespace; NULL reads no user configuration */
-    int pin_base_url;             /* ignore <prefix>.base_url: a first-party key must not
-                                     follow a configured URL to another host */
-    const char *catalog_id;       /* copied; NULL disables catalog metadata */
-    /* Default request protocol; NULL means Chat Completions. An OpenAI-family choice may be
-     * overridden by <prefix>.api; the Messages wire is pinned because its knobs differ. */
-    const struct wire *wire;
-    /* Resolve each model's wire from the catalog api hint: for gateways serving models over
-     * different protocols behind one base URL. <prefix>.model_apis rules take precedence and
-     * work without this flag; unmatched models fall back to the default wire. */
-    int catalog_wires;
+/* Per-entry /models refinement: fill capabilities and pricing from one listing entry. `out` is
+ * initialized and already owns the entry's id. */
+typedef void (*http_parse_model_cb)(const json_t *entry, struct model_info *out);
 
-    /* Chat Completions / Responses policy. */
-    int send_cache_key_default;
-    int cache_auto_default; /* AUTO when set, otherwise OFF */
-    int emit_progress;      /* request and parse llama.cpp prompt_progress */
-    int request_cost;       /* request OpenRouter usage cost */
-    enum chat_reasoning_format reasoning_format;
-    const char *reasoning_replay_field; /* copied; NULL disables replay */
-
-    /* Messages policy. */
-    enum anthropic_thinking_mode default_thinking_mode;
-    int allow_empty_signature;      /* preserve unsigned thinking blocks on compat backends */
-    int send_cache_control_default; /* overridable by the cache setting */
-
-    const char *const *extra_headers; /* NULL-terminated; copied */
-
-    /* Borrowed for the provider lifetime. NULL/0 disables the effort picker. On the Messages
-     * wire the list is offered only while adaptive thinking is active. */
-    const char *const *efforts;
-    size_t n_efforts;
-    const char *length_hint; /* borrowed for the provider lifetime */
-
-    /* `out` is initialized and already owns the entry's id. */
-    void (*parse_model)(const json_t *entry, struct model_info *out);
+/* Ops of a dynamic credential source, for endpoints whose tokens rotate rather than sit in a
+ * config key. Every op receives the source's own `auth` state, and destroy releases it. All
+ * ops run on the foreground thread. */
+struct http_auth_ops {
+    /* Ensure usable credentials before an operation. With `allow_refresh` the source may renew
+     * them over the network, honoring `tick`; without it only local reloads are permitted, so
+     * callers that must not block simply fail on a stale token. Returns 0 when credentials
+     * exist, -1 when the provider is logged out. */
+    int (*prepare)(void *auth, int allow_refresh, http_tick_cb tick, void *tick_user);
+    /* Owned NULL-terminated credential headers, rebuilt per attempt because tokens rotate.
+     * `session_id` is the provider's stable per-process session key; `streaming` distinguishes
+     * the streaming completion request from metadata GETs. */
+    char **(*headers)(const void *auth, const char *session_id, int streaming);
+    /* One bounded recovery after an unauthorized response: renew or re-read credentials and
+     * return non-zero to retry with rebuilt headers. `retried` is the caller's per-operation
+     * guard; the op must set it. */
+    int (*recover)(void *auth, int *retried, http_tick_cb tick, void *tick_user);
+    /* Owned user-facing message for a terminal unauthorized failure, logged out or rejected.
+     * May record state so the next operation re-evaluates credentials. */
+    char *(*unauthorized_message)(void *auth);
+    void (*destroy)(void *auth);
 };
 
-/* Preset strings need only remain valid during construction unless marked borrowed above. */
-struct provider *http_provider_new_preset(const struct http_provider_preset *preset);
+/* A credential source: its ops and their state. A provider with a source resolves no API key —
+ * its requests authenticate through the source's headers. A zeroed value means no source. */
+struct http_auth_source {
+    const struct http_auth_ops *ops;
+    void *state; /* owned by the source; released by ops->destroy */
+};
 
-/* Accessors for preset modules implementing their own metadata callbacks. */
+/* Build the provider described by `def`: its data overlaid by the providers.<id> config block
+ * (registry.h), its capability hooks installed. NULL after reporting a user-actionable error;
+ * callers normally go through provider_construct instead. */
+struct provider *http_provider_new(const struct provider_def *def);
+
+/* Availability for the /provider picker, from the same def and config resolution as
+ * construction. A keyed (cloud) def — one with a declared api_key_env or an inline api_key —
+ * is selectable iff that key resolves, with no network probe (fast, and a 401 would be the
+ * only extra signal). A keyless one counts its resolved base_url as availability, except for
+ * defs that opt into a GET <base>/models reachability probe. `out` need not be initialized. */
+void http_provider_availability(const struct provider_def *def, struct provider_availability *out);
+
+/* Accessors for hook modules implementing their own metadata callbacks. */
 const char *http_provider_base_url(const struct provider *provider);
 int http_provider_has_api_key(const struct provider *provider);
 /* The resolved key, or NULL; borrowed for the provider's lifetime. */
 const char *http_provider_api_key(const struct provider *provider);
-/* Owned NULL-terminated auth headers for JSON metadata requests, including the version header
- * on the Messages wire; free with string_array_free. */
+/* Owned NULL-terminated auth headers for JSON metadata requests, following the resolved
+ * metadata dialect (x-api-key plus the version header on the Anthropic side); free with
+ * string_array_free. */
 char **http_provider_metadata_headers(const struct provider *provider);
+/* The def's per-entry /models refinement hook, or NULL. */
+http_parse_model_cb http_provider_parse_model(const struct provider *provider);
+
+/* The provider's credential source; its ops member is NULL when the provider authenticates
+ * with an API key instead. */
+const struct http_auth_source *http_provider_auth(const struct provider *provider);
+/* Note that a model-metadata probe could not run under stale credentials; the next stream
+ * that authenticates successfully relaunches it. */
+void http_provider_defer_probe(struct provider *provider);
 
 /* Output cap for one Messages request: <prefix>.max_tokens clamped to model metadata. */
 int http_provider_max_tokens(struct provider *provider, const char *model);

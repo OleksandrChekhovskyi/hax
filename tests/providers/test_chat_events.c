@@ -953,20 +953,9 @@ static void test_usage_cache_write_1h_needs_a_write(void)
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
-static void test_progress_ignored_when_flag_off(void)
+static void test_progress_emitted(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{}}],"
-                              "\"prompt_progress\":{\"total\":100,\"cache\":0,"
-                              "\"processed\":50,\"time_ms\":42}}");
-    EXPECT(capture.n_events == 0);
-    EVENTS_FIXTURE_FREE(capture, parser);
-}
-
-static void test_progress_emitted_when_flag_on(void)
-{
-    EVENTS_FIXTURE(capture, parser);
-    parser.emit_progress = 1;
     chat_events_feed(&parser, "{\"choices\":[{\"delta\":"
                               "{\"role\":\"assistant\",\"content\":null}}],"
                               "\"prompt_progress\":{\"total\":1000,\"cache\":200,"
@@ -982,7 +971,6 @@ static void test_progress_emitted_when_flag_on(void)
 static void test_progress_missing_fields_default_zero(void)
 {
     EVENTS_FIXTURE(capture, parser);
-    parser.emit_progress = 1;
     chat_events_feed(&parser, "{\"choices\":[],"
                               "\"prompt_progress\":{\"processed\":50}}");
     EXPECT(capture.n_events == 1);
@@ -1050,8 +1038,7 @@ int main(void)
     test_usage_cache_write_captured();
     test_usage_cache_write_1h_attributed_from_request();
     test_usage_cache_write_1h_needs_a_write();
-    test_progress_ignored_when_flag_off();
-    test_progress_emitted_when_flag_on();
+    test_progress_emitted();
     test_progress_missing_fields_default_zero();
     T_REPORT();
 }
