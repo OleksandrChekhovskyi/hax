@@ -412,6 +412,153 @@ static void test_session_init_raw(void)
     unsetenv("HAX_SYSTEM_PROMPT");
 }
 
+static void test_session_add_tool_appends(void)
+{
+    setenv("HAX_MODEL", "m", 1);
+    struct provider p = {.name = "test"};
+    struct hax_opts opts = {0};
+
+    struct agent_session s;
+    agent_session_init(&s, &p, &opts);
+    size_t builtins = s.n_tools;
+    EXPECT(builtins > 0);
+
+    struct tool_param params[] = {
+        {.name = "order_id", .type = "string", .description = "which order", .required = 1},
+    };
+    struct tool_def def = {
+        .name = "lookup_order", .description = "look one up", .params = params, .n_params = 1};
+    EXPECT(agent_session_add_tool(&s, &def) == 0);
+    EXPECT(s.n_tools == builtins + 1);
+
+    /* The copy must not alias the caller's storage, which a host is free to reuse or free. */
+    EXPECT(s.tools[builtins].name != def.name);
+    EXPECT(s.tools[builtins].params != params);
+    EXPECT_STR_EQ(s.tools[builtins].name, "lookup_order");
+    EXPECT_STR_EQ(s.tools[builtins].description, "look one up");
+    EXPECT(s.tools[builtins].n_params == 1);
+    EXPECT_STR_EQ(s.tools[builtins].params[0].name, "order_id");
+    EXPECT_STR_EQ(s.tools[builtins].params[0].type, "string");
+    EXPECT(s.tools[builtins].params[0].required == 1);
+    EXPECT(s.tools[builtins].params[0].item_type == NULL);
+
+    struct context ctx = agent_session_context(&s);
+    EXPECT(ctx.n_tools == builtins + 1);
+
+    agent_session_free(&s);
+    unsetenv("HAX_MODEL");
+}
+
+static void test_session_add_tool_replaces_builtin(void)
+{
+    setenv("HAX_MODEL", "m", 1);
+    struct provider p = {.name = "test"};
+    struct hax_opts opts = {0};
+
+    struct agent_session s;
+    agent_session_init(&s, &p, &opts);
+    size_t builtins = s.n_tools;
+
+    struct tool_def def = {.name = "read", .description = "the host's own read"};
+    EXPECT(agent_session_add_tool(&s, &def) == 0);
+    /* Replacement, not a second entry: two tools sharing a name is not expressible on the wire. */
+    EXPECT(s.n_tools == builtins);
+
+    size_t found = 0;
+    for (size_t i = 0; i < s.n_tools; i++) {
+        if (strcmp(s.tools[i].name, "read") == 0) {
+            found++;
+            EXPECT_STR_EQ(s.tools[i].description, "the host's own read");
+        }
+    }
+    EXPECT(found == 1);
+
+    /* Replacing twice must free the first copy rather than leak it; the built-in it displaced
+     * points at static storage and must not be freed at all. */
+    struct tool_def again = {.name = "read", .description = "replaced once more"};
+    EXPECT(agent_session_add_tool(&s, &again) == 0);
+    EXPECT(s.n_tools == builtins);
+
+    agent_session_free(&s);
+    unsetenv("HAX_MODEL");
+}
+
+static void test_session_add_tool_grows_past_capacity(void)
+{
+    setenv("HAX_MODEL", "m", 1);
+    struct provider p = {.name = "test"};
+    struct hax_opts opts = {0};
+
+    struct agent_session s;
+    agent_session_init(&s, &p, &opts);
+    size_t builtins = s.n_tools;
+
+    /* The initial array is sized to the built-ins exactly, so every add reallocates. */
+    char names[24][16];
+    for (size_t i = 0; i < 24; i++) {
+        snprintf(names[i], sizeof(names[i]), "host_%zu", i);
+        struct tool_def def = {.name = names[i], .description = "host tool"};
+        EXPECT(agent_session_add_tool(&s, &def) == 0);
+    }
+    EXPECT(s.n_tools == builtins + 24);
+    EXPECT_STR_EQ(s.tools[builtins].name, "host_0");
+    EXPECT_STR_EQ(s.tools[s.n_tools - 1].name, "host_23");
+
+    agent_session_free(&s);
+    unsetenv("HAX_MODEL");
+}
+
+static void test_session_add_tool_rejects_raw_and_nameless(void)
+{
+    setenv("HAX_MODEL", "m", 1);
+    struct provider p = {.name = "test"};
+
+    struct hax_opts raw_opts = {.raw = 1};
+    struct agent_session raw;
+    agent_session_init(&raw, &p, &raw_opts);
+    struct tool_def def = {.name = "lookup_order"};
+    /* Raw mode promises no tools at all; honoring an add would contradict the flag. */
+    EXPECT(agent_session_add_tool(&raw, &def) == -1);
+    EXPECT(raw.n_tools == 0);
+    agent_session_free(&raw);
+
+    struct hax_opts opts = {0};
+    struct agent_session s;
+    agent_session_init(&s, &p, &opts);
+    size_t builtins = s.n_tools;
+    struct tool_def nameless = {.name = NULL};
+    struct tool_def empty = {.name = ""};
+    EXPECT(agent_session_add_tool(&s, &nameless) == -1);
+    EXPECT(agent_session_add_tool(&s, &empty) == -1);
+    EXPECT(agent_session_add_tool(&s, NULL) == -1);
+    EXPECT(s.n_tools == builtins);
+    agent_session_free(&s);
+
+    unsetenv("HAX_MODEL");
+}
+
+static void test_session_add_tool_onto_borrowed_array(void)
+{
+    /* A session assembled by hand carries tools with no ownership flags, which means every
+     * entry is borrowed. Adding to one must not free the caller's static defs. */
+    static const struct tool_def borrowed = {.name = "read", .description = "static storage"};
+    struct agent_session s;
+    memset(&s, 0, sizeof(s));
+    s.tools = xcalloc(1, sizeof(*s.tools));
+    s.tools[0] = borrowed;
+    s.n_tools = 1;
+
+    struct tool_def def = {.name = "lookup_order", .description = "host tool"};
+    EXPECT(agent_session_add_tool(&s, &def) == 0);
+    EXPECT(s.n_tools == 2);
+    EXPECT_STR_EQ(s.tools[0].name, "read");
+    EXPECT_STR_EQ(s.tools[1].name, "lookup_order");
+
+    agent_session_free(&s);
+    /* The borrowed def is still intact: freeing the session must not have touched it. */
+    EXPECT_STR_EQ(borrowed.description, "static storage");
+}
+
 static void test_session_init_missing_model(void)
 {
     unsetenv("HAX_MODEL");
@@ -661,6 +808,11 @@ int main(void)
     test_recording_enabled();
     test_session_init_model_label();
     test_session_init_raw();
+    test_session_add_tool_appends();
+    test_session_add_tool_replaces_builtin();
+    test_session_add_tool_grows_past_capacity();
+    test_session_add_tool_rejects_raw_and_nameless();
+    test_session_add_tool_onto_borrowed_array();
     test_session_init_missing_model();
     test_session_init_missing_provider();
     test_session_add_user();

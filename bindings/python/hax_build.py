@@ -50,6 +50,24 @@ void item_free(struct item *item);
 
 struct provider;
 
+/* Advertised tool schema. Declared in full because the binding builds defs to register, and a
+   drifting layout must fail the build rather than be miscopied. */
+struct tool_param {
+    const char *name;
+    const char *type;
+    const char *item_type;
+    const char *description;
+    int required;
+    long minimum;
+};
+
+struct tool_def {
+    const char *name;
+    const char *description;
+    const struct tool_param *params;
+    size_t n_params;
+};
+
 /* --- tool.h --- */
 struct tool_run_ctx {
     int image_input;
@@ -73,6 +91,8 @@ struct agent_session {
     char *model_label;
     char *effort;
     char *system_prompt;
+    struct tool_def *tools;
+    size_t n_tools;
     struct item *items;
     size_t n_items;
     ...;
@@ -82,6 +102,7 @@ void agent_session_init(struct agent_session *session, struct provider *provider
                         const struct hax_opts *opts);
 void agent_session_free(struct agent_session *session);
 void agent_session_add_user(struct agent_session *session, const char *text);
+int agent_session_add_tool(struct agent_session *session, const struct tool_def *def);
 
 /* --- agent_tool.h --- */
 struct agent_tool_call { ...; };

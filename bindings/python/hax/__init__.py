@@ -291,6 +291,65 @@ def _check_arguments(fn: Callable[..., Any], arguments: dict[str, Any]) -> None:
         raise HaxError(f"{fn.__name__} cannot accept these arguments: {exc}") from exc
 
 
+_JSON_TYPES: dict[Any, str] = {
+    str: "string",
+    int: "integer",
+    float: "number",
+    bool: "boolean",
+    list: "array",
+    dict: "object",
+}
+
+
+def _describe_parameters(fn: Callable[..., Any]) -> list[dict[str, Any]] | None:
+    """Derive advertised parameters from a function signature.
+
+    Returns None when the signature declares nothing usable but accepts anything — a bare
+    **kwargs. That is the shadowing case: the host wants the call, not a new schema, so the
+    tool it shadows keeps the definition the model already knows.
+
+    An unannotated parameter is advertised as a string. Models supply JSON either way, and a
+    wrong-but-present type is more useful to them than a property with no type at all.
+    """
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return None
+
+    parameters = []
+    accepts_anything = False
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            accepts_anything = True
+            continue
+        if parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+            continue  # *args carries no names to advertise.
+        annotation = parameter.annotation
+        json_type = _JSON_TYPES.get(annotation, "string")
+        item_type = None
+        if json_type == "array":
+            item_type = "string"
+        parameters.append(
+            {
+                "name": parameter.name,
+                "type": json_type,
+                "item_type": item_type,
+                "required": parameter.default is inspect.Parameter.empty,
+            }
+        )
+
+    if not parameters and accepts_anything:
+        return None
+    return parameters
+
+
+def _tool_description(fn: Callable[..., Any]) -> str:
+    """The docstring's summary paragraph, which is what the model needs to choose the tool."""
+    doc = inspect.getdoc(fn) or ""
+    summary = doc.split("\n\n", 1)[0].strip()
+    return " ".join(summary.split()) or f"The host's {fn.__name__} tool."
+
+
 def _stringify(output: Any) -> str:
     """Render a tool's return value for the model.
 
@@ -426,12 +485,95 @@ class Agent:
     def __exit__(self, *exc_info) -> None:
         self.close()
 
+    @property
+    def tools(self) -> list[dict[str, Any]]:
+        """The tool definitions advertised to the model, hax's built-ins included.
+
+        This is what the provider is told exists, which is a separate question from what runs
+        when a tool is called: a **kwargs function shadows a built-in's dispatch without
+        appearing here as its own entry.
+        """
+        if self._session is None:
+            return []
+        advertised = []
+        for index in range(self._session.n_tools):
+            definition = self._session.tools[index]
+            advertised.append(
+                {
+                    "name": _text(definition.name),
+                    "description": _text(definition.description),
+                    "parameters": [
+                        {
+                            "name": _text(definition.params[i].name),
+                            "type": _text(definition.params[i].type),
+                            "required": bool(definition.params[i].required),
+                        }
+                        for i in range(definition.n_params)
+                    ],
+                }
+            )
+        return advertised
+
     # --- tools ---
 
     def tool(self, fn: Callable[..., Any]) -> Callable[..., Any]:
-        """Register a Python tool. It shadows a built-in of the same name."""
+        """Register a Python tool and advertise it to the model.
+
+        Parameters come from the signature: an annotation picks the JSON type, a default makes
+        the parameter optional, and the docstring's first paragraph becomes the description.
+        A function taking only **kwargs declares no schema; if it shadows a built-in, that
+        built-in's definition stands, so the model keeps the arguments it already knows.
+
+        Registering is only useful before the first send() of a turn that should call it: the
+        tool list goes out with the request.
+        """
         self._tools[fn.__name__] = fn
+        parameters = _describe_parameters(fn)
+        if parameters is not None:
+            self._advertise(fn.__name__, _tool_description(fn), parameters)
         return fn
+
+    def _advertise(self, name: str, description: str, parameters: list[dict[str, Any]]) -> None:
+        """Hand a tool definition to the session, which deep-copies it.
+
+        Every cffi string is bound to a local list for the duration of the call. Dropping one
+        early would free it while the C copy is still reading, and the copy is what outlives
+        this function -- nothing here needs to stay alive afterwards.
+        """
+        if self._session is None:
+            raise HaxError("the agent is closed")
+
+        alive: list[Any] = []
+
+        def cstr(value: str | None):
+            if value is None:
+                return ffi.NULL
+            buffer = ffi.new("char[]", value.encode())
+            alive.append(buffer)
+            return buffer
+
+        params = ffi.new("struct tool_param[]", len(parameters)) if parameters else ffi.NULL
+        alive.append(params)
+        for index, parameter in enumerate(parameters):
+            params[index].name = cstr(parameter["name"])
+            params[index].type = cstr(parameter["type"])
+            params[index].item_type = cstr(parameter.get("item_type"))
+            params[index].description = cstr(parameter.get("description"))
+            params[index].required = 1 if parameter["required"] else 0
+            params[index].minimum = 0
+
+        definition = ffi.new(
+            "struct tool_def *",
+            {
+                "name": cstr(name),
+                "description": cstr(description),
+                "params": params,
+                "n_params": len(parameters),
+            },
+        )
+        if lib.agent_session_add_tool(self._session, definition) != 0:
+            # raw mode is the only rejection a caller can provoke, and this binding never sets it.
+            raise HaxError(f"hax refused to advertise the tool {name!r}")
 
     def _run_builtin(self, call, image_input: int):
         ctx = ffi.new("struct tool_run_ctx *", {"image_input": image_input})

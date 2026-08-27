@@ -218,6 +218,8 @@ void agent_session_init(struct agent_session *session, struct provider *provider
 
     if (!opts->raw) {
         session->tools = xmalloc(N_TOOLS * sizeof(*session->tools));
+        session->tools_owned = xcalloc(N_TOOLS, sizeof(*session->tools_owned));
+        session->cap_tools = N_TOOLS;
         for (size_t i = 0; i < N_TOOLS; i++) {
             const struct tool_def *def =
                 TOOLS[i]->advertise ? TOOLS[i]->advertise() : &TOOLS[i]->def;
@@ -281,11 +283,104 @@ int agent_session_resync_effort(struct agent_session *session, struct provider *
     return 1;
 }
 
+/* Release a def deep-copied by agent_session_add_tool. Built-in defs point at static storage
+ * and must never reach this. */
+static void tool_def_free(struct tool_def *def)
+{
+    for (size_t i = 0; i < def->n_params; i++) {
+        const struct tool_param *param = &def->params[i];
+        free((char *)param->name);
+        free((char *)param->type);
+        free((char *)param->item_type);
+        free((char *)param->description);
+    }
+    free((struct tool_param *)def->params);
+    free((char *)def->name);
+    free((char *)def->description);
+    memset(def, 0, sizeof(*def));
+}
+
+/* xstrdup that keeps NULL, so an omitted optional field stays omitted rather than becoming "". */
+static char *dup_or_null(const char *s)
+{
+    return s ? xstrdup(s) : NULL;
+}
+
+static void tool_def_copy(struct tool_def *dst, const struct tool_def *src)
+{
+    struct tool_param *params = NULL;
+    if (src->n_params) {
+        params = xcalloc(src->n_params, sizeof(*params));
+        for (size_t i = 0; i < src->n_params; i++) {
+            params[i].name = dup_or_null(src->params[i].name);
+            params[i].type = dup_or_null(src->params[i].type);
+            params[i].item_type = dup_or_null(src->params[i].item_type);
+            params[i].description = dup_or_null(src->params[i].description);
+            params[i].required = src->params[i].required;
+            params[i].minimum = src->params[i].minimum;
+        }
+    }
+    dst->name = dup_or_null(src->name);
+    dst->description = dup_or_null(src->description);
+    dst->params = params;
+    dst->n_params = src->n_params;
+}
+
+int agent_session_add_tool(struct agent_session *session, const struct tool_def *def)
+{
+    if (!def || !def->name || !*def->name)
+        return -1;
+    /* Raw mode advertises nothing; adding here would contradict the flag the caller set. */
+    if (session->raw_mode)
+        return -1;
+
+    /* A session assembled by hand carries tools without flags. Materialize them before the
+     * first add, when the array stops being uniformly borrowed. */
+    if (!session->tools_owned) {
+        if (session->cap_tools < session->n_tools)
+            session->cap_tools = session->n_tools;
+        session->tools_owned =
+            xcalloc(session->cap_tools ? session->cap_tools : 1, sizeof(*session->tools_owned));
+    }
+
+    for (size_t i = 0; i < session->n_tools; i++) {
+        if (strcmp(session->tools[i].name, def->name) != 0)
+            continue;
+        /* Copy before freeing: `def` may alias the entry being replaced. */
+        struct tool_def replacement;
+        tool_def_copy(&replacement, def);
+        if (session->tools_owned[i])
+            tool_def_free(&session->tools[i]);
+        session->tools[i] = replacement;
+        session->tools_owned[i] = 1;
+        return 0;
+    }
+
+    if (session->n_tools == session->cap_tools) {
+        size_t capacity = session->cap_tools ? session->cap_tools * 2 : 8;
+        session->tools = xrealloc(session->tools, capacity * sizeof(*session->tools));
+        session->tools_owned =
+            xrealloc(session->tools_owned, capacity * sizeof(*session->tools_owned));
+        memset(session->tools_owned + session->cap_tools, 0,
+               (capacity - session->cap_tools) * sizeof(*session->tools_owned));
+        session->cap_tools = capacity;
+    }
+    tool_def_copy(&session->tools[session->n_tools], def);
+    session->tools_owned[session->n_tools] = 1;
+    session->n_tools++;
+    return 0;
+}
+
 void agent_session_free(struct agent_session *session)
 {
     for (size_t i = 0; i < session->n_items; i++)
         item_free(&session->items[i]);
     free(session->items);
+    for (size_t i = 0; session->tools_owned && i < session->n_tools; i++) {
+        if (session->tools_owned[i])
+            tool_def_free(&session->tools[i]);
+    }
+    free(session->tools_owned);
     free(session->tools);
     free(session->system_prompt);
     free(session->model);

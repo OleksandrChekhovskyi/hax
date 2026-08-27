@@ -48,7 +48,7 @@ import hax
 with hax.Agent(provider="anthropic", model="claude-sonnet-5") as agent:
 
     @agent.tool
-    def lookup_order(order_id):
+    def lookup_order(order_id: str):
         """Return the contents of an order."""
         return database[order_id]
 
@@ -58,6 +58,31 @@ with hax.Agent(provider="anthropic", model="claude-sonnet-5") as agent:
 Provider setup is hax's own: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, a `~/.config/hax/config.json`
 block, and so on. See [docs/providers.md](../../docs/providers.md). Anything the binary can talk
 to, the binding can.
+
+## How a tool is described to the model
+
+`@agent.tool` both advertises the tool and registers what runs when it is called. The definition
+comes from the function:
+
+| Source | Becomes |
+| --- | --- |
+| function name | the tool name |
+| first paragraph of the docstring | the description the model chooses from |
+| parameter annotation | the JSON type: `str`, `int`, `float`, `bool`, `list`, `dict` |
+| no annotation | `string` |
+| parameter without a default | required |
+
+Register before the `send()` that should use the tool: the definition travels with the request, so
+a tool added afterwards is not available until the next one.
+
+A name matching a built-in (`read`, `edit`, `write`, `bash`, `task_wait`) replaces it rather than
+adding a second tool, since one name can carry only one definition on the wire. The exception is a
+function taking only `**kwargs`: it declares no schema, so the built-in's definition stands and the
+host receives the arguments the model already knows how to send. Use that to intercept a built-in;
+use a declared signature to define a tool of your own.
+
+`agent.tools` returns the advertised list, which is what the model was told exists — a separate
+question from what runs when a call arrives.
 
 ## Examples
 

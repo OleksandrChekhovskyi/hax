@@ -30,6 +30,17 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - `sort_models` and `catalog_id` now work in every provider's config block, not only custom
   ones; `providers.openai.sort_models`, for example, keeps the picker in server order.
 
+### Fixed
+
+- Host tools registered through the Python binding's `@agent.tool` are now advertised to the
+  provider, not only dispatched. Previously the decorator recorded a function to run when a call
+  arrived but never told the model the tool existed, so a live model could call one only when the
+  name matched a built-in it already knew; a tool with a new name was unreachable. Definitions are
+  derived from the signature — annotations pick JSON types, a default makes a parameter optional,
+  the docstring's first paragraph is the description — and `agent.tools` reports the advertised
+  list. A `**kwargs` function still shadows a built-in's dispatch without altering its published
+  arguments. See [bindings/python/README.md](bindings/python/README.md).
+
 ### Changed
 
 - Skill discovery now follows the cross-agent `.agents/skills` convention: project skills are

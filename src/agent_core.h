@@ -49,6 +49,11 @@ struct agent_session {
     char *system_prompt;
     struct tool_def *tools;
     size_t n_tools;
+    size_t cap_tools;
+    /* Per-entry ownership: a host-registered def owns its strings, a built-in points at static
+     * storage. Parallel to `tools` because a host may replace a built-in at any index. NULL
+     * means no entry is owned, so a hand-assembled session needs only `tools` and `n_tools`. */
+    unsigned char *tools_owned;
     int raw_mode;
 
     /* The whole conversation, including prefixes a compaction has already summarized. */
@@ -60,6 +65,13 @@ struct agent_session {
 /* Initialize a session. A missing model is valid so the interactive frontend can prompt for one. */
 void agent_session_init(struct agent_session *session, struct provider *provider,
                         const struct hax_opts *opts);
+
+/* Advertise a host-provided tool alongside the built-ins, deep-copying `def` so the caller keeps
+ * ownership of everything it passed. A name that already appears replaces that entry, which is
+ * how a host redefines a built-in rather than adding a second tool under one name. Returns -1 in
+ * raw mode, which advertises no tools at all. Dispatch is a separate concern: registering a def
+ * tells the model the tool exists but does not decide what runs when it is called. */
+int agent_session_add_tool(struct agent_session *session, const struct tool_def *def);
 
 /* Re-resolve request settings for `provider` without changing history or tools. Returns -1 when
  * the provider has no configured or default model; the existing settings remain unchanged. */

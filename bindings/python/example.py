@@ -21,7 +21,7 @@ ORDERS = {"4417": "two widgets and a length of rope"}
 with hax.Agent(provider="mock") as agent:
 
     @agent.tool
-    def lookup_order(order_id):
+    def lookup_order(order_id: str):
         """Return the contents of an order."""
         return ORDERS.get(order_id, "no such order")
 

@@ -79,6 +79,99 @@ def test_host_tool_runs() -> None:
         expect(outputs == ["two widgets"], f"tool output reaches history (got {outputs})")
 
 
+def test_host_tool_is_advertised() -> None:
+    """The gap a mock script cannot expose: a scripted call proves dispatch, not advertisement.
+
+    A live model can only call a tool it was told about, so assert the advertised list itself.
+    """
+    use_mock("hello.txt")
+    with hax.Agent(provider="mock") as agent:
+        builtins = {t["name"] for t in agent.tools}
+        expect("lookup_order" not in builtins, "the tool is absent before registration")
+
+        @agent.tool
+        def lookup_order(order_id: str, include_history: bool = False):
+            """Return the contents of an order.
+
+            A second paragraph is rationale for the reader, not for the model.
+            """
+            return "two widgets"
+
+        advertised = {t["name"]: t for t in agent.tools}
+        expect("lookup_order" in advertised, f"the tool is advertised: {sorted(advertised)}")
+        expect(builtins <= set(advertised), "registering does not displace the built-ins")
+
+        definition = advertised.get("lookup_order", {})
+        expect(
+            definition.get("description") == "Return the contents of an order.",
+            f"the docstring summary alone becomes the description ({definition.get('description')!r})",
+        )
+        parameters = {p["name"]: p for p in definition.get("parameters", [])}
+        expect(set(parameters) == {"order_id", "include_history"},
+               f"both parameters are advertised (got {sorted(parameters)})")
+        expect(parameters.get("order_id", {}).get("type") == "string",
+               "an str annotation becomes a string property")
+        expect(parameters.get("order_id", {}).get("required") is True,
+               "a parameter with no default is required")
+        expect(parameters.get("include_history", {}).get("type") == "boolean",
+               "a bool annotation becomes a boolean property")
+        expect(parameters.get("include_history", {}).get("required") is False,
+               "a parameter with a default is optional")
+
+
+def test_unannotated_and_novel_types_still_advertise() -> None:
+    use_mock("hello.txt")
+    with hax.Agent(provider="mock") as agent:
+
+        @agent.tool
+        def mixed(plain, count: int, tags: list, ratio: float):
+            """Take assorted arguments."""
+            return "ok"
+
+        definition = {t["name"]: t for t in agent.tools}["mixed"]
+        types = {p["name"]: p["type"] for p in definition["parameters"]}
+        expect(types == {"plain": "string", "count": "integer", "tags": "array",
+                         "ratio": "number"},
+               f"annotations map onto JSON types, unannotated falls back to string (got {types})")
+
+
+def test_kwargs_tool_leaves_the_builtin_definition_alone() -> None:
+    """Shadowing dispatch must not silently narrow what the model knows about the built-in."""
+    use_mock("hello.txt")
+    with hax.Agent(provider="mock") as agent:
+        before = {t["name"]: t for t in agent.tools}
+        expect("read" in before, "read is a built-in")
+
+        @agent.tool
+        def read(**arguments):
+            return "shadowed"
+
+        after = {t["name"]: t for t in agent.tools}
+        expect(len(after) == len(before), "no entry is added for a kwargs-only shadow")
+        expect(after["read"] == before["read"],
+               "the built-in read definition is untouched, so its arguments still reach the host")
+        expect(agent._tools.get("read") is not None, "dispatch is still redirected to the host")
+
+
+def test_declared_shadow_replaces_the_builtin_definition() -> None:
+    use_mock("hello.txt")
+    with hax.Agent(provider="mock") as agent:
+        count_before = len(agent.tools)
+
+        @agent.tool
+        def read(path: str):
+            """Read through the host instead."""
+            return "shadowed"
+
+        advertised = [t for t in agent.tools if t["name"] == "read"]
+        expect(len(advertised) == 1, f"one entry per name (got {len(advertised)})")
+        expect(len(agent.tools) == count_before, "replacement, not an addition")
+        expect(advertised[0]["description"] == "Read through the host instead.",
+               "the host's declaration wins over the built-in's")
+        expect([p["name"] for p in advertised[0]["parameters"]] == ["path"],
+               "the advertised parameters are the host's")
+
+
 def test_builtin_tool_still_runs() -> None:
     use_mock("tool_roundtrip.txt")
     workdir = scratch / "work"
@@ -315,6 +408,10 @@ def test_unknown_provider_reports_a_diagnostic() -> None:
 
 test_plain_turn()
 test_host_tool_runs()
+test_host_tool_is_advertised()
+test_unannotated_and_novel_types_still_advertise()
+test_kwargs_tool_leaves_the_builtin_definition_alone()
+test_declared_shadow_replaces_the_builtin_definition()
 test_builtin_tool_still_runs()
 test_host_exception_propagates_and_history_stays_paired()
 test_skipped_calls_carry_hax_markers()

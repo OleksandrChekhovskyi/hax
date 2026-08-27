@@ -43,7 +43,23 @@ share one configuration.
 
 ## Tool calls from the host
 
-`agent_loop_hooks.tool_call` receives one model-issued call and returns the matching result:
+Advertising a tool and dispatching one are separate steps, and a host needs both. The model can
+only call what it was told exists, so register the definition first:
+
+```c
+struct tool_param params[] = {
+    {.name = "order_id", .type = "string", .description = "which order", .required = 1},
+};
+struct tool_def def = {.name = "lookup_order", .description = "Return the contents of an order.",
+                       .params = params, .n_params = 1};
+agent_session_add_tool(&session, &def);
+```
+
+The session deep-copies the def, so the caller keeps ownership of everything it passed. A name
+already advertised is replaced rather than added twice, which is how a host redefines a built-in.
+Raw mode advertises no tools and rejects the call.
+
+`agent_loop_hooks.tool_call` then receives one model-issued call and returns the matching result:
 
 ```c
 static struct item on_tool_call(const struct item *call, enum agent_loop_tool_action action,
@@ -121,7 +137,7 @@ import hax
 with hax.Agent(provider="anthropic") as agent:
 
     @agent.tool
-    def lookup_order(order_id):
+    def lookup_order(order_id: str):
         """Return the contents of an order."""
         return database[order_id]
 
