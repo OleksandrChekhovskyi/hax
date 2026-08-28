@@ -455,7 +455,7 @@ char *dup_trim_trailing_slash(const char *str)
     return result;
 }
 
-long parse_size(const char *str)
+static long parse_scaled(const char *str, long kilo)
 {
     if (!str || !*str)
         return 0;
@@ -472,12 +472,12 @@ long parse_size(const char *str)
     switch (*end) {
     case 'k':
     case 'K':
-        multiplier = 1024L;
+        multiplier = kilo;
         end++;
         break;
     case 'm':
     case 'M':
-        multiplier = 1024L * 1024L;
+        multiplier = kilo * kilo;
         end++;
         break;
     }
@@ -486,6 +486,16 @@ long parse_size(const char *str)
     if (*end != '\0' || value > LONG_MAX / multiplier)
         return 0;
     return value * multiplier;
+}
+
+long parse_size(const char *str)
+{
+    return parse_scaled(str, 1024L);
+}
+
+long parse_token_count(const char *str)
+{
+    return parse_scaled(str, 1000L);
 }
 
 long parse_duration_ms(const char *str)
@@ -533,22 +543,30 @@ long monotonic_ms(void)
     return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
 }
 
+/* "2.0k" reads as noise next to "412" and "2.5k"; print whole multiples bare. */
+static void format_one_decimal(char *out, size_t out_size, double value, char suffix)
+{
+    snprintf(out, out_size, "%.1f%c", value, suffix);
+    char *zero_fraction = strstr(out, ".0");
+    if (zero_fraction)
+        memmove(zero_fraction, zero_fraction + 2, strlen(zero_fraction + 2) + 1);
+}
+
 void format_tokens(char *out, size_t out_size, long tokens)
 {
+    const long million = 1000000L;
     if (tokens < 0)
         snprintf(out, out_size, "?");
-    else if (tokens < 1024)
+    else if (tokens < 1000)
         snprintf(out, out_size, "%ld", tokens);
-    else if (tokens < 10L * 1024)
-        snprintf(out, out_size, "%.1fk", (double)tokens / 1024.0);
-    else if (tokens < 1024L * 1024)
-        snprintf(out, out_size, "%ldk", tokens / 1024 + (tokens % 1024 >= 512));
-    else if (tokens < 10L * 1024 * 1024)
-        snprintf(out, out_size, "%.1fM", (double)tokens / (1024.0 * 1024.0));
-    else {
-        const long million = 1024L * 1024L;
+    else if (tokens < 10L * 1000)
+        format_one_decimal(out, out_size, (double)tokens / 1000.0, 'k');
+    else if (tokens < million)
+        snprintf(out, out_size, "%ldk", tokens / 1000 + (tokens % 1000 >= 500));
+    else if (tokens < 10L * million)
+        format_one_decimal(out, out_size, (double)tokens / (double)million, 'M');
+    else
         snprintf(out, out_size, "%ldM", tokens / million + (tokens % million >= million / 2));
-    }
 }
 
 void format_duration(char *out, size_t out_size, long duration_ms)

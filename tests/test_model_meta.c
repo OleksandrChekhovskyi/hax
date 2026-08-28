@@ -146,7 +146,7 @@ static void test_context_resolution(void)
     EXPECT(model_meta_context(&p, "other") == 0);
 
     config_set_override("context_limit", "16k");
-    EXPECT(model_meta_context(&p, "m") == 16 * 1024);
+    EXPECT(model_meta_context(&p, "m") == 16000);
     config_set_override("context_limit", NULL);
     model_meta_release(&p);
 }
@@ -384,6 +384,128 @@ static void test_same_model_store_merges(void)
     model_meta_release(&q);
 }
 
+/* Explicit catalog.models configuration beats a live provider report, and a block scoped to the
+ * runtime provider id does not leak onto other providers sharing the catalog identity. */
+static void test_configured_context_beats_report(void)
+{
+    unsetenv("HAX_CONTEXT_LIMIT");
+    EXPECT(config_load("{\"catalog\": {\"models\": {\"codex\": {"
+                       "\"m\": {\"limit\": {\"context\": 872000}}}}}}") == 0);
+
+    struct provider codex = make_provider("codex", NULL);
+    codex.catalog_id = "openai";
+    store_report(&codex, "m", 272000, PROVIDER_CAP_UNKNOWN);
+    EXPECT(model_meta_context(&codex, "m") == 872000);
+
+    struct provider openai = make_provider("openai", NULL);
+    openai.catalog_id = "openai";
+    store_report(&openai, "m", 272000, PROVIDER_CAP_UNKNOWN);
+    EXPECT(model_meta_context(&openai, "m") == 272000);
+
+    model_meta_release(&codex);
+    model_meta_release(&openai);
+    config_load(NULL);
+}
+
+/* Store a live report carrying base rates and, when `tier_threshold` is positive, one
+ * long-context tier priced at `tier_input`. */
+static void store_rates_report(struct provider *provider, const char *model, double cost_input,
+                               double cost_output, long tier_threshold, double tier_input)
+{
+    struct model_info info;
+    model_info_init(&info);
+    info.id = xstrdup(model);
+    info.cost_input = cost_input;
+    info.cost_output = cost_output;
+    if (tier_threshold > 0) {
+        info.n_tiers = 1;
+        info.tiers[0].context_threshold = tier_threshold;
+        info.tiers[0].cost_input = tier_input;
+        info.tiers[0].cost_output = -1;
+        info.tiers[0].cost_cache_read = -1;
+        info.tiers[0].cost_cache_write = -1;
+        info.tiers[0].cost_cache_write_1h = -1;
+    }
+    model_meta_store(provider, &info);
+    model_info_clear(&info);
+}
+
+static void test_configured_rates_beat_report(void)
+{
+    EXPECT(config_load("{\"catalog\": {\"models\": {\"codex\": {\"m\": {\"cost\": {\"input\": 5,"
+                       " \"tiers\": [{\"input\": 10,"
+                       " \"tier\": {\"type\": \"context\", \"size\": 100000}}]}}}}}}") == 0);
+
+    struct provider p = make_provider("codex", NULL);
+    store_rates_report(&p, "m", 3, 12, 0, 0);
+
+    struct catalog_entry rates;
+    EXPECT(model_meta_rates(&p, "m", &rates) == 1);
+    EXPECT(rates.cost_input == 5);   /* configured beats the report */
+    EXPECT(rates.cost_output == 12); /* the report fills what config omits */
+    /* Configured tiers apply even alongside reported base rates. */
+    EXPECT(rates.n_tiers == 1 && rates.tiers[0].cost_input == 10);
+
+    model_meta_release(&p);
+    config_load(NULL);
+}
+
+/* An explicitly empty tier list is the whole override: it must survive resolution and select
+ * flat pricing over a tiered report. */
+static void test_configured_empty_tiers_beat_tiered_report(void)
+{
+    EXPECT(config_load("{\"catalog\": {\"models\": {\"codex\": {\"m\": {"
+                       "\"cost\": {\"tiers\": []}}}}}}") == 0);
+
+    struct provider p = make_provider("codex", NULL);
+    store_rates_report(&p, "m", 3, 12, 100000, 6);
+
+    struct catalog_entry rates;
+    EXPECT(model_meta_rates(&p, "m", &rates) == 1);
+    EXPECT(rates.n_tiers == 0);
+    EXPECT(catalog_price(&rates, 1000000, 0, 0, 0, 0, NULL) == 3.0);
+
+    model_meta_release(&p);
+    config_load(NULL);
+}
+
+static void test_configured_efforts_beat_report(void)
+{
+    EXPECT(config_load("{\"catalog\": {\"models\": {\"prov\": {\"m\": {"
+                       "\"reasoning_options\": [{\"type\": \"effort\","
+                       " \"values\": [\"low\", \"max\"]}]}}}}}") == 0);
+    static const char *const reported[] = {"low", "medium", "high", NULL};
+    struct provider p = make_provider("prov", list_provider_efforts);
+    store_efforts(&p, "m", reported);
+    struct effort_set levels;
+    model_meta_efforts(&p, "m", &levels);
+    /* Configured levels narrow the provider ladder and, like a report, may extend it. */
+    static const char *const expected[] = {"low", "max", NULL};
+    EXPECT(efforts_equal(&levels, expected));
+    model_meta_release(&p);
+    config_load(NULL);
+}
+
+/* A same-model refinement without the ceiling keeps the previously reported one. */
+static void test_same_model_store_keeps_max_context(void)
+{
+    struct provider p = make_provider("codex", list_no_efforts);
+    struct model_info info;
+    model_info_init(&info);
+    info.id = xstrdup("m");
+    info.context = 272000;
+    info.max_context = 872000;
+    model_meta_store(&p, &info);
+    model_info_clear(&info);
+
+    store_report(&p, "m", 300000, PROVIDER_CAP_UNKNOWN);
+    struct model_info held;
+    EXPECT(model_meta_snapshot(&p, &held) == 1);
+    EXPECT(held.context == 300000 && held.max_context == 872000);
+    model_info_clear(&held);
+    model_meta_release(&p);
+}
+
 /* Refreshing an unchanged model retries a failed probe once the finished job is reaped, instead
  * of mistaking the completed job for a live warm-up. */
 static void test_refresh_retries_after_failed_probe(void)
@@ -499,6 +621,11 @@ int main(void)
     test_snapshot_can_restore_report();
     test_id_only_report_is_ignored();
     test_same_model_store_merges();
+    test_configured_context_beats_report();
+    test_configured_rates_beat_report();
+    test_configured_empty_tiers_beat_tiered_report();
+    test_configured_efforts_beat_report();
+    test_same_model_store_keeps_max_context();
     test_refresh_retries_after_failed_probe();
     test_store_during_probe_keeps_costs_unknown();
     test_incomplete_report_still_probes();

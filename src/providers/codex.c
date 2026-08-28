@@ -258,10 +258,14 @@ int codex_model_is_hidden(const json_t *entry)
 
 void codex_parse_model(const json_t *entry, struct model_info *model)
 {
-    /* context_window is the served limit; max_context_window is only a fallback ceiling. */
+    /* context_window is the served default; max_context_window is the ceiling the backend
+     * sanctions for client-side overrides (catalog.models), and the fallback default. */
+    json_t *max_context_window = json_object_get(entry, "max_context_window");
+    if (json_is_integer(max_context_window) && json_integer_value(max_context_window) > 0)
+        model->max_context = (long)json_integer_value(max_context_window);
     json_t *context_window = json_object_get(entry, "context_window");
     if (!json_is_integer(context_window) || json_integer_value(context_window) <= 0)
-        context_window = json_object_get(entry, "max_context_window");
+        context_window = max_context_window;
     if (json_is_integer(context_window) && json_integer_value(context_window) > 0)
         model->context = (long)json_integer_value(context_window);
 

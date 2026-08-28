@@ -372,6 +372,16 @@ static void test_parse_size_basic(void)
     EXPECT(parse_size("1M") == 1024L * 1024);
 }
 
+static void test_parse_token_count_is_decimal(void)
+{
+    EXPECT(parse_token_count("4096") == 4096);
+    EXPECT(parse_token_count("256k") == 256000);
+    EXPECT(parse_token_count("872K") == 872000);
+    EXPECT(parse_token_count("1m") == 1000000);
+    EXPECT(parse_token_count("1M") == 1000000);
+    EXPECT(parse_token_count("xyz") == 0);
+}
+
 static void test_parse_size_invalid_returns_zero(void)
 {
     EXPECT(parse_size(NULL) == 0);
@@ -477,13 +487,19 @@ static void test_format_tokens_ranges(void)
     EXPECT_STR_EQ(buf, "?");
     format_tokens(buf, sizeof(buf), 412);
     EXPECT_STR_EQ(buf, "412");
-    format_tokens(buf, sizeof(buf), 5 * 1024 + 410); /* 5.4k */
+    format_tokens(buf, sizeof(buf), 5410);
     EXPECT_STR_EQ(buf, "5.4k");
-    format_tokens(buf, sizeof(buf), 128L * 1024);
-    EXPECT_STR_EQ(buf, "128k");
-    format_tokens(buf, sizeof(buf), 1228L * 1024); /* ~1.2M */
+    format_tokens(buf, sizeof(buf), 2000); /* whole multiples print bare */
+    EXPECT_STR_EQ(buf, "2k");
+    format_tokens(buf, sizeof(buf), 262144); /* decimal suffixes even for binary windows */
+    EXPECT_STR_EQ(buf, "262k");
+    format_tokens(buf, sizeof(buf), 872000);
+    EXPECT_STR_EQ(buf, "872k");
+    format_tokens(buf, sizeof(buf), 1000000);
+    EXPECT_STR_EQ(buf, "1M");
+    format_tokens(buf, sizeof(buf), 1200000);
     EXPECT_STR_EQ(buf, "1.2M");
-    format_tokens(buf, sizeof(buf), 12L * 1024 * 1024);
+    format_tokens(buf, sizeof(buf), 12000000);
     EXPECT_STR_EQ(buf, "12M");
 }
 
@@ -519,14 +535,14 @@ static void test_format_duration_ranges(void)
 static void test_format_context_with_and_without_limit(void)
 {
     char buf[64];
-    format_context(buf, sizeof(buf), 9113, 262144); /* 8.9k / 256k, 3% */
-    EXPECT_STR_EQ(buf, "8.9k / 256k (3%)");
+    format_context(buf, sizeof(buf), 9113, 262144);
+    EXPECT_STR_EQ(buf, "9.1k / 262k (3%)");
     format_context(buf, sizeof(buf), 9113, 0); /* unknown window */
-    EXPECT_STR_EQ(buf, "8.9k");
+    EXPECT_STR_EQ(buf, "9.1k");
     format_context(buf, sizeof(buf), 300000, 262144); /* stale window metadata reports over 100% */
-    EXPECT_STR_EQ(buf, "293k / 256k (114%)");
+    EXPECT_STR_EQ(buf, "300k / 262k (114%)");
     format_context(buf, sizeof(buf), -1, 262144); /* known window, no usage reported yet */
-    EXPECT_STR_EQ(buf, "? / 256k");
+    EXPECT_STR_EQ(buf, "? / 262k");
     format_context(buf, sizeof(buf), -1, 0); /* nothing known */
     EXPECT_STR_EQ(buf, "?");
 }
@@ -678,6 +694,7 @@ int main(void)
     test_slurp_capped_exact();
 
     test_parse_size_basic();
+    test_parse_token_count_is_decimal();
     test_parse_size_invalid_returns_zero();
     test_parse_size_rejects_overflow();
 

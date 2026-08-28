@@ -243,6 +243,7 @@ static void test_codex_model_capabilities(void)
                "\"visibility\":\"list\"}",
                codex_parse_model, model);
     EXPECT(model.context == 272000);
+    EXPECT(model.max_context == 1000000);
     EXPECT(model.image_input == PROVIDER_CAP_YES);
     EXPECT_STR_EQ(model.description, "Strong model for everyday coding.");
     EXPECT(!codex_model_is_hidden(model_j));
@@ -254,6 +255,7 @@ static void test_codex_context_fallback(void)
 {
     WITH_ENTRY("{\"slug\":\"x\",\"max_context_window\":400000}", codex_parse_model, model);
     EXPECT(model.context == 400000);
+    EXPECT(model.max_context == 400000);
     json_decref(model_j);
 }
 

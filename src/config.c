@@ -61,7 +61,7 @@ static const struct config_setting REGISTRY[] = {
      .choices = CONFIG_CHOICES_TRISTATE, .editable = 1},
     {.key = "context_limit", .env_var = "HAX_CONTEXT_LIMIT",
      .description = "Manual context-window size for the % display; overrides auto-detect",
-     .kind = CONFIG_KIND_SIZE, .editable = 1},
+     .kind = CONFIG_KIND_TOKENS, .editable = 1},
     {.key = "display_width", .env_var = "HAX_DISPLAY_WIDTH", .default_value = "auto",
      .description = "Content width: auto uses full width through 110 columns and 100 beyond that; "
                     "terminal always uses full width; a number sets an exact width",
@@ -786,6 +786,10 @@ static int kind_value_valid(const struct config_setting *setting, const char *va
         long parsed = parse_size(value);
         return parsed > 0 && value_in_bounds(setting, parsed);
     }
+    case CONFIG_KIND_TOKENS: {
+        long parsed = parse_token_count(value);
+        return parsed > 0 && value_in_bounds(setting, parsed);
+    }
     case CONFIG_KIND_DURATION: {
         long parsed = parse_duration_ms(value);
         return parsed >= 0 && value_in_bounds(setting, parsed);
@@ -851,7 +855,10 @@ static void kind_value_hint(const struct config_setting *setting, char *buffer, 
             snprintf(buffer, size, "a whole number");
         break;
     case CONFIG_KIND_SIZE:
-        snprintf(buffer, size, "a size like 64k or 1M");
+        snprintf(buffer, size, "a byte size like 64k or 1M (k = 1024)");
+        break;
+    case CONFIG_KIND_TOKENS:
+        snprintf(buffer, size, "a token count like 200k or 1M (k = 1000)");
         break;
     case CONFIG_KIND_DURATION:
         snprintf(buffer, size, "a duration like 2s or 500ms");
@@ -911,6 +918,15 @@ long config_size(const char *key)
     if (value > 0 && value_in_bounds(setting, value))
         return value;
     return setting ? parse_size(setting->default_value) : 0;
+}
+
+long config_tokens(const char *key)
+{
+    const struct config_setting *setting = find_setting(key);
+    long value = parse_token_count(resolve(key, 1));
+    if (value > 0 && value_in_bounds(setting, value))
+        return value;
+    return setting ? parse_token_count(setting->default_value) : 0;
 }
 
 long config_duration_ms(const char *key)

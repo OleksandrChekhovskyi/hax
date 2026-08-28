@@ -15,6 +15,7 @@ struct spend_record {
     double reported_cost; /* -1 when the provider did not report cost */
     struct catalog_entry rates;
     int has_rates;
+    char *provider_id;
     char *catalog_id;
     char *model;
 };
@@ -60,6 +61,8 @@ void agent_spend_account(struct spend_totals *totals, const struct stream_usage 
     record->usage = *usage;
     record->reported_cost = usage->cost;
     record->has_rates = model_meta_rates(provider, model, &record->rates);
+    const char *provider_id = provider ? provider_stable_id(provider) : NULL;
+    record->provider_id = provider_id && *provider_id ? xstrdup(provider_id) : NULL;
     const char *catalog_id = provider ? provider->catalog_id : NULL;
     record->catalog_id = catalog_id && *catalog_id ? xstrdup(catalog_id) : NULL;
     record->model = model && *model ? xstrdup(model) : NULL;
@@ -73,11 +76,11 @@ static double spend_record_estimate(const struct spend_record *record, struct ca
         return catalog_price(&record->rates, usage->input_tokens, usage->output_tokens,
                              usage->cached_tokens, usage->cache_write_tokens,
                              usage->cache_write_1h_tokens, split);
-    if (!record->catalog_id || !record->model)
+    if ((!record->provider_id && !record->catalog_id) || !record->model)
         return -1;
 
     struct catalog_entry rates;
-    if (catalog_lookup(record->catalog_id, record->model, &rates) != 0)
+    if (catalog_lookup(record->provider_id, record->catalog_id, record->model, &rates) != 0)
         return -1;
     return catalog_price(&rates, usage->input_tokens, usage->output_tokens, usage->cached_tokens,
                          usage->cache_write_tokens, usage->cache_write_1h_tokens, split);
@@ -142,6 +145,7 @@ int agent_spend_split(const struct spend_totals *totals, struct catalog_split *s
 void agent_spend_free(struct spend_totals *totals)
 {
     for (size_t i = 0; i < totals->count; i++) {
+        free(totals->records[i].provider_id);
         free(totals->records[i].catalog_id);
         free(totals->records[i].model);
     }

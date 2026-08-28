@@ -370,9 +370,9 @@ static void test_session_prints_totals(void)
     EXPECT(strstr(out, "time worked") != NULL);
     EXPECT(strstr(out, "1m 08s") != NULL);
     EXPECT(strstr(out, "context") != NULL);
-    EXPECT(strstr(out, "3.9k") != NULL);
+    EXPECT(strstr(out, "4k") != NULL);
     EXPECT(strstr(out, "tokens total") != NULL);
-    EXPECT(strstr(out, "in 2.4k · cache 2.0k · write 1.0k · out 412") != NULL);
+    EXPECT(strstr(out, "in 2.5k · cache 2k · write 1k · out 412") != NULL);
     EXPECT(strstr(out, "$0.042") != NULL);
     EXPECT(strstr(out, "~$") == NULL);
     free(out);
@@ -412,7 +412,7 @@ static void test_session_shows_window_before_first_request(void)
     unsetenv("HAX_CONTEXT_LIMIT");
     EXPECT(c.result == SLASH_HANDLED);
     EXPECT(strstr(out, "context") != NULL);
-    EXPECT(strstr(out, "? / 256k") != NULL);
+    EXPECT(strstr(out, "? / 262k") != NULL);
     EXPECT(strstr(out, "%") == NULL);
     free(out);
 }

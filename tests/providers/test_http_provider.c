@@ -746,6 +746,85 @@ static void test_interleaved_reasoning_replay(void)
     EXPECT(config_load(NULL) == 0);
 }
 
+/* Runtime-id catalog.models configuration routes wires and reasoning replay even when the
+ * provider has no catalog identity to resolve the snapshot under. */
+static void test_config_only_routing_without_catalog_id(void)
+{
+    catalog_shutdown(); /* drop lookups memoized against an earlier fixture */
+    struct wire_server server = {
+        .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+        .n_requests = 2,
+    };
+    pthread_t thread;
+    int port = start_server(&server, &thread);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+
+    EXPECT(config_load("{\"catalog\": {\"models\": {\"zen\": {"
+                       " \"claude-pin\": {\"api\": \"anthropic-messages\"},"
+                       " \"think-pin\": {\"interleaved\": {\"field\": \"reasoning_content\"}}"
+                       "}}}}") == 0);
+    char base_url[64];
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
+    struct provider_def def = {
+        .id = "zen",
+        .api = "catalog",
+        .base_url = base_url,
+    };
+    struct provider *provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    if (!provider)
+        return;
+
+    struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
+    struct context context = {.items = items, .n_items = 1, .image_input = 1};
+    struct error_log log = {0};
+    provider->stream(provider, &context, "claude-pin", log_error, &log, NULL, NULL);
+    stream_one_reasoned_turn(provider, "think-pin", &log);
+    pthread_join(thread, NULL);
+    close(server.listener_fd);
+    EXPECT(atomic_load(&server.served) == 2);
+
+    EXPECT(strncmp(server.requests[0], "POST /messages HTTP", 19) == 0);
+    EXPECT(strncmp(server.requests[1], "POST /chat/completions HTTP", 27) == 0);
+    EXPECT(strstr(server.requests[1], "\"reasoning_content\":\"thought\"") != NULL);
+
+    provider->destroy(provider);
+    EXPECT(config_load(NULL) == 0);
+}
+
+/* api "catalog" with no routing source warns at construction; cost or limit overrides are not a
+ * routing source, only a configured api hint is. */
+static void test_catalog_routing_warning(void)
+{
+    struct provider_def def = {
+        .id = "zen",
+        .api = "catalog",
+        .base_url = "http://127.0.0.1:1",
+    };
+
+    EXPECT(config_load("{\"catalog\": {\"models\": {\"zen\": {"
+                       "\"m\": {\"limit\": {\"context\": 872000}}}}}}") == 0);
+    unsigned long diagnostics_before = hax_diag_sequence();
+    struct provider *provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    EXPECT(hax_diag_sequence() == diagnostics_before + 1);
+    if (provider)
+        provider->destroy(provider);
+
+    EXPECT(config_load("{\"catalog\": {\"models\": {\"zen\": {"
+                       "\"m\": {\"api\": \"anthropic-messages\"}}}}}") == 0);
+    diagnostics_before = hax_diag_sequence();
+    provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    EXPECT(hax_diag_sequence() == diagnostics_before);
+    if (provider)
+        provider->destroy(provider);
+
+    EXPECT(config_load(NULL) == 0);
+}
+
 /* A catalog hint naming an unimplemented protocol fails cleanly before any request. */
 static void test_unsupported_protocol_reported(void)
 {
@@ -782,6 +861,8 @@ int main(void)
     test_auth_source_logged_out();
     test_def_extra_body_and_defaults();
     test_interleaved_reasoning_replay();
+    test_config_only_routing_without_catalog_id();
+    test_catalog_routing_warning();
     test_unsupported_protocol_reported();
     T_REPORT();
 }

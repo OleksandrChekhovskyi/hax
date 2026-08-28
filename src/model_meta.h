@@ -8,9 +8,10 @@ struct catalog_entry;
 struct model_info;
 struct provider;
 
-/* Resolve metadata for a provider's selected model. Provider-reported values take precedence over
- * the models.dev catalog; context and image support may also be overridden by configuration.
- * Provider reports are scoped by model ID and copied into provider-owned storage. */
+/* Resolve metadata for a provider's selected model. Explicit catalog.models configuration takes
+ * precedence over provider-reported values, which take precedence over the models.dev snapshot;
+ * the context_limit and image_input settings override globally. Provider reports are scoped by
+ * model ID and copied into provider-owned storage. */
 
 /* Cancel any active probe and release the provider's metadata storage. NULL-safe. Provider
  * destroy callbacks must call this before freeing the provider. */
@@ -44,10 +45,11 @@ void model_meta_store(struct provider *provider, const struct model_info *info);
  * The caller must pass `out` to model_info_clear(). */
 int model_meta_snapshot(const struct provider *provider, struct model_info *out);
 
-/* Merge one provider report over one catalog entry. Either source may be NULL. `out` is a
- * metadata-only view with no owned fields and does not need clearing. */
-void model_meta_merge(const struct model_info *reported, const struct catalog_entry *catalog,
-                      struct model_info *out);
+/* Merge the three metadata layers in precedence order: `configured` (catalog_lookup_config) beats
+ * the provider report, which beats the `catalog` snapshot entry. Any source may be NULL. `out` is
+ * a metadata-only view with no owned fields and does not need clearing. */
+void model_meta_merge(const struct catalog_entry *configured, const struct model_info *reported,
+                      const struct catalog_entry *catalog, struct model_info *out);
 
 /* Context window in tokens, or 0 when unknown. The context_limit setting takes precedence. */
 long model_meta_context(const struct provider *provider, const char *model);

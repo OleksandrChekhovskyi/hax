@@ -164,21 +164,6 @@ static int compare_model_info(const void *left, const void *right)
 
 /* ---------- /model picker gutter ---------- */
 
-/* Keep one decimal for millions, trimming a zero fraction. */
-static void format_token_count(char *output, size_t output_size, long tokens)
-{
-    if (tokens >= 1000000) {
-        snprintf(output, output_size, "%.1fM", (double)tokens / 1000000.0);
-        char *zero_fraction = strstr(output, ".0M");
-        if (zero_fraction)
-            memmove(zero_fraction, zero_fraction + 2, strlen(zero_fraction + 2) + 1);
-    } else if (tokens >= 1000) {
-        snprintf(output, output_size, "%ldk", tokens / 1000);
-    } else {
-        snprintf(output, output_size, "%ld", tokens);
-    }
-}
-
 static void append_segment(struct buf *buffer, const char *text)
 {
     if (buffer->len)
@@ -212,11 +197,11 @@ static size_t split_choices(const char *choices, char ***values_out)
     return count;
 }
 
-char *model_desc_line(const struct model_info *model, const struct catalog_entry *catalog)
+char *model_desc_line(const struct model_info *model, const struct catalog_entry *configured,
+                      const struct catalog_entry *catalog)
 {
-    /* Backend metadata is fresher and more specific, so it overrides catalog fields. */
     struct model_info merged;
-    model_meta_merge(model, catalog, &merged);
+    model_meta_merge(configured, model, catalog, &merged);
     long context_tokens = merged.context;
     int image_input = merged.image_input;
     double input_cost = merged.cost_input;
@@ -227,9 +212,17 @@ char *model_desc_line(const struct model_info *model, const struct catalog_entry
     buf_init(&description);
     if (context_tokens > 0) {
         char token_count[32];
-        char segment[48];
-        format_token_count(token_count, sizeof(token_count), context_tokens);
-        snprintf(segment, sizeof(segment), "%s context", token_count);
+        char segment[80];
+        format_tokens(token_count, sizeof(token_count), context_tokens);
+        if (merged.max_context > context_tokens) {
+            /* The backend serves a smaller default than the model's sanctioned ceiling; the gap
+             * is closable with a catalog.models context override. */
+            char ceiling[32];
+            format_tokens(ceiling, sizeof(ceiling), merged.max_context);
+            snprintf(segment, sizeof(segment), "%s context (up to %s)", token_count, ceiling);
+        } else {
+            snprintf(segment, sizeof(segment), "%s context", token_count);
+        }
         append_segment(&description, segment);
     }
     /* Image support is usually present, so describe only its absence. Tool support controls row
@@ -290,21 +283,22 @@ static struct model_pick_result pick_model_from_list(struct provider *provider,
         qsort(models, model_count, sizeof(*models), compare_model_info);
 
     /* Batch catalog lookup avoids loading the snapshot once per model. */
-    struct catalog_entry *catalog = NULL;
-    if (provider->catalog_id && *provider->catalog_id) {
-        const char **model_ids = xmalloc(model_count * sizeof(*model_ids));
-        for (size_t i = 0; i < model_count; i++)
-            model_ids[i] = models[i].id;
-        catalog = xmalloc(model_count * sizeof(*catalog));
-        catalog_lookup_many(provider->catalog_id, model_ids, model_count, catalog, NULL);
-        free(model_ids);
-    }
+    const char **model_ids = xmalloc(model_count * sizeof(*model_ids));
+    for (size_t i = 0; i < model_count; i++)
+        model_ids[i] = models[i].id;
+    struct catalog_entry *catalog = xmalloc(model_count * sizeof(*catalog));
+    catalog_lookup_many(provider_stable_id(provider), provider->catalog_id, model_ids, model_count,
+                        catalog, NULL);
+    free(model_ids);
 
     struct picker_item *items = xcalloc(model_count, sizeof(*items));
     char **descriptions = xcalloc(model_count, sizeof(*descriptions));
     size_t initial = 0;
     for (size_t i = 0; i < model_count; i++) {
-        descriptions[i] = model_desc_line(&models[i], catalog ? &catalog[i] : NULL);
+        struct catalog_entry configured;
+        catalog_lookup_config(provider_stable_id(provider), provider->catalog_id, models[i].id,
+                              &configured);
+        descriptions[i] = model_desc_line(&models[i], &configured, &catalog[i]);
         items[i].label = models[i].id;
         items[i].description = descriptions[i];
         /* Known lack of tool support dims but does not hide the row; catalog capability is
@@ -1446,7 +1440,7 @@ static const struct config_setting *choose_config_setting(void)
         items[i].label = setting->key;
         items[i].detail = details[i];
         /* Show units or bounds only when the value grammar adds useful information. */
-        int show_hint = setting->kind == CONFIG_KIND_SIZE ||
+        int show_hint = setting->kind == CONFIG_KIND_SIZE || setting->kind == CONFIG_KIND_TOKENS ||
                         setting->kind == CONFIG_KIND_DURATION ||
                         (setting->kind == CONFIG_KIND_INT && (setting->min || setting->max));
         if (show_hint) {

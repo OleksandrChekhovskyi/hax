@@ -53,12 +53,12 @@ static void test_format_stats_segments(void)
     int count = agent_format_stats_segments(segments, 9113, 262144, 42000, 0.042, 0);
     EXPECT(count == 3);
     EXPECT_STR_EQ(segments[0], "42s");
-    EXPECT_STR_EQ(segments[1], "8.9k / 256k (3%)");
+    EXPECT_STR_EQ(segments[1], "9.1k / 262k (3%)");
     EXPECT_STR_EQ(segments[2], "$0.042");
 
     count = agent_format_stats_segments(segments, 9113, 0, 42000, 0.042, 0);
     EXPECT(count == 3);
-    EXPECT_STR_EQ(segments[1], "context 8.9k");
+    EXPECT_STR_EQ(segments[1], "context 9.1k");
 
     count = agent_format_stats_segments(segments, -1, 0, -1, 0.042, 1);
     EXPECT(count == 1);

@@ -491,7 +491,7 @@ static void test_estimated_turn_usage_footer(void)
         .cost_estimated = 1,
     };
     char *out = render_usage(&usage);
-    EXPECT(contains(out, "42s · ~$0.157 · in 2.0k ~$0.025 · cache 1.0k ~$0.048 · out 512 ~$0.084"));
+    EXPECT(contains(out, "42s · ~$0.157 · in 2k ~$0.025 · cache 1k ~$0.048 · out 512 ~$0.084"));
 
     const char *answer = strstr(out, "answer");
     const char *footer = strstr(out, "42s ·");
@@ -527,7 +527,7 @@ static void test_overlapping_cache_usage_uses_precomputed_uncached_count(void)
         .cost_estimated = 0,
     };
     char *out = render_usage(&usage);
-    EXPECT(contains(out, "in 3.4k ~$0.0070"));
+    EXPECT(contains(out, "in 3.5k ~$0.0070"));
     EXPECT(!contains(out, "in 0"));
     free(out);
 }

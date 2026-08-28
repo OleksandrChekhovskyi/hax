@@ -94,34 +94,34 @@ static const char CACHE_FIXTURE[] =
 static void test_lookup_reasoning_options(void)
 {
     struct catalog_entry entry;
-    EXPECT(catalog_lookup("openai", "o3-effort", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "o3-effort", &entry) == 0);
     EXPECT(entry.efforts.known && entry.efforts.count == 3);
     EXPECT_STR_EQ(entry.efforts.values[0], "none");
     EXPECT_STR_EQ(entry.efforts.values[2], "high");
 
     /* A token budget is a real answer of a different kind: no levels. */
-    EXPECT(catalog_lookup("openai", "o3-budget", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "o3-budget", &entry) == 0);
     EXPECT(entry.efforts.known && entry.efforts.count == 0);
 
     /* Mixed options: the effort list is the one that yields a menu. */
-    EXPECT(catalog_lookup("openai", "o3-toggle-then-effort", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "o3-toggle-then-effort", &entry) == 0);
     EXPECT(entry.efforts.known && entry.efforts.count == 2);
     EXPECT(effort_set_has(&entry.efforts, "max"));
 
     /* Declaring no reasoning at all lands in the same place. */
-    EXPECT(catalog_lookup("openai", "o3-no-reasoning", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "o3-no-reasoning", &entry) == 0);
     EXPECT(entry.efforts.known && entry.efforts.count == 0);
 
     /* An entry that says nothing about reasoning stays unknown — this is
      * the majority of the artifact, and it must not read as "no levels". */
-    EXPECT(catalog_lookup("openai", "o3", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "o3", &entry) == 0);
     EXPECT(!entry.efforts.known);
 }
 
 static void test_lookup_from_cache(void)
 {
     struct catalog_entry entry;
-    EXPECT(catalog_lookup("openai", "o3", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "o3", &entry) == 0);
     EXPECT(entry.cost_input == 2);
     EXPECT(entry.cost_output == 8);
     EXPECT(entry.cost_cache_read == 0.5);
@@ -134,9 +134,9 @@ static void test_lookup_from_cache(void)
 static void test_lookup_modalities(void)
 {
     struct catalog_entry entry;
-    EXPECT(catalog_lookup("openai", "o3-vision", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "o3-vision", &entry) == 0);
     EXPECT(entry.image_input == CATALOG_SUPPORT_YES);
-    EXPECT(catalog_lookup("openai", "o3-text", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "o3-text", &entry) == 0);
     EXPECT(entry.image_input == CATALOG_SUPPORT_NO);
 }
 
@@ -145,7 +145,7 @@ static void test_lookup_dotted_slashed_model_id(void)
     /* Model ids with '/', '.', and ':' are plain object keys in both
      * tiers — no dotted-key splitting may apply to them. */
     struct catalog_entry entry;
-    EXPECT(catalog_lookup("openrouter", "vendor/model.v1:free", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openrouter", "vendor/model.v1:free", &entry) == 0);
     EXPECT(entry.cost_input == 0.1);
     EXPECT(entry.context_window == 131072);
 }
@@ -153,12 +153,12 @@ static void test_lookup_dotted_slashed_model_id(void)
 static void test_lookup_miss(void)
 {
     struct catalog_entry entry;
-    EXPECT(catalog_lookup("openai", "no-such-model", &entry) == -1);
+    EXPECT(catalog_lookup(NULL, "openai", "no-such-model", &entry) == -1);
     EXPECT(entry.cost_input == -1);
     EXPECT(entry.context_window == 0);
-    EXPECT(catalog_lookup("no-such-provider", "o3", &entry) == -1);
-    EXPECT(catalog_lookup(NULL, "o3", &entry) == -1);
-    EXPECT(catalog_lookup("openai", NULL, &entry) == -1);
+    EXPECT(catalog_lookup(NULL, "no-such-provider", "o3", &entry) == -1);
+    EXPECT(catalog_lookup(NULL, NULL, "o3", &entry) == -1);
+    EXPECT(catalog_lookup(NULL, "openai", NULL, &entry) == -1);
 }
 
 static void test_lookup_many(void)
@@ -170,7 +170,7 @@ static void test_lookup_many(void)
     memset(entries, 0xff, sizeof(entries));
     memset(found, 0xff, sizeof(found));
 
-    catalog_lookup_many("openai", models, model_count, entries, found);
+    catalog_lookup_many(NULL, "openai", models, model_count, entries, found);
 
     EXPECT(found[0]);
     EXPECT(entries[0].cost_input == 2);
@@ -187,7 +187,7 @@ static void test_config_overrides_and_merges(void)
 {
     /* The config catalog.models block wins field-by-field; the cache fills
      * what it leaves unset. Numbers arrive normalized to strings (config.c),
-     * and token counts accept the parse_size grammar. */
+     * and token counts accept the parse_token_count grammar. */
     EXPECT(config_load("{\"catalog\": {\"models\": {\"openai\": {"
                        "  \"gpt-x.5\": {\"cost\": {\"input\": 1.25, \"output\": 10},"
                        "                \"limit\": {\"context\": \"256k\"}},"
@@ -196,20 +196,63 @@ static void test_config_overrides_and_merges(void)
 
     /* Config-only entry (model unknown to the cache). */
     struct catalog_entry entry;
-    EXPECT(catalog_lookup("openai", "gpt-x.5", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "gpt-x.5", &entry) == 0);
     EXPECT(entry.cost_input == 1.25);
     EXPECT(entry.cost_output == 10);
-    EXPECT(entry.context_window == 256 * 1024);
+    EXPECT(entry.context_window == 256000);
     EXPECT(entry.max_output == 0);
 
     /* Config + cache merge: config's input rate wins, the rest fills in
      * from the cached snapshot. */
-    EXPECT(catalog_lookup("openai", "o3-merge", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "o3-merge", &entry) == 0);
     EXPECT(entry.cost_input == 99);
     EXPECT(entry.cost_output == 8);
     EXPECT(entry.context_window == 200000);
 
     config_load(NULL);
+}
+
+/* A provider whose runtime id differs from its catalog identity (codex estimates against openai
+ * rates) needs overrides scoped to itself: the runtime-id block wins field by field over the
+ * catalog-id block, which wins over the snapshot. */
+static void test_config_scoped_by_runtime_provider_id(void)
+{
+    EXPECT(
+        config_load("{\"catalog\": {\"models\": {"
+                    "  \"codex\": {\"o3\": {\"limit\": {\"context\": 872000}}},"
+                    "  \"openai\": {\"o3\": {\"limit\": {\"context\": 300000, \"output\": 64000}}}"
+                    "}}}") == 0);
+
+    struct catalog_entry entry;
+    EXPECT(catalog_lookup("codex", "openai", "o3", &entry) == 0);
+    EXPECT(entry.context_window == 872000); /* runtime-id block */
+    EXPECT(entry.max_output == 64000);      /* catalog-id block fills the gap */
+    EXPECT(entry.cost_input == 2);          /* snapshot fills the rest */
+
+    /* The config-only view carries just what the user wrote. */
+    EXPECT(catalog_lookup_config("codex", "openai", "o3", &entry) == 0);
+    EXPECT(entry.context_window == 872000);
+    EXPECT(entry.max_output == 64000);
+    EXPECT(entry.cost_input == -1);
+
+    /* The codex-scoped block must not leak onto the openai provider itself. */
+    EXPECT(catalog_lookup("openai", "openai", "o3", &entry) == 0);
+    EXPECT(entry.context_window == 300000);
+
+    /* Runtime-id configuration resolves even without any catalog identity. */
+    EXPECT(catalog_lookup("codex", NULL, "o3", &entry) == 0);
+    EXPECT(entry.context_window == 872000);
+    EXPECT(entry.cost_input == -1);
+
+    config_load(NULL);
+}
+
+static void test_config_lookup_ignores_snapshot(void)
+{
+    struct catalog_entry entry;
+    EXPECT(catalog_lookup_config(NULL, "openai", "o3", &entry) == -1);
+    EXPECT(entry.cost_input == -1);
+    EXPECT(entry.context_window == 0);
 }
 
 static void test_price_formula(void)
@@ -397,7 +440,7 @@ static void test_lookup_parses_tiers(void)
     /* The models.dev tiers array survives the cache-tier parse: context
      * tiers are kept in order, non-context selectors are skipped. */
     struct catalog_entry entry;
-    EXPECT(catalog_lookup("openai", "o3-tiered", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "o3-tiered", &entry) == 0);
     EXPECT(entry.n_tiers == 1);
     EXPECT(entry.tiers[0].context_threshold == 200000);
     EXPECT(entry.tiers[0].cost_input == 4);
@@ -416,7 +459,7 @@ static void test_lookup_parses_tiers(void)
                        "     \"tier\": {\"type\": \"context\", \"size\": 100000}}"
                        "  ]}}"
                        "}}}}") == 0);
-    EXPECT(catalog_lookup("openai", "o3-tiered", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "o3-tiered", &entry) == 0);
     EXPECT(entry.n_tiers == 1);
     EXPECT(entry.tiers[0].context_threshold == 100000);
     EXPECT(entry.tiers[0].cost_input == 5);
@@ -432,7 +475,7 @@ static void test_lookup_parses_tiers(void)
                        "               \"cache_read\": 0.3, \"cache_write\": 3.75},"
                        "    \"limit\": {\"context\": \"400k\", \"output\": \"128k\"}}"
                        "}}}}") == 0);
-    EXPECT(catalog_lookup("openai", "o3-tiered", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "o3-tiered", &entry) == 0);
     EXPECT(entry.cost_input == 3);
     EXPECT(entry.n_tiers == 1);
     EXPECT(entry.tiers[0].context_threshold == 200000);
@@ -443,7 +486,7 @@ static void test_lookup_parses_tiers(void)
     EXPECT(config_load("{\"catalog\": {\"models\": {\"openai\": {"
                        "  \"o3-tiered\": {\"cost\": {\"tiers\": []}}"
                        "}}}}") == 0);
-    EXPECT(catalog_lookup("openai", "o3-tiered", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "o3-tiered", &entry) == 0);
     EXPECT(entry.n_tiers == 0);
     EXPECT(entry.cost_input == 2); /* base rates still from the cache */
 
@@ -465,7 +508,7 @@ static void test_tier_only_entry(void)
                        "  ]}}"
                        "}}}}") == 0);
     struct catalog_entry entry;
-    EXPECT(catalog_lookup("openai", "tier-only", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "tier-only", &entry) == 0);
     EXPECT(entry.n_tiers == 1); /* the type-less selector was skipped */
     EXPECT(entry.tiers[0].context_threshold == 200000);
     /* Above the threshold the tier's own rates price the request... */
@@ -537,16 +580,16 @@ static void test_wire_api_hints(void)
                         "\"gem-x\": {\"provider\": {\"npm\": \"@ai-sdk/google\"}}}}}");
 
     struct catalog_entry entry;
-    EXPECT(catalog_lookup("zen-hint", "basic", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "zen-hint", "basic", &entry) == 0);
     EXPECT_STR_EQ(entry.api, "openai-completions");
     /* A hint alone counts as metadata, or merging would drop it for uncosted models. */
-    EXPECT(catalog_lookup("zen-hint", "claude-x", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "zen-hint", "claude-x", &entry) == 0);
     EXPECT_STR_EQ(entry.api, "anthropic-messages");
-    EXPECT(catalog_lookup("zen-hint", "gpt-x", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "zen-hint", "gpt-x", &entry) == 0);
     EXPECT_STR_EQ(entry.api, "openai-responses");
-    EXPECT(catalog_lookup("zen-hint", "gem-x", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "zen-hint", "gem-x", &entry) == 0);
     EXPECT_STR_EQ(entry.api, "unsupported");
-    catalog_lookup("zen-hint", "absent", &entry);
+    catalog_lookup(NULL, "zen-hint", "absent", &entry);
     EXPECT(entry.api == NULL);
 
     write_cache_fixture(CACHE_FIXTURE); /* later tests re-parse the shared snapshot */
@@ -567,20 +610,20 @@ static void test_interleaved_hints(void)
                         "\"quiet\": {\"cost\": {\"input\": 1, \"output\": 2}}}}}");
 
     struct catalog_entry entry;
-    EXPECT(catalog_lookup("zen-think", "content", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "zen-think", "content", &entry) == 0);
     EXPECT_STR_EQ(entry.interleaved_field, "reasoning_content");
-    EXPECT(catalog_lookup("zen-think", "plain", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "zen-think", "plain", &entry) == 0);
     EXPECT_STR_EQ(entry.interleaved_field, "reasoning");
-    EXPECT(catalog_lookup("zen-think", "bare", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "zen-think", "bare", &entry) == 0);
     EXPECT_STR_EQ(entry.interleaved_field, "reasoning_content");
 
-    catalog_lookup("zen-think", "details", &entry);
+    catalog_lookup(NULL, "zen-think", "details", &entry);
     EXPECT(entry.interleaved_field == NULL);
-    catalog_lookup("zen-think", "toggle", &entry);
+    catalog_lookup(NULL, "zen-think", "toggle", &entry);
     EXPECT(entry.interleaved_field == NULL);
-    catalog_lookup("zen-think", "off", &entry);
+    catalog_lookup(NULL, "zen-think", "off", &entry);
     EXPECT(entry.interleaved_field == NULL);
-    EXPECT(catalog_lookup("zen-think", "quiet", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "zen-think", "quiet", &entry) == 0);
     EXPECT(entry.interleaved_field == NULL);
 
     /* catalog.models can pin the member for a model the snapshot says nothing about, and can
@@ -590,15 +633,15 @@ static void test_interleaved_hints(void)
                        "  \"quiet\": {\"interleaved\": {\"field\": \"reasoning_content\"}},"
                        "  \"content\": {\"interleaved\": false}}}}}") == 0);
     catalog_shutdown();
-    EXPECT(catalog_lookup("zen-think", "quiet", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "zen-think", "quiet", &entry) == 0);
     EXPECT_STR_EQ(entry.interleaved_field, "reasoning_content");
-    EXPECT(catalog_lookup("zen-think", "content", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "zen-think", "content", &entry) == 0);
     EXPECT(entry.interleaved_field == NULL);
     EXPECT(config_load(NULL) == 0);
     catalog_shutdown();
 
     /* Without the override the snapshot's hint stands. */
-    EXPECT(catalog_lookup("zen-think", "content", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "zen-think", "content", &entry) == 0);
     EXPECT_STR_EQ(entry.interleaved_field, "reasoning_content");
 
     write_cache_fixture(CACHE_FIXTURE); /* later tests re-parse the shared snapshot */
@@ -623,13 +666,13 @@ static void test_config_api_override(void)
                        "}}}}") == 0);
 
     struct catalog_entry entry;
-    EXPECT(catalog_lookup("zen-api", "pinned", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "zen-api", "pinned", &entry) == 0);
     EXPECT_STR_EQ(entry.api, "openai-responses");
-    EXPECT(catalog_lookup("zen-api", "typo", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "zen-api", "typo", &entry) == 0);
     EXPECT_STR_EQ(entry.api, "unsupported");
     /* A config entry complete in every field it can express still merges the cache-only api
      * hint instead of silently defaulting the wire. */
-    EXPECT(catalog_lookup("zen-api", "priced", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "zen-api", "priced", &entry) == 0);
     EXPECT(entry.cost_input == 1);
     EXPECT_STR_EQ(entry.api, "anthropic-messages");
 
@@ -642,14 +685,14 @@ static void test_memoization_and_shutdown_clear(void)
     /* Snapshot answers remain memoized until shutdown. This test runs last because it replaces the
      * shared fixture. */
     struct catalog_entry entry;
-    EXPECT(catalog_lookup("openai", "o3", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "o3", &entry) == 0);
     EXPECT(entry.cost_input == 2);
     write_cache_fixture("{\"openai\": {\"models\": {"
                         "\"o3\": {\"cost\": {\"input\": 5, \"output\": 8}}}}}");
-    EXPECT(catalog_lookup("openai", "o3", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "o3", &entry) == 0);
     EXPECT(entry.cost_input == 2); /* memo hit, not the rewritten file */
     catalog_shutdown();            /* joins workers, clears the memo */
-    EXPECT(catalog_lookup("openai", "o3", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "o3", &entry) == 0);
     EXPECT(entry.cost_input == 5); /* fresh parse sees the new snapshot */
 }
 
@@ -665,6 +708,8 @@ int main(void)
     test_lookup_miss();
     test_lookup_many();
     test_config_overrides_and_merges();
+    test_config_scoped_by_runtime_provider_id();
+    test_config_lookup_ignores_snapshot();
     test_price_formula();
     test_price_surcharge_style_writes();
     test_price_tiers();

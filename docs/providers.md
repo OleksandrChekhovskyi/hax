@@ -66,6 +66,25 @@ none is configured, choose a model with `/model` or pass `--model`.
 response, so any `~$` amount is an API-equivalent estimate from model metadata, not a charge against
 the subscription.
 
+Codex serves some models a smaller default context window than they support — the `/model` picker
+shows the sanctioned ceiling as "272k context (up to 872k)". A
+[`catalog.models`](./configuration.md#model-metadata) override raises the window for
+one model; keying the block `codex` leaves the `openai` provider alone:
+
+```json
+{
+  "catalog": {
+    "models": {
+      "codex": {
+        "gpt-5.6-luna": {"limit": {"context": 872000}}
+      }
+    }
+  }
+}
+```
+
+Values above the ceiling are not clamped; the backend rejects requests larger than it actually serves.
+
 ## OpenAI
 
 ```sh

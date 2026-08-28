@@ -84,8 +84,10 @@ structured values such as `providers`, `presets`, and `catalog.models` nested fo
 
 Scalar strings, numbers, and booleans are accepted. Booleans recognize `1/0`, `true/false`,
 `yes/no`, and `on/off`, case-insensitively. Durations accept seconds or `ms`, `s`, `m`, and `h`
-suffixes. Sizes accept plain bytes or `k` and `m` suffixes using 1024-base units. Invalid typed
-values use the setting's default; `/config` rejects invalid runtime values with an error.
+suffixes. Byte sizes accept plain bytes or `k` and `m` suffixes using 1024-base units; token
+counts (`context_limit`, catalog `limit` fields) use decimal `k` and `m`, so `"272k"` means
+272000 tokens. Invalid typed values use the setting's default; `/config` rejects invalid runtime
+values with an error.
 
 Keep secrets in environment variables where possible:
 
@@ -247,7 +249,7 @@ provider-dependent.
 rarely report a light background reliably, so set `light` explicitly if auto detection is wrong.
 `theme=ansi` uses the terminal's own 16-color palette; identity tints apply only to dark/light themes.
 
-### Recording and model metadata
+### Recording
 
 | Config key | Environment | Default | Purpose |
 | --- | --- | --- | --- |
@@ -255,6 +257,11 @@ rarely report a light background reliably, so set `light` explicitly if auto det
 | `session_retention_days` | `HAX_SESSION_RETENTION_DAYS` | `30` | Remove inactive sessions after N days; `0` keeps them. |
 | `transcript` | `HAX_TRANSCRIPT` | — | Mirror the Ctrl-T transcript to a file. |
 | `trace` | `HAX_TRACE` | — | Write an HTTP/SSE diagnostic trace. |
+
+### Model metadata
+
+| Config key | Environment | Default | Purpose |
+| --- | --- | --- | --- |
 | `catalog.url` | `HAX_CATALOG_URL` | models.dev | Metadata catalog URL; empty disables fetching. |
 | `catalog.refresh` | `HAX_CATALOG_REFRESH` | `24h` | Refresh age; `0` disables fetching. |
 
@@ -280,10 +287,13 @@ Per-model overrides can be placed under `catalog.models`, with costs in USD per 
 }
 ```
 
-Configured fields override cached fields individually. Model API overrides for mixed gateways are
-covered under [Custom providers](./providers.md#custom-providers). A `~` on displayed spend means the
-result is estimated from token counts and this metadata; check provider billing for authoritative
-costs.
+Blocks are keyed by the runtime provider id (the `providers.<id>` name) or by the models.dev
+provider key when the two differ; the runtime-id block wins field by field. Configured fields
+override both the cached snapshot and metadata the provider reports live — see
+[Codex](./providers.md#codex) for a worked context-window override. Model API overrides for mixed
+gateways are covered under [Custom providers](./providers.md#custom-providers). A `~` on displayed
+spend means the result is estimated from token counts and this metadata; check provider billing
+for authoritative costs.
 
 ### Tools and transport
 

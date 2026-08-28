@@ -269,6 +269,7 @@ struct model_info {
     char *id;          /* owned exact wire id; NULL in metadata-only merged views */
     char *description; /* owned one-line description; NULL when absent */
     long context;      /* served context window in tokens; 0 = unknown */
+    long max_context;  /* provider-declared ceiling for context overrides; 0 = unknown */
     long max_output;   /* maximum output tokens per response; 0 = unknown */
     enum provider_cap image_input;
     enum provider_cap tools;

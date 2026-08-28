@@ -79,6 +79,8 @@ static void report_fill_unknown(struct model_info *report, const struct model_in
 {
     if (report->context <= 0)
         report->context = retained->context;
+    if (report->max_context <= 0)
+        report->max_context = retained->max_context;
     if (report->max_output <= 0)
         report->max_output = retained->max_output;
     if (report->image_input == PROVIDER_CAP_UNKNOWN)
@@ -217,9 +219,10 @@ void model_meta_wait_ms(struct provider *provider, long timeout_ms)
 
 static int model_info_has_details(const struct model_info *info)
 {
-    return info->context > 0 || info->max_output > 0 || info->image_input != PROVIDER_CAP_UNKNOWN ||
-           info->tools != PROVIDER_CAP_UNKNOWN || info->efforts.known || info->cost_input >= 0 ||
-           info->cost_output >= 0 || info->cost_cache_read >= 0 || info->cost_cache_write >= 0 ||
+    return info->context > 0 || info->max_context > 0 || info->max_output > 0 ||
+           info->image_input != PROVIDER_CAP_UNKNOWN || info->tools != PROVIDER_CAP_UNKNOWN ||
+           info->efforts.known || info->cost_input >= 0 || info->cost_output >= 0 ||
+           info->cost_cache_read >= 0 || info->cost_cache_write >= 0 ||
            info->cost_cache_write_1h >= 0 || info->n_tiers > 0;
 }
 
@@ -282,8 +285,19 @@ static void load_catalog_entry(const struct provider *provider, const char *mode
                                struct catalog_entry *out)
 {
     catalog_entry_init(out);
-    if (provider && provider->catalog_id && *provider->catalog_id && model && *model)
-        catalog_lookup(provider->catalog_id, model, out);
+    if (provider && model && *model)
+        catalog_lookup(provider_stable_id(provider), provider->catalog_id, model, out);
+}
+
+/* Returns 1 when configuration declares any metadata for `model`. */
+static int load_config_entry(const struct provider *provider, const char *model,
+                             struct catalog_entry *out)
+{
+    catalog_entry_init(out);
+    if (!provider || !model || !*model)
+        return 0;
+    return catalog_lookup_config(provider_stable_id(provider), provider->catalog_id, model, out) ==
+           0;
 }
 
 static int report_has_base_rates(const struct model_info *report)
@@ -291,8 +305,35 @@ static int report_has_base_rates(const struct model_info *report)
     return report && (report->cost_input >= 0 || report->cost_output >= 0);
 }
 
-void model_meta_merge(const struct model_info *reported, const struct catalog_entry *catalog,
-                      struct model_info *out)
+/* Apply one catalog-shaped layer: with `entry_wins`, known entry fields replace `out`'s; without
+ * it they only fill unknowns. Tiers stay with the caller — their rule spans layers. */
+static void merge_entry_fields(struct model_info *out, const struct catalog_entry *entry,
+                               int entry_wins)
+{
+    if (entry->context_window > 0 && (entry_wins || out->context <= 0))
+        out->context = entry->context_window;
+    if (entry->max_output > 0 && (entry_wins || out->max_output <= 0))
+        out->max_output = entry->max_output;
+    if (entry->image_input != CATALOG_SUPPORT_UNKNOWN &&
+        (entry_wins || out->image_input == PROVIDER_CAP_UNKNOWN))
+        out->image_input =
+            entry->image_input == CATALOG_SUPPORT_YES ? PROVIDER_CAP_YES : PROVIDER_CAP_NO;
+    if (entry->cost_input >= 0 && (entry_wins || out->cost_input < 0))
+        out->cost_input = entry->cost_input;
+    if (entry->cost_output >= 0 && (entry_wins || out->cost_output < 0))
+        out->cost_output = entry->cost_output;
+    if (entry->cost_cache_read >= 0 && (entry_wins || out->cost_cache_read < 0))
+        out->cost_cache_read = entry->cost_cache_read;
+    if (entry->cost_cache_write >= 0 && (entry_wins || out->cost_cache_write < 0))
+        out->cost_cache_write = entry->cost_cache_write;
+    if (entry->cost_cache_write_1h >= 0 && (entry_wins || out->cost_cache_write_1h < 0))
+        out->cost_cache_write_1h = entry->cost_cache_write_1h;
+    if (entry->efforts.known && (entry_wins || !out->efforts.known))
+        out->efforts = entry->efforts;
+}
+
+void model_meta_merge(const struct catalog_entry *configured, const struct model_info *reported,
+                      const struct catalog_entry *catalog, struct model_info *out)
 {
     model_info_init(out);
     if (reported) {
@@ -300,50 +341,41 @@ void model_meta_merge(const struct model_info *reported, const struct catalog_en
         out->id = NULL;
         out->description = NULL;
     }
-    if (!catalog)
-        return;
-
-    if (out->context <= 0)
-        out->context = catalog->context_window;
-    if (out->max_output <= 0)
-        out->max_output = catalog->max_output;
-    if (out->image_input == PROVIDER_CAP_UNKNOWN && catalog->image_input != CATALOG_SUPPORT_UNKNOWN)
-        out->image_input =
-            catalog->image_input == CATALOG_SUPPORT_YES ? PROVIDER_CAP_YES : PROVIDER_CAP_NO;
-    if (out->cost_input < 0)
-        out->cost_input = catalog->cost_input;
-    if (out->cost_output < 0)
-        out->cost_output = catalog->cost_output;
-    if (out->cost_cache_read < 0)
-        out->cost_cache_read = catalog->cost_cache_read;
-    if (out->cost_cache_write < 0)
-        out->cost_cache_write = catalog->cost_cache_write;
-    if (out->cost_cache_write_1h < 0)
-        out->cost_cache_write_1h = catalog->cost_cache_write_1h;
-
-    /* Catalog tiers cannot be combined with base rates reported by a different billing source. */
-    if (out->n_tiers == 0 && !report_has_base_rates(reported)) {
-        memcpy(out->tiers, catalog->tiers, sizeof(out->tiers));
-        out->n_tiers = catalog->n_tiers;
+    if (catalog) {
+        merge_entry_fields(out, catalog, 0);
+        /* Snapshot tiers cannot be combined with base rates reported by a different billing
+         * source. */
+        if (out->n_tiers == 0 && !report_has_base_rates(reported)) {
+            memcpy(out->tiers, catalog->tiers, sizeof(out->tiers));
+            out->n_tiers = catalog->n_tiers;
+        }
     }
-    if (!out->efforts.known)
-        out->efforts = catalog->efforts;
+    if (configured) {
+        merge_entry_fields(out, configured, 1);
+        /* Configured tiers were written against the user's own rate choices and always apply. */
+        if (configured->tiers_declared) {
+            memcpy(out->tiers, configured->tiers, sizeof(out->tiers));
+            out->n_tiers = configured->n_tiers;
+        }
+    }
 }
 
 static void resolve_model_info(const struct provider *provider, const char *model,
                                struct model_info *out)
 {
+    struct catalog_entry configured;
+    int has_config = load_config_entry(provider, model, &configured);
     struct model_info reported;
     int has_report = copy_report(provider, model, &reported);
     struct catalog_entry catalog;
     load_catalog_entry(provider, model, &catalog);
-    model_meta_merge(has_report ? &reported : NULL, &catalog, out);
+    model_meta_merge(has_config ? &configured : NULL, has_report ? &reported : NULL, &catalog, out);
     model_info_clear(&reported);
 }
 
 long model_meta_context(const struct provider *provider, const char *model)
 {
-    long configured = config_size("context_limit");
+    long configured = config_tokens("context_limit");
     if (configured > 0)
         return configured;
 
@@ -404,17 +436,23 @@ void model_meta_efforts(const struct provider *provider, const char *model, stru
     if (provider_level_count == 0)
         return;
 
+    struct catalog_entry configured;
+    int authoritative = load_config_entry(provider, model, &configured) && configured.efforts.known;
     struct effort_set accepted = {0};
-    struct model_info reported;
-    if (copy_report(provider, model, &reported)) {
-        accepted = reported.efforts;
-        model_info_clear(&reported);
-    }
-    int reported_by_provider = accepted.known;
-    if (!accepted.known) {
-        struct catalog_entry catalog;
-        load_catalog_entry(provider, model, &catalog);
-        accepted = catalog.efforts;
+    if (authoritative) {
+        accepted = configured.efforts;
+    } else {
+        struct model_info reported;
+        if (copy_report(provider, model, &reported)) {
+            accepted = reported.efforts;
+            model_info_clear(&reported);
+        }
+        authoritative = accepted.known;
+        if (!accepted.known) {
+            struct catalog_entry catalog;
+            load_catalog_entry(provider, model, &catalog);
+            accepted = catalog.efforts;
+        }
     }
 
     if (!accepted.known) {
@@ -429,8 +467,9 @@ void model_meta_efforts(const struct provider *provider, const char *model, stru
         if (effort_set_has(&accepted, provider_levels[i]))
             effort_set_add(out, provider_levels[i]);
 
-    /* Catalog metadata may narrow a provider's vocabulary; only the provider may extend it. */
-    if (reported_by_provider)
+    /* Snapshot metadata may narrow a provider's vocabulary; only the provider's own report or
+     * explicit configuration may extend it. */
+    if (authoritative)
         for (size_t i = 0; i < accepted.count; i++)
             effort_set_add(out, accepted.values[i]);
 }

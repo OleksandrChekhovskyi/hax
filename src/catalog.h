@@ -8,8 +8,9 @@
 
 /* The model catalog resolves per-model pricing, token limits, image support, and reasoning-effort
  * metadata. User `catalog.models` configuration takes precedence over a cached models.dev
- * snapshot; missing providers, models, and fields remain unknown. `provider_id` is the models.dev
- * provider key and may differ from the runtime provider name. The prefetch lifecycle refreshes the
+ * snapshot; missing providers, models, and fields remain unknown. Lookups take two keys: the
+ * runtime provider id scopes configuration to one provider, and the models.dev `catalog_id` names
+ * the snapshot identity, which several providers may share. The prefetch lifecycle refreshes the
  * cached snapshot asynchronously. */
 
 #define CATALOG_TIERS_MAX 4
@@ -69,16 +70,29 @@ struct catalog_entry {
 /* Initialize every field to its documented unknown state. */
 void catalog_entry_init(struct catalog_entry *entry);
 
-/* Resolve one model. Configuration wins field by field over the cached snapshot. Returns 0 when
- * any metadata resolved and -1 otherwise. `out` is always initialized. Results from the snapshot,
- * including misses, are memoized until a successful refresh. */
-int catalog_lookup(const char *provider_id, const char *model, struct catalog_entry *out);
+/* Resolve one model. Configuration under `provider_id` wins field by field over configuration
+ * under `catalog_id`, which wins over the cached snapshot (keyed by `catalog_id` alone). Either
+ * key may be NULL or empty. Returns 0 when any metadata resolved and -1 otherwise. `out` is always
+ * initialized. Results from the snapshot, including misses, are memoized until a successful
+ * refresh. */
+int catalog_lookup(const char *provider_id, const char *catalog_id, const char *model,
+                   struct catalog_entry *out);
+
+/* Resolve one model from the catalog.models configuration tier alone, ignoring the snapshot.
+ * Callers use this entry to rank explicit configuration above provider-reported metadata. Same
+ * keying and return convention as catalog_lookup. */
+int catalog_lookup_config(const char *provider_id, const char *catalog_id, const char *model,
+                          struct catalog_entry *out);
+
+/* Return whether catalog.models configuration names a wire dialect for any model under
+ * `provider_id`. Cost or limit overrides alone cannot route a catalog-wired provider. */
+int catalog_config_routes_models(const char *provider_id);
 
 /* Resolve `model_count` models for one provider while loading its cached snapshot once. `models`
  * and `out` must contain `model_count` elements. If non-NULL, `found[i]` receives 1 when any
  * metadata resolved and 0 otherwise. NULL or empty model IDs are unresolved. */
-void catalog_lookup_many(const char *provider_id, const char *const *models, size_t model_count,
-                         struct catalog_entry *out, int *found);
+void catalog_lookup_many(const char *provider_id, const char *catalog_id, const char *const *models,
+                         size_t model_count, struct catalog_entry *out, int *found);
 
 /* Parse the top-level member named `key` without tree-parsing the full JSON object. Returns a new
  * reference, or NULL when the member is absent or malformed. The caller must call json_decref. */

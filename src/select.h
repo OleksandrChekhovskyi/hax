@@ -28,10 +28,11 @@ void select_restore_session(struct agent_state *state, const char *provider_id, 
 /* Open the settings picker, or apply "<key> [value]" as a run-scoped override. */
 void select_config(struct agent_state *state, const char *argument);
 
-/* Build an owned model-picker description. `model` is required; `catalog` may be NULL and fills
- * gaps behind backend metadata. Unknown fields are omitted. Returns NULL when there is nothing to
- * describe. */
-char *model_desc_line(const struct model_info *model, const struct catalog_entry *catalog);
+/* Build an owned model-picker description. `model` is required; `configured` and `catalog` may be
+ * NULL and merge around it with model_meta_merge precedence. Unknown fields are omitted. Returns
+ * NULL when there is nothing to describe. */
+char *model_desc_line(const struct model_info *model, const struct catalog_entry *configured,
+                      const struct catalog_entry *catalog);
 
 /* Return the first available provider in autoselect priority order, newly constructed, or NULL. */
 struct provider *provider_autoselect(void);

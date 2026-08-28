@@ -26,7 +26,7 @@ static void test_reported_full(void)
     model.cost_output = 50;
     model.description = "Fast-mode variant.";
 
-    char *description = model_desc_line(&model, NULL);
+    char *description = model_desc_line(&model, NULL, NULL);
     EXPECT_STR_EQ(description,
                   "1M context · $10 in / $1 cached / $50 out per Mtok\nFast-mode variant.");
     free(description);
@@ -45,7 +45,7 @@ static void test_catalog_fills_gaps(void)
     catalog.cost_cache_read = 0.125;
     catalog.cost_output = 10;
 
-    char *description = model_desc_line(&model, &catalog);
+    char *description = model_desc_line(&model, NULL, &catalog);
     EXPECT_STR_EQ(description, "272k context · $1.25 in / $0.125 cached / $10 out per Mtok");
     free(description);
 }
@@ -56,10 +56,30 @@ static void test_unknown_fields_omitted(void)
     model_info_init(&model);
     model.id = "some-model";
 
-    EXPECT(model_desc_line(&model, NULL) == NULL);
+    EXPECT(model_desc_line(&model, NULL, NULL) == NULL);
 
     struct catalog_entry catalog = unknown_catalog_entry();
-    EXPECT(model_desc_line(&model, &catalog) == NULL);
+    EXPECT(model_desc_line(&model, NULL, &catalog) == NULL);
+}
+
+static void test_override_ceiling_shown(void)
+{
+    /* codex serves a default window below the model's sanctioned override ceiling. */
+    struct model_info model;
+    model_info_init(&model);
+    model.context = 272000;
+    model.max_context = 872000;
+
+    char *description = model_desc_line(&model, NULL, NULL);
+    EXPECT_STR_EQ(description, "272k context (up to 872k)");
+    free(description);
+
+    /* A configured override raised to the ceiling leaves nothing to advertise. */
+    struct catalog_entry configured = unknown_catalog_entry();
+    configured.context_window = 872000;
+    description = model_desc_line(&model, &configured, NULL);
+    EXPECT_STR_EQ(description, "872k context");
+    free(description);
 }
 
 static void test_image_input_only_when_absent(void)
@@ -70,14 +90,14 @@ static void test_image_input_only_when_absent(void)
     model.context = 32000;
     model.image_input = PROVIDER_CAP_NO;
 
-    char *description = model_desc_line(&model, NULL);
+    char *description = model_desc_line(&model, NULL, NULL);
     EXPECT_STR_EQ(description, "32k context · no images");
     free(description);
 
     model_info_init(&model);
     model.context = 32000;
     model.image_input = PROVIDER_CAP_YES;
-    description = model_desc_line(&model, NULL);
+    description = model_desc_line(&model, NULL, NULL);
     EXPECT_STR_EQ(description, "32k context");
     free(description);
 }
@@ -92,13 +112,13 @@ static void test_tools_stay_off_the_gutter(void)
     model.context = 32000;
     model.tools = PROVIDER_CAP_NO;
 
-    char *description = model_desc_line(&model, NULL);
+    char *description = model_desc_line(&model, NULL, NULL);
     EXPECT_STR_EQ(description, "32k context");
     free(description);
 
     model_info_init(&model);
     model.tools = PROVIDER_CAP_NO;
-    EXPECT(model_desc_line(&model, NULL) == NULL);
+    EXPECT(model_desc_line(&model, NULL, NULL) == NULL);
 }
 
 static void test_power_of_two_window(void)
@@ -109,13 +129,13 @@ static void test_power_of_two_window(void)
     model_info_init(&model);
     model.context = 1048576;
 
-    char *description = model_desc_line(&model, NULL);
+    char *description = model_desc_line(&model, NULL, NULL);
     EXPECT_STR_EQ(description, "1M context");
     free(description);
 
     model_info_init(&model);
     model.context = 1500000;
-    description = model_desc_line(&model, NULL);
+    description = model_desc_line(&model, NULL, NULL);
     EXPECT_STR_EQ(description, "1.5M context");
     free(description);
 }
@@ -128,7 +148,7 @@ static void test_free_model(void)
     model.cost_input = 0;
     model.cost_output = 0;
 
-    char *description = model_desc_line(&model, NULL);
+    char *description = model_desc_line(&model, NULL, NULL);
     EXPECT_STR_EQ(description, "free");
     free(description);
 }
@@ -139,7 +159,7 @@ static void test_description_only(void)
     model_info_init(&model);
     model.description = "Latest frontier agentic coding model.";
 
-    char *description = model_desc_line(&model, NULL);
+    char *description = model_desc_line(&model, NULL, NULL);
     EXPECT_STR_EQ(description, "Latest frontier agentic coding model.");
     free(description);
 }
@@ -149,6 +169,7 @@ int main(void)
     test_reported_full();
     test_catalog_fills_gaps();
     test_unknown_fields_omitted();
+    test_override_ceiling_shown();
     test_image_input_only_when_absent();
     test_tools_stay_off_the_gutter();
     test_power_of_two_window();

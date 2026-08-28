@@ -21,6 +21,14 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- Token counts are decimal everywhere, unlike byte sizes, which keep 1024-base suffixes. The
+  stats line, `/session`, and the `/model` picker agree ("200k" for a 200000-token window rather
+  than "195k"), and `context_limit` and catalog `limit` fields written with suffixes now parse
+  decimally: `"272k"` means 272000 tokens.
+- `catalog.models` overrides now beat metadata the provider reports live, and blocks may be keyed
+  by the runtime provider id, so codex models can be overridden separately from `openai`. This
+  allows raising codex's served context window per model; the `/model` picker shows the sanctioned
+  ceiling ("272k context (up to 872k)"). See [docs/providers.md](docs/providers.md#codex).
 - Skill discovery now follows the cross-agent `.agents/skills` convention: project skills are
   collected from the current directory up to the repository root, as `AGENTS.md` already was, and
   `~/.agents/skills` is read alongside `~/.config/hax/skills`. Skills installed globally by other

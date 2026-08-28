@@ -260,15 +260,16 @@ static const struct wire *resolve_model_wire(struct http_provider *provider, con
         if (fnmatch(provider->wire_rules[i].pattern, model, 0) == 0)
             return provider->wire_rules[i].wire;
 
-    if (provider->catalog_wires && provider->catalog_id) {
+    if (provider->catalog_wires) {
+        const char *provider_id = provider_stable_id(&provider->base);
         struct catalog_entry entry;
-        catalog_lookup(provider->catalog_id, model, &entry);
-        if (!entry.api) {
+        catalog_lookup(provider_id, provider->catalog_id, model, &entry);
+        if (!entry.api && provider->catalog_id) {
             /* A fresh install may still be fetching the snapshot, and guessing here would
              * speak the wrong protocol to the model: wait, bounded, and look again. A fetch
              * outliving the wait keeps running so later requests can route by it. */
             catalog_wait(WIRE_HINT_FETCH_WAIT_MS);
-            catalog_lookup(provider->catalog_id, model, &entry);
+            catalog_lookup(provider_id, provider->catalog_id, model, &entry);
         }
         if (entry.api)
             return wire_find(entry.api);
@@ -282,11 +283,11 @@ static const struct wire *resolve_model_wire(struct http_provider *provider, con
 static const char *resolve_model_reasoning_field(const struct http_provider *provider,
                                                  const char *model)
 {
-    if (provider->reasoning_field_pinned || !provider->catalog_id)
+    if (provider->reasoning_field_pinned)
         return provider->reasoning_field;
 
     struct catalog_entry entry;
-    catalog_lookup(provider->catalog_id, model, &entry);
+    catalog_lookup(provider_stable_id(&provider->base), provider->catalog_id, model, &entry);
     return entry.interleaved_field ? entry.interleaved_field : provider->reasoning_field;
 }
 
@@ -838,9 +839,10 @@ struct provider *http_provider_new(const struct provider_def *def)
         provider->metadata_wire = provider->wire;
     resolve_wire_rules(provider, prefix);
     provider->catalog_wires = routes_wires;
-    /* Catalog routing with neither rules nor a catalog identity would silently send every model
-     * to the default wire. */
-    if (provider->catalog_wires && !provider->catalog_id && provider->n_wire_rules == 0)
+    /* Catalog routing with no rules, no catalog identity, and no configured api hint would
+     * silently send every model to the default wire. */
+    if (provider->catalog_wires && !provider->catalog_id && provider->n_wire_rules == 0 &&
+        !catalog_config_routes_models(name))
         hax_warn("provider '%s': models route by catalog metadata, but catalog_id is empty",
                  provider->name);
     /* Resolved regardless of the default wire: per-model rules can route to Messages. */

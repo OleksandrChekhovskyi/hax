@@ -79,6 +79,9 @@ char *dup_trim_trailing_slash(const char *str);
 /* Parse positive byte counts with optional case-insensitive k/m binary suffixes. */
 long parse_size(const char *str);
 
+/* Parse positive token counts: same grammar, decimal suffixes (k = 1000, m = 1000000). */
+long parse_token_count(const char *str);
+
 /* Parse a non-negative duration with an optional ms/s/m/h suffix and return milliseconds. A missing
  * suffix means seconds. Returns -1 for invalid input. */
 long parse_duration_ms(const char *str);
@@ -89,7 +92,8 @@ int parse_int(const char *str, int *out);
 /* CLOCK_MONOTONIC milliseconds since an unspecified epoch. */
 long monotonic_ms(void);
 
-/* Use binary k/M suffixes for token counts; negative values produce "?". */
+/* Use decimal k/M suffixes for token counts — tokens are specified and billed in decimal
+ * multiples, unlike bytes. Negative values produce "?". */
 void format_tokens(char *out, size_t out_size, long tokens);
 /* Round to seconds and format compactly, omitting zero remainders ("10m", "2h"); non-positive
  * values produce "0s". */

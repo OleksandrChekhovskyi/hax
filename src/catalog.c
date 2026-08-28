@@ -63,7 +63,7 @@ static long member_tokens(json_t *object, const char *name)
         long tokens = (long)json_integer_value(value);
         return tokens > 0 ? tokens : 0;
     }
-    return parse_size(json_string_value(value));
+    return parse_token_count(json_string_value(value));
 }
 
 static void fill_tiers(struct catalog_entry *entry, json_t *tiers)
@@ -223,11 +223,12 @@ static void fill_entry(struct catalog_entry *entry, json_t *model_object)
 
 static int entry_has_metadata(const struct catalog_entry *entry)
 {
-    /* A tier-only entry can still price requests above its threshold. */
+    /* A declared tier list is a real answer even when empty: it explicitly selects flat
+     * pricing and must survive to override a tiered report. */
     return entry->cost_input >= 0 || entry->cost_output >= 0 || entry->cost_cache_read >= 0 ||
            entry->cost_cache_write >= 0 || entry->cost_cache_write_1h >= 0 ||
            entry->context_window > 0 || entry->max_output > 0 ||
-           entry->image_input != CATALOG_SUPPORT_UNKNOWN || entry->n_tiers > 0 ||
+           entry->image_input != CATALOG_SUPPORT_UNKNOWN || entry->tiers_declared ||
            entry->efforts.known || entry->api != NULL || entry->interleaved_declared;
 }
 
@@ -437,16 +438,38 @@ static int catalog_text_valid(const char *text)
 
 /* ---------------- config tier: the catalog.models block ---------------- */
 
+static json_t *config_provider_block(const char *provider_id)
+{
+    if (!provider_id || !*provider_id)
+        return NULL;
+    const json_t *models = config_json_node("catalog.models");
+    if (!json_is_object(models))
+        return NULL;
+    json_t *provider = json_object_get((json_t *)models, provider_id);
+    return json_is_object(provider) ? provider : NULL;
+}
+
+int catalog_config_routes_models(const char *provider_id)
+{
+    json_t *provider = config_provider_block(provider_id);
+    if (!provider)
+        return 0;
+    const char *model;
+    json_t *entry;
+    json_object_foreach(provider, model, entry)
+    {
+        if (json_is_object(entry) && json_is_string(json_object_get(entry, "api")))
+            return 1;
+    }
+    return 0;
+}
+
 static void fill_from_config(const char *provider_id, const char *model,
                              struct catalog_entry *entry)
 {
-    const json_t *models = config_json_node("catalog.models");
-    if (!json_is_object(models))
-        return;
-    json_t *provider = json_object_get((json_t *)models, provider_id);
-    if (!json_is_object(provider))
-        return;
-    fill_entry(entry, json_object_get(provider, model));
+    json_t *provider = config_provider_block(provider_id);
+    if (provider)
+        fill_entry(entry, json_object_get(provider, model));
 }
 
 /* ---------------- cache tier: the fetched snapshot ---------------- */
@@ -610,44 +633,55 @@ static int cache_source_slice(const struct cache_source *source, const char *mod
 }
 
 /* Config fields take precedence; a NULL cache source resolves from config alone. */
-static int resolve_entry(const char *provider_id, const char *model,
+static int resolve_entry(const char *provider_id, const char *catalog_id, const char *model,
                          const struct cache_source *cache, struct catalog_entry *out)
 {
     catalog_entry_init(out);
-    if (!provider_id || !*provider_id || !model || !*model)
+    if (!model || !*model)
         return 0;
+    fill_from_config(provider_id, model, out);
+    if (!catalog_id || !provider_id || strcmp(provider_id, catalog_id) != 0)
+        fill_from_config(catalog_id, model, out);
     /* Always consult the cache: some fields (the SDK-derived api hint) exist only there, and
      * merging fills gaps without disturbing configured values. */
-    fill_from_config(provider_id, model, out);
     struct catalog_entry cached;
     if (cache && cache->fill(cache, model, &cached))
         merge_entry(out, &cached);
     return entry_has_metadata(out);
 }
 
-int catalog_lookup(const char *provider_id, const char *model, struct catalog_entry *out)
+int catalog_lookup(const char *provider_id, const char *catalog_id, const char *model,
+                   struct catalog_entry *out)
 {
-    struct cache_source memo = {.fill = cache_source_memo, .provider_id = provider_id};
-    return resolve_entry(provider_id, model, &memo, out) ? 0 : -1;
+    struct cache_source memo = {.fill = cache_source_memo, .provider_id = catalog_id};
+    int has_snapshot = catalog_id && *catalog_id;
+    return resolve_entry(provider_id, catalog_id, model, has_snapshot ? &memo : NULL, out) ? 0 : -1;
 }
 
-void catalog_lookup_many(const char *provider_id, const char *const *models, size_t model_count,
-                         struct catalog_entry *out, int *found)
+int catalog_lookup_config(const char *provider_id, const char *catalog_id, const char *model,
+                          struct catalog_entry *out)
+{
+    return resolve_entry(provider_id, catalog_id, model, NULL, out) ? 0 : -1;
+}
+
+void catalog_lookup_many(const char *provider_id, const char *catalog_id, const char *const *models,
+                         size_t model_count, struct catalog_entry *out, int *found)
 {
     for (size_t i = 0; i < model_count; i++) {
         catalog_entry_init(&out[i]);
         if (found)
             found[i] = 0;
     }
-    if (!provider_id || !*provider_id || model_count == 0)
+    if (model_count == 0)
         return;
 
     /* A missing provider slice falls back to config without retrying the file per model. */
-    json_t *provider = cache_provider_slice(provider_id);
+    json_t *provider = catalog_id && *catalog_id ? cache_provider_slice(catalog_id) : NULL;
     struct cache_source cache = {
-        .fill = cache_source_slice, .provider_id = provider_id, .slice = provider};
+        .fill = cache_source_slice, .provider_id = catalog_id, .slice = provider};
     for (size_t i = 0; i < model_count; i++) {
-        int resolved = resolve_entry(provider_id, models[i], provider ? &cache : NULL, &out[i]);
+        int resolved =
+            resolve_entry(provider_id, catalog_id, models[i], provider ? &cache : NULL, &out[i]);
         if (found)
             found[i] = resolved;
     }

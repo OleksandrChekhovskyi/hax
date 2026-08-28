@@ -56,6 +56,7 @@ size_t config_object_keys(const char *key, char ***out);
 int config_int(const char *key);
 int config_bool(const char *key);
 long config_size(const char *key);
+long config_tokens(const char *key);
 long config_duration_ms(const char *key);
 
 /* Parse a boolean setting, using `default_value` when it is unset or invalid. */
@@ -153,7 +154,8 @@ size_t config_preset_names(char ***out);
 enum config_kind {
     CONFIG_KIND_STRING = 0,
     CONFIG_KIND_INT,
-    CONFIG_KIND_SIZE,
+    CONFIG_KIND_SIZE,   /* bytes; binary k/m suffixes */
+    CONFIG_KIND_TOKENS, /* token counts; decimal k/m suffixes */
     CONFIG_KIND_DURATION,
 };
 

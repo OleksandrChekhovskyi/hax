@@ -104,7 +104,8 @@ static int wait_for_rate(const char *provider_id, const char *model, double expe
 {
     for (int attempt = 0; attempt < 300; attempt++) {
         struct catalog_entry entry;
-        if (catalog_lookup(provider_id, model, &entry) == 0 && entry.cost_input == expected_rate)
+        if (catalog_lookup(NULL, provider_id, model, &entry) == 0 &&
+            entry.cost_input == expected_rate)
             return 1;
         struct timespec ts = {0, 10 * 1000 * 1000};
         nanosleep(&ts, NULL);
@@ -147,7 +148,7 @@ static void scenario_refresh_invalidates_memo(void)
                    "\"m2\": {\"cost\": {\"input\": 2, \"output\": 1}}}}}");
 
     struct catalog_entry entry;
-    EXPECT(catalog_lookup("openai", "m2", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "m2", &entry) == 0);
     EXPECT(entry.cost_input == 2); /* old snapshot, now memoized */
 
     pthread_t server_thread;
@@ -169,7 +170,7 @@ static void run_bad_payload_scenario(const char *name, const char *bad_body)
                    "\"m3\": {\"cost\": {\"input\": 2, \"output\": 1}}}}}");
 
     struct catalog_entry entry;
-    EXPECT(catalog_lookup("openai", "m3", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "m3", &entry) == 0);
     EXPECT(entry.cost_input == 2);
 
     pthread_t server_thread;
@@ -185,7 +186,7 @@ static void run_bad_payload_scenario(const char *name, const char *bad_body)
     catalog_shutdown();
 
     /* Shutdown clears the memo, forcing this lookup to read the snapshot on disk. */
-    EXPECT(catalog_lookup("openai", "m3", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "m3", &entry) == 0);
     EXPECT(entry.cost_input == 2);
 }
 
@@ -250,7 +251,7 @@ static void scenario_drain_completes_fetch(void)
     EXPECT(catalog_prefetch() == 0);
     catalog_drain(5000);
     struct catalog_entry entry;
-    EXPECT(catalog_lookup("openai", "m5", &entry) == 0);
+    EXPECT(catalog_lookup(NULL, "openai", "m5", &entry) == 0);
     EXPECT(entry.cost_input == 7);
 
     pthread_join(server_thread, NULL);

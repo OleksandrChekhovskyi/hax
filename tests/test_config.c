@@ -63,7 +63,7 @@ static void test_scalar_normalization(void)
      * the file wrote 64000 or "64000", true or "1". */
     EXPECT(config_load("{\"context_limit\": 64000, \"display_width\": 120,"
                        " \"show_reasoning\": true}") == 0);
-    EXPECT(config_size("context_limit") == 64000);
+    EXPECT(config_tokens("context_limit") == 64000);
     EXPECT(config_int("display_width") == 120);
     EXPECT(config_bool("show_reasoning") == 1);
     EXPECT(config_load("{\"show_reasoning\": false}") == 0);
@@ -75,13 +75,13 @@ static void test_typed_getters(void)
     clear_env();
     EXPECT(config_load("{\"context_limit\": \"64k\", \"display_width\": \"100\","
                        " \"show_reasoning\": \"0\"}") == 0);
-    EXPECT(config_size("context_limit") == 64 * 1024);
+    EXPECT(config_tokens("context_limit") == 64000); /* token counts use decimal suffixes */
     EXPECT(config_int("display_width") == 100);
     EXPECT(config_bool("show_reasoning") == 0); /* explicit "0" is false */
     /* Unset typed reads are type-zero. */
     EXPECT(config_load(NULL) == 0);
     EXPECT(config_int("display_width") == 0);
-    EXPECT(config_size("context_limit") == 0);
+    EXPECT(config_tokens("context_limit") == 0);
     EXPECT(config_bool("show_reasoning") == 0);
 }
 
@@ -149,7 +149,7 @@ static void test_default_on_unset_and_invalid(void)
     EXPECT(config_bool_or("providers.openai-compatible.send_cache_key", 1) == 1); /* unset → def */
     /* No registry default → type-zero, as before. */
     EXPECT(config_load("{\"context_limit\": \"nope\"}") == 0);
-    EXPECT(config_size("context_limit") == 0);
+    EXPECT(config_tokens("context_limit") == 0);
     /* config_default exposes the registry default tier directly. */
     EXPECT_STR_EQ(config_default("providers.llamacpp.port"), "8080");
     EXPECT(config_default("model") == NULL);
@@ -702,7 +702,7 @@ static void test_source_reports_winning_tier(void)
     EXPECT_STR_EQ(config_source("markdown"), "config"); /* empty env skipped */
     EXPECT(config_bool("markdown") == 0);               /* effective from file */
     EXPECT_STR_EQ(config_source("context_limit"), "config");
-    EXPECT(config_size("context_limit") == 128 * 1024);
+    EXPECT(config_tokens("context_limit") == 128000);
     /* A free-form setting keeps empty-as-meaningful: the empty env wins. */
     setenv("HAX_SYSTEM_PROMPT", "", 1);
     EXPECT(config_load("{\"system_prompt\": \"from file\"}") == 0);
@@ -805,7 +805,14 @@ static void test_bounded_and_scaled_value_validation(void)
     EXPECT(!config_value_valid(output_cap, "0"));
     EXPECT(!config_value_valid(output_cap, "lots"));
     config_value_hint(output_cap, hint, sizeof(hint));
-    EXPECT_STR_EQ(hint, "a size like 64k or 1M");
+    EXPECT_STR_EQ(hint, "a byte size like 64k or 1M (k = 1024)");
+
+    const struct config_setting *context_limit = config_setting_find("context_limit");
+    EXPECT(context_limit && context_limit->kind == CONFIG_KIND_TOKENS);
+    EXPECT(config_value_valid(context_limit, "872k"));
+    EXPECT(!config_value_valid(context_limit, "lots"));
+    config_value_hint(context_limit, hint, sizeof(hint));
+    EXPECT_STR_EQ(hint, "a token count like 200k or 1M (k = 1000)");
 
     const struct config_setting *timeout = config_setting_find("bash.timeout");
     EXPECT(timeout && timeout->kind == CONFIG_KIND_DURATION);
