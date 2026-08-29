@@ -21,8 +21,10 @@ install: all
 # hax resolves subagent `hax` invocations through PATH, so development is nicest
 # with the dev binary linked there; the symlink tracks every rebuild.
 symlink: all
-	@mkdir -p "$(HOME)/.local/bin"
-	ln -sf "$(abspath $(BUILD_DIR))/hax" "$(HOME)/.local/bin/hax"
+	@mkdir -p "$(HOME)/.local/bin"; \
+	target="$$(cd "$(BUILD_DIR)" && pwd)/hax"; \
+	link="$(HOME)/.local/bin/hax"; \
+	ln -sf "$$target" "$$link" && echo "$$link -> $$target"
 
 clean:
 	rm -rf $(BUILD_DIR)
