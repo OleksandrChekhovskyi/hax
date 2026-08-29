@@ -22,7 +22,8 @@ install: all
 # with the dev binary linked there; the symlink tracks every rebuild.
 symlink: all
 	@mkdir -p "$(HOME)/.local/bin"
-	ln -sf "$(abspath $(BUILD_DIR))/hax" "$(HOME)/.local/bin/hax"
+	@build_dir_abs=$$(cd "$(BUILD_DIR)" && pwd); \
+	ln -sf "$$build_dir_abs/hax" "$(HOME)/.local/bin/hax"
 
 clean:
 	rm -rf $(BUILD_DIR)
