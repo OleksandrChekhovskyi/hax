@@ -32,6 +32,8 @@ struct wire_events_opts {
 /* Per-request body options. Wires read only the fields their dialect defines. */
 struct wire_body_opts {
     const json_t *extra_body; /* user passthrough, merged over the finished body */
+    const char *temperature;
+    const char *top_p;
     /* chat + anthropic: send explicit cache markers with this ttl */
     int cache_markers;
     const char *cache_ttl;

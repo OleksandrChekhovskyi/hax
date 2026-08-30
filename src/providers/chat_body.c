@@ -345,6 +345,11 @@ json_t *chat_build_body(const struct context *context, const char *provider_id, 
     if (opts->request_cost)
         json_object_set_new(body, "usage", json_pack("{s:b}", "include", 1));
 
+    if (opts->temperature)
+        json_object_set_new(body, "temperature", json_real(strtod(opts->temperature, NULL)));
+    if (opts->top_p)
+        json_object_set_new(body, "top_p", json_real(strtod(opts->top_p, NULL)));
+
     chat_apply_reasoning(body, opts->reasoning_format, context->effort);
     return body;
 }

@@ -284,6 +284,11 @@ json_t *anthropic_build_body(const struct context *context, const char *provider
     if (opts->cache_markers)
         attach_cache_to_last_message(messages, opts->cache_ttl);
 
+    if (opts->temperature)
+        json_object_set_new(body, "temperature", json_real(strtod(opts->temperature, NULL)));
+    if (opts->top_p)
+        json_object_set_new(body, "top_p", json_real(strtod(opts->top_p, NULL)));
+
     apply_thinking(body, context, opts);
     return body;
 }

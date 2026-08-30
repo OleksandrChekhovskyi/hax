@@ -32,6 +32,10 @@ static const struct config_setting REGISTRY[] = {
      .description = "Model id (provider-specific; some auto-fill or require it)"},
     {.key = "effort", .env_var = "HAX_EFFORT", .keep_empty = 1,
      .description = "Reasoning effort (provider-specific); empty omits it"},
+    {.key = "temperature", .env_var = "HAX_TEMPERATURE", .keep_empty = 1,
+     .description = "Model temperature (provider-specific); empty omits it"},
+    {.key = "top_p", .env_var = "HAX_TOP_P", .keep_empty = 1,
+     .description = "Model top_p (provider-specific); empty omits it"},
     {.key = "system_prompt", .env_var = "HAX_SYSTEM_PROMPT", .keep_empty = 1,
      .description = "Replace the built-in base prompt (context sections still follow); @path "
                     "reads a file; (none) sends no system message at all"},

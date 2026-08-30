@@ -149,5 +149,11 @@ json_t *responses_build_body(const struct context *context, const char *provider
     apply_reasoning(body, context->effort);
     if (opts && opts->session_cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(opts->session_cache_key));
+
+    if (opts && opts->temperature)
+        json_object_set_new(body, "temperature", json_real(strtod(opts->temperature, NULL)));
+    if (opts && opts->top_p)
+        json_object_set_new(body, "top_p", json_real(strtod(opts->top_p, NULL)));
+
     return body;
 }

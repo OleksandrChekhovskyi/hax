@@ -327,6 +327,8 @@ static int http_provider_stream(struct provider *base, const struct context *con
     struct http_stream stream = {.provider = provider, .wire = wire};
     struct wire_body_opts opts = {
         .extra_body = provider->extra_body,
+        .temperature = config_str("temperature"),
+        .top_p = config_str("top_p"),
         .cache_ttl = provider->cache_ttl,
     };
 
