@@ -4,7 +4,7 @@
 
 #include <stddef.h>
 
-#include "util.h"
+#include "buf.h"
 #include "render/ctrl_strip.h"
 #include "text/utf8_sanitize.h"
 

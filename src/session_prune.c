@@ -15,6 +15,8 @@
 #include "session.h"
 #include "util.h"
 #include "system/bg_job.h"
+#include "system/fs.h"
+#include "system/path.h"
 
 #define SESSION_PRUNE_INTERVAL_S (24 * 60 * 60)
 

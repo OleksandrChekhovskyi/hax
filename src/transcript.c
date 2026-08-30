@@ -6,7 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "agent_usage.h"
 #include "config.h"
+#include "diag.h"
 #include "provider.h"
 #include "tool_schema.h"
 #include "util.h"

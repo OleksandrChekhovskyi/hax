@@ -9,7 +9,9 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "buf.h"
 #include "config.h"
+#include "diag.h"
 #include "util.h"
 #include "providers/registry.h"
 #include "system/fs.h"

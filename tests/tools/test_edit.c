@@ -7,6 +7,7 @@
 #include "harness.h"
 #include "tool.h"
 #include "util.h"
+#include "system/fs.h"
 
 static char *seed_file(const char *dir, const char *name, const char *content)
 {

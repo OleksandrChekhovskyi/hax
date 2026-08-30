@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "util.h"
+#include "buf.h"
 
 /* Formatting filters require an upstream producer; unknown commands, shell side effects, and
  * recognized writer options reject the exploration classification. */

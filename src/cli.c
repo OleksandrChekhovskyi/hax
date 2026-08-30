@@ -9,6 +9,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "buf.h"
+#include "diag.h"
 #include "session.h"
 #include "session_picker.h"
 #include "util.h"

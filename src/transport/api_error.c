@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "buf.h"
 #include "util.h"
 #include "transport/sse.h"
 

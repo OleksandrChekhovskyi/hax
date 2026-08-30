@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "buf.h"
 #include "provider.h"
 #include "tool.h"
 #include "util.h"

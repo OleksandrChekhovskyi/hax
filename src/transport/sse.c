@@ -3,7 +3,7 @@
 
 #include <string.h>
 
-#include "util.h"
+#include "buf.h"
 
 void sse_parser_init(struct sse_parser *parser, sse_cb callback, void *user)
 {

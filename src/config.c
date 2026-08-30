@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <jansson.h>
 #include <libgen.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +13,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "diag.h"
 #include "provider.h"
 #include "util.h"
 #include "system/fs.h"
@@ -651,6 +653,87 @@ static int value_in_bounds(const struct config_setting *setting, long value)
     if (setting->max && value > setting->max)
         return 0;
     return 1;
+}
+
+static long parse_scaled(const char *str, long kilo)
+{
+    if (!str || !*str)
+        return 0;
+
+    char *end;
+    errno = 0;
+    long value = strtol(str, &end, 10);
+    if (end == str || value <= 0 || errno == ERANGE)
+        return 0;
+    while (*end == ' ' || *end == '\t')
+        end++;
+
+    long multiplier = 1;
+    switch (*end) {
+    case 'k':
+    case 'K':
+        multiplier = kilo;
+        end++;
+        break;
+    case 'm':
+    case 'M':
+        multiplier = kilo * kilo;
+        end++;
+        break;
+    }
+    while (*end == ' ' || *end == '\t')
+        end++;
+    if (*end != '\0' || value > LONG_MAX / multiplier)
+        return 0;
+    return value * multiplier;
+}
+
+long parse_size(const char *str)
+{
+    return parse_scaled(str, 1024L);
+}
+
+long parse_token_count(const char *str)
+{
+    return parse_scaled(str, 1000L);
+}
+
+long parse_duration_ms(const char *str)
+{
+    if (!str || !*str)
+        return -1;
+
+    char *end;
+    errno = 0;
+    long value = strtol(str, &end, 10);
+    if (end == str || value < 0 || errno == ERANGE)
+        return -1;
+    while (*end == ' ' || *end == '\t')
+        end++;
+
+    long multiplier;
+    /* Match "ms" before "m". */
+    if ((end[0] == 'm' || end[0] == 'M') && (end[1] == 's' || end[1] == 'S')) {
+        multiplier = 1;
+        end += 2;
+    } else if (*end == '\0' || *end == 's' || *end == 'S') {
+        multiplier = 1000;
+        if (*end)
+            end++;
+    } else if (*end == 'm' || *end == 'M') {
+        multiplier = 60000;
+        end++;
+    } else if (*end == 'h' || *end == 'H') {
+        multiplier = 3600000;
+        end++;
+    } else {
+        return -1;
+    }
+    while (*end == ' ' || *end == '\t')
+        end++;
+    if (*end != '\0' || (multiplier > 1 && value > LONG_MAX / multiplier))
+        return -1;
+    return value * multiplier;
 }
 
 int config_int(const char *key)

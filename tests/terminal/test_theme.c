@@ -3,8 +3,8 @@
 #include <string.h>
 
 #include "config.h"
+#include "diag.h"
 #include "harness.h"
-#include "util.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
 

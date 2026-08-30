@@ -9,6 +9,7 @@
 
 #include "catalog.h"
 #include "config.h"
+#include "diag.h"
 #include "effort.h"
 #include "model_meta.h"
 #include "provider.h"
@@ -21,6 +22,7 @@
 #include "providers/registry.h"
 #include "providers/stream_retry.h"
 #include "providers/wire.h"
+#include "system/path.h"
 #include "transport/http.h"
 
 #define MESSAGES_DEFAULT_VERSION    "2023-06-01"

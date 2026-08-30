@@ -8,8 +8,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "buf.h"
 #include "busy.h"
 #include "cred_store.h"
+#include "diag.h"
 #include "trace.h"
 #include "util.h"
 #include "providers/codex_auth.h"

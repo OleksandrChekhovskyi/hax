@@ -17,8 +17,10 @@
  * them through <stdlib.h>, so the include cleaner cannot attribute them. */
 #include <sys/wait.h> // IWYU pragma: keep
 
+#include "buf.h"
 #include "util.h"
 #include "system/fs.h"
+#include "system/path.h"
 #include "system/spawn.h"
 #include "terminal/ansi.h"
 #include "terminal/input_core.h"

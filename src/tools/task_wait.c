@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <stdio.h>
 
+#include "buf.h"
 #include "config.h"
 #include "provider.h"
 #include "tool.h"

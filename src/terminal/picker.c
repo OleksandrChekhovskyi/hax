@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 
+#include "buf.h"
 #include "util.h"
 #include "terminal/ansi.h"
 #include "terminal/input_core.h"

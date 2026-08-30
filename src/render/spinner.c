@@ -9,6 +9,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "buf.h"
 #include "util.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"

@@ -2,8 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "buf.h"
 #include "harness.h"
-#include "util.h"
 #include "text/urlencode.h"
 
 static void expect_encoded(const char *value, const char *want)

@@ -8,7 +8,9 @@
 #include <string.h>
 #include <strings.h>
 
+#include "buf.h"
 #include "config.h"
+#include "diag.h"
 #include "util.h"
 
 static pthread_mutex_t trace_mu = PTHREAD_MUTEX_INITIALIZER;

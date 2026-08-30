@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "buf.h"
 #include "util.h"
 
 static size_t path_len_without_trailing_slashes(const char *path)
@@ -111,4 +112,42 @@ char *path_relativize(const char *path, const char *cwd)
     while (*relative == '/')
         relative++;
     return *relative ? xstrdup(relative) : NULL;
+}
+
+static char *xdg_hax_path(const char *env_name, const char *home_relative,
+                          const char *relative_path)
+{
+    const char *xdg_base = getenv(env_name);
+    if (xdg_base && *xdg_base)
+        return xasprintf("%s/hax/%s", xdg_base, relative_path);
+    const char *home = getenv("HOME");
+    if (home && *home)
+        return xasprintf("%s/%s/hax/%s", home, home_relative, relative_path);
+    return NULL;
+}
+
+char *xdg_hax_config_path(const char *relative_path)
+{
+    return xdg_hax_path("XDG_CONFIG_HOME", ".config", relative_path);
+}
+
+char *xdg_hax_state_path(const char *relative_path)
+{
+    return xdg_hax_path("XDG_STATE_HOME", ".local/state", relative_path);
+}
+
+char *xdg_hax_cache_path(const char *relative_path)
+{
+    return xdg_hax_path("XDG_CACHE_HOME", ".cache", relative_path);
+}
+
+char *dup_trim_trailing_slash(const char *str)
+{
+    size_t length = strlen(str);
+    while (length > 0 && str[length - 1] == '/')
+        length--;
+    char *result = xmalloc(length + 1);
+    memcpy(result, str, length);
+    result[length] = '\0';
+    return result;
 }

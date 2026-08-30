@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 
 #include "config.h"
+#include "diag.h"
 #include "effort.h"
 #include "harness.h"
 #include "provider.h"

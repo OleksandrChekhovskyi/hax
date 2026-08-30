@@ -10,11 +10,13 @@
 #include <curl/urlapi.h>
 
 #include "config.h"
+#include "diag.h"
 #include "provider.h"
 #include "util.h"
 #include "providers/http_provider.h"
 #include "providers/provider_config.h"
 #include "providers/registry.h"
+#include "system/path.h"
 #include "transport/http.h"
 
 #define MODEL_LIST_TIMEOUT_S 2

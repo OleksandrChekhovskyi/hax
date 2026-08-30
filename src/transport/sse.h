@@ -4,7 +4,7 @@
 
 #include <stddef.h>
 
-#include "util.h"
+#include "buf.h"
 
 /* `event_name` is empty when the event has no `event:` field. Consecutive `data:` fields are joined
  * with newlines. Both strings are parser-owned and valid only during the callback. Returning

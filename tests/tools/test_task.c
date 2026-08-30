@@ -8,10 +8,12 @@
 #include <unistd.h>
 
 #include "agent_core.h"
+#include "buf.h"
 #include "harness.h"
 #include "provider.h"
 #include "tool.h"
 #include "util.h"
+#include "system/fs.h"
 #include "tools/bash_process.h"
 #include "tools/task_helpers.h"
 #include "tools/task_registry.h"

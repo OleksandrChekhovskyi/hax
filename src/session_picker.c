@@ -7,6 +7,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "buf.h"
 #include "session.h"
 #include "util.h"
 #include "terminal/picker.h"

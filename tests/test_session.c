@@ -9,6 +9,7 @@
 #include "provider.h"
 #include "session.h"
 #include "util.h"
+#include "system/fs.h"
 #include "system/git.h"
 
 static void expect_write(int fd, const char *text)

@@ -6,9 +6,11 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "buf.h"
 #include "harness.h"
 #include "tool.h"
 #include "util.h"
+#include "system/fs.h"
 #include "tools/task_helpers.h"
 #include "tools/task_registry.h"
 

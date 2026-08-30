@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "buf.h"
 #include "config.h"
 #include "harness.h"
 #include "tool.h"

@@ -4,7 +4,7 @@
 
 #include <stddef.h>
 
-#include "util.h"
+#include "buf.h"
 
 /* Private GFM table collector and terminal renderer. Tables buffer every row because column sizing
  * and the aligned-versus-reflowed decision require the complete block. The parser supplies inline

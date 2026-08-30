@@ -6,7 +6,7 @@
 #include "config.h"
 #include "harness.h"
 #include "trace.h"
-#include "util.h"
+#include "system/fs.h"
 
 /* HAX_TRACE must never write a credential to disk. Two exact rules: the protocol auth headers
  * (Authorization, x-api-key, api-key) are redacted by case-insensitive name, and a value

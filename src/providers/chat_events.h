@@ -5,8 +5,8 @@
 #include <jansson.h>
 #include <stddef.h>
 
+#include "buf.h"
 #include "provider.h"
-#include "util.h"
 
 /* Stateful translator from Chat Completions SSE payloads to stream events. Only the modern
  * tool_calls shape is supported; legacy function_call deltas are ignored. */

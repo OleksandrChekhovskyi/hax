@@ -8,9 +8,11 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "buf.h"
 #include "harness.h"
 #include "tool.h"
 #include "util.h"
+#include "system/fs.h"
 #include "tools/output_cap.h"
 
 static char *create_temp_file(const void *data, size_t len)

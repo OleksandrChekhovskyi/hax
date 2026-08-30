@@ -16,6 +16,7 @@
 #include "catalog.h"
 #include "compact.h"
 #include "config.h"
+#include "diag.h"
 #include "file_mention.h"
 #include "history.h"
 #include "model_meta.h"

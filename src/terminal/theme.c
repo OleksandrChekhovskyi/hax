@@ -6,6 +6,7 @@
 #include <strings.h>
 
 #include "config.h"
+#include "diag.h"
 #include "util.h"
 #include "terminal/ansi.h"
 

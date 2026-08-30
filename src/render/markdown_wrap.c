@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "util.h"
+#include "buf.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
 #include "text/utf8.h"

@@ -3,7 +3,7 @@
 
 #include <string.h>
 
-#include "util.h"
+#include "buf.h"
 #include "terminal/picker.h"
 #include "text/utf8.h"
 

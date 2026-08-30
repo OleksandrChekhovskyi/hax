@@ -7,6 +7,7 @@
 #include "agent.h"
 #include "agent_core.h"
 #include "config.h"
+#include "diag.h"
 #include "harness.h"
 #include "model_meta.h"
 #include "provider.h"

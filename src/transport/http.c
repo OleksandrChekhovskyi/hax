@@ -12,6 +12,7 @@
 #include <curl/system.h>
 #include <curl/typecheck-gcc.h>
 
+#include "buf.h"
 #include "trace.h"
 #include "util.h"
 #include "version.h"

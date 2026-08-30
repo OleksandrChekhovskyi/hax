@@ -1,11 +1,14 @@
 /* SPDX-License-Identifier: MIT */
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "buf.h"
 #include "harness.h"
 #include "util.h"
 #include "system/fs.h"
@@ -361,6 +364,193 @@ static void test_mkdir_p_null_and_empty(void)
     EXPECT(fs_mkdir_p("") == 0);
 }
 
+/* ---------- slurp_file / slurp_file_capped ---------- */
+
+static char *write_temp_file(const void *data, size_t length)
+{
+    char *path = xasprintf("%s/file", t_tempdir());
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) {
+        FAIL("open %s: %s", path, strerror(errno));
+        free(path);
+        return NULL;
+    }
+    if (write_all(fd, data, length) < 0)
+        FAIL("write %s: %s", path, strerror(errno));
+    close(fd);
+    return path;
+}
+
+static void test_slurp_missing(void)
+{
+    size_t n = 999;
+    char *p = slurp_file("/nonexistent/path/should-not-exist", &n);
+    EXPECT(p == NULL);
+}
+
+static void test_slurp_empty(void)
+{
+    char *path = write_temp_file("", 0);
+    size_t n = 999;
+    char *p = slurp_file(path, &n);
+    EXPECT(p != NULL);
+    EXPECT(n == 0);
+    EXPECT_STR_EQ(p, "");
+    free(p);
+    unlink(path);
+    free(path);
+}
+
+static void test_slurp_normal(void)
+{
+    const char content[] = "line one\nline two\n";
+    size_t clen = sizeof(content) - 1;
+    char *path = write_temp_file(content, clen);
+    size_t n = 0;
+    char *p = slurp_file(path, &n);
+    EXPECT(p != NULL);
+    EXPECT(n == clen);
+    EXPECT_MEM_EQ(p, n, content, clen);
+    free(p);
+    unlink(path);
+    free(path);
+}
+
+static void test_slurp_directory_rejected(void)
+{
+    /* Some platforms let open(O_RDONLY) on a directory succeed and only
+     * fail on read(); the regular-file pre-check rejects up front so
+     * callers never get a bogus partial buffer back. */
+    char *dir = t_tempdir();
+    errno = 0;
+    char *p = slurp_file(dir, NULL);
+    EXPECT(p == NULL);
+    EXPECT(errno == EISDIR);
+}
+
+static void test_slurp_fifo_rejected_no_hang(void)
+{
+    /* A blocking read-only open on a writer-less FIFO never returns. */
+    char *path = t_tempdir();
+    char fifo[64];
+    snprintf(fifo, sizeof(fifo), "%s/f", path);
+    EXPECT(mkfifo(fifo, 0644) == 0);
+
+    errno = 0;
+    int fd = open_regular_file(fifo);
+    EXPECT(fd < 0);
+    EXPECT(errno == EINVAL);
+
+    errno = 0;
+    char *p = slurp_file(fifo, NULL);
+    EXPECT(p == NULL);
+    EXPECT(errno == EINVAL);
+    /* Same check via the capped variant. */
+    errno = 0;
+    int truncated = 1;
+    char *p2 = slurp_file_capped(fifo, 1024, NULL, &truncated);
+    EXPECT(p2 == NULL);
+    EXPECT(errno == EINVAL);
+}
+
+static void test_slurp_capped_missing(void)
+{
+    size_t n = 0;
+    int tr = 0;
+    char *p = slurp_file_capped("/nonexistent/path/should-not-exist", 1024, &n, &tr);
+    EXPECT(p == NULL);
+}
+
+static void test_slurp_capped_under(void)
+{
+    const char content[] = "short";
+    size_t clen = sizeof(content) - 1;
+    char *path = write_temp_file(content, clen);
+    size_t n = 0;
+    int tr = 1;
+    char *p = slurp_file_capped(path, 1024, &n, &tr);
+    EXPECT(p != NULL);
+    EXPECT(n == clen);
+    EXPECT(tr == 0);
+    EXPECT_STR_EQ(p, content);
+    free(p);
+    unlink(path);
+    free(path);
+}
+
+static void test_slurp_capped_zero(void)
+{
+    char *path = write_temp_file("x", 1);
+    size_t length = 1;
+    int truncated = 0;
+
+    char *contents = slurp_file_capped(path, 0, &length, &truncated);
+
+    EXPECT_STR_EQ(contents, "");
+    EXPECT(length == 0);
+    EXPECT(truncated == 1);
+    free(contents);
+    free(path);
+}
+
+static void test_slurp_capped_does_not_preallocate_cap(void)
+{
+    char *path = write_temp_file("short", 5);
+    size_t length = 0;
+    int truncated = 1;
+
+    char *contents = slurp_file_capped(path, SIZE_MAX, &length, &truncated);
+
+    EXPECT_STR_EQ(contents, "short");
+    EXPECT(length == 5);
+    EXPECT(truncated == 0);
+    free(contents);
+    free(path);
+}
+
+static void test_slurp_capped_over(void)
+{
+    /* File is cap+100 bytes; we expect cap bytes kept and truncated=1. */
+    const size_t cap = 64;
+    char big[200];
+    memset(big, 'a', sizeof(big));
+    char *path = write_temp_file(big, sizeof(big));
+    size_t n = 0;
+    int tr = 0;
+    char *p = slurp_file_capped(path, cap, &n, &tr);
+    EXPECT(p != NULL);
+    EXPECT(n == cap);
+    EXPECT(tr == 1);
+    for (size_t i = 0; i < n; i++) {
+        if (p[i] != 'a') {
+            FAIL("unexpected byte at %zu", i);
+            break;
+        }
+    }
+    EXPECT(p[n] == '\0');
+    free(p);
+    unlink(path);
+    free(path);
+}
+
+static void test_slurp_capped_exact(void)
+{
+    /* File is exactly cap bytes; probe read should see EOF → truncated=0. */
+    const size_t cap = 32;
+    char buf[32];
+    memset(buf, 'z', cap);
+    char *path = write_temp_file(buf, cap);
+    size_t n = 0;
+    int tr = 1;
+    char *p = slurp_file_capped(path, cap, &n, &tr);
+    EXPECT(p != NULL);
+    EXPECT(n == cap);
+    EXPECT(tr == 0);
+    free(p);
+    unlink(path);
+    free(path);
+}
+
 int main(void)
 {
     test_which_finds_sh();
@@ -392,6 +582,18 @@ int main(void)
     test_mkdir_p_file_in_the_middle_fails();
     test_mkdir_p_final_component_is_file_fails();
     test_mkdir_p_null_and_empty();
+
+    test_slurp_missing();
+    test_slurp_empty();
+    test_slurp_normal();
+    test_slurp_directory_rejected();
+    test_slurp_fifo_rejected_no_hang();
+    test_slurp_capped_missing();
+    test_slurp_capped_under();
+    test_slurp_capped_zero();
+    test_slurp_capped_does_not_preallocate_cap();
+    test_slurp_capped_over();
+    test_slurp_capped_exact();
 
     T_REPORT();
 }

@@ -6,8 +6,10 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+#include "buf.h"
 #include "harness.h"
 #include "util.h"
+#include "system/fs.h"
 #include "text/base64.h"
 #include "text/sha256.h"
 #include "transport/oauth.h"

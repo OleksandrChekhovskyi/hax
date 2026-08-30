@@ -9,9 +9,12 @@
 
 #include "agent.h"
 #include "agent_core.h"
+#include "agent_usage.h"
+#include "buf.h"
 #include "busy.h"
 #include "catalog.h"
 #include "config.h"
+#include "diag.h"
 #include "effort.h"
 #include "model_meta.h"
 #include "model_sort.h"

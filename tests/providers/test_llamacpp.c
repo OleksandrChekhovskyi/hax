@@ -4,9 +4,9 @@
 #include <string.h>
 
 #include "config.h"
+#include "diag.h"
 #include "harness.h"
 #include "provider.h"
-#include "util.h"
 #include "providers/http_provider.h"
 #include "providers/llamacpp.h"
 #include "providers/registry.h"

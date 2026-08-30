@@ -6,7 +6,9 @@
 #include <string.h>
 #include <strings.h>
 
+#include "buf.h"
 #include "catalog.h"
+#include "diag.h"
 #include "provider.h"
 #include "tool_schema.h"
 #include "util.h"

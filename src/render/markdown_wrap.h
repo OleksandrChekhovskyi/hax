@@ -4,7 +4,7 @@
 
 #include <stddef.h>
 
-#include "util.h"
+#include "buf.h"
 #include "text/utf8.h"
 
 /* Private eager terminal wrapper for Markdown output. Visible bytes are emitted

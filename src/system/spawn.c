@@ -17,6 +17,7 @@
 #include <sys/prctl.h>
 #endif
 
+#include "buf.h"
 #include "util.h"
 
 /* Everything a pinned LC_ALL was covering besides the charset. Clearing it is what lets LC_CTYPE

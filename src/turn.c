@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "buf.h"
 #include "provider.h"
 #include "util.h"
 

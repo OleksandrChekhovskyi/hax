@@ -13,6 +13,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#include "buf.h"
 #include "config.h"
 #include "tool.h"
 #include "util.h"

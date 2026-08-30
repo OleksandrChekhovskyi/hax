@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +12,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "buf.h"
 #include "util.h"
 #include "system/path.h"
 #include "text/diff.h"
@@ -365,4 +367,143 @@ int fs_shell_head_resolves(const char *shell_cmd)
     free(path);
     free(head);
     return resolves;
+}
+
+static int regular_mode_or_error(mode_t mode)
+{
+    if (S_ISREG(mode))
+        return 0;
+    errno = S_ISDIR(mode) ? EISDIR : EINVAL;
+    return -1;
+}
+
+int ensure_regular_file(const char *path)
+{
+    struct stat status;
+    if (stat(path, &status) < 0)
+        return -1;
+    return regular_mode_or_error(status.st_mode);
+}
+
+int open_regular_file(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0)
+        return -1;
+
+    struct stat status;
+    if (fstat(fd, &status) == 0 && regular_mode_or_error(status.st_mode) == 0)
+        return fd;
+
+    int saved_errno = errno;
+    close(fd);
+    errno = saved_errno;
+    return -1;
+}
+
+static ssize_t read_retry(int fd, void *data, size_t length)
+{
+    ssize_t bytes_read;
+    do {
+        bytes_read = read(fd, data, length);
+    } while (bytes_read < 0 && errno == EINTR);
+    return bytes_read;
+}
+
+char *slurp_file(const char *path, size_t *out_len)
+{
+    int saved_errno;
+    int fd = open_regular_file(path);
+    if (fd < 0)
+        return NULL;
+
+    struct buf contents;
+    buf_init(&contents);
+    char chunk[8192];
+    for (;;) {
+        ssize_t bytes_read = read_retry(fd, chunk, sizeof(chunk));
+        if (bytes_read < 0)
+            goto error;
+        if (bytes_read == 0)
+            break;
+        buf_append(&contents, chunk, (size_t)bytes_read);
+    }
+
+    close(fd);
+    if (out_len)
+        *out_len = contents.len;
+    return buf_steal(&contents);
+
+error:
+    saved_errno = errno;
+    buf_free(&contents);
+    close(fd);
+    errno = saved_errno;
+    return NULL;
+}
+
+char *slurp_file_capped(const char *path, size_t cap, size_t *out_len, int *out_truncated)
+{
+    int saved_errno;
+    int truncated = 0;
+    int fd = open_regular_file(path);
+    if (fd < 0)
+        return NULL;
+
+    struct buf contents;
+    buf_init(&contents);
+    char chunk[8192];
+    while (contents.len < cap) {
+        size_t remaining = cap - contents.len;
+        size_t request = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+        ssize_t bytes_read = read_retry(fd, chunk, request);
+        if (bytes_read < 0)
+            goto error;
+        if (bytes_read == 0)
+            break;
+        buf_append(&contents, chunk, (size_t)bytes_read);
+    }
+
+    if (contents.len == cap) {
+        char extra;
+        ssize_t bytes_read = read_retry(fd, &extra, 1);
+        if (bytes_read < 0)
+            goto error;
+        truncated = bytes_read > 0;
+    }
+
+    close(fd);
+    if (out_len)
+        *out_len = contents.len;
+    if (out_truncated)
+        *out_truncated = truncated;
+    return buf_steal(&contents);
+
+error:
+    saved_errno = errno;
+    buf_free(&contents);
+    close(fd);
+    errno = saved_errno;
+    return NULL;
+}
+
+int write_all(int fd, const void *data, size_t length)
+{
+    const char *cursor = data;
+    while (length > 0) {
+        size_t request = length > (size_t)SSIZE_MAX ? (size_t)SSIZE_MAX : length;
+        ssize_t written = write(fd, cursor, request);
+        if (written < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (written == 0) {
+            errno = EIO;
+            return -1;
+        }
+        cursor += written;
+        length -= (size_t)written;
+    }
+    return 0;
 }

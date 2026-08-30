@@ -9,6 +9,7 @@
 #include "catalog.h"
 #include "cli.h"
 #include "config.h"
+#include "diag.h"
 #include "oneshot.h"
 #include "provider.h"
 #include "select.h"

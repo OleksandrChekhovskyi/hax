@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "config.h"
+#include "diag.h"
 #include "harness.h"
 #include "provider.h"
 #include "util.h"

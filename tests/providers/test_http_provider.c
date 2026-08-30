@@ -14,6 +14,7 @@
 
 #include "catalog.h"
 #include "config.h"
+#include "diag.h"
 #include "effort.h"
 #include "harness.h"
 #include "provider.h"

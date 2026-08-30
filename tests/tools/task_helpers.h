@@ -2,6 +2,7 @@
 #ifndef HAX_TESTS_TOOLS_TASK_HELPERS_H
 #define HAX_TESTS_TOOLS_TASK_HELPERS_H
 
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -11,11 +12,10 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "buf.h"
 #include "harness.h"
 #include "tool.h"
 #include "util.h"
-#include "tools/bash_process.h"
-#include "tools/task_registry.h"
 
 /* Producers must outlive the yield window to detach. Tests that also need initial output
  * captured before the transition hold it open with HAX_BASH_TRANSITION_MIN_BYTES instead of

@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "config.h"
+#include "diag.h"
 #include "model_meta.h"
 #include "provider.h"
 #include "util.h"

@@ -11,6 +11,7 @@
 #include <curl/curlver.h>
 #include <curl/typecheck-gcc.h>
 
+#include "diag.h"
 #include "util.h"
 
 /* The well-known locations curl's configure, Go, and rust-native-certs also probe, minus

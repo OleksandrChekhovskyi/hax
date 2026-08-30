@@ -4,7 +4,7 @@
 
 #include <stddef.h>
 
-#include "util.h"
+#include "buf.h"
 #include "terminal/picker.h"
 
 #define PICKER_MARKER_CELLS               2

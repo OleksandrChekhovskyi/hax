@@ -94,6 +94,8 @@ Terminology:
 
 Core boundaries:
 
+- Keep shared primitives in focused modules instead of growing `util`; reserve `util` for small,
+  genuinely cross-cutting helpers with no clearer owner.
 - The canonical conversation state is the flat, provider-independent `struct item` log owned by
   `struct agent_session`. Compaction appends a summary seed without deleting prior history; build
   model-visible windows with `agent_session_context()` rather than slicing the raw log.

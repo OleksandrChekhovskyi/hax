@@ -14,10 +14,12 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#include "buf.h"
 #include "config.h"
 #include "tool.h"
 #include "util.h"
 #include "system/bg_job.h"
+#include "system/fs.h"
 #include "terminal/interrupt.h"
 #include "text/utf8_sanitize.h"
 #include "text/width.h"

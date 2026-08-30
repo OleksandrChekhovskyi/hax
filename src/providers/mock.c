@@ -10,6 +10,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "buf.h"
 #include "config.h"
 #include "model_meta.h"
 #include "provider.h"

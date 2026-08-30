@@ -6,7 +6,9 @@
 
 #include "agent_env.h"
 #include "agent_usage.h"
+#include "buf.h"
 #include "config.h"
+#include "diag.h"
 #include "effort.h"
 #include "model_meta.h"
 #include "provider.h"

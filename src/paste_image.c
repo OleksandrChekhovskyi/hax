@@ -7,7 +7,9 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include "buf.h"
 #include "util.h"
+#include "system/fs.h"
 #include "system/tempfiles.h"
 #include "terminal/clipboard.h"
 #include "tools/image_sniff.h"

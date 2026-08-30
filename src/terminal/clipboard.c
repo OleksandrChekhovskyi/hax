@@ -13,6 +13,9 @@
 #include <sys/wait.h> // IWYU pragma: keep
 
 #include "util.h"
+/* The buf builders are __APPLE__-only here, invisible to the Linux lint pass. */
+#include "buf.h" // IWYU pragma: keep
+#include "system/fs.h"
 /* path_join is __APPLE__-only here, invisible to the Linux lint pass. */
 #include "system/path.h" // IWYU pragma: keep
 #include "system/spawn.h"

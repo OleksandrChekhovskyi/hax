@@ -9,6 +9,7 @@
 /* POSIX declares the wait macros here; some libc headers also expose them indirectly. */
 #include <sys/wait.h> // IWYU pragma: keep
 
+#include "diag.h"
 #include "util.h"
 #include "system/fs.h"
 #include "system/path.h"

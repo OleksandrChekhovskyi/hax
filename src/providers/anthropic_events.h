@@ -4,8 +4,8 @@
 
 #include <stddef.h>
 
+#include "buf.h"
 #include "provider.h"
-#include "util.h"
 
 enum anthropic_content_kind {
     ANTHROPIC_CONTENT_TEXT = 0,

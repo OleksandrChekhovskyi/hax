@@ -4,7 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "util.h"
+#include "buf.h"
+#include "system/fs.h"
 #include "system/path.h"
 
 static const char *skip_inline_whitespace(const char *cursor, const char *end)

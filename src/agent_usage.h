@@ -9,12 +9,23 @@
 #define AGENT_STATS_MAX_SEGMENTS 3
 #define AGENT_STATS_SEGMENT_LEN  64
 
+/* Smallest cost the transcript and /session still display. */
+#define COST_DISPLAY_MIN 0.00005
+
+/* Use decimal k/M suffixes for token counts — tokens are specified and billed in decimal
+ * multiples, unlike bytes. Negative values produce "?". */
+void format_tokens(char *out, size_t out_size, long tokens);
+/* Include the usage percentage when context_limit is positive; negative context_tokens means
+ * unknown usage ("? / 256k", no percentage). */
+void format_context(char *out, size_t out_size, long context_tokens, long context_limit);
+
 /* Format turn duration, context use, and session spend in display order. Negative token/time
  * values and nonpositive spend are omitted. Returns the number of populated segments. */
 int agent_format_stats_segments(char segments[][AGENT_STATS_SEGMENT_LEN], long context_tokens,
                                 long context_limit, long elapsed_ms, double session_spend,
                                 int spend_estimated);
 
+struct catalog_split;
 struct spend_record;
 
 /* Zero-initialize before use and release with agent_spend_free. */

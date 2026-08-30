@@ -8,6 +8,7 @@
 #include "harness.h"
 #include "tool.h"
 #include "util.h"
+#include "system/fs.h"
 
 static char *call_write(const char *path, const char *content)
 {

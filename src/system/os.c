@@ -7,7 +7,9 @@
 #include <sys/stat.h>
 #include <sys/utsname.h>
 
+#include "buf.h"
 #include "util.h"
+#include "system/fs.h"
 
 #define OS_RELEASE_FILE_CAP (64u * 1024u)
 

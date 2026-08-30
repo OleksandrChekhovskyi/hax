@@ -4,7 +4,7 @@
 
 #include <stddef.h>
 
-#include "util.h"
+#include "buf.h"
 
 /* URL encoding for query strings and form-urlencoded bodies: RFC 3986 unreserved characters pass
  * through and every other byte becomes %XX, so encoded values are safe in both positions. */

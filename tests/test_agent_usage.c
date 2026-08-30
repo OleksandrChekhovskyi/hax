@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: MIT */
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 
 #include "agent_usage.h"
@@ -334,6 +336,56 @@ static void test_usage_add_drops_cost_over_unpriced_tokens(void)
     EXPECT(sum.cost < 0);
 }
 
+/* ---------- format_tokens / format_context ---------- */
+
+static void test_format_tokens_ranges(void)
+{
+    char buf[32];
+    format_tokens(buf, sizeof(buf), -1);
+    EXPECT_STR_EQ(buf, "?");
+    format_tokens(buf, sizeof(buf), 412);
+    EXPECT_STR_EQ(buf, "412");
+    format_tokens(buf, sizeof(buf), 5410);
+    EXPECT_STR_EQ(buf, "5.4k");
+    format_tokens(buf, sizeof(buf), 2000); /* whole multiples print bare */
+    EXPECT_STR_EQ(buf, "2k");
+    format_tokens(buf, sizeof(buf), 262144); /* decimal suffixes even for binary windows */
+    EXPECT_STR_EQ(buf, "262k");
+    format_tokens(buf, sizeof(buf), 872000);
+    EXPECT_STR_EQ(buf, "872k");
+    format_tokens(buf, sizeof(buf), 1000000);
+    EXPECT_STR_EQ(buf, "1M");
+    format_tokens(buf, sizeof(buf), 1200000);
+    EXPECT_STR_EQ(buf, "1.2M");
+    format_tokens(buf, sizeof(buf), 12000000);
+    EXPECT_STR_EQ(buf, "12M");
+}
+
+static void test_format_context_with_and_without_limit(void)
+{
+    char buf[64];
+    format_context(buf, sizeof(buf), 9113, 262144);
+    EXPECT_STR_EQ(buf, "9.1k / 262k (3%)");
+    format_context(buf, sizeof(buf), 9113, 0); /* unknown window */
+    EXPECT_STR_EQ(buf, "9.1k");
+    format_context(buf, sizeof(buf), 300000, 262144); /* stale window metadata reports over 100% */
+    EXPECT_STR_EQ(buf, "300k / 262k (114%)");
+    format_context(buf, sizeof(buf), -1, 262144); /* known window, no usage reported yet */
+    EXPECT_STR_EQ(buf, "? / 262k");
+    format_context(buf, sizeof(buf), -1, 0); /* nothing known */
+    EXPECT_STR_EQ(buf, "?");
+}
+
+static void test_format_usage_extremes(void)
+{
+    char formatted[64];
+    format_tokens(formatted, sizeof(formatted), LONG_MAX);
+    EXPECT(formatted[0] != '-');
+
+    format_context(formatted, sizeof(formatted), LONG_MAX, 1);
+    EXPECT(strstr(formatted, "(999%)") != NULL);
+}
+
 int main(void)
 {
     install_catalog();
@@ -352,5 +404,10 @@ int main(void)
     test_turn_usage_without_rates();
     test_usage_add_keeps_unreported_sentinels();
     test_usage_add_drops_cost_over_unpriced_tokens();
+
+    test_format_tokens_ranges();
+    test_format_context_with_and_without_limit();
+    test_format_usage_extremes();
+
     T_REPORT();
 }

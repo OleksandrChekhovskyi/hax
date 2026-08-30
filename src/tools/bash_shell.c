@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include "config.h"
+#include "diag.h"
 #include "util.h"
 #include "system/fs.h"
 

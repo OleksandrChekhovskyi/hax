@@ -12,6 +12,7 @@
 
 #include "util.h"
 #include "system/fs.h"
+#include "system/path.h"
 
 char *cred_store_file_path(void)
 {

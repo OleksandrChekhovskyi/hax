@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "buf.h"
 #include "busy.h"
 #include "catalog.h"
 #include "config.h"

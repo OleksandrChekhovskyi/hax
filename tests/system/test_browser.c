@@ -7,6 +7,7 @@
 #include "harness.h"
 #include "util.h"
 #include "system/browser.h"
+#include "system/fs.h"
 
 /* Both platform opener names point at the same recorder so the test is platform-independent.
  * The recording is published by rename, so a poll never observes a partially written file. */

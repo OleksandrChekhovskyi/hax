@@ -4,8 +4,8 @@
 
 #include <stddef.h>
 
+#include "buf.h"
 #include "provider.h"
-#include "util.h"
 
 /* Pure state machine that assembles one provider stream into conversation items. */
 

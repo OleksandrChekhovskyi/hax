@@ -8,6 +8,7 @@
 #include <strings.h>
 
 #include "config.h"
+#include "diag.h"
 #include "trace.h"
 #include "util.h"
 

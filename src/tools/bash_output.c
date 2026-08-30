@@ -11,7 +11,9 @@
  * them through <stdlib.h>, so the include cleaner cannot attribute them. */
 #include <sys/wait.h> // IWYU pragma: keep
 
+#include "buf.h"
 #include "util.h"
+#include "system/fs.h"
 #include "system/tempfiles.h"
 #include "text/utf8_sanitize.h"
 #include "tools/output_cap.h"

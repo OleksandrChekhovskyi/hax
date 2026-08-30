@@ -17,6 +17,7 @@
 #include "util.h"
 #include "system/bg_job.h"
 #include "system/fs.h"
+#include "system/path.h"
 #include "transport/http.h"
 
 #define CATALOG_CACHE_FILE "catalog.json"

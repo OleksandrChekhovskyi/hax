@@ -6,9 +6,11 @@
 #include <string.h>
 
 #include "cred_store.h"
+#include "diag.h"
 #include "util.h"
 #include "providers/codex_login.h"
 #include "providers/http_provider.h"
+#include "system/fs.h"
 #include "system/path.h"
 #include "text/base64.h"
 #include "transport/http.h"

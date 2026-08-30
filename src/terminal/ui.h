@@ -4,7 +4,7 @@
 
 /* User-facing status lines and listing rows, printed to stdout so they interleave with the
  * on-screen conversation. Not for startup/CLI errors, which print "hax: ..." to stderr before the
- * REPL exists (hax_err() in util.h), nor for mid-stream provider errors, which flow through the
+ * REPL exists (hax_err() in diag.h), nor for mid-stream provider errors, which flow through the
  * unified EV_ERROR event and the agent's display layer. */
 
 /* One status line: ui_error (red) reports a failure, ui_note (dim) an informational aside. Color

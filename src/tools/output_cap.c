@@ -3,8 +3,8 @@
 
 #include <stdio.h>
 
+#include "buf.h"
 #include "config.h"
-#include "util.h"
 
 size_t output_cap_bytes(void)
 {
