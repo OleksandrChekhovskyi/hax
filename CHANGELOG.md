@@ -41,6 +41,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- OpenCode Go usage-window limits now surface immediately instead of triggering retries that cannot
+  succeed before the window resets.
 - Skill discovery now ignores descriptions from unterminated YAML frontmatter or unsupported block
   scalars instead of advertising incomplete metadata.
 - Chat Completions streams now detect upstream provider failures signaled through the finish

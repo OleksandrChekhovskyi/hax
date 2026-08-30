@@ -45,6 +45,12 @@ static void test_terminal_429_errors(void)
     const char *uppercase_quota = "{\"error\":{\"code\":\"INSUFFICIENT_QUOTA\"}}";
     EXPECT(retry_should_attempt(-1, 429, uppercase_quota) == 0);
 
+    const char *opencode_go_usage =
+        "{\"type\":\"error\",\"error\":{\"type\":\"GoUsageLimitError\","
+        "\"message\":\"5-hour usage limit reached. Resets in 3hr 52min.\"},"
+        "\"metadata\":{\"limitName\":\"5 hour\"}}";
+    EXPECT(retry_should_attempt(-1, 429, opencode_go_usage) == 0);
+
     const char *rate_limit =
         "{\"error\":{\"message\":\"Rate limit\",\"type\":\"rate_limit_exceeded\","
         "\"code\":\"rate_limit_exceeded\"}}";
