@@ -33,7 +33,7 @@ hax --resume=ID -p "continue"    # resume non-interactively
 | `-p`, `--print` | Run to completion and print the final assistant message to stdout. |
 | `--json` | One-shot (implies `-p`) with stdout as JSON-line conversation records, closed by a `result` record. |
 | `-c`, `--continue` | Resume the newest session for the current directory. |
-| `--resume[=ID]` | Pick a session, or resume an id/unique prefix. The id form works with `-p`. |
+| `--resume[=ID]` | Pick a session, or resume an id/unique prefix. The id form works with `-p`; without a prompt it continues the run. |
 | `--no-session` | Do not record this run or add its prompts to persistent recall. |
 | `--raw` | Send only the prompt: no system/context sections and no tools. |
 | `--bare` | Keep the base prompt, environment, and tools, but omit project/delegation context. |
@@ -67,6 +67,12 @@ hax --json "fix the failing test" | jq 'select(.kind == "tool_call" or .type == 
 A picker needs a terminal, so use `--resume=ID` rather than bare `--resume` with `-p`. `--raw` and
 `--bare` still record the conversation; combine either with `--no-session` for a disposable run.
 `max_turns` bounds a one-shot run's provider round-trips (default 100).
+
+A one-shot run responds to signals the way the REPL responds to Esc: SIGUSR1 pauses cleanly at
+the next turn boundary (outcome `paused`), and SIGINT (Ctrl-C) or SIGTERM interrupts at once,
+saving completed work (outcome `interrupted`, exit status 130); a second signal kills the
+process. The session stays resumable: `hax --resume=ID -p` without a prompt continues where the
+run stopped, and a new prompt steers it instead.
 
 ## REPL commands
 
@@ -210,7 +216,11 @@ Esc again requests an immediate interrupt. Answer text already shown and complet
 remain visible, but unfinished reasoning is discarded so it cannot confuse the next request. If the
 model had not yet produced answer text or a tool call, the conversation is left unchanged; press
 Enter on an empty line to retry. `max_turns` provides the same kind of periodic check-in after a
-configured number of model round-trips.
+configured number of model round-trips. In one-shot mode, SIGUSR1 and SIGINT request the same
+pause and interrupt from outside; see [CLI modes](#cli-modes).
+
+Resuming an interrupted conversation (`--resume`, `-c`, `/resume`) offers the same empty-Enter
+continue at the first prompt.
 
 ## Background tasks and delegation
 

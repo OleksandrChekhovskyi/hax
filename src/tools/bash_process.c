@@ -461,6 +461,8 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
     if (display)
         display_suffix(display, display_data, bash_output_size(output), binary, displayed_body,
                        stop_reason, transition_ms, wait_status);
+    if (ctx && stop_reason == BASH_STOP_INTERRUPT)
+        ctx->interrupted = 1;
     char *result = bash_output_finish(output, binary, stop_reason, transition_ms, wait_status);
     if (*task_footer) {
         char *with_footer = xasprintf("%s%s", result, task_footer);

@@ -53,6 +53,9 @@ struct item agent_tool_result_make(const struct item *call, const char *output,
         ctx->n_result_images = 0;
         if (ctx->output_summarizes_display)
             result.origin = ITEM_ORIGIN_SUMMARIZED;
+        /* A kill outranks display bookkeeping: resume decisions hinge on this provenance. */
+        if (ctx->interrupted)
+            result.origin = ITEM_ORIGIN_INTERRUPTED;
         result.output_hidden_tail = ctx->output_hidden_tail;
     }
     return result;

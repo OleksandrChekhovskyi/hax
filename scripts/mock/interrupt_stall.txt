@@ -1,0 +1,9 @@
+# Interrupt fixture: the first sentence lands immediately, then the turn stalls
+# long enough for a driver to deliver a stop signal mid-stream.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/interrupt_stall.txt build/hax --json go
+
+text Partial answer before the interrupt.
+delay 2000
+text Never delivered
+end-turn

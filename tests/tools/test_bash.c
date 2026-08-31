@@ -15,6 +15,7 @@
 #include "xalloc.h"
 #include "system/fs.h"
 #include "system/tempfiles.h"
+#include "terminal/interrupt.h"
 #include "tools/bash_env.h"
 
 static char *call_bash(const char *escaped_command)
@@ -52,6 +53,22 @@ static char *call_bash_streamed(const char *escaped_command, struct display_capt
     char *out = TOOL_BASH.run(args, &ctx);
     free(args);
     return out;
+}
+
+/* A latched abort kills the command and reports the cut through both the output marker and the
+ * run context's interrupted provenance. */
+static void test_bash_interrupt_sets_provenance(void)
+{
+    interrupt_install_request_signal_handlers();
+    raise(SIGINT); /* the request handler only latches; the run's next poll observes it */
+
+    struct tool_run_ctx ctx = {0};
+    char *out = TOOL_BASH.run("{\"command\":\"sleep 5\"}", &ctx);
+    interrupt_clear_requests();
+
+    EXPECT(ctx.interrupted);
+    EXPECT(strstr(out, "[interrupted]") != NULL);
+    free(out);
 }
 
 static void test_bash_invalid_json(void)
@@ -912,6 +929,7 @@ int main(void)
      * tools/test_task.c. */
     setenv("HAX_NO_TASKS", "1", 1);
 
+    test_bash_interrupt_sets_provenance();
     test_bash_invalid_json();
     test_bash_missing_command();
     test_bash_stdout();

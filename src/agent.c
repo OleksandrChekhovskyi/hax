@@ -560,8 +560,30 @@ int agent_apply_settings(struct agent_state *state, struct provider *provider, i
 static void clear_resume_state(struct agent_state *state)
 {
     state->resume_reason = AGENT_RESUME_NONE;
-    state->resume_has_marker = 0;
     state->compaction_deferred = 0;
+}
+
+/* A resumed record can end mid-story; re-offer the empty-send continue its run lost with the
+ * process. A clean tail is indistinguishable from a finished conversation, so only marked or
+ * unanswered tails re-arm the affordance. */
+static void derive_resume_state(struct agent_state *state)
+{
+    clear_resume_state(state);
+    switch (agent_session_resume_tail(state->session)) {
+    case AGENT_RESUME_TAIL_MARKED:
+    case AGENT_RESUME_TAIL_USER:
+        state->resume_reason = AGENT_RESUME_INTERRUPTED;
+        break;
+    case AGENT_RESUME_TAIL_CLEAN:
+    case AGENT_RESUME_TAIL_EMPTY:
+        break;
+    }
+    /* The record may end over the compaction threshold — a pause stops before the loop's
+     * compact seam — so the run that continues it owes the pre-send pass. */
+    if (state->provider && state->session->model)
+        state->compaction_deferred =
+            compact_should_auto(agent_session_last_context_tokens(state->session),
+                                model_meta_context(state->provider, state->session->model));
 }
 
 /* Interactive front for agent_finalize_tasks: announce the stop before the kill. */
@@ -732,7 +754,7 @@ void agent_resume_session(struct agent_state *state, const char *path)
                          session->n_tools);
     transcript_log_append(state->transcript, session->items, session->n_items);
 
-    clear_resume_state(state);
+    derive_resume_state(state);
     replay_user_turn(state->render, session, "resumed");
 }
 
@@ -1005,8 +1027,7 @@ int agent_compact(struct agent_state *state, const char *instructions, int autom
          * end-of-turn pass: the oversized history it referred to is gone. */
         state->compaction_deferred = 0;
     }
-    /* Manual compaction moves the model past the resumable tail, so its summary seed must not
-     * receive a stale continuation marker. */
+    /* Manual compaction moves the model past the resumable tail; retract the empty-send offer. */
     if (compacted && !automatic)
         clear_resume_state(state);
     switch (result.outcome) {
@@ -1170,20 +1191,17 @@ static void set_resume_state(struct agent_state *state, const struct agent_loop_
         return;
     case AGENT_LOOP_PAUSED:
         state->resume_reason = AGENT_RESUME_PAUSED;
-        state->resume_has_marker = 0;
         return;
     case AGENT_LOOP_MAX_TURNS:
         state->resume_reason = AGENT_RESUME_MAX_TURNS;
-        state->resume_has_marker = 0;
         return;
     case AGENT_LOOP_INTERRUPTED:
         state->resume_reason = AGENT_RESUME_INTERRUPTED;
-        break;
+        return;
     case AGENT_LOOP_PROVIDER_ERROR:
         state->resume_reason = AGENT_RESUME_ERROR;
-        break;
+        return;
     }
-    state->resume_has_marker = result->abort_marker_placed;
 }
 
 int agent_run(struct provider **provider_io, const struct hax_opts *options)
@@ -1266,8 +1284,10 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
                              session.model, session.model_label, session.effort,
                              config_str("preset"));
     session_meta_free(&resume_metadata);
-    if (resumed_item_count > 0)
+    if (resumed_item_count > 0) {
         transcript_log_append(transcript, session.items, session.n_items);
+        derive_resume_state(&state);
+    }
     /* Capture terminal state before raw input; non-TTY initialization is a no-op. */
     interrupt_init();
     interrupt_set_fatal_signal_hook(bash_shell_pgids_kill);
@@ -1328,9 +1348,8 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
 
         /* Settle deferred compaction before appending steering input or sending another oversized
          * request. */
-        int compacted = 0;
         if (state.compaction_deferred) {
-            compacted = agent_compact(&state, NULL, 1);
+            agent_compact(&state, NULL, 1);
             /* A newly latched interrupt belongs to compaction and cancels the whole send; retain
              * the debt for the next attempt. */
             if (interrupt_abort_requested() || interrupt_pause_requested()) {
@@ -1342,17 +1361,25 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             state.compaction_deferred = 0;
         }
 
-        /* After compaction, empty input continues from the summary seed without a stale marker. */
         int continued = 0;
         int typed_prompt = *line != 0;
-        /* Boundaries precede fresh prompts. Marked resumes add a continuation item; clean resumes
-         * let the loop append its boundary. */
-        if (*line)
+        /* Boundaries precede fresh prompts. An empty send asks the recorded tail how to
+         * continue, so a compaction seed just appended above supersedes an older marker. */
+        if (*line) {
             agent_session_add_user(&session, line);
-        else if (!compacted && state.resume_has_marker)
-            agent_session_add_continuation(&session);
-        else
-            continued = 1;
+        } else {
+            switch (agent_session_resume_tail(&session)) {
+            case AGENT_RESUME_TAIL_MARKED:
+                agent_session_add_continuation(&session);
+                break;
+            case AGENT_RESUME_TAIL_USER:
+                break; /* the recorded prompt is unanswered; re-send history as-is */
+            case AGENT_RESUME_TAIL_CLEAN:
+            case AGENT_RESUME_TAIL_EMPTY:
+                continued = 1;
+                break;
+            }
+        }
         free(line);
         /* input_readline left the cursor at column 0 of a fresh row. */
         disp_sync_external_line(&render.disp);

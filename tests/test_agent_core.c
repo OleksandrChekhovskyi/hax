@@ -604,19 +604,53 @@ static void test_turn_usage_provenance_without_response(void)
     agent_session_free(&session);
 }
 
-static void test_mark_interrupt_skips_marked_result(void)
+/* A killed tool's result arrives with interrupted provenance from dispatch; no second marker. */
+static void test_mark_interrupt_skips_interrupted_result(void)
 {
     struct agent_session session = {0};
     agent_session_append(&session,
                          (struct item){.kind = ITEM_TOOL_RESULT,
                                        .call_id = xstrdup("c1"),
-                                       .output = xstrdup("partial output\n" INTERRUPT_MARKER)});
+                                       .output = xstrdup("partial output\n" INTERRUPT_MARKER),
+                                       .origin = ITEM_ORIGIN_INTERRUPTED});
     struct stream_usage usage = reported_usage();
     agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
 
     size_t before = session.n_items;
     agent_session_mark_interrupt(&session);
     EXPECT(session.n_items == before);
+    EXPECT(agent_session_resume_tail(&session) == AGENT_RESUME_TAIL_MARKED);
+    agent_session_free(&session);
+}
+
+/* Marker text inside ordinary output is not provenance: the interrupt is still recorded. */
+static void test_mark_interrupt_ignores_marker_text(void)
+{
+    struct agent_session session = {0};
+    agent_session_append(&session,
+                         (struct item){.kind = ITEM_TOOL_RESULT,
+                                       .call_id = xstrdup("c1"),
+                                       .output = xstrdup("genuine output\n" INTERRUPT_MARKER)});
+
+    agent_session_mark_interrupt(&session);
+    EXPECT(session.n_items == 2);
+    EXPECT(session.items[1].kind == ITEM_ASSISTANT_MESSAGE);
+    EXPECT(session.items[1].origin == ITEM_ORIGIN_INTERRUPTED);
+    agent_session_free(&session);
+}
+
+static void test_mark_interrupt_preserves_skipped_origin(void)
+{
+    struct agent_session session = {0};
+    agent_session_append(&session, (struct item){.kind = ITEM_TOOL_RESULT,
+                                                 .call_id = xstrdup("c1"),
+                                                 .output = xstrdup(INTERRUPT_MARKER),
+                                                 .origin = ITEM_ORIGIN_SKIPPED});
+
+    size_t before = session.n_items;
+    agent_session_mark_interrupt(&session);
+    EXPECT(session.n_items == before);
+    EXPECT(session.items[0].origin == ITEM_ORIGIN_SKIPPED);
     agent_session_free(&session);
 }
 
@@ -645,6 +679,91 @@ static void test_mark_interrupt_empty_session(void)
     agent_session_free(&session);
 }
 
+/* The classification follows the tail as the conversation evolves through an unanswered
+ * prompt, a finished seam, an abort marker, and a continuation, skipping inert trailing
+ * usage footers and boundaries at every step. */
+static void test_resume_tail_classification(void)
+{
+    struct agent_session session = {0};
+    EXPECT(agent_session_resume_tail(&session) == AGENT_RESUME_TAIL_EMPTY);
+
+    agent_session_add_user(&session, "hello");
+    EXPECT(agent_session_resume_tail(&session) == AGENT_RESUME_TAIL_USER);
+
+    agent_session_append(&session,
+                         (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("done")});
+    struct stream_usage usage = reported_usage();
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    EXPECT(agent_session_resume_tail(&session) == AGENT_RESUME_TAIL_CLEAN);
+
+    agent_session_append(&session, (struct item){.kind = ITEM_TOOL_RESULT,
+                                                 .call_id = xstrdup("c1"),
+                                                 .output = xstrdup(INTERRUPT_MARKER),
+                                                 .origin = ITEM_ORIGIN_SKIPPED});
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    EXPECT(agent_session_resume_tail(&session) == AGENT_RESUME_TAIL_MARKED);
+
+    /* A continuation that itself went unanswered re-sends rather than stacking another one. */
+    agent_session_add_continuation(&session);
+    EXPECT(agent_session_resume_tail(&session) == AGENT_RESUME_TAIL_USER);
+
+    agent_session_append(&session, (struct item){.kind = ITEM_ASSISTANT_MESSAGE,
+                                                 .text = xstrdup("cut short"),
+                                                 .origin = ITEM_ORIGIN_INTERRUPTED});
+    EXPECT(agent_session_resume_tail(&session) == AGENT_RESUME_TAIL_MARKED);
+
+    /* A compaction seed is a synthetic user message but continues like a finished seam. */
+    agent_session_append(&session, (struct item){.kind = ITEM_USER_MESSAGE,
+                                                 .text = xstrdup("summary"),
+                                                 .origin = ITEM_ORIGIN_COMPACT_SEED});
+    EXPECT(agent_session_resume_tail(&session) == AGENT_RESUME_TAIL_CLEAN);
+
+    agent_session_free(&session);
+}
+
+/* The newest reporting footer wins, unreported footers are skipped, and a compaction seed
+ * floors the scan: pre-compaction usage must not describe the summarized window. */
+static void test_last_context_tokens(void)
+{
+    struct agent_session session = {0};
+    EXPECT(agent_session_last_context_tokens(&session) == -1);
+
+    agent_session_add_user(&session, "hello");
+    struct stream_usage usage = reported_usage();
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    EXPECT(agent_session_last_context_tokens(&session) == 110);
+
+    usage.input_tokens = 600;
+    usage.output_tokens = 40;
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    EXPECT(agent_session_last_context_tokens(&session) == 640);
+
+    struct stream_usage unreported = {-1, -1, -1, -1, -1, -1};
+    agent_session_add_turn_usage(&session, NULL, &unreported, 1000, NULL);
+    EXPECT(agent_session_last_context_tokens(&session) == 640);
+
+    /* Production order: the accepted summarization footer follows the seed and reports the
+     * summarized request, so the fresh window still has no snapshot. */
+    agent_session_append(&session, (struct item){.kind = ITEM_USER_MESSAGE,
+                                                 .text = xstrdup("summary"),
+                                                 .origin = ITEM_ORIGIN_COMPACT_SEED});
+    usage.input_tokens = 900;
+    usage.output_tokens = 100;
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    EXPECT(agent_session_last_context_tokens(&session) == -1);
+
+    /* A continued turn's footer after the seed is the window snapshot again. */
+    agent_session_add_boundary(&session);
+    agent_session_append(&session,
+                         (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("onward")});
+    usage.input_tokens = 120;
+    usage.output_tokens = 30;
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    EXPECT(agent_session_last_context_tokens(&session) == 150);
+
+    agent_session_free(&session);
+}
+
 int main(void)
 {
     test_session_append();
@@ -670,8 +789,12 @@ int main(void)
     test_turn_usage_provenance_omits_redundant_labels();
     test_turn_usage_provenance_records_distinct_identity();
     test_turn_usage_provenance_without_response();
-    test_mark_interrupt_skips_marked_result();
+    test_mark_interrupt_skips_interrupted_result();
+    test_mark_interrupt_ignores_marker_text();
+    test_mark_interrupt_preserves_skipped_origin();
     test_mark_interrupt_marks_clean_result();
     test_mark_interrupt_empty_session();
+    test_resume_tail_classification();
+    test_last_context_tokens();
     T_REPORT();
 }

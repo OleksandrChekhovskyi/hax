@@ -13,6 +13,12 @@ void interrupt_install_fatal_signal_handlers(void);
 /* The hook runs from a signal handler and must be async-signal-safe. */
 void interrupt_set_fatal_signal_hook(void (*hook)(void));
 
+/* Install handlers that translate driver signals into requests for headless runs: SIGINT and
+ * SIGTERM latch an abort — a repeat escalates to the fatal path — and SIGUSR1 latches a pause.
+ * Overrides the fatal handlers for these signals, so install those first for the escalation
+ * (and the remaining fatal signals) to keep their cleanup. */
+void interrupt_install_request_signal_handlers(void);
+
 /* Start bare-Esc detection. The first Esc requests a pause and the second requests an immediate
  * abort. Arming is idempotent and does not clear requests left by an earlier cycle. */
 void interrupt_arm(void);

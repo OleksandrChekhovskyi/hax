@@ -29,7 +29,7 @@ enum item_origin {
     ITEM_ORIGIN_NONE = 0,
     ITEM_ORIGIN_COMPACT_SEED, /* synthetic USER_MESSAGE summarizing the history before it */
     ITEM_ORIGIN_CONTINUATION, /* synthetic USER_MESSAGE after an interrupted turn */
-    ITEM_ORIGIN_INTERRUPTED,  /* ASSISTANT_MESSAGE marked as interrupted */
+    ITEM_ORIGIN_INTERRUPTED,  /* ASSISTANT_MESSAGE or killed tool's TOOL_RESULT cut short */
     ITEM_ORIGIN_SKIPPED,      /* TOOL_RESULT for a call that did not run after an abort */
     ITEM_ORIGIN_REFUSED,      /* TOOL_RESULT for a call disabled by the frontend */
     ITEM_ORIGIN_SUMMARIZED,   /* TOOL_RESULT standing in for separately displayed output */

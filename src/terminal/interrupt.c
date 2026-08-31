@@ -296,6 +296,30 @@ void interrupt_install_fatal_signal_handlers(void)
         sigaction(signals[i], &action, NULL);
 }
 
+static void request_signal(int signal_number)
+{
+    atomic_store(&watcher.pause_requested, 1);
+    if (signal_number == SIGUSR1)
+        return;
+    /* A repeated stop request means the graceful wind-down is stuck or unwanted: escalate. */
+    if (atomic_exchange(&watcher.abort_requested, 1))
+        restore_and_reraise_signal(signal_number);
+}
+
+void interrupt_install_request_signal_handlers(void)
+{
+    struct sigaction action = {0};
+    action.sa_handler = request_signal;
+    sigemptyset(&action.sa_mask);
+    /* The run keeps writing logs and stream records while it winds down; cancellation is
+     * polled through the request latch, so interrupted syscalls may restart transparently. */
+    action.sa_flags = SA_RESTART;
+
+    const int signals[] = {SIGINT, SIGTERM, SIGUSR1};
+    for (size_t i = 0; i < sizeof(signals) / sizeof(signals[0]); i++)
+        sigaction(signals[i], &action, NULL);
+}
+
 static int create_wake_pipe(void)
 {
     int fds[2];

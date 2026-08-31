@@ -150,6 +150,7 @@ endforeach
 # selects the group (`meson test 'e2e/*'`).
 e2e_scenarios = [
     'oneshot_json',
+    'oneshot_signal_interrupt',
     'oneshot_text',
     'oneshot_tool',
 ]

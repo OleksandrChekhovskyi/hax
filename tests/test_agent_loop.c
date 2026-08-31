@@ -493,16 +493,21 @@ static struct item run_test_tool(const struct item *call, enum agent_loop_tool_a
 {
     (void)image_input;
     struct loop_test_ctx *ctx = user;
+    /* Results carry the action's provenance, as the frontend dispatchers' do. */
     if (action == AGENT_LOOP_TOOL_RUN) {
         ctx->tools_run++;
         return agent_tool_result_make(call, "handled", NULL);
     }
     if (action == AGENT_LOOP_TOOL_SKIP) {
         ctx->tools_skipped++;
-        return agent_tool_result_make(call, INTERRUPT_MARKER, NULL);
+        struct item skipped = agent_tool_result_make(call, INTERRUPT_MARKER, NULL);
+        skipped.origin = ITEM_ORIGIN_SKIPPED;
+        return skipped;
     }
     ctx->tools_refused++;
-    return agent_tool_result_make(call, "refused", NULL);
+    struct item refused = agent_tool_result_make(call, "refused", NULL);
+    refused.origin = ITEM_ORIGIN_REFUSED;
+    return refused;
 }
 
 static int cancel_checkpoint(void *user)

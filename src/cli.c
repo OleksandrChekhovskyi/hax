@@ -37,10 +37,9 @@ static const struct help_option {
      "one per line, ending with a result record. Format reference: docs/sessions.md."},
     {"-c, --continue", "Resume the most recent conversation in this directory."},
     {"--resume[=ID]",
-     "Resume a past conversation in this directory. With no ID, pick one from an interactive "
-     "list; with a session ID, resume it directly — the ID form also works with -p. Resuming "
-     "restores the provider, model, effort, and preset the conversation was last using; the "
-     "selection flags override them."},
+     "Resume a past conversation in this directory, restoring its recorded settings: pick "
+     "from a list, or give a session ID. Works with -p; without a prompt, the conversation "
+     "continues from where it stopped."},
     {"--no-session",
      "Don't record this conversation: nothing to resume afterwards, and the prompts you type "
      "aren't added to Ctrl-R recall. Earlier sessions and prompts stay readable."},
@@ -292,6 +291,9 @@ int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FI
     *prompt = NULL;
     if (!options->one_shot)
         return 0;
+    /* Resuming gives a missing prompt a meaning — continue the recorded conversation, like the
+     * REPL's empty-send resume — so only a fresh run rejects it. */
+    int resuming = options->resume_mode != CLI_RESUME_NONE;
 
     if (options->first_prompt_arg < argc) {
         *prompt =
@@ -303,15 +305,19 @@ int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FI
             return -1;
         }
         strip_final_newline(*prompt);
+    } else if (resuming) {
+        return 0;
     } else {
         hax_err("-p requires a prompt (positional args or piped stdin)");
         return -1;
     }
 
     if (!**prompt) {
-        hax_err("-p prompt is empty");
         free(*prompt);
         *prompt = NULL;
+        if (resuming)
+            return 0;
+        hax_err("-p prompt is empty");
         return -1;
     }
     return 0;

@@ -84,19 +84,21 @@ records:
 
 | Field | Meaning |
 | --- | --- |
-| `outcome` | `complete`, `error`, or `max_turns`. |
+| `outcome` | `complete`, `error`, `interrupted`, `paused`, or `max_turns`. |
 | `text` | The final assistant text on `complete`, verbatim — unlike plain output, no trailing newline is appended. |
 | `error` | Provider error message, when the run failed. |
 | `turns` | Provider round-trips used. |
 | `elapsed_ms` | Wall-clock duration of the run. |
 | `context_tokens` | Context size of the last round-trip, when reported. |
 | `cost` | Total spend in USD, with `cost_estimated: true` when catalog-priced. |
-| `session_id` | Resume handle for `hax --resume=ID -p`. |
+| `session_id` | Resume handle for `hax --resume=ID -p`; with no prompt, the resumed run continues where this one stopped. |
 
-A startup failure can end the stream before any result record, so also treat process exit as
-terminal. The exit status matches plain `-p`: 0 on `complete`, 1 otherwise. When the stream
-itself becomes unwritable mid-run (the consumer exited, the disk filled), hax stops the run and
-exits nonzero rather than keep working unobserved.
+`interrupted` and `paused` report a stop signal (SIGINT/SIGTERM and SIGUSR1 respectively; see
+[usage.md](./usage.md#cli-modes)). A startup failure can end the stream before any result record,
+so also treat process exit as terminal. The exit status matches plain `-p`: 0 on `complete`, 130
+on a signal-caused `interrupted`, 1 otherwise. When the stream itself becomes unwritable mid-run
+(the consumer exited, the disk filled), hax stops the run and exits nonzero rather than keep
+working unobserved.
 
 Example — watch tool calls and cost from a script, no state-directory knowledge needed:
 

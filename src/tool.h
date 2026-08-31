@@ -18,6 +18,8 @@ struct tool_run_ctx {
     size_t n_result_images;
     /* The returned output summarizes bytes sent through display instead of repeating them. */
     int output_summarizes_display;
+    /* The run was cut short by a user interrupt; the result carries interrupted provenance. */
+    int interrupted;
     /* Length of a trailing model-only annotation in the returned output; user-facing rendering
      * omits it. Control-free text only, so stripping the stored copy keeps the length valid. */
     size_t output_hidden_tail;

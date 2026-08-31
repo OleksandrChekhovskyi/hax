@@ -53,7 +53,6 @@ struct agent_state {
     char *pending_recall;  /* owned prompt to add to editor recall after a slash command */
     char *pending_preseed; /* owned text to seed into the next prompt */
     enum agent_resume_reason resume_reason;
-    int resume_has_marker;   /* empty-send resume must append a continuation message */
     int compaction_deferred; /* settle before appending the next prompt */
     struct session_stats stats;
 };

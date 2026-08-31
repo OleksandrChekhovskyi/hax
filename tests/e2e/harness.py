@@ -51,26 +51,66 @@ def hermetic_env(home: Path) -> dict[str, str]:
     return env
 
 
-def run_oneshot(prompt: str, mock_script: str, extra_args: list[str] | None = None) -> Result:
-    """Run `hax -p [extra_args] <prompt>` against scripts/mock/<mock_script> in a scratch cwd."""
+def make_home() -> tuple[Path, Path]:
+    """Scratch HOME plus the work directory inside it, shareable across runs of one scenario."""
     home = scratch_dir()
     workdir = home / "work"
     workdir.mkdir()
+    return home, workdir
+
+
+def hax_binary() -> Path:
+    # Resolve before any cwd switch so a relative HAX_BIN keeps meaning what
+    # the caller wrote.
+    return Path(os.environ.get("HAX_BIN", str(REPO_ROOT / "build" / "hax"))).resolve()
+
+
+def mock_env(home: Path, mock_script: str, extra_env: dict[str, str] | None = None) -> dict[str, str]:
     env = hermetic_env(home)
     env["HAX_PROVIDER"] = "mock"
     env["HAX_MOCK_SCRIPT"] = str(REPO_ROOT / "scripts" / "mock" / mock_script)
-    # Resolve before the cwd switch so a relative HAX_BIN keeps meaning what
-    # the caller wrote; decode as UTF-8 regardless of the host locale.
-    binary = Path(os.environ.get("HAX_BIN", str(REPO_ROOT / "build" / "hax"))).resolve()
+    if extra_env:
+        env.update(extra_env)
+    return env
+
+
+def run_oneshot(prompt: str, mock_script: str, extra_args: list[str] | None = None) -> Result:
+    """Run `hax -p [extra_args] <prompt>` against scripts/mock/<mock_script> in a scratch cwd."""
+    home, workdir = make_home()
+    # Decode as UTF-8 regardless of the host locale.
     proc = subprocess.run(
-        [str(binary), "-p", *(extra_args or []), prompt],
+        [str(hax_binary()), "-p", *(extra_args or []), prompt],
         cwd=workdir,
-        env=env,
+        env=mock_env(home, mock_script),
         capture_output=True,
         encoding="utf-8",
         timeout=30,
     )
     return Result(proc, workdir)
+
+
+def spawn_hax(
+    args: list[str],
+    mock_script: str,
+    home: Path,
+    workdir: Path,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.Popen:
+    """Start `hax <args>` for scenarios that drive stdout and signals themselves."""
+    return subprocess.Popen(
+        [str(hax_binary()), *args],
+        cwd=workdir,
+        env=mock_env(home, mock_script, extra_env),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+    )
+
+
+def spawned_result(proc: subprocess.Popen, stdout: str, stderr: str, workdir: Path) -> Result:
+    """Package a finished spawn_hax() run so expect() can dump it on failure."""
+    completed = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+    return Result(completed, workdir)
 
 
 def expect(condition: bool, description: str, result: Result | None = None) -> None:
