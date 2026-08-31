@@ -15,9 +15,10 @@
 
 #include "diag.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 #include "system/path.h"
+#include "text/fmt.h"
 #include "text/utf8_sanitize.h"
 
 /* Canonical keys, env bindings, defaults, and /config metadata. Row order is

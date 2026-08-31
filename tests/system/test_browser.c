@@ -5,7 +5,7 @@
 #include <sys/stat.h>
 
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/browser.h"
 #include "system/fs.h"
 

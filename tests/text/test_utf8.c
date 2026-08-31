@@ -2,7 +2,7 @@
 #include <string.h>
 
 #include "harness.h"
-#include "util.h"
+#include "system/locale.h"
 #include "text/utf8.h"
 
 static void test_sequence_length_ascii(void)

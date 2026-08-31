@@ -7,7 +7,7 @@
 
 #include "agent.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/codex.h"
 #include "providers/codex_login.h"
 #include "providers/registry.h"

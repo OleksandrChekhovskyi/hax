@@ -6,7 +6,7 @@
 #include <strings.h>
 
 #include "buf.h"
-#include "util.h"
+#include "xalloc.h"
 #include "render/markdown_scan.h"
 #include "render/markdown_table.h"
 #include "render/markdown_wrap.h"

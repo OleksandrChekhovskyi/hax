@@ -9,7 +9,7 @@
 
 #include "busy.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/http_provider.h"
 #include "providers/provider_config.h"
 #include "providers/usage_render.h"

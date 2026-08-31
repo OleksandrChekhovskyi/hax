@@ -11,7 +11,8 @@
 #include "buf.h"
 #include "config.h"
 #include "diag.h"
-#include "util.h"
+#include "xalloc.h"
+#include "system/clock.h"
 
 static pthread_mutex_t trace_mu = PTHREAD_MUTEX_INITIALIZER;
 static FILE *trace_fp;

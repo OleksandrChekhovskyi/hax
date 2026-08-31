@@ -10,7 +10,7 @@
 
 #include "buf.h"
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 #include "system/path.h"
 

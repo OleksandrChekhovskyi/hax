@@ -8,7 +8,7 @@
 #include "agent_core.h"
 #include "config.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
 #include "terminal/width.h"

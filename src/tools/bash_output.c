@@ -12,7 +12,7 @@
 #include <sys/wait.h> // IWYU pragma: keep
 
 #include "buf.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 #include "system/tempfiles.h"
 #include "text/utf8_sanitize.h"

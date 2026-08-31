@@ -11,7 +11,7 @@
 #include "provider.h"
 #include "tool.h"
 #include "turn.h"
-#include "util.h"
+#include "xalloc.h"
 #include "tools/task_registry.h"
 #include "transport/http.h"
 

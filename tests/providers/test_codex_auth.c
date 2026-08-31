@@ -7,7 +7,7 @@
 
 #include "cred_store.h"
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/codex_auth.h"
 #include "providers/http_provider.h"
 #include "text/base64.h"

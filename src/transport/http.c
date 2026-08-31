@@ -14,8 +14,8 @@
 
 #include "buf.h"
 #include "trace.h"
-#include "util.h"
 #include "version.h"
+#include "xalloc.h"
 #include "transport/ca.h"
 #include "transport/sse.h"
 

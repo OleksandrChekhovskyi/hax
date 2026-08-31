@@ -27,7 +27,7 @@ add_project_arguments(
     '-D_DARWIN_C_SOURCE',
     # Project headers go through -iquote, not -I, so `#include <foo.h>`
     # always reaches a system header rather than shadowing it with one
-    # of ours (e.g. `src/util.h` would collide with macOS's `<util.h>`
+    # of ours (e.g. a `src/util.h` would collide with macOS's `<util.h>`
     # under -I). The `tests/` entry serves the same purpose for
     # `harness.h` and friends.
     '-iquote', meson.project_source_root() / 'src',
@@ -112,7 +112,7 @@ sources = files(
     'src/trace.c',
     'src/transcript.c',
     'src/turn.c',
-    'src/util.c',
+    'src/xalloc.c',
 
     'src/providers/anthropic_body.c',
     'src/providers/anthropic_events.c',
@@ -151,11 +151,14 @@ sources = files(
 
     'src/system/bg_job.c',
     'src/system/browser.c',
+    'src/system/clock.c',
     'src/system/fs.c',
     'src/system/git.c',
     'src/system/keepawake.c',
+    'src/system/locale.c',
     'src/system/os.c',
     'src/system/path.c',
+    'src/system/rand.c',
     'src/system/spawn.c',
     'src/system/tempfiles.c',
 
@@ -173,7 +176,9 @@ sources = files(
 
     'src/text/base64.c',
     'src/text/diff.c',
+    'src/text/fmt.c',
     'src/text/sha256.c',
+    'src/text/shell_quote.c',
     'src/text/urlencode.c',
     'src/text/utf8.c',
     'src/text/utf8_sanitize.c',

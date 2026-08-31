@@ -10,7 +10,7 @@
 #include "harness.h"
 #include "provider.h"
 #include "session.h"
-#include "util.h"
+#include "xalloc.h"
 #include "transport/http.h"
 
 static void test_over_threshold(void)

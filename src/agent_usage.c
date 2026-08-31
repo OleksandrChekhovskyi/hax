@@ -8,7 +8,8 @@
 #include "catalog.h"
 #include "model_meta.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
+#include "text/fmt.h"
 
 struct spend_record {
     struct stream_usage usage;

@@ -14,11 +14,12 @@
 #include "config.h"
 #include "effort.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/provider_config.h"
 #include "render/ctrl_strip.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
+#include "text/fmt.h"
 #include "transport/http.h"
 
 #define OPENROUTER_BASE_URL         "https://openrouter.ai/api/v1"

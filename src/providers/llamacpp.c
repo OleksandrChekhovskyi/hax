@@ -12,7 +12,7 @@
 #include "config.h"
 #include "diag.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/http_provider.h"
 #include "providers/provider_config.h"
 #include "providers/registry.h"

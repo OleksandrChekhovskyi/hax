@@ -6,9 +6,10 @@
 
 #include "file_mention.h"
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/path.h"
 #include "terminal/input_core.h"
+#include "text/shell_quote.h"
 
 static void write_file(const char *path, const char *contents, mode_t mode)
 {

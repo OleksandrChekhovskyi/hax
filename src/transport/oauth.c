@@ -13,7 +13,9 @@
 /* struct timeval for SO_RCVTIMEO; not every libc leaks it through the socket headers. */
 #include <sys/time.h> // IWYU pragma: keep
 
-#include "util.h"
+#include "xalloc.h"
+#include "system/clock.h"
+#include "system/rand.h"
 #include "text/base64.h"
 #include "text/sha256.h"
 #include "text/urlencode.h"

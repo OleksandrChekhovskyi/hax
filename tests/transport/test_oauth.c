@@ -8,7 +8,8 @@
 
 #include "buf.h"
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
+#include "system/clock.h"
 #include "system/fs.h"
 #include "text/base64.h"
 #include "text/sha256.h"

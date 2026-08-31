@@ -7,7 +7,7 @@
 
 #include "effort.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/http_provider.h"
 #include "transport/api_error.h"
 #include "transport/http.h"

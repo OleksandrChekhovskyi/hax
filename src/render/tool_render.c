@@ -6,7 +6,7 @@
 #include <string.h>
 
 #include "buf.h"
-#include "util.h"
+#include "xalloc.h"
 #include "render/ctrl_strip.h"
 #include "render/diff_color.h"
 #include "render/disp.h"

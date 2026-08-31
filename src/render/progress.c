@@ -3,7 +3,7 @@
 
 #include <stdio.h>
 
-#include "util.h"
+#include "system/locale.h"
 #include "terminal/ansi.h"
 
 /* Subtle look: the whole bar renders at ANSI_DIM with contrast coming

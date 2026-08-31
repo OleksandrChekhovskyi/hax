@@ -14,7 +14,7 @@
 #include "model_meta.h"
 #include "provider.h"
 #include "session.h"
-#include "util.h"
+#include "xalloc.h"
 #include "render/render_ctx.h"
 
 /* Run `body` with captured stdout, restore stdout, and return owned output. */

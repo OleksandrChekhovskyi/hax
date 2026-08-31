@@ -10,7 +10,7 @@
 
 #include "config.h"
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/keepawake.h"
 
 static void expect_no_children(void)

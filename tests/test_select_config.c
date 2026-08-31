@@ -12,7 +12,7 @@
 #include "model_meta.h"
 #include "provider.h"
 #include "select.h"
-#include "util.h"
+#include "xalloc.h"
 #include "render/render_ctx.h"
 #include "terminal/picker.h"
 #include "transport/http.h"

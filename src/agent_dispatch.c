@@ -10,7 +10,7 @@
 #include "agent_tool.h"
 #include "provider.h"
 #include "tool.h"
-#include "util.h"
+#include "xalloc.h"
 #include "render/disp.h"
 #include "render/render_ctx.h"
 #include "render/spinner.h"

@@ -6,7 +6,7 @@
 #include <string.h>
 
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 
 struct responses_tool_call {
     char *item_id;

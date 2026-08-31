@@ -12,7 +12,8 @@
 #include "session.h"
 #include "transcript.h"
 #include "turn.h"
-#include "util.h"
+#include "xalloc.h"
+#include "system/clock.h"
 
 /* Fixed sections and exact identifiers make the seed useful across model changes. The leading
  * output-only instruction prevents weaker models from continuing the task instead. */

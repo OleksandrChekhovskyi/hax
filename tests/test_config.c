@@ -10,7 +10,7 @@
 #include "config.h"
 #include "diag.h"
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 
 /* Isolate resolution tests from the developer or CI environment. */

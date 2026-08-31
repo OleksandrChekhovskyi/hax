@@ -4,7 +4,7 @@
 #include <sys/stat.h>
 
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
 #include "terminal/input.h"
 #include "terminal/input_core.h"
 

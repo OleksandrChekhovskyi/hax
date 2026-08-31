@@ -5,7 +5,7 @@
 
 #include "config.h"
 #include "diag.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 
 char *bash_resolve_shell(void)

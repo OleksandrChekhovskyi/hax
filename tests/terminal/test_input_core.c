@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "harness.h"
-#include "util.h"
+#include "system/locale.h"
 #include "terminal/input.h"
 #include "terminal/input_core.h"
 

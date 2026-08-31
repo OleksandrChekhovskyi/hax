@@ -8,10 +8,11 @@
 #include "harness.h"
 #include "provider.h"
 #include "tool.h"
-#include "util.h"
+#include "xalloc.h"
 #include "render/markdown.h"
 #include "render/render_ctx.h"
 #include "render/spinner.h"
+#include "system/locale.h"
 
 static char *run_mode_probe(const char *args_json, struct tool_run_ctx *ctx)
 {

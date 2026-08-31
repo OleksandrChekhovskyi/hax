@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "buf.h"
-#include "util.h"
+#include "xalloc.h"
 
 static size_t path_len_without_trailing_slashes(const char *path)
 {

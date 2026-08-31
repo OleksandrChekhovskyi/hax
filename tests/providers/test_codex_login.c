@@ -4,7 +4,7 @@
 #include <string.h>
 
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/codex_login.h"
 #include "text/base64.h"
 

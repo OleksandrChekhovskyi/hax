@@ -13,7 +13,7 @@
 #include <sys/stat.h>
 
 #include "buf.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/path.h"
 #include "text/diff.h"
 

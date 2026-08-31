@@ -9,7 +9,7 @@
 #include "agent_env.h"
 #include "config.h"
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 
 /* HOME, XDG paths, cwd, and prompt feature flags are isolated from the developer's environment. */

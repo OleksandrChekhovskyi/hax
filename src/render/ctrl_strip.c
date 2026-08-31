@@ -3,7 +3,7 @@
 
 #include <string.h>
 
-#include "util.h"
+#include "xalloc.h"
 
 enum {
     ASCII_BEL = 0x07,

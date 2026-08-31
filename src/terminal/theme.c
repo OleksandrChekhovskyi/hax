@@ -7,7 +7,7 @@
 
 #include "config.h"
 #include "diag.h"
-#include "util.h"
+#include "xalloc.h"
 #include "terminal/ansi.h"
 
 enum tint_palette {

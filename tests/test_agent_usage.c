@@ -10,7 +10,7 @@
 #include "harness.h"
 #include "model_meta.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 
 static const struct provider CATALOG_PROVIDER = {.catalog_id = "prov"};
 

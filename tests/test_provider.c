@@ -4,7 +4,7 @@
 
 #include "harness.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 
 static struct item make_image_item(size_t base64_bytes)
 {

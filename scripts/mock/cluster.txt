@@ -64,7 +64,7 @@ end-turn
 # Turn 8: a mixed cluster in one turn — the open read line closes for the bash
 # line, and the next read starts a fresh line.
 text Mixing reads and quiet commands.
-tool read {"path":"src/util.h"}
+tool read {"path":"src/xalloc.h"}
 tool bash {"command":"ls scripts/mock"}
 tool read {"path":"src/config.h"}
 usage in=540 out=32

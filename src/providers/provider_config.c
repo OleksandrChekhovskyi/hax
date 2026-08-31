@@ -10,7 +10,7 @@
 #include "config.h"
 #include "diag.h"
 #include "trace.h"
-#include "util.h"
+#include "xalloc.h"
 
 #define FIELD_ANY (PROVIDER_FIELD_OPENAI | PROVIDER_FIELD_ANTHROPIC)
 /* Responses fixes its reasoning shape and round-trip on the wire and never sends explicit cache

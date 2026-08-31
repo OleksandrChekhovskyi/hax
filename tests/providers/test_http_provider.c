@@ -18,7 +18,7 @@
 #include "effort.h"
 #include "harness.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/http_provider.h"
 #include "providers/registry.h"
 #include "transport/http.h"

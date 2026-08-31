@@ -18,7 +18,10 @@
 #endif
 
 #include "buf.h"
-#include "util.h"
+#include "xalloc.h"
+#include "system/clock.h"
+#include "system/locale.h"
+#include "text/shell_quote.h"
 
 /* Everything a pinned LC_ALL was covering besides the charset. Clearing it is what lets LC_CTYPE
  * apply at all, so each category is restated at the value it had: hax is entitled to the encoding

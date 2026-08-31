@@ -19,7 +19,7 @@
 #include "select.h"
 #include "session.h"
 #include "session_picker.h"
-#include "util.h"
+#include "xalloc.h"
 #include "render/disp.h"
 #include "render/render_ctx.h"
 #include "terminal/ansi.h"
@@ -28,6 +28,7 @@
 #include "terminal/theme.h"
 #include "terminal/ui.h"
 #include "terminal/width.h"
+#include "text/fmt.h"
 #include "text/width.h"
 #include "tools/task_registry.h"
 

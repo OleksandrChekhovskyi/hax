@@ -8,7 +8,7 @@
 #include "provider.h"
 #include "tool.h"
 #include "turn.h"
-#include "util.h"
+#include "xalloc.h"
 
 /* agent_core's static tool table requires these link-time stand-ins. */
 static char *stub_run(const char *args, struct tool_run_ctx *ctx)

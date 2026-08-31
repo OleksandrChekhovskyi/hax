@@ -7,7 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "util.h"
+#include "xalloc.h"
 #include "system/path.h"
 #include "text/utf8.h"
 

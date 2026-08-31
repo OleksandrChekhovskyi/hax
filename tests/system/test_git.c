@@ -7,7 +7,7 @@
 #include <sys/wait.h> // IWYU pragma: keep
 
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 #include "system/git.h"
 #include "system/spawn.h"

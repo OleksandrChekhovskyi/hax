@@ -6,7 +6,7 @@
 #include <string.h>
 
 #include "buf.h"
-#include "util.h"
+#include "xalloc.h"
 
 void url_encode_append(struct buf *out, const char *value)
 {

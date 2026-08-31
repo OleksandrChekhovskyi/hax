@@ -2,7 +2,7 @@
 #include <stdlib.h>
 
 #include "harness.h"
-#include "util.h"
+#include "system/clock.h"
 #include "transport/retry.h"
 
 static void test_response_classification(void)

@@ -8,7 +8,7 @@
 #include "buf.h"
 #include "harness.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/registry.h"
 
 struct stream_capture {

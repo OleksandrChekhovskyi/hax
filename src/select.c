@@ -19,7 +19,7 @@
 #include "model_meta.h"
 #include "model_sort.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/registry.h"
 #include "render/disp.h"
 #include "render/render_ctx.h"

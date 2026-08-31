@@ -10,10 +10,12 @@
 #include <unistd.h>
 
 #include "buf.h"
-#include "util.h"
+#include "xalloc.h"
+#include "system/clock.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
 #include "terminal/width.h"
+#include "text/fmt.h"
 #include "text/width.h"
 
 #define FRAME_INTERVAL_MS 80

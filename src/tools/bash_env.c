@@ -5,7 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "util.h"
+#include "xalloc.h"
+#include "text/fmt.h"
 
 static char *selection_env[4];
 static size_t selection_count;

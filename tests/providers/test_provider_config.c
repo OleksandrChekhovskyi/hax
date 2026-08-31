@@ -7,7 +7,7 @@
 #include "diag.h"
 #include "harness.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/opencode.h"
 #include "providers/provider_config.h"
 #include "providers/registry.h"

@@ -8,7 +8,7 @@
 #include "agent_core.h"
 #include "provider.h"
 #include "tool.h"
-#include "util.h"
+#include "xalloc.h"
 #include "render/ctrl_strip.h"
 
 void agent_tool_call_init(struct agent_tool_call *tc, const struct item *call)

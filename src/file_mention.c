@@ -10,11 +10,12 @@
 #include <sys/wait.h> // IWYU pragma: keep
 
 #include "diag.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 #include "system/path.h"
 #include "system/spawn.h"
 #include "terminal/input_core.h"
+#include "text/shell_quote.h"
 
 /* NUL records preserve non-ASCII paths that git line mode would quote and filenames containing
  * newlines. Keep candidates streaming: fzf reads stdin asynchronously while using /dev/tty. */

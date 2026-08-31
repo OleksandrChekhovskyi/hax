@@ -8,7 +8,8 @@
 #include "banner.h"
 #include "harness.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
+#include "system/locale.h"
 
 /* Row layout is asserted on plain text; SGR runs vary with theme resolution. */
 static char *strip_sgr(const char *s)

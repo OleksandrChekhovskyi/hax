@@ -7,7 +7,7 @@
 #include <time.h>
 
 #include "config.h"
-#include "util.h"
+#include "system/clock.h"
 #include "transport/http.h"
 
 #define MAX_DELAY_MS   30000

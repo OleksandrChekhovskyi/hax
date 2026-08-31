@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "util.h"
+#include "xalloc.h"
 #include "system/spawn.h"
 
 /* The probe runs before the first request goes out, so a git that can't answer about the working

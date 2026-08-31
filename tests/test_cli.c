@@ -11,7 +11,8 @@
 #include "harness.h"
 #include "provider.h"
 #include "session.h"
-#include "util.h"
+#include "xalloc.h"
+#include "system/locale.h"
 #include "text/width.h"
 
 static void test_parse_selection_and_prompt_arguments(void)

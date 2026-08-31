@@ -7,7 +7,7 @@
 
 #include "buf.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 
 void chat_events_init(struct chat_events *parser, stream_cb callback, void *callback_user)
 {

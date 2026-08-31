@@ -9,8 +9,9 @@
 #include "config.h"
 #include "effort.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/bg_job.h"
+#include "system/clock.h"
 #include "transport/http.h"
 
 struct model_meta {

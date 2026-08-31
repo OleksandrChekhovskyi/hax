@@ -11,7 +11,7 @@
 #include "provider.h"
 #include "slash.h"
 #include "tool.h"
-#include "util.h"
+#include "xalloc.h"
 #include "render/render_ctx.h"
 
 /* Link-only tool stubs; slash tests never invoke them. */

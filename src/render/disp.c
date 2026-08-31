@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "util.h"
+#include "xalloc.h"
 
 FILE *disp_sink(const struct disp *disp)
 {

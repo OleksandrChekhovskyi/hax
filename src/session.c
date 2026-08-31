@@ -19,11 +19,12 @@
 #include "diag.h"
 #include "provider.h"
 #include "session_prune.h"
-#include "util.h"
 #include "version.h"
+#include "xalloc.h"
 #include "system/fs.h"
 #include "system/git.h"
 #include "system/path.h"
+#include "system/rand.h"
 #include "text/width.h"
 
 /* struct stat's sub-second mtime field is spelled differently across

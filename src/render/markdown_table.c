@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "buf.h"
-#include "util.h"
+#include "xalloc.h"
 #include "terminal/ansi.h"
 #include "text/utf8.h"
 

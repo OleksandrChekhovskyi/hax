@@ -15,7 +15,7 @@
 #include "buf.h"
 #include "harness.h"
 #include "tool.h"
-#include "util.h"
+#include "xalloc.h"
 
 /* Producers must outlive the yield window to detach. Tests that also need initial output
  * captured before the transition hold it open with HAX_BASH_TRANSITION_MIN_BYTES instead of

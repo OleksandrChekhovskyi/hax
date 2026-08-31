@@ -4,7 +4,7 @@
 #include <string.h>
 
 #include "harness.h"
-#include "util.h"
+#include "system/locale.h"
 #include "terminal/ansi.h"
 #include "terminal/vt_resolve.h"
 

@@ -8,7 +8,7 @@
 #include "harness.h"
 #include "provider.h"
 #include "session.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 #include "system/git.h"
 

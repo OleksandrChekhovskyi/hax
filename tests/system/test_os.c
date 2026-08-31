@@ -6,7 +6,7 @@
 #include <unistd.h>
 
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/os.h"
 
 static char *write_release(const char *content)

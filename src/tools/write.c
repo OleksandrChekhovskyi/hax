@@ -5,7 +5,7 @@
 
 #include "provider.h"
 #include "tool.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 #include "system/path.h"
 #include "tools/path_preprocess.h"

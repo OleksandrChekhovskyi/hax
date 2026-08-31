@@ -12,7 +12,7 @@
 #include "buf.h"
 #include "config.h"
 #include "diag.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/registry.h"
 #include "system/fs.h"
 #include "system/os.h"

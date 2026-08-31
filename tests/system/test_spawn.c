@@ -10,7 +10,8 @@
 #include <sys/wait.h> // IWYU pragma: keep
 
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
+#include "system/locale.h"
 #include "system/spawn.h"
 
 static const char *tmpdir;

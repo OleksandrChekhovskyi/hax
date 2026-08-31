@@ -5,7 +5,7 @@
 #include <unistd.h>
 
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/path.h"
 #include "tools/path_preprocess.h"
 

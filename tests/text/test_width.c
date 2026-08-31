@@ -3,7 +3,7 @@
 #include <string.h>
 
 #include "harness.h"
-#include "util.h"
+#include "system/locale.h"
 #include "text/width.h"
 
 /* ---------- flatten_for_display ---------- */

@@ -7,7 +7,7 @@
 #include <string.h>
 
 #include "buf.h"
-#include "util.h"
+#include "xalloc.h"
 #include "transport/sse.h"
 
 #define MAX_MESSAGE_BYTES 200

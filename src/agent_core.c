@@ -16,7 +16,7 @@
 #include "tool.h"
 #include "transcript.h"
 #include "turn.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/registry.h"
 #include "tools/bash_env.h"
 #include "tools/task_registry.h"

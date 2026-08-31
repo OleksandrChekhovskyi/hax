@@ -5,8 +5,9 @@
 
 #include "buf.h"
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
 #include "render/markdown_table.h"
+#include "system/locale.h"
 #include "terminal/ansi.h"
 
 #define DIM  ANSI_DIM

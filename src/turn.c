@@ -6,7 +6,7 @@
 
 #include "buf.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 
 struct pending_tool_call {
     char *id;

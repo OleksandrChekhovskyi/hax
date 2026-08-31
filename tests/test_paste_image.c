@@ -7,7 +7,7 @@
 
 #include "harness.h"
 #include "paste_image.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/tempfiles.h"
 
 static void expect_normalized_text(const char *input, size_t input_len, const char *expected)

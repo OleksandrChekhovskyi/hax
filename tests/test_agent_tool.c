@@ -6,7 +6,7 @@
 #include "harness.h"
 #include "provider.h"
 #include "tool.h"
-#include "util.h"
+#include "xalloc.h"
 
 static char *last_args;
 static int preprocess_calls;

@@ -7,7 +7,7 @@
 
 #include "provider.h"
 #include "tool_schema.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/wire.h"
 
 /* Responses accepts content parts instead of a string when a function result contains images. */

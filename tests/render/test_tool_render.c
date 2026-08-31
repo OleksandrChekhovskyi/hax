@@ -5,9 +5,9 @@
 #include <unistd.h>
 
 #include "harness.h"
-#include "util.h"
 #include "render/disp.h"
 #include "render/tool_render.h"
+#include "system/locale.h"
 #include "terminal/ansi.h"
 
 #define STRIP_FIRST      ANSI_DIM ANSI_CYAN "\xE2\x94\x8C " ANSI_RESET

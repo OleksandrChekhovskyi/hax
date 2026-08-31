@@ -17,8 +17,8 @@
 #include "session_prune.h"
 #include "trace.h"
 #include "transcript.h"
-#include "util.h"
 #include "providers/registry.h"
+#include "system/locale.h"
 #include "terminal/theme.h"
 #include "transport/ca.h"
 

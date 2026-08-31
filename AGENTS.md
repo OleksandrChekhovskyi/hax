@@ -45,7 +45,7 @@ Tests are plain C binaries using `tests/harness.h` (`EXPECT`, `EXPECT_STR_EQ`, `
 at process exit; raw `mkdtemp` in tests fails `make lint`.
 To add a test, append its source to `test_sources` in `tests/meson.build`, grouped to mirror
 the production `sources` list. Test names are path-derived: `tools/test_read.c` becomes
-`tools/read`, and `test_util.c` becomes `util`.
+`tools/read`, and `test_buf.c` becomes `buf`.
 
 End-to-end scenarios follow the same conventions in Python: standalone scripts under
 `tests/e2e/`, registered in `e2e_scenarios` in `tests/meson.build`. They run the built binary
@@ -94,8 +94,8 @@ Terminology:
 
 Core boundaries:
 
-- Keep shared primitives in focused modules instead of growing `util`; reserve `util` for small,
-  genuinely cross-cutting helpers with no clearer owner.
+- Keep shared primitives in small focused modules; there is no catch-all `util`. Extend the
+  module whose contract a new helper fits, or give it a focused module of its own.
 - The canonical conversation state is the flat, provider-independent `struct item` log owned by
   `struct agent_session`. Compaction appends a summary seed without deleting prior history; build
   model-visible windows with `agent_session_context()` rather than slicing the raw log.
@@ -144,7 +144,7 @@ Extension workflows:
 - Linux-kernel-inspired userspace style: snake_case, no typedef'd structs, function braces on
   their own line, control-flow braces on the same line.
 - Every source file starts with `/* SPDX-License-Identifier: MIT */`.
-- Use plain `malloc`/`calloc`/`free`; `xmalloc`/`xstrdup`/`xasprintf` in `src/util.h` abort on
+- Use plain `malloc`/`calloc`/`free`; `xmalloc`/`xstrdup`/`xasprintf` in `src/xalloc.h` abort on
   OOM. No arenas.
 - Use kernel-style goto cleanup for multi-resource functions, with labels in reverse
   acquisition order.

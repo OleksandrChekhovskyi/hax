@@ -3,10 +3,10 @@
 
 #include <stdio.h>
 
-#include "util.h"
 #include "render/disp.h"
 #include "render/markdown.h"
 #include "render/spinner.h"
+#include "system/clock.h"
 #include "terminal/ansi.h"
 
 static int hide_table_spinner(struct render_ctx *render)

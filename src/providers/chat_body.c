@@ -11,7 +11,7 @@
 #include "diag.h"
 #include "provider.h"
 #include "tool_schema.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/wire.h"
 
 /* AUTO sends explicit cache markers only when writes replace ordinary input processing. */

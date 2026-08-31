@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "util.h"
+#include "xalloc.h"
 
 char *item_image_placeholder(const struct item_image *image)
 {

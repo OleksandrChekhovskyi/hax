@@ -7,7 +7,7 @@
 
 #include "cred_store.h"
 #include "diag.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/codex_login.h"
 #include "providers/http_provider.h"
 #include "system/fs.h"

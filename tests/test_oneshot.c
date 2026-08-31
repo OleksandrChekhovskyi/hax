@@ -9,7 +9,7 @@
 #include "harness.h"
 #include "oneshot.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "transport/http.h"
 
 struct captured_run {

@@ -10,7 +10,7 @@
 #include "effort.h"
 #include "harness.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/codex.h"
 #include "providers/http_provider.h"
 #include "providers/registry.h"

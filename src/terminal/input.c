@@ -18,8 +18,9 @@
 #include <sys/wait.h> // IWYU pragma: keep
 
 #include "buf.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
+#include "system/locale.h"
 #include "system/path.h"
 #include "system/spawn.h"
 #include "terminal/ansi.h"

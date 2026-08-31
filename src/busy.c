@@ -5,7 +5,7 @@
 #include <stdlib.h>
 
 #include "agent_core.h"
-#include "util.h"
+#include "xalloc.h"
 #include "render/spinner.h"
 #include "terminal/ansi.h"
 #include "terminal/interrupt.h"

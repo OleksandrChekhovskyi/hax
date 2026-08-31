@@ -11,9 +11,10 @@
 #include "history.h"
 #include "provider.h"
 #include "tool.h"
-#include "util.h"
+#include "xalloc.h"
 #include "render/disp.h"
 #include "render/render_ctx.h"
+#include "system/locale.h"
 #include "terminal/vt_resolve.h"
 
 /* Render through the paged-history sink and resolver. Markdown stays disabled so assertions do

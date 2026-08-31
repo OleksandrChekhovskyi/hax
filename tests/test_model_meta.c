@@ -11,7 +11,7 @@
 #include "harness.h"
 #include "model_meta.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/registry.h"
 
 static void write_catalog_fixture(void)

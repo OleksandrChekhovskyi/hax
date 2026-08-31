@@ -6,7 +6,7 @@
 #include "harness.h"
 #include "provider.h"
 #include "transcript.h"
-#include "util.h"
+#include "system/locale.h"
 #include "terminal/ansi.h"
 
 static char *render_to_string(const char *system_prompt, const struct item *items, size_t n_items)

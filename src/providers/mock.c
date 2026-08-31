@@ -14,8 +14,9 @@
 #include "config.h"
 #include "model_meta.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/registry.h"
+#include "system/rand.h"
 #include "transport/http.h"
 
 #define TEXT_CHUNK_BYTES 16

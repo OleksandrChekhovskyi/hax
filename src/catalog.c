@@ -14,7 +14,7 @@
 
 #include "config.h"
 #include "effort.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/bg_job.h"
 #include "system/fs.h"
 #include "system/path.h"

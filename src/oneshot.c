@@ -17,7 +17,7 @@
 #include "provider.h"
 #include "session.h"
 #include "transcript.h"
-#include "util.h"
+#include "system/clock.h"
 #include "terminal/ansi.h"
 #include "terminal/interrupt.h"
 #include "tools/bash_process.h"

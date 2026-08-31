@@ -7,7 +7,8 @@
 #include "config.h"
 #include "provider.h"
 #include "tool.h"
-#include "util.h"
+#include "xalloc.h"
+#include "text/fmt.h"
 #include "tools/task_registry.h"
 
 static char *run_task_wait(const char *args_json, struct tool_run_ctx *ctx)

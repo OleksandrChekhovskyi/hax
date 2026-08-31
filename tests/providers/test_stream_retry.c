@@ -12,7 +12,7 @@
 
 #include "harness.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/stream_retry.h"
 #include "transport/http.h"
 

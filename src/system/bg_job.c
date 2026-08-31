@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <time.h>
 
-#include "util.h"
+#include "xalloc.h"
 
 struct bg_job {
     pthread_t thread;

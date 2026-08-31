@@ -7,7 +7,7 @@
 #include "config.h"
 #include "provider.h"
 #include "tool.h"
-#include "util.h"
+#include "xalloc.h"
 #include "tools/bash_cd_strip.h"
 #include "tools/bash_classify.h"
 #include "tools/bash_process.h"

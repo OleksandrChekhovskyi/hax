@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 #include "transport/retry.h"

@@ -6,7 +6,7 @@
 #include <string.h>
 
 #include "buf.h"
-#include "util.h"
+#include "xalloc.h"
 #include "text/utf8.h"
 
 static size_t codepoint_cells_at(const char *str, size_t length, size_t offset,
