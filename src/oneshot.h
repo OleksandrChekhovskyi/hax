@@ -6,9 +6,8 @@
 #include "provider.h"
 
 /* Run one non-interactive user turn. The provider may call advertised tools until it produces a
- * final response or reaches max_turns. Assistant messages from the final response are written to
- * stdout; diagnostics go to stderr. Returns 0 on completion and 1 on failure. */
-int oneshot_run(struct provider *provider, const char *prompt, const struct hax_opts *options,
-                int max_turns);
+ * final response or reaches the max_turns bound. Assistant messages from the final response are
+ * written to stdout; diagnostics go to stderr. Returns 0 on completion and 1 on failure. */
+int oneshot_run(struct provider *provider, const char *prompt, const struct hax_opts *options);
 
 #endif /* HAX_ONESHOT_H */

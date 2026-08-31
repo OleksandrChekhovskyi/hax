@@ -149,6 +149,7 @@ endforeach
 # e2e/test_oneshot_text.py registers as e2e/oneshot_text, so the name prefix
 # selects the group (`meson test 'e2e/*'`).
 e2e_scenarios = [
+    'oneshot_json',
     'oneshot_text',
     'oneshot_tool',
 ]

@@ -16,6 +16,24 @@
 /* Returns a new JSON reference. NULL item fields are omitted. */
 json_t *item_to_json(const struct item *item);
 
+/* Field sources for a "type":"session" header record. All strings are borrowed; NULL fields
+ * are omitted from the record. */
+struct session_header {
+    const char *id;
+    const char *timestamp;
+    const char *cwd;
+    const char *provider;
+    const char *model;
+    const char *model_label; /* recorded only when it differs from model */
+    const char *effort;
+    const char *preset;
+};
+
+/* Build the header record, stamping the format and hax versions and probing the current git
+ * state. Shared by the session file and the one-shot --json stream so the schema cannot
+ * diverge. Returns a new reference. */
+json_t *session_header_to_json(const struct session_header *header);
+
 /* Zeroes and fills out with owned fields. Free with item_free. Returns -1 for an invalid kind. */
 int item_from_json(const json_t *object, struct item *out);
 

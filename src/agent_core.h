@@ -25,6 +25,7 @@ struct hax_opts {
     int raw;                   /* send only user content and advertise no tools */
     const char *resume_path;   /* borrowed session path; NULL starts a new session */
     int provider_autoselected; /* show the one-shot provider-selection banner */
+    int json;                  /* one-shot: stream conversation records as JSONL on stdout */
 };
 
 const struct tool *agent_find_tool(const char *name);

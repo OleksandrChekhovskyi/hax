@@ -22,9 +22,6 @@
 #include "terminal/theme.h"
 #include "transport/ca.h"
 
-/* Bounds unattended agent loops when an interrupt cannot reliably reach a pipeline. */
-#define ONESHOT_MAX_TURNS 100
-
 static struct provider *select_initial_provider(int one_shot, int *autoselected)
 {
     const char *name = config_str("provider");
@@ -222,9 +219,8 @@ int main(int argc, char **argv)
     if (!provider && options.one_shot)
         goto cleanup_provider;
 
-    result = options.one_shot
-                 ? oneshot_run(provider, prompt, &options.agent_options, ONESHOT_MAX_TURNS)
-                 : agent_run(&provider, &options.agent_options);
+    result = options.one_shot ? oneshot_run(provider, prompt, &options.agent_options)
+                              : agent_run(&provider, &options.agent_options);
 
 cleanup_provider:
     /* Providers must join background work before global libcurl teardown. */

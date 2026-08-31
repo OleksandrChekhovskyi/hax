@@ -600,11 +600,39 @@ static int materialize_log(struct session_log *log)
 
 /* Recorded only when it says something the wire id doesn't, so a reader can treat its absence as
  * "the id is the label" — which is also what files predating labels mean. */
-static const char *differing_model_label(const struct session_log *log)
+static const char *differing_model_label(const char *model_label, const char *model)
 {
-    if (!log->model_label || !log->model || strcmp(log->model_label, log->model) == 0)
+    if (!model_label || !model || strcmp(model_label, model) == 0)
         return NULL;
-    return log->model_label;
+    return model_label;
+}
+
+json_t *session_header_to_json(const struct session_header *header)
+{
+    json_t *object = json_object();
+    json_object_set_new(object, "type", json_string("session"));
+    json_object_set_new(object, "version", json_integer(SESSION_FORMAT_VERSION));
+    json_object_set_new(object, "hax_version", json_string(HAX_VERSION));
+    json_set_optional_string(object, "id", header->id);
+    json_set_optional_string(object, "timestamp", header->timestamp);
+    json_set_optional_string(object, "cwd", header->cwd);
+    json_set_optional_string(object, "provider", header->provider);
+    json_set_optional_string(object, "model", header->model);
+    json_set_optional_string(object, "model_label",
+                             differing_model_label(header->model_label, header->model));
+    json_set_optional_string(object, "effort", header->effort);
+    json_set_optional_string(object, "preset", header->preset);
+
+    /* Probed when the record is built — at file materialization, so the position recorded is
+     * the one the conversation actually started from, and runs that never send a message pay
+     * nothing; at run start for the --json stream. */
+    struct git_state git;
+    git_state_probe(&git);
+    json_set_optional_string(object, "git_branch", git.branch);
+    json_set_optional_string(object, "git_commit", git.commit);
+    json_set_optional_string(object, "git_subject", git.subject);
+    git_state_free(&git);
+    return object;
 }
 
 static int write_json_line(FILE *file, const json_t *object)
@@ -619,30 +647,19 @@ static int write_json_line(FILE *file, const json_t *object)
 
 static int write_header(struct session_log *log)
 {
-    json_t *header = json_object();
-    json_object_set_new(header, "type", json_string("session"));
-    json_object_set_new(header, "version", json_integer(SESSION_FORMAT_VERSION));
-    json_object_set_new(header, "hax_version", json_string(HAX_VERSION));
-    json_set_optional_string(header, "id", log->id);
-    json_set_optional_string(header, "timestamp", log->timestamp);
-    json_set_optional_string(header, "cwd", log->cwd);
-    json_set_optional_string(header, "provider", log->provider);
-    json_set_optional_string(header, "model", log->model);
-    json_set_optional_string(header, "model_label", differing_model_label(log));
-    json_set_optional_string(header, "effort", log->effort);
-    json_set_optional_string(header, "preset", log->preset);
-
-    /* Probed at materialization rather than at open: the position recorded is the one the
-     * conversation actually started from, and runs that never send a message pay nothing. */
-    struct git_state git;
-    git_state_probe(&git);
-    json_set_optional_string(header, "git_branch", git.branch);
-    json_set_optional_string(header, "git_commit", git.commit);
-    json_set_optional_string(header, "git_subject", git.subject);
-    git_state_free(&git);
-
-    int result = write_json_line(log->file, header);
-    json_decref(header);
+    struct session_header header = {
+        .id = log->id,
+        .timestamp = log->timestamp,
+        .cwd = log->cwd,
+        .provider = log->provider,
+        .model = log->model,
+        .model_label = log->model_label,
+        .effort = log->effort,
+        .preset = log->preset,
+    };
+    json_t *object = session_header_to_json(&header);
+    int result = write_json_line(log->file, object);
+    json_decref(object);
     return result;
 }
 
@@ -662,7 +679,8 @@ static int write_selection(struct session_log *log)
     json_object_set_new(selection, "type", json_string("selection"));
     json_set_optional_string(selection, "provider", log->provider);
     json_set_optional_string(selection, "model", log->model);
-    json_set_optional_string(selection, "model_label", differing_model_label(log));
+    json_set_optional_string(selection, "model_label",
+                             differing_model_label(log->model_label, log->model));
     json_set_optional_string(selection, "effort", log->effort);
     json_set_optional_string(selection, "preset", log->preset);
     int result = write_json_line(log->file, selection);

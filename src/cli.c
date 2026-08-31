@@ -32,6 +32,9 @@ static const struct help_option {
      "Non-interactive mode. Runs the prompt to completion and prints the final assistant "
      "message to stdout. The prompt comes from PROMPT positional arguments (joined with "
      "spaces) when given, otherwise from stdin if stdin is not a terminal."},
+    {"--json",
+     "Non-interactive JSON output (implies -p): stream the run as JSON records on stdout, "
+     "one per line, ending with a result record. Format reference: docs/sessions.md."},
     {"-c, --continue", "Resume the most recent conversation in this directory."},
     {"--resume[=ID]",
      "Resume a past conversation in this directory. With no ID, pick one from an interactive "
@@ -124,6 +127,7 @@ enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *optio
         OPT_PRESET,
         OPT_BARE,
         OPT_NO_SESSION,
+        OPT_JSON,
     };
     static const struct option long_options[] = {
         {"help", no_argument, NULL, 'h'},
@@ -132,6 +136,7 @@ enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *optio
         {"continue", no_argument, NULL, 'c'},
         {"resume", optional_argument, NULL, OPT_RESUME},
         {"no-session", no_argument, NULL, OPT_NO_SESSION},
+        {"json", no_argument, NULL, OPT_JSON},
         {"raw", no_argument, NULL, OPT_RAW},
         {"bare", no_argument, NULL, OPT_BARE},
         {"provider", required_argument, NULL, OPT_PROVIDER},
@@ -187,6 +192,10 @@ enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *optio
             break;
         case OPT_NO_SESSION:
             options->no_session = 1;
+            break;
+        case OPT_JSON:
+            options->agent_options.json = 1;
+            options->one_shot = 1;
             break;
         case '?':
             fprintf(stderr, "Try 'hax --help' for usage.\n");

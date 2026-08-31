@@ -26,8 +26,10 @@ What you can already shape without touching C:
 **hax composes as a Unix tool.** The one-shot mode (`hax -p`, clean stdout, resumable sessions)
 is the extension point. Orchestration that would be a hook or plugin elsewhere is a script that
 drives hax from the outside, where it can be versioned, inspected, and tested like any other
-program. This covers behavior between invocations, not interception inside a turn — that gap is
-a deliberate omission, discussed below.
+program. A driver that needs to observe a run — turns, tool calls, cost — gets `hax --json`, a
+JSONL stream of the same records the session file holds ([sessions.md](./sessions.md)). This
+covers observing and sequencing runs, not interception inside a turn — that gap is a deliberate
+omission, discussed below.
 
 **Prefer telling the model over building machinery around it.** Models follow project
 instructions well. A convention documented in `AGENTS.md` or a skill usually replaces a feature.
@@ -47,8 +49,9 @@ process, and another config surface.
 Event hooks elsewhere serve a handful of needs, each of which hax answers more directly:
 
 - Notifications when the interactive REPL needs attention: built in (`notify`).
-- Observability and debugging: JSONL sessions record the conversation history, `HAX_TRANSCRIPT`
-  shows the model-facing context, and `HAX_TRACE` captures redacted HTTP/SSE diagnostics.
+- Observability and debugging: JSONL sessions record the conversation history — `hax --json`
+  streams the same records live for a driving process — `HAX_TRANSCRIPT` shows the model-facing
+  context, and `HAX_TRACE` captures redacted HTTP/SSE diagnostics.
 - Auto-formatting after edits: rewriting files under the model desynchronizes it from the tree
   it thinks it just edited. Tell the model to run the formatter (an `AGENTS.md` line); the
   change stays part of its own work.

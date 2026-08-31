@@ -9,6 +9,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- `hax --json` (implies `-p`) streams the run as JSON lines on stdout for orchestrators and
+  scripts: the conversation records in the session-file schema as they are appended, closed by a
+  `result` record with the outcome, final text, cost, and session id. Plain `-p` output is
+  unchanged. The session-file format is now documented as a supported read surface. See
+  [docs/sessions.md](docs/sessions.md).
 - `/login` for the codex provider now offers a browser flow (authorization code with PKCE through
   a `localhost` redirect) alongside device login, for organizations that block the device flow.
   Device login remains the ssh-friendly path. See [docs/providers.md](docs/providers.md#codex).
@@ -21,6 +26,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- `max_turns` now also bounds one-shot runs, which previously stopped only at a built-in limit.
+  The default is now spelled `auto` (interactive unlimited, one-shot 100); `0` still means the
+  same.
 - Token counts are decimal everywhere, unlike byte sizes, which keep 1024-base suffixes. The
   stats line, `/session`, and the `/model` picker agree ("200k" for a 200000-token window rather
   than "195k"), and `context_limit` and catalog `limit` fields written with suffixes now parse

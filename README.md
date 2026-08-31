@@ -121,6 +121,7 @@ and the setting reference.
 
 ## More docs
 
+- [docs/sessions.md](./docs/sessions.md) — the session-file format and the `hax --json` stream.
 - [docs/debugging.md](./docs/debugging.md) — trace/transcript logs, mock provider, and demo scripts.
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — how to propose, prepare, and submit a change.
 

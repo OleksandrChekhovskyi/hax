@@ -31,6 +31,7 @@ hax --resume=ID -p "continue"    # resume non-interactively
 | Option | Purpose |
 | --- | --- |
 | `-p`, `--print` | Run to completion and print the final assistant message to stdout. |
+| `--json` | One-shot (implies `-p`) with stdout as JSON-line conversation records, closed by a `result` record. |
 | `-c`, `--continue` | Resume the newest session for the current directory. |
 | `--resume[=ID]` | Pick a session, or resume an id/unique prefix. The id form works with `-p`. |
 | `--no-session` | Do not record this run or add its prompts to persistent recall. |
@@ -52,8 +53,20 @@ answer=$(hax -p "summarize the public API")
 hax -p "produce JSON only" >result.json 2>run.log
 ```
 
+For orchestrators and scripts that want to observe a run as it happens — turns, tool calls,
+cost — `--json` (which implies `-p`) turns stdout into a JSONL event stream: the run's session
+records live as they are appended, closed by a `result` record with the outcome, final text,
+usage, and the session id for a follow-up `--resume=ID -p`. The stderr banner and stats are
+omitted; errors and warnings still go there. See [sessions.md](./sessions.md) for the record
+reference.
+
+```sh
+hax --json "fix the failing test" | jq 'select(.kind == "tool_call" or .type == "result")'
+```
+
 A picker needs a terminal, so use `--resume=ID` rather than bare `--resume` with `-p`. `--raw` and
 `--bare` still record the conversation; combine either with `--no-session` for a disposable run.
+`max_turns` bounds a one-shot run's provider round-trips (default 100).
 
 ## REPL commands
 
@@ -167,7 +180,8 @@ Non-empty conversations are recorded as JSONL session files under:
 
 Sessions are scoped to the current directory. `-c`, `--resume`, and `/resume` therefore show the
 history for where hax is running, not every repository. Sessions inactive for 30 days are removed by
-default; set `session_retention_days` to another value or `0` to keep them indefinitely.
+default; set `session_retention_days` to another value or `0` to keep them indefinitely. The file
+format is documented in [sessions.md](./sessions.md) and is safe to read from scripts.
 
 Resuming restores the provider, model, effort, and preset last used by that conversation. A CLI
 selection flag deliberately overrides the restored choice:

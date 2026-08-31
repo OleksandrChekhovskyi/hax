@@ -92,6 +92,24 @@ static void test_parse_rejects_missing_values_and_interactive_prompt(void)
     EXPECT(cli_parse(2, interactive_prompt, &options) == CLI_PARSE_ERROR);
 }
 
+static void test_parse_json_implies_print(void)
+{
+    struct cli_options options;
+    char *json_alone[] = {"hax", "--json", "hi", NULL};
+    EXPECT(cli_parse(3, json_alone, &options) == CLI_PARSE_OK);
+    EXPECT(options.agent_options.json == 1);
+    EXPECT(options.one_shot == 1);
+
+    char *json_with_print[] = {"hax", "-p", "--json", "hi", NULL};
+    EXPECT(cli_parse(4, json_with_print, &options) == CLI_PARSE_OK);
+    EXPECT(options.agent_options.json == 1);
+    EXPECT(options.one_shot == 1);
+
+    char *plain_oneshot[] = {"hax", "-p", "hi", NULL};
+    EXPECT(cli_parse(3, plain_oneshot, &options) == CLI_PARSE_OK);
+    EXPECT(options.agent_options.json == 0);
+}
+
 static void test_parse_version_prints_and_exits(void)
 {
     const char *flags[] = {"--version", "-v"};
@@ -351,6 +369,7 @@ int main(void)
     test_parse_resume_modes();
     test_parse_rejects_incompatible_resume_options();
     test_parse_rejects_missing_values_and_interactive_prompt();
+    test_parse_json_implies_print();
     test_parse_version_prints_and_exits();
     test_help_wraps_to_display_width();
     test_read_prompt_from_stream();

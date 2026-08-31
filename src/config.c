@@ -93,10 +93,10 @@ static const struct config_setting REGISTRY[] = {
     {.key = "compact.threshold", .env_var = "HAX_COMPACT_THRESHOLD", .default_value = "85",
      .description = "Auto-compact when context usage reaches this percent of the window",
      .kind = CONFIG_KIND_INT, .min = 1, .max = 100, .editable = 1},
-    {.key = "max_turns", .env_var = "HAX_MAX_TURNS",
-     .description = "Interactive: pause for confirmation after this many model round-trips per "
-                    "user turn",
-     .kind = CONFIG_KIND_INT, .editable = 1},
+    {.key = "max_turns", .env_var = "HAX_MAX_TURNS", .default_value = "auto",
+     .description = "Model round-trips per user turn: interactive then pauses for confirmation, "
+                    "one-shot aborts; auto is unlimited interactively and 100 in one-shot",
+     .choices = "auto", .example = "25", .kind = CONFIG_KIND_INT, .editable = 1},
 
     /* model catalog */
     {.key = "catalog.url", .env_var = "HAX_CATALOG_URL",
