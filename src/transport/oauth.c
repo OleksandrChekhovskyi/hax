@@ -18,7 +18,7 @@
 #include "system/rand.h"
 #include "text/base64.h"
 #include "text/sha256.h"
-#include "text/urlencode.h"
+#include "text/url.h"
 #include "transport/http.h"
 
 /* macOS has no MSG_NOSIGNAL; SO_NOSIGPIPE on the connection covers it there. */

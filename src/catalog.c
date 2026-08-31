@@ -16,6 +16,7 @@
 #include "effort.h"
 #include "xalloc.h"
 #include "system/bg_job.h"
+#include "system/fd.h"
 #include "system/fs.h"
 #include "system/path.h"
 #include "transport/http.h"
@@ -483,7 +484,7 @@ static json_t *cache_provider_slice(const char *provider_id)
         return NULL;
     size_t len;
     int truncated;
-    char *text = slurp_file_capped(path, CATALOG_MAX_BYTES, &len, &truncated);
+    char *text = fs_read_file_capped(path, CATALOG_MAX_BYTES, &len, &truncated);
     free(path);
     if (!text)
         return NULL;
@@ -819,7 +820,7 @@ static int write_cache_atomic(const char *path, const char *body, size_t body_le
         free(temp_path);
         return -1;
     }
-    int result = write_all(fd, body, body_length);
+    int result = fd_write_all(fd, body, body_length);
     if (close(fd) != 0)
         result = -1;
     if (result == 0 && rename(temp_path, path) != 0)

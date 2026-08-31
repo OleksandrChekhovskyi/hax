@@ -16,7 +16,7 @@
 #include "providers/http_provider.h"
 #include "providers/provider_config.h"
 #include "providers/registry.h"
-#include "system/path.h"
+#include "text/url.h"
 #include "transport/http.h"
 
 #define MODEL_LIST_TIMEOUT_S 2
@@ -32,7 +32,7 @@ static char *resolve_base_url(void)
 {
     char *default_url = default_base_url();
     const char *configured_url = config_str_nonempty("providers.llamacpp.base_url");
-    char *base_url = dup_trim_trailing_slash(configured_url ? configured_url : default_url);
+    char *base_url = url_trim_trailing_slashes(configured_url ? configured_url : default_url);
     free(default_url);
     return base_url;
 }

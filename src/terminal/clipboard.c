@@ -16,7 +16,7 @@
 #include "system/clock.h"
 /* The buf builders are __APPLE__-only here, invisible to the Linux lint pass. */
 #include "buf.h" // IWYU pragma: keep
-#include "system/fs.h"
+#include "system/fd.h"
 /* path_join is __APPLE__-only here, invisible to the Linux lint pass. */
 #include "system/path.h" // IWYU pragma: keep
 #include "system/spawn.h"
@@ -95,7 +95,7 @@ static int run_copy_helper(const char *const *argv, const char *text, size_t tex
     }
 
     close(pipe_fds[0]);
-    int write_status = write_all(pipe_fds[1], text, text_len);
+    int write_status = fd_write_all(pipe_fds[1], text, text_len);
     close(pipe_fds[1]);
     int status = spawn_wait_child(pid);
     spawn_parent_restore_signals(&signals);
@@ -144,7 +144,7 @@ static int copy_with_osc52(const char *text, size_t text_len)
     int owns_fd = fd >= 0;
     if (!owns_fd)
         fd = STDOUT_FILENO;
-    int result = write_all(fd, sequence, sequence_len);
+    int result = fd_write_all(fd, sequence, sequence_len);
     if (owns_fd)
         close(fd);
     free(sequence);

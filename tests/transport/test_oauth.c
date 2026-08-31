@@ -10,7 +10,7 @@
 #include "harness.h"
 #include "xalloc.h"
 #include "system/clock.h"
-#include "system/fs.h"
+#include "system/fd.h"
 #include "text/base64.h"
 #include "text/sha256.h"
 #include "transport/oauth.h"
@@ -121,7 +121,7 @@ static int queue_request(int port, const char *target)
 {
     int fd = connect_loopback(port);
     char *request = xasprintf("GET %s HTTP/1.1\r\nHost: localhost\r\n\r\n", target);
-    EXPECT(write_all(fd, request, strlen(request)) == 0);
+    EXPECT(fd_write_all(fd, request, strlen(request)) == 0);
     free(request);
     return fd;
 }
@@ -290,7 +290,7 @@ static void test_listener_survives_stalled_sender(void)
         return;
 
     int stalled = connect_loopback(port);
-    EXPECT(write_all(stalled, "GET /cb?code", 12) == 0);
+    EXPECT(fd_write_all(stalled, "GET /cb?code", 12) == 0);
 
     char *code = NULL;
     char *detail = NULL;
@@ -299,7 +299,7 @@ static void test_listener_survives_stalled_sender(void)
 
     /* The tick keeps being polled while the request is being read. */
     int stalled_again = connect_loopback(port);
-    EXPECT(write_all(stalled_again, "GET /cb?code", 12) == 0);
+    EXPECT(fd_write_all(stalled_again, "GET /cb?code", 12) == 0);
     int tick_calls = 0;
     EXPECT(oauth_listener_wait(listener, "/cb", "S6", monotonic_ms() + 30000,
                                count_then_cancel_tick, &tick_calls, &code,

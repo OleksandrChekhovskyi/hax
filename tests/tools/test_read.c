@@ -12,7 +12,7 @@
 #include "harness.h"
 #include "tool.h"
 #include "xalloc.h"
-#include "system/fs.h"
+#include "system/fd.h"
 #include "tools/output_cap.h"
 
 static char *create_temp_file(const void *data, size_t len)
@@ -25,7 +25,7 @@ static char *create_temp_file(const void *data, size_t len)
         free(path);
         return NULL;
     }
-    if (write_all(fd, data, len) < 0)
+    if (fd_write_all(fd, data, len) < 0)
         FAIL("writing %s: %s", path, strerror(errno));
     close(fd);
     return path;

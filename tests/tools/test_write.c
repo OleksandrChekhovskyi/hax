@@ -20,10 +20,10 @@ static char *call_write(const char *path, const char *content)
     return result;
 }
 
-static char *slurp(const char *path)
+static char *read_file(const char *path)
 {
     size_t n = 0;
-    return slurp_file(path, &n);
+    return fs_read_file(path, &n);
 }
 
 static void test_write_invalid_json(void)
@@ -62,7 +62,7 @@ static void test_write_creates_new_file(void)
     EXPECT(strstr(out, "+alpha") == NULL);
     free(out);
 
-    char *got = slurp(path);
+    char *got = read_file(path);
     EXPECT_STR_EQ(got, "alpha\nbeta\n");
     free(got);
 
@@ -78,7 +78,7 @@ static void test_write_creates_parent_dirs(void)
     EXPECT(strstr(out, "created ") != NULL);
     free(out);
 
-    char *got = slurp(path);
+    char *got = read_file(path);
     EXPECT_STR_EQ(got, "content\n");
     free(got);
 
@@ -98,7 +98,7 @@ static void test_write_overwrites(void)
     EXPECT(strstr(out, "+second") != NULL);
     free(out);
 
-    char *got = slurp(path);
+    char *got = read_file(path);
     EXPECT_STR_EQ(got, "second\n");
     free(got);
 
@@ -199,7 +199,7 @@ static void test_write_through_dangling_symlink(void)
     EXPECT(lstat(link, &lst) == 0);
     EXPECT(S_ISLNK(lst.st_mode));
 
-    char *got = slurp(real);
+    char *got = read_file(real);
     EXPECT_STR_EQ(got, "hello\n");
     free(got);
 
@@ -256,7 +256,7 @@ static void test_write_through_symlink(void)
     EXPECT(lstat(link, &lst) == 0);
     EXPECT(S_ISLNK(lst.st_mode));
 
-    char *got = slurp(real);
+    char *got = read_file(real);
     EXPECT_STR_EQ(got, "second\n");
     free(got);
 

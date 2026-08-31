@@ -13,7 +13,7 @@
 
 #include "buf.h"
 #include "xalloc.h"
-#include "system/fs.h"
+#include "system/fd.h"
 #include "system/tempfiles.h"
 #include "text/utf8_sanitize.h"
 #include "tools/output_cap.h"
@@ -90,7 +90,7 @@ static void output_spill(struct bash_output *output)
     if (output_open_tempfile(output) < 0)
         return;
     if (output->memory.len > 0 &&
-        write_all(output->fd, output->memory.data, output->memory.len) < 0)
+        fd_write_all(output->fd, output->memory.data, output->memory.len) < 0)
         output->write_failed = 1;
     buf_free(&output->memory);
 }
@@ -116,7 +116,7 @@ static void output_write(struct bash_output *output, const char *data, size_t le
         if (output->write_failed)
             return;
     }
-    if (write_all(output->fd, data, len) < 0)
+    if (fd_write_all(output->fd, data, len) < 0)
         output->write_failed = 1;
 }
 

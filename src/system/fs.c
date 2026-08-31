@@ -4,7 +4,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
-#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +13,7 @@
 
 #include "buf.h"
 #include "xalloc.h"
+#include "system/fd.h"
 #include "system/path.h"
 #include "text/diff.h"
 
@@ -153,7 +153,7 @@ static int inspect_write_target(const char *path, struct write_target *target, c
 
         target->existed = 1;
         target->mode = st.st_mode & 07777;
-        target->old_content = slurp_file(path, &target->old_content_len);
+        target->old_content = fs_read_file(path, &target->old_content_len);
         if (!target->old_content) {
             *error = xasprintf("error reading %s: %s", path, strerror(errno));
             return -1;
@@ -205,7 +205,7 @@ static char *stage_write(const char *parent, const char *content, size_t content
         return NULL;
     }
 
-    if (write_all(fd, content, content_len) < 0) {
+    if (fd_write_all(fd, content, content_len) < 0) {
         *error = xasprintf("write %s: %s", temp_path, strerror(errno));
         goto error;
     }
@@ -377,7 +377,7 @@ static int regular_mode_or_error(mode_t mode)
     return -1;
 }
 
-int ensure_regular_file(const char *path)
+int fs_check_regular(const char *path)
 {
     struct stat status;
     if (stat(path, &status) < 0)
@@ -385,7 +385,7 @@ int ensure_regular_file(const char *path)
     return regular_mode_or_error(status.st_mode);
 }
 
-int open_regular_file(const char *path)
+int fs_open_regular(const char *path)
 {
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
     if (fd < 0)
@@ -410,10 +410,10 @@ static ssize_t read_retry(int fd, void *data, size_t length)
     return bytes_read;
 }
 
-char *slurp_file(const char *path, size_t *out_len)
+char *fs_read_file(const char *path, size_t *out_len)
 {
     int saved_errno;
-    int fd = open_regular_file(path);
+    int fd = fs_open_regular(path);
     if (fd < 0)
         return NULL;
 
@@ -442,11 +442,11 @@ error:
     return NULL;
 }
 
-char *slurp_file_capped(const char *path, size_t cap, size_t *out_len, int *out_truncated)
+char *fs_read_file_capped(const char *path, size_t cap, size_t *out_len, int *out_truncated)
 {
     int saved_errno;
     int truncated = 0;
-    int fd = open_regular_file(path);
+    int fd = fs_open_regular(path);
     if (fd < 0)
         return NULL;
 
@@ -485,25 +485,4 @@ error:
     close(fd);
     errno = saved_errno;
     return NULL;
-}
-
-int write_all(int fd, const void *data, size_t length)
-{
-    const char *cursor = data;
-    while (length > 0) {
-        size_t request = length > (size_t)SSIZE_MAX ? (size_t)SSIZE_MAX : length;
-        ssize_t written = write(fd, cursor, request);
-        if (written < 0) {
-            if (errno == EINTR)
-                continue;
-            return -1;
-        }
-        if (written == 0) {
-            errno = EIO;
-            return -1;
-        }
-        cursor += written;
-        length -= (size_t)written;
-    }
-    return 0;
 }

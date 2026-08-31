@@ -20,7 +20,7 @@
 #include "xalloc.h"
 #include "system/bg_job.h"
 #include "system/clock.h"
-#include "system/fs.h"
+#include "system/fd.h"
 #include "terminal/interrupt.h"
 #include "text/fmt.h"
 #include "text/utf8_sanitize.h"
@@ -143,7 +143,7 @@ static void task_drain(struct bg_job *job, void *arg)
         /* write(2) outside the lock: the fd is drainer-owned for writing, and readers use
          * pread. Failure and progress land back under the lock. */
         int write_failed = 0;
-        if (write_spool && write_all(t->spool_fd, chunk, (size_t)bytes_read) < 0)
+        if (write_spool && fd_write_all(t->spool_fd, chunk, (size_t)bytes_read) < 0)
             write_failed = 1;
         pthread_mutex_lock(&t->lock);
         if (write_spool && !write_failed)

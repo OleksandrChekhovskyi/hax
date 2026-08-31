@@ -19,6 +19,7 @@
 
 #include "buf.h"
 #include "xalloc.h"
+#include "system/fd.h"
 #include "system/fs.h"
 #include "system/locale.h"
 #include "system/path.h"
@@ -680,7 +681,7 @@ static void open_editor(struct input *in)
     int fd = mkstemp(path);
     if (fd < 0)
         goto reenter;
-    if (in->len > 0 && write_all(fd, in->buf, in->len) < 0) {
+    if (in->len > 0 && fd_write_all(fd, in->buf, in->len) < 0) {
         close(fd);
         unlink(path);
         goto reenter;
@@ -698,7 +699,7 @@ static void open_editor(struct input *in)
     int aborted = status < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
 
     size_t n = 0;
-    char *content = aborted ? NULL : slurp_file(path, &n);
+    char *content = aborted ? NULL : fs_read_file(path, &n);
     unlink(path);
     if (content) {
         /* The edit buffer is NUL-terminated; preserve embedded NUL positions as spaces. */
@@ -1147,7 +1148,7 @@ static void history_file_rewrite(struct input *in, const char *path)
 /* Return records seen, including entries later evicted from the in-memory cap. */
 static size_t history_file_load(struct input *in, const char *path)
 {
-    int fd = open_regular_file(path);
+    int fd = fs_open_regular(path);
     FILE *f = fd >= 0 ? fdopen(fd, "r") : NULL;
     if (fd >= 0 && !f)
         close(fd);

@@ -631,7 +631,7 @@ static void test_fork_copies_prefix_without_touching_source(void)
         session_meta_free(&meta);
 
         size_t data_n;
-        char *data = slurp_file(fork_path, &data_n);
+        char *data = fs_read_file(fork_path, &data_n);
         EXPECT(data != NULL);
         if (data) {
             EXPECT(strstr(data, "forked_from") != NULL);

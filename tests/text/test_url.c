@@ -4,7 +4,22 @@
 
 #include "buf.h"
 #include "harness.h"
-#include "text/urlencode.h"
+#include "text/url.h"
+
+static void expect_trimmed(const char *url, const char *want)
+{
+    char *trimmed = url_trim_trailing_slashes(url);
+    EXPECT_STR_EQ(trimmed, want);
+    free(trimmed);
+}
+
+static void test_trim_trailing_slashes(void)
+{
+    expect_trimmed("https://example.com/v1", "https://example.com/v1");
+    expect_trimmed("https://example.com/v1///", "https://example.com/v1");
+    expect_trimmed("/", "");
+    expect_trimmed("", "");
+}
 
 static void expect_encoded(const char *value, const char *want)
 {
@@ -69,6 +84,7 @@ static void test_roundtrip(void)
 
 int main(void)
 {
+    test_trim_trailing_slashes();
     test_encode();
     test_decode();
     test_roundtrip();

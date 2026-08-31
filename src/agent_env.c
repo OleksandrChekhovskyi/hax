@@ -185,7 +185,7 @@ static void append_agents_file(struct buf *prompt, const char *path, const char 
 {
     size_t content_len = 0;
     int truncated = 0;
-    char *content = slurp_file_capped(path, AGENTS_MD_MAX_BYTES, &content_len, &truncated);
+    char *content = fs_read_file_capped(path, AGENTS_MD_MAX_BYTES, &content_len, &truncated);
     if (!content)
         return;
 
@@ -385,7 +385,7 @@ static void collect_skills(struct skill_list *skills, const char *root)
         free(skill_dir);
         size_t frontmatter_len = 0;
         char *frontmatter =
-            slurp_file_capped(skill_path, SKILL_FRONTMATTER_MAX_BYTES, &frontmatter_len, NULL);
+            fs_read_file_capped(skill_path, SKILL_FRONTMATTER_MAX_BYTES, &frontmatter_len, NULL);
         if (!frontmatter) {
             free(name);
             free(skill_path);

@@ -140,14 +140,3 @@ char *xdg_hax_cache_path(const char *relative_path)
 {
     return xdg_hax_path("XDG_CACHE_HOME", ".cache", relative_path);
 }
-
-char *dup_trim_trailing_slash(const char *str)
-{
-    size_t length = strlen(str);
-    while (length > 0 && str[length - 1] == '/')
-        length--;
-    char *result = xmalloc(length + 1);
-    memcpy(result, str, length);
-    result[length] = '\0';
-    return result;
-}

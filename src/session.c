@@ -1061,7 +1061,7 @@ static void apply_selection_record(struct session_meta *meta, const json_t *obje
 
 static FILE *open_session_reader(const char *path)
 {
-    int fd = open_regular_file(path);
+    int fd = fs_open_regular(path);
     if (fd < 0)
         return NULL;
 
@@ -1224,7 +1224,7 @@ int session_load(const char *path, struct item **out_items, size_t *out_count,
 void session_label_read(const char *path, int max_cells, struct session_label *out)
 {
     *out = (struct session_label){0};
-    char *data = slurp_file_capped(path, LABEL_SCAN_CAP, NULL, NULL);
+    char *data = fs_read_file_capped(path, LABEL_SCAN_CAP, NULL, NULL);
     if (!data)
         return;
 

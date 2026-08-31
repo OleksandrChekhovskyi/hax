@@ -48,7 +48,7 @@ static char *os_release_value(const char *path, const char *key)
 {
     size_t len = 0;
     int truncated = 0;
-    char *data = slurp_file_capped(path, OS_RELEASE_FILE_CAP, &len, &truncated);
+    char *data = fs_read_file_capped(path, OS_RELEASE_FILE_CAP, &len, &truncated);
     if (!data || truncated) {
         free(data);
         return NULL;

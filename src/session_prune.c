@@ -15,7 +15,7 @@
 #include "session.h"
 #include "xalloc.h"
 #include "system/bg_job.h"
-#include "system/fs.h"
+#include "system/fd.h"
 #include "system/path.h"
 
 #define SESSION_PRUNE_INTERVAL_S (24 * 60 * 60)
@@ -153,7 +153,7 @@ static void prune_worker(struct bg_job *job, void *arg)
         /* A zero-length marker means no sweep has completed yet. Truncate
          * first so a crash during this update causes an early retry. */
         if (ftruncate(args->marker_fd, 0) == 0 && lseek(args->marker_fd, 0, SEEK_SET) == 0)
-            (void)write_all(args->marker_fd, "1", 1);
+            (void)fd_write_all(args->marker_fd, "1", 1);
     }
     (void)flock(args->marker_fd, LOCK_UN);
     close(args->marker_fd);

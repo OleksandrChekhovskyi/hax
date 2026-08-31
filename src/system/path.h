@@ -27,7 +27,4 @@ char *xdg_hax_config_path(const char *relative_path); /* XDG_CONFIG_HOME or HOME
 char *xdg_hax_state_path(const char *relative_path);  /* XDG_STATE_HOME or HOME/.local/state */
 char *xdg_hax_cache_path(const char *relative_path);  /* XDG_CACHE_HOME or HOME/.cache */
 
-/* Return a copy with all trailing slashes removed. */
-char *dup_trim_trailing_slash(const char *str);
-
 #endif /* HAX_SYSTEM_PATH_H */

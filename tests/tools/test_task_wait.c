@@ -537,7 +537,7 @@ static void test_detached_log_holds_full_output(void)
     EXPECT(strstr(out, "second") != NULL);
     free(out);
     if (*log_path) {
-        char *content = slurp_file(log_path, NULL);
+        char *content = fs_read_file(log_path, NULL);
         EXPECT(content != NULL);
         if (content) {
             EXPECT_STR_EQ(content, "first\nsecond\n");

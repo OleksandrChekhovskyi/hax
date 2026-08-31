@@ -21,7 +21,7 @@
 #include "terminal/clipboard.h"
 #include "terminal/picker.h"
 #include "terminal/ui.h"
-#include "text/urlencode.h"
+#include "text/url.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 #include "transport/oauth.h"

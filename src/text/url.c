@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "text/urlencode.h"
+#include "text/url.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -7,6 +7,17 @@
 
 #include "buf.h"
 #include "xalloc.h"
+
+char *url_trim_trailing_slashes(const char *url)
+{
+    size_t length = strlen(url);
+    while (length > 0 && url[length - 1] == '/')
+        length--;
+    char *result = xmalloc(length + 1);
+    memcpy(result, url, length);
+    result[length] = '\0';
+    return result;
+}
 
 void url_encode_append(struct buf *out, const char *value)
 {

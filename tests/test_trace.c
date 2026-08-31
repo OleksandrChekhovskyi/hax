@@ -47,7 +47,7 @@ static void test_credential_headers_redacted(void)
     trace_request("POST", "https://api.anthropic.com/v1/messages", headers, "{}", 2);
 
     size_t len = 0;
-    char *contents = slurp_file(path, &len);
+    char *contents = fs_read_file(path, &len);
     EXPECT(contents != NULL);
     if (contents) {
         /* No secret value reaches the file. */
@@ -75,7 +75,7 @@ static void test_credential_headers_redacted(void)
                   sizeof(token_body) - 1);
     trace_response_status(400, "{\"error\":\"bad token PORTKEYSECRET\"}");
 
-    contents = slurp_file(path, &len);
+    contents = fs_read_file(path, &len);
     EXPECT(contents != NULL);
     if (contents) {
         EXPECT(strstr(contents, "PORTKEYSECRET") == NULL);
@@ -92,7 +92,7 @@ static void test_credential_headers_redacted(void)
     trace_request("POST", "https://auth.example.com/oauth/token", NULL, overlap_body,
                   sizeof(overlap_body) - 1);
 
-    contents = slurp_file(path, &len);
+    contents = fs_read_file(path, &len);
     EXPECT(contents != NULL);
     if (contents) {
         EXPECT(strstr(contents, "LONGER") == NULL);

@@ -19,10 +19,10 @@ static char *seed_file(const char *dir, const char *name, const char *content)
     return path;
 }
 
-static char *slurp(const char *path)
+static char *read_file(const char *path)
 {
     size_t n = 0;
-    return slurp_file(path, &n);
+    return fs_read_file(path, &n);
 }
 
 static void test_edit_missing_path(void)
@@ -75,7 +75,7 @@ static void test_edit_unique_match(void)
     EXPECT(strstr(out, "+BETA") != NULL);
     free(out);
 
-    char *got = slurp(path);
+    char *got = read_file(path);
     EXPECT_STR_EQ(got, "alpha\nBETA\ngamma\n");
     free(got);
 
@@ -93,7 +93,7 @@ static void test_edit_no_match(void)
     EXPECT(strstr(out, "not found") != NULL);
     free(out);
 
-    char *got = slurp(path);
+    char *got = read_file(path);
     EXPECT_STR_EQ(got, "alpha\n");
     free(got);
 
@@ -111,7 +111,7 @@ static void test_edit_multi_match_requires_replace_all(void)
     EXPECT(strstr(out, "matches 3 places") != NULL);
     free(out);
 
-    char *got = slurp(path);
+    char *got = read_file(path);
     EXPECT_STR_EQ(got, "foo\nfoo\nfoo\n");
     free(got);
 
@@ -131,7 +131,7 @@ static void test_edit_replace_all(void)
     EXPECT(strstr(out, "+bar") != NULL);
     free(out);
 
-    char *got = slurp(path);
+    char *got = read_file(path);
     EXPECT_STR_EQ(got, "bar\nbar\nbar\n");
     free(got);
 
@@ -150,7 +150,7 @@ static void test_edit_deletes_entire_content(void)
     EXPECT(strstr(out, "-delete me") != NULL);
     free(out);
 
-    char *got = slurp(path);
+    char *got = read_file(path);
     EXPECT_STR_EQ(got, "");
     free(got);
     free(path);
@@ -170,7 +170,7 @@ static void test_edit_multiline_match(void)
     EXPECT(strstr(out, "+\treturn 42;") != NULL);
     free(out);
 
-    char *got = slurp(path);
+    char *got = read_file(path);
     EXPECT_STR_EQ(got, "int main(void)\n{\n\treturn 42;\n}\n");
     free(got);
 
@@ -179,8 +179,8 @@ static void test_edit_multiline_match(void)
 
 static void test_edit_refuses_fifo(void)
 {
-    /* slurp_file_capped on a FIFO without a writer would block the
-     * agent forever. The tool must refuse upfront with a clear error. */
+    /* A blocking read from a writer-less FIFO never returns, so reject it as non-regular before
+     * reading. */
     char *dir = t_tempdir();
     char *path = xasprintf("%s/pipe", dir);
     EXPECT(mkfifo(path, 0644) == 0);

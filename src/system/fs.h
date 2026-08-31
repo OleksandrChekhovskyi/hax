@@ -37,22 +37,18 @@ char *fs_shell_head(const char *shell_cmd);
 int fs_shell_head_resolves(const char *shell_cmd);
 
 /* Return 0 for a regular file, or -1 with errno set for any other path. */
-int ensure_regular_file(const char *path);
+int fs_check_regular(const char *path);
 
 /* Open a regular file for reading without blocking on special files. The caller owns the returned
  * descriptor. Returns -1 with errno set on failure or when the path is not a regular file. */
-int open_regular_file(const char *path);
+int fs_open_regular(const char *path);
 
 /* Return newly allocated, NUL-terminated file contents, or NULL with errno set. */
-char *slurp_file(const char *path, size_t *out_len);
+char *fs_read_file(const char *path, size_t *out_len);
 
 /* Read at most cap bytes. On success, optional outputs report the returned length and whether more
  * data exists. The allocation grows with the bytes read rather than cap. Returns NULL with errno
  * set on failure. */
-char *slurp_file_capped(const char *path, size_t cap, size_t *out_len, int *out_truncated);
-
-/* Write exactly length bytes, retrying interrupted and short writes. Returns 0 on success or -1
- * with errno set. */
-int write_all(int fd, const void *data, size_t length);
+char *fs_read_file_capped(const char *path, size_t cap, size_t *out_len, int *out_truncated);
 
 #endif /* HAX_SYSTEM_FS_H */

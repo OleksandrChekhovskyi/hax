@@ -292,7 +292,7 @@ static char *read_image(const char *path, size_t file_size, struct tool_run_ctx 
 
     size_t image_len = 0;
     int truncated = 0;
-    char *data = slurp_file_capped(path, READ_IMAGE_MAX_BYTES, &image_len, &truncated);
+    char *data = fs_read_file_capped(path, READ_IMAGE_MAX_BYTES, &image_len, &truncated);
     if (!data || truncated) {
         free(data);
         return xasprintf("error reading %s: file changed while reading", path);

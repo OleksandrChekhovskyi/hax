@@ -44,7 +44,7 @@ static void test_hands_url_to_opener(void)
     /* The opener runs detached, so the recording lands asynchronously. */
     char *recorded = NULL;
     for (int i = 0; i < 300 && !recorded; i++) {
-        recorded = slurp_file(out_path, NULL);
+        recorded = fs_read_file(out_path, NULL);
         if (!recorded) {
             struct timespec pause = {.tv_nsec = 10 * 1000 * 1000};
             nanosleep(&pause, NULL);

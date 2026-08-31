@@ -11,6 +11,7 @@
 #include <sys/file.h>
 
 #include "xalloc.h"
+#include "system/fd.h"
 #include "system/fs.h"
 #include "system/path.h"
 
@@ -61,7 +62,7 @@ static void store_unlock(int lock_fd)
 
 static json_t *load_root(const char *path)
 {
-    char *contents = slurp_file(path, NULL);
+    char *contents = fs_read_file(path, NULL);
     if (!contents)
         return NULL;
     json_t *root = json_loads(contents, 0, NULL);
@@ -107,7 +108,7 @@ static int save_root(const char *path, json_t *root)
     if (fd < 0)
         goto err_body;
 
-    if (write_all(fd, body, strlen(body)) != 0 || write_all(fd, "\n", 1) != 0)
+    if (fd_write_all(fd, body, strlen(body)) != 0 || fd_write_all(fd, "\n", 1) != 0)
         goto err_fd;
     if (fsync(fd) != 0)
         goto err_fd;

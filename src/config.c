@@ -385,7 +385,7 @@ static int load_tier_file(json_t **tier, char *path, const char *label)
     int unusable = 0;
     int truncated;
     errno = 0;
-    char *text = slurp_file_capped(path, CONFIG_MAX_BYTES, NULL, &truncated);
+    char *text = fs_read_file_capped(path, CONFIG_MAX_BYTES, NULL, &truncated);
     if (text) {
         if (truncated) {
             hax_warn("ignoring %s at %s: larger than the 1 MiB limit", label, path);
@@ -834,7 +834,7 @@ char *config_prompt_expand(const char *value, char **error)
 
     size_t len = 0;
     int truncated = 0;
-    char *content = slurp_file_capped(path, PROMPT_FILE_CAP, &len, &truncated);
+    char *content = fs_read_file_capped(path, PROMPT_FILE_CAP, &len, &truncated);
     if (!content) {
         if (error)
             *error = xasprintf("couldn't read prompt file %s", path);

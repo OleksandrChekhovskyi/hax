@@ -10,7 +10,7 @@
 #include "buf.h"
 #include "xalloc.h"
 #include "system/clock.h"
-#include "system/fs.h"
+#include "system/fd.h"
 #include "system/tempfiles.h"
 #include "terminal/clipboard.h"
 #include "tools/image_sniff.h"
@@ -53,7 +53,7 @@ static char *persist_clipboard_image(const char *image, size_t image_len, const 
     int fd = tempfile_create("paste-", extension_for_mime_type(mime_type), &path);
     if (fd < 0)
         return NULL;
-    int write_status = write_all(fd, image, image_len);
+    int write_status = fd_write_all(fd, image, image_len);
     close(fd);
     if (write_status < 0) {
         unlink(path);
