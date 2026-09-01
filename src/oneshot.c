@@ -310,6 +310,9 @@ static void open_logs(struct oneshot_state *state, const struct hax_opts *option
                                      resume_metadata->preset, resumed_item_count)
                 : session_log_open(agent_provider_id(provider), session->model,
                                    session->model_label, session->effort, config_str("preset"));
+        /* The banner announces the id before the first provider call, so the file must exist by
+         * then: a run killed outright never reaches the exit hint. */
+        session_log_begin(state->session_log);
     }
     if (options->resume_path)
         session_log_set_meta(state->session_log, agent_provider_id(provider), session->model,

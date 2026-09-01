@@ -54,10 +54,11 @@ int session_read_meta(const char *path, struct session_meta *out);
 
 struct session_log;
 
-/* Prepares a fresh session for the current directory. The file is created on the first append.
- * model_label is how the provider renders model for people; it is recorded only when it differs,
- * so a later reader shows what the banner showed without knowing any provider's conventions.
- * Returns NULL when recording is disabled or the state path cannot be resolved. */
+/* Prepares a fresh session for the current directory. The file is created on the first append, or
+ * by session_log_begin. model_label is how the provider renders model for people; it is recorded
+ * only when it differs, so a later reader shows what the banner showed without knowing any
+ * provider's conventions. Returns NULL when recording is disabled or the state path cannot be
+ * resolved. */
 struct session_log *session_log_open(const char *provider, const char *model,
                                      const char *model_label, const char *effort,
                                      const char *preset);
@@ -69,6 +70,10 @@ struct session_log *session_log_open(const char *provider, const char *model,
 struct session_log *session_log_resume(const char *path, const char *provider, const char *model,
                                        const char *effort, const char *preset,
                                        size_t loaded_item_count);
+
+/* Writes the header before any item exists, so the id is a resume handle from the start; for a
+ * frontend that announces it up front. A no-op once materialized. */
+void session_log_begin(struct session_log *log);
 
 /* Appends items not previously written. All writer functions accept a NULL log. */
 void session_log_append(struct session_log *log, const struct item *items, size_t item_count);

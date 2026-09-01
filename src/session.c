@@ -696,6 +696,13 @@ static int selection_matches_log(const struct session_meta *meta, const struct s
            optional_strings_equal(meta->preset, log->preset);
 }
 
+void session_log_begin(struct session_log *log)
+{
+    if (!log || log->header_written || materialize_log(log) < 0 || write_header(log) < 0)
+        return;
+    log->header_written = 1;
+}
+
 void session_log_append(struct session_log *log, const struct item *items, size_t item_count)
 {
     if (!log || item_count <= log->written_items || materialize_log(log) < 0)

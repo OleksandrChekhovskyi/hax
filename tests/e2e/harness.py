@@ -74,14 +74,19 @@ def mock_env(home: Path, mock_script: str, extra_env: dict[str, str] | None = No
     return env
 
 
-def run_oneshot(prompt: str, mock_script: str, extra_args: list[str] | None = None) -> Result:
+def run_oneshot(
+    prompt: str,
+    mock_script: str,
+    extra_args: list[str] | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> Result:
     """Run `hax -p [extra_args] <prompt>` against scripts/mock/<mock_script> in a scratch cwd."""
     home, workdir = make_home()
     # Decode as UTF-8 regardless of the host locale.
     proc = subprocess.run(
         [str(hax_binary()), "-p", *(extra_args or []), prompt],
         cwd=workdir,
-        env=mock_env(home, mock_script),
+        env=mock_env(home, mock_script, extra_env),
         capture_output=True,
         encoding="utf-8",
         timeout=30,

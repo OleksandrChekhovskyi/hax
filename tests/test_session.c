@@ -540,6 +540,40 @@ static void test_log_materialization(void)
     EXPECT(session_log_materialized(NULL) == 0);
 }
 
+static void test_log_begin_materializes_before_any_item(void)
+{
+    use_fresh_session_state();
+    struct session_log *log = session_log_open("pa", "ma", NULL, NULL, NULL);
+    EXPECT(log != NULL);
+    char *path = xstrdup(session_log_path(log));
+
+    EXPECT(session_log_resume_hint(log) == NULL);
+    session_log_begin(log);
+    EXPECT(session_log_materialized(log) != 0);
+    EXPECT(session_log_resume_hint(log) != NULL);
+    struct session_meta meta;
+    EXPECT(session_read_meta(path, &meta) == 0);
+    EXPECT_STR_EQ(meta.provider, "pa");
+    EXPECT_STR_EQ(meta.id, session_log_resume_hint(log));
+    session_meta_free(&meta);
+
+    /* A second begin and the first append must not restate the header. */
+    struct item turn[] = {{.kind = ITEM_TURN_BOUNDARY},
+                          {.kind = ITEM_USER_MESSAGE, .text = (char *)"hi"}};
+    session_log_begin(log);
+    session_log_append(log, turn, 2);
+    session_log_close(log);
+
+    struct item *items;
+    size_t count;
+    EXPECT(session_load(path, &items, &count, &meta) == 0);
+    EXPECT(count == 2);
+    free_items(items, count);
+    session_meta_free(&meta);
+    free(path);
+    session_log_begin(NULL);
+}
+
 static struct item UNDO_CONVERSATION[] = {
     {.kind = ITEM_TURN_BOUNDARY},
     {.kind = ITEM_USER_MESSAGE, .text = (char *)"t0"},
@@ -877,6 +911,7 @@ int main(void)
     test_resume_repairs_torn_final_line();
     test_load_trims_dangling_tool_call();
     test_log_materialization();
+    test_log_begin_materializes_before_any_item();
     test_truncate_and_reappend();
     test_truncate_all_turns();
     test_fork_copies_prefix_without_touching_source();

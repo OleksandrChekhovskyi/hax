@@ -30,6 +30,8 @@ result = harness.spawned_result(proc, "".join(lines) + out, err, workdir)
 
 harness.expect(result.returncode == 130, "a graceful interrupt exits 130", result)
 records = [json.loads(line) for line in result.stdout.splitlines()]
+# Announced before the run, so a killed one is resumable without reaching a result record.
+harness.expect(bool(records[0].get("id")), "the opening session record carries the id", result)
 final = records[-1]
 harness.expect(final.get("type") == "result", "the stream still closes with a result", result)
 harness.expect(final.get("outcome") == "interrupted", "the result reports the interrupt", result)
