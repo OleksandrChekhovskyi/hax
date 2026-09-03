@@ -52,6 +52,7 @@ struct http_provider {
     char *endpoint; /* for the default wire; other wires derive theirs per request */
     char *config_prefix;
     char *session_id;
+    const char *session_header;       /* borrowed from the def */
     const struct wire *wire;          /* default; wire_rules and catalog hints override per model */
     const struct wire *metadata_wire; /* auth scheme for /models and probe requests */
     struct wire_rule *wire_rules;
@@ -151,6 +152,7 @@ static char **build_headers(const struct http_provider *provider, const struct w
 
     char *auth = NULL;
     char *version = NULL;
+    char *session = NULL;
     if (wire == &WIRE_ANTHROPIC_MESSAGES) {
         if (provider->api_key)
             auth = xasprintf("x-api-key: %s", provider->api_key);
@@ -159,12 +161,17 @@ static char **build_headers(const struct http_provider *provider, const struct w
         auth = xasprintf("Authorization: Bearer %s", provider->api_key);
     }
 
-    const char *fixed[5];
+    if (provider->session_header)
+        session = xasprintf("%s: %s", provider->session_header, provider->session_id);
+
+    const char *fixed[6];
     size_t n_fixed = 0;
     if (auth)
         fixed[n_fixed++] = auth;
     if (version)
         fixed[n_fixed++] = version;
+    if (session)
+        fixed[n_fixed++] = session;
     if (streaming) {
         fixed[n_fixed++] = "Accept: text/event-stream";
         fixed[n_fixed++] = "Content-Type: application/json";
@@ -174,6 +181,7 @@ static char **build_headers(const struct http_provider *provider, const struct w
     char **headers = string_array_concat(fixed, (const char *const *)provider->extra_headers);
     free(auth);
     free(version);
+    free(session);
     return headers;
 }
 
@@ -899,6 +907,7 @@ struct provider *http_provider_new(const struct provider_def *def)
     char session_id[37];
     gen_uuid_v4(session_id);
     provider->session_id = xstrdup(session_id);
+    provider->session_header = def->session_header;
 
     if (def->load_defaults)
         def->load_defaults(&provider->default_model, &provider->default_effort);

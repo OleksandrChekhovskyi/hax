@@ -56,6 +56,7 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- OpenCode Go requests now include the required stable `x-opencode-session` header.
 - Interactively resuming an interrupted conversation (`--resume`, `-c`, `/resume`) now shows the
   resume hint and accepts the empty-Enter continue, which previously worked only within the
   interrupted process.

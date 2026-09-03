@@ -75,6 +75,8 @@ struct provider_def {
                        char **error, http_tick_cb tick, void *tick_user);
     int (*query_usage)(struct provider *provider);
     char *(*model_label)(struct provider *provider, const char *model);
+    /* Request header carrying the provider's stable per-process session id; NULL sends none. */
+    const char *session_header;
     /* Owned NULL-terminated headers resolved once at construction and sent on every request. */
     char **(*static_headers)(void);
     /* Create the provider's dynamic credential source (http_provider.h), or return non-zero

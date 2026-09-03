@@ -98,6 +98,7 @@ static const struct provider_def DEFS[] = {
         .api_key_env = "OPENCODE_API_KEY",
         .catalog_id = "opencode-go",
         .metadata_api = "openai",
+        .session_header = "x-opencode-session",
         .query_usage = opencode_go_query_usage,
     },
     /* Local servers. */
