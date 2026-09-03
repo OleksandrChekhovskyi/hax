@@ -114,9 +114,9 @@ static void test_extra_body(void)
 }
 
 /* extra_headers become "Name: value" strings; a "$NAME" value reads the environment. A
- * non-token name (space, separator), a non-string value, an unset variable, an empty value
- * (curl would suppress the header instead of sending it empty), and a control character
- * (literal, DEL, or smuggled through a variable) each warn and drop. */
+ * non-token name (space, separator), a non-string value, an unset variable, and a control
+ * character (literal, DEL, or smuggled through a variable) each warn and drop; an empty value
+ * is a silent removal marker that never reaches a request. */
 static void test_extra_headers(void)
 {
     setenv("HAX_TEST_HEADER", "from-env", 1);
@@ -125,7 +125,7 @@ static void test_extra_headers(void)
 
     unsigned long diagnostics_before = hax_diag_sequence();
     char **headers = provider_extra_headers("providers.extras");
-    EXPECT(hax_diag_sequence() == diagnostics_before + 9);
+    EXPECT(hax_diag_sequence() == diagnostics_before + 8);
     EXPECT(headers != NULL);
     if (!headers)
         return;
@@ -149,6 +149,57 @@ static void test_extra_headers(void)
     EXPECT(provider_extra_headers(NULL) == NULL);
     unsetenv("HAX_TEST_HEADER");
     unsetenv("HAX_TEST_EVIL_HEADER");
+}
+
+/* Config headers replace def defaults of the same name, compared case-insensitively as HTTP
+ * requires, an empty config value removes a default, and the session placeholder expands per
+ * request wherever it appears. */
+static void test_headers_merge_and_expand(void)
+{
+    json_t *defaults_object = json_pack("{ss ss ss}", "x-gw-session", "{session_id}", "X-Gw-Client",
+                                        "hax", "X-Gw-Title", "hax");
+    json_t *overrides_object = json_pack("{ss ss ss}", "x-gw-client", "custom", "X-Extra",
+                                         "{session_id}/{session_id}", "x-gw-title", "");
+    char **defaults = provider_headers_from_object(defaults_object, "defaults");
+    char **overrides = provider_headers_from_object(overrides_object, "overrides");
+    json_decref(defaults_object);
+    json_decref(overrides_object);
+
+    char **merged = provider_headers_merge(defaults, overrides);
+    EXPECT(merged != NULL);
+    if (merged) {
+        EXPECT_STR_EQ(merged[0], "x-gw-session: {session_id}");
+        EXPECT_STR_EQ(merged[1], "x-gw-client: custom");
+        EXPECT_STR_EQ(merged[2], "X-Extra: {session_id}/{session_id}");
+        EXPECT(merged[3] == NULL);
+
+        char **expanded = provider_headers_expand(merged, "conv-1");
+        EXPECT_STR_EQ(expanded[0], "x-gw-session: conv-1");
+        EXPECT_STR_EQ(expanded[1], "x-gw-client: custom");
+        EXPECT_STR_EQ(expanded[2], "X-Extra: conv-1/conv-1");
+        string_array_free(expanded);
+        string_array_free(merged);
+    }
+    EXPECT(provider_headers_merge(NULL, NULL) == NULL);
+    EXPECT(provider_headers_expand(NULL, "conv-1") == NULL);
+    /* Removals alone leave nothing to send. */
+    json_t *removal_object = json_pack("{ss}", "X-Gone", "");
+    char **removals = provider_headers_from_object(removal_object, "removals");
+    json_decref(removal_object);
+    EXPECT_STR_EQ(removals[0], "X-Gone:");
+    EXPECT(provider_headers_merge(NULL, removals) == NULL);
+    string_array_free(removals);
+
+    /* Outside a conversation the process id fills the placeholder, and it stays put. */
+    const char *process_id = provider_process_session_id();
+    EXPECT(strlen(process_id) == 36);
+    EXPECT(process_id == provider_process_session_id());
+    char **expanded = provider_headers_expand(defaults, process_id);
+    EXPECT(strncmp(expanded[0], "x-gw-session: ", 14) == 0);
+    EXPECT_STR_EQ(expanded[0] + 14, process_id);
+    string_array_free(expanded);
+    string_array_free(defaults);
+    string_array_free(overrides);
 }
 
 /* An inline api_key accepts the same "$NAME" indirection, falling through to api_key_env
@@ -560,6 +611,7 @@ int main(void)
     test_cache_ttl_resolution();
     test_extra_body();
     test_extra_headers();
+    test_headers_merge_and_expand();
     test_api_key_env_escape();
 
     config_free();

@@ -238,12 +238,6 @@ static const struct config_setting REGISTRY[] = {
     {.key = "providers.llamacpp.port", .env_var = "HAX_LLAMACPP_PORT", .default_value = "8080",
      .description = "Port for the local llama-server (when base_url is unset)",
      .kind = CONFIG_KIND_INT, .min = 1, .max = 65535},
-    {.key = "providers.openrouter.title", .env_var = "HAX_OPENROUTER_TITLE",
-     .default_value = "hax", .keep_empty = 1,
-     .description = "X-Title header for OpenRouter attribution (empty disables)"},
-    {.key = "providers.openrouter.referer", .env_var = "HAX_OPENROUTER_REFERER",
-     .default_value = "https://usehax.dev", .keep_empty = 1,
-     .description = "HTTP-Referer header for OpenRouter attribution (empty disables)"},
     {.key = "providers.mock.script", .env_var = "HAX_MOCK_SCRIPT",
      .description = "Path to a mock-provider script (mock provider only)"},
 };

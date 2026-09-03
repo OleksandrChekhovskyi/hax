@@ -11,7 +11,6 @@
 #include "buf.h"
 #include "busy.h"
 #include "catalog.h"
-#include "config.h"
 #include "effort.h"
 #include "provider.h"
 #include "xalloc.h"
@@ -365,29 +364,4 @@ out:
     free(key_body);
     free(credits_body);
     return result;
-}
-
-char **openrouter_static_headers(void)
-{
-    const char *title = config_str("providers.openrouter.title");
-    const char *referer = config_str("providers.openrouter.referer");
-
-    char *title_header = (title && *title) ? xasprintf("X-Title: %s", title) : NULL;
-    char *referer_header = (referer && *referer) ? xasprintf("HTTP-Referer: %s", referer) : NULL;
-
-    const char *fixed[4];
-    size_t n_fixed = 0;
-    if (title_header)
-        fixed[n_fixed++] = title_header;
-    /* Categories refine app attribution and have no effect without a referer. */
-    if (referer_header) {
-        fixed[n_fixed++] = referer_header;
-        fixed[n_fixed++] = "X-OpenRouter-Categories: cli-agent";
-    }
-    fixed[n_fixed] = NULL;
-
-    char **headers = string_array_concat(fixed, NULL);
-    free(title_header);
-    free(referer_header);
-    return headers;
 }

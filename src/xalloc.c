@@ -84,13 +84,17 @@ void string_array_free(char **strings)
     free(strings);
 }
 
+size_t string_array_count(const char *const *strings)
+{
+    size_t count = 0;
+    for (const char *const *string = strings; string && *string; string++)
+        count++;
+    return count;
+}
+
 char **string_array_concat(const char *const *first, const char *const *second)
 {
-    size_t n_strings = 0;
-    for (const char *const *string = first; string && *string; string++)
-        n_strings++;
-    for (const char *const *string = second; string && *string; string++)
-        n_strings++;
+    size_t n_strings = string_array_count(first) + string_array_count(second);
     if (n_strings == 0)
         return NULL;
 

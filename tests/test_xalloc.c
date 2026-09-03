@@ -35,6 +35,15 @@ static void test_string_array_concat(void)
     }
 }
 
+static void test_string_array_count(void)
+{
+    const char *const three[] = {"a", "b", "c", NULL};
+    const char *const none[] = {NULL};
+    EXPECT(string_array_count(three) == 3);
+    EXPECT(string_array_count(none) == 0);
+    EXPECT(string_array_count(NULL) == 0);
+}
+
 static void test_zero_sized_allocations(void)
 {
     void *malloc_result = xmalloc(0);
@@ -52,6 +61,7 @@ static void test_zero_sized_allocations(void)
 int main(void)
 {
     test_string_array_concat();
+    test_string_array_count();
     test_zero_sized_allocations();
 
     T_REPORT();

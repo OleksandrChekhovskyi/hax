@@ -10,6 +10,7 @@
 #include "compact.h"
 #include "model_meta.h"
 #include "provider.h"
+#include "session.h"
 #include "tool.h"
 #include "transcript.h"
 #include "turn.h"
@@ -73,8 +74,8 @@ static int loop_turn_on_event(const struct stream_event *ev, void *user)
 }
 
 void agent_loop_turn_run(struct agent_loop_turn *loop_turn, struct agent_session *session,
-                         struct provider *provider, stream_cb observer, void *observer_user,
-                         http_tick_cb tick, void *tick_user)
+                         struct provider *provider, const char *session_id, stream_cb observer,
+                         void *observer_user, http_tick_cb tick, void *tick_user)
 {
     memset(loop_turn, 0, sizeof(*loop_turn));
     turn_init(&loop_turn->assembly);
@@ -88,6 +89,7 @@ void agent_loop_turn_run(struct agent_loop_turn *loop_turn, struct agent_session
     };
     struct context ctx = agent_session_context(session);
     ctx.image_input = model_meta_image_input(provider, session->model);
+    ctx.session_id = session_id;
     long started_ms = monotonic_ms();
     provider->stream(provider, &ctx, session->model, loop_turn_on_event, &sink, tick, tick_user);
     loop_turn->elapsed_ms = monotonic_ms() - started_ms;
@@ -330,8 +332,8 @@ static void loop_run_active(const struct agent_loop_params *params,
             hooks->turn_begin(hooks->user);
 
         struct agent_loop_turn loop_turn;
-        agent_loop_turn_run(&loop_turn, session, params->provider, hooks->observe, hooks->user,
-                            hooks->tick, hooks->user);
+        agent_loop_turn_run(&loop_turn, session, params->provider, session_log_id(params->slog),
+                            hooks->observe, hooks->user, hooks->tick, hooks->user);
         result->turns++;
         /* Account the request before branching: errored and interrupted turns still reached the
          * provider and may carry billable usage. */

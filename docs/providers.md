@@ -133,9 +133,20 @@ capabilities when available.
 The [transcript](debugging.md#transcript-log) reports the upstream endpoint OpenRouter routed each
 response to, which is how to confirm that `extra_body` routing preferences took effect.
 
-hax sends its project URL and title for OpenRouter app attribution by default. Set
-`providers.openrouter.referer` or `providers.openrouter.title` to an empty string to omit those
-headers.
+By default hax sends app attribution (`HTTP-Referer`, `X-Title`, `X-OpenRouter-Categories`) and
+the conversation id as `x-session-id`, which OpenRouter uses for sticky routing and to group the
+conversation in its activity view. Override or remove any of them through `extra_headers`
+([below](#request-passthrough)):
+
+```json
+{
+  "providers": {
+    "openrouter": {
+      "extra_headers": { "X-Title": "my-tool", "HTTP-Referer": "" }
+    }
+  }
+}
+```
 
 Before sending proprietary code, review the selected endpoint's retention/training policy and your
 OpenRouter privacy settings. Free and paid models have separate training controls, and a free model
@@ -159,6 +170,10 @@ yet described by the model catalog, see the `model_apis` override under
 
 On `opencode-go`, `/usage` shows the subscription's rolling, weekly, and monthly limits. Zen does
 not expose usage through its API, so check the OpenCode dashboard instead.
+
+Requests carry the conversation id as `x-opencode-session`, which the gateway requires for
+routing and prompt caching, and `x-opencode-client: hax`. Both can be overridden in
+`extra_headers` ([below](#request-passthrough)).
 
 ## llama.cpp
 
@@ -346,7 +361,11 @@ streaming setup — are ignored with a warning naming the member.
 `extra_headers` is an object of header names and non-empty string values added to every request to
 the provider. A value of `$VAR` reads the environment variable `VAR`, keeping a credential out of
 the config file, like an inline `api_key: "$VAR"`; `$$` escapes a literal leading `$`. A header
-whose variable is unset is dropped with a warning.
+whose variable is unset is dropped with a warning. A header hax sends for the provider by default
+can be overridden by name (case-insensitive) or removed with an empty string value.
+
+A value may contain `{session_id}`, the conversation's stable id — the one `--resume` takes, so it
+survives restarts, while `/new` starts a fresh one — for gateways that route or cache by session.
 
 ```json
 {
@@ -362,7 +381,8 @@ whose variable is unset is dropped with a warning.
       "extra_body": { "service_tier": "priority" },
       "extra_headers": {
         "x-gateway-project": "hax",
-        "x-gateway-key": "$GATEWAY_EXTRA_KEY"
+        "x-gateway-key": "$GATEWAY_EXTRA_KEY",
+        "x-gateway-session": "{session_id}"
       }
     }
   }
@@ -370,11 +390,10 @@ whose variable is unset is dropped with a warning.
 ```
 
 Prefer a dedicated field when one exists — `api_key`/`api_key_env` for the credential, `version`
-for `anthropic-version`, the OpenRouter `title`/`referer` settings for its attribution headers —
-because hax cannot reason about a value injected behind its back: an `extra_body` that changes
-between runs can also defeat prompt caching. `HAX_TRACE` redacts API keys and `$VAR`-resolved
-values wherever they appear, but cannot recognize a credential written literally into a header
-value — one more reason to prefer `$VAR`.
+for `anthropic-version` — because hax cannot reason about a value injected behind its back: an
+`extra_body` that changes between runs can also defeat prompt caching. `HAX_TRACE` redacts API
+keys and `$VAR`-resolved values wherever they appear, but cannot recognize a credential written
+literally into a header value — one more reason to prefer `$VAR`.
 
 ## Mock provider
 

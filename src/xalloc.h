@@ -22,6 +22,9 @@ void die_oom(void);
 /* Free a NULL-terminated array and its strings. NULL-safe. */
 void string_array_free(char **strings);
 
+/* Number of strings before the terminator; 0 for NULL. */
+size_t string_array_count(const char *const *strings);
+
 /* Owned concatenation of two NULL-terminated string arrays (either may be NULL), or NULL when
  * the result would be empty. Free with string_array_free. */
 char **string_array_concat(const char *const *first, const char *const *second);

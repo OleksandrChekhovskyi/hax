@@ -25,6 +25,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   protocol families. See [docs/providers.md](docs/providers.md#custom-providers).
 - `sort_models` and `catalog_id` now work in every provider's config block, not only custom
   ones; `providers.openai.sort_models`, for example, keeps the picker in server order.
+- `extra_headers` values accept `{session_id}`, the conversation's stable id, for gateways that
+  route or cache by session. Headers hax sends by default can now be overridden by name or removed
+  with an empty value. See [docs/providers.md](docs/providers.md#request-passthrough).
+- OpenRouter requests carry the conversation id as `x-session-id`, OpenRouter's sticky-routing
+  key, which also groups a conversation's generations in its activity view.
 
 ### Changed
 
@@ -53,9 +58,16 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - The first-party `openai`, `anthropic`, and `openrouter` providers pin their protocol along
   with their endpoint: `providers.<id>.api` now warns instead of switching the wire. Use
   `model_apis` for per-model protocols, or a custom provider.
+- The `providers.openrouter.title` and `providers.openrouter.referer` settings and their
+  `HAX_OPENROUTER_*` aliases are gone; override or remove the attribution headers through
+  `providers.openrouter.extra_headers`. See [docs/providers.md](docs/providers.md#openrouter).
 
 ### Fixed
 
+- OpenCode Zen and Go requests now send the `x-opencode-session` header the gateway requires;
+  Requests without it may error starting 2026-09-06.
+- The session key sent to providers for routing and prompt caching now follows the conversation
+  rather than the process: a resumed conversation keeps its cache, and `/new` starts fresh.
 - Interactively resuming an interrupted conversation (`--resume`, `-c`, `/resume`) now shows the
   resume hint and accepts the empty-Enter continue, which previously worked only within the
   interrupted process.

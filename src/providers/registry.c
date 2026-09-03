@@ -10,6 +10,7 @@
 #include "diag.h"
 #include "model_meta.h"
 #include "provider.h"
+#include "version.h"
 #include "xalloc.h"
 #include "providers/codex.h"
 #include "providers/codex_auth.h"
@@ -20,9 +21,14 @@
 #include "providers/opencode.h"
 #include "providers/openrouter.h"
 
-/* The shipped defs, user-facing ones first, in autoselect priority order. All are data plus
- * capability hooks built by the generic constructor; only the scripted mock, which speaks no
- * HTTP, constructs its own provider. */
+/* The OpenCode gateway pins a conversation to one upstream by its session header — Go rejects
+ * requests without one — and attributes usage by client. */
+#define OPENCODE_HEADERS                                                                           \
+    "{\"x-opencode-session\": \"{session_id}\", \"x-opencode-client\": \"hax\"}"
+
+/* The shipped defs, user-facing ones first, in autoselect priority order: data fields in the
+ * order registry.h declares them, then capability hooks. All are built by the generic
+ * constructor; only the scripted mock, which speaks no HTTP, constructs its own provider. */
 // clang-format off
 static const struct provider_def DEFS[] = {
     {
@@ -37,10 +43,12 @@ static const struct provider_def DEFS[] = {
         /* The official client sends the catalog's per-model verbosity default, "low" for
          * effectively every served model; hax sends it flat rather than plumbing the flag. */
         .extra_body = "{\"text\": {\"verbosity\": \"low\"}}",
+        /* Models the backend routes only to the official CLI check both identities. */
+        .extra_headers = "{\"originator\": \"codex_cli_rs\","
+                         " \"User-Agent\": \"codex_cli_rs/0.144.1 hax/" HAX_VERSION "\"}",
         .probe_model = codex_probe_model,
         .list_models = codex_list_models,
         .query_usage = codex_query_usage,
-        .static_headers = codex_static_headers,
         .auth_source = codex_auth_source,
         .load_defaults = codex_load_settings,
         .prepare_availability = codex_prepare_availability,
@@ -75,10 +83,14 @@ static const struct provider_def DEFS[] = {
         .cache = "auto",
         .request_cost = 1,
         .reasoning_format = "nested",
+        /* App attribution (categories take effect only alongside the referer), and the
+         * session key OpenRouter routes and groups generations by. */
+        .extra_headers = "{\"X-Title\": \"hax\", \"HTTP-Referer\": \"https://usehax.dev\","
+                         " \"X-OpenRouter-Categories\": \"cli-agent\","
+                         " \"x-session-id\": \"{session_id}\"}",
         .parse_model = openrouter_parse_model,
         .probe_model = openrouter_probe_model,
         .query_usage = openrouter_query_usage,
-        .static_headers = openrouter_static_headers,
     },
     /* One gateway family: the same key serves Zen (pay-as-you-go) and Go (subscription).
      * Models span all three wires; the catalog says which each one speaks, while the /models
@@ -90,6 +102,7 @@ static const struct provider_def DEFS[] = {
         .api_key_env = "OPENCODE_API_KEY",
         .catalog_id = "opencode",
         .metadata_api = "openai",
+        .extra_headers = OPENCODE_HEADERS,
     },
     {
         .id = "opencode-go",
@@ -98,6 +111,7 @@ static const struct provider_def DEFS[] = {
         .api_key_env = "OPENCODE_API_KEY",
         .catalog_id = "opencode-go",
         .metadata_api = "openai",
+        .extra_headers = OPENCODE_HEADERS,
         .query_usage = opencode_go_query_usage,
     },
     /* Local servers. */

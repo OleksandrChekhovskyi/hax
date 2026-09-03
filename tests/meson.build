@@ -105,6 +105,7 @@ test_sources = [
     'text/test_base64.c',
     'text/test_diff.c',
     'text/test_fmt.c',
+    'text/test_placeholder.c',
     'text/test_sha256.c',
     'text/test_shell_quote.c',
     'text/test_url.c',

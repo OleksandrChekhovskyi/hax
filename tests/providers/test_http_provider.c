@@ -20,6 +20,7 @@
 #include "provider.h"
 #include "xalloc.h"
 #include "providers/http_provider.h"
+#include "providers/provider_config.h"
 #include "providers/registry.h"
 #include "transport/http.h"
 
@@ -553,7 +554,8 @@ static void test_auth_source_stream(void)
         return;
 
     struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
-    struct context context = {.items = items, .n_items = 1, .image_input = 1};
+    struct context context = {
+        .items = items, .n_items = 1, .image_input = 1, .session_id = "conv-a"};
     struct error_log log = {0};
     provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
     auth.can_recover = 0;
@@ -564,8 +566,8 @@ static void test_auth_source_stream(void)
 
     EXPECT(strstr(server.requests[0], "Authorization: Bearer fake-1\r\n") != NULL);
     EXPECT(strstr(server.requests[0], "x-fake-stream: 1\r\n") != NULL);
-    /* The provider hands its session key to the source through the request facts. */
-    EXPECT(strstr(server.requests[0], "x-fake-session: ") != NULL);
+    /* The conversation's id reaches the source through the request facts. */
+    EXPECT(strstr(server.requests[0], "x-fake-session: conv-a\r\n") != NULL);
     /* The recovery rotated the token and the retry re-built its headers. */
     EXPECT(strstr(server.requests[1], "Authorization: Bearer fake-2\r\n") != NULL);
     EXPECT(strstr(server.requests[2], "Authorization: Bearer fake-2\r\n") != NULL);
@@ -660,6 +662,72 @@ static void test_def_extra_body_and_defaults(void)
     EXPECT(strstr(server.requests[0], "\"verbosity\":\"low\"") != NULL);
     EXPECT(strstr(server.requests[1], "\"verbosity\":\"high\"") != NULL);
     EXPECT(strstr(server.requests[1], "\"low\"") == NULL);
+    EXPECT(config_load(NULL) == 0);
+}
+
+/* Def-declared headers ride every request with the conversation's id in the session placeholder
+ * and as the prompt-cache key; without a conversation the process id stands in; config headers
+ * replace same-named defaults. */
+static void test_def_extra_headers_follow_conversation(void)
+{
+    struct wire_server server = {
+        .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+        .n_requests = 3,
+    };
+    pthread_t thread;
+    int port = start_server(&server, &thread);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+
+    char base_url[64];
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
+    struct provider_def def = {
+        .id = "fh",
+        .base_url = base_url,
+        .send_cache_key = 1,
+        .extra_headers = "{\"x-def-session\": \"{session_id}\", \"x-def-client\": \"hax\"}",
+    };
+    struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
+    struct context context = {
+        .items = items, .n_items = 1, .image_input = 1, .session_id = "conv-1"};
+    struct error_log log = {0};
+
+    struct provider *provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
+        context.session_id = NULL;
+        provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
+        provider->destroy(provider);
+    }
+
+    EXPECT(config_load("{\"providers\": {\"fh\": {\"extra_headers\":"
+                       " {\"X-Def-Client\": \"custom\"}}}}") == 0);
+    context.session_id = "conv-1";
+    provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
+        provider->destroy(provider);
+    }
+
+    pthread_join(thread, NULL);
+    close(server.listener_fd);
+    EXPECT(atomic_load(&server.served) == 3);
+
+    EXPECT(strstr(server.requests[0], "x-def-session: conv-1\r\n") != NULL);
+    EXPECT(strstr(server.requests[0], "x-def-client: hax\r\n") != NULL);
+    EXPECT(strstr(server.requests[0], "\"prompt_cache_key\":\"conv-1\"") != NULL);
+
+    char process_header[80];
+    snprintf(process_header, sizeof(process_header), "x-def-session: %s\r\n",
+             provider_process_session_id());
+    EXPECT(strstr(server.requests[1], process_header) != NULL);
+
+    EXPECT(strstr(server.requests[2], "x-def-session: conv-1\r\n") != NULL);
+    EXPECT(strstr(server.requests[2], "X-Def-Client: custom\r\n") != NULL);
+    EXPECT(strstr(server.requests[2], "x-def-client: hax") == NULL);
     EXPECT(config_load(NULL) == 0);
 }
 
@@ -861,6 +929,7 @@ int main(void)
     test_auth_source_stream();
     test_auth_source_logged_out();
     test_def_extra_body_and_defaults();
+    test_def_extra_headers_follow_conversation();
     test_interleaved_reasoning_replay();
     test_config_only_routing_without_catalog_id();
     test_catalog_routing_warning();

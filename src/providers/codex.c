@@ -10,7 +10,6 @@
 #include "busy.h"
 #include "effort.h"
 #include "provider.h"
-#include "version.h"
 #include "xalloc.h"
 #include "providers/codex_auth.h"
 #include "providers/http_provider.h"
@@ -33,16 +32,6 @@
 /* The models endpoint hides entries requiring a newer client version. A high synthetic version
  * exposes metadata for models that the responses endpoint already accepts. */
 #define CODEX_MODEL_CLIENT_VERSION "999.0.0"
-
-/* Both identities are required for models that the backend routes only to the official CLI. */
-#define CODEX_ORIGINATOR "originator: codex_cli_rs"
-#define CODEX_USER_AGENT "User-Agent: codex_cli_rs/0.144.1 hax/" HAX_VERSION
-
-char **codex_static_headers(void)
-{
-    const char *fixed[] = {CODEX_ORIGINATOR, CODEX_USER_AGENT, NULL};
-    return string_array_concat(fixed, NULL);
-}
 
 void codex_provider_reload_auth(struct provider *provider)
 {

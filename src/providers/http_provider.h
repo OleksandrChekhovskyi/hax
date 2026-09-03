@@ -26,8 +26,9 @@ struct http_auth_ops {
      * exist, -1 when the provider is logged out. */
     int (*prepare)(void *auth, int allow_refresh, http_tick_cb tick, void *tick_user);
     /* Owned NULL-terminated credential headers, rebuilt per attempt because tokens rotate.
-     * `session_id` is the provider's stable per-process session key; `streaming` distinguishes
-     * the streaming completion request from metadata GETs. */
+     * `session_id` is the request's affinity id — the conversation's, or the provider's
+     * per-process fallback outside one; `streaming` distinguishes the streaming completion
+     * request from metadata GETs. */
     char **(*headers)(const void *auth, const char *session_id, int streaming);
     /* One bounded recovery after an unauthorized response: renew or re-read credentials and
      * return non-zero to retry with rebuilt headers. `retried` is the caller's per-operation
@@ -67,6 +68,9 @@ const char *http_provider_api_key(const struct provider *provider);
  * metadata dialect (x-api-key plus the version header on the Anthropic side); free with
  * string_array_free. */
 char **http_provider_metadata_headers(const struct provider *provider);
+/* Owned NULL-terminated extra headers, def defaults under the user's, expanded for a request
+ * outside any conversation; NULL when none. Free with string_array_free. */
+char **http_provider_extra_headers(const struct provider *provider);
 /* The def's per-entry /models refinement hook, or NULL. */
 http_parse_model_cb http_provider_parse_model(const struct provider *provider);
 

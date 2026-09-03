@@ -11,7 +11,6 @@
 #include "provider.h"
 #include "xalloc.h"
 #include "providers/http_provider.h"
-#include "providers/provider_config.h"
 #include "providers/usage_render.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
@@ -94,11 +93,9 @@ char **opencode_usage_headers(const struct provider *provider)
      * only Bearer auth. */
     char *authorization = xasprintf("Authorization: Bearer %s", http_provider_api_key(provider));
     const char *fixed[] = {authorization, "Accept: application/json", NULL};
-    char *prefix = xasprintf("providers.%s", provider->id);
-    char **extra_headers = provider_extra_headers(prefix);
+    char **extra_headers = http_provider_extra_headers(provider);
     char **headers = string_array_concat(fixed, (const char *const *)extra_headers);
     string_array_free(extra_headers);
-    free(prefix);
     free(authorization);
     return headers;
 }

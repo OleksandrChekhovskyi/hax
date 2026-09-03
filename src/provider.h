@@ -123,6 +123,9 @@ struct context {
     /* Image-input capability: 1 yes, 0 no, -1 unknown. Unknown is treated as yes because rejecting
      * an image is recoverable, while suppressing one silently loses content. */
     int image_input;
+    /* Stable id of the conversation, for provider-side affinity: sticky upstream routing and
+     * prompt-cache keys. NULL falls back to the adapter's per-process id. */
+    const char *session_id;
 };
 
 /* Usage reported for one response. Negative values mean unreported. `cached_tokens` and

@@ -111,6 +111,10 @@ const char *session_log_path(const struct session_log *log);
 /* Borrowed resumable id, or NULL until the session is materialized. */
 const char *session_log_resume_hint(const struct session_log *log);
 
+/* Borrowed conversation id, fixed from open or resume until reset or close: the id a
+ * materialized file carries, available before anything is written. NULL without a log. */
+const char *session_log_id(const struct session_log *log);
+
 /* True when path has hax's timestamp-and-UUID session filename. */
 int session_path_is_standard(const char *path);
 

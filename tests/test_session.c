@@ -540,6 +540,34 @@ static void test_log_materialization(void)
     EXPECT(session_log_materialized(NULL) == 0);
 }
 
+/* The conversation id is fixed from open, before anything is written, becomes the resume handle,
+ * changes with /new, and comes back verbatim on resume. */
+static void test_log_id_follows_conversation(void)
+{
+    use_fresh_session_state();
+    EXPECT(session_log_id(NULL) == NULL);
+    struct session_log *log = session_log_open("pa", "ma", NULL, NULL, NULL);
+    EXPECT(log != NULL);
+    char *first_id = xstrdup(session_log_id(log));
+    char *path = xstrdup(session_log_path(log));
+    EXPECT(strlen(first_id) == 36);
+
+    session_log_begin(log);
+    EXPECT_STR_EQ(session_log_resume_hint(log), first_id);
+    session_log_reset(log);
+    EXPECT(strcmp(session_log_id(log), first_id) != 0);
+    session_log_close(log);
+
+    log = session_log_resume(path, "pa", "ma", NULL, NULL, 0);
+    EXPECT(log != NULL);
+    if (log) {
+        EXPECT_STR_EQ(session_log_id(log), first_id);
+        session_log_close(log);
+    }
+    free(path);
+    free(first_id);
+}
+
 static void test_log_begin_materializes_before_any_item(void)
 {
     use_fresh_session_state();
@@ -911,6 +939,7 @@ int main(void)
     test_resume_repairs_torn_final_line();
     test_load_trims_dangling_tool_call();
     test_log_materialization();
+    test_log_id_follows_conversation();
     test_log_begin_materializes_before_any_item();
     test_truncate_and_reappend();
     test_truncate_all_turns();

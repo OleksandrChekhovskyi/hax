@@ -944,11 +944,9 @@ static void test_empty_policy(void)
     /* Settings that document a meaning for empty keep it: the empty env wins
      * and is reported there, matching what the consumer reads. */
     EXPECT(config_load("{\"system_prompt\": \"from file\", \"effort\": \"high\","
-                       " \"providers\": {\"openrouter\": {\"referer\": \"https://x\"}},"
                        " \"transcript\": \"/tmp/transcript\", \"trace\": \"/tmp/trace\"}") == 0);
     setenv("HAX_SYSTEM_PROMPT", "", 1);
     setenv("HAX_EFFORT", "", 1);
-    setenv("HAX_OPENROUTER_REFERER", "", 1);
     setenv("HAX_TRANSCRIPT", "", 1);
     setenv("HAX_TRACE", "", 1);
     const char *sp = config_str("system_prompt");
@@ -956,9 +954,6 @@ static void test_empty_policy(void)
     EXPECT_STR_EQ(config_source("system_prompt"), "env");
     const char *ef = config_str("effort");
     EXPECT(ef && !*ef);
-    const char *rf = config_str("providers.openrouter.referer");
-    EXPECT(rf && !*rf);
-    EXPECT_STR_EQ(config_source("providers.openrouter.referer"), "env");
     const char *transcript = config_str("transcript");
     EXPECT(transcript && !*transcript);
     EXPECT_STR_EQ(config_source("transcript"), "env");

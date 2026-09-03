@@ -808,6 +808,11 @@ const char *session_log_resume_hint(const struct session_log *log)
     return log->id;
 }
 
+const char *session_log_id(const struct session_log *log)
+{
+    return log ? log->id : NULL;
+}
+
 /* Keep this predicate aligned with agent.c's in-memory typed-prompt scan. */
 static int json_line_is_typed_prompt(const json_t *object)
 {

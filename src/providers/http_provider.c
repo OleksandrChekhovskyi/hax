@@ -22,7 +22,7 @@
 #include "providers/registry.h"
 #include "providers/stream_retry.h"
 #include "providers/wire.h"
-#include "system/rand.h"
+#include "text/placeholder.h"
 #include "text/url.h"
 #include "transport/http.h"
 
@@ -51,7 +51,6 @@ struct http_provider {
     char *catalog_id;
     char *endpoint; /* for the default wire; other wires derive theirs per request */
     char *config_prefix;
-    char *session_id;
     const struct wire *wire;          /* default; wire_rules and catalog hints override per model */
     const struct wire *metadata_wire; /* auth scheme for /models and probe requests */
     struct wire_rule *wire_rules;
@@ -67,8 +66,8 @@ struct http_provider {
     enum chat_reasoning_format reasoning_format;
     enum anthropic_thinking_mode default_thinking_mode;
     int strict_signatures;
-    int cache_default; /* Messages cache_control default; chat uses cache_mode */
-    char **extra_headers;
+    int cache_default;    /* Messages cache_control default; chat uses cache_mode */
+    char **extra_headers; /* "Name: value" templates; {session_id} expands per request */
     json_t *extra_body;
     struct http_auth_source auth; /* zeroed ops: the api_key authenticates requests */
     /* A probe skipped on stale credentials, relaunched after the next authenticated stream. */
@@ -126,13 +125,15 @@ int http_provider_max_tokens(struct provider *base, const char *model)
 /* Owned NULL-terminated headers; free with string_array_free. Credentials come from the auth
  * source when the provider has one, otherwise the auth scheme follows the wire: Bearer for the
  * OpenAI family, x-api-key plus the version header for Messages. Streaming requests add the
- * SSE Accept and the JSON Content-Type. */
+ * SSE Accept and the JSON Content-Type. `session_id` fills the extra headers' placeholders and
+ * reaches the auth source. */
 static char **build_headers(const struct http_provider *provider, const struct wire *wire,
-                            int streaming)
+                            int streaming, const char *session_id)
 {
+    char **extra = provider_headers_expand(provider->extra_headers, session_id);
     if (provider->auth.ops) {
         char **credentials =
-            provider->auth.ops->headers(provider->auth.state, provider->session_id, streaming);
+            provider->auth.ops->headers(provider->auth.state, session_id, streaming);
         const char *fixed[3];
         size_t n_fixed = 0;
         if (streaming) {
@@ -140,12 +141,12 @@ static char **build_headers(const struct http_provider *provider, const struct w
             fixed[n_fixed++] = "Content-Type: application/json";
         }
         fixed[n_fixed] = NULL;
-        char **fixed_and_extra =
-            string_array_concat(fixed, (const char *const *)provider->extra_headers);
+        char **fixed_and_extra = string_array_concat(fixed, (const char *const *)extra);
         char **headers = string_array_concat((const char *const *)credentials,
                                              (const char *const *)fixed_and_extra);
         string_array_free(fixed_and_extra);
         string_array_free(credentials);
+        string_array_free(extra);
         return headers;
     }
 
@@ -171,7 +172,8 @@ static char **build_headers(const struct http_provider *provider, const struct w
     }
     fixed[n_fixed] = NULL;
 
-    char **headers = string_array_concat(fixed, (const char *const *)provider->extra_headers);
+    char **headers = string_array_concat(fixed, (const char *const *)extra);
+    string_array_free(extra);
     free(auth);
     free(version);
     return headers;
@@ -180,6 +182,7 @@ static char **build_headers(const struct http_provider *provider, const struct w
 struct http_stream {
     struct http_provider *provider;
     const struct wire *wire; /* resolved for this request's model */
+    const char *session_id;  /* the request's affinity id, never NULL */
     struct chat_cache_plan cache;
     union wire_events events;
     int auth_retried; /* per-stream guard for the auth source's unauthorized recovery */
@@ -188,7 +191,7 @@ struct http_stream {
 static char **stream_build_headers(void *ctx)
 {
     struct http_stream *stream = ctx;
-    return build_headers(stream->provider, stream->wire, 1);
+    return build_headers(stream->provider, stream->wire, 1, stream->session_id);
 }
 
 static void stream_parser_init(void *ctx, stream_cb callback, void *callback_user)
@@ -327,7 +330,11 @@ static int http_provider_stream(struct provider *base, const struct context *con
         }
     }
 
-    struct http_stream stream = {.provider = provider, .wire = wire};
+    struct http_stream stream = {
+        .provider = provider,
+        .wire = wire,
+        .session_id = context->session_id ? context->session_id : provider_process_session_id(),
+    };
     struct wire_body_opts opts = {
         .extra_body = provider->extra_body,
         .cache_ttl = provider->cache_ttl,
@@ -350,7 +357,7 @@ static int http_provider_stream(struct provider *base, const struct context *con
         model_meta_rates(base, model, &rates);
         stream.cache = chat_plan_cache(&rates, provider->cache_mode, provider->cache_ttl);
         opts.cache_markers = stream.cache.send_breakpoints;
-        opts.session_cache_key = provider->send_cache_key ? provider->session_id : NULL;
+        opts.session_cache_key = provider->send_cache_key ? stream.session_id : NULL;
         opts.reasoning_field = resolve_model_reasoning_field(provider, model);
         opts.reasoning_format = provider->reasoning_format;
         opts.request_cost = provider->request_cost;
@@ -403,7 +410,6 @@ static void http_provider_destroy(struct provider *base)
     free(provider->catalog_id);
     free(provider->endpoint);
     free(provider->config_prefix);
-    free(provider->session_id);
     free(provider->version);
     free(provider->cache_ttl);
     free(provider->reasoning_field);
@@ -518,7 +524,13 @@ const char *http_provider_api_key(const struct provider *provider)
 char **http_provider_metadata_headers(const struct provider *provider)
 {
     const struct http_provider *hp = (const struct http_provider *)provider;
-    return build_headers(hp, hp->metadata_wire, 0);
+    return build_headers(hp, hp->metadata_wire, 0, provider_process_session_id());
+}
+
+char **http_provider_extra_headers(const struct provider *provider)
+{
+    const struct http_provider *hp = (const struct http_provider *)provider;
+    return provider_headers_expand(hp->extra_headers, provider_process_session_id());
 }
 
 http_parse_model_cb http_provider_parse_model(const struct provider *provider)
@@ -551,14 +563,19 @@ void http_provider_prepare_base_url_availability(const char *base_url, const cha
     free(authorization);
 }
 
+#define PORT_PLACEHOLDER "port"
+
+static int def_base_url_port_templated(const struct provider_def *def)
+{
+    return def->base_url && placeholder_present(def->base_url, PORT_PLACEHOLDER);
+}
+
 /* Expand a "{port}" placeholder in a def's default base_url: providers.<name>.port, else the
  * def's own port. Returns the owned expansion, or NULL when the URL carries no placeholder or
  * no port resolves. */
 static char *expand_port_template(const struct provider_def *def)
 {
-    const char *url = def->base_url;
-    const char *placeholder = url ? strstr(url, "{port}") : NULL;
-    if (!placeholder)
+    if (!def_base_url_port_templated(def))
         return NULL;
     /* The typed read parses and bounds-checks a registered setting (llamacpp), falling back to
      * its registered default; the range guard covers unregistered ports, so a malformed value
@@ -570,8 +587,10 @@ static char *expand_port_template(const struct provider_def *def)
         port = def->port;
     if (port < 1)
         return NULL;
-    return xasprintf("%.*s%d%s", (int)(placeholder - url), url, port,
-                     placeholder + strlen("{port}"));
+    char *port_text = xasprintf("%d", port);
+    char *url = placeholder_expand(def->base_url, PORT_PLACEHOLDER, port_text);
+    free(port_text);
+    return url;
 }
 
 /* Resolve the def's endpoint: a pinned def's own base_url; otherwise the configured
@@ -739,6 +758,24 @@ static void narrow_messages_efforts(struct http_provider *provider)
     provider->n_efforts = n_kept;
 }
 
+/* The def's extra_headers object as "Name: value" templates, or NULL. A malformed literal is a
+ * programming error worth a warning, not a construction failure. */
+static char **def_extra_headers(const struct provider_def *def)
+{
+    if (!def->extra_headers)
+        return NULL;
+    json_t *object = json_loads(def->extra_headers, 0, NULL);
+    if (!object) {
+        hax_warn("provider '%s': default extra_headers is not valid JSON — ignoring it", def->id);
+        return NULL;
+    }
+    char *label = xasprintf("provider '%s' default extra_headers", def->id);
+    char **headers = provider_headers_from_object(object, label);
+    free(label);
+    json_decref(object);
+    return headers;
+}
+
 static const char *resolve_display_name(const struct provider_def *def, const char *prefix)
 {
     const char *configured = config_scoped_str(prefix, "display_name");
@@ -775,7 +812,7 @@ struct provider *http_provider_new(const struct provider_def *def)
         classes |= PROVIDER_FIELD_OPENAI | PROVIDER_FIELD_ANTHROPIC;
     if (!def->auth_source)
         classes |= PROVIDER_FIELD_KEYED | (def->pinned ? 0 : PROVIDER_FIELD_UNPINNED);
-    if (def->base_url && strstr(def->base_url, "{port}"))
+    if (def_base_url_port_templated(def))
         classes |= PROVIDER_FIELD_PORT_TEMPLATED;
     provider_warn_unused_fields(name, wire->id, classes,
                                 metadata_api == HTTP_METADATA_ANTHROPIC ? METADATA_FIELDS : NULL);
@@ -867,13 +904,12 @@ struct provider *http_provider_new(const struct provider_def *def)
                                           ? (enum anthropic_thinking_mode)thinking_mode
                                           : ANTHROPIC_THINKING_BUDGET;
     provider->strict_signatures = def->strict_signatures;
-    /* Def-declared headers first, then config-declared ones; both reach every request. */
-    char **static_headers = def->static_headers ? def->static_headers() : NULL;
-    char **config_headers = provider_extra_headers(prefix);
-    provider->extra_headers = string_array_concat((const char *const *)static_headers,
-                                                  (const char *const *)config_headers);
+    /* The user's headers replace same-named def defaults, as extra_body members do. */
+    char **def_headers = def_extra_headers(def);
+    char **config_headers = provider_extra_header_templates(prefix);
+    provider->extra_headers = provider_headers_merge(def_headers, config_headers);
     string_array_free(config_headers);
-    string_array_free(static_headers);
+    string_array_free(def_headers);
     provider->extra_body = provider_extra_body(prefix);
     if (def->extra_body) {
         /* The user's members merge over the def's, so config can override endpoint defaults. */
@@ -895,10 +931,6 @@ struct provider *http_provider_new(const struct provider_def *def)
     }
     narrow_messages_efforts(provider);
     provider->parse_model = def->parse_model;
-
-    char session_id[37];
-    gen_uuid_v4(session_id);
-    provider->session_id = xstrdup(session_id);
 
     if (def->load_defaults)
         def->load_defaults(&provider->default_model, &provider->default_effort);

@@ -222,6 +222,7 @@ static void summary_request_init(struct summary_request *request,
     request->base_context = agent_session_context(params->session);
     request->base_context.image_input =
         model_meta_image_input(params->provider, params->session->model);
+    request->base_context.session_id = session_log_id(params->session_log);
     request->borrowed_count = request->base_context.n_items;
     request->capacity = request->borrowed_count + 1;
     request->items = xmalloc(request->capacity * sizeof(*request->items));

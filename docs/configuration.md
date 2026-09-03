@@ -372,8 +372,6 @@ When model metadata has no output limit, `max_tokens` falls back internally to 3
 | `providers.llamacpp.base_url` | `HAX_LLAMACPP_BASE_URL` | — | Full llama-server URL; overrides the port. |
 | `providers.llamacpp.api_key` | `HAX_LLAMACPP_API_KEY` | — | Bearer token when llama-server uses `--api-key`. |
 | `providers.llamacpp.port` | `HAX_LLAMACPP_PORT` | `8080` | llama-server port when no base URL is set. |
-| `providers.openrouter.title` | `HAX_OPENROUTER_TITLE` | `hax` | OpenRouter attribution title; empty disables. |
-| `providers.openrouter.referer` | `HAX_OPENROUTER_REFERER` | `https://usehax.dev` | OpenRouter attribution URL; empty disables. |
 | `providers.mock.script` | `HAX_MOCK_SCRIPT` | — | Mock-provider script path. |
 
 Custom provider blocks are documented in [providers.md](./providers.md#custom-providers).

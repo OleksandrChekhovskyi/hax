@@ -24,7 +24,4 @@ int openrouter_probe_model(struct provider *provider, const char *model, struct 
 /* /usage backend: API-key spend and account credits. */
 int openrouter_query_usage(struct provider *provider);
 
-/* Owned app-attribution headers from the providers.openrouter title/referer settings. */
-char **openrouter_static_headers(void);
-
 #endif /* HAX_PROVIDERS_OPENROUTER_H */

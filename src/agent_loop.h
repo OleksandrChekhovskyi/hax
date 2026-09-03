@@ -29,12 +29,13 @@ struct agent_loop_turn {
     long elapsed_ms;
 };
 
-/* Run one model turn. observer receives each event for optional presentation (its return value
- * is ignored); event assembly, terminal usage, errors, and timing are always captured here. tick
- * is the provider's optional wait-loop side channel. */
+/* Run one model turn. session_id is the conversation's stable id for provider affinity (may be
+ * NULL). observer receives each event for optional presentation (its return value is ignored);
+ * event assembly, terminal usage, errors, and timing are always captured here. tick is the
+ * provider's optional wait-loop side channel. */
 void agent_loop_turn_run(struct agent_loop_turn *loop_turn, struct agent_session *session,
-                         struct provider *provider, stream_cb observer, void *observer_user,
-                         http_tick_cb tick, void *tick_user);
+                         struct provider *provider, const char *session_id, stream_cb observer,
+                         void *observer_user, http_tick_cb tick, void *tick_user);
 void agent_loop_turn_destroy(struct agent_loop_turn *loop_turn);
 
 /* Billable usage for the whole turn: the terminal attempt plus retried attempts. */

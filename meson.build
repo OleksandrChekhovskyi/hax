@@ -178,6 +178,7 @@ sources = files(
     'src/text/base64.c',
     'src/text/diff.c',
     'src/text/fmt.c',
+    'src/text/placeholder.c',
     'src/text/sha256.c',
     'src/text/shell_quote.c',
     'src/text/url.c',

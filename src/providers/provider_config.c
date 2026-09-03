@@ -11,6 +11,10 @@
 #include "diag.h"
 #include "trace.h"
 #include "xalloc.h"
+#include "system/rand.h"
+#include "text/placeholder.h"
+
+#define SESSION_PLACEHOLDER "session_id"
 
 #define FIELD_ANY (PROVIDER_FIELD_OPENAI | PROVIDER_FIELD_ANTHROPIC)
 /* Responses fixes its reasoning shape and round-trip on the wire and never sends explicit cache
@@ -168,50 +172,128 @@ static int header_value_valid(const char *value)
     return 1;
 }
 
-char **provider_extra_headers(const char *config_prefix)
+char **provider_headers_from_object(const json_t *object, const char *label)
 {
-    if (!config_prefix)
+    if (!object)
         return NULL;
-    char *key = xasprintf("%s.extra_headers", config_prefix);
-    const json_t *node = config_json_node(key);
-    if (node && !json_is_object(node))
-        hax_warn("%s must be a JSON object of name/value members — ignoring it", key);
-    if (!json_is_object(node)) {
-        free(key);
+    if (!json_is_object(object)) {
+        hax_warn("%s must be a JSON object of name/value members — ignoring it", label);
         return NULL;
     }
 
-    char **headers = xcalloc(json_object_size((json_t *)node) + 1, sizeof(*headers));
+    char **headers = xcalloc(json_object_size((json_t *)object) + 1, sizeof(*headers));
     size_t n_headers = 0;
     const char *name;
     json_t *value;
-    json_object_foreach((json_t *)node, name, value)
+    json_object_foreach((json_t *)object, name, value)
     {
         const char *text = json_string_value(value);
         const char *resolved = text ? resolve_env_escape(text) : NULL;
         /* Validate the resolved value, not the written one: an environment variable holding
          * a newline must not smuggle in a second header. */
         if (!header_name_valid(name))
-            hax_warn("%s: invalid header name '%s' — ignoring it", key, name);
+            hax_warn("%s: invalid header name '%s' — ignoring it", label, name);
         else if (!text)
-            hax_warn("%s: header '%s' needs a string value — ignoring it", key, name);
+            hax_warn("%s: header '%s' needs a string value — ignoring it", label, name);
         else if (!resolved)
-            hax_warn("%s: header '%s' dropped — %s is not set", key, name, text + 1);
+            hax_warn("%s: header '%s' dropped — %s is not set", label, name, text + 1);
         else if (!*resolved)
-            /* curl reads "Name:" with an empty value as suppression, not an empty header. */
-            hax_warn("%s: header '%s' needs a non-empty value — ignoring it", key, name);
+            /* curl's spelling for suppressing a header; an empty header cannot be sent. */
+            headers[n_headers++] = xasprintf("%s:", name);
         else if (!header_value_valid(resolved))
-            hax_warn("%s: header '%s' needs a control-character-free value — ignoring it", key,
+            hax_warn("%s: header '%s' needs a control-character-free value — ignoring it", label,
                      name);
         else
             headers[n_headers++] = xasprintf("%s: %s", name, resolved);
     }
-    free(key);
     if (n_headers == 0) {
         free(headers);
         return NULL;
     }
     return headers;
+}
+
+char **provider_extra_header_templates(const char *config_prefix)
+{
+    if (!config_prefix)
+        return NULL;
+    char *key = xasprintf("%s.extra_headers", config_prefix);
+    char **headers = provider_headers_from_object(config_json_node(key), key);
+    free(key);
+    return headers;
+}
+
+char **provider_extra_headers(const char *config_prefix)
+{
+    char **templates = provider_extra_header_templates(config_prefix);
+    char **kept = provider_headers_merge(NULL, templates);
+    char **headers = provider_headers_expand(kept, provider_process_session_id());
+    string_array_free(kept);
+    string_array_free(templates);
+    return headers;
+}
+
+const char *provider_process_session_id(void)
+{
+    static char id[37];
+    if (!id[0])
+        gen_uuid_v4(id);
+    return id;
+}
+
+static int header_names_equal(const char *first, const char *second)
+{
+    const char *first_colon = strchr(first, ':');
+    const char *second_colon = strchr(second, ':');
+    size_t first_len = first_colon ? (size_t)(first_colon - first) : strlen(first);
+    size_t second_len = second_colon ? (size_t)(second_colon - second) : strlen(second);
+    return first_len == second_len && strncasecmp(first, second, first_len) == 0;
+}
+
+static int headers_contain_name(char *const *headers, const char *header)
+{
+    for (char *const *entry = headers; entry && *entry; entry++)
+        if (header_names_equal(*entry, header))
+            return 1;
+    return 0;
+}
+
+static int header_is_removal(const char *header)
+{
+    const char *colon = strchr(header, ':');
+    return colon && colon[1] == '\0';
+}
+
+char **provider_headers_merge(char *const *defaults, char *const *overrides)
+{
+    size_t capacity = string_array_count((const char *const *)defaults) +
+                      string_array_count((const char *const *)overrides);
+    if (capacity == 0)
+        return NULL;
+    char **merged = xcalloc(capacity + 1, sizeof(*merged));
+    size_t n_merged = 0;
+    for (char *const *entry = defaults; entry && *entry; entry++)
+        if (!headers_contain_name(overrides, *entry) && !header_is_removal(*entry))
+            merged[n_merged++] = xstrdup(*entry);
+    for (char *const *entry = overrides; entry && *entry; entry++)
+        if (!header_is_removal(*entry))
+            merged[n_merged++] = xstrdup(*entry);
+    if (n_merged == 0) {
+        free(merged);
+        return NULL;
+    }
+    return merged;
+}
+
+char **provider_headers_expand(char *const *templates, const char *session_id)
+{
+    size_t count = string_array_count((const char *const *)templates);
+    if (count == 0)
+        return NULL;
+    char **expanded = xcalloc(count + 1, sizeof(*expanded));
+    for (size_t i = 0; i < count; i++)
+        expanded[i] = placeholder_expand(templates[i], SESSION_PLACEHOLDER, session_id);
+    return expanded;
 }
 
 /* A leaf outside the shared inventory is still consumed when it is a registered per-provider

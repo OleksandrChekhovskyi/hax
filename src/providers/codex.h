@@ -15,9 +15,6 @@ struct provider_def; /* providers/registry.h */
 /* Available iff usable credentials exist on disk. */
 void codex_prepare_availability(const struct provider_def *def, struct provider_availability *out);
 
-/* Owned client-identity headers the backend requires on every request. */
-char **codex_static_headers(void);
-
 /* Model catalog and metadata probe against the codex /models shape. */
 int codex_list_models(struct provider *provider, struct model_info **models, size_t *n_models,
                       char **error, http_tick_cb tick, void *tick_user);

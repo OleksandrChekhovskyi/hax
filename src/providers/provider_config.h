@@ -65,10 +65,29 @@ const char *provider_cache_ttl(const char *config_prefix);
  * dropped with a warning, as is a non-object value. */
 json_t *provider_extra_body(const char *config_prefix);
 
-/* Resolve <prefix>.extra_headers, an object of header name/value members, into an owned
- * NULL-terminated array of "Name: value" strings for every request to the provider, or NULL.
- * A "$NAME" value reads the environment variable NAME, like an inline api_key. Invalid names
- * and values are dropped with a warning. */
+/* Affinity id for requests outside any conversation. Borrowed static storage, generated on
+ * first use; foreground-thread only. */
+const char *provider_process_session_id(void);
+
+/* Owned NULL-terminated "Name: value" strings from an extra_headers object (a def's or a config
+ * block's), or NULL when none survive. A "$NAME" value reads the environment like an inline
+ * api_key; an empty value becomes a "Name:" removal marker for provider_headers_merge. Invalid
+ * entries and a non-object warn, naming `label`, and drop. */
+char **provider_headers_from_object(const json_t *object, const char *label);
+
+/* <prefix>.extra_headers as templates — placeholders and markers intact — or NULL. */
+char **provider_extra_header_templates(const char *config_prefix);
+
+/* <prefix>.extra_headers ready to send on a request outside any conversation, or NULL. */
 char **provider_extra_headers(const char *config_prefix);
+
+/* Owned defaults plus overrides (either may be NULL): an override replaces a same-named default,
+ * case-insensitively as HTTP requires, and a removal marker deletes one without being emitted.
+ * NULL when empty. */
+char **provider_headers_merge(char *const *defaults, char *const *overrides);
+
+/* Owned copy of `templates` (may be NULL) with every "{session_id}" replaced by `session_id`
+ * (non-NULL). Free with string_array_free. */
+char **provider_headers_expand(char *const *templates, const char *session_id);
 
 #endif /* HAX_PROVIDERS_PROVIDER_CONFIG_H */

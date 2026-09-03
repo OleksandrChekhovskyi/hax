@@ -47,6 +47,9 @@ static void test_gateway_defs_registered(void)
     EXPECT(provider_find("opencode-go") != NULL);
     EXPECT(idx_of("opencode-zen") >
            idx_of("openrouter")); /* data defs rank after the primary built-ins */
+    /* Both gateway tiers declare the session header the gateway routes and bills by. */
+    EXPECT(strstr(provider_find("opencode-zen")->extra_headers, "x-opencode-session") != NULL);
+    EXPECT(strstr(provider_find("opencode-go")->extra_headers, "x-opencode-session") != NULL);
 
     /* The picker names the exact variable to set, like the compiled-in providers. */
     unsetenv("OPENCODE_API_KEY");
@@ -103,6 +106,9 @@ static void test_def_hooks_reach_provider(void)
     EXPECT(def != NULL);
     if (!def)
         return;
+    /* Attribution and the session key are def data, overridable through extra_headers. */
+    EXPECT(strstr(def->extra_headers, "X-Title") != NULL);
+    EXPECT(strstr(def->extra_headers, "x-session-id") != NULL);
     struct provider *provider = provider_construct(def);
     EXPECT(provider != NULL);
     if (provider) {

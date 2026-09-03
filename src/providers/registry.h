@@ -58,6 +58,10 @@ struct provider_def {
     /* JSON object of body members the endpoint requires on every request, merged under the
      * user's providers.<id>.extra_body. NULL sends none. */
     const char *extra_body;
+    /* JSON object of headers the endpoint expects on every request, overridden by name by the
+     * user's providers.<id>.extra_headers; "{session_id}" in a value expands to the conversation's
+     * affinity id. NULL sends none. */
+    const char *extra_headers;
     /* Probe <base_url>/models reachability when keyless. Only for curated local defs where
      * "not running" is the common failure and /models is known to exist; a generic endpoint may
      * not serve /models at all, so configuration is the default availability check. */
@@ -75,8 +79,6 @@ struct provider_def {
                        char **error, http_tick_cb tick, void *tick_user);
     int (*query_usage)(struct provider *provider);
     char *(*model_label)(struct provider *provider, const char *model);
-    /* Owned NULL-terminated headers resolved once at construction and sent on every request. */
-    char **(*static_headers)(void);
     /* Create the provider's dynamic credential source (http_provider.h), or return non-zero
      * after reporting why no usable credentials exist, failing construction. A def with an
      * auth source resolves no API key. */

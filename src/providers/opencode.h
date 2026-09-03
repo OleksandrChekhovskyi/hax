@@ -17,8 +17,8 @@ struct provider;
 size_t opencode_usage_parse(json_t *root, struct usage_window *windows, size_t max);
 
 /* Owned NULL-terminated headers for a usage request: Bearer auth independent of the model wire,
- * plus the provider's configured extra headers. The provider must hold a resolved API key. Free
- * with string_array_free. */
+ * plus the provider's extra headers. The provider must hold a resolved API key. Free with
+ * string_array_free. */
 char **opencode_usage_headers(const struct provider *provider);
 
 /* /usage backend for the opencode-go def. */

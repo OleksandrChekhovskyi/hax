@@ -9,6 +9,7 @@
 #include "config.h"
 #include "harness.h"
 #include "provider.h"
+#include "session.h"
 #include "tool.h"
 #include "turn.h"
 #include "xalloc.h"
@@ -176,7 +177,7 @@ static void test_loop_turn_collects_success(void)
     script = SCRIPT_COMPLETE;
     observer_events = 0;
 
-    agent_loop_turn_run(&loop_turn, &session, &provider, observe, NULL, NULL, NULL);
+    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, observe, NULL, NULL, NULL);
     /* Collection is authoritative even with a presentation observer: terminal
      * usage, timing, and assembled text cannot depend on frontend behavior. */
     EXPECT(loop_turn.assembly.state == TURN_DONE);
@@ -203,7 +204,7 @@ static void test_partial_error_is_preserved(void)
     struct agent_loop_turn loop_turn;
     script = SCRIPT_PARTIAL_ERROR;
 
-    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
+    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
     EXPECT(loop_turn.assembly.state == TURN_FAILED);
     EXPECT_STR_EQ(loop_turn.error_message, "stream failed");
     EXPECT(loop_turn.usage.input_tokens == 100);
@@ -229,7 +230,7 @@ static void test_prestream_error_adds_no_marker(void)
     struct agent_loop_turn loop_turn;
     script = SCRIPT_PRESTREAM_ERROR;
 
-    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
+    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
     struct agent_abort_outcome out =
         agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_PROVIDER_ERROR);
     /* A provider failure before any event must not fabricate assistant history;
@@ -249,7 +250,7 @@ static void test_cancelled_tool_call_gets_result(void)
     struct agent_loop_turn loop_turn;
     script = SCRIPT_TOOL_ERROR;
 
-    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
+    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
     struct agent_abort_outcome out =
         agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_USER_CANCEL);
     /* A user cancel keeps the whole streamed turn, and providers require
@@ -274,7 +275,7 @@ static void test_provider_error_drops_tool_call(void)
     struct agent_loop_turn loop_turn;
     script = SCRIPT_TOOL_ERROR;
 
-    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
+    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
     struct agent_abort_outcome out =
         agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_PROVIDER_ERROR);
     /* The call never ran, so replaying it would need a fabricated result;
@@ -299,7 +300,7 @@ static void test_provider_error_drops_reasoning(void)
     struct agent_loop_turn loop_turn;
     script = SCRIPT_REASONING_ERROR;
 
-    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
+    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
     struct agent_abort_outcome out =
         agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_PROVIDER_ERROR);
     /* Truncated reasoning re-sent as finished state derails models. With no
@@ -320,7 +321,7 @@ static void test_cancel_of_thinking_only_turn_leaves_no_trace(void)
     struct agent_loop_turn loop_turn;
     script = SCRIPT_REASONING_CANCELLED;
 
-    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
+    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
     struct agent_abort_outcome out =
         agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_USER_CANCEL);
     /* A cancel that caught only truncated thinking evaporates like the
@@ -340,7 +341,7 @@ static void test_cancel_keeps_text_but_drops_reasoning(void)
     struct agent_loop_turn loop_turn;
     script = SCRIPT_REASONING_TEXT_CANCELLED;
 
-    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
+    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
     struct agent_abort_outcome out =
         agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_USER_CANCEL);
     /* Partial text survives with its marker, and so does thinking the model
@@ -366,7 +367,7 @@ static void test_cancel_keeps_sealed_reasoning_with_tool_call(void)
     struct agent_loop_turn loop_turn;
     script = SCRIPT_SEALED_REASONING_TOOL_CANCELLED;
 
-    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
+    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
     struct agent_abort_outcome out =
         agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_USER_CANCEL);
     /* A completed call keeps the turn, and providers require the sealed
@@ -391,7 +392,7 @@ static void test_retry_usage_accumulates(void)
     struct agent_loop_turn loop_turn;
     script = SCRIPT_RETRY_THEN_COMPLETE;
 
-    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL);
+    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
     /* The retried attempt's tokens are billed but must not skew the context
      * measurement, which reflects only the terminal attempt. */
     EXPECT(loop_turn.assembly.state == TURN_DONE);
@@ -452,6 +453,53 @@ static int chain_stream(struct provider *p, const struct context *ctx, const cha
     }
     emit_done(cb, user, usage_tokens(10 * chain_turn, 2));
     return 0;
+}
+
+static char *captured_session_id;
+
+static int capture_stream(struct provider *p, const struct context *ctx, const char *model,
+                          stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
+{
+    (void)p;
+    (void)model;
+    (void)tick;
+    (void)tick_user;
+    free(captured_session_id);
+    captured_session_id = ctx->session_id ? xstrdup(ctx->session_id) : NULL;
+    emit_text(cb, user, "done");
+    emit_done(cb, user, usage_tokens(10, 2));
+    return 0;
+}
+
+/* The loop hands the session log's conversation id to the provider, and nothing without one. */
+static void test_loop_passes_conversation_id_to_provider(void)
+{
+    setenv("XDG_STATE_HOME", t_tempdir(), 1);
+    unsetenv("HAX_NO_SESSION");
+    struct session_log *slog = session_log_open("test", "model", NULL, NULL, NULL);
+    EXPECT(slog != NULL);
+
+    struct agent_session session;
+    session_init(&session);
+    agent_session_add_user(&session, "hi");
+    struct provider provider = {.name = "test", .stream = capture_stream};
+    struct agent_loop_params params = {
+        .session = &session, .provider = &provider, .slog = slog, .max_turns = -1};
+    struct agent_loop_result result;
+    agent_loop_run(&params, &result);
+    EXPECT(captured_session_id != NULL && session_log_id(slog) != NULL);
+    if (captured_session_id && session_log_id(slog))
+        EXPECT_STR_EQ(captured_session_id, session_log_id(slog));
+    agent_loop_result_destroy(&result);
+
+    params.slog = NULL;
+    agent_session_add_user(&session, "again");
+    agent_loop_run(&params, &result);
+    EXPECT(captured_session_id == NULL);
+    agent_loop_result_destroy(&result);
+
+    session_log_close(slog);
+    agent_session_free(&session);
 }
 
 struct loop_test_ctx {
@@ -1331,6 +1379,7 @@ int main(void)
     /* Loop tests exercise orchestration, not the platform inhibitor helper. */
     config_set_override("keep_awake", "0");
     test_loop_turn_collects_success();
+    test_loop_passes_conversation_id_to_provider();
     test_partial_error_is_preserved();
     test_prestream_error_adds_no_marker();
     test_cancelled_tool_call_gets_result();
