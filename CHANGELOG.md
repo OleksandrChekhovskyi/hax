@@ -7,6 +7,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-04
+
 ### Added
 
 - `hax --json` (implies `-p`) streams new conversation records as JSONL, followed by a `result`
