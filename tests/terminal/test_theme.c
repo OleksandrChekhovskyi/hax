@@ -276,6 +276,53 @@ static void test_background_autodetection(void)
     unsetenv("COLORFGBG");
 }
 
+static void test_custom_theme(void)
+{
+    EXPECT(config_load("{\"themes\": {\"midnight\": {\"extends\": \"dark\", \"roles\": {"
+                       "\"accent\": \"#e5c07b\", \"chrome\": {\"fg\": 33, \"bold\": true},"
+                       " \"link\": {\"fg\": \"bright-cyan\", \"underline\": true}},"
+                       " \"tints\": {\"amber\": {\"stance\": \"#e5c07b\","
+                       " \"code_inline\": \"#e5c07b\"}}}}}") == 0);
+    const struct config_setting *theme = config_setting_find("theme");
+    EXPECT(config_value_valid(theme, "midnight"));
+    EXPECT(!config_value_valid(theme, "dawn"));
+    config_set_override("theme", "midnight");
+    theme_init();
+    const struct config_setting *tint = config_setting_find("tint");
+    EXPECT(config_value_valid(tint, "amber"));
+    EXPECT(!config_value_valid(tint, "ochre"));
+    EXPECT_STR_EQ(theme_name(), "midnight");
+    EXPECT_STR_EQ(theme_open(THEME_ACCENT), "\x1b[38;2;229;192;123m");
+    EXPECT_STR_EQ(theme_close(THEME_ACCENT), ANSI_FG_DEFAULT);
+    EXPECT_STR_EQ(theme_open(THEME_CHROME), "\x1b[1;38;5;33m");
+    EXPECT_STR_EQ(theme_close(THEME_CHROME), "\x1b[22;39m");
+    EXPECT_STR_EQ(theme_open(THEME_LINK), "\x1b[4;96m");
+    EXPECT_STR_EQ(theme_close(THEME_LINK), "\x1b[24;39m");
+    config_set_override("tint", "amber");
+    theme_init();
+    EXPECT_STR_EQ(theme_tint_name(), "amber");
+    EXPECT_STR_EQ(theme_open(THEME_STANCE), "\x1b[38;2;229;192;123m");
+    EXPECT(theme_set("dark") == 0);
+    config_set_override("theme", NULL);
+    config_set_override("tint", NULL);
+    EXPECT(config_load(NULL) == 0);
+}
+
+static void test_invalid_custom_theme(void)
+{
+    EXPECT(config_load("{\"themes\": {\"bad-extends\": {\"extends\": 1},"
+                       " \"bad-roles\": {\"roles\": []},"
+                       " \"bad-style\": {\"roles\": {\"accent\": {\"fg\": \"red\","
+                       " \"blink\": true}}},"
+                       " \"bad-tint\": {\"tints\": {\"amber\": []}}}}") == 0);
+    EXPECT(!theme_name_valid("bad-extends"));
+    EXPECT(!theme_name_valid("bad-roles"));
+    EXPECT(!theme_name_valid("bad-style"));
+    EXPECT(!theme_name_valid("bad-tint"));
+    EXPECT(theme_set("bad-style") == -1);
+    EXPECT(config_load(NULL) == 0);
+}
+
 static void test_config_resolution(void)
 {
     setenv("TERM", "xterm-256color", 1);
@@ -406,6 +453,8 @@ int main(void)
     test_no_color_autodetection();
     test_terminal_capability_autodetection();
     test_background_autodetection();
+    test_custom_theme();
+    test_invalid_custom_theme();
     test_config_resolution();
     test_preset_tint_precedence();
     test_masked_invalid_tint_warning();

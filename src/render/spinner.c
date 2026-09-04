@@ -13,6 +13,7 @@
 #include "xalloc.h"
 #include "system/clock.h"
 #include "terminal/ansi.h"
+#include "terminal/glyphs.h"
 #include "terminal/theme.h"
 #include "terminal/width.h"
 #include "text/fmt.h"
@@ -26,12 +27,6 @@
 
 #define DEFAULT_LABEL     "working..."
 #define DEFAULT_LABEL_KEY "working"
-
-static const char *const SPINNER_FRAMES[] = {
-    "\xE2\xA0\x8B", "\xE2\xA0\x99", "\xE2\xA0\xB9", "\xE2\xA0\xB8", "\xE2\xA0\xBC",
-    "\xE2\xA0\xB4", "\xE2\xA0\xA6", "\xE2\xA0\xA7", "\xE2\xA0\x87", "\xE2\xA0\x8F",
-};
-#define SPINNER_FRAME_COUNT (sizeof(SPINNER_FRAMES) / sizeof(SPINNER_FRAMES[0]))
 
 enum spinner_mode {
     SPINNER_HIDDEN = 0,
@@ -77,8 +72,8 @@ const char *spinner_glyph_now(void)
     long now_ms = monotonic_ms();
     if (now_ms < 0)
         now_ms = 0;
-    size_t frame = (size_t)(now_ms / FRAME_INTERVAL_MS) % SPINNER_FRAME_COUNT;
-    return SPINNER_FRAMES[frame];
+    size_t frame = (size_t)(now_ms / FRAME_INTERVAL_MS);
+    return glyph_spinner_frame(frame);
 }
 
 /* Erasing the old row tail after repaint avoids a blank frame without synchronized output. */

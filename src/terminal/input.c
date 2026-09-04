@@ -25,6 +25,7 @@
 #include "system/path.h"
 #include "system/spawn.h"
 #include "terminal/ansi.h"
+#include "terminal/glyphs.h"
 #include "terminal/input_core.h"
 #include "terminal/theme.h"
 #include "terminal/ui.h"
@@ -557,7 +558,8 @@ static void submitted_emit(const struct input_render_event *event, void *user)
         buf_append_str(frame, theme_close(THEME_ACCENT));
         buf_append_str(frame, ANSI_ERASE_LINE "\r\n");
         buf_append_str(frame, theme_open(THEME_ACCENT));
-        buf_append_str(frame, "▌ ");
+        buf_append_str(frame, glyph(GLYPH_USER_GUTTER));
+        buf_append_str(frame, " ");
     }
 }
 
@@ -567,7 +569,8 @@ static void append_user_message(struct buf *frame, const char *text, size_t len,
     const int body_column = 2;
 
     buf_append_str(frame, theme_open(THEME_ACCENT));
-    buf_append_str(frame, "▌ ");
+    buf_append_str(frame, glyph(GLYPH_USER_GUTTER));
+    buf_append_str(frame, " ");
     input_core_render(text, len, 0, body_column, body_column, display_columns, submitted_emit,
                       frame, NULL);
     buf_append_str(frame, theme_close(THEME_ACCENT));

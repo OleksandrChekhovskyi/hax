@@ -34,10 +34,10 @@
 #include "render/spinner.h"
 #include "system/clock.h"
 #include "system/fs.h"
-#include "system/locale.h"
 #include "system/spawn.h"
 #include "system/tempfiles.h"
 #include "terminal/ansi.h"
+#include "terminal/glyphs.h"
 #include "terminal/input.h"
 #include "terminal/interrupt.h"
 #include "terminal/notify.h"
@@ -51,11 +51,8 @@
 /* Use ASCII unless wcwidth() can measure the themed UTF-8 glyph correctly. */
 static const char *build_prompt(char *buffer, size_t size)
 {
-    if (locale_have_utf8())
-        snprintf(buffer, size, "%s" ANSI_BOLD "❯" ANSI_BOLD_OFF "%s ", theme_open(THEME_ACCENT),
-                 theme_close(THEME_ACCENT));
-    else
-        snprintf(buffer, size, ANSI_BOLD ">" ANSI_BOLD_OFF " ");
+    snprintf(buffer, size, "%s" ANSI_BOLD "%s" ANSI_BOLD_OFF "%s ", theme_open(THEME_ACCENT),
+             glyph(GLYPH_PROMPT), theme_close(THEME_ACCENT));
     return buffer;
 }
 
@@ -110,6 +107,7 @@ static int reasoning_visible(void)
 void agent_display_refresh(struct agent_state *state)
 {
     theme_init();
+    glyphs_init();
     struct render_ctx *render = state->render;
     render->show_reasoning = reasoning_visible();
     if (render->md) {
@@ -1292,7 +1290,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
     interrupt_init();
     interrupt_set_fatal_signal_hook(bash_shell_pgids_kill);
 
-    char prompt_buffer[64];
+    char prompt_buffer[128];
 
     for (;;) {
         disp_block_separator(&render.disp);

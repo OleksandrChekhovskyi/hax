@@ -10,6 +10,7 @@
 #include "provider.h"
 #include "xalloc.h"
 #include "terminal/ansi.h"
+#include "terminal/glyphs.h"
 #include "terminal/theme.h"
 #include "terminal/width.h"
 #include "text/width.h"
@@ -19,13 +20,14 @@
 
 static const char *banner_bar(char *buffer, size_t size)
 {
-    snprintf(buffer, size, "%s▌%s", theme_open(THEME_CHROME), theme_close(THEME_CHROME));
+    snprintf(buffer, size, "%s%s%s", theme_open(THEME_CHROME), glyph(GLYPH_BANNER_GUTTER),
+             theme_close(THEME_CHROME));
     return buffer;
 }
 
 void banner_open(struct banner_writer *w, FILE *out)
 {
-    char bar[32];
+    char bar[96];
     w->out = out;
     w->columns = display_width();
     w->col = BANNER_GUTTER_CELLS;
@@ -50,7 +52,7 @@ static void banner_style(struct banner_writer *w, const char *style_open, const 
 
 static void banner_row_break(struct banner_writer *w)
 {
-    char bar[32];
+    char bar[96];
     banner_style(w, NULL, NULL);
     fprintf(w->out, "\n%s   ", banner_bar(bar, sizeof(bar)));
     w->col = BANNER_INDENT_CELLS;
@@ -106,11 +108,14 @@ void banner_identity(FILE *out, const struct provider *provider,
         free(stance);
     }
     if (!provider) {
-        banner_put(&w, " ", ANSI_DIM, ANSI_BOLD_OFF, "› no provider — use /provider");
+        char *message = xasprintf("%s no provider — use /provider", glyph(GLYPH_TOOL_MARKER));
+        banner_put(&w, " ", ANSI_DIM, ANSI_BOLD_OFF, message);
+        free(message);
         banner_close(&w);
         return;
     }
-    char *head = xasprintf("› %s", provider->name ? provider->name : "?");
+    char *head =
+        xasprintf("%s %s", glyph(GLYPH_TOOL_MARKER), provider->name ? provider->name : "?");
     banner_put(&w, " ", ANSI_DIM, ANSI_BOLD_OFF, head);
     free(head);
     const char *model_label = session->model_label ? session->model_label : session->model;
@@ -118,10 +123,12 @@ void banner_identity(FILE *out, const struct provider *provider,
     if (!session->model || !*session->model)
         tail = xstrdup("no model — use /model (or /provider)");
     else if (session->effort)
-        tail = xasprintf("%s · %s", model_label, session->effort);
+        tail = xasprintf("%s %s %s", model_label, glyph(GLYPH_SEPARATOR), session->effort);
     else
         tail = xstrdup(model_label);
-    banner_put(&w, " · ", ANSI_DIM, ANSI_BOLD_OFF, tail);
+    char separator[GLYPH_MAX_BYTES + 3];
+    snprintf(separator, sizeof(separator), " %s ", glyph(GLYPH_SEPARATOR));
+    banner_put(&w, separator, ANSI_DIM, ANSI_BOLD_OFF, tail);
     free(tail);
     banner_close(&w);
 }
@@ -132,6 +139,8 @@ void banner_print(const struct provider *provider, const struct agent_session *s
     struct banner_writer w;
     banner_open(&w, stdout);
     banner_put(&w, "", ANSI_DIM, ANSI_BOLD_OFF, "ctrl-d quit");
-    banner_put(&w, " · ", ANSI_DIM, ANSI_BOLD_OFF, "try /help");
+    char separator[GLYPH_MAX_BYTES + 3];
+    snprintf(separator, sizeof(separator), " %s ", glyph(GLYPH_SEPARATOR));
+    banner_put(&w, separator, ANSI_DIM, ANSI_BOLD_OFF, "try /help");
     banner_close(&w);
 }

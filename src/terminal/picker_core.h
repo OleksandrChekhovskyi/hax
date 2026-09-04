@@ -8,7 +8,7 @@
 #include "terminal/picker.h"
 
 #define PICKER_MARKER_CELLS               2
-#define PICKER_CURRENT_TAG_CELLS          11
+#define PICKER_CURRENT_TAG_CELLS          9
 #define PICKER_DETAIL_SEPARATOR_CELLS     2
 #define PICKER_DIM_DETAIL_SEPARATOR_CELLS 3
 

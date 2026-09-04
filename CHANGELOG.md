@@ -9,6 +9,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- Named custom terminal color and glyph themes in `config.json`, with inherited semantic color
+  roles, terminal palette/truecolor values, attributes, backgrounds, and model-output tints.
+  Separate glyph themes include prompt and message gutters, tool/picker marks, and spinner frames
+  with UTF-8 and ASCII defaults.
 - A resumed one-shot run no longer requires a prompt: `hax --resume=ID -p` (or `--json`)
   continues the conversation from where it stopped, including after an interrupt or pause.
 - `hax --json` (implies `-p`) streams the run as JSON lines on stdout for orchestrators and

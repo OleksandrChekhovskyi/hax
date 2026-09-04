@@ -16,6 +16,7 @@
 #include "session.h"
 #include "xalloc.h"
 #include "render/render_ctx.h"
+#include "system/locale.h"
 
 /* Run `body` with captured stdout, restore stdout, and return owned output. */
 static char *capture_stdout(void (*body)(void *), void *user)
@@ -894,6 +895,7 @@ static void test_undo_intact_when_truncate_fails(void)
 
 int main(void)
 {
+    locale_init_utf8();
     test_apply_settings_empty_reprints_banner();
     test_apply_settings_nonempty_prints_marker();
     test_apply_settings_quiet_prints_nothing();

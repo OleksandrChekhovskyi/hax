@@ -4,8 +4,10 @@
 #include <string.h>
 
 #include "buf.h"
+#include "terminal/glyphs.h"
 #include "terminal/picker.h"
 #include "text/utf8.h"
+#include "text/width.h"
 
 int picker_core_text_cells(const char *text)
 {
@@ -28,7 +30,7 @@ int picker_core_label_cells(const struct picker_item *item, int terminal_cols)
     if (row_cells < 1)
         row_cells = 1;
 
-    int current_cells = item->current ? PICKER_CURRENT_TAG_CELLS : 0;
+    int current_cells = item->current ? (int)display_cells(glyph(GLYPH_PICKER_CURRENT)) + 8 : 0;
     int separator_cells =
         item->dim ? PICKER_DIM_DETAIL_SEPARATOR_CELLS : PICKER_DETAIL_SEPARATOR_CELLS;
     int available_cells = row_cells - current_cells;

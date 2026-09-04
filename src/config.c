@@ -18,6 +18,8 @@
 #include "xalloc.h"
 #include "system/fs.h"
 #include "system/path.h"
+#include "terminal/glyphs.h"
+#include "terminal/theme.h"
 #include "text/fmt.h"
 #include "text/utf8_sanitize.h"
 
@@ -75,12 +77,15 @@ static const struct config_setting REGISTRY[] = {
                     "(auto detects from the terminal)",
      .choices = "auto|bel|osc9|off", .editable = 1},
     {.key = "theme", .env_var = "HAX_THEME", .default_value = "auto",
-     .description = "Color theme: auto, dark, light, ansi, off (auto detects from the terminal)",
+     .description = "Color theme: auto, dark, light, ansi, off, or a name in themes",
      .choices = "auto|dark|light|ansi|off", .editable = 1},
     {.key = "tint", .env_var = "HAX_TINT", .default_value = "teal",
      .description = "Identity tint for model output; an active preset's own tint wins until set "
                     "here. Ignored by the ansi and off themes",
      .choices = "teal|violet|rose|sage", .editable = 1},
+    {.key = "glyph_theme", .env_var = "HAX_GLYPH_THEME", .default_value = "auto",
+     .description = "UI glyph theme: auto, utf8, ascii, or a name in glyph_themes",
+     .choices = "auto|utf8|ascii", .editable = 1},
 
     /* behavior */
     {.key = "keep_awake", .env_var = "HAX_KEEP_AWAKE", .default_value = "1",
@@ -912,6 +917,12 @@ int config_value_valid(const struct config_setting *setting, const char *value)
 {
     if (!setting || !value)
         return 0;
+    if (setting->key && strcmp(setting->key, "theme") == 0)
+        return theme_name_valid(value);
+    if (setting->key && strcmp(setting->key, "tint") == 0)
+        return theme_tint_valid(value);
+    if (setting->key && strcmp(setting->key, "glyph_theme") == 0)
+        return glyph_theme_name_valid(value);
     if (setting->choices && choice_value_valid(setting, value))
         return 1;
     if (setting->choices && setting->kind == CONFIG_KIND_STRING)

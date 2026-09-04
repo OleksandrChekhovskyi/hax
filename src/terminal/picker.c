@@ -14,6 +14,7 @@
 #include "xalloc.h"
 #include "system/locale.h"
 #include "terminal/ansi.h"
+#include "terminal/glyphs.h"
 #include "terminal/input_core.h"
 #include "terminal/picker_core.h"
 #include "terminal/theme.h"
@@ -247,13 +248,14 @@ static int append_clipped_line(struct buf *output, const char *line, size_t line
 static void render_search(struct buf *output, const struct picker *picker, int terminal_cols,
                           int use_utf8)
 {
-    const char *icon = use_utf8 ? "\xe2\x8c\x95 " : "/ "; /* ⌕ */
+    const char *icon = glyph(GLYPH_PICKER_SEARCH);
     int text_cells = terminal_cols - PICKER_MARKER_CELLS;
     if (text_cells < 0)
         text_cells = 0;
 
     buf_append_str(output, ANSI_DIM);
     buf_append_str(output, icon);
+    buf_append_str(output, " ");
 
     if (picker->core.query.len == 0) {
         char placeholder[48];
@@ -294,13 +296,21 @@ static void render_row(struct buf *output, const struct picker *picker, size_t m
 
     if (selected)
         buf_append_str(output, theme_open(THEME_ACCENT));
-    buf_append_str(output, selected ? (use_utf8 ? "\xe2\x86\x92 " : "> ") : "  "); /* → */
+    if (selected) {
+        buf_append_str(output, glyph(GLYPH_PICKER_SELECTED));
+        buf_append_str(output, " ");
+    } else {
+        buf_append_str(output, "  ");
+    }
     if (selected)
         buf_append_str(output, theme_close(THEME_ACCENT));
 
-    const char *current_tag =
-        item->current ? (use_utf8 ? "\xe2\x9c\x93 current" : "* current") : NULL; /* ✓ */
-    int current_tag_cells = current_tag ? PICKER_CURRENT_TAG_CELLS : 0;
+    char current_tag_text[GLYPH_MAX_BYTES + sizeof(" current")];
+    const char *current = glyph(GLYPH_PICKER_CURRENT);
+    if (item->current)
+        snprintf(current_tag_text, sizeof(current_tag_text), "%s current", current);
+    const char *current_tag = item->current ? current_tag_text : NULL;
+    int current_tag_cells = current_tag ? (int)display_cells(current_tag) : 0;
 
     const char *separator = item->dim ? (use_utf8 ? " \xe2\x80\x93 " : " - ") : "  "; /* – */
     int separator_cells =

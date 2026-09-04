@@ -12,6 +12,7 @@
 #include "render/disp.h"
 #include "render/spinner.h"
 #include "terminal/ansi.h"
+#include "terminal/glyphs.h"
 #include "terminal/theme.h"
 #include "terminal/width.h"
 #include "text/utf8.h"
@@ -19,11 +20,6 @@
 #include "text/width.h"
 
 #define TAIL_RING_CAPACITY 1500
-
-static const char GUTTER_FIRST[] = "\xE2\x94\x8C";  /* ┌ */
-static const char GUTTER_BODY[] = "\xE2\x94\x82";   /* │ */
-static const char GUTTER_LAST[] = "\xE2\x94\x94";   /* └ */
-static const char GUTTER_MARKER[] = "\xE2\x80\xBA"; /* › */
 
 struct preview_limits {
     int head_lines;
@@ -120,7 +116,7 @@ static void write_gutter(struct disp *disp, const char *glyph)
 
 void tool_render_write_marker_gutter(struct disp *disp)
 {
-    write_gutter(disp, GUTTER_MARKER);
+    write_gutter(disp, glyph(GLYPH_TOOL_MARKER));
 }
 
 /* The one definition of a preview row's look; settled rows and live spinner rows share it. */
@@ -135,7 +131,8 @@ static void compose_row(struct buf *out, const char *gutter_glyph, const char *c
 
 static void write_next_row_gutter(struct tool_render *render)
 {
-    write_gutter(render->disp, render->rows_emitted == 0 ? GUTTER_FIRST : GUTTER_BODY);
+    write_gutter(render->disp,
+                 render->rows_emitted == 0 ? glyph(GLYPH_TOOL_FIRST) : glyph(GLYPH_TOOL_BODY));
 }
 
 /* The final newline remains pending, so a carriage return can replace the row's first cell. */
@@ -182,7 +179,7 @@ static void paint_live_rows(struct tool_render *render, const char *const *conte
     for (int row = 0; row < count; row++) {
         char *clipped = truncate_for_display(contents[row], budget);
         buf_init(&styled[row]);
-        compose_row(&styled[row], GUTTER_BODY, clipped);
+        compose_row(&styled[row], glyph(GLYPH_TOOL_BODY), clipped);
         rows[row].bytes = styled[row].data;
         rows[row].cells = TOOL_RENDER_GUTTER_COLS + (int)display_cells(clipped);
         free(clipped);
@@ -217,7 +214,8 @@ static void emit_row(struct tool_render *render, const char *content, size_t len
     char *truncated = truncate_slice(content, len);
     struct buf row;
     buf_init(&row);
-    compose_row(&row, render->rows_emitted == 0 ? GUTTER_FIRST : GUTTER_BODY, truncated);
+    compose_row(&row, render->rows_emitted == 0 ? glyph(GLYPH_TOOL_FIRST) : glyph(GLYPH_TOOL_BODY),
+                truncated);
     free(truncated);
     disp_commit_newlines(render->disp);
     disp_write(render->disp, row.data, row.len);
@@ -678,9 +676,9 @@ void tool_render_finalize(struct tool_render *render)
         finalize_capped_preview(render);
 
     if (render->rows_emitted >= 2)
-        overprint_final_gutter(render->disp, GUTTER_LAST);
+        overprint_final_gutter(render->disp, glyph(GLYPH_TOOL_LAST));
     else if (render->rows_emitted == 1)
-        overprint_final_gutter(render->disp, GUTTER_MARKER);
+        overprint_final_gutter(render->disp, glyph(GLYPH_TOOL_MARKER));
     spinner_swap_end(render->spinner);
     disp_flush(render->disp);
     render->block_open = 0;

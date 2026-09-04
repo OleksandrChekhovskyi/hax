@@ -19,6 +19,7 @@
 #include "transcript.h"
 #include "providers/registry.h"
 #include "system/locale.h"
+#include "terminal/glyphs.h"
 #include "terminal/theme.h"
 #include "transport/ca.h"
 
@@ -153,6 +154,7 @@ static void initialize_config(void)
     theme_set("auto");
     config_init();
     theme_init();
+    glyphs_init();
 }
 
 static void initialize_run_services(const char *resume_path)
@@ -207,6 +209,7 @@ int main(int argc, char **argv)
 
     /* A restored or newly applied preset may change the theme. */
     theme_init();
+    glyphs_init();
     initialize_run_services(resume_path);
 
     unsigned long diagnostics_before_provider = hax_diag_sequence();

@@ -12,6 +12,7 @@
 #include "harness.h"
 #include "xalloc.h"
 #include "system/fs.h"
+#include "terminal/theme.h"
 
 /* Isolate resolution tests from the developer or CI environment. */
 static void clear_env(void)
@@ -881,6 +882,31 @@ static void test_choice_value_validation(void)
     EXPECT(!config_value_valid(theme, "dar"));
     EXPECT(!config_value_valid(theme, "darker"));
     EXPECT(!config_value_valid(theme, ""));
+}
+
+static void test_custom_theme_value_validation(void)
+{
+    clear_env();
+    EXPECT(config_load("{\"themes\": {\"midnight\": {\"tints\": {\"amber\": {"
+                       "\"stance\": \"yellow\"}}}}, \"presets\": {\"review\": {"
+                       "\"provider\": \"mock\", \"tint\": \"amber\"}}}") == 0);
+
+    const struct config_setting *theme = config_setting_find("theme");
+    const struct config_setting *tint = config_setting_find("tint");
+    EXPECT(config_value_valid(theme, "midnight"));
+    EXPECT(theme_set("midnight") == 0);
+    EXPECT(config_value_valid(tint, "amber"));
+
+    char *err = NULL;
+    EXPECT(config_preset_apply("review", CONFIG_TIER_RUN, &err) == 0);
+    EXPECT(err == NULL);
+    config_preset_exit(CONFIG_TIER_RUN);
+    config_set_override("preset", NULL);
+    config_set_override("provider", NULL);
+    config_set_override("model", NULL);
+    config_set_override("effort", NULL);
+    EXPECT(config_load(NULL) == 0);
+    EXPECT(theme_set("ansi") == 0);
 }
 
 static void test_sort_models_auto(void)
@@ -2195,6 +2221,7 @@ int main(void)
     test_string_and_integer_value_validation();
     test_bounded_and_scaled_value_validation();
     test_choice_value_validation();
+    test_custom_theme_value_validation();
     test_sort_models_auto();
     test_empty_policy();
     test_nested_and_flat();

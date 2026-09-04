@@ -238,8 +238,9 @@ provider-dependent.
 | `context_limit` | `HAX_CONTEXT_LIMIT` | auto | Override the model context-window size used for display and compaction. |
 | `display_width` | `HAX_DISPLAY_WIDTH` | `auto` | `auto`, `terminal`, or an exact width of at least 20 columns. |
 | `notify` | `HAX_NOTIFY` | `auto` | Completion notification: `auto`, `bel`, `osc9`, or `off`. |
-| `theme` | `HAX_THEME` | `auto` | `auto`, `dark`, `light`, `ansi`, or `off`. |
-| `tint` | `HAX_TINT` | `teal` | Model-output tint: `teal`, `violet`, `rose`, or `sage`. |
+| `theme` | `HAX_THEME` | `auto` | `auto`, a shipped theme, or a name in `themes`. |
+| `tint` | `HAX_TINT` | `teal` | Model-output tint: a shipped tint or the active custom theme's tint. |
+| `glyph_theme` | `HAX_GLYPH_THEME` | `auto` | UI glyph theme: `auto`, `utf8`, `ascii`, or a name in `glyph_themes`. |
 | `keep_awake` | `HAX_KEEP_AWAKE` | on | Best-effort idle-sleep inhibition while a turn runs. |
 | `compact.auto` | `HAX_COMPACT_AUTO` | on | Automatically summarize history near the context limit. |
 | `compact.threshold` | `HAX_COMPACT_THRESHOLD` | `85` | Context percentage that triggers automatic compaction. |
@@ -248,6 +249,56 @@ provider-dependent.
 `theme=auto` respects `NO_COLOR`, terminal color support, and `COLORFGBG` when available. Terminals
 rarely report a light background reliably, so set `light` explicitly if auto detection is wrong.
 `theme=ansi` uses the terminal's own 16-color palette; identity tints apply only to dark/light themes.
+
+### Themes and glyphs
+
+`themes` defines named color palettes. A custom theme inherits `dark`, `light`, or `ansi`; omitted
+roles inherit unchanged. A role is a color string or an object with `fg`, `bg`, `bold`, `dim`,
+`italic`, `underline`, and `reverse`. Colors may be a terminal color name, a 0–255 palette index,
+`#rrggbb`, or `default`. Theme entries never accept raw ANSI sequences.
+
+`glyph_theme=auto` selects the shipped `utf8` or `ascii` glyph theme from the locale. Custom
+`glyph_themes` use one string per mark and inherit the shipped UTF-8 theme for omitted marks.
+Spinner frame lists must be nonempty. Controls, zero-width characters, wide characters, ANSI
+sequences, and values over 16 UTF-8 bytes are rejected so input layout and animated redraws remain
+safe.
+
+```json
+{
+  "theme": "midnight",
+  "tint": "amber",
+  "glyph_theme": "minimal",
+  "themes": {
+    "midnight": {
+      "extends": "dark",
+      "roles": {
+        "accent": "#e5c07b",
+        "chrome": { "fg": "#61afef", "bold": true },
+        "heading": { "fg": "#c678dd", "bold": true },
+        "link": { "fg": "#61afef", "underline": true }
+      },
+      "tints": {
+        "amber": {
+          "stance": "#e5c07b",
+          "code_inline": "#e5c07b",
+          "code_block": "#d19a66"
+        }
+      }
+    }
+  },
+  "glyph_themes": {
+    "minimal": {
+      "prompt": "❯",
+      "user_gutter": "▌",
+      "banner_gutter": "▌",
+      "separator": "·",
+      "spinner": ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+      "tool_gutter": { "first": "┌", "body": "│", "last": "└", "marker": "›" },
+      "picker": { "search": "⌕", "selected": "→", "current": "✓" }
+    }
+  }
+}
+```
 
 ### Recording
 
