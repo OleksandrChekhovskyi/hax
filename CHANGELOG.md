@@ -9,56 +9,42 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- `hax --json` (implies `-p`) streams new conversation records as JSONL, followed by a `result`
+  record with the outcome, final text, cost, and session id. Plain `-p` output is unchanged, and
+  the session-file schema is now a supported read surface. See [docs/sessions.md](docs/sessions.md).
 - A resumed one-shot run no longer requires a prompt: `hax --resume=ID -p` (or `--json`)
-  continues the conversation from where it stopped, including after an interrupt or pause.
-- `hax --json` (implies `-p`) streams the run as JSON lines on stdout for orchestrators and
-  scripts: the conversation records in the session-file schema as they are appended, closed by a
-  `result` record with the outcome, final text, cost, and session id. Plain `-p` output is
-  unchanged. The session-file format is now documented as a supported read surface. See
-  [docs/sessions.md](docs/sessions.md).
-- `/login` for the codex provider now offers a browser flow (authorization code with PKCE through
-  a `localhost` redirect) alongside device login, for organizations that block the device flow.
-  Device login remains the ssh-friendly path. See [docs/providers.md](docs/providers.md#codex).
-- Provider blocks accept `metadata_api` to pick the `/models` dialect (`openai` or `anthropic`)
-  independently of the request protocol, for proxies that pair one with the other. Mixed-protocol
-  gateways now authenticate metadata requests correctly even when models are rerouted across
-  protocol families. See [docs/providers.md](docs/providers.md#custom-providers).
-- `sort_models` and `catalog_id` now work in every provider's config block, not only custom
-  ones; `providers.openai.sort_models`, for example, keeps the picker in server order.
-- `extra_headers` values accept `{session_id}`, the conversation's stable id, for gateways that
-  route or cache by session. Headers hax sends by default can now be overridden by name or removed
-  with an empty value. See [docs/providers.md](docs/providers.md#request-passthrough).
-- OpenRouter requests carry the conversation id as `x-session-id`, OpenRouter's sticky-routing
-  key, which also groups a conversation's generations in its activity view.
+  continues from where the conversation stopped.
+- Codex `/login` now offers a local-browser OAuth flow for organizations that block device login;
+  the device flow remains available for ssh sessions. See [docs/providers.md](docs/providers.md#codex).
+- Provider blocks accept `metadata_api` to select the `/models` protocol independently of the
+  request protocol. All user-facing providers now also honor per-provider `sort_models` and
+  `catalog_id` settings. See [docs/providers.md](docs/providers.md#custom-providers).
+- `extra_headers` can override or remove provider defaults and interpolate the stable
+  `{session_id}` for gateways that route or cache by conversation. See
+  [docs/providers.md](docs/providers.md#request-passthrough).
 
 ### Changed
 
-- Anthropic-protocol models on OpenCode Zen/Go and `anthropic-compatible` endpoints now get
-  prompt caching and metadata-driven thinking like first-party Anthropic: current Claude
-  models think adaptively, budget-only ones such as Sonnet 4.5 use budget thinking (also fixed
-  on the first-party provider). `thinking_mode` gains `auto` (default) and `prefer-adaptive`.
-- One-shot runs now stop cleanly on signals instead of dying mid-flight. SIGINT/SIGTERM
-  interrupts like the REPL's double Esc — running tools are killed, completed work is saved,
-  `--json` still closes with a `result` record, exit status 130 — and a second signal kills the
-  process at once. SIGUSR1 pauses like a single Esc: work in flight finishes and the run stops
-  at the next turn boundary. See [docs/usage.md](docs/usage.md#cli-modes).
-- `max_turns` now also bounds one-shot runs, which previously stopped only at a built-in limit.
-  The default is now spelled `auto` (interactive unlimited, one-shot 100); `0` still means the
-  same.
-- Token counts are decimal everywhere, unlike byte sizes, which keep 1024-base suffixes. The
-  stats line, `/session`, and the `/model` picker agree ("200k" for a 200000-token window rather
-  than "195k"), and `context_limit` and catalog `limit` fields written with suffixes now parse
-  decimally: `"272k"` means 272000 tokens.
-- `catalog.models` overrides now beat metadata the provider reports live, and blocks may be keyed
-  by the runtime provider id, so codex models can be overridden separately from `openai`. This
-  allows raising codex's served context window per model; the `/model` picker shows the sanctioned
-  ceiling ("272k context (up to 872k)"). See [docs/providers.md](docs/providers.md#codex).
-- Skill discovery now follows the cross-agent `.agents/skills` convention: project skills are
-  collected from the current directory up to the repository root, as `AGENTS.md` already was, and
-  `~/.agents/skills` is read alongside `~/.config/hax/skills`. Skills installed globally by other
-  tools work in hax without being copied or symlinked, and running hax from a subdirectory no
-  longer hides skills defined at the project root. The nearest match for a name wins. See
+- Anthropic-protocol models on OpenCode Zen/Go and `anthropic-compatible` endpoints now use prompt
+  caching and choose adaptive or budget thinking from model metadata, as first-party Anthropic now
+  does. `thinking_mode` adds `auto` (the default) and `prefer-adaptive`.
+- One-shot runs stop cleanly on signals: SIGINT or SIGTERM interrupts the run with status 130,
+  while SIGUSR1 pauses at the next turn boundary. Completed work remains resumable, `--json`
+  emits a final result when possible, and a second signal still kills immediately. See
+  [docs/usage.md](docs/usage.md#cli-modes).
+- `max_turns` now bounds one-shot runs as well as interactive turns. Its default is `auto`:
+  unlimited interactively and 100 in one-shot mode.
+- Token counts and their `k`/`m` config suffixes now use decimal units; byte sizes remain
+  1024-based. For example, `context_limit: "272k"` means 272000 tokens.
+- `catalog.models` overrides now take precedence over live provider metadata and may be scoped by
+  runtime provider id. This allows codex context overrides without changing OpenAI metadata; the
+  model picker shows both the served window and its reported ceiling. See
+  [docs/providers.md](docs/providers.md#codex).
+- Skill discovery now searches `.agents/skills` from the current directory to the repository root,
+  then `~/.config/hax/skills` and `~/.agents/skills`; the nearest same-named skill wins. See
   [docs/usage.md](docs/usage.md#project-instructions-and-context).
+- Provider routing and prompt-cache keys now remain stable for a conversation across restarts.
+  OpenRouter sends this id as `x-session-id`, and `/new` starts with a fresh id.
 - The first-party `openai`, `anthropic`, and `openrouter` providers pin their protocol along
   with their endpoint: `providers.<id>.api` now warns instead of switching the wire. Use
   `model_apis` for per-model protocols, or a custom provider.
@@ -68,24 +54,15 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
-- The retry indicator no longer sits at "retrying in 1s" while the retried request is in
-  flight. Once the backoff wait ends, it reads "retrying (attempt N/M)..." until the attempt
-  produces output or fails again.
-- OpenCode Zen and Go requests now send the `x-opencode-session` header the gateway requires;
-  Requests without it may error starting 2026-09-06.
-- The session key sent to providers for routing and prompt caching now follows the conversation
-  rather than the process: a resumed conversation keeps its cache, and `/new` starts fresh.
-- Interactively resuming an interrupted conversation (`--resume`, `-c`, `/resume`) now shows the
-  resume hint and accepts the empty-Enter continue, which previously worked only within the
-  interrupted process.
-- OpenCode Go usage-window limits now surface immediately instead of triggering retries that cannot
-  succeed before the window resets.
-- Skill discovery now ignores descriptions from unterminated YAML frontmatter or unsupported block
-  scalars instead of advertising incomplete metadata.
-- Chat Completions streams now detect upstream provider failures signaled through the finish
-  reason (including OpenRouter's `error` and `network_error` sentinels), retry them like other
-  transient failures, and surface an error once retries are exhausted. Previously such streams
-  rendered as empty successful responses.
+- OpenCode Zen and Go now send the required `x-opencode-session` header; requests without it may
+  fail starting 2026-09-06.
+- Chat Completions streams now retry upstream failures signaled through `error` or `network_error`
+  finish reasons and report an error after retries, instead of returning an empty success.
+- Interactively resumed interrupted conversations now show the resume hint and accept empty Enter
+  to continue.
+- OpenCode Go usage-window limits now surface immediately instead of triggering futile retries.
+- The retry indicator shows the active attempt after backoff instead of remaining at
+  "retrying in 1s" while the request is in flight.
 
 ## [0.4.0] - 2026-08-22
 
