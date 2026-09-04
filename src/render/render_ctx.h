@@ -75,6 +75,10 @@ void render_text_delta(struct render_ctx *render, const char *bytes, size_t len)
 /* Show the delayed spinner for a buffered table. No-op outside text mode. */
 void render_show_table_spinner(struct render_ctx *render);
 
+/* Format the retry indicator for now_ms into out: a countdown while the retry sleep is pending,
+ * and a plain attempt marker once the deadline has passed and the retried request is in flight. */
+void render_retry_label(const struct render_ctx *render, long now_ms, char *out, size_t size);
+
 /* Repaint the retry spinner label from the current retry state. */
 void render_update_retry_label(struct render_ctx *render);
 

@@ -205,16 +205,27 @@ void render_text_delta(struct render_ctx *render, const char *bytes, size_t len)
     render_write_text(render, bytes, len);
 }
 
-void render_update_retry_label(struct render_ctx *render)
+void render_retry_label(const struct render_ctx *render, long now_ms, char *out, size_t size)
 {
-    long remaining_ms = render->retry.deadline_ms - monotonic_ms();
+    long remaining_ms = render->retry.deadline_ms - now_ms;
+    /* The retry state persists until the retried attempt produces its first event, so an
+     * expired deadline means the request is in flight: a stalled attempt would otherwise read
+     * as a countdown stuck at its final second. */
+    if (remaining_ms <= 0) {
+        snprintf(out, size, "retrying (attempt %d/%d)...", render->retry.next_attempt,
+                 render->retry.max_attempts);
+        return;
+    }
+
     /* Round up so the final second is displayed as 1s rather than 0s. */
     long remaining_seconds = (remaining_ms + 999) / 1000;
-    if (remaining_seconds < 1)
-        remaining_seconds = 1;
-
-    char label[64];
-    snprintf(label, sizeof(label), "retrying in %lds (attempt %d/%d)...", remaining_seconds,
+    snprintf(out, size, "retrying in %lds (attempt %d/%d)...", remaining_seconds,
              render->retry.next_attempt, render->retry.max_attempts);
+}
+
+void render_update_retry_label(struct render_ctx *render)
+{
+    char label[64];
+    render_retry_label(render, monotonic_ms(), label, sizeof(label));
     spinner_set_label(render->spinner, "retry", label);
 }

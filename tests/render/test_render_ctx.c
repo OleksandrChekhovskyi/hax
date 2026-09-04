@@ -233,6 +233,28 @@ static void test_stream_retry_silent_without_output(void)
     fixture_destroy(&fixture);
 }
 
+static void test_retry_label_counts_down_then_marks_in_flight(void)
+{
+    struct fixture fixture;
+    if (!fixture_init(&fixture))
+        return;
+
+    fixture.render.retry.deadline_ms = 10000;
+    fixture.render.retry.next_attempt = 2;
+    fixture.render.retry.max_attempts = 5;
+    char label[64];
+
+    render_retry_label(&fixture.render, 7500, label, sizeof(label));
+    EXPECT_STR_EQ(label, "retrying in 3s (attempt 2/5)...");
+    render_retry_label(&fixture.render, 9990, label, sizeof(label));
+    EXPECT_STR_EQ(label, "retrying in 1s (attempt 2/5)...");
+    render_retry_label(&fixture.render, 10000, label, sizeof(label));
+    EXPECT_STR_EQ(label, "retrying (attempt 2/5)...");
+    render_retry_label(&fixture.render, 16000, label, sizeof(label));
+    EXPECT_STR_EQ(label, "retrying (attempt 2/5)...");
+    fixture_destroy(&fixture);
+}
+
 static void test_closing_tool_cluster_resets_substate(void)
 {
     struct fixture fixture;
@@ -262,6 +284,7 @@ int main(void)
     test_stream_begin_preserves_tool_cluster();
     test_stream_retry_marks_rendered_output();
     test_stream_retry_silent_without_output();
+    test_retry_label_counts_down_then_marks_in_flight();
     test_closing_tool_cluster_resets_substate();
 
     T_REPORT();

@@ -68,6 +68,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- The retry indicator no longer sits at "retrying in 1s" while the retried request is in
+  flight. Once the backoff wait ends, it reads "retrying (attempt N/M)..." until the attempt
+  produces output or fails again.
 - OpenCode Zen and Go requests now send the `x-opencode-session` header the gateway requires;
   Requests without it may error starting 2026-09-06.
 - The session key sent to providers for routing and prompt caching now follows the conversation

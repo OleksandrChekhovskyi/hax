@@ -46,6 +46,7 @@ MODE_NAMES = (
     "sse-error",
     "truncated",
     "slow",
+    "hang",
     "tool-call",
 )
 MODE_HELP = """\
@@ -59,7 +60,13 @@ Modes:
   sse-error    HTTP 503 with an SSE-shaped error body
   truncated    finish_reason=length
   slow         Two-second pauses between text chunks
+  hang         200 headers, then silence for --fail-delay seconds, then EOF
   tool-call    Bash call followed by a final text response
+
+Timing knobs for retry-indicator checks:
+  --fail-delay SECONDS   hold each failing request open this long before answering, the
+                         way an overloaded upstream does (default: 0)
+  --retry-after SECONDS  add a Retry-After header to failure responses
 """
 
 
@@ -143,6 +150,8 @@ class MockServer(ThreadingHTTPServer):
 class MockHandler(BaseHTTPRequestHandler):
     mode = "normal"
     fail_count = 2
+    fail_delay = 0.0
+    retry_after = 0
     request_count = 0
     request_count_lock = threading.Lock()
 
@@ -168,11 +177,10 @@ class MockHandler(BaseHTTPRequestHandler):
 
         self.discard_request_body()
         request_number = self.next_request_number()
-        if self.send_pre_stream_failure(request_number):
-            return
-
-        self.start_event_stream()
         try:
+            if self.send_pre_stream_failure(request_number):
+                return
+            self.start_event_stream()
             self.serve_mode(request_number)
         except (BrokenPipeError, ConnectionResetError):
             pass  # Client cancellation is a normal end to a manual test.
@@ -190,16 +198,18 @@ class MockHandler(BaseHTTPRequestHandler):
 
     def send_pre_stream_failure(self, request_number: int) -> bool:
         if self.mode in ("500", "503", "429"):
-            self.send_error(int(self.mode))
+            self.send_failure_status(int(self.mode))
             return True
 
         if self.mode.startswith("flaky-") and request_number <= self.fail_count:
-            self.send_error(int(self.mode.removeprefix("flaky-")))
+            self.send_failure_status(int(self.mode.removeprefix("flaky-")))
             return True
 
         if self.mode == "sse-error":
+            self.hold_before_failure()
             self.send_response(503)
             self.send_event_stream_headers()
+            self.send_retry_after_header()
             self.end_headers()
             self.write_event(
                 '{"error":{"message":"upstream rate limit",'
@@ -208,6 +218,25 @@ class MockHandler(BaseHTTPRequestHandler):
             return True
 
         return False
+
+    def hold_before_failure(self) -> None:
+        if self.fail_delay > 0:
+            self.log_message("holding request for %.1fs before failing", self.fail_delay)
+            time.sleep(self.fail_delay)
+
+    def send_retry_after_header(self) -> None:
+        if self.retry_after > 0:
+            self.send_header("Retry-After", str(self.retry_after))
+
+    def send_failure_status(self, status: int) -> None:
+        self.hold_before_failure()
+        body = json.dumps({"error": {"message": f"mock failure {status}"}}).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_retry_after_header()
+        self.end_headers()
+        self.wfile.write(body)
 
     def start_event_stream(self) -> None:
         self.send_response(200)
@@ -238,6 +267,8 @@ class MockHandler(BaseHTTPRequestHandler):
             self.serve_truncated()
         elif self.mode == "slow":
             self.serve_slow()
+        elif self.mode == "hang":
+            self.serve_hang(request_number)
         elif self.mode == "tool-call":
             self.serve_tool_call(request_number)
         else:
@@ -258,6 +289,14 @@ class MockHandler(BaseHTTPRequestHandler):
         self.write_event(finish_chunk("stop"))
         self.write_event(usage_chunk(8, 5))
         self.write_done()
+
+    def serve_hang(self, request_number: int) -> None:
+        # Headers are already out, so the client sees an accepted request that produces no
+        # events. Closing without a finish reason counts as a mid-stream death and is retried.
+        if request_number <= self.fail_count:
+            self.hold_before_failure()
+            return
+        self.serve_normal()
 
     def serve_mid_drop(self) -> None:
         self.write_event(delta_chunk("Let me think about this. The answer is "))
@@ -331,11 +370,27 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="requests to reject before a flaky mode succeeds (default: 2)",
     )
+    parser.add_argument(
+        "--fail-delay",
+        type=float,
+        default=0.0,
+        help="seconds to hold a failing request open before answering (default: 0)",
+    )
+    parser.add_argument(
+        "--retry-after",
+        type=int,
+        default=0,
+        help="Retry-After header value in seconds for failure responses (default: none)",
+    )
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
     if args.fail_count < 0:
         parser.error("--fail-count must be non-negative")
+    if args.fail_delay < 0:
+        parser.error("--fail-delay must be non-negative")
+    if args.retry_after < 0:
+        parser.error("--retry-after must be non-negative")
     return args
 
 
@@ -343,15 +398,21 @@ def main() -> int:
     args = parse_args()
     MockHandler.mode = args.mode
     MockHandler.fail_count = args.fail_count
+    MockHandler.fail_delay = args.fail_delay
+    MockHandler.retry_after = args.retry_after
     MockHandler.request_count = 0
 
     address = ("127.0.0.1", args.port)
     with MockServer(address, MockHandler) as server:
         flaky_suffix = (
             f", fail-count={args.fail_count}"
-            if args.mode.startswith("flaky-")
+            if args.mode.startswith("flaky-") or args.mode == "hang"
             else ""
         )
+        if args.fail_delay > 0:
+            flaky_suffix += f", fail-delay={args.fail_delay:g}s"
+        if args.retry_after > 0:
+            flaky_suffix += f", retry-after={args.retry_after}s"
         sys.stderr.write(
             f"[mock] listening on http://{address[0]}:{address[1]}/v1 "
             f"(mode={args.mode}{flaky_suffix})\n"
