@@ -22,18 +22,20 @@ void model_meta_release(struct provider *provider);
  * for the same model is retained. NULL-safe. */
 void model_meta_refresh(struct provider *provider, const char *model);
 
-/* Wait for an active probe to finish without cancelling it. NULL-safe. */
+/* Wait for the metadata sources to settle: an active probe, without cancelling it, and, bounded
+ * by MODEL_META_WAIT_MS, a running catalog refresh when the provider has a catalog identity.
+ * NULL-safe. */
 void model_meta_wait(struct provider *provider);
 
 /* Bounded model_meta_wait for callers that must stay responsive. `timeout_ms` is measured from
- * probe start, not per call, so callers stacked on one request path share the budget. On timeout
- * the probe keeps running in the background and its report lands whenever it completes.
+ * each source's start, not per call, so callers stacked on one request path share the budget.
+ * On timeout the work keeps running in the background and lands whenever it completes.
  * NULL-safe. */
 void model_meta_wait_ms(struct provider *provider, long timeout_ms);
 
-/* Covers metadata-endpoint probes; probes that also load a model (llama.cpp router autoload)
- * exceed it and finish in the background. */
-#define MODEL_META_PROBE_WAIT_MS 5000
+/* Covers metadata-endpoint probes and the catalog refresh; probes that also load a model
+ * (llama.cpp router autoload) exceed it and finish in the background. */
+#define MODEL_META_WAIT_MS 5000
 
 /* Store a copy of provider-reported metadata. A same-model store keeps the previous report's
  * fields that `info` leaves unknown and lets an active probe continue; a different model replaces
@@ -65,8 +67,10 @@ int model_meta_rates(const struct provider *provider, const char *model, struct 
  * setting takes precedence unless set to auto. */
 int model_meta_image_input(const struct provider *provider, const char *model);
 
-/* Resolve the categorical effort levels accepted by `model`, ordered by the provider's ladder.
- * `out` is always known; an empty set means the provider sends no categorical effort. */
-void model_meta_efforts(const struct provider *provider, const char *model, struct effort_set *out);
+/* Resolve the categorical effort levels offered for `model`, ordered by the provider's ladder.
+ * `out` is always known; an empty set means the provider sends no categorical effort. Returns 1
+ * when metadata settled the set and 0 when `out` is the provider's full ladder, offered
+ * unverified. */
+int model_meta_efforts(const struct provider *provider, const char *model, struct effort_set *out);
 
 #endif /* HAX_MODEL_META_H */

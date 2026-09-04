@@ -33,6 +33,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- Anthropic-protocol models on OpenCode Zen/Go and `anthropic-compatible` endpoints now get
+  prompt caching and metadata-driven thinking like first-party Anthropic: current Claude
+  models think adaptively, budget-only ones such as Sonnet 4.5 use budget thinking (also fixed
+  on the first-party provider). `thinking_mode` gains `auto` (default) and `prefer-adaptive`.
 - One-shot runs now stop cleanly on signals instead of dying mid-flight. SIGINT/SIGTERM
   interrupts like the REPL's double Esc — running tools are killed, completed work is saved,
   `--json` still closes with a `result` record, exit status 130 — and a second signal kills the

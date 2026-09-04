@@ -195,7 +195,7 @@ static void test_falls_back_to_provider_levels(void)
 {
     struct provider p = make_provider("codex", list_provider_efforts);
     struct effort_set levels;
-    model_meta_efforts(&p, "gpt-unknown", &levels);
+    EXPECT(model_meta_efforts(&p, "gpt-unknown", &levels) == 0);
     static const char *const expected[] = {"none", "low", "medium", "high", "xhigh", NULL};
     EXPECT(efforts_equal(&levels, expected));
     model_meta_release(&p);
@@ -207,7 +207,7 @@ static void test_provider_report_narrows(void)
     struct provider p = make_provider("codex", list_provider_efforts);
     store_efforts(&p, "gpt-narrow", reported);
     struct effort_set levels;
-    model_meta_efforts(&p, "gpt-narrow", &levels);
+    EXPECT(model_meta_efforts(&p, "gpt-narrow", &levels) == 1);
     static const char *const expected[] = {"low", "medium", "high", NULL};
     EXPECT(efforts_equal(&levels, expected));
     EXPECT(!effort_set_has(&levels, "none"));

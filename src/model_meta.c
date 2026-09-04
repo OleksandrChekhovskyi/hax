@@ -144,6 +144,16 @@ static void probe_worker(struct bg_job *job, void *arg)
     probe_task_free(task);
 }
 
+static void join_probe(struct provider *provider)
+{
+    if (!provider || !provider->meta || !provider->meta->probe_job)
+        return;
+    bg_job_join(provider->meta->probe_job);
+    provider->meta->probe_job = NULL;
+    free(provider->meta->probe_model);
+    provider->meta->probe_model = NULL;
+}
+
 void model_meta_refresh(struct provider *provider, const char *model)
 {
     if (!provider || (!provider->probe_model && !provider->meta))
@@ -152,7 +162,7 @@ void model_meta_refresh(struct provider *provider, const char *model)
     struct model_meta *meta = get_or_create_meta(provider);
     /* Reap a finished probe so it cannot pass for a live one below. */
     if (meta->probe_job && bg_job_wait_ms(meta->probe_job, 0))
-        model_meta_wait(provider);
+        join_probe(provider);
 
     pthread_mutex_lock(&report_lock);
     /* A model-list report may lack the context window; a probe can still learn it. */
@@ -197,25 +207,29 @@ void model_meta_refresh(struct provider *provider, const char *model)
         probe_task_free(task);
 }
 
+/* The snapshot is keyed by catalog_id; without one, only configuration and the probe apply. */
+static void wait_catalog(const struct provider *provider, long timeout_ms)
+{
+    if (provider && provider->catalog_id)
+        catalog_wait(timeout_ms);
+}
+
 void model_meta_wait(struct provider *provider)
 {
-    if (!provider || !provider->meta || !provider->meta->probe_job)
-        return;
-    bg_job_join(provider->meta->probe_job);
-    provider->meta->probe_job = NULL;
-    free(provider->meta->probe_model);
-    provider->meta->probe_model = NULL;
+    wait_catalog(provider, MODEL_META_WAIT_MS);
+    join_probe(provider);
 }
 
 void model_meta_wait_ms(struct provider *provider, long timeout_ms)
 {
+    wait_catalog(provider, timeout_ms);
     if (!provider || !provider->meta || !provider->meta->probe_job)
         return;
     /* The budget is anchored at probe start so stacked callers on one request path do not each
      * wait the full amount for a slow probe. */
     long remaining_ms = timeout_ms - (monotonic_ms() - provider->meta->probe_started_ms);
     if (bg_job_wait_ms(provider->meta->probe_job, remaining_ms > 0 ? remaining_ms : 0))
-        model_meta_wait(provider);
+        join_probe(provider);
 }
 
 static int model_info_has_details(const struct model_info *info)
@@ -423,19 +437,10 @@ int model_meta_image_input(const struct provider *provider, const char *model)
     return -1;
 }
 
-void model_meta_efforts(const struct provider *provider, const char *model, struct effort_set *out)
+int model_meta_efforts(const struct provider *provider, const char *model, struct effort_set *out)
 {
     memset(out, 0, sizeof(*out));
     out->known = 1;
-
-    const char *const *provider_levels = NULL;
-    struct provider *mutable_provider = (struct provider *)provider;
-    size_t provider_level_count = (provider && provider->list_efforts)
-                                      ? provider->list_efforts(mutable_provider, &provider_levels)
-                                      : 0;
-    /* Metadata cannot enable effort values on a provider that has no way to send them. */
-    if (provider_level_count == 0)
-        return;
 
     struct catalog_entry configured;
     int authoritative = load_config_entry(provider, model, &configured) && configured.efforts.known;
@@ -456,13 +461,22 @@ void model_meta_efforts(const struct provider *provider, const char *model, stru
         }
     }
 
+    const char *const *provider_levels = NULL;
+    struct provider *mutable_provider = (struct provider *)provider;
+    size_t provider_level_count = (provider && provider->list_efforts)
+                                      ? provider->list_efforts(mutable_provider, &provider_levels)
+                                      : 0;
+    /* Metadata cannot enable effort values on a provider that has no way to send them. */
+    if (provider_level_count == 0)
+        return accepted.known;
+
     if (!accepted.known) {
         for (size_t i = 0; i < provider_level_count; i++)
             effort_set_add(out, provider_levels[i]);
-        return;
+        return 0;
     }
     if (accepted.count == 0)
-        return;
+        return 1;
 
     for (size_t i = 0; i < provider_level_count; i++)
         if (effort_set_has(&accepted, provider_levels[i]))
@@ -473,4 +487,5 @@ void model_meta_efforts(const struct provider *provider, const char *model, stru
     if (authoritative)
         for (size_t i = 0; i < accepted.count; i++)
             effort_set_add(out, accepted.values[i]);
+    return 1;
 }

@@ -58,8 +58,9 @@ static void test_list_efforts_wiring(void)
     }
 }
 
-/* On the Messages wire the effort ladder steers adaptive thinking, so only an explicit
- * budget/off pin hides it: an unconfigured budget default upgrades when an effort is chosen. */
+/* On the Messages wire the effort ladder steers adaptive thinking, so only a budget/off pin,
+ * configured or shipped in the def, hides it: an unpinned mode upgrades when an effort is
+ * chosen. */
 static void test_messages_efforts_follow_thinking_mode(void)
 {
     struct provider_def def = {
@@ -82,6 +83,8 @@ static void test_messages_efforts_follow_thinking_mode(void)
 
         EXPECT(config_load("{\"providers\": {\"x\": {\"thinking_mode\": \"adaptive\"}}}") == 0);
         EXPECT(provider->list_efforts(provider, &efforts) == EFFORT_LADDER_N - 1);
+        EXPECT(config_load("{\"providers\": {\"x\": {\"thinking_mode\": \"auto\"}}}") == 0);
+        EXPECT(provider->list_efforts(provider, &efforts) == EFFORT_LADDER_N - 1);
 
         /* A typo is not a pin: requests fall back to the default, so the ladder stays. */
         EXPECT(config_load("{\"providers\": {\"x\": {\"thinking_mode\": \"bugdet\"}}}") == 0);
@@ -102,6 +105,21 @@ static void test_messages_efforts_follow_thinking_mode(void)
         provider->destroy(provider);
     }
     EXPECT(config_load(NULL) == 0);
+
+    /* A def pin means the same as a configured one. */
+    struct provider_def pinned = {
+        .id = "x",
+        .api = "anthropic-messages",
+        .base_url = "http://example.invalid/v1",
+        .thinking_mode = "budget",
+    };
+    provider = http_provider_new(&pinned);
+    EXPECT(provider != NULL);
+    if (provider) {
+        const char *const *efforts = NULL;
+        EXPECT(provider->list_efforts(provider, &efforts) == 0);
+        provider->destroy(provider);
+    }
 }
 
 static int headers_have_version(char **headers)
@@ -192,7 +210,7 @@ static void test_metadata_api_override(void)
     EXPECT(config_load(NULL) == 0);
 }
 
-#define MAX_REQUESTS 8
+#define MAX_REQUESTS 9
 
 /* Serves one canned response per sequential connection, capturing each request. A non-NULL
  * responses[i] overrides the shared response for that connection. */
@@ -307,6 +325,11 @@ static void write_catalog_fixture(void)
         FAIL("fopen %s: %s", path, strerror(errno));
     fputs("{\"zen-test\": {\"npm\": \"@ai-sdk/openai-compatible\", \"models\": {"
           "\"claude-hint\": {\"provider\": {\"npm\": \"@ai-sdk/anthropic\"}},"
+          "\"claude-adaptive\": {\"provider\": {\"npm\": \"@ai-sdk/anthropic\"},"
+          " \"reasoning_options\": [{\"type\": \"effort\", \"values\": [\"low\", \"high\"]},"
+          " {\"type\": \"budget_tokens\"}]},"
+          "\"claude-budget\": {\"provider\": {\"npm\": \"@ai-sdk/anthropic\"},"
+          " \"reasoning_options\": [{\"type\": \"budget_tokens\"}]},"
           "\"gemini-hint\": {\"provider\": {\"npm\": \"@ai-sdk/google\"}},"
           "\"think-hint\": {\"interleaved\": {\"field\": \"reasoning_content\"}}}}}",
           f);
@@ -320,7 +343,7 @@ static void test_model_wire_routing(void)
     write_catalog_fixture();
     struct wire_server server = {
         .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
-        .n_requests = 7,
+        .n_requests = 9,
     };
     pthread_t thread;
     int port = start_server(&server, &thread);
@@ -360,9 +383,13 @@ static void test_model_wire_routing(void)
     context.effort = "minimal";
     provider->stream(provider, &context, "claude-rule-1", log_error, &log, NULL, NULL);
     context.effort = NULL;
+    provider->stream(provider, &context, "claude-adaptive", log_error, &log, NULL, NULL);
+    context.effort = "high";
+    provider->stream(provider, &context, "claude-budget", log_error, &log, NULL, NULL);
+    context.effort = NULL;
     pthread_join(thread, NULL);
     close(server.listener_fd);
-    EXPECT(atomic_load(&server.served) == 7);
+    EXPECT(atomic_load(&server.served) == 9);
 
     EXPECT(strncmp(server.requests[0], "POST /messages HTTP", 19) == 0);
     EXPECT(strstr(server.requests[0], "x-api-key: sk-test\r\n") != NULL);
@@ -395,19 +422,34 @@ static void test_model_wire_routing(void)
     EXPECT(strstr(server.requests[6], "\"effort\":\"low\"") != NULL);
     EXPECT(strstr(server.requests[6], "\"minimal\"") == NULL);
 
-    EXPECT(log.n_errors == 7); /* every canned reply is a 400 */
+    /* Catalog effort levels select adaptive thinking before any effort is chosen; with none
+     * chosen, the model picks its own. */
+    EXPECT(strncmp(server.requests[7], "POST /messages HTTP", 19) == 0);
+    EXPECT(strstr(server.requests[7], "\"adaptive\"") != NULL);
+    EXPECT(strstr(server.requests[7], "\"output_config\"") == NULL);
+    EXPECT(strstr(server.requests[7], "\"budget_tokens\"") == NULL);
+
+    /* An effort accepted before the catalog landed does not force adaptive thinking on a
+     * model the catalog now marks budget-only. */
+    EXPECT(strstr(server.requests[8], "\"budget_tokens\"") != NULL);
+    EXPECT(strstr(server.requests[8], "\"adaptive\"") == NULL);
+    EXPECT(strstr(server.requests[8], "\"output_config\"") == NULL);
+
+    EXPECT(log.n_errors == 9); /* every canned reply is a 400 */
     provider->destroy(provider);
     EXPECT(config_load(NULL) == 0);
 }
 
-/* The def-declared Messages defaults reach the request: adaptive thinking (not a compat-safe
- * budget) and prompt-cache markers on. Effort "none" has no Messages spelling, so it disables
- * thinking instead of riding output_config. */
+/* The def-declared Messages defaults reach the request: prefer-adaptive thinking gives a model
+ * the catalog does not know adaptive (not a compat-safe budget) while a catalogued budget-only
+ * ladder still gets budget, and prompt-cache markers come without the def asking for them.
+ * Effort "none" has no Messages spelling, so it disables thinking instead of riding
+ * output_config. A configured cache=false is the only thing that drops the markers. */
 static void test_messages_defaults_follow_def(void)
 {
     struct wire_server server = {
         .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
-        .n_requests = 2,
+        .n_requests = 4,
     };
     pthread_t thread;
     int port = start_server(&server, &thread);
@@ -421,8 +463,7 @@ static void test_messages_defaults_follow_def(void)
         .id = "fp",
         .api = "anthropic-messages",
         .base_url = base_url,
-        .cache = "on",
-        .thinking_mode = "adaptive",
+        .thinking_mode = "prefer-adaptive",
         .strict_signatures = 1,
     };
     struct provider *provider = http_provider_new(&def);
@@ -436,9 +477,15 @@ static void test_messages_defaults_follow_def(void)
     provider->stream(provider, &context, "claude-x", log_error, &log, NULL, NULL);
     context.effort = "none";
     provider->stream(provider, &context, "claude-x", log_error, &log, NULL, NULL);
+    EXPECT(config_load("{\"providers\": {\"fp\": {\"cache\": false}}}") == 0);
+    provider->stream(provider, &context, "claude-x", log_error, &log, NULL, NULL);
+    context.effort = NULL;
+    EXPECT(config_load("{\"catalog\": {\"models\": {\"fp\": {\"claude-budget\": {"
+                       "\"reasoning_options\": [{\"type\": \"budget_tokens\"}]}}}}}") == 0);
+    provider->stream(provider, &context, "claude-budget", log_error, &log, NULL, NULL);
     pthread_join(thread, NULL);
     close(server.listener_fd);
-    EXPECT(atomic_load(&server.served) == 2);
+    EXPECT(atomic_load(&server.served) == 4);
 
     EXPECT(strstr(server.requests[0], "\"adaptive\"") != NULL);
     EXPECT(strstr(server.requests[0], "\"budget_tokens\"") == NULL);
@@ -446,7 +493,14 @@ static void test_messages_defaults_follow_def(void)
 
     EXPECT(strstr(server.requests[1], "\"thinking\"") == NULL);
     EXPECT(strstr(server.requests[1], "\"output_config\"") == NULL);
+    EXPECT(strstr(server.requests[1], "\"cache_control\"") != NULL);
+
+    EXPECT(strstr(server.requests[2], "\"cache_control\"") == NULL);
+
+    EXPECT(strstr(server.requests[3], "\"budget_tokens\"") != NULL);
+    EXPECT(strstr(server.requests[3], "\"adaptive\"") == NULL);
     provider->destroy(provider);
+    EXPECT(config_load(NULL) == 0);
 }
 
 struct fake_auth {

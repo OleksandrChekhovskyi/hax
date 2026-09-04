@@ -266,7 +266,7 @@ int agent_session_resync_effort(struct agent_session *session, struct provider *
         return 0;
     /* Bounded: this runs on the interactive foreground thread, and a router-autoload probe can
      * take minutes. A late report refines effort before the next prompt instead. */
-    model_meta_wait_ms(provider, MODEL_META_PROBE_WAIT_MS);
+    model_meta_wait_ms(provider, MODEL_META_WAIT_MS);
     char *effort = resolve_effort(provider, session->model);
     int unchanged = (!effort && !session->effort) ||
                     (effort && session->effort && strcmp(effort, session->effort) == 0);

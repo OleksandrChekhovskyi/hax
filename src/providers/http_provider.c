@@ -43,6 +43,13 @@ struct wire_rule {
     const struct wire *wire;
 };
 
+/* A thinking_mode value: a pinned Messages mode, or metadata-following with `mode` as the
+ * fallback for models the catalog lacks. */
+struct thinking_setting {
+    int follow_catalog;
+    enum anthropic_thinking_mode mode;
+};
+
 struct http_provider {
     struct provider base;
     char *base_url;
@@ -59,14 +66,13 @@ struct http_provider {
     char *version; /* anthropic-version; sent on Messages requests */
     int send_cache_key;
     int request_cost;
-    enum chat_cache_mode cache_mode;
+    enum chat_cache_mode cache_mode; /* chat only */
     char *cache_ttl;
     char *reasoning_field;
     int reasoning_field_pinned; /* configured explicitly; no catalog hint may override it */
     enum chat_reasoning_format reasoning_format;
-    enum anthropic_thinking_mode default_thinking_mode;
+    struct thinking_setting thinking; /* the def's; providers.<id>.thinking_mode overrides */
     int strict_signatures;
-    int cache_default;    /* Messages cache_control default; chat uses cache_mode */
     char **extra_headers; /* "Name: value" templates; {session_id} expands per request */
     json_t *extra_body;
     struct http_auth_source auth; /* zeroed ops: the api_key authenticates requests */
@@ -82,24 +88,58 @@ struct http_provider {
     http_parse_model_cb parse_model;
 };
 
+/* `out` is always set: an unset value is auto, and an unrecognized one is auto with -1. */
+static int thinking_setting_parse(const char *value, struct thinking_setting *out)
+{
+    *out = (struct thinking_setting){.follow_catalog = 1, .mode = ANTHROPIC_THINKING_BUDGET};
+    if (!value || !*value || strcasecmp(value, "auto") == 0)
+        return 0;
+    if (strcasecmp(value, "prefer-adaptive") == 0) {
+        out->mode = ANTHROPIC_THINKING_ADAPTIVE;
+        return 0;
+    }
+    int mode = anthropic_thinking_mode_parse(value);
+    if (mode < 0)
+        return -1;
+    *out = (struct thinking_setting){.mode = (enum anthropic_thinking_mode)mode};
+    return 0;
+}
+
+/* The configured thinking_mode when set and recognized, else the def's. */
+static struct thinking_setting effective_thinking(const struct http_provider *provider)
+{
+    const char *configured = config_scoped_str(provider->config_prefix, "thinking_mode");
+    struct thinking_setting setting;
+    if (configured && *configured && thinking_setting_parse(configured, &setting) == 0)
+        return setting;
+    return provider->thinking;
+}
+
 static enum anthropic_thinking_mode resolve_thinking_mode(const struct http_provider *provider,
-                                                          const char *effort)
+                                                          const char *model, const char *effort)
 {
     /* Messages has no "none" effort value: it means no reasoning, which is thinking off. */
     if (effort && strcmp(effort, "none") == 0)
         return ANTHROPIC_THINKING_OFF;
     const char *configured = config_scoped_str(provider->config_prefix, "thinking_mode");
-    if (configured && *configured) {
-        int parsed = anthropic_thinking_mode_parse(configured);
-        if (parsed >= 0)
-            return (enum anthropic_thinking_mode)parsed;
-        hax_warn("unknown thinking_mode '%s' (adaptive/budget/off) — using default", configured);
-    }
-    /* An effort reaches a request only when the model's metadata accepts it, and on Messages
-     * efforts steer adaptive thinking; a compat-safe budget default must not drop it. */
+    struct thinking_setting setting;
+    if (configured && *configured && thinking_setting_parse(configured, &setting) != 0)
+        hax_warn("unknown thinking_mode '%s' (auto/prefer-adaptive/adaptive/budget/off) — "
+                 "using default",
+                 configured);
+    setting = effective_thinking(provider);
+    if (!setting.follow_catalog)
+        return setting.mode;
+    /* Listed effort levels mean the model steers thinking by effort, which Messages spells as
+     * adaptive; a settled ladder without them is a budget-only model, which rejects adaptive
+     * even when an effort accepted before the metadata landed is still selected. */
+    struct effort_set levels;
+    if (model_meta_efforts(&provider->base, model, &levels))
+        return levels.count > 0 ? ANTHROPIC_THINKING_ADAPTIVE : ANTHROPIC_THINKING_BUDGET;
+    /* Unsettled: a selected effort still needs adaptive thinking to be expressed. */
     if (effort && *effort)
         return ANTHROPIC_THINKING_ADAPTIVE;
-    return provider->default_thinking_mode;
+    return setting.mode;
 }
 
 int http_provider_max_tokens(struct provider *base, const char *model)
@@ -254,9 +294,6 @@ static char *stream_auth_error_message(void *ctx, long http_status, const char *
     return stream->provider->auth.ops->unauthorized_message(stream->provider->auth.state);
 }
 
-/* How long a request may wait on the in-flight snapshot fetch for its wire hint. */
-#define WIRE_HINT_FETCH_WAIT_MS 5000
-
 /* The wire `model` speaks: the first matching model_apis rule, else the catalog hint on a
  * catalog-routed provider, else the provider default. NULL means the catalog knows the model
  * needs a protocol hax does not implement; the caller reports it instead of guessing. */
@@ -270,13 +307,6 @@ static const struct wire *resolve_model_wire(struct http_provider *provider, con
         const char *provider_id = provider_stable_id(&provider->base);
         struct catalog_entry entry;
         catalog_lookup(provider_id, provider->catalog_id, model, &entry);
-        if (!entry.api && provider->catalog_id) {
-            /* A fresh install may still be fetching the snapshot, and guessing here would
-             * speak the wrong protocol to the model: wait, bounded, and look again. A fetch
-             * outliving the wait keeps running so later requests can route by it. */
-            catalog_wait(WIRE_HINT_FETCH_WAIT_MS);
-            catalog_lookup(provider_id, provider->catalog_id, model, &entry);
-        }
         if (entry.api)
             return wire_find(entry.api);
     }
@@ -297,11 +327,24 @@ static const char *resolve_model_reasoning_field(const struct http_provider *pro
     return entry.interleaved_field ? entry.interleaved_field : provider->reasoning_field;
 }
 
+/* Whether a request consults metadata before it is sent: wire routing on a catalog-routed
+ * provider, cache planning on chat, thinking mode on Messages. A pure Responses provider
+ * consults none. */
+static int request_reads_metadata(const struct http_provider *provider)
+{
+    return provider->catalog_wires || provider->n_wire_rules > 0 ||
+           provider->wire != &WIRE_OPENAI_RESPONSES;
+}
+
 static int http_provider_stream(struct provider *base, const struct context *context,
                                 const char *model, stream_cb callback, void *callback_user,
                                 http_tick_cb tick, void *tick_user)
 {
     struct http_provider *provider = (struct http_provider *)base;
+    /* Bounded: a router-autoload probe can take minutes, and the request waits for that model
+     * anyway. */
+    if (request_reads_metadata(provider))
+        model_meta_wait_ms(base, MODEL_META_WAIT_MS);
     const struct wire *wire = resolve_model_wire(provider, model);
     if (!wire) {
         char *message = xasprintf("model %s needs a protocol hax does not support", model);
@@ -341,18 +384,15 @@ static int http_provider_stream(struct provider *base, const struct context *con
     };
 
     if (wire == &WIRE_ANTHROPIC_MESSAGES) {
-        opts.cache_markers =
-            config_scoped_bool_or(provider->config_prefix, "cache", provider->cache_default);
+        /* Messages endpoints cache only at explicit breakpoints, so only a configured off
+         * omits them. */
+        opts.cache_markers = config_scoped_bool_or(provider->config_prefix, "cache", 1);
         opts.max_tokens = http_provider_max_tokens(base, model);
-        opts.thinking_mode = resolve_thinking_mode(provider, context->effort);
+        opts.thinking_mode = resolve_thinking_mode(provider, model, context->effort);
         opts.thinking_budget = config_scoped_int(provider->config_prefix, "thinking_budget");
         opts.show_reasoning = config_bool("show_reasoning");
         opts.allow_empty_signature = !provider->strict_signatures;
     } else {
-        /* Cache planning depends on rates populated by the startup metadata probe. Bounded: a
-         * router-autoload probe can take minutes, while rate-reporting probes answer quickly,
-         * and the request itself waits for the model to load anyway. */
-        model_meta_wait_ms(base, MODEL_META_PROBE_WAIT_MS);
         struct catalog_entry rates;
         model_meta_rates(base, model, &rates);
         stream.cache = chat_plan_cache(&rates, provider->cache_mode, provider->cache_ttl);
@@ -492,14 +532,13 @@ static size_t http_provider_list_efforts(struct provider *base, const char *cons
     struct http_provider *provider = (struct http_provider *)base;
     if (!provider->efforts || provider->n_efforts == 0)
         return 0;
-    /* Messages effort levels steer adaptive thinking; only an explicit budget/off pin rules
-     * that out — an unconfigured default upgrades per request when an effort is chosen, and
-     * an unrecognized value falls back to that default at request time. Only a pure Messages
-     * provider hides the ladder: on a mixed one, models routed to other wires still take it. */
+    /* A budget/off pin rules out the efforts that steer adaptive thinking; an unpinned mode
+     * upgrades when one is chosen. Only a pure Messages provider hides the ladder: on a mixed
+     * one, models routed to other wires still take it. */
     if (provider->wire == &WIRE_ANTHROPIC_MESSAGES && !provider->n_wire_rules &&
         !provider->catalog_wires) {
-        const char *mode = config_scoped_str(provider->config_prefix, "thinking_mode");
-        if (mode && (strcasecmp(mode, "budget") == 0 || strcasecmp(mode, "off") == 0))
+        struct thinking_setting setting = effective_thinking(provider);
+        if (!setting.follow_catalog && setting.mode != ANTHROPIC_THINKING_ADAPTIVE)
             return 0;
     }
     *efforts = provider->efforts;
@@ -898,11 +937,7 @@ struct provider *http_provider_new(const struct provider_def *def)
     provider->reasoning_format = chat_reasoning_format_parse(
         config_scoped_str(prefix, "reasoning_format"),
         chat_reasoning_format_parse(def->reasoning_format, CHAT_REASONING_FLAT));
-    provider->cache_default = def->cache && strcasecmp(def->cache, "on") == 0;
-    int thinking_mode = anthropic_thinking_mode_parse(def->thinking_mode);
-    provider->default_thinking_mode = thinking_mode >= 0
-                                          ? (enum anthropic_thinking_mode)thinking_mode
-                                          : ANTHROPIC_THINKING_BUDGET;
+    thinking_setting_parse(def->thinking_mode, &provider->thinking);
     provider->strict_signatures = def->strict_signatures;
     /* The user's headers replace same-named def defaults, as extra_body members do. */
     char **def_headers = def_extra_headers(def);

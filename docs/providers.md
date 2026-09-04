@@ -110,11 +110,11 @@ hax --provider=anthropic
 Choose a model with `/model`, config, or `--model`. hax uses `https://api.anthropic.com/v1` with
 credentials from `ANTHROPIC_API_KEY`; the endpoint is pinned.
 
-First-party Anthropic uses adaptive thinking, so `/effort` offers the effort levels exposed by hax.
-Prompt caching is enabled with a 1h TTL, and the output-token limit follows model metadata when
-available (falling back to 32000); a `providers.anthropic` config block can override advanced
-fields such as `max_tokens` when an older model needs it. A different endpoint — a proxy, say —
-belongs in a [custom provider](#custom-providers).
+Thinking follows model metadata: adaptive, with `/effort` levels, on current models and budget
+thinking on older ones. Prompt caching is enabled with a 1h TTL, and the output-token limit follows
+model metadata when available (falling back to 32000); a `providers.anthropic` config block can
+override advanced fields such as `max_tokens` when an older model needs it. A different endpoint —
+a proxy, say — belongs in a [custom provider](#custom-providers).
 
 ## OpenRouter
 
@@ -269,8 +269,9 @@ hax
 ```
 
 `HAX_ANTHROPIC_BASE_URL` is required. Use `HAX_ANTHROPIC_API_KEY` when authentication is needed; hax
-does not fall back to `ANTHROPIC_API_KEY`. Compatible endpoints default to budget thinking and leave
-explicit prompt-cache controls off for broader compatibility.
+does not fall back to `ANTHROPIC_API_KEY`. Compatible endpoints get the first-party thinking and
+prompt-cache defaults, except that a model the catalog does not list falls back to budget
+thinking. Override `thinking_mode` or `cache` when an endpoint needs it.
 
 For a static endpoint you use regularly, prefer a named custom provider instead of repeatedly
 exporting the generic base URL.

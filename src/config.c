@@ -214,15 +214,17 @@ static const struct config_setting REGISTRY[] = {
      .kind = CONFIG_KIND_INT, .min = 1},
     {.key = "providers.anthropic-compatible.thinking_mode",
      .env_var = "HAX_ANTHROPIC_THINKING_MODE",
-     .description = "Thinking mode: adaptive, budget, or off",
-     .choices = "adaptive|budget|off"},
+     .description = "Thinking mode: auto follows model metadata, prefer-adaptive also assumes "
+                    "adaptive for unlisted models; adaptive, budget, and off pin",
+     .choices = "auto|prefer-adaptive|adaptive|budget|off"},
     {.key = "providers.anthropic-compatible.thinking_budget",
      .env_var = "HAX_ANTHROPIC_THINKING_BUDGET",
      .description = "Budget-mode thinking tokens (default: max_tokens - 1)",
      .kind = CONFIG_KIND_INT, .min = 1},
     {.key = "providers.anthropic-compatible.cache", .env_var = "HAX_ANTHROPIC_CACHE",
      .choices = CONFIG_CHOICES_TRISTATE,
-     .description = "Send prompt cache_control breakpoints; auto uses the provider default"},
+     .description = "Send prompt cache_control breakpoints; off only for endpoints that reject "
+                    "them"},
     {.key = "providers.anthropic-compatible.cache_ttl", .env_var = "HAX_ANTHROPIC_CACHE_TTL",
      .description = "Cache breakpoint TTL: 5m or 1h (default 1h, suiting an interactive agent's "
                     "pauses)",

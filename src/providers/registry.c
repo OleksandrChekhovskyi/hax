@@ -69,8 +69,8 @@ static const struct provider_def DEFS[] = {
         .pinned = 1,
         .api_key_env = "ANTHROPIC_API_KEY",
         .catalog_id = "anthropic",
-        .cache = "on",
-        .thinking_mode = "adaptive",
+        /* Every Claude since 4.6 thinks adaptively, so a model the catalog lacks yet does too. */
+        .thinking_mode = "prefer-adaptive",
         .strict_signatures = 1,
     },
     {

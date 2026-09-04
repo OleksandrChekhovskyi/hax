@@ -16,6 +16,7 @@
 #include "effort.h"
 #include "xalloc.h"
 #include "system/bg_job.h"
+#include "system/clock.h"
 #include "system/fd.h"
 #include "system/fs.h"
 #include "system/path.h"
@@ -789,6 +790,7 @@ double catalog_price(const struct catalog_entry *entry, long input_tokens, long 
 /* ---------------- background fetch ---------------- */
 
 static struct bg_job *g_fetch_job;
+static long g_fetch_started_ms;
 static int g_prefetch_attempted;
 /* bg_job has no timed join, so catalog_drain polls this worker-owned flag. */
 static _Atomic int g_fetch_done;
@@ -879,28 +881,36 @@ long catalog_prefetch(void)
     struct fetch_args *args = xcalloc(1, sizeof(*args));
     args->url = xstrdup(url);
     args->path = path;
+    g_fetch_started_ms = monotonic_ms();
     g_fetch_job = bg_job_spawn(fetch_worker, args);
     if (!g_fetch_job)
         fetch_args_free(args);
     return stale_days;
 }
 
-void catalog_wait(long max_wait_ms)
+static void wait_fetch(long budget_ms)
 {
-    if (!g_fetch_job)
-        return;
-    for (long waited_ms = 0; waited_ms < max_wait_ms && !atomic_load(&g_fetch_done);
+    for (long waited_ms = 0; waited_ms < budget_ms && !atomic_load(&g_fetch_done);
          waited_ms += 20) {
         struct timespec delay = {0, 20 * 1000 * 1000};
         nanosleep(&delay, NULL);
     }
 }
 
+void catalog_wait(long max_wait_ms)
+{
+    if (!g_fetch_job)
+        return;
+    /* Anchored at fetch start so requests during a slow refresh do not each stall in full. */
+    wait_fetch(max_wait_ms - (monotonic_ms() - g_fetch_started_ms));
+}
+
 void catalog_drain(long max_wait_ms)
 {
     if (!g_fetch_job)
         return;
-    catalog_wait(max_wait_ms);
+    /* Call-relative: the grace is for finishing the fetch, however long it has already run. */
+    wait_fetch(max_wait_ms);
     if (!atomic_load(&g_fetch_done))
         bg_job_cancel(g_fetch_job);
     bg_job_join(g_fetch_job);

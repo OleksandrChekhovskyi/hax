@@ -127,8 +127,9 @@ double catalog_price(const struct catalog_entry *entry, long input_tokens, long 
  * threshold, otherwise 0. Fetch failures leave the existing snapshot untouched. */
 long catalog_prefetch(void);
 
-/* Wait up to `max_wait_ms` for a background refresh to land, leaving a slower fetch running for
- * later callers. No-op when no refresh is running. */
+/* Wait for a background refresh to land, up to `max_wait_ms` measured from its start so stacked
+ * callers share the budget, leaving a slower fetch running for later callers. No-op when no
+ * refresh is running. */
 void catalog_wait(long max_wait_ms);
 
 /* Give short-lived runs up to `max_wait_ms` to finish a background refresh, then cancel and join

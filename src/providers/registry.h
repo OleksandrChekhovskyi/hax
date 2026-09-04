@@ -41,15 +41,18 @@ struct provider_def {
     const char *metadata_api; /* /models dialect: "openai" (flat list) or "anthropic" (paged);
                                  NULL follows the default wire's family */
     int send_cache_key;       /* prompt_cache_key default (0/1) */
-    /* Cache-marker default: "auto" plans chat markers from model rates, "on" always sends them;
-     * NULL sends none. */
+    /* Chat cache-marker default: "auto" plans them from model rates, "on" always sends them,
+     * NULL sends none. Messages always sends them; only a configured providers.<id>.cache=off
+     * drops them. */
     const char *cache;
     int request_cost;             /* chat: request provider-reported per-response cost */
     const char *reasoning_format; /* "flat"/"nested"; NULL → flat */
     /* Chat default for the member prior reasoning replays under; NULL disables replay.
      * providers.<id>.reasoning_roundtrip overrides either way. */
     const char *reasoning_roundtrip;
-    const char *thinking_mode; /* messages: "adaptive"/"budget"/"off"; NULL → compat-safe budget */
+    /* Messages: "auto"/"prefer-adaptive" follow model metadata and differ only for a model the
+     * catalog lacks; "adaptive"/"budget"/"off" pin. NULL → auto. */
+    const char *thinking_mode;
     /* The endpoint signs and validates thinking blocks like the first-party Messages API, so
      * unsigned blocks from other backends are dropped rather than replayed and rejected. */
     int strict_signatures;

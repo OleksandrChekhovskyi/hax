@@ -357,9 +357,9 @@ Keys in the `providers.anthropic-compatible` block:
 | `api_key` | `HAX_ANTHROPIC_API_KEY` | — | `x-api-key` token. Does not inherit `ANTHROPIC_API_KEY`. |
 | `display_name` | `HAX_ANTHROPIC_DISPLAY_NAME` | — | Banner and picker name. |
 | `max_tokens` | `HAX_ANTHROPIC_MAX_TOKENS` | model cap | Maximum output including thinking; clamped to known model limits. |
-| `thinking_mode` | `HAX_ANTHROPIC_THINKING_MODE` | `budget` | `adaptive`, `budget`, or `off`. When unset, selecting an effort switches to adaptive. |
+| `thinking_mode` | `HAX_ANTHROPIC_THINKING_MODE` | `auto` | `auto` follows model metadata; `prefer-adaptive` also assumes adaptive for models the catalog lacks; `adaptive`, `budget`, and `off` pin. Selecting an effort makes an unpinned mode adaptive. |
 | `thinking_budget` | `HAX_ANTHROPIC_THINKING_BUDGET` | max minus 1 | Budget-mode thinking tokens. |
-| `cache` | `HAX_ANTHROPIC_CACHE` | `auto` | Send prompt-cache breakpoints. |
+| `cache` | `HAX_ANTHROPIC_CACHE` | `auto` | Send prompt-cache breakpoints; `off` for endpoints that reject them. |
 | `cache_ttl` | `HAX_ANTHROPIC_CACHE_TTL` | `1h` | Cache TTL: `5m` or `1h`. |
 | `version` | `HAX_ANTHROPIC_VERSION` | `2023-06-01` | API version header. |
 
