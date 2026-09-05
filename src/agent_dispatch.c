@@ -12,6 +12,7 @@
 #include "tool.h"
 #include "xalloc.h"
 #include "render/disp.h"
+#include "render/highlight_sh.h"
 #include "render/render_ctx.h"
 #include "render/spinner.h"
 #include "render/tool_render.h"
@@ -89,6 +90,32 @@ static char *display_extra(const struct tool *tool, const char *args_json, int t
     return trimmed;
 }
 
+/* Shell spans share the header's bold base; each span reopens it after its own color
+ * so a theme closer (which may clear intensity) cannot dim the rest of the command. */
+static void write_sh_span(const char *bytes, size_t n, enum sh_span_kind kind, void *user)
+{
+    struct disp *disp = user;
+    const char *open;
+    const char *close;
+    if (kind == SH_SPAN_STRING) {
+        open = theme_open(THEME_CODE_INLINE);
+        close = theme_close(THEME_CODE_INLINE);
+    } else if (kind == SH_SPAN_OPERATOR) {
+        open = theme_open(THEME_CHROME);
+        close = theme_close(THEME_CHROME);
+    } else if (kind == SH_SPAN_COMMENT) {
+        open = ANSI_DIM;
+        close = ANSI_BOLD_OFF;
+    } else {
+        disp_write(disp, bytes, n);
+        return;
+    }
+    disp_write_ansi(disp, open);
+    disp_write(disp, bytes, n);
+    disp_write_ansi(disp, close);
+    disp_write_ansi(disp, ANSI_BOLD);
+}
+
 static void write_tool_header(struct disp *disp, const struct item *call)
 {
     const char *name = tool_name(call);
@@ -120,7 +147,10 @@ static void write_tool_header(struct disp *disp, const struct item *call)
 
         disp_putc(disp, ' ');
         disp_write_ansi(disp, ANSI_BOLD);
-        disp_write(disp, layout, strlen(layout));
+        if (strcmp(name, "bash") == 0)
+            highlight_sh(layout, strlen(layout), write_sh_span, disp);
+        else
+            disp_write(disp, layout, strlen(layout));
         disp_write_ansi(disp, ANSI_RESET);
         free(layout);
         if (extra && *extra) {

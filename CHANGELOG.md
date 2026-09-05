@@ -7,6 +7,13 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- Bash commands now render with lightweight syntax highlighting: quoted strings, comments, and
+  `&&`/`||`/`|`-style operators are tinted in `[bash]` headers and in `sh`/`bash`/`shell` fenced
+  code blocks, reusing the active theme's code palette. Other tools, plain commands, and
+  unstyled output are unchanged.
+
 ## [0.5.0] - 2026-09-04
 
 ### Added

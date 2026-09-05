@@ -140,6 +140,7 @@ sources = files(
     'src/render/ctrl_strip.c',
     'src/render/diff_color.c',
     'src/render/disp.c',
+    'src/render/highlight_sh.c',
     'src/render/markdown.c',
     'src/render/markdown_scan.c',
     'src/render/markdown_table.c',

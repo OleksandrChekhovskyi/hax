@@ -47,12 +47,20 @@ static const struct tool TOOL_TAIL_PROBE = {
     .display = {.preview_mode = TOOL_PREVIEW_HEAD_TAIL},
 };
 
+/* Bash-shaped probe: the header highlights the command only for this tool name. */
+static const struct tool TOOL_BASH_PROBE = {
+    .def = {.name = "bash"},
+    .display = {.arg_name = "command", .header_rows = 1},
+};
+
 /* agent_find_tool lives in agent_core.c alongside the full tool table; stub it
  * so this test links only its own tools and the render stack. */
 const struct tool *agent_find_tool(const char *name)
 {
     if (strcmp(name, "write") == 0)
         return &TOOL_WRITE;
+    if (strcmp(name, "bash") == 0)
+        return &TOOL_BASH_PROBE;
     if (strcmp(name, "mode-probe") == 0)
         return &TOOL_MODE_PROBE;
     if (strcmp(name, "tail-probe") == 0)
@@ -130,6 +138,51 @@ static const char *cap_read(void)
     size_t n = fread(captured, 1, sizeof(captured) - 1, stdout);
     captured[n] = 0;
     return captured;
+}
+
+/* Render a bare tool header for the named probe tool and return captured bytes. */
+static const char *run_header(const char *name, const char *args_json)
+{
+    struct item call = {
+        .kind = ITEM_TOOL_CALL,
+        .call_id = xstrdup("call-header"),
+        .tool_name = xstrdup(name),
+        .tool_arguments_json = xstrdup(args_json),
+    };
+    struct render_ctx render = {.mode = RENDER_IDLE, .spinner = spinner_new(NULL)};
+
+    cap_reset();
+    render_tool_call_header(&render, &call);
+    const char *cap = cap_read();
+    spinner_free(render.spinner);
+    item_free(&call);
+    return cap;
+}
+
+static void test_bash_header_highlights_shell_spans(void)
+{
+    /* Strings ride the inline-code color, comments stay dim, operators take chrome. */
+    const char *cap = run_header("bash", "{\"command\":\"grep -r 'foo' . # find && wc\"}");
+    EXPECT(strstr(cap, "\x1b[36m'foo'") != NULL);
+    EXPECT(strstr(cap, "\x1b[2m# find && wc") != NULL);
+    EXPECT(strstr(cap, "grep") != NULL);
+}
+
+static void test_bash_header_plain_command_has_no_spans(void)
+{
+    /* Flags and paths are not spans: a plain command renders as one bold run. */
+    const char *cap = run_header("bash", "{\"command\":\"ls -la /tmp\"}");
+    EXPECT(strstr(cap, "ls -la /tmp") != NULL);
+    /* The only chrome escape is the "[bash]" tag itself. */
+    const char *tag = strstr(cap, "[bash]");
+    EXPECT(tag != NULL && strstr(tag, "\x1b[36m") == NULL);
+}
+
+static void test_non_bash_header_has_no_shell_highlight(void)
+{
+    /* Other tools keep their plain bold argument even with shell-like content. */
+    const char *cap = run_header("mode-probe", "{\"command\":\"echo 'hi'\"}");
+    EXPECT(strstr(cap, "\x1b[36m'hi'") == NULL);
 }
 
 /* Run a `write` call through the verbose dispatch path and return the
@@ -260,5 +313,8 @@ int main(void)
     test_visible_content_shows_preview_not_summary();
     test_selector_overrides_non_collapsed_mode();
     test_hidden_tail_not_displayed_by_fallback();
+    test_bash_header_highlights_shell_spans();
+    test_bash_header_plain_command_has_no_spans();
+    test_non_bash_header_has_no_shell_highlight();
     T_REPORT();
 }

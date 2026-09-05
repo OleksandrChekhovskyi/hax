@@ -480,6 +480,76 @@ static void test_code_fence_crlf_lang(void)
     free(got);
 }
 
+/* Shell fences reuse the code palette per span: strings take inline-code cyan, comments
+ * go quiet, operators take chrome, and each span reopens the dim fence base. */
+static void test_code_fence_sh_strings_and_comments(void)
+{
+    /* A comment swallows the rest of the line, so && inside it stays comment-colored. */
+    char *got = render_one("```sh\ngrep 'foo' . # find && wc\n```\n");
+    EXPECT_STR_EQ(got, DIM "grep " CODE "'foo'" DIM " . " DIM CODE "# find && wc" DIM "\n" OFF);
+    free(got);
+}
+
+static void test_code_fence_bash_operators(void)
+{
+    char *got = render_one("```bash\na && b | c\n```\n");
+    EXPECT_STR_EQ(got, DIM "a " CODE "&&" DIM " b " CODE "|" DIM " c\n" OFF);
+    free(got);
+}
+
+static void test_code_fence_non_shell_untouched(void)
+{
+    char *got = render_one("```python\necho 'hi'\n```\n");
+    EXPECT_STR_EQ(got, DIM "echo 'hi'\n" OFF);
+    free(got);
+}
+
+static void test_code_fence_shellsession_untouched(void)
+{
+    /* Console transcripts are not shell source; the info word must match exactly. */
+    char *got = render_one("```shellsession\n$ echo hi\n```\n");
+    EXPECT_STR_EQ(got, DIM "$ echo hi\n" OFF);
+    free(got);
+}
+
+static void test_code_fence_sh_split_across_feeds(void)
+{
+    /* A content line split across feeds highlights once the newline arrives. */
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 0);
+    md_feed(m, "```sh\ngrep 'f", 13);
+    md_feed(m, "oo'\n```\n", 8);
+    md_flush(m);
+    md_free(m);
+    char *got = buf_steal(&out);
+    EXPECT_STR_EQ(got, DIM "grep " CODE "'foo'" DIM "\n" OFF);
+    free(got);
+}
+
+static void test_code_fence_sh_unclosed_at_eof(void)
+{
+    /* A partial final line flushes when the fence closes at EOF. */
+    char *got = render_one("```sh\necho 'hi'");
+    EXPECT_STR_EQ(got, DIM "echo " CODE "'hi'" DIM OFF);
+    free(got);
+}
+
+static void test_code_fence_sh_unstyled_no_escapes(void)
+{
+    struct buf out;
+    buf_init(&out);
+    struct md_renderer *m = md_new(capture, &out, 0);
+    md_set_styled(m, 0);
+    const char *in = "```sh\ngrep 'foo' # find\n```\n";
+    md_feed(m, in, strlen(in));
+    md_flush(m);
+    md_free(m);
+    char *got = buf_steal(&out);
+    EXPECT_STR_EQ(got, "grep 'foo' # find\n");
+    free(got);
+}
+
 /* ---------- list markers ---------- */
 
 static void test_star_space_is_list_marker(void)
@@ -3139,6 +3209,13 @@ int main(void)
     test_code_fence_closer_with_trailing_spaces();
     test_code_fence_crlf_closer();
     test_code_fence_crlf_lang();
+    test_code_fence_sh_strings_and_comments();
+    test_code_fence_bash_operators();
+    test_code_fence_non_shell_untouched();
+    test_code_fence_shellsession_untouched();
+    test_code_fence_sh_split_across_feeds();
+    test_code_fence_sh_unclosed_at_eof();
+    test_code_fence_sh_unstyled_no_escapes();
 
     test_star_space_is_list_marker();
     test_dash_list_passthrough();

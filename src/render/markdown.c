@@ -7,6 +7,7 @@
 
 #include "buf.h"
 #include "xalloc.h"
+#include "render/highlight_sh.h"
 #include "render/markdown_scan.h"
 #include "render/markdown_table.h"
 #include "render/markdown_wrap.h"
@@ -45,6 +46,10 @@ struct md_renderer {
 
     /* Active fence width; a closer needs at least this many backticks and no info string. */
     size_t fence_open_count;
+
+    /* Nonzero while a shell-tagged fence buffers its current line for highlighting. */
+    int fence_sh;
+    struct buf fence_line;
 
     /* Style flags track parser state independently; nested bold and inline code can still alter
      * SGR attributes owned by a heading, so their closers restore its theme. */
@@ -218,8 +223,39 @@ static void open_code_fence(struct md_renderer *m)
     emit_raw(m, theme_open(THEME_CODE_BLOCK));
 }
 
+/* Shell spans inside a fence reopen the fence base after their own color, mirroring how
+ * inline-code and link closers restore a heading theme. Unstyled output drops escapes. */
+static void emit_fence_span(const char *bytes, size_t n, enum sh_span_kind kind, void *user)
+{
+    struct md_renderer *m = user;
+    if (kind == SH_SPAN_PLAIN) {
+        emit_text(m, bytes, n);
+        return;
+    }
+    if (kind == SH_SPAN_STRING)
+        emit_raw(m, theme_open(THEME_CODE_INLINE));
+    else if (kind == SH_SPAN_COMMENT)
+        emit_raw(m, theme_open(THEME_CHROME_DIM));
+    else
+        emit_raw(m, theme_open(THEME_CHROME));
+    emit_text(m, bytes, n);
+    emit_raw(m, theme_open(THEME_CODE_BLOCK));
+}
+
+static void flush_fence_line(struct md_renderer *m)
+{
+    if (m->fence_line.len)
+        highlight_sh(m->fence_line.data, m->fence_line.len, emit_fence_span, m);
+    buf_reset(&m->fence_line);
+}
+
 static void close_code_fence(struct md_renderer *m)
 {
+    /* A partial final line never saw its newline; an unclosed fence at EOF arrives here too. */
+    if (m->fence_sh) {
+        flush_fence_line(m);
+        m->fence_sh = 0;
+    }
     emit_raw(m, theme_close(THEME_CODE_BLOCK));
     m->in_code_fence = 0;
 }
@@ -464,6 +500,18 @@ static enum step_result step_in_code_fence(struct md_renderer *m, struct buf *w,
             }
         }
     }
+    /* Shell fences highlight line by line; the closer check above still sees raw input. */
+    if (m->fence_sh) {
+        if (c == '\n') {
+            flush_fence_line(m);
+            emit_text(m, "\n", 1);
+        } else {
+            buf_append(&m->fence_line, &c, 1);
+        }
+        m->at_line_start = (c == '\n');
+        (*i)++;
+        return STEP_ADVANCED;
+    }
     emit_text(m, &c, 1);
     m->at_line_start = (c == '\n');
     (*i)++;
@@ -561,6 +609,7 @@ static enum step_result step_line_start(struct md_renderer *m, struct buf *w, si
                 return STEP_DEFER;
             open_code_fence(m);
             m->fence_open_count = cnt;
+            m->fence_sh = highlight_sh_lang(w->data + *i + cnt, scan - (*i + cnt));
             *i = scan + 1;
             m->at_line_start = 1;
             return STEP_ADVANCED;
@@ -1051,6 +1100,8 @@ void md_reset(struct md_renderer *m, int wrap_width)
     m->at_line_start = 1;
     m->trailing_spaces = 0;
     m->fence_open_count = 0;
+    m->fence_sh = 0;
+    buf_reset(&m->fence_line);
     m->in_heading = 0;
     m->in_code_fence = 0;
     m->in_inline_code = 0;
@@ -1073,6 +1124,7 @@ void md_free(struct md_renderer *m)
     if (!m)
         return;
     buf_free(&m->tail);
+    buf_free(&m->fence_line);
     md_wrap_free(&m->wrap);
     md_table_free(&m->table);
     free(m);
