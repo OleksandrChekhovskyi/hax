@@ -20,8 +20,9 @@
 #include "model_meta.h"
 #include "provider.h"
 #include "session.h"
-#include "transcript.h"
 #include "system/clock.h"
+#include "system/tempfiles.h"
+#include "transcript.h"
 #include "terminal/ansi.h"
 #include "terminal/interrupt.h"
 #include "tools/bash_process.h"
@@ -68,11 +69,14 @@ static int account_compaction_event(const struct stream_event *event, void *user
     return 0;
 }
 
-/* Compaction has no pause seam, so either latched request cancels the retriable transaction;
- * the loop checkpoint that follows turns it into the run's pause or abort. */
+/* The worker's watchdog reads file activity in hax's run dir; a healthy stream can stay
+ * silent for many minutes, so every tick keeps the heartbeat fresh (HTPR-6251). Compaction
+ * has no pause seam, so either latched request cancels the retriable transaction; the loop
+ * checkpoint that follows turns it into the run's pause or abort. */
 static int compact_cancelled(void *user)
 {
     (void)user;
+    tempfiles_touch_heartbeat();
     return interrupt_abort_requested() || interrupt_pause_requested();
 }
 
@@ -163,6 +167,7 @@ static void json_tool_seen(const struct item *call, void *user)
 static int loop_tick(void *user)
 {
     (void)user;
+    tempfiles_touch_heartbeat();
     return interrupt_abort_requested();
 }
 

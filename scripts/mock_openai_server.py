@@ -32,6 +32,7 @@ COMPLETION_ID = "chatcmpl-mock"
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 FAST_CHUNK_DELAY_SECONDS = 0.05
 SLOW_CHUNK_DELAY_SECONDS = 2.0
+SILENT_SECONDS = 25.0
 MODE_NAMES = (
     "normal",
     "500",
@@ -47,6 +48,7 @@ MODE_NAMES = (
     "truncated",
     "slow",
     "hang",
+    "silent",
     "tool-call",
 )
 MODE_HELP = """\
@@ -61,6 +63,7 @@ Modes:
   truncated    finish_reason=length
   slow         Two-second pauses between text chunks
   hang         200 headers, then silence for --fail-delay seconds, then EOF
+  silent       Headers only, then SILENT_SECONDS of pure silence
   tool-call    Bash call followed by a final text response
 
 Timing knobs for retry-indicator checks:
@@ -152,6 +155,7 @@ class MockHandler(BaseHTTPRequestHandler):
     fail_count = 2
     fail_delay = 0.0
     retry_after = 0
+    silent_seconds = SILENT_SECONDS
     request_count = 0
     request_count_lock = threading.Lock()
 
@@ -269,6 +273,8 @@ class MockHandler(BaseHTTPRequestHandler):
             self.serve_slow()
         elif self.mode == "hang":
             self.serve_hang(request_number)
+        elif self.mode == "silent":
+            self.serve_silent()
         elif self.mode == "tool-call":
             self.serve_tool_call(request_number)
         else:
@@ -297,6 +303,14 @@ class MockHandler(BaseHTTPRequestHandler):
             self.hold_before_failure()
             return
         self.serve_normal()
+    def serve_silent(self) -> None:
+        # Headers are already out; send nothing for SILENT_SECONDS, then finish normally.
+        # Emulates a provider that is processing a huge request without streaming a byte.
+        time.sleep(self.silent_seconds)
+        self.write_event(delta_chunk("The silent response arrived."))
+        self.write_event(finish_chunk("stop"))
+        self.write_event(usage_chunk(8, 5))
+        self.write_done()
 
     def serve_mid_drop(self) -> None:
         self.write_event(delta_chunk("Let me think about this. The answer is "))
@@ -365,6 +379,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=47821)
     parser.add_argument("--mode", default="normal", choices=MODE_NAMES)
     parser.add_argument(
+        "--silent-seconds",
+        type=float,
+        default=SILENT_SECONDS,
+        help="seconds of byte silence for the silent mode (default: 25)",
+    )
+    parser.add_argument(
         "--fail-count",
         type=int,
         default=2,
@@ -383,8 +403,8 @@ def parse_args() -> argparse.Namespace:
         help="Retry-After header value in seconds for failure responses (default: none)",
     )
     args = parser.parse_args()
-    if not 1 <= args.port <= 65535:
-        parser.error("--port must be between 1 and 65535")
+    if args.port and not 1 <= args.port <= 65535:
+        parser.error("--port must be 0 (ephemeral) or between 1 and 65535")
     if args.fail_count < 0:
         parser.error("--fail-count must be non-negative")
     if args.fail_delay < 0:
@@ -400,10 +420,12 @@ def main() -> int:
     MockHandler.fail_count = args.fail_count
     MockHandler.fail_delay = args.fail_delay
     MockHandler.retry_after = args.retry_after
+    MockHandler.silent_seconds = args.silent_seconds
     MockHandler.request_count = 0
 
     address = ("127.0.0.1", args.port)
     with MockServer(address, MockHandler) as server:
+        bound_port = server.socket.getsockname()[1]
         flaky_suffix = (
             f", fail-count={args.fail_count}"
             if args.mode.startswith("flaky-") or args.mode == "hang"
@@ -414,7 +436,7 @@ def main() -> int:
         if args.retry_after > 0:
             flaky_suffix += f", retry-after={args.retry_after}s"
         sys.stderr.write(
-            f"[mock] listening on http://{address[0]}:{address[1]}/v1 "
+            f"[mock] listening on http://{address[0]}:{bound_port}/v1 "
             f"(mode={args.mode}{flaky_suffix})\n"
         )
         try:

@@ -21,4 +21,10 @@ void tempfile_untrack(const char *path);
  * retained by callers remain available and are retried by later cleanup calls. */
 void tempfiles_cleanup(void);
 
+/* Best-effort liveness heartbeat: create once and keep touching a file in the private run
+ * directory so an external watchdog watching that directory can tell a live process from a
+ * hung one even when the process is legitimately silent (a long model stream or tool call).
+ * Internally throttled; every failure is ignored. */
+void tempfiles_touch_heartbeat(void);
+
 #endif /* HAX_SYSTEM_TEMPFILES_H */

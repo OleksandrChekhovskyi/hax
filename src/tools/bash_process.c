@@ -19,6 +19,7 @@
 #include "xalloc.h"
 #include "system/clock.h"
 #include "system/spawn.h"
+#include "system/tempfiles.h"
 #include "terminal/interrupt.h"
 #include "text/fmt.h"
 #include "tools/bash_env.h"
@@ -301,6 +302,9 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
 
     for (;;) {
         long now_ms = monotonic_ms();
+        /* A long silent foreground command looks idle to the worker's run-dir watchdog; keep
+         * the heartbeat advancing while the shell runs (HTPR-6251). Internally throttled. */
+        tempfiles_touch_heartbeat();
 
         /* A held transition stretches toward the cap until the expected bytes arrive. */
         long transition_deadline = deadline;

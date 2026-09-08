@@ -3,11 +3,14 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "xalloc.h"
+#include "system/clock.h"
 #include "system/path.h"
 #include "text/utf8.h"
 
@@ -162,4 +165,53 @@ int tempfile_create(const char *prefix, const char *suffix, char **path_out)
 
     errno = EEXIST;
     return -1;
+}
+
+/* Liveness heartbeat (HTPR-6251): the agent worker kills a turn whose watched run dir goes
+ * quiet, but a healthy turn can be silent for many minutes while a model stream or a tool
+ * call runs. Ticks call this so the run dir keeps showing life. Deliberately silent on
+ * failure: a diagnostic here would itself reset the worker's output-based idle timer and
+ * hide the stall it is meant to reveal. */
+#define HEARTBEAT_THROTTLE_MS 10000
+
+static char *heartbeat_path;
+static long long heartbeat_last_attempt_ms;
+
+static int heartbeat_create(void)
+{
+    char *path = NULL;
+    int fd = tempfile_create("heartbeat-", ".json", &path);
+    if (fd < 0)
+        return -1;
+    char payload[32];
+    int len = snprintf(payload, sizeof(payload), "{\"pid\":%ld}\n", (long)getpid());
+    if (write(fd, payload, (size_t)len) < 0 && errno == EINTR) {
+        /* Best effort only; the mtime is the signal, not the content. */
+    }
+    close(fd);
+    free(heartbeat_path);
+    heartbeat_path = path;
+    return 0;
+}
+
+void tempfiles_touch_heartbeat(void)
+{
+    long long now = monotonic_ms();
+    /* One attempt per throttle window even on failure: a permanently failing heartbeat must
+     * not spin on create/touch, and a transient one must recover. */
+    if (heartbeat_last_attempt_ms && now - heartbeat_last_attempt_ms < HEARTBEAT_THROTTLE_MS)
+        return;
+    heartbeat_last_attempt_ms = now;
+
+    if (!heartbeat_path || (utimensat(AT_FDCWD, heartbeat_path, NULL, 0) != 0 &&
+                            errno == ENOENT)) {
+        /* First use, or a reaper removed the run dir (or the file): forget the cached
+         * directory so tempfile_create makes a fresh one and re-creates the heartbeat. */
+        free(heartbeat_path);
+        heartbeat_path = NULL;
+        forget_active_dir();
+        if (heartbeat_create() != 0)
+            return;
+    }
+    (void)utimensat(AT_FDCWD, heartbeat_path, NULL, 0);
 }
