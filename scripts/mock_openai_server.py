@@ -33,6 +33,7 @@ CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 FAST_CHUNK_DELAY_SECONDS = 0.05
 SLOW_CHUNK_DELAY_SECONDS = 2.0
 SILENT_SECONDS = 25.0
+SILENT_KEEPALIVE_SECONDS = 30.0
 MODE_NAMES = (
     "normal",
     "500",
@@ -304,9 +305,17 @@ class MockHandler(BaseHTTPRequestHandler):
             return
         self.serve_normal()
     def serve_silent(self) -> None:
-        # Headers are already out; send nothing for SILENT_SECONDS, then finish normally.
-        # Emulates a provider that is processing a huge request without streaming a byte.
-        time.sleep(self.silent_seconds)
+        # Headers are already out; emit only SSE comment keepalives for SILENT_SECONDS,
+        # then finish normally. Emulates a provider that is processing a huge request
+        # without streaming a single event — bytes flow, so a low-speed abort never
+        # fires, but hax has nothing to print and nothing to write locally.
+        deadline = time.monotonic() + self.silent_seconds
+        while time.monotonic() < deadline:
+            time.sleep(min(SILENT_KEEPALIVE_SECONDS, max(0.0, deadline - time.monotonic())))
+            if time.monotonic() >= deadline:
+                break
+            self.wfile.write(b": keepalive\n\n")
+            self.wfile.flush()
         self.write_event(delta_chunk("The silent response arrived."))
         self.write_event(finish_chunk("stop"))
         self.write_event(usage_chunk(8, 5))
