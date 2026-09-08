@@ -407,6 +407,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--port must be 0 (ephemeral) or between 1 and 65535")
     if args.fail_count < 0:
         parser.error("--fail-count must be non-negative")
+    if not (args.silent_seconds >= 0) or args.silent_seconds == float("inf"):
+        parser.error("--silent-seconds must be finite and non-negative")
     if args.fail_delay < 0:
         parser.error("--fail-delay must be non-negative")
     if args.retry_after < 0:

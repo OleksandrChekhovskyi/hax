@@ -9,7 +9,7 @@ the run cleaned up after itself.
 """
 
 import os
-import re
+import socket
 import subprocess
 import sys
 import time
@@ -25,27 +25,38 @@ def fail(message: str, result: harness.Result | None = None) -> None:
     harness.expect(False, message, result)
 
 
+def free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def await_port(port: int, deadline_s: float) -> bool:
+    deadline = time.monotonic() + deadline_s
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
+
+
 def main() -> int:
     home = harness.scratch_dir()
     tmpdir = home / "tmp"
     tmpdir.mkdir()
+    port = free_port()
     server = subprocess.Popen(
         [sys.executable, str(REPO_ROOT / "scripts" / "mock_openai_server.py"),
-         "--port", "0", "--mode", "silent", "--silent-seconds", str(SILENT_SECONDS)],
+         "--port", str(port), "--mode", "silent", "--silent-seconds", str(SILENT_SECONDS)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
+    proc = None
     try:
-        line = ""
-        start = time.monotonic()
-        while time.monotonic() - start < 10 and server.stderr:
-            line = server.stderr.readline()
-            match = re.search(r"listening on http://127\.0\.0\.1:(\d+)/v1", line)
-            if match:
-                break
-        else:
-            fail("mock server did not report its port")
+        if not await_port(port, 10):
+            fail("mock server did not start listening")
             return 1
-        port = int(match.group(1))
 
         env = harness.hermetic_env(home)
         env.update({
@@ -64,29 +75,35 @@ def main() -> int:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
 
-        # Sample the heartbeat while the request is still byte-silent.
+        # Sample through the whole silent window: the baseline plus two throttle-spaced
+        # touches must all appear while the request is still byte-silent.
         seen_mtimes = set()
-        deadline = time.monotonic() + SILENT_SECONDS + 5
+        deadline = time.monotonic() + SILENT_SECONDS + 15
         while time.monotonic() < deadline and proc.poll() is None:
             for path in tmpdir.glob("hax-*/heartbeat-*.json"):
                 try:
                     seen_mtimes.add(path.stat().st_mtime_ns)
                 except OSError:
                     pass
-            if len(seen_mtimes) >= 2:
-                break
             time.sleep(0.25)
 
-        stdout, stderr = proc.communicate(timeout=30)
+        try:
+            stdout, stderr = proc.communicate(timeout=30)
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
+            fail("hax did not exit after the silent window")
+            return 1
         result = harness.Result(
-            subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr),
+            subprocess.CompletedProcess(proc.args, returncode, stdout, stderr),
             workdir,
         )
-        harness.expect(proc.returncode == 0, "exit status is 0", result)
+        harness.expect(returncode == 0, "exit status is 0", result)
         harness.expect("silent response arrived" in stdout, "text reaches stdout", result)
-        if len(seen_mtimes) < 2:
-            fail(f"heartbeat mtime advanced fewer than 2 times while silent "
-                 f"(observed {len(seen_mtimes)})", result)
+        if len(seen_mtimes) < 3:
+            fail(f"heartbeat advanced fewer than 2 times past its baseline while silent "
+                 f"(observed {len(seen_mtimes)} distinct mtimes)", result)
             return 1
 
         # The run dir and heartbeat must not outlive the process.
@@ -94,6 +111,9 @@ def main() -> int:
         harness.expect(not leftovers, "run dir is cleaned up at exit", result)
         return 0
     finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
         server.terminate()
         server.wait(timeout=10)
 
