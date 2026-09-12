@@ -170,6 +170,7 @@ sources = files(
     'src/terminal/notify.c',
     'src/terminal/picker.c',
     'src/terminal/picker_core.c',
+    'src/terminal/question.c',
     'src/terminal/theme.c',
     'src/terminal/ui.c',
     'src/terminal/vt_resolve.c',
@@ -186,6 +187,7 @@ sources = files(
     'src/text/utf8_sanitize.c',
     'src/text/width.c',
 
+    'src/tools/ask.c',
     'src/tools/bash.c',
     'src/tools/bash_cd_strip.c',
     'src/tools/bash_classify.c',

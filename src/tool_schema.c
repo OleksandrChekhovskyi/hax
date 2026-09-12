@@ -13,16 +13,21 @@ json_t *tool_schema_build(const struct tool_def *def)
 
     for (size_t i = 0; def && i < def->n_params; i++) {
         const struct tool_param *param = &def->params[i];
-        json_t *prop = json_object();
+        json_t *prop = NULL;
 
-        if (param->type)
-            json_object_set_new(prop, "type", json_string(param->type));
-        if (param->item_type)
-            json_object_set_new(prop, "items", json_pack("{s:s}", "type", param->item_type));
-        if (param->description)
-            json_object_set_new(prop, "description", json_string(param->description));
-        if (param->minimum)
-            json_object_set_new(prop, "minimum", json_integer(param->minimum));
+        if (param->schema_json)
+            prop = json_loads(param->schema_json, 0, NULL);
+        if (!prop) {
+            prop = json_object();
+            if (param->type)
+                json_object_set_new(prop, "type", json_string(param->type));
+            if (param->item_type)
+                json_object_set_new(prop, "items", json_pack("{s:s}", "type", param->item_type));
+            if (param->description)
+                json_object_set_new(prop, "description", json_string(param->description));
+            if (param->minimum)
+                json_object_set_new(prop, "minimum", json_integer(param->minimum));
+        }
         json_object_set_new(properties, param->name, prop);
 
         if (param->required)

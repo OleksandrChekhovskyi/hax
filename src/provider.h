@@ -103,6 +103,9 @@ struct tool_param {
     const char *description;
     int required;
     long minimum;
+    /* Complete raw JSON Schema object for this parameter; used verbatim when non-NULL, ignoring
+     * type, item_type, description, and minimum. */
+    const char *schema_json;
 };
 
 struct tool_def {

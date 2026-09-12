@@ -114,6 +114,7 @@ test_sources = [
     'text/test_utf8_sanitize.c',
     'text/test_width.c',
 
+    'tools/test_ask.c',
     'tools/test_bash.c',
     'tools/test_bash_cd_strip.c',
     'tools/test_bash_classify.c',

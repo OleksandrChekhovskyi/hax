@@ -47,6 +47,10 @@ struct tool_display {
     enum tool_preview_mode preview_mode;
     /* Zero uses the one-row default. */
     int header_rows;
+    /* The tool takes over the terminal for the duration of run() (a blocking interactive
+     * prompt), so dispatch hides the live indicator before the call and lets normal rendering
+     * resume after it. */
+    int takes_terminal;
     /* Optional allocated suffix for the displayed argument; the caller frees it. */
     char *(*format_extra)(const char *args_json);
     /* Optional per-call override of preview_mode. */
@@ -74,6 +78,7 @@ struct tool {
 extern const struct tool TOOL_READ;
 extern const struct tool TOOL_EDIT;
 extern const struct tool TOOL_WRITE;
+extern const struct tool TOOL_ASK;
 extern const struct tool TOOL_BASH;
 extern const struct tool TOOL_TASK_WAIT;
 

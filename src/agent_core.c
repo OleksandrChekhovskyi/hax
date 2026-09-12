@@ -35,8 +35,10 @@ static const char DEFAULT_SYSTEM_PROMPT[] =
     "When something is ambiguous, infer from the code and pick a sensible default "
     "rather than stopping. Ask only when genuinely blocked: the choice materially "
     "changes the result, an action is destructive or affects shared state, or you "
-    "need a value you can't obtain. To ask, end your turn with one targeted "
-    "question and a recommended default.\n"
+    "need a value you can't obtain. To ask, call `ask_user_question` with a "
+    "short prompt and a few concrete options, best answer first; if that "
+    "tool is unavailable, end your turn with one targeted question and a "
+    "recommended default.\n"
     "\n"
     "When changing code:\n"
     "- Make the smallest correct change that fits the existing style.\n"
@@ -57,7 +59,7 @@ static const char DEFAULT_SYSTEM_PROMPT[] =
     "severity honestly; no flattery. Empty findings is a valid result.";
 
 static const struct tool *const TOOLS[] = {
-    &TOOL_READ, &TOOL_EDIT, &TOOL_WRITE, &TOOL_BASH, &TOOL_TASK_WAIT,
+    &TOOL_READ, &TOOL_EDIT, &TOOL_WRITE, &TOOL_ASK, &TOOL_BASH, &TOOL_TASK_WAIT,
 };
 static const size_t N_TOOLS = sizeof(TOOLS) / sizeof(TOOLS[0]);
 

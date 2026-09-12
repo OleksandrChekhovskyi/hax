@@ -345,6 +345,11 @@ static struct item dispatch_tool_call_collapsed(struct render_ctx *render,
     spinner_park(spinner, is_read ? render->cluster.line_cells : 0);
     spinner_swap_end(spinner);
 
+    /* A terminal-owning tool paints its own full-screen widget; nothing may repaint over it
+     * until the tool returns. */
+    if (prepared->tool && prepared->tool->display.takes_terminal)
+        spinner_hide(spinner);
+
     struct tool_run_ctx run_ctx = {.image_input = image_input};
     char *output = agent_tool_call_run(prepared, &run_ctx);
     spinner_request_label(spinner, "working", "working...");
@@ -394,9 +399,14 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *render,
         preview_mode == TOOL_PREVIEW_HEAD_TAIL ? TOOL_RENDER_HEAD_TAIL : TOOL_RENDER_HEAD;
     struct tool_render renderer;
     tool_render_init(&renderer, disp, spinner, mode);
-    /* An empty live row instead of a parked "working..." label: the indicator sits in the block
-     * and the first output line replaces it in place, so a fast tool never blinks a label. */
-    tool_render_begin_live(&renderer);
+    /* A terminal-owning tool would paint over a live row, so hide the indicator instead. */
+    if (tool && tool->display.takes_terminal)
+        spinner_hide(spinner);
+    else
+        /* An empty live row instead of a parked "working..." label: the indicator sits in the
+         * block and the first output line replaces it in place, so a fast tool never blinks a
+         * label. */
+        tool_render_begin_live(&renderer);
     struct tool_run_ctx run_ctx = {
         .display = tool_render_emit,
         .display_data = &renderer,
