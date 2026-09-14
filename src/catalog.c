@@ -537,6 +537,55 @@ static void fill_from_cache(const char *provider_id, const char *model, struct c
     json_decref(provider);
 }
 
+/* Append the keys of a models-bearing JSON object, deduplicated against what we already hold. */
+static void add_model_ids(char ***ids, size_t *count, size_t *capacity, json_t *object)
+{
+    if (!json_is_object(object))
+        return;
+    const char *model;
+    json_t *value;
+    json_object_foreach(object, model, value)
+    {
+        if (!model || !*model)
+            continue;
+        int seen = 0;
+        for (size_t i = 0; i < *count; i++)
+            if (strcmp((*ids)[i], model) == 0) {
+                seen = 1;
+                break;
+            }
+        if (seen)
+            continue;
+        if (*count == *capacity) {
+            *capacity = *capacity ? *capacity * 2 : 8;
+            *ids = xrealloc(*ids, *capacity * sizeof(**ids));
+        }
+        (*ids)[(*count)++] = xstrdup(model);
+    }
+}
+
+/* Snapshot and config tiers together with config taking precedence. */
+char **catalog_list_model_ids(const char *provider_id, const char *catalog_id, size_t *count)
+{
+    *count = 0;
+    char **ids = NULL;
+    size_t capacity = 0;
+
+    const json_t *config_models = config_json_node("catalog.models");
+    if (json_is_object(config_models)) {
+        add_model_ids(&ids, count, &capacity, json_object_get(config_models, provider_id));
+        if (catalog_id && provider_id && strcmp(catalog_id, provider_id) != 0)
+            add_model_ids(&ids, count, &capacity, json_object_get(config_models, catalog_id));
+    }
+    if (catalog_id && *catalog_id) {
+        json_t *slice = cache_provider_slice(catalog_id);
+        if (json_is_object(slice))
+            add_model_ids(&ids, count, &capacity, json_object_get(slice, "models"));
+        json_decref(slice);
+    }
+    return ids; /* NULL when nothing was collected */
+}
+
 /* ---------------- cache-tier memo (foreground thread) ---------------- */
 
 /* Only the foreground accesses the memo; the worker publishes refreshes via the generation. */

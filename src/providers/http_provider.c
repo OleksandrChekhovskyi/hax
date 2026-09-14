@@ -1,12 +1,15 @@
 /* SPDX-License-Identifier: MIT */
 #include "providers/http_provider.h"
 
+#include <ctype.h>
 #include <fnmatch.h>
 #include <jansson.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
+#include "buf.h"
 #include "catalog.h"
 #include "config.h"
 #include "diag.h"
@@ -24,6 +27,7 @@
 #include "providers/wire.h"
 #include "text/placeholder.h"
 #include "text/url.h"
+#include "transport/api_error.h"
 #include "transport/http.h"
 
 #define MESSAGES_DEFAULT_VERSION    "2023-06-01"
@@ -56,7 +60,8 @@ struct http_provider {
     char *api_key;
     char *name;
     char *catalog_id;
-    char *endpoint; /* for the default wire; other wires derive theirs per request */
+    char *endpoint;     /* for the default wire; other wires derive theirs per request */
+    int path_has_model; /* endpoint carries a {model} placeholder, expanded per request */
     char *config_prefix;
     const struct wire *wire;          /* default; wire_rules and catalog hints override per model */
     const struct wire *metadata_wire; /* auth scheme for /models and probe requests */
@@ -73,6 +78,8 @@ struct http_provider {
     enum chat_reasoning_format reasoning_format;
     struct thinking_setting thinking; /* the def's; providers.<id>.thinking_mode overrides */
     int strict_signatures;
+    int body_version;     /* Messages: anthropic_version goes in the body, no version header */
+    int cache_default;    /* Messages cache_control default; chat uses cache_mode */
     char **extra_headers; /* "Name: value" templates; {session_id} expands per request */
     json_t *extra_body;
     struct http_auth_source auth; /* zeroed ops: the api_key authenticates requests */
@@ -82,6 +89,7 @@ struct http_provider {
     char *default_effort;
 
     const char *length_hint;    /* borrowed for the provider lifetime */
+    const char *payload_hint;   /* borrowed; appended to a request-too-large HTTP error */
     const char *const *efforts; /* borrowed, or aliases owned_efforts */
     const char **owned_efforts; /* owned array of borrowed strings; NULL when not narrowed */
     size_t n_efforts;
@@ -285,13 +293,43 @@ static int stream_auth_recover(void *ctx, long http_status, http_tick_cb tick, v
                                                tick, tick_user);
 }
 
+/* Whether `error_body` describes a request that exceeded the backend's payload cap, so a def's
+ * payload_hint can replace the cryptic "too large" message with an actionable one. Case-insensitive
+ * over the common phrasings (Google's "Request payload size exceeds the limit: N bytes"). */
+static int payload_too_large(const char *body)
+{
+    if (!body)
+        return 0;
+    size_t len = strlen(body);
+    if (len >= 4096)
+        len = 4095;
+    char lower[4096];
+    for (size_t i = 0; i < len; i++)
+        lower[i] = (char)tolower((unsigned char)body[i]);
+    lower[len] = '\0';
+    static const char *const NEEDLES[] = {"payload size", "too large", "request too large",
+                                          "payload limit"};
+    for (size_t i = 0; i < sizeof(NEEDLES) / sizeof(NEEDLES[0]); i++)
+        if (strstr(lower, NEEDLES[i]))
+            return 1;
+    return 0;
+}
+
 static char *stream_auth_error_message(void *ctx, long http_status, const char *error_body)
 {
-    (void)error_body;
     struct http_stream *stream = ctx;
-    if (http_status != 401)
-        return NULL;
-    return stream->provider->auth.ops->unauthorized_message(stream->provider->auth.state);
+    /* A rejected credential names the recovery step rather than the raw HTTP error. */
+    if (http_status == 401 && stream->provider->auth.ops)
+        return stream->provider->auth.ops->unauthorized_message(stream->provider->auth.state);
+    /* Vertex caps the request body at 30 MB; a long image-heavy session can hit that before the
+     * 1M-token window, and the error only says the request was too large. */
+    if (stream->provider->payload_hint && payload_too_large(error_body)) {
+        char *base = format_api_error(http_status, error_body);
+        char *combined = xasprintf("%s\n%s", base, stream->provider->payload_hint);
+        free(base);
+        return combined;
+    }
+    return NULL;
 }
 
 /* The wire `model` speaks: the first matching model_apis rule, else the catalog hint on a
@@ -335,6 +373,7 @@ static int request_reads_metadata(const struct http_provider *provider)
     return provider->catalog_wires || provider->n_wire_rules > 0 ||
            provider->wire != &WIRE_OPENAI_RESPONSES;
 }
+static char *model_expand_endpoint(const char *endpoint, const char *model);
 
 static int http_provider_stream(struct provider *base, const struct context *context,
                                 const char *model, stream_cb callback, void *callback_user,
@@ -392,6 +431,9 @@ static int http_provider_stream(struct provider *base, const struct context *con
         opts.thinking_budget = config_scoped_int(provider->config_prefix, "thinking_budget");
         opts.show_reasoning = config_bool("show_reasoning");
         opts.allow_empty_signature = !provider->strict_signatures;
+        /* Vertex raw-Predict reads the version from the body and drops the header. */
+        opts.omit_model = provider->body_version;
+        opts.anthropic_version = provider->body_version ? provider->version : NULL;
     } else {
         struct catalog_entry rates;
         model_meta_rates(base, model, &rates);
@@ -407,8 +449,13 @@ static int http_provider_stream(struct provider *base, const struct context *con
     if (!body)
         return -1;
 
-    char *endpoint =
-        wire == provider->wire ? NULL : xasprintf("%s%s", provider->base_url, wire->path);
+    char *endpoint = NULL;
+    if (wire == provider->wire) {
+        if (provider->path_has_model)
+            endpoint = model_expand_endpoint(provider->endpoint, model);
+    } else {
+        endpoint = xasprintf("%s%s", provider->base_url, wire->path);
+    }
     struct stream_retry request = {
         .endpoint = endpoint ? endpoint : provider->endpoint,
         .body = body,
@@ -424,6 +471,8 @@ static int http_provider_stream(struct provider *base, const struct context *con
     };
     if (provider->auth.ops) {
         request.recover = stream_auth_recover;
+        request.error_message = stream_auth_error_message;
+    } else if (provider->payload_hint) {
         request.error_message = stream_auth_error_message;
     }
     int result = stream_retry_run(&request, callback, callback_user, tick, tick_user);
@@ -609,6 +658,65 @@ static int def_base_url_port_templated(const struct provider_def *def)
     return def->base_url && placeholder_present(def->base_url, PORT_PLACEHOLDER);
 }
 
+/* Expand "{name}" placeholders in `template` into provider config values. "port" resolves through
+ * the typed providers.<id>.port (def default); any other name reads providers.<id>.<name> as a
+ * string. An unresolvable placeholder is dropped. Returns owned. */
+static char *expand_config_placeholders(const struct provider_def *def, const char *template)
+{
+    struct buf out;
+    buf_init(&out);
+    const char *rest = template;
+    while (*rest) {
+        const char *open = strstr(rest, "{");
+        if (!open) {
+            buf_append(&out, rest, strlen(rest));
+            break;
+        }
+        buf_append(&out, rest, (size_t)(open - rest));
+        const char *close = strchr(open, '}');
+        if (!close) {
+            buf_append(&out, open, strlen(open));
+            break;
+        }
+        const char *name = open + 1;
+        size_t name_len = (size_t)(close - name);
+        if (name_len == 4 && memcmp(name, "port", 4) == 0) {
+            char *key = xasprintf("providers.%s.port", def->id);
+            int port = config_int(key);
+            free(key);
+            if (port < 1 || port > 65535)
+                port = def->port;
+            if (port >= 1) {
+                char stack[32];
+                snprintf(stack, sizeof(stack), "%d", port);
+                buf_append(&out, stack, strlen(stack));
+            }
+        } else if (name_len == 5 && memcmp(name, "model", 5) == 0) {
+            /* {model} is resolved per request, not from config. */
+            buf_append(&out, open, (size_t)(close - open) + 1);
+        } else {
+            char *key = xasprintf("providers.%s.%.*s", def->id, (int)name_len, name);
+            const char *value = config_str_nonempty(key);
+            free(key);
+            if (value)
+                buf_append(&out, value, strlen(value));
+        }
+        rest = close + 1;
+    }
+    return buf_steal(&out);
+}
+
+/* Return the endpoint with {model} substituted for `model`, or NULL when `endpoint` carries no
+ * such placeholder. Owned. */
+static char *model_expand_endpoint(const char *endpoint, const char *model)
+{
+    const char *placeholder = strstr(endpoint, "{model}");
+    if (!placeholder)
+        return NULL;
+    return xasprintf("%.*s%s%s", (int)(placeholder - endpoint), endpoint, model,
+                     placeholder + strlen("{model}"));
+}
+
 /* Expand a "{port}" placeholder in a def's default base_url: providers.<name>.port, else the
  * def's own port. Returns the owned expansion, or NULL when the URL carries no placeholder or
  * no port resolves. */
@@ -633,28 +741,34 @@ static char *expand_port_template(const struct provider_def *def)
 }
 
 /* Resolve the def's endpoint: a pinned def's own base_url; otherwise the configured
- * providers.<id>.base_url verbatim, else the def's default with any "{port}" placeholder
- * expanded. Owned; NULL when nothing resolves. The trailing slash is trimmed so
- * "<base>/models" and "<base><wire path>" never double it. */
+ * providers.<id>.base_url verbatim, else the def's resolve_base_url hook, else the def's default
+ * with any "{port}" placeholder expanded. Owned; NULL when nothing resolves. The trailing slash
+ * is trimmed so "<base>/models" and "<base><wire path>" never double it. */
 static char *def_base_url(const struct provider_def *def)
 {
-    const char *base = def->base_url;
-    char *expanded = NULL;
-    if (!def->pinned) {
-        char *key = xasprintf("providers.%s.base_url", def->id);
-        const char *configured = config_str_nonempty(key);
-        free(key);
-        if (configured) {
-            base = configured;
-        } else {
-            expanded = expand_port_template(def);
-            if (expanded)
-                base = expanded;
-        }
+    if (def->pinned)
+        return def->base_url ? url_trim_trailing_slashes(def->base_url) : NULL;
+
+    char *key = xasprintf("providers.%s.base_url", def->id);
+    const char *configured = config_str_nonempty(key);
+    free(key);
+    if (configured)
+        return url_trim_trailing_slashes(configured);
+    if (def->resolve_base_url) {
+        char *resolved = def->resolve_base_url(def);
+        if (!resolved)
+            return NULL;
+        char *trimmed = url_trim_trailing_slashes(resolved);
+        free(resolved);
+        return trimmed;
     }
-    char *trimmed = base ? url_trim_trailing_slashes(base) : NULL;
-    free(expanded);
-    return trimmed;
+    char *expanded = expand_port_template(def);
+    if (expanded) {
+        char *trimmed = url_trim_trailing_slashes(expanded);
+        free(expanded);
+        return trimmed;
+    }
+    return def->base_url ? url_trim_trailing_slashes(def->base_url) : NULL;
 }
 
 void http_provider_availability(const struct provider_def *def, struct provider_availability *out)
@@ -690,6 +804,53 @@ void http_provider_availability(const struct provider_def *def, struct provider_
     }
     free(prefix);
     free(base);
+}
+
+/* A generic /model listing for endpoints that serve no /models route (Vertex), built entirely
+ * from the catalog: the ids it knows, enriched with their catalog metadata so the picker and
+ * autocomplete render context, cost, and effort without a network round trip. */
+int http_provider_list_catalog_models(struct provider *base, struct model_info **models,
+                                      size_t *n_models, char **error, http_tick_cb tick,
+                                      void *tick_user)
+{
+    (void)tick;
+    (void)tick_user;
+    const char *provider_id = provider_stable_id(base);
+    struct http_provider *provider = (struct http_provider *)base;
+    size_t count = 0;
+    char **ids = catalog_list_model_ids(provider_id, provider->catalog_id, &count);
+    if (!ids || count == 0) {
+        free(ids);
+        *models = NULL;
+        *n_models = 0;
+        *error = xasprintf("no catalog metadata for %s — the models.dev snapshot may be missing",
+                           provider->name);
+        return -1;
+    }
+
+    struct model_info *list = xcalloc(count, sizeof(*list));
+    for (size_t i = 0; i < count; i++) {
+        model_info_init(&list[i]);
+        list[i].id = ids[i]; /* transfer ownership */
+        struct catalog_entry entry;
+        if (catalog_lookup(provider_id, provider->catalog_id, ids[i], &entry) == 0) {
+            list[i].context = entry.context_window;
+            list[i].max_output = entry.max_output;
+            list[i].image_input = entry.image_input == CATALOG_SUPPORT_YES  ? PROVIDER_CAP_YES
+                                  : entry.image_input == CATALOG_SUPPORT_NO ? PROVIDER_CAP_NO
+                                                                            : PROVIDER_CAP_UNKNOWN;
+            list[i].cost_input = entry.cost_input;
+            list[i].cost_cache_read = entry.cost_cache_read;
+            list[i].cost_output = entry.cost_output;
+            list[i].cost_cache_write = entry.cost_cache_write;
+            list[i].cost_cache_write_1h = entry.cost_cache_write_1h;
+            list[i].efforts = entry.efforts;
+        }
+    }
+    free(ids);
+    *models = list;
+    *n_models = count;
+    return 0;
 }
 
 /* A declared <prefix>.model_apis block, valid members or not: routing intent makes the provider
@@ -907,7 +1068,15 @@ struct provider *http_provider_new(const struct provider_def *def)
     provider->name = xstrdup(resolve_display_name(def, prefix));
     provider->catalog_id = resolve_catalog_id(def, prefix);
     provider->wire = wire;
-    provider->endpoint = xasprintf("%s%s", provider->base_url, provider->wire->path);
+    /* A path template may carry config placeholders ({project}, {location}) resolved now and a
+     * {model} placeholder resolved per request. Non-template paths (wire's path) are literal. */
+    char *expanded_path = NULL;
+    if (def->path_template)
+        expanded_path = expand_config_placeholders(def, def->path_template);
+    const char *path = expanded_path ? expanded_path : wire->path;
+    provider->path_has_model = strstr(path, "{model}") != NULL;
+    provider->endpoint = xasprintf("%s%s", provider->base_url, path);
+    free(expanded_path);
     /* On the OpenAI side any OpenAI-family wire carries the same Bearer scheme; only a Messages
      * default wire paired with OpenAI-shaped metadata needs the explicit Chat stand-in. */
     if (metadata_api == HTTP_METADATA_ANTHROPIC)
@@ -926,7 +1095,9 @@ struct provider *http_provider_new(const struct provider_def *def)
                  provider->name);
     /* Resolved regardless of the default wire: per-model rules can route to Messages. */
     const char *version = config_scoped_str(prefix, "version");
-    provider->version = xstrdup(version && *version ? version : MESSAGES_DEFAULT_VERSION);
+    provider->version = xstrdup(
+        version && *version ? version : (def->version ? def->version : MESSAGES_DEFAULT_VERSION));
+    provider->body_version = def->body_version;
 
     provider->send_cache_key = config_scoped_bool_or(prefix, "send_cache_key", def->send_cache_key);
     provider->request_cost = config_scoped_bool_or(prefix, "request_cost", def->request_cost);
@@ -958,6 +1129,7 @@ struct provider *http_provider_new(const struct provider_def *def)
     }
 
     provider->length_hint = def->length_hint;
+    provider->payload_hint = def->payload_hint;
     /* Efforts are advisory offers narrowed by per-model metadata, so they default on; defs opt
      * out backends with no categorical effort. */
     if (!def->no_efforts) {

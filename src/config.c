@@ -237,6 +237,19 @@ static const struct config_setting REGISTRY[] = {
     {.key = "providers.llamacpp.port", .env_var = "HAX_LLAMACPP_PORT", .default_value = "8080",
      .description = "Port for the local llama-server (when base_url is unset)",
      .kind = CONFIG_KIND_INT, .min = 1, .max = 65535},
+    /* Vertex AI Anthropic serving: only project and location are really required; access_token
+     * names an explicit token that skips the ADC file entirely. */
+    {.key = "providers.vertex.project", .env_var = "GOOGLE_CLOUD_PROJECT",
+     .env_var_alt = "ANTHROPIC_VERTEX_PROJECT_ID",
+     .description = "Google Cloud project id for Vertex AI (ANTHROPIC_VERTEX_PROJECT_ID also "
+                    "works)"},
+    {.key = "providers.vertex.location", .env_var = "GOOGLE_CLOUD_LOCATION",
+     .env_var_alt = "CLOUD_ML_REGION", .default_value = "us-east5",
+     .description = "Vertex AI location (default us-east5; `global`, `us`, or `eu` for the "
+                    "multi-region endpoints; CLOUD_ML_REGION also works)"},
+    {.key = "providers.vertex.access_token", .env_var = "GOOGLE_OAUTH_ACCESS_TOKEN", .secret = 1,
+     .description = "Explicit Google access token, bypassing the ADC file"},
+
     {.key = "providers.mock.script", .env_var = "HAX_MOCK_SCRIPT",
      .description = "Path to a mock-provider script (mock provider only)"},
 };
@@ -554,6 +567,8 @@ static const char *resolve_with_source(const char *key, int skip_empty, int skip
     } else {
         const char *conversation_value = object_get_string(store.conversation, key);
         const char *environment_value = setting ? getenv(setting->env_var) : NULL;
+        const char *alternate_value =
+            setting && setting->env_var_alt ? getenv(setting->env_var_alt) : NULL;
         const char *state_value = object_get_string(store.state, key);
         const char *file_value = object_get_string(store.file, key);
 
@@ -563,6 +578,9 @@ static const char *resolve_with_source(const char *key, int skip_empty, int skip
             value_source = "conversation";
         } else if (value_present(environment_value, skip_empty)) {
             value = environment_value;
+            value_source = "env";
+        } else if (value_present(alternate_value, skip_empty)) {
+            value = alternate_value;
             value_source = "env";
         } else if (value_present(state_value, skip_empty) &&
                    provider_binding_allows(store.state, key)) {

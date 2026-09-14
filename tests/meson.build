@@ -67,6 +67,7 @@ test_sources = [
     'providers/test_responses_body.c',
     'providers/test_responses_events.c',
     'providers/test_stream_retry.c',
+    'providers/test_vertex.c',
     'providers/test_wire.c',
 
     'render/test_ctrl_strip.c',
@@ -155,6 +156,7 @@ e2e_scenarios = [
     'oneshot_signal_interrupt',
     'oneshot_text',
     'oneshot_tool',
+    'vertex',
 ]
 
 python = find_program('python3')

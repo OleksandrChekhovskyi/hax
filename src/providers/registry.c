@@ -20,6 +20,7 @@
 #include "providers/mock.h"
 #include "providers/opencode.h"
 #include "providers/openrouter.h"
+#include "providers/vertex.h"
 
 /* The OpenCode gateway pins a conversation to one upstream by its session header — Go rejects
  * requests without one — and attributes usage by client. */
@@ -113,6 +114,34 @@ static const struct provider_def DEFS[] = {
         .metadata_api = "openai",
         .extra_headers = OPENCODE_HEADERS,
         .query_usage = opencode_go_query_usage,
+    },
+    /* Vertex AI Anthropic serving. The endpoint carries project, location, and model in its URL
+     * (no /models route), needs a Google access token (never a static key, so an auth source),
+     * and reads anthropic_version from the body instead of the header. Host and path come from
+     * providers.vertex.{project,location}; an explicit base_url still wins verbatim. */
+    {
+        .id = "vertex",
+        .display_name = "Vertex AI",
+        .api = "anthropic-messages",
+        .version = "vertex-2023-10-16",
+        .body_version = 1,
+        /* Vertex signs and validates thinking blocks like the first-party Messages API. */
+        .strict_signatures = 1,
+        .cache = "on",
+        .thinking_mode = "adaptive",
+        .catalog_id = "google-vertex-anthropic",
+        .payload_hint = "vertex AI caps a request around 30 MB — trim context or images (or "
+                        "compact with /compact) before it fills",
+        /* No /models route: openai metadata stands in so the catalog list is installed and no
+         * probe launches. */
+        .metadata_api = "openai",
+        .path_template =
+            "/v1/projects/{project}/locations/{location}/publishers/anthropic/models/"
+            "{model}:streamRawPredict",
+        .auth_source = vertex_auth_source,
+        .resolve_base_url = vertex_resolve_base_url,
+        .list_models = http_provider_list_catalog_models,
+        .prepare_availability = vertex_prepare_availability,
     },
     /* Local servers. */
     {

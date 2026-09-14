@@ -261,8 +261,13 @@ json_t *anthropic_build_body(const struct context *context, const char *provider
     json_t *messages =
         anthropic_build_messages(context->items, context->n_items, provider_id, model,
                                  opts->allow_empty_signature, context->image_input);
-    json_t *body = json_pack("{s:s, s:i, s:b, s:o}", "model", model, "max_tokens", opts->max_tokens,
-                             "stream", 1, "messages", messages);
+    json_t *body = json_pack("{s:i, s:b, s:o}", "max_tokens", opts->max_tokens, "stream", 1,
+                             "messages", messages);
+    if (!opts->omit_model)
+        json_object_set_new(body, "model", json_string(model));
+    /* Vertex raw-Predict: anthropic_version goes in the body, and there is no version header. */
+    if (opts->anthropic_version && *opts->anthropic_version)
+        json_object_set_new(body, "anthropic_version", json_string(opts->anthropic_version));
 
     if (context->system_prompt && *context->system_prompt) {
         json_t *system_block =

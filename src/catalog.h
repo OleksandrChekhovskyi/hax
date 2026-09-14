@@ -99,6 +99,11 @@ void catalog_lookup_many(const char *provider_id, const char *catalog_id, const 
  * reference, or NULL when the member is absent or malformed. The caller must call json_decref. */
 json_t *catalog_extract_member(const char *text, const char *key);
 
+/* Collect the model ids the catalog knows under `catalog_id` (the cached snapshot) plus any
+ * catalog.models configuration under `provider_id` or `catalog_id`, deduplicated in written
+ * order. `count` receives the length; the caller frees each id and the array. NULL-safe. */
+char **catalog_list_model_ids(const char *provider_id, const char *catalog_id, size_t *count);
+
 /* Return whether cache writes replace the input charge. A known write rate below the input rate is
  * treated as a storage surcharge; unknown rates use the more common replacement policy. */
 int catalog_cache_write_replaces_input(const struct catalog_entry *entry);
