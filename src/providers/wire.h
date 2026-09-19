@@ -47,6 +47,12 @@ struct wire_body_opts {
     int thinking_budget;       /* tokens; out-of-range values fall back to max_tokens - 1 */
     int show_reasoning;        /* adaptive thinking: summarized display instead of omitted */
     int allow_empty_signature; /* preserve unsigned thinking blocks on compat backends */
+    /* Vertex raw-Predict contract: the endpoint reads `anthropic_version` from the body and names
+     * the model in its URL. `omit_model` drops the model member, and `anthropic_version` (borrowed,
+     * e.g. "vertex-2023-10-16") is sent as the body's anthropic_version member instead of the
+     * anthropic-version header. */
+    int omit_model;
+    const char *anthropic_version;
 };
 
 struct wire {

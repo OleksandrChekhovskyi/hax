@@ -177,6 +177,7 @@ enum config_kind {
 struct config_setting {
     const char *key;
     const char *env_var;
+    const char *env_var_alt; /* secondary fallback env var (enabled/home-dir secrets) */
     const char *default_value;
     const char *description;
     const char *choices; /* '|'-separated; exhaustive for strings, additive for numeric kinds */

@@ -175,6 +175,40 @@ Requests carry the conversation id as `x-opencode-session`, which the gateway re
 routing and prompt caching, and `x-opencode-client: hax`. Both can be overridden in
 `extra_headers` ([below](#request-passthrough)).
 
+## Vertex AI
+
+Vertex AI serves Claude through the Anthropic Messages protocol under a URL that carries the
+project, location, and model:
+
+```sh
+export HAX_PROVIDER=vertex
+export GOOGLE_CLOUD_PROJECT=my-gcp-project     # or ANTHROPIC_VERTEX_PROJECT_ID
+```
+
+hax builds the endpoint's host from the location: `global` uses `aiplatform.googleapis.com`,
+`us`/`eu` use the multi-region replica hosts, and any other value uses `{location}-aiplatform.
+googleapis.com`. Point an explicit `providers.vertex.base_url` at anything else to override the
+host rule verbatim.
+
+Credentials are a Google access token, resolved in this order:
+
+1. `providers.vertex.access_token` or `GOOGLE_OAUTH_ACCESS_TOKEN` — used as-is (no refresh).
+2. An Application Default Credentials `authorized_user` file (from
+   `gcloud auth application-default login`), refreshed in place through its own client id.
+3. Any other ADC shape (service account, workload identity federation, impersonation) — resolved
+   through `gcloud auth application-default print-access-token`.
+
+There is no `/login`; Google owns that flow (`gcloud auth application-default login`).
+
+`/model` is populated from hax's model catalog (`google-vertex-anthropic`) rather than a network
+listing, because the raw-predict endpoint serves no `/models` route. Claude-only for now: Gemini on
+Vertex speaks a different protocol, and the OpenAI-compatible route degrades multi-turn tool use, so
+it is a config recipe rather than a built-in.
+
+Vertex caps a request at about 30 MB; a long image-heavy session can hit that before the 1M-token
+window. When a request is rejected for its payload size, hax points at trimming context or images
+(`/compact`). The catalog's Vertex rates do not model the regional/multi-region premium.
+
 ## llama.cpp
 
 `llama.cpp` selects the convenience provider for a local `llama-server` at
