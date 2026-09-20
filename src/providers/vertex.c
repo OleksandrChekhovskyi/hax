@@ -37,9 +37,7 @@
 #define VERTEX_GCLOUD_MAX_BYTES  8192
 
 /* The default region mirrors Claude Code's CLOUD_ML_REGION default; users override it per
- * deployment. The default and the CLOUD_ML_REGION fallback live in the config registry
- * (providers.vertex.location) so the path template's {location} placeholder resolves from the
- * same single source instead of a second, divergent lookup. */
+ * deployment. Host and path both consume resolve_settings() so their fallbacks cannot diverge. */
 static const char *env_nonempty(const char *name)
 {
     const char *value = getenv(name);
@@ -80,37 +78,78 @@ static const char *config_literal_token(void)
                            NULL);
 }
 
+static int project_valid(const char *project)
+{
+    size_t len = strlen(project);
+    if (len == 0 || len > 128 || !isalnum((unsigned char)project[0]) ||
+        !isalnum((unsigned char)project[len - 1]))
+        return 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)project[i];
+        if (!islower(c) && !isdigit(c) && c != '-' && c != '.' && c != ':')
+            return 0;
+    }
+    return 1;
+}
+
+static int location_valid(const char *location)
+{
+    size_t len = strlen(location);
+    if (len == 0 || len > 63 || !isalnum((unsigned char)location[0]) ||
+        !isalnum((unsigned char)location[len - 1]))
+        return 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)location[i];
+        if (!islower(c) && !isdigit(c) && c != '-')
+            return 0;
+    }
+    return 1;
+}
+
+static int validate_settings(const struct vertex_settings *settings)
+{
+    if (!settings->project) {
+        hax_err("provider 'vertex': project is not set (configure providers.vertex.project / "
+                "HAX_VERTEX_PROJECT, GOOGLE_CLOUD_PROJECT, or ANTHROPIC_VERTEX_PROJECT_ID)");
+        return -1;
+    }
+    if (!project_valid(settings->project)) {
+        hax_err("provider 'vertex': invalid project (use a Google Cloud project ID or number)");
+        return -1;
+    }
+    if (!location_valid(settings->location)) {
+        hax_err("provider 'vertex': invalid location (use lowercase letters, digits, and hyphens)");
+        return -1;
+    }
+    return 0;
+}
+
 char *vertex_resolve_base_url(const struct provider_def *def)
 {
     (void)def;
     struct vertex_settings settings = resolve_settings();
-    if (!settings.project) {
-        hax_err("provider 'vertex': providers.vertex.project is not set (or set "
-                "GOOGLE_CLOUD_PROJECT / ANTHROPIC_VERTEX_PROJECT_ID)");
+    if (validate_settings(&settings) != 0)
         return NULL;
-    }
-    const char *host;
-    char dynamic_host[128];
+
+    char *host;
     if (strcmp(settings.location, "global") == 0) {
-        host = "aiplatform.googleapis.com";
+        host = xstrdup("aiplatform.googleapis.com");
     } else if (strcmp(settings.location, "us") == 0 || strcmp(settings.location, "eu") == 0) {
         /* Multi-region endpoints are served from the region's replica host. */
-        snprintf(dynamic_host, sizeof(dynamic_host), "aiplatform.%s.rep.googleapis.com",
-                 settings.location);
-        host = dynamic_host;
+        host = xasprintf("aiplatform.%s.rep.googleapis.com", settings.location);
     } else {
-        snprintf(dynamic_host, sizeof(dynamic_host), "%s-aiplatform.googleapis.com",
-                 settings.location);
-        host = dynamic_host;
+        host = xasprintf("%s-aiplatform.googleapis.com", settings.location);
     }
-    return xasprintf("https://%s", host);
+    char *url = xasprintf("https://%s", host);
+    free(host);
+    return url;
 }
 
 char *vertex_resolve_path(const struct provider_def *def)
 {
     (void)def;
     struct vertex_settings settings = resolve_settings();
-    if (!settings.project)
+    if (validate_settings(&settings) != 0)
         return NULL;
     return xasprintf("/v1/projects/%s/locations/%s/publishers/anthropic/models/"
                      "{model}:streamRawPredict",

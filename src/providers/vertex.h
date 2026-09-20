@@ -12,9 +12,9 @@ struct http_auth_source;      /* providers/http_provider.h */
  * short-lived access tokens across the session's lifetime. */
 int vertex_auth_source(const struct provider_def *def, struct http_auth_source *out);
 
-/* Resolve the endpoint's base URL (scheme + host) from the resolved project and location: the
+/* Resolve the endpoint's base URL (scheme + host) from the validated project and location: the
  * `global` endpoint, the us/eu multi-region endpoints, or the per-location regional host. Returns
- * an owned URL, or NULL after reporting which value is missing. */
+ * an owned URL, or NULL after reporting the invalid or missing value. */
 char *vertex_resolve_base_url(const struct provider_def *def);
 
 /* Resolve the raw-predict path from the same project/location precedence as the endpoint host. */

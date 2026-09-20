@@ -361,6 +361,80 @@ static int log_error(const struct stream_event *event, void *user)
     return 0;
 }
 
+static char *reject_base_url(const struct provider_def *def)
+{
+    hax_err("provider '%s': endpoint unavailable", def->id);
+    return NULL;
+}
+
+static void test_endpoint_placeholders(void)
+{
+    struct loopback server = {
+        .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+    };
+    int port = loopback_listen(&server);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+
+    struct config_snapshot *saved = config_snapshot_take();
+    config_set_override("providers.path-test.tenant", "team-a");
+    char *base_url = xasprintf("http://127.0.0.1:%d", port);
+    struct provider_def def = {
+        .id = "path-test",
+        .base_url = base_url,
+        .port = 4321,
+        .path_template = "/{tenant}/{tenant}/{model}/again/{model}/port/{port}",
+    };
+    struct provider *provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    if (!provider)
+        goto out_server;
+    int rc = loopback_serve(&server);
+    EXPECT(rc == 0);
+    if (rc != 0)
+        goto out_provider;
+
+    struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
+    struct context context = {.items = items, .n_items = 1};
+    struct error_log log = {0};
+    provider->stream(provider, &context, "model-x", log_error, &log, NULL, NULL);
+    loopback_stop(&server);
+    EXPECT(atomic_load(&server.served) == 1);
+    EXPECT(log.n_errors == 1);
+    EXPECT(strstr(server.requests[0], "POST /team-a/team-a/model-x/again/model-x/port/4321 HTTP") ==
+           server.requests[0]);
+
+out_provider:
+    provider->destroy(provider);
+out_server:
+    loopback_stop(&server);
+    free(base_url);
+    config_snapshot_restore(saved);
+
+    const char *templates[] = {"/{required}/{model}", "/{port}/{model}", "/{broken"};
+    for (size_t i = 0; i < sizeof(templates) / sizeof(templates[0]); i++) {
+        def = (struct provider_def){
+            .id = "missing-path",
+            .base_url = "http://127.0.0.1:1",
+            .path_template = templates[i],
+        };
+        unsigned long diagnostics_before = hax_diag_sequence();
+        provider = http_provider_new(&def);
+        EXPECT(provider == NULL);
+        EXPECT(hax_diag_sequence() == diagnostics_before + 1);
+    }
+
+    def = (struct provider_def){
+        .id = "hook-error",
+        .resolve_base_url = reject_base_url,
+    };
+    unsigned long diagnostics_before = hax_diag_sequence();
+    provider = http_provider_new(&def);
+    EXPECT(provider == NULL);
+    EXPECT(hax_diag_sequence() == diagnostics_before + 1);
+}
+
 /* Point the catalog cache tier at a private snapshot naming each model's wire. */
 static void write_catalog_fixture(void)
 {
@@ -1203,6 +1277,7 @@ int main(void)
     test_metadata_api_override();
     test_metadata_api_none();
     test_metadata_api_none_catalog_listing();
+    test_endpoint_placeholders();
     test_model_wire_routing();
     test_messages_defaults_follow_def();
     test_vertex_thinking_follows_catalog();

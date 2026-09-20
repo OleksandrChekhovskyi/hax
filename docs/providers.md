@@ -196,8 +196,9 @@ Project and location use this precedence:
 
 Empty values are skipped. The resolved project and location are used together for the request path
 and regional host. `global` uses `aiplatform.googleapis.com`, `us`/`eu` use the multi-region replica
-hosts, and any other location uses `{location}-aiplatform.googleapis.com`. An explicit
-`providers.vertex.base_url` overrides only the host rule.
+hosts, and any other location uses `{location}-aiplatform.googleapis.com`. Project must be a
+Google Cloud project ID or number; location accepts lowercase letters, digits, and hyphens. Both
+remain required and validated when `providers.vertex.base_url` overrides the host rule.
 
 Credentials are a Google access token, resolved in this order:
 

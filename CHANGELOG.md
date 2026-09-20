@@ -33,6 +33,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- Vertex endpoint construction validates project/location even with a custom base URL, avoids
+  truncated regional hosts, and reports one actionable construction error.
 - Vertex uses budget thinking for catalog-listed budget-only Claude models instead of forcing
   adaptive thinking; unlisted models retain the adaptive default.
 - Vertex OAuth client secrets, refresh tokens, and access tokens are redacted from HTTP traces,

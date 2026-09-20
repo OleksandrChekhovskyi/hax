@@ -1,7 +1,7 @@
 # PR 37 implementation notes
 
 Each numbered section describes one independently committed change from `pr-37-review-plan.md`.
-The first six changes are implemented here; the remaining review items are still pending.
+The first seven changes are implemented here; the remaining review items are still pending.
 
 ## 1. Redact Vertex authentication secrets from HTTP traces
 
@@ -415,3 +415,79 @@ No real Google credentials or public endpoints were used.
 Harden endpoint construction: replace ad-hoc placeholder expansion, resolve every model occurrence,
 fail required unresolved placeholders, validate project/location under base URL overrides, avoid
 host truncation, and remove duplicate construction diagnostics.
+
+## 7. Harden endpoint placeholder expansion and Vertex validation
+
+### Problem
+
+HTTP-provider path templates had a second, ad-hoc replacement implementation. Missing values were
+silently deleted, `{model}` replaced only its first occurrence, and port parsing was duplicated.
+Vertex host formatting used a fixed 128-byte buffer, so long locations could be truncated into a
+different hostname. A custom base URL bypassed project validation, and a failed base resolver was
+followed by a generic `no base_url` diagnostic even though the hook had already explained the
+failure.
+
+### Changes
+
+- Resolve named path-template values with the shared `placeholder_expand()` primitive. It replaces
+  every occurrence, including repeated config values and repeated `{model}` placeholders.
+- Preserve `{model}` until request time, but fail construction with one diagnostic when another
+  placeholder has no non-empty value, when `{port}` cannot resolve, or when an opening brace is
+  unterminated. Required values are no longer silently removed from the request path.
+- Extract one typed, bounded port resolver and use it for both base URL and path templates. Existing
+  malformed/out-of-range fallback behavior for shipped local providers is unchanged.
+- Resolve path templates before provider discovery or auth-state construction, so endpoint failures
+  do not acquire resources that then need partial-provider cleanup.
+- Treat a NULL `resolve_path` result as a reported construction failure. The hook contract now
+  states this explicitly.
+- Validate Vertex project and location in Vertex code. Projects accept lowercase project IDs,
+  numbers, and domain-scoped forms without URL separators; locations accept lowercase letters,
+  digits, and hyphens and fit one DNS label. Both are validated when a custom base URL is present.
+- Replace `dynamic_host[128]` with allocated formatting. Valid location text is either represented
+  completely or rejected; it is never truncated into another endpoint.
+- Respect the existing base-resolver diagnostic contract: generic construction adds `no base_url`
+  only when no resolver hook exists. Vertex therefore emits exactly one actionable error.
+- Document endpoint validation and add an Unreleased changelog entry.
+
+Project/location fallback remains in Vertex's resolver, not generic template code. This piece does
+not add URL encoding or automatic model-name conversion; model IDs retain their existing endpoint
+spelling.
+
+### Regression coverage
+
+- Send a request through a generic path template containing a repeated config placeholder, two
+  `{model}` occurrences, and `{port}`. Assert all occurrences and the def fallback port in the
+  captured request target.
+- Check that a missing named value, unresolved port, and unterminated placeholder each reject
+  construction with exactly one diagnostic.
+- Use a reporting base resolver that returns NULL and verify generic construction does not append a
+  second diagnostic.
+- Construct Vertex without a project both with and without an explicit base URL, asserting one
+  diagnostic in each case.
+- Reject project path injection, location path injection, and a location longer than a DNS label
+  even under a base override.
+- Resolve a valid 63-character location and compare the complete allocated regional URL.
+- Retain the successful explicit-base streaming test, which checks the full project/location/model
+  raw-predict target.
+
+### Validation
+
+- All five focused targets passed:
+
+  ```sh
+  scripts/check.sh test providers/http_provider providers/vertex providers/registry \
+      text/placeholder e2e/vertex
+  ```
+
+- `make tests` passed all 121 tests under the external-network and credential guard.
+- `make lint` and `git diff --check` passed; all touched C sources and headers were formatted.
+- ASan/UBSan and TSan setup were retried and remain blocked by the missing runtime libraries listed
+  in change 1; no sanitizer pass is claimed.
+
+All endpoint requests used loopback fixtures; no Google endpoint or credential was used.
+
+### Next change
+
+Extract Google ADC credential loading, token renewal, auth operations, and credential status into
+`vertex_auth.{c,h}` before hardening non-refresh preparation, cancellation, recovery, and ADC
+support.

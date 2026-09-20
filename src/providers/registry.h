@@ -37,7 +37,8 @@ struct provider_def {
      * ({project}, {location}, {port}, ...; substituted at construction). NULL → the wire path. */
     const char *path_template;
     /* Resolve an owned request path for providers whose placeholders use external settings.
-     * NULL uses path_template/the wire path. */
+     * Returns NULL after reporting why construction must fail. Without a hook, path_template or
+     * the wire path applies. */
     char *(*resolve_path)(const struct provider_def *def);
     /* Resolve the endpoint's base URL from supplied config for defs whose host depends on a
      * config value (e.g. a cloud per-region endpoint). Called only when no explicit base_url is

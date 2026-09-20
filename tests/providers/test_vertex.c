@@ -112,7 +112,60 @@ static void test_endpoint_setting_precedence(void)
     char *url = vertex_resolve_base_url(NULL);
     EXPECT(url == NULL);
     EXPECT(vertex_resolve_path(NULL) == NULL);
+    EXPECT(hax_diag_sequence() == diagnostics_before + 2);
+    EXPECT(config_load(NULL) == 0);
+}
+
+static void expect_construct_failure(const char *config_json)
+{
+    EXPECT(config_load(config_json) == 0);
+    unsigned long diagnostics_before = hax_diag_sequence();
+    struct provider *provider = provider_construct(provider_find("vertex"));
+    EXPECT(provider == NULL);
     EXPECT(hax_diag_sequence() == diagnostics_before + 1);
+    if (provider)
+        provider->destroy(provider);
+}
+
+static void test_endpoint_validation(void)
+{
+    clear_vertex_setting_env();
+    expect_construct_failure("{}");
+    expect_construct_failure("{\"providers\":{\"vertex\":{"
+                             "\"base_url\":\"http://127.0.0.1:1\"}}}");
+    expect_construct_failure("{\"providers\":{\"vertex\":{"
+                             "\"base_url\":\"http://127.0.0.1:1\","
+                             "\"project\":\"bad/project\"}}}");
+    expect_construct_failure("{\"providers\":{\"vertex\":{"
+                             "\"base_url\":\"http://127.0.0.1:1\","
+                             "\"project\":\"valid-project\","
+                             "\"location\":\"bad/location\"}}}");
+
+    char long_location[65];
+    memset(long_location, 'a', sizeof(long_location) - 1);
+    long_location[sizeof(long_location) - 1] = '\0';
+    char *config_json = xasprintf("{\"providers\":{\"vertex\":{"
+                                  "\"base_url\":\"http://127.0.0.1:1\","
+                                  "\"project\":\"valid-project\","
+                                  "\"location\":\"%s\"}}}",
+                                  long_location);
+    expect_construct_failure(config_json);
+    free(config_json);
+
+    char max_location[64];
+    memset(max_location, 'a', sizeof(max_location) - 1);
+    max_location[sizeof(max_location) - 1] = '\0';
+    config_json = xasprintf("{\"providers\":{\"vertex\":{"
+                            "\"project\":\"valid-project\","
+                            "\"location\":\"%s\"}}}",
+                            max_location);
+    EXPECT(config_load(config_json) == 0);
+    free(config_json);
+    char *url = vertex_resolve_base_url(NULL);
+    char *want = xasprintf("https://%s-aiplatform.googleapis.com", max_location);
+    EXPECT_STR_EQ(url, want);
+    free(want);
+    free(url);
     EXPECT(config_load(NULL) == 0);
 }
 
@@ -453,6 +506,7 @@ int main(void)
     EXPECT(curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK);
     setup_fixtures();
     test_endpoint_setting_precedence();
+    test_endpoint_validation();
     test_def_registered();
     test_messages_body_variant();
     test_stream_raw_predict();

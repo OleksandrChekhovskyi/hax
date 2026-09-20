@@ -9,7 +9,6 @@
 #include <string.h>
 #include <strings.h>
 
-#include "buf.h"
 #include "catalog.h"
 #include "config.h"
 #include "diag.h"
@@ -654,88 +653,88 @@ void http_provider_prepare_base_url_availability(const char *base_url, const cha
     free(authorization);
 }
 
-#define PORT_PLACEHOLDER "port"
+#define MODEL_PLACEHOLDER "model"
+#define PORT_PLACEHOLDER  "port"
 
 static int def_base_url_port_templated(const struct provider_def *def)
 {
     return def->base_url && placeholder_present(def->base_url, PORT_PLACEHOLDER);
 }
 
-/* Expand "{name}" placeholders in `template` into provider config values. "port" resolves through
- * the typed providers.<id>.port (def default); any other name reads providers.<id>.<name> as a
- * string. An unresolvable placeholder is dropped. Returns owned. */
-static char *expand_config_placeholders(const struct provider_def *def, const char *template)
+static int resolve_port(const struct provider_def *def)
 {
-    struct buf out;
-    buf_init(&out);
-    const char *rest = template;
-    while (*rest) {
-        const char *open = strstr(rest, "{");
-        if (!open) {
-            buf_append(&out, rest, strlen(rest));
-            break;
-        }
-        buf_append(&out, rest, (size_t)(open - rest));
-        const char *close = strchr(open, '}');
-        if (!close) {
-            buf_append(&out, open, strlen(open));
-            break;
-        }
-        const char *name = open + 1;
-        size_t name_len = (size_t)(close - name);
-        if (name_len == 4 && memcmp(name, "port", 4) == 0) {
-            char *key = xasprintf("providers.%s.port", def->id);
-            int port = config_int(key);
-            free(key);
-            if (port < 1 || port > 65535)
-                port = def->port;
-            if (port >= 1) {
-                char stack[32];
-                snprintf(stack, sizeof(stack), "%d", port);
-                buf_append(&out, stack, strlen(stack));
-            }
-        } else if (name_len == 5 && memcmp(name, "model", 5) == 0) {
-            /* {model} is resolved per request, not from config. */
-            buf_append(&out, open, (size_t)(close - open) + 1);
-        } else {
-            char *key = xasprintf("providers.%s.%.*s", def->id, (int)name_len, name);
-            const char *value = config_str_nonempty(key);
-            free(key);
-            if (value)
-                buf_append(&out, value, strlen(value));
-        }
-        rest = close + 1;
-    }
-    return buf_steal(&out);
-}
-
-/* Return the endpoint with {model} substituted for `model`, or NULL when `endpoint` carries no
- * such placeholder. Owned. */
-static char *model_expand_endpoint(const char *endpoint, const char *model)
-{
-    const char *placeholder = strstr(endpoint, "{model}");
-    if (!placeholder)
-        return NULL;
-    return xasprintf("%.*s%s%s", (int)(placeholder - endpoint), endpoint, model,
-                     placeholder + strlen("{model}"));
-}
-
-/* Expand a "{port}" placeholder in a def's default base_url: providers.<name>.port, else the
- * def's own port. Returns the owned expansion, or NULL when the URL carries no placeholder or
- * no port resolves. */
-static char *expand_port_template(const struct provider_def *def)
-{
-    if (!def_base_url_port_templated(def))
-        return NULL;
-    /* The typed read parses and bounds-checks a registered setting (llamacpp), falling back to
-     * its registered default; the range guard covers unregistered ports, so a malformed value
-     * degrades to the def's default instead of a malformed URL. */
     char *key = xasprintf("providers.%s.port", def->id);
     int port = config_int(key);
     free(key);
     if (port < 1 || port > 65535)
         port = def->port;
-    if (port < 1)
+    return port >= 1 && port <= 65535 ? port : 0;
+}
+
+/* Expand provider setting placeholders while preserving {model} for request time. */
+static char *expand_config_placeholders(const struct provider_def *def, const char *template)
+{
+    char *expanded = xstrdup(template);
+    const char *rest = template;
+    while ((rest = strchr(rest, '{')) != NULL) {
+        const char *close = strchr(rest + 1, '}');
+        if (!close) {
+            hax_err("provider '%s': unterminated endpoint placeholder", def->id);
+            free(expanded);
+            return NULL;
+        }
+        size_t name_len = (size_t)(close - rest - 1);
+        char *name = xmalloc(name_len + 1);
+        memcpy(name, rest + 1, name_len);
+        name[name_len] = '\0';
+        rest = close + 1;
+        if (strcmp(name, MODEL_PLACEHOLDER) == 0) {
+            free(name);
+            continue;
+        }
+
+        char *value_owned = NULL;
+        const char *value = NULL;
+        if (strcmp(name, PORT_PLACEHOLDER) == 0) {
+            int port = resolve_port(def);
+            if (port)
+                value = value_owned = xasprintf("%d", port);
+        } else {
+            char *key = xasprintf("providers.%s.%s", def->id, name);
+            value = config_str_nonempty(key);
+            free(key);
+        }
+        if (!value) {
+            hax_err("provider '%s': endpoint placeholder {%s} is not set", def->id, name);
+            free(value_owned);
+            free(name);
+            free(expanded);
+            return NULL;
+        }
+        char *next = placeholder_expand(expanded, name, value);
+        free(expanded);
+        expanded = next;
+        free(value_owned);
+        free(name);
+    }
+    return expanded;
+}
+
+/* Return the endpoint with every {model} occurrence substituted, or NULL when absent. */
+static char *model_expand_endpoint(const char *endpoint, const char *model)
+{
+    return placeholder_present(endpoint, MODEL_PLACEHOLDER)
+               ? placeholder_expand(endpoint, MODEL_PLACEHOLDER, model)
+               : NULL;
+}
+
+/* Expand a "{port}" placeholder in a def's default base_url. */
+static char *expand_port_template(const struct provider_def *def)
+{
+    if (!def_base_url_port_templated(def))
+        return NULL;
+    int port = resolve_port(def);
+    if (!port)
         return NULL;
     char *port_text = xasprintf("%d", port);
     char *url = placeholder_expand(def->base_url, PORT_PLACEHOLDER, port_text);
@@ -1029,20 +1028,35 @@ struct provider *http_provider_new(const struct provider_def *def)
                  name, def->base_url);
     char *base_url = def_base_url(def);
     if (!base_url) {
-        char *key = xasprintf("%s.base_url", prefix);
-        const struct config_setting *setting = config_setting_find(key);
-        if (setting && setting->env_var)
-            hax_err("provider '%s': no base_url (set %s, or %s in config.json)", name,
-                    setting->env_var, key);
-        else
-            hax_err("provider '%s': no base_url (set %s in config.json)", name, key);
-        free(key);
+        if (!def->resolve_base_url) {
+            char *key = xasprintf("%s.base_url", prefix);
+            const struct config_setting *setting = config_setting_find(key);
+            if (setting && setting->env_var)
+                hax_err("provider '%s': no base_url (set %s, or %s in config.json)", name,
+                        setting->env_var, key);
+            else
+                hax_err("provider '%s': no base_url (set %s in config.json)", name, key);
+            free(key);
+        }
         free(prefix);
         return NULL;
     }
 
+    char *expanded_path = NULL;
+    if (def->resolve_path)
+        expanded_path = def->resolve_path(def);
+    else if (def->path_template)
+        expanded_path = expand_config_placeholders(def, def->path_template);
+    if ((def->resolve_path || def->path_template) && !expanded_path) {
+        free(base_url);
+        free(prefix);
+        return NULL;
+    }
+    const char *path = expanded_path ? expanded_path : wire->path;
+
     int model_discovered = 0;
     if (def->discover && def->discover(base_url, &model_discovered) != 0) {
+        free(expanded_path);
         free(base_url);
         free(prefix);
         return NULL;
@@ -1052,6 +1066,7 @@ struct provider *http_provider_new(const struct provider_def *def)
      * construction with the hook's diagnostics, like a missing base_url. */
     struct http_auth_source auth = {0};
     if (def->auth_source && def->auth_source(def, &auth) != 0) {
+        free(expanded_path);
         free(base_url);
         free(prefix);
         return NULL;
@@ -1072,15 +1087,7 @@ struct provider *http_provider_new(const struct provider_def *def)
     provider->name = xstrdup(resolve_display_name(def, prefix));
     provider->catalog_id = resolve_catalog_id(def, prefix);
     provider->wire = wire;
-    /* A path template may carry config placeholders ({project}, {location}) resolved now and a
-     * {model} placeholder resolved per request. Non-template paths (wire's path) are literal. */
-    char *expanded_path = NULL;
-    if (def->resolve_path)
-        expanded_path = def->resolve_path(def);
-    else if (def->path_template)
-        expanded_path = expand_config_placeholders(def, def->path_template);
-    const char *path = expanded_path ? expanded_path : wire->path;
-    provider->path_has_model = strstr(path, "{model}") != NULL;
+    provider->path_has_model = placeholder_present(path, MODEL_PLACEHOLDER);
     provider->endpoint = xasprintf("%s%s", provider->base_url, path);
     free(expanded_path);
     /* On the OpenAI side any OpenAI-family wire carries the same Bearer scheme; only a Messages
