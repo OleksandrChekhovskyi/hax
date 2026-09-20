@@ -33,6 +33,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- Request errors distinguish byte-payload limits (HTTP 413, or a 400 naming the payload size) from
+  input-context overflow, appending the relevant advice onto the backend diagnostic instead of
+  matching any "too large" message.
 - Vertex falls back to GCE metadata-server tokens when no file credential is configured, using a
   bounded request that bypasses proxies and honors cancellation.
 - Vertex distinguishes a missing, unreadable, and malformed ADC file in request diagnostics.

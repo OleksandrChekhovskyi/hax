@@ -1,7 +1,7 @@
 # PR 37 implementation notes
 
 Each numbered section describes one independently committed change from `pr-37-review-plan.md`.
-The first ten changes are implemented here; the remaining review items are still pending.
+The first eleven changes are implemented here; the remaining review items are still pending.
 
 ## 1. Redact Vertex authentication secrets from HTTP traces
 
@@ -687,3 +687,55 @@ All metadata checks used loopback servers, not a real GCP metadata service.
 
 Continue with payload-error classification (`stream_auth_error_message`), then test consolidation,
 documentation cleanup, and the final validation pass.
+
+## 11. Classify request-payload and context-limit errors
+
+### Problem
+
+The error-message hook matched any "too large" phrasing, conflating distinct failures: a wire
+byte cap, an input-context overflow, and unrelated text. The hook name also claimed to be
+auth-specific.
+
+### Changes
+
+- Rename `stream_auth_error_message` to `format_request_error` and register it for every provider
+  request. It still handles the 401 auth case first and otherwise appends only applicable advice.
+- Recognize byte-payload limits narrowly: HTTP 413 directly, or a 400 whose body names the payload
+  size (Google's "Request payload size exceeds the limit: N bytes"). Remove the broad "too large"
+  and "request too large" matches.
+- Distinguish input-context overflow: a `Prompt is too long` or `too many input tokens` body gets
+  compaction advice ("compact with /compact or trim the conversation") instead of the byte-payload
+  hint.
+- Keep output truncation separate: the existing `length_hint` continues to serve the finish-reason
+  length case and is untouched by this classifier.
+- Preserve the backend's own diagnostic by appending a hint line to `format_api_error`'s base
+  message rather than replacing it.
+- Update the field and provider-directive comments and the provider guide, and add a changelog
+  entry.
+
+The phrasings were cross-checked against Google's documented payload message and Anthropic's
+prompt-length message; the fixtures remain synthetic because no live backend was available.
+
+### Regression coverage
+
+- A 400 naming the payload size appends the def's payload hint.
+- A 413 with a generic entity-too-large body, and a 413 with no body, both append the payload hint.
+- A `Prompt is too long: N tokens > maximum` body receives context-window advice and not the
+  byte-payload hint, even when the def declares a payload hint.
+- An unrelated "message too large" text appends nothing: neither the payload hint nor compaction
+  advice appears, and the backend text survives.
+- The 401 recovery path and all existing stream tests are unchanged.
+
+### Validation
+
+- `scripts/check.sh test providers/http_provider providers/vertex e2e/vertex` passed.
+- `make tests` passed all 121 tests under the external-network and credential guard; `make lint`
+  and `git diff --check` passed.
+- ASan/UBSan and TSan setup remain blocked by the missing sanitizer runtime libraries listed in
+  change 1; no sanitizer pass is claimed.
+
+### Next change
+
+Consolidate tests at their owning modules: migrate the remaining Vertex e2e and C-wire assertions,
+drop the private servers already replaced by `tests/loopback.h`, and finish the missing regression
+coverage from the plan's test checklist.

@@ -905,24 +905,42 @@ static void test_auth_source_logged_out(void)
 
 /* A payload_hint def appends an actionable line when the endpoint rejects a request as too
  * large; unrelated error bodies keep the default message. */
-static void test_payload_hint(void)
+static void test_payload_and_context_hints(void)
 {
-    const char *body = "{\"error\": {\"code\": 400, \"message\": \"Request payload size exceeds "
-                       "the limit: 31457280 bytes\", \"status\": \"INVALID_ARGUMENT\"}}";
-    char *response =
-        xasprintf("HTTP/1.1 400 Bad Request\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
-                  strlen(body), body);
+    const char *payload_body = "{\"error\": {\"code\": 400, \"message\": \"Request payload "
+                               "size exceeds the limit: 31457280 bytes\", "
+                               "\"status\": \"INVALID_ARGUMENT\"}}";
+    const char *context_body = "{\"error\": {\"message\": \"Prompt is too long: "
+                               "3394278 tokens > 1000000 maximum\"}}";
+    const char *unrelated_body = "message too large";
+    const char *too_large_body = "request entity too large";
+    char responses[5][256];
     struct wire_server server = {
-        .response = response,
-        .n_requests = 1,
+        .n_requests = 5,
+        .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
     };
+    snprintf(responses[0], sizeof(responses[0]),
+             "HTTP/1.1 400 Bad Request\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+             strlen(payload_body), payload_body);
+    snprintf(responses[1], sizeof(responses[1]),
+             "HTTP/1.1 413 Payload Too Large\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+             strlen(too_large_body), too_large_body);
+    snprintf(responses[2], sizeof(responses[2]),
+             "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno");
+    snprintf(responses[3], sizeof(responses[3]),
+             "HTTP/1.1 400 Bad Request\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+             strlen(context_body), context_body);
+    snprintf(responses[4], sizeof(responses[4]),
+             "HTTP/1.1 400 Bad Request\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+             strlen(unrelated_body), unrelated_body);
+    for (int i = 0; i < 5; i++)
+        server.responses[i] = responses[i];
+
     pthread_t thread;
     int port = start_server(&server, &thread);
     EXPECT(port > 0);
-    if (port <= 0) {
-        free(response);
+    if (port <= 0)
         return;
-    }
 
     char base_url[64];
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
@@ -933,23 +951,38 @@ static void test_payload_hint(void)
     };
     struct provider *provider = http_provider_new(&def);
     EXPECT(provider != NULL);
-    if (!provider) {
-        free(response);
+    if (!provider)
         return;
-    }
 
     struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
     struct context context = {.items = items, .n_items = 1, .image_input = 1};
     struct error_log log = {0};
     provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
-    pthread_join(thread, NULL);
-    close(server.listener_fd);
-    EXPECT(atomic_load(&server.served) == 1);
-    EXPECT(log.n_errors == 1);
     EXPECT(strstr(log.message, "payload size exceeds") != NULL);
     EXPECT(strstr(log.message, "payload hint line") != NULL);
+
+    /* 413 is a payload-limit signal even when its body does not name the size. */
+    provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
+    EXPECT(strstr(log.message, "payload hint line") != NULL);
+    provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
+    EXPECT(strstr(log.message, "payload hint line") != NULL);
+
+    /* Input-context overflow gets its own advice, not the byte-payload hint. */
+    provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
+    EXPECT(strstr(log.message, "context window") != NULL);
+    EXPECT(strstr(log.message, "compact with /compact") != NULL);
+    EXPECT(strstr(log.message, "payload hint line") == NULL);
+
+    /* An unrelated "too large" message appends nothing. */
+    provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
+    EXPECT(strstr(log.message, "payload hint line") == NULL);
+    EXPECT(strstr(log.message, "compact with /compact") == NULL);
+    EXPECT(strstr(log.message, "message too large") != NULL);
+
+    pthread_join(thread, NULL);
+    close(server.listener_fd);
+    EXPECT(atomic_load(&server.served) == 5);
     provider->destroy(provider);
-    free(response);
 }
 
 static void fake_load_defaults(char **default_model, char **default_effort)
@@ -1283,7 +1316,7 @@ int main(void)
     test_vertex_thinking_follows_catalog();
     test_auth_source_stream();
     test_auth_source_logged_out();
-    test_payload_hint();
+    test_payload_and_context_hints();
     test_def_extra_body_and_defaults();
     test_def_extra_headers_follow_conversation();
     test_interleaved_reasoning_replay();

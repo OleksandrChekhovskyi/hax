@@ -69,7 +69,8 @@ struct provider_def {
      * unsigned blocks from other backends are dropped rather than replayed and rejected. */
     int strict_signatures;
     const char *length_hint;  /* appended to a "length"-truncation error */
-    const char *payload_hint; /* appended to a request-too-large HTTP error */
+    const char *payload_hint; /* appended to a payload-size-limit HTTP error (413 or a 400
+                                 naming the payload size) */
     int no_efforts;           /* offer no effort levels, so /effort skips the provider */
     /* JSON object of body members the endpoint requires on every request, merged under the
      * user's providers.<id>.extra_body. NULL sends none. */

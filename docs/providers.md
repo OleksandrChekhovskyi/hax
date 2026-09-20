@@ -244,8 +244,10 @@ Request diagnostics retain the fuller setup guidance.
 listing, because the raw-predict endpoint serves no `/models` route.
 
 Vertex caps a request at about 30 MB; a long image-heavy session can hit that before the 1M-token
-window. When a request is rejected for its payload size, hax points at trimming context or images
-(`/compact`). The catalog's Vertex rates do not model the regional/multi-region premium.
+window. When a request is rejected for its payload size (HTTP 413, or a 400 naming the payload
+size), hax points at trimming context or images (`/compact`). A `Prompt is too long` token-window
+overflow receives separate compaction advice. The catalog's Vertex rates do not model the
+regional/multi-region premium.
 
 ## llama.cpp
 

@@ -89,7 +89,7 @@ struct http_provider {
     char *default_effort;
 
     const char *length_hint;    /* borrowed for the provider lifetime */
-    const char *payload_hint;   /* borrowed; appended to a request-too-large HTTP error */
+    const char *payload_hint;   /* borrowed; appended to a payload-size-limit HTTP error */
     const char *const *efforts; /* borrowed, or aliases owned_efforts */
     const char **owned_efforts; /* owned array of borrowed strings; NULL when not narrowed */
     size_t n_efforts;
@@ -293,43 +293,60 @@ static int stream_auth_recover(void *ctx, long http_status, http_tick_cb tick, v
                                                tick, tick_user);
 }
 
-/* Whether `error_body` describes a request that exceeded the backend's payload cap, so a def's
- * payload_hint can replace the cryptic "too large" message with an actionable one. Case-insensitive
- * over the common phrasings (Google's "Request payload size exceeds the limit: N bytes"). */
-static int payload_too_large(const char *body)
+/* Lowercase `body` in place-sized buffer for case-insensitive phrase matching. */
+static int body_contains(const char *body, const char *needle)
 {
     if (!body)
         return 0;
     size_t len = strlen(body);
     if (len >= 4096)
         len = 4095;
-    char lower[4096];
+    static const size_t CAP = 4096;
+    char lower[CAP];
     for (size_t i = 0; i < len; i++)
         lower[i] = (char)tolower((unsigned char)body[i]);
     lower[len] = '\0';
-    static const char *const NEEDLES[] = {"payload size", "too large", "request too large",
-                                          "payload limit"};
-    for (size_t i = 0; i < sizeof(NEEDLES) / sizeof(NEEDLES[0]); i++)
-        if (strstr(lower, NEEDLES[i]))
-            return 1;
-    return 0;
+    return strstr(lower, needle) != NULL;
 }
 
-static char *stream_auth_error_message(void *ctx, long http_status, const char *error_body)
+/* Whether the backend rejected the request body against a byte cap: HTTP 413, or a 400 whose body
+ * names the payload size (Google's "Request payload size exceeds the limit: N bytes"). The broad
+ * "too large" phrasings are deliberately not matched. */
+static int payload_limit_error(long http_status, const char *body)
+{
+    return http_status == 413 ||
+           (http_status == 400 && body_contains(body, "payload size exceeds"));
+}
+
+/* Whether the input exceeded the model's context window (token overflow), as opposed to the wire
+ * byte cap above. */
+static int context_overflow_error(const char *body)
+{
+    return body_contains(body, "prompt is too long") ||
+           body_contains(body, "too many input tokens");
+}
+
+static char *format_request_error(void *ctx, long http_status, const char *error_body)
 {
     struct http_stream *stream = ctx;
     /* A rejected credential names the recovery step rather than the raw HTTP error. */
     if (http_status == 401 && stream->provider->auth.ops)
         return stream->provider->auth.ops->unauthorized_message(stream->provider->auth.state);
-    /* Vertex caps the request body at 30 MB; a long image-heavy session can hit that before the
-     * 1M-token window, and the error only says the request was too large. */
-    if (stream->provider->payload_hint && payload_too_large(error_body)) {
-        char *base = format_api_error(http_status, error_body);
-        char *combined = xasprintf("%s\n%s", base, stream->provider->payload_hint);
-        free(base);
-        return combined;
+
+    /* Append only an applicable hint onto the backend's own diagnostic. */
+    const char *hint = NULL;
+    if (payload_limit_error(http_status, error_body)) {
+        hint = stream->provider->payload_hint;
+    } else if (context_overflow_error(error_body)) {
+        hint = "the request exceeds the model's context window — compact with /compact or trim "
+               "the conversation";
     }
-    return NULL;
+    if (!hint)
+        return NULL;
+    char *base = format_api_error(http_status, error_body);
+    char *combined = xasprintf("%s\n%s", base, hint);
+    free(base);
+    return combined;
 }
 
 /* The wire `model` speaks: the first matching model_apis rule, else the catalog hint on a
@@ -469,12 +486,9 @@ static int http_provider_stream(struct provider *base, const struct context *con
         .parser_complete = stream_parser_complete,
         .parser_usage = stream_parser_usage,
     };
-    if (provider->auth.ops) {
+    request.error_message = format_request_error;
+    if (provider->auth.ops)
         request.recover = stream_auth_recover;
-        request.error_message = stream_auth_error_message;
-    } else if (provider->payload_hint) {
-        request.error_message = stream_auth_error_message;
-    }
     int result = stream_retry_run(&request, callback, callback_user, tick, tick_user);
     free(endpoint);
     free(body);
