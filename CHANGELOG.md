@@ -27,6 +27,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- Vertex OAuth client secrets, refresh tokens, and access tokens are redacted from HTTP traces,
+  including form-encoded credentials and echoed error bodies.
 - `config.json` and `state.json` are now written with a trailing newline, matching `auth.json`
   and session files.
 - The brief history shown on resume now names the task a `task_wait` call waited on, as the

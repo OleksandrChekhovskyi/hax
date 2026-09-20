@@ -8,14 +8,15 @@
 #include <string.h>
 #include <time.h>
 
-#include "buf.h"
 #include "config.h"
 #include "diag.h"
+#include "trace.h"
 #include "xalloc.h"
 #include "providers/http_provider.h"
 #include "system/fs.h"
 #include "system/path.h"
 #include "system/spawn.h"
+#include "text/url.h"
 #include "transport/http.h"
 
 /* Vertex's Anthropic endpoint serves the Messages wire under a URL that carries the project,
@@ -113,26 +114,6 @@ struct vertex_auth {
     char *fatal;
 };
 
-/* Percent-encode one byte for an application/x-www-form-urlencoded body. */
-static char *form_encode(const char *value)
-{
-    static const char hex[] = "0123456789ABCDEF";
-    struct buf out;
-    buf_init(&out);
-    for (const char *cursor = value; *cursor; cursor++) {
-        unsigned char byte = (unsigned char)*cursor;
-        if (('A' <= byte && byte <= 'Z') || ('a' <= byte && byte <= 'z') ||
-            ('0' <= byte && byte <= '9') || byte == '-' || byte == '_' || byte == '.' ||
-            byte == '~') {
-            buf_append(&out, cursor, 1);
-        } else {
-            char esc[3] = {'%', hex[byte >> 4], hex[byte & 0xF]};
-            buf_append(&out, esc, sizeof(esc));
-        }
-    }
-    return buf_steal(&out);
-}
-
 /* Default ADC path, or the configured GOOGLE_APPLICATION_CREDENTIALS. The caller must not free
  * the result if it aliases the env. */
 static const char *adc_path(void)
@@ -163,9 +144,14 @@ static json_t *load_adc(void)
 /* Exchange the ADC file's own client_id/client_secret and refresh token for a new access token. */
 static int refresh_user_token(struct vertex_auth *a, char **detail)
 {
-    char *encoded_id = form_encode(a->client_id);
-    char *encoded_secret = form_encode(a->client_secret);
-    char *encoded_refresh = form_encode(a->refresh_token);
+    char *encoded_id = url_encode(a->client_id);
+    char *encoded_secret = url_encode(a->client_secret);
+    char *encoded_refresh = url_encode(a->refresh_token);
+    /* http_post traces the form and error response before returning. */
+    trace_register_secret(a->client_secret);
+    trace_register_secret(encoded_secret);
+    trace_register_secret(a->refresh_token);
+    trace_register_secret(encoded_refresh);
     char *body = xasprintf("grant_type=refresh_token&client_id=%s&client_secret=%s"
                            "&refresh_token=%s",
                            encoded_id, encoded_secret, encoded_refresh);
@@ -200,6 +186,7 @@ static int refresh_user_token(struct vertex_auth *a, char **detail)
     }
     free(a->token);
     a->token = xstrdup(token);
+    trace_register_secret(a->token);
     json_t *expires = json_object_get(root, "expires_in");
     long ttl = json_is_number(expires) ? (long)json_integer_value(expires) : 0;
     a->token_expires = ttl > 0 ? time(NULL) + ttl : 0;
@@ -226,6 +213,7 @@ static int refresh_service_token(struct vertex_auth *a, char **detail)
         output[--length] = '\0';
     free(a->token);
     a->token = xstrdup(output);
+    trace_register_secret(a->token);
     /* gcloud tokens are short-lived (~1h); treat them as expiring so a request refreshes rather
      * than letting one die mid-turn. */
     a->token_expires = time(NULL) + 3600 - VERTEX_TOKEN_MARGIN_S;
@@ -250,6 +238,7 @@ static int load_credentials(struct vertex_auth *a)
         a->kind = VERTEX_LITERAL;
         free(a->token);
         a->token = xstrdup(literal);
+        trace_register_secret(a->token);
         a->token_expires = 0;
         return 0;
     }

@@ -150,6 +150,51 @@ static inline char *t_tempdir(void)
     return dir;
 }
 
+/* Replace PATH with `value` (NULL unsets it) and return the previous value for t_path_restore,
+ * NULL when it was unset. Aborts on allocation failure like t_tempdir. */
+static inline char *t_path_replace(const char *value)
+{
+    const char *current = getenv("PATH");
+    char *saved = NULL;
+    if (current) {
+        saved = strdup(current);
+        if (!saved)
+            abort();
+    }
+    if (value)
+        setenv("PATH", value, 1);
+    else
+        unsetenv("PATH");
+    return saved;
+}
+
+/* Put `dir` ahead of the current PATH entries, so a stub there shadows the real command while
+ * the utilities the stub runs stay reachable. Returns the previous value for t_path_restore. */
+static inline char *t_path_prepend(const char *dir)
+{
+    const char *current = getenv("PATH");
+    if (!current || !*current)
+        return t_path_replace(dir);
+    size_t len = strlen(dir) + 1 + strlen(current) + 1;
+    char *combined = malloc(len);
+    if (!combined)
+        abort();
+    snprintf(combined, len, "%s:%s", dir, current);
+    char *saved = t_path_replace(combined);
+    free(combined);
+    return saved;
+}
+
+/* Restore PATH from t_path_replace or t_path_prepend and release the saved copy. */
+static inline void t_path_restore(char *saved)
+{
+    if (saved)
+        setenv("PATH", saved, 1);
+    else
+        unsetenv("PATH");
+    free(saved);
+}
+
 #define T_REPORT()                                                                                 \
     do {                                                                                           \
         if (t_skips)                                                                               \
