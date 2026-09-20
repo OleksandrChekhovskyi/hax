@@ -1,7 +1,7 @@
 # PR 37 implementation notes
 
 Each numbered section describes one independently committed change from `pr-37-review-plan.md`.
-The first twelve changes are implemented here; the remaining review items are still pending.
+The first thirteen changes are implemented here; the remaining review items are still pending.
 
 ## 1. Redact Vertex authentication secrets from HTTP traces
 
@@ -778,3 +778,45 @@ Vertex tests.
 Complete the documentation and small-cleanup section: delete the unused `cache_default` field,
 clean up remaining narrative comments, add Vertex to the README with its retained settings and
 exact model IDs, move and tighten the Vertex changelog entry, and run the final validation pass.
+
+## 13. Documentation and small cleanup
+
+### Changes
+
+- Delete the unused `cache_default` field from the HTTP provider struct instead of wiring it up
+  just to retain it.
+- Add Vertex to the README provider-support list and the connect-a-provider table.
+- Document exact Vertex model ids (`claude-sonnet-4-5@20250929`,
+  `claude-opus-4-6@default`) and state that ids are used verbatim, with no bare-name conversion
+  rule. Note that catalog listings do not
+  guarantee availability in a given project or region.
+- Clarify that `authorized_user` access tokens refresh in memory through the file's own client id
+  and that the ADC file is never modified.
+- Keep `us-east5` as the initial location default; the provider guide already documents it.
+- Move the verbose vertex changelog entry from the released 0.5.0 section into `[Unreleased] ->
+  Added` with concise user-facing wording, and drop the PR-internal `Fixed` entry about the
+  `locations//` path bug.
+- The narrative `Hobbling...` comment was already replaced in change 8; the remaining Vertex
+  comments were left in place.
+
+No production behavior changes; the `cache_default` field had no readers or writers.
+
+### Validation
+
+- Focused targets passed:
+
+  ```sh
+  scripts/check.sh test providers/http_provider providers/vertex providers/vertex_auth \
+      providers/registry
+  ```
+
+- `make tests` passed all 120 tests under the external-network and credential guard; `make lint`
+  and `git diff --check` passed.
+- ASan/UBSan and TSan setup remain blocked by the missing sanitizer runtime libraries listed in
+  change 1; no sanitizer pass is claimed.
+
+### Next change
+
+Run the final validation pass: format every touched source, run the full project gates (build,
+lint, the full and sanitizer test suites where available), review the complete diff against the
+PR base, and record what was source-verified, mock-tested, and deferred.

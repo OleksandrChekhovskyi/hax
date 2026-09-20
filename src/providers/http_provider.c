@@ -79,7 +79,6 @@ struct http_provider {
     struct thinking_setting thinking; /* the def's; providers.<id>.thinking_mode overrides */
     int strict_signatures;
     int body_version;     /* Messages: anthropic_version goes in the body, no version header */
-    int cache_default;    /* Messages cache_control default; chat uses cache_mode */
     char **extra_headers; /* "Name: value" templates; {session_id} expands per request */
     json_t *extra_body;
     struct http_auth_source auth; /* zeroed ops: the api_key authenticates requests */

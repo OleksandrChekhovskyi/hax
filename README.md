@@ -22,7 +22,8 @@
 - **Inspectable** — See exactly what was sent to the model and what it replied in a usable
   transcript view (Ctrl+T). Optionally collect a detailed wire protocol trace.
 - **Broad provider support** — OpenAI (+compatible), Anthropic (+compatible), Codex (via a ChatGPT
-  subscription), OpenRouter, OpenCode Zen/Go, llama.cpp, and custom endpoints.
+  subscription), OpenRouter, OpenCode Zen/Go, Vertex (Claude on Google Cloud), llama.cpp, and
+  custom endpoints.
 - **Well-behaved Unix tool** — XDG paths, clean stdout in `-p` one-shot mode with resume hints on
   stderr, plain-text config and session files, composition via subprocesses instead of plugins.
 
@@ -89,6 +90,7 @@ and choose a model. hax remembers interactive provider, model, and effort select
 | `anthropic` | Set `ANTHROPIC_API_KEY`. |
 | `openrouter` | Set `OPENROUTER_API_KEY`. |
 | `opencode-zen` / `opencode-go` | Set `OPENCODE_API_KEY`. |
+| `vertex` | Set `GOOGLE_CLOUD_PROJECT` (see [docs/providers.md](./docs/providers.md#vertex-ai)). |
 | `llama.cpp` | Run `llama-server`. |
 | `ollama` | Run `ollama serve`. |
 | Compatible or custom endpoint | See [docs/providers.md](./docs/providers.md). |

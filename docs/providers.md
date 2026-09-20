@@ -205,7 +205,8 @@ Credentials are a Google access token, resolved in this order:
 1. `providers.vertex.access_token` or `HAX_VERTEX_ACCESS_TOKEN`.
 2. `GOOGLE_OAUTH_ACCESS_TOKEN`.
 3. An Application Default Credentials `authorized_user` file (from
-   `gcloud auth application-default login`), refreshed in memory through its own client id.
+   `gcloud auth application-default login`), whose token refreshes in memory through its own
+   client id — the ADC file itself is never modified.
 4. Any other ADC shape (service account, workload identity federation, impersonation) — resolved
    through `gcloud auth application-default print-access-token`.
 
@@ -241,7 +242,10 @@ metadata server, and availability is not proof that a token or project permissio
 Request diagnostics retain the fuller setup guidance.
 
 `/model` is populated from hax's model catalog (`google-vertex-anthropic`) rather than a network
-listing, because the raw-predict endpoint serves no `/models` route.
+listing, because the raw-predict endpoint serves no `/models` route. Model ids are used verbatim,
+for example `claude-sonnet-4-5@20250929` and `claude-opus-4-6@default`; there is no rule that
+converts a bare model name into a Vertex id. A catalog listing reflects the Vertex catalog
+generally, so every listed model may not be available in a given project or region.
 
 Vertex caps a request at about 30 MB; a long image-heavy session can hit that before the 1M-token
 window. When a request is rejected for its payload size (HTTP 413, or a 400 naming the payload
