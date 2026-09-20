@@ -227,7 +227,8 @@ The provider picker shows a short setup reason:
 - `ADC unavailable`: create user ADC with `gcloud auth application-default login`, or point
   `GOOGLE_APPLICATION_CREDENTIALS` at a readable, valid ADC file. An explicit
   `providers.vertex.access_token`, `HAX_VERTEX_ACCESS_TOKEN`, or `GOOGLE_OAUTH_ACCESS_TOKEN`
-  bypasses file credentials.
+  bypasses file credentials. Request diagnostics distinguish an absent file, an unreadable one,
+  and an ADC file that is not valid JSON.
 - `gcloud not found`: install the Google Cloud CLI and ensure its `gcloud` executable is on PATH.
   Delegated credential types need it to obtain tokens; native `authorized_user` refresh and
   explicit access tokens do not.

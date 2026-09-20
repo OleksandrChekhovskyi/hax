@@ -1,7 +1,7 @@
 # PR 37 implementation notes
 
 Each numbered section describes one independently committed change from `pr-37-review-plan.md`.
-The first eight changes are implemented here; the remaining review items are still pending.
+The first nine changes are implemented here; the remaining review items are still pending.
 
 ## 1. Redact Vertex authentication secrets from HTTP traces
 
@@ -576,3 +576,49 @@ Metadata-server ADC credentials were deliberately deferred and the documentation
 accordingly. The remaining auth follow-ups are: metadata support; distinguishing absent, unreadable,
 and malformed credential files; and preserving the ADC file across refreshes. Then continue with
 payload-error classification, test consolidation, documentation cleanup, and final validation.
+
+## 9. Distinguish ADC credential faults
+
+### Problem
+
+`load_adc` collapsed every failure into a NULL root, so an absent file, an unreadable one, and a
+file that is not valid JSON all produced the same "no Google ADC credentials" diagnostic. Users
+could not tell whether to authenticate, fix permissions, or repair the file.
+
+### Changes
+
+- Return a load outcome from `load_adc`: absent (no file at the resolved path), unreadable (a file
+  exists but could not be opened), or malformed (parses to something other than a JSON object).
+  `ENOENT` separates absence from permission and I/O errors.
+- Report each class distinctly on the request path. Absence keeps the login/token guidance; an
+  unreadable file points at permissions on `GOOGLE_APPLICATION_CREDENTIALS`; malformed content
+  points at re-running `gcloud auth application-default login`.
+- Keep the picker's concise `ADC unavailable` reason unchanged; the added detail belongs to request
+  diagnostics, not to a picker row.
+- Document the distinction in the provider guide and add an Unreleased changelog entry.
+
+Delegated credential kinds (service account and unrecognized shapes) remain the gcloud path, as
+before. Metadata-server credentials stay a documented, deferred follow-up; this change does not
+add fallbacks to unreadable or malformed configured files.
+
+### Regression coverage
+
+- A path with no file fails preparation with "no Google ADC credentials".
+- A `chmod 000` file carrying valid user ADC fails with an "unreadable" diagnostic.
+- A non-JSON file fails with a "not valid JSON" diagnostic.
+- Existing missing-ADC, malformed, and unavailable picker assertions still pass against the moved
+  module and the status interface.
+
+### Validation
+
+- The focused `providers/vertex_auth` and `providers/vertex` targets pass.
+- `make tests` passed all 121 tests under the external-network and credential guard; `make lint`
+  and `git diff --check` passed.
+- ASan/UBSan and TSan setup remain blocked by the missing sanitizer runtime libraries listed in
+  change 1; no sanitizer pass is claimed.
+
+### Next change
+
+Add metadata-server ADC support, which was deferred in change 8: a bounded, cancellable, proxy-
+bypassing token request with `Metadata-Flavor: Google`, falling back only when no higher-priority
+credential source exists. Then continue with payload-error classification and test consolidation.

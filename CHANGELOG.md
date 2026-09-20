@@ -33,6 +33,7 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- Vertex distinguishes a missing, unreadable, and malformed ADC file in request diagnostics.
 - Vertex credential refresh respects cancellation and the no-network/no-process refresh contract,
   refuses to resend an unchanged rejected token, adopts credential-source changes, and rejects
   blank gcloud output. OAuth `invalid_grant` rejections point at re-authenticating.

@@ -386,6 +386,43 @@ out_server:
     free(error_response);
 }
 
+static void test_credential_faults_distinguished(void)
+{
+    char *dir = t_tempdir();
+    char *path = xasprintf("%s/custom.json", dir);
+    struct config_snapshot *saved = config_snapshot_take();
+
+    setenv("GOOGLE_APPLICATION_CREDENTIALS", path, 1);
+    struct http_auth_source source = {0};
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == -1);
+    char *message = source.ops->unauthorized_message(source.state);
+    EXPECT(strstr(message, "no Google ADC credentials") != NULL);
+    free(message);
+    source.ops->destroy(source.state);
+
+    EXPECT(fs_write_atomic(path, USER_ADC, strlen(USER_ADC), 0) == 0);
+    EXPECT(chmod(path, 0) == 0);
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == -1);
+    message = source.ops->unauthorized_message(source.state);
+    EXPECT(strstr(message, "unreadable") != NULL);
+    free(message);
+    source.ops->destroy(source.state);
+    EXPECT(chmod(path, 0600) == 0);
+
+    EXPECT(fs_write_atomic(path, "{not json", strlen("{not json"), 0) == 0);
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == -1);
+    message = source.ops->unauthorized_message(source.state);
+    EXPECT(strstr(message, "not valid JSON") != NULL);
+    free(message);
+    source.ops->destroy(source.state);
+
+    config_snapshot_restore(saved);
+    free(path);
+}
+
 static void test_setup_diagnostics(void)
 {
     char *dir = t_tempdir();
@@ -437,6 +474,7 @@ int main(void)
     test_oauth_trace_redaction(trace_path);
     test_gcloud_trace_redaction(trace_path);
     test_setup_diagnostics();
+    test_credential_faults_distinguished();
     test_prepare_no_refresh();
     test_prepare_expired_refuses_network();
     test_recover_literal_semantics();

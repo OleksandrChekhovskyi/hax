@@ -2,6 +2,7 @@
 #include "providers/vertex_auth.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <jansson.h>
 #include <stdlib.h>
 #include <string.h>
@@ -81,21 +82,33 @@ static char *adc_path(void)
     return cached ? xstrdup(cached) : NULL;
 }
 
-/* Read and parse the ADC file, or NULL when missing or not a JSON object. The caller frees with
- * json_decref. */
-static json_t *load_adc(void)
+/* Why an ADC file did not yield a JSON object. */
+enum adc_load_error {
+    ADC_LOAD_ABSENT,     /* no file at the resolved path */
+    ADC_LOAD_UNREADABLE, /* a file exists but could not be opened */
+    ADC_LOAD_MALFORMED,  /* not valid JSON, or not a JSON object */
+};
+
+/* Read and parse the ADC file, reporting why a NULL root is returned. The caller frees a
+ * non-NULL result with json_decref. */
+static json_t *load_adc(enum adc_load_error *error)
 {
+    *error = ADC_LOAD_ABSENT;
     char *path = adc_path();
     if (!path)
         return NULL;
     char *contents = fs_read_file(path, NULL);
+    int read_errno = errno;
     free(path);
-    if (!contents)
+    if (!contents) {
+        *error = read_errno == ENOENT ? ADC_LOAD_ABSENT : ADC_LOAD_UNREADABLE;
         return NULL;
+    }
     json_t *root = json_loads(contents, 0, NULL);
     free(contents);
     if (!json_is_object(root)) {
         json_decref(root);
+        *error = ADC_LOAD_MALFORMED;
         return NULL;
     }
     return root;
@@ -254,10 +267,18 @@ static int load_credentials(struct vertex_auth *a)
         return 0;
     }
 
-    json_t *root = load_adc();
+    enum adc_load_error error;
+    json_t *root = load_adc(&error);
     if (!root) {
-        set_fatal(a, "no Google ADC credentials (run `gcloud auth application-default login`, "
-                     "or set GOOGLE_OAUTH_ACCESS_TOKEN)");
+        if (error == ADC_LOAD_UNREADABLE)
+            set_fatal(a, "Google ADC file is unreadable — check permissions on "
+                         "GOOGLE_APPLICATION_CREDENTIALS");
+        else if (error == ADC_LOAD_MALFORMED)
+            set_fatal(a, "Google ADC file is not valid JSON — rerun `gcloud auth "
+                         "application-default login`");
+        else
+            set_fatal(a, "no Google ADC credentials (run `gcloud auth application-default login`, "
+                         "or set GOOGLE_OAUTH_ACCESS_TOKEN)");
         return -1;
     }
     const char *type = json_string_value(json_object_get(root, "type"));
@@ -428,7 +449,8 @@ int vertex_auth_local_status(char **reason)
     if (config_literal_token())
         return 1;
 
-    json_t *root = load_adc();
+    enum adc_load_error error;
+    json_t *root = load_adc(&error);
     if (!root) {
         *reason = xstrdup("ADC unavailable");
         return 0;
