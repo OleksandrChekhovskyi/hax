@@ -23,45 +23,95 @@
 #include "providers/wire.h"
 #include "system/fs.h"
 
-/* Endpoint host follows the resolved location: `global`, a `us`/`eu` multi-region, or the
- * regional host. An explicit base_url would win verbatim instead. */
-static void test_resolve_base_url_host_rules(void)
+static void expect_resolved_endpoint(const char *host, const char *project, const char *location)
 {
+    char *url = vertex_resolve_base_url(NULL);
+    EXPECT_STR_EQ(url, host);
+    free(url);
+    char *path = vertex_resolve_path(NULL);
+    char *want = xasprintf("/v1/projects/%s/locations/%s/publishers/anthropic/models/"
+                           "{model}:streamRawPredict",
+                           project, location);
+    EXPECT_STR_EQ(path, want);
+    free(want);
+    free(path);
+}
+
+static void clear_vertex_setting_env(void)
+{
+    unsetenv("HAX_VERTEX_PROJECT");
+    unsetenv("HAX_VERTEX_LOCATION");
+    unsetenv("GOOGLE_CLOUD_PROJECT");
+    unsetenv("ANTHROPIC_VERTEX_PROJECT_ID");
+    unsetenv("GOOGLE_CLOUD_LOCATION");
+    unsetenv("CLOUD_ML_REGION");
+}
+
+static void test_endpoint_setting_precedence(void)
+{
+    clear_vertex_setting_env();
     EXPECT(config_load("{\"providers\": {\"vertex\": {\"project\": \"proj-1\","
                        " \"location\": \"global\"}}}") == 0);
-    char *url = vertex_resolve_base_url(NULL);
-    EXPECT_STR_EQ(url, "https://aiplatform.googleapis.com");
-    free(url);
+    expect_resolved_endpoint("https://aiplatform.googleapis.com", "proj-1", "global");
 
     EXPECT(config_load("{\"providers\": {\"vertex\": {\"project\": \"proj-1\","
                        " \"location\": \"us\"}}}") == 0);
-    url = vertex_resolve_base_url(NULL);
-    EXPECT_STR_EQ(url, "https://aiplatform.us.rep.googleapis.com");
-    free(url);
+    expect_resolved_endpoint("https://aiplatform.us.rep.googleapis.com", "proj-1", "us");
 
     EXPECT(config_load("{\"providers\": {\"vertex\": {\"project\": \"proj-1\","
                        " \"location\": \"eu\"}}}") == 0);
-    url = vertex_resolve_base_url(NULL);
-    EXPECT_STR_EQ(url, "https://aiplatform.eu.rep.googleapis.com");
-    free(url);
+    expect_resolved_endpoint("https://aiplatform.eu.rep.googleapis.com", "proj-1", "eu");
 
     EXPECT(config_load("{\"providers\": {\"vertex\": {\"project\": \"proj-1\","
                        " \"location\": \"us-central1\"}}}") == 0);
-    url = vertex_resolve_base_url(NULL);
-    EXPECT_STR_EQ(url, "https://us-central1-aiplatform.googleapis.com");
-    free(url);
+    expect_resolved_endpoint("https://us-central1-aiplatform.googleapis.com", "proj-1",
+                             "us-central1");
 
-    /* The default location fills in when none is set. */
-    EXPECT(config_load("{\"providers\": {\"vertex\": {\"project\": \"proj-1\"}}}") == 0);
-    url = vertex_resolve_base_url(NULL);
-    EXPECT_STR_EQ(url, "https://us-east5-aiplatform.googleapis.com");
-    free(url);
+    EXPECT(config_load("{\"providers\": {\"vertex\": {\"project\": \"configured\","
+                       " \"location\": \"europe-west1\"}}}") == 0);
+    setenv("GOOGLE_CLOUD_PROJECT", "google-primary", 1);
+    setenv("ANTHROPIC_VERTEX_PROJECT_ID", "google-alternate", 1);
+    setenv("GOOGLE_CLOUD_LOCATION", "asia-east1", 1);
+    setenv("CLOUD_ML_REGION", "us-west1", 1);
+    expect_resolved_endpoint("https://europe-west1-aiplatform.googleapis.com", "configured",
+                             "europe-west1");
+    EXPECT_STR_EQ(config_source("providers.vertex.project"), "config");
+    EXPECT_STR_EQ(config_source("providers.vertex.location"), "config");
 
-    /* Missing project fails with a diagnostic, so availability and construction report it. */
-    EXPECT(config_load("{ }") == 0);
+    EXPECT(config_load("{\"providers\": {\"vertex\": {\"project\": \"\","
+                       " \"location\": \"\"}}}") == 0);
+    expect_resolved_endpoint("https://asia-east1-aiplatform.googleapis.com", "google-primary",
+                             "asia-east1");
+    EXPECT_STR_EQ(config_source("providers.vertex.project"), "default");
+    EXPECT_STR_EQ(config_source("providers.vertex.location"), "default");
+
+    setenv("GOOGLE_CLOUD_PROJECT", "", 1);
+    setenv("GOOGLE_CLOUD_LOCATION", "", 1);
+    expect_resolved_endpoint("https://us-west1-aiplatform.googleapis.com", "google-alternate",
+                             "us-west1");
+
+    setenv("HAX_VERTEX_PROJECT", "hax-project", 1);
+    setenv("HAX_VERTEX_LOCATION", "global", 1);
+    expect_resolved_endpoint("https://aiplatform.googleapis.com", "hax-project", "global");
+    EXPECT_STR_EQ(config_source("providers.vertex.project"), "env");
+    EXPECT_STR_EQ(config_source("providers.vertex.location"), "env");
+
+    setenv("HAX_VERTEX_PROJECT", "", 1);
+    setenv("HAX_VERTEX_LOCATION", "", 1);
+    expect_resolved_endpoint("https://us-west1-aiplatform.googleapis.com", "google-alternate",
+                             "us-west1");
+
+    clear_vertex_setting_env();
+    setenv("GOOGLE_CLOUD_PROJECT", "default-location", 1);
+    EXPECT(config_load("{}") == 0);
+    expect_resolved_endpoint("https://us-east5-aiplatform.googleapis.com", "default-location",
+                             "us-east5");
+
+    unsetenv("GOOGLE_CLOUD_PROJECT");
     unsigned long diagnostics_before = hax_diag_sequence();
-    url = vertex_resolve_base_url(NULL);
+    char *url = vertex_resolve_base_url(NULL);
     EXPECT(url == NULL);
+    EXPECT(vertex_resolve_path(NULL) == NULL);
     EXPECT(hax_diag_sequence() == diagnostics_before + 1);
     EXPECT(config_load(NULL) == 0);
 }
@@ -85,12 +135,21 @@ static void test_def_registered(void)
         return;
     EXPECT_STR_EQ(def->display_name, "google vertex");
     EXPECT_STR_EQ(def->api, "anthropic-messages");
+    const struct config_setting *project = config_setting_find("providers.vertex.project");
+    const struct config_setting *location = config_setting_find("providers.vertex.location");
+    const struct config_setting *token = config_setting_find("providers.vertex.access_token");
+    EXPECT(project != NULL && strcmp(project->env_var, "HAX_VERTEX_PROJECT") == 0);
+    EXPECT(location != NULL && strcmp(location->env_var, "HAX_VERTEX_LOCATION") == 0);
+    EXPECT(token != NULL && strcmp(token->env_var, "HAX_VERTEX_ACCESS_TOKEN") == 0);
+    EXPECT(token != NULL && token->secret);
+    EXPECT(config_default("providers.vertex.location") == NULL);
     EXPECT_STR_EQ(def->catalog_id, "google-vertex-anthropic");
     EXPECT_STR_EQ(def->version, "vertex-2023-10-16");
     EXPECT(def->body_version == 1);
     EXPECT(def->strict_signatures == 1);
     EXPECT(def->auth_source == vertex_auth_source);
     EXPECT(def->resolve_base_url == vertex_resolve_base_url);
+    EXPECT(def->resolve_path == vertex_resolve_path);
     EXPECT(def->list_models == http_provider_list_catalog_models);
     EXPECT(strstr(def->path_template, "{model}") != NULL);
     EXPECT(strstr(def->path_template, "{project}") != NULL);
@@ -367,6 +426,9 @@ static void setup_fixtures(void)
     setenv("XDG_CONFIG_HOME", home, 1);
     setenv("XDG_CACHE_HOME", home, 1);
     setenv("CLOUDSDK_CONFIG", home, 1);
+    unsetenv("HAX_VERTEX_PROJECT");
+    unsetenv("HAX_VERTEX_LOCATION");
+    unsetenv("HAX_VERTEX_ACCESS_TOKEN");
     unsetenv("GOOGLE_CLOUD_PROJECT");
     unsetenv("ANTHROPIC_VERTEX_PROJECT_ID");
     unsetenv("GOOGLE_CLOUD_LOCATION");
@@ -390,7 +452,7 @@ int main(void)
     signal(SIGPIPE, SIG_IGN);
     EXPECT(curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK);
     setup_fixtures();
-    test_resolve_base_url_host_rules();
+    test_endpoint_setting_precedence();
     test_def_registered();
     test_messages_body_variant();
     test_stream_raw_predict();

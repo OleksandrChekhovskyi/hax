@@ -52,6 +52,7 @@ static void expect_token_redacted(const struct http_auth_source *source, const c
 
 static void test_literal_trace_redaction(const char *trace_path)
 {
+    setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "google-access-token", 1);
     config_set_override("providers.vertex.access_token", "configured-access-token");
     struct http_auth_source source = {0};
     EXPECT(vertex_auth_source(NULL, &source) == 0);
@@ -60,11 +61,18 @@ static void test_literal_trace_redaction(const char *trace_path)
     source.ops->destroy(source.state);
     config_set_override("providers.vertex.access_token", NULL);
 
-    setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "environment-access-token", 1);
+    setenv("HAX_VERTEX_ACCESS_TOKEN", "hax-access-token", 1);
     EXPECT(vertex_auth_source(NULL, &source) == 0);
     EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == 0);
-    expect_token_redacted(&source, "environment-access-token", trace_path);
+    expect_token_redacted(&source, "hax-access-token", trace_path);
     source.ops->destroy(source.state);
+
+    setenv("HAX_VERTEX_ACCESS_TOKEN", "", 1);
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == 0);
+    expect_token_redacted(&source, "google-access-token", trace_path);
+    source.ops->destroy(source.state);
+    unsetenv("HAX_VERTEX_ACCESS_TOKEN");
     unsetenv("GOOGLE_OAUTH_ACCESS_TOKEN");
 }
 
@@ -194,6 +202,7 @@ int main(void)
     setenv("HOME", t_tempdir(), 1);
     setenv("CLOUDSDK_CONFIG", t_tempdir(), 1);
     setenv("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent/hax-test-adc.json", 1);
+    unsetenv("HAX_VERTEX_ACCESS_TOKEN");
     unsetenv("GOOGLE_OAUTH_ACCESS_TOKEN");
     unsetenv("HAX_VERTEX_OAUTH_URL");
     setenv("NO_PROXY", "*", 1);

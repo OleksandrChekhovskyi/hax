@@ -36,6 +36,9 @@ struct provider_def {
      * may carry {model} (substituted at request time) and providers.<id> config placeholders
      * ({project}, {location}, {port}, ...; substituted at construction). NULL → the wire path. */
     const char *path_template;
+    /* Resolve an owned request path for providers whose placeholders use external settings.
+     * NULL uses path_template/the wire path. */
+    char *(*resolve_path)(const struct provider_def *def);
     /* Resolve the endpoint's base URL from supplied config for defs whose host depends on a
      * config value (e.g. a cloud per-region endpoint). Called only when no explicit base_url is
      * configured; returns an owned URL or NULL after reporting why none can be derived. */

@@ -16,6 +16,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- Vertex project, location, and access-token settings now have `HAX_VERTEX_*` aliases; Google's
+  conventional environment variables remain provider fallbacks with documented precedence.
 - The `vertex` provider is displayed as `google vertex`, with concise setup reasons in the
   provider picker. Delegated ADC credentials now report when gcloud is missing.
 - Custom providers no longer take their models.dev catalog identity from their own name; set

@@ -183,21 +183,32 @@ project, location, and model:
 
 ```sh
 export HAX_PROVIDER=vertex
-export GOOGLE_CLOUD_PROJECT=my-gcp-project     # or ANTHROPIC_VERTEX_PROJECT_ID
+export GOOGLE_CLOUD_PROJECT=my-gcp-project
 ```
 
-hax builds the endpoint's host from the location: `global` uses `aiplatform.googleapis.com`,
-`us`/`eu` use the multi-region replica hosts, and any other value uses `{location}-aiplatform.
-googleapis.com`. Point an explicit `providers.vertex.base_url` at anything else to override the
-host rule verbatim.
+Project and location use this precedence:
+
+1. The hax setting (`providers.vertex.project` / `providers.vertex.location`), including its
+   `HAX_VERTEX_PROJECT` / `HAX_VERTEX_LOCATION` environment alias.
+2. Google's primary variable (`GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION`).
+3. The alternate variable (`ANTHROPIC_VERTEX_PROJECT_ID` / `CLOUD_ML_REGION`).
+4. No project; location defaults to `us-east5`.
+
+Empty values are skipped. The resolved project and location are used together for the request path
+and regional host. `global` uses `aiplatform.googleapis.com`, `us`/`eu` use the multi-region replica
+hosts, and any other location uses `{location}-aiplatform.googleapis.com`. An explicit
+`providers.vertex.base_url` overrides only the host rule.
 
 Credentials are a Google access token, resolved in this order:
 
-1. `providers.vertex.access_token` or `GOOGLE_OAUTH_ACCESS_TOKEN` — used as-is (no refresh).
-2. An Application Default Credentials `authorized_user` file (from
-   `gcloud auth application-default login`), refreshed in place through its own client id.
-3. Any other ADC shape (service account, workload identity federation, impersonation) — resolved
+1. `providers.vertex.access_token` or `HAX_VERTEX_ACCESS_TOKEN`.
+2. `GOOGLE_OAUTH_ACCESS_TOKEN`.
+3. An Application Default Credentials `authorized_user` file (from
+   `gcloud auth application-default login`), refreshed in memory through its own client id.
+4. Any other ADC shape (service account, workload identity federation, impersonation) — resolved
    through `gcloud auth application-default print-access-token`.
+
+Explicit access tokens are used as-is and cannot be refreshed.
 
 There is no `/login`; Google owns that flow (`gcloud auth application-default login`).
 For file credentials, hax reads `GOOGLE_APPLICATION_CREDENTIALS` when set, otherwise
@@ -205,11 +216,12 @@ For file credentials, hax reads `GOOGLE_APPLICATION_CREDENTIALS` when set, other
 
 The provider picker shows a short setup reason:
 
-- `project not set`: set `providers.vertex.project`, `GOOGLE_CLOUD_PROJECT`, or
-  `ANTHROPIC_VERTEX_PROJECT_ID` to your Google Cloud project ID.
+- `project not set`: set `providers.vertex.project`, `HAX_VERTEX_PROJECT`,
+  `GOOGLE_CLOUD_PROJECT`, or `ANTHROPIC_VERTEX_PROJECT_ID` to your Google Cloud project ID.
 - `ADC unavailable`: create user ADC with `gcloud auth application-default login`, or point
   `GOOGLE_APPLICATION_CREDENTIALS` at a readable, valid ADC file. An explicit
-  `providers.vertex.access_token` or `GOOGLE_OAUTH_ACCESS_TOKEN` bypasses file credentials.
+  `providers.vertex.access_token`, `HAX_VERTEX_ACCESS_TOKEN`, or `GOOGLE_OAUTH_ACCESS_TOKEN`
+  bypasses file credentials.
 - `gcloud not found`: install the Google Cloud CLI and ensure its `gcloud` executable is on PATH.
   Delegated credential types need it to obtain tokens; native `authorized_user` refresh and
   explicit access tokens do not.

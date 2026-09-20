@@ -1075,7 +1075,9 @@ struct provider *http_provider_new(const struct provider_def *def)
     /* A path template may carry config placeholders ({project}, {location}) resolved now and a
      * {model} placeholder resolved per request. Non-template paths (wire's path) are literal. */
     char *expanded_path = NULL;
-    if (def->path_template)
+    if (def->resolve_path)
+        expanded_path = def->resolve_path(def);
+    else if (def->path_template)
         expanded_path = expand_config_placeholders(def, def->path_template);
     const char *path = expanded_path ? expanded_path : wire->path;
     provider->path_has_model = strstr(path, "{model}") != NULL;

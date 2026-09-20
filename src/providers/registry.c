@@ -138,6 +138,7 @@ static const struct provider_def DEFS[] = {
             "{model}:streamRawPredict",
         .auth_source = vertex_auth_source,
         .resolve_base_url = vertex_resolve_base_url,
+        .resolve_path = vertex_resolve_path,
         .list_models = http_provider_list_catalog_models,
         .prepare_availability = vertex_prepare_availability,
     },

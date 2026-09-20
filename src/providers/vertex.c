@@ -46,47 +46,75 @@ static const char *env_nonempty(const char *name)
     return value && *value ? value : NULL;
 }
 
-static const char *config_project(void)
+struct vertex_settings {
+    const char *project;
+    const char *location;
+};
+
+static const char *resolve_setting(const char *key, const char *primary_env,
+                                   const char *alternate_env, const char *fallback)
 {
-    /* Registered as GOOGLE_CLOUD_PROJECT with ANTHROPIC_VERTEX_PROJECT_ID fallback. */
-    return config_str_nonempty("providers.vertex.project");
+    const char *value = config_str_nonempty(key);
+    if (value)
+        return value;
+    value = env_nonempty(primary_env);
+    if (value)
+        return value;
+    value = alternate_env ? env_nonempty(alternate_env) : NULL;
+    return value ? value : fallback;
 }
 
-static const char *config_location(void)
+static struct vertex_settings resolve_settings(void)
 {
-    /* Registered as GOOGLE_CLOUD_LOCATION with CLOUD_ML_REGION fallback and a us-east5 default. */
-    return config_str_nonempty("providers.vertex.location");
+    return (struct vertex_settings){
+        .project = resolve_setting("providers.vertex.project", "GOOGLE_CLOUD_PROJECT",
+                                   "ANTHROPIC_VERTEX_PROJECT_ID", NULL),
+        .location = resolve_setting("providers.vertex.location", "GOOGLE_CLOUD_LOCATION",
+                                    "CLOUD_ML_REGION", "us-east5"),
+    };
 }
 
 static const char *config_literal_token(void)
 {
-    const char *token = config_str_nonempty("providers.vertex.access_token");
-    return token ? token : env_nonempty("GOOGLE_OAUTH_ACCESS_TOKEN");
+    return resolve_setting("providers.vertex.access_token", "GOOGLE_OAUTH_ACCESS_TOKEN", NULL,
+                           NULL);
 }
 
 char *vertex_resolve_base_url(const struct provider_def *def)
 {
     (void)def;
-    const char *project = config_project();
-    const char *location = config_location();
-    if (!project) {
+    struct vertex_settings settings = resolve_settings();
+    if (!settings.project) {
         hax_err("provider 'vertex': providers.vertex.project is not set (or set "
                 "GOOGLE_CLOUD_PROJECT / ANTHROPIC_VERTEX_PROJECT_ID)");
         return NULL;
     }
     const char *host;
     char dynamic_host[128];
-    if (strcmp(location, "global") == 0) {
+    if (strcmp(settings.location, "global") == 0) {
         host = "aiplatform.googleapis.com";
-    } else if (strcmp(location, "us") == 0 || strcmp(location, "eu") == 0) {
+    } else if (strcmp(settings.location, "us") == 0 || strcmp(settings.location, "eu") == 0) {
         /* Multi-region endpoints are served from the region's replica host. */
-        snprintf(dynamic_host, sizeof(dynamic_host), "aiplatform.%s.rep.googleapis.com", location);
+        snprintf(dynamic_host, sizeof(dynamic_host), "aiplatform.%s.rep.googleapis.com",
+                 settings.location);
         host = dynamic_host;
     } else {
-        snprintf(dynamic_host, sizeof(dynamic_host), "%s-aiplatform.googleapis.com", location);
+        snprintf(dynamic_host, sizeof(dynamic_host), "%s-aiplatform.googleapis.com",
+                 settings.location);
         host = dynamic_host;
     }
     return xasprintf("https://%s", host);
+}
+
+char *vertex_resolve_path(const struct provider_def *def)
+{
+    (void)def;
+    struct vertex_settings settings = resolve_settings();
+    if (!settings.project)
+        return NULL;
+    return xasprintf("/v1/projects/%s/locations/%s/publishers/anthropic/models/"
+                     "{model}:streamRawPredict",
+                     settings.project, settings.location);
 }
 
 /* ---- credentials ----
@@ -405,7 +433,7 @@ void vertex_prepare_availability(const struct provider_def *def, struct provider
 {
     (void)def;
     memset(out, 0, sizeof(*out));
-    if (!config_project()) {
+    if (!resolve_settings().project) {
         out->available = 0;
         out->reason = xstrdup("project not set");
         return;

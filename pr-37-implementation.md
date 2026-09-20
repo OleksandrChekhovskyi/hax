@@ -1,7 +1,7 @@
 # PR 37 implementation notes
 
 Each numbered section describes one independently committed change from `pr-37-review-plan.md`.
-The first five changes are implemented here; the remaining review items are still pending.
+The first six changes are implemented here; the remaining review items are still pending.
 
 ## 1. Redact Vertex authentication secrets from HTTP traces
 
@@ -342,3 +342,76 @@ No real Google credentials or public endpoints were used; gcloud was a local tes
 Reconcile explicit hax settings with Google's conventional environment variables: remove
 `env_var_alt`, establish precedence, and resolve project/location consistently for the endpoint host
 and request path.
+
+## 6. Separate hax settings from Google environment fallbacks
+
+### Problem
+
+Google's conventional variables were registered directly as hax setting aliases, including a
+one-off `env_var_alt` field added only for Vertex. That mixed external Google inputs into the
+process-wide config registry and let the registry's location default mask provider-owned fallback
+logic. Moving those reads into Vertex without changing path construction would instead resolve the
+host correctly but leave `{project}` or `{location}` empty in the request path.
+
+### Changes
+
+- Remove `env_var_alt` and its second environment lookup from the generic config registry.
+- Give the three explicit hax settings conventional hax-owned aliases:
+  `HAX_VERTEX_PROJECT`, `HAX_VERTEX_LOCATION`, and secret `HAX_VERTEX_ACCESS_TOKEN`.
+- Move Google's variables into Vertex resolution. Project and location now follow one rule:
+  non-empty hax setting, primary Google variable, alternate variable, then provider default.
+  Project has no default; location defaults to `us-east5`. Access tokens use the non-empty hax
+  setting first and `GOOGLE_OAUTH_ACCESS_TOKEN` second.
+- Remove the location default from the registry. It now reports no configured value when only an
+  external Google variable or the provider default is active, instead of hiding those fallbacks.
+- Resolve project and location through one shared Vertex settings function for endpoint host,
+  request path, and picker availability.
+- Add a narrow `resolve_path` definition hook. Vertex uses it to build the raw-predict path from
+  the same project/location precedence as its host rather than asking generic HTTP-provider code
+  to interpret Google environment variables. Other providers retain existing path-template
+  behavior.
+- Document the exact precedence, empty-value behavior, aliases, and `us-east5` default. Add an
+  Unreleased changelog entry.
+
+An explicit `providers.vertex.base_url` still overrides host selection only. Validation of required
+path values under that override and generic placeholder hardening belong to the next endpoint piece.
+
+### Regression coverage
+
+- Check regional, global, `us`, and `eu` hosts together with their fully resolved request paths.
+- Verify hax config values beat populated primary and alternate Google variables.
+- Verify empty hax values fall through, primary variables beat alternates, empty primaries fall
+  through to alternates, and location reaches `us-east5` only after every other source is absent.
+- Verify `HAX_VERTEX_PROJECT` and `HAX_VERTEX_LOCATION` participate in normal config resolution and
+  beat Google variables; empty aliases fall through.
+- Check that Google's project/location variables no longer report themselves as config-registry
+  sources, and that the registry itself has no location default.
+- Check registry aliases and secrecy for all three settings, and that the shipped provider uses
+  the narrow path hook.
+- Verify configured and HAX access tokens beat `GOOGLE_OAUTH_ACCESS_TOKEN`, while an empty HAX
+  token falls through to Google's value. Existing trace assertions cover every selected token.
+- Keep the full streaming test as an integration check that project and location still appear in
+  the raw-predict request path.
+
+### Validation
+
+- All six focused targets passed:
+
+  ```sh
+  scripts/check.sh test config providers/vertex providers/vertex_auth providers/http_provider \
+      providers/registry e2e/vertex
+  ```
+
+- `make tests` passed all 121 tests with Google and hax Vertex variables cleared in the external
+  network guard.
+- `make lint` and `git diff --check` passed; every touched C source/header was formatted.
+- ASan/UBSan and TSan setup were retried and remain blocked by the missing runtime libraries
+  listed in change 1; no sanitizer pass is claimed.
+
+No real Google credentials or public endpoints were used.
+
+### Next change
+
+Harden endpoint construction: replace ad-hoc placeholder expansion, resolve every model occurrence,
+fail required unresolved placeholders, validate project/location under base URL overrides, avoid
+host truncation, and remove duplicate construction diagnostics.

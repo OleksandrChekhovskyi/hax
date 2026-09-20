@@ -17,6 +17,9 @@ int vertex_auth_source(const struct provider_def *def, struct http_auth_source *
  * an owned URL, or NULL after reporting which value is missing. */
 char *vertex_resolve_base_url(const struct provider_def *def);
 
+/* Resolve the raw-predict path from the same project/location precedence as the endpoint host. */
+char *vertex_resolve_path(const struct provider_def *def);
+
 /* Immediate picker verdict with a concise reason: project, credential source, and gcloud when
  * needed. Checks local files only; no network probe or process execution. */
 void vertex_prepare_availability(const struct provider_def *def, struct provider_availability *out);
