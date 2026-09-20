@@ -16,6 +16,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- The `vertex` provider is displayed as `google vertex`, with concise setup reasons in the
+  provider picker. Delegated ADC credentials now report when gcloud is missing.
 - Custom providers no longer take their models.dev catalog identity from their own name; set
   `catalog_id` explicitly (for example `"catalog_id": "groq"`) to keep pricing and context
   metadata. Local servers and proxies without one never contact models.dev. See

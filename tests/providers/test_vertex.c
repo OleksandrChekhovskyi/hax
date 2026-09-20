@@ -1,11 +1,13 @@
 /* SPDX-License-Identifier: MIT */
 #include <jansson.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <curl/curl.h>
+#include <sys/stat.h>
 
 #include "catalog.h"
 #include "config.h"
@@ -81,7 +83,7 @@ static void test_def_registered(void)
     EXPECT(def != NULL);
     if (!def)
         return;
-    EXPECT_STR_EQ(def->display_name, "Vertex AI");
+    EXPECT_STR_EQ(def->display_name, "google vertex");
     EXPECT_STR_EQ(def->api, "anthropic-messages");
     EXPECT_STR_EQ(def->catalog_id, "google-vertex-anthropic");
     EXPECT_STR_EQ(def->version, "vertex-2023-10-16");
@@ -278,6 +280,86 @@ static void test_auth_source_literal(void)
     EXPECT(config_load(NULL) == 0);
 }
 
+static void expect_availability(int available, const char *reason)
+{
+    unsigned long diagnostics_before = hax_diag_sequence();
+    struct provider_availability availability = {0};
+    provider_prepare_availability(provider_find("vertex"), &availability);
+    EXPECT(availability.available == available);
+    EXPECT(availability.url == NULL);
+    EXPECT(hax_diag_sequence() == diagnostics_before);
+    if (reason) {
+        EXPECT(availability.reason != NULL);
+        if (availability.reason)
+            EXPECT_STR_EQ(availability.reason, reason);
+    } else {
+        EXPECT(availability.reason == NULL);
+    }
+    provider_availability_clear(&availability);
+}
+
+static void test_availability_reasons(void)
+{
+    struct loopback oauth = {0};
+    int port = loopback_listen(&oauth);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+    char *url = xasprintf("http://127.0.0.1:%d/token", port);
+    setenv("HAX_VERTEX_OAUTH_URL", url, 1);
+    free(url);
+
+    char *dir = t_tempdir();
+    char *saved_path = t_path_replace(dir);
+    char *adc = xasprintf("%s/adc.json", dir);
+    setenv("GOOGLE_APPLICATION_CREDENTIALS", adc, 1);
+    struct config_snapshot *saved = config_snapshot_take();
+    expect_availability(0, "project not set");
+    config_set_override("providers.vertex.project", "test-project");
+    expect_availability(0, "ADC unavailable");
+
+    const char *malformed = "{not-json}";
+    EXPECT(fs_write_atomic(adc, malformed, strlen(malformed), 0) == 0);
+    expect_availability(0, "ADC unavailable");
+    const char *incomplete = "{\"type\":\"authorized_user\",\"client_id\":\"cid\","
+                             "\"refresh_token\":\"refresh\"}";
+    EXPECT(fs_write_atomic(adc, incomplete, strlen(incomplete), 0) == 0);
+    expect_availability(0, "ADC unavailable");
+
+    const char *user = "{\"type\":\"authorized_user\",\"client_id\":\"cid\","
+                       "\"client_secret\":\"secret\",\"refresh_token\":\"refresh\"}";
+    EXPECT(fs_write_atomic(adc, user, strlen(user), 0) == 0);
+    expect_availability(1, NULL);
+    const char *service = "{\"type\":\"service_account\"}";
+    EXPECT(fs_write_atomic(adc, service, strlen(service), 0) == 0);
+    expect_availability(0, "gcloud not found");
+
+    config_set_override("providers.vertex.access_token", "literal-token");
+    expect_availability(1, NULL);
+    config_set_override("providers.vertex.access_token", NULL);
+
+    char *gcloud = xasprintf("%s/gcloud", dir);
+    char *marker = xasprintf("%s/gcloud-called", dir);
+    char *script = xasprintf("#!/bin/sh\n: > '%s'\nexit 1\n", marker);
+    EXPECT(fs_write_atomic(gcloud, script, strlen(script), 0) == 0);
+    free(script);
+    expect_availability(0, "gcloud not found");
+    EXPECT(chmod(gcloud, 0700) == 0);
+    expect_availability(1, NULL);
+    EXPECT(fs_check_regular(marker) != 0);
+    struct pollfd listener = {.fd = oauth.listener_fd, .events = POLLIN};
+    EXPECT(poll(&listener, 1, 0) == 0);
+
+    free(marker);
+    free(gcloud);
+    config_snapshot_restore(saved);
+    unsetenv("GOOGLE_APPLICATION_CREDENTIALS");
+    free(adc);
+    t_path_restore(saved_path);
+    unsetenv("HAX_VERTEX_OAUTH_URL");
+    loopback_stop(&oauth);
+}
+
 static void setup_fixtures(void)
 {
     char *home = t_tempdir();
@@ -314,6 +396,7 @@ int main(void)
     test_stream_raw_predict();
     test_auth_source_user_refresh();
     test_auth_source_literal();
+    test_availability_reasons();
     catalog_shutdown();
     config_free();
     curl_global_cleanup();

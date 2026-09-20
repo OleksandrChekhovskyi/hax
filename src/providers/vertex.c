@@ -198,11 +198,18 @@ static int refresh_user_token(struct vertex_auth *a, char **detail)
  * account, workload identity federation, or impersonation). */
 static int refresh_service_token(struct vertex_auth *a, char **detail)
 {
-    static const char *const argv[] = {"gcloud", "auth", "application-default",
-                                       "print-access-token", NULL};
+    char *gcloud = fs_which("gcloud");
+    if (!gcloud) {
+        if (detail)
+            *detail = xstrdup("gcloud not found — install the Google Cloud CLI and put gcloud on "
+                              "PATH, or set GOOGLE_OAUTH_ACCESS_TOKEN");
+        return -1;
+    }
+    const char *const argv[] = {gcloud, "auth", "application-default", "print-access-token", NULL};
     size_t length = 0;
     char *output =
         spawn_capture_stdout(argv, VERTEX_GCLOUD_MAX_BYTES, VERTEX_GCLOUD_TIMEOUT_MS, &length);
+    free(gcloud);
     if (!output) {
         if (detail)
             *detail = xstrdup("`gcloud auth application-default print-access-token` failed");
@@ -386,8 +393,8 @@ int vertex_auth_source(const struct provider_def *def, struct http_auth_source *
 {
     (void)def;
     struct vertex_auth *a = xcalloc(1, sizeof(*a));
-    /* A missing credential source does not fail construction: the session reports the resolution
-     * steps on the first request and on availability. */
+    /* A missing credential source does not fail construction: the session reports setup steps
+     * on the first request. */
     load_credentials(a);
     out->ops = &VERTEX_AUTH_OPS;
     out->state = a;
@@ -400,14 +407,19 @@ void vertex_prepare_availability(const struct provider_def *def, struct provider
     memset(out, 0, sizeof(*out));
     if (!config_project()) {
         out->available = 0;
-        out->reason = xstrdup("providers.vertex.project not set (or GOOGLE_CLOUD_PROJECT / "
-                              "ANTHROPIC_VERTEX_PROJECT_ID)");
+        out->reason = xstrdup("project not set");
         return;
     }
     struct vertex_auth a = {0};
     if (load_credentials(&a) != 0) {
         out->available = 0;
-        out->reason = xstrdup(a.fatal ? a.fatal : "no Google credentials");
+        out->reason = xstrdup("ADC unavailable");
+    } else if (a.kind == VERTEX_SERVICE) {
+        char *gcloud = fs_which("gcloud");
+        out->available = gcloud != NULL;
+        if (!gcloud)
+            out->reason = xstrdup("gcloud not found");
+        free(gcloud);
     } else {
         out->available = 1;
     }

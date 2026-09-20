@@ -157,6 +157,36 @@ static void test_gcloud_trace_redaction(const char *trace_path)
     t_path_restore(saved_path);
 }
 
+static void test_setup_diagnostics(void)
+{
+    char *dir = t_tempdir();
+    char *saved_path = t_path_replace(dir);
+    char *missing_adc = xasprintf("%s/missing-adc.json", dir);
+    setenv("GOOGLE_APPLICATION_CREDENTIALS", missing_adc, 1);
+    free(missing_adc);
+
+    struct http_auth_source source = {0};
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == -1);
+    char *message = source.ops->unauthorized_message(source.state);
+    EXPECT(strstr(message, "gcloud auth application-default login") != NULL);
+    EXPECT(strstr(message, "GOOGLE_OAUTH_ACCESS_TOKEN") != NULL);
+    free(message);
+    source.ops->destroy(source.state);
+
+    write_adc("{\"type\":\"service_account\"}");
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == -1);
+    message = source.ops->unauthorized_message(source.state);
+    EXPECT(strstr(message, "gcloud not found") != NULL);
+    EXPECT(strstr(message, "install the Google Cloud CLI") != NULL);
+    EXPECT(strstr(message, "PATH") != NULL);
+    EXPECT(strstr(message, "GOOGLE_OAUTH_ACCESS_TOKEN") != NULL);
+    free(message);
+    source.ops->destroy(source.state);
+    t_path_restore(saved_path);
+}
+
 int main(void)
 {
     signal(SIGPIPE, SIG_IGN);
@@ -176,6 +206,7 @@ int main(void)
     test_literal_trace_redaction(trace_path);
     test_oauth_trace_redaction(trace_path);
     test_gcloud_trace_redaction(trace_path);
+    test_setup_diagnostics();
     free(trace_path);
     config_free();
     curl_global_cleanup();

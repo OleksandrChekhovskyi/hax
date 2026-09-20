@@ -8,8 +8,8 @@ struct http_auth_source;      /* providers/http_provider.h */
 
 /* Auth-source hook for the vertex def: open a Google-credential session as `out`'s state. A
  * missing or broken credential source does not fail construction — the session reports the
- * resolution steps on the first request and on availability. The session re-reads the ADC file
- * and refreshes short-lived access tokens across the session's lifetime. */
+ * resolution steps on the first request. The session re-reads the ADC file and refreshes
+ * short-lived access tokens across the session's lifetime. */
 int vertex_auth_source(const struct provider_def *def, struct http_auth_source *out);
 
 /* Resolve the endpoint's base URL (scheme + host) from the resolved project and location: the
@@ -17,8 +17,8 @@ int vertex_auth_source(const struct provider_def *def, struct http_auth_source *
  * an owned URL, or NULL after reporting which value is missing. */
 char *vertex_resolve_base_url(const struct provider_def *def);
 
-/* Immediate availability verdict for the picker: project/location plus usable credentials, with
- * no network probe. */
+/* Immediate picker verdict with a concise reason: project, credential source, and gcloud when
+ * needed. Checks local files only; no network probe or process execution. */
 void vertex_prepare_availability(const struct provider_def *def, struct provider_availability *out);
 
 #endif /* HAX_PROVIDERS_VERTEX_H */

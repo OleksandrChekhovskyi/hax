@@ -95,6 +95,17 @@ static void test_display_name_resolution(void)
     EXPECT_STR_EQ(provider_display_name(provider_find("anthropic-compatible")),
                   "anthropic-compatible");
     unsetenv("HAX_OPENAI_DISPLAY_NAME");
+
+    const struct provider_def *vertex = provider_find("vertex");
+    EXPECT(vertex != NULL);
+    if (!vertex)
+        return;
+    EXPECT_STR_EQ(vertex->id, "vertex");
+    EXPECT_STR_EQ(provider_display_name(vertex), "google vertex");
+    config_set_override("providers.vertex.display_name", "Work Claude");
+    EXPECT_STR_EQ(provider_display_name(vertex), "Work Claude");
+    EXPECT_STR_EQ(vertex->id, "vertex");
+    config_set_override("providers.vertex.display_name", NULL);
 }
 
 /* Capability hooks declared on a def reach the constructed provider — including the /models

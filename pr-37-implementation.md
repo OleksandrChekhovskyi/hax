@@ -1,7 +1,7 @@
 # PR 37 implementation notes
 
 Each numbered section describes one independently committed change from `pr-37-review-plan.md`.
-The first four changes are implemented here; the remaining review items are still pending.
+The first five changes are implemented here; the remaining review items are still pending.
 
 ## 1. Redact Vertex authentication secrets from HTTP traces
 
@@ -272,3 +272,73 @@ No live Google Cloud endpoint or real Google credential was used for these check
 
 Keep the `vertex` provider ID, change its display name to `google vertex`, and shorten picker
 availability reasons while retaining full setup advice in request diagnostics and documentation.
+
+## 5. Clarify the Vertex name and picker availability reasons
+
+### Problem
+
+The display label `Vertex AI` did not identify Google consistently with the other provider names.
+Unavailable picker rows also contained complete setup instructions, making them unnecessarily long.
+For delegated ADC credentials, the picker reported availability even when gcloud was absent; the
+first request then failed with only a generic command-failure message.
+
+### Changes
+
+- Change the default display name to lowercase `google vertex`. The stable provider ID remains
+  `vertex`, so command-line selection, configuration keys, and stored identities do not change.
+  Explicit `providers.vertex.display_name` overrides still work.
+- Use `project not set`, `ADC unavailable`, and `gcloud not found` as the picker reasons. Keep
+  availability checks silent and local: they inspect configuration, credential files, and executable
+  presence without performing HTTP requests or launching gcloud.
+- Use `ADC unavailable` rather than `ADC not found` because the current loader also reports failure
+  for malformed files and incomplete user credentials. More precise missing/unreadable/malformed
+  classification remains part of the planned auth hardening; this piece does not change ADC parsing.
+- Require an executable gcloud only for credentials delegated to it. Native `authorized_user`
+  refresh and literal access tokens remain usable without the CLI.
+- Resolve gcloud with the shared `fs_which()` helper before a delegated request, run the resolved
+  executable, and report installation/PATH advice plus the explicit-token alternative if it is
+  absent. Picker discovery uses the same lookup rules. Existing missing-project and missing-ADC
+  diagnostics retain their detailed setup instructions.
+- Document the short reasons and their remedies, and state explicitly that this provider serves
+  Claude on Google Vertex AI, not Gemini. A locally available credential source is not a guarantee
+  of valid tokens or project permissions. Add an Unreleased changelog entry.
+
+The later auth-module extraction will move credential status behind its planned small interface;
+this change does not introduce that boundary early or duplicate the credential parser.
+
+### Regression coverage
+
+- Check the default display label, unchanged `vertex` ID, and custom display-name override.
+- Exercise missing project, missing ADC, malformed JSON, and incomplete user credentials, asserting
+  exact short reasons and no emitted diagnostics.
+- Check that native user credentials and literal tokens remain available with no gcloud on PATH.
+- Check delegated credentials with missing, non-executable, and executable fake gcloud files. A
+  marker-writing stub proves that availability does not run it; a bound loopback token endpoint
+  receives no connection during the checks.
+- Verify that auth request failures retain login/token guidance for missing ADC and give explicit
+  Google Cloud CLI installation/PATH guidance for missing gcloud. Existing fake-gcloud token and
+  redaction tests continue to exercise successful delegated requests.
+
+### Validation
+
+- Before implementation, the updated checks failed 14 assertions across `providers/vertex`,
+  `providers/vertex_auth`, and `providers/registry`.
+- After implementation, all five focused targets passed:
+
+  ```sh
+  scripts/check.sh test providers/vertex providers/vertex_auth providers/registry \
+      providers/http_provider e2e/vertex
+  ```
+
+- `make tests` passed all 121 tests with the external-network guard described in change 1.
+- `make lint` and `git diff --check` passed; all touched C sources and headers were formatted.
+- Retried ASan/UBSan and TSan setup. Both remain blocked by the missing sanitizer runtime
+  libraries listed in change 1; no sanitizer pass is claimed.
+
+No real Google credentials or public endpoints were used; gcloud was a local test stub.
+
+### Next change
+
+Reconcile explicit hax settings with Google's conventional environment variables: remove
+`env_var_alt`, establish precedence, and resolve project/location consistently for the endpoint host
+and request path.

@@ -177,7 +177,8 @@ routing and prompt caching, and `x-opencode-client: hax`. Both can be overridden
 
 ## Vertex AI
 
-Vertex AI serves Claude through the Anthropic Messages protocol under a URL that carries the
+The `vertex` provider, shown as `google vertex` in the provider picker, serves **Claude on Google
+Vertex AI, not Gemini**. It uses the Anthropic Messages protocol under a URL that carries the
 project, location, and model:
 
 ```sh
@@ -199,11 +200,26 @@ Credentials are a Google access token, resolved in this order:
    through `gcloud auth application-default print-access-token`.
 
 There is no `/login`; Google owns that flow (`gcloud auth application-default login`).
+For file credentials, hax reads `GOOGLE_APPLICATION_CREDENTIALS` when set, otherwise
+`~/.config/gcloud/application_default_credentials.json`.
+
+The provider picker shows a short setup reason:
+
+- `project not set`: set `providers.vertex.project`, `GOOGLE_CLOUD_PROJECT`, or
+  `ANTHROPIC_VERTEX_PROJECT_ID` to your Google Cloud project ID.
+- `ADC unavailable`: create user ADC with `gcloud auth application-default login`, or point
+  `GOOGLE_APPLICATION_CREDENTIALS` at a readable, valid ADC file. An explicit
+  `providers.vertex.access_token` or `GOOGLE_OAUTH_ACCESS_TOKEN` bypasses file credentials.
+- `gcloud not found`: install the Google Cloud CLI and ensure its `gcloud` executable is on PATH.
+  Delegated credential types need it to obtain tokens; native `authorized_user` refresh and
+  explicit access tokens do not.
+
+These checks inspect local setup only: they do not contact Google or run gcloud, and availability
+is not proof that a token or project permission is valid. Request diagnostics retain the fuller
+setup guidance.
 
 `/model` is populated from hax's model catalog (`google-vertex-anthropic`) rather than a network
-listing, because the raw-predict endpoint serves no `/models` route. Claude-only for now: Gemini on
-Vertex speaks a different protocol, and the OpenAI-compatible route degrades multi-turn tool use, so
-it is a config recipe rather than a built-in.
+listing, because the raw-predict endpoint serves no `/models` route.
 
 Vertex caps a request at about 30 MB; a long image-heavy session can hit that before the 1M-token
 window. When a request is rejected for its payload size, hax points at trimming context or images

@@ -121,7 +121,7 @@ static const struct provider_def DEFS[] = {
      * providers.vertex.{project,location}; an explicit base_url still wins verbatim. */
     {
         .id = "vertex",
-        .display_name = "Vertex AI",
+        .display_name = "google vertex",
         .api = "anthropic-messages",
         .version = "vertex-2023-10-16",
         .body_version = 1,
